@@ -6,7 +6,7 @@ use std::{cell::RefCell, rc::Rc};
 use std::time::Instant;
 
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalPosition, LogicalSize};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, Ime as WIme, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
@@ -35,7 +35,10 @@ struct Win {
     alpha: Option<crate::surface_alpha::AlphaSurface>,
 }
 
-pub(crate) enum WakeEvent { App(usize), Live(usize), Visible(usize, bool), Open(usize), Close(usize) }
+pub(crate) enum WakeEvent {
+    App(usize), Live(usize), Window(usize, WindowRequest), Focus(usize),
+    Position(usize, (i32, i32)), Level(usize, bool),
+}
 
 /// What `Windows` needs of a host, whatever its state type: an app window or an overlay.
 pub(crate) trait AnyHost {
@@ -47,9 +50,6 @@ pub(crate) trait AnyHost {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent);
     /// Draws what has no redraw event (a layer surface); true while it needs more frames.
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) -> bool { false }
-    fn set_visible(&mut self, _visible: bool) {}
-    fn open(&mut self, _event_loop: &ActiveEventLoop) {}
-    fn close(&mut self, _event_loop: &ActiveEventLoop) {}
     fn finished(&self) -> bool { false }
     /// False for hosts that must not keep the loop running alone (overlays).
     fn keeps_loop(&self) -> bool { true }
@@ -84,14 +84,24 @@ impl WindowHandle {
         self.window()?.set_cursor_hittest(!click_through).map_err(|e| e.to_string())
     }
     pub fn set_always_on_top(&self, on: bool) {
-        if let Ok(window) = self.window() {
-            window.set_window_level(if on { WindowLevel::AlwaysOnTop } else { WindowLevel::Normal });
-        }
+        let _ = self.proxy.send_event(WakeEvent::Level(self.slot, on));
     }
-    pub fn set_visible(&self, visible: bool) { let _ = self.proxy.send_event(WakeEvent::Visible(self.slot, visible)); }
+    /// Physical desktop pixels; retained across recreation. Unsupported on Wayland.
+    pub fn set_position(&self, position: (i32, i32)) {
+        let _ = self.proxy.send_event(WakeEvent::Position(self.slot, position));
+    }
+    /// Show/recreate without requesting focus, or hide while keeping the host and state.
+    pub fn set_visible(&self, visible: bool) {
+        let request = if visible { WindowRequest::Show } else { WindowRequest::Hide };
+        let _ = self.proxy.send_event(WakeEvent::Window(self.slot, request));
+    }
+    pub fn show(&self) { self.set_visible(true); }
+    pub fn hide(&self) { self.set_visible(false); }
+    /// Request focus without forcing macOS app activation; Wayland requests attention.
+    pub fn focus(&self) { let _ = self.proxy.send_event(WakeEvent::Focus(self.slot)); }
     /// Open/focus a retained host. A default close destroys its host; use App::keep_running to reopen.
-    pub fn open(&self) { let _ = self.proxy.send_event(WakeEvent::Open(self.slot)); }
-    pub fn close(&self) { let _ = self.proxy.send_event(WakeEvent::Close(self.slot)); }
+    pub fn open(&self) { let _ = self.proxy.send_event(WakeEvent::Window(self.slot, WindowRequest::Open(None))); }
+    pub fn close(&self) { let _ = self.proxy.send_event(WakeEvent::Window(self.slot, WindowRequest::Close)); }
     /// Borrow a raw native handle while alive. Platform thread restrictions still apply;
     /// do not retain an extracted pointer beyond the callback.
     pub fn with_raw_handle<R>(&self, f: impl for<'a> FnOnce(winit::raw_window_handle::WindowHandle<'a>) -> R) -> Result<R, String> {
@@ -164,15 +174,11 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
         let slot = match &event {
-            WakeEvent::App(i) | WakeEvent::Live(i) | WakeEvent::Visible(i, _) | WakeEvent::Open(i) | WakeEvent::Close(i) => *i,
+            WakeEvent::App(i) | WakeEvent::Live(i) | WakeEvent::Window(i, _) | WakeEvent::Focus(i)
+                | WakeEvent::Position(i, _) | WakeEvent::Level(i, _) => *i,
         };
         if let Some(Some(host)) = self.hosts.get_mut(slot) {
-            match event {
-                WakeEvent::Visible(_, visible) => host.set_visible(visible),
-                WakeEvent::Open(_) => host.open(event_loop),
-                WakeEvent::Close(_) => host.close(event_loop),
-                event => host.user_event(event_loop, event),
-            }
+            host.user_event(event_loop, event);
         }
         self.cleanup(event_loop);
     }
@@ -380,18 +386,56 @@ fn map_key(key: &WKey, m: ModifiersState) -> Option<KeyEvent> {
 }
 
 impl<S: 'static> Host<S> {
-    fn set_visible(&mut self, visible: bool) {
-        let Some(w) = self.win.as_mut() else { return };
-        w.visible = visible;
-        if visible { w.occluded = false; }
-        w.window.set_visible(visible);
-        self.rt.set_live_visible(visible && !w.occluded && !w.window.is_minimized().unwrap_or(false));
-        self.idle = true;
-        if visible {
-            self.native_handle.native.number.store(native_window_number(&w.window).unwrap_or(0), Ordering::Release);
-            self.rt.settle_all();
-            w.window.request_redraw();
+    fn window_request(&mut self, event_loop: &ActiveEventLoop, request: WindowRequest) {
+        match request {
+            WindowRequest::Open(token) => self.open(event_loop, token),
+            WindowRequest::Show => self.show(event_loop),
+            WindowRequest::Hide => self.hide(event_loop),
+            WindowRequest::Close => self.close(event_loop),
         }
+    }
+
+    fn set_position(&mut self, event_loop: &ActiveEventLoop, position: (i32, i32)) {
+        self.options.position = Some(position);
+        if !is_wayland(event_loop) && let Some(w) = &self.win {
+            w.window.set_outer_position(PhysicalPosition::new(position.0, position.1));
+        }
+    }
+
+    fn set_always_on_top(&mut self, event_loop: &ActiveEventLoop, on: bool) {
+        self.options.always_on_top = on;
+        if !is_wayland(event_loop) && let Some(w) = &self.win {
+            w.window.set_window_level(if on { WindowLevel::AlwaysOnTop } else { WindowLevel::Normal });
+        }
+    }
+
+    fn show(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(w) = self.win.as_mut() else { self.create(event_loop, None, false); return };
+        if !w.visible {
+            #[cfg(target_os = "macos")]
+            crate::macos::show_without_focus(&w.window);
+            #[cfg(not(target_os = "macos"))]
+            w.window.set_visible(true);
+        }
+        w.visible = true;
+        w.occluded = false;
+        self.rt.set_live_visible(!w.window.is_minimized().unwrap_or(false));
+        self.idle = true;
+        self.native_handle.native.number.store(native_window_number(&w.window).unwrap_or(0), Ordering::Release);
+        self.rt.settle_all();
+        w.window.request_redraw();
+    }
+
+    fn focus(&self, event_loop: &ActiveEventLoop) {
+        let Some(w) = self.win.as_ref().filter(|w| w.visible && !w.window.is_minimized().unwrap_or(false)) else { return };
+        if is_wayland(event_loop) {
+            w.window.request_user_attention(Some(winit::window::UserAttentionType::Informational));
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        crate::macos::focus_without_forcing_activation(&w.window);
+        #[cfg(not(target_os = "macos"))]
+        w.window.focus_window();
     }
 
     /// Applies everything other threads asked for since the last wake-up.
@@ -408,11 +452,10 @@ impl<S: 'static> Host<S> {
         if let Some(visible) = requests.dock {
             crate::macos::set_dock_icon(visible);
         }
-        match requests.window {
-            Some(WindowRequest::Open(token)) => self.open(event_loop, token),
-            Some(WindowRequest::Close) => self.close(event_loop),
-            None => {}
-        }
+        if let Some(position) = requests.position { self.set_position(event_loop, position); }
+        if let Some(on) = requests.always_on_top { self.set_always_on_top(event_loop, on); }
+        if let Some(request) = requests.window { self.window_request(event_loop, request); }
+        if requests.focus { self.focus(event_loop); }
         self.shell(event_loop);
         if let Some(w) = self.win.as_ref().filter(|w| w.visible) {
             w.window.request_redraw();
@@ -445,6 +488,11 @@ impl<S: 'static> Host<S> {
             self.finished = true;
             return;
         }
+        self.hide(event_loop);
+    }
+
+    fn hide(&mut self, event_loop: &ActiveEventLoop) {
+        self.rt.set_live_visible(false);
         self.rt.pointer_leave();
         self.mods = ModifiersState::empty();
         if self.release_gpu {
@@ -475,7 +523,7 @@ impl<S: 'static> Host<S> {
         }
         let token = token.or(from_env);
         let Some(w) = self.win.as_mut() else {
-            self.create(event_loop, token);
+            self.create(event_loop, token, true);
             return;
         };
         if !w.visible {
@@ -513,11 +561,11 @@ impl<S: 'static> Host<S> {
     }
 
     #[cfg_attr(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))), allow(unused_variables))]
-    fn create(&mut self, event_loop: &ActiveEventLoop, token: Option<String>) {
+    fn create(&mut self, event_loop: &ActiveEventLoop, token: Option<String>, focus: bool) {
         let size = self.args.size.unwrap_or(self.spec.size);
         let visible = self.started || self.options.visible;
         #[allow(unused_mut)]
-        let mut attrs = self.options.attributes(self.spec.title, size, self.spec.min_size, visible);
+        let mut attrs = self.options.attributes(self.spec.title, size, self.spec.min_size, visible).with_active(focus);
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         {
             if let Some(id) = crate::tooling::app_id() {
@@ -686,9 +734,6 @@ impl<S: 'static> AnyHost for Host<S> {
     fn owns(&self, id: WindowId) -> bool {
         self.win.as_ref().is_some_and(|w| w.window.id() == id)
     }
-    fn set_visible(&mut self, visible: bool) { Host::set_visible(self, visible) }
-    fn open(&mut self, event_loop: &ActiveEventLoop) { Host::open(self, event_loop, None) }
-    fn close(&mut self, event_loop: &ActiveEventLoop) { Host::close(self, event_loop) }
     fn finished(&self) -> bool { self.finished }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
@@ -730,7 +775,10 @@ impl<S: 'static> AnyHost for Host<S> {
                     w.window.request_redraw();
                 }
             }
-            _ => {}
+            WakeEvent::Window(_, request) => self.window_request(event_loop, request),
+            WakeEvent::Focus(_) => self.focus(event_loop),
+            WakeEvent::Position(_, position) => self.set_position(event_loop, position),
+            WakeEvent::Level(_, on) => self.set_always_on_top(event_loop, on),
         }
     }
 
