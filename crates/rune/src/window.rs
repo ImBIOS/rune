@@ -2,6 +2,7 @@
 //! factories share the same input, rendering, activation and close/reopen paths.
 
 use std::sync::{Arc, Mutex, Weak, atomic::{AtomicU32, Ordering}};
+use std::{cell::RefCell, rc::Rc};
 use std::time::Instant;
 
 use winit::application::ApplicationHandler;
@@ -102,6 +103,8 @@ struct Windows<S: 'static> {
     args: Args,
     proxy: EventLoopProxy<WakeEvent>,
     hosts: Vec<Option<Host<S>>>,
+    // Weak pool preserves release_gpu_when_closed when the last GPU owner closes.
+    gpu: Rc<RefCell<Weak<Gpu>>>,
 }
 impl<S: 'static> Windows<S> {
     fn cleanup(&mut self, event_loop: &ActiveEventLoop) {
@@ -122,7 +125,7 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
         let specs = factory(&displays);
         crate::windows::validate(&specs).expect("window keys");
         for (slot, spec) in specs.into_iter().enumerate() {
-            let mut host = Host::new(spec, self.args.clone(), self.proxy.clone(), slot);
+            let mut host = Host::new(spec, self.args.clone(), self.proxy.clone(), slot, self.gpu.clone());
             host.resumed(event_loop);
             self.hosts.push(Some(host));
         }
@@ -164,7 +167,8 @@ struct Host<S: 'static> {
     shared: Arc<Shared<S>>,
     rt: Runtime<S>,
     win: Option<Win>,
-    gpu: Option<(Gpu, Renderer, wgpu::TextureFormat)>,
+    gpu: Option<(Arc<Gpu>, Renderer, wgpu::TextureFormat)>,
+    gpu_pool: Rc<RefCell<Weak<Gpu>>>,
     /// A window has shown before: the next one opens settled.
     shown: bool,
     started: bool,
@@ -198,52 +202,53 @@ fn run_configured<S: 'static>(factory: impl FnOnce(&[Display]) -> Vec<WindowSpec
     let event_loop = builder.build().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
-    let mut windows = Windows { factory: Some(Box::new(factory)), args, proxy, hosts: Vec::new() };
+    let mut windows = Windows { factory: Some(Box::new(factory)), args, proxy, hosts: Vec::new(), gpu: Rc::default() };
     event_loop.run_app(&mut windows).expect("run");
 }
 
 impl<S: 'static> Host<S> {
-fn new(window_spec: WindowSpec<S>, args: Args, proxy: EventLoopProxy<WakeEvent>, slot: usize) -> Self {
-    let WindowSpec { app, options, key, on_created } = window_spec;
-    let native_handle = WindowHandle { native: Arc::default(), slot, key: key.into(), proxy: proxy.clone() };
-    let live_proxy = proxy.clone();
-    let waker: Waker = Arc::new(move || {
-        let _ = proxy.send_event(WakeEvent::App(slot));
-    });
-    let (open, keep_running, on_close, release_gpu) = (app.open, app.keep_running, app.on_close, app.release_gpu);
-    let (spec, state, shared) = app.into_parts(args.scene.as_deref());
-    let size = args.size.unwrap_or(spec.size);
-    // The window reports the system appearance and scale when it opens.
-    let env = Env { system_dark: args.theme.as_deref() != Some("light"), scale: 1.0 };
-    let mut rt = runtime_for(&spec, state, size, env, waker.clone());
-    rt.set_live_waker(Arc::new(move || { let _ = live_proxy.send_event(WakeEvent::Live(slot)); }));
-    rt.set_live_visible(false);
-    rt.transparent = options.transparent;
-    rt.wall_start = Some(Instant::now());
-    shared.connect(waker);
-    Host {
-        options,
-        native_handle,
-        on_created,
-        finished: false,
-        spec,
-        args,
-        keep_running,
-        on_close,
-        release_gpu,
-        open_at_start: open,
-        shared,
-        rt,
-        win: None,
-        gpu: None,
-        shown: false,
-        started: false,
-        last: Instant::now(),
-        idle: true,
-        mods: ModifiersState::empty(),
-        clipboard: arboard::Clipboard::new().ok(),
+    fn new(window_spec: WindowSpec<S>, args: Args, proxy: EventLoopProxy<WakeEvent>, slot: usize, gpu_pool: Rc<RefCell<Weak<Gpu>>>) -> Self {
+        let WindowSpec { app, options, key, on_created } = window_spec;
+        let native_handle = WindowHandle { native: Arc::default(), slot, key: key.into(), proxy: proxy.clone() };
+        let live_proxy = proxy.clone();
+        let waker: Waker = Arc::new(move || {
+            let _ = proxy.send_event(WakeEvent::App(slot));
+        });
+        let (open, keep_running, on_close, release_gpu) = (app.open, app.keep_running, app.on_close, app.release_gpu);
+        let (spec, state, shared) = app.into_parts(args.scene.as_deref());
+        let size = args.size.unwrap_or(spec.size);
+        // The window reports the system appearance and scale when it opens.
+        let env = Env { system_dark: args.theme.as_deref() != Some("light"), scale: 1.0 };
+        let mut rt = runtime_for(&spec, state, size, env, waker.clone());
+        rt.set_live_waker(Arc::new(move || { let _ = live_proxy.send_event(WakeEvent::Live(slot)); }));
+        rt.set_live_visible(false);
+        rt.transparent = options.transparent;
+        rt.wall_start = Some(Instant::now());
+        shared.connect(waker);
+        Host {
+            options,
+            native_handle,
+            on_created,
+            finished: false,
+            spec,
+            args,
+            keep_running,
+            on_close,
+            release_gpu,
+            open_at_start: open,
+            shared,
+            rt,
+            win: None,
+            gpu: None,
+            gpu_pool,
+            shown: false,
+            started: false,
+            last: Instant::now(),
+            idle: true,
+            mods: ModifiersState::empty(),
+            clipboard: arboard::Clipboard::new().ok(),
+        }
     }
-}
 }
 
 
@@ -388,6 +393,7 @@ impl<S: 'static> Host<S> {
             return;
         }
         if !self.keep_running {
+            if let Some(w) = &self.win { w.window.set_visible(false); }
             self.finished = true;
             return;
         }
@@ -490,7 +496,9 @@ impl<S: 'static> Host<S> {
             attrs = attrs.with_titlebar_transparent(true).with_title_hidden(true).with_fullsize_content_view(true);
         }
         let window = Arc::new(event_loop.create_window(attrs).expect("window"));
-        if self.options.click_through { window.set_cursor_hittest(false).expect("window click-through"); }
+        if self.options.click_through && let Err(error) = window.set_cursor_hittest(false) {
+            eprintln!("click-through unavailable for {}: {error}", self.native_handle.key());
+        }
         window.set_ime_allowed(true);
         let (gpu, surface) = match self.gpu.take() {
             Some((gpu, renderer, format)) => {
@@ -499,9 +507,18 @@ impl<S: 'static> Host<S> {
                 (None, surface)
             }
             None => {
-                let instance = Gpu::instance();
-                let surface = instance.create_surface(window.clone()).expect("surface");
-                (Some(Gpu::new(instance, Some(&surface))), surface)
+                let cached = self.gpu_pool.borrow().upgrade();
+                let (gpu, surface) = if let Some(gpu) = cached {
+                    let surface = gpu.instance.create_surface(window.clone()).expect("surface");
+                    (gpu, surface)
+                } else {
+                    let instance = Gpu::instance();
+                    let surface = instance.create_surface(window.clone()).expect("surface");
+                    let gpu = Arc::new(Gpu::new(instance, Some(&surface)));
+                    *self.gpu_pool.borrow_mut() = Arc::downgrade(&gpu);
+                    (gpu, surface)
+                };
+                (Some(gpu), surface)
             }
         };
         let adapter = &gpu.as_ref().or(self.gpu.as_ref().map(|g| &g.0)).unwrap().adapter;
@@ -512,7 +529,11 @@ impl<S: 'static> Host<S> {
         if self.options.transparent {
             config.alpha_mode = [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::PostMultiplied, wgpu::CompositeAlphaMode::Inherit]
                 .into_iter().find(|mode| caps.alpha_modes.contains(mode))
-                .expect("this surface does not support transparent composition");
+                .unwrap_or_else(|| {
+                    eprintln!("transparency unavailable for {}; using an opaque window", self.native_handle.key());
+                    wgpu::CompositeAlphaMode::Opaque
+                });
+            self.rt.transparent = config.alpha_mode != wgpu::CompositeAlphaMode::Opaque;
         }
         config.present_mode = wgpu::PresentMode::AutoVsync;
         config.desired_maximum_frame_latency = 2;
@@ -527,7 +548,10 @@ impl<S: 'static> Host<S> {
             self.rt.text.atlas.invalidate();
         }
         surface.configure(&gpu.device, &config);
-        let alpha = (self.options.transparent && config.alpha_mode == wgpu::CompositeAlphaMode::PostMultiplied)
+        // Metal's PostMultiplied mode only makes CAMetalLayer non-opaque; Core Animation
+        // still composites premultiplied pixels. Other backends follow wgpu's straight-alpha contract.
+        let alpha = (self.options.transparent && config.alpha_mode == wgpu::CompositeAlphaMode::PostMultiplied
+            && gpu.adapter.get_info().backend != wgpu::Backend::Metal)
             .then(|| crate::surface_alpha::AlphaSurface::new(&gpu.device, config.format, (config.width, config.height)));
         let scale = window.scale_factor() as f32;
         let dark = match self.args.theme.as_deref() {

@@ -1,5 +1,5 @@
 //! Convert Rune's premultiplied composition to the straight alpha required by
-//! wgpu's PostMultiplied surfaces (including Metal) and PNG exports.
+//! wgpu's straight-alpha surfaces and PNG exports. Metal's CAMetalLayer stays premultiplied.
 pub(crate) struct AlphaSurface {
     pub view: wgpu::TextureView,
     texture: wgpu::Texture,
