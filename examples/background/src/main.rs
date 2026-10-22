@@ -223,7 +223,6 @@ fn main() {
                         commands.set_position((x, y));
                     }
                 }
-                (Some("topmost"), Some(on)) => commands.set_always_on_top(on == "on"),
                 (Some("activate"), Some(token)) => commands.activate(token),
                 (Some("close"), _) => commands.close(),
                 (Some("quit"), _) => commands.quit(),
@@ -241,7 +240,7 @@ fn main() {
                 (Some("capsule"), Some("wide")) => capsule.resize((320.0, 48.0)),
                 (Some("capsule"), Some("status")) => eprintln!("background: capsule {:?}", capsule.availability()),
                 (Some(other), _) => {
-                    eprintln!("background: unknown command {other:?} (open | show | hide | focus | position X Y | topmost on|off | activate TOKEN | close | dock on|off | hud show|hide|top|bottom|recording|transcribing|status | capsule show|hide|left|wide|status | quit)")
+                    eprintln!("background: unknown command {other:?} (open | show | hide | focus | position X Y | activate TOKEN | close | dock on|off | hud show|hide|top|bottom|recording|transcribing|status | capsule show|hide|left|wide|status | quit)")
                 }
                 (None, _) => {}
             }

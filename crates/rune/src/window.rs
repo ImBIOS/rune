@@ -97,7 +97,7 @@ impl WindowHandle {
     }
     pub fn show(&self) { self.set_visible(true); }
     pub fn hide(&self) { self.set_visible(false); }
-    /// Request focus without forcing macOS app activation; Wayland requests attention.
+    /// Focus/activate an already-visible window, restoring it if minimized. Wayland requests attention.
     pub fn focus(&self) { let _ = self.proxy.send_event(WakeEvent::Focus(self.slot)); }
     /// Open/focus a retained host. A default close destroys its host; use App::keep_running to reopen.
     pub fn open(&self) { let _ = self.proxy.send_event(WakeEvent::Window(self.slot, WindowRequest::Open(None))); }
@@ -236,8 +236,8 @@ pub fn run<S: 'static>(app: App<S>, args: Args) {
     run_configured(move |_| vec![WindowSpec::from_app("main", app)], args, accessory);
 }
 
-pub(crate) fn run_windows<S: 'static>(factory: impl FnOnce(&[Display]) -> Vec<WindowSpec<S>> + 'static, args: Args) {
-    run_configured(factory, args, false);
+pub(crate) fn run_windows<S: 'static>(factory: impl FnOnce(&[Display]) -> Vec<WindowSpec<S>> + 'static, args: Args, options: crate::RunOptions) {
+    run_configured(factory, args, options.accessory);
 }
 
 fn run_configured<S: 'static>(factory: impl FnOnce(&[Display]) -> Vec<WindowSpec<S>> + 'static, args: Args, accessory: bool) {
@@ -427,14 +427,12 @@ impl<S: 'static> Host<S> {
     }
 
     fn focus(&self, event_loop: &ActiveEventLoop) {
-        let Some(w) = self.win.as_ref().filter(|w| w.visible && !w.window.is_minimized().unwrap_or(false)) else { return };
+        let Some(w) = self.win.as_ref().filter(|w| w.visible) else { return };
+        if w.window.is_minimized() == Some(true) { w.window.set_minimized(false); }
         if is_wayland(event_loop) {
             w.window.request_user_attention(Some(winit::window::UserAttentionType::Informational));
             return;
         }
-        #[cfg(target_os = "macos")]
-        crate::macos::focus_without_forcing_activation(&w.window);
-        #[cfg(not(target_os = "macos"))]
         w.window.focus_window();
     }
 
@@ -453,7 +451,6 @@ impl<S: 'static> Host<S> {
             crate::macos::set_dock_icon(visible);
         }
         if let Some(position) = requests.position { self.set_position(event_loop, position); }
-        if let Some(on) = requests.always_on_top { self.set_always_on_top(event_loop, on); }
         if let Some(request) = requests.window { self.window_request(event_loop, request); }
         if requests.focus { self.focus(event_loop); }
         self.shell(event_loop);

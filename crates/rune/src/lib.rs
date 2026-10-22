@@ -34,7 +34,7 @@ pub mod tooling;
 mod window;
 pub mod windows;
 pub use window::WindowHandle;
-pub use windows::{Display, WindowOptions, WindowSpec};
+pub use windows::{Display, RunOptions, WindowOptions, WindowSpec};
 pub use winit::raw_window_handle;
 
 pub use app::{App, AppHandle};
@@ -58,4 +58,4 @@ pub use shape::{LineCap, Path, Shape};
 pub use text::{Icon, Span};
 pub use theme::Theme;
 pub use tok::{Family, TextStyle};
-pub use tooling::{AppSpec, extra_args, run, run_windows, set_app_id};
+pub use tooling::{AppSpec, extra_args, run, run_windows, run_windows_with, set_app_id};

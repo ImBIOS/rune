@@ -197,6 +197,11 @@ pub fn run<S: 'static>(spec: AppSpec<S>) {
 /// Create independent windows from a display-aware factory. Headless tools invoke the same
 /// factory with one virtual display and select one retained tree using `--window KEY`.
 pub fn run_windows<S: 'static>(factory: impl FnOnce(&[crate::Display]) -> Vec<crate::WindowSpec<S>> + 'static) {
+    run_windows_with(crate::RunOptions::default(), factory);
+}
+
+/// Run a window factory with process-level options, such as macOS accessory activation.
+pub fn run_windows_with<S: 'static>(options: crate::RunOptions, factory: impl FnOnce(&[crate::Display]) -> Vec<crate::WindowSpec<S>> + 'static) {
     let args = Args::parse();
     if args.headless() {
         let display = crate::Display { name: Some("headless".into()), position: (0, 0),
@@ -218,7 +223,7 @@ pub fn run_windows<S: 'static>(factory: impl FnOnce(&[crate::Display]) -> Vec<cr
         }
         headless_configured(window.app, args, window.options.transparent);
     } else {
-        crate::window::run_windows(factory, args);
+        crate::window::run_windows(factory, args, options);
     }
 }
 

@@ -33,7 +33,6 @@ type Update<S> = Box<dyn FnOnce(&mut S, &mut Tx) + Send>;
 /// like `rune::run`.
 pub struct App<S: 'static> {
     pub(crate) spec: AppSpec<S>,
-    pub(crate) window_options: crate::WindowOptions,
     init: Option<Box<dyn FnOnce() -> S>>,
     argv: Option<Vec<String>>,
     pub(crate) open: bool,
@@ -50,7 +49,6 @@ impl<S: 'static> App<S> {
     pub fn new(spec: AppSpec<S>) -> Self {
         App {
             spec,
-            window_options: crate::WindowOptions::default(),
             init: None,
             argv: None,
             open: true,
@@ -77,13 +75,6 @@ impl<S: 'static> App<S> {
     /// host already made (a channel, a handle to its runtime). Scenes still apply on top.
     pub fn init(mut self, f: impl FnOnce() -> S + 'static) -> Self {
         self.init = Some(Box::new(f));
-        self
-    }
-
-    /// Configure the native window while retaining App's args, accessory policy and lifetime.
-    /// Size limits use logical points; desktop position uses physical pixels.
-    pub fn window_options(mut self, options: crate::WindowOptions) -> Self {
-        self.window_options = options;
         self
     }
 
@@ -195,7 +186,7 @@ impl<S: 'static> AppHandle<S> {
         self.request(|q| q.window = Some(WindowRequest::Hide));
     }
 
-    /// Request focus for an already-visible window without forcing macOS app activation.
+    /// Focus/activate an already-visible window, restoring it if minimized.
     /// On Wayland this requests attention; use activate(token) for compositor-authorized focus.
     pub fn focus(&self) {
         self.request(|q| q.focus = true);
@@ -205,11 +196,6 @@ impl<S: 'static> AppHandle<S> {
     /// Retained across recreation. Wayland does not support application window placement.
     pub fn set_position(&self, position: (i32, i32)) {
         self.request(|q| q.position = Some(position));
-    }
-
-    /// Change the window level, retaining it across recreation. No effect on Wayland.
-    pub fn set_always_on_top(&self, on: bool) {
-        self.request(|q| q.always_on_top = Some(on));
     }
 
     /// Show and focus the window with an activation token another process forwarded
@@ -263,7 +249,6 @@ pub(crate) struct Requests<S> {
     pub dock: Option<bool>,
     pub focus: bool,
     pub position: Option<(i32, i32)>,
-    pub always_on_top: Option<bool>,
     pub quit: bool,
     pub updates: Vec<Update<S>>,
 }
@@ -275,7 +260,6 @@ impl<S> Default for Requests<S> {
             dock: None,
             focus: false,
             position: None,
-            always_on_top: None,
             quit: false,
             updates: Vec::new(),
         }
@@ -409,7 +393,6 @@ mod tests {
             handle.set_position((10, 20));
             handle.hide();
             handle.set_position((-300, 40));
-            handle.set_always_on_top(true);
             handle.show();
             handle.focus();
         }).join().unwrap();
@@ -417,9 +400,8 @@ mod tests {
         assert_eq!(requests.window, Some(WindowRequest::Show), "focus must not overwrite show");
         assert!(requests.focus);
         assert_eq!(requests.position, Some((-300, 40)));
-        assert_eq!(requests.always_on_top, Some(true));
         let drained = app.shared.take();
-        assert!(!drained.focus && drained.window.is_none() && drained.position.is_none() && drained.always_on_top.is_none());
+        assert!(!drained.focus && drained.window.is_none() && drained.position.is_none());
     }
 
     #[test]
