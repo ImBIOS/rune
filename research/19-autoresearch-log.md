@@ -178,8 +178,9 @@ window. No ten-second native idle/power measurement was run on Studio.
 3. Synchronous measurement including last-line fill: implemented in this pass.
 4. Enforced measure/mutate commit API: implemented by separate capabilities and an
    owned measured result (experiment 9).
-5. Fractional scroll: implemented. Width rewrap can shrink smoothly, but a dedicated
-   wrap-once side-panel width/120 ms stable-width protocol remains open.
+5. Fractional scroll and wrap-once landing widths: implemented. Growth targets wait
+   for 120 ms of stable width; streaming shrink is allowed for 400 ms. Reading
+   history lands measured heights with its keyed scroll correction (experiment 12).
 6. Leaving-node retention: covered by exit/revival tests and the stable tail.
 7. Reduced motion: .15 s fades, including newly mounted growth rows, are tested.
 8. Settle on session open: tested at first-frame bottom. Native window resume and
@@ -187,9 +188,11 @@ window. No ten-second native idle/power measurement was run on Studio.
 
 ## Next
 
-1. Resume and verify the 120 ms stable-width hold (experiment 12's saved patch).
+1. Migrate composer pickers onto the landed rune-kit, then use themes/opencode for
+   their palette/icons. Preserve stable filtered identities and keyboard/IME behavior.
 2. Horizontal code scrolling, tool expansion/details and remaining hover/press fidelity.
-3. Lazy row construction for long transcripts; repeat paired timing on a quiet worker.
+3. Lazy row construction for long transcripts; repeat paired release timing headlessly
+   on Studio, not contended workers.
 4. Native idle/wakeups, display presentation and truly cold OS/driver startup remain
    unmeasured. The earlier <50 ms result was fresh-process headless on Studio.
 5. Extend picker fidelity beyond the bounded fixture catalog: large-list keyboard
@@ -423,7 +426,7 @@ window. No ten-second native idle/power measurement was run on Studio.
   routing, provider identity, fixture-only initialization, phase isolation, inherited
   trace state, exiting hit targets and the interrupted-reopen regression.
 
-## Experiment 12: stable-width hold (deferred, not shipped)
+## Experiment 12: stable-width hold (kept after resumed verification)
 
 - Prepared growth-stack width tracking: measure at the declared landing width,
   retain height targets for 120 ms after the last width change, then release on
@@ -442,4 +445,43 @@ window. No ten-second native idle/power measurement was run on Studio.
   Resume by inspecting/applying that patch, using HiveMind with a healthy compiler
   cache or the per-job override, then run the targeted test, width motion traces,
   virtualization/streaming resize regressions and the snapshot/motion gates before
-  committing. All three timed-out job groups have ended.
+   committing. All three timed-out job groups have ended.
+
+### Resumed verification
+
+- After the cache restart, the saved patch compiled and its initial test passed.
+  Expanded coverage to restart the hold while it is active, allow streaming shrink
+  only within the 400 ms window, and preserve a reading anchor across a rewrap.
+- Rejected the original behavior while reading virtualized history: measurement
+  corrected scrolling to new heights while growth still displayed old heights,
+  moving the anchor **113.5 pt**. Unpinned virtual stacks now land the measured
+  heights with that correction. Following stacks retain the hold and growth easing.
+- Normal and reduced-motion width traces at 30/120 Hz each pass motion-lint with
+  zero candidates. The test checks equal sampled curves, no presentation-time
+  reshaping/recommit, active-clock retention, restart, and settle. All 11 runtime
+  tests and four fixture picker tests pass after integrating upstream through
+  `8b37ced`. Builds/tests ran through HiveMind; all OpenCode runs used fixtures.
+- Nine goldens are byte-identical and all eleven fixture motion cases pass on mini.
+  No lint thresholds or golden digests changed. Removed the superseded pending
+  patch; the implementation and its regressions are now in the runtime.
+- Removed unnecessary substep deadline arithmetic when no heights are pending.
+  An exact-parent seven-pair Studio comparison (both on rune-kit base `ad80ae1`)
+  gives long-stream p95 **2.539 → 2.480 ms**, MAD **.139 → .061 ms**; mean
+  **.376 → .368 ms**, first CPU frame **8.44 → 8.81 ms**, MAD **.27 → .42 ms**.
+  This is performance-neutral within noise, retained for the width/anchor behavior.
+  Evidence: `perf/autoresearch/width/paired-exact/results.json`.
+- Final upstream-integrated Studio seven-run medians: long-stream p95 **2.971 ms**,
+  first CPU frame **8.76 ms**; long-scroll p95 **.443 ms**, first **9.61 ms**.
+  The <4 ms long-stream target is revalidated. Native presentation remains unmeasured.
+- The earlier picker-binary comparison included rune-kit's renderer changes and
+  cannot isolate this patch. Pro's target cache also disappeared between jobs,
+  forcing a dependency rebuild that hit its timeout. A later HiveMind job spilled
+  to Studio; reused that release cache for the remaining tests/builds. Snapshot
+  rendering stayed on mini, and every benchmark ran headlessly on Studio.
+- Independent model review remains unavailable (no spawn tool). Self-review checked
+  pending-row removal, fixed-substep release, reduced motion, settle, the reading
+  anchor, and the empty-pending fast path. Slack coordination was read throughout;
+  the available slack-control CLI is read-only.
+- The repository switched to a fresh public root during landing. Preserved the old
+  local history as `width-before-public-root` and transplanted only this three-file
+  change onto `1f6fbd0`; no force push or old-history merge into the public root.
