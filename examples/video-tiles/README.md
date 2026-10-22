@@ -75,8 +75,11 @@ accepts packed BGRA or two packed NV12 planes. The native `PixelBuffer` API is m
   come from hardware render-pass queries (the containing UI pass, when embedded in Rune).
   Their difference is GPU duration; the GPU epoch is backend-specific. Do not subtract
   them from `Instant`. Backends without timestamp queries still report completion.
-  A coalesced, sleeping completion worker services wgpu callbacks, including the final
-  frame at idle. This includes callback/readback latency; it is not an exact Metal
+   A coalesced completion worker uses nonblocking polls, sleeping between them, including
+   for the final frame at idle. It never holds wgpu's device lock while waiting on a GPU
+   fence. Counter resolution runs in a separate submission after render completion to
+   avoid stale Metal counter samples; the second notification follows its 16-byte readback.
+   Completion time is captured before that readback, but includes callback latency; it is not an exact Metal
   command-buffer completion timestamp. wgpu 30 rejects `as_hal_mut` after normal render
   encoding, so its raw completed-handler hook cannot be used here. A tested prototype
   hit that validation error and was removed. No backend fork or untracked raw submission.
@@ -88,3 +91,5 @@ accepts packed BGRA or two packed NV12 planes. The native `PixelBuffer` API is m
 Verification: `hivemind run --kind cargo -- env RUSTC_WRAPPER= cargo test -p rune native_surface -- --test-threads=1`.
 The GPU test compares native IOSurface and byte-upload results with a scalar colour oracle,
 checks exact one-pixel patterns, fitting/clipping, notifications, and released backing ownership.
+The overlap test acquires the same exclusive device lock as presentation while GPU work
+is still in flight, without creating a window.
