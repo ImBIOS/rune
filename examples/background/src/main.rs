@@ -7,7 +7,8 @@
 //! cargo run -p background -- --open  # start with the window
 //! cargo run -p background -- --release-gpu  # closing also drops the GPU device
 //! cargo run -p background -- --accessory    # macOS: no Dock icon until `dock on`
-//! # `hud show|hide|top|bottom|recording|transcribing|status` drives a recording-HUD overlay
+//! # `hud show|hide|top|bottom|recording|transcribing|status` drives a recording-HUD overlay;
+//! # `capsule show|hide|left|wide|status` a clickable corner capsule
 //! cargo run -p background -- --snap /tmp/background.png
 //! ```
 
@@ -128,6 +129,21 @@ fn hud(h: &Hud, _: &mut Cx<Hud>) -> El {
     )
 }
 
+fn capsule(presses: &u32, _: &mut Cx<u32>) -> El {
+    let t = tok::theme(true);
+    row().key("capsule").w_full().h_full().px(space::S2).gap(space::S2).center().radius(24.0).fill(t.card).border(1.0, t.card_border).child(
+        text(format!("Pressed {presses} times")).key("presses").font(type_::LABEL).color(t.text),
+    )
+    .child(
+        row().key("press").role("button").h(28.0).px(space::S3).center().radius(radius::MD).fill(t.control_off).hover(t.hover)
+            .on_press(|n: &mut u32| {
+                *n += 1;
+                eprintln!("background: capsule pressed {n}");
+            })
+            .child(text("Press").font(type_::LABEL).color(t.text)),
+    )
+}
+
 fn main() {
     let mut app = App::new(rune::AppSpec {
         title: "Background",
@@ -155,7 +171,34 @@ fn main() {
     }
     // `--hud-large` covers most of the screen, to check that clicks pass through it.
     let size = if std::env::args().any(|a| a == "--hud-large") { (1200.0, 700.0) } else { (240.0, 44.0) };
-    let overlay = app.overlay(rune::OverlaySpec { name: "background-hud", size, edge: rune::ScreenEdge::Top, margin: 16.0, view: hud }, Hud::default());
+    let overlay = app.overlay(
+        rune::OverlaySpec {
+            name: "background-hud",
+            size,
+            edge: rune::ScreenEdge::Top,
+            margin: 16.0,
+            align: rune::Align::Center,
+            inset: 0.0,
+            interactive: false,
+            view: hud,
+        },
+        Hud::default(),
+    );
+    // A clickable capsule in the top-right corner, like a meeting offer: clicks reach it, focus
+    // stays where it was.
+    let capsule = app.overlay(
+        rune::OverlaySpec {
+            name: "background-capsule",
+            size: (220.0, 48.0),
+            edge: rune::ScreenEdge::Top,
+            margin: 40.0,
+            align: rune::Align::End,
+            inset: 12.0,
+            interactive: true,
+            view: capsule,
+        },
+        0,
+    );
     let ticker = app.handle();
     let hud_ticker = overlay.clone();
     std::thread::spawn(move || {
@@ -183,8 +226,13 @@ fn main() {
                 (Some("hud"), Some("transcribing")) => overlay.update(|h, _| h.transcribing = true),
                 (Some("hud"), Some("recording")) => overlay.update(|h, _| h.transcribing = false),
                 (Some("hud"), Some("status")) => eprintln!("background: hud {:?}", overlay.availability()),
+                (Some("capsule"), Some("show")) => capsule.show(),
+                (Some("capsule"), Some("hide")) => capsule.hide(),
+                (Some("capsule"), Some("left")) => capsule.set_align(rune::Align::Start, 12.0),
+                (Some("capsule"), Some("wide")) => capsule.resize((320.0, 48.0)),
+                (Some("capsule"), Some("status")) => eprintln!("background: capsule {:?}", capsule.availability()),
                 (Some(other), _) => {
-                    eprintln!("background: unknown command {other:?} (open | activate TOKEN | close | dock on|off | hud show|hide|top|bottom|recording|transcribing|status | quit)")
+                    eprintln!("background: unknown command {other:?} (open | activate TOKEN | close | dock on|off | hud show|hide|top|bottom|recording|transcribing|status | capsule show|hide|left|wide|status | quit)")
                 }
                 (None, _) => {}
             }

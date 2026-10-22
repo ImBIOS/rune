@@ -1,15 +1,18 @@
-//! Overlays: observational surfaces beside the app's window (a recording HUD, meeting
-//! capsules). Each has its own state type and `Runtime`, is fed from any thread through an
-//! `OverlayHandle`, and is drawn transparent above every app, centred on the top or bottom
-//! edge of the primary screen. An overlay never takes focus and the pointer passes through it.
+//! Overlays: surfaces beside the app's window (a recording HUD, meeting capsules). Each has
+//! its own state type and `Runtime`, is fed from any thread through an `OverlayHandle`, and is
+//! drawn transparent above every app at the top or bottom edge of the primary screen (centred
+//! or in a corner). An overlay never takes keyboard focus or activates the app; the pointer
+//! passes through it unless it is `interactive`, in which case clicks reach its view.
 //!
 //! - Wayland: a layer-shell surface on the overlay layer (`layer_shell.rs`), keyboard none,
-//!   empty input region. Hidden means destroyed. Without layer-shell the overlay is unavailable.
-//! - X11: an override-redirect notification window with an empty input shape.
-//! - macOS: a borderless window at status level on every space, ignoring mouse events,
-//!   ordered front without becoming key or activating the app.
-//! - Windows: a topmost tool window with `WS_EX_NOACTIVATE`, `WS_EX_TRANSPARENT` and
-//!   `WS_EX_LAYERED`, shown with `SW_SHOWNOACTIVATE`.
+//!   empty input region. Hidden means destroyed. Without layer-shell the overlay is
+//!   unavailable; interactive overlays are unavailable there (no pointer on the private queue).
+//! - X11: an override-redirect notification window, with an empty input shape unless
+//!   interactive.
+//! - macOS: winit's view moved into a non-activating `NSPanel` at status level on every space,
+//!   ignoring the mouse unless interactive, ordered front without becoming key.
+//! - Windows: a topmost tool window with `WS_EX_NOACTIVATE` (plus `WS_EX_TRANSPARENT` and
+//!   `WS_EX_LAYERED` unless interactive), shown with `SW_SHOWNOACTIVATE`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -22,14 +25,14 @@ use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId, WindowLevel};
 
-use crate::el::{El, Tx};
+use crate::el::{Align, El, Tx};
 use crate::render::{Gpu, Renderer};
 use crate::runtime::{Cx, Env, Runtime, Waker};
 use crate::text::TextSystem;
 use crate::tooling::AppSpec;
 use crate::window::{AnyHost, WakeEvent};
 
-/// The screen edge an overlay is centred on.
+/// The screen edge an overlay sits on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ScreenEdge {
     #[default]
@@ -45,6 +48,11 @@ pub struct OverlaySpec<T: 'static> {
     pub edge: ScreenEdge,
     /// Distance from the edge, in points.
     pub margin: f32,
+    /// Along the edge: centred, or at the start (left) or end (right) `inset` points in.
+    pub align: Align,
+    pub inset: f32,
+    /// Clicks reach the view (meeting capsule buttons); otherwise they pass through.
+    pub interactive: bool,
     /// The overlay's view. Its root should have no fill: whatever it leaves clear stays
     /// transparent.
     pub view: fn(&T, &mut Cx<T>) -> El,
@@ -61,16 +69,28 @@ pub enum Availability {
 
 type Update<T> = Box<dyn FnOnce(&mut T, &mut Tx) + Send>;
 
+/// Where an overlay sits and how big it is, in points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Placement {
+    pub size: (f32, f32),
+    pub edge: ScreenEdge,
+    pub margin: f32,
+    pub align: Align,
+    pub inset: f32,
+}
+
 struct Requests<T> {
     visible: Option<bool>,
     edge: Option<ScreenEdge>,
     margin: Option<f32>,
+    align: Option<(Align, f32)>,
+    size: Option<(f32, f32)>,
     updates: Vec<Update<T>>,
 }
 
 impl<T> Default for Requests<T> {
     fn default() -> Self {
-        Requests { visible: None, edge: None, margin: None, updates: Vec::new() }
+        Requests { visible: None, edge: None, margin: None, align: None, size: None, updates: Vec::new() }
     }
 }
 
@@ -122,6 +142,16 @@ impl<T: 'static> OverlayHandle<T> {
         });
     }
 
+    /// Moves the overlay along its edge: centred, or `inset` points from the start or end.
+    pub fn set_align(&self, align: Align, inset: f32) {
+        self.request(|q| q.align = Some((align, inset)));
+    }
+
+    /// Resizes the overlay (points), keeping its edge and alignment.
+    pub fn resize(&self, size: (f32, f32)) {
+        self.request(|q| q.size = Some(size));
+    }
+
     /// Change the overlay's state on the UI thread, in call order, shown or not.
     pub fn update(&self, f: impl FnOnce(&mut T, &mut Tx) + Send + 'static) {
         self.request(|q| q.updates.push(Box::new(f)));
@@ -163,14 +193,18 @@ struct Live {
 
 pub(crate) struct Overlay<T: 'static> {
     name: &'static str,
-    size: (f32, f32),
-    edge: ScreenEdge,
-    margin: f32,
+    at: Placement,
+    interactive: bool,
     shared: Arc<Shared<T>>,
     rt: Runtime<T>,
+    /// The non-activating panel holding winit's view (macOS), kept with the window. Declared
+    /// before the window so the view goes back to it first.
+    #[cfg(target_os = "macos")]
+    panel: Option<crate::macos::Panel>,
     live: Option<Live>,
     /// Kept while hidden where the platform can hide a window.
     hidden: Option<Arc<Window>>,
+    mods: winit::keyboard::ModifiersState,
     renderer: Option<(Renderer, wgpu::TextureFormat)>,
     gpu: Option<Arc<Gpu>>,
     gpu_pool: Rc<RefCell<Weak<Gpu>>>,
@@ -188,13 +222,15 @@ impl<T: 'static> Overlay<T> {
         rt.wall_start = Some(Instant::now());
         let overlay = Overlay {
             name: spec.name,
-            size: spec.size,
-            edge: spec.edge,
-            margin: spec.margin,
+            at: Placement { size: spec.size, edge: spec.edge, margin: spec.margin, align: spec.align, inset: spec.inset },
+            interactive: spec.interactive,
             shared: shared.clone(),
             rt,
             live: None,
             hidden: None,
+            #[cfg(target_os = "macos")]
+            panel: None,
+            mods: Default::default(),
             renderer: None,
             gpu: None,
             gpu_pool: Rc::default(),
@@ -221,10 +257,8 @@ impl<T: 'static> Overlay<T> {
             return;
         }
         if let Some(window) = self.hidden.take() {
-            if let Some(p) = position(event_loop, self.size, self.edge, self.margin) {
-                window.set_outer_position(p);
-            }
-            show_window(&window);
+            self.place_window(event_loop, &window);
+            self.show_window(&window);
             let scale = window.scale_factor() as f32;
             match self.attach(Backing::Window(window), scale) {
                 Some(live) => self.live = Some(live),
@@ -232,7 +266,11 @@ impl<T: 'static> Overlay<T> {
             }
             return;
         }
-        let made = if crate::window::is_wayland(event_loop) { self.layer(event_loop) } else { self.window(event_loop) };
+        let made = match (crate::window::is_wayland(event_loop), self.interactive) {
+            (true, true) => None,
+            (true, false) => self.layer(event_loop),
+            (false, _) => self.window(event_loop),
+        };
         match made {
             Some(live) => {
                 self.live = Some(live);
@@ -252,7 +290,12 @@ impl<T: 'static> Overlay<T> {
         drop(surface);
         match backing {
             Backing::Window(window) => {
+                #[cfg(target_os = "macos")]
+                if let Some(panel) = &self.panel {
+                    panel.hide();
+                }
                 window.set_visible(false);
+                self.rt.pointer_leave();
                 self.hidden = Some(window);
             }
             #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
@@ -266,8 +309,7 @@ impl<T: 'static> Overlay<T> {
         let display = event_loop.display_handle().ok()?.as_raw();
         // A buffer scale covers the densest output; the compositor corrects it on entry.
         let scale = event_loop.available_monitors().map(|m| m.scale_factor()).fold(1.0f64, f64::max).ceil() as i32;
-        let size = (self.size.0.ceil() as u32, self.size.1.ceil() as u32);
-        let mut layer = crate::layer_shell::LayerSurface::new(display, self.name, size, self.edge, self.margin.round() as i32)?;
+        let mut layer = crate::layer_shell::LayerSurface::new(display, self.name, self.at)?;
         layer.set_buffer_scale(scale);
         self.attach(Backing::Layer(layer), scale as f32)
     }
@@ -280,14 +322,14 @@ impl<T: 'static> Overlay<T> {
     fn window(&mut self, event_loop: &ActiveEventLoop) -> Option<Live> {
         let mut attrs = Window::default_attributes()
             .with_title(self.name)
-            .with_inner_size(LogicalSize::new(self.size.0 as f64, self.size.1 as f64))
+            .with_inner_size(LogicalSize::new(self.at.size.0 as f64, self.at.size.1 as f64))
             .with_decorations(false)
             .with_resizable(false)
             .with_transparent(true)
             .with_active(false)
             .with_visible(false)
             .with_window_level(WindowLevel::AlwaysOnTop);
-        if let Some(p) = position(event_loop, self.size, self.edge, self.margin) {
+        if let Some(p) = position(event_loop, self.at) {
             attrs = attrs.with_position(p);
         }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
@@ -309,18 +351,93 @@ impl<T: 'static> Overlay<T> {
             attrs = attrs.with_has_shadow(false);
         }
         let window = Arc::new(event_loop.create_window(attrs).ok()?);
-        let _ = window.set_cursor_hittest(false);
-        prepare_window(&window);
-        show_window(&window);
         let scale = window.scale_factor() as f32;
-        self.attach(Backing::Window(window), scale)
+        // The surface first: on macOS it binds winit's view and its layer, which then move
+        // into the panel.
+        let live = self.attach(Backing::Window(window.clone()), scale)?;
+        #[cfg(target_os = "macos")]
+        {
+            self.panel = Some(crate::macos::Panel::adopt(&window, self.at, self.interactive)?);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = window.set_cursor_hittest(self.interactive);
+            #[cfg(target_os = "windows")]
+            crate::win32::prepare_overlay(&window, self.interactive);
+        }
+        self.place_window(event_loop, &window);
+        self.show_window(&window);
+        Some(live)
+    }
+
+    fn place_window(&self, event_loop: &ActiveEventLoop, window: &Window) {
+        #[cfg(target_os = "macos")]
+        if let Some(panel) = &self.panel {
+            panel.place(self.at);
+            return;
+        }
+        if let Some(p) = position(event_loop, self.at) {
+            window.set_outer_position(p);
+        }
+    }
+
+    /// Puts the window on screen without focusing it or activating the app.
+    fn show_window(&self, window: &Window) {
+        #[cfg(target_os = "macos")]
+        if let Some(panel) = &self.panel {
+            panel.show();
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        crate::win32::show_overlay(window);
+        #[cfg(not(target_os = "windows"))]
+        window.set_visible(true);
+    }
+
+    fn resized(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(live) = self.live.as_mut() else { return };
+        match &mut live.backing {
+            Backing::Window(w) => {
+                let _ = w.request_inner_size(LogicalSize::new(self.at.size.0 as f64, self.at.size.1 as f64));
+            }
+            #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+            Backing::Layer(layer) => {
+                layer.place(self.at);
+                layer.commit();
+            }
+        }
+        if let Some(gpu) = self.gpu.clone() {
+            let scale = live.scale;
+            live.scale = 0.0;
+            self.rescale(&gpu, scale);
+        }
+        if let Some(Backing::Window(w)) = self.live.as_ref().map(|l| &l.backing) {
+            let w = w.clone();
+            self.place_window(event_loop, &w);
+        }
     }
 
     /// Creates the wgpu surface (and the GPU device, if this is the first surface).
     fn attach(&mut self, backing: Backing, scale: f32) -> Option<Live> {
+        #[cfg(target_os = "macos")]
+        let moved = self.panel.as_ref().map(|p| p.raw_handles());
         let make = |instance: &wgpu::Instance| -> Option<wgpu::Surface<'static>> {
             match &backing {
-                Backing::Window(w) => instance.create_surface(w.clone()).ok(),
+                Backing::Window(w) => {
+                    #[cfg(target_os = "macos")]
+                    if let Some((display, window)) = moved {
+                        // SAFETY: the panel keeps the view (and its layer) alive while the
+                        // overlay holds this surface; AppKit's display handle carries nothing.
+                        return unsafe {
+                            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                                raw_display_handle: Some(display),
+                                raw_window_handle: window,
+                            })
+                        }
+                        .ok();
+                    }
+                    instance.create_surface(w.clone()).ok()
+                }
                 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
                 Backing::Layer(layer) => {
                     let (display, window) = layer.raw_handles();
@@ -353,7 +470,7 @@ impl<T: 'static> Overlay<T> {
             }
         };
         let gpu = self.gpu.clone()?;
-        let (w, h) = ((self.size.0 * scale).round() as u32, (self.size.1 * scale).round() as u32);
+        let (w, h) = ((self.at.size.0 * scale).round() as u32, (self.at.size.1 * scale).round() as u32);
         let mut config = surface.get_default_config(&gpu.adapter, w.max(1), h.max(1))?;
         let caps = surface.get_capabilities(&gpu.adapter);
         config.format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(config.format);
@@ -374,7 +491,7 @@ impl<T: 'static> Overlay<T> {
         let alpha = (config.alpha_mode == wgpu::CompositeAlphaMode::PostMultiplied && gpu.adapter.get_info().backend != wgpu::Backend::Metal)
             .then(|| crate::surface_alpha::AlphaSurface::new(&gpu.device, config.format, (config.width, config.height)));
         self.rt.transparent = true;
-        self.rt.set_viewport(self.size, scale);
+        self.rt.set_viewport(self.at.size, scale);
         Some(Live { alpha, surface, config, backing, scale })
     }
 
@@ -384,13 +501,13 @@ impl<T: 'static> Overlay<T> {
             return;
         }
         live.scale = scale;
-        live.config.width = (self.size.0 * scale).round().max(1.0) as u32;
-        live.config.height = (self.size.1 * scale).round().max(1.0) as u32;
+        live.config.width = (self.at.size.0 * scale).round().max(1.0) as u32;
+        live.config.height = (self.at.size.1 * scale).round().max(1.0) as u32;
         live.surface.configure(&gpu.device, &live.config);
         if let Some(alpha) = &mut live.alpha {
             alpha.resize(&gpu.device, (live.config.width, live.config.height));
         }
-        self.rt.set_viewport(self.size, scale);
+        self.rt.set_viewport(self.at.size, scale);
         self.dirty = true;
     }
 }
@@ -404,24 +521,31 @@ impl<T: 'static> Overlay<T> {
             self.rt.shell_request = None;
             self.dirty = true;
         }
-        let margin = requests.margin.filter(|m| *m != self.margin);
-        if let Some(margin) = margin {
-            self.margin = margin;
+        let mut at = self.at;
+        at.edge = requests.edge.unwrap_or(at.edge);
+        at.margin = requests.margin.unwrap_or(at.margin);
+        if let Some((align, inset)) = requests.align {
+            (at.align, at.inset) = (align, inset);
         }
-        if let Some(edge) = requests.edge.filter(|e| *e != self.edge).or(margin.map(|_| self.edge)) {
-            self.edge = edge;
-            match self.live.as_mut().map(|l| &mut l.backing) {
-                Some(Backing::Window(w)) => {
-                    if let Some(p) = position(event_loop, self.size, edge, self.margin) {
-                        w.set_outer_position(p);
+        let resized = requests.size.is_some_and(|size| size != at.size);
+        at.size = requests.size.unwrap_or(at.size);
+        if at != self.at {
+            self.at = at;
+            if resized {
+                self.resized(event_loop);
+            } else {
+                match self.live.as_mut().map(|l| &mut l.backing) {
+                    Some(Backing::Window(w)) => {
+                        let w = w.clone();
+                        self.place_window(event_loop, &w);
                     }
+                    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+                    Some(Backing::Layer(layer)) => {
+                        layer.place(at);
+                        layer.commit();
+                    }
+                    None => {}
                 }
-                #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-                Some(Backing::Layer(layer)) => {
-                    layer.place(edge, self.margin.round() as i32);
-                    layer.commit();
-                }
-                None => {}
             }
         }
         match requests.visible {
@@ -513,6 +637,25 @@ impl<T: 'static> AnyHost for Overlay<T> {
                 }
             }
             WindowEvent::RedrawRequested | WindowEvent::Resized(_) => self.dirty = true,
+            WindowEvent::CursorMoved { position, .. } if self.interactive => {
+                let scale = self.live.as_ref().map_or(1.0, |l| l.scale);
+                self.rt.pointer_move(position.x as f32 / scale, position.y as f32 / scale);
+                self.dirty = true;
+            }
+            WindowEvent::CursorLeft { .. } if self.interactive => {
+                self.rt.pointer_leave();
+                self.dirty = true;
+            }
+            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::MouseInput { state, button: winit::event::MouseButton::Left, .. } if self.interactive => {
+                if let Some((x, y)) = self.rt.pointer() {
+                    match state {
+                        winit::event::ElementState::Pressed => self.rt.pointer_down(x, y),
+                        winit::event::ElementState::Released => self.rt.pointer_up(x, y),
+                    }
+                }
+                self.dirty = true;
+            }
             WindowEvent::ThemeChanged(theme) => {
                 self.dark = theme == winit::window::Theme::Dark;
                 self.rt.set_system_dark(self.dark);
@@ -540,14 +683,19 @@ impl<T: 'static> PendingOverlay for Overlay<T> {
     }
 }
 
-/// Centred on the primary screen's top or bottom edge, `margin` points in.
-fn position(event_loop: &ActiveEventLoop, size: (f32, f32), edge: ScreenEdge, margin: f32) -> Option<PhysicalPosition<i32>> {
+/// On the primary screen's top or bottom edge, `margin` points in, centred or `inset` points
+/// from a side.
+fn position(event_loop: &ActiveEventLoop, at: Placement) -> Option<PhysicalPosition<i32>> {
     let monitor = event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next())?;
     let scale = monitor.scale_factor();
     let (origin, area) = (monitor.position(), monitor.size());
-    let (w, h) = ((size.0 as f64 * scale).round() as i32, (size.1 as f64 * scale).round() as i32);
-    let m = (margin as f64 * scale).round() as i32;
-    let x = origin.x + (area.width as i32 - w) / 2;
+    let px = |v: f32| (v as f64 * scale).round() as i32;
+    let (w, h) = (px(at.size.0), px(at.size.1));
+    let x = match at.align {
+        Align::Start => origin.x + px(at.inset),
+        Align::Center => origin.x + (area.width as i32 - w) / 2,
+        Align::End => origin.x + area.width as i32 - w - px(at.inset),
+    };
     #[allow(unused_mut)]
     let mut bottom = origin.y + area.height as i32;
     // Above the taskbar on Windows' primary display.
@@ -557,30 +705,11 @@ fn position(event_loop: &ActiveEventLoop, size: (f32, f32), edge: ScreenEdge, ma
     {
         bottom = work;
     }
-    let y = match edge {
-        ScreenEdge::Top => origin.y + m,
-        ScreenEdge::Bottom => bottom - h - m,
+    let y = match at.edge {
+        ScreenEdge::Top => origin.y + px(at.margin),
+        ScreenEdge::Bottom => bottom - h - px(at.margin),
     };
     Some(PhysicalPosition::new(x, y))
-}
-
-/// Platform window flags winit has no attribute for.
-fn prepare_window(window: &Window) {
-    #[cfg(target_os = "macos")]
-    crate::macos::prepare_overlay(window);
-    #[cfg(target_os = "windows")]
-    crate::win32::prepare_overlay(window);
-    let _ = window;
-}
-
-/// Puts the window on screen without focusing it or activating the app.
-fn show_window(window: &Window) {
-    #[cfg(target_os = "macos")]
-    crate::macos::show_overlay(window);
-    #[cfg(target_os = "windows")]
-    crate::win32::show_overlay(window);
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    window.set_visible(true);
 }
 
 #[cfg(test)]
@@ -595,11 +724,14 @@ mod tests {
         handle.show();
         handle.update(|n, _| *n += 1);
         handle.place(ScreenEdge::Bottom, 24.0);
+        handle.set_align(Align::End, 12.0);
+        handle.resize((300.0, 80.0));
         handle.update(|n, _| *n *= 3);
         handle.hide();
         let q = std::mem::take(&mut *shared.requests.lock().unwrap());
         assert_eq!(q.visible, Some(false), "the latest show/hide wins");
         assert_eq!((q.edge, q.margin), (Some(ScreenEdge::Bottom), Some(24.0)));
+        assert_eq!((q.align, q.size), (Some((Align::End, 12.0)), Some((300.0, 80.0))));
         let mut n = 0;
         for f in q.updates {
             f(&mut n, &mut Tx::default());
