@@ -470,7 +470,7 @@ window. No ten-second native idle/power measurement was run on Studio.
   **.376 → .368 ms**, first CPU frame **8.44 → 8.81 ms**, MAD **.27 → .42 ms**.
   This is performance-neutral within noise, retained for the width/anchor behavior.
   Evidence: `perf/autoresearch/width/paired-exact/results.json`.
-- Final upstream-integrated Studio seven-run medians: long-stream p95 **2.971 ms**,
+- Before the public-root transplant, Studio seven-run medians: long-stream p95 **2.971 ms**,
   first CPU frame **8.76 ms**; long-scroll p95 **.443 ms**, first **9.61 ms**.
   The <4 ms long-stream target is revalidated. Native presentation remains unmeasured.
 - The earlier picker-binary comparison included rune-kit's renderer changes and
@@ -485,3 +485,9 @@ window. No ten-second native idle/power measurement was run on Studio.
 - The repository switched to a fresh public root during landing. Preserved the old
   local history as `width-before-public-root` and transplanted only this three-file
   change onto `1f6fbd0`; no force push or old-history merge into the public root.
+- Shipped as `63d8d35`. On that public-root build, all 12 runtime tests pass, all
+  nine goldens remain byte-identical, and all eleven fixture motion cases pass.
+  Seven-run Studio medians: long-stream p95 **2.016 ms**, first CPU frame **6.20 ms**;
+  long-scroll p95 **.579 ms**, first **6.67 ms**. These final absolute measurements
+  include intervening upstream changes and are not an isolated width-patch speedup.
+  Final evidence: `perf/autoresearch/width/public/results.json` and `public-gates/`.
