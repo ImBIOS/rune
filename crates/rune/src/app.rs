@@ -182,6 +182,12 @@ impl<S: 'static> AppHandle<S> {
         self.request(|q| q.quit = true);
     }
 
+    /// macOS: show or hide the app's Dock icon (and app menu) while it runs, switching between
+    /// the regular and accessory activation policies. Does nothing elsewhere.
+    pub fn set_dock_icon(&self, visible: bool) {
+        self.request(|q| q.dock = Some(visible));
+    }
+
     /// Change the state from this thread: `f` runs on the UI thread, in call order, even while no
     /// window shows, and the next frame commits it with the motion its `Tx` asks for.
     pub fn update(&self, f: impl FnOnce(&mut S, &mut Tx) + Send + 'static) {
@@ -203,6 +209,7 @@ pub(crate) enum WindowRequest {
 
 pub(crate) struct Requests<S> {
     pub window: Option<WindowRequest>,
+    pub dock: Option<bool>,
     pub quit: bool,
     pub updates: Vec<Update<S>>,
 }
@@ -211,6 +218,7 @@ impl<S> Default for Requests<S> {
     fn default() -> Self {
         Requests {
             window: None,
+            dock: None,
             quit: false,
             updates: Vec::new(),
         }
@@ -262,6 +270,7 @@ mod tests {
         AppSpec {
             title: "test",
             size: (100.0, 100.0),
+            min_size: None,
             init: || 0,
             view: |_: &u32, _: &mut Cx<u32>| el(),
             scenes: &[],

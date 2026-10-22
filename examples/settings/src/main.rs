@@ -323,6 +323,7 @@ fn main() {
     rune::run(AppSpec {
         title: "Settings",
         size: (620.0, 520.0),
+        min_size: None,
         init: Settings::default,
         view,
         scenes: &[

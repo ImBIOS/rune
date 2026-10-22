@@ -111,6 +111,7 @@ let app = rune::App::new(spec)
     .windowless()                  // start with no window (implies keep_running)
     .keep_running()                // closing the window keeps the process, state and loop
     .release_gpu_when_closed()     // optional: drop the GPU device while closed
+    .accessory()                   // macOS: menu-bar app, no Dock icon (h.set_dock_icon(true) shows it)
     .on_close(|s, tx| ..);         // runs before every close; tx.quit() quits instead
 let handle = app.handle();     // AppHandle<S>: Clone + Send + Sync, usable before run
 std::thread::spawn(move || {
@@ -144,8 +145,11 @@ app.run();
   reopen, `release_gpu_when_closed`; and under Xwayland, hide/show and `focus_window`. Not yet run on KWin, Mutter, niri,
   macOS or Windows.
 - Headless tooling runs ignore window requests and apply updates before each frame.
+- `AppSpec::min_size` sets the smallest window (None keeps 420×400).
+- `AppHandle::set_dock_icon(bool)` switches macOS between the regular and accessory activation
+  policies at runtime (observed on macOS 26.2 with `lsappinfo`: UIElement ↔ Foreground).
 - Not yet: several windows, window kinds (panel, transparent click-through overlay, Wayland
-  layer-shell), macOS activation policy, a per-app minimum size.
+  layer-shell).
 
 ## Run
 

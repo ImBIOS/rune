@@ -6,6 +6,8 @@
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
 mod activation;
 mod app;
+#[cfg(target_os = "macos")]
+mod macos;
 pub mod color;
 pub mod edit;
 pub mod el;

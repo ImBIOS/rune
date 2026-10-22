@@ -199,6 +199,10 @@ impl<S: 'static> Host<S> {
             event_loop.exit();
             return;
         }
+        #[cfg(target_os = "macos")]
+        if let Some(visible) = requests.dock {
+            crate::macos::set_dock_icon(visible);
+        }
         match requests.window {
             Some(WindowRequest::Open(token)) => self.open(event_loop, token),
             Some(WindowRequest::Close) => self.close(event_loop),
@@ -297,11 +301,12 @@ impl<S: 'static> Host<S> {
     #[cfg_attr(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))), allow(unused_variables))]
     fn create(&mut self, event_loop: &ActiveEventLoop, token: Option<String>) {
         let size = self.args.size.unwrap_or(self.spec.size);
+        let min = self.spec.min_size.unwrap_or((420.0, 400.0));
         #[allow(unused_mut)]
         let mut attrs = Window::default_attributes()
             .with_title(self.spec.title)
             .with_inner_size(LogicalSize::new(size.0 as f64, size.1 as f64))
-            .with_min_inner_size(LogicalSize::new(420.0, 400.0));
+            .with_min_inner_size(LogicalSize::new(min.0 as f64, min.1 as f64));
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         {
             if let Some(id) = crate::tooling::app_id() {
