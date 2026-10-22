@@ -58,6 +58,11 @@ impl Gpu {
     }
 
     pub fn try_new(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Result<Gpu, String> {
+        Self::try_with_features(instance, surface, wgpu::Features::empty())
+    }
+
+    /// Like `try_new`, also enabling whichever of `wanted` the adapter supports.
+    pub fn try_with_features(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, wanted: wgpu::Features) -> Result<Gpu, String> {
         let _serial = GPU_INIT.lock().unwrap_or_else(|e| e.into_inner());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
@@ -66,7 +71,7 @@ impl Gpu {
             apply_limit_buckets: false,
         }))
         .map_err(|error| format!("no GPU adapter: {error}"))?;
-        let required_features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+        let required_features = adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wanted);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("rune"),
             required_features,
@@ -91,6 +96,12 @@ impl Gpu {
 
 pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
+    format: wgpu::TextureFormat,
+    shader: wgpu::ShaderModule,
+    layout: wgpu::PipelineLayout,
+    vertex_entry: &'static str,
+    /// Pipelines for other target formats a compositor draws into (`add_format`).
+    extra: Vec<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
     bind_group: wgpu::BindGroup,
     bind_layout: wgpu::BindGroupLayout,
     globals: wgpu::Buffer,
@@ -183,16 +194,49 @@ impl Renderer {
             bind_group_layouts: &layouts[..if properties.is_some() { 2 } else { 1 }],
             immediate_size: 0,
         });
+        let vertex_entry = if properties.is_some() { "vs_springs" } else { "vs" };
+        let pipeline = Self::pipeline(device, &layout, &shader, format, vertex_entry);
+        let capacity = 256;
+        let instances = Self::instance_buffer(device, capacity);
+        let spring_instances = properties.map_or(0, |(_, ids)| ids.len());
+        let springs = properties.map(|(nodes, ids)| crate::gpu_springs::Bindings::new(device, spring_layout.as_ref().unwrap(), nodes, ids));
+        Renderer {
+            pipeline,
+            format,
+            shader,
+            layout,
+            vertex_entry,
+            extra: Vec::new(),
+            bind_group,
+            bind_layout: bgl,
+            globals,
+            atlas,
+            images: None,
+            instances,
+            capacity,
+            count: 0,
+            springs,
+            spring_instances,
+        }
+    }
+
+    fn pipeline(
+        device: &wgpu::Device,
+        layout: &wgpu::PipelineLayout,
+        shader: &wgpu::ShaderModule,
+        format: wgpu::TextureFormat,
+        vertex_entry: &str,
+    ) -> wgpu::RenderPipeline {
         let attrs = wgpu::vertex_attr_array![
             0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
             4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4
         ];
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("uber"),
-            layout: Some(&layout),
+            layout: Some(layout),
             vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some(if properties.is_some() { "vs_springs" } else { "vs" }),
+                module: shader,
+                entry_point: Some(vertex_entry),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Instance>() as u64,
@@ -204,7 +248,7 @@ impl Renderer {
             depth_stencil: None,
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: shader,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
@@ -215,12 +259,7 @@ impl Renderer {
             }),
             multiview_mask: None,
             cache: None,
-        });
-        let capacity = 256;
-        let instances = Self::instance_buffer(device, capacity);
-        let spring_instances = properties.map_or(0, |(_, ids)| ids.len());
-        let springs = properties.map(|(nodes, ids)| crate::gpu_springs::Bindings::new(device, spring_layout.as_ref().unwrap(), nodes, ids));
-        Renderer { pipeline, bind_group, bind_layout: bgl, globals, atlas, images: None, instances, capacity, count: 0, springs, spring_instances }
+        })
     }
 
     fn image_texture(device: &wgpu::Device, size: u32) -> wgpu::Texture {
@@ -277,6 +316,53 @@ impl Renderer {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None },
             wgpu::Extent3d { width: IMAGE_ATLAS_SIZE, height: y1 - y0, depth_or_array_layers: 1 },
         );
+    }
+
+    /// Builds the pipeline for another target format (e.g. an `Rgba16Float` layer), once.
+    pub fn add_format(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
+        if format != self.format && !self.extra.iter().any(|(f, _)| *f == format) {
+            let p = Self::pipeline(device, &self.layout, &self.shader, format, self.vertex_entry);
+            self.extra.push((format, p));
+        }
+    }
+
+    /// Uploads several instance lists back to back (one buffer, one glyph upload) and returns
+    /// each list's instance range for `draw_range`. A compositor's version of `prepare`.
+    pub fn prepare_lists(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        atlas: &mut Atlas,
+        lists: &[&[Instance]],
+        viewport: (u32, u32),
+    ) -> Vec<std::ops::Range<u32>> {
+        let mut all = Vec::with_capacity(lists.iter().map(|l| l.len()).sum());
+        let mut ranges = Vec::with_capacity(lists.len());
+        for l in lists {
+            let a = all.len() as u32;
+            all.extend_from_slice(l);
+            ranges.push(a..all.len() as u32);
+        }
+        self.prepare(device, queue, atlas, &all, viewport);
+        ranges
+    }
+
+    /// Draws uploaded instances `range` into a pass whose target has `format` (the renderer's
+    /// own, or one added with `add_format`).
+    pub fn draw_range(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat, range: std::ops::Range<u32>) {
+        if range.is_empty() {
+            return;
+        }
+        let pipeline = if format == self.format {
+            &self.pipeline
+        } else {
+            &self.extra.iter().find(|(f, _)| *f == format).expect("Renderer::add_format first").1
+        };
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        if let Some(properties) = &self.springs { pass.set_bind_group(1, &properties.group, &[]); }
+        pass.set_vertex_buffer(0, self.instances.slice(..));
+        pass.draw(0..4, range);
     }
 
     fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {

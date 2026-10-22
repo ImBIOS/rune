@@ -262,6 +262,8 @@ pub struct Visual {
     pub shape: Option<Rc<Shape>>,
     /// An RGBA image scaled into the element's rect, over the fill and shape.
     pub pixels: Option<crate::pixels::Pixels>,
+    /// App-defined tag a compositor reads per instance (`Runtime::marks`); 0 inherits the parent's.
+    pub mark: u32,
 }
 
 impl Default for Visual {
@@ -281,6 +283,7 @@ impl Default for Visual {
             outline: None,
             shape: None,
             pixels: None,
+            mark: 0,
         }
     }
 }
@@ -765,6 +768,12 @@ impl El {
     }
     pub fn opacity(mut self, o: f32) -> Self {
         self.vis.opacity = o;
+        self
+    }
+    /// Tags this element's instances (and its descendants', until one sets its own) for a
+    /// compositor: `Runtime::marks` runs parallel to `Runtime::instances`.
+    pub fn mark(mut self, mark: u32) -> Self {
+        self.vis.mark = mark;
         self
     }
     /// Overlay drawn over the fill while hovered.

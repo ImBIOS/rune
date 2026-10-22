@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 
+use crate::compose::{Compositor, Frame};
 use crate::edit::{Key, KeyEvent, Mods};
 use crate::el::{El, Tx};
 use crate::render::{Gpu, OFFSCREEN_FORMAT, Offscreen, Renderer, write_png};
@@ -225,6 +226,11 @@ pub fn run_windows_with<S: 'static>(options: crate::RunOptions, factory: impl Fn
     } else {
         crate::window::run_windows(factory, args, options);
     }
+}
+
+/// `run` with a compositor drawing every frame (see `compose`); `App::compositor` for other lifetimes.
+pub fn run_with<S: 'static>(spec: AppSpec<S>, compositor: impl Compositor<S>) {
+    crate::app::App::new(spec).compositor(compositor).run();
 }
 
 pub fn initial_state<S: 'static>(spec: &AppSpec<S>, scene: Option<&str>) -> S {
@@ -631,7 +637,7 @@ pub fn headless<S: 'static>(app: crate::app::App<S>, args: Args) {
     headless_configured(app, args, false);
 }
 
-fn headless_configured<S: 'static>(app: crate::app::App<S>, args: Args, transparent: bool) {
+fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, transparent: bool) {
     let launched = Instant::now();
     if args.list_scenes {
         for (n, _) in app.spec.scenes {
@@ -639,6 +645,7 @@ fn headless_configured<S: 'static>(app: crate::app::App<S>, args: Args, transpar
         }
         return;
     }
+    let mut comp = app.compositor.take();
     let (spec, state, shared) = app.into_parts(args.scene.as_deref());
     let scale = args.scale.unwrap_or(2.0);
     let size = args.size.unwrap_or(spec.size);
@@ -647,6 +654,7 @@ fn headless_configured<S: 'static>(app: crate::app::App<S>, args: Args, transpar
     let mut rt = runtime_for(&spec, state, size, Env { system_dark: dark, scale }, std::sync::Arc::new(|| {}));
     rt.transparent = transparent;
     if args.tree.is_some() { rt.key_warnings = Some(Vec::new()); }
+    rt.track_marks = comp.is_some();
     let runtime_ms = launched.elapsed().as_secs_f64() * 1000.0 - state_ms;
 
     let script = args.script.as_ref().map(load_script).unwrap_or_default();
@@ -666,7 +674,8 @@ fn headless_configured<S: 'static>(app: crate::app::App<S>, args: Args, transpar
     let last_frame = snap_frame.max(start_frame + frames.max(1) - 1);
 
     let t0 = Instant::now();
-    let gpu = Gpu::new(Gpu::instance(), None);
+    let features = comp.as_ref().map_or(wgpu::Features::empty(), |c| c.features());
+    let gpu = Gpu::try_with_features(Gpu::instance(), None, features).unwrap_or_else(|e| die(&e));
     let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
     let (wp, hp) = ((size.0 * scale).round() as u32, (size.1 * scale).round() as u32);
     let target = Offscreen::new(&gpu.device, wp, hp);
@@ -716,11 +725,31 @@ fn headless_configured<S: 'static>(app: crate::app::App<S>, args: Args, transpar
         for f in shared.take().updates {
             rt.update(f);
         }
-        let animating = rt.frame(if k == 0 { 0.0 } else { dt });
-        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (wp, hp));
+        let step = if k == 0 { 0.0 } else { dt };
+        let mut animating = rt.frame(step);
+        let update_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
         renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
         let mut enc = gpu.device.create_command_encoder(&Default::default());
-        renderer.draw(&mut enc, alpha.as_ref().map_or(&target.view, |a| &a.view), rt.clear_color());
+        let view = alpha.as_ref().map_or(&target.view, |a| &a.view);
+        if let Some(c) = comp.as_mut() {
+            let mut f = Frame {
+                device: &gpu.device,
+                queue: &gpu.queue,
+                encoder: &mut enc,
+                target: view,
+                format: OFFSCREEN_FORMAT,
+                size: (wp, hp),
+                dt: step,
+                update_ms,
+                rt: &mut rt,
+                ui: &mut renderer,
+            };
+            c.render(&mut f);
+            animating |= c.animating();
+        } else {
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (wp, hp));
+            renderer.draw(&mut enc, view, rt.clear_color());
+        }
         if let Some(alpha) = &alpha { alpha.draw(&mut enc, &target.view); }
         let dump = k >= start_frame && k < start_frame + frames && (args.out.is_some() || args.strip.is_some()) && (k - start_frame).is_multiple_of(args.every);
         let want_snap = k == snap_frame && args.snap.is_some();
@@ -735,6 +764,10 @@ fn headless_configured<S: 'static>(app: crate::app::App<S>, args: Args, transpar
             if animating { anim_ms.push(ms) } else { rest_ms.push(ms) }
         }
 
+        if comp.is_some() {
+            // Pace like a display link so a compositor's async readbacks (GPU timers) land between frames.
+            gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
+        }
         if let Some(tr) = trace.as_mut() {
             tr.frame(&mut rt, real_t * 1000.0, ms);
         }
@@ -818,6 +851,9 @@ fn headless_configured<S: 'static>(app: crate::app::App<S>, args: Args, transpar
         rt.stats.layout_nodes,
         rt.stats.glyphs
     );
+    if let Some(s) = comp.as_mut().and_then(|c| c.summary(&gpu.device)) {
+        eprintln!("{s}");
+    }
 }
 
 fn tile_size(w: u32, h: u32, crops: &[[u32; 4]], gap: u32) -> (u32, u32) {
