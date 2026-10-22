@@ -35,5 +35,5 @@ fn a_select_trigger_is_the_closed_field_without_a_listbox() {
     let mut rt = Runtime::new(0usize, field, (400.0, 300.0), Env { system_dark: true, scale: 1.0 });
     rt.frame(0.0);
     assert_eq!(rect(&rt, "model-trigger")[2], 200.0);
-    assert!(rt.elements().iter().all(|e| e.role != "listbox"));
+    assert!(rt.elements().iter().all(|e| e.role != "listbox"), "open turns the chevron but builds no listbox");
 }

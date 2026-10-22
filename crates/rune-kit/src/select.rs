@@ -130,14 +130,86 @@ impl Select {
         self
     }
 
-    /// The closed field alone, for an app that opens its own menu or picker on press
-    /// (`on_toggle`); options, `open` and the listbox are ignored.
+    /// The field alone, for an app that opens its own menu or picker on press (`on_toggle`):
+    /// `open` still turns the chevron and highlights the field, but no listbox is built.
     pub fn trigger(mut self, k: &Kit) -> El {
-        self.open = false;
-        self.build(k, &mut Vec::new())
+        self.field(k)
     }
 
-    pub fn build(self, k: &Kit, layer: &mut Vec<El>) -> El {
+    pub fn build(mut self, k: &Kit, layer: &mut Vec<El>) -> El {
+        let trigger = self.field(k);
+        if self.state == State::Disabled || !self.open {
+            return trigger;
+        }
+        let c = &k.c;
+        let anchor_key = format!("{}-trigger", self.key);
+        if let Some(s) = self.dismiss {
+            layer.push(s);
+        }
+        // 12rem tall at most; consecutive options sit 2 points apart, headers flush.
+        let mut list = col().key("listbox").role("listbox").padding(4.0).max_h(192.0).clip_soft(0.0).items_stretch();
+        let mut group: Option<&str> = None;
+        let mut after_item = false;
+        for (i, (g, o)) in self.options.iter().enumerate() {
+            if g.as_deref() != group {
+                group = g.as_deref();
+                if let Some(g) = group {
+                    list = list.child(
+                        row()
+                            .key(format!("group{i}"))
+                            .h(28.0)
+                            .px(12.0)
+                            .center_y()
+                            .child(text(g).font(k.ty.small_medium).color(c.text_faint)),
+                    );
+                    after_item = false;
+                }
+            }
+            let selected = self.current.as_deref() == Some(o.as_str());
+            let mut item = row()
+                .key(format!("option{i}"))
+                .role("option")
+                .label(o.clone())
+                .h(28.0)
+                .pl(12.0)
+                .pr(6.0)
+                .gap(8.0)
+                .center_y()
+                .radius(4.0)
+                .mt(if after_item { 2.0 } else { 0.0 })
+                .child(
+                    text(o.clone()).key("label").font(k.ty.ui_compact).color(c.text_base).grow(1.0).shrink().truncate(),
+                )
+                .child(el().key("indicator").size(16.0, 16.0).center().child(
+                    icon(k.glyph.check_small, 14.0).color(c.icon_base).opacity(if selected { 1.0 } else { 0.0 }),
+                ));
+            if self.highlighted.as_deref() == Some(o.as_str()) {
+                item = item.fill(c.hover);
+            } else {
+                item = item.hover(c.hover);
+            }
+            if let Some(f) = &self.choose {
+                item = f(o)(item);
+            }
+            list = list.child(item);
+            after_item = true;
+        }
+        let content = shadows(
+            col()
+                .key(format!("{}-content", self.key))
+                .min_w(160.0)
+                .max_w(368.0)
+                .radius(6.0)
+                .fill(c.layer_01)
+                .child(list),
+            &k.elevation.floating,
+        );
+        layer.push(anchor(k, content, &anchor_key, self.placement, 2.0));
+        trigger
+    }
+
+    /// The closed or open field: label, chevron, and the press that toggles the listbox.
+    fn field(&mut self, k: &Kit) -> El {
         let c = &k.c;
         let disabled = self.state == State::Disabled;
         let anchor_key = format!("{}-trigger", self.key);
@@ -205,74 +277,9 @@ impl Select {
         if disabled {
             return trigger.opacity(0.5);
         }
-        if let Some(f) = self.toggle {
+        if let Some(f) = self.toggle.take() {
             trigger = f(trigger);
         }
-        if !self.open {
-            return trigger;
-        }
-        if let Some(s) = self.dismiss {
-            layer.push(s);
-        }
-        // 12rem tall at most; consecutive options sit 2 points apart, headers flush.
-        let mut list = col().key("listbox").role("listbox").padding(4.0).max_h(192.0).clip_soft(0.0).items_stretch();
-        let mut group: Option<&str> = None;
-        let mut after_item = false;
-        for (i, (g, o)) in self.options.iter().enumerate() {
-            if g.as_deref() != group {
-                group = g.as_deref();
-                if let Some(g) = group {
-                    list = list.child(
-                        row()
-                            .key(format!("group{i}"))
-                            .h(28.0)
-                            .px(12.0)
-                            .center_y()
-                            .child(text(g).font(k.ty.small_medium).color(c.text_faint)),
-                    );
-                    after_item = false;
-                }
-            }
-            let selected = self.current.as_deref() == Some(o.as_str());
-            let mut item = row()
-                .key(format!("option{i}"))
-                .role("option")
-                .label(o.clone())
-                .h(28.0)
-                .pl(12.0)
-                .pr(6.0)
-                .gap(8.0)
-                .center_y()
-                .radius(4.0)
-                .mt(if after_item { 2.0 } else { 0.0 })
-                .child(
-                    text(o.clone()).key("label").font(k.ty.ui_compact).color(c.text_base).grow(1.0).shrink().truncate(),
-                )
-                .child(el().key("indicator").size(16.0, 16.0).center().child(
-                    icon(k.glyph.check_small, 14.0).color(c.icon_base).opacity(if selected { 1.0 } else { 0.0 }),
-                ));
-            if self.highlighted.as_deref() == Some(o.as_str()) {
-                item = item.fill(c.hover);
-            } else {
-                item = item.hover(c.hover);
-            }
-            if let Some(f) = &self.choose {
-                item = f(o)(item);
-            }
-            list = list.child(item);
-            after_item = true;
-        }
-        let content = shadows(
-            col()
-                .key(format!("{}-content", self.key))
-                .min_w(160.0)
-                .max_w(368.0)
-                .radius(6.0)
-                .fill(c.layer_01)
-                .child(list),
-            &k.elevation.floating,
-        );
-        layer.push(anchor(k, content, &anchor_key, self.placement, 2.0));
         trigger
     }
 }
