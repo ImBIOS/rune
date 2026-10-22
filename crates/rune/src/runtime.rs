@@ -301,6 +301,8 @@ pub struct Runtime<S: 'static> {
     stacks: HashMap<NodeId, Stack>,
     virtuals: HashMap<String, crate::virtual_list::VirtualList>,
     virtual_culled: HashSet<String>,
+    /// Fresh view accessors for focused text fields omitted by virtualization.
+    virtual_inputs: HashMap<String, Box<InputSpec>>,
     reveals: HashMap<NodeId, RevealState>,
     flights: Vec<TextFlight>,
     /// Per node index this frame: presented row top dy, row height override, and bottom feather mask.
@@ -312,8 +314,12 @@ pub struct Runtime<S: 'static> {
     keyboard_focus: bool,
     modal_stack: Vec<(String, Option<String>)>,
     modal_index: Option<usize>,
+    modal_members: Vec<bool>,
     loops: HashMap<NodeId, rune_motion::LoopTrack>,
     loops_active: bool,
+    /// Shared host deadline: unscaled wake time and corresponding animation time.
+    loop_wake: Option<(f64, f64)>,
+    surface_visible: bool,
     hovered: Option<String>,
     pub ime_area: Option<[f32; 4]>,
     /// The shell cancels native composition before enabling the new text focus.
@@ -440,6 +446,7 @@ impl<S: 'static> Runtime<S> {
             stacks: HashMap::new(),
             virtuals: HashMap::new(),
             virtual_culled: HashSet::new(),
+            virtual_inputs: HashMap::new(),
             reveals: HashMap::new(),
             flights: Vec::new(),
             row_dy: Vec::new(),
@@ -450,8 +457,11 @@ impl<S: 'static> Runtime<S> {
             keyboard_focus: false,
             modal_stack: Vec::new(),
             modal_index: None,
+            modal_members: Vec::new(),
             loops: HashMap::new(),
             loops_active: false,
+            loop_wake: None,
+            surface_visible: true,
             hovered: None,
             ime_area: None,
             ime_reset: false,
@@ -504,7 +514,11 @@ impl<S: 'static> Runtime<S> {
         self.subscribe_live();
     }
 
-    pub fn set_live_visible(&mut self, visible: bool) { self.live_wake.visible(visible); }
+    pub fn set_live_visible(&mut self, visible: bool) {
+        self.live_wake.visible(visible);
+        self.surface_visible = visible;
+        if !visible { self.loop_wake = None; }
+    }
     pub fn live_pending(&self) -> bool {
         self.live_dirty || self.live_wake.pending.load(std::sync::atomic::Ordering::Acquire)
     }
@@ -590,7 +604,7 @@ impl<S: 'static> Runtime<S> {
 
     /// Next requested wake on the unscaled app clock. None lets the shell sleep indefinitely.
     pub fn wake_deadline(&self) -> Option<f64> {
-        self.wake_deadlines.first().copied()
+        self.wake_deadlines.first().copied().into_iter().chain(self.loop_wake.map(|w| w.0)).min_by(f64::total_cmp)
     }
 
     /// Lands every track before the next frame: growth, reveals and follow-the-end (guarantee 8,
@@ -629,6 +643,16 @@ impl<S: 'static> Runtime<S> {
             Some(t0) => t0.elapsed().as_secs_f64(),
             None => self.clock + dt,
         };
+        if let Some((deadline, animation_time)) = self.loop_wake
+            && !self.animating
+        {
+            // Native shells cap dt after idle. Advance the sleeping part of the
+            // delay before new handlers retarget, without double-stepping manual time.
+            let elapsed = animation_time - (deadline - self.clock).max(0.0) * self.time_scale as f64;
+            self.t += (elapsed - self.t - dt * self.time_scale as f64).max(0.0);
+            self.scene.set_time(self.t);
+            if self.clock >= deadline { self.loop_wake = None; }
+        }
         let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
         self.wake_deadlines.drain(..due);
         if let Some(poll) = self.poll {
@@ -848,8 +872,16 @@ impl<S: 'static> Runtime<S> {
             }
             Action::Key(ev) => {
                 self.keyboard_focus = true;
-                if let Some(f) = self.focused.as_deref().and_then(|p| self.node(p))
-                    .and_then(|n| n.input.as_ref()?.key.clone())
+                // With no focused element, app-owned navigation (e.g. a toolbar)
+                // gets first refusal before Rune starts a new Tab traversal.
+                let app_first = self.focused.is_none();
+                if app_first && let Some(f) = self.on_key
+                    && f(&mut self.state, &ev, &mut one)
+                {
+                    merge(tx, one);
+                    return true;
+                }
+                if let Some(f) = self.focused_input().and_then(|input| input.key.clone())
                     && f(&mut self.state as &mut dyn Any, &ev, &mut one)
                 {
                     merge(tx, one);
@@ -871,7 +903,7 @@ impl<S: 'static> Runtime<S> {
                         return true;
                     }
                 }
-                if let Some(f) = self.on_key
+                if !app_first && let Some(f) = self.on_key
                     && f(&mut self.state, &ev, &mut one)
                 {
                     self.events.push(format!("key {:?}", ev.key));
@@ -919,7 +951,7 @@ impl<S: 'static> Runtime<S> {
     fn with_focused(&mut self, f: impl FnOnce(&mut crate::edit::TextEdit) -> EditOutcome, tx: &mut Tx) -> bool {
         let Some(path) = self.focused.clone() else { return false };
         let Some((access, submit, change, animate_layout)) =
-            self.node(&path).and_then(|n| n.input.as_ref().map(|i| (i.access.clone(), i.submit.clone(), i.change.clone(), i.animate_layout)))
+            self.focused_input().map(|i| (i.access.clone(), i.submit.clone(), i.change.clone(), i.animate_layout))
         else {
             return false;
         };
@@ -949,6 +981,11 @@ impl<S: 'static> Runtime<S> {
 
     fn node(&self, path: &str) -> Option<&Node> {
         self.nodes.iter().enumerate().find(|(i, n)| n.path == path && !self.subtree_exiting(*i)).map(|(_, n)| n)
+    }
+
+    fn focused_input(&self) -> Option<&InputSpec> {
+        let path = self.focused.as_deref()?;
+        self.node(path).and_then(|n| n.input.as_deref()).or_else(|| self.virtual_inputs.get(path).map(Box::as_ref))
     }
 
     fn subtree_exiting(&self, mut i: usize) -> bool {
@@ -1008,6 +1045,7 @@ struct Measurement<'a, S> {
     scrolls: &'a mut HashMap<NodeId, ScrollState>,
     virtuals: &'a mut HashMap<String, crate::virtual_list::VirtualList>,
     virtual_culled: &'a mut HashSet<String>,
+    virtual_inputs: &'a mut HashMap<String, Box<InputSpec>>,
     stats: &'a mut FrameStats,
     key_warnings: &'a mut Option<Vec<String>>,
 }
@@ -1021,12 +1059,26 @@ struct Measured {
     time_scale: f32,
 }
 
+fn collect_virtual_inputs(el: &El, parent: &str, index: usize, inputs: &mut HashMap<String, Box<InputSpec>>) {
+    let segment = el.key.clone().unwrap_or_else(|| format!("#{index}"));
+    let path = format!("{parent}/{segment}");
+    if let Some(input) = &el.input
+        && input.edit.focused && input.access.is_some()
+    {
+        inputs.insert(path.clone(), input.clone());
+    }
+    for (i, child) in el.children.iter().enumerate() {
+        collect_virtual_inputs(child, &path, i, inputs);
+    }
+}
+
 impl<S> Measurement<'_, S> {
     fn finish(mut self, tx: &Tx) -> Measured {
         self.virtual_culled.clear();
         let mut passes = 0;
         let (layout, nodes) = loop {
             passes += 1;
+            self.virtual_inputs.clear();
             // Degenerate zero-height runs fall back to a full measurement instead of
             // an unbounded retry loop. Normal transcripts need one pass.
             let (layout, nodes) = self.measure_view(tx, passes > 8);
@@ -1098,7 +1150,10 @@ impl<S> Measurement<'_, S> {
             el.style.padding.top = length(v.pad_top + v.before);
             el.style.padding.bottom = length(v.pad_bottom + v.after);
             el.children = std::mem::take(&mut el.children).into_iter().enumerate().filter_map(|(i, mut child)| {
-                if !v.range.contains(&i) { return None; }
+                if !v.range.contains(&i) {
+                    collect_virtual_inputs(&child, &path, i, self.virtual_inputs);
+                    return None;
+                }
                 child.virtual_mount = v.born[child.key.as_ref().unwrap()] < self.commits;
                 Some(child)
             }).collect();
@@ -1296,6 +1351,7 @@ impl<S: 'static> Runtime<S> {
             scrolls: &mut self.scrolls,
             virtuals: &mut self.virtuals,
             virtual_culled: &mut self.virtual_culled,
+            virtual_inputs: &mut self.virtual_inputs,
             stats: &mut self.stats,
             key_warnings: &mut self.key_warnings,
         }.finish(tx)
@@ -1813,16 +1869,15 @@ impl<S: 'static> Runtime<S> {
     pub fn pointer_down(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
         self.keyboard_focus = false;
-        if let Some(i) = self.active_modal() {
-            let r = self.drawn.get(i).copied().unwrap_or([0.0; 4]);
-            if !(x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]) {
-                if self.nodes[i].modal.as_ref().is_some_and(|m| m.outside) {
-                    self.queue.push(Action::Dismiss(self.nodes[i].path.clone()));
-                }
-                return;
-            }
-        }
         let target = self.primary_target(x, y);
+        if let Some(i) = self.active_modal()
+            && target.is_none_or(|t| !self.allowed(t))
+        {
+            if self.nodes[i].modal.as_ref().is_some_and(|m| m.outside) {
+                self.queue.push(Action::Dismiss(self.nodes[i].path.clone()));
+            }
+            return;
+        }
         let Some(ti) = target else {
             if self.focused.is_some() {
                 self.queue.push(Action::Blur);
@@ -1961,6 +2016,12 @@ impl<S: 'static> Runtime<S> {
         self.queue.push(Action::Ime(ev));
     }
 
+    /// End native composition on window deactivation without discarding text or field focus.
+    pub fn cancel_composition(&mut self) {
+        self.ime(Ime::Preedit(String::new(), None));
+        self.ime_reset = true;
+    }
+
     pub fn paste(&mut self, text: impl Into<String>) {
         self.queue.push(Action::Paste(text.into()));
     }
@@ -2084,6 +2145,7 @@ impl<S: 'static> Runtime<S> {
         self.surfaces.clear();
         self.hits.clear();
         self.loops_active = false;
+        self.loop_wake = None;
         let n_nodes = self.nodes.len();
         self.inh_scratch.clear();
         self.inh_scratch.resize(n_nodes, Inh::default());
@@ -2147,6 +2209,7 @@ impl<S: 'static> Runtime<S> {
             } else {
                 pinh.group
             };
+            let base_opacity = o;
             let loop_value = self.loops.get(&n.id).map(|l| l.sample(now, self.reduced_motion));
             if let (Some(rune_motion::LoopSpec { kind: rune_motion::LoopKind::Opacity { .. }, .. }), Some(v)) = (n.looping, loop_value) {
                 o *= v;
@@ -2217,12 +2280,18 @@ impl<S: 'static> Runtime<S> {
                 _ => c,
             };
 
-            if o > 0.001 && visible {
-                if !self.reduced_motion && r[2] > clip[0].max(vp[0]) && r[0] < clip[2].min(vp[2])
-                    && r[3] > clip[1].max(vp[1]) && r[1] < clip[3].min(vp[3])
-                    && self.loops.get(&n.id).is_some_and(|l| l.active(now)) {
-                    self.loops_active = true;
+            if self.surface_visible && base_opacity > 0.001 && !self.reduced_motion && self.time_scale > 0.0
+                && r[2] > clip[0].max(vp[0]) && r[0] < clip[2].min(vp[2])
+                && r[3] > clip[1].max(vp[1]) && r[1] < clip[3].min(vp[3])
+                && let Some(track) = self.loops.get(&n.id)
+            {
+                self.loops_active |= track.active(now);
+                if let Some(start) = track.pending_start(now) {
+                    let wake = self.clock + (start - now) / self.time_scale as f64;
+                    if self.loop_wake.is_none_or(|w| wake < w.0) { self.loop_wake = Some((wake, start)); }
                 }
+            }
+            if o > 0.001 && visible {
                 let k_px = sc * s;
                 for (k, sh) in n.vis.shadows.iter().enumerate() {
                     let c = if k < P_SHADOWS.len() { self.color(n.id, P_SHADOWS[k], sh.color) } else { sh.color };
@@ -3289,6 +3358,45 @@ mod tests {
         assert_eq!(rt.cursor(), Cursor::Default);
         rt.pointer_leave();
         assert_eq!(rt.cursor(), Cursor::Default);
+    }
+
+    #[test]
+    fn delayed_loops_sleep_on_the_shared_deadline_and_resume_after_native_idle() {
+        fn view(s: &(f32, f32), cx: &mut Cx<(f32, f32)>) -> El {
+            cx.time_scale(s.1);
+            el().size(100.0, 100.0).opacity(s.0).child(el().size(20.0, 20.0)
+                .looping(rune_motion::LoopSpec::opacity(1.0, 2.0, 0.0, 1.0)))
+        }
+        let make = |opacity, scale| Runtime::new((opacity, scale), view, (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        let mut rt = make(1.0, 1.0);
+        assert!(!rt.frame(0.0));
+        assert_eq!(rt.wake_deadline(), Some(2.0));
+        let commits = rt.stats.commits;
+        assert!(!rt.frame(1.0));
+        assert_eq!(rt.wake_deadline(), Some(2.0));
+        assert!(rt.frame(1.0), "a zero-opacity first pose must still start the loop");
+        assert_eq!(rt.stats.commits, commits);
+        assert_eq!(rt.wake_deadline(), None);
+        let mut rt = make(1.0, 1.0);
+        rt.frame(0.0);
+        rt.wall_start = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        assert!(!rt.frame(1.0 / 120.0));
+        assert!((rt.wake_deadline().unwrap() - 2.0).abs() < 0.001, "an input during idle must not postpone the loop");
+        rt.wall_start = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+        assert!(rt.frame(1.0 / 120.0));
+        assert!((rt.t - 2.0).abs() < 0.001, "idle dt must not postpone the start again");
+        let mut rt = make(1.0, 0.5);
+        assert!(!rt.frame(0.0));
+        assert_eq!(rt.wake_deadline(), Some(4.0));
+        rt.set_live_visible(false);
+        assert_eq!(rt.wake_deadline(), None);
+        rt.frame(0.0);
+        assert_eq!(rt.wake_deadline(), None);
+        for (opacity, scale) in [(0.0, 1.0), (1.0, 0.0)] {
+            let mut rt = make(opacity, scale);
+            assert!(!rt.frame(0.0));
+            assert_eq!(rt.wake_deadline(), None);
+        }
     }
 
     #[test]

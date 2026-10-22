@@ -1028,6 +1028,15 @@ impl<S: 'static> Host<S> {
                 }
             }
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::Focused(focused) => {
+                if !focused {
+                    rt.cancel_composition();
+                    l.window.set_ime_allowed(false);
+                } else {
+                    rt.ime_reset = true;
+                }
+                l.window.request_redraw();
+            }
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } if event.state == ElementState::Pressed => {
                 if let Some(ev) = map_key(&event.logical_key, self.mods) {
                     if ev.key == Key::Command('v') && rt.has_focus() {

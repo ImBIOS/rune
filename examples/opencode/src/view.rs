@@ -71,7 +71,7 @@ pub fn app(s: &App, cx: &mut Cx<App>) -> El {
     }
     root = root.child(sidebar_toggle(p, open, w));
     if s.pickers.open.is_some() {
-        root = root.child(el().key("picker-dismiss").absolute(0.0, 0.0).w_full().h_full().opacity(0.0)
+        root = root.child(el().key("picker-dismiss").absolute(0.0, 0.0).w_full().h_full()
             .on_press(|s: &mut App| s.close_picker(false)))
             .child(picker(s, p));
     }
@@ -1116,6 +1116,7 @@ fn composer_dock(s: &App, p: &Pal) -> El {
                     .placeholder("Ask anything… \"Fix a TODO in the codebase\"", p.faint)
                     .caret(p.text, p.selection)
                     .on_edit(|s: &mut App| &mut s.composer)
+                    .on_input_key(|s: &mut App, ev, _| s.picker_key(ev))
                     .on_submit(|s: &mut App, tx: &mut Tx| s.send(tx)),
             ),
         )
@@ -1166,7 +1167,8 @@ fn picker(s: &App, p: &Pal) -> El {
             .child(icon(&ic::MAGNIFYING_GLASS, 16.0).color(p.icon_muted))
             .child(text_input(&s.pickers.search, UI).key("picker-search").grow(1.0).shrink().h(28.0).animate_edit_layout()
                 .placeholder("Search models", p.faint).caret(p.text, p.selection)
-                .on_edit(|s: &mut App| &mut s.pickers.search)))
+                .on_edit(|s: &mut App| &mut s.pickers.search)
+                .on_input_key(|s: &mut App, ev, _| s.picker_key(ev))))
             .child(el().h(0.5).w_full().fill(p.border_muted));
     }
     let mut list = col().key("picker-options").w_full();

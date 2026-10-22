@@ -54,7 +54,11 @@ impl LoopTrack {
         self.amplitude.animate_to(if enabled { 1.0 } else { 0.0 }, Spring::new(0.18, 0.0), now);
     }
     pub fn active(&self, now: f64) -> bool {
-        self.amplitude.target() > 0.0 || !self.amplitude.is_settled(now)
+        (self.amplitude.target() > 0.0 && now >= self.epoch) || !self.amplitude.is_settled(now)
+    }
+    /// The animation-clock instant to wake at; no frames are needed before it.
+    pub fn pending_start(&self, now: f64) -> Option<f64> {
+        (self.amplitude.target() > 0.0 && now < self.epoch).then_some(self.epoch)
     }
     /// Opacity multiplier or clockwise radians. Reduced motion uses the calm first pose.
     pub fn sample(&self, now: f64, reduced: bool) -> f32 {
@@ -72,6 +76,16 @@ impl LoopTrack {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn delay_has_one_wake_and_no_active_frames() {
+        let track = LoopTrack::new(LoopSpec::opacity(1.0, 2.0, 0.0, 1.0), 3.0);
+        assert_eq!(track.pending_start(3.0), Some(5.0));
+        assert!(!track.active(4.999));
+        assert_eq!(track.sample(4.999, false), 0.0);
+        assert_eq!(track.pending_start(5.0), None);
+        assert!(track.active(5.0));
+        assert_eq!(track.phase(5.0), 0.0);
+    }
     #[test]
     fn phase_continuity_and_clock_sampling() {
         let mut t = LoopTrack::new(LoopSpec::rotation(0.9), 4.0);

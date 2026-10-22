@@ -126,6 +126,8 @@ impl App {
     pub fn close_picker(&mut self, restore: bool) {
         self.pickers.open = None;
         self.pickers.search.focused = false;
+        self.pickers.search.preedit = None;
+        self.pickers.search.break_history_group();
         self.composer.focused = restore;
     }
 
@@ -268,6 +270,11 @@ mod tests {
     fn agent_effort_tab_pointer_and_session_isolation() {
         let mut rt = runtime();
         tap(&mut rt, "prompt");
+        for expected in [Some(Kind::Agent), Some(Kind::Model), Some(Kind::Effort), None] {
+            key(&mut rt, Key::Tab);
+            assert_eq!(rt.state.pickers.toolbar_focus, expected);
+        }
+        assert!(rt.state.composer.focused);
         key(&mut rt, Key::Tab);
         key(&mut rt, Key::Enter);
         key(&mut rt, Key::Down);
