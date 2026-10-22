@@ -6,6 +6,7 @@ license.workspace = true
 description = "Rune's special-effects layers: glow, pulses, electricity, fire, motion blur, distortion."
 
 [dependencies]
+rune-motion = { path = "../rune-motion" }
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
 bytemuck = { version = "1.25", features = ["derive"] }
 
