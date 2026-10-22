@@ -10,6 +10,7 @@ pub mod color;
 pub mod edit;
 pub mod el;
 pub mod growth;
+pub mod live;
 pub mod render;
 pub mod runtime;
 mod virtual_list;
@@ -28,6 +29,7 @@ pub use el::{
     row, spacer, text, text_input,
 };
 pub use growth::{GROWTH, StreamEdge, edge};
+pub use live::Live;
 pub use rune_motion::{
     Anim, AnimExt, Clock, Curve, Edge, LayoutAnim, NodeId, Phase as PresencePhase, Presented, Spring, SpringPair,
     Transition, Travel,

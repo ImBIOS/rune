@@ -40,3 +40,36 @@ fn streaming_presentation_allocates_nothing() {
     let count = allocs() - before;
     assert_eq!(count, 0, "presentation allocations across 30 streaming frames");
 }
+
+#[test]
+fn live_publication_and_presentation_allocate_nothing() {
+    use rune::{Color, Live, el};
+    type State = (Live<f32>, Live<[f32; 2]>, Live<Color>);
+    fn view(s: &State, _: &mut Cx<State>) -> El {
+        el().size(200.0, 200.0).child(el().size(20.0, 20.0)
+            .live_opacity(&s.0).live_offset(&s.1).live_fill(&s.2))
+    }
+    let state = (Live::new(1.0), Live::new([0.0, 0.0]), Live::new(Color::WHITE));
+    let mut rt = Runtime::new(state, view, (200.0, 200.0), Env { system_dark: true, scale: 2.0 });
+    rt.frame(0.0);
+    let producer = (rt.state.0.clone(), rt.state.1.clone(), rt.state.2.clone());
+    // Includes the very first publication on a new producer thread, not only warmed sets.
+    std::thread::spawn(move || {
+        let before = allocs();
+        for i in 0..120 {
+            producer.0.set(0.3 + i as f32 / 240.0);
+            producer.1.set([i as f32, i as f32]);
+            producer.2.set(Color { r: i as f32 / 120.0, ..Color::WHITE });
+        }
+        assert_eq!(allocs() - before, 0, "producer allocations");
+    }).join().unwrap();
+    rt.frame(0.0);
+    let before = allocs();
+    for i in 0..120 {
+        rt.state.0.set(0.5 + i as f32 / 240.0);
+        rt.state.1.set([i as f32, i as f32]);
+        rt.state.2.set(Color { r: i as f32 / 120.0, ..Color::WHITE });
+        rt.frame(1.0 / 120.0);
+    }
+    assert_eq!(allocs() - before, 0, "live CPU presentation allocations");
+}

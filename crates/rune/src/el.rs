@@ -259,6 +259,7 @@ pub struct El {
     pub(crate) label: Option<String>,
     pub(crate) style: Style,
     pub(crate) vis: Visual,
+    pub(crate) live: Vec<crate::live::Bound>,
     pub(crate) text: Option<TextSpec>,
     pub(crate) children: Vec<El>,
     pub(crate) on_press: Option<PressFn>,
@@ -286,6 +287,7 @@ fn base(dir: FlexDirection) -> El {
         label: None,
         style: Style { display: Display::Flex, flex_direction: dir, flex_shrink: 0.0, ..Default::default() },
         vis: Visual::default(),
+        live: Vec::new(),
         text: None,
         children: Vec::new(),
         on_press: None,
@@ -381,6 +383,30 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
 }
 
 impl El {
+    /// Bind opacity directly to a latest-wins value, without rebuilding or laying out the view.
+    pub fn live_opacity(mut self, value: impl Into<crate::live::Binding<f32>>) -> Self {
+        self.bind_live(crate::live::Bound::new(value, crate::live::Property::Opacity)); self
+    }
+    /// Bind an additive parent-space offset in points. Descendants and hit tests follow it.
+    pub fn live_offset(mut self, value: impl Into<crate::live::Binding<[f32; 2]>>) -> Self {
+        self.bind_live(crate::live::Bound::new(value, crate::live::Property::Offset)); self
+    }
+    /// Bind uniform scale around the node's centre; layout remains at its target size.
+    pub fn live_scale(mut self, value: impl Into<crate::live::Binding<f32>>) -> Self {
+        self.bind_live(crate::live::Bound::new(value, crate::live::Property::Scale)); self
+    }
+    pub fn live_fill(mut self, value: impl Into<crate::live::Binding<Color>>) -> Self {
+        self.bind_live(crate::live::Bound::new(value, crate::live::Property::Fill)); self
+    }
+    /// Bind presentation [x, y, width, height] in parent points. Does not reflow siblings or
+    /// rewrap text; use ordinary layout for those changes. Width/height clamp at zero.
+    pub fn live_rect(mut self, value: impl Into<crate::live::Binding<[f32; 4]>>) -> Self {
+        self.bind_live(crate::live::Bound::new(value, crate::live::Property::Rect)); self
+    }
+    fn bind_live(&mut self, bound: crate::live::Bound) {
+        if let Some(old) = self.live.iter_mut().find(|b| b.property == bound.property) { *old = bound; }
+        else { self.live.push(bound); }
+    }
     /// Window keyed rows of a growth stack directly inside a vertical scroll viewport.
     /// Unvisited rows use an estimated height; measurement preserves the visible anchor.
     /// Offscreen rows have no layout, text or scene nodes.

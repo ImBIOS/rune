@@ -16,6 +16,7 @@ pollster = "1"
 png = "0.18"
 serde_json = "1"
 arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+portable-atomic = "1"
 
 [target.'cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))'.dependencies]
 raw-window-handle = "0.6"
