@@ -1635,11 +1635,20 @@ impl<S: 'static> Runtime<S> {
     // ---------------------------------------------------------------------------------------
     // Input: queued, handled at the next frame.
 
+    fn primary_target(&self, x: f32, y: f32) -> Option<usize> {
+        self.hits.iter().rev().find_map(|&(id, r)| {
+            if x < r[0] || x > r[2] || y < r[1] || y > r[3] { return None; }
+            let i = *self.node_index.get(&id)?;
+            let n = &self.nodes[i];
+            // A secondary-only child must not obscure primary input or background blur.
+            (!self.is_exiting(id) && (n.on_press.is_some() || n.on_hover.is_some()
+                || n.on_drag.is_some() || n.input.is_some())).then_some(i)
+        })
+    }
+
     pub fn pointer_move(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
-        let hovered = self.hits.iter().rev().find(|&&(_, r)| x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3])
-            .and_then(|(id, _)| self.node_index.get(id).map(|&i| &self.nodes[i]))
-            .filter(|n| !self.is_exiting(n.id)).map(|n| n.path.clone());
+        let hovered = self.primary_target(x, y).map(|i| self.nodes[i].path.clone());
         if hovered != self.hovered {
             if let Some(path) = &hovered { self.queue.push(Action::Hover(path.clone())); }
             self.hovered = hovered;
@@ -1655,8 +1664,7 @@ impl<S: 'static> Runtime<S> {
 
     pub fn pointer_down(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
-        let hit = self.hits.iter().rev().find(|&&(_, r)| x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3]).map(|h| h.0);
-        let target = hit.and_then(|id| self.node_index.get(&id).copied().filter(|&i| !self.is_exiting(self.nodes[i].id)));
+        let target = self.primary_target(x, y);
         let Some(ti) = target else {
             if self.focused.is_some() {
                 self.queue.push(Action::Blur);
@@ -2747,6 +2755,36 @@ mod tests {
 
     fn duplicate_view(_: &(), _: &mut Cx<()>) -> El {
         col().children([el().key("card"), el().key("card")])
+    }
+
+    #[test]
+    fn secondary_only_children_preserve_primary_click_hover_and_background_blur() {
+        type State = (u32, u32, bool);
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let parent = el().key("parent").size(80.0, 80.0);
+            let parent = if s.2 { parent } else {
+                parent.on_press(|s: &mut State| s.0 += 1)
+                    .on_hover(|s: &mut State| s.1 += 1)
+            };
+            parent.child(el().key("child").size(40.0, 40.0)
+                .on_secondary_press(|_: &mut State, _, _| {}))
+        }
+        let mut rt = Runtime::new((0, 0, false), view, (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        rt.pointer_move(10.0, 10.0);
+        rt.pointer_down(10.0, 10.0);
+        rt.pointer_up(10.0, 10.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state, (1, 1, false));
+        rt.state.2 = true;
+        rt.invalidate();
+        rt.frame(0.0);
+        rt.focused = Some("previous-input".into());
+        rt.pointer_move(10.0, 10.0);
+        rt.pointer_down(10.0, 10.0);
+        assert!(rt.hovered.is_none());
+        assert!(matches!(rt.queue.last(), Some(Action::Blur)));
+        assert!(rt.secondary_target(10.0, 10.0).is_some());
     }
 
     #[test]
