@@ -61,7 +61,8 @@ impl WindowOptions {
     pub(crate) fn attributes(&self, title: &str, size: (f32, f32), app_min: Option<(f32, f32)>, visible: bool) -> winit::window::WindowAttributes {
         use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
         use winit::window::{Window, WindowLevel};
-        let min = self.min_size.or(app_min).unwrap_or((420.0, 400.0));
+        let mut min = self.min_size.or(app_min).unwrap_or((420.0, 400.0));
+        if let Some(max) = self.max_size { min = (min.0.min(max.0), min.1.min(max.1)); }
         let mut attrs = Window::default_attributes()
             .with_title(title)
             .with_inner_size(LogicalSize::new(size.0, size.1))
@@ -136,6 +137,19 @@ mod tests {
         assert_eq!(compact.min_inner_size, Some(Size::Logical(LogicalSize::new(280.0, 80.0))));
         assert_eq!(compact.max_inner_size, Some(Size::Logical(LogicalSize::new(320.0, 120.0))));
         assert!(!compact.resizable && !compact.decorations && !compact.visible);
+    }
+
+    #[test]
+    fn maximum_alone_caps_the_inherited_minimum_per_axis() {
+        let options = WindowOptions { max_size: Some((320.0, 120.0)), ..Default::default() };
+        for (app_min, expected) in [
+            (None, (320.0, 120.0)),
+            (Some((860.0, 80.0)), (320.0, 80.0)),
+        ] {
+            let attrs = options.attributes("compact", (300.0, 100.0), app_min, true);
+            assert_eq!(attrs.min_inner_size, Some(Size::Logical(LogicalSize::new(expected.0, expected.1))));
+            assert_eq!(attrs.max_inner_size, Some(Size::Logical(LogicalSize::new(320.0, 120.0))));
+        }
     }
 
     #[test]
