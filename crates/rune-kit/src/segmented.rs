@@ -1,7 +1,7 @@
 //! SegmentedControl (`@opencode/ui` navigation/segmented-control): equal segments over a layer
 //! with a sliding raised indicator.
 
-use rune::{Cursor, El, TextStyle, Tx, el, row, text};
+use rune::{El, TextStyle, Tx, el, row, text};
 
 use crate::{Kit, State};
 
@@ -102,7 +102,7 @@ impl SegmentedControl {
             if st != State::Disabled
                 && let Some(p) = &self.pick
             {
-                seg = p(i)(seg).cursor(Cursor::Pointer);
+                seg = p(i)(seg);
             }
             root = root.child(seg);
         }
