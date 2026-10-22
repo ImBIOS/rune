@@ -61,7 +61,10 @@ pub use store::{AnimationStore, MotionEvent, Release, RetargetAudit, TrackId};
 pub use tokens as motion;
 pub use trace::{Intent, MotionTrace, SharedBuffer, TraceHeader, flags};
 pub use transition::{Edge, Effect, Reveal, Transition};
-pub use value::{Animatable, Blur, Color, Corners, MAX_LANES, Rect, Sides, Transform, Vec2};
+pub use value::{
+    Animatable, Blur, Color, Corners, MAX_LANES, Rect, Sides, Transform, Vec2, linear_to_oklab, oklab_to_linear,
+    srgb_decode, srgb_encode,
+};
 
 /// Everything an animation call site needs.
 pub mod prelude {

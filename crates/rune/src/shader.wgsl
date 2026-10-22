@@ -1,6 +1,7 @@
 // One instanced "uber-quad": rounded rects with per-corner radius and border (kind 0), analytic
 // Gaussian rounded-rect shadows (kind 1), glyph-atlas text (kind 2), inset shadows (kind 3) and
-// vertical-gradient rounded rects (kind 4). Every instance carries a
+// vertical-gradient rounded rects (kind 4), stroke segments (kind 5) and filled triangles
+// (kind 6) for vector shapes. Every instance carries a
 // soft-edge clip. Output is premultiplied linear colour into an sRGB target (linear blending).
 
 struct Globals {
@@ -46,6 +47,8 @@ fn vs(i: In) -> Out {
     } else if (kind > 1.5 && kind < 2.5) {
         grow = 0.0;
     } else if (kind > 2.5 && kind < 3.5) {
+        grow = 1.0;
+    } else if (kind > 4.5) {
         grow = 1.0;
     }
     let lo = i.rect.xy - vec2<f32>(grow);
@@ -125,6 +128,95 @@ fn shadow(p: vec2<f32>, half: vec2<f32>, sigma: f32, corner: f32) -> f32 {
     return v;
 }
 
+// Coverage of a stroke segment from a to b, `hw` half width, round or butt caps. Strokes
+// thinner than a pixel draw a pixel wide at proportionally lower coverage.
+fn segment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, hw: f32, round: bool) -> f32 {
+    let w = max(hw, 0.5);
+    let weight = min(hw * 2.0, 1.0);
+    let ab = b - a;
+    let len = length(ab);
+    let ap = p - a;
+    var d: f32;
+    if (len < 1e-4) {
+        if (!round) {
+            return 0.0;
+        }
+        d = length(ap) - w;
+    } else {
+        let dir = ab / len;
+        let along = dot(ap, dir);
+        if (round) {
+            d = length(ap - dir * clamp(along, 0.0, len)) - w;
+        } else {
+            let across = abs(dir.x * ap.y - dir.y * ap.x);
+            let q = vec2<f32>(abs(along - len * 0.5) - len * 0.5, across - w);
+            d = min(max(q.x, q.y), 0.0) + length(max(q, vec2<f32>(0.0)));
+        }
+    }
+    return clamp(0.5 - d, 0.0, 1.0) * weight;
+}
+
+// Signed distance from p to the edge a->b, positive on the side `c` lies on.
+fn edge(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> f32 {
+    let e = b - a;
+    let l = max(length(e), 1e-6);
+    let n = vec2<f32>(-e.y, e.x) / l;
+    let s = select(-1.0, 1.0, dot(c - a, n) >= 0.0);
+    return dot(p - a, n) * s;
+}
+
+// Whether p is on c's side of the edge a-b, decided so that the two triangles sharing the edge
+// compute the same value with opposite signs and exactly one of them owns every pixel: the
+// endpoints are put in a fixed order and ties go to the positive side.
+fn owns(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> bool {
+    let swap = a.x > b.x || (a.x == b.x && a.y > b.y);
+    let lo = select(a, b, swap);
+    let hi = select(b, a, swap);
+    let e = hi - lo;
+    let side = e.x * (c.y - lo.y) - e.y * (c.x - lo.x);
+    let v = e.x * (p.y - lo.y) - e.y * (p.x - lo.x);
+    if (side > 0.0) {
+        return v >= 0.0;
+    }
+    return v < 0.0;
+}
+
+// Coverage across a polygon edge a->b. Only the edge itself is antialiased: past its ends
+// (where a concave polygon's interior continues along the edge's line) the edge cuts hard, so
+// the neighbouring triangle that owns those pixels is not shaded through.
+fn soft(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> f32 {
+    let d = edge(p, a, b, c);
+    let e = b - a;
+    let t = dot(p - a, e) / max(dot(e, e), 1e-6);
+    if (t < 0.0 || t > 1.0) {
+        return select(0.0, 1.0, d >= 0.0);
+    }
+    return clamp(d + 0.5, 0.0, 1.0);
+}
+
+// Coverage of a filled triangle; `aa` marks the polygon-boundary edges, which are antialiased
+// (bits 0, 1, 2 for a->b, b->c, c->a). Other edges are shared with a neighbouring triangle and
+// cut hard, with exactly one of the two owning each pixel.
+fn triangle(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>, aa: u32) -> f32 {
+    var cov = 1.0;
+    if ((aa & 1u) == 1u) {
+        cov = cov * soft(p, a, b, c);
+    } else if (!owns(p, a, b, c)) {
+        return 0.0;
+    }
+    if ((aa & 2u) == 2u) {
+        cov = cov * soft(p, b, c, a);
+    } else if (!owns(p, b, c, a)) {
+        return 0.0;
+    }
+    if ((aa & 4u) == 4u) {
+        cov = cov * soft(p, c, a, b);
+    } else if (!owns(p, c, a, b)) {
+        return 0.0;
+    }
+    return cov;
+}
+
 @fragment
 fn fs(i: Out) -> @location(0) vec4<f32> {
     let kind = i.params.y;
@@ -146,6 +238,12 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         let sigma = max(i.params.z, 0.01);
         let corner = min(i.radii.x, min(half.x, half.y));
         col = i.fill * shadow(i.p - center, half, sigma, corner);
+    } else if (kind > 4.5 && kind < 5.5) {
+        col = i.fill * segment(i.pos.xy, i.radii.xy, i.radii.zw, i.params.x, i.params.z > 0.5);
+    } else if (kind > 5.5) {
+        // The pixel centre itself, not `p`: `p` is interpolated over each triangle's own quad, so
+        // neighbours would disagree in the last bits about who owns a pixel on a shared edge.
+        col = i.fill * triangle(i.pos.xy, i.radii.xy, i.radii.zw, i.uv.xy, u32(i.params.x + 0.5));
     } else if (kind > 2.5) {
         let d = sd_rounded(i.p - center, half, i.radii);
         let cov = clamp(0.5 - d, 0.0, 1.0);

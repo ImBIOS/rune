@@ -151,8 +151,8 @@ impl<'a> B<'a> {
     fn button(&mut self, r: Rect, label: &str, top: u32, bottom: u32, text: u32) {
         self.shadow(Rect::new(r.x, r.y + 4.0, r.w, r.h), r.h * 0.5, 8.0, [0.0, 0.0, 0.0, 0.4]);
         self.rect(r, r.h * 0.5, col(top, 1.0), col(bottom, 1.0), col(0xffffff, 0.16), 1.0 / S);
-        let [cx, cy] = r.center();
-        self.text_c(cx, cy, label, 14.0, 2, col(text, 1.0));
+        let c = r.center();
+        self.text_c(c.x, c.y, label, 14.0, 2, col(text, 1.0));
     }
     fn caption(&mut self, x: f32, y: f32, s: &str) {
         self.text(x, y, s, 11.0, 1, col(0x6b7280, 1.0));

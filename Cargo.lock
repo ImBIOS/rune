@@ -1874,6 +1874,7 @@ dependencies = [
  "bytemuck",
  "pollster",
  "rune",
+ "rune-motion",
  "wgpu",
 ]
 
@@ -2044,6 +2045,13 @@ dependencies = [
 
 [[package]]
 name = "settings"
+version = "0.0.1"
+dependencies = [
+ "rune",
+]
+
+[[package]]
+name = "shapes"
 version = "0.0.1"
 dependencies = [
  "rune",

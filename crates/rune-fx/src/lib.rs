@@ -16,40 +16,7 @@ pub use renderer::*;
 
 // ---------------------------------------------------------------- geometry / colour
 
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-}
-
-impl Rect {
-    pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Rect {
-        Rect { x, y, w, h }
-    }
-    pub fn inflate(self, m: f32) -> Rect {
-        Rect { x: self.x - m, y: self.y - m, w: self.w + 2.0 * m, h: self.h + 2.0 * m }
-    }
-    pub fn union(self, o: Rect) -> Rect {
-        let x0 = self.x.min(o.x);
-        let y0 = self.y.min(o.y);
-        let x1 = (self.x + self.w).max(o.x + o.w);
-        let y1 = (self.y + self.h).max(o.y + o.h);
-        Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
-    }
-    pub fn from_points(a: [f32; 2], b: [f32; 2]) -> Rect {
-        let x0 = a[0].min(b[0]);
-        let y0 = a[1].min(b[1]);
-        Rect { x: x0, y: y0, w: (a[0] - b[0]).abs(), h: (a[1] - b[1]).abs() }
-    }
-    pub fn center(self) -> [f32; 2] {
-        [self.x + self.w * 0.5, self.y + self.h * 0.5]
-    }
-    fn arr(self) -> [f32; 4] {
-        [self.x, self.y, self.w, self.h]
-    }
-}
+pub use rune_motion::Rect;
 
 /// The node's shape, in points. Capsules and circles are rounded rects with radius = min(w, h) / 2.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,13 +41,9 @@ impl Shape {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rgb(pub [f32; 3]);
 
-fn srgb_to_lin(c: f32) -> f32 {
-    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
-}
-
 /// sRGB hex (0xRRGGBB) to linear.
 pub fn rgb(hex: u32) -> Rgb {
-    let f = |s: u32| srgb_to_lin(((hex >> s) & 0xff) as f32 / 255.0);
+    let f = |s: u32| rune_motion::srgb_decode(((hex >> s) & 0xff) as f32 / 255.0);
     Rgb([f(16), f(8), f(0)])
 }
 
@@ -546,7 +509,7 @@ impl Default for Pose {
 impl Pose {
     /// Forward affine (a, b, c, d, tx, ty): screen = [a c; b d] * local + t.
     fn affine(&self, rest: Rect) -> [f32; 6] {
-        let [cx, cy] = rest.center();
+        let rune_motion::Vec2 { x: cx, y: cy } = rest.center();
         let (s, c) = self.rotation.sin_cos();
         let a = c * self.scale;
         let b = s * self.scale;
@@ -951,7 +914,7 @@ impl FxLayer {
         let s = self.shape;
         let r = s.rect;
         let mut i = InstRaw {
-            rect: r.arr(),
+            rect: r.xywh(),
             shape: [s.radius.min(r.w * 0.5).min(r.h * 0.5).max(0.0), 1.0, 0.0, 0.0],
             bounds: [0.0; 4],
             c0: [0.0; 4],
@@ -963,7 +926,7 @@ impl FxLayer {
             p3: [0.0; 4],
             t: [self.time, (self.seed % 65_536) as f32, 0.0, if self.reduced_motion { 1.0 } else { 0.0 }],
             aux: [0.0; 4],
-            aux2: self.source.map(|s| s.rect.arr()).unwrap_or([0.0, 0.0, 1.0, 1.0]),
+            aux2: self.source.map(|s| s.rect.xywh()).unwrap_or([0.0, 0.0, 1.0, 1.0]),
             xf: [0.0; 4],
         };
         let rm = self.reduced_motion;
@@ -1102,7 +1065,7 @@ impl FxLayer {
                         let mut b = r;
                         if let Some(s2) = l.second {
                             i.p2 = [l.light_angle, l.tint_amount, l.union_k, s2.radius.min(s2.rect.w * 0.5).min(s2.rect.h * 0.5)];
-                            i.p3 = s2.rect.arr();
+                            i.p3 = s2.rect.xywh();
                             i.shape[3] = l.morph;
                             b = b.union(s2.rect);
                         } else {
