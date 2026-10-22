@@ -1,0 +1,8 @@
+{
+  "1 light": {"field": 0.1561, "shadows": 0.1748, "gi": 0.0067, "frame_wall": 0.9417},
+  "4 lights": {"field": 0.0670, "shadows": 0.3078, "gi": 0.0037, "frame_wall": 1.0391},
+  "8 lights": {"field": 0.0627, "shadows": 0.5711, "gi": 0.0036, "frame_wall": 1.6493},
+  "4 lights + shafts": {"field": 0.0632, "shadows": 1.3841, "gi": 0.0036, "frame_wall": 2.1980},
+  "GI only (emitters)": {"field": 0.0651, "shadows": 0.0193, "gi": 2.2657, "frame_wall": 2.6903},
+  "4 lights + GI bounce": {"field": 0.0629, "shadows": 0.2975, "gi": 2.4869, "frame_wall": 3.4413}
+}

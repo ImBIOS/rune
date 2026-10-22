@@ -1,0 +1,6 @@
+{
+  "events": [
+    { "t": 0.3, "type": "scroll", "x": 700, "y": 300, "dy": 900, "dur": 0.25, "fling": true },
+    { "t": 2.0, "type": "scroll", "x": 700, "y": 300, "dy": 20000, "dur": 0.2 }
+  ]
+}

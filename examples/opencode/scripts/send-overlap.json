@@ -1,0 +1,9 @@
+{
+  "events": [
+    { "t": 0.3, "type": "tap", "key": "prompt" },
+    { "t": 0.5, "type": "paste", "text": "Check the reconnect path while the previous rows are still landing. Preserve the selected session, keep Unicode like héllo and 日本 intact, and explain how the timeout changes after a failed connection.\nThen show the smallest patch and the test that proves it." },
+    { "t": 0.7, "type": "key", "name": "Enter" },
+    { "t": 0.85, "type": "paste", "text": "Also keep the existing retry budget." },
+    { "t": 1.0, "type": "key", "name": "Enter" }
+  ]
+}

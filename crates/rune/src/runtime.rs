@@ -1,0 +1,2749 @@
+//! The retained tree: view → keyed nodes → Taffy layout at the target state → `rune-motion` Scene.
+//! Animation samples tracks at frame time; it never re-runs view functions.
+//!
+//! Beside Scene's tracks the runtime owns four render-side behaviours that never touch app code:
+//! scroll viewports (offset, momentum, follow-the-end), growth stacks (row heights on a capped
+//! spring, positions derived), streaming word reveals, and text-field carets. Each frame:
+//! queued input → (commit if state changed) → Scene → growth → scroll → reveals → build.
+
+use std::any::Any;
+use std::collections::{HashMap, HashSet};
+use std::marker::PhantomData;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use parley::Layout;
+use parley::editing::{Cursor, Selection};
+use parley::layout::Affinity;
+use rune_motion::{
+    Corners, LayoutAnim, Mount, NodeId, NodeSpec, Phase as PresencePhase, Prop, PropClass, Rect as MRect, Scene,
+    Spring, SpringPair, Transition, prop, snap::grid,
+};
+use taffy::prelude::*;
+use taffy::TraversePartialTree;
+
+use crate::color::{Color, over, srgb_encode};
+use crate::edit::{EditOutcome, Ime, KeyEvent};
+use crate::el::{Align, Drag, DragFn, El, GrowthSpec, InputSpec, Phase, PressFn, ScrollSpec, Shell, TextSpec, Tx, Visual};
+use crate::growth::{GrowTrack, SUBSTEP};
+use crate::flight::{TextFlight, transformed};
+use crate::render::{Instance, KIND_GLYPH, KIND_GRADIENT, KIND_INSET, KIND_RECT, KIND_SHADOW, NO_CLIP};
+use crate::text::{Deco, GlyphQuad, Ink, TextSystem, layout_height};
+use crate::tok::motion;
+
+const P_FILL: Prop<Color> = Prop::custom(64, PropClass::Color);
+const P_BORDER: Prop<Color> = Prop::custom(65, PropClass::Color);
+const P_TEXT: Prop<Color> = Prop::custom(66, PropClass::Color);
+const P_HOVER_C: Prop<Color> = Prop::custom(67, PropClass::Color);
+const P_PRESS_C: Prop<Color> = Prop::custom(68, PropClass::Color);
+const P_SHADOWS: [Prop<Color>; 4] = [
+    Prop::custom(69, PropClass::Color),
+    Prop::custom(70, PropClass::Color),
+    Prop::custom(71, PropClass::Color),
+    Prop::custom(72, PropClass::Color),
+];
+const P_HOVER: Prop<f32> = Prop::custom(73, PropClass::Opacity);
+const P_PRESS: Prop<f32> = Prop::custom(74, PropClass::Opacity);
+const P_GRADIENT: [Prop<Color>; 2] = [Prop::custom(75, PropClass::Color), Prop::custom(76, PropClass::Color)];
+const P_OUTLINE: Prop<Color> = Prop::custom(77, PropClass::Color);
+
+/// Scroll momentum decay (iOS normal: 0.998 per ms).
+const SCROLL_DECAY: f32 = 2.002;
+
+#[derive(Clone, Copy, Debug)]
+pub struct Env {
+    pub system_dark: bool,
+    pub scale: f32,
+}
+
+/// Wakes the shell from another thread (new data arrived); a no-op headless.
+pub type Waker = Arc<dyn Fn() + Send + Sync>;
+
+/// Passed to view functions: the environment, plus runtime settings a view may declare.
+pub struct Cx<S> {
+    env: Env,
+    reduced_motion: bool,
+    time_scale: f32,
+    _s: PhantomData<fn(&S)>,
+}
+
+impl<S> Cx<S> {
+    pub fn env(&self) -> Env {
+        self.env
+    }
+    pub fn system_dark(&self) -> bool {
+        self.env.system_dark
+    }
+    /// Switch the runtime to reduced motion: travel jumps, opacity and colour take a short fade.
+    pub fn reduced_motion(&mut self, on: bool) {
+        self.reduced_motion = on;
+    }
+    /// Scale the animation clock (slow motion below 1).
+    pub fn time_scale(&mut self, scale: f32) {
+        self.time_scale = scale.clamp(0.05, 8.0);
+    }
+}
+
+pub(crate) struct Node {
+    pub id: NodeId,
+    pub path: String,
+    pub key: Option<String>,
+    pub role: &'static str,
+    pub label: Option<String>,
+    pub vis: Visual,
+    pub text: Option<TextSpec>,
+    pub text_layout: Option<Rc<Layout<Ink>>>,
+    on_press: Option<PressFn>,
+    on_hover: Option<PressFn>,
+    above: Option<crate::el::Anchor>,
+    on_drag: Option<DragFn>,
+    motion: Spring,
+    opacity_motion: Option<rune_motion::Anim>,
+    lead: Option<(Spring, Spring)>,
+    width_leads: bool,
+    transition: Transition,
+    scroll: Option<ScrollSpec>,
+    growth: Option<GrowthSpec>,
+    streaming: bool,
+    input: Option<Box<InputSpec>>,
+    cursor: Option<crate::el::Cursor>,
+    /// Inside a growth row: layout snaps (the row's height carries the motion).
+    in_row: bool,
+    virtual_mount: bool,
+    pub parent: Option<usize>,
+    taffy: taffy::NodeId,
+    /// Layout target in root space: x0, y0, x1, y1 in points.
+    pub target: [f32; 4],
+    /// Layout target in parent space.
+    pub local: MRect,
+    /// Padding plus border (left, top, right, bottom): text draws inside it.
+    inset: [f32; 4],
+}
+
+enum Action {
+    Hover(String),
+    Press(String),
+    Drag(String, Drag),
+    Key(KeyEvent),
+    Ime(Ime),
+    Paste(String),
+    Focus(String, f32, f32),
+    Blur,
+}
+
+/// What tools see of one element.
+#[derive(Clone, Debug)]
+pub struct ElementInfo {
+    pub path: String,
+    pub key: Option<String>,
+    pub role: &'static str,
+    pub label: Option<String>,
+    pub text: Option<String>,
+    pub rect: [f32; 4],
+    pub target: [f32; 4],
+    pub opacity: f32,
+    pub radius: f32,
+    pub fill: Color,
+    pub text_color: Option<Color>,
+    pub hover: f32,
+    pub press: f32,
+    pub moving: bool,
+    pub parent: Option<usize>,
+    /// The part of `rect` its ancestors' clips leave visible.
+    pub visible: [f32; 4],
+    /// Words of this text are still fading in.
+    pub revealing: bool,
+    /// Inside a growth row whose height is moving: its visible part is being revealed.
+    pub in_growing_row: bool,
+    /// This node is riding user-driven wheel/trackpad scrolling or its momentum.
+    pub scrolling: bool,
+    /// Invisible estimated extent of a virtual list, not a drawable surface.
+    pub virtual_extent: bool,
+}
+
+#[derive(Clone, Copy)]
+struct Inh {
+    opacity: f32,
+    clip: [f32; 4],
+    fade: [f32; 4],
+    scale: f32,
+    anchor: [f32; 2],
+    blur: f32,
+    /// Vertical offset in points from scroll viewports and growth rows above.
+    dy: f32,
+}
+
+impl Default for Inh {
+    fn default() -> Self {
+        Inh { opacity: 1.0, clip: NO_CLIP, fade: [0.0; 4], scale: 1.0, anchor: [0.0; 2], blur: 0.0, dy: 0.0 }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ScrollState {
+    offset: f64,
+    v: f32,
+    pinned: bool,
+    max: f64,
+    direct: bool,
+    scrolling: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RevealState {
+    len: usize,
+    /// (word start byte, start time) for words still fading.
+    words: Vec<(u32, f64)>,
+    fade: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+struct Stack {
+    /// Row ids in presented order, including rows still closing after removal.
+    order: Vec<NodeId>,
+    /// Removed rows: when their space starts closing.
+    closing: HashMap<NodeId, f64>,
+    /// Last known target top (container-relative) per row, for rows that left.
+    tops: HashMap<NodeId, f32>,
+    pad_top: f32,
+    pad_bottom: f32,
+}
+
+struct LayoutEntry {
+    id: taffy::NodeId,
+    measure: Option<u64>,
+    used: bool,
+}
+
+pub struct Runtime<S: 'static> {
+    pub state: S,
+    view: fn(&S, &mut Cx<S>) -> El,
+    pub text: TextSystem,
+    pub scene: Scene,
+    pub env: Env,
+    /// Viewport in points.
+    pub viewport: (f32, f32),
+    /// Animation time (seconds, scaled by the time scale).
+    pub t: f64,
+    pub reduced_motion: bool,
+    pub time_scale: f32,
+    /// Called at the start of every frame with the clock; return true when state changed (new data).
+    pub poll: Option<fn(&mut S, f64, &mut Tx) -> bool>,
+    /// Seconds since the first frame, unscaled (virtual when headless).
+    pub clock: f64,
+    /// Windowed runs read the clock from the wall instead of summing frame steps.
+    pub wall_start: Option<std::time::Instant>,
+    /// Called for every key before the focused field; return true to consume it.
+    pub on_key: Option<fn(&mut S, &KeyEvent, &mut Tx) -> bool>,
+    nodes: Vec<Node>,
+    layout: TaffyTree<usize>,
+    layout_entries: HashMap<String, LayoutEntry>,
+    node_index: HashMap<NodeId, usize>,
+    path_ids: HashMap<String, NodeId>,
+    next_id: u64,
+    commits: u64,
+    dirty: bool,
+    relayout: bool,
+    settle: bool,
+    queue: Vec<Action>,
+    pointer: Option<(f32, f32)>,
+    capture: Option<(String, Drag)>,
+    capture_inside: bool,
+    drag_data: f32,
+    pub instances: Vec<Instance>,
+    hits: Vec<(NodeId, [f32; 4])>,
+    glyph_scratch: Vec<GlyphQuad>,
+    deco_scratch: Vec<Deco>,
+    inh_scratch: Vec<Inh>,
+    /// Drawn rect per node (points, root space), for tools and hit tests.
+    drawn: Vec<[f32; 4]>,
+    scrolls: HashMap<NodeId, ScrollState>,
+    grows: HashMap<NodeId, GrowTrack>,
+    stacks: HashMap<NodeId, Stack>,
+    virtuals: HashMap<String, crate::virtual_list::VirtualList>,
+    virtual_culled: HashSet<String>,
+    reveals: HashMap<NodeId, RevealState>,
+    flights: Vec<TextFlight>,
+    /// Per node index this frame: presented row top dy, row height override, and bottom feather mask.
+    row_dy: Vec<f32>,
+    row_h: Vec<f32>,
+    row_mask: Vec<f32>,
+    grow_acc: f32,
+    focused: Option<String>,
+    hovered: Option<String>,
+    pub ime_area: Option<[f32; 4]>,
+    /// Text the focused field asked to copy (the shell writes it to the clipboard).
+    pub copy_request: Option<String>,
+    /// A handler or `update` asked to close the window or quit (the shell takes it).
+    pub shell_request: Option<Shell>,
+    /// What `update` asked of the next commit.
+    pending: Tx,
+    pub animating: bool,
+    /// This frame's commit landed every track (`Tx::settle`): a deliberate cut.
+    pub settled: bool,
+    /// Events since the last frame, for traces.
+    pub events: Vec<String>,
+    /// Counters for perf gates.
+    pub stats: FrameStats,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameStats {
+    pub commits: u64,
+    pub layout_nodes: usize,
+    pub glyphs: usize,
+    pub shaped: u32,
+}
+
+fn ease_out(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    1.0 - (1.0 - x) * (1.0 - x) * (1.0 - x)
+}
+
+fn word_starts(s: &str, from: usize, out: &mut Vec<u32>) {
+    let mut prev_space = true;
+    for (i, c) in s[from..].char_indices() {
+        let space = c.is_whitespace();
+        if !space && prev_space {
+            out.push((from + i) as u32);
+        }
+        prev_space = space;
+    }
+}
+
+impl<S: 'static> Runtime<S> {
+    pub fn new(state: S, view: fn(&S, &mut Cx<S>) -> El, viewport: (f32, f32), env: Env) -> Self {
+        Self::with_text(state, view, viewport, env, TextSystem::default())
+    }
+
+    pub fn with_text(state: S, view: fn(&S, &mut Cx<S>) -> El, viewport: (f32, f32), env: Env, text: TextSystem) -> Self {
+        let mut scene = Scene::new();
+        scene.set_pixel_scale(env.scale);
+        Runtime {
+            state,
+            view,
+            text,
+            scene,
+            env,
+            viewport,
+            t: 0.0,
+            reduced_motion: false,
+            time_scale: 1.0,
+            poll: None,
+            clock: 0.0,
+            wall_start: None,
+            on_key: None,
+            nodes: Vec::new(),
+            layout: {
+                let mut tree = TaffyTree::new();
+                tree.disable_rounding();
+                tree
+            },
+            layout_entries: HashMap::new(),
+            node_index: HashMap::new(),
+            path_ids: HashMap::new(),
+            next_id: 1,
+            commits: 0,
+            dirty: true,
+            relayout: false,
+            settle: false,
+            queue: Vec::new(),
+            pointer: None,
+            capture: None,
+            capture_inside: false,
+            drag_data: 0.0,
+            instances: Vec::new(),
+            hits: Vec::new(),
+            glyph_scratch: Vec::new(),
+            deco_scratch: Vec::new(),
+            inh_scratch: Vec::new(),
+            drawn: Vec::new(),
+            scrolls: HashMap::new(),
+            grows: HashMap::new(),
+            stacks: HashMap::new(),
+            virtuals: HashMap::new(),
+            virtual_culled: HashSet::new(),
+            reveals: HashMap::new(),
+            flights: Vec::new(),
+            row_dy: Vec::new(),
+            row_h: Vec::new(),
+            row_mask: Vec::new(),
+            grow_acc: 0.0,
+            focused: None,
+            hovered: None,
+            ime_area: None,
+            copy_request: None,
+            shell_request: None,
+            pending: Tx::default(),
+            animating: false,
+            settled: false,
+            events: Vec::new(),
+            stats: FrameStats::default(),
+        }
+    }
+
+    pub fn set_viewport(&mut self, viewport: (f32, f32), scale: f32) {
+        if viewport != self.viewport || scale != self.env.scale {
+            if scale != self.env.scale { self.flights.clear(); }
+            self.viewport = viewport;
+            self.env.scale = scale;
+            self.scene.set_pixel_scale(scale);
+            self.relayout = true;
+        }
+    }
+
+    pub fn set_system_dark(&mut self, dark: bool) {
+        if dark != self.env.system_dark {
+            self.env.system_dark = dark;
+            self.dirty = true;
+        }
+    }
+
+    /// Marks app state changed outside a handler (the next frame re-runs the view).
+    pub fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Changes the state from outside any handler, for data another thread delivered
+    /// (`AppHandle::update`). Runs now, so it works while no window shows; the next frame commits
+    /// it with the motion `f` asked for.
+    pub fn update(&mut self, f: impl FnOnce(&mut S, &mut Tx)) {
+        let mut one = Tx::default();
+        f(&mut self.state, &mut one);
+        self.shell_request = self.shell_request.max(one.shell.take());
+        merge(&mut self.pending, one);
+        self.dirty = true;
+    }
+
+    /// Lands every track before the next frame: growth, reveals and follow-the-end (guarantee 8,
+    /// for returning to a window or session).
+    pub fn settle_all(&mut self) {
+        self.settle = true;
+        self.dirty = true;
+    }
+
+    /// Advances animation time by `dt` real seconds, runs queued handlers, re-runs the view only
+    /// if state changed, steps `Scene`, growth, scroll and reveals, and builds this frame's
+    /// instances.
+    pub fn frame(&mut self, dt: f64) -> bool {
+        let mut tx = std::mem::take(&mut self.pending);
+        let mut ran = false;
+        self.clock = match self.wall_start {
+            Some(t0) => t0.elapsed().as_secs_f64(),
+            None => self.clock + dt,
+        };
+        if let Some(poll) = self.poll {
+            let mut one = Tx::default();
+            if poll(&mut self.state, self.clock, &mut one) {
+                ran = true;
+                merge(&mut tx, one);
+            }
+        }
+        for action in std::mem::take(&mut self.queue) {
+            ran |= self.run_action(action, &mut tx);
+        }
+        let shaped0 = self.text.shaped;
+        if let Some(copy) = tx.copy.take() {
+            self.copy_request = Some(copy);
+        }
+        self.shell_request = self.shell_request.max(tx.shell.take());
+        for (source, target) in std::mem::take(&mut tx.text_flights) {
+            self.capture_text_flight(source, target);
+        }
+        if ran || self.dirty || self.relayout || self.settle || self.virtual_window_changed() {
+            if self.relayout && !ran && !self.dirty {
+                tx.relayout = true;
+            }
+            if self.settle {
+                tx.instant = true;
+                tx.settle = true;
+            }
+            self.settled = tx.settle;
+            self.commit(tx);
+        } else {
+            self.settled = false;
+        }
+        self.update_interaction();
+        let step = dt * self.time_scale as f64;
+        self.t += step;
+        self.scene.set_time(self.t);
+        let out = self.scene.frame();
+        let mut animating = out.animating;
+        if !out.exited.is_empty() {
+            self.prune_exited();
+        }
+        animating |= self.step_growth(step as f32);
+        animating |= self.step_scroll(step as f32);
+        animating |= self.reveals_active();
+        self.build();
+        animating |= self.draw_text_flights();
+        self.stats.shaped = self.text.shaped - shaped0;
+        self.animating = animating;
+        self.animating
+    }
+
+    fn prune_exited(&mut self) {
+        let old = std::mem::take(&mut self.nodes);
+        let mut remap = vec![None; old.len()];
+        self.node_index.clear();
+        for (old_idx, mut n) in old.into_iter().enumerate() {
+            if !self.scene.contains(n.id) {
+                self.reveals.remove(&n.id);
+                self.scrolls.remove(&n.id);
+                continue;
+            }
+            n.parent = n.parent.and_then(|p| remap[p]);
+            let idx = self.nodes.len();
+            remap[old_idx] = Some(idx);
+            self.node_index.insert(n.id, idx);
+            self.nodes.push(n);
+        }
+    }
+
+    fn capture_text_flight(&mut self, source: String, target: String) {
+        let Some((i, n)) = self.nodes.iter().enumerate().find(|(_, n)| n.key.as_deref() == Some(&source)) else { return };
+        let (Some(spec), Some(layout), Some(r)) = (&n.text, &n.text_layout, self.drawn.get(i)) else { return };
+        if spec.content.is_empty() { return; }
+        let scale = self.env.scale;
+        let rect = MRect::new(r[0] + n.inset[0], r[1] + n.inset[1],
+            (layout.full_width() / scale).min(r[2] - n.inset[0] - n.inset[2]),
+            (layout_height(layout, spec.style, scale) / scale).min(r[3] - n.inset[1] - n.inset[3]));
+        let clip = n.parent.and_then(|p| self.inh_scratch.get(p)).map_or(NO_CLIP, |h| h.clip).map(|v| v / scale);
+        let clip = [rect.x.max(clip[0]).max(0.0), rect.y.max(clip[1]).max(0.0),
+            (rect.x + rect.w).min(clip[2]).min(self.viewport.0), (rect.y + rect.h).min(clip[3]).min(self.viewport.1)];
+        if rect.w <= 0.0 || clip[2] <= clip[0] || clip[3] <= clip[1] { return; }
+        self.glyph_scratch.clear();
+        self.text.glyphs_for_layout(layout, scale, [rect.x * scale, rect.y * scale], false, &mut self.glyph_scratch);
+        let color = spec.color;
+        let glyphs = self.glyph_scratch.iter().filter(|q| q.rect[1] < clip[3] * scale && q.rect[1] + q.rect[3] > clip[1] * scale)
+            .map(|q| glyph(q, color.premul(1.0), glyph_gamma(color), clip.map(|v| v * scale), [0.0; 4])).collect();
+        self.flights.push(TextFlight::new(source, target, rect, clip, glyphs, scale, self.t));
+    }
+
+    /// All destination rectangles below come from this frame's completed growth/scroll build.
+    /// The overlay only writes draw instances, never layout or app state.
+    fn draw_text_flights(&mut self) -> bool {
+        let s = self.env.scale;
+        let now = self.t;
+        let reduced = self.reduced_motion;
+        let viewport = [0.0, 0.0, self.viewport.0, self.viewport.1];
+        let nodes = &self.nodes;
+        let scene = &self.scene;
+        self.flights.retain(|f| nodes.iter().any(|n| n.key.as_deref() == Some(&f.target_key)
+            && !matches!(scene.phase(n.id), Some(PresencePhase::Exiting { .. }))));
+        let mut done = Vec::new();
+        for (fi, f) in self.flights.iter_mut().enumerate() {
+            let Some((i, n)) = nodes.iter().enumerate().find(|(_, n)| n.key.as_deref() == Some(&f.target_key)) else { continue };
+            let (Some(spec), Some(layout)) = (&n.text, &n.text_layout) else { done.push(fi); continue };
+            let r = self.drawn[i];
+            let target = MRect::new(r[0] + n.inset[0], r[1] + n.inset[1], r[2] - n.inset[0] - n.inset[2], r[3] - n.inset[1] - n.inset[3]);
+            if f.measure(target, now, reduced) { done.push(fi); }
+            // Land sub-quantum size residuals before snapping both edges. Otherwise a settled
+            // height can alternate by one quantum while its still-moving top crosses the grid.
+            let quantum = 1.0 / (64.0 * s);
+            if (f.presented.w - target.w).abs() < quantum { f.presented.w = target.w; }
+            if (f.presented.h - target.h).abs() < quantum { f.presented.h = target.h; }
+            let edges = f.presented.edges().map(|v| grid(v, s));
+            f.presented = MRect::new(edges[0], edges[1], edges[2] - edges[0], edges[3] - edges[1]);
+            let p = f.progress(now, reduced);
+            let (source_alpha, target_alpha) = f.alphas(target, now, reduced);
+            let actual_clip = n.parent.and_then(|p| self.inh_scratch.get(p)).map_or(NO_CLIP, |h| h.clip).map(|v| v / s);
+            let actual_clip = [actual_clip[0].max(0.0), actual_clip[1].max(0.0), actual_clip[2].min(viewport[2]), actual_clip[3].min(viewport[3])];
+            let current = f.presented;
+            let zoom = current.w / f.source.w;
+            let start_clip = [current.x + (f.source_clip[0] - f.source.x) * zoom,
+                current.y + (f.source_clip[1] - f.source.y) * zoom,
+                current.x + (f.source_clip[2] - f.source.x) * zoom,
+                current.y + (f.source_clip[3] - f.source.y) * zoom];
+            // A travelling overlay is above the composer and the growing bubble's mask. Using
+            // that destination mask here can hide the text before it has reached the bubble.
+            // The normal ancestor clip takes over only once the flight has landed.
+            let end_clip = viewport;
+            let clip = std::array::from_fn(|j| start_clip[j] + (end_clip[j] - start_clip[j]) * p);
+            f.clip = if reduced { actual_clip } else { clip };
+            f.source_alpha = source_alpha;
+            f.target_alpha = target_alpha;
+            let final_fade = n.parent.and_then(|p| self.inh_scratch.get(p)).map_or([0.0; 4], |h| h.fade.map(|v| v / s));
+            let fade = [0.0; 4];
+            if source_alpha > 0.0 {
+                let source_rect = if reduced { f.source } else { current };
+                let source_clip = if reduced { f.source_clip } else { clip };
+                for q in &f.glyphs {
+                    self.instances.push(transformed(*q, f.source, source_rect, f.scale, source_alpha, source_clip, fade));
+                }
+            }
+            self.glyph_scratch.clear();
+            self.text.glyphs_for_layout(layout, s, [target.x * s, target.y * s], false, &mut self.glyph_scratch);
+            for q in &self.glyph_scratch {
+                let q = glyph(q, spec.color.premul(1.0), glyph_gamma(spec.color), NO_CLIP, [0.0; 4]);
+                self.instances.push(transformed(q, target, current, s, target_alpha,
+                    if reduced { actual_clip } else { clip }, if reduced { final_fade } else { fade }));
+            }
+        }
+        for i in done.into_iter().rev() { self.flights.remove(i); }
+        !self.flights.is_empty()
+    }
+
+    fn run_action(&mut self, action: Action, tx: &mut Tx) -> bool {
+        let mut one = Tx::default();
+        let ran = match action {
+            Action::Hover(path) => {
+                let Some(f) = self.node(&path).and_then(|n| n.on_hover.clone()) else { return false };
+                f(&mut self.state as &mut dyn Any, &mut one);
+                true
+            }
+            Action::Press(path) => {
+                let Some(f) = self.node(&path).and_then(|n| n.on_press.clone()) else { return false };
+                self.events.push(format!("press {path}"));
+                f(&mut self.state as &mut dyn Any, &mut one);
+                true
+            }
+            Action::Drag(path, mut d) => {
+                let Some(f) = self.node(&path).and_then(|n| n.on_drag.clone()) else { return false };
+                if d.phase == Phase::Move {
+                    one.instant = true;
+                }
+                d.data = if d.phase == Phase::Down { 0.0 } else { self.drag_data };
+                f(&mut self.state as &mut dyn Any, &mut d, &mut one);
+                self.drag_data = d.data;
+                if d.phase != Phase::Move {
+                    self.events.push(format!("drag {:?} {path}", d.phase));
+                }
+                true
+            }
+            Action::Key(ev) => {
+                if let Some(f) = self.on_key
+                    && f(&mut self.state, &ev, &mut one)
+                {
+                    self.events.push(format!("key {:?}", ev.key));
+                    merge(tx, one);
+                    return true;
+                }
+                let layout = self.focused_layout();
+                self.with_focused(|e| e.key(&ev, layout.as_deref()), &mut one)
+            }
+            Action::Ime(ev) => self.with_focused(|e| e.ime(&ev), &mut one),
+            Action::Paste(s) => self.with_focused(|e| e.paste(&s), &mut one),
+            Action::Focus(path, x, y) => {
+                let Some(access) = self.node(&path).and_then(|n| n.input.as_ref()?.access.clone()) else { return false };
+                let layout = self.node(&path).and_then(|n| n.text_layout.clone());
+                let s = self.env.scale;
+                if let Some(old) = self.focused.take()
+                    && old != path
+                    && let Some(a) = self.node(&old).and_then(|n| n.input.as_ref()?.access.clone())
+                {
+                    let e = a(&mut self.state as &mut dyn Any);
+                    e.focused = false;
+                    e.break_history_group();
+                }
+                let e = access(&mut self.state as &mut dyn Any);
+                e.break_history_group();
+                e.focused = true;
+                if let Some(l) = layout {
+                    let i = Cursor::from_point(&l, x * s, y * s).index().min(e.text.len());
+                    e.anchor = i;
+                    e.focus = i;
+                }
+                self.focused = Some(path);
+                one.instant = true;
+                true
+            }
+            Action::Blur => {
+                let Some(old) = self.focused.take() else { return false };
+                if let Some(a) = self.node(&old).and_then(|n| n.input.as_ref()?.access.clone()) {
+                    let e = a(&mut self.state as &mut dyn Any);
+                    e.focused = false;
+                    e.break_history_group();
+                }
+                true
+            }
+        };
+        merge(tx, one);
+        ran
+    }
+
+    fn focused_layout(&mut self) -> Option<Rc<Layout<Ink>>> {
+        let path = self.focused.clone()?;
+        let s = self.env.scale;
+        let n = self.node(&path)?;
+        let (spec, w) = (n.text.clone()?, n.target[2] - n.target[0] - n.inset[0] - n.inset[2]);
+        let text = n.input.as_ref()?.edit.text.clone();
+        Some(self.text.layout_rich(&text, &spec.spans, spec.style, s, Some(w * s)))
+    }
+
+    fn with_focused(&mut self, f: impl FnOnce(&mut crate::edit::TextEdit) -> EditOutcome, tx: &mut Tx) -> bool {
+        let Some(path) = self.focused.clone() else { return false };
+        let Some((access, submit, animate_layout)) =
+            self.node(&path).and_then(|n| n.input.as_ref().map(|i| (i.access.clone(), i.submit.clone(), i.animate_layout)))
+        else {
+            return false;
+        };
+        let Some(access) = access else { return false };
+        let out = f(access(&mut self.state as &mut dyn Any));
+        // Typing is the user's own hand: no animation.
+        tx.instant = !animate_layout;
+        if let Some(c) = out.copy {
+            tx.copy(c);
+        }
+        if out.blur {
+            access(&mut self.state as &mut dyn Any).focused = false;
+            self.focused = None;
+        }
+        if out.submit
+            && let Some(sub) = submit
+        {
+            self.events.push(format!("submit {path}"));
+            tx.instant = false;
+            sub(&mut self.state as &mut dyn Any, tx);
+        }
+        true
+    }
+
+    fn node(&self, path: &str) -> Option<&Node> {
+        self.nodes.iter().enumerate().find(|(i, n)| n.path == path && !self.subtree_exiting(*i)).map(|(_, n)| n)
+    }
+
+    fn subtree_exiting(&self, mut i: usize) -> bool {
+        loop {
+            if self.is_exiting(self.nodes[i].id) { return true; }
+            let Some(parent) = self.nodes[i].parent else { return false };
+            i = parent;
+        }
+    }
+
+    fn is_exiting(&self, id: NodeId) -> bool {
+        matches!(self.scene.phase(id), Some(PresencePhase::Exiting { .. }))
+    }
+
+    fn set_or_anim<T: rune_motion::Animatable>(&mut self, id: NodeId, p: Prop<T>, val: T, s: Spring, instant: bool) {
+        if instant {
+            self.scene.set(id, p, val);
+        } else {
+            self.scene.animate(id, p, val, s);
+        }
+    }
+
+    fn color(&self, id: NodeId, prop: Prop<Color>, rest: Color) -> Color {
+        if self.scene.store().is_animating(id, prop) { self.scene.get(id, prop).unwrap_or(rest) } else { rest }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Commit: view → nodes → layout → Scene retarget
+
+    fn virtual_window_changed(&self) -> bool {
+        self.virtuals.values().any(|v| {
+            self.path_ids.get(&v.scroll_path).and_then(|id| self.scrolls.get(id))
+                .is_some_and(|s| v.needs_window(s.offset as f32, s.pinned))
+        })
+    }
+}
+
+/// Measurement capabilities: text/layout caches and virtual geometry only. In particular this
+/// type has no Scene, growth tracks, reveal tracks, draw instances, or mutable app state.
+struct Measurement<'a, S> {
+    state: &'a S,
+    view: fn(&S, &mut Cx<S>) -> El,
+    env: Env,
+    viewport: (f32, f32),
+    reduced_motion: bool,
+    time_scale: f32,
+    commits: u64,
+    nodes: &'a [Node],
+    text: &'a mut TextSystem,
+    layout: &'a mut TaffyTree<usize>,
+    layout_entries: &'a mut HashMap<String, LayoutEntry>,
+    node_index: &'a mut HashMap<NodeId, usize>,
+    path_ids: &'a mut HashMap<String, NodeId>,
+    next_id: &'a mut u64,
+    scrolls: &'a mut HashMap<NodeId, ScrollState>,
+    virtuals: &'a mut HashMap<String, crate::virtual_list::VirtualList>,
+    virtual_culled: &'a mut HashSet<String>,
+    stats: &'a mut FrameStats,
+}
+
+/// Owned result of completed measurement. Scene mutation consumes this once; retries never
+/// return it. Keeping this separate from El makes unmeasured views invalid commit inputs.
+struct Measured {
+    layout: TaffyTree<usize>,
+    nodes: Vec<Node>,
+    reduced_motion: bool,
+    time_scale: f32,
+}
+
+impl<S> Measurement<'_, S> {
+    fn finish(mut self, tx: &Tx) -> Measured {
+        self.virtual_culled.clear();
+        let mut passes = 0;
+        let (layout, nodes) = loop {
+            passes += 1;
+            // Degenerate zero-height runs fall back to a full measurement instead of
+            // an unbounded retry loop. Normal transcripts need one pass.
+            let (layout, nodes) = self.measure_view(tx, passes > 8);
+            if !self.measure_virtuals(&nodes, tx.settle) { break (layout, nodes); }
+            *self.layout = layout;
+        };
+        self.virtuals.retain(|path, _| nodes.iter().any(|n| n.path == *path));
+        Measured { layout, nodes, reduced_motion: self.reduced_motion, time_scale: self.time_scale }
+    }
+
+    fn node_id(&mut self, path: &str) -> NodeId {
+        if let Some(&id) = self.path_ids.get(path) { return id; }
+        let id = NodeId(*self.next_id);
+        *self.next_id += 1;
+        self.path_ids.insert(path.to_owned(), id);
+        id
+    }
+
+    fn window_tree(&mut self, el: &mut El, parent: &str, index: usize, scroll: Option<(&str, bool)>, settle: bool, force_all: bool) {
+        let seg = el.key.clone().unwrap_or_else(|| format!("#{index}"));
+        let path = if parent.is_empty() { seg } else { format!("{parent}/{seg}") };
+        if let Some(estimate) = el.virtual_estimate {
+            assert!(el.growth.is_some(), "virtual rows need a growth stack");
+            let (scroll_path, sticky) = scroll.expect("virtual stack must be the direct child of a scroll viewport");
+            let old_scroll = self.path_ids.get(scroll_path).and_then(|id| self.scrolls.get(id));
+            let pinned = (settle && sticky) || old_scroll.map_or(sticky, |s| s.pinned);
+            let mut offset = old_scroll.map_or(0.0, |s| s.offset as f32);
+            let height = self.nodes.iter().find(|n| n.path == scroll_path).map_or(self.viewport.1, |n| n.local.h);
+            let padding = |p: LengthPercentage| match p.expand() {
+                taffy::style::ExpandedLengthPercentage::Length(x) => x,
+                _ => panic!("virtual stack padding must be in points"),
+            };
+            let v = self.virtuals.entry(path.clone()).or_default();
+            v.estimate = estimate;
+            v.scroll_path = scroll_path.to_owned();
+            v.viewport = height;
+            v.pad_top = padding(el.style.padding.top);
+            v.pad_bottom = padding(el.style.padding.bottom);
+            let old_keys: HashSet<_> = v.keys.get(v.range.clone()).unwrap_or_default().iter().cloned().collect();
+            let keys: Vec<_> = el.children.iter().map(|c| c.key.clone().expect("virtual rows require stable keys")).collect();
+            let all: HashSet<_> = keys.iter().cloned().collect();
+            assert_eq!(all.len(), keys.len(), "virtual row keys must be unique");
+            let mut anchor = None;
+            if !pinned {
+                let mut y = v.pad_top;
+                for key in &v.keys {
+                    let h = v.height(key);
+                    if y + h > offset && all.contains(key) { anchor = Some((key.clone(), y)); break; }
+                    y += h;
+                }
+            }
+            v.keys = keys;
+            v.heights.retain(|k, _| all.contains(k));
+            v.born.retain(|k, _| all.contains(k));
+            for key in &v.keys { v.born.entry(key.clone()).or_insert(self.commits); }
+            v.anchor = anchor;
+            let delta = v.anchor_delta();
+            offset = (offset + delta).max(0.0);
+            if let Some(st) = self.path_ids.get(scroll_path).and_then(|id| self.scrolls.get_mut(id)) {
+                if !pinned { st.offset = (st.offset + f64::from(delta)).max(0.0); }
+            }
+            v.select(offset, pinned);
+            if force_all { v.range = 0..v.keys.len(); v.before = 0.0; v.after = 0.0; }
+            let mounted: HashSet<_> = v.keys[v.range.clone()].iter().cloned().collect();
+            for key in old_keys.difference(&mounted).filter(|k| all.contains(*k)) {
+                self.virtual_culled.insert(format!("{path}/{key}"));
+            }
+            el.style.padding.top = length(v.pad_top + v.before);
+            el.style.padding.bottom = length(v.pad_bottom + v.after);
+            el.children = std::mem::take(&mut el.children).into_iter().enumerate().filter_map(|(i, mut child)| {
+                if !v.range.contains(&i) { return None; }
+                child.virtual_mount = v.born[child.key.as_ref().unwrap()] < self.commits;
+                Some(child)
+            }).collect();
+        }
+        let scroll = el.scroll.map(|s| (path.as_str(), s.stick_bottom));
+        for (i, child) in el.children.iter_mut().enumerate() {
+            self.window_tree(child, &path, i, scroll, settle, force_all);
+        }
+    }
+
+    /// Finishes all row measurements before scene/growth mutation. Newly measured estimates
+    /// above the viewport adjust the scroll offset by exactly the same amount.
+    fn measure_virtuals(&mut self, nodes: &[Node], settle: bool) -> bool {
+        let mut retry = false;
+        for (path, v) in self.virtuals.iter_mut() {
+            let Some((ci, _)) = nodes.iter().enumerate().find(|(_, n)| n.path == *path) else { continue };
+            for n in nodes.iter().filter(|n| n.parent == Some(ci)) {
+                v.heights.insert(n.key.clone().unwrap(), n.local.h);
+            }
+            let Some(scroll) = nodes.iter().find(|n| n.path == v.scroll_path) else { continue };
+            v.viewport = scroll.local.h;
+            let st = self.scrolls.get_mut(&scroll.id);
+            let sticky = scroll.scroll.unwrap().stick_bottom;
+            let pinned = (settle && sticky) || st.as_ref().map_or(sticky, |s| s.pinned);
+            let offset = if let Some(st) = st {
+                if !pinned { st.offset = (st.offset + f64::from(v.anchor_delta())).max(0.0); }
+                st.offset as f32
+            } else { 0.0 };
+            let mounted_height = v.prefix(v.range.end) - v.before;
+            // Never present a blank caused by an estimate. Expand and measure again first.
+            retry |= if pinned {
+                v.range.start > 0 && mounted_height < v.viewport
+            } else {
+                (v.range.start > 0 && offset < v.pad_top + v.before)
+                    || (v.range.end < v.keys.len() && offset + v.viewport > v.pad_top + v.prefix(v.range.end))
+            };
+        }
+        retry
+    }
+
+    fn measure_view(&mut self, tx: &Tx, force_all: bool) -> (TaffyTree<usize>, Vec<Node>) {
+        let scale = self.env.scale;
+        let mut cx = Cx::<S> {
+            env: self.env,
+            reduced_motion: self.reduced_motion,
+            time_scale: self.time_scale,
+            _s: PhantomData,
+        };
+        let mut root = (self.view)(self.state, &mut cx);
+        self.window_tree(&mut root, "", 0, None, tx.settle, force_all);
+        self.reduced_motion = cx.reduced_motion;
+        self.time_scale = cx.time_scale;
+
+        let mut taffy = std::mem::replace(self.layout, TaffyTree::with_capacity(0));
+        for entry in self.layout_entries.values_mut() {
+            entry.used = false;
+        }
+        let mut nodes = Vec::with_capacity(self.nodes.len().max(32));
+        // Root constraints are part of the retained style, not a dirty write after flattening.
+        root.style.size = Size { width: length(self.viewport.0), height: length(self.viewport.1) };
+        let root_id = flatten(root, None, "", 0, motion::DEFAULT, false, &mut taffy, &mut nodes, &mut self.layout_entries, scale);
+        self.layout_entries.retain(|_, entry| {
+            if !entry.used { taffy.remove(entry.id).unwrap(); }
+            entry.used
+        });
+        {
+            let text_sys = &mut self.text;
+            let nodes_ref = &nodes;
+            taffy
+                .compute_layout_with_measure(
+                    root_id,
+                    Size {
+                        width: AvailableSpace::Definite(self.viewport.0),
+                        height: AvailableSpace::Definite(self.viewport.1),
+                    },
+                    |inputs, _id, ctx, style| {
+                        taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |known, avail| {
+                            let Some(&mut i) = ctx else { return Size::ZERO };
+                            let spec = nodes_ref[i].text.as_ref().unwrap();
+                            let w = if spec.wrap {
+                                known.width.or(match avail.width {
+                                    AvailableSpace::Definite(w) => Some(w),
+                                    AvailableSpace::MinContent => Some(0.0),
+                                    AvailableSpace::MaxContent => None,
+                                })
+                            } else {
+                                None
+                            };
+                            let l = text_sys.layout_rich(&spec.content, &spec.spans, spec.style, scale, w.map(|w| w * scale));
+                            let mut lw = (l.full_width() / scale).ceil_to(scale);
+                            if spec.truncate
+                                && let AvailableSpace::Definite(a) = avail.width
+                            {
+                                lw = lw.min(a);
+                            }
+                            Size {
+                                width: known.width.unwrap_or(lw),
+                                height: known.height.unwrap_or(layout_height(&l, spec.style, scale) / scale),
+                            }
+                        })
+                    },
+                )
+                .unwrap();
+        }
+        self.stats.layout_nodes = nodes.len();
+
+        self.node_index.clear();
+        self.node_index.reserve(nodes.len());
+        for i in 0..nodes.len() {
+            let id = self.node_id(&nodes[i].path);
+            nodes[i].id = id;
+            self.node_index.insert(id, i);
+            let l = taffy.layout(nodes[i].taffy).unwrap();
+            nodes[i].local = MRect::new(l.location.x, l.location.y, l.size.width, l.size.height);
+            let (px, py) = nodes[i].parent.map_or((0.0, 0.0), |p| (nodes[p].target[0], nodes[p].target[1]));
+            let mut x = px + l.location.x;
+            let mut y = py + l.location.y;
+            if let Some(a) = &nodes[i].above
+                && let Some(j) = nodes[..i].iter().position(|n| n.key.as_ref() == Some(&a.key))
+            {
+                // Anchors inside scroll viewports sit where they are scrolled to.
+                let mut target = nodes[j].target;
+                let mut up = nodes[j].parent;
+                while let Some(p) = up {
+                    if let Some(st) = self.scrolls.get(&nodes[p].id) {
+                        target[1] -= st.offset as f32;
+                        target[3] -= st.offset as f32;
+                    }
+                    up = nodes[p].parent;
+                }
+                (x, y) = anchor_position(a, target, (l.size.width, l.size.height), self.viewport);
+                nodes[i].local.x = x - px;
+                nodes[i].local.y = y - py;
+            }
+            nodes[i].target = [x, y, x + l.size.width, y + l.size.height];
+            let ins = [
+                l.padding.left + l.border.left,
+                l.padding.top + l.border.top,
+                l.padding.right + l.border.right,
+                l.padding.bottom + l.border.bottom,
+            ];
+            nodes[i].inset = ins;
+            if let Some(spec) = &nodes[i].text {
+                let w = (l.size.width - ins[0] - ins[2]).max(0.0);
+                let wrap = spec.wrap.then_some(w * scale);
+                let mut layout = self.text.layout_rich(&spec.content, &spec.spans, spec.style, scale, wrap);
+                if spec.truncate && layout.full_width() > w * scale + 0.5 {
+                    layout = truncated(&mut self.text, &spec.content, spec, scale, w * scale);
+                }
+                nodes[i].text_layout = Some(layout);
+            }
+        }
+
+        (taffy, nodes)
+    }
+}
+
+impl<S: 'static> Runtime<S> {
+    fn commit(&mut self, tx: Tx) {
+        let measured = self.measure(&tx);
+        self.apply(measured, tx);
+    }
+
+    fn measure(&mut self, tx: &Tx) -> Measured {
+        Measurement {
+            state: &self.state,
+            view: self.view,
+            env: self.env,
+            viewport: self.viewport,
+            reduced_motion: self.reduced_motion,
+            time_scale: self.time_scale,
+            commits: self.commits,
+            nodes: &self.nodes,
+            text: &mut self.text,
+            layout: &mut self.layout,
+            layout_entries: &mut self.layout_entries,
+            node_index: &mut self.node_index,
+            path_ids: &mut self.path_ids,
+            next_id: &mut self.next_id,
+            scrolls: &mut self.scrolls,
+            virtuals: &mut self.virtuals,
+            virtual_culled: &mut self.virtual_culled,
+            stats: &mut self.stats,
+        }.finish(tx)
+    }
+
+    /// The mutation phase cannot accept an El or an unfinished measurement pass.
+    fn apply(&mut self, measured: Measured, tx: Tx) {
+        let Measured { layout: taffy, mut nodes, reduced_motion, time_scale } = measured;
+        if reduced_motion != self.reduced_motion {
+            self.reduced_motion = reduced_motion;
+            self.scene.set_reduced_motion(reduced_motion);
+        }
+        self.time_scale = time_scale;
+        if tx.settle { self.flights.clear(); }
+        let scale = self.env.scale;
+        // Culling is not a model removal. Retire offscreen scene/growth state immediately;
+        // re-entering historical rows mount settled and don't replay streaming words.
+        for path in &self.virtual_culled {
+            if let Some(id) = self.path_ids.get(path) {
+                self.scene.unmount(*id);
+                self.grows.remove(id);
+            }
+        }
+        let first = self.commits == 0;
+        self.commits += 1;
+        self.stats.commits = self.commits;
+        let instant = tx.instant || first;
+        let now = self.t;
+
+        // Growth stacks: rows of a stack that existed before grow; a new stack mounts settled.
+        for c in 0..nodes.len() {
+            let Some(_spec) = nodes[c].growth else { continue };
+            let cid = nodes[c].id;
+            let rows: Vec<usize> = (c + 1..nodes.len()).filter(|&j| nodes[j].parent == Some(c)).collect();
+            let existed = self.stacks.contains_key(&cid) && !tx.settle;
+            let mut stack = self.stacks.remove(&cid).unwrap_or_default();
+            let new_ids: Vec<NodeId> = rows.iter().map(|&j| nodes[j].id).collect();
+            let new_set: HashSet<NodeId> = new_ids.iter().copied().collect();
+            // Merge: keep leaving rows where they stood.
+            let mut order = Vec::with_capacity(new_ids.len() + 4);
+            let mut ni = 0;
+            for &old in &stack.order {
+                if new_set.contains(&old) {
+                    while ni < new_ids.len() && new_ids[ni] != old {
+                        if !order.contains(&new_ids[ni]) {
+                            order.push(new_ids[ni]);
+                        }
+                        ni += 1;
+                    }
+                    if !order.contains(&old) {
+                        order.push(old);
+                    }
+                    ni += 1;
+                } else if self.grows.get(&old).is_some_and(|g| g.h > 0.01) && existed && !instant {
+                    stack.closing.entry(old).or_insert(now + 0.15);
+                    order.push(old);
+                } else {
+                    self.grows.remove(&old);
+                    stack.closing.remove(&old);
+                }
+            }
+            for &id in &new_ids[ni.min(new_ids.len())..] {
+                if !order.contains(&id) {
+                    order.push(id);
+                }
+            }
+            let ctop = nodes[c].target[1];
+            stack.pad_top = rows.first().map_or(0.0, |&j| nodes[j].target[1] - ctop);
+            stack.pad_bottom = rows.last().map_or(nodes[c].target[3] - ctop, |&j| nodes[c].target[3] - nodes[j].target[3]);
+            for &j in &rows {
+                let id = nodes[j].id;
+                let mut h = nodes[j].target[3] - nodes[j].target[1];
+                stack.closing.remove(&id);
+                stack.tops.insert(id, nodes[j].target[1] - ctop);
+                let streaming = nodes[j].streaming;
+                if streaming && existed && !tx.settle && !first && !self.reduced_motion {
+                    // Measure the final wrapped text before mutating the growth track. Targets
+                    // retain full layout height; only the presented stack extent lags the fill.
+                    let mut end = j + 1;
+                    while end < nodes.len() && nodes[end].parent.is_some_and(|p| p >= j) { end += 1; }
+                    if let Some(n) = nodes[j..end].iter().rev().find(|n| n.text.as_ref().is_some_and(|t| t.wrap && t.reveal >= 0.0))
+                        && let Some(l) = &n.text_layout
+                    {
+                        let width = (n.target[2] - n.target[0] - n.inset[0] - n.inset[2]) * scale;
+                        h = (h - crate::text::stream_height_lag(l, width, scale)).max(0.0);
+                    }
+                }
+                let g = self.grows.entry(id).or_insert_with(|| {
+                    if existed && !instant && !nodes[j].virtual_mount { GrowTrack { streaming, ..GrowTrack::settled(0.0) } } else { GrowTrack::settled(h) }
+                });
+                g.streaming = streaming;
+                if tx.settle || !existed || first || self.reduced_motion {
+                    *g = GrowTrack { streaming, ..GrowTrack::settled(h) };
+                } else {
+                    // Only a width/scale rewrap may shrink an active streaming row, including
+                    // when fresh text arrives in the same frame as the resize.
+                    let t = if streaming && !self.relayout { h.max(g.h.min(g.target)) } else { h };
+                    g.retarget(t);
+                }
+            }
+            stack.order = order;
+            self.stacks.insert(cid, stack);
+        }
+
+        for i in 0..nodes.len() {
+            let id = nodes[i].id;
+            let parent_id = nodes[i].parent.map(|p| nodes[p].id);
+            let spring_l = tx.motion.unwrap_or(nodes[i].motion);
+            let spring_c = tx.color_motion.unwrap_or(nodes[i].motion);
+            // Text leads its background so theme crossfades never dip through zero contrast.
+            let spring_tc = Spring::new((spring_c.duration * 0.5).max(0.1), spring_c.bounce);
+            let row_like = nodes[i].in_row || nodes[i].parent.is_some_and(|p| nodes[p].growth.is_some());
+            let layout_instant = instant || row_like || tx.relayout || self.virtuals.contains_key(&nodes[i].path);
+            let mut scene_rect = nodes[i].local;
+            if let Some(v) = nodes[i].parent.and_then(|p| self.virtuals.get(&nodes[p].path)) {
+                scene_rect.y -= v.before;
+            }
+
+            let was_present = self.scene.contains(id);
+            let was_exiting = self.is_exiting(id);
+            if !was_present || was_exiting {
+                let mut tr = nodes[i].transition;
+                if nodes[i].motion != motion::DEFAULT {
+                    tr.springs = SpringPair::with_exit_ratio(spring_l, 0.8);
+                }
+                // Revive presence first, then let this transaction own the layout retarget.
+                // Scene::insert otherwise starts its default .4 s reflow before our .25 s
+                // menu curve; the equal target makes the intended retarget a no-op.
+                let mount_rect = if was_exiting {
+                    self.scene.store().target(id, prop::FRAME).unwrap_or(scene_rect)
+                } else { scene_rect };
+                let mut spec = NodeSpec::new(mount_rect)
+                    .opacity(nodes[i].vis.opacity)
+                    .radius(Corners(nodes[i].vis.radius))
+                    .transition(tr);
+                if let Some(pid) = parent_id {
+                    spec = spec.parent(pid);
+                }
+                let mount = if instant || nodes[i].virtual_mount || (row_like && !was_exiting && !self.reduced_motion) { Mount::Initial } else { Mount::Animated };
+                self.scene.insert(id, spec, mount);
+            }
+            if was_present {
+                let layout_anim = if layout_instant {
+                    LayoutAnim::INSTANT
+                } else {
+                    let mut la = LayoutAnim::new(spring_l);
+                    if tx.motion.is_none() {
+                        if let Some((lead, trail)) = nodes[i].lead {
+                            la = la.lead(lead, trail);
+                        } else if nodes[i].width_leads {
+                            la = la.width_leads();
+                        }
+                    }
+                    la
+                };
+                self.scene.set_frame(id, scene_rect, layout_anim);
+                self.set_or_anim(id, prop::RADIUS, Corners(nodes[i].vis.radius), spring_l, instant);
+                if !instant && let Some(anim) = nodes[i].opacity_motion {
+                    self.scene.animate(id, prop::OPACITY, nodes[i].vis.opacity, anim);
+                } else {
+                    self.set_or_anim(id, prop::OPACITY, nodes[i].vis.opacity, spring_l, instant);
+                }
+            }
+            let vis = &nodes[i].vis;
+            self.set_or_anim(id, P_FILL, vis.fill, spring_c, instant);
+            if vis.border_width > 0.0 {
+                self.set_or_anim(id, P_BORDER, vis.border, spring_c, instant);
+            }
+            if let Some(c) = nodes[i].text.as_ref().map(|t| t.color).or(nodes[i].vis.icon.map(|(_, c)| c)) {
+                self.set_or_anim(id, P_TEXT, c, spring_tc, instant);
+            }
+            if vis.hover.a > 0.0 || self.scene.store().has(id, P_HOVER_C) {
+                self.set_or_anim(id, P_HOVER_C, vis.hover, spring_c, instant);
+            }
+            if vis.press.a > 0.0 || self.scene.store().has(id, P_PRESS_C) {
+                self.set_or_anim(id, P_PRESS_C, vis.press, spring_c, instant);
+            }
+            for (k, sh) in vis.shadows.iter().take(P_SHADOWS.len()).enumerate() {
+                self.set_or_anim(id, P_SHADOWS[k], sh.color, spring_c, instant);
+            }
+            if let Some(g) = vis.gradient {
+                self.set_or_anim(id, P_GRADIENT[0], g[0], spring_c, instant);
+                self.set_or_anim(id, P_GRADIENT[1], g[1], spring_c, instant);
+            }
+            if let Some(ol) = vis.outline {
+                self.set_or_anim(id, P_OUTLINE, ol.color, spring_c, instant);
+            }
+            if (vis.hover.a > 0.0 || vis.press.a > 0.0) && !self.scene.store().has(id, P_HOVER) {
+                self.scene.set(id, P_HOVER, 0.0);
+                self.scene.set(id, P_PRESS, 0.0);
+            }
+
+            // Streaming word reveal.
+            if let Some(spec) = &nodes[i].text
+                && spec.reveal >= 0.0
+            {
+                let content = &spec.content;
+                let fade = if self.reduced_motion { 0.15 } else { spec.reveal };
+                let mounted_late = !was_present && !instant && !nodes[i].virtual_mount;
+                let st = self.reveals.entry(id).or_insert_with(|| RevealState {
+                    len: if mounted_late { 0 } else { content.len() },
+                    words: Vec::new(),
+                    fade,
+                });
+                st.fade = fade;
+                if instant || (!was_present && nodes[i].virtual_mount) || content.len() < st.len || !content.is_char_boundary(st.len) {
+                    st.len = content.len();
+                    st.words.clear();
+                } else if content.len() > st.len && fade > 0.0 {
+                    let mut starts = Vec::new();
+                    word_starts(content, st.len, &mut starts);
+                    // A word continuing across the old end keeps its time.
+                    let mut tn = st.words.last().map_or(now, |w| w.1.max(now));
+                    let pending = st.words.iter().filter(|w| w.1 > now).count() + starts.len();
+                    let stagger = if self.reduced_motion {
+                        0.0
+                    } else {
+                        let k = (pending as f32 / 24.0).clamp(0.0, 1.0);
+                        (0.020 + (0.0055 - 0.020) * k) as f64
+                    };
+                    for b in starts {
+                        st.words.push((b, tn));
+                        tn += stagger;
+                    }
+                    st.len = content.len();
+                } else {
+                    st.len = content.len();
+                }
+            }
+        }
+
+        // Scroll viewports: a new sticky viewport opens at the end.
+        for n in &nodes {
+            if let Some(sp) = n.scroll {
+                let e = self.scrolls.entry(n.id).or_insert(ScrollState {
+                    offset: 0.0,
+                    v: 0.0,
+                    pinned: sp.stick_bottom,
+                    max: 0.0,
+                    direct: false,
+                    scrolling: false,
+                });
+                if tx.settle && sp.stick_bottom {
+                    e.pinned = true;
+                    e.v = 0.0;
+                }
+            }
+        }
+
+        // Removed nodes stay mounted in `Scene` until their exit transition settles at opacity 0.
+        let present_len = nodes.len();
+        let old_nodes = std::mem::take(&mut self.nodes);
+        let old_ids: Vec<NodeId> = old_nodes.iter().map(|n| n.id).collect();
+        for mut old in old_nodes {
+            if self.node_index.contains_key(&old.id) || !self.scene.contains(old.id) {
+                continue;
+            }
+            let old_parent_id = old.parent.and_then(|p| old_ids.get(p).copied());
+            let parent_remained_present =
+                old_parent_id.is_none_or(|pid| self.node_index.get(&pid).is_some_and(|&i| i < present_len));
+            if parent_remained_present {
+                if tx.settle || (instant && !self.is_exiting(old.id)) {
+                    self.scene.unmount(old.id);
+                } else {
+                    self.scene.remove(old.id);
+                }
+            }
+            old.parent = old_parent_id.and_then(|pid| self.node_index.get(&pid).copied());
+            self.node_index.insert(old.id, nodes.len());
+            nodes.push(old);
+        }
+
+        if let Some(f) = &self.focused
+            && !nodes[..present_len].iter().any(|n| &n.path == f && n.input.as_ref().is_some_and(|i| i.edit.focused))
+        {
+            self.focused = None;
+        }
+        if self.focused.is_none()
+            && let Some(n) = nodes[..present_len].iter().find(|n| n.input.as_ref().is_some_and(|i| i.edit.focused))
+        {
+            self.focused = Some(n.path.clone());
+        }
+
+        self.nodes = nodes;
+        self.layout = taffy;
+        self.text.end_commit();
+        self.dirty = false;
+        self.relayout = false;
+        self.settle = false;
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Growth, scroll and reveals: render-side tracks.
+
+    fn step_growth(&mut self, dt: f32) -> bool {
+        if self.stacks.is_empty() {
+            return false;
+        }
+        self.grow_acc += dt;
+        let steps = (self.grow_acc / SUBSTEP).floor() as usize;
+        self.grow_acc -= steps as f32 * SUBSTEP;
+        let now = self.t;
+        let mut moving = false;
+        for (cid, stack) in self.stacks.iter_mut() {
+            let Some(&ci) = self.node_index.get(cid) else { continue };
+            let Some(spec) = self.nodes[ci].growth else { continue };
+            let n_rows = stack.order.len();
+            for (k, id) in stack.order.iter().enumerate() {
+                let Some(g) = self.grows.get_mut(id) else { continue };
+                if let Some(&at) = stack.closing.get(id)
+                    && now >= at
+                {
+                    if self.reduced_motion {
+                        *g = GrowTrack::settled(0.0);
+                    } else {
+                        g.retarget(0.0);
+                    }
+                }
+                // A row above the tail (the last row) carries it.
+                let carrying = k + 2 == n_rows;
+                for _ in 0..steps.min(240) {
+                    g.step(spec.spring, &spec.edge, carrying);
+                }
+                moving |= g.moving();
+            }
+            stack.order.retain(|id| {
+                let keep = !stack.closing.contains_key(id) || self.grows.get(id).is_some_and(|g| g.h > 0.01 || g.target > 0.0);
+                if !keep {
+                    self.grows.remove(id);
+                }
+                keep
+            });
+            stack.closing.retain(|id, _| stack.order.contains(id));
+        }
+        moving || (steps == 0 && self.grows.values().any(|g| g.moving()))
+    }
+
+    /// Presented content extent of node `c` if it is a growth stack (points).
+    fn stack_extent(&self, c: usize) -> Option<f64> {
+        let n = &self.nodes[c];
+        n.growth?;
+        let stack = self.stacks.get(&n.id)?;
+        let rows: f64 = stack.order.iter().filter_map(|id| self.grows.get(id)).map(|g| f64::from(g.h)).sum();
+        Some(f64::from(stack.pad_top) + rows + f64::from(stack.pad_bottom))
+    }
+
+    fn step_scroll(&mut self, dt: f32) -> bool {
+        let mut moving = false;
+        for i in 0..self.nodes.len() {
+            let Some(sp) = self.nodes[i].scroll else { continue };
+            let id = self.nodes[i].id;
+            let view_h = self.nodes[i].target[3] - self.nodes[i].target[1];
+            let content = (i + 1..self.nodes.len()).find(|&j| self.nodes[j].parent == Some(i));
+            let content_h = content.map_or(0.0, |c| {
+                let n = &self.nodes[c];
+                let top = n.target[1] - self.nodes[i].target[1];
+                f64::from(top) + self.stack_extent(c).unwrap_or(f64::from(n.target[3] - n.target[1]))
+            });
+            let Some(st) = self.scrolls.get_mut(&id) else { continue };
+            st.scrolling = st.direct || st.v.abs() > 1.0;
+            st.direct = false;
+            st.max = (content_h - f64::from(view_h)).max(0.0);
+            if st.pinned && sp.stick_bottom {
+                st.offset = st.max;
+                st.v = 0.0;
+            } else if st.v.abs() > 1.0 {
+                st.offset += f64::from(st.v) * f64::from(dt);
+                st.v *= (-SCROLL_DECAY * dt).exp();
+                if st.offset <= 0.0 || st.offset >= st.max {
+                    st.v = 0.0;
+                }
+                moving = true;
+            } else {
+                st.v = 0.0;
+            }
+            st.offset = st.offset.clamp(0.0, st.max);
+            if sp.stick_bottom && st.offset >= st.max - 0.5 && st.v.abs() <= 1.0 {
+                st.pinned = true;
+            }
+        }
+        moving
+    }
+
+    fn reveals_active(&mut self) -> bool {
+        let now = self.t;
+        let mut any = false;
+        for st in self.reveals.values_mut() {
+            let fade = st.fade as f64;
+            // Words fully shown leave the list (only from the front, which keeps lookups valid).
+            let done = st.words.iter().take_while(|w| now - w.1 >= fade).count();
+            if done > 0 && done == st.words.len() {
+                st.words.clear();
+            }
+            any |= !st.words.is_empty();
+        }
+        any
+    }
+
+    fn reveal_alpha(st: &RevealState, byte: u32, now: f64) -> f32 {
+        let i = st.words.partition_point(|w| w.0 <= byte);
+        if i == 0 {
+            return 1.0;
+        }
+        let t0 = st.words[i - 1].1;
+        if st.fade <= 0.0 {
+            return if now >= t0 { 1.0 } else { 0.0 };
+        }
+        ease_out(((now - t0) / st.fade as f64) as f32)
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Input: queued, handled at the next frame.
+
+    pub fn pointer_move(&mut self, x: f32, y: f32) {
+        self.pointer = Some((x, y));
+        let hovered = self.hits.iter().rev().find(|&&(_, r)| x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3])
+            .and_then(|(id, _)| self.node_index.get(id).map(|&i| &self.nodes[i]))
+            .filter(|n| !self.is_exiting(n.id)).map(|n| n.path.clone());
+        if hovered != self.hovered {
+            if let Some(path) = &hovered { self.queue.push(Action::Hover(path.clone())); }
+            self.hovered = hovered;
+        }
+        let Some((path, d)) = self.capture.clone() else { return };
+        let Some((r, has_drag)) = self.node(&path).map(|n| (n.target, n.on_drag.is_some())) else { return };
+        self.capture_inside = x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3];
+        if has_drag {
+            let d = Drag { phase: Phase::Move, x: x - r[0], y: y - r[1], ..d };
+            self.queue.push(Action::Drag(path, d));
+        }
+    }
+
+    pub fn pointer_down(&mut self, x: f32, y: f32) {
+        self.pointer = Some((x, y));
+        let hit = self.hits.iter().rev().find(|&&(_, r)| x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3]).map(|h| h.0);
+        let target = hit.and_then(|id| self.node_index.get(&id).copied().filter(|&i| !self.is_exiting(self.nodes[i].id)));
+        let Some(ti) = target else {
+            if self.focused.is_some() {
+                self.queue.push(Action::Blur);
+            }
+            return;
+        };
+        let n = &self.nodes[ti];
+        let r = self.drawn.get(ti).copied().unwrap_or([n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]]);
+        if n.input.is_some() {
+            self.queue.push(Action::Focus(n.path.clone(), x - r[0] - n.inset[0], y - r[1] - n.inset[1]));
+            return;
+        }
+        let r = n.target;
+        let d = Drag {
+            phase: Phase::Down,
+            x: x - r[0],
+            y: y - r[1],
+            w: r[2] - r[0],
+            h: r[3] - r[1],
+            start_x: x - r[0],
+            start_y: y - r[1],
+            data: 0.0,
+        };
+        let path = n.path.clone();
+        if n.on_drag.is_some() {
+            self.queue.push(Action::Drag(path.clone(), d));
+        }
+        self.capture = Some((path, d));
+        self.capture_inside = true;
+    }
+
+    pub fn pointer_up(&mut self, x: f32, y: f32) {
+        self.pointer_move(x, y);
+        let Some((path, d)) = self.capture.take() else { return };
+        let Some((r, has_drag, has_press)) =
+            self.node(&path).map(|n| (n.target, n.on_drag.is_some(), n.on_press.is_some()))
+        else {
+            return;
+        };
+        if has_drag {
+            self.queue.push(Action::Drag(path.clone(), Drag { phase: Phase::Up, x: x - r[0], y: y - r[1], ..d }));
+        }
+        if has_press && self.capture_inside {
+            self.queue.push(Action::Press(path));
+        }
+        self.capture_inside = false;
+    }
+
+    pub fn pointer_leave(&mut self) {
+        if self.capture.is_none() {
+            self.pointer = None;
+            self.hovered = None;
+        }
+    }
+
+    pub fn pointer(&self) -> Option<(f32, f32)> {
+        self.pointer
+    }
+
+    /// The pointer shape the shell should show: the pressed element's while a gesture holds
+    /// the pointer, else the hovered one's, from the nearest ancestor that sets one.
+    pub fn cursor(&self) -> crate::el::Cursor {
+        let path = self.capture.as_ref().map(|(p, _)| p.as_str()).or(self.hovered.as_deref());
+        let Some(mut i) = path.and_then(|p| self.nodes.iter().position(|n| n.path == p)) else {
+            return crate::el::Cursor::Default;
+        };
+        if self.nodes[i].cursor.is_none() && self.nodes[i].input.is_some() {
+            return crate::el::Cursor::Text;
+        }
+        loop {
+            if let Some(c) = self.nodes[i].cursor {
+                return c;
+            }
+            let Some(parent) = self.nodes[i].parent else { return crate::el::Cursor::Default };
+            i = parent;
+        }
+    }
+
+    pub fn key(&mut self, ev: KeyEvent) {
+        self.queue.push(Action::Key(ev));
+    }
+
+    pub fn ime(&mut self, ev: Ime) {
+        self.queue.push(Action::Ime(ev));
+    }
+
+    pub fn paste(&mut self, text: impl Into<String>) {
+        self.queue.push(Action::Paste(text.into()));
+    }
+
+    pub fn has_focus(&self) -> bool {
+        self.focused.is_some()
+    }
+
+    fn scroll_at(&self, x: f32, y: f32) -> Option<NodeId> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, n)| n.scroll.is_some() && !self.is_exiting(n.id))
+            .find(|(i, _)| {
+                let r = self.drawn.get(*i).copied().unwrap_or([0.0; 4]);
+                x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]
+            })
+            .map(|(_, n)| n.id)
+    }
+
+    /// Wheel or trackpad delta in points (positive `dy` moves content down, like a browser's
+    /// negative deltaY). Applied 1:1: the platform supplies its own momentum phases.
+    pub fn wheel(&mut self, x: f32, y: f32, dy: f32) {
+        let Some(id) = self.scroll_at(x, y) else { return };
+        let stick = self.node_index.get(&id).and_then(|&i| self.nodes[i].scroll).is_some_and(|s| s.stick_bottom);
+        if let Some(st) = self.scrolls.get_mut(&id) {
+            st.offset = (st.offset - f64::from(dy)).clamp(0.0, st.max);
+            st.v = 0.0;
+            st.direct = true;
+            st.pinned = stick && st.offset >= st.max - 0.5;
+            self.events.push(format!("wheel {dy:.1}"));
+        }
+    }
+
+    /// Releases a scroll with `velocity` (points per second, positive moves content down);
+    /// the runtime decays it (for platforms without OS momentum and headless scripts).
+    pub fn fling(&mut self, x: f32, y: f32, velocity: f32) {
+        let Some(id) = self.scroll_at(x, y) else { return };
+        if let Some(st) = self.scrolls.get_mut(&id) {
+            st.v = -velocity;
+            st.pinned = false;
+            self.events.push(format!("fling {velocity:.0}"));
+        }
+    }
+
+    pub fn has_pending_input(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
+    fn update_interaction(&mut self) {
+        let captured = self.capture.as_ref().map(|(p, _)| p.as_str());
+        for i in 0..self.nodes.len() {
+            let n = &self.nodes[i];
+            if self.is_exiting(n.id) || (n.vis.hover.a <= 0.0 && n.vis.press.a <= 0.0) {
+                continue;
+            }
+            let r = self.drawn.get(i).map_or(
+                [n.target[0], n.target[1], n.target[2], n.target[3]],
+                |d| [d[0], d[1], d[0] + d[2], d[1] + d[3]],
+            );
+            let inside = self.pointer.is_some_and(|(x, y)| x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3]);
+            let hovered = inside && n.vis.hover.a > 0.0 && captured.is_none_or(|p| p == n.path);
+            let pressed = captured == Some(n.path.as_str()) && self.capture_inside && n.vis.press.a > 0.0;
+            let id = n.id;
+            self.scene.animate(id, P_HOVER, hovered as u8 as f32, motion::SNAPPY);
+            self.scene.animate(id, P_PRESS, pressed as u8 as f32, if pressed { motion::INSTANT } else { motion::SNAPPY });
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Frame build: Scene Presented → instances
+
+    fn build(&mut self) {
+        let s = self.env.scale;
+        let snap_px = |v: f32| grid(v, s) * s;
+        self.instances.clear();
+        self.hits.clear();
+        let n_nodes = self.nodes.len();
+        self.inh_scratch.clear();
+        self.inh_scratch.resize(n_nodes, Inh::default());
+        self.drawn.clear();
+        self.drawn.resize(n_nodes, [0.0; 4]);
+        self.ime_area = None;
+        let now = self.t;
+        let vp = [0.0, 0.0, self.viewport.0 * s, self.viewport.1 * s];
+        let mut glyph_count = 0usize;
+
+        // Growth rows: presented top offset, height and bottom feather mask per node index.
+        self.row_dy.clear();
+        self.row_dy.resize(n_nodes, 0.0);
+        self.row_h.clear();
+        self.row_h.resize(n_nodes, -1.0);
+        self.row_mask.clear();
+        self.row_mask.resize(n_nodes, -1.0);
+        for (cid, stack) in &self.stacks {
+            let Some(&ci) = self.node_index.get(cid) else { continue };
+            let Some(spec) = self.nodes[ci].growth else { continue };
+            let origin = self.virtuals.get(&self.nodes[ci].path).map_or(0.0, |v| v.before);
+            let mut y = stack.pad_top - origin;
+            for id in &stack.order {
+                let Some(g) = self.grows.get(id) else { continue };
+                let top_rel = stack.tops.get(id).copied().unwrap_or(0.0) - origin;
+                let cur = y;
+                if let Some(&ri) = self.node_index.get(id) {
+                    self.row_dy[ri] = cur - top_rel;
+                    self.row_h[ri] = g.h;
+                    let withheld = if g.streaming { (self.nodes[ri].local.h - g.target).max(0.0) } else { 0.0 };
+                    if spec.edge.clip && (g.h < g.target - 0.01 || g.mask > 0.01 || withheld > 0.01) {
+                        self.row_mask[ri] = g.mask.max(withheld.min(spec.edge.floor));
+                    }
+                }
+                y = cur + g.h;
+            }
+            // The stack itself presents the rows' heights, which scrolling follows.
+            self.row_h[ci] = y + stack.pad_bottom;
+        }
+
+        for i in 0..n_nodes {
+            let n = &self.nodes[i];
+            let Some(p) = self.scene.presented(n.id) else { continue };
+            let mut pinh = n.parent.map_or(Inh::default(), |pr| self.inh_scratch[pr]);
+            pinh.dy += self.row_dy[i];
+            let o = (p.opacity * pinh.opacity).clamp(0.0, 1.0);
+            let (mut clip, mut fade) = (pinh.clip, pinh.fade);
+            let own_sc = p.transform.scale.x;
+            let (sc, anchor) = if (own_sc - 1.0).abs() > 1e-5 {
+                (pinh.scale * own_sc, [p.anchor.x, p.anchor.y + pinh.dy])
+            } else {
+                (pinh.scale, pinh.anchor)
+            };
+            let blur = pinh.blur.max(p.blur);
+
+            let mut raw_edges = p.rect.edges();
+            raw_edges[1] += pinh.dy;
+            raw_edges[3] += pinh.dy;
+            if self.row_h[i] >= 0.0 {
+                raw_edges[3] = raw_edges[1] + self.row_h[i];
+            }
+            let mut rect_pt = if (sc - 1.0).abs() > 1e-5 {
+                [
+                    anchor[0] + (raw_edges[0] - anchor[0]) * sc,
+                    anchor[1] + (raw_edges[1] - anchor[1]) * sc,
+                    anchor[0] + (raw_edges[2] - anchor[0]) * sc,
+                    anchor[1] + (raw_edges[3] - anchor[1]) * sc,
+                ]
+            } else {
+                raw_edges
+            };
+            // Land a sub-quantum size residual before snapping both edges. Otherwise a
+            // translating/scaling box can alternate between neighbouring widths at rest.
+            for (axis, target) in [n.local.w, n.local.h].into_iter().enumerate() {
+                let target = grid(target, s);
+                if ((rect_pt[axis + 2] - rect_pt[axis]) - target).abs() * s < 1.0 / 32.0 {
+                    rect_pt[axis + 2] = rect_pt[axis] + target;
+                }
+            }
+            let r = rect_pt.map(snap_px);
+            let (w, h) = ((r[2] - r[0]).max(0.0), (r[3] - r[1]).max(0.0));
+            self.drawn[i] = [r[0] / s, r[1] / s, w / s, h / s];
+            let radii = p.radius.0.map(|v| v * sc * s);
+
+            if !p.mask.is_none() {
+                let ins = p.mask.inset.0.map(|v| v * sc * s);
+                let fea = p.mask.feather.0.map(|v| v * sc * s);
+                clip = [
+                    (r[0] + ins[0]).max(clip[0]),
+                    (r[1] + ins[1]).max(clip[1]),
+                    (r[2] - ins[2]).min(clip[2]),
+                    (r[3] - ins[3]).min(clip[3]),
+                ];
+                fade = [fea[0].max(fade[0]), fea[1].max(fade[1]), fea[2].max(fade[2]), fea[3].max(fade[3])];
+            }
+            let visible = r[2] >= clip[0].max(vp[0]) - 2.0
+                && r[0] <= clip[2].min(vp[2]) + 2.0
+                && r[3] >= clip[1].max(vp[1]) - 2.0
+                && r[1] <= clip[3].min(vp[3]) + 2.0;
+
+            if o > 0.001 && visible {
+                let k_px = sc * s;
+                for (k, sh) in n.vis.shadows.iter().enumerate() {
+                    let c = if k < P_SHADOWS.len() { self.color(n.id, P_SHADOWS[k], sh.color) } else { sh.color };
+                    if c.a <= 0.0 || sh.inset {
+                        continue;
+                    }
+                    let sp = sh.spread * k_px;
+                    let rect = [r[0] + sh.x * k_px - sp, r[1] + sh.y * k_px - sp, w + 2.0 * sp, h + 2.0 * sp];
+                    let sradii = radii.map(|v| if v > 0.0 { (v + sp).max(0.0) } else { 0.0 });
+                    if sh.blur + blur <= 0.0 {
+                        // A crisp shadow: a ring when it sits exactly around the box, else a solid
+                        // offset copy (hidden under an opaque element, as in CSS).
+                        let ring = sh.x == 0.0 && sh.y == 0.0;
+                        if ring && sp <= 0.0 {
+                            continue;
+                        }
+                        self.instances.push(Instance {
+                            rect,
+                            radii: sradii,
+                            fill: if ring { [0.0; 4] } else { c.premul(o) },
+                            border: if ring { c.premul(o) } else { [0.0; 4] },
+                            params: [if ring { sp } else { 0.0 }, KIND_RECT, 0.0, 1.0],
+                            uv: [0.0; 4],
+                            clip,
+                            fade,
+                        });
+                        continue;
+                    }
+                    self.instances.push(Instance {
+                        rect,
+                        radii: sradii,
+                        fill: c.premul(o),
+                        border: [0.0; 4],
+                        params: [0.0, KIND_SHADOW, ((sh.blur + blur) * s * 0.5).max(0.5), 1.0],
+                        uv: [0.0; 4],
+                        clip,
+                        fade,
+                    });
+                }
+                let mut overlay = [0.0f32; 4];
+                if n.vis.hover.a > 0.0 || self.scene.store().is_animating(n.id, P_HOVER_C) {
+                    let hov_v = self.scene.get(n.id, P_HOVER).unwrap_or(0.0).clamp(0.0, 1.0);
+                    if hov_v > 0.0 {
+                        overlay = over(self.color(n.id, P_HOVER_C, n.vis.hover).premul(hov_v), overlay);
+                    }
+                }
+                if n.vis.press.a > 0.0 || self.scene.store().is_animating(n.id, P_PRESS_C) {
+                    let prs_v = self.scene.get(n.id, P_PRESS).unwrap_or(0.0).clamp(0.0, 1.0);
+                    if prs_v > 0.0 {
+                        overlay = over(self.color(n.id, P_PRESS_C, n.vis.press).premul(prs_v), overlay);
+                    }
+                }
+                let base = self.color(n.id, P_FILL, n.vis.fill).premul(1.0);
+                let layered = n.vis.gradient.is_some();
+                let fill = if layered { base } else { over(overlay, base) }.map(|c| c * o);
+                let bw = n.vis.border_width * sc * s;
+                let border = if bw > 0.0 { self.color(n.id, P_BORDER, n.vis.border).premul(o) } else { [0.0; 4] };
+                if layered {
+                    // Fill, gradient and overlays first, then the border on top, as in CSS.
+                    if fill[3] > 0.0005 {
+                        self.instances.push(Instance {
+                            rect: [r[0], r[1], w, h],
+                            radii,
+                            fill,
+                            border: [0.0; 4],
+                            params: [0.0, KIND_RECT, blur * s, 1.0],
+                            uv: [0.0; 4],
+                            clip,
+                            fade,
+                        });
+                    }
+                    let g = n.vis.gradient.unwrap_or_default();
+                    let top = self.color(n.id, P_GRADIENT[0], g[0]).premul(o);
+                    let bottom = self.color(n.id, P_GRADIENT[1], g[1]).premul(o);
+                    if top[3] > 0.0005 || bottom[3] > 0.0005 {
+                        self.instances.push(Instance {
+                            rect: [r[0], r[1], w, h],
+                            radii,
+                            fill: top,
+                            border: [0.0; 4],
+                            params: [0.0, KIND_GRADIENT, 0.0, 1.0],
+                            uv: bottom,
+                            clip,
+                            fade,
+                        });
+                    }
+                    let ov = overlay.map(|c| c * o);
+                    if ov[3] > 0.0005 || border[3] > 0.0005 {
+                        self.instances.push(Instance {
+                            rect: [r[0], r[1], w, h],
+                            radii,
+                            fill: ov,
+                            border,
+                            params: [bw, KIND_RECT, blur * s, 1.0],
+                            uv: [0.0; 4],
+                            clip,
+                            fade,
+                        });
+                    }
+                } else if fill[3] > 0.0005 || border[3] > 0.0005 {
+                    self.instances.push(Instance {
+                        rect: [r[0], r[1], w, h],
+                        radii,
+                        fill,
+                        border,
+                        params: [bw, KIND_RECT, blur * s, 1.0],
+                        uv: [0.0; 4],
+                        clip,
+                        fade,
+                    });
+                }
+                for (k, sh) in n.vis.shadows.iter().enumerate() {
+                    if !sh.inset {
+                        continue;
+                    }
+                    let c = if k < P_SHADOWS.len() { self.color(n.id, P_SHADOWS[k], sh.color) } else { sh.color };
+                    if c.a <= 0.0 {
+                        continue;
+                    }
+                    self.instances.push(Instance {
+                        rect: [r[0], r[1], w, h],
+                        radii,
+                        fill: c.premul(o),
+                        border: [0.0; 4],
+                        params: [sh.spread * k_px, KIND_INSET, if sh.blur > 0.0 { (sh.blur * s * 0.5).max(0.5) } else { 0.0 }, 1.0],
+                        uv: [sh.x * k_px, sh.y * k_px, 0.0, 0.0],
+                        clip,
+                        fade,
+                    });
+                }
+                if let Some(ol) = n.vis.outline {
+                    let c = self.color(n.id, P_OUTLINE, ol.color);
+                    let g = (ol.offset + ol.width) * k_px;
+                    if c.a > 0.0 && ol.width > 0.0 {
+                        self.instances.push(Instance {
+                            rect: [r[0] - g, r[1] - g, w + 2.0 * g, h + 2.0 * g],
+                            radii: radii.map(|v| if v > 0.0 { v + g } else { 0.0 }),
+                            fill: [0.0; 4],
+                            border: c.premul(o),
+                            params: [ol.width * k_px, KIND_RECT, 0.0, 1.0],
+                            uv: [0.0; 4],
+                            clip,
+                            fade,
+                        });
+                    }
+                }
+                if let Some((ic, c)) = n.vis.icon {
+                    let color = self.color(n.id, P_TEXT, c);
+                    let px = (w.min(h)).round().max(1.0) as u32;
+                    if let Some(q) = self.text.icon_quad(ic, px, [r[0], r[1]]) {
+                        self.instances.push(Instance {
+                            rect: q.rect,
+                            radii: [0.0; 4],
+                            fill: color.premul(o),
+                            border: [0.0; 4],
+                            params: [0.0, KIND_GLYPH, 0.0, 1.0],
+                            uv: [q.uv[0], q.uv[1], 0.0, 0.0],
+                            clip,
+                            fade,
+                        });
+                    }
+                } else if let (Some(spec), Some(layout)) = (&n.text, &n.text_layout) {
+                    let color = self.color(n.id, P_TEXT, spec.color);
+                    let tw = layout.full_width().ceil();
+                    let ins = n.inset.map(|v| v * sc * s);
+                    let (x0, x1) = (r[0] + ins[0], r[2] - ins[2]);
+                    let x = match spec.align {
+                        Align::Start => x0,
+                        Align::Center => x0 + (x1 - x0 - tw) * 0.5,
+                        Align::End => x1 - tw,
+                    };
+                    let origin = [x, r[1] + ins[1]];
+                    // Text fields: selection under the text, placeholder, caret over it.
+                    let mut caret = None;
+                    if let Some(inp) = &n.input {
+                        let e = &inp.edit;
+                        let departing = self.flights.iter().any(|f| n.key.as_deref() == Some(&f.source_key)
+                            && f.alphas(f.destination, now, self.reduced_motion).0 > 0.0);
+                        if e.text.is_empty() && e.preedit.is_none() && !inp.placeholder.is_empty() && !departing {
+                            let pl = self.text.layout_rich(&inp.placeholder, &[], spec.style, s, Some(w));
+                            self.glyph_scratch.clear();
+                            self.text.glyphs_for_layout(&pl, s, origin, false, &mut self.glyph_scratch);
+                            let pc = inp.placeholder_color.premul(o);
+                            for q in &self.glyph_scratch {
+                                self.instances.push(glyph(q, pc, glyph_gamma(inp.placeholder_color), clip, fade));
+                            }
+                        }
+                        if e.focused && !departing {
+                            let (a, b) = e.range();
+                            if a != b && e.preedit.is_none() {
+                                let sel = Selection::new(
+                                    Cursor::from_byte_index(layout, a, Affinity::Downstream),
+                                    Cursor::from_byte_index(layout, b, Affinity::Upstream),
+                                );
+                                for (bb, _) in sel.geometry(layout) {
+                                    self.instances.push(rect_inst(
+                                        [origin[0] + bb.x0 as f32, origin[1] + bb.y0 as f32, (bb.x1 - bb.x0) as f32, (bb.y1 - bb.y0) as f32],
+                                        inp.selection.premul(o),
+                                        2.0 * s,
+                                        clip,
+                                        fade,
+                                    ));
+                                }
+                            }
+                            let ci = match &e.preedit {
+                                Some((p, Some((_, c)))) => (e.range().0 + (*c).min(p.len())).min(spec.content.len()),
+                                Some((p, None)) => (e.range().0 + p.len()).min(spec.content.len()),
+                                None => e.focus.min(spec.content.len()),
+                            };
+                            let cur = Cursor::from_byte_index(layout, ci, Affinity::Downstream);
+                            let bb = cur.geometry(layout, 1.5 * s);
+                            let line = spec.style.line_px() * s;
+                            let (cx0, cy0) = (origin[0] + bb.x0 as f32, origin[1] + bb.y0 as f32);
+                            let ch = if bb.y1 > bb.y0 { (bb.y1 - bb.y0) as f32 } else { line };
+                            caret = Some([cx0.round(), cy0 + ch * 0.1, (1.5 * s).round(), ch * 0.8]);
+                            self.ime_area = Some([cx0 / s, cy0 / s, 2.0, ch / s]);
+                            if let Some((_, _)) = &e.preedit
+                                && let (_, Some((pa, pb))) = e.display()
+                            {
+                                let sel = Selection::new(
+                                    Cursor::from_byte_index(layout, pa, Affinity::Downstream),
+                                    Cursor::from_byte_index(layout, pb, Affinity::Upstream),
+                                );
+                                for (bb, _) in sel.geometry(layout) {
+                                    self.instances.push(rect_inst(
+                                        [origin[0] + bb.x0 as f32, origin[1] + bb.y1 as f32 - s, (bb.x1 - bb.x0) as f32, s],
+                                        color.premul(o),
+                                        0.0,
+                                        clip,
+                                        fade,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    // Span backgrounds (inline code), then glyphs.
+                    self.deco_scratch.clear();
+                    self.text.decorations(layout, &spec.spans, s, origin, &mut self.deco_scratch);
+                    for d in &self.deco_scratch {
+                        let c = d.color.premul(o);
+                        self.instances.push(rect_inst(d.rect, c, d.radius, clip, fade));
+                    }
+                    let reveal = self.reveals.get(&n.id).filter(|st| !st.words.is_empty());
+                    self.glyph_scratch.clear();
+                    self.text.glyphs_for_layout(layout, s, origin, reveal.is_some(), &mut self.glyph_scratch);
+                    let gamma = glyph_gamma(color);
+                    let base = color.premul(o);
+                    for q in &self.glyph_scratch {
+                        if self.flights.iter().any(|f| n.key.as_deref() == Some(&f.target_key)) { continue; }
+                        if q.rect[1] > clip[3] || q.rect[1] + q.rect[3] < clip[1] {
+                            continue;
+                        }
+                        let (mut f, mut gm) = (base, gamma);
+                        if q.ink > 0
+                            && let Some(c) = spec.spans.get(q.ink as usize - 1).and_then(|sp| sp.color)
+                        {
+                            f = c.premul(o);
+                            gm = glyph_gamma(c);
+                        }
+                        if let Some(st) = reveal {
+                            let a = Self::reveal_alpha(st, q.byte, now);
+                            if a <= 0.0 {
+                                continue;
+                            }
+                            f = f.map(|v| v * a);
+                        }
+                        self.instances.push(glyph(q, f, gm, clip, fade));
+                        glyph_count += 1;
+                    }
+                    if let (Some(c), Some(inp)) = (caret, &n.input) {
+                        self.instances.push(rect_inst(c, inp.caret.premul(o), 0.0, clip, fade));
+                    }
+                }
+            }
+            let (mut clip, mut fade) = match n.vis.clip {
+                Some(f) => (
+                    [r[0].max(clip[0]), r[1].max(clip[1]), r[2].min(clip[2]), r[3].min(clip[3])],
+                    {
+                        let f = f.map(|v| v * sc * s);
+                        [f[0].max(fade[0]), f[1].max(fade[1]), f[2].max(fade[2]), f[3].max(fade[3])]
+                    },
+                ),
+                None => (clip, fade),
+            };
+            let mask = self.row_mask[i];
+            if mask >= 0.0 {
+                clip[3] = clip[3].min(r[3]);
+                fade[3] = fade[3].max(mask * s);
+            }
+            let mut dy = pinh.dy;
+            if n.scroll.is_some()
+                && let Some(st) = self.scrolls.get(&n.id)
+            {
+                let origin = self.virtuals.values().find(|v| v.scroll_path == n.path).map_or(0.0, |v| f64::from(v.before));
+                dy -= grid((st.offset - origin) as f32, s);
+            }
+            self.inh_scratch[i] = Inh { opacity: o, clip, fade, scale: sc, anchor, blur, dy };
+            if (n.on_press.is_some() || n.on_hover.is_some() || n.on_drag.is_some() || n.input.is_some())
+                && !self.subtree_exiting(i)
+            {
+                let c = self.inh_scratch[n.parent.unwrap_or(0)].clip;
+                let cr = [
+                    rect_pt[0].max(c[0] / s),
+                    rect_pt[1].max(c[1] / s),
+                    rect_pt[2].min(c[2] / s),
+                    rect_pt[3].min(c[3] / s),
+                ];
+                self.hits.push((n.id, if n.parent.is_some() { cr } else { rect_pt }));
+            }
+        }
+        self.stats.glyphs = glyph_count;
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Inspection
+
+    pub fn elements(&self) -> Vec<ElementInfo> {
+        let store = self.scene.store();
+        let mut elements: Vec<_> = self.nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| {
+                let p = self.scene.presented(n.id)?;
+                let flight = self.flights.iter().find(|f| n.key.as_deref() == Some(&f.target_key));
+                let mut moving = flight.is_some() || store.is_animating(n.id, prop::FRAME)
+                    || store.is_animating(n.id, prop::TRAVEL)
+                    || store.is_animating(n.id, prop::PRESENCE)
+                    || self.grows.get(&n.id).is_some_and(|g| g.moving());
+                let rect = flight.map_or_else(|| self.drawn.get(i).copied().unwrap_or([p.rect.x, p.rect.y, p.rect.w, p.rect.h]),
+                    |f| [f.presented.x, f.presented.y, f.presented.w, f.presented.h]);
+                let s = self.env.scale;
+                let clip = flight.map_or_else(|| n.parent.and_then(|pi| self.inh_scratch.get(pi)).map_or(NO_CLIP, |h| h.clip),
+                    |f| f.clip.map(|v| v * s));
+                let (x0, y0) = (rect[0].max(clip[0] / s), rect[1].max(clip[1] / s));
+                let (x1, y1) = ((rect[0] + rect[2]).min(clip[2] / s), (rect[1] + rect[3]).min(clip[3] / s));
+                let visible = [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)];
+                let revealing = flight.is_some() || self.reveals.get(&n.id).is_some_and(|r| !r.words.is_empty());
+                let mut in_growing_row = false;
+                let mut scrolling = false;
+                let mut a = n.parent;
+                while let Some(pi) = a {
+                    let parent = self.nodes[pi].id;
+                    moving |= store.is_animating(parent, prop::FRAME) || store.is_animating(parent, prop::TRAVEL)
+                        || store.is_animating(parent, prop::PRESENCE);
+                    scrolling |= self.scrolls.get(&self.nodes[pi].id).is_some_and(|s| s.scrolling);
+                    if self.grows.get(&self.nodes[pi].id).is_some_and(|g| g.moving()) {
+                        in_growing_row = true;
+                    }
+                    a = self.nodes[pi].parent;
+                }
+                Some(ElementInfo {
+                    path: n.path.clone(),
+                    key: n.key.clone(),
+                    role: n.role,
+                    label: n.label.clone(),
+                    text: n.text.as_ref().map(|t| t.content.clone()),
+                    rect,
+                    target: [n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]],
+                    opacity: flight.map_or_else(|| self.inh_scratch.get(i).map_or(p.opacity, |h| h.opacity), |f| f.target_alpha),
+                    radius: p.radius.0[0],
+                    fill: self.color(n.id, P_FILL, n.vis.fill),
+                    text_color: n.text.as_ref().map(|t| t.color).or(n.vis.icon.map(|(_, c)| c)).map(|c| self.color(n.id, P_TEXT, c)),
+                    hover: self.scene.get(n.id, P_HOVER).unwrap_or(0.0),
+                    press: self.scene.get(n.id, P_PRESS).unwrap_or(0.0),
+                    moving,
+                    parent: n.parent,
+                    visible,
+                    revealing,
+                    in_growing_row,
+                    scrolling,
+                    virtual_extent: self.virtuals.contains_key(&n.path) && n.vis.fill.a == 0.0
+                        && n.vis.border_width == 0.0 && n.vis.shadows.is_empty() && n.text.is_none() && n.vis.icon.is_none(),
+                })
+            })
+            .collect();
+        for f in &self.flights {
+            let r = if self.reduced_motion { f.source } else { f.presented };
+            let c = if self.reduced_motion { f.source_clip } else { f.clip };
+            let path = format!("flight-source/{}", f.target_key);
+            let t = f.destination;
+            elements.push(ElementInfo {
+                key: Some(path.clone()), path, role: "text", label: None, text: None,
+                rect: [r.x, r.y, r.w, r.h], target: [t.x, t.y, t.w, t.h],
+                opacity: f.source_alpha, radius: 0.0, fill: Color::TRANSPARENT, text_color: None,
+                hover: 0.0, press: 0.0, moving: true, parent: None,
+                visible: [r.x.max(c[0]), r.y.max(c[1]), (r.edges()[2].min(c[2]) - r.x.max(c[0])).max(0.0),
+                    (r.edges()[3].min(c[3]) - r.y.max(c[1])).max(0.0)],
+                revealing: true, in_growing_row: false, scrolling: false, virtual_extent: false,
+            });
+        }
+        elements
+    }
+
+    /// Centre of the first non-exiting element whose key is `key`, or whose path ends with `key`
+    /// when it contains a `/` (e.g. `slider/knob`), in points.
+    pub fn find(&self, key: &str) -> Option<(f32, f32)> {
+        let i = if key.contains('/') {
+            let suffix = format!("/{key}");
+            self.nodes.iter().position(|n| !self.is_exiting(n.id) && (n.path == key || n.path.ends_with(&suffix)))?
+        } else {
+            self.nodes.iter().position(|n| !self.is_exiting(n.id) && n.key.as_deref() == Some(key))?
+        };
+        let r = self.drawn.get(i).copied()?;
+        Some((r[0] + r[2] * 0.5, r[1] + r[3] * 0.5))
+    }
+
+    pub fn clear_color(&self) -> [f32; 4] {
+        self.nodes.first().map_or([0.0, 0.0, 0.0, 1.0], |n| {
+            let c = self.color(n.id, P_FILL, n.vis.fill);
+            [c.r, c.g, c.b, 1.0]
+        })
+    }
+}
+
+fn merge(tx: &mut Tx, one: Tx) {
+    tx.text_flights.extend(one.text_flights);
+    if one.copy.is_some() { tx.copy = one.copy; }
+    tx.shell = tx.shell.max(one.shell);
+    tx.instant |= one.instant;
+    tx.settle |= one.settle;
+    tx.motion = one.motion.or(tx.motion);
+    tx.color_motion = one.color_motion.or(tx.color_motion);
+}
+
+trait CeilTo {
+    fn ceil_to(self, scale: f32) -> f32;
+}
+
+impl CeilTo for f32 {
+    /// Rounds up to whole device pixels.
+    fn ceil_to(self, scale: f32) -> f32 {
+        (self * scale - 1e-3).ceil() / scale
+    }
+}
+
+/// The longest prefix of `content` (at a char boundary, trailing space dropped) that fits in
+/// `max_w` device px with an ellipsis.
+fn truncated(text: &mut TextSystem, content: &str, spec: &TextSpec, scale: f32, max_w: f32) -> Rc<Layout<Ink>> {
+    let bounds: Vec<usize> = content.char_indices().map(|(i, _)| i).collect();
+    let (mut lo, mut hi) = (0usize, bounds.len());
+    let make = |text: &mut TextSystem, n: usize| {
+        let cut = bounds.get(n).copied().unwrap_or(content.len());
+        let s = format!("{}…", content[..cut].trim_end());
+        text.layout_rich(&s, &spec.spans, spec.style, scale, None)
+    };
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if make(text, mid).full_width() <= max_w + 0.5 { lo = mid } else { hi = mid - 1 }
+    }
+    make(text, lo)
+}
+
+fn glyph(q: &GlyphQuad, fill: [f32; 4], gamma: f32, clip: [f32; 4], fade: [f32; 4]) -> Instance {
+    Instance {
+        rect: q.rect,
+        radii: [0.0; 4],
+        fill,
+        border: [0.0; 4],
+        params: [0.0, KIND_GLYPH, 0.0, gamma],
+        uv: [q.uv[0], q.uv[1], 0.0, 0.0],
+        clip,
+        fade,
+    }
+}
+
+/// Where an anchored overlay of `size` goes next to `t` (x0, y0, x1, y1), flipped to the
+/// opposite side when it doesn't fit, then kept 8 points inside the viewport.
+fn anchor_position(a: &crate::el::Anchor, t: [f32; 4], size: (f32, f32), vp: (f32, f32)) -> (f32, f32) {
+    use crate::el::Side;
+    let (w, h) = size;
+    let margin = 8.0;
+    let along = |lo: f32, hi: f32, len: f32| match a.align {
+        Align::Start => lo,
+        Align::Center => (lo + hi - len) * 0.5,
+        Align::End => hi - len,
+    };
+    let (mut x, mut y) = match a.side {
+        Side::Top => (along(t[0], t[2], w), t[1] - h - a.gap),
+        Side::Bottom => (along(t[0], t[2], w), t[3] + a.gap),
+        Side::Left => (t[0] - w - a.gap, along(t[1], t[3], h)),
+        Side::Right => (t[2] + a.gap, along(t[1], t[3], h)),
+    };
+    // Flip the side when the other one fits (Floating UI's `flip`).
+    match a.side {
+        Side::Bottom if y + h > vp.1 - margin && t[1] - h - a.gap >= margin => y = t[1] - h - a.gap,
+        Side::Top if y < margin && t[3] + a.gap + h <= vp.1 - margin => y = t[3] + a.gap,
+        Side::Right if x + w > vp.0 - margin && t[0] - w - a.gap >= margin => x = t[0] - w - a.gap,
+        Side::Left if x < margin && t[2] + a.gap + w <= vp.0 - margin => x = t[2] + a.gap,
+        _ => {}
+    }
+    // Flip the alignment when it overflows and the other end fits, then shift along the side.
+    let vertical = matches!(a.side, Side::Top | Side::Bottom);
+    let (pos, lo, hi, len, room) = if vertical { (&mut x, t[0], t[2], w, vp.0) } else { (&mut y, t[1], t[3], h, vp.1) };
+    match a.align {
+        Align::End if *pos < margin && lo + len <= room - margin => *pos = lo,
+        Align::Start if *pos + len > room - margin && hi - len >= margin => *pos = hi - len,
+        _ => {}
+    }
+    *pos = pos.clamp(margin, (room - len - margin).max(margin));
+    // Along the main axis only keep the start edge inside; a long list may run off the far end.
+    if vertical { y = y.max(margin) } else { x = x.max(margin) }
+    (x, y)
+}
+
+fn rect_inst(rect: [f32; 4], fill: [f32; 4], radius: f32, clip: [f32; 4], fade: [f32; 4]) -> Instance {
+    Instance {
+        rect,
+        radii: [radius; 4],
+        fill,
+        border: [0.0; 4],
+        params: [0.0, KIND_RECT, 0.0, 1.0],
+        uv: [0.0; 4],
+        clip,
+        fade,
+    }
+}
+
+/// Coverage exponent: dark text on light gets a little more weight (linear blending thins it),
+/// light text on dark is left almost as rasterised.
+fn glyph_gamma(c: Color) -> f32 {
+    let l = srgb_encode(c.luminance());
+    0.78 + 0.22 * l
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flatten(
+    el: El,
+    parent: Option<usize>,
+    parent_path: &str,
+    index: usize,
+    motion: Spring,
+    in_row: bool,
+    taffy: &mut TaffyTree<usize>,
+    nodes: &mut Vec<Node>,
+    entries: &mut HashMap<String, LayoutEntry>,
+    scale: f32,
+) -> taffy::NodeId {
+    let seg = el.key.clone().unwrap_or_else(|| format!("#{index}"));
+    let path = if parent_path.is_empty() { seg } else { format!("{parent_path}/{seg}") };
+    let motion = el.motion.unwrap_or(motion);
+    let me = nodes.len();
+    let parent_is_stack = parent.is_some_and(|p| nodes[p].growth.is_some());
+    let virtual_mount = el.virtual_mount || parent.is_some_and(|p| nodes[p].virtual_mount);
+    let El {
+        key,
+        role,
+        label,
+        style,
+        vis,
+        text,
+        children,
+        on_press,
+        on_hover,
+        above,
+        on_drag,
+        opacity_motion,
+        lead,
+        width_leads,
+        transition,
+        scroll,
+        growth,
+        streaming,
+        input,
+        cursor,
+        ..
+    } = el;
+    let measured = text.is_some();
+    let measure = text.as_ref().map(|t| crate::text::text_hash(&t.content, &t.spans, t.style, scale, None) ^ u64::from(t.wrap) ^ (u64::from(t.truncate) << 1));
+    nodes.push(Node {
+        id: NodeId(0),
+        path: path.clone(),
+        key,
+        role,
+        label,
+        vis,
+        text,
+        text_layout: None,
+        on_press,
+        on_hover,
+        above,
+        on_drag,
+        motion,
+        opacity_motion,
+        lead,
+        width_leads,
+        transition,
+        scroll,
+        growth,
+        streaming,
+        input,
+        cursor,
+        in_row,
+        virtual_mount,
+        parent,
+        taffy: taffy::NodeId::from(0u64),
+        target: [0.0; 4],
+        local: MRect::ZERO,
+        inset: [0.0; 4],
+    });
+    let child_in_row = in_row || parent_is_stack;
+    let kids: Vec<taffy::NodeId> = children
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| flatten(c, Some(me), &path, i, motion, child_in_row, taffy, nodes, entries, scale))
+        .collect();
+    let id = if let Some(entry) = entries.get_mut(&path) {
+        let id = entry.id;
+        if taffy.style(id).unwrap() != &style {
+            taffy.set_style(id, style).unwrap();
+        }
+        if !taffy.child_ids(id).eq(kids.iter().copied()) {
+            taffy.set_children(id, &kids).unwrap();
+        }
+        // Context indices can move after insertion/reorder without invalidating measurements.
+        // Only text/style/scale changes invalidate the cached leaf result.
+        if entry.measure.is_some() != measured {
+            taffy.set_node_context(id, measured.then_some(me)).unwrap();
+        } else if measured {
+            *taffy.get_node_context_mut(id).unwrap() = me;
+        }
+        if entry.measure != measure {
+            taffy.mark_dirty(id).unwrap();
+        }
+        entry.measure = measure;
+        entry.used = true;
+        id
+    } else if !kids.is_empty() {
+        taffy.new_with_children(style, &kids).unwrap()
+    } else if measured {
+        taffy.new_leaf_with_context(style, me).unwrap()
+    } else {
+        taffy.new_leaf(style).unwrap()
+    };
+    if !entries.contains_key(&path) {
+        if measured && taffy.get_node_context(id).is_none() {
+            taffy.set_node_context(id, Some(me)).unwrap();
+        }
+        entries.insert(path, LayoutEntry { id, measure, used: true });
+    }
+    nodes[me].taffy = id;
+    id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::el::{col, el};
+
+    #[test]
+    fn cursor_follows_the_hovered_target_and_its_ancestors() {
+        use crate::el::Cursor;
+        struct State { field: crate::edit::TextEdit }
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            col().size(200.0, 200.0)
+                .child(el().key("button").size(200.0, 40.0).cursor(Cursor::Pointer).on_press(|_: &mut State| {}))
+                .child(el().key("handle").size(200.0, 40.0).cursor(Cursor::Grab)
+                    .child(el().key("inner").size(100.0, 40.0).on_press(|_: &mut State| {})))
+                .child(crate::el::text_input(&s.field, crate::tok::TextStyle::new(14.0, 400.0)).key("field").size(200.0, 40.0)
+                    .on_edit(|s: &mut State| &mut s.field))
+                .child(el().key("plain").size(200.0, 40.0).on_press(|_: &mut State| {}))
+        }
+        let mut rt = Runtime::new(State { field: crate::edit::TextEdit::new("") }, view, (200.0, 200.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        assert_eq!(rt.cursor(), Cursor::Default);
+        for (y, cursor) in [(20.0, Cursor::Pointer), (60.0, Cursor::Grab), (100.0, Cursor::Text), (140.0, Cursor::Default)] {
+            rt.pointer_move(50.0, y);
+            assert_eq!(rt.cursor(), cursor, "at y {y}");
+        }
+        rt.pointer_move(50.0, 20.0);
+        rt.pointer_down(50.0, 20.0);
+        rt.pointer_move(50.0, 140.0);
+        assert_eq!(rt.cursor(), Cursor::Pointer, "a held press keeps its cursor");
+        rt.pointer_up(50.0, 140.0);
+        assert_eq!(rt.cursor(), Cursor::Default);
+        rt.pointer_leave();
+        assert_eq!(rt.cursor(), Cursor::Default);
+    }
+
+    #[test]
+    fn delayed_opacity_handoff_never_overprints_the_outgoing_label() {
+        use rune_motion::AnimExt;
+        fn view(s: &(bool, bool), cx: &mut Cx<(bool, bool)>) -> El {
+            cx.reduced_motion(s.1);
+            let fade = |show| rune_motion::Curve::ease_in_out(0.18).delay(if show { 0.18 } else { 0.0 });
+            col().child(el().key("copy").size(28.0, 28.0).opacity(if s.0 { 0.0 } else { 1.0 }).opacity_motion(fade(!s.0)))
+                .child(el().key("working").size(28.0, 28.0).opacity(if s.0 { 1.0 } else { 0.0 }).opacity_motion(fade(s.0)))
+        }
+        for reduced in [false, true] {
+            let mut rt = Runtime::new((false, reduced), view, (100.0, 100.0), Env { system_dark: true, scale: 2.0 });
+            rt.frame(0.0);
+            for busy in [true, false] {
+                rt.state.0 = busy;
+                rt.invalidate();
+                for _ in 0..60 {
+                    rt.frame(1.0 / 120.0);
+                    let alpha = |key| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap().opacity;
+                    assert!(alpha("copy").min(alpha("working")) < 0.001);
+                }
+                assert!(!rt.animating);
+            }
+        }
+    }
+
+    #[test]
+    fn measurement_cannot_change_presented_geometry_or_motion_policy() {
+        fn view(changed: &bool, cx: &mut Cx<bool>) -> El {
+            cx.reduced_motion(*changed);
+            col().key("stack").w_full().growth(GrowthSpec::default())
+                .child(el().key("row").w_full().h(if *changed { 160.0 } else { 40.0 }))
+        }
+        let mut rt = Runtime::new(false, view, (300.0, 300.0), Env { system_dark: true, scale: 2.0 });
+        rt.frame(0.0);
+        let id = rt.nodes.iter().find(|n| n.key.as_deref() == Some("row")).unwrap().id;
+        let before = rt.scene.presented(id).unwrap().rect;
+        rt.state = true;
+        let measured = rt.measure(&Tx::default());
+        assert_eq!(rt.scene.presented(id).unwrap().rect, before);
+        assert_eq!(rt.scene.store().active_len(), 0);
+        assert_eq!(rt.grows[&id].h, 40.0);
+        assert!(!rt.reduced_motion && !rt.scene.store().reduced_motion());
+        rt.apply(measured, Tx::default());
+        assert!(rt.reduced_motion && rt.scene.store().reduced_motion());
+        assert_eq!(rt.grows[&id].h, 160.0);
+    }
+
+    #[test]
+    fn send_flight_follows_the_measured_bubble_while_earlier_rows_land() {
+        struct State { draft: crate::edit::TextEdit, sent: bool, height: f32 }
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let mut rows = col().w_full().growth(GrowthSpec::default())
+                .child(el().key("earlier").w_full().h(s.height));
+            if s.sent { rows = rows.child(col().key("bubble").w_full().py(8.0)
+                .child(crate::el::text("héllo flight").key("destination").wrap())); }
+            col().w_full().h_full()
+                .child(col().key("scroll").w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: true }).child(rows))
+                .child(crate::el::text_input(&s.draft, crate::tok::TextStyle::new(14.0, 400.0)).key("source").w_full().h(60.0)
+                    .on_edit(|s: &mut State| &mut s.draft)
+                    .on_submit(|s: &mut State, tx: &mut Tx| {
+                        s.sent = true;
+                        s.draft.clear();
+                        tx.fly_text("source", "destination");
+                    }))
+        }
+        let mut draft = crate::edit::TextEdit::new("héllo flight");
+        draft.focused = true;
+        let mut rt = Runtime::new(State { draft, sent: false, height: 80.0 }, view, (400.0, 300.0), Env { system_dark: true, scale: 2.0 });
+        rt.frame(0.0);
+        rt.state.height = 400.0;
+        rt.invalidate();
+        rt.frame(1.0 / 120.0);
+        rt.key(KeyEvent { key: crate::edit::Key::Enter, mods: Default::default() });
+        rt.frame(1.0 / 120.0);
+        assert_eq!(rt.flights.len(), 1);
+        assert!(!rt.flights[0].glyphs.is_empty(), "the visible composer glyphs survive clearing the model");
+        let mut previous_target = rt.flights[0].destination;
+        let mut retargets = 0;
+        for _ in 0..240 {
+            rt.frame(1.0 / 120.0);
+            if let Some(f) = rt.flights.first() {
+                assert!(rt.instances.iter().any(|q| q.params[1] == KIND_GLYPH && q.uv[2] > 0.0 && q.fill[3] > 0.1
+                    && q.rect[0].max(q.clip[0]) + 1.0 < (q.rect[0] + q.rect[2]).min(q.clip[2])
+                    && q.rect[1].max(q.clip[1]) + 1.0 < (q.rect[1] + q.rect[3]).min(q.clip[3])),
+                    "the source/destination handoff never loses every visible glyph");
+                let target = rt.nodes.iter().position(|n| n.key.as_deref() == Some("destination")).unwrap();
+                assert!((f.destination.y - rt.drawn[target][1]).abs() < 0.01, "destination is this frame's post-scroll geometry");
+                if f.destination != previous_target { retargets += 1; }
+                previous_target = f.destination;
+            }
+        }
+        assert!(retargets > 3, "earlier row growth actually moved the destination");
+        assert!(rt.flights.is_empty(), "flight lands and releases the captured glyphs");
+        assert!(!rt.animating);
+    }
+
+    #[test]
+    fn virtual_rows_match_full_layout_while_paging_and_keep_a_keyed_anchor() {
+        struct State { virtualized: bool, keys: Vec<usize> }
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let mut stack = col().key("rows").w_full().pt(8.0).pb(24.0).growth(GrowthSpec::default());
+            if s.virtualized { stack = stack.virtualize(80.0); }
+            for &i in &s.keys {
+                stack = stack.child(col().key(format!("r{i}")).w_full().pb(9.0).child(
+                    crate::el::text(format!("Row {i}: {}", "variable height héllo naïve ".repeat(i % 7 + 1))).wrap().w_full()
+                ));
+            }
+            col().key("scroll").w_full().h_full().clip_fade(0.0, 8.0, 0.0, 8.0).scroll(ScrollSpec { stick_bottom: true }).child(stack)
+        }
+        let env = Env { system_dark: true, scale: 2.0 };
+        let mut full = Runtime::new(State { virtualized: false, keys: (0..600).collect() }, view, (240.0, 300.0), env);
+        let mut window = Runtime::new(State { virtualized: true, keys: (0..600).collect() }, view, (240.0, 300.0), env);
+        full.frame(0.0);
+        window.frame(0.0);
+        assert!(window.nodes.len() < 100, "offscreen rows aren't laid out or retained in the scene");
+        assert!(window.text.shaped < full.text.shaped / 5, "offscreen text isn't shaped");
+        let visible = |r: &Runtime<State>| r.elements().into_iter()
+            .filter(|e| e.key.as_ref().is_some_and(|k| k.starts_with('r') && k != "rows") && e.visible[3] > 0.0)
+            .map(|e| (e.key.unwrap(), e.rect)).collect::<Vec<_>>();
+        for step in 0..135 {
+            let a = visible(&full);
+            let b = visible(&window);
+            assert_eq!(a.len(), b.len(), "visible count at step {step}: {a:?} vs {b:?}");
+            for ((ak, ar), (bk, br)) in a.iter().zip(&b) {
+                assert_eq!(ak, bk, "visible identity at step {step}");
+                assert!(ar.iter().zip(br).all(|(a, b)| (a - b).abs() < 0.05), "anchor at step {step}: {ak} {ar:?} vs {br:?}");
+            }
+            let dy = if step < 90 { 137.25 } else { -137.25 };
+            full.wheel(120.0, 150.0, dy);
+            window.wheel(120.0, 150.0, dy);
+            full.frame(1.0 / 120.0);
+            window.frame(1.0 / 120.0);
+        }
+        let before = visible(&window);
+        window.state.keys.insert(0, 9000);
+        window.invalidate();
+        window.frame(1.0 / 120.0);
+        assert_eq!(before, visible(&window), "prepending outside the window preserves its keyed anchor");
+        assert!(window.nodes.len() < 150 && window.grows.len() < 70, "paging releases old row state");
+        window.settle_all();
+        window.frame(0.0);
+        let last = visible(&window).pop().unwrap();
+        assert_eq!(last.0, "r599");
+        assert!((last.1[1] + last.1[3] - 276.0).abs() < 0.05, "return lands at the exact bottom");
+        assert!(!window.animating, "moving: {:?}; active: {}", window.elements().into_iter().filter(|e| e.moving).map(|e| (e.path, e.rect, e.target, e.opacity)).collect::<Vec<_>>(), window.scene.store().active_len());
+    }
+
+    #[test]
+    fn reduced_motion_rows_land_immediately_but_keep_the_presence_fade() {
+        fn view(show: &bool, cx: &mut Cx<bool>) -> El {
+            cx.reduced_motion(true);
+            let mut stack = col().w_full().growth(GrowthSpec::default());
+            if *show {
+                stack = stack.child(el().key("row").size(200.0, 100.0));
+            }
+            stack
+        }
+        let mut rt = Runtime::new(false, view, (200.0, 300.0), Env { system_dark: true, scale: 2.0 });
+        assert!(!rt.frame(0.0));
+        rt.state = true;
+        rt.invalidate();
+        rt.frame(1.0 / 120.0);
+        let row = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("row")).unwrap();
+        assert_eq!(row.rect[3], 100.0, "reduced motion removes growth travel");
+        assert!(row.opacity > 0.0 && row.opacity < 1.0, "new rows still fade in");
+        rt.frame(0.2);
+        assert!(!rt.animating);
+        assert_eq!(rt.elements().into_iter().find(|e| e.key.as_deref() == Some("row")).unwrap().opacity, 1.0);
+        rt.state = false;
+        rt.invalidate();
+        rt.frame(1.0 / 120.0);
+        let row = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("row")).unwrap();
+        assert!(row.opacity > 0.0 && row.opacity < 1.0, "removed rows stay for their fade");
+        for _ in 0..60 { rt.frame(1.0 / 120.0); }
+        assert!(!rt.animating);
+        assert!(rt.elements().iter().all(|e| e.key.as_deref() != Some("row")));
+    }
+
+    #[test]
+    fn clipboard_requests_follow_handler_order_and_are_consumed_once() {
+        use crate::edit::{Key, KeyEvent, Mods, TextEdit};
+        fn view(edit: &TextEdit, _: &mut Cx<TextEdit>) -> El {
+            col()
+                .child(el().key("copy").size(40.0, 28.0).on_press_tx(|_: &mut TextEdit, tx| tx.copy("response")))
+                .child(crate::el::text_input(edit, crate::tok::TextStyle::new(14.0, 400.0)).key("input").on_edit(|e: &mut TextEdit| e))
+        }
+        let mut edit = TextEdit::new("héllo 👋");
+        edit.anchor = 0;
+        let mut rt = Runtime::new(edit, view, (300.0, 200.0), Env { system_dark: true, scale: 2.0 });
+        rt.frame(0.0);
+        let button = rt.nodes.iter().find(|n| n.key.as_deref() == Some("copy")).unwrap().path.clone();
+        rt.focused = Some(rt.nodes.iter().find(|n| n.key.as_deref() == Some("input")).unwrap().path.clone());
+        let copy_key = KeyEvent { key: Key::Command('c'), mods: Mods { cmd: true, ..Mods::default() } };
+        rt.queue.push(Action::Press(button.clone()));
+        rt.queue.push(Action::Key(copy_key.clone()));
+        rt.frame(1.0 / 120.0);
+        assert_eq!(rt.copy_request.take().as_deref(), Some("héllo 👋"));
+        rt.frame(1.0 / 120.0);
+        assert!(rt.copy_request.is_none());
+        rt.queue.push(Action::Key(copy_key));
+        rt.queue.push(Action::Press(button));
+        rt.frame(1.0 / 120.0);
+        assert_eq!(rt.copy_request.take().as_deref(), Some("response"));
+    }
+
+    #[test]
+    fn streaming_fill_and_width_rewrap_land_on_completion() {
+        fn view(state: &(String, bool), _: &mut Cx<(String, bool)>) -> El {
+            col().w_full().growth(GrowthSpec::default()).child(
+                col().key("row").w_full().streaming(state.1).child(crate::el::text(state.0.clone()).wrap().w_full().reveal(0.18))
+            )
+        }
+        let mut rt = Runtime::new(("one".into(), true), view, (180.0, 500.0), Env { system_dark: true, scale: 2.0 });
+        rt.frame(0.0);
+        rt.state.0 = "one two three four five six seven eight nine ten eleven".into();
+        rt.invalidate();
+        rt.frame(1.0 / 120.0);
+        let row = rt.nodes.iter().find(|n| n.key.as_deref() == Some("row")).unwrap().id;
+        let n = &rt.nodes[rt.node_index[&row]];
+        let full = n.local.h;
+        assert!(rt.grows[&row].target < full, "new line is held back while filling");
+        for _ in 0..240 { rt.frame(1.0 / 120.0); }
+        assert!(!rt.animating, "partial line at rest must stop ticking");
+        let old_h = rt.grows[&row].h;
+        rt.set_viewport((600.0, 500.0), 2.0);
+        rt.state.0.push_str(" twelve");
+        rt.invalidate();
+        rt.frame(1.0 / 120.0);
+        assert!(rt.grows[&row].target < old_h, "width change may shrink a streaming row");
+        assert!(rt.grows[&row].h > rt.grows[&row].target, "rewrapped height eases instead of snapping");
+        rt.state.1 = false;
+        rt.invalidate();
+        for _ in 0..240 { rt.frame(1.0 / 120.0); }
+        assert!(!rt.animating);
+        assert_eq!(rt.grows[&row].h, rt.nodes[rt.node_index[&row]].local.h);
+    }
+
+    #[test]
+    fn retained_layout_matches_fresh_tree_across_edits() {
+        fn view(seed: &usize, _: &mut Cx<usize>) -> El {
+            let mut root = col().key("root").w_full();
+            for k in 0..8 {
+                let i = (k + seed) % 8;
+                if (i + seed) % 5 == 0 { continue; }
+                let body = "some words ".repeat((i + seed) % 10 + 1);
+                let child = if (i + seed) % 7 == 0 { el().h(31.0) } else { crate::el::text(body).wrap() };
+                root = root.child(child.key(format!("row-{i}")).w_full().px((seed % 3) as f32));
+            }
+            root
+        }
+        let env = Env { system_dark: true, scale: 2.0 };
+        let mut cached = Runtime::new(0usize, view, (320.0, 600.0), env);
+        for seed in 0..40 {
+            let size = (240.0 + (seed % 4) as f32 * 30.0, 600.0);
+            let scale = if seed % 3 == 0 { 1.0 } else { 2.0 };
+            cached.state = seed;
+            cached.set_viewport(size, scale);
+            cached.settle_all();
+            cached.frame(0.0);
+            let mut fresh = Runtime::new(seed, view, size, Env { scale, ..env });
+            fresh.frame(0.0);
+            let rects = |r: &Runtime<usize>| r.elements().into_iter().filter(|e| e.opacity > 0.0).map(|e| (e.path, e.target)).collect::<Vec<_>>();
+            assert_eq!(rects(&cached), rects(&fresh), "edit {seed}");
+        }
+    }
+
+    #[test]
+    fn presence_exits_stay_drawn_and_revive_mid_flight() {
+        fn view(show: &bool, _cx: &mut Cx<bool>) -> El {
+            let mut root = col().key("root").size(200.0, 100.0);
+            if *show {
+                root = root.child(
+                    el().key("badge")
+                        .size(80.0, 30.0)
+                        .fill(Color::WHITE)
+                        .transition(Transition::blur_replace()),
+                );
+            }
+            root
+        }
+
+        let mut rt = Runtime::new(true, view, (200.0, 100.0), Env { system_dark: true, scale: 2.0 });
+        assert!(!rt.frame(0.0), "first mount never animates");
+        assert_eq!(rt.elements().len(), 2);
+
+        // Remove the badge: it stays in the tree while its blur-replace exit runs.
+        rt.state = false;
+        rt.dirty = true;
+        assert!(rt.frame(1.0 / 60.0));
+        let badge = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("badge")).unwrap();
+        assert!(badge.opacity > 0.0 && badge.opacity < 1.0);
+
+        // Revive mid-exit: continues without a jump.
+        let before = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("badge")).unwrap().opacity;
+        rt.state = true;
+        rt.dirty = true;
+        rt.frame(1.0 / 60.0);
+        let after = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("badge")).unwrap().opacity;
+        assert!((after - before).abs() < 0.15, "{before} -> {after}");
+
+        // Remove again and run until settled: unmounts only after opacity reaches 0.
+        rt.state = false;
+        rt.dirty = true;
+        for _ in 0..120 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert!(!rt.animating);
+        assert!(rt.elements().iter().all(|e| e.key.as_deref() != Some("badge")));
+    }
+
+    #[test]
+    fn growth_rows_grow_and_sticky_scroll_lands_at_bottom() {
+        use crate::el::{GrowthSpec, ScrollSpec};
+        fn view(n: &usize, _cx: &mut Cx<usize>) -> El {
+            let mut stack = col().key("stack").growth(GrowthSpec::default());
+            for i in 0..*n {
+                stack = stack.child(el().key(format!("r{i}")).h(100.0).w_full());
+            }
+            col().key("root").child(col().key("scroll").h(300.0).w_full().scroll(ScrollSpec { stick_bottom: true }).child(stack))
+        }
+        let mut rt = Runtime::new(10usize, view, (200.0, 300.0), Env { system_dark: true, scale: 2.0 });
+        rt.frame(0.0);
+        // First frame: at the bottom, nothing animating (guarantee 8).
+        assert!(!rt.animating);
+        let last = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r9")).unwrap();
+        assert!((last.rect[1] + last.rect[3] - 300.0).abs() < 0.05, "{:?}", last.rect);
+        // A new row grows from 0 and the end stays pinned.
+        rt.state = 11;
+        rt.dirty = true;
+        rt.frame(1.0 / 60.0);
+        assert!(rt.animating);
+        let r10 = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r10")).unwrap();
+        assert!(r10.rect[3] < 100.0 && r10.rect[3] > 0.0);
+        for _ in 0..120 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert!(!rt.animating);
+        let r10 = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r10")).unwrap();
+        assert!((r10.rect[1] + r10.rect[3] - 300.0).abs() < 0.05, "{:?}", r10.rect);
+    }
+}

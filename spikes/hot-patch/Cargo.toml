@@ -1,0 +1,13 @@
+[package]
+name = "rune-hot-patch"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+subsecond = "=0.7.10"
+dioxus-devtools = { version = "=0.7.10", default-features = false }
+
+[profile.dev]
+opt-level = 0
+debug = 0
+incremental = true

@@ -1,0 +1,1146 @@
+//! The animation store: every animated property of every node, in flat arrays the render thread
+//! samples once per frame.
+//!
+//! - **Struct of arrays.** Lane targets, values, velocities and segments live in parallel `Vec`s;
+//!   a track (one property of one node) is a contiguous run of lanes.
+//! - **Only active tracks cost anything.** `tick` walks a dense list of active track indices.
+//!   Settled tracks snap to `(target, 0)`, leave the list and cost nothing until retargeted.
+//! - **No allocation per frame.** Pools for additive layers and delayed events use intrusive free
+//!   lists, and the event and touched buffers keep their capacity.
+//! - **Ids, not references.** `NodeId` + `Prop<T>` or a generational `TrackId`.
+
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+
+use crate::curve::{Anim, Blend, Curve, Decay, Velocity};
+use crate::layer::{Eps, Kind, Layer};
+use crate::props::{NodeId, Prop, PropClass, PropId};
+use crate::spring::Spring;
+use crate::value::{Animatable, MAX_LANES, lanes};
+
+const NONE: u32 = u32::MAX;
+/// Most additive layers a lane keeps before it collapses them into one merged segment.
+const MAX_ADDITIVE: usize = 8;
+
+/// A generational handle to one track.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TrackId {
+    index: u32,
+    generation: u32,
+}
+
+impl TrackId {
+    pub(crate) fn index_usize(self) -> usize {
+        self.index as usize
+    }
+}
+
+/// What happened during a tick (or since the last one).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MotionEvent {
+    /// The track reached `(target, 0)` and went dormant.
+    Settled { track: TrackId, node: NodeId, prop: PropId },
+    /// An animation started with `.completion(token)` finished (`finished`), or was replaced by a
+    /// newer animation before it did (`!finished`).
+    Completed { token: u64, node: NodeId, prop: PropId, finished: bool },
+}
+
+/// How a released gesture continues.
+#[derive(Clone, Copy, Debug)]
+pub enum Release<T> {
+    /// Spring to a target, starting from the release velocity.
+    Spring { target: T, spring: Spring },
+    /// Coast with exponential decay to the projected rest point.
+    Decay(Decay),
+    /// Coast, but if the projection leaves `[min, max]`, spring onto the bound with the velocity
+    /// the value has when it reaches it (scroll views). If it is already out of bounds
+    /// (rubber-banded), spring straight back.
+    DecayClamped { decay: Decay, min: T, max: T, spring: Spring },
+}
+
+#[derive(Clone, Copy)]
+struct Extra {
+    layer: Layer,
+    next: u32,
+}
+
+#[derive(Clone, Copy)]
+struct Pending {
+    at: f64,
+    target: f32,
+    /// NaN: inherit.
+    velocity: f32,
+    curve: Curve,
+    blend: Blend,
+    next: u32,
+}
+
+#[derive(Clone, Copy)]
+struct Meta {
+    node: NodeId,
+    prop: PropId,
+    class: PropClass,
+    generation: u32,
+    alive: bool,
+    epoch: u32,
+    token: u64,
+    logical_at: f64,
+    node_next: u32,
+}
+
+#[derive(Default)]
+pub(crate) struct Fx(u64);
+impl Hasher for Fx {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.add(b as u64);
+        }
+    }
+    fn write_u16(&mut self, i: u16) {
+        self.add(i as u64)
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.add(i as u64)
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.add(i)
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64)
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+impl Fx {
+    #[inline]
+    fn add(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+pub(crate) type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
+
+/// Optional diagnostics for inherited spatial spring retargets (points per second).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RetargetAudit {
+    pub lanes: u64,
+    pub max_velocity_error: f32,
+}
+
+/// All animated properties, sampled together at one presentation time.
+pub struct AnimationStore {
+    now: f64,
+    pixel_scale: f32,
+    reduced_motion: bool,
+
+    l_target: Vec<f32>,
+    l_value: Vec<f32>,
+    l_vel: Vec<f32>,
+    l_layer: Vec<Layer>,
+    l_more: Vec<u32>,
+    l_pending: Vec<u32>,
+    l_curve: Vec<Curve>,
+    lane_free: Vec<Vec<u32>>,
+
+    t_lane0: Vec<u32>,
+    t_n: Vec<u8>,
+    t_settle_at: Vec<f64>,
+    t_next_due: Vec<f64>,
+    t_slot: Vec<u32>,
+    t_meta: Vec<Meta>,
+    track_free: Vec<u32>,
+
+    active: Vec<u32>,
+    touched: Vec<u32>,
+    set_touched: Vec<u32>,
+
+    extra: Vec<Extra>,
+    extra_free: u32,
+    pending: Vec<Pending>,
+    pending_free: u32,
+
+    index: FxMap<(u64, u16), u32>,
+    node_head: FxMap<u64, u32>,
+
+    events: Vec<MotionEvent>,
+    events_seen: usize,
+    retarget_audit: Option<RetargetAudit>,
+}
+
+impl Default for AnimationStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AnimationStore {
+    pub fn new() -> Self {
+        AnimationStore {
+            now: 0.0,
+            pixel_scale: 2.0,
+            reduced_motion: false,
+            l_target: Vec::new(),
+            l_value: Vec::new(),
+            l_vel: Vec::new(),
+            l_layer: Vec::new(),
+            l_more: Vec::new(),
+            l_pending: Vec::new(),
+            l_curve: Vec::new(),
+            lane_free: (0..=MAX_LANES).map(|_| Vec::new()).collect(),
+            t_lane0: Vec::new(),
+            t_n: Vec::new(),
+            t_settle_at: Vec::new(),
+            t_next_due: Vec::new(),
+            t_slot: Vec::new(),
+            t_meta: Vec::new(),
+            track_free: Vec::new(),
+            active: Vec::new(),
+            touched: Vec::new(),
+            set_touched: Vec::new(),
+            extra: Vec::new(),
+            extra_free: NONE,
+            pending: Vec::new(),
+            pending_free: NONE,
+            index: FxMap::default(),
+            node_head: FxMap::default(),
+            events: Vec::new(),
+            events_seen: 0,
+            retarget_audit: None,
+        }
+    }
+
+    /// Pre-sizes for `tracks` tracks of about `lanes_per_track` lanes, so even the first frames
+    /// don't allocate.
+    pub fn with_capacity(tracks: usize, lanes_per_track: usize) -> Self {
+        let mut s = Self::new();
+        let lanes = tracks * lanes_per_track;
+        s.l_target.reserve(lanes);
+        s.l_value.reserve(lanes);
+        s.l_vel.reserve(lanes);
+        s.l_layer.reserve(lanes);
+        s.l_more.reserve(lanes);
+        s.l_pending.reserve(lanes);
+        s.l_curve.reserve(lanes);
+        s.t_lane0.reserve(tracks);
+        s.t_n.reserve(tracks);
+        s.t_settle_at.reserve(tracks);
+        s.t_next_due.reserve(tracks);
+        s.t_slot.reserve(tracks);
+        s.t_meta.reserve(tracks);
+        s.active.reserve(tracks);
+        s.touched.reserve(tracks);
+        s.events.reserve(tracks * 2);
+        s.index.reserve(tracks);
+        s.node_head.reserve(tracks);
+        s
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Time and policy
+
+    /// The presentation time animations are applied at and sampled for (seconds, from a [`crate::Clock`]).
+    pub fn now(&self) -> f64 {
+        self.now
+    }
+
+    /// Opt-in trace diagnostics; disabled in normal rendering. Measures inherited spatial
+    /// spring velocity at actual retarget boundaries, excluding deliberate instant cuts.
+    pub fn audit_retargets(&mut self, enabled: bool) {
+        self.retarget_audit = enabled.then(RetargetAudit::default);
+    }
+
+    pub fn take_retarget_audit(&mut self) -> RetargetAudit {
+        self.retarget_audit.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    /// Sets the frame's target presentation time. Apply this frame's commits after this, then `tick`.
+    pub fn set_time(&mut self, t: f64) {
+        self.now = t;
+    }
+
+    /// `set_time(t)` then `tick()`.
+    pub fn tick_at(&mut self, t: f64) {
+        self.now = t;
+        self.tick();
+    }
+
+    /// Device pixels per point; sets settle thresholds below the 1/64 px snap quantum.
+    pub fn set_pixel_scale(&mut self, scale: f32) {
+        self.pixel_scale = scale.max(1.0);
+    }
+
+    pub fn pixel_scale(&self) -> f32 {
+        self.pixel_scale
+    }
+
+    /// The OS Reduce Motion setting. Applied per property class to every new animation.
+    pub fn set_reduced_motion(&mut self, on: bool) {
+        self.reduced_motion = on;
+    }
+
+    pub fn reduced_motion(&self) -> bool {
+        self.reduced_motion
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Typed API
+
+    /// Sets a value immediately: direct manipulation, no animation, cancels anything running.
+    /// The first `set` or `animate` of a property creates its track.
+    pub fn set<T: Animatable>(&mut self, node: NodeId, prop: Prop<T>, value: T) -> TrackId {
+        let v = lanes(&value);
+        let t = self.ensure(node, prop.id, prop.class, &v[..T::LANES]);
+        self.set_raw(t, &v[..T::LANES]);
+        self.id_of(t as usize)
+    }
+
+    /// Animates a property to `target`. Retargets from the exact current position and velocity.
+    /// The first time a property is seen it is *set* instead: nothing animates on first mount.
+    /// An unchanged target is a no-op (the running trajectory is kept).
+    pub fn animate<T: Animatable>(
+        &mut self,
+        node: NodeId,
+        prop: Prop<T>,
+        target: T,
+        anim: impl Into<Anim>,
+    ) -> TrackId {
+        let v = lanes(&target);
+        let anim = anim.into();
+        match self.index.get(&(node.0, prop.id.0)).copied() {
+            None => self.set(node, prop, target),
+            Some(t) => {
+                self.check_lanes(t as usize, T::LANES);
+                self.animate_raw(t as usize, &v[..T::LANES], anim, None);
+                self.id_of(t as usize)
+            }
+        }
+    }
+
+    /// Sets `from` immediately, then animates to `to` (an explicit entrance).
+    pub fn animate_from<T: Animatable>(
+        &mut self,
+        node: NodeId,
+        prop: Prop<T>,
+        from: T,
+        to: T,
+        anim: impl Into<Anim>,
+    ) -> TrackId {
+        self.set(node, prop, from);
+        self.animate(node, prop, to, anim)
+    }
+
+    /// Animates with an explicit per-lane starting velocity (gesture handoff).
+    pub fn animate_with_velocity<T: Animatable>(
+        &mut self,
+        node: NodeId,
+        prop: Prop<T>,
+        target: T,
+        velocity: T,
+        anim: impl Into<Anim>,
+    ) -> TrackId {
+        let v = lanes(&target);
+        let vel = lanes(&velocity);
+        let t = self.ensure(node, prop.id, prop.class, &v[..T::LANES]) as usize;
+        self.animate_raw(t, &v[..T::LANES], anim.into(), Some(&vel[..T::LANES]));
+        self.id_of(t)
+    }
+
+    /// Hands a released gesture to physics, from its current value and the given velocity.
+    pub fn release<T: Animatable>(&mut self, node: NodeId, prop: Prop<T>, velocity: T, how: Release<T>) -> TrackId {
+        let vel = lanes(&velocity);
+        let cur = lanes(&self.sample(node, prop).expect("release: set the value before releasing it"));
+        let t = self.index[&(node.0, prop.id.0)] as usize;
+        let n = T::LANES;
+        match how {
+            Release::Spring { target, spring } => {
+                let tg = lanes(&target);
+                self.animate_raw(t, &tg[..n], Anim::new(Curve::Spring(spring)), Some(&vel[..n]));
+            }
+            Release::Decay(d) => {
+                // The decay's target is computed per lane from (x, v); pass the current values.
+                self.animate_raw(t, &cur[..n], Anim::new(Curve::Decay(d)), Some(&vel[..n]));
+            }
+            Release::DecayClamped { decay, min, max, spring } => {
+                let (lo, hi) = (lanes(&min), lanes(&max));
+                let k = decay.k();
+                let l0 = self.t_lane0[t] as usize;
+                let now = self.now;
+                let eps = self.t_meta[t].class.eps(self.pixel_scale);
+                for i in 0..n {
+                    let l = l0 + i;
+                    let (x, v) = (cur[i], vel[i]);
+                    self.cancel_pending(l);
+                    if x < lo[i] || x > hi[i] {
+                        let bound = x.clamp(lo[i], hi[i]);
+                        self.start_lane(l, now, bound, Curve::Spring(spring), Blend::Merge, Some(v), eps);
+                        continue;
+                    }
+                    let proj = x + v / k;
+                    self.start_lane(l, now, x, Curve::Decay(decay), Blend::Merge, Some(v), eps);
+                    let bound = if proj > hi[i] { Some(hi[i]) } else if proj < lo[i] { Some(lo[i]) } else { None };
+                    if let Some(b) = bound {
+                        // x + (v/k)(1 − e^{−kτ}) = b  →  τ = −ln(1 − (b − x)k/v) / k
+                        let tau = -((1.0 - (b - x) * k / v) as f64).ln() / k as f64;
+                        self.push_pending(l, Pending {
+                            at: now + tau.max(0.0),
+                            target: b,
+                            velocity: f32::NAN,
+                            curve: Curve::Spring(spring),
+                            blend: Blend::Merge,
+                            next: NONE,
+                        });
+                    }
+                }
+                self.commit_scheduled(t, now, 0);
+            }
+        }
+        self.id_of(t)
+    }
+
+    /// The value presented at the last `tick` (what's on screen).
+    pub fn get<T: Animatable>(&self, node: NodeId, prop: Prop<T>) -> Option<T> {
+        let t = *self.index.get(&(node.0, prop.id.0))? as usize;
+        let l0 = self.t_lane0[t] as usize;
+        Some(T::read_lanes(&self.l_value[l0..l0 + T::LANES]))
+    }
+
+    /// The velocity at the last `tick`, in units per second.
+    pub fn velocity<T: Animatable>(&self, node: NodeId, prop: Prop<T>) -> Option<T> {
+        let t = *self.index.get(&(node.0, prop.id.0))? as usize;
+        let l0 = self.t_lane0[t] as usize;
+        Some(T::read_lanes(&self.l_vel[l0..l0 + T::LANES]))
+    }
+
+    /// The exact value at the current `now()` (may be between ticks).
+    pub fn sample<T: Animatable>(&self, node: NodeId, prop: Prop<T>) -> Option<T> {
+        let t = *self.index.get(&(node.0, prop.id.0))? as usize;
+        let mut out = [0.0; MAX_LANES];
+        let l0 = self.t_lane0[t] as usize;
+        for (i, slot) in out.iter_mut().enumerate().take(T::LANES) {
+            *slot = self.sample_lane(l0 + i, self.now).0;
+        }
+        Some(T::read_lanes(&out[..T::LANES]))
+    }
+
+    /// The exact velocity at the current `now()`.
+    pub fn sample_velocity<T: Animatable>(&self, node: NodeId, prop: Prop<T>) -> Option<T> {
+        let t = *self.index.get(&(node.0, prop.id.0))? as usize;
+        let mut out = [0.0; MAX_LANES];
+        let l0 = self.t_lane0[t] as usize;
+        for (i, slot) in out.iter_mut().enumerate().take(T::LANES) {
+            *slot = self.sample_lane(l0 + i, self.now).1;
+        }
+        Some(T::read_lanes(&out[..T::LANES]))
+    }
+
+    /// Where the property is going (the latest target, including delayed ones).
+    pub fn target<T: Animatable>(&self, node: NodeId, prop: Prop<T>) -> Option<T> {
+        let t = *self.index.get(&(node.0, prop.id.0))? as usize;
+        let l0 = self.t_lane0[t] as usize;
+        let mut out = [0.0; MAX_LANES];
+        for (i, slot) in out.iter_mut().enumerate().take(T::LANES) {
+            *slot = self.final_target(l0 + i);
+        }
+        Some(T::read_lanes(&out[..T::LANES]))
+    }
+
+    pub fn has<T>(&self, node: NodeId, prop: Prop<T>) -> bool {
+        self.index.contains_key(&(node.0, prop.id.0))
+    }
+
+    pub fn is_animating<T>(&self, node: NodeId, prop: Prop<T>) -> bool {
+        self.index.get(&(node.0, prop.id.0)).is_some_and(|&t| self.t_slot[t as usize] != NONE)
+    }
+
+    pub fn track_id<T>(&self, node: NodeId, prop: Prop<T>) -> Option<TrackId> {
+        self.index.get(&(node.0, prop.id.0)).map(|&t| self.id_of(t as usize))
+    }
+
+    /// Is this exact track (not a reused slot) alive?
+    pub fn contains(&self, id: TrackId) -> bool {
+        self.t_meta.get(id.index as usize).is_some_and(|m| m.alive && m.generation == id.generation)
+    }
+
+    /// True once the track is at rest (or gone).
+    pub fn is_settled(&self, id: TrackId) -> bool {
+        !self.contains(id) || self.t_slot[id.index as usize] == NONE
+    }
+
+    /// Bumps every time the track gets a new animation; choreography uses it to tell whether a
+    /// track it started was taken over by something else.
+    pub fn epoch(&self, id: TrackId) -> Option<u32> {
+        self.contains(id).then(|| self.t_meta[id.index as usize].epoch)
+    }
+
+    /// When the track's latest animation logically completes (SwiftUI `.logicallyComplete`).
+    pub fn logical_end(&self, id: TrackId) -> Option<f64> {
+        self.contains(id).then(|| self.t_meta[id.index as usize].logical_at)
+    }
+
+    /// The node and property a track belongs to.
+    pub fn owner(&self, id: TrackId) -> Option<(NodeId, PropId)> {
+        self.contains(id).then(|| {
+            let m = &self.t_meta[id.index as usize];
+            (m.node, m.prop)
+        })
+    }
+
+    /// Removes one property's track.
+    pub fn remove<T>(&mut self, node: NodeId, prop: Prop<T>) {
+        if let Some(t) = self.index.get(&(node.0, prop.id.0)).copied() {
+            self.unlink_node(node, t);
+            self.free_track(t as usize);
+        }
+    }
+
+    /// Removes every track of a node.
+    pub fn remove_node(&mut self, node: NodeId) {
+        let mut t = self.node_head.remove(&node.0).unwrap_or(NONE);
+        while t != NONE {
+            let next = self.t_meta[t as usize].node_next;
+            self.free_track(t as usize);
+            t = next;
+        }
+    }
+
+    /// Live tuning: every lane currently springing on `old` re-springs on `new` from where it is,
+    /// at the same target (research 06 §2.6). Smooth because the swap keeps `(x, v)`.
+    pub fn retune(&mut self, old: Spring, new: Spring) {
+        let now = self.now;
+        for i in 0..self.active.len() {
+            let t = self.active[i] as usize;
+            let (l0, n) = (self.t_lane0[t] as usize, self.t_n[t] as usize);
+            let eps = self.t_meta[t].class.eps(self.pixel_scale);
+            let mut hit = false;
+            for l in l0..l0 + n {
+                if self.l_curve[l] == Curve::Spring(old) {
+                    let target = self.l_target[l];
+                    self.start_lane(l, now, target, Curve::Spring(new), Blend::Merge, None, eps);
+                    hit = true;
+                }
+            }
+            if hit {
+                self.recompute(t);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // The frame
+
+    /// Samples every active track at `now()`, applies due delayed animations, settles finished
+    /// tracks. Allocation-free once buffers have grown to the working-set size.
+    pub fn tick(&mut self) {
+        self.events.drain(..self.events_seen);
+        self.touched.clear();
+        self.touched.extend_from_slice(&self.set_touched);
+        self.set_touched.clear();
+        let now = self.now;
+        let mut i = 0;
+        while i < self.active.len() {
+            let t = self.active[i] as usize;
+            self.touched.push(t as u32);
+            if self.t_next_due[t] <= now {
+                self.apply_due(t, now);
+            }
+            let l0 = self.t_lane0[t] as usize;
+            let n = self.t_n[t] as usize;
+            let range = l0..l0 + n;
+            let mut stacked = false;
+            {
+                // One bounds check per track, then straight-line lane sampling.
+                let layers = &self.l_layer[range.clone()];
+                let more = &self.l_more[range.clone()];
+                let targets = &self.l_target[range.clone()];
+                let values = &mut self.l_value[range.clone()];
+                let vels = &mut self.l_vel[range.clone()];
+                for k in 0..n {
+                    let (o, v) = layers[k].sample(now);
+                    values[k] = targets[k] + o;
+                    vels[k] = v;
+                    stacked |= more[k] != NONE;
+                }
+            }
+            if stacked {
+                for l in range {
+                    if self.l_more[l] != NONE {
+                        let (o2, v2) = self.sample_extra(l, now, true);
+                        self.l_value[l] += o2;
+                        self.l_vel[l] += v2;
+                    }
+                }
+            }
+            if now >= self.t_settle_at[t] && self.t_next_due[t] == f64::INFINITY {
+                self.settle(t);
+                self.deactivate(t, i);
+                continue;
+            }
+            i += 1;
+        }
+        self.events_seen = self.events.len();
+    }
+
+    /// Events since the previous tick (settles, completions).
+    pub fn events(&self) -> &[MotionEvent] {
+        &self.events
+    }
+
+    /// Tracks sampled (or `set`) in the last tick: what changed on screen.
+    pub fn touched(&self) -> impl Iterator<Item = (NodeId, PropId)> + '_ {
+        self.touched.iter().map(|&t| {
+            let m = &self.t_meta[t as usize];
+            (m.node, m.prop)
+        })
+    }
+
+    /// Like [`touched`](Self::touched), with track ids.
+    pub fn touched_tracks(&self) -> impl Iterator<Item = (TrackId, NodeId, PropId)> + '_ {
+        self.touched.iter().map(|&t| {
+            let m = &self.t_meta[t as usize];
+            (TrackId { index: t, generation: m.generation }, m.node, m.prop)
+        })
+    }
+
+    /// The values presented at the last tick for a track, as raw lanes.
+    pub fn values_of(&self, id: TrackId) -> Option<&[f32]> {
+        self.contains(id).then(|| self.lane_values(id.index as usize))
+    }
+
+    /// The velocities at the last tick for a track, as raw lanes.
+    pub fn velocities_of(&self, id: TrackId) -> Option<&[f32]> {
+        self.contains(id).then(|| self.lane_velocities(id.index as usize))
+    }
+
+    /// Is the track currently animating?
+    pub fn is_active(&self, id: TrackId) -> bool {
+        self.contains(id) && self.t_slot[id.index as usize] != NONE
+    }
+
+    /// Exact `(value, velocity)` lanes of a track at `now()`, into `x` and `v`.
+    pub(crate) fn sample_exact(&self, id: TrackId, x: &mut [f32], v: &mut [f32]) -> bool {
+        if !self.contains(id) {
+            return false;
+        }
+        let t = id.index as usize;
+        let l0 = self.t_lane0[t] as usize;
+        for i in 0..self.t_n[t] as usize {
+            let (a, b) = self.sample_lane(l0 + i, self.now);
+            x[i] = a;
+            v[i] = b;
+        }
+        true
+    }
+
+    pub fn active_len(&self) -> usize {
+        self.active.len()
+    }
+
+    pub fn track_len(&self) -> usize {
+        self.t_meta.iter().filter(|m| m.alive).count()
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Untyped core (used by the scene, keyframes and choreography)
+
+    pub(crate) fn ensure(&mut self, node: NodeId, prop: PropId, class: PropClass, init: &[f32]) -> u32 {
+        if let Some(&t) = self.index.get(&(node.0, prop.0)) {
+            self.check_lanes(t as usize, init.len());
+            return t;
+        }
+        let n = init.len();
+        assert!(n > 0 && n <= MAX_LANES);
+        let l0 = self.lane_free[n].pop().unwrap_or_else(|| {
+            let l0 = self.l_target.len();
+            let end = l0 + n;
+            self.l_target.resize(end, 0.0);
+            self.l_value.resize(end, 0.0);
+            self.l_vel.resize(end, 0.0);
+            self.l_layer.resize(end, Layer::REST);
+            self.l_more.resize(end, NONE);
+            self.l_pending.resize(end, NONE);
+            self.l_curve.resize(end, Curve::Instant);
+            l0 as u32
+        });
+        for (i, &x) in init.iter().enumerate() {
+            let l = l0 as usize + i;
+            self.l_target[l] = x;
+            self.l_value[l] = x;
+            self.l_vel[l] = 0.0;
+            self.l_layer[l] = Layer::REST;
+            self.l_more[l] = NONE;
+            self.l_pending[l] = NONE;
+            self.l_curve[l] = Curve::Instant;
+        }
+        let head = self.node_head.get(&node.0).copied().unwrap_or(NONE);
+        let t = match self.track_free.pop() {
+            Some(t) => {
+                let t = t as usize;
+                let generation = self.t_meta[t].generation.wrapping_add(1);
+                self.t_meta[t] = Meta::new(node, prop, class, generation, head);
+                self.t_lane0[t] = l0;
+                self.t_n[t] = n as u8;
+                self.t_settle_at[t] = f64::NEG_INFINITY;
+                self.t_next_due[t] = f64::INFINITY;
+                self.t_slot[t] = NONE;
+                t as u32
+            }
+            None => {
+                self.t_meta.push(Meta::new(node, prop, class, 0, head));
+                self.t_lane0.push(l0);
+                self.t_n.push(n as u8);
+                self.t_settle_at.push(f64::NEG_INFINITY);
+                self.t_next_due.push(f64::INFINITY);
+                self.t_slot.push(NONE);
+                (self.t_meta.len() - 1) as u32
+            }
+        };
+        self.index.insert((node.0, prop.0), t);
+        self.node_head.insert(node.0, t);
+        t
+    }
+
+    pub(crate) fn id_of(&self, t: usize) -> TrackId {
+        TrackId { index: t as u32, generation: self.t_meta[t].generation }
+    }
+
+    fn check_lanes(&self, t: usize, n: usize) {
+        assert_eq!(
+            self.t_n[t] as usize, n,
+            "property {:?} of {:?} was created with {} lanes, used with {}",
+            self.t_meta[t].prop, self.t_meta[t].node, self.t_n[t], n
+        );
+    }
+
+    pub(crate) fn lane_targets_4(&self, t: usize) -> [f32; 4] {
+        let l0 = self.t_lane0[t] as usize;
+        core::array::from_fn(|i| self.final_target(l0 + i))
+    }
+
+    pub(crate) fn lane_values(&self, t: usize) -> &[f32] {
+        let l0 = self.t_lane0[t] as usize;
+        &self.l_value[l0..l0 + self.t_n[t] as usize]
+    }
+
+    pub(crate) fn lane_velocities(&self, t: usize) -> &[f32] {
+        let l0 = self.t_lane0[t] as usize;
+        &self.l_vel[l0..l0 + self.t_n[t] as usize]
+    }
+
+    pub(crate) fn set_raw(&mut self, t: u32, values: &[f32]) {
+        let t = t as usize;
+        let l0 = self.t_lane0[t] as usize;
+        for (i, &x) in values.iter().enumerate() {
+            let l = l0 + i;
+            self.cancel_pending(l);
+            self.free_extra(l);
+            self.l_layer[l] = Layer::REST;
+            self.l_target[l] = x;
+            self.l_value[l] = x;
+            self.l_vel[l] = 0.0;
+            self.l_curve[l] = Curve::Instant;
+        }
+        self.t_next_due[t] = f64::INFINITY;
+        self.t_settle_at[t] = f64::NEG_INFINITY;
+        self.take_token(t, false);
+        self.t_meta[t].epoch = self.t_meta[t].epoch.wrapping_add(1);
+        if self.t_slot[t] != NONE {
+            let slot = self.t_slot[t] as usize;
+            self.deactivate(t, slot);
+        }
+        self.set_touched.push(t as u32);
+    }
+
+    /// Animates lanes of track `t` toward `targets`. `lane_vel` overrides per-lane start velocity.
+    pub(crate) fn animate_raw(&mut self, t: usize, targets: &[f32], mut anim: Anim, lane_vel: Option<&[f32]>) {
+        let now = self.now;
+        if self.t_next_due[t] <= now {
+            self.apply_due(t, now);
+        }
+        let class = self.t_meta[t].class;
+        if self.reduced_motion {
+            anim.curve = class.reduce(anim.curve);
+        }
+        let eps = class.eps(self.pixel_scale);
+        let blend = anim.resolved_blend();
+        let l0 = self.t_lane0[t] as usize;
+        let mut changed = false;
+        for (i, &target) in targets.iter().enumerate() {
+            let l = l0 + i;
+            let vel = match (lane_vel, anim.velocity) {
+                (Some(v), _) => Some(v[i]),
+                (None, Velocity::Inherit) => None,
+                (None, Velocity::Zero) => Some(0.0),
+                (None, Velocity::Uniform(u)) => Some(u),
+            };
+            let decay = matches!(anim.curve, Curve::Decay(_));
+            if vel.is_none() && !decay && self.final_target(l) == target {
+                continue; // unchanged target: keep the running trajectory and any pending due time
+            }
+            changed = true;
+            self.cancel_pending(l);
+            if anim.delay > 0.0 {
+                self.push_pending(l, Pending {
+                    at: now + anim.delay as f64,
+                    target,
+                    velocity: vel.unwrap_or(f32::NAN),
+                    curve: anim.curve,
+                    blend,
+                    next: NONE,
+                });
+            } else {
+                let before = (self.retarget_audit.is_some() && class == PropClass::Spatial
+                    && matches!(anim.curve, Curve::Spring(_)) && vel.is_none()
+                    && self.l_layer[l].end > now).then(|| self.sample_lane(l, now).1);
+                self.start_lane(l, now, target, anim.curve, blend, vel, eps);
+                if let Some(before) = before {
+                    let error = (self.sample_lane(l, now).1 - before).abs();
+                    let audit = self.retarget_audit.as_mut().unwrap();
+                    audit.lanes += 1;
+                    audit.max_velocity_error = audit.max_velocity_error.max(error);
+                }
+            }
+        }
+        if changed {
+            let end = self.now + anim.delay as f64 + anim.curve.logical_duration() as f64;
+            self.commit_scheduled(t, end, anim.token);
+        } else if anim.token != 0 {
+            if self.t_slot[t] == NONE {
+                let m = self.t_meta[t];
+                self.events.push(MotionEvent::Completed { token: anim.token, node: m.node, prop: m.prop, finished: true });
+            } else {
+                self.take_token(t, false);
+                self.t_meta[t].token = anim.token;
+            }
+        }
+    }
+
+    /// Starts a new segment on lane `l` at time `at` from its exact state there.
+    #[allow(clippy::too_many_arguments)]
+    fn start_lane(&mut self, l: usize, at: f64, target: f32, curve: Curve, blend: Blend, vel: Option<f32>, eps: Eps) {
+        let (x, v) = self.sample_lane(l, at);
+        self.l_curve[l] = curve;
+        match curve {
+            Curve::Instant => {
+                self.free_extra(l);
+                self.l_layer[l] = Layer::REST;
+                self.l_target[l] = target;
+            }
+            Curve::Decay(d) => {
+                let v = vel.unwrap_or(v);
+                self.free_extra(l);
+                self.l_target[l] = x + v / d.k();
+                self.l_layer[l] = Layer::decay(d.k(), at, v, eps);
+            }
+            _ if blend == Blend::Additive => {
+                let old = self.l_target[l];
+                self.l_target[l] = target;
+                let layer = Layer::start(&curve, at, old - target, vel.map_or(0.0, |u| u - v), eps);
+                self.push_layer(l, layer, at);
+            }
+            _ => {
+                self.free_extra(l);
+                self.l_target[l] = target;
+                self.l_layer[l] = Layer::start(&curve, at, x - target, vel.unwrap_or(v), eps);
+            }
+        }
+    }
+
+    fn push_layer(&mut self, l: usize, layer: Layer, at: f64) {
+        if layer.kind == Kind::Rest {
+            return;
+        }
+        if self.l_layer[l].kind == Kind::Rest || self.l_layer[l].end <= at {
+            self.l_layer[l] = layer;
+            return;
+        }
+        let mut count = 1;
+        let mut m = self.l_more[l];
+        while m != NONE {
+            count += 1;
+            m = self.extra[m as usize].next;
+        }
+        if count >= MAX_ADDITIVE {
+            // Too many stacked layers: collapse into one merged segment on the new curve. Exact in
+            // position and velocity at `at`.
+            // The lane's target already moved; the new layer carries the difference.
+            let (x, v) = self.sample_lane(l, at);
+            let (o, ov) = layer.sample(at);
+            let (x, v) = (x + o, v + ov);
+            self.free_extra(l);
+            let target = self.l_target[l];
+            let curve = self.l_curve[l];
+            self.l_layer[l] = Layer::start(&curve, at, x - target, v, Eps { pos: 1e-4, vel: 1e-3 });
+            return;
+        }
+        let idx = self.alloc_extra(Extra { layer, next: self.l_more[l] });
+        self.l_more[l] = idx;
+    }
+
+    #[inline]
+    fn sample_lane(&self, l: usize, at: f64) -> (f32, f32) {
+        let (mut o, mut v) = self.l_layer[l].sample(at);
+        let mut m = self.l_more[l];
+        while m != NONE {
+            let e = &self.extra[m as usize];
+            let (a, b) = e.layer.sample(at);
+            o += a;
+            v += b;
+            m = e.next;
+        }
+        (self.l_target[l] + o, v)
+    }
+
+    /// Sums extra layers; with `prune`, frees the ones that have ended.
+    fn sample_extra(&mut self, l: usize, now: f64, prune: bool) -> (f32, f32) {
+        let (mut o, mut v) = (0.0, 0.0);
+        let mut prev = NONE;
+        let mut m = self.l_more[l];
+        while m != NONE {
+            let e = self.extra[m as usize];
+            if prune && now >= e.layer.end {
+                if prev == NONE {
+                    self.l_more[l] = e.next;
+                } else {
+                    self.extra[prev as usize].next = e.next;
+                }
+                self.extra[m as usize].next = self.extra_free;
+                self.extra_free = m;
+            } else {
+                let (a, b) = e.layer.sample(now);
+                o += a;
+                v += b;
+                prev = m;
+            }
+            m = e.next;
+        }
+        (o, v)
+    }
+
+    fn final_target(&self, l: usize) -> f32 {
+        let mut p = self.l_pending[l];
+        let mut target = self.l_target[l];
+        while p != NONE {
+            target = self.pending[p as usize].target;
+            p = self.pending[p as usize].next;
+        }
+        target
+    }
+
+    fn apply_due(&mut self, t: usize, now: f64) {
+        let l0 = self.t_lane0[t] as usize;
+        let n = self.t_n[t] as usize;
+        let eps = self.t_meta[t].class.eps(self.pixel_scale);
+        for l in l0..l0 + n {
+            loop {
+                let p = self.l_pending[l];
+                if p == NONE || self.pending[p as usize].at > now {
+                    break;
+                }
+                let ev = self.pending[p as usize];
+                self.l_pending[l] = ev.next;
+                self.pending[p as usize].next = self.pending_free;
+                self.pending_free = p;
+                let vel = if ev.velocity.is_nan() { None } else { Some(ev.velocity) };
+                self.start_lane(l, ev.at, ev.target, ev.curve, ev.blend, vel, eps);
+            }
+        }
+        self.recompute(t);
+    }
+
+    /// Recomputes the track's next due time and settle time from its lanes.
+    fn recompute(&mut self, t: usize) {
+        let l0 = self.t_lane0[t] as usize;
+        let n = self.t_n[t] as usize;
+        let mut due = f64::INFINITY;
+        let mut settle = f64::NEG_INFINITY;
+        for l in l0..l0 + n {
+            let p = self.l_pending[l];
+            if p != NONE {
+                due = due.min(self.pending[p as usize].at);
+            }
+            if self.l_layer[l].kind != Kind::Rest {
+                settle = settle.max(self.l_layer[l].end);
+            }
+            let mut m = self.l_more[l];
+            while m != NONE {
+                settle = settle.max(self.extra[m as usize].layer.end);
+                m = self.extra[m as usize].next;
+            }
+        }
+        self.t_next_due[t] = due;
+        self.t_settle_at[t] = settle;
+    }
+
+    fn settle(&mut self, t: usize) {
+        let l0 = self.t_lane0[t] as usize;
+        let n = self.t_n[t] as usize;
+        for l in l0..l0 + n {
+            self.free_extra(l);
+            self.l_layer[l] = Layer::REST;
+            self.l_value[l] = self.l_target[l];
+            self.l_vel[l] = 0.0;
+        }
+        let m = self.t_meta[t];
+        self.events.push(MotionEvent::Settled { track: self.id_of(t), node: m.node, prop: m.prop });
+        self.take_token(t, true);
+    }
+
+    fn take_token(&mut self, t: usize, finished: bool) {
+        let m = &mut self.t_meta[t];
+        if m.token != 0 {
+            let token = core::mem::take(&mut m.token);
+            let (node, prop) = (m.node, m.prop);
+            self.events.push(MotionEvent::Completed { token, node, prop, finished });
+        }
+    }
+
+    fn activate(&mut self, t: usize) {
+        if self.t_slot[t] == NONE {
+            self.t_slot[t] = self.active.len() as u32;
+            self.active.push(t as u32);
+        }
+    }
+
+    fn deactivate(&mut self, t: usize, slot: usize) {
+        self.active.swap_remove(slot);
+        if slot < self.active.len() {
+            let moved = self.active[slot] as usize;
+            self.t_slot[moved] = slot as u32;
+        }
+        self.t_slot[t] = NONE;
+    }
+
+    fn push_pending(&mut self, l: usize, mut ev: Pending) {
+        // Keep the lane's list sorted by time.
+        let mut prev = NONE;
+        let mut cur = self.l_pending[l];
+        while cur != NONE && self.pending[cur as usize].at <= ev.at {
+            prev = cur;
+            cur = self.pending[cur as usize].next;
+        }
+        ev.next = cur;
+        let idx = if self.pending_free != NONE {
+            let i = self.pending_free;
+            self.pending_free = self.pending[i as usize].next;
+            self.pending[i as usize] = ev;
+            i
+        } else {
+            self.pending.push(ev);
+            (self.pending.len() - 1) as u32
+        };
+        if prev == NONE {
+            self.l_pending[l] = idx;
+        } else {
+            self.pending[prev as usize].next = idx;
+        }
+    }
+
+    pub(crate) fn schedule(&mut self, t: usize, lane: usize, at: f64, target: f32, curve: Curve, blend: Blend, velocity: Option<f32>) {
+        let l = self.t_lane0[t] as usize + lane;
+        self.push_pending(l, Pending { at, target, velocity: velocity.unwrap_or(f32::NAN), curve, blend, next: NONE });
+    }
+
+    pub(crate) fn cancel_track_pending(&mut self, t: usize) {
+        let l0 = self.t_lane0[t] as usize;
+        for l in l0..l0 + self.t_n[t] as usize {
+            self.cancel_pending(l);
+        }
+    }
+
+    /// After `schedule` calls: recompute timing and wake the track.
+    pub(crate) fn commit_scheduled(&mut self, t: usize, logical_at: f64, token: u64) {
+        self.take_token(t, false);
+        let m = &mut self.t_meta[t];
+        m.token = token;
+        m.logical_at = logical_at;
+        m.epoch = m.epoch.wrapping_add(1);
+        self.recompute(t);
+        self.activate(t);
+    }
+
+    fn cancel_pending(&mut self, l: usize) {
+        let mut p = self.l_pending[l];
+        while p != NONE {
+            let next = self.pending[p as usize].next;
+            self.pending[p as usize].next = self.pending_free;
+            self.pending_free = p;
+            p = next;
+        }
+        self.l_pending[l] = NONE;
+    }
+
+    fn alloc_extra(&mut self, e: Extra) -> u32 {
+        if self.extra_free != NONE {
+            let i = self.extra_free;
+            self.extra_free = self.extra[i as usize].next;
+            self.extra[i as usize] = e;
+            i
+        } else {
+            self.extra.push(e);
+            (self.extra.len() - 1) as u32
+        }
+    }
+
+    fn free_extra(&mut self, l: usize) {
+        let mut m = self.l_more[l];
+        while m != NONE {
+            let next = self.extra[m as usize].next;
+            self.extra[m as usize].next = self.extra_free;
+            self.extra_free = m;
+            m = next;
+        }
+        self.l_more[l] = NONE;
+    }
+
+    fn unlink_node(&mut self, node: NodeId, t: u32) {
+        let head = self.node_head.get(&node.0).copied().unwrap_or(NONE);
+        if head == t {
+            let next = self.t_meta[t as usize].node_next;
+            if next == NONE {
+                self.node_head.remove(&node.0);
+            } else {
+                self.node_head.insert(node.0, next);
+            }
+            return;
+        }
+        let mut cur = head;
+        while cur != NONE {
+            let next = self.t_meta[cur as usize].node_next;
+            if next == t {
+                self.t_meta[cur as usize].node_next = self.t_meta[t as usize].node_next;
+                return;
+            }
+            cur = next;
+        }
+    }
+
+    fn free_track(&mut self, t: usize) {
+        if !self.t_meta[t].alive {
+            return;
+        }
+        let l0 = self.t_lane0[t] as usize;
+        let n = self.t_n[t] as usize;
+        for l in l0..l0 + n {
+            self.cancel_pending(l);
+            self.free_extra(l);
+        }
+        if self.t_slot[t] != NONE {
+            let slot = self.t_slot[t] as usize;
+            self.deactivate(t, slot);
+        }
+        self.set_touched.retain(|&x| x as usize != t);
+        self.touched.retain(|&x| x as usize != t);
+        let m = self.t_meta[t];
+        self.index.remove(&(m.node.0, m.prop.0));
+        self.lane_free[n].push(l0 as u32);
+        self.t_meta[t].alive = false;
+        self.t_meta[t].token = 0;
+        self.track_free.push(t as u32);
+    }
+}
+
+impl Meta {
+    fn new(node: NodeId, prop: PropId, class: PropClass, generation: u32, node_next: u32) -> Meta {
+        Meta { node, prop, class, generation, alive: true, epoch: 0, token: 0, logical_at: f64::NEG_INFINITY, node_next }
+    }
+}

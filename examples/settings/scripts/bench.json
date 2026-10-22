@@ -1,0 +1,10 @@
+{"events": [
+  {"t": 0.10, "type": "tap", "key": "Light", "hold": 0.03},
+  {"t": 0.20, "type": "tap", "key": "login", "hold": 0.03},
+  {"t": 0.30, "type": "tap", "key": "pink", "hold": 0.03},
+  {"t": 0.40, "type": "drag", "key": "slider/knob", "dx": 50, "dur": 0.4},
+  {"t": 1.00, "type": "tap", "key": "Dark", "hold": 0.03},
+  {"t": 1.10, "type": "tap", "key": "sounds", "hold": 0.03},
+  {"t": 1.20, "type": "tap", "key": "blue", "hold": 0.03},
+  {"t": 1.30, "type": "tap", "key": "slider/track", "hold": 0.03}
+]}

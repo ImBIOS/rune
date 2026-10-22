@@ -1,0 +1,264 @@
+//! Timeline growth: rows of a growth stack ease their heights on one spring with speed limits
+//! per second, and positions are derived from the presented heights above (so rows never
+//! overlap or open gaps). Streaming rows reveal through a feathered bottom edge.
+//!
+//! Desktop's constants (research/18, `row-growth.ts @ 39eb86d`) are per frame at 60 fps; here
+//! every cap is per second and the integrator runs fixed 1/240 s substeps, so 30, 60 and 120 Hz
+//! sample the same curve (guarantee 1). Retargets keep height and velocity (guarantee 2).
+
+use rune_motion::Spring;
+
+/// One streaming-edge variant (research/18 §1). Desktop's per-frame values × 60.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StreamEdge {
+    pub name: &'static str,
+    /// Largest feather height (points).
+    pub mask_max: f32,
+    /// Smallest feather height while growing (points).
+    pub floor: f32,
+    /// How fast the feather shrinks back (points per second).
+    pub shrink: f32,
+    /// Multiplier on the near-target slowdown cap.
+    pub catch_up: f32,
+    /// Multiplier on the growth spring's duration.
+    pub duration: f32,
+    /// Clip the row at its presented height (else content overflows while it grows).
+    pub clip: bool,
+    /// Word fade-in duration in seconds (0 = words appear at once).
+    pub word_fade: f32,
+}
+
+pub mod edge {
+    use super::StreamEdge;
+    pub const FEATHER: StreamEdge = StreamEdge {
+        name: "feather",
+        mask_max: 28.0,
+        floor: 18.0,
+        shrink: 1.8 * 60.0,
+        catch_up: 1.0,
+        duration: 1.0,
+        clip: true,
+        word_fade: 0.18,
+    };
+    pub const FAST_FEATHER: StreamEdge = StreamEdge {
+        name: "fast-feather",
+        mask_max: 12.0,
+        floor: 6.0,
+        shrink: 4.0 * 60.0,
+        catch_up: 2.4,
+        duration: 0.55,
+        clip: true,
+        word_fade: 0.18,
+    };
+    pub const NO_MASK: StreamEdge = StreamEdge {
+        name: "no-mask",
+        mask_max: 0.0,
+        floor: 0.0,
+        shrink: 28.0 * 60.0,
+        catch_up: 1.0,
+        duration: 1.0,
+        clip: false,
+        word_fade: 0.0,
+    };
+    pub const WORD_FADE: StreamEdge = StreamEdge {
+        name: "word-fade",
+        mask_max: 0.0,
+        floor: 0.0,
+        shrink: 28.0 * 60.0,
+        catch_up: 1.0,
+        duration: 1.0,
+        clip: false,
+        word_fade: 0.36,
+    };
+    pub const ALL: [StreamEdge; 4] = [FEATHER, FAST_FEATHER, NO_MASK, WORD_FADE];
+}
+
+/// `timeline.growth`: 0.32 s, bounce 0 (`row-growth.ts:6-14 @ 39eb86d`).
+pub const GROWTH: Spring = Spring::new(0.32, 0.0);
+
+/// Speed limits in points per second (Desktop's per-frame caps × 60).
+pub mod caps {
+    pub const START: f32 = 1.875 * 60.0;
+    /// Ramp factor per second. Desktop ramps 2.2× per 60 fps frame; Rune ramps 1.6× so a
+    /// growth starting from rest doesn't read as a velocity snap.
+    pub const RAMP_PER_S: f32 = 28.2; // ln(1.6) * 60
+    pub const MAX: f32 = 11.5 * 60.0;
+    pub const MAX_LONG: f32 = 16.0 * 60.0;
+    pub const LONG_DISTANCE: f32 = 240.0;
+    pub const CARRYING_TAIL: f32 = 7.5 * 60.0;
+    pub const NEAR: f32 = 36.0;
+    /// Feather growth limit.
+    pub const MASK_GROW: f32 = 5.0 * 60.0;
+    /// Hardest braking when a cap drops, in points per second squared (Rune's addition: Desktop
+    /// switches caps between frames, which motion-lint reads as a velocity snap).
+    pub const MAX_DECEL: f32 = 1800.0;
+    /// Speed ceiling near the target: APPROACH × points left (per second) plus APPROACH_MIN, so
+    /// every row decays into its target (Rune's addition, for the same reason).
+    pub const APPROACH: f32 = 14.0;
+    pub const APPROACH_MIN: f32 = 3.0;
+}
+
+pub const SUBSTEP: f32 = 1.0 / 240.0;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GrowTrack {
+    pub h: f32,
+    pub v: f32,
+    pub target: f32,
+    /// Seconds since this growth began (drives the cap ramp).
+    pub age: f32,
+    /// Presented feather height (points).
+    pub mask: f32,
+    pub streaming: bool,
+}
+
+impl GrowTrack {
+    pub fn settled(h: f32) -> GrowTrack {
+        GrowTrack { h, v: 0.0, target: h, age: 0.0, mask: 0.0, streaming: false }
+    }
+
+    pub fn moving(&self) -> bool {
+        (self.h - self.target).abs() > 1.0 / 128.0 || self.v.abs() > 0.5 || self.mask > 0.01
+    }
+
+    pub fn retarget(&mut self, target: f32) {
+        if (target - self.target).abs() > 1e-4 {
+            if !self.moving() {
+                self.age = 0.0;
+            }
+            self.target = target;
+        }
+    }
+
+    /// Advance one fixed substep.
+    pub fn step(&mut self, spring: Spring, edge: &StreamEdge, carrying_tail: bool) {
+        let dt = SUBSTEP;
+        let spring = spring.with_duration(spring.duration * edge.duration.max(0.05));
+        let rem = self.target - self.h;
+        if rem.abs() <= 1.0 / 128.0 && self.v.abs() < 0.5 {
+            self.h = self.target;
+            self.v = 0.0;
+        } else {
+            let (x, _v) = spring.sample(self.h, self.v, self.target, dt);
+            let mut cap = if rem.abs() > caps::LONG_DISTANCE { caps::MAX_LONG } else { caps::MAX };
+            if carrying_tail {
+                cap = cap.min(caps::CARRYING_TAIL);
+            }
+            cap = cap.min(caps::START * (caps::RAMP_PER_S * self.age).exp());
+            if self.streaming && rem > 0.0 && rem < caps::NEAR {
+                // Desktop's near-target slowdown, with its 0.65 px floor tapering over the last
+                // 4 points so the row settles instead of stopping dead.
+                cap = cap.min((0.085 * rem + 0.65 * (rem / 4.0).min(1.0)) * 60.0 * edge.catch_up);
+            }
+            // A cap that drops (near the target, carrying the tail) brakes at most MAX_DECEL, and
+            // never faster than lets the row still stop exactly at its target.
+            let braking = (2.0 * caps::MAX_DECEL * rem.abs()).sqrt();
+            cap = cap.max((self.v.abs() - caps::MAX_DECEL * dt).min(braking));
+            // The last points ease out exponentially, so a lagging row never arrives at speed.
+            cap = cap.min(caps::APPROACH * rem.abs() + caps::APPROACH_MIN);
+            let mut d = x - self.h;
+            let lim = cap * dt;
+            d = d.clamp(-lim, lim);
+            // A growth bent toward a nearer target lands there instead of overshooting.
+            let landed = (rem >= 0.0 && d >= rem) || (rem <= 0.0 && d <= rem);
+            if landed {
+                d = rem;
+            }
+            self.h += d;
+            self.v = if landed { 0.0 } else { d / dt };
+            self.age += dt;
+        }
+        // Feather: aims for min(max, max(floor, 1.5 × left to grow)); grows ≤ MASK_GROW/s.
+        let left = (self.target - self.h).max(0.0);
+        let aim = if left > 0.25 {
+            edge.mask_max.min(edge.floor.max(1.5 * left))
+        } else {
+            0.0
+        };
+        if aim > self.mask {
+            self.mask = (self.mask + caps::MASK_GROW * dt).min(aim);
+        } else {
+            self.mask = (self.mask - edge.shrink * dt).max(aim);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(fps: f32, dist: f32) -> Vec<(f32, f32)> {
+        let mut t = GrowTrack::settled(0.0);
+        t.retarget(dist);
+        let mut acc = 0.0;
+        let mut out = Vec::new();
+        let dt = 1.0 / fps;
+        for k in 1..=(2.0 * fps) as usize {
+            acc += dt;
+            while acc >= SUBSTEP - 1e-6 {
+                t.step(GROWTH, &edge::FEATHER, false);
+                acc -= SUBSTEP;
+            }
+            out.push((k as f32 * dt, t.h));
+        }
+        out
+    }
+
+    #[test]
+    fn same_curve_at_30_60_120_fps() {
+        let a = run(30.0, 457.0);
+        let c = run(120.0, 457.0);
+        for (t, h) in a {
+            let (_, h2) = c.iter().copied().find(|(t2, _)| (t2 - t).abs() < 1e-3).unwrap();
+            assert!((h - h2).abs() < 0.5, "t={t} {h} vs {h2}");
+        }
+    }
+
+    #[test]
+    fn monotone_and_capped() {
+        let r = run(120.0, 900.0);
+        let mut prev = 0.0;
+        for &(_, h) in &r {
+            assert!(h >= prev - 1e-4);
+            assert!(h - prev <= caps::MAX_LONG / 120.0 + 0.01);
+            prev = h;
+        }
+        assert!((r.last().unwrap().1 - 900.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn eases_into_target() {
+        for streaming in [false, true] {
+            let mut t = GrowTrack::settled(0.0);
+            t.streaming = streaming;
+            t.retarget(300.0);
+            let mut speeds = Vec::new();
+            let mut prev = 0.0;
+            for _ in 0..120 {
+                for _ in 0..4 {
+                    t.step(GROWTH, &edge::FEATHER, false);
+                }
+                speeds.push(t.h - prev);
+                prev = t.h;
+            }
+            // motion-lint's stop-dead: a frame at ≥ 0.5 px followed by one under 15% of it.
+            for w in speeds.windows(2) {
+                assert!(!(w[0] >= 0.5 && w[1] <= 0.15 * w[0]), "{streaming}: {speeds:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn retarget_keeps_velocity() {
+        let mut t = GrowTrack::settled(0.0);
+        t.retarget(100.0);
+        for _ in 0..24 {
+            t.step(GROWTH, &edge::FEATHER, false);
+        }
+        let (h, v) = (t.h, t.v);
+        t.retarget(200.0);
+        t.step(GROWTH, &edge::FEATHER, false);
+        assert!((t.v - v).abs() < v.abs() * 0.5 + 60.0, "{v} -> {}", t.v);
+        assert!(t.h > h);
+    }
+}

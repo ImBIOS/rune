@@ -1,0 +1,111 @@
+//! SegmentedControl (`@opencode/ui` navigation/segmented-control): equal segments over a layer
+//! with a sliding raised indicator.
+
+use rune::{Cursor, El, TextStyle, Tx, el, row, text};
+
+use crate::{Kit, State};
+
+type Pick = Box<dyn Fn(usize) -> Box<dyn FnOnce(El) -> El>>;
+
+pub struct SegmentedControl {
+    labels: Vec<String>,
+    selected: Option<usize>,
+    width: Option<f32>,
+    states: Vec<State>,
+    pick: Option<Pick>,
+}
+
+impl SegmentedControl {
+    pub fn new<S: AsRef<str>>(labels: &[S], selected: Option<usize>) -> SegmentedControl {
+        SegmentedControl {
+            labels: labels.iter().map(|l| l.as_ref().to_owned()).collect(),
+            selected,
+            width: Some(232.0),
+            states: Vec::new(),
+            pick: None,
+        }
+    }
+    /// Width in points (default 232); `None` fills the parent.
+    pub fn width(mut self, w: Option<f32>) -> Self {
+        self.width = w;
+        self
+    }
+    /// Force a segment's visual state (hover, focus, disabled).
+    pub fn segment_state(mut self, i: usize, s: State) -> Self {
+        if self.states.len() <= i {
+            self.states.resize(i + 1, State::Rest);
+        }
+        self.states[i] = s;
+        self
+    }
+    pub fn on_pick<S: 'static>(mut self, f: impl Fn(&mut S, usize, &mut Tx) + Clone + 'static) -> Self {
+        self.pick = Some(Box::new(move |i| {
+            let f = f.clone();
+            Box::new(move |e: El| e.on_press_tx(move |s: &mut S, tx: &mut Tx| f(s, i, tx)))
+        }));
+        self
+    }
+
+    pub fn build(self, k: &Kit) -> El {
+        let c = &k.c;
+        let n = self.labels.len().max(1);
+        let font = TextStyle { line_height: 13.0, ..k.ty.ui };
+        let mut root =
+            row().role("radiogroup").h(28.0).center_y().radius(6.0).fill(c.layer_01).box_shadow(rune::Shadow {
+                spread: 0.5,
+                color: c.border_base,
+                ..Default::default()
+            });
+        root = match self.width {
+            Some(w) => root.w(w),
+            None => root.w_full(),
+        };
+        if let (Some(sel), Some(w)) = (self.selected, self.width) {
+            let seg = w / n as f32;
+            root = root.child(
+                el().key("indicator")
+                    .size(seg, 28.0)
+                    .absolute(seg * sel as f32, 0.0)
+                    .radius(6.0)
+                    .fill(c.bg_base)
+                    .box_shadow(rune::Shadow { spread: 0.5, color: c.border_strong, ..Default::default() })
+                    .motion(k.motion.control),
+            );
+        }
+        for (i, l) in self.labels.into_iter().enumerate() {
+            let st = self.states.get(i).copied().unwrap_or_default();
+            let on = self.selected == Some(i);
+            let ink = if on || st == State::Hover { c.text_base } else { c.text_muted };
+            let mut seg = row()
+                .key(format!("segment{i}"))
+                .role("radio")
+                .label(l.clone())
+                .grow(1.0)
+                .shrink()
+                .h(28.0)
+                .px(12.0)
+                .center()
+                .radius(6.0)
+                .child(text(l).key("label").font(font).color(ink).truncate());
+            if self.width.is_none() && on {
+                seg = seg.fill(c.bg_base).box_shadow(rune::Shadow {
+                    spread: 0.5,
+                    color: c.border_strong,
+                    ..Default::default()
+                });
+            }
+            match st {
+                State::Focus => seg = seg.outline(2.0, 1.0, c.border_focus),
+                State::Disabled => seg = seg.opacity(0.45),
+                _ => {}
+            }
+            if st != State::Disabled
+                && let Some(p) = &self.pick
+            {
+                seg = p(i)(seg).cursor(Cursor::Pointer);
+            }
+            root = root.child(seg);
+        }
+        root
+    }
+}

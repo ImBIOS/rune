@@ -1,0 +1,30 @@
+{
+  "explicit_hotfn_signature": {
+    "saved_ns": 1792642443553528000,
+    "error": "Empty: ",
+    "before": {
+      "ns": 1792642443549997000,
+      "pid": 16842,
+      "counter": 60,
+      "vec0": 133,
+      "vec_ptr": 4356149072,
+      "state_addr": 6124137224,
+      "panel_width": 800,
+      "output": "rev=0;value=133;generic=g0:60;closure=70;trait=t0:800x600;static=1059;tls=2059;layout=48"
+    },
+    "last": {
+      "ns": 1792642448698142000,
+      "pid": 16842,
+      "counter": 666,
+      "vec0": 739,
+      "vec_ptr": 4356149072,
+      "state_addr": 6124137224,
+      "panel_width": 800,
+      "output": "rev=0;value=739;generic=g0:666;closure=676;trait=t0:800x600;static=1665;tls=2665;layout=48"
+    },
+    "dx_exit": null,
+    "all_patch_ns": [
+      1792642444347318000
+    ]
+  }
+}

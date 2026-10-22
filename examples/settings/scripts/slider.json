@@ -1,0 +1,4 @@
+{"events": [
+  {"t": 0.1, "type": "drag", "key": "slider/knob", "dx": -60, "dur": 0.3},
+  {"t": 0.8, "type": "tap", "key": "slider/track"}
+]}

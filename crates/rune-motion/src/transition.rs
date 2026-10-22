@@ -1,0 +1,220 @@
+//! SwiftUI-style composable transitions, as data the scene evaluates and the renderer draws.
+//!
+//! An [`Effect`] is what a node looks like when fully *absent*; presence progress `p` blends it
+//! toward identity (`p = 1`). Transitions pair an insertion and a removal effect.
+
+use crate::spring::SpringPair;
+use crate::tokens;
+use crate::value::Vec2;
+
+/// A side of a node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Edge {
+    Leading,
+    Trailing,
+    Top,
+    Bottom,
+}
+
+impl Edge {
+    /// Unit direction pointing out of the node through this edge (LTR).
+    pub fn direction(self) -> Vec2 {
+        match self {
+            Edge::Leading => Vec2::new(-1.0, 0.0),
+            Edge::Trailing => Vec2::new(1.0, 0.0),
+            Edge::Top => Vec2::new(0.0, -1.0),
+            Edge::Bottom => Vec2::new(0.0, 1.0),
+        }
+    }
+    pub fn opposite(self) -> Edge {
+        match self {
+            Edge::Leading => Edge::Trailing,
+            Edge::Trailing => Edge::Leading,
+            Edge::Top => Edge::Bottom,
+            Edge::Bottom => Edge::Top,
+        }
+    }
+}
+
+/// A soft-edged wipe: the mask's `edge` side is inset by `(1 − p) ×` the node's size, with a
+/// `feather`-point gradient ramp (Kit rule 11: no hard edges).
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Reveal {
+    /// The side the content is hidden behind when absent (it grows away from the opposite side).
+    pub edge: Edge,
+    pub feather: f32,
+}
+
+/// What an absent node looks like. Every field's identity value means "no change".
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Effect {
+    /// Opacity multiplier when absent (identity 1).
+    pub opacity: f32,
+    /// Uniform scale when absent (identity 1). Kept within [0.9, 1.1]: never scale to or from 0.
+    pub scale: f32,
+    /// Scale anchor in unit coordinates of the node (0.5, 0.5 = centre).
+    pub anchor: Vec2,
+    /// Offset in points when absent.
+    pub offset: Vec2,
+    /// Offset in fractions of the node's own size when absent (`.move(edge)`, `.push`).
+    pub offset_fraction: Vec2,
+    /// Blur radius in points when absent (identity 0). At most 4: only for in-place replacement.
+    pub blur: f32,
+    pub reveal: Option<Reveal>,
+}
+
+impl Default for Effect {
+    fn default() -> Self {
+        Effect::IDENTITY
+    }
+}
+
+impl Effect {
+    pub const IDENTITY: Effect = Effect {
+        opacity: 1.0,
+        scale: 1.0,
+        anchor: Vec2 { x: 0.5, y: 0.5 },
+        offset: Vec2::ZERO,
+        offset_fraction: Vec2::ZERO,
+        blur: 0.0,
+        reveal: None,
+    };
+
+    pub fn opacity(opacity: f32) -> Effect {
+        Effect { opacity, ..Effect::IDENTITY }
+    }
+    pub fn scale(scale: f32) -> Effect {
+        Effect { scale, ..Effect::IDENTITY }
+    }
+    pub fn blur(radius: f32) -> Effect {
+        Effect { blur: radius, ..Effect::IDENTITY }
+    }
+
+    /// Both effects at once: opacities and scales multiply, offsets add, blur takes the max.
+    pub fn combined(self, o: Effect) -> Effect {
+        Effect {
+            opacity: self.opacity * o.opacity,
+            scale: self.scale * o.scale,
+            anchor: if self.scale != 1.0 { self.anchor } else { o.anchor },
+            offset: Vec2::new(self.offset.x + o.offset.x, self.offset.y + o.offset.y),
+            offset_fraction: Vec2::new(
+                self.offset_fraction.x + o.offset_fraction.x,
+                self.offset_fraction.y + o.offset_fraction.y,
+            ),
+            blur: self.blur.max(o.blur),
+            reveal: self.reveal.or(o.reveal),
+        }
+    }
+
+    pub fn travels(&self) -> bool {
+        self.offset != Vec2::ZERO || self.offset_fraction != Vec2::ZERO
+    }
+
+    /// Kit's rules, enforced: scale in [0.9, 1.1] (never to or from 0), blur ≤ 4 px, no blur on
+    /// anything that travels (sliding content stays sharp), and nothing leaves at full opacity.
+    pub fn kit_rules(mut self, removal: bool) -> Effect {
+        self.scale = self.scale.clamp(0.9, 1.1);
+        self.blur = if self.travels() { 0.0 } else { self.blur.clamp(0.0, 4.0) };
+        self.opacity = self.opacity.clamp(0.0, 1.0);
+        if removal {
+            self.opacity = 0.0;
+        }
+        self
+    }
+}
+
+/// Insertion and removal effects plus how the node behaves while it leaves.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Transition {
+    pub insertion: Effect,
+    pub removal: Effect,
+    /// Motion's `AnimatePresence mode="popLayout"`: an exiting node leaves layout flow at once
+    /// (siblings reflow while it fades in place). The default.
+    pub pop_layout: bool,
+    /// Enter and exit springs. Exits run 10–25 % shorter.
+    pub springs: SpringPair,
+}
+
+impl Default for Transition {
+    fn default() -> Self {
+        Transition::opacity()
+    }
+}
+
+impl Transition {
+    fn symmetric(e: Effect) -> Transition {
+        Transition { insertion: e, removal: e, pop_layout: true, springs: tokens::pair::SETTLE }
+    }
+
+    /// No visual change (presence still holds removal until its fade settles).
+    pub fn identity() -> Transition {
+        Transition::symmetric(Effect::IDENTITY)
+    }
+    /// `.opacity`.
+    pub fn opacity() -> Transition {
+        Transition::symmetric(Effect::opacity(0.0))
+    }
+    /// `.scale(s)` about the centre, plus a fade.
+    pub fn scale(scale: f32) -> Transition {
+        Transition::symmetric(Effect { scale, opacity: 0.0, ..Effect::IDENTITY })
+    }
+    /// `.scale(s, anchor:)`.
+    pub fn scale_anchor(scale: f32, anchor: Vec2) -> Transition {
+        Transition::symmetric(Effect { scale, anchor, opacity: 0.0, ..Effect::IDENTITY })
+    }
+    /// `.offset(x:y:)`.
+    pub fn offset(x: f32, y: f32) -> Transition {
+        Transition::symmetric(Effect { offset: Vec2::new(x, y), ..Effect::IDENTITY })
+    }
+    /// `.move(edge:)`: in from and out to `edge`, by the node's full size.
+    pub fn move_edge(edge: Edge) -> Transition {
+        Transition::symmetric(Effect { offset_fraction: edge.direction(), ..Effect::IDENTITY })
+    }
+    /// `.push(from:)`: in from `edge`, out through the opposite edge, fading.
+    pub fn push(edge: Edge) -> Transition {
+        let e = |d: Edge| Effect { offset_fraction: d.direction(), opacity: 0.0, ..Effect::IDENTITY };
+        Transition { insertion: e(edge), removal: e(edge.opposite()), ..Transition::symmetric(Effect::IDENTITY) }
+    }
+    /// `.slide`: in from the leading edge, out through the trailing edge.
+    pub fn slide() -> Transition {
+        let e = |d: Edge| Effect { offset_fraction: d.direction(), ..Effect::IDENTITY };
+        Transition { insertion: e(Edge::Leading), removal: e(Edge::Trailing), ..Transition::symmetric(Effect::IDENTITY) }
+    }
+    /// `.blurReplace`: Kit's whole-element in-place replacement: 4 px blur, scale .96, fade.
+    pub fn blur_replace() -> Transition {
+        Transition::symmetric(Effect { opacity: 0.0, scale: 0.96, blur: 4.0, ..Effect::IDENTITY })
+    }
+    /// Blur and fade only.
+    pub fn blur(radius: f32) -> Transition {
+        Transition::symmetric(Effect { opacity: 0.0, blur: radius, ..Effect::IDENTITY })
+    }
+    /// A soft-edged wipe from `edge` (mask reveal), 24 pt feather.
+    pub fn reveal(edge: Edge) -> Transition {
+        Transition::symmetric(Effect { reveal: Some(Reveal { edge, feather: 24.0 }), ..Effect::IDENTITY })
+    }
+    /// `.asymmetric(insertion:removal:)`.
+    pub fn asymmetric(insertion: Transition, removal: Transition) -> Transition {
+        Transition { insertion: insertion.insertion, removal: removal.removal, ..insertion }
+    }
+    /// `.combined(with:)`.
+    pub fn combined(self, other: Transition) -> Transition {
+        Transition {
+            insertion: self.insertion.combined(other.insertion),
+            removal: self.removal.combined(other.removal),
+            ..self
+        }
+    }
+    pub fn springs(mut self, springs: SpringPair) -> Transition {
+        self.springs = springs;
+        self
+    }
+    /// Keep the exiting node in flow (its slot collapses as it leaves) instead of popping it out.
+    pub fn hold_layout(mut self) -> Transition {
+        self.pop_layout = false;
+        self
+    }
+}

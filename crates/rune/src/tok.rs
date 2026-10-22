@@ -1,0 +1,148 @@
+//! Design tokens: the one place for colour, space, radius, type and motion.
+
+use crate::color::{Color, oklch, oklcha};
+
+pub mod motion {
+    pub use rune_motion::motion::*;
+    /// The leading edge of something travelling (width leads).
+    pub const LEAD: rune_motion::Spring = rune_motion::Spring::new(0.2, 0.0);
+}
+
+pub mod space {
+    pub const S1: f32 = 4.0;
+    pub const S2: f32 = 8.0;
+    pub const S3: f32 = 12.0;
+    pub const S6: f32 = 24.0;
+}
+
+pub mod radius {
+    pub const SM: f32 = 6.0;
+    pub const MD: f32 = 8.0;
+    pub const LG: f32 = 12.0;
+}
+
+/// Which of the app's two font families a style uses (`AppSpec::families` names them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum Family {
+    #[default]
+    Sans,
+    Mono,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextStyle {
+    pub size: f32,
+    pub weight: f32,
+    pub family: Family,
+    /// Line height in points; 0 means 1.25 × size.
+    pub line_height: f32,
+    /// Letter spacing in points.
+    pub tracking: f32,
+}
+
+impl TextStyle {
+    pub const fn new(size: f32, weight: f32) -> TextStyle {
+        TextStyle { size, weight, family: Family::Sans, line_height: 0.0, tracking: 0.0 }
+    }
+    pub const fn mono(self) -> TextStyle {
+        TextStyle { family: Family::Mono, ..self }
+    }
+    pub const fn lh(self, line_height: f32) -> TextStyle {
+        TextStyle { line_height, ..self }
+    }
+    pub const fn tracking(self, tracking: f32) -> TextStyle {
+        TextStyle { tracking, ..self }
+    }
+    /// Resolved line height in points.
+    pub fn line_px(&self) -> f32 {
+        if self.line_height > 0.0 { self.line_height } else { self.size * 1.25 }
+    }
+}
+
+pub mod type_ {
+    use super::TextStyle;
+    pub const BODY: TextStyle = TextStyle::new(13.0, 400.0);
+    pub const LABEL: TextStyle = TextStyle::new(12.0, 500.0);
+    pub const SECTION: TextStyle = TextStyle::new(11.5, 600.0);
+    pub const TITLE: TextStyle = TextStyle::new(13.0, 600.0);
+    pub const MONO_CAPTION: TextStyle = TextStyle::new(12.0, 500.0);
+}
+
+/// Semantic colours for one appearance. Alphas are for linear-light blending, so white overlays
+/// on dark are much lower and black overlays on light much higher than their sRGB/CSS equivalents.
+#[derive(Clone, Copy, Debug)]
+pub struct Theme {
+    pub bg: Color,
+    pub card: Color,
+    pub card_border: Color,
+    pub text: Color,
+    pub text_secondary: Color,
+    pub separator: Color,
+    pub control_track: Color,
+    pub control_off: Color,
+    pub indicator: Color,
+    pub knob: Color,
+    pub hover: Color,
+    pub press: Color,
+    pub shadow: Color,
+    pub shadow_soft: Color,
+    /// Hairline contact shadow under raised controls.
+    pub edge: Color,
+    pub knob_shadow: Color,
+}
+
+pub fn theme(dark: bool) -> Theme {
+    if dark {
+        Theme {
+            bg: oklch(0.185, 0.004, 265.0),
+            card: oklch(0.232, 0.005, 265.0),
+            card_border: oklcha(1.0, 0.0, 0.0, 0.05),
+            text: oklch(0.955, 0.003, 265.0),
+            text_secondary: oklch(0.72, 0.008, 265.0),
+            separator: oklcha(1.0, 0.0, 0.0, 0.055),
+            control_track: oklcha(1.0, 0.0, 0.0, 0.05),
+            control_off: oklcha(1.0, 0.0, 0.0, 0.085),
+            indicator: oklch(0.43, 0.006, 265.0),
+            knob: oklch(0.985, 0.0, 0.0),
+            hover: oklcha(1.0, 0.0, 0.0, 0.016),
+            press: oklcha(1.0, 0.0, 0.0, 0.03),
+            shadow: oklcha(0.0, 0.0, 0.0, 0.42),
+            shadow_soft: oklcha(0.0, 0.0, 0.0, 0.28),
+            edge: oklcha(0.0, 0.0, 0.0, 0.3),
+            knob_shadow: oklcha(0.0, 0.0, 0.0, 0.3),
+        }
+    } else {
+        Theme {
+            bg: oklch(0.958, 0.004, 265.0),
+            card: oklch(1.0, 0.0, 0.0),
+            card_border: oklcha(0.0, 0.0, 0.0, 0.1),
+            text: oklch(0.225, 0.006, 265.0),
+            text_secondary: oklch(0.5, 0.01, 265.0),
+            separator: oklcha(0.0, 0.0, 0.0, 0.13),
+            control_track: oklcha(0.2, 0.01, 265.0, 0.13),
+            control_off: oklcha(0.2, 0.01, 265.0, 0.24),
+            indicator: oklch(1.0, 0.0, 0.0),
+            knob: oklch(1.0, 0.0, 0.0),
+            hover: oklcha(0.2, 0.01, 265.0, 0.07),
+            press: oklcha(0.2, 0.01, 265.0, 0.12),
+            shadow: oklcha(0.2, 0.02, 265.0, 0.16),
+            shadow_soft: oklcha(0.2, 0.02, 265.0, 0.07),
+            edge: oklcha(0.2, 0.02, 265.0, 0.2),
+            knob_shadow: oklcha(0.2, 0.02, 265.0, 0.3),
+        }
+    }
+}
+
+pub const ACCENT_NAMES: [&str; 6] = ["blue", "purple", "pink", "orange", "green", "graphite"];
+
+pub fn accent(i: usize, dark: bool) -> Color {
+    let l = if dark { 0.66 } else { 0.6 };
+    match i % 6 {
+        0 => oklch(l, 0.17, 256.0),
+        1 => oklch(l, 0.18, 300.0),
+        2 => oklch(l + 0.02, 0.19, 357.0),
+        3 => oklch(l + 0.08, 0.16, 58.0),
+        4 => oklch(l + 0.04, 0.16, 152.0),
+        _ => oklch(l - 0.02, 0.012, 265.0),
+    }
+}

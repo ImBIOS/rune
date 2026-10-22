@@ -1,0 +1,24 @@
+[
+  {
+    "name": "cold",
+    "elapsed_ms": 79599.681459,
+    "exit": 0,
+    "command": [
+      "cargo",
+      "build",
+      "--target-dir",
+      "target/normal"
+    ]
+  },
+  {
+    "name": "incremental",
+    "elapsed_ms": 1671.94775,
+    "exit": 0,
+    "command": [
+      "cargo",
+      "build",
+      "--target-dir",
+      "target/normal"
+    ]
+  }
+]
