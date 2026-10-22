@@ -402,6 +402,12 @@ fn video_gpu_colour_sharpness_geometry_and_lifetime() {
     sprung.submit(&gpu.queue, encoder);
     assert_eq!(target.read(&gpu.device), p, "retained-springs binding must survive the video draw");
 
+    // A custom compositor can omit video. Preparing it alone must not report a submission.
+    let submitted = surface.counts().0;
+    renderer.prepare_surfaces(&gpu.device, &gpu.queue, &rt.surfaces, (16, 8));
+    renderer.submit(&gpu.queue, gpu.device.create_command_encoder(&Default::default()));
+    assert_eq!(surface.counts().0, submitted, "undrawn video must not report submission");
+
     // External pass timing takes precedence without resolving NativeSurface's unwritten
     // query set. Frame completion still arrives, with no native GPU timestamps.
     if gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
