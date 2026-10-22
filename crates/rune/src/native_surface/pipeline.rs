@@ -276,7 +276,9 @@ impl SurfaceRenderer {
                 if self.importer.is_none() {
                     self.importer = Some(macos::Importer::new(device)?);
                 }
-                objc2_video::rc::autoreleasepool(|_| self.importer.as_ref().unwrap().import(b, frame.format, frame.size))?
+                objc2_video::rc::autoreleasepool(|_| {
+                    self.importer.as_ref().unwrap().import(b, frame.format, frame.size)
+                })?
             }
         };
         Ok(Imported { frame, textures })
@@ -306,7 +308,7 @@ impl SurfaceRenderer {
         pass.set_bind_group(0, &self.draws[index].bind, &[]);
         pass.draw(0..4, 0..1);
     }
-    pub fn submit(&self, queue: &wgpu::Queue, mut encoder: wgpu::CommandEncoder) -> wgpu::SubmissionIndex {
+    pub fn submit(&self, queue: &wgpu::Queue, encoder: wgpu::CommandEncoder) -> wgpu::SubmissionIndex {
         let submitted_at = Instant::now();
         let frames: Vec<_> = self
             .draws

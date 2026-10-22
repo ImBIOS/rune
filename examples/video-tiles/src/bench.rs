@@ -105,11 +105,14 @@ pub fn run() {
                 }
             }
             let gpu_ms = timings.lock().unwrap().clone();
+            if gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+                assert_eq!(gpu_ms.len(), 30, "every submitted frame must have a valid GPU timestamp pair");
+            }
             for s in &surfaces {
                 assert_eq!(s.last_error(), None);
             }
             if run > 0 {
-                runs.push(serde_json::json!({"cpu_p50_ms":median(&cpu),"cpu_p95_ms":percentile(&cpu,0.95),"gpu_p50_ms":median(&gpu_ms),"gpu_p95_ms":percentile(&gpu_ms,0.95)}));
+                runs.push(serde_json::json!({"cpu_p50_ms":median(&cpu),"cpu_p95_ms":percentile(&cpu,0.95),"gpu_samples":gpu_ms.len(),"gpu_p50_ms":median(&gpu_ms),"gpu_p95_ms":percentile(&gpu_ms,0.95)}));
             }
         }
         let cpu: Vec<_> = runs.iter().map(|r| r["cpu_p50_ms"].as_f64().unwrap()).collect();
