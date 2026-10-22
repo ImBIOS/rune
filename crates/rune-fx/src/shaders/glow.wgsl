@@ -62,10 +62,10 @@ fn shade(in: VOut) -> vec4f {
         let m = 0.45 * mask_tent(uv, max(base - 1.0, 0.0)) + 0.35 * mask_tent(uv, max(base, 0.0))
               + 0.2 * mask_tent(uv, base + 1.3);
         let core = textureSampleLevel(source, samp, uv, 0.0).a;
-        let g = m * 1.25;
+        let g = knee(m * 1.25 * intensity) * 1.1;
         let hotc = core * hot * smoothstep(0.55, 1.0, heat);
-        light = tint * g * intensity + i.c1.rgb * hotc * intensity * 0.6;
-        alpha = min(g * intensity * occl, 1.0);
+        light = tint * g + i.c1.rgb * hotc * intensity * 0.6;
+        alpha = min(g * occl, 1.0);
         return finish(vec4f(light, alpha), in.px);
     }
 
@@ -75,8 +75,9 @@ fn shade(in: VOut) -> vec4f {
         let gl = mix(in_g, out_g, edge);
         let corew = gauss(max(c.d, 0.0), 0.3 * radius) * hot * smoothstep(0.6, 1.0, heat);
         let col = mix(tint, i.c1.rgb, corew * 0.8);
-        light = col * gl * intensity;
-        alpha = gl * intensity * occl;
+        let e = knee(gl * intensity * 1.1);
+        light = col * e;
+        alpha = e * occl;
     } else if (c.variant == 1) {
         // Neon: a white-hot hairline core on the border, coloured bloom both sides.
         let w = max(i.p2.y, c.aa * 0.75);
@@ -84,8 +85,9 @@ fn shade(in: VOut) -> vec4f {
         let out_g = bloom(c.d, radius, reach) * edge;
         let in_g = inner * bloom(-c.d, radius * 0.6, reach) * (1.0 - edge);
         let corec = mix(tint, i.c1.rgb, 0.7 * hot * smoothstep(0.5, 1.0, heat));
-        light = corec * core * 1.4 * intensity + tint * (out_g + in_g) * 0.85 * intensity;
-        alpha = (core * 0.6 + (out_g + in_g) * occl) * intensity;
+        let e = knee((out_g + in_g) * intensity);
+        light = corec * core * 1.4 * intensity + tint * e * 0.9;
+        alpha = core * 0.6 * intensity + e * occl;
     } else {
         // Aura: spectrum flowing around the perimeter, inner rim light + outer bloom + hairline.
         let pr = rrect_perim(c.q, c.half, c.r);
@@ -98,9 +100,9 @@ fn shade(in: VOut) -> vec4f {
         let out_g = bloom(c.d, radius, reach) * edge;
         let in_g = inner * exp(min(c.d, 0.0) / (0.55 * radius)) * (1.0 - edge);
         let hair = gauss(c.d + 0.6, max(i.p2.y, c.aa)) * 0.9;
-        let lit = (out_g + in_g) * wob;
-        light = col * lit * intensity + mix(col, vec3f(1.0), 0.6) * hair * intensity * hot;
-        alpha = lit * intensity * occl;
+        let lit = knee((out_g + in_g) * wob * intensity * 1.1);
+        light = col * lit + mix(col, vec3f(1.0), 0.6) * hair * intensity * hot;
+        alpha = lit * occl;
     }
     return finish(vec4f(light, alpha), in.px);
 }

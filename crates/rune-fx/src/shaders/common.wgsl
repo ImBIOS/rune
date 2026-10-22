@@ -202,14 +202,17 @@ fn erf_approx(x: f32) -> f32 {
 }
 // Coverage of a half-plane blurred by a Gaussian of sigma s, at signed distance d.
 fn cov(d: f32, s: f32) -> f32 { return 0.5 - 0.5 * erf_approx(d / (max(s, 1e-3) * 1.41421)); }
-// Bloom of a shape edge: tight Gaussian plus a heavy (inverse-square-ish) tail, windowed to `reach`
-// so the quad edge never shows. Continuous through d = 0 (inside saturates).
+// Bloom of a shape edge: a tight lobe that carries most of the light plus a wider one, both
+// Gaussian so the light is gone by ~2.5 r (heavy tails read as a uniform haze over dark UI).
+// Windowed to `reach` so the quad edge never shows. Continuous through d = 0 (inside saturates).
 fn bloom(d: f32, r: f32, reach: f32) -> f32 {
     let o = max(d, 0.0);
-    let tail = 1.0 / pow(1.0 + (o / r) * (o / r), 1.5);
     let w = 1.0 - smoothstep(reach * 0.5, reach, o);
-    return (0.62 * cov(d, r * 0.4) + 0.38 * select(tail, 1.0, d < 0.0)) * w;
+    return (0.65 * gauss(o, r * 0.35) + 0.35 * gauss(o, r * 1.2)) * w;
 }
+// Soft knee for light energy: linear when dim, approaching 1 when bright, so a tinted glow
+// keeps its hue instead of clipping toward white.
+fn knee(x: f32) -> f32 { return 1.0 - exp(-max(x, 0.0)); }
 fn gauss(x: f32, w: f32) -> f32 { return exp(-(x * x) / max(w * w, 1e-6)); }
 fn lum(c: vec3f) -> f32 { return dot(c, vec3f(0.2126, 0.7152, 0.0722)); }
 // A colour as its light cools: dims and deepens (saturates) instead of just fading.

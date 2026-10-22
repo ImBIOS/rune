@@ -103,7 +103,8 @@ fn shade(in: VOut) -> vec4f {
                 let age = x * period; // seconds since that beat's lub
                 if (age > 0.0) {
                     let rr = reach * (1.0 - exp(-age * 4.5));
-                    ring += exp(-age * 3.2) * smoothstep(0.0, 0.03, age) * gauss(c.d - rr, width * (1.0 + age * 3.0));
+                    // Finished rings fade out instead of piling up into a band at full reach.
+                    ring += exp(-age * 3.2) * smoothstep(0.0, 0.03, age) * (1.0 - smoothstep(0.7, 1.3, age)) * gauss(c.d - rr, width * (1.0 + age * 3.0));
                 }
             }
             // Fade the faint tail of old rings out before the quad edge.
