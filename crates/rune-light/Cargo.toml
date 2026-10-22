@@ -15,4 +15,3 @@ wgpu = { version = "30", default-features = false, features = ["vulkan", "dx12"]
 [dev-dependencies]
 rune = { path = "../rune" }
 pollster = "1"
-png = "0.18"

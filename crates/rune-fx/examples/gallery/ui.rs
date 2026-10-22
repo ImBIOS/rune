@@ -17,13 +17,9 @@ pub struct UiInst {
     pub vp: [f32; 4],
 }
 
-fn lin(c: f32) -> f32 {
-    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
-}
-
 /// sRGB hex + alpha -> premultiplied linear.
 pub fn col(hex: u32, a: f32) -> [f32; 4] {
-    let f = |s: u32| lin(((hex >> s) & 0xff) as f32 / 255.0) * a;
+    let f = |s: u32| rune::color::srgb_decode(((hex >> s) & 0xff) as f32 / 255.0) * a;
     [f(16), f(8), f(0), a]
 }
 
@@ -49,9 +45,9 @@ pub struct TextAtlas {
 impl TextAtlas {
     pub fn new() -> TextAtlas {
         let fonts = vec![
-            FontRef::try_from_slice(include_bytes!("assets/Inter-Regular.ttf")).unwrap(),
-            FontRef::try_from_slice(include_bytes!("assets/Inter-Medium.ttf")).unwrap(),
-            FontRef::try_from_slice(include_bytes!("assets/Inter-SemiBold.ttf")).unwrap(),
+            FontRef::try_from_slice(include_bytes!("../../../rune/assets/Inter-Regular.ttf")).unwrap(),
+            FontRef::try_from_slice(include_bytes!("../../../rune/assets/Inter-Medium.ttf")).unwrap(),
+            FontRef::try_from_slice(include_bytes!("../../../rune/assets/Inter-SemiBold.ttf")).unwrap(),
         ];
         TextAtlas { fonts, data: vec![0; (ATLAS * ATLAS) as usize], map: HashMap::new(), x: 1, y: 1, row_h: 0, dirty: true }
     }

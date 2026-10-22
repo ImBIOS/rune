@@ -2,16 +2,14 @@
 
 Effect layers for Rune: glow, pulses, electricity, fire, motion blur, distortion, and some extras
 (shimmer, sparkles, aurora, grain). Each effect is a WGSL fragment shader on an instanced quad with
-typed params that have knob ranges. Given (time, seed), every frame is deterministic. A layer whose
-intensity is 0, whose one-shot has finished, or that is off screen is never drawn.
+typed params. Given (time, seed), every frame is deterministic. A layer whose intensity is 0, whose
+one-shot has finished, or that is off screen is never drawn.
 
-Standalone crate with its own `[workspace]` (wgpu 30, bytemuck). Build and run through HiveMind:
+Build and run through HiveMind from the workspace root:
 
 ```sh
-cd crates/rune-fx
-hivemind run --kind cargo --dir . --fetch demo/fx -- cargo run --release --example gallery   # stills, strips, timings
-hivemind run --kind cargo --dir . -- cargo test --release --lib                               # contract tests
-hivemind run --kind cargo --dir . --fetch demo/fx -- ./examples/gallery/videos.sh            # MP4s
+hivemind run --kind cargo -- cargo run --release -p rune-fx --example gallery   # stills, strips, timings
+hivemind run --kind cargo -- cargo test --release -p rune-fx --lib              # contract tests
 ```
 
 Output lands in `demo/fx/` (repo root): `<effect>.png`, `<effect>-strip.png` (8 frames),
@@ -128,8 +126,7 @@ Time helpers:
 
 ## Effects and params
 
-Lengths are in points, times in seconds. Each params struct's `KNOBS` lists name, min, max and
-default for knobs.
+Lengths are in points, times in seconds.
 
 | Effect | Variants | Key params (default) | Notes |
 |---|---|---|---|

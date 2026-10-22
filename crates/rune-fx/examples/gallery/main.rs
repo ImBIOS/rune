@@ -7,6 +7,7 @@
 
 mod ui;
 
+use rune::render::write_png;
 use rune_fx::*;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -675,18 +676,6 @@ impl Ctx {
     }
 }
 
-fn write_png(path: &Path, w: u32, h: u32, rgba: &[u8]) {
-    if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d).unwrap();
-    }
-    let f = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
-    let mut e = png::Encoder::new(f, w, h);
-    e.set_color(png::ColorType::Rgba);
-    e.set_depth(png::BitDepth::Eight);
-    e.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
-    e.write_header().unwrap().write_image_data(rgba).unwrap();
-}
-
 fn half(px: &[u8], w: u32, h: u32) -> Vec<u8> {
     let (hw, hh) = (w / 2, h / 2);
     let mut o = vec![0u8; (hw * hh * 4) as usize];
@@ -724,17 +713,12 @@ fn still_time(name: &str) -> f32 {
     }
 }
 
-fn out_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../demo/fx")
-}
-
-fn render_effect(ctx: &mut Ctx, name: &str) {
-    let dir = out_dir();
+fn render_effect(ctx: &mut Ctx, dir: &Path, name: &str) {
     let (w, h) = (ctx.w, ctx.h);
     let px = ctx.render(name, still_time(name), false);
-    write_png(&dir.join(format!("{name}.png")), w, h, &px);
+    write_png(&dir.join(format!("{name}.png")), w, h, &px).unwrap();
     let px = ctx.render(name, still_time(name), true);
-    write_png(&dir.join(format!("{name}-reduced.png")), w / 2, h / 2, &half(&px, w, h));
+    write_png(&dir.join(format!("{name}-reduced.png")), w / 2, h / 2, &half(&px, w, h)).unwrap();
     let (t0, span) = strip_times(name);
     let (fw, fh) = (w / 2, h / 2);
     let mut strip = vec![0u8; (fw * 4 * fh * 2 * 4) as usize];
@@ -748,7 +732,7 @@ fn render_effect(ctx: &mut Ctx, name: &str) {
             strip[d..d + (fw * 4) as usize].copy_from_slice(&f[s..s + (fw * 4) as usize]);
         }
     }
-    write_png(&dir.join(format!("{name}-strip.png")), fw * 4, fh * 2, &strip);
+    write_png(&dir.join(format!("{name}-strip.png")), fw * 4, fh * 2, &strip).unwrap();
     eprintln!("wrote {name}");
 }
 
@@ -859,11 +843,12 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let effect = get("--effect");
+    let dir = get("--out").map_or_else(|| PathBuf::from("demo/fx"), PathBuf::from);
     if args.iter().any(|a| a == "--timings") {
         let t = timings();
         println!("{t}");
-        std::fs::create_dir_all(out_dir()).unwrap();
-        std::fs::write(out_dir().join("timings.md"), t).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("timings.md"), t).unwrap();
         return;
     }
     let mut ctx = Ctx::new((W * S) as u32, (H * S) as u32);
@@ -876,7 +861,7 @@ fn main() {
         let n = (fps * secs).round() as u32;
         for i in 0..n {
             let px = ctx.render(&name, start + i as f32 / fps, reduced);
-            write_png(&Path::new(&dir).join(format!("{name}_{i:04}.png")), ctx.w, ctx.h, &px);
+            write_png(&Path::new(&dir).join(format!("{name}_{i:04}.png")), ctx.w, ctx.h, &px).unwrap();
         }
         eprintln!("wrote {n} frames to {dir}");
         return;
@@ -886,11 +871,11 @@ fn main() {
         None => EFFECTS.to_vec(),
     };
     for e in list {
-        render_effect(&mut ctx, e);
+        render_effect(&mut ctx, &dir, e);
     }
-    if effect.is_none() {
+    if effect.is_none() && !args.iter().any(|a| a == "--no-timings") {
         let t = timings();
         println!("{t}");
-        std::fs::write(out_dir().join("timings.md"), t).unwrap();
+        std::fs::write(dir.join("timings.md"), t).unwrap();
     }
 }
