@@ -62,6 +62,11 @@ fn vs_springs(input: In, @builtin(instance_index) instance: u32) -> Out {
     i.rect = vec4<f32>(i.rect.xy + offset, i.rect.zw);
     i.fill *= alpha;
     i.border *= alpha;
-    if (i.params.y > 3.5) { i.uv *= alpha; }
+    if (i.params.y > 3.5 && i.params.y < 4.5) { i.uv *= alpha; }
+    // Vector endpoints are screen-space geometry, unlike image/glyph atlas UVs.
+    if (i.params.y > 4.5 && i.params.y < 6.5) {
+        i.radii += vec4<f32>(offset, offset);
+        if (i.params.y > 5.5) { i.uv = vec4<f32>(i.uv.xy + offset, i.uv.zw); }
+    }
     return base_vs(i);
 }

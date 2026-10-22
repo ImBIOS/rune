@@ -187,8 +187,15 @@ bytes, preserving a timestamp previously supplied by `present_at` in the same fr
 The pixel harness deliberately calls `prepare` after `present_at` at all 16 sampled
 states; all remain byte-identical and all 81,920 differential samples pass. Use
 `gpu_springs --verify-only` to repeat correctness without rerunning timing loops.
-Landing remains paused for the coordinated public-history reset; the old base is
-`8b37ced6a841d5d9600ce030efcdb183501cd7d3`.
+After the public-history reset, the three original commits were rebased from old
+base `8b37ced6a841d5d9600ce030efcdb183501cd7d3` onto new-history `f4d00b0`.
+The merge preserves the image-atlas bind group (including binding 2), image upload
+and lazy texture creation. The opt-in vertex wrapper now limits UV colour scaling
+to gradients (kind 4), preserves image/glyph UVs, and translates segment endpoints
+and triangle vertices with their bounding quad (new kinds 5/6). The default shader
+is unchanged. An additional four-frame pixel comparison covers all eight primitive
+kinds sharing one property node, with actual image/glyph atlas data and nonblank
+assertions. This shader adaptation needs a short delta review before pushing.
 
 ## Shutter motion blur
 

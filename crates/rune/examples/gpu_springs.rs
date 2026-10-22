@@ -372,6 +372,88 @@ fn bench(gpu: &Gpu, timing: bool) {
     }
 }
 
+fn primitive_pixels(gpu: &Gpu) {
+    let (d, q) = (&gpu.device, &gpu.queue);
+    let target = Offscreen::new(d, 512, 96);
+    let mut cpu = Renderer::new(d, OFFSCREEN_FORMAT);
+    let mut image_atlas = Default::default();
+    cpu.upload_images(d, q, &mut image_atlas);
+    let pixels = rune::Pixels::new();
+    pixels.set(2, 2, vec![255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 192, 255, 255, 255, 255]);
+    let uv = image_atlas.place(&pixels).unwrap().map(|v| v as f32);
+    let s = Spring::new(0.4, 0.16);
+    let fade = Spring::new(0.4, 0.0);
+    let node = Node {
+        x: Track::new(s, 0.0, 0.0, 6.0, 0.0, 0.001),
+        y: Track::new(s, 0.0, 0.0, 3.0, 0.0, 0.001),
+        opacity: Track::new(fade, 0.0, 0.2, 0.9, 0.0, 0.00001),
+    };
+    let mut fast = Renderer::with_springs(d, OFFSCREEN_FORMAT, &[node], &[0; 8]);
+    cpu.upload_images(d, q, &mut image_atlas);
+    image_atlas.invalidate();
+    fast.upload_images(d, q, &mut image_atlas);
+    let mut atlas = TextSystem::default().atlas;
+    // A real opaque glyph footprint, independently uploaded to both renderers.
+    atlas.data[0] = 255;
+    atlas.data[1] = 192;
+    atlas.data[rune::text::ATLAS_SIZE as usize] = 128;
+    atlas.data[rune::text::ATLAS_SIZE as usize + 1] = 255;
+    let base: Vec<_> = (0..8).map(|kind| {
+        let x = 8.0 + kind as f32 * 60.0;
+        let mut i = Instance {
+            rect: [x, 24.0, 40.0, 30.0], radii: [4.0; 4], fill: [0.2, 0.4, 0.6, 0.8],
+            params: [0.0, kind as f32, 0.0, 1.0], clip: NO_CLIP, ..Zeroable::zeroed()
+        };
+        match kind {
+            1 => i.params[2] = 2.0,
+            2 => i.uv = [0.0, 0.0, 2.0, 2.0],
+            3 => { i.params[0] = 2.0; i.params[2] = 1.0; }
+            4 => i.uv = [0.7, 0.2, 0.1, 0.8],
+            5 => { i.radii = [x, 24.0, x + 40.0, 54.0]; i.params[0] = 2.0; i.params[2] = 1.0; }
+            6 => { i.radii = [x, 24.0, x + 40.0, 24.0]; i.uv = [x + 20.0, 54.0, 0.0, 0.0]; i.params[0] = 7.0; }
+            7 => i.uv = uv,
+            _ => {}
+        }
+        i
+    }).collect();
+    for now in [0.0, 0.07, 0.31, 0.99] {
+        let dx = s.sample(0.0, 0.0, 6.0, now).0;
+        let dy = s.sample(0.0, 0.0, 3.0, now).0;
+        let alpha = fade.sample(0.2, 0.0, 0.9, now).0.clamp(0.0, 1.0);
+        let mut expected = base.clone();
+        for (kind, i) in expected.iter_mut().enumerate() {
+            i.rect[0] += dx;
+            i.rect[1] += dy;
+            i.fill = i.fill.map(|v| v * alpha);
+            if kind == 4 { i.uv = i.uv.map(|v| v * alpha); }
+            if kind == 5 || kind == 6 {
+                for (v, offset) in i.radii.iter_mut().zip([dx, dy, dx, dy]) { *v += offset; }
+            }
+            if kind == 6 { i.uv[0] += dx; i.uv[1] += dy; }
+        }
+        atlas.dirty = Some((0, 2));
+        cpu.prepare(d, q, &mut atlas, &expected, (512, 96));
+        atlas.dirty = Some((0, 2));
+        fast.present_at(q, (512, 96), now as f64);
+        fast.prepare(d, q, &mut atlas, &base, (512, 96));
+        let mut images = Vec::new();
+        for renderer in [&cpu, &fast] {
+            let mut enc = d.create_command_encoder(&Default::default());
+            renderer.draw(&mut enc, &target.view, [0.0; 4]);
+            target.copy(&mut enc);
+            q.submit([enc.finish()]);
+            images.push(target.read(d));
+        }
+        for kind in 0..8 {
+            assert!((0..96).any(|y| (kind * 60..kind * 60 + 60).any(|x| images[0][(y * 512 + x) * 4 + 3] != 0)), "blank primitive {kind}");
+        }
+        let max = images[0].iter().zip(&images[1]).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+        let changed = images[0].iter().zip(&images[1]).filter(|(a, b)| a != b).count();
+        assert!(max <= 1, "primitive pixel delta {max} at {now}");
+        println!("PRIMITIVES kinds=8 time={now} changed_channels={changed} max_delta={max}");
+    }
+}
+
 fn main() {
     let instance = Gpu::instance();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).unwrap();
@@ -384,4 +466,5 @@ fn main() {
     let gpu = Gpu { instance, adapter, device, queue };
     differential(&gpu);
     bench(&gpu, !std::env::args().any(|arg| arg == "--verify-only"));
+    primitive_pixels(&gpu);
 }
