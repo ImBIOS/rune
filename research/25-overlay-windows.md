@@ -2,7 +2,7 @@
 
 `run_windows` invokes a display-aware factory once and creates one runtime per
 `WindowSpec`. Live handles and application services can be shared across those
-states. Wakes carry the native window ID; hiding, occlusion and closing gate the
+states. Wakes carry a stable host slot; hiding, occlusion and closing gate the
 corresponding runtime's producer notifications.
 
 The same lifetime host backs `run`, `App::run` and `run_windows`.
@@ -33,6 +33,24 @@ unsupported click-through reports the platform error instead of aborting startup
 selection uses the supplied per-window state and never calls native creation
 callbacks. The overlay example pairs a control window with a cursor and SVG
 stroke on each monitor; production stops after four seconds.
+
+## Verification
+
+- Release builds passed for overlay, background, live-values, Settings and OpenCode.
+  The final rebase onto App accessory/Dock/minimum-size APIs passed release checking
+  for Rune and all five examples through HiveMind on mini.
+- 32 library tests passed, including GPU/CPU alpha conversion. The binding change
+  also passed five integration tests and both allocation gates.
+- Headless listing returns `controls` and `overlay-0`. Selected trees contain the
+  controls or the stroke/cursor respectively. Controls export at 1120×880 with all
+  985,600 pixels opaque. The 1920×1080 overlay contains 2,059,504 fully transparent,
+  12,106 opaque and 1,990 antialiased partial-alpha pixels; its empty corner is RGBA zero.
+- The overlay trace has **0 motion-lint candidates across 720 frames**.
+- All nine Settings/OpenCode captures are byte-identical to the pre-bindings baseline.
+  Committed demo goldens were not changed. Local evidence is in
+  `perf/live-values/overlay/` (ignored).
+- Independent review cleared the shared device, Metal alpha path, slot routing,
+  native references, close/reopen behavior and platform fallbacks.
 
 ## Boundaries
 

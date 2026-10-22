@@ -6,8 +6,9 @@ runtime tests/builds run through HiveMind on mini; no native window was opened.
 
 Baseline (before binding integration): **16.417 µs** median CPU frame, seven run
 medians 16.167–16.542 µs. `examples/live-values --bench`; synthetic poll, view,
-retained layout, Scene and instance build included, GPU/driver excluded. The saved
-baseline executable lives in ignored `perf/live-values/baseline` for paired runs.
+retained layout, Scene and instance build included, GPU/driver excluded. A saved
+baseline executable was used for paired runs and removed after verification;
+timing records remain in ignored `perf/live-values/`.
 
 Hypothesis: publishing to the existing Scene properties removes view allocation,
 diff and layout work. Bindings use OPACITY/OFFSET/SCALE and the renderer's P_FILL;
