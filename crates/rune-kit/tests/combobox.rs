@@ -52,6 +52,20 @@ fn opening_takes_focus_and_reveals_the_offscreen_selection() {
 }
 
 #[test]
+fn closing_a_scrolled_virtual_popup_keeps_rows_in_place_while_fading() {
+    let mut rt = runtime();
+    key(&mut rt, Key::Up, Mods::default());
+    for _ in 0..60 { rt.frame(1.0 / 60.0); }
+    let before = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("models-option-item-199")).unwrap();
+    key(&mut rt, Key::Escape, Mods::default());
+    rt.frame(1.0 / 60.0);
+    let after = rt.elements().into_iter().find(|e| e.key == before.key).unwrap();
+    assert!((after.rect[1] - before.rect[1]).abs() < 5.0, "row jumped: {:?} -> {:?}", before.rect, after.rect);
+    assert!(after.opacity > 0.0 && after.opacity < before.opacity);
+    assert!(after.visible[3] > 0.0);
+}
+
+#[test]
 fn combobox_loops_skips_disabled_and_scrolls_virtual_rows_into_view() {
     let mut rt = runtime();
     assert!(rt.elements().iter().filter(|e| e.role == "option").count() < 50);
