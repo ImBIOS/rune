@@ -16,6 +16,7 @@ members = [
     "examples/shapes",
     "examples/overlay",
     "examples/lab",
+    "examples/video-tiles",
 ]
 
 [workspace.package]

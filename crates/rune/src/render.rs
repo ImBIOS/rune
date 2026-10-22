@@ -95,6 +95,7 @@ impl Gpu {
 }
 
 pub struct Renderer {
+    surfaces: Option<crate::native_surface::SurfaceRenderer>,
     pipeline: wgpu::RenderPipeline,
     format: wgpu::TextureFormat,
     shader: wgpu::ShaderModule,
@@ -201,6 +202,7 @@ impl Renderer {
         let spring_instances = properties.map_or(0, |(_, ids)| ids.len());
         let springs = properties.map(|(nodes, ids)| crate::gpu_springs::Bindings::new(device, spring_layout.as_ref().unwrap(), nodes, ids));
         Renderer {
+            surfaces: None,
             pipeline,
             format,
             shader,
@@ -408,6 +410,17 @@ impl Renderer {
         self.count = instances.len() as u32;
     }
 
+    pub fn prepare_surfaces(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, draws: &[crate::native_surface::SurfaceDraw], viewport: (u32,u32)) {
+        if !draws.is_empty() && self.surfaces.is_none() {
+            self.surfaces = Some(crate::native_surface::SurfaceRenderer::new(device, self.format));
+        }
+        if let Some(s) = &mut self.surfaces { s.prepare(device,queue,draws,viewport); }
+    }
+
+    pub fn submit(&self, queue: &wgpu::Queue, encoder: wgpu::CommandEncoder) -> wgpu::SubmissionIndex {
+        if let Some(s) = &self.surfaces { s.submit(queue,encoder) } else { queue.submit([encoder.finish()]) }
+    }
+
     pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, clear: [f32; 4]) {
         self.draw_timed(encoder, view, clear, None);
     }
@@ -451,18 +464,24 @@ impl Renderer {
                 },
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: timestamps,
+            timestamp_writes: timestamps.or_else(|| self.surfaces.as_ref().and_then(|s| s.timestamp_writes())),
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        if self.count == 0 {
-            return;
+        let mut first = 0;
+        let video_count = self.surfaces.as_ref().map_or(0, |s| s.len());
+        for index in 0..=video_count {
+            let end = if index == video_count { self.count } else { self.surfaces.as_ref().unwrap().before_instance(index).min(self.count) };
+            if end > first {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                if let Some(properties) = &self.springs { pass.set_bind_group(1, &properties.group, &[]); }
+                pass.set_vertex_buffer(0, self.instances.slice(..));
+                pass.draw(0..4, first..end);
+            }
+            if index < video_count { self.surfaces.as_ref().unwrap().draw(&mut pass,index); }
+            first = end;
         }
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        if let Some(properties) = &self.springs { pass.set_bind_group(1, &properties.group, &[]); }
-        pass.set_vertex_buffer(0, self.instances.slice(..));
-        pass.draw(0..4, 0..self.count);
     }
 }
 

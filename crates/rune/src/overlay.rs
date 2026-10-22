@@ -610,12 +610,13 @@ impl<T: 'static> Overlay<T> {
         let view = frame.texture.create_view(&Default::default());
         renderer.prepare(&gpu.device, &gpu.queue, &mut self.rt.text.atlas, &self.rt.instances, (live.config.width, live.config.height));
         renderer.upload_images(&gpu.device, &gpu.queue, &mut self.rt.images);
+        renderer.prepare_surfaces(&gpu.device, &gpu.queue, &self.rt.surfaces, (live.config.width, live.config.height));
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         renderer.draw(&mut enc, live.alpha.as_ref().map_or(&view, |a| &a.view), [0.0, 0.0, 0.0, 0.0]);
         if let Some(alpha) = &live.alpha {
             alpha.draw(&mut enc, &view);
         }
-        gpu.queue.submit([enc.finish()]);
+        renderer.submit(&gpu.queue, enc);
         #[allow(irrefutable_let_patterns)]
         if let Backing::Window(w) = &live.backing {
             w.pre_present_notify();

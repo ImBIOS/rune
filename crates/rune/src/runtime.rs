@@ -274,6 +274,7 @@ pub struct Runtime<S: 'static> {
     /// `track_marks` is set (a compositor is attached).
     pub marks: Vec<u32>,
     pub track_marks: bool,
+    pub surfaces: Vec<crate::native_surface::SurfaceDraw>,
     hits: Vec<(NodeId, [f32; 4])>,
     glyph_scratch: Vec<GlyphQuad>,
     deco_scratch: Vec<Deco>,
@@ -389,6 +390,7 @@ impl<S: 'static> Runtime<S> {
             instances: Vec::new(),
             marks: Vec::new(),
             track_marks: false,
+            surfaces: Vec::new(),
             hits: Vec::new(),
             glyph_scratch: Vec::new(),
             deco_scratch: Vec::new(),
@@ -1971,6 +1973,7 @@ impl<S: 'static> Runtime<S> {
         let snap_px = |v: f32| grid(v, s) * s;
         self.instances.clear();
         self.marks.clear();
+        self.surfaces.clear();
         self.hits.clear();
         let n_nodes = self.nodes.len();
         self.inh_scratch.clear();
@@ -2128,7 +2131,7 @@ impl<S: 'static> Runtime<S> {
                     }
                 }
                 let base = self.color(n.id, P_FILL, n.vis.fill).premul(1.0);
-                let layered = n.vis.gradient.is_some();
+                let layered = n.vis.gradient.is_some() || n.vis.surface.is_some();
                 let fill = if layered { base } else { over(overlay, base) }.map(|c| c * o);
                 let bw = n.vis.border_width * sc * s;
                 let border = if bw > 0.0 { self.color(n.id, P_BORDER, n.vis.border).premul(o) } else { [0.0; 4] };
@@ -2159,6 +2162,12 @@ impl<S: 'static> Runtime<S> {
                             uv: bottom,
                             clip,
                             fade,
+                        });
+                    }
+                    if let Some((surface, fit)) = &n.vis.surface {
+                        self.surfaces.push(crate::native_surface::SurfaceDraw {
+                            surface: surface.clone(), fit: *fit, before_instance: self.instances.len() as u32,
+                            rect: [r[0], r[1], w, h], radii, clip, fade, opacity: o,
                         });
                     }
                     let ov = overlay.map(|c| c * o);

@@ -744,6 +744,7 @@ impl<S: 'static> Host<S> {
         }
         let view = frame.texture.create_view(&Default::default());
         renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
+        renderer.prepare_surfaces(&gpu.device, &gpu.queue, &rt.surfaces, (l.config.width, l.config.height));
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         let target = l.alpha.as_ref().map_or(&view, |a| &a.view);
         if let Some(c) = self.comp.as_mut() {
@@ -766,7 +767,7 @@ impl<S: 'static> Host<S> {
             renderer.draw(&mut enc, target, rt.clear_color());
         }
         if let Some(alpha) = &l.alpha { alpha.draw(&mut enc, &view); }
-        gpu.queue.submit([enc.finish()]);
+        renderer.submit(&gpu.queue, enc);
         l.window.pre_present_notify();
         gpu.queue.present(frame);
         self.idle = !(animating || rt.has_pending_input() || rt.live_pending());
