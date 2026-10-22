@@ -14,6 +14,7 @@ mod win32;
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod color;
+pub mod compose;
 pub mod edit;
 pub mod el;
 mod key_diagnostics;
@@ -41,6 +42,7 @@ pub use winit::raw_window_handle;
 pub use app::{App, AppHandle};
 pub use overlay::{Availability, OverlayHandle, OverlaySpec, ScreenEdge};
 pub use color::{Color, oklch, oklcha};
+pub use compose::{Compositor, Frame};
 pub use edit::{Ime, Key, KeyEvent, Mods, TextEdit};
 pub use el::{
     Align, Anchor, Cursor, Drag, El, GrowthSpec, Outline, Phase, PointerPress, ScrollSpec, Shadow, Shell, Side, Tx, canvas, col, edit_access, el, icon, rich,
@@ -59,4 +61,4 @@ pub use shape::{LineCap, Path, Shape};
 pub use text::{Icon, Span};
 pub use theme::Theme;
 pub use tok::{Family, TextStyle};
-pub use tooling::{AppSpec, extra_args, run, run_windows, run_windows_with, set_app_id};
+pub use tooling::{AppSpec, extra_args, run, run_windows, run_windows_with, run_with, set_app_id};

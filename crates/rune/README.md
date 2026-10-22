@@ -309,6 +309,29 @@ of the primary display, centred or `inset` points from a side. Clicks pass throu
 - Not yet: interactive overlays on Wayland, hover in a non-key macOS panel (mouse-moved events
   go to the key window), per-monitor placement.
 
+### Compositor hook (lighting and effects)
+
+![lab](../../demo/lab/flashlight.png)
+
+`rune::run_with(spec, compositor)` (or `App::compositor`) hands each frame to a `Compositor`
+(`compose.rs`) after `Runtime::frame` has built it; `rune::run` never builds one, so the default path
+and its goldens are unchanged. `examples/lab` uses it to composite `rune-light` and `rune-fx` live.
+
+- `El::mark(u32)` tags an element's instances, and its descendants' until one sets its own.
+  While a compositor is attached, `Runtime::marks` runs parallel to `Runtime::instances` (no marks
+  are recorded otherwise). The lab encodes canvas, lighting material and effect node in the mark.
+- The `Frame` gives the device, queue, encoder, target view and format, `dt`, the time
+  `Runtime::frame` took (`update_ms`), the runtime (instances, marks, clock `t`, pointer, state,
+  `presented(key)` → drawn rect and effective opacity), and Rune's `Renderer`.
+- `Renderer::prepare_lists` uploads several instance lists in one buffer (one glyph upload) and
+  returns their ranges; `draw_range` draws any range into any pass; `add_format` builds the uber
+  pipeline for another target format (e.g. an `Rgba16Float` scene, a text mask or a node layer).
+  `Frame::draw_ui` is the default frame.
+- `Compositor::animating` keeps the display link running while something moves on its own;
+  `features` requests device features (e.g. `TIMESTAMP_QUERY`) when the adapter has them;
+  `summary` prints after a headless run.
+- Headless tooling (`--snap`, `--script`, `--trace`, strips) runs through the same compositor.
+
 ## Run
 
 ```sh

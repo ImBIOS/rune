@@ -47,6 +47,7 @@ pub struct App<S: 'static> {
     pub(crate) shared: Arc<Shared<S>>,
     pub(crate) overlays: Vec<Box<dyn crate::overlay::PendingOverlay>>,
     pub(crate) on_window: Option<OnWindow>,
+    pub(crate) compositor: Option<Box<dyn crate::compose::Compositor<S>>>,
 }
 
 impl<S: 'static> App<S> {
@@ -63,6 +64,7 @@ impl<S: 'static> App<S> {
             shared: Arc::default(),
             overlays: Vec::new(),
             on_window: None,
+            compositor: None,
         }
     }
 
@@ -133,6 +135,13 @@ impl<S: 'static> App<S> {
     /// `WindowHandle::with_raw_handle`.
     pub fn on_window(mut self, f: impl FnMut(&crate::WindowHandle) + 'static) -> Self {
         self.on_window = Some(Box::new(f));
+        self
+    }
+
+    /// Draw every frame of the app's window (and headless renders) through `compositor`
+    /// instead of Rune's default pass (see `compose`).
+    pub fn compositor(mut self, compositor: impl crate::compose::Compositor<S>) -> Self {
+        self.compositor = Some(Box::new(compositor));
         self
     }
 

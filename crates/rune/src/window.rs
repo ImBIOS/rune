@@ -14,6 +14,7 @@ use winit::window::{CursorIcon, Theme, Window, WindowId, WindowLevel};
 use winit::raw_window_handle::HasWindowHandle;
 
 use crate::app::{App, Shared, WindowRequest};
+use crate::compose::{Compositor, Frame};
 use crate::edit::{Ime, Key, KeyEvent, Mods};
 use crate::el::{Cursor, Shell, Tx};
 use crate::render::{Gpu, Renderer};
@@ -230,6 +231,7 @@ struct Host<S: 'static> {
     mods: ModifiersState,
     control_click: bool,
     clipboard: Option<arboard::Clipboard>,
+    comp: Option<Box<dyn Compositor<S>>>,
 }
 
 pub fn run<S: 'static>(app: App<S>, args: Args) {
@@ -270,6 +272,8 @@ impl<S: 'static> Host<S> {
             let _ = proxy.send_event(WakeEvent::App(slot));
         });
         let (open, keep_running, on_close, release_gpu) = (app.open, app.keep_running, app.on_close, app.release_gpu);
+        let mut app = app;
+        let comp = app.compositor.take();
         let (spec, state, shared) = app.into_parts(args.scene.as_deref());
         let size = args.size.unwrap_or(spec.size);
         // The window reports the system appearance and scale when it opens.
@@ -278,6 +282,7 @@ impl<S: 'static> Host<S> {
         rt.set_live_waker(Arc::new(move || { let _ = live_proxy.send_event(WakeEvent::Live(slot)); }));
         rt.set_live_visible(false);
         rt.transparent = options.transparent;
+        rt.track_marks = comp.is_some();
         rt.wall_start = Some(Instant::now());
         shared.connect(waker);
         Host {
@@ -304,6 +309,7 @@ impl<S: 'static> Host<S> {
             mods: ModifiersState::empty(),
             control_click: false,
             clipboard: arboard::Clipboard::new().ok(),
+            comp,
         }
     }
 }
@@ -611,7 +617,8 @@ impl<S: 'static> Host<S> {
                 } else {
                     let instance = Gpu::instance();
                     let surface = instance.create_surface(window.clone()).map_err(|e| e.to_string())?;
-                    let gpu = Arc::new(Gpu::try_new(instance, Some(&surface))?);
+                    let features = self.comp.as_ref().map_or(wgpu::Features::empty(), |c| c.features());
+                    let gpu = Arc::new(Gpu::try_with_features(instance, Some(&surface), features)?);
                     *self.gpu_pool.borrow_mut() = Arc::downgrade(&gpu);
                     (gpu, surface)
                 };
@@ -717,7 +724,8 @@ impl<S: 'static> Host<S> {
         let dt = if self.idle { 1.0 / 120.0 } else { (now - self.last).as_secs_f64().min(1.0 / 30.0) };
         self.last = now;
         let rt = &mut self.rt;
-        let animating = rt.frame(dt);
+        let mut animating = rt.frame(dt);
+        let update_ms = now.elapsed().as_secs_f64() * 1000.0;
         let cursor = rt.cursor();
         if cursor != l.cursor {
             l.cursor = cursor;
@@ -735,10 +743,28 @@ impl<S: 'static> Host<S> {
             );
         }
         let view = frame.texture.create_view(&Default::default());
-        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (l.config.width, l.config.height));
         renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
         let mut enc = gpu.device.create_command_encoder(&Default::default());
-        renderer.draw(&mut enc, l.alpha.as_ref().map_or(&view, |a| &a.view), rt.clear_color());
+        let target = l.alpha.as_ref().map_or(&view, |a| &a.view);
+        if let Some(c) = self.comp.as_mut() {
+            let mut f = Frame {
+                device: &gpu.device,
+                queue: &gpu.queue,
+                encoder: &mut enc,
+                target,
+                format: l.config.format,
+                size: (l.config.width, l.config.height),
+                dt,
+                update_ms,
+                rt: &mut *rt,
+                ui: &mut *renderer,
+            };
+            c.render(&mut f);
+            animating |= c.animating();
+        } else {
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (l.config.width, l.config.height));
+            renderer.draw(&mut enc, target, rt.clear_color());
+        }
         if let Some(alpha) = &l.alpha { alpha.draw(&mut enc, &view); }
         gpu.queue.submit([enc.finish()]);
         l.window.pre_present_notify();

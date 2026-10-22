@@ -178,11 +178,12 @@ struct Inh {
     blur: f32,
     /// Vertical offset in points from scroll viewports and growth rows above.
     dy: f32,
+    mark: u32,
 }
 
 impl Default for Inh {
     fn default() -> Self {
-        Inh { opacity: 1.0, clip: NO_CLIP, fade: [0.0; 4], scale: 1.0, anchor: [0.0; 2], blur: 0.0, dy: 0.0 }
+        Inh { opacity: 1.0, clip: NO_CLIP, fade: [0.0; 4], scale: 1.0, anchor: [0.0; 2], blur: 0.0, dy: 0.0, mark: 0 }
     }
 }
 
@@ -269,6 +270,10 @@ pub struct Runtime<S: 'static> {
     capture_inside: bool,
     drag_data: f32,
     pub instances: Vec<Instance>,
+    /// Per instance, the `El::mark` of its nearest marked node (0 for none). Filled only while
+    /// `track_marks` is set (a compositor is attached).
+    pub marks: Vec<u32>,
+    pub track_marks: bool,
     hits: Vec<(NodeId, [f32; 4])>,
     glyph_scratch: Vec<GlyphQuad>,
     deco_scratch: Vec<Deco>,
@@ -382,6 +387,8 @@ impl<S: 'static> Runtime<S> {
             capture_inside: false,
             drag_data: 0.0,
             instances: Vec::new(),
+            marks: Vec::new(),
+            track_marks: false,
             hits: Vec::new(),
             glyph_scratch: Vec::new(),
             deco_scratch: Vec::new(),
@@ -618,6 +625,9 @@ impl<S: 'static> Runtime<S> {
         self.build();
         self.images.end_frame();
         animating |= self.draw_text_flights();
+        if self.track_marks {
+            self.marks.resize(self.instances.len(), 0);
+        }
         self.stats.shaped = self.text.shaped - shaped0;
         self.animating = animating;
         self.animating
@@ -1960,6 +1970,7 @@ impl<S: 'static> Runtime<S> {
         let s = self.env.scale;
         let snap_px = |v: f32| grid(v, s) * s;
         self.instances.clear();
+        self.marks.clear();
         self.hits.clear();
         let n_nodes = self.nodes.len();
         self.inh_scratch.clear();
@@ -2007,6 +2018,7 @@ impl<S: 'static> Runtime<S> {
             let Some(p) = self.scene.presented(n.id) else { continue };
             let mut pinh = n.parent.map_or(Inh::default(), |pr| self.inh_scratch[pr]);
             pinh.dy += self.row_dy[i];
+            let mark = if n.vis.mark != 0 { n.vis.mark } else { pinh.mark };
             let o = (p.opacity * pinh.opacity).clamp(0.0, 1.0);
             let (mut clip, mut fade) = (pinh.clip, pinh.fade);
             let own_sc = p.transform.scale.x;
@@ -2358,6 +2370,9 @@ impl<S: 'static> Runtime<S> {
                     }
                 }
             }
+            if self.track_marks {
+                self.marks.resize(self.instances.len(), mark);
+            }
             let (mut clip, mut fade) = match n.vis.clip {
                 Some(f) => (
                     [r[0].max(clip[0]), r[1].max(clip[1]), r[2].min(clip[2]), r[3].min(clip[3])],
@@ -2380,7 +2395,7 @@ impl<S: 'static> Runtime<S> {
                 let origin = self.virtuals.values().find(|v| v.scroll_path == n.path).map_or(0.0, |v| f64::from(v.before));
                 dy -= grid((st.offset - origin) as f32, s);
             }
-            self.inh_scratch[i] = Inh { opacity: o, clip, fade, scale: sc, anchor, blur, dy };
+            self.inh_scratch[i] = Inh { opacity: o, clip, fade, scale: sc, anchor, blur, dy, mark };
             if (n.on_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_drag.is_some() || n.input.is_some() || n.window_drag)
                 && !self.subtree_exiting(i)
             {
@@ -2510,6 +2525,13 @@ impl<S: 'static> Runtime<S> {
         };
         let r = self.drawn.get(i).copied()?;
         Some((r[0] + r[2] * 0.5, r[1] + r[3] * 0.5))
+    }
+
+    /// Drawn rect `[x, y, w, h]` in points and effective opacity (ancestors included) of the
+    /// element keyed `key`, exiting or not, as of the last frame.
+    pub fn presented(&self, key: &str) -> Option<([f32; 4], f32)> {
+        let i = self.nodes.iter().position(|n| n.key.as_deref() == Some(key))?;
+        Some((*self.drawn.get(i)?, self.inh_scratch.get(i)?.opacity))
     }
 
     pub fn clear_color(&self) -> [f32; 4] {
