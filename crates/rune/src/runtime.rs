@@ -1142,7 +1142,31 @@ impl<S> Measurement<'_, S> {
 
 impl<S: 'static> Runtime<S> {
     fn commit(&mut self, tx: Tx) {
-        let measured = self.measure(&tx);
+        let mut measured = self.measure(&tx);
+        // A newly focused input (for example a popover search field) takes focus from
+        // the previous field. Re-measure after clearing its model so focus rings agree
+        // with keyboard routing in this same frame.
+        let focused = measured.nodes.iter().filter(|n| n.input.as_ref().is_some_and(|i| i.edit.focused));
+        let next = focused.clone().find(|n| Some(&n.path) != self.focused.as_ref())
+            .or_else(|| focused.into_iter().next()).map(|n| n.path.clone());
+        let mut cleared = false;
+        for n in &measured.nodes {
+            if Some(&n.path) != next.as_ref()
+                && let Some(access) = n.input.as_ref().and_then(|i| i.access.as_ref())
+            {
+                let edit = access(&mut self.state as &mut dyn Any);
+                if edit.focused {
+                    edit.focused = false;
+                    edit.break_history_group();
+                    cleared = true;
+                }
+            }
+        }
+        self.focused = next;
+        if cleared {
+            self.layout = measured.layout;
+            measured = self.measure(&tx);
+        }
         self.apply(measured, tx);
     }
 
@@ -2755,6 +2779,26 @@ mod tests {
 
     fn duplicate_view(_: &(), _: &mut Cx<()>) -> El {
         col().children([el().key("card"), el().key("card")])
+    }
+
+    #[test]
+    fn deleting_a_focused_row_does_not_call_its_stale_edit_accessor() {
+        fn view(s: &Vec<crate::TextEdit>, _: &mut Cx<Vec<crate::TextEdit>>) -> El {
+            col().children(s.iter().enumerate().map(|(i, edit)| {
+                crate::text_input(edit, crate::TextStyle::new(14.0, 400.0))
+                    .key(format!("row-{i}"))
+                    .on_edit(crate::edit_access(move |s: &mut Vec<crate::TextEdit>| &mut s[i]))
+            })).child(el().key("delete").size(40.0, 40.0).on_press(|s: &mut Vec<crate::TextEdit>| { s.clear(); }))
+        }
+        let mut edit = crate::TextEdit::default();
+        edit.focused = true;
+        let mut rt = Runtime::new(vec![edit], view, (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        let path = rt.nodes.iter().find(|n| n.key.as_deref() == Some("delete")).unwrap().path.clone();
+        rt.queue.push(Action::Press(path));
+        rt.frame(0.0);
+        assert!(rt.state.is_empty());
+        assert!(!rt.has_focus());
     }
 
     #[test]

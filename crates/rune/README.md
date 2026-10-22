@@ -348,6 +348,9 @@ policy changes are applied in the same mutation phase.
 
 ## Known gaps and next
 
+`TextEdit::focused` is maintained by the runtime. Set it once to request focus, then
+let the runtime clear it when another field takes focus; do not force it on every view rebuild.
+
 ### File dialogs
 
 Enable Rune's `native-file-dialog` feature and inject `FileDialogs::native()` in the shell.

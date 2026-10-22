@@ -2,7 +2,7 @@ use rune::{Cx, El, Env, Ime, Key, KeyEvent, Mods, Runtime};
 use rune_kit::{Combobox, ComboboxOption, ComboboxState, Kit};
 
 #[derive(Default)]
-struct State { combo: ComboboxState, chosen: Option<String> }
+struct State { combo: ComboboxState, chosen: Option<String>, other: rune::TextEdit }
 fn view(s: &State, _: &mut Cx<State>) -> El {
     let options: Vec<_> = (0..200).map(|i| {
         let mut o = ComboboxOption::new(format!("item-{i}"), format!("Model {i:03}"));
@@ -11,7 +11,10 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
     }).collect();
     let mut layer = Vec::new();
     let body = Combobox::new("models", &s.combo, &options, |s: &mut State| &mut s.combo)
+        .current(s.chosen.as_deref())
         .on_choose(|s, id, _| s.chosen = Some(id.into())).build(&Kit::neutral(true), &mut layer);
+    let body = rune::col().child(rune_kit::TextInput::new(&s.other)
+        .on_edit(|s: &mut State| &mut s.other).build(&Kit::neutral(true)).key("other")).child(body);
     rune_kit::root(body, layer)
 }
 fn runtime() -> Runtime<State> {
@@ -24,6 +27,28 @@ fn runtime() -> Runtime<State> {
 }
 fn key(rt: &mut Runtime<State>, key: Key, mods: Mods) {
     rt.key(KeyEvent { key, mods }); rt.frame(0.0);
+}
+
+#[test]
+fn opening_takes_focus_and_reveals_the_offscreen_selection() {
+    let mut s = State::default();
+    s.other.focused = true;
+    s.chosen = Some("item-199".into());
+    let mut rt = Runtime::new(s, view, (400.0, 400.0), Env { system_dark: true, scale: 1.0 });
+    rt.frame(0.0);
+    let trigger = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("models-value-trigger")).unwrap();
+    let x = trigger.rect[0] + trigger.rect[2] / 2.0;
+    let y = trigger.rect[1] + trigger.rect[3] / 2.0;
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.0);
+    assert!(rt.state.combo.open && rt.state.combo.search.focused);
+    assert!(!rt.state.other.focused);
+    let last = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("models-option-item-199")).unwrap();
+    assert!(last.visible[3] > 0.0);
+    key(&mut rt, Key::Text("099".into()), Mods::default());
+    assert_eq!(rt.state.combo.search.text, "099");
+    assert_eq!(rt.state.other.text, "");
 }
 
 #[test]

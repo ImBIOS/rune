@@ -138,8 +138,8 @@ impl<S: 'static> Combobox<S> {
                 let state = change_access(s);
                 state.active = None;
                 state.query = state.search.text.clone();
-                if let Some(i) = filtered(&change_options, &state.search.text).first() {
-                    tx.scroll_into_view(format!("{change_key}-option-{}", change_options[*i].id));
+                if let Some(i) = filtered(&change_options, &state.search.text).into_iter().find(|i| !change_options[*i].disabled) {
+                    tx.scroll_into_view(format!("{change_key}-option-{}", change_options[i].id));
                 }
             })
             .on_key(move |s: &mut S, ev, tx| {
