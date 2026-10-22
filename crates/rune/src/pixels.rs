@@ -165,6 +165,9 @@ impl ImageAtlas {
             if !self.slots.values().any(|slot| slot.page == i) {
                 (page.shelf_x, page.shelf_y, page.shelf_h) = (0, 0, 0);
                 page.dirty = None;
+                if page.width > IMAGE_ATLAS_SIZE || page.height > IMAGE_ATLAS_SIZE {
+                    page.data = Vec::new();
+                }
             }
         }
         let keep = self.slots.values().map(|s| s.page + 1).max().unwrap_or(0);
@@ -178,12 +181,10 @@ impl ImageAtlas {
 
     fn allocate(&mut self, w: u32, h: u32) -> (usize, u32, u32) {
         for (i, page) in self.pages.iter_mut().enumerate() {
+            if page.data.is_empty() { *page = ImagePage::new(w, h); }
             if let Some((x, y)) = page.allocate(w, h) { return (i, x, y); }
         }
-        let (width, height) = if w > IMAGE_ATLAS_SIZE || h > IMAGE_ATLAS_SIZE { (w, h) }
-            else { (IMAGE_ATLAS_SIZE, IMAGE_ATLAS_SIZE) };
-        let mut page = ImagePage { width, height, data: vec![0; width as usize * height as usize * 4],
-            dirty: None, shelf_x: 0, shelf_y: 0, shelf_h: 0 };
+        let mut page = ImagePage::new(w, h);
         let (x, y) = page.allocate(w, h).unwrap();
         self.pages.push(page);
         (self.pages.len() - 1, x, y)
@@ -191,6 +192,13 @@ impl ImageAtlas {
 }
 
 impl ImagePage {
+    fn new(w: u32, h: u32) -> Self {
+        let (width, height) = if w > IMAGE_ATLAS_SIZE || h > IMAGE_ATLAS_SIZE { (w, h) }
+            else { (IMAGE_ATLAS_SIZE, IMAGE_ATLAS_SIZE) };
+        Self { width, height, data: vec![0; width as usize * height as usize * 4],
+            dirty: None, shelf_x: 0, shelf_y: 0, shelf_h: 0 }
+    }
+
     fn allocate(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
         if w > self.width || h > self.height { return None; }
         if self.shelf_x + w > self.width {
@@ -273,6 +281,7 @@ mod tests {
         let out = draw(&mut rt);
         near(pixel(&out, 0, 0), [255, 0, 0, 255]);
         near(pixel(&out, 7, 0), [0, 0, 255, 255]);
+        assert!(rt.images.pages.iter().any(|p| p.data.is_empty()), "the old large page is released between live pages");
     }
 
     #[test]
@@ -391,6 +400,11 @@ mod tests {
         assert_eq!(third.page, 2);
         atlas.end_frame();
         stream.set(224, 128, vec![4; 224 * 128 * 4]);
+        assert_eq!(atlas.place(&stream, [112.0, 64.0]).unwrap(), first);
+        atlas.place(&full, [1024.0; 2]);
+        atlas.end_frame();
+        assert_eq!(atlas.pages.len(), 3);
+        assert!(atlas.pages[second.page].data.is_empty(), "unused middle standalone page releases storage");
         assert_eq!(atlas.place(&stream, [112.0, 64.0]).unwrap(), first);
         atlas.end_frame();
         assert_eq!(atlas.pages.len(), 1, "unused trailing pages release their storage");

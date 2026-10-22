@@ -108,7 +108,7 @@ pub struct Renderer {
     globals: wgpu::Buffer,
     atlas: wgpu::Texture,
     /// Stable image pages; the initial bind group uses a 1×1 stand-in.
-    images: Vec<(wgpu::Texture, wgpu::BindGroup)>,
+    images: Vec<Option<(wgpu::Texture, wgpu::BindGroup)>>,
     image_batches: Vec<(std::ops::Range<u32>, usize)>,
     instances: wgpu::Buffer,
     capacity: usize,
@@ -302,20 +302,20 @@ impl Renderer {
     /// Uploads changed rows of the runtime's image atlas (`El::pixels`), creating its texture on
     /// first use.
     pub fn upload_images(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, images: &mut ImageAtlas) {
-        self.images.truncate(images.pages.len());
+        self.images.resize_with(images.pages.len(), || None);
         for (index, page) in images.pages.iter_mut().enumerate() {
-            if self.images.get(index).is_none_or(|(t, _)| t.width() != page.width || t.height() != page.height) {
+            if page.data.is_empty() { self.images[index] = None; continue; }
+            if self.images[index].as_ref().is_none_or(|(t, _)| t.width() != page.width || t.height() != page.height) {
                 let texture = Self::image_texture(device, page.width, page.height);
                 let bind = Self::bind_group(device, &self.bind_layout, &self.globals, &self.atlas, &texture);
-                if index == self.images.len() { self.images.push((texture, bind)); }
-                else { self.images[index] = (texture, bind); }
+                self.images[index] = Some((texture, bind));
                 page.dirty = Some((0, page.height));
             }
             let Some((y0, y1)) = page.dirty.take() else { continue };
             let row = page.width * 4;
             queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.images[index].0,
+                texture: &self.images[index].as_ref().unwrap().0,
                 mip_level: 0,
                 origin: wgpu::Origin3d { x: 0, y: y0, z: 0 },
                 aspect: wgpu::TextureAspect::All,
@@ -372,7 +372,7 @@ impl Renderer {
         pass.set_vertex_buffer(0, self.instances.slice(..));
         let start = self.image_batches.partition_point(|(batch, _)| batch.end <= range.start);
         for (batch, page) in self.image_batches[start..].iter().take_while(|(batch, _)| batch.start < range.end) {
-            pass.set_bind_group(0, self.images.get(*page).map_or(&self.bind_group, |(_, bind)| bind), &[]);
+            pass.set_bind_group(0, self.images.get(*page).and_then(Option::as_ref).map_or(&self.bind_group, |(_, bind)| bind), &[]);
             pass.draw(0..4, batch.start.max(range.start)..batch.end.min(range.end));
         }
     }

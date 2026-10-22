@@ -380,7 +380,7 @@ fn primitive_pixels(gpu: &Gpu) {
     cpu.upload_images(d, q, &mut image_atlas);
     let pixels = rune::Pixels::new();
     pixels.set(2, 2, vec![255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 192, 255, 255, 255, 255]);
-    let uv = image_atlas.place(&pixels).unwrap().map(|v| v as f32);
+    let uv = image_atlas.place(&pixels, [2.0, 2.0]).unwrap().rect.map(|v| v as f32);
     let s = Spring::new(0.4, 0.16);
     let fade = Spring::new(0.4, 0.0);
     let node = Node {
