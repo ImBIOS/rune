@@ -676,6 +676,21 @@ impl El {
         self.style.min_size.width = length(0.0);
         self
     }
+    /// Lay children out in `n` equal columns, each as wide as the widest child needs (CSS
+    /// `grid-template-columns: repeat(n, 1fr)`), or sharing the width the element is given.
+    /// Children fill the cells in order unless placed with `grid_cell`.
+    pub fn equal_columns(mut self, n: usize) -> Self {
+        self.style.display = Display::Grid;
+        self.style.grid_template_columns = vec![fr(1.0); n.max(1)];
+        self
+    }
+    /// Place this child of an `equal_columns` element in `column` (0-based) of the first row.
+    /// Children in the same cell overlap in order, so a moving highlight can sit under a label.
+    pub fn grid_cell(mut self, column: usize) -> Self {
+        self.style.grid_column = Line { start: line(column as i16 + 1), end: span(1) };
+        self.style.grid_row = Line { start: line(1), end: span(1) };
+        self
+    }
     /// Out of flow, positioned at `left, top` inside the parent's padding box.
     pub fn absolute(mut self, left: f32, top: f32) -> Self {
         self.style.position = Position::Absolute;
