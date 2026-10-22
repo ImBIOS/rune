@@ -266,7 +266,7 @@ pub struct Runtime<S: 'static> {
     wake_deadlines: Vec<f64>,
     /// Windowed runs read the clock from the wall instead of summing frame steps.
     pub wall_start: Option<std::time::Instant>,
-    /// Called for every key before the focused field; return true to consume it.
+    /// Called for keys unhandled by the focused control; return true to consume it.
     pub on_key: Option<fn(&mut S, &KeyEvent, &mut Tx) -> bool>,
     nodes: Vec<Node>,
     layout: TaffyTree<usize>,
@@ -316,6 +316,8 @@ pub struct Runtime<S: 'static> {
     loops_active: bool,
     hovered: Option<String>,
     pub ime_area: Option<[f32; 4]>,
+    /// The shell cancels native composition before enabling the new text focus.
+    pub(crate) ime_reset: bool,
     /// Text the focused field asked to copy (the shell writes it to the clipboard).
     pub copy_request: Option<String>,
     /// A handler or `update` asked to close the window or quit (the shell takes it).
@@ -452,6 +454,7 @@ impl<S: 'static> Runtime<S> {
             loops_active: false,
             hovered: None,
             ime_area: None,
+            ime_reset: false,
             copy_request: None,
             shell_request: None,
             pending: Tx::default(),
@@ -843,9 +846,29 @@ impl<S: 'static> Runtime<S> {
                 true
             }
             Action::Key(ev) => {
+                self.keyboard_focus = true;
+                if let Some(f) = self.focused.as_deref().and_then(|p| self.node(p))
+                    .and_then(|n| n.input.as_ref()?.key.clone())
+                    && f(&mut self.state as &mut dyn Any, &ev, &mut one)
+                {
+                    merge(tx, one);
+                    return true;
+                }
                 if self.focus_key(&ev, &mut one) {
                     merge(tx, one);
                     return true;
+                }
+                let input_handles = match &ev.key {
+                    crate::edit::Key::Function(_) | crate::edit::Key::Tab => false,
+                    crate::edit::Key::Command(c) => matches!(c, 'a' | 'c' | 'x' | 'z'),
+                    _ => true,
+                };
+                if input_handles {
+                    let layout = self.focused_layout();
+                    if self.with_focused(|e| e.key(&ev, layout.as_deref()), &mut one) {
+                        merge(tx, one);
+                        return true;
+                    }
                 }
                 if let Some(f) = self.on_key
                     && f(&mut self.state, &ev, &mut one)
@@ -854,50 +877,28 @@ impl<S: 'static> Runtime<S> {
                     merge(tx, one);
                     return true;
                 }
-                if let Some(f) = self.focused.as_deref().and_then(|p| self.node(p))
-                    .and_then(|n| n.input.as_ref()?.key.clone())
-                    && f(&mut self.state as &mut dyn Any, &ev, &mut one)
-                {
-                    merge(tx, one);
-                    return true;
-                }
-                let layout = self.focused_layout();
-                self.with_focused(|e| e.key(&ev, layout.as_deref()), &mut one)
+                false
             }
             Action::Ime(ev) => self.with_focused(|e| e.ime(&ev), &mut one),
             Action::Paste(s) => self.with_focused(|e| e.paste(&s), &mut one),
             Action::Focus(path, x, y) => {
-                self.keyboard_focus = false;
                 let Some(access) = self.node(&path).and_then(|n| n.input.as_ref()?.access.clone()) else { return false };
                 let layout = self.node(&path).and_then(|n| n.text_layout.clone());
                 let s = self.env.scale;
-                if let Some(old) = self.focused.take()
-                    && old != path
-                    && let Some(a) = self.node(&old).and_then(|n| n.input.as_ref()?.access.clone())
-                {
-                    let e = a(&mut self.state as &mut dyn Any);
-                    e.focused = false;
-                    e.break_history_group();
-                }
+                self.set_focus(Some(path), false);
                 let e = access(&mut self.state as &mut dyn Any);
                 e.break_history_group();
-                e.focused = true;
                 if let Some(l) = layout {
                     let i = Cursor::from_point(&l, x * s, y * s).index().min(e.text.len());
                     e.anchor = i;
                     e.focus = i;
                 }
-                self.focused = Some(path);
                 one.instant = true;
                 true
             }
             Action::Blur => {
-                let Some(old) = self.focused.take() else { return false };
-                if let Some(a) = self.node(&old).and_then(|n| n.input.as_ref()?.access.clone()) {
-                    let e = a(&mut self.state as &mut dyn Any);
-                    e.focused = false;
-                    e.break_history_group();
-                }
+                if self.focused.is_none() { return false; }
+                self.set_focus(None, self.keyboard_focus);
                 true
             }
         };
@@ -933,8 +934,7 @@ impl<S: 'static> Runtime<S> {
             tx.copy(c);
         }
         if out.blur {
-            access(&mut self.state as &mut dyn Any).focused = false;
-            self.focused = None;
+            self.set_focus(None, self.keyboard_focus);
         }
         if out.submit
             && let Some(sub) = submit
@@ -1269,27 +1269,7 @@ impl<S> Measurement<'_, S> {
 impl<S: 'static> Runtime<S> {
     fn commit(&mut self, tx: Tx) {
         let mut measured = self.measure(&tx);
-        // A newly focused input (for example a popover search field) takes focus from
-        // the previous field. Re-measure after clearing its model so focus rings agree
-        // with keyboard routing in this same frame.
-        let focused = measured.nodes.iter().filter(|n| n.input.as_ref().is_some_and(|i| i.edit.focused));
-        let next = focused.clone().find(|n| Some(&n.path) != self.focused.as_ref())
-            .or_else(|| focused.into_iter().next()).map(|n| n.path.clone());
-        let mut cleared = false;
-        for n in &measured.nodes {
-            if Some(&n.path) != next.as_ref()
-                && let Some(access) = n.input.as_ref().and_then(|i| i.access.as_ref())
-            {
-                let edit = access(&mut self.state as &mut dyn Any);
-                if edit.focused {
-                    edit.focused = false;
-                    edit.break_history_group();
-                    cleared = true;
-                }
-            }
-        }
-        self.focused = next;
-        if cleared {
+        if self.sync_requested_focus(&mut measured.nodes) {
             self.layout = measured.layout;
             measured = self.measure(&tx);
         }
@@ -1638,17 +1618,6 @@ impl<S: 'static> Runtime<S> {
             old.live.clear();
             self.node_index.insert(old.id, nodes.len());
             nodes.push(old);
-        }
-
-        if let Some(f) = &self.focused
-            && !nodes[..present_len].iter().any(|n| &n.path == f && (n.focus.enabled || n.input.as_ref().is_some_and(|i| i.edit.focused)))
-        {
-            self.focused = None;
-        }
-        if self.focused.is_none()
-            && let Some(n) = nodes[..present_len].iter().find(|n| n.input.as_ref().is_some_and(|i| i.edit.focused))
-        {
-            self.focused = Some(n.path.clone());
         }
 
         self.nodes = nodes;

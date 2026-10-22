@@ -702,7 +702,8 @@ impl<S: 'static> Host<S> {
         if self.options.click_through && let Err(error) = window.set_cursor_hittest(false) {
             eprintln!("click-through unavailable for {}: {error}", self.native_handle.key());
         }
-        window.set_ime_allowed(true);
+        window.set_ime_allowed(false);
+        self.rt.ime_reset = true;
         #[cfg(target_os = "macos")]
         if chrome.drag_regions && !self.options.borderless {
             mac::own_window_dragging(&window);
@@ -835,6 +836,10 @@ impl<S: 'static> Host<S> {
         let rt = &mut self.rt;
         let mut animating = rt.frame(dt);
         let update_ms = now.elapsed().as_secs_f64() * 1000.0;
+        if std::mem::take(&mut rt.ime_reset) {
+            l.window.set_ime_allowed(false);
+            l.window.set_ime_allowed(rt.ime_area.is_some());
+        }
         let cursor = rt.cursor();
         if cursor != l.cursor {
             l.cursor = cursor;

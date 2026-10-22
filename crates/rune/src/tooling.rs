@@ -32,7 +32,7 @@ pub struct AppSpec<S: 'static> {
     /// Called at the start of every frame with seconds since start (virtual when headless);
     /// true when state changed.
     pub poll: Option<fn(&mut S, f64, &mut Tx) -> bool>,
-    /// App-level keys, before the focused text field; true consumes the key.
+    /// Keys unhandled by the focused control; true consumes the key.
     pub on_key: Option<fn(&mut S, &KeyEvent, &mut Tx) -> bool>,
     /// How the window frames the app's content.
     pub chrome: Chrome,
