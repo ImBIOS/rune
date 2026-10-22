@@ -135,3 +135,30 @@ the final targeted run passed all 3 focus tests, 5 combobox tests, context-menu
 and popover-focus tests on mini. No native windows were opened. The earlier
 snapshot/motion-lint evidence above predates this integration and is not claimed
 as a new visual run on this head.
+
+## Independent-review fixes
+
+- Wired OpenCode's picker and composer `on_input_key` handlers so picker navigation
+  and toolbar Tab cycling precede text editing and Rune traversal. App navigation
+  gets first refusal when there is no focused element. Its dismissal surface is
+  transparent rather than zero-opacity, keeping it hittable. Settings and the kit
+  gallery have no global key handler to migrate.
+- Modal membership follows anchored portal ownership and root layers above the
+  modal. Outside dismissal uses the allowed hit target. The Dialog+Select test
+  chooses an option outside the panel and keeps the dialog open.
+- Window deactivation queues preedit cancellation and resets native IME while
+  retaining committed text and field focus; overlay hosts also cancel preedit.
+- Focused virtual inputs retain fresh view accessors while unrealized, accept edits
+  offscreen, and clear model focus when another control takes focus.
+- Delayed loops sleep until the shared AnyHost deadline. Idle catch-up preserves
+  the deadline through intermediate input, with visibility and time-scale gating.
+
+On `111f999`, HiveMind mini passed 26 runtime tests, 4 loop tests, 5 combobox tests,
+context-menu, popover-focus, Dialog+Select, and all 4 OpenCode picker tests. Built
+OpenCode, settings and kit-gallery in release mode. The Dialog test's initial
+right-only outside assertion was corrected to accept any outside edge; the
+broader picker test exposed and verified the transparent-dismissal fix.
+
+Headless mini captures matched **19 current-main stills with zero changed pixels**:
+five OpenCode scenes, settings dark/light, and twelve kit comparison Rune columns.
+Existing goldens were never overwritten. No Studio rendering, windows or audio.

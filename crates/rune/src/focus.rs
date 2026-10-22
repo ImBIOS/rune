@@ -25,22 +25,29 @@ fn sync_input_focus<S: 'static>(nodes: &mut [Node], state: &mut S, path: Option<
 }
 
 impl<S: 'static> Runtime<S> {
-    fn descendant(&self, mut i: usize, ancestor: usize) -> bool {
-        loop {
-            if i == ancestor { return true; }
-            let Some(p) = self.nodes[i].parent else { return false };
-            i = p;
-        }
-    }
     pub(super) fn active_modal(&self) -> Option<usize> {
         self.modal_index
     }
     pub(super) fn refresh_modal_index(&mut self) {
         self.modal_index = self.nodes.iter().enumerate().rev()
             .find(|(i, n)| n.modal.is_some() && !self.subtree_exiting(*i)).map(|(i, _)| i);
+        self.modal_members = (0..self.nodes.len()).map(|i| self.modal_index.is_none_or(|m| i >= m)).collect();
+        // Portals are root siblings. Follow their anchor ownership, including chained
+        // popovers, rather than requiring their layout parent to be the modal.
+        loop {
+            let mut changed = false;
+            for (i, n) in self.nodes.iter().enumerate() {
+                if self.modal_members[i] || self.subtree_exiting(i) { continue; }
+                let parent_inside = n.parent.is_some_and(|p| self.modal_members[p]);
+                let anchor_inside = n.above.as_ref().is_some_and(|a| self.nodes.iter().enumerate()
+                    .any(|(j, anchor)| anchor.key.as_deref() == Some(&a.key) && self.modal_members[j]));
+                if parent_inside || anchor_inside { self.modal_members[i] = true; changed = true; }
+            }
+            if !changed { break; }
+        }
     }
     pub(super) fn allowed(&self, i: usize) -> bool {
-        self.active_modal().is_none_or(|m| self.descendant(i, m))
+        self.active_modal().is_none() || self.modal_members.get(i).copied().unwrap_or(false)
     }
     pub(super) fn can_focus(&self, i: usize) -> bool {
         let n = &self.nodes[i];
@@ -74,6 +81,20 @@ impl<S: 'static> Runtime<S> {
     pub(super) fn set_focus(&mut self, path: Option<String>, keyboard: bool) -> bool {
         if self.focused != path { self.ime_area = None; self.ime_reset = true; }
         let changed = sync_input_focus(&mut self.nodes, &mut self.state, path.as_deref());
+        let mut changed = changed;
+        for (p, input) in &mut self.virtual_inputs {
+            if let Some(access) = &input.access {
+                let edit = access(&mut self.state);
+                let focused = path.as_deref() == Some(p.as_str());
+                if edit.focused != focused || (!focused && edit.preedit.is_some()) {
+                    edit.focused = focused;
+                    if !focused { edit.preedit = None; }
+                    edit.break_history_group();
+                    changed = true;
+                }
+                input.edit = edit.clone();
+            }
+        }
         self.focused = path;
         self.keyboard_focus = keyboard;
         changed
@@ -96,7 +117,8 @@ impl<S: 'static> Runtime<S> {
             .map(|n| n.path.clone())
             .or(restore)
             .or_else(|| self.focused.clone().filter(|p| nodes.iter().any(|n| &n.path == p
-                && (n.focus.enabled || n.input.as_ref().is_some_and(|i| i.edit.focused)))))
+                && (n.focus.enabled || n.input.as_ref().is_some_and(|i| i.edit.focused)))
+                || self.virtual_inputs.get(p).is_some_and(|i| i.edit.focused)))
             .or_else(|| requested.into_iter().next().map(|n| n.path.clone()));
         // State may have deleted a row. Only the new view's accessors are valid now.
         // Use the same focus path as input events, then restore the old presentation
@@ -185,7 +207,7 @@ impl<S: 'static> Runtime<S> {
             self.hovered = None;
         }
         let inside = self.focused.as_deref().and_then(|p| self.nodes.iter().position(|n| n.path == p))
-            .is_some_and(|j| self.descendant(j, i));
+            .is_some_and(|j| self.allowed(j));
         if !inside {
             let target = self.tab_order().first().map(|&j| self.nodes[j].path.clone()).unwrap_or(path);
             self.set_focus(Some(target), self.keyboard_focus);
@@ -230,9 +252,55 @@ mod tests {
     fn key(rt: &mut Runtime<State>, key: Key, shift: bool) {
         rt.key(KeyEvent { key, mods: Mods { shift, ..Default::default() } }); rt.frame(0.0);
     }
-    fn focused(rt: &Runtime<State>) -> String {
+    fn focused<S: 'static>(rt: &Runtime<S>) -> String {
         rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key).unwrap()
     }
+    #[test]
+    fn window_blur_cancels_preedit_without_losing_committed_text_or_focus() {
+        fn view(s: &crate::TextEdit, _: &mut Cx<crate::TextEdit>) -> El {
+            crate::text_input(s, crate::TextStyle::new(14.0, 400.0)).key("field").size(200.0, 40.0)
+                .on_edit(|s: &mut crate::TextEdit| s)
+        }
+        let mut edit = crate::TextEdit::new("committed"); edit.focused = true;
+        let mut rt = Runtime::new(edit, view, (200.0, 40.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        rt.ime(crate::Ime::Preedit("pending".into(), None)); rt.frame(0.0);
+        rt.ime_reset = false;
+        rt.cancel_composition(); rt.frame(0.0);
+        assert!(rt.state.preedit.is_none() && rt.state.focused && rt.ime_reset);
+        assert_eq!(rt.state.text, "committed");
+    }
+
+    #[test]
+    fn unrealized_virtual_input_keeps_focus_and_does_not_steal_it_back() {
+        fn view(s: &Vec<crate::TextEdit>, _: &mut Cx<Vec<crate::TextEdit>>) -> El {
+            col().key("root").size(200.0, 240.0).child(button("other"))
+                .child(col().key("viewport").size(200.0, 200.0).scroll(ScrollSpec { stick_bottom: false }).clip_soft(0.0)
+                    .child(col().key("rows").w_full().growth(GrowthSpec::default()).virtualize(40.0)
+                        .children(s.iter().enumerate().map(|(i, edit)| {
+                            crate::text_input(edit, crate::TextStyle::new(14.0, 400.0))
+                                .key(format!("row-{i}")).size(200.0, 40.0)
+                                .on_edit(move |s: &mut Vec<crate::TextEdit>| &mut s[i])
+                        }))))
+        }
+        let mut state: Vec<_> = (0..100).map(|_| crate::TextEdit::new("")).collect();
+        state[0].focused = true;
+        let mut rt = Runtime::new(state, view, (200.0, 240.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        let path = rt.focused.clone();
+        rt.wheel(100.0, 100.0, -2000.0); rt.frame(0.0);
+        assert!(rt.node(path.as_deref().unwrap()).is_none());
+        assert_eq!(rt.focused, path);
+        rt.key(KeyEvent { key: Key::Text("offscreen".into()), mods: Mods::default() }); rt.frame(0.0);
+        assert_eq!(rt.state[0].text, "offscreen");
+        let (x, y) = rt.find("other").unwrap();
+        rt.pointer_down(x, y); rt.pointer_up(x, y); rt.frame(0.0);
+        assert!(!rt.state[0].focused);
+        rt.wheel(100.0, 100.0, 2000.0); rt.frame(0.0);
+        assert_eq!(focused(&rt), "other");
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("row-0")));
+    }
+
     #[test]
     fn input_handover_cancels_composition_and_keys_bubble_after_the_field() {
         use crate::{text_input, TextEdit, TextStyle};

@@ -677,6 +677,10 @@ impl<T: 'static> AnyHost for Overlay<T> {
                 self.dirty = true;
             }
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::Focused(false) => {
+                self.rt.cancel_composition();
+                self.dirty = true;
+            }
             WindowEvent::MouseInput { state, button: winit::event::MouseButton::Left, .. } if self.interactive => {
                 if let Some((x, y)) = self.rt.pointer() {
                     match state {
