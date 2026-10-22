@@ -48,7 +48,7 @@ an interactive drawing editor is outside this example.
 
 ## Native boundaries
 
-Windowed paths are compile-checked, not exercised on Studio. Window-manager support
+Windowed paths are compile-checked, not exercised on a desktop. Window-manager support
 for transparency, topmost placement and click-through varies. Monitor placement
 is a startup snapshot; hot-plug reconciliation is the app's next integration step.
 The native window-number accessor supplies the macOS CGWindowID that Rooms can
@@ -61,3 +61,7 @@ window is alive, on a platform-appropriate thread.
 These are winit windows, not non-activating `NSPanel`s. Non-activating panels,
 all-Spaces/fullscreen-space behavior and a status item still require Rune's own
 Mac shell. This example does not implement them.
+
+All windows share a GPU device. Unsupported transparency uses opaque rendering
+with a diagnostic, and unsupported click-through reports the platform error.
+Metal surfaces stay premultiplied for Core Animation; PNG exports are straight alpha.

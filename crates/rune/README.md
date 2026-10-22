@@ -180,6 +180,7 @@ wake callbacks are not hard-real-time guarantees.
 `run_windows(|displays| Vec<WindowSpec<S>>)` creates independent retained trees on
 one winit event loop. Each spec has a stable key, an `AppSpec`, optional supplied
 state, and `WindowOptions`. Share Live handles/services between window states.
+Windows share one GPU device, with independent renderers and text atlases.
 `WindowOptions::overlay(display)` selects transparent, borderless, topmost,
 click-through presentation at that display's physical origin and size. Options
 also support initially hidden windows and per-window minimum sizes.
@@ -205,6 +206,8 @@ still governs transparency, placement and topmost behavior. Non-activating macOS
 `NSPanel`s, all-Spaces/fullscreen-space policy and status items need Rune's own Mac
 shell; they are not implemented here. Native window behavior remains untested on
 Studio; verification uses compilation and selected-window headless renders.
+Unsupported transparency falls back to opaque rendering; unsupported click-through
+prints the platform error. Metal surfaces retain premultiplied colour for Core Animation.
 
 ## Run
 
