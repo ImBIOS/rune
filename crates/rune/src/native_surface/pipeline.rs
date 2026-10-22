@@ -34,6 +34,7 @@ struct Prepared {
 pub struct SurfaceRenderer {
     device: wgpu::Device,
     queries: Option<wgpu::QuerySet>,
+    queries_used: std::sync::atomic::AtomicBool,
     completion: std::sync::mpsc::SyncSender<()>,
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
@@ -137,6 +138,7 @@ impl SurfaceRenderer {
         Self {
             device: device.clone(),
             queries,
+            queries_used: std::sync::atomic::AtomicBool::new(false),
             completion,
             pipeline,
             layout,
@@ -149,6 +151,7 @@ impl SurfaceRenderer {
     }
 
     pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, draws: &[SurfaceDraw], viewport: (u32, u32)) {
+        *self.queries_used.get_mut() = false;
         // Query storage is per submission: counter reuse must not pair different frames.
         self.queries = (!draws.is_empty() && device.features().contains(wgpu::Features::TIMESTAMP_QUERY)).then(|| {
             device.create_query_set(&wgpu::QuerySetDescriptor {
@@ -294,10 +297,13 @@ impl SurfaceRenderer {
         if self.draws.is_empty() {
             return None;
         }
-        self.queries.as_ref().map(|query_set| wgpu::RenderPassTimestampWrites {
-            query_set,
-            beginning_of_pass_write_index: Some(0),
-            end_of_pass_write_index: Some(1),
+        self.queries.as_ref().map(|query_set| {
+            self.queries_used.store(true, std::sync::atomic::Ordering::Relaxed);
+            wgpu::RenderPassTimestampWrites {
+                query_set,
+                beginning_of_pass_write_index: Some(0),
+                end_of_pass_write_index: Some(1),
+            }
         })
     }
     pub fn before_instance(&self, index: usize) -> u32 {
@@ -334,7 +340,11 @@ impl SurfaceRenderer {
         for (surface, _, t) in &frames {
             surface.report(t.clone());
         }
-        if let Some(queries) = self.queries.as_ref().filter(|_| !frames.is_empty()) {
+        // A caller may use Renderer::draw_timed with its own query set. Never resolve our
+        // unwritten counters in that case; CPU submission/completion notifications still work.
+        if let Some(queries) =
+            self.queries.as_ref().filter(|_| self.queries_used.load(std::sync::atomic::Ordering::Relaxed))
+        {
             let resolve = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("video timestamps"),
                 size: 16,
