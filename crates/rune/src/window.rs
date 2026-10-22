@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, Ime as WIme, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime as WIme, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Theme, Window, WindowId, WindowLevel};
@@ -39,6 +39,8 @@ pub(crate) enum WakeEvent { App(usize), Live(usize), Visible(usize, bool), Open(
 
 /// What `Windows` needs of a host, whatever its state type: an app window or an overlay.
 pub(crate) trait AnyHost {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: StartCause) {}
+    fn wake_deadline(&self) -> Option<Instant> { None }
     fn resumed(&mut self, event_loop: &ActiveEventLoop);
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent);
     fn owns(&self, id: WindowId) -> bool;
@@ -131,6 +133,11 @@ impl<S: 'static> Windows<S> {
     }
 }
 impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        for host in self.hosts.iter_mut().flatten() { host.new_events(event_loop, cause); }
+        // Before resumed there are no hosts to clean up.
+        if self.factory.is_none() { self.cleanup(event_loop); }
+    }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let Some(factory) = self.factory.take() else { return };
         let primary = event_loop.primary_monitor();
@@ -182,7 +189,9 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
         }
         // Layer surfaces have no redraw events: keep turning while one animates (its vsync
         // paces the loop).
-        event_loop.set_control_flow(if animating { ControlFlow::Poll } else { ControlFlow::Wait });
+        let deadline = self.hosts.iter().flatten().filter_map(|host| host.wake_deadline()).min();
+        event_loop.set_control_flow(if animating { ControlFlow::Poll }
+            else { deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil) });
     }
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         // Surfaces go while winit's display connection is still open (layer surfaces live on it).
@@ -691,6 +700,25 @@ impl<S: 'static> AnyHost for Host<S> {
     fn open(&mut self, event_loop: &ActiveEventLoop) { Host::open(self, event_loop, None) }
     fn close(&mut self, event_loop: &ActiveEventLoop) { Host::close(self, event_loop) }
     fn finished(&self) -> bool { self.finished }
+
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        if matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll)
+            && self.wake_deadline().is_some_and(|deadline| deadline <= Instant::now())
+        {
+            if let Some(w) = self.win.as_ref().filter(|w| w.visible) {
+                w.window.request_redraw();
+            } else {
+                self.rt.frame(0.0);
+                self.shell(event_loop);
+            }
+        }
+    }
+
+    fn wake_deadline(&self) -> Option<Instant> {
+        self.rt.wall_start.and_then(|start| {
+            start.checked_add(std::time::Duration::try_from_secs_f64(self.rt.wake_deadline()?).ok()?)
+        })
+    }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.started {

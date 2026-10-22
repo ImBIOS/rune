@@ -107,6 +107,10 @@ The first runnable piece of Rune: enough framework to draw a small Settings wind
   state and `.on_submit(..)` runs on Enter.
 - **App hooks**: `AppSpec::setup` (once, with a `Waker` for background threads), `poll(state, clock,
   tx)` before every frame, `on_key`, and `extra_args()` for the app's own flags.
+  `tx.wake_after(Duration::from_millis(250))` schedules a poll on the unscaled app clock,
+  even when poll returns false. Equal deadlines coalesce; the shell sleeps until the earliest
+  deadline without a timer thread. Headless steps visit deadlines exactly. For debounce, store
+  the latest due time in state and reschedule its remainder when an older wake arrives.
 - **Tooling**: scripts gain `type`, `key`, `paste`, `scroll` and `fling`. Traces carry motion-lint
   intents (settle cuts, growing rows, word reveals) and clipped visible rects.
 
