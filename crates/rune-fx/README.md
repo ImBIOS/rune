@@ -50,7 +50,20 @@ fx.draw_layer(&mut pass, 0);              // or fx.draw_all(&mut pass, &layers, 
 ```
 
 `FxLayer` builders: `.at(time)`, `.seed(n)`, `.over()` / `.under()`, `.reduced(bool)`,
-`.source(slot, rect)`. `layer.is_animating()` tells the frame loop whether to keep ticking.
+`.source(slot, rect)`, `.opacity(k)` (also the pub field `opacity`, so struct literals need it).
+`layer.is_animating()` tells the frame loop whether to keep ticking.
+
+One-shots overlap: `OneShots<T>::new(cap)` keeps a bounded pool. `trigger(t, data)` starts a new
+instance beside the live ones, and `live(t, life)` yields each `(shot, opacity)`. Draw one layer per
+instance with `.seed(shot.seed).opacity(k)`. When the pool is full the oldest instance fades out
+over `OneShots::FADE` (0.16 s) instead of being cut. Ripples, pings, shockwaves, lightning zaps
+(`ElectricParams::zap: Some(t0)`, lives `ZAP_LIFE`) and sparkle bursts
+(`SparkleParams::burst: Some(t0)`, lives `burst_life()`) all work this way.
+
+Frosted glass (`LensParams::frost > 0`) reads a blurred backdrop. After copying the backdrop, call
+`fx.blur_backdrop(&device, &queue, &mut encoder, &backdrop_view, layer)` for each frosted layer. It
+runs a half-resolution dual-filter pyramid scissored to the layer. Without it the lens falls back
+to an 8-tap spiral blur.
 `Fx::cost()` returns the static cost declaration. `FxStats` reports draws, idle and off-screen
 culls, covered pixels, and whether any drawn layer needs a backdrop.
 
@@ -132,46 +145,53 @@ Lengths are in points, times in seconds.
 
 | Effect | Variants | Key params (default) | Notes |
 |---|---|---|---|
-| **Glow** `GlowParams` | `Soft`, `Neon` (white-hot hairline rim, bloom both sides), `Aura` (3-colour spectrum flowing round the perimeter, inner rim light), `Mask` (text/icon bloom from a `MaskPyramid`) | radius 14, intensity 1, inner 0, occlusion .15, breathe 0, breathe_period 2.6, heat 1, hot .6, aura_speed .12, rim_width .6, reach 4.5 | Bloom = erf edge + inverse-square tail, windowed. `heat` cools the light. Mask glow samples fractional mip levels with tent taps, so an animated radius never steps |
+| **Glow** `GlowParams` | `Soft`, `Neon` (white-hot hairline rim, bloom both sides), `Aura` (3-colour spectrum flowing round the perimeter, inner rim light), `Mask` (text/icon bloom from a `MaskPyramid`) | radius 14, intensity 1, inner 0, occlusion .15, breathe 0, breathe_period 2.6, heat 1, hot .6, aura_speed .12, rim_width .6, reach 4.5 | Bloom = tight Gaussian (0.35 r) + wide Gaussian (1.2 r), so the light is gone by about 2.5 r, through a soft knee (`1 − e^−x`) that keeps the hue instead of clipping to white. `heat` cools the light. Mask glow samples fractional mip levels with tent taps, so an animated radius never steps |
 | **Pulse** `PulseParams` | `Radar`, `Breathe`, `Heartbeat`, `Ping{from,dir,travel}`, `Ripple{at}` | count 3, period 2.4, reach 36, width 1.6, t0, duration .75, repeat 0, lag .16, head_radius 2.6 | Rings follow the shape's SDF. The ping winds up against its travel (Bézier P1 = −0.12), shoots, decelerates to zero velocity, then blooms and cools. Ripple `reach: 0` = auto (farthest corner) |
-| **Electric** `ElectricParams` | `Arc{a,b}`, `Border`, `Charged` (`ElectricParams::charged()`) | amplitude 5, frequency 2.4 cells/100pt, speed 3.2, core_width .6, glow 5, forks .55, flicker .45, strands 2, gap 2, fork_len 20 | Paths are noise-displaced polylines from CPU tables. The halo follows a Gaussian-blurred copy of the path. Forks grow out with a decelerating front (50 ms), then fade from white to the tint to violet |
-| **Fire** `FireParams` | `Top`, `Border`, `Heat` (`FireParams::heat()`), `Embers`; `FireParams::plasma()` | height 54, scale 20, speed 1.5, embers 16, ember_rise 58, ember_size .8, ember_life 1.5, warp 1, sides .32, base_glow .5, swirl 0 | Domain-warped fbm (2+2+4 octaves) scrolling upward through a 3-colour ramp. Embers are CPU particles drawn as short shutter streaks that cool white → orange → red |
+| **Electric** `ElectricParams` | `Arc{a,b}`, `Border`, `Charged` (`ElectricParams::charged()`) | amplitude 5, frequency 2.4 cells/100pt, speed 3.2, core_width .6, glow 5, forks .55, flicker .45, strands 2, gap 2, fork_len 20, zap None | Lightning: a midpoint-displacement bolt (CPU tables) that strikes with a flash, holds, sometimes return-strokes, and re-strikes every ~0.55/speed s, mostly down the same channel. Extra strands are the last two strikes' afterimages (≈70 ms decay). Forks branch off at each strike, shoot out in 35 ms, then cool white → tint → violet and die within 70–200 ms. Narrow halo along a blurred copy of the path. Arc bounds cover the bolt's full reach. `Charged` keeps a calm crawling hairline |
+| **Fire** `FireParams` | `Top`, `Border`, `Heat` (`FireParams::heat()`), `Embers`; `FireParams::plasma()` | height 54, scale 20, speed 1.5, embers 16, ember_rise 58, ember_size .8, ember_life 1.5, warp 1, sides .32, base_glow .5, swirl 0 | Flames: domain-warped fbm (warp grows with height) in height-normalised density, so tongues rise and narrow. Per-column flicker (slow + ~8 Hz). Temperature ramp from a white-yellow base through orange and deep red to a faint smoke veil. Plasma is a thin band hugging the outside of the edge, with ridged filaments that breathe (3 noise evaluations). Embers are flung up, slow under drag (`EMBER_DRAG` 2.4/s) to a buoyant drift, sway, and cool exponentially. Heat haze only distorts above the flame |
 | **Motion blur** `MotionBlurParams` + `MotionSamples` | `Shutter` (exact sub-frame poses), `Directional` (taps along the velocity) | shutter_angle 180, frame_dt 1/60, max_samples 48, px_per_sample 1.25, smooth_shutter true | Sample count = travel px / 1.25, so it's 1 at rest. Raised-cosine shutter weights give soft trail ends. Poses include rotation, scale and opacity |
-| **Distort** `DistortParams` | `HeatHaze`, `Shockwave`, `Lens(LensParams)`, `Crt`, `ChromaSplit` | lens: bevel 14, depth 16, dispersion .14, magnification 1.04, presence 1, frost 0, shadow .35, rim 1.6, union_k 22, morph 0, `second: Option<Shape>` | Lens uses psychopomp's thin-surface optics: a superellipse bevel (power 3) bends light by `tan(θ − asin(sin θ / 1.5))`. Per-channel spread splits colour at the rim, a soft blur covers the squeezed rim, and it adds sky fresnel, a specular line on the lit arc, a counter-line and a drop shadow. `presence` ramps lensing, rim and shadow together, so the glass appears by lensing, not by fading. A second shape smooth-unions into a gooey merge; `morph` lerps toward it |
+| **Distort** `DistortParams` | `HeatHaze`, `Shockwave`, `Lens(LensParams)`, `Crt`, `ChromaSplit` | lens: bevel 14, depth 16, dispersion .14, magnification 1.04, presence 1, frost 0, shadow .35, rim 1.6, union_k 22, morph 0, `second: Option<Shape>` | Lens uses psychopomp's thin-surface optics: a superellipse bevel (power 3) bends light by `tan(θ − asin(sin θ / 1.5))`. Per-channel spread splits colour at the rim, a soft blur covers the squeezed rim, and it adds sky fresnel, a specular line on the lit arc, a counter-line and a drop shadow. `presence` ramps lensing, rim and shadow together, so the glass appears by lensing, not by fading. A second shape smooth-unions into a gooey merge; `morph` lerps toward it. `frost` is Liquid Glass "regular": a wide pyramid blur (σ up to 18 pt), saturation ×(1 + 0.9 k), a compressive sRGB lift that brightens dark backdrops more than light ones, and grain against banding |
 | **Shimmer** `ShimmerParams` | shape or mask (`use_mask`) | period 1.8, band 28, angle .35 rad, intensity .16, pause .3 | Skeleton loaders and "Thinking…" text sheen. The band starts and ends off the shape, so it never cuts |
-| **Sparkles** `SparkleParams` | – | count 9, life 1.5, size 7, margin 10 | 4-point glints with a `sin³` envelope |
+| **Sparkles** `SparkleParams` | continuous or `burst: Some(t0)` | count 6, life 1.5, size 7, margin 10 | Crisp four-point stars (concave superellipse, 1 px AA) with a white-hot centre. Sizes skew small with a few large. Each pops in with overshoot, twinkles at its own 5–9 Hz, spins slowly and shrinks away; continuous stars rest between appearances so only a few are lit. A burst flings every star out once |
 | **Aurora** `AuroraParams` | – | scale 120, speed .25, intensity .5, feather 40 | 3 curtains from CPU tables, plus noise rays |
 | **Grain** `GrainParams` | static or animated (`fps`) | amount .03, fps 0 | Static by default (no temporal shimmer) |
 
 ## Costs
 
-From `demo/fx/timings.md`: Apple M2 Max, shared with other jobs. One layer covers a
+From `demo/fx/timings.md`: Apple M5 Max (shared with other jobs). One layer covers a
 600×400 pt region at 2× (1200×800 = 960k px, smaller where noted). GPU time per draw is the median
 over 10 draws per timestamped pass. "reads" = texture taps plus CPU-table reads per pixel; "noise" =
-gradient-noise evaluations per pixel.
+gradient-noise evaluations per pixel. "was" is the previous effects on the same machine (median of
+three runs each).
 
-| effect | px | reads | noise | backdrop | ms |
-|---|---:|---:|---:|:-:|---:|
-| glow soft / neon | 960k | 0 | 0 | | 0.27 / 0.31 |
-| glow aura | 960k | 0 | 1 | | 0.65 |
-| glow mask (text) | 960k | 13 | 0 | | 0.36 |
-| pulse radar / breathe / heartbeat | 960k | 0 | 0 | | 0.57 / 0.21 / 0.26 |
-| pulse ripple | 544k | 0 | 0 | | 0.12 |
-| electric arc (3 strands) / border / charged | 960k | 37 / 43 / 37 | 0 | | 0.81 / 0.61 / 0.58 |
-| fire top + 16 embers / plasma border / heat | 667k / 960k / 667k | 32 / 0 / 6 | 8 | | 1.73 / 1.59 / 1.16 |
-| distort heat haze | 960k | 1 | 6 | yes | 1.35 |
-| distort shockwave / CRT / chroma split | 960k | 3 / 7 / 3 | 0 | yes | 0.13 / 0.38 / 0.53 |
-| distort lens / lens + frost | 960k | 12 | 0 | yes | 0.31 / 0.53 |
-| shimmer / grain | 960k | 0 | 0 | | 0.48 / 0.68 |
-| sparkles ×9 / aurora | 960k | 18 / 12 | 0 / 3 | | 1.23 / 1.64 |
-| motion shutter (48 poses) / directional (32 taps) | 467k | 48 / 32 | 0 | | 1.61 / 1.54 |
+| effect | px | reads | noise | backdrop | ms | was |
+|---|---:|---:|---:|:-:|---:|---:|
+| glow soft / neon | 960k | 0 | 0 | | 0.10 / 0.11 | 0.10 / 0.12 |
+| glow aura | 960k | 0 | 1 | | 0.21 | 0.21 |
+| glow mask (text) | 960k | 13 | 0 | | 0.23 | 0.22 |
+| pulse radar / breathe / heartbeat | 960k | 0 | 0 | | 0.16 / 0.07 / 0.17 | 0.21 / 0.09 / 0.09 |
+| pulse ripple | 544k | 0 | 0 | | 0.05 | 0.06 |
+| electric arc (3 strands) / border / charged | 960k | 37 / 43 / 37 | 0 | | 0.39 / 0.38 / 0.24 | 0.43 / 0.28 / 0.23 |
+| fire top + 16 embers / plasma border / heat | 644k / 960k / 635k | 32 / 0 / 8 | 8 / 3 / 8 | | 1.32 / 0.51 / 0.74 | 1.19 / 1.00 / 0.78 |
+| distort heat haze | 960k | 1 | 6 | yes | 0.68 | 0.70 |
+| distort shockwave / CRT / chroma split | 960k | 3 / 7 / 3 | 0 | yes | 0.09 / 0.11 / 0.06 | 0.10 / 0.13 / 0.06 |
+| distort lens / lens + frost | 960k | 12 | 0 | yes | 0.21 / 0.40 | 0.21 / 0.44 |
+| shimmer / grain | 960k | 0 | 0 | | 0.09 / 0.08 | 0.08 / 0.08 |
+| sparkles ×9 / aurora | 960k | 18 / 12 | 0 / 3 | | 0.18 / 0.48 | 0.36 / 0.49 |
+| motion shutter (48 poses) / directional (32 taps) | 467k | 48 / 32 | 0 | | 0.66 / 0.50 | 0.64 / 0.60 |
+
+Deltas: the heartbeat doubles (four overlapping beat instances instead of one) and the electric
+border costs about 0.1 ms more (sharper fractal paths keep more of the near-field slope
+correction). Flames cost about 10% more for the height-normalised warp. Plasma halves (3 noise
+evaluations instead of 8) and sparkles halve (stars outside their own radius are skipped). The frost
+pyramid adds a half-resolution blur scissored to the lens (in the lab, lens-frost measures
+0.7 ms per whole frame against 0.5–0.6 ms for the clear lens). Every row stays within the old budgets.
 
 These are worst-case full-region numbers. Real layers hug their node: the gallery's 224 pt card
-with flames and embers covers about 195k px (about 0.5 ms), and a charged 196×50 button border
+with flames and embers covers about 195k px (about 0.4 ms), and a charged 196×50 button border
 about 115k px (about 0.05 ms).
-Timings on the shared machine varied by about 1.5–3× between runs (cheap effects like grain and chroma split
-measured 0.1–0.2 ms in a quieter run), so read them as relative costs. A reserved machine is needed
-for gating.
+Timings on a shared machine vary by about 1.5× between runs, so read them as relative costs. A
+reserved machine is needed for gating.
 
 ## Gaps and next steps
 
@@ -184,7 +204,8 @@ for gating.
 - **Fire** is the heaviest per pixel (8 noise evaluations). Half-resolution evaluation with a
   bilateral upsample would cut it about 3×. Not done.
 - Electricity forks grow and cool but don't sub-branch.
-- Blur and frost in the lens use an 8-tap spiral, not the Jimenez pyramid from research note 12.
+- The frost pyramid needs one `blur_backdrop` call per frosted layer (about 10 per frame fit the
+  uniform slots). The clear lens's rim blur is still an 8-tap spiral.
 - Bind groups are rebuilt every `prepare`. They should be cached per (backdrop, source) pair.
 - No CPU reference renderer or golden tests for the shaders yet; the CPU-table and contract tests
   live in `src/lib.rs`.
