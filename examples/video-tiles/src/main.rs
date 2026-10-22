@@ -44,7 +44,7 @@ fn setup(s: &mut Tiles, wake: Waker) {
     }
     let surfaces = s.surfaces.clone();
     std::thread::spawn(move || {
-        for id in 1.. {
+        for id in 1..=u64::MAX {
             let bytes = synthetic(640, 360, id);
             for s in &surfaces {
                 push(s, &bytes, id);

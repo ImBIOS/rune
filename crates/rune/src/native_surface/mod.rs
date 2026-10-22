@@ -136,7 +136,7 @@ impl NativeSurface {
         let sizes = match frame.format {
             Format::Bgra => [n * 4, 0],
             _ => {
-                if w % 2 != 0 || h % 2 != 0 {
+                if !w.is_multiple_of(2) || !h.is_multiple_of(2) {
                     return Err("NV12 requires even dimensions".into());
                 }
                 [n, n / 2]
@@ -245,7 +245,7 @@ pub fn linear(x: f32, transfer: Transfer) -> f32 {
 
 /// Synthetic bars, gradient and one-pixel text-like strokes. No decoded content is copied by import.
 pub fn synthetic(width: u32, height: u32, phase: u64) -> ByteFrame {
-    assert!(width > 0 && height > 0 && width % 2 == 0 && height % 2 == 0);
+    assert!(width > 0 && height > 0 && width.is_multiple_of(2) && height.is_multiple_of(2));
     let bars = [
         [235, 128, 128],
         [210, 16, 146],
@@ -264,7 +264,7 @@ pub fn synthetic(width: u32, height: u32, phase: u64) -> ByteFrame {
                 bars[(x * 8 / width) as usize][0]
             } else if row < 2 * height / 3 {
                 (16 + x * 219 / width) as u8
-            } else if (x + phase as u32) % 8 == 0 || row % 9 == 0 {
+            } else if (x + phase as u32).is_multiple_of(8) || row.is_multiple_of(9) {
                 235
             } else {
                 16

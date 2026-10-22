@@ -35,4 +35,32 @@ idle frame still reports. GPU seconds use the GPU clock, not the CPU `Instant` e
 These are GPU pass durations and callback-observed completion, not exact raw
 command-buffer/presentation feedback.
 
-Results: pending verified release binary and headless measurements.
+## Results (2026-10-22)
+
+M4 Pro, Metal, release build `52b5995`. Every run produced 30/30 valid GPU samples
+(1,200 including warmup). Raw runs: `native-surface-m4-pro.jsonl`.
+
+| Configuration | CPU ms/frame | GPU ms/frame | CPU ms/tile | GPU ms/tile |
+| --- | ---: | ---: | ---: | ---: |
+| 1 × 1080p | 1.568 | 0.384 | 1.568 | 0.384 |
+| 4 × 1080p | 2.104 | 1.467 | 0.526 | 0.367 |
+| 9 × 1080p | 1.523 | 3.271 | 0.169 | 0.363 |
+| 1 × 4K | 0.661 | 1.409 | 0.661 | 1.409 |
+| 1 × 5K | 0.642 | 2.482 | 0.642 | 2.482 |
+
+These are medians of seven run medians. The shared worker was under CPU contention:
+CPU p95 reached 48.8 ms and tile-count CPU medians are not monotonic. This verifies the
+GPU budget and complete timing samples, not sustained end-to-end 60 Hz or isolated CPU
+capacity. There is no decoder/network/presentation in this benchmark.
+
+On Pro M2 Max the overlap regression test's exclusive device-lock operation took
+0.082 ms and returned 179.789 ms before GPU completion (427.147 ms workload). It uses
+`Buffer::destroy`, which acquires the same wgpu-core snatch write lock as `queue.present`;
+no real drawable presentation was measured. The initial smaller workload finished before
+the probe on M5 and failed loudly, so the test uses a longer compute workload.
+
+All nine settings/opencode snapshots are byte-identical to the pre-video binaries.
+Stream, send, switch and scroll traces pass motion-lint with zero candidates. The
+synthetic four-tile Retina snapshot also renders successfully. Native colour/sharpness/
+lifetime tests pass on M5; the overlap test passes on M2 Max. The original Windows
+cross-check passed before the Host rebase; no native Windows run was performed.

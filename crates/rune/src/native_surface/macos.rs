@@ -76,7 +76,9 @@ impl PixelBuffer {
         if size.contains(&0) || size.iter().any(|v| *v > 16384) {
             return Err("invalid video dimensions".into());
         }
-        if format != Format::Bgra && (size[0] % 2 != 0 || size[1] % 2 != 0 || CVPixelBufferGetPlaneCount(b) != 2) {
+        if format != Format::Bgra
+            && (!size[0].is_multiple_of(2) || !size[1].is_multiple_of(2) || CVPixelBufferGetPlaneCount(b) != 2)
+        {
             return Err("NV12 requires two planes and even dimensions".into());
         }
         // An absent matrix follows the common SD/HD convention; explicit unsupported colour
@@ -119,7 +121,7 @@ impl PixelBuffer {
             return Err("invalid dimensions".into());
         }
         let nv12 = frame.format != Format::Bgra;
-        if nv12 && (w % 2 != 0 || h % 2 != 0) {
+        if nv12 && (!w.is_multiple_of(2) || !h.is_multiple_of(2)) {
             return Err("odd NV12 dimensions".into());
         }
         if frame.planes[0].len() != w * h * if nv12 { 1 } else { 4 }

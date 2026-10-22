@@ -162,6 +162,7 @@ fn completion_worker_preserves_cpu_gpu_overlap() {
     let still_running = matches!(state, Err(std::sync::mpsc::TryRecvError::Empty));
     assert!(still_running, "snatch write lock was serialized behind GPU completion (or workload too short)");
     let finish = completed.recv_timeout(Duration::from_secs(30)).expect("GPU workload completed");
+    assert!(unlocked - lock_start < (finish - start) / 2, "write lock consumed the GPU workload's duration");
     eprintln!(
         "CPU/GPU overlap: write lock {:.3} ms, returned {:.3} ms before GPU completion ({:.3} ms workload)",
         (unlocked - lock_start).as_secs_f64() * 1000.0,
