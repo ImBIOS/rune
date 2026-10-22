@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::WindowEvent;
+use winit::event::{StartCause, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId, WindowLevel};
 
@@ -153,6 +153,7 @@ impl<T: 'static> OverlayHandle<T> {
     }
 
     /// Change the overlay's state on the UI thread, in call order, shown or not.
+    /// `Tx::wake_after` only redraws; the view re-runs on `update` (no poll callback yet).
     pub fn update(&self, f: impl FnOnce(&mut T, &mut Tx) + Send + 'static) {
         self.request(|q| q.updates.push(Box::new(f)));
     }
@@ -513,14 +514,30 @@ impl<T: 'static> Overlay<T> {
 }
 
 impl<T: 'static> Overlay<T> {
+    fn apply_updates(&mut self, updates: Vec<Update<T>>) {
+        if updates.is_empty() { return; }
+        for f in updates { self.rt.update(f); }
+        // Register timer requests even before the first show; hidden overlays never draw.
+        self.advance();
+    }
+
+    fn advance(&mut self) {
+        self.rt.frame(0.0);
+        self.rt.shell_request = None;
+        self.dirty = true;
+    }
+
+    fn wake_due(&mut self, now: Instant) {
+        if self.wake_deadline().is_some_and(|deadline| deadline <= now) {
+            // Drain independently of surface acquisition (hidden, minimized, or unavailable).
+            self.advance();
+        }
+    }
+
     /// Applies requests from other threads: updates, edge, show and hide.
     fn sync(&mut self, event_loop: &ActiveEventLoop) {
         let requests = std::mem::take(&mut *self.shared.requests.lock().unwrap());
-        for f in requests.updates {
-            self.rt.update(f);
-            self.rt.shell_request = None;
-            self.dirty = true;
-        }
+        self.apply_updates(requests.updates);
         let mut at = self.at;
         at.edge = requests.edge.unwrap_or(at.edge);
         at.margin = requests.margin.unwrap_or(at.margin);
@@ -611,6 +628,18 @@ impl<T: 'static> Overlay<T> {
 }
 
 impl<T: 'static> AnyHost for Overlay<T> {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
+        if matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll) {
+            self.wake_due(Instant::now());
+        }
+    }
+
+    fn wake_deadline(&self) -> Option<Instant> {
+        self.rt.wall_start.and_then(|start| {
+            start.checked_add(std::time::Duration::try_from_secs_f64(self.rt.wake_deadline()?).ok()?)
+        })
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.sync(event_loop);
     }
@@ -739,5 +768,43 @@ mod tests {
         assert_eq!(n, 3);
         shared.availability.store(2, Ordering::Release);
         assert_eq!(handle.availability(), Availability::Unavailable);
+    }
+
+    #[test]
+    fn hidden_overlay_update_wakes_once_without_a_surface() {
+        use std::time::Duration;
+        fn view(_: &Vec<f64>, _: &mut Cx<Vec<f64>>) -> El { crate::el() }
+        let app = AppSpec {
+            title: "timer test", size: (20.0, 20.0), min_size: None,
+            init: Vec::<f64>::new, view, scenes: &[], fonts: &[], families: ("sans-serif", "monospace"),
+            setup: None, poll: None, on_key: None,
+        };
+        let spec = OverlaySpec {
+            name: "timer test", size: (20.0, 20.0), edge: ScreenEdge::Top,
+            margin: 0.0, align: Align::Center, inset: 0.0, interactive: false, view,
+        };
+        let (mut overlay, handle) = Overlay::new(spec, Vec::new(), &app);
+        // The runtime's virtual clock makes scheduling exact; the host maps it to wall time.
+        overlay.rt.wall_start = None;
+        overlay.rt.poll = Some(|seen, now, _| { seen.push(now); false });
+        handle.update(|_, tx| tx.wake_after(Duration::from_millis(250)));
+        let updates = std::mem::take(&mut overlay.shared.requests.lock().unwrap().updates);
+        overlay.apply_updates(updates);
+        assert_eq!(overlay.rt.state, [0.0]);
+        assert_eq!(overlay.rt.wake_deadline(), Some(0.25));
+        let start = Instant::now();
+        overlay.rt.wall_start = Some(start);
+        assert_eq!(overlay.wake_deadline(), Some(start + Duration::from_millis(250)));
+        overlay.wake_due(start + Duration::from_millis(249));
+        assert_eq!(overlay.rt.state.len(), 1, "not before the deadline");
+        overlay.rt.wall_start = Some(Instant::now() - Duration::from_millis(250));
+        overlay.wake_due(Instant::now());
+        assert_eq!(overlay.rt.state.len(), 2);
+        assert!(overlay.rt.state[1] >= 0.25);
+        assert_eq!(overlay.wake_deadline(), None);
+        overlay.wake_due(Instant::now());
+        assert!(!overlay.draw(), "hidden overlays do not acquire or animate a surface");
+        assert_eq!(overlay.rt.state.len(), 2, "no polling after the one wake");
+        assert!(overlay.live.is_none() && overlay.gpu.is_none());
     }
 }
