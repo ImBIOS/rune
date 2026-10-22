@@ -12,7 +12,7 @@ scenes reach 2. The gate allows 2 per channel and **zero outlier pixels**.
 
 ## The oracle evaluates the formulas Rune actually ships
 
-The scalar evaluator implements all five current instance kinds:
+The scalar evaluator implements the five instance kinds present when this work began:
 
 | Kind | Reference behavior |
 |---|---|
@@ -26,8 +26,12 @@ Every kind uses the shader's four independent soft clip ramps. Expanded quad
 bounds are included, since the GPU cannot shade outside its triangles. Outlines
 and capsules already lower to rounded-rect instances. Positions are device pixels.
 Translation and positive glyph scale are the transforms the current instance ABI
-supports. Arbitrary affine transforms, path rendering, group opacity and backdrop
-blur are not implemented by this ABI or claimed by this oracle.
+supports for these five kinds. Arbitrary affine transforms, path rendering, group
+opacity and backdrop blur are not covered by this oracle.
+
+During the publication rebase, main added vector segment/triangle kinds 5 and 6
+(`d666064`). Those new kinds are rejected by this oracle's validator and are not
+generated yet; extending the independent formulas and corpus is follow-up work.
 
 `vello_cpu` was considered, as PLAN §6c requests. Its path-area coverage would
 introduce a second antialiasing definition, and its rounded-box blur need not
@@ -187,7 +191,13 @@ service. The first Linux run must validate the benchmark and save its baseline.
 5. [Rune coordination thread](https://anoma-ly.slack.com/archives/C0CB59ARQLE/p1792685407384429).
 6. Rune `shader.wgsl` and `render.rs`; research/12, /14 and /19; PLAN tenet 7 and §6c.
 
+The parent supplied an independent Opus medium review of `77c92ab`: no blockers.
+It verified that every Renderer caller supplies target dimensions as the viewport,
+so fragment position has the required coordinates. Static glyphs are pixel-snapped,
+which keeps their texel choices unchanged. The review's nonblocking benchmark nit
+is fixed: non-Linux workspace benches skip cleanly; the instruction-gate script
+still rejects non-Linux execution. After the explicit publication thaw, the
+reviewed commit was rebased onto the new public root and current main.
+
 Remaining: Linux instruction execution, x86/arm CPU hash comparison, Vulkan/D3D12
-budget measurement, broader app snapshot comparison, and independent Opus review.
-This subagent's catalog exposes model search but no agent-spawn tool; the requested
-pre-push review must be supplied by the parent session before landing.
+budget measurement, broader app snapshot comparison, and the new vector kinds.
