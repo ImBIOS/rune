@@ -95,13 +95,28 @@ pub struct Renderer {
     instances: wgpu::Buffer,
     capacity: usize,
     count: u32,
+    springs: Option<crate::gpu_springs::Bindings>,
+    spring_instances: usize,
 }
 
 impl Renderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Renderer {
+        Self::create(device, format, None)
+    }
+
+    /// Opt-in retained geometry. IDs map instances to shared translation/opacity nodes.
+    /// Upload geometry once with `prepare`, then use `present_at` without rebuilding instances.
+    pub fn with_springs(device: &wgpu::Device, format: wgpu::TextureFormat, nodes: &[crate::gpu_springs::Node], ids: &[u32]) -> Renderer {
+        Self::create(device, format, Some((nodes, ids)))
+    }
+
+    fn create(device: &wgpu::Device, format: wgpu::TextureFormat, properties: Option<(&[crate::gpu_springs::Node], &[u32])>) -> Renderer {
+        let source = if properties.is_some() {
+            format!("{}\n{}", include_str!("shader.wgsl").replace("@vertex\nfn vs(", "fn base_vs("), crate::gpu_springs::SHADER)
+        } else { include_str!("shader.wgsl").to_owned() };
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("uber"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
         });
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
@@ -156,9 +171,11 @@ impl Renderer {
         });
         let stand_in = Self::image_texture(device, 1);
         let bind_group = Self::bind_group(device, &bgl, &globals, &atlas, &stand_in);
+        let spring_layout = properties.map(|_| crate::gpu_springs::Bindings::layout(device));
+        let layouts = [Some(&bgl), spring_layout.as_ref()];
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[Some(&bgl)],
+            bind_group_layouts: &layouts[..if properties.is_some() { 2 } else { 1 }],
             immediate_size: 0,
         });
         let attrs = wgpu::vertex_attr_array![
@@ -170,7 +187,7 @@ impl Renderer {
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: Some("vs"),
+                entry_point: Some(if properties.is_some() { "vs_springs" } else { "vs" }),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Instance>() as u64,
@@ -196,7 +213,9 @@ impl Renderer {
         });
         let capacity = 256;
         let instances = Self::instance_buffer(device, capacity);
-        Renderer { pipeline, bind_group, bind_layout: bgl, globals, atlas, images: None, instances, capacity, count: 0 }
+        let spring_instances = properties.map_or(0, |(_, ids)| ids.len());
+        let springs = properties.map(|(nodes, ids)| crate::gpu_springs::Bindings::new(device, spring_layout.as_ref().unwrap(), nodes, ids));
+        Renderer { pipeline, bind_group, bind_layout: bgl, globals, atlas, images: None, instances, capacity, count: 0, springs, spring_instances }
     }
 
     fn image_texture(device: &wgpu::Device, size: u32) -> wgpu::Texture {
@@ -273,6 +292,7 @@ impl Renderer {
         instances: &[Instance],
         viewport: (u32, u32),
     ) {
+        if self.springs.is_some() { assert_eq!(instances.len(), self.spring_instances); }
         if let Some((y0, y1)) = atlas.dirty.take() {
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -297,6 +317,31 @@ impl Renderer {
     }
 
     pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, clear: [f32; 4]) {
+        self.draw_timed(encoder, view, clear, None);
+    }
+
+    /// One uniform write per presentation-only frame; use the display's target time.
+    pub fn present_at(&self, queue: &wgpu::Queue, viewport: (u32, u32), time: f64) {
+        let t = crate::gpu_springs::split_time(time);
+        queue.write_buffer(&self.globals, 0, bytemuck::cast_slice(&[viewport.0 as f32, viewport.1 as f32, t[0], t[1]]));
+    }
+
+    /// A retarget touches one node record; caller computes inherited position/velocity on CPU.
+    pub fn write_spring_node(&mut self, queue: &wgpu::Queue, id: usize, node: &crate::gpu_springs::Node) {
+        let properties = self.springs.as_mut().expect("renderer has no GPU springs");
+        assert!(id < properties.count);
+        properties.deadlines[id] = node.settle_at();
+        properties.settle_at = properties.deadlines.iter().copied().fold(0.0, f64::max);
+        queue.write_buffer(&properties.nodes, (id * std::mem::size_of::<crate::gpu_springs::Node>()) as u64, bytemuck::bytes_of(node));
+    }
+
+    /// Constant-time scheduler check. Present the terminal frame, then stop the display link.
+    /// Deadlines are recomputed only on commits, so no per-node CPU sampling occurs on ticks.
+    pub fn springs_animating(&self, time: f64) -> bool {
+        self.springs.as_ref().is_some_and(|p| time < p.settle_at)
+    }
+
+    pub fn draw_timed(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, clear: [f32; 4], timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("frame"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -314,7 +359,7 @@ impl Renderer {
                 },
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: timestamps,
             occlusion_query_set: None,
             multiview_mask: None,
         });
@@ -323,6 +368,7 @@ impl Renderer {
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
+        if let Some(properties) = &self.springs { pass.set_bind_group(1, &properties.group, &[]); }
         pass.set_vertex_buffer(0, self.instances.slice(..));
         pass.draw(0..4, 0..self.count);
     }

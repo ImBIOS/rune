@@ -20,6 +20,7 @@ mod key_diagnostics;
 pub mod growth;
 pub mod live;
 mod pixels;
+pub mod gpu_springs;
 pub mod render;
 mod surface_alpha;
 pub mod runtime;
