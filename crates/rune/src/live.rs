@@ -9,35 +9,38 @@ mod sealed { pub trait Sealed {} }
 
 /// The small, atomically published values supported by [`Live`].
 pub trait LiveValue: sealed::Sealed + Copy + Send + Sync + 'static {
-    #[doc(hidden)] fn encode(self) -> u128;
+    /// `None` when any lane is NaN. ±inf clamps to ±`f32::MAX` and -0.0 becomes 0.0, so producers
+    /// (audio callbacks) never panic and equal values never wake.
+    #[doc(hidden)] fn encode(self) -> Option<u128>;
     #[doc(hidden)] fn decode(bits: u128) -> Self;
 }
 impl sealed::Sealed for f32 {}
 impl LiveValue for f32 {
-    fn encode(self) -> u128 {
-        assert!(self.is_finite(), "Live values must be finite");
-        self.to_bits() as u128
+    fn encode(self) -> Option<u128> {
+        if self.is_nan() { return None; }
+        let x = if self == 0.0 { 0.0 } else { self.clamp(-f32::MAX, f32::MAX) };
+        Some(x.to_bits() as u128)
     }
     fn decode(bits: u128) -> Self { f32::from_bits(bits as u32) }
 }
 impl sealed::Sealed for [f32; 2] {}
 impl LiveValue for [f32; 2] {
-    fn encode(self) -> u128 { self[0].encode() | (self[1].encode() << 32) }
+    fn encode(self) -> Option<u128> { Some(self[0].encode()? | (self[1].encode()? << 32)) }
     fn decode(bits: u128) -> Self { [f32::decode(bits), f32::decode(bits >> 32)] }
 }
 impl sealed::Sealed for Color {}
 impl sealed::Sealed for [f32; 4] {}
 impl LiveValue for [f32; 4] {
-    fn encode(self) -> u128 {
-        self[0].encode() | (self[1].encode() << 32) | (self[2].encode() << 64) | (self[3].encode() << 96)
+    fn encode(self) -> Option<u128> {
+        Some(self[0].encode()? | (self[1].encode()? << 32) | (self[2].encode()? << 64) | (self[3].encode()? << 96))
     }
     fn decode(bits: u128) -> Self {
         [f32::decode(bits), f32::decode(bits >> 32), f32::decode(bits >> 64), f32::decode(bits >> 96)]
     }
 }
 impl LiveValue for Color {
-    fn encode(self) -> u128 {
-        self.r.encode() | (self.g.encode() << 32) | (self.b.encode() << 64) | (self.a.encode() << 96)
+    fn encode(self) -> Option<u128> {
+        Some(self.r.encode()? | (self.g.encode()? << 32) | (self.b.encode()? << 64) | (self.a.encode()? << 96))
     }
     fn decode(bits: u128) -> Self {
         Self { r: f32::decode(bits), g: f32::decode(bits >> 32), b: f32::decode(bits >> 64), a: f32::decode(bits >> 96) }
@@ -45,7 +48,7 @@ impl LiveValue for Color {
 }
 
 /// Cloneable, thread-safe, coherent latest value. Equal bit patterns do not wake a window.
-/// Values must be finite. Opacity is clamped by presentation; scale must be nonnegative.
+/// NaN is ignored (`set` returns false; `new` starts at zero), ±inf clamps to ±`f32::MAX`. Opacity is clamped by presentation; scale must be nonnegative.
 /// Publication is lock-free on supported desktop CPUs. Window notification is coalesced;
 /// its platform callback is not a hard-real-time API.
 pub struct Live<T: LiveValue> { pub(crate) source: Arc<Source>, _t: PhantomData<T> }
@@ -57,14 +60,14 @@ impl<T: LiveValue> Live<T> {
         assert!(AtomicU128::is_lock_free(), "Rune Live requires lock-free 128-bit atomics on this CPU");
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self { source: Arc::new(Source {
-            id: NEXT.fetch_add(1, Ordering::Relaxed), value: AtomicU128::new(value.encode()),
+            id: NEXT.fetch_add(1, Ordering::Relaxed), value: AtomicU128::new(value.encode().unwrap_or(0)),
             listeners: AtomicPtr::new(std::ptr::null_mut()),
         }), _t: PhantomData }
     }
     /// Returns whether the published bit pattern changed. No allocation, including first use
     /// on a producer thread. Concurrent producers publish whole values, never torn lanes.
     pub fn set(&self, value: T) -> bool {
-        let bits = value.encode();
+        let Some(bits) = value.encode() else { return false };
         if self.source.value.swap(bits, Ordering::AcqRel) == bits { return false; }
         self.source.notify();
         true
@@ -235,5 +238,34 @@ mod tests {
         drop(wake);
         live.set(102.0);
         assert_eq!(count.load(Ordering::Relaxed), 2);
+    }
+}
+
+#[cfg(test)]
+mod nonfinite_tests {
+    use super::*;
+
+    #[test]
+    fn non_finite_values_never_panic() {
+        let v = Live::new(0.5f32);
+        assert!(!v.set(f32::NAN));
+        assert_eq!(v.get(), 0.5);
+        assert!(v.set(f32::INFINITY));
+        assert_eq!(v.get(), f32::MAX);
+        assert!(v.set(f32::NEG_INFINITY));
+        assert_eq!(v.get(), -f32::MAX);
+        assert!(v.set(0.0));
+        assert!(!v.set(-0.0), "-0.0 equals 0.0 and must not wake");
+        assert_eq!(v.get().to_bits(), 0.0f32.to_bits());
+        assert_eq!(Live::new(f32::NAN).get(), 0.0);
+        let p = Live::new([1.0f32, 2.0]);
+        assert!(!p.set([f32::NAN, 3.0]), "a NaN lane rejects the whole value");
+        assert_eq!(p.get(), [1.0, 2.0]);
+        let r = Live::new([0.0f32; 4]);
+        assert!(r.set([0.0, 0.0, f32::INFINITY, 1.0]));
+        assert_eq!(r.get(), [0.0, 0.0, f32::MAX, 1.0]);
+        let c = Live::new(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 });
+        assert!(!c.set(Color { r: f32::NAN, g: 0.0, b: 0.0, a: 1.0 }));
+        assert_eq!(c.get().r, 1.0);
     }
 }
