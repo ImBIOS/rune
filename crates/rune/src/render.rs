@@ -52,9 +52,10 @@ impl Gpu {
             apply_limit_buckets: false,
         }))
         .expect("no GPU adapter");
+        let required_features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("rune"),
-            required_features: wgpu::Features::empty(),
+            required_features,
             required_limits: wgpu::Limits::default(),
             experimental_features: Default::default(),
             memory_hints: wgpu::MemoryHints::Performance,
@@ -62,6 +63,10 @@ impl Gpu {
         }))
         .expect("no GPU device");
         Gpu { instance, adapter, device, queue }
+    }
+
+    pub fn headless() -> Gpu {
+        Self::new(Self::instance(), None)
     }
 
     pub fn instance() -> wgpu::Instance {
@@ -265,13 +270,17 @@ pub const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unor
 
 impl Offscreen {
     pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Offscreen {
+        Self::with_format(device, width, height, OFFSCREEN_FORMAT)
+    }
+
+    pub fn with_format(device: &wgpu::Device, width: u32, height: u32, format: wgpu::TextureFormat) -> Offscreen {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: OFFSCREEN_FORMAT,
+            format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });

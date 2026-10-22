@@ -21,5 +21,8 @@ members = [
 edition = "2024"
 license = "MIT"
 
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 codegen-units = 16
