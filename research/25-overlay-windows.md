@@ -40,3 +40,5 @@ The native shell has been compiled, not exercised against a desktop. Placement,
 click-through toggling, actual OS wake counts and capture exclusion still need
 Rooms integration testing. Monitor hot-plug reconciliation, non-activating panels,
 all-Spaces/fullscreen-space behavior and status items are not implemented.
+The shared adapter is chosen for the first surface. Compatibility with later
+surfaces on a multi-GPU Linux machine remains unverified.
