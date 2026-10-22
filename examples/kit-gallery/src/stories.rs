@@ -14,6 +14,8 @@ macro_rules! stories {
         pub const STORIES: &[(&str, Story)] = &[$(($id, $f),)*];
         pub const SCENES: &[(&str, fn(&mut G))] = &[$(($id, |s: &mut G| {
             s.story = $id;
+            s.combo = ComboboxState::default();
+            if $id == "rune-combobox--searchable" { s.combo.open = true; s.combo.search.focused = true; }
             s.open = OPENED.iter().find(|(id, _)| *id == $id).map(|(_, k)| (*k).to_owned());
         }),)*];
     };
@@ -53,6 +55,7 @@ fn close(s: &mut G) {
 }
 
 stories! {
+    "rune-combobox--searchable" => combobox_searchable,
     "ui-button--playground" => button_playground,
     "ui-button--variants" => button_variants,
     "ui-button--sizes" => button_sizes,
@@ -141,6 +144,14 @@ stories! {
     "components-progress--indeterminate" => progress_indeterminate,
     "ui-segmented-control--basic" => segmented_basic,
     "ui-segmented-control--controlled" => segmented_controlled,
+}
+
+fn combobox_searchable(s: &G, k: &Kit, layer: &mut Vec<El>) -> El {
+    let options: Vec<_> = (0..200).map(|i| ComboboxOption::new(format!("model-{i}"), format!("Model {i:03}"))).collect();
+    Combobox::new("model", &s.combo, &options, |s: &mut G| &mut s.combo)
+        .placeholder("Choose model").current(s.pick.get("model").map(String::as_str))
+        .on_choose(|s, id, _| { s.pick.insert("model".into(), id.into()); })
+        .build(k, layer)
 }
 
 pub fn render(s: &G, k: &Kit, overlays: &mut Vec<El>) -> El {

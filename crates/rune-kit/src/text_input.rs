@@ -43,6 +43,12 @@ impl EditActs {
     fn submit<S: 'static>(&mut self, f: impl Fn(&mut S, &mut Tx) + 'static) {
         self.0.push(Box::new(move |e: El| e.on_submit(f)));
     }
+    fn key<S: 'static>(&mut self, f: impl Fn(&mut S, &rune::KeyEvent, &mut Tx) -> bool + 'static) {
+        self.0.push(Box::new(move |e: El| e.on_input_key(f)));
+    }
+    fn change<S: 'static>(&mut self, f: impl Fn(&mut S, &mut Tx) + 'static) {
+        self.0.push(Box::new(move |e: El| e.on_input_change(f)));
+    }
     fn apply(self, mut e: El) -> El {
         for f in self.0 {
             e = f(e);
@@ -67,6 +73,14 @@ pub struct TextInput {
 }
 
 impl TextInput {
+    pub fn on_change<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        self.edits.change(f);
+        self
+    }
+    pub fn on_key<S: 'static>(mut self, f: impl Fn(&mut S, &rune::KeyEvent, &mut Tx) -> bool + 'static) -> Self {
+        self.edits.key(f);
+        self
+    }
     pub fn new(edit: &TextEdit) -> TextInput {
         TextInput {
             edit: edit.clone(),

@@ -365,18 +365,24 @@ impl FxRenderer {
 
     /// Fill mips 1.. of a mask pyramid from its level 0 (render the mask into `pyramid.level(0)` first).
     pub fn build_mips(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, pyramid: &MaskPyramid) {
-        for lvl in 1..pyramid.mips {
-            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("fx mip"),
-                layout: &self.mip_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&pyramid.levels[(lvl - 1) as usize]),
-                    },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                ],
-            });
+        let binds = pyramid.binds.get_or_init(|| {
+            (1..pyramid.mips)
+                .map(|lvl| {
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("fx mip"),
+                        layout: &self.mip_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&pyramid.levels[(lvl - 1) as usize]),
+                            },
+                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                        ],
+                    })
+                })
+                .collect()
+        });
+        for (lvl, bg) in (1..pyramid.mips).zip(binds) {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("fx mip"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -391,7 +397,7 @@ impl FxRenderer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.mip_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
+            pass.set_bind_group(0, bg, &[]);
             pass.draw(0..3, 0..1);
         }
     }
@@ -406,6 +412,7 @@ pub struct MaskPyramid {
     pub levels: Vec<wgpu::TextureView>,
     pub mips: u32,
     pub size: [u32; 2],
+    binds: std::sync::OnceLock<Vec<wgpu::BindGroup>>,
 }
 
 impl MaskPyramid {
@@ -433,6 +440,6 @@ impl MaskPyramid {
                 })
             })
             .collect();
-        MaskPyramid { texture, view, levels, mips, size: [width, height] }
+        MaskPyramid { texture, view, levels, mips, size: [width, height], binds: std::sync::OnceLock::new() }
     }
 }

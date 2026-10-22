@@ -1,0 +1,7 @@
+[
+  {"t": 0.25, "type": "key", "name": "Up"},
+  {"t": 0.6, "type": "type", "text": "099"},
+  {"t": 1.1, "type": "key", "name": "Enter"},
+  {"t": 1.6, "type": "click", "key": "model-trigger"},
+  {"t": 2.1, "type": "key", "name": "Escape"}
+]

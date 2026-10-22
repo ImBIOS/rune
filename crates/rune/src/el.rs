@@ -23,6 +23,8 @@ pub struct Tx {
     pub(crate) relayout: bool,
     pub(crate) copy: Option<String>,
     pub(crate) text_flights: Vec<(String, String)>,
+    pub(crate) scroll_to: Vec<String>,
+    pub(crate) wakes: Vec<std::time::Duration>,
     pub(crate) shell: Option<Shell>,
 }
 
@@ -36,6 +38,18 @@ pub enum Shell {
 }
 
 impl Tx {
+    /// Reveal a keyed row, including a currently unrealized virtual row.
+    pub fn scroll_into_view(&mut self, key: impl Into<String>) {
+        self.scroll_to.push(key.into());
+    }
+    /// Wake the app's poll hook after an unscaled duration. Equal deadlines coalesce.
+    /// This schedules a frame, not a view commit; poll returns true if state changed.
+    /// For debounce, keep the latest due time in app state and reschedule the remaining
+    /// duration when an earlier wake arrives. No timer thread is created.
+    pub fn wake_after(&mut self, duration: std::time::Duration) {
+        self.wakes.push(duration);
+    }
+
     /// Fly the visible text of an existing keyed field to a newly mounted keyed text node.
     /// The runtime captures the previous presentation and measures the live destination each
     /// frame, after row growth and scroll. Keys must be unique in the view.
@@ -100,6 +114,15 @@ pub struct Drag {
 }
 
 pub(crate) type PressFn = Rc<dyn Fn(&mut dyn Any, &mut Tx)>;
+pub(crate) type SecondaryFn = Rc<dyn Fn(&mut dyn Any, PointerPress, &mut Tx)>;
+pub(crate) type InputKeyFn = Rc<dyn Fn(&mut dyn Any, &crate::KeyEvent, &mut Tx) -> bool>;
+
+/// A press position in window points, suitable for a context-menu anchor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointerPress {
+    pub x: f32,
+    pub y: f32,
+}
 pub(crate) type DragFn = Rc<dyn Fn(&mut dyn Any, &mut Drag, &mut Tx)>;
 pub(crate) type EditFn = Rc<dyn for<'a> Fn(&'a mut dyn Any) -> &'a mut TextEdit>;
 
@@ -137,6 +160,8 @@ pub struct InputSpec {
     pub selection: Color,
     pub(crate) access: Option<EditFn>,
     pub(crate) submit: Option<PressFn>,
+    pub(crate) key: Option<InputKeyFn>,
+    pub(crate) change: Option<PressFn>,
 }
 
 /// A CSS-style box shadow. Outer shadows draw behind the element; `inset` ones draw inside its
@@ -219,6 +244,7 @@ pub struct TextSpec {
 
 #[derive(Clone, Debug)]
 pub struct Visual {
+    pub surface: Option<(crate::NativeSurface, crate::SurfaceFit)>,
     pub fill: Color,
     pub radius: [f32; 4],
     pub border_width: f32,
@@ -235,11 +261,16 @@ pub struct Visual {
     pub outline: Option<Outline>,
     /// Vector strokes and fills in the element's own points, over the fill.
     pub shape: Option<Rc<Shape>>,
+    /// An RGBA image scaled into the element's rect, over the fill and shape.
+    pub pixels: Option<crate::pixels::Pixels>,
+    /// App-defined tag a compositor reads per instance (`Runtime::marks`); 0 inherits the parent's.
+    pub mark: u32,
 }
 
 impl Default for Visual {
     fn default() -> Self {
         Visual {
+            surface: None,
             fill: Color::TRANSPARENT,
             radius: [0.0; 4],
             border_width: 0.0,
@@ -253,12 +284,16 @@ impl Default for Visual {
             gradient: None,
             outline: None,
             shape: None,
+            pixels: None,
+            mark: 0,
         }
     }
 }
 
 pub struct El {
     pub(crate) key: Option<String>,
+    #[cfg(debug_assertions)]
+    key_source: Option<&'static std::panic::Location<'static>>,
     pub(crate) role: &'static str,
     pub(crate) label: Option<String>,
     pub(crate) style: Style,
@@ -267,6 +302,7 @@ pub struct El {
     pub(crate) text: Option<TextSpec>,
     pub(crate) children: Vec<El>,
     pub(crate) on_press: Option<PressFn>,
+    pub(crate) on_secondary_press: Option<SecondaryFn>,
     pub(crate) on_hover: Option<PressFn>,
     pub(crate) above: Option<Anchor>,
     pub(crate) on_drag: Option<DragFn>,
@@ -282,11 +318,14 @@ pub struct El {
     pub(crate) streaming: bool,
     pub(crate) input: Option<Box<InputSpec>>,
     pub(crate) cursor: Option<Cursor>,
+    pub(crate) window_drag: bool,
 }
 
 fn base(dir: FlexDirection) -> El {
     El {
         key: None,
+        #[cfg(debug_assertions)]
+        key_source: None,
         role: "group",
         label: None,
         style: Style { display: Display::Flex, flex_direction: dir, flex_shrink: 0.0, ..Default::default() },
@@ -295,6 +334,7 @@ fn base(dir: FlexDirection) -> El {
         text: None,
         children: Vec::new(),
         on_press: None,
+        on_secondary_press: None,
         on_hover: None,
         above: None,
         on_drag: None,
@@ -310,6 +350,7 @@ fn base(dir: FlexDirection) -> El {
         streaming: false,
         input: None,
         cursor: None,
+        window_drag: false,
     }
 }
 
@@ -389,6 +430,8 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
         selection: Color::WHITE.alpha(0.2),
         access: None,
         submit: None,
+        key: None,
+        change: None,
     }));
     e
 }
@@ -418,6 +461,39 @@ impl El {
         if let Some(old) = self.live.iter_mut().find(|b| b.property == bound.property) { *old = bound; }
         else { self.live.push(bound); }
     }
+    /// Called after a focused field's text changes, with the updated model available.
+    pub fn on_input_change<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        if let Some(input) = &mut self.input {
+            input.change = Some(Rc::new(move |s, tx| f(s.downcast_mut::<S>().expect("input change state type"), tx)));
+        }
+        self
+    }
+    /// Handle a focused text field's key before the editor. Return true to consume it.
+    pub fn on_input_key<S: 'static>(mut self, f: impl Fn(&mut S, &crate::KeyEvent, &mut Tx) -> bool + 'static) -> Self {
+        if let Some(input) = &mut self.input {
+            input.key = Some(Rc::new(move |s, key, tx| f(s.downcast_mut::<S>().expect("input key state type"), key, tx)));
+        }
+        self
+    }
+    /// Secondary release inside the captured element (right-click or macOS control-click).
+    pub fn on_secondary_press<S: 'static>(mut self, f: impl Fn(&mut S, PointerPress, &mut Tx) + 'static) -> Self {
+        self.on_secondary_press = Some(Rc::new(move |s, p, tx| {
+            f(s.downcast_mut::<S>().expect("secondary press state type"), p, tx);
+        }));
+        self
+    }
+
+    pub(crate) fn key_location(&self) -> String {
+        #[cfg(debug_assertions)]
+        if let Some(source) = self.key_source { return source.to_string(); }
+        "unknown (build with debug assertions for source locations)".into()
+    }
+
+    /// Paint the newest video frame inside this node. Node dimensions are in points.
+    pub fn native_surface(mut self, surface: &crate::NativeSurface, fit: crate::SurfaceFit) -> Self {
+        self.vis.surface = Some((surface.clone(), fit));
+        self
+    }
     /// Window keyed rows of a growth stack directly inside a vertical scroll viewport.
     /// Unvisited rows use an estimated height; measurement preserves the visible anchor.
     /// Offscreen rows have no layout, text or scene nodes.
@@ -426,8 +502,11 @@ impl El {
         self
     }
 
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
+        #[cfg(debug_assertions)]
+        { self.key_source = Some(std::panic::Location::caller()); }
         self
     }
     pub fn role(mut self, role: &'static str) -> Self {
@@ -597,6 +676,21 @@ impl El {
         self.style.min_size.width = length(0.0);
         self
     }
+    /// Lay children out in `n` equal columns, each as wide as the widest child needs (CSS
+    /// `grid-template-columns: repeat(n, 1fr)`), or sharing the width the element is given.
+    /// Children fill the cells in order unless placed with `grid_cell`.
+    pub fn equal_columns(mut self, n: usize) -> Self {
+        self.style.display = Display::Grid;
+        self.style.grid_template_columns = vec![fr(1.0); n.max(1)];
+        self
+    }
+    /// Place this child of an `equal_columns` element in `column` (0-based) of the first row.
+    /// Children in the same cell overlap in order, so a moving highlight can sit under a label.
+    pub fn grid_cell(mut self, column: usize) -> Self {
+        self.style.grid_column = Line { start: line(column as i16 + 1), end: span(1) };
+        self.style.grid_row = Line { start: line(1), end: span(1) };
+        self
+    }
     /// Out of flow, positioned at `left, top` inside the parent's padding box.
     pub fn absolute(mut self, left: f32, top: f32) -> Self {
         self.style.position = Position::Absolute;
@@ -630,6 +724,12 @@ impl El {
     /// text element) inside this one.
     pub fn cursor(mut self, cursor: Cursor) -> Self {
         self.cursor = Some(cursor);
+        self
+    }
+    /// Pressing this element moves the window, as a title bar does. Hit targets inside it
+    /// (buttons, fields) keep their presses.
+    pub fn window_drag(mut self) -> Self {
+        self.window_drag = true;
         self
     }
     /// Called once when the pointer enters this hit target, not on animation frames.
@@ -677,6 +777,12 @@ impl El {
         self.vis.shape = (!shape.is_empty()).then(|| Rc::new(shape));
         self
     }
+    /// Shows `pixels`, scaled into the element's rect and clipped to its corner radius. The image
+    /// can change without the view re-running: the next frame draws its latest contents.
+    pub fn pixels(mut self, pixels: &crate::pixels::Pixels) -> Self {
+        self.vis.pixels = Some(pixels.clone());
+        self
+    }
     /// A ring `offset` points outside the border box (CSS `outline` + `outline-offset`).
     pub fn outline(mut self, width: f32, offset: f32, color: Color) -> Self {
         self.vis.outline = Some(Outline { width, offset, color });
@@ -684,6 +790,12 @@ impl El {
     }
     pub fn opacity(mut self, o: f32) -> Self {
         self.vis.opacity = o;
+        self
+    }
+    /// Tags this element's instances (and its descendants', until one sets its own) for a
+    /// compositor: `Runtime::marks` runs parallel to `Runtime::instances`.
+    pub fn mark(mut self, mark: u32) -> Self {
+        self.vis.mark = mark;
         self
     }
     /// Overlay drawn over the fill while hovered.

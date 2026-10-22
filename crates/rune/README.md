@@ -41,19 +41,25 @@ The first runnable piece of Rune: enough framework to draw a small Settings wind
     atlas.
   - Vector shapes (`shape.rs`): `El::shape(Shape)` and `canvas(shape)` paint strokes (polylines,
     round or butt caps, open or closed) and fills (simple polygons, ear-clipped) in the element's own
-    points; `Path` flattens quadratic and cubic Béziers. Strokes are one analytic capsule/box per
+    points, or in a `view_box` stretched to the element's size; `Path` flattens quadratic and cubic
+    Béziers. Strokes are one analytic capsule/box per
     segment (`KIND_SEGMENT`); fills are triangles (`KIND_TRIANGLE`) antialiased only on polygon
     edges, so they have no seams. No atlas, so a shape can change every frame (`examples/shapes`).
     Translucent strokes blend twice where segments overlap at a joint; fills do not overlap.
   - Every instance has a soft-edge clip (`clip_soft`, `clip_fade`).
   - Colour is premultiplied linear and drawn into an sRGB target, so blending is linear-light. Glyph
-    coverage gets a small exponent that depends on luminance, so dark text isn't thin.
+    coverage uses a CoreText-calibrated luminance/scale exponent.
   - The Retina scale is applied throughout.
-- **Text** (`text.rs`): Parley 0.12 lays out the embedded Inter 4.1 (OFL, `assets/`; no system fonts,
-  so output is deterministic). swash 0.2 rasterises into a 1024² R8 atlas with 4× horizontal subpixel
-  positions and baselines snapped to pixels. This matches Parley's own `swash_render` example.
+- **Text** (`text.rs`): Parley 0.12 lays out embedded Inter 4.1 (OFL, `assets/`). swash 0.2
+  rasterises unhinted, centered, .1-point-emboldened outlines into a 2048² R8 atlas with four
+  horizontal subpixel positions and pixel-snapped baselines. Colors share the same atlas masks.
+  The [CoreText comparison and phase sweep](../../research/23-text-quality.md) measure weight,
+  structural similarity and motion brightness variation at 1×/2×.
 - **Input**: hit-testing on presented rects, pointer capture, hover and press overlays, press on
   release inside the element, and drags with a per-gesture scratch value.
+  `.on_secondary_press(|s: &mut App, point, tx| ..)` receives window-point coordinates on
+  right-click (also control-click on macOS), without invoking primary actions. Scripts accept
+  `secondary-down`, `secondary-up`, and `secondary-click`.
 
 ### Added for the OpenCode example (M3)
 
@@ -80,6 +86,7 @@ The first runnable piece of Rune: enough framework to draw a small Settings wind
   rows remount settled. The measurement pass expands the window before drawing if estimates leave
   a gap. Render coordinates are rebased near the window and scroll extents use double precision.
   View construction still visits every row; a lazy view API is a remaining optimization.
+  `tx.scroll_into_view(key)` reveals a row, including one outside the realized window.
 - **Timeline growth** (`.growth(GrowthSpec { spring, edge })`, `growth.rs`): rows of a stack ease
   their heights render-side on `GROWTH` (0.32 s, bounce 0) in fixed 1/240 s substeps, so 30, 60 and
   120 fps give the same curve. Desktop's per-frame caps are per-second here (start, ramp, max, long,
@@ -102,6 +109,10 @@ The first runnable piece of Rune: enough framework to draw a small Settings wind
   state and `.on_submit(..)` runs on Enter.
 - **App hooks**: `AppSpec::setup` (once, with a `Waker` for background threads), `poll(state, clock,
   tx)` before every frame, `on_key`, and `extra_args()` for the app's own flags.
+  `tx.wake_after(Duration::from_millis(250))` schedules a poll on the unscaled app clock,
+  even when poll returns false. Equal deadlines coalesce; the shell sleeps until the earliest
+  deadline without a timer thread. Headless steps visit deadlines exactly. For debounce, store
+  the latest due time in state and reschedule its remainder when an older wake arrives.
 - **Tooling**: scripts gain `type`, `key`, `paste`, `scroll` and `fling`. Traces carry motion-lint
   intents (settle cuts, growing rows, word reveals) and clipped visible rects.
 
@@ -151,15 +162,55 @@ app.run();
   reopen, `release_gpu_when_closed`; and under Xwayland, hide/show and `focus_window`. Not yet run on KWin, Mutter, niri,
   macOS or Windows.
 - Headless tooling runs ignore window requests and apply updates before each frame.
+- `AppHandle::is_visible()` reports whether the window is on screen; `AppHandle::window_error()`
+  says why it couldn't be created (no display, no GPU adapter or device). A failed creation is
+  logged and leaves the app windowless; the next open tries again (`Gpu::try_new`).
+- `App::on_window(|w: &WindowHandle| ..)` runs on the UI thread after every native creation, for
+  icons or native styles through `WindowHandle::with_raw_handle`.
 - `AppSpec::min_size` sets the smallest window (None keeps 420×400).
 - `AppHandle::set_dock_icon(bool)` switches macOS between the regular and accessory activation
   policies at runtime (observed on macOS 26.2 with `lsappinfo`: UIElement ↔ Foreground).
-- Not yet: several windows, window kinds (panel, transparent click-through overlay, Wayland
-  layer-shell).
+- Edge overlays (HUDs): see `App::overlay` below.
 
-## Run
+### Compact tray-controlled windows
 
-### High-frequency values
+Use `WindowOptions` on a `WindowSpec`. Existing single-window defaults
+remain resizable, decorated, with a 420×400 minimum unless `AppSpec::min_size` is set.
+
+```rust
+spec.size = (320.0, 160.0);
+let app = rune::App::new(spec).windowless().keep_running();
+let tray = app.handle();
+// Any thread, including a tray callback:
+tray.set_position((-320, 80)); // physical desktop pixels
+tray.show();                  // no focus request; recreates a destroyed window
+tray.focus();                 // a separate, explicit activation request
+// tray.hide() keeps state without invoking on_close; tray.open() shows and activates.
+rune::run_windows_with(rune::RunOptions { accessory: true }, move |_| {
+    vec![rune::WindowSpec::from_app("call", app).options(rune::WindowOptions {
+        min_size: Some((320.0, 160.0)),
+        max_size: Some((320.0, 160.0)),
+        resizable: false,
+        borderless: true,
+        always_on_top: true,
+        ..Default::default()
+    })]
+});
+```
+
+Size constraints use logical points. Placement and topmost work through the native
+window manager on macOS and X11; they are no-ops on Wayland. Runtime changes survive
+close/recreation. On Wayland, use `activate(token)` for authorized focus; tokenless
+`focus()` requests attention. `show()` leaves minimized windows minimized; `open()`
+also restores them. On macOS, no-focus show uses `orderFrontRegardless`, rather than winit's
+`makeKeyAndOrderFront`. Window-manager focus policy still applies. `WindowHandle`
+also provides show/hide/focus, placement and topmost control on the event thread.
+Rooms owns its tray; Rune supplies the window lifetime and handles.
+`RunOptions::accessory` applies the macOS process policy before the event loop is
+created: no Dock icon/default menu and no activation at launch. Other platforms
+ignore it; `run_windows` keeps its regular-launch default.
+
+## High-frequency values
 
 `Live<T>` is a cloneable, thread-safe latest-wins handle (`f32`, `[f32; 2]`,
 `[f32; 4]`, `Color`). Call `set(value)` from a producer thread; Rune coalesces a
@@ -176,6 +227,151 @@ The native shell samples after acquiring a drawable. This is still the main-thre
 renderer, not a dedicated late-uniform/render-thread path. `Live::new` requires
 lock-free 128-bit atomics on the host CPU. Publication allocates nothing; platform
 wake callbacks are not hard-real-time guarantees.
+
+## Multiple windows and overlays
+
+`run_windows(|displays| Vec<WindowSpec<S>>)` creates independent retained trees on
+one winit event loop. Each spec has a stable key, an `AppSpec`, optional supplied
+state, and `WindowOptions`. Share Live handles/services between window states.
+Windows share one GPU device, with independent renderers and text atlases.
+`WindowOptions::overlay(display)` selects transparent, borderless, topmost,
+click-through presentation at that display's physical origin and size. Options
+also support initially hidden windows and per-window minimum sizes.
+
+`WindowSpec::on_created` receives a weak `WindowHandle`: toggle click-through,
+visibility and topmost status, close a window, borrow its raw-window-handle, or
+read its macOS `window_number()` (CGWindowID) for ScreenCaptureKit exclusion.
+By default closing a window releases its runtime; the last window closes the app. Input,
+focus, clocks, redraws and visibility-gated live wakes are window-local.
+
+`WindowSpec::from_app(key, app)` preserves `AppHandle`, `windowless`, `keep_running`,
+close callbacks and optional GPU release for that window. Retained hosts can reopen
+through their AppHandle or WindowHandle. `Tx::quit` / `AppHandle::quit` exit the
+whole event loop. Both entry points use the same lifetime host and render path.
+
+Headless tools accept `--window KEY` and `--list-windows`. They use one virtual
+1920×1080 display, create no native windows, and export overlays as straight-alpha
+PNGs. See [`examples/overlay`](../../examples/overlay) for a normal control window,
+one overlay per monitor, a shared remote cursor, a stroke and hit-test toggling.
+
+Monitor enumeration is a startup snapshot. Winit platform/window-manager support
+still governs transparency, placement and topmost behavior. Non-activating macOS
+`NSPanel`s, all-Spaces/fullscreen-space policy and status items need Rune's own Mac
+shell; they are not implemented here. Native window behavior remains untested on
+Studio; verification uses compilation and selected-window headless renders.
+Unsupported transparency falls back to opaque rendering; unsupported click-through
+prints the platform error. Metal surfaces retain premultiplied colour for Core Animation.
+
+### Pixels (`pixels.rs`)
+
+`rune::Pixels` is a cloneable, thread-safe RGBA image a producer replaces with
+`set(width, height, rgba)` (straight-alpha sRGB). `El::pixels(&pixels)` draws it scaled
+into the element's rect, clipped to its corner radius, without re-running the view when the
+image changes: the next frame uploads the new rows (wake the window with an `update` or a
+`Live` value). Images live in stable per-runtime 1024² RGBA pages (`Rgba8UnormSrgb`, binding 2,
+instance kind 7); larger images get exact-size standalone pages, up to 8192 pixels per axis.
+Pages are created on demand and unused trailing pages are released. Rendering breaks batches
+only when the image page changes, preserving painter order. Filtering is bilinear on
+premultiplied texels, clamped to each image. Same-size streaming updates reuse their slot,
+perform only a row copy/upload, and do no mip work or internal allocation.
+
+For static assets, construct an `ImageCache` once with the app's setup waker:
+
+```rust,ignore
+let cache = rune::ImageCache::new(waker);
+let icon = cache.load(png_bytes); // PNG, JPEG, or PNG-backed ICNS
+// Keep `icon` in app state; pending images paint nothing, completion wakes the app.
+el().size(32.0, 32.0).pixels(icon.pixels())
+```
+
+The cache deduplicates by content and decodes on one worker. `cache.rgba(w, h, bytes)` accepts
+straight-alpha sRGB pixels. Static images get area-filtered, linear-premultiplied mip levels
+on that worker; rendering chooses a precomputed level from the drawn device-pixel size.
+`Image::{size,is_ready,error}` inspect completion; `Image::wait` is for deterministic headless
+fixtures. Dropping all image and pixel handles releases decoded storage. Legacy ICNS codecs
+and SVG are not decoded; provide decoded RGBA for those formats.
+
+### Edge overlays (`App::overlay`, `overlay.rs`, `layer_shell.rs`)
+
+`app.overlay(OverlaySpec { name, size, edge, margin, align, inset, interactive, view }, state)
+-> OverlayHandle<T>` adds a surface to that app's loop with its own state type: transparent,
+above every app, never keyboard-focused, never activating the app, on the top or bottom edge
+of the primary display, centred or `inset` points from a side. Clicks pass through unless
+`interactive`. `show()`, `hide()`, `place(edge, margin)`, `set_align(align, inset)`,
+`resize(size)` and `update(|t, tx| ..)` work from any thread; `availability()` reports
+`Unavailable` where the platform can't do it. An overlay is one more host on the event loop
+(it shares the GPU pool) but never keeps the loop alive alone.
+
+- Wayland: a `zwlr_layer_shell_v1` surface on winit's display (overlay layer, keyboard none,
+  exclusive zone 0, empty input region), buffer scale from `preferred_buffer_scale`; hidden
+  means destroyed. Interactive overlays are unavailable there (pointer events for a surface on
+  a private queue aren't wired).
+- X11: an override-redirect notification window, empty input shape unless interactive.
+- macOS: winit's view (and the Metal layer wgpu draws into) moves into a non-activating
+  `NSPanel` (`NonactivatingPanel`, `becomesKeyOnlyIfNeeded`) at status level (25) on every
+  Space incl. full-screen ones, ordered front with `orderFrontRegardless`; it ignores the mouse
+  unless interactive. Clicks still reach Rune through winit's view (`macos.rs`).
+- Windows: a topmost tool window with `WS_EX_NOACTIVATE` (plus `WS_EX_TRANSPARENT|WS_EX_LAYERED`
+  unless interactive), shown with `SW_SHOWNOACTIVATE`; a bottom overlay sits above the taskbar
+  (`win32.rs`).
+- Observed in headless sway 1.12 on apollo: layer-shell placement (top, bottom, switching),
+  transparency, scale 2, show/hide/reshow with the app window open or closed, the focused
+  window keeping focus, and a `zwlr_virtual_pointer` click passing through a large overlay to
+  the button under it. Under Xwayland the same, plus an interactive corner capsule taking a
+  virtual-pointer click (once flaky: the first try lost the click to an enter/leave pair from the
+  new virtual device) while the app window kept focus, `set_align` and `resize`. macOS 26.2
+  (hailmary, screen at the login window): both panels at level 25 with the right bounds (top
+  centre; top right, then left and wider), hide, reshow and quit (CGWindowList); clicks, pixels
+  and non-activation not observed. Windows: `cargo xwin clippy` only.
+- `Tx::copy` works in overlays (a meeting capsule's Copy button).
+- Not yet: interactive overlays on Wayland, hover in a non-key macOS panel (mouse-moved events
+  go to the key window), per-monitor placement.
+
+### Compositor hook (lighting and effects)
+
+![lab](../../demo/lab/flashlight.png)
+
+`rune::run_with(spec, compositor)` (or `App::compositor`) hands each frame to a `Compositor`
+(`compose.rs`) after `Runtime::frame` has built it; `rune::run` never builds one, so the default path
+and its goldens are unchanged. `examples/lab` uses it to composite `rune-light` and `rune-fx` live.
+
+- `El::mark(u32)` tags an element's instances, and its descendants' until one sets its own.
+  While a compositor is attached, `Runtime::marks` runs parallel to `Runtime::instances` (no marks
+  are recorded otherwise). The lab encodes canvas, lighting material and effect node in the mark.
+- The `Frame` gives the device, queue, encoder, target view and format, `dt`, the time
+  `Runtime::frame` took (`update_ms`), the runtime (instances, marks, clock `t`, pointer, state,
+  `presented(key)` → drawn rect and effective opacity), and Rune's `Renderer`.
+- `Renderer::prepare_lists` uploads several instance lists in one buffer (one glyph upload) and
+  returns their ranges; `draw_range` draws any range into any pass; `add_format` builds the uber
+  pipeline for another target format (e.g. an `Rgba16Float` scene, a text mask or a node layer).
+  `Frame::draw_ui` is the default frame.
+- `Compositor::animating` keeps the display link running while something moves on its own;
+  `features` requests device features (e.g. `TIMESTAMP_QUERY`) when the adapter has them;
+  `summary` prints after a headless run.
+- Headless tooling (`--snap`, `--script`, `--trace`, strips) runs through the same compositor.
+
+## Run
+
+### NativeSurface video
+
+`NativeSurface::new()` is a cloneable latest-wins frame slot. Bind it with
+`el().native_surface(&surface, SurfaceFit::Fit)` (or `Fill`), install the app's `Waker`,
+and push retained immutable CoreVideo buffers from a decoder thread. macOS uses
+CVMetalTextureCache and wgpu-hal Metal texture import without CPU pixel copies.
+BGRA and NV12 420v/420f are supported with BT.601/709 matrices and sRGB/709 transfer
+attachments. Pixel-matched video uses exact texel loads at Retina scale.
+
+Per-draw notifications carry source frame ID, CPU submit time, completion-observed time,
+and optional GPU render-pass timestamp queries. These are **not presented-frame timestamps**:
+true presentation feedback needs the planned own Mac shell with CAMetalLayer /
+CAMetalDisplayLink. wgpu-hal 30 does not expose its acquired drawable, and wgpu 30
+forbids mixing normal encoding with the raw command-buffer completed-handler escape
+hatch. Completion uses wgpu's per-submission callback/readback, serviced by a sleeping
+completion worker so the last frame reports even after the window goes idle.
+
+See [`examples/video-tiles`](../../examples/video-tiles/README.md) for the copyable
+producer/view boundary, portable byte source, headless benchmark, ownership contract,
+colour defaults and current limitations.
 
 ```sh
 hivemind run --kind cargo -- cargo build --release -p settings
@@ -264,6 +460,23 @@ policy changes are applied in the same mutation phase.
 
 ## Known gaps and next
 
+`TextEdit::focused` is maintained by the runtime. Set it once to request focus, then
+let the runtime clear it when another field takes focus; do not force it on every view rebuild.
+
+### File dialogs
+
+Enable Rune's `native-file-dialog` feature and inject `FileDialogs::native()` in the shell.
+`dialogs.open(options).await` and `dialogs.save(options).await` return an optional path
+(None means cancelled). `FileDialogOptions` carries title, directory, suggested filename and
+`.filter("Audio", &["wav", "flac"])`. rfd handles Cocoa on macOS and the XDG portal on Linux;
+poll these futures on the app's async executor and wake Rune when the result arrives.
+Never block the window's main thread with `pollster::block_on` for a native dialog;
+Cocoa needs that thread's event loop to present and complete it.
+
+Headless fixtures inject `FileDialogs::scripted([ScriptedFileDialog { kind:
+FileDialogKind::Open, path: Some("/fixture/recording.wav".into()) }])`. Requests resolve
+without a window; wrong request order or exhausted fixtures return an error.
+
 - Group opacity through offscreen layers.
-- Next: a render thread with a command channel, a CoreText side-by-side text diff (S5), Slug for
+- Next: a render thread with a command channel, broader text shaping/optical-size parity (S5), Slug for
   scaled text, the inspector socket, knobs/tunables, and the Scrawl pill (M1).

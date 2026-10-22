@@ -19,7 +19,7 @@ use swash::FontRef;
 use swash::scale::{Render, ScaleContext, Source};
 use swash::zeno::{Cap, Fill, Format, Join, Mask, Stroke, Transform, Vector};
 
-use crate::color::Color;
+use crate::color::{Color, srgb_encode};
 use crate::tok::{Family, TextStyle};
 
 const DEFAULT_FONTS: [&[u8]; 3] = [
@@ -153,7 +153,7 @@ struct GlyphKey {
     size: u32,
     coords: u64,
     subpx: u8,
-    hint: bool,
+    dilation: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -240,16 +240,26 @@ impl Atlas {
     }
 }
 
-fn rasterize(scaler: &mut swash::scale::Scaler<'_>, atlas: &mut Atlas, glyph: u16, subpx: u8) -> Option<AtlasGlyph> {
+fn rasterize(scaler: &mut swash::scale::Scaler<'_>, atlas: &mut Atlas, glyph: u16, subpx: u8, dilation: f32) -> Option<AtlasGlyph> {
     let image = Render::new(&[Source::Outline])
         .format(Format::Alpha)
-        .offset(Vector::new(subpx as f32 / SUBPIXEL_STEPS, 0.0))
+        // Swash expands toward +x/+y; offset back to preserve the outline's centre.
+        .embolden(dilation)
+        .offset(Vector::new(subpx as f32 / SUBPIXEL_STEPS - dilation, -dilation))
         .render(scaler, glyph)?;
     let (w, h) = (image.placement.width, image.placement.height);
-    if w == 0 || h == 0 {
+    if w == 0 || h == 0 || !image.data.iter().any(|&coverage| coverage != 0) {
         return None;
     }
     atlas.put(w, h, &image.data, image.placement.left, image.placement.top)
+}
+
+/// CoreText-calibrated coverage for a linear-light target. Keep colour adjustment out of
+/// atlas keys: theme animation must not rasterize five copies or jump between buckets.
+/// See research/23-text-quality.md for the held-out glyph and motion measurements.
+pub fn glyph_coverage_exponent(color: Color, scale: f32) -> f32 {
+    // Stronger bright-ink contrast at Retina density limits phase-dependent blooming.
+    0.35 + (1.15 + 0.2 * (scale - 1.0).clamp(0.0, 1.0)) * srgb_encode(color.luminance())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -510,7 +520,7 @@ impl TextSystem {
         bytes: bool,
         out: &mut Vec<GlyphQuad>,
     ) {
-        let hint = scale < 1.5;
+        let dilation = 0.1 * scale;
         let table = &mut self.cluster_scratch;
         for line in layout.lines() {
             if bytes {
@@ -553,7 +563,7 @@ impl TextSystem {
                         size: font_size.to_bits(),
                         coords: coords_key,
                         subpx,
-                        hint,
+                        dilation: dilation.to_bits(),
                     };
                     let entry = match self.atlas.map.get(&key) {
                         Some(&e) => e,
@@ -565,10 +575,10 @@ impl TextSystem {
                                 .scale_cx
                                 .builder(font_ref)
                                 .size(font_size)
-                                .hint(hint)
+                                .hint(false)
                                 .normalized_coords(coords.iter().map(|c| c.to_bits()))
                                 .build();
-                            let e = rasterize(&mut scaler, &mut self.atlas, g.id as u16, subpx);
+                            let e = rasterize(&mut scaler, &mut self.atlas, g.id as u16, subpx, dilation);
                             self.atlas.map.insert(key, e);
                             e
                         }
@@ -699,5 +709,54 @@ mod tests {
         assert_eq!(han.len(), 4);
         assert!(han.iter().all(|id| *id != 0), "tofu: {han:?}");
         assert_eq!(glyph_ids("Hello"), glyph_ids("Hello"));
+    }
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::*;
+
+    #[test]
+    fn moving_glyphs_reuse_four_phases_and_land_without_atlas_work() {
+        let mut text = TextSystem::default();
+        let layout = text.layout_rich("lHEx ", &[], TextStyle::new(13.0, 400.0), 2.0, None);
+        let mut quads = Vec::new();
+        // Negative origins exercise phase carry as well as both sides of zero.
+        for step in 0..256 {
+            quads.clear();
+            text.glyphs_for_layout(&layout, 2.0, [-2.0 + step as f32 / 64.0, 12.37], false, &mut quads);
+            assert_eq!(quads.len(), 4, "dilation must not turn whitespace into empty draw instances");
+            assert!(quads.iter().all(|g| g.rect[0].fract() == 0.0 && g.rect[1].fract() == 0.0));
+        }
+        let entries = text.atlas.map.len();
+        assert!(entries <= 5 * 4, "four glyphs plus cached whitespace have at most four x phases");
+        let mut track = rune_motion::Animated::new(-2.0f32).with_class(rune_motion::PropClass::Spatial);
+        track.animate_to(8.0, rune_motion::Spring::new(0.3, 0.0), 0.0);
+        let end = track.settle_time();
+        assert!(end.is_finite());
+        text.atlas.dirty = None;
+        quads.clear();
+        text.glyphs_for_layout(&layout, 2.0, [8.0, 12.37], false, &mut quads);
+        let landed: Vec<_> = quads.iter().map(|q| (q.rect, q.uv)).collect();
+        for frame in 0..120 {
+            let x = track.sample(end + frame as f64 / 120.0);
+            assert_eq!(x, 8.0, "the analytic tail lands on its target exactly");
+            quads.clear();
+            text.glyphs_for_layout(&layout, 2.0, [x, 12.37], false, &mut quads);
+            assert!(quads.iter().map(|q| (q.rect, q.uv)).eq(landed.iter().copied()));
+        }
+        assert_eq!(text.atlas.map.len(), entries);
+        assert!(text.atlas.dirty.is_none());
+    }
+
+    #[test]
+    fn nominal_size_dilation_is_part_of_the_cache_key() {
+        let mut text = TextSystem::default();
+        let small = text.layout_rich("H", &[], TextStyle::new(12.0, 400.0), 2.0, None);
+        let large = text.layout_rich("H", &[], TextStyle::new(24.0, 400.0), 1.0, None);
+        let mut a = Vec::new(); let mut b = Vec::new();
+        text.glyphs_for_layout(&small, 2.0, [0.0, 0.0], false, &mut a);
+        text.glyphs_for_layout(&large, 1.0, [0.0, 0.0], false, &mut b);
+        assert_ne!(a[0].uv, b[0].uv, "same pixel size, different nominal-size dilation");
     }
 }
