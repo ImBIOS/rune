@@ -37,6 +37,8 @@ pub struct App<S: 'static> {
     argv: Option<Vec<String>>,
     pub(crate) open: bool,
     pub(crate) release_gpu: bool,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) accessory: bool,
     pub(crate) keep_running: bool,
     pub(crate) on_close: Option<fn(&mut S, &mut Tx)>,
     pub(crate) shared: Arc<Shared<S>>,
@@ -50,6 +52,7 @@ impl<S: 'static> App<S> {
             argv: None,
             open: true,
             release_gpu: false,
+            accessory: false,
             keep_running: false,
             on_close: None,
             shared: Arc::default(),
@@ -90,6 +93,14 @@ impl<S: 'static> App<S> {
     /// recreates them, which costs a device creation.
     pub fn release_gpu_when_closed(mut self) -> Self {
         self.release_gpu = true;
+        self
+    }
+
+    /// macOS: run as an accessory (menu-bar) app: no Dock icon, no default menu bar, and
+    /// launching doesn't activate the app or take focus. The app installs its own menu if it
+    /// wants one, and may change the activation policy later. No effect on other platforms.
+    pub fn accessory(mut self) -> Self {
+        self.accessory = true;
         self
     }
 
