@@ -6,6 +6,11 @@
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
 mod activation;
 mod app;
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+mod layer_shell;
+mod overlay;
+#[cfg(target_os = "windows")]
+mod win32;
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod color;
@@ -30,6 +35,7 @@ pub use windows::{Display, WindowOptions, WindowSpec};
 pub use winit::raw_window_handle;
 
 pub use app::{App, AppHandle};
+pub use overlay::{Availability, OverlayHandle, OverlaySpec, ScreenEdge};
 pub use color::{Color, oklch, oklcha};
 pub use edit::{Ime, Key, KeyEvent, Mods, TextEdit};
 pub use el::{

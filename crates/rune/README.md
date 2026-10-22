@@ -155,7 +155,7 @@ app.run();
 - `AppSpec::min_size` sets the smallest window (None keeps 420×400).
 - `AppHandle::set_dock_icon(bool)` switches macOS between the regular and accessory activation
   policies at runtime (observed on macOS 26.2 with `lsappinfo`: UIElement ↔ Foreground).
-- Not yet: Wayland layer-shell or non-activating panels.
+- Edge overlays (HUDs): see `App::overlay` below.
 
 ## High-frequency values
 
@@ -208,6 +208,33 @@ shell; they are not implemented here. Native window behavior remains untested on
 Studio; verification uses compilation and selected-window headless renders.
 Unsupported transparency falls back to opaque rendering; unsupported click-through
 prints the platform error. Metal surfaces retain premultiplied colour for Core Animation.
+
+### Edge overlays (`App::overlay`, `overlay.rs`, `layer_shell.rs`)
+
+`app.overlay(OverlaySpec { name, size, edge, margin, view }, state) -> OverlayHandle<T>`
+adds a HUD-sized surface to that app's loop with its own state type: transparent, above every
+app, never focused, letting the pointer through, centred on the top or bottom edge of the
+primary display. `show()`, `hide()`, `set_edge(..)` and `update(|t, tx| ..)` work from any
+thread; `availability()` reports `Unavailable` where the platform can't do it. An overlay is
+one more host on the event loop (it shares the GPU pool) but never keeps the loop alive alone.
+
+- Wayland: a `zwlr_layer_shell_v1` surface on winit's display (overlay layer, keyboard none,
+  exclusive zone 0, empty input region), buffer scale from `preferred_buffer_scale`; hidden
+  means destroyed. A winit toplevel can't be placed or kept on top there.
+- X11: an override-redirect notification window with an empty input shape.
+- macOS: a borderless window at status level (25) on every Space incl. full-screen ones,
+  ignoring the mouse, ordered front with `orderFrontRegardless` so it never becomes key or
+  activates the app (`macos.rs`).
+- Windows: a topmost tool window with `WS_EX_NOACTIVATE|WS_EX_TRANSPARENT|WS_EX_LAYERED`, shown
+  with `SW_SHOWNOACTIVATE` (`win32.rs`).
+- Observed in headless sway 1.12 on apollo: layer-shell placement (top, bottom, switching),
+  transparency, scale 2, show/hide/reshow while the app window is open or closed, the focused
+  window keeping focus, and a `zwlr_virtual_pointer` click passing through a large overlay to
+  the button under it; the same under Xwayland (override-redirect). macOS 26.2 (hailmary, screen
+  at the login window): level 25, bounds at the top and bottom edge, hide and reshow
+  (CGWindowList); pixels and focus not observed. Windows: `cargo xwin clippy` only.
+- Not yet: overlays that take input (meeting capsules: clickable, non-activating), per-monitor
+  placement.
 
 ## Run
 
@@ -301,3 +328,4 @@ policy changes are applied in the same mutation phase.
 - Group opacity through offscreen layers.
 - Next: a render thread with a command channel, a CoreText side-by-side text diff (S5), Slug for
   scaled text, the inspector socket, knobs/tunables, and the Scrawl pill (M1).
+
