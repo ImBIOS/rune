@@ -22,6 +22,7 @@ pub mod growth;
 pub mod live;
 mod pixels;
 pub mod gpu_springs;
+pub mod image;
 pub mod render;
 mod surface_alpha;
 pub mod native_surface;
@@ -53,6 +54,7 @@ pub use growth::{GROWTH, StreamEdge, edge};
 pub use live::Live;
 pub use pixels::Pixels;
 pub use file_dialog::{FileDialogError, FileDialogKind, FileDialogOptions, FileDialogs, ScriptedFileDialog};
+pub use image::{Image, ImageCache, ImageError, ImageId};
 pub use rune_motion::{
     Anim, AnimExt, Clock, Curve, Edge, LayoutAnim, NodeId, Phase as PresencePhase, Presented, Spring, SpringPair,
     Transition, Travel,
