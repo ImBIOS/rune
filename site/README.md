@@ -3,11 +3,32 @@
 The docs site for Rune: what it is, its principles, its architecture and its roadmap. Vite and React, prerendered to
 static HTML.
 
-- `bun run dev`: dev server on `127.0.0.1:4241`.
-- `bun run build`: typecheck, client and SSR builds, then prerender every route into `dist/`.
+- `bun run dev`: dev server at `http://127.0.0.1:4241/team/rune/`.
+- `bun run build`: typecheck, client and SSR builds, then prerender every route into
+  `.cloudflare/output/v0/workers/default/assets/` (Build Output for the `cf` CLI). `--mode dev` builds for
+  dev.anoma.ly.
 
 Content lives in `src/content.tsx` (principles, layers, decisions, milestones, risks) and `src/pages.tsx`. The
 source of truth for all of it is `PLAN.md` at the repo root; update the plan first, then the site.
+
+## Hosting and deploys
+
+The site is served at https://anoma.ly/team/rune and https://dev.anoma.ly/team/rune, the same way as Abattoir.
+
+- A push to `main` that touches `site/` deploys https://anoma.ly/team/rune (Worker `rune-site`).
+- A push to `site-dev` that touches `site/` deploys https://dev.anoma.ly/team/rune (Worker `rune-site-dev`). To try a
+  change before merging, push it there: `git push -f origin HEAD:site-dev`.
+
+Nothing else deploys. `.github/workflows/site.yml` runs `bun run deploy:<production|dev>` with the
+`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets. The token needs Workers Scripts Write on the account and
+Workers Routes Write on `anoma.ly`.
+
+`cloudflare.config.ts` defines both environments, selected by the build mode. `worker.ts` redirects other hosts to the
+canonical one, strips the base path `/team/rune` (from `src/base.ts`) and serves the static files. Vite's `base`, the
+links (`withBase`) and the client router (`stripBase`) use the same constant.
+
+`/team` on both hosts sits behind a Cloudflare Access app, so only Anomaly accounts get in. `workers.dev` and preview
+URLs are off, so nothing bypasses Access.
 
 ## Design system
 
