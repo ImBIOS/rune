@@ -55,6 +55,9 @@ The first runnable piece of Rune: enough framework to draw a small Settings wind
   positions and baselines snapped to pixels. This matches Parley's own `swash_render` example.
 - **Input**: hit-testing on presented rects, pointer capture, hover and press overlays, press on
   release inside the element, and drags with a per-gesture scratch value.
+  `.on_secondary_press(|s: &mut App, point, tx| ..)` receives window-point coordinates on
+  right-click (also control-click on macOS), without invoking primary actions. Scripts accept
+  `secondary-down`, `secondary-up`, and `secondary-click`.
 
 ### Added for the OpenCode example (M3)
 

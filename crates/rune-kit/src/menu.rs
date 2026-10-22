@@ -1,10 +1,20 @@
 //! Menu, context menu and their items (`@opencode/ui` navigation/menu, components/context-menu).
 //! Compact (default) and standard appearances.
 
-use rune::{El, Icon, TextStyle, Tx, col, el, icon, row, text};
+use rune::{El, Icon, PointerPress, TextStyle, Tx, col, el, icon, row, text};
 
 use crate::overlay::{Placement, anchor, scrim};
 use crate::{Acts, Kit, State, shadows};
+
+/// A menu at a secondary-press position. Store the point from `El::on_secondary_press`
+/// in app state; clear it in `on_close` and item callbacks. Uses Menu's flipping anchor.
+pub fn context_menu(key: impl Into<String>, trigger: El, point: Option<PointerPress>) -> Menu {
+    let menu = Menu::new(key).trigger(trigger).open(point.is_some());
+    match point {
+        Some(p) => menu.at(p.x, p.y),
+        None => menu,
+    }
+}
 
 pub enum MenuEntry {
     Item(Box<MenuItem>),

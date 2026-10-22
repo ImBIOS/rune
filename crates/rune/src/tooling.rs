@@ -254,6 +254,8 @@ enum Kind {
     Move,
     Down,
     Up,
+    SecondaryDown,
+    SecondaryUp,
     Key(KeyEvent),
     Paste(String),
     Wheel(f32),
@@ -311,6 +313,12 @@ fn load_script(path: &PathBuf) -> Vec<Ev> {
                 out.push(Ev { t, kind: Kind::Down, pos });
             }
             "up" => out.push(Ev { t, kind: Kind::Up, pos }),
+            "secondary-down" => out.push(Ev { t, kind: Kind::SecondaryDown, pos }),
+            "secondary-up" => out.push(Ev { t, kind: Kind::SecondaryUp, pos }),
+            "secondary-click" => {
+                out.push(Ev { t, kind: Kind::SecondaryDown, pos: pos.clone() });
+                out.push(Ev { t: t + e["hold"].as_f64().unwrap_or(0.08), kind: Kind::SecondaryUp, pos });
+            }
             "tap" | "click" => {
                 out.push(Ev { t, kind: Kind::Move, pos: pos.clone() });
                 out.push(Ev { t, kind: Kind::Down, pos });
@@ -692,6 +700,8 @@ fn headless_configured<S: 'static>(app: crate::app::App<S>, args: Args, transpar
                     rt.pointer_down(x, y);
                 }
                 Kind::Up => rt.pointer_up(x, y),
+                Kind::SecondaryDown => { last_down = (x, y); rt.secondary_down(x, y); }
+                Kind::SecondaryUp => rt.secondary_up(x, y),
                 Kind::Key(k) => rt.key(k.clone()),
                 Kind::Paste(s) => rt.paste(s.clone()),
                 Kind::Wheel(dy) => rt.wheel(x, y, *dy),
