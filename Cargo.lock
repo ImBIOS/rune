@@ -994,6 +994,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
+name = "live-values"
+version = "0.0.1"
+dependencies = [
+ "rune",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1843,6 +1850,7 @@ dependencies = [
  "parley",
  "png",
  "pollster",
+ "portable-atomic",
  "raw-window-handle",
  "rune-motion",
  "serde_json",

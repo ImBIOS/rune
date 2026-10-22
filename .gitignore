@@ -1,3 +1,4 @@
 target/
 perf/autoresearch/
 perf/kit-diff/
+perf/live-values/

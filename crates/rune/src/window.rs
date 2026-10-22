@@ -29,8 +29,11 @@ struct Win {
     window: Arc<Window>,
     /// False while hidden (platforms that can hide a window keep it for the next open).
     visible: bool,
+    occluded: bool,
     cursor: Cursor,
 }
+
+enum WakeEvent { App, Live }
 
 struct Host<S: 'static> {
     spec: AppSpec<S>,
@@ -53,11 +56,12 @@ struct Host<S: 'static> {
 }
 
 pub fn run<S: 'static>(app: App<S>, args: Args) {
-    let event_loop = EventLoop::<()>::with_user_event().build().expect("event loop");
+    let event_loop = EventLoop::<WakeEvent>::with_user_event().build().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
+    let live_proxy = proxy.clone();
     let waker: Waker = Arc::new(move || {
-        let _ = proxy.send_event(());
+        let _ = proxy.send_event(WakeEvent::App);
     });
     let (open, keep_running, on_close, release_gpu) = (app.open, app.keep_running, app.on_close, app.release_gpu);
     let (spec, state, shared) = app.into_parts(args.scene.as_deref());
@@ -65,6 +69,8 @@ pub fn run<S: 'static>(app: App<S>, args: Args) {
     // The window reports the system appearance and scale when it opens.
     let env = Env { system_dark: args.theme.as_deref() != Some("light"), scale: 1.0 };
     let mut rt = runtime_for(&spec, state, size, env, waker.clone());
+    rt.set_live_waker(Arc::new(move || { let _ = live_proxy.send_event(WakeEvent::Live); }));
+    rt.set_live_visible(false);
     rt.wall_start = Some(Instant::now());
     shared.connect(waker);
     let mut host = Host {
@@ -210,6 +216,7 @@ impl<S: 'static> Host<S> {
         if let Some(f) = self.on_close {
             self.rt.update(f);
         }
+        self.rt.set_live_visible(false);
         if !self.keep_running || self.rt.shell_request.take() == Some(Shell::Quit) {
             event_loop.exit();
             return;
@@ -253,6 +260,8 @@ impl<S: 'static> Host<S> {
         if w.window.is_minimized() == Some(true) {
             w.window.set_minimized(false);
         }
+        w.occluded = false;
+        self.rt.set_live_visible(true);
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         if is_wayland(event_loop) {
             match token {
@@ -345,6 +354,7 @@ impl<S: 'static> Host<S> {
         }
         self.shown = true;
         self.idle = true;
+        self.rt.set_live_visible(true);
         window.request_redraw();
         self.win = Some(Win {
             #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
@@ -353,15 +363,26 @@ impl<S: 'static> Host<S> {
             config,
             window,
             visible: true,
+            occluded: false,
             cursor: Cursor::Default,
         });
     }
 
     fn redraw(&mut self) {
         let (Some(l), Some((gpu, renderer, _))) = (self.win.as_mut(), self.gpu.as_mut()) else { return };
-        if !l.visible {
+        if !l.visible || l.occluded || l.window.is_minimized().unwrap_or(false) {
             return;
         }
+        // Acquire before latching live values so a drawable wait cannot age the input.
+        let frame = match l.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                l.surface.configure(&gpu.device, &l.config);
+                l.window.request_redraw();
+                return;
+            }
+            _ => { l.window.request_redraw(); return; }
+        };
         let now = Instant::now();
         // After an idle stretch, start the new motion from its first pose rather than
         // skipping ahead by the time spent idle.
@@ -385,18 +406,6 @@ impl<S: 'static> Host<S> {
                 LogicalSize::new(a[2] as f64, a[3] as f64),
             );
         }
-        let frame = match l.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                l.surface.configure(&gpu.device, &l.config);
-                l.window.request_redraw();
-                return;
-            }
-            _ => {
-                l.window.request_redraw();
-                return;
-            }
-        };
         let view = frame.texture.create_view(&Default::default());
         renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (l.config.width, l.config.height));
         let mut enc = gpu.device.create_command_encoder(&Default::default());
@@ -404,14 +413,14 @@ impl<S: 'static> Host<S> {
         gpu.queue.submit([enc.finish()]);
         l.window.pre_present_notify();
         gpu.queue.present(frame);
-        self.idle = !(animating || rt.has_pending_input());
+        self.idle = !(animating || rt.has_pending_input() || rt.live_pending());
         if !self.idle {
             l.window.request_redraw();
         }
     }
 }
 
-impl<S: 'static> ApplicationHandler for Host<S> {
+impl<S: 'static> ApplicationHandler<WakeEvent> for Host<S> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.started {
             return;
@@ -423,9 +432,15 @@ impl<S: 'static> ApplicationHandler for Host<S> {
         self.drain(event_loop);
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: ()) {
-        if self.started {
-            self.drain(event_loop);
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
+        if !self.started { return; }
+        match event {
+            WakeEvent::App => self.drain(event_loop),
+            WakeEvent::Live => {
+                if self.rt.live_pending() && let Some(w) = self.win.as_ref().filter(|w| w.visible && !w.occluded) {
+                    w.window.request_redraw();
+                }
+            }
         }
     }
 
@@ -450,6 +465,8 @@ impl<S: 'static> ApplicationHandler for Host<S> {
         let scale = l.window.scale_factor() as f32;
         match event {
             WindowEvent::Resized(size) => {
+                rt.set_live_visible(l.visible && !l.occluded && size.width > 0 && size.height > 0 && !l.window.is_minimized().unwrap_or(false));
+                if size.width == 0 || size.height == 0 { self.idle = true; return; }
                 l.config.width = size.width.max(1);
                 l.config.height = size.height.max(1);
                 l.surface.configure(&gpu.device, &l.config);
@@ -457,7 +474,10 @@ impl<S: 'static> ApplicationHandler for Host<S> {
                 l.window.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { .. } => l.window.request_redraw(),
-            WindowEvent::Occluded(false) => {
+            WindowEvent::Occluded(occluded) => {
+                l.occluded = occluded;
+                rt.set_live_visible(l.visible && !occluded && !l.window.is_minimized().unwrap_or(false));
+                if occluded { self.idle = true; return; }
                 // Coming back paints the settled state in the first frame (guarantee 8).
                 rt.settle_all();
                 l.window.request_redraw();

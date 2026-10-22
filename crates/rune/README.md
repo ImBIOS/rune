@@ -149,6 +149,24 @@ app.run();
 
 ## Run
 
+### High-frequency values
+
+`Live<T>` is a cloneable, thread-safe latest-wins handle (`f32`, `[f32; 2]`,
+`[f32; 4]`, `Color`). Call `set(value)` from a producer thread; Rune coalesces a
+wake for each visible subscribed window. Equal values and hidden windows do not
+wake. Bind with `.live_opacity(&level)`, `.live_offset(&cursor)`,
+`.live_scale(&scale)`, `.live_fill(&color)` or `.live_rect(&rect)`.
+`cursor.smooth(Spring::new(0.16, 0.0))` opts a binding into rune-motion smoothing.
+Views and layout do not rerun. Rects are presentation `[x,y,w,h]` in parent points,
+so text does not rewrap and siblings do not reflow. See
+[`examples/live-values`](../../examples/live-values) for background producers,
+deterministic snapshots/traces, allocation gates and the rebuild comparison.
+
+The native shell samples after acquiring a drawable. This is still the main-thread
+renderer, not a dedicated late-uniform/render-thread path. `Live::new` requires
+lock-free 128-bit atomics on the host CPU. Publication allocates nothing; platform
+wake callbacks are not hard-real-time guarantees.
+
 ```sh
 hivemind run --kind cargo -- cargo build --release -p settings
 target/release/settings                       # the window (don't open it on Studio)

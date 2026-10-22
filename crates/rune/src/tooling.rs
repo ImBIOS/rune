@@ -57,6 +57,7 @@ pub(crate) fn runtime_for<S: 'static>(spec: &AppSpec<S>, state: S, size: (f32, f
     let mut rt = Runtime::with_text(state, spec.view, size, env, text);
     rt.poll = spec.poll;
     rt.on_key = spec.on_key;
+    rt.set_live_waker(waker.clone());
     if let Some(f) = spec.setup {
         f(&mut rt.state, waker);
     }
@@ -405,7 +406,7 @@ impl Trace {
             // transition 16, reveal 32. A settle commit is a deliberate cut (everything lands at
             // once); a growth row reveals its content by growing; reveals fade words in.
             let clipped = e.rect.iter().zip(e.visible.iter()).any(|(a, b)| (a - b).abs() > 0.5);
-            let mut intent = 0;
+            let mut intent = e.live_intent;
             if settled {
                 intent |= 1 | 2 | 16 | 32;
             }

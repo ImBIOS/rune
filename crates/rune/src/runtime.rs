@@ -91,6 +91,7 @@ pub(crate) struct Node {
     pub role: &'static str,
     pub label: Option<String>,
     pub vis: Visual,
+    live: Vec<crate::live::Bound>,
     pub text: Option<TextSpec>,
     pub text_layout: Option<Rc<Layout<Ink>>>,
     on_press: Option<PressFn>,
@@ -159,6 +160,8 @@ pub struct ElementInfo {
     pub scrolling: bool,
     /// Invisible estimated extent of a virtual list, not a drawable surface.
     pub virtual_extent: bool,
+    /// Property-specific intentional cuts for 1:1 live bindings (never smoothed bindings).
+    pub live_intent: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -285,6 +288,9 @@ pub struct Runtime<S: 'static> {
     pub events: Vec<String>,
     /// Counters for perf gates.
     pub stats: FrameStats,
+    live_wake: Arc<crate::live::Wake>,
+    live_subscriptions: Vec<Arc<crate::live::Subscription>>,
+    live_dirty: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -379,6 +385,9 @@ impl<S: 'static> Runtime<S> {
             settled: false,
             events: Vec::new(),
             stats: FrameStats::default(),
+            live_wake: crate::live::Wake::new(Arc::new(|| {})),
+            live_subscriptions: Vec::new(),
+            live_dirty: false,
         }
     }
 
@@ -389,6 +398,75 @@ impl<S: 'static> Runtime<S> {
             self.env.scale = scale;
             self.scene.set_pixel_scale(scale);
             self.relayout = true;
+        }
+    }
+
+    /// Install before the first frame. Live updates use this separate coalesced wake lane.
+    pub fn set_live_waker(&mut self, waker: Waker) {
+        for sub in &self.live_subscriptions { sub.active.store(false, std::sync::atomic::Ordering::Release); }
+        self.live_subscriptions.clear();
+        self.live_wake = crate::live::Wake::new(waker);
+        self.subscribe_live();
+    }
+
+    pub fn set_live_visible(&mut self, visible: bool) { self.live_wake.visible(visible); }
+    pub fn live_pending(&self) -> bool {
+        self.live_dirty || self.live_wake.pending.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn subscribe_live(&mut self) {
+        use std::sync::atomic::Ordering;
+        for sub in &self.live_subscriptions { sub.active.store(false, Ordering::Release); }
+        for node in &self.nodes {
+            if self.is_exiting(node.id) { continue; }
+            for bound in &node.live {
+                if let Some(sub) = self.live_subscriptions.iter().find(|s| s.source_id == bound.source.id()) {
+                    sub.active.store(true, Ordering::Release);
+                } else {
+                    self.live_subscriptions.push(bound.source.subscribe(&self.live_wake));
+                }
+            }
+        }
+        self.live_subscriptions.retain(|s| s.active.load(Ordering::Acquire));
+        self.live_dirty = !self.live_subscriptions.is_empty();
+    }
+
+    fn latch_live(&mut self) {
+        // Clear before sampling: a concurrent publication either participates in this frame or
+        // retains a pending wake for the next one. Never clear after sampling (lost wake race).
+        let pending = self.live_wake.pending.swap(false, std::sync::atomic::Ordering::AcqRel);
+        if self.live_subscriptions.is_empty() { return; }
+        if !pending && !self.live_dirty { return; }
+        self.live_dirty = false;
+        for node in &mut self.nodes {
+            for bound in &mut node.live {
+                let initial = bound.seen.is_none();
+                let Some(bits) = bound.read() else { continue };
+                let spring = if initial { None } else { bound.spring };
+                use crate::live::{LiveValue, Property};
+                fn apply<T: rune_motion::Animatable>(scene: &mut Scene, id: NodeId, prop: Prop<T>, value: T, spring: Option<Spring>) {
+                    if let Some(spring) = spring { scene.animate(id, prop, value, spring); }
+                    else { scene.set(id, prop, value); }
+                }
+                match bound.property {
+                    Property::Opacity => apply(&mut self.scene, node.id, prop::OPACITY, f32::decode(bits).clamp(0.0, 1.0), spring),
+                    Property::Scale => apply(&mut self.scene, node.id, prop::SCALE, f32::decode(bits).max(0.0), spring),
+                    Property::Offset => {
+                        let [x, y] = <[f32; 2]>::decode(bits);
+                        apply(&mut self.scene, node.id, prop::OFFSET, rune_motion::Vec2::new(x, y), spring);
+                    }
+                    Property::Fill => {
+                        // The renderer uses the exact authored colour after its track settles.
+                        node.vis.fill = Color::decode(bits);
+                        apply(&mut self.scene, node.id, P_FILL, node.vis.fill, spring);
+                    }
+                    Property::Rect => {
+                        let [x, y, w, h] = <[f32; 4]>::decode(bits);
+                        self.scene.set_frame(node.id, MRect::new(x, y, w.max(0.0), h.max(0.0)),
+                            spring.map_or(LayoutAnim::INSTANT, LayoutAnim::new));
+                    }
+                }
+            }
         }
     }
 
@@ -464,6 +542,7 @@ impl<S: 'static> Runtime<S> {
             self.settled = false;
         }
         self.update_interaction();
+        self.latch_live();
         let step = dt * self.time_scale as f64;
         self.t += step;
         self.scene.set_time(self.t);
@@ -1183,16 +1262,22 @@ impl<S: 'static> Runtime<S> {
                     }
                     la
                 };
-                self.scene.set_frame(id, scene_rect, layout_anim);
+                if !nodes[i].live.iter().any(|b| b.property == crate::live::Property::Rect) {
+                    self.scene.set_frame(id, scene_rect, layout_anim);
+                }
                 self.set_or_anim(id, prop::RADIUS, Corners(nodes[i].vis.radius), spring_l, instant);
-                if !instant && let Some(anim) = nodes[i].opacity_motion {
+                if nodes[i].live.iter().any(|b| b.property == crate::live::Property::Opacity) {
+                    // The live source owns this property, including across unrelated commits.
+                } else if !instant && let Some(anim) = nodes[i].opacity_motion {
                     self.scene.animate(id, prop::OPACITY, nodes[i].vis.opacity, anim);
                 } else {
                     self.set_or_anim(id, prop::OPACITY, nodes[i].vis.opacity, spring_l, instant);
                 }
             }
             let vis = &nodes[i].vis;
-            self.set_or_anim(id, P_FILL, vis.fill, spring_c, instant);
+            if !nodes[i].live.iter().any(|b| b.property == crate::live::Property::Fill) {
+                self.set_or_anim(id, P_FILL, vis.fill, spring_c, instant);
+            }
             if vis.border_width > 0.0 {
                 self.set_or_anim(id, P_BORDER, vis.border, spring_c, instant);
             }
@@ -1282,6 +1367,26 @@ impl<S: 'static> Runtime<S> {
         let old_nodes = std::mem::take(&mut self.nodes);
         let old_ids: Vec<NodeId> = old_nodes.iter().map(|n| n.id).collect();
         for mut old in old_nodes {
+            if let Some(&i) = self.node_index.get(&old.id) {
+                let mut fill = None;
+                for bound in &mut nodes[i].live {
+                    if let Some(previous) = old.live.iter().find(|b| b.property == bound.property && Arc::ptr_eq(&b.source, &bound.source)) {
+                        bound.seen = if tx.settle { None } else { previous.seen };
+                        if bound.property == crate::live::Property::Fill { fill = Some(old.vis.fill); }
+                    }
+                }
+                if let Some(fill) = fill { nodes[i].vis.fill = fill; }
+                // Removing a binding restores the normal property, including transform defaults.
+                for previous in &old.live {
+                    if !nodes[i].live.iter().any(|b| b.property == previous.property) {
+                        match previous.property {
+                            crate::live::Property::Offset => self.scene.set(old.id, prop::OFFSET, rune_motion::Vec2::ZERO),
+                            crate::live::Property::Scale => self.scene.set(old.id, prop::SCALE, 1.0),
+                            _ => {}
+                        }
+                    }
+                }
+            }
             if self.node_index.contains_key(&old.id) || !self.scene.contains(old.id) {
                 continue;
             }
@@ -1296,6 +1401,7 @@ impl<S: 'static> Runtime<S> {
                 }
             }
             old.parent = old_parent_id.and_then(|pid| self.node_index.get(&pid).copied());
+            old.live.clear();
             self.node_index.insert(old.id, nodes.len());
             nodes.push(old);
         }
@@ -1312,6 +1418,7 @@ impl<S: 'static> Runtime<S> {
         }
 
         self.nodes = nodes;
+        self.subscribe_live();
         self.layout = taffy;
         self.text.end_commit();
         self.dirty = false;
@@ -2045,6 +2152,14 @@ impl<S: 'static> Runtime<S> {
     // Inspection
 
     pub fn elements(&self) -> Vec<ElementInfo> {
+        fn live_intent(n: &Node) -> u32 {
+            n.live.iter().filter(|b| b.spring.is_none()).fold(0, |bits, b| bits | match b.property {
+                crate::live::Property::Offset => 1,
+                crate::live::Property::Scale | crate::live::Property::Rect => 1 | 2,
+                crate::live::Property::Opacity => 4,
+                crate::live::Property::Fill => 0,
+            })
+        }
         let store = self.scene.store();
         let mut elements: Vec<_> = self.nodes
             .iter()
@@ -2055,6 +2170,7 @@ impl<S: 'static> Runtime<S> {
                 let mut moving = flight.is_some() || store.is_animating(n.id, prop::FRAME)
                     || store.is_animating(n.id, prop::TRAVEL)
                     || store.is_animating(n.id, prop::PRESENCE)
+                    || store.is_animating(n.id, prop::OFFSET) || store.is_animating(n.id, prop::SCALE)
                     || self.grows.get(&n.id).is_some_and(|g| g.moving());
                 let rect = flight.map_or_else(|| self.drawn.get(i).copied().unwrap_or([p.rect.x, p.rect.y, p.rect.w, p.rect.h]),
                     |f| [f.presented.x, f.presented.y, f.presented.w, f.presented.h]);
@@ -2067,11 +2183,23 @@ impl<S: 'static> Runtime<S> {
                 let revealing = flight.is_some() || self.reveals.get(&n.id).is_some_and(|r| !r.words.is_empty());
                 let mut in_growing_row = false;
                 let mut scrolling = false;
+                let mut live_intent = live_intent(n);
                 let mut a = n.parent;
                 while let Some(pi) = a {
                     let parent = self.nodes[pi].id;
                     moving |= store.is_animating(parent, prop::FRAME) || store.is_animating(parent, prop::TRAVEL)
-                        || store.is_animating(parent, prop::PRESENCE);
+                        || store.is_animating(parent, prop::PRESENCE)
+                        || store.is_animating(parent, prop::OFFSET) || store.is_animating(parent, prop::SCALE);
+                    for b in &self.nodes[pi].live {
+                        if b.spring.is_none() {
+                            live_intent |= match b.property {
+                                crate::live::Property::Offset => 1,
+                                crate::live::Property::Scale | crate::live::Property::Rect => 1 | 2,
+                                crate::live::Property::Opacity => 4,
+                                crate::live::Property::Fill => 0,
+                            };
+                        }
+                    }
                     scrolling |= self.scrolls.get(&self.nodes[pi].id).is_some_and(|s| s.scrolling);
                     if self.grows.get(&self.nodes[pi].id).is_some_and(|g| g.moving()) {
                         in_growing_row = true;
@@ -2098,6 +2226,7 @@ impl<S: 'static> Runtime<S> {
                     revealing,
                     in_growing_row,
                     scrolling,
+                    live_intent,
                     virtual_extent: self.virtuals.contains_key(&n.path) && n.vis.fill.a == 0.0
                         && n.vis.border_width == 0.0 && n.vis.shadows.is_empty() && n.text.is_none() && n.vis.icon.is_none(),
                 })
@@ -2115,7 +2244,7 @@ impl<S: 'static> Runtime<S> {
                 hover: 0.0, press: 0.0, moving: true, parent: None,
                 visible: [r.x.max(c[0]), r.y.max(c[1]), (r.edges()[2].min(c[2]) - r.x.max(c[0])).max(0.0),
                     (r.edges()[3].min(c[3]) - r.y.max(c[1])).max(0.0)],
-                revealing: true, in_growing_row: false, scrolling: false, virtual_extent: false,
+                revealing: true, in_growing_row: false, scrolling: false, virtual_extent: false, live_intent: 0,
             });
         }
         elements
@@ -2277,6 +2406,7 @@ fn flatten(
         label,
         style,
         vis,
+        live,
         text,
         children,
         on_press,
@@ -2303,6 +2433,7 @@ fn flatten(
         role,
         label,
         vis,
+        live,
         text,
         text_layout: None,
         on_press,
