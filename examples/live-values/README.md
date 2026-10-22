@@ -39,8 +39,8 @@ without reflowing siblings or rewrapping text. This also supports a meter's fill
 width. `.live_fill(&Live<Color>)` and `.live_scale(&Live<f32>)` use the same path.
 
 Values use coherent 128-bit atomic snapshots, including concurrent producers.
-Desktop CPUs must support lock-free 128-bit atomics (`Live::new` checks). Finite
-values only. Publication and CPU presentation allocate nothing after mounting;
+Desktop CPUs must support lock-free 128-bit atomics (`Live::new` checks). `set`
+ignores NaN and clamps ±inf, so audio callbacks never panic. Publication and CPU presentation allocate nothing after mounting;
 platform wake callbacks are not hard-real-time guarantees. Subscription metadata
 is one cell per source/runtime pair, reused across view rebuilds and freed when
 the last source handle dies. Keep sources scoped to their app/window lifetime.
