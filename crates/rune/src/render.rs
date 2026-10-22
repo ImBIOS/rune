@@ -47,8 +47,13 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
 }
 
+/// Vulkan loaders crash when two threads create instances or devices at once (seen with
+/// parallel GPU tests on lavapipe), so Rune creates them one at a time.
+static GPU_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl Gpu {
     pub fn new(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Gpu {
+        let _serial = GPU_INIT.lock().unwrap_or_else(|e| e.into_inner());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
             force_fallback_adapter: false,
@@ -74,6 +79,7 @@ impl Gpu {
     }
 
     pub fn instance() -> wgpu::Instance {
+        let _serial = GPU_INIT.lock().unwrap_or_else(|e| e.into_inner());
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle())
     }
 }
