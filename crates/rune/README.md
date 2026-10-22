@@ -165,6 +165,41 @@ app.run();
   policies at runtime (observed on macOS 26.2 with `lsappinfo`: UIElement ↔ Foreground).
 - Edge overlays (HUDs): see `App::overlay` below.
 
+### Compact tray-controlled windows
+
+Use the same `WindowOptions` with `App::run` or `WindowSpec`. Existing defaults
+remain resizable, decorated, with a 420×400 minimum unless `AppSpec::min_size` is set.
+
+```rust
+spec.size = (320.0, 160.0);
+let app = rune::App::new(spec)
+    .window_options(rune::WindowOptions {
+        min_size: Some((320.0, 160.0)),
+        max_size: Some((320.0, 160.0)),
+        resizable: false,
+        borderless: true,
+        ..Default::default()
+    })
+    .keep_running(); // close hides; state survives
+let tray = app.handle();
+// Any thread, including a tray callback:
+tray.set_position((-320, 80)); // physical desktop pixels
+tray.set_always_on_top(true);
+tray.show();                  // no focus request; recreates a destroyed window
+tray.focus();                 // separate focus request; does not force Mac activation
+// tray.hide() keeps state without invoking on_close; tray.open() shows and activates.
+app.run();
+```
+
+Size constraints use logical points. Placement and topmost work through the native
+window manager on macOS and X11; they are no-ops on Wayland. Runtime changes survive
+close/recreation. On Wayland, use `activate(token)` for authorized focus; tokenless
+`focus()` requests attention. `show()` leaves minimized windows minimized; `open()`
+also restores them. On macOS, no-focus show uses `orderFront`, rather than winit's
+`makeKeyAndOrderFront`. Window-manager focus policy still applies. `WindowHandle`
+also provides show/hide/focus, placement and topmost control on the event thread.
+Rooms owns its tray; Rune supplies the window lifetime and handles.
+
 ## High-frequency values
 
 `Live<T>` is a cloneable, thread-safe latest-wins handle (`f32`, `[f32; 2]`,

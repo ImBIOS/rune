@@ -3,7 +3,7 @@
 //! reopening shows the same state (the ticks kept counting, the note kept its text).
 //!
 //! ```sh
-//! cargo run -p background            # then type: open | activate TOKEN | close | dock on|off | quit
+//! cargo run -p background            # stdin: open | show | hide | focus | activate TOKEN | close | quit
 //! cargo run -p background -- --open  # start with the window
 //! cargo run -p background -- --release-gpu  # closing also drops the GPU device
 //! cargo run -p background -- --accessory    # macOS: no Dock icon until `dock on`
@@ -215,6 +215,15 @@ fn main() {
             let mut words = line.split_whitespace();
             match (words.next(), words.next()) {
                 (Some("open"), _) => commands.open(),
+                (Some("show"), _) => commands.show(),
+                (Some("hide"), _) => commands.hide(),
+                (Some("focus"), _) => commands.focus(),
+                (Some("position"), Some(x)) => {
+                    if let (Ok(x), Some(Ok(y))) = (x.parse::<i32>(), words.next().map(str::parse::<i32>)) {
+                        commands.set_position((x, y));
+                    }
+                }
+                (Some("topmost"), Some(on)) => commands.set_always_on_top(on == "on"),
                 (Some("activate"), Some(token)) => commands.activate(token),
                 (Some("close"), _) => commands.close(),
                 (Some("quit"), _) => commands.quit(),
@@ -232,7 +241,7 @@ fn main() {
                 (Some("capsule"), Some("wide")) => capsule.resize((320.0, 48.0)),
                 (Some("capsule"), Some("status")) => eprintln!("background: capsule {:?}", capsule.availability()),
                 (Some(other), _) => {
-                    eprintln!("background: unknown command {other:?} (open | activate TOKEN | close | dock on|off | hud show|hide|top|bottom|recording|transcribing|status | capsule show|hide|left|wide|status | quit)")
+                    eprintln!("background: unknown command {other:?} (open | show | hide | focus | position X Y | topmost on|off | activate TOKEN | close | dock on|off | hud show|hide|top|bottom|recording|transcribing|status | capsule show|hide|left|wide|status | quit)")
                 }
                 (None, _) => {}
             }

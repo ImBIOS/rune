@@ -1,7 +1,17 @@
-//! AppKit pieces winit 0.30 doesn't expose: the activation policy at runtime and overlay windows.
+//! AppKit activation policy, overlay windows, and visibility without activation.
 
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use objc2_foundation::MainThreadMarker;
+pub(crate) use show_overlay as show_without_focus;
+
+pub(crate) fn focus_without_forcing_activation(window: &winit::window::Window) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let Some(window) = ns_window(window).filter(|w| w.isVisible() && !w.isMiniaturized()) else { return };
+    // Unlike winit::focus_window, do not override another app's activation.
+    #[allow(deprecated)]
+    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(false);
+    window.makeKeyAndOrderFront(None);
+}
 
 /// Regular (Dock icon and app menu) or accessory (menu-bar only). Called on the main thread.
 pub(crate) fn set_dock_icon(visible: bool) {

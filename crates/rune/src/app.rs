@@ -184,6 +184,34 @@ impl<S: 'static> AppHandle<S> {
         self.request(|q| q.window = Some(WindowRequest::Open(None)));
     }
 
+    /// Show or recreate the window without requesting focus. A minimized window stays minimized;
+    /// open() also restores and activates it. Window-manager policy still applies.
+    pub fn show(&self) {
+        self.request(|q| q.window = Some(WindowRequest::Show));
+    }
+
+    /// Hide the window, retaining its host and state. Does not invoke the close callback.
+    pub fn hide(&self) {
+        self.request(|q| q.window = Some(WindowRequest::Hide));
+    }
+
+    /// Request focus for an already-visible window without forcing macOS app activation.
+    /// On Wayland this requests attention; use activate(token) for compositor-authorized focus.
+    pub fn focus(&self) {
+        self.request(|q| q.focus = true);
+    }
+
+    /// Set the outer position in physical desktop pixels (negative coordinates are valid).
+    /// Retained across recreation. Wayland does not support application window placement.
+    pub fn set_position(&self, position: (i32, i32)) {
+        self.request(|q| q.position = Some(position));
+    }
+
+    /// Change the window level, retaining it across recreation. No effect on Wayland.
+    pub fn set_always_on_top(&self, on: bool) {
+        self.request(|q| q.always_on_top = Some(on));
+    }
+
     /// Show and focus the window with an activation token another process forwarded
     /// (`XDG_ACTIVATION_TOKEN` on Wayland, `DESKTOP_STARTUP_ID` on X11), so the compositor
     /// lets it take focus. Where tokens don't exist this is `open`.
@@ -225,12 +253,17 @@ impl<S: 'static> AppHandle<S> {
 pub(crate) enum WindowRequest {
     /// Show and focus, with an activation token when one was forwarded.
     Open(Option<String>),
+    Show,
+    Hide,
     Close,
 }
 
 pub(crate) struct Requests<S> {
     pub window: Option<WindowRequest>,
     pub dock: Option<bool>,
+    pub focus: bool,
+    pub position: Option<(i32, i32)>,
+    pub always_on_top: Option<bool>,
     pub quit: bool,
     pub updates: Vec<Update<S>>,
 }
@@ -240,6 +273,9 @@ impl<S> Default for Requests<S> {
         Requests {
             window: None,
             dock: None,
+            focus: false,
+            position: None,
+            always_on_top: None,
             quit: false,
             updates: Vec::new(),
         }
@@ -363,6 +399,27 @@ mod tests {
             Some(WindowRequest::Open(None)),
             "an empty token is no token"
         );
+    }
+
+    #[test]
+    fn tray_requests_keep_show_focus_and_geometry_together() {
+        let app = App::new(spec()).windowless();
+        let handle = app.handle();
+        std::thread::spawn(move || {
+            handle.set_position((10, 20));
+            handle.hide();
+            handle.set_position((-300, 40));
+            handle.set_always_on_top(true);
+            handle.show();
+            handle.focus();
+        }).join().unwrap();
+        let requests = app.shared.take();
+        assert_eq!(requests.window, Some(WindowRequest::Show), "focus must not overwrite show");
+        assert!(requests.focus);
+        assert_eq!(requests.position, Some((-300, 40)));
+        assert_eq!(requests.always_on_top, Some(true));
+        let drained = app.shared.take();
+        assert!(!drained.focus && drained.window.is_none() && drained.position.is_none() && drained.always_on_top.is_none());
     }
 
     #[test]
