@@ -1,0 +1,8 @@
+{
+  "events": [
+    { "t": 0.3, "type": "move", "key": "sidebar-resize" },
+    { "t": 0.9, "type": "drag", "key": "sidebar-resize", "dx": 140, "dur": 0.5 },
+    { "t": 1.8, "type": "drag", "key": "sidebar-resize", "dx": -320, "dur": 0.6 },
+    { "t": 2.8, "type": "move", "x": 700, "y": 400 }
+  ]
+}

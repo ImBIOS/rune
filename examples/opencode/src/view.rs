@@ -4,15 +4,15 @@
 use std::sync::OnceLock;
 
 use rune::{
-    Align, Color, Cx, El, GrowthSpec, Icon, ScrollSpec, Span, TextStyle, Tx, col, edge, el, icon, rich, row, spacer,
-    text, text_input,
+    Align, Anim, AnimExt, Color, Curve, Cursor, Cx, Cycle, Drag, Easing, El, GrowthSpec, Icon, Phase, ScrollSpec, Span,
+    Spring, TextStyle, Tx, col, edge, el, icon, rich, row, spacer, text, text_input,
 };
 
 use crate::icons as ic;
 use crate::markdown::{self, Block, Inline, Style};
 use crate::model::{self, Message, Part, SessionInfo, ToolStatus, Transcript};
 use crate::palette::{Pal, pal};
-use crate::{App, Route};
+use crate::{App, Route, TabStatus};
 use crate::pickers::Kind;
 
 // Type: Inter variable (weights 440/530/670 are real instances) and IBM Plex Mono.
@@ -34,6 +34,8 @@ const CONTENT_W: f32 = 696.0;
 pub fn app(s: &App, cx: &mut Cx<App>) -> El {
     let p = pal(cx.system_dark());
     cx.reduced_motion(s.reduced_motion);
+    let w = s.sidebar_w;
+    let open = s.sidebar_open;
     let mut root = row()
         .key("window")
         .role("window")
@@ -46,6 +48,7 @@ pub fn app(s: &App, cx: &mut Cx<App>) -> El {
                 .key("panel")
                 .grow(1.0)
                 .shrink()
+                .ml(8.0)
                 .mt(8.0)
                 .mr(8.0)
                 .mb(8.0)
@@ -60,7 +63,13 @@ pub fn app(s: &App, cx: &mut Cx<App>) -> El {
                     Route::Session(id) => session_page(s, p, id),
                     Route::Draft => draft_page(s, p),
                 }),
-        );
+        )
+        // The empty inset above the panels moves the window, as the titlebar does.
+        .child(el().key("drag-inset").absolute(0.0, 0.0).w_full().h(8.0).window_drag());
+    if open {
+        root = root.child(resize_handle(s, p, w));
+    }
+    root = root.child(sidebar_toggle(p, open, w));
     if s.pickers.open.is_some() {
         root = root.child(el().key("picker-dismiss").absolute(0.0, 0.0).w_full().h_full().opacity(0.0)
             .on_press(|s: &mut App| s.close_picker(false)))
@@ -84,170 +93,364 @@ fn avatar(p: &Pal, name: &str) -> El {
         .child(text(letter).font(AVATAR).color(p.avatar_fg))
 }
 
-fn nav_item(p: &Pal, key: &str, glyph: &'static Icon, label: &str, hint: Option<&str>, on: bool) -> El {
-    let mut r = row()
-        .key(key)
-        .role("button")
-        .label(label)
-        .h(28.0)
-        .px(6.0)
-        .gap(8.0)
-        .center_y()
-        .radius(6.0)
-        .hover(p.layer1)
-        .press(p.layer2)
-        .child(icon(glyph, 16.0).color(if on { p.icon } else { p.icon_muted }))
-        .child(text(label).font(UI).color(if on { p.text } else { p.muted }).truncate());
-    if on {
-        r = r.fill(p.layer2);
-    }
-    if let Some(h) = hint {
-        r = r.child(spacer()).child(text(h).font(UI_SMALL).color(p.faint));
-    }
-    r
-}
-
-fn short_ago(now: i64, then: i64) -> String {
-    model::ago(now, then).trim_end_matches(" ago").to_owned()
-}
-
 fn roots(s: &App) -> impl Iterator<Item = &SessionInfo> {
     s.sessions.iter().filter(|x| x.parent.is_none())
 }
 
 // ---------------------------------------------------------------------------------------------
-// Sidebar
+// Sidebar: Desktop's vertical tabs (`shell/titlebar/titlebar.tsx`, `tab-nav.tsx`).
+
+/// Default, minimum and maximum widths (`shell.tsx`'s ResizeHandle).
+pub const SIDEBAR_W: f32 = 260.0;
+pub const SIDEBAR_MIN: f32 = 120.0;
+pub const SIDEBAR_MAX: f32 = 640.0;
+/// The sidebars' shared spring, "smooth" (`panel-motion.ts`).
+const SIDEBAR_SPRING: Spring = Spring::new(0.3, 0.0);
+/// Where the zoom button ends with the lights on the header's centre line (`macVerticalTrafficLights`).
+const TRAFFIC_LIGHTS_END: f32 = 85.0;
+/// The collapsed toggle's box: from the shell inset plus header padding (18) to past the lights.
+const COLLAPSED_SLOT: f32 = TRAFFIC_LIGHTS_END + 16.0 - 18.0 + 32.0;
+/// How far a closed panel's contents dim at the end of the flight.
+const FADE_FLOOR: f32 = 0.5;
+
+const INSTANT: Anim = Anim::INSTANT;
+
+/// Home, Search sessions and New session (`data-titlebar-tab-action`).
+fn action_row(p: &Pal, key: &str, glyph: &'static Icon, label: &str, hint: &str, pressed: bool) -> El {
+    let ink = if pressed { p.text } else { p.faint };
+    let mut r = row()
+        .key(key)
+        .role("button")
+        .label(label)
+        .h(28.0)
+        .w_full()
+        .pl(6.0)
+        .pr(8.0)
+        .gap(6.0)
+        .center_y()
+        .radius(6.0)
+        .hover(p.hover)
+        .press(p.pressed)
+        .hover_motion(INSTANT, INSTANT)
+        .child(icon(glyph, 16.0).color(ink).group_color(p.text))
+        .child(text(label).font(UI).color(ink).group_color(p.text).truncate());
+    if pressed {
+        r = r.fill(p.pressed);
+    }
+    if !hint.is_empty() {
+        r = r.child(spacer()).child(text(hint).font(UI).color(p.faint).group_opacity(0.0, 1.0));
+    }
+    r
+}
 
 fn sidebar(s: &App, p: &Pal) -> El {
     let current = match &s.route {
-        Route::Session(id) => Some(id.as_str()),
+        Route::Session(id) => Some(s.root_of(id)),
         _ => None,
     };
-    let current_project = current.and_then(|id| s.session(id)).map(|x| x.project.clone());
-    let mut list = col().key("projects").gap(1.0);
-    for proj in s.projects.iter().take(12) {
-        let open = s.open_projects.contains(&proj.id);
-        let here = current_project.as_deref() == Some(proj.id.as_str());
-        let pid = proj.id.clone();
-        list = list.child(
-            row()
-                .key(format!("p-{}", proj.id))
-                .role("button")
-                .label(proj.name.clone())
-                .h(28.0)
-                .px(6.0)
-                .gap(8.0)
-                .center_y()
-                .radius(6.0)
-                .hover(p.layer1)
-                .press(p.layer2)
-                .on_press(move |s: &mut App| {
-                    if !s.open_projects.remove(&pid) {
-                        s.open_projects.insert(pid.clone());
-                    }
-                })
-                .child(avatar(p, &proj.name))
-                .child(text(proj.name.clone()).font(UI).color(if here { p.text } else { p.muted }).truncate()),
-        );
-        if open {
-            let mut n = 0;
-            for ses in roots(s).filter(|x| x.project == proj.id).take(6) {
-                n += 1;
-                let on = current == Some(ses.id.as_str());
-                let id = ses.id.clone();
-                let mut r = row()
-                    .key(format!("s-{}", ses.id))
-                    .role("button")
-                    .label(ses.title.clone())
-                    .h(28.0)
-                    .pl(30.0)
-                    .pr(8.0)
-                    .gap(8.0)
-                    .center_y()
-                    .radius(6.0)
-                    .hover(p.layer1)
-                    .press(p.layer2)
-                    .on_press_tx(move |s: &mut App, tx: &mut Tx| s.open(&id, tx))
-                    .child(text(title_of(ses)).font(UI).color(if on { p.text } else { p.muted }).truncate())
-                    .child(spacer())
-                    .child(text(short_ago(s.now_ms, ses.updated)).font(UI_SMALL).color(p.faint));
-                if on {
-                    r = r.fill(p.layer2);
-                }
-                list = list.child(r);
-            }
-            if n == 0 {
-                list = list.child(
-                    row().key(format!("empty-{}", proj.id)).h(28.0).pl(30.0).center_y().child(text("No sessions").font(UI).color(p.faint)),
-                );
-            }
-        }
+    let mut list = col().key("tabs").w_full().gap(4.0).pb(16.0);
+    for t in &s.tabs {
+        list = list.child(tab_row(s, p, t, current == Some(t.id.as_str())));
     }
 
-    col()
-        .key("sidebar")
-        .role("navigation")
-        .w(256.0)
+    let w = s.sidebar_w;
+    let inner = col()
+        .key("sidebar-inner")
+        // Pinned to the aside's end edge: it slides out as the aside narrows.
+        .absolute(if s.sidebar_open { 0.0 } else { -w }, 0.0)
+        .w(w)
         .h_full()
         .pt(8.0)
-        .pb(10.0)
         .pl(10.0)
-        .pr(6.0)
+        .pr(2.0)
+        .pb(10.0)
+        .opacity(if s.sidebar_open { 1.0 } else { FADE_FLOOR })
+        .opacity_motion(SIDEBAR_SPRING)
+        .child(
+            // Shares the session header's 48px centre line with the traffic lights; drags the window.
+            row()
+                .key("sidebar-header")
+                .w_full()
+                .h(48.0)
+                .mb(8.0)
+                .gap(8.0)
+                .center_y()
+                .window_drag()
+                .child(el().key("lights").w(TRAFFIC_LIGHTS_END - 10.0).h(28.0))
+                .child(spacer())
+                // The toggle floats above (see `sidebar_toggle`); its slot keeps the row's shape.
+                .child(el().key("toggle-slot").size(28.0, 28.0)),
+        )
         .child(
             col()
-                .key("nav")
-                .gap(1.0)
-                .child(
-                    nav_item(p, "home", &ic::STATUS, "Home", None, s.route == Route::Home)
-                        .on_press_tx(|s: &mut App, tx: &mut Tx| {
-                            s.route = Route::Home;
-                            tx.settle();
-                        }),
-                )
-                .child(nav_item(p, "search", &ic::MAGNIFYING_GLASS, "Search sessions", Some("⌘K"), false).on_press_tx(
+                .key("actions")
+                .w_full()
+                .gap(4.0)
+                .child(action_row(p, "home", &ic::GRID_PLUS, "Home", "⌘B", s.route == Route::Home).on_press_tx(
+                    |s: &mut App, tx: &mut Tx| {
+                        s.route = Route::Home;
+                        tx.settle();
+                    },
+                ))
+                .child(action_row(p, "search", &ic::MAGNIFYING_GLASS, "Search sessions", "", false).on_press_tx(
                     |s: &mut App, tx: &mut Tx| {
                         s.route = Route::Home;
                         s.search.focused = true;
                         tx.settle();
                     },
                 ))
-                .child(
-                    nav_item(p, "new", &ic::EDIT, "New session", Some("⌘N"), s.route == Route::Draft)
-                        .on_press_tx(|s: &mut App, tx: &mut Tx| {
-                            s.route = Route::Draft;
-                            tx.settle();
-                        }),
-                ),
+                .child(action_row(p, "new", &ic::EDIT, "New session", "⌘T", false).on_press_tx(
+                    |s: &mut App, tx: &mut Tx| {
+                        s.route = Route::Draft;
+                        tx.settle();
+                    },
+                )),
         )
-        .child(
-            row()
-                .key("projects-header")
-                .h(28.0)
-                .mt(16.0)
-                .pl(6.0)
-                .pr(6.0)
-                .center_y()
-                .child(text("Projects").font(UI_MED).color(p.muted))
-                .child(spacer())
-                .child(icon(&ic::PLUS, 16.0).color(p.icon_muted)),
-        )
+        .child(el().key("tabs-gap").w_full().h(16.0))
         .child(
             col()
-                .key("projects-scroll")
+                .key("tabs-scroll")
+                .w_full()
                 .grow(1.0)
                 .shrink()
                 .scroll(ScrollSpec { stick_bottom: false })
                 .clip_fade(0.0, 0.0, 0.0, 16.0)
                 .child(list),
+        );
+
+    // The aside's width moves the panel's edge; its contents keep their width, pinned to that edge.
+    el().key("sidebar")
+        .role("navigation")
+        .w(if s.sidebar_open { w } else { 0.0 })
+        .h_full()
+        
+        .clip_soft(0.0)
+        .motion(SIDEBAR_SPRING)
+        .child(inner)
+}
+
+fn tab_row(s: &App, p: &Pal, t: &crate::tabs::Tab, active: bool) -> El {
+    let info = s.session(&t.id);
+    let title = info.map(title_of).unwrap_or_else(|| if t.title.is_empty() { "Untitled session".into() } else { t.title.clone() });
+    let dir = info.map_or(t.directory.as_str(), |i| i.directory.as_str());
+    let proj = info
+        .and_then(|i| s.project(&i.project))
+        .map(|x| x.name.clone())
+        .unwrap_or_else(|| dir.rsplit('/').find(|x| !x.is_empty()).unwrap_or("").to_owned());
+    let status = s.tab_status(&t.id);
+    // The title fades out before the status/close slot (`--tab-title-fade-offset`).
+    let fade_offset = if active || status.is_some() { 24.0 } else { 4.0 };
+    // 4px from the row's end; the row spans the sidebar less its 10 + 2 padding.
+    let slot_x = s.sidebar_w - 12.0 - 24.0;
+    let id = t.id.clone();
+    let close_id = t.id.clone();
+    let mut r = row()
+        .key(format!("t-{}", t.id))
+        .role("button")
+        .label(title.clone())
+        .w_full()
+        .h(28.0)
+        
+        .radius(6.0)
+        .hover(p.hover)
+        .press(p.pressed)
+        .hover_motion(INSTANT, INSTANT)
+        .on_press_tx(move |s: &mut App, tx: &mut Tx| s.open(&id, tx))
+        .child(
+            row()
+                .key("link")
+                .grow(1.0)
+                .shrink()
+                .min_w(0.0)
+                .h_full()
+                .pl(6.0)
+                .mr(fade_offset + 6.0)
+                .gap(6.0)
+                .center_y()
+                .clip_fade(0.0, 0.0, 16.0, 0.0)
+                .child(avatar(p, &proj))
+                .child(text(title).font(UI_MED).color(if active { p.text } else { p.faint })),
         )
         .child(
-            col()
-                .key("utility")
-                .gap(1.0)
-                .pt(8.0)
-                .child(nav_item(p, "settings", &ic::SETTINGS_GEAR, "Settings", None, false))
-                .child(nav_item(p, "help", &ic::HELP, "Help", None, false)),
+            // Status and close share the slot; hovering the row swaps one for the other.
+            el().key("status")
+                .absolute(slot_x, 4.0)
+                .size(20.0, 20.0)
+                .center()
+                .group_opacity(1.0, 0.0)
+                .child(match status {
+                    Some(TabStatus::Busy) => activity_ring(p),
+                    Some(TabStatus::Attention) => el().size(7.0, 7.0).radius(3.5).fill(p.warning),
+                    Some(TabStatus::Unread) => el().size(7.0, 7.0).radius(3.5).fill(p.bg_accent),
+                    None => el(),
+                }),
         )
+        .child(
+            el().key("close")
+                .role("button")
+                .label("Close tab")
+                .absolute(slot_x, 4.0)
+                .size(20.0, 20.0)
+                .radius(4.0)
+                .center()
+                .fill(p.bg_deep)
+                .hover(p.hover)
+                .hover_motion(INSTANT, INSTANT)
+                .group_opacity(0.0, 1.0)
+                .on_press_tx(move |s: &mut App, tx: &mut Tx| s.close_tab(&close_id, tx))
+                .child(
+                    el().key("close-ink")
+                        .size(20.0, 20.0)
+                        .radius(4.0)
+                        .center()
+                        .fill(if active { p.pressed } else { p.hover })
+                        .child(icon(&ic::XMARK_SMALL, 16.0).color(p.icon_muted)),
+                ),
+        );
+    if active {
+        r = r.fill(p.pressed);
+    }
+    r
+}
+
+/// The sidebar edge's resize handle: an 8px hit area across the gap, with a pill that waits a
+/// moment before showing on hover (`resize-handle.css`).
+fn resize_handle(s: &App, p: &Pal, w: f32) -> El {
+    let enter = Curve::tween(0.15, Easing::cubic(0.2, 0.8, 0.2, 1.0)).delay(0.2);
+    let exit = Curve::tween(0.11, Easing::cubic(0.4, 0.0, 1.0, 1.0));
+    let dragging = s.sidebar_drag.is_some();
+    el().key("sidebar-resize")
+        .absolute(w, 0.0)
+        .w(8.0)
+        .h_full()
+        .center()
+        .cursor(Cursor::ResizeColumn)
+        .hover_group()
+        .hover_motion(enter, exit)
+        .on_drag(|s: &mut App, d: &mut Drag, tx: &mut Tx| {
+            tx.instant();
+            match d.phase {
+                Phase::Down => s.sidebar_drag = Some(s.sidebar_w),
+                Phase::Move => {
+                    let from = s.sidebar_drag.unwrap_or(s.sidebar_w);
+                    s.sidebar_w = (from + d.dx).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                }
+                Phase::Up => s.sidebar_drag = None,
+            }
+        })
+        .child(
+            el().key("pill")
+                .size(4.0, 40.0)
+                .radius(2.0)
+                .fill(if dragging { p.icon } else { p.icon_muted })
+                .group_opacity(if dragging { 1.0 } else { 0.0 }, 1.0),
+        )
+}
+
+/// One toggle that reads as the header's and the collapsed one: it rides the sidebar's edge
+/// to the collapsed spot past the traffic lights while its glyph turns (`sidebar-toggle.tsx`).
+fn sidebar_toggle(p: &Pal, open: bool, w: f32) -> El {
+    let x = if open { w - 2.0 - 28.0 } else { 18.0 + COLLAPSED_SLOT - 4.0 - 28.0 };
+    el().key("sidebar-toggle")
+        .role("button")
+        .label("Toggle sidebar")
+        .absolute(x, 18.0)
+        .size(28.0, 28.0)
+        .radius(6.0)
+        .center()
+        .hover(p.hover)
+        .press(p.pressed)
+        .hover_motion(INSTANT, INSTANT)
+        .motion(SIDEBAR_SPRING)
+        .on_press(|s: &mut App| s.sidebar_open = !s.sidebar_open)
+        .child(icon(&ic::LAYOUT_LEFT_FULL, 20.0).color(p.icon_muted).absolute(4.0, 4.0).opacity(if open { 1.0 } else { 0.0 }).opacity_motion(SIDEBAR_SPRING))
+        .child(icon(&ic::LAYOUT_LEFT, 20.0).color(p.icon_muted).absolute(4.0, 4.0).opacity(if open { 0.0 } else { 1.0 }).opacity_motion(SIDEBAR_SPRING))
+}
+
+/// Room the session header keeps for the collapsed toggle.
+fn collapsed_slot(s: &App) -> El {
+    // Beta measures from the header's 10px padding; this header pads 14.
+    el().key("toggle-space").w(if s.sidebar_open { 0.0 } else { COLLAPSED_SLOT - 4.0 }).h(28.0).motion(SIDEBAR_SPRING)
+}
+
+/// Desktop's activity spinner, "Soft Radar": a 5×5 dot matrix whose sweep head steps clockwise
+/// around each square ring, leaving a fading trail (`spinner-variants.ts`), 14px, icon-muted.
+fn activity_ring(p: &Pal) -> El {
+    let mut r = el().key("ring").size(14.0, 14.0);
+    for (k, d) in radar().iter().enumerate() {
+        let mut dot = el()
+            .key(format!("d{k}"))
+            .absolute(d.x, d.y)
+            .size(d.size, d.size)
+            .radius(d.size * 0.24)
+            .fill(p.icon_muted);
+        dot = match d.cycle {
+            Some(c) => dot.cycle(c),
+            None => dot.opacity(d.still),
+        };
+        r = r.child(dot);
+    }
+    r
+}
+
+struct RadarDot {
+    x: f32,
+    y: f32,
+    size: f32,
+    still: f32,
+    cycle: Option<Cycle>,
+}
+
+fn radar() -> &'static [RadarDot] {
+    static DOTS: OnceLock<Vec<RadarDot>> = OnceLock::new();
+    DOTS.get_or_init(|| {
+        const SPAN: i32 = 5;
+        const LOOP: f32 = 1.8;
+        const DIM: f32 = 0.2;
+        const EDGE: f32 = 1.5;
+        let r3 = |v: f32| (v * 1000.0).round() / 1000.0;
+        // Soft Radar's trail from 0.55, sampled every 4% over 48% of the loop.
+        let fade = [1.0, 0.987, 0.934, 0.812, 0.599, 0.384, 0.238, 0.143, 0.081, 0.041, 0.017, 0.004, 0.0];
+        let mut trail: Vec<(f32, f32)> = fade.iter().enumerate().map(|(i, l)| (i as f32 * 4.0, r3(0.55 * l))).collect();
+        trail.push((100.0, 0.0));
+        let level_at = |stops: &[(f32, f32)], pc: f32| -> f32 {
+            let Some(k) = stops.iter().position(|s| s.0 >= pc) else { return stops.last().map_or(0.0, |s| s.1) };
+            if k == 0 {
+                return stops[0].1;
+            }
+            let ((p0, l0), (p1, l1)) = (stops[k - 1], stops[k]);
+            l0 + (l1 - l0) * (pc - p0) / if p1 - p0 == 0.0 { 1.0 } else { p1 - p0 }
+        };
+        let frac = |v: f32| v - v.floor();
+        let cells: Vec<(i32, i32)> = (0..SPAN * SPAN).map(|i| (i % SPAN - SPAN / 2, i / SPAN - SPAN / 2)).collect();
+        let angle = |(gx, gy): (i32, i32)| frac((gx as f32).atan2(-(gy as f32)) / std::f32::consts::TAU);
+        let ring_of = |(gx, gy): (i32, i32)| gx.abs().max(gy.abs());
+        let scale = 14.0 / 16.0;
+        cells
+            .iter()
+            .map(|&c| {
+                let (x, y, size) = ((8.0 + c.0 as f32 * 3.0 - 1.0) * scale, (8.0 + c.1 as f32 * 3.0 - 1.0) * scale, 2.0 * scale);
+                if c == (0, 0) {
+                    // The steady centre glows like the fresh trail.
+                    return RadarDot { x, y, size, still: DIM + (1.0 - DIM) * trail[0].1, cycle: None };
+                }
+                let at = r3(angle(c));
+                let others = cells.iter().filter(|&&o| o != c && o != (0, 0) && ring_of(o) == ring_of(c));
+                let behind = others.clone().map(|&o| r3(frac(at - r3(angle(o))))).fold(1.0f32, f32::min) * 100.0;
+                let ahead = others.map(|&o| r3(frac(r3(angle(o)) - at))).fold(1.0f32, f32::min) * 100.0;
+                // "step": lit while it's the dot nearest the head, then the trail.
+                let off = ahead / 2.0 + EDGE;
+                let on = 100.0 - behind / 2.0;
+                let mut shape = vec![(0.0, 1.0), (ahead / 2.0, 1.0), (off, level_at(&trail, off))];
+                shape.extend(trail.iter().copied().filter(|&(pc, _)| pc > off && pc < 100.0 && pc < on - EDGE));
+                shape.extend([(on - EDGE, 0.0), (on, 1.0), (100.0, 1.0)]);
+                let still = DIM + (1.0 - DIM) * level_at(&shape, frac(0.22 - at) * 100.0);
+                let stops: Vec<(f32, f32)> = shape.iter().map(|&(pc, l)| (pc / 100.0, DIM + (1.0 - DIM) * l)).collect();
+                let stops: &'static [(f32, f32)] = Box::leak(stops.into_boxed_slice());
+                RadarDot { x, y, size, still, cycle: Some(Cycle { period: LOOP, phase: at, stops, still, fps: 30.0 }) }
+            })
+            .collect()
+    })
 }
 
 fn title_of(s: &SessionInfo) -> String {
@@ -369,7 +572,16 @@ fn draft_page(s: &App, p: &Pal) -> El {
         .key("draft")
         .grow(1.0)
         .w_full()
-        .child(row().key("header").h(48.0).pl(14.0).center_y().child(text("New session").font(UI_MED).color(p.text)))
+        .child(
+            row()
+                .key("header")
+                .h(48.0)
+                .pl(14.0)
+                .center_y()
+                .window_drag()
+                .child(collapsed_slot(s))
+                .child(text("New session").font(UI_MED).color(p.text)),
+        )
         .child(
             col()
                 .key("draft-hero")
@@ -441,6 +653,8 @@ fn header(s: &App, p: &Pal, info: Option<&SessionInfo>, t: Option<&Transcript>) 
         .pr(14.0)
         .gap(8.0)
         .center_y()
+        .window_drag()
+        .child(collapsed_slot(s))
         .child(crumbs)
         .child(spacer())
         .child(usage)

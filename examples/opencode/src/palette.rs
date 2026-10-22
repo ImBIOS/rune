@@ -29,6 +29,8 @@ pub struct Pal {
     pub shadow: Color,
     pub success: Color,
     pub danger: Color,
+    pub warning: Color,
+    pub bg_accent: Color,
     pub search_bg: Color,
     pub inline_code_bg: Color,
     pub selection: Color,
@@ -68,6 +70,8 @@ fn build(dark: bool) -> Pal {
         shadow: if dark { c("alpha-dark-30") } else { c("alpha-dark-8") },
         success: c("state-fg-success"),
         danger: c("state-fg-danger"),
+        warning: c("state-fg-warning"),
+        bg_accent: c("background-bg-accent"),
         search_bg: t.alpha(layer2, 0.6),
         // color-mix(in oklch, text-base 8%, transparent)
         inline_code_bg: t.alpha(text, 0.08),

@@ -18,6 +18,7 @@ pub const DEFAULT_SERVER: &str = "http://127.0.0.1:4096";
 
 pub enum Incoming {
     Sessions(Vec<SessionInfo>),
+    Info(SessionInfo),
     Messages { session: String, messages: Vec<Message> },
     Event { ty: String, data: Value },
     Status(String),
@@ -26,6 +27,8 @@ pub enum Incoming {
 pub enum Request {
     Session(String),
     Sessions,
+    /// One session's info (`time.idle`/`time.viewed` after it finishes or someone views it).
+    Info(String),
 }
 
 #[derive(Clone)]
@@ -161,6 +164,10 @@ pub fn connect(server: Server, wake: Waker) -> (Sender<Request>, Receiver<Incomi
                         },
                         Request::Sessions => match sessions(&server) {
                             Ok(list) => send(Incoming::Sessions(list)),
+                            Err(e) => send(Incoming::Status(e)),
+                        },
+                        Request::Info(id) => match server.get(&format!("/api/session/{id}")) {
+                            Ok(v) => send(Incoming::Info(model::parse_session(v.get("data").unwrap_or(&v)))),
                             Err(e) => send(Incoming::Status(e)),
                         },
                     };

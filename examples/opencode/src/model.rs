@@ -92,6 +92,16 @@ pub struct SessionInfo {
     pub updated: i64,
     pub model: ModelRef,
     pub cost: f64,
+    /// When the session last went idle and when someone last viewed it (`time.idle`,
+    /// `time.viewed`): unread while it went idle after the last view.
+    pub idle: Option<i64>,
+    pub viewed: Option<i64>,
+}
+
+impl SessionInfo {
+    pub fn unread(&self) -> bool {
+        self.idle.is_some_and(|i| self.viewed.is_none_or(|v| i > v))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -169,6 +179,8 @@ pub fn parse_session(p: &Value) -> SessionInfo {
         updated: i(&p["time"]["updated"]),
         model: ModelRef::parse(&p["model"]),
         cost: p["cost"].as_f64().unwrap_or(0.0),
+        idle: p["time"]["idle"].as_i64(),
+        viewed: p["time"]["viewed"].as_i64(),
     }
 }
 

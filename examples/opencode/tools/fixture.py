@@ -68,14 +68,41 @@ main = session("lumen", "Fix flaky reconnect in the event stream", 1 * MIN, cost
 review = session("lumen", "Review the reconnect change", 4 * MIN, cost=0.31, tokens=22_000, parent=main)
 stale = session("lumen", "Sidebar shows stale session titles", 35 * MIN)
 shortcuts = session("lumen", "Add keyboard shortcuts to the command palette", 3 * HOUR)
-session("lumen", "Profile scroll jank in long transcripts", 27 * HOUR)
-session("harbor", "Migrate config loader to the new schema", 40 * MIN)
-session("harbor", "Retry uploads after a dropped connection", 5 * HOUR)
-session("tidepool", "Explain the tile cache eviction policy", 3 * HOUR)
+jank = session("lumen", "Profile scroll jank in long transcripts", 27 * HOUR)
+migrate = session("harbor", "Migrate config loader to the new schema", 40 * MIN)
+retry = session("harbor", "Retry uploads after a dropped connection", 5 * HOUR)
+tiles = session("tidepool", "Explain the tile cache eviction policy", 3 * HOUR)
 session("tidepool", "Write a benchmark for the merge step", 2 * DAY)
-session("quill", "Fix footnote numbering in exported PDFs", 26 * HOUR)
+footnotes = session("quill", "Fix footnote numbering in exported PDFs", 26 * HOUR)
 session("atlas-cli", "Add --json output to the status command", 3 * DAY)
 session("kiln", "Upgrade the build to the 2026 toolchain", 6 * DAY)
+
+# Read state (`time.idle` after `time.viewed` is unread) and the pinned tabs Desktop keeps client-side.
+by_id = {x["id"]: x for x in sessions}
+
+
+def read_state(sid, idle, viewed=None):
+    by_id[sid]["time"]["idle"] = idle
+    if viewed is not None:
+        by_id[sid]["time"]["viewed"] = viewed
+
+
+read_state(main, NOW - 1 * MIN, NOW - 1 * MIN)
+read_state(stale, NOW - 35 * MIN, NOW - 30 * MIN)
+read_state(shortcuts, NOW - 3 * HOUR, NOW - 4 * HOUR)
+read_state(retry, NOW - 5 * HOUR)
+read_state(tiles, NOW - 3 * HOUR)
+read_state(footnotes, NOW - 26 * HOUR, NOW - 26 * HOUR)
+read_state(jank, NOW - 27 * HOUR, NOW - 27 * HOUR)
+tabs = [main, stale, migrate, shortcuts, tiles, footnotes, retry, jank]
+running = [migrate]
+requests = [{"sessionID": tiles, "id": "per_fx0001"}]
+# The "status" scene: a tab starts running, a request is answered, a run finishes.
+status_events = [
+    {"t": 0.5, "type": "session.execution.started", "data": {"sessionID": shortcuts}},
+    {"t": 1.5, "type": "permission.replied", "data": {"sessionID": tiles, "requestID": "per_fx0001", "reply": "once"}},
+    {"t": 2.5, "type": "session.execution.succeeded", "data": {"sessionID": migrate}},
+]
 
 mid = [0]
 
@@ -269,6 +296,7 @@ def ev(ty, **data):
     events.append({"t": round(t, 3), "type": ty, "data": {"sessionID": main, "assistantMessageID": reply_id, **data}})
 
 
+ev("session.execution.started")
 ev("session.step.started", agent="build", model=MODEL, started=NOW)
 t += 0.35
 ev("session.reasoning.started", ordinal=0)
@@ -307,11 +335,13 @@ t += 0.2
 ev("session.text.ended", ordinal=2, text=reply_text)
 t += 0.1
 ev("session.step.ended", finish="stop", cost=0.18, tokens={"input": 6, "output": 540, "reasoning": 120, "cache": {"read": 63_200, "write": 900}})
+ev("session.execution.succeeded")
 
 # A short reply for the mock send path ($MSG is replaced per send).
 reply = []
 t = 0.5
 for ty, data in [
+    ("session.execution.started", {}),
     ("session.step.started", {"agent": "build", "model": MODEL}),
     ("session.text.started", {"ordinal": 0}),
 ]:
@@ -322,6 +352,7 @@ for w in "Got it. I'll take a look and report back with what I find.".split(" ")
     reply.append({"t": round(t, 3), "type": "session.text.delta", "data": {"ordinal": 0, "delta": w + " "}})
 t += 0.2
 reply.append({"t": round(t, 3), "type": "session.step.ended", "data": {"finish": "stop", "cost": 0.01}})
+reply.append({"t": round(t + 0.05, 3), "type": "session.execution.succeeded", "data": {}})
 
 json.dump(
     {
@@ -330,6 +361,10 @@ json.dump(
         "sessions": sorted(sessions, key=lambda s: -s["time"]["updated"]),
         "messages": {main: transcript, review: review_msgs, stale: stale_msgs, shortcuts: shortcut_msgs},
         "open": main,
+        "tabs": tabs,
+        "running": running,
+        "requests": requests,
+        "status_events": status_events,
         "stream": {"session": main, "events": events},
         "reply": reply,
     },

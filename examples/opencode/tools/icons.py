@@ -11,6 +11,7 @@ NAMES = [
     "magnifying-glass", "edit", "folder", "chevron-down", "chevron-right", "settings-gear", "help",
     "arrow-up", "outline-dots", "branch", "brain", "subagent", "checklist", "console", "code-lines",
     "file-tree", "stop", "plus", "status", "sidebar", "outline-worktree", "check-small", "home", "outline-copy",
+    "grid-plus", "layout-left", "layout-left-full", "xmark-small",
 ]
 
 root = Path(sys.argv[1])
