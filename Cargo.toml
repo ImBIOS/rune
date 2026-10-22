@@ -12,6 +12,7 @@ members = [
     "examples/kit-gallery",
     "examples/background",
     "examples/live-values",
+    "examples/shapes",
 ]
 
 [workspace.package]

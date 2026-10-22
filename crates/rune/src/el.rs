@@ -9,6 +9,7 @@ use taffy::prelude::*;
 use crate::color::Color;
 use crate::edit::TextEdit;
 use crate::growth::{GROWTH, StreamEdge, edge};
+use crate::shape::Shape;
 use crate::text::{Icon, Span};
 use crate::tok::TextStyle;
 
@@ -232,6 +233,8 @@ pub struct Visual {
     /// Vertical linear gradient (top, bottom) painted over the fill, under hover/press overlays.
     pub gradient: Option<[Color; 2]>,
     pub outline: Option<Outline>,
+    /// Vector strokes and fills in the element's own points, over the fill.
+    pub shape: Option<Rc<Shape>>,
 }
 
 impl Default for Visual {
@@ -249,6 +252,7 @@ impl Default for Visual {
             icon: None,
             gradient: None,
             outline: None,
+            shape: None,
         }
     }
 }
@@ -358,6 +362,13 @@ pub fn icon(i: &'static Icon, size: f32) -> El {
     let mut e = base(FlexDirection::Row).size(size, size);
     e.role = "icon";
     e.vis.icon = Some((i, Color::WHITE));
+    e
+}
+
+/// An element that paints `shape`; size it like any element.
+pub fn canvas(shape: Shape) -> El {
+    let mut e = base(FlexDirection::Row).shape(shape);
+    e.role = "image";
     e
 }
 
@@ -658,6 +669,12 @@ impl El {
     /// A vertical gradient from `top` to `bottom` painted over the fill (CSS `linear-gradient(180deg, ..)`).
     pub fn gradient(mut self, top: Color, bottom: Color) -> Self {
         self.vis.gradient = Some([top, bottom]);
+        self
+    }
+    /// Paints `shape` (strokes and fills in this element's points, origin top-left) over the
+    /// fill and under any text. It does not affect layout or hit testing.
+    pub fn shape(mut self, shape: Shape) -> Self {
+        self.vis.shape = (!shape.is_empty()).then(|| Rc::new(shape));
         self
     }
     /// A ring `offset` points outside the border box (CSS `outline` + `outline-offset`).

@@ -27,7 +27,8 @@ use crate::edit::{EditOutcome, Ime, KeyEvent};
 use crate::el::{Align, Drag, DragFn, El, GrowthSpec, InputSpec, Phase, PressFn, ScrollSpec, Shell, TextSpec, Tx, Visual};
 use crate::growth::{GrowTrack, SUBSTEP};
 use crate::flight::{TextFlight, transformed};
-use crate::render::{Instance, KIND_GLYPH, KIND_GRADIENT, KIND_INSET, KIND_RECT, KIND_SHADOW, NO_CLIP};
+use crate::render::{Instance, KIND_GLYPH, KIND_GRADIENT, KIND_INSET, KIND_RECT, KIND_SEGMENT, KIND_SHADOW, KIND_TRIANGLE, NO_CLIP};
+use crate::shape::{LineCap, Op, Shape};
 use crate::text::{Deco, GlyphQuad, Ink, TextSystem, layout_height};
 use crate::tok::motion;
 
@@ -2016,6 +2017,9 @@ impl<S: 'static> Runtime<S> {
                         });
                     }
                 }
+                if let Some(shape) = &n.vis.shape {
+                    push_shape(&mut self.instances, shape, [r[0], r[1]], k_px, o, clip, fade);
+                }
                 if let Some((ic, c)) = n.vis.icon {
                     let color = self.color(n.id, P_TEXT, c);
                     let px = (w.min(h)).round().max(1.0) as u32;
@@ -2394,6 +2398,60 @@ fn anchor_position(a: &crate::el::Anchor, t: [f32; 4], size: (f32, f32), vp: (f3
     // Along the main axis only keep the start edge inside; a long list may run off the far end.
     if vertical { y = y.max(margin) } else { x = x.max(margin) }
     (x, y)
+}
+
+/// Instances for a vector shape whose origin sits at `origin` (device px), `k` device px per point.
+fn push_shape(out: &mut Vec<Instance>, shape: &Shape, origin: [f32; 2], k: f32, opacity: f32, clip: [f32; 4], fade: [f32; 4]) {
+    let at = |p: [f32; 2]| [origin[0] + p[0] * k, origin[1] + p[1] * k];
+    for op in &shape.ops {
+        match op {
+            Op::Stroke { points, closed, width, cap, color } => {
+                let fill = color.premul(opacity);
+                if fill[3] <= 0.0005 {
+                    continue;
+                }
+                let hw = width * k * 0.5;
+                let pad = hw.max(0.5) + 1.0;
+                let n = points.len();
+                let count = if *closed { n } else { n - 1 };
+                for i in 0..count {
+                    let (a, b) = (at(points[i]), at(points[(i + 1) % n]));
+                    let (x0, y0) = (a[0].min(b[0]) - pad, a[1].min(b[1]) - pad);
+                    out.push(Instance {
+                        rect: [x0, y0, a[0].max(b[0]) + pad - x0, a[1].max(b[1]) + pad - y0],
+                        radii: [a[0], a[1], b[0], b[1]],
+                        fill,
+                        border: [0.0; 4],
+                        params: [hw, KIND_SEGMENT, if *cap == LineCap::Round { 1.0 } else { 0.0 }, 1.0],
+                        uv: [0.0; 4],
+                        clip,
+                        fade,
+                    });
+                }
+            }
+            Op::Fill { points, color } => {
+                let fill = color.premul(opacity);
+                if fill[3] <= 0.0005 {
+                    continue;
+                }
+                for ([ia, ib, ic], aa) in crate::shape::triangulate(points) {
+                    let (a, b, c) = (at(points[ia]), at(points[ib]), at(points[ic]));
+                    let (x0, y0) = (a[0].min(b[0]).min(c[0]), a[1].min(b[1]).min(c[1]));
+                    let (x1, y1) = (a[0].max(b[0]).max(c[0]), a[1].max(b[1]).max(c[1]));
+                    out.push(Instance {
+                        rect: [x0, y0, x1 - x0, y1 - y0],
+                        radii: [a[0], a[1], b[0], b[1]],
+                        fill,
+                        border: [0.0; 4],
+                        params: [aa as f32, KIND_TRIANGLE, 0.0, 1.0],
+                        uv: [c[0], c[1], 0.0, 0.0],
+                        clip,
+                        fade,
+                    });
+                }
+            }
+        }
+    }
 }
 
 fn rect_inst(rect: [f32; 4], fill: [f32; 4], radius: f32, clip: [f32; 4], fade: [f32; 4]) -> Instance {
