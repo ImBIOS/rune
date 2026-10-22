@@ -167,28 +167,28 @@ app.run();
 
 ### Compact tray-controlled windows
 
-Use the same `WindowOptions` with `App::run` or `WindowSpec`. Existing defaults
+Use `WindowOptions` on a `WindowSpec`. Existing single-window defaults
 remain resizable, decorated, with a 420×400 minimum unless `AppSpec::min_size` is set.
 
 ```rust
 spec.size = (320.0, 160.0);
-let app = rune::App::new(spec)
-    .window_options(rune::WindowOptions {
+let app = rune::App::new(spec).windowless().keep_running();
+let tray = app.handle();
+// Any thread, including a tray callback:
+tray.set_position((-320, 80)); // physical desktop pixels
+tray.show();                  // no focus request; recreates a destroyed window
+tray.focus();                 // a separate, explicit activation request
+// tray.hide() keeps state without invoking on_close; tray.open() shows and activates.
+rune::run_windows_with(rune::RunOptions { accessory: true }, move |_| {
+    vec![rune::WindowSpec::from_app("call", app).options(rune::WindowOptions {
         min_size: Some((320.0, 160.0)),
         max_size: Some((320.0, 160.0)),
         resizable: false,
         borderless: true,
+        always_on_top: true,
         ..Default::default()
-    })
-    .keep_running(); // close hides; state survives
-let tray = app.handle();
-// Any thread, including a tray callback:
-tray.set_position((-320, 80)); // physical desktop pixels
-tray.set_always_on_top(true);
-tray.show();                  // no focus request; recreates a destroyed window
-tray.focus();                 // separate focus request; does not force Mac activation
-// tray.hide() keeps state without invoking on_close; tray.open() shows and activates.
-app.run();
+    })]
+});
 ```
 
 Size constraints use logical points. Placement and topmost work through the native
@@ -199,6 +199,9 @@ also restores them. On macOS, no-focus show uses `orderFront`, rather than winit
 `makeKeyAndOrderFront`. Window-manager focus policy still applies. `WindowHandle`
 also provides show/hide/focus, placement and topmost control on the event thread.
 Rooms owns its tray; Rune supplies the window lifetime and handles.
+`RunOptions::accessory` applies the macOS process policy before the event loop is
+created: no Dock icon/default menu and no activation at launch. Other platforms
+ignore it; `run_windows` keeps its regular-launch default.
 
 ## High-frequency values
 

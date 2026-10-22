@@ -1,6 +1,13 @@
 //! Window descriptions shared by the native shell and deterministic headless selection.
 use crate::{App, AppSpec};
 
+/// Process-level settings applied once, before constructing the native event loop.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RunOptions {
+    /// macOS: no Dock icon/default menu and no activation at launch. Ignored elsewhere.
+    pub accessory: bool,
+}
+
 /// A display in desktop physical-pixel coordinates (origins may be negative).
 /// Headless runs provide one deterministic virtual display.
 #[derive(Clone, Debug, PartialEq)]
@@ -88,10 +95,10 @@ impl<S> WindowSpec<S> {
     /// Preserve AppHandle, windowless, keep-running and GPU-release behavior for this window.
     /// Closing a default window removes only it; quitting any app exits the whole event loop.
     /// The outer run_windows command line controls tooling; App::args and the process-level
-    /// App::accessory launch policy are not used here. AppHandle::set_dock_icon remains global.
+    /// App::accessory launch policy are not used here; use run_windows_with(RunOptions, factory).
+    /// AppHandle::set_dock_icon remains global.
     pub fn from_app(key: impl Into<String>, app: App<S>) -> Self {
-        let options = app.window_options.clone();
-        Self { key: key.into(), app, options, on_created: None }
+        Self { key: key.into(), app, options: WindowOptions::default(), on_created: None }
     }
     pub fn options(mut self, options: WindowOptions) -> Self { self.options = options; self }
     pub fn state(mut self, state: S) -> Self { self.app = self.app.init(move || state); self }

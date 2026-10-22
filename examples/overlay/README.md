@@ -32,6 +32,7 @@ close, and the last host ends the loop. Any `AppHandle::quit` or `Tx::quit` quit
 whole loop. The outer tooling arguments apply to all specs; `App::args` is ignored
 inside `run_windows`. `App::accessory` is a process launch option for `App::run`,
 not a per-window option; `run_windows` starts with regular activation policy.
+Use `run_windows_with(RunOptions { accessory: true }, factory)` for a menu-bar app.
 An AppHandle's `set_dock_icon` still changes the whole process at runtime.
 
 ```sh
