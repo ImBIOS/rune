@@ -1,0 +1,876 @@
+{
+  "isolated": {
+    "results": {
+      "stream": {
+        "before": {
+          "median": {
+            "gpu_ms": 13.2,
+            "first_ms": 4.98,
+            "mean_ms": 0.408,
+            "p50_ms": 0.313,
+            "p95_ms": 0.665,
+            "max_ms": 11.512,
+            "instances": 1126.0
+          },
+          "mad": {
+            "gpu_ms": 0.8999999999999986,
+            "first_ms": 0.5499999999999998,
+            "mean_ms": 0.12999999999999995,
+            "p50_ms": 0.01100000000000001,
+            "p95_ms": 0.17100000000000004,
+            "max_ms": 6.460000000000001,
+            "instances": 0.0
+          },
+          "runs": [
+            {
+              "gpu_ms": 12.3,
+              "first_ms": 3.94,
+              "mean_ms": 0.339,
+              "p50_ms": 0.313,
+              "p95_ms": 0.66,
+              "max_ms": 3.937,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 13.2,
+              "first_ms": 4.98,
+              "mean_ms": 0.408,
+              "p50_ms": 0.317,
+              "p95_ms": 0.665,
+              "max_ms": 11.512,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 15.7,
+              "first_ms": 4.34,
+              "mean_ms": 0.271,
+              "p50_ms": 0.269,
+              "p95_ms": 0.481,
+              "max_ms": 4.345,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 13.1,
+              "first_ms": 5.05,
+              "mean_ms": 0.278,
+              "p50_ms": 0.271,
+              "p95_ms": 0.494,
+              "max_ms": 5.052,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 14.2,
+              "first_ms": 5.18,
+              "mean_ms": 0.551,
+              "p50_ms": 0.319,
+              "p95_ms": 1.229,
+              "max_ms": 14.396,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 13.0,
+              "first_ms": 4.41,
+              "mean_ms": 0.463,
+              "p50_ms": 0.302,
+              "p95_ms": 0.692,
+              "max_ms": 13.99,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 17.7,
+              "first_ms": 5.53,
+              "mean_ms": 0.698,
+              "p50_ms": 0.354,
+              "p95_ms": 1.29,
+              "max_ms": 25.165,
+              "instances": 1126.0
+            }
+          ]
+        },
+        "after": {
+          "median": {
+            "gpu_ms": 14.8,
+            "first_ms": 5.39,
+            "mean_ms": 0.32,
+            "p50_ms": 0.295,
+            "p95_ms": 0.604,
+            "max_ms": 6.606,
+            "instances": 1126.0
+          },
+          "mad": {
+            "gpu_ms": 1.3000000000000007,
+            "first_ms": 0.8799999999999999,
+            "mean_ms": 0.043999999999999984,
+            "p50_ms": 0.019999999999999962,
+            "p95_ms": 0.11499999999999999,
+            "max_ms": 2.093,
+            "instances": 0.0
+          },
+          "runs": [
+            {
+              "gpu_ms": 13.8,
+              "first_ms": 4.19,
+              "mean_ms": 0.32,
+              "p50_ms": 0.304,
+              "p95_ms": 0.604,
+              "max_ms": 4.194,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 16.9,
+              "first_ms": 7.46,
+              "mean_ms": 0.302,
+              "p50_ms": 0.284,
+              "p95_ms": 0.56,
+              "max_ms": 7.463,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 14.3,
+              "first_ms": 4.73,
+              "mean_ms": 0.276,
+              "p50_ms": 0.275,
+              "p95_ms": 0.489,
+              "max_ms": 4.726,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 13.5,
+              "first_ms": 4.51,
+              "mean_ms": 0.272,
+              "p50_ms": 0.27,
+              "p95_ms": 0.476,
+              "max_ms": 4.513,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 14.8,
+              "first_ms": 5.39,
+              "mean_ms": 0.352,
+              "p50_ms": 0.295,
+              "p95_ms": 0.61,
+              "max_ms": 6.606,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 16.4,
+              "first_ms": 6.41,
+              "mean_ms": 0.578,
+              "p50_ms": 0.404,
+              "p95_ms": 1.014,
+              "max_ms": 12.501,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 16.8,
+              "first_ms": 5.72,
+              "mean_ms": 0.754,
+              "p50_ms": 0.376,
+              "p95_ms": 2.448,
+              "max_ms": 16.74,
+              "instances": 1126.0
+            }
+          ]
+        }
+      },
+      "long-stream": {
+        "before": {
+          "median": {
+            "gpu_ms": 14.2,
+            "first_ms": 9.7,
+            "mean_ms": 0.735,
+            "p50_ms": 0.327,
+            "p95_ms": 3.891,
+            "max_ms": 10.968,
+            "instances": 1126.0
+          },
+          "mad": {
+            "gpu_ms": 0.8999999999999986,
+            "first_ms": 0.14999999999999858,
+            "mean_ms": 0.050999999999999934,
+            "p50_ms": 0.029000000000000026,
+            "p95_ms": 0.2030000000000003,
+            "max_ms": 1.3930000000000007,
+            "instances": 0.0
+          },
+          "runs": [
+            {
+              "gpu_ms": 14.2,
+              "first_ms": 9.58,
+              "mean_ms": 0.773,
+              "p50_ms": 0.362,
+              "p95_ms": 3.891,
+              "max_ms": 9.575,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 19.9,
+              "first_ms": 9.79,
+              "mean_ms": 0.684,
+              "p50_ms": 0.298,
+              "p95_ms": 4.313,
+              "max_ms": 12.835,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 13.3,
+              "first_ms": 9.7,
+              "mean_ms": 0.496,
+              "p50_ms": 0.144,
+              "p95_ms": 3.615,
+              "max_ms": 9.697,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 18.1,
+              "first_ms": 11.22,
+              "mean_ms": 0.497,
+              "p50_ms": 0.147,
+              "p95_ms": 3.576,
+              "max_ms": 11.224,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 14.4,
+              "first_ms": 9.41,
+              "mean_ms": 0.744,
+              "p50_ms": 0.334,
+              "p95_ms": 3.851,
+              "max_ms": 9.41,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 13.9,
+              "first_ms": 9.91,
+              "mean_ms": 0.735,
+              "p50_ms": 0.349,
+              "p95_ms": 4.044,
+              "max_ms": 10.968,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 13.2,
+              "first_ms": 9.55,
+              "mean_ms": 0.869,
+              "p50_ms": 0.327,
+              "p95_ms": 4.094,
+              "max_ms": 22.655,
+              "instances": 1126.0
+            }
+          ]
+        },
+        "after": {
+          "median": {
+            "gpu_ms": 14.2,
+            "first_ms": 10.4,
+            "mean_ms": 0.674,
+            "p50_ms": 0.311,
+            "p95_ms": 3.695,
+            "max_ms": 11.397,
+            "instances": 1126.0
+          },
+          "mad": {
+            "gpu_ms": 0.40000000000000036,
+            "first_ms": 1.0500000000000007,
+            "mean_ms": 0.051999999999999935,
+            "p50_ms": 0.033999999999999975,
+            "p95_ms": 0.2410000000000001,
+            "max_ms": 1.357000000000001,
+            "instances": 0.0
+          },
+          "runs": [
+            {
+              "gpu_ms": 19.4,
+              "first_ms": 11.47,
+              "mean_ms": 0.726,
+              "p50_ms": 0.345,
+              "p95_ms": 3.936,
+              "max_ms": 11.469,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 20.7,
+              "first_ms": 12.85,
+              "mean_ms": 0.524,
+              "p50_ms": 0.173,
+              "p95_ms": 3.533,
+              "max_ms": 12.851,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 14.1,
+              "first_ms": 10.4,
+              "mean_ms": 0.495,
+              "p50_ms": 0.148,
+              "p95_ms": 3.614,
+              "max_ms": 10.397,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 12.9,
+              "first_ms": 8.8,
+              "mean_ms": 0.465,
+              "p50_ms": 0.137,
+              "p95_ms": 3.322,
+              "max_ms": 8.8,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 14.2,
+              "first_ms": 10.04,
+              "mean_ms": 0.722,
+              "p50_ms": 0.325,
+              "p95_ms": 4.05,
+              "max_ms": 10.04,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 14.1,
+              "first_ms": 11.4,
+              "mean_ms": 0.724,
+              "p50_ms": 0.344,
+              "p95_ms": 4.125,
+              "max_ms": 11.397,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 14.6,
+              "first_ms": 9.35,
+              "mean_ms": 0.674,
+              "p50_ms": 0.311,
+              "p95_ms": 3.695,
+              "max_ms": 28.508,
+              "instances": 1126.0
+            }
+          ]
+        }
+      }
+    }
+  },
+  "rebase_live": {
+    "results": {
+      "stream": {
+        "before": {
+          "median": {
+            "gpu_ms": 11.6,
+            "first_ms": 4.07,
+            "mean_ms": 0.243,
+            "p50_ms": 0.248,
+            "p95_ms": 0.423,
+            "max_ms": 4.071,
+            "instances": 1126.0
+          },
+          "mad": {
+            "gpu_ms": 0.40000000000000036,
+            "first_ms": 0.07000000000000028,
+            "mean_ms": 0.0040000000000000036,
+            "p50_ms": 0.0020000000000000018,
+            "p95_ms": 0.01799999999999996,
+            "max_ms": 0.07599999999999962,
+            "instances": 0.0
+          },
+          "runs": [
+            {
+              "gpu_ms": 11.5,
+              "first_ms": 4.08,
+              "mean_ms": 0.236,
+              "p50_ms": 0.246,
+              "p95_ms": 0.379,
+              "max_ms": 4.076,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 11.4,
+              "first_ms": 3.9,
+              "mean_ms": 0.247,
+              "p50_ms": 0.253,
+              "p95_ms": 0.423,
+              "max_ms": 3.903,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 11.2,
+              "first_ms": 4.17,
+              "mean_ms": 0.236,
+              "p50_ms": 0.246,
+              "p95_ms": 0.398,
+              "max_ms": 4.171,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 12.2,
+              "first_ms": 4.05,
+              "mean_ms": 0.245,
+              "p50_ms": 0.252,
+              "p95_ms": 0.405,
+              "max_ms": 4.049,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 12.4,
+              "first_ms": 4.0,
+              "mean_ms": 0.241,
+              "p50_ms": 0.248,
+              "p95_ms": 0.434,
+              "max_ms": 3.995,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 12.2,
+              "first_ms": 4.07,
+              "mean_ms": 0.243,
+              "p50_ms": 0.246,
+              "p95_ms": 0.431,
+              "max_ms": 4.071,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 11.6,
+              "first_ms": 4.18,
+              "mean_ms": 0.256,
+              "p50_ms": 0.255,
+              "p95_ms": 0.45,
+              "max_ms": 4.176,
+              "instances": 1126.0
+            }
+          ]
+        },
+        "after": {
+          "median": {
+            "gpu_ms": 11.8,
+            "first_ms": 4.09,
+            "mean_ms": 0.239,
+            "p50_ms": 0.248,
+            "p95_ms": 0.407,
+            "max_ms": 4.087,
+            "instances": 1126.0
+          },
+          "mad": {
+            "gpu_ms": 0.3000000000000007,
+            "first_ms": 0.08999999999999986,
+            "mean_ms": 0.0010000000000000009,
+            "p50_ms": 0.0020000000000000018,
+            "p95_ms": 0.020999999999999963,
+            "max_ms": 0.08699999999999974,
+            "instances": 0.0
+          },
+          "runs": [
+            {
+              "gpu_ms": 12.1,
+              "first_ms": 4.09,
+              "mean_ms": 0.239,
+              "p50_ms": 0.246,
+              "p95_ms": 0.41,
+              "max_ms": 4.087,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 11.4,
+              "first_ms": 3.97,
+              "mean_ms": 0.238,
+              "p50_ms": 0.248,
+              "p95_ms": 0.407,
+              "max_ms": 3.97,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 11.5,
+              "first_ms": 4.0,
+              "mean_ms": 0.238,
+              "p50_ms": 0.25,
+              "p95_ms": 0.386,
+              "max_ms": 4.0,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 11.8,
+              "first_ms": 4.04,
+              "mean_ms": 0.234,
+              "p50_ms": 0.245,
+              "p95_ms": 0.385,
+              "max_ms": 4.042,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 11.7,
+              "first_ms": 4.11,
+              "mean_ms": 0.239,
+              "p50_ms": 0.246,
+              "p95_ms": 0.399,
+              "max_ms": 4.109,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 12.6,
+              "first_ms": 4.51,
+              "mean_ms": 0.257,
+              "p50_ms": 0.252,
+              "p95_ms": 0.464,
+              "max_ms": 4.513,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 14.3,
+              "first_ms": 4.65,
+              "mean_ms": 0.256,
+              "p50_ms": 0.254,
+              "p95_ms": 0.458,
+              "max_ms": 4.651,
+              "instances": 1126.0
+            }
+          ]
+        }
+      },
+      "long-stream": {
+        "before": {
+          "median": {
+            "gpu_ms": 12.2,
+            "first_ms": 9.06,
+            "mean_ms": 0.423,
+            "p50_ms": 0.126,
+            "p95_ms": 2.88,
+            "max_ms": 9.058,
+            "instances": 1126.0
+          },
+          "mad": {
+            "gpu_ms": 0.40000000000000036,
+            "first_ms": 0.75,
+            "mean_ms": 0.013000000000000012,
+            "p50_ms": 0.0040000000000000036,
+            "p95_ms": 0.040999999999999925,
+            "max_ms": 0.7509999999999994,
+            "instances": 0.0
+          },
+          "runs": [
+            {
+              "gpu_ms": 12.3,
+              "first_ms": 9.06,
+              "mean_ms": 0.406,
+              "p50_ms": 0.121,
+              "p95_ms": 2.839,
+              "max_ms": 9.058,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 12.2,
+              "first_ms": 7.92,
+              "mean_ms": 0.418,
+              "p50_ms": 0.126,
+              "p95_ms": 2.885,
+              "max_ms": 7.915,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 11.6,
+              "first_ms": 9.81,
+              "mean_ms": 0.428,
+              "p50_ms": 0.13,
+              "p95_ms": 2.917,
+              "max_ms": 9.809,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 11.8,
+              "first_ms": 8.5,
+              "mean_ms": 0.436,
+              "p50_ms": 0.13,
+              "p95_ms": 2.88,
+              "max_ms": 8.499,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 12.6,
+              "first_ms": 9.19,
+              "mean_ms": 0.472,
+              "p50_ms": 0.145,
+              "p95_ms": 3.238,
+              "max_ms": 9.189,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 14.0,
+              "first_ms": 9.89,
+              "mean_ms": 0.423,
+              "p50_ms": 0.124,
+              "p95_ms": 2.783,
+              "max_ms": 9.886,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 11.6,
+              "first_ms": 8.28,
+              "mean_ms": 0.398,
+              "p50_ms": 0.121,
+              "p95_ms": 2.782,
+              "max_ms": 8.282,
+              "instances": 1126.0
+            }
+          ]
+        },
+        "after": {
+          "median": {
+            "gpu_ms": 11.8,
+            "first_ms": 6.31,
+            "mean_ms": 0.371,
+            "p50_ms": 0.148,
+            "p95_ms": 2.272,
+            "max_ms": 6.313,
+            "instances": 1126.0
+          },
+          "mad": {
+            "gpu_ms": 0.5,
+            "first_ms": 0.1200000000000001,
+            "mean_ms": 0.014000000000000012,
+            "p50_ms": 0.006000000000000005,
+            "p95_ms": 0.16000000000000014,
+            "max_ms": 0.11699999999999999,
+            "instances": 0.0
+          },
+          "runs": [
+            {
+              "gpu_ms": 11.5,
+              "first_ms": 6.43,
+              "mean_ms": 0.366,
+              "p50_ms": 0.15,
+              "p95_ms": 2.188,
+              "max_ms": 6.43,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 11.8,
+              "first_ms": 6.33,
+              "mean_ms": 0.376,
+              "p50_ms": 0.142,
+              "p95_ms": 2.32,
+              "max_ms": 6.328,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 11.3,
+              "first_ms": 6.3,
+              "mean_ms": 0.357,
+              "p50_ms": 0.148,
+              "p95_ms": 2.091,
+              "max_ms": 6.301,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 11.9,
+              "first_ms": 6.17,
+              "mean_ms": 0.404,
+              "p50_ms": 0.156,
+              "p95_ms": 2.432,
+              "max_ms": 6.171,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 42.5,
+              "first_ms": 8.49,
+              "mean_ms": 0.449,
+              "p50_ms": 0.173,
+              "p95_ms": 2.662,
+              "max_ms": 8.488,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 10.9,
+              "first_ms": 5.94,
+              "mean_ms": 0.371,
+              "p50_ms": 0.14,
+              "p95_ms": 2.272,
+              "max_ms": 5.944,
+              "instances": 1126.0
+            },
+            {
+              "gpu_ms": 12.4,
+              "first_ms": 6.31,
+              "mean_ms": 0.351,
+              "p50_ms": 0.147,
+              "p95_ms": 2.082,
+              "max_ms": 6.313,
+              "instances": 1126.0
+            }
+          ]
+        }
+      }
+    },
+    "binaries": {
+      "before": "c2bb31da0a331b0fc68e9edbd228ac7df1e42ff3058851d32655d49f4f0cdb44",
+      "after": "8faaceaeaa6137c5664e730a3d01107002d410fd11eb15e674b73d6da2b72fe9"
+    }
+  },
+  "timeline_hold": {
+    "results": {
+      "stream": {
+        "median": {
+          "gpu_ms": 11.4,
+          "first_ms": 4.02,
+          "mean_ms": 0.237,
+          "p50_ms": 0.249,
+          "p95_ms": 0.402,
+          "max_ms": 4.021,
+          "instances": 1126.0
+        },
+        "mad": {
+          "gpu_ms": 0.20000000000000107,
+          "first_ms": 0.10999999999999943,
+          "mean_ms": 0.0,
+          "p50_ms": 0.0010000000000000009,
+          "p95_ms": 0.009000000000000008,
+          "max_ms": 0.11499999999999977,
+          "instances": 0.0
+        },
+        "runs": [
+          {
+            "gpu_ms": 11.2,
+            "first_ms": 4.21,
+            "mean_ms": 0.294,
+            "p50_ms": 0.275,
+            "p95_ms": 0.541,
+            "max_ms": 4.215,
+            "instances": 1126.0
+          },
+          {
+            "gpu_ms": 11.5,
+            "first_ms": 4.49,
+            "mean_ms": 0.243,
+            "p50_ms": 0.25,
+            "p95_ms": 0.425,
+            "max_ms": 4.488,
+            "instances": 1126.0
+          },
+          {
+            "gpu_ms": 11.4,
+            "first_ms": 4.02,
+            "mean_ms": 0.237,
+            "p50_ms": 0.249,
+            "p95_ms": 0.393,
+            "max_ms": 4.021,
+            "instances": 1126.0
+          },
+          {
+            "gpu_ms": 11.0,
+            "first_ms": 3.94,
+            "mean_ms": 0.237,
+            "p50_ms": 0.249,
+            "p95_ms": 0.382,
+            "max_ms": 3.941,
+            "instances": 1126.0
+          },
+          {
+            "gpu_ms": 11.5,
+            "first_ms": 4.0,
+            "mean_ms": 0.237,
+            "p50_ms": 0.25,
+            "p95_ms": 0.399,
+            "max_ms": 3.998,
+            "instances": 1126.0
+          },
+          {
+            "gpu_ms": 11.8,
+            "first_ms": 4.18,
+            "mean_ms": 0.237,
+            "p50_ms": 0.247,
+            "p95_ms": 0.402,
+            "max_ms": 4.183,
+            "instances": 1126.0
+          },
+          {
+            "gpu_ms": 10.9,
+            "first_ms": 3.91,
+            "mean_ms": 0.235,
+            "p50_ms": 0.245,
+            "p95_ms": 0.405,
+            "max_ms": 3.906,
+            "instances": 1126.0
+          }
+        ]
+      },
+      "long-stream": {
+        "median": {
+          "gpu_ms": 11.0,
+          "first_ms": 5.92,
+          "mean_ms": 0.347,
+          "p50_ms": 0.147,
+          "p95_ms": 1.969,
+          "max_ms": 5.919,
+          "instances": 1126.0
+        },
+        "mad": {
+          "gpu_ms": 0.09999999999999964,
+          "first_ms": 0.25,
+          "mean_ms": 0.007999999999999952,
+          "p50_ms": 0.0030000000000000027,
+          "p95_ms": 0.020000000000000018,
+          "max_ms": 0.24499999999999922,
+          "instances": 0.0
+        },
+        "runs": [
+          {
+            "gpu_ms": 10.9,
+            "first_ms": 5.67,
+            "mean_ms": 0.339,
+            "p50_ms": 0.147,
+            "p95_ms": 1.978,
+            "max_ms": 5.674,
+            "instances": 1126.0
+          },
+          {
+            "gpu_ms": 10.7,
+            "first_ms": 5.9,
+            "mean_ms": 0.347,
+            "p50_ms": 0.177,
+            "p95_ms": 1.903,
+            "max_ms": 5.896,
+            "instances": 1126.0
+          },
+          {
+            "gpu_ms": 11.0,
+            "first_ms": 5.92,
+            "mean_ms": 0.339,
+            "p50_ms": 0.145,
+            "p95_ms": 1.989,
+            "max_ms": 5.919,
+            "instances": 1126.0
+          },
+          {
+            "gpu_ms": 11.3,
+            "first_ms": 6.69,
+            "mean_ms": 0.336,
+            "p50_ms": 0.15,
+            "p95_ms": 1.892,
+            "max_ms": 6.691,
+            "instances": 1126.0
+          },
+          {
+            "gpu_ms": 13.3,
+            "first_ms": 8.05,
+            "mean_ms": 0.379,
+            "p50_ms": 0.139,
+            "p95_ms": 2.483,
+            "max_ms": 8.048,
+            "instances": 1126.0
+          },
+          {
+            "gpu_ms": 11.1,
+            "first_ms": 5.61,
+            "mean_ms": 0.349,
+            "p50_ms": 0.162,
+            "p95_ms": 1.965,
+            "max_ms": 5.61,
+            "instances": 1126.0
+          },
+          {
+            "gpu_ms": 10.9,
+            "first_ms": 6.11,
+            "mean_ms": 0.348,
+            "p50_ms": 0.146,
+            "p95_ms": 1.969,
+            "max_ms": 6.114,
+            "instances": 1126.0
+          }
+        ]
+      }
+    }
+  }
+}

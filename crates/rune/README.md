@@ -48,11 +48,13 @@ The first runnable piece of Rune: enough framework to draw a small Settings wind
     Translucent strokes blend twice where segments overlap at a joint; fills do not overlap.
   - Every instance has a soft-edge clip (`clip_soft`, `clip_fade`).
   - Colour is premultiplied linear and drawn into an sRGB target, so blending is linear-light. Glyph
-    coverage gets a small exponent that depends on luminance, so dark text isn't thin.
+    coverage uses a CoreText-calibrated luminance/scale exponent.
   - The Retina scale is applied throughout.
-- **Text** (`text.rs`): Parley 0.12 lays out the embedded Inter 4.1 (OFL, `assets/`; no system fonts,
-  so output is deterministic). swash 0.2 rasterises into a 1024² R8 atlas with 4× horizontal subpixel
-  positions and baselines snapped to pixels. This matches Parley's own `swash_render` example.
+- **Text** (`text.rs`): Parley 0.12 lays out embedded Inter 4.1 (OFL, `assets/`). swash 0.2
+  rasterises unhinted, centered, .1-point-emboldened outlines into a 2048² R8 atlas with four
+  horizontal subpixel positions and pixel-snapped baselines. Colors share the same atlas masks.
+  The [CoreText comparison and phase sweep](../../research/23-text-quality.md) measure weight,
+  structural similarity and motion brightness variation at 1×/2×.
 - **Input**: hit-testing on presented rects, pointer capture, hover and press overlays, press on
   release inside the element, and drags with a per-gesture scratch value.
   `.on_secondary_press(|s: &mut App, point, tx| ..)` receives window-point coordinates on
@@ -414,5 +416,5 @@ FileDialogKind::Open, path: Some("/fixture/recording.wav".into()) }])`. Requests
 without a window; wrong request order or exhausted fixtures return an error.
 
 - Group opacity through offscreen layers.
-- Next: a render thread with a command channel, a CoreText side-by-side text diff (S5), Slug for
+- Next: a render thread with a command channel, broader text shaping/optical-size parity (S5), Slug for
   scaled text, the inspector socket, knobs/tunables, and the Scrawl pill (M1).

@@ -93,7 +93,7 @@ impl<'a> Ui<'a> {
         let style = TextStyle::new(size, weight);
         let mut quads = Vec::new();
         self.ts.glyphs(s, style, S, [(x * S).round(), (y * S).round()], &mut quads);
-        let gamma = 0.78 + 0.22 * srgb_encode(color.luminance());
+        let gamma = rune::text::glyph_coverage_exponent(color, S);
         for q in quads {
             self.text.push(Instance {
                 rect: q.rect,

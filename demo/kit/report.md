@@ -1,3 +1,10 @@
+# Historical Storybook comparison
+
+This 178-render report predates the text calibration in
+[research/23](../../research/23-text-quality.md). The twelve committed side-by-sides
+have been refreshed against their existing web references; their current scores
+are in [text/kit-metrics.json](../text/kit-metrics.json). The aggregate below is historical.
+
 | story | scheme | similarity | off (% px) |
 |---|---|---:|---:|
 | components-card--error | light | 99.55 | 1.02 |
