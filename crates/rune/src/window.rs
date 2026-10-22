@@ -802,7 +802,12 @@ impl<S: 'static> AnyHost for Host<S> {
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 if let Some((x, y)) = rt.pointer() {
                     match state {
-                        ElementState::Pressed => rt.pointer_down(x, y),
+                        ElementState::Pressed => {
+                            rt.pointer_down(x, y);
+                            if rt.take_window_drag() {
+                                let _ = l.window.drag_window();
+                            }
+                        }
                         ElementState::Released => rt.pointer_up(x, y),
                     }
                 }

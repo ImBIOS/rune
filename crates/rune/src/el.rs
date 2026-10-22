@@ -282,6 +282,7 @@ pub struct El {
     pub(crate) streaming: bool,
     pub(crate) input: Option<Box<InputSpec>>,
     pub(crate) cursor: Option<Cursor>,
+    pub(crate) window_drag: bool,
 }
 
 fn base(dir: FlexDirection) -> El {
@@ -310,6 +311,7 @@ fn base(dir: FlexDirection) -> El {
         streaming: false,
         input: None,
         cursor: None,
+        window_drag: false,
     }
 }
 
@@ -630,6 +632,12 @@ impl El {
     /// text element) inside this one.
     pub fn cursor(mut self, cursor: Cursor) -> Self {
         self.cursor = Some(cursor);
+        self
+    }
+    /// Pressing this element moves the window, as a title bar does. Hit targets inside it
+    /// (buttons, fields) keep their presses.
+    pub fn window_drag(mut self) -> Self {
+        self.window_drag = true;
         self
     }
     /// Called once when the pointer enters this hit target, not on animation frames.
