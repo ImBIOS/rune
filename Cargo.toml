@@ -13,6 +13,7 @@ members = [
     "examples/background",
     "examples/live-values",
     "examples/shapes",
+    "examples/overlay",
 ]
 
 [workspace.package]

@@ -1,17 +1,16 @@
-//! The prototype shell: winit, one window at a time, a wgpu surface, redraws only while
-//! something animates. Keys, IME and the clipboard route to the runtime; other threads wake it
-//! through an `EventLoopProxy` (live data, `AppHandle`). The runtime outlives the window
-//! (`App`): closing hides or destroys the window and keeps the state, GPU device and renderer.
+//! One event loop, independent window lifetime hosts. App/AppHandle and multi-window
+//! factories share the same input, rendering, activation and close/reopen paths.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak, atomic::{AtomicU32, Ordering}};
 use std::time::Instant;
 
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalPosition, LogicalSize};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime as WIme, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
-use winit::window::{CursorIcon, Theme, Window, WindowId};
+use winit::window::{CursorIcon, Theme, Window, WindowId, WindowLevel};
+use winit::raw_window_handle::HasWindowHandle;
 
 use crate::app::{App, Shared, WindowRequest};
 use crate::edit::{Ime, Key, KeyEvent, Mods};
@@ -19,6 +18,7 @@ use crate::el::{Cursor, Shell, Tx};
 use crate::render::{Gpu, Renderer};
 use crate::runtime::{Env, Runtime, Waker};
 use crate::tooling::{AppSpec, Args, runtime_for};
+use crate::windows::{Display, WindowOptions, WindowSpec};
 
 /// The open window. Fields drop in order: the surface before its window.
 struct Win {
@@ -31,11 +31,130 @@ struct Win {
     visible: bool,
     occluded: bool,
     cursor: Cursor,
+    alpha: Option<crate::surface_alpha::AlphaSurface>,
 }
 
-enum WakeEvent { App, Live }
+enum WakeEvent { App(usize), Live(usize), Visible(usize, bool), Open(usize), Close(usize) }
+
+#[derive(Default)]
+struct NativeWindow {
+    window: Mutex<Weak<Window>>,
+    number: AtomicU32,
+}
+
+/// A window's native reference, refreshed across App close/reopen without owning the window.
+#[derive(Clone)]
+pub struct WindowHandle {
+    native: Arc<NativeWindow>,
+    slot: usize,
+    key: Arc<str>,
+    proxy: EventLoopProxy<WakeEvent>,
+}
+impl WindowHandle {
+    pub fn key(&self) -> &str { &self.key }
+    fn window(&self) -> Result<Arc<Window>, String> {
+        self.native.window.lock().unwrap().upgrade().ok_or_else(|| "window is closed".into())
+    }
+    /// macOS CGWindowID for ScreenCaptureKit exclusion; None before registration or after destruction.
+    pub fn window_number(&self) -> Option<u32> {
+        let _window = self.window().ok()?;
+        let number = self.native.number.load(Ordering::Acquire);
+        (number != 0).then_some(number)
+    }
+    pub fn set_click_through(&self, click_through: bool) -> Result<(), String> {
+        self.window()?.set_cursor_hittest(!click_through).map_err(|e| e.to_string())
+    }
+    pub fn set_always_on_top(&self, on: bool) {
+        if let Ok(window) = self.window() {
+            window.set_window_level(if on { WindowLevel::AlwaysOnTop } else { WindowLevel::Normal });
+        }
+    }
+    pub fn set_visible(&self, visible: bool) { let _ = self.proxy.send_event(WakeEvent::Visible(self.slot, visible)); }
+    /// Open/focus a retained host. A default close destroys its host; use App::keep_running to reopen.
+    pub fn open(&self) { let _ = self.proxy.send_event(WakeEvent::Open(self.slot)); }
+    pub fn close(&self) { let _ = self.proxy.send_event(WakeEvent::Close(self.slot)); }
+    /// Borrow a raw native handle while alive. Platform thread restrictions still apply;
+    /// do not retain an extracted pointer beyond the callback.
+    pub fn with_raw_handle<R>(&self, f: impl for<'a> FnOnce(winit::raw_window_handle::WindowHandle<'a>) -> R) -> Result<R, String> {
+        let window = self.window()?;
+        let handle = window.window_handle().map_err(|e| e.to_string())?;
+        Ok(f(handle))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_window_number(window: &Window) -> Option<u32> {
+    use objc2::rc::Retained;
+    use objc2_app_kit::NSView;
+    use winit::raw_window_handle::RawWindowHandle;
+    let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else { return None };
+    // SAFETY: called on winit's event thread; the live window owns the retained view.
+    unsafe {
+        let view = Retained::retain(handle.ns_view.as_ptr().cast::<NSView>())?;
+        u32::try_from(view.window()?.windowNumber()).ok().filter(|n| *n != 0)
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn native_window_number(_: &Window) -> Option<u32> { None }
+
+struct Windows<S: 'static> {
+    factory: Option<Box<dyn FnOnce(&[Display]) -> Vec<WindowSpec<S>>>>,
+    args: Args,
+    proxy: EventLoopProxy<WakeEvent>,
+    hosts: Vec<Option<Host<S>>>,
+}
+impl<S: 'static> Windows<S> {
+    fn cleanup(&mut self, event_loop: &ActiveEventLoop) {
+        for host in &mut self.hosts {
+            if host.as_ref().is_some_and(|h| h.finished) { *host = None; }
+        }
+        if self.hosts.iter().all(Option::is_none) { event_loop.exit(); }
+    }
+}
+impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(factory) = self.factory.take() else { return };
+        let primary = event_loop.primary_monitor();
+        let displays: Vec<_> = event_loop.available_monitors().map(|m| Display {
+            name: m.name(), position: (m.position().x, m.position().y),
+            size: (m.size().width, m.size().height), scale: m.scale_factor(), primary: primary.as_ref() == Some(&m),
+        }).collect();
+        let specs = factory(&displays);
+        crate::windows::validate(&specs).expect("window keys");
+        for (slot, spec) in specs.into_iter().enumerate() {
+            let mut host = Host::new(spec, self.args.clone(), self.proxy.clone(), slot);
+            host.resumed(event_loop);
+            self.hosts.push(Some(host));
+        }
+        self.cleanup(event_loop);
+    }
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
+        let slot = match &event {
+            WakeEvent::App(i) | WakeEvent::Live(i) | WakeEvent::Visible(i, _) | WakeEvent::Open(i) | WakeEvent::Close(i) => *i,
+        };
+        if let Some(Some(host)) = self.hosts.get_mut(slot) {
+            match event {
+                WakeEvent::Visible(_, visible) => host.set_visible(visible),
+                WakeEvent::Open(_) => host.open(event_loop, None),
+                WakeEvent::Close(_) => host.close(event_loop),
+                event => host.user_event(event_loop, event),
+            }
+        }
+        self.cleanup(event_loop);
+    }
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if let Some(host) = self.hosts.iter_mut().flatten().find(|h| h.win.as_ref().is_some_and(|w| w.window.id() == id)) {
+            host.window_event(event_loop, id, event);
+        }
+        self.cleanup(event_loop);
+    }
+}
 
 struct Host<S: 'static> {
+    options: WindowOptions,
+    native_handle: WindowHandle,
+    on_created: Option<Box<dyn FnOnce(WindowHandle)>>,
+    finished: bool,
     spec: AppSpec<S>,
     args: Args,
     keep_running: bool,
@@ -56,10 +175,20 @@ struct Host<S: 'static> {
 }
 
 pub fn run<S: 'static>(app: App<S>, args: Args) {
+    let accessory = app.accessory;
+    run_configured(move |_| vec![WindowSpec::from_app("main", app)], args, accessory);
+}
+
+pub(crate) fn run_windows<S: 'static>(factory: impl FnOnce(&[Display]) -> Vec<WindowSpec<S>> + 'static, args: Args) {
+    run_configured(factory, args, false);
+}
+
+fn run_configured<S: 'static>(factory: impl FnOnce(&[Display]) -> Vec<WindowSpec<S>> + 'static, args: Args, accessory: bool) {
+    let _ = accessory;
     #[allow(unused_mut)]
     let mut builder = EventLoop::<WakeEvent>::with_user_event();
     #[cfg(target_os = "macos")]
-    if app.accessory {
+    if accessory {
         use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
         builder
             .with_activation_policy(ActivationPolicy::Accessory)
@@ -69,9 +198,17 @@ pub fn run<S: 'static>(app: App<S>, args: Args) {
     let event_loop = builder.build().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
+    let mut windows = Windows { factory: Some(Box::new(factory)), args, proxy, hosts: Vec::new() };
+    event_loop.run_app(&mut windows).expect("run");
+}
+
+impl<S: 'static> Host<S> {
+fn new(window_spec: WindowSpec<S>, args: Args, proxy: EventLoopProxy<WakeEvent>, slot: usize) -> Self {
+    let WindowSpec { app, options, key, on_created } = window_spec;
+    let native_handle = WindowHandle { native: Arc::default(), slot, key: key.into(), proxy: proxy.clone() };
     let live_proxy = proxy.clone();
     let waker: Waker = Arc::new(move || {
-        let _ = proxy.send_event(WakeEvent::App);
+        let _ = proxy.send_event(WakeEvent::App(slot));
     });
     let (open, keep_running, on_close, release_gpu) = (app.open, app.keep_running, app.on_close, app.release_gpu);
     let (spec, state, shared) = app.into_parts(args.scene.as_deref());
@@ -79,11 +216,16 @@ pub fn run<S: 'static>(app: App<S>, args: Args) {
     // The window reports the system appearance and scale when it opens.
     let env = Env { system_dark: args.theme.as_deref() != Some("light"), scale: 1.0 };
     let mut rt = runtime_for(&spec, state, size, env, waker.clone());
-    rt.set_live_waker(Arc::new(move || { let _ = live_proxy.send_event(WakeEvent::Live); }));
+    rt.set_live_waker(Arc::new(move || { let _ = live_proxy.send_event(WakeEvent::Live(slot)); }));
     rt.set_live_visible(false);
+    rt.transparent = options.transparent;
     rt.wall_start = Some(Instant::now());
     shared.connect(waker);
-    let mut host = Host {
+    Host {
+        options,
+        native_handle,
+        on_created,
+        finished: false,
         spec,
         args,
         keep_running,
@@ -100,8 +242,8 @@ pub fn run<S: 'static>(app: App<S>, args: Args) {
         idle: true,
         mods: ModifiersState::empty(),
         clipboard: arboard::Clipboard::new().ok(),
-    };
-    event_loop.run_app(&mut host).expect("run");
+    }
+}
 }
 
 
@@ -185,8 +327,18 @@ fn map_key(key: &WKey, m: ModifiersState) -> Option<KeyEvent> {
 }
 
 impl<S: 'static> Host<S> {
-    fn visible(&self) -> bool {
-        self.win.as_ref().is_some_and(|w| w.visible)
+    fn set_visible(&mut self, visible: bool) {
+        let Some(w) = self.win.as_mut() else { return };
+        w.visible = visible;
+        if visible { w.occluded = false; }
+        w.window.set_visible(visible);
+        self.rt.set_live_visible(visible && !w.occluded && !w.window.is_minimized().unwrap_or(false));
+        self.idle = true;
+        if visible {
+            self.native_handle.native.number.store(native_window_number(&w.window).unwrap_or(0), Ordering::Release);
+            self.rt.settle_all();
+            w.window.request_redraw();
+        }
     }
 
     /// Applies everything other threads asked for since the last wake-up.
@@ -224,26 +376,32 @@ impl<S: 'static> Host<S> {
     }
 
     fn close(&mut self, event_loop: &ActiveEventLoop) {
-        if !self.visible() {
+        if self.win.is_none() || (self.keep_running && self.win.as_ref().is_some_and(|w| !w.visible)) {
             return;
         }
         if let Some(f) = self.on_close {
             self.rt.update(f);
         }
         self.rt.set_live_visible(false);
-        if !self.keep_running || self.rt.shell_request.take() == Some(Shell::Quit) {
+        if self.rt.shell_request.take() == Some(Shell::Quit) {
             event_loop.exit();
+            return;
+        }
+        if !self.keep_running {
+            self.finished = true;
             return;
         }
         self.rt.pointer_leave();
         self.mods = ModifiersState::empty();
         if self.release_gpu {
             self.win = None;
+            self.native_handle.native.number.store(0, Ordering::Release);
             self.gpu = None;
             self.rt.text.atlas.invalidate();
         } else if is_wayland(event_loop) {
             // Wayland has no hidden toplevel: unmap by destroying, recreate on open.
             self.win = None;
+            self.native_handle.native.number.store(0, Ordering::Release);
         } else if let Some(w) = self.win.as_mut() {
             w.window.set_visible(false);
             w.visible = false;
@@ -276,6 +434,7 @@ impl<S: 'static> Host<S> {
         }
         w.occluded = false;
         self.rt.set_live_visible(true);
+        self.native_handle.native.number.store(native_window_number(&w.window).unwrap_or(0), Ordering::Release);
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         if is_wayland(event_loop) {
             match token {
@@ -301,12 +460,19 @@ impl<S: 'static> Host<S> {
     #[cfg_attr(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))), allow(unused_variables))]
     fn create(&mut self, event_loop: &ActiveEventLoop, token: Option<String>) {
         let size = self.args.size.unwrap_or(self.spec.size);
-        let min = self.spec.min_size.unwrap_or((420.0, 400.0));
+        let min = self.options.min_size.or(self.spec.min_size).unwrap_or((420.0, 400.0));
+        let visible = self.started || self.options.visible;
         #[allow(unused_mut)]
         let mut attrs = Window::default_attributes()
             .with_title(self.spec.title)
             .with_inner_size(LogicalSize::new(size.0 as f64, size.1 as f64))
-            .with_min_inner_size(LogicalSize::new(min.0 as f64, min.1 as f64));
+            .with_min_inner_size(LogicalSize::new(min.0 as f64, min.1 as f64))
+            .with_transparent(self.options.transparent)
+            .with_decorations(!self.options.borderless)
+            .with_visible(visible)
+            .with_window_level(if self.options.always_on_top { WindowLevel::AlwaysOnTop } else { WindowLevel::Normal });
+        if let Some((x, y)) = self.options.position { attrs = attrs.with_position(PhysicalPosition::new(x, y)); }
+        if let Some((w, h)) = self.options.physical_size { attrs = attrs.with_inner_size(PhysicalSize::new(w, h)); }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         {
             if let Some(id) = crate::tooling::app_id() {
@@ -319,11 +485,12 @@ impl<S: 'static> Host<S> {
             }
         }
         #[cfg(target_os = "macos")]
-        {
+        if !self.options.borderless {
             use winit::platform::macos::WindowAttributesExtMacOS;
             attrs = attrs.with_titlebar_transparent(true).with_title_hidden(true).with_fullsize_content_view(true);
         }
         let window = Arc::new(event_loop.create_window(attrs).expect("window"));
+        if self.options.click_through { window.set_cursor_hittest(false).expect("window click-through"); }
         window.set_ime_allowed(true);
         let (gpu, surface) = match self.gpu.take() {
             Some((gpu, renderer, format)) => {
@@ -342,6 +509,11 @@ impl<S: 'static> Host<S> {
         let mut config = surface.get_default_config(adapter, phys.width.max(1), phys.height.max(1)).expect("surface config");
         let caps = surface.get_capabilities(adapter);
         config.format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(config.format);
+        if self.options.transparent {
+            config.alpha_mode = [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::PostMultiplied, wgpu::CompositeAlphaMode::Inherit]
+                .into_iter().find(|mode| caps.alpha_modes.contains(mode))
+                .expect("this surface does not support transparent composition");
+        }
         config.present_mode = wgpu::PresentMode::AutoVsync;
         config.desired_maximum_frame_latency = 2;
         if let Some(gpu) = gpu {
@@ -355,6 +527,8 @@ impl<S: 'static> Host<S> {
             self.rt.text.atlas.invalidate();
         }
         surface.configure(&gpu.device, &config);
+        let alpha = (self.options.transparent && config.alpha_mode == wgpu::CompositeAlphaMode::PostMultiplied)
+            .then(|| crate::surface_alpha::AlphaSurface::new(&gpu.device, config.format, (config.width, config.height)));
         let scale = window.scale_factor() as f32;
         let dark = match self.args.theme.as_deref() {
             Some("light") => false,
@@ -369,24 +543,31 @@ impl<S: 'static> Host<S> {
         }
         self.shown = true;
         self.idle = true;
-        self.rt.set_live_visible(true);
-        window.request_redraw();
+        self.rt.set_live_visible(visible);
+        if visible { window.request_redraw(); }
+        *self.native_handle.native.window.lock().unwrap() = Arc::downgrade(&window);
+        self.native_handle.native.number.store(native_window_number(&window).unwrap_or(0), Ordering::Release);
         self.win = Some(Win {
             #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
             activator: None,
             surface,
             config,
             window,
-            visible: true,
+            visible,
             occluded: false,
             cursor: Cursor::Default,
+            alpha,
         });
+        if let Some(created) = self.on_created.take() { created(self.native_handle.clone()); }
     }
 
     fn redraw(&mut self) {
         let (Some(l), Some((gpu, renderer, _))) = (self.win.as_mut(), self.gpu.as_mut()) else { return };
         if !l.visible || l.occluded || l.window.is_minimized().unwrap_or(false) {
             return;
+        }
+        if self.native_handle.native.number.load(Ordering::Relaxed) == 0 {
+            self.native_handle.native.number.store(native_window_number(&l.window).unwrap_or(0), Ordering::Release);
         }
         // Acquire before latching live values so a drawable wait cannot age the input.
         let frame = match l.surface.get_current_texture() {
@@ -424,7 +605,8 @@ impl<S: 'static> Host<S> {
         let view = frame.texture.create_view(&Default::default());
         renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (l.config.width, l.config.height));
         let mut enc = gpu.device.create_command_encoder(&Default::default());
-        renderer.draw(&mut enc, &view, rt.clear_color());
+        renderer.draw(&mut enc, l.alpha.as_ref().map_or(&view, |a| &a.view), rt.clear_color());
+        if let Some(alpha) = &l.alpha { alpha.draw(&mut enc, &view); }
         gpu.queue.submit([enc.finish()]);
         l.window.pre_present_notify();
         gpu.queue.present(frame);
@@ -450,12 +632,13 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Host<S> {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
         if !self.started { return; }
         match event {
-            WakeEvent::App => self.drain(event_loop),
-            WakeEvent::Live => {
+            WakeEvent::App(_) => self.drain(event_loop),
+            WakeEvent::Live(_) => {
                 if self.rt.live_pending() && let Some(w) = self.win.as_ref().filter(|w| w.visible && !w.occluded) {
                     w.window.request_redraw();
                 }
             }
+            _ => {}
         }
     }
 
@@ -485,10 +668,15 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Host<S> {
                 l.config.width = size.width.max(1);
                 l.config.height = size.height.max(1);
                 l.surface.configure(&gpu.device, &l.config);
+                if let Some(alpha) = &mut l.alpha { alpha.resize(&gpu.device, (l.config.width, l.config.height)); }
                 rt.set_viewport((size.width as f32 / scale, size.height as f32 / scale), scale);
                 l.window.request_redraw();
             }
-            WindowEvent::ScaleFactorChanged { .. } => l.window.request_redraw(),
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                let size = l.window.inner_size();
+                rt.set_viewport((size.width as f32 / scale_factor as f32, size.height as f32 / scale_factor as f32), scale_factor as f32);
+                l.window.request_redraw();
+            }
             WindowEvent::Occluded(occluded) => {
                 l.occluded = occluded;
                 rt.set_live_visible(l.visible && !occluded && !l.window.is_minimized().unwrap_or(false));
