@@ -1,6 +1,6 @@
 //! Button and IconButton (`@opencode/ui` actions/button, actions/icon-button).
 
-use rune::{Color, Cursor, El, Icon, Tx, icon, row, text};
+use rune::{Color, El, Icon, Tx, icon, row, text};
 
 use crate::{Acts, Kit, State, over, press_over, shadows};
 
@@ -220,9 +220,6 @@ impl Button {
             e = e.child(icon(i, 16.0).key("icon").color(icon_c));
         }
         e = e.child(text(self.label).key("label").font(font).color(ink));
-        if enabled {
-            e = e.cursor(Cursor::Pointer);
-        }
         self.acts.apply(e, enabled)
     }
 }
