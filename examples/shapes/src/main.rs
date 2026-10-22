@@ -164,6 +164,7 @@ fn main() {
     rune::run(AppSpec {
         title: "Shapes",
         size: (820.0, 360.0),
+        min_size: None,
         init: || State { t: 0.0 },
         view,
         scenes: &[],
