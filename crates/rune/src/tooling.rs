@@ -439,26 +439,29 @@ impl Trace {
                 metas.push(meta);
             }
             let [x, y, w, h] = e.rect;
-            // motion-lint flags: animated 1, clipped 8. Own intents at << 8: position 1, size 2,
-            // transition 16, reveal 32. A settle commit is a deliberate cut (everything lands at
-            // once); a growth row reveals its content by growing; reveals fade words in.
+            // A settle commit is a deliberate cut (everything lands at once); a growth row reveals
+            // its content by growing; reveals fade words in.
+            use rune_motion::{Intent as I, flags as F};
             let clipped = e.rect.iter().zip(e.visible.iter()).any(|(a, b)| (a - b).abs() > 0.5);
             let mut intent = e.live_intent;
             if settled {
-                intent |= 1 | 2 | 16 | 32;
+                intent |= I::POSITION | I::SIZE | I::TRANSITION | I::REVEAL;
             }
             // Reduced motion deliberately cuts geometry. Opacity still needs to fade;
             // do not declare transition/opacity intent for the whole reduced-motion tree.
             if rt.reduced_motion {
-                intent |= 1 | 2;
+                intent |= I::POSITION | I::SIZE;
             }
             if e.revealing {
-                intent |= 32;
+                intent |= I::REVEAL;
             }
             if e.in_growing_row {
-                intent |= 2 | 32;
+                intent |= I::SIZE | I::REVEAL;
             }
-            let flags = u32::from(e.moving || e.in_growing_row) | if e.scrolling { 4 } else { 0 } | if clipped { 8 } else { 0 } | intent << 8;
+            let flags = if e.moving || e.in_growing_row { F::ANIMATED } else { 0 }
+                | if e.scrolling { F::SCROLLING } else { 0 }
+                | if clipped { F::CLIPPED } else { 0 }
+                | intent << 8;
             let q = [
                 (f64::from(x) * 100.0).round() as i64,
                 (f64::from(y) * 100.0).round() as i64,
@@ -494,7 +497,7 @@ impl Trace {
                 && settled
             {
                 let [x, y, w, h] = [q[0], q[1], q[2], q[3]].map(|v| v as f64 / 100.0);
-                cuts.push(json!([id, x, y, w, h, 16 | 4, 0]));
+                cuts.push(json!([id, x, y, w, h, rune_motion::Intent::TRANSITION | rune_motion::Intent::OPACITY, 0]));
             }
         }
 

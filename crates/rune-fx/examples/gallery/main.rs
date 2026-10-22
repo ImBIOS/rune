@@ -7,7 +7,7 @@
 
 mod ui;
 
-use rune::render::write_png;
+use rune::render::{Gpu, Offscreen, write_png};
 use rune_fx::*;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -368,12 +368,12 @@ fn scene(name: &str, b: &mut B) {
                 let src_rect = b.src_rect.unwrap().inflate(SRC_PAD);
                 let dy = y - 62.0;
                 let p = MotionBlurParams { mode: *mode, shutter_angle: *angle, ..Default::default() };
-                let samples = MotionSamples::from_track(&p, b.src_rect.unwrap(), t, S, |tt| {
+                let sp = if b.reduced { MotionBlurParams { shutter_angle: 0.0, ..p } } else { p };
+                let samples = MotionSamples::from_track(&sp, b.src_rect.unwrap(), t, S, |tt| {
                     let mut q = fling(tt);
                     q.y += dy;
                     q
                 });
-                let samples = if b.reduced { MotionSamples::from_track(&MotionBlurParams { shutter_angle: 0.0, ..p }, b.src_rect.unwrap(), t, S, |tt| { let mut q = fling(tt); q.y += dy; q }) } else { samples };
                 b.fx(Fx::motion_blur(p, samples).on(Shape::rounded(r.x, r.y, r.w, r.h, 14.0)).source(1, src_rect));
             }
         }
@@ -465,9 +465,7 @@ struct Ctx {
     scene_view: wgpu::TextureView,
     backdrop: wgpu::Texture,
     backdrop_view: wgpu::TextureView,
-    out: wgpu::Texture,
-    out_view: wgpu::TextureView,
-    readback: wgpu::Buffer,
+    out: Offscreen,
     pyramid: MaskPyramid,
     src: Option<(wgpu::Texture, wgpu::TextureView, [u32; 2])>,
     resolve: wgpu::RenderPipeline,
@@ -510,37 +508,15 @@ fn pass<'e>(enc: &'e mut wgpu::CommandEncoder, view: &'e wgpu::TextureView, clea
 
 impl Ctx {
     fn new(w: u32, h: u32) -> Ctx {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: None,
-            apply_limit_buckets: false,
-        }))
-        .expect("adapter");
-        let timestamps = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("gallery"),
-            required_features: if timestamps { wgpu::Features::TIMESTAMP_QUERY } else { wgpu::Features::empty() },
-            required_limits: wgpu::Limits::default(),
-            experimental_features: Default::default(),
-            memory_hints: wgpu::MemoryHints::Performance,
-            trace: Default::default(),
-        }))
-        .expect("device");
+        let Gpu { adapter, device, queue, .. } = Gpu::headless();
+        let timestamps = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         eprintln!("adapter: {:?} timestamps={timestamps}", adapter.get_info().name);
         let ui = UiRenderer::new(&device, FMT);
         let fx = FxRenderer::new(&device, FMT, FxOptions { dither: false });
         let u = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC;
         let (scene, scene_view) = tex(&device, w, h, FMT, u);
         let (backdrop, backdrop_view) = tex(&device, w, h, FMT, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
-        let (out, out_view) = tex(&device, w, h, wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("readback"),
-            size: ((w * 4).div_ceil(256) * 256 * h) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let out = Offscreen::with_format(&device, w, h, wgpu::TextureFormat::Rgba8Unorm);
         let pyramid = MaskPyramid::new(&device, w, h);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("resolve"),
@@ -578,8 +554,6 @@ impl Ctx {
             backdrop,
             backdrop_view,
             out,
-            out_view,
-            readback,
             pyramid,
             src: None,
             resolve,
@@ -648,31 +622,14 @@ impl Ctx {
             }
         }
         {
-            let mut p = pass(&mut enc, &self.out_view, Some(wgpu::Color::BLACK), None);
+            let mut p = pass(&mut enc, &self.out.view, Some(wgpu::Color::BLACK), None);
             p.set_pipeline(&self.resolve);
             p.set_bind_group(0, &self.resolve_bg, &[]);
             p.draw(0..3, 0..1);
         }
-        let padded = (self.w * 4).div_ceil(256) * 256;
-        enc.copy_texture_to_buffer(
-            self.out.as_image_copy(),
-            wgpu::TexelCopyBufferInfo { buffer: &self.readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(self.h) } },
-            wgpu::Extent3d { width: self.w, height: self.h, depth_or_array_layers: 1 },
-        );
+        self.out.copy(&mut enc);
         self.queue.submit([enc.finish()]);
-        let slice = self.readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |r| r.expect("map"));
-        self.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-        let mut px = Vec::with_capacity((self.w * self.h * 4) as usize);
-        {
-            let data = slice.get_mapped_range().expect("mapped range");
-            for row in 0..self.h {
-                let s = (row * padded) as usize;
-                px.extend_from_slice(&data[s..s + (self.w * 4) as usize]);
-            }
-        }
-        self.readback.unmap();
-        px
+        self.out.read(&self.device)
     }
 }
 
