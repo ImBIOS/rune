@@ -268,10 +268,28 @@ prints the platform error. Metal surfaces retain premultiplied colour for Core A
 `set(width, height, rgba)` (straight-alpha sRGB). `El::pixels(&pixels)` draws it scaled
 into the element's rect, clipped to its corner radius, without re-running the view when the
 image changes: the next frame uploads the new rows (wake the window with an `update` or a
-`Live` value). Images live in a per-runtime 1024² RGBA atlas (`Rgba8UnormSrgb`, binding 2,
-instance kind 7), created on first use; filtering is bilinear on premultiplied texels and
-clamped to each image. Checked by a GPU test that draws texel for texel and follows a new
-frame; Settings and OpenCode snapshots are byte-identical.
+`Live` value). Images live in stable per-runtime 1024² RGBA pages (`Rgba8UnormSrgb`, binding 2,
+instance kind 7); larger images get exact-size standalone pages, up to 8192 pixels per axis.
+Pages are created on demand and unused trailing pages are released. Rendering breaks batches
+only when the image page changes, preserving painter order. Filtering is bilinear on
+premultiplied texels, clamped to each image. Same-size streaming updates reuse their slot,
+perform only a row copy/upload, and do no mip work or internal allocation.
+
+For static assets, construct an `ImageCache` once with the app's setup waker:
+
+```rust,ignore
+let cache = rune::ImageCache::new(waker);
+let icon = cache.load(png_bytes); // PNG, JPEG, or PNG-backed ICNS
+// Keep `icon` in app state; pending images paint nothing, completion wakes the app.
+el().size(32.0, 32.0).pixels(icon.pixels())
+```
+
+The cache deduplicates by content and decodes on one worker. `cache.rgba(w, h, bytes)` accepts
+straight-alpha sRGB pixels. Static images get area-filtered, linear-premultiplied mip levels
+on that worker; rendering chooses a precomputed level from the drawn device-pixel size.
+`Image::{size,is_ready,error}` inspect completion; `Image::wait` is for deterministic headless
+fixtures. Dropping all image and pixel handles releases decoded storage. Legacy ICNS codecs
+and SVG are not decoded; provide decoded RGBA for those formats.
 
 ### Edge overlays (`App::overlay`, `overlay.rs`, `layer_shell.rs`)
 

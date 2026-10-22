@@ -25,7 +25,8 @@ pub(crate) struct Decoded {
 }
 struct State {
     id: ImageId,
-    decoded: OnceLock<Result<Decoded, ImageError>>,
+    pixels: crate::Pixels,
+    decoded: OnceLock<Result<Arc<Decoded>, ImageError>>,
 }
 
 /// A cheap shared handle. Pending images paint nothing until their worker wakes the app.
@@ -37,6 +38,8 @@ impl std::fmt::Debug for Image {
     }
 }
 impl Image {
+    /// The shared static pixel handle, ready to pass to `El::pixels` after decoding.
+    pub fn pixels(&self) -> &crate::Pixels { &self.0.pixels }
     pub fn id(&self) -> ImageId { self.0.id }
     pub fn size(&self) -> Option<[u32; 2]> {
         let mip = self.decoded()?.ok()?.mips.first()?;
@@ -51,7 +54,7 @@ impl Image {
         Ok([mip.width, mip.height])
     }
     pub(crate) fn decoded(&self) -> Option<Result<&Decoded, &ImageError>> {
-        self.0.decoded.get().map(Result::as_ref)
+        self.0.decoded.get().map(|r| r.as_ref().map(Arc::as_ref))
     }
 }
 
@@ -74,6 +77,8 @@ impl ImageCache {
                     Input::Encoded(bytes) => decode(&bytes),
                     Input::Rgba(w, h, bytes) => mip_chain(w, h, &bytes),
                 };
+                let decoded = decoded.map(Arc::new);
+                if let Ok(decoded) = &decoded { job.image.0.pixels.set_mips(decoded.clone()); }
                 let _ = job.image.0.decoded.set(decoded);
                 waker();
             }
@@ -107,7 +112,7 @@ impl ImageCache {
         let mut entries = self.entries.lock().unwrap();
         if let Some(state) = entries.get(&id).and_then(Weak::upgrade) { return Image(state); }
         entries.retain(|_, value| value.strong_count() > 0);
-        let image = Image(Arc::new(State { id, decoded: OnceLock::new() }));
+        let image = Image(Arc::new(State { id, pixels: crate::Pixels::new(), decoded: OnceLock::new() }));
         entries.insert(id, Arc::downgrade(&image.0));
         if self.jobs.send(Job { image: image.clone(), input }).is_err() {
             let _ = image.0.decoded.set(Err(ImageError("image worker stopped".into())));

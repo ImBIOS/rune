@@ -219,8 +219,9 @@ fn triangle(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>, aa: u32) -> 
 }
 
 /// One image texel, premultiplied (the atlas holds straight alpha) so filtering doesn't darken edges.
-fn image_texel(t: vec2<i32>) -> vec4<f32> {
+fn image_texel(t: vec2<i32>, premultiplied: bool) -> vec4<f32> {
     let c = textureLoad(images, t, 0);
+    if premultiplied { return c; }
     return vec4<f32>(c.rgb * c.a, c.a);
 }
 
@@ -253,9 +254,10 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         let base = floor(local);
         let f = local - base;
         let t0 = clamp(lo + vec2<i32>(base), lo, hi);
-        let t1 = clamp(t0 + vec2<i32>(1, 1), lo, hi);
-        let c = mix(mix(image_texel(t0), image_texel(vec2<i32>(t1.x, t0.y)), f.x),
-                    mix(image_texel(vec2<i32>(t0.x, t1.y)), image_texel(t1), f.x), f.y);
+        let t1 = clamp(lo + vec2<i32>(base) + vec2<i32>(1, 1), lo, hi);
+        let premultiplied = i.params.z > 0.5;
+        let c = mix(mix(image_texel(t0, premultiplied), image_texel(vec2<i32>(t1.x, t0.y), premultiplied), f.x),
+                    mix(image_texel(vec2<i32>(t0.x, t1.y), premultiplied), image_texel(t1, premultiplied), f.x), f.y);
         let d = sd_rounded(i.p - center, half, i.radii);
         let cov = clamp(0.5 - d, 0.0, 1.0);
         col = c * (i.fill.a * cov);

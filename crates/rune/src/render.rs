@@ -2,7 +2,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use crate::pixels::{IMAGE_ATLAS_SIZE, ImageAtlas};
+use crate::pixels::ImageAtlas;
 use crate::text::{ATLAS_SIZE, Atlas};
 
 pub const KIND_RECT: f32 = 0.0;
@@ -107,8 +107,9 @@ pub struct Renderer {
     bind_layout: wgpu::BindGroupLayout,
     globals: wgpu::Buffer,
     atlas: wgpu::Texture,
-    /// The RGBA image atlas, made when an element first shows pixels (a 1×1 stand-in before).
-    images: Option<wgpu::Texture>,
+    /// Stable image pages; the initial bind group uses a 1×1 stand-in.
+    images: Vec<(wgpu::Texture, wgpu::BindGroup)>,
+    image_batches: Vec<(std::ops::Range<u32>, usize)>,
     instances: wgpu::Buffer,
     capacity: usize,
     count: u32,
@@ -186,7 +187,7 @@ impl Renderer {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let stand_in = Self::image_texture(device, 1);
+        let stand_in = Self::image_texture(device, 1, 1);
         let bind_group = Self::bind_group(device, &bgl, &globals, &atlas, &stand_in);
         let spring_layout = properties.map(|_| crate::gpu_springs::Bindings::layout(device));
         let layouts = [Some(&bgl), spring_layout.as_ref()];
@@ -213,7 +214,8 @@ impl Renderer {
             bind_layout: bgl,
             globals,
             atlas,
-            images: None,
+            images: Vec::new(),
+            image_batches: Vec::new(),
             instances,
             capacity,
             count: 0,
@@ -264,10 +266,10 @@ impl Renderer {
         })
     }
 
-    fn image_texture(device: &wgpu::Device, size: u32) -> wgpu::Texture {
+    fn image_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some("image atlas"),
-            size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -300,24 +302,29 @@ impl Renderer {
     /// Uploads changed rows of the runtime's image atlas (`El::pixels`), creating its texture on
     /// first use.
     pub fn upload_images(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, images: &mut ImageAtlas) {
-        let Some((y0, y1)) = images.dirty.take() else { return };
-        if self.images.is_none() {
-            let texture = Self::image_texture(device, IMAGE_ATLAS_SIZE);
-            self.bind_group = Self::bind_group(device, &self.bind_layout, &self.globals, &self.atlas, &texture);
-            self.images = Some(texture);
-        }
-        let row = IMAGE_ATLAS_SIZE * 4;
-        queue.write_texture(
+        self.images.truncate(images.pages.len());
+        for (index, page) in images.pages.iter_mut().enumerate() {
+            if self.images.get(index).is_none_or(|(t, _)| t.width() != page.width || t.height() != page.height) {
+                let texture = Self::image_texture(device, page.width, page.height);
+                let bind = Self::bind_group(device, &self.bind_layout, &self.globals, &self.atlas, &texture);
+                if index == self.images.len() { self.images.push((texture, bind)); }
+                else { self.images[index] = (texture, bind); }
+                page.dirty = Some((0, page.height));
+            }
+            let Some((y0, y1)) = page.dirty.take() else { continue };
+            let row = page.width * 4;
+            queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: self.images.as_ref().unwrap(),
+                texture: &self.images[index].0,
                 mip_level: 0,
                 origin: wgpu::Origin3d { x: 0, y: y0, z: 0 },
                 aspect: wgpu::TextureAspect::All,
             },
-            &images.data[(y0 * row) as usize..(y1 * row) as usize],
+            &page.data[(y0 * row) as usize..(y1 * row) as usize],
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None },
-            wgpu::Extent3d { width: IMAGE_ATLAS_SIZE, height: y1 - y0, depth_or_array_layers: 1 },
+            wgpu::Extent3d { width: page.width, height: y1 - y0, depth_or_array_layers: 1 },
         );
+        }
     }
 
     /// Builds the pipeline for another target format (e.g. an `Rgba16Float` layer), once.
@@ -361,10 +368,13 @@ impl Renderer {
             &self.extra.iter().find(|(f, _)| *f == format).expect("Renderer::add_format first").1
         };
         pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
         if let Some(properties) = &self.springs { pass.set_bind_group(1, &properties.group, &[]); }
         pass.set_vertex_buffer(0, self.instances.slice(..));
-        pass.draw(0..4, range);
+        let start = self.image_batches.partition_point(|(batch, _)| batch.end <= range.start);
+        for (batch, page) in self.image_batches[start..].iter().take_while(|(batch, _)| batch.start < range.end) {
+            pass.set_bind_group(0, self.images.get(*page).map_or(&self.bind_group, |(_, bind)| bind), &[]);
+            pass.draw(0..4, batch.start.max(range.start)..batch.end.min(range.end));
+        }
     }
 
     fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -408,6 +418,16 @@ impl Renderer {
         let g: [f32; 2] = [viewport.0 as f32, viewport.1 as f32];
         queue.write_buffer(&self.globals, 0, bytemuck::cast_slice(&g));
         self.count = instances.len() as u32;
+        self.image_batches.clear();
+        let (mut start, mut page) = (0, 0);
+        for (i, instance) in instances.iter().enumerate() {
+            if instance.params[1] == KIND_IMAGE && instance.params[0] as usize != page {
+                if start < i as u32 { self.image_batches.push((start..i as u32, page)); }
+                start = i as u32;
+                page = instance.params[0] as usize;
+            }
+        }
+        if start < self.count { self.image_batches.push((start..self.count, page)); }
     }
 
     pub fn prepare_surfaces(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, draws: &[crate::native_surface::SurfaceDraw], viewport: (u32,u32)) {
