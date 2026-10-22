@@ -14,8 +14,7 @@ fn pose(base: u32, k: u32, p: vec2f) -> vec3f {
     return vec3f(m.x * p.x + m.z * p.y + tw.x, m.y * p.x + m.w * p.y + tw.y, tw.z);
 }
 
-@fragment
-fn fs(in: VOut) -> @location(0) vec4f {
+fn shade(in: VOut) -> vec4f {
     let i = insts[in.id];
     let p = in.px / i.shape.y;
     let first = u32(i.xf.x);

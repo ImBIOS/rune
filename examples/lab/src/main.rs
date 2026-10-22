@@ -57,7 +57,8 @@ pub struct Lab {
     pub recording: bool,
     pub uploading: bool,
     pub neon_on: bool,
-    pub shots: Vec<Shot>,
+    /// Taps, pings and shockwaves: each overlaps the ones still running (a bounded pool).
+    pub shots: rune_fx::OneShots<Shot>,
     /// The motion card's top-left in canvas points.
     pub card: Animated<Vec2>,
     pub card_vt: VelocityTracker<Vec2>,
@@ -78,7 +79,7 @@ impl Lab {
             recording: true,
             uploading: true,
             neon_on: true,
-            shots: Vec::new(),
+            shots: rune_fx::OneShots::new(8),
             card: Animated::new(Vec2 { x: stage::CARD_REST[0], y: stage::CARD_REST[1] }),
             card_vt: VelocityTracker::new(),
             lens: stage::LENS_REST,

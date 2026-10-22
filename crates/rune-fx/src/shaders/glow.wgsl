@@ -25,8 +25,7 @@ fn mask_tent(uv: vec2f, lod: f32) -> f32 {
     return s * 0.25;
 }
 
-@fragment
-fn fs(in: VOut) -> @location(0) vec4f {
+fn shade(in: VOut) -> vec4f {
     let i = insts[in.id];
     let c = ctx(i, in.px);
     var radius = i.p0.x;

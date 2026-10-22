@@ -201,8 +201,8 @@ pub fn on_stage(s: &mut Lab, d: &mut Drag, tx: &mut Tx) {
                     } else {
                         Shot { kind: ShotKind::Ripple, at: p, t0: t }
                     };
-                    s.shots.retain(|sh| t - sh.t0 < 3.0);
-                    s.shots.push(shot);
+                    s.shots.prune(t, 3.0);
+                    s.shots.trigger(t, shot);
                 }
                 Scene::Motion => {
                     let c = s.card.sample(now);
@@ -219,8 +219,8 @@ pub fn on_stage(s: &mut Lab, d: &mut Drag, tx: &mut Tx) {
                     if inside(lens_rect(s.lens), p, 4.0) {
                         s.grab = Some(Grab::Lens([p[0] - s.lens[0], p[1] - s.lens[1]]));
                     } else {
-                        s.shots.retain(|sh| t - sh.t0 < 3.0);
-                        s.shots.push(Shot { kind: ShotKind::Shockwave, at: p, t0: t });
+                        s.shots.prune(t, 3.0);
+                        s.shots.trigger(t, Shot { kind: ShotKind::Shockwave, at: p, t0: t });
                     }
                 }
                 _ => {}

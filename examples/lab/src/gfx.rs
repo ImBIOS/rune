@@ -1124,7 +1124,9 @@ impl Live {
                         .on(cv.capsule(stage::LIVE)),
                     Anchor::Under(node::LIVE),
                 );
-                for sh in &cv.s.shots {
+                for (shot, k) in cv.s.shots.live(t, 3.0) {
+                    let sh = &shot.data;
+                    let mut push = |layer: FxLayer, anchor: Anchor| push(layer.opacity(k), anchor);
                     match sh.kind {
                         ShotKind::Ripple => push(
                             Fx::pulse(PulseParams {
@@ -1263,9 +1265,10 @@ impl Live {
                 d.animate_to(target, Spring::new(0.5, 0.0), now);
                 *anim |= !d.is_settled(now);
                 let dp = d.sample(now);
-                for sh in cv.s.shots.iter().filter(|sh| sh.kind == ShotKind::Shockwave) {
+                for (shot, k) in cv.s.shots.live(t, 3.0).filter(|(sh, _)| sh.data.kind == ShotKind::Shockwave) {
+                    let sh = &shot.data;
                     push(
-                        Fx::distort(DistortParams::shockwave(cv.w(sh.at), sh.t0)).on(cv.everywhere()),
+                        Fx::distort(DistortParams::shockwave(cv.w(sh.at), sh.t0)).on(cv.everywhere()).opacity(k),
                         Anchor::Top,
                     );
                 }

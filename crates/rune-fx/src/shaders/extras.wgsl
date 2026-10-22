@@ -7,8 +7,7 @@
 // Inner feather: fully inside the shape, so overlays never leak past the node's edge.
 fn cover(c: Ctx, feather: f32) -> f32 { return smoothstep(c.aa * 0.5, -max(feather, c.aa), c.d); }
 
-@fragment
-fn fs(in: VOut) -> @location(0) vec4f {
+fn shade(in: VOut) -> vec4f {
     let i = insts[in.id];
     let c = ctx(i, in.px);
 

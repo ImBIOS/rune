@@ -17,8 +17,42 @@ fn beat_env(x: f32) -> f32 {
     return select(exp(-x / 0.085), exp(-(x / 0.018) * (x / 0.018)), x < 0.0);
 }
 
-@fragment
-fn fs(in: VOut) -> @location(0) vec4f {
+// One ping shot at `age` seconds: (energy, white-hot share).
+fn ping(c: Ctx, i: Inst, age: f32, dur: f32) -> vec2f {
+    let o = i.aux.xy;
+    let dir = normalize(i.aux.zw);
+    let travel = i.p2.x;
+    let head_r = i.p2.z;
+    if (age < 0.0) { return vec2f(0.0); }
+    let u = age / dur;
+    if (c.reduced) {
+        // No travel: the destination glows up and cools in place.
+        let dest = o + dir * travel;
+        let env = smoothstep(0.0, 0.2, age) * exp(-max(age - 0.2, 0.0) * 3.0);
+        return vec2f(env * gauss(length(c.p - dest), head_r * 3.0), 0.0);
+    }
+    let s_head = shoot(u);
+    let s_tail = shoot(u - i.p2.y);
+    let hpos = o + dir * travel * s_head;
+    let tpos = o + dir * travel * s_tail;
+    let sd = segdist(c.p, tpos, hpos);
+    // After arrival the head blooms out and cools (continuous at u = 1).
+    let after = max(u - 1.0, 0.0);
+    let cool = exp(-after * 3.5);
+    let hr = head_r * (1.0 + 0.9 * (1.0 - cool));
+    let tailw = head_r * 0.55 * (0.35 + 0.65 * sd.y);
+    let tail = gauss(sd.x, tailw) * sd.y * sd.y * 0.8;
+    let dh = length(c.p - hpos);
+    let head = gauss(dh, hr) + 0.35 * bloom(dh - hr * 0.5, hr * 1.2, hr * 8.0);
+    var e = (head + tail) * cool;
+    let hot = gauss(dh, hr * 0.45) * cool * cool;
+    // Launch flash at the origin.
+    let fr = 26.0 * (1.0 - exp(-age * 7.0));
+    e += exp(-age * 10.0) * smoothstep(0.0, 0.03, age) * gauss(length(c.p - o) - fr, 2.0 + age * 6.0) * 0.5;
+    return vec2f(e, hot);
+}
+
+fn shade(in: VOut) -> vec4f {
     let i = insts[in.id];
     let c = ctx(i, in.px);
     let n = i32(i.p0.x + 0.5);
@@ -58,52 +92,43 @@ fn fs(in: VOut) -> @location(0) vec4f {
         var beat = 0.3;
         var ring = 0.0;
         if (!c.reduced) {
-            let ph = fract(c.t / period);
-            let x1 = fract(ph + 0.5) - 0.5;
-            let x2 = fract(ph - 0.17 + 0.5) - 0.5;
-            beat = beat_env(x1) + 0.62 * beat_env(x2);
-            let age = ph * period; // seconds since the lub
-            let rr = reach * (1.0 - exp(-age * 4.5));
-            ring = exp(-age * 3.2) * smoothstep(0.0, 0.03, age) * gauss(c.d - rr, width * (1.0 + age * 3.0));
+            // Every beat is its own instance: the rings of earlier beats keep expanding and fading
+            // under the new one instead of being cut when it starts.
+            let tp = c.t / period;
+            let kb = floor(tp);
+            beat = 0.0;
+            for (var k = -1; k < 3; k++) {
+                let x = tp - (kb - f32(k));
+                beat += beat_env(x) + 0.62 * beat_env(x - 0.17);
+                let age = x * period; // seconds since that beat's lub
+                if (age > 0.0) {
+                    let rr = reach * (1.0 - exp(-age * 4.5));
+                    ring += exp(-age * 3.2) * smoothstep(0.0, 0.03, age) * gauss(c.d - rr, width * (1.0 + age * 3.0));
+                }
+            }
+            // Fade the faint tail of old rings out before the quad edge.
+            let edge = reach + width * 16.0;
+            ring *= 1.0 - smoothstep(edge * 0.8, edge, c.d);
         }
         let r = reach * 0.22 * (1.0 + 0.35 * beat);
         e = ((0.25 + 0.75 * beat) * bloom(c.d, r, reach) + 0.55 * ring) * outside;
-        hotv = 0.35 * beat * gauss(max(c.d, 0.0), r * 0.35) * outside;
+        hotv = 0.35 * beat * gauss(max(c.d, 0.0), r * 0.25) * outside;
     } else if (c.variant == 3) {
         let dur = max(i.p1.z, 0.05);
-        var age = c.t - i.p1.y;
-        if (i.p1.w > 0.0) { age = age - floor(age / i.p1.w) * i.p1.w; }
-        let o = i.aux.xy;
-        let dir = normalize(i.aux.zw);
-        let travel = i.p2.x;
-        let head_r = i.p2.z;
-        if (age >= 0.0) {
-            let u = age / dur;
-            if (c.reduced) {
-                // No travel: the destination glows up and cools in place.
-                let dest = o + dir * travel;
-                let env = smoothstep(0.0, 0.2, age) * exp(-max(age - 0.2, 0.0) * 3.0);
-                e = env * gauss(length(c.p - dest), head_r * 3.0);
-            } else {
-                let s_head = shoot(u);
-                let s_tail = shoot(u - i.p2.y);
-                let hpos = o + dir * travel * s_head;
-                let tpos = o + dir * travel * s_tail;
-                let sd = segdist(c.p, tpos, hpos);
-                // After arrival the head blooms out and cools (continuous at u = 1).
-                let after = max(u - 1.0, 0.0);
-                let cool = exp(-after * 3.5);
-                let hr = head_r * (1.0 + 0.9 * (1.0 - cool));
-                let tailw = head_r * 0.55 * (0.35 + 0.65 * sd.y);
-                let tail = gauss(sd.x, tailw) * sd.y * sd.y * 0.8;
-                let dh = length(c.p - hpos);
-                let head = gauss(dh, hr) + 0.35 * bloom(dh - hr * 0.5, hr * 1.2, hr * 8.0);
-                e = (head + tail) * cool;
-                hotv = gauss(dh, hr * 0.45) * cool * cool;
-                // Launch flash at the origin.
-                let fr = 26.0 * (1.0 - exp(-age * 7.0));
-                e += exp(-age * 10.0) * smoothstep(0.0, 0.03, age) * gauss(length(c.p - o) - fr, 2.0 + age * 6.0) * 0.5;
-            }
+        let age0 = c.t - i.p1.y;
+        // A repeating ping lets the previous shot finish blooming while the next one flies.
+        var shots = 1;
+        var age = age0;
+        if (i.p1.w > 0.0 && age0 > 0.0) {
+            age = age0 - floor(age0 / i.p1.w) * i.p1.w;
+            shots = 3;
+        }
+        for (var k = 0; k < shots; k++) {
+            let a = age + f32(k) * i.p1.w;
+            if (a > age0 + 1e-4 || a > dur * 2.2) { break; }
+            let pe = ping(c, i, a, dur);
+            e += pe.x;
+            hotv += pe.y;
         }
     } else {
         // Ripple from a tap point, confined to the shape with a soft edge.

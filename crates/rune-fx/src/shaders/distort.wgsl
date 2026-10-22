@@ -32,8 +32,7 @@ fn bend_at(t: f32) -> f32 {
     return tan(tilt - bent);
 }
 
-@fragment
-fn fs(in: VOut) -> @location(0) vec4f {
+fn shade(in: VOut) -> vec4f {
     let i = insts[in.id];
     let c = ctx(i, in.px);
     let s = c.scale;

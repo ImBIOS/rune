@@ -13,7 +13,7 @@ struct Globals {
 
 struct Inst {
     rect: vec4f,   // node rect pt (x, y, w, h)
-    shape: vec4f,  // corner radius pt, scale px/pt, k (smooth-union), morph
+    shape: vec4f,  // corner radius pt, scale px/pt, layer opacity, morph
     bounds: vec4f, // drawn quad px (x0, y0, x1, y1), already clipped to the viewport
     c0: vec4f,
     c1: vec4f,
@@ -53,6 +53,13 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
     o.id = ii;
     o.px = px;
     return o;
+}
+
+// Every effect module defines `shade`; the layer's opacity (shape.z) scales its premultiplied
+// output, so a retiring one-shot fades instead of cutting.
+@fragment
+fn fs(in: VOut) -> @location(0) vec4f {
+    return shade(in) * insts[in.id].shape.z;
 }
 
 const TAU: f32 = 6.2831853;

@@ -22,8 +22,7 @@ fn fbm4(p0: vec2f, seed: u32) -> f32 {
     return s / 0.9375;
 }
 
-@fragment
-fn fs(in: VOut) -> @location(0) vec4f {
+fn shade(in: VOut) -> vec4f {
     let i = insts[in.id];
     let c = ctx(i, in.px);
     let H = i.p0.x;

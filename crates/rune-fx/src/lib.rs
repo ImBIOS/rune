@@ -113,6 +113,82 @@ impl Heat {
     }
 }
 
+/// Overlapping one-shot effects: taps, pings, shockwaves, zaps, sparkle bursts.
+///
+/// Every `trigger` starts its own instance, which lives out its whole life beside the ones already
+/// running, so a quick double tap shows two ripples instead of restarting one. The pool is bounded:
+/// when `cap` instances are live, the oldest one fades out over `FADE` seconds instead of being cut.
+/// Feed each live instance's opacity to `FxLayer::opacity`.
+#[derive(Clone, Debug)]
+pub struct OneShots<T> {
+    cap: usize,
+    shots: Vec<OneShot<T>>,
+    count: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OneShot<T> {
+    /// Start time on the layer's clock.
+    pub t0: f32,
+    pub data: T,
+    /// Distinct per instance, so overlapping instances don't look identical.
+    pub seed: u32,
+    retired: Option<f32>,
+}
+
+impl<T: Copy> OneShots<T> {
+    /// How long a retired instance takes to fade out.
+    pub const FADE: f32 = 0.16;
+
+    pub fn new(cap: usize) -> Self {
+        OneShots { cap: cap.max(1), shots: Vec::new(), count: 0 }
+    }
+
+    pub fn trigger(&mut self, t: f32, data: T) {
+        self.shots.retain(|s| s.retired.is_none_or(|r| t - r < Self::FADE));
+        let active = self.shots.iter().filter(|s| s.retired.is_none()).count();
+        if active >= self.cap
+            && let Some(old) = self.shots.iter_mut().filter(|s| s.retired.is_none()).min_by(|a, b| a.t0.total_cmp(&b.t0))
+        {
+            old.retired = Some(t);
+        }
+        // Retired instances are fading; under a storm of triggers drop the most faded first.
+        while self.shots.len() >= self.cap * 2 {
+            let i = (0..self.shots.len()).min_by(|&a, &b| self.shots[a].retired.unwrap_or(f32::MAX).total_cmp(&self.shots[b].retired.unwrap_or(f32::MAX))).unwrap();
+            self.shots.remove(i);
+        }
+        self.count = self.count.wrapping_add(1);
+        self.shots.push(OneShot { t0: t, data, seed: cpu::hu(self.count, 0x51ed), retired: None });
+    }
+
+    /// Instances alive at `t` (started less than `life` seconds ago) with their opacity.
+    pub fn live(&self, t: f32, life: f32) -> impl Iterator<Item = (&OneShot<T>, f32)> {
+        self.shots.iter().filter_map(move |s| {
+            let k = match s.retired {
+                Some(r) => {
+                    let x = ((t - r) / Self::FADE).clamp(0.0, 1.0);
+                    1.0 - x * x * (3.0 - 2.0 * x)
+                }
+                None => 1.0,
+            };
+            (t - s.t0 < life && k > 0.0).then_some((s, k))
+        })
+    }
+
+    /// Drop instances that finished (older than `life`) or faded out.
+    pub fn prune(&mut self, t: f32, life: f32) {
+        self.shots.retain(|s| t - s.t0 < life && s.retired.is_none_or(|r| t - r < Self::FADE));
+    }
+
+    pub fn is_animating(&self, t: f32, life: f32) -> bool {
+        self.live(t, life).next().is_some()
+    }
+
+    pub fn clear(&mut self) {
+        self.shots.clear();
+    }
+}
+
 // ---------------------------------------------------------------- knobs
 
 /// A tunable parameter with its range, for knobs panels.
@@ -852,6 +928,8 @@ pub struct FxLayer {
     pub seed: u32,
     pub reduced_motion: bool,
     pub source: Option<Source>,
+    /// 0..1, scales the layer's whole output (a retiring one-shot fades out with it).
+    pub opacity: f32,
 }
 
 impl Fx {
@@ -875,7 +953,7 @@ impl Fx {
             Fx::Electric(_) => Place::Over,
             _ => Place::Over,
         };
-        FxLayer { fx: self, shape, place, time: 0.0, seed: 1, reduced_motion: false, source: None }
+        FxLayer { fx: self, shape, place, time: 0.0, seed: 1, reduced_motion: false, source: None, opacity: 1.0 }
     }
 
     pub fn needs_backdrop(&self) -> bool {
@@ -939,6 +1017,7 @@ impl FxLayer {
     pub fn under(mut self) -> Self { self.place = Place::Under; self }
     pub fn reduced(mut self, on: bool) -> Self { self.reduced_motion = on; self }
     pub fn source(mut self, slot: u32, rect: Rect) -> Self { self.source = Some(Source { slot, rect }); self }
+    pub fn opacity(mut self, k: f32) -> Self { self.opacity = k; self }
 
     /// Whether this layer still changes over time (the frame loop may stop ticking when false).
     pub fn is_animating(&self) -> bool {
@@ -998,11 +1077,14 @@ impl FxLayer {
     /// Pack into an instance; `None` when the layer is idle (intensity 0, finished one-shot).
     /// Returns (kind, instance without bounds, bounds in pt).
     pub(crate) fn pack(&self) -> Option<(usize, InstRaw, Rect)> {
+        if self.opacity <= 0.0 {
+            return None;
+        }
         let s = self.shape;
         let r = s.rect;
         let mut i = InstRaw {
             rect: r.xywh(),
-            shape: [s.radius.min(r.w * 0.5).min(r.h * 0.5).max(0.0), 1.0, 0.0, 0.0],
+            shape: [s.radius.min(r.w * 0.5).min(r.h * 0.5).max(0.0), 1.0, self.opacity.min(1.0), 0.0],
             bounds: [0.0; 4],
             c0: [0.0; 4],
             c1: [0.0; 4],
@@ -1044,7 +1126,7 @@ impl FxLayer {
                 let (v, b) = match p.style {
                     PulseStyle::Radar => (0.0, r.inflate(p.reach + p.width * 3.2 * 4.0)),
                     PulseStyle::Breathe => (1.0, r.inflate(p.reach * 5.0)),
-                    PulseStyle::Heartbeat => (2.0, r.inflate(p.reach + p.width * 8.0)),
+                    PulseStyle::Heartbeat => (2.0, r.inflate(p.reach + p.width * 16.0 + 2.0)),
                     PulseStyle::Ping { from, dir, travel } => {
                         if p.repeat <= 0.0 && (self.time < p.t0 || self.time > p.t0 + p.duration * 2.2) {
                             return None;
@@ -1282,6 +1364,42 @@ mod tests {
         assert!(!Fx::pulse(ripple).on(card()).at(1.6).is_animating());
         let shock = DistortParams::shockwave([0.0, 0.0], 0.0);
         assert!(Fx::distort(shock).on(card()).at(2.0).pack().is_none());
+    }
+
+    #[test]
+    fn one_shots_overlap_and_retire_by_fading() {
+        let mut p = OneShots::new(3);
+        for k in 0..3 {
+            p.trigger(k as f32 * 0.1, k);
+        }
+        let live: Vec<_> = p.live(0.25, 1.0).map(|(s, o)| (s.data, o)).collect();
+        assert_eq!(live, vec![(0, 1.0), (1, 1.0), (2, 1.0)], "a retrigger never restarts or cuts the running ones");
+        // Full: the oldest fades out over FADE instead of vanishing.
+        p.trigger(0.3, 3);
+        let o0 = |t: f32| p.live(t, 1.0).find(|(s, _)| s.data == 0).map_or(0.0, |(_, o)| o);
+        assert_eq!(o0(0.3), 1.0);
+        let mut prev = 1.0;
+        for i in 1..=20 {
+            let v = o0(0.3 + i as f32 * OneShots::<i32>::FADE / 20.0);
+            assert!(v <= prev && prev - v < 0.2, "fades smoothly: {prev} -> {v}");
+            prev = v;
+        }
+        assert_eq!(prev, 0.0);
+        assert_eq!(p.live(0.31, 1.0).filter(|(_, o)| *o == 1.0).count(), 3);
+        // A storm of triggers stays bounded.
+        for k in 0..100 {
+            p.trigger(0.4 + k as f32 * 0.001, k);
+        }
+        assert!(p.live(0.5, 1.0).count() <= 6);
+        let seeds: std::collections::HashSet<u32> = p.live(0.5, 1.0).map(|(s, _)| s.seed).collect();
+        assert!(seeds.len() > 1, "instances get distinct seeds");
+    }
+
+    #[test]
+    fn opacity_zero_is_culled() {
+        assert!(Fx::glow(GlowParams::default()).on(card()).opacity(0.0).pack().is_none());
+        let (_, i, _) = Fx::glow(GlowParams::default()).on(card()).opacity(0.4).pack().unwrap();
+        assert_eq!(i.shape[2], 0.4);
     }
 
     #[test]

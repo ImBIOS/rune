@@ -29,8 +29,7 @@ fn fork_col(i: Inst, heat: f32) -> vec3f {
     return mix(mix(i.c2.rgb, i.c0.rgb, smoothstep(0.0, 0.5, heat)), i.c1.rgb, smoothstep(0.6, 1.0, heat));
 }
 
-@fragment
-fn fs(in: VOut) -> @location(0) vec4f {
+fn shade(in: VOut) -> vec4f {
     let i = insts[in.id];
     let c = ctx(i, in.px);
     let w = max(i.p0.w, c.aa * 0.7);
