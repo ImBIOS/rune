@@ -1,0 +1,41 @@
+# Rune site
+
+The docs site for Rune: what it is, its principles, its architecture and its roadmap. Vite and React, prerendered to
+static HTML.
+
+- `bun run dev`: dev server at `http://127.0.0.1:4241/team/rune/`.
+- `bun run build`: typecheck, client and SSR builds, then prerender every route into
+  `.cloudflare/output/v0/workers/default/assets/` (Build Output for the `cf` CLI). `--mode dev` builds for
+  dev.anoma.ly.
+
+Content lives in `src/content.tsx` (principles, layers, decisions, milestones, risks) and `src/pages.tsx`. The
+source of truth for all of it is `PLAN.md` at the repo root; update the plan first, then the site.
+
+## Hosting and deploys
+
+The site is served at https://anoma.ly/team/rune and https://dev.anoma.ly/team/rune, the same way as Abattoir.
+
+- A push to `dev` that touches `site/` deploys https://dev.anoma.ly/team/rune (Worker `rune-site-dev`).
+- A push to `production` that touches `site/` deploys https://anoma.ly/team/rune (Worker `rune-site`). To release,
+  fast-forward it to `dev`: `git push origin dev:production`. Never commit to `production` directly.
+
+Nothing else deploys. `.github/workflows/site.yml` runs `bun run deploy:<production|dev>` with the
+`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets. The token needs Workers Scripts Write on the account and
+Workers Routes Write on `anoma.ly`.
+
+`cloudflare.config.ts` defines both environments, selected by the build mode. `worker.ts` redirects other hosts to the
+canonical one, strips the base path `/team/rune` (from `src/base.ts`) and serves the static files. Vite's `base`, the
+links (`withBase`) and the client router (`stripBase`) use the same constant.
+
+`/team` on both hosts sits behind a Cloudflare Access app, so only Anomaly accounts get in. `workers.dev` and preview
+URLs are off, so nothing bypasses Access.
+
+## Design system
+
+`src/system/` (`tokens.css`, `primitives.css`, `Frame.tsx`, `useActiveId.ts`) and the Geist fonts in
+`public/fonts/` are copied unchanged from Abattoir's design system (Anomaly's docs system, direction "Workbench").
+`src/site.css` sets Rune's accent by overriding `--ink` and adds only what the system lacks: the wordmark, the
+architecture diagram, the decisions table and the roadmap rows. These files should become a shared package that both
+sites import; until then, copy changes across by hand rather than editing the copies here.
+
+The screenshots in `public/shots/` are Rune's own headless renders from `demo/`, resized.
