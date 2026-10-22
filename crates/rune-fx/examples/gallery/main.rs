@@ -404,6 +404,8 @@ fn scene(name: &str, b: &mut B) {
             b.fx(Fx::lens(LensParams { second: Some(Shape::circle(lx, 116.0, 30.0)), union_k: 26.0, ..Default::default() })
                 .on(Shape::capsule(140.0, 84.0, 200.0, 64.0)));
             b.backdrop();
+            b.fx(Fx::lens(LensParams { frost: 1.0, ..Default::default() }).on(Shape::capsule(388.0, 92.0, 220.0, 66.0)));
+            b.backdrop();
             b.fx(Fx::distort(DistortParams::shockwave([470.0, 150.0], 0.0)).on(Shape::rounded(0.0, 0.0, W, H, 0.0)));
             b.backdrop();
             b.fx(Fx::distort(DistortParams::crt()).on(Shape::rounded(crt.x, crt.y, crt.w, crt.h, 12.0)));
@@ -613,6 +615,7 @@ impl Ctx {
                     self.ui.draw(&mut p, r.clone());
                 }
                 Op::Fx(i) => {
+                    self.fx.blur_backdrop(&self.device, &self.queue, &mut enc, &self.backdrop_view, *i);
                     let mut p = pass(&mut enc, &self.scene_view, None, None);
                     self.fx.draw_layer(&mut p, *i);
                 }

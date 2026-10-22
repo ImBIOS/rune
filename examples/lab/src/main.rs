@@ -138,6 +138,11 @@ fn main() {
                 ("fire", |s| s.scene = Scene::Fire),
                 ("motion", |s| s.scene = Scene::Motion),
                 ("lens", |s| s.scene = Scene::Lens),
+                ("lens-frost", |s| {
+                    s.scene = Scene::Lens;
+                    let i = specs(Scene::Lens).iter().position(|k| k.id == "frost").unwrap();
+                    s.vals[Scene::Lens.idx()][i] = 1.0;
+                }),
                 ("extras", |s| s.scene = Scene::Extras),
                 ("motion-thrown", thrown),
                 ("fire-reduced", |s| {

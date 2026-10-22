@@ -1070,6 +1070,9 @@ pub(crate) const KIND_MOTION: usize = 5;
 pub(crate) const KIND_EXTRAS: usize = 6;
 pub(crate) const KINDS: usize = 7;
 
+/// Blur sigma (pt) of a fully frosted lens (`LensParams::frost = 1`).
+pub(crate) const LENS_FROST_SIGMA: f32 = 18.0;
+
 /// Calm pose for looping noise effects under reduced motion: frozen at a fixed, pleasant time.
 const CALM_T: f32 = 2.37;
 

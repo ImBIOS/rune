@@ -48,6 +48,70 @@ struct Prepared {
     kind: usize,
     instance: u32,
     bind: usize,
+    /// Drawn quad, device px (x0, y0, x1, y1).
+    bounds: [f32; 4],
+    /// Frosted lens: blur sigma in device px (0 = no backdrop blur).
+    blur_px: f32,
+}
+
+/// Backdrop blur pyramid: half-resolution mip chains for the dual-filter down and up passes.
+struct BlurPyramid {
+    size: [u32; 2],
+    down: Vec<wgpu::TextureView>,
+    up: Vec<wgpu::TextureView>,
+    /// Up chain level 0 (half resolution): what a frosted lens samples.
+    result: wgpu::TextureView,
+    /// Down pass into mip m + 1 (from mip m); the pass into mip 0 reads the backdrop.
+    down_binds: Vec<wgpu::BindGroup>,
+    /// Up pass into mip m from down mip m + 1 (the coarsest level used) or from up mip m + 1.
+    up_binds: Vec<(wgpu::BindGroup, Option<wgpu::BindGroup>)>,
+}
+
+const BLUR_MIPS: u32 = 6;
+const BLUR_SLOTS: usize = 64;
+
+/// A blur pass's inputs; the uniform slot is a dynamic offset.
+fn blur_bind(device: &wgpu::Device, bgl: &wgpu::BindGroupLayout, src: &wgpu::TextureView, fine: &wgpu::TextureView, sampler: &wgpu::Sampler, uniforms: &wgpu::Buffer) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("fx blur"),
+        layout: bgl,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(fine) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: uniforms, offset: 0, size: wgpu::BufferSize::new(16) }) },
+        ],
+    })
+}
+
+impl BlurPyramid {
+    fn new(device: &wgpu::Device, viewport: [u32; 2], bgl: &wgpu::BindGroupLayout, dummy: &wgpu::TextureView, sampler: &wgpu::Sampler, uniforms: &wgpu::Buffer) -> BlurPyramid {
+        let size = [viewport[0].div_ceil(2).max(1), viewport[1].div_ceil(2).max(1)];
+        let mips = BLUR_MIPS.min(32 - size[0].max(size[1]).leading_zeros());
+        let make = |label| {
+            let t = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+                mip_level_count: mips,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            (0..mips)
+                .map(|m| t.create_view(&wgpu::TextureViewDescriptor { base_mip_level: m, mip_level_count: Some(1), ..Default::default() }))
+                .collect::<Vec<_>>()
+        };
+        let down = make("fx blur down");
+        let up = make("fx blur up");
+        let result = up[0].clone();
+        let bind = |src, fine| blur_bind(device, bgl, src, fine, sampler, uniforms);
+        let m = down.len();
+        let down_binds = (1..m).map(|k| bind(&down[k - 1], dummy)).collect();
+        let up_binds = (0..m - 1).map(|k| (bind(&down[k + 1], &down[k]), (k + 2 < m).then(|| bind(&up[k + 1], &down[k])))).collect();
+        BlurPyramid { size: viewport, down, up, result, down_binds, up_binds }
+    }
 }
 
 pub struct FxRenderer {
@@ -68,6 +132,13 @@ pub struct FxRenderer {
     scratch_xf: Vec<[f32; 4]>,
     mip_pipeline: wgpu::RenderPipeline,
     mip_bgl: wgpu::BindGroupLayout,
+    blur: Option<BlurPyramid>,
+    blur_down: wgpu::RenderPipeline,
+    blur_up: wgpu::RenderPipeline,
+    blur_bgl: wgpu::BindGroupLayout,
+    blur_uniforms: wgpu::Buffer,
+    blur_slot: usize,
+    viewport: [u32; 2],
     opts: FxOptions,
 }
 
@@ -110,6 +181,7 @@ impl FxRenderer {
                 entry(0, fr, tex),
                 entry(1, fr, tex),
                 entry(2, fr, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
+                entry(3, fr, tex),
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -223,6 +295,52 @@ impl FxRenderer {
             cache: None,
         });
 
+        // Backdrop blur pyramid (frosted glass).
+        let blur_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fx blur"),
+            entries: &[
+                entry(0, fr, tex),
+                entry(1, fr, tex),
+                entry(2, fr, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
+                entry(3, fr, wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: true, min_binding_size: wgpu::BufferSize::new(16) }),
+            ],
+        });
+        let blur_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("fx blur"),
+            bind_group_layouts: &[Some(&blur_bgl)],
+            immediate_size: 0,
+        });
+        let blur_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("fx blur"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/blur.wgsl").into()),
+        });
+        let blur_pipe = |entry: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&blur_layout),
+                vertex: wgpu::VertexState { module: &blur_module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &blur_module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let blur_down = blur_pipe("fs_down");
+        let blur_up = blur_pipe("fs_up");
+        let blur_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fx blur params"),
+            size: (BLUR_SLOTS * 256) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let inst_cap = 64;
         let xform_cap = 4096;
         FxRenderer {
@@ -243,6 +361,13 @@ impl FxRenderer {
             scratch_xf: Vec::new(),
             mip_pipeline,
             mip_bgl,
+            blur: None,
+            blur_down,
+            blur_up,
+            blur_bgl,
+            blur_uniforms,
+            blur_slot: 0,
+            viewport: [0, 0],
             opts,
         }
     }
@@ -266,8 +391,17 @@ impl FxRenderer {
         let vw = frame.viewport[0] as f32;
         let vh = frame.viewport[1] as f32;
         let s = frame.scale;
-        // Bind groups keyed by (needs backdrop, source slot) so equal layers share one.
-        let mut keys: Vec<(bool, Option<u32>)> = Vec::new();
+        self.viewport = frame.viewport;
+        self.blur_slot = 0;
+        let wants_blur = |l: &FxLayer| match l.fx {
+            Fx::Distort(DistortParams::Lens(p)) => p.frost > 0.0,
+            _ => false,
+        };
+        if frame.backdrop.is_some() && frame.layers.iter().any(wants_blur) && self.blur.as_ref().is_none_or(|b| b.size != frame.viewport) {
+            self.blur = Some(BlurPyramid::new(device, frame.viewport, &self.blur_bgl, &self.dummy, &self.sampler, &self.blur_uniforms));
+        }
+        // Bind groups keyed by (needs backdrop, source slot, blurred backdrop) so equal layers share one.
+        let mut keys: Vec<(bool, Option<u32>, bool)> = Vec::new();
         for layer in frame.layers {
             let Some((kind, mut inst, b)) = layer.pack() else {
                 stats.culled_idle += 1;
@@ -288,12 +422,17 @@ impl FxRenderer {
             inst.shape[1] = s;
             let needs_bd = layer.fx.needs_backdrop();
             stats.needs_backdrop |= needs_bd;
-            let key = (needs_bd && frame.backdrop.is_some(), layer.source.map(|s| s.slot));
+            let blur_px = match layer.fx {
+                Fx::Distort(DistortParams::Lens(p)) if frame.backdrop.is_some() => (p.frost.clamp(0.0, 1.0) * LENS_FROST_SIGMA * s).max(0.0),
+                _ => 0.0,
+            };
+            let key = (needs_bd && frame.backdrop.is_some(), layer.source.map(|s| s.slot), blur_px > 0.0);
             let bind = match keys.iter().position(|k| *k == key) {
                 Some(p) => p,
                 None => {
                     let bd = if key.0 { frame.backdrop.unwrap() } else { &self.dummy };
                     let src = key.1.and_then(|slot| frame.sources.get(slot as usize).copied()).unwrap_or(&self.dummy);
+                    let blurred = if key.2 { self.blur.as_ref().map_or(&self.dummy, |b| &b.result) } else { &self.dummy };
                     self.binds.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("fx1"),
                         layout: &self.bgl1,
@@ -301,6 +440,7 @@ impl FxRenderer {
                             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(bd) },
                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src) },
                             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(blurred) },
                         ],
                     }));
                     keys.push(key);
@@ -309,7 +449,7 @@ impl FxRenderer {
             };
             stats.drawn += 1;
             stats.pixels += ((x1 - x0) * (y1 - y0)) as u64;
-            self.prepared.push(Some(Prepared { kind, instance: self.scratch.len() as u32, bind }));
+            self.prepared.push(Some(Prepared { kind, instance: self.scratch.len() as u32, bind, bounds: [x0, y0, x1, y1], blur_px }));
             self.scratch.push(inst);
         }
         let mut regrow = self.bg0.is_none();
@@ -361,6 +501,80 @@ impl FxRenderer {
                 self.draw_layer(pass, i);
             }
         }
+    }
+
+    /// Blur the backdrop for a frosted lens (`LensParams::frost > 0`), scissored to the layer.
+    ///
+    /// Call it after copying the backdrop for layer `layer` and before drawing that layer, outside
+    /// any render pass. Returns false (and does nothing) for other layers; a frosted lens drawn
+    /// without it falls back to a small in-shader blur.
+    pub fn blur_backdrop(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, backdrop: &wgpu::TextureView, layer: usize) -> bool {
+        let Some(Some(p)) = self.prepared.get(layer) else { return false };
+        let (Some(pyr), true) = (self.blur.as_ref(), p.blur_px > 0.0) else { return false };
+        let mips = pyr.down.len();
+        if mips < 2 || self.blur_slot + mips > BLUR_SLOTS {
+            return false;
+        }
+        // Pyramid level (half-res mip) whose blur matches the sigma; the fraction crossfades levels.
+        let level = (p.blur_px / 2.0).max(1.0).log2().clamp(0.0, (mips - 1) as f32);
+        let n = (level.ceil() as usize).clamp(1, mips - 1);
+        let frac = (level - (n - 1) as f32).clamp(0.0, 1.0);
+        let margin = p.blur_px * 3.0 + 8.0;
+        let [vw, vh] = self.viewport;
+        let region = [(p.bounds[0] - margin).max(0.0), (p.bounds[1] - margin).max(0.0), (p.bounds[2] + margin).min(vw as f32), (p.bounds[3] + margin).min(vh as f32)];
+        let base = self.blur_slot;
+        self.blur_slot += mips;
+        let mut params = vec![0u8; mips * 256];
+        for k in 0..mips {
+            let w: f32 = if k + 1 == n { frac } else { 1.0 };
+            params[k * 256..k * 256 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        queue.write_buffer(&self.blur_uniforms, (base * 256) as u64, &params);
+        let scissor = |m: usize| {
+            let k = (2u32 << m) as f32;
+            let w = (vw.div_ceil(2) >> m).max(1);
+            let h = (vh.div_ceil(2) >> m).max(1);
+            let x0 = ((region[0] / k).floor() as u32).saturating_sub(2).min(w - 1);
+            let y0 = ((region[1] / k).floor() as u32).saturating_sub(2).min(h - 1);
+            let x1 = ((region[2] / k).ceil() as u32 + 2).min(w);
+            let y1 = ((region[3] / k).ceil() as u32 + 2).min(h);
+            (x0, y0, x1.max(x0 + 1) - x0, y1.max(y0 + 1) - y0)
+        };
+        let first = blur_bind(device, &self.blur_bgl, backdrop, &self.dummy, &self.sampler, &self.blur_uniforms);
+        let mut run = |pipe: &wgpu::RenderPipeline, dst: &wgpu::TextureView, bg: &wgpu::BindGroup, slot: usize, m: usize| {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("fx blur"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: dst,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let (x, y, w, h) = scissor(m);
+            pass.set_scissor_rect(x, y, w, h);
+            pass.set_pipeline(pipe);
+            pass.set_bind_group(0, bg, &[(slot * 256) as u32]);
+            pass.draw(0..3, 0..1);
+        };
+        for m in 0..=n {
+            let bg = if m == 0 { &first } else { &pyr.down_binds[m - 1] };
+            run(&self.blur_down, &pyr.down[m], bg, base + m, m);
+        }
+        for m in (0..n).rev() {
+            let (from_down, from_up) = &pyr.up_binds[m];
+            let bg = if m + 1 == n { from_down } else { from_up.as_ref().unwrap() };
+            run(&self.blur_up, &pyr.up[m], bg, base + m, m);
+        }
+        // Tell the lens shader the pyramid is ready (xf.x), and how much of it to use (xf.y).
+        let xf = [1.0f32, (p.blur_px / 3.0).min(1.0), 0.0, 0.0];
+        let off = p.instance as usize * INST_SIZE + std::mem::offset_of!(InstRaw, xf);
+        queue.write_buffer(&self.insts, off as u64, bytemuck::cast_slice(&xf));
+        true
     }
 
     /// Fill mips 1.. of a mask pyramid from its level 0 (render the mask into `pyramid.level(0)` first).

@@ -814,6 +814,7 @@ impl Compositor<Lab> for LabGfx {
                             wgpu::TexelCopyTextureInfo { texture: &res.backdrop.tex, mip_level: 0, origin: o, aspect: wgpu::TextureAspect::All },
                             wgpu::Extent3d { width: sw, height: sh, depth_or_array_layers: 1 },
                         );
+                        res.fx.blur_backdrop(f.device, f.queue, enc, &res.backdrop.view, i);
                         rp = pass(enc, &res.scene.view, None).forget_lifetime();
                     }
                     rp.set_scissor_rect(sx, sy, sw, sh);

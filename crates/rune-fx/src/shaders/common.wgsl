@@ -36,6 +36,8 @@ fn dat1(base: u32, i: u32) -> f32 { return data[base + (i >> 2u)][i & 3u]; }
 @group(1) @binding(0) var backdrop: texture_2d<f32>;
 @group(1) @binding(1) var source: texture_2d<f32>;
 @group(1) @binding(2) var samp: sampler;
+// The backdrop's blur pyramid result (frosted lenses only; see FxRenderer::blur_backdrop).
+@group(1) @binding(3) var blurred: texture_2d<f32>;
 
 struct VOut {
     @builtin(position) pos: vec4f,

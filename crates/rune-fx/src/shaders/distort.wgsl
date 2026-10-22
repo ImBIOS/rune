@@ -13,6 +13,21 @@ fn bd(p: vec2f, scale: f32) -> vec4f {
     return textureSampleLevel(backdrop, samp, p * scale / g.viewport, 0.0);
 }
 
+fn bdb(p: vec2f, scale: f32) -> vec3f {
+    return textureSampleLevel(blurred, samp, p * scale / g.viewport, 0.0).rgb;
+}
+
+// Frosted material, after Apple's "regular" glass: a saturation boost puts back the colour that
+// blur and scrim take out, and a compressive transfer lifts dark backdrops while light ones
+// barely move (macOS 26 Control Center measures sRGB L' = 0.58 L + 0.134; iOS keeps more of
+// the colour, so this sits a little above that). k = 0..1.
+fn frosted(c: vec3f, k: f32) -> vec3f {
+    let l = lum(c);
+    let sat = max(mix(vec3f(l), c, 1.0 + 0.9 * k), vec3f(0.0));
+    let e = to_srgb(sat);
+    return to_lin(e * (1.0 - 0.32 * k) + vec3f(0.11 * k));
+}
+
 fn lens_sd(c: Ctx, i: Inst, q: vec2f) -> f32 {
     let da = sd_rrect(q, c.half, c.r);
     if (i.p3.z <= 0.0) { return da; }
@@ -112,21 +127,34 @@ fn shade(in: VOut) -> vec4f {
         let srcr = ctr + (local + inward * bend * (1.0 - dsp)) / mag;
         let srcb = ctr + (local + inward * bend * (1.0 + dsp)) / mag;
         var col = vec3f(bd(srcr, s).r, bd(srcg, s).g, bd(srcb, s).b);
-        // Rim softening where the page is squeezed into a thin band.
-        let rim = bend / max(1.118 * i.p0.y, 1e-3);
-        let soften = min(pow(rim, 1.5) * 0.55, 1.0);
         let frost = i.p1.y;
-        if (soften > 1e-3 || frost > 0.0) {
-            let rad = mix(1.2, 10.0, frost);
-            let j = ign(in.px) * TAU;
-            var acc = vec3f(0.0);
-            for (var k = 0; k < 8; k++) {
-                let a = j + f32(k) * 2.39996;
-                let rr = rad * sqrt((f32(k) + 0.5) / 8.0);
-                acc += bd(srcg + vec2f(cos(a), sin(a)) * rr, s).rgb;
+        if (frost > 0.0 && i.xf.x > 0.5) {
+            // Frosted: the dual-filter pyramid, refracted like the clear image (so the rim still
+            // bends and splits), then the material transfer and a static grain against banding.
+            let blr = vec3f(bdb(srcr, s).r, bdb(srcg, s).g, bdb(srcb, s).b);
+            col = mix(col, blr, i.xf.y);
+            let k = presence * smoothstep(0.0, 0.6, frost);
+            col = frosted(col, k);
+            let ip = vec2u(in.px);
+            let n = u01(ip.x + pcg(ip.y + 7u)) - u01(ip.x * 7919u + pcg(ip.y + 31u));
+            col = to_lin(max(to_srgb(col) + vec3f(n * 1.6 / 255.0 * k), vec3f(0.0)));
+        } else {
+            // Rim softening where the page is squeezed into a thin band (+ a small fallback frost
+            // when no pyramid was built).
+            let rim = bend / max(1.118 * i.p0.y, 1e-3);
+            let soften = min(pow(rim, 1.5) * 0.55, 1.0);
+            if (soften > 1e-3 || frost > 0.0) {
+                let rad = mix(1.2, 10.0, frost);
+                let j = ign(in.px) * TAU;
+                var acc = vec3f(0.0);
+                for (var k = 0; k < 8; k++) {
+                    let a = j + f32(k) * 2.39996;
+                    let rr = rad * sqrt((f32(k) + 0.5) / 8.0);
+                    acc += bd(srcg + vec2f(cos(a), sin(a)) * rr, s).rgb;
+                }
+                acc /= 8.0;
+                col = mix(col, acc, clamp(max(soften, frost), 0.0, 1.0));
             }
-            acc /= 8.0;
-            col = mix(col, acc, clamp(max(soften, frost), 0.0, 1.0));
         }
         col = mix(col, col * i.c0.rgb, i.p2.y * presence);
         // Light: sky sheen, crisp specular where the rim faces the light, a fainter counter-line, hairline.
