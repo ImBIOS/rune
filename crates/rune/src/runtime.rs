@@ -22,7 +22,7 @@ use rune_motion::{
 use taffy::prelude::*;
 use taffy::TraversePartialTree;
 
-use crate::color::{Color, over, srgb_encode};
+use crate::color::{Color, over};
 use crate::edit::{EditOutcome, Ime, KeyEvent};
 use crate::el::{Align, Drag, DragFn, El, GrowthSpec, InputSpec, Phase, PointerPress, PressFn, SecondaryFn, ScrollSpec, Shell, TextSpec, Tx, Visual};
 use crate::growth::{GrowTrack, SUBSTEP};
@@ -658,7 +658,7 @@ impl<S: 'static> Runtime<S> {
         self.text.glyphs_for_layout(layout, scale, [rect.x * scale, rect.y * scale], false, &mut self.glyph_scratch);
         let color = spec.color;
         let glyphs = self.glyph_scratch.iter().filter(|q| q.rect[1] < clip[3] * scale && q.rect[1] + q.rect[3] > clip[1] * scale)
-            .map(|q| glyph(q, color.premul(1.0), glyph_gamma(color), clip.map(|v| v * scale), [0.0; 4])).collect();
+            .map(|q| glyph(q, color.premul(1.0), glyph_gamma(color, scale), clip.map(|v| v * scale), [0.0; 4])).collect();
         self.flights.push(TextFlight::new(source, target, rect, clip, glyphs, scale, self.t));
     }
 
@@ -717,7 +717,7 @@ impl<S: 'static> Runtime<S> {
             self.glyph_scratch.clear();
             self.text.glyphs_for_layout(layout, s, [target.x * s, target.y * s], false, &mut self.glyph_scratch);
             for q in &self.glyph_scratch {
-                let q = glyph(q, spec.color.premul(1.0), glyph_gamma(spec.color), NO_CLIP, [0.0; 4]);
+                let q = glyph(q, spec.color.premul(1.0), glyph_gamma(spec.color, s), NO_CLIP, [0.0; 4]);
                 self.instances.push(transformed(q, target, current, s, target_alpha,
                     if reduced { actual_clip } else { clip }, if reduced { final_fade } else { fade }));
             }
@@ -2268,7 +2268,7 @@ impl<S: 'static> Runtime<S> {
                             self.text.glyphs_for_layout(&pl, s, origin, false, &mut self.glyph_scratch);
                             let pc = inp.placeholder_color.premul(o);
                             for q in &self.glyph_scratch {
-                                self.instances.push(glyph(q, pc, glyph_gamma(inp.placeholder_color), clip, fade));
+                                self.instances.push(glyph(q, pc, glyph_gamma(inp.placeholder_color, s), clip, fade));
                             }
                         }
                         if e.focused && !departing {
@@ -2329,7 +2329,7 @@ impl<S: 'static> Runtime<S> {
                     let reveal = self.reveals.get(&n.id).filter(|st| !st.words.is_empty());
                     self.glyph_scratch.clear();
                     self.text.glyphs_for_layout(layout, s, origin, reveal.is_some(), &mut self.glyph_scratch);
-                    let gamma = glyph_gamma(color);
+                    let gamma = glyph_gamma(color, s);
                     let base = color.premul(o);
                     for q in &self.glyph_scratch {
                         if self.flights.iter().any(|f| n.key.as_deref() == Some(&f.target_key)) { continue; }
@@ -2341,7 +2341,7 @@ impl<S: 'static> Runtime<S> {
                             && let Some(c) = spec.spans.get(q.ink as usize - 1).and_then(|sp| sp.color)
                         {
                             f = c.premul(o);
-                            gm = glyph_gamma(c);
+                            gm = glyph_gamma(c, s);
                         }
                         if let Some(st) = reveal {
                             let a = Self::reveal_alpha(st, q.byte, now);
@@ -2682,11 +2682,8 @@ fn rect_inst(rect: [f32; 4], fill: [f32; 4], radius: f32, clip: [f32; 4], fade: 
     }
 }
 
-/// Coverage exponent: dark text on light gets a little more weight (linear blending thins it),
-/// light text on dark is left almost as rasterised.
-fn glyph_gamma(c: Color) -> f32 {
-    let l = srgb_encode(c.luminance());
-    0.78 + 0.22 * l
+fn glyph_gamma(c: Color, scale: f32) -> f32 {
+    crate::text::glyph_coverage_exponent(c, scale)
 }
 
 #[allow(clippy::too_many_arguments)]
