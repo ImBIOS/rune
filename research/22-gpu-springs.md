@@ -128,6 +128,22 @@ CPU reduction: 6.6%, 13.1%, 55.4%, 91.7%. At 10k the retained path saves
 the second buffer write; the convincing scaling win starts at 1k nodes. This measures
 three scalar tracks and one small quad per node, not 10k full text-heavy cards.
 
+Rebased verification on `8b37ced` (the root-workspace/text changes that landed during
+the experiment) passes the CPU tail test, all 81,920 differential samples, all 16
+byte-exact pixel comparisons and the idle/deadline-cancellation assertions. The
+required recheck also repeats the seven-pair timing loop; its noisier measurements
+are retained rather than replacing the first experiment:
+
+| Nodes | CPU-path CPU µs (MAD) | GPU-path CPU µs (MAD) | CPU-path GPU µs | GPU-path GPU µs |
+|---:|---:|---:|---:|---:|
+| 1 | 34.917 (1.417) | 31.917 (1.625) | 10.250 | 10.875 |
+| 100 | 44.416 (.874) | 43.250 (5.083) | 10.292 | 11.417 |
+| 1,000 | 97.583 (13.042) | 43.250 (4.750) | 13.458 | 14.708 |
+| 10,000 | 431.167 (46.376) | 32.666 (2.250) | 36.041 | 36.917 |
+
+The 100-node saving is inside this run's noise; the 1k/10k win survives. Raw runs
+and fixture summaries are in the worktree's `perf/gpu-springs/{spike.log,rebased.log,fixtures/results.json}`.
+
 The initial same-command-buffer Metal query resolve returned reversed/stale timestamps
 on some frames (unsigned subtraction then produced nonsense). Those timings were
 discarded. Resolve now runs in a separate command buffer **after waiting for the draw**,
