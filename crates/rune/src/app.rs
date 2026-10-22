@@ -42,6 +42,7 @@ pub struct App<S: 'static> {
     pub(crate) keep_running: bool,
     pub(crate) on_close: Option<fn(&mut S, &mut Tx)>,
     pub(crate) shared: Arc<Shared<S>>,
+    pub(crate) overlays: Vec<Box<dyn crate::overlay::PendingOverlay>>,
 }
 
 impl<S: 'static> App<S> {
@@ -56,7 +57,18 @@ impl<S: 'static> App<S> {
             keep_running: false,
             on_close: None,
             shared: Arc::default(),
+            overlays: Vec::new(),
         }
+    }
+
+    /// Adds an overlay: an observational surface beside this app's window with its own state,
+    /// drawn transparent above every app, never focused, letting the pointer through (a
+    /// recording HUD), centred on the top or bottom edge of the primary display. Hidden until
+    /// `OverlayHandle::show`; uses the spec's fonts. Headless runs don't draw overlays.
+    pub fn overlay<T: 'static>(&mut self, spec: crate::overlay::OverlaySpec<T>, state: T) -> crate::overlay::OverlayHandle<T> {
+        let (overlay, handle) = crate::overlay::Overlay::new(spec, state, &self.spec);
+        self.overlays.push(Box::new(overlay));
+        handle
     }
 
     /// Build the first state with `f` instead of `AppSpec::init`, so it can capture what the

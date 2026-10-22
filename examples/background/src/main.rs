@@ -7,6 +7,7 @@
 //! cargo run -p background -- --open  # start with the window
 //! cargo run -p background -- --release-gpu  # closing also drops the GPU device
 //! cargo run -p background -- --accessory    # macOS: no Dock icon until `dock on`
+//! # `hud show|hide|top|bottom|recording|transcribing|status` drives a recording-HUD overlay
 //! cargo run -p background -- --snap /tmp/background.png
 //! ```
 
@@ -103,6 +104,30 @@ fn on_close(s: &mut Background, _: &mut Tx) {
     eprintln!("background: window closed; still running");
 }
 
+/// The overlay's own state: what a recording HUD shows.
+#[derive(Default)]
+struct Hud {
+    seconds: u64,
+    transcribing: bool,
+}
+
+fn hud(h: &Hud, _: &mut Cx<Hud>) -> El {
+    let label = if h.transcribing { "Transcribing".to_owned() } else { format!("Recording {}:{:02}", h.seconds / 60, h.seconds % 60) };
+    row().key("hud").w_full().h_full().center().child(
+        row()
+            .key("pill")
+            .h(36.0)
+            .px(space::S3)
+            .gap(space::S2)
+            .center()
+            .radius(18.0)
+            .fill(rune::oklch(0.2, 0.0, 0.0))
+            .border(1.0, rune::oklch(0.3, 0.0, 0.0))
+            .child(el().key("dot").size(8.0, 8.0).radius(4.0).fill(if h.seconds.is_multiple_of(2) { rune::oklch(0.65, 0.2, 25.0) } else { rune::oklch(0.45, 0.12, 25.0) }))
+            .child(text(label).key("label").font(type_::LABEL).color(rune::oklch(0.93, 0.0, 0.0))),
+    )
+}
+
 fn main() {
     let mut app = App::new(rune::AppSpec {
         title: "Background",
@@ -128,11 +153,16 @@ fn main() {
     if std::env::args().any(|a| a == "--release-gpu") {
         app = app.release_gpu_when_closed();
     }
+    // `--hud-large` covers most of the screen, to check that clicks pass through it.
+    let size = if std::env::args().any(|a| a == "--hud-large") { (1200.0, 700.0) } else { (240.0, 44.0) };
+    let overlay = app.overlay(rune::OverlaySpec { name: "background-hud", size, edge: rune::ScreenEdge::Top, margin: 16.0, view: hud }, Hud::default());
     let ticker = app.handle();
+    let hud_ticker = overlay.clone();
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(1));
             ticker.update(|s, _| s.ticks += 1);
+            hud_ticker.update(|h, _| h.seconds += 1);
         }
     });
     let commands = app.handle();
@@ -146,8 +176,15 @@ fn main() {
                 (Some("close"), _) => commands.close(),
                 (Some("quit"), _) => commands.quit(),
                 (Some("dock"), Some(on)) => commands.set_dock_icon(on == "on"),
+                (Some("hud"), Some("show")) => overlay.show(),
+                (Some("hud"), Some("hide")) => overlay.hide(),
+                (Some("hud"), Some("top")) => overlay.set_edge(rune::ScreenEdge::Top),
+                (Some("hud"), Some("bottom")) => overlay.set_edge(rune::ScreenEdge::Bottom),
+                (Some("hud"), Some("transcribing")) => overlay.update(|h, _| h.transcribing = true),
+                (Some("hud"), Some("recording")) => overlay.update(|h, _| h.transcribing = false),
+                (Some("hud"), Some("status")) => eprintln!("background: hud {:?}", overlay.availability()),
                 (Some(other), _) => {
-                    eprintln!("background: unknown command {other:?} (open | activate TOKEN | close | dock on|off | quit)")
+                    eprintln!("background: unknown command {other:?} (open | activate TOKEN | close | dock on|off | hud show|hide|top|bottom|recording|transcribing|status | quit)")
                 }
                 (None, _) => {}
             }

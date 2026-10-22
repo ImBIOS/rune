@@ -35,7 +35,23 @@ struct Win {
     alpha: Option<crate::surface_alpha::AlphaSurface>,
 }
 
-enum WakeEvent { App(usize), Live(usize), Visible(usize, bool), Open(usize), Close(usize) }
+pub(crate) enum WakeEvent { App(usize), Live(usize), Visible(usize, bool), Open(usize), Close(usize) }
+
+/// What `Windows` needs of a host, whatever its state type: an app window or an overlay.
+pub(crate) trait AnyHost {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop);
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent);
+    fn owns(&self, id: WindowId) -> bool;
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent);
+    /// Draws what has no redraw event (a layer surface); true while it needs more frames.
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) -> bool { false }
+    fn set_visible(&mut self, _visible: bool) {}
+    fn open(&mut self, _event_loop: &ActiveEventLoop) {}
+    fn close(&mut self, _event_loop: &ActiveEventLoop) {}
+    fn finished(&self) -> bool { false }
+    /// False for hosts that must not keep the loop running alone (overlays).
+    fn keeps_loop(&self) -> bool { true }
+}
 
 #[derive(Default)]
 struct NativeWindow {
@@ -102,16 +118,16 @@ struct Windows<S: 'static> {
     factory: Option<Box<dyn FnOnce(&[Display]) -> Vec<WindowSpec<S>>>>,
     args: Args,
     proxy: EventLoopProxy<WakeEvent>,
-    hosts: Vec<Option<Host<S>>>,
+    hosts: Vec<Option<Box<dyn AnyHost>>>,
     // Weak pool preserves release_gpu_when_closed when the last GPU owner closes.
     gpu: Rc<RefCell<Weak<Gpu>>>,
 }
 impl<S: 'static> Windows<S> {
     fn cleanup(&mut self, event_loop: &ActiveEventLoop) {
         for host in &mut self.hosts {
-            if host.as_ref().is_some_and(|h| h.finished) { *host = None; }
+            if host.as_ref().is_some_and(|h| h.finished()) { *host = None; }
         }
-        if self.hosts.iter().all(Option::is_none) { event_loop.exit(); }
+        if !self.hosts.iter().flatten().any(|h| h.keeps_loop()) { event_loop.exit(); }
     }
 }
 impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
@@ -124,10 +140,18 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
         }).collect();
         let specs = factory(&displays);
         crate::windows::validate(&specs).expect("window keys");
-        for (slot, spec) in specs.into_iter().enumerate() {
+        let mut overlays = Vec::new();
+        for (slot, mut spec) in specs.into_iter().enumerate() {
+            overlays.append(&mut spec.app.overlays);
             let mut host = Host::new(spec, self.args.clone(), self.proxy.clone(), slot, self.gpu.clone());
-            host.resumed(event_loop);
-            self.hosts.push(Some(host));
+            AnyHost::resumed(&mut host, event_loop);
+            self.hosts.push(Some(Box::new(host)));
+        }
+        for mut overlay in overlays {
+            let (slot, proxy) = (self.hosts.len(), self.proxy.clone());
+            overlay.connect(Arc::new(move || { let _ = proxy.send_event(WakeEvent::App(slot)); }), self.gpu.clone());
+            overlay.resumed(event_loop);
+            self.hosts.push(Some(overlay));
         }
         self.cleanup(event_loop);
     }
@@ -138,7 +162,7 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
         if let Some(Some(host)) = self.hosts.get_mut(slot) {
             match event {
                 WakeEvent::Visible(_, visible) => host.set_visible(visible),
-                WakeEvent::Open(_) => host.open(event_loop, None),
+                WakeEvent::Open(_) => host.open(event_loop),
                 WakeEvent::Close(_) => host.close(event_loop),
                 event => host.user_event(event_loop, event),
             }
@@ -146,10 +170,23 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
         self.cleanup(event_loop);
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        if let Some(host) = self.hosts.iter_mut().flatten().find(|h| h.win.as_ref().is_some_and(|w| w.window.id() == id)) {
+        if let Some(host) = self.hosts.iter_mut().flatten().find(|h| h.owns(id)) {
             host.window_event(event_loop, id, event);
         }
         self.cleanup(event_loop);
+    }
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let mut animating = false;
+        for host in self.hosts.iter_mut().flatten() {
+            animating |= host.about_to_wait(event_loop);
+        }
+        // Layer surfaces have no redraw events: keep turning while one animates (its vsync
+        // paces the loop).
+        event_loop.set_control_flow(if animating { ControlFlow::Poll } else { ControlFlow::Wait });
+    }
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Surfaces go while winit's display connection is still open (layer surfaces live on it).
+        self.hosts.clear();
     }
 }
 
@@ -252,7 +289,7 @@ impl<S: 'static> Host<S> {
 }
 
 
-fn is_wayland(event_loop: &ActiveEventLoop) -> bool {
+pub(crate) fn is_wayland(event_loop: &ActiveEventLoop) -> bool {
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
     return winit::platform::wayland::ActiveEventLoopExtWayland::is_wayland(event_loop);
     #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
@@ -641,7 +678,15 @@ impl<S: 'static> Host<S> {
     }
 }
 
-impl<S: 'static> ApplicationHandler<WakeEvent> for Host<S> {
+impl<S: 'static> AnyHost for Host<S> {
+    fn owns(&self, id: WindowId) -> bool {
+        self.win.as_ref().is_some_and(|w| w.window.id() == id)
+    }
+    fn set_visible(&mut self, visible: bool) { Host::set_visible(self, visible) }
+    fn open(&mut self, event_loop: &ActiveEventLoop) { Host::open(self, event_loop, None) }
+    fn close(&mut self, event_loop: &ActiveEventLoop) { Host::close(self, event_loop) }
+    fn finished(&self) -> bool { self.finished }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.started {
             return;
