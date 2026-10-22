@@ -77,6 +77,9 @@ accepts packed BGRA or two packed NV12 planes. The native `PixelBuffer` API is m
    them from `Instant`. Backends without timestamp queries still report completion.
    An explicit query set passed to `Renderer::draw_timed` takes precedence; that draw's
    NativeSurface notifications carry CPU submit/completion times only.
+   A custom compositor must call `Frame::draw_ui` (or `Renderer::draw`) to include video.
+   `prepare_lists`/`draw_range` operate on UI instances only; video is a separate list in
+   `Runtime::surfaces`. Prepared but undrawn video generates no submission notification.
    A coalesced completion worker uses nonblocking polls, sleeping between them, including
    for the final frame at idle. It never holds wgpu's device lock while waiting on a GPU
    fence. Counter resolution runs in a separate submission after render completion to

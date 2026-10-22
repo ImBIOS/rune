@@ -22,6 +22,7 @@ pub(crate) struct Imported {
     textures: [wgpu::Texture; 2],
 }
 struct Prepared {
+    drawn: std::sync::atomic::AtomicBool,
     before: u32,
     bind: wgpu::BindGroup,
     uniform: wgpu::Buffer,
@@ -213,6 +214,7 @@ impl SurfaceRenderer {
                 sampling: [if exact { 1.0 } else { 0.0 }, f.size[0] as f32, f.size[1] as f32, 0.0],
             };
             if let Some(p) = self.draws.get_mut(count).filter(|p| Arc::ptr_eq(&p.imported, &imported)) {
+                *p.drawn.get_mut() = false;
                 queue.write_buffer(&p.uniform, 0, bytemuck::bytes_of(&u));
                 p.before = d.before_instance;
                 p.surface = d.surface.clone();
@@ -233,7 +235,14 @@ impl SurfaceRenderer {
                         wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                     ],
                 });
-                let p = Prepared { before: d.before_instance, bind, uniform, imported, surface: d.surface.clone() };
+                let p = Prepared {
+                    drawn: std::sync::atomic::AtomicBool::new(false),
+                    before: d.before_instance,
+                    bind,
+                    uniform,
+                    imported,
+                    surface: d.surface.clone(),
+                };
                 if count < self.draws.len() {
                     self.draws[count] = p;
                 } else {
@@ -310,6 +319,7 @@ impl SurfaceRenderer {
         self.draws[index].before
     }
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, index: usize) {
+        self.draws[index].drawn.store(true, std::sync::atomic::Ordering::Relaxed);
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.draws[index].bind, &[]);
         pass.draw(0..4, 0..1);
@@ -319,6 +329,7 @@ impl SurfaceRenderer {
         let frames: Vec<_> = self
             .draws
             .iter()
+            .filter(|p| p.drawn.load(std::sync::atomic::Ordering::Relaxed))
             .map(|p| {
                 (
                     p.surface.clone(),

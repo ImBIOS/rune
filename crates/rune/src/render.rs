@@ -473,11 +473,7 @@ impl Renderer {
         for index in 0..=video_count {
             let end = if index == video_count { self.count } else { self.surfaces.as_ref().unwrap().before_instance(index).min(self.count) };
             if end > first {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &self.bind_group, &[]);
-                if let Some(properties) = &self.springs { pass.set_bind_group(1, &properties.group, &[]); }
-                pass.set_vertex_buffer(0, self.instances.slice(..));
-                pass.draw(0..4, first..end);
+                self.draw_range(&mut pass, self.format, first..end);
             }
             if index < video_count { self.surfaces.as_ref().unwrap().draw(&mut pass,index); }
             first = end;
