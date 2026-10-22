@@ -45,6 +45,8 @@ impl std::error::Error for FileDialogError {}
 impl FileDialogs {
     /// Native dialogs are opt-in at the app's capability boundary. Headless apps inject
     /// `scripted` instead, so tests never depend on filesystem UI or a display server.
+    /// Poll asynchronously: blocking the window's main thread (for example with
+    /// `pollster::block_on`) deadlocks Cocoa's dialog presentation.
     #[cfg(feature = "native-file-dialog")]
     pub fn native() -> Self { Self(Backend::Native) }
     pub fn scripted(responses: impl IntoIterator<Item = ScriptedFileDialog>) -> Self {
