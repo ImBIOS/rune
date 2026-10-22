@@ -195,7 +195,14 @@ to gradients (kind 4), preserves image/glyph UVs, and translates segment endpoin
 and triangle vertices with their bounding quad (new kinds 5/6). The default shader
 is unchanged. An additional four-frame pixel comparison covers all eight primitive
 kinds sharing one property node, with actual image/glyph atlas data and nonblank
-assertions. This shader adaptation needs a short delta review before pushing.
+assertions. The new-history HiveMind release build passed; its three source hashes
+matched the local render/shader/harness files, ruling out stale CAS output. On Studio,
+all 81,920 differential samples passed with the same maximum errors, and the original
+16 pixel comparisons stayed byte-identical. The four eight-primitive comparisons
+passed: three byte-identical, the terminal-time comparison differing in three
+channels by one 8-bit step (inside the predeclared rounding allowance). The default
+shader has no diff against the new main. This shader adaptation needs a short delta
+review before pushing. Evidence: `perf/gpu-springs/new-root.log`.
 
 ## Shutter motion blur
 
