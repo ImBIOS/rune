@@ -1,76 +1,105 @@
-// Fire / plasma. variant: 0 flames off the top edge (also Heat), 1 flames around the border, 3 embers only.
+// Fire / plasma. variant: 0 flames off the top edge (also Heat), 1 plasma hugging the border, 3 embers only.
 // Embers are a CPU particle table (cpu.rs::embers): xf = (first, count).
-// c0 ramp low (embers/deep), c1 ramp mid, c2 ramp hot
+// c0 ramp low (deep red / plasma envelope), c1 ramp mid, c2 ramp hot
 // p0 (height pt, scale pt, speed (scale units/s), intensity)
 // p1 (ember count, ember rise pt/s, ember size pt, ember life s)
-// p2 (warp, sides (border variant flame height share), base glow, occlusion)
+// p2 (warp, sides (plasma band thickness share), base glow, occlusion)
 // p3 (swirl, _, _, _)
 
+// Temperature to colour: smoke-dark -> deep red -> orange -> yellow -> white-yellow core.
 fn ramp(T: f32, c0: vec3f, c1: vec3f, c2: vec3f) -> vec3f {
-    var col = c0 * smoothstep(0.0, 0.3, T);
-    col = mix(col, c1, smoothstep(0.25, 0.62, T));
-    col = mix(col, c2, smoothstep(0.58, 0.95, T));
-    col = mix(col, vec3f(1.0, 0.97, 0.92), smoothstep(0.9, 1.25, T) * 0.7);
+    var col = mix(vec3f(0.012, 0.009, 0.008), c0, smoothstep(0.04, 0.22, T));
+    col = mix(col, c1, smoothstep(0.2, 0.5, T));
+    col = mix(col, c2, smoothstep(0.45, 0.78, T));
+    col = mix(col, vec3f(1.0, 0.92, 0.74), smoothstep(0.8, 1.08, T));
     return col;
-}
-fn fbm2(p0: vec2f, seed: u32) -> f32 {
-    return (0.5 * gnoise(p0, seed) + 0.25 * gnoise(ROT * p0 * 2.02, seed + 131u)) / 0.75;
 }
 fn fbm4(p0: vec2f, seed: u32) -> f32 {
     var p = p0; var a = 0.5; var s = 0.0;
-    for (var o = 0u; o < 4u; o++) { s += a * gnoise(p, seed + o * 131u); p = ROT * p * 2.02; a *= 0.5; }
+    for (var o = 0u; o < 4u; o++) { s += a * gnoise(p, seed + o * 131u); p = ROT * p * 2.03; a *= 0.5; }
     return s / 0.9375;
+}
+
+fn flames(c: Ctx, i: Inst) -> vec4f {
+    let H = i.p0.x;
+    let sc = max(i.p0.y, 1.0);
+    let tr = c.t * i.p0.z;
+    let nrm = sd_grad(c);
+    let up = clamp(-nrm.y, 0.0, 1.0);
+    // Top edge only: fades over the rounded corners and never past the sides.
+    let span = smoothstep(c.half.x + 2.0, c.half.x - c.r * 0.9 - 2.0, abs(c.q.x));
+    let hl = H * smoothstep(0.15, 0.95, up) * span;
+    if (hl < 0.5) { return vec4f(0.0); }
+    let y = c.d + 1.5; // height above the edge (the base tucks under the node)
+    let yn = y / hl;
+    if (yn > 1.6 || yn < -0.2) { return vec4f(0.0); }
+    let x = c.p.x / sc;
+    // Flicker: tongue heights breathe slowly and jitter at ~8 Hz, per column.
+    let fl = 1.0 + 0.2 * gnoise(vec2f(x * 0.45, c.t * 1.3), c.seed + 7u) + 0.07 * gnoise(vec2f(x * 1.1 + 9.0, c.t * 8.0), c.seed + 8u);
+    let yh = yn / max(fl, 0.4);
+    // Rising, domain-warped turbulence; the warp grows with height, so tongues curl and tear.
+    var sw = vec2f(0.0);
+    if (i.p3.x > 0.0) { sw = i.p3.x * vec2f(sin(y / sc * 0.7 + tr * 0.4), 0.0); }
+    let wq = vec2f(x * 0.7, y / sc * 0.45 - tr * 1.05);
+    let w = vec2f(gnoise(wq, c.seed), gnoise(wq + vec2f(3.7, 1.9), c.seed + 1u)) * i.p2.x * (0.2 + 0.8 * yh);
+    let n = fbm4(vec2f(x * 1.05, y / sc * 0.5 - tr * 1.6) + w + sw, c.seed + 2u);
+    // Density: full at the base, falling with height; the noise carves it into tongues that narrow
+    // as only the strongest plumes survive higher up.
+    let dens = (1.0 - yh) * 1.2 + n * 0.8 - 0.08;
+    let body = smoothstep(0.0, 0.06, dens) * smoothstep(-0.2, 0.05, yn);
+    // Hottest low down and inside a plume; the tips cool to red.
+    // Only the dense heart of a plume near the base reaches the white-yellow core.
+    let T = clamp(dens * (0.95 - 0.5 * yh), 0.0, 1.1);
+    let col = ramp(T, i.c0.rgb, i.c1.rgb, i.c2.rgb);
+    let e = body * (0.3 + 0.75 * T * T);
+    var emis = col * e;
+    // Smoke: a faint dark veil just past the tips (only visible over lighter content).
+    let smoke = smoothstep(-0.32, -0.02, dens) * (1.0 - body) * smoothstep(0.35, 0.9, yh) * 0.12;
+    // A little of the fire's light on the edge it sits on.
+    let bg = i.p2.z * 0.22 * exp(-max(c.d, 0.0) / max(hl * 0.12, 1.0)) * smoothstep(-1.0, 0.5, c.d) * span;
+    emis += i.c1.rgb * bg;
+    return vec4f(emis, body * i.p2.w + smoke);
+}
+
+// Plasma: contained energy hugging the shape. A thin band centred just outside the edge, with
+// ridged filaments flowing along the perimeter, a tight outer falloff and slow breathing.
+fn plasma(c: Ctx, i: Inst) -> vec4f {
+    let sc = max(i.p0.y, 1.0);
+    let thick = max(i.p0.x * i.p2.y * 0.3, 2.5);
+    let pr = rrect_perim(c.q, c.half, c.r);
+    let u = pr.x / pr.y;
+    let d = c.d - thick * 0.45;
+    if (abs(d) > thick * 4.0) { return vec4f(0.0); }
+    let P = max(round(pr.y / (sc * 2.5)), 3.0);
+    let flow = c.t * i.p0.z * (0.35 + 0.25 * i.p3.x);
+    let warp = 0.6 * pgnoise(vec2f(u * P - flow * 0.6, c.t * 0.35), i32(P), c.seed + 3u);
+    // Ridges stretched along the perimeter: filaments run with the flow instead of netting.
+    let r1 = 1.0 - abs(pgnoise(vec2f(u * P - flow * 1.4, d / sc * 3.2 + warp), i32(P), c.seed));
+    let r2 = 1.0 - abs(pgnoise(vec2f(u * P * 2.0 + flow * 1.1, d / sc * 4.5 - warp - c.t * 0.6), i32(P * 2.0), c.seed + 1u));
+    let fil = pow(r1, 10.0) + 0.45 * pow(r2, 12.0);
+    let breathe = 0.78 + 0.22 * pgnoise(vec2f(u * 3.0 - c.t * 0.25, c.t * 0.2), 3, c.seed + 5u);
+    let env = exp(-(d * d) / (thick * thick));
+    let halo = exp(-max(d, 0.0) / (thick * 0.9)) * smoothstep(-thick, 0.0, d);
+    let E = env * (0.18 + 1.2 * fil) * breathe;
+    let rgb = i.c0.rgb * halo * 0.28 + i.c1.rgb * E * 0.55 + i.c2.rgb * fil * env * breathe * 0.9
+            + vec3f(1.0) * pow(fil, 3.0) * env * breathe * 0.35;
+    return vec4f(rgb, (E * 0.5 + halo * 0.1) * i.p2.w * 2.0);
 }
 
 fn shade(in: VOut) -> vec4f {
     let i = insts[in.id];
     let c = ctx(i, in.px);
-    let H = i.p0.x;
-    let sc = max(i.p0.y, 1.0);
-    let speed = i.p0.z;
     let inten = i.p0.w;
-    let t = c.t;
-    var emis = vec3f(0.0);
-    var alpha = 0.0;
-
-    if (c.variant != 3) {
-        let nrm = sd_grad(c);
-        let up = clamp(-nrm.y, 0.0, 1.0);
-        var hl: f32;
-        if (c.variant == 1) {
-            let side = mix(0.14, i.p2.y, smoothstep(-0.3, 0.3, -nrm.y + 0.3));
-            hl = H * mix(side, 1.0, smoothstep(0.2, 0.95, up));
-        } else {
-            // Top edge only: fades over the rounded corners and never past the sides.
-            let span = smoothstep(c.half.x + 2.0, c.half.x - c.r * 0.9 - 2.0, abs(c.q.x));
-            hl = H * smoothstep(0.15, 0.95, up) * span;
-        }
-        let hgt = max(c.d + H * 0.06, 0.0) / max(hl, 0.5);
-        if (hl > 0.5 && hgt < 1.3) {
-            // Domain-warped fbm, stretched vertically into tongues, scrolling upward (buoyancy).
-            let q = c.p / sc;
-            let tr = t * speed;
-            var sw = vec2f(0.0);
-            if (i.p3.x > 0.0) { sw = i.p3.x * vec2f(sin(q.y * 0.7 + tr * 0.4), cos(q.x * 0.6 - tr * 0.3)); }
-            let wq = q * vec2f(0.9, 0.55) + vec2f(0.0, tr * 0.85);
-            let warp = vec2f(fbm2(wq, c.seed), fbm2(wq + vec2f(5.2, 1.3), c.seed + 1u));
-            let n = fbm4(q * vec2f(1.0, 0.5) + vec2f(0.0, tr) + warp * i.p2.x + sw, c.seed + 2u);
-            let n01 = 0.5 + 0.62 * n;
-            var dens = n01 * 1.25 - hgt * 1.05 - 0.05;
-            dens += pow(max(1.0 - hgt, 0.0), 3.0) * 0.28;
-            // Soft cap toward the reach so tongues thin out instead of ending on a line.
-            dens -= smoothstep(0.8, 1.3, hgt) * 0.4;
-            let T = clamp(dens * 1.45, 0.0, 1.3);
-            let col = ramp(T, i.c0.rgb, i.c1.rgb, i.c2.rgb);
-            let e = smoothstep(0.0, 0.35, T) * (0.35 + 0.65 * T);
-            emis += col * e;
-            alpha += e * i.p2.w;
-        }
-        // Light the fire casts around its base.
-        let bg = i.p2.z * exp(-max(c.d, 0.0) / max(hl * 0.22, 1.0)) * smoothstep(-1.0, 1.0, c.d) * smoothstep(0.1, 0.6, hl / max(H, 1e-3));
-        emis += i.c1.rgb * bg * 0.35;
+    var o = vec4f(0.0);
+    if (c.variant == 0) {
+        o = flames(c, i);
+    } else if (c.variant == 1) {
+        o = plasma(c, i);
     }
+    var emis = o.rgb;
+    var alpha = o.a;
 
+    // Embers: short shutter streaks with a hot core, cooling white -> orange -> red as they rise.
     let ef = u32(i.xf.x);
     let en = u32(i.xf.y);
     for (var k = 0u; k < en; k++) {
@@ -79,8 +108,8 @@ fn shade(in: VOut) -> vec4f {
         let sd = segdist(c.p, a.xy - a.zw, a.xy);
         let T = b.y;
         let core = gauss(sd.x, b.x);
-        let halo = gauss(sd.x, b.x * 4.0) * 0.22;
-        emis += ramp(T * 1.15, i.c0.rgb, i.c1.rgb, i.c2.rgb) * (core + halo) * T * 1.6;
+        let halo = gauss(sd.x, b.x * 3.0) * 0.12;
+        emis += ramp(0.25 + T * 0.85, i.c0.rgb, i.c1.rgb, i.c2.rgb) * (core * 1.6 + halo) * T;
         alpha += core * T * 0.5;
     }
     return finish(vec4f(emis * inten, min(alpha, 1.0) * inten), in.px);

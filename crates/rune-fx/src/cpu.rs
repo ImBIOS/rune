@@ -283,13 +283,19 @@ pub(crate) fn electric(p: &ElectricParams, shape: Shape, t: f32, seed: u32, redu
     }
 }
 
+/// Ember drag (1/s): flung out of the flame fast, they slow to a buoyant drift.
+pub(crate) const EMBER_DRAG: f32 = 2.4;
+
 /// Embers: two vec4 per live ember: (pos, streak), (size, temperature, 0, 0). Returns (first, count).
+/// Each is flung up out of the flame, slows under drag toward a buoyant drift, sways in the
+/// turbulence and cools (white -> orange -> red) until it vanishes.
 pub(crate) fn embers(p: &FireParams, rect: Rect, radius: f32, t: f32, seed: u32, data: &mut Vec<[f32; 4]>) -> (f32, f32) {
     let first = data.len() as f32;
     let mut count = 0;
     let life0 = p.ember_life.max(0.1);
-    for k in 0..p.embers.min(40) {
-        let hk0 = hu(seed.wrapping_add(991), k * 7 + 3);
+    let k = EMBER_DRAG;
+    for e in 0..p.embers.min(40) {
+        let hk0 = hu(seed.wrapping_add(991), e * 7 + 3);
         let life = life0 * (0.6 + 0.8 * u01(hk0));
         let tau = t / life + u01(hk0 + 1);
         let kk = tau.floor();
@@ -297,24 +303,27 @@ pub(crate) fn embers(p: &FireParams, rect: Rect, radius: f32, t: f32, seed: u32,
         let hk = hu(hk0, kk as i32 as u32);
         let age = a * life;
         let x0 = rect.x + radius * 0.6 + (rect.w - radius * 1.2) * u01(hk + 2);
-        let y0 = rect.y + 1.5;
-        let vy = p.ember_rise * (0.6 + 0.8 * u01(hk + 3));
-        let sway = 3.0 + 6.0 * u01(hk + 4);
-        let fq = 2.0 + 3.0 * u01(hk + 5);
-        let ph = TAU * u01(hk + 6);
-        let drift = (u01(hk + 7) - 0.5) * 18.0;
-        let y = y0 - vy * age * (1.0 - 0.3 * a);
-        let x = x0 + sway * (age * fq + ph).sin() * a + drift * age;
-        let vyy = -vy * (1.0 - 0.6 * a);
-        let vxx = sway * ((age * fq + ph).cos() * fq * a + (age * fq + ph).sin() / life) + drift;
-        let sz = p.ember_size * (0.55 + 0.9 * u01(hk + 8)) * (1.0 - 0.45 * a);
-        let attack = (a / 0.06).clamp(0.0, 1.0);
-        let temp = (1.0 - a).powf(1.3) * (0.75 + 0.35 * u01(hk + 9)) * attack * attack * (3.0 - 2.0 * attack);
+        let y0 = rect.y - p.height * (0.1 + 0.45 * u01(hk + 3));
+        let v0 = -p.ember_rise * (1.0 + 0.8 * u01(hk + 4));
+        let vt = -p.ember_rise * 0.32;
+        let ek = (-k * age).exp();
+        let y = y0 + vt * age + (v0 - vt) * (1.0 - ek) / k;
+        let vy = vt + (v0 - vt) * ek;
+        let sway = 2.5 + 5.0 * u01(hk + 5);
+        let fq = 3.0 + 4.0 * u01(hk + 6);
+        let ph = TAU * u01(hk + 7);
+        let drift = (u01(hk + 8) - 0.5) * 14.0;
+        let grow = 1.0 - (-age * 3.0).exp();
+        let x = x0 + drift * age + sway * (age * fq + ph).sin() * grow;
+        let vx = drift + sway * ((age * fq + ph).cos() * fq * grow + (age * fq + ph).sin() * 3.0 * (-age * 3.0).exp());
+        let sz = p.ember_size * (0.5 + 0.8 * u01(hk + 9)) * (1.0 - 0.4 * a);
+        let attack = (age / 0.05).clamp(0.0, 1.0);
+        let temp = (-age / (life * 0.42)).exp() * (1.0 - a * a) * (0.8 + 0.3 * u01(hk + 10)) * attack;
         if temp < 0.004 {
             continue;
         }
-        let k_shutter = 0.8 / 60.0;
-        data.push([x, y, vxx * k_shutter, vyy * k_shutter]);
+        let k_shutter = 0.6 / 60.0;
+        data.push([x, y, vx * k_shutter, vy * k_shutter]);
         data.push([sz, temp, 0.0, 0.0]);
         count += 1;
     }

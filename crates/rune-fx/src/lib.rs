@@ -507,19 +507,19 @@ impl FireParams {
     pub fn heat() -> FireParams {
         FireParams {
             style: FireStyle::Heat,
-            low: rgb(0x5a1a06),
-            mid: rgb(0xd9561c),
-            hot: rgb(0xffb35c),
-            height: 11.0,
-            scale: 8.0,
-            speed: 1.0,
-            intensity: 0.42,
-            embers: 3,
-            ember_rise: 26.0,
-            ember_size: 0.5,
-            ember_life: 1.2,
-            warp: 0.7,
-            base_glow: 1.0,
+            low: rgb(0x7a1606),
+            mid: rgb(0xf0601a),
+            hot: rgb(0xffc062),
+            height: 15.0,
+            scale: 7.0,
+            speed: 1.3,
+            intensity: 0.8,
+            embers: 4,
+            ember_rise: 30.0,
+            ember_size: 0.55,
+            ember_life: 1.1,
+            warp: 0.8,
+            base_glow: 0.35,
             occlusion: 0.1,
             ..Default::default()
         }
@@ -528,15 +528,15 @@ impl FireParams {
     pub fn plasma() -> FireParams {
         FireParams {
             style: FireStyle::Border,
-            low: rgb(0x2a0a6b),
-            mid: rgb(0x6b3cff),
-            hot: rgb(0x8fe3ff),
+            low: rgb(0x3a1690),
+            mid: rgb(0x7b5cff),
+            hot: rgb(0x9fe8ff),
             height: 30.0,
             scale: 16.0,
             speed: 1.1,
             intensity: 0.95,
             embers: 0,
-            warp: 1.6,
+            warp: 1.0,
             sides: 0.55,
             base_glow: 0.6,
             swirl: 0.8,
@@ -980,7 +980,7 @@ impl Fx {
                     ElectricStyle::Charged => c(1 + 6 + 5 * 6, 0),
                 }
             }
-            Fx::Fire(p) => c(p.embers.min(40) * 2, if p.style == FireStyle::Embers { 0 } else { 8 }),
+            Fx::Fire(p) => c(p.embers.min(40) * 2, match p.style { FireStyle::Embers => 0, FireStyle::Border => 3, _ => 8 }),
             Fx::Distort(d) => {
                 let (s, a) = match d {
                     DistortParams::HeatHaze { .. } => (1, 6),
@@ -1198,14 +1198,22 @@ impl FxLayer {
                 i.p1 = [if rm { 0.0 } else { p.embers.min(40) as f32 }, p.ember_rise, p.ember_size, p.ember_life];
                 i.p2 = [p.warp, p.sides, p.base_glow, p.occlusion];
                 i.p3 = [p.swirl, 0.0, 0.0, 0.0];
-                let ember_up = if p.embers > 0 && !rm { p.ember_rise * p.ember_life * 1.45 } else { 0.0 };
-                let up = (p.height * 1.32).max(ember_up) + 6.0;
-                let side = p.height * 0.7 + if p.embers > 0 { 24.0 } else { 0.0 };
-                let b = match p.style {
-                    FireStyle::Border => r.inflate(p.height * p.sides.max(0.14) * 1.35 + 6.0),
-                    _ => Rect::new(r.x - 12.0, r.y, r.w + 24.0, 8.0),
+                // Embers: spawn up to 0.55 H, fly (v0 - vt) / drag, then drift vt for the rest of life.
+                let ember_up = if p.embers > 0 && !rm {
+                    let life = p.ember_life.max(0.1) * 1.4;
+                    p.height * 0.55 + p.ember_rise * (1.48 / cpu::EMBER_DRAG + 0.32 * life) + p.ember_size * 4.0
+                } else {
+                    0.0
                 };
-                (KIND_FIRE, b.union(Rect::new(r.x - side, r.y - up, r.w + 2.0 * side, up + 8.0)))
+                let ember_side = if p.embers > 0 && !rm { 7.5 * p.ember_life.max(0.1) * 1.4 + 9.0 } else { 0.0 };
+                let b = match p.style {
+                    FireStyle::Border => r.inflate((p.height * p.sides * 0.3).max(2.5) * 4.6 + 2.0),
+                    _ => {
+                        let up = (p.height * 1.6 + 2.0).max(ember_up) + 4.0;
+                        Rect::new(r.x - ember_side, r.y - up, r.w + 2.0 * ember_side, up + 4.0)
+                    }
+                };
+                (KIND_FIRE, b)
             }
             Fx::Distort(d) => {
                 let b = match *d {

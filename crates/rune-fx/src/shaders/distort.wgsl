@@ -60,7 +60,9 @@ fn shade(in: VOut) -> vec4f {
         } else {
             let above = i.rect.y - c.p.y;
             let side = smoothstep(c.half.x + 2.0, c.half.x - c.r - 4.0, abs(c.q.x));
-            m = smoothstep(-6.0, 4.0, above) * (1.0 - smoothstep(H * 0.35, H, above)) * side;
+            // Starts just clear of the edge so the shape itself never wobbles, and is strongest a
+            // little up the column where the hot air has risen off the flame tips.
+            m = smoothstep(1.0, 1.0 + H * 0.3, above) * (1.0 - smoothstep(H * 0.45, H, above)) * side;
         }
         if (m <= 0.0) { return vec4f(0.0); }
         var t = c.t;
