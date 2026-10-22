@@ -44,6 +44,9 @@ cargo build --profile perf -p rune-light --example light
 target/perf/examples/light bench
 ```
 
+`examples/reel.rs` renders a radiance-cascades reel that steps through the real GI buffers
+(`reel render`, `reel stills T1,T2`, `reel bench`; outputs land in `demo/reel/`).
+
 ## Integration contract
 
 **Inputs, per frame**

@@ -14,3 +14,4 @@ wgpu = { version = "30", default-features = false, features = ["vulkan", "dx12"]
 
 [dev-dependencies]
 rune = { path = "../rune" }
+rune-fx = { path = "../rune-fx" }
