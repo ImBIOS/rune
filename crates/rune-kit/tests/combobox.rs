@@ -2,7 +2,7 @@ use rune::{Cx, El, Env, Ime, Key, KeyEvent, Mods, Runtime};
 use rune_kit::{Combobox, ComboboxOption, ComboboxState, Kit};
 
 #[derive(Default)]
-struct State { combo: ComboboxState, chosen: Option<String>, other: rune::TextEdit }
+struct State { combo: ComboboxState, chosen: Option<String>, other: rune::TextEdit, app_keys: usize }
 fn view(s: &State, _: &mut Cx<State>) -> El {
     let options: Vec<_> = (0..200).map(|i| {
         let mut o = ComboboxOption::new(format!("item-{i}"), format!("Model {i:03}"));
@@ -36,6 +36,7 @@ fn opening_takes_focus_and_reveals_the_offscreen_selection() {
     s.chosen = Some("item-199".into());
     let mut rt = Runtime::new(s, view, (400.0, 400.0), Env { system_dark: true, scale: 1.0 });
     rt.frame(0.0);
+    rt.ime(Ime::Preedit("pending".into(), None)); rt.frame(0.0);
     let trigger = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("models-value-trigger")).unwrap();
     let x = trigger.rect[0] + trigger.rect[2] / 2.0;
     let y = trigger.rect[1] + trigger.rect[3] / 2.0;
@@ -44,6 +45,7 @@ fn opening_takes_focus_and_reveals_the_offscreen_selection() {
     rt.frame(0.0);
     assert!(rt.state.combo.open && rt.state.combo.search.focused);
     assert!(!rt.state.other.focused);
+    assert!(rt.state.other.preedit.is_none());
     let last = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("models-option-item-199")).unwrap();
     assert!(last.visible[3] > 0.0);
     key(&mut rt, Key::Text("099".into()), Mods::default());
@@ -96,4 +98,34 @@ fn combobox_filters_from_scroll_end_preserves_editor_modifiers_and_ime() {
     rt.ime(Ime::Preedit(String::new(), None)); rt.frame(0.0);
     key(&mut rt, Key::Escape, Mods::default());
     assert!(!rt.state.combo.open);
+}
+
+#[test]
+fn focused_combobox_handles_keys_before_app_and_returns_focus_on_close() {
+    let mut rt = runtime();
+    rt.on_key = Some(|s, _, _| { s.app_keys += 1; true });
+    key(&mut rt, Key::Down, Mods::default());
+    assert_eq!(rt.state.combo.active.as_deref(), Some("item-2"));
+    key(&mut rt, Key::Function(5), Mods::default());
+    assert_eq!(rt.state.app_keys, 1, "unhandled keys bubble to the app");
+    key(&mut rt, Key::Enter, Mods::default());
+    assert_eq!(rt.state.chosen.as_deref(), Some("item-2"));
+    let trigger = rt.elements().into_iter().find(|e| e.focused).unwrap();
+    assert_eq!(trigger.key.as_deref(), Some("models-value-trigger"));
+    assert!(trigger.focus_visible);
+    key(&mut rt, Key::Enter, Mods::default());
+    assert!(rt.state.combo.open && rt.state.combo.search.focused);
+    key(&mut rt, Key::Escape, Mods::default());
+    assert!(!rt.state.combo.open);
+    assert_eq!(rt.state.app_keys, 1, "Enter/arrows/Escape belong to the control");
+    assert_eq!(rt.elements().into_iter().find(|e| e.focused).unwrap().key.as_deref(), Some("models-value-trigger"));
+    key(&mut rt, Key::Enter, Mods::default());
+    for _ in 0..60 { rt.frame(1.0 / 60.0); }
+    rt.ime(Ime::Preedit("pending".into(), None)); rt.frame(0.0);
+    rt.pointer_down(390.0, 390.0); rt.pointer_up(390.0, 390.0); rt.frame(0.0);
+    assert!(!rt.state.combo.open && !rt.state.combo.search.focused);
+    assert!(rt.state.combo.search.preedit.is_none());
+    let trigger = rt.elements().into_iter().find(|e| e.focused).unwrap();
+    assert_eq!(trigger.key.as_deref(), Some("models-value-trigger"));
+    assert!(!trigger.focus_visible);
 }

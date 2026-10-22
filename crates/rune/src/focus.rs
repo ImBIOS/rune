@@ -78,17 +78,33 @@ impl<S: 'static> Runtime<S> {
         self.keyboard_focus = keyboard;
         changed
     }
-    pub(super) fn sync_requested_focus(&mut self, nodes: &mut [Node]) -> bool {
+    pub(super) fn sync_requested_focus(&mut self, nodes: &mut Vec<Node>) -> bool {
+        let restore = self.nodes.iter().enumerate().rev().find_map(|(i, old)| {
+            let key = old.focus.return_to.as_deref()?;
+            if self.subtree_exiting(i) || nodes.iter().any(|n| n.path == old.path) { return None; }
+            let anchor = nodes.iter().find(|n| n.key.as_deref() == Some(key))?;
+            let prefix = format!("{}/", anchor.path);
+            nodes.iter().find(|n| (n.path == anchor.path || n.path.starts_with(&prefix))
+                && (n.focus.enabled || n.input.as_ref().is_some_and(|i| i.access.is_some()))
+                && n.vis.opacity > 0.0 && n.local.w > 0.0 && n.local.h > 0.0)
+                .map(|n| n.path.clone())
+        });
         // A newly requested text field wins; a focused control otherwise retains focus.
         let requested = nodes.iter().filter(|n| n.input.as_ref().is_some_and(|i| i.edit.focused));
         let next = requested.clone().find(|n| self.focused.as_deref() != Some(&n.path)
             && !self.nodes.iter().any(|old| old.path == n.path && old.input.as_ref().is_some_and(|i| i.edit.focused)))
             .map(|n| n.path.clone())
+            .or(restore)
             .or_else(|| self.focused.clone().filter(|p| nodes.iter().any(|n| &n.path == p
                 && (n.focus.enabled || n.input.as_ref().is_some_and(|i| i.edit.focused)))))
             .or_else(|| requested.into_iter().next().map(|n| n.path.clone()));
+        // State may have deleted a row. Only the new view's accessors are valid now.
+        // Use the same focus path as input events, then restore the old presentation
+        // tree so apply can retain its exit visuals.
+        std::mem::swap(&mut self.nodes, nodes);
         let changed = self.set_focus(next, self.keyboard_focus);
-        sync_input_focus(nodes, &mut self.state, self.focused.as_deref()) || changed
+        std::mem::swap(&mut self.nodes, nodes);
+        changed
     }
     fn tab_order(&self) -> Vec<usize> {
         let all: Vec<_> = (0..self.nodes.len()).filter(|&i| self.can_focus(i) && self.nodes[i].focus.order >= 0).collect();
@@ -108,6 +124,7 @@ impl<S: 'static> Runtime<S> {
         self.keyboard_focus = true;
         if ev.key == Key::Escape && let Some(i) = self.active_modal() {
             let f = self.nodes[i].modal.as_ref().unwrap().dismiss.clone();
+            self.set_focus(None, true);
             f(&mut self.state, tx);
             return true;
         }
@@ -164,6 +181,7 @@ impl<S: 'static> Runtime<S> {
             self.modal_stack.push((path.clone(), self.focused.clone()));
             // Cancel any gesture captured before the modal opened.
             self.capture = None;
+            self.secondary_capture = None;
             self.hovered = None;
         }
         let inside = self.focused.as_deref().and_then(|p| self.nodes.iter().position(|n| n.path == p))
@@ -181,10 +199,11 @@ mod tests {
     use crate::{col, el, Mods};
 
     #[derive(Default)]
-    struct State { open: bool, nested: bool, picks: usize, selected: usize }
+    struct State { open: bool, nested: bool, picks: usize, selected: usize, secondary_picks: usize }
     fn button(key: &str) -> El { el().key(key).size(30.0, 30.0).focusable(true).role("button") }
     fn view(s: &State, _: &mut Cx<State>) -> El {
         let mut root = col().key("root").w_full().h_full()
+            .on_secondary_press(|s: &mut State, _, _| s.secondary_picks += 1)
             .child(button("opener").on_press(|s: &mut State| s.open = true))
             .child(button("early").tab_index(1))
             .child(button("skip").tab_index(-1))
@@ -275,6 +294,9 @@ mod tests {
         let mut rt = runtime();
         key(&mut rt, Key::Tab, false); key(&mut rt, Key::Tab, false);
         key(&mut rt, Key::Enter, false); assert_eq!(focused(&rt), "one");
+        let (x, y) = rt.find("one").unwrap();
+        rt.secondary_down(x, y); rt.secondary_up(x, y); rt.frame(0.0);
+        assert_eq!(rt.state.secondary_picks, 0, "secondary events must not bubble past a modal");
         key(&mut rt, Key::Tab, true); assert_eq!(focused(&rt), "two");
         key(&mut rt, Key::Tab, false); assert_eq!(focused(&rt), "one");
         key(&mut rt, Key::Enter, false); assert_eq!(focused(&rt), "inner");

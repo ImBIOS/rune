@@ -304,11 +304,11 @@ impl Menu {
                 layer.push(el().key(point.clone()).absolute(x, y).size(0.0, 0.0));
                 (Placement::BottomStart, 0.0, point)
             }
-            None => (self.placement, self.gutter, anchor_key),
+            None => (self.placement, self.gutter, anchor_key.clone()),
         };
         // Submenus anchor to items inside this surface, so they mount after it.
         let mut subs = Vec::new();
-        let surface = self.surface(k, &mut subs);
+        let surface = self.surface(k, &mut subs).focus_return(anchor_key);
         layer.push(anchor(k, surface, &key, placement, gutter));
         layer.extend(subs);
         trigger

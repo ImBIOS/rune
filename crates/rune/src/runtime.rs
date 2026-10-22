@@ -811,6 +811,7 @@ impl<S: 'static> Runtime<S> {
             }
             Action::Dismiss(path) => {
                 let Some(f) = self.node(&path).and_then(|n| n.modal.as_ref().map(|m| m.dismiss.clone())) else { return false };
+                self.set_focus(None, self.keyboard_focus);
                 f(&mut self.state, &mut one);
                 true
             }
@@ -1616,6 +1617,15 @@ impl<S: 'static> Runtime<S> {
             }
             old.parent = old_parent_id.and_then(|pid| self.node_index.get(&pid).copied());
             old.live.clear();
+            // Exit visuals outlive their model. Never call an accessor captured by
+            // a deleted row while normalizing a later focus change.
+            if let Some(input) = &mut old.input {
+                input.access = None;
+                input.key = None;
+                input.change = None;
+                input.edit.focused = false;
+                input.edit.preedit = None;
+            }
             self.node_index.insert(old.id, nodes.len());
             nodes.push(old);
         }
@@ -1778,8 +1788,8 @@ impl<S: 'static> Runtime<S> {
             let i = *self.node_index.get(&id)?;
             let n = &self.nodes[i];
             // A secondary-only child must not obscure primary input or background blur.
-            (!self.is_exiting(id) && (n.on_press.is_some() || n.on_hover.is_some()
-                || n.on_drag.is_some() || n.input.is_some() || n.window_drag)).then_some(i)
+            (!self.subtree_exiting(i) && self.allowed(i) && (n.on_press.is_some() || n.on_hover.is_some()
+                || n.on_drag.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())).then_some(i)
         })
     }
 
@@ -1840,6 +1850,8 @@ impl<S: 'static> Runtime<S> {
         }
         if n.focus.enabled {
             self.queue.push(Action::FocusControl(n.path.clone()));
+        } else if self.focused.is_some() {
+            self.queue.push(Action::Blur);
         }
         let r = n.target;
         let d = Drag {
@@ -1867,7 +1879,7 @@ impl<S: 'static> Runtime<S> {
         let mut index = *self.node_index.get(&id)?;
         loop {
             let n = &self.nodes[index];
-            if self.is_exiting(n.id) { return None; }
+            if self.subtree_exiting(index) || !self.allowed(index) { return None; }
             if n.on_secondary_press.is_some() { return Some(&n.path); }
             index = n.parent?;
         }
@@ -1876,6 +1888,7 @@ impl<S: 'static> Runtime<S> {
     /// Capture a secondary gesture without activating primary actions or text selection.
     pub fn secondary_down(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
+        self.keyboard_focus = false;
         self.secondary_capture = self.secondary_target(x, y).map(str::to_owned);
     }
 

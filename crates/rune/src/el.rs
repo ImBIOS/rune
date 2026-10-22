@@ -136,6 +136,7 @@ pub(crate) struct FocusSpec {
     pub group: bool,
     pub selected: bool,
     pub ring: Option<Outline>,
+    pub return_to: Option<String>,
 }
 
 #[derive(Clone)]
@@ -552,6 +553,11 @@ impl El {
     }
     pub fn focus_selected(mut self, selected: bool) -> Self {
         self.focus.selected = selected;
+        self
+    }
+    /// Return focus to this keyed trigger (or its first focusable child) when removed.
+    pub fn focus_return(mut self, trigger: impl Into<String>) -> Self {
+        self.focus.return_to = Some(trigger.into());
         self
     }
     /// Keyboard-only ring, on this element or a visual child of the focused control.
