@@ -23,6 +23,7 @@ pub struct Tx {
     pub(crate) relayout: bool,
     pub(crate) copy: Option<String>,
     pub(crate) text_flights: Vec<(String, String)>,
+    pub(crate) scroll_to: Vec<String>,
     pub(crate) shell: Option<Shell>,
 }
 
@@ -36,6 +37,10 @@ pub enum Shell {
 }
 
 impl Tx {
+    /// Reveal a keyed row, including a currently unrealized virtual row.
+    pub fn scroll_into_view(&mut self, key: impl Into<String>) {
+        self.scroll_to.push(key.into());
+    }
     /// Fly the visible text of an existing keyed field to a newly mounted keyed text node.
     /// The runtime captures the previous presentation and measures the live destination each
     /// frame, after row growth and scroll. Keys must be unique in the view.
@@ -101,6 +106,7 @@ pub struct Drag {
 
 pub(crate) type PressFn = Rc<dyn Fn(&mut dyn Any, &mut Tx)>;
 pub(crate) type SecondaryFn = Rc<dyn Fn(&mut dyn Any, PointerPress, &mut Tx)>;
+pub(crate) type InputKeyFn = Rc<dyn Fn(&mut dyn Any, &crate::KeyEvent, &mut Tx) -> bool>;
 
 /// A press position in window points, suitable for a context-menu anchor.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -145,6 +151,8 @@ pub struct InputSpec {
     pub selection: Color,
     pub(crate) access: Option<EditFn>,
     pub(crate) submit: Option<PressFn>,
+    pub(crate) key: Option<InputKeyFn>,
+    pub(crate) change: Option<PressFn>,
 }
 
 /// A CSS-style box shadow. Outer shadows draw behind the element; `inset` ones draw inside its
@@ -408,6 +416,8 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
         selection: Color::WHITE.alpha(0.2),
         access: None,
         submit: None,
+        key: None,
+        change: None,
     }));
     e
 }
@@ -436,6 +446,20 @@ impl El {
     fn bind_live(&mut self, bound: crate::live::Bound) {
         if let Some(old) = self.live.iter_mut().find(|b| b.property == bound.property) { *old = bound; }
         else { self.live.push(bound); }
+    }
+    /// Called after a focused field's text changes, with the updated model available.
+    pub fn on_input_change<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        if let Some(input) = &mut self.input {
+            input.change = Some(Rc::new(move |s, tx| f(s.downcast_mut::<S>().expect("input change state type"), tx)));
+        }
+        self
+    }
+    /// Handle a focused text field's key before the editor. Return true to consume it.
+    pub fn on_input_key<S: 'static>(mut self, f: impl Fn(&mut S, &crate::KeyEvent, &mut Tx) -> bool + 'static) -> Self {
+        if let Some(input) = &mut self.input {
+            input.key = Some(Rc::new(move |s, key, tx| f(s.downcast_mut::<S>().expect("input key state type"), key, tx)));
+        }
+        self
     }
     /// Secondary release inside the captured element (right-click or macOS control-click).
     pub fn on_secondary_press<S: 'static>(mut self, f: impl Fn(&mut S, PointerPress, &mut Tx) + 'static) -> Self {
