@@ -135,9 +135,8 @@ fn setup(s: &mut State, wake: rune::Waker) {
 fn main() {
     if std::env::args().any(|a| a == "--bench") { bench_mode(true); return bench_mode(false); }
     WINDOWED.store(!std::env::args().any(|a| matches!(a.as_str(), "--snap" | "--trace" | "--tree" | "--frames" | "--strip" | "--first-pixels" | "--list-scenes")), Ordering::Relaxed);
-    rune::run(AppSpec {
-        title: "Live values", size: (560.0, 440.0), min_size: None, init, view,
-        scenes: &[("smooth", |s| s.smooth = true)], fonts: &[], families: ("Inter", "Inter"),
-        setup: Some(setup), poll: Some(poll), on_key: None,
+    rune::run(AppSpec::<State> {
+        scenes: &[("smooth", |s| s.smooth = true)], setup: Some(setup), poll: Some(poll),
+        ..AppSpec::new("Live values", (560.0, 440.0), init, view)
     });
 }

@@ -786,11 +786,7 @@ mod tests {
     fn hidden_overlay_update_wakes_once_without_a_surface() {
         use std::time::Duration;
         fn view(_: &Vec<f64>, _: &mut Cx<Vec<f64>>) -> El { crate::el() }
-        let app = AppSpec {
-            title: "timer test", size: (20.0, 20.0), min_size: None,
-            init: Vec::<f64>::new, view, scenes: &[], fonts: &[], families: ("sans-serif", "monospace"),
-            setup: None, poll: None, on_key: None,
-        };
+        let app = AppSpec { families: ("sans-serif", "monospace"), ..AppSpec::new("timer test", (20.0, 20.0), Vec::<f64>::new, view) };
         let spec = OverlaySpec {
             name: "timer test", size: (20.0, 20.0), edge: ScreenEdge::Top,
             margin: 0.0, align: Align::Center, inset: 0.0, interactive: false, view,

@@ -47,7 +47,7 @@ pub use color::{Color, oklch, oklcha};
 pub use compose::{Compositor, Frame};
 pub use edit::{Ime, Key, KeyEvent, Mods, TextEdit};
 pub use el::{
-    Align, Anchor, Cursor, Drag, El, GrowthSpec, Outline, Phase, PointerPress, ScrollSpec, Shadow, Shell, Side, Tx, canvas, col, edit_access, el, icon, rich,
+    Align, Anchor, Cursor, Cycle, Drag, El, GrowthSpec, Outline, Phase, PointerPress, ScrollSpec, Shadow, Shell, Side, Tx, canvas, col, edit_access, el, icon, rich,
     row, spacer, text, text_input,
 };
 pub use growth::{GROWTH, StreamEdge, edge};
@@ -56,13 +56,13 @@ pub use pixels::Pixels;
 pub use file_dialog::{FileDialogError, FileDialogKind, FileDialogOptions, FileDialogs, ScriptedFileDialog};
 pub use image::{Image, ImageCache, ImageError, ImageId};
 pub use rune_motion::{
-    Anim, AnimExt, Clock, Curve, Edge, LayoutAnim, NodeId, Phase as PresencePhase, Presented, Spring, SpringPair,
-    Transition, Travel,
+    Anim, AnimExt, Clock, Curve, Easing, Edge, LayoutAnim, NodeId, Phase as PresencePhase, Presented, Spring,
+    SpringPair, Transition, Travel,
 };
-pub use runtime::{Cx, Env, Runtime, Waker};
+pub use runtime::{Cx, Env, Runtime, TitlebarAction, Waker};
 pub use shape::{LineCap, Path, Shape};
 pub use native_surface::{NativeSurface, SurfaceFit};
 pub use text::{Icon, Span};
 pub use theme::Theme;
 pub use tok::{Family, TextStyle};
-pub use tooling::{AppSpec, extra_args, run, run_windows, run_windows_with, run_with, set_app_id};
+pub use tooling::{AppSpec, Chrome, extra_args, run, run_windows, run_windows_with, run_with, set_app_id};

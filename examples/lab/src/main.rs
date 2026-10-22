@@ -123,12 +123,8 @@ fn thrown(s: &mut Lab) {
 
 fn main() {
     rune::run_with(
-        AppSpec {
-            title: "Rune Lab",
-            size: (1320.0, 800.0),
+        AppSpec::<Lab> {
             min_size: Some((1080.0, 640.0)),
-            init: Lab::new,
-            view: ui::view,
             scenes: &[
                 ("lamp", |s| s.scene = Scene::Lamp),
                 ("flashlight", |s| s.scene = Scene::Flashlight),
@@ -155,9 +151,8 @@ fn main() {
                 include_bytes!("../assets/IBMPlexMono-Medium.ttf"),
             ],
             families: ("Inter", "IBM Plex Mono"),
-            setup: None,
-            poll: None,
             on_key: Some(on_key),
+            ..AppSpec::new("Rune Lab", (1320.0, 800.0), Lab::new, ui::view)
         },
         gfx::LabGfx::default(),
     );

@@ -16,7 +16,7 @@ use parley::Layout;
 use parley::editing::{Cursor, Selection};
 use parley::layout::Affinity;
 use rune_motion::{
-    Corners, LayoutAnim, Mount, NodeId, NodeSpec, Phase as PresencePhase, Prop, PropClass, Rect as MRect, Scene,
+    Anim, Corners, LayoutAnim, Mount, NodeId, NodeSpec, Phase as PresencePhase, Prop, PropClass, Rect as MRect, Scene,
     Spring, SpringPair, Transition, prop, snap::grid,
 };
 use taffy::prelude::*;
@@ -179,11 +179,13 @@ struct Inh {
     /// Vertical offset in points from scroll viewports and growth rows above.
     dy: f32,
     mark: u32,
+    /// The nearest hover group's hover amount (0–1), for `group_*` styles.
+    group: f32,
 }
 
 impl Default for Inh {
     fn default() -> Self {
-        Inh { opacity: 1.0, clip: NO_CLIP, fade: [0.0; 4], scale: 1.0, anchor: [0.0; 2], blur: 0.0, dy: 0.0, mark: 0 }
+        Inh { opacity: 1.0, clip: NO_CLIP, fade: [0.0; 4], scale: 1.0, anchor: [0.0; 2], blur: 0.0, dy: 0.0, mark: 0, group: 0.0 }
     }
 }
 
@@ -300,8 +302,6 @@ pub struct Runtime<S: 'static> {
     pub copy_request: Option<String>,
     /// A handler or `update` asked to close the window or quit (the shell takes it).
     pub shell_request: Option<Shell>,
-    /// A press landed on a `window_drag` element (the shell starts a window move).
-    window_drag_request: bool,
     /// What `update` asked of the next commit.
     pending: Tx,
     pub animating: bool,
@@ -316,6 +316,25 @@ pub struct Runtime<S: 'static> {
     live_dirty: bool,
     /// Opt-in tooling checks. None keeps release commits free of key traversal/allocation.
     pub(crate) key_warnings: Option<Vec<String>>,
+    /// Seconds until the next frame while only [`Cycle`](crate::el::Cycle)s move on screen
+    /// (the shell sleeps until then instead of drawing every display frame).
+    pub ambient: Option<f32>,
+    /// Where (window points) the current press started.
+    press_at: (f32, f32),
+    /// The last press on a window drag region: when (clock seconds) and where.
+    last_drag_press: Option<(f64, f32, f32)>,
+    titlebar_action: Option<TitlebarAction>,
+    /// Two presses on a drag region closer than this (seconds) are a double press.
+    pub double_click_interval: f64,
+}
+
+/// What a press on a window drag region asks the shell to do, synchronously in that press.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TitlebarAction {
+    /// Move the window with the pointer (the system tracks the drag).
+    Drag,
+    /// The titlebar double-click action (zoom, minimise or nothing, per system setting).
+    DoubleClick,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -412,7 +431,6 @@ impl<S: 'static> Runtime<S> {
             ime_area: None,
             copy_request: None,
             shell_request: None,
-            window_drag_request: false,
             pending: Tx::default(),
             animating: false,
             settled: false,
@@ -422,7 +440,24 @@ impl<S: 'static> Runtime<S> {
             live_subscriptions: Vec::new(),
             live_dirty: false,
             key_warnings: None,
+            ambient: None,
+            press_at: (0.0, 0.0),
+            last_drag_press: None,
+            titlebar_action: None,
+            double_click_interval: 0.5,
         }
+    }
+
+    /// A window drag or titlebar double-click requested by the press just delivered. The shell
+    /// must act on it before returning from that press event.
+    pub fn take_titlebar_action(&mut self) -> Option<TitlebarAction> {
+        self.titlebar_action.take()
+    }
+
+    /// Clock seconds now: the wall clock in a window (input arrives between frames), the
+    /// virtual clock headless.
+    fn now_clock(&self) -> f64 {
+        self.wall_start.map_or(self.clock, |t| t.elapsed().as_secs_f64())
     }
 
     pub fn set_viewport(&mut self, viewport: (f32, f32), scale: f32) {
@@ -1403,7 +1438,12 @@ impl<S: 'static> Runtime<S> {
                 self.scene.insert(id, spec, mount);
             }
             if was_present {
-                let layout_anim = if layout_instant {
+                let stack_row = nodes[i].parent.is_some_and(|p| nodes[p].growth.is_some()) || self.virtuals.contains_key(&nodes[i].path);
+                let layout_anim = if stack_row && !instant && !tx.relayout {
+                    // Growth and virtual windows own a row's vertical place; its horizontal place
+                    // still springs, or a re-centred column jumps against its moving parent.
+                    LayoutAnim::axes(spring_l, Anim::INSTANT)
+                } else if layout_instant {
                     LayoutAnim::INSTANT
                 } else {
                     let mut la = LayoutAnim::new(spring_l);
@@ -1454,7 +1494,7 @@ impl<S: 'static> Runtime<S> {
             if let Some(ol) = vis.outline {
                 self.set_or_anim(id, P_OUTLINE, ol.color, spring_c, instant);
             }
-            if (vis.hover.a > 0.0 || vis.press.a > 0.0) && !self.scene.store().has(id, P_HOVER) {
+            if (vis.hover.a > 0.0 || vis.press.a > 0.0 || vis.hover_group) && !self.scene.store().has(id, P_HOVER) {
                 self.scene.set(id, P_HOVER, 0.0);
                 self.scene.set(id, P_PRESS, 0.0);
             }
@@ -1734,7 +1774,8 @@ impl<S: 'static> Runtime<S> {
         let Some((r, has_drag)) = self.node(&path).map(|n| (n.target, n.on_drag.is_some())) else { return };
         self.capture_inside = x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3];
         if has_drag {
-            let d = Drag { phase: Phase::Move, x: x - r[0], y: y - r[1], ..d };
+            let (dx, dy) = (x - self.press_at.0, y - self.press_at.1);
+            let d = Drag { phase: Phase::Move, x: x - r[0], y: y - r[1], dx, dy, ..d };
             self.queue.push(Action::Drag(path, d));
         }
     }
@@ -1749,13 +1790,22 @@ impl<S: 'static> Runtime<S> {
             return;
         };
         let n = &self.nodes[ti];
+        if n.window_drag && n.on_press.is_none() && n.on_drag.is_none() && n.input.is_none() {
+            let now = self.now_clock();
+            let double = self.last_drag_press.is_some_and(|(t, px, py)| {
+                now - t <= self.double_click_interval && (x - px).abs() <= 4.0 && (y - py).abs() <= 4.0
+            });
+            self.last_drag_press = if double { None } else { Some((now, x, y)) };
+            self.titlebar_action = Some(if double { TitlebarAction::DoubleClick } else { TitlebarAction::Drag });
+            if self.focused.is_some() {
+                self.queue.push(Action::Blur);
+            }
+            return;
+        }
+        self.press_at = (x, y);
         let r = self.drawn.get(ti).copied().unwrap_or([n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]]);
         if n.input.is_some() {
             self.queue.push(Action::Focus(n.path.clone(), x - r[0] - n.inset[0], y - r[1] - n.inset[1]));
-            return;
-        }
-        if n.window_drag && n.on_press.is_none() && n.on_drag.is_none() {
-            self.window_drag_request = true;
             return;
         }
         let r = n.target;
@@ -1767,6 +1817,8 @@ impl<S: 'static> Runtime<S> {
             h: r[3] - r[1],
             start_x: x - r[0],
             start_y: y - r[1],
+            dx: 0.0,
+            dy: 0.0,
             data: 0.0,
         };
         let path = n.path.clone();
@@ -1775,12 +1827,6 @@ impl<S: 'static> Runtime<S> {
         }
         self.capture = Some((path, d));
         self.capture_inside = true;
-    }
-
-    /// Whether the last `pointer_down` landed on a `window_drag` element; the shell moves the
-    /// window from inside that mouse-down event.
-    pub fn take_window_drag(&mut self) -> bool {
-        std::mem::take(&mut self.window_drag_request)
     }
 
     fn secondary_target(&self, x: f32, y: f32) -> Option<&str> {
@@ -1818,7 +1864,8 @@ impl<S: 'static> Runtime<S> {
             return;
         };
         if has_drag {
-            self.queue.push(Action::Drag(path.clone(), Drag { phase: Phase::Up, x: x - r[0], y: y - r[1], ..d }));
+            let (dx, dy) = (x - self.press_at.0, y - self.press_at.1);
+            self.queue.push(Action::Drag(path.clone(), Drag { phase: Phase::Up, x: x - r[0], y: y - r[1], dx, dy, ..d }));
         }
         if has_press && self.capture_inside {
             self.queue.push(Action::Press(path));
@@ -1833,6 +1880,10 @@ impl<S: 'static> Runtime<S> {
         }
     }
 
+    /// A press on an element is held (the hand drives whatever follows it).
+    pub fn pressing(&self) -> bool {
+        self.capture.is_some()
+    }
     pub fn pointer(&self) -> Option<(f32, f32)> {
         self.pointer
     }
@@ -1948,19 +1999,30 @@ impl<S: 'static> Runtime<S> {
         let captured = self.capture.as_ref().map(|(p, _)| p.as_str()).or(self.secondary_capture.as_deref());
         for i in 0..self.nodes.len() {
             let n = &self.nodes[i];
-            if self.is_exiting(n.id) || (n.vis.hover.a <= 0.0 && n.vis.press.a <= 0.0) {
+            let tracks_hover = n.vis.hover.a > 0.0 || n.vis.hover_group;
+            if self.is_exiting(n.id) || (!tracks_hover && n.vis.press.a <= 0.0) {
                 continue;
             }
             let r = self.drawn.get(i).map_or(
                 [n.target[0], n.target[1], n.target[2], n.target[3]],
                 |d| [d[0], d[1], d[0] + d[2], d[1] + d[3]],
             );
-            let inside = self.pointer.is_some_and(|(x, y)| x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3]);
-            let hovered = inside && n.vis.hover.a > 0.0 && captured.is_none_or(|p| p == n.path);
+            // A group inside a clipped region (a scrolled list) only hovers where it shows.
+            let c = n.parent.and_then(|p| self.inh_scratch.get(p)).map_or(NO_CLIP, |h| h.clip).map(|v| v / self.env.scale);
+            let inside = self.pointer.is_some_and(|(x, y)| {
+                x >= r[0].max(c[0]) && x <= r[2].min(c[2]) && y >= r[1].max(c[1]) && y <= r[3].min(c[3])
+            });
+            // A group stays hovered while one of its descendants holds the press.
+            let within = |p: &str| p == n.path || (p.len() > n.path.len() && p.starts_with(&n.path) && p.as_bytes()[n.path.len()] == b'/');
+            let hovered = inside && tracks_hover && captured.is_none_or(within);
             let capture_inside = if self.secondary_capture.is_some() { inside } else { self.capture_inside };
             let pressed = captured == Some(n.path.as_str()) && capture_inside && n.vis.press.a > 0.0;
             let id = n.id;
-            self.scene.animate(id, P_HOVER, hovered as u8 as f32, motion::SNAPPY);
+            let hover_anim = match n.vis.hover_motion {
+                Some((enter, exit)) => if hovered { enter } else { exit },
+                None => motion::SNAPPY.into(),
+            };
+            self.scene.animate(id, P_HOVER, hovered as u8 as f32, hover_anim);
             self.scene.animate(id, P_PRESS, pressed as u8 as f32, if pressed { motion::INSTANT } else { motion::SNAPPY });
         }
     }
@@ -1984,6 +2046,7 @@ impl<S: 'static> Runtime<S> {
         let now = self.t;
         let vp = [0.0, 0.0, self.viewport.0 * s, self.viewport.1 * s];
         let mut glyph_count = 0usize;
+        let mut ambient: Option<f32> = None;
 
         // Growth rows: presented top offset, height and bottom feather mask per node index.
         self.row_dy.clear();
@@ -2022,7 +2085,21 @@ impl<S: 'static> Runtime<S> {
             let mut pinh = n.parent.map_or(Inh::default(), |pr| self.inh_scratch[pr]);
             pinh.dy += self.row_dy[i];
             let mark = if n.vis.mark != 0 { n.vis.mark } else { pinh.mark };
-            let o = (p.opacity * pinh.opacity).clamp(0.0, 1.0);
+            let mut own = p.opacity;
+            if let Some([rest, hov]) = n.vis.group_opacity {
+                own *= rest + (hov - rest) * pinh.group;
+            }
+            // Shown at all, apart from where its own loop is in its cycle.
+            let shown = own * pinh.opacity;
+            if let Some(c) = n.vis.cycle {
+                own *= if self.reduced_motion { c.still } else { c.sample(self.clock) };
+            }
+            let o = (own * pinh.opacity).clamp(0.0, 1.0);
+            let group = if n.vis.hover.a > 0.0 || n.vis.hover_group {
+                self.scene.get(n.id, P_HOVER).unwrap_or(0.0).clamp(0.0, 1.0)
+            } else {
+                pinh.group
+            };
             let (mut clip, mut fade) = (pinh.clip, pinh.fade);
             let own_sc = p.transform.scale.x;
             let (sc, anchor) = if (own_sc - 1.0).abs() > 1e-5 {
@@ -2076,6 +2153,18 @@ impl<S: 'static> Runtime<S> {
                 && r[0] <= clip[2].min(vp[2]) + 2.0
                 && r[3] >= clip[1].max(vp[1]) - 2.0
                 && r[1] <= clip[3].min(vp[3]) + 2.0;
+            if let Some(c) = n.vis.cycle
+                && visible
+                && shown > 0.001
+                && !self.reduced_motion
+            {
+                let dt = 1.0 / c.fps.max(1.0);
+                ambient = Some(ambient.map_or(dt, |a: f32| a.min(dt)));
+            }
+            let text_tint = |c: Color| match n.vis.group_color {
+                Some(g) if pinh.group > 0.0 => c.mix(g, pinh.group),
+                _ => c,
+            };
 
             if o > 0.001 && visible {
                 let k_px = sc * s;
@@ -2252,7 +2341,7 @@ impl<S: 'static> Runtime<S> {
                     });
                 }
                 if let Some((ic, c)) = n.vis.icon {
-                    let color = self.color(n.id, P_TEXT, c);
+                    let color = text_tint(self.color(n.id, P_TEXT, c));
                     let px = (w.min(h)).round().max(1.0) as u32;
                     if let Some(q) = self.text.icon_quad(ic, px, [r[0], r[1]]) {
                         self.instances.push(Instance {
@@ -2267,7 +2356,7 @@ impl<S: 'static> Runtime<S> {
                         });
                     }
                 } else if let (Some(spec), Some(layout)) = (&n.text, &n.text_layout) {
-                    let color = self.color(n.id, P_TEXT, spec.color);
+                    let color = text_tint(self.color(n.id, P_TEXT, spec.color));
                     let tw = layout.full_width().ceil();
                     let ins = n.inset.map(|v| v * sc * s);
                     let (x0, x1) = (r[0] + ins[0], r[2] - ins[2]);
@@ -2404,7 +2493,7 @@ impl<S: 'static> Runtime<S> {
                 let origin = self.virtuals.values().find(|v| v.scroll_path == n.path).map_or(0.0, |v| f64::from(v.before));
                 dy -= grid((st.offset - origin) as f32, s);
             }
-            self.inh_scratch[i] = Inh { opacity: o, clip, fade, scale: sc, anchor, blur, dy, mark };
+            self.inh_scratch[i] = Inh { opacity: o, clip, fade, scale: sc, anchor, blur, dy, mark, group };
             if (n.on_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_drag.is_some() || n.input.is_some() || n.window_drag)
                 && !self.subtree_exiting(i)
             {
@@ -2419,6 +2508,7 @@ impl<S: 'static> Runtime<S> {
             }
         }
         self.stats.glyphs = glyph_count;
+        self.ambient = ambient;
     }
 
     // ---------------------------------------------------------------------------------------
@@ -2457,6 +2547,17 @@ impl<S: 'static> Runtime<S> {
                 let mut in_growing_row = false;
                 let mut scrolling = false;
                 let mut live_intent = live_intent(n);
+                // A group_opacity swap under an instant hover group is a deliberate cut (Beta's
+                // status/close swap), for it and what it contains: opacity and transition intent.
+                let up = |from: Option<usize>| std::iter::successors(from, |&pi| self.nodes[pi].parent);
+                if let Some(gi) = up(Some(i)).find(|&j| self.nodes[j].vis.group_opacity.is_some()) {
+                    let group = up(self.nodes[gi].parent)
+                        .map(|pi| &self.nodes[pi].vis)
+                        .find(|v| v.hover.a > 0.0 || v.hover_group);
+                    if group.and_then(|v| v.hover_motion).is_some_and(|(e, x)| [e, x].iter().any(|a| matches!(a.curve, rune_motion::Curve::Instant))) {
+                        live_intent |= 4 | 16;
+                    }
+                }
                 let mut a = n.parent;
                 while let Some(pi) = a {
                     let parent = self.nodes[pi].id;
@@ -3080,8 +3181,8 @@ mod tests {
         for (x, y, drags) in [(100.0, 20.0, true), (20.0, 20.0, false), (100.0, 60.0, false)] {
             rt.pointer_move(x, y);
             rt.pointer_down(x, y);
-            assert_eq!(rt.take_window_drag(), drags, "at {x}, {y}");
-            assert!(!rt.take_window_drag(), "a drag request is taken once");
+            assert_eq!(rt.take_titlebar_action() == Some(TitlebarAction::Drag), drags, "at {x}, {y}");
+            assert!(rt.take_titlebar_action().is_none(), "a drag request is taken once");
             rt.pointer_up(x, y);
         }
         rt.frame(1.0 / 120.0);

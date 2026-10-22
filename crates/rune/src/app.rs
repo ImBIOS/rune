@@ -347,19 +347,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn spec() -> AppSpec<u32> {
-        AppSpec {
-            title: "test",
-            size: (100.0, 100.0),
-            min_size: None,
-            init: || 0,
-            view: |_: &u32, _: &mut Cx<u32>| el(),
-            scenes: &[],
-            fonts: &[],
-            families: ("Inter", "Inter"),
-            setup: None,
-            poll: None,
-            on_key: None,
-        }
+        AppSpec::new("test", (100.0, 100.0), || 0, |_: &u32, _: &mut Cx<u32>| el())
     }
 
     #[test]

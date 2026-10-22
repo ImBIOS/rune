@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex, Weak, atomic::{AtomicU32, Ordering}};
 use std::{cell::RefCell, rc::Rc};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
@@ -18,8 +18,8 @@ use crate::compose::{Compositor, Frame};
 use crate::edit::{Ime, Key, KeyEvent, Mods};
 use crate::el::{Cursor, Shell, Tx};
 use crate::render::{Gpu, Renderer};
-use crate::runtime::{Env, Runtime, Waker};
-use crate::tooling::{AppSpec, Args, runtime_for};
+use crate::runtime::{Env, Runtime, TitlebarAction, Waker};
+use crate::tooling::{AppSpec, Args, Chrome, runtime_for};
 use crate::windows::{Display, WindowOptions, WindowSpec};
 
 /// The open window. Fields drop in order: the surface before its window.
@@ -195,7 +195,7 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
             animating |= host.about_to_wait(event_loop);
         }
         // Layer surfaces have no redraw events: keep turning while one animates (its vsync
-        // paces the loop).
+        // paces the loop). Hosts whose only motion is an ambient loop sleep until its next step.
         let deadline = self.hosts.iter().flatten().filter_map(|host| host.wake_deadline()).min();
         event_loop.set_control_flow(if animating { ControlFlow::Poll }
             else { deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil) });
@@ -232,6 +232,8 @@ struct Host<S: 'static> {
     control_click: bool,
     clipboard: Option<arboard::Clipboard>,
     comp: Option<Box<dyn Compositor<S>>>,
+    /// The next frame while only ambient cycles move.
+    wake_at: Option<Instant>,
 }
 
 pub fn run<S: 'static>(app: App<S>, args: Args) {
@@ -310,6 +312,7 @@ impl<S: 'static> Host<S> {
             control_click: false,
             clipboard: arboard::Clipboard::new().ok(),
             comp,
+            wake_at: None,
         }
     }
 }
@@ -323,6 +326,102 @@ pub(crate) fn is_wayland(event_loop: &ActiveEventLoop) -> bool {
         let _ = event_loop;
         false
     }
+}
+
+/// Native titlebar behaviour the framework owns: traffic-light placement, drag regions and the
+/// double-click action. Elsewhere only the portable parts apply.
+#[cfg(target_os = "macos")]
+mod mac {
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, Bool, Sel};
+    use objc2::{ffi, sel};
+    use objc2_app_kit::{NSEvent, NSView, NSWindowButton, NSWindowStyleMask};
+    use objc2_foundation::{NSPoint, NSString, NSUserDefaults};
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use winit::window::Window;
+
+    fn content_view(window: &Window) -> Option<Retained<NSView>> {
+        let RawWindowHandle::AppKit(h) = window.window_handle().ok()?.as_raw() else { return None };
+        // SAFETY: winit's AppKit handle points at its live content view, used on the main thread.
+        unsafe { Retained::retain(h.ns_view.as_ptr().cast::<NSView>()) }
+    }
+
+    unsafe extern "C" fn cannot_move_window(_: *mut AnyObject, _: Sel) -> Bool {
+        Bool::NO
+    }
+
+    /// The content view stops AppKit from moving the window when the titlebar band is pressed;
+    /// only `.window_drag()` regions move it (as Electron does with app regions).
+    pub fn own_window_dragging(window: &Window) {
+        let Some(view) = content_view(window) else { return };
+        let types = if cfg!(target_arch = "aarch64") { c"B@:" } else { c"c@:" };
+        // SAFETY: adds an override to winit's private view subclass (inherited from NSView, so
+        // the add succeeds once and later calls are no-ops). The IMP matches `BOOL (id, SEL)`.
+        unsafe {
+            let cls = ffi::object_getClass(Retained::as_ptr(&view).cast()) as *mut ffi::objc_class;
+            let imp: ffi::IMP = Some(std::mem::transmute::<
+                unsafe extern "C" fn(*mut AnyObject, Sel) -> Bool,
+                unsafe extern "C" fn(),
+            >(cannot_move_window));
+            ffi::class_addMethod(cls, sel!(mouseDownCanMoveWindow).as_ptr(), imp, types.as_ptr());
+        }
+    }
+
+    /// Electron's `trafficLightPosition`: the titlebar container grows to the buttons' height
+    /// plus twice `y`, and the buttons sit `x, y` from the top-left at AppKit's own pitch.
+    /// AppKit lays the titlebar out again on resize, so the shell calls this after each.
+    pub fn place_traffic_lights(window: &Window, (x, y): (f32, f32)) {
+        let Some(win) = content_view(window).and_then(|v| v.window()) else { return };
+        if win.styleMask().contains(NSWindowStyleMask::FullScreen) {
+            return;
+        }
+        let buttons = [NSWindowButton::NSWindowCloseButton, NSWindowButton::NSWindowMiniaturizeButton, NSWindowButton::NSWindowZoomButton]
+            .map(|b| win.standardWindowButton(b));
+        let [Some(close), Some(mini), Some(zoom)] = buttons else { return };
+        // SAFETY: AppKit's own view hierarchy, on the main thread.
+        let Some(container) = (unsafe { close.superview().and_then(|v| v.superview()) }) else { return };
+        let (x, y) = (f64::from(x), f64::from(y));
+        let pitch = mini.frame().origin.x - close.frame().origin.x;
+        let mut frame = container.frame();
+        frame.size.height = close.frame().size.height + 2.0 * y;
+        frame.origin.y = win.frame().size.height - frame.size.height;
+        unsafe {
+            container.setFrame(frame);
+            for (i, b) in [close, mini, zoom].iter().enumerate() {
+                b.setFrameOrigin(NSPoint::new(x + i as f64 * pitch, y));
+            }
+        }
+    }
+
+    pub fn double_click_interval() -> f64 {
+        unsafe { NSEvent::doubleClickInterval() }
+    }
+
+    /// System Settings › Desktop & Dock › "Double-click a window's title bar to".
+    pub fn titlebar_double_click(window: &Window) {
+        // SAFETY: reading a user default on the main thread.
+        let action = unsafe { NSUserDefaults::standardUserDefaults().stringForKey(&NSString::from_str("AppleActionOnDoubleClick")) };
+        match action.map(|s| s.to_string()).as_deref() {
+            Some("Minimize") => window.set_minimized(true),
+            Some("None") => {}
+            _ => window.set_maximized(!window.is_maximized()),
+        }
+    }
+}
+
+fn place_chrome(window: &Window, chrome: Chrome) {
+    #[cfg(target_os = "macos")]
+    if let Some(p) = chrome.traffic_lights {
+        mac::place_traffic_lights(window, p);
+    }
+    let _ = (window, chrome);
+}
+
+fn titlebar_double_click(window: &Window) {
+    #[cfg(target_os = "macos")]
+    mac::titlebar_double_click(window);
+    #[cfg(not(target_os = "macos"))]
+    window.set_maximized(!window.is_maximized());
 }
 
 fn cursor_icon(c: Cursor) -> CursorIcon {
@@ -593,8 +692,9 @@ impl<S: 'static> Host<S> {
                 attrs = winit::platform::startup_notify::WindowAttributesExtStartupNotify::with_activation_token(attrs, token);
             }
         }
+        let chrome = self.spec.chrome;
         #[cfg(target_os = "macos")]
-        if !self.options.borderless {
+        if !self.options.borderless && chrome.full_size_content {
             use winit::platform::macos::WindowAttributesExtMacOS;
             attrs = attrs.with_titlebar_transparent(true).with_title_hidden(true).with_fullsize_content_view(true);
         }
@@ -603,6 +703,15 @@ impl<S: 'static> Host<S> {
             eprintln!("click-through unavailable for {}: {error}", self.native_handle.key());
         }
         window.set_ime_allowed(true);
+        #[cfg(target_os = "macos")]
+        if chrome.drag_regions && !self.options.borderless {
+            mac::own_window_dragging(&window);
+        }
+        place_chrome(&window, chrome);
+        #[cfg(target_os = "macos")]
+        {
+            self.rt.double_click_interval = mac::double_click_interval();
+        }
         let (gpu, surface) = match self.gpu.take() {
             Some((gpu, renderer, format)) => {
                 let surface = gpu.instance.create_surface(window.clone());
@@ -772,7 +881,11 @@ impl<S: 'static> Host<S> {
         gpu.queue.present(frame);
         self.idle = !(animating || rt.has_pending_input() || rt.live_pending());
         if !self.idle {
+            self.wake_at = None;
             l.window.request_redraw();
+        } else {
+            // Only cycles (activity spinners) move: sleep until their next step.
+            self.wake_at = rt.ambient.map(|dt| now + Duration::from_secs_f32(dt));
         }
     }
 }
@@ -784,8 +897,15 @@ impl<S: 'static> AnyHost for Host<S> {
     fn finished(&self) -> bool { self.finished }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        // An ambient loop's next step: draw it (the redraw schedules the one after).
+        if self.wake_at.is_some_and(|t| t <= Instant::now()) {
+            self.wake_at = None;
+            if let Some(w) = self.win.as_ref().filter(|w| w.visible && !w.occluded) {
+                w.window.request_redraw();
+            }
+        }
         if matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll)
-            && self.wake_deadline().is_some_and(|deadline| deadline <= Instant::now())
+            && self.rt.wall_start.and_then(|start| start.checked_add(Duration::try_from_secs_f64(self.rt.wake_deadline()?).ok()?)).is_some_and(|deadline| deadline <= Instant::now())
         {
             if let Some(w) = self.win.as_ref().filter(|w| w.visible && !w.occluded && !w.window.is_minimized().unwrap_or(false)) {
                 w.window.request_redraw();
@@ -797,9 +917,11 @@ impl<S: 'static> AnyHost for Host<S> {
     }
 
     fn wake_deadline(&self) -> Option<Instant> {
-        self.rt.wall_start.and_then(|start| {
-            start.checked_add(std::time::Duration::try_from_secs_f64(self.rt.wake_deadline()?).ok()?)
-        })
+        let timer = self.rt.wall_start.and_then(|start| {
+            start.checked_add(Duration::try_from_secs_f64(self.rt.wake_deadline()?).ok()?)
+        });
+        let ambient = self.wake_at.filter(|_| self.win.as_ref().is_some_and(|w| w.visible && !w.occluded));
+        timer.into_iter().chain(ambient).min()
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -865,8 +987,10 @@ impl<S: 'static> Host<S> {
         let (Some(l), Some((gpu, ..))) = (self.win.as_mut(), self.gpu.as_ref()) else { return };
         let rt = &mut self.rt;
         let scale = l.window.scale_factor() as f32;
+        let chrome = self.spec.chrome;
         match event {
             WindowEvent::Resized(size) => {
+                place_chrome(&l.window, chrome);
                 rt.set_live_visible(l.visible && !l.occluded && size.width > 0 && size.height > 0 && !l.window.is_minimized().unwrap_or(false));
                 if size.width == 0 || size.height == 0 { self.idle = true; return; }
                 l.config.width = size.width.max(1);
@@ -879,12 +1003,15 @@ impl<S: 'static> Host<S> {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 let size = l.window.inner_size();
                 rt.set_viewport((size.width as f32 / scale_factor as f32, size.height as f32 / scale_factor as f32), scale_factor as f32);
+                place_chrome(&l.window, chrome);
                 l.window.request_redraw();
             }
+            WindowEvent::Focused(_) => place_chrome(&l.window, chrome),
             WindowEvent::Occluded(occluded) => {
                 l.occluded = occluded;
                 rt.set_live_visible(l.visible && !occluded && !l.window.is_minimized().unwrap_or(false));
                 if occluded { self.idle = true; return; }
+                place_chrome(&l.window, chrome);
                 // Coming back paints the settled state in the first frame (guarantee 8).
                 rt.settle_all();
                 l.window.request_redraw();
@@ -944,7 +1071,14 @@ impl<S: 'static> Host<S> {
                         (ElementState::Released, true) => rt.secondary_up(x, y),
                         (ElementState::Pressed, false) => {
                             rt.pointer_down(x, y);
-                            if rt.take_window_drag() { let _ = l.window.drag_window(); }
+                            // AppKit needs the drag started inside this mouse-down.
+                            match rt.take_titlebar_action() {
+                                Some(TitlebarAction::Drag) => {
+                                    let _ = l.window.drag_window();
+                                }
+                                Some(TitlebarAction::DoubleClick) => titlebar_double_click(&l.window),
+                                None => {}
+                            }
                         }
                         (ElementState::Released, false) => rt.pointer_up(x, y),
                     }

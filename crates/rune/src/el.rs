@@ -109,6 +109,9 @@ pub struct Drag {
     pub h: f32,
     pub start_x: f32,
     pub start_y: f32,
+    /// Pointer travel since the press, in window points (independent of the element moving).
+    pub dx: f32,
+    pub dy: f32,
     /// Scratch kept across one gesture's phases (e.g. a grab offset).
     pub data: f32,
 }
@@ -242,6 +245,8 @@ pub struct TextSpec {
     pub truncate: bool,
 }
 
+pub use rune_motion::Cycle;
+
 #[derive(Clone, Debug)]
 pub struct Visual {
     pub surface: Option<(crate::NativeSurface, crate::SurfaceFit)>,
@@ -265,6 +270,16 @@ pub struct Visual {
     pub pixels: Option<crate::pixels::Pixels>,
     /// App-defined tag a compositor reads per instance (`Runtime::marks`); 0 inherits the parent's.
     pub mark: u32,
+    /// Tracks hover for its descendants' `group_*` styles even without a hover colour. Any
+    /// element with a hover colour is a group too.
+    pub hover_group: bool,
+    /// The hover track's enter and exit curves (default: snappy spring both ways).
+    pub hover_motion: Option<(Anim, Anim)>,
+    /// Opacity factor (rest, hovered) following the nearest ancestor group's hover.
+    pub group_opacity: Option<[f32; 2]>,
+    /// Text or icon colour while the nearest ancestor group is hovered.
+    pub group_color: Option<Color>,
+    pub cycle: Option<Cycle>,
 }
 
 impl Default for Visual {
@@ -286,6 +301,11 @@ impl Default for Visual {
             shape: None,
             pixels: None,
             mark: 0,
+            hover_group: false,
+            hover_motion: None,
+            group_opacity: None,
+            group_color: None,
+            cycle: None,
         }
     }
 }
@@ -726,8 +746,9 @@ impl El {
         self.cursor = Some(cursor);
         self
     }
-    /// Pressing this element moves the window, as a title bar does. Hit targets inside it
-    /// (buttons, fields) keep their presses.
+    /// Pressing this element moves the window, as a title bar does, and a double press zooms or
+    /// minimises it as the system's titlebar setting says. Hit targets inside it (buttons,
+    /// fields) keep their presses.
     pub fn window_drag(mut self) -> Self {
         self.window_drag = true;
         self
@@ -816,6 +837,33 @@ impl El {
     /// Soft clip with a fade width per side (left, top, right, bottom).
     pub fn clip_fade(mut self, left: f32, top: f32, right: f32, bottom: f32) -> Self {
         self.vis.clip = Some([left, top, right, bottom]);
+        self
+    }
+    /// Track hover for descendants' `group_*` styles (see [`Visual::hover_group`]).
+    pub fn hover_group(mut self) -> Self {
+        self.vis.hover_group = true;
+        self
+    }
+    /// Curves for this element's hover track: `enter` when the pointer arrives, `exit` when it
+    /// leaves (e.g. a delayed reveal).
+    pub fn hover_motion(mut self, enter: impl Into<Anim>, exit: impl Into<Anim>) -> Self {
+        self.vis.hover_motion = Some((enter.into(), exit.into()));
+        self
+    }
+    /// Opacity factor `rest` normally and `hovered` while the nearest ancestor group is hovered.
+    pub fn group_opacity(mut self, rest: f32, hovered: f32) -> Self {
+        self.vis.group_opacity = Some([rest, hovered]);
+        self
+    }
+    /// Text or icon colour while the nearest ancestor group is hovered.
+    pub fn group_color(mut self, c: Color) -> Self {
+        self.vis.group_color = Some(c);
+        self
+    }
+    /// An opacity loop (see [`Cycle`]). It will become sugar over a general `El::looping`, so
+    /// there is one loop engine.
+    pub fn cycle(mut self, c: Cycle) -> Self {
+        self.vis.cycle = Some(c);
         self
     }
 

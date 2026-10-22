@@ -163,17 +163,5 @@ fn poll(s: &mut State, t: f64, _: &mut Tx) -> bool {
 }
 
 fn main() {
-    rune::run(AppSpec {
-        title: "Shapes",
-        size: (820.0, 360.0),
-        min_size: None,
-        init: || State { t: 0.0 },
-        view,
-        scenes: &[],
-        fonts: &[],
-        families: ("Inter", "Inter"),
-        setup: None,
-        poll: Some(poll),
-        on_key: None,
-    });
+    rune::run(AppSpec { poll: Some(poll), ..AppSpec::new("Shapes", (820.0, 360.0), || State { t: 0.0 }, view) });
 }
