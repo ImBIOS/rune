@@ -1227,3 +1227,10 @@ fn main() {
         }
     }
 }
+
+/// Appends a line of text (points) to a built frame's text layer.
+pub fn caption(ts: &mut TextSystem, f: &mut Frame, x: f32, y: f32, s: &str, color: Color) {
+    let mut ui = Ui::new(ts, f.3);
+    ui.text(x, y, s, 12.0, 500.0, color);
+    f.2.extend(ui.text);
+}

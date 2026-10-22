@@ -1,8 +1,10 @@
 //! Interactive rune-light: the flashlight and chat demos in a window.
 //!
 //!     live      window: 1 flashlight, 2 chat, click the settings controls, drag the chat lamp, scroll radius,
-//!               G god rays, D spring follow, R reset radius, Esc quit
+//!               L light mode (raking / overhead / backlight), M machined vs soft material, G god rays,
+//!               D spring follow, R reset radius, Esc quit
 //!     live --snap out.png [--scene chat] [--at X,Y] [--down | --click] [--after S] [--rays]
+//!               [--mode behind|overhead|backlight] [--soft] [--bare]
 //!               one frame headless at 2560×1600; --down/--click press (and release) at --at at t=0, rendered at S
 
 #[allow(dead_code)]
@@ -12,7 +14,9 @@ mod light;
 use std::sync::Arc;
 use std::time::Instant;
 
-use light::{DOT_HUES, DOT0, Frame, Hit, N_CTL, Panel, SLIDER, Spring, TOGGLE0, Track, accent_for, chat_scene, flashlight_scene, set_scale};
+use light::{DOT_HUES, DOT0, Frame, Hit, N_CTL, Panel, SLIDER, Spring, TOGGLE0, Track, accent_for, caption, chat_scene, flashlight_scene, lin, sc, set_scale};
+use rune::color::oklcha;
+use rune_light::Light;
 use rune::color::Color;
 use rune::render::Renderer;
 use rune::text::TextSystem;
@@ -35,6 +39,92 @@ const PRESS_DOWN: Spring = Spring::new(0.1, 0.0);
 const PRESS_UP: Spring = Spring::new(0.3, 0.2);
 const ACCENT: Spring = Spring::new(0.3, 0.0);
 const VOLUME: Spring = Spring::new(0.25, 0.0);
+/// The raking torch rig relative to its aim point, in points.
+const RIG: [f32; 3] = [80.0, 130.0, 260.0];
+const HALF_ANGLE: f32 = 0.58;
+
+/// Where the raking torch's pool peaks relative to its aim point on bare floor, in points, measured on GPU frames
+/// (`--snap --bare`, blurred-luminance argmax). The rig is shifted back by this so the hotspot sits under the cursor.
+const BEHIND_COMP: [f32; 2] = [65.0, 105.5];
+
+/// How the flashlight scene is lit (L cycles).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Mode {
+    /// The torch held low and to the side, raking across the panel (the original demo rig).
+    Behind,
+    /// Straight above the cursor: a soft centred pool.
+    Overhead,
+    /// A source just above the floor at the cursor: no front light, only rims, silhouettes and shafts.
+    Backlight,
+}
+
+impl Mode {
+    fn next(self) -> Mode {
+        match self {
+            Mode::Behind => Mode::Overhead,
+            Mode::Overhead => Mode::Backlight,
+            Mode::Backlight => Mode::Behind,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Mode::Behind => "Light: raking (L)",
+            Mode::Overhead => "Light: overhead (L)",
+            Mode::Backlight => "Light: backlight (L)",
+        }
+    }
+
+    fn torch(self, p: [f32; 2]) -> Light {
+        let s = sc();
+        match self {
+            Mode::Behind | Mode::Overhead => {
+                let (lp, aim) = if self == Mode::Behind {
+                    let c = BEHIND_COMP;
+                    let aim = [p[0] - c[0], p[1] - c[1]];
+                    ([aim[0] + RIG[0], aim[1] + RIG[1], RIG[2]], aim)
+                } else {
+                    ([p[0], p[1], 260.0], p)
+                };
+                Light::point(lp[0] * s, lp[1] * s, lp[2] * s)
+                    .color(lin(1.0, 0.95, 0.88))
+                    .intensity(7.0)
+                    .radius(9.0 * s)
+                    .range(1800.0 * s)
+                    .spot([aim[0] - lp[0], aim[1] - lp[1], -lp[2]], HALF_ANGLE)
+                    .specular(1.4)
+            }
+            Mode::Backlight => Light::point(p[0] * s, p[1] * s, 4.0 * s)
+                .color(lin(1.0, 0.92, 0.82))
+                .intensity(4.0)
+                .radius(12.0 * s)
+                .range(3000.0 * s)
+                .shafts(2.5)
+                .softness(2.2),
+        }
+    }
+}
+
+/// Hard machined slabs: tighter bevels with a thin bright edge, tighter highlights, taller cards for clearer
+/// elevation, sharper contact shadows, a darker void and less sheen on the floor.
+fn machine(f: &mut Frame) {
+    for p in f.0.iter_mut() {
+        if p.z[2] > 0.0 {
+            p.z[2] *= 0.45;
+            p.mat[0] = (p.mat[0] * 1.3).min(1.0);
+            p.mat[1] *= 0.6;
+        }
+        p.z[0] *= 1.5;
+        p.z[1] *= 1.5;
+    }
+    let s = &mut f.5;
+    s.ambient = [0.035, 0.037, 0.045];
+    s.albedo_floor = 0.045;
+    s.contact_ao = 0.6;
+    s.rim = 1.8;
+    s.background_gloss = 0.12;
+    s.background_roughness = 0.25;
+}
 
 // ---------------------------------------------------------------- GPU
 
@@ -154,6 +244,10 @@ struct State {
     direct: bool,
     radius: f32,
     rays: bool,
+    mode: Mode,
+    mode_at: f64,
+    machined: bool,
+    bare: bool,
     press: Option<[f32; 2]>,
     dragging: bool,
     // Settings panel.
@@ -184,6 +278,10 @@ impl State {
             direct: true,
             radius: 1.0,
             rays: false,
+            mode: Mode::Behind,
+            mode_at: f64::NEG_INFINITY,
+            machined: true,
+            bare: false,
             press: None,
             dragging: false,
             on: d.toggles.map(|k| k > 0.5),
@@ -349,8 +447,21 @@ impl State {
         let p = [self.x.value(t), self.y.value(t)];
         let mut f = match self.which {
             Which::Flashlight => {
-                let (f, hits) = flashlight_scene(ts, t as f32, p, &self.panel(t), true);
+                let (mut f, hits) = flashlight_scene(ts, t as f32, p, &self.panel(t), false);
                 self.hits = hits;
+                f.4 = vec![self.mode.torch(p)];
+                if self.machined {
+                    machine(&mut f);
+                }
+                if self.mode == Mode::Backlight {
+                    f.5.shafts_over = 0.1;
+                    f.5.ambient = f.5.ambient.map(|a| a.max(0.06));
+                }
+                if self.bare {
+                    f.0.clear();
+                    f.1.clear();
+                    f.2.clear();
+                }
                 f
             }
             Which::Chat => chat_scene(ts, t as f32, p),
@@ -362,10 +473,16 @@ impl State {
                 l.extra[0] = 1.5;
             }
         }
-        if self.rays {
+        if self.rays && self.mode != Mode::Backlight {
             f.5.shafts_over = f.5.shafts_over.max(0.12);
         }
-        (f, self.animating(t))
+        // The mode caption shows for a moment after L, then fades.
+        let since = t - self.mode_at;
+        let alpha = (1.0 - ((since - 1.2) / 0.4).clamp(0.0, 1.0)) as f32;
+        if self.which == Which::Flashlight && alpha > 0.0 {
+            caption(ts, &mut f, 24.0, 772.0, self.mode.label(), oklcha(1.0, 0.0, 0.0, alpha));
+        }
+        (f, self.animating(t) || since < 1.7)
     }
 }
 
@@ -478,6 +595,11 @@ impl ApplicationHandler for App {
                     Key::Character("d") | Key::Character("D") => st.direct = !st.direct,
                     Key::Character("g") | Key::Character("G") => st.rays = !st.rays,
                     Key::Character("r") | Key::Character("R") => st.radius = 1.0,
+                    Key::Character("l") | Key::Character("L") => {
+                        st.mode = st.mode.next();
+                        st.mode_at = st.now();
+                    }
+                    Key::Character("m") | Key::Character("M") => st.machined = !st.machined,
                     _ => {}
                 }
                 l.window.request_redraw();
@@ -514,7 +636,7 @@ impl ApplicationHandler for App {
 
 // ---------------------------------------------------------------- headless snapshot
 
-fn snap(path: &str, which: Which, at: Option<[f32; 2]>, rays: bool, click: Option<bool>, after: f64) {
+fn snap(path: &str, which: Which, at: Option<[f32; 2]>, rays: bool, click: Option<bool>, after: f64, opts: (Mode, bool, bool)) {
     let (w, h) = (2560u32, 1600u32);
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let (_, device, queue) = request_device(&instance, None);
@@ -538,6 +660,7 @@ fn snap(path: &str, which: Which, at: Option<[f32; 2]>, rays: bool, click: Optio
         }
     }
     st.rays = rays;
+    (st.mode, st.machined, st.bare) = opts;
     st.fake = Some(after);
     let out = gfx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("snap"),
@@ -584,7 +707,12 @@ fn main() {
         let flag = |f: &str| args.iter().any(|a| a == f);
         let click = if flag("--click") { Some(true) } else if flag("--down") { Some(false) } else { None };
         let after = arg("--after").and_then(|s| s.parse().ok()).unwrap_or(1.0);
-        snap(&path, which, at, flag("--rays"), click, after);
+        let mode = match arg("--mode").as_deref() {
+            Some("overhead") => Mode::Overhead,
+            Some("backlight") => Mode::Backlight,
+            _ => Mode::Behind,
+        };
+        snap(&path, which, at, flag("--rays"), click, after, (mode, !flag("--soft"), flag("--bare")));
         return;
     }
     let event_loop = EventLoop::new().expect("event loop");
