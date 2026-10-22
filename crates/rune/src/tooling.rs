@@ -354,7 +354,7 @@ fn load_script(path: &PathBuf) -> Vec<Ev> {
 // -------------------------------------------------------------------------------------------
 // motion-lint trace (the format Scrawl writes)
 
-struct Trace {
+pub(crate) struct Trace {
     out: std::io::BufWriter<std::fs::File>,
     ids: HashMap<String, u32>,
     described: HashSet<u32>,
@@ -366,7 +366,7 @@ fn r2(v: f32) -> f64 {
 }
 
 impl Trace {
-    fn open(path: &PathBuf, size: (f32, f32), fps: f64, scale: f32) -> Trace {
+    pub(crate) fn open(path: &PathBuf, size: (f32, f32), fps: f64, scale: f32) -> Trace {
         if let Some(d) = path.parent() {
             let _ = std::fs::create_dir_all(d);
         }
@@ -385,7 +385,7 @@ impl Trace {
         *self.ids.entry(key.to_owned()).or_insert(next)
     }
 
-    fn frame<S>(&mut self, rt: &mut Runtime<S>, t_ms: f64, cpu_ms: f64) {
+    pub(crate) fn frame<S>(&mut self, rt: &mut Runtime<S>, t_ms: f64, cpu_ms: f64) {
         let els = rt.elements();
         let settled = rt.settled;
         let mut metas = Vec::new();

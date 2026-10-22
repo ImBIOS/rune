@@ -210,6 +210,11 @@ struct Stack {
     tops: HashMap<NodeId, f32>,
     pad_top: f32,
     pad_bottom: f32,
+    width: f32,
+    /// Measure at the landing width immediately; defer height targets until it is stable.
+    width_hold_until: f64,
+    width_shrink_until: f64,
+    pending_heights: HashMap<NodeId, f32>,
 }
 
 struct LayoutEntry {
@@ -1140,6 +1145,11 @@ impl<S: 'static> Runtime<S> {
         for c in 0..nodes.len() {
             let Some(_spec) = nodes[c].growth else { continue };
             let cid = nodes[c].id;
+            // A reader away from the tail is anchored using measured row heights. Land those
+            // heights with the anchor correction; delayed growth would move the reading position.
+            let reading = self.virtuals.get(&nodes[c].path)
+                .and_then(|v| self.path_ids.get(&v.scroll_path))
+                .and_then(|id| self.scrolls.get(id)).is_some_and(|s| !s.pinned);
             let rows: Vec<usize> = (c + 1..nodes.len()).filter(|&j| nodes[j].parent == Some(c)).collect();
             let existed = self.stacks.contains_key(&cid) && !tx.settle;
             let mut stack = self.stacks.remove(&cid).unwrap_or_default();
@@ -1174,6 +1184,17 @@ impl<S: 'static> Runtime<S> {
                 }
             }
             let ctop = nodes[c].target[1];
+            let width = nodes[c].local.w;
+            if first || !existed || tx.settle || self.reduced_motion || reading {
+                stack.width_hold_until = 0.0;
+                stack.width_shrink_until = 0.0;
+                stack.pending_heights.clear();
+            } else if (width - stack.width).abs() > 0.25 {
+                stack.width_hold_until = now + 0.12;
+                stack.width_shrink_until = now + 0.4;
+            }
+            stack.width = width;
+            stack.pending_heights.retain(|id, _| new_set.contains(id));
             stack.pad_top = rows.first().map_or(0.0, |&j| nodes[j].target[1] - ctop);
             stack.pad_bottom = rows.last().map_or(nodes[c].target[3] - ctop, |&j| nodes[c].target[3] - nodes[j].target[3]);
             for &j in &rows {
@@ -1182,7 +1203,7 @@ impl<S: 'static> Runtime<S> {
                 stack.closing.remove(&id);
                 stack.tops.insert(id, nodes[j].target[1] - ctop);
                 let streaming = nodes[j].streaming;
-                if streaming && existed && !tx.settle && !first && !self.reduced_motion {
+                if streaming && existed && !tx.settle && !first && !self.reduced_motion && !reading {
                     // Measure the final wrapped text before mutating the growth track. Targets
                     // retain full layout height; only the presented stack extent lags the fill.
                     let mut end = j + 1;
@@ -1198,13 +1219,18 @@ impl<S: 'static> Runtime<S> {
                     if existed && !instant && !nodes[j].virtual_mount { GrowTrack { streaming, ..GrowTrack::settled(0.0) } } else { GrowTrack::settled(h) }
                 });
                 g.streaming = streaming;
-                if tx.settle || !existed || first || self.reduced_motion {
+                if tx.settle || !existed || first || self.reduced_motion || reading {
                     *g = GrowTrack { streaming, ..GrowTrack::settled(h) };
                 } else {
                     // Only a width/scale rewrap may shrink an active streaming row, including
                     // when fresh text arrives in the same frame as the resize.
-                    let t = if streaming && !self.relayout { h.max(g.h.min(g.target)) } else { h };
-                    g.retarget(t);
+                    let t = if streaming && !self.relayout && now >= stack.width_shrink_until { h.max(g.h.min(g.target)) } else { h };
+                    if now < stack.width_hold_until {
+                        stack.pending_heights.insert(id, t);
+                    } else {
+                        stack.pending_heights.remove(&id);
+                        g.retarget(t);
+                    }
                 }
             }
             stack.order = order;
@@ -1455,7 +1481,13 @@ impl<S: 'static> Runtime<S> {
                 }
                 // A row above the tail (the last row) carries it.
                 let carrying = k + 2 == n_rows;
-                for _ in 0..steps.min(240) {
+                for substep in 0..steps.min(240) {
+                    if !stack.pending_heights.is_empty() {
+                        let at = now - f64::from(self.grow_acc) - f64::from((steps.min(240) - substep) as f32 * SUBSTEP);
+                        if at >= stack.width_hold_until && let Some(height) = stack.pending_heights.remove(id) {
+                            g.retarget(height);
+                        }
+                    }
                     g.step(spec.spring, &spec.edge, carrying);
                 }
                 moving |= g.moving();
@@ -1468,6 +1500,8 @@ impl<S: 'static> Runtime<S> {
                 keep
             });
             stack.closing.retain(|id, _| stack.order.contains(id));
+            // Keep the shared clock awake through the hold. No timer thread or remeasurement.
+            moving |= !stack.pending_heights.is_empty();
         }
         moving || (steps == 0 && self.grows.values().any(|g| g.moving()))
     }
@@ -1764,8 +1798,9 @@ impl<S: 'static> Runtime<S> {
                     self.row_dy[ri] = cur - top_rel;
                     self.row_h[ri] = g.h;
                     let withheld = if g.streaming { (self.nodes[ri].local.h - g.target).max(0.0) } else { 0.0 };
-                    if spec.edge.clip && (g.h < g.target - 0.01 || g.mask > 0.01 || withheld > 0.01) {
-                        self.row_mask[ri] = g.mask.max(withheld.min(spec.edge.floor));
+                    let rewrap = stack.pending_heights.contains_key(id) && self.nodes[ri].local.h > g.h + 0.01;
+                    if spec.edge.clip && (g.h < g.target - 0.01 || g.mask > 0.01 || withheld > 0.01 || rewrap) {
+                        self.row_mask[ri] = g.mask.max(withheld.min(spec.edge.floor)).max(if rewrap { spec.edge.floor } else { 0.0 });
                     }
                 }
                 y = cur + g.h;
@@ -2508,6 +2543,77 @@ mod tests {
     use crate::el::{col, el};
 
     #[test]
+    fn side_panel_wraps_once_and_releases_height_after_stable_width() {
+        use crate::el::{row, text};
+        fn view(s: &(f32, bool), cx: &mut Cx<(f32, bool)>) -> El {
+            cx.reduced_motion(s.1);
+            row().key("window").w_full().h_full()
+                .child(col().key("viewport").grow(1.0).shrink().h_full()
+                    .scroll(ScrollSpec { stick_bottom: true }).clip_soft(18.0)
+                    .child(col().key("stack").w_full().growth(GrowthSpec::default())
+                        .child(col().key("message").w_full().child(text("Wrap once at the landing width. ".repeat(30)).wrap().w_full()))))
+                .child(el().key("side-panel").w(s.0).h_full())
+        }
+        fn run(fps: usize, reduced: bool) -> Vec<f32> {
+            let mut rt = Runtime::new((0.0, reduced), view, (480.0, 700.0), Env { system_dark: true, scale: 2.0 });
+            rt.frame(0.0);
+            let id = rt.nodes.iter().find(|n| n.key.as_deref() == Some("message")).unwrap().id;
+            let original = rt.grows[&id].h;
+            let mut trace = std::env::var_os("RUNE_WIDTH_TRACE").map(|dir| {
+                let dir = std::path::PathBuf::from(dir).join(format!("width-{fps}-{}", if reduced { "reduced" } else { "normal" }));
+                std::fs::create_dir_all(&dir).unwrap();
+                crate::tooling::Trace::open(&dir.join("trace.jsonl"), (480.0, 700.0), fps as f64, 2.0)
+            });
+            if let Some(trace) = &mut trace { trace.frame(&mut rt, 0.0, 0.0); }
+            rt.state.0 = 160.0;
+            rt.invalidate();
+            rt.frame(0.0);
+            let commits = rt.stats.commits;
+            let measured = rt.nodes.iter().find(|n| n.id == id).unwrap().local.h;
+            assert!(measured > original);
+            if reduced { assert_eq!(rt.grows[&id].h, measured); }
+            else { assert_eq!(rt.grows[&id].target, original); }
+            let mut samples = vec![];
+            for frame in 1..=fps * 2 {
+                rt.frame(1.0 / fps as f64);
+                assert_eq!(rt.stats.commits, commits, "presentation must not remeasure the wrapping");
+                assert_eq!(rt.stats.shaped, 0);
+                if frame as f64 / (fps as f64) < 0.12 && !reduced {
+                    assert_eq!(rt.grows[&id].h, original);
+                    assert!(rt.animating, "the hold must keep the shared clock awake");
+                }
+                if frame % (fps / 30) == 0 { samples.push(rt.grows[&id].h); }
+                if let Some(trace) = &mut trace { trace.frame(&mut rt, frame as f64 * 1000.0 / fps as f64, 0.0); }
+            }
+            assert!((rt.grows[&id].h - measured).abs() < 0.05);
+            // A second target during a hold restarts the stable-width interval.
+            rt.state.0 = 80.0;
+            rt.invalidate();
+            rt.frame(0.0);
+            for _ in 0..fps / 10 { rt.frame(1.0 / fps as f64); }
+            rt.state.0 = 120.0;
+            rt.invalidate();
+            rt.frame(0.0);
+            for _ in 0..fps / 10 { rt.frame(1.0 / fps as f64); }
+            if !reduced {
+                assert_eq!(rt.grows[&id].h, measured, "a changing width must restart the hold");
+                assert!(!rt.stacks.values().next().unwrap().pending_heights.is_empty());
+            }
+            // Settle/resume bypasses even an active hold completely.
+            rt.settle_all();
+            rt.frame(0.0);
+            assert!(rt.stacks.values().all(|s| s.pending_heights.is_empty()));
+            assert!(!rt.animating);
+            samples
+        }
+        for reduced in [false, true] {
+            let a = run(30, reduced);
+            let b = run(120, reduced);
+            for (a, b) in a.into_iter().zip(b) { assert!((a - b).abs() < 0.05, "frame-rate dependent hold: {a} vs {b}"); }
+        }
+    }
+
+    #[test]
     fn cursor_follows_the_hovered_target_and_its_ancestors() {
         use crate::el::Cursor;
         struct State { field: crate::edit::TextEdit }
@@ -2676,6 +2782,15 @@ mod tests {
         window.frame(1.0 / 120.0);
         assert_eq!(before, visible(&window), "prepending outside the window preserves its keyed anchor");
         assert!(window.nodes.len() < 150 && window.grows.len() < 70, "paging releases old row state");
+        let anchor = visible(&window)[0].clone();
+        window.set_viewport((320.0, 300.0), 2.0);
+        window.frame(0.0);
+        for _ in 0..60 {
+            let after = visible(&window);
+            let rect = after.iter().find(|(key, _)| key == &anchor.0).expect("resize retains the visible keyed anchor");
+            assert!((rect.1[1] - anchor.1[1]).abs() < 0.05, "resize anchor moved: {:?} vs {:?}", anchor, rect);
+            window.frame(1.0 / 120.0);
+        }
         window.settle_all();
         window.frame(0.0);
         let last = visible(&window).pop().unwrap();
@@ -2765,8 +2880,20 @@ mod tests {
         rt.state.0.push_str(" twelve");
         rt.invalidate();
         rt.frame(1.0 / 120.0);
+        assert_eq!(rt.grows[&row].target, old_h, "rewrap waits for stable width");
+        for _ in 0..15 { rt.frame(1.0 / 120.0); }
         assert!(rt.grows[&row].target < old_h, "width change may shrink a streaming row");
         assert!(rt.grows[&row].h > rt.grows[&row].target, "rewrapped height eases instead of snapping");
+        rt.state.0 = "one two".into();
+        rt.invalidate();
+        rt.frame(0.0);
+        assert!(rt.grows[&row].target < rt.grows[&row].h, "streaming may still shrink inside the 400 ms rewrap window");
+        for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        let landed = rt.grows[&row].h;
+        rt.state.0 = "o".into();
+        rt.invalidate();
+        rt.frame(0.0);
+        assert_eq!(rt.grows[&row].target, landed, "streaming cannot shrink after the rewrap window");
         rt.state.1 = false;
         rt.invalidate();
         for _ in 0..240 { rt.frame(1.0 / 120.0); }
