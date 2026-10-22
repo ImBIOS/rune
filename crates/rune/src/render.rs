@@ -311,7 +311,8 @@ impl Renderer {
             self.instances = Self::instance_buffer(device, self.capacity);
         }
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
-        let g: [f32; 4] = [viewport.0 as f32, viewport.1 as f32, 0.0, 0.0];
+        // Geometry uploads must preserve a presentation timestamp already latched this frame.
+        let g: [f32; 2] = [viewport.0 as f32, viewport.1 as f32];
         queue.write_buffer(&self.globals, 0, bytemuck::cast_slice(&g));
         self.count = instances.len() as u32;
     }

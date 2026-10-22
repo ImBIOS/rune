@@ -179,8 +179,16 @@ passes the original position/opacity gates, and the default runtime stays CPU-ow
 Automatic runtime promotion is not justified yet: first build a retained-geometry
 contract with lazy presented-value queries, per-node property ownership and a way
 to combine CPU-driven growth/scroll with GPU transforms. Test animated clip/colour
-and hierarchical transforms separately. An independent Opus review is still required
-before the first push; this subagent's catalog exposes model search but no spawn tool.
+and hierarchical transforms separately.
+
+Independent Opus-medium review (dispatched by the parent) found **no blockers**.
+Its non-blocking finding was fixed: `prepare` now writes only the eight viewport
+bytes, preserving a timestamp previously supplied by `present_at` in the same frame.
+The pixel harness deliberately calls `prepare` after `present_at` at all 16 sampled
+states; all remain byte-identical and all 81,920 differential samples pass. Use
+`gpu_springs --verify-only` to repeat correctness without rerunning timing loops.
+Landing remains paused for the coordinated public-history reset; the old base is
+`8b37ced6a841d5d9600ce030efcdb183501cd7d3`.
 
 ## Shutter motion blur
 

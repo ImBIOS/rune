@@ -215,7 +215,7 @@ struct O { @builtin(position) p: vec4<f32>, @location(0) @interpolate(flat) resu
     assert_eq!(failures, 0, "GPU position/opacity differential");
 }
 
-fn bench(gpu: &Gpu) {
+fn bench(gpu: &Gpu, timing: bool) {
     let d = &gpu.device;
     let q = &gpu.queue;
     let target = Offscreen::new(d, 512, 512);
@@ -263,7 +263,7 @@ fn bench(gpu: &Gpu) {
         let mut atlas = TextSystem::default().atlas;
         fast.prepare(d, q, &mut atlas, &base, (512, 512));
         let mut results: [Vec<(f64, f64)>; 2] = [vec![], vec![]];
-        for run in 0..8 {
+        for run in 0..if timing { 8 } else { 0 } {
             for k in 0..2 {
                 let path = (k + run) % 2;
                 let mut cpu_times = Vec::new();
@@ -323,6 +323,7 @@ fn bench(gpu: &Gpu) {
             }
         }
         for (path, runs) in results.iter().enumerate() {
+            if runs.is_empty() { continue; }
             let mut c: Vec<_> = runs.iter().map(|x| x.0).collect();
             let mut g: Vec<_> = runs.iter().map(|x| x.1).collect();
             let cm = median(&mut c);
@@ -344,6 +345,8 @@ fn bench(gpu: &Gpu) {
             }
             cpu.prepare(d, q, &mut atlas, &instances, (512, 512));
             fast.present_at(q, (512, 512), now as f64);
+            // Uploading changed geometry after latching time must not rewind the tracks.
+            fast.prepare(d, q, &mut atlas, &base, (512, 512));
             let mut images = Vec::new();
             for r in [&cpu, &fast] {
                 let mut enc = d.create_command_encoder(&Default::default());
@@ -380,5 +383,5 @@ fn main() {
     println!("ADAPTER {:?}", adapter.get_info());
     let gpu = Gpu { instance, adapter, device, queue };
     differential(&gpu);
-    bench(&gpu);
+    bench(&gpu, !std::env::args().any(|arg| arg == "--verify-only"));
 }
