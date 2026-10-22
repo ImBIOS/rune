@@ -24,6 +24,7 @@ pub struct Tx {
     pub(crate) copy: Option<String>,
     pub(crate) text_flights: Vec<(String, String)>,
     pub(crate) scroll_to: Vec<String>,
+    pub(crate) wakes: Vec<std::time::Duration>,
     pub(crate) shell: Option<Shell>,
 }
 
@@ -41,6 +42,14 @@ impl Tx {
     pub fn scroll_into_view(&mut self, key: impl Into<String>) {
         self.scroll_to.push(key.into());
     }
+    /// Wake the app's poll hook after an unscaled duration. Equal deadlines coalesce.
+    /// This schedules a frame, not a view commit; poll returns true if state changed.
+    /// For debounce, keep the latest due time in app state and reschedule the remaining
+    /// duration when an earlier wake arrives. No timer thread is created.
+    pub fn wake_after(&mut self, duration: std::time::Duration) {
+        self.wakes.push(duration);
+    }
+
     /// Fly the visible text of an existing keyed field to a newly mounted keyed text node.
     /// The runtime captures the previous presentation and measures the live destination each
     /// frame, after row growth and scroll. Keys must be unique in the view.

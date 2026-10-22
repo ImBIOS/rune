@@ -247,6 +247,7 @@ pub struct Runtime<S: 'static> {
     pub poll: Option<fn(&mut S, f64, &mut Tx) -> bool>,
     /// Seconds since the first frame, unscaled (virtual when headless).
     pub clock: f64,
+    wake_deadlines: Vec<f64>,
     /// Windowed runs read the clock from the wall instead of summing frame steps.
     pub wall_start: Option<std::time::Instant>,
     /// Called for every key before the focused field; return true to consume it.
@@ -357,6 +358,7 @@ impl<S: 'static> Runtime<S> {
             time_scale: 1.0,
             poll: None,
             clock: 0.0,
+            wake_deadlines: Vec::new(),
             wall_start: None,
             on_key: None,
             nodes: Vec::new(),
@@ -516,6 +518,11 @@ impl<S: 'static> Runtime<S> {
         self.dirty = true;
     }
 
+    /// Next requested wake on the unscaled app clock. None lets the shell sleep indefinitely.
+    pub fn wake_deadline(&self) -> Option<f64> {
+        self.wake_deadlines.first().copied()
+    }
+
     /// Lands every track before the next frame: growth, reveals and follow-the-end (guarantee 8,
     /// for returning to a window or session).
     pub fn settle_all(&mut self) {
@@ -527,23 +534,51 @@ impl<S: 'static> Runtime<S> {
     /// if state changed, steps `Scene`, growth, scroll and reveals, and builds this frame's
     /// instances.
     pub fn frame(&mut self, dt: f64) -> bool {
+        // A coarse headless step still polls at every timer deadline, independent of FPS.
+        // Input queued for the requested frame stays at that frame's timestamp.
+        if self.wall_start.is_none()
+            && self.wake_deadline().is_some_and(|deadline| deadline > self.clock && deadline < self.clock + dt)
+        {
+            let target = self.clock + dt;
+            let input = std::mem::take(&mut self.queue);
+            while let Some(deadline) = self.wake_deadline()
+                && deadline > self.clock && deadline < target
+            {
+                self.frame_step(deadline - self.clock);
+            }
+            self.queue.extend(input);
+            return self.frame_step(target - self.clock);
+        }
+        self.frame_step(dt)
+    }
+
+    fn frame_step(&mut self, dt: f64) -> bool {
         let mut tx = std::mem::take(&mut self.pending);
         let mut ran = false;
         self.clock = match self.wall_start {
             Some(t0) => t0.elapsed().as_secs_f64(),
             None => self.clock + dt,
         };
+        let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
+        self.wake_deadlines.drain(..due);
         if let Some(poll) = self.poll {
             let mut one = Tx::default();
+            // Scheduling does not imply a model change.
             if poll(&mut self.state, self.clock, &mut one) {
                 ran = true;
-                merge(&mut tx, one);
             }
+            merge(&mut tx, one);
         }
         for action in std::mem::take(&mut self.queue) {
             ran |= self.run_action(action, &mut tx);
         }
         let shaped0 = self.text.shaped;
+        for delay in tx.wakes.drain(..) {
+            let deadline = self.clock + delay.as_secs_f64();
+            if let Err(index) = self.wake_deadlines.binary_search_by(|t| t.total_cmp(&deadline)) {
+                self.wake_deadlines.insert(index, deadline);
+            }
+        }
         if let Some(copy) = tx.copy.take() {
             self.copy_request = Some(copy);
         }
@@ -2488,6 +2523,7 @@ impl<S: 'static> Runtime<S> {
 
 fn merge(tx: &mut Tx, one: Tx) {
     tx.scroll_to.extend(one.scroll_to);
+    tx.wakes.extend(one.wakes);
     tx.text_flights.extend(one.text_flights);
     if one.copy.is_some() { tx.copy = one.copy; }
     tx.shell = tx.shell.max(one.shell);
@@ -2867,6 +2903,50 @@ mod tests {
         rt.secondary_up(12.0, 12.0);
         rt.frame(0.0);
         assert_eq!(rt.state.1.len(), 1);
+    }
+
+    #[test]
+    fn timed_wakes_are_exact_coalesced_and_do_not_commit_or_animate() {
+        use std::time::Duration;
+        fn view(_: &Vec<f64>, cx: &mut Cx<Vec<f64>>) -> El {
+            cx.time_scale(0.1);
+            el()
+        }
+        fn poll(seen: &mut Vec<f64>, clock: f64, tx: &mut Tx) -> bool {
+            seen.push(clock);
+            if clock == 0.0 {
+                tx.wake_after(Duration::from_millis(250));
+                tx.wake_after(Duration::from_millis(250));
+                tx.wake_after(Duration::from_millis(375));
+            }
+            false
+        }
+        let mut rt = Runtime::new(Vec::new(), view, (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        rt.poll = Some(poll);
+        assert!(!rt.frame(0.0));
+        assert_eq!(rt.wake_deadlines, [0.25, 0.375]);
+        assert!(!rt.frame(0.5));
+        assert_eq!(rt.state, [0.0, 0.25, 0.375, 0.5]);
+        assert_eq!(rt.commits, 1);
+        assert_eq!(rt.wake_deadline(), None);
+        assert!((rt.t - 0.05).abs() < 1e-8);
+    }
+
+    #[test]
+    fn timed_wakes_from_handlers_survive_transaction_merging() {
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            el().key("button").size(100.0, 100.0).on_press_tx(|_: &mut (), tx| {
+                tx.wake_after(std::time::Duration::from_millis(250));
+            })
+        }
+        let mut rt = Runtime::new((), view, (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        rt.pointer_down(10.0, 10.0);
+        rt.pointer_up(10.0, 10.0);
+        rt.frame(0.1);
+        assert_eq!(rt.wake_deadline(), Some(0.35));
+        rt.frame(0.25);
+        assert_eq!(rt.wake_deadline(), None);
     }
 
     #[test]
