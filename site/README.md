@@ -15,9 +15,9 @@ source of truth for all of it is `PLAN.md` at the repo root; update the plan fir
 
 The site is served at https://anoma.ly/team/rune and https://dev.anoma.ly/team/rune, the same way as Abattoir.
 
-- A push to `main` that touches `site/` deploys https://anoma.ly/team/rune (Worker `rune-site`).
-- A push to `site-dev` that touches `site/` deploys https://dev.anoma.ly/team/rune (Worker `rune-site-dev`). To try a
-  change before merging, push it there: `git push -f origin HEAD:site-dev`.
+- A push to `dev` that touches `site/` deploys https://dev.anoma.ly/team/rune (Worker `rune-site-dev`).
+- A push to `production` that touches `site/` deploys https://anoma.ly/team/rune (Worker `rune-site`). To release,
+  fast-forward it to `dev`: `git push origin dev:production`. Never commit to `production` directly.
 
 Nothing else deploys. `.github/workflows/site.yml` runs `bun run deploy:<production|dev>` with the
 `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets. The token needs Workers Scripts Write on the account and

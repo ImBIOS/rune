@@ -56,8 +56,8 @@ function navGroups(pathname: string): NavGroup[] {
       label: "Source",
       items: [
         { href: REPO, label: "GitHub" },
-        { href: `${REPO}/blob/main/PLAN.md`, label: "Plan" },
-        { href: `${REPO}/tree/main/research`, label: "Research notes" },
+        { href: `${REPO}/blob/dev/PLAN.md`, label: "Plan" },
+        { href: `${REPO}/tree/dev/research`, label: "Research notes" },
       ],
     },
   ]
