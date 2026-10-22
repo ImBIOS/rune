@@ -209,6 +209,7 @@ struct Host<S: 'static> {
     options: WindowOptions,
     native_handle: WindowHandle,
     on_created: Option<Box<dyn FnOnce(WindowHandle)>>,
+    on_window: Option<crate::app::OnWindow>,
     finished: bool,
     spec: AppSpec<S>,
     args: Args,
@@ -261,7 +262,8 @@ fn run_configured<S: 'static>(factory: impl FnOnce(&[Display]) -> Vec<WindowSpec
 
 impl<S: 'static> Host<S> {
     fn new(window_spec: WindowSpec<S>, args: Args, proxy: EventLoopProxy<WakeEvent>, slot: usize, gpu_pool: Rc<RefCell<Weak<Gpu>>>) -> Self {
-        let WindowSpec { app, options, key, on_created } = window_spec;
+        let WindowSpec { mut app, options, key, on_created } = window_spec;
+        let on_window = app.on_window.take();
         let native_handle = WindowHandle { native: Arc::default(), slot, key: key.into(), proxy: proxy.clone() };
         let live_proxy = proxy.clone();
         let waker: Waker = Arc::new(move || {
@@ -282,6 +284,7 @@ impl<S: 'static> Host<S> {
             options,
             native_handle,
             on_created,
+            on_window,
             finished: false,
             spec,
             args,
@@ -557,8 +560,18 @@ impl<S: 'static> Host<S> {
         w.window.request_redraw();
     }
 
-    #[cfg_attr(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))), allow(unused_variables))]
+    /// Creates the window, or records why it can't be and leaves the app windowless; a later
+    /// open tries again.
     fn create(&mut self, event_loop: &ActiveEventLoop, token: Option<String>, focus: bool) {
+        let result = self.try_create(event_loop, token, focus);
+        if let Err(error) = &result {
+            eprintln!("rune: could not create the window {}: {error}", self.native_handle.key());
+        }
+        *self.shared.window_error.lock().unwrap() = result.err();
+    }
+
+    #[cfg_attr(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))), allow(unused_variables))]
+    fn try_create(&mut self, event_loop: &ActiveEventLoop, token: Option<String>, focus: bool) -> Result<(), String> {
         let size = self.args.size.unwrap_or(self.spec.size);
         let visible = self.started || self.options.visible;
         #[allow(unused_mut)]
@@ -579,26 +592,26 @@ impl<S: 'static> Host<S> {
             use winit::platform::macos::WindowAttributesExtMacOS;
             attrs = attrs.with_titlebar_transparent(true).with_title_hidden(true).with_fullsize_content_view(true);
         }
-        let window = Arc::new(event_loop.create_window(attrs).expect("window"));
+        let window = Arc::new(event_loop.create_window(attrs).map_err(|e| e.to_string())?);
         if self.options.click_through && let Err(error) = window.set_cursor_hittest(false) {
             eprintln!("click-through unavailable for {}: {error}", self.native_handle.key());
         }
         window.set_ime_allowed(true);
         let (gpu, surface) = match self.gpu.take() {
             Some((gpu, renderer, format)) => {
-                let surface = gpu.instance.create_surface(window.clone()).expect("surface");
+                let surface = gpu.instance.create_surface(window.clone());
                 self.gpu = Some((gpu, renderer, format));
-                (None, surface)
+                (None, surface.map_err(|e| e.to_string())?)
             }
             None => {
                 let cached = self.gpu_pool.borrow().upgrade();
                 let (gpu, surface) = if let Some(gpu) = cached {
-                    let surface = gpu.instance.create_surface(window.clone()).expect("surface");
+                    let surface = gpu.instance.create_surface(window.clone()).map_err(|e| e.to_string())?;
                     (gpu, surface)
                 } else {
                     let instance = Gpu::instance();
-                    let surface = instance.create_surface(window.clone()).expect("surface");
-                    let gpu = Arc::new(Gpu::new(instance, Some(&surface)));
+                    let surface = instance.create_surface(window.clone()).map_err(|e| e.to_string())?;
+                    let gpu = Arc::new(Gpu::try_new(instance, Some(&surface))?);
                     *self.gpu_pool.borrow_mut() = Arc::downgrade(&gpu);
                     (gpu, surface)
                 };
@@ -607,7 +620,9 @@ impl<S: 'static> Host<S> {
         };
         let adapter = &gpu.as_ref().or(self.gpu.as_ref().map(|g| &g.0)).unwrap().adapter;
         let phys = window.inner_size();
-        let mut config = surface.get_default_config(adapter, phys.width.max(1), phys.height.max(1)).expect("surface config");
+        let mut config = surface
+            .get_default_config(adapter, phys.width.max(1), phys.height.max(1))
+            .ok_or("the GPU adapter can't present to this window")?;
         let caps = surface.get_capabilities(adapter);
         config.format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(config.format);
         if self.options.transparent {
@@ -668,6 +683,14 @@ impl<S: 'static> Host<S> {
             alpha,
         });
         if let Some(created) = self.on_created.take() { created(self.native_handle.clone()); }
+        if let Some(on_window) = self.on_window.as_mut() { on_window(&self.native_handle); }
+        Ok(())
+    }
+
+    /// Publishes what `AppHandle::is_visible` reports.
+    fn publish(&self) {
+        let visible = !self.finished && self.win.as_ref().is_some_and(|w| w.visible);
+        self.shared.visible.store(visible, Ordering::Release);
     }
 
     fn redraw(&mut self) {
@@ -753,6 +776,23 @@ impl<S: 'static> AnyHost for Host<S> {
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.resume(event_loop);
+        self.publish();
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
+        self.handle_user_event(event_loop, event);
+        self.publish();
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        self.handle_window_event(event_loop, id, event);
+        self.publish();
+    }
+}
+
+impl<S: 'static> Host<S> {
+    fn resume(&mut self, event_loop: &ActiveEventLoop) {
         if self.started {
             return;
         }
@@ -763,7 +803,7 @@ impl<S: 'static> AnyHost for Host<S> {
         self.drain(event_loop);
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
+    fn handle_user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
         if !self.started { return; }
         match event {
             WakeEvent::App(_) => self.drain(event_loop),
@@ -779,7 +819,7 @@ impl<S: 'static> AnyHost for Host<S> {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+    fn handle_window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if self.win.as_ref().is_none_or(|w| w.window.id() != id) {
             return;
         }

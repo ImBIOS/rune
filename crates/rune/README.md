@@ -160,6 +160,11 @@ app.run();
   reopen, `release_gpu_when_closed`; and under Xwayland, hide/show and `focus_window`. Not yet run on KWin, Mutter, niri,
   macOS or Windows.
 - Headless tooling runs ignore window requests and apply updates before each frame.
+- `AppHandle::is_visible()` reports whether the window is on screen; `AppHandle::window_error()`
+  says why it couldn't be created (no display, no GPU adapter or device). A failed creation is
+  logged and leaves the app windowless; the next open tries again (`Gpu::try_new`).
+- `App::on_window(|w: &WindowHandle| ..)` runs on the UI thread after every native creation, for
+  icons or native styles through `WindowHandle::with_raw_handle`.
 - `AppSpec::min_size` sets the smallest window (None keeps 420×400).
 - `AppHandle::set_dock_icon(bool)` switches macOS between the regular and accessory activation
   policies at runtime (observed on macOS 26.2 with `lsappinfo`: UIElement ↔ Foreground).
@@ -298,6 +303,7 @@ of the primary display, centred or `inset` points from a side. Clicks pass throu
   (hailmary, screen at the login window): both panels at level 25 with the right bounds (top
   centre; top right, then left and wider), hide, reshow and quit (CGWindowList); clicks, pixels
   and non-activation not observed. Windows: `cargo xwin clippy` only.
+- `Tx::copy` works in overlays (a meeting capsule's Copy button).
 - Not yet: interactive overlays on Wayland, hover in a non-key macOS panel (mouse-moved events
   go to the key window), per-monitor placement.
 

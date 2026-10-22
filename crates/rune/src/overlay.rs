@@ -464,7 +464,7 @@ impl<T: 'static> Overlay<T> {
             None => {
                 let instance = Gpu::instance();
                 let surface = make(&instance)?;
-                let gpu = Arc::new(Gpu::new(instance, Some(&surface)));
+                let gpu = Arc::new(Gpu::try_new(instance, Some(&surface)).ok()?);
                 *self.gpu_pool.borrow_mut() = Arc::downgrade(&gpu);
                 self.gpu = Some(gpu);
                 surface
@@ -523,7 +523,7 @@ impl<T: 'static> Overlay<T> {
 
     fn advance(&mut self) {
         self.rt.frame(0.0);
-        self.rt.shell_request = None;
+        after_frame(&mut self.rt);
         self.dirty = true;
     }
 
@@ -606,7 +606,7 @@ impl<T: 'static> Overlay<T> {
         let dt = if self.idle { 1.0 / 120.0 } else { (now - self.last).as_secs_f64().min(1.0 / 30.0) };
         self.last = now;
         let animating = self.rt.frame(dt);
-        self.rt.shell_request = None;
+        after_frame(&mut self.rt);
         let view = frame.texture.create_view(&Default::default());
         renderer.prepare(&gpu.device, &gpu.queue, &mut self.rt.text.atlas, &self.rt.instances, (live.config.width, live.config.height));
         renderer.upload_images(&gpu.device, &gpu.queue, &mut self.rt.images);
@@ -709,6 +709,17 @@ impl<T: 'static> PendingOverlay for Overlay<T> {
         *self.shared.wake.lock().unwrap() = Some(wake.clone());
         // Requests made before the loop existed.
         wake();
+    }
+}
+
+/// Carries out a frame's clipboard request; window requests (`Tx::close_window`) don't apply
+/// to overlays.
+fn after_frame<T>(rt: &mut Runtime<T>) {
+    rt.shell_request = None;
+    if let Some(text) = rt.copy_request.take()
+        && let Ok(mut clipboard) = arboard::Clipboard::new()
+    {
+        let _ = clipboard.set_text(text);
     }
 }
 
