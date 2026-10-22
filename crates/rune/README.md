@@ -195,7 +195,7 @@ Size constraints use logical points. Placement and topmost work through the nati
 window manager on macOS and X11; they are no-ops on Wayland. Runtime changes survive
 close/recreation. On Wayland, use `activate(token)` for authorized focus; tokenless
 `focus()` requests attention. `show()` leaves minimized windows minimized; `open()`
-also restores them. On macOS, no-focus show uses `orderFront`, rather than winit's
+also restores them. On macOS, no-focus show uses `orderFrontRegardless`, rather than winit's
 `makeKeyAndOrderFront`. Window-manager focus policy still applies. `WindowHandle`
 also provides show/hide/focus, placement and topmost control on the event thread.
 Rooms owns its tray; Rune supplies the window lifetime and handles.
@@ -410,4 +410,3 @@ without a window; wrong request order or exhausted fixtures return an error.
 - Group opacity through offscreen layers.
 - Next: a render thread with a command channel, a CoreText side-by-side text diff (S5), Slug for
   scaled text, the inspector socket, knobs/tunables, and the Scrawl pill (M1).
-
