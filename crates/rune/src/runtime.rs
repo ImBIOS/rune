@@ -27,7 +27,7 @@ use crate::edit::{EditOutcome, Ime, KeyEvent};
 use crate::el::{Align, Drag, DragFn, El, GrowthSpec, InputSpec, Phase, PressFn, ScrollSpec, Shell, TextSpec, Tx, Visual};
 use crate::growth::{GrowTrack, SUBSTEP};
 use crate::flight::{TextFlight, transformed};
-use crate::render::{Instance, KIND_GLYPH, KIND_GRADIENT, KIND_INSET, KIND_RECT, KIND_SEGMENT, KIND_SHADOW, KIND_TRIANGLE, NO_CLIP};
+use crate::render::{Instance, KIND_GLYPH, KIND_GRADIENT, KIND_IMAGE, KIND_INSET, KIND_RECT, KIND_SEGMENT, KIND_SHADOW, KIND_TRIANGLE, NO_CLIP};
 use crate::shape::{LineCap, Op, Shape};
 use crate::text::{Deco, GlyphQuad, Ink, TextSystem, layout_height};
 use crate::tok::motion;
@@ -229,6 +229,8 @@ pub struct Runtime<S: 'static> {
     pub state: S,
     view: fn(&S, &mut Cx<S>) -> El,
     pub text: TextSystem,
+    /// RGBA images elements show (`El::pixels`), uploaded by the renderer.
+    pub images: crate::pixels::ImageAtlas,
     pub scene: Scene,
     pub env: Env,
     /// Viewport in points.
@@ -340,6 +342,7 @@ impl<S: 'static> Runtime<S> {
             state,
             view,
             text,
+            images: Default::default(),
             scene,
             env,
             viewport,
@@ -568,6 +571,7 @@ impl<S: 'static> Runtime<S> {
         animating |= self.step_scroll(step as f32);
         animating |= self.reveals_active();
         self.build();
+        self.images.end_frame();
         animating |= self.draw_text_flights();
         self.stats.shaped = self.text.shaped - shaped0;
         self.animating = animating;
@@ -2040,6 +2044,20 @@ impl<S: 'static> Runtime<S> {
                         None => [k_px, k_px],
                     };
                     push_shape(&mut self.instances, shape, [r[0], r[1]], k, k_px, o, clip, fade);
+                }
+                if let Some(pixels) = &n.vis.pixels
+                    && let Some([ax, ay, aw, ah]) = self.images.place(pixels)
+                {
+                    self.instances.push(Instance {
+                        rect: [r[0], r[1], w, h],
+                        radii,
+                        fill: [0.0, 0.0, 0.0, o],
+                        border: [0.0; 4],
+                        params: [0.0, KIND_IMAGE, 0.0, 1.0],
+                        uv: [ax as f32, ay as f32, aw as f32, ah as f32],
+                        clip,
+                        fade,
+                    });
                 }
                 if let Some((ic, c)) = n.vis.icon {
                     let color = self.color(n.id, P_TEXT, c);

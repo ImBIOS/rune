@@ -209,6 +209,17 @@ Studio; verification uses compilation and selected-window headless renders.
 Unsupported transparency falls back to opaque rendering; unsupported click-through
 prints the platform error. Metal surfaces retain premultiplied colour for Core Animation.
 
+### Pixels (`pixels.rs`)
+
+`rune::Pixels` is a cloneable, thread-safe RGBA image a producer replaces with
+`set(width, height, rgba)` (straight-alpha sRGB). `El::pixels(&pixels)` draws it scaled
+into the element's rect, clipped to its corner radius, without re-running the view when the
+image changes: the next frame uploads the new rows (wake the window with an `update` or a
+`Live` value). Images live in a per-runtime 1024² RGBA atlas (`Rgba8UnormSrgb`, binding 2,
+instance kind 7), created on first use; filtering is bilinear on premultiplied texels and
+clamped to each image. Checked by a GPU test that draws texel for texel and follows a new
+frame; Settings and OpenCode snapshots are byte-identical.
+
 ### Edge overlays (`App::overlay`, `overlay.rs`, `layer_shell.rs`)
 
 `app.overlay(OverlaySpec { name, size, edge, margin, view }, state) -> OverlayHandle<T>`

@@ -235,6 +235,8 @@ pub struct Visual {
     pub outline: Option<Outline>,
     /// Vector strokes and fills in the element's own points, over the fill.
     pub shape: Option<Rc<Shape>>,
+    /// An RGBA image scaled into the element's rect, over the fill and shape.
+    pub pixels: Option<crate::pixels::Pixels>,
 }
 
 impl Default for Visual {
@@ -253,6 +255,7 @@ impl Default for Visual {
             gradient: None,
             outline: None,
             shape: None,
+            pixels: None,
         }
     }
 }
@@ -683,6 +686,12 @@ impl El {
     /// fill and under any text. It does not affect layout or hit testing.
     pub fn shape(mut self, shape: Shape) -> Self {
         self.vis.shape = (!shape.is_empty()).then(|| Rc::new(shape));
+        self
+    }
+    /// Shows `pixels`, scaled into the element's rect and clipped to its corner radius. The image
+    /// can change without the view re-running: the next frame draws its latest contents.
+    pub fn pixels(mut self, pixels: &crate::pixels::Pixels) -> Self {
+        self.vis.pixels = Some(pixels.clone());
         self
     }
     /// A ring `offset` points outside the border box (CSS `outline` + `outline-offset`).

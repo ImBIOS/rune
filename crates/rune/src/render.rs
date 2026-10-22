@@ -2,6 +2,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use crate::pixels::{IMAGE_ATLAS_SIZE, ImageAtlas};
 use crate::text::{ATLAS_SIZE, Atlas};
 
 pub const KIND_RECT: f32 = 0.0;
@@ -16,6 +17,9 @@ pub const KIND_SEGMENT: f32 = 5.0;
 /// A filled triangle: `radii` = ax, ay, bx, by; `uv.xy` = cx, cy; `params.x` the antialiased-edge
 /// mask (a→b, b→c, c→a as bits 0, 1, 2; other edges are hard so neighbours meet without seams).
 pub const KIND_TRIANGLE: f32 = 6.0;
+/// An RGBA image (`El::pixels`): `uv.xy` its origin in the image atlas, `uv.zw` its size in
+/// texels, drawn scaled into `rect` with the element's corner `radii`; `fill.a` is the opacity.
+pub const KIND_IMAGE: f32 = 7.0;
 
 /// One instance, in device pixels.
 #[repr(C)]
@@ -77,8 +81,11 @@ impl Gpu {
 pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
+    bind_layout: wgpu::BindGroupLayout,
     globals: wgpu::Buffer,
     atlas: wgpu::Texture,
+    /// The RGBA image atlas, made when an element first shows pixels (a 1×1 stand-in before).
+    images: Option<wgpu::Texture>,
     instances: wgpu::Buffer,
     capacity: usize,
     count: u32,
@@ -113,6 +120,16 @@ impl Renderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
@@ -131,15 +148,8 @@ impl Renderer {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let atlas_view = atlas.create_view(&Default::default());
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&atlas_view) },
-            ],
-        });
+        let stand_in = Self::image_texture(device, 1);
+        let bind_group = Self::bind_group(device, &bgl, &globals, &atlas, &stand_in);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[Some(&bgl)],
@@ -180,7 +190,63 @@ impl Renderer {
         });
         let capacity = 256;
         let instances = Self::instance_buffer(device, capacity);
-        Renderer { pipeline, bind_group, globals, atlas, instances, capacity, count: 0 }
+        Renderer { pipeline, bind_group, bind_layout: bgl, globals, atlas, images: None, instances, capacity, count: 0 }
+    }
+
+    fn image_texture(device: &wgpu::Device, size: u32) -> wgpu::Texture {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("image atlas"),
+            size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    }
+
+    fn bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        globals: &wgpu::Buffer,
+        atlas: &wgpu::Texture,
+        images: &wgpu::Texture,
+    ) -> wgpu::BindGroup {
+        let atlas_view = atlas.create_view(&Default::default());
+        let image_view = images.create_view(&Default::default());
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&atlas_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&image_view) },
+            ],
+        })
+    }
+
+    /// Uploads changed rows of the runtime's image atlas (`El::pixels`), creating its texture on
+    /// first use.
+    pub fn upload_images(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, images: &mut ImageAtlas) {
+        let Some((y0, y1)) = images.dirty.take() else { return };
+        if self.images.is_none() {
+            let texture = Self::image_texture(device, IMAGE_ATLAS_SIZE);
+            self.bind_group = Self::bind_group(device, &self.bind_layout, &self.globals, &self.atlas, &texture);
+            self.images = Some(texture);
+        }
+        let row = IMAGE_ATLAS_SIZE * 4;
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: self.images.as_ref().unwrap(),
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y: y0, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &images.data[(y0 * row) as usize..(y1 * row) as usize],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None },
+            wgpu::Extent3d { width: IMAGE_ATLAS_SIZE, height: y1 - y0, depth_or_array_layers: 1 },
+        );
     }
 
     fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {

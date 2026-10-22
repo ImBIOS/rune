@@ -358,6 +358,7 @@ impl<T: 'static> Overlay<T> {
         if self.renderer.as_ref().is_none_or(|(_, f)| *f != config.format) {
             self.renderer = Some((Renderer::new(&gpu.device, config.format), config.format));
             self.rt.text.atlas.invalidate();
+            self.rt.images.invalidate();
         }
         // Core Animation composites premultiplied pixels even in wgpu's PostMultiplied mode;
         // other straight-alpha surfaces get the conversion pass.
@@ -454,6 +455,7 @@ impl<T: 'static> Overlay<T> {
         self.rt.shell_request = None;
         let view = frame.texture.create_view(&Default::default());
         renderer.prepare(&gpu.device, &gpu.queue, &mut self.rt.text.atlas, &self.rt.instances, (live.config.width, live.config.height));
+        renderer.upload_images(&gpu.device, &gpu.queue, &mut self.rt.images);
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         renderer.draw(&mut enc, live.alpha.as_ref().map_or(&view, |a| &a.view), [0.0, 0.0, 0.0, 0.0]);
         if let Some(alpha) = &live.alpha {
