@@ -265,16 +265,19 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
             col = mix(i.fill, i.uv, t) * cov;
         }
     } else {
+        // Interpolated screen coordinates can round below an integer texel
+        // boundary. Fragment position is the rasterizer's exact pixel center.
+        let p = i.pos.xy;
         var cov: f32;
         if i.uv.z > 0.0 {
             // Flying text keeps the original atlas footprint while its quad scales uniformly.
-            let p = (i.p - i.rect.xy) * i.uv.zw / i.rect.zw - vec2<f32>(0.5);
-            let uv = vec2<i32>(i.uv.xy + floor(p));
-            let f = fract(p);
+            let local = (p - i.rect.xy) * i.uv.zw / i.rect.zw - vec2<f32>(0.5);
+            let uv = vec2<i32>(i.uv.xy + floor(local));
+            let f = fract(local);
             cov = mix(mix(textureLoad(atlas, uv, 0).r, textureLoad(atlas, uv + vec2<i32>(1, 0), 0).r, f.x),
                       mix(textureLoad(atlas, uv + vec2<i32>(0, 1), 0).r, textureLoad(atlas, uv + vec2<i32>(1, 1), 0).r, f.x), f.y);
         } else {
-            let texel = vec2<i32>(i.uv.xy + floor(i.p - i.rect.xy));
+            let texel = vec2<i32>(i.uv.xy + floor(p - i.rect.xy));
             cov = textureLoad(atlas, texel, 0).r;
         }
         col = i.fill * pow(cov, i.params.w);
