@@ -12,8 +12,18 @@ use crate::Lab;
 
 const SIDEBAR_W: f32 = 212.0;
 const PANEL_W: f32 = 272.0;
-const ROW_H: f32 = 30.0;
-const GROUP_H: f32 = 30.0;
+// Sidebar geometry. Every text line (eyebrows, rows, the footer hint) starts on one edge,
+// TEXT_X, which is also the knobs panel's inset. Row pills (hover and the travelling selection)
+// sit PILL_INSET in from both sidebar edges and bleed out PILL_PAD around their text.
+const PILL_INSET: f32 = 10.0;
+const PILL_PAD: f32 = 10.0;
+const TEXT_X: f32 = PILL_INSET + PILL_PAD;
+const PILL_W: f32 = SIDEBAR_W - 2.0 * PILL_INSET;
+const ROW_H: f32 = 28.0;
+const ROW_PITCH: f32 = 30.0;
+const PILL_R: f32 = 8.0;
+const GROUP_H: f32 = 28.0;
+const GROUP_GAP: f32 = 16.0;
 const SLIDER_W: f32 = PANEL_W - 40.0;
 
 pub struct Pal {
@@ -79,12 +89,23 @@ pub fn view(s: &Lab, cx: &mut Cx<Lab>) -> El {
 
 fn sidebar(s: &Lab, hair: f32) -> El {
     let p = pal();
-    let mut list = el().key("scenes").w_full().px(10.0);
+    let mut list = el().key("scenes").w_full();
     let mut y = 0.0;
     let mut sel_y = 0.0;
     let mut items: Vec<El> = Vec::new();
     for (g, group) in [("Light", &ALL[..5]), ("Effects", &ALL[5..])].iter().enumerate() {
-        items.push(text(group.0.to_uppercase()).key(format!("group{g}")).absolute(10.0, y + 11.0).font(EYEBROW).color(p.faint));
+        if g > 0 {
+            y += GROUP_GAP;
+        }
+        items.push(
+            row()
+                .key(format!("group{g}"))
+                .absolute(0.0, y)
+                .size(SIDEBAR_W, GROUP_H)
+                .pl(TEXT_X)
+                .center_y()
+                .child(text(group.0.to_uppercase()).key("label").font(EYEBROW).color(p.faint)),
+        );
         y += GROUP_H;
         for sc in group.1.iter().copied() {
             let selected = sc == s.scene;
@@ -96,27 +117,26 @@ fn sidebar(s: &Lab, hair: f32) -> El {
                     .key(sc.id())
                     .role("tab")
                     .label(sc.title())
-                    .absolute(0.0, y)
-                    .size(SIDEBAR_W - 20.0, ROW_H)
-                    .px(10.0)
+                    .absolute(PILL_INSET, y)
+                    .size(PILL_W, ROW_H)
+                    .px(PILL_PAD)
                     .center_y()
-                    .radius(7.0)
+                    .radius(PILL_R)
                     .hover(if selected { Color::TRANSPARENT } else { p.hover })
                     .press(p.pressed)
                     .on_press(move |s: &mut Lab| s.select(sc))
                     .child(text(sc.title()).key("label").font(BODY).color(if selected { p.text } else { p.muted })),
             );
-            y += ROW_H;
+            y += ROW_PITCH;
         }
-        y += 8.0;
     }
     list = list
         .h(y)
         .child(
             el().key("selection")
-                .absolute(10.0, sel_y)
-                .size(SIDEBAR_W - 20.0, ROW_H)
-                .radius(7.0)
+                .absolute(PILL_INSET, sel_y)
+                .size(PILL_W, ROW_H)
+                .radius(PILL_R)
                 .fill(p.selected)
                 .lead(motion::LEAD, motion::DEFAULT),
         )
@@ -138,7 +158,7 @@ fn sidebar(s: &Lab, hair: f32) -> El {
                         .key("keys-hint")
                         .font(TextStyle::new(11.5, 400.0))
                         .color(p.faint)
-                        .ml(20.0)
+                        .ml(TEXT_X)
                         .mb(16.0),
                 ),
         )
