@@ -2018,7 +2018,11 @@ impl<S: 'static> Runtime<S> {
                     }
                 }
                 if let Some(shape) = &n.vis.shape {
-                    push_shape(&mut self.instances, shape, [r[0], r[1]], k_px, o, clip, fade);
+                    let k = match shape.view_box {
+                        Some([vw, vh]) => [w / vw, h / vh],
+                        None => [k_px, k_px],
+                    };
+                    push_shape(&mut self.instances, shape, [r[0], r[1]], k, k_px, o, clip, fade);
                 }
                 if let Some((ic, c)) = n.vis.icon {
                     let color = self.color(n.id, P_TEXT, c);
@@ -2400,9 +2404,11 @@ fn anchor_position(a: &crate::el::Anchor, t: [f32; 4], size: (f32, f32), vp: (f3
     (x, y)
 }
 
-/// Instances for a vector shape whose origin sits at `origin` (device px), `k` device px per point.
-fn push_shape(out: &mut Vec<Instance>, shape: &Shape, origin: [f32; 2], k: f32, opacity: f32, clip: [f32; 4], fade: [f32; 4]) {
-    let at = |p: [f32; 2]| [origin[0] + p[0] * k, origin[1] + p[1] * k];
+/// Instances for a vector shape whose origin sits at `origin` (device px), with `k` device px per
+/// coordinate unit on each axis and `k_px` device px per point for stroke widths.
+#[allow(clippy::too_many_arguments)]
+fn push_shape(out: &mut Vec<Instance>, shape: &Shape, origin: [f32; 2], k: [f32; 2], k_px: f32, opacity: f32, clip: [f32; 4], fade: [f32; 4]) {
+    let at = |p: [f32; 2]| [origin[0] + p[0] * k[0], origin[1] + p[1] * k[1]];
     for op in &shape.ops {
         match op {
             Op::Stroke { points, closed, width, cap, color } => {
@@ -2410,7 +2416,7 @@ fn push_shape(out: &mut Vec<Instance>, shape: &Shape, origin: [f32; 2], k: f32, 
                 if fill[3] <= 0.0005 {
                     continue;
                 }
-                let hw = width * k * 0.5;
+                let hw = width * k_px * 0.5;
                 let pad = hw.max(0.5) + 1.0;
                 let n = points.len();
                 let count = if *closed { n } else { n - 1 };

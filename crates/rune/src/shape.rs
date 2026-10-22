@@ -47,6 +47,9 @@ pub(crate) enum Op {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Shape {
     pub(crate) ops: Vec<Op>,
+    /// Coordinates span this box and stretch to the element's size (SVG `viewBox` with
+    /// `preserveAspectRatio="none"`); stroke widths stay in points.
+    pub(crate) view_box: Option<[f32; 2]>,
 }
 
 impl Shape {
@@ -108,6 +111,14 @@ impl Shape {
         for sub in &path.subpaths {
             self = self.fill(sub.points.clone(), color);
         }
+        self
+    }
+
+    /// Treats coordinates as spanning `width` × `height` and stretches them to whatever size the
+    /// element lays out at, so a shape can fill a flexible element (a waveform in a growing row).
+    /// Stroke widths stay in points.
+    pub fn view_box(mut self, width: f32, height: f32) -> Shape {
+        self.view_box = (width > 0.0 && height > 0.0).then_some([width, height]);
         self
     }
 
