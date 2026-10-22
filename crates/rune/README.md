@@ -41,7 +41,8 @@ The first runnable piece of Rune: enough framework to draw a small Settings wind
     atlas.
   - Vector shapes (`shape.rs`): `El::shape(Shape)` and `canvas(shape)` paint strokes (polylines,
     round or butt caps, open or closed) and fills (simple polygons, ear-clipped) in the element's own
-    points; `Path` flattens quadratic and cubic Béziers. Strokes are one analytic capsule/box per
+    points, or in a `view_box` stretched to the element's size; `Path` flattens quadratic and cubic
+    Béziers. Strokes are one analytic capsule/box per
     segment (`KIND_SEGMENT`); fills are triangles (`KIND_TRIANGLE`) antialiased only on polygon
     edges, so they have no seams. No atlas, so a shape can change every frame (`examples/shapes`).
     Translucent strokes blend twice where segments overlap at a joint; fills do not overlap.
