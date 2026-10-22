@@ -109,6 +109,7 @@ pub(crate) struct Node {
     streaming: bool,
     input: Option<Box<InputSpec>>,
     cursor: Option<crate::el::Cursor>,
+    window_drag: bool,
     /// Inside a growth row: layout snaps (the row's height carries the motion).
     in_row: bool,
     virtual_mount: bool,
@@ -287,6 +288,8 @@ pub struct Runtime<S: 'static> {
     pub copy_request: Option<String>,
     /// A handler or `update` asked to close the window or quit (the shell takes it).
     pub shell_request: Option<Shell>,
+    /// A press landed on a `window_drag` element (the shell starts a window move).
+    window_drag_request: bool,
     /// What `update` asked of the next commit.
     pending: Tx,
     pub animating: bool,
@@ -389,6 +392,7 @@ impl<S: 'static> Runtime<S> {
             ime_area: None,
             copy_request: None,
             shell_request: None,
+            window_drag_request: false,
             pending: Tx::default(),
             animating: false,
             settled: false,
@@ -1620,6 +1624,10 @@ impl<S: 'static> Runtime<S> {
             self.queue.push(Action::Focus(n.path.clone(), x - r[0] - n.inset[0], y - r[1] - n.inset[1]));
             return;
         }
+        if n.window_drag && n.on_press.is_none() && n.on_drag.is_none() {
+            self.window_drag_request = true;
+            return;
+        }
         let r = n.target;
         let d = Drag {
             phase: Phase::Down,
@@ -1637,6 +1645,12 @@ impl<S: 'static> Runtime<S> {
         }
         self.capture = Some((path, d));
         self.capture_inside = true;
+    }
+
+    /// Whether the last `pointer_down` landed on a `window_drag` element; the shell moves the
+    /// window from inside that mouse-down event.
+    pub fn take_window_drag(&mut self) -> bool {
+        std::mem::take(&mut self.window_drag_request)
     }
 
     pub fn pointer_up(&mut self, x: f32, y: f32) {
@@ -2178,7 +2192,7 @@ impl<S: 'static> Runtime<S> {
                 dy -= grid((st.offset - origin) as f32, s);
             }
             self.inh_scratch[i] = Inh { opacity: o, clip, fade, scale: sc, anchor, blur, dy };
-            if (n.on_press.is_some() || n.on_hover.is_some() || n.on_drag.is_some() || n.input.is_some())
+            if (n.on_press.is_some() || n.on_hover.is_some() || n.on_drag.is_some() || n.input.is_some() || n.window_drag)
                 && !self.subtree_exiting(i)
             {
                 let c = self.inh_scratch[n.parent.unwrap_or(0)].clip;
@@ -2525,6 +2539,7 @@ fn flatten(
         streaming,
         input,
         cursor,
+        window_drag,
         ..
     } = el;
     let measured = text.is_some();
@@ -2553,6 +2568,7 @@ fn flatten(
         streaming,
         input,
         cursor,
+        window_drag,
         in_row,
         virtual_mount,
         parent,
@@ -2679,6 +2695,28 @@ mod tests {
             let b = run(120, reduced);
             for (a, b) in a.into_iter().zip(b) { assert!((a - b).abs() < 0.05, "frame-rate dependent hold: {a} vs {b}"); }
         }
+    }
+
+    #[test]
+    fn presses_on_a_window_drag_region_move_the_window_but_not_its_buttons() {
+        struct State { pressed: u32 }
+        fn view(_: &State, _: &mut Cx<State>) -> El {
+            col().size(200.0, 200.0)
+                .child(crate::el::row().key("titlebar").size(200.0, 40.0).window_drag()
+                    .child(el().key("button").size(40.0, 40.0).on_press(|s: &mut State| s.pressed += 1)))
+                .child(el().key("body").size(200.0, 40.0))
+        }
+        let mut rt = Runtime::new(State { pressed: 0 }, view, (200.0, 200.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        for (x, y, drags) in [(100.0, 20.0, true), (20.0, 20.0, false), (100.0, 60.0, false)] {
+            rt.pointer_move(x, y);
+            rt.pointer_down(x, y);
+            assert_eq!(rt.take_window_drag(), drags, "at {x}, {y}");
+            assert!(!rt.take_window_drag(), "a drag request is taken once");
+            rt.pointer_up(x, y);
+        }
+        rt.frame(1.0 / 120.0);
+        assert_eq!(rt.state.pressed, 1, "the button inside the title bar still presses");
     }
 
     #[test]
