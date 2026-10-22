@@ -24,6 +24,7 @@ mod pixels;
 pub mod gpu_springs;
 pub mod render;
 mod surface_alpha;
+pub mod native_surface;
 pub mod runtime;
 pub mod shape;
 mod virtual_list;
@@ -58,6 +59,7 @@ pub use rune_motion::{
 };
 pub use runtime::{Cx, Env, Runtime, Waker};
 pub use shape::{LineCap, Path, Shape};
+pub use native_surface::{NativeSurface, SurfaceFit};
 pub use text::{Icon, Span};
 pub use theme::Theme;
 pub use tok::{Family, TextStyle};

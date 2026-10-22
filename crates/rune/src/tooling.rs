@@ -729,6 +729,7 @@ fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, tran
         let mut animating = rt.frame(step);
         let update_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
         renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
+        renderer.prepare_surfaces(&gpu.device, &gpu.queue, &rt.surfaces, (wp, hp));
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         let view = alpha.as_ref().map_or(&target.view, |a| &a.view);
         if let Some(c) = comp.as_mut() {
@@ -757,7 +758,7 @@ fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, tran
         if want_pixels {
             target.copy(&mut enc);
         }
-        gpu.queue.submit([enc.finish()]);
+        renderer.submit(&gpu.queue, enc);
         let ms = frame_start.elapsed().as_secs_f64() * 1000.0;
         cpu_ms.push(ms);
         if k > 0 {

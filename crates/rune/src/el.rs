@@ -244,6 +244,7 @@ pub struct TextSpec {
 
 #[derive(Clone, Debug)]
 pub struct Visual {
+    pub surface: Option<(crate::NativeSurface, crate::SurfaceFit)>,
     pub fill: Color,
     pub radius: [f32; 4],
     pub border_width: f32,
@@ -269,6 +270,7 @@ pub struct Visual {
 impl Default for Visual {
     fn default() -> Self {
         Visual {
+            surface: None,
             fill: Color::TRANSPARENT,
             radius: [0.0; 4],
             border_width: 0.0,
@@ -487,6 +489,11 @@ impl El {
         "unknown (build with debug assertions for source locations)".into()
     }
 
+    /// Paint the newest video frame inside this node. Node dimensions are in points.
+    pub fn native_surface(mut self, surface: &crate::NativeSurface, fit: crate::SurfaceFit) -> Self {
+        self.vis.surface = Some((surface.clone(), fit));
+        self
+    }
     /// Window keyed rows of a growth stack directly inside a vertical scroll viewport.
     /// Unvisited rows use an estimated height; measurement preserves the visible anchor.
     /// Offscreen rows have no layout, text or scene nodes.

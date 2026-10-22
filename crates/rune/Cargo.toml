@@ -26,6 +26,11 @@ rfd = { version = "0.15", optional = true, default-features = false, features = 
 objc2 = "0.5.2"
 objc2-foundation = { version = "0.2.2", features = ["NSArray", "NSGeometry", "NSThread"] }
 objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSResponder", "NSRunningApplication", "NSView", "NSWindow", "NSColor", "NSGraphics", "NSPanel", "NSScreen"] }
+objc2-video = { package = "objc2", version = "0.6" }
+objc2-core-foundation = "0.3"
+objc2-core-video = { version = "0.3", features = ["CVPixelBufferIOSurface", "objc2-io-surface"] }
+objc2-io-surface = "0.3"
+objc2-metal = "0.3"
 
 [target.'cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))'.dependencies]
 raw-window-handle = "0.6"
