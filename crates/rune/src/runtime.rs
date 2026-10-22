@@ -1707,7 +1707,7 @@ impl<S: 'static> Runtime<S> {
             let n = &self.nodes[i];
             // A secondary-only child must not obscure primary input or background blur.
             (!self.is_exiting(id) && (n.on_press.is_some() || n.on_hover.is_some()
-                || n.on_drag.is_some() || n.input.is_some())).then_some(i)
+                || n.on_drag.is_some() || n.input.is_some() || n.window_drag)).then_some(i)
         })
     }
 
