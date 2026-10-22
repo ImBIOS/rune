@@ -52,7 +52,12 @@ pub struct Gpu {
 static GPU_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl Gpu {
+    /// Panics without a usable adapter or device; windows use `try_new`.
     pub fn new(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Gpu {
+        Self::try_new(instance, surface).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_new(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Result<Gpu, String> {
         let _serial = GPU_INIT.lock().unwrap_or_else(|e| e.into_inner());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
@@ -60,7 +65,7 @@ impl Gpu {
             compatible_surface: surface,
             apply_limit_buckets: false,
         }))
-        .expect("no GPU adapter");
+        .map_err(|error| format!("no GPU adapter: {error}"))?;
         let required_features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("rune"),
@@ -70,8 +75,8 @@ impl Gpu {
             memory_hints: wgpu::MemoryHints::Performance,
             trace: Default::default(),
         }))
-        .expect("no GPU device");
-        Gpu { instance, adapter, device, queue }
+        .map_err(|error| format!("no GPU device: {error}"))?;
+        Ok(Gpu { instance, adapter, device, queue })
     }
 
     pub fn headless() -> Gpu {

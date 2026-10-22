@@ -22,12 +22,15 @@
 //! app.run();
 //! ```
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::el::Tx;
 use crate::tooling::{AppSpec, Args};
 
 type Update<S> = Box<dyn FnOnce(&mut S, &mut Tx) + Send>;
+/// `App::on_window`'s hook, run after each native window creation.
+pub(crate) type OnWindow = Box<dyn FnMut(&crate::WindowHandle)>;
 
 /// An `AppSpec` with its lifetime: by default it opens one window and quits when it closes,
 /// like `rune::run`.
@@ -43,6 +46,7 @@ pub struct App<S: 'static> {
     pub(crate) on_close: Option<fn(&mut S, &mut Tx)>,
     pub(crate) shared: Arc<Shared<S>>,
     pub(crate) overlays: Vec<Box<dyn crate::overlay::PendingOverlay>>,
+    pub(crate) on_window: Option<OnWindow>,
 }
 
 impl<S: 'static> App<S> {
@@ -58,6 +62,7 @@ impl<S: 'static> App<S> {
             on_close: None,
             shared: Arc::default(),
             overlays: Vec::new(),
+            on_window: None,
         }
     }
 
@@ -120,6 +125,14 @@ impl<S: 'static> App<S> {
     /// before it goes: flush drafts, stop previews. Its `Tx::quit` quits.
     pub fn on_close(mut self, f: fn(&mut S, &mut Tx)) -> Self {
         self.on_close = Some(f);
+        self
+    }
+
+    /// Runs on the UI thread each time the native window is created (again after a Wayland
+    /// close or a GPU release): set its icon or native styles through
+    /// `WindowHandle::with_raw_handle`.
+    pub fn on_window(mut self, f: impl FnMut(&crate::WindowHandle) + 'static) -> Self {
+        self.on_window = Some(Box::new(f));
         self
     }
 
@@ -223,6 +236,18 @@ impl<S: 'static> AppHandle<S> {
         self.request(|q| q.dock = Some(visible));
     }
 
+    /// Whether the window is on screen (shown, not hidden or closed). Minimized and occluded
+    /// windows count as shown.
+    pub fn is_visible(&self) -> bool {
+        self.shared.visible.load(Ordering::Acquire)
+    }
+
+    /// Why the window couldn't be created the last time it was asked for (no display, no GPU
+    /// adapter or device), until a later creation succeeds. The app keeps running windowless.
+    pub fn window_error(&self) -> Option<String> {
+        self.shared.window_error.lock().unwrap().clone()
+    }
+
     /// Change the state from this thread: `f` runs on the UI thread, in call order, even while no
     /// window shows, and the next frame commits it with the motion its `Tx` asks for.
     pub fn update(&self, f: impl FnOnce(&mut S, &mut Tx) + Send + 'static) {
@@ -269,6 +294,9 @@ impl<S> Default for Requests<S> {
 pub(crate) struct Shared<S> {
     requests: Mutex<Requests<S>>,
     wake: Mutex<Option<crate::runtime::Waker>>,
+    /// Published by the window host for `AppHandle::is_visible` / `window_error`.
+    pub(crate) visible: AtomicBool,
+    pub(crate) window_error: Mutex<Option<String>>,
 }
 
 impl<S> Default for Shared<S> {
@@ -276,6 +304,8 @@ impl<S> Default for Shared<S> {
         Shared {
             requests: Mutex::default(),
             wake: Mutex::new(None),
+            visible: AtomicBool::new(false),
+            window_error: Mutex::new(None),
         }
     }
 }
@@ -321,6 +351,17 @@ mod tests {
             poll: None,
             on_key: None,
         }
+    }
+
+    #[test]
+    fn handles_report_the_window_the_host_publishes() {
+        let app = App::new(spec());
+        let handle = app.handle();
+        assert!(!handle.is_visible() && handle.window_error().is_none());
+        app.shared.visible.store(true, Ordering::Release);
+        *app.shared.window_error.lock().unwrap() = Some("no GPU adapter".into());
+        assert!(handle.is_visible());
+        assert_eq!(handle.window_error().as_deref(), Some("no GPU adapter"));
     }
 
     #[test]

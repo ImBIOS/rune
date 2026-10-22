@@ -3,7 +3,7 @@
 //! reopening shows the same state (the ticks kept counting, the note kept its text).
 //!
 //! ```sh
-//! cargo run -p background            # stdin: open | show | hide | focus | activate TOKEN | close | quit
+//! cargo run -p background            # stdin: open | show | hide | focus | activate TOKEN | close | status | quit
 //! cargo run -p background -- --open  # start with the window
 //! cargo run -p background -- --release-gpu  # closing also drops the GPU device
 //! cargo run -p background -- --accessory    # macOS: no Dock icon until `dock on`
@@ -159,7 +159,11 @@ fn main() {
         on_key: Some(on_key),
     })
     .keep_running()
-    .on_close(on_close);
+    .on_close(on_close)
+    .on_window(|window| {
+        let native = window.with_raw_handle(|handle| format!("{:?}", handle.as_raw())).unwrap_or_default();
+        eprintln!("background: native window {}", native.split('(').next().unwrap_or_default());
+    });
     if !std::env::args().any(|a| a == "--open") {
         app = app.windowless();
     }
@@ -226,6 +230,7 @@ fn main() {
                 (Some("activate"), Some(token)) => commands.activate(token),
                 (Some("close"), _) => commands.close(),
                 (Some("quit"), _) => commands.quit(),
+                (Some("status"), _) => eprintln!("background: visible {}, window error {:?}", commands.is_visible(), commands.window_error()),
                 (Some("dock"), Some(on)) => commands.set_dock_icon(on == "on"),
                 (Some("hud"), Some("show")) => overlay.show(),
                 (Some("hud"), Some("hide")) => overlay.hide(),
