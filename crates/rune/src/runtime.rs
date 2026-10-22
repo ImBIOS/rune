@@ -604,6 +604,7 @@ impl<S: 'static> Runtime<S> {
             self.node_index.insert(n.id, idx);
             self.nodes.push(n);
         }
+        self.virtuals.retain(|path, _| self.nodes.iter().any(|n| n.path == *path));
     }
 
     fn capture_text_flight(&mut self, source: String, target: String) {
@@ -855,7 +856,9 @@ impl<S: 'static> Runtime<S> {
     // Commit: view → nodes → layout → Scene retarget
 
     fn virtual_window_changed(&self) -> bool {
-        self.virtuals.values().any(|v| {
+        self.virtuals.iter().any(|(path, v)| {
+            let Some(&i) = self.path_ids.get(path).and_then(|id| self.node_index.get(id)) else { return false };
+            if self.subtree_exiting(i) { return false; }
             self.path_ids.get(&v.scroll_path).and_then(|id| self.scrolls.get(id))
                 .is_some_and(|s| v.needs_window(s.offset as f32, s.pinned))
         })
@@ -907,7 +910,8 @@ impl<S> Measurement<'_, S> {
             if !self.measure_virtuals(&nodes, tx.settle) { break (layout, nodes); }
             *self.layout = layout;
         };
-        self.virtuals.retain(|path, _| nodes.iter().any(|n| n.path == *path));
+        // Exiting virtual subtrees still use their origin and measured extent while
+        // fading. Runtime prunes this metadata with the retained scene nodes.
         Measured { layout, nodes, reduced_motion: self.reduced_motion, time_scale: self.time_scale }
     }
 
@@ -1521,6 +1525,7 @@ impl<S: 'static> Runtime<S> {
         }
 
         self.nodes = nodes;
+        self.virtuals.retain(|path, _| self.nodes.iter().any(|n| n.path == *path));
         self.subscribe_live();
         self.layout = taffy;
         self.text.end_commit();
@@ -1596,6 +1601,7 @@ impl<S: 'static> Runtime<S> {
         let mut moving = false;
         for i in 0..self.nodes.len() {
             let Some(sp) = self.nodes[i].scroll else { continue };
+            if self.subtree_exiting(i) { continue; }
             let id = self.nodes[i].id;
             let view_h = self.nodes[i].target[3] - self.nodes[i].target[1];
             let content = (i + 1..self.nodes.len()).find(|&j| self.nodes[j].parent == Some(i));
