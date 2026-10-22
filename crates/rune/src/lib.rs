@@ -26,6 +26,7 @@ pub mod runtime;
 pub mod shape;
 mod virtual_list;
 mod flight;
+pub mod file_dialog;
 pub mod text;
 pub mod theme;
 pub mod tok;
@@ -47,6 +48,7 @@ pub use el::{
 pub use growth::{GROWTH, StreamEdge, edge};
 pub use live::Live;
 pub use pixels::Pixels;
+pub use file_dialog::{FileDialogError, FileDialogKind, FileDialogOptions, FileDialogs, ScriptedFileDialog};
 pub use rune_motion::{
     Anim, AnimExt, Clock, Curve, Edge, LayoutAnim, NodeId, Phase as PresencePhase, Presented, Spring, SpringPair,
     Transition, Travel,
