@@ -1869,8 +1869,8 @@ version = "0.0.1"
 dependencies = [
  "ab_glyph",
  "bytemuck",
- "png",
  "pollster",
+ "rune",
  "wgpu",
 ]
 
@@ -1888,7 +1888,6 @@ name = "rune-light"
 version = "0.0.1"
 dependencies = [
  "bytemuck",
- "png",
  "pollster",
  "rune",
  "wgpu",

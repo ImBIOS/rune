@@ -56,7 +56,17 @@ struct Host<S: 'static> {
 }
 
 pub fn run<S: 'static>(app: App<S>, args: Args) {
-    let event_loop = EventLoop::<WakeEvent>::with_user_event().build().expect("event loop");
+    #[allow(unused_mut)]
+    let mut builder = EventLoop::<WakeEvent>::with_user_event();
+    #[cfg(target_os = "macos")]
+    if app.accessory {
+        use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+        builder
+            .with_activation_policy(ActivationPolicy::Accessory)
+            .with_default_menu(false)
+            .with_activate_ignoring_other_apps(false);
+    }
+    let event_loop = builder.build().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
     let live_proxy = proxy.clone();
