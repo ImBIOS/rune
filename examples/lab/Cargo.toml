@@ -1,0 +1,16 @@
+[package]
+name = "lab"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rune = { path = "../../crates/rune" }
+rune-motion = { path = "../../crates/rune-motion" }
+rune-fx = { path = "../../crates/rune-fx" }
+rune-light = { path = "../../crates/rune-light" }
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
+bytemuck = { version = "1.25", features = ["derive"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["vulkan", "dx12"] }
