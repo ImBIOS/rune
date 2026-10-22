@@ -12,6 +12,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   without actions are unchanged.
 - **A disabled, invalid rune-kit `TextInput` no longer has a red caret.** The caret now follows
   the text colour, as `TextArea`'s does. Only that one state changes.
+- **rune-light's `Scene` and `Gi` have an `emission` field.** `Scene::emission` (an optional
+  output-resolution texture) lets effect layers light the UI through the GI, scaled by
+  `Gi::emission`. Struct literals need `emission: None` and `..Default::default()`. GI media now use
+  sub-texel coverage, so a moving emitter no longer pops. New: `LightRenderer::inspect`,
+  per-cascade `Timings` and `GlassRenderer` (thick refracting glass).
 - **rune-fx effects look different, and some structs gained fields.** Fire rises and narrows with
   a white-yellow core and smoke, electricity strikes and re-strikes as fractal lightning, glows fall
   off within about 2.5 radii, sparkles are a few crisp four-point stars, and one-shots (ripples,

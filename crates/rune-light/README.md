@@ -82,7 +82,9 @@ between the uber pass and present. The demos do exactly this by hand with Rune's
 | Upsample | full | Joint bilateral on receiver height | Shadows never bleed from the floor onto a card top |
 | Shading | full | Lambert + GGX (viewer overhead) with Karis sphere-light widening, a rim hairline on edges facing the light, contact AO from the field, an earlier lighting prototype's windowed inverse square and torch beam profile | Cards read as raised; highlights sweep; the torch has a hot core and spill, not a flat disc |
 | God rays | ½ | A light behind the UI: each pixel integrates the light's glow, masked by the field (prefiltered to the sample spacing), along its path to the light (Mitchell, GPU Gems 3), plus distance falloff | Shafts through every gap and no banding, with the same field |
-| GI | ⅛ | 2D radiance cascades: 5 cascades, 4·4ⁿ directions, Sannikov's bilinear fix, emitters glow, cards absorb only rays from lower probes (light reaches a card from things standing on it), one bounce from direct light on cards | Every emitter lights its neighbours with soft occlusion at a cost fixed by the grid, not the emitter count |
+| GI | ⅛ | 2D radiance cascades: 5 cascades, 4·4ⁿ directions, Sannikov's bilinear fix, emitters glow, cards absorb only rays from lower probes (light reaches a card from things standing on it), one bounce from direct light on cards. The media are built from the analytic primitives with box-filtered sub-texel coverage and sampled bilinearly, so an emitter moving by a fraction of a texel changes the light by that fraction (no popping). Rays skip empty space using the distance to emitters and to the occluder boundary | Every emitter lights its neighbours with soft occlusion at a cost fixed by the grid, not the emitter count |
+| Extra emission | ⅛ | An optional output-resolution emission texture (effect layers such as rune-fx electric arcs) enters the GI as glowing medium; `Prim::gi_hint` rects tell the tracer where it can be | Effects light the UI too |
+| Glass | full | `GlassRenderer`: thick slabs over the lit frame. Snell refraction in and out (n = 1.5), exact unpolarised Fresnel, total internal reflection off the bottom face, Beer–Lambert tint, 8-wavelength dispersion from a Cauchy fit, frost from a 13-tap prefiltered pyramid read at the refracted cone's footprint, GGX highlights from emissive elements with normal-variance specular AA, GI fluence scattered into the bevel, smooth-union morphs | Glass that reads as glass: the UI bends at the rim, fringes in colour and mirrors at grazing angles |
 
 Prior art reused from an earlier lighting prototype:
 
@@ -137,7 +139,11 @@ Quílez/Aaltonen estimator where the ray grazes two occluders. It's never wrong 
   the nearer of the two.
 - `examples/light.rs` drives `crates/rune` and `crates/rune-light` directly; `examples/lab` drives the lights from a
   live `rune::Runtime` through the compositor hook (marked elements become occluders).
-- GI is 2–3 ms. Halving the cascade-0 directions, or temporal amortisation (which breaks strict determinism), are
+- `LightRenderer::inspect()` exposes every intermediate GI buffer (field, media, each cascade merged and, with
+  `inspect = true`, unmerged) and `Timings` has per-cascade GPU times; `examples/reel.rs` visualises them.
+- GI is 2–3 ms for sparse layouts and more for dense ones: the bilinear fix traces four rays per direction, and C3's
+  rays cross many card edges where the field is small (`reel bench`). Halving the cascade-0 directions, or temporal
+  amortisation (which breaks strict determinism), are
   the next levers.
 - The surface buffer is a second full-resolution raster of the primitives. Rune's uber pass could write it as an
   extra target for free.

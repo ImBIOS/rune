@@ -779,7 +779,7 @@ impl Compositor<Lab> for LabGfx {
                 f.device,
                 f.queue,
                 enc,
-                &LightScene { prims: &prims, lights: &lights, settings: st },
+                &LightScene { prims: &prims, lights: &lights, settings: st, emission: None },
                 &res.base.view,
                 &res.text.view,
                 &res.lit.view,
@@ -948,7 +948,7 @@ impl Live {
                 Settings {
                     ambient: [0.62, 0.63, 0.7],
                     albedo_floor: 0.07,
-                    gi: cv.on("bounce").then_some(Gi { strength: 1.0, air: 0.0, bounce: 0.6, absorption: 0.24 }),
+                    gi: cv.on("bounce").then_some(Gi { strength: 1.0, air: 0.0, bounce: 0.6, absorption: 0.24, ..Default::default() }),
                     rim: 0.9,
                     contact_ao: 0.45,
                     ..Default::default()
@@ -995,7 +995,7 @@ impl Live {
                 let am = cv.k("ambient");
                 Settings {
                     ambient: [am, am * 1.03, am * 1.17],
-                    gi: cv.on("gi").then_some(Gi { strength: cv.k("strength"), air: cv.k("air"), bounce: cv.k("bounce"), absorption: 0.24 }),
+                    gi: cv.on("gi").then_some(Gi { strength: cv.k("strength"), air: cv.k("air"), bounce: cv.k("bounce"), absorption: 0.24, ..Default::default() }),
                     contact_ao: 0.4,
                     rim: 0.6,
                     ..Default::default()

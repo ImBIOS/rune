@@ -175,7 +175,7 @@ impl Ctx {
     /// Lights the UI already drawn; returns sRGB RGBA8 pixels.
     fn light_frame(&mut self, prims: &[Prim], lights: &[Light], settings: Settings, read: bool) -> Option<Vec<u8>> {
         let mut enc = self.device.create_command_encoder(&Default::default());
-        let scene = Scene { prims, lights, settings };
+        let scene = Scene { prims, lights, settings, emission: None };
         self.light.render(&self.device, &self.queue, &mut enc, &scene, &self.base, &self.text, &self.out.view);
         if read {
             self.out.copy(&mut enc);
@@ -669,7 +669,7 @@ impl Demo for Emissive {
 
         let s = Settings {
             ambient: [0.3, 0.31, 0.35],
-            gi: Some(Gi { strength: 1.0, air: 0.09, bounce: 0.0, absorption: 0.24 }),
+            gi: Some(Gi { strength: 1.0, air: 0.09, bounce: 0.0, absorption: 0.24, ..Default::default() }),
             contact_ao: 0.4,
             rim: 0.6,
             time: t,

@@ -33,7 +33,7 @@ fn fs(i: VOut) -> GOut {
     let half = pr.rect.zw * 0.5;
     let q = i.p - (pr.rect.xy + half);
     let d = sd_rrect(q, half, pr.radii);
-    if (d > 0.5) {
+    if (d > 0.5 || (flags_of(pr) & F_HINT) != 0u) {
         discard;
     }
     let e = 0.5;

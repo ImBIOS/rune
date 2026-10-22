@@ -1,10 +1,10 @@
 // Scene distance field at field resolution, straight from the analytic primitives (exact, no jump flood):
 //   x: union signed distance to occluders (device px), y/z: bottom/top z of the nearest occluder,
-//   w: distance to anything the GI sees (occluders and emitters), for radiance-cascade sphere tracing.
+//   w: distance to emitters (and GI hints), for radiance-cascade sphere tracing alongside x.
 // Distances are clamped to CLAMP (no tracer steps further), so each 16×16 tile first culls the primitives whose
 // bounds lie further than CLAMP from it into workgroup memory and only those are evaluated per texel.
 
-const CLAMP: f32 = 128.0;
+const CLAMP: f32 = 256.0;
 const MAX_LOCAL: u32 = 256u;
 
 @group(0) @binding(0) var<uniform> F: Frame;
@@ -28,7 +28,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     let n = F.counts.x;
     for (var i = li; i < n; i = i + 256u) {
         let pr = prims[i];
-        if ((flags_of(pr) & (F_OCC | F_EMIT)) == 0u) {
+        if ((flags_of(pr) & (F_OCC | F_EMIT | F_HINT)) == 0u) {
             continue;
         }
         let half = pr.rect.zw * 0.5;
@@ -66,7 +66,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
             continue;
         }
         let d = sd_rrect(p - c, half, pr.radii);
-        gi = min(gi, d);
+        if ((flags_of(pr) & (F_EMIT | F_HINT)) != 0u) {
+            gi = min(gi, d);
+        }
         if ((flags_of(pr) & F_OCC) != 0u && (d < best || (d == best && i < best_i))) {
             best = d;
             best_i = i;

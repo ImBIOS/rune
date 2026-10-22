@@ -4,12 +4,12 @@ struct Frame {
     sf: vec4<f32>,       // output size xy, field size zw
     gs: vec4<f32>,       // gi probe grid xy, field scale (field px per output px), gi scale
     ambient: vec4<f32>,  // rgb ambient irradiance, exposure
-    counts: vec4<u32>,   // prims, lights, cascades, flags (1 gi, 2 shafts, 4 encode sRGB, 8 ao)
+    counts: vec4<u32>,   // prims, lights, cascades, flags (1 gi, 2 shafts, 4 encode sRGB, 8 ao, 16 extra emission)
     misc: vec4<f32>,     // max occluder top z, time, seed, shafts over occluders
     text: vec4<f32>,     // floor, ceiling, how much light text takes, specular on text
     gi: vec4<f32>,       // strength, air glow, bounce, absorption per gi texel
     bg: vec4<f32>,       // background gloss, background roughness, contact AO strength, rim strength
-    ext: vec4<f32>,      // albedo floor, unused
+    ext: vec4<f32>,      // albedo floor, extra emission gain, unused
 };
 
 struct Prim {
@@ -35,6 +35,8 @@ const REF: f32 = 200.0;
 const F_OCC: u32 = 1u;
 const F_EMIT: u32 = 2u;
 const F_RAISED: u32 = 4u;
+// Seen only by the GI tracer's distance (marks where extra emission may be); never a surface.
+const F_HINT: u32 = 8u;
 
 fn flags_of(p: Prim) -> u32 {
     return u32(p.mat.z + 0.5);

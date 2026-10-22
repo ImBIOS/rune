@@ -518,7 +518,7 @@ impl Compositor<Cursed> for Gfx {
             let mut st = out.settings;
             st.time = t;
             let light = res.light.get_or_insert_with(|| LightRenderer::new(f.device, f.queue, w, h, HDR));
-            lit_drawn = light.render(f.device, f.queue, enc, &LightScene { prims: &prims, lights: &lights, settings: st }, &res.base.view, &res.text.view, &res.lit.view);
+            lit_drawn = light.render(f.device, f.queue, enc, &LightScene { prims: &prims, lights: &lights, settings: st, emission: None }, &res.base.view, &res.text.view, &res.lit.view);
             f.queue.write_buffer(&res.blit_alpha, 0, bytemuck::cast_slice(&[out.lit, 0.0, 0.0, 0.0]));
             self.lit_frames += 1;
         }
