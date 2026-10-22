@@ -222,30 +222,38 @@ frame; Settings and OpenCode snapshots are byte-identical.
 
 ### Edge overlays (`App::overlay`, `overlay.rs`, `layer_shell.rs`)
 
-`app.overlay(OverlaySpec { name, size, edge, margin, view }, state) -> OverlayHandle<T>`
-adds a HUD-sized surface to that app's loop with its own state type: transparent, above every
-app, never focused, letting the pointer through, centred on the top or bottom edge of the
-primary display. `show()`, `hide()`, `set_edge(..)` and `update(|t, tx| ..)` work from any
-thread; `availability()` reports `Unavailable` where the platform can't do it. An overlay is
-one more host on the event loop (it shares the GPU pool) but never keeps the loop alive alone.
+`app.overlay(OverlaySpec { name, size, edge, margin, align, inset, interactive, view }, state)
+-> OverlayHandle<T>` adds a surface to that app's loop with its own state type: transparent,
+above every app, never keyboard-focused, never activating the app, on the top or bottom edge
+of the primary display, centred or `inset` points from a side. Clicks pass through unless
+`interactive`. `show()`, `hide()`, `place(edge, margin)`, `set_align(align, inset)`,
+`resize(size)` and `update(|t, tx| ..)` work from any thread; `availability()` reports
+`Unavailable` where the platform can't do it. An overlay is one more host on the event loop
+(it shares the GPU pool) but never keeps the loop alive alone.
 
 - Wayland: a `zwlr_layer_shell_v1` surface on winit's display (overlay layer, keyboard none,
   exclusive zone 0, empty input region), buffer scale from `preferred_buffer_scale`; hidden
-  means destroyed. A winit toplevel can't be placed or kept on top there.
-- X11: an override-redirect notification window with an empty input shape.
-- macOS: a borderless window at status level (25) on every Space incl. full-screen ones,
-  ignoring the mouse, ordered front with `orderFrontRegardless` so it never becomes key or
-  activates the app (`macos.rs`).
-- Windows: a topmost tool window with `WS_EX_NOACTIVATE|WS_EX_TRANSPARENT|WS_EX_LAYERED`, shown
-  with `SW_SHOWNOACTIVATE` (`win32.rs`).
+  means destroyed. Interactive overlays are unavailable there (pointer events for a surface on
+  a private queue aren't wired).
+- X11: an override-redirect notification window, empty input shape unless interactive.
+- macOS: winit's view (and the Metal layer wgpu draws into) moves into a non-activating
+  `NSPanel` (`NonactivatingPanel`, `becomesKeyOnlyIfNeeded`) at status level (25) on every
+  Space incl. full-screen ones, ordered front with `orderFrontRegardless`; it ignores the mouse
+  unless interactive. Clicks still reach Rune through winit's view (`macos.rs`).
+- Windows: a topmost tool window with `WS_EX_NOACTIVATE` (plus `WS_EX_TRANSPARENT|WS_EX_LAYERED`
+  unless interactive), shown with `SW_SHOWNOACTIVATE`; a bottom overlay sits above the taskbar
+  (`win32.rs`).
 - Observed in headless sway 1.12 on apollo: layer-shell placement (top, bottom, switching),
-  transparency, scale 2, show/hide/reshow while the app window is open or closed, the focused
+  transparency, scale 2, show/hide/reshow with the app window open or closed, the focused
   window keeping focus, and a `zwlr_virtual_pointer` click passing through a large overlay to
-  the button under it; the same under Xwayland (override-redirect). macOS 26.2 (hailmary, screen
-  at the login window): level 25, bounds at the top and bottom edge, hide and reshow
-  (CGWindowList); pixels and focus not observed. Windows: `cargo xwin clippy` only.
-- Not yet: overlays that take input (meeting capsules: clickable, non-activating), per-monitor
-  placement.
+  the button under it. Under Xwayland the same, plus an interactive corner capsule taking a
+  virtual-pointer click (once flaky: the first try lost the click to an enter/leave pair from the
+  new virtual device) while the app window kept focus, `set_align` and `resize`. macOS 26.2
+  (hailmary, screen at the login window): both panels at level 25 with the right bounds (top
+  centre; top right, then left and wider), hide, reshow and quit (CGWindowList); clicks, pixels
+  and non-activation not observed. Windows: `cargo xwin clippy` only.
+- Not yet: interactive overlays on Wayland, hover in a non-key macOS panel (mouse-moved events
+  go to the key window), per-monitor placement.
 
 ## Run
 

@@ -16,7 +16,8 @@ use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1};
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1};
 
-use crate::overlay::ScreenEdge;
+use crate::el::Align;
+use crate::overlay::{Placement, ScreenEdge};
 
 #[derive(Default)]
 struct State {
@@ -74,7 +75,7 @@ pub(crate) struct LayerSurface {
 
 impl LayerSurface {
     /// None when the display isn't Wayland or the compositor lacks layer-shell.
-    pub fn new(display: RawDisplayHandle, namespace: &str, size: (u32, u32), edge: ScreenEdge, margin: i32) -> Option<LayerSurface> {
+    pub fn new(display: RawDisplayHandle, namespace: &str, at: Placement) -> Option<LayerSurface> {
         let RawDisplayHandle::Wayland(display) = display else { return None };
         // SAFETY: winit owns this `wl_display` for the life of the event loop, which outlives
         // every overlay; a foreign backend never closes it.
@@ -89,11 +90,10 @@ impl LayerSurface {
         surface.set_input_region(Some(&region));
         region.destroy();
         let layer = shell.get_layer_surface(&surface, None, Layer::Overlay, namespace.to_owned(), &qh, ());
-        layer.set_size(size.0, size.1);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer.set_exclusive_zone(0);
         let mut this = LayerSurface { queue, state: State::default(), layer, surface, display: display.display };
-        this.place(edge, margin);
+        this.place(at);
         this.surface.commit();
         while this.state.configured.is_none() && !this.state.closed {
             this.queue.blocking_dispatch(&mut this.state).ok()?;
@@ -101,13 +101,20 @@ impl LayerSurface {
         (!this.state.closed).then_some(this)
     }
 
-    pub fn place(&mut self, edge: ScreenEdge, margin: i32) {
-        let (anchor, margins) = match edge {
-            ScreenEdge::Top => (Anchor::Top, (margin, 0)),
-            ScreenEdge::Bottom => (Anchor::Bottom, (0, margin)),
+    pub fn place(&mut self, at: Placement) {
+        let (margin, inset) = (at.margin.round() as i32, at.inset.round() as i32);
+        let (vertical, top, bottom) = match at.edge {
+            ScreenEdge::Top => (Anchor::Top, margin, 0),
+            ScreenEdge::Bottom => (Anchor::Bottom, 0, margin),
         };
-        self.layer.set_anchor(anchor);
-        self.layer.set_margin(margins.0, 0, margins.1, 0);
+        let (horizontal, left, right) = match at.align {
+            Align::Start => (Anchor::Left, inset, 0),
+            Align::Center => (Anchor::empty(), 0, 0),
+            Align::End => (Anchor::Right, 0, inset),
+        };
+        self.layer.set_size(at.size.0.ceil() as u32, at.size.1.ceil() as u32);
+        self.layer.set_anchor(vertical | horizontal);
+        self.layer.set_margin(top, right, bottom, left);
     }
 
     /// Commit role state (placement) without a new buffer; wgpu's present commits buffers.

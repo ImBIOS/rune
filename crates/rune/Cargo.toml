@@ -20,8 +20,8 @@ portable-atomic = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5.2"
-objc2-foundation = { version = "0.2.2", features = ["NSGeometry", "NSThread"] }
-objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSResponder", "NSRunningApplication", "NSView", "NSWindow", "NSColor", "NSGraphics", "NSPanel"] }
+objc2-foundation = { version = "0.2.2", features = ["NSArray", "NSGeometry", "NSThread"] }
+objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSResponder", "NSRunningApplication", "NSView", "NSWindow", "NSColor", "NSGraphics", "NSPanel", "NSScreen"] }
 
 [target.'cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))'.dependencies]
 raw-window-handle = "0.6"

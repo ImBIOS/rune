@@ -13,13 +13,14 @@ fn hwnd(window: &winit::window::Window) -> Option<HWND> {
     Some(h.hwnd.get() as HWND)
 }
 
-/// Topmost tool window that never activates and lets every click through.
-pub(crate) fn prepare_overlay(window: &winit::window::Window) {
+/// Topmost tool window that never activates; unless `interactive`, every click goes through.
+pub(crate) fn prepare_overlay(window: &winit::window::Window, interactive: bool) {
     let Some(hwnd) = hwnd(window) else { return };
+    let through = if interactive { 0 } else { WS_EX_TRANSPARENT | WS_EX_LAYERED };
     // SAFETY: style changes on a live window owned by this thread.
     unsafe {
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-        let style = style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED;
+        let style = style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | through;
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style as isize);
     }
 }
