@@ -705,7 +705,7 @@ impl<S: 'static> AnyHost for Host<S> {
         if matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll)
             && self.wake_deadline().is_some_and(|deadline| deadline <= Instant::now())
         {
-            if let Some(w) = self.win.as_ref().filter(|w| w.visible) {
+            if let Some(w) = self.win.as_ref().filter(|w| w.visible && !w.occluded && !w.window.is_minimized().unwrap_or(false)) {
                 w.window.request_redraw();
             } else {
                 self.rt.frame(0.0);
