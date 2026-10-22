@@ -1,9 +1,9 @@
 name: site
 
-# Deploys the docs site in site/. main deploys https://anoma.ly/team/rune, site-dev deploys https://dev.anoma.ly/team/rune.
+# Deploys the docs site in site/. dev deploys https://dev.anoma.ly/team/rune, production deploys https://anoma.ly/team/rune.
 on:
   push:
-    branches: [main, site-dev]
+    branches: [dev, production]
     paths:
       - "site/**"
       - ".github/workflows/site.yml"
@@ -28,7 +28,7 @@ jobs:
           node-version: 22
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
-      - run: bun run deploy:${{ github.ref_name == 'main' && 'production' || 'dev' }}
+      - run: bun run deploy:${{ github.ref_name == 'production' && 'production' || 'dev' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
