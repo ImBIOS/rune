@@ -32,6 +32,9 @@ use crate::shape::{LineCap, Op, Shape};
 use crate::text::{Deco, GlyphQuad, Ink, TextSystem, layout_height};
 use crate::tok::motion;
 
+#[path = "focus.rs"]
+mod focus;
+
 const P_FILL: Prop<Color> = Prop::custom(64, PropClass::Color);
 const P_BORDER: Prop<Color> = Prop::custom(65, PropClass::Color);
 const P_TEXT: Prop<Color> = Prop::custom(66, PropClass::Color);
@@ -81,11 +84,14 @@ impl<S> Cx<S> {
     }
     /// Scale the animation clock (slow motion below 1).
     pub fn time_scale(&mut self, scale: f32) {
-        self.time_scale = scale.clamp(0.05, 8.0);
+        self.time_scale = scale.clamp(0.0, 8.0);
     }
 }
 
 pub(crate) struct Node {
+    focus: crate::el::FocusSpec,
+    modal: Option<crate::el::ModalSpec>,
+    looping: Option<rune_motion::LoopSpec>,
     pub id: NodeId,
     pub path: String,
     pub key: Option<String>,
@@ -125,6 +131,8 @@ pub(crate) struct Node {
 }
 
 enum Action {
+    FocusControl(String),
+    Dismiss(String),
     Hover(String),
     Press(String),
     SecondaryPress(String, PointerPress),
@@ -139,6 +147,11 @@ enum Action {
 /// What tools see of one element.
 #[derive(Clone, Debug)]
 pub struct ElementInfo {
+    pub loop_phase: Option<f64>,
+    pub focusable: bool,
+    pub focused: bool,
+    pub focus_visible: bool,
+    pub inert: bool,
     pub path: String,
     pub key: Option<String>,
     pub role: &'static str,
@@ -296,6 +309,11 @@ pub struct Runtime<S: 'static> {
     row_mask: Vec<f32>,
     grow_acc: f32,
     focused: Option<String>,
+    keyboard_focus: bool,
+    modal_stack: Vec<(String, Option<String>)>,
+    modal_index: Option<usize>,
+    loops: HashMap<NodeId, rune_motion::LoopTrack>,
+    loops_active: bool,
     hovered: Option<String>,
     pub ime_area: Option<[f32; 4]>,
     /// Text the focused field asked to copy (the shell writes it to the clipboard).
@@ -427,6 +445,11 @@ impl<S: 'static> Runtime<S> {
             row_mask: Vec::new(),
             grow_acc: 0.0,
             focused: None,
+            keyboard_focus: false,
+            modal_stack: Vec::new(),
+            modal_index: None,
+            loops: HashMap::new(),
+            loops_active: false,
             hovered: None,
             ime_area: None,
             copy_request: None,
@@ -661,12 +684,13 @@ impl<S: 'static> Runtime<S> {
         animating |= self.reveals_active();
         self.build();
         self.images.end_frame();
+        animating |= self.loops_active;
         animating |= self.draw_text_flights();
         if self.track_marks {
             self.marks.resize(self.instances.len(), 0);
         }
         self.stats.shaped = self.text.shaped - shaped0;
-        self.animating = animating;
+        self.animating = animating && self.time_scale > 0.0;
         self.animating
     }
 
@@ -678,6 +702,7 @@ impl<S: 'static> Runtime<S> {
             if !self.scene.contains(n.id) {
                 self.reveals.remove(&n.id);
                 self.scrolls.remove(&n.id);
+                self.loops.remove(&n.id);
                 continue;
             }
             n.parent = n.parent.and_then(|p| remap[p]);
@@ -687,6 +712,7 @@ impl<S: 'static> Runtime<S> {
             self.nodes.push(n);
         }
         self.virtuals.retain(|path, _| self.nodes.iter().any(|n| n.path == *path));
+        self.refresh_modal_index();
     }
 
     fn capture_text_flight(&mut self, source: String, target: String) {
@@ -776,6 +802,15 @@ impl<S: 'static> Runtime<S> {
     fn run_action(&mut self, action: Action, tx: &mut Tx) -> bool {
         let mut one = Tx::default();
         let ran = match action {
+            Action::FocusControl(path) => {
+                self.set_focus(Some(path), false);
+                true
+            }
+            Action::Dismiss(path) => {
+                let Some(f) = self.node(&path).and_then(|n| n.modal.as_ref().map(|m| m.dismiss.clone())) else { return false };
+                f(&mut self.state, &mut one);
+                true
+            }
             Action::Hover(path) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_hover.clone()) else { return false };
                 f(&mut self.state as &mut dyn Any, &mut one);
@@ -808,6 +843,10 @@ impl<S: 'static> Runtime<S> {
                 true
             }
             Action::Key(ev) => {
+                if self.focus_key(&ev, &mut one) {
+                    merge(tx, one);
+                    return true;
+                }
                 if let Some(f) = self.on_key
                     && f(&mut self.state, &ev, &mut one)
                 {
@@ -828,6 +867,7 @@ impl<S: 'static> Runtime<S> {
             Action::Ime(ev) => self.with_focused(|e| e.ime(&ev), &mut one),
             Action::Paste(s) => self.with_focused(|e| e.paste(&s), &mut one),
             Action::Focus(path, x, y) => {
+                self.keyboard_focus = false;
                 let Some(access) = self.node(&path).and_then(|n| n.input.as_ref()?.access.clone()) else { return false };
                 let layout = self.node(&path).and_then(|n| n.text_layout.clone());
                 let s = self.env.scale;
@@ -1601,7 +1641,7 @@ impl<S: 'static> Runtime<S> {
         }
 
         if let Some(f) = &self.focused
-            && !nodes[..present_len].iter().any(|n| &n.path == f && n.input.as_ref().is_some_and(|i| i.edit.focused))
+            && !nodes[..present_len].iter().any(|n| &n.path == f && (n.focus.enabled || n.input.as_ref().is_some_and(|i| i.edit.focused)))
         {
             self.focused = None;
         }
@@ -1614,6 +1654,17 @@ impl<S: 'static> Runtime<S> {
         self.nodes = nodes;
         self.virtuals.retain(|path, _| self.nodes.iter().any(|n| n.path == *path));
         self.subscribe_live();
+        self.refresh_modal_index();
+        self.sync_modals();
+        self.loops.retain(|id, _| self.scene.contains(*id));
+        for n in &self.nodes {
+            if let Some(spec) = n.looping {
+                self.loops.entry(n.id).and_modify(|l| { l.retime(spec, self.t); l.enabled(true, self.t); })
+                    .or_insert_with(|| rune_motion::LoopTrack::new(spec, self.t));
+            } else if let Some(l) = self.loops.get_mut(&n.id) {
+                l.enabled(false, self.t);
+            }
+        }
         self.layout = taffy;
         self.text.end_commit();
         self.dirty = false;
@@ -1782,6 +1833,16 @@ impl<S: 'static> Runtime<S> {
 
     pub fn pointer_down(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
+        self.keyboard_focus = false;
+        if let Some(i) = self.active_modal() {
+            let r = self.drawn.get(i).copied().unwrap_or([0.0; 4]);
+            if !(x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]) {
+                if self.nodes[i].modal.as_ref().is_some_and(|m| m.outside) {
+                    self.queue.push(Action::Dismiss(self.nodes[i].path.clone()));
+                }
+                return;
+            }
+        }
         let target = self.primary_target(x, y);
         let Some(ti) = target else {
             if self.focused.is_some() {
@@ -1807,6 +1868,9 @@ impl<S: 'static> Runtime<S> {
         if n.input.is_some() {
             self.queue.push(Action::Focus(n.path.clone(), x - r[0] - n.inset[0], y - r[1] - n.inset[1]));
             return;
+        }
+        if n.focus.enabled {
+            self.queue.push(Action::FocusControl(n.path.clone()));
         }
         let r = n.target;
         let d = Drag {
@@ -1958,7 +2022,7 @@ impl<S: 'static> Runtime<S> {
             .iter()
             .enumerate()
             .rev()
-            .filter(|(_, n)| n.scroll.is_some() && !self.is_exiting(n.id))
+            .filter(|(i, n)| n.scroll.is_some() && !self.subtree_exiting(*i) && self.allowed(*i))
             .find(|(i, _)| {
                 let r = self.drawn.get(*i).copied().unwrap_or([0.0; 4]);
                 x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]
@@ -2037,6 +2101,7 @@ impl<S: 'static> Runtime<S> {
         self.marks.clear();
         self.surfaces.clear();
         self.hits.clear();
+        self.loops_active = false;
         let n_nodes = self.nodes.len();
         self.inh_scratch.clear();
         self.inh_scratch.resize(n_nodes, Inh::default());
@@ -2094,12 +2159,16 @@ impl<S: 'static> Runtime<S> {
             if let Some(c) = n.vis.cycle {
                 own *= if self.reduced_motion { c.still } else { c.sample(self.clock) };
             }
-            let o = (own * pinh.opacity).clamp(0.0, 1.0);
+            let mut o = (own * pinh.opacity).clamp(0.0, 1.0);
             let group = if n.vis.hover.a > 0.0 || n.vis.hover_group {
                 self.scene.get(n.id, P_HOVER).unwrap_or(0.0).clamp(0.0, 1.0)
             } else {
                 pinh.group
             };
+            let loop_value = self.loops.get(&n.id).map(|l| l.sample(now, self.reduced_motion));
+            if let (Some(rune_motion::LoopSpec { kind: rune_motion::LoopKind::Opacity { .. }, .. }), Some(v)) = (n.looping, loop_value) {
+                o *= v;
+            }
             let (mut clip, mut fade) = (pinh.clip, pinh.fade);
             let own_sc = p.transform.scale.x;
             let (sc, anchor) = if (own_sc - 1.0).abs() > 1e-5 {
@@ -2167,6 +2236,11 @@ impl<S: 'static> Runtime<S> {
             };
 
             if o > 0.001 && visible {
+                if !self.reduced_motion && r[2] > clip[0].max(vp[0]) && r[0] < clip[2].min(vp[2])
+                    && r[3] > clip[1].max(vp[1]) && r[1] < clip[3].min(vp[3])
+                    && self.loops.get(&n.id).is_some_and(|l| l.active(now)) {
+                    self.loops_active = true;
+                }
                 let k_px = sc * s;
                 for (k, sh) in n.vis.shadows.iter().enumerate() {
                     let c = if k < P_SHADOWS.len() { self.color(n.id, P_SHADOWS[k], sh.color) } else { sh.color };
@@ -2303,8 +2377,9 @@ impl<S: 'static> Runtime<S> {
                         fade,
                     });
                 }
-                if let Some(ol) = n.vis.outline {
-                    let c = self.color(n.id, P_OUTLINE, ol.color);
+                let focus_ring = self.focus_ring_visible(i).then_some(n.focus.ring).flatten();
+                if let Some(ol) = focus_ring.or(n.vis.outline) {
+                    let c = if focus_ring.is_some() { ol.color } else { self.color(n.id, P_OUTLINE, ol.color) };
                     let g = (ol.offset + ol.width) * k_px;
                     if c.a > 0.0 && ol.width > 0.0 {
                         self.instances.push(Instance {
@@ -2349,7 +2424,7 @@ impl<S: 'static> Runtime<S> {
                             radii: [0.0; 4],
                             fill: color.premul(o),
                             border: [0.0; 4],
-                            params: [0.0, KIND_GLYPH, 0.0, 1.0],
+                            params: [if matches!(n.looping.map(|l| l.kind), Some(rune_motion::LoopKind::Rotation)) { loop_value.unwrap_or(0.0) } else { 0.0 }, KIND_GLYPH, 0.0, 1.0],
                             uv: [q.uv[0], q.uv[1], 0.0, 0.0],
                             clip,
                             fade,
@@ -2494,8 +2569,9 @@ impl<S: 'static> Runtime<S> {
                 dy -= grid((st.offset - origin) as f32, s);
             }
             self.inh_scratch[i] = Inh { opacity: o, clip, fade, scale: sc, anchor, blur, dy, mark, group };
-            if (n.on_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_drag.is_some() || n.input.is_some() || n.window_drag)
+            if (n.on_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_drag.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())
                 && !self.subtree_exiting(i)
+                && self.allowed(i) && o > 0.001 && visible
             {
                 let c = self.inh_scratch[n.parent.unwrap_or(0)].clip;
                 let cr = [
@@ -2530,7 +2606,8 @@ impl<S: 'static> Runtime<S> {
             .filter_map(|(i, n)| {
                 let p = self.scene.presented(n.id)?;
                 let flight = self.flights.iter().find(|f| n.key.as_deref() == Some(&f.target_key));
-                let mut moving = flight.is_some() || store.is_animating(n.id, prop::FRAME)
+                let mut moving = flight.is_some() || (!self.reduced_motion && self.loops.get(&n.id).is_some_and(|l| l.active(self.t)))
+                    || store.is_animating(n.id, prop::FRAME)
                     || store.is_animating(n.id, prop::TRAVEL)
                     || store.is_animating(n.id, prop::PRESENCE)
                     || store.is_animating(n.id, prop::OFFSET) || store.is_animating(n.id, prop::SCALE)
@@ -2581,6 +2658,11 @@ impl<S: 'static> Runtime<S> {
                     a = self.nodes[pi].parent;
                 }
                 Some(ElementInfo {
+                    loop_phase: self.loops.get(&n.id).map(|l| if self.reduced_motion { 0.0 } else { l.phase(self.t) }),
+                    focusable: self.can_focus(i),
+                    focused: self.focused.as_deref() == Some(&n.path),
+                    focus_visible: self.keyboard_focus && self.focused.as_deref() == Some(&n.path),
+                    inert: !self.allowed(i) || self.subtree_exiting(i),
                     path: n.path.clone(),
                     key: n.key.clone(),
                     role: n.role,
@@ -2612,6 +2694,8 @@ impl<S: 'static> Runtime<S> {
             let path = format!("flight-source/{}", f.target_key);
             let t = f.destination;
             elements.push(ElementInfo {
+                loop_phase: None,
+                focusable: false, focused: false, focus_visible: false, inert: true,
                 key: Some(path.clone()), path, role: "text", label: None, text: None,
                 rect: [r.x, r.y, r.w, r.h], target: [t.x, t.y, t.w, t.h],
                 opacity: f.source_alpha, radius: 0.0, fill: Color::TRANSPARENT, text_color: None,
@@ -2838,6 +2922,9 @@ fn flatten(
     let parent_is_stack = parent.is_some_and(|p| nodes[p].growth.is_some());
     let virtual_mount = el.virtual_mount || parent.is_some_and(|p| nodes[p].virtual_mount);
     let El {
+        focus,
+        modal,
+        looping,
         key,
         role,
         label,
@@ -2866,6 +2953,9 @@ fn flatten(
     let measured = text.is_some();
     let measure = text.as_ref().map(|t| crate::text::text_hash(&t.content, &t.spans, t.style, scale, None) ^ u64::from(t.wrap) ^ (u64::from(t.truncate) << 1));
     nodes.push(Node {
+        focus,
+        modal,
+        looping,
         id: NodeId(0),
         path: path.clone(),
         key,
@@ -3217,6 +3307,35 @@ mod tests {
         assert_eq!(rt.cursor(), Cursor::Default);
         rt.pointer_leave();
         assert_eq!(rt.cursor(), Cursor::Default);
+    }
+
+    #[test]
+    fn loops_sleep_offscreen_hidden_reduced_and_after_exit() {
+        fn view(s: &(f32, bool, bool), cx: &mut Cx<(f32, bool, bool)>) -> El {
+            cx.reduced_motion(s.2);
+            let mut root = col().key("root").size(100.0, 100.0).clip_soft(0.0);
+            if s.1 {
+                root = root.child(el().key("loop").absolute(0.0, s.0).size(20.0, 20.0).fill(Color::WHITE)
+                    .looping(rune_motion::LoopSpec::opacity(1.0, 0.0, 0.4, 1.0)));
+            }
+            root
+        }
+        for (y, shown, reduced, active) in [(0.0, true, false, true), (200.0, true, false, false),
+            (0.0, false, false, false), (0.0, true, true, false)] {
+            let mut rt = Runtime::new((y, shown, reduced), view, (100.0, 100.0), Env { system_dark: true, scale: 2.0 });
+            assert_eq!(rt.frame(0.0), active);
+            // Model the shell's scheduling gate: zero requested frames over ten seconds at rest.
+            let mut requested = 0;
+            for _ in 0..1200 { if rt.animating { requested += 1; rt.frame(1.0 / 120.0); } }
+            assert_eq!(requested, if active { 1200 } else { 0 });
+            if active {
+                rt.state.1 = false; rt.invalidate(); rt.frame(0.0);
+                assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("loop") && e.opacity > 0.0));
+                for _ in 0..240 { rt.frame(1.0 / 120.0); }
+                assert!(!rt.animating);
+                assert!(!rt.elements().iter().any(|e| e.key.as_deref() == Some("loop")));
+            }
+        }
     }
 
     #[test]

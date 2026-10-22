@@ -147,7 +147,7 @@ impl Select {
             layer.push(s);
         }
         // 12rem tall at most; consecutive options sit 2 points apart, headers flush.
-        let mut list = col().key("listbox").role("listbox").padding(4.0).max_h(192.0).clip_soft(0.0).items_stretch();
+        let mut list = col().key("listbox").role("listbox").focus_group().padding(4.0).max_h(192.0).clip_soft(0.0).items_stretch();
         let mut group: Option<&str> = None;
         let mut after_item = false;
         for (i, (g, o)) in self.options.iter().enumerate() {
@@ -169,6 +169,7 @@ impl Select {
             let mut item = row()
                 .key(format!("option{i}"))
                 .role("option")
+                .focusable(true).focus_selected(selected).focus_ring(1.0, -1.0, c.border_focus)
                 .label(o.clone())
                 .h(28.0)
                 .pl(12.0)
@@ -218,7 +219,8 @@ impl Select {
             None => (self.placeholder.clone(), if self.invalid && !disabled { c.danger.fg } else { c.text_faint }),
         };
         let chevron: &'static Icon = if self.open { k.glyph.chevron_up } else { k.glyph.chevron_down };
-        let mut trigger = row().key(anchor_key.clone()).role("combobox").label(label.clone()).center_y();
+        let mut trigger = row().key(anchor_key.clone()).role("combobox").label(label.clone()).center_y()
+            .focusable(!disabled).focus_ring(1.0, 0.0, c.border_focus);
         trigger = match self.appearance {
             SelectAppearance::Inline => {
                 let font = TextStyle { line_height: 16.0, ..k.ty.ui_medium };

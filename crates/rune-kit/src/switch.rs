@@ -90,8 +90,8 @@ impl Switch {
         if let Some(d) = &self.description {
             root = root.child(text(d.clone()).key("description").font(k.ty.text_xsmall.lh(15.6)).color(c.std_text));
         }
-        root = root.child(control.key("control"));
-        self.acts.apply(root, !disabled)
+        root = root.child(control.key("control").focus_ring(2.0, 1.0, c.border_focus));
+        self.acts.apply(root.focusable(!disabled), !disabled)
     }
 
     fn compact_control(&self, k: &Kit, hover: bool) -> El {

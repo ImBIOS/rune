@@ -94,7 +94,7 @@ impl Checkbox {
         if self.state == State::Rest {
             control = control.hover(c.surface_hover);
         }
-        let mut root = row().role("checkbox").gap(12.0).center_y().child(control);
+        let mut root = row().role("checkbox").gap(12.0).center_y().child(control.focus_ring(1.0, 0.0, c.border_active));
         if let Some(l) = &self.label {
             root = root.label(l.clone());
             let mut content = col().key("content");
@@ -107,6 +107,6 @@ impl Checkbox {
             }
             root = root.child(content);
         }
-        self.acts.apply(root, self.state != State::Disabled)
+        self.acts.apply(root.focusable(self.state != State::Disabled), self.state != State::Disabled)
     }
 }

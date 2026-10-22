@@ -111,6 +111,7 @@ fn skin(k: &Kit, v: ButtonVariant) -> Skin {
 
 /// Paints `skin` on `e` for `state`. Rest leaves hover/press to the runtime.
 fn paint(k: &Kit, mut e: El, s: Skin, state: State, interactive: bool) -> El {
+    e = e.focusable(interactive && state != State::Disabled).focus_ring(2.0, 2.5, k.c.border_focus);
     let fill = match state {
         State::Hover => over(s.hover, s.fill),
         State::Pressed => over(s.pressed, s.fill),

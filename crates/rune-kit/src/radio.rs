@@ -69,6 +69,7 @@ impl RadioItem {
             .gradient(sheen, k.light(0.0))
             .box_shadow(Shadow { spread: 0.5, color: ring, inset: true, ..Shadow::default() })
             .motion(k.motion.control);
+        control = control.focus_ring(2.0, 1.0, c.border_focus);
         if self.checked {
             let dot = c.knob_on;
             control = control.child(
@@ -105,7 +106,7 @@ impl RadioItem {
             .items_start()
             .child(el().key("stack").size(16.0, 20.0).child(control))
             .child(words);
-        self.acts.apply(root, !disabled)
+        self.acts.apply(root.focusable(!disabled).focus_selected(self.checked), !disabled)
     }
 }
 
@@ -144,7 +145,7 @@ impl RadioGroup {
 
     pub fn build(self, k: &Kit) -> El {
         let c = &k.c;
-        let mut root = col().role("radiogroup").gap(8.0);
+        let mut root = col().role("radiogroup").focus_group().gap(8.0);
         if let Some(l) = &self.label {
             root =
                 root.label(l.clone()).child(text(l.clone()).key("label").font(k.ty.small.lh(11.0)).color(c.text_faint));

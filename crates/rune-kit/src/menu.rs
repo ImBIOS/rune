@@ -175,7 +175,7 @@ impl MenuItem {
         if disabled {
             e = e.opacity(if standard { 1.0 } else { 0.5 });
         }
-        self.acts.apply(e, !disabled)
+        self.acts.apply(e.focusable(!disabled).focus_ring(1.0, -1.0, c.border_focus), !disabled)
     }
 }
 
@@ -260,7 +260,7 @@ impl Menu {
     fn surface(self, k: &Kit, layer: &mut Vec<El>) -> El {
         let c = &k.c;
         let standard = self.standard;
-        let mut list = col().key(format!("{}-menu", self.key)).role("menu").min_w(self.min_width).items_stretch();
+        let mut list = col().key(format!("{}-menu", self.key)).role("menu").focus_group().min_w(self.min_width).items_stretch();
         list = if standard {
             shadows(
                 list.padding(4.0).radius(k.radius.md).fill(c.surface_raised).border(1.0, k.alpha(c.std_border, 0.5)),

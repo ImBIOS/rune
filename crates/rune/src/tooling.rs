@@ -633,6 +633,9 @@ fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
                 "role": e.role,
                 "rect": e.rect.map(r2),
                 "opacity": (e.opacity * 1000.0).round() / 1000.0,
+                "focusable": e.focusable, "focused": e.focused,
+                "focusVisible": e.focus_visible, "inert": e.inert,
+                "loopPhase": e.loop_phase,
                 "fill": e.fill.hex(),
             });
             if let Some(k) = &e.key {

@@ -1,0 +1,15 @@
+[
+  {"t":0.1,"type":"key","name":"Tab"},
+  {"t":0.2,"type":"key","name":"Enter"},
+  {"t":0.5,"type":"key","name":"Tab"},
+  {"t":0.6,"type":"key","name":"Tab"},
+  {"t":1.8,"type":"key","name":"Escape"},
+  {"t":2.4,"type":"key","name":"Tab"},
+  {"t":2.5,"type":"type","text":" "},
+  {"t":2.8,"type":"key","name":"Tab"},
+  {"t":2.9,"type":"type","text":" "},
+  {"t":3.2,"type":"key","name":"Tab"},
+  {"t":3.3,"type":"key","name":"Right"},
+  {"t":3.8,"type":"tap","key":"opener"},
+  {"t":4.8,"type":"tap","x":10,"y":10}
+]
