@@ -6,7 +6,7 @@ cd "${0:A:h}/../.."
 out=../../demo/fx
 tmp=$(mktemp -d)
 cargo build --release --example gallery
-bin=${CARGO_TARGET_DIR:-target}/release/examples/gallery
+bin=${CARGO_TARGET_DIR:-../../target}/release/examples/gallery
 for spec in "electric 0.0 2" "fire 0.0 2" "glow 0.0 2" "pulse 0.0 2" "motion 0.0 1" "distort 0.0 1.5" "extras 0.0 2"; do
   set -- ${=spec}
   $bin --frames $tmp/$1 --fps 60 --seconds $3 --start $2 --effect $1
