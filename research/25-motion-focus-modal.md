@@ -99,14 +99,39 @@ then requests no frames. Exact counts need no noisy wall-time repetitions.
 
 - Independent Opus review remains required before push; no agent-spawn tool is
   available in this session. The parent has a coordination note in the worktree.
-  Final fetch/rebase/reverification is still required before `HEAD:main`; tests
-  above cover the implementation atop `a9ca7f7`, not later upstream commits.
-- The parent requested integration with hex-gaps' `on_input_key` and popover focus
-  return. Those APIs were not on this base; the shared focus path and input-first
-  routing are ready, but that integration remains pending their landing.
+  Final fetch/rebase/reverification is still required before `HEAD:main` if main
+  advances after the reviewed head.
+- Desktop-fidelity's `.cycle()` API is not on `origin/main` as of `9864df3`.
+  Once landed, retain its public signature as sugar over `LoopSpec` and move loop
+  wakes onto the shared AnyHost deadline, including group-opacity visibility.
 - Platform AccessKit attachment is future work; this provides the shared tree hook.
 - Select/menu roving works after focus reaches the group. Their opening autofocus
   and popup keyboard dismissal are not yet unified with the modal API.
 - Context-menu, tabs and avatar gallery scenes remain; indeterminate progress is
   still static. Existing demo PNGs have not been overwritten.
 - Native occlusion and physical idle wakeups require a non-Studio windowed run.
+
+## Combobox and popup integration
+
+Rebased onto hex-gaps' `9c4e087` stack, then `f4d00b0`. The requested-focus
+normalization now uses `set_focus` on the newly measured tree and remeasures once
+when model focus changes. This preserves non-input focus and avoids calling an
+edit accessor after its row was deleted. Fading-out inputs retain no edit callbacks.
+
+`on_input_key` runs before built-in focus navigation, text editing and app `on_key`;
+only unhandled keys bubble to the app. `El::focus_return(trigger_key)` restores
+popover, combobox and menu triggers on removal, with keyboard/pointer modality
+preserved. Combobox close cancels composition, and modal dismissal cancels it before
+the close callback can remove the model. Secondary clicks cannot bubble out of a modal.
+
+The first integration run passed 22 runtime tests and exposed the deleted-row
+accessor regression. After fixing it, HiveMind on mini passed the deleted-row test,
+all 3 focus tests, both secondary-input tests, all 5 combobox tests, the context-menu
+test and the new popover-focus test. An interrupted rerun was cancelled by a server
+restart; no worker job remained before resuming it.
+
+After rebasing onto `9864df3` (the newer compact-window/accessory host changes),
+the final targeted run passed all 3 focus tests, 5 combobox tests, context-menu
+and popover-focus tests on mini. No native windows were opened. The earlier
+snapshot/motion-lint evidence above predates this integration and is not claimed
+as a new visual run on this head.
