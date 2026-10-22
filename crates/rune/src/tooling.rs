@@ -17,6 +17,8 @@ use crate::text::TextSystem;
 pub struct AppSpec<S: 'static> {
     pub title: &'static str,
     pub size: (f32, f32),
+    /// The smallest window the user can resize to, in points (None: 420×400).
+    pub min_size: Option<(f32, f32)>,
     pub init: fn() -> S,
     pub view: fn(&S, &mut Cx<S>) -> El,
     /// Named states for snapshots: each modifies the initial state.

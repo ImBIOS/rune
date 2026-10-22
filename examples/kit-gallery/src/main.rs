@@ -75,6 +75,7 @@ fn main() {
     rune::run(AppSpec {
         title: "rune-kit gallery",
         size: (720.0, 480.0),
+        min_size: None,
         init,
         view,
         scenes: stories::SCENES,

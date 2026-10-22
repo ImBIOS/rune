@@ -3,9 +3,10 @@
 //! reopening shows the same state (the ticks kept counting, the note kept its text).
 //!
 //! ```sh
-//! cargo run -p background            # then type: open | activate TOKEN | close | quit
+//! cargo run -p background            # then type: open | activate TOKEN | close | dock on|off | quit
 //! cargo run -p background -- --open  # start with the window
 //! cargo run -p background -- --release-gpu  # closing also drops the GPU device
+//! cargo run -p background -- --accessory    # macOS: no Dock icon until `dock on`
 //! cargo run -p background -- --snap /tmp/background.png
 //! ```
 
@@ -106,6 +107,7 @@ fn main() {
     let mut app = App::new(rune::AppSpec {
         title: "Background",
         size: (480.0, 420.0),
+        min_size: None,
         init,
         view,
         scenes: &[("ticked", |s| s.ticks = 42)],
@@ -119,6 +121,9 @@ fn main() {
     .on_close(on_close);
     if !std::env::args().any(|a| a == "--open") {
         app = app.windowless();
+    }
+    if std::env::args().any(|a| a == "--accessory") {
+        app = app.accessory();
     }
     if std::env::args().any(|a| a == "--release-gpu") {
         app = app.release_gpu_when_closed();
@@ -140,8 +145,9 @@ fn main() {
                 (Some("activate"), Some(token)) => commands.activate(token),
                 (Some("close"), _) => commands.close(),
                 (Some("quit"), _) => commands.quit(),
+                (Some("dock"), Some(on)) => commands.set_dock_icon(on == "on"),
                 (Some(other), _) => {
-                    eprintln!("background: unknown command {other:?} (open | activate TOKEN | close | quit)")
+                    eprintln!("background: unknown command {other:?} (open | activate TOKEN | close | dock on|off | quit)")
                 }
                 (None, _) => {}
             }

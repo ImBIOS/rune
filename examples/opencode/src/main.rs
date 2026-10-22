@@ -421,6 +421,7 @@ fn main() {
     rune::run(AppSpec {
         title: "OpenCode",
         size: (1280.0, 820.0),
+        min_size: None,
         init: App::new,
         view: view::app,
         scenes: &[
