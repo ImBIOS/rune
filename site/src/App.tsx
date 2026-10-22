@@ -1,13 +1,14 @@
 import { useEffect, useState, type JSX, type MouseEvent } from "react"
 import { layers, milestones, principles, risks } from "./content"
 import { ArchitectureView, HomeView, NotFoundView, PrinciplesView, RoadmapView, num } from "./pages"
+import { stripBase, withBase } from "./base"
 import { REPO, normalizePath } from "./routes"
 import signature from "./footer-signature.svg"
 import { Frame, type NavGroup, type NavItem } from "./system/Frame"
 
 function Wordmark() {
   return (
-    <a className="wordmark" href="/" aria-label="Rune, overview">
+    <a className="wordmark" href={withBase("/")} aria-label="Rune, overview">
       <span className="wordmark-glyph" aria-hidden="true" />
       Rune
     </a>
@@ -16,7 +17,7 @@ function Wordmark() {
 
 function navGroups(pathname: string): NavGroup[] {
   const page = (path: string, label: string, children: NavItem[]): NavItem => ({
-    href: path,
+    href: withBase(path),
     label,
     current: pathname === path,
     children: pathname === path ? children : undefined,
@@ -75,13 +76,18 @@ function Footer() {
   )
 }
 
+// The site path for a browser path under the base; paths outside it fall through to the not-found view.
+function sitePath(pathname: string): string {
+  return normalizePath(stripBase(pathname) ?? pathname)
+}
+
 export function App({ pathname: initial }: { pathname?: string }) {
   const [pathname, setPathname] = useState(() =>
-    normalizePath(initial ?? (typeof window !== "undefined" ? window.location.pathname : "/")),
+    sitePath(initial ?? (typeof window !== "undefined" ? window.location.pathname : "/")),
   )
 
   useEffect(() => {
-    const onPopState = () => setPathname(normalizePath(window.location.pathname))
+    const onPopState = () => setPathname(sitePath(window.location.pathname))
     window.addEventListener("popstate", onPopState)
     return () => window.removeEventListener("popstate", onPopState)
   }, [])
@@ -91,7 +97,7 @@ export function App({ pathname: initial }: { pathname?: string }) {
     const href = (e.target as HTMLElement | null)?.closest("a")?.getAttribute("href")
     if (!href || !href.startsWith("/") || /\.\w+$/.test(href)) return
     const url = new URL(href, window.location.origin)
-    const next = normalizePath(url.pathname)
+    const next = sitePath(url.pathname)
     if (next === pathname) return
     e.preventDefault()
     window.history.pushState(null, "", `${url.pathname}${url.hash}`)

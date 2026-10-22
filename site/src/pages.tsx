@@ -1,6 +1,7 @@
 import type { ReactNode } from "react"
 import { decisions, layers, milestones, principles, risks, type Entry, type Milestone } from "./content"
 import { ArchitectureDiagram } from "./Diagram"
+import { withBase } from "./base"
 import { REPO } from "./routes"
 import { PageHead, SectionHead } from "./system/Frame"
 
@@ -42,8 +43,8 @@ function Rule({ entry, number, children }: { entry: Entry; number?: string; chil
 function Pager({ prev, next }: { prev?: [string, string]; next?: [string, string] }) {
   return (
     <nav className="doc-pager" aria-label="Pages">
-      {prev ? <a href={prev[0]}>← {prev[1]}</a> : <span />}
-      {next && <a href={next[0]}>{next[1]} →</a>}
+      {prev ? <a href={withBase(prev[0])}>← {prev[1]}</a> : <span />}
+      {next && <a href={withBase(next[0])}>{next[1]} →</a>}
     </nav>
   )
 }
@@ -108,11 +109,11 @@ export function HomeView() {
         </ul>
         <div className="shots">
           <figure className="shot">
-            <img src="/shots/settings.png" alt="A dark Settings window with theme, accent, toggle and slider rows" width={1240} height={1040} loading="lazy" />
+            <img src={withBase("/shots/settings.png")} alt="A dark Settings window with theme, accent, toggle and slider rows" width={1240} height={1040} loading="lazy" />
             <figcaption>examples/settings, rendered headless</figcaption>
           </figure>
           <figure className="shot">
-            <img src="/shots/opencode-session.png" alt="OpenCode Desktop's session page: a project sidebar, a transcript with code, and the composer" width={1600} height={1025} loading="lazy" />
+            <img src={withBase("/shots/opencode-session.png")} alt="OpenCode Desktop's session page: a project sidebar, a transcript with code, and the composer" width={1600} height={1025} loading="lazy" />
             <figcaption>examples/opencode, session page from the fixture</figcaption>
           </figure>
         </div>
@@ -333,7 +334,7 @@ export function NotFoundView() {
   return (
     <PageHead title="Not found">
       <p>
-        That page doesn't exist. Go to the <a href="/">overview</a>.
+        That page doesn't exist. Go to the <a href={withBase("/")}>overview</a>.
       </p>
     </PageHead>
   )
