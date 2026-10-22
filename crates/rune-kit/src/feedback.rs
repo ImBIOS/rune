@@ -1,8 +1,7 @@
 //! Spinner, Loader, Progress and ProgressCircle (`@opencode/ui` components/spinner,
 //! feedback/loader, components/progress, feedback/progress-circle).
 //!
-//! Rune has no looping tracks yet, so the spinning and pulsing frames are the web's first
-//! frame (what a paused or reduced-motion browser shows).
+//! Renderer-owned loops share Rune's deterministic clock and cool through presence on removal.
 
 use rune::{Color, El, Icon, col, el, icon, row, spacer, text};
 
@@ -39,7 +38,11 @@ impl Spinner {
             }
             let a = if outer { 0.15 } else { 0.4 };
             e = e.child(
-                el().key(format!("sq{i}")).size(3.0 * u, 3.0 * u).absolute(x * u, y * u).radius(u).fill(ink).opacity(a),
+                el().key(format!("sq{i}")).size(3.0 * u, 3.0 * u).absolute(x * u, y * u).radius(u).fill(ink)
+                    // Web chooses random 1–2 s periods and 0–1.5 s delays at module load.
+                    // A fixed per-cell seed preserves that timing range in replays/goldens.
+                    .looping(rune_motion::LoopSpec::opacity(1.0 + ((i * 37) % 101) as f64 / 100.0,
+                        ((i * 53) % 101) as f64 * 0.015, a, if outer { 0.35 } else { 1.0 })),
             );
         }
         e
@@ -83,7 +86,7 @@ impl Loader {
             .label("Loading")
             .size(self.size, self.size)
             .child(icon(&RING, self.size).absolute(0.0, 0.0).color(ink).opacity(0.2))
-            .child(icon(&ARC, self.size).absolute(0.0, 0.0).color(ink))
+            .child(icon(&ARC, self.size).absolute(0.0, 0.0).color(ink).looping(rune_motion::LoopSpec::rotation(0.9)))
     }
 }
 

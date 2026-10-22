@@ -129,6 +129,21 @@ pub struct PointerPress {
 pub(crate) type DragFn = Rc<dyn Fn(&mut dyn Any, &mut Drag, &mut Tx)>;
 pub(crate) type EditFn = Rc<dyn for<'a> Fn(&'a mut dyn Any) -> &'a mut TextEdit>;
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FocusSpec {
+    pub enabled: bool,
+    pub order: i32,
+    pub group: bool,
+    pub selected: bool,
+    pub ring: Option<Outline>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ModalSpec {
+    pub dismiss: PressFn,
+    pub outside: bool,
+}
+
 /// A vertical scroll viewport. Its first child is the content.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScrollSpec {
@@ -311,6 +326,9 @@ impl Default for Visual {
 }
 
 pub struct El {
+    pub(crate) focus: FocusSpec,
+    pub(crate) modal: Option<ModalSpec>,
+    pub(crate) looping: Option<rune_motion::LoopSpec>,
     pub(crate) key: Option<String>,
     #[cfg(debug_assertions)]
     key_source: Option<&'static std::panic::Location<'static>>,
@@ -343,6 +361,9 @@ pub struct El {
 
 fn base(dir: FlexDirection) -> El {
     El {
+        focus: FocusSpec::default(),
+        modal: None,
+        looping: None,
         key: None,
         #[cfg(debug_assertions)]
         key_source: None,
@@ -512,6 +533,45 @@ impl El {
     /// Paint the newest video frame inside this node. Node dimensions are in points.
     pub fn native_surface(mut self, surface: &crate::NativeSurface, fit: crate::SurfaceFit) -> Self {
         self.vis.surface = Some((surface.clone(), fit));
+        self
+    }
+    /// Opt into keyboard and pointer focus. Disabled controls must set this false.
+    pub fn focusable(mut self, enabled: bool) -> Self {
+        self.focus.enabled = enabled;
+        self
+    }
+    /// Positive overrides precede document order (0); negative values skip Tab only.
+    pub fn tab_index(mut self, order: i32) -> Self {
+        self.focus.order = order;
+        self
+    }
+    /// Arrow keys rove among focusable descendants; Tab visits only the current/selected item.
+    pub fn focus_group(mut self) -> Self {
+        self.focus.group = true;
+        self
+    }
+    pub fn focus_selected(mut self, selected: bool) -> Self {
+        self.focus.selected = selected;
+        self
+    }
+    /// Keyboard-only ring, on this element or a visual child of the focused control.
+    pub fn focus_ring(mut self, width: f32, offset: f32, color: Color) -> Self {
+        self.focus.ring = Some(Outline { width, offset, color });
+        self
+    }
+    /// Trap focus and make the background inert while mounted. Escape requests dismissal.
+    pub fn modal<S: 'static>(mut self, click_outside: bool, dismiss: impl Fn(&mut S) + 'static) -> Self {
+        self.modal = Some(ModalSpec { outside: click_outside,
+            dismiss: Rc::new(move |s, _| dismiss(s.downcast_mut::<S>().expect("modal state type"))) });
+        self
+    }
+    pub fn modal_click_outside(mut self, enabled: bool) -> Self {
+        if let Some(m) = &mut self.modal { m.outside = enabled; }
+        self
+    }
+    /// A renderer-owned periodic opacity or icon rotation track, on the shared clock.
+    pub fn looping(mut self, spec: rune_motion::LoopSpec) -> Self {
+        self.looping = Some(spec);
         self
     }
     /// Window keyed rows of a growth stack directly inside a vertical scroll viewport.

@@ -139,12 +139,14 @@ Known differences, and why:
 - **Blending.** Rune blends in linear light; translucent tokens are re-solved per backdrop
   (`Kit::on`), exact over the surface they were solved for and close elsewhere. CSS group opacity
   (disabled controls) is per-layer opacity in Rune, so text over a dimmed fill is slightly lighter.
-- **Focus.** Kobalte moves focus into an opened popover (the close button shows its ring); Rune has
-  no focus model for non-text elements yet, so the ring only appears with `State::Focus`.
-- **Motion.** Spinner, loader and indeterminate progress show the web's first frame; Rune has no
-  looping tracks yet. Transitions use springs of similar duration rather than CSS easing curves.
+- **Focus.** Controls support keyboard focus rings, Tab, activation and arrow-key roving.
+  Dialog traps focus and restores the opener; popover/select opening autofocus is still separate.
+- **Motion.** Spinner pulses use fixed seeds in the web's randomized timing ranges; Loader rotates
+  every 900 ms. Both use Rune's clock and hold a static pose under reduced motion. Indeterminate
+  progress remains static. Transitions use springs rather than CSS easing curves.
 - **Not drawn.** The textarea resize grip, hover-card trigger underline, scrollbars.
 - **Story quirks mirrored on purpose.** Solid ignores `defaultValue` on the v2 inputs (the web shows
   placeholders), the Basic and NonCollapsible accordions render closed, and the menu Rich story's
   `settings`/`save`/`print` icons fall back to `plus`. `components-popover--inline` and the
-  context-menu, tabs, avatar and dialog stories have no gallery scene yet.
+  context-menu, tabs and avatar stories have no gallery scene yet. `ui-dialog--basic` and the
+  scripted `motion-focus-modal` scene cover the new modal layer.

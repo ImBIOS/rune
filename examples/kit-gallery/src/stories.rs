@@ -24,6 +24,7 @@ macro_rules! stories {
 /// Stories whose web version opens an overlay (by default or through the harness's click):
 /// their scene starts with that overlay open.
 const OPENED: &[(&str, &str)] = &[
+    ("ui-dialog--basic", "dialog"),
     ("ui-menu--basic", "menu"),
     ("ui-menu--rich", "menu"),
     ("ui-menu--with-checkbox", "menu"),
@@ -56,6 +57,8 @@ fn close(s: &mut G) {
 
 stories! {
     "rune-combobox--searchable" => combobox_searchable,
+    "ui-dialog--basic" => dialog_basic,
+    "motion-focus-modal" => motion_focus_modal,
     "ui-button--playground" => button_playground,
     "ui-button--variants" => button_variants,
     "ui-button--sizes" => button_sizes,
@@ -152,6 +155,25 @@ fn combobox_searchable(s: &G, k: &Kit, layer: &mut Vec<El>) -> El {
         .placeholder("Choose model").current(s.pick.get("model").map(String::as_str))
         .on_choose(|s, id, _| { s.pick.insert("model".into(), id.into()); })
         .build(k, layer)
+}
+
+fn dialog_basic(s: &G, k: &Kit, layer: &mut Vec<El>) -> El {
+    Dialog::new("dialog", "Dialog").description("Description").open(is_open(s, "dialog"))
+        .on_close(close).child(body_text(k, "Dialog body content.")).build(k, layer);
+    Button::new("Open dialog").on_press(toggle("dialog")).build(k).key("opener")
+}
+
+fn motion_focus_modal(s: &G, k: &Kit, layer: &mut Vec<El>) -> El {
+    Dialog::new("dialog", "Loading").open(is_open(s, "dialog")).on_close(close)
+        .child(row().gap(16.0).child(Spinner::new().build(k).key("spinner"))
+            .child(Loader::new().build(k).key("loader")))
+        .child(Button::new("Done").on_press(close).build(k).key("done")).build(k, layer);
+    col().gap(16.0)
+        .child(Button::new("Open dialog").on_press(toggle("dialog")).build(k).key("opener"))
+        .child(Switch::new(s.is("switch")).label("Sync").on_toggle(|s: &mut G| s.flip("switch")).build(k).key("switch"))
+        .child(Checkbox::new(s.is("check")).label("Remember").on_toggle(|s: &mut G| s.flip("check")).build(k).key("check"))
+        .child(SegmentedControl::new(&["First", "Second"], Some(if s.is("second") { 1 } else { 0 }))
+            .on_pick(|s: &mut G, i, _| { if s.is("second") != (i == 1) { s.flip("second"); } }).build(k))
 }
 
 pub fn render(s: &G, k: &Kit, overlays: &mut Vec<El>) -> El {

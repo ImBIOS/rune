@@ -55,8 +55,17 @@ fn vs(i: In) -> Out {
     let lo = i.rect.xy - vec2<f32>(grow);
     let size = i.rect.zw + vec2<f32>(2.0 * grow);
     let p = lo + corner * size;
+    var screen = p;
+    // Icon loops rotate the quad, not its atlas allocation. Local p still samples the glyph.
+    if (kind > 1.5 && kind < 2.5 && i.params.x != 0.0) {
+        let center = i.rect.xy + i.rect.zw * 0.5;
+        let q = p - center;
+        let c = cos(i.params.x);
+        let s = sin(i.params.x);
+        screen = center + vec2<f32>(c * q.x - s * q.y, s * q.x + c * q.y);
+    }
     var o: Out;
-    o.pos = vec4<f32>(p.x / g.viewport.x * 2.0 - 1.0, 1.0 - p.y / g.viewport.y * 2.0, 0.0, 1.0);
+    o.pos = vec4<f32>(screen.x / g.viewport.x * 2.0 - 1.0, 1.0 - screen.y / g.viewport.y * 2.0, 0.0, 1.0);
     o.p = p;
     o.rect = i.rect;
     o.radii = i.radii;
@@ -305,5 +314,7 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         }
         col = i.fill * pow(cov, i.params.w);
     }
-    return col * clip_alpha(i.p, i.clip, i.fade);
+    var clip_p = i.p;
+    if (kind > 1.5 && kind < 2.5 && i.params.x != 0.0) { clip_p = i.pos.xy; }
+    return col * clip_alpha(clip_p, i.clip, i.fade);
 }

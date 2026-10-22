@@ -39,6 +39,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # selector) to reach the state the Rune scene starts in.
 MENU = {"actions": [{"click": "#storybook-root button"}]}
 OPTIONS: dict[str, dict] = {
+    "ui-dialog--basic": {"height": 480},
     "ui-menu--basic": MENU,
     "ui-menu--rich": MENU,
     "ui-menu--with-checkbox": MENU,

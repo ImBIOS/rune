@@ -60,6 +60,16 @@ The first runnable piece of Rune: enough framework to draw a small Settings wind
   `.on_secondary_press(|s: &mut App, point, tx| ..)` receives window-point coordinates on
   right-click (also control-click on macOS), without invoking primary actions. Scripts accept
   `secondary-down`, `secondary-up`, and `secondary-click`.
+- **Focus and modals**: `.focusable(true)`, `.tab_index(n)` (positive overrides, 0 document order,
+  negative pointer-only), `.focus_group()` for arrow-key roving, `.focus_selected(on)` for a group's
+  initial Tab stop, and `.focus_ring(width, offset, color)` for keyboard-only rings. Enter/Space
+  activates non-text controls. `.modal(click_outside, close)` traps Tab, handles Escape, makes the
+  background inert and restores the opener. Nested modals restore in stack order. Inspector tree
+  flags (`focusable`, `focused`, `focusVisible`, `inert`) are the future platform AX hook.
+- **Periodic motion**: `.looping(rune_motion::LoopSpec::opacity(..))` or `LoopSpec::rotation(period)`
+  (icon quads). Tracks use animation time, preserve phase when retimed and only request frames
+  while visible through ancestor clips. Removal uses the existing spring presence fade. Reduced
+  motion holds the first pose; time scale 0 pauses. Occluded windows stop drawing.
 
 ### Added for the OpenCode example (M3)
 
