@@ -23,6 +23,7 @@ pub struct G {
     /// The open overlay, by key.
     pub open: Option<String>,
     pub edits: [TextEdit; 8],
+    pub combo: rune_kit::ComboboxState,
     pub neutral: bool,
 }
 
@@ -50,6 +51,7 @@ fn init() -> G {
         pick: HashMap::new(),
         open: None,
         edits: Default::default(),
+        combo: Default::default(),
         neutral: rune::extra_args().iter().any(|a| a == "neutral"),
     }
 }

@@ -551,6 +551,7 @@ impl<S: 'static> Runtime<S> {
         for (source, target) in std::mem::take(&mut tx.text_flights) {
             self.capture_text_flight(source, target);
         }
+        let scroll_to = std::mem::take(&mut tx.scroll_to);
         if ran || self.dirty || self.relayout || self.settle || self.virtual_window_changed() {
             if self.relayout && !ran && !self.dirty {
                 tx.relayout = true;
@@ -564,6 +565,8 @@ impl<S: 'static> Runtime<S> {
         } else {
             self.settled = false;
         }
+        if !scroll_to.is_empty() { self.step_scroll(0.0); }
+        for key in scroll_to { self.reveal_row(&key); }
         self.update_interaction();
         self.latch_live();
         let step = dt * self.time_scale as f64;
@@ -729,6 +732,13 @@ impl<S: 'static> Runtime<S> {
                     merge(tx, one);
                     return true;
                 }
+                if let Some(f) = self.focused.as_deref().and_then(|p| self.node(p))
+                    .and_then(|n| n.input.as_ref()?.key.clone())
+                    && f(&mut self.state as &mut dyn Any, &ev, &mut one)
+                {
+                    merge(tx, one);
+                    return true;
+                }
                 let layout = self.focused_layout();
                 self.with_focused(|e| e.key(&ev, layout.as_deref()), &mut one)
             }
@@ -783,15 +793,19 @@ impl<S: 'static> Runtime<S> {
 
     fn with_focused(&mut self, f: impl FnOnce(&mut crate::edit::TextEdit) -> EditOutcome, tx: &mut Tx) -> bool {
         let Some(path) = self.focused.clone() else { return false };
-        let Some((access, submit, animate_layout)) =
-            self.node(&path).and_then(|n| n.input.as_ref().map(|i| (i.access.clone(), i.submit.clone(), i.animate_layout)))
+        let Some((access, submit, change, animate_layout)) =
+            self.node(&path).and_then(|n| n.input.as_ref().map(|i| (i.access.clone(), i.submit.clone(), i.change.clone(), i.animate_layout)))
         else {
             return false;
         };
         let Some(access) = access else { return false };
+        let before = change.as_ref().map(|_| access(&mut self.state as &mut dyn Any).text.clone());
         let out = f(access(&mut self.state as &mut dyn Any));
         // Typing is the user's own hand: no animation.
         tx.instant = !animate_layout;
+        if let Some(change) = change
+            && before.as_deref() != Some(access(&mut self.state as &mut dyn Any).text.as_str())
+        { change(&mut self.state as &mut dyn Any, tx); }
         if let Some(c) = out.copy {
             tx.copy(c);
         }
@@ -1773,6 +1787,36 @@ impl<S: 'static> Runtime<S> {
         self.focused.is_some()
     }
 
+    fn reveal_row(&mut self, key: &str) {
+        let geometry = self.virtuals.iter().find_map(|(_, v)| {
+            let index = v.keys.iter().position(|candidate| candidate == key)?;
+            Some((v.scroll_path.clone(), f64::from(v.pad_top + v.prefix(index)), f64::from(v.height(key)), f64::from(v.viewport)))
+        }).or_else(|| {
+            let (i, row) = self.nodes.iter().enumerate().find(|(_, n)| n.key.as_deref() == Some(key) || n.path == key)?;
+            let mut ancestor = self.nodes[i].parent;
+            while let Some(p) = ancestor {
+                let parent = &self.nodes[p];
+                if parent.scroll.is_some() {
+                    return Some((parent.path.clone(), f64::from(row.target[1] - parent.target[1]),
+                        f64::from(row.local.h), f64::from(parent.local.h)));
+                }
+                ancestor = parent.parent;
+            }
+            None
+        });
+        let Some((path, top, height, viewport)) = geometry else { return };
+        let Some(id) = self.path_ids.get(&path) else { return };
+        let Some(scroll) = self.scrolls.get_mut(id) else { return };
+        let offset = if top < scroll.offset { top } else if top + height > scroll.offset + viewport {
+            top + height - viewport
+        } else { scroll.offset };
+        scroll.offset = offset.clamp(0.0, scroll.max);
+        scroll.pinned = false;
+        scroll.v = 0.0;
+        scroll.direct = true;
+        if self.virtual_window_changed() { self.commit(Tx::default()); }
+    }
+
     fn scroll_at(&self, x: f32, y: f32) -> Option<NodeId> {
         self.nodes
             .iter()
@@ -2405,6 +2449,7 @@ impl<S: 'static> Runtime<S> {
 }
 
 fn merge(tx: &mut Tx, one: Tx) {
+    tx.scroll_to.extend(one.scroll_to);
     tx.text_flights.extend(one.text_flights);
     if one.copy.is_some() { tx.copy = one.copy; }
     tx.shell = tx.shell.max(one.shell);

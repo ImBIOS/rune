@@ -57,6 +57,18 @@ loads Inter and IBM Plex Mono.
 
 ## Components
 
+`Combobox::new("models", &s.combo, &options, |s: &mut App| &mut s.combo)` composes
+Popover, TextInput and virtual rows. Options carry stable ids, labels, details and disabled
+state; `.current(..).on_choose(..)` binds selection. It filters case-insensitively, loops
+ArrowUp/Down and Ctrl-N/P across enabled rows, scrolls keyboard choices into view, and ignores
+selection keys during IME composition. Escape closes it. The contract follows OpenCode's
+`components/list` and `use-filtered-list` (origin/dev, fetched 2026-10-22); Rune's fuzzy ranking
+is its own, not bit-identical to fuzzysort. `rune-combobox--searchable` is its 200-row gallery
+scene; there is no matching combobox Storybook story to diff.
+
+`TextInput::on_key` intercepts a focused field's keys before editing; `on_change` runs after
+text changes and receives a `Tx`, for filtering and exact debounce wakes.
+
 Button (10 variants × 3 sizes × 5 states), IconButton, Switch (compact, standard), Checkbox,
 RadioGroup/RadioItem, TextInput, TextArea, TextField (older), Field, Select (inline and field
 triggers, grouped), Popover, Menu (compact and standard, checkbox/radio items, submenus,
