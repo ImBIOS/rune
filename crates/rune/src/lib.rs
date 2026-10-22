@@ -16,6 +16,7 @@ mod macos;
 pub mod color;
 pub mod edit;
 pub mod el;
+mod key_diagnostics;
 pub mod growth;
 pub mod live;
 mod pixels;

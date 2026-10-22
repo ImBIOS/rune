@@ -262,6 +262,8 @@ impl Default for Visual {
 
 pub struct El {
     pub(crate) key: Option<String>,
+    #[cfg(debug_assertions)]
+    key_source: Option<&'static std::panic::Location<'static>>,
     pub(crate) role: &'static str,
     pub(crate) label: Option<String>,
     pub(crate) style: Style,
@@ -291,6 +293,8 @@ pub struct El {
 fn base(dir: FlexDirection) -> El {
     El {
         key: None,
+        #[cfg(debug_assertions)]
+        key_source: None,
         role: "group",
         label: None,
         style: Style { display: Display::Flex, flex_direction: dir, flex_shrink: 0.0, ..Default::default() },
@@ -423,6 +427,12 @@ impl El {
         if let Some(old) = self.live.iter_mut().find(|b| b.property == bound.property) { *old = bound; }
         else { self.live.push(bound); }
     }
+    pub(crate) fn key_location(&self) -> String {
+        #[cfg(debug_assertions)]
+        if let Some(source) = self.key_source { return source.to_string(); }
+        "unknown (build with debug assertions for source locations)".into()
+    }
+
     /// Window keyed rows of a growth stack directly inside a vertical scroll viewport.
     /// Unvisited rows use an estimated height; measurement preserves the visible anchor.
     /// Offscreen rows have no layout, text or scene nodes.
@@ -431,8 +441,11 @@ impl El {
         self
     }
 
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
+        #[cfg(debug_assertions)]
+        { self.key_source = Some(std::panic::Location::caller()); }
         self
     }
     pub fn role(mut self, role: &'static str) -> Self {
