@@ -1,0 +1,384 @@
+/* Rune on the Anomaly docs system (system/tokens.css, system/primitives.css): the accent, the wordmark, the
+   architecture diagram and the page parts the system doesn't have yet. */
+:root {
+  /* Rune's accent replaces Abattoir's red ink; everything else is the shared system as is. */
+  --ink: oklch(0.74 0.14 245);
+}
+
+/* Wordmark: one rounded quad, the shape Rune draws most, and the name. */
+.wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font: 600 18px/24px var(--font-sans);
+  letter-spacing: -.02em;
+  color: var(--fg);
+  text-decoration: none;
+}
+.wordmark-glyph {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  background: var(--ink);
+}
+
+/* Page sections */
+.home-section + .home-section,
+.doc-section + .doc-section,
+.doc-section + #choices,
+#choices .doc-section + .doc-section { margin-top: var(--space-9); }
+.home-section .index-list { margin-bottom: var(--space-7); }
+
+/* Headless renders, two up; the columns follow each image's aspect so both stand the same height. */
+.shots {
+  display: grid;
+  grid-template-columns: 1.19fr 1.56fr;
+  gap: var(--space-5);
+  align-items: start;
+}
+.shot { margin: 0; }
+.shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius-2);
+  outline: 1px solid var(--line);
+  outline-offset: -1px;
+}
+.shot figcaption {
+  margin-top: var(--space-2);
+  font: var(--mono-12);
+  color: var(--fg-3);
+}
+
+/* Code under a rule */
+.code {
+  max-width: var(--measure);
+  margin: var(--space-5) 0 0;
+  padding: var(--space-4);
+  border-radius: var(--radius-2);
+  background: var(--surface-1);
+  box-shadow: inset 0 0 0 1px var(--line);
+  overflow-x: auto;
+  font: var(--mono-12);
+  line-height: 20px;
+  color: var(--fg-2);
+}
+.code code { font: inherit; }
+
+/* Architecture diagram: app side and render thread with the channel between, the shell under both. */
+.arch { margin: 0; }
+.arch-grid {
+  --channel: 176px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--channel) minmax(0, 1fr);
+  grid-template-areas:
+    "app channel render"
+    "shell shell shell";
+  gap: var(--space-5) 0;
+}
+[data-area="app"] { grid-area: app; }
+[data-area="channel"] { grid-area: channel; }
+[data-area="render"] { grid-area: render; }
+[data-area="shell"] { grid-area: shell; }
+.arch-box {
+  position: relative;
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  border-radius: var(--radius-2);
+  background: var(--surface-1);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.arch-box h3 {
+  margin: 0 0 var(--space-3);
+  font: var(--text-14);
+  font-weight: 500;
+}
+.arch-kicker {
+  margin: 0 0 2px;
+  font: var(--mono-12);
+  color: var(--fg-3);
+}
+.arch-box ul {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font: var(--text-13);
+  color: var(--fg-2);
+}
+.arch-box li {
+  position: relative;
+  padding-left: var(--space-4);
+}
+.arch-box li::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  left: 0;
+  width: 6px;
+  height: 1px;
+  background: var(--fg-3);
+}
+.arch-line {
+  margin: 0;
+  font: var(--text-13);
+  color: var(--fg-2);
+  text-wrap: pretty;
+}
+.arch-inner {
+  margin-top: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-1);
+  background: var(--surface-1);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.arch-inner-title {
+  margin: 0 0 var(--space-2);
+  font: var(--text-13);
+  font-weight: 500;
+}
+
+.arch-channel {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-5);
+  padding: 0 var(--space-3);
+  text-align: center;
+}
+.arch-channel-label {
+  margin: 0;
+  font: var(--mono-12);
+  color: var(--ink);
+}
+.arch-flow {
+  display: grid;
+  gap: var(--space-2);
+}
+.arch-flow-text {
+  font: var(--mono-12);
+  color: var(--fg-3);
+  text-wrap: balance;
+}
+/* The line runs edge to edge between the boxes; the head is a chevron drawn from two borders. */
+.arch-arrow {
+  position: relative;
+  display: block;
+  height: 1px;
+  margin-inline: calc(-1 * var(--space-3));
+  background: var(--ink-dim);
+}
+.arch-arrow::after {
+  content: "";
+  position: absolute;
+  top: -2.5px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  border-top: 1px solid var(--ink);
+  border-right: 1px solid var(--ink);
+  transform: rotate(45deg);
+}
+.arch-flow[data-dir="back"] .arch-arrow::after {
+  right: auto;
+  left: 2px;
+  transform: rotate(-135deg);
+}
+
+/* The shell lines its two parts up under the boxes above, with a connector from each. */
+.arch-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--channel) minmax(0, 1fr);
+  padding: 0;
+}
+.arch-shell > div { padding: var(--space-4) var(--space-5) var(--space-5); }
+.arch-shell > div + div { grid-column: 3; }
+.arch-shell::before,
+.arch-shell::after {
+  content: "";
+  position: absolute;
+  top: calc(-1 * var(--space-5));
+  width: 1px;
+  height: var(--space-5);
+  background: var(--line-2);
+}
+.arch-shell::before { left: calc((100% - var(--channel)) / 4); }
+.arch-shell::after { right: calc((100% - var(--channel)) / 4); }
+
+.arch figcaption {
+  max-width: var(--measure);
+  margin-top: var(--space-4);
+  font: var(--text-13);
+  color: var(--fg-3);
+  text-wrap: pretty;
+}
+
+/* Decisions */
+.decisions {
+  width: 100%;
+  border-collapse: collapse;
+  font: var(--text-13);
+  text-align: left;
+}
+.decisions th,
+.decisions td {
+  padding: var(--space-3) var(--space-5) var(--space-3) 0;
+  box-shadow: inset 0 -1px var(--line);
+  vertical-align: top;
+  text-wrap: pretty;
+}
+.decisions th:last-child,
+.decisions td:last-child { padding-right: 0; }
+.decisions thead th {
+  padding-top: 0;
+  padding-bottom: var(--space-2);
+  font: var(--text-12);
+  color: var(--fg-3);
+  white-space: nowrap;
+}
+.decisions tbody th {
+  width: 8.5rem;
+  font-weight: 500;
+  color: var(--fg);
+}
+.decisions td { color: var(--fg-2); }
+.decisions td:nth-child(2) { width: 22%; color: var(--fg); }
+.decisions td.rejected { width: 22%; color: var(--fg-3); }
+
+/* Roadmap */
+.milestones .index-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+.milestone-id {
+  flex: none;
+  width: 4ch;
+  font: var(--mono-13);
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.index-text p { margin: 0; }
+.index-text code,
+.prose li code { font: var(--mono-12); color: var(--fg); }
+.milestones .index-row { scroll-margin-top: var(--space-6); }
+.rule-text code { font: var(--mono-12); }
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.status::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px var(--fg-3);
+}
+.status[data-status="done"]::before { background: var(--fg); box-shadow: none; }
+.status[data-status="now"] { color: var(--fg); }
+.status[data-status="now"]::before { background: var(--ink); box-shadow: none; }
+.status[data-status="started"]::before { background: linear-gradient(90deg, var(--fg-2) 50%, transparent 50%); }
+
+/* Pager and footer */
+.doc-pager {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-top: var(--space-9);
+  padding-top: var(--space-4);
+  box-shadow: inset 0 1px var(--line);
+  font: var(--text-13);
+}
+.doc-pager a { color: var(--fg-2); text-decoration: none; }
+@media (hover: hover) and (pointer: fine) {
+  .doc-pager a:hover { color: var(--fg); }
+}
+.site-footer {
+  width: 100%;
+  max-width: calc(var(--content) + 2 * var(--space-7));
+  margin-inline: auto;
+  padding: 0 var(--space-7) var(--space-7);
+}
+.copyright {
+  position: relative;
+  display: inline-block;
+  font: var(--text-12);
+  color: var(--fg-3);
+}
+.copyright img {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  opacity: .7;
+  pointer-events: none;
+}
+.copyright p { position: relative; margin: 0; }
+.copyright a { color: inherit; }
+
+@media (max-width: 900px) {
+  .site-footer { padding: 0 var(--space-4) var(--space-6); }
+  .home-section + .home-section,
+  .doc-section + .doc-section,
+  .doc-section + #choices,
+  #choices .doc-section + .doc-section { margin-top: var(--space-8); }
+  .milestones .index-row { scroll-margin-top: calc(var(--topbar) + var(--space-4)); }
+}
+
+/* Narrow: the diagram stacks, the channel turns vertical, the table becomes a list. */
+@media (max-width: 760px) {
+  .arch-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "app" "channel" "render" "shell";
+    row-gap: 0;
+  }
+  .arch-channel {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: center;
+    gap: 0 var(--space-3);
+    padding: 0;
+  }
+  .arch-channel-label { grid-column: 2; grid-row: 1; }
+  .arch-flow {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    grid-row: 1;
+  }
+  .arch-flow[data-dir="fwd"] { grid-column: 1; flex-direction: row-reverse; text-align: right; }
+  .arch-flow[data-dir="back"] { grid-column: 3; text-align: left; }
+  .arch-arrow {
+    flex: none;
+    width: 1px;
+    height: 88px;
+    margin: 0;
+  }
+  .arch-arrow::after { top: auto; right: auto; bottom: 2px; left: -2.5px; transform: rotate(135deg); }
+  .arch-flow[data-dir="back"] .arch-arrow::after { top: 2px; bottom: auto; left: -2.5px; transform: rotate(-45deg); }
+  .arch-shell {
+    margin-top: var(--space-5);
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .arch-shell > div + div { grid-column: 1; box-shadow: inset 0 1px var(--line); }
+  .arch-shell::before { left: 50%; }
+  .arch-shell::after { display: none; }
+
+  .shots { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 640px) {
+  .decisions thead { display: none; }
+  .decisions, .decisions tbody, .decisions tr, .decisions th, .decisions td { display: block; width: auto !important; }
+  .decisions tr { padding: var(--space-3) 0; box-shadow: inset 0 -1px var(--line); }
+  .decisions th, .decisions td { padding: 0; box-shadow: none; }
+  .decisions tbody th { margin-bottom: var(--space-1); }
+  .decisions td + td { margin-top: var(--space-1); }
+  .decisions td[data-label]::before {
+    content: attr(data-label) " ";
+    color: var(--fg-3);
+  }
+}
