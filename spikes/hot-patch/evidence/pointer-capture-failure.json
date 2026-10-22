@@ -1,0 +1,47 @@
+{
+  "command": [
+    "~/.cargo/bin/dx",
+    "serve",
+    "--hot-patch",
+    "--platform",
+    "server",
+    "--open",
+    "false",
+    "--interactive",
+    "false",
+    "--addr",
+    "127.0.0.1",
+    "--port",
+    "18743"
+  ],
+  "launch_to_tick60_ms": 139455.02,
+  "rows": [
+    {
+      "saved_ns": 1792641351383807000,
+      "error": "Empty: ",
+      "before": {
+        "ns": 1792641351381246000,
+        "pid": 341,
+        "counter": 60,
+        "vec0": 133,
+        "vec_ptr": 4383383296,
+        "state_addr": 6091696912,
+        "panel_width": 800,
+        "output": "rev=0;value=133;generic=g0:60;closure=70;trait=t0:800x600;static=1059;tls=2059;layout=48"
+      },
+      "last": {
+        "ns": 1792641381515163000,
+        "pid": 341,
+        "counter": 3665,
+        "vec0": 3738,
+        "vec_ptr": 4383383296,
+        "state_addr": 6091696912,
+        "panel_width": 800,
+        "output": "rev=0;value=3738;generic=g0:3665;closure=3675;trait=t0:800x600;static=4664;tls=5664;layout=48"
+      },
+      "dx_exit": null
+    }
+  ],
+  "median_ms": null,
+  "p95_nearest_rank_ms": null
+}

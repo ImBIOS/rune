@@ -1,0 +1,442 @@
+{
+  "command": [
+    "~/.cargo/bin/dx",
+    "serve",
+    "--hot-patch",
+    "--platform",
+    "server",
+    "--open",
+    "false",
+    "--interactive",
+    "false",
+    "--addr",
+    "127.0.0.1",
+    "--port",
+    "18743"
+  ],
+  "launch_to_tick60_ms": 7001.939,
+  "rows": [
+    {
+      "saved_ns": 1792642085506222000,
+      "latency_ms": 1150.117,
+      "before": {
+        "ns": 1792642085503443000,
+        "pid": 12294,
+        "counter": 60,
+        "vec0": 133,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=0;value=133;generic=g0:60;closure=70;trait=t0:800x600;static=1059;tls=2059;layout=48"
+      },
+      "previous": {
+        "ns": 1792642086561740000,
+        "pid": 12294,
+        "counter": 202,
+        "vec0": 275,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=0;value=275;generic=g0:202;closure=212;trait=t0:800x600;static=1201;tls=2201;layout=48"
+      },
+      "after": {
+        "ns": 1792642086656339000,
+        "pid": 12294,
+        "counter": 203,
+        "vec0": 276,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=1;value=276;generic=g0:203;closure=213;trait=t0:800x600;static=1000;tls=2000;layout=48"
+      },
+      "same_pid": true,
+      "same_vec": true,
+      "same_state": true,
+      "counter_advanced": true,
+      "vector_invariant": true,
+      "patch_ns": [
+        1792642086605967000
+      ]
+    },
+    {
+      "saved_ns": 1792642086838981000,
+      "latency_ms": 712.42,
+      "before": {
+        "ns": 1792642086835450000,
+        "pid": 12294,
+        "counter": 233,
+        "vec0": 306,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=1;value=306;generic=g0:233;closure=243;trait=t0:800x600;static=1030;tls=2030;layout=48"
+      },
+      "previous": {
+        "ns": 1792642087349187000,
+        "pid": 12294,
+        "counter": 297,
+        "vec0": 370,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=1;value=370;generic=g0:297;closure=307;trait=t0:800x600;static=1094;tls=2094;layout=48"
+      },
+      "after": {
+        "ns": 1792642087551401000,
+        "pid": 12294,
+        "counter": 298,
+        "vec0": 371,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=2;value=371;generic=g0:298;closure=308;trait=t0:800x600;static=1000;tls=2000;layout=48"
+      },
+      "same_pid": true,
+      "same_vec": true,
+      "same_state": true,
+      "counter_advanced": true,
+      "vector_invariant": true,
+      "patch_ns": [
+        1792642087501981000
+      ]
+    },
+    {
+      "saved_ns": 1792642087751298000,
+      "latency_ms": 998.195,
+      "before": {
+        "ns": 1792642087749279000,
+        "pid": 12294,
+        "counter": 328,
+        "vec0": 401,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=2;value=401;generic=g0:328;closure=338;trait=t0:800x600;static=1030;tls=2030;layout=48"
+      },
+      "previous": {
+        "ns": 1792642088550413000,
+        "pid": 12294,
+        "counter": 441,
+        "vec0": 514,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=2;value=514;generic=g0:441;closure=451;trait=t0:800x600;static=1143;tls=2143;layout=48"
+      },
+      "after": {
+        "ns": 1792642088749493000,
+        "pid": 12294,
+        "counter": 442,
+        "vec0": 515,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=3;value=515;generic=g0:442;closure=452;trait=t0:800x600;static=1000;tls=2000;layout=48"
+      },
+      "same_pid": true,
+      "same_vec": true,
+      "same_state": true,
+      "counter_advanced": true,
+      "vector_invariant": true,
+      "patch_ns": [
+        1792642088559161000
+      ]
+    },
+    {
+      "saved_ns": 1792642088953242000,
+      "latency_ms": 867.826,
+      "before": {
+        "ns": 1792642088951300000,
+        "pid": 12294,
+        "counter": 472,
+        "vec0": 545,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=3;value=545;generic=g0:472;closure=482;trait=t0:800x600;static=1030;tls=2030;layout=48"
+      },
+      "previous": {
+        "ns": 1792642089613359000,
+        "pid": 12294,
+        "counter": 569,
+        "vec0": 642,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=3;value=642;generic=g0:569;closure=579;trait=t0:800x600;static=1127;tls=2127;layout=48"
+      },
+      "after": {
+        "ns": 1792642089821068000,
+        "pid": 12294,
+        "counter": 570,
+        "vec0": 643,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=4;value=643;generic=g0:570;closure=580;trait=t0:800x600;static=1000;tls=2000;layout=48"
+      },
+      "same_pid": true,
+      "same_vec": true,
+      "same_state": true,
+      "counter_advanced": true,
+      "vector_invariant": true,
+      "patch_ns": [
+        1792642089665812000
+      ]
+    },
+    {
+      "saved_ns": 1792642090034248000,
+      "latency_ms": 753.253,
+      "before": {
+        "ns": 1792642090033362000,
+        "pid": 12294,
+        "counter": 600,
+        "vec0": 673,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=4;value=673;generic=g0:600;closure=610;trait=t0:800x600;static=1030;tls=2030;layout=48"
+      },
+      "previous": {
+        "ns": 1792642090627389000,
+        "pid": 12294,
+        "counter": 690,
+        "vec0": 763,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=4;value=763;generic=g0:690;closure=700;trait=t0:800x600;static=1120;tls=2120;layout=48"
+      },
+      "after": {
+        "ns": 1792642090787501000,
+        "pid": 12294,
+        "counter": 691,
+        "vec0": 764,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=5;value=764;generic=g0:691;closure=701;trait=t0:800x600;static=1000;tls=2000;layout=48"
+      },
+      "same_pid": true,
+      "same_vec": true,
+      "same_state": true,
+      "counter_advanced": true,
+      "vector_invariant": true,
+      "patch_ns": [
+        1792642090786059000
+      ]
+    },
+    {
+      "saved_ns": 1792642091031835000,
+      "latency_ms": 1005.25,
+      "before": {
+        "ns": 1792642091029866000,
+        "pid": 12294,
+        "counter": 721,
+        "vec0": 794,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=5;value=794;generic=g0:721;closure=731;trait=t0:800x600;static=1030;tls=2030;layout=48"
+      },
+      "previous": {
+        "ns": 1792642091830376000,
+        "pid": 12294,
+        "counter": 835,
+        "vec0": 908,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=5;value=908;generic=g0:835;closure=845;trait=t0:800x600;static=1144;tls=2144;layout=48"
+      },
+      "after": {
+        "ns": 1792642092037085000,
+        "pid": 12294,
+        "counter": 836,
+        "vec0": 909,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=6;value=909;generic=g0:836;closure=846;trait=t0:800x600;static=1000;tls=2000;layout=48"
+      },
+      "same_pid": true,
+      "same_vec": true,
+      "same_state": true,
+      "counter_advanced": true,
+      "vector_invariant": true,
+      "patch_ns": [
+        1792642091865846000
+      ]
+    },
+    {
+      "saved_ns": 1792642092106997000,
+      "latency_ms": 851.558,
+      "before": {
+        "ns": 1792642092105159000,
+        "pid": 12294,
+        "counter": 866,
+        "vec0": 939,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=6;value=939;generic=g0:866;closure=876;trait=t0:800x600;static=1030;tls=2030;layout=48"
+      },
+      "previous": {
+        "ns": 1792642092920925000,
+        "pid": 12294,
+        "counter": 965,
+        "vec0": 1038,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=6;value=1038;generic=g0:965;closure=975;trait=t0:800x600;static=1129;tls=2129;layout=48"
+      },
+      "after": {
+        "ns": 1792642092958555000,
+        "pid": 12294,
+        "counter": 966,
+        "vec0": 1039,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=7;value=1039;generic=g0:966;closure=976;trait=t0:800x600;static=1000;tls=2000;layout=48"
+      },
+      "same_pid": true,
+      "same_vec": true,
+      "same_state": true,
+      "counter_advanced": true,
+      "vector_invariant": true,
+      "patch_ns": [
+        1792642092924546000
+      ]
+    },
+    {
+      "saved_ns": 1792642093312077000,
+      "latency_ms": 979.82,
+      "before": {
+        "ns": 1792642093311180000,
+        "pid": 12294,
+        "counter": 996,
+        "vec0": 1069,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=7;value=1069;generic=g0:996;closure=1006;trait=t0:800x600;static=1030;tls=2030;layout=48"
+      },
+      "previous": {
+        "ns": 1792642094093259000,
+        "pid": 12294,
+        "counter": 1106,
+        "vec0": 1179,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=7;value=1179;generic=g0:1106;closure=1116;trait=t0:800x600;static=1140;tls=2140;layout=48"
+      },
+      "after": {
+        "ns": 1792642094291897000,
+        "pid": 12294,
+        "counter": 1107,
+        "vec0": 1180,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=8;value=1180;generic=g0:1107;closure=1117;trait=t0:800x600;static=1000;tls=2000;layout=48"
+      },
+      "same_pid": true,
+      "same_vec": true,
+      "same_state": true,
+      "counter_advanced": true,
+      "vector_invariant": true,
+      "patch_ns": [
+        1792642094172697000
+      ]
+    },
+    {
+      "saved_ns": 1792642094492841000,
+      "latency_ms": 1036.368,
+      "before": {
+        "ns": 1792642094490695000,
+        "pid": 12294,
+        "counter": 1137,
+        "vec0": 1210,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=8;value=1210;generic=g0:1137;closure=1147;trait=t0:800x600;static=1030;tls=2030;layout=48"
+      },
+      "previous": {
+        "ns": 1792642095323670000,
+        "pid": 12294,
+        "counter": 1254,
+        "vec0": 1327,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=8;value=1327;generic=g0:1254;closure=1264;trait=t0:800x600;static=1147;tls=2147;layout=48"
+      },
+      "after": {
+        "ns": 1792642095529209000,
+        "pid": 12294,
+        "counter": 1255,
+        "vec0": 1328,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=9;value=1328;generic=g0:1255;closure=1265;trait=t0:800x600;static=1000;tls=2000;layout=48"
+      },
+      "same_pid": true,
+      "same_vec": true,
+      "same_state": true,
+      "counter_advanced": true,
+      "vector_invariant": true,
+      "patch_ns": [
+        1792642095408833000
+      ]
+    },
+    {
+      "saved_ns": 1792642095766266000,
+      "latency_ms": 1030.275,
+      "before": {
+        "ns": 1792642095763851000,
+        "pid": 12294,
+        "counter": 1285,
+        "vec0": 1358,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=9;value=1358;generic=g0:1285;closure=1295;trait=t0:800x600;static=1030;tls=2030;layout=48"
+      },
+      "previous": {
+        "ns": 1792642096590552000,
+        "pid": 12294,
+        "counter": 1406,
+        "vec0": 1479,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=9;value=1479;generic=g0:1406;closure=1416;trait=t0:800x600;static=1151;tls=2151;layout=48"
+      },
+      "after": {
+        "ns": 1792642096796541000,
+        "pid": 12294,
+        "counter": 1407,
+        "vec0": 1480,
+        "vec_ptr": 4313468912,
+        "state_addr": 6169897736,
+        "panel_width": 800,
+        "output": "rev=10;value=1480;generic=g0:1407;closure=1417;trait=t0:800x600;static=1000;tls=2000;layout=48"
+      },
+      "same_pid": true,
+      "same_vec": true,
+      "same_state": true,
+      "counter_advanced": true,
+      "vector_invariant": true,
+      "patch_ns": [
+        1792642096704994000
+      ]
+    }
+  ],
+  "median_ms": 989.0075,
+  "p95_nearest_rank_ms": 1150.117
+}

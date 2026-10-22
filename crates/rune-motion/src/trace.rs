@@ -1,0 +1,307 @@
+//! motion-lint JSONL traces, written from what was actually presented (post-snap, post-mask), with
+//! exact "this was animated on purpose" intent bits. Same format Scrawl writes
+//! (`scrawl/src/ui/motion.rs`) and `motion-lint analyze` reads (`motion-lint/src/analyze.ts`).
+
+use std::fmt::Write as _;
+use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
+
+use crate::props::{NodeId, PropId, prop};
+use crate::scene::Presented;
+use crate::store::{FxMap, MotionEvent};
+
+/// motion-lint element flag bits (`analyze.ts` `Flags`).
+pub mod flags {
+    pub const ANIMATED: u32 = 1;
+    pub const ANCESTOR_ANIMATED: u32 = 2;
+    pub const SCROLLING: u32 = 4;
+    pub const CLIPPED: u32 = 8;
+    pub const FILTERED: u32 = 16;
+    pub const OCCLUDED: u32 = 32;
+}
+
+/// motion-lint intent classes (`analyze.ts` `Intent`): in flags at `<< 8` (own) and `<< 16`
+/// (ancestor), and in `ai` intent records.
+pub struct Intent;
+
+impl Intent {
+    pub const POSITION: u32 = 1;
+    pub const SIZE: u32 = 2;
+    pub const OPACITY: u32 = 4;
+    pub const SHAPE: u32 = 8;
+    pub const TRANSITION: u32 = 16;
+    pub const REVEAL: u32 = 32;
+    pub const CONTENTS: u32 = 64;
+
+    /// The intent class a built-in property's animation declares.
+    pub fn for_prop(p: PropId) -> u32 {
+        match p {
+            x if x == prop::FRAME.id || x == prop::TRAVEL.id => Self::POSITION | Self::SIZE,
+            x if x == prop::OFFSET.id || x == prop::ROTATION.id || x == prop::SCROLL.id => Self::POSITION,
+            x if x == prop::OPACITY.id => Self::OPACITY,
+            x if x == prop::SCALE.id => Self::SIZE | Self::TRANSITION,
+            x if x == prop::BLUR.id => Self::TRANSITION,
+            x if x == prop::RADIUS.id => Self::SHAPE,
+            x if x == prop::FILL.id => Self::CONTENTS,
+            x if x == prop::MASK.id => Self::REVEAL,
+            x if x == prop::PRESENCE.id => Self::TRANSITION | Self::OPACITY,
+            _ => Self::CONTENTS,
+        }
+    }
+}
+
+/// The trace's header line.
+#[derive(Clone, Debug)]
+pub struct TraceHeader {
+    pub launch: String,
+    pub width: f32,
+    pub height: f32,
+    pub hz: f32,
+    pub scale: f32,
+}
+
+/// A `Write` that keeps everything in shared memory, for tests (`trace.contents()`).
+#[derive(Clone, Default)]
+pub struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl SharedBuffer {
+    pub fn contents(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+impl Write for SharedBuffer {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Writes one JSONL line per frame. Only elements whose presented state changed are written;
+/// unmounted ones go in `g`.
+pub struct MotionTrace {
+    out: Box<dyn Write + Send>,
+    ids: FxMap<u64, u32>,
+    states: FxMap<u32, [f32; 12]>,
+    last_t: Option<f64>,
+    hz: f64,
+    time_scale: f32,
+    line: String,
+}
+
+impl MotionTrace {
+    pub fn new(out: impl Write + Send + 'static, header: &TraceHeader) -> io::Result<MotionTrace> {
+        let mut out: Box<dyn Write + Send> = Box::new(io::BufWriter::new(out));
+        writeln!(
+            out,
+            r#"{{"type":"header","launch":{},"width":{},"height":{},"hz":{},"scale":{},"platform":"rune","units":"pt","clock":"virtual"}}"#,
+            json_str(&header.launch),
+            header.width,
+            header.height,
+            header.hz,
+            header.scale
+        )?;
+        Ok(MotionTrace {
+            out,
+            ids: FxMap::default(),
+            states: FxMap::default(),
+            last_t: None,
+            hz: header.hz.max(1.0) as f64,
+            time_scale: 1.0,
+            line: String::new(),
+        })
+    }
+
+    /// Opens `$RUNE_MOTION_TRACE` if it is set (one env read).
+    pub fn from_env(header: &TraceHeader) -> Option<MotionTrace> {
+        let path = std::env::var_os("RUNE_MOTION_TRACE")?;
+        let file = std::fs::File::create(path).ok()?;
+        MotionTrace::new(file, header).ok()
+    }
+
+    /// An in-memory trace and a handle to read it back.
+    pub fn in_memory(header: &TraceHeader) -> (MotionTrace, SharedBuffer) {
+        let buf = SharedBuffer::default();
+        (MotionTrace::new(buf.clone(), header).expect("in-memory write"), buf)
+    }
+
+    /// The clock's time scale, written as `sc` so motion-lint counts the app's own frames.
+    pub fn set_time_scale(&mut self, sc: f32) {
+        self.time_scale = sc;
+    }
+
+    fn id(&mut self, node: NodeId) -> (u32, bool) {
+        let next = self.ids.len() as u32 + 1;
+        let mut new = false;
+        let id = *self.ids.entry(node.0).or_insert_with(|| {
+            new = true;
+            next
+        });
+        (id, new)
+    }
+
+    /// Writes one frame. `t` is animation time in seconds.
+    pub fn frame(
+        &mut self,
+        t: f64,
+        presented: &[Presented],
+        gone: &[NodeId],
+        events: &[MotionEvent],
+        intents: &[(NodeId, u32, f32)],
+    ) {
+        let t_ms = t * 1000.0;
+        let n = self.last_t.map_or(1, |last| (((t_ms - last) / (1000.0 / self.hz)).round().max(1.0)) as u64);
+        self.last_t = Some(t_ms);
+        let mut line = std::mem::take(&mut self.line);
+        line.clear();
+        let _ = write!(line, r#"{{"t":{},"n":{},"sc":{}"#, r3(t_ms), n, self.time_scale);
+        if !events.is_empty() {
+            line.push_str(r#","ev":["#);
+            for (k, e) in events.iter().enumerate() {
+                if k > 0 {
+                    line.push(',');
+                }
+                let s = match *e {
+                    MotionEvent::Settled { node, prop, .. } => format!("settled {}:{}", node.0, prop.0),
+                    MotionEvent::Completed { token, finished, .. } => {
+                        format!("completed #{token}{}", if finished { "" } else { " (replaced)" })
+                    }
+                };
+                line.push_str(&json_str(&s));
+            }
+            line.push(']');
+        }
+        let mut metas = String::new();
+        let mut elems = String::new();
+        for p in presented {
+            let (id, new) = self.id(p.node);
+            if new {
+                if !metas.is_empty() {
+                    metas.push(',');
+                }
+                let _ = write!(metas, r#"{{"id":{id},"cls":"rune","nm":"{}","host":"scene""#, p.node.0);
+                if let Some(parent) = p.parent {
+                    let (pv, _) = self.id(parent);
+                    let _ = write!(metas, r#","pv":{pv}"#);
+                }
+                metas.push('}');
+            }
+            let r = p.rect;
+            let ins = p.mask.inset.0;
+            let mut s = [r.x, r.y, r.w, r.h, p.opacity, p.radius.0[0], p.flags as f32, f32::NAN, 0.0, 0.0, 0.0, 0.0];
+            if ins.iter().any(|&v| v > 0.25) {
+                s[7] = r.x + ins[0];
+                s[8] = r.y + ins[1];
+                s[9] = (r.w - ins[0] - ins[2]).max(0.0);
+                s[10] = (r.h - ins[1] - ins[3]).max(0.0);
+            }
+            let rounded = s.map(|v| if v.is_nan() { v } else { (v * 100.0).round() / 100.0 });
+            if self.states.get(&id).is_some_and(|old| same(old, &rounded)) {
+                continue;
+            }
+            self.states.insert(id, rounded);
+            if !elems.is_empty() {
+                elems.push(',');
+            }
+            let _ = write!(
+                elems,
+                "[{id},{},{},{},{},{},{},{}",
+                r2(r.x),
+                r2(r.y),
+                r2(r.w),
+                r2(r.h),
+                r3(p.opacity as f64),
+                r2(p.radius.0[0]),
+                p.flags
+            );
+            if !s[7].is_nan() {
+                let _ = write!(elems, ",{},{},{},{}", r2(s[7]), r2(s[8]), r2(s[9]), r2(s[10]));
+            }
+            elems.push(']');
+        }
+        if !intents.is_empty() {
+            line.push_str(r#","ai":["#);
+            for (k, &(node, bits, secs)) in intents.iter().enumerate() {
+                let (id, _) = self.id(node);
+                let rect = presented.iter().find(|p| p.node == node).map(|p| p.rect).unwrap_or_default();
+                if k > 0 {
+                    line.push(',');
+                }
+                let _ = write!(
+                    line,
+                    "[{id},{},{},{},{},{bits},{}]",
+                    r2(rect.x),
+                    r2(rect.y),
+                    r2(rect.w),
+                    r2(rect.h),
+                    (secs * 1000.0).round()
+                );
+            }
+            line.push(']');
+        }
+        if !metas.is_empty() {
+            let _ = write!(line, r#","m":[{metas}]"#);
+        }
+        if !elems.is_empty() {
+            let _ = write!(line, r#","e":[{elems}]"#);
+        }
+        if !gone.is_empty() {
+            line.push_str(r#","g":["#);
+            for (k, node) in gone.iter().enumerate() {
+                let (id, _) = self.id(*node);
+                self.states.remove(&id);
+                if k > 0 {
+                    line.push(',');
+                }
+                let _ = write!(line, "{id}");
+            }
+            line.push(']');
+        }
+        line.push('}');
+        let _ = writeln!(self.out, "{line}");
+        self.line = line;
+    }
+
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.out.flush()
+    }
+}
+
+impl Drop for MotionTrace {
+    fn drop(&mut self) {
+        let _ = self.out.flush();
+    }
+}
+
+fn same(a: &[f32; 12], b: &[f32; 12]) -> bool {
+    a.iter().zip(b).all(|(x, y)| x == y || (x.is_nan() && y.is_nan()))
+}
+
+fn r2(v: f32) -> f64 {
+    (v as f64 * 100.0).round() / 100.0
+}
+
+fn r3(v: f64) -> f64 {
+    (v * 1000.0).round() / 1000.0
+}
+
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}

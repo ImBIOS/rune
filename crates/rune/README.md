@@ -1,0 +1,241 @@
+# rune (first slice)
+
+The first runnable piece of Rune: enough framework to draw a small Settings window
+(`examples/settings`) entirely with Rune's own code.
+
+![dark](../../demo/settings-dark.png)
+
+## What exists
+
+- **View API** (`el.rs`): `fn view(s: &S, cx: &mut Cx<S>) -> El`, with `row()/col()/el()/text()`,
+  `.key(..)`, layout and style methods, `.on_press(|s: &mut S| ..)`, `.on_press_tx(|s, tx| ..)` and
+  `.on_drag(|s, drag, tx| ..)`. Handlers are queued and run between frames with `&mut S`. Then the view
+  re-runs, and the diff retargets property tracks. Hover and press only retarget tracks; they never
+  re-run the view.
+- **Tokens** (`tok.rs`): colours in OKLCH (dark and light themes, six accents), plus space, radius, type
+  and Kit's motion palette (snappy .25/0, default .3/0, calm .4/0, a .2/0 lead, a .15 fade).
+- **Layout**: Taffy 0.15 at the target state. Text sizes round up to whole device pixels, so layout
+  stays on the pixel grid. Keyed nodes retain Taffy's constraint cache between commits; only changed
+  styles, children or text measurements dirty it. Text colour does not invalidate measurement.
+- **Animation** (`rune-motion`, `runtime.rs`): analytic springs (`Spring::new(duration, bounce)`),
+  tweens, decay and transitions driven through `rune_motion::Scene` and `AnimationStore`. Retargets
+  keep exact position and velocity.
+  - Layout animates per edge, so stationary edges never move.
+  - `.lead(lead, trail)` makes the edge in the direction of travel lead; `.width_leads()` speeds up X
+    by `0.78×`.
+  - Presence (`Transition`): elements added or removed after the first frame animate in and stay drawn
+    until their exit settles at opacity 0 (including `.transition(Transition::blur_replace())` and
+    mid-flight revival).
+  - Colours animate in premultiplied OKLab, and text colour leads its background (`0.5×` duration) so
+    theme switches keep label contrast through the transition.
+  - Nothing animates on the first frame.
+  - `Tx::instant()` applies a change with no animation (drag moves are instant by default).
+  - `Tx::color_motion(spring)` sets the spring for that change's colours (the theme switch uses calm).
+  - In reduced motion, spatial travel snaps while opacity, presence and colour take `REDUCED_FADE`
+    (`0.15 s`). Growth-stack rows also keep this fade on insertion/removal; closing gaps land after
+    the exit fade instead of animating their height.
+  - The animation clock has a time scale, which the Settings speed slider drives.
+- **Renderer** (`render.rs`, `shader.wgsl`): one instanced uber-quad pipeline and one draw call per
+  frame.
+  - Kinds: rounded rects (per-corner radius, border), analytic Gaussian shadows, and glyphs from the
+    atlas.
+  - Every instance has a soft-edge clip (`clip_soft`, `clip_fade`).
+  - Colour is premultiplied linear and drawn into an sRGB target, so blending is linear-light. Glyph
+    coverage gets a small exponent that depends on luminance, so dark text isn't thin.
+  - The Retina scale is applied throughout.
+- **Text** (`text.rs`): Parley 0.12 lays out the embedded Inter 4.1 (OFL, `assets/`; no system fonts,
+  so output is deterministic). swash 0.2 rasterises into a 1024² R8 atlas with 4× horizontal subpixel
+  positions and baselines snapped to pixels. This matches Parley's own `swash_render` example.
+- **Input**: hit-testing on presented rects, pointer capture, hover and press overlays, press on
+  release inside the element, and drags with a per-gesture scratch value.
+
+### Added for the OpenCode example (M3)
+
+![session](../../demo/opencode/session-bottom.png)
+
+- **Rich text** (`rich(text, spans)`): per-range weight, colour, family, background and underline
+  (`Span`), wrapping with absolute line height and letter spacing, `.truncate()` with an ellipsis, and
+  inline-code backgrounds that merge where they touch. `.align(..)` and `Node` insets keep text inside
+  padding and borders.
+- **Fonts as data**: `AppSpec::fonts` embeds faces and `AppSpec::families = (ui, mono)` names them.
+  `TextStyle` picks a `Family`.
+- **Icons** (`icon(&Icon, size)`): SVG icon bodies (as in `@opencode/ui`'s catalog) rasterised into
+  the glyph atlas.
+- **Themes as data** (`theme.rs`): `Theme::from_json(src, dark)` reads named tokens (hex, rgba or
+  references, plus numbers). `"blend": {"mode": "srgb", "over": token}` re-solves translucent tokens so
+  linear-light blending matches a browser's sRGB blending (`srgb_equivalent`, `Theme::alpha`). An app's own theme lives
+  in the app; core ships only the format.
+- **Scrolling** (`.scroll(ScrollSpec { stick_bottom })`): a runtime-owned fractional offset, wheel 1:1,
+  fling decay, and follow-the-end. A new viewport opens at its end on its first frame.
+- **Virtual rows** (`.virtualize(estimated_row_height)` on a growth stack directly inside a scroll
+  viewport): only an overscanned window has Taffy, shaped text and scene nodes. Rows need unique
+  keys and internal vertical padding rather than margins or stack gaps. Unvisited heights are
+  estimates; measured corrections preserve the visible key and the bottom stays exact. Historical
+  rows remount settled. The measurement pass expands the window before drawing if estimates leave
+  a gap. Render coordinates are rebased near the window and scroll extents use double precision.
+  View construction still visits every row; a lazy view API is a remaining optimization.
+- **Timeline growth** (`.growth(GrowthSpec { spring, edge })`, `growth.rs`): rows of a stack ease
+  their heights render-side on `GROWTH` (0.32 s, bounce 0) in fixed 1/240 s substeps, so 30, 60 and
+  120 fps give the same curve. Desktop's per-frame caps are per-second here (start, ramp, max, long,
+  carrying-tail, near-target), and every row eases into its target. Positions come from the presented
+  heights above, on the 1/64 px grid. Leaving rows close after 0.15 s and fade in place.
+  `.streaming(true)` marks the growing tail. Its last wrapped line holds back up to .52 line heights
+  (one line) or .82 (multiple lines), proportional to unfilled width. Measurement reuses Parley's
+  shaped layout. A width rewrap can shrink the row; completion lands at its full measured height.
+- **Stream edges** (`edge::{FEATHER, FAST_FEATHER, NO_MASK, WORD_FADE}`): the feather mask under a
+  growing row and the word-fade duration. `.reveal(word_fade)` fades appended words in, staggered from
+  20 ms down to 5.5 ms as a backlog builds.
+- **Settling** (`Tx::settle()`): no animation, every track lands, and removed nodes unmount at once.
+  Opening a session lands at the bottom on its first frame with nothing animating in.
+- **Turn actions**: the OpenCode example reserves a stable tail and crossfades Working into the
+  Desktop copy icon over .34 s, without removing and re-adding the tail's height. `Tx::copy(text)`
+  requests a shell clipboard write. Requests follow handler order; headless runs never write the
+  system clipboard.
+- **Text input** (`text_input(&edit, style)`, `edit.rs`): caret, selection, word and line motion,
+  select all, copy, cut and paste, and IME preedit through winit (no undo yet). `.on_edit(..)` binds the `TextEdit` in app
+  state and `.on_submit(..)` runs on Enter.
+- **App hooks**: `AppSpec::setup` (once, with a `Waker` for background threads), `poll(state, clock,
+  tx)` before every frame, `on_key`, and `extra_args()` for the app's own flags.
+- **Tooling**: scripts gain `type`, `key`, `paste`, `scroll` and `fling`. Traces carry motion-lint
+  intents (settle cuts, growing rows, word reveals) and clipped visible rects.
+
+### App lifetime (`app.rs`, for apps that outlive their window)
+
+`rune::run(spec)` opens one window and quits when it closes. `rune::App` gives the app its own
+lifetime (`examples/background` exercises all of it):
+
+```rust
+let app = rune::App::new(spec)
+    .init(move || Ui::new(host))   // first state from a closure (scenes still apply)
+    .args(Vec::new())              // Rune flags from here, not the process argv
+    .windowless()                  // start with no window (implies keep_running)
+    .keep_running()                // closing the window keeps the process, state and loop
+    .release_gpu_when_closed()     // optional: drop the GPU device while closed
+    .on_close(|s, tx| ..);         // runs before every close; tx.quit() quits instead
+let handle = app.handle();     // AppHandle<S>: Clone + Send + Sync, usable before run
+std::thread::spawn(move || {
+    handle.activate(token);    // show + focus with a forwarded XDG activation token
+    handle.open();             // show + focus without one
+    handle.update(|s, tx| ..); // change state on the UI thread; commits on the next frame
+    handle.close();            // as the close button (on_close runs)
+    handle.quit();             // run returns
+});
+app.run();
+```
+
+- Every handle call wakes the loop; nothing polls. Updates run in call order on the main thread
+  inside the event loop, even while no window shows, so a closed app keeps its state current and
+  an update may do main-thread native work (a status item, a tray). Window requests collapse to
+  the latest.
+- Handlers ask the shell with `Tx::close_window()` and `Tx::quit()` (quit wins).
+- The `Runtime` (state, scene, text, scroll offsets) belongs to the app, so a reopened window
+  shows the same UI, settled on its first frame. The GPU device and renderer stay too, unless
+  `release_gpu_when_closed` (then closing destroys the window and device everywhere).
+- Closing hides the window on macOS, Windows and X11, and destroys it on Wayland (no hidden
+  toplevel exists there); `open` recreates it with the same app id (`set_app_id`).
+- Activation: the first window takes the launcher's `XDG_ACTIVATION_TOKEN`/`DESKTOP_STARTUP_ID`
+  and clears them from the environment. A new window gets a forwarded token through winit's
+  `with_activation_token`. An open Wayland window is activated with `xdg_activation_v1` bound on
+  winit's own display (`activation.rs`), since winit 0.30 can't. Without a token Wayland can only
+  request attention (most compositors mark it urgent); X11, macOS and Windows use `focus_window`.
+- Verified in a headless sway 1.12 (`focus_on_window_activation focus`) on Linux: windowless start,
+  open, a forwarded token focusing an open window and a recreated one (without a token: urgent
+  only), close by handle, compositor and `Tx::close_window`, `Tx::quit`, state kept across
+  reopen, `release_gpu_when_closed`; and under Xwayland, hide/show and `focus_window`. Not yet run on KWin, Mutter, niri,
+  macOS or Windows.
+- Headless tooling runs ignore window requests and apply updates before each frame.
+- Not yet: several windows, window kinds (panel, transparent click-through overlay, Wayland
+  layer-shell), macOS activation policy, a per-app minimum size.
+
+## Run
+
+```sh
+hivemind run --kind cargo -- cargo build --release -p settings
+target/release/settings                       # the window (don't open it on Studio)
+
+hivemind run --kind cargo -- cargo build --release -p opencode
+target/release/opencode                       # live, read-only, when 127.0.0.1:4096 answers
+F=(--fixture examples/opencode/assets/fixture.json)
+target/release/opencode $F --scene streaming --snap out.png   # scenes: home session streaming draft
+target/release/opencode $F --script examples/opencode/scripts/switch.json --frames 540 --out frames/
+```
+
+The OpenCode example takes `--server URL`, `--session <id or title words>`, `--edge NAME`,
+`--no-stream` and `--reduced-motion`. It sends prompts only to a fixture's scripted reply, or to a
+non-default server with `--allow-send`.
+
+## Agent tooling (headless, no window, same renderer, fixed virtual clock)
+
+```sh
+S=target/release/settings
+$S --snap out.png [--scene light] [--at 0.4] [--size 620x520] [--scale 2] [--theme dark|light]
+$S --list-scenes            # default light dark reduced-motion toggles-off accent-pink slow
+$S --script examples/settings/scripts/toggle.json --frames 30 --start 0.1 --out frames/
+$S --script examples/settings/scripts/demo.json --start 0.12 --frames 24 --every 3 --cols 4 \
+   --strip strip.png --crop 370,74,214,36 --crop 530,305,60,30     # crops stacked per frame
+$S --tree tree.json [--at T]     # key, path, role, label, text, presented rect, target, opacity,
+                                 # fill/text colour, hover/press, moving
+$S --trace run.jsonl             # motion-lint JSONL (Scrawl's format); keyed elements only
+```
+
+- **Scripts** are timestamped `move`, `down`, `up`, `tap` (`hold`) and `drag` (`dx`, `dy`, `dur`)
+  events, at `x,y` in points or at an element by `key` (or a path suffix such as `slider/knob`).
+- **Timing**: every headless run prints per-frame CPU time (update, build and encode/submit, without
+  readback).
+- **Startup**: `--first-pixels` emits a flushed marker after the first offscreen GPU readback.
+  `python3 scripts/bench-startup.py --out perf/startup` times fresh process launch to that marker
+  (one warmup, seven runs), including loader, app state, GPU work and readback, excluding PNG encoding.
+  This measures process-cold startup with warm OS/driver caches, not physical display presentation.
+
+Text fields support Cmd/Ctrl-Z and Cmd/Ctrl-Shift-Z. Consecutive typing is one undo
+group; selection changes, navigation, paste, cut and IME commits separate groups.
+Undo restores selection direction as well as text. History shares storage with view
+snapshots and retains at most 128 edits / 1 MiB of text (oversized edits drop history).
+Call `TextEdit::clear()` after submission to clear history while retaining focus;
+call `break_history_group()` when setting a selection from custom pointer handling.
+
+`tx.fly_text("prompt", "sent-text")` hands a visible plain-text field to a newly
+mounted, uniquely keyed text node. The runtime captures its visible glyphs before
+committing and measures the destination after growth/scroll each frame. One 0.32 s
+growth-spring progress drives the screen-space handoff; reduced motion uses a
+150 ms crossfade. `settle()` lands it immediately. Neither view code nor handlers
+measure presentation geometry.
+
+Commit layout runs through a `Measurement` capability that can access text/layout
+caches and virtual geometry, but cannot access the scene, animation tracks, draw
+instances, or mutable app state. It finishes all measurement retries before
+returning an owned `Measured` result. Scene mutation consumes that result; motion
+policy changes are applied in the same mutation phase.
+- **Trace quality**: `python3 scripts/trace-quality.py run.jsonl` reports scene-edge error against
+  analytic samples, inherited spatial spring velocity error at retarget, CPU budget excess, and
+  virtual cadence. Growth/scroll are renderer-owned and excluded from the analytic edge metric;
+  virtual timestamps do not measure display hitches. Diagnostics are enabled only with `--trace`.
+
+## Measured (Studio, M-series, headless at 2×)
+
+- **Build**: incremental `-p settings` release build through HiveMind is about 20–60 s, sync included.
+- **Binary**: 10.9 MB, or 9.3 MB stripped (1.2 MB of that is the three Inter faces).
+- **Frame CPU**: over 180 frames of `scripts/bench.json` (theme switch, toggles, accent, a drag, a
+  click-to-seek), the mean is 0.13 ms and p95 0.29 ms. The first frame takes 1.4 ms (glyph
+  rasterisation) and GPU init about 11 ms. There are 174 instances, drawn in one draw call.
+- **motion-lint**: `motion-lint analyze` on that trace finds 0 candidates.
+- **OpenCode example**: while streaming, frame CPU is about 0.25 ms at p50 and 0.5 ms at p95, with
+  about 1,100 instances in one draw call. At rest the window draws nothing. The first frame takes
+  4–7 ms. motion-lint finds 0 candidates in the stream, switch, send and scroll traces.
+
+## Deviations from PLAN.md (fine for a prototype)
+
+- wgpu (Metal backend) on macOS instead of the own thin HAL over raw Metal.
+- winit for the window instead of an own shell (no non-activating panels or glass underlays).
+- Animation is evaluated on the main thread at frame time, not on a render thread. View functions still
+  never run for animation: views produce targets, and tracks animate between them.
+- One pipeline with three fragment paths instead of separate quad and text pipelines (draw order is free).
+- No AccessKit, no hot reload, and no inspector socket (the CLI flags stand in). Scrolling is
+  vertical only.
+- The windowed path is untested on Studio by rule. Only the headless path has been run.
+
+## Known gaps and next
+
+- Group opacity through offscreen layers.
+- Next: a render thread with a command channel, a CoreText side-by-side text diff (S5), Slug for
+  scaled text, the inspector socket, knobs/tunables, and the Scrawl pill (M1).
