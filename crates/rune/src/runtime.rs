@@ -304,6 +304,8 @@ pub struct Runtime<S: 'static> {
     live_wake: Arc<crate::live::Wake>,
     live_subscriptions: Vec<Arc<crate::live::Subscription>>,
     live_dirty: bool,
+    /// Opt-in tooling checks. None keeps release commits free of key traversal/allocation.
+    pub(crate) key_warnings: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -404,6 +406,7 @@ impl<S: 'static> Runtime<S> {
             live_wake: crate::live::Wake::new(Arc::new(|| {})),
             live_subscriptions: Vec::new(),
             live_dirty: false,
+            key_warnings: None,
         }
     }
 
@@ -855,6 +858,7 @@ struct Measurement<'a, S> {
     virtuals: &'a mut HashMap<String, crate::virtual_list::VirtualList>,
     virtual_culled: &'a mut HashSet<String>,
     stats: &'a mut FrameStats,
+    key_warnings: &'a mut Option<Vec<String>>,
 }
 
 /// Owned result of completed measurement. Scene mutation consumes this once; retries never
@@ -992,6 +996,17 @@ impl<S> Measurement<'_, S> {
             _s: PhantomData,
         };
         let mut root = (self.view)(self.state, &mut cx);
+        if let Some(warnings) = self.key_warnings.as_mut() {
+            *warnings = crate::key_diagnostics::warnings(&root);
+            // Do not hand an invalid identity tree to Taffy. --tree still emits diagnostics.
+            if !warnings.is_empty() { root = crate::el(); }
+        } else {
+            #[cfg(debug_assertions)]
+            {
+                let warnings = crate::key_diagnostics::warnings(&root);
+                debug_assert!(warnings.is_empty(), "{}", warnings.join("\n"));
+            }
+        }
         self.window_tree(&mut root, "", 0, None, tx.settle, force_all);
         self.reduced_motion = cx.reduced_motion;
         self.time_scale = cx.time_scale;
@@ -1126,6 +1141,7 @@ impl<S: 'static> Runtime<S> {
             virtuals: &mut self.virtuals,
             virtual_culled: &mut self.virtual_culled,
             stats: &mut self.stats,
+            key_warnings: &mut self.key_warnings,
         }.finish(tx)
     }
 
@@ -2643,6 +2659,28 @@ fn flatten(
 mod tests {
     use super::*;
     use crate::el::{col, el};
+
+    fn duplicate_view(_: &(), _: &mut Cx<()>) -> El {
+        col().children([el().key("card"), el().key("card")])
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "duplicate sibling key \"card\"")]
+    fn duplicate_sibling_keys_fail_before_layout() {
+        let mut rt = Runtime::new((), duplicate_view, (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+    }
+
+    #[test]
+    fn duplicate_sibling_keys_tooling_reports_without_invalid_layout() {
+        let mut rt = Runtime::new((), duplicate_view, (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        rt.key_warnings = Some(Vec::new());
+        rt.frame(0.0);
+        assert_eq!(rt.key_warnings.as_ref().unwrap().len(), 1);
+        assert_eq!(rt.nodes.len(), 1);
+        assert_eq!(rt.nodes[0].local.w, 100.0);
+    }
 
     #[test]
     fn side_panel_wraps_once_and_releases_height_after_stable_width() {

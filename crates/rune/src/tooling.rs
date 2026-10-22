@@ -578,6 +578,7 @@ fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
         "time_scale": rt.time_scale,
         "animating": rt.animating,
         "elements": els,
+        "warnings": rt.key_warnings.as_deref().unwrap_or_default(),
     })
 }
 
@@ -632,6 +633,7 @@ fn headless_configured<S: 'static>(app: crate::app::App<S>, args: Args, transpar
     let state_ms = launched.elapsed().as_secs_f64() * 1000.0;
     let mut rt = runtime_for(&spec, state, size, Env { system_dark: dark, scale }, std::sync::Arc::new(|| {}));
     rt.transparent = transparent;
+    if args.tree.is_some() { rt.key_warnings = Some(Vec::new()); }
     let runtime_ms = launched.elapsed().as_secs_f64() * 1000.0 - state_ms;
 
     let script = args.script.as_ref().map(load_script).unwrap_or_default();
