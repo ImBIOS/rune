@@ -11,7 +11,7 @@ native-file-dialog = ["dep:rfd"]
 rune-motion = { path = "../rune-motion" }
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
 winit = "0.30.13"
-taffy = { version = "0.15", default-features = false, features = ["std", "taffy_tree", "flexbox", "block_layout", "content_size"] }
+taffy = { version = "0.15", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "block_layout", "content_size"] }
 parley = { version = "0.12", default-features = false, features = ["std"] }
 swash = "0.2.10"
 bytemuck = { version = "1.25", features = ["derive"] }

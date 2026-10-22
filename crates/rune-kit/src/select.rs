@@ -130,6 +130,13 @@ impl Select {
         self
     }
 
+    /// The closed field alone, for an app that opens its own menu or picker on press
+    /// (`on_toggle`); options, `open` and the listbox are ignored.
+    pub fn trigger(mut self, k: &Kit) -> El {
+        self.open = false;
+        self.build(k, &mut Vec::new())
+    }
+
     pub fn build(self, k: &Kit, layer: &mut Vec<El>) -> El {
         let c = &k.c;
         let disabled = self.state == State::Disabled;
