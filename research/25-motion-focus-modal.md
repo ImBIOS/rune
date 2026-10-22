@@ -162,3 +162,12 @@ broader picker test exposed and verified the transparent-dismissal fix.
 Headless mini captures matched **19 current-main stills with zero changed pixels**:
 five OpenCode scenes, settings dark/light, and twelve kit comparison Rune columns.
 Existing goldens were never overwritten. No Studio rendering, windows or audio.
+
+Final rebase: `c6bf061`, including NativeSurface. Resolved overlapping additions
+by retaining compositor marks, native-surface APIs and video timing alongside
+focus/loop work. Reverified on mini: **26 runtime + 2 native-surface unit + 8 kit
+integration + 4 OpenCode picker tests passed**; release builds of all three demos
+passed. Repeated the 19-still comparison with these binaries: zero changed pixels.
+The four loop-unit tests passed before this rebase; their sources did not change.
+The renderer hold note was deleted after confirming NativeSurface on main.
+Nothing has been pushed; the parent must arrange the short delta review.
