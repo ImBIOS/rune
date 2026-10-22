@@ -701,6 +701,7 @@ fn headless_configured<S: 'static>(app: crate::app::App<S>, args: Args, transpar
         }
         let animating = rt.frame(if k == 0 { 0.0 } else { dt });
         renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (wp, hp));
+        renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         renderer.draw(&mut enc, alpha.as_ref().map_or(&target.view, |a| &a.view), rt.clear_color());
         if let Some(alpha) = &alpha { alpha.draw(&mut enc, &target.view); }

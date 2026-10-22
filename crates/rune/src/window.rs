@@ -441,6 +441,7 @@ impl<S: 'static> Host<S> {
             self.native_handle.native.number.store(0, Ordering::Release);
             self.gpu = None;
             self.rt.text.atlas.invalidate();
+            self.rt.images.invalidate();
         } else if is_wayland(event_loop) {
             // Wayland has no hidden toplevel: unmap by destroying, recreate on open.
             self.win = None;
@@ -583,6 +584,7 @@ impl<S: 'static> Host<S> {
             *renderer = Renderer::new(&gpu.device, config.format);
             *format = config.format;
             self.rt.text.atlas.invalidate();
+            self.rt.images.invalidate();
         }
         surface.configure(&gpu.device, &config);
         // Metal's PostMultiplied mode only makes CAMetalLayer non-opaque; Core Animation
@@ -665,6 +667,7 @@ impl<S: 'static> Host<S> {
         }
         let view = frame.texture.create_view(&Default::default());
         renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (l.config.width, l.config.height));
+        renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         renderer.draw(&mut enc, l.alpha.as_ref().map_or(&view, |a| &a.view), rt.clear_color());
         if let Some(alpha) = &l.alpha { alpha.draw(&mut enc, &view); }
