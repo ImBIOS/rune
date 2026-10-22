@@ -29,6 +29,12 @@ impl Color {
         Color { a, ..self }
     }
 
+    /// `t` of the way from `self` to `other`, straight in linear light.
+    pub fn mix(self, other: Color, t: f32) -> Color {
+        let m = |a: f32, b: f32| a + (b - a) * t;
+        Color { r: m(self.r, other.r), g: m(self.g, other.g), b: m(self.b, other.b), a: m(self.a, other.a) }
+    }
+
     pub fn to_oklab(self) -> [f32; 4] {
         let [l, a, b] = linear_to_oklab(self.r, self.g, self.b);
         [l, a, b, self.a]

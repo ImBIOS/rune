@@ -210,6 +210,35 @@ Rooms owns its tray; Rune supplies the window lifetime and handles.
 created: no Dock icon/default menu and no activation at launch. Other platforms
 ignore it; `run_windows` keeps its regular-launch default.
 
+### Window chrome and shell controls (OpenCode Desktop fidelity)
+
+![sidebar](../../demo/opencode/sidebar-status.png)
+
+- **`AppSpec::chrome`** (`Chrome { full_size_content, traffic_lights, drag_regions }`, or `Chrome::DEFAULT`): on
+  macOS, `full_size_content` gives a transparent titlebar with content under it, and
+  `traffic_lights: Some((x, y))` places the close button's top-left at `x, y` points (Electron's
+  `trafficLightPosition`). Rune places the buttons again after every resize, scale change, focus change
+  and un-occlusion. On Windows and Linux both options do nothing; the system titlebar stays.
+- **`AppSpec::new(title, size, init, view)`** fills every other field with its default; literals
+  that set a few more end with `..AppSpec::new(..)`, so new fields (like `chrome`) don't break them.
+- **Window drag regions** (`.window_drag()`): a press starts winit's `drag_window` and a
+  double press zooms the window (macOS follows the user's `AppleActionOnDoubleClick` setting, so it
+  may minimise instead; elsewhere it toggles maximised). With `Chrome::drag_regions` on macOS, only
+  marked regions move the window, so content under a full-size titlebar stays clickable. This is
+  process-wide: it patches winit's shared view class, so every window and overlay follows it.
+- **Hover groups**: `.hover_group()` (or any `.hover(color)`) tracks hover for a subtree, and
+  `.hover_motion(enter, exit)` sets its curves (for example a delayed reveal). Descendants read the
+  nearest group with `.group_opacity(rest, hovered)` and `.group_color(c)`. A group stays hovered
+  while one of its descendants holds the press, and only counts the part of it that shows inside a
+  clipping parent.
+- **Loops** (`.cycle(Cycle { period, phase, stops, still, fps })`): an opacity loop sampled from the
+  clock (it will become sugar over a general `El::looping`, with one loop engine in rune-motion),
+  so every loop with the same period stays in phase. Reduced motion holds `still`. While only loops
+  move, the window wakes at `fps` instead of every display frame, and a still window does no work.
+- **Drags** report `dx, dy`, the pointer's travel since the press.
+- **`--chrome`** (headless) paints the traffic lights and a 4 pt clearance box onto snapshots and
+  prints any element that overlaps them.
+
 ## High-frequency values
 
 `Live<T>` is a cloneable, thread-safe latest-wins handle (`f32`, `[f32; 2]`,
@@ -380,7 +409,7 @@ target/release/settings                       # the window (don't open it on Stu
 hivemind run --kind cargo -- cargo build --release -p opencode
 target/release/opencode                       # live, read-only, when 127.0.0.1:4096 answers
 F=(--fixture examples/opencode/assets/fixture.json)
-target/release/opencode $F --scene streaming --snap out.png   # scenes: home session streaming draft
+target/release/opencode $F --scene streaming --snap out.png   # scenes: home session streaming draft sidebar-closed status
 target/release/opencode $F --script examples/opencode/scripts/switch.json --frames 540 --out frames/
 ```
 

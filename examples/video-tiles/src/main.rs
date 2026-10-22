@@ -69,17 +69,5 @@ fn main() {
         bench::run();
         return;
     }
-    rune::run(AppSpec {
-        title: "Video tiles",
-        size: (664.0, 384.0),
-        min_size: None,
-        init: state,
-        view,
-        scenes: &[],
-        fonts: &[],
-        families: ("Inter", "Inter"),
-        setup: Some(setup),
-        poll: None,
-        on_key: None,
-    });
+    rune::run(AppSpec { setup: Some(setup), ..AppSpec::new("Video tiles", (664.0, 384.0), state, view) });
 }

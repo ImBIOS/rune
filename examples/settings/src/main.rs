@@ -320,12 +320,7 @@ fn speed_control(p: Paint, v: f32) -> El {
 }
 
 fn main() {
-    rune::run(AppSpec {
-        title: "Settings",
-        size: (620.0, 520.0),
-        min_size: None,
-        init: Settings::default,
-        view,
+    rune::run(AppSpec::<Settings> {
         scenes: &[
             ("default", |_| {}),
             ("light", |s| s.appearance = Appearance::Light),
@@ -339,10 +334,6 @@ fn main() {
             ("accent-pink", |s| s.accent = 2),
             ("slow", |s| s.speed = 0.0),
         ],
-        fonts: &[],
-        families: ("Inter", "Inter"),
-        setup: None,
-        poll: None,
-        on_key: None,
+        ..AppSpec::new("Settings", (620.0, 520.0), Settings::default, view)
     });
 }

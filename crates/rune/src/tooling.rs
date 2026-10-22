@@ -34,6 +34,72 @@ pub struct AppSpec<S: 'static> {
     pub poll: Option<fn(&mut S, f64, &mut Tx) -> bool>,
     /// App-level keys, before the focused text field; true consumes the key.
     pub on_key: Option<fn(&mut S, &KeyEvent, &mut Tx) -> bool>,
+    /// How the window frames the app's content.
+    pub chrome: Chrome,
+}
+
+impl<S: 'static> AppSpec<S> {
+    /// The required parts; everything else at its default. Literals that set a few more fields
+    /// end with `..AppSpec::new(..)`, so new fields don't break them.
+    pub fn new(title: &'static str, size: (f32, f32), init: fn() -> S, view: fn(&S, &mut Cx<S>) -> El) -> Self {
+        AppSpec {
+            title,
+            size,
+            min_size: None,
+            init,
+            view,
+            scenes: &[],
+            fonts: &[],
+            families: ("Inter", "Inter"),
+            setup: None,
+            poll: None,
+            on_key: None,
+            chrome: Chrome::DEFAULT,
+        }
+    }
+}
+
+/// Window frame options. Elements marked `.window_drag()` move the window on every platform;
+/// a double press there zooms (macOS follows System Settings' titlebar double-click action;
+/// elsewhere it toggles maximised).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Chrome {
+    /// macOS: the content view fills the window under a transparent, title-less titlebar (the
+    /// app draws its own titlebar area). Off: a standard titled window. Other platforms keep
+    /// their native frame either way.
+    pub full_size_content: bool,
+    /// macOS: the close button's top-left, in points from the window's top-left, kept there
+    /// across resizes and full screen (Electron's `trafficLightPosition`). `None` leaves
+    /// AppKit's placement. The three buttons keep AppKit's own size and spacing.
+    pub traffic_lights: Option<(f32, f32)>,
+    /// macOS: only `.window_drag()` regions move the window, so content under a full-size
+    /// titlebar stays clickable (Electron's app regions). Off: AppKit's titlebar band drags too.
+    /// AppKit asks winit's shared view class, so this applies to every window in the process
+    /// (overlays included) once any window opens with it.
+    pub drag_regions: bool,
+}
+
+impl Chrome {
+    pub const DEFAULT: Chrome = Chrome { full_size_content: true, traffic_lights: None, drag_regions: false };
+    /// Headless `--chrome` overlay and checks: macOS 26 draws 14 pt buttons on a 23 pt pitch.
+    pub const TRAFFIC_LIGHT: f32 = 14.0;
+    pub const TRAFFIC_PITCH: f32 = 23.0;
+
+    /// Where macOS will draw the three buttons (x, y, w, h in points), assuming macOS 26 metrics
+    /// and AppKit's default origin (7, 6) when unpositioned.
+    pub fn traffic_light_rects(&self) -> Option<[[f32; 4]; 3]> {
+        if !self.full_size_content && self.traffic_lights.is_none() {
+            return None;
+        }
+        let (x, y) = self.traffic_lights.unwrap_or((7.0, 6.0));
+        Some(std::array::from_fn(|i| [x + i as f32 * Self::TRAFFIC_PITCH, y, Self::TRAFFIC_LIGHT, Self::TRAFFIC_LIGHT]))
+    }
+}
+
+impl Default for Chrome {
+    fn default() -> Self {
+        Chrome::DEFAULT
+    }
 }
 
 static EXTRA: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
@@ -90,6 +156,9 @@ pub struct Args {
     pub first_pixels: bool,
     pub window: Option<String>,
     pub list_windows: bool,
+    /// Draw where macOS will put the traffic lights over headless frames, and report elements
+    /// that overlap them.
+    pub chrome_overlay: bool,
 }
 
 impl Args {
@@ -139,6 +208,7 @@ impl Args {
                 "--first-pixels" => a.first_pixels = true,
                 "--window" => a.window = Some(val(&mut i)),
                 "--list-windows" => a.list_windows = true,
+                "--chrome" => a.chrome_overlay = true,
                 "-h" | "--help" => {
                     eprintln!("{HELP}");
                     std::process::exit(0);
@@ -178,6 +248,7 @@ const HELP: &str = "usage: <app> [window]
   --first-pixels        report when the first GPU-complete offscreen pixels are readable
   --window KEY         select a window for headless tools (run_windows apps)
   --list-windows       list window keys using a deterministic virtual display
+  --chrome              draw where macOS puts the traffic lights; list elements overlapping them
   other arguments are passed to the app (rune::tooling::extra_args)";
 
 fn die(msg: &str) -> ! {
@@ -521,6 +592,10 @@ impl Trace {
         }
 
         let mut line = json!({ "t": (t_ms * 1000.0).round() / 1000.0, "n": 1 });
+        // motion-lint's touch count: motion under a held press follows the hand.
+        if rt.pressing() {
+            line["k"] = 1.into();
+        }
         let (edges, position_error) = rt.scene.sampling_error();
         let retarget = rt.scene.store_mut().take_retarget_audit();
         line["quality"] = json!({
@@ -774,7 +849,12 @@ fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, tran
         }
         if want_pixels {
             let wait = Instant::now();
-            let px = target.read(&gpu.device);
+            let mut px = target.read(&gpu.device);
+            if args.chrome_overlay
+                && let Some(lights) = spec.chrome.traffic_light_rects()
+            {
+                paint_traffic_lights(&mut px, wp, hp, scale, &lights);
+            }
             if args.first_pixels && k == 0 {
                 let marker = json!({
                     "headless_ms": launched.elapsed().as_secs_f64() * 1000.0,
@@ -798,6 +878,12 @@ fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, tran
                 let p = args.snap.as_ref().unwrap();
                 write_png(p, wp, hp, &px).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
             }
+        }
+        if k == snap_frame
+            && args.chrome_overlay
+            && let Some(lights) = spec.chrome.traffic_light_rects()
+        {
+            report_traffic_light_overlaps(&rt, &lights);
         }
         if k == snap_frame
             && let Some(p) = &args.tree
@@ -855,6 +941,59 @@ fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, tran
     if let Some(s) = comp.as_mut().and_then(|c| c.summary(&gpu.device)) {
         eprintln!("{s}");
     }
+}
+
+/// Antialiased discs where macOS draws close, minimise and zoom, plus a hairline box 4 pt
+/// around them (the clearance an app should keep).
+fn paint_traffic_lights(px: &mut [u8], w: u32, h: u32, scale: f32, lights: &[[f32; 4]; 3]) {
+    const COLORS: [[f32; 3]; 3] = [[255.0, 95.0, 87.0], [254.0, 188.0, 46.0], [40.0, 200.0, 64.0]];
+    let mut blend = |x: i64, y: i64, c: [f32; 3], a: f32| {
+        if x < 0 || y < 0 || x >= i64::from(w) || y >= i64::from(h) || a <= 0.0 {
+            return;
+        }
+        let i = ((y as u32 * w + x as u32) * 4) as usize;
+        for k in 0..3 {
+            px[i + k] = (f32::from(px[i + k]) * (1.0 - a) + c[k] * a).round() as u8;
+        }
+    };
+    for (r, c) in lights.iter().zip(COLORS) {
+        let (cx, cy, rad) = ((r[0] + r[2] / 2.0) * scale, (r[1] + r[3] / 2.0) * scale, r[2] / 2.0 * scale);
+        for y in (cy - rad - 1.0) as i64..=(cy + rad + 1.0) as i64 {
+            for x in (cx - rad - 1.0) as i64..=(cx + rad + 1.0) as i64 {
+                let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+                blend(x, y, c, (rad - d + 0.5).clamp(0.0, 1.0));
+            }
+        }
+    }
+    let m = 4.0;
+    let (x0, y0) = ((lights[0][0] - m) * scale, (lights[0][1] - m) * scale);
+    let (x1, y1) = ((lights[2][0] + lights[2][2] + m) * scale, (lights[2][1] + lights[2][3] + m) * scale);
+    let cyan = [0.0, 200.0, 255.0];
+    for x in x0 as i64..=x1 as i64 {
+        blend(x, y0 as i64, cyan, 0.8);
+        blend(x, y1 as i64, cyan, 0.8);
+    }
+    for y in y0 as i64..=y1 as i64 {
+        blend(x0 as i64, y, cyan, 0.8);
+        blend(x1 as i64, y, cyan, 0.8);
+    }
+}
+
+/// Lists visible text, icons and controls whose drawn rect comes within 4 pt of a traffic light.
+fn report_traffic_light_overlaps<S>(rt: &Runtime<S>, lights: &[[f32; 4]; 3]) {
+    let m = 4.0;
+    let zone = [lights[0][0] - m, lights[0][1] - m, lights[2][0] + lights[2][2] + m, lights[2][1] + lights[2][3] + m];
+    let mut n = 0;
+    for e in rt.elements() {
+        let drawn = e.text.is_some() || matches!(e.role, "icon" | "button" | "textbox");
+        let v = e.visible;
+        let (x1, y1) = (v[0] + v[2], v[1] + v[3]);
+        if drawn && e.opacity > 0.01 && v[2] > 0.0 && v[3] > 0.0 && v[0] < zone[2] && x1 > zone[0] && v[1] < zone[3] && y1 > zone[1] {
+            eprintln!("rune: chrome: {} overlaps the traffic lights at {:?}", e.path, e.visible.map(r2));
+            n += 1;
+        }
+    }
+    eprintln!("rune: chrome: traffic lights at {:?}, {n} overlapping elements", lights[0].map(r2));
 }
 
 fn tile_size(w: u32, h: u32, crops: &[[u32; 4]], gap: u32) -> (u32, u32) {

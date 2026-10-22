@@ -145,18 +145,10 @@ fn capsule(presses: &u32, _: &mut Cx<u32>) -> El {
 }
 
 fn main() {
-    let mut app = App::new(rune::AppSpec {
-        title: "Background",
-        size: (480.0, 420.0),
-        min_size: None,
-        init,
-        view,
+    let mut app = App::new(rune::AppSpec::<Background> {
         scenes: &[("ticked", |s| s.ticks = 42)],
-        fonts: &[],
-        families: ("Inter", "Inter"),
-        setup: None,
-        poll: None,
         on_key: Some(on_key),
+        ..rune::AppSpec::new("Background", (480.0, 420.0), init, view)
     })
     .keep_running()
     .on_close(on_close)
