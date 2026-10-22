@@ -15,6 +15,7 @@ pub mod growth;
 pub mod live;
 pub mod render;
 pub mod runtime;
+pub mod shape;
 mod virtual_list;
 mod flight;
 pub mod text;
@@ -27,7 +28,7 @@ pub use app::{App, AppHandle};
 pub use color::{Color, oklch, oklcha};
 pub use edit::{Ime, Key, KeyEvent, Mods, TextEdit};
 pub use el::{
-    Align, Anchor, Cursor, Drag, El, GrowthSpec, Outline, Phase, ScrollSpec, Shadow, Shell, Side, Tx, col, edit_access, el, icon, rich,
+    Align, Anchor, Cursor, Drag, El, GrowthSpec, Outline, Phase, ScrollSpec, Shadow, Shell, Side, Tx, canvas, col, edit_access, el, icon, rich,
     row, spacer, text, text_input,
 };
 pub use growth::{GROWTH, StreamEdge, edge};
@@ -37,6 +38,7 @@ pub use rune_motion::{
     Transition, Travel,
 };
 pub use runtime::{Cx, Env, Runtime, Waker};
+pub use shape::{LineCap, Path, Shape};
 pub use text::{Icon, Span};
 pub use theme::Theme;
 pub use tok::{Family, TextStyle};

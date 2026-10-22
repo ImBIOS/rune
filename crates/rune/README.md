@@ -39,6 +39,12 @@ The first runnable piece of Rune: enough framework to draw a small Settings wind
   frame.
   - Kinds: rounded rects (per-corner radius, border), analytic Gaussian shadows, and glyphs from the
     atlas.
+  - Vector shapes (`shape.rs`): `El::shape(Shape)` and `canvas(shape)` paint strokes (polylines,
+    round or butt caps, open or closed) and fills (simple polygons, ear-clipped) in the element's own
+    points; `Path` flattens quadratic and cubic Béziers. Strokes are one analytic capsule/box per
+    segment (`KIND_SEGMENT`); fills are triangles (`KIND_TRIANGLE`) antialiased only on polygon
+    edges, so they have no seams. No atlas, so a shape can change every frame (`examples/shapes`).
+    Translucent strokes blend twice where segments overlap at a joint; fills do not overlap.
   - Every instance has a soft-edge clip (`clip_soft`, `clip_fade`).
   - Colour is premultiplied linear and drawn into an sRGB target, so blending is linear-light. Glyph
     coverage gets a small exponent that depends on luminance, so dark text isn't thin.

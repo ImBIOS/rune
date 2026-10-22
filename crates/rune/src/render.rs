@@ -11,6 +11,11 @@ pub const KIND_GLYPH: f32 = 2.0;
 pub const KIND_INSET: f32 = 3.0;
 /// Rounded rect with a vertical gradient: `fill` at the top, `uv` (premultiplied) at the bottom.
 pub const KIND_GRADIENT: f32 = 4.0;
+/// A stroke segment: `radii` = x0, y0, x1, y1; `params.x` half width, `params.z` 1 for round caps.
+pub const KIND_SEGMENT: f32 = 5.0;
+/// A filled triangle: `radii` = ax, ay, bx, by; `uv.xy` = cx, cy; `params.x` the antialiased-edge
+/// mask (a→b, b→c, c→a as bits 0, 1, 2; other edges are hard so neighbours meet without seams).
+pub const KIND_TRIANGLE: f32 = 6.0;
 
 /// One instance, in device pixels.
 #[repr(C)]
