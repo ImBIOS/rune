@@ -13,7 +13,9 @@ fn shade_bolt(dist: f32, w: f32, gr: f32) -> Bolt {
     var b: Bolt;
     b.core = gauss(dist, w);
     let o = dist / gr;
-    b.halo = 0.5 / (1.0 + o * o) * (1.0 - smoothstep(gr * 2.5, gr * 5.0, dist)) + 0.5 * gauss(dist, gr * 0.8);
+    // A narrow coloured sheath plus a faint 1/(1+d^2) tail: the air right around the channel glows,
+    // not a wide haze.
+    b.halo = 0.35 / (1.0 + o * o) * (1.0 - smoothstep(gr * 2.5, gr * 5.0, dist)) + 0.65 * gauss(dist, gr * 0.6);
     return b;
 }
 // Lateral distance to a sampled path, slope-corrected but capped so steep jags never smear
@@ -71,7 +73,7 @@ fn shade(in: VOut) -> vec4f {
             let dh = length(vec2f((u - uc) * L, v - mix(dat1(hb, i0), dat1(hb, i0 + 1u), f)));
             let bw = select(w * 0.6, w, k == 0u);
             var bo = shade_bolt(dd, bw, gr);
-            bo.halo = 0.5 * shade_bolt(dh, bw, gr).halo + 0.5 * shade_bolt(dd, bw, gr * 0.35).halo;
+            bo.halo = 0.4 * shade_bolt(dh, bw, gr).halo + 0.6 * shade_bolt(dd, bw, gr * 0.3).halo;
             let kb = select(0.32, 1.0, k == 0u) * fl[k];
             core += bo.core * kb;
             halo += bo.halo * kb;
@@ -121,7 +123,7 @@ fn shade(in: VOut) -> vec4f {
             let crawl = mix(dat1(cb, i0), dat1(cb, i1), f);
             let bw = select(w * 0.6, w, k == 0u);
             var bo = shade_bolt(dd, bw, gr);
-            bo.halo = 0.5 * shade_bolt(dh, bw, gr).halo + 0.5 * shade_bolt(dd, bw, gr * 0.35).halo;
+            bo.halo = 0.4 * shade_bolt(dh, bw, gr).halo + 0.6 * shade_bolt(dd, bw, gr * 0.3).halo;
             let kb = select(0.32, 1.0, k == 0u) * fl[k] * crawl;
             core += bo.core * kb;
             halo += bo.halo * kb;
@@ -144,7 +146,7 @@ fn shade(in: VOut) -> vec4f {
             let len = h1.x;
             var dsv = s - h0.x;
             dsv -= total * round(dsv / total);
-            let fu = (c.d - gap) / len;
+            let fu = (c.d - gap - h0.z) / len;
             let fuc = clamp(fu, 0.0, h1.y);
             let ffi = fuc * 15.0;
             let j0 = min(u32(ffi), 14u);

@@ -1172,8 +1172,8 @@ impl FxLayer {
                     ElectricStyle::Arc { a, b } => {
                         i.t[2] = 0.0;
                         i.aux = [a[0], a[1], b[0], b[1]];
-                        let len = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
-                        (KIND_ELECTRIC, Rect::from_points(a, b).inflate(m + if p.forks > 0.0 { (len * 0.11).clamp(10.0, 56.0) + p.amplitude } else { 0.0 }))
+                        let len = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt().max(1.0);
+                        (KIND_ELECTRIC, Rect::from_points(a, b).inflate(p.glow * 5.0 + p.core_width * 3.0 + cpu::arc_reach(p, len)))
                     }
                     ElectricStyle::Border => {
                         i.t[2] = 1.0;
@@ -1492,5 +1492,17 @@ mod tests {
         assert!(data[2][0].abs() < 1e-3);
         let reduced = cpu::electric(&p, card(), 1.7, 3, true, &mut Vec::new());
         assert_eq!(reduced[2], 0.0, "reduced motion: no forks");
+    }
+
+    #[test]
+    fn zero_amplitude_electricity_is_a_straight_finite_line() {
+        for style in [ElectricStyle::Arc { a: [0.0, 0.0], b: [300.0, 0.0] }, ElectricStyle::Border] {
+            let p = ElectricParams { style, amplitude: 0.0, forks: 1.0, ..Default::default() };
+            for t in [0.0, 0.4, 1.7] {
+                let mut data = Vec::new();
+                cpu::electric(&p, card(), t, 3, false, &mut data);
+                assert!(data.iter().flatten().all(|v| v.is_finite()), "{style:?} at {t}");
+            }
+        }
     }
 }
