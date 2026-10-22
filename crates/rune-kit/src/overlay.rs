@@ -148,7 +148,8 @@ impl Popover {
         if !self.open {
             return trigger;
         }
-        let mut content = col().key(format!("{}-content", self.key)).role("dialog").min_w(200.0).max_w(320.0);
+        let mut content = col().key(format!("{}-content", self.key)).role("dialog")
+            .focus_return(&anchor_key).min_w(200.0).max_w(320.0);
         if let Some(t) = &self.title {
             let close = IconButton::new(k.glyph.close)
                 .variant(IconButtonVariant::Ghost)

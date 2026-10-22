@@ -26,7 +26,12 @@ pub struct ComboboxState {
     query: String,
 }
 impl ComboboxState {
-    pub fn close(&mut self) { self.open = false; self.search.focused = false; }
+    pub fn close(&mut self) {
+        self.open = false;
+        self.search.focused = false;
+        self.search.preedit = None;
+        self.search.break_history_group();
+    }
     fn active_index(&self, options: &[ComboboxOption], filtered: &[usize]) -> Option<usize> {
         if self.query == self.search.text
             && let Some(index) = filtered.iter().copied().find(|i| !options[*i].disabled && Some(&options[*i].id) == self.active.as_ref())
