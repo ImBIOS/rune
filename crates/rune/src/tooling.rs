@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 
+use crate::compose::{Compositor, Frame};
 use crate::edit::{Key, KeyEvent, Mods};
 use crate::el::{El, Tx};
 use crate::render::{Gpu, OFFSCREEN_FORMAT, Offscreen, Renderer, write_png};
@@ -66,7 +67,7 @@ pub(crate) fn runtime_for<S: 'static>(spec: &AppSpec<S>, state: S, size: (f32, f
     rt
 }
 
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct Args {
     pub snap: Option<PathBuf>,
     pub scene: Option<String>,
@@ -87,6 +88,8 @@ pub struct Args {
     pub cols: usize,
     pub list_scenes: bool,
     pub first_pixels: bool,
+    pub window: Option<String>,
+    pub list_windows: bool,
 }
 
 impl Args {
@@ -134,6 +137,8 @@ impl Args {
                 "--every" => a.every = (num(&val(&mut i)) as usize).max(1),
                 "--list-scenes" => a.list_scenes = true,
                 "--first-pixels" => a.first_pixels = true,
+                "--window" => a.window = Some(val(&mut i)),
+                "--list-windows" => a.list_windows = true,
                 "-h" | "--help" => {
                     eprintln!("{HELP}");
                     std::process::exit(0);
@@ -154,6 +159,7 @@ impl Args {
             || self.strip.is_some()
             || self.list_scenes
             || self.first_pixels
+            || self.list_windows
     }
 }
 
@@ -170,6 +176,8 @@ const HELP: &str = "usage: <app> [window]
   --tree out.json       element tree with animated values
   --trace out.jsonl     per-frame rects/opacity in motion-lint JSONL
   --first-pixels        report when the first GPU-complete offscreen pixels are readable
+  --window KEY         select a window for headless tools (run_windows apps)
+  --list-windows       list window keys using a deterministic virtual display
   other arguments are passed to the app (rune::tooling::extra_args)";
 
 fn die(msg: &str) -> ! {
@@ -185,6 +193,44 @@ fn num(s: &str) -> f64 {
 /// headless for the tooling arguments.
 pub fn run<S: 'static>(spec: AppSpec<S>) {
     crate::app::App::new(spec).run();
+}
+
+/// Create independent windows from a display-aware factory. Headless tools invoke the same
+/// factory with one virtual display and select one retained tree using `--window KEY`.
+pub fn run_windows<S: 'static>(factory: impl FnOnce(&[crate::Display]) -> Vec<crate::WindowSpec<S>> + 'static) {
+    run_windows_with(crate::RunOptions::default(), factory);
+}
+
+/// Run a window factory with process-level options, such as macOS accessory activation.
+pub fn run_windows_with<S: 'static>(options: crate::RunOptions, factory: impl FnOnce(&[crate::Display]) -> Vec<crate::WindowSpec<S>> + 'static) {
+    let args = Args::parse();
+    if args.headless() {
+        let display = crate::Display { name: Some("headless".into()), position: (0, 0),
+            size: (1920, 1080), scale: f64::from(args.scale.unwrap_or(2.0)), primary: true };
+        let mut windows = factory(std::slice::from_ref(&display));
+        crate::windows::validate(&windows).unwrap_or_else(|e| die(&e));
+        if args.list_windows {
+            for window in windows { println!("{}", window.key); }
+            return;
+        }
+        let index = match args.window.as_deref() {
+            Some(key) => windows.iter().position(|w| w.key == key).unwrap_or_else(|| die(&format!("no window {key:?}; use --list-windows"))),
+            None if !windows.is_empty() => 0,
+            None => die("the app created no windows"),
+        };
+        let mut window = windows.remove(index);
+        if let Some((w, h)) = window.options.physical_size {
+            window.app.spec.size = (w as f32 / display.scale as f32, h as f32 / display.scale as f32);
+        }
+        headless_configured(window.app, args, window.options.transparent);
+    } else {
+        crate::window::run_windows(factory, args, options);
+    }
+}
+
+/// `run` with a compositor drawing every frame (see `compose`); `App::compositor` for other lifetimes.
+pub fn run_with<S: 'static>(spec: AppSpec<S>, compositor: impl Compositor<S>) {
+    crate::app::App::new(spec).compositor(compositor).run();
 }
 
 pub fn initial_state<S: 'static>(spec: &AppSpec<S>, scene: Option<&str>) -> S {
@@ -219,6 +265,8 @@ enum Kind {
     Move,
     Down,
     Up,
+    SecondaryDown,
+    SecondaryUp,
     Key(KeyEvent),
     Paste(String),
     Wheel(f32),
@@ -276,6 +324,12 @@ fn load_script(path: &PathBuf) -> Vec<Ev> {
                 out.push(Ev { t, kind: Kind::Down, pos });
             }
             "up" => out.push(Ev { t, kind: Kind::Up, pos }),
+            "secondary-down" => out.push(Ev { t, kind: Kind::SecondaryDown, pos }),
+            "secondary-up" => out.push(Ev { t, kind: Kind::SecondaryUp, pos }),
+            "secondary-click" => {
+                out.push(Ev { t, kind: Kind::SecondaryDown, pos: pos.clone() });
+                out.push(Ev { t: t + e["hold"].as_f64().unwrap_or(0.08), kind: Kind::SecondaryUp, pos });
+            }
             "tap" | "click" => {
                 out.push(Ev { t, kind: Kind::Move, pos: pos.clone() });
                 out.push(Ev { t, kind: Kind::Down, pos });
@@ -404,26 +458,29 @@ impl Trace {
                 metas.push(meta);
             }
             let [x, y, w, h] = e.rect;
-            // motion-lint flags: animated 1, clipped 8. Own intents at << 8: position 1, size 2,
-            // transition 16, reveal 32. A settle commit is a deliberate cut (everything lands at
-            // once); a growth row reveals its content by growing; reveals fade words in.
+            // A settle commit is a deliberate cut (everything lands at once); a growth row reveals
+            // its content by growing; reveals fade words in.
+            use rune_motion::{Intent as I, flags as F};
             let clipped = e.rect.iter().zip(e.visible.iter()).any(|(a, b)| (a - b).abs() > 0.5);
             let mut intent = e.live_intent;
             if settled {
-                intent |= 1 | 2 | 16 | 32;
+                intent |= I::POSITION | I::SIZE | I::TRANSITION | I::REVEAL;
             }
             // Reduced motion deliberately cuts geometry. Opacity still needs to fade;
             // do not declare transition/opacity intent for the whole reduced-motion tree.
             if rt.reduced_motion {
-                intent |= 1 | 2;
+                intent |= I::POSITION | I::SIZE;
             }
             if e.revealing {
-                intent |= 32;
+                intent |= I::REVEAL;
             }
             if e.in_growing_row {
-                intent |= 2 | 32;
+                intent |= I::SIZE | I::REVEAL;
             }
-            let flags = u32::from(e.moving || e.in_growing_row) | if e.scrolling { 4 } else { 0 } | if clipped { 8 } else { 0 } | intent << 8;
+            let flags = if e.moving || e.in_growing_row { F::ANIMATED } else { 0 }
+                | if e.scrolling { F::SCROLLING } else { 0 }
+                | if clipped { F::CLIPPED } else { 0 }
+                | intent << 8;
             let q = [
                 (f64::from(x) * 100.0).round() as i64,
                 (f64::from(y) * 100.0).round() as i64,
@@ -459,7 +516,7 @@ impl Trace {
                 && settled
             {
                 let [x, y, w, h] = [q[0], q[1], q[2], q[3]].map(|v| v as f64 / 100.0);
-                cuts.push(json!([id, x, y, w, h, 16 | 4, 0]));
+                cuts.push(json!([id, x, y, w, h, rune_motion::Intent::TRANSITION | rune_motion::Intent::OPACITY, 0]));
             }
         }
 
@@ -540,13 +597,47 @@ fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
         "time_scale": rt.time_scale,
         "animating": rt.animating,
         "elements": els,
+        "warnings": rt.key_warnings.as_deref().unwrap_or_default(),
     })
 }
 
 // -------------------------------------------------------------------------------------------
 // Headless run
 
+// Render targets contain sRGB-encoded premultiplied linear colour. PNG uses straight
+// colour, so unpremultiply in linear space, not in the encoded byte domain.
+#[cfg(test)]
+pub(crate) fn straight_alpha(pixels: &mut [u8]) {
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = f32::from(pixel[3]) / 255.0;
+        if alpha == 0.0 { pixel[..3].fill(0); }
+        else if alpha < 1.0 {
+            for c in &mut pixel[..3] {
+                *c = (crate::color::srgb_encode((crate::color::srgb_decode(f32::from(*c) / 255.0) / alpha).clamp(0.0, 1.0)) * 255.0).round() as u8;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    #[test]
+    fn transparent_png_unpremultiplies_in_linear_space() {
+        let mut pixels = [188, 0, 0, 128, 255, 255, 255, 0, 12, 34, 56, 255];
+        super::straight_alpha(&mut pixels);
+        assert_eq!(pixels, [255, 0, 0, 128, 0, 0, 0, 0, 12, 34, 56, 255]);
+    }
+}
+
 pub fn headless<S: 'static>(app: crate::app::App<S>, args: Args) {
+    if args.list_windows { println!("main"); return; }
+    if args.window.as_deref().is_some_and(|key| key != "main") {
+        die("no such window; this app has only 'main'");
+    }
+    headless_configured(app, args, false);
+}
+
+fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, transparent: bool) {
     let launched = Instant::now();
     if args.list_scenes {
         for (n, _) in app.spec.scenes {
@@ -554,12 +645,16 @@ pub fn headless<S: 'static>(app: crate::app::App<S>, args: Args) {
         }
         return;
     }
+    let mut comp = app.compositor.take();
     let (spec, state, shared) = app.into_parts(args.scene.as_deref());
     let scale = args.scale.unwrap_or(2.0);
     let size = args.size.unwrap_or(spec.size);
     let dark = args.theme.as_deref() != Some("light");
     let state_ms = launched.elapsed().as_secs_f64() * 1000.0;
     let mut rt = runtime_for(&spec, state, size, Env { system_dark: dark, scale }, std::sync::Arc::new(|| {}));
+    rt.transparent = transparent;
+    if args.tree.is_some() { rt.key_warnings = Some(Vec::new()); }
+    rt.track_marks = comp.is_some();
     let runtime_ms = launched.elapsed().as_secs_f64() * 1000.0 - state_ms;
 
     let script = args.script.as_ref().map(load_script).unwrap_or_default();
@@ -579,10 +674,12 @@ pub fn headless<S: 'static>(app: crate::app::App<S>, args: Args) {
     let last_frame = snap_frame.max(start_frame + frames.max(1) - 1);
 
     let t0 = Instant::now();
-    let gpu = Gpu::new(Gpu::instance(), None);
+    let features = comp.as_ref().map_or(wgpu::Features::empty(), |c| c.features());
+    let gpu = Gpu::try_with_features(Gpu::instance(), None, features).unwrap_or_else(|e| die(&e));
     let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
     let (wp, hp) = ((size.0 * scale).round() as u32, (size.1 * scale).round() as u32);
     let target = Offscreen::new(&gpu.device, wp, hp);
+    let alpha = transparent.then(|| crate::surface_alpha::AlphaSurface::new(&gpu.device, OFFSCREEN_FORMAT, (wp, hp)));
     let init_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let mut trace = args.trace.as_ref().map(|p| Trace::open(p, size, fps, scale));
@@ -617,6 +714,8 @@ pub fn headless<S: 'static>(app: crate::app::App<S>, args: Args) {
                     rt.pointer_down(x, y);
                 }
                 Kind::Up => rt.pointer_up(x, y),
+                Kind::SecondaryDown => { last_down = (x, y); rt.secondary_down(x, y); }
+                Kind::SecondaryUp => rt.secondary_up(x, y),
                 Kind::Key(k) => rt.key(k.clone()),
                 Kind::Paste(s) => rt.paste(s.clone()),
                 Kind::Wheel(dy) => rt.wheel(x, y, *dy),
@@ -626,23 +725,50 @@ pub fn headless<S: 'static>(app: crate::app::App<S>, args: Args) {
         for f in shared.take().updates {
             rt.update(f);
         }
-        let animating = rt.frame(if k == 0 { 0.0 } else { dt });
-        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (wp, hp));
+        let step = if k == 0 { 0.0 } else { dt };
+        let mut animating = rt.frame(step);
+        let update_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+        renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
+        renderer.prepare_surfaces(&gpu.device, &gpu.queue, &rt.surfaces, (wp, hp));
         let mut enc = gpu.device.create_command_encoder(&Default::default());
-        renderer.draw(&mut enc, &target.view, rt.clear_color());
+        let view = alpha.as_ref().map_or(&target.view, |a| &a.view);
+        if let Some(c) = comp.as_mut() {
+            let mut f = Frame {
+                device: &gpu.device,
+                queue: &gpu.queue,
+                encoder: &mut enc,
+                target: view,
+                format: OFFSCREEN_FORMAT,
+                size: (wp, hp),
+                dt: step,
+                update_ms,
+                rt: &mut rt,
+                ui: &mut renderer,
+            };
+            c.render(&mut f);
+            animating |= c.animating();
+        } else {
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (wp, hp));
+            renderer.draw(&mut enc, view, rt.clear_color());
+        }
+        if let Some(alpha) = &alpha { alpha.draw(&mut enc, &target.view); }
         let dump = k >= start_frame && k < start_frame + frames && (args.out.is_some() || args.strip.is_some()) && (k - start_frame).is_multiple_of(args.every);
         let want_snap = k == snap_frame && args.snap.is_some();
         let want_pixels = dump || want_snap || (args.first_pixels && k == 0);
         if want_pixels {
             target.copy(&mut enc);
         }
-        gpu.queue.submit([enc.finish()]);
+        renderer.submit(&gpu.queue, enc);
         let ms = frame_start.elapsed().as_secs_f64() * 1000.0;
         cpu_ms.push(ms);
         if k > 0 {
             if animating { anim_ms.push(ms) } else { rest_ms.push(ms) }
         }
 
+        if comp.is_some() {
+            // Pace like a display link so a compositor's async readbacks (GPU timers) land between frames.
+            gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
+        }
         if let Some(tr) = trace.as_mut() {
             tr.frame(&mut rt, real_t * 1000.0, ms);
         }
@@ -726,6 +852,9 @@ pub fn headless<S: 'static>(app: crate::app::App<S>, args: Args) {
         rt.stats.layout_nodes,
         rt.stats.glyphs
     );
+    if let Some(s) = comp.as_mut().and_then(|c| c.summary(&gpu.device)) {
+        eprintln!("{s}");
+    }
 }
 
 fn tile_size(w: u32, h: u32, crops: &[[u32; 4]], gap: u32) -> (u32, u32) {

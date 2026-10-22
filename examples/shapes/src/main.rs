@@ -59,10 +59,12 @@ fn waveform(t: f32, w: f32, h: f32) -> Shape {
             ]
         })
         .collect();
+    // Drawn in a w × h box and stretched to the element's size.
     Shape::new()
         .fill(envelope, SOFT)
         .stroke(line, 1.5, ACCENT)
         .line([0.0, mid], [w, mid], 0.5, LineCap::Butt, INK)
+        .view_box(w, h)
 }
 
 fn meters(t: f32) -> Shape {
@@ -126,7 +128,7 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
         })
         .child(label("Waveform: filled envelope, polyline, hairline"))
         .child(
-            canvas(waveform(s.t, 520.0, 96.0))
+            canvas(waveform(s.t, 260.0, 96.0))
                 .key("wave")
                 .size(520.0, 96.0)
                 .fill(Color {
@@ -164,6 +166,7 @@ fn main() {
     rune::run(AppSpec {
         title: "Shapes",
         size: (820.0, 360.0),
+        min_size: None,
         init: || State { t: 0.0 },
         view,
         scenes: &[],

@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/rune",
+    "crates/rune-ref",
     "crates/rune-motion",
     "crates/rune-kit",
     "crates/rune-fx",
@@ -13,11 +14,17 @@ members = [
     "examples/background",
     "examples/live-values",
     "examples/shapes",
+    "examples/overlay",
+    "examples/lab",
+    "examples/video-tiles",
 ]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
+
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
 codegen-units = 16

@@ -22,12 +22,12 @@ use rune_motion::{
 use taffy::prelude::*;
 use taffy::TraversePartialTree;
 
-use crate::color::{Color, over, srgb_encode};
+use crate::color::{Color, over};
 use crate::edit::{EditOutcome, Ime, KeyEvent};
-use crate::el::{Align, Drag, DragFn, El, GrowthSpec, InputSpec, Phase, PressFn, ScrollSpec, Shell, TextSpec, Tx, Visual};
+use crate::el::{Align, Drag, DragFn, El, GrowthSpec, InputSpec, Phase, PointerPress, PressFn, SecondaryFn, ScrollSpec, Shell, TextSpec, Tx, Visual};
 use crate::growth::{GrowTrack, SUBSTEP};
 use crate::flight::{TextFlight, transformed};
-use crate::render::{Instance, KIND_GLYPH, KIND_GRADIENT, KIND_INSET, KIND_RECT, KIND_SEGMENT, KIND_SHADOW, KIND_TRIANGLE, NO_CLIP};
+use crate::render::{Instance, KIND_GLYPH, KIND_GRADIENT, KIND_IMAGE, KIND_INSET, KIND_RECT, KIND_SEGMENT, KIND_SHADOW, KIND_TRIANGLE, NO_CLIP};
 use crate::shape::{LineCap, Op, Shape};
 use crate::text::{Deco, GlyphQuad, Ink, TextSystem, layout_height};
 use crate::tok::motion;
@@ -96,6 +96,7 @@ pub(crate) struct Node {
     pub text: Option<TextSpec>,
     pub text_layout: Option<Rc<Layout<Ink>>>,
     on_press: Option<PressFn>,
+    on_secondary_press: Option<SecondaryFn>,
     on_hover: Option<PressFn>,
     above: Option<crate::el::Anchor>,
     on_drag: Option<DragFn>,
@@ -109,6 +110,7 @@ pub(crate) struct Node {
     streaming: bool,
     input: Option<Box<InputSpec>>,
     cursor: Option<crate::el::Cursor>,
+    window_drag: bool,
     /// Inside a growth row: layout snaps (the row's height carries the motion).
     in_row: bool,
     virtual_mount: bool,
@@ -125,6 +127,7 @@ pub(crate) struct Node {
 enum Action {
     Hover(String),
     Press(String),
+    SecondaryPress(String, PointerPress),
     Drag(String, Drag),
     Key(KeyEvent),
     Ime(Ime),
@@ -175,11 +178,12 @@ struct Inh {
     blur: f32,
     /// Vertical offset in points from scroll viewports and growth rows above.
     dy: f32,
+    mark: u32,
 }
 
 impl Default for Inh {
     fn default() -> Self {
-        Inh { opacity: 1.0, clip: NO_CLIP, fade: [0.0; 4], scale: 1.0, anchor: [0.0; 2], blur: 0.0, dy: 0.0 }
+        Inh { opacity: 1.0, clip: NO_CLIP, fade: [0.0; 4], scale: 1.0, anchor: [0.0; 2], blur: 0.0, dy: 0.0, mark: 0 }
     }
 }
 
@@ -228,10 +232,14 @@ pub struct Runtime<S: 'static> {
     pub state: S,
     view: fn(&S, &mut Cx<S>) -> El,
     pub text: TextSystem,
+    /// RGBA images elements show (`El::pixels`), uploaded by the renderer.
+    pub images: crate::pixels::ImageAtlas,
     pub scene: Scene,
     pub env: Env,
     /// Viewport in points.
     pub viewport: (f32, f32),
+    /// Transparent native surfaces/headless exports clear to transparent black.
+    pub transparent: bool,
     /// Animation time (seconds, scaled by the time scale).
     pub t: f64,
     pub reduced_motion: bool,
@@ -240,6 +248,7 @@ pub struct Runtime<S: 'static> {
     pub poll: Option<fn(&mut S, f64, &mut Tx) -> bool>,
     /// Seconds since the first frame, unscaled (virtual when headless).
     pub clock: f64,
+    wake_deadlines: Vec<f64>,
     /// Windowed runs read the clock from the wall instead of summing frame steps.
     pub wall_start: Option<std::time::Instant>,
     /// Called for every key before the focused field; return true to consume it.
@@ -257,9 +266,15 @@ pub struct Runtime<S: 'static> {
     queue: Vec<Action>,
     pointer: Option<(f32, f32)>,
     capture: Option<(String, Drag)>,
+    secondary_capture: Option<String>,
     capture_inside: bool,
     drag_data: f32,
     pub instances: Vec<Instance>,
+    /// Per instance, the `El::mark` of its nearest marked node (0 for none). Filled only while
+    /// `track_marks` is set (a compositor is attached).
+    pub marks: Vec<u32>,
+    pub track_marks: bool,
+    pub surfaces: Vec<crate::native_surface::SurfaceDraw>,
     hits: Vec<(NodeId, [f32; 4])>,
     glyph_scratch: Vec<GlyphQuad>,
     deco_scratch: Vec<Deco>,
@@ -285,6 +300,8 @@ pub struct Runtime<S: 'static> {
     pub copy_request: Option<String>,
     /// A handler or `update` asked to close the window or quit (the shell takes it).
     pub shell_request: Option<Shell>,
+    /// A press landed on a `window_drag` element (the shell starts a window move).
+    window_drag_request: bool,
     /// What `update` asked of the next commit.
     pending: Tx,
     pub animating: bool,
@@ -297,6 +314,8 @@ pub struct Runtime<S: 'static> {
     live_wake: Arc<crate::live::Wake>,
     live_subscriptions: Vec<Arc<crate::live::Subscription>>,
     live_dirty: bool,
+    /// Opt-in tooling checks. None keeps release commits free of key traversal/allocation.
+    pub(crate) key_warnings: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -335,14 +354,17 @@ impl<S: 'static> Runtime<S> {
             state,
             view,
             text,
+            images: Default::default(),
             scene,
             env,
             viewport,
+            transparent: false,
             t: 0.0,
             reduced_motion: false,
             time_scale: 1.0,
             poll: None,
             clock: 0.0,
+            wake_deadlines: Vec::new(),
             wall_start: None,
             on_key: None,
             nodes: Vec::new(),
@@ -362,9 +384,13 @@ impl<S: 'static> Runtime<S> {
             queue: Vec::new(),
             pointer: None,
             capture: None,
+            secondary_capture: None,
             capture_inside: false,
             drag_data: 0.0,
             instances: Vec::new(),
+            marks: Vec::new(),
+            track_marks: false,
+            surfaces: Vec::new(),
             hits: Vec::new(),
             glyph_scratch: Vec::new(),
             deco_scratch: Vec::new(),
@@ -386,6 +412,7 @@ impl<S: 'static> Runtime<S> {
             ime_area: None,
             copy_request: None,
             shell_request: None,
+            window_drag_request: false,
             pending: Tx::default(),
             animating: false,
             settled: false,
@@ -394,6 +421,7 @@ impl<S: 'static> Runtime<S> {
             live_wake: crate::live::Wake::new(Arc::new(|| {})),
             live_subscriptions: Vec::new(),
             live_dirty: false,
+            key_warnings: None,
         }
     }
 
@@ -499,6 +527,11 @@ impl<S: 'static> Runtime<S> {
         self.dirty = true;
     }
 
+    /// Next requested wake on the unscaled app clock. None lets the shell sleep indefinitely.
+    pub fn wake_deadline(&self) -> Option<f64> {
+        self.wake_deadlines.first().copied()
+    }
+
     /// Lands every track before the next frame: growth, reveals and follow-the-end (guarantee 8,
     /// for returning to a window or session).
     pub fn settle_all(&mut self) {
@@ -510,23 +543,51 @@ impl<S: 'static> Runtime<S> {
     /// if state changed, steps `Scene`, growth, scroll and reveals, and builds this frame's
     /// instances.
     pub fn frame(&mut self, dt: f64) -> bool {
+        // A coarse headless step still polls at every timer deadline, independent of FPS.
+        // Input queued for the requested frame stays at that frame's timestamp.
+        if self.wall_start.is_none()
+            && self.wake_deadline().is_some_and(|deadline| deadline > self.clock && deadline < self.clock + dt)
+        {
+            let target = self.clock + dt;
+            let input = std::mem::take(&mut self.queue);
+            while let Some(deadline) = self.wake_deadline()
+                && deadline > self.clock && deadline < target
+            {
+                self.frame_step(deadline - self.clock);
+            }
+            self.queue.extend(input);
+            return self.frame_step(target - self.clock);
+        }
+        self.frame_step(dt)
+    }
+
+    fn frame_step(&mut self, dt: f64) -> bool {
         let mut tx = std::mem::take(&mut self.pending);
         let mut ran = false;
         self.clock = match self.wall_start {
             Some(t0) => t0.elapsed().as_secs_f64(),
             None => self.clock + dt,
         };
+        let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
+        self.wake_deadlines.drain(..due);
         if let Some(poll) = self.poll {
             let mut one = Tx::default();
+            // Scheduling does not imply a model change.
             if poll(&mut self.state, self.clock, &mut one) {
                 ran = true;
-                merge(&mut tx, one);
             }
+            merge(&mut tx, one);
         }
         for action in std::mem::take(&mut self.queue) {
             ran |= self.run_action(action, &mut tx);
         }
         let shaped0 = self.text.shaped;
+        for delay in tx.wakes.drain(..) {
+            let deadline = self.clock + delay.as_secs_f64();
+            if let Err(index) = self.wake_deadlines.binary_search_by(|t| t.total_cmp(&deadline)) {
+                self.wake_deadlines.insert(index, deadline);
+            }
+        }
         if let Some(copy) = tx.copy.take() {
             self.copy_request = Some(copy);
         }
@@ -534,6 +595,7 @@ impl<S: 'static> Runtime<S> {
         for (source, target) in std::mem::take(&mut tx.text_flights) {
             self.capture_text_flight(source, target);
         }
+        let scroll_to = std::mem::take(&mut tx.scroll_to);
         if ran || self.dirty || self.relayout || self.settle || self.virtual_window_changed() {
             if self.relayout && !ran && !self.dirty {
                 tx.relayout = true;
@@ -547,6 +609,8 @@ impl<S: 'static> Runtime<S> {
         } else {
             self.settled = false;
         }
+        if !scroll_to.is_empty() { self.step_scroll(0.0); }
+        for key in scroll_to { self.reveal_row(&key); }
         self.update_interaction();
         self.latch_live();
         let step = dt * self.time_scale as f64;
@@ -561,7 +625,11 @@ impl<S: 'static> Runtime<S> {
         animating |= self.step_scroll(step as f32);
         animating |= self.reveals_active();
         self.build();
+        self.images.end_frame();
         animating |= self.draw_text_flights();
+        if self.track_marks {
+            self.marks.resize(self.instances.len(), 0);
+        }
         self.stats.shaped = self.text.shaped - shaped0;
         self.animating = animating;
         self.animating
@@ -583,6 +651,7 @@ impl<S: 'static> Runtime<S> {
             self.node_index.insert(n.id, idx);
             self.nodes.push(n);
         }
+        self.virtuals.retain(|path, _| self.nodes.iter().any(|n| n.path == *path));
     }
 
     fn capture_text_flight(&mut self, source: String, target: String) {
@@ -601,7 +670,7 @@ impl<S: 'static> Runtime<S> {
         self.text.glyphs_for_layout(layout, scale, [rect.x * scale, rect.y * scale], false, &mut self.glyph_scratch);
         let color = spec.color;
         let glyphs = self.glyph_scratch.iter().filter(|q| q.rect[1] < clip[3] * scale && q.rect[1] + q.rect[3] > clip[1] * scale)
-            .map(|q| glyph(q, color.premul(1.0), glyph_gamma(color), clip.map(|v| v * scale), [0.0; 4])).collect();
+            .map(|q| glyph(q, color.premul(1.0), glyph_gamma(color, scale), clip.map(|v| v * scale), [0.0; 4])).collect();
         self.flights.push(TextFlight::new(source, target, rect, clip, glyphs, scale, self.t));
     }
 
@@ -660,7 +729,7 @@ impl<S: 'static> Runtime<S> {
             self.glyph_scratch.clear();
             self.text.glyphs_for_layout(layout, s, [target.x * s, target.y * s], false, &mut self.glyph_scratch);
             for q in &self.glyph_scratch {
-                let q = glyph(q, spec.color.premul(1.0), glyph_gamma(spec.color), NO_CLIP, [0.0; 4]);
+                let q = glyph(q, spec.color.premul(1.0), glyph_gamma(spec.color, s), NO_CLIP, [0.0; 4]);
                 self.instances.push(transformed(q, target, current, s, target_alpha,
                     if reduced { actual_clip } else { clip }, if reduced { final_fade } else { fade }));
             }
@@ -683,6 +752,13 @@ impl<S: 'static> Runtime<S> {
                 f(&mut self.state as &mut dyn Any, &mut one);
                 true
             }
+            Action::SecondaryPress(path, point) => {
+                let Some(n) = self.node(&path).filter(|n| !self.is_exiting(n.id)) else { return false };
+                let Some(f) = n.on_secondary_press.clone() else { return false };
+                self.events.push(format!("secondary press {path}"));
+                f(&mut self.state as &mut dyn Any, point, &mut one);
+                true
+            }
             Action::Drag(path, mut d) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_drag.clone()) else { return false };
                 if d.phase == Phase::Move {
@@ -701,6 +777,13 @@ impl<S: 'static> Runtime<S> {
                     && f(&mut self.state, &ev, &mut one)
                 {
                     self.events.push(format!("key {:?}", ev.key));
+                    merge(tx, one);
+                    return true;
+                }
+                if let Some(f) = self.focused.as_deref().and_then(|p| self.node(p))
+                    .and_then(|n| n.input.as_ref()?.key.clone())
+                    && f(&mut self.state as &mut dyn Any, &ev, &mut one)
+                {
                     merge(tx, one);
                     return true;
                 }
@@ -758,15 +841,19 @@ impl<S: 'static> Runtime<S> {
 
     fn with_focused(&mut self, f: impl FnOnce(&mut crate::edit::TextEdit) -> EditOutcome, tx: &mut Tx) -> bool {
         let Some(path) = self.focused.clone() else { return false };
-        let Some((access, submit, animate_layout)) =
-            self.node(&path).and_then(|n| n.input.as_ref().map(|i| (i.access.clone(), i.submit.clone(), i.animate_layout)))
+        let Some((access, submit, change, animate_layout)) =
+            self.node(&path).and_then(|n| n.input.as_ref().map(|i| (i.access.clone(), i.submit.clone(), i.change.clone(), i.animate_layout)))
         else {
             return false;
         };
         let Some(access) = access else { return false };
+        let before = change.as_ref().map(|_| access(&mut self.state as &mut dyn Any).text.clone());
         let out = f(access(&mut self.state as &mut dyn Any));
         // Typing is the user's own hand: no animation.
         tx.instant = !animate_layout;
+        if let Some(change) = change
+            && before.as_deref() != Some(access(&mut self.state as &mut dyn Any).text.as_str())
+        { change(&mut self.state as &mut dyn Any, tx); }
         if let Some(c) = out.copy {
             tx.copy(c);
         }
@@ -816,7 +903,9 @@ impl<S: 'static> Runtime<S> {
     // Commit: view → nodes → layout → Scene retarget
 
     fn virtual_window_changed(&self) -> bool {
-        self.virtuals.values().any(|v| {
+        self.virtuals.iter().any(|(path, v)| {
+            let Some(&i) = self.path_ids.get(path).and_then(|id| self.node_index.get(id)) else { return false };
+            if self.subtree_exiting(i) { return false; }
             self.path_ids.get(&v.scroll_path).and_then(|id| self.scrolls.get(id))
                 .is_some_and(|s| v.needs_window(s.offset as f32, s.pinned))
         })
@@ -844,6 +933,7 @@ struct Measurement<'a, S> {
     virtuals: &'a mut HashMap<String, crate::virtual_list::VirtualList>,
     virtual_culled: &'a mut HashSet<String>,
     stats: &'a mut FrameStats,
+    key_warnings: &'a mut Option<Vec<String>>,
 }
 
 /// Owned result of completed measurement. Scene mutation consumes this once; retries never
@@ -867,7 +957,8 @@ impl<S> Measurement<'_, S> {
             if !self.measure_virtuals(&nodes, tx.settle) { break (layout, nodes); }
             *self.layout = layout;
         };
-        self.virtuals.retain(|path, _| nodes.iter().any(|n| n.path == *path));
+        // Exiting virtual subtrees still use their origin and measured extent while
+        // fading. Runtime prunes this metadata with the retained scene nodes.
         Measured { layout, nodes, reduced_motion: self.reduced_motion, time_scale: self.time_scale }
     }
 
@@ -981,6 +1072,17 @@ impl<S> Measurement<'_, S> {
             _s: PhantomData,
         };
         let mut root = (self.view)(self.state, &mut cx);
+        if let Some(warnings) = self.key_warnings.as_mut() {
+            *warnings = crate::key_diagnostics::warnings(&root);
+            // Do not hand an invalid identity tree to Taffy. --tree still emits diagnostics.
+            if !warnings.is_empty() { root = crate::el(); }
+        } else {
+            #[cfg(debug_assertions)]
+            {
+                let warnings = crate::key_diagnostics::warnings(&root);
+                debug_assert!(warnings.is_empty(), "{}", warnings.join("\n"));
+            }
+        }
         self.window_tree(&mut root, "", 0, None, tx.settle, force_all);
         self.reduced_motion = cx.reduced_motion;
         self.time_scale = cx.time_scale;
@@ -1091,7 +1193,31 @@ impl<S> Measurement<'_, S> {
 
 impl<S: 'static> Runtime<S> {
     fn commit(&mut self, tx: Tx) {
-        let measured = self.measure(&tx);
+        let mut measured = self.measure(&tx);
+        // A newly focused input (for example a popover search field) takes focus from
+        // the previous field. Re-measure after clearing its model so focus rings agree
+        // with keyboard routing in this same frame.
+        let focused = measured.nodes.iter().filter(|n| n.input.as_ref().is_some_and(|i| i.edit.focused));
+        let next = focused.clone().find(|n| Some(&n.path) != self.focused.as_ref())
+            .or_else(|| focused.into_iter().next()).map(|n| n.path.clone());
+        let mut cleared = false;
+        for n in &measured.nodes {
+            if Some(&n.path) != next.as_ref()
+                && let Some(access) = n.input.as_ref().and_then(|i| i.access.as_ref())
+            {
+                let edit = access(&mut self.state as &mut dyn Any);
+                if edit.focused {
+                    edit.focused = false;
+                    edit.break_history_group();
+                    cleared = true;
+                }
+            }
+        }
+        self.focused = next;
+        if cleared {
+            self.layout = measured.layout;
+            measured = self.measure(&tx);
+        }
         self.apply(measured, tx);
     }
 
@@ -1115,6 +1241,7 @@ impl<S: 'static> Runtime<S> {
             virtuals: &mut self.virtuals,
             virtual_culled: &mut self.virtual_culled,
             stats: &mut self.stats,
+            key_warnings: &mut self.key_warnings,
         }.finish(tx)
     }
 
@@ -1445,6 +1572,7 @@ impl<S: 'static> Runtime<S> {
         }
 
         self.nodes = nodes;
+        self.virtuals.retain(|path, _| self.nodes.iter().any(|n| n.path == *path));
         self.subscribe_live();
         self.layout = taffy;
         self.text.end_commit();
@@ -1520,6 +1648,7 @@ impl<S: 'static> Runtime<S> {
         let mut moving = false;
         for i in 0..self.nodes.len() {
             let Some(sp) = self.nodes[i].scroll else { continue };
+            if self.subtree_exiting(i) { continue; }
             let id = self.nodes[i].id;
             let view_h = self.nodes[i].target[3] - self.nodes[i].target[1];
             let content = (i + 1..self.nodes.len()).find(|&j| self.nodes[j].parent == Some(i));
@@ -1583,11 +1712,20 @@ impl<S: 'static> Runtime<S> {
     // ---------------------------------------------------------------------------------------
     // Input: queued, handled at the next frame.
 
+    fn primary_target(&self, x: f32, y: f32) -> Option<usize> {
+        self.hits.iter().rev().find_map(|&(id, r)| {
+            if x < r[0] || x > r[2] || y < r[1] || y > r[3] { return None; }
+            let i = *self.node_index.get(&id)?;
+            let n = &self.nodes[i];
+            // A secondary-only child must not obscure primary input or background blur.
+            (!self.is_exiting(id) && (n.on_press.is_some() || n.on_hover.is_some()
+                || n.on_drag.is_some() || n.input.is_some() || n.window_drag)).then_some(i)
+        })
+    }
+
     pub fn pointer_move(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
-        let hovered = self.hits.iter().rev().find(|&&(_, r)| x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3])
-            .and_then(|(id, _)| self.node_index.get(id).map(|&i| &self.nodes[i]))
-            .filter(|n| !self.is_exiting(n.id)).map(|n| n.path.clone());
+        let hovered = self.primary_target(x, y).map(|i| self.nodes[i].path.clone());
         if hovered != self.hovered {
             if let Some(path) = &hovered { self.queue.push(Action::Hover(path.clone())); }
             self.hovered = hovered;
@@ -1603,8 +1741,7 @@ impl<S: 'static> Runtime<S> {
 
     pub fn pointer_down(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
-        let hit = self.hits.iter().rev().find(|&&(_, r)| x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3]).map(|h| h.0);
-        let target = hit.and_then(|id| self.node_index.get(&id).copied().filter(|&i| !self.is_exiting(self.nodes[i].id)));
+        let target = self.primary_target(x, y);
         let Some(ti) = target else {
             if self.focused.is_some() {
                 self.queue.push(Action::Blur);
@@ -1615,6 +1752,10 @@ impl<S: 'static> Runtime<S> {
         let r = self.drawn.get(ti).copied().unwrap_or([n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]]);
         if n.input.is_some() {
             self.queue.push(Action::Focus(n.path.clone(), x - r[0] - n.inset[0], y - r[1] - n.inset[1]));
+            return;
+        }
+        if n.window_drag && n.on_press.is_none() && n.on_drag.is_none() {
+            self.window_drag_request = true;
             return;
         }
         let r = n.target;
@@ -1636,6 +1777,38 @@ impl<S: 'static> Runtime<S> {
         self.capture_inside = true;
     }
 
+    /// Whether the last `pointer_down` landed on a `window_drag` element; the shell moves the
+    /// window from inside that mouse-down event.
+    pub fn take_window_drag(&mut self) -> bool {
+        std::mem::take(&mut self.window_drag_request)
+    }
+
+    fn secondary_target(&self, x: f32, y: f32) -> Option<&str> {
+        let id = self.hits.iter().rev().find(|&&(_, r)| x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3])?.0;
+        let mut index = *self.node_index.get(&id)?;
+        loop {
+            let n = &self.nodes[index];
+            if self.is_exiting(n.id) { return None; }
+            if n.on_secondary_press.is_some() { return Some(&n.path); }
+            index = n.parent?;
+        }
+    }
+
+    /// Capture a secondary gesture without activating primary actions or text selection.
+    pub fn secondary_down(&mut self, x: f32, y: f32) {
+        self.pointer = Some((x, y));
+        self.secondary_capture = self.secondary_target(x, y).map(str::to_owned);
+    }
+
+    pub fn secondary_up(&mut self, x: f32, y: f32) {
+        self.pointer = Some((x, y));
+        if let Some(path) = self.secondary_capture.take()
+            && self.secondary_target(x, y) == Some(path.as_str())
+        {
+            self.queue.push(Action::SecondaryPress(path, PointerPress { x, y }));
+        }
+    }
+
     pub fn pointer_up(&mut self, x: f32, y: f32) {
         self.pointer_move(x, y);
         let Some((path, d)) = self.capture.take() else { return };
@@ -1654,7 +1827,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub fn pointer_leave(&mut self) {
-        if self.capture.is_none() {
+        if self.capture.is_none() && self.secondary_capture.is_none() {
             self.pointer = None;
             self.hovered = None;
         }
@@ -1697,6 +1870,36 @@ impl<S: 'static> Runtime<S> {
 
     pub fn has_focus(&self) -> bool {
         self.focused.is_some()
+    }
+
+    fn reveal_row(&mut self, key: &str) {
+        let geometry = self.virtuals.iter().find_map(|(_, v)| {
+            let index = v.keys.iter().position(|candidate| candidate == key)?;
+            Some((v.scroll_path.clone(), f64::from(v.pad_top + v.prefix(index)), f64::from(v.height(key)), f64::from(v.viewport)))
+        }).or_else(|| {
+            let (i, row) = self.nodes.iter().enumerate().find(|(_, n)| n.key.as_deref() == Some(key) || n.path == key)?;
+            let mut ancestor = self.nodes[i].parent;
+            while let Some(p) = ancestor {
+                let parent = &self.nodes[p];
+                if parent.scroll.is_some() {
+                    return Some((parent.path.clone(), f64::from(row.target[1] - parent.target[1]),
+                        f64::from(row.local.h), f64::from(parent.local.h)));
+                }
+                ancestor = parent.parent;
+            }
+            None
+        });
+        let Some((path, top, height, viewport)) = geometry else { return };
+        let Some(id) = self.path_ids.get(&path) else { return };
+        let Some(scroll) = self.scrolls.get_mut(id) else { return };
+        let offset = if top < scroll.offset { top } else if top + height > scroll.offset + viewport {
+            top + height - viewport
+        } else { scroll.offset };
+        scroll.offset = offset.clamp(0.0, scroll.max);
+        scroll.pinned = false;
+        scroll.v = 0.0;
+        scroll.direct = true;
+        if self.virtual_window_changed() { self.commit(Tx::default()); }
     }
 
     fn scroll_at(&self, x: f32, y: f32) -> Option<NodeId> {
@@ -1742,7 +1945,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn update_interaction(&mut self) {
-        let captured = self.capture.as_ref().map(|(p, _)| p.as_str());
+        let captured = self.capture.as_ref().map(|(p, _)| p.as_str()).or(self.secondary_capture.as_deref());
         for i in 0..self.nodes.len() {
             let n = &self.nodes[i];
             if self.is_exiting(n.id) || (n.vis.hover.a <= 0.0 && n.vis.press.a <= 0.0) {
@@ -1754,7 +1957,8 @@ impl<S: 'static> Runtime<S> {
             );
             let inside = self.pointer.is_some_and(|(x, y)| x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3]);
             let hovered = inside && n.vis.hover.a > 0.0 && captured.is_none_or(|p| p == n.path);
-            let pressed = captured == Some(n.path.as_str()) && self.capture_inside && n.vis.press.a > 0.0;
+            let capture_inside = if self.secondary_capture.is_some() { inside } else { self.capture_inside };
+            let pressed = captured == Some(n.path.as_str()) && capture_inside && n.vis.press.a > 0.0;
             let id = n.id;
             self.scene.animate(id, P_HOVER, hovered as u8 as f32, motion::SNAPPY);
             self.scene.animate(id, P_PRESS, pressed as u8 as f32, if pressed { motion::INSTANT } else { motion::SNAPPY });
@@ -1768,6 +1972,8 @@ impl<S: 'static> Runtime<S> {
         let s = self.env.scale;
         let snap_px = |v: f32| grid(v, s) * s;
         self.instances.clear();
+        self.marks.clear();
+        self.surfaces.clear();
         self.hits.clear();
         let n_nodes = self.nodes.len();
         self.inh_scratch.clear();
@@ -1815,6 +2021,7 @@ impl<S: 'static> Runtime<S> {
             let Some(p) = self.scene.presented(n.id) else { continue };
             let mut pinh = n.parent.map_or(Inh::default(), |pr| self.inh_scratch[pr]);
             pinh.dy += self.row_dy[i];
+            let mark = if n.vis.mark != 0 { n.vis.mark } else { pinh.mark };
             let o = (p.opacity * pinh.opacity).clamp(0.0, 1.0);
             let (mut clip, mut fade) = (pinh.clip, pinh.fade);
             let own_sc = p.transform.scale.x;
@@ -1924,7 +2131,7 @@ impl<S: 'static> Runtime<S> {
                     }
                 }
                 let base = self.color(n.id, P_FILL, n.vis.fill).premul(1.0);
-                let layered = n.vis.gradient.is_some();
+                let layered = n.vis.gradient.is_some() || n.vis.surface.is_some();
                 let fill = if layered { base } else { over(overlay, base) }.map(|c| c * o);
                 let bw = n.vis.border_width * sc * s;
                 let border = if bw > 0.0 { self.color(n.id, P_BORDER, n.vis.border).premul(o) } else { [0.0; 4] };
@@ -1955,6 +2162,12 @@ impl<S: 'static> Runtime<S> {
                             uv: bottom,
                             clip,
                             fade,
+                        });
+                    }
+                    if let Some((surface, fit)) = &n.vis.surface {
+                        self.surfaces.push(crate::native_surface::SurfaceDraw {
+                            surface: surface.clone(), fit: *fit, before_instance: self.instances.len() as u32,
+                            rect: [r[0], r[1], w, h], radii, clip, fade, opacity: o,
                         });
                     }
                     let ov = overlay.map(|c| c * o);
@@ -2018,7 +2231,25 @@ impl<S: 'static> Runtime<S> {
                     }
                 }
                 if let Some(shape) = &n.vis.shape {
-                    push_shape(&mut self.instances, shape, [r[0], r[1]], k_px, o, clip, fade);
+                    let k = match shape.view_box {
+                        Some([vw, vh]) => [w / vw, h / vh],
+                        None => [k_px, k_px],
+                    };
+                    push_shape(&mut self.instances, shape, [r[0], r[1]], k, k_px, o, clip, fade);
+                }
+                if let Some(pixels) = &n.vis.pixels
+                    && let Some(image) = self.images.place(pixels, [w, h])
+                {
+                    self.instances.push(Instance {
+                        rect: [r[0], r[1], w, h],
+                        radii,
+                        fill: [0.0, 0.0, 0.0, o],
+                        border: [0.0; 4],
+                        params: [image.page as f32, KIND_IMAGE, image.premultiplied as u8 as f32, 1.0],
+                        uv: image.rect.map(|v| v as f32),
+                        clip,
+                        fade,
+                    });
                 }
                 if let Some((ic, c)) = n.vis.icon {
                     let color = self.color(n.id, P_TEXT, c);
@@ -2058,7 +2289,7 @@ impl<S: 'static> Runtime<S> {
                             self.text.glyphs_for_layout(&pl, s, origin, false, &mut self.glyph_scratch);
                             let pc = inp.placeholder_color.premul(o);
                             for q in &self.glyph_scratch {
-                                self.instances.push(glyph(q, pc, glyph_gamma(inp.placeholder_color), clip, fade));
+                                self.instances.push(glyph(q, pc, glyph_gamma(inp.placeholder_color, s), clip, fade));
                             }
                         }
                         if e.focused && !departing {
@@ -2119,7 +2350,7 @@ impl<S: 'static> Runtime<S> {
                     let reveal = self.reveals.get(&n.id).filter(|st| !st.words.is_empty());
                     self.glyph_scratch.clear();
                     self.text.glyphs_for_layout(layout, s, origin, reveal.is_some(), &mut self.glyph_scratch);
-                    let gamma = glyph_gamma(color);
+                    let gamma = glyph_gamma(color, s);
                     let base = color.premul(o);
                     for q in &self.glyph_scratch {
                         if self.flights.iter().any(|f| n.key.as_deref() == Some(&f.target_key)) { continue; }
@@ -2131,7 +2362,7 @@ impl<S: 'static> Runtime<S> {
                             && let Some(c) = spec.spans.get(q.ink as usize - 1).and_then(|sp| sp.color)
                         {
                             f = c.premul(o);
-                            gm = glyph_gamma(c);
+                            gm = glyph_gamma(c, s);
                         }
                         if let Some(st) = reveal {
                             let a = Self::reveal_alpha(st, q.byte, now);
@@ -2147,6 +2378,9 @@ impl<S: 'static> Runtime<S> {
                         self.instances.push(rect_inst(c, inp.caret.premul(o), 0.0, clip, fade));
                     }
                 }
+            }
+            if self.track_marks {
+                self.marks.resize(self.instances.len(), mark);
             }
             let (mut clip, mut fade) = match n.vis.clip {
                 Some(f) => (
@@ -2170,8 +2404,8 @@ impl<S: 'static> Runtime<S> {
                 let origin = self.virtuals.values().find(|v| v.scroll_path == n.path).map_or(0.0, |v| f64::from(v.before));
                 dy -= grid((st.offset - origin) as f32, s);
             }
-            self.inh_scratch[i] = Inh { opacity: o, clip, fade, scale: sc, anchor, blur, dy };
-            if (n.on_press.is_some() || n.on_hover.is_some() || n.on_drag.is_some() || n.input.is_some())
+            self.inh_scratch[i] = Inh { opacity: o, clip, fade, scale: sc, anchor, blur, dy, mark };
+            if (n.on_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_drag.is_some() || n.input.is_some() || n.window_drag)
                 && !self.subtree_exiting(i)
             {
                 let c = self.inh_scratch[n.parent.unwrap_or(0)].clip;
@@ -2302,7 +2536,15 @@ impl<S: 'static> Runtime<S> {
         Some((r[0] + r[2] * 0.5, r[1] + r[3] * 0.5))
     }
 
+    /// Drawn rect `[x, y, w, h]` in points and effective opacity (ancestors included) of the
+    /// element keyed `key`, exiting or not, as of the last frame.
+    pub fn presented(&self, key: &str) -> Option<([f32; 4], f32)> {
+        let i = self.nodes.iter().position(|n| n.key.as_deref() == Some(key))?;
+        Some((*self.drawn.get(i)?, self.inh_scratch.get(i)?.opacity))
+    }
+
     pub fn clear_color(&self) -> [f32; 4] {
+        if self.transparent { return [0.0; 4]; }
         self.nodes.first().map_or([0.0, 0.0, 0.0, 1.0], |n| {
             let c = self.color(n.id, P_FILL, n.vis.fill);
             [c.r, c.g, c.b, 1.0]
@@ -2311,6 +2553,8 @@ impl<S: 'static> Runtime<S> {
 }
 
 fn merge(tx: &mut Tx, one: Tx) {
+    tx.scroll_to.extend(one.scroll_to);
+    tx.wakes.extend(one.wakes);
     tx.text_flights.extend(one.text_flights);
     if one.copy.is_some() { tx.copy = one.copy; }
     tx.shell = tx.shell.max(one.shell);
@@ -2400,9 +2644,11 @@ fn anchor_position(a: &crate::el::Anchor, t: [f32; 4], size: (f32, f32), vp: (f3
     (x, y)
 }
 
-/// Instances for a vector shape whose origin sits at `origin` (device px), `k` device px per point.
-fn push_shape(out: &mut Vec<Instance>, shape: &Shape, origin: [f32; 2], k: f32, opacity: f32, clip: [f32; 4], fade: [f32; 4]) {
-    let at = |p: [f32; 2]| [origin[0] + p[0] * k, origin[1] + p[1] * k];
+/// Instances for a vector shape whose origin sits at `origin` (device px), with `k` device px per
+/// coordinate unit on each axis and `k_px` device px per point for stroke widths.
+#[allow(clippy::too_many_arguments)]
+fn push_shape(out: &mut Vec<Instance>, shape: &Shape, origin: [f32; 2], k: [f32; 2], k_px: f32, opacity: f32, clip: [f32; 4], fade: [f32; 4]) {
+    let at = |p: [f32; 2]| [origin[0] + p[0] * k[0], origin[1] + p[1] * k[1]];
     for op in &shape.ops {
         match op {
             Op::Stroke { points, closed, width, cap, color } => {
@@ -2410,7 +2656,7 @@ fn push_shape(out: &mut Vec<Instance>, shape: &Shape, origin: [f32; 2], k: f32, 
                 if fill[3] <= 0.0005 {
                     continue;
                 }
-                let hw = width * k * 0.5;
+                let hw = width * k_px * 0.5;
                 let pad = hw.max(0.5) + 1.0;
                 let n = points.len();
                 let count = if *closed { n } else { n - 1 };
@@ -2467,11 +2713,8 @@ fn rect_inst(rect: [f32; 4], fill: [f32; 4], radius: f32, clip: [f32; 4], fade: 
     }
 }
 
-/// Coverage exponent: dark text on light gets a little more weight (linear blending thins it),
-/// light text on dark is left almost as rasterised.
-fn glyph_gamma(c: Color) -> f32 {
-    let l = srgb_encode(c.luminance());
-    0.78 + 0.22 * l
+fn glyph_gamma(c: Color, scale: f32) -> f32 {
+    crate::text::glyph_coverage_exponent(c, scale)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2503,6 +2746,7 @@ fn flatten(
         text,
         children,
         on_press,
+        on_secondary_press,
         on_hover,
         above,
         on_drag,
@@ -2515,6 +2759,7 @@ fn flatten(
         streaming,
         input,
         cursor,
+        window_drag,
         ..
     } = el;
     let measured = text.is_some();
@@ -2530,6 +2775,7 @@ fn flatten(
         text,
         text_layout: None,
         on_press,
+        on_secondary_press,
         on_hover,
         above,
         on_drag,
@@ -2543,6 +2789,7 @@ fn flatten(
         streaming,
         input,
         cursor,
+        window_drag,
         in_row,
         virtual_mount,
         parent,
@@ -2599,6 +2846,154 @@ fn flatten(
 mod tests {
     use super::*;
     use crate::el::{col, el};
+
+    fn duplicate_view(_: &(), _: &mut Cx<()>) -> El {
+        col().children([el().key("card"), el().key("card")])
+    }
+
+    #[test]
+    fn deleting_a_focused_row_does_not_call_its_stale_edit_accessor() {
+        fn view(s: &Vec<crate::TextEdit>, _: &mut Cx<Vec<crate::TextEdit>>) -> El {
+            col().children(s.iter().enumerate().map(|(i, edit)| {
+                crate::text_input(edit, crate::TextStyle::new(14.0, 400.0))
+                    .key(format!("row-{i}"))
+                    .on_edit(crate::edit_access(move |s: &mut Vec<crate::TextEdit>| &mut s[i]))
+            })).child(el().key("delete").size(40.0, 40.0).on_press(|s: &mut Vec<crate::TextEdit>| { s.clear(); }))
+        }
+        let mut edit = crate::TextEdit::default();
+        edit.focused = true;
+        let mut rt = Runtime::new(vec![edit], view, (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        let path = rt.nodes.iter().find(|n| n.key.as_deref() == Some("delete")).unwrap().path.clone();
+        rt.queue.push(Action::Press(path));
+        rt.frame(0.0);
+        assert!(rt.state.is_empty());
+        assert!(!rt.has_focus());
+    }
+
+    #[test]
+    fn secondary_only_children_preserve_primary_click_hover_and_background_blur() {
+        type State = (u32, u32, bool);
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let parent = el().key("parent").size(80.0, 80.0);
+            let parent = if s.2 { parent } else {
+                parent.on_press(|s: &mut State| s.0 += 1)
+                    .on_hover(|s: &mut State| s.1 += 1)
+            };
+            parent.child(el().key("child").size(40.0, 40.0)
+                .on_secondary_press(|_: &mut State, _, _| {}))
+        }
+        let mut rt = Runtime::new((0, 0, false), view, (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        rt.pointer_move(10.0, 10.0);
+        rt.pointer_down(10.0, 10.0);
+        rt.pointer_up(10.0, 10.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state, (1, 1, false));
+        rt.state.2 = true;
+        rt.invalidate();
+        rt.frame(0.0);
+        rt.focused = Some("previous-input".into());
+        rt.pointer_move(10.0, 10.0);
+        rt.pointer_down(10.0, 10.0);
+        assert!(rt.hovered.is_none());
+        assert!(matches!(rt.queue.last(), Some(Action::Blur)));
+        assert!(rt.secondary_target(10.0, 10.0).is_some());
+    }
+
+    #[test]
+    fn secondary_press_routes_to_ancestor_without_primary_and_cancels_outside() {
+        type State = (u32, Vec<PointerPress>, bool);
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            col().child(if s.2 {
+                el()
+            } else {
+                el().key("parent").size(80.0, 80.0)
+                    .on_secondary_press(|s: &mut State, p, _| s.1.push(p))
+                    .child(el().key("child").size(40.0, 40.0).on_press(|s: &mut State| s.0 += 1))
+            })
+        }
+        let mut rt = Runtime::new((0, Vec::new(), false), view, (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        rt.secondary_down(10.0, 10.0);
+        rt.secondary_up(12.0, 12.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state.0, 0);
+        assert_eq!(rt.state.1, [PointerPress { x: 12.0, y: 12.0 }]);
+        rt.secondary_down(10.0, 10.0);
+        rt.secondary_up(90.0, 90.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state.1.len(), 1);
+        rt.secondary_down(10.0, 10.0);
+        rt.state.2 = true;
+        rt.invalidate();
+        rt.frame(0.0);
+        rt.secondary_up(12.0, 12.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state.1.len(), 1);
+    }
+
+    #[test]
+    fn timed_wakes_are_exact_coalesced_and_do_not_commit_or_animate() {
+        use std::time::Duration;
+        fn view(_: &Vec<f64>, cx: &mut Cx<Vec<f64>>) -> El {
+            cx.time_scale(0.1);
+            el()
+        }
+        fn poll(seen: &mut Vec<f64>, clock: f64, tx: &mut Tx) -> bool {
+            seen.push(clock);
+            if clock == 0.0 {
+                tx.wake_after(Duration::from_millis(250));
+                tx.wake_after(Duration::from_millis(250));
+                tx.wake_after(Duration::from_millis(375));
+            }
+            false
+        }
+        let mut rt = Runtime::new(Vec::new(), view, (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        rt.poll = Some(poll);
+        assert!(!rt.frame(0.0));
+        assert_eq!(rt.wake_deadlines, [0.25, 0.375]);
+        assert!(!rt.frame(0.5));
+        assert_eq!(rt.state, [0.0, 0.25, 0.375, 0.5]);
+        assert_eq!(rt.commits, 1);
+        assert_eq!(rt.wake_deadline(), None);
+        assert!((rt.t - 0.05).abs() < 1e-8);
+    }
+
+    #[test]
+    fn timed_wakes_from_handlers_survive_transaction_merging() {
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            el().key("button").size(100.0, 100.0).on_press_tx(|_: &mut (), tx| {
+                tx.wake_after(std::time::Duration::from_millis(250));
+            })
+        }
+        let mut rt = Runtime::new((), view, (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        rt.pointer_down(10.0, 10.0);
+        rt.pointer_up(10.0, 10.0);
+        rt.frame(0.1);
+        assert_eq!(rt.wake_deadline(), Some(0.35));
+        rt.frame(0.25);
+        assert_eq!(rt.wake_deadline(), None);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "duplicate sibling key \"card\"")]
+    fn duplicate_sibling_keys_fail_before_layout() {
+        let mut rt = Runtime::new((), duplicate_view, (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+    }
+
+    #[test]
+    fn duplicate_sibling_keys_tooling_reports_without_invalid_layout() {
+        let mut rt = Runtime::new((), duplicate_view, (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        rt.key_warnings = Some(Vec::new());
+        rt.frame(0.0);
+        assert_eq!(rt.key_warnings.as_ref().unwrap().len(), 1);
+        assert_eq!(rt.nodes.len(), 1);
+        assert_eq!(rt.nodes[0].local.w, 100.0);
+    }
 
     #[test]
     fn side_panel_wraps_once_and_releases_height_after_stable_width() {
@@ -2669,6 +3064,28 @@ mod tests {
             let b = run(120, reduced);
             for (a, b) in a.into_iter().zip(b) { assert!((a - b).abs() < 0.05, "frame-rate dependent hold: {a} vs {b}"); }
         }
+    }
+
+    #[test]
+    fn presses_on_a_window_drag_region_move_the_window_but_not_its_buttons() {
+        struct State { pressed: u32 }
+        fn view(_: &State, _: &mut Cx<State>) -> El {
+            col().size(200.0, 200.0)
+                .child(crate::el::row().key("titlebar").size(200.0, 40.0).window_drag()
+                    .child(el().key("button").size(40.0, 40.0).on_press(|s: &mut State| s.pressed += 1)))
+                .child(el().key("body").size(200.0, 40.0))
+        }
+        let mut rt = Runtime::new(State { pressed: 0 }, view, (200.0, 200.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        for (x, y, drags) in [(100.0, 20.0, true), (20.0, 20.0, false), (100.0, 60.0, false)] {
+            rt.pointer_move(x, y);
+            rt.pointer_down(x, y);
+            assert_eq!(rt.take_window_drag(), drags, "at {x}, {y}");
+            assert!(!rt.take_window_drag(), "a drag request is taken once");
+            rt.pointer_up(x, y);
+        }
+        rt.frame(1.0 / 120.0);
+        assert_eq!(rt.state.pressed, 1, "the button inside the title bar still presses");
     }
 
     #[test]

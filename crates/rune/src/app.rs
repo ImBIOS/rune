@@ -22,12 +22,15 @@
 //! app.run();
 //! ```
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::el::Tx;
 use crate::tooling::{AppSpec, Args};
 
 type Update<S> = Box<dyn FnOnce(&mut S, &mut Tx) + Send>;
+/// `App::on_window`'s hook, run after each native window creation.
+pub(crate) type OnWindow = Box<dyn FnMut(&crate::WindowHandle)>;
 
 /// An `AppSpec` with its lifetime: by default it opens one window and quits when it closes,
 /// like `rune::run`.
@@ -42,6 +45,9 @@ pub struct App<S: 'static> {
     pub(crate) keep_running: bool,
     pub(crate) on_close: Option<fn(&mut S, &mut Tx)>,
     pub(crate) shared: Arc<Shared<S>>,
+    pub(crate) overlays: Vec<Box<dyn crate::overlay::PendingOverlay>>,
+    pub(crate) on_window: Option<OnWindow>,
+    pub(crate) compositor: Option<Box<dyn crate::compose::Compositor<S>>>,
 }
 
 impl<S: 'static> App<S> {
@@ -56,7 +62,20 @@ impl<S: 'static> App<S> {
             keep_running: false,
             on_close: None,
             shared: Arc::default(),
+            overlays: Vec::new(),
+            on_window: None,
+            compositor: None,
         }
+    }
+
+    /// Adds an overlay: an observational surface beside this app's window with its own state,
+    /// drawn transparent above every app, never focused, letting the pointer through (a
+    /// recording HUD), centred on the top or bottom edge of the primary display. Hidden until
+    /// `OverlayHandle::show`; uses the spec's fonts. Headless runs don't draw overlays.
+    pub fn overlay<T: 'static>(&mut self, spec: crate::overlay::OverlaySpec<T>, state: T) -> crate::overlay::OverlayHandle<T> {
+        let (overlay, handle) = crate::overlay::Overlay::new(spec, state, &self.spec);
+        self.overlays.push(Box::new(overlay));
+        handle
     }
 
     /// Build the first state with `f` instead of `AppSpec::init`, so it can capture what the
@@ -108,6 +127,21 @@ impl<S: 'static> App<S> {
     /// before it goes: flush drafts, stop previews. Its `Tx::quit` quits.
     pub fn on_close(mut self, f: fn(&mut S, &mut Tx)) -> Self {
         self.on_close = Some(f);
+        self
+    }
+
+    /// Runs on the UI thread each time the native window is created (again after a Wayland
+    /// close or a GPU release): set its icon or native styles through
+    /// `WindowHandle::with_raw_handle`.
+    pub fn on_window(mut self, f: impl FnMut(&crate::WindowHandle) + 'static) -> Self {
+        self.on_window = Some(Box::new(f));
+        self
+    }
+
+    /// Draw every frame of the app's window (and headless renders) through `compositor`
+    /// instead of Rune's default pass (see `compose`).
+    pub fn compositor(mut self, compositor: impl crate::compose::Compositor<S>) -> Self {
+        self.compositor = Some(Box::new(compositor));
         self
     }
 
@@ -163,6 +197,29 @@ impl<S: 'static> AppHandle<S> {
         self.request(|q| q.window = Some(WindowRequest::Open(None)));
     }
 
+    /// Show or recreate the window without requesting focus. A minimized window stays minimized;
+    /// open() also restores and activates it. Window-manager policy still applies.
+    pub fn show(&self) {
+        self.request(|q| q.window = Some(WindowRequest::Show));
+    }
+
+    /// Hide the window, retaining its host and state. Does not invoke the close callback.
+    pub fn hide(&self) {
+        self.request(|q| q.window = Some(WindowRequest::Hide));
+    }
+
+    /// Focus/activate an already-visible window, restoring it if minimized.
+    /// On Wayland this requests attention; use activate(token) for compositor-authorized focus.
+    pub fn focus(&self) {
+        self.request(|q| q.focus = true);
+    }
+
+    /// Set the outer position in physical desktop pixels (negative coordinates are valid).
+    /// Retained across recreation. Wayland does not support application window placement.
+    pub fn set_position(&self, position: (i32, i32)) {
+        self.request(|q| q.position = Some(position));
+    }
+
     /// Show and focus the window with an activation token another process forwarded
     /// (`XDG_ACTIVATION_TOKEN` on Wayland, `DESKTOP_STARTUP_ID` on X11), so the compositor
     /// lets it take focus. Where tokens don't exist this is `open`.
@@ -188,6 +245,18 @@ impl<S: 'static> AppHandle<S> {
         self.request(|q| q.dock = Some(visible));
     }
 
+    /// Whether the window is on screen (shown, not hidden or closed). Minimized and occluded
+    /// windows count as shown.
+    pub fn is_visible(&self) -> bool {
+        self.shared.visible.load(Ordering::Acquire)
+    }
+
+    /// Why the window couldn't be created the last time it was asked for (no display, no GPU
+    /// adapter or device), until a later creation succeeds. The app keeps running windowless.
+    pub fn window_error(&self) -> Option<String> {
+        self.shared.window_error.lock().unwrap().clone()
+    }
+
     /// Change the state from this thread: `f` runs on the UI thread, in call order, even while no
     /// window shows, and the next frame commits it with the motion its `Tx` asks for.
     pub fn update(&self, f: impl FnOnce(&mut S, &mut Tx) + Send + 'static) {
@@ -204,12 +273,16 @@ impl<S: 'static> AppHandle<S> {
 pub(crate) enum WindowRequest {
     /// Show and focus, with an activation token when one was forwarded.
     Open(Option<String>),
+    Show,
+    Hide,
     Close,
 }
 
 pub(crate) struct Requests<S> {
     pub window: Option<WindowRequest>,
     pub dock: Option<bool>,
+    pub focus: bool,
+    pub position: Option<(i32, i32)>,
     pub quit: bool,
     pub updates: Vec<Update<S>>,
 }
@@ -219,6 +292,8 @@ impl<S> Default for Requests<S> {
         Requests {
             window: None,
             dock: None,
+            focus: false,
+            position: None,
             quit: false,
             updates: Vec::new(),
         }
@@ -228,6 +303,9 @@ impl<S> Default for Requests<S> {
 pub(crate) struct Shared<S> {
     requests: Mutex<Requests<S>>,
     wake: Mutex<Option<crate::runtime::Waker>>,
+    /// Published by the window host for `AppHandle::is_visible` / `window_error`.
+    pub(crate) visible: AtomicBool,
+    pub(crate) window_error: Mutex<Option<String>>,
 }
 
 impl<S> Default for Shared<S> {
@@ -235,6 +313,8 @@ impl<S> Default for Shared<S> {
         Shared {
             requests: Mutex::default(),
             wake: Mutex::new(None),
+            visible: AtomicBool::new(false),
+            window_error: Mutex::new(None),
         }
     }
 }
@@ -280,6 +360,17 @@ mod tests {
             poll: None,
             on_key: None,
         }
+    }
+
+    #[test]
+    fn handles_report_the_window_the_host_publishes() {
+        let app = App::new(spec());
+        let handle = app.handle();
+        assert!(!handle.is_visible() && handle.window_error().is_none());
+        app.shared.visible.store(true, Ordering::Release);
+        *app.shared.window_error.lock().unwrap() = Some("no GPU adapter".into());
+        assert!(handle.is_visible());
+        assert_eq!(handle.window_error().as_deref(), Some("no GPU adapter"));
     }
 
     #[test]
@@ -342,6 +433,25 @@ mod tests {
             Some(WindowRequest::Open(None)),
             "an empty token is no token"
         );
+    }
+
+    #[test]
+    fn tray_requests_keep_show_focus_and_geometry_together() {
+        let app = App::new(spec()).windowless();
+        let handle = app.handle();
+        std::thread::spawn(move || {
+            handle.set_position((10, 20));
+            handle.hide();
+            handle.set_position((-300, 40));
+            handle.show();
+            handle.focus();
+        }).join().unwrap();
+        let requests = app.shared.take();
+        assert_eq!(requests.window, Some(WindowRequest::Show), "focus must not overwrite show");
+        assert!(requests.focus);
+        assert_eq!(requests.position, Some((-300, 40)));
+        let drained = app.shared.take();
+        assert!(!drained.focus && drained.window.is_none() && drained.position.is_none());
     }
 
     #[test]

@@ -47,12 +47,27 @@ loads Inter and IBM Plex Mono.
   trigger. Content is `El::anchored` to the trigger (flips, shifts, stays inside the window).
 - Handlers attach through the builder (`on_press`, `on_toggle`, `on_select`, `on_choose`,
   `on_edit`) so disabled components drop them.
+  For pointer menus, store `Some(point)` from `El::on_secondary_press` and use
+  `context_menu("menu", trigger, s.point).item(..).on_close(..).build(k, &mut layer)`.
+  Clear the point on close or selection; positioning uses Menu's viewport-aware anchor.
 - `.state(State::Hover | Pressed | Focus | Disabled)` forces a visual state (the stories'
   `data-state`); at rest the runtime drives hover and press.
 - Translucent tokens are solved for linear-light blending over `bg_base`; colours painted on
   other surfaces (contrast buttons, accent switches) go through `Kit::on(colour, backdrop)`.
 
 ## Components
+
+`Combobox::new("models", &s.combo, &options, |s: &mut App| &mut s.combo)` composes
+Popover, TextInput and virtual rows. Options carry stable ids, labels, details and disabled
+state; `.current(..).on_choose(..)` binds selection. It filters case-insensitively, loops
+ArrowUp/Down and Ctrl-N/P across enabled rows, scrolls keyboard choices into view, and ignores
+selection keys during IME composition. Escape closes it. The contract follows OpenCode's
+`components/list` and `use-filtered-list` (origin/dev, fetched 2026-10-22); Rune's fuzzy ranking
+is its own, not bit-identical to fuzzysort. `rune-combobox--searchable` is its 200-row gallery
+scene; there is no matching combobox Storybook story to diff.
+
+`TextInput::on_key` intercepts a focused field's keys before editing; `on_change` runs after
+text changes and receives a `Tx`, for filtering and exact debounce wakes.
 
 Button (10 variants × 3 sizes × 5 states), IconButton, Switch (compact, standard), Checkbox,
 RadioGroup/RadioItem, TextInput, TextArea, TextField (older), Field, Select (inline and field

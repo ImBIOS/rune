@@ -113,6 +113,13 @@ impl Spring {
         layer.end as f32
     }
 
+    /// Tail bound for an arbitrary retarget, using the same thresholds and 120 s cap as the store.
+    pub fn settling_duration_from(self, from: f32, velocity: f32, target: f32, epsilon: f32) -> f32 {
+        assert!(epsilon.is_finite() && epsilon > 0.0);
+        let layer = Layer::spring(self, 0.0, from - target, velocity, Eps { pos: epsilon, vel: epsilon * 10.0 });
+        layer.end.max(0.0) as f32
+    }
+
     /// Bakes the unit step response into a CSS `linear()` easing plus its duration in ms,
     /// like knobs' `springEasing`. For web backends that offload to WAAPI.
     pub fn css_linear(self) -> (String, u32) {

@@ -7,8 +7,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use rune::Spring;
 use rune::color::{Color, oklch, oklcha, srgb_decode, srgb_encode};
-use rune::render::{Instance, KIND_GLYPH, KIND_RECT, NO_CLIP, Renderer, write_png};
+use rune::render::{Gpu, Instance, KIND_GLYPH, KIND_RECT, NO_CLIP, Offscreen, Renderer, write_png};
 use rune::text::TextSystem;
 use rune::tok::TextStyle;
 use rune_light::{Gi, Light, LightRenderer, Prim, Scene, Settings, TextPolicy, cpu};
@@ -19,39 +20,6 @@ const H: u32 = 1600;
 const FPS: u32 = 60;
 
 // ---------------------------------------------------------------- springs
-// Kit's parameterisation (SwiftUI): ω = 2π / duration, ζ = 1 − bounce; a track retargets from its exact position and
-// velocity. Local copy so the demos don't follow rune's motion crate while it moves.
-
-#[derive(Clone, Copy)]
-struct Spring {
-    duration: f32,
-    bounce: f32,
-}
-
-impl Spring {
-    const fn new(duration: f32, bounce: f32) -> Spring {
-        Spring { duration, bounce }
-    }
-
-    /// Displacement and velocity `t` s after starting at displacement `d0`, velocity `v0`.
-    fn eval(&self, d0: f32, v0: f32, t: f32) -> (f32, f32) {
-        let w = std::f32::consts::TAU / self.duration.max(1e-3);
-        let z = (1.0 - self.bounce).clamp(0.05, 1.0);
-        if z > 0.9999 {
-            let c = v0 + w * d0;
-            let e = (-w * t).exp();
-            return ((d0 + c * t) * e, (c - w * (d0 + c * t)) * e);
-        }
-        let wd = w * (1.0 - z * z).sqrt();
-        let a = d0;
-        let b = (v0 + z * w * d0) / wd;
-        let e = (-z * w * t).exp();
-        let (s, c) = (wd * t).sin_cos();
-        let x = e * (a * c + b * s);
-        let v = e * ((b * wd - z * w * a) * c - (a * wd + z * w * b) * s);
-        (x, v)
-    }
-}
 
 struct Track {
     t0: f64,
@@ -67,8 +35,7 @@ impl Track {
     }
 
     fn sample(&self, t: f64) -> (f32, f32) {
-        let (d, v) = self.spring.eval(self.x0 - self.target, self.v0, (t - self.t0).max(0.0) as f32);
-        (self.target + d, v)
+        self.spring.sample(self.x0, self.v0, self.target, (t - self.t0).max(0.0) as f32)
     }
 
     fn value(&self, t: f64) -> f32 {
@@ -126,7 +93,7 @@ impl<'a> Ui<'a> {
         let style = TextStyle::new(size, weight);
         let mut quads = Vec::new();
         self.ts.glyphs(s, style, S, [(x * S).round(), (y * S).round()], &mut quads);
-        let gamma = 0.78 + 0.22 * srgb_encode(color.luminance());
+        let gamma = rune::text::glyph_coverage_exponent(color, S);
         for q in quads {
             self.text.push(Instance {
                 rect: q.rect,
@@ -161,102 +128,60 @@ struct Ctx {
     rune: Renderer,
     ts: TextSystem,
     light: LightRenderer,
-    base: wgpu::Texture,
-    text: wgpu::Texture,
-    out: wgpu::Texture,
-    readback: wgpu::Buffer,
+    base: wgpu::TextureView,
+    text: wgpu::TextureView,
+    out: Offscreen,
     timestamps: bool,
 }
 
 impl Ctx {
     fn new() -> Ctx {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: None,
-            apply_limit_buckets: false,
-        }))
-        .expect("adapter");
-        let ts_feat = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("rune-light demo"),
-            required_features: ts_feat,
-            required_limits: wgpu::Limits::default(),
-            experimental_features: Default::default(),
-            memory_hints: wgpu::MemoryHints::Performance,
-            trace: Default::default(),
-        }))
-        .expect("device");
-        eprintln!("adapter: {:?}, timestamps: {}", adapter.get_info().name, !ts_feat.is_empty());
-        let mk = |label, format, usage| {
-            device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage,
-                view_formats: &[],
-            })
+        let Gpu { adapter, device, queue, .. } = Gpu::headless();
+        let timestamps = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        eprintln!("adapter: {:?}, timestamps: {timestamps}", adapter.get_info().name);
+        let mk = |label| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default())
         };
-        use wgpu::TextureUsages as U;
-        let base = mk("ui base", wgpu::TextureFormat::Rgba16Float, U::RENDER_ATTACHMENT | U::TEXTURE_BINDING);
-        let text = mk("ui text", wgpu::TextureFormat::Rgba16Float, U::RENDER_ATTACHMENT | U::TEXTURE_BINDING);
-        let out = mk("lit", wgpu::TextureFormat::Rgba8Unorm, U::RENDER_ATTACHMENT | U::COPY_SRC);
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("readback"),
-            size: (W * 4 * H) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let base = mk("ui base");
+        let text = mk("ui text");
+        let out = Offscreen::with_format(&device, W, H, wgpu::TextureFormat::Rgba8Unorm);
         let rune = Renderer::new(&device, wgpu::TextureFormat::Rgba16Float);
         let light = LightRenderer::new(&device, &queue, W, H, wgpu::TextureFormat::Rgba8Unorm);
-        Ctx { device, queue, rune, ts: TextSystem::default(), light, base, text, out, readback, timestamps: !ts_feat.is_empty() }
+        Ctx { device, queue, rune, ts: TextSystem::default(), light, base, text, out, timestamps }
     }
 
     fn draw_ui(&mut self, base: &[Instance], text: &[Instance], clear: Color) {
-        let bv = self.base.create_view(&Default::default());
-        let tv = self.text.create_view(&Default::default());
         self.rune.prepare(&self.device, &self.queue, &mut self.ts.atlas, base, (W, H));
         let mut enc = self.device.create_command_encoder(&Default::default());
-        self.rune.draw(&mut enc, &bv, [clear.r, clear.g, clear.b, 1.0]);
+        self.rune.draw(&mut enc, &self.base, [clear.r, clear.g, clear.b, 1.0]);
         self.queue.submit([enc.finish()]);
         self.rune.prepare(&self.device, &self.queue, &mut self.ts.atlas, text, (W, H));
         let mut enc = self.device.create_command_encoder(&Default::default());
-        self.rune.draw(&mut enc, &tv, [0.0; 4]);
+        self.rune.draw(&mut enc, &self.text, [0.0; 4]);
         self.queue.submit([enc.finish()]);
     }
 
     /// Lights the UI already drawn; returns sRGB RGBA8 pixels.
     fn light_frame(&mut self, prims: &[Prim], lights: &[Light], settings: Settings, read: bool) -> Option<Vec<u8>> {
-        let bv = self.base.create_view(&Default::default());
-        let tv = self.text.create_view(&Default::default());
-        let ov = self.out.create_view(&Default::default());
         let mut enc = self.device.create_command_encoder(&Default::default());
         let scene = Scene { prims, lights, settings };
-        self.light.render(&self.device, &self.queue, &mut enc, &scene, &bv, &tv, &ov);
+        self.light.render(&self.device, &self.queue, &mut enc, &scene, &self.base, &self.text, &self.out.view);
         if read {
-            enc.copy_texture_to_buffer(
-                wgpu::TexelCopyTextureInfo { texture: &self.out, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &self.readback,
-                    layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(W * 4), rows_per_image: Some(H) },
-                },
-                wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
-            );
+            self.out.copy(&mut enc);
         }
         self.queue.submit([enc.finish()]);
-        if !read {
-            return None;
-        }
-        let slice = self.readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |r| r.expect("map"));
-        self.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-        let v = slice.get_mapped_range().expect("range").to_vec();
-        self.readback.unmap();
-        Some(v)
+        read.then(|| self.out.read(&self.device))
     }
 }
 

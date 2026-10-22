@@ -1,7 +1,7 @@
 // One instanced "uber-quad": rounded rects with per-corner radius and border (kind 0), analytic
 // Gaussian rounded-rect shadows (kind 1), glyph-atlas text (kind 2), inset shadows (kind 3) and
 // vertical-gradient rounded rects (kind 4), stroke segments (kind 5) and filled triangles
-// (kind 6) for vector shapes. Every instance carries a
+// (kind 6) for vector shapes, and RGBA images (kind 7). Every instance carries a
 // soft-edge clip. Output is premultiplied linear colour into an sRGB target (linear blending).
 
 struct Globals {
@@ -11,6 +11,7 @@ struct Globals {
 
 @group(0) @binding(0) var<uniform> g: Globals;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
+@group(0) @binding(2) var images: texture_2d<f32>;
 
 struct In {
     @builtin(vertex_index) vi: u32,
@@ -217,6 +218,13 @@ fn triangle(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>, aa: u32) -> 
     return cov;
 }
 
+/// One image texel, premultiplied (the atlas holds straight alpha) so filtering doesn't darken edges.
+fn image_texel(t: vec2<i32>, premultiplied: bool) -> vec4<f32> {
+    let c = textureLoad(images, t, 0);
+    if premultiplied { return c; }
+    return vec4<f32>(c.rgb * c.a, c.a);
+}
+
 @fragment
 fn fs(i: Out) -> @location(0) vec4<f32> {
     let kind = i.params.y;
@@ -238,9 +246,24 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         let sigma = max(i.params.z, 0.01);
         let corner = min(i.radii.x, min(half.x, half.y));
         col = i.fill * shadow(i.p - center, half, sigma, corner);
+    } else if (kind > 6.5) {
+        // Bilinear, clamped to the image's own texels so neighbours in the atlas never bleed.
+        let local = (i.p - i.rect.xy) * i.uv.zw / i.rect.zw - vec2<f32>(0.5);
+        let lo = vec2<i32>(i.uv.xy);
+        let hi = lo + vec2<i32>(i.uv.zw) - vec2<i32>(1);
+        let base = floor(local);
+        let f = local - base;
+        let t0 = clamp(lo + vec2<i32>(base), lo, hi);
+        let t1 = clamp(lo + vec2<i32>(base) + vec2<i32>(1, 1), lo, hi);
+        let premultiplied = i.params.z > 0.5;
+        let c = mix(mix(image_texel(t0, premultiplied), image_texel(vec2<i32>(t1.x, t0.y), premultiplied), f.x),
+                    mix(image_texel(vec2<i32>(t0.x, t1.y), premultiplied), image_texel(t1, premultiplied), f.x), f.y);
+        let d = sd_rounded(i.p - center, half, i.radii);
+        let cov = clamp(0.5 - d, 0.0, 1.0);
+        col = c * (i.fill.a * cov);
     } else if (kind > 4.5 && kind < 5.5) {
         col = i.fill * segment(i.pos.xy, i.radii.xy, i.radii.zw, i.params.x, i.params.z > 0.5);
-    } else if (kind > 5.5) {
+    } else if (kind > 5.5 && kind < 6.5) {
         // The pixel centre itself, not `p`: `p` is interpolated over each triangle's own quad, so
         // neighbours would disagree in the last bits about who owns a pixel on a shared edge.
         col = i.fill * triangle(i.pos.xy, i.radii.xy, i.radii.zw, i.uv.xy, u32(i.params.x + 0.5));
@@ -265,16 +288,19 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
             col = mix(i.fill, i.uv, t) * cov;
         }
     } else {
+        // Interpolated screen coordinates can round below an integer texel
+        // boundary. Fragment position is the rasterizer's exact pixel center.
+        let p = i.pos.xy;
         var cov: f32;
         if i.uv.z > 0.0 {
             // Flying text keeps the original atlas footprint while its quad scales uniformly.
-            let p = (i.p - i.rect.xy) * i.uv.zw / i.rect.zw - vec2<f32>(0.5);
-            let uv = vec2<i32>(i.uv.xy + floor(p));
-            let f = fract(p);
+            let local = (p - i.rect.xy) * i.uv.zw / i.rect.zw - vec2<f32>(0.5);
+            let uv = vec2<i32>(i.uv.xy + floor(local));
+            let f = fract(local);
             cov = mix(mix(textureLoad(atlas, uv, 0).r, textureLoad(atlas, uv + vec2<i32>(1, 0), 0).r, f.x),
                       mix(textureLoad(atlas, uv + vec2<i32>(0, 1), 0).r, textureLoad(atlas, uv + vec2<i32>(1, 1), 0).r, f.x), f.y);
         } else {
-            let texel = vec2<i32>(i.uv.xy + floor(i.p - i.rect.xy));
+            let texel = vec2<i32>(i.uv.xy + floor(p - i.rect.xy));
             cov = textureLoad(atlas, texel, 0).r;
         }
         col = i.fill * pow(cov, i.params.w);

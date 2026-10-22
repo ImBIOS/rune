@@ -3,10 +3,12 @@
 //! reopening shows the same state (the ticks kept counting, the note kept its text).
 //!
 //! ```sh
-//! cargo run -p background            # then type: open | activate TOKEN | close | dock on|off | quit
+//! cargo run -p background            # stdin: open | show | hide | focus | activate TOKEN | close | status | quit
 //! cargo run -p background -- --open  # start with the window
 //! cargo run -p background -- --release-gpu  # closing also drops the GPU device
 //! cargo run -p background -- --accessory    # macOS: no Dock icon until `dock on`
+//! # `hud show|hide|top|bottom|recording|transcribing|status` drives a recording-HUD overlay;
+//! # `capsule show|hide|left|wide|status` a clickable corner capsule
 //! cargo run -p background -- --snap /tmp/background.png
 //! ```
 
@@ -103,6 +105,45 @@ fn on_close(s: &mut Background, _: &mut Tx) {
     eprintln!("background: window closed; still running");
 }
 
+/// The overlay's own state: what a recording HUD shows.
+#[derive(Default)]
+struct Hud {
+    seconds: u64,
+    transcribing: bool,
+}
+
+fn hud(h: &Hud, _: &mut Cx<Hud>) -> El {
+    let label = if h.transcribing { "Transcribing".to_owned() } else { format!("Recording {}:{:02}", h.seconds / 60, h.seconds % 60) };
+    row().key("hud").w_full().h_full().center().child(
+        row()
+            .key("pill")
+            .h(36.0)
+            .px(space::S3)
+            .gap(space::S2)
+            .center()
+            .radius(18.0)
+            .fill(rune::oklch(0.2, 0.0, 0.0))
+            .border(1.0, rune::oklch(0.3, 0.0, 0.0))
+            .child(el().key("dot").size(8.0, 8.0).radius(4.0).fill(if h.seconds.is_multiple_of(2) { rune::oklch(0.65, 0.2, 25.0) } else { rune::oklch(0.45, 0.12, 25.0) }))
+            .child(text(label).key("label").font(type_::LABEL).color(rune::oklch(0.93, 0.0, 0.0))),
+    )
+}
+
+fn capsule(presses: &u32, _: &mut Cx<u32>) -> El {
+    let t = tok::theme(true);
+    row().key("capsule").w_full().h_full().px(space::S2).gap(space::S2).center().radius(24.0).fill(t.card).border(1.0, t.card_border).child(
+        text(format!("Pressed {presses} times")).key("presses").font(type_::LABEL).color(t.text),
+    )
+    .child(
+        row().key("press").role("button").h(28.0).px(space::S3).center().radius(radius::MD).fill(t.control_off).hover(t.hover)
+            .on_press(|n: &mut u32| {
+                *n += 1;
+                eprintln!("background: capsule pressed {n}");
+            })
+            .child(text("Press").font(type_::LABEL).color(t.text)),
+    )
+}
+
 fn main() {
     let mut app = App::new(rune::AppSpec {
         title: "Background",
@@ -118,7 +159,11 @@ fn main() {
         on_key: Some(on_key),
     })
     .keep_running()
-    .on_close(on_close);
+    .on_close(on_close)
+    .on_window(|window| {
+        let native = window.with_raw_handle(|handle| format!("{:?}", handle.as_raw())).unwrap_or_default();
+        eprintln!("background: native window {}", native.split('(').next().unwrap_or_default());
+    });
     if !std::env::args().any(|a| a == "--open") {
         app = app.windowless();
     }
@@ -128,11 +173,43 @@ fn main() {
     if std::env::args().any(|a| a == "--release-gpu") {
         app = app.release_gpu_when_closed();
     }
+    // `--hud-large` covers most of the screen, to check that clicks pass through it.
+    let size = if std::env::args().any(|a| a == "--hud-large") { (1200.0, 700.0) } else { (240.0, 44.0) };
+    let overlay = app.overlay(
+        rune::OverlaySpec {
+            name: "background-hud",
+            size,
+            edge: rune::ScreenEdge::Top,
+            margin: 16.0,
+            align: rune::Align::Center,
+            inset: 0.0,
+            interactive: false,
+            view: hud,
+        },
+        Hud::default(),
+    );
+    // A clickable capsule in the top-right corner, like a meeting offer: clicks reach it, focus
+    // stays where it was.
+    let capsule = app.overlay(
+        rune::OverlaySpec {
+            name: "background-capsule",
+            size: (220.0, 48.0),
+            edge: rune::ScreenEdge::Top,
+            margin: 40.0,
+            align: rune::Align::End,
+            inset: 12.0,
+            interactive: true,
+            view: capsule,
+        },
+        0,
+    );
     let ticker = app.handle();
+    let hud_ticker = overlay.clone();
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(1));
             ticker.update(|s, _| s.ticks += 1);
+            hud_ticker.update(|h, _| h.seconds += 1);
         }
     });
     let commands = app.handle();
@@ -142,12 +219,33 @@ fn main() {
             let mut words = line.split_whitespace();
             match (words.next(), words.next()) {
                 (Some("open"), _) => commands.open(),
+                (Some("show"), _) => commands.show(),
+                (Some("hide"), _) => commands.hide(),
+                (Some("focus"), _) => commands.focus(),
+                (Some("position"), Some(x)) => {
+                    if let (Ok(x), Some(Ok(y))) = (x.parse::<i32>(), words.next().map(str::parse::<i32>)) {
+                        commands.set_position((x, y));
+                    }
+                }
                 (Some("activate"), Some(token)) => commands.activate(token),
                 (Some("close"), _) => commands.close(),
                 (Some("quit"), _) => commands.quit(),
+                (Some("status"), _) => eprintln!("background: visible {}, window error {:?}", commands.is_visible(), commands.window_error()),
                 (Some("dock"), Some(on)) => commands.set_dock_icon(on == "on"),
+                (Some("hud"), Some("show")) => overlay.show(),
+                (Some("hud"), Some("hide")) => overlay.hide(),
+                (Some("hud"), Some("top")) => overlay.set_edge(rune::ScreenEdge::Top),
+                (Some("hud"), Some("bottom")) => overlay.set_edge(rune::ScreenEdge::Bottom),
+                (Some("hud"), Some("transcribing")) => overlay.update(|h, _| h.transcribing = true),
+                (Some("hud"), Some("recording")) => overlay.update(|h, _| h.transcribing = false),
+                (Some("hud"), Some("status")) => eprintln!("background: hud {:?}", overlay.availability()),
+                (Some("capsule"), Some("show")) => capsule.show(),
+                (Some("capsule"), Some("hide")) => capsule.hide(),
+                (Some("capsule"), Some("left")) => capsule.set_align(rune::Align::Start, 12.0),
+                (Some("capsule"), Some("wide")) => capsule.resize((320.0, 48.0)),
+                (Some("capsule"), Some("status")) => eprintln!("background: capsule {:?}", capsule.availability()),
                 (Some(other), _) => {
-                    eprintln!("background: unknown command {other:?} (open | activate TOKEN | close | dock on|off | quit)")
+                    eprintln!("background: unknown command {other:?} (open | show | hide | focus | position X Y | activate TOKEN | close | dock on|off | hud show|hide|top|bottom|recording|transcribing|status | capsule show|hide|left|wide|status | quit)")
                 }
                 (None, _) => {}
             }
