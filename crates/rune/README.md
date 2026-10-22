@@ -348,6 +348,18 @@ policy changes are applied in the same mutation phase.
 
 ## Known gaps and next
 
+### File dialogs
+
+Enable Rune's `native-file-dialog` feature and inject `FileDialogs::native()` in the shell.
+`dialogs.open(options).await` and `dialogs.save(options).await` return an optional path
+(None means cancelled). `FileDialogOptions` carries title, directory, suggested filename and
+`.filter("Audio", &["wav", "flac"])`. rfd handles Cocoa on macOS and the XDG portal on Linux;
+poll these futures on the app's async executor and wake Rune when the result arrives.
+
+Headless fixtures inject `FileDialogs::scripted([ScriptedFileDialog { kind:
+FileDialogKind::Open, path: Some("/fixture/recording.wav".into()) }])`. Requests resolve
+without a window; wrong request order or exhausted fixtures return an error.
+
 - Group opacity through offscreen layers.
 - Next: a render thread with a command channel, a CoreText side-by-side text diff (S5), Slug for
   scaled text, the inspector socket, knobs/tunables, and the Scrawl pill (M1).
