@@ -74,7 +74,9 @@ accepts packed BGRA or two packed NV12 planes. The native `PixelBuffer` API is m
   `completed_at` is when completion was observed, while `gpu_start_seconds/gpu_end_seconds`
   come from hardware render-pass queries (the containing UI pass, when embedded in Rune).
   Their difference is GPU duration; the GPU epoch is backend-specific. Do not subtract
-  them from `Instant`. Backends without timestamp queries still report completion.
+   them from `Instant`. Backends without timestamp queries still report completion.
+   An explicit query set passed to `Renderer::draw_timed` takes precedence; that draw's
+   NativeSurface notifications carry CPU submit/completion times only.
    A coalesced completion worker uses nonblocking polls, sleeping between them, including
    for the final frame at idle. It never holds wgpu's device lock while waiting on a GPU
    fence. Counter resolution runs in a separate submission after render completion to

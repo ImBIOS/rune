@@ -387,4 +387,59 @@ fn video_gpu_colour_sharpness_geometry_and_lifetime() {
     assert_eq!(&p[0..4], &[0, 0, 0, 255], "border must paint over video");
     assert_eq!(&p[(3 * 16 + 3) * 4..(3 * 16 + 3) * 4 + 4], &[0, 0, 0, 255], "child must paint over video");
     assert_eq!(&p[(4 * 16 + 10) * 4..(4 * 16 + 10) * 4 + 4], &[255; 4], "video must paint over background");
+
+    // A video pipeline switch must also restore the retained-springs bind group before
+    // painting the border and child. Identity tracks should exactly match ordinary rendering.
+    let zero = crate::gpu_springs::Track::constant(0.0);
+    let node = crate::gpu_springs::Node { x: zero, y: zero, opacity: crate::gpu_springs::Track::constant(1.0) };
+    let mut sprung =
+        crate::render::Renderer::with_springs(&gpu.device, OFFSCREEN_FORMAT, &[node], &vec![0; rt.instances.len()]);
+    sprung.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (16, 8));
+    sprung.prepare_surfaces(&gpu.device, &gpu.queue, &rt.surfaces, (16, 8));
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    sprung.draw(&mut encoder, &target.view, [0.0; 4]);
+    target.copy(&mut encoder);
+    sprung.submit(&gpu.queue, encoder);
+    assert_eq!(target.read(&gpu.device), p, "retained-springs binding must survive the video draw");
+
+    // External pass timing takes precedence without resolving NativeSurface's unwritten
+    // query set. Frame completion still arrives, with no native GPU timestamps.
+    if gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+        let external = gpu.device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("external UI timing"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 2,
+        });
+        let (done, completion) = std::sync::mpsc::channel();
+        surface.set_observer(Arc::new(move |t| {
+            if t.completed_at.is_some() {
+                let _ = done.send(t);
+            }
+        }));
+        renderer.prepare_surfaces(&gpu.device, &gpu.queue, &rt.surfaces, (16, 8));
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        renderer.draw_timed(
+            &mut encoder,
+            &target.view,
+            [0.0; 4],
+            Some(wgpu::RenderPassTimestampWrites {
+                query_set: &external,
+                beginning_of_pass_write_index: Some(0),
+                end_of_pass_write_index: Some(1),
+            }),
+        );
+        renderer.submit(&gpu.queue, encoder);
+        // The preceding render's callback may still arrive; consume until this submission.
+        let submission = surface.timing().unwrap().submitted_at;
+        loop {
+            let t =
+                completion.recv_timeout(std::time::Duration::from_secs(10)).expect("externally timed frame completion");
+            if t.submitted_at != submission {
+                continue;
+            }
+            assert_eq!(t.gpu_start_seconds, None);
+            assert_eq!(t.gpu_end_seconds, None);
+            break;
+        }
+    }
 }
