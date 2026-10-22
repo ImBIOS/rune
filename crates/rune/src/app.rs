@@ -33,6 +33,7 @@ type Update<S> = Box<dyn FnOnce(&mut S, &mut Tx) + Send>;
 /// like `rune::run`.
 pub struct App<S: 'static> {
     pub(crate) spec: AppSpec<S>,
+    pub(crate) window_options: crate::WindowOptions,
     init: Option<Box<dyn FnOnce() -> S>>,
     argv: Option<Vec<String>>,
     pub(crate) open: bool,
@@ -49,6 +50,7 @@ impl<S: 'static> App<S> {
     pub fn new(spec: AppSpec<S>) -> Self {
         App {
             spec,
+            window_options: crate::WindowOptions::default(),
             init: None,
             argv: None,
             open: true,
@@ -75,6 +77,13 @@ impl<S: 'static> App<S> {
     /// host already made (a channel, a handle to its runtime). Scenes still apply on top.
     pub fn init(mut self, f: impl FnOnce() -> S + 'static) -> Self {
         self.init = Some(Box::new(f));
+        self
+    }
+
+    /// Configure the native window while retaining App's args, accessory policy and lifetime.
+    /// Size limits use logical points; desktop position uses physical pixels.
+    pub fn window_options(mut self, options: crate::WindowOptions) -> Self {
+        self.window_options = options;
         self
     }
 

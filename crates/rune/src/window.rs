@@ -6,7 +6,7 @@ use std::{cell::RefCell, rc::Rc};
 use std::time::Instant;
 
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, Ime as WIme, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
@@ -515,19 +515,9 @@ impl<S: 'static> Host<S> {
     #[cfg_attr(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))), allow(unused_variables))]
     fn create(&mut self, event_loop: &ActiveEventLoop, token: Option<String>) {
         let size = self.args.size.unwrap_or(self.spec.size);
-        let min = self.options.min_size.or(self.spec.min_size).unwrap_or((420.0, 400.0));
         let visible = self.started || self.options.visible;
         #[allow(unused_mut)]
-        let mut attrs = Window::default_attributes()
-            .with_title(self.spec.title)
-            .with_inner_size(LogicalSize::new(size.0 as f64, size.1 as f64))
-            .with_min_inner_size(LogicalSize::new(min.0 as f64, min.1 as f64))
-            .with_transparent(self.options.transparent)
-            .with_decorations(!self.options.borderless)
-            .with_visible(visible)
-            .with_window_level(if self.options.always_on_top { WindowLevel::AlwaysOnTop } else { WindowLevel::Normal });
-        if let Some((x, y)) = self.options.position { attrs = attrs.with_position(PhysicalPosition::new(x, y)); }
-        if let Some((w, h)) = self.options.physical_size { attrs = attrs.with_inner_size(PhysicalSize::new(w, h)); }
+        let mut attrs = self.options.attributes(self.spec.title, size, self.spec.min_size, visible);
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         {
             if let Some(id) = crate::tooling::app_id() {
