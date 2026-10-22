@@ -2,6 +2,28 @@
 use super::*;
 use crate::edit::Key;
 
+fn sync_input_focus<S: 'static>(nodes: &mut [Node], state: &mut S, path: Option<&str>) -> bool {
+    let mut changed = false;
+    for n in nodes {
+        if let Some(input) = &mut n.input {
+            let focused = path == Some(n.path.as_str());
+            if let Some(access) = &input.access {
+                let edit = access(state);
+                if edit.focused != focused || (!focused && edit.preedit.is_some()) {
+                    edit.focused = focused;
+                    if !focused { edit.preedit = None; }
+                    edit.break_history_group();
+                    changed = true;
+                }
+                input.edit = edit.clone();
+            } else {
+                input.edit.focused = focused;
+            }
+        }
+    }
+    changed
+}
+
 impl<S: 'static> Runtime<S> {
     fn descendant(&self, mut i: usize, ancestor: usize) -> bool {
         loop {
@@ -49,28 +71,24 @@ impl<S: 'static> Runtime<S> {
             i = p;
         }
     }
-    pub(super) fn set_focus(&mut self, path: Option<String>, keyboard: bool) {
-        if self.focused != path {
-            if let Some(a) = self.focused.as_deref().and_then(|p| self.node(p))
-                .and_then(|n| n.input.as_ref()?.access.clone()) {
-                let e = a(&mut self.state);
-                e.focused = false;
-                e.break_history_group();
-            }
-            if let Some(a) = path.as_deref().and_then(|p| self.node(p))
-                .and_then(|n| n.input.as_ref()?.access.clone()) {
-                let e = a(&mut self.state);
-                e.focused = true;
-                e.break_history_group();
-            }
-            self.focused = path;
-            for n in &mut self.nodes {
-                if let Some(input) = &mut n.input {
-                    input.edit.focused = self.focused.as_deref() == Some(&n.path);
-                }
-            }
-        }
+    pub(super) fn set_focus(&mut self, path: Option<String>, keyboard: bool) -> bool {
+        if self.focused != path { self.ime_area = None; self.ime_reset = true; }
+        let changed = sync_input_focus(&mut self.nodes, &mut self.state, path.as_deref());
+        self.focused = path;
         self.keyboard_focus = keyboard;
+        changed
+    }
+    pub(super) fn sync_requested_focus(&mut self, nodes: &mut [Node]) -> bool {
+        // A newly requested text field wins; a focused control otherwise retains focus.
+        let requested = nodes.iter().filter(|n| n.input.as_ref().is_some_and(|i| i.edit.focused));
+        let next = requested.clone().find(|n| self.focused.as_deref() != Some(&n.path)
+            && !self.nodes.iter().any(|old| old.path == n.path && old.input.as_ref().is_some_and(|i| i.edit.focused)))
+            .map(|n| n.path.clone())
+            .or_else(|| self.focused.clone().filter(|p| nodes.iter().any(|n| &n.path == p
+                && (n.focus.enabled || n.input.as_ref().is_some_and(|i| i.edit.focused)))))
+            .or_else(|| requested.into_iter().next().map(|n| n.path.clone()));
+        let changed = self.set_focus(next, self.keyboard_focus);
+        sync_input_focus(nodes, &mut self.state, self.focused.as_deref()) || changed
     }
     fn tab_order(&self) -> Vec<usize> {
         let all: Vec<_> = (0..self.nodes.len()).filter(|&i| self.can_focus(i) && self.nodes[i].focus.order >= 0).collect();
@@ -196,6 +214,46 @@ mod tests {
     fn focused(rt: &Runtime<State>) -> String {
         rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key).unwrap()
     }
+    #[test]
+    fn input_handover_cancels_composition_and_keys_bubble_after_the_field() {
+        use crate::{text_input, TextEdit, TextStyle};
+        struct Form { first: TextEdit, search: TextEdit, open: bool, app_keys: usize }
+        fn view(s: &Form, _: &mut Cx<Form>) -> El {
+            let mut root = col().size(300.0, 300.0)
+                .child(text_input(&s.first, TextStyle::new(14.0, 400.0)).key("first").size(200.0, 40.0)
+                    .on_edit(|s: &mut Form| &mut s.first))
+                .child(button("open").on_press(|s: &mut Form| { s.open = true; s.search.focused = true; }));
+            if s.open {
+                root = root.child(text_input(&s.search, TextStyle::new(14.0, 400.0)).key("search").size(200.0, 40.0)
+                    .on_edit(|s: &mut Form| &mut s.search));
+            }
+            root
+        }
+        let mut first = TextEdit::new("hello"); first.focused = true;
+        let mut rt = Runtime::new(Form { first, search: TextEdit::new(""), open: false, app_keys: 0 }, view,
+            (300.0, 300.0), Env { system_dark: true, scale: 1.0 });
+        rt.on_key = Some(|s, _, _| { s.app_keys += 1; true });
+        rt.frame(0.0);
+        rt.ime(crate::Ime::Preedit("pending".into(), None)); rt.frame(0.0);
+        rt.state.open = true; rt.state.search.focused = true; rt.invalidate(); rt.frame(0.0);
+        assert!(rt.state.search.focused);
+        assert!(!rt.state.first.focused);
+        assert!(rt.state.first.preedit.is_none());
+        assert!(rt.ime_reset);
+        assert!(!rt.keyboard_focus);
+        rt.key(KeyEvent { key: Key::Text("query".into()), mods: Mods::default() }); rt.frame(0.0);
+        assert_eq!(rt.state.search.text, "query");
+        assert_eq!(rt.state.first.text, "hello");
+        assert_eq!(rt.state.app_keys, 0);
+        rt.key(KeyEvent { key: Key::Function(5), mods: Mods::default() }); rt.frame(0.0);
+        assert_eq!(rt.state.app_keys, 1);
+        rt.ime(crate::Ime::Preedit("pending".into(), None)); rt.frame(0.0);
+        rt.pointer_down(290.0, 290.0); rt.pointer_up(290.0, 290.0); rt.frame(0.0);
+        assert!(rt.focused.is_none());
+        assert!(!rt.state.search.focused);
+        assert!(rt.state.search.preedit.is_none());
+    }
+
     #[test]
     fn focus_document_order_overrides_roving_and_activation() {
         let mut rt = runtime();
