@@ -221,6 +221,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gpu_pages_interleave_with_video_and_retained_springs() {
+        use crate::{Cx, El, Env, Runtime, el};
+        use crate::native_surface::{ByteFrame, ColorInfo, Format, NativeSurface, SurfaceFit};
+        use crate::render::{Gpu, OFFSCREEN_FORMAT, Offscreen, Renderer};
+        type State = ([Pixels; 3], NativeSurface);
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            el().size(8.0, 8.0).pixels(&s.0[0]).child(
+                el().size(6.0, 6.0).pin(Some(1.0), Some(1.0), None, None).native_surface(&s.1, SurfaceFit::Fill)
+                    .child(el().size(2.0, 2.0).pin(Some(1.0), Some(1.0), None, None).pixels(&s.0[1]))
+                    .child(el().size(1.0, 1.0).pin(Some(4.0), Some(4.0), None, None).pixels(&s.0[2]))
+            )
+        }
+        let pixels = [Pixels::new(), Pixels::new(), Pixels::new()];
+        pixels[0].set(8, 8, [255,0,0,255].repeat(64));
+        pixels[1].set(2, 2, [0,255,0,255].repeat(4));
+        pixels[2].set(1024, 1024, [255;4].repeat(1024 * 1024));
+        let surface = NativeSurface::new();
+        surface.push_bytes(ByteFrame { width: 6, height: 6, format: Format::Bgra,
+            color: ColorInfo::default(), planes: [[255,0,0,255].repeat(36), vec![]] }, 1).unwrap();
+        let mut rt = Runtime::new((pixels, surface), view, (8.0, 8.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        assert_eq!(rt.images.pages.len(), 2);
+        let gpu = Gpu::headless();
+        let zero = crate::gpu_springs::Track::constant(0.0);
+        let node = crate::gpu_springs::Node { x: zero, y: zero, opacity: crate::gpu_springs::Track::constant(1.0) };
+        let mut renderer = Renderer::with_springs(&gpu.device, OFFSCREEN_FORMAT, &[node], &vec![0; rt.instances.len()]);
+        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (8,8));
+        renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
+        renderer.prepare_surfaces(&gpu.device, &gpu.queue, &rt.surfaces, (8,8));
+        let target = Offscreen::new(&gpu.device, 8, 8);
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        renderer.draw(&mut encoder, &target.view, [0.0;4]);
+        target.copy(&mut encoder);
+        renderer.submit(&gpu.queue, encoder);
+        let out = target.read(&gpu.device);
+        for (x, y, want) in [(0,0,[255,0,0,255]), (1,1,[0,0,255,255]), (2,2,[0,255,0,255]), (5,5,[255;4])] {
+            assert_eq!(&out[(y*8+x)*4..(y*8+x+1)*4], &want, "at {x},{y}");
+        }
+    }
+
+    #[test]
     fn gpu_static_mips_alpha_clip_and_page_order_match_pixels() {
         use crate::{Cx, El, Env, Runtime, el, image::ImageCache};
         use crate::render::{Gpu, OFFSCREEN_FORMAT, Offscreen, Renderer};
