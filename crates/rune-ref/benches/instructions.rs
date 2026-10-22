@@ -28,5 +28,5 @@ main!(
 );
 #[cfg(not(target_os = "linux"))]
 fn main() {
-    panic!("instruction gate requires Linux and Valgrind");
+    eprintln!("skipping instruction benchmark: Linux and Valgrind required");
 }
