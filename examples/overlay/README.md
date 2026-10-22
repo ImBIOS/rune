@@ -30,7 +30,9 @@ retain its state after closing. The App's handle opens/activates/updates that wi
 `WindowHandle::open` can also reopen a retained host. Default hosts are removed on
 close, and the last host ends the loop. Any `AppHandle::quit` or `Tx::quit` quits the
 whole loop. The outer tooling arguments apply to all specs; `App::args` is ignored
-inside `run_windows`.
+inside `run_windows`. `App::accessory` is a process launch option for `App::run`,
+not a per-window option; `run_windows` starts with regular activation policy.
+An AppHandle's `set_dock_icon` still changes the whole process at runtime.
 
 ```sh
 hivemind run --kind cargo --fetch target/release/overlay -- cargo build --release -p overlay
