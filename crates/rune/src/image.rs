@@ -162,7 +162,7 @@ fn mip_chain(width: u32, height: u32, bytes: &[u8]) -> Result<Decoded, ImageErro
     if width == 0 || height == 0 || width > 8192 || height > 8192
         || bytes.len() != width as usize * height as usize * 4
     { return Err(ImageError("RGBA image dimensions or byte length are invalid".into())); }
-    let mut linear: Vec<[f32; 4]> = bytes.chunks_exact(4).map(|p| {
+    let mut linear: Vec<[f32; 4]> = bytes.as_chunks::<4>().0.iter().map(|p| {
         let a = p[3] as f32 / 255.0;
         [crate::color::srgb_decode(p[0] as f32 / 255.0) * a,
          crate::color::srgb_decode(p[1] as f32 / 255.0) * a,
@@ -171,10 +171,12 @@ fn mip_chain(width: u32, height: u32, bytes: &[u8]) -> Result<Decoded, ImageErro
     let (mut w, mut h) = (width, height);
     let mut mips = Vec::new();
     loop {
-        let pixels = linear.iter().flat_map(|p| [
-            byte(crate::color::srgb_encode(p[0])), byte(crate::color::srgb_encode(p[1])),
-            byte(crate::color::srgb_encode(p[2])), byte(p[3]),
-        ]).collect();
+        let pixels = linear.iter().flat_map(|p| {
+            let a = byte(p[3]);
+            // Quantized alpha bounds premultiplied RGB, including fully transparent tails.
+            let rgb = [p[0], p[1], p[2]].map(|v| byte(crate::color::srgb_encode(v.min(a as f32 / 255.0))));
+            [rgb[0], rgb[1], rgb[2], a]
+        }).collect();
         mips.push(Mip { width: w, height: h, pixels });
         if w == 1 && h == 1 { break; }
         let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
@@ -215,6 +217,8 @@ mod tests {
         assert!((d.mips[1].pixels[0] as i32 - 213).abs() <= 1);
         let gray = mip_chain(2, 1, &[0, 0, 0, 255, 255, 255, 255, 255]).unwrap();
         assert_eq!(gray.mips[1].pixels, [188, 188, 188, 255]);
+        let tail = mip_chain(3, 1, &[255, 255, 255, 1, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(tail.mips[1].pixels, [0, 0, 0, 0], "alpha rounded to zero cannot emit light");
     }
 
     #[test]
