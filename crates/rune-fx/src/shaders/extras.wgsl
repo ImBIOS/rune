@@ -39,25 +39,31 @@ fn shade(in: VOut) -> vec4f {
     if (c.variant == 1) {
         let f0 = u32(i.xf.x);
         let n = u32(i.xf.y);
-        var e = 0.0;
-        var core = 0.0;
+        var body = 0.0;
+        var hot = 0.0;
+        var halo = 0.0;
         for (var k = 0u; k < n; k++) {
             let a = data[f0 + k * 2u];
             let b = data[f0 + k * 2u + 1u];
-            let S = a.z;
+            let S = max(a.z, 0.01);
             let env = a.w;
             let rel = c.p - a.xy;
+            let r = length(rel);
+            if (r > S * 1.6) { continue; }
             let l = vec2f(b.x * rel.x - b.y * rel.y, b.y * rel.x + b.x * rel.y);
-            let rw = max(S * 0.055, c.aa * 0.6);
-            let fall = pow(max(1.0 - abs(l.x) / S, 0.0), 3.0);
-            let fally = pow(max(1.0 - abs(l.y) / S, 0.0), 3.0);
-            let rays = gauss(l.y, rw) * fall + gauss(l.x, rw) * fally;
-            let r = length(l);
-            e += env * (rays * 0.85 + gauss(r, S * 0.5) * 0.25);
-            core += env * gauss(r, S * 0.12);
+            // Four-point star: |x|^p + |y|^p = 1 with p < 1 gives concave sides and needle tips.
+            // g is homogeneous of degree 1, so (g - 1) * S is roughly a distance in points.
+            let ax = max(abs(l) / S, vec2f(1e-6));
+            let g = pow(pow(ax.x, 0.55) + pow(ax.y, 0.55), 1.0 / 0.55);
+            let w = c.aa * 0.75 / S;
+            let m = 1.0 - smoothstep(1.0 - w, 1.0 + w, g);
+            body += env * m;
+            hot += env * m * (1.0 - g) * (1.0 - g);
+            halo += env * gauss(r, S * 0.32);
         }
-        let col = i.c0.rgb * e + mix(i.c0.rgb, vec3f(1.0), 0.75) * core;
-        return finish(vec4f(col * i.p0.w, (e * 0.3 + core * 0.6) * i.p0.w), in.px);
+        let tint = i.c0.rgb;
+        let col = mix(tint, vec3f(1.0), 0.3) * body + vec3f(1.0) * hot * 0.8 + tint * halo * 0.12;
+        return finish(vec4f(col * i.p0.w, min(body * 0.9 + halo * 0.05, 1.0) * i.p0.w), in.px);
     }
     if (c.variant == 2) {
         let m = cover(c, max(i.p0.w, c.aa));

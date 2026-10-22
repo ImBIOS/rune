@@ -1188,7 +1188,7 @@ impl Live {
                                 Anchor::Over(node::INBOX),
                             );
                         }
-                        ShotKind::Shockwave => {}
+                        _ => {}
                     }
                 }
             }
@@ -1212,6 +1212,27 @@ impl Live {
                     .on(Shape::rounded(a[0], a[1] - 1.0, b[0] - a[0], 2.0, 0.0)),
                     Anchor::Under(node::TERMINALS),
                 );
+                for (shot, k) in cv.s.shots.live(t, ElectricParams::ZAP_LIFE).filter(|(sh, _)| sh.data.kind == ShotKind::Zap) {
+                    let to = cv.w(shot.data.at);
+                    let from = if (to[0] - a[0]).hypot(to[1] - a[1]) < (to[0] - b[0]).hypot(to[1] - b[1]) { a } else { b };
+                    push(
+                        Fx::electric(ElectricParams {
+                            style: ElectricStyle::Arc { a: from, b: to },
+                            color,
+                            amplitude: amp * 9.0 / 5.0,
+                            frequency: fq,
+                            glow: gl * 6.0 / 5.0,
+                            forks: (fk * 0.6 / 0.55).min(1.0),
+                            intensity: cv.a,
+                            zap: Some(shot.t0),
+                            ..Default::default()
+                        })
+                        .on(Shape::rounded(from[0].min(to[0]), from[1].min(to[1]), (to[0] - from[0]).abs().max(1.0), (to[1] - from[1]).abs().max(1.0), 0.0))
+                        .seed(shot.seed)
+                        .opacity(k),
+                        Anchor::Top,
+                    );
+                }
                 push(
                     Fx::electric(ElectricParams { color, amplitude: amp * 0.8, frequency: fq, speed: sp, glow: gl, forks: fk, gap: 3.0, fork_len: 22.0, intensity: cv.a, ..Default::default() })
                         .on(cv.rounded(stage::OVERLOAD, 18.0))
@@ -1325,7 +1346,14 @@ impl Live {
                 }
                 if cv.on("sparkles") {
                     push(
-                        Fx::sparkles(SparkleParams { margin: 20.0, size: 8.0, count: 9, intensity: cv.a, ..Default::default() }).on(cv.capsule(stage::PRO)).seed(4),
+                        Fx::sparkles(SparkleParams { margin: 20.0, size: 8.0, count: 6, intensity: cv.a, ..Default::default() }).on(cv.capsule(stage::PRO)).seed(4),
+                        Anchor::Over(node::PRO),
+                    );
+                }
+                let burst = SparkleParams { margin: 34.0, size: 9.0, count: 8, intensity: cv.a, ..Default::default() };
+                for (shot, k) in cv.s.shots.live(t, burst.burst_life()).filter(|(sh, _)| sh.data.kind == ShotKind::Sparkles) {
+                    push(
+                        Fx::sparkles(SparkleParams { burst: Some(shot.t0), ..burst }).on(cv.capsule(stage::PRO)).seed(shot.seed).opacity(k),
                         Anchor::Over(node::PRO),
                     );
                 }

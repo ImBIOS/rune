@@ -374,6 +374,10 @@ pub struct ElectricParams {
     pub gap: f32,
     pub fork_len: f32,
     pub occlusion: f32,
+    /// One strike at this time (layer clock) instead of a continuous arc: it flashes, may
+    /// re-strike down the same channel, then its afterimage fades within `ZAP_LIFE`. Overlapping
+    /// zaps: one layer per `OneShots` instance, seeded with the instance's seed.
+    pub zap: Option<f32>,
 }
 
 impl Default for ElectricParams {
@@ -395,11 +399,14 @@ impl Default for ElectricParams {
             gap: 2.0,
             fork_len: 20.0,
             occlusion: 0.12,
+            zap: None,
         }
     }
 }
 
 impl ElectricParams {
+    /// How long a zap lasts (s).
+    pub const ZAP_LIFE: f32 = 0.5;
     pub const KNOBS: &'static [Knob] = &[
         k("amplitude", 0.0, 24.0, 5.0),
         k("frequency", 0.5, 8.0, 2.4),
@@ -843,11 +850,21 @@ pub struct SparkleParams {
     pub size: f32,
     pub intensity: f32,
     pub margin: f32,
+    /// A one-shot burst starting at this time (layer clock): every star pops once, flies a little
+    /// way out from the shape and twinkles out within `burst_life()`. `None` twinkles forever.
+    pub burst: Option<f32>,
 }
 
 impl Default for SparkleParams {
     fn default() -> Self {
-        SparkleParams { color: rgb(0xffe6a8), count: 9, life: 1.5, size: 7.0, intensity: 1.0, margin: 10.0 }
+        SparkleParams { color: rgb(0xffe6a8), count: 6, life: 1.5, size: 7.0, intensity: 1.0, margin: 10.0, burst: None }
+    }
+}
+
+impl SparkleParams {
+    /// Seconds from the start of a burst until its last star is gone.
+    pub fn burst_life(&self) -> f32 {
+        cpu::SPARKLE_STAGGER + self.life * cpu::BURST_LIFE * 1.3
     }
 }
 
@@ -1035,6 +1052,8 @@ impl FxLayer {
             Fx::Distort(DistortParams::ChromaSplit { glitch, .. }) => *glitch > 0.0 && !rm,
             Fx::MotionBlur(_, s) => s.is_moving(),
             Fx::Grain(g) => g.fps > 0.0 && !rm,
+            Fx::Electric(ElectricParams { zap: Some(t0), .. }) => t < t0 + ElectricParams::ZAP_LIFE,
+            Fx::Sparkles(p @ SparkleParams { burst: Some(t0), .. }) => t < t0 + p.burst_life(),
             _ => !rm,
         }
     }
@@ -1161,6 +1180,12 @@ impl FxLayer {
                     return None;
                 }
                 i.t[0] = looped_t;
+                if let Some(t0) = p.zap {
+                    if self.time < t0 || self.time > t0 + ElectricParams::ZAP_LIFE {
+                        return None;
+                    }
+                    i.t[0] = self.time;
+                }
                 i.c0 = p.color.v4();
                 i.c1 = p.core.v4();
                 i.c2 = p.cool.v4();
@@ -1293,11 +1318,16 @@ impl FxLayer {
                 if p.intensity <= 0.0 || p.count == 0 {
                     return None;
                 }
+                if let Some(t0) = p.burst
+                    && (self.time < t0 || self.time > t0 + p.burst_life())
+                {
+                    return None;
+                }
                 i.t[2] = 1.0;
                 i.c0 = p.color.v4();
                 i.p0 = [p.count.min(32) as f32, p.life, p.size, p.intensity];
                 i.p1 = [p.margin, 0.0, 0.0, 0.0];
-                (KIND_EXTRAS, r.inflate(p.margin + p.size * 1.3))
+                (KIND_EXTRAS, r.inflate(p.margin + p.size * cpu::SPARKLE_MAX_SCALE + 2.0))
             }
             Fx::Aurora(p) => {
                 if p.intensity <= 0.0 {
@@ -1411,6 +1441,21 @@ mod tests {
         assert!(Fx::glow(GlowParams::default()).on(card()).opacity(0.0).pack().is_none());
         let (_, i, _) = Fx::glow(GlowParams::default()).on(card()).opacity(0.4).pack().unwrap();
         assert_eq!(i.shape[2], 0.4);
+    }
+
+    #[test]
+    fn zaps_and_bursts_live_out_their_window_then_cull() {
+        let zap = Fx::electric(ElectricParams { style: ElectricStyle::Arc { a: [0.0, 0.0], b: [200.0, 40.0] }, zap: Some(1.0), ..Default::default() }).on(card());
+        assert!(zap.at(0.9).pack().is_none());
+        assert!(zap.at(1.2).pack().is_some() && zap.at(1.2).is_animating());
+        assert!(zap.at(1.0 + ElectricParams::ZAP_LIFE + 0.01).pack().is_none());
+        let p = SparkleParams { burst: Some(2.0), ..Default::default() };
+        let burst = Fx::sparkles(p).on(card());
+        assert!(burst.at(2.3).pack().is_some());
+        assert!(!burst.at(2.0 + p.burst_life() + 0.01).is_animating());
+        let mut data = Vec::new();
+        let (_, n) = cpu::sparkles(&p, card().rect, 2.0 + p.burst_life() + 0.01, 1, false, &mut data);
+        assert_eq!(n, 0.0, "every burst star is gone by burst_life()");
     }
 
     #[test]

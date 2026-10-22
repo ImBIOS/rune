@@ -448,7 +448,7 @@ fn scene(name: &str, b: &mut B) {
             let pro = Rect::new(432.0, 274.0, 88.0, 34.0);
             b.rect(pro, 17.0, col(0xf7d98b, 1.0), col(0xcf9f38, 1.0), col(0xffffff, 0.4), 0.5);
             b.text_c(476.0, 291.0, "PRO", 13.0, 2, col(0x3b2a06, 1.0));
-            b.fx(Fx::sparkles(SparkleParams { margin: 20.0, size: 8.0, count: 9, ..Default::default() }).on(Shape::capsule(pro.x, pro.y, pro.w, pro.h)).seed(4));
+            b.fx(Fx::sparkles(SparkleParams { margin: 20.0, size: 8.0, count: 6, ..Default::default() }).on(Shape::capsule(pro.x, pro.y, pro.w, pro.h)).seed(4));
             b.caption(432.0, 344.0, "Sparkles");
         }
         _ => panic!("unknown effect {name}"),

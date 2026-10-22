@@ -215,6 +215,14 @@ pub fn on_stage(s: &mut Lab, d: &mut Drag, tx: &mut Tx) {
                         tx.instant();
                     }
                 }
+                Scene::Electric if !inside(CHARGED, p, 0.0) => {
+                    s.shots.prune(t, 3.0);
+                    s.shots.trigger(t, Shot { kind: ShotKind::Zap, at: p, t0: t });
+                }
+                Scene::Extras if inside(PRO, p, 8.0) => {
+                    s.shots.prune(t, 3.0);
+                    s.shots.trigger(t, Shot { kind: ShotKind::Sparkles, at: p, t0: t });
+                }
                 Scene::Lens => {
                     if inside(lens_rect(s.lens), p, 4.0) {
                         s.grab = Some(Grab::Lens([p[0] - s.lens[0], p[1] - s.lens[1]]));
@@ -622,7 +630,7 @@ fn electric(p: &P) -> Vec<El> {
     for t in [ARC_A, ARC_B] {
         v.push(circle([t[0], t[1], 9.0]).fill(oklch(0.72, 0.01, 265.0)).border(0.5, oklcha(1.0, 0.0, 0.0, 0.3)).mark(mk(p.sc, 0, node::TERMINALS)));
     }
-    v.push(caption(p, ARC_A[0], ARC_A[1] + 40.0, "Arc · forks shoot out and cool"));
+    v.push(caption(p, ARC_A[0], ARC_A[1] + 40.0, "Arc · click to zap"));
     v.push(fx_card(p, OVERLOAD, 18.0, node::OVERLOAD));
     v.push(label(OVERLOAD.x + 22.0, OVERLOAD.y + 22.0, "Overload", 16.0, 600.0, p.txt));
     v.extend(lines(p, OVERLOAD.x + 22.0, OVERLOAD.y + 56.0, 200.0, 4));
@@ -725,6 +733,6 @@ fn extras(p: &P) -> Vec<El> {
     v.push(caption(p, AURORA.x, AURORA.y + AURORA.h + 24.0, "Aurora + static grain"));
     v.push(r(PRO).radius(PRO.h * 0.5).fill(hx(0xe9c46a)).border(0.5, oklcha(1.0, 0.0, 0.0, 0.4)).mark(mk(p.sc, 0, node::PRO)));
     v.push(label(PRO.x + 36.0, PRO.y + 11.0, "PRO", 14.0, 600.0, hx(0x3b2a06)));
-    v.push(caption(p, PRO.x, PRO.y + PRO.h + 26.0, "Sparkles"));
+    v.push(caption(p, PRO.x, PRO.y + PRO.h + 26.0, "Sparkles · click for a burst"));
     v
 }

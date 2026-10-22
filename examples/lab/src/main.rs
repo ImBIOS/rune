@@ -27,6 +27,10 @@ pub enum ShotKind {
     /// The send button's ping to the inbox (which ripples on arrival).
     Ping,
     Shockwave,
+    /// A lightning strike from the nearer electrode to the click.
+    Zap,
+    /// A burst of sparkles off the PRO badge.
+    Sparkles,
 }
 
 #[derive(Clone, Copy, Debug)]

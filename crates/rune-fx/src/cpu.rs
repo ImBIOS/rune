@@ -174,6 +174,18 @@ fn strike_env(age: f32, dur: f32, flicker: f32, h: u32) -> f32 {
     flash * settle + ret
 }
 
+/// A single zap: the strike's flash, usually one re-strike down the same channel a few frames
+/// later, then the afterimage fades out by `ElectricParams::ZAP_LIFE`.
+fn zap_env(age: f32, flicker: f32, reduced: bool, h: u32) -> f32 {
+    let out = 1.0 - ss(0.6, 1.0, age / ElectricParams::ZAP_LIFE);
+    if reduced {
+        return (-age / 0.15).exp() * out;
+    }
+    let a1 = 0.07 + 0.06 * u01(h);
+    let ret = if age > a1 { (0.5 + 0.5 * flicker) * (-(age - a1) / 0.035).exp() } else { 0.0 };
+    ((1.0 + 0.65 * (-age / 0.022).exp()) * (-age / 0.11).exp() + ret) * out
+}
+
 /// Afterimage of a strike `g` seconds after it was replaced.
 fn ghost_env(g: f32) -> f32 {
     0.9 * (-g / 0.07).exp()
@@ -259,17 +271,25 @@ pub(crate) fn arc_reach(p: &ElectricParams, l: f32) -> f32 {
 pub(crate) fn electric(p: &ElectricParams, shape: Shape, t: f32, seed: u32, reduced: bool, data: &mut Vec<[f32; 4]>) -> [f32; 4] {
     let first = data.len() as f32;
     let freq = p.frequency / 100.0;
-    let strands = p.strands.clamp(1, 3) as usize;
+    let strands = if p.zap.is_some() { 1 } else { p.strands.clamp(1, 3) as usize };
     let rate = if reduced { 0.0 } else { p.forks };
-    let st = Strikes::new(if reduced { 0.0 } else { p.speed }, seed);
-    let (k, age, dur) = if reduced { (0, 1.0, f32::INFINITY) } else { st.at(t) };
+    let st = Strikes::new(if reduced || p.zap.is_some() { 0.0 } else { p.speed }, seed);
+    let (k, age, dur) = if reduced && p.zap.is_none() { (0, 1.0, f32::INFINITY) } else { st.at(t - p.zap.unwrap_or(0.0)) };
+    // When each strike began, on the layer clock (a zap is strike 0 only).
+    let start = |ks: i32| match p.zap {
+        Some(t0) => if ks == 0 { t0 } else { f32::INFINITY },
+        None => st.start(ks),
+    };
     let still = reduced || st.period.is_infinite();
-    let noise = |j: usize| if still { 1.0 } else { 1.0 - p.flicker * 0.25 * (0.5 + 0.5 * gnoise(t * 14.0, j as f32 * 3.7, 0, seed.wrapping_add(17))) };
-    let bright = [
-        if reduced { 1.0 } else { strike_env(age, dur, p.flicker, st.strike_seed(k)) * noise(0) },
-        if still { 0.0 } else { ghost_env(age) * noise(1) },
-        if still { 0.0 } else { ghost_env(age + st.start(k) - st.start(k - 1)) * noise(2) },
-    ];
+    let noise = |j: usize| if reduced { 1.0 } else { 1.0 - p.flicker * 0.25 * (0.5 + 0.5 * gnoise(t * 14.0, j as f32 * 3.7, 0, seed.wrapping_add(17))) };
+    let bright = match p.zap {
+        Some(_) => [zap_env(age, p.flicker, reduced, st.strike_seed(0)) * noise(0), 0.0, 0.0],
+        None => [
+            if reduced { 1.0 } else { strike_env(age, dur, p.flicker, st.strike_seed(k)) * noise(0) },
+            if still { 0.0 } else { ghost_env(age) * noise(1) },
+            if still { 0.0 } else { ghost_env(age + st.start(k) - st.start(k - 1)) * noise(2) },
+        ],
+    };
     let hdr = data.len();
     data.push([0.0; 4]);
     data.push([bright[0], bright[1], bright[2], 0.0]);
@@ -300,7 +320,7 @@ pub(crate) fn electric(p: &ElectricParams, shape: Shape, t: f32, seed: u32, redu
             let mut forks = 0;
             'strikes: for j in 0..2 {
                 let ks = k - j;
-                let fage = t - st.start(ks);
+                let fage = t - start(ks);
                 for c in 0..3u32 {
                     if forks == 4 {
                         break 'strikes;
@@ -359,7 +379,7 @@ pub(crate) fn electric(p: &ElectricParams, shape: Shape, t: f32, seed: u32, redu
             let mut forks = 0;
             'strikes: for j in 0..2 {
                 let ks = k - j;
-                let fage = t - st.start(ks);
+                let fage = t - start(ks);
                 for c in 0..3u32 {
                     if forks == 5 {
                         break 'strikes;
@@ -498,26 +518,82 @@ pub(crate) fn embers(p: &FireParams, rect: Rect, radius: f32, t: f32, seed: u32,
     (first, count as f32)
 }
 
-/// Sparkles: two vec4 each: (pos, size, envelope), (cos, sin, 0, 0).
+/// Burst stars start within this many seconds of each other.
+pub(crate) const SPARKLE_STAGGER: f32 = 0.16;
+/// A burst star lives this fraction of `SparkleParams::life`.
+pub(crate) const BURST_LIFE: f32 = 0.55;
+/// Peak of a star's pop (overshoot before it settles), as a multiple of its size.
+pub(crate) const SPARKLE_MAX_SCALE: f32 = 1.16 * 1.35;
+
+/// A star's size over its life `a` (0..1): it pops in with a little overshoot, settles, holds,
+/// then shrinks away.
+fn star_scale(a: f32) -> f32 {
+    let x = (a / 0.22).min(1.0);
+    let c = 2.2;
+    let back = 1.0 + (c + 1.0) * (x - 1.0).powi(3) + c * (x - 1.0).powi(2);
+    back * (1.0 - ss(0.55, 1.0, a))
+}
+
+/// Sparkles: two vec4 each: (pos, size, brightness), (cos, sin, 0, 0).
+/// A few four-point stars around the shape, each with its own size (mostly small, a few large),
+/// twinkle rate and spin. Continuous stars rest between appearances so only some are lit at once;
+/// a burst (`SparkleParams::burst`) pops every star once and flings it out a little.
 pub(crate) fn sparkles(p: &SparkleParams, rect: Rect, t: f32, seed: u32, reduced: bool, data: &mut Vec<[f32; 4]>) -> (f32, f32) {
     let first = data.len() as f32;
     let mut count = 0;
+    let (cx, cy, hw, hh) = (rect.x + rect.w * 0.5, rect.y + rect.h * 0.5, rect.w * 0.5, rect.h * 0.5);
     for k in 0..p.count.min(32) {
         let h0 = hu(seed.wrapping_add(313), k * 11 + 1);
-        let life = p.life * (0.7 + 0.6 * u01(h0));
-        let tau = t / life + u01(h0 + 1);
-        let kk = tau.floor();
-        let a = tau - kk;
-        let hk = hu(h0, kk as i32 as u32);
-        let m = p.margin;
-        let pos = [rect.x - m + (rect.w + 2.0 * m) * u01(hk + 2), rect.y - m + (rect.h + 2.0 * m) * u01(hk + 3)];
-        let size = p.size * (0.55 + 0.7 * u01(hk + 4));
-        let env = if reduced { 0.5 * u01(hk + 5) } else { (PI * a).sin().powi(3) };
-        if env < 0.003 {
+        // (instance hash, age within its life, life)
+        let (hk, age, life) = match p.burst {
+            Some(t0) => {
+                let life = p.life * BURST_LIFE * (0.7 + 0.6 * u01(h0));
+                (h0, t - t0 - SPARKLE_STAGGER * u01(h0 + 1), life)
+            }
+            None if reduced => {
+                // Still: a fixed handful, lit at rest.
+                if u01(h0 + 9) > 0.6 {
+                    continue;
+                }
+                (h0, 0.5, 1.0)
+            }
+            None => {
+                // Each cycle: lit for `life`, then dark for a while, so the stars take turns.
+                let life = p.life * (0.7 + 0.6 * u01(h0));
+                let cycle = life * (1.5 + 0.8 * u01(h0 + 2));
+                let tau = t / cycle + u01(h0 + 1);
+                let kk = tau.floor();
+                (hu(h0, kk as i32 as u32), (tau - kk) * cycle, life)
+            }
+        };
+        if age < 0.0 || age > life {
             continue;
         }
-        let ang = 0.785398 * u01(hk + 6) * 0.3;
-        data.push([pos[0], pos[1], size, env]);
+        let a = age / life;
+        // Around the shape: a point on its outline, pushed out into the margin.
+        let th = TAU * u01(hk + 2);
+        let (dx, dy) = (th.cos(), th.sin());
+        let edge = 1.0 / (dx.abs() / hw.max(1.0)).max(dy.abs() / hh.max(1.0));
+        let mut out = p.margin * (0.15 + 0.85 * u01(hk + 3));
+        if p.burst.is_some() && !reduced {
+            out *= 0.35 + 0.65 * (1.0 - (-age * 5.0).exp());
+        }
+        let pos = [cx + dx * (edge + out), cy + dy * (edge + out)];
+        let v = u01(hk + 4);
+        let size = p.size * (0.45 + 0.9 * v * v);
+        let (sc, env) = if reduced {
+            (1.0, (PI * a).sin() * 0.7)
+        } else {
+            let fq = 5.0 + 4.0 * u01(hk + 5);
+            let tw = 0.5 + 0.5 * (TAU * fq * age + TAU * u01(hk + 6)).sin();
+            (star_scale(a), 1.0 - 0.3 * tw * tw)
+        };
+        if sc * env < 0.01 {
+            continue;
+        }
+        let spin = if reduced { 0.0 } else { (u01(hk + 7) - 0.5) * 1.2 * age };
+        let ang = (u01(hk + 8) - 0.5) * 0.35 + spin;
+        data.push([pos[0], pos[1], size * sc, env]);
         data.push([ang.cos(), ang.sin(), 0.0, 0.0]);
         count += 1;
     }
