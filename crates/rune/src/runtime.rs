@@ -232,6 +232,8 @@ pub struct Runtime<S: 'static> {
     pub env: Env,
     /// Viewport in points.
     pub viewport: (f32, f32),
+    /// Transparent native surfaces/headless exports clear to transparent black.
+    pub transparent: bool,
     /// Animation time (seconds, scaled by the time scale).
     pub t: f64,
     pub reduced_motion: bool,
@@ -338,6 +340,7 @@ impl<S: 'static> Runtime<S> {
             scene,
             env,
             viewport,
+            transparent: false,
             t: 0.0,
             reduced_motion: false,
             time_scale: 1.0,
@@ -2307,6 +2310,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub fn clear_color(&self) -> [f32; 4] {
+        if self.transparent { return [0.0; 4]; }
         self.nodes.first().map_or([0.0, 0.0, 0.0, 1.0], |n| {
             let c = self.color(n.id, P_FILL, n.vis.fill);
             [c.r, c.g, c.b, 1.0]

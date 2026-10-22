@@ -66,7 +66,7 @@ pub(crate) fn runtime_for<S: 'static>(spec: &AppSpec<S>, state: S, size: (f32, f
     rt
 }
 
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct Args {
     pub snap: Option<PathBuf>,
     pub scene: Option<String>,
@@ -87,6 +87,8 @@ pub struct Args {
     pub cols: usize,
     pub list_scenes: bool,
     pub first_pixels: bool,
+    pub window: Option<String>,
+    pub list_windows: bool,
 }
 
 impl Args {
@@ -134,6 +136,8 @@ impl Args {
                 "--every" => a.every = (num(&val(&mut i)) as usize).max(1),
                 "--list-scenes" => a.list_scenes = true,
                 "--first-pixels" => a.first_pixels = true,
+                "--window" => a.window = Some(val(&mut i)),
+                "--list-windows" => a.list_windows = true,
                 "-h" | "--help" => {
                     eprintln!("{HELP}");
                     std::process::exit(0);
@@ -154,6 +158,7 @@ impl Args {
             || self.strip.is_some()
             || self.list_scenes
             || self.first_pixels
+            || self.list_windows
     }
 }
 
@@ -170,6 +175,8 @@ const HELP: &str = "usage: <app> [window]
   --tree out.json       element tree with animated values
   --trace out.jsonl     per-frame rects/opacity in motion-lint JSONL
   --first-pixels        report when the first GPU-complete offscreen pixels are readable
+  --window KEY         select a window for headless tools (run_windows apps)
+  --list-windows       list window keys using a deterministic virtual display
   other arguments are passed to the app (rune::tooling::extra_args)";
 
 fn die(msg: &str) -> ! {
@@ -185,6 +192,34 @@ fn num(s: &str) -> f64 {
 /// headless for the tooling arguments.
 pub fn run<S: 'static>(spec: AppSpec<S>) {
     crate::app::App::new(spec).run();
+}
+
+/// Create independent windows from a display-aware factory. Headless tools invoke the same
+/// factory with one virtual display and select one retained tree using `--window KEY`.
+pub fn run_windows<S: 'static>(factory: impl FnOnce(&[crate::Display]) -> Vec<crate::WindowSpec<S>> + 'static) {
+    let args = Args::parse();
+    if args.headless() {
+        let display = crate::Display { name: Some("headless".into()), position: (0, 0),
+            size: (1920, 1080), scale: f64::from(args.scale.unwrap_or(2.0)), primary: true };
+        let mut windows = factory(std::slice::from_ref(&display));
+        crate::windows::validate(&windows).unwrap_or_else(|e| die(&e));
+        if args.list_windows {
+            for window in windows { println!("{}", window.key); }
+            return;
+        }
+        let index = match args.window.as_deref() {
+            Some(key) => windows.iter().position(|w| w.key == key).unwrap_or_else(|| die(&format!("no window {key:?}; use --list-windows"))),
+            None if !windows.is_empty() => 0,
+            None => die("the app created no windows"),
+        };
+        let mut window = windows.remove(index);
+        if let Some((w, h)) = window.options.physical_size {
+            window.app.spec.size = (w as f32 / display.scale as f32, h as f32 / display.scale as f32);
+        }
+        headless_configured(window.app, args, window.options.transparent);
+    } else {
+        crate::window::run_windows(factory, args);
+    }
 }
 
 pub fn initial_state<S: 'static>(spec: &AppSpec<S>, scene: Option<&str>) -> S {
@@ -546,7 +581,40 @@ fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
 // -------------------------------------------------------------------------------------------
 // Headless run
 
+// Render targets contain sRGB-encoded premultiplied linear colour. PNG uses straight
+// colour, so unpremultiply in linear space, not in the encoded byte domain.
+#[cfg(test)]
+pub(crate) fn straight_alpha(pixels: &mut [u8]) {
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = f32::from(pixel[3]) / 255.0;
+        if alpha == 0.0 { pixel[..3].fill(0); }
+        else if alpha < 1.0 {
+            for c in &mut pixel[..3] {
+                *c = (crate::color::srgb_encode((crate::color::srgb_decode(f32::from(*c) / 255.0) / alpha).clamp(0.0, 1.0)) * 255.0).round() as u8;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    #[test]
+    fn transparent_png_unpremultiplies_in_linear_space() {
+        let mut pixels = [188, 0, 0, 128, 255, 255, 255, 0, 12, 34, 56, 255];
+        super::straight_alpha(&mut pixels);
+        assert_eq!(pixels, [255, 0, 0, 128, 0, 0, 0, 0, 12, 34, 56, 255]);
+    }
+}
+
 pub fn headless<S: 'static>(app: crate::app::App<S>, args: Args) {
+    if args.list_windows { println!("main"); return; }
+    if args.window.as_deref().is_some_and(|key| key != "main") {
+        die("no such window; this app has only 'main'");
+    }
+    headless_configured(app, args, false);
+}
+
+fn headless_configured<S: 'static>(app: crate::app::App<S>, args: Args, transparent: bool) {
     let launched = Instant::now();
     if args.list_scenes {
         for (n, _) in app.spec.scenes {
@@ -560,6 +628,7 @@ pub fn headless<S: 'static>(app: crate::app::App<S>, args: Args) {
     let dark = args.theme.as_deref() != Some("light");
     let state_ms = launched.elapsed().as_secs_f64() * 1000.0;
     let mut rt = runtime_for(&spec, state, size, Env { system_dark: dark, scale }, std::sync::Arc::new(|| {}));
+    rt.transparent = transparent;
     let runtime_ms = launched.elapsed().as_secs_f64() * 1000.0 - state_ms;
 
     let script = args.script.as_ref().map(load_script).unwrap_or_default();
@@ -583,6 +652,7 @@ pub fn headless<S: 'static>(app: crate::app::App<S>, args: Args) {
     let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
     let (wp, hp) = ((size.0 * scale).round() as u32, (size.1 * scale).round() as u32);
     let target = Offscreen::new(&gpu.device, wp, hp);
+    let alpha = transparent.then(|| crate::surface_alpha::AlphaSurface::new(&gpu.device, OFFSCREEN_FORMAT, (wp, hp)));
     let init_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let mut trace = args.trace.as_ref().map(|p| Trace::open(p, size, fps, scale));
@@ -629,7 +699,8 @@ pub fn headless<S: 'static>(app: crate::app::App<S>, args: Args) {
         let animating = rt.frame(if k == 0 { 0.0 } else { dt });
         renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (wp, hp));
         let mut enc = gpu.device.create_command_encoder(&Default::default());
-        renderer.draw(&mut enc, &target.view, rt.clear_color());
+        renderer.draw(&mut enc, alpha.as_ref().map_or(&target.view, |a| &a.view), rt.clear_color());
+        if let Some(alpha) = &alpha { alpha.draw(&mut enc, &target.view); }
         let dump = k >= start_frame && k < start_frame + frames && (args.out.is_some() || args.strip.is_some()) && (k - start_frame).is_multiple_of(args.every);
         let want_snap = k == snap_frame && args.snap.is_some();
         let want_pixels = dump || want_snap || (args.first_pixels && k == 0);

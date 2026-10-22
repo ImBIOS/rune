@@ -155,12 +155,9 @@ app.run();
 - `AppSpec::min_size` sets the smallest window (None keeps 420×400).
 - `AppHandle::set_dock_icon(bool)` switches macOS between the regular and accessory activation
   policies at runtime (observed on macOS 26.2 with `lsappinfo`: UIElement ↔ Foreground).
-- Not yet: several windows, window kinds (panel, transparent click-through overlay, Wayland
-  layer-shell).
+- Not yet: Wayland layer-shell or non-activating panels.
 
-## Run
-
-### High-frequency values
+## High-frequency values
 
 `Live<T>` is a cloneable, thread-safe latest-wins handle (`f32`, `[f32; 2]`,
 `[f32; 4]`, `Color`). Call `set(value)` from a producer thread; Rune coalesces a
@@ -177,6 +174,39 @@ The native shell samples after acquiring a drawable. This is still the main-thre
 renderer, not a dedicated late-uniform/render-thread path. `Live::new` requires
 lock-free 128-bit atomics on the host CPU. Publication allocates nothing; platform
 wake callbacks are not hard-real-time guarantees.
+
+## Multiple windows and overlays
+
+`run_windows(|displays| Vec<WindowSpec<S>>)` creates independent retained trees on
+one winit event loop. Each spec has a stable key, an `AppSpec`, optional supplied
+state, and `WindowOptions`. Share Live handles/services between window states.
+`WindowOptions::overlay(display)` selects transparent, borderless, topmost,
+click-through presentation at that display's physical origin and size. Options
+also support initially hidden windows and per-window minimum sizes.
+
+`WindowSpec::on_created` receives a weak `WindowHandle`: toggle click-through,
+visibility and topmost status, close a window, borrow its raw-window-handle, or
+read its macOS `window_number()` (CGWindowID) for ScreenCaptureKit exclusion.
+By default closing a window releases its runtime; the last window closes the app. Input,
+focus, clocks, redraws and visibility-gated live wakes are window-local.
+
+`WindowSpec::from_app(key, app)` preserves `AppHandle`, `windowless`, `keep_running`,
+close callbacks and optional GPU release for that window. Retained hosts can reopen
+through their AppHandle or WindowHandle. `Tx::quit` / `AppHandle::quit` exit the
+whole event loop. Both entry points use the same lifetime host and render path.
+
+Headless tools accept `--window KEY` and `--list-windows`. They use one virtual
+1920×1080 display, create no native windows, and export overlays as straight-alpha
+PNGs. See [`examples/overlay`](../../examples/overlay) for a normal control window,
+one overlay per monitor, a shared remote cursor, a stroke and hit-test toggling.
+
+Monitor enumeration is a startup snapshot. Winit platform/window-manager support
+still governs transparency, placement and topmost behavior. Non-activating macOS
+`NSPanel`s, all-Spaces/fullscreen-space policy and status items need Rune's own Mac
+shell; they are not implemented here. Native window behavior remains untested on
+Studio; verification uses compilation and selected-window headless renders.
+
+## Run
 
 ```sh
 hivemind run --kind cargo -- cargo build --release -p settings
