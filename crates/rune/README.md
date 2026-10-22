@@ -358,6 +358,8 @@ Enable Rune's `native-file-dialog` feature and inject `FileDialogs::native()` in
 (None means cancelled). `FileDialogOptions` carries title, directory, suggested filename and
 `.filter("Audio", &["wav", "flac"])`. rfd handles Cocoa on macOS and the XDG portal on Linux;
 poll these futures on the app's async executor and wake Rune when the result arrives.
+Never block the window's main thread with `pollster::block_on` for a native dialog;
+Cocoa needs that thread's event loop to present and complete it.
 
 Headless fixtures inject `FileDialogs::scripted([ScriptedFileDialog { kind:
 FileDialogKind::Open, path: Some("/fixture/recording.wav".into()) }])`. Requests resolve
