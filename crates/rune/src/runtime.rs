@@ -24,7 +24,7 @@ use taffy::TraversePartialTree;
 
 use crate::color::{Color, over, srgb_encode};
 use crate::edit::{EditOutcome, Ime, KeyEvent};
-use crate::el::{Align, Drag, DragFn, El, GrowthSpec, InputSpec, Phase, PressFn, ScrollSpec, Shell, TextSpec, Tx, Visual};
+use crate::el::{Align, Drag, DragFn, El, GrowthSpec, InputSpec, Phase, PointerPress, PressFn, SecondaryFn, ScrollSpec, Shell, TextSpec, Tx, Visual};
 use crate::growth::{GrowTrack, SUBSTEP};
 use crate::flight::{TextFlight, transformed};
 use crate::render::{Instance, KIND_GLYPH, KIND_GRADIENT, KIND_IMAGE, KIND_INSET, KIND_RECT, KIND_SEGMENT, KIND_SHADOW, KIND_TRIANGLE, NO_CLIP};
@@ -96,6 +96,7 @@ pub(crate) struct Node {
     pub text: Option<TextSpec>,
     pub text_layout: Option<Rc<Layout<Ink>>>,
     on_press: Option<PressFn>,
+    on_secondary_press: Option<SecondaryFn>,
     on_hover: Option<PressFn>,
     above: Option<crate::el::Anchor>,
     on_drag: Option<DragFn>,
@@ -126,6 +127,7 @@ pub(crate) struct Node {
 enum Action {
     Hover(String),
     Press(String),
+    SecondaryPress(String, PointerPress),
     Drag(String, Drag),
     Key(KeyEvent),
     Ime(Ime),
@@ -262,6 +264,7 @@ pub struct Runtime<S: 'static> {
     queue: Vec<Action>,
     pointer: Option<(f32, f32)>,
     capture: Option<(String, Drag)>,
+    secondary_capture: Option<String>,
     capture_inside: bool,
     drag_data: f32,
     pub instances: Vec<Instance>,
@@ -373,6 +376,7 @@ impl<S: 'static> Runtime<S> {
             queue: Vec::new(),
             pointer: None,
             capture: None,
+            secondary_capture: None,
             capture_inside: false,
             drag_data: 0.0,
             instances: Vec::new(),
@@ -695,6 +699,13 @@ impl<S: 'static> Runtime<S> {
                 let Some(f) = self.node(&path).and_then(|n| n.on_press.clone()) else { return false };
                 self.events.push(format!("press {path}"));
                 f(&mut self.state as &mut dyn Any, &mut one);
+                true
+            }
+            Action::SecondaryPress(path, point) => {
+                let Some(n) = self.node(&path).filter(|n| !self.is_exiting(n.id)) else { return false };
+                let Some(f) = n.on_secondary_press.clone() else { return false };
+                self.events.push(format!("secondary press {path}"));
+                f(&mut self.state as &mut dyn Any, point, &mut one);
                 true
             }
             Action::Drag(path, mut d) => {
@@ -1673,6 +1684,32 @@ impl<S: 'static> Runtime<S> {
         std::mem::take(&mut self.window_drag_request)
     }
 
+    fn secondary_target(&self, x: f32, y: f32) -> Option<&str> {
+        let id = self.hits.iter().rev().find(|&&(_, r)| x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3])?.0;
+        let mut index = *self.node_index.get(&id)?;
+        loop {
+            let n = &self.nodes[index];
+            if self.is_exiting(n.id) { return None; }
+            if n.on_secondary_press.is_some() { return Some(&n.path); }
+            index = n.parent?;
+        }
+    }
+
+    /// Capture a secondary gesture without activating primary actions or text selection.
+    pub fn secondary_down(&mut self, x: f32, y: f32) {
+        self.pointer = Some((x, y));
+        self.secondary_capture = self.secondary_target(x, y).map(str::to_owned);
+    }
+
+    pub fn secondary_up(&mut self, x: f32, y: f32) {
+        self.pointer = Some((x, y));
+        if let Some(path) = self.secondary_capture.take()
+            && self.secondary_target(x, y) == Some(path.as_str())
+        {
+            self.queue.push(Action::SecondaryPress(path, PointerPress { x, y }));
+        }
+    }
+
     pub fn pointer_up(&mut self, x: f32, y: f32) {
         self.pointer_move(x, y);
         let Some((path, d)) = self.capture.take() else { return };
@@ -1691,7 +1728,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub fn pointer_leave(&mut self) {
-        if self.capture.is_none() {
+        if self.capture.is_none() && self.secondary_capture.is_none() {
             self.pointer = None;
             self.hovered = None;
         }
@@ -1779,7 +1816,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn update_interaction(&mut self) {
-        let captured = self.capture.as_ref().map(|(p, _)| p.as_str());
+        let captured = self.capture.as_ref().map(|(p, _)| p.as_str()).or(self.secondary_capture.as_deref());
         for i in 0..self.nodes.len() {
             let n = &self.nodes[i];
             if self.is_exiting(n.id) || (n.vis.hover.a <= 0.0 && n.vis.press.a <= 0.0) {
@@ -1791,7 +1828,8 @@ impl<S: 'static> Runtime<S> {
             );
             let inside = self.pointer.is_some_and(|(x, y)| x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3]);
             let hovered = inside && n.vis.hover.a > 0.0 && captured.is_none_or(|p| p == n.path);
-            let pressed = captured == Some(n.path.as_str()) && self.capture_inside && n.vis.press.a > 0.0;
+            let capture_inside = if self.secondary_capture.is_some() { inside } else { self.capture_inside };
+            let pressed = captured == Some(n.path.as_str()) && capture_inside && n.vis.press.a > 0.0;
             let id = n.id;
             self.scene.animate(id, P_HOVER, hovered as u8 as f32, motion::SNAPPY);
             self.scene.animate(id, P_PRESS, pressed as u8 as f32, if pressed { motion::INSTANT } else { motion::SNAPPY });
@@ -2226,7 +2264,7 @@ impl<S: 'static> Runtime<S> {
                 dy -= grid((st.offset - origin) as f32, s);
             }
             self.inh_scratch[i] = Inh { opacity: o, clip, fade, scale: sc, anchor, blur, dy };
-            if (n.on_press.is_some() || n.on_hover.is_some() || n.on_drag.is_some() || n.input.is_some() || n.window_drag)
+            if (n.on_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_drag.is_some() || n.input.is_some() || n.window_drag)
                 && !self.subtree_exiting(i)
             {
                 let c = self.inh_scratch[n.parent.unwrap_or(0)].clip;
@@ -2561,6 +2599,7 @@ fn flatten(
         text,
         children,
         on_press,
+        on_secondary_press,
         on_hover,
         above,
         on_drag,
@@ -2589,6 +2628,7 @@ fn flatten(
         text,
         text_layout: None,
         on_press,
+        on_secondary_press,
         on_hover,
         above,
         on_drag,
@@ -2662,6 +2702,38 @@ mod tests {
 
     fn duplicate_view(_: &(), _: &mut Cx<()>) -> El {
         col().children([el().key("card"), el().key("card")])
+    }
+
+    #[test]
+    fn secondary_press_routes_to_ancestor_without_primary_and_cancels_outside() {
+        type State = (u32, Vec<PointerPress>, bool);
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            col().child(if s.2 {
+                el()
+            } else {
+                el().key("parent").size(80.0, 80.0)
+                    .on_secondary_press(|s: &mut State, p, _| s.1.push(p))
+                    .child(el().key("child").size(40.0, 40.0).on_press(|s: &mut State| s.0 += 1))
+            })
+        }
+        let mut rt = Runtime::new((0, Vec::new(), false), view, (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        rt.secondary_down(10.0, 10.0);
+        rt.secondary_up(12.0, 12.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state.0, 0);
+        assert_eq!(rt.state.1, [PointerPress { x: 12.0, y: 12.0 }]);
+        rt.secondary_down(10.0, 10.0);
+        rt.secondary_up(90.0, 90.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state.1.len(), 1);
+        rt.secondary_down(10.0, 10.0);
+        rt.state.2 = true;
+        rt.invalidate();
+        rt.frame(0.0);
+        rt.secondary_up(12.0, 12.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state.1.len(), 1);
     }
 
     #[test]

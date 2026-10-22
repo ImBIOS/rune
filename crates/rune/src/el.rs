@@ -100,6 +100,14 @@ pub struct Drag {
 }
 
 pub(crate) type PressFn = Rc<dyn Fn(&mut dyn Any, &mut Tx)>;
+pub(crate) type SecondaryFn = Rc<dyn Fn(&mut dyn Any, PointerPress, &mut Tx)>;
+
+/// A press position in window points, suitable for a context-menu anchor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointerPress {
+    pub x: f32,
+    pub y: f32,
+}
 pub(crate) type DragFn = Rc<dyn Fn(&mut dyn Any, &mut Drag, &mut Tx)>;
 pub(crate) type EditFn = Rc<dyn for<'a> Fn(&'a mut dyn Any) -> &'a mut TextEdit>;
 
@@ -272,6 +280,7 @@ pub struct El {
     pub(crate) text: Option<TextSpec>,
     pub(crate) children: Vec<El>,
     pub(crate) on_press: Option<PressFn>,
+    pub(crate) on_secondary_press: Option<SecondaryFn>,
     pub(crate) on_hover: Option<PressFn>,
     pub(crate) above: Option<Anchor>,
     pub(crate) on_drag: Option<DragFn>,
@@ -303,6 +312,7 @@ fn base(dir: FlexDirection) -> El {
         text: None,
         children: Vec::new(),
         on_press: None,
+        on_secondary_press: None,
         on_hover: None,
         above: None,
         on_drag: None,
@@ -427,6 +437,14 @@ impl El {
         if let Some(old) = self.live.iter_mut().find(|b| b.property == bound.property) { *old = bound; }
         else { self.live.push(bound); }
     }
+    /// Secondary release inside the captured element (right-click or macOS control-click).
+    pub fn on_secondary_press<S: 'static>(mut self, f: impl Fn(&mut S, PointerPress, &mut Tx) + 'static) -> Self {
+        self.on_secondary_press = Some(Rc::new(move |s, p, tx| {
+            f(s.downcast_mut::<S>().expect("secondary press state type"), p, tx);
+        }));
+        self
+    }
+
     pub(crate) fn key_location(&self) -> String {
         #[cfg(debug_assertions)]
         if let Some(source) = self.key_source { return source.to_string(); }

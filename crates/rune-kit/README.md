@@ -47,6 +47,9 @@ loads Inter and IBM Plex Mono.
   trigger. Content is `El::anchored` to the trigger (flips, shifts, stays inside the window).
 - Handlers attach through the builder (`on_press`, `on_toggle`, `on_select`, `on_choose`,
   `on_edit`) so disabled components drop them.
+  For pointer menus, store `Some(point)` from `El::on_secondary_press` and use
+  `context_menu("menu", trigger, s.point).item(..).on_close(..).build(k, &mut layer)`.
+  Clear the point on close or selection; positioning uses Menu's viewport-aware anchor.
 - `.state(State::Hover | Pressed | Focus | Disabled)` forces a visual state (the stories'
   `data-state`); at rest the runtime drives hover and press.
 - Translucent tokens are solved for linear-light blending over `bg_base`; colours painted on

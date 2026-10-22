@@ -212,6 +212,7 @@ struct Host<S: 'static> {
     last: Instant,
     idle: bool,
     mods: ModifiersState,
+    control_click: bool,
     clipboard: Option<arboard::Clipboard>,
 }
 
@@ -283,6 +284,7 @@ impl<S: 'static> Host<S> {
             last: Instant::now(),
             idle: true,
             mods: ModifiersState::empty(),
+            control_click: false,
             clipboard: arboard::Clipboard::new().ok(),
         }
     }
@@ -803,15 +805,28 @@ impl<S: 'static> AnyHost for Host<S> {
                 l.window.request_redraw();
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                if state == ElementState::Pressed {
+                    self.control_click = cfg!(target_os = "macos") && self.mods.control_key();
+                }
+                if let Some((x, y)) = rt.pointer() {
+                    match (state, self.control_click) {
+                        (ElementState::Pressed, true) => rt.secondary_down(x, y),
+                        (ElementState::Released, true) => rt.secondary_up(x, y),
+                        (ElementState::Pressed, false) => {
+                            rt.pointer_down(x, y);
+                            if rt.take_window_drag() { let _ = l.window.drag_window(); }
+                        }
+                        (ElementState::Released, false) => rt.pointer_up(x, y),
+                    }
+                }
+                if state == ElementState::Released { self.control_click = false; }
+                l.window.request_redraw();
+            }
+            WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => {
                 if let Some((x, y)) = rt.pointer() {
                     match state {
-                        ElementState::Pressed => {
-                            rt.pointer_down(x, y);
-                            if rt.take_window_drag() {
-                                let _ = l.window.drag_window();
-                            }
-                        }
-                        ElementState::Released => rt.pointer_up(x, y),
+                        ElementState::Pressed => rt.secondary_down(x, y),
+                        ElementState::Released => rt.secondary_up(x, y),
                     }
                 }
                 l.window.request_redraw();
