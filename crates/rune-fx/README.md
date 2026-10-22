@@ -12,6 +12,8 @@ hivemind run --kind cargo -- cargo run --release -p rune-fx --example gallery   
 hivemind run --kind cargo -- cargo test --release -p rune-fx --lib              # contract tests
 ```
 
+`examples/lab` composites these layers live inside Rune's renderer, with knobs.
+
 Output lands in `demo/fx/` (repo root): `<effect>.png`, `<effect>-strip.png` (8 frames),
 `<effect>-reduced.png` (reduced motion), `<effect>.mp4`, `motion-quarter-speed.mp4`, `timings.md`.
 `gallery --frames DIR --fps 60 --seconds 2 --effect fire [--start 0] [--reduced]` dumps a PNG sequence.

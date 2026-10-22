@@ -129,8 +129,8 @@ Quílez/Aaltonen estimator where the ray grazes two occluders. It's never wrong 
   jump-flood field over their coverage.
 - Nested occluders: the field keeps the nearest slab's z range, so a raised button on a raised card shadows as
   the nearer of the two.
-- Not wired into `rune::Runtime` yet (see the integration contract above); `examples/light.rs` drives `crates/rune`
-  and `crates/rune-light` directly.
+- `examples/light.rs` drives `crates/rune` and `crates/rune-light` directly; `examples/lab` drives the lights from a
+  live `rune::Runtime` through the compositor hook (marked elements become occluders).
 - GI is 2–3 ms. Halving the cascade-0 directions, or temporal amortisation (which breaks strict determinism), are
   the next levers.
 - The surface buffer is a second full-resolution raster of the primitives. Rune's uber pass could write it as an
