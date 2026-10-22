@@ -97,7 +97,9 @@
    },
    "time": {
     "created": 1792658140000,
-    "updated": 1792659340000
+    "updated": 1792659340000,
+    "idle": 1792659340000,
+    "viewed": 1792659340000
    },
    "title": "Fix flaky reconnect in the event stream",
    "location": {
@@ -154,7 +156,9 @@
    },
    "time": {
     "created": 1792656100000,
-    "updated": 1792657300000
+    "updated": 1792657300000,
+    "idle": 1792657300000,
+    "viewed": 1792657600000
    },
    "title": "Sidebar shows stale session titles",
    "location": {
@@ -210,7 +214,9 @@
    },
    "time": {
     "created": 1792647400000,
-    "updated": 1792648600000
+    "updated": 1792648600000,
+    "idle": 1792648600000,
+    "viewed": 1792645000000
    },
    "title": "Add keyboard shortcuts to the command palette",
    "location": {
@@ -238,7 +244,8 @@
    },
    "time": {
     "created": 1792647400000,
-    "updated": 1792648600000
+    "updated": 1792648600000,
+    "idle": 1792648600000
    },
    "title": "Explain the tile cache eviction policy",
    "location": {
@@ -266,7 +273,8 @@
    },
    "time": {
     "created": 1792640200000,
-    "updated": 1792641400000
+    "updated": 1792641400000,
+    "idle": 1792641400000
    },
    "title": "Retry uploads after a dropped connection",
    "location": {
@@ -294,7 +302,9 @@
    },
    "time": {
     "created": 1792564600000,
-    "updated": 1792565800000
+    "updated": 1792565800000,
+    "idle": 1792565800000,
+    "viewed": 1792565800000
    },
    "title": "Fix footnote numbering in exported PDFs",
    "location": {
@@ -322,7 +332,9 @@
    },
    "time": {
     "created": 1792561000000,
-    "updated": 1792562200000
+    "updated": 1792562200000,
+    "idle": 1792562200000,
+    "viewed": 1792562200000
    },
    "title": "Profile scroll jank in long transcripts",
    "location": {
@@ -840,9 +852,61 @@
   ]
  },
  "open": "ses_fx0001aaaaaaaaaaaaaaaaaa",
+ "tabs": [
+  "ses_fx0001aaaaaaaaaaaaaaaaaa",
+  "ses_fx0003aaaaaaaaaaaaaaaaaa",
+  "ses_fx0006aaaaaaaaaaaaaaaaaa",
+  "ses_fx0004aaaaaaaaaaaaaaaaaa",
+  "ses_fx0008aaaaaaaaaaaaaaaaaa",
+  "ses_fx0010aaaaaaaaaaaaaaaaaa",
+  "ses_fx0007aaaaaaaaaaaaaaaaaa",
+  "ses_fx0005aaaaaaaaaaaaaaaaaa"
+ ],
+ "running": [
+  "ses_fx0006aaaaaaaaaaaaaaaaaa"
+ ],
+ "requests": [
+  {
+   "sessionID": "ses_fx0008aaaaaaaaaaaaaaaaaa",
+   "id": "per_fx0001"
+  }
+ ],
+ "status_events": [
+  {
+   "t": 0.5,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_fx0004aaaaaaaaaaaaaaaaaa"
+   }
+  },
+  {
+   "t": 1.5,
+   "type": "permission.replied",
+   "data": {
+    "sessionID": "ses_fx0008aaaaaaaaaaaaaaaaaa",
+    "requestID": "per_fx0001",
+    "reply": "once"
+   }
+  },
+  {
+   "t": 2.5,
+   "type": "session.execution.succeeded",
+   "data": {
+    "sessionID": "ses_fx0006aaaaaaaaaaaaaaaaaa"
+   }
+  }
+ ],
  "stream": {
   "session": "ses_fx0001aaaaaaaaaaaaaaaaaa",
   "events": [
+   {
+    "t": 0.25,
+    "type": "session.execution.started",
+    "data": {
+     "sessionID": "ses_fx0001aaaaaaaaaaaaaaaaaa",
+     "assistantMessageID": "msg_001a162cb6dbc013fixture00"
+    }
+   },
    {
     "t": 0.25,
     "type": "session.step.started",
@@ -2163,12 +2227,25 @@
       }
      }
     }
+   },
+   {
+    "t": 8.281,
+    "type": "session.execution.succeeded",
+    "data": {
+     "sessionID": "ses_fx0001aaaaaaaaaaaaaaaaaa",
+     "assistantMessageID": "msg_001a162cb6dbc013fixture00"
+    }
    }
   ]
  },
  "reply": [
   {
    "t": 0.5,
+   "type": "session.execution.started",
+   "data": {}
+  },
+  {
+   "t": 0.8,
    "type": "session.step.started",
    "data": {
     "agent": "build",
@@ -2180,58 +2257,10 @@
    }
   },
   {
-   "t": 0.8,
+   "t": 1.1,
    "type": "session.text.started",
    "data": {
     "ordinal": 0
-   }
-  },
-  {
-   "t": 1.15,
-   "type": "session.text.delta",
-   "data": {
-    "ordinal": 0,
-    "delta": "Got "
-   }
-  },
-  {
-   "t": 1.2,
-   "type": "session.text.delta",
-   "data": {
-    "ordinal": 0,
-    "delta": "it. "
-   }
-  },
-  {
-   "t": 1.25,
-   "type": "session.text.delta",
-   "data": {
-    "ordinal": 0,
-    "delta": "I'll "
-   }
-  },
-  {
-   "t": 1.3,
-   "type": "session.text.delta",
-   "data": {
-    "ordinal": 0,
-    "delta": "take "
-   }
-  },
-  {
-   "t": 1.35,
-   "type": "session.text.delta",
-   "data": {
-    "ordinal": 0,
-    "delta": "a "
-   }
-  },
-  {
-   "t": 1.4,
-   "type": "session.text.delta",
-   "data": {
-    "ordinal": 0,
-    "delta": "look "
    }
   },
   {
@@ -2239,7 +2268,7 @@
    "type": "session.text.delta",
    "data": {
     "ordinal": 0,
-    "delta": "and "
+    "delta": "Got "
    }
   },
   {
@@ -2247,7 +2276,7 @@
    "type": "session.text.delta",
    "data": {
     "ordinal": 0,
-    "delta": "report "
+    "delta": "it. "
    }
   },
   {
@@ -2255,7 +2284,7 @@
    "type": "session.text.delta",
    "data": {
     "ordinal": 0,
-    "delta": "back "
+    "delta": "I'll "
    }
   },
   {
@@ -2263,7 +2292,7 @@
    "type": "session.text.delta",
    "data": {
     "ordinal": 0,
-    "delta": "with "
+    "delta": "take "
    }
   },
   {
@@ -2271,7 +2300,7 @@
    "type": "session.text.delta",
    "data": {
     "ordinal": 0,
-    "delta": "what "
+    "delta": "a "
    }
   },
   {
@@ -2279,7 +2308,7 @@
    "type": "session.text.delta",
    "data": {
     "ordinal": 0,
-    "delta": "I "
+    "delta": "look "
    }
   },
   {
@@ -2287,16 +2316,69 @@
    "type": "session.text.delta",
    "data": {
     "ordinal": 0,
-    "delta": "find. "
+    "delta": "and "
+   }
+  },
+  {
+   "t": 1.8,
+   "type": "session.text.delta",
+   "data": {
+    "ordinal": 0,
+    "delta": "report "
+   }
+  },
+  {
+   "t": 1.85,
+   "type": "session.text.delta",
+   "data": {
+    "ordinal": 0,
+    "delta": "back "
+   }
+  },
+  {
+   "t": 1.9,
+   "type": "session.text.delta",
+   "data": {
+    "ordinal": 0,
+    "delta": "with "
    }
   },
   {
    "t": 1.95,
+   "type": "session.text.delta",
+   "data": {
+    "ordinal": 0,
+    "delta": "what "
+   }
+  },
+  {
+   "t": 2.0,
+   "type": "session.text.delta",
+   "data": {
+    "ordinal": 0,
+    "delta": "I "
+   }
+  },
+  {
+   "t": 2.05,
+   "type": "session.text.delta",
+   "data": {
+    "ordinal": 0,
+    "delta": "find. "
+   }
+  },
+  {
+   "t": 2.25,
    "type": "session.step.ended",
    "data": {
     "finish": "stop",
     "cost": 0.01
    }
+  },
+  {
+   "t": 2.3,
+   "type": "session.execution.succeeded",
+   "data": {}
   }
  ]
 }

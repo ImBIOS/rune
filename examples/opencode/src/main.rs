@@ -7,6 +7,7 @@ mod markdown;
 mod model;
 mod palette;
 mod pickers;
+mod tabs;
 mod view;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -17,6 +18,7 @@ use serde_json::Value;
 
 use live::{DEFAULT_SERVER, Incoming, Request, Server};
 use model::{Message, Project, SessionInfo, Transcript};
+use tabs::Tab;
 
 const FIXTURE: &str = include_str!("../assets/fixture.json");
 
@@ -26,6 +28,13 @@ pub enum Route {
     Session(String),
     /// "New session": an empty page with the composer.
     Draft,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TabStatus {
+    Busy,
+    Attention,
+    Unread,
 }
 
 pub enum Source {
@@ -41,7 +50,16 @@ pub struct App {
     pub route: Route,
     pub transcripts: HashMap<String, Transcript>,
     pub expanded: HashSet<String>,
-    pub open_projects: HashSet<String>,
+    /// Pinned session tabs, in sidebar order (see `tabs.rs` for where they come from).
+    pub tabs: Vec<Tab>,
+    /// Sessions running right now (any depth; a tab is busy when anything in its family runs).
+    pub running: HashSet<String>,
+    /// Pending permission and form requests: (session, request id).
+    pub requests: HashSet<(String, String)>,
+    pub sidebar_open: bool,
+    pub sidebar_w: f32,
+    /// The width when a resize drag started.
+    pub sidebar_drag: Option<f32>,
     pub composer: TextEdit,
     pub search: TextEdit,
     pub pickers: pickers::Pickers,
@@ -83,7 +101,12 @@ impl App {
             route: Route::Home,
             transcripts: HashMap::new(),
             expanded: HashSet::new(),
-            open_projects: HashSet::new(),
+            tabs: Vec::new(),
+            running: HashSet::new(),
+            requests: HashSet::new(),
+            sidebar_open: !flag("--sidebar-closed"),
+            sidebar_w: view::SIDEBAR_W,
+            sidebar_drag: None,
             composer: TextEdit::new(""),
             search: TextEdit::new(""),
             pickers: pickers::Pickers::default(),
@@ -129,6 +152,14 @@ impl App {
                 self.transcripts.insert(id.clone(), Transcript { session: id.clone(), messages: msgs });
             }
         }
+        let ids: Vec<String> = v["tabs"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_owned)).collect();
+        self.tabs = ids.iter().map(|id| Tab { id: id.clone(), title: String::new(), directory: String::new() }).collect();
+        self.running = v["running"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_owned)).collect();
+        for r in v["requests"].as_array().into_iter().flatten() {
+            if let (Some(s), Some(id)) = (r["sessionID"].as_str(), r["id"].as_str()) {
+                self.requests.insert((s.to_owned(), id.to_owned()));
+            }
+        }
         self.status = "Fixture".into();
         self.fixture = v;
         self.source = Source::Fixture;
@@ -142,6 +173,13 @@ impl App {
         if let Ok(s) = server.get("/api/session?limit=120") {
             self.sessions = model::parse_sessions(&s);
         }
+        if let Ok(a) = server.get("/api/session/active") {
+            let map = a.get("data").unwrap_or(&a);
+            self.running = map.as_object().into_iter().flatten().map(|(k, _)| k.clone()).collect();
+        }
+        self.tabs = tabs::load(&server.base)
+            .or_else(|| if server.base == DEFAULT_SERVER { tabs::from_beta() } else { None })
+            .unwrap_or_else(|| self.recent_tabs());
         self.base_ms = wall_ms();
         self.now_ms = self.base_ms;
         self.status = format!("Live · {}", server.base.trim_start_matches("http://"));
@@ -162,9 +200,69 @@ impl App {
         let mut ps = std::mem::take(&mut self.projects);
         ps.sort_by_key(|p| std::cmp::Reverse(key(p)));
         self.projects = ps;
-        if let Some(first) = self.projects.first() {
-            self.open_projects.insert(first.id.clone());
+    }
+
+    /// A fresh profile's tabs: the most recent root sessions.
+    fn recent_tabs(&self) -> Vec<Tab> {
+        let mut roots: Vec<&SessionInfo> = self.sessions.iter().filter(|s| s.parent.is_none()).collect();
+        roots.sort_by_key(|s| std::cmp::Reverse(s.updated));
+        roots.iter().take(8).map(|s| Tab { id: s.id.clone(), title: s.title.clone(), directory: s.directory.clone() }).collect()
+    }
+
+    fn save_tabs(&mut self) {
+        // Keep titles fresh for sessions outside the loaded list next launch.
+        for t in &mut self.tabs {
+            if let Some(s) = self.sessions.iter().find(|s| s.id == t.id) {
+                t.title = s.title.clone();
+                t.directory = s.directory.clone();
+            }
         }
+        if let Source::Live { server, .. } = &self.source {
+            tabs::save(&server.base, &self.tabs);
+        }
+    }
+
+    /// The root of a session's family.
+    pub fn root_of<'a>(&'a self, id: &'a str) -> &'a str {
+        let mut cur = id;
+        for _ in 0..32 {
+            match self.session(cur).and_then(|s| s.parent.as_deref()) {
+                Some(p) => cur = p,
+                None => break,
+            }
+        }
+        cur
+    }
+
+    /// A tab's mark, as Desktop decides it: busy while anything in the family runs (unless it's
+    /// waiting on you), then nothing for the open tab, then attention before unread.
+    pub fn tab_status(&self, id: &str) -> Option<TabStatus> {
+        let attention = self.requests.iter().any(|(s, _)| self.root_of(s) == id);
+        if !attention && self.running.iter().any(|s| self.root_of(s) == id) {
+            return Some(TabStatus::Busy);
+        }
+        if self.route == Route::Session(id.to_owned()) {
+            return None;
+        }
+        if attention {
+            return Some(TabStatus::Attention);
+        }
+        self.session(id).is_some_and(SessionInfo::unread).then_some(TabStatus::Unread)
+    }
+
+    pub fn close_tab(&mut self, id: &str, tx: &mut Tx) {
+        let Some(i) = self.tabs.iter().position(|t| t.id == id) else { return };
+        self.tabs.remove(i);
+        if self.route == Route::Session(id.to_owned()) {
+            match self.tabs.get(i).or_else(|| self.tabs.get(i.wrapping_sub(1))).map(|t| t.id.clone()) {
+                Some(next) => self.open(&next, tx),
+                None => {
+                    self.route = Route::Home;
+                    tx.settle();
+                }
+            }
+        }
+        self.save_tabs();
     }
 
     pub fn live(&self) -> bool {
@@ -183,9 +281,15 @@ impl App {
     pub fn open(&mut self, id: &str, tx: &mut Tx) {
         self.close_picker(false);
         self.route = Route::Session(id.to_owned());
-        if let Some(s) = self.session(id) {
-            let p = s.project.clone();
-            self.open_projects.insert(p);
+        let root = self.root_of(id).to_owned();
+        if let Some(s) = self.sessions.iter_mut().find(|s| s.id == root) {
+            // Viewing it reads it (locally: this build never writes to the server).
+            s.viewed = s.idle.max(s.viewed);
+        }
+        if !self.tabs.iter().any(|t| t.id == root) {
+            let (title, directory) = self.session(&root).map(|s| (s.title.clone(), s.directory.clone())).unwrap_or_default();
+            self.tabs.push(Tab { id: root, title, directory });
+            self.save_tabs();
         }
         tx.settle();
         match &self.source {
@@ -280,10 +384,50 @@ impl App {
         self.composer.clear();
     }
 
+    /// Tab marks: running sessions, read state and pending requests.
+    fn apply_status(&mut self, ty: &str, data: &Value, sid: &str) -> bool {
+        let id = |v: &Value| v.as_str().unwrap_or("").to_owned();
+        match ty {
+            "session.execution.started" => self.running.insert(sid.to_owned()),
+            "session.execution.succeeded" | "session.execution.failed" | "session.execution.interrupted" => {
+                let was = self.running.remove(sid);
+                if ty == "session.execution.interrupted" && data["reason"] == "shutdown" {
+                    return was;
+                }
+                let now = self.now_ms;
+                // Desktop reports the open session's idle mark as viewed, so it never lights up.
+                let open = matches!(&self.route, Route::Session(r) if self.root_of(r) == self.root_of(sid));
+                if let Some(s) = self.sessions.iter_mut().find(|s| s.id == sid) {
+                    s.idle = Some(now);
+                    if open {
+                        s.viewed = Some(now);
+                    }
+                }
+                // The server's own idle mark, like Desktop's re-read after a run ends.
+                if let Source::Live { requests: Some(r), .. } = &self.source {
+                    let _ = r.send(Request::Info(sid.to_owned()));
+                }
+                true
+            }
+            "session.viewed" => {
+                let idle = data["idle"].as_i64();
+                self.sessions.iter_mut().find(|s| s.id == sid).is_some_and(|s| {
+                    s.viewed = s.viewed.max(idle);
+                    true
+                })
+            }
+            "permission.asked" => self.requests.insert((sid.to_owned(), id(&data["id"]))),
+            "permission.replied" => self.requests.remove(&(sid.to_owned(), id(&data["requestID"]))),
+            "form.created" => self.requests.insert((id(&data["form"]["sessionID"]), id(&data["form"]["id"]))),
+            "form.replied" | "form.cancelled" => self.requests.remove(&(sid.to_owned(), id(&data["id"]))),
+            _ => false,
+        }
+    }
+
     fn apply_event(&mut self, ty: &str, data: &Value) -> bool {
         let sid = data["sessionID"].as_str().unwrap_or("").to_owned();
         let now = self.now_ms;
-        let mut changed = false;
+        let mut changed = self.apply_status(ty, data, &sid);
         if let Some(t) = self.transcripts.get_mut(&sid) {
             changed |= t.apply(ty, data, now);
         }
@@ -329,10 +473,22 @@ fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
     if let Some(inbox) = s.inbox.take() {
         for m in inbox.try_iter() {
             match m {
-                Incoming::Sessions(list) => {
+                Incoming::Sessions(mut list) => {
+                    for n in &mut list {
+                        if let Some(old) = s.session(&n.id) {
+                            n.viewed = n.viewed.max(old.viewed);
+                        }
+                    }
                     s.sessions = list;
                     s.sort_projects();
                 }
+                Incoming::Info(mut info) => match s.sessions.iter_mut().find(|x| x.id == info.id) {
+                    Some(old) => {
+                        info.viewed = info.viewed.max(old.viewed);
+                        *old = info;
+                    }
+                    None => s.sessions.push(info),
+                },
                 Incoming::Messages { session, messages } => {
                     let first = !s.transcripts.contains_key(&session);
                     let t = s.transcripts.entry(session.clone()).or_insert_with(|| Transcript { session: session.clone(), messages: vec![] });
@@ -366,6 +522,10 @@ fn setup(s: &mut App, waker: Waker) {
     }
     if let Source::Live { server, requests, .. } = &mut s.source {
         let (r, inbox) = live::connect(server.clone(), waker);
+        // Tabs for sessions past the listed page: their info, so marks and avatars resolve.
+        for t in s.tabs.iter().filter(|t| !s.sessions.iter().any(|x| x.id == t.id)) {
+            let _ = r.send(Request::Info(t.id.clone()));
+        }
         *requests = Some(r);
         s.inbox = Some(inbox);
     }
@@ -393,7 +553,16 @@ fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             s.edge = (s.edge + 1) % edge::ALL.len();
             true
         }
-        Key::Command('n') => {
+        Key::Command(c) if c.eq_ignore_ascii_case(&'b') && ev.mods.shift => {
+            s.sidebar_open = !s.sidebar_open;
+            true
+        }
+        Key::Command('b') => {
+            s.route = if s.route == Route::Home { s.tabs.last().map_or(Route::Home, |t| Route::Session(t.id.clone())) } else { Route::Home };
+            tx.settle();
+            true
+        }
+        Key::Command('n') | Key::Command('t') => {
             s.route = Route::Draft;
             tx.settle();
             true
@@ -411,19 +580,11 @@ fn open_scene(s: &mut App) {
     let id = s.fixture["open"].as_str().map(str::to_owned).or_else(|| s.sessions.first().map(|x| x.id.clone()));
     if let Some(id) = id {
         s.route = Route::Session(id.clone());
-        if let Some(p) = s.session(&id).map(|x| x.project.clone()) {
-            s.open_projects.insert(p);
-        }
     }
 }
 
 fn main() {
     rune::run(AppSpec {
-        title: "OpenCode",
-        size: (1280.0, 820.0),
-        min_size: None,
-        init: App::new,
-        view: view::app,
         scenes: &[
             ("home", |_| {}),
             ("session", |s| {
@@ -438,6 +599,18 @@ fn main() {
                 }
             }),
             ("draft", |s| s.route = Route::Draft),
+            ("sidebar-closed", |s| {
+                open_scene(s);
+                s.finish_stream();
+                s.sidebar_open = false;
+            }),
+            ("status", |s| {
+                open_scene(s);
+                s.finish_stream();
+                for e in s.fixture["status_events"].as_array().cloned().unwrap_or_default() {
+                    s.playback.push_back((e["t"].as_f64().unwrap_or(0.0), e["type"].as_str().unwrap_or("").into(), e["data"].clone()));
+                }
+            }),
         ],
         fonts: &[
             include_bytes!("../assets/fonts/InterVariable.ttf"),
@@ -448,5 +621,11 @@ fn main() {
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_key),
+        chrome: rune::Chrome {
+            full_size_content: true,
+            traffic_lights: Some((25.0, 25.0)),
+            drag_regions: true,
+        },
+        ..AppSpec::new("OpenCode", (1280.0, 820.0), App::new, view::app)
     });
 }
