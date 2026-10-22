@@ -3108,9 +3108,11 @@ name = "rune-light"
 version = "0.0.1"
 dependencies = [
  "bytemuck",
+ "pollster 1.0.1",
  "rune",
  "rune-fx",
  "wgpu",
+ "winit",
 ]
 
 [[package]]

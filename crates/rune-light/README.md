@@ -47,6 +47,9 @@ target/perf/examples/light bench
 `examples/reel.rs` renders a radiance-cascades reel that steps through the real GI buffers
 (`reel render`, `reel stills T1,T2`, `reel bench`; outputs land in `demo/reel/`).
 
+`examples/live.rs` puts the flashlight and chat demos in a window (`cargo run --release -p rune-light --example live`;
+`live --snap out.png` renders one frame headless).
+
 ## Integration contract
 
 **Inputs, per frame**

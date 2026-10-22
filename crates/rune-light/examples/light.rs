@@ -7,21 +7,33 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use rune::Spring;
+pub use rune::Spring;
 use rune::color::{Color, oklch, oklcha, srgb_decode, srgb_encode};
 use rune::render::{Gpu, Instance, KIND_GLYPH, KIND_RECT, NO_CLIP, Offscreen, Renderer, write_png};
 use rune::text::TextSystem;
 use rune::tok::TextStyle;
 use rune_light::{Gi, Light, LightRenderer, Prim, Scene, Settings, TextPolicy, cpu};
 
-const S: f32 = 2.0;
+thread_local! {
+    static SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(2.0) };
+}
+
+/// Device px per point (2 for the headless renders; the live window sets its own).
+pub fn sc() -> f32 {
+    SCALE.with(|c| c.get())
+}
+
+pub fn set_scale(k: f32) {
+    SCALE.with(|c| c.set(k));
+}
+
 const W: u32 = 2560;
 const H: u32 = 1600;
 const FPS: u32 = 60;
 
 // ---------------------------------------------------------------- springs
 
-struct Track {
+pub struct Track {
     t0: f64,
     x0: f32,
     v0: f32,
@@ -30,19 +42,19 @@ struct Track {
 }
 
 impl Track {
-    fn at(v: f32) -> Track {
+    pub fn at(v: f32) -> Track {
         Track { t0: 0.0, x0: v, v0: 0.0, target: v, spring: Spring::new(0.3, 0.0) }
     }
 
-    fn sample(&self, t: f64) -> (f32, f32) {
+    pub fn sample(&self, t: f64) -> (f32, f32) {
         self.spring.sample(self.x0, self.v0, self.target, (t - self.t0).max(0.0) as f32)
     }
 
-    fn value(&self, t: f64) -> f32 {
+    pub fn value(&self, t: f64) -> f32 {
         self.sample(t).0
     }
 
-    fn retarget(&mut self, t: f64, target: f32, spring: Spring) {
+    pub fn retarget(&mut self, t: f64, target: f32, spring: Spring) {
         let (x, v) = self.sample(t);
         *self = Track { t0: t, x0: x, v0: v, target, spring };
     }
@@ -79,21 +91,21 @@ impl<'a> Ui<'a> {
 
     /// A rect in points. `light` configures its lighting primitive; return `None` to skip it (pure decoration).
     fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, fill: Color, border: Option<(Color, f32)>, light: impl FnOnce(Prim) -> Prim) {
-        let rect = [x * S, y * S, w * S, h * S];
-        self.base.push(inst(rect, r * S, fill, border.map(|(c, bw)| (c, bw * S))));
-        self.prims.push(light(Prim::from_rune(rect, [r * S; 4]).albedo([fill.r, fill.g, fill.b])));
+        let rect = [x * sc(), y * sc(), w * sc(), h * sc()];
+        self.base.push(inst(rect, r * sc(), fill, border.map(|(c, bw)| (c, bw * sc()))));
+        self.prims.push(light(Prim::from_rune(rect, [r * sc(); 4]).albedo([fill.r, fill.g, fill.b])));
     }
 
     /// Paint only (no lighting primitive): hairlines, icons.
     fn paint(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, fill: Color) {
-        self.base.push(inst([x * S, y * S, w * S, h * S], r * S, fill, None));
+        self.base.push(inst([x * sc(), y * sc(), w * sc(), h * sc()], r * sc(), fill, None));
     }
 
     fn text(&mut self, x: f32, y: f32, s: &str, size: f32, weight: f32, color: Color) -> f32 {
         let style = TextStyle::new(size, weight);
         let mut quads = Vec::new();
-        self.ts.glyphs(s, style, S, [(x * S).round(), (y * S).round()], &mut quads);
-        let gamma = rune::text::glyph_coverage_exponent(color, S);
+        self.ts.glyphs(s, style, sc(), [(x * sc()).round(), (y * sc()).round()], &mut quads);
+        let gamma = rune::text::glyph_coverage_exponent(color, sc());
         for q in quads {
             self.text.push(Instance {
                 rect: q.rect,
@@ -106,7 +118,7 @@ impl<'a> Ui<'a> {
                 fade: [0; 4],
             });
         }
-        self.ts.measure(s, style, S).0
+        self.ts.measure(s, style, sc()).0
     }
 
     fn lines(&mut self, x: f32, y: f32, lh: f32, lines: &[&str], size: f32, weight: f32, color: Color) {
@@ -116,7 +128,7 @@ impl<'a> Ui<'a> {
     }
 
     fn measure(&mut self, s: &str, size: f32, weight: f32) -> f32 {
-        self.ts.measure(s, TextStyle::new(size, weight), S).0
+        self.ts.measure(s, TextStyle::new(size, weight), sc()).0
     }
 }
 
@@ -211,7 +223,7 @@ fn downscale(src: &[u8], w: u32, h: u32, k: u32) -> Vec<u8> {
 
 // ---------------------------------------------------------------- demos
 
-type Frame = (Vec<Prim>, Vec<Instance>, Vec<Instance>, Color, Vec<Light>, Settings);
+pub type Frame = (Vec<Prim>, Vec<Instance>, Vec<Instance>, Color, Vec<Light>, Settings);
 
 trait Demo {
     fn name(&self) -> &'static str;
@@ -227,7 +239,7 @@ fn finish(ui: Ui<'_>, lights: Vec<Light>, s: Settings) -> Frame {
 }
 
 /// Linear colour from a colour temperature-ish triplet in sRGB.
-fn lin(r: f32, g: f32, b: f32) -> [f32; 3] {
+pub fn lin(r: f32, g: f32, b: f32) -> [f32; 3] {
     [srgb_decode(r), srgb_decode(g), srgb_decode(b)]
 }
 
@@ -261,7 +273,7 @@ impl Drag {
         Drag { x: Track::at(p0[0]), y: Track::at(p0[1]), stops, next: 1, spring }
     }
 
-    fn at(&mut self, t: f32) -> [f32; 2] {
+    pub fn at(&mut self, t: f32) -> [f32; 2] {
         while self.next < self.stops.len() && self.stops[self.next].0 <= t {
             let (ts, p) = self.stops[self.next];
             self.x.retarget(ts as f64, p[0], self.spring);
@@ -305,6 +317,14 @@ impl Demo for Chat {
         1.6
     }
     fn frame(&mut self, ts: &mut TextSystem, t: f32) -> Frame {
+        let p = self.drag.at(t);
+        chat_scene(ts, t, p)
+    }
+}
+
+/// The chat timeline with the warm lamp at `p` (points).
+pub fn chat_scene(ts: &mut TextSystem, t: f32, p: [f32; 2]) -> Frame {
+    {
         let bg = oklch(0.17, 0.006, 265.0);
         let mut ui = Ui::new(ts, bg);
         let side = oklch(0.195, 0.006, 265.0);
@@ -321,7 +341,7 @@ impl Demo for Chat {
         ui.rect(0.0, 0.0, 268.0, 800.0, 0.0, side, None, |p| p);
         ui.paint(268.0, 0.0, 1.0, 800.0, 0.0, hair);
         ui.text(24.0, 22.0, "OpenCode", 15.0, 600.0, txt);
-        ui.rect(20.0, 58.0, 228.0, 34.0, 9.0, card, Some((hair, 1.0)), |p| p.raised(3.0 * S).bevel(3.0 * S, 1.2 * S).gloss(0.5, 0.45));
+        ui.rect(20.0, 58.0, 228.0, 34.0, 9.0, card, Some((hair, 1.0)), |p| p.raised(3.0 * sc()).bevel(3.0 * sc(), 1.2 * sc()).gloss(0.5, 0.45));
         ui.text(36.0, 66.0, "+  New session", 13.0, 500.0, txt);
         ui.text(24.0, 116.0, "TODAY", 11.0, 600.0, txt3);
         let sessions = [
@@ -345,11 +365,11 @@ impl Demo for Chat {
         ui.text(300.0, 22.0, "rune-light: lighting for UIs", 14.0, 600.0, txt);
         let chip = "claude-opus-5.5";
         let cw = ui.measure(chip, 12.0, 500.0);
-        ui.rect(1240.0 - cw - 24.0, 16.0, cw + 24.0, 28.0, 14.0, card, Some((hair, 1.0)), |p| p.raised(2.0 * S).bevel(4.0 * S, 1.0 * S).gloss(0.5, 0.4));
+        ui.rect(1240.0 - cw - 24.0, 16.0, cw + 24.0, 28.0, 14.0, card, Some((hair, 1.0)), |p| p.raised(2.0 * sc()).bevel(4.0 * sc(), 1.0 * sc()).gloss(0.5, 0.4));
         ui.text(1240.0 - cw - 12.0, 22.0, chip, 12.0, 500.0, txt2);
         ui.paint(269.0, 60.0, 1011.0, 1.0, 0.0, hair);
 
-        let raise = |p: Prim| p.raised(7.0 * S).bevel(6.0 * S, 2.0 * S).gloss(0.55, 0.42);
+        let raise = |p: Prim| p.raised(7.0 * sc()).bevel(6.0 * sc(), 2.0 * sc()).gloss(0.55, 0.42);
         // User bubble
         let l1 = ["what if lighting effects. like you could put a light and", "it would raytrace around the ui elements…"];
         ui.rect(800.0, 88.0, 440.0, 68.0, 16.0, user, Some((oklcha(1.0, 0.0, 0.0, 0.08), 1.0)), raise);
@@ -372,7 +392,7 @@ impl Demo for Chat {
         for (i, chipt) in ["Read shader.wgsl", "Edit rune-light/src/lib.rs", "Run bench"].iter().enumerate() {
             let x = 322.0 + [0.0, 140.0, 330.0][i];
             let w = ui.measure(chipt, 12.0, 500.0) + 22.0;
-            ui.rect(x, 292.0, w, 26.0, 13.0, oklch(0.27, 0.008, 265.0), Some((hair, 1.0)), |p| p.on(7.0 * S).raised(2.5 * S).bevel(4.0 * S, 1.0 * S).gloss(0.4, 0.4));
+            ui.rect(x, 292.0, w, 26.0, 13.0, oklch(0.27, 0.008, 265.0), Some((hair, 1.0)), |p| p.on(7.0 * sc()).raised(2.5 * sc()).bevel(4.0 * sc(), 1.0 * sc()).gloss(0.4, 0.4));
             ui.text(x + 11.0, 297.0, chipt, 12.0, 500.0, txt2);
         }
 
@@ -383,7 +403,7 @@ impl Demo for Chat {
         // Assistant with code
         ui.rect(300.0, 430.0, 640.0, 196.0, 16.0, card, Some((hair, 1.0)), raise);
         bubble_text(&mut ui, 322.0, 446.0, &["Here's the API: lights are springs like everything else."], txt);
-        ui.rect(318.0, 480.0, 604.0, 126.0, 10.0, code, Some((hair, 1.0)), |p| p.on(7.0 * S).gloss(0.2, 0.5));
+        ui.rect(318.0, 480.0, 604.0, 126.0, 10.0, code, Some((hair, 1.0)), |p| p.on(7.0 * sc()).gloss(0.2, 0.5));
         let mono = oklch(0.8, 0.06, 200.0);
         ui.lines(
             336.0,
@@ -403,25 +423,24 @@ impl Demo for Chat {
 
         // Composer
         ui.rect(300.0, 690.0, 940.0, 78.0, 18.0, card, Some((oklcha(1.0, 0.0, 0.0, 0.09), 1.0)), |p| {
-            p.raised(10.0 * S).bevel(7.0 * S, 2.5 * S).gloss(0.6, 0.38)
+            p.raised(10.0 * sc()).bevel(7.0 * sc(), 2.5 * sc()).gloss(0.6, 0.38)
         });
         ui.text(322.0, 708.0, "Ask anything…", 14.0, 400.0, txt3);
-        ui.rect(1192.0, 724.0, 32.0, 32.0, 16.0, accent, None, |p| p.on(10.0 * S).raised(4.0 * S).bevel(10.0 * S, 3.0 * S).gloss(0.8, 0.3));
+        ui.rect(1192.0, 724.0, 32.0, 32.0, 16.0, accent, None, |p| p.on(10.0 * sc()).raised(4.0 * sc()).bevel(10.0 * sc(), 3.0 * sc()).gloss(0.8, 0.3));
         ui.paint(1203.0, 739.0, 10.0, 2.0, 1.0, oklch(0.2, 0.02, 255.0));
 
-        let p = self.drag.at(t);
-        let lamp = Light::point(p[0] * S, p[1] * S, 40.0 * S)
+        let lamp = Light::point(p[0] * sc(), p[1] * sc(), 40.0 * sc())
             .color(lin(1.0, 0.78, 0.55))
             .intensity(2.6)
-            .radius(11.0 * S)
-            .range(1100.0 * S)
+            .radius(11.0 * sc())
+            .range(1100.0 * sc())
             .bulb(0.75)
             .specular(1.2);
-        let fill = Light::point(-300.0 * S, -200.0 * S, 900.0 * S)
+        let fill = Light::point(-300.0 * sc(), -200.0 * sc(), 900.0 * sc())
             .color(lin(0.55, 0.65, 1.0))
             .intensity(0.35)
-            .radius(220.0 * S)
-            .range(6000.0 * S)
+            .radius(220.0 * sc())
+            .range(6000.0 * sc())
             .specular(0.4);
         let s = Settings {
             ambient: [0.62, 0.63, 0.7],
@@ -441,8 +460,8 @@ impl Demo for Chat {
 struct Flashlight;
 
 fn settings_panel(ui: &mut Ui, card: Color, txt: Color, txt2: Color, hair: Color, accent: Color) {
-    let raise_card = |p: Prim| p.raised(4.0 * S).bevel(5.0 * S, 1.5 * S).gloss(0.45, 0.45);
-    let top = 4.0 * S;
+    let raise_card = |p: Prim| p.raised(4.0 * sc()).bevel(5.0 * sc(), 1.5 * sc()).gloss(0.45, 0.45);
+    let top = 4.0 * sc();
     ui.text(160.0, 70.0, "Settings", 24.0, 600.0, txt);
     ui.text(160.0, 106.0, "Appearance, sound and shortcuts", 13.0, 400.0, txt2);
     let rows: [(&str, &str, u8); 9] = [
@@ -475,13 +494,13 @@ fn settings_panel(ui: &mut Ui, card: Color, txt: Color, txt2: Color, hair: Color
                     ui.rect(rx - 42.0, ry + 16.0, 42.0, 24.0, 12.0, track, None, |p| p.on(top).gloss(0.4, 0.4));
                     let kx = if on { rx - 22.0 } else { rx - 40.0 };
                     ui.rect(kx, ry + 18.0, 20.0, 20.0, 10.0, oklch(0.96, 0.0, 0.0), None, |p| {
-                        p.on(top).raised(5.0 * S).bevel(10.0 * S, 4.0 * S).gloss(0.7, 0.3)
+                        p.on(top).raised(5.0 * sc()).bevel(10.0 * sc(), 4.0 * sc()).gloss(0.7, 0.3)
                     });
                 }
                 2 => {
                     let w = ui.measure(value, 12.0, 500.0) + 20.0;
                     ui.rect(rx - w, ry + 14.0, w, 28.0, 8.0, oklch(0.3, 0.006, 265.0), Some((hair, 1.0)), |p| {
-                        p.on(top).raised(3.0 * S).bevel(4.0 * S, 1.2 * S).gloss(0.5, 0.4)
+                        p.on(top).raised(3.0 * sc()).bevel(4.0 * sc(), 1.2 * sc()).gloss(0.5, 0.4)
                     });
                     ui.text(rx - w + 10.0, ry + 20.0, value, 12.0, 500.0, txt);
                 }
@@ -489,14 +508,14 @@ fn settings_panel(ui: &mut Ui, card: Color, txt: Color, txt2: Color, hair: Color
                     for (k, h) in [255.0, 300.0, 350.0, 40.0, 150.0].iter().enumerate() {
                         let c = oklch(0.68, 0.15, *h);
                         let cx = rx - 18.0 - k as f32 * 26.0;
-                        ui.rect(cx, ry + 19.0, 18.0, 18.0, 9.0, c, None, |p| p.on(top).raised(3.5 * S).bevel(9.0 * S, 3.0 * S).gloss(0.7, 0.3));
+                        ui.rect(cx, ry + 19.0, 18.0, 18.0, 9.0, c, None, |p| p.on(top).raised(3.5 * sc()).bevel(9.0 * sc(), 3.0 * sc()).gloss(0.7, 0.3));
                     }
                 }
                 _ => {
                     ui.rect(rx - 130.0, ry + 26.0, 130.0, 4.0, 2.0, oklch(0.33, 0.006, 265.0), None, |p| p.on(top));
                     ui.rect(rx - 130.0, ry + 26.0, 82.0, 4.0, 2.0, accent, None, |p| p.on(top));
                     ui.rect(rx - 58.0, ry + 18.0, 20.0, 20.0, 10.0, oklch(0.96, 0.0, 0.0), None, |p| {
-                        p.on(top).raised(6.0 * S).bevel(10.0 * S, 4.0 * S).gloss(0.7, 0.3)
+                        p.on(top).raised(6.0 * sc()).bevel(10.0 * sc(), 4.0 * sc()).gloss(0.7, 0.3)
                     });
                 }
             }
@@ -510,14 +529,14 @@ fn settings_panel(ui: &mut Ui, card: Color, txt: Color, txt2: Color, hair: Color
     ui.text(180.0, by + 46.0, "Press a key combination to record a new shortcut.", 13.0, 400.0, txt2);
     for (i, k) in ["⌘", "⇧", "K"].iter().enumerate() {
         ui.rect(180.0 + i as f32 * 52.0, by + 82.0, 44.0, 44.0, 10.0, oklch(0.3, 0.006, 265.0), Some((hair, 1.0)), |p| {
-            p.on(top).raised(6.0 * S).bevel(7.0 * S, 2.5 * S).gloss(0.6, 0.35)
+            p.on(top).raised(6.0 * sc()).bevel(7.0 * sc(), 2.5 * sc()).gloss(0.6, 0.35)
         });
         ui.text(195.0 + i as f32 * 52.0, by + 94.0, k, 15.0, 600.0, txt);
     }
-    ui.rect(940.0, by + 90.0, 170.0, 36.0, 10.0, accent, None, |p| p.on(top).raised(5.0 * S).bevel(6.0 * S, 2.0 * S).gloss(0.7, 0.3));
+    ui.rect(940.0, by + 90.0, 170.0, 36.0, 10.0, accent, None, |p| p.on(top).raised(5.0 * sc()).bevel(6.0 * sc(), 2.0 * sc()).gloss(0.7, 0.3));
     ui.text(975.0, by + 99.0, "Record shortcut", 13.0, 600.0, oklch(0.18, 0.03, 255.0));
     ui.rect(780.0, by + 90.0, 140.0, 36.0, 10.0, oklch(0.3, 0.006, 265.0), Some((hair, 1.0)), |p| {
-        p.on(top).raised(5.0 * S).bevel(6.0 * S, 2.0 * S).gloss(0.6, 0.35)
+        p.on(top).raised(5.0 * sc()).bevel(6.0 * sc(), 2.0 * sc()).gloss(0.6, 0.35)
     });
     ui.text(828.0, by + 99.0, "Reset", 13.0, 600.0, txt);
     // Lower row of tiles.
@@ -530,7 +549,7 @@ fn settings_panel(ui: &mut Ui, card: Color, txt: Color, txt2: Color, hair: Color
         ui.rect(x + 18.0, 600.0, 144.0, 18.0, 9.0, oklch(0.27, 0.006, 265.0), None, |p| p.on(top));
         let fill = [0.7, 0.45, 0.0, 0.85, 0.92][i];
         if fill > 0.0 {
-            ui.rect(x + 18.0, 600.0, 144.0 * fill, 18.0, 9.0, accent, None, |p| p.on(top).raised(2.0 * S).bevel(9.0 * S, 2.0 * S).gloss(0.6, 0.3));
+            ui.rect(x + 18.0, 600.0, 144.0 * fill, 18.0, 9.0, accent, None, |p| p.on(top).raised(2.0 * sc()).bevel(9.0 * sc(), 2.0 * sc()).gloss(0.6, 0.3));
         }
     }
 }
@@ -543,6 +562,16 @@ impl Demo for Flashlight {
         1.15
     }
     fn frame(&mut self, ts: &mut TextSystem, t: f32) -> Frame {
+        // The pointer wanders like a hand: one smooth closed path at an even pace.
+        let path = [[300.0, 230.0], [700.0, 180.0], [1020.0, 300.0], [860.0, 470.0], [560.0, 600.0], [260.0, 520.0]];
+        let p = loop_path(&path, t / 4.0 + 0.02);
+        flashlight_scene(ts, t, p)
+    }
+}
+
+/// The dark settings panel lit by a torch aimed at the pointer `p` (points).
+pub fn flashlight_scene(ts: &mut TextSystem, t: f32, p: [f32; 2]) -> Frame {
+    {
         let bg = oklch(0.16, 0.005, 265.0);
         let mut ui = Ui::new(ts, bg);
         settings_panel(
@@ -553,18 +582,15 @@ impl Demo for Flashlight {
             oklcha(1.0, 0.0, 0.0, 0.06),
             oklch(0.7, 0.15, 255.0),
         );
-        // The pointer wanders like a hand: one smooth closed path at an even pace.
-        let path = [[300.0, 230.0], [700.0, 180.0], [1020.0, 300.0], [860.0, 470.0], [560.0, 600.0], [260.0, 520.0]];
-        let p = loop_path(&path, t / 4.0 + 0.02);
         // The torch is held low and to the right of the pointer, aimed at it: the pool stretches and every shadow
         // swings as it moves.
         let lp = [p[0] + 80.0, p[1] + 130.0, 260.0];
         let axis = [p[0] - lp[0], p[1] - lp[1], -lp[2]];
-        let torch = Light::point(lp[0] * S, lp[1] * S, lp[2] * S)
+        let torch = Light::point(lp[0] * sc(), lp[1] * sc(), lp[2] * sc())
             .color(lin(1.0, 0.95, 0.88))
             .intensity(7.0)
-            .radius(9.0 * S)
-            .range(1800.0 * S)
+            .radius(9.0 * sc())
+            .range(1800.0 * sc())
             .spot(axis, 0.58)
             .specular(1.4);
         let s = Settings {
@@ -611,7 +637,7 @@ impl Demo for Emissive {
         let txt = oklch(0.94, 0.003, 265.0);
         let txt2 = oklch(0.64, 0.01, 265.0);
         let hair = oklcha(1.0, 0.0, 0.0, 0.06);
-        let raise = |p: Prim| p.raised(6.0 * S).bevel(6.0 * S, 2.0 * S).gloss(0.5, 0.42);
+        let raise = |p: Prim| p.raised(6.0 * sc()).bevel(6.0 * sc(), 2.0 * sc()).gloss(0.5, 0.42);
 
         ui.text(140.0, 64.0, "Voice memo", 24.0, 600.0, txt);
         ui.text(140.0, 100.0, "Recording · Studio Display microphone", 13.0, 400.0, txt2);
@@ -630,14 +656,14 @@ impl Demo for Emissive {
         // Waveform bars (flat, receive light)
         for k in 0..40 {
             let h = 8.0 + 46.0 * (0.5 + 0.5 * ((k as f32 * 0.7).sin() * (k as f32 * 0.23 + 1.0).cos())).abs();
-            ui.rect(494.0 + k as f32 * 8.8, 290.0 - h * 0.5, 4.6, h, 2.3, oklch(0.5, 0.01, 265.0), None, |p| p.on(12.0).raised(2.0 * S));
+            ui.rect(494.0 + k as f32 * 8.8, 290.0 - h * 0.5, 4.6, h, 2.3, oklch(0.5, 0.01, 265.0), None, |p| p.on(12.0).raised(2.0 * sc()));
         }
         // Glowing record button with a spring breath
         let red = oklch(0.66, 0.2, 25.0);
         let red_lin = [red.r, red.g, red.b];
         let glow = 7.0 * b;
         ui.rect(620.0, 370.0, 100.0, 100.0, 50.0, oklch(0.27, 0.008, 265.0), Some((hair, 1.0)), |p| {
-            p.on(12.0).bevel(16.0 * S, 4.0 * S).gloss(0.6, 0.35)
+            p.on(12.0).bevel(16.0 * sc(), 4.0 * sc()).gloss(0.6, 0.35)
         });
         ui.rect(640.0, 390.0, 60.0, 60.0, 30.0, red, None, |p| p.on(12.0).emissive([red_lin[0] * glow, red_lin[1] * glow, red_lin[2] * glow]));
 
@@ -699,7 +725,7 @@ impl Demo for Raised {
         let key = oklch(0.29, 0.004, 265.0);
         // Device body
         ui.rect(120.0, 90.0, 1040.0, 620.0, 36.0, body, Some((oklcha(1.0, 0.0, 0.0, 0.05), 1.0)), |p| {
-            p.raised(10.0 * S).bevel(22.0 * S, 7.0 * S).gloss(0.7, 0.32)
+            p.raised(10.0 * sc()).bevel(22.0 * sc(), 7.0 * sc()).gloss(0.7, 0.32)
         });
         ui.text(170.0, 130.0, "OP-1 Field · Control surface", 15.0, 600.0, txt);
         ui.text(170.0, 156.0, "Bevels from the SDF catch the light", 12.0, 400.0, txt2);
@@ -707,7 +733,7 @@ impl Demo for Raised {
         let hues = [255.0, 150.0, 60.0, 25.0];
         for i in 0..4 {
             let cx = 200.0 + i as f32 * 140.0;
-            ui.rect(cx - 48.0, 210.0, 96.0, 96.0, 48.0, key, None, |p| p.floating(10.0 * S, 22.0 * S).bevel(30.0 * S, 10.0 * S).gloss(0.9, 0.26));
+            ui.rect(cx - 48.0, 210.0, 96.0, 96.0, 48.0, key, None, |p| p.floating(10.0 * sc(), 22.0 * sc()).bevel(30.0 * sc(), 10.0 * sc()).gloss(0.9, 0.26));
             let c = oklch(0.7, 0.14, hues[i]);
             ui.rect(cx - 5.0, 222.0, 10.0, 10.0, 5.0, c, None, |p| p);
         }
@@ -722,7 +748,7 @@ impl Demo for Raised {
                 let y = 450.0 + r as f32 * 110.0;
                 let accent = (r == 0 && (i == 2 || i == 7)) || (r == 1 && i == 10);
                 let c = if accent { oklch(0.62, 0.17, 35.0) } else { key };
-                ui.rect(x, y, 68.0, 92.0, 14.0, c, None, |p| p.floating(10.0 * S, 18.0 * S).bevel(12.0 * S, 4.5 * S).gloss(0.85, 0.28));
+                ui.rect(x, y, 68.0, 92.0, 14.0, c, None, |p| p.floating(10.0 * sc(), 18.0 * sc()).bevel(12.0 * sc(), 4.5 * sc()).gloss(0.85, 0.28));
                 ui.text(x + 12.0, y + 12.0, ["C", "D", "E", "F", "G", "A", "B", "C", "D", "E", "F", "G"][i], 12.0, 600.0, if accent { oklch(0.2, 0.03, 35.0) } else { txt2 });
             }
         }
@@ -731,12 +757,12 @@ impl Demo for Raised {
         let e = u * u * (3.0 - 2.0 * u);
         let x = 40.0 + e * 1200.0;
         let y = 560.0 - 300.0 * (1.0 - (2.0 * e - 1.0).powi(2));
-        let key_l = Light::point(x * S, y * S, 150.0 * S).color(lin(1.0, 0.93, 0.85)).intensity(3.4).radius(26.0 * S).range(2200.0 * S).specular(2.4);
-        let fill = Light::point(1400.0 * S, 900.0 * S, 700.0 * S)
+        let key_l = Light::point(x * sc(), y * sc(), 150.0 * sc()).color(lin(1.0, 0.93, 0.85)).intensity(3.4).radius(26.0 * sc()).range(2200.0 * sc()).specular(2.4);
+        let fill = Light::point(1400.0 * sc(), 900.0 * sc(), 700.0 * sc())
             .color(lin(0.5, 0.62, 1.0))
             .intensity(0.4)
-            .radius(200.0 * S)
-            .range(5000.0 * S)
+            .radius(200.0 * sc())
+            .range(5000.0 * sc())
             .specular(0.6);
         let s = Settings { ambient: [0.3, 0.31, 0.34], rim: 1.1, contact_ao: 0.5, time: t, ..Default::default() };
         finish(ui, vec![key_l, fill], s)
@@ -774,7 +800,7 @@ impl Demo for GodRays {
                 let x = x0 + c as f32 * (cw + gx);
                 let y = y0 + r as f32 * (ch + gy);
                 let i = r * cols + c;
-                ui.rect(x, y, cw, ch, 24.0, card, Some((hair, 1.0)), |p| p.raised(14.0 * S).bevel(8.0 * S, 2.5 * S).gloss(0.5, 0.4));
+                ui.rect(x, y, cw, ch, 24.0, card, Some((hair, 1.0)), |p| p.raised(14.0 * sc()).bevel(8.0 * sc(), 2.5 * sc()).gloss(0.5, 0.4));
                 let hue = (i as f32 * 47.0) % 360.0;
                 ui.rect(x + 20.0, y + 20.0, 40.0, 40.0, 12.0, oklch(0.62, 0.12, hue), None, |p| p);
                 ui.text(x + 20.0, y + 84.0, names[i], 13.0, 600.0, txt);
@@ -788,11 +814,11 @@ impl Demo for GodRays {
         let e = u * u * (3.0 - 2.0 * u);
         let lx = 488.0 + e * 304.0;
         let warm = lin(1.0, 0.8, 0.55);
-        let sun = Light::point(lx * S, 428.0 * S, 4.0 * S)
+        let sun = Light::point(lx * sc(), 428.0 * sc(), 4.0 * sc())
             .color(warm)
             .intensity(1.6)
-            .radius(12.0 * S)
-            .range(3000.0 * S)
+            .radius(12.0 * sc())
+            .range(3000.0 * sc())
             .shafts(1.5)
             .softness(2.2);
         let s = Settings { ambient: [0.5, 0.5, 0.58], shafts_over: 0.12, rim: 0.8, contact_ao: 0.35, time: t, ..Default::default() };
@@ -881,7 +907,7 @@ fn bench(ctx: &mut Ctx, out: &Path) {
         for j in 0..10 {
             let x = 30.0 + j as f32 * 124.0;
             let y = 20.0 + i as f32 * 78.0;
-            ui.rect(x, y, 104.0 + (i * 7 % 13) as f32, 56.0, 14.0, card, None, |p| p.raised(7.0 * S).bevel(6.0 * S, 2.0 * S).gloss(0.5, 0.4));
+            ui.rect(x, y, 104.0 + (i * 7 % 13) as f32, 56.0, 14.0, card, None, |p| p.raised(7.0 * sc()).bevel(6.0 * sc(), 2.0 * sc()).gloss(0.5, 0.4));
             ui.text(x + 12.0, y + 18.0, "Message", 13.0, 400.0, oklch(0.9, 0.0, 0.0));
         }
     }
@@ -903,10 +929,10 @@ fn bench(ctx: &mut Ctx, out: &Path) {
             let lights: Vec<Light> = (0..*nl)
                 .map(|k| {
                     let a = t * 0.8 + k as f32 * 1.7;
-                    let l = Light::point((640.0 + 420.0 * a.cos()) * S, (400.0 + 260.0 * a.sin()) * S, 60.0 * S)
+                    let l = Light::point((640.0 + 420.0 * a.cos()) * sc(), (400.0 + 260.0 * a.sin()) * sc(), 60.0 * sc())
                         .intensity(1.5)
-                        .radius(10.0 * S)
-                        .range(1200.0 * S);
+                        .radius(10.0 * sc())
+                        .range(1200.0 * sc());
                     if *shafts { l.shafts(0.4) } else { l }
                 })
                 .collect();
@@ -934,7 +960,7 @@ fn bench(ctx: &mut Ctx, out: &Path) {
         let wall = {
             let lights: Vec<Light> = (0..*nl)
                 .map(|k| {
-                    let l = Light::point((300.0 + k as f32 * 90.0) * S, 400.0 * S, 60.0 * S).intensity(1.5).radius(10.0 * S).range(1200.0 * S);
+                    let l = Light::point((300.0 + k as f32 * 90.0) * sc(), 400.0 * sc(), 60.0 * sc()).intensity(1.5).radius(10.0 * sc()).range(1200.0 * sc());
                     if *shafts { l.shafts(0.4) } else { l }
                 })
                 .collect();
