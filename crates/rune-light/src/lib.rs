@@ -355,7 +355,6 @@ struct Targets {
     gi_scene_bg: wgpu::BindGroup,
     cascade_bgs: Vec<wgpu::BindGroup>,
     fluence_bg: wgpu::BindGroup,
-    c0_in_a: bool,
 }
 
 pub struct LightRenderer {
@@ -761,11 +760,10 @@ impl LightRenderer {
         let arr = |label| {
             let t = texture(device, label, fsz.0, fsz.1, 2, Tf::Rgba16Float, st);
             let v = t.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
-            let s = t.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
-            (t, v, s)
+            (t, v)
         };
-        let (vis_tex, vis, vis_store) = arr("vis");
-        let (_, air, air_store) = arr("air");
+        let (vis_tex, vis) = arr("vis");
+        let (_, air) = arr("air");
         let scene = texture(device, "gi scene", gsz.0, gsz.1, 1, Tf::Rgba16Float, st).create_view(&Default::default());
         let ca = texture(device, "cascade a", gsz.0 * 2, gsz.1 * 2, 1, Tf::Rgba16Float, st).create_view(&Default::default());
         let cb = texture(device, "cascade b", gsz.0 * 2, gsz.1 * 2, 1, Tf::Rgba16Float, st).create_view(&Default::default());
@@ -775,7 +773,7 @@ impl LightRenderer {
         let shadow_bg = bind(
             device,
             shadow_bgl,
-            &[frame.as_entire_binding(), lights.as_entire_binding(), tv(&field), smp.clone(), tv(&gb0), tv(&vis_store), tv(&air_store)],
+            &[frame.as_entire_binding(), lights.as_entire_binding(), tv(&field), smp.clone(), tv(&gb0), tv(&vis), tv(&air)],
         );
         let gi_scene_bg = bind(device, scene_bgl, &[prims.as_entire_binding(), lights.as_entire_binding(), tv(&gb1), tv(&vis), tv(&scene)]);
         // Top cascade writes A; each lower cascade reads the other one.
@@ -791,7 +789,7 @@ impl LightRenderer {
         }
         let c0_in_a = (CASCADES - 1) % 2 == 0;
         let fluence_bg = bind(device, fluence_bgl, &[tv(if c0_in_a { &ca } else { &cb }), tv(&fluence)]);
-        Targets { vis_tex, gb0, gb1, field, vis, air, fluence, field_bg, shadow_bg, gi_scene_bg, cascade_bgs, fluence_bg, c0_in_a }
+        Targets { vis_tex, gb0, gb1, field, vis, air, fluence, field_bg, shadow_bg, gi_scene_bg, cascade_bgs, fluence_bg }
     }
 
     fn rebind_prims(&mut self, device: &wgpu::Device) {
@@ -991,7 +989,6 @@ impl LightRenderer {
             encoder.resolve_query_set(qs, 0..QUERIES, resolve, 0);
             encoder.copy_buffer_to_buffer(resolve, 0, read, 0, QUERIES as u64 * 8);
         }
-        let _ = self.t.c0_in_a;
         true
     }
 
@@ -1014,10 +1011,6 @@ impl LightRenderer {
     }
 
     /// The half-resolution visibility texture (2 layers × 4 lights), for debugging and the CPU reference check.
-    pub fn visibility_view(&self) -> &wgpu::TextureView {
-        &self.t.vis
-    }
-
     pub fn visibility_texture(&self) -> &wgpu::Texture {
         &self.t.vis_tex
     }

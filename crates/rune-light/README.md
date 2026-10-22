@@ -32,9 +32,7 @@ let drew = lights.render(&device, &queue, &mut encoder,
 Run the demos, the benchmark and the CPU check (headless, offscreen; outputs land in `demo/light/`):
 
 ```sh
-# from crates/rune-light; the binary is fetched back to the repo root's target/
-hivemind run --kind cargo --dir . --fetch target/release/examples/light -- cargo build --release --example light
-# from the repo root
+hivemind run --kind cargo -- cargo build --release -p rune-light --example light
 target/release/examples/light all        # chat, flashlight, emissive, raised, godrays: PNG, strip, MP4
 target/release/examples/light bench      # GPU timestamps per pass → demo/light/bench.json
 target/release/examples/light verify     # GPU shadow texels vs. CPU estimator and brute-force ground truth

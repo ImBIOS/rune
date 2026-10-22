@@ -7,8 +7,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use rune::color::{Color, oklch, oklcha};
-use rune::render::{Instance, KIND_GLYPH, KIND_RECT, NO_CLIP, Renderer};
+use rune::color::{Color, oklch, oklcha, srgb_decode, srgb_encode};
+use rune::render::{Instance, KIND_GLYPH, KIND_RECT, NO_CLIP, Renderer, write_png};
 use rune::text::TextSystem;
 use rune::tok::TextStyle;
 use rune_light::{Gi, Light, LightRenderer, Prim, Scene, Settings, TextPolicy, cpu};
@@ -114,7 +114,7 @@ impl<'a> Ui<'a> {
     fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, fill: Color, border: Option<(Color, f32)>, light: impl FnOnce(Prim) -> Prim) {
         let rect = [x * S, y * S, w * S, h * S];
         self.base.push(inst(rect, r * S, fill, border.map(|(c, bw)| (c, bw * S))));
-        self.prims.push(light(Prim::rect(rect[0], rect[1], rect[2], rect[3]).radius(r * S).albedo([fill.r, fill.g, fill.b])));
+        self.prims.push(light(Prim::from_rune(rect, [r * S; 4]).albedo([fill.r, fill.g, fill.b])));
     }
 
     /// Paint only (no lighting primitive): hairlines, icons.
@@ -126,7 +126,7 @@ impl<'a> Ui<'a> {
         let style = TextStyle::new(size, weight);
         let mut quads = Vec::new();
         self.ts.glyphs(s, style, S, [(x * S).round(), (y * S).round()], &mut quads);
-        let gamma = 0.78 + 0.22 * rune::color::srgb_encode(color.luminance());
+        let gamma = 0.78 + 0.22 * srgb_encode(color.luminance());
         for q in quads {
             self.text.push(Instance {
                 rect: q.rect,
@@ -260,23 +260,9 @@ impl Ctx {
     }
 }
 
-fn write_png(path: &Path, w: u32, h: u32, rgba: &[u8]) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let file = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
-    let mut enc = png::Encoder::new(file, w, h);
-    enc.set_color(png::ColorType::Rgba);
-    enc.set_depth(png::BitDepth::Eight);
-    enc.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
-    enc.write_header().unwrap().write_image_data(rgba).unwrap();
-}
-
 fn downscale(src: &[u8], w: u32, h: u32, k: u32) -> Vec<u8> {
     let (ow, oh) = (w / k, h / k);
     let mut out = vec![0u8; (ow * oh * 4) as usize];
-    let lin = |v: u8| {
-        let c = v as f32 / 255.0;
-        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
-    };
     for y in 0..oh {
         for x in 0..ow {
             let mut acc = [0f32; 3];
@@ -284,13 +270,13 @@ fn downscale(src: &[u8], w: u32, h: u32, k: u32) -> Vec<u8> {
                 for dx in 0..k {
                     let i = (((y * k + dy) * w + x * k + dx) * 4) as usize;
                     for c in 0..3 {
-                        acc[c] += lin(src[i + c]);
+                        acc[c] += srgb_decode(src[i + c] as f32 / 255.0);
                     }
                 }
             }
             let o = ((y * ow + x) * 4) as usize;
             for c in 0..3 {
-                out[o + c] = (rune::color::srgb_encode(acc[c] / (k * k) as f32) * 255.0).round() as u8;
+                out[o + c] = (srgb_encode(acc[c] / (k * k) as f32) * 255.0).round() as u8;
             }
             out[o + 3] = 255;
         }
@@ -317,8 +303,7 @@ fn finish(ui: Ui<'_>, lights: Vec<Light>, s: Settings) -> Frame {
 
 /// Linear colour from a colour temperature-ish triplet in sRGB.
 fn lin(r: f32, g: f32, b: f32) -> [f32; 3] {
-    let f = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
-    [f(r), f(g), f(b)]
+    [srgb_decode(r), srgb_decode(g), srgb_decode(b)]
 }
 
 /// A smooth closed path through `pts` (Catmull–Rom), u in [0, 1).
@@ -901,7 +886,7 @@ fn render_demo(ctx: &mut Ctx, demo: &mut dyn Demo, out: &Path, frames: Option<u3
         s.seed = 0.0;
         ctx.draw_ui(&base, &text, clear);
         let px = ctx.light_frame(&prims, &lights, s, true).unwrap();
-        write_png(&out.join(format!("{name}.png")), W, H, &px);
+        write_png(&out.join(format!("{name}.png")), W, H, &px).unwrap();
         return;
     }
     let n = frames.unwrap_or((demo.seconds() * FPS as f32).round() as u32);
@@ -925,7 +910,7 @@ fn render_demo(ctx: &mut Ctx, demo: &mut dyn Demo, out: &Path, frames: Option<u3
         ctx.draw_ui(&base, &text, clear);
         let px = ctx.light_frame(&prims, &lights, s, true).unwrap();
         if f == still_frame {
-            write_png(&out.join(format!("{name}.png")), W, H, &px);
+            write_png(&out.join(format!("{name}.png")), W, H, &px).unwrap();
         }
         if strip_at.contains(&f) {
             strip.push(downscale(&px, W, H, 4));
@@ -949,7 +934,7 @@ fn render_demo(ctx: &mut Ctx, demo: &mut dyn Demo, out: &Path, frames: Option<u3
     for i in (3..img.len()).step_by(4) {
         img[i] = 255;
     }
-    write_png(&out.join(format!("{name}-strip.png")), tw, sh, &img);
+    write_png(&out.join(format!("{name}-strip.png")), tw, sh, &img).unwrap();
     eprintln!("{name}: {n} frames in {:.1}s → {}", t0.elapsed().as_secs_f32(), mp4.display());
 }
 

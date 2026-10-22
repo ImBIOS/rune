@@ -88,9 +88,6 @@ impl Rgb {
     fn v4(self) -> [f32; 4] {
         [self.0[0], self.0[1], self.0[2], 1.0]
     }
-    pub fn scale(self, k: f32) -> Rgb {
-        Rgb([self.0[0] * k, self.0[1] * k, self.0[2] * k])
-    }
 }
 
 // ---------------------------------------------------------------- time helpers
@@ -147,25 +144,6 @@ impl Heat {
             h0 * (-dt / self.cool.max(1e-3)).exp()
         }
     }
-    /// Lit enough to keep ticking frames.
-    pub fn is_active(&self, t: f32) -> bool {
-        self.last.2 || self.at(t) > 1.0 / 512.0
-    }
-}
-
-// ---------------------------------------------------------------- knobs
-
-/// A tunable parameter with its range, for knobs panels.
-#[derive(Clone, Copy, Debug)]
-pub struct Knob {
-    pub name: &'static str,
-    pub min: f32,
-    pub max: f32,
-    pub default: f32,
-}
-
-const fn k(name: &'static str, min: f32, max: f32, default: f32) -> Knob {
-    Knob { name, min, max, default }
 }
 
 // ---------------------------------------------------------------- params
@@ -225,22 +203,6 @@ impl Default for GlowParams {
     }
 }
 
-impl GlowParams {
-    pub const KNOBS: &'static [Knob] = &[
-        k("radius", 1.0, 64.0, 14.0),
-        k("intensity", 0.0, 3.0, 1.0),
-        k("inner", 0.0, 1.0, 0.0),
-        k("occlusion", 0.0, 1.0, 0.15),
-        k("breathe", 0.0, 1.0, 0.0),
-        k("breathe_period", 0.4, 8.0, 2.6),
-        k("heat", 0.0, 1.0, 1.0),
-        k("hot", 0.0, 1.0, 0.6),
-        k("aura_speed", 0.0, 1.0, 0.12),
-        k("rim_width", 0.2, 3.0, 0.6),
-        k("reach", 2.0, 8.0, 4.5),
-    ];
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PulseStyle {
     /// Rings expand outward from the shape edge.
@@ -297,21 +259,6 @@ impl Default for PulseParams {
     }
 }
 
-impl PulseParams {
-    pub const KNOBS: &'static [Knob] = &[
-        k("count", 1.0, 6.0, 3.0),
-        k("period", 0.3, 6.0, 2.4),
-        k("reach", 4.0, 200.0, 36.0),
-        k("width", 0.3, 8.0, 1.6),
-        k("intensity", 0.0, 3.0, 1.0),
-        k("duration", 0.1, 3.0, 0.75),
-        k("repeat", 0.0, 6.0, 0.0),
-        k("lag", 0.02, 0.5, 0.16),
-        k("head_radius", 0.5, 12.0, 2.6),
-        k("occlusion", 0.0, 1.0, 0.15),
-    ];
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ElectricStyle {
     Arc { a: [f32; 2], b: [f32; 2] },
@@ -364,20 +311,6 @@ impl Default for ElectricParams {
 }
 
 impl ElectricParams {
-    pub const KNOBS: &'static [Knob] = &[
-        k("amplitude", 0.0, 24.0, 5.0),
-        k("frequency", 0.5, 8.0, 2.4),
-        k("speed", 0.0, 10.0, 3.2),
-        k("core_width", 0.2, 3.0, 0.6),
-        k("intensity", 0.0, 3.0, 1.0),
-        k("glow", 1.0, 20.0, 5.0),
-        k("forks", 0.0, 1.0, 0.55),
-        k("flicker", 0.0, 1.0, 0.45),
-        k("strands", 1.0, 3.0, 2.0),
-        k("gap", -6.0, 12.0, 2.0),
-        k("fork_len", 2.0, 60.0, 20.0),
-        k("occlusion", 0.0, 1.0, 0.12),
-    ];
     /// The calm border for UI: a charged hairline that crawls.
     pub fn charged() -> ElectricParams {
         ElectricParams {
@@ -453,21 +386,6 @@ impl Default for FireParams {
 }
 
 impl FireParams {
-    pub const KNOBS: &'static [Knob] = &[
-        k("height", 4.0, 160.0, 54.0),
-        k("scale", 4.0, 80.0, 20.0),
-        k("speed", 0.0, 5.0, 1.5),
-        k("intensity", 0.0, 3.0, 1.0),
-        k("embers", 0.0, 40.0, 16.0),
-        k("ember_rise", 0.0, 200.0, 58.0),
-        k("ember_size", 0.2, 3.0, 0.8),
-        k("ember_life", 0.2, 4.0, 1.5),
-        k("warp", 0.0, 3.0, 1.0),
-        k("sides", 0.0, 1.0, 0.32),
-        k("base_glow", 0.0, 2.0, 0.5),
-        k("occlusion", 0.0, 1.0, 0.25),
-        k("swirl", 0.0, 3.0, 0.0),
-    ];
     pub fn heat() -> FireParams {
         FireParams {
             style: FireStyle::Heat,
@@ -607,14 +525,6 @@ impl Default for MotionBlurParams {
             smooth_shutter: true,
         }
     }
-}
-
-impl MotionBlurParams {
-    pub const KNOBS: &'static [Knob] = &[
-        k("shutter_angle", 0.0, 360.0, 180.0),
-        k("max_samples", 1.0, 64.0, 48.0),
-        k("px_per_sample", 0.5, 6.0, 1.25),
-    ];
 }
 
 /// A node's pose relative to its rest rect: translate, rotate and scale about the rect centre.
