@@ -64,12 +64,13 @@ type Update<T> = Box<dyn FnOnce(&mut T, &mut Tx) + Send>;
 struct Requests<T> {
     visible: Option<bool>,
     edge: Option<ScreenEdge>,
+    margin: Option<f32>,
     updates: Vec<Update<T>>,
 }
 
 impl<T> Default for Requests<T> {
     fn default() -> Self {
-        Requests { visible: None, edge: None, updates: Vec::new() }
+        Requests { visible: None, edge: None, margin: None, updates: Vec::new() }
     }
 }
 
@@ -111,6 +112,14 @@ impl<T: 'static> OverlayHandle<T> {
 
     pub fn set_edge(&self, edge: ScreenEdge) {
         self.request(|q| q.edge = Some(edge));
+    }
+
+    /// Moves the overlay to `edge`, `margin` points in.
+    pub fn place(&self, edge: ScreenEdge, margin: f32) {
+        self.request(|q| {
+            q.edge = Some(edge);
+            q.margin = Some(margin);
+        });
     }
 
     /// Change the overlay's state on the UI thread, in call order, shown or not.
@@ -395,7 +404,11 @@ impl<T: 'static> Overlay<T> {
             self.rt.shell_request = None;
             self.dirty = true;
         }
-        if let Some(edge) = requests.edge.filter(|e| *e != self.edge) {
+        let margin = requests.margin.filter(|m| *m != self.margin);
+        if let Some(margin) = margin {
+            self.margin = margin;
+        }
+        if let Some(edge) = requests.edge.filter(|e| *e != self.edge).or(margin.map(|_| self.edge)) {
             self.edge = edge;
             match self.live.as_mut().map(|l| &mut l.backing) {
                 Some(Backing::Window(w)) => {
@@ -535,9 +548,18 @@ fn position(event_loop: &ActiveEventLoop, size: (f32, f32), edge: ScreenEdge, ma
     let (w, h) = ((size.0 as f64 * scale).round() as i32, (size.1 as f64 * scale).round() as i32);
     let m = (margin as f64 * scale).round() as i32;
     let x = origin.x + (area.width as i32 - w) / 2;
+    #[allow(unused_mut)]
+    let mut bottom = origin.y + area.height as i32;
+    // Above the taskbar on Windows' primary display.
+    #[cfg(target_os = "windows")]
+    if event_loop.primary_monitor().as_ref() == Some(&monitor)
+        && let Some(work) = crate::win32::work_area_bottom()
+    {
+        bottom = work;
+    }
     let y = match edge {
         ScreenEdge::Top => origin.y + m,
-        ScreenEdge::Bottom => origin.y + area.height as i32 - h - m,
+        ScreenEdge::Bottom => bottom - h - m,
     };
     Some(PhysicalPosition::new(x, y))
 }
@@ -572,12 +594,12 @@ mod tests {
         assert_eq!(handle.availability(), Availability::Unknown);
         handle.show();
         handle.update(|n, _| *n += 1);
-        handle.set_edge(ScreenEdge::Bottom);
+        handle.place(ScreenEdge::Bottom, 24.0);
         handle.update(|n, _| *n *= 3);
         handle.hide();
         let q = std::mem::take(&mut *shared.requests.lock().unwrap());
         assert_eq!(q.visible, Some(false), "the latest show/hide wins");
-        assert_eq!(q.edge, Some(ScreenEdge::Bottom));
+        assert_eq!((q.edge, q.margin), (Some(ScreenEdge::Bottom), Some(24.0)));
         let mut n = 0;
         for f in q.updates {
             f(&mut n, &mut Tx::default());
