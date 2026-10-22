@@ -37,7 +37,7 @@ pub struct Track {
     t0: f64,
     x0: f32,
     v0: f32,
-    target: f32,
+    pub target: f32,
     spring: Spring,
 }
 
@@ -459,7 +459,69 @@ pub fn chat_scene(ts: &mut TextSystem, t: f32, p: [f32; 2]) -> Frame {
 
 struct Flashlight;
 
-fn settings_panel(ui: &mut Ui, card: Color, txt: Color, txt2: Color, hair: Color, accent: Color) {
+/// Control ids for hit-testing: 5 toggles, 5 accent dots, the volume slider, 7 press buttons
+/// (Dark pill, ⌥ Space chip, ⌘ ⇧ K keycaps, Reset, Record shortcut).
+pub const TOGGLE0: usize = 0;
+pub const DOT0: usize = 5;
+pub const SLIDER: usize = 10;
+pub const BUTTON0: usize = 11;
+pub const N_CTL: usize = 18;
+pub const DOT_HUES: [f32; 5] = [255.0, 300.0, 350.0, 40.0, 150.0];
+
+pub fn accent_for(hue: f32) -> Color {
+    oklch(0.7, 0.15, hue)
+}
+
+/// Sampled (already animated) state of the settings panel. `Panel::default()` is the headless demo.
+#[derive(Clone)]
+pub struct Panel {
+    /// Toggle knob positions, 0 off … 1 on.
+    pub toggles: [f32; 5],
+    pub accent: Color,
+    pub selected: usize,
+    /// Opacity of the ring around the selected accent dot (0 in the headless demo).
+    pub ring: f32,
+    pub volume: f32,
+    pub hover: [f32; N_CTL],
+    pub press: [f32; N_CTL],
+}
+
+impl Default for Panel {
+    fn default() -> Panel {
+        Panel {
+            toggles: [1.0, 0.0, 1.0, 0.0, 1.0],
+            accent: accent_for(255.0),
+            selected: 0,
+            ring: 0.0,
+            volume: 82.0 / 130.0,
+            hover: [0.0; N_CTL],
+            press: [0.0; N_CTL],
+        }
+    }
+}
+
+impl Panel {
+    /// Height multiplier: hover lifts a little, pressing pushes it nearly flat.
+    fn lift(&self, id: usize) -> f32 {
+        (1.0 + 0.45 * self.hover[id]) * (1.0 - 0.92 * self.press[id].clamp(0.0, 1.2))
+    }
+}
+
+/// A clickable region in points.
+#[derive(Clone, Copy, Debug)]
+pub struct Hit {
+    pub id: usize,
+    pub rect: [f32; 4],
+}
+
+fn mix(a: Color, b: Color, k: f32) -> Color {
+    let k = k.clamp(0.0, 1.0);
+    Color { r: a.r + (b.r - a.r) * k, g: a.g + (b.g - a.g) * k, b: a.b + (b.b - a.b) * k, a: a.a + (b.a - a.a) * k }
+}
+
+fn settings_panel(ui: &mut Ui, card: Color, txt: Color, txt2: Color, hair: Color, st: &Panel) -> Vec<Hit> {
+    let accent = st.accent;
+    let mut hits = Vec::new();
     let raise_card = |p: Prim| p.raised(4.0 * sc()).bevel(5.0 * sc(), 1.5 * sc()).gloss(0.45, 0.45);
     let top = 4.0 * sc();
     ui.text(160.0, 70.0, "Settings", 24.0, 600.0, txt);
@@ -475,7 +537,8 @@ fn settings_panel(ui: &mut Ui, card: Color, txt: Color, txt2: Color, hair: Color
         ("Send crash reports", "", 0),
         ("Launch at login", "", 1),
     ];
-    let mut y = 150.0;
+    let (mut toggle, mut button) = (0usize, 0usize);
+    let y = 150.0;
     for (gi, group) in [&rows[0..3], &rows[3..6], &rows[6..9]].iter().enumerate() {
         let x = 160.0 + gi as f32 * 330.0;
         let h = group.len() as f32 * 56.0;
@@ -489,38 +552,60 @@ fn settings_panel(ui: &mut Ui, card: Color, txt: Color, txt2: Color, hair: Color
             let rx = x + 310.0 - 18.0;
             match kind {
                 0 | 1 => {
-                    let on = *kind == 1;
-                    let track = if on { accent } else { oklch(0.33, 0.006, 265.0) };
+                    let id = TOGGLE0 + toggle;
+                    toggle += 1;
+                    let k = st.toggles[id - TOGGLE0];
+                    let m = st.lift(id);
+                    let track = mix(oklch(0.33, 0.006, 265.0), accent, k);
                     ui.rect(rx - 42.0, ry + 16.0, 42.0, 24.0, 12.0, track, None, |p| p.on(top).gloss(0.4, 0.4));
-                    let kx = if on { rx - 22.0 } else { rx - 40.0 };
+                    let kx = rx - 40.0 + 18.0 * k;
                     ui.rect(kx, ry + 18.0, 20.0, 20.0, 10.0, oklch(0.96, 0.0, 0.0), None, |p| {
-                        p.on(top).raised(5.0 * sc()).bevel(10.0 * sc(), 4.0 * sc()).gloss(0.7, 0.3)
+                        p.on(top).raised(5.0 * sc() * m).bevel(10.0 * sc(), 4.0 * sc() * m).gloss(0.7, 0.3)
                     });
+                    hits.push(Hit { id, rect: [rx - 42.0, ry + 16.0, 42.0, 24.0] });
                 }
                 2 => {
+                    let id = BUTTON0 + button;
+                    button += 1;
+                    let m = st.lift(id);
                     let w = ui.measure(value, 12.0, 500.0) + 20.0;
                     ui.rect(rx - w, ry + 14.0, w, 28.0, 8.0, oklch(0.3, 0.006, 265.0), Some((hair, 1.0)), |p| {
-                        p.on(top).raised(3.0 * sc()).bevel(4.0 * sc(), 1.2 * sc()).gloss(0.5, 0.4)
+                        p.on(top).raised(3.0 * sc() * m).bevel(4.0 * sc(), 1.2 * sc() * m).gloss(0.5, 0.4)
                     });
                     ui.text(rx - w + 10.0, ry + 20.0, value, 12.0, 500.0, txt);
+                    hits.push(Hit { id, rect: [rx - w, ry + 14.0, w, 28.0] });
                 }
                 3 => {
-                    for (k, h) in [255.0, 300.0, 350.0, 40.0, 150.0].iter().enumerate() {
+                    for (k, h) in DOT_HUES.iter().enumerate() {
+                        let id = DOT0 + k;
+                        let m = st.lift(id);
                         let c = oklch(0.68, 0.15, *h);
                         let cx = rx - 18.0 - k as f32 * 26.0;
-                        ui.rect(cx, ry + 19.0, 18.0, 18.0, 9.0, c, None, |p| p.on(top).raised(3.5 * sc()).bevel(9.0 * sc(), 3.0 * sc()).gloss(0.7, 0.3));
+                        if k == st.selected && st.ring > 0.0 {
+                            let o = 3.0;
+                            let ring = oklcha(0.95, 0.0, 0.0, 0.8 * st.ring);
+                            let r = [(cx - o) * sc(), (ry + 19.0 - o) * sc(), (18.0 + 2.0 * o) * sc(), (18.0 + 2.0 * o) * sc()];
+                            ui.base.push(inst(r, (9.0 + o) * sc(), Color::TRANSPARENT, Some((ring, 1.5 * sc()))));
+                        }
+                        ui.rect(cx, ry + 19.0, 18.0, 18.0, 9.0, c, None, |p| p.on(top).raised(3.5 * sc() * m).bevel(9.0 * sc(), 3.0 * sc() * m).gloss(0.7, 0.3));
+                        hits.push(Hit { id, rect: [cx - 4.0, ry + 15.0, 26.0, 26.0] });
                     }
                 }
                 _ => {
+                    let m = st.lift(SLIDER);
+                    let v = st.volume.clamp(0.0, 1.0);
                     ui.rect(rx - 130.0, ry + 26.0, 130.0, 4.0, 2.0, oklch(0.33, 0.006, 265.0), None, |p| p.on(top));
-                    ui.rect(rx - 130.0, ry + 26.0, 82.0, 4.0, 2.0, accent, None, |p| p.on(top));
-                    ui.rect(rx - 58.0, ry + 18.0, 20.0, 20.0, 10.0, oklch(0.96, 0.0, 0.0), None, |p| {
-                        p.on(top).raised(6.0 * sc()).bevel(10.0 * sc(), 4.0 * sc()).gloss(0.7, 0.3)
+                    if v > 0.0 {
+                        ui.rect(rx - 130.0, ry + 26.0, 130.0 * v, 4.0, 2.0, accent, None, |p| p.on(top));
+                    }
+                    ui.rect(rx - 140.0 + 130.0 * v, ry + 18.0, 20.0, 20.0, 10.0, oklch(0.96, 0.0, 0.0), None, |p| {
+                        p.on(top).raised(6.0 * sc() * m).bevel(10.0 * sc(), 4.0 * sc() * m).gloss(0.7, 0.3)
                     });
+                    // The slider's hit rect spans exactly the track in x, so value = (x - rect.x) / rect.w.
+                    hits.push(Hit { id: SLIDER, rect: [rx - 130.0, ry + 12.0, 130.0, 32.0] });
                 }
             }
         }
-        let _ = &mut y;
     }
     // A wide card below with buttons.
     let by = 340.0;
@@ -528,17 +613,24 @@ fn settings_panel(ui: &mut Ui, card: Color, txt: Color, txt2: Color, hair: Color
     ui.text(180.0, by + 20.0, "Keyboard shortcuts", 15.0, 600.0, txt);
     ui.text(180.0, by + 46.0, "Press a key combination to record a new shortcut.", 13.0, 400.0, txt2);
     for (i, k) in ["⌘", "⇧", "K"].iter().enumerate() {
+        let id = BUTTON0 + 2 + i;
+        let m = st.lift(id);
         ui.rect(180.0 + i as f32 * 52.0, by + 82.0, 44.0, 44.0, 10.0, oklch(0.3, 0.006, 265.0), Some((hair, 1.0)), |p| {
-            p.on(top).raised(6.0 * sc()).bevel(7.0 * sc(), 2.5 * sc()).gloss(0.6, 0.35)
+            p.on(top).raised(6.0 * sc() * m).bevel(7.0 * sc(), 2.5 * sc() * m).gloss(0.6, 0.35)
         });
         ui.text(195.0 + i as f32 * 52.0, by + 94.0, k, 15.0, 600.0, txt);
+        hits.push(Hit { id, rect: [180.0 + i as f32 * 52.0, by + 82.0, 44.0, 44.0] });
     }
-    ui.rect(940.0, by + 90.0, 170.0, 36.0, 10.0, accent, None, |p| p.on(top).raised(5.0 * sc()).bevel(6.0 * sc(), 2.0 * sc()).gloss(0.7, 0.3));
+    let m = st.lift(BUTTON0 + 6);
+    ui.rect(940.0, by + 90.0, 170.0, 36.0, 10.0, accent, None, |p| p.on(top).raised(5.0 * sc() * m).bevel(6.0 * sc(), 2.0 * sc() * m).gloss(0.7, 0.3));
     ui.text(975.0, by + 99.0, "Record shortcut", 13.0, 600.0, oklch(0.18, 0.03, 255.0));
+    hits.push(Hit { id: BUTTON0 + 6, rect: [940.0, by + 90.0, 170.0, 36.0] });
+    let m = st.lift(BUTTON0 + 5);
     ui.rect(780.0, by + 90.0, 140.0, 36.0, 10.0, oklch(0.3, 0.006, 265.0), Some((hair, 1.0)), |p| {
-        p.on(top).raised(5.0 * sc()).bevel(6.0 * sc(), 2.0 * sc()).gloss(0.6, 0.35)
+        p.on(top).raised(5.0 * sc() * m).bevel(6.0 * sc(), 2.0 * sc() * m).gloss(0.6, 0.35)
     });
     ui.text(828.0, by + 99.0, "Reset", 13.0, 600.0, txt);
+    hits.push(Hit { id: BUTTON0 + 5, rect: [780.0, by + 90.0, 140.0, 36.0] });
     // Lower row of tiles.
     for i in 0..5 {
         let x = 160.0 + i as f32 * 198.0;
@@ -552,6 +644,7 @@ fn settings_panel(ui: &mut Ui, card: Color, txt: Color, txt2: Color, hair: Color
             ui.rect(x + 18.0, 600.0, 144.0 * fill, 18.0, 9.0, accent, None, |p| p.on(top).raised(2.0 * sc()).bevel(9.0 * sc(), 2.0 * sc()).gloss(0.6, 0.3));
         }
     }
+    hits
 }
 
 impl Demo for Flashlight {
@@ -565,46 +658,44 @@ impl Demo for Flashlight {
         // The pointer wanders like a hand: one smooth closed path at an even pace.
         let path = [[300.0, 230.0], [700.0, 180.0], [1020.0, 300.0], [860.0, 470.0], [560.0, 600.0], [260.0, 520.0]];
         let p = loop_path(&path, t / 4.0 + 0.02);
-        flashlight_scene(ts, t, p)
+        flashlight_scene(ts, t, p, &Panel::default(), false).0
     }
 }
 
-/// The dark settings panel lit by a torch aimed at the pointer `p` (points).
-pub fn flashlight_scene(ts: &mut TextSystem, t: f32, p: [f32; 2]) -> Frame {
-    {
-        let bg = oklch(0.16, 0.005, 265.0);
-        let mut ui = Ui::new(ts, bg);
-        settings_panel(
-            &mut ui,
-            oklch(0.225, 0.006, 265.0),
-            oklch(0.94, 0.003, 265.0),
-            oklch(0.66, 0.01, 265.0),
-            oklcha(1.0, 0.0, 0.0, 0.06),
-            oklch(0.7, 0.15, 255.0),
-        );
-        // The torch is held low and to the right of the pointer, aimed at it: the pool stretches and every shadow
-        // swings as it moves.
-        let lp = [p[0] + 80.0, p[1] + 130.0, 260.0];
-        let axis = [p[0] - lp[0], p[1] - lp[1], -lp[2]];
-        let torch = Light::point(lp[0] * sc(), lp[1] * sc(), lp[2] * sc())
-            .color(lin(1.0, 0.95, 0.88))
-            .intensity(7.0)
-            .radius(9.0 * sc())
-            .range(1800.0 * sc())
-            .spot(axis, 0.58)
-            .specular(1.4);
-        let s = Settings {
-            ambient: [0.07, 0.075, 0.09],
-            albedo_floor: 0.04,
-            text: TextPolicy { floor: 0.32, ceiling: 1.3, lit: 1.0, specular: 0.1 },
-            rim: 1.0,
-            contact_ao: 0.3,
-            background_gloss: 0.5,
-            time: t,
-            ..Default::default()
-        };
-        finish(ui, vec![torch], s)
-    }
+/// The dark settings panel lit by a torch aimed at the pointer `p` (points). `overhead` holds the torch straight
+/// above the pointer so the hotspot sits exactly under it (the live window); otherwise it's held low and to the
+/// right (the headless demo). Returns the panel's hit regions too.
+pub fn flashlight_scene(ts: &mut TextSystem, t: f32, p: [f32; 2], panel: &Panel, overhead: bool) -> (Frame, Vec<Hit>) {
+    let bg = oklch(0.16, 0.005, 265.0);
+    let mut ui = Ui::new(ts, bg);
+    let hits = settings_panel(
+        &mut ui,
+        oklch(0.225, 0.006, 265.0),
+        oklch(0.94, 0.003, 265.0),
+        oklch(0.66, 0.01, 265.0),
+        oklcha(1.0, 0.0, 0.0, 0.06),
+        panel,
+    );
+    let lp = if overhead { [p[0], p[1], 260.0] } else { [p[0] + 80.0, p[1] + 130.0, 260.0] };
+    let axis = [p[0] - lp[0], p[1] - lp[1], -lp[2]];
+    let torch = Light::point(lp[0] * sc(), lp[1] * sc(), lp[2] * sc())
+        .color(lin(1.0, 0.95, 0.88))
+        .intensity(7.0)
+        .radius(9.0 * sc())
+        .range(1800.0 * sc())
+        .spot(axis, 0.58)
+        .specular(1.4);
+    let s = Settings {
+        ambient: [0.07, 0.075, 0.09],
+        albedo_floor: 0.04,
+        text: TextPolicy { floor: 0.32, ceiling: 1.3, lit: 1.0, specular: 0.1 },
+        rim: 1.0,
+        contact_ao: 0.3,
+        background_gloss: 0.5,
+        time: t,
+        ..Default::default()
+    };
+    (finish(ui, vec![torch], s), hits)
 }
 
 // 3. Emissive UI lights its neighbours ----------------------------------------------

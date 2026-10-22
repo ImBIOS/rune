@@ -1,7 +1,9 @@
 //! Interactive rune-light: the flashlight and chat demos in a window.
 //!
-//!     live                      window (1 flashlight, 2 chat, scroll radius, click god rays, D direct follow, Esc quit)
-//!     live --snap out.png [--scene chat] [--at X,Y]   one frame headless at 2560×1600
+//!     live      window: 1 flashlight, 2 chat, click the settings controls, drag the chat lamp, scroll radius,
+//!               G god rays, D spring follow, R reset radius, Esc quit
+//!     live --snap out.png [--scene chat] [--at X,Y] [--down | --click] [--after S] [--rays]
+//!               one frame headless at 2560×1600; --down/--click press (and release) at --at at t=0, rendered at S
 
 #[allow(dead_code)]
 #[path = "light.rs"]
@@ -10,7 +12,8 @@ mod light;
 use std::sync::Arc;
 use std::time::Instant;
 
-use light::{Frame, Spring, Track, chat_scene, flashlight_scene, set_scale};
+use light::{DOT_HUES, DOT0, Frame, Hit, N_CTL, Panel, SLIDER, Spring, TOGGLE0, Track, accent_for, chat_scene, flashlight_scene, set_scale};
+use rune::color::Color;
 use rune::render::Renderer;
 use rune::text::TextSystem;
 use rune_light::{LightRenderer, Scene};
@@ -26,6 +29,12 @@ const PT_W: f32 = 1280.0;
 const PT_H: f32 = 800.0;
 const FOLLOW: Spring = Spring::new(0.12, 0.0);
 const LAMP: Spring = Spring::new(0.2, 0.0);
+const TOGGLE: Spring = Spring::new(0.25, 0.15);
+const HOVER: Spring = Spring::new(0.2, 0.0);
+const PRESS_DOWN: Spring = Spring::new(0.1, 0.0);
+const PRESS_UP: Spring = Spring::new(0.3, 0.2);
+const ACCENT: Spring = Spring::new(0.3, 0.0);
+const VOLUME: Spring = Spring::new(0.25, 0.0);
 
 // ---------------------------------------------------------------- GPU
 
@@ -122,59 +131,93 @@ enum Which {
     Chat,
 }
 
+fn busy(tr: &Track, t: f64, eps: f32) -> bool {
+    let (x, v) = tr.sample(t);
+    (x - tr.target).abs() > eps || v.abs() > eps * 10.0
+}
+
+fn tracks<const N: usize>(f: impl Fn(usize) -> f32) -> [Track; N] {
+    std::array::from_fn(|i| Track::at(f(i)))
+}
+
 struct State {
     which: Which,
     start: Instant,
+    /// Fixed clock for headless snapshots.
+    fake: Option<f64>,
     /// Pointer in points.
     cursor: [f32; 2],
     /// The followed point: torch aim (flashlight) or lamp (chat), in points.
     x: Track,
     y: Track,
-    target: [f32; 2],
     lamp: [f32; 2],
     direct: bool,
     radius: f32,
     rays: bool,
     press: Option<[f32; 2]>,
     dragging: bool,
+    // Settings panel.
+    on: [bool; 5],
+    toggles: [Track; 5],
+    selected: usize,
+    accent: [Track; 3],
+    volume: Track,
+    hover: [Track; N_CTL],
+    pressed: [Track; N_CTL],
+    hits: Vec<Hit>,
+    hovered: Option<usize>,
+    active: Option<usize>,
 }
 
 impl State {
     fn new(which: Which) -> State {
+        let d = Panel::default();
+        let a = d.accent;
         let mut s = State {
             which: Which::Flashlight,
             start: Instant::now(),
+            fake: None,
             cursor: [640.0, 400.0],
             x: Track::at(640.0),
             y: Track::at(400.0),
-            target: [640.0, 400.0],
             lamp: [1085.0, 250.0],
-            direct: false,
+            direct: true,
             radius: 1.0,
             rays: false,
             press: None,
             dragging: false,
+            on: d.toggles.map(|k| k > 0.5),
+            toggles: tracks(|i| d.toggles[i]),
+            selected: d.selected,
+            accent: tracks(|i| [a.r, a.g, a.b][i]),
+            volume: Track::at(d.volume),
+            hover: tracks(|_| 0.0),
+            pressed: tracks(|_| 0.0),
+            hits: Vec::new(),
+            hovered: None,
+            active: None,
         };
         s.switch(which);
         s
     }
 
     fn now(&self) -> f64 {
-        self.start.elapsed().as_secs_f64()
+        self.fake.unwrap_or_else(|| self.start.elapsed().as_secs_f64())
     }
 
     fn jump(&mut self, p: [f32; 2]) {
         self.x = Track::at(p[0]);
         self.y = Track::at(p[1]);
-        self.target = p;
     }
 
     fn switch(&mut self, which: Which) {
         if self.which == Which::Chat {
-            self.lamp = self.target;
+            self.lamp = [self.x.target, self.y.target];
         }
         self.which = which;
         self.dragging = false;
+        self.active = None;
+        self.set_hover(None);
         match which {
             Which::Flashlight => self.jump(self.cursor),
             Which::Chat => self.jump(self.lamp),
@@ -182,7 +225,6 @@ impl State {
     }
 
     fn follow(&mut self, p: [f32; 2], spring: Spring) {
-        self.target = p;
         if self.direct {
             self.jump(p);
         } else {
@@ -192,6 +234,36 @@ impl State {
         }
     }
 
+    fn hit(&self, p: [f32; 2]) -> Option<&Hit> {
+        if self.which != Which::Flashlight {
+            return None;
+        }
+        let pad = 4.0;
+        self.hits.iter().rev().find(|h| {
+            let r = h.rect;
+            p[0] >= r[0] - pad && p[0] <= r[0] + r[2] + pad && p[1] >= r[1] - pad && p[1] <= r[1] + r[3] + pad
+        })
+    }
+
+    fn slider_value(&self, p: [f32; 2]) -> Option<f32> {
+        let h = self.hits.iter().find(|h| h.id == SLIDER)?;
+        Some(((p[0] - h.rect[0]) / h.rect[2]).clamp(0.0, 1.0))
+    }
+
+    fn set_hover(&mut self, id: Option<usize>) {
+        if id == self.hovered {
+            return;
+        }
+        let t = self.now();
+        if let Some(old) = self.hovered {
+            self.hover[old].retarget(t, 0.0, HOVER);
+        }
+        if let Some(new) = id {
+            self.hover[new].retarget(t, 1.0, HOVER);
+        }
+        self.hovered = id;
+    }
+
     fn pointer_move(&mut self, p: [f32; 2]) {
         self.cursor = p;
         if let Some(down) = self.press
@@ -199,6 +271,13 @@ impl State {
         {
             self.dragging = true;
         }
+        if self.active == Some(SLIDER) && self.dragging
+            && let Some(v) = self.slider_value(p)
+        {
+            self.volume = Track::at(v);
+        }
+        let over = if self.active.is_some() { self.active } else { self.hit(p).map(|h| h.id) };
+        self.set_hover(over);
         match self.which {
             Which::Flashlight => self.follow(p, FOLLOW),
             Which::Chat if self.dragging => self.follow(p, LAMP),
@@ -206,32 +285,74 @@ impl State {
         }
     }
 
-    fn button(&mut self, pressed: bool) {
-        if pressed {
+    fn button(&mut self, down: bool) {
+        let t = self.now();
+        if down {
             self.press = Some(self.cursor);
             self.dragging = false;
-        } else {
-            if self.press.is_some() && !self.dragging {
-                self.rays = !self.rays;
+            self.active = self.hit(self.cursor).map(|h| h.id);
+            if let Some(id) = self.active {
+                self.pressed[id].retarget(t, 1.0, PRESS_DOWN);
+                if id == SLIDER
+                    && let Some(v) = self.slider_value(self.cursor)
+                {
+                    self.volume.retarget(t, v, VOLUME);
+                }
             }
-            self.press = None;
-            self.dragging = false;
+            return;
+        }
+        if let Some(id) = self.active.take() {
+            self.pressed[id].retarget(t, 0.0, PRESS_UP);
+            if self.hit(self.cursor).map(|h| h.id) == Some(id) {
+                if (TOGGLE0..TOGGLE0 + 5).contains(&id) {
+                    let i = id - TOGGLE0;
+                    self.on[i] = !self.on[i];
+                    self.toggles[i].retarget(t, if self.on[i] { 1.0 } else { 0.0 }, TOGGLE);
+                } else if (DOT0..DOT0 + 5).contains(&id) {
+                    self.selected = id - DOT0;
+                    let a = accent_for(DOT_HUES[self.selected]);
+                    for (tr, v) in self.accent.iter_mut().zip([a.r, a.g, a.b]) {
+                        tr.retarget(t, v, ACCENT);
+                    }
+                }
+            }
+            let over = self.hit(self.cursor).map(|h| h.id);
+            self.set_hover(over);
+        }
+        self.press = None;
+        self.dragging = false;
+    }
+
+    fn animating(&self, t: f64) -> bool {
+        busy(&self.x, t, 0.05)
+            || busy(&self.y, t, 0.05)
+            || busy(&self.volume, t, 1e-3)
+            || self.toggles.iter().chain(&self.accent).chain(&self.hover).chain(&self.pressed).any(|tr| busy(tr, t, 1e-3))
+    }
+
+    fn panel(&self, t: f64) -> Panel {
+        let [r, g, b] = self.accent.each_ref().map(|tr| tr.value(t));
+        Panel {
+            toggles: self.toggles.each_ref().map(|tr| tr.value(t)),
+            accent: Color { r, g, b, a: 1.0 },
+            selected: self.selected,
+            ring: 1.0,
+            volume: self.volume.value(t),
+            hover: self.hover.each_ref().map(|tr| tr.value(t)),
+            press: self.pressed.each_ref().map(|tr| tr.value(t)),
         }
     }
 
-    fn position(&self, t: f64) -> ([f32; 2], bool) {
-        let (x, vx) = self.x.sample(t);
-        let (y, vy) = self.y.sample(t);
-        let moving = (x - self.target[0]).abs() > 0.05 || (y - self.target[1]).abs() > 0.05 || vx.abs() > 0.5 || vy.abs() > 0.5;
-        ([x, y], moving)
-    }
-
     /// Builds the frame with the same scene builders as the headless demos, then applies the live knobs.
-    fn frame(&self, ts: &mut TextSystem) -> (Frame, bool) {
+    fn frame(&mut self, ts: &mut TextSystem) -> (Frame, bool) {
         let t = self.now();
-        let (p, moving) = self.position(t);
+        let p = [self.x.value(t), self.y.value(t)];
         let mut f = match self.which {
-            Which::Flashlight => flashlight_scene(ts, t as f32, p),
+            Which::Flashlight => {
+                let (f, hits) = flashlight_scene(ts, t as f32, p, &self.panel(t), true);
+                self.hits = hits;
+                f
+            }
             Which::Chat => chat_scene(ts, t as f32, p),
         };
         if let Some(l) = f.4.first_mut() {
@@ -244,7 +365,26 @@ impl State {
         if self.rays {
             f.5.shafts_over = f.5.shafts_over.max(0.12);
         }
-        (f, moving)
+        (f, self.animating(t))
+    }
+}
+
+/// Moves a frame by whole device px (centres the 1280×800 pt canvas in the window).
+fn translate(f: &mut Frame, o: [f32; 2]) {
+    if o == [0.0, 0.0] {
+        return;
+    }
+    for i in f.1.iter_mut().chain(f.2.iter_mut()) {
+        i.rect[0] += o[0];
+        i.rect[1] += o[1];
+    }
+    for p in f.0.iter_mut() {
+        p.rect[0] += o[0];
+        p.rect[1] += o[1];
+    }
+    for l in f.4.iter_mut() {
+        l.pos[0] += o[0];
+        l.pos[1] += o[1];
     }
 }
 
@@ -266,6 +406,12 @@ impl Live {
     /// Device px per point: the window's scale at the native 1280×800 pt size, fitted when resized.
     fn k(&self) -> f32 {
         (self.config.width as f32 / PT_W).min(self.config.height as f32 / PT_H).max(0.1)
+    }
+
+    /// Device-px offset of the fitted canvas, centred in the window (whole px so text stays crisp).
+    fn offset(&self) -> [f32; 2] {
+        let k = self.k();
+        [((self.config.width as f32 - PT_W * k) * 0.5).round(), ((self.config.height as f32 - PT_H * k) * 0.5).round()]
     }
 }
 
@@ -307,8 +453,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ScaleFactorChanged { .. } => l.window.request_redraw(),
             WindowEvent::CursorMoved { position, .. } => {
-                let k = l.k();
-                st.pointer_move([position.x as f32 / k, position.y as f32 / k]);
+                // winit reports physical px from the content view's top-left; undo the centring, then px → pt.
+                let (k, o) = (l.k(), l.offset());
+                st.pointer_move([(position.x as f32 - o[0]) / k, (position.y as f32 - o[1]) / k]);
                 l.window.request_redraw();
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
@@ -351,7 +498,8 @@ impl ApplicationHandler for App {
                     }
                 };
                 let view = surface_tex.texture.create_view(&Default::default());
-                let (frame, moving) = st.frame(&mut l.gfx.ts);
+                let (mut frame, moving) = st.frame(&mut l.gfx.ts);
+                translate(&mut frame, l.offset());
                 l.gfx.render(frame, &view);
                 l.window.pre_present_notify();
                 l.gfx.queue.present(surface_tex);
@@ -366,7 +514,7 @@ impl ApplicationHandler for App {
 
 // ---------------------------------------------------------------- headless snapshot
 
-fn snap(path: &str, which: Which, at: Option<[f32; 2]>, rays: bool) {
+fn snap(path: &str, which: Which, at: Option<[f32; 2]>, rays: bool, click: Option<bool>, after: f64) {
     let (w, h) = (2560u32, 1600u32);
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let (_, device, queue) = request_device(&instance, None);
@@ -374,12 +522,23 @@ fn snap(path: &str, which: Which, at: Option<[f32; 2]>, rays: bool) {
     let mut gfx = Gfx::new(device, queue, (w, h), format);
     set_scale(2.0);
     let mut st = State::new(which);
+    st.fake = Some(0.0);
+    // One throwaway frame so the panel's hit regions exist before any simulated input.
+    let _ = st.frame(&mut gfx.ts);
     if let Some(p) = at {
-        st.cursor = p;
-        st.switch(which);
-        st.jump(p);
+        st.pointer_move(p);
+        if which == Which::Chat {
+            st.jump(p);
+        }
+        if let Some(release) = click {
+            st.button(true);
+            if release {
+                st.button(false);
+            }
+        }
     }
     st.rays = rays;
+    st.fake = Some(after);
     let out = gfx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("snap"),
         size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -422,7 +581,10 @@ fn main() {
             let (x, y) = s.split_once(',')?;
             Some([x.parse().ok()?, y.parse().ok()?])
         });
-        snap(&path, which, at, args.iter().any(|a| a == "--rays"));
+        let flag = |f: &str| args.iter().any(|a| a == f);
+        let click = if flag("--click") { Some(true) } else if flag("--down") { Some(false) } else { None };
+        let after = arg("--after").and_then(|s| s.parse().ok()).unwrap_or(1.0);
+        snap(&path, which, at, flag("--rays"), click, after);
         return;
     }
     let event_loop = EventLoop::new().expect("event loop");
