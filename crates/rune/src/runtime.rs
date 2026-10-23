@@ -3618,14 +3618,16 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// Centre of the first non-exiting element whose key is `key`, or whose path ends with `key`
-    /// when it contains a `/` (e.g. `slider/knob`), in points.
+    /// when it contains a `/` (e.g. `slider/knob`), in points. Failing that, the first line box
+    /// of the link (`El::link`) whose id is `key`.
     pub fn find(&self, key: &str) -> Option<(f32, f32)> {
         let i = if key.contains('/') {
             let suffix = format!("/{key}");
-            self.nodes.iter().position(|n| !self.is_exiting(n.id) && (n.path == key || n.path.ends_with(&suffix)))?
+            self.nodes.iter().position(|n| !self.is_exiting(n.id) && (n.path == key || n.path.ends_with(&suffix)))
         } else {
-            self.nodes.iter().position(|n| !self.is_exiting(n.id) && n.key.as_deref() == Some(key))?
+            self.nodes.iter().position(|n| !self.is_exiting(n.id) && n.key.as_deref() == Some(key))
         };
+        let Some(i) = i else { return self.find_link(key) };
         let r = self.drawn.get(i).copied()?;
         Some((r[0] + r[2] * 0.5, r[1] + r[3] * 0.5))
     }

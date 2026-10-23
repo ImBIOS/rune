@@ -160,6 +160,10 @@ fn links_press_through_on_link() {
     click(&mut rt, centre(&three));
     click(&mut rt, ((one.rect[0] + one.rect[2] + two.rect[0]) / 2.0, centre(&one).1));
     assert_eq!(rt.state.opened, ["https://b.dev", "https://c.dev"]);
+    // `--script` taps by key through `find`, which resolves a link by its destination.
+    let at = rt.find("https://c.dev").expect("a link is found by its destination");
+    click(&mut rt, at);
+    assert_eq!(rt.state.opened.pop().as_deref(), Some("https://c.dev"));
 
     // Links are Tab stops in reading order, opened with Enter.
     rt.key(rune::KeyEvent { key: rune::Key::Tab, mods: Default::default() });

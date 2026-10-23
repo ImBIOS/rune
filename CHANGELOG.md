@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`--script` taps links by id**. A script event's `"key"` (and
+  `Runtime::find`) falls back to the link whose id matches when no element has that key, so
+  `{"type":"tap","key":"https://x.dev"}` presses an `El::link` or Markdown link, aiming at its
+  first line box. Before, the run stopped with "no element with key".
+- **Late children of virtual rows play their entrance**. A child added
 - **Late children of virtual rows play their entrance**. A child added
   to a row of a `.virtualize(..)` stack after the row first appeared (a "Copied" chip, say) now
   fades in with its transition, as it would in a plain stack, instead of popping in. Rows
