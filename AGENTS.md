@@ -16,6 +16,7 @@ A Rust GPU UI framework (wgpu, winit) for apps that feel like SwiftUI on iOS at 
 ## Changes
 
 - Work on `dev`. `production` deploys the site.
+- `dev` is fast-forward-only: never force-push or rewrite it. Apps pin its revs, so a rewrite breaks every app's build on a clean fetch.
 - Add a `CHANGELOG.md` `## dev` entry, newest first, for any change that can move an app's output or break its build.
 - Apps build these types as literals, so adding a pub field breaks them: `AppSpec`, `Env`, `Elevation`, `PaletteSeed`, `OverlaySpec`, `TextStyle`, `RunOptions`, `ScrollSpec`, `Span`, `ByteFrame`, `SurfaceDraw`, `LayerSpec`. Add a builder method instead.
 
