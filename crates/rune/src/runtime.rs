@@ -3243,6 +3243,7 @@ fn caret_index(e: &crate::edit::TextEdit, content: &str) -> usize {
 /// Parley line alignment for a text node: only wrapped text aligns per line.
 fn line_alignment(spec: &TextSpec) -> parley::Alignment {
     match spec.align {
+        _ if spec.wrap && spec.justify => parley::Alignment::Justify,
         Align::Center if spec.wrap => parley::Alignment::Center,
         Align::End if spec.wrap => parley::Alignment::End,
         _ => parley::Alignment::Start,

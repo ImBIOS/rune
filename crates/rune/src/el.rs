@@ -272,6 +272,8 @@ pub struct TextSpec {
     pub truncate: bool,
     /// Fade the overflowing trailing edge rather than replacing text with an ellipsis.
     pub truncate_fade: bool,
+    /// Spread wrapped lines to fill the width (see [`El::justify`]).
+    pub justify: bool,
     /// Plain live run. Layout is measured from the authored placeholder before latching it.
     pub live: Option<crate::LiveText>,
 }
@@ -461,6 +463,7 @@ pub fn text(content: impl Into<String>) -> El {
         reveal: -1.0,
         truncate: false,
         truncate_fade: false,
+        justify: false,
         live: None,
     });
     e
@@ -1192,6 +1195,14 @@ impl El {
     pub fn align(mut self, a: Align) -> Self {
         if let Some(t) = &mut self.text {
             t.align = a;
+        }
+        self
+    }
+    /// Spread each wrapped line but the last to fill the width; the last line and unwrapped text
+    /// keep [`El::align`].
+    pub fn justify(mut self) -> Self {
+        if let Some(t) = &mut self.text {
+            t.justify = true;
         }
         self
     }
