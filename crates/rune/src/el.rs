@@ -623,6 +623,19 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
     e
 }
 
+/// Fits a multi-line [`text_input`] to its text: `min_lines` tall at least, growing with each
+/// wrapped line up to `max_lines`, then scrolling inside with the caret kept in view. The height
+/// springs on the element's motion. Returns `field` inside a scroll viewport keyed `"scroll"`, so
+/// key the field and attach its handlers first. A smaller `.max_h(..)` caps it in points.
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn auto_grow(field: El, min_lines: usize, max_lines: usize) -> El {
+    let line = field.text.as_ref().map_or(0.0, |t| t.style.line_px());
+    let (min, max) = (min_lines.max(1), max_lines.max(min_lines.max(1)));
+    col().key("scroll").w_full().shrink().min_h(min as f32 * line).max_h(max as f32 * line)
+        .scroll(ScrollSpec { stick_bottom: false })
+        .child(field.animate_edit_layout())
+}
+
 impl El {
     /// On the root, receive native window activation/deactivation (not text-field focus).
     /// Also works on interactive overlays. Headless hosts may call Runtime::window_focus.

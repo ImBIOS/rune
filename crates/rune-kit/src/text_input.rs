@@ -1,7 +1,7 @@
 //! TextInput and Textarea (`@opencode/ui` forms/text-input, forms/textarea), and the older
 //! TextField (`components/text-field`).
 
-use rune::{Color, El, Icon, ScrollSpec, TextEdit, TextStyle, Tx, col, el, icon, row, text, text_input};
+use rune::{Color, El, Icon, TextEdit, TextStyle, Tx, col, el, icon, row, text, text_input};
 
 use crate::{Acts, Kit, State, over, shadows};
 
@@ -315,10 +315,11 @@ impl TextArea {
         let line = style.line_px();
         let mut e = col().role("textbox").label(self.placeholder.clone()).padding(8.0);
         e = if let Some((min_rows, max_rows)) = self.grow {
-            let max = self.max_height.map_or(max_rows as f32 * line, |h| h.min(max_rows as f32 * line));
-            let field = if disabled { field } else { field.animate_edit_layout() };
-            let viewport = col().key("scroll").w_full().shrink().max_h(max.max(line)).scroll(ScrollSpec { stick_bottom: false });
-            e.min_h(min_rows as f32 * line + 16.0).child(viewport.child(field))
+            let viewport = rune::auto_grow(field, min_rows, max_rows);
+            e.child(match self.max_height {
+                Some(h) => viewport.max_h(h.min(max_rows as f32 * line).max(line)),
+                None => viewport,
+            })
         } else {
             // A <textarea rows=3>: rows of its line height plus padding, at least 80.
             e.min_h((self.rows as f32 * line + 16.0).max(80.0)).child(field)

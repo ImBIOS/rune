@@ -10,16 +10,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   `{"type":"tap","key":"https://x.dev"}` presses an `El::link` or Markdown link, aiming at its
   first line box. Before, the run stopped with "no element with key".
 - **Late children of virtual rows play their entrance**. A child added
-- **Late children of virtual rows play their entrance**. A child added
   to a row of a `.virtualize(..)` stack after the row first appeared (a "Copied" chip, say) now
   fades in with its transition, as it would in a plain stack, instead of popping in. Rows
   scrolled back into view still mount settled with their whole subtree.
 - **Timers drive motion in windowless dev runs**. With the dev panel
-- **Timers drive motion in windowless dev runs**. With the dev panel
   attached and no visible window, a timer that starts a transition now animates it in real time
   on hidden ticks, as a shown window would. Before, the timer's frame left the motion frozen
   until the next input or panel command.
-- **Stuck scrolls hold their bottom across fitting and overflowing**.
 - **Stuck scrolls hold their bottom across fitting and overflowing**.
   When a stick-to-bottom scroll's content goes between overflowing its viewport and fitting it
   while the viewport resizes, the rows no longer jump by the size change and slide back.
@@ -75,18 +72,18 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   on its own. Rolled labels get narrower and tighter (IBM Plex Mono 11 pt "Copy password": 91 →
   86 pt) and at rest draw the same glyphs at the same positions as the plain string. New
   `El::advance_in(run, at)` measures and draws a text as its grapheme in a longer run.
-- **Stuck scrolls hold their bottom while they resize** (`rooms-gaps` branch). A stick-to-bottom
+- **Stuck scrolls hold their bottom while they resize**. A stick-to-bottom
   scroll whose own height animates (a banner opening above it, a footer below) now keeps its last
   row on its bottom edge every frame. Before, the rows jumped by the size change and slid back.
   Settled frames and `--snap` goldens are unchanged.
-- **Editing scrolls the caret into view** (`rooms-gaps` branch). Typing, pasting, IME composition
+- **Editing scrolls the caret into view**. Typing, pasting, IME composition
   or caret keys in a field inside a scroll viewport now scroll its nearest viewport just far enough
   to show the caret line, as a browser textarea does. Before, the caret could run off the bottom.
-- **Growth rows play an explicit `.transition`** (`rooms-gaps` branch). Rows inserted into a
+- **Growth rows play an explicit `.transition`**. Rows inserted into a
   growth stack (and elements inserted inside them) used to ignore `.transition(...)` and only grow
   open. One that sets a transition now also plays its entrance; rows without one are unchanged,
   and rows a virtual list remounts on scroll still appear settled.
-- **Absolute children size against their parent** (`rooms-gaps` branch). `absolute`/`pin` children
+- **Absolute children size against their parent**. `absolute`/`pin` children
   now resolve `w_full`, `w_frac`, `h_full` and right/bottom pins against their parent's padding
   box, as documented, instead of the window (Taffy hands them to the nearest positioned ancestor,
   and elements were static). Left/top offsets were already parent-relative. Root overlays (scrims,

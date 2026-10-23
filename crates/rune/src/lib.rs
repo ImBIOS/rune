@@ -115,7 +115,7 @@ pub use color::{Color, oklch, oklcha};
 pub use compose::{Compositor, Frame};
 pub use edit::{Ime, Key, KeyEvent, Mods, TextEdit};
 pub use el::{
-    Align, Anchor, Cursor, Cycle, Drag, El, GrowthSpec, Outline, Phase, PointerPress, ScrollSpec, Shadow, Shell, Side, Tx, canvas, col, edit_access, el, icon, rich,
+    Align, Anchor, Cursor, Cycle, Drag, El, GrowthSpec, Outline, Phase, PointerPress, ScrollSpec, Shadow, Shell, Side, Tx, auto_grow, canvas, col, edit_access, el, icon, rich,
     row, spacer, text, text_input,
 };
 pub use growth::{GROWTH, StreamEdge, edge};
