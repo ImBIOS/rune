@@ -10,14 +10,14 @@ use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, Ime as WIme, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
-use winit::window::{CursorIcon, Theme, Window, WindowId, WindowLevel};
+use winit::window::{Theme, Window, WindowId, WindowLevel};
 use winit::raw_window_handle::HasWindowHandle;
 
 use crate::app::{App, Shared, WindowRequest};
 use crate::compose::{Compositor, Frame};
 use crate::frame_clock::FrameClock;
 use crate::edit::{Ime, Key, KeyEvent, Mods};
-use crate::el::{Cursor, Shell, Tx};
+use crate::el::{Shell, Tx};
 use crate::render::{Gpu, Renderer};
 use crate::runtime::{Env, Runtime, TitlebarAction, Waker};
 use crate::tooling::{AppSpec, Args, Chrome, runtime_for};
@@ -41,7 +41,7 @@ struct Win {
     /// False while hidden (platforms that can hide a window keep it for the next open).
     visible: bool,
     occluded: bool,
-    cursor: Cursor,
+    cursor: crate::os_cursor::OsCursor,
     alpha: Option<crate::surface_alpha::AlphaSurface>,
 }
 
@@ -149,6 +149,13 @@ impl Win {
         }
         self.window.set_visible(true);
         if focus { self.window.focus_window(); }
+    }
+
+    /// The runtime's cursor while the pointer is in the window, the arrow once it leaves.
+    /// `Hidden` needs focus, so it can't outlive the window being active.
+    fn apply_cursor<S>(&mut self, rt: &Runtime<S>, focused: bool) {
+        let want = match rt.cursor() { crate::el::Cursor::Hidden if !focused => crate::el::Cursor::Default, c => c };
+        self.cursor.apply(&self.window, want, rt.pointer().is_some());
     }
 
     fn hide(&self) {
@@ -737,20 +744,6 @@ fn titlebar_double_click(window: &Window) {
     window.set_maximized(!window.is_maximized());
 }
 
-fn cursor_icon(c: Cursor) -> CursorIcon {
-    match c {
-        Cursor::Default => CursorIcon::Default,
-        Cursor::Pointer => CursorIcon::Pointer,
-        Cursor::Text => CursorIcon::Text,
-        Cursor::Grab => CursorIcon::Grab,
-        Cursor::Grabbing => CursorIcon::Grabbing,
-        Cursor::NotAllowed => CursorIcon::NotAllowed,
-        Cursor::Move => CursorIcon::Move,
-        Cursor::ResizeColumn => CursorIcon::ColResize,
-        Cursor::ResizeRow => CursorIcon::RowResize,
-    }
-}
-
 pub(crate) fn map_mods(m: ModifiersState) -> Mods {
     Mods { shift: m.shift_key(), cmd: if cfg!(target_os = "macos") { m.super_key() } else { m.control_key() },
         alt: m.alt_key(), ctrl: m.control_key(), logo: m.super_key() }
@@ -1005,7 +998,8 @@ impl<S: 'static> Host<S> {
             return;
         }
         if !self.keep_running {
-            if let Some(w) = &self.win { w.hide(); }
+            self.rt.cancel_pointer();
+            if let Some(w) = &mut self.win { w.apply_cursor(&self.rt, false); w.hide(); }
             self.finished = true;
             return;
         }
@@ -1029,7 +1023,8 @@ impl<S: 'static> Host<S> {
         self.ime_allowed = false;
         if let Some(w) = &self.win { w.window.set_ime_allowed(false); }
         self.rt.set_live_visible(false);
-        self.rt.pointer_leave();
+        self.rt.cancel_pointer();
+        if let Some(w) = &mut self.win { w.apply_cursor(&self.rt, false); }
         self.mods = ModifiersState::empty();
         if let Some(w) = &self.win { w.hide(); }
         if self.release_gpu && !self.launcher() {
@@ -1253,7 +1248,7 @@ impl<S: 'static> Host<S> {
             window,
             visible,
             occluded: false,
-            cursor: Cursor::Default,
+            cursor: crate::os_cursor::OsCursor::new(event_loop),
             alpha,
         });
         if launcher { self.win.as_mut().unwrap().first_frame.prepare(); }
@@ -1344,11 +1339,8 @@ impl<S: 'static> Host<S> {
             l.window.set_ime_allowed(ime_allowed);
             self.ime_allowed = ime_allowed;
         }
-        let cursor = rt.cursor();
-        if cursor != l.cursor {
-            l.cursor = cursor;
-            l.window.set_cursor(cursor_icon(cursor));
-        }
+        let focused = l.window.has_focus();
+        l.apply_cursor(rt, focused);
         self.clipboard.flush(rt);
         if let Some(a) = rt.ime_area {
             l.window.set_ime_cursor_area(
@@ -1644,6 +1636,8 @@ impl<S: 'static> Host<S> {
                     rt.cancel_composition();
                     l.window.set_ime_allowed(false);
                     self.ime_allowed = false;
+                    // A minimized or occluded window skips redraw.
+                    l.apply_cursor(rt, false);
                 } else {
                     rt.ime_reset = true;
                 }

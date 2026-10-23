@@ -58,6 +58,7 @@ mod x11_overlay;
 mod x11_pointer;
 mod overlay;
 mod overlay_options;
+mod os_cursor;
 #[cfg(any(test, target_os = "windows", all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 mod pointer_observer;
 #[cfg(target_os = "windows")]

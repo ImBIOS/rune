@@ -92,6 +92,10 @@ impl OverlayInput {
     }
 }
 
+/// An overlay shows its elements' [`Cursor`](crate::Cursor)s while the pointer is over a hit
+/// area (with [`OverlayInput::Regions`], a hit region). On macOS that works for a non-key
+/// overlay only while its app is frontmost, unless `rune` is built with the
+/// `macos-background-cursor` feature, which uses private API (an App Store review risk).
 #[derive(Clone, Debug, Default)]
 pub struct OverlayOptions {
     /// None preserves the spec's edge, margin, alignment and inset.

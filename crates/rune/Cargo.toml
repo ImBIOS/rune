@@ -8,6 +8,12 @@ license.workspace = true
 dev = ["dep:tungstenite", "dep:csscolorparser", "rune-motion/dev"]
 native-file-dialog = ["dep:rfd"]
 hot = ["dep:subsecond", "dep:dioxus-devtools"]
+# macOS: let an overlay set its element's cursor while its app isn't frontmost. macOS ignores
+# `[NSCursor set]` from a background app; this sets WindowServer's private per-connection
+# `SetsCursorInBackground` property, looked up at run time. Private API: App Store review may
+# reject an app built with it. Off, the lookup isn't compiled in, and a non-key overlay's
+# cursor shows only while its app is frontmost.
+macos-background-cursor = []
 
 [dependencies]
 subsecond = { version = "=0.7.10", optional = true }

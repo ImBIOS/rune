@@ -250,6 +250,7 @@ pub(crate) struct Overlay<T: 'static> {
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
     x11: Option<crate::x11_overlay::InputWindow>,
     live: Option<Live>,
+    cursor: Option<crate::os_cursor::OsCursor>,
     mods: winit::keyboard::ModifiersState,
     renderer: Option<(Renderer, wgpu::TextureFormat)>,
     gpu: Option<Arc<Gpu>>,
@@ -294,6 +295,7 @@ impl<T: 'static> Overlay<T> {
             clipboard: Default::default(),
             compositor,
             live: None,
+            cursor: None,
             #[cfg(target_os = "macos")]
             panel: None,
             #[cfg(target_os = "windows")]
@@ -399,6 +401,7 @@ impl<T: 'static> Overlay<T> {
         self.rt.set_live_visible(false);
         self.visible = false;
         self.rt.cancel_pointer();
+        self.apply_cursor();
         let Some(live) = &self.live else { return };
         match &live.backing {
             Backing::Window(window) => {
@@ -480,6 +483,7 @@ impl<T: 'static> Overlay<T> {
             attrs = attrs.with_has_shadow(false);
         }
         let window = Arc::new(event_loop.create_window(attrs).ok()?);
+        if self.cursor.is_none() { self.cursor = Some(crate::os_cursor::OsCursor::new(event_loop)); }
         let scale = window.scale_factor() as f32;
         // The surface first: on macOS it binds winit's view and its layer, which then move
         // into the panel.
@@ -737,6 +741,24 @@ impl<T: 'static> Overlay<T> {
 }
 
 impl<T: 'static> Overlay<T> {
+    /// The runtime's cursor while the pointer is over a hit area of a shown overlay that takes
+    /// input; the arrow once when it leaves, so `Cursor::Hidden` never outlives the overlay or
+    /// the hover, and a click-through area leaves the cursor to the window under it.
+    fn apply_cursor(&mut self) {
+        let input = self.options.input.resolved(self.interactive);
+        let over = self.rt.pointer().is_some_and(|(x, y)| {
+            x >= 0.0 && y >= 0.0 && x < self.at.size.0 && y < self.at.size.1
+                && (input != OverlayInput::Regions || self.rt.pointer_captured()
+                    || self.rt.hit_regions().iter().any(|r| crate::overlay_options::contains(*r, x, y)))
+        });
+        let active = self.visible && input != OverlayInput::None && over;
+        let want = self.rt.cursor();
+        let (Some(Live { backing: Backing::Window(window), .. }), Some(cursor)) = (&self.live, &mut self.cursor) else { return };
+        cursor.apply(window, want, active);
+        #[cfg(target_os = "macos")]
+        if let Some(panel) = &self.panel { panel.set_cursor(active.then_some(want)); }
+    }
+
     fn observe_pointer(&mut self, x: f32, y: f32) {
         if self.rt.pointer_captured() || (x >= 0.0 && y >= 0.0 && x < self.at.size.0 && y < self.at.size.1) {
             self.dirty |= self.rt.observe_pointer(x, y);
@@ -1275,7 +1297,9 @@ impl<T: 'static> AnyHost for Overlay<T> {
                 }
             }
         }
-        self.draw()
+        let more = self.draw();
+        self.apply_cursor();
+        more
     }
 
     fn keeps_loop(&self) -> bool {

@@ -425,6 +425,8 @@ pub struct Runtime<S: 'static> {
     capture: Option<(String, Drag)>,
     secondary_capture: Option<String>,
     capture_inside: bool,
+    /// The pointer left while a press held it; the leave lands on release.
+    left_in_capture: bool,
     drag_data: f32,
     pub instances: Vec<Instance>,
     /// Per instance, the `El::mark` of its nearest marked node (0 for none). Filled only while
@@ -620,6 +622,7 @@ impl<S: 'static> Runtime<S> {
             capture: None,
             secondary_capture: None,
             capture_inside: false,
+            left_in_capture: false,
             drag_data: 0.0,
             instances: Vec::new(),
             marks: Vec::new(),
@@ -2519,6 +2522,7 @@ impl<S: 'static> Runtime<S> {
 
     pub fn pointer_move(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
+        if self.in_viewport(x, y) { self.left_in_capture = false; }
         for &(id, rect) in &self.hits {
             if crate::overlay_options::contains(rect, x, y)
                 && let Some(n) = self.node_index.get(&id).map(|&i| &self.nodes[i])
@@ -2572,6 +2576,18 @@ impl<S: 'static> Runtime<S> {
         self.secondary_capture = None;
         self.capture_inside = false;
         self.pointer_leave();
+    }
+
+    fn in_viewport(&self, x: f32, y: f32) -> bool {
+        x >= 0.0 && y >= 0.0 && x < self.viewport.0 && y < self.viewport.1
+    }
+
+    /// A release outside the window, or after the pointer left during the press, ends the hover.
+    fn leave_after_release(&mut self) {
+        if self.pointer_captured() { return; }
+        if std::mem::take(&mut self.left_in_capture) || self.pointer.is_some_and(|(x, y)| !self.in_viewport(x, y)) {
+            self.pointer_leave();
+        }
     }
 
     fn refresh_hover(&mut self, x: f32, y: f32) {
@@ -2680,9 +2696,18 @@ impl<S: 'static> Runtime<S> {
         {
             self.queue.push(Action::SecondaryPress(path, PointerPress { x, y }));
         }
+        self.leave_after_release();
     }
 
     pub fn pointer_up(&mut self, x: f32, y: f32) {
+        // Hosts release at the last position they saw, which a leave doesn't move.
+        let left = self.left_in_capture;
+        self.release(x, y);
+        self.left_in_capture = left;
+        self.leave_after_release();
+    }
+
+    fn release(&mut self, x: f32, y: f32) {
         self.pointer_move(x, y);
         let Some((path, d)) = self.capture.take() else { return };
         self.refresh_hover_within();
@@ -2706,7 +2731,10 @@ impl<S: 'static> Runtime<S> {
         if self.capture.is_none() && self.secondary_capture.is_none() {
             self.pointer = None;
             self.hovered = None;
+            self.left_in_capture = false;
             self.refresh_hover_within();
+        } else {
+            self.left_in_capture = true;
         }
     }
 
@@ -2752,10 +2780,16 @@ impl<S: 'static> Runtime<S> {
     pub fn hit_regions(&self) -> &[[f32; 4]] { &self.overlay_hits }
 
     /// The pointer shape the shell should show: the pressed element's while a gesture holds
-    /// the pointer, else the hovered one's, from the nearest ancestor that sets one.
+    /// the pointer, else the one under it in the current frame, from the nearest ancestor that
+    /// sets one. The arrow while the pointer is outside the window.
     pub fn cursor(&self) -> crate::el::Cursor {
-        let path = self.capture.as_ref().map(|(p, _)| p.as_str()).or(self.hovered.as_deref());
-        let Some(mut i) = path.and_then(|p| self.nodes.iter().position(|n| n.path == p)) else {
+        let Some((x, y)) = self.pointer.filter(|&(x, y)| self.in_viewport(x, y)) else { return crate::el::Cursor::Default };
+        // An element on its way out has no cursor: `Cursor::Hidden` ends when it's removed.
+        let target = match &self.capture {
+            Some((p, _)) => (0..self.nodes.len()).find(|&i| self.nodes[i].path == *p && !self.subtree_exiting(i)),
+            None => self.primary_target(x, y),
+        };
+        let Some(mut i) = target else {
             return crate::el::Cursor::Default;
         };
         if self.nodes[i].cursor.is_none() && self.nodes[i].input.is_some() {
@@ -4769,6 +4803,76 @@ mod tests {
         assert_eq!(rt.cursor(), Cursor::Default);
         rt.pointer_leave();
         assert_eq!(rt.cursor(), Cursor::Default);
+    }
+
+    #[test]
+    fn hidden_cursor_ends_with_its_hover_and_its_element() {
+        use crate::el::Cursor;
+        fn view(picking: &bool, _: &mut Cx<bool>) -> El {
+            let picker = el().key("picker").size(200.0, 100.0).cursor(Cursor::Hidden).on_press(|_: &mut bool| {})
+                .child(el().key("area").size(100.0, 100.0).cursor(Cursor::Crosshair).on_press(|_: &mut bool| {}));
+            col().size(200.0, 200.0).child(if *picking { picker } else { el().key("idle").size(200.0, 100.0) })
+        }
+        let mut rt = Runtime::new(true, view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.pointer_move(50.0, 50.0);
+        assert_eq!(rt.cursor(), Cursor::Crosshair);
+        rt.pointer_move(150.0, 50.0);
+        assert_eq!(rt.cursor(), Cursor::Hidden);
+        rt.pointer_move(150.0, 150.0);
+        assert_eq!(rt.cursor(), Cursor::Default, "hover left the element");
+        rt.pointer_move(150.0, 50.0);
+        rt.pointer_leave();
+        assert_eq!(rt.cursor(), Cursor::Default, "pointer left the window");
+        rt.pointer_move(150.0, 50.0);
+        assert_eq!(rt.cursor(), Cursor::Hidden);
+        rt.update(|picking: &mut bool, _| *picking = false);
+        rt.frame(0.0);
+        assert_eq!(rt.cursor(), Cursor::Default, "the element went away");
+    }
+
+    #[test]
+    fn hidden_cursor_ends_when_a_drag_is_released_outside_the_window() {
+        use crate::el::Cursor;
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            el().size(200.0, 200.0).child(el().key("picker").size(200.0, 100.0).cursor(Cursor::Hidden).on_press(|_: &mut ()| {}))
+        }
+        let mut rt = Runtime::new((), view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.pointer_move(50.0, 50.0);
+        rt.pointer_down(50.0, 50.0);
+        assert_eq!(rt.cursor(), Cursor::Hidden);
+        rt.pointer_move(250.0, 50.0);
+        assert_eq!(rt.cursor(), Cursor::Default, "never an element's cursor outside the window");
+        rt.pointer_up(250.0, 50.0);
+        assert_eq!(rt.pointer(), None, "a release outside the window is a leave");
+
+        // The host saw the pointer leave mid-press, then releases at its last inside position.
+        rt.pointer_move(50.0, 50.0);
+        rt.pointer_down(50.0, 50.0);
+        rt.pointer_leave();
+        assert_eq!(rt.cursor(), Cursor::Hidden, "the press still holds the pointer");
+        rt.pointer_up(50.0, 50.0);
+        assert_eq!(rt.pointer(), None, "the deferred leave lands on release");
+        assert_eq!(rt.cursor(), Cursor::Default);
+    }
+
+    #[test]
+    fn cursor_follows_a_sibling_that_replaces_an_exiting_element_under_a_still_pointer() {
+        use crate::el::Cursor;
+        fn view(first: &bool, _: &mut Cx<bool>) -> El {
+            let item = |key: &str, cursor: Cursor| el().key(key).absolute(0.0, 0.0).size(100.0, 100.0).cursor(cursor)
+                .on_press(|_: &mut bool| {}).transition(Transition::opacity());
+            el().size(200.0, 200.0).child(if *first { item("a", Cursor::Crosshair) } else { item("b", Cursor::Hidden) })
+        }
+        let mut rt = Runtime::new(true, view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.pointer_move(50.0, 50.0);
+        assert_eq!(rt.cursor(), Cursor::Crosshair);
+        rt.update(|first: &mut bool, _| *first = false);
+        rt.frame(1.0 / 120.0);
+        assert!(rt.nodes.iter().any(|n| n.key.as_deref() == Some("a")), "a is still exiting");
+        assert_eq!(rt.cursor(), Cursor::Hidden, "the sibling under the still pointer takes over");
     }
 
     #[test]

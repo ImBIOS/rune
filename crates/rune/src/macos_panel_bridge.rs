@@ -38,6 +38,10 @@ extern "C" fn scale(window: &AnyObject, _: Sel) -> f64 {
 extern "C" fn screen(window: &AnyObject, _: Sel) -> *mut AnyObject {
     unsafe { let panel = handles(window).1 as *mut AnyObject; msg_send![panel, screen] }
 }
+/// winit's `set_cursor` invalidates the view's cursor rects in its own (hidden) window.
+extern "C" fn invalidate_cursor_rects(window: &AnyObject, _: Sel, view: *mut AnyObject) {
+    unsafe { let panel = handles(window).1 as *mut AnyObject; let _: () = msg_send![panel, invalidateCursorRectsForView: view]; }
+}
 
 // Ordinary panel hosts retain winit's geometry/appearance API. Only their source window
 // gets these forwards; overlay placement continues to manage both native frames itself.
@@ -103,6 +107,7 @@ impl Bridge {
                     (sel!(occlusionState), occlusion as *const c_void),
                     (sel!(backingScaleFactor), scale as *const c_void),
                     (sel!(screen), screen as *const c_void),
+                    (sel!(invalidateCursorRectsForView:), invalidate_cursor_rects as *const c_void),
                 ] {
                     let method = class_getInstanceMethod(original, selector);
                     // All selectors belong to NSWindow, inherited by every winit/KVO source.

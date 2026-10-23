@@ -5,6 +5,20 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Cursor::Crosshair` and `Cursor::Hidden`.** A crosshair for picking a point or dragging out
+  a rect, and no OS cursor for views that draw their own. Windows set them, and overlays now
+  set an element's `Cursor` too (before, they left the OS cursor alone) while the pointer is
+  over a hit area of a shown overlay that takes input, including a non-key macOS overlay.
+  `Hidden` is a transparent cursor image, so it is per-window like any shape and never confines
+  the pointer. It shows the arrow again when hover leaves the element, the pointer leaves the
+  window (including a drag released outside it), the element is removed, the window loses focus
+  or hides, or the overlay hides. The cursor now comes from what's under the pointer in the
+  current frame, so an element playing its exit transition has no cursor and a sibling that
+  replaces it under a still pointer sets its own. On macOS a non-key overlay sets its cursor
+  only while its app is frontmost; the opt-in `macos-background-cursor` feature lifts that with
+  a private WindowServer property (an App Store review risk), and without it none of that code
+  is in the binary. `Cursor` is now `#[non_exhaustive]`: an app that matches it needs a
+  wildcard arm.
 - **Key handlers can tell a held key's repeats from its first press.** `tx.key_repeat()` is true
   in the window's `on_key`, an overlay's `.on_key`, `on_input_key` and `on_physical_input` while
   the OS auto-repeats a held key, and false for the first press. `KeyEvent` is unchanged, so

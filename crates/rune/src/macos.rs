@@ -134,6 +134,8 @@ pub(crate) struct PointerState {
     clicks: RefCell<VecDeque<(bool, f32, f32)>>,
     release_since: Cell<Option<(Instant, (f32, f32))>>,
     recovered_release: Cell<Option<(f32, f32)>>,
+    /// The cursor the overlay shows while the pointer is over its hit area.
+    cursor: Cell<Option<crate::el::Cursor>>,
 }
 
 impl PointerState {
@@ -181,6 +183,18 @@ impl PointerState {
         self.release_since.set(None);
         self.recovered_release.set(Some(released_at));
     }
+    /// Sets the cursor again after a mouse event, which may have let another window's cursor
+    /// rects replace it. The arrow once the pointer is off the hit area.
+    fn reapply_cursor(&self, panel: &NSPanel) {
+        let Some(cursor) = self.cursor.get() else { return };
+        // SAFETY: monitors run on AppKit's main thread.
+        let pointer = unsafe { NSEvent::mouseLocation() };
+        let frame = panel.frame();
+        let (x, y) = ((pointer.x - frame.origin.x) as f32, (frame.origin.y + frame.size.height - pointer.y) as f32);
+        let inside = x >= 0.0 && y >= 0.0 && x < frame.size.width as f32 && y < frame.size.height as f32;
+        if inside && self.hit(x, y) { set_ns_cursor(cursor); }
+        else { self.cursor.set(None); set_ns_cursor(crate::el::Cursor::Default); }
+    }
     fn observe(&self, panel: &NSPanel, wake: Option<&crate::Waker>) {
         // SAFETY: monitors and frame publication run on AppKit's main thread.
         let pointer = unsafe { NSEvent::mouseLocation() };
@@ -203,6 +217,98 @@ impl PointerState {
             self.pending.set(Some((x, y)));
             if let Some(wake) = wake { wake(); }
         }
+    }
+}
+
+/// `[NSCursor set]` with winit's shape for each cursor. Main thread.
+fn set_ns_cursor(cursor: crate::el::Cursor) {
+    use crate::el::Cursor as C;
+    thread_local! {
+        static TRANSPARENT: Option<Retained<NSObject>> = image_cursor(None);
+        static MOVE: Option<Retained<NSObject>> = image_cursor(Some("move"));
+    }
+    let Some(class) = objc2::runtime::AnyClass::get("NSCursor") else { return };
+    #[cfg(feature = "macos-background-cursor")]
+    sets_cursor_in_background();
+    // SAFETY: NSCursor class methods and -set on the main thread.
+    unsafe {
+        let image = match cursor {
+            C::Hidden => TRANSPARENT.with(Clone::clone),
+            C::Move => MOVE.with(Clone::clone),
+            _ => None,
+        };
+        let ns: Option<Retained<NSObject>> = match (image, cursor) {
+            (Some(image), _) => Some(image),
+            (None, C::Pointer) => msg_send_id![class, pointingHandCursor],
+            (None, C::Text) => msg_send_id![class, IBeamCursor],
+            (None, C::Grab) => msg_send_id![class, openHandCursor],
+            (None, C::Grabbing) => msg_send_id![class, closedHandCursor],
+            (None, C::NotAllowed) => msg_send_id![class, operationNotAllowedCursor],
+            (None, C::ResizeColumn) => msg_send_id![class, resizeLeftRightCursor],
+            (None, C::ResizeRow) => msg_send_id![class, resizeUpDownCursor],
+            (None, C::Crosshair) => msg_send_id![class, crosshairCursor],
+            (None, _) => msg_send_id![class, arrowCursor],
+        };
+        if let Some(ns) = ns { let _: () = msg_send![&*ns, set]; }
+    }
+}
+
+/// The window server ignores `[NSCursor set]` from an app that isn't active, which an overlay's
+/// app usually isn't. WindowServer's per-connection `SetsCursorInBackground` property lifts
+/// that; it's private, so it's opt-in (`macos-background-cursor`), looked up at run time and
+/// skipped if it's gone. Without the feature none of its names are in the binary.
+#[cfg(feature = "macos-background-cursor")]
+fn sets_cursor_in_background() {
+    use std::ffi::{c_char, c_void};
+    thread_local! { static DONE: Cell<bool> = const { Cell::new(false) }; }
+    if DONE.with(|done| done.replace(true)) { return; }
+    unsafe extern "C" { fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void; }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" { static kCFBooleanTrue: *const c_void; }
+    const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
+    // SAFETY: both symbols have these C signatures; the key and value outlive the call.
+    unsafe {
+        let (main, set) = (dlsym(RTLD_DEFAULT, c"_CGSDefaultConnection".as_ptr()), dlsym(RTLD_DEFAULT, c"CGSSetConnectionProperty".as_ptr()));
+        if main.is_null() || set.is_null() { return; }
+        let main: extern "C" fn() -> i32 = std::mem::transmute(main);
+        let set: extern "C" fn(i32, i32, *const c_void, *const c_void) -> i32 = std::mem::transmute(set);
+        let key = objc2_foundation::NSString::from_str("SetsCursorInBackground");
+        let connection = main();
+        set(connection, connection, (&*key as *const objc2_foundation::NSString).cast(), kCFBooleanTrue);
+    }
+}
+
+/// A transparent cursor (`None`), or one of the system's WebKit cursors as winit loads them.
+fn image_cursor(name: Option<&str>) -> Option<Retained<NSObject>> {
+    use objc2::runtime::AnyClass;
+    use objc2_foundation::NSString;
+    // A 16x16 transparent GIF.
+    const TRANSPARENT: &[u8] = &[
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x10, 0x00, 0x10, 0x00, 0xf0, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x21, 0xf9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00,
+        0x00, 0x00, 0x10, 0x00, 0x10, 0x00, 0x00, 0x02, 0x0e, 0x84, 0x8f, 0xa9, 0xcb, 0xed, 0x0f,
+        0xa3, 0x9c, 0xb4, 0xda, 0x8b, 0xb3, 0x3e, 0x05, 0x00, 0x3b,
+    ];
+    let (image_class, cursor_class) = (AnyClass::get("NSImage")?, AnyClass::get("NSCursor")?);
+    // SAFETY: AppKit image and cursor construction on the main thread; every object is retained.
+    unsafe {
+        let image: Option<Retained<NSObject>> = match name {
+            None => {
+                let data: Option<Retained<NSObject>> = msg_send_id![objc2::class!(NSData), dataWithBytes: TRANSPARENT.as_ptr().cast::<std::ffi::c_void>(), length: TRANSPARENT.len()];
+                let image: objc2::rc::Allocated<NSObject> = msg_send_id![image_class, alloc];
+                msg_send_id![image, initWithData: &*data?]
+            }
+            Some(name) => {
+                let path = NSString::from_str(&format!("/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework/Versions/A/Resources/cursors/{name}/cursor.pdf"));
+                let image: objc2::rc::Allocated<NSObject> = msg_send_id![image_class, alloc];
+                msg_send_id![image, initByReferencingFile: &*path]
+            }
+        };
+        let image = image?;
+        let size: NSSize = msg_send![&*image, size];
+        let hot = if name.is_some() { NSPoint::new(size.width / 2.0, size.height / 2.0) } else { NSPoint::new(0.0, 0.0) };
+        let cursor: objc2::rc::Allocated<NSObject> = msg_send_id![cursor_class, alloc];
+        msg_send_id![cursor, initWithImage: &*image, hotSpot: hot]
     }
 }
 
@@ -417,6 +523,7 @@ impl Panel {
         self.pointer.clicks.borrow_mut().clear();
         self.pointer.release_since.set(None);
         self.pointer.recovered_release.set(None);
+        self.set_cursor(None);
         if self.options.prewarm {
             unsafe { self.panel.setAlphaValue(0.0); self.panel.resignKeyWindow(); }
             self.panel.setIgnoresMouseEvents(true);
@@ -469,13 +576,25 @@ impl Panel {
         self.refresh_monitors();
         if self.visible.get() { self.pointer.observe(&self.panel, self.wake.as_ref()); }
     }
+    /// AppKit applies cursor rects (winit's cursor) only in the key window, and an overlay is
+    /// rarely key. While the pointer is over its hit area (`Some`), set the cursor directly and
+    /// again on every mouse event; set the arrow once when it leaves (`None`).
+    pub fn set_cursor(&self, cursor: Option<crate::el::Cursor>) {
+        let was = self.pointer.cursor.replace(cursor);
+        match cursor {
+            Some(cursor) => set_ns_cursor(cursor),
+            None if was.is_some() => set_ns_cursor(crate::el::Cursor::Default),
+            None => {}
+        }
+        if was.is_some() != cursor.is_some() { self.refresh_monitors(); }
+    }
     pub fn set_follow_pointer(&self, follow: bool) { self.follow_pointer.set(follow); self.pointer.follow.set(follow); self.refresh_monitors(); }
     fn refresh_monitors(&self) {
         if !self.visible.get() { return; }
         if self.pointer.input.get() == OverlayInput::Regions {
             if self.pointer_poll.get().is_none() { self.pointer_poll.set(Some(Instant::now())); }
         } else { self.pointer_poll.set(None); }
-        if self.follow_pointer.get() || self.pointer.input.get() == OverlayInput::Regions || self.pointer.captured.get() { self.start_monitors(); }
+        if self.needs_monitors() { self.start_monitors(); }
         else { self.monitors.borrow_mut().take(); }
     }
     pub fn set_regions(&self, regions: &[[f32; 4]]) {
@@ -485,8 +604,13 @@ impl Panel {
         if self.visible.get() { self.pointer.observe(&self.panel, None); }
     }
 
+    fn needs_monitors(&self) -> bool {
+        self.follow_pointer.get() || self.pointer.input.get() == OverlayInput::Regions || self.pointer.captured.get()
+            || self.pointer.cursor.get().is_some()
+    }
+
     fn start_monitors(&self) {
-        if self.monitors.borrow().is_some() || !(self.follow_pointer.get() || self.pointer.input.get() == OverlayInput::Regions || self.pointer.captured.get()) { return; }
+        if self.monitors.borrow().is_some() || !self.needs_monitors() { return; }
         // Monitors wake the loop; position/button state is sampled there. A local down
         // owns its drag until winit has delivered Up, including outside the hit region.
         let movement = (1usize << 5) | (1 << 6) | (1 << 7) | (1 << 27);
@@ -494,11 +618,13 @@ impl Panel {
         let (pointer, panel, wake) = (self.pointer.clone(), self.panel.clone(), self.wake.clone());
         let global = block2::RcBlock::new(move |event: *mut NSEvent| {
             pointer.trace(&panel, "global", unsafe { event.as_ref() });
+            pointer.reapply_cursor(&panel);
             if let Some(wake) = &wake { wake(); }
         });
         let (pointer, panel, wake) = (self.pointer.clone(), self.panel.clone(), self.wake.clone());
         let local = block2::RcBlock::new(move |event: *mut NSEvent| -> *mut NSEvent {
             pointer.trace(&panel, "local", unsafe { event.as_ref() });
+            pointer.reapply_cursor(&panel);
             unsafe {
                 let kind: usize = msg_send![event, type];
                 let window: *mut NSWindow = msg_send![event, window];
