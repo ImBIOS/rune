@@ -28,14 +28,14 @@ impl LoopSpec {
     pub fn cycle(cycle: Cycle) -> Self {
         Self { period: f64::from(cycle.period), delay: 0.0, kind: LoopKind::OpacityCycle(cycle) }
     }
-    pub fn opacity(period: f64, delay: f64, low: f32, high: f32) -> Self {
+    pub const fn opacity(period: f64, delay: f64, low: f32, high: f32) -> Self {
         Self { period, delay, kind: LoopKind::Opacity { low, high } }
     }
-    pub fn rotation(period: f64) -> Self {
+    pub const fn rotation(period: f64) -> Self {
         Self { period, delay: 0.0, kind: LoopKind::Rotation }
     }
     /// Reduced motion holds the sweep's midpoint; removal cools it back to no offset.
-    pub fn slide(period: f64, from: [f32; 2], to: [f32; 2]) -> Self {
+    pub const fn slide(period: f64, from: [f32; 2], to: [f32; 2]) -> Self {
         Self { period, delay: 0.0, kind: LoopKind::Slide { from, to } }
     }
 }
