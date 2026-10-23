@@ -525,6 +525,7 @@ pub(crate) struct Trace {
     ids: HashMap<String, u32>,
     described: HashSet<u32>,
     states: HashMap<u32, ([i64; 6], u32, [i64; 4])>,
+    effects: HashMap<u32, [i64; 2]>,
 }
 
 fn r2(v: f32) -> f64 {
@@ -543,7 +544,7 @@ impl Trace {
             "hz": fps, "scale": scale, "platform": "rune", "units": "pt", "clock": "virtual",
         });
         let _ = writeln!(out, "{header}");
-        Trace { out, ids: HashMap::new(), described: HashSet::new(), states: HashMap::new() }
+        Trace { out, ids: HashMap::new(), described: HashSet::new(), states: HashMap::new(), effects: HashMap::new() }
     }
 
     fn id(&mut self, key: &str) -> u32 {
@@ -556,6 +557,8 @@ impl Trace {
         let settled = rt.settled;
         let mut metas = Vec::new();
         let mut changed = Vec::new();
+        let mut channels = Vec::new();
+        let mut values = Vec::new();
         let mut seen = HashSet::new();
         // A virtual list's invisible estimated extent changes when rows are measured or the
         // window rebases. Record the actual row surfaces, not that bookkeeping rectangle.
@@ -568,6 +571,14 @@ impl Trace {
                     meta["pv"] = self.id(&p.path).into();
                 }
                 metas.push(meta);
+                for (channel, name, unit) in [(id * 2, "scale", "ratio"), (id * 2 + 1, "blur", "pt")] {
+                    channels.push(json!({ "id": channel, "name": format!("{}.{name}", e.path), "kind": "position", "unit": unit, "owner": e.path }));
+                }
+            }
+            let effects = [(e.scale * 10000.0).round() as i64, (e.blur * 1000.0).round() as i64];
+            if self.effects.insert(id, effects) != Some(effects) {
+                values.push(json!([id * 2, effects[0] as f64 / 10000.0]));
+                values.push(json!([id * 2 + 1, effects[1] as f64 / 1000.0]));
             }
             let [x, y, w, h] = e.rect;
             // A settle commit is a deliberate cut (everything lands at once); a growth row reveals
@@ -624,6 +635,7 @@ impl Trace {
         // A settle unmounts what it replaces at once: a cut (transition | opacity) at its last place.
         let mut cuts = Vec::new();
         for id in &gone {
+            self.effects.remove(id);
             if let Some((q, ..)) = self.states.remove(id)
                 && settled
             {
@@ -655,8 +667,11 @@ impl Trace {
             line["e"] = changed.into();
         }
         if !gone.is_empty() {
+            line["cg"] = gone.iter().flat_map(|id| [id * 2, id * 2 + 1]).collect::<Vec<_>>().into();
             line["g"] = gone.into();
         }
+        if !channels.is_empty() { line["cm"] = channels.into(); }
+        if !values.is_empty() { line["c"] = values.into(); }
         if !cuts.is_empty() {
             line["ai"] = cuts.into();
         }
@@ -674,6 +689,8 @@ fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
                 "role": e.role,
                 "rect": e.rect.map(r2),
                 "opacity": (e.opacity * 1000.0).round() / 1000.0,
+                "scale": (e.scale * 10000.0).round() / 10000.0,
+                "blur": r2(e.blur),
                 "focusable": e.focusable, "focused": e.focused,
                 "focusVisible": e.focus_visible, "inert": e.inert,
                 "loopPhase": e.loop_phase,
@@ -1067,6 +1084,46 @@ fn tile_size(w: u32, h: u32, crops: &[[u32; 4]], gap: u32) -> (u32, u32) {
     let cw = crops.iter().map(|c| c[2]).max().unwrap_or(w);
     let ch = crops.iter().map(|c| c[3]).sum::<u32>() + gap * (crops.len() as u32 - 1);
     (cw, ch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tree_and_trace_serialize_effects_and_remove_channels() {
+        fn view(show: &bool, _: &mut Cx<bool>) -> El {
+            crate::el().key("root").size(100.0, 100.0).children(show.then(||
+                crate::el().key("pill").size(40.0, 40.0).opacity(0.5)
+                    .live_scale(&crate::live::Live::new(0.8))
+                    .transition(crate::Transition::blur(4.0))))
+        }
+        let mut rt = Runtime::new(true, view, (100.0, 100.0), Env { scale: 1.0, system_dark: true });
+        rt.frame(0.0);
+        let tree = tree_json(&rt, 0.0);
+        let pill = tree["elements"].as_array().unwrap().iter().find(|e| e["key"] == "pill").unwrap();
+        assert_eq!(pill["opacity"], 0.5);
+        assert!((pill["scale"].as_f64().unwrap() - 0.8).abs() < 1e-6);
+        assert_eq!(pill["blur"], 0.0);
+        let path = std::env::temp_dir().join(format!("rune-effects-{}.jsonl", std::process::id()));
+        {
+            let mut trace = Trace::open(&path, rt.viewport, 60.0, 1.0);
+            trace.frame(&mut rt, 0.0, 0.0);
+            rt.state = false; rt.invalidate(); rt.frame(0.0); rt.frame(0.05);
+            trace.frame(&mut rt, 50.0, 0.0);
+            rt.frame(3.0);
+            trace.frame(&mut rt, 3050.0, 0.0);
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let lines: Vec<Value> = text.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let blur = lines[1]["cm"].as_array().unwrap().iter()
+            .find(|m| m["name"].as_str().unwrap().ends_with("pill.blur")).unwrap()["id"].as_u64().unwrap();
+        let values = lines[2]["c"].as_array().unwrap();
+        assert!(values.iter().any(|v| v[0] == blur && v[1].as_f64().unwrap() > 0.0));
+        assert!(lines[3]["cg"].as_array().unwrap().contains(&json!(blur)));
+        assert_eq!(lines[1]["e"][0].as_array().unwrap().len(), 8, "element row schema stays compatible");
+    }
 }
 
 /// The crops of one frame stacked vertically (the whole frame when there are none).

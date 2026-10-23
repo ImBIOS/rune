@@ -185,6 +185,10 @@ pub struct ElementInfo {
     pub rect: [f32; 4],
     pub target: [f32; 4],
     pub opacity: f32,
+    /// Effective uniform scale, including ancestors and the presence transition.
+    pub scale: f32,
+    /// Effective transition blur in logical points (zero when unblurred).
+    pub blur: f32,
     pub radius: f32,
     pub fill: Color,
     pub text_color: Option<Color>,
@@ -3129,6 +3133,8 @@ impl<S: 'static> Runtime<S> {
                     rect,
                     target: [n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]],
                     opacity: flight.map_or_else(|| self.inh_scratch.get(i).map_or(p.opacity, |h| h.opacity), |f| f.target_alpha),
+                    scale: if flight.is_some() { 1.0 } else { self.inh_scratch.get(i).map_or(p.transform.scale.x, |h| h.scale) },
+                    blur: if flight.is_some() { 0.0 } else { self.inh_scratch.get(i).map_or(p.blur, |h| h.blur) },
                     radius: p.radius.0[0],
                     fill: self.color(n.id, P_FILL, n.vis.fill),
                     text_color: n.text.as_ref().map(|t| t.color).or(n.vis.icon.map(|(_, c)| c)).map(|c| self.color(n.id, P_TEXT, c)),
@@ -3156,7 +3162,7 @@ impl<S: 'static> Runtime<S> {
                 focusable: false, focused: false, focus_visible: false, inert: true,
                 key: Some(path.clone()), path, role: "text", label: None, text: None,
                 rect: [r.x, r.y, r.w, r.h], target: [t.x, t.y, t.w, t.h],
-                opacity: f.source_alpha, radius: 0.0, fill: Color::TRANSPARENT, text_color: None,
+                opacity: f.source_alpha, scale: 1.0, blur: 0.0, radius: 0.0, fill: Color::TRANSPARENT, text_color: None,
                 hover: 0.0, press: 0.0, moving: true, parent: None,
                 visible: [r.x.max(c[0]), r.y.max(c[1]), (r.edges()[2].min(c[2]) - r.x.max(c[0])).max(0.0),
                     (r.edges()[3].min(c[3]) - r.y.max(c[1])).max(0.0)],
@@ -3604,6 +3610,27 @@ mod tests {
         assert!((opacity(&fast) - opacity(&slow)).abs() < 1e-6);
     }
 
+    #[test]
+    fn element_effects_include_ancestor_opacity_scale_and_exit_blur() {
+        fn view(show: &bool, _: &mut Cx<bool>) -> El {
+            col().size(200.0, 100.0).children(show.then(|| el().key("parent").size(100.0, 60.0)
+                .opacity(0.5).live_scale(&crate::live::Live::new(0.8)).transition(Transition::blur(4.0))
+                .child(el().key("child").size(20.0, 20.0).opacity(0.5).live_scale(&crate::live::Live::new(0.5)))))
+        }
+        let mut rt = Runtime::new(true, view, (200.0, 100.0), Env { scale: 2.0, system_dark: true });
+        rt.frame(0.0);
+        let child = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("child")).unwrap();
+        assert!((child.opacity - 0.25).abs() < 1e-6);
+        assert!((child.scale - 0.4).abs() < 1e-6);
+        assert_eq!(child.blur, 0.0);
+        rt.state = false; rt.invalidate(); rt.frame(0.0); rt.frame(0.05);
+        let elements = rt.elements();
+        let parent = elements.iter().find(|e| e.key.as_deref() == Some("parent")).unwrap();
+        let child = elements.iter().find(|e| e.key.as_deref() == Some("child")).unwrap();
+        assert!(parent.blur > 0.0);
+        assert_eq!(child.blur, parent.blur);
+        assert!((child.opacity - parent.opacity * 0.5).abs() < 1e-6);
+    }
 
     fn duplicate_view(_: &(), _: &mut Cx<()>) -> El {
         col().children([el().key("card"), el().key("card")])
