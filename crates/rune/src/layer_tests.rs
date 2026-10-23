@@ -1,7 +1,7 @@
 use super::*;
 use crate::{Color, Cx, El, Env, Live, Runtime, el};
 
-fn rect(bounds: [f32; 4], color: [f32; 4]) -> Instance {
+pub(super) fn rect(bounds: [f32; 4], color: [f32; 4]) -> Instance {
     Instance { rect: bounds, fill: color, clip: NO_CLIP, params: [0.0, KIND_RECT, 0.0, 1.0], ..Instance::zeroed() }
 }
 
@@ -11,7 +11,7 @@ fn group(bounds: [f32; 4], opacity: f32, color: [f32; 4]) -> Vec<Instance> {
         Instance::end_layer()]
 }
 
-fn pixels(gpu: &Gpu, renderer: &Renderer, target: &Offscreen) -> Vec<u8> {
+pub(super) fn pixels(gpu: &Gpu, renderer: &Renderer, target: &Offscreen) -> Vec<u8> {
     let mut enc = gpu.device.create_command_encoder(&Default::default());
     renderer.draw(&mut enc, &target.view, [0.0; 4]);
     target.copy(&mut enc);
@@ -19,7 +19,7 @@ fn pixels(gpu: &Gpu, renderer: &Renderer, target: &Offscreen) -> Vec<u8> {
     target.read(&gpu.device)
 }
 
-fn rgba(linear: [f32; 4]) -> [u8; 4] {
+pub(super) fn rgba(linear: [f32; 4]) -> [u8; 4] {
     std::array::from_fn(|i| {
         let v = linear[i];
         let v = if i == 3 { v } else if v <= 0.0031308 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
@@ -27,7 +27,7 @@ fn rgba(linear: [f32; 4]) -> [u8; 4] {
     })
 }
 
-fn near(got: &[u8], want: [u8; 4]) {
+pub(super) fn near(got: &[u8], want: [u8; 4]) {
     assert!(got.iter().zip(want).all(|(&a,b)| a.abs_diff(b) <= 1), "{got:?} != {want:?}");
 }
 
@@ -157,7 +157,7 @@ fn dissolve_keeps_opaque_coverage_and_isolates_each_state() {
     near(&out[(8*32+16)*4..(8*32+17)*4], [191,0,0,191]);
     // Saturate colour as well as alpha, before either the dissolve or enclosing group's fade.
     let nested = [Instance::begin_layer(bounds, NO_CLIP, LayerSpec { opacity: 0.5, ..Default::default() }),
-        Instance::begin_layer(bounds, NO_CLIP, LayerSpec { opacity: 0.5, blend: Blend::PlusLighter }),
+        Instance::begin_layer(bounds, NO_CLIP, LayerSpec { opacity: 0.5, blend: Blend::PlusLighter, ..Default::default() }),
         rect(bounds, [1.0; 4]), rect(bounds, [1.0; 4]), Instance::end_layer(), Instance::end_layer()];
     renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &nested, (32, 16));
     let out = pixels(&gpu, &renderer, &target);
@@ -174,7 +174,7 @@ fn dissolve_adds_direct_primitives_and_native_surfaces_then_clamps_before_opacit
     let mut atlas = crate::text::TextSystem::default().atlas;
     let bounds = [4.0, 4.0, 24.0, 8.0];
     let content = [rect([0.0, 0.0, 32.0, 16.0], [0.0, 1.0, 0.0, 1.0]),
-        Instance::begin_layer(bounds, NO_CLIP, LayerSpec { opacity: 0.5, blend: Blend::PlusLighter }),
+        Instance::begin_layer(bounds, NO_CLIP, LayerSpec { opacity: 0.5, blend: Blend::PlusLighter, ..Default::default() }),
         rect(bounds, [1.0, 0.0, 0.0, 1.0]), Instance::end_layer()];
     renderer.prepare(&gpu.device, &gpu.queue, &mut atlas, &content, (32, 16));
     let surface = NativeSurface::new();

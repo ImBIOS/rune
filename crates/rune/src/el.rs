@@ -361,6 +361,8 @@ pub struct Visual {
     pub border: Color,
     pub shadows: Vec<Shadow>,
     pub opacity: f32,
+    pub blur: f32,
+    pub blur_motion: Option<Anim>,
     /// Static alpha of this element's own paint; never inherited or isolated.
     pub paint_alpha: f32,
     pub blend: crate::render::Blend,
@@ -400,6 +402,8 @@ impl Default for Visual {
             border: Color::TRANSPARENT,
             shadows: Vec::new(),
             opacity: 1.0,
+            blur: 0.0,
+            blur_motion: None,
             paint_alpha: 1.0,
             blend: crate::render::Blend::SourceOver,
             hover: Color::TRANSPARENT,
@@ -671,6 +675,12 @@ impl El {
     /// Bind opacity directly to a latest-wins value, without rebuilding or laying out the view.
     pub fn live_opacity(mut self, value: impl Into<crate::live::Binding<f32>>) -> Self {
         self.bind_live(crate::live::Bound::new(value, crate::live::Property::Opacity)); self
+    }
+
+    /// Bind a subtree's Gaussian blur (sigma in points), optionally smoothed with `Live::smooth`.
+    pub fn live_blur(mut self, value: impl Into<crate::live::Binding<f32>>) -> Self {
+        self.bind_live(crate::live::Bound::new(value, crate::live::Property::Blur));
+        self
     }
     /// Bind an additive parent-space offset in points. Descendants and hit tests follow it.
     pub fn live_offset(mut self, value: impl Into<crate::live::Binding<[f32; 2]>>) -> Self {
@@ -1153,6 +1163,17 @@ impl El {
     }
     pub fn opacity(mut self, o: f32) -> Self {
         self.vis.opacity = o;
+        self
+    }
+    /// Gaussian blur of the completed subtree, in points (standard deviation). Zero has no
+    /// filter cost. The renderer caps sigma at 64 device pixels; bounds grow by three sigma.
+    pub fn blur(mut self, sigma: f32) -> Self {
+        self.vis.blur = sigma.max(0.0);
+        self
+    }
+    /// Override the blur target's curve. Ordinary changes use the element's motion spring.
+    pub fn blur_motion(mut self, anim: impl Into<Anim>) -> Self {
+        self.vis.blur_motion = Some(anim.into());
         self
     }
     /// Dim each paint leaf in the currently built subtree, independently. Unlike `opacity`,

@@ -7,6 +7,8 @@ use crate::text::{ATLAS_SIZE, Atlas};
 
 #[path = "layers.rs"]
 mod layers;
+#[path = "layer_blur.rs"]
+mod layer_blur;
 pub use layers::LayerStats;
 
 pub const KIND_RECT: f32 = 0.0;
@@ -58,10 +60,15 @@ impl Blend {
 pub struct LayerSpec {
     pub opacity: f32,
     pub blend: Blend,
+    /// Gaussian standard deviation in device pixels, clamped to 64. Zero bypasses filtering.
+    pub blur: f32,
+    /// Radius of the rounded `clip` rectangle, in device pixels; zero is rectangular.
+    /// Applied to the completed layer after filtering. The caller supplies finite clip edges.
+    pub clip_radius: f32,
 }
 
 impl Default for LayerSpec {
-    fn default() -> Self { Self { opacity: 1.0, blend: Blend::SourceOver } }
+    fn default() -> Self { Self { opacity: 1.0, blend: Blend::SourceOver, blur: 0.0, clip_radius: 0.0 } }
 }
 
 /// One instance, in device pixels.
@@ -111,7 +118,10 @@ impl Instance {
     /// native surfaces. Primitive bounds (including shadow support) expand it during prepare.
     pub fn begin_layer(bounds: [f32; 4], clip: [f32; 4], spec: LayerSpec) -> Self {
         Self { rect: bounds, clip, fill: [0.0, 0.0, 0.0, spec.opacity.clamp(0.0, 1.0)],
-            params: [if spec.blend == Blend::PlusLighter { 1.0 } else { 0.0 }, KIND_LAYER, 0.0, 0.0], ..Self::zeroed() }
+            radii: [spec.clip_radius.max(0.0).min(((clip[2] - clip[0]).min(clip[3] - clip[1]) * 0.5).max(0.0)); 4],
+            uv: clip,
+            params: [if spec.blend == Blend::PlusLighter { 1.0 } else { 0.0 }, KIND_LAYER,
+                layer_blur::sigma(spec.blur), 0.0], ..Self::zeroed() }
     }
 
     pub fn end_layer() -> Self {
@@ -124,7 +134,7 @@ impl Instance {
 pub(crate) fn end_layer(instances: &mut Vec<Instance>, surfaces: &mut [crate::native_surface::SurfaceDraw], marks: &mut Vec<u32>, start: usize, surface_start: usize) {
     let primitives = instances.len() - start - 1;
     let videos = surfaces.len() - surface_start;
-    if primitives + videos <= 1 && instances[start].params[0] == 0.0 {
+    if primitives + videos <= 1 && instances[start].params[0] == 0.0 && instances[start].params[2] == 0.0 && instances[start].radii[0] == 0.0 {
         let opacity = instances[start].fill[3];
         if primitives == 1 {
             let i = &mut instances[start + 1];

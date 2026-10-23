@@ -30,7 +30,14 @@ pub struct Theme {
     numbers: HashMap<String, f32>,
 }
 
-/// The linear-light alpha that makes `c` over `bg` match sRGB-space blending.
+/// Compensate a translucent colour authored for sRGB blending, for a known opaque backdrop.
+/// Input/output RGB remain linear and unchanged; only alpha is re-solved. Neutral foreground
+/// and background pairs match sRGB source-over exactly (apart from output quantization).
+/// Chromatic pairs use a luminance-weighted least-squares fit: one alpha cannot generally
+/// match three channels. `bg.a` must be 1; HDR, translucent/unknown backdrops, overlapping
+/// paints and group fades are not equivalent. Recompute from the *current authored alpha*
+/// during animation: multiplying the solved alpha afterwards is not the same operation.
+/// This is a CPU colour helper, with no extra GPU resources or passes.
 pub fn srgb_equivalent(c: Color, bg: Color) -> Color {
     if c.a >= 0.999 || c.a <= 0.0 {
         return c;

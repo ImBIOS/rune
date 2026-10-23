@@ -166,7 +166,7 @@ impl<T: LiveValue> From<&Live<T>> for Binding<T> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Property { Opacity, Offset, Scale, Fill, Rect }
+pub(crate) enum Property { Opacity, Offset, Scale, Fill, Rect, Blur }
 pub(crate) struct Bound {
     pub source: Arc<Source>,
     pub property: Property,

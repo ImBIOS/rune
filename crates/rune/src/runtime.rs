@@ -755,6 +755,7 @@ impl<S: 'static> Runtime<S> {
                 }
                 match bound.property {
                     Property::Opacity => apply(&mut self.scene, node.id, prop::OPACITY, f32::decode(bits).clamp(0.0, 1.0), spring),
+                    Property::Blur => apply(&mut self.scene, node.id, prop::BLUR, f32::decode(bits).max(0.0), spring),
                     Property::Scale => apply(&mut self.scene, node.id, prop::SCALE, f32::decode(bits).max(0.0), spring),
                     Property::Offset => {
                         let [x, y] = <[f32; 2]>::decode(bits);
@@ -2074,6 +2075,13 @@ impl<S: 'static> Runtime<S> {
                 }
             }
             let vis = &nodes[i].vis;
+            if !nodes[i].live.iter().any(|b| b.property == crate::live::Property::Blur)
+                && (vis.blur != 0.0 || self.scene.store().has(id, prop::BLUR))
+            {
+                if !instant && was_present && let Some(anim) = vis.blur_motion {
+                    self.scene.animate(id, prop::BLUR, vis.blur, anim);
+                } else { self.set_or_anim(id, prop::BLUR, vis.blur, spring_l, instant || !was_present); }
+            }
             if !nodes[i].live.iter().any(|b| b.property == crate::live::Property::Fill) {
                 self.set_or_anim(id, P_FILL, vis.fill, spring_c, instant);
             }
@@ -2801,7 +2809,7 @@ impl<S: 'static> Runtime<S> {
             let n = &self.nodes[pair[0]];
             self.nodes[pair[1]].parent == Some(pair[0]) && (n.vis.blend == crate::render::Blend::PlusLighter || n.vis.group_opacity.is_some()
                 || matches!(n.looping, Some(rune_motion::LoopSpec { kind: rune_motion::LoopKind::Opacity { .. } | rune_motion::LoopKind::OpacityCycle(_), .. }))
-                || self.scene.presented(n.id).is_some_and(|p| p.opacity > 0.0 && p.opacity < 1.0))
+                || self.scene.presented(n.id).is_some_and(|p| (p.opacity > 0.0 && p.opacity < 1.0) || p.blur > 0.0))
         });
         for paint_index in 0..n_nodes {
             let i = if tree_order { self.layer_paint_order[paint_index] } else { paint_index };
@@ -2834,7 +2842,7 @@ impl<S: 'static> Runtime<S> {
             let effective_opacity = (own * pinh.opacity).clamp(0.0, 1.0);
             let next = if tree_order { self.layer_paint_order.get(paint_index + 1).copied() } else { (i + 1 < n_nodes).then_some(i + 1) };
             let additive_parent = n.parent.is_some_and(|p| self.nodes[p].vis.blend == crate::render::Blend::PlusLighter);
-            let isolate = effective_opacity > 0.001 && (n.vis.blend == crate::render::Blend::PlusLighter
+            let isolate = effective_opacity > 0.001 && (p.blur > 0.0 || n.vis.blend == crate::render::Blend::PlusLighter
                 || additive_parent || (own > 0.001 && own < 1.0
                     && next.is_some_and(|j| self.nodes[j].parent == Some(i))));
             let o = if isolate { 1.0 } else { (own * pinh.paint_opacity).clamp(0.0, 1.0) };
@@ -2848,7 +2856,8 @@ impl<S: 'static> Runtime<S> {
             } else {
                 (pinh.scale, pinh.anchor)
             };
-            let blur = pinh.blur.max(p.blur);
+            let blur = pinh.blur + p.blur * sc;
+            let filter_margin = blur * s * 3.0;
 
             let mut raw_edges = p.rect.edges();
             raw_edges[1] += pinh.dy;
@@ -2890,18 +2899,18 @@ impl<S: 'static> Runtime<S> {
                 ];
                 inherit_fade(&mut fade, &mut fade_origin, [r[0] + ins[0], r[1] + ins[1], r[2] - ins[2], r[3] - ins[3]], fea);
             }
-            let visible = r[2] >= clip[0].max(vp[0]) - 2.0
-                && r[0] <= clip[2].min(vp[2]) + 2.0
-                && r[3] >= clip[1].max(vp[1]) - 2.0
-                && r[1] <= clip[3].min(vp[3]) + 2.0;
+            let visible = r[2] >= clip[0].max(vp[0] - filter_margin) - 2.0
+                && r[0] <= clip[2].min(vp[2] + filter_margin) + 2.0
+                && r[3] >= clip[1].max(vp[1] - filter_margin) - 2.0
+                && r[1] <= clip[3].min(vp[3] + filter_margin) + 2.0;
             let text_tint = |c: Color| match n.vis.group_color {
                 Some(g) if pinh.group > 0.0 => c.mix(g, pinh.group),
                 _ => c,
             };
 
             if self.surface_visible && base_opacity > 0.001 && !self.reduced_motion
-                && r[2] > clip[0].max(vp[0]) && r[0] < clip[2].min(vp[2])
-                && r[3] > clip[1].max(vp[1]) && r[1] < clip[3].min(vp[3])
+                && r[2] > clip[0].max(vp[0] - filter_margin) && r[0] < clip[2].min(vp[2] + filter_margin)
+                && r[3] > clip[1].max(vp[1] - filter_margin) && r[1] < clip[3].min(vp[3] + filter_margin)
                 && let Some(track) = self.loops.get(&n.id)
             {
                 if let Some(dt) = track.frame_interval().filter(|_| track.active(now)) {
@@ -2921,7 +2930,7 @@ impl<S: 'static> Runtime<S> {
             if isolate {
                 layers.push((i, self.instances.len(), self.surfaces.len()));
                 self.instances.push(Instance::begin_layer([r[0], r[1], w, h], clip,
-                    crate::render::LayerSpec { opacity: own * pinh.paint_opacity, blend: n.vis.blend }));
+                    crate::render::LayerSpec { opacity: own * pinh.paint_opacity, blend: n.vis.blend, blur: p.blur * sc * s, ..Default::default() }));
             }
             // Include native surface geometry, which lives beside the primitive stream.
             if n.vis.surface.is_some() {
@@ -2946,6 +2955,8 @@ impl<S: 'static> Runtime<S> {
                 // Disabled styling is distributed to each authored paint leaf at build time.
                 // Keep this local to emission: it neither propagates to children nor opens scopes.
                 let o = o * n.vis.paint_alpha;
+                // Subtree blur runs once after rasterization, never on each primitive as well.
+                let blur = 0.0;
                 let k_px = sc * s;
                 for (k, sh) in n.vis.shadows.iter().enumerate() {
                     let c = if k < P_SHADOWS.len() { self.color(n.id, P_SHADOWS[k], sh.color) } else { sh.color };
@@ -3350,7 +3361,7 @@ impl<S: 'static> Runtime<S> {
                 crate::live::Property::Offset => 1,
                 crate::live::Property::Scale | crate::live::Property::Rect => 1 | 2,
                 crate::live::Property::Opacity => 4,
-                crate::live::Property::Fill => 0,
+                crate::live::Property::Fill | crate::live::Property::Blur => 0,
             })
         }
         let store = self.scene.store();
@@ -3402,7 +3413,7 @@ impl<S: 'static> Runtime<S> {
                                 crate::live::Property::Offset => 1,
                                 crate::live::Property::Scale | crate::live::Property::Rect => 1 | 2,
                                 crate::live::Property::Opacity => 4,
-                                crate::live::Property::Fill => 0,
+                                crate::live::Property::Fill | crate::live::Property::Blur => 0,
                             };
                         }
                     }

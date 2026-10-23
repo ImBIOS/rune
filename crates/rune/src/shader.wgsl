@@ -273,9 +273,16 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         let p = i.pos.xy + projection.xy - i.rect.xy;
         if (any(p < vec2<f32>(0.0)) || any(p >= i.rect.zw)) { discard; }
         let color = textureLoad(images, vec2<i32>(floor(p)), 0);
+        var mask = 1.0;
+        if (i.radii.x > 0.0) {
+            let half = (i.uv.zw - i.uv.xy) * 0.5;
+            let d = sd_rounded(i.pos.xy + projection.xy - i.uv.xy - half, half, i.radii);
+            mask = clamp(0.5 - d, 0.0, 1.0);
+        }
         // Float intermediates accumulate One/One without saturation. Clamp before applying
         // this scope's opacity so nesting preserves plus-lighter's bounded coverage.
-        return select(color, clamp(color, vec4(0.0), vec4(1.0)), i.params.x == 1.0) * i.fill.a;
+        return select(color, clamp(color, vec4(0.0), vec4(1.0)), i.params.x == 1.0) * i.fill.a
+            * clip_alpha(i.pos.xy + projection.xy, i.clip, i.fade) * mask;
     }
     let kind = i.params.y;
     let half = i.rect.zw * 0.5;

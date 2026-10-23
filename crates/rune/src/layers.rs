@@ -10,6 +10,12 @@ pub(super) const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 #[cfg(test)]
 #[path = "layer_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "layer_filter_tests.rs"]
+mod filter_tests;
+#[cfg(test)]
+#[path = "srgb_blend_tests.rs"]
+mod srgb_tests;
 
 #[derive(Default)]
 pub(super) struct Layers {
@@ -18,6 +24,7 @@ pub(super) struct Layers {
     stack: Vec<usize>,
     pipelines: Vec<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
     pub additive: Option<(wgpu::RenderPipeline, wgpu::RenderPipeline)>,
+    blur: Option<layer_blur::Pipeline>,
     viewport: (u32, u32),
     image_generation: u64,
     allocations: u64,
@@ -31,6 +38,10 @@ struct Layer {
     clip: [f32; 4],
     opacity: f32,
     blend: Blend,
+    blur: f32,
+    support: f32,
+    mask: [f32; 4],
+    clip_radius: f32,
 }
 
 pub(super) struct Target {
@@ -44,6 +55,7 @@ pub(super) struct Target {
     pub base: wgpu::BindGroup,
     pub images: Vec<Option<wgpu::BindGroup>>,
     image_generation: u64,
+    blur: Option<layer_blur::Scratch>,
 }
 
 /// Resource/pass counters for diagnostics. The ordinary path creates no layer resources.
@@ -68,8 +80,12 @@ impl Renderer {
             stats.targets += 1;
             stats.bytes += u64::from(t.texture.width()) * u64::from(t.texture.height())
                 * u64::from(FORMAT.block_copy_size(None).unwrap());
+            if let Some(blur) = &t.blur {
+                stats.bytes += blur.bytes();
+                stats.extra_passes += blur.passes();
+            }
         }
-        stats.extra_passes = stats.targets;
+        stats.extra_passes += stats.targets;
         stats
     }
 
@@ -82,26 +98,32 @@ impl Renderer {
             if i.params[1] == KIND_LAYER {
                 let parent = self.layers.stack.last().copied();
                 let hidden = parent.is_some_and(|p| self.layers.plan[p].opacity == 0.0);
-                let clip = parent.map_or(i.clip, |p| {
-                    let c = self.layers.plan[p].clip;
-                    [i.clip[0].max(c[0]), i.clip[1].max(c[1]), i.clip[2].min(c[2]), i.clip[3].min(c[3])]
-                });
+                // Each scope clips its completed output. Pushing a parent's clip into a
+                // child would crop source pixels before the parent's convolution.
+                let clip = i.clip;
                 self.layers.stack.push(self.layers.plan.len());
                 self.layers.plan.push(Layer {
                     begin: index as u32, end: 0, parent,
                     bounds: [i.rect[0], i.rect[1], i.rect[0] + i.rect[2], i.rect[1] + i.rect[3]],
                     clip,
+                    mask: i.uv,
+                    clip_radius: i.radii[0],
                     opacity: if hidden { 0.0 } else { i.fill[3].clamp(0.0, 1.0) },
                     blend: if i.params[0] == 1.0 { Blend::PlusLighter } else { Blend::SourceOver },
+                    blur: layer_blur::sigma(i.params[2]),
+                    support: parent.map_or(0.0, |p| self.layers.plan[p].support) + (3.0 * layer_blur::sigma(i.params[2])).ceil(),
                 });
             } else if i.params[1] == KIND_LAYER_END {
                 let at = self.layers.stack.pop().expect("unbalanced layer end");
                 let l = &mut self.layers.plan[at];
                 l.end = index as u32;
-                l.bounds = [l.bounds[0].max(l.clip[0]).max(0.0).floor(),
-                    l.bounds[1].max(l.clip[1]).max(0.0).floor(),
-                    l.bounds[2].min(l.clip[2]).min(viewport.0 as f32).ceil(),
-                    l.bounds[3].min(l.clip[3]).min(viewport.1 as f32).ceil()];
+                let grow = (3.0 * l.blur).ceil();
+                // Retain off-viewport sources that can contribute through this or an ancestor's
+                // filter. Clipping to the destination viewport before filtering loses those taps.
+                l.bounds = [(l.bounds[0] - grow).max(l.clip[0] - grow).max(-l.support).floor(),
+                    (l.bounds[1] - grow).max(l.clip[1] - grow).max(-l.support).floor(),
+                    (l.bounds[2] + grow).min(l.clip[2] + grow).min(viewport.0 as f32 + l.support).ceil(),
+                    (l.bounds[3] + grow).min(l.clip[3] + grow).min(viewport.1 as f32 + l.support).ceil()];
                 let bounds = l.bounds;
                 if let Some(parent) = l.parent { union(&mut self.layers.plan[parent].bounds, bounds); }
             } else if let Some(&at) = self.layers.stack.last() {
@@ -133,7 +155,8 @@ impl Renderer {
             l.bounds[2] = (l.bounds[2] - l.bounds[0]).max(0.0);
             l.bounds[3] = (l.bounds[3] - l.bounds[1]).max(0.0);
             if l.bounds[2] == 0.0 || l.bounds[3] == 0.0 { l.opacity = 0.0; }
-            if l.opacity == 0.0 || (l.opacity == 1.0 && l.blend == Blend::SourceOver && !additive_parent) {
+            if l.opacity == 0.0 || (l.opacity == 1.0 && l.blend == Blend::SourceOver && !additive_parent
+                && l.blur == 0.0 && l.clip_radius == 0.0 && l.clip == NO_CLIP) {
                 self.layers.targets[index] = None;
                 continue;
             }
@@ -163,15 +186,29 @@ impl Renderer {
                 let composite = Self::bind_group(device, &self.bind_layout, &self.globals, &self.atlas, &texture, None);
                 self.layers.targets[index] = Some(Target { texture, view, projection,
                     identity: self.layers.allocations + 1, composite_parent: None,
-                    quad: Self::instance_buffer(device, 1), base, composite, images: Vec::new(), image_generation: u64::MAX });
+                    quad: Self::instance_buffer(device, 1), base, composite, images: Vec::new(), image_generation: u64::MAX, blur: None });
                 self.layers.allocations += 1;
             }
-            let t = self.layers.targets[index].as_ref().unwrap();
+            let sigma = self.layers.plan[index].blur;
+            if sigma > 0.0 && self.layers.blur.is_none() { self.layers.blur = Some(layer_blur::Pipeline::new(device)); }
+            let t = self.layers.targets[index].as_mut().unwrap();
+            if sigma > 0.0 {
+                if t.blur.is_none() {
+                    t.blur = Some(self.layers.blur.as_ref().unwrap().scratch(device, &t.texture));
+                    self.layers.allocations += 1;
+                }
+                if t.blur.as_mut().unwrap().prepare(device, self.layers.blur.as_ref().unwrap(), queue,
+                    [bounds[2], bounds[3]], sigma, self.layers.plan[index].blend == Blend::PlusLighter) {
+                    self.layers.allocations += 1;
+                }
+            } else { t.blur = None; }
             queue.write_buffer(&t.projection, 0, bytemuck::cast_slice(&bounds));
-            // Contents already carry packed clip fades. Composite with zero fade words so
-            // those ramps are applied exactly once; word 3 stays reserved for clip radius.
-            let quad = Instance::begin_layer(bounds, NO_CLIP, LayerSpec {
-                opacity: self.layers.plan[index].opacity, blend: self.layers.plan[index].blend });
+            let l = &self.layers.plan[index];
+            let mut quad = Instance::begin_layer(bounds, l.clip, LayerSpec {
+                opacity: l.opacity, blend: l.blend, clip_radius: l.clip_radius, ..Default::default() });
+            // Keep the original rounded rectangle when intersecting rectangular ancestor clips.
+            quad.uv = l.mask;
+            quad.radii = [l.clip_radius; 4];
             queue.write_buffer(&t.quad, 0, bytemuck::bytes_of(&quad));
         }
         // Rebind child composites to their nearest materialized parent (opaque scopes flatten).
@@ -273,6 +310,10 @@ impl Renderer {
             first = false;
             pass.set_viewport(0.0, 0.0, l.bounds[2], l.bounds[3], 0.0, 1.0);
             self.draw_layer_range(&mut pass, FORMAT, l.begin + 1..l.end, Some(index));
+            drop(pass);
+            if let Some(blur) = &target.blur {
+                self.layers.blur.as_ref().unwrap().encode(encoder, blur, &target.view);
+            }
         }
     }
 
