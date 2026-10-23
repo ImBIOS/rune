@@ -414,6 +414,10 @@ impl<S> Shared<S> {
     pub fn take(&self) -> Requests<S> {
         std::mem::take(&mut self.requests.lock().unwrap())
     }
+
+    pub fn take_place(&self) -> Option<crate::windows::PlaceRequest> {
+        self.requests.lock().unwrap().place.take()
+    }
 }
 
 #[cfg(test)]

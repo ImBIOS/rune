@@ -848,16 +848,17 @@ fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, tran
             }
         }
         let requests = shared.take();
-        if let Some(place) = requests.place {
-            let record = desktop.placed_json(&place, size, real_t);
-            println!("rune-placed {record}");
-            placed = Some(record);
-        }
         for f in requests.updates {
             rt.update(f);
         }
         let step = if k == 0 { 0.0 } else { dt };
         let mut animating = rt.frame(step);
+        // Updates, poll and input handlers place too; the latest request this frame wins.
+        if let Some(place) = shared.take_place().or(requests.place) {
+            let record = desktop.placed_json(&place, size, real_t);
+            println!("rune-placed {record}");
+            placed = Some(record);
+        }
         let update_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
         renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
         renderer.prepare_surfaces(&gpu.device, &gpu.queue, &rt.surfaces, (wp, hp));
