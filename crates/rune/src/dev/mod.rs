@@ -39,7 +39,7 @@ pub struct Config<S: 'static> {
 
 impl<S> Default for Config<S> {
     fn default() -> Self {
-        Self { bind: SocketAddr::from(([127, 0, 0, 1], 4793)), transitions: Vec::new(), motion_blur: false }
+        Self { bind: SocketAddr::from(([127, 0, 0, 1], 7863)), transitions: Vec::new(), motion_blur: false }
     }
 }
 

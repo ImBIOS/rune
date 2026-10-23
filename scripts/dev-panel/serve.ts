@@ -2,8 +2,8 @@
 // Socket/page glue only. Every control and the page itself belong to @kitlangton/knobs.
 import { resolve } from "node:path"
 
-const port = Number(process.env.PORT ?? 4794)
-const upstream = process.env.RUNE_DEV_WS ?? "ws://127.0.0.1:4793"
+const port = Number(process.env.PORT ?? 7862)
+const upstream = process.env.RUNE_DEV_WS ?? "ws://127.0.0.1:7863"
 const bundle = await Bun.build({
   entrypoints: [resolve(import.meta.dir, "index.ts")],
   target: "browser",

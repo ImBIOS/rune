@@ -1,7 +1,7 @@
 # Rune dev panel
 
 Build `rune-dev-panel` with `--features dev` on a build worker, then run the
-binary on the app host. It announces `ws://127.0.0.1:4793`.
+binary on the app host. It announces `ws://127.0.0.1:7863`.
 `--windowless` keeps a live runtime for protocol work without opening a window.
 
 ```sh
@@ -9,7 +9,7 @@ binary on the app host. It announces `ws://127.0.0.1:4793`.
 bun scripts/dev-panel/serve.ts
 ```
 
-Open `http://127.0.0.1:4794`. The page is knobs' own `mountPage`, pinned to
+Open `http://127.0.0.1:7862`. The page is knobs' own `mountPage`, pinned to
 `@kitlangton/knobs@0.4.0-next.20`. Every Copy action (header, group, row) emits
 `rune::tune!` lines through knobs' `formatRust`; playback and scene controls
 are left out. Rune contains no panel implementation.

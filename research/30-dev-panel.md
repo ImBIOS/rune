@@ -58,8 +58,11 @@ Selecting a new state cancels an outstanding replay.
 
 ## Wire protocol and UI
 
-Rune owns a loopback WebSocket listener, default port 4793 (port 0 announces a
-free port). Explicit Tailscale IP binding is allowed; wildcard/public binding
+Rune owns a loopback WebSocket listener, default port 7863 ("RUNE" on a phone
+keypad, clear of motion-lint, knobs, HiveMind and Nexus; port 0 announces a
+free port). A busy port moves on to the next 15 and, past those, leaves the app
+running without a panel. Headless runs (`--snap`, `--tree`, scripts) open it
+only with `RUNE_DEV_PANEL=1`. Explicit Tailscale IP binding is allowed; wildcard/public binding
 is rejected. The listener exists only inside an opted-in debug runtime, with
 bounded messages/queues and owned shutdown. Socket threads enqueue commands
 and wake the app; model/view mutation stays on the app thread.
