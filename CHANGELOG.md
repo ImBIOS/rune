@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Command chords don't type, and single-line fields stay on one line.** Text typed with Cmd
+  (macOS) or Ctrl held, such as Shift-Cmd-Space, no longer inserts into any field; it goes on to
+  the app's `on_key` instead. Ctrl+Alt (AltGr) still types on Windows and Linux, and Option still
+  types on macOS. Secure and `single_line()` fields drop control characters from typing, paste and
+  IME commits: pasted line breaks and tabs are stripped, like `<input type=text>`, and
+  Shift/Option-Enter submits instead of inserting a newline. Multi-line fields are unchanged.
 - **RollingText sets like one text.** Each rolling glyph sits at its advance in the whole label
   shaped once, with kerning and contextual forms, where each used to round up to a device pixel
   on its own. Rolled labels get narrower and tighter (IBM Plex Mono 11 pt "Copy password": 91 →

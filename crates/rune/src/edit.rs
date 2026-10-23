@@ -25,6 +25,8 @@ pub struct TextEdit {
     pub focused: bool,
     history: Arc<History>,
     secure: bool,
+    /// Mirrors the field's `El::single_line()`; the runtime sets it before each edit.
+    single_line: bool,
 }
 
 impl std::fmt::Debug for TextEdit {
@@ -108,6 +110,16 @@ pub struct KeyEvent {
     pub mods: Mods,
 }
 
+impl KeyEvent {
+    /// Text typed with Cmd (macOS) or Ctrl held, such as an unclaimed Shift-Cmd-Space. It never
+    /// inserts, matching browsers and AppKit, but still reaches key handlers. Ctrl+Alt is AltGr
+    /// on Windows and Linux, so text typed with both still inserts there; Option alone types.
+    pub(crate) fn is_command_chord(&self) -> bool {
+        let m = self.mods;
+        matches!(self.key, Key::Text(_)) && (m.cmd || m.ctrl) && (cfg!(target_os = "macos") || !m.alt)
+    }
+}
+
 impl Drop for KeyEvent {
     fn drop(&mut self) {
         if let Key::Text(text) = &mut self.key { text.zeroize(); }
@@ -174,7 +186,7 @@ impl TextEdit {
     pub fn new(text: impl Into<String>) -> TextEdit {
         let text = text.into();
         let n = text.len();
-        TextEdit { text, anchor: n, focus: n, preedit: None, focused: false, history: Arc::default(), secure: false }
+        TextEdit { text, anchor: n, focus: n, preedit: None, focused: false, history: Arc::default(), secure: false, single_line: false }
     }
 
     /// Password editing: masked display, no undo, copy, cut or IME. All model buffers are
@@ -276,6 +288,26 @@ impl TextEdit {
         self.replace(self.range(), s, false);
     }
 
+    pub(crate) fn set_single_line(&mut self, single_line: bool) { self.single_line = single_line; }
+
+    /// Text typed, pasted or committed into this field. Secure and single-line fields drop
+    /// control characters, line breaks included (stripped, as `<input type=text>` does);
+    /// multi-line fields only fold CRLF to LF. Sized up front so no partial copy of a secret
+    /// is left behind by a reallocation.
+    fn sanitize(&self, s: &str) -> Zeroizing<String> {
+        let mut out = Zeroizing::new(String::with_capacity(s.len()));
+        if self.secure || self.single_line {
+            out.extend(s.chars().filter(|c| !c.is_control() && !matches!(c, '\u{2028}' | '\u{2029}')));
+        } else {
+            let mut chars = s.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\r' && chars.peek() == Some(&'\n') { continue; }
+                out.push(c);
+            }
+        }
+        out
+    }
+
     fn replace(&mut self, (a, b): (usize, usize), s: &str, typing: bool) {
         if self.secure {
             let mut next = String::with_capacity(self.text.len() - (b - a) + s.len());
@@ -346,17 +378,20 @@ impl TextEdit {
     pub fn key(&mut self, ev: &KeyEvent, layout: Option<&Layout<Ink>>) -> EditOutcome {
         let mut out = EditOutcome::default();
         let m = ev.mods;
+        if ev.is_command_chord() { return out; }
         if !matches!(&ev.key, Key::Text(s) if !s.contains(['\r', '\n'])) { self.break_history_group(); }
         let word = m.alt || (m.ctrl && !cfg!(target_os = "macos"));
         let t = &self.text;
         match &ev.key {
             Key::Text(s) => {
                 if s.chars().any(|c| !c.is_control()) {
-                    self.replace(self.range(), s, !s.contains(['\r', '\n']));
+                    let s = self.sanitize(s);
+                    if !s.is_empty() { self.replace(self.range(), &s, !s.contains(['\r', '\n'])); }
                 }
             }
             Key::Enter => {
-                if m.shift || m.alt {
+                // A single-line field submits on any Enter, like `<input>`.
+                if (m.shift || m.alt) && !self.secure && !self.single_line {
                     self.insert("\n");
                 } else {
                     out.submit = true;
@@ -452,15 +487,16 @@ impl TextEdit {
             }
             Ime::Commit(s) => {
                 self.preedit = None;
-                self.insert(s);
+                let s = self.sanitize(s);
+                self.insert(&s);
             }
         }
         EditOutcome::default()
     }
 
     pub fn paste(&mut self, s: &str) -> EditOutcome {
-        let normalized = Zeroizing::new(s.replace("\r\n", "\n"));
-        self.insert(&normalized);
+        let s = self.sanitize(s);
+        self.insert(&s);
         EditOutcome::default()
     }
 
@@ -621,6 +657,83 @@ mod tests {
         e.focus = e.anchor;
         e.undo();
         assert_eq!(e.text, "external", "external model replacement cannot restore stale history");
+    }
+
+    fn chord(s: &str, mods: Mods) -> KeyEvent { KeyEvent { key: Key::Text(s.into()), mods } }
+
+    #[test]
+    fn command_chords_type_nothing() {
+        let mut e = TextEdit::new("pw").secure();
+        e.key(&chord(" ", Mods { cmd: true, shift: true, logo: true, ..Mods::default() }), None);
+        e.key(&chord("a", Mods { ctrl: true, ..Mods::default() }), None);
+        assert_eq!(e.text, "pw");
+        let mut plain = TextEdit::new("");
+        plain.key(&chord(" ", Mods { cmd: true, logo: true, ..Mods::default() }), None);
+        plain.key(&chord("a", Mods { ctrl: true, cmd: !cfg!(target_os = "macos"), ..Mods::default() }), None);
+        assert_eq!(plain.text, "");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn altgr_text_still_types() {
+        let mut e = TextEdit::new("");
+        e.key(&chord("€", Mods { ctrl: true, cmd: true, alt: true, ..Mods::default() }), None);
+        assert_eq!(e.text, "€");
+    }
+
+    #[test]
+    fn option_text_still_types() {
+        let mut e = TextEdit::new("").secure();
+        e.key(&chord("é", Mods { alt: true, ..Mods::default() }), None);
+        e.key(&chord("ø", Mods { alt: true, shift: true, ..Mods::default() }), None);
+        assert_eq!(e.text, "éø");
+    }
+
+    #[test]
+    fn paste_keeps_single_line_fields_on_one_line() {
+        let mut secure = TextEdit::new("").secure();
+        let mut single = TextEdit::new("");
+        single.set_single_line(true);
+        let mut multi = TextEdit::new("");
+        for e in [&mut secure, &mut single, &mut multi] { e.paste("a\tb\r\nc\u{2028}d"); }
+        assert_eq!(secure.text, "abcd");
+        assert_eq!(single.text, "abcd");
+        assert_eq!(multi.text, "a\tb\nc\u{2028}d");
+        single.ime(&Ime::Commit("x\ny".into()));
+        assert_eq!(single.text, "abcdxy");
+    }
+
+    #[test]
+    fn shift_enter_in_a_single_line_field_submits_without_a_line_break() {
+        let shift_enter = KeyEvent { key: Key::Enter, mods: Mods { shift: true, ..Mods::default() } };
+        let mut single = TextEdit::new("ab");
+        single.set_single_line(true);
+        let mut secure = TextEdit::new("ab").secure();
+        for e in [&mut single, &mut secure] {
+            assert!(e.key(&shift_enter, None).submit);
+            e.key(&k(Key::Text("\n".into())), None);
+            e.key(&k(Key::Text("\r\nc".into())), None);
+            assert_eq!(e.text, "abc");
+        }
+    }
+
+    #[test]
+    fn command_chord_reaches_on_key() {
+        use crate::{text_input, Cx, El, Env, Runtime, TextStyle};
+        struct Form { pw: TextEdit, keys: Vec<Key> }
+        fn view(s: &Form, _: &mut Cx<Form>) -> El {
+            text_input(&s.pw, TextStyle::new(14.0, 400.0)).single_line().key("pw").size(200.0, 40.0)
+                .on_edit(|s: &mut Form| &mut s.pw)
+        }
+        let mut pw = TextEdit::new("").secure();
+        pw.focused = true;
+        let mut rt = Runtime::new(Form { pw, keys: vec![] }, view, (200.0, 40.0), Env::new(true, 1.0));
+        rt.on_key = Some(|s, ev, _| { s.keys.push(ev.key.clone()); true });
+        rt.frame(0.0);
+        rt.key(chord(" ", Mods { cmd: true, shift: true, logo: true, ..Mods::default() })); rt.frame(0.0);
+        rt.key(chord("x", Mods::default())); rt.frame(0.0);
+        assert_eq!(rt.state.pw.text, "x");
+        assert_eq!(rt.state.keys, [Key::Text(" ".into())]);
     }
 
     #[test]
