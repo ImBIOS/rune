@@ -444,6 +444,9 @@ pub struct Runtime<S: 'static> {
     pub copy_request: Option<crate::ClipboardWrite>,
     // Outer None: no read; inner None: app-level paste rather than a focused editor.
     pub(crate) paste_request: Option<Option<String>>,
+    pub(crate) clear_secret_request: bool,
+    /// `Runtime::use_clipboard`: a test clipboard that replaces the OS one.
+    pub(crate) clipboard: Option<crate::clipboard::MemoryClipboard>,
     /// A handler or `update` asked to close the window or quit (the shell takes it).
     pub shell_request: Option<Shell>,
     /// What `update` asked of the next commit.
@@ -606,6 +609,8 @@ impl<S: 'static> Runtime<S> {
             ime_reset: false,
             copy_request: None,
             paste_request: None,
+            clear_secret_request: false,
+            clipboard: None,
             shell_request: None,
             pending: Tx::default(),
             animating: false,
@@ -808,8 +813,22 @@ impl<S: 'static> Runtime<S> {
         let mut one = self.transaction();
         f(&mut self.state, &mut one);
         self.shell_request = self.shell_request.max(one.shell.take());
+        self.take_clipboard(&mut one);
         merge(&mut self.pending, one);
         self.dirty = true;
+    }
+
+    /// Latches a Tx's clipboard requests for the shell, so `update`, a hidden poll and
+    /// `on_close` reach the clipboard without a frame, and applies them to a memory clipboard
+    /// at once. A secret clear drops an earlier secret copy not yet written.
+    fn take_clipboard(&mut self, tx: &mut Tx) {
+        if std::mem::take(&mut tx.clear_secret) {
+            if self.copy_request.as_ref().is_some_and(crate::ClipboardWrite::is_secret) { self.copy_request = None; }
+            self.clear_secret_request = true;
+        }
+        if let Some(copy) = tx.copy.take() { self.copy_request = Some(copy); }
+        if std::mem::take(&mut tx.paste) { self.paste_request = Some(self.paste_target()); }
+        crate::clipboard::flush_memory(self);
     }
 
     /// `poll` alone, for a hidden window's wake: its timers and inbox advance while nothing
@@ -833,6 +852,7 @@ impl<S: 'static> Runtime<S> {
             }
         }
         self.shell_request = self.shell_request.max(one.shell.take());
+        self.take_clipboard(&mut one);
         merge(&mut self.pending, one);
         changed
     }
@@ -1001,10 +1021,7 @@ impl<S: 'static> Runtime<S> {
                 self.wake_deadlines.insert(index, deadline);
             }
         }
-        if let Some(copy) = tx.copy.take() {
-            self.copy_request = Some(copy);
-        }
-        if tx.paste { self.paste_request = Some(self.paste_target()); }
+        self.take_clipboard(&mut tx);
         self.shell_request = self.shell_request.max(tx.shell.take());
         for (source, target) in std::mem::take(&mut tx.text_flights) {
             self.capture_text_flight(source, target);
@@ -3463,6 +3480,8 @@ fn merge(tx: &mut Tx, one: Tx) {
     tx.scroll_bottom.extend(one.scroll_bottom);
     tx.wakes.extend(one.wakes);
     tx.text_flights.extend(one.text_flights);
+    if one.clear_secret && tx.copy.as_ref().is_some_and(crate::ClipboardWrite::is_secret) { tx.copy = None; }
+    tx.clear_secret |= one.clear_secret;
     if one.copy.is_some() { tx.copy = one.copy; }
     tx.shell = tx.shell.max(one.shell);
     tx.instant |= one.instant;

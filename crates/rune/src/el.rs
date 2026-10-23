@@ -24,6 +24,7 @@ pub struct Tx {
     pub(crate) relayout: bool,
     pub(crate) copy: Option<crate::ClipboardWrite>,
     pub(crate) paste: bool,
+    pub(crate) clear_secret: bool,
     pub(crate) text_flights: Vec<(String, String)>,
     pub(crate) scroll_to: Vec<String>,
     /// Scroll viewports to send to their bottom: (key, animated).
@@ -102,8 +103,18 @@ impl Tx {
     }
 
     /// Exclude this text from clipboard histories and clear it after `clear_after` if unchanged.
-    pub fn copy_secret(&mut self, text: impl Into<String>, clear_after: std::time::Duration) {
-        self.copy = Some(crate::ClipboardWrite::new(text.into(), Some(clear_after)));
+    /// The handle reports whether the copy still holds the clipboard, and can clear it early.
+    pub fn copy_secret(&mut self, text: impl Into<String>, clear_after: std::time::Duration) -> crate::SecretCopy {
+        let (write, copy) = crate::ClipboardWrite::secret(text.into(), clear_after);
+        self.copy = Some(write);
+        copy
+    }
+
+    /// Clear the secret Rune copied last, from any window, if the clipboard still holds it
+    /// (on lock, say). A secret copy asked for earlier in this handler is dropped.
+    pub fn clear_secret_clipboard(&mut self) {
+        if self.copy.as_ref().is_some_and(crate::ClipboardWrite::is_secret) { self.copy = None; }
+        self.clear_secret = true;
     }
 
     /// Read the OS clipboard asynchronously and paste into the focused field or root `on_paste`.

@@ -899,6 +899,7 @@ impl<S: 'static> Host<S> {
             self.rt.update(f);
             self.menus.drain();
         }
+        self.clipboard.flush(&mut self.rt);
         if requests.quit {
             event_loop.exit();
             return;
@@ -937,6 +938,7 @@ impl<S: 'static> Host<S> {
         #[cfg(all(feature = "dev", debug_assertions))]
         if self.rt.dev.is_some() { return; }
         let changed = self.rt.poll_hidden();
+        self.clipboard.flush(&mut self.rt);
         self.shell(event_loop);
         if changed && self.launcher() && let Some(w) = &self.win { w.window.request_redraw(); }
     }
@@ -959,6 +961,8 @@ impl<S: 'static> Host<S> {
         if let Some(f) = self.on_close {
             self.rt.update(f);
         }
+        // Before the window hides or the app exits: a lock or clear must reach the worker.
+        self.clipboard.flush(&mut self.rt);
         self.rt.set_live_visible(false);
         if self.rt.shell_request.take() == Some(Shell::Quit) {
             event_loop.exit();

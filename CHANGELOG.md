@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Tx::copy_secret` returns a `SecretCopy` handle.** `state()` / `holds()` tell whether the
+  copy is still the last thing Rune wrote and the clipboard hasn't changed (the worker watches
+  the change count while a secret is held), whether a write failed, and whether it was cleared or
+  replaced; `clear_now()` clears it early. `Tx::clear_secret_clipboard()` clears the latest
+  secret from any window. Tests can share `rune::clipboard::memory()` between runtimes with
+  `Runtime::use_clipboard`. The worker now keeps a keyed fingerprint of the secret, not its text.
 - **Command chords don't type, and single-line fields stay on one line.** Text typed with Cmd
   (macOS) or Ctrl held, such as Shift-Cmd-Space, no longer inserts into any field; it goes on to
   the app's `on_key` instead. Ctrl+Alt (AltGr) still types on Windows and Linux, and Option still

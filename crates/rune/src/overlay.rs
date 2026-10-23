@@ -806,6 +806,7 @@ impl<T: 'static> Overlay<T> {
     fn apply_updates(&mut self, updates: Vec<Update<T>>) {
         if updates.is_empty() { return; }
         for f in updates { self.rt.update(f); }
+        self.clipboard.flush(&mut self.rt);
         if self.visible {
             self.dirty = true;
         } else {
