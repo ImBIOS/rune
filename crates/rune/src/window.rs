@@ -1011,7 +1011,6 @@ impl<S: 'static> Host<S> {
                 place_chrome(&l.window, chrome);
                 l.window.request_redraw();
             }
-            WindowEvent::Focused(_) => place_chrome(&l.window, chrome),
             WindowEvent::Occluded(occluded) => {
                 l.occluded = occluded;
                 rt.set_live_visible(l.visible && !occluded && !l.window.is_minimized().unwrap_or(false));
@@ -1029,6 +1028,7 @@ impl<S: 'static> Host<S> {
             }
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::Focused(focused) => {
+                place_chrome(&l.window, chrome);
                 if !focused {
                     rt.cancel_composition();
                     l.window.set_ime_allowed(false);
