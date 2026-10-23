@@ -4,6 +4,8 @@
 pub struct DevClock {
     pub scale: f64,
     pub paused: bool,
+    /// The last frame's scaled animation dt.
+    pub dt: f64,
     host: f64,
     logical: f64,
     steps: u32,
@@ -11,7 +13,7 @@ pub struct DevClock {
 
 impl DevClock {
     pub fn new(host: f64, logical: f64) -> Self {
-        Self { scale: 1.0, paused: false, host, logical, steps: 0 }
+        Self { scale: 1.0, paused: false, dt: 0.0, host, logical, steps: 0 }
     }
 
     pub fn step(&mut self) {
@@ -28,6 +30,7 @@ impl DevClock {
         let (logical, animation) = (scaled(next - self.host) + steps, scaled(dt.max(0.0)) + steps);
         self.host = next;
         self.logical += logical;
+        self.dt = animation;
         (logical, animation)
     }
 

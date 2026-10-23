@@ -110,6 +110,21 @@ pub fn attach<S>(rt: &mut Runtime<S>, spec: &AppSpec<S>, config: &Config<S>, wak
     Ok(address)
 }
 
+thread_local! {
+    static SCENE_CLOCK: std::cell::Cell<crate::SceneClock> = const { std::cell::Cell::new(crate::SceneClock { now: 0.0, dt: 0.0 }) };
+}
+
+pub(crate) fn scene_clock() -> crate::SceneClock { SCENE_CLOCK.get() }
+
+fn with_scene_clock<R>(clock: crate::SceneClock, f: impl FnOnce() -> R) -> R {
+    struct Restore(crate::SceneClock);
+    impl Drop for Restore {
+        fn drop(&mut self) { SCENE_CLOCK.set(self.0); }
+    }
+    let _restore = Restore(SCENE_CLOCK.replace(clock));
+    f()
+}
+
 /// The app launch path: a busy port moves on to the next few and never stops the app.
 pub(crate) fn launch<S>(rt: &mut Runtime<S>, spec: &AppSpec<S>, mut config: Config<S>, wake: Waker) -> Option<SocketAddr> {
     let port = config.bind.port();
@@ -170,9 +185,13 @@ impl<S> Session<S> {
         let (_, scene) = self.scenes.iter().find(|(n, _)| *n == name).ok_or("unknown scene")?;
         // Scenes are patches of the initial state, exactly as --scene. In particular a
         // default scene may be a no-op; applying it to the previous scene would not reset it.
-        let mut next = (self.init)();
-        scene(&mut next);
-        if let Some(setup) = self.setup { setup(&mut next, self.wake.clone()); }
+        let clock = crate::SceneClock { now: rt.clock, dt: rt.dev_clock.as_ref().map_or(0.0, |c| c.dt) };
+        let next = with_scene_clock(clock, || {
+            let mut next = (self.init)();
+            scene(&mut next);
+            if let Some(setup) = self.setup { setup(&mut next, self.wake.clone()); }
+            next
+        });
         rt.update(|state, tx| { *state = next; tx.settle(); });
         self.state = name.to_owned();
         self.selection = self.selection.wrapping_add(1);

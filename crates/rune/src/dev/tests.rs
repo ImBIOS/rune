@@ -214,3 +214,28 @@ fn transition_closures_take_their_state_from_the_config() {
     assert!(!ui.joined);
 }
 
+#[test]
+fn scene_fns_build_against_the_running_clock() {
+    fn view(_: &(f64, f64), _: &mut Cx<(f64, f64)>) -> El { el() }
+    let spec = AppSpec {
+        scenes: &[("start", |s| {
+            let clock = crate::scene_clock();
+            *s = (clock.now, clock.dt);
+        })],
+        ..AppSpec::new("test", (100.0, 100.0), || (-1.0, -1.0), view)
+    };
+    let mut config = Config::default();
+    config.bind.set_port(0);
+    let mut rt = Runtime::new((spec.init)(), view, spec.size, Env { system_dark: true, scale: 1.0 });
+    attach(&mut rt, &spec, &config, Arc::new(|| {})).unwrap();
+    rt.dev_clock.as_mut().unwrap().scale = 0.5;
+    rt.frame(0.0);
+    rt.frame(1.0);
+    let (reply, _) = std::sync::mpsc::channel();
+    let message = json!({"type":"set","key":"rune.state","value":"start"});
+    rt.dev.as_ref().unwrap().bridge.lock().unwrap().incoming.push_back(transport::Request { message, reply });
+    rt.frame(0.1);
+    assert!((rt.state.0 - 0.55).abs() < 1e-12 && (rt.state.0 - rt.clock).abs() < 1e-12, "{:?} at {}", rt.state, rt.clock);
+    assert!((rt.state.1 - 0.05).abs() < 1e-12, "the panel's speed scales dt: {:?}", rt.state);
+    assert_eq!(crate::scene_clock(), crate::SceneClock::default(), "outside a scene the clock reads zero");
+}

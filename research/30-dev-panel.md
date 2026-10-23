@@ -58,6 +58,10 @@ reconnects `AppSpec::setup`, and commits with settle. This matters for Rooms'
 existing `("list", |_| {})` scene: it is a patch of the initial state, not a
 reset function by itself. `App::init`'s one-shot captured initializer is not
 replayed; repeatable fixtures belong in `AppSpec::init` and `scenes`.
+Scene fns are plain `fn(&mut S)`, so `rune::scene_clock()` hands them, `init`
+and `setup` the running logical clock (`poll`'s `now`) and the last frame's
+scaled animation dt. `--scene` reads zero, which is where its clock starts;
+release builds return zero without a thread-local.
 A transition names its source scene and a `fn(&mut S, &mut Tx)`. Replay commits
 and settles that source for one frame, then runs its action on the next frame.
 The event-loop waker requests that second frame even if paused or at rest.

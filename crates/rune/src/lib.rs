@@ -25,6 +25,24 @@ macro_rules! tune {
 macro_rules! tune {
     ($key:expr, $default:expr $(, $min:expr, $max:expr, $step:expr)?) => { $default };
 }
+
+/// The logical clock a scene fn (`AppSpec::scenes`) builds its state against. `--scene` starts
+/// at time zero; the dev panel's state picker passes the running clock (`poll`'s `now`) and the
+/// last frame's animation dt, scaled by the panel's speed.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct SceneClock {
+    pub now: f64,
+    pub dt: f64,
+}
+
+/// Readable from scene fns, `AppSpec::init` and `AppSpec::setup`; zero anywhere else.
+pub fn scene_clock() -> SceneClock {
+    #[cfg(all(feature = "dev", debug_assertions))]
+    return dev::scene_clock();
+    #[cfg(not(all(feature = "dev", debug_assertions)))]
+    SceneClock::default()
+}
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
 mod layer_shell;
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
