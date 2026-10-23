@@ -176,7 +176,11 @@ impl<S: 'static> Runtime<S> {
     pub(super) fn focus_key(&mut self, ev: &KeyEvent, shown: bool, tx: &mut Tx) -> bool {
         if ev.mods.cmd || ev.mods.ctrl || ev.mods.alt || ev.mods.logo { return false; }
         self.keyboard_focus = true;
+        // Activations (dismiss, press, open) fire once per press. Their repeats are consumed so
+        // they reach nothing else; navigation below keeps repeating.
+        let repeat = tx.key_repeat;
         if ev.key == Key::Escape && let Some(i) = self.active_modal() {
+            if repeat { return true; }
             let f = self.nodes[i].modal.as_ref().unwrap().dismiss.clone();
             self.set_focus(None, true);
             f(handler_state(&mut self.state), tx);
@@ -239,12 +243,14 @@ impl<S: 'static> Runtime<S> {
             }
         } else if self.nodes[i].role == "combobox" && self.nodes[i].input.is_none() && matches!(ev.key, Key::Up | Key::Down) {
             // A popup button opens on its arrows as well as Space and Return (NSPopUpButton).
+            if repeat { return true; }
             if let Some(f) = self.nodes[i].on_press.clone() { f(handler_state(&mut self.state), tx); }
             return true;
         }
         if self.nodes[i].input.is_none() && (ev.key == Key::Enter || ev.key == Key::Text(" ".into())) {
             // A row the user cannot see highlighted (the pointer left it) chooses nothing.
             if self.nodes[i].focus.highlight.is_some() && !shown { self.keyboard_focus = false; return true; }
+            if repeat { return true; }
             if self.link_key(i, tx) { return true; }
             if let Some(f) = self.nodes[i].on_press.clone() { f(handler_state(&mut self.state), tx); }
             return true;
@@ -679,5 +685,101 @@ mod tests {
         assert!(rt.elements().iter().any(|e| e.focused && e.focus_visible), "and keeps the keyboard ring");
         key(&mut rt, Key::Up, false);
         assert_eq!((focused(&rt).as_str(), rt.state.selected), ("row1", 1));
+    }
+
+    #[derive(Default)]
+    struct Held { presses: usize, opens: usize, menu: bool, picks: Vec<usize>, modals: u8, submits: usize, app: usize, field: crate::TextEdit }
+    fn held_view(s: &Held, _: &mut Cx<Held>) -> El {
+        let mut root = col().key("root").size(300.0, 300.0)
+            .child(button("press").on_press(|s: &mut Held| s.presses += 1))
+            .child(button("popup").role("combobox").on_press(|s: &mut Held| { s.opens += 1; s.menu = !s.menu; }))
+            .child(crate::text_input(&s.field, crate::TextStyle::new(14.0, 400.0)).single_line().key("field").size(80.0, 20.0)
+                .on_edit(|s: &mut Held| &mut s.field).on_submit(|s: &mut Held, _| s.submits += 1))
+            .child(button("plain"));
+        if s.menu {
+            root = root.child(col().key("surface").absolute(100.0, 100.0).focus_return("popup")
+                .modal(true, |s: &mut Held| s.menu = false)
+                .child(col().key("menu").role("menu").focus_group().children(ITEMS.iter().enumerate().map(|(i, label)| {
+                    el().key(*label).label(*label).size(80.0, 20.0).focusable(true).focus_highlight(crate::Color::WHITE)
+                        .on_press(move |s: &mut Held| { s.picks.push(i); s.menu = false; })
+                }))));
+        }
+        if s.modals >= 1 {
+            root = root.child(col().key("one").absolute(0.0, 150.0).size(100.0, 100.0)
+                .modal(true, |s: &mut Held| s.modals -= 1).child(button("in-one")));
+        }
+        if s.modals >= 2 {
+            root = root.child(col().key("two").absolute(150.0, 150.0).size(100.0, 100.0)
+                .modal(true, |s: &mut Held| s.modals -= 1).child(button("in-two")));
+        }
+        root
+    }
+    fn held_runtime(state: Held) -> Runtime<Held> {
+        let mut rt = Runtime::new(state, held_view, (300.0, 300.0), Env::new(true, 1.0));
+        rt.on_key = Some(|s, _, _| { s.app += 1; false });
+        rt.frame(0.0); rt
+    }
+    /// A first press and two auto-repeats.
+    fn hold<S: 'static>(rt: &mut Runtime<S>, key: Key) {
+        rt.key(KeyEvent { key: key.clone(), mods: Mods::default() }); rt.frame(0.0);
+        for _ in 0..2 { rt.repeat_key(KeyEvent { key: key.clone(), mods: Mods::default() }); rt.frame(0.0); }
+    }
+
+    #[test]
+    fn held_activation_keys_fire_once_while_navigation_repeats() {
+        let mut rt = held_runtime(Held::default());
+        press(&mut rt, Key::Tab); assert_eq!(focused(&rt), "press");
+        hold(&mut rt, Key::Enter);
+        hold(&mut rt, Key::Text(" ".into()));
+        assert_eq!(rt.state.presses, 2, "Return and Space press a button once per press");
+        press(&mut rt, Key::Tab); assert_eq!(focused(&rt), "popup");
+        hold(&mut rt, Key::Down);
+        assert_eq!(rt.state.opens, 1, "arrows open a popup button once");
+        assert!(rt.state.menu);
+        assert_eq!(focused(&rt), "Bravo", "held arrows keep moving inside the open menu");
+        hold(&mut rt, Key::Enter);
+        assert_eq!(rt.state.picks, [2], "a menu item chooses once");
+        assert_eq!(focused(&rt), "popup");
+        assert_eq!(rt.state.opens, 1, "the repeat does not reopen the popup that took focus back");
+        press(&mut rt, Key::Tab); assert_eq!(focused(&rt), "field");
+        hold(&mut rt, Key::Enter);
+        assert_eq!(rt.state.submits, 1, "a field submits once per press");
+        hold(&mut rt, Key::Text("x".into()));
+        hold(&mut rt, Key::Backspace);
+        assert_eq!(rt.state.field.text, "", "held keys type and delete");
+        let app = rt.state.app;
+        hold(&mut rt, Key::Escape);
+        assert!(!rt.has_focus(), "Escape blurs the field");
+        assert_eq!(rt.state.app, app, "and its repeats reach nothing once focus has gone");
+        rt.state.app = 0;
+        press(&mut rt, Key::Tab); assert_eq!(focused(&rt), "press");
+        hold(&mut rt, Key::Tab);
+        assert_eq!(focused(&rt), "plain", "held Tab keeps moving focus");
+    }
+
+    #[test]
+    fn held_return_on_a_hidden_highlight_keeps_it_hidden() {
+        let mut rt = menu_runtime(Menu::default());
+        let (x, y) = rt.find("popup").unwrap();
+        rt.pointer_down(x, y); rt.pointer_up(x, y); rt.frame(0.0);
+        assert_eq!(focused(&rt), "Alpha");
+        for key in [Key::Enter, Key::Text(" ".into())] {
+            hold(&mut rt, key);
+            assert_eq!(highlighted(&rt), None, "a repeat must not reveal the highlight");
+        }
+        assert!(rt.state.open && rt.state.picks.is_empty());
+    }
+
+    #[test]
+    fn held_escape_closes_one_modal_and_its_repeats_reach_nothing_after() {
+        let mut rt = held_runtime(Held { modals: 2, ..Held::default() });
+        assert_eq!(focused(&rt), "in-two");
+        hold(&mut rt, Key::Escape);
+        assert_eq!(rt.state.modals, 1);
+        assert_eq!(focused(&rt), "in-one");
+        hold(&mut rt, Key::Escape);
+        assert_eq!(rt.state.modals, 0);
+        assert!(!rt.has_focus());
+        assert_eq!(rt.state.app, 0, "repeats never fall through to the app after a dismissal");
     }
 }

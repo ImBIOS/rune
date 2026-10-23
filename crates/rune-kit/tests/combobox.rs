@@ -2,7 +2,7 @@ use rune::{Cx, El, Env, Ime, Key, KeyEvent, Mods, Runtime};
 use rune_kit::{Combobox, ComboboxOption, ComboboxState, Kit};
 
 #[derive(Default)]
-struct State { combo: ComboboxState, chosen: Option<String>, other: rune::TextEdit, app_keys: usize }
+struct State { combo: ComboboxState, chosen: Option<String>, chooses: usize, other: rune::TextEdit, app_keys: usize }
 fn view(s: &State, _: &mut Cx<State>) -> El {
     let options: Vec<_> = (0..200).map(|i| {
         let mut o = ComboboxOption::new(format!("item-{i}"), format!("Model {i:03}"));
@@ -12,7 +12,7 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
     let mut layer = Vec::new();
     let body = Combobox::new("models", &s.combo, &options, |s: &mut State| &mut s.combo)
         .current(s.chosen.as_deref())
-        .on_choose(|s, id, _| s.chosen = Some(id.into())).build(&Kit::neutral(true), &mut layer);
+        .on_choose(|s, id, _| { s.chosen = Some(id.into()); s.chooses += 1; }).build(&Kit::neutral(true), &mut layer);
     let body = rune::col().child(rune_kit::TextInput::new(&s.other)
         .on_edit(|s: &mut State| &mut s.other).build(&Kit::neutral(true)).key("other")).child(body);
     rune_kit::root(body, layer)
@@ -128,4 +128,33 @@ fn focused_combobox_handles_keys_before_app_and_returns_focus_on_close() {
     let trigger = rt.elements().into_iter().find(|e| e.focused).unwrap();
     assert_eq!(trigger.key.as_deref(), Some("models-value-trigger"));
     assert!(!trigger.focus_visible);
+}
+
+#[test]
+fn held_enter_chooses_once_and_does_not_reopen_from_the_trigger() {
+    let mut rt = runtime();
+    rt.on_key = Some(|s, _, _| { s.app_keys += 1; false });
+    key(&mut rt, Key::Down, Mods::default());
+    rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() }); rt.frame(0.0);
+    for _ in 0..2 { rt.repeat_key(KeyEvent { key: Key::Enter, mods: Mods::default() }); rt.frame(0.0); }
+    assert_eq!((rt.state.chosen.as_deref(), rt.state.chooses), (Some("item-2"), 1));
+    assert!(!rt.state.combo.open, "the repeat must not reopen the popup from its trigger");
+    assert_eq!(rt.state.app_keys, 0);
+}
+
+/// A held key whose first press went to the IME: the repeats arrive after the composition ends,
+/// while the popup is still open, and must not choose or close it.
+#[test]
+fn repeats_after_an_ime_composition_neither_choose_nor_close() {
+    for held in [Key::Enter, Key::Escape] {
+        let mut rt = runtime();
+        key(&mut rt, Key::Down, Mods::default());
+        rt.ime(Ime::Preedit("ka".into(), None)); rt.frame(0.0);
+        key(&mut rt, held.clone(), Mods::default());
+        assert!(rt.state.combo.open, "{held:?} during composition belongs to the IME");
+        rt.ime(Ime::Commit("か".into())); rt.frame(0.0);
+        for _ in 0..2 { rt.repeat_key(KeyEvent { key: held.clone(), mods: Mods::default() }); rt.frame(0.0); }
+        assert!(rt.state.combo.open, "a repeated {held:?} keeps the popup open");
+        assert_eq!(rt.state.chooses, 0);
+    }
 }

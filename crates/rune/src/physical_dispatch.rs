@@ -1,7 +1,11 @@
 use super::*;
-use crate::PhysicalInput;
+use crate::{PhysicalInput, PhysicalKeyCode};
 
 pub(super) struct Fallback { key: KeyEvent }
+
+/// An activation key held down: its physical code (native and physical input) or logical key
+/// (`Runtime::key`), and the focus its first press landed on.
+pub(super) struct HeldKey { physical: Option<PhysicalKeyCode>, key: Option<crate::Key>, focus: Option<String> }
 
 impl<S: 'static> Runtime<S> {
     /// Queue physical input without a logical fallback (also useful for headless drivers).
@@ -31,7 +35,35 @@ impl<S: 'static> Runtime<S> {
         self.dirty |= consumed;
         consumed
     }
+    /// Remember an activation key's first press and the focus it landed on; true drops a
+    /// repeat of that same key once focus has moved. Any other first press replaces it.
+    pub(super) fn held_gate(&mut self, physical: Option<PhysicalKeyCode>, key: Option<&crate::Key>, repeat: bool) -> bool {
+        use crate::{Key, PhysicalKeyCode as Code};
+        if !repeat {
+            // The OS keeps repeating a held key through modifier presses.
+            if physical.is_some_and(|c| matches!(c, Code::ShiftLeft | Code::ShiftRight | Code::ControlLeft
+                | Code::ControlRight | Code::AltLeft | Code::AltRight | Code::SuperLeft | Code::SuperRight
+                | Code::CapsLock | Code::Fn)) { return false; }
+            let activation = physical.is_some_and(|c| matches!(c, Code::Enter | Code::NumpadEnter | Code::Escape | Code::Space))
+                || key.is_some_and(|k| matches!(k, Key::Enter | Key::Escape) || matches!(k, Key::Text(t) if t == " "));
+            self.held = activation.then(|| HeldKey { physical, key: key.cloned(), focus: self.focused.clone() });
+            return false;
+        }
+        self.held.as_ref().is_some_and(|held| {
+            let same = match physical { Some(code) => held.physical == Some(code), None => held.key.as_ref() == key };
+            same && held.focus != self.focused
+        })
+    }
     pub(super) fn dispatch_physical(&mut self, event: PhysicalInput, fallback: Option<Fallback>, tx: &mut Tx) -> bool {
+        match event {
+            PhysicalInput::Key { key, pressed: true, repeat, .. } => {
+                if self.held_gate(Some(key), fallback.as_ref().map(|f| &f.key.key), repeat) { return false; }
+            }
+            PhysicalInput::Key { key, pressed: false, .. } => {
+                if self.held.as_ref().is_some_and(|h| h.physical == Some(key)) { self.held = None; }
+            }
+            PhysicalInput::FocusLost | PhysicalInput::Modifiers(_) => {}
+        }
         let handler = self.focused.as_deref().and_then(|p| self.node(p))
             .and_then(|n| n.focus.physical.clone());
         let repeat = matches!(event, PhysicalInput::Key { repeat: true, .. });
@@ -48,7 +80,7 @@ impl<S: 'static> Runtime<S> {
                     // change focus. An empty/image clipboard still consumes the command.
                     self.paste_request = Some(self.paste_target());
                     false
-                } else { self.run_action(Action::Key(key, repeat), tx) }
+                } else { self.run_action(Action::Key { ev: key, repeat, physical: true }, tx) }
             }
             None => false,
         }
@@ -278,6 +310,114 @@ mod tests {
         rt.frame(0.0);
         let s = Key::Text("s".into());
         assert_eq!(rt.state.app, [(s.clone(), false), (s.clone(), true), (s, false)]);
+    }
+
+    fn release<S: 'static>(rt: &mut Runtime<S>, physical: PhysicalKeyCode) {
+        rt.physical_with_fallback(PhysicalInput::Key { key: physical, mods: Mods::default(), pressed: false, repeat: false }, None);
+        rt.frame(0.0);
+    }
+
+    #[test]
+    fn a_held_arrow_keeps_repeating_after_an_escape_tap_moves_focus() {
+        let mut rt = fields_runtime(false);
+        click(&mut rt, "first");
+        press(&mut rt, PhysicalKeyCode::ArrowDown, Key::Down, false);
+        press(&mut rt, PhysicalKeyCode::Escape, Key::Escape, false);
+        release(&mut rt, PhysicalKeyCode::Escape);
+        assert!(!rt.has_focus(), "Escape blurred the field");
+        let before = rt.state.app_keys;
+        press(&mut rt, PhysicalKeyCode::ArrowDown, Key::Down, true);
+        press(&mut rt, PhysicalKeyCode::ArrowDown, Key::Down, true);
+        assert_eq!(rt.state.app_keys, before + 2, "the held arrow's repeats still arrive");
+        // The same without a release, from a script: only Escape's own repeats are dropped.
+        click(&mut rt, "first");
+        rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() }); rt.frame(0.0);
+        rt.repeat_key(KeyEvent { key: Key::Down, mods: Mods::default() });
+        rt.repeat_key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+        rt.frame(0.0);
+        assert_eq!(rt.state.app_keys, before + 3);
+    }
+
+    #[test]
+    fn a_released_key_and_a_pointer_focus_change_leave_later_repeats_alone() {
+        let mut rt = fields_runtime(false);
+        click(&mut rt, "second");
+        press(&mut rt, PhysicalKeyCode::Enter, Key::Enter, false);
+        release(&mut rt, PhysicalKeyCode::Enter);
+        click(&mut rt, "first");
+        rt.frame(0.0);
+        rt.repeat_key(KeyEvent { key: Key::Down, mods: Mods::default() });
+        rt.repeat_key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+        rt.frame(0.0);
+        assert_eq!(rt.state.keys, 2, "scripted repeats reach the newly focused field");
+    }
+
+    #[derive(Default)]
+    struct Opener { modal: bool, go_repeats: usize, sink: usize }
+    fn opener(s: &Opener, _: &mut Cx<Opener>) -> El {
+        let mut root = col().size(300.0, 200.0)
+            .child(el().key("go").size(40.0, 30.0).focusable(true).role("button")
+                .on_press(|s: &mut Opener| s.modal = true)
+                .on_physical_input(|s: &mut Opener, e, _| {
+                    if matches!(e, PhysicalInput::Key { repeat: true, .. }) { s.go_repeats += 1; }
+                    false
+                }))
+            .child(el().key("grab").size(40.0, 30.0).focusable(true)
+                .on_physical_input(|s: &mut Opener, e, _| match e {
+                    PhysicalInput::Key { key: PhysicalKeyCode::Enter, pressed: true, repeat: false, .. } => { s.modal = true; true }
+                    _ => false,
+                }));
+        if s.modal {
+            root = root.child(col().key("modal").absolute(100.0, 0.0).size(100.0, 100.0)
+                .modal(true, |s: &mut Opener| s.modal = false)
+                .child(el().key("sink").size(40.0, 30.0).focusable(true)
+                    .on_physical_input(|s: &mut Opener, e, _| {
+                        if matches!(e, PhysicalInput::Key { pressed: true, .. }) { s.sink += 1; }
+                        true
+                    })));
+        }
+        root
+    }
+    fn opener_focused_on(tabs: usize) -> Runtime<Opener> {
+        let mut rt = Runtime::new(Opener::default(), opener, (300.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        for _ in 0..tabs { rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() }); rt.frame(0.0); }
+        rt
+    }
+    fn focused_key<S: 'static>(rt: &Runtime<S>) -> Option<String> {
+        rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key)
+    }
+
+    #[test]
+    fn repeats_never_reach_physical_handlers_after_their_key_moved_focus() {
+        // A built-in press opens the modal: the new focus's physical handler sees no repeat.
+        let mut rt = opener_focused_on(1);
+        assert_eq!(focused_key(&rt).as_deref(), Some("go"));
+        press(&mut rt, PhysicalKeyCode::Enter, Key::Enter, false);
+        assert_eq!(focused_key(&rt).as_deref(), Some("sink"));
+        press(&mut rt, PhysicalKeyCode::Enter, Key::Enter, true);
+        press(&mut rt, PhysicalKeyCode::Enter, Key::Enter, true);
+        assert_eq!(rt.state.sink, 0);
+        // A physical handler consumes the first press and opens it: still recorded and dropped.
+        let mut rt = opener_focused_on(2);
+        assert_eq!(focused_key(&rt).as_deref(), Some("grab"));
+        press(&mut rt, PhysicalKeyCode::Enter, Key::Enter, false);
+        assert_eq!(focused_key(&rt).as_deref(), Some("sink"));
+        press(&mut rt, PhysicalKeyCode::Enter, Key::Enter, true);
+        assert_eq!(rt.state.sink, 0);
+    }
+
+    #[test]
+    fn a_repeat_queued_in_the_same_frame_sees_the_focus_its_press_moved() {
+        let mut rt = opener_focused_on(1);
+        let mods = Mods::default();
+        rt.physical_with_fallback(PhysicalInput::Key { key: PhysicalKeyCode::Enter, mods, pressed: true, repeat: false },
+            Some(KeyEvent { key: Key::Enter, mods }));
+        rt.physical_with_fallback(PhysicalInput::Key { key: PhysicalKeyCode::Enter, mods, pressed: true, repeat: true },
+            Some(KeyEvent { key: Key::Enter, mods }));
+        rt.frame(0.0);
+        assert_eq!(focused_key(&rt).as_deref(), Some("sink"));
+        assert_eq!((rt.state.go_repeats, rt.state.sink), (0, 0), "the repeat went nowhere");
     }
 
     #[test]

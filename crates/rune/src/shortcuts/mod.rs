@@ -12,6 +12,8 @@ mod macos;
 mod windows;
 #[cfg(target_os = "linux")]
 mod x11;
+#[cfg(any(target_os = "linux", test))]
+mod x11_repeat;
 #[cfg(target_os = "linux")]
 mod wayland;
 

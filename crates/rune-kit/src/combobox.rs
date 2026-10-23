@@ -150,12 +150,16 @@ impl<S: 'static> Combobox<S> {
             .on_key(move |s: &mut S, ev, tx| {
                 let state = key_access(s);
                 if state.search.preedit.is_some() { return false; }
-                if ev.key == Key::Escape { state.close(); return true; }
+                if ev.key == Key::Escape {
+                    if !tx.key_repeat() { state.close(); }
+                    return true;
+                }
                 if ev.mods.alt || ev.mods.logo { return false; }
                 let choices = filtered(&options, &state.search.text);
                 let enabled: Vec<_> = choices.into_iter().filter(|i| !options[*i].disabled).collect();
                 let active = state.active_index(&options, &enabled);
                 if ev.key == Key::Enter {
+                    if tx.key_repeat() { return true; }
                     let selected = active.map(|i| options[i].id.clone());
                     state.close();
                     if let (Some(selected), Some(choose)) = (selected, &choose) { choose(s, &selected, tx); }

@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Held keys activate once, as in AppKit.** Auto-repeats no longer press a focused button,
+  menu item, row or link (Return, Space), open a popup button (arrows), dismiss another modal
+  (Escape), blur a field (Escape) or submit it (Return). Rune consumes those repeats. After a held
+  Return, Escape or Space moves focus, its later repeats reach nothing: not the app's `on_key`,
+  the control that took focus or its physical input handler. Other held keys keep repeating. A
+  rune-kit `Combobox` chooses once on a held Return and closes once on a held Escape. On X11, a
+  held global shortcut fires once, as on macOS and Windows. Typing, deletion, caret movement,
+  arrows in lists and menus, and Tab still repeat. To act on every repeat, handle the key in `on_key` and
+  check `tx.key_repeat()`.
 - **`--script` events at t = 0 see the first layout.** A script whose first events are at
   t = 0 (or omit `t`) now lays out a first frame, with the initial state and queued updates,
   before running them. `{"t": 0, "type": "click", "key": "..."}` used to fail with "no element

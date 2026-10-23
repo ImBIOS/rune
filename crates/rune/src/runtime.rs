@@ -245,8 +245,9 @@ enum Action {
     Link(String, usize),
     SecondaryPress(String, PointerPress),
     Drag(String, Drag),
-    /// The key and whether it is an auto-repeat of a held key.
-    Key(KeyEvent, bool),
+    /// A logical key. `physical`: it is a physical key's fallback, already gated by
+    /// `held_gate` in `dispatch_physical`.
+    Key { ev: KeyEvent, repeat: bool, physical: bool },
     Ime(Ime),
     Paste(zeroize::Zeroizing<String>, Option<Option<String>>),
     Focus(String, f32, f32),
@@ -468,6 +469,10 @@ pub struct Runtime<S: 'static> {
     hover_focus: bool,
     /// Type-select's typed prefix and when its last key arrived (`now_clock`).
     typeahead: (String, f64),
+    /// The activation key (Enter, Escape, Space) held down and the focus it was first pressed
+    /// on. Its repeats are dropped once focus has moved, so a held key that closed something
+    /// can't act again on whatever took focus next.
+    held: Option<physical_dispatch::HeldKey>,
     /// Tab visits every control; off, only text fields and lists (macOS Full Keyboard
     /// Access off). Native hosts sample the system setting; headless runtimes default on.
     full_keyboard_access: bool,
@@ -655,6 +660,7 @@ impl<S: 'static> Runtime<S> {
             keyboard_focus: false,
             hover_focus: false,
             typeahead: (String::new(), f64::NEG_INFINITY),
+            held: None,
             full_keyboard_access: true,
             modal_stack: Vec::new(),
             modal_index: None,
@@ -1118,7 +1124,7 @@ impl<S: 'static> Runtime<S> {
             // State may have requested focus on a newly mounted field. Resolve the
             // new tree before routing this frame's text, not after it has gone to
             // the previous field. The same boundary covers an earlier handler.
-            if (ran || self.dirty) && matches!(&action, Action::Key(..) | Action::Ime(_) | Action::Paste(..)) {
+            if (ran || self.dirty) && matches!(&action, Action::Key { .. } | Action::Physical(..) | Action::Ime(_) | Action::Paste(..)) {
                 for (source, target) in std::mem::take(&mut tx.text_flights) {
                     self.capture_text_flight(source, target);
                 }
@@ -1360,11 +1366,16 @@ impl<S: 'static> Runtime<S> {
         let mut one = self.transaction();
         let ran = match action {
             Action::WindowFocus(focused) => {
+                if !focused { self.held = None; }
                 let Some(f) = self.nodes.first().and_then(|n| n.on_window_focus.clone()) else { return false };
                 f(handler_state(&mut self.state), focused, &mut one);
                 true
             }
-            Action::Physical(event, fallback) => return self.dispatch_physical(event, fallback, tx),
+            Action::Physical(event, fallback) => {
+                // The window lost key focus (an internal focus move also notifies handlers).
+                if matches!(event, crate::PhysicalInput::FocusLost) { self.held = None; }
+                return self.dispatch_physical(event, fallback, tx);
+            }
             Action::FocusControl(path) => {
                 self.set_focus(Some(path), false);
                 true
@@ -1436,7 +1447,8 @@ impl<S: 'static> Runtime<S> {
                 }
                 true
             }
-            Action::Key(ev, repeat) => {
+            Action::Key { ev, repeat, physical } => {
+                if !physical && self.held_gate(None, Some(&ev.key), repeat) { return false; }
                 one.key_repeat = repeat;
                 let shown = self.keyboard_focus || self.hover_focus;
                 self.keyboard_focus = true;
@@ -1538,7 +1550,9 @@ impl<S: 'static> Runtime<S> {
         let Some(access) = access else { return false };
         access(handler_state(&mut self.state)).set_single_line(single_line);
         let before = change.as_ref().map(|_| zeroize::Zeroizing::new(access(handler_state(&mut self.state)).text.clone()));
-        let out = f(access(handler_state(&mut self.state)));
+        let mut out = f(access(handler_state(&mut self.state)));
+        // Submit and Escape's blur act once per press; held keys still type, move and delete.
+        if tx.key_repeat { out.submit = false; out.blur = false; }
         // Typing is the user's own hand: no animation.
         tx.instant = !animate_layout;
         self.caret_follow = true;
@@ -2805,13 +2819,13 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub fn key(&mut self, ev: KeyEvent) {
-        self.queue.push(Action::Key(ev, false));
+        self.queue.push(Action::Key { ev, repeat: false, physical: false });
     }
 
     /// Queue an auto-repeat of a held key, as the OS sends after the first press. Handlers see
     /// `Tx::key_repeat` true for it.
     pub fn repeat_key(&mut self, ev: KeyEvent) {
-        self.queue.push(Action::Key(ev, true));
+        self.queue.push(Action::Key { ev, repeat: true, physical: false });
     }
 
     pub fn ime(&mut self, ev: Ime) {
@@ -5348,12 +5362,12 @@ mod tests {
         rt.set_focus(Some(input), true);
         let copy_key = KeyEvent { key: Key::Command('c'), mods: Mods { cmd: true, ..Mods::default() } };
         rt.queue.push(Action::Press(button.clone()));
-        rt.queue.push(Action::Key(copy_key.clone(), false));
+        rt.queue.push(Action::Key { ev: copy_key.clone(), repeat: false, physical: false });
         rt.frame(1.0 / 120.0);
         assert_eq!(rt.copy_request.take().as_deref(), Some("héllo 👋"));
         rt.frame(1.0 / 120.0);
         assert!(rt.copy_request.is_none());
-        rt.queue.push(Action::Key(copy_key, false));
+        rt.queue.push(Action::Key { ev: copy_key, repeat: false, physical: false });
         rt.queue.push(Action::Press(button));
         rt.frame(1.0 / 120.0);
         assert_eq!(rt.copy_request.take().as_deref(), Some("response"));

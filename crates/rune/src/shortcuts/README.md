@@ -62,7 +62,8 @@ even if other threads retain `AppHandle`s.
 - Windows: `RegisterHotKey` on a message-only window owned by the event thread.
   Repeat is disabled. Windows-reserved combinations may fail registration.
 - X11: checked passive grabs on every root, including CapsLock/NumLock variants.
-  A failed variant rolls back the registration. Keys use the current keymap's
+  A failed variant rolls back the registration. Autorepeat is filtered, so a held
+  chord fires once, as on macOS and Windows. Keys use the current keymap's
   base keysyms; restart/re-register after changing the keymap.
 - Wayland: xdg-desktop-portal GlobalShortcuts. No portal returns `Unsupported`.
   The portal may ask for permission or let the user choose another trigger;
