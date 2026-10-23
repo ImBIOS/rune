@@ -353,6 +353,40 @@ pub struct TextSpec {
     pub(crate) on_link: Option<LinkFn>,
     /// Measured as its slice at this byte of the run (see [`El::advance_in`]).
     pub advance_in: Option<(crate::text::Run, usize)>,
+    /// See [`El::text_case`]; applied when the element is laid out.
+    pub(crate) case: Option<crate::TextCase>,
+    /// The authored string once `case` has replaced `content` with the drawn one.
+    pub(crate) source: Option<Box<crate::text::CaseSource>>,
+}
+
+impl TextSpec {
+    /// The string as authored, before [`El::text_case`].
+    pub(crate) fn source_text(&self) -> &str {
+        self.source.as_ref().map_or(&self.content, |s| &s.text)
+    }
+
+    /// The authored text of `content[start..end]`.
+    pub(crate) fn source_slice(&self, start: u32, end: u32) -> Option<&str> {
+        match &self.source {
+            None => self.content.get(start as usize..end as usize),
+            Some(s) => s.text.get(s.source(start, false) as usize..s.source(end, true) as usize),
+        }
+    }
+
+    /// Replaces `content` (the authored string) with its cased form and moves span and link
+    /// ranges onto it.
+    pub(crate) fn apply_case(&mut self) {
+        let Some(case) = self.case else { return };
+        let (shown, source) = crate::text::CaseSource::new(case, std::mem::take(&mut self.content));
+        for span in &mut self.spans {
+            (span.start, span.end) = (source.shown(span.start, false), source.shown(span.end, true));
+        }
+        for link in &mut self.links {
+            (link.start, link.end) = (source.shown(link.start, false), source.shown(link.end, true));
+        }
+        self.content = shown;
+        self.source = Some(Box::new(source));
+    }
 }
 
 /// [`El::on_link`]'s handler.
@@ -599,6 +633,8 @@ pub fn text(content: impl Into<String>) -> El {
         links: Vec::new(),
         on_link: None,
         advance_in: None,
+        case: None,
+        source: None,
     });
     e
 }
@@ -1527,6 +1563,17 @@ impl El {
     pub fn align(mut self, a: Align) -> Self {
         if let Some(t) = &mut self.text {
             t.align = a;
+        }
+        self
+    }
+    /// Draw this text in capitals or lower case without changing its string, like SwiftUI's
+    /// `textCase`: `text("Text channels").text_case(TextCase::Uppercase)` draws "TEXT CHANNELS".
+    /// The dev tree, tools and link labels keep the authored text, and [`Span`] and [`Link`]
+    /// ranges stay byte ranges of it. Casing follows `str::to_uppercase`, so "ß" draws "SS".
+    /// Text fields draw what is typed and ignore it.
+    pub fn text_case(mut self, case: crate::TextCase) -> Self {
+        if let Some(t) = &mut self.text {
+            t.case = Some(case);
         }
         self
     }

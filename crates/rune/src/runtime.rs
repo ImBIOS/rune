@@ -782,10 +782,11 @@ impl<S: 'static> Runtime<S> {
             if let Some(spec) = &mut node.text
                 && let Some(live) = &spec.live
                 && let Some(text) = live.read(&mut node.live_text_seen)
-                && spec.content != *text
+                && spec.source_text() != &*text
             {
                 spec.content = text.to_string();
-                node.text_layout = Some(self.text.layout_live(&text, spec.style, self.env.scale));
+                spec.apply_case();
+                node.text_layout = Some(self.text.layout_live(&spec.content, spec.style, self.env.scale));
             }
             for bound in &mut node.live {
                 let initial = bound.seen.is_none();
@@ -3784,7 +3785,7 @@ impl<S: 'static> Runtime<S> {
                     key: n.key.clone(),
                     role: n.role,
                     label: n.label.clone(),
-                    text: n.text.as_ref().filter(|_| !n.input.as_ref().is_some_and(|i| i.edit.is_secure())).map(|t| t.content.clone()),
+                    text: n.text.as_ref().filter(|_| !n.input.as_ref().is_some_and(|i| i.edit.is_secure())).map(|t| t.source_text().to_owned()),
                     rect,
                     target: [n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]],
                     opacity: flight.map_or_else(|| self.inh_scratch.get(i).map_or(p.opacity, |h| h.opacity), |f| f.target_alpha),
@@ -4203,6 +4204,8 @@ fn flatten(
         assert!(input.is_none() && !t.wrap && t.spans.is_empty() && t.reveal < 0.0 && !t.truncate,
             "live_text requires plain single-line text; use truncate_fade for overflow");
     }
+    let mut text = text;
+    if input.is_none() && let Some(t) = &mut text { t.apply_case(); }
     let measured = text.is_some();
     let measure = text.as_ref().map(|t| crate::text::text_hash(&t.content, &t.spans, t.style, scale, None) ^ u64::from(t.wrap) ^ (u64::from(t.truncate || t.truncate_fade) << 1)
         ^ t.advance_in.as_ref().map_or(0, |(run, at)| run.hash.rotate_left(3) ^ (*at as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)));

@@ -23,8 +23,11 @@ use swash::zeno::{Cap, Fill, Format, Join, Mask, Stroke, Transform, Vector};
 use crate::color::{Color, srgb_encode};
 use crate::tok::{Family, OpticalSize, TextStyle};
 
+mod case;
 mod fallback;
 mod svg_path;
+pub use case::TextCase;
+pub(crate) use case::Source as CaseSource;
 
 use fallback::Route;
 

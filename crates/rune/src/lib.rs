@@ -133,7 +133,7 @@ pub use rune_motion::{
 pub use runtime::{Cx, Env, Runtime, TitlebarAction, Waker};
 pub use shape::{LineCap, Path, Shape};
 pub use native_surface::{NativeSurface, SurfaceFit};
-pub use text::{Icon, Link, LinkPaint, Span};
+pub use text::{Icon, Link, LinkPaint, Span, TextCase};
 pub use theme::Theme;
 pub use tok::{Family, OpticalSize, TextStyle};
 pub use tooling::{AppSpec, Chrome, extra_args, run, run_windows, run_windows_with, run_windows_with_args, run_with, set_app_id};

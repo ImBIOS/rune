@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Text can draw in capitals.** `El::text_case(TextCase::Uppercase)` (or `Lowercase`) draws
+  a text element's letters cased without changing its string, like SwiftUI's `textCase`:
+  `text("Text channels").text_case(TextCase::Uppercase)` draws "TEXT CHANNELS". Casing is
+  `str::to_uppercase`'s, so "ß" draws "SS". The dev tree, `ElementInfo::text`, link labels and
+  live text keep the authored string, and `Span` and `Link` ranges stay byte ranges of it even
+  when casing changes the length. Text fields ignore it and draw what is typed, so their caret
+  and selection are unchanged. `TextStyle` is unchanged.
 - **Exiting elements are marked, and gone from lookups.** `ElementInfo` has a new `exiting`
   field, true for an element playing its exit transition and for everything inside it. `--tree`
   (and the hot host's tree) still lists them, now with `"exiting": true`; elements at rest add no
