@@ -840,6 +840,18 @@ policy changes are applied in the same mutation phase.
   `python3 scripts/check-native-pacing.py pacing.jsonl` on a worker with a display.
   Trees expose inherited `opacity`, `scale` and `blur` (logical points); traces keep opacity in
   element rows and encode scale/blur as named scalar channels (`cm`/`c`/`cg`).
+- **Present times** (macOS windows): `--native --trace` frames also carry `target_ms`, the
+  display link's target for the frame, and `present_ms`, the drawable's Metal `presentedTime`
+  (when it reached the screen), both in ms on `t`'s clock. `present_dt_ms` is the gap since the
+  previous presented frame, written only when that frame asked for this one right away, so idle
+  time isn't counted.
+  `present_ms` is `null` when the system skipped the drawable and absent when no time arrived.
+  Lines are written once their present time arrives, two or three frames late. When the trace
+  ends, stderr gets a summary: present-interval p50/p95/max, intervals under 2 ms (frames
+  bunched onto the screen together) and over 1.5 refresh periods (missed refreshes), and the
+  lag from target to present. Overlays, other platforms and headless traces write no present
+  fields. Without `--trace` nothing changes. Capture on a display, not headless:
+  `cargo run --profile perf -p rune --example pacing -- --native --trace pacing.jsonl --frames 240`.
 
 ## Measured (Studio, M-series, headless at 2×)
 

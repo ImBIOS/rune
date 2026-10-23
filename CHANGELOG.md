@@ -5,6 +5,16 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Native traces record when frames reach the screen.** On macOS, `--native --trace` frames
+  now add `target_ms` (the display link's target) and `present_ms` (Metal's `presentedTime`
+  for the frame's drawable), plus `present_dt_ms`, the gap from the previous presented frame
+  when the two were drawn back to back. A skipped drawable writes `present_ms: null`. Each line
+  is written once its present time arrives, so frames land in the file two or three frames
+  late, still in order. When the trace ends it prints a summary to stderr: present-interval
+  p50/p95/max, intervals under 2 ms (bunched) and over 1.5 refresh periods (missed), and the
+  target-to-present lag. Every other field is unchanged, and readers that ignore unknown keys
+  read the new traces as before. Overlays, other platforms and headless traces add no present
+  fields, and nothing changes without `--trace`.
 - **A late frame no longer slows motion down.** Windows, overlays and the hot and dev hosts now
   share one frame-step rule (`frame_clock`). Motion already running advances by the real time
   since the last frame, up to 250 ms, instead of 1/30 s at most. Before, a host marked idle

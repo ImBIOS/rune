@@ -596,6 +596,20 @@ pub(crate) struct Trace {
     states: HashMap<u32, ([i64; 6], u32, [i64; 4])>,
     effects: HashMap<u32, [String; 2]>,
     channels: rune_motion::TraceChannels,
+    path: PathBuf,
+    /// Lines waiting for present times; `None` writes each frame at once.
+    presents: Option<crate::present_time::Presents>,
+}
+
+/// A native frame's timing beyond its submission time.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct FrameTiming {
+    /// The display link's target, ms on the trace's clock.
+    pub target_ms: Option<f64>,
+    /// The drawable the frame presented, when present times are recorded.
+    pub drawable: Option<u64>,
+    /// The previous frame asked for this one right away (it wasn't idle).
+    pub continuous: bool,
 }
 
 fn r2(v: f32) -> f64 {
@@ -619,7 +633,25 @@ impl Trace {
         });
         if clock == "wall" { header["timestamp"] = "cpu-submit".into(); }
         let _ = writeln!(out, "{header}");
-        Trace { out, ids: HashMap::new(), described: HashMap::new(), states: HashMap::new(), effects: HashMap::new(), channels: Default::default() }
+        Trace { out, ids: HashMap::new(), described: HashMap::new(), states: HashMap::new(), effects: HashMap::new(),
+            channels: Default::default(), path: path.clone(), presents: None }
+    }
+
+    /// Holds each frame's line until its present time arrives from `source`, then writes
+    /// it with `present_ms` and `present_dt_ms`. `start` is the trace clock's zero.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn record_presents(&mut self, source: std::sync::Arc<dyn crate::present_time::Source>, start: Instant) {
+        self.presents = Some(crate::present_time::Presents::new(source, start));
+    }
+
+    /// Waits up to `wait` for the last frames' present times, then writes every held line.
+    pub(crate) fn settle_presents(&mut self, wait: std::time::Duration) {
+        let Some(presents) = self.presents.as_mut() else { return };
+        let until = Instant::now() + wait;
+        while presents.waiting() && Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        presents.flush(&mut self.out);
     }
 
     fn id(&mut self, key: &str) -> u32 {
@@ -628,6 +660,10 @@ impl Trace {
     }
 
     pub(crate) fn frame<S>(&mut self, rt: &mut Runtime<S>, t_ms: f64, cpu_ms: f64) {
+        self.frame_timed(rt, t_ms, cpu_ms, FrameTiming::default());
+    }
+
+    pub(crate) fn frame_timed<S>(&mut self, rt: &mut Runtime<S>, t_ms: f64, cpu_ms: f64, timing: FrameTiming) {
         let els = rt.elements();
         let settled = rt.settled;
         let mut metas = Vec::new();
@@ -756,8 +792,26 @@ impl Trace {
         let mut line = line.to_string();
         line.pop(); // Append scalar fields to the same frame object.
         self.channels.write_json(&mut line);
+        if let Some(target) = timing.target_ms {
+            line.push_str(&format!(r#","target_ms":{target}"#));
+        }
+        if let Some(presents) = self.presents.as_mut() {
+            presents.push(line, timing.drawable, timing.continuous, &mut self.out);
+            return;
+        }
         line.push('}');
         let _ = writeln!(self.out, "{line}");
+    }
+}
+
+impl Drop for Trace {
+    fn drop(&mut self) {
+        if self.presents.is_none() { return; }
+        self.settle_presents(crate::present_time::SETTLE);
+        let _ = self.out.flush();
+        if let Some(summary) = std::fs::read_to_string(&self.path).ok().as_deref().and_then(crate::present_time::Summary::of_trace) {
+            eprintln!("{summary}");
+        }
     }
 }
 
@@ -1266,6 +1320,55 @@ mod tests {
             assert_eq!(renamed["host"], "other-host");
             assert!(!updated.iter().any(|m| m["nm"] == "fixed"), "descendant override must survive parent namespace changes");
         }
+    }
+
+    #[test]
+    fn native_traces_add_target_and_present_times_without_changing_other_fields() {
+        struct Presents(std::sync::Mutex<Vec<crate::present_time::Presented>>);
+        impl crate::present_time::Source for Presents {
+            fn take(&self, out: &mut Vec<crate::present_time::Presented>) { out.append(&mut self.0.lock().unwrap()); }
+        }
+        let view = |_: &bool, _: &mut Cx<bool>| crate::el().key("box").size(20.0, 20.0);
+        let run = |name: &str, timed: bool| {
+            let mut rt = Runtime::new(false, view, (100.0, 100.0), Env { scale: 1.0, system_dark: true });
+            let path = std::env::temp_dir().join(format!("rune-present-{name}-{}.jsonl", std::process::id()));
+            let start = Instant::now();
+            let source = std::sync::Arc::new(Presents(Default::default()));
+            {
+                let mut trace = Trace::open_clock(&path, rt.viewport, 120.0, 1.0, "wall");
+                if timed { trace.record_presents(source.clone(), start); }
+                for k in 0..3u64 {
+                    rt.frame(1.0 / 120.0);
+                    let timing = FrameTiming { target_ms: timed.then_some(k as f64 * 8.333), drawable: timed.then_some(k + 1), continuous: k > 0 };
+                    trace.frame_timed(&mut rt, k as f64 * 8.0, 0.0, timing);
+                    let at = start + std::time::Duration::from_micros(20_000 + k * 8_333);
+                    source.0.lock().unwrap().push((k + 1, Some(at)));
+                }
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            std::fs::remove_file(path).unwrap();
+            text
+        };
+        let plain = run("plain", false);
+        let timed = run("timed", true);
+        let strip = |text: &str| -> Vec<Value> {
+            text.lines().map(|l| {
+                let mut v: Value = serde_json::from_str(l).unwrap();
+                for key in ["target_ms", "present_ms", "present_dt_ms"] { v.as_object_mut().unwrap().remove(key); }
+                if let Some(q) = v.get_mut("quality") { q["cpu_ms"] = 0.into(); }
+                v
+            }).collect()
+        };
+        assert_eq!(strip(&plain), strip(&timed), "present timing only adds fields");
+        assert!(!plain.contains("present_ms") && !plain.contains("target_ms"), "untimed frames keep the old format");
+        let frames: Vec<Value> = timed.lines().skip(1).map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(frames.len(), 3, "every held line is written when the trace ends");
+        assert_eq!(frames[1]["target_ms"], 8.333);
+        assert_eq!(frames[1]["present_ms"], 28.333);
+        assert_eq!(frames[1]["present_dt_ms"], 8.333);
+        let summary = crate::present_time::Summary::of_trace(&timed).unwrap();
+        assert_eq!((summary.frames, summary.presented, summary.bunched, summary.missed), (3, 3, 0, 0));
+        assert!(crate::present_time::Summary::of_trace(&plain).is_none());
     }
 
     #[test]

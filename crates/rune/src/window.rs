@@ -30,6 +30,9 @@ struct Win {
     pacing: Option<crate::display_link::DisplayLink>,
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
     activator: Option<crate::activation::Activator>,
+    /// Reports when each drawable reached the screen while tracing.
+    #[cfg(target_os = "macos")]
+    present: Option<crate::present_time::metal::LayerHook>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     #[cfg(target_os = "macos")]
@@ -395,6 +398,11 @@ struct Host<S: 'static> {
     shortcuts: crate::shortcuts::Guard,
     menus: crate::native_menu::Guard<S>,
     rt: Runtime<S>,
+    /// Before `win` and `gpu`: fields drop in order, and the trace waits for the window's last
+    /// present times.
+    trace: Option<crate::tooling::Trace>,
+    trace_start: Option<Instant>,
+    trace_frames: usize,
     win: Option<Win>,
     gpu: Option<(Arc<Gpu>, Renderer, wgpu::TextureFormat)>,
     gpu_pool: Rc<RefCell<Weak<Gpu>>>,
@@ -409,9 +417,9 @@ struct Host<S: 'static> {
     secure_input: crate::secure_input::SecureInput,
     ime_allowed: bool,
     comp: Option<Box<dyn Compositor<S>>>,
-    trace: Option<crate::tooling::Trace>,
-    trace_start: Option<Instant>,
-    trace_frames: usize,
+    /// Present times of every window this host opens while tracing.
+    #[cfg(target_os = "macos")]
+    present_log: Option<Arc<crate::present_time::metal::Log>>,
     #[cfg(target_os = "macos")]
     frame_wake: Waker,
 }
@@ -462,6 +470,8 @@ impl<S: 'static> Host<S> {
             let _ = proxy.send_event(WakeEvent::App(slot));
         });
         let (open, keep_running, on_close, release_gpu) = (app.open, app.keep_running, app.on_close, app.release_gpu);
+        #[cfg(target_os = "macos")]
+        let present_log = args.trace.as_ref().map(|_| Arc::default());
         let mut app = app;
         let comp = app.compositor.take();
         let on_focus = app.on_focus;
@@ -525,6 +535,8 @@ impl<S: 'static> Host<S> {
             trace: None,
             trace_start: None,
             trace_frames: 0,
+            #[cfg(target_os = "macos")]
+            present_log,
             #[cfg(target_os = "macos")]
             frame_wake: Arc::new(move || { let _ = frame_proxy.send_event(WakeEvent::DisplayTick(slot)); }),
         }
@@ -986,6 +998,8 @@ impl<S: 'static> Host<S> {
         if !self.closes() { return; }
         self.close_hook();
         self.rt.set_live_visible(false);
+        // While the window still shows its last frames.
+        if let Some(trace) = &mut self.trace { trace.settle_presents(crate::present_time::SETTLE); }
         if self.rt.shell_request.take() == Some(Shell::Quit) {
             event_loop.exit();
             return;
@@ -1220,12 +1234,18 @@ impl<S: 'static> Host<S> {
         if visible || launcher { window.request_redraw(); }
         *self.native_handle.native.window.lock().unwrap() = Arc::downgrade(&window);
         self.native_handle.native.number.store(native_window_number(&window).unwrap_or(0), Ordering::Release);
+        #[cfg(target_os = "macos")]
+        let present = self.present_log.clone().and_then(|log| crate::present_time::metal::LayerHook::attach(&surface, log));
+        #[cfg(target_os = "macos")]
+        if self.present_log.is_some() && present.is_none() { eprintln!("rune: trace: this surface reports no present times"); }
         self.win = Some(Win {
             first_frame: FirstFrame::default(),
             #[cfg(target_os = "macos")]
             pacing: crate::display_link::DisplayLink::new(&window, self.frame_wake.clone()),
             #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
             activator: None,
+            #[cfg(target_os = "macos")]
+            present,
             surface,
             config,
             #[cfg(target_os = "macos")]
@@ -1286,20 +1306,28 @@ impl<S: 'static> Host<S> {
                 if !hidden { l.window.request_redraw(); } return;
             }
         };
+        #[cfg(target_os = "macos")]
+        let drawable = l.present.as_ref().and(self.present_log.as_ref()).and_then(|log| log.acquired());
+        #[cfg(not(target_os = "macos"))]
+        let drawable = None;
         let now = Instant::now();
         if self.trace.is_none() && let Some(path) = &self.args.trace {
             let hz = l.window.current_monitor().and_then(|m| m.refresh_rate_millihertz()).map_or(60.0, |hz| hz as f64 / 1000.0);
             #[cfg(target_os = "macos")]
             let hz = l.pacing.as_ref().map_or(hz, |pacing| pacing.refresh_hz());
-            self.trace = Some(crate::tooling::Trace::open_clock(path, self.rt.viewport, hz,
-                l.window.scale_factor() as f32, "wall"));
+            #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+            let mut trace = crate::tooling::Trace::open_clock(path, self.rt.viewport, hz, l.window.scale_factor() as f32, "wall");
+            #[cfg(target_os = "macos")]
+            if let Some(log) = self.present_log.clone() && l.present.is_some() { trace.record_presents(log, now); }
+            self.trace = Some(trace);
             self.trace_start = Some(now);
             self.rt.scene.store_mut().audit_retargets(true);
         }
         #[cfg(not(target_os = "macos"))]
-        let frame_time = now;
+        let (frame_time, target): (_, Option<Instant>) = (now, None);
         #[cfg(target_os = "macos")]
         let frame_time = target.unwrap_or(now);
+        let target_ms = target.zip(self.trace_start).map(|(target, start)| crate::present_time::ms_since(start, target));
         let rt = &mut self.rt;
         if hidden && l.first_frame.settles() { rt.settle_all(); }
         let (mut animating, dt) = if hidden {
@@ -1364,10 +1392,15 @@ impl<S: 'static> Host<S> {
         #[cfg(target_os = "macos")]
         if let Some(pacing) = &mut l.pacing { pacing.presented(submitted); }
         if let Some(trace) = self.trace.as_mut() {
-            trace.frame(rt, (submitted - self.trace_start.unwrap()).as_secs_f64() * 1000.0,
-                now.elapsed().as_secs_f64() * 1000.0);
+            // A frame count keeps the trace redrawing while idle, as below.
+            let continuous = !self.idle || self.args.frames.is_some();
+            let timing = crate::tooling::FrameTiming { target_ms, drawable, continuous };
+            trace.frame_timed(rt, (submitted - self.trace_start.unwrap()).as_secs_f64() * 1000.0,
+                now.elapsed().as_secs_f64() * 1000.0, timing);
             self.trace_frames += 1;
             if self.args.frames.is_some_and(|n| self.trace_frames >= n) {
+                // While the window still shows its last frames.
+                trace.settle_presents(crate::present_time::SETTLE);
                 self.finished = true;
                 return;
             }
