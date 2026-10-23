@@ -2158,6 +2158,7 @@ impl<S: 'static> Runtime<S> {
                 input.change = None;
                 input.edit.focused = false;
                 input.edit.clear_preedit();
+                input.edit.conceal();
             }
             self.node_index.insert(old.id, nodes.len());
             nodes.push(old);
@@ -4906,5 +4907,35 @@ mod tests {
         assert!(!rt.animating);
         let r10 = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r10")).unwrap();
         assert!((r10.rect[1] + r10.rect[3] - 300.0).abs() < 0.05, "{:?}", r10.rect);
+    }
+
+    /// The app clears its password as the card leaves; the exiting copy of the field must
+    /// hold no plaintext from that frame on, yet paint the same dots and no placeholder.
+    #[test]
+    fn an_exiting_secure_field_paints_dots_without_its_secret() {
+        use crate::{text_input, TextEdit, TextStyle};
+        struct Card { pw: TextEdit, open: bool }
+        fn view(s: &Card, _: &mut Cx<Card>) -> El {
+            let mut root = col().key("root").size(200.0, 100.0);
+            if s.open {
+                root = root.child(text_input(&s.pw, TextStyle::new(14.0, 400.0)).single_line()
+                    .placeholder("Enter your password", Color::WHITE).key("pw").size(200.0, 40.0)
+                    .transition(Transition::blur_replace()).on_edit(|s: &mut Card| &mut s.pw));
+            }
+            root
+        }
+        let mut rt = Runtime::new(Card { pw: TextEdit::new("hunter2").secure(), open: true }, view, (200.0, 100.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        let painted = rt.instances.len();
+        rt.update(|s, _| { s.pw.clear(); s.open = false; });
+        assert!(rt.frame(1.0 / 60.0));
+        let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("pw")).expect("exiting field stays drawn");
+        assert!(rt.is_exiting(n.id));
+        let edit = &n.input.as_ref().unwrap().edit;
+        assert_eq!(edit.text, "•".repeat(7), "only the mask remains");
+        assert!(!edit.has_history() && !edit.focused);
+        assert_eq!(n.text.as_ref().unwrap().content, "•".repeat(7));
+        assert_eq!(rt.instances.len(), painted, "the same dots, no placeholder");
+        assert!(!format!("{:?}", rt.elements()).contains("hunter2"));
     }
 }

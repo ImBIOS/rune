@@ -218,6 +218,16 @@ impl TextEdit {
         self.history = Arc::default();
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_history(&self) -> bool { !self.history.undo.is_empty() || !self.history.redo.is_empty() }
+
+    /// For a secure field that has started exiting: wipe the secret and keep only its mask, so
+    /// the field paints the same dots (no placeholder) through the exit with no plaintext.
+    pub(crate) fn conceal(&mut self) {
+        if !self.secure { return; }
+        self.replace_text("•".repeat(self.text.chars().count()));
+    }
+
     /// Map model bytes to the bullet layout's bytes and back. Each Unicode scalar gets one
     /// bullet, so UTF-8 length never changes caret/selection alignment.
     pub(crate) fn display_index(&self, byte: usize) -> usize {

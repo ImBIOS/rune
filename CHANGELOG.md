@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Exiting password fields drop their secret.** When a secure text input starts its exit
+  animation, its copy of the text is wiped and replaced by its mask, so it paints the same dots
+  (no placeholder, no caret) through the exit without holding the password.
 - **`Tx::copy_secret` returns a `SecretCopy` handle.** `state()` / `holds()` tell whether the
   copy is still the last thing Rune wrote and the clipboard hasn't changed (the worker watches
   the change count while a secret is held), whether a write failed, and whether it was cleared or
