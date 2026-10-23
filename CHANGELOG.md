@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Hover lands at once.** A `.hover(color)` overlay (and a hover group's `group_opacity`) used
+  to spring in, so a highlight trailed the pointer. Without `.hover_motion`, hover now appears on
+  the first frame under the pointer and fades out over 0.1 s, like a native sidebar or menu.
+  `.hover_motion(enter, exit)` still sets both curves.
 - **App icons on Windows and Linux; aspect-fit images**. `ImageCache::app_icon` now rasterizes
   an executable's or `.ico`'s icon on Windows and a `.desktop` entry's hicolor or `pixmaps`
   icon (PNG or SVG) on Linux, where it used to resolve to an error, so apps that fell back on
@@ -38,6 +42,7 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   flagged unmaintained (RUSTSEC-2026-0370, -0371, -0372) and no longer appear in Rune's default
   dependency graph. Linux builds need Rust 1.89 or newer. The opt-in `native-file-dialog` feature
   still reaches zbus 5 through `rfd`'s `ashpd`, which has no zbus 6 release yet.
+||||||| parent of 46c9c07 (Land hover at once and fade it out, like a native sidebar)
 - **Steady 60 Hz in Low Power Mode on ProMotion Macs.** Low Power Mode caps the built-in panel
   at 60 Hz while macOS still reports 120 Hz, so Rune drew a few fast frames after each change
   before settling. Windows and overlays on the built-in display now pace at 60 Hz in Low Power

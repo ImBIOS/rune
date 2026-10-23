@@ -2785,9 +2785,12 @@ impl<S: 'static> Runtime<S> {
             let capture_inside = if self.secondary_capture.is_some() { inside } else { self.capture_inside };
             let pressed = captured == Some(n.path.as_str()) && capture_inside && n.vis.press.a > 0.0;
             let id = n.id;
+            // Like a native sidebar or menu: the highlight lands with the pointer and
+            // fades briefly as it leaves.
             let hover_anim = match n.vis.hover_motion {
                 Some((enter, exit)) => if hovered { enter } else { exit },
-                None => motion::SNAPPY.into(),
+                None if hovered => Anim::INSTANT,
+                None => rune_motion::Curve::tween(0.1, rune_motion::Easing::EASE_OUT).into(),
             };
             self.scene.animate(id, P_HOVER, hovered as u8 as f32, hover_anim);
             self.scene.animate(id, P_PRESS, pressed as u8 as f32, if pressed { motion::INSTANT } else { motion::SNAPPY });
@@ -4567,6 +4570,27 @@ mod tests {
         assert_eq!(rt.cursor(), Cursor::Default);
         rt.pointer_leave();
         assert_eq!(rt.cursor(), Cursor::Default);
+    }
+
+    #[test]
+    fn hover_lands_at_once_and_fades_out() {
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            col().size(200.0, 80.0)
+                .child(el().key("row").size(200.0, 40.0).hover(crate::color::oklcha(1.0, 0.0, 0.0, 0.1)).on_press(|_: &mut ()| {}))
+        }
+        let mut rt = Runtime::new((), view, (200.0, 80.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let id = rt.nodes.iter().find(|n| n.key.as_deref() == Some("row")).unwrap().id;
+        let hover = |rt: &Runtime<()>| rt.scene.get(id, P_HOVER).unwrap_or(0.0);
+        rt.pointer_move(50.0, 20.0);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(hover(&rt), 1.0, "the first frame under the pointer is fully hovered");
+        rt.pointer_move(50.0, 60.0);
+        rt.frame(1.0 / 120.0);
+        let leaving = hover(&rt);
+        assert!(leaving > 0.0 && leaving < 1.0, "leaving fades: {leaving}");
+        rt.frame(0.5);
+        assert_eq!(hover(&rt), 0.0);
     }
 
     #[test]
