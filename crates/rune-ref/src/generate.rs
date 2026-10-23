@@ -82,7 +82,8 @@ pub fn scene(records: &[[u8; 32]]) -> Scene {
                     0.0,
                 ]
             }
-            4 => p.uv = color(10),
+            // Kinds 2 and 3 are the only other readers of bytes 29..32.
+            4 => p.uv = color(29),
             _ => {}
         }
         scene.primitives.push(p);

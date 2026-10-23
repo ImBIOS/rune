@@ -14,6 +14,7 @@ enum Mode {
     GradientThenBorder,
     RimGradient,
     RimBorder,
+    SolidBottom,
 }
 
 fn view(mode: &Mode, _: &mut Cx<Mode>) -> El {
@@ -24,6 +25,7 @@ fn view(mode: &Mode, _: &mut Cx<Mode>) -> El {
         Mode::GradientThenBorder => capsule.border_gradient(0.5, TOP, BOTTOM).border(1.0, RIM),
         Mode::RimGradient => capsule.fill(DARK).border_gradient(0.5, RIM, RIM),
         Mode::RimBorder => capsule.fill(DARK).border(0.5, RIM),
+        Mode::SolidBottom => capsule.border(0.5, BOTTOM),
     };
     el().size(68.0, 22.0).child(capsule)
 }
@@ -81,6 +83,26 @@ fn border_gradient_springs_from_a_solid_border() {
     assert!(i.uv[3] > rim[3] && i.uv[3] < bottom[3] && i.uv[2] < bottom[2], "bottom mid-spring: {:?}", i.uv);
     rt.frame(5.0);
     assert_eq!(ring(&rt).uv, bottom);
+}
+
+#[test]
+fn solid_border_springs_from_a_gradient_without_moving_a_settled_bottom() {
+    // The new solid colour equals the old bottom stop, so only the top edge has anywhere to go.
+    let mut rt = frame(Mode::Gradient);
+    rt.update(|s, _| *s = Mode::SolidBottom);
+    let bottom = BOTTOM.premul(1.0);
+    let mut kinds = Vec::new();
+    for step in 1..=120 {
+        rt.frame(1.0 / 60.0);
+        let i = ring(&rt);
+        let edge = if i.params[1] == KIND_GRADIENT { i.uv } else { i.border };
+        assert_eq!(edge, bottom, "frame {step}: the bottom edge left `bottom` ({:?})", i);
+        kinds.push(i.params[1]);
+    }
+    assert_eq!(kinds[0], KIND_GRADIENT, "the top edge springs rather than jumping");
+    rt.frame(5.0);
+    let i = ring(&rt);
+    assert_eq!((i.params[1], i.border, i.uv), (KIND_RECT, bottom, [0.0; 4]));
 }
 
 #[test]

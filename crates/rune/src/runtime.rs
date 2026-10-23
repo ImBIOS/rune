@@ -3256,8 +3256,13 @@ impl<S: 'static> Runtime<S> {
                 let bw = n.vis.border_width * sc * s;
                 let border = if bw > 0.0 { self.color(n.id, P_BORDER, n.vis.border).premul(o) } else { [0.0; 4] };
                 // A gradient border draws as KIND_GRADIENT with a width: `border` top, `uv` bottom.
-                let border_bottom = (bw > 0.0 && (n.vis.border_bottom.is_some() || self.scene.store().is_animating(n.id, P_BORDER_BOTTOM)))
-                    .then(|| self.color(n.id, P_BORDER_BOTTOM, n.vis.border_bottom.unwrap_or(n.vis.border)).premul(o));
+                // After a switch back to `border`, it stays a gradient until both stops meet.
+                let store = self.scene.store();
+                let springing = store.has(n.id, P_BORDER_BOTTOM)
+                    && (store.is_animating(n.id, P_BORDER_BOTTOM) || store.is_animating(n.id, P_BORDER));
+                let border_bottom = (bw > 0.0 && (n.vis.border_bottom.is_some() || springing))
+                    .then(|| self.color(n.id, P_BORDER_BOTTOM, n.vis.border_bottom.unwrap_or(n.vis.border)).premul(o))
+                    .filter(|b| n.vis.border_bottom.is_some() || *b != border);
                 let (border_kind, border_uv) = border_bottom.map_or((KIND_RECT, [0.0; 4]), |b| (KIND_GRADIENT, b));
                 let border_a = border[3].max(border_uv[3]);
                 if layered {
