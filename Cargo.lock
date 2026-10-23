@@ -3085,7 +3085,6 @@ dependencies = [
  "resvg",
  "rune",
  "rune-motion",
- "serde_json",
  "unicode-segmentation",
 ]
 
@@ -3117,7 +3116,6 @@ dependencies = [
  "rune",
  "serde",
  "serde_json",
- "wgpu",
 ]
 
 [[package]]
