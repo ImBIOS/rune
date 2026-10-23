@@ -23,6 +23,7 @@ use crate::{OverlayInput, OverlayOptions, OverlayPlacement};
 
 pub(crate) enum Input {
     Move(f32, f32), Leave, Button(bool), Key(crate::KeyEvent),
+    Physical(crate::PhysicalInput, Option<crate::KeyEvent>),
 }
 
 #[derive(Default)]
@@ -77,7 +78,13 @@ impl Dispatch<WlPointer, ()> for State {
                 state.pointer_inside = false;
                 state.input.push(Input::Leave);
             }
-            wl_pointer::Event::Button { button: 0x110, state: wayland_client::WEnum::Value(button), .. } if state.pointer_inside => state.input.push(Input::Button(button == wl_pointer::ButtonState::Pressed)),
+            wl_pointer::Event::Button { button: 0x110, state: wayland_client::WEnum::Value(button), .. } if state.pointer_inside => {
+                let pressed = button == wl_pointer::ButtonState::Pressed;
+                state.input.push(Input::Button(pressed));
+                if pressed && let Some(xkb) = &state.xkb {
+                    state.input.push(Input::Physical(crate::PhysicalInput::Modifiers(key_mods(xkb)), None));
+                }
+            }
             _ => {}
         }
     }
@@ -87,7 +94,10 @@ impl Dispatch<WlKeyboard, ()> for State {
         use xkbcommon::xkb;
         match event {
             wl_keyboard::Event::Enter { surface, .. } => state.keyboard_focus = state.surface.as_ref() == Some(&surface),
-            wl_keyboard::Event::Leave { surface, .. } if state.surface.as_ref() == Some(&surface) => state.keyboard_focus = false,
+            wl_keyboard::Event::Leave { surface, .. } if state.surface.as_ref() == Some(&surface) => {
+                state.keyboard_focus = false;
+                state.input.push(Input::Physical(crate::PhysicalInput::FocusLost, None));
+            }
             wl_keyboard::Event::Keymap { format: wayland_client::WEnum::Value(wl_keyboard::KeymapFormat::XkbV1), fd, size } => {
                 use std::io::Read;
                 let mut map = String::new();
@@ -97,23 +107,37 @@ impl Dispatch<WlKeyboard, ()> for State {
                 }
             }
             wl_keyboard::Event::Modifiers { mods_depressed, mods_latched, mods_locked, group, .. } => {
-                // TODO(item 6): emit the shared modifier-only event here when available.
-                if let Some(xkb) = &mut state.xkb { xkb.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group); }
+                if let Some(xkb) = &mut state.xkb {
+                    xkb.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
+                    state.input.push(Input::Physical(crate::PhysicalInput::Modifiers(key_mods(xkb)), None));
+                }
             }
-            wl_keyboard::Event::Key { key, state: wayland_client::WEnum::Value(wl_keyboard::KeyState::Pressed), .. } if state.keyboard_focus => {
-                if let Some(xkb) = &state.xkb && let Some(key) = key_event(xkb, key) { state.input.push(Input::Key(key)); }
+            wl_keyboard::Event::Key { key, state: wayland_client::WEnum::Value(pressed), .. } if state.keyboard_focus => {
+                use winit::platform::scancode::PhysicalKeyExtScancode;
+                if let Some(xkb) = &state.xkb {
+                    let pressed = pressed == wl_keyboard::KeyState::Pressed;
+                    let fallback = pressed.then(|| key_event(xkb, key)).flatten();
+                    if let winit::keyboard::PhysicalKey::Code(key) = crate::PhysicalKeyCode::from_scancode(key) {
+                        state.input.push(Input::Physical(crate::PhysicalInput::Key { key, mods: key_mods(xkb), pressed, repeat: false }, fallback));
+                    } else if let Some(key) = fallback { state.input.push(Input::Key(key)); }
+                }
             }
             _ => {}
         }
     }
 }
 
+fn key_mods(state: &xkbcommon::xkb::State) -> crate::Mods {
+    use xkbcommon::xkb;
+    let active = |name: &str| state.mod_name_is_active(name, xkb::STATE_MODS_EFFECTIVE);
+    crate::Mods { shift: active(xkb::MOD_NAME_SHIFT), ctrl: active(xkb::MOD_NAME_CTRL), cmd: active(xkb::MOD_NAME_CTRL), alt: active(xkb::MOD_NAME_ALT), logo: active(xkb::MOD_NAME_LOGO) }
+}
+
 fn key_event(state: &xkbcommon::xkb::State, key: u32) -> Option<crate::KeyEvent> {
     use xkbcommon::xkb;
     let code = xkb::Keycode::new(key + 8);
     let symbol = state.key_get_one_sym(code).raw();
-    let active = |name: &str| state.mod_name_is_active(name, xkb::STATE_MODS_EFFECTIVE);
-    let mods = crate::Mods { shift: active(xkb::MOD_NAME_SHIFT), ctrl: active(xkb::MOD_NAME_CTRL), cmd: active(xkb::MOD_NAME_CTRL), alt: active(xkb::MOD_NAME_ALT), logo: active(xkb::MOD_NAME_LOGO) };
+    let mods = key_mods(state);
     let key = match symbol {
         0xff1b => crate::Key::Escape, 0xff0d => crate::Key::Enter, 0xff08 => crate::Key::Backspace,
         0xffff => crate::Key::Delete, 0xff09 | 0xfe20 => crate::Key::Tab,

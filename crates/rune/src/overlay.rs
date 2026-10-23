@@ -957,6 +957,7 @@ impl<T: 'static> Overlay<T> {
                         if down { self.rt.pointer_down(x, y); } else { self.rt.pointer_up(x, y); }
                     },
                     Input::Key(key) => self.rt.key(key),
+                    Input::Physical(event, fallback) => self.rt.physical_with_fallback(event, fallback, None),
                 }
                 self.dirty = true;
             }
@@ -1160,16 +1161,28 @@ impl<T: 'static> AnyHost for Overlay<T> {
                 self.rt.pointer_leave();
                 self.dirty = true;
             }
-            // TODO(item 6): forward standalone modifier transitions once the shared
-            // modifier-only key event lands; do not introduce a second key API here.
-            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
-            WindowEvent::Focused(focused) => {
-                self.rt.set_system_reduced_motion(crate::preferences::reduced_motion());
-                if !focused { self.rt.cancel_composition(); }
+            WindowEvent::ModifiersChanged(m) => {
+                self.mods = m.state();
+                self.rt.physical_input(crate::PhysicalInput::Modifiers(crate::window::map_mods(self.mods)));
                 self.dirty = true;
             }
-            WindowEvent::KeyboardInput { event, .. } if self.options.keys == KeyPolicy::OnDemand && event.state.is_pressed() => {
-                if let Some(key) = crate::window::map_key(&event.logical_key, self.mods) { self.rt.key(key); self.dirty = true; }
+            WindowEvent::Focused(focused) => {
+                self.rt.set_system_reduced_motion(crate::preferences::reduced_motion());
+                if !focused {
+                    self.rt.physical_input(crate::PhysicalInput::FocusLost);
+                    self.rt.cancel_composition();
+                }
+                self.dirty = true;
+            }
+            WindowEvent::KeyboardInput { event, is_synthetic: false, .. } if self.options.keys == KeyPolicy::OnDemand => {
+                let pressed = event.state.is_pressed();
+                let fallback = pressed.then(|| crate::window::map_key(&event.logical_key, self.mods)).flatten();
+                if let winit::keyboard::PhysicalKey::Code(key) = event.physical_key {
+                    self.rt.physical_with_fallback(crate::PhysicalInput::Key {
+                        key, mods: crate::window::map_mods(self.mods), pressed, repeat: event.repeat,
+                    }, fallback, None);
+                } else if let Some(key) = fallback { self.rt.key(key); }
+                self.dirty = true;
             }
             WindowEvent::MouseInput { state, button: winit::event::MouseButton::Left, .. } => {
                 #[cfg(target_os = "macos")]
@@ -1181,7 +1194,10 @@ impl<T: 'static> AnyHost for Overlay<T> {
                     if let Some(point) = self.native.as_ref().and_then(|p| p.take_click(state.is_pressed())) { self.rt.pointer_move(point.0, point.1); }
                     if let Some((x, y)) = self.rt.pointer() {
                         match state {
-                            winit::event::ElementState::Pressed => self.rt.pointer_down(x, y),
+                            winit::event::ElementState::Pressed => {
+                                self.rt.pointer_down(x, y);
+                                self.rt.physical_input(crate::PhysicalInput::Modifiers(crate::window::map_mods(self.mods)));
+                            }
                             winit::event::ElementState::Released => self.rt.pointer_up(x, y),
                         }
                     }
