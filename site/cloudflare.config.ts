@@ -8,7 +8,7 @@ export default defineConfig(({ mode }) => {
   const host = hostForMode(mode)
   return {
     worker: {
-      name: mode === "dev" ? "rune-site-dev" : "rune-site",
+      name: mode === "dev" ? "rune-dev-site" : "rune-production-site",
       compatibilityDate: "2026-10-13",
       entrypoint: "./worker.ts",
       assets: { runWorkerFirst: true },

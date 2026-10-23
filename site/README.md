@@ -20,8 +20,8 @@ how-it-works diagrams are plain HTML in `src/Diagram.tsx`.
 
 The site is served at https://anoma.ly/team/rune and https://dev.anoma.ly/team/rune, the same way as Abattoir.
 
-- A push to `dev` that touches `site/` deploys https://dev.anoma.ly/team/rune (Worker `rune-site-dev`).
-- A push to `production` that touches `site/` deploys https://anoma.ly/team/rune (Worker `rune-site`). To release,
+- A push to `dev` that touches `site/` deploys https://dev.anoma.ly/team/rune (Worker `rune-dev-site`).
+- A push to `production` that touches `site/` deploys https://anoma.ly/team/rune (Worker `rune-production-site`). To release,
   fast-forward it to `dev`: `git push origin dev:production`. Never commit to `production` directly.
 
 Nothing else deploys. `.github/workflows/site.yml` runs `bun run deploy:<production|dev>` with the
