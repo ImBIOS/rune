@@ -55,8 +55,9 @@ let mut k = rune_kit::Kit::from_palette(rune_kit::PaletteSeed {
 k.radius.sm = 3.0;
 ```
 
-This derives surfaces, muted text, borders, states and elevation in linear light. It uses
-neutral typography and motion; override individual tokens on `k` as needed. The default
+This derives surfaces, borders, states and elevation in linear light. Secondary text uses
+OKLab with contrast floors of 4.5:1 (muted) and 3:1 (faint), when the supplied foreground
+supports them. It uses neutral typography and motion; override individual tokens as needed. The default
 glyph set includes `k.glyph.lock`, `k.glyph.eye` and `k.glyph.eye_off`.
 
 - Builders end in `.build(&kit)`; overlays take `.build(&kit, &mut layer)` and return their
