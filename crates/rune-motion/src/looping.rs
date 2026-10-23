@@ -1,9 +1,11 @@
 //! Clock-driven periodic motion. Visibility is a renderer decision, not a second clock.
-use crate::{Animated, Easing, PropClass, Spring};
+use crate::{Animated, Cycle, Easing, PropClass, Spring};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LoopKind {
     Opacity { low: f32, high: f32 },
+    /// Piecewise-linear, wall-clock opacity with a bounded frame rate.
+    OpacityCycle(Cycle),
     Rotation,
 }
 
@@ -15,6 +17,9 @@ pub struct LoopSpec {
 }
 
 impl LoopSpec {
+    pub fn cycle(cycle: Cycle) -> Self {
+        Self { period: f64::from(cycle.period), delay: 0.0, kind: LoopKind::OpacityCycle(cycle) }
+    }
     pub fn opacity(period: f64, delay: f64, low: f32, high: f32) -> Self {
         Self { period, delay, kind: LoopKind::Opacity { low, high } }
     }
@@ -60,10 +65,21 @@ impl LoopTrack {
     pub fn pending_start(&self, now: f64) -> Option<f64> {
         (self.amplitude.target() > 0.0 && now < self.epoch).then_some(self.epoch)
     }
+    /// Wall-clock cycles retain their cadence even when animation time is paused.
+    pub fn frame_interval(&self) -> Option<f64> {
+        match self.spec.kind {
+            LoopKind::OpacityCycle(c) => Some(f64::from(1.0 / c.fps.max(1.0))),
+            _ => None,
+        }
+    }
     /// Opacity multiplier or clockwise radians. Reduced motion uses the calm first pose.
     pub fn sample(&self, now: f64, reduced: bool) -> f32 {
+        self.sample_at(now, now, reduced)
+    }
+    pub fn sample_at(&self, now: f64, wall: f64, reduced: bool) -> f32 {
         let phase = if reduced { 0.0 } else { self.phase(now) as f32 };
         match self.spec.kind {
+            LoopKind::OpacityCycle(c) => if reduced { c.still } else { c.sample(wall) },
             LoopKind::Rotation => phase * core::f32::consts::TAU,
             LoopKind::Opacity { low, high } => {
                 let triangle = if phase < 0.5 { phase * 2.0 } else { (1.0 - phase) * 2.0 };
@@ -76,6 +92,17 @@ impl LoopTrack {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cycle_preserves_wall_phase_stops_still_and_cadence() {
+        let c = Cycle { period: 1.7, phase: 0.3, stops: &[(0.0, 0.2), (0.2, 1.0), (0.7, 0.1), (1.0, 0.2)], still: 0.4, fps: 30.0 };
+        let track = LoopTrack::new(LoopSpec::cycle(c), 4.0);
+        for i in 0..200 {
+            let wall = i as f64 * 0.037;
+            assert_eq!(track.sample_at(4.0, wall, false), c.sample(wall));
+            assert_eq!(track.sample_at(4.0, wall, true), c.still);
+        }
+        assert_eq!(track.frame_interval(), Some(f64::from(1.0 / 30.0_f32)));
+    }
     #[test]
     fn delay_has_one_wake_and_no_active_frames() {
         let track = LoopTrack::new(LoopSpec::opacity(1.0, 2.0, 0.0, 1.0), 3.0);

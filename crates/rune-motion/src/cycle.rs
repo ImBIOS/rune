@@ -1,5 +1,4 @@
-//! Wall-clock opacity loops (activity spinners): Rune's `.cycle()`. Kept here, beside the other
-//! curves, so a general loop spec can absorb it.
+//! Wall-clock opacity curve used by `LoopSpec::cycle` and Rune's `.cycle()` sugar.
 
 /// A looping opacity curve sampled from the wall clock: `stops` are (loop fraction 0–1, opacity)
 /// pairs interpolated linearly; this element is at `frac(t / period - phase)`. Every cycle with
