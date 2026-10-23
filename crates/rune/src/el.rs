@@ -1173,6 +1173,10 @@ impl El {
         self.vis.radius = r;
         self
     }
+    /// A ring `width` points wide just inside the border box, following the corner radii. It
+    /// takes no layout space and replaces the fill under it rather than drawing over it, so a
+    /// translucent ring shows what's behind the element. For a stroke over the fill (SwiftUI's
+    /// `strokeBorder`), put the border on an unfilled child the same size.
     pub fn border(mut self, width: f32, c: Color) -> Self {
         self.vis.border_width = width;
         self.vis.border = c;
@@ -1180,7 +1184,8 @@ impl El {
         self
     }
     /// A border whose colour runs from `top` at the top edge to `bottom` at the bottom edge,
-    /// e.g. a top-lit hairline rim. Replaces any `border`, and `border` replaces it.
+    /// e.g. a top-lit hairline rim. Drawn like [`El::border`], inside the box in place of the
+    /// fill. Replaces any `border`, and `border` replaces it.
     pub fn border_gradient(mut self, width: f32, top: Color, bottom: Color) -> Self {
         self.vis.border_width = width;
         self.vis.border = top;
