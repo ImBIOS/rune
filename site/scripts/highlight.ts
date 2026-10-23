@@ -1,5 +1,5 @@
-/** A small build-time highlighter: one regex pass per language, spans with `tk-*` classes. Copied from Abattoir's
- *  packages/site/src/content/highlight.ts until this site moves onto the shared package. Only scripts/snippets.ts
+/** A small build-time highlighter: one regex pass per language, spans with `tk-*` classes. Copied from
+ *  @anomalyco/site's content/highlight.ts until this site moves onto the shared package. Only scripts/snippets.ts
  *  imports it, at build time; the client gets finished HTML. */
 
 export type CodeLang = "rust" | "toml" | "ts" | "css" | "shell" | "plain"

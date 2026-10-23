@@ -28,5 +28,6 @@ Everything pushed stays public in history. Before committing, run `git diff --ca
 - home folder and temp paths, machine names and tailnet hostnames. Write repo-relative paths, and use `host.example.ts.net` in tests;
 - session IDs, chat or Slack links, and quotes from private sessions, chats or calls;
 - teammates' names attached to their plans, opinions or internal discussions, and private repos or branches;
+- quotes of, or citations to, Anomaly's internal guides and rules (Abattoir). Say what the code does and why on its own terms;
 - agent handoff notes (`REVIEW-TO-PARENT.md` and similar), raw evidence, logs and benchmark dumps;
 - generated videos and strips nothing links to. Commit the stills a doc shows.

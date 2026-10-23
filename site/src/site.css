@@ -1,7 +1,7 @@
 /* Rune on the Anomaly docs system (system/tokens.css, system/primitives.css): the accent, the wordmark, the home
    page, the diagrams and the page parts the system doesn't have yet. */
 :root {
-  /* Rune's accent replaces Abattoir's red ink; everything else is the shared system as is. */
+  /* Rune's accent replaces the system's red ink; everything else is the shared system as is. */
   --ink: oklch(0.74 0.14 245);
 }
 
@@ -31,7 +31,7 @@
 }
 .wordmark-glint { fill: oklch(0.97 0.035 245); }
 .wordmark-rune.is-lit { fill: oklch(0.97 0.035 245); }
-/* The lockup row stands as tall as Abattoir's, whose search button sets it, so the nav starts on the same line. */
+/* The lockup row stands as tall as the system's, whose search button sets it, so the nav starts on the same line. */
 .brand {
   display: flex;
   align-items: center;
@@ -827,7 +827,7 @@
 }
 
 /* The system's frame lets its two rows share spare height under 900 px, which drops a short page to the middle of the
-   screen; the top bar keeps its own height and the page takes the rest. (Abattoir has the same bug.) */
+   screen; the top bar keeps its own height and the page takes the rest. */
 @media (max-width: 900px) {
   .frame { grid-template-rows: auto minmax(0, 1fr); }
 }

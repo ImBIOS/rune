@@ -68,7 +68,7 @@ pub(crate) fn anchor(k: &Kit, content: El, anchor: &str, placement: Placement, g
 }
 
 /// Positions a menu surface next to `anchor` with no entrance: it is there on the next frame,
-/// and only its close fades (`.25 / 0`). Abattoir: "Open menus instantly, fade only the close".
+/// and only its close fades (`.25 / 0`).
 /// The 0.1 s enter spring only plays when a menu reopens mid-fade, from wherever the fade was.
 pub(crate) fn menu_anchor(k: &Kit, content: El, anchor: &str, placement: Placement, gap: f32) -> El {
     let (side, align) = placement.split();

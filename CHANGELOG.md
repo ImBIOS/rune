@@ -140,7 +140,7 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 - **Linux builds link `libxkbcommon`** (`a7f0f56`). Display-targeted overlays added the `xkbcommon`
   crate, so CI and build hosts without `libxkbcommon-dev` (Fedora: `libxkbcommon-devel`) fail at
   link time. See "Linux system packages" in `crates/rune/README.md`.
-- **`.truncate_fade()` fades 1.5 em instead of 1 em** (Abattoir: 1.5 em on overflowing text).
+- **`.truncate_fade()` fades 1.5 em instead of 1 em**.
   Overflowing labels fade over a wider edge; labels that fit don't change. New
   `.truncate_fade_width(em)` sets another width.
 - **Emoji with `U+FE0F` draw in colour.** `❤️`, `☀️`, `✔️` and other characters a text font also
@@ -168,7 +168,7 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   in flight, an old one at rest. Content, geometry and live values refresh before reveal;
   hidden motion does not drive a frame loop. Initial preparation and ordinary overlay shows
   still settle their first frame.
-- **rune-kit menus open instantly** (Abattoir "Open menus instantly, fade only the close"). `Menu`,
+- **rune-kit menus open instantly**. `Menu`,
   `context_menu`, submenus and `Select`'s list now appear fully on the next frame instead of fading
   and scaling in from 0.96, and close with a plain `.25 / 0` fade (no scale). Menu item highlights
   land the frame the pointer arrives and leave over 100 ms ease-out. No `--snap` goldens move:

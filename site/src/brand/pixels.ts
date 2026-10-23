@@ -1,4 +1,4 @@
-// ᚱUNE on Abattoir's pixel grid: letters 11 pixels tall, 2-pixel stems, notched corners, fitted one clear pixel apart.
+// ᚱUNE on Anomaly's pixel grid: letters 11 pixels tall, 2-pixel stems, notched corners, fitted one clear pixel apart.
 // The R is the rune ᚱ (raidō), so the name is spelled with a real rune and still reads as RUNE. Plain data and string
 // builders, so the site and the icon script draw the same pixels.
 

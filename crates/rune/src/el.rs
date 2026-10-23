@@ -349,7 +349,7 @@ impl std::fmt::Debug for LinkFn {
 
 pub use rune_motion::Cycle;
 
-/// Default `truncate_fade` edge, in ems (Abattoir: 1.5 em on overflowing text).
+/// Default `truncate_fade` edge, in ems.
 const TRUNCATE_FADE_EM: f32 = 1.5;
 
 #[derive(Clone, Debug)]

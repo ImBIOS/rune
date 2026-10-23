@@ -1,5 +1,5 @@
 /* Anomaly docs tokens. Dark only. One sans for interface and prose, one mono for values, code and numbers.
-   Copied from @anomalyco/site in Abattoir (packages/site). */
+   Copied from @anomalyco/site. */
 @font-face { font-family: "Geist"; src: url("/fonts/geist.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
 @font-face { font-family: "Geist Mono"; src: url("/fonts/geist-mono.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
 
