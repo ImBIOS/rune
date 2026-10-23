@@ -22,6 +22,7 @@ members = [
     "examples/video-tiles",
     "examples/dev-panel",
 ]
+exclude = ["tools/rune-dev-guard"]
 
 [workspace.package]
 edition = "2024"
@@ -32,3 +33,14 @@ debug = false
 
 [profile.release]
 codegen-units = 16
+
+[profile.rune-hot]
+inherits = "dev"
+debug = 0
+incremental = true
+
+[profile.rune-hot.package.png]
+opt-level = 3
+
+[profile.rune-hot.package.fdeflate]
+opt-level = 3

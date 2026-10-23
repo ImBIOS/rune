@@ -159,7 +159,7 @@ impl<S: 'static> Runtime<S> {
             Some((t.on_link.clone()?, t.links.get(k)?.id.clone()))
         }) else { return false };
         self.events.push(format!("link {path} {id}"));
-        (f.0)(&mut self.state as &mut dyn Any, &id, tx);
+        (f.0)(handler_state(&mut self.state), &id, tx);
         true
     }
 

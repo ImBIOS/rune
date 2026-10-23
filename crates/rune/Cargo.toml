@@ -7,8 +7,11 @@ license.workspace = true
 [features]
 dev = ["dep:tungstenite", "dep:csscolorparser", "rune-motion/dev"]
 native-file-dialog = ["dep:rfd"]
+hot = ["dep:subsecond", "dep:dioxus-devtools"]
 
 [dependencies]
+subsecond = { version = "=0.7.10", optional = true }
+dioxus-devtools = { version = "=0.7.10", optional = true }
 rune-motion = { path = "../rune-motion" }
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
 # Keep Wayland client-side frames/buttons without the title font's ab_glyph/ttf-parser.

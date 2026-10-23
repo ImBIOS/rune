@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+"""Guarded Rune hot editing. The compiler and app always run in the same HiveMind lease.
+
+On Studio this relays source edits to Pro; on a worker it watches a validated mirror.
+Only view function bodies can patch. All other build inputs require a restart.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import select
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def files():
+    manifest = ROOT / ".rune-dev-files.json"
+    if manifest.exists():
+        return json.loads(manifest.read_text())
+    if not (ROOT / ".git").exists():
+        # HiveMind syncs source without Git metadata.
+        result = []
+        for directory in ("crates", "examples", "themes", "tools", "scripts", ".cargo"):
+            for parent, dirs, names in os.walk(ROOT / directory):
+                dirs[:] = [d for d in dirs if d not in ("target", ".git", "__pycache__")]
+                result.extend(str((Path(parent) / n).relative_to(ROOT)) for n in names)
+        result.extend(p for p in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml") if (ROOT / p).exists())
+        return result
+    return subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT).decode().strip("\0").split("\0")
+
+
+def inputs(cache):
+    def stamp(path):
+        s = path.stat()
+        # ctime/inode also catch same-size saves with restored mtimes and atomic replacements.
+        return s.st_size, s.st_mtime_ns, s.st_ctime_ns, s.st_dev, s.st_ino
+
+    current = {}
+    for p in files():
+        if not p or Path(p).name.startswith(".env") or Path(p).suffix in (".pem", ".key"):
+            continue
+        if not (p.startswith(("crates/", "examples/", "themes/")) or p in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/config.toml")):
+            continue
+        path = ROOT / p
+        try:
+            before = stamp(path)
+        except FileNotFoundError:
+            continue
+        old = cache.get(p)
+        if old is not None and old[0] == before:
+            current[p] = old
+        else:
+            data = path.read_bytes()
+            if stamp(path) != before:
+                raise OSError(f"input changed while reading: {p}")
+            current[p] = before, data
+    # Publish the cache only after a complete scan, including deletions.
+    cache.clear()
+    cache.update(current)
+    return {p: data for p, (_, data) in current.items()}
+
+
+def transfer_files(source):
+    return sorted(set(source) | {p for p in files() if p.startswith("tools/rune-dev-guard/")} | {"scripts/rune-dev"})
+
+
+def watch(on_change, process, previous, cache, on_tick=None):
+    while process.poll() is None:
+        select.select([], [], [], .1)
+        if on_tick:
+            on_tick()
+        try:
+            current = inputs(cache)
+        except (OSError, json.JSONDecodeError):
+            continue  # An editor or source relay is replacing a file.
+        if current != previous:
+            on_change(current)
+            previous = current
+
+
+def stop(process):
+    if process.poll() is None:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+
+
+def relay(args):
+    """Studio watches original files. Pro's guard sees a source staging area, never dx's mirror."""
+    import shlex
+    tag = hashlib.sha256(str(ROOT).encode()).hexdigest()[:12]
+    remote = os.environ.get("RUNE_DEV_REMOTE", f"scratch/rune-dev-{tag}")
+    # HiveMind's local admission requires a Git root. This is an empty staging
+    # repository, not a copy of the user's history; the manifest supplies its inputs.
+    subprocess.run(["ssh", "pro", f"mkdir -p {shlex.quote(remote)} && if [ ! -e {shlex.quote(remote + '/.git')} ]; then git -C {shlex.quote(remote)} init -q; fi"], check=True)
+    with tempfile.TemporaryDirectory(prefix="rune-relay-") as tmp:
+        cache = {}
+        previous = inputs(cache)
+        manifest = Path(tmp) / ".rune-dev-files.json"
+        manifest.write_text(json.dumps(transfer_files(previous)))
+        listing = Path(tmp) / "files"
+        listing.write_text("\n".join(transfer_files(previous)) + "\n")
+        subprocess.run(["rsync", "-ac", "--files-from", str(listing), str(ROOT) + "/", f"pro:{remote}/"], check=True)
+        subprocess.run(["scp", "-q", str(manifest), f"pro:{remote}/.rune-dev-files.json"], check=True)
+        command = f'export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:$PATH"; cd "$HOME/{remote}" && HIVEMIND_STRICT_PIN=1 hivemind run --worker pro --kind cargo --no-sync -- env RUNE_DEV_LEASE=1 python3 scripts/rune-dev ' + shlex.join(args)
+        process = subprocess.Popen(["ssh", "-tt", "pro", command], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
+        def path_arg(flag):
+            return Path(args[args.index(flag) + 1]) if flag in args else None
+        snap = path_arg("--snap-on-patch")
+        control = path_arg("--hot-control")
+        def remote_path(path):
+            return str(path) if path.is_absolute() else f"{remote}/{path}"
+        if control:
+            subprocess.run(["ssh", "pro", "mkdir -p " + shlex.quote(remote_path(control.parent))], check=True)
+        def receive():
+            for line in process.stdout:
+                complete = True
+                if snap and "rune-hot-pixels " in line:
+                    for path in (snap, snap.with_suffix(".json")):
+                        dest = ROOT / path
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        temp = dest.with_suffix(dest.suffix + ".fetch")
+                        fetched = subprocess.run(["scp", "-q", f"pro:{remote_path(path)}", str(temp)])
+                        if fetched.returncode == 0: temp.replace(dest)
+                        else: complete = False
+                if complete:
+                    # A completion marker on Studio means its local PNG/tree have arrived too.
+                    print(line, end="", flush=True)
+                else:
+                    print("rune-dev: snapshot fetch failed", file=sys.stderr, flush=True)
+        receiver = threading.Thread(target=receive, daemon=True)
+        receiver.start()
+        previous_control = None
+        def relay_control():
+            nonlocal previous_control
+            if control:
+                try:
+                    data = (ROOT / control).read_bytes()
+                except OSError:
+                    return
+                if data != previous_control:
+                    subprocess.run(["scp", "-q", str(ROOT / control), f"pro:{remote_path(control)}"], check=True)
+                    previous_control = data
+
+        def relay_source(current):
+            nonlocal previous
+            changed = [p for p, data in current.items() if previous.get(p) != data]
+            # Missing/new inputs are caught by the worker's manifest comparison.
+            listing.write_text("\n".join(changed) + "\n")
+            if changed:
+                subprocess.run(["rsync", "-ac", "--files-from", str(listing), str(ROOT) + "/", f"pro:{remote}/"], check=True)
+            manifest.write_text(json.dumps(transfer_files(current)))
+            subprocess.run(["scp", "-q", str(manifest), f"pro:{remote}/.rune-dev-files.json"], check=True)
+            previous = current
+
+        print(f"rune-dev: Pro source ~/" + remote + "; edit this checkout. PNG/tree snapshots are fetched here.", flush=True)
+        try:
+            watch(relay_source, process, previous, cache, relay_control)
+        finally:
+            stop(process)
+            receiver.join(timeout=15)
+        return process.returncode
+
+
+def run(args):
+    if "studio" in socket.gethostname().lower():
+        raise SystemExit("rune-dev: compiler and renderer must stay on Pro; restart without RUNE_DEV_LEASE")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("example", choices=["settings", "opencode"])
+    parser.add_argument("--port", type=int, default=18744)
+    parser.add_argument("app_args", nargs=argparse.REMAINDER)
+    opts = parser.parse_args(args)
+    app_args = opts.app_args
+    if app_args[:1] == ["--"]: app_args = app_args[1:]
+    for flag in ("--snap-on-patch", "--hot-control", "--fixture"):
+        if flag in app_args:
+            i = app_args.index(flag) + 1
+            if i == len(app_args): parser.error(flag + " needs a path")
+            app_args[i] = str((ROOT / app_args[i]).resolve())
+    if opts.example == "opencode":
+        if any(x in app_args for x in ("--live", "--server", "--allow-send")):
+            parser.error("OpenCode live editing is fixture-only")
+        if "--fixture" not in app_args:
+            app_args += ["--fixture", str(ROOT / "examples/opencode/assets/fixture.json")]
+    env = dict(os.environ, RUSTC_WRAPPER="", CARGO_INCREMENTAL="1", CARGO_BUILD_JOBS="2", RUNE_DEV_GUARDED="1",
+               CARGO_TARGET_DIR=str(ROOT / "target/live-edit-build"))
+    guard_root = ROOT / "tools/rune-dev-guard"
+    subprocess.run(["cargo", "build", "--manifest-path", str(guard_root / "Cargo.toml")], env=env, check=True)
+    guard = Path(env.get("CARGO_TARGET_DIR", str(guard_root / "target"))) / "debug/rune-dev-guard"
+    mirror = ROOT / "target/rune-dev" / opts.example
+    cache = {}
+    baseline = inputs(cache)
+    # Remove stale source files, but retain compiler artifacts between invocations.
+    old_manifest = mirror / ".inputs.json"
+    if old_manifest.exists():
+        for p in set(json.loads(old_manifest.read_text())) - set(baseline):
+            (mirror / p).unlink(missing_ok=True)
+    for p, data in baseline.items():
+        dest = mirror / p
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not dest.exists() or dest.read_bytes() != data: dest.write_bytes(data)
+    old_manifest.write_text(json.dumps(list(baseline)))
+    # Workspace excludes reference this independent tool; Cargo needn't see its source.
+    dx = Path(os.environ.get("RUNE_DX", str(Path.home() / ".cargo/bin/dx")))
+    if not dx.exists(): parser.error("install dioxus-cli 0.7.10 (the Deno dx command is unrelated)")
+    command = [str(dx), "serve", "--hot-patch", "--platform", "server", "--open", "false", "--interactive", "false", "--addr", "127.0.0.1", "--port", str(opts.port), "--package", opts.example, "--features", "hot", "--profile", "rune-hot", "--args=" + " ".join(["--hot"] + app_args)]
+    process = subprocess.Popen(command, cwd=mirror, env=env, start_new_session=True)
+    allowed = {"examples/settings/src/main.rs"} if opts.example == "settings" else {"examples/opencode/src/view.rs", "examples/opencode/src/palette.rs"}
+    try:
+        with tempfile.TemporaryDirectory(prefix="rune-guard-") as tmp:
+            candidate = Path(tmp) / "candidate.rs"
+            def publish(current):
+                nonlocal baseline
+                changed = [p for p, data in current.items() if baseline.get(p) != data]
+                incompatible = (set(current) ^ set(baseline)) | (set(changed) - allowed)
+                if incompatible:
+                    print("rune-dev: restart needed: " + ", ".join(sorted(incompatible)), flush=True)
+                    return
+                for p in changed:
+                    candidate.write_bytes(current[p])
+                    if subprocess.run([str(guard), str(mirror / p), str(candidate)]).returncode:
+                        return
+                # All files validated from immutable bytes before publishing any of them.
+                for p in changed:
+                    dest = mirror / p
+                    temp = dest.with_suffix(".rune-tmp")
+                    temp.write_bytes(current[p])
+                    temp.replace(dest)
+                baseline = current
+                print("rune-dev: accepted " + ", ".join(changed), flush=True)
+            watch(publish, process, baseline, cache)
+    finally:
+        stop(process)
+    return process.returncode
+
+
+if __name__ == "__main__":
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt()
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGHUP, interrupted)
+    try:
+        if not os.environ.get("RUNE_DEV_LEASE"):
+            if "studio" in socket.gethostname().lower():
+                sys.exit(relay(sys.argv[1:]))
+            os.environ["HIVEMIND_STRICT_PIN"] = "1"
+            os.execvp("hivemind", ["hivemind", "run", "--worker", "pro", "--kind", "cargo", "--no-sync", "--", "env", "RUNE_DEV_LEASE=1", "python3", str(Path(__file__).resolve()), *sys.argv[1:]])
+        sys.exit(run(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

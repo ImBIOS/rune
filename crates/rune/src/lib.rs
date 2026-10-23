@@ -83,6 +83,8 @@ pub mod live;
 mod pixels;
 pub mod gpu_springs;
 pub mod image;
+#[cfg(feature = "hot")]
+pub mod hot;
 pub mod render;
 mod surface_alpha;
 pub mod native_surface;

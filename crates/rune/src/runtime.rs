@@ -32,6 +32,15 @@ use crate::shape::{LineCap, Op, Shape};
 use crate::text::{Deco, GlyphQuad, Ink, TextSystem, layout_height};
 use crate::tok::motion;
 
+#[inline(always)]
+fn handler_state<S: 'static>(state: &mut S) -> &mut dyn Any {
+    #[cfg(feature = "hot")]
+    if std::any::TypeId::of::<S>() == std::any::TypeId::of::<crate::hot::HostState>() {
+        return (state as &mut dyn Any).downcast_mut::<crate::hot::HostState>().unwrap().value.as_mut();
+    }
+    state
+}
+
 #[cfg(debug_assertions)]
 #[path = "layout_diagnostics.rs"]
 mod layout_diagnostics;
@@ -101,6 +110,24 @@ pub struct Cx<S> {
 }
 
 impl<S> Cx<S> {
+    #[cfg(feature = "hot")]
+    pub(crate) fn retype<T>(&self) -> Cx<T> {
+        Cx {
+            env: self.env, system_reduced_motion: self.system_reduced_motion,
+            reduced_motion: self.reduced_motion, time_scale: self.time_scale,
+            caret: self.caret.clone(), caret_read: self.caret_read.clone(),
+            layout: self.layout.clone(), layout_reads: self.layout_reads.clone(), _s: PhantomData,
+        }
+    }
+
+    #[cfg(feature = "hot")]
+    pub(crate) fn settings_from<T>(&mut self, other: Cx<T>) {
+        self.reduced_motion = other.reduced_motion;
+        self.time_scale = other.time_scale;
+        self.caret_read = other.caret_read;
+        self.layout_reads = other.layout_reads;
+    }
+
     pub fn env(&self) -> Env {
         self.env
     }
@@ -337,6 +364,8 @@ pub struct Runtime<S: 'static> {
     pub state: S,
     pub(crate) on_focus: Option<fn(&mut S, bool, &mut Tx)>,
     view: fn(&S, &mut Cx<S>) -> El,
+    #[cfg(feature = "hot")]
+    pub(crate) hot: Option<crate::hot::Session>,
     pub text: TextSystem,
     /// RGBA images elements show (`El::pixels`), uploaded by the renderer.
     pub images: crate::pixels::ImageAtlas,
@@ -523,6 +552,8 @@ impl<S: 'static> Runtime<S> {
         Runtime {
             state,
             view,
+            #[cfg(feature = "hot")]
+            hot: None,
             text,
             images: Default::default(),
             scene,
@@ -888,6 +919,20 @@ impl<S: 'static> Runtime<S> {
         self.wake_deadlines.first().copied().into_iter().chain(self.loop_wake.map(|w| w.0)).min_by(f64::total_cmp)
     }
 
+    #[cfg(feature = "hot")]
+    pub(crate) fn hot_scrolls(&self) -> Vec<(String, f64)> {
+        self.nodes.iter().filter_map(|n| self.scrolls.get(&n.id).map(|s| (n.path.clone(), s.offset))).collect()
+    }
+
+    #[cfg(feature = "hot")]
+    pub(crate) fn hot_motion(&self) -> Vec<(String, [f32; 4], [f32; 4])> {
+        let store = self.scene.store();
+        self.nodes.iter().filter_map(|n| {
+            if !store.is_animating(n.id, prop::FRAME) { return None; }
+            Some((n.path.clone(), store.sample(n.id, prop::FRAME)?.edges(), store.sample_velocity(n.id, prop::FRAME)?.edges()))
+        }).collect()
+    }
+
     /// Lands every track before the next frame: growth, reveals and follow-the-end (guarantee 8,
     /// for returning to a window or session).
     pub fn settle_all(&mut self) {
@@ -957,6 +1002,12 @@ impl<S: 'static> Runtime<S> {
 
     /// `elapsed` advances the logical clock when no wall clock drives it; `dt` steps animations.
     fn frame_step(&mut self, elapsed: f64, dt: f64, before_commit: bool) -> bool {
+        #[cfg(feature = "hot")]
+        if self.hot.as_mut().is_some_and(crate::hot::Session::changed) {
+            // Replace handler trait objects before queued input can call an old vtable.
+            // A regular commit preserves keyed nodes, scrolls and spring velocities.
+            self.commit(&Tx::default());
+        }
         let mut tx = std::mem::take(&mut self.pending);
         let mut ran = false;
         let shaped0 = self.text.shaped;
@@ -1228,7 +1279,7 @@ impl<S: 'static> Runtime<S> {
         let ran = match action {
             Action::WindowFocus(focused) => {
                 let Some(f) = self.nodes.first().and_then(|n| n.on_window_focus.clone()) else { return false };
-                f(&mut self.state as &mut dyn Any, focused, &mut one);
+                f(handler_state(&mut self.state), focused, &mut one);
                 true
             }
             Action::Physical(event, fallback) => return self.dispatch_physical(event, fallback, tx),
@@ -1239,33 +1290,33 @@ impl<S: 'static> Runtime<S> {
             Action::Dismiss(path) => {
                 let Some(f) = self.node(&path).and_then(|n| n.modal.as_ref().map(|m| m.dismiss.clone())) else { return false };
                 self.set_focus(None, self.keyboard_focus);
-                f(&mut self.state, &mut one);
+                f(handler_state(&mut self.state), &mut one);
                 true
             }
             Action::PointerMove(path, point) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_pointer_move.clone()) else { return false };
-                f(&mut self.state as &mut dyn Any, point, &mut one);
+                f(handler_state(&mut self.state), point, &mut one);
                 true
             }
             Action::AtBottom(path, at) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_at_bottom.clone()) else { return false };
-                f(&mut self.state as &mut dyn Any, at);
+                f(handler_state(&mut self.state), at);
                 true
             }
             Action::Layout(path, rect) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_layout.clone()) else { return false };
-                f(&mut self.state as &mut dyn Any, rect);
+                f(handler_state(&mut self.state), rect);
                 true
             }
             Action::Hover(path) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_hover.clone()) else { return false };
-                f(&mut self.state as &mut dyn Any, &mut one);
+                f(handler_state(&mut self.state), &mut one);
                 true
             }
             Action::Press(path) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_press.clone()) else { return false };
                 self.events.push(format!("press {path}"));
-                f(&mut self.state as &mut dyn Any, &mut one);
+                f(handler_state(&mut self.state), &mut one);
                 true
             }
             Action::Link(path, k) => self.press_link(&path, k, &mut one),
@@ -1273,7 +1324,7 @@ impl<S: 'static> Runtime<S> {
                 let Some(n) = self.node(&path).filter(|n| !self.is_exiting(n.id)) else { return false };
                 let Some(f) = n.on_secondary_press.clone() else { return false };
                 self.events.push(format!("secondary press {path}"));
-                f(&mut self.state as &mut dyn Any, point, &mut one);
+                f(handler_state(&mut self.state), point, &mut one);
                 true
             }
             Action::Drag(path, mut d) => {
@@ -1282,7 +1333,7 @@ impl<S: 'static> Runtime<S> {
                     one.instant = true;
                 }
                 d.data = if d.phase == Phase::Down { 0.0 } else { self.drag_data };
-                f(&mut self.state as &mut dyn Any, &mut d, &mut one);
+                f(handler_state(&mut self.state), &mut d, &mut one);
                 self.drag_data = d.data;
                 if d.phase != Phase::Move {
                     self.events.push(format!("drag {:?} {path}", d.phase));
@@ -1301,7 +1352,7 @@ impl<S: 'static> Runtime<S> {
                     return true;
                 }
                 if let Some(f) = self.focused_input().and_then(|input| input.key.clone())
-                    && f(&mut self.state as &mut dyn Any, &ev, &mut one)
+                    && f(handler_state(&mut self.state), &ev, &mut one)
                 {
                     merge(tx, one);
                     return true;
@@ -1338,7 +1389,7 @@ impl<S: 'static> Runtime<S> {
                     self.events.push("paste field".into());
                     true
                 } else if let Some(f) = self.app_paste_handler() {
-                    f(&mut self.state, &s, &mut one);
+                    f(handler_state(&mut self.state), &s, &mut one);
                     self.events.push("paste window".into());
                     true
                 } else { false }
@@ -1349,7 +1400,7 @@ impl<S: 'static> Runtime<S> {
                 let s = self.env.scale;
                 let scroll = self.input_scroll.get(&path).copied().unwrap_or(0.0);
                 self.set_focus(Some(path), false);
-                let e = access(&mut self.state as &mut dyn Any);
+                let e = access(handler_state(&mut self.state));
                 e.break_history_group();
                 if let Some(l) = layout {
                     let x = x + scroll;
@@ -1387,15 +1438,15 @@ impl<S: 'static> Runtime<S> {
             return false;
         };
         let Some(access) = access else { return false };
-        access(&mut self.state as &mut dyn Any).set_single_line(single_line);
-        let before = change.as_ref().map(|_| zeroize::Zeroizing::new(access(&mut self.state as &mut dyn Any).text.clone()));
-        let out = f(access(&mut self.state as &mut dyn Any));
+        access(handler_state(&mut self.state)).set_single_line(single_line);
+        let before = change.as_ref().map(|_| zeroize::Zeroizing::new(access(handler_state(&mut self.state)).text.clone()));
+        let out = f(access(handler_state(&mut self.state)));
         // Typing is the user's own hand: no animation.
         tx.instant = !animate_layout;
         self.caret_follow = true;
         if let Some(change) = change
-            && before.as_ref().map(|s| s.as_str()) != Some(access(&mut self.state as &mut dyn Any).text.as_str())
-        { change(&mut self.state as &mut dyn Any, tx); }
+            && before.as_ref().map(|s| s.as_str()) != Some(access(handler_state(&mut self.state)).text.as_str())
+        { change(handler_state(&mut self.state), tx); }
         if let Some(c) = out.copy {
             tx.copy(c);
         }
@@ -1407,7 +1458,7 @@ impl<S: 'static> Runtime<S> {
         {
             self.events.push(format!("submit {path}"));
             tx.instant = false;
-            sub(&mut self.state as &mut dyn Any, tx);
+            sub(handler_state(&mut self.state), tx);
         }
         true
     }
@@ -1647,7 +1698,10 @@ impl<S> Measurement<'_, S> {
             layout_reads: Default::default(),
             _s: PhantomData,
         };
+        #[cfg(not(feature = "hot"))]
         let mut root = (self.view)(self.state, &mut cx);
+        #[cfg(feature = "hot")]
+        let mut root = subsecond::HotFn::current(self.view).call((self.state, &mut cx));
         if let Some(warnings) = self.key_warnings.as_mut() {
             *warnings = crate::key_diagnostics::warnings(&root);
             // Do not hand an invalid identity tree to Taffy. --tree still emits diagnostics.

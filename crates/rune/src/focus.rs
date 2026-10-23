@@ -8,7 +8,7 @@ fn sync_input_focus<S: 'static>(nodes: &mut [Node], state: &mut S, path: Option<
         if let Some(input) = &mut n.input {
             let focused = path == Some(n.path.as_str());
             if let Some(access) = &input.access {
-                let edit = access(state);
+                let edit = access(handler_state(state));
                 if input.edit.is_secure() && !edit.is_secure() {
                     edit.set_secure(true);
                     changed = true;
@@ -89,7 +89,7 @@ impl<S: 'static> Runtime<S> {
         let mut changed = changed;
         for (p, input) in &mut self.virtual_inputs {
             if let Some(access) = &input.access {
-                let edit = access(&mut self.state);
+                let edit = access(handler_state(&mut self.state));
                 if input.edit.is_secure() && !edit.is_secure() {
                     edit.set_secure(true);
                     changed = true;
@@ -156,7 +156,7 @@ impl<S: 'static> Runtime<S> {
         if ev.key == Key::Escape && let Some(i) = self.active_modal() {
             let f = self.nodes[i].modal.as_ref().unwrap().dismiss.clone();
             self.set_focus(None, true);
-            f(&mut self.state, tx);
+            f(handler_state(&mut self.state), tx);
             return true;
         }
         if ev.key == Key::Tab {
@@ -190,14 +190,14 @@ impl<S: 'static> Runtime<S> {
                 let action = (n.role == "radio" || n.role == "tab").then(|| n.on_press.clone()).flatten();
                 let path = n.path.clone();
                 self.set_focus(Some(path), true);
-                if let Some(f) = action { f(&mut self.state, tx); }
+                if let Some(f) = action { f(handler_state(&mut self.state), tx); }
                 return true;
             }
         }
         if self.nodes[i].input.is_none() && (ev.key == Key::Enter || ev.key == Key::Text(" ".into())) {
             self.keyboard_focus = true;
             if self.link_key(i, tx) { return true; }
-            if let Some(f) = self.nodes[i].on_press.clone() { f(&mut self.state, tx); }
+            if let Some(f) = self.nodes[i].on_press.clone() { f(handler_state(&mut self.state), tx); }
             return true;
         }
         false

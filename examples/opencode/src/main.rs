@@ -125,10 +125,11 @@ impl App {
     fn new() -> App {
         let mut app = Self::empty();
         let fixture_path = arg("--fixture");
-        let server = Server::new(&arg("--server").unwrap_or_else(|| DEFAULT_SERVER.into()));
-        let want_live = fixture_path.is_none() && (flag("--live") || server.reachable());
-        if want_live && app.load_live(server) {
-            return app;
+        #[cfg(not(feature = "hot"))]
+        {
+            let server = Server::new(&arg("--server").unwrap_or_else(|| DEFAULT_SERVER.into()));
+            let want_live = fixture_path.is_none() && (flag("--live") || server.reachable());
+            if want_live && app.load_live(server) { return app; }
         }
         let src = match &fixture_path {
             Some(p) => std::fs::read_to_string(p).unwrap_or_else(|e| panic!("{p}: {e}")),
@@ -583,7 +584,13 @@ fn open_scene(s: &mut App) {
 }
 
 fn main() {
-    rune::App::new(AppSpec {
+    #[cfg(feature = "hot")]
+    {
+        let args: Vec<_> = std::env::args().collect();
+        assert!(args.iter().position(|a| a == "--fixture").and_then(|i| args.get(i + 1)).is_some_and(|p| !p.starts_with("--")), "hot OpenCode requires --fixture FILE");
+        assert!(!args.iter().any(|a| a == "--allow-send" || a == "--live" || a == "--server"), "hot OpenCode is fixture-only");
+    }
+    let spec = AppSpec {
         scenes: &[
             ("home", |_| {}),
             ("session", |s| {
@@ -621,7 +628,11 @@ fn main() {
         poll: Some(poll),
         on_key: Some(on_key),
         ..AppSpec::new("OpenCode", (1280.0, 820.0), App::new, view::app)
-    })
+    };
+    #[cfg(feature = "hot")]
+    rune::run(spec);
+    #[cfg(not(feature = "hot"))]
+    rune::App::new(spec)
     .chrome(rune::Chrome {
         full_size_content: true,
         traffic_lights: Some((25.0, 25.0)),

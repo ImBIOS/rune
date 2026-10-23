@@ -622,7 +622,94 @@ $S --native --trace run.jsonl --frames 240  # native submission timestamps, then
 - **Startup**: `--first-pixels` emits a flushed marker after the first offscreen GPU readback.
   `python3 scripts/bench-startup.py --out perf/startup` times fresh process launch to that marker
   (one warmup, seven runs), including loader, app state, GPU work and readback, excluding PNG encoding.
-  This measures process-cold startup with warm OS/driver caches, not physical display presentation.
+   This measures process-cold startup with warm OS/driver caches, not physical display presentation.
+
+## Live Rust editing (desktop development)
+
+```sh
+scripts/rune-dev settings -- --snap-on-patch perf/live-edit/settings.png --hot-control perf/live-edit/control.json
+# Or the fixture-only OpenCode example:
+scripts/rune-dev opencode -- --scene session --snap-on-patch perf/live-edit/opencode.png
+```
+
+Edit a view function and the existing process rebuilds its keyed tree. Scroll offsets,
+app state and spring tracks stay in the runtime. Layout and colour edits use the same
+retargeting as input changes. Handlers are recreated before queued input runs.
+Omit `--snap-on-patch` for a window on a development machine.
+
+Hot builds type-erase the host state behind thin typed adapters, so the runtime and
+shell compile once in the Rune library rather than in each changing executable.
+The explicit `HotFn` boundary still calls the app's typed view function. The headless
+PNG encoder uses its fastest lossless mode; normal snapshots keep their existing encoding.
+
+The launcher currently requires Kit's Studio/Pro fleet and HiveMind setup.
+On Studio the command runs the app and compiler together on Pro through HiveMind,
+relays source edits, and fetches each PNG and matching `.json` tree into this checkout.
+It never opens a Studio window. On Pro it takes a local HiveMind lease. Install
+**Dioxus CLI 0.7.10** at `~/.cargo/bin/dx` first (`RUNE_DX` overrides the path);
+the Homebrew/Deno command with the same name is unrelated. The first build is a full
+development build; subsequent runs reuse `target/rune-dev/<example>`.
+Compiler artifacts live in `target/live-edit-build`. Worker leases are strictly pinned
+to Pro so a busy worker cannot spill the renderer onto Studio.
+
+The `hot` feature is opt-in. Feature-off builds have no patch dependencies, connection,
+dispatch, generation checks or extra runtime fields. Goldens use feature-off builds.
+
+### Compatible edits and restart boundaries
+
+The launcher validates Rust syntax, then copies compatible edits into a private compiler
+mirror. It accepts function-body changes in Settings' `main.rs`, and OpenCode's
+`view.rs` and `palette.rs`. Use stable keys to preserve node identity.
+
+**Restart needed** is printed before publishing changes to state/type declarations,
+function signatures, imports, constants, const-fn bodies, impl methods, startup code, dependencies,
+assets or framework code. This catches same-size field/type changes too; `size_of`
+alone cannot. Syntax errors stay outside the mirror until fixed. Stop and rerun the
+command after an incompatible change. State is not migrated across restarts.
+Function attributes other than `doc`, `inline`, `cold` and `allow` also keep the whole
+body in the restart contract, since attribute macros can generate persistent types.
+
+Keep persistent state in `AppSpec::init`'s returned value. Tip-crate statics and thread
+locals can reset after any patch; use them only for disposable caches. Do not retain
+view-owned trait objects in app state. Rune replaces its event-handler trait objects
+at the patch boundary. Arbitrary cached vtables, background callbacks and initializer
+edits do not hot-reload. Use this launcher, not raw `dx serve`, to keep the source guard.
+Edits to helpers called only from `poll`, `on_key` or `setup` take effect after a restart:
+those callbacks retain the function pointers captured at startup.
+
+If a patched view panics, Rune logs it and renders the original startup view against
+the retained state, discarding the failed view's context changes. A later patch is
+still attempted. Handler-closure panics are not caught; neither are panics in the
+original fallback view. This recovery requires Rust's unwinding panic mode and does
+not undo interior-mutability side effects performed by a view before it panics.
+Physical iOS devices are unsupported by this backend.
+
+### Headless input and patch acknowledgement
+
+`--snap-on-patch` keeps one offscreen renderer alive. It publishes the initial PNG/tree
+and another after each patch or control request, then flushes `rune-hot-pixels` with the
+patch generation, PID, state address, scroll offsets and GPU-readback timestamp.
+The PNG is the first patched frame; animated properties may still be near their old
+values. The renderer continues advancing normal animation time between edits.
+
+Replace the `--hot-control` JSON file atomically to send a request. Give each request
+a new `id`; the matching tree includes that ID:
+
+```json
+{"id":1,"tap":"login"}
+{"id":2,"scroll":[800,400,180]}
+{"id":3,"pause":true}
+{"id":4,"step":0.05}
+```
+
+Each line above is a separate file replacement. `pause` freezes the virtual clock;
+`step` advances it explicitly. This lets an agent inspect an in-flight animation across
+patches. `{"id":5}` requests a fresh snapshot. See
+[`research/20-live-editing.md`](../../research/20-live-editing.md) for measurement results
+and `research/bench-live-edit.py` for the ten-edit benchmark.
+The final shared-worker runs preserved exact spring positions/velocities over ten edits
+per example, with median save-to-GPU times of **8.195 s Settings / 21.169 s OpenCode**.
+The approximately one-second target is not yet met.
 
 Text fields support Cmd/Ctrl-Z and Cmd/Ctrl-Shift-Z. Consecutive typing is one undo
 group; selection changes, navigation, paste, cut and IME commits separate groups.
@@ -718,7 +805,7 @@ policy changes are applied in the same mutation phase.
 - Animation is evaluated on the main thread at frame time, not on a render thread. View functions still
   never run for animation: views produce targets, and tracks animate between them.
 - One pipeline with three fragment paths instead of separate quad and text pipelines (draw order is free).
-- No AccessKit, no hot reload, and no inspector socket (the CLI flags stand in). Scrolling is
+- No AccessKit or inspector socket (the CLI flags stand in). Scrolling is
   vertical only.
 - The windowed path is untested on Studio by rule. Only the headless path has been run.
 

@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Opt-in guarded Rust view editing**. `scripts/rune-dev` patches
+  Settings and fixture-only OpenCode views while retaining state, scroll and springs.
+  Declaration, signature and other build-input changes require a restart. `rune/hot`
+  is off by default; measured edit-to-pixels latency remains above the one-second target.
 - **`SecretCopy::pending()`** makes a copy that is never written and stays `Pending`, so a
   scene can show a copy in flight without building a `Tx`. No output change.
 - **`NativeSurface::set_mirrored(bool)`** flips video horizontally at draw time, for

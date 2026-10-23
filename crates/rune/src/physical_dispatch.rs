@@ -36,7 +36,7 @@ impl<S: 'static> Runtime<S> {
             .and_then(|n| n.focus.physical.clone());
         if let Some(handler) = handler {
             let mut one = Tx::default();
-            let consumed = handler(&mut self.state, &event, &mut one);
+            let consumed = handler(handler_state(&mut self.state), &event, &mut one);
             merge(tx, one);
             if consumed { return true; }
         }

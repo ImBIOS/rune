@@ -124,6 +124,10 @@ pub(crate) fn runtime_for<S: 'static>(spec: &AppSpec<S>, state: S, size: (f32, f
     rt.poll = spec.poll;
     rt.on_key = spec.on_key;
     rt.set_live_waker(waker.clone());
+    #[cfg(feature = "hot")]
+    if crate::hot::enabled() {
+        rt.hot = Some(crate::hot::Session::connect(waker.clone()));
+    }
     if let Some(f) = spec.setup {
         f(&mut rt.state, waker);
     }
@@ -138,6 +142,10 @@ pub(crate) fn attach_dev<S: 'static>(rt: &mut Runtime<S>, spec: &AppSpec<S>, con
 
 #[derive(Clone, Default, Debug)]
 pub struct Args {
+    #[cfg(feature = "hot")]
+    pub(crate) snap_on_patch: Option<PathBuf>,
+    #[cfg(feature = "hot")]
+    pub(crate) hot_control: Option<PathBuf>,
     pub snap: Option<PathBuf>,
     pub scene: Option<String>,
     pub at: Option<f64>,
@@ -182,6 +190,14 @@ impl Args {
         };
         while i < argv.len() {
             match argv[i].as_str() {
+                #[cfg(feature = "hot")]
+                "--hot" => crate::hot::enable(),
+                #[cfg(feature = "hot")]
+                "--snap-on-patch" => a.snap_on_patch = Some(val(&mut i).into()),
+                #[cfg(feature = "hot")]
+                "--hot-control" => a.hot_control = Some(val(&mut i).into()),
+                #[cfg(not(feature = "hot"))]
+                "--hot" | "--snap-on-patch" | "--hot-control" => die("live editing requires the rune/hot feature; use scripts/rune-dev"),
                 "--snap" => a.snap = Some(val(&mut i).into()),
                 "--scene" => a.scene = Some(val(&mut i)),
                 "--at" => a.at = Some(num(&val(&mut i))),
@@ -270,6 +286,9 @@ fn num(s: &str) -> f64 {
 /// Opens the app's window and quits when it closes (`App` for other lifetimes), or renders
 /// headless for the tooling arguments.
 pub fn run<S: 'static>(spec: AppSpec<S>) {
+    #[cfg(feature = "hot")]
+    crate::hot::run(spec, Args::parse());
+    #[cfg(not(feature = "hot"))]
     crate::app::App::new(spec).run();
 }
 
@@ -729,7 +748,7 @@ impl Trace {
     }
 }
 
-fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
+pub(crate) fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
     let els: Vec<Value> = rt
         .elements()
         .iter()
