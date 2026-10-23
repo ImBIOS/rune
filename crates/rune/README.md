@@ -224,18 +224,20 @@ ignore it; `run_windows` keeps its regular-launch default.
 
 ![sidebar](../../demo/opencode/sidebar-status.png)
 
-- **`AppSpec::chrome`** (`Chrome { full_size_content, traffic_lights, drag_regions }`, or `Chrome::DEFAULT`): on
+- **`App::chrome` / `WindowSpec::chrome`** (`Chrome { full_size_content, traffic_lights, drag_regions }`, or `Chrome::DEFAULT`): on
   macOS, `full_size_content` gives a transparent titlebar with content under it, and
   `traffic_lights: Some((x, y))` places the close button's top-left at `x, y` points (Electron's
   `trafficLightPosition`). Rune places the buttons again after every resize, scale change, focus change
   and un-occlusion. On Windows and Linux both options do nothing; the system titlebar stays.
 - **`AppSpec::new(title, size, init, view)`** fills every other field with its default; literals
-  that set a few more end with `..AppSpec::new(..)`, so new fields (like `chrome`) don't break them.
+  that set a few more end with `..AppSpec::new(..)`. Window chrome lives on the builders, keeping
+  existing exhaustive `AppSpec` literals source-compatible.
 - **Window drag regions** (`.window_drag()`): a press starts winit's `drag_window` and a
   double press zooms the window (macOS follows the user's `AppleActionOnDoubleClick` setting, so it
   may minimise instead; elsewhere it toggles maximised). With `Chrome::drag_regions` on macOS, only
-  marked regions move the window, so content under a full-size titlebar stays clickable. This is
-  process-wide: it patches winit's shared view class, so every window and overlay follows it.
+  marked regions move a borderless or full-size-content window, so titlebar content stays clickable.
+  Rune subclasses only that window's content-view instance; ordinary titled windows and NSPanel
+  overlays retain their native behaviour.
 - **Hover groups**: `.hover_group()` (or any `.hover(color)`) tracks hover for a subtree, and
   `.hover_motion(enter, exit)` sets its curves (for example a delayed reveal). Descendants read the
   nearest group with `.group_opacity(rest, hovered)` and `.group_color(c)`. A group stays hovered

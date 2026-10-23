@@ -207,6 +207,7 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
 }
 
 struct Host<S: 'static> {
+    chrome: Chrome,
     options: WindowOptions,
     native_handle: WindowHandle,
     on_created: Option<Box<dyn FnOnce(WindowHandle)>>,
@@ -274,6 +275,7 @@ impl<S: 'static> Host<S> {
         let (open, keep_running, on_close, release_gpu) = (app.open, app.keep_running, app.on_close, app.release_gpu);
         let mut app = app;
         let comp = app.compositor.take();
+        let chrome = app.chrome;
         let (spec, state, shared) = app.into_parts(args.scene.as_deref());
         let size = args.size.unwrap_or(spec.size);
         // The window reports the system appearance and scale when it opens.
@@ -286,6 +288,7 @@ impl<S: 'static> Host<S> {
         rt.wall_start = Some(Instant::now());
         shared.connect(waker);
         Host {
+            chrome,
             options,
             native_handle,
             on_created,
@@ -327,12 +330,30 @@ pub(crate) fn is_wayland(event_loop: &ActiveEventLoop) -> bool {
 
 /// Native titlebar behaviour the framework owns: traffic-light placement, drag regions and the
 /// double-click action. Elsewhere only the portable parts apply.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn uses_drag_regions(chrome: Chrome, borderless: bool, panel: bool) -> bool {
+    chrome.drag_regions && (borderless || chrome.full_size_content) && !panel
+}
+
+#[test]
+fn drag_region_policy_preserves_titled_windows_and_panels() {
+    for enabled in [false, true] {
+        for full_size in [false, true] {
+            let chrome = Chrome { drag_regions: enabled, full_size_content: full_size, ..Chrome::DEFAULT };
+            assert_eq!(uses_drag_regions(chrome, false, false), enabled && full_size);
+            assert_eq!(uses_drag_regions(chrome, true, false), enabled);
+            assert!(!uses_drag_regions(chrome, false, true));
+            assert!(!uses_drag_regions(chrome, true, true));
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod mac {
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, Bool, Sel};
-    use objc2::{ffi, sel};
-    use objc2_app_kit::{NSEvent, NSView, NSWindowButton, NSWindowStyleMask};
+    use objc2::{ffi, msg_send, sel, ClassType};
+    use objc2_app_kit::{NSEvent, NSPanel, NSView, NSWindowButton, NSWindowStyleMask};
     use objc2_foundation::{NSPoint, NSString, NSUserDefaults};
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use winit::window::Window;
@@ -348,19 +369,69 @@ mod mac {
     }
 
     /// The content view stops AppKit from moving the window when the titlebar band is pressed;
-    /// only `.window_drag()` regions move it (as Electron does with app regions).
+    /// only `.window_drag()` regions move it. Install an equal-sized subclass on this instance,
+    /// never a method on winit's shared class. Other windows keep their original class.
     pub fn own_window_dragging(window: &Window) {
         let Some(view) = content_view(window) else { return };
+        let Some(win) = view.window() else { return };
+        let panel: Bool = unsafe { msg_send![&*win, isKindOfClass: NSPanel::class()] };
+        let full_size = win.styleMask().contains(NSWindowStyleMask::FullSizeContentView);
+        let borderless = !win.styleMask().contains(NSWindowStyleMask::Titled);
+        let chrome = super::Chrome { full_size_content: full_size, drag_regions: true, ..super::Chrome::DEFAULT };
+        if !super::uses_drag_regions(chrome, borderless, panel.as_bool()) { return; }
+        unsafe { scope_drag_regions(Retained::as_ptr(&view).cast_mut().cast()) };
+    }
+
+    /// Main-thread native views only. The subclass adds no ivars, preserving winit's layout,
+    /// methods and deallocation. Registered classes live for the process lifetime.
+    unsafe fn scope_drag_regions(view: *mut ffi::objc_object) {
+        use std::ffi::{CStr, CString};
         let types = if cfg!(target_arch = "aarch64") { c"B@:" } else { c"c@:" };
-        // SAFETY: adds an override to winit's private view subclass (inherited from NSView, so
-        // the add succeeds once and later calls are no-ops). The IMP matches `BOOL (id, SEL)`.
+        // SAFETY: called on a live view on the main thread. Only its isa changes; the original
+        // class is never modified. The IMP matches `BOOL (id, SEL)` on both architectures.
         unsafe {
-            let cls = ffi::object_getClass(Retained::as_ptr(&view).cast()) as *mut ffi::objc_class;
-            let imp: ffi::IMP = Some(std::mem::transmute::<
-                unsafe extern "C" fn(*mut AnyObject, Sel) -> Bool,
-                unsafe extern "C" fn(),
-            >(cannot_move_window));
-            ffi::class_addMethod(cls, sel!(mouseDownCanMoveWindow).as_ptr(), imp, types.as_ptr());
+            let base = ffi::object_getClass(view);
+            let base_name = CStr::from_ptr(ffi::class_getName(base)).to_string_lossy();
+            if base_name.starts_with("RuneDragRegions_") { return; }
+            let name = CString::new(format!("RuneDragRegions_{base_name}")).unwrap();
+            let mut cls = ffi::objc_lookUpClass(name.as_ptr()).cast_mut();
+            if cls.is_null() {
+                cls = ffi::objc_allocateClassPair(base, name.as_ptr(), 0);
+                assert!(!cls.is_null(), "register Rune drag-region view");
+                let imp: ffi::IMP = Some(std::mem::transmute::<
+                    unsafe extern "C" fn(*mut AnyObject, Sel) -> Bool,
+                    unsafe extern "C" fn(),
+                >(cannot_move_window));
+                assert!(ffi::class_addMethod(cls, sel!(mouseDownCanMoveWindow).as_ptr(), imp, types.as_ptr()));
+                ffi::objc_registerClassPair(cls);
+            }
+            ffi::object_setClass(view, cls);
+        }
+    }
+
+    #[test]
+    fn drag_subclass_changes_only_the_selected_instance() {
+        // NSObject exercises the Objective-C class operation without constructing a window
+        // or requiring an AppKit event loop on the test thread.
+        let selected = objc2_foundation::NSObject::new();
+        let sibling = objc2_foundation::NSObject::new();
+        unsafe {
+            let selected_ptr = Retained::as_ptr(&selected).cast_mut().cast();
+            let sibling_ptr = Retained::as_ptr(&sibling).cast_mut().cast();
+            let base = ffi::object_getClass(selected_ptr);
+            let selector = sel!(mouseDownCanMoveWindow).as_ptr();
+            let original = ffi::class_getInstanceMethod(base, selector);
+            scope_drag_regions(selected_ptr);
+            let scoped = ffi::object_getClass(selected_ptr);
+            assert_ne!(scoped, base);
+            assert_eq!(ffi::class_getSuperclass(scoped), base);
+            assert_eq!(ffi::class_getInstanceSize(scoped), ffi::class_getInstanceSize(base));
+            assert_eq!(ffi::object_getClass(sibling_ptr), base);
+            assert_eq!(ffi::class_getInstanceMethod(base, selector), original);
+            let moves: Bool = msg_send![&*selected, mouseDownCanMoveWindow];
+            assert!(!moves.as_bool());
+            scope_drag_regions(selected_ptr);
+            assert_eq!(ffi::object_getClass(selected_ptr), scoped);
         }
     }
 
@@ -689,7 +760,7 @@ impl<S: 'static> Host<S> {
                 attrs = winit::platform::startup_notify::WindowAttributesExtStartupNotify::with_activation_token(attrs, token);
             }
         }
-        let chrome = self.spec.chrome;
+        let chrome = self.chrome;
         #[cfg(target_os = "macos")]
         if !self.options.borderless && chrome.full_size_content {
             use winit::platform::macos::WindowAttributesExtMacOS;
@@ -702,7 +773,7 @@ impl<S: 'static> Host<S> {
         window.set_ime_allowed(false);
         self.rt.ime_reset = true;
         #[cfg(target_os = "macos")]
-        if chrome.drag_regions && !self.options.borderless {
+        if uses_drag_regions(chrome, self.options.borderless, false) {
             mac::own_window_dragging(&window);
         }
         place_chrome(&window, chrome);
@@ -976,7 +1047,7 @@ impl<S: 'static> Host<S> {
         let (Some(l), Some((gpu, ..))) = (self.win.as_mut(), self.gpu.as_ref()) else { return };
         let rt = &mut self.rt;
         let scale = l.window.scale_factor() as f32;
-        let chrome = self.spec.chrome;
+        let chrome = self.chrome;
         match event {
             WindowEvent::Resized(size) => {
                 place_chrome(&l.window, chrome);

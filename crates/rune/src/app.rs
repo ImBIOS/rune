@@ -36,6 +36,7 @@ pub(crate) type OnWindow = Box<dyn FnMut(&crate::WindowHandle)>;
 /// like `rune::run`.
 pub struct App<S: 'static> {
     pub(crate) spec: AppSpec<S>,
+    pub(crate) chrome: crate::Chrome,
     init: Option<Box<dyn FnOnce() -> S>>,
     argv: Option<Vec<String>>,
     pub(crate) open: bool,
@@ -54,6 +55,7 @@ impl<S: 'static> App<S> {
     pub fn new(spec: AppSpec<S>) -> Self {
         App {
             spec,
+            chrome: crate::Chrome::DEFAULT,
             init: None,
             argv: None,
             open: true,
@@ -66,6 +68,12 @@ impl<S: 'static> App<S> {
             on_window: None,
             compositor: None,
         }
+    }
+
+    /// Configure this window's frame. Overlays retain their own native behaviour.
+    pub fn chrome(mut self, chrome: crate::Chrome) -> Self {
+        self.chrome = chrome;
+        self
     }
 
     /// Adds an overlay: an observational surface beside this app's window with its own state,

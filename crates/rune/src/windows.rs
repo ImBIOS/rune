@@ -102,6 +102,8 @@ impl<S> WindowSpec<S> {
         Self { key: key.into(), app, options: WindowOptions::default(), on_created: None }
     }
     pub fn options(mut self, options: WindowOptions) -> Self { self.options = options; self }
+    /// Configure this window's frame, including headless traffic-light placement.
+    pub fn chrome(mut self, chrome: crate::Chrome) -> Self { self.app = self.app.chrome(chrome); self }
     pub fn state(mut self, state: S) -> Self { self.app = self.app.init(move || state); self }
     pub fn on_created(mut self, callback: impl FnOnce(crate::window::WindowHandle) + 'static) -> Self {
         self.on_created = Some(Box::new(callback));
