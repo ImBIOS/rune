@@ -3,10 +3,13 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
-use crate::{Color, Spring};
+use crate::{Color, Spring, Waker};
 
 thread_local! {
     static ACTIVE: RefCell<Option<Registry>> = const { RefCell::new(None) };
+    /// The attached session, for app code that runs between frames on its thread
+    /// (`Compositor::render`, `AppHandle` updates). A frame's own scope wins.
+    static HOME: RefCell<Option<(Registry, Waker)>> = const { RefCell::new(None) };
 }
 
 pub(crate) type Registry = Arc<Mutex<BTreeMap<String, Entry>>>;
@@ -18,6 +21,17 @@ pub(crate) fn scope<R>(registry: Registry, f: impl FnOnce() -> R) -> R {
     }
     let _guard = Guard(ACTIVE.with(|a| a.replace(Some(registry))));
     f()
+}
+
+pub(crate) fn set_home(registry: Registry, wake: Waker) {
+    HOME.with(|home| *home.borrow_mut() = Some((registry, wake)));
+}
+
+pub(crate) fn clear_home(registry: &Registry) {
+    HOME.with(|home| {
+        let mut home = home.borrow_mut();
+        if home.as_ref().is_some_and(|(r, _)| Arc::ptr_eq(r, registry)) { *home = None; }
+    });
 }
 
 /// Values supported by the knobs remote protocol.
@@ -84,28 +98,37 @@ impl Entry {
 
 /// Used by `tune!`. The inactive path never creates a registry or allocates a descriptor.
 pub fn tune<T: Tunable>(key: &str, default: T, bounds: Option<[f32; 3]>) -> T {
-    ACTIVE.with(|active| {
-        let active = active.borrow();
-        let Some(registry) = active.as_ref() else { return default };
-        assert!(!key.starts_with("rune."), "rune.* is reserved for dev controls");
-        let mut entries = registry.lock().unwrap();
-        let entry = entries.entry(key.to_owned()).or_insert_with(|| {
-            let value = default.encode();
-            assert!(T::decode(&value).is_some(), "invalid default for {key}");
-            let (group, label) = key.rsplit_once('.').unwrap_or(("Tunables", key));
-            let mut descriptor = json!({"key":key,"kind":T::KIND,"default":value,"group":group,"label":label});
-            if T::KIND == "number" {
-                let n = value.as_f64().unwrap() as f32;
-                let [min, max, step] = bounds.unwrap_or([0.0_f32.min(n * 2.0), 1.0_f32.max(n * 2.0), 0.1]);
-                assert!(min.is_finite() && max.is_finite() && step.is_finite() && min < max && step > 0.0 && n >= min && n <= max);
-                descriptor["min"] = json!(min);
-                descriptor["max"] = json!(max);
-                descriptor["step"] = json!(step);
-            }
-            Entry { descriptor, value, normalize: |v| T::decode(v).map(T::encode) }
-        });
-        assert_eq!(entry.descriptor["kind"], T::KIND, "tunable {key} changed type");
-        if entry.value == entry.descriptor["default"] { return default; }
-        T::decode(&entry.value).unwrap_or(default)
-    })
+    if let Some(value) = ACTIVE.with(|active| active.borrow().as_ref().map(|r| lookup(r, key, default, bounds).0)) {
+        return value;
+    }
+    let Some((registry, wake)) = HOME.with(|home| home.borrow().clone()) else { return default };
+    let (value, added) = lookup(&registry, key, default, bounds);
+    // This frame's snapshot has already gone out; the next one announces the new control.
+    if added { wake(); }
+    value
+}
+
+fn lookup<T: Tunable>(registry: &Registry, key: &str, default: T, bounds: Option<[f32; 3]>) -> (T, bool) {
+    assert!(!key.starts_with("rune."), "rune.* is reserved for dev controls");
+    let mut entries = registry.lock().unwrap();
+    let mut added = false;
+    let entry = entries.entry(key.to_owned()).or_insert_with(|| {
+        added = true;
+        let value = default.encode();
+        assert!(T::decode(&value).is_some(), "invalid default for {key}");
+        let (group, label) = key.rsplit_once('.').unwrap_or(("Tunables", key));
+        let mut descriptor = json!({"key":key,"kind":T::KIND,"default":value,"group":group,"label":label});
+        if T::KIND == "number" {
+            let n = value.as_f64().unwrap() as f32;
+            let [min, max, step] = bounds.unwrap_or([0.0_f32.min(n * 2.0), 1.0_f32.max(n * 2.0), 0.1]);
+            assert!(min.is_finite() && max.is_finite() && step.is_finite() && min < max && step > 0.0 && n >= min && n <= max);
+            descriptor["min"] = json!(min);
+            descriptor["max"] = json!(max);
+            descriptor["step"] = json!(step);
+        }
+        Entry { descriptor, value, normalize: |v| T::decode(v).map(T::encode) }
+    });
+    assert_eq!(entry.descriptor["kind"], T::KIND, "tunable {key} changed type");
+    if entry.value == entry.descriptor["default"] { return (default, added); }
+    (T::decode(&entry.value).unwrap_or(default), added)
 }

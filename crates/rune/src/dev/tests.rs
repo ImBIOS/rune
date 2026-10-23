@@ -123,3 +123,33 @@ fn a_busy_port_moves_on_and_a_full_range_turns_the_panel_off_without_panicking()
     assert_eq!(launch(&mut third, &spec, config, Arc::new(|| {})), None);
     assert!(third.dev.is_none() && third.dev_clock.is_none());
 }
+
+#[test]
+fn tunables_read_between_frames_reach_the_panel_and_follow_its_values() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    fn view(_: &f32, _: &mut Cx<f32>) -> El { el() }
+    let spec = AppSpec::new("test", (100.0, 100.0), || 0.0, view);
+    let mut config = Config::default();
+    config.bind.set_port(0);
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let counter = wakes.clone();
+    let mut rt = Runtime::new(0.0, view, spec.size, Env { system_dark: true, scale: 1.0 });
+    attach(&mut rt, &spec, &config, Arc::new(move || { counter.fetch_add(1, Ordering::Relaxed); })).unwrap();
+    rt.frame(0.0);
+    // Like `Compositor::render`: after the frame, outside its scope.
+    assert_eq!(tune("glow.radius", 2.5_f32, Some([0.0, 12.0, 0.5])), 2.5);
+    assert_eq!(wakes.swap(0, Ordering::Relaxed), 1, "a control registered between frames asks for a snapshot");
+    assert_eq!(tune("glow.radius", 2.5_f32, Some([0.0, 12.0, 0.5])), 2.5);
+    assert_eq!(wakes.load(Ordering::Relaxed), 0);
+    rt.frame(0.0);
+    let snapshot = rt.dev.as_ref().unwrap().bridge.lock().unwrap().latest.clone();
+    assert!(snapshot["descriptors"].as_array().unwrap().iter().any(|d| d["key"] == "glow.radius"));
+    let (reply, _) = std::sync::mpsc::channel();
+    let message = json!({"type":"set","key":"glow.radius","value":8});
+    rt.dev.as_ref().unwrap().bridge.lock().unwrap().incoming.push_back(transport::Request { message, reply });
+    rt.frame(0.0);
+    assert_eq!(tune("glow.radius", 2.5_f32, Some([0.0, 12.0, 0.5])), 8.0);
+    drop(rt);
+    assert_eq!(tune("glow.radius", 2.5_f32, Some([0.0, 12.0, 0.5])), 2.5, "a dropped session leaves no registry behind");
+}
+

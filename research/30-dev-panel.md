@@ -40,7 +40,10 @@ directly as transition sources; the names above just keep the API sketch short.
 A frame-scoped thread-local registry makes the macro available to both view
 helpers and transition handlers without threading a context through all of
 Rooms. It restores the previous scope on unwind and isolates multiple runtimes.
-Calls outside an attached runtime return their default. Registration is lazy;
+Between frames (`Compositor::render`, `AppHandle` updates) the macro falls back
+to the session attached on that thread; a control first seen there wakes one
+more frame so the panel hears about it. Calls on a thread with no attached
+runtime return their default. Registration is lazy;
 controls encountered in earlier states remain available when states change.
 
 ## States and transitions

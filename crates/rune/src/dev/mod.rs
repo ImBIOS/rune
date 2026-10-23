@@ -88,8 +88,10 @@ pub fn attach<S>(rt: &mut Runtime<S>, spec: &AppSpec<S>, config: &Config<S>, wak
     let server = Server::bind(config.bind, bridge.clone(), wake.clone())?;
     let address = server.address;
     rt.dev_clock = Some(crate::dev_clock::DevClock::new(rt.wall_start.map_or(rt.clock, |t| t.elapsed().as_secs_f64()), rt.clock));
+    let registry: tune::Registry = Arc::new(Mutex::new(BTreeMap::new()));
+    tune::set_home(registry.clone(), wake.clone());
     rt.dev = Some(Session {
-        registry: Arc::new(Mutex::new(BTreeMap::new())), bridge, server, wake,
+        registry, bridge, server, wake,
         scenes: spec.scenes, transitions: config.transitions.clone(), pending: None, state: String::new(), selection: 0,
         init: spec.init, setup: spec.setup,
         blur_control: config.motion_blur, blur: true, velocity: false, frame: 0, replies: Vec::new(), requests: Default::default(),
@@ -117,6 +119,10 @@ pub(crate) fn launch<S>(rt: &mut Runtime<S>, spec: &AppSpec<S>, mut config: Conf
     }
     eprintln!("Rune dev panel off: ports {port}–{} are busy", port + (tries - 1));
     None
+}
+
+impl<S> Drop for Session<S> {
+    fn drop(&mut self) { tune::clear_home(&self.registry); }
 }
 
 impl<S> Session<S> {
