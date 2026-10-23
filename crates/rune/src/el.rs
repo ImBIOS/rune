@@ -407,6 +407,15 @@ impl Default for Visual {
 }
 
 pub(crate) type PasteFn = Rc<dyn Fn(&mut dyn Any, &str, &mut Tx)>;
+/// A scroll viewport's content-aware edges: `El::scroll_edge_fade` and `El::scroll_margin`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct ScrollEdges {
+    /// Fade width (points) for the top and bottom edges; 0 for none.
+    pub(crate) fade: f32,
+    /// Space `Tx::scroll_into_view` leaves between a revealed row and the viewport's edge.
+    pub(crate) margin: f32,
+}
+
 pub(crate) type AtBottomFn = Rc<dyn Fn(&mut dyn Any, bool)>;
 pub(crate) type LayoutFn = Rc<dyn Fn(&mut dyn Any, [f32; 4])>;
 pub(crate) type WindowFocusFn = Rc<dyn Fn(&mut dyn Any, bool, &mut Tx)>;
@@ -445,6 +454,7 @@ pub struct El {
     pub(crate) scroll: Option<ScrollSpec>,
     pub(crate) on_at_bottom: Option<AtBottomFn>,
     pub(crate) on_layout: Option<LayoutFn>,
+    pub(crate) scroll_edges: ScrollEdges,
     pub(crate) growth: Option<GrowthSpec>,
     pub(crate) virtual_estimate: Option<f32>,
     pub(crate) virtual_mount: bool,
@@ -492,6 +502,7 @@ fn base(dir: FlexDirection) -> El {
         scroll: None,
         on_at_bottom: None,
         on_layout: None,
+        scroll_edges: ScrollEdges::default(),
         growth: None,
         virtual_estimate: None,
         virtual_mount: false,
@@ -1333,6 +1344,21 @@ impl El {
     /// [`Tx::scroll_to_bottom`] for a "jump to latest" button.
     pub fn on_at_bottom<S: 'static>(mut self, f: impl Fn(&mut S, bool) + 'static) -> Self {
         self.on_at_bottom = Some(Rc::new(move |s, at| f(downcast::<S>(s), at)));
+        self
+    }
+    /// On a scroll viewport, fade its top and bottom edges over `width` points (16–32 reads well),
+    /// each only while content is hidden under it: the fade's strength is the hidden extent / 15
+    /// points, so a viewport at its top (or bottom, or stuck to it) shows that edge hard. Replaces
+    /// any top/bottom [`El::clip_fade`] widths; left/right ones still apply. Pair with
+    /// [`El::scroll_margin`] so rows brought into view stop clear of the fade.
+    pub fn scroll_edge_fade(mut self, width: f32) -> Self {
+        self.scroll_edges.fade = width.max(0.0);
+        self
+    }
+    /// On a scroll viewport, the space [`Tx::scroll_into_view`] leaves between a revealed row and
+    /// the edge it scrolls to, like CSS `scroll-padding`. The content's own ends still stop flush.
+    pub fn scroll_margin(mut self, pts: f32) -> Self {
+        self.scroll_edges.margin = pts.max(0.0);
         self
     }
     /// Called with this element's laid-out rect `[x, y, w, h]` in window points, after scrolling

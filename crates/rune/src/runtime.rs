@@ -48,6 +48,8 @@ mod caret;
 mod layout_read;
 #[path = "links.rs"]
 mod links;
+#[path = "scroll_edge.rs"]
+mod scroll_edge;
 
 const P_FILL: Prop<Color> = Prop::custom(64, PropClass::Color);
 const P_BORDER: Prop<Color> = Prop::custom(65, PropClass::Color);
@@ -175,6 +177,7 @@ pub(crate) struct Node {
     scroll: Option<ScrollSpec>,
     on_at_bottom: Option<crate::el::AtBottomFn>,
     on_layout: Option<crate::el::LayoutFn>,
+    scroll_edges: crate::el::ScrollEdges,
     growth: Option<GrowthSpec>,
     streaming: bool,
     input: Option<Box<InputSpec>>,
@@ -2557,11 +2560,10 @@ impl<S: 'static> Runtime<S> {
             None
         });
         let Some((path, top, height, viewport)) = geometry else { return };
+        let margin = self.node(&path).map_or(0.0, |n| f64::from(n.scroll_edges.margin));
         let Some(id) = self.path_ids.get(&path) else { return };
         let Some(scroll) = self.scrolls.get_mut(id) else { return };
-        let offset = if top < scroll.offset { top } else if top + height > scroll.offset + viewport {
-            top + height - viewport
-        } else { scroll.offset };
+        let offset = scroll_edge::reveal(scroll.offset, top, height, viewport, margin);
         scroll.offset = offset.clamp(0.0, scroll.max);
         scroll.pinned = false;
         scroll.v = 0.0;
@@ -3197,7 +3199,8 @@ impl<S: 'static> Runtime<S> {
             // A scroll viewport clips its content with a hard edge unless it sets soft ones.
             if let Some(f) = n.vis.clip.or(n.scroll.map(|_| [0.0; 4])) {
                 clip = [r[0].max(clip[0]), r[1].max(clip[1]), r[2].min(clip[2]), r[3].min(clip[3])];
-                inherit_fade(&mut fade, &mut fade_origin, r, f.map(|v| v * sc * s));
+                let (own, origin) = self.scroll_edge_fade(i, f, r, sc * s, p.rect.edges()[3]);
+                inherit_fade(&mut fade, &mut fade_origin, origin, own);
             }
             let mask = self.row_mask[i];
             if mask >= 0.0 {
@@ -3721,6 +3724,7 @@ fn flatten(
         scroll,
         on_at_bottom,
         on_layout,
+        scroll_edges,
         growth,
         streaming,
         input,
@@ -3767,6 +3771,7 @@ fn flatten(
         scroll,
         on_at_bottom,
         on_layout,
+        scroll_edges,
         growth,
         streaming,
         input,

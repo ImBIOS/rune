@@ -118,3 +118,23 @@ fn live_publication_and_presentation_allocate_nothing() {
     }
     assert_eq!(allocs() - before, 0, "live CPU presentation allocations");
 }
+
+#[test]
+fn scroll_edge_fades_allocate_nothing_per_frame() {
+    use rune::{Color, el};
+    fn view(faded: &bool, _: &mut Cx<bool>) -> El {
+        let rows = (0..40).map(|i| el().key(format!("row{i}")).w_full().h(20.0).fill(Color::WHITE));
+        let scroll = col().w_full().h(200.0).scroll(ScrollSpec { stick_bottom: false }).child(col().w_full().children(rows));
+        if *faded { scroll.scroll_edge_fade(24.0) } else { scroll }
+    }
+    let gliding = |faded| {
+        let mut rt = Runtime::new(faded, view, (200.0, 300.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        rt.fling(100.0, 100.0, -1500.0);
+        for _ in 0..4 { rt.frame(1.0 / 120.0); }
+        let before = allocs();
+        for _ in 0..30 { assert!(rt.frame(1.0 / 120.0), "still gliding"); }
+        allocs() - before
+    };
+    assert_eq!(gliding(true), gliding(false), "edge fades add no per-frame allocations while scrolling");
+}

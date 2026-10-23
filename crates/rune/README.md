@@ -110,6 +110,8 @@ The first runnable piece of Rune: enough framework to draw a small Settings wind
   a gap. Render coordinates are rebased near the window and scroll extents use double precision.
   View construction still visits every row; a lazy view API is a remaining optimization.
   `tx.scroll_into_view(key)` reveals a row, including one outside the realized window.
+  `.scroll_edge_fade(w)` fades a viewport's top and bottom only while content is hidden under
+  them (strength = hidden extent / 15 pt), and `.scroll_margin(pts)` stops revealed rows clear of it.
 - **Timeline growth** (`.growth(GrowthSpec { spring, edge })`, `growth.rs`): rows of a stack ease
   their heights render-side on `GROWTH` (0.32 s, bounce 0) in fixed 1/240 s substeps, so 30, 60 and
   120 fps give the same curve. Desktop's per-frame caps are per-second here (start, ramp, max, long,
