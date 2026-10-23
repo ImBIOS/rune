@@ -28,7 +28,9 @@ Timing experiment: wgpu 30 forbids mixing its regular encoding API with `as_hal_
 the attempted raw Metal completed handler panicked in validation and was removed.
 Supported render-pass timestamp queries plus per-submission callbacks replace it.
 Same-command-buffer resolves produced stale or zero timestamp pairs on M4/M5; each
-submission now owns a fresh query set and resolves its counters after render completion.
+submission leases a distinct counter pair and resolves it after render completion.
+One query set supplies eight pairs, retained through metadata readback; when all are
+busy, frames still render and report CPU completion without GPU timestamps.
 Completion callbacks run through coalesced nonblocking polling, with 1 ms sleeps between
 polls, so presentation's exclusive device lock is never held behind a fence wait. A final
 idle frame still reports. GPU seconds use the GPU clock, not the CPU `Instant` epoch.
@@ -64,3 +66,16 @@ Stream, send, switch and scroll traces pass motion-lint with zero candidates. Th
 synthetic four-tile Retina snapshot also renders successfully. Native colour/sharpness/
 lifetime tests pass on M5; the overlap test passes on M2 Max. The original Windows
 cross-check passed before the Host rebase; no native Windows run was performed.
+
+## Sustained headless readback fix
+
+Per-frame query-set allocation exhausted Metal counter sample buffers during queued
+headless rendering. The driver reported `Cannot allocate sample buffer`; wgpu then
+lost the device, so the final pixel mapping failed with `BufferAsyncError`.
+The bounded counter-pair pool above replaces that allocation pattern.
+
+On M4 Pro, the new regression failed before the fix and passed after it: eight bursts
+of 61 four-tile frames, one pixel readback per burst, with all 1,952 surface completion
+notifications delivered. The existing colour/lifetime and CPU/GPU-overlap tests also
+passed. Actual `video-tiles --at 0` and `--at 1` snapshots passed and are byte-identical
+to each other and desktop-fidelity's original `--at 0` golden.

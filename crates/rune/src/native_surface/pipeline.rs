@@ -30,11 +30,35 @@ struct Prepared {
     surface: NativeSurface,
 }
 
+// Metal has a small limit on live counter sample buffers. Keep one query set and lease
+// disjoint pairs until their deferred resolve/readback completes, rather than allocating
+// a query set for every queued frame. Timing may be omitted; rendering never waits.
+const TIMING_SLOTS: u32 = 8;
+struct TimingPool {
+    queries: wgpu::QuerySet,
+    free: std::sync::Mutex<Vec<u32>>,
+}
+impl TimingPool {
+    fn take(self: &Arc<Self>) -> Option<Arc<TimingSlot>> {
+        self.free.lock().unwrap().pop().map(|start| Arc::new(TimingSlot { pool: self.clone(), start }))
+    }
+}
+struct TimingSlot {
+    pool: Arc<TimingPool>,
+    start: u32,
+}
+impl Drop for TimingSlot {
+    fn drop(&mut self) {
+        self.pool.free.lock().unwrap().push(self.start);
+    }
+}
+
 /// Standalone pipeline, also used by Rune's renderer. A frame must be submitted through `submit`
 /// for timing notifications; texture lifetimes are safe even with ordinary wgpu submission.
 pub struct SurfaceRenderer {
     device: wgpu::Device,
-    queries: Option<wgpu::QuerySet>,
+    timing_pool: Option<Arc<TimingPool>>,
+    queries: Option<Arc<TimingSlot>>,
     queries_used: std::sync::atomic::AtomicBool,
     completion: std::sync::mpsc::SyncSender<()>,
     pipeline: wgpu::RenderPipeline,
@@ -47,11 +71,14 @@ pub struct SurfaceRenderer {
 }
 impl SurfaceRenderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        let queries = device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| {
-            device.create_query_set(&wgpu::QuerySetDescriptor {
-                label: Some("video frame timestamps"),
-                ty: wgpu::QueryType::Timestamp,
-                count: 2,
+        let timing_pool = device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| {
+            Arc::new(TimingPool {
+                queries: device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("video frame timestamps"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count: TIMING_SLOTS * 2,
+                }),
+                free: std::sync::Mutex::new((0..TIMING_SLOTS).map(|i| i * 2).collect()),
             })
         });
         let (completion, receiver) = std::sync::mpsc::sync_channel(1);
@@ -138,7 +165,8 @@ impl SurfaceRenderer {
         });
         Self {
             device: device.clone(),
-            queries,
+            timing_pool,
+            queries: None,
             queries_used: std::sync::atomic::AtomicBool::new(false),
             completion,
             pipeline,
@@ -153,14 +181,12 @@ impl SurfaceRenderer {
 
     pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, draws: &[SurfaceDraw], viewport: (u32, u32)) {
         *self.queries_used.get_mut() = false;
-        // Query storage is per submission: counter reuse must not pair different frames.
-        self.queries = (!draws.is_empty() && device.features().contains(wgpu::Features::TIMESTAMP_QUERY)).then(|| {
-            device.create_query_set(&wgpu::QuerySetDescriptor {
-                label: Some("video frame timestamps"),
-                ty: wgpu::QueryType::Timestamp,
-                count: 2,
-            })
-        });
+        // Release an unsubmitted preparation before acquiring its replacement. Submitted
+        // slots stay leased by their completion callbacks, including the deferred resolve.
+        self.queries = None;
+        if !draws.is_empty() {
+            self.queries = self.timing_pool.as_ref().and_then(TimingPool::take);
+        }
         self.cache.retain(|key, _| draws.iter().any(|d| d.surface.key() == *key));
         // Keep uniforms/bindings on unchanged frames. The source is latched here, after scene build.
         let mut count = 0;
@@ -302,16 +328,19 @@ impl SurfaceRenderer {
         self.draws.is_empty()
     }
     /// Include this in the containing render pass for hardware GPU timing.
+    /// Submit that encoder through [`Self::submit`] before the next [`Self::prepare`].
+    /// Plain `Queue::submit` does not retain the timing slot and may let it be reused
+    /// while the recorded pass is still in flight.
     pub fn timestamp_writes(&self) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
         if self.draws.is_empty() {
             return None;
         }
-        self.queries.as_ref().map(|query_set| {
+        self.queries.as_ref().map(|slot| {
             self.queries_used.store(true, std::sync::atomic::Ordering::Relaxed);
             wgpu::RenderPassTimestampWrites {
-                query_set,
-                beginning_of_pass_write_index: Some(0),
-                end_of_pass_write_index: Some(1),
+                query_set: &slot.pool.queries,
+                beginning_of_pass_write_index: Some(slot.start),
+                end_of_pass_write_index: Some(slot.start + 1),
             }
         })
     }
@@ -379,7 +408,7 @@ impl SurfaceRenderer {
             encoder.on_submitted_work_done(move || {
                 let completed_at = Instant::now();
                 let mut timestamps = device.create_command_encoder(&Default::default());
-                timestamps.resolve_query_set(&queries, 0..2, &resolve, 0);
+                timestamps.resolve_query_set(&queries.pool.queries, queries.start..queries.start + 2, &resolve, 0);
                 timestamps.copy_buffer_to_buffer(&resolve, 0, &readback, 0, 16);
                 let result = readback.clone();
                 timestamps.map_buffer_on_submit(&readback, wgpu::MapMode::Read, .., move |status| {
@@ -394,6 +423,8 @@ impl SurfaceRenderer {
                     if status.is_ok() {
                         result.unmap();
                     }
+                    // The sample pair must survive both GPU submissions and CPU mapping.
+                    drop(queries);
                     for (s, _, mut t) in frames {
                         t.completed_at = Some(completed_at);
                         if let Some((a, b)) = times {

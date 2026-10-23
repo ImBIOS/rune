@@ -181,6 +181,79 @@ fn publish(s: &NativeSurface, b: ByteFrame, id: u64, native: bool) {
 }
 
 #[test]
+fn queued_video_frames_then_readback() {
+    let gpu = Gpu::headless();
+    let mut renderer = SurfaceRenderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let surfaces: Vec<_> = (0..4).map(|_| NativeSurface::new()).collect();
+    let (done, completed) = std::sync::mpsc::channel();
+    let draws: Vec<_> = surfaces
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            publish(s, synthetic(640, 360, 0), 0, cfg!(target_os = "macos"));
+            let done = done.clone();
+            s.set_observer(Arc::new(move |t| {
+                if t.completed_at.is_some() {
+                    done.send(t).unwrap();
+                }
+            }));
+            draw(s, [(i % 2) as f32 * 640.0, (i / 2) as f32 * 360.0, 640.0, 360.0])
+        })
+        .collect();
+    let target = Offscreen::new(&gpu.device, 1280, 720);
+    let mut expected = None;
+    // Headless --at 1 queues 61 frames but maps pixels only after the last one.
+    // Exercise multiple bursts so completion polling overlaps the next submission.
+    for _ in 0..8 {
+        for frame in 0..61 {
+            renderer.prepare(&gpu.device, &gpu.queue, &draws, (1280, 720));
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &target.view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    timestamp_writes: renderer.timestamp_writes(),
+                    ..Default::default()
+                });
+                for i in 0..renderer.len() {
+                    renderer.draw(&mut pass, i);
+                }
+            }
+            if frame == 60 {
+                target.copy(&mut encoder);
+            }
+            renderer.submit(&gpu.queue, encoder);
+        }
+        let pixels = target.read(&gpu.device);
+        if let Some(expected) = &expected {
+            assert_eq!(&pixels, expected, "unchanged queued frames must read back identically");
+        } else {
+            assert!(pixels.iter().any(|&v| v != 0));
+            expected = Some(pixels);
+        }
+    }
+    let mut timed = 0;
+    for _ in 0..8 * 61 * 4 {
+        let t = completed.recv_timeout(std::time::Duration::from_secs(10)).expect("queued frame completion");
+        assert_eq!(t.gpu_start_seconds.is_some(), t.gpu_end_seconds.is_some());
+        if let Some((start, end)) = t.gpu_start_seconds.zip(t.gpu_end_seconds) {
+            assert!(end >= start && end > 0.0, "invalid timestamps: {t:?}");
+            timed += 1;
+        }
+    }
+    if gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+        assert!(timed > 0, "queued frames must still produce GPU timing samples");
+    }
+}
+
+#[test]
 fn video_gpu_colour_sharpness_geometry_and_lifetime() {
     let gpu = Gpu::new(Gpu::instance(), None);
     let mut renderer = SurfaceRenderer::new(&gpu.device, OFFSCREEN_FORMAT);
