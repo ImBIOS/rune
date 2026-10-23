@@ -80,7 +80,7 @@ impl FirstFrame {
     /// Hidden frames settle, except the refresh a reveal waits on: its new motion runs on.
     fn settles(&self) -> bool { !(self.reveal && self.notified) }
     /// A finished frame still owes the first readiness, or a refresh owes its reveal.
-    fn pending(&self) -> bool { self.ready && (!self.notified || self.reveal || self.until.is_some()) }
+    fn pending(&self) -> bool { self.ready && (!self.notified || self.reveal) }
     fn complete(&mut self) -> bool {
         self.ready = true;
         self.retry = None;

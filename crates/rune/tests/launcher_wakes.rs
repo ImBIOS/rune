@@ -1,7 +1,8 @@
 //! A retained launcher panel (`WindowOptions::launcher_panel`) runs `poll` on a plain
 //! `AppHandle::wake`, hidden or shown, and never reveals cached pixels older than an update
-//! in the same turn. Prints the reveal latency of both paths. Opens a native panel, so it only runs with
-//! RUNE_GUI_TESTS=1 in a logged-in macOS GUI session.
+//! in the same turn. With RUNE_LATENCY=1 it repeats 12 times and prints the median reveal
+//! latency of both paths. Opens a native panel, so it only runs with RUNE_GUI_TESTS=1 in a
+//! logged-in macOS GUI session.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {}
@@ -132,8 +133,9 @@ mod mac {
     }
 
     fn reveal_after_update(handle: &AppHandle<State>) {
+        let latency = std::env::var("RUNE_LATENCY").as_deref() == Ok("1");
         let (mut cached, mut fresh) = (Vec::new(), Vec::new());
-        for i in 0..12 {
+        for i in 0..if latency { 12 } else { 1 } {
             cached.push(reveal_in_one_drain(handle, || handle.open()));
             hide(handle);
             let label = format!("fresh {i}");
@@ -153,8 +155,10 @@ mod mac {
         });
         assert_eq!(rendered("polled"), Some(false), "a wake's poll ran and rendered before the reveal");
         hide(handle);
-        let median = |v: &mut Vec<Duration>| { v.sort(); v[v.len() / 2].as_secs_f64() * 1000.0 };
-        let (cached, fresh) = (median(&mut cached), median(&mut fresh));
-        println!("launcher_wakes: reveal median {cached:.2} ms cached, {fresh:.2} ms after an update (+{:.2} ms)", fresh - cached);
+        if latency {
+            let median = |v: &mut Vec<Duration>| { v.sort(); v[v.len() / 2].as_secs_f64() * 1000.0 };
+            let (cached, fresh) = (median(&mut cached), median(&mut fresh));
+            println!("launcher_wakes: reveal median {cached:.2} ms cached, {fresh:.2} ms after an update (+{:.2} ms)", fresh - cached);
+        }
     }
 }
