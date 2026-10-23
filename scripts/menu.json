@@ -1,0 +1,5 @@
+[
+  {"t": 0.1, "menu": "Open Quick Panel"},
+  {"t": 0.3, "menu": "named"},
+  {"t": 0.5, "menu": "dock"}
+]

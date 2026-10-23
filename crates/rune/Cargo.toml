@@ -35,7 +35,7 @@ csscolorparser = { version = "0.7", optional = true }
 objc2 = "0.5.2"
 block2 = "0.5"
 objc2-foundation = { version = "0.2.2", features = ["NSArray", "NSGeometry", "NSString", "NSThread", "NSUserDefaults"] }
-objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSButton", "NSControl", "NSEvent", "NSResponder", "NSRunningApplication", "NSView", "NSWindow", "NSColor", "NSGraphics", "NSPanel", "NSScreen", "NSPasteboard"] }
+objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSButton", "NSCell", "NSControl", "NSEvent", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSView", "NSWindow", "NSColor", "NSGraphics", "NSPanel", "NSScreen", "NSPasteboard"] }
 objc2-video = { package = "objc2", version = "0.6" }
 objc2-core-foundation = "0.3"
 objc2-core-video = { version = "0.3", features = ["CVPixelBufferIOSurface", "objc2-io-surface"] }
