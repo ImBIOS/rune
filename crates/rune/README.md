@@ -844,9 +844,10 @@ policy changes are applied in the same mutation phase.
 
 - **Build**: incremental `-p settings` release build through HiveMind is about 20–60 s, sync included.
 - **Binary**: 10.9 MB, or 9.3 MB stripped (1.2 MB of that is the three Inter faces).
-- **Frame CPU**: over 180 frames of `scripts/bench.json` (theme switch, toggles, accent, a drag, a
-  click-to-seek), the mean is 0.13 ms and p95 0.29 ms. The first frame takes 1.4 ms (glyph
-  rasterisation) and GPU init about 11 ms. There are 174 instances, drawn in one draw call.
+- **Frame CPU**: over 180 frames of `examples/settings/scripts/bench.json` (theme switch,
+  toggles, accent, a drag, a click-to-seek), the mean is 0.13 ms and p95 0.29 ms. The first frame
+  takes 1.4 ms (glyph rasterisation) and GPU init about 11 ms. There are 174 instances, drawn in
+  one draw call.
 - **motion-lint**: `motion-lint analyze` on that trace finds 0 candidates.
 - **OpenCode example**: while streaming, frame CPU is about 0.25 ms at p50 and 0.5 ms at p95, with
   about 1,100 instances in one draw call. At rest the window draws nothing. The first frame takes
