@@ -810,8 +810,9 @@ impl<S: 'static> Host<S> {
         w.focus();
     }
 
-    /// Applies everything other threads asked for since the last wake-up.
-    fn drain(&mut self, event_loop: &ActiveEventLoop) {
+    /// Applies everything other threads asked for since the last wake-up. A `wake` polls a
+    /// hidden window first, so a reveal in the same turn sees what `poll` changed.
+    fn drain(&mut self, event_loop: &ActiveEventLoop, wake: bool) {
         let shown = self.win.as_ref().is_some_and(|w| w.visible);
         let clipboard = self.clipboard.receive(&mut self.rt);
         let requests = self.shared.take();
@@ -827,6 +828,7 @@ impl<S: 'static> Host<S> {
         if let Some(visible) = requests.dock {
             crate::macos::set_dock_icon(visible);
         }
+        if wake { self.poll_hidden(event_loop); }
         if let Some(position) = requests.position { self.set_position(event_loop, position); }
         if let Some(place) = requests.place { self.place(event_loop, place); }
         if let Some(request) = requests.window { self.window_request(event_loop, request); }
@@ -1302,15 +1304,14 @@ impl<S: 'static> Host<S> {
             self.open(event_loop, None);
         }
         self.started = true;
-        self.drain(event_loop);
+        self.drain(event_loop, false);
     }
 
     fn handle_user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
         if !self.started { return; }
         match event {
             WakeEvent::App(_) => {
-                self.drain(event_loop);
-                self.poll_hidden(event_loop);
+                self.drain(event_loop, true);
             }
             WakeEvent::Live(_) => {
                 if self.rt.live_pending() && let Some(w) = self.win.as_ref().filter(|w| w.visible && !w.occluded) {

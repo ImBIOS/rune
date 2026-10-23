@@ -30,6 +30,11 @@ mod mac {
     }
 
     fn poll(s: &mut State, _: f64, _: &mut Tx) -> bool {
+        if BLOCK.swap(false, Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(100));
+            *UNBLOCKED.lock().unwrap() = Some(Instant::now());
+            return false;
+        }
         POLLS.fetch_add(1, Ordering::SeqCst);
         let Some(label) = INBOX.lock().unwrap().pop() else { return false };
         s.label = label;
@@ -104,15 +109,14 @@ mod mac {
         wait("hide", || !handle.is_visible());
     }
 
+    static BLOCK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     static UNBLOCKED: Mutex<Option<Instant>> = Mutex::new(None);
 
-    /// Queues `requests` while the event thread is busy, so one drain takes them all, and
-    /// returns the time from that drain's start until the window reports itself shown.
+    /// Queues `requests` while the event thread is busy in a hidden poll, so one drain takes
+    /// them all, and returns the time from that drain's start until the window is shown.
     fn reveal_in_one_drain(handle: &AppHandle<State>, requests: impl FnOnce()) -> Duration {
-        handle.update(|_, _| {
-            std::thread::sleep(Duration::from_millis(100));
-            *UNBLOCKED.lock().unwrap() = Some(Instant::now());
-        });
+        BLOCK.store(true, Ordering::SeqCst);
+        handle.wake();
         std::thread::sleep(Duration::from_millis(30));
         requests();
         let start = Instant::now();
@@ -141,6 +145,14 @@ mod mac {
             assert_eq!(rendered(&label), Some(false), "the update rendered hidden before the reveal");
             hide(handle);
         }
+        INBOX.lock().unwrap().clear();
+        reveal_in_one_drain(handle, || {
+            INBOX.lock().unwrap().push("polled".into());
+            handle.wake();
+            handle.open();
+        });
+        assert_eq!(rendered("polled"), Some(false), "a wake's poll ran and rendered before the reveal");
+        hide(handle);
         let median = |v: &mut Vec<Duration>| { v.sort(); v[v.len() / 2].as_secs_f64() * 1000.0 };
         let (cached, fresh) = (median(&mut cached), median(&mut fresh));
         println!("launcher_wakes: reveal median {cached:.2} ms cached, {fresh:.2} ms after an update (+{:.2} ms)", fresh - cached);
