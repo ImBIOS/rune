@@ -4745,7 +4745,8 @@ mod tests {
         let mut rt = Runtime::new(edit, view, (300.0, 200.0), Env::new(true, 2.0));
         rt.frame(0.0);
         let button = rt.nodes.iter().find(|n| n.key.as_deref() == Some("copy")).unwrap().path.clone();
-        rt.focused = Some(rt.nodes.iter().find(|n| n.key.as_deref() == Some("input")).unwrap().path.clone());
+        let input = rt.nodes.iter().find(|n| n.key.as_deref() == Some("input")).unwrap().path.clone();
+        rt.set_focus(Some(input), true);
         let copy_key = KeyEvent { key: Key::Command('c'), mods: Mods { cmd: true, ..Mods::default() } };
         rt.queue.push(Action::Press(button.clone()));
         rt.queue.push(Action::Key(copy_key.clone()));
