@@ -329,20 +329,19 @@ impl<T: 'static> Overlay<T> {
         self.resume_live();
         if size != self.at.size { self.resized(event_loop); }
         self.settle_before_reveal();
-        let retained = cfg!(target_os = "macos") && self.options.prewarm;
         if let Some(Backing::Window(window)) = self.live.as_ref().map(|l| &l.backing) {
             let window = window.clone();
             self.place_window(event_loop, &window);
             if let Some(gpu) = self.gpu.clone() { self.rescale(&gpu, window.scale_factor() as f32); }
             // Retained alpha-zero hosts already have pixels. A hidden update must reach
             // the surface before exposing it, rather than flashing the old frame.
-            self.refresh_for_reveal(retained);
+            self.refresh_for_reveal_at(Instant::now());
             self.show_window(&window);
         }
         self.visible = true;
         #[cfg(target_os = "macos")]
         if let Some(live) = &mut self.live { live.occluded = false; }
-        if !retained { self.dirty = true; }
+        if !self.retained() { self.dirty = true; }
         self.idle &= !(self.rt.animating || self.compositor.as_ref().is_some_and(|c| c.animating()));
     }
 
@@ -377,15 +376,14 @@ impl<T: 'static> Overlay<T> {
     fn settle_before_reveal(&mut self) {
         // Initial retained pixels were settled by warm(). Leaving a settle flag pending here
         // would snap changes arriving after that frame, in the same turn as show().
-        if !(cfg!(target_os = "macos") && self.options.prewarm) { self.rt.settle_all(); }
+        if !self.retained() { self.rt.settle_all(); }
     }
 
-    fn refresh_for_reveal(&mut self, retained: bool) {
-        self.refresh_for_reveal_at(retained, Instant::now());
-    }
+    /// macOS keeps a prewarmed host's alpha-zero surface, and its pixels, while hidden.
+    fn retained(&self) -> bool { cfg!(target_os = "macos") && self.options.prewarm }
 
-    fn refresh_for_reveal_at(&mut self, retained: bool, now: Instant) {
-        if retained && (self.dirty || self.rt.animating) {
+    fn refresh_for_reveal_at(&mut self, now: Instant) {
+        if self.retained() && (self.dirty || self.rt.animating) {
             self.advance_at(now);
             self.warm_frame();
         }
@@ -807,11 +805,9 @@ impl<T: 'static> Overlay<T> {
         if updates.is_empty() { return; }
         for f in updates { self.rt.update(f); }
         self.clipboard.flush(&mut self.rt);
-        if self.visible {
-            self.dirty = true;
-        } else {
+        self.dirty = true; // Queued updates already invalidate the cache before polling.
+        if !self.visible {
             // Register timer requests even before the first show; hidden overlays never draw.
-            self.dirty = true; // Queued updates already invalidate the cache before polling.
             self.advance();
         }
     }
@@ -822,7 +818,7 @@ impl<T: 'static> Overlay<T> {
 
     fn advance_at(&mut self, now: Instant) {
         let commits = self.rt.stats.commits;
-        if cfg!(target_os = "macos") && self.options.prewarm {
+        if self.retained() {
             self.rt.frame_after_idle(now.saturating_duration_since(self.last).as_secs_f64());
             self.last = now;
         } else {
@@ -1399,7 +1395,7 @@ mod tests {
             handle.show(); // Turn 2, after B has been committed.
             overlay.resume_live();
             overlay.settle_before_reveal();
-            overlay.refresh_for_reveal_at(true, commit + delay);
+            overlay.refresh_for_reveal_at(commit + delay);
             let width = overlay.rt.presented("box").unwrap().0[2];
             if delay.as_secs() == 0 {
                 assert!(overlay.rt.animating && width > 12.0 && width < 14.0,
@@ -1436,7 +1432,7 @@ mod tests {
             overlay.advance_at(commit);
             overlay.advance_at(commit + Duration::from_millis(8)); // Unchanged intervening poll.
             overlay.rt.update(|width, _| *width = 30.0); // Newly observed at reveal, not 2s ago.
-            overlay.refresh_for_reveal_at(true, commit + delay);
+            overlay.refresh_for_reveal_at(commit + delay);
 
             // A visible reference ages B first and only then commits C. Compare the next
             // moving frame too: retargeting must preserve velocity, not just position.
@@ -1504,7 +1500,7 @@ mod tests {
             }
             assert_eq!(handle.shared.requests.lock().unwrap().visible, Some(true));
             overlay.settle_before_reveal();
-            overlay.refresh_for_reveal(prewarm);
+            overlay.refresh_for_reveal_at(Instant::now());
             if queued {
                 assert!(overlay.rt.animating && overlay.rt.presented("box").unwrap().0[2] < 20.0,
                     "a queued update kick must not settle the entry during reveal");
