@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Absolute children size against their parent** (`rooms-gaps` branch). `absolute`/`pin` children
+  now resolve `w_full`, `w_frac`, `h_full` and right/bottom pins against their parent's padding
+  box, as documented, instead of the window (Taffy hands them to the nearest positioned ancestor,
+  and elements were static). Left/top offsets were already parent-relative. Root overlays (scrims,
+  dialogs, toasts, anchored popovers) are unchanged; nested ones move, e.g. rune-kit `List::divider`
+  now spans its row.
 - **Accessory apps get an app menu when showing their Dock icon.** On macOS,
   `set_dock_icon(true)` installs About, Services, Hide and Quit when no main menu exists,
   preserving app-supplied menus and composing with Rune's custom menu items.

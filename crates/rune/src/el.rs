@@ -453,7 +453,10 @@ fn base(dir: FlexDirection) -> El {
         scroll_source: None,
         role: "group",
         label: None,
-        style: Style { display: Display::Flex, flex_direction: dir, flex_shrink: 0.0, ..Default::default() },
+        // Relative makes every element the containing block for its absolute children, so they
+        // size and pin against their parent's padding box. Taffy's default (static) hands them
+        // to the window instead, as CSS does.
+        style: Style { display: Display::Flex, flex_direction: dir, flex_shrink: 0.0, position: Position::Relative, ..Default::default() },
         vis: Visual::default(),
         live: Vec::new(),
         text: None,
