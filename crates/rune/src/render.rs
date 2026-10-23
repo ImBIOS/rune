@@ -139,16 +139,25 @@ impl Instance {
 pub(crate) fn end_layer(instances: &mut Vec<Instance>, surfaces: &mut [crate::native_surface::SurfaceDraw], marks: &mut Vec<u32>, start: usize, surface_start: usize) {
     let primitives = instances.len() - start - 1;
     let videos = surfaces.len() - surface_start;
-    if primitives + videos <= 1 && instances[start].params[0] == 0.0 && instances[start].params[2] == 0.0
-        && instances[start].clip == NO_CLIP && instances[start].fade == [0; 4] {
-        let opacity = instances[start].fill[3];
+    let scope = instances[start];
+    let unmasked = if primitives == 1 {
+        instances[start + 1].clip == NO_CLIP && instances[start + 1].fade == [0; 4]
+    } else if videos == 1 {
+        surfaces[surface_start].clip == NO_CLIP && surfaces[surface_start].fade == [0; 4]
+    } else { true };
+    let transfer_clip = scope.fade[3] == 0 && unmasked;
+    if primitives + videos <= 1 && scope.params[0] == 0.0 && scope.params[2] == 0.0
+        && (transfer_clip || (scope.clip == NO_CLIP && scope.fade == [0; 4])) {
+        let opacity = scope.fill[3];
         if primitives == 1 {
             let i = &mut instances[start + 1];
+            if transfer_clip { i.clip = scope.clip; i.fade = scope.fade; }
             i.fill = i.fill.map(|v| v * opacity);
             i.border = i.border.map(|v| v * opacity);
             if i.params[1] == KIND_GRADIENT { i.uv = i.uv.map(|v| v * opacity); }
         }
         if videos == 1 {
+            if transfer_clip { surfaces[surface_start].clip = scope.clip; surfaces[surface_start].fade = scope.fade; }
             surfaces[surface_start].opacity *= opacity;
             surfaces[surface_start].before_instance -= 1;
         }

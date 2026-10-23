@@ -583,16 +583,16 @@ Instance::begin_layer(bounds, [left, top, right, bottom], LayerSpec {
 
 `clip_radius` uses device pixels and clamps to half the shorter clip dimension. Each scope
 keeps its own rounded rectangle, so nested masks do not move when rectangles intersect.
-The high-level API is reserved for the planned `El::clip_rounded`; that API is not part of
-this branch. Its integration contract and the current marker encoding are in
-[`perf/layer-filters.md`](../../perf/layer-filters.md).
+Use `el().clip_rounded(radius)` for the same mask in logical points on an element and its
+descendants. Ordinary paint clips directly; isolated subtrees clip after filtering. Hit tests
+remain rectangular, including visually clipped corners. The 128-byte instance stores radius
+in attribute 7 `fade[3]`. See [`perf/layer-filters.md`](../../perf/layer-filters.md).
 
 For a known opaque neutral backdrop, use `theme::srgb_equivalent(white.alpha(authored_alpha), bg)`
 to match AppKit's sRGB source-over in Rune's linear renderer. Recompute from the current authored
 alpha during animation. This changes only alpha and adds no GPU work. It is exact for neutral
 foreground/background pairs apart from quantization, but chromatic pairs are approximate;
 unknown/translucent backdrops, group opacity and overlapping paints require different math.
-The AppKit comparison and the measured backdrop-sampling alternative are in the performance note.
 
 ## Run
 

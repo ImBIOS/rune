@@ -1224,6 +1224,7 @@ impl El {
     /// Clip this element and its descendants to its presented rounded rectangle. Radius is in
     /// points, capped at half the shorter edge. Filters run before this mask. Nested masks
     /// intersect without moving either rectangle's corners; complex intersections use a layer.
+    /// Hit testing uses the rectangular clip bounds, including visually clipped corner areas.
     pub fn clip_rounded(mut self, radius: f32) -> Self {
         self.vis.clip_radius = Some(radius.max(0.0));
         self

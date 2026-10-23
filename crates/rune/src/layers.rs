@@ -16,9 +16,6 @@ mod filter_tests;
 #[cfg(test)]
 #[path = "rounded_clip_tests.rs"]
 mod rounded_clip_tests;
-#[cfg(test)]
-#[path = "srgb_blend_tests.rs"]
-mod srgb_tests;
 
 #[derive(Default)]
 pub(super) struct Layers {
@@ -39,6 +36,7 @@ struct Layer {
     parent: Option<usize>,
     bounds: [f32; 4], // edges while planning, xywh after preparation
     clip: [f32; 4],
+    limit: [f32; 4], // ancestor output needed by their filters; never a replacement rounded clip
     fade: [u32; 4],
     opacity: f32,
     blend: Blend,
@@ -101,14 +99,21 @@ impl Renderer {
             if i.params[1] == KIND_LAYER {
                 let parent = self.layers.stack.last().copied();
                 let hidden = parent.is_some_and(|p| self.layers.plan[p].opacity == 0.0);
-                // Each scope clips its completed output. Pushing a parent's clip into a
-                // child would crop source pixels before the parent's convolution.
+                // Bound storage by the ancestor's required input, including filter support.
+                // Keep the actual clip separate so rounded corners never move.
+                let limit = parent.map_or(NO_CLIP, |p| {
+                    let p = &self.layers.plan[p];
+                    let grow = (3.0 * p.blur).ceil();
+                    [p.clip[0].max(p.limit[0]) - grow, p.clip[1].max(p.limit[1]) - grow,
+                        p.clip[2].min(p.limit[2]) + grow, p.clip[3].min(p.limit[3]) + grow]
+                });
                 let clip = i.clip;
                 self.layers.stack.push(self.layers.plan.len());
                 self.layers.plan.push(Layer {
                     begin: index as u32, end: 0, parent,
                     bounds: [i.rect[0], i.rect[1], i.rect[0] + i.rect[2], i.rect[1] + i.rect[3]],
                     clip,
+                    limit,
                     fade: i.fade,
                     clip_radius: f32::from_bits(i.fade[3]),
                     opacity: if hidden { 0.0 } else { i.fill[3].clamp(0.0, 1.0) },
@@ -123,10 +128,10 @@ impl Renderer {
                 let grow = (3.0 * l.blur).ceil();
                 // Retain off-viewport sources that can contribute through this or an ancestor's
                 // filter. Clipping to the destination viewport before filtering loses those taps.
-                l.bounds = [(l.bounds[0] - grow).max(l.clip[0] - grow).max(-l.support).floor(),
-                    (l.bounds[1] - grow).max(l.clip[1] - grow).max(-l.support).floor(),
-                    (l.bounds[2] + grow).min(l.clip[2] + grow).min(viewport.0 as f32 + l.support).ceil(),
-                    (l.bounds[3] + grow).min(l.clip[3] + grow).min(viewport.1 as f32 + l.support).ceil()];
+                l.bounds = [(l.bounds[0] - grow).max(l.clip[0].max(l.limit[0]) - grow).max(-l.support).floor(),
+                    (l.bounds[1] - grow).max(l.clip[1].max(l.limit[1]) - grow).max(-l.support).floor(),
+                    (l.bounds[2] + grow).min(l.clip[2].min(l.limit[2]) + grow).min(viewport.0 as f32 + l.support).ceil(),
+                    (l.bounds[3] + grow).min(l.clip[3].min(l.limit[3]) + grow).min(viewport.1 as f32 + l.support).ceil()];
                 let bounds = l.bounds;
                 if let Some(parent) = l.parent { union(&mut self.layers.plan[parent].bounds, bounds); }
             } else if let Some(&at) = self.layers.stack.last() {

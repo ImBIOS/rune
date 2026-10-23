@@ -346,6 +346,47 @@ fn single_leaf_groups_keep_the_direct_path_and_springs_stay_live() {
 }
 
 #[test]
+fn clipped_single_draw_fades_do_not_allocate_targets() {
+    use crate::native_surface::{ByteFrame, ColorInfo, Format, NativeSurface, SurfaceFit};
+    type State = (Option<NativeSurface>, u8);
+    fn view(s: &State, _: &mut Cx<State>) -> El {
+        let child = el().size(64.0, 48.0).absolute(-8.0, -8.0);
+        let child = if let Some(surface) = &s.0 { child.native_surface(surface, SurfaceFit::Fill) }
+            else { child.fill(Color::WHITE) };
+        let clip = el().size(48.0, 32.0).absolute(8.0, 8.0);
+        let clip = match s.1 {
+            0 => clip.clip_soft(0.0),
+            1 => clip.clip_fade(4.0, 4.0, 4.0, 4.0),
+            _ => clip.scroll(crate::ScrollSpec { stick_bottom: false }),
+        };
+        el().child(clip.child(el().size(48.0, 32.0).opacity(0.5).child(child)))
+    }
+    let gpu = Gpu::headless();
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let target = Offscreen::new(&gpu.device, 64, 48);
+    let surface = NativeSurface::new();
+    surface.push_bytes(ByteFrame { width: 1, height: 1, format: Format::Bgra, color: ColorInfo::default(),
+        planes: [vec![255; 4], vec![]] }, 1).unwrap();
+    for mode in 0..3 {
+        let mut frames = Vec::new();
+        for video in [false, true] {
+            let mut rt = Runtime::new((video.then(|| surface.clone()), mode), view, (64.0, 48.0), Env::new(true, 1.0));
+            rt.frame(0.0);
+            assert!(rt.instances.iter().all(|i| i.params[1] != KIND_LAYER));
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (64, 48));
+            renderer.prepare_surfaces(&gpu.device, &gpu.queue, &rt.surfaces, (64, 48));
+            assert_eq!(renderer.layer_stats().targets, 0, "mode={mode} video={video}");
+            let out = pixels(&gpu, &renderer, &target);
+            assert_eq!(out[(24 * 64 + 32) * 4 + 3], 128);
+            assert_eq!(out[(24 * 64 + 4) * 4 + 3], 0);
+            if mode == 1 { assert!(out[(24 * 64 + 8) * 4 + 3] < 32); }
+            frames.push(out);
+        }
+        assert_eq!(frames[0], frames[1], "primitive and video inherit identical clips/fades");
+    }
+}
+
+#[test]
 fn opacity_motion_samples_group_alpha_until_the_terminal_frame() {
     fn view(show: &bool, _: &mut Cx<bool>) -> El {
         el().size(32.0, 16.0).opacity(if *show { 1.0 } else { 0.0 })
@@ -423,116 +464,4 @@ fn isolated_layers_preserve_image_video_spring_and_list_order() {
     for (x, y, want) in [(0,0,[255;4]), (9,6,[128,0,0,128]), (10,6,[128;4]), (15,6,[0,128,0,128]), (22,6,[0,0,128,128])] {
         near(&out[(y*32+x)*4..(y*32+x+1)*4], want);
     }
-}
-
-#[test]
-#[ignore = "manual GPU timing and two headless review stills"]
-fn layer_gpu_timing_and_stills() {
-    let gpu = Gpu::headless();
-    assert!(gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY));
-    eprintln!("adapter: {:?}", gpu.adapter.get_info());
-    let mut atlas = crate::text::TextSystem::default().atlas;
-    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
-    let target = Offscreen::new(&gpu.device, 1600, 1000);
-    for (name, bounds) in [("400x120pt@2x", [400.0, 380.0, 800.0, 240.0]), ("full-window", [0.0, 0.0, 1600.0, 1000.0])] {
-        for isolated in [false, true] {
-            let content = group(bounds, 0.5, [1.0; 4]);
-            let content = if isolated { &content[..] } else { &content[1..3] };
-            renderer.prepare(&gpu.device, &gpu.queue, &mut atlas, content, (1600, 1000));
-            let mut enc = gpu.device.create_command_encoder(&Default::default());
-            for _ in 0..8 { renderer.draw(&mut enc, &target.view, [0.0; 4]); }
-            gpu.queue.submit([enc.finish()]);
-            gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            const N: u32 = 60;
-            let queries = gpu.device.create_query_set(&wgpu::QuerySetDescriptor { label: None, ty: wgpu::QueryType::Timestamp, count: N * 2 });
-            let resolve = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(N) * 16,
-                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
-            let read = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(N) * 16,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
-            // One completed presentation per sample. Batching many frames into one command
-            // buffer lets Metal overlap their vertex/fragment stages and inflates pass spans.
-            for i in 0..N {
-                let mut enc = gpu.device.create_command_encoder(&Default::default());
-                renderer.draw_timed(&mut enc, &target.view, [0.0; 4], Some(wgpu::RenderPassTimestampWrites {
-                    query_set: &queries, beginning_of_pass_write_index: Some(i * 2), end_of_pass_write_index: Some(i * 2 + 1),
-                }));
-                gpu.queue.submit([enc.finish()]);
-                gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            }
-            // Resolve after completion: Metal counter end samples can race a same-buffer resolve.
-            let mut enc = gpu.device.create_command_encoder(&Default::default());
-            enc.resolve_query_set(&queries, 0..N * 2, &resolve, 0);
-            enc.copy_buffer_to_buffer(&resolve, 0, &read, 0, u64::from(N) * 16);
-            gpu.queue.submit([enc.finish()]);
-            read.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-            gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            let bytes = read.slice(..).get_mapped_range().unwrap();
-            let mut ms: Vec<f64> = bytes.chunks_exact(16).map(|b| {
-                let a = u64::from_le_bytes(b[..8].try_into().unwrap());
-                let z = u64::from_le_bytes(b[8..].try_into().unwrap());
-                assert!(z >= a && z != 0, "invalid GPU counters");
-                (z - a) as f64 * f64::from(gpu.queue.get_timestamp_period()) / 1e6
-            }).collect();
-            ms.sort_by(f64::total_cmp);
-            eprintln!("{name} isolated={isolated}: n={N} median={:.6}ms p95={:.6}ms {:?}", ms[N as usize / 2], ms[(N as usize * 95 / 100) - 1], renderer.layer_stats());
-            drop(bytes); read.unmap();
-        }
-    }
-    let output = std::env::var_os("LEASE_OUT").map(std::path::PathBuf::from).unwrap_or_else(|| "artifacts/group-layers".into());
-    let target = Offscreen::new(&gpu.device, 880, 320);
-    for t in [0.25, 0.75] {
-        let mut all = vec![rect([0.0, 0.0, 880.0, 320.0], [0.025, 0.025, 0.035, 1.0])];
-        for (alpha, color, bar_width) in [(t, [0.03, 0.28, 0.65, 1.0], 360.0), (1.0 - t, [0.45, 0.08, 0.28, 1.0], 480.0)] {
-            all.push(Instance::begin_layer([40.0, 40.0, 800.0, 240.0], NO_CLIP, LayerSpec { opacity: alpha, ..Default::default() }));
-            all.push(Instance { radii: [120.0; 4], ..rect([40.0, 40.0, 800.0, 240.0], color) });
-            all.push(Instance { radii: [48.0; 4], ..rect([100.0, 112.0, 96.0, 96.0], [1.0; 4]) });
-            for y in [120.0, 158.0, 196.0] {
-                all.push(Instance { radii: [9.0; 4], ..rect([240.0, y, bar_width, 18.0], [1.0; 4]) });
-            }
-            all.push(Instance::end_layer());
-        }
-        renderer.prepare(&gpu.device, &gpu.queue, &mut atlas, &all, (880, 320));
-        let out = pixels(&gpu, &renderer, &target);
-        write_png(&output.join(format!("crossfade-{}.png", (t * 100.0) as u32)), 880, 320, &out).unwrap();
-    }
-}
-
-#[test]
-#[ignore = "provide RUNE_BASELINE_SHADER from the base revision for the byte-identity gate"]
-fn opaque_shader_is_byte_identical_to_base_revision() {
-    let source = std::env::var("RUNE_BASELINE_SHADER").expect("provide the base revision's crates/rune/src/shader.wgsl");
-    let gpu = Gpu::headless();
-    let mut old = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
-    old.shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("base revision"), source: wgpu::ShaderSource::Wgsl(source.into()) });
-    old.pipeline = Renderer::pipeline(&gpu.device, &old.layout, &old.shader, OFFSCREEN_FORMAT, "vs");
-    let mut new = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
-    let target = Offscreen::new(&gpu.device, 96, 64);
-    let mut atlas = crate::text::TextSystem::default().atlas;
-    for y in 0..16 { for x in 0..16 { atlas.data[y * ATLAS_SIZE as usize + x] = ((x * 17 + y * 31) % 256) as u8; } }
-    for seed in 0..24 {
-        let mut all = Vec::new();
-        for kind in 0..=6 {
-            let mut i = rect([6.25 + kind as f32 * 7.0, 8.5 + seed as f32 * 0.25, 24.0, 28.0], [0.25, 0.1, 0.3, 0.5]);
-            i.params = [2.0, kind as f32, 2.0, 1.2];
-            i.radii = [4.0, 7.0, 2.0, 9.0];
-            i.border = [0.1, 0.2, 0.05, 0.5];
-            i.clip = [4.25, 5.75, 88.5, 58.25];
-            i.fade = pack_fade([3.0, 0.0, 4.0, 2.0], i.clip, i.clip);
-            match kind {
-                2 => { i.rect[2] = 16.0; i.rect[3] = 16.0; i.params[2] = 0.0; },
-                3 => { i.uv = [2.0, 3.0, 0.0, 0.0]; },
-                4 => { i.uv = [0.01, 0.2, 0.1, 0.3]; },
-                5 => { i.radii = [i.rect[0], i.rect[1], i.rect[0] + 24.0, i.rect[1] + 28.0]; i.params[2] = 1.0; },
-                6 => { i.radii = [i.rect[0], i.rect[1], i.rect[0] + 24.0, i.rect[1] + 28.0]; i.uv = [i.rect[0], i.rect[1] + 28.0, 0.0, 0.0]; i.params[0] = 7.0; },
-                _ => {},
-            }
-            all.push(i);
-        }
-        atlas.dirty = Some((0, 16)); old.prepare(&gpu.device, &gpu.queue, &mut atlas, &all, (96, 64));
-        let before = pixels(&gpu, &old, &target);
-        atlas.dirty = Some((0, 16)); new.prepare(&gpu.device, &gpu.queue, &mut atlas, &all, (96, 64));
-        assert_eq!(before, pixels(&gpu, &new, &target), "opaque baseline seed {seed}");
-        assert_eq!(new.layer_stats(), LayerStats::default());
-    }
-    eprintln!("24 opaque GPU fixtures byte-identical to the base shader (kinds 0–6)");
 }

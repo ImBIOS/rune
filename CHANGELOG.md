@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`LayerSpec` literals need filter fields**. The public `blur` and
+  `clip_radius` fields break external `LayerSpec { opacity, blend }` literals. Add
+  `..Default::default()` for their previous unfiltered, rectangular behavior.
 - **Rounded subtree clips and dormant dissolves**. `clip_rounded(radius)`
   clips ordinary paint directly and isolated output after filtering, preserving blur from sources
   beyond the clip. `dissolve()` skips isolation at opacity endpoints, where overlapping opaque

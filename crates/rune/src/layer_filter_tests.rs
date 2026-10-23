@@ -159,6 +159,57 @@ fn nested_blur_and_capsule_mask_apply_to_completed_output() {
 }
 
 #[test]
+fn nested_targets_bound_ancestor_support_without_losing_halos() {
+    let gpu = Gpu::headless();
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let target = Offscreen::new(&gpu.device, 512, 512);
+    let mut atlas = crate::text::TextSystem::default().atlas;
+    let clip = [240.0, 240.0, 272.0, 272.0];
+    let mut content = vec![Instance::begin_layer([0.0, 0.0, 512.0, 512.0], NO_CLIP,
+        LayerSpec { blur: 3.0, ..Default::default() })];
+    content.push(Instance::begin_layer([0.0, 0.0, 512.0, 512.0], NO_CLIP,
+        LayerSpec { blur: 2.0, ..Default::default() }));
+    content.extend(filtered([232.0, 246.0, 6.0, 20.0], 1.0));
+    content.extend([Instance::end_layer(), Instance::end_layer()]);
+    renderer.prepare(&gpu.device, &gpu.queue, &mut atlas, &content, (512, 512));
+    let reference = pixels(&gpu, &renderer, &target);
+    content[0].clip = clip;
+    renderer.prepare(&gpu.device, &gpu.queue, &mut atlas, &content, (512, 512));
+    for t in renderer.layers.targets.iter().flatten() {
+        assert!(t.texture.width() <= 64 && t.texture.height() <= 64, "bound every nested texture");
+    }
+    let out = pixels(&gpu, &renderer, &target);
+    let mut halo = false;
+    for y in 0..512 { for x in 0..512 {
+        let at = (y * 512 + x) * 4 + 3;
+        let inside = (240..272).contains(&x) && (240..272).contains(&y);
+        let want = if inside { reference[at] } else { 0 };
+        assert!(out[at].abs_diff(want) <= 1, "({x},{y})");
+        halo |= inside && out[at] > 0;
+    } }
+    assert!(halo, "off-wall source still contributes through all ancestor filters");
+}
+
+#[test]
+fn unchanged_blur_reuses_uniforms_and_changed_inputs_refresh_them() {
+    let gpu = Gpu::headless();
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let mut atlas = crate::text::TextSystem::default().atlas;
+    let mut writes = 0;
+    for (width, sigma, additive, changed) in [(20.0, 2.0, false, true), (20.0, 2.0, false, false),
+        (20.0, 2.5, false, true), (22.0, 2.5, false, true), (22.0, 2.5, true, true),
+        (22.0, 4.0, true, true), (22.0, 4.0, true, false), (22.0, 2.0, true, true)] {
+        let mut content = filtered([12.0, 10.0, width, 16.0], sigma);
+        content[0].params[0] = if additive { 1.0 } else { 0.0 };
+        renderer.prepare(&gpu.device, &gpu.queue, &mut atlas, &content, (64, 48));
+        let blur = renderer.layers.targets[0].as_ref().unwrap().blur.as_ref().unwrap();
+        let expected = writes + if changed { blur.passes() } else { 0 };
+        assert_eq!(blur.uniform_writes, expected);
+        writes = expected;
+    }
+}
+
+#[test]
 fn filtered_video_and_image_page_match_primitive_source() {
     use crate::native_surface::{ByteFrame, ColorInfo, Format, NativeSurface, SurfaceDraw, SurfaceFit};
     use crate::pixels::{Pixels, ImageAtlas};
@@ -275,36 +326,6 @@ fn reduced_gaussian_accuracy_and_resolution_boundary_continuity() {
         }
         previous = Some(out);
     }
-}
-
-#[test]
-#[ignore = "one headless review still; set RUNE_FILTER_STILL to the PNG destination"]
-fn layer_filter_review_still() {
-    let gpu = Gpu::headless();
-    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
-    let target = Offscreen::new(&gpu.device, 880, 352);
-    let mut atlas = crate::text::TextSystem::default().atlas;
-    let mut all = vec![rect([0.0, 0.0, 880.0, 352.0], [0.012, 0.012, 0.016, 1.0])];
-    for (row, sigma) in [0.0, 3.0, 8.0].into_iter().enumerate() {
-        for (column, masked) in [false, true].into_iter().enumerate() {
-            let (x, y) = (24.0 + column as f32 * 440.0, 24.0 + row as f32 * 112.0);
-            let bounds = [x, y, 392.0, 80.0];
-            let clip = if masked { [x, y, x + 392.0, y + 80.0] } else { NO_CLIP };
-            all.push(Instance::begin_layer(bounds, clip, LayerSpec {
-                blur: sigma, clip_radius: if masked { 40.0 } else { 0.0 }, ..Default::default() }));
-            all.push(Instance { radii: [40.0; 4], ..rect(bounds, [0.04, 0.08, 0.16, 1.0]) });
-            for offset in [-12.0, 20.0, 52.0, 340.0, 372.0] {
-                all.push(Instance { radii: [12.0; 4], ..rect([x + offset, y + 28.0, 24.0, 24.0], [0.45, 0.18, 0.06, 1.0]) });
-            }
-            for (dy, width) in [(24.0, 188.0), (42.0, 144.0)] {
-                all.push(Instance { radii: [5.0; 4], ..rect([x + 96.0, y + dy, width, 10.0], [0.8, 0.8, 0.8, 1.0]) });
-            }
-            all.push(Instance::end_layer());
-        }
-    }
-    renderer.prepare(&gpu.device, &gpu.queue, &mut atlas, &all, (880, 352));
-    let output = pixels(&gpu, &renderer, &target);
-    write_png(&std::path::PathBuf::from(std::env::var_os("RUNE_FILTER_STILL").unwrap()), 880, 352, &output).unwrap();
 }
 
 #[test]

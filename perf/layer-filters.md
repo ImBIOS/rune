@@ -34,6 +34,8 @@ The shader removes saturation and mode branches from the ordinary sampling loop.
 path needs one scratch texture; the reduced path needs two. Both follow the primary 64 px bucket
 and retain storage while the layer fits. `LayerStats` includes scratch bytes, passes and allocations.
 At zero there are no filter resources or passes; pipeline objects may remain cached.
+Each layer caches its size, sigma and blend mode, so unchanged filters skip kernel generation
+and uniform uploads while continuing to redraw live content.
 
 Rune-fx's frost (`distort.wgsl:119`) is an eight-tap noisy spiral tied to lens distortion. It
 cannot supply this deterministic subtree Gaussian. Its `MaskPyramid` was useful precedent for
@@ -76,24 +78,29 @@ rectangle. Radius is in points, scales with the element, and clamps to half its 
 Ordinary subtrees apply the inherited rounded rectangle per primitive, without an offscreen
 pass. Opacity, active dissolve and blur scopes apply the mask to their final composite instead.
 Their source primitives remain unmasked so a chip beyond the wall can still contribute blur
-inside it. Hit-test and inspection bounds retain the logical clip when painting consumes it.
+inside it. Hit tests remain rectangular, including visually clipped corner areas; inspection
+bounds retain the logical rectangular clip when painting consumes it.
 
 `Instance::begin_layer(bounds, clip, spec)` stores radius bits in packed `fade[3]` and edges
 in `clip`; the instance remains 128 bytes. The final composite applies the rounded SDF and hard clip
-after filtering. A masked scope materializes even at opacity one. The planner does not push a
-parent's final clip into its children because that would lose source pixels before parent blur.
+after filtering. A rounded masked scope materializes even at opacity one. Child textures are
+bounded by the ancestor clip expanded by all intervening filter support; the actual rounded
+clip stays separate, so bounds pruning cannot move corners or lose blur source pixels.
 
 Nested rounded rectangles retain both sets of corner centres. A second distinct rounded clip
 consumes the inherited mask on an outer scope; the inner mask stays direct or joins the inner
 filter scope. A rectangular clip cutting through a rounded corner uses a separate outer scope.
 Each mask keeps its original rectangle rather than rounding the intersected bounding box.
 Packed feather widths and origin offsets survive onto the composite. These exceptional
-intersections cost a layer; a single capsule with ordinary children does not.
+intersections cost a layer; a single capsule with ordinary children does not. A rectangular
+intersection that misses every radius-sized corner square needs no rounded coverage and stays
+direct, including central scroll viewports. A single unmasked primitive or video under an
+unfiltered rectangular opacity scope inherits its clip/fade and folds back to a direct draw.
 
 Ordinary primitives, composites and native video all decode radius from `fade[3]`. The temporary
 per-kind encoding, `radii[0]`/`uv` layer markers, `Layer::mask` and `SurfaceDraw::clip_radius` are
 removed. Glyph gamma, shape geometry and atlas UVs retain their own lanes. Live/truncated text
-consumes an inherited rounded mask on a scope before adding its glyph-only rectangular clip.
+and single-line inputs consume the rounded mask before adding a glyph-only rectangular clip.
 
 ![Exiting chip before and after post-blur capsule clipping](../crates/rune/artifacts/layer-filters/rounded-chip.png)
 
@@ -112,9 +119,9 @@ The updated fade regression checks inherited nonzero offsets on composites at 1�
 rounded and rectangular masks. The combined LiveText/truncation regression compares alpha
 against an independent capsule oracle through short and long live updates at both scales.
 
-Dev now includes `ElementInfo.blur` with inherited presented-effect semantics. The landing
-rebase retains that contract and its ancestor/exit-blur regression; it supersedes the earlier
-proposal to expose only the node's own `p.blur`.
+`ElementInfo.blur` is the additive culling margin in logical points: the sum of scaled node
+and ancestor sigmas. Three times it bounds source support. It is not the equivalent Gaussian
+sigma of sequential convolutions (which would combine variances).
 
 ### A real overlay contains the blurred chip
 
@@ -125,17 +132,17 @@ Both rows use a 400×40 pt capsule at 2×, nested dissolve/blur, sigma 1.5 pt an
 The lower row clips the completed blur at the capsule edge. The fixture uses Scrawl's dimensions;
 it is not a capture of Scrawl itself.
 
-The final-base run captured window `14409`, PID `72697`, at 1240×352 pixels. The presentation
-log records an alpha-zero prewarm acquisition, visible alpha 1, and positive Metal presentation
-time `560498.526072625`. No diagnostic redraw assistance was enabled. Cua reports a valid frame
-and matching exact window. The app and Cua session exited, and the injected probe dylib was removed.
+This 1240×352 capture was made on base `4223d64` after alpha-zero prewarming and a positive
+Metal presentation, without diagnostic redraw assistance. The app and Cua session exited,
+and the injected probe dylib was removed. Per-run JSON/log files are scratch, not tracked evidence.
 Reproduction is in `examples/overlay-lab/README.md` under “Native layer-filter proof”.
 
 ## Dissolve is direct at rest
 
 `dissolve()` activates only while a direct child's presented opacity is strictly between zero
 and one. A linear prepass uses retained exits, presence, Live opacity, hover-group opacity and
-opacity-loop samples. Both the parent's additive blend and child isolation use this decision.
+opacity-loop/sequence samples. A flag cached when the tree rebuilds skips this pass entirely
+when there are no PlusLighter nodes. Both parent additive blend and child isolation use the decision.
 Scratch capacity is reused across frames. Returning to endpoints removes the dissolve scope;
 starting a fade reinstates it on that frame.
 
@@ -208,71 +215,15 @@ background. It preserves RGB and solves alpha in linear space. Animate the autho
 solve each sample; fading an already-solved alpha is not equivalent. Do not use it to claim exact
 chromatic, translucent-backdrop, HDR, overlapping-paint or group-opacity composition.
 
-`scripts/layer-srgb-reference.swift` renders through AppKit into an explicit sRGB bitmap without
-opening a window. The ignored `appkit_srgb_fidelity_and_cost` GPU test compares the helper and an
-experimental layer compositor against those bytes. The experimental shader samples independent
-foreground/backdrop textures, unpremultiplies, encodes sRGB, blends, and decodes to the output.
-
-| Fixture | Helper max byte error | Experimental composite max byte error |
-|---|---:|---:|
-| White 6% over dark grey | 0 | 0 |
-| White 20% over dark grey | 0 | 0 |
-| White 50% over black | 1 | 1 |
-| Black 20% over light grey | 1 | 0 |
-| Grey 35% over dark grey | 0 | 1 |
-| White over blue | 18 | 0 |
-| Orange over blue | 45 | 1 |
-| Cyan over red | 49 | 1 |
-
-For eight colour strips across 400×40 pt at 2×, the helper's full-frame median/p95 was
-**0.078291/0.085500 ms**. The experimental three-pass frame was **0.102084/0.115042 ms**,
-adding 0.023793 ms median and two 800×80 `Rgba16Float` textures (1,024,000 bytes). This is a
-lower bound for a general compositor: it draws the backdrop into a separate texture and does
-not include a snapshot of an existing framebuffer or arbitrary painter-order pass splitting.
-
-The helper is the supported choice because Scrawl's neutral, known-backdrop case matches AppKit
-without compositor dependencies. A general `Blend::Srgb` could improve chromatic fidelity but
-needs destination snapshots and scope rules. The experiment remains test-only.
-
-To reproduce, run Swift through HiveMind, save stdout to a temporary JSON file outside the
-synced checkout, and set `RUNE_SRGB_REFERENCE` to that file for
-`cargo test -p rune --lib appkit_srgb_fidelity_and_cost -- --ignored --nocapture --test-threads=1`.
-
 ## Verification
 
-The October 23 landing rebase onto `b6783ae` passed `cargo check --workspace --all-targets`
-and 24 targeted layer/filter cases. Sequence opacity now participates in dormant-dissolve
-activation; its new GPU test preserves full alpha during complementary fades and skips scopes
-at endpoints. Native video's mirror flag stays in `sampling.w`, independent of `fade[3]` radius.
+The review-fix pass has 29 layer/filter correctness tests. They cover zero-target clipped leaf
+fades (primitive/video), central scroll clipping, single-line input masks, bounded nested targets,
+uniform-cache invalidation, LiveText/truncation, all eight primitive kinds, retained exits and
+off-wall blur. Dissolve tests check endpoint scope removal and byte-identical fade boundaries.
+Native video's mirror flag stays in `sampling.w`, independent of the `fade[3]` radius.
 
-The requested Rune/rune-kit markdown-enabled test run was invoked once. Its only failure was
-a secure-exit assertion counting blur-scope markers as dots; after changing that assertion to
-count glyph instances, the targeted case passed. All remaining integration targets, rune-kit
-unit tests and runnable doctests passed in separate serial HiveMind jobs. Two opt-in GUI tests
-skipped. See `REVIEW-TO-PARENT.md` for the exact coverage and retained native-capture base.
-
-After packed-fade integration, **22 layer/filter correctness cases**, all **7 Batch C cases**,
-all **3 clip-fade cases** (including the corrected fixture's targeted rerun), and
-`cargo check -p rune --all-targets` passed serially through HiveMind mini. Five new cases cover direct
-and nested masks, rectangular intersections, all eight primitive kinds (including glyph gamma
-and four feather lanes), native-video inheritance, retained exits, and the off-wall chip.
-The existing dissolve test now checks zero rest scopes and byte-identical fade boundaries.
-`Instance` remains 128 bytes. The new still was generated headlessly by the chip regression;
-set `RUNE_CLIP_STILL` to a PNG path when running that test to reproduce it.
-
-On final dev base `4223d64`, the additional combined LiveText/truncation/capsule regression
-passed, bringing the layer/filter correctness coverage to 23 cases across these runs. The native
-overlay binary rebuilt and its exact-window proof passed again on that base. The overlay-only
-upstream changes did not alter the previously checked renderer/runtime paths. GPU timings in
-this document are historical measurements from before the ABI rebase, not new timing runs.
-
-For the original filter implementation, seventeen layer/filter correctness cases
-passed, including the original ten layer cases, plus three Live tests. `cargo check -p rune
---all-targets` passed. GPU cases cover paired taps against a discrete oracle, negative origins,
-zero/negative/NaN bypass, pooling, nested blur, post-filter capsule masks, additive saturation,
-page-1 image sampling and newly published native video frames. Runtime cases cover curves,
-smoothed/direct Live, replacement bindings, offscreen sources and presence completion.
-
-The manual AppKit comparison, timing benchmark and single review still also ran successfully.
-The presence test originally used `settle_all`, which did not complete its presence track in
-this base; it now advances the transition clock to verify natural completion.
+Run `cargo test -p rune --lib render::layers -- --test-threads=1` through HiveMind. The two
+ignored tests are the pill and blur-replace benchmarks documented above. Set `RUNE_CLIP_STILL`
+when running `rounded_clip_blurred_exiting_chip_stays_inside_capsule` to regenerate that sheet.
+GPU timings in this document are historical pre-repack measurements, not new timing runs.

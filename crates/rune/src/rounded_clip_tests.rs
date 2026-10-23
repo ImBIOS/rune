@@ -236,3 +236,62 @@ fn rounded_clip_and_dissolve_follow_retained_presence() {
     for _ in 0..120 { rt.frame(1.0 / 120.0); }
     assert!(rt.instances.iter().all(|i| i.params[1] != KIND_LAYER));
 }
+
+#[test]
+fn rounded_clip_leaves_central_scroll_rectangles_on_the_direct_path() {
+    type State = (bool, bool);
+    fn view(s: &State, _: &mut Cx<State>) -> El {
+        let mut capsule = el().size(80.0, 48.0).absolute(8.0, 8.0);
+        if s.0 { capsule = capsule.clip_rounded(16.0); }
+        let (x, y, w, h) = if s.1 { (0.0, 16.0, 80.0, 16.0) } else { (16.0, 0.0, 48.0, 48.0) };
+        el().child(capsule.child(el().absolute(x, y).size(w, h).scroll(crate::ScrollSpec { stick_bottom: false })
+            .child(el().size(120.0, 120.0).fill(Color::WHITE))))
+    }
+    let gpu = Gpu::headless();
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let target = Offscreen::new(&gpu.device, 96, 64);
+    for horizontal in [false, true] {
+        let mut frames = Vec::new();
+        for rounded in [false, true] {
+            let mut rt = Runtime::new((rounded, horizontal), view, (96.0, 64.0), Env::new(true, 1.0));
+            rt.frame(0.0);
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (96, 64));
+            assert_eq!(renderer.layer_stats().targets, 0);
+            frames.push(pixels(&gpu, &renderer, &target));
+        }
+        assert_eq!(frames[0], frames[1], "central strip misses every rounded corner");
+    }
+}
+
+#[test]
+fn rounded_clip_single_line_input_keeps_the_original_mask() {
+    type State = (bool, crate::TextEdit);
+    fn view(s: &State, _: &mut Cx<State>) -> El {
+        let mut capsule = el().size(80.0, 40.0).absolute(8.0, 8.0);
+        if s.0 { capsule = capsule.clip_rounded(20.0); }
+        el().child(capsule.child(crate::text_input(&s.1, crate::TextStyle::new(28.0, 700.0))
+            .single_line().size(64.0, 40.0).absolute(8.0, 0.0)))
+    }
+    let gpu = Gpu::headless();
+    for scale in [1.0, 2.0] {
+        let size = ((96.0 * scale) as u32, (56.0 * scale) as u32);
+        let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+        let target = Offscreen::new(&gpu.device, size.0, size.1);
+        let mut frames = Vec::new();
+        for rounded in [false, true] {
+            let mut rt = Runtime::new((rounded, crate::TextEdit::new("MMMMMMMMMMMM")), view,
+                (96.0, 56.0), Env::new(true, scale));
+            rt.frame(0.0);
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, size);
+            frames.push(pixels(&gpu, &renderer, &target));
+        }
+        assert!(frames[0].chunks_exact(4).any(|p| p[3] > 0));
+        for y in 0..size.1 { for x in 0..size.0 {
+            let a = mask(x as f32 + 0.5, y as f32 + 0.5,
+                [8.0, 8.0, 88.0, 48.0].map(|v| v * scale), 20.0 * scale);
+            let at = ((y * size.0 + x) * 4 + 3) as usize;
+            assert!(frames[1][at].abs_diff((frames[0][at] as f32 * a).round() as u8) <= 1,
+                "scale={scale} ({x},{y})");
+        } }
+    }
+}

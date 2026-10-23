@@ -29,6 +29,9 @@ pub(super) struct Scratch {
     size: [f32; 2],
     reduced: [f32; 2],
     additive: bool,
+    sigma: f32,
+    #[cfg(test)]
+    pub uniform_writes: usize,
 }
 
 impl Pipeline {
@@ -86,7 +89,8 @@ impl Pipeline {
                 wgpu::BindGroupEntry { binding: 2, resource: uniforms[axis].as_entire_binding() },
             ],
         }));
-        Scratch { texture, view, uniforms, bindings, work: None, size: [0.0; 2], reduced: [0.0; 2], additive: false }
+        Scratch { texture, view, uniforms, bindings, work: None, size: [0.0; 2], reduced: [0.0; 2], additive: false,
+            sigma: 0.0, #[cfg(test)] uniform_writes: 0 }
     }
 
     pub fn encode(&self, encoder: &mut wgpu::CommandEncoder, scratch: &Scratch, destination: &wgpu::TextureView) {
@@ -127,8 +131,10 @@ impl Scratch {
 
     pub fn prepare(&mut self, device: &wgpu::Device, pipeline: &Pipeline, queue: &wgpu::Queue, size: [f32; 2], sigma: f32, additive: bool) -> bool {
         let sigma = sigma.clamp(0.001, MAX_SIGMA);
+        if self.size == size && self.sigma == sigma && self.additive == additive { return false; }
         let reduction = (sigma / 3.0).clamp(1.0, 8.0);
         self.size = size;
+        self.sigma = sigma;
         self.additive = additive;
         self.reduced = size.map(|v| (v / reduction).ceil());
         let reduced = self.reduced != size;
@@ -165,6 +171,7 @@ impl Scratch {
                 _ => [1.0, 1.0, 0.0, 0.0],
             };
             queue.write_buffer(&self.uniforms[pass], 0, bytemuck::bytes_of(&u));
+            #[cfg(test)] { self.uniform_writes += 1; }
         }
         allocated
     }
