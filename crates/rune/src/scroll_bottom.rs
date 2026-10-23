@@ -52,7 +52,7 @@ impl<S: 'static> Runtime<S> {
         }
         for _ in 0..3 {
             if !self.virtual_window_changed() { break; }
-            self.commit(Tx::default());
+            self.commit(&Tx::default());
             self.step_scroll(0.0);
             for (id, ..) in &targets {
                 if let Some(st) = self.scrolls.get_mut(id) { st.offset = st.max; }
@@ -70,7 +70,7 @@ impl<S: 'static> Runtime<S> {
             }
         }
         if self.virtual_window_changed() {
-            self.commit(Tx::default());
+            self.commit(&Tx::default());
             self.step_scroll(0.0);
         }
     }

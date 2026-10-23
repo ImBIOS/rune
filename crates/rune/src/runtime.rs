@@ -1049,7 +1049,7 @@ impl<S: 'static> Runtime<S> {
         for key in scroll_to { self.reveal_row(&key); }
         if !scroll_bottom.is_empty() { self.scroll_to_bottom(scroll_bottom); }
         // Those scrolls moved the caret after the commit a view placed from it saw.
-        if self.caret_watch && self.caret_moved(None) { self.commit(Tx { instant: true, ..Tx::default() }); }
+        if self.caret_watch && self.caret_moved(None) { self.commit(&Tx { instant: true, ..Tx::default() }); }
         self.update_interaction();
         let live_animating = self.latch_live();
         if let Some(trace) = tx.trace.take() {
