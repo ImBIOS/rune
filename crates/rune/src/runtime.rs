@@ -162,6 +162,8 @@ pub(crate) struct Node {
     live: Vec<crate::live::Bound>,
     pub text: Option<TextSpec>,
     pub text_layout: Option<Rc<Layout<Ink>>>,
+    /// The run a cell measures and draws from (see `El::advance_in`).
+    run_layout: Option<Rc<crate::text::RunLayout>>,
     live_text_seen: Option<u128>,
     on_press: Option<PressFn>,
     on_secondary_press: Option<SecondaryFn>,
@@ -1680,6 +1682,15 @@ impl<S> Measurement<'_, S> {
                             } else {
                                 None
                             };
+                            if let Some((run, at)) = &spec.advance_in {
+                                let r = text_sys.run_layout(run, spec.style, scale);
+                                if let Some(w) = r.advance(*at, scale) {
+                                    return Size {
+                                        width: known.width.unwrap_or(w),
+                                        height: known.height.unwrap_or(layout_height(&r.layout, spec.style, scale) / scale),
+                                    };
+                                }
+                            }
                             let l = text_sys.layout_rich(&spec.content, &spec.spans, spec.style, scale, w.map(|w| w * scale));
                             let mut lw = (l.full_width() / scale).ceil_to(scale);
                             if (spec.truncate || spec.truncate_fade)
@@ -1736,7 +1747,12 @@ impl<S> Measurement<'_, S> {
                 l.padding.bottom + l.border.bottom,
             ];
             nodes[i].inset = ins;
-            if let Some(spec) = &nodes[i].text {
+            // A cell of a run draws from the run's layout (and keeps it cached) instead of its own.
+            let run = nodes[i].text.as_ref().and_then(|t| t.advance_in.as_ref().map(|(run, at)| (self.text.run_layout(run, t.style, scale), *at)));
+            if let Some((r, _)) = run.filter(|(r, at)| r.x(*at).is_some()) {
+                nodes[i].text_layout = Some(r.layout.clone());
+                nodes[i].run_layout = Some(r);
+            } else if let Some(spec) = &nodes[i].text {
                 let w = (l.size.width - ins[0] - ins[2]).max(0.0);
                 let wrap = spec.wrap.then_some(w * scale);
                 let mut layout = self.text.layout_aligned(&spec.content, &spec.spans, spec.style, scale, wrap, line_alignment(spec));
@@ -3129,9 +3145,16 @@ impl<S: 'static> Runtime<S> {
                         let c = d.color.premul(o);
                         self.instances.push(rect_inst(d.rect, c, d.radius, clip, fade));
                     }
-                    let reveal = self.reveals.get(&n.id).filter(|st| !st.words.is_empty());
+                    let reveal = self.reveals.get(&n.id).filter(|st| !st.words.is_empty() && spec.advance_in.is_none());
                     self.glyph_scratch.clear();
-                    self.text.glyphs_for_layout(layout, s, origin, reveal.is_some() || !link_fx.is_empty(), &mut self.glyph_scratch);
+                    // A cell of a longer run draws its slice of the run's glyphs, shaped in context.
+                    if let (Some(r), Some((_, at))) = (&n.run_layout, &spec.advance_in)
+                        && let Some(x) = r.x(*at)
+                    {
+                        self.text.glyphs_in(r, *at, s, [origin[0] - x, origin[1]], &mut self.glyph_scratch);
+                    } else {
+                        self.text.glyphs_for_layout(layout, s, origin, reveal.is_some() || !link_fx.is_empty(), &mut self.glyph_scratch);
+                    }
                     let gamma = glyph_gamma(color, s);
                     let base = color.premul(o);
                     for q in &self.glyph_scratch {
@@ -3738,7 +3761,8 @@ fn flatten(
     }
     let measured = text.is_some();
     let measure = text.as_ref().map(|t| crate::text::text_hash(&t.content, &t.spans, t.style, scale, None) ^ u64::from(t.wrap) ^ (u64::from(t.truncate || t.truncate_fade) << 1)
-        ^ if t.truncate_fade { u64::from(t.fade_em.to_bits()) << 2 } else { 0 });
+        ^ if t.truncate_fade { u64::from(t.fade_em.to_bits()) << 2 } else { 0 }
+        ^ t.advance_in.as_ref().map_or(0, |(run, at)| run.hash.rotate_left(3) ^ (*at as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)));
     nodes.push(Node {
         on_paste,
         on_window_focus,
@@ -3756,6 +3780,7 @@ fn flatten(
         live,
         text,
         text_layout: None,
+        run_layout: None,
         live_text_seen: None,
         on_press,
         on_secondary_press,

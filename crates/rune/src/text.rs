@@ -601,6 +601,7 @@ pub struct TextSystem {
     layout_cx: LayoutContext<Ink>,
     scale_cx: ScaleContext,
     layouts: HashMap<u64, (Rc<Layout<Ink>>, u32)>,
+    runs: HashMap<u64, (Rc<RunLayout>, u32)>,
     generation: u32,
     pub sans: String,
     pub mono: String,
@@ -617,6 +618,7 @@ pub struct TextSystem {
     pub shaped: u32,
     /// Reused across lines and frames when mapping reveal glyphs back to source bytes.
     cluster_scratch: Vec<(f32, u32)>,
+    coords_scratch: Vec<i16>,
 }
 
 impl Default for TextSystem {
@@ -639,6 +641,153 @@ pub fn text_hash(text: &str, spans: &[Span], style: TextStyle, scale: f32, width
     };
     (style.variations, style.features, optical, style.italic).hash(&mut h);
     h.finish()
+}
+
+/// A string that several text cells each show one grapheme of (see [`El::advance_in`]), hashed
+/// once so cells and frames can look up its shaped layout without rehashing it.
+///
+/// [`El::advance_in`]: crate::El::advance_in
+#[derive(Clone, Debug)]
+pub struct Run {
+    text: Rc<str>,
+    pub(crate) hash: u64,
+}
+
+impl Run {
+    pub fn new(text: impl Into<Rc<str>>) -> Run {
+        let text = text.into();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut h);
+        Run { hash: h.finish(), text }
+    }
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+    /// The run's cache key for one style and scale.
+    pub(crate) fn key(&self, style: TextStyle, scale: f32) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (self.hash, text_hash("", &[], style, scale, None)).hash(&mut h);
+        h.finish()
+    }
+}
+
+/// One glyph run's face, as the rasterizer needs it.
+struct Face {
+    font: parley::FontData,
+    size: f32,
+    coords_key: u64,
+    ink: u16,
+    /// A face without italics leans by a fixed angle instead of fontique's 14°.
+    skew: u8,
+    baseline: f32,
+}
+
+impl Face {
+    /// The face of `glyph_run`; its normalized coordinates go to `coords`.
+    fn of(glyph_run: &parley::GlyphRun<'_, Ink>, coords: &mut Vec<i16>) -> Face {
+        let run = glyph_run.run();
+        coords.clear();
+        coords.extend(run.normalized_coords().iter().map(|c| c.to_bits()));
+        Face {
+            font: run.font().clone(),
+            size: run.font_size(),
+            coords_key: coords.iter().fold(0u64, |h, &c| h.wrapping_mul(31).wrapping_add(c as u16 as u64)),
+            ink: glyph_run.style().brush.0,
+            skew: if run.synthesis().skew().is_some() { SYNTHETIC_OBLIQUE } else { 0 },
+            baseline: glyph_run.baseline(),
+        }
+    }
+}
+
+struct RunFace {
+    face: Face,
+    coords: Vec<i16>,
+}
+
+struct RunGlyph {
+    face: u16,
+    id: u32,
+    /// From the layout's left edge and its line's baseline (device px).
+    x: f32,
+    y: f32,
+}
+
+/// A [`Run`] shaped as one line, with each grapheme's offset and glyphs.
+pub struct RunLayout {
+    pub layout: Rc<Layout<Ink>>,
+    /// Per grapheme: (byte, x on the 1/64 px grid element rects snap to, first glyph); then
+    /// (len, end rounded up to a device pixel, glyph count).
+    graphemes: Vec<(u32, f32, u32)>,
+    faces: Vec<RunFace>,
+    glyphs: Vec<RunGlyph>,
+}
+
+impl RunLayout {
+    fn new(layout: Rc<Layout<Ink>>, text: &str) -> RunLayout {
+        use unicode_segmentation::UnicodeSegmentation;
+        let starts: Vec<u32> = text.grapheme_indices(true).map(|(i, _)| i as u32).collect();
+        let grapheme_of = |byte: u32| starts.partition_point(|&s| s <= byte).saturating_sub(1);
+        let mut xs = vec![f32::INFINITY; starts.len()];
+        let mut faces = Vec::new();
+        let mut glyphs: Vec<(usize, RunGlyph)> = Vec::new();
+        for line in layout.lines() {
+            for item in line.items() {
+                let PositionedLayoutItem::GlyphRun(glyph_run) = item else { continue };
+                let mut coords = Vec::new();
+                let face = Face::of(&glyph_run, &mut coords);
+                faces.push(RunFace { face, coords });
+                let face = faces.len() as u16 - 1;
+                // Glyphs belong to the cluster they were shaped in (by count, not by x), so a
+                // zero-advance mark stays with its base.
+                let mut owners = glyph_run.run().visual_clusters().flat_map(|cl| {
+                    std::iter::repeat_n(cl.text_range().start as u32, cl.glyphs().count())
+                });
+                let mut x = glyph_run.offset();
+                for cl in glyph_run.run().visual_clusters() {
+                    let gi = grapheme_of(cl.text_range().start as u32);
+                    if let Some(g) = xs.get_mut(gi) {
+                        *g = g.min(x);
+                    }
+                    x += cl.advance();
+                }
+                let mut rel = glyph_run.offset();
+                for g in glyph_run.glyphs() {
+                    let byte = owners.next().unwrap_or(0);
+                    glyphs.push((grapheme_of(byte), RunGlyph { face, id: g.id, x: rel + g.x, y: g.y }));
+                    rel += g.advance;
+                }
+            }
+        }
+        glyphs.sort_by_key(|g| g.0);
+        let mut graphemes = Vec::with_capacity(starts.len() + 1);
+        let mut prev = 0.0;
+        for (i, &start) in starts.iter().enumerate() {
+            let x = if xs[i].is_finite() { xs[i] } else { prev };
+            prev = x;
+            graphemes.push((start, (x * 64.0).round() / 64.0, glyphs.partition_point(|g| g.0 < i) as u32));
+        }
+        graphemes.push((text.len() as u32, (layout.full_width() - 1e-3).ceil(), glyphs.len() as u32));
+        RunLayout { layout, graphemes, faces, glyphs: glyphs.into_iter().map(|g| g.1).collect() }
+    }
+
+    /// The index of the grapheme starting at byte `at` (never the end sentinel).
+    fn grapheme(&self, at: usize) -> Option<usize> {
+        let i = self.graphemes.binary_search_by_key(&(at as u32), |e| e.0).ok()?;
+        (i + 1 < self.graphemes.len()).then_some(i)
+    }
+
+    /// The x (device px) of the grapheme at byte `at`.
+    pub fn x(&self, at: usize) -> Option<f32> {
+        self.grapheme(at).map(|i| self.graphemes[i].1)
+    }
+
+    /// Width in points of the grapheme at byte `at`: the gap to the next grapheme, or for the
+    /// last to the run's end rounded up as [`TextSystem::measure`] does, so cells measured this
+    /// way keep the run's kerning and sum to its measured width.
+    pub fn advance(&self, at: usize, scale: f32) -> Option<f32> {
+        let i = self.grapheme(at)?;
+        Some(((self.graphemes[i + 1].1 - self.graphemes[i].1) / scale).max(0.0))
+    }
 }
 
 fn variations(style: TextStyle, size: f32) -> Vec<parley::FontVariation> {
@@ -673,6 +822,7 @@ impl TextSystem {
             layout_cx: LayoutContext::new(),
             scale_cx: ScaleContext::new(),
             layouts: HashMap::new(),
+            runs: HashMap::new(),
             generation: 0,
             sans: families.0.to_owned(),
             mono: families.1.to_owned(),
@@ -686,6 +836,7 @@ impl TextSystem {
             color_pixels: Vec::new(),
             shaped: 0,
             cluster_scratch: Vec::new(),
+            coords_scratch: Vec::new(),
         }
     }
 
@@ -698,6 +849,7 @@ impl TextSystem {
     pub fn end_commit(&mut self) {
         let g = self.generation;
         self.layouts.retain(|_, (_, used)| g.wrapping_sub(*used) < 2);
+        self.runs.retain(|_, (_, used)| g.wrapping_sub(*used) < 2);
         self.generation = g.wrapping_add(1);
     }
 
@@ -838,6 +990,19 @@ impl TextSystem {
         (l.full_width().ceil() / scale, layout_height(&l, style, scale) / scale)
     }
 
+    /// `run` shaped as one line in `style`, cached until two commits pass without a lookup.
+    pub fn run_layout(&mut self, run: &Run, style: TextStyle, scale: f32) -> Rc<RunLayout> {
+        let key = run.key(style, scale);
+        let g = self.generation;
+        if let Some((r, used)) = self.runs.get_mut(&key) {
+            *used = g;
+            return r.clone();
+        }
+        let r = Rc::new(RunLayout::new(self.layout_rich(run.as_str(), &[], style, scale, None), run.as_str()));
+        self.runs.insert(key, (r.clone(), g));
+        r
+    }
+
     /// A live run owns its latest layout; don't retain every timer tick in the commit cache.
     pub(crate) fn layout_live(&mut self, text: &str, style: TextStyle, scale: f32) -> Rc<Layout<Ink>> {
         let key = text_hash(text, &[], style, scale, None);
@@ -863,8 +1028,8 @@ impl TextSystem {
         bytes: bool,
         out: &mut Vec<GlyphQuad>,
     ) {
-        let dilation = 0.1 * scale;
-        let table = &mut self.cluster_scratch;
+        let mut table = std::mem::take(&mut self.cluster_scratch);
+        let mut coords = std::mem::take(&mut self.coords_scratch);
         for line in layout.lines() {
             if bytes {
                 table.clear();
@@ -878,82 +1043,96 @@ impl TextSystem {
             }
             for item in line.items() {
                 let PositionedLayoutItem::GlyphRun(glyph_run) = item else { continue };
-                let run = glyph_run.run();
-                let font = run.font();
-                let font_size = run.font_size();
-                let coords = run.normalized_coords();
-                let coords_key = coords.iter().fold(0u64, |h, c| h.wrapping_mul(31).wrapping_add(c.to_bits() as u16 as u64));
-                let ink = glyph_run.style().brush.0;
-                // A face without italics leans by a fixed angle instead of fontique's 14°.
-                let skew = if run.synthesis().skew().is_some() { SYNTHETIC_OBLIQUE } else { 0 };
-                let baseline = (origin[1] + glyph_run.baseline()).round();
+                let face = Face::of(&glyph_run, &mut coords);
+                let baseline = (origin[1] + face.baseline).round();
                 let mut rel = glyph_run.offset();
                 for g in glyph_run.glyphs() {
-                    let gx = origin[0] + rel + g.x;
-                    let gy = baseline + g.y;
                     let byte = if bytes {
                         let i = table.partition_point(|&(x0, _)| x0 <= rel + 0.01);
                         table.get(i.saturating_sub(1)).map_or(0, |e| e.1)
                     } else {
                         0
                     };
+                    self.push_glyph(&face, &coords, g.id, [origin[0] + rel + g.x, baseline + g.y], scale, byte, out);
                     rel += g.advance;
-                    let fx = gx.floor();
-                    let subpx = ((gx - fx) * SUBPIXEL_STEPS).round() as u8;
-                    let (fx, subpx) = if subpx as f32 >= SUBPIXEL_STEPS { (fx + 1.0, 0) } else { (fx, subpx) };
-                    let key = GlyphKey {
-                        font: font.data.id(),
-                        index: font.index,
-                        glyph: g.id,
-                        size: font_size.to_bits(),
-                        coords: coords_key,
-                        subpx,
-                        dilation: dilation.to_bits(),
-                        skew,
-                    };
-                    let entry = match self.atlas.map.get(&key) {
-                        Some(&e) => e,
-                        None => {
-                            // Colour glyphs sit on whole pixels and ignore emboldening.
-                            let color_key = GlyphKey { subpx: 0, dilation: 0, ..key };
-                            if let Some(c) = self.color_glyphs.get(&color_key) {
-                                out.push(c.quad(gx, gy, ink, byte));
-                                continue;
-                            }
-                            let Some(font_ref) = FontRef::from_index(font.data.as_ref(), font.index as usize) else {
-                                continue;
-                            };
-                            let mut scaler = self
-                                .scale_cx
-                                .builder(font_ref)
-                                .size(font_size)
-                                .hint(false)
-                                .normalized_coords(coords.iter().map(|c| c.to_bits()))
-                                .build();
-                            if let Some((pixels, at)) = rasterize_color(&mut scaler, g.id as u16) {
-                                self.color_pixels.push(pixels);
-                                let index = self.color_pixels.len() as u32;
-                                let c = ColorGlyph { index, left: at.left, top: at.top, w: at.width, h: at.height };
-                                self.color_glyphs.insert(color_key, c);
-                                out.push(c.quad(gx, gy, ink, byte));
-                                continue;
-                            }
-                            let e = rasterize(&mut scaler, &mut self.atlas, g.id as u16, subpx, dilation, skew);
-                            self.atlas.map.insert(key, e);
-                            e
-                        }
-                    };
-                    if let Some(a) = entry {
-                        out.push(GlyphQuad {
-                            rect: [fx + a.left as f32, gy.round() - a.top as f32, a.w as f32, a.h as f32],
-                            uv: [a.x as f32, a.y as f32],
-                            ink,
-                            byte,
-                            color: 0,
-                        });
-                    }
                 }
             }
+        }
+        self.cluster_scratch = table;
+        self.coords_scratch = coords;
+    }
+
+    /// Glyph quads for the grapheme at byte `at` of a shaped run, with the run's top-left at
+    /// `origin` (device px). Only that grapheme's glyphs are visited.
+    pub fn glyphs_in(&mut self, run: &RunLayout, at: usize, scale: f32, origin: [f32; 2], out: &mut Vec<GlyphQuad>) {
+        let Some(i) = run.grapheme(at) else { return };
+        let glyphs = run.graphemes[i].2 as usize..run.graphemes[i + 1].2 as usize;
+        for g in &run.glyphs[glyphs] {
+            let face = &run.faces[g.face as usize];
+            let baseline = (origin[1] + face.face.baseline).round();
+            self.push_glyph(&face.face, &face.coords, g.id, [origin[0] + g.x, baseline + g.y], scale, at as u32, out);
+        }
+    }
+
+    /// Rasterizes (once) and appends one glyph at device position `at`.
+    #[allow(clippy::too_many_arguments)]
+    fn push_glyph(&mut self, face: &Face, coords: &[i16], glyph: u32, at: [f32; 2], scale: f32, byte: u32, out: &mut Vec<GlyphQuad>) {
+        let dilation = 0.1 * scale;
+        let [gx, gy] = at;
+        let (font, font_size, ink, skew) = (&face.font, face.size, face.ink, face.skew);
+        let fx = gx.floor();
+        let subpx = ((gx - fx) * SUBPIXEL_STEPS).round() as u8;
+        let (fx, subpx) = if subpx as f32 >= SUBPIXEL_STEPS { (fx + 1.0, 0) } else { (fx, subpx) };
+        let key = GlyphKey {
+            font: font.data.id(),
+            index: font.index,
+            glyph,
+            size: font_size.to_bits(),
+            coords: face.coords_key,
+            subpx,
+            dilation: dilation.to_bits(),
+            skew,
+        };
+        let entry = match self.atlas.map.get(&key) {
+            Some(&e) => e,
+            None => {
+                // Colour glyphs sit on whole pixels and ignore emboldening.
+                let color_key = GlyphKey { subpx: 0, dilation: 0, ..key };
+                if let Some(c) = self.color_glyphs.get(&color_key) {
+                    out.push(c.quad(gx, gy, ink, byte));
+                    return;
+                }
+                let Some(font_ref) = FontRef::from_index(font.data.as_ref(), font.index as usize) else {
+                    return;
+                };
+                let mut scaler = self
+                    .scale_cx
+                    .builder(font_ref)
+                    .size(font_size)
+                    .hint(false)
+                    .normalized_coords(coords.iter().copied())
+                    .build();
+                if let Some((pixels, at)) = rasterize_color(&mut scaler, glyph as u16) {
+                    self.color_pixels.push(pixels);
+                    let index = self.color_pixels.len() as u32;
+                    let c = ColorGlyph { index, left: at.left, top: at.top, w: at.width, h: at.height };
+                    self.color_glyphs.insert(color_key, c);
+                    out.push(c.quad(gx, gy, ink, byte));
+                    return;
+                }
+                let e = rasterize(&mut scaler, &mut self.atlas, glyph as u16, subpx, dilation, skew);
+                self.atlas.map.insert(key, e);
+                e
+            }
+        };
+        if let Some(a) = entry {
+            out.push(GlyphQuad {
+                rect: [fx + a.left as f32, gy.round() - a.top as f32, a.w as f32, a.h as f32],
+                uv: [a.x as f32, a.y as f32],
+                ink,
+                byte,
+                color: 0,
+            });
         }
     }
 
@@ -1358,6 +1537,50 @@ mod tests {
         ts.glyphs_for_layout(&layout, 2.0, [0.0, 0.0], false, &mut again);
         assert_eq!(again.iter().filter(|q| q.color != 0).map(|q| q.color).collect::<Vec<_>>(), vec![e.color]);
         assert_eq!(ts.color_pixels.len(), 1);
+    }
+
+    #[test]
+    fn run_cells_draw_the_run_glyphs_and_marks_stay_with_their_base() {
+        let mut ts = TextSystem::default();
+        let style = crate::tok::type_::BODY;
+        // No precomposed x-acute, so the accent is its own zero-advance glyph after "x".
+        let run = Run::new("x\u{301}yAV");
+        let r = ts.run_layout(&run, style, 2.0);
+        let mut whole = Vec::new();
+        ts.glyphs_for_layout(&r.layout, 2.0, [0.0, 0.0], false, &mut whole);
+        let mut cells = Vec::new();
+        for at in [0, 3, 4, 5] {
+            let mut one = Vec::new();
+            ts.glyphs_in(&r, at, 2.0, [0.0, 0.0], &mut one);
+            cells.push(one);
+        }
+        assert_eq!(cells.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1, 1, 1], "the accent draws in the x cell");
+        let rects: Vec<_> = cells.concat().iter().map(|q| q.rect).collect();
+        assert_eq!(rects, whole.iter().map(|q| q.rect).collect::<Vec<_>>(), "cells draw exactly the run's glyphs");
+        // Widths tile the run and sum to its measured width.
+        let sum: f32 = [0, 3, 4, 5].iter().map(|&at| r.advance(at, 2.0).unwrap()).sum();
+        assert!((sum - ts.measure(run.as_str(), style, 2.0).0).abs() < 1e-3, "{sum}");
+    }
+
+    #[test]
+    fn run_lookups_off_a_grapheme_start_find_nothing() {
+        let mut ts = TextSystem::default();
+        let run = Run::new("x\u{301}y");
+        let r = ts.run_layout(&run, crate::tok::type_::BODY, 2.0);
+        for at in [1, 2, 4, 99] {
+            assert_eq!((r.x(at), r.advance(at, 2.0)), (None, None), "byte {at}");
+            let mut out = Vec::new();
+            ts.glyphs_in(&r, at, 2.0, [0.0, 0.0], &mut out);
+            assert!(out.is_empty());
+        }
+        // A cell whose byte is off the run measures and draws as plain text.
+        use crate::{Cx, El, Env, Runtime};
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            crate::el::row().child(crate::el::text("y").advance_in(&Run::new("x\u{301}y"), 2)).child(crate::el::text("y").advance_in(&Run::new("y"), 99))
+        }
+        let mut rt = Runtime::new((), view, (200.0, 100.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        assert_eq!(rt.instances.iter().filter(|i| i.params[1] == crate::render::KIND_GLYPH).count(), 2);
     }
 }
 

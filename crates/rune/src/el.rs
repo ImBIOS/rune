@@ -319,6 +319,8 @@ pub struct TextSpec {
     pub live: Option<crate::LiveText>,
     pub(crate) links: Vec<Link>,
     pub(crate) on_link: Option<LinkFn>,
+    /// Measured as its slice at this byte of the run (see [`El::advance_in`]).
+    pub advance_in: Option<(crate::text::Run, usize)>,
 }
 
 /// [`El::on_link`]'s handler.
@@ -549,6 +551,7 @@ pub fn text(content: impl Into<String>) -> El {
         live: None,
         links: Vec::new(),
         on_link: None,
+        advance_in: None,
     });
     e
 }
@@ -1401,6 +1404,16 @@ impl El {
     pub fn justify(mut self) -> Self {
         if let Some(t) = &mut self.text {
             t.justify = true;
+        }
+        self
+    }
+    /// Measure this text as the grapheme at byte `at` of `run`, shaped as one line in the same
+    /// style, instead of on its own rounded up to a device pixel. Neighbouring cells of one run
+    /// then sit at its fractional, kerned advances and together take its width, and each draws
+    /// the run's own glyphs for its grapheme (contextual forms included).
+    pub fn advance_in(mut self, run: &crate::text::Run, at: usize) -> Self {
+        if let Some(t) = &mut self.text {
+            t.advance_in = Some((run.clone(), at));
         }
         self
     }
