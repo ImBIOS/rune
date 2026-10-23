@@ -16,6 +16,7 @@ use crate::tok::TextStyle;
 /// What a handler may say about the commit it causes.
 #[derive(Clone, Debug, Default)]
 pub struct Tx {
+    pub(crate) shortcut_activation_token: Option<String>,
     pub(crate) instant: bool,
     pub(crate) motion: Option<Spring>,
     pub(crate) color_motion: Option<Spring>,

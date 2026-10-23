@@ -246,7 +246,7 @@ impl<S: 'static> App<S> {
 /// Opens, focuses, closes and feeds a running `App` from any thread. Every call wakes the event
 /// loop; nothing polls. Window requests collapse to the latest.
 pub struct AppHandle<S: 'static> {
-    shared: Arc<Shared<S>>,
+    pub(crate) shared: Arc<Shared<S>>,
 }
 
 impl<S> Clone for AppHandle<S> {
@@ -383,6 +383,7 @@ impl<S> Default for Requests<S> {
 }
 
 pub(crate) struct Shared<S> {
+    pub(crate) shortcuts: crate::shortcuts::Hub<S>,
     requests: Mutex<Requests<S>>,
     wake: Mutex<Option<crate::runtime::Waker>>,
     /// Published by the window host for `AppHandle::is_visible` / `window_error`.
@@ -393,6 +394,7 @@ pub(crate) struct Shared<S> {
 impl<S> Default for Shared<S> {
     fn default() -> Self {
         Shared {
+            shortcuts: crate::shortcuts::Hub::default(),
             requests: Mutex::default(),
             wake: Mutex::new(None),
             visible: AtomicBool::new(false),

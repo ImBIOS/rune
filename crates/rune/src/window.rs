@@ -318,7 +318,7 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
                 continue;
             }
             overlays.append(&mut spec.app.overlays);
-            let mut host = Host::new(spec, args, self.proxy.clone(), slot, self.gpu.clone());
+            let mut host = Host::new(spec, args, self.proxy.clone(), slot, self.gpu.clone(), is_wayland(event_loop));
             AnyHost::resumed(&mut host, event_loop);
             self.hosts.push(Some(Box::new(host)));
         }
@@ -384,6 +384,7 @@ struct Host<S: 'static> {
     release_gpu: bool,
     open_at_start: bool,
     shared: Arc<Shared<S>>,
+    shortcuts: crate::shortcuts::Guard,
     rt: Runtime<S>,
     win: Option<Win>,
     gpu: Option<(Arc<Gpu>, Renderer, wgpu::TextureFormat)>,
@@ -438,7 +439,7 @@ fn run_configured<S: 'static>(factory: impl FnOnce(&[Display]) -> Vec<WindowSpec
 }
 
 impl<S: 'static> Host<S> {
-    fn new(window_spec: WindowSpec<S>, args: Args, proxy: EventLoopProxy<WakeEvent>, slot: usize, gpu_pool: Rc<RefCell<Weak<Gpu>>>) -> Self {
+    fn new(window_spec: WindowSpec<S>, args: Args, proxy: EventLoopProxy<WakeEvent>, slot: usize, gpu_pool: Rc<RefCell<Weak<Gpu>>>, wayland: bool) -> Self {
         let WindowSpec { mut app, options, key, on_created } = window_spec;
         let args = app.resolve_args(args);
         let on_window = app.on_window.take();
@@ -475,7 +476,8 @@ impl<S: 'static> Host<S> {
         crate::tooling::attach_dev(&mut rt, &spec, dev, waker.clone());
         let mut clipboard = crate::clipboard::Client::default();
         clipboard.connect(waker.clone());
-        shared.connect(waker);
+        shared.connect(waker.clone());
+        let shortcuts = crate::shortcuts::Guard::attach(&shared, waker, false, wayland);
         Host {
             chrome,
             options,
@@ -493,6 +495,7 @@ impl<S: 'static> Host<S> {
             release_gpu,
             open_at_start: open,
             shared,
+            shortcuts,
             rt,
             win: None,
             gpu: None,
@@ -881,6 +884,7 @@ impl<S: 'static> Host<S> {
     fn drain(&mut self, event_loop: &ActiveEventLoop, wake: bool) {
         let shown = self.win.as_ref().is_some_and(|w| w.visible);
         let clipboard = self.clipboard.receive(&mut self.rt);
+        self.shortcuts.drain();
         let requests = self.shared.take();
         let changed = clipboard || !requests.updates.is_empty();
         for f in requests.updates {
