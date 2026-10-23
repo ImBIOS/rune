@@ -178,6 +178,8 @@ pub(crate) trait AnyHost {
     /// Draws what has no redraw event (a layer surface); true while it needs more frames.
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) -> bool { false }
     fn finished(&self) -> bool { false }
+    /// The OS is ending the app without Rune asking: run close hooks before the hosts drop.
+    fn terminate(&mut self) {}
     /// False for hosts that must not keep the loop running alone (overlays).
     fn keeps_loop(&self) -> bool { true }
 }
@@ -353,7 +355,12 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
         event_loop.set_control_flow(if animating { ControlFlow::Poll }
             else { deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil) });
     }
-    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+    fn exiting(&mut self, event_loop: &ActiveEventLoop) {
+        // Rune didn't ask to exit, so the OS is ending the app: macOS Quit, Cmd-Q, the Dock's
+        // Quit, logout. Windows close as their close button would, before the clipboard stops.
+        if !event_loop.exiting() {
+            for host in self.hosts.iter_mut().flatten() { host.terminate(); }
+        }
         // Surfaces go while winit's display connection is still open (layer surfaces live on it).
         self.hosts.clear();
         crate::clipboard::shutdown();
@@ -950,14 +957,8 @@ impl<S: 'static> Host<S> {
     fn close(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(w) = &mut self.win { w.first_frame.hide(); }
         self.secure_input.set(false);
-        if self.win.is_none() || (self.keep_running && self.win.as_ref().is_some_and(|w| !w.visible)) {
-            return;
-        }
-        if let Some(f) = self.on_close {
-            self.rt.update(f);
-        }
-        // Before the window hides or the app exits: a lock or clear must reach the worker.
-        self.clipboard.flush(&mut self.rt);
+        if !self.closes() { return; }
+        self.close_hook();
         self.rt.set_live_visible(false);
         if self.rt.shell_request.take() == Some(Shell::Quit) {
             event_loop.exit();
@@ -969,6 +970,17 @@ impl<S: 'static> Host<S> {
             return;
         }
         self.hide(event_loop);
+    }
+
+    /// Whether a close runs `on_close`: a window is shown, or hidden without `keep_running`.
+    fn closes(&self) -> bool { self.win.as_ref().is_some_and(|w| w.visible || !self.keep_running) }
+
+    fn close_hook(&mut self) {
+        if let Some(f) = self.on_close {
+            self.rt.update(f);
+        }
+        // Before the window hides or the app exits: a lock or clear must reach the worker.
+        self.clipboard.flush(&mut self.rt);
     }
 
     fn hide(&mut self, event_loop: &ActiveEventLoop) {
@@ -1352,6 +1364,12 @@ impl<S: 'static> AnyHost for Host<S> {
         self.win.as_ref().is_some_and(|w| w.window.id() == id)
     }
     fn finished(&self) -> bool { self.finished }
+    fn terminate(&mut self) {
+        // Once: a window that already closed ran its hook then.
+        if self.finished || !self.closes() { return; }
+        self.finished = true;
+        self.close_hook();
+    }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
         if let Some(w) = &mut self.win && let Some((retry, until)) = w.first_frame.deadline && retry <= Instant::now() {

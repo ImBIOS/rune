@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **macOS Quit runs `on_close`.** The app menu's Quit, Cmd-Q, the Dock's Quit and logout now
+  run `on_close` once, and flush clipboard clears, before the process ends, as the close button
+  does. A window already hidden under `keep_running` has closed, so its hook doesn't run again.
+  `AppHandle::quit` and `Tx::quit` still skip it.
 - **Headless `{"physical": "alt+super+space"}` releases its modifiers.** After the key's down
   and up, the script now sends the modifiers coming up, as a keyboard does, so a recorder no
   longer shows ⌥⌘ held in later stills. Scripts whose stills showed held modifiers change.

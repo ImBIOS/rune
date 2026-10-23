@@ -172,8 +172,9 @@ impl<S: 'static> App<S> {
         self
     }
 
-    /// Runs whenever the window closes (close button, `Tx::close_window`, `AppHandle::close`),
-    /// before it goes: flush drafts, stop previews. Its `Tx::quit` quits.
+    /// Runs whenever the window closes (close button, `Tx::close_window`, `AppHandle::close`,
+    /// macOS Quit from the menu, Cmd-Q or the Dock), before it goes: flush drafts, stop previews.
+    /// Its `Tx::quit` quits.
     pub fn on_close(mut self, f: fn(&mut S, &mut Tx)) -> Self {
         self.on_close = Some(f);
         self
