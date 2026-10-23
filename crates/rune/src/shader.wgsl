@@ -1,8 +1,8 @@
 // One instanced "uber-quad": rounded rects with per-corner radius and border (kind 0), analytic
-// Gaussian rounded-rect shadows (kind 1), glyph-atlas text (kind 2), inset shadows (kind 3) and
-// vertical-gradient rounded rects (kind 4), stroke segments (kind 5) and filled triangles
-// (kind 6) for vector shapes, RGBA images (kind 7), and premultiplied layer composites (kind 8).
-// Scope-end records (kind 9) never reach this shader. Every ordinary instance carries a
+// Gaussian rounded-rect shadows (kind 1), glyph-atlas text (kind 2), inset shadows (kind 3),
+// vertical-gradient rounded rects or borders (kind 4), stroke segments (kind 5) and filled
+// triangles (kind 6) for vector shapes, RGBA images (kind 7), and premultiplied layer composites
+// (kind 8). Scope-end records (kind 9) never reach this shader. Every ordinary instance carries a
 // soft-edge clip. Output is premultiplied linear colour into an sRGB target (linear blending).
 
 struct Globals {
@@ -340,8 +340,17 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
             }
             col = i.fill * cov * (1.0 - clamp(lit, 0.0, 1.0));
         } else {
+            // With a border width, kind 0 whose ring runs from `border` (top) to `uv` (bottom).
             let t = clamp((i.p.y - i.rect.y) / max(i.rect.w, 1.0), 0.0, 1.0);
-            col = mix(i.fill, i.uv, t) * cov;
+            let soft = max(i.params.z, 0.5);
+            let soft_cov = clamp(0.5 - d / (soft * 2.0), 0.0, 1.0);
+            let bw = i.params.x;
+            if (bw > 0.0) {
+                let inner = clamp(0.5 - (d + bw) / (soft * 2.0), 0.0, 1.0);
+                col = i.fill * inner + mix(i.border, i.uv, t) * (soft_cov - inner);
+            } else {
+                col = mix(i.fill, i.uv, t) * soft_cov;
+            }
         }
     } else {
         // Interpolated screen coordinates can round below an integer texel

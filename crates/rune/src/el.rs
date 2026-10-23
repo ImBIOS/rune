@@ -361,6 +361,8 @@ pub struct Visual {
     pub radius: [f32; 4],
     pub border_width: f32,
     pub border: Color,
+    /// Bottom colour of a vertical border gradient whose top is `border` (`El::border_gradient`).
+    pub border_bottom: Option<Color>,
     pub shadows: Vec<Shadow>,
     pub opacity: f32,
     pub blur: f32,
@@ -406,6 +408,7 @@ impl Default for Visual {
             radius: [0.0; 4],
             border_width: 0.0,
             border: Color::TRANSPARENT,
+            border_bottom: None,
             shadows: Vec::new(),
             opacity: 1.0,
             blur: 0.0,
@@ -1173,6 +1176,15 @@ impl El {
     pub fn border(mut self, width: f32, c: Color) -> Self {
         self.vis.border_width = width;
         self.vis.border = c;
+        self.vis.border_bottom = None;
+        self
+    }
+    /// A border whose colour runs from `top` at the top edge to `bottom` at the bottom edge,
+    /// e.g. a top-lit hairline rim. Replaces any `border`, and `border` replaces it.
+    pub fn border_gradient(mut self, width: f32, top: Color, bottom: Color) -> Self {
+        self.vis.border_width = width;
+        self.vis.border = top;
+        self.vis.border_bottom = Some(bottom);
         self
     }
     pub fn shadow(mut self, y: f32, blur: f32, color: Color) -> Self {

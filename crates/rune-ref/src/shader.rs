@@ -142,9 +142,16 @@ pub(crate) fn fragment(i: &Primitive, atlas: &Atlas, p: [f32; 2]) -> [f32; 4] {
             col = i.fill.map(|c| c * cov * (1.0 - clamp(lit)));
         }
         4 => {
-            let cov = clamp(0.5 - sd(q, h, i.radii));
+            let d = sd(q, h, i.radii);
+            let soft = i.params[2].max(0.5);
+            let cov = clamp(0.5 - d / (soft * 2.0));
+            let inner = clamp(0.5 - (d + i.params[0]) / (soft * 2.0));
             let t = clamp((p[1] - i.rect[1]) / i.rect[3].max(1.0));
-            col = std::array::from_fn(|c| mix(i.fill[c], i.uv[c], t) * cov);
+            col = std::array::from_fn(|c| if i.params[0] > 0.0 {
+                i.fill[c] * inner + mix(i.border[c], i.uv[c], t) * (cov - inner)
+            } else {
+                mix(i.fill[c], i.uv[c], t) * cov
+            });
         }
         _ => panic!("unsupported primitive kind"),
     }

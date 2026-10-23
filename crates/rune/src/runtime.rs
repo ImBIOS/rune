@@ -75,6 +75,7 @@ const P_HOVER: Prop<f32> = Prop::custom(73, PropClass::Opacity);
 const P_PRESS: Prop<f32> = Prop::custom(74, PropClass::Opacity);
 const P_GRADIENT: [Prop<Color>; 2] = [Prop::custom(75, PropClass::Color), Prop::custom(76, PropClass::Color)];
 const P_OUTLINE: Prop<Color> = Prop::custom(77, PropClass::Color);
+const P_BORDER_BOTTOM: Prop<Color> = Prop::custom(78, PropClass::Color);
 
 /// Scroll momentum decay (iOS normal: 0.998 per ms).
 const SCROLL_DECAY: f32 = 2.002;
@@ -2165,7 +2166,15 @@ impl<S: 'static> Runtime<S> {
                 self.set_or_anim(id, P_FILL, vis.fill, spring_c, instant);
             }
             if vis.border_width > 0.0 {
+                let had_bottom = self.scene.store().has(id, P_BORDER_BOTTOM);
+                if vis.border_bottom.is_some() && !had_bottom && let Some(c) = self.scene.get(id, P_BORDER) {
+                    // A solid border's bottom springs into the gradient rather than jumping.
+                    self.scene.set(id, P_BORDER_BOTTOM, c);
+                }
                 self.set_or_anim(id, P_BORDER, vis.border, spring_c, instant);
+                if vis.border_bottom.is_some() || had_bottom {
+                    self.set_or_anim(id, P_BORDER_BOTTOM, vis.border_bottom.unwrap_or(vis.border), spring_c, instant);
+                }
             }
             if let Some(c) = nodes[i].text.as_ref().map(|t| t.color).or(nodes[i].vis.icon.map(|(_, c)| c)) {
                 self.set_or_anim(id, P_TEXT, c, spring_tc, instant);
@@ -3246,6 +3255,11 @@ impl<S: 'static> Runtime<S> {
                 let fill = if layered { base } else { over(overlay, base) }.map(|c| c * o);
                 let bw = n.vis.border_width * sc * s;
                 let border = if bw > 0.0 { self.color(n.id, P_BORDER, n.vis.border).premul(o) } else { [0.0; 4] };
+                // A gradient border draws as KIND_GRADIENT with a width: `border` top, `uv` bottom.
+                let border_bottom = (bw > 0.0 && (n.vis.border_bottom.is_some() || self.scene.store().is_animating(n.id, P_BORDER_BOTTOM)))
+                    .then(|| self.color(n.id, P_BORDER_BOTTOM, n.vis.border_bottom.unwrap_or(n.vis.border)).premul(o));
+                let (border_kind, border_uv) = border_bottom.map_or((KIND_RECT, [0.0; 4]), |b| (KIND_GRADIENT, b));
+                let border_a = border[3].max(border_uv[3]);
                 if layered {
                     // Fill, gradient and overlays first, then the border on top, as in CSS.
                     if fill[3] > 0.0005 {
@@ -3282,26 +3296,26 @@ impl<S: 'static> Runtime<S> {
                         });
                     }
                     let ov = overlay.map(|c| c * o);
-                    if ov[3] > 0.0005 || border[3] > 0.0005 {
+                    if ov[3] > 0.0005 || border_a > 0.0005 {
                         self.instances.push(Instance {
                             rect: [r[0], r[1], w, h],
                             radii,
                             fill: ov,
                             border,
-                            params: [bw, KIND_RECT, blur * s, 1.0],
-                            uv: [0.0; 4],
+                            params: [bw, border_kind, blur * s, 1.0],
+                            uv: border_uv,
                             clip,
                             fade: crate::render::pack_fade(fade, clip, clip),
                         });
                     }
-                } else if fill[3] > 0.0005 || border[3] > 0.0005 {
+                } else if fill[3] > 0.0005 || border_a > 0.0005 {
                     self.instances.push(Instance {
                         rect: [r[0], r[1], w, h],
                         radii,
                         fill,
                         border,
-                        params: [bw, KIND_RECT, blur * s, 1.0],
-                        uv: [0.0; 4],
+                        params: [bw, border_kind, blur * s, 1.0],
+                        uv: border_uv,
                         clip,
                         fade: crate::render::pack_fade(fade, clip, clip),
                     });

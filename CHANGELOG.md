@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::border_gradient(width, top, bottom)`**. A border whose colour runs from `top` at the
+  element's top edge to `bottom` at its bottom edge, such as a top-lit hairline rim on a capsule.
+  It has `border`'s corners, coverage and antialiasing, and like `border` it doesn't affect layout.
+  Whichever of the two is called last wins, and both stops spring like `border`'s colour. Kind 4
+  instances (`KIND_GRADIENT`) with a nonzero `params.x` now draw a filled rect with a gradient
+  ring (`border` at the top, `uv` at the bottom) and honour `params.z` softness. Rune only emits
+  them for this border, but hand-built kind 4 instances that left a border width in `params.x`
+  now draw a ring. `rune-ref` matches and its canonical hashes change.
 - **macOS Quit runs `on_close`.** The app menu's Quit, Cmd-Q, the Dock's Quit and logout now
   run `on_close` once, and flush clipboard clears, before the process ends, as the close button
   does. A window already hidden under `keep_running` has closed, so its hook doesn't run again.
