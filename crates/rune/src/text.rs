@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use parley::fontique::{Blob, Collection, CollectionOptions, FallbackKey, FamilyId, Script, SourceCache};
 use parley::{
-    Alignment, AlignmentOptions, FontContext, FontFamily, FontWeight, Layout, LayoutContext, LineHeight,
-    PositionedLayoutItem, StyleProperty,
+    Alignment, AlignmentOptions, FontContext, FontFamily, FontFamilyName, FontWeight, Layout, LayoutContext,
+    LineHeight, PositionedLayoutItem, StyleProperty,
 };
 use swash::FontRef;
 use swash::scale::{Render, ScaleContext, Source};
@@ -30,6 +30,28 @@ const DEFAULT_FONTS: [&[u8]; 3] = [
 
 /// Scripts the app's own families usually lack: Han, kana, Hangul and Bopomofo.
 const CJK_SCRIPTS: [&[u8; 4]; 5] = [b"Hani", b"Hira", b"Kana", b"Hang", b"Bopo"];
+
+// Common-script symbols can inherit the script of adjacent letters. Put these families at
+// the end of the requested family list, rather than registering only a Zyyy fallback.
+#[cfg(target_os = "macos")]
+const SYMBOL_FAMILIES: &[&str] = &["Apple Symbols", ".SF NS Symbols", "Menlo"];
+#[cfg(target_os = "macos")]
+const SYMBOL_FONT_FILES: &[&str] = &["applesymbols", "sfnssymbols", "menlo"];
+#[cfg(windows)]
+const SYMBOL_FAMILIES: &[&str] = &["Segoe UI Symbol"];
+#[cfg(windows)]
+const SYMBOL_FONT_FILES: &[&str] = &["seguisym"];
+#[cfg(not(any(target_os = "macos", windows)))]
+const SYMBOL_FAMILIES: &[&str] = &["DejaVu Sans", "Noto Sans Symbols2", "Noto Sans Symbols"];
+#[cfg(not(any(target_os = "macos", windows)))]
+const SYMBOL_FONT_FILES: &[&str] = &["dejavusans", "notosanssymbols"];
+
+fn register_symbol_fallbacks(collection: &mut Collection) -> Vec<&'static str> {
+    let mut files = system_font_files(SYMBOL_FONT_FILES);
+    files.sort();
+    collection.load_fonts_from_paths(files);
+    SYMBOL_FAMILIES.iter().copied().filter(|name| collection.family_id(name).is_some()).collect()
+}
 
 /// File-name fragments (lowercase) of the CJK fonts desktops ship, most preferred first. Only
 /// these files are loaded, and only as fallbacks, so Latin text stays on the app's own fonts.
@@ -51,7 +73,7 @@ fn register_cjk_fallbacks(collection: &mut Collection, registered: &[FamilyId], 
             fallbacks.push(*id);
         }
     }
-    let mut files = system_cjk_font_files();
+    let mut files = system_font_files(&CJK_FONT_FILES);
     files.sort_by_key(|path| {
         let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
         CJK_FONT_FILES.iter().position(|fragment| name.contains(fragment)).unwrap_or(usize::MAX)
@@ -75,7 +97,7 @@ fn register_cjk_fallbacks(collection: &mut Collection, registered: &[FamilyId], 
     }
 }
 
-fn system_cjk_font_files() -> Vec<std::path::PathBuf> {
+fn system_font_files(fragments: &[&str]) -> Vec<std::path::PathBuf> {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     if cfg!(target_os = "macos") {
         dirs.extend(["/System/Library/Fonts", "/Library/Fonts"].map(Into::into));
@@ -109,7 +131,8 @@ fn system_cjk_font_files() -> Vec<std::path::PathBuf> {
             }
             let name = entry.file_name().to_string_lossy().to_lowercase();
             let font = [".ttf", ".otf", ".ttc", ".otc"].iter().any(|ext| name.ends_with(ext));
-            if font && CJK_FONT_FILES.iter().any(|fragment| name.contains(fragment)) && !found.contains(&path) {
+            let compact = name.replace([' ', '.'], "");
+            if font && fragments.iter().any(|fragment| compact.contains(fragment)) && !found.contains(&path) {
                 found.push(path);
             }
         }
@@ -388,6 +411,7 @@ pub struct TextSystem {
     generation: u32,
     pub sans: String,
     pub mono: String,
+    symbol_families: Vec<&'static str>,
     pub atlas: Atlas,
     /// Layouts built since the last commit (shaping work counter for perf gates).
     pub shaped: u32,
@@ -424,6 +448,7 @@ impl TextSystem {
             registered.extend(collection.register_fonts(Blob::new(Arc::new(*data)), None).into_iter().map(|(id, _)| id));
         }
         register_cjk_fallbacks(&mut collection, &registered, families);
+        let symbol_families = register_symbol_fallbacks(&mut collection);
         TextSystem {
             font_cx: FontContext { collection, source_cache: SourceCache::default() },
             layout_cx: LayoutContext::new(),
@@ -432,6 +457,7 @@ impl TextSystem {
             generation: 0,
             sans: families.0.to_owned(),
             mono: families.1.to_owned(),
+            symbol_families,
             atlas: Atlas::new(),
             shaped: 0,
             cluster_scratch: Vec::new(),
@@ -465,9 +491,16 @@ impl TextSystem {
             Family::Sans => self.sans.as_str(),
             Family::Mono => self.mono.as_str(),
         };
-        let mono = self.mono.as_str();
+        let with_symbols = |primary| {
+            FontFamilyName::parse_css_list(primary)
+                .flatten()
+                .chain(self.symbol_families.iter().map(|name| FontFamilyName::named(name)))
+                .collect::<Vec<_>>()
+        };
+        let sans = with_symbols(sans);
+        let mono = with_symbols(self.mono.as_str());
         let mut b = self.layout_cx.ranged_builder(&mut self.font_cx, text, scale, true);
-        b.push_default(FontFamily::from(sans));
+        b.push_default(FontFamily::from(sans.as_slice()));
         b.push_default(StyleProperty::FontSize(style.size));
         b.push_default(StyleProperty::FontWeight(FontWeight::new(style.weight)));
         b.push_default(LineHeight::Absolute(style.line_px()));
@@ -481,7 +514,7 @@ impl TextSystem {
             }
             b.push(StyleProperty::Brush(Ink(i as u16 + 1)), r.clone());
             if s.mono {
-                b.push(FontFamily::from(mono), r.clone());
+                b.push(FontFamily::from(mono.as_slice()), r.clone());
             }
             if let Some(w) = s.weight {
                 b.push(StyleProperty::FontWeight(FontWeight::new(w)), r.clone());
@@ -701,7 +734,7 @@ mod tests {
     /// text keeps the app's own family.
     #[test]
     fn cjk_falls_back_to_an_installed_font() {
-        if system_cjk_font_files().is_empty() {
+        if system_font_files(&CJK_FONT_FILES).is_empty() {
             eprintln!("skipping: no CJK font installed (set XDG_DATA_DIRS to a dir with fonts/)");
             return;
         }
@@ -709,6 +742,47 @@ mod tests {
         assert_eq!(han.len(), 4);
         assert!(han.iter().all(|id| *id != 0), "tofu: {han:?}");
         assert_eq!(glyph_ids("Hello"), glyph_ids("Hello"));
+    }
+
+    #[test]
+    fn plex_keyboard_symbols_use_real_glyphs() {
+        const PLEX: &[u8] = include_bytes!("../../../themes/opencode/assets/fonts/IBMPlexMono-Regular.ttf");
+        let mut ts = TextSystem::new(&[PLEX], ("IBM Plex Mono", "IBM Plex Mono"));
+        assert!(!ts.symbol_families.is_empty(), "install a platform symbol font to run this test");
+        let plex = FontRef::from_index(PLEX, 0).unwrap();
+        assert_eq!(plex.charmap().map('⌘'), 0, "fixture must need fallback");
+        // Exercise standalone Common script, surrounding Latin and a mono rich-text span.
+        for text in ["⌘⇧⏎⌥⌃⎋⌫←↑→↓↵", "Copy ⌘K ⇧⏎ ⌥⌃⎋⌫←↑→↓↵"] {
+            for style in [TextStyle::new(13.0, 400.0), TextStyle::new(13.0, 400.0).mono()] {
+                let spans = [Span { mono: true, ..Span::new(0, text.len()) }];
+                for spans in [&[][..], &spans[..]] {
+                    let layout = ts.layout_rich(text, spans, style, 2.0, None);
+                    let mut count = 0;
+                    for line in layout.lines() {
+                        for item in line.items() {
+                            if let PositionedLayoutItem::GlyphRun(run) = item {
+                                for glyph in run.glyphs() {
+                                    assert_ne!(glyph.id, 0, "missing symbol in {text:?}");
+                                    count += 1;
+                                }
+                            }
+                        }
+                    }
+                    assert_eq!(count, text.chars().count());
+                }
+            }
+        }
+        let layout = ts.layout_rich("Hello", &[], TextStyle::new(13.0, 400.0), 2.0, None);
+        let ids: Vec<_> = layout
+            .lines()
+            .flat_map(|line| line.items())
+            .filter_map(|item| match item {
+                PositionedLayoutItem::GlyphRun(run) => Some(run.glyphs().map(|glyph| glyph.id).collect::<Vec<_>>()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(ids, "Hello".chars().map(|ch| u32::from(plex.charmap().map(ch))).collect::<Vec<_>>());
     }
 }
 
