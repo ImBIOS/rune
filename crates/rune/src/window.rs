@@ -167,6 +167,7 @@ impl Win {
 }
 
 pub(crate) enum WakeEvent {
+    DisplayTick(usize),
     App(usize), Live(usize), Window(usize, WindowRequest), Focus(usize),
     Position(usize, (i32, i32)), Level(usize, bool),
     Place(usize, crate::windows::PlaceRequest),
@@ -323,7 +324,9 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
         }
         for mut overlay in overlays {
             let (slot, proxy) = (self.hosts.len(), self.proxy.clone());
-            overlay.connect(Arc::new(move || { let _ = proxy.send_event(WakeEvent::App(slot)); }), self.gpu.clone());
+            let frame_proxy = proxy.clone();
+            overlay.connect(Arc::new(move || { let _ = proxy.send_event(WakeEvent::App(slot)); }),
+                Arc::new(move || { let _ = frame_proxy.send_event(WakeEvent::DisplayTick(slot)); }), self.gpu.clone());
             overlay.resumed(event_loop);
             self.hosts.push(Some(overlay));
         }
@@ -331,7 +334,7 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
         let slot = match &event {
-            WakeEvent::App(i) | WakeEvent::Live(i) | WakeEvent::Window(i, _) | WakeEvent::Focus(i)
+            WakeEvent::DisplayTick(i) | WakeEvent::App(i) | WakeEvent::Live(i) | WakeEvent::Window(i, _) | WakeEvent::Focus(i)
                 | WakeEvent::Position(i, _) | WakeEvent::Level(i, _) | WakeEvent::Place(i, _) => *i,
         };
         if let Some(Some(host)) = self.hosts.get_mut(slot) {
@@ -399,6 +402,8 @@ struct Host<S: 'static> {
     trace: Option<crate::tooling::Trace>,
     trace_start: Option<Instant>,
     trace_frames: usize,
+    #[cfg(target_os = "macos")]
+    frame_wake: Waker,
 }
 
 pub fn run<S: 'static>(app: App<S>, args: Args) {
@@ -441,6 +446,8 @@ impl<S: 'static> Host<S> {
         let macos_window = std::mem::take(&mut app.macos_window);
         let native_handle = WindowHandle { native: Arc::default(), slot, key: key.into(), proxy: proxy.clone() };
         let live_proxy = proxy.clone();
+        #[cfg(target_os = "macos")]
+        let frame_proxy = proxy.clone();
         let waker: Waker = Arc::new(move || {
             let _ = proxy.send_event(WakeEvent::App(slot));
         });
@@ -503,6 +510,8 @@ impl<S: 'static> Host<S> {
             trace: None,
             trace_start: None,
             trace_frames: 0,
+            #[cfg(target_os = "macos")]
+            frame_wake: Arc::new(move || { let _ = frame_proxy.send_event(WakeEvent::DisplayTick(slot)); }),
         }
     }
 }
@@ -1164,7 +1173,7 @@ impl<S: 'static> Host<S> {
         self.win = Some(Win {
             first_frame: FirstFrame::default(),
             #[cfg(target_os = "macos")]
-            pacing: crate::display_link::DisplayLink::new(&window),
+            pacing: crate::display_link::DisplayLink::new(self.frame_wake.clone()),
             #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
             activator: None,
             surface,
@@ -1208,7 +1217,10 @@ impl<S: 'static> Host<S> {
             l.first_frame.retry = l.first_frame.until.map(|_| Instant::now() + Duration::from_millis(16));
         }
         #[cfg(target_os = "macos")]
-        if !hidden && l.pacing.as_mut().is_some_and(|pacing| !pacing.ready(&l.window)) { return; }
+        let target = if hidden { None } else if let Some(pacing) = &mut l.pacing {
+            let Some(target) = pacing.next_frame(&l.window) else { return };
+            Some(target)
+        } else { None };
         if self.native_handle.native.number.load(Ordering::Relaxed) == 0 {
             self.native_handle.native.number.store(native_window_number(&l.window).unwrap_or(0), Ordering::Release);
         }
@@ -1216,15 +1228,11 @@ impl<S: 'static> Host<S> {
         let frame = match l.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                #[cfg(target_os = "macos")]
-                if let Some(pacing) = &mut l.pacing { pacing.retry(); }
                 l.surface.configure(&gpu.device, &l.config);
                 if !hidden { l.window.request_redraw(); }
                 return;
             }
             _ => {
-                #[cfg(target_os = "macos")]
-                if let Some(pacing) = &mut l.pacing { pacing.retry(); }
                 if !hidden { l.window.request_redraw(); } return;
             }
         };
@@ -1240,8 +1248,12 @@ impl<S: 'static> Host<S> {
         }
         // After an idle stretch, start the new motion from its first pose rather than
         // skipping ahead by the time spent idle.
-        let dt = if hidden { 0.0 } else if self.idle { 1.0 / 120.0 } else { (now - self.last).as_secs_f64().min(1.0 / 30.0) };
-        self.last = now;
+        #[cfg(not(target_os = "macos"))]
+        let frame_time = now;
+        #[cfg(target_os = "macos")]
+        let frame_time = target.unwrap_or(now);
+        let dt = if hidden { 0.0 } else if self.idle { 1.0 / 120.0 } else { frame_time.saturating_duration_since(self.last).as_secs_f64().min(1.0 / 30.0) };
+        self.last = frame_time;
         let rt = &mut self.rt;
         if hidden && l.first_frame.settles() { rt.settle_all(); }
         let mut animating = rt.frame(dt);
@@ -1311,7 +1323,11 @@ impl<S: 'static> Host<S> {
         }
         self.idle = !(animating || rt.has_pending_input() || rt.live_pending());
         if !hidden && (!self.idle || (self.trace.is_some() && self.args.frames.is_some())) {
-            l.window.request_redraw();
+            #[cfg(target_os = "macos")]
+            let paced = l.pacing.as_ref().is_some_and(|p| p.running());
+            #[cfg(not(target_os = "macos"))]
+            let paced = false;
+            if !paced { l.window.request_redraw(); }
         } else {
             #[cfg(target_os = "macos")]
             if let Some(pacing) = &mut l.pacing { pacing.stop(); }
@@ -1418,6 +1434,10 @@ impl<S: 'static> Host<S> {
         match event {
             WakeEvent::App(_) => {
                 self.drain(event_loop, true);
+            }
+            WakeEvent::DisplayTick(_) => {
+                #[cfg(target_os = "macos")]
+                if self.win.as_ref().and_then(|w| w.pacing.as_ref()).is_some_and(|p| p.running()) { self.redraw(); }
             }
             WakeEvent::Live(_) => {
                 if self.rt.live_pending() && let Some(w) = self.win.as_ref().filter(|w| w.visible && !w.occluded) {

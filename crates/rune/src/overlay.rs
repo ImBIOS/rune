@@ -203,7 +203,7 @@ impl<T: 'static> OverlayHandle<T> {
 
 /// An overlay before the event loop runs: the shell gives it a wake-up and the GPU pool.
 pub(crate) trait PendingOverlay: AnyHost {
-    fn connect(&mut self, wake: Waker, gpu: Rc<RefCell<Weak<Gpu>>>);
+    fn connect(&mut self, wake: Waker, frame_wake: Waker, gpu: Rc<RefCell<Weak<Gpu>>>);
 }
 
 enum Backing {
@@ -255,6 +255,8 @@ pub(crate) struct Overlay<T: 'static> {
     dirty: bool,
     idle: bool,
     last: Instant,
+    #[cfg(target_os = "macos")]
+    frame_wake: Option<Waker>,
 }
 
 impl<T: 'static> Overlay<T> {
@@ -302,6 +304,8 @@ impl<T: 'static> Overlay<T> {
             dirty: true,
             idle: true,
             last: Instant::now(),
+            #[cfg(target_os = "macos")]
+            frame_wake: None,
         };
         (overlay, OverlayHandle { shared })
     }
@@ -682,7 +686,7 @@ impl<T: 'static> Overlay<T> {
         self.rt.transparent = true;
         self.rt.set_viewport(self.at.size, scale);
         #[cfg(target_os = "macos")]
-        let pacing = match &backing { Backing::Window(w) => crate::display_link::DisplayLink::new(w) };
+        let pacing = self.frame_wake.clone().and_then(crate::display_link::DisplayLink::new);
         Some(Live {
             #[cfg(target_os = "macos")]
             pacing,
@@ -974,35 +978,34 @@ impl<T: 'static> Overlay<T> {
             return false;
         }
         #[cfg(target_os = "macos")]
-        if !prewarm {
+        let target = if prewarm { None } else {
             if live.occluded { return false; }
             if let (Some(pacing), Backing::Window(w)) = (&mut live.pacing, &live.backing) {
-                if !pacing.ready(w) { return false; }
-            }
-        }
+                let Some(target) = pacing.next_frame(w) else { return false };
+                Some(target)
+            } else { None }
+        };
         let mut retries = if prewarm { 2 } else { 0 };
         let frame = loop {
             match live.surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => break f,
                 wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                    #[cfg(target_os = "macos")]
-                    if let Some(pacing) = &mut live.pacing { pacing.retry(); }
                     live.surface.configure(&gpu.device, &live.config);
                     if retries == 0 { return true; }
                     retries -= 1;
                 }
                 // A truly occluded display or timed-out drawable must not be retried
                 // synchronously: nextDrawable can already have waited for a second.
-                _ => {
-                    #[cfg(target_os = "macos")]
-                    if let Some(pacing) = &mut live.pacing { pacing.retry(); }
-                    return true;
-                }
+                _ => return true,
             }
         };
         let now = Instant::now();
-        let dt = if prewarm { 0.0 } else if self.idle { 1.0 / 120.0 } else { (now - self.last).as_secs_f64().min(1.0 / 30.0) };
-        self.last = now;
+        #[cfg(not(target_os = "macos"))]
+        let frame_time = now;
+        #[cfg(target_os = "macos")]
+        let frame_time = target.unwrap_or(now);
+        let dt = if prewarm { 0.0 } else if self.idle { 1.0 / 120.0 } else { frame_time.saturating_duration_since(self.last).as_secs_f64().min(1.0 / 30.0) };
+        self.last = frame_time;
         let mut animating = self.rt.frame(dt);
         let update_ms = if self.compositor.is_some() { now.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
         self.rt.shell_request = None;
@@ -1083,6 +1086,11 @@ impl<T: 'static> AnyHost for Overlay<T> {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
+        #[cfg(target_os = "macos")]
+        if matches!(event, WakeEvent::DisplayTick(_))
+            && self.live.as_ref().and_then(|l| l.pacing.as_ref()).is_some_and(|p| p.running()) {
+            self.draw();
+        }
         if let WakeEvent::App(_) = event {
             self.sync(event_loop);
         }
@@ -1214,7 +1222,9 @@ impl<T: 'static> AnyHost for Overlay<T> {
 }
 
 impl<T: 'static> PendingOverlay for Overlay<T> {
-    fn connect(&mut self, wake: Waker, gpu: Rc<RefCell<Weak<Gpu>>>) {
+    fn connect(&mut self, wake: Waker, _frame_wake: Waker, gpu: Rc<RefCell<Weak<Gpu>>>) {
+        #[cfg(target_os = "macos")]
+        { self.frame_wake = Some(_frame_wake); }
         // All live sources (including Pixels) must share this registration: a second
         // set_live_waker call replaces the wake lane and resets its subscriptions.
         self.rt.set_live_waker(wake.clone());
