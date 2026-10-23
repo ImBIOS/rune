@@ -273,7 +273,11 @@ impl Res {
             format,
             pyramid: MaskPyramid::new(device, size.0, size.1),
             light: None,
-            fx: FxRenderer::new(device, HDR, FxOptions { dither: false }),
+            fx: {
+                let mut fx = FxRenderer::new(device, HDR, FxOptions { dither: false });
+                fx.set_fire_sim(device, true);
+                fx
+            },
             timer: Timer::new(device, queue),
             scene,
             backdrop,
@@ -785,6 +789,14 @@ impl Compositor<Lab> for LabGfx {
         let px = |v: f32| (v * scale).round().max(0.0) as u32;
         let (sx, sy) = (px(stage_r[0]).min(w), px(stage_r[1]).min(h));
         let (sw, sh) = (px(stage_r[0] + stage_r[2]).min(w) - sx, px(stage_r[1] + stage_r[3]).min(h) - sy);
+        if res.fx.simulate_pending() {
+            let ts = stamp(false).map(|w| wgpu::ComputePassTimestampWrites {
+                query_set: w.query_set,
+                beginning_of_pass_write_index: w.beginning_of_pass_write_index,
+                end_of_pass_write_index: w.end_of_pass_write_index,
+            });
+            res.fx.simulate(f.queue, enc, ts);
+        }
         let mut cursor = 0usize;
         let mut rp = pass_ts(enc, &res.scene.view, Some(clear), stamp(false)).forget_lifetime();
         for (pos, op) in ops {

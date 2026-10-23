@@ -60,6 +60,15 @@ over `OneShots::FADE` (0.16 s) instead of being cut. Ripples, pings, shockwaves,
 (`ElectricParams::zap: Some(t0)`, lives `ZAP_LIFE`) and sparkle bursts
 (`SparkleParams::burst: Some(t0)`, lives `burst_life()`) all work this way.
 
+Simulated fire and smoke: `fx.set_fire_sim(&device, true)` makes `Top` and `Heat` fires a small
+GPU fluid simulation per layer (stable fluids at 1–3 pt cells: buoyancy, vorticity confinement,
+expansion at the fuel line, cooling into smoke, monotone cubic advection) instead of noise. Call
+`fx.simulate(&queue, &mut encoder, None)` after `prepare` and before drawing. Steps are fixed
+1/60 s (at most 4 per frame); a new or time-jumped grid warms up 1.2 s in one frame; reduced motion
+settles one pose and then steps nothing. Flames are blackbody light (1000–2700 K) with a
+per-channel shoulder; `FireParams::smoke` sets how much smoke the cooling flame leaves, and smoke
+covers what is behind it, lit warm from below. The lab's fire scene costs 0.8–0.9 ms GPU per frame at 2×.
+
 Frosted glass (`LensParams::frost > 0`) reads a blurred backdrop. After copying the backdrop, call
 `fx.blur_backdrop(&device, &queue, &mut encoder, &backdrop_view, layer)` for each frosted layer. It
 runs a half-resolution dual-filter pyramid scissored to the layer. Without it the lens falls back

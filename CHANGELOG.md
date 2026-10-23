@@ -12,6 +12,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   without actions are unchanged.
 - **A disabled, invalid rune-kit `TextInput` no longer has a red caret.** The caret now follows
   the text colour, as `TextArea`'s does. Only that one state changes.
+- **rune-fx effects look different, and some structs gained fields.** Fire rises and narrows with
+  a white-yellow core and smoke, electricity strikes and re-strikes as fractal lightning, glows fall
+  off within about 2.5 radii, sparkles are a few crisp four-point stars, and one-shots (ripples,
+  pings, zaps, bursts) overlap instead of restarting. `FxLayer::opacity`, `ElectricParams::zap`,
+  `SparkleParams::burst` and `FireParams::smoke` are new pub fields, so struct literals without
+  `..Default::default()` need them. New: `OneShots`, `FxRenderer::blur_backdrop` (frosted glass)
+  and `FxRenderer::set_fire_sim`/`simulate` (an opt-in GPU fluid for fire and smoke).
 - **Rotating icons turn their artwork, not just their outline.** An icon with
   `.looping(LoopSpec::rotation(..))`, such as rune-kit's `Loader` arc, turned its quad but kept
   sampling the atlas unturned, so the arc stayed put while the rotating square cropped it. The

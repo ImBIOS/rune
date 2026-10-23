@@ -1,4 +1,5 @@
-// Fire / plasma. variant: 0 flames off the top edge (also Heat), 1 plasma hugging the border, 3 embers only.
+// Fire / plasma. variant: 0 flames off the top edge (also Heat), 1 plasma hugging the border, 3 embers only,
+// 4 simulated flames + smoke (`source` = the sim state: velocity, temperature, smoke; aux = its rect in pt).
 // Embers are a CPU particle table (cpu.rs::embers): xf = (first, count).
 // c0 ramp low (deep red / plasma envelope), c1 ramp mid, c2 ramp hot
 // p0 (height pt, scale pt, speed (scale units/s), intensity)
@@ -61,6 +62,74 @@ fn flames(c: Ctx, i: Inst) -> vec4f {
     return vec4f(emis, body * i.p2.w + smoke);
 }
 
+// Blackbody colour (linear) for a flame temperature in kelvin (Tanner Helland's fit, 1000-4000 K).
+fn blackbody(k: f32) -> vec3f {
+    let t = k / 100.0;
+    let g = clamp((99.4708 * log(t) - 161.1196) / 255.0, 0.0, 1.0);
+    let b = select(clamp((138.5177 * log(max(t - 10.0, 1.0)) - 305.0448) / 255.0, 0.0, 1.0), 0.0, t <= 19.0);
+    return to_lin(vec3f(1.0, g, b));
+}
+
+// Light a flame of temperature T (0..~1.2) emits: colour from 1000 K (dim red tips) to ~2700 K
+// (near-white core), brightness rising steeply with temperature, then a per-channel shoulder so
+// the hottest parts go pale yellow-white the way a camera sees them instead of clipping flat.
+fn flame_light(T: f32, gain: f32) -> vec3f {
+    let x = max(T, 0.0);
+    let e = gain * x * x * x * smoothstep(0.08, 0.3, x);
+    return vec3f(1.0) - exp(-blackbody(1000.0 + 1700.0 * min(x, 1.3)) * e);
+}
+
+// Cubic B-spline sample of the sim state from 4 bilinear taps: smooth isolines, no grid diamonds.
+fn sim_at(uv: vec2f) -> vec4f {
+    let dim = vec2f(textureDimensions(source, 0));
+    let g = uv * dim - 0.5;
+    let i = floor(g);
+    let f = g - i;
+    let w0 = (1.0 - f) * (1.0 - f) * (1.0 - f) / 6.0;
+    let w1 = (4.0 - 6.0 * f * f + 3.0 * f * f * f) / 6.0;
+    let w3 = f * f * f / 6.0;
+    let w2 = 1.0 - w0 - w1 - w3;
+    let s0 = w0 + w1;
+    let s1 = w2 + w3;
+    let o0 = (i - 0.5 + w1 / s0) / dim;
+    let o1 = (i + 1.5 + w3 / s1) / dim;
+    let a = textureSampleLevel(source, samp, vec2f(o0.x, o0.y), 0.0);
+    let b = textureSampleLevel(source, samp, vec2f(o1.x, o0.y), 0.0);
+    let c = textureSampleLevel(source, samp, vec2f(o0.x, o1.y), 0.0);
+    let d = textureSampleLevel(source, samp, vec2f(o1.x, o1.y), 0.0);
+    return mix(mix(a, b, s1.x), mix(c, d, s1.x), s1.y);
+}
+
+// Simulated fire: flames are additive light from the temperature field; smoke is a separate
+// density that partly covers what is behind it and is lit warm from below by the flames.
+fn sim_flames(c: Ctx, i: Inst) -> vec4f {
+    let ext = i.aux.zw;
+    let uv = (c.p - i.aux.xy) / ext;
+    if (any(uv < vec2f(0.0)) || any(uv > vec2f(1.0))) { return vec4f(0.0); }
+    let s = sim_at(uv);
+    let T = s.z;
+    // Fade out well before the drawn quad's top and sides (p3.yz = its size).
+    let m = min(min(c.p.x - i.aux.x, i.aux.x + i.p3.y - c.p.x), c.p.y - i.aux.y);
+    let win = smoothstep(0.0, 18.0, m);
+    var rgb = flame_light(T, 6.0) * win;
+    // Smoke, lit by the flame below it: march a few taps down toward the fire.
+    let sm = s.w * win;
+    var a = 0.0;
+    if (sm > 0.002) {
+        a = (1.0 - exp(-sm * 1.2)) * i.p2.w * 1.6;
+        var lit = 0.0;
+        for (var k = 1; k < 5; k++) {
+            let tk = sim_at(uv + vec2f(0.0, f32(k) * 7.0 / ext.y)).z;
+            lit += tk * tk / f32(k);
+        }
+        let warm = vec3f(1.0, 0.45, 0.18) * min(lit, 1.0) * 0.3;
+        rgb += a * (vec3f(0.11, 0.11, 0.115) + warm);
+    }
+    // Flames themselves cover a little of what is behind them (occlusion).
+    let vis = smoothstep(0.12, 0.35, T) * win;
+    return vec4f(rgb, min(a + vis * i.p2.w * 0.5, 1.0));
+}
+
 // Plasma: contained energy hugging the shape. A thin band centred just outside the edge, with
 // ridged filaments flowing along the perimeter, a tight outer falloff and slow breathing.
 fn plasma(c: Ctx, i: Inst) -> vec4f {
@@ -95,6 +164,8 @@ fn shade(in: VOut) -> vec4f {
         o = flames(c, i);
     } else if (c.variant == 1) {
         o = plasma(c, i);
+    } else if (c.variant == 4) {
+        o = sim_flames(c, i);
     }
     var emis = o.rgb;
     var alpha = o.a;
@@ -109,7 +180,7 @@ fn shade(in: VOut) -> vec4f {
         let T = b.y;
         let core = gauss(sd.x, b.x);
         let halo = gauss(sd.x, b.x * 3.0) * 0.12;
-        emis += ramp(0.25 + T * 0.85, i.c0.rgb, i.c1.rgb, i.c2.rgb) * (core * 1.6 + halo) * T;
+        emis += flame_light(0.45 + T * 0.75, 6.0) * (core * 1.4 + halo) * T;
         alpha += core * T * 0.5;
     }
     return finish(vec4f(emis * inten, min(alpha, 1.0) * inten), in.px);

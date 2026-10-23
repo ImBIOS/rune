@@ -12,6 +12,7 @@
 
 mod cpu;
 mod renderer;
+mod sim;
 pub use renderer::*;
 
 // ---------------------------------------------------------------- geometry / colour
@@ -469,6 +470,8 @@ pub struct FireParams {
     pub base_glow: f32,
     pub occlusion: f32,
     pub swirl: f32,
+    /// How much smoke the cooling flame leaves (simulated fire only; see `FxRenderer::set_fire_sim`).
+    pub smoke: f32,
 }
 
 impl Default for FireParams {
@@ -491,6 +494,7 @@ impl Default for FireParams {
             base_glow: 0.5,
             occlusion: 0.25,
             swirl: 0.0,
+            smoke: 0.5,
         }
     }
 }
@@ -510,6 +514,7 @@ impl FireParams {
         k("base_glow", 0.0, 2.0, 0.5),
         k("occlusion", 0.0, 1.0, 0.25),
         k("swirl", 0.0, 3.0, 0.0),
+        k("smoke", 0.0, 2.0, 0.5),
     ];
     pub fn heat() -> FireParams {
         FireParams {
@@ -1234,7 +1239,8 @@ impl FxLayer {
                 let b = match p.style {
                     FireStyle::Border => r.inflate((p.height * p.sides * 0.3).max(2.5) * 4.6 + 2.0),
                     _ => {
-                        let up = (p.height * 1.6 + 2.0).max(ember_up) + 4.0;
+                        // Room above the flames for the smoke they leave (simulated fire).
+                        let up = (p.height * 2.6 + 8.0).max(ember_up) + 4.0;
                         Rect::new(r.x - ember_side, r.y - up, r.w + 2.0 * ember_side, up + 4.0)
                     }
                 };

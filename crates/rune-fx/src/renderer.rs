@@ -140,6 +140,7 @@ pub struct FxRenderer {
     blur_slot: usize,
     viewport: [u32; 2],
     opts: FxOptions,
+    sims: Option<crate::sim::Sims>,
 }
 
 const INST_SIZE: usize = std::mem::size_of::<InstRaw>();
@@ -369,6 +370,7 @@ impl FxRenderer {
             blur_slot: 0,
             viewport: [0, 0],
             opts,
+            sims: None,
         }
     }
 
@@ -400,8 +402,11 @@ impl FxRenderer {
         if frame.backdrop.is_some() && frame.layers.iter().any(wants_blur) && self.blur.as_ref().is_none_or(|b| b.size != frame.viewport) {
             self.blur = Some(BlurPyramid::new(device, frame.viewport, &self.blur_bgl, &self.dummy, &self.sampler, &self.blur_uniforms));
         }
-        // Bind groups keyed by (needs backdrop, source slot, blurred backdrop) so equal layers share one.
-        let mut keys: Vec<(bool, Option<u32>, bool)> = Vec::new();
+        if let Some(sims) = self.sims.as_mut() {
+            sims.begin_frame();
+        }
+        // Bind groups keyed by (needs backdrop, source slot, blurred backdrop, fire sim grid) so equal layers share one.
+        let mut keys: Vec<(bool, Option<u32>, bool, Option<usize>)> = Vec::new();
         for layer in frame.layers {
             let Some((kind, mut inst, b)) = layer.pack() else {
                 stats.culled_idle += 1;
@@ -418,6 +423,17 @@ impl FxRenderer {
                 continue;
             }
             layer.fill(&mut inst, &mut self.scratch_xf);
+            let grid = match (&layer.fx, self.sims.as_mut()) {
+                (Fx::Fire(p), Some(sims)) if matches!(p.style, FireStyle::Top | FireStyle::Heat) => {
+                    let (g, ext) = sims.plan(device, layer, p, b, layer.reduced_motion);
+                    inst.t[2] = 4.0;
+                    inst.aux = [b.x, b.y, ext[0], ext[1]];
+                    inst.p3[1] = b.w;
+                    inst.p3[2] = b.h;
+                    Some(g)
+                }
+                _ => None,
+            };
             inst.bounds = [x0, y0, x1, y1];
             inst.shape[1] = s;
             let needs_bd = layer.fx.needs_backdrop();
@@ -426,12 +442,15 @@ impl FxRenderer {
                 Fx::Distort(DistortParams::Lens(p)) if frame.backdrop.is_some() => (p.frost.clamp(0.0, 1.0) * LENS_FROST_SIGMA * s).max(0.0),
                 _ => 0.0,
             };
-            let key = (needs_bd && frame.backdrop.is_some(), layer.source.map(|s| s.slot), blur_px > 0.0);
+            let key = (needs_bd && frame.backdrop.is_some(), layer.source.map(|s| s.slot), blur_px > 0.0, grid);
             let bind = match keys.iter().position(|k| *k == key) {
                 Some(p) => p,
                 None => {
                     let bd = if key.0 { frame.backdrop.unwrap() } else { &self.dummy };
-                    let src = key.1.and_then(|slot| frame.sources.get(slot as usize).copied()).unwrap_or(&self.dummy);
+                    let src = match (key.3, self.sims.as_ref()) {
+                        (Some(g), Some(sims)) => sims.final_view(g),
+                        _ => key.1.and_then(|slot| frame.sources.get(slot as usize).copied()).unwrap_or(&self.dummy),
+                    };
                     let blurred = if key.2 { self.blur.as_ref().map_or(&self.dummy, |b| &b.result) } else { &self.dummy };
                     self.binds.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("fx1"),
@@ -483,6 +502,28 @@ impl FxRenderer {
         let g = [vw, vh, if self.opts.dither { 1.0 } else { 0.0 }, 0.0];
         queue.write_buffer(&self.globals, 0, bytemuck::cast_slice(&g));
         stats
+    }
+
+    /// Simulate fire and smoke (styles `Top` and `Heat`) as small fluid grids instead of noise.
+    /// Off by default; when on, call `simulate` every frame after `prepare` and before drawing.
+    pub fn set_fire_sim(&mut self, device: &wgpu::Device, on: bool) {
+        match (on, self.sims.is_some()) {
+            (true, false) => self.sims = Some(crate::sim::Sims::new(device)),
+            (false, true) => self.sims = None,
+            _ => {}
+        }
+    }
+
+    /// Whether `simulate` has steps to record this frame (false when every fire is frozen or culled).
+    pub fn simulate_pending(&self) -> bool {
+        self.sims.as_ref().is_some_and(|s| s.pending())
+    }
+
+    /// Record this frame's fire simulation steps (fixed 1/60 s steps) as one compute pass. Call
+    /// after `prepare`, outside any render pass, before drawing the fire layers. Returns false and
+    /// records nothing when no step is due.
+    pub fn simulate(&mut self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>) -> bool {
+        self.sims.as_mut().is_some_and(|s| s.record(queue, encoder, timestamps))
     }
 
     /// Draw one prepared layer (no-op when it was culled).
