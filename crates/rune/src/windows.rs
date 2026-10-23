@@ -31,10 +31,24 @@ impl PlaceRequest {
 }
 
 /// Process-level settings applied once, before constructing the native event loop.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct RunOptions {
     /// macOS: no Dock icon/default menu and no activation at launch. Ignored elsewhere.
     pub accessory: bool,
+    /// Rune arguments without the program name. None reads the process command line;
+    /// Some(vec![]) isolates Rune from the embedding application's flags.
+    pub args: Option<Vec<String>>,
+}
+
+impl RunOptions {
+    pub fn args(mut self, args: impl IntoIterator<Item = String>) -> Self {
+        self.args = Some(args.into_iter().collect());
+        self
+    }
+
+    pub(crate) fn resolve_args(&self, process: impl FnOnce() -> crate::tooling::Args) -> crate::tooling::Args {
+        self.args.as_ref().map_or_else(process, |args| crate::tooling::Args::parse_from(args.clone()))
+    }
 }
 
 /// A display in desktop physical-pixel coordinates (origins may be negative).
@@ -194,8 +208,10 @@ impl<S> WindowSpec<S> {
     }
     /// Preserve AppHandle, windowless, keep-running and GPU-release behavior for this window.
     /// Closing a default window removes only it; quitting any app exits the whole event loop.
-    /// The outer run_windows command line controls tooling; App::args and the process-level
-    /// App::accessory launch policy are not used here; use run_windows_with(RunOptions, factory).
+    /// RunOptions controls factory display discovery and tooling/window selection. App::args
+    /// replaces the selected window's arguments (including native/headless mode). Isolate a
+    /// host CLI before factory discovery with RunOptions::default().args([]).
+    /// App::accessory is process-level: use run_windows_with(RunOptions, factory) instead.
     /// AppHandle::set_dock_icon remains global.
     pub fn from_app(key: impl Into<String>, app: App<S>) -> Self {
         Self { key: key.into(), app, options: WindowOptions::default(), on_created: None }
@@ -256,6 +272,34 @@ mod tests {
     fn default_window_options_remain_inferable_at_existing_call_sites() {
         // This fails to compile if options becomes generic over Into<...>.
         let _configure: fn(WindowSpec<()>) -> WindowSpec<()> = |spec| spec.options(Default::default());
+    }
+
+    #[test]
+    fn explicit_empty_args_never_read_the_host_cli() {
+        let options = RunOptions::default().args([]);
+        let args = options.resolve_args(|| panic!("must not inspect host --trace/--snap flags"));
+        assert!(!args.headless());
+        assert!(args.scene.is_none() && args.size.is_none());
+        let inherited = RunOptions::default().resolve_args(|| crate::tooling::Args::parse_from(
+            vec!["--trace".into(), "out.jsonl".into()]));
+        assert!(inherited.headless());
+    }
+
+    #[test]
+    fn window_app_args_override_inherited_scene_and_size() {
+        fn spec() -> AppSpec<()> { AppSpec::new("test", (100.0, 100.0), || (), |_, _| crate::el()) }
+        let inherited = crate::tooling::Args::parse_from(vec!["--scene".into(), "host-scene".into()]);
+        let mut window = WindowSpec::from_app("pill", App::new(spec()).args(vec!["--size".into(), "320x80".into()]));
+        let resolved = window.app.resolve_args(inherited.clone());
+        assert_eq!(resolved.size, Some((320.0, 80.0)));
+        assert!(resolved.scene.is_none());
+        let mut plain = WindowSpec::new("plain", spec());
+        assert_eq!(plain.app.resolve_args(inherited).scene.as_deref(), Some("host-scene"));
+        let trace = crate::tooling::Args::parse_from(vec!["--trace".into(), "host.jsonl".into()]);
+        let mut isolated = WindowSpec::from_app("isolated", App::new(spec()).args(vec![]));
+        assert!(!isolated.app.resolve_args(trace).headless());
+        let mut traced = WindowSpec::from_app("traced", App::new(spec()).args(vec!["--trace".into(), "window.jsonl".into()]));
+        assert!(traced.app.resolve_args(crate::tooling::Args::default()).headless());
     }
 
     #[test]

@@ -298,8 +298,18 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
         crate::windows::validate(&specs).expect("window keys");
         let mut overlays = Vec::new();
         for (slot, mut spec) in specs.into_iter().enumerate() {
+            let args = spec.app.resolve_args(self.args.clone());
+            if args.headless() {
+                if let Some((w, h)) = spec.options.physical_size {
+                    let scale = args.scale.unwrap_or(2.0);
+                    spec.app.spec.size = (w as f32 / scale, h as f32 / scale);
+                }
+                crate::tooling::headless_configured(spec.app, args, spec.options.transparent);
+                self.hosts.push(None);
+                continue;
+            }
             overlays.append(&mut spec.app.overlays);
-            let mut host = Host::new(spec, self.args.clone(), self.proxy.clone(), slot, self.gpu.clone());
+            let mut host = Host::new(spec, args, self.proxy.clone(), slot, self.gpu.clone());
             AnyHost::resumed(&mut host, event_loop);
             self.hosts.push(Some(Box::new(host)));
         }
@@ -414,6 +424,7 @@ fn run_configured<S: 'static>(factory: impl FnOnce(&[Display]) -> Vec<WindowSpec
 impl<S: 'static> Host<S> {
     fn new(window_spec: WindowSpec<S>, args: Args, proxy: EventLoopProxy<WakeEvent>, slot: usize, gpu_pool: Rc<RefCell<Weak<Gpu>>>) -> Self {
         let WindowSpec { mut app, options, key, on_created } = window_spec;
+        let args = app.resolve_args(args);
         let on_window = app.on_window.take();
         let on_ready = app.on_ready.take();
         let macos_window = std::mem::take(&mut app.macos_window);

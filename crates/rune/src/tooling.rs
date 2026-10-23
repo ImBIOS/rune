@@ -278,7 +278,7 @@ pub fn run_windows<S: 'static>(factory: impl FnOnce(&[crate::Display]) -> Vec<cr
 
 /// Run a window factory with process-level options, such as macOS accessory activation.
 pub fn run_windows_with<S: 'static>(options: crate::RunOptions, factory: impl FnOnce(&[crate::Display]) -> Vec<crate::WindowSpec<S>> + 'static) {
-    let args = Args::parse();
+    let args = options.resolve_args(Args::parse);
     if args.headless() {
         let displays = desktop(&args).displays();
         let display = displays.iter().find(|d| d.primary).unwrap_or(&displays[0]).clone();
@@ -294,6 +294,11 @@ pub fn run_windows_with<S: 'static>(options: crate::RunOptions, factory: impl Fn
             None => die("the app created no windows"),
         };
         let mut window = windows.remove(index);
+        let args = window.app.resolve_args(args);
+        if !args.headless() {
+            crate::window::run_windows(move |_| vec![window], args, options);
+            return;
+        }
         if let Some((w, h)) = window.options.physical_size {
             window.app.spec.size = (w as f32 / display.scale as f32, h as f32 / display.scale as f32);
         }
@@ -751,7 +756,7 @@ pub fn headless<S: 'static>(app: crate::app::App<S>, args: Args) {
     headless_configured(app, args, false);
 }
 
-fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, transparent: bool) {
+pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, transparent: bool) {
     let chrome = app.chrome;
     let launched = Instant::now();
     if args.list_scenes {

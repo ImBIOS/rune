@@ -230,6 +230,10 @@ impl<S: 'static> App<S> {
 }
 
 impl<S: 'static> App<S> {
+    pub(crate) fn resolve_args(&mut self, inherited: Args) -> Args {
+        self.argv.take().map_or(inherited, Args::parse_from)
+    }
+
     pub(crate) fn into_parts(self, scene: Option<&str>) -> (AppSpec<S>, S, Arc<Shared<S>>) {
         let state = match self.init {
             Some(init) => crate::tooling::with_scene(&self.spec, init(), scene),
