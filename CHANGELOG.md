@@ -5,6 +5,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`SecretCopy::pending()`** makes a copy that is never written and stays `Pending`, so a
+  scene can show a copy in flight without building a `Tx`. No output change.
 - **`NativeSurface::set_mirrored(bool)`** flips video horizontally at draw time, for
   front-camera previews. It is off by default, so existing output doesn't change.
 - **Exiting password fields drop their secret.** When a secure text input starts its exit

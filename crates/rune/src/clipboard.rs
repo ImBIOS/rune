@@ -90,6 +90,9 @@ impl Drop for Unwritten {
 #[derive(Clone)]
 pub struct SecretCopy(Arc<Slot>);
 impl SecretCopy {
+    /// A copy that is never written and stays `Pending`, for scenes and tests that show a copy
+    /// in flight without a `Tx`.
+    pub fn pending() -> Self { Self(Arc::default()) }
     pub fn state(&self) -> SecretState {
         if let Some(Route::Memory(m)) = self.0.route.get() { m.tick(); }
         lock(&self.0.state).clone()
@@ -658,5 +661,16 @@ mod tests {
         rt.frame(0.0);
         assert_eq!(text(&m), None);
         assert_eq!(rt.state.as_ref().unwrap().state(), SecretState::Replaced);
+    }
+
+    #[test]
+    fn a_staged_pending_copy_stays_pending_and_clear_now_is_a_no_op() {
+        let copy = SecretCopy::pending();
+        let clone = copy.clone();
+        drop(copy);
+        assert_eq!(clone.state(), SecretState::Pending);
+        clone.clear_now();
+        assert_eq!(clone.state(), SecretState::Pending);
+        assert!(!clone.holds());
     }
 }
