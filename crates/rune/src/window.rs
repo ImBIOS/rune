@@ -15,6 +15,7 @@ use winit::raw_window_handle::HasWindowHandle;
 
 use crate::app::{App, Shared, WindowRequest};
 use crate::compose::{Compositor, Frame};
+use crate::frame_clock::FrameClock;
 use crate::edit::{Ime, Key, KeyEvent, Mods};
 use crate::el::{Cursor, Shell, Tx};
 use crate::render::{Gpu, Renderer};
@@ -400,7 +401,7 @@ struct Host<S: 'static> {
     /// A window has shown before: the next one opens settled.
     shown: bool,
     started: bool,
-    last: Instant,
+    clock: FrameClock,
     idle: bool,
     mods: ModifiersState,
     control_click: bool,
@@ -513,7 +514,7 @@ impl<S: 'static> Host<S> {
             gpu_pool,
             shown: false,
             started: false,
-            last: Instant::now(),
+            clock: FrameClock::new(Instant::now()),
             idle: true,
             mods: ModifiersState::empty(),
             control_click: false,
@@ -1295,17 +1296,18 @@ impl<S: 'static> Host<S> {
             self.trace_start = Some(now);
             self.rt.scene.store_mut().audit_retargets(true);
         }
-        // After an idle stretch, start the new motion from its first pose rather than
-        // skipping ahead by the time spent idle.
         #[cfg(not(target_os = "macos"))]
         let frame_time = now;
         #[cfg(target_os = "macos")]
         let frame_time = target.unwrap_or(now);
-        let dt = if hidden { 0.0 } else if self.idle { 1.0 / 120.0 } else { frame_time.saturating_duration_since(self.last).as_secs_f64().min(1.0 / 30.0) };
-        self.last = frame_time;
         let rt = &mut self.rt;
         if hidden && l.first_frame.settles() { rt.settle_all(); }
-        let mut animating = rt.frame(dt);
+        let (mut animating, dt) = if hidden {
+            self.clock.hold(frame_time);
+            (rt.frame(0.0), 0.0)
+        } else {
+            self.clock.advance(rt, frame_time, self.comp.as_ref().is_some_and(|c| c.animating()))
+        };
         self.secure_input.set(rt.has_secure_focus() && l.window.has_focus());
         let update_ms = now.elapsed().as_secs_f64() * 1000.0;
         let ime_allowed = rt.ime_area.is_some() && !rt.has_secure_focus() && l.window.has_focus();

@@ -27,6 +27,7 @@ use winit::window::{Window, WindowId, WindowLevel};
 
 use crate::el::{Align, El, Tx};
 use crate::compose::{Compositor, Frame};
+use crate::frame_clock::FrameClock;
 use crate::render::{Gpu, Renderer};
 use crate::runtime::{Cx, Env, Runtime, Waker};
 use crate::text::TextSystem;
@@ -256,7 +257,7 @@ pub(crate) struct Overlay<T: 'static> {
     dark: bool,
     dirty: bool,
     idle: bool,
-    last: Instant,
+    clock: FrameClock,
     #[cfg(target_os = "macos")]
     frame_wake: Option<Waker>,
 }
@@ -306,7 +307,7 @@ impl<T: 'static> Overlay<T> {
             dark: true,
             dirty: true,
             idle: true,
-            last: Instant::now(),
+            clock: FrameClock::new(Instant::now()),
             #[cfg(target_os = "macos")]
             frame_wake: None,
         };
@@ -762,7 +763,7 @@ impl<T: 'static> Overlay<T> {
         self.rt.frame(0.0);
         self.rt.settle_all();
         self.rt.frame(0.0);
-        self.last = Instant::now();
+        self.clock.hold(Instant::now());
         self.warm_frame();
     }
 
@@ -836,8 +837,8 @@ impl<T: 'static> Overlay<T> {
     fn advance_at(&mut self, now: Instant) {
         let commits = self.rt.stats.commits;
         if self.retained() {
-            self.rt.frame_after_idle(now.saturating_duration_since(self.last).as_secs_f64());
-            self.last = now;
+            self.rt.frame_split(now.saturating_duration_since(self.clock.last()).as_secs_f64(), 0.0);
+            self.clock.hold(now);
         } else {
             self.rt.frame(0.0);
         }
@@ -1029,9 +1030,7 @@ impl<T: 'static> Overlay<T> {
         let frame_time = now;
         #[cfg(target_os = "macos")]
         let frame_time = target.unwrap_or(now);
-        let dt = if prewarm { 0.0 } else if self.idle { 1.0 / 120.0 } else { frame_time.saturating_duration_since(self.last).as_secs_f64().min(1.0 / 30.0) };
-        self.last = frame_time;
-        let mut animating = self.rt.frame(dt);
+        let (mut animating, dt) = step(&mut self.rt, &mut self.clock, &self.compositor, frame_time, prewarm);
         let update_ms = if self.compositor.is_some() { now.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
         self.rt.shell_request = None;
         self.clipboard.flush(&mut self.rt);
@@ -1071,6 +1070,25 @@ impl<T: 'static> Overlay<T> {
         }
         !self.idle
     }
+
+    #[cfg(target_os = "macos")]
+    fn occluded(&mut self, occluded: bool) {
+        if let Some(live) = &mut self.live {
+            live.occluded = occluded;
+            if occluded && let Some(pacing) = &mut live.pacing { pacing.stop(); }
+        }
+        self.idle = true;
+        self.dirty = !occluded;
+    }
+}
+
+/// `draw_frame`'s animation step, apart from the surface so tests can drive it.
+fn step<T: 'static>(rt: &mut Runtime<T>, clock: &mut FrameClock, compositor: &Option<Box<dyn Compositor<T>>>, frame_time: Instant, prewarm: bool) -> (bool, f64) {
+    if prewarm {
+        clock.hold(frame_time);
+        return (rt.frame(0.0), 0.0);
+    }
+    clock.advance(rt, frame_time, compositor.as_ref().is_some_and(|c| c.animating()))
 }
 
 /// Both native surface frames and offscreen prewarming use the same compositor path.
@@ -1156,14 +1174,7 @@ impl<T: 'static> AnyHost for Overlay<T> {
             && let Some(x11) = &self.x11 { x11.update_geometry(); }
         match event {
             #[cfg(target_os = "macos")]
-            WindowEvent::Occluded(occluded) => {
-                if let Some(live) = &mut self.live {
-                    live.occluded = occluded;
-                    if occluded && let Some(pacing) = &mut live.pacing { pacing.stop(); }
-                }
-                self.idle = true;
-                self.dirty = !occluded;
-            }
+            WindowEvent::Occluded(occluded) => self.occluded(occluded),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 if let Some(gpu) = self.gpu.clone() {
                     self.rescale(&gpu, scale_factor as f32);
@@ -1374,6 +1385,139 @@ impl<T: 'static> Drop for Overlay<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    const FRAME: Duration = Duration::from_micros(16_667);
+
+    fn width_overlay(name: &'static str) -> Overlay<f32> {
+        fn view(width: &f32, _: &mut Cx<f32>) -> El {
+            crate::el().child(crate::el().key("box").size(*width, 8.0))
+        }
+        let app = AppSpec::new(name, (400.0, 50.0), || 12.0, view);
+        let (mut overlay, _) = Overlay::new(OverlaySpec::new(name, app.size, view).options(Default::default()), 12.0, &app);
+        overlay.rt.wall_start = None;
+        overlay
+    }
+
+    /// One `draw_frame` without a surface: the frame step, then the idle bookkeeping after present.
+    fn present<T: 'static>(overlay: &mut Overlay<T>, at: Instant) {
+        let (animating, _) = step(&mut overlay.rt, &mut overlay.clock, &overlay.compositor, at, false);
+        overlay.dirty = false;
+        overlay.idle = !(animating || overlay.rt.has_pending_input());
+    }
+
+    fn width<T: 'static>(overlay: &Overlay<T>, key: &str) -> f32 {
+        overlay.rt.presented(key).unwrap().0[2]
+    }
+
+    /// A spring started at `FRAME`, presented at `times` (from `start`); `before` runs ahead of
+    /// the frame at `at`. Returns the width after each frame.
+    fn widths(times: &[Duration], at: Duration, before: fn(&mut Overlay<f32>)) -> Vec<(Duration, f32)> {
+        let mut overlay = width_overlay("late frame");
+        let start = Instant::now();
+        times.iter().map(|&t| {
+            if t == FRAME { overlay.rt.update(|width, _| *width = 212.0); }
+            if t == at { before(&mut overlay); }
+            present(&mut overlay, start + t);
+            (t, width(&overlay, "box"))
+        }).collect()
+    }
+
+    /// A 49 ms frame mid-spring lands where an unbroken 16.7 ms cadence is at that time, and so
+    /// do the frames after it: no hitch followed by a slow catch-up. `before` runs just ahead
+    /// of the late frame.
+    fn assert_late_frame_keeps_time(before: fn(&mut Overlay<f32>), what: &str) {
+        let late = 6 * FRAME + Duration::from_micros(49_300);
+        let mut steady: Vec<_> = (0..=8).map(|k| k * FRAME).collect();
+        let after = [late, late + FRAME, late + 2 * FRAME];
+        steady.extend(after);
+        let mut hitched: Vec<_> = (0..=6).map(|k| k * FRAME).collect();
+        hitched.extend(after);
+        let steady = widths(&steady, Duration::MAX, |_| {});
+        let hitched = widths(&hitched, late, before);
+        for t in after {
+            let expected = steady.iter().find(|w| w.0 == t).unwrap().1;
+            let got = hitched.iter().find(|w| w.0 == t).unwrap().1;
+            assert!(expected < 211.0, "the spring must still be moving at {t:?}: {expected}");
+            assert!((got - expected).abs() < 0.01, "{what}: at {t:?} width={got}, unbroken cadence={expected}");
+        }
+    }
+
+    #[test]
+    fn overlay_late_frame_lands_where_an_unbroken_cadence_would() {
+        assert_late_frame_keeps_time(|_| {}, "late frame");
+    }
+
+    #[test]
+    fn overlay_idle_flag_left_set_mid_motion_cannot_shrink_the_step() {
+        // The motion trace's case: something marks the host idle while a spring is in flight.
+        assert_late_frame_keeps_time(|overlay| overlay.idle = true, "idle flag left set");
+        // The source on macOS: an unoccluded notice with no occlusion before it.
+        #[cfg(target_os = "macos")]
+        assert_late_frame_keeps_time(|overlay| overlay.occluded(false), "Occluded(false) mid-motion");
+    }
+
+    #[test]
+    fn overlay_motion_starting_after_idle_takes_one_frame_step() {
+        let first_pose = |idle: Duration| {
+            let mut overlay = width_overlay("after idle");
+            let start = Instant::now();
+            present(&mut overlay, start);
+            present(&mut overlay, start + FRAME);
+            assert!(overlay.idle);
+            overlay.rt.update(|width, _| *width = 212.0);
+            present(&mut overlay, start + FRAME + idle);
+            width(&overlay, "box")
+        };
+        let short = first_pose(FRAME);
+        let long = first_pose(Duration::from_secs(2));
+        assert!(short > 12.0 && short < 20.0, "the first frame shows one step of motion: {short}");
+        assert!((long - short).abs() < 0.001, "idle time must not age motion that starts after it: {long} vs {short}");
+    }
+
+    #[test]
+    fn overlay_resume_keeps_running_motion_and_starts_new_motion_fresh() {
+        #[derive(Clone, Copy)]
+        struct Pair { a: f32, b: f32 }
+        fn view(s: &Pair, _: &mut Cx<Pair>) -> El {
+            crate::el().children([crate::el().key("a").size(s.a, 8.0), crate::el().key("b").size(s.b, 8.0)])
+        }
+        let app = AppSpec::new("resume", (500.0, 50.0), || Pair { a: 12.0, b: 12.0 }, view);
+        // `a` springs from FRAME; `pause` runs after 3 frames, and `b` starts on the frame
+        // presented `gap` later.
+        let run = |pause: fn(&mut Overlay<Pair>), resume: fn(&mut Overlay<Pair>), gap: Duration| {
+            let (mut overlay, _) = Overlay::new(OverlaySpec::new("resume", app.size, view).options(Default::default()), Pair { a: 12.0, b: 12.0 }, &app);
+            overlay.rt.wall_start = None;
+            let start = Instant::now();
+            present(&mut overlay, start);
+            overlay.rt.update(|s, _| s.a = 212.0);
+            for k in 1..=3 { present(&mut overlay, start + k * FRAME); }
+            pause(&mut overlay);
+            overlay.rt.update(|s, _| s.b = 212.0);
+            resume(&mut overlay);
+            present(&mut overlay, start + 3 * FRAME + gap);
+            (width(&overlay, "a"), width(&overlay, "b"))
+        };
+        let fresh = {
+            let mut overlay = width_overlay("fresh");
+            let start = Instant::now();
+            present(&mut overlay, start);
+            overlay.rt.update(|width, _| *width = 212.0);
+            present(&mut overlay, start + FRAME);
+            width(&overlay, "box")
+        };
+        // Running motion keeps real time up to the resume cap.
+        let (capped, _) = run(|_| {}, |_| {}, Duration::from_secs_f64(crate::frame_clock::MAX_GAP));
+        let mut cases: Vec<(&str, fn(&mut Overlay<Pair>), fn(&mut Overlay<Pair>))> = vec![("hidden", |o| o.hide(), |o| o.visible = true)];
+        #[cfg(target_os = "macos")]
+        cases.push(("occluded", |o| o.occluded(true), |o| o.occluded(false)));
+        for (what, pause, resume) in cases {
+            let (a, b) = run(pause, resume, Duration::from_secs(3));
+            // `b` sits beside `a`, so its edges snap to a different 1/64 pt grid than `fresh`.
+            assert!((b - fresh).abs() < 0.02, "{what}: motion starting on the resume frame must not jump: b={b}, fresh={fresh}");
+            assert!(capped < 211.0 && (a - capped).abs() < 0.01, "{what}: running motion resumes {:?} along: a={a}, expected={capped}", crate::frame_clock::MAX_GAP);
+        }
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -1401,7 +1545,7 @@ mod tests {
             overlay.rt.wall_start = None;
             overlay.warm();
             overlay.dirty = false; // Successful submission of A, without a native window.
-            let commit = overlay.last + Duration::from_secs(10);
+            let commit = overlay.clock.last() + Duration::from_secs(10);
             overlay.rt.state.enter = true;
             overlay.advance_at(commit); // Hidden turn 1 commits B; no show request yet.
             assert_eq!(handle.shared.requests.lock().unwrap().visible, None);
@@ -1444,7 +1588,7 @@ mod tests {
             overlay.rt.time_scale = scale;
             overlay.warm();
             overlay.dirty = false;
-            let commit = overlay.last + Duration::from_secs(10);
+            let commit = overlay.clock.last() + Duration::from_secs(10);
             overlay.rt.update(|width, _| *width = 20.0);
             overlay.advance_at(commit);
             overlay.advance_at(commit + Duration::from_millis(8)); // Unchanged intervening poll.

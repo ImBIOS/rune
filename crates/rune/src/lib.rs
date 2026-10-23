@@ -99,6 +99,7 @@ pub mod theme;
 pub mod tok;
 pub mod tooling;
 mod window;
+mod frame_clock;
 mod secure_input;
 pub mod clipboard;
 mod preferences;

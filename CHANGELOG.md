@@ -5,6 +5,17 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A late frame no longer slows motion down.** Windows, overlays and the hot and dev hosts now
+  share one frame-step rule (`frame_clock`). Motion already running advances by the real time
+  since the last frame, up to 250 ms, instead of 1/30 s at most. Before, a host marked idle
+  mid-motion stepped only 1/120 s, so after a hitch springs fell behind and finished late. Motion
+  a frame starts or retargets starts at that frame's time and steps at most 1/120 s, so it no
+  longer jumps by a late frame's gap, and a retargeted spring turns from where it is at that
+  time. Both happen in one runtime pass, so poll, the motion trace and the settle flag see one
+  frame. While other motion runs, a 60 Hz frame now starts new motion with a 1/120 s step rather
+  than 1/60 s. The hot host's first frame after idle no longer steps new motion by the idle gap.
+  Scroll flings now integrate their decay exactly, so a fling travels about 1% less in total and
+  a long frame carries the same distance as the short frames it stands for.
 - **Focus follows an app selection.** In a `focus_follows` group, when the app selects a
   different item (a ⌘-digit shortcut, say) while focus is in the group, focus moves to the
   `focus_selected` item and keeps its keyboard ring, instead of staying on the old row.

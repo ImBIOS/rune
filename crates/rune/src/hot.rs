@@ -177,7 +177,8 @@ fn headless(spec: AppSpec<HostState>, args: Args) {
     loop {
         let now = Instant::now();
         let elapsed = (now - previous).as_secs_f64();
-        let mut dt = if first || paused { 0.0 } else { elapsed.min(1.0 / 30.0) };
+        // `None`: a frame `elapsed` after the last, under the shared frame rule.
+        let mut fixed = (first || paused).then_some(0.0);
         previous = now;
         let mut requested = false;
         if !first && let Some(path) = &args.hot_control
@@ -187,8 +188,8 @@ fn headless(spec: AppSpec<HostState>, args: Args) {
         {
             command = next;
             if command["quit"] == true { break; }
-            if let Some(pause) = command["pause"].as_bool() { paused = pause; dt = 0.0; }
-            if let Some(step) = command["step"].as_f64() { dt = step.clamp(0.0, 10.0); }
+            if let Some(pause) = command["pause"].as_bool() { paused = pause; fixed = Some(0.0); }
+            if let Some(step) = command["step"].as_f64() { fixed = Some(step.clamp(0.0, 10.0)); }
             control_input(&mut rt, &command);
             requested = true;
         }
@@ -199,9 +200,11 @@ fn headless(spec: AppSpec<HostState>, args: Args) {
             woken = sleep.recv_timeout(Duration::from_millis(16)).is_ok();
             continue;
         }
-        if !first && !paused && !requested { rt.clock += (elapsed - dt).max(0.0); }
         let before = rt.hot.as_ref().unwrap().seen;
-        rt.frame(dt);
+        match fixed {
+            Some(dt) => { rt.frame(dt); }
+            None => { crate::frame_clock::advance_by(&mut rt, elapsed); }
+        }
         let generation = rt.hot.as_ref().unwrap().seen;
         if first || requested || before != generation {
             renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);

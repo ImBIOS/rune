@@ -341,7 +341,10 @@ impl<S> Runtime<S> {
     pub(crate) fn dev_hidden_frame(&mut self) {
         let now = std::time::Instant::now();
         let last = self.dev.as_ref().and_then(|dev| dev.hidden);
-        let moving = self.frame(last.map_or(0.0, |t| (now - t).as_secs_f64().min(1.0 / 30.0)));
+        let moving = match last {
+            Some(t) => crate::frame_clock::advance_by(self, (now - t).as_secs_f64()),
+            None => self.frame(0.0),
+        };
         if let Some(dev) = &mut self.dev { dev.hidden = moving.then_some(now); }
     }
 

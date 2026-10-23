@@ -992,7 +992,7 @@ impl<S: 'static> Runtime<S> {
     /// if state changed, steps `Scene`, growth, scroll and reveals, and builds this frame's
     /// instances.
     pub fn frame(&mut self, dt: f64) -> bool {
-        self.frame_ordered(dt, false)
+        self.frame_split(0.0, dt)
     }
 
     /// A hidden or windowless host's due timer. Under the dev panel, motion the timer starts
@@ -1003,13 +1003,12 @@ impl<S: 'static> Runtime<S> {
         self.frame(0.0);
     }
 
-    /// Catch up a sleeping host's existing motion before committing newly observed state.
-    /// The elapsed gap belongs to old tracks, never to targets first observed on this frame.
-    pub(crate) fn frame_after_idle(&mut self, dt: f64) -> bool {
-        self.frame_ordered(dt, true)
-    }
-
-    fn frame_ordered(&mut self, dt: f64, before_commit: bool) -> bool {
+    /// One frame in one pass that steps `catch_up + dt` seconds. Motion already running advances
+    /// `catch_up` before this frame's handlers and commit, so they retarget it from its pose at
+    /// the frame's time. Then everything, including what the commit started, steps `dt`. A late
+    /// frame or a sleeping host's gap belongs to old tracks, never to targets first observed
+    /// on this frame.
+    pub(crate) fn frame_split(&mut self, catch_up: f64, dt: f64) -> bool {
         #[cfg(all(feature = "dev", debug_assertions))]
         if let Some(mut dev) = self.dev.take() {
             let scope = dev.scope();
@@ -1017,47 +1016,61 @@ impl<S: 'static> Runtime<S> {
                 // Bring existing tracks/timers to the command's timestamp first. Idle wall
                 // time must never be charged to a transition or spring created by that command.
                 let commands = dev.prepare();
-                if commands { self.frame_clock(dt, before_commit); }
+                if commands { self.frame_clock(catch_up + dt, 0.0); }
                 dev.before(self);
-                self.frame_clock(if commands { 0.0 } else { dt }, before_commit);
+                if commands { self.frame_clock(0.0, 0.0) } else { self.frame_clock(catch_up, dt) };
                 dev.after(self)
             });
             self.dev = Some(dev);
             return moving;
         }
-        self.frame_clock(dt, before_commit)
+        self.frame_clock(catch_up, dt)
     }
 
-    fn frame_clock(&mut self, dt: f64, before_commit: bool) -> bool {
+    fn frame_clock(&mut self, catch_up: f64, dt: f64) -> bool {
         // Like a native shell: the logical clock follows host time (timers, poll), while
         // animations step by the frame's own dt, so idle time never lands on a fresh commit.
         #[cfg(not(all(feature = "dev", debug_assertions)))]
-        let elapsed = dt;
+        let elapsed = catch_up + dt;
         #[cfg(all(feature = "dev", debug_assertions))]
-        let (elapsed, dt) = match &mut self.dev_clock {
-            Some(clock) => clock.advance(self.wall_start.map(|t| t.elapsed().as_secs_f64()), dt),
-            None => (dt, dt),
+        let (elapsed, catch_up, dt) = match &mut self.dev_clock {
+            Some(clock) => {
+                let total = catch_up + dt;
+                let (elapsed, animation) = clock.advance(self.wall_start.map(|t| t.elapsed().as_secs_f64()), total);
+                // Scale and pause both parts alike; manual steps go to `dt`.
+                let catch_up = if total > 0.0 { catch_up * (animation / total).min(1.0) } else { 0.0 };
+                (elapsed, catch_up, animation - catch_up)
+            }
+            None => (catch_up + dt, catch_up, dt),
         };
         // A coarse headless step still polls at every timer deadline, independent of FPS.
-        // Input queued for the requested frame stays at that frame's timestamp.
+        // Input queued for the requested frame stays at that frame's timestamp. The catch-up
+        // is the earliest part of the step.
         if self.wall_start.is_none()
             && self.logical_wake_deadline().is_some_and(|deadline| deadline > self.clock && deadline < self.clock + elapsed)
         {
             let target = self.clock + elapsed;
             let input = std::mem::take(&mut self.queue);
+            let mut catch_up = catch_up;
             while let Some(deadline) = self.logical_wake_deadline()
                 && deadline > self.clock && deadline < target
             {
-                self.frame_step(deadline - self.clock, deadline - self.clock, before_commit);
+                let step = deadline - self.clock;
+                let old = step.min(catch_up);
+                catch_up -= old;
+                self.frame_step(step, old, step - old);
             }
             self.queue.extend(input);
-            return self.frame_step(target - self.clock, target - self.clock, before_commit);
+            let step = target - self.clock;
+            let old = step.min(catch_up);
+            return self.frame_step(step, old, step - old);
         }
-        self.frame_step(elapsed, dt, before_commit)
+        self.frame_step(elapsed, catch_up, dt)
     }
 
-    /// `elapsed` advances the logical clock when no wall clock drives it; `dt` steps animations.
-    fn frame_step(&mut self, elapsed: f64, dt: f64, before_commit: bool) -> bool {
+    /// `elapsed` advances the logical clock when no wall clock drives it; `catch_up` steps
+    /// running motion before the commit and `dt` steps all motion after it.
+    fn frame_step(&mut self, elapsed: f64, catch_up: f64, dt: f64) -> bool {
         #[cfg(feature = "hot")]
         if self.hot.as_mut().is_some_and(crate::hot::Session::changed) {
             // Replace handler trait objects before queued input can call an old vtable.
@@ -1075,14 +1088,14 @@ impl<S: 'static> Runtime<S> {
             // Native shells cap dt after idle. Advance the sleeping part of the
             // delay before new handlers retarget, without double-stepping manual time.
             let elapsed = animation_time - (deadline - self.clock).max(0.0) * self.time_scale as f64;
-            self.t += (elapsed - self.t - dt * self.time_scale as f64).max(0.0);
+            self.t += (elapsed - self.t - (catch_up + dt) * self.time_scale as f64).max(0.0);
             self.scene.set_time(self.t);
             if self.clock >= deadline { self.loop_wake = None; }
         }
-        // Sample old tracks at this timestamp before a poll/update retargets them. Building
-        // here also brings growth, scroll and text-flight geometry to the same current pose.
-        if before_commit && dt > 0.0 { self.step_motion(dt); }
-        let dt = if before_commit { 0.0 } else { dt };
+        // Bring old tracks, growth and scroll to this frame's time before a poll or update
+        // retargets them. Presenting waits for `step_motion`, so the frame is sampled and
+        // built once.
+        if catch_up > 0.0 { self.catch_up_motion(catch_up); }
         let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
         self.wake_deadlines.drain(..due);
         if let Some(poll) = self.poll {
@@ -1158,6 +1171,14 @@ impl<S: 'static> Runtime<S> {
         #[cfg(all(feature = "dev", debug_assertions))]
         if self.dev_clock.as_ref().is_some_and(|clock| clock.paused) { self.animating = false; }
         self.animating
+    }
+
+    fn catch_up_motion(&mut self, dt: f64) {
+        let step = dt * self.time_scale as f64;
+        self.t += step;
+        self.scene.set_time(self.t);
+        self.step_growth(step as f32);
+        self.step_scroll(step as f32);
     }
 
     fn step_motion(&mut self, dt: f64) -> bool {
@@ -2433,8 +2454,11 @@ impl<S: 'static> Runtime<S> {
             } else if let Some(v) = st.glide {
                 moving |= scroll_bottom::glide(st, v, dt);
             } else if st.v.abs() > 1.0 {
-                st.offset += f64::from(st.v) * f64::from(dt);
-                st.v *= (-SCROLL_DECAY * dt).exp();
+                // Exact for exponential decay, so a long frame carries the same distance as
+                // the short frames it stands for.
+                let decay = (-SCROLL_DECAY * dt).exp();
+                st.offset += f64::from(st.v * (1.0 - decay) / SCROLL_DECAY);
+                st.v *= decay;
                 if st.offset <= 0.0 || st.offset >= st.max {
                     st.v = 0.0;
                 }

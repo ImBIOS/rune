@@ -79,11 +79,11 @@ mod tests {
             rt.frame(0.0);
             rt.update(|width, _| *width = 20.0);
         }
-        hidden.frame_after_idle(10.0); // Commit at the end of idle, not its beginning.
+        hidden.frame_split(10.0, 0.0); // Commit at the end of idle, not its beginning.
         visible.frame(0.0);
         for (paused, dt) in [(false, 0.032), (true, 2.0), (false, 0.032)] {
             hidden.dev_clock.as_mut().unwrap().paused = paused;
-            hidden.frame_after_idle(dt);
+            hidden.frame_split(dt, 0.0);
             visible.frame(if paused { 0.0 } else { dt * 0.5 });
             assert_eq!(hidden.presented("box"), visible.presented("box"));
         }

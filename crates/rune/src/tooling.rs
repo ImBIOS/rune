@@ -1202,7 +1202,7 @@ mod tests {
         let commits = rt.stats.commits;
         rt.poll_hidden();
         assert_eq!(rt.stats.commits, commits, "hidden polling must not lay out or render");
-        rt.frame_after_idle(1.0);
+        rt.frame_split(1.0, 0.0);
         rt.frame(0.02);
         assert_eq!(rt.events, ["hidden:ready"]);
         assert_eq!(rt.trace_channels.as_ref().unwrap()["shell.width"], ("position", 40.0));
