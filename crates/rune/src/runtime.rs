@@ -3387,17 +3387,9 @@ impl<S: 'static> Runtime<S> {
                     }
                 } else if let (Some(spec), Some(layout)) = (&n.text, &n.text_layout) {
                     let color = text_tint(self.color(n.id, P_TEXT, spec.color));
-                    let tw = layout.full_width().ceil();
                     let ins = n.inset.map(|v| v * sc * s);
                     let (x0, x1) = (r[0] + ins[0], r[2] - ins[2]);
-                    // Wrapped text aligns each line inside the wrap width itself.
-                    let x = match spec.align {
-                        _ if line_alignment(spec) != parley::Alignment::Start => x0,
-                        Align::Start => x0,
-                        Align::Center => x0 + (x1 - x0 - tw) * 0.5,
-                        Align::End => x1 - tw,
-                    };
-                    let mut origin = [x, r[1] + ins[1]];
+                    let mut origin = [text_x(spec, x0, x1, layout.full_width().ceil()), r[1] + ins[1]];
                     let mut clip = clip;
                     if let Some(inp) = n.input.as_ref().filter(|i| i.single_line) {
                         let scroll = single_line_scroll(&mut self.input_scroll, &n.path, inp, &spec.content, layout, s, x1 - x0);
@@ -3858,6 +3850,17 @@ fn line_alignment(spec: &TextSpec) -> parley::Alignment {
         Align::Center if spec.wrap => parley::Alignment::Center,
         Align::End if spec.wrap => parley::Alignment::End,
         _ => parley::Alignment::Start,
+    }
+}
+
+/// Where a `width`-wide text line starts between `x0` and `x1`. Wrapped text aligns each line
+/// inside the wrap width itself, so it starts at `x0`.
+fn text_x(spec: &TextSpec, x0: f32, x1: f32, width: f32) -> f32 {
+    match spec.align {
+        _ if line_alignment(spec) != parley::Alignment::Start => x0,
+        Align::Start => x0,
+        Align::Center => x0 + (x1 - x0 - width) * 0.5,
+        Align::End => x1 - width,
     }
 }
 

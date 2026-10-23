@@ -14,14 +14,7 @@ pub(super) struct LinkState {
 
 /// Where node `n`'s text starts inside its border box `rect` (points, x0 y0 x1 y1).
 fn origin(n: &Node, spec: &TextSpec, layout: &Layout<Ink>, rect: [f32; 4], s: f32) -> [f32; 2] {
-    let tw = layout.full_width().ceil() / s;
-    let (x0, x1) = (rect[0] + n.inset[0], rect[2] - n.inset[2]);
-    let x = match spec.align {
-        _ if line_alignment(spec) != parley::Alignment::Start => x0,
-        Align::Start => x0,
-        Align::Center => x0 + (x1 - x0 - tw) * 0.5,
-        Align::End => x1 - tw,
-    };
+    let x = text_x(spec, rect[0] + n.inset[0], rect[2] - n.inset[2], layout.full_width().ceil() / s);
     [x, rect[1] + n.inset[1]]
 }
 
