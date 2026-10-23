@@ -66,7 +66,6 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   instead of travel relative to the moving window, so a dragged capsule follows the pointer
   without feeding back. New `El::on_hover_change` reports entering and leaving an element's
   rect, children included, without taking their presses or hover; a held press stays inside.
-||||||| parent of a7ed763 (Make release builds incremental and add a perf profile for benchmarks)
 - **Mac keyboard navigation for menus, selects and lists**. Groups with role `menu`, `listbox`,
   `list` or `tree` move with Up and Down only (Left and Right no longer move them), and those
   plus `tablist` jump to the item whose label you type. `El::focus_highlight(color)` gives a
