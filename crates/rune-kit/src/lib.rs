@@ -10,7 +10,7 @@
 //! forces a visual state for galleries and stories; live hover and press come from the runtime.
 //!
 //! Overlays (popover, menu, select, tooltip, hover card, toast) return their trigger in place
-//! and their content as a separate `El` that the view mounts at the root with [`layer`], so it
+//! and their content as a separate `El` that the view mounts at the root with [`root`], so it
 //! draws above later siblings and escapes clipping ancestors.
 
 pub mod css;
