@@ -10,7 +10,7 @@ use crate::color::Color;
 use crate::edit::TextEdit;
 use crate::growth::{GROWTH, StreamEdge, edge};
 use crate::shape::Shape;
-use crate::text::{Icon, Span};
+use crate::text::{Icon, Link, Span};
 use crate::tok::TextStyle;
 
 /// What a handler may say about the commit it causes.
@@ -317,6 +317,19 @@ pub struct TextSpec {
     pub justify: bool,
     /// Plain live run. Layout is measured from the authored placeholder before latching it.
     pub live: Option<crate::LiveText>,
+    pub(crate) links: Vec<Link>,
+    pub(crate) on_link: Option<LinkFn>,
+}
+
+/// [`El::on_link`]'s handler.
+#[derive(Clone)]
+pub(crate) struct LinkFn(pub LinkHandler);
+pub(crate) type LinkHandler = Rc<dyn Fn(&mut dyn Any, &str, &mut Tx)>;
+
+impl std::fmt::Debug for LinkFn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LinkFn")
+    }
 }
 
 pub use rune_motion::Cycle;
@@ -520,6 +533,8 @@ pub fn text(content: impl Into<String>) -> El {
         fade_em: TRUNCATE_FADE_EM,
         justify: false,
         live: None,
+        links: Vec::new(),
+        on_link: None,
     });
     e
 }
@@ -1240,6 +1255,25 @@ impl El {
             if let Some(t) = &mut self.text {
                 t.wrap = false;
             }
+        }
+        self
+    }
+    /// Make a byte range of this text pressable (see [`Link`]). Only the range's shaped glyph
+    /// boxes take the pointer, which shows a hand over them; the rest of the text stays
+    /// transparent to input. Each link is a Tab stop that Enter or Space presses.
+    pub fn link(mut self, link: Link) -> Self {
+        if let Some(t) = &mut self.text {
+            t.links.push(link);
+            self.focus.enabled = true;
+            self.cursor.get_or_insert(Cursor::Pointer);
+        }
+        self
+    }
+    /// Called with a [`Link`]'s id when it is clicked, or pressed with Enter or Space while
+    /// focused.
+    pub fn on_link<S: 'static>(mut self, f: impl Fn(&mut S, &str, &mut Tx) + 'static) -> Self {
+        if let Some(t) = &mut self.text {
+            t.on_link = Some(LinkFn(Rc::new(move |s, id, tx| f(downcast::<S>(s), id, tx))));
         }
         self
     }

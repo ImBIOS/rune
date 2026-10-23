@@ -44,6 +44,8 @@ mod physical_dispatch;
 mod scroll_bottom;
 #[path = "caret.rs"]
 mod caret;
+#[path = "links.rs"]
+mod links;
 
 const P_FILL: Prop<Color> = Prop::custom(64, PropClass::Color);
 const P_BORDER: Prop<Color> = Prop::custom(65, PropClass::Color);
@@ -182,6 +184,7 @@ enum Action {
     Hover(String),
     AtBottom(String, bool),
     Press(String),
+    Link(String, usize),
     SecondaryPress(String, PointerPress),
     Drag(String, Drag),
     Key(KeyEvent),
@@ -402,6 +405,7 @@ pub struct Runtime<S: 'static> {
     caret_watch: bool,
     /// An edit ran this frame: keep the caret in its scroll viewport after the commit.
     caret_follow: bool,
+    links: links::LinkState,
     /// The shell cancels native composition before enabling the new text focus.
     pub(crate) ime_reset: bool,
     /// Text the focused field asked to copy (the shell writes it to the clipboard).
@@ -563,6 +567,7 @@ impl<S: 'static> Runtime<S> {
             caret: None,
             caret_watch: false,
             caret_follow: false,
+            links: Default::default(),
             ime_reset: false,
             copy_request: None,
             paste_request: None,
@@ -1197,6 +1202,7 @@ impl<S: 'static> Runtime<S> {
                 f(&mut self.state as &mut dyn Any, &mut one);
                 true
             }
+            Action::Link(path, k) => self.press_link(&path, k, &mut one),
             Action::SecondaryPress(path, point) => {
                 let Some(n) = self.node(&path).filter(|n| !self.is_exiting(n.id)) else { return false };
                 let Some(f) = n.on_secondary_press.clone() else { return false };
@@ -2310,6 +2316,7 @@ impl<S: 'static> Runtime<S> {
             }
             return;
         };
+        let on_link = self.link_down(ti, x, y);
         let n = &self.nodes[ti];
         if n.window_drag && n.on_press.is_none() && n.on_drag.is_none() && n.input.is_none() {
             let now = self.now_clock();
@@ -2329,9 +2336,10 @@ impl<S: 'static> Runtime<S> {
             self.queue.push(Action::Focus(n.path.clone(), x - r[0] - n.inset[0], y - r[1] - n.inset[1]));
             return;
         }
-        if n.focus.enabled {
+        // Clicking a link leaves focus where it is (a composer keeps typing).
+        if !on_link && n.focus.enabled {
             self.queue.push(Action::FocusControl(n.path.clone()));
-        } else if self.focused.is_some() {
+        } else if !on_link && self.focused.is_some() {
             self.queue.push(Action::Blur);
         }
         let r = n.target;
@@ -2394,6 +2402,7 @@ impl<S: 'static> Runtime<S> {
             let (dx, dy) = (x - self.press_at.0, y - self.press_at.1);
             self.queue.push(Action::Drag(path.clone(), Drag { phase: Phase::Up, x: x - r[0], y: y - r[1], dx, dy, ..d }));
         }
+        self.link_up(&path, x, y);
         if has_press && self.capture_inside {
             self.queue.push(Action::Press(path));
         }
@@ -3057,15 +3066,17 @@ impl<S: 'static> Runtime<S> {
                         }
                     }
                     // Span backgrounds (inline code), then glyphs.
+                    let link_fx = self.link_fx(i);
                     self.deco_scratch.clear();
                     self.text.decorations(layout, &spec.spans, s, origin, &mut self.deco_scratch);
+                    link_fx.decos(layout, spec.content.len(), s, origin, &mut self.deco_scratch);
                     for d in &self.deco_scratch {
                         let c = d.color.premul(o);
                         self.instances.push(rect_inst(d.rect, c, d.radius, clip, fade));
                     }
                     let reveal = self.reveals.get(&n.id).filter(|st| !st.words.is_empty());
                     self.glyph_scratch.clear();
-                    self.text.glyphs_for_layout(layout, s, origin, reveal.is_some(), &mut self.glyph_scratch);
+                    self.text.glyphs_for_layout(layout, s, origin, reveal.is_some() || !link_fx.is_empty(), &mut self.glyph_scratch);
                     let gamma = glyph_gamma(color, s);
                     let base = color.premul(o);
                     for q in &self.glyph_scratch {
@@ -3077,6 +3088,10 @@ impl<S: 'static> Runtime<S> {
                         if q.ink > 0
                             && let Some(c) = spec.spans.get(q.ink as usize - 1).and_then(|sp| sp.color)
                         {
+                            f = c.premul(o);
+                            gm = glyph_gamma(c, s);
+                        }
+                        if !link_fx.is_empty() && let Some(c) = link_fx.glyph_color(q.byte) {
                             f = c.premul(o);
                             gm = glyph_gamma(c, s);
                         }
@@ -3156,7 +3171,8 @@ impl<S: 'static> Runtime<S> {
                     rect_pt[3].min(c[3] / s),
                 ];
                 let rect = if n.parent.is_some() { cr } else { rect_pt };
-                self.hits.push((n.id, rect));
+                if !self.push_link_hits(i, rect_pt, rect) { self.hits.push((self.nodes[i].id, rect)); }
+                let n = &self.nodes[i];
                 if n.vis.hit && effective_opacity > 0.0 && rect[2] > rect[0] && rect[3] > rect[1] {
                     self.overlay_hits.push(rect);
                 }
@@ -3303,6 +3319,7 @@ impl<S: 'static> Runtime<S> {
                 revealing: true, in_growing_row: false, scrolling: false, virtual_extent: false, live_intent: 0, caret: None,
             });
         }
+        self.link_elements(&mut elements);
         elements
     }
 

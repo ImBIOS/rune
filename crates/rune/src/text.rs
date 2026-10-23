@@ -221,6 +221,95 @@ impl Span {
     }
 }
 
+/// A pressable byte range of a text element: a link, an @mention, a file chip. Attach with
+/// [`El::link`](crate::El::link) and handle with [`El::on_link`](crate::El::on_link). Its resting
+/// look is whatever [`Span`]s cover it; [`LinkPaint`]s add the hover, pressed and focus looks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Link {
+    pub(crate) start: u32,
+    pub(crate) end: u32,
+    pub(crate) id: String,
+    pub(crate) role: &'static str,
+    pub(crate) label: Option<String>,
+    pub(crate) hover: LinkPaint,
+    pub(crate) pressed: Option<LinkPaint>,
+    pub(crate) focused: Option<LinkPaint>,
+}
+
+impl Link {
+    /// Bytes `range` of the text, reported to `on_link` as `id`. Its role is "link".
+    pub fn new(range: std::ops::Range<usize>, id: impl Into<String>) -> Link {
+        Link {
+            start: range.start as u32,
+            end: range.end as u32,
+            id: id.into(),
+            role: "link",
+            label: None,
+            hover: LinkPaint::default(),
+            pressed: None,
+            focused: None,
+        }
+    }
+    /// Accessibility role, such as "button" for a file chip.
+    pub fn role(mut self, role: &'static str) -> Self {
+        self.role = role;
+        self
+    }
+    /// Accessible name; the range's text by default.
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+    /// The look while the pointer is over it.
+    pub fn hover(mut self, paint: LinkPaint) -> Self {
+        self.hover = paint;
+        self
+    }
+    /// The look while it is held down; the hover look by default.
+    pub fn pressed(mut self, paint: LinkPaint) -> Self {
+        self.pressed = Some(paint);
+        self
+    }
+    /// The look while it has keyboard focus; the hover look by default, or an underline in
+    /// its text colour when that is empty.
+    pub fn focused(mut self, paint: LinkPaint) -> Self {
+        self.focused = Some(paint);
+        self
+    }
+}
+
+/// A link's look in one state, painted over its resting span style without reshaping. Unset
+/// parts keep the span's own.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LinkPaint {
+    pub(crate) color: Option<Color>,
+    pub(crate) bg: Option<Color>,
+    pub(crate) underline: Option<Color>,
+}
+
+impl LinkPaint {
+    pub fn new() -> LinkPaint {
+        LinkPaint::default()
+    }
+    /// Glyph colour.
+    pub fn color(mut self, c: Color) -> Self {
+        self.color = Some(c);
+        self
+    }
+    /// A rounded background behind each line of the range.
+    pub fn bg(mut self, c: Color) -> Self {
+        self.bg = Some(c);
+        self
+    }
+    pub fn underline(mut self, c: Color) -> Self {
+        self.underline = Some(c);
+        self
+    }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.color.is_none() && self.bg.is_none() && self.underline.is_none()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct GlyphKey {
     font: u64,

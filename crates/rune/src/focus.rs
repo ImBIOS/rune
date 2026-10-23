@@ -83,7 +83,7 @@ impl<S: 'static> Runtime<S> {
         }
     }
     pub(super) fn set_focus(&mut self, path: Option<String>, keyboard: bool) -> bool {
-        if self.focused != path { self.ime_area = None; self.ime_reset = true; }
+        if self.focused != path { self.ime_area = None; self.ime_reset = true; self.blur_links(); }
         let lost = self.focused != path && self.physical_focus_lost();
         let changed = sync_input_focus(&mut self.nodes, &mut self.state, path.as_deref()) || lost;
         let mut changed = changed;
@@ -160,6 +160,7 @@ impl<S: 'static> Runtime<S> {
             return true;
         }
         if ev.key == Key::Tab {
+            if self.link_tab(ev.mods.shift) { return true; }
             let order = self.tab_order();
             if order.is_empty() { return self.active_modal().is_some(); }
             let current = order.iter().position(|&i| self.focused.as_deref() == Some(&self.nodes[i].path));
@@ -170,6 +171,7 @@ impl<S: 'static> Runtime<S> {
                 None => 0,
             };
             self.set_focus(Some(self.nodes[order[next]].path.clone()), true);
+            self.enter_links(order[next], ev.mods.shift);
             return true;
         }
         let Some(i) = self.nodes.iter().position(|n| self.focused.as_deref() == Some(&n.path)) else { return false; };
@@ -194,6 +196,7 @@ impl<S: 'static> Runtime<S> {
         }
         if self.nodes[i].input.is_none() && (ev.key == Key::Enter || ev.key == Key::Text(" ".into())) {
             self.keyboard_focus = true;
+            if self.link_key(i, tx) { return true; }
             if let Some(f) = self.nodes[i].on_press.clone() { f(&mut self.state, tx); }
             return true;
         }
