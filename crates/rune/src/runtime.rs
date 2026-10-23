@@ -837,6 +837,8 @@ impl<S: 'static> Runtime<S> {
     fn frame_step(&mut self, elapsed: f64, dt: f64, before_commit: bool) -> bool {
         let mut tx = std::mem::take(&mut self.pending);
         let mut ran = false;
+        let shaped0 = self.text.shaped;
+        self.settled = false;
         let wall_start = self.wall_start;
         #[cfg(all(feature = "dev", debug_assertions))]
         let wall_start = wall_start.filter(|_| self.dev_clock.is_none());
@@ -872,9 +874,20 @@ impl<S: 'static> Runtime<S> {
             self.commit(Tx::default());
         }
         for action in std::mem::take(&mut self.queue) {
+            // State may have requested focus on a newly mounted field. Resolve the
+            // new tree before routing this frame's text, not after it has gone to
+            // the previous field. The same boundary covers an earlier handler.
+            if (ran || self.dirty) && matches!(&action, Action::Key(_) | Action::Ime(_) | Action::Paste(_)) {
+                for (source, target) in std::mem::take(&mut tx.text_flights) {
+                    self.capture_text_flight(source, target);
+                }
+                if self.settle { tx.settle(); }
+                self.settled |= tx.settle;
+                self.commit(&tx);
+                ran = false;
+            }
             ran |= self.run_action(action, &mut tx);
         }
-        let shaped0 = self.text.shaped;
         for delay in tx.wakes.drain(..) {
             let deadline = self.clock + delay.as_secs_f64();
             if let Err(index) = self.wake_deadlines.binary_search_by(|t| t.total_cmp(&deadline)) {
@@ -899,9 +912,7 @@ impl<S: 'static> Runtime<S> {
                 tx.settle = true;
             }
             self.settled = tx.settle;
-            self.commit(tx);
-        } else {
-            self.settled = false;
+            self.commit(&tx);
         }
         if !scroll_to.is_empty() { self.step_scroll(0.0); }
         for key in scroll_to { self.reveal_row(&key); }
@@ -1589,11 +1600,11 @@ impl<S> Measurement<'_, S> {
 }
 
 impl<S: 'static> Runtime<S> {
-    fn commit(&mut self, tx: Tx) {
-        let mut measured = self.measure(&tx);
+    fn commit(&mut self, tx: &Tx) {
+        let mut measured = self.measure(tx);
         if self.sync_requested_focus(&mut measured.nodes) {
             self.layout = measured.layout;
-            measured = self.measure(&tx);
+            measured = self.measure(tx);
         }
         self.apply(measured, tx);
     }
@@ -1625,7 +1636,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// The mutation phase cannot accept an El or an unfinished measurement pass.
-    fn apply(&mut self, measured: Measured, tx: Tx) {
+    fn apply(&mut self, measured: Measured, tx: &Tx) {
         let Measured { layout: taffy, mut nodes, reduced_motion, time_scale } = measured;
         if reduced_motion != self.reduced_motion {
             self.reduced_motion = reduced_motion;
@@ -2385,7 +2396,7 @@ impl<S: 'static> Runtime<S> {
         scroll.pinned = false;
         scroll.v = 0.0;
         scroll.direct = true;
-        if self.virtual_window_changed() { self.commit(Tx::default()); }
+        if self.virtual_window_changed() { self.commit(&Tx::default()); }
     }
 
     fn scroll_at(&self, x: f32, y: f32) -> Option<NodeId> {
@@ -2658,6 +2669,14 @@ impl<S: 'static> Runtime<S> {
             }
 
             let first_instance = self.instances.len();
+            // Native input readiness follows focus, not entrance opacity. An input
+            // mounting at opacity zero still needs its IME area in this frame.
+            let input_caret = n.input.as_ref().filter(|input| input.edit.focused && self.can_focus(i))
+                .filter(|_| !self.flights.iter().any(|f| n.key.as_deref() == Some(&f.source_key)
+                    && f.alphas(f.destination, now, self.reduced_motion).0 > 0.0))
+                .and_then(|_| input_caret(n, r, sc, s, &mut self.input_scroll));
+            if let Some((_, area)) = input_caret
+                && n.input.as_ref().is_some_and(|input| !input.edit.is_secure()) { self.ime_area = Some(area); }
             if effective_opacity > 0.001 && o > 0.001 && visible {
                 // Disabled styling is distributed to each authored paint leaf at build time.
                 // Keep this local to emission: it neither propagates to children nor opens scopes.
@@ -2904,14 +2923,7 @@ impl<S: 'static> Runtime<S> {
                                     ));
                                 }
                             }
-                            let ci = caret_index(e, &spec.content);
-                            let cur = Cursor::from_byte_index(layout, ci, Affinity::Downstream);
-                            let bb = cur.geometry(layout, 1.5 * s);
-                            let line = spec.style.line_px() * s;
-                            let (cx0, cy0) = (origin[0] + bb.x0 as f32, origin[1] + bb.y0 as f32);
-                            let ch = if bb.y1 > bb.y0 { (bb.y1 - bb.y0) as f32 } else { line };
-                            caret = Some([cx0.round(), cy0 + ch * 0.1, (1.5 * s).round(), ch * 0.8]);
-                            if !e.is_secure() { self.ime_area = Some([cx0 / s, cy0 / s, 2.0, ch / s]); }
+                            caret = input_caret.map(|(caret, _)| caret);
                             if let Some((_, _)) = &e.preedit
                                 && let (_, Some((pa, pb))) = e.display()
                             {
@@ -3199,6 +3211,26 @@ impl<S: 'static> Runtime<S> {
             [c.r, c.g, c.b, 1.0]
         })
     }
+}
+
+/// Pixel caret and logical-point IME area use the same shaped cursor geometry.
+fn input_caret(n: &Node, r: [f32; 4], scale: f32, s: f32, scrolls: &mut HashMap<String, f32>) -> Option<([f32; 4], [f32; 4])> {
+    let (spec, layout, input) = (n.text.as_ref()?, n.text_layout.as_ref()?, n.input.as_ref()?);
+    let e = &input.edit;
+    let ins = n.inset.map(|v| v * scale * s);
+    let (x0, x1) = (r[0] + ins[0], r[2] - ins[2]);
+    let mut x = match spec.align {
+        _ if line_alignment(spec) != parley::Alignment::Start => x0,
+        Align::Start => x0,
+        Align::Center => x0 + (x1 - x0 - layout.full_width().ceil()) * 0.5,
+        Align::End => x1 - layout.full_width().ceil(),
+    };
+    if input.single_line { x -= single_line_scroll(scrolls, &n.path, input, &spec.content, layout, s, x1 - x0); }
+    let ci = caret_index(e, &spec.content);
+    let bb = Cursor::from_byte_index(layout, ci, Affinity::Downstream).geometry(layout, 1.5 * s);
+    let (cx, cy) = (x + bb.x0 as f32, r[1] + ins[1] + bb.y0 as f32);
+    let h = if bb.y1 > bb.y0 { (bb.y1 - bb.y0) as f32 } else { spec.style.line_px() * s };
+    Some(([cx.round(), cy + h * 0.1, (1.5 * s).round(), h * 0.8], [cx / s, cy / s, 2.0, h / s]))
 }
 
 fn merge(tx: &mut Tx, one: Tx) {
@@ -4224,7 +4256,7 @@ mod tests {
         assert_eq!(rt.scene.store().active_len(), 0);
         assert_eq!(rt.grows[&id].h, 40.0);
         assert!(!rt.reduced_motion && !rt.scene.store().reduced_motion());
-        rt.apply(measured, Tx::default());
+        rt.apply(measured, &Tx::default());
         assert!(rt.reduced_motion && rt.scene.store().reduced_motion());
         assert_eq!(rt.grows[&id].h, 160.0);
     }

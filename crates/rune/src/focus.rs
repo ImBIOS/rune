@@ -264,6 +264,34 @@ mod tests {
         rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key).unwrap()
     }
     #[test]
+    fn state_focus_routes_the_first_same_frame_key_to_a_new_field() {
+        use crate::{text_input, TextEdit, TextStyle};
+        struct Form { first: TextEdit, next: TextEdit, open: bool, hidden: bool }
+        fn view(s: &Form, _: &mut Cx<Form>) -> El {
+            col().size(200.0, 100.0)
+                .child(text_input(&s.first, TextStyle::new(14.0, 400.0)).key("first").size(200.0, 40.0)
+                    .on_edit(|s: &mut Form| &mut s.first))
+                .children(s.open.then(|| text_input(&s.next, TextStyle::new(14.0, 400.0)).key("next").size(200.0, 40.0)
+                    .opacity(if s.hidden { 0.0 } else { 1.0 })
+                    .on_edit(|s: &mut Form| &mut s.next)))
+        }
+        let mut first = TextEdit::new(""); first.focused = true;
+        let mut rt = Runtime::new(Form { first, next: TextEdit::new(""), open: false, hidden: false }, view,
+            (200.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        rt.update(|s, _| { s.open = true; s.next.focused = true; });
+        rt.key(KeyEvent { key: Key::Text("x".into()), mods: Mods::default() });
+        rt.frame(0.0);
+        assert_eq!(focused(&rt), "next");
+        assert_eq!(rt.state.next.text, "x", "the first key must not use the previous frame's focus");
+        assert_eq!(rt.state.first.text, "");
+        assert!(!rt.state.first.focused && rt.state.next.focused);
+        assert!(rt.ime_area.is_some());
+        rt.update(|s, _| s.hidden = true); rt.frame(0.0);
+        assert!(rt.ime_area.is_none(), "authored hidden inputs must not enable IME");
+    }
+
+    #[test]
     fn window_blur_cancels_preedit_without_losing_committed_text_or_focus() {
         fn view(s: &crate::TextEdit, _: &mut Cx<crate::TextEdit>) -> El {
             crate::text_input(s, crate::TextStyle::new(14.0, 400.0)).key("field").size(200.0, 40.0)
