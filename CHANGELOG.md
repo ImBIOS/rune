@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Late children of virtual rows play their entrance**. A child added
+  to a row of a `.virtualize(..)` stack after the row first appeared (a "Copied" chip, say) now
+  fades in with its transition, as it would in a plain stack, instead of popping in. Rows
+  scrolled back into view still mount settled with their whole subtree.
+- **Timers drive motion in windowless dev runs**. With the dev panel
 - **Timers drive motion in windowless dev runs**. With the dev panel
   attached and no visible window, a timer that starts a transition now animates it in real time
   on hidden ticks, as a shown window would. Before, the timer's frame left the motion frozen

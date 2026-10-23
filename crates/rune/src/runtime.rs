@@ -1927,6 +1927,14 @@ impl<S: 'static> Runtime<S> {
                 self.grows.remove(id);
             }
         }
+        // A row scrolled into view mounts settled with its subtree. Content added later under a
+        // row already on screen is a live change and keeps its own entrance.
+        // Parents precede children, so a remounting row passes its flag down its whole subtree.
+        for i in 0..nodes.len() {
+            if let Some(p) = nodes[i].parent {
+                nodes[i].virtual_mount |= nodes[p].virtual_mount && !self.scene.contains(nodes[p].id);
+            }
+        }
         let first = self.commits == 0;
         self.commits += 1;
         self.stats.commits = self.commits;
@@ -3924,7 +3932,7 @@ fn flatten(
     let motion = el.motion.unwrap_or(motion);
     let me = nodes.len();
     let parent_is_stack = parent.is_some_and(|p| nodes[p].growth.is_some());
-    let virtual_mount = el.virtual_mount || parent.is_some_and(|p| nodes[p].virtual_mount);
+    let virtual_mount = el.virtual_mount;
     #[cfg(debug_assertions)]
     let scroll_source = el.scroll_source;
     let trace_namespace = el.trace_namespace.or_else(|| parent.and_then(|p| nodes[p].trace_namespace));
