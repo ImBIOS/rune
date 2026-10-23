@@ -867,25 +867,35 @@ impl<S: 'static> Runtime<S> {
     /// Returns whether `poll` reported a change.
     pub(crate) fn poll_hidden(&mut self) -> bool {
         let Some(poll) = self.poll else { return false };
-        let wall_start = self.wall_start;
-        #[cfg(all(feature = "dev", debug_assertions))]
-        let wall_start = wall_start.filter(|_| self.dev_clock.is_none());
-        if let Some(t0) = wall_start { self.clock = t0.elapsed().as_secs_f64(); }
+        if let Some(clock) = self.wall_clock() { self.clock = clock; }
         let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
         self.wake_deadlines.drain(..due);
         let mut one = self.transaction();
         let changed = poll(&mut self.state, self.clock, &mut one);
         self.dirty |= changed;
-        for delay in one.wakes.drain(..) {
+        self.schedule_wakes(one.wakes.drain(..));
+        self.shell_request = self.shell_request.max(one.shell.take());
+        self.take_clipboard(&mut one);
+        merge(&mut self.pending, one);
+        changed
+    }
+
+    /// Host time on the logical clock, unless a dev clock owns it.
+    fn wall_clock(&self) -> Option<f64> {
+        let wall_start = self.wall_start;
+        #[cfg(all(feature = "dev", debug_assertions))]
+        let wall_start = wall_start.filter(|_| self.dev_clock.is_none());
+        wall_start.map(|t0| t0.elapsed().as_secs_f64())
+    }
+
+    /// Sorted, de-duplicated deadlines on the logical clock.
+    fn schedule_wakes(&mut self, wakes: impl IntoIterator<Item = std::time::Duration>) {
+        for delay in wakes {
             let deadline = self.clock + delay.as_secs_f64();
             if let Err(index) = self.wake_deadlines.binary_search_by(|t| t.total_cmp(&deadline)) {
                 self.wake_deadlines.insert(index, deadline);
             }
         }
-        self.shell_request = self.shell_request.max(one.shell.take());
-        self.take_clipboard(&mut one);
-        merge(&mut self.pending, one);
-        changed
     }
 
     pub fn tracing(&self) -> bool { self.trace_channels.is_some() || self.scene.tracing() }
@@ -1012,13 +1022,7 @@ impl<S: 'static> Runtime<S> {
         let mut ran = false;
         let shaped0 = self.text.shaped;
         self.settled = false;
-        let wall_start = self.wall_start;
-        #[cfg(all(feature = "dev", debug_assertions))]
-        let wall_start = wall_start.filter(|_| self.dev_clock.is_none());
-        self.clock = match wall_start {
-            Some(t0) => t0.elapsed().as_secs_f64(),
-            None => self.clock + elapsed,
-        };
+        self.clock = self.wall_clock().unwrap_or(self.clock + elapsed);
         if let Some((deadline, animation_time)) = self.loop_wake
             && !self.animating
         {
@@ -1066,12 +1070,7 @@ impl<S: 'static> Runtime<S> {
                 ran |= self.run_action(action, &mut tx);
             }
         }
-        for delay in tx.wakes.drain(..) {
-            let deadline = self.clock + delay.as_secs_f64();
-            if let Err(index) = self.wake_deadlines.binary_search_by(|t| t.total_cmp(&deadline)) {
-                self.wake_deadlines.insert(index, deadline);
-            }
-        }
+        self.schedule_wakes(tx.wakes.drain(..));
         self.take_clipboard(&mut tx);
         self.shell_request = self.shell_request.max(tx.shell.take());
         for (source, target) in std::mem::take(&mut tx.text_flights) {
