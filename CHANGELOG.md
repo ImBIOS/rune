@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **ShortcutRecorder can retry an unchanged chord.** `ShortcutRecorderState::mark_unregistered()`
+  says the shown shortcut isn't registered (its launch registration failed, say). Recording
+  the same chord then goes through `on_change` again instead of being a no-op, until a change
+  succeeds. Without the call, behavior is unchanged.
 - **Global shortcuts need a modifier.** `App::global_shortcut`, `register_shortcut` and
   ShortcutRecorder refuse a chord without ⌘, ⌃ or ⌥ (Ctrl, Alt or Super elsewhere), such as
   Space, Enter or ⇧A, which would take the key from typing in every app. F1–F24 still work

@@ -144,3 +144,26 @@ fn a_chord_without_a_modifier_is_refused_before_on_change_but_f_keys_pass() {
     assert_eq!(rt.state.recorder.shortcut().unwrap().to_string(), "space");
     assert_eq!(rt.state.changes, 2);
 }
+
+#[test]
+fn recording_the_same_chord_retries_it_after_mark_unregistered() {
+    let mut rt = runtime(); rt.state.reject = true;
+    rt.state.recorder.mark_unregistered();
+    let ctrl = Mods { ctrl: true, ..Mods::default() };
+    click(&mut rt, "shortcut");
+    physical(&mut rt, Code::KeyK, ctrl, true, false);
+    assert_eq!(rt.state.changes, 1, "an unregistered chord is proposed again");
+    assert_eq!(rt.state.recorder.error(), Some(&ShortcutError::Conflict));
+    physical(&mut rt, Code::KeyK, ctrl, false, false);
+    rt.state.reject = false;
+    rt.physical_input(PhysicalInput::Modifiers(Mods::default())); rt.frame(0.0);
+    physical(&mut rt, Code::KeyK, ctrl, true, false);
+    physical(&mut rt, Code::KeyK, ctrl, false, false);
+    assert_eq!(rt.state.changes, 2);
+    assert!(!rt.state.recorder.is_recording() && rt.state.recorder.error().is_none());
+    // Registered again: the same chord is a no-op once more.
+    click(&mut rt, "shortcut");
+    physical(&mut rt, Code::KeyK, ctrl, true, false);
+    assert_eq!(rt.state.changes, 2);
+    assert_eq!(rt.state.recorder.shortcut().unwrap().to_string(), "ctrl+k");
+}

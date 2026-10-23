@@ -13,6 +13,7 @@ pub struct ShortcutRecorderState {
     refused: Option<Shortcut>,
     // Swallow auto-repeat until the captured/cancelled key is released.
     finishing: Option<PhysicalKeyCode>,
+    unregistered: bool,
 }
 
 impl ShortcutRecorderState {
@@ -22,6 +23,9 @@ impl ShortcutRecorderState {
     pub fn error(&self) -> Option<&ShortcutError> { self.error.as_ref() }
     /// The chord `on_change` just refused, until another chord starts.
     pub fn refused(&self) -> Option<&Shortcut> { self.refused.as_ref() }
+    /// The shortcut isn't registered (it failed at launch, say): recording the same chord
+    /// proposes it through `on_change` again instead of being a no-op, until a change succeeds.
+    pub fn mark_unregistered(&mut self) { self.unregistered = true; }
     pub fn begin(&mut self) { self.recording = true; self.error = None; self.refused = None; self.finishing = None; }
     pub fn cancel(&mut self) { self.recording = false; self.held = Mods::default(); self.error = None; self.refused = None; }
     pub fn keycaps(&self) -> Vec<String> {
@@ -100,7 +104,8 @@ pub fn shortcut_error_message(error: &ShortcutError, shortcut: Option<&Shortcut>
 /// Click (or activate with Enter/Space) to record. Escape cancels; Backspace clears.
 /// `on_change` must register the proposed binding before releasing the previous registration:
 /// returning an error keeps the old value and shows the refused chord with a message
-/// (`error_message` words it). An unchanged chord is a no-op. A chord without ⌘, ⌃ or ⌥ (Ctrl,
+/// (`error_message` words it). An unchanged chord is a no-op unless the state was marked
+/// unregistered (`ShortcutRecorderState::mark_unregistered`). A chord without ⌘, ⌃ or ⌥ (Ctrl,
 /// Alt or Super elsewhere) other than F1–F24 is refused before `on_change` unless
 /// `allow_unmodified`.
 pub struct ShortcutRecorder<S> {
@@ -160,11 +165,11 @@ impl<S: 'static> ShortcutRecorder<S> {
                     Outcome::Change(next) => {
                         let bare = next.as_ref().filter(|_| !unmodified).map(Shortcut::require_modifier);
                         let result = if let Some(Err(error)) = bare { Err(error) }
-                            else if access(s).shortcut == next { Ok(()) }
+                            else if access(s).shortcut == next && !access(s).unregistered { Ok(()) }
                             else { change.as_ref().map_or(Ok(()), |f| f(s, next.as_ref(), tx)) };
                         let state = access(s);
                         match result {
-                            Ok(()) => { state.shortcut = next; state.error = None; state.cancel(); }
+                            Ok(()) => { state.shortcut = next; state.error = None; state.unregistered = false; state.cancel(); }
                             Err(error) => { state.error = Some(error); state.refused = next; }
                         }
                         true

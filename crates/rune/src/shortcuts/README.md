@@ -108,7 +108,9 @@ ShortcutRecorder::new("shortcut", &state.shortcut, |s: &mut State| &mut s.shortc
 
 The change callback returns `Result<(), ShortcutError>`. A registration failure
 retains the old binding; the recorder keeps showing the refused chord with a message
-until another modifier starts the next chord. Unchanged chords skip the callback. The
+until another modifier starts the next chord. Unchanged chords skip the callback,
+unless `state.mark_unregistered()` says the shortcut isn't registered (it failed at
+launch): then recording it again retries it through the callback. The
 default message names the chord ("⌃J is already in use."); `.error_message(|error,
 chord| ...)` rewords it, falling back on `rune_kit::shortcut_error_message`, and
 `ShortcutRecorderState::refused()` reads the chord. A chord without a modifier (other
