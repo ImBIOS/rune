@@ -4157,6 +4157,36 @@ mod tests {
     }
 
     #[test]
+    fn grapheme_arrow_caret_hit_tests_roundtrip_after_single_line_scroll() {
+        fn view(s: &crate::TextEdit, _: &mut Cx<crate::TextEdit>) -> El {
+            crate::text_input(s, crate::TextStyle::new(16.0, 400.0)).single_line()
+                .key("search").size(100.0, 40.0).on_edit(|s: &mut crate::TextEdit| s)
+        }
+        let graphemes = ["W", "W", "W", "W", "W", "W", "W", "W", "W", "W", " ",
+            "👨\u{200D}👩\u{200D}👧", "🇯🇵", "👋🏽", "e\u{301}", "❤\u{FE0F}", "Z"];
+        let mut edit = crate::TextEdit::new(graphemes.concat());
+        edit.focused = true;
+        let mut rt = Runtime::new(edit, view, (100.0, 40.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.key(KeyEvent { key: crate::Key::Home, mods: Default::default() });
+        rt.frame(0.0);
+        let path = rt.nodes.iter().find(|n| n.key.as_deref() == Some("search")).unwrap().path.clone();
+        let mut offset = 0;
+        for grapheme in graphemes {
+            offset += grapheme.len();
+            rt.key(KeyEvent { key: crate::Key::Right, mods: Default::default() });
+            rt.frame(0.0);
+            assert_eq!(rt.state.focus, offset, "arrow must cross the whole {grapheme:?}");
+            let [x, y, _, height] = rt.ime_area.unwrap();
+            assert!((0.0..=100.0).contains(&x), "caret must remain in the scrolled field");
+            rt.queue.push(Action::Focus(path.clone(), x + 0.1, y + height * 0.5));
+            rt.frame(0.0);
+            assert_eq!(rt.state.focus, offset, "clicking the reported caret after {grapheme:?} must hit that boundary");
+        }
+        assert!(rt.input_scroll[&path] > 0.0, "the fixture must exercise scrolled caret geometry");
+    }
+
+    #[test]
     fn secure_input_masks_layout_inspector_and_unicode_pointer_indices() {
         fn view(s: &crate::TextEdit, _: &mut Cx<crate::TextEdit>) -> El {
             crate::text_input(s, crate::TextStyle::new(16.0, 400.0)).secure()
