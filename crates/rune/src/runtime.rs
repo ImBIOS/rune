@@ -1296,7 +1296,7 @@ impl<S: 'static> Runtime<S> {
                 let input_handles = match &ev.key {
                     crate::edit::Key::Function(_) | crate::edit::Key::Tab => false,
                     crate::edit::Key::Command(c) => matches!(c, 'a' | 'c' | 'x' | 'z'),
-                    _ => true,
+                    _ => !ev.is_command_chord(),
                 };
                 if input_handles {
                     let layout = self.focused_layout();
@@ -1364,12 +1364,13 @@ impl<S: 'static> Runtime<S> {
 
     fn with_focused(&mut self, f: impl FnOnce(&mut crate::edit::TextEdit) -> EditOutcome, tx: &mut Tx) -> bool {
         let Some(path) = self.focused.clone() else { return false };
-        let Some((access, submit, change, animate_layout)) =
-            self.focused_input().map(|i| (i.access.clone(), i.submit.clone(), i.change.clone(), i.animate_layout))
+        let Some((access, submit, change, animate_layout, single_line)) =
+            self.focused_input().map(|i| (i.access.clone(), i.submit.clone(), i.change.clone(), i.animate_layout, i.single_line))
         else {
             return false;
         };
         let Some(access) = access else { return false };
+        access(&mut self.state as &mut dyn Any).set_single_line(single_line);
         let before = change.as_ref().map(|_| zeroize::Zeroizing::new(access(&mut self.state as &mut dyn Any).text.clone()));
         let out = f(access(&mut self.state as &mut dyn Any));
         // Typing is the user's own hand: no animation.
