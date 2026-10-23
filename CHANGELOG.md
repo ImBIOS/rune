@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Steady 60 Hz in Low Power Mode on ProMotion Macs.** Low Power Mode caps the built-in panel
+  at 60 Hz while macOS still reports 120 Hz, so Rune drew a few fast frames after each change
+  before settling. Windows and overlays on the built-in display now pace at 60 Hz in Low Power
+  Mode, with no fast start and about half the input-to-screen latency. `--trace` headers report
+  60 Hz there.
 - **`LayerSpec` literals need filter fields**. The public `blur` and
   `clip_radius` fields break external `LayerSpec { opacity, blend }` literals. Add
   `..Default::default()` for their previous unfiltered, rectangular behavior.

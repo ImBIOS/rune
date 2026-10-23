@@ -1,5 +1,9 @@
 //! One drawable submission per display tick. Metal's drawable pool is not a frame clock:
 //! acquisition may return immediately even with FIFO presentation enabled.
+//!
+//! Low Power Mode caps a ProMotion panel at 60 Hz while CVDisplayLink, CADisplayLink and
+//! NSScreen all still report 120 Hz. Submitting on every tick then fills the drawable queue
+//! with a few fast frames before backpressure settles it at 60 Hz, so pace at the cap instead.
 #![allow(deprecated)] // CVDisplayLink supports the same macOS versions as winit.
 
 use std::ffi::c_void;
@@ -24,7 +28,22 @@ pub(crate) struct DisplayLink {
     last_present: Option<Instant>,
     last_target: Option<Instant>,
     display: Option<u32>,
+    capped: bool,
     running: bool,
+}
+
+const LOW_POWER_FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" { fn CGDisplayIsBuiltin(display: u32) -> u32; }
+
+fn low_power_caps(display: Option<u32>) -> bool {
+    use objc2_foundation::{NSObjectProtocol, NSProcessInfo};
+    let info = NSProcessInfo::processInfo();
+    // SAFETY: CGDisplayIsBuiltin accepts any display ID; the selector is checked first (macOS 12+).
+    display.is_some_and(|display| unsafe { CGDisplayIsBuiltin(display) } != 0)
+        && info.respondsToSelector(objc2::sel!(isLowPowerModeEnabled))
+        && unsafe { info.isLowPowerModeEnabled() }
 }
 
 unsafe extern "C-unwind" fn tick(
@@ -54,7 +73,12 @@ unsafe extern "C-unwind" fn tick(
 
 impl DisplayLink {
     pub(crate) fn running(&self) -> bool { self.running }
-    pub(crate) fn refresh_hz(&self) -> f64 { 1e9 / self.callback.period_ns.load(Ordering::Relaxed) as f64 }
+    pub(crate) fn refresh_hz(&self) -> f64 { 1.0 / self.frame_period().as_secs_f64() }
+
+    fn frame_period(&self) -> Duration {
+        let period = Duration::from_nanos(self.callback.period_ns.load(Ordering::Relaxed));
+        if self.capped { period.max(LOW_POWER_FRAME) } else { period }
+    }
 
     pub(crate) fn new(window: &Window, wake: crate::runtime::Waker) -> Option<Self> {
         let mut raw = std::ptr::null_mut();
@@ -70,7 +94,7 @@ impl DisplayLink {
         });
         let status = unsafe { link.set_output_callback(Some(tick), (&mut *callback as *mut Callback).cast()) };
         if status != 0 { eprintln!("display link callback failed: {status}"); return None; }
-        let mut pacing = Self { link, callback, last_present: None, last_target: None, display: None, running: false };
+        let mut pacing = Self { link, callback, last_present: None, last_target: None, display: None, capped: false, running: false };
         pacing.update_display(window);
         Some(pacing)
     }
@@ -82,6 +106,7 @@ impl DisplayLink {
             if let Some(display) = display { self.link.set_current_cg_display(display); }
             self.display = display;
         }
+        self.capped = low_power_caps(self.display);
     }
 
     /// Claims one display opportunity and returns its target presentation time. Consume
@@ -91,12 +116,14 @@ impl DisplayLink {
             let status = self.link.start();
             if status != 0 { eprintln!("display link start failed: {status}"); return Some(Instant::now()); }
             self.running = true;
+            // Power state can change while idle; each burst rechecks it.
+            self.capped = low_power_caps(self.display);
         }
         let host_target = self.callback.target.swap(0, Ordering::Acquire);
         if host_target == 0 { return None; }
         let now = Instant::now();
         let target = target_time(now, CVGetCurrentHostTime(), host_target, self.callback.host_frequency);
-        let period = Duration::from_nanos(self.callback.period_ns.load(Ordering::Relaxed));
+        let period = self.frame_period();
         // A late render followed by an on-time tick must skip, not submit two frames
         // together. Also discard stale callbacks after main-thread stalls.
         if !permits(self.last_present, self.last_target, target, now, period) { return None; }
@@ -125,7 +152,7 @@ fn target_time(now: Instant, host_now: u64, host_target: u64, frequency: f64) ->
 
 fn permits(last: Option<Instant>, last_target: Option<Instant>, target: Instant, now: Instant, period: Duration) -> bool {
     let half = period / 2;
-    now < target && last_target.is_none_or(|last| target > last)
+    now < target && last_target.is_none_or(|last| target >= last + period * 3 / 4)
         && last.is_none_or(|last| now.saturating_duration_since(last) >= half)
 }
 
@@ -145,5 +172,15 @@ mod tests {
         assert!(!permits(Some(ms(100)), Some(ms(112)), ms(128), ms(102), period));
         assert_eq!(target_time(t, 100, 116, 1000.0), ms(16));
         assert_eq!(target_time(ms(32), 132, 116, 1000.0), ms(16));
+    }
+
+    #[test]
+    fn a_capped_period_skips_ticks_between_frames() {
+        let t = Instant::now();
+        let ms = |n| t + Duration::from_millis(n);
+        let capped = Duration::from_millis(16);
+        assert!(!permits(Some(ms(0)), Some(ms(8)), ms(16), ms(9), capped));
+        assert!(permits(Some(ms(2)), Some(ms(8)), ms(24), ms(17), capped));
+        assert!(permits(Some(ms(2)), Some(ms(8)), ms(16), ms(9), Duration::from_millis(8)));
     }
 }
