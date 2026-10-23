@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Math alphanumerics and non-Latin scripts render instead of tofu.** Math alphanumerics and
+  symbol blocks, plus Hebrew, Arabic, Devanagari, Bengali and Thai, load system fonts the first
+  time a text uses them. Text that used these characters changes pixels and advances; Latin-only
+  text and the existing goldens don't move. New `El::justify()` spreads wrapped lines to the
+  width, from the right in right-to-left text; `Align` behaves as before.
 - **Colour emoji** (#7). Emoji fall back to the system's colour emoji font (Apple Color Emoji,
   Segoe UI Emoji, Noto Color Emoji) and draw as colour images from the image atlas, where they
   used to draw as blank gaps. Text without emoji renders as before.
