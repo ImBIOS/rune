@@ -69,6 +69,8 @@ pub(crate) struct Frame {
 /// Submit is a CPU monotonic timestamp. Completion is callback-observed CPU time;
 /// GPU start/end are render-pass timestamp-query seconds on the GPU clock, not `Instant`
 /// or display time. Their difference is GPU duration; the epoch is backend-specific.
+/// GPU times are absent when unsupported, overridden by caller timing, or all timing
+/// slots are in flight. CPU submission/completion notifications are still delivered.
 #[derive(Clone, Debug)]
 pub struct FrameTiming {
     pub frame_id: u64,
