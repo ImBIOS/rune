@@ -50,6 +50,22 @@ pub static CIRCLE_X: Icon = Icon {
     body: r#"<path d="M6 6L10 10M10 6L6 10M14.5 8C14.5 11.5899 11.5899 14.5 8 14.5C4.41015 14.5 1.5 11.5899 1.5 8C1.5 4.41015 4.41015 1.5 8 1.5C11.5899 1.5 14.5 4.41015 14.5 8Z" stroke="currentColor"/>"#,
 };
 
+pub static LOCK: Icon = Icon {
+    name: "kit-lock",
+    view: 16.0,
+    body: r#"<rect x="3.5" y="7" width="9" height="7" rx="1" stroke="currentColor"/><path d="M5.5 7V4.5a2.5 2.5 0 0 1 5 0V7M8 10v1.5" stroke="currentColor" stroke-linecap="round"/>"#,
+};
+pub static EYE: Icon = Icon {
+    name: "kit-eye",
+    view: 16.0,
+    body: r#"<path d="M1 8s2.5-4.5 7-4.5S15 8 15 8s-2.5 4.5-7 4.5S1 8 1 8Z" stroke="currentColor" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor"/>"#,
+};
+pub static EYE_OFF: Icon = Icon {
+    name: "kit-eye-off",
+    view: 16.0,
+    body: r#"<path d="m2 2 12 12M6.2 3.7A8 8 0 0 1 8 3.5C12.5 3.5 15 8 15 8a13 13 0 0 1-2.4 2.8M10.3 12.1a8 8 0 0 1-2.3.4C3.5 12.5 1 8 1 8a13 13 0 0 1 2.5-2.9M6.6 6.6a2 2 0 0 0 2.8 2.8" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
 /// `fill-triangle-down` turned a quarter counter-clockwise (a collapsed disclosure).
 pub static TRIANGLE_RIGHT: Icon = Icon {
     name: "kit-triangle-right",
@@ -71,6 +87,9 @@ pub const DEFAULT: Glyphs = Glyphs {
     clear: &CLOSE,
     copy: &COPY,
     search: &SEARCH,
+    lock: &LOCK,
+    eye: &EYE,
+    eye_off: &EYE_OFF,
     circle_x: &CIRCLE_X,
     dash: &DASH,
 };

@@ -136,6 +136,9 @@ pub struct Glyphs {
     pub clear: &'static Icon,
     pub copy: &'static Icon,
     pub search: &'static Icon,
+    pub lock: &'static Icon,
+    pub eye: &'static Icon,
+    pub eye_off: &'static Icon,
     pub circle_x: &'static Icon,
     /// A short horizontal rule (card title placeholder).
     pub dash: &'static Icon,
