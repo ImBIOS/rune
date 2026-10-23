@@ -359,6 +359,7 @@ enum Pos {
 #[derive(Clone, Debug)]
 enum Kind {
     Focus(bool),
+    Menu(String),
     Physical(crate::PhysicalInput),
     Shortcut(crate::Shortcut),
     Move,
@@ -423,6 +424,10 @@ fn parse_script(list: Value) -> Vec<Ev> {
         let t = e["t"].as_f64().unwrap_or(0.0);
         if let Some(focused) = e["focus"].as_bool() {
             out.push(Ev { t, kind: Kind::Focus(focused), pos: Pos::Rel(0.0, 0.0) });
+            continue;
+        }
+        if let Some(item) = e["menu"].as_str() {
+            out.push(Ev { t, kind: Kind::Menu(item.into()), pos: Pos::Rel(0.0, 0.0) });
             continue;
         }
         if let Some(chord) = e["physical"].as_str() {
@@ -834,6 +839,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let on_focus = app.on_focus;
     let (spec, state, shared) = app.into_parts(args.scene.as_deref());
     let shortcuts = crate::shortcuts::Guard::attach(&shared, std::sync::Arc::new(|| {}), true, false);
+    let mut menus = crate::native_menu::Guard::attach(&shared, true);
     let scale = args.scale.unwrap_or(2.0);
     let size = args.size.unwrap_or(spec.size);
     let dark = args.theme.as_deref() != Some("light");
@@ -903,6 +909,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             match &e.kind {
                 Kind::Focus(focused) => rt.window_focus(*focused),
                 Kind::Shortcut(shortcut) => shared.shortcuts.fire(shortcut).unwrap_or_else(|e| die(&format!("script shortcut: {e}"))),
+                Kind::Menu(item) => crate::native_menu::fire(&shared, item).unwrap_or_else(|e| die(&format!("script menu: {e}"))),
                 Kind::Move => rt.pointer_move(x, y),
                 Kind::Down => {
                     last_down = (x, y);
@@ -920,8 +927,10 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         }
         shortcuts.drain();
         let requests = shared.take();
+        menus.drain();
         for f in requests.updates {
             rt.update(f);
+            menus.drain();
         }
         let step = if k == 0 { 0.0 } else { dt };
         let mut animating = rt.frame(step);

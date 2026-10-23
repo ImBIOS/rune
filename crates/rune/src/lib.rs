@@ -48,6 +48,8 @@ mod shortcuts;
 pub use shortcuts::{PhysicalKeyCode, Shortcut, ShortcutError, ShortcutId, modifier_keycaps};
 mod physical_input;
 pub use physical_input::PhysicalInput;
+mod native_menu;
+pub use native_menu::{MenuError, MenuItem};
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
 mod layer_shell;
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]

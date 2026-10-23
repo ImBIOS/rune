@@ -383,6 +383,7 @@ impl<S> Default for Requests<S> {
 }
 
 pub(crate) struct Shared<S> {
+    pub(crate) menus: crate::native_menu::Hub<S>,
     pub(crate) shortcuts: crate::shortcuts::Hub<S>,
     requests: Mutex<Requests<S>>,
     wake: Mutex<Option<crate::runtime::Waker>>,
@@ -394,6 +395,7 @@ pub(crate) struct Shared<S> {
 impl<S> Default for Shared<S> {
     fn default() -> Self {
         Shared {
+            menus: crate::native_menu::Hub::default(),
             shortcuts: crate::shortcuts::Hub::default(),
             requests: Mutex::default(),
             wake: Mutex::new(None),

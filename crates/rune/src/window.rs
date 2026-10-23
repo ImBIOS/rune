@@ -385,6 +385,7 @@ struct Host<S: 'static> {
     open_at_start: bool,
     shared: Arc<Shared<S>>,
     shortcuts: crate::shortcuts::Guard,
+    menus: crate::native_menu::Guard<S>,
     rt: Runtime<S>,
     win: Option<Win>,
     gpu: Option<(Arc<Gpu>, Renderer, wgpu::TextureFormat)>,
@@ -478,6 +479,7 @@ impl<S: 'static> Host<S> {
         clipboard.connect(waker.clone());
         shared.connect(waker.clone());
         let shortcuts = crate::shortcuts::Guard::attach(&shared, waker, false, wayland);
+        let menus = crate::native_menu::Guard::attach(&shared, false);
         Host {
             chrome,
             options,
@@ -496,6 +498,7 @@ impl<S: 'static> Host<S> {
             open_at_start: open,
             shared,
             shortcuts,
+            menus,
             rt,
             win: None,
             gpu: None,
@@ -891,8 +894,10 @@ impl<S: 'static> Host<S> {
         self.shortcuts.drain();
         let requests = self.shared.take();
         let changed = clipboard || !requests.updates.is_empty();
+        self.menus.drain();
         for f in requests.updates {
             self.rt.update(f);
+            self.menus.drain();
         }
         if requests.quit {
             event_loop.exit();
