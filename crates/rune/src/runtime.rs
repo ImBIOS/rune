@@ -40,6 +40,8 @@ mod layout_diagnostics;
 mod focus;
 #[path = "physical_dispatch.rs"]
 mod physical_dispatch;
+#[path = "scroll_bottom.rs"]
+mod scroll_bottom;
 
 const P_FILL: Prop<Color> = Prop::custom(64, PropClass::Color);
 const P_BORDER: Prop<Color> = Prop::custom(65, PropClass::Color);
@@ -137,6 +139,7 @@ pub(crate) struct Node {
     width_leads: bool,
     transition: Transition,
     scroll: Option<ScrollSpec>,
+    on_at_bottom: Option<crate::el::AtBottomFn>,
     growth: Option<GrowthSpec>,
     streaming: bool,
     input: Option<Box<InputSpec>>,
@@ -164,6 +167,7 @@ enum Action {
     Dismiss(String),
     PointerMove(String, PointerPress),
     Hover(String),
+    AtBottom(String, bool),
     Press(String),
     SecondaryPress(String, PointerPress),
     Drag(String, Drag),
@@ -248,6 +252,10 @@ struct ScrollState {
     max: f64,
     direct: bool,
     scrolling: bool,
+    /// Velocity of a glide to the bottom (`Tx::scroll_to_bottom`) while one runs.
+    glide: Option<f32>,
+    /// At-bottom state last sent to `El::on_at_bottom`.
+    at_bottom: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -933,6 +941,7 @@ impl<S: 'static> Runtime<S> {
             self.capture_text_flight(source, target);
         }
         let scroll_to = std::mem::take(&mut tx.scroll_to);
+        let scroll_bottom = std::mem::take(&mut tx.scroll_bottom);
         if ran || self.dirty || self.relayout || self.settle || self.virtual_window_changed() {
             if self.relayout && !ran && !self.dirty {
                 tx.relayout = true;
@@ -946,6 +955,7 @@ impl<S: 'static> Runtime<S> {
         }
         if !scroll_to.is_empty() { self.step_scroll(0.0); }
         for key in scroll_to { self.reveal_row(&key); }
+        if !scroll_bottom.is_empty() { self.scroll_to_bottom(scroll_bottom); }
         self.update_interaction();
         let live_animating = self.latch_live();
         if let Some(trace) = tx.trace.take() {
@@ -977,6 +987,7 @@ impl<S: 'static> Runtime<S> {
         }
         animating |= self.step_growth(step as f32);
         animating |= self.step_scroll(step as f32);
+        self.report_at_bottom();
         animating |= self.reveals_active();
         self.build();
         self.images.end_frame();
@@ -1139,6 +1150,11 @@ impl<S: 'static> Runtime<S> {
             Action::PointerMove(path, point) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_pointer_move.clone()) else { return false };
                 f(&mut self.state as &mut dyn Any, point, &mut one);
+                true
+            }
+            Action::AtBottom(path, at) => {
+                let Some(f) = self.node(&path).and_then(|n| n.on_at_bottom.clone()) else { return false };
+                f(&mut self.state as &mut dyn Any, at);
                 true
             }
             Action::Hover(path) => {
@@ -1943,6 +1959,8 @@ impl<S: 'static> Runtime<S> {
                     max: 0.0,
                     direct: false,
                     scrolling: false,
+                    glide: None,
+                    at_bottom: None,
                 });
                 if tx.settle && sp.stick_bottom {
                     e.pinned = true;
@@ -2111,6 +2129,9 @@ impl<S: 'static> Runtime<S> {
             if st.pinned && sp.stick_bottom {
                 st.offset = st.max;
                 st.v = 0.0;
+                st.glide = None;
+            } else if let Some(v) = st.glide {
+                moving |= scroll_bottom::glide(st, v, dt);
             } else if st.v.abs() > 1.0 {
                 st.offset += f64::from(st.v) * f64::from(dt);
                 st.v *= (-SCROLL_DECAY * dt).exp();
@@ -2437,6 +2458,7 @@ impl<S: 'static> Runtime<S> {
         scroll.offset = offset.clamp(0.0, scroll.max);
         scroll.pinned = false;
         scroll.v = 0.0;
+        scroll.glide = None;
         scroll.direct = true;
         if self.virtual_window_changed() { self.commit(&Tx::default()); }
     }
@@ -2462,6 +2484,7 @@ impl<S: 'static> Runtime<S> {
         if let Some(st) = self.scrolls.get_mut(&id) {
             st.offset = (st.offset - f64::from(dy)).clamp(0.0, st.max);
             st.v = 0.0;
+            st.glide = None;
             st.direct = true;
             st.pinned = stick && st.offset >= st.max - 0.5;
             self.events.push(format!("wheel {dy:.1}"));
@@ -2475,6 +2498,7 @@ impl<S: 'static> Runtime<S> {
         if let Some(st) = self.scrolls.get_mut(&id) {
             st.v = -velocity;
             st.pinned = false;
+            st.glide = None;
             self.events.push(format!("fling {velocity:.0}"));
         }
     }
@@ -3293,6 +3317,7 @@ fn merge(tx: &mut Tx, one: Tx) {
         trace.channels.extend(one.channels);
     }
     tx.scroll_to.extend(one.scroll_to);
+    tx.scroll_bottom.extend(one.scroll_bottom);
     tx.wakes.extend(one.wakes);
     tx.text_flights.extend(one.text_flights);
     if one.copy.is_some() { tx.copy = one.copy; }
@@ -3573,6 +3598,7 @@ fn flatten(
         width_leads,
         transition,
         scroll,
+        on_at_bottom,
         growth,
         streaming,
         input,
@@ -3617,6 +3643,7 @@ fn flatten(
         width_leads,
         transition,
         scroll,
+        on_at_bottom,
         growth,
         streaming,
         input,

@@ -26,6 +26,8 @@ pub struct Tx {
     pub(crate) paste: bool,
     pub(crate) text_flights: Vec<(String, String)>,
     pub(crate) scroll_to: Vec<String>,
+    /// Scroll viewports to send to their bottom: (key, animated).
+    pub(crate) scroll_bottom: Vec<(String, bool)>,
     pub(crate) wakes: Vec<std::time::Duration>,
     pub(crate) shell: Option<Shell>,
     pub(crate) trace: Option<TraceCalls>,
@@ -66,6 +68,16 @@ impl Tx {
     /// Reveal a keyed row, including a currently unrealized virtual row.
     pub fn scroll_into_view(&mut self, key: impl Into<String>) {
         self.scroll_to.push(key.into());
+    }
+    /// Glide the scroll viewport keyed `key` (or the one containing it) to its bottom, as a
+    /// "jump to latest" button does. A `stick_bottom` viewport follows the end again once it
+    /// lands. Long distances cut to two viewports from the end first; reduced motion jumps.
+    pub fn scroll_to_bottom(&mut self, key: impl Into<String>) {
+        self.scroll_bottom.push((key.into(), true));
+    }
+    /// [`Tx::scroll_to_bottom`] without the glide.
+    pub fn scroll_to_bottom_instant(&mut self, key: impl Into<String>) {
+        self.scroll_bottom.push((key.into(), false));
     }
     /// Wake the app's poll hook after an unscaled duration. Equal deadlines coalesce.
     /// This schedules a frame, not a view commit; poll returns true if state changed.
@@ -380,6 +392,7 @@ impl Default for Visual {
 }
 
 pub(crate) type PasteFn = Rc<dyn Fn(&mut dyn Any, &str, &mut Tx)>;
+pub(crate) type AtBottomFn = Rc<dyn Fn(&mut dyn Any, bool)>;
 pub(crate) type WindowFocusFn = Rc<dyn Fn(&mut dyn Any, bool, &mut Tx)>;
 
 pub struct El {
@@ -414,6 +427,7 @@ pub struct El {
     pub(crate) width_leads: bool,
     pub(crate) transition: Transition,
     pub(crate) scroll: Option<ScrollSpec>,
+    pub(crate) on_at_bottom: Option<AtBottomFn>,
     pub(crate) growth: Option<GrowthSpec>,
     pub(crate) virtual_estimate: Option<f32>,
     pub(crate) virtual_mount: bool,
@@ -456,6 +470,7 @@ fn base(dir: FlexDirection) -> El {
         width_leads: false,
         transition: Transition::opacity(),
         scroll: None,
+        on_at_bottom: None,
         growth: None,
         virtual_estimate: None,
         virtual_mount: false,
@@ -1231,6 +1246,13 @@ impl El {
         #[cfg(debug_assertions)]
         { self.scroll_source = Some(std::panic::Location::caller()); }
         self.style.overflow = taffy::Point { x: taffy::Overflow::Hidden, y: taffy::Overflow::Scroll };
+        self
+    }
+    /// On a scroll viewport, called with whether it shows its bottom (within a point): once
+    /// after its first layout, then only when that changes, never per frame. Pair with
+    /// [`Tx::scroll_to_bottom`] for a "jump to latest" button.
+    pub fn on_at_bottom<S: 'static>(mut self, f: impl Fn(&mut S, bool) + 'static) -> Self {
+        self.on_at_bottom = Some(Rc::new(move |s, at| f(downcast::<S>(s), at)));
         self
     }
     /// Make this column a growth stack (see [`GrowthSpec`]). Required alongside
