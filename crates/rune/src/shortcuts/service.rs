@@ -2,7 +2,7 @@ use super::{Shortcut, ShortcutError, ShortcutId, Sink, NativeBackend};
 #[cfg(test)]
 use super::Backend;
 use crate::{Tx, app::Shared, runtime::Waker};
-use std::{collections::HashMap, rc::Rc, sync::{Arc, Mutex, OnceLock, atomic::{AtomicU32, Ordering}}, thread::ThreadId};
+use std::{collections::HashMap, rc::Rc, sync::{Arc, Mutex, OnceLock, atomic::{AtomicBool, AtomicU32, Ordering}}, thread::ThreadId};
 #[cfg(not(target_os = "linux"))]
 use std::cell::RefCell;
 #[cfg(not(target_os = "linux"))]
@@ -41,6 +41,7 @@ pub(crate) struct Hub<S> {
     handlers: Arc<Mutex<HashMap<ShortcutId, Handler<S>>>>,
     errors: Mutex<Vec<ShortcutError>>,
     title: OnceLock<&'static str>,
+    unmodified: AtomicBool,
 }
 
 impl<S> Default for Hub<S> {
@@ -53,7 +54,7 @@ impl<S> Default for Hub<S> {
                 #[cfg(target_os = "linux")]
                 engine: Mutex::default(),
             }),
-            pending: Mutex::default(), handlers: Arc::default(), errors: Mutex::default(), title: OnceLock::new(),
+            pending: Mutex::default(), handlers: Arc::default(), errors: Mutex::default(), title: OnceLock::new(), unmodified: AtomicBool::new(false),
         }
     }
 }
@@ -164,6 +165,7 @@ impl<S: 'static> Hub<S> {
     }
 
     pub(super) fn register(&self, shortcut: Shortcut, handler: Handler<S>) -> Result<ShortcutId, ShortcutError> {
+        if !self.unmodified.load(Ordering::Relaxed) { shortcut.require_modifier()?; }
         let id = NEXT_ID.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map(ShortcutId).map_err(|_| ShortcutError::Backend("shortcut id space exhausted".into()))?;
         self.handlers.lock().unwrap().insert(id, handler);
@@ -186,6 +188,8 @@ impl<S: 'static> Hub<S> {
     pub(super) fn errors(&self) -> Vec<ShortcutError> { std::mem::take(&mut self.errors.lock().unwrap()) }
 
     pub(crate) fn named(&self, title: &'static str) { let _ = self.title.set(title); }
+
+    pub(super) fn allow_unmodified(&self) { self.unmodified.store(true, Ordering::Relaxed); }
 
     pub(super) fn owner(&self, shortcut: &Shortcut) -> Option<String> {
         let shortcut = shortcut.clone();
@@ -347,6 +351,29 @@ mod tests {
         assert_eq!(state, 1);
         drop(guard);
         assert_eq!(handle.unregister_shortcut(id), Err(ShortcutError::NotRunning));
+    }
+
+    #[test]
+    fn a_chord_without_a_modifier_is_refused_unless_it_is_a_function_key() {
+        let app = App::new(AppSpec::new("bare", (10.0, 10.0), || (), |_, _| el())).global_shortcut("space", |_, _| {});
+        let handle = app.handle();
+        let guard = Guard::attach(&app.shared, Arc::new(|| {}), true, false);
+        assert!(matches!(handle.take_shortcut_errors().as_slice(), [ShortcutError::InvalidAccelerator(_)]));
+        for bare in ["space", "enter", "a", "shift+a", "shift+tab"] {
+            assert!(matches!(handle.register_shortcut(bare.parse().unwrap(), |_, _| {}), Err(ShortcutError::InvalidAccelerator(_))), "{bare}");
+        }
+        for allowed in ["f5", "f24", "shift+f1", "ctrl+space", "alt+a", "super+enter"] {
+            assert!(handle.register_shortcut(allowed.parse().unwrap(), |_, _| {}).is_ok(), "{allowed}");
+        }
+        drop(guard);
+
+        let app = App::new(AppSpec::new("bare", (10.0, 10.0), || (), |_, _| el())).global_shortcut("space", |_, _| {})
+            .allow_unmodified_shortcuts();
+        let handle = app.handle();
+        let guard = Guard::attach(&app.shared, Arc::new(|| {}), true, false);
+        assert!(handle.take_shortcut_errors().is_empty());
+        assert!(handle.register_shortcut("shift+a".parse().unwrap(), |_, _| {}).is_ok());
+        drop(guard);
     }
 
     #[test]

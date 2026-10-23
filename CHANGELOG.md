@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Global shortcuts need a modifier.** `App::global_shortcut`, `register_shortcut` and
+  ShortcutRecorder refuse a chord without ⌘, ⌃ or ⌥ (Ctrl, Alt or Super elsewhere), such as
+  Space, Enter or ⇧A, which would take the key from typing in every app. F1–F24 still work
+  alone. Registration returns `InvalidAccelerator("space needs ⌘, ⌃ or ⌥")`, and the recorder
+  shows the refused chord with "Add ⌘, ⌃ or ⌥." without calling `on_change`. Opt out with
+  `App::allow_unmodified_shortcuts()` and `ShortcutRecorder::allow_unmodified()`.
+  `Shortcut::require_modifier()` checks a chord. Apps that bound a bare key now get an error.
 - **A window's first updates can register on a later window.** `run_windows` now builds every
   window's host before any of them opens and drains its queued updates, so an update queued on
   the first window that calls `register_shortcut` or `set_menu` on the second gets `Ok` instead

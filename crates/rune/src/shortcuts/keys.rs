@@ -37,6 +37,16 @@ impl Shortcut {
 
     pub fn physical_key(&self) -> PhysicalKeyCode { self.key }
 
+    /// Refuses a chord that would take its key from typing everywhere: no ⌘, ⌃ or ⌥ (Ctrl,
+    /// Alt or Super elsewhere) on a key other than F1–F24. Shift alone isn't enough. Global
+    /// registration applies it unless `App::allow_unmodified_shortcuts`.
+    pub fn require_modifier(&self) -> Result<(), ShortcutError> {
+        let function = self.key_name().strip_prefix('f').is_some_and(|n| !n.is_empty());
+        if function || self.mods & (CTRL | ALT | SUPER) != 0 { return Ok(()); }
+        let names = if cfg!(target_os = "macos") { "⌘, ⌃ or ⌥" } else { "Ctrl, Alt or Super" };
+        Err(ShortcutError::InvalidAccelerator(format!("{self} needs {names}")))
+    }
+
     pub fn modifiers(&self) -> crate::Mods {
         crate::Mods { ctrl: self.mods & CTRL != 0, alt: self.mods & ALT != 0, shift: self.mods & SHIFT != 0,
             logo: self.mods & SUPER != 0, cmd: self.mods & if cfg!(target_os = "macos") { SUPER } else { CTRL } != 0 }

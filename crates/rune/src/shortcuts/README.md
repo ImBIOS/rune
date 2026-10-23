@@ -41,9 +41,15 @@ grabs, Windows, X11 and the portal name nobody, so it returns None. Headless run
 answer only for their own virtual registrations. `ShortcutError::Conflict` itself is
 unchanged.
 
+A chord needs ⌘, ⌃ or ⌥ (Ctrl, Alt or Super elsewhere), or an F1–F24 key, because a
+global Space or ⇧A would take that key from typing in every app. Both the builder and
+`register_shortcut` refuse one without them with `InvalidAccelerator`
+(`shortcut.require_modifier()` checks it), unless the App opts in with
+`.allow_unmodified_shortcuts()`.
+
 Call runtime registration after the host starts (an `on_window` or queued
-`handle.update` callback works). Calls before startup or after shutdown return
-`NotRunning`. On macOS/Windows other threads may call it, but wait for the app
+`handle.update` callback works, including one on another window of the same
+`run_windows`). Calls before startup or after shutdown return `NotRunning`. On macOS/Windows other threads may call it, but wait for the app
 thread, so the app thread must not join those callers. Linux registration can
 run off-thread. Dropping the host unregisters everything,
 even if other threads retain `AppHandle`s.
@@ -105,7 +111,9 @@ retains the old binding; the recorder keeps showing the refused chord with a mes
 until another modifier starts the next chord. Unchanged chords skip the callback. The
 default message names the chord ("⌃J is already in use."); `.error_message(|error,
 chord| ...)` rewords it, falling back on `rune_kit::shortcut_error_message`, and
-`ShortcutRecorderState::refused()` reads the chord.
+`ShortcutRecorderState::refused()` reads the chord. A chord without a modifier (other
+than F1–F24) is refused before the callback with "Add ⌘, ⌃ or ⌥." unless
+`.allow_unmodified()`.
 Click or keyboard activation starts recording, held modifiers preview immediately,
 Escape cancels, Backspace clears, and focus loss or disabling cancels recording.
 Repeated key presses are consumed without registering again.

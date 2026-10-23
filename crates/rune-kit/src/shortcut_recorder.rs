@@ -79,7 +79,8 @@ type Change<S> = Rc<dyn Fn(&mut S, Option<&Shortcut>, &mut Tx) -> Result<(), Sho
 type Message = Box<dyn Fn(&ShortcutError, Option<&Shortcut>) -> String>;
 
 /// The recorder's default error text, for `error_message` closures to fall back on:
-/// "⇧⌘K is already in use." The refused chord is None when clearing was refused.
+/// "⇧⌘K is already in use.", or "Add ⌘, ⌃ or ⌥." for a chord without a modifier. The refused
+/// chord is None when clearing was refused.
 pub fn shortcut_error_message(error: &ShortcutError, shortcut: Option<&Shortcut>) -> String {
     let Some(shortcut) = shortcut else {
         return if matches!(error, ShortcutError::InvalidAccelerator(_)) { "That key can't be part of a shortcut.".into() }
@@ -87,6 +88,8 @@ pub fn shortcut_error_message(error: &ShortcutError, shortcut: Option<&Shortcut>
     };
     let chord = shortcut.keycaps().join(if cfg!(target_os = "macos") { "" } else { "+" });
     match error {
+        ShortcutError::InvalidAccelerator(_) if shortcut.require_modifier().is_err() =>
+            if cfg!(target_os = "macos") { "Add ⌘, ⌃ or ⌥.".into() } else { "Add Ctrl, Alt or Super.".into() },
         ShortcutError::Conflict => format!("{chord} is already in use."),
         ShortcutError::Unsupported => "This desktop doesn't support global shortcuts.".into(),
         ShortcutError::PermissionDenied => format!("Permission to use {chord} was declined."),
@@ -97,7 +100,9 @@ pub fn shortcut_error_message(error: &ShortcutError, shortcut: Option<&Shortcut>
 /// Click (or activate with Enter/Space) to record. Escape cancels; Backspace clears.
 /// `on_change` must register the proposed binding before releasing the previous registration:
 /// returning an error keeps the old value and shows the refused chord with a message
-/// (`error_message` words it). An unchanged chord is a no-op.
+/// (`error_message` words it). An unchanged chord is a no-op. A chord without ⌘, ⌃ or ⌥ (Ctrl,
+/// Alt or Super elsewhere) other than F1–F24 is refused before `on_change` unless
+/// `allow_unmodified`.
 pub struct ShortcutRecorder<S> {
     key: String,
     state: ShortcutRecorderState,
@@ -106,11 +111,12 @@ pub struct ShortcutRecorder<S> {
     message: Message,
     width: f32,
     disabled: bool,
+    unmodified: bool,
 }
 impl<S: 'static> ShortcutRecorder<S> {
     pub fn new(key: impl Into<String>, state: &ShortcutRecorderState,
         access: impl for<'a> Fn(&'a mut S) -> &'a mut ShortcutRecorderState + 'static) -> Self {
-        Self { key: key.into(), state: state.clone(), access: Rc::new(access), change: None, message: Box::new(shortcut_error_message), width: 240.0, disabled: false }
+        Self { key: key.into(), state: state.clone(), access: Rc::new(access), change: None, message: Box::new(shortcut_error_message), width: 240.0, disabled: false, unmodified: false }
     }
     pub fn on_change(mut self, change: impl Fn(&mut S, Option<&Shortcut>, &mut Tx) -> Result<(), ShortcutError> + 'static) -> Self {
         self.change = Some(Rc::new(change)); self
@@ -121,6 +127,9 @@ impl<S: 'static> ShortcutRecorder<S> {
     pub fn error_message(mut self, message: impl Fn(&ShortcutError, Option<&Shortcut>) -> String + 'static) -> Self {
         self.message = Box::new(message); self
     }
+    /// Propose chords without a modifier too, such as Space or ⇧A. Registering one globally
+    /// also needs `App::allow_unmodified_shortcuts`.
+    pub fn allow_unmodified(mut self) -> Self { self.unmodified = true; self }
     pub fn width(mut self, width: f32) -> Self { self.width = width; self }
     pub fn disabled(mut self, disabled: bool) -> Self { self.disabled = disabled; self }
     pub fn build(self, k: &Kit) -> El {
@@ -142,14 +151,16 @@ impl<S: 'static> ShortcutRecorder<S> {
         {
             let access = self.access;
             let change = self.change;
-            let disabled = self.disabled;
+            let (disabled, unmodified) = (self.disabled, self.unmodified);
             control = control.on_physical_input(move |s: &mut S, event, tx| {
                 if disabled && !matches!(event, PhysicalInput::FocusLost) { return false; }
                 match access(s).input(event) {
                     Outcome::Pass => false,
                     Outcome::Consumed => true,
                     Outcome::Change(next) => {
-                        let result = if access(s).shortcut == next { Ok(()) }
+                        let bare = next.as_ref().filter(|_| !unmodified).map(Shortcut::require_modifier);
+                        let result = if let Some(Err(error)) = bare { Err(error) }
+                            else if access(s).shortcut == next { Ok(()) }
                             else { change.as_ref().map_or(Ok(()), |f| f(s, next.as_ref(), tx)) };
                         let state = access(s);
                         match result {

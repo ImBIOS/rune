@@ -102,6 +102,14 @@ impl<S: 'static> crate::App<S> {
         self.shared.shortcuts.pending(accelerator.parse(), Arc::new(handler));
         self
     }
+
+    /// Let `global_shortcut` and `register_shortcut` take a chord without ⌘, ⌃ or ⌥ (Ctrl, Alt
+    /// or Super elsewhere), such as Space or ⇧A, which then can't be typed in any app. By
+    /// default those fail with `InvalidAccelerator`; F1–F24 are always allowed alone.
+    pub fn allow_unmodified_shortcuts(self) -> Self {
+        self.shared.shortcuts.allow_unmodified();
+        self
+    }
 }
 
 impl<S: 'static> crate::AppHandle<S> {
