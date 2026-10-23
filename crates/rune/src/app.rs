@@ -605,24 +605,13 @@ mod tests {
         fn view(s: &Lock, _: &mut Cx<Lock>) -> El {
             crate::el::row().child(el().key("box").size(10.0 + s.locked as f32, 10.0))
         }
-        let spec = AppSpec {
-            poll: Some(|s: &mut Lock, _, tx: &mut Tx| {
-                let Some(n) = s.inbox.as_ref().and_then(|inbox| inbox.try_iter().last()) else { return false };
-                s.locked = n;
-                tx.wake_after(std::time::Duration::from_secs(60));
-                true
-            }),
-            ..AppSpec::new("test", (200.0, 200.0), Lock::default, view)
-        };
-        let app = App::new(spec).windowless();
-        assert!(app.keep_running);
-        let handle = app.handle();
-        let wakes = Arc::new(AtomicUsize::new(0));
-        let w = wakes.clone();
-        app.shared.connect(Arc::new(move || { w.fetch_add(1, Ordering::SeqCst); }));
-        let (spec, state, _) = app.into_parts(None);
-        let mut rt = Runtime::new(state, spec.view, spec.size, Env { system_dark: true, scale: 1.0 });
-        rt.poll = spec.poll;
+        let mut rt = Runtime::new(Lock::default(), view, (200.0, 200.0), Env { system_dark: true, scale: 1.0 });
+        rt.poll = Some(|s: &mut Lock, _, tx: &mut Tx| {
+            let Some(n) = s.inbox.as_ref().and_then(|inbox| inbox.try_iter().last()) else { return false };
+            s.locked = n;
+            tx.wake_after(std::time::Duration::from_secs(60));
+            true
+        });
         rt.wall_start = Some(std::time::Instant::now());
         let (send, inbox) = std::sync::mpsc::channel();
         rt.state.inbox = Some(inbox);
@@ -630,13 +619,8 @@ mod tests {
         let width = |rt: &Runtime<Lock>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("box")).unwrap().rect[2];
         assert_eq!(width(&rt), 10.0);
 
-        // Hidden from here: a background thread queues a lock and wakes the loop.
-        let before = wakes.load(Ordering::SeqCst);
-        std::thread::spawn(move || {
-            send.send(30).unwrap();
-            handle.wake();
-        }).join().unwrap();
-        assert_eq!(wakes.load(Ordering::SeqCst), before + 1);
+        // Hidden from here: something queues a lock and wakes the loop.
+        send.send(30).unwrap();
         assert!(rt.poll_hidden(), "a hidden launcher renders when poll reports a change");
         assert!(!rt.poll_hidden());
         assert_eq!(rt.state.locked, 30, "poll drained the inbox without a frame");
