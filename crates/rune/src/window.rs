@@ -816,6 +816,18 @@ impl<S: 'static> Host<S> {
         }
     }
 
+    /// A hidden, keep-running or windowless window still reads its inbox when woken: `poll` runs
+    /// with no drawable, present or animation, and its changes render when the window is next
+    /// shown. A hidden launcher keeps rendering while hidden instead.
+    fn poll_hidden(&mut self, event_loop: &ActiveEventLoop) {
+        if event_loop.exiting() || self.launcher() || self.win.as_ref().is_some_and(|w| w.visible) { return; }
+        // Its hidden frames already poll.
+        #[cfg(all(feature = "dev", debug_assertions))]
+        if self.rt.dev.is_some() { return; }
+        self.rt.poll_hidden();
+        self.shell(event_loop);
+    }
+
     /// Carries out what a handler or update asked with `Tx::close_window` / `Tx::quit`.
     fn shell(&mut self, event_loop: &ActiveEventLoop) {
         match self.rt.shell_request.take() {
@@ -1264,7 +1276,10 @@ impl<S: 'static> Host<S> {
     fn handle_user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
         if !self.started { return; }
         match event {
-            WakeEvent::App(_) => self.drain(event_loop),
+            WakeEvent::App(_) => {
+                self.drain(event_loop);
+                self.poll_hidden(event_loop);
+            }
             WakeEvent::Live(_) => {
                 if self.rt.live_pending() && let Some(w) = self.win.as_ref().filter(|w| w.visible && !w.occluded) {
                     w.window.request_redraw();

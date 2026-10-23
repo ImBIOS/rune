@@ -254,6 +254,12 @@ impl<S> Clone for AppHandle<S> {
 }
 
 impl<S: 'static> AppHandle<S> {
+    /// Wake the event loop so `AppSpec::poll` runs, also while the window is hidden; for a
+    /// background thread that queued work for `poll` to drain.
+    pub fn wake(&self) {
+        self.shared.wake();
+    }
+
     /// Show the window (creating it if needed) and bring it forward.
     pub fn open(&self) {
         self.request(|q| q.window = Some(WindowRequest::Open(None)));
@@ -578,5 +584,55 @@ mod tests {
         rt.update(|_, tx| tx.quit());
         rt.update(|_, tx| tx.close_window());
         assert_eq!(rt.shell_request.take(), Some(Shell::Quit), "quit outranks close");
+    }
+
+    #[test]
+    fn a_hidden_window_drains_its_inbox_on_wake_and_shows_it_when_reopened() {
+        #[derive(Default)]
+        struct Lock { inbox: Option<std::sync::mpsc::Receiver<u32>>, locked: u32 }
+        fn view(s: &Lock, _: &mut Cx<Lock>) -> El {
+            crate::el::row().child(el().key("box").size(10.0 + s.locked as f32, 10.0))
+        }
+        let spec = AppSpec {
+            poll: Some(|s: &mut Lock, _, tx: &mut Tx| {
+                let Some(n) = s.inbox.as_ref().and_then(|inbox| inbox.try_iter().last()) else { return false };
+                s.locked = n;
+                tx.wake_after(std::time::Duration::from_secs(60));
+                true
+            }),
+            ..AppSpec::new("test", (200.0, 200.0), Lock::default, view)
+        };
+        let app = App::new(spec).windowless();
+        assert!(app.keep_running);
+        let handle = app.handle();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let w = wakes.clone();
+        app.shared.connect(Arc::new(move || { w.fetch_add(1, Ordering::SeqCst); }));
+        let (spec, state, _) = app.into_parts(None);
+        let mut rt = Runtime::new(state, spec.view, spec.size, Env { system_dark: true, scale: 1.0 });
+        rt.poll = spec.poll;
+        rt.wall_start = Some(std::time::Instant::now());
+        let (send, inbox) = std::sync::mpsc::channel();
+        rt.state.inbox = Some(inbox);
+        rt.frame(0.0);
+        let width = |rt: &Runtime<Lock>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("box")).unwrap().rect[2];
+        assert_eq!(width(&rt), 10.0);
+
+        // Hidden from here: a background thread queues a lock and wakes the loop.
+        let before = wakes.load(Ordering::SeqCst);
+        std::thread::spawn(move || {
+            send.send(30).unwrap();
+            handle.wake();
+        }).join().unwrap();
+        assert_eq!(wakes.load(Ordering::SeqCst), before + 1);
+        rt.poll_hidden();
+        assert_eq!(rt.state.locked, 30, "poll drained the inbox without a frame");
+        assert_eq!(width(&rt), 10.0, "nothing laid out, animated or presented while hidden");
+        assert!(rt.wake_deadline().is_some(), "poll's own timers still schedule while hidden");
+
+        // `show` lands everything on its first frame.
+        rt.settle_all();
+        rt.frame(1.0 / 60.0);
+        assert_eq!(width(&rt), 40.0);
     }
 }
