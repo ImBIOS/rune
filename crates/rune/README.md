@@ -587,6 +587,7 @@ $S --script examples/settings/scripts/demo.json --start 0.12 --frames 24 --every
 $S --tree tree.json [--at T]     # key, path, role, label, text, presented rect, target, opacity,
                                  # fill/text colour, hover/press, moving
 $S --trace run.jsonl             # motion-lint JSONL (Scrawl's format); keyed elements only
+$S --native --trace run.jsonl --frames 240  # native submission timestamps, then close the traced window
 ```
 
 - **Scripts** are timestamped `move`, `down`, `up`, `tap` (`hold`) and `drag` (`dx`, `dy`, `dur`)
@@ -664,6 +665,14 @@ policy changes are applied in the same mutation phase.
   analytic samples, inherited spatial spring velocity error at retarget, CPU budget excess, and
   virtual cadence. Growth/scroll are renderer-owned and excluded from the analytic edge metric;
   virtual timestamps do not measure display hitches. Diagnostics are enabled only with `--trace`.
+  `--native --trace` records wall-clock CPU submission timestamps (not GPU completion or scanout).
+  In a window factory, `--window KEY` selects the traced window; otherwise the first is traced.
+  macOS windows and overlays acquire drawables on coalesced display-link ticks, stopping the
+  link while idle or hidden. `cargo run --release -p rune --example pacing -- --native --trace
+  pacing.jsonl --frames 240` exercises spring retargets and hide/show; check it with
+  `python3 scripts/check-native-pacing.py pacing.jsonl` on a worker with a display.
+  Trees expose inherited `opacity`, `scale` and `blur` (logical points); traces keep opacity in
+  element rows and encode scale/blur as named scalar channels (`cm`/`c`/`cg`).
 
 ## Measured (Studio, M-series, headless at 2×)
 

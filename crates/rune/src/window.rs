@@ -25,6 +25,8 @@ use crate::windows::{Display, WindowOptions, WindowSpec};
 /// The open window. Fields drop in order: the surface before its window.
 struct Win {
     first_frame: FirstFrame,
+    #[cfg(target_os = "macos")]
+    pacing: Option<crate::display_link::DisplayLink>,
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
     activator: Option<crate::activation::Activator>,
     surface: wgpu::Surface<'static>,
@@ -296,9 +298,15 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
         }).collect();
         let specs = factory(&displays);
         crate::windows::validate(&specs).expect("window keys");
+        let trace_window = self.args.window.clone().or_else(|| specs.first().map(|s| s.key.clone()));
         let mut overlays = Vec::new();
         for (slot, mut spec) in specs.into_iter().enumerate() {
-            let args = spec.app.resolve_args(self.args.clone());
+            let mut inherited = self.args.clone();
+            if inherited.native && trace_window.as_deref() != Some(spec.key.as_str()) {
+                inherited.trace = None;
+                inherited.frames = None;
+            }
+            let args = spec.app.resolve_args(inherited);
             if args.headless() {
                 if let Some((w, h)) = spec.options.physical_size {
                     let scale = args.scale.unwrap_or(2.0);
@@ -388,6 +396,9 @@ struct Host<S: 'static> {
     secure_input: crate::secure_input::SecureInput,
     ime_allowed: bool,
     comp: Option<Box<dyn Compositor<S>>>,
+    trace: Option<crate::tooling::Trace>,
+    trace_start: Option<Instant>,
+    trace_frames: usize,
 }
 
 pub fn run<S: 'static>(app: App<S>, args: Args) {
@@ -488,6 +499,9 @@ impl<S: 'static> Host<S> {
             secure_input: Default::default(),
             ime_allowed: false,
             comp,
+            trace: None,
+            trace_start: None,
+            trace_frames: 0,
         }
     }
 }
@@ -957,6 +971,8 @@ impl<S: 'static> Host<S> {
             self.native_handle.native.ready.store(false, Ordering::Release);
             self.native_handle.native.number.store(0, Ordering::Release);
         } else if let Some(w) = self.win.as_mut() {
+            #[cfg(target_os = "macos")]
+            if let Some(pacing) = &mut w.pacing { pacing.stop(); }
             w.visible = false;
         }
     }
@@ -1146,6 +1162,8 @@ impl<S: 'static> Host<S> {
         self.native_handle.native.number.store(native_window_number(&window).unwrap_or(0), Ordering::Release);
         self.win = Some(Win {
             first_frame: FirstFrame::default(),
+            #[cfg(target_os = "macos")]
+            pacing: crate::display_link::DisplayLink::new(&window),
             #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
             activator: None,
             surface,
@@ -1178,6 +1196,8 @@ impl<S: 'static> Host<S> {
         let (Some(l), Some((gpu, renderer, _))) = (self.win.as_mut(), self.gpu.as_mut()) else { return };
         let hidden = launcher && !l.visible;
         if (!launcher && (!l.visible || l.occluded)) || l.window.is_minimized().unwrap_or(false) {
+            #[cfg(target_os = "macos")]
+            if let Some(pacing) = &mut l.pacing { pacing.stop(); }
             return;
         }
         #[cfg(target_os = "macos")]
@@ -1186,6 +1206,8 @@ impl<S: 'static> Host<S> {
             // Bounded retries while preparing the first frame (including acquisition errors).
             l.first_frame.retry = l.first_frame.until.map(|_| Instant::now() + Duration::from_millis(16));
         }
+        #[cfg(target_os = "macos")]
+        if !hidden && l.pacing.as_mut().is_some_and(|pacing| !pacing.ready(&l.window)) { return; }
         if self.native_handle.native.number.load(Ordering::Relaxed) == 0 {
             self.native_handle.native.number.store(native_window_number(&l.window).unwrap_or(0), Ordering::Release);
         }
@@ -1193,13 +1215,28 @@ impl<S: 'static> Host<S> {
         let frame = match l.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                #[cfg(target_os = "macos")]
+                if let Some(pacing) = &mut l.pacing { pacing.retry(); }
                 l.surface.configure(&gpu.device, &l.config);
                 if !hidden { l.window.request_redraw(); }
                 return;
             }
-            _ => { if !hidden { l.window.request_redraw(); } return; }
+            _ => {
+                #[cfg(target_os = "macos")]
+                if let Some(pacing) = &mut l.pacing { pacing.retry(); }
+                if !hidden { l.window.request_redraw(); } return;
+            }
         };
         let now = Instant::now();
+        if self.trace.is_none() && let Some(path) = &self.args.trace {
+            let hz = l.window.current_monitor().and_then(|m| m.refresh_rate_millihertz()).map_or(60.0, |hz| hz as f64 / 1000.0);
+            #[cfg(target_os = "macos")]
+            let hz = l.pacing.as_ref().map_or(hz, |pacing| pacing.refresh_hz());
+            self.trace = Some(crate::tooling::Trace::open_clock(path, self.rt.viewport, hz,
+                l.window.scale_factor() as f32, "wall"));
+            self.trace_start = Some(now);
+            self.rt.scene.store_mut().audit_retargets(true);
+        }
         // After an idle stretch, start the new motion from its first pose rather than
         // skipping ahead by the time spent idle.
         let dt = if hidden { 0.0 } else if self.idle { 1.0 / 120.0 } else { (now - self.last).as_secs_f64().min(1.0 / 30.0) };
@@ -1259,9 +1296,24 @@ impl<S: 'static> Host<S> {
             && gpu.device.poll(wgpu::PollType::wait_indefinitely()).is_ok() {
             l.first_frame.ready = true;
         }
+        let submitted = Instant::now();
+        #[cfg(target_os = "macos")]
+        if let Some(pacing) = &mut l.pacing { pacing.presented(submitted); }
+        if let Some(trace) = self.trace.as_mut() {
+            trace.frame(rt, (submitted - self.trace_start.unwrap()).as_secs_f64() * 1000.0,
+                now.elapsed().as_secs_f64() * 1000.0);
+            self.trace_frames += 1;
+            if self.args.frames.is_some_and(|n| self.trace_frames >= n) {
+                self.finished = true;
+                return;
+            }
+        }
         self.idle = !(animating || rt.has_pending_input() || rt.live_pending());
-        if !self.idle && !hidden {
+        if !hidden && (!self.idle || (self.trace.is_some() && self.args.frames.is_some())) {
             l.window.request_redraw();
+        } else {
+            #[cfg(target_os = "macos")]
+            if let Some(pacing) = &mut l.pacing { pacing.stop(); }
         }
     }
 }
@@ -1309,6 +1361,12 @@ impl<S: 'static> AnyHost for Host<S> {
     }
 
     fn wake_deadline(&self) -> Option<Instant> {
+        // The next display tick consumes due timers too. Leaving an overdue timer
+        // armed while its redraw waits for that tick would spin the event loop.
+        #[cfg(target_os = "macos")]
+        if self.win.as_ref().and_then(|w| w.pacing.as_ref()).is_some_and(|p| p.running()) {
+            return self.win.as_ref().and_then(|w| w.first_frame.retry);
+        }
         let runtime = self.rt.wall_start.and_then(|start| {
             start.checked_add(Duration::try_from_secs_f64(self.rt.wake_deadline()?).ok()?)
         });
@@ -1411,7 +1469,12 @@ impl<S: 'static> Host<S> {
             WindowEvent::Resized(size) => {
                 place_chrome(&l.window, chrome);
                 rt.set_live_visible(l.visible && !l.occluded && size.width > 0 && size.height > 0 && !l.window.is_minimized().unwrap_or(false));
-                if size.width == 0 || size.height == 0 { self.secure_input.set(false); self.idle = true; return; }
+                if size.width == 0 || size.height == 0 {
+                    self.secure_input.set(false);
+                    #[cfg(target_os = "macos")]
+                    if let Some(pacing) = &mut l.pacing { pacing.stop(); }
+                    self.idle = true; return;
+                }
                 l.config.width = size.width.max(1);
                 l.config.height = size.height.max(1);
                 l.surface.configure(&gpu.device, &l.config);
@@ -1431,7 +1494,12 @@ impl<S: 'static> Host<S> {
                 if self.macos_window.launcher && cfg!(target_os = "macos") { return; }
                 l.occluded = occluded;
                 rt.set_live_visible(l.visible && !occluded && !l.window.is_minimized().unwrap_or(false));
-                if occluded { self.secure_input.set(false); self.idle = true; return; }
+                if occluded {
+                    self.secure_input.set(false);
+                    #[cfg(target_os = "macos")]
+                    if let Some(pacing) = &mut l.pacing { pacing.stop(); }
+                    self.idle = true; return;
+                }
                 place_chrome(&l.window, chrome);
                 // Coming back paints the settled state in the first frame (guarantee 8).
                 rt.settle_all();

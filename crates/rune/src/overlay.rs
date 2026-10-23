@@ -214,6 +214,10 @@ enum Backing {
 
 /// A shown overlay. The wgpu surface drops before what it draws into.
 struct Live {
+    #[cfg(target_os = "macos")]
+    pacing: Option<crate::display_link::DisplayLink>,
+    #[cfg(target_os = "macos")]
+    occluded: bool,
     alpha: Option<crate::surface_alpha::AlphaSurface>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
@@ -677,7 +681,15 @@ impl<T: 'static> Overlay<T> {
             .then(|| crate::surface_alpha::AlphaSurface::new(&gpu.device, config.format, (config.width, config.height)));
         self.rt.transparent = true;
         self.rt.set_viewport(self.at.size, scale);
-        Some(Live { alpha, surface, config, backing, scale })
+        #[cfg(target_os = "macos")]
+        let pacing = match &backing { Backing::Window(w) => crate::display_link::DisplayLink::new(w) };
+        Some(Live {
+            #[cfg(target_os = "macos")]
+            pacing,
+            #[cfg(target_os = "macos")]
+            occluded: false,
+            alpha, surface, config, backing, scale,
+        })
     }
 
     fn rescale(&mut self, gpu: &Gpu, scale: f32) {
@@ -961,18 +973,31 @@ impl<T: 'static> Overlay<T> {
         if !self.dirty && self.idle {
             return false;
         }
+        #[cfg(target_os = "macos")]
+        if !prewarm {
+            if live.occluded { return false; }
+            if let (Some(pacing), Backing::Window(w)) = (&mut live.pacing, &live.backing) {
+                if !pacing.ready(w) { return false; }
+            }
+        }
         let mut retries = if prewarm { 2 } else { 0 };
         let frame = loop {
             match live.surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => break f,
                 wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(pacing) = &mut live.pacing { pacing.retry(); }
                     live.surface.configure(&gpu.device, &live.config);
                     if retries == 0 { return true; }
                     retries -= 1;
                 }
                 // A truly occluded display or timed-out drawable must not be retried
                 // synchronously: nextDrawable can already have waited for a second.
-                _ => return true,
+                _ => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(pacing) = &mut live.pacing { pacing.retry(); }
+                    return true;
+                }
             }
         };
         let now = Instant::now();
@@ -1010,6 +1035,12 @@ impl<T: 'static> Overlay<T> {
         gpu.queue.present(frame);
         self.dirty = false;
         self.idle = !(animating || self.rt.has_pending_input());
+        #[cfg(target_os = "macos")]
+        if let Some(pacing) = &mut live.pacing {
+            pacing.presented(Instant::now());
+            if self.idle { pacing.stop(); }
+            return false; // The display link wakes this overlay, never ControlFlow::Poll.
+        }
         !self.idle
     }
 }
@@ -1081,6 +1112,15 @@ impl<T: 'static> AnyHost for Overlay<T> {
         if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. })
             && let Some(x11) = &self.x11 { x11.update_geometry(); }
         match event {
+            #[cfg(target_os = "macos")]
+            WindowEvent::Occluded(occluded) => {
+                if let Some(live) = &mut self.live {
+                    live.occluded = occluded;
+                    if occluded && let Some(pacing) = &mut live.pacing { pacing.stop(); }
+                }
+                self.idle = true;
+                self.dirty = !occluded;
+            }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 if let Some(gpu) = self.gpu.clone() {
                     self.rescale(&gpu, scale_factor as f32);

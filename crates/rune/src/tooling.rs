@@ -151,6 +151,8 @@ pub struct Args {
     pub out: Option<PathBuf>,
     pub tree: Option<PathBuf>,
     pub trace: Option<PathBuf>,
+    /// Trace the native window's submission clock instead of a virtual headless clock.
+    pub native: bool,
     pub strip: Option<PathBuf>,
     pub crops: Vec<[f32; 4]>,
     pub every: usize,
@@ -197,6 +199,7 @@ impl Args {
                 "--out" => a.out = Some(val(&mut i).into()),
                 "--tree" => a.tree = Some(val(&mut i).into()),
                 "--trace" => a.trace = Some(val(&mut i).into()),
+                "--native" => a.native = true,
                 "--strip" => a.strip = Some(val(&mut i).into()),
                 "--crop" => {
                     let v: Vec<f32> = val(&mut i).split(',').map(|s| num(s) as f32).collect();
@@ -227,8 +230,7 @@ impl Args {
     pub fn headless(&self) -> bool {
         self.snap.is_some()
             || self.tree.is_some()
-            || self.trace.is_some()
-            || self.frames.is_some()
+            || (!self.native && (self.trace.is_some() || self.frames.is_some()))
             || self.strip.is_some()
             || self.list_scenes
             || self.first_pixels
@@ -249,6 +251,7 @@ const HELP: &str = "usage: <app> [window]
                         (repeat --crop to stack several regions per frame; --cols N per row)
   --tree out.json       element tree with animated values
   --trace out.jsonl     per-frame rects/opacity in motion-lint JSONL
+  --native             trace native submissions; --frames N stops after N frames
   --first-pixels        report when the first GPU-complete offscreen pixels are readable
   --window KEY         select a window for headless tools (run_windows apps)
   --list-windows       list window keys using a deterministic virtual display
@@ -534,15 +537,20 @@ fn r2(v: f32) -> f64 {
 
 impl Trace {
     pub(crate) fn open(path: &PathBuf, size: (f32, f32), fps: f64, scale: f32) -> Trace {
+        Self::open_clock(path, size, fps, scale, "virtual")
+    }
+
+    pub(crate) fn open_clock(path: &PathBuf, size: (f32, f32), fps: f64, scale: f32, clock: &str) -> Trace {
         if let Some(d) = path.parent() {
             let _ = std::fs::create_dir_all(d);
         }
         let file = std::fs::File::create(path).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
         let mut out = std::io::BufWriter::new(file);
-        let header = json!({
+        let mut header = json!({
             "type": "header", "launch": "rune", "width": size.0, "height": size.1,
-            "hz": fps, "scale": scale, "platform": "rune", "units": "pt", "clock": "virtual",
+            "hz": fps, "scale": scale, "platform": "rune", "units": "pt", "clock": clock,
         });
+        if clock == "wall" { header["timestamp"] = "cpu-submit".into(); }
         let _ = writeln!(out, "{header}");
         Trace { out, ids: HashMap::new(), described: HashSet::new(), states: HashMap::new(), effects: HashMap::new() }
     }
@@ -1089,6 +1097,14 @@ fn tile_size(w: u32, h: u32, crops: &[[u32; 4]], gap: u32) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_trace_does_not_select_virtual_rendering() {
+        let args = |v: &[&str]| Args::parse_from(v.iter().map(|s| (*s).into()).collect());
+        assert!(args(&["--trace", "trace.jsonl", "--frames", "120"]).headless());
+        assert!(!args(&["--native", "--trace", "trace.jsonl", "--frames", "120"]).headless());
+        assert!(args(&["--native", "--snap", "snap.png"]).headless());
+    }
 
     #[test]
     fn tree_and_trace_serialize_effects_and_remove_channels() {
