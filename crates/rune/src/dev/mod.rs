@@ -66,6 +66,8 @@ pub(crate) struct Session<S: 'static> {
     pub(crate) blur: bool,
     velocity: bool,
     frame: u64,
+    /// Last hidden-host frame while motion was running (see `Runtime::dev_hidden_frame`).
+    hidden: Option<std::time::Instant>,
     replies: Vec<(Value, std::sync::mpsc::Sender<Value>)>,
     requests: std::collections::VecDeque<transport::Request>,
 }
@@ -94,7 +96,7 @@ pub fn attach<S>(rt: &mut Runtime<S>, spec: &AppSpec<S>, config: &Config<S>, wak
         registry, bridge, server, wake,
         scenes: spec.scenes, transitions: config.transitions.clone(), pending: None, state: String::new(), selection: 0,
         init: spec.init, setup: spec.setup,
-        blur_control: config.motion_blur, blur: true, velocity: false, frame: 0, replies: Vec::new(), requests: Default::default(),
+        blur_control: config.motion_blur, blur: true, velocity: false, frame: 0, hidden: None, replies: Vec::new(), requests: Default::default(),
     });
     rt.invalidate();
     eprintln!("Rune dev controls: ws://{address} (scripts/dev-panel)");
@@ -292,7 +294,7 @@ impl<S> Session<S> {
         }
         for (request, reply) in self.replies.drain(..) {
             let response = if request["type"] == "tree" {
-                json!({"type":"tree","id":request["id"],"frame":self.frame,"elements":rt.elements().into_iter().map(|e| json!({"key":e.key,"text":e.text,"rect":e.rect,"target":e.target,"moving":e.moving})).collect::<Vec<_>>()})
+                json!({"type":"tree","id":request["id"],"frame":self.frame,"elements":rt.elements().into_iter().map(|e| json!({"key":e.key,"text":e.text,"rect":e.rect,"target":e.target,"opacity":(e.opacity * 1000.0).round() / 1000.0,"moving":e.moving})).collect::<Vec<_>>()})
             } else { json!({"type":"ack","id":request["id"],"frame":self.frame}) };
             if reply.send(response).is_err() {} // The client may disconnect before its commit.
         }
@@ -307,6 +309,24 @@ impl<S> Session<S> {
 impl<S> Runtime<S> {
     /// The actual listening address, including an OS-selected port when configured with port 0.
     pub fn dev_address(&self) -> Option<SocketAddr> { self.dev.as_ref().map(|dev| dev.server.address) }
+
+    /// A hidden or windowless host's frame. Nothing is drawn, but the panel watches the tree,
+    /// so motion keeps real time, ticking at 60 Hz only while something moves.
+    pub(crate) fn dev_hidden_frame(&mut self) {
+        let now = std::time::Instant::now();
+        let last = self.dev.as_ref().and_then(|dev| dev.hidden);
+        let moving = self.frame(last.map_or(0.0, |t| (now - t).as_secs_f64().min(1.0 / 30.0)));
+        if let Some(dev) = &mut self.dev { dev.hidden = moving.then_some(now); }
+    }
+
+    pub(crate) fn dev_hidden_deadline(&self) -> Option<std::time::Instant> {
+        Some(self.dev.as_ref()?.hidden? + std::time::Duration::from_micros(16_667))
+    }
+
+    /// A shown window's redraws take over from hidden ticks.
+    pub(crate) fn dev_hidden_stop(&mut self) {
+        if let Some(dev) = &mut self.dev { dev.hidden = None; }
+    }
 }
 
 #[cfg(test)]

@@ -73,7 +73,8 @@ and wake the app; model/view mutation stays on the app thread.
 Server `state` messages contain `descriptors`, complete `values`, and readouts.
 Client messages: `{type:"set", key, value}` (`null` restores default),
 `{type:"setBatch", changes:[{key,value}]}`, `{type:"reset", key?, group?}`,
-`{type:"action", key}`, and `{type:"get"}`. Invalid requests return `error`.
+`{type:"action", key}`, `{type:"get"}`, and `{type:"tree"}` (key, text, rect,
+target, opacity, moving per element). Invalid requests return `error`.
 Descriptors are knobs `ControlDescriptor`s, not a new Rune panel schema:
 
 | Rune value | knobs descriptor |
@@ -109,6 +110,11 @@ uses the internal logical deadlines. Manual step advances the same clock by
 1/60 second while remaining paused. Existing view `Cx::time_scale` remains an
 additional animation-only multiplier. Scale changes never multiply an absolute
 timestamp or stretch spring parameters, so no pose discontinuity is introduced.
+
+A hidden or windowless app normally lands its motion when shown and spends no
+frames meanwhile. With a panel attached the tree is being watched, so a hidden
+host steps animations by real elapsed time at 60 Hz while anything moves and
+sleeps again at rest.
 
 Tunables dirty the view. During a tuning commit, active same-target spring
 tracks accept changed spring parameters and inherit their sampled velocity.

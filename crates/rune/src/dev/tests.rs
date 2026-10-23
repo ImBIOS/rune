@@ -153,3 +153,44 @@ fn tunables_read_between_frames_reach_the_panel_and_follow_its_values() {
     assert_eq!(tune("glow.radius", 2.5_f32, Some([0.0, 12.0, 0.5])), 2.5, "a dropped session leaves no registry behind");
 }
 
+#[test]
+fn hidden_hosts_keep_motion_in_real_time_and_the_tree_reports_opacity() {
+    fn view(n: &f32, _: &mut Cx<f32>) -> El {
+        crate::col().child(el().key("box").absolute(*n, 0.0).size(10.0, 10.0).opacity(0.5))
+    }
+    let spec = AppSpec::new("test", (100.0, 100.0), || 0.0, view);
+    let mut config = Config::default();
+    config.bind.set_port(0);
+    let mut rt = Runtime::new(0.0, view, spec.size, Env { system_dark: true, scale: 1.0 });
+    rt.wall_start = Some(std::time::Instant::now());
+    attach(&mut rt, &spec, &config, Arc::new(|| {})).unwrap();
+    rt.dev_hidden_frame();
+    assert_eq!(rt.dev_hidden_deadline(), None, "at rest a hidden host sleeps");
+    rt.update(|n, tx| {
+        *n = 80.0;
+        tx.motion(Spring::new(0.3, 0.0));
+    });
+    rt.dev_hidden_frame();
+    assert!(rt.dev_hidden_deadline().is_some(), "running motion schedules the next hidden tick");
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    rt.dev_hidden_frame();
+    let x = rt.presented("box").unwrap().0[0];
+    assert!(x > 0.0 && x < 80.0, "springs advance without presented frames: {x}");
+
+    let (reply, replies) = std::sync::mpsc::channel();
+    let message = json!({"type":"tree","id":1});
+    rt.dev.as_ref().unwrap().bridge.lock().unwrap().incoming.push_back(transport::Request { message, reply });
+    rt.dev_hidden_frame();
+    let tree = replies.try_recv().unwrap();
+    let card = tree["elements"].as_array().unwrap().iter().find(|e| e["key"] == "box").unwrap();
+    assert_eq!(card["opacity"], 0.5);
+    assert_eq!(card["moving"], true);
+
+    for _ in 0..200 {
+        if rt.dev_hidden_deadline().is_none() { break; }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        rt.dev_hidden_frame();
+    }
+    assert_eq!(rt.dev_hidden_deadline(), None);
+    assert_eq!(rt.presented("box").unwrap().0[0], 80.0);
+}

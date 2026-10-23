@@ -806,8 +806,11 @@ impl<S: 'static> Host<S> {
         if self.rt.dev.is_some() && self.win.as_ref().is_none_or(|w| !w.visible || w.occluded || w.window.is_minimized().unwrap_or(false)) {
             // A hidden/windowless app still services its dev channel without a GPU or redraw.
             if self.launcher() && let Some(w) = &self.win { w.window.request_redraw(); }
-            else { self.rt.frame(0.0); self.shell(event_loop); }
+            else { self.rt.dev_hidden_frame(); self.shell(event_loop); }
         }
+        // A dev command may change a shown launcher, which otherwise redraws only for updates.
+        #[cfg(all(feature = "dev", debug_assertions))]
+        let changed = changed || self.rt.dev.is_some();
         if let Some(w) = self.win.as_ref().filter(|w| if self.launcher() { changed } else { w.visible }) {
             w.window.request_redraw();
         }
@@ -1200,12 +1203,24 @@ impl<S: 'static> AnyHost for Host<S> {
                 self.shell(event_loop);
             }
         }
+        #[cfg(all(feature = "dev", debug_assertions))]
+        if self.rt.dev_hidden_deadline().is_some_and(|deadline| deadline <= Instant::now()) {
+            if let Some(w) = self.win.as_ref().filter(|w| (self.launcher() || (w.visible && !w.occluded)) && !w.window.is_minimized().unwrap_or(false)) {
+                w.window.request_redraw();
+                self.rt.dev_hidden_stop();
+            } else {
+                self.rt.dev_hidden_frame();
+                self.shell(event_loop);
+            }
+        }
     }
 
     fn wake_deadline(&self) -> Option<Instant> {
         let runtime = self.rt.wall_start.and_then(|start| {
             start.checked_add(Duration::try_from_secs_f64(self.rt.wake_deadline()?).ok()?)
         });
+        #[cfg(all(feature = "dev", debug_assertions))]
+        let runtime = runtime.into_iter().chain(self.rt.dev_hidden_deadline()).min();
         runtime.into_iter().chain(self.win.as_ref().and_then(|w| w.first_frame.retry)).min()
     }
 
