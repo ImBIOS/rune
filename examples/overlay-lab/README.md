@@ -1,5 +1,25 @@
 # Overlay lab
 
+## Native layer-filter proof
+
+`layer-filter-overlay` draws two static exiting-chip samples in a prewarmed native panel.
+Both use a 400×40 pt capsule, nested dissolve/blur, sigma 1.5 pt and opacity .65. The upper
+row is unmasked; the lower row uses `clip_rounded(20)`. Run from the repo root:
+
+```sh
+HIVEMIND_CAS_SYNC=0 hivemind run --kind render --worker pro \
+  --fetch crates/rune/artifacts/layer-filters/native-overlay -- sh -c \
+  'env RUSTC_WRAPPER= cargo build -p overlay-lab --bin layer-filter-overlay -j 2 && python3 examples/overlay-lab/native/run-filter-probe.py crates/rune/artifacts/layer-filters/native-overlay'
+```
+
+The runner holds Pro's GUI lock, waits for visible alpha and positive Metal presentation,
+then captures that exact window with Cua. It closes the app's stdin to quit, ends the Cua
+session and removes its diagnostic dylib. Evidence includes `native-overlay.png`, the
+presentation log and Cua's valid-frame/window metadata. This proves Rune's native rendering
+of Scrawl's capsule case; the separate headless regression covers fully off-wall sources.
+
+## Interactive lab
+
 `cargo run -p overlay-lab` opens a transparent pill on the display under the pointer.
 Only its chips intercept clicks; the background and hover label pass through. iPhone/Paste
 change its contents inside a fixed maximum canvas. Area/Window/Screen open one picker per

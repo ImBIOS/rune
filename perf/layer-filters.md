@@ -2,7 +2,8 @@
 
 Scrawl's default blur meets the measured added-GPU-cost target. Wider blurs and larger surfaces
 can exceed it. This branch also implements `El::clip_rounded(radius)` and removes dissolve's
-offscreen pass at rest. The renderer repack still needs the integration steps below.
+offscreen pass at rest. Deadbolt's packed-fade ABI is integrated, and a native overlay capture
+verifies blur with rounded clipping on dev base `4223d64`.
 
 ![Layer blur with and without a capsule mask](../crates/rune/artifacts/layer-filters/filters.png)
 
@@ -77,22 +78,22 @@ pass. Opacity, active dissolve and blur scopes apply the mask to their final com
 Their source primitives remain unmasked so a chip beyond the wall can still contribute blur
 inside it. Hit-test and inspection bounds retain the logical clip when painting consumes it.
 
-`Instance::begin_layer(bounds, clip, spec)` stores the radius in `radii[0]` and original clip edges
-in `uv`; the instance remains 128 bytes. The final composite applies the rounded SDF and hard clip
+`Instance::begin_layer(bounds, clip, spec)` stores radius bits in packed `fade[3]` and edges
+in `clip`; the instance remains 128 bytes. The final composite applies the rounded SDF and hard clip
 after filtering. A masked scope materializes even at opacity one. The planner does not push a
 parent's final clip into its children because that would lose source pixels before parent blur.
 
 Nested rounded rectangles retain both sets of corner centres. A second distinct rounded clip
 consumes the inherited mask on an outer scope; the inner mask stays direct or joins the inner
-filter scope. A rectangular clip cutting through a rounded corner also needs isolation. The
-old-layout marker then carries rectangular intersection in `clip` and original rounded bounds
-in `uv`. Layer feather widths survive onto the composite. These exceptional intersections cost
-a layer; a single capsule with ordinary children does not.
+filter scope. A rectangular clip cutting through a rounded corner uses a separate outer scope.
+Each mask keeps its original rectangle rather than rounding the intersected bounding box.
+Packed feather widths and origin offsets survive onto the composite. These exceptional
+intersections cost a layer; a single capsule with ordinary children does not.
 
-Ordinary primitives temporarily encode radius in negative `params[3]`, except glyphs, which use
-their unused `radii[0]`. Glyph gamma, shape geometry, atlas UVs and four feather widths are intact.
-Native video uses `SurfaceDraw::clip_radius` and the spare `sampling.w` uniform lane. Callers
-constructing `SurfaceDraw` directly must initialize the new field to zero for rectangular clips.
+Ordinary primitives, composites and native video all decode radius from `fade[3]`. The temporary
+per-kind encoding, `radii[0]`/`uv` layer markers, `Layer::mask` and `SurfaceDraw::clip_radius` are
+removed. Glyph gamma, shape geometry and atlas UVs retain their own lanes. Live/truncated text
+consumes an inherited rounded mask on a scope before adding its glyph-only rectangular clip.
 
 ![Exiting chip before and after post-blur capsule clipping](../crates/rune/artifacts/layer-filters/rounded-chip.png)
 
@@ -102,29 +103,32 @@ survives while exterior pixels are zero. This is a Rune headless fixture for Scr
 not a capture of the Scrawl application. The test compares every alpha byte against unmasked
 blur multiplied by an independent capsule oracle (maximum allowed difference: one byte).
 
-### Landing-second contract for Deadbolt
+### Packed-fade integration is complete
 
-Whether filters or Deadbolt's repack lands first, the second branch must resolve these points:
+The branch was rebased after both Deadbolt batches landed, then onto dev `4223d64` with its
+overlay poll/compositor hooks and prewarm guards. The 128-byte ABI keeps half-float feather
+widths in words 0–1, normalized origin offsets in word 2, and clip-radius bits in word 3.
+The updated fade regression checks inherited nonzero offsets on composites at 1×/2×, with
+rounded and rectangular masks. The combined LiveText/truncation regression compares alpha
+against an independent capsule oracle through short and long live updates at both scales.
 
-1. Move layer and ordinary clip radius to **`fade[3]`** in the repacked instance. In `KIND_LAYER`
-   and ordinary clipping, use Deadbolt's decoded clip/radius. Remove `Instance::round_clip`'s
-   temporary per-kind encoding and the old float-feather interpretation together.
-2. Drop the **`radii[0]` / `uv` layer marker** when replacing it with the decoded representation.
-   **The earlier `mask == clip` assumption no longer holds:** the high-level API can intersect a
-   rectangular ancestor with a rounded child. Preserve the original rounded bounds, or split
-   that intersection into two scopes before dropping `Layer::mask`. Never round the intersected
-   bounding box. `rounded_clip_direct_nested_and_rectangular_intersections` covers this case.
-3. Keep the post-filter rounded coverage and opacity-one mask scope. Do not reintroduce parent
-   clip propagation before convolution. Retain the nested-capsule/source-retention regression.
-4. Keep non-isolated subtrees on per-primitive rounded clipping. If the clipped element is
-   itself isolated or blurred, retain `LayerSpec::clip_radius` on its scope. Distinct nested
-   masks keep distinct scopes. Keep native-video clipping in sync with the instance decoder.
-5. Resolve `ElementInfo.blur` using presented **`p.blur`**, own plus presence sigma in points,
-   rather than accumulated `Inh.blur`.
+If `ElementInfo.blur` is added later, report presented `p.blur` (own plus presence sigma in
+points), rather than accumulated `Inh.blur`. This branch does not add that field.
 
-The high-level API supersedes the earlier handoff in
-`desktop-fidelity/LAYER-FILTERS-HANDOFF.md`. The two-rectangle requirement above is new since the
-parent's review of the low-level filter work.
+### A real overlay contains the blurred chip
+
+![Native overlay: unmasked above, rounded clip below](../crates/rune/artifacts/layer-filters/native-overlay/native-overlay.png)
+
+This is a Cua exact-window capture of a Rune NSPanel on Pro, built and run through HiveMind.
+Both rows use a 400×40 pt capsule at 2×, nested dissolve/blur, sigma 1.5 pt and opacity .65.
+The lower row clips the completed blur at the capsule edge. The fixture uses Scrawl's dimensions;
+it is not a capture of Scrawl itself.
+
+The final-base run captured window `14409`, PID `72697`, at 1240×352 pixels. The presentation
+log records an alpha-zero prewarm acquisition, visible alpha 1, and positive Metal presentation
+time `560498.526072625`. No diagnostic redraw assistance was enabled. Cua reports a valid frame
+and matching exact window. The app and Cua session exited, and the injected probe dylib was removed.
+Reproduction is in `examples/overlay-lab/README.md` under “Native layer-filter proof”.
 
 ## Dissolve is direct at rest
 
@@ -235,13 +239,20 @@ synced checkout, and set `RUNE_SRGB_REFERENCE` to that file for
 
 ## Verification
 
-The rounded-clip/dormant-dissolve follow-up passed **22 layer/filter correctness cases** and
-`cargo check -p rune --all-targets`, serially through HiveMind mini. Five new cases cover direct
+After packed-fade integration, **22 layer/filter correctness cases**, all **7 Batch C cases**,
+all **3 clip-fade cases** (including the corrected fixture's targeted rerun), and
+`cargo check -p rune --all-targets` passed serially through HiveMind mini. Five new cases cover direct
 and nested masks, rectangular intersections, all eight primitive kinds (including glyph gamma
 and four feather lanes), native-video inheritance, retained exits, and the off-wall chip.
 The existing dissolve test now checks zero rest scopes and byte-identical fade boundaries.
 `Instance` remains 128 bytes. The new still was generated headlessly by the chip regression;
 set `RUNE_CLIP_STILL` to a PNG path when running that test to reproduce it.
+
+On final dev base `4223d64`, the additional combined LiveText/truncation/capsule regression
+passed, bringing the layer/filter correctness coverage to 23 cases across these runs. The native
+overlay binary rebuilt and its exact-window proof passed again on that base. The overlay-only
+upstream changes did not alter the previously checked renderer/runtime paths. GPU timings in
+this document are historical measurements from before the ABI rebase, not new timing runs.
 
 For the original filter implementation, seventeen layer/filter correctness cases
 passed, including the original ten layer cases, plus three Live tests. `cargo check -p rune

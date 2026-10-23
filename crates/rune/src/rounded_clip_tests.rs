@@ -177,6 +177,50 @@ fn rounded_clip_native_video_inherits_capsule_without_a_layer() {
 }
 
 #[test]
+fn rounded_clip_live_truncated_text_preserves_corner_centres() {
+    type State = (bool, crate::LiveText, bool);
+    fn view(s: &State, _: &mut Cx<State>) -> El {
+        let mut capsule = el().size(48.0, 32.0).absolute(8.0, 8.0);
+        if s.0 { capsule = capsule.clip_rounded(16.0); }
+        let mut label = crate::text("MMMMMMMM").live_text(&s.1).size(44.0, 32.0)
+            .absolute(2.0, -2.0).font(crate::TextStyle::new(28.0, 700.0)).color(Color::WHITE);
+        if s.2 { label = label.truncate_fade(); }
+        el().child(capsule.child(label))
+    }
+    let gpu = Gpu::headless();
+    for scale in [1.0, 2.0] { for truncate in [false, true] {
+        let size = ((64.0 * scale) as u32, (48.0 * scale) as u32);
+        let target = Offscreen::new(&gpu.device, size.0, size.1);
+        let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+        let value = crate::LiveText::new("MMMMMMMM");
+        let mut plain = Runtime::new((false, value.clone(), truncate), view, (64.0, 48.0), Env::new(true, scale));
+        let mut clipped = Runtime::new((true, value.clone(), truncate), view, (64.0, 48.0), Env::new(true, scale));
+        for words in ["MMMMMMMM", "WW", "MMMMMMMMMMMM"] {
+            value.set(words);
+            let mut outputs = Vec::new();
+            for rt in [&mut plain, &mut clipped] {
+                rt.frame(0.0);
+                renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, size);
+                outputs.push(pixels(&gpu, &renderer, &target));
+            }
+            let mut cut = false;
+            let mut kept = false;
+            for y in 0..size.1 { for x in 0..size.0 {
+                let a = mask(x as f32 + 0.5, y as f32 + 0.5,
+                    [8.0, 8.0, 56.0, 40.0].map(|v| v * scale), 16.0 * scale);
+                let at = ((y * size.0 + x) * 4 + 3) as usize;
+                let want = (outputs[0][at] as f32 * a).round() as u8;
+                assert!(outputs[1][at].abs_diff(want) <= 1,
+                    "scale={scale} truncate={truncate} words={words} ({x},{y})");
+                cut |= outputs[0][at] > outputs[1][at];
+                kept |= outputs[1][at] > 0;
+            } }
+            assert!(cut && kept, "exercise glyph coverage inside and outside the corner");
+        }
+    } }
+}
+
+#[test]
 fn rounded_clip_and_dissolve_follow_retained_presence() {
     fn view(show: &bool, _: &mut Cx<bool>) -> El {
         el().size(80.0, 40.0).clip_rounded(20.0).dissolve()
