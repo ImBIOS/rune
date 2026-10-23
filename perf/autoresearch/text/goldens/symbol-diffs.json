@@ -1,0 +1,137 @@
+[
+  {
+    "path": "demo/kit/side-ui-menu--rich-light.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/kit/side-ui-select--grouped-light.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/kit/side-components-card--warning-dark.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/kit/side-ui-toast--all-examples-dark.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/kit/side-ui-toast--all-examples-light.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/kit/side-ui-button--all-states-dark.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/kit/side-ui-text-input--states-light.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/kit/index-dark.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/kit/side-ui-button--all-states-light.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/kit/side-components-card--warning-light.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/kit/side-ui-menu--rich-dark.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/kit/index-light.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/kit/side-ui-text-input--states-dark.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/kit/side-ui-select--grouped-dark.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/opencode/sidebar-closed.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/opencode/sidebar-toggle-strip.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/opencode/streaming.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/opencode/home.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/opencode/session-top.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/opencode/send-strip.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/opencode/session-light.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/opencode/sidebar-status.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/opencode/session-bottom.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/opencode/switch-strip.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/opencode/stream-reveal-strip.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/settings-light.png",
+    "pixels_changed": 0,
+    "regions": []
+  },
+  {
+    "path": "demo/settings-dark.png",
+    "pixels_changed": 0,
+    "regions": []
+  }
+]

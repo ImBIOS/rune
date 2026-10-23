@@ -13,10 +13,40 @@ pub struct PaletteSeed {
     pub accent: Color,
 }
 
+fn contrast(a: Color, b: Color) -> f32 {
+    let (a, b) = (a.luminance(), b.luminance());
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// Perceptual dimming, bounded by a contrast floor when the supplied foreground supports it.
+fn secondary(bg: Color, fg: Color, amount: f32, minimum: f32) -> Color {
+    let a = bg.to_oklab();
+    let b = fg.to_oklab();
+    let mix = |t: f32| Color::from_oklab(std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t));
+    let candidate = mix(amount);
+    if contrast(bg, candidate) >= minimum {
+        return candidate;
+    }
+    if contrast(bg, fg) < minimum {
+        return fg;
+    }
+    let (mut low, mut high) = (amount, 1.0);
+    for _ in 0..24 {
+        let mid = (low + high) * 0.5;
+        if contrast(bg, mix(mid)) >= minimum {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    mix(high)
+}
+
 impl Kit {
     /// Derives surfaces, text, borders, states and elevation from three theme colours.
-    /// Appearance is dark when `fg` is lighter than `bg`. Colours mix in linear light;
-    /// translucent hover/press tokens use Rune's native blending (`blend_over: None`).
+    /// Appearance is dark when `fg` is lighter than `bg`. Secondary text mixes in OKLab,
+    /// with contrast floors of 4.5:1 (muted) and 3:1 (faint) when `fg` supports them.
+    /// Surfaces and translucent hover/press tokens use native linear-light blending.
     ///
     /// ```
     /// use rune::{Color, color::hex};
@@ -32,8 +62,8 @@ impl Kit {
         let dark = fg.luminance() > bg.luminance();
         let mut kit = Kit::neutral(dark);
         let layer = |amount| bg.mix(fg, amount);
-        let muted = layer(0.60);
-        let faint = layer(0.40);
+        let muted = secondary(bg, fg, 0.60, 4.5);
+        let faint = secondary(bg, fg, if dark { 0.48 } else { 0.40 }, 3.0);
         let border = layer(0.16);
         let raised = layer(0.035);
         let hover = fg.alpha(0.06);
@@ -133,5 +163,26 @@ impl Kit {
             recolor(shadows);
         }
         kit
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rune::color::hex;
+
+    #[test]
+    fn secondary_text_is_readable_on_light_dark_and_middle_backgrounds() {
+        for (bg, fg) in [("#ffffff", "#000000"), ("#101010", "#ffffff"), ("#767676", "#000000"), ("#767676", "#ffffff")]
+        {
+            let (bg, fg) = (hex(bg).unwrap(), hex(fg).unwrap());
+            let kit = Kit::from_palette(PaletteSeed { bg, fg, accent: fg });
+            assert!(contrast(bg, kit.c.text_muted) >= 4.5, "muted on {}", bg.hex());
+            assert!(contrast(bg, kit.c.text_faint) >= 3.0, "faint on {}", bg.hex());
+            assert!(contrast(bg, kit.c.text_faint) <= contrast(bg, kit.c.text_muted));
+            if kit.dark && bg.luminance() < 0.02 {
+                assert!(kit.c.text_muted.luminance() < fg.luminance() * 0.5, "dark muted must look dimmer");
+            }
+        }
     }
 }
