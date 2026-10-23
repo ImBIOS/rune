@@ -79,14 +79,41 @@ impl<S: 'static> Runtime<S> {
     /// `bottom`: layout's offset keeps the content's target bottom on the viewport's target
     /// bottom, but while either is still animating (the viewport resizing under a banner)
     /// that would jump the rows and slide them back. This keeps the presented edges together.
+    ///
+    /// Rows that sat on the bottom hold it as the content crosses between overflowing and
+    /// fitting: while they still end on the bottom (`justify_end`), or until the content's top
+    /// would carry them above it, after which they ride the content's top. The offset goes
+    /// negative while fitting rows sit low in a box that has not shrunk yet.
     pub(super) fn stuck_offset(&self, i: usize, bottom: f32) -> Option<f64> {
         let n = &self.nodes[i];
-        let st = self.scrolls.get(&n.id).filter(|st| st.pinned && st.max > 0.0)?;
+        let st = self.scrolls.get(&n.id).filter(|st| st.pinned)?;
         if !n.scroll.is_some_and(|s| s.stick_bottom) { return None; }
         let c = (i + 1..self.nodes.len()).find(|&j| self.nodes[j].parent == Some(i))?;
+        let lag = self.stuck_lag(i, c, bottom)?;
+        // How far the rows end above the bottom in the layout (negative past it), beside the
+        // stack's own bottom padding and border.
+        let pad = self.stacks.get(&self.nodes[c].id).map_or(0.0, |s| (s.pad_bottom - self.nodes[c].inset[3]).max(0.0));
+        let short = f64::from(n.target[3] - (self.nodes[c].target[3] - pad));
+        if st.held && (short <= 0.5 || lag - short >= -0.5) {
+            Some(self.scroll_overflow(i) + lag)
+        } else if st.max > 0.0 {
+            Some((st.max + lag).max(0.0))
+        } else {
+            None
+        }
+    }
+
+    /// The offset that draws viewport `i`'s content bottom on its presented bottom `bottom`.
+    pub(super) fn bottom_offset(&self, i: usize, bottom: f32) -> Option<f64> {
+        let c = (i + 1..self.nodes.len()).find(|&j| self.nodes[j].parent == Some(i))?;
+        Some(self.scroll_overflow(i) + self.stuck_lag(i, c, bottom)?)
+    }
+
+    /// How much further content `c` of viewport `i` has to travel to its layout than the
+    /// viewport's presented bottom `bottom` has.
+    fn stuck_lag(&self, i: usize, c: usize, bottom: f32) -> Option<f64> {
         let top = self.scene.presented(self.nodes[c].id)?.rect.edges()[1];
-        let lag = (top - self.nodes[c].target[1]) - (bottom - n.target[3]);
-        Some((st.max + f64::from(lag)).max(0.0))
+        Some(f64::from((top - self.nodes[c].target[1]) - (bottom - self.nodes[i].target[3])))
     }
 
     /// Queues `on_at_bottom` for viewports whose at-bottom state changed this frame.
@@ -288,3 +315,4 @@ mod tests {
         }
     }
 }
+

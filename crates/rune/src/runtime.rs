@@ -335,6 +335,8 @@ struct ScrollState {
     glide: Option<f32>,
     /// At-bottom state last sent to `El::on_at_bottom`.
     at_bottom: Option<bool>,
+    /// Whether the last frame drew the content's bottom on the viewport's (see `stuck_offset`).
+    held: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2177,6 +2179,7 @@ impl<S: 'static> Runtime<S> {
                     scrolling: false,
                     glide: None,
                     at_bottom: None,
+                    held: false,
                 });
                 if tx.settle && sp.stick_bottom {
                     e.pinned = true;
@@ -2327,23 +2330,29 @@ impl<S: 'static> Runtime<S> {
         Some(f64::from(stack.pad_top) + rows + f64::from(stack.pad_bottom))
     }
 
+    /// How far scroll viewport `i`'s content reaches past its bottom, negative while it fits.
+    fn scroll_overflow(&self, i: usize) -> f64 {
+        let view = self.nodes[i].target;
+        let content = (i + 1..self.nodes.len()).find(|&j| self.nodes[j].parent == Some(i));
+        let content_h = content.map_or(0.0, |c| {
+            let n = &self.nodes[c];
+            let top = n.target[1] - view[1];
+            f64::from(top) + self.stack_extent(c).unwrap_or(f64::from(n.target[3] - n.target[1]))
+        });
+        content_h - f64::from(view[3] - view[1])
+    }
+
     fn step_scroll(&mut self, dt: f32) -> bool {
         let mut moving = false;
         for i in 0..self.nodes.len() {
             let Some(sp) = self.nodes[i].scroll else { continue };
             if self.subtree_exiting(i) { continue; }
             let id = self.nodes[i].id;
-            let view_h = self.nodes[i].target[3] - self.nodes[i].target[1];
-            let content = (i + 1..self.nodes.len()).find(|&j| self.nodes[j].parent == Some(i));
-            let content_h = content.map_or(0.0, |c| {
-                let n = &self.nodes[c];
-                let top = n.target[1] - self.nodes[i].target[1];
-                f64::from(top) + self.stack_extent(c).unwrap_or(f64::from(n.target[3] - n.target[1]))
-            });
+            let overflow = self.scroll_overflow(i);
             let Some(st) = self.scrolls.get_mut(&id) else { continue };
             st.scrolling = st.direct || st.v.abs() > 1.0;
             st.direct = false;
-            st.max = (content_h - f64::from(view_h)).max(0.0);
+            st.max = overflow.max(0.0);
             if st.pinned && sp.stick_bottom {
                 st.offset = st.max;
                 st.v = 0.0;
@@ -3419,7 +3428,10 @@ impl<S: 'static> Runtime<S> {
                 && let Some(st) = self.scrolls.get(&n.id)
             {
                 let origin = self.virtuals.values().find(|v| v.scroll_path == n.path).map_or(0.0, |v| f64::from(v.before));
-                dy -= grid((self.stuck_offset(i, p.rect.edges()[3]).unwrap_or(st.offset) - origin) as f32, s);
+                let offset = self.stuck_offset(i, p.rect.edges()[3]).unwrap_or(st.offset);
+                let held = self.bottom_offset(i, p.rect.edges()[3]).is_some_and(|b| (offset - b).abs() < 0.5);
+                dy -= grid((offset - origin) as f32, s);
+                if let Some(st) = self.scrolls.get_mut(&self.nodes[i].id) { st.held = held; }
             }
             inherit_fade(&mut hit_fade, &mut hit_origin, fade_origin, fade);
             self.inh_scratch[i] = Inh { opacity: effective_opacity, paint_opacity: o,

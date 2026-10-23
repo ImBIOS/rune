@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Stuck scrolls hold their bottom across fitting and overflowing**.
+  When a stick-to-bottom scroll's content goes between overflowing its viewport and fitting it
+  while the viewport resizes, the rows no longer jump by the size change and slide back.
+  Bottom-aligned rows (`justify_end` in a filling stack) stay on the bottom edge every frame;
+  top-aligned rows glide between the bottom and the top. A row added to a bottom-aligned stack
+  that fits now pushes the rows above it up as it grows, where they used to jump up first.
+  Settled frames and `--snap` goldens are unchanged.
 - **Linux portal shortcuts use zbus 6.** zbus 5's zvariant, zbus_names and zvariant_derive are
   flagged unmaintained (RUSTSEC-2026-0370, -0371, -0372) and no longer appear in Rune's default
   dependency graph. Linux builds need Rust 1.89 or newer. The opt-in `native-file-dialog` feature
