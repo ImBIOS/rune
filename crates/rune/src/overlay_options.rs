@@ -126,6 +126,7 @@ pub struct ConfiguredOverlay<T: 'static> {
     pub(crate) poll: Option<fn(&mut T, f64, &mut crate::Tx) -> bool>,
     pub(crate) on_focus: Option<fn(&mut T, bool, &mut crate::Tx)>,
     pub(crate) compositor: Option<Box<dyn crate::compose::Compositor<T>>>,
+    pub(crate) setup: Option<fn(&mut T, crate::Waker)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -150,6 +151,12 @@ impl<T: 'static> ConfiguredOverlay<T> {
         self
     }
     pub fn on_key(mut self, f: fn(&mut T, &crate::KeyEvent, &mut crate::Tx) -> bool) -> Self { self.on_key = Some(f); self }
+    /// Like `AppSpec::setup`: called once with a waker other threads use when new data arrives
+    /// (an `ImageCache` decode, a channel). It runs on the event thread when the event loop
+    /// starts, before the overlay's first frame and before updates queued through its handle.
+    /// Waking a shown overlay draws a frame, which polls; a hidden one runs a frame without
+    /// drawing. Headless runs don't create overlays, so they don't call it.
+    pub fn setup(mut self, f: fn(&mut T, crate::Waker)) -> Self { self.setup = Some(f); self }
     /// Called once on the event thread after native creation, before the first show.
     /// Use `prewarm: true` to create at startup rather than waiting for `show()`.
     pub fn on_created(mut self, f: impl FnOnce(OverlayCreated) + 'static) -> Self { self.on_created = Some(Box::new(f)); self }
@@ -161,7 +168,7 @@ impl<T: 'static> OverlaySpec<T> {
     }
 
     pub fn options(self, options: OverlayOptions) -> ConfiguredOverlay<T> {
-        ConfiguredOverlay { spec: self, options, on_key: None, on_created: None, poll: None, on_focus: None, compositor: None }
+        ConfiguredOverlay { spec: self, options, on_key: None, on_created: None, poll: None, on_focus: None, compositor: None, setup: None }
     }
 }
 

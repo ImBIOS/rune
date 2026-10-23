@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`ConfiguredOverlay::setup(fn(&mut T, Waker))`**, like `AppSpec::setup`, so an overlay can
+  build its own `ImageCache` or channel instead of borrowing the main window's waker. It runs
+  once on the event thread when the loop starts, before the overlay's first frame and before
+  updates queued on its handle. A wake re-runs the overlay's view: a shown overlay draws a
+  frame, which polls, and a hidden one runs a frame without drawing. Headless runs don't
+  create overlays, so they don't call it.
 - **`Cursor::Crosshair` and `Cursor::Hidden`.** A crosshair for picking a point or dragging out
   a rect, and no OS cursor for views that draw their own. Windows set them, and overlays now
   set an element's `Cursor` too (before, they left the OS cursor alone) while the pointer is

@@ -93,12 +93,14 @@ struct Requests<T> {
     margin: Option<f32>,
     align: Option<(Align, f32)>,
     size: Option<(f32, f32)>,
+    /// The `setup` waker fired.
+    woken: bool,
     updates: Vec<Update<T>>,
 }
 
 impl<T> Default for Requests<T> {
     fn default() -> Self {
-        Requests { input: None, follow_pointer: None, placement: None, display: None, request_keys: false, visible: None, edge: None, margin: None, align: None, size: None, updates: Vec::new() }
+        Requests { input: None, follow_pointer: None, placement: None, display: None, request_keys: false, visible: None, edge: None, margin: None, align: None, size: None, woken: false, updates: Vec::new() }
     }
 }
 
@@ -228,6 +230,7 @@ struct Live {
 
 pub(crate) struct Overlay<T: 'static> {
     on_created: Option<Box<dyn FnOnce(crate::OverlayCreated)>>,
+    setup: Option<fn(&mut T, Waker)>,
     pending_input: Option<OverlayInput>,
     visible: bool,
     options: OverlayOptions,
@@ -265,7 +268,7 @@ pub(crate) struct Overlay<T: 'static> {
 
 impl<T: 'static> Overlay<T> {
     pub(crate) fn new<S>(configured: impl Into<ConfiguredOverlay<T>>, state: T, app: &AppSpec<S>) -> (Self, OverlayHandle<T>) {
-        let ConfiguredOverlay { spec, options, on_key, on_created, poll, on_focus, compositor } = configured.into();
+        let ConfiguredOverlay { spec, options, on_key, on_created, poll, on_focus, compositor, setup } = configured.into();
         let shared = Arc::new(Shared { native: Mutex::default(), requests: Mutex::default(), availability: AtomicU8::new(0), wake: Mutex::new(None) });
         let text = TextSystem::new(app.fonts, app.families);
         let mut rt = Runtime::with_text(state, spec.view, spec.size, Env::default(), text);
@@ -282,6 +285,7 @@ impl<T: 'static> Overlay<T> {
         }));
         let overlay = Overlay {
             on_created,
+            setup,
             pending_input: None,
             visible: false,
             options,
@@ -841,19 +845,24 @@ impl<T: 'static> Overlay<T> {
         if let Some(Live { backing: Backing::Layer(layer), .. }) = &mut self.live { layer.commit(); }
     }
 
-    fn apply_updates(&mut self, updates: Vec<Update<T>>) {
-        if updates.is_empty() { return; }
+    fn advance(&mut self) {
+        self.advance_at(Instant::now());
+    }
+
+    /// Handle updates, and the `setup` waker (new data arrived) re-runs the view. A shown
+    /// overlay draws a frame, which polls; a hidden one runs a frame without drawing, as for a
+    /// due timer.
+    fn apply_wake(&mut self, woken: bool, updates: Vec<Update<T>>) {
+        let updated = !updates.is_empty();
         for f in updates { self.rt.update(f); }
+        if woken { self.rt.invalidate(); }
+        if !woken && !updated { return; }
         self.clipboard.flush(&mut self.rt);
         self.dirty = true; // Queued updates already invalidate the cache before polling.
         if !self.visible {
             // Register timer requests even before the first show; hidden overlays never draw.
             self.advance();
         }
-    }
-
-    fn advance(&mut self) {
-        self.advance_at(Instant::now());
     }
 
     fn advance_at(&mut self, now: Instant) {
@@ -912,7 +921,7 @@ impl<T: 'static> Overlay<T> {
         if recreate_layer { self.hide(); }
         if let Some(placement) = requests.placement { self.options.placement = placement; }
         if let Some(display) = requests.display { self.options.display = display; }
-        self.apply_updates(requests.updates);
+        self.apply_wake(requests.woken, requests.updates);
         let mut at = self.at;
         at.edge = requests.edge.unwrap_or(at.edge);
         at.margin = requests.margin.unwrap_or(at.margin);
@@ -1317,6 +1326,13 @@ impl<T: 'static> PendingOverlay for Overlay<T> {
         self.clipboard.connect(wake.clone());
         self.gpu_pool = gpu;
         *self.shared.wake.lock().unwrap() = Some(wake.clone());
+        if let Some(setup) = self.setup.take() {
+            let shared = self.shared.clone();
+            setup(&mut self.rt.state, Arc::new(move || {
+                let first = !std::mem::replace(&mut shared.requests.lock().unwrap().woken, true);
+                if first { shared.wake(); }
+            }));
+        }
         // Requests made before the loop existed.
         wake();
     }
@@ -1674,14 +1690,14 @@ mod tests {
             assert_eq!(overlay.rt.presented("box").unwrap().0[2], 12.0);
             overlay.advance();
             assert!(!overlay.dirty, "an unchanged hidden poll preserves the prepared frame");
-            if stale { overlay.apply_updates(vec![Box::new(|s, _| s.width = 16.0)]); }
+            if stale { overlay.apply_wake(false, vec![Box::new(|s, _| s.width = 16.0)]); }
             overlay.rt.state.enter = true; // External event observed by the next hidden poll.
             if queued {
                 // Scrawl's original kick: a no-op update invalidates the prepared frame
                 // before the hidden poll commits B and requests show.
                 handle.update(|_, _| {});
                 let updates = std::mem::take(&mut handle.shared.requests.lock().unwrap().updates);
-                overlay.apply_updates(updates);
+                overlay.apply_wake(false, updates);
                 assert!(overlay.dirty);
             } else {
                 overlay.advance();
@@ -1848,7 +1864,7 @@ mod tests {
         overlay.rt.wall_start = None;
         handle.update(|_, tx| tx.wake_after(Duration::from_millis(250)));
         let updates = std::mem::take(&mut overlay.shared.requests.lock().unwrap().updates);
-        overlay.apply_updates(updates);
+        overlay.apply_wake(false, updates);
         assert_eq!(overlay.rt.state, [0.0]);
         assert_eq!(overlay.rt.wake_deadline(), Some(0.25));
         let start = Instant::now();
@@ -1916,6 +1932,81 @@ mod tests {
         assert!(different.rt.poll.is_none(), "never apply a poll to a different state type");
         different.rt.frame(0.0);
         assert_eq!(different.rt.state, 0);
+    }
+
+    #[test]
+    fn overlay_setup_runs_once_with_a_waker_that_redraws_the_overlay() {
+        use std::sync::atomic::AtomicUsize;
+        use std::time::Duration;
+        #[derive(Default)]
+        struct State { setups: usize, polls: usize, cache: Option<crate::image::ImageCache>, icon: Option<crate::image::Image>, saw_icon: std::cell::Cell<bool> }
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            s.saw_icon.set(s.icon.as_ref().is_some_and(|i| i.is_ready()));
+            crate::el()
+        }
+        let app = AppSpec { families: ("sans-serif", "monospace"), ..AppSpec::new("setup", (30.0, 20.0), State::default, view) };
+        let configured = OverlaySpec::new("setup", app.size, view).options(Default::default())
+            .setup(|s, waker| { s.setups += 1; s.cache = Some(crate::image::ImageCache::new(waker)); })
+            .poll(|s, _, _| { s.polls += 1; false });
+        let (mut overlay, _) = Overlay::new(configured, State::default(), &app);
+        overlay.rt.wall_start = None;
+        assert_eq!(overlay.rt.state.setups, 0, "not before the event loop");
+        let loop_wakes = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let counter = loop_wakes.clone();
+        let wake: Waker = Arc::new(move || { counter.fetch_add(1, Ordering::SeqCst); let _ = tx.send(()); });
+        overlay.connect(wake.clone(), Arc::new(|| {}), Rc::default());
+        overlay.connect(wake, Arc::new(|| {}), Rc::default());
+        assert_eq!(overlay.rt.state.setups, 1, "setup runs once");
+        while rx.try_recv().is_ok() {}
+        let take = |overlay: &mut Overlay<State>| std::mem::take(&mut *overlay.shared.requests.lock().unwrap());
+        let _ = take(&mut overlay);
+
+        // Hidden: the overlay has laid out without the icon; a background decode wakes the
+        // loop, and the overlay re-runs the view in a frame without drawing.
+        overlay.advance();
+        assert!(!overlay.rt.state.saw_icon.get());
+        let state = &mut overlay.rt.state;
+        state.icon = Some(state.cache.as_ref().unwrap().rgba(1, 1, vec![20, 40, 60, 255]));
+        rx.recv_timeout(Duration::from_secs(5)).expect("the decode wakes the event loop");
+        let requests = take(&mut overlay);
+        assert!(requests.woken);
+        overlay.apply_wake(requests.woken, requests.updates);
+        assert!(overlay.rt.state.saw_icon.get(), "the view saw the decoded image");
+        let polls = overlay.rt.state.polls;
+
+        // Shown: the next wake schedules a frame that re-runs the view.
+        overlay.visible = true;
+        overlay.rt.state.icon = None;
+        overlay.rt.invalidate();
+        overlay.advance();
+        assert!(!overlay.rt.state.saw_icon.get());
+        overlay.dirty = false;
+        overlay.idle = true;
+        let polls_shown = overlay.rt.state.polls;
+        let state = &mut overlay.rt.state;
+        state.icon = Some(state.cache.as_ref().unwrap().rgba(1, 1, vec![60, 40, 20, 255]));
+        rx.recv_timeout(Duration::from_secs(5)).expect("the decode wakes the event loop");
+        let requests = take(&mut overlay);
+        overlay.apply_wake(requests.woken, requests.updates);
+        assert!(overlay.dirty, "a shown overlay draws a frame");
+        assert_eq!(overlay.rt.state.polls, polls_shown, "the drawn frame owns the poll");
+        overlay.advance(); // the drawn frame
+        assert!(overlay.rt.state.saw_icon.get(), "the view saw the decoded image");
+        assert!(polls >= 1);
+
+        // Wakes before the loop drains them coalesce into one loop wake.
+        while rx.try_recv().is_ok() {}
+        let before = loop_wakes.load(Ordering::SeqCst);
+        let state = &mut overlay.rt.state;
+        let cache = state.cache.as_ref().unwrap();
+        let _a = cache.rgba(1, 1, vec![1, 2, 3, 255]);
+        let _b = cache.rgba(1, 1, vec![4, 5, 6, 255]);
+        rx.recv_timeout(Duration::from_secs(5)).expect("the decodes wake the event loop");
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(loop_wakes.load(Ordering::SeqCst), before + 1, "one loop wake until the overlay takes it");
+        assert!(take(&mut overlay).woken);
+        assert!(loop_wakes.load(Ordering::SeqCst) >= 2);
     }
 
     #[test]
