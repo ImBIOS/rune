@@ -660,6 +660,7 @@ impl TextSystem {
             self.math.get(&mut self.font_cx.collection, fallback::MATH_FONT_FILES, fallback::MATH_FAMILIES);
         }
         let math = self.math.loaded();
+        let emoji = self.symbol_families.iter().position(|f| f.contains("Emoji")).map_or(&[][..], |i| &self.symbol_families[i..=i]);
         let with_symbols = |primary| {
             FontFamilyName::parse_css_list(primary)
                 .flatten()
@@ -681,7 +682,7 @@ impl TextSystem {
             .routes
             .iter()
             .filter_map(|(range, route)| {
-                let fonts = match route { Route::Math => math };
+                let fonts = match route { Route::Math => math, Route::Emoji => emoji };
                 if fonts.is_empty() {
                     return None;
                 }
@@ -1165,6 +1166,30 @@ mod tests {
         assert_eq!(routes, vec![(2..10, Route::Math), (13..17, Route::Math)]);
         fallback::routes("plain ascii", &mut routes);
         assert!(routes.is_empty());
+        let (heart, flag) = ("❤\u{FE0F}", "🏳\u{FE0F}\u{200D}🌈");
+        fallback::routes(&format!("a{heart}❤{flag}"), &mut routes);
+        let flag_at = 1 + heart.len() + '❤'.len_utf8();
+        assert_eq!(routes, vec![(1..1 + heart.len(), Route::Emoji), (flag_at..flag_at + flag.len(), Route::Emoji)]);
+    }
+
+    /// `U+FE0F` asks for the colour emoji even when a text font has the base character; without
+    /// it the text form stays.
+    #[test]
+    fn emoji_presentation_selector_draws_in_colour() {
+        let mut ts = TextSystem::default();
+        if !ts.symbol_families.iter().any(|f| f.contains("Emoji")) {
+            eprintln!("skipping: no colour emoji font installed");
+            return;
+        }
+        let colour = |ts: &mut TextSystem, text: &str| {
+            let layout = ts.layout_rich(text, &[], TextStyle::new(13.0, 400.0), 2.0, None);
+            let mut quads = Vec::new();
+            ts.glyphs_for_layout(&layout, 2.0, [0.0, 0.0], false, &mut quads);
+            quads.iter().filter(|q| q.color != 0).count()
+        };
+        assert_eq!(colour(&mut ts, "a❤\u{FE0F}b ☀\u{FE0F} ✔\u{FE0F}"), 3);
+        assert_eq!(colour(&mut ts, "a❤b ☺\u{FE0E}"), 0);
+        assert_eq!(colour(&mut ts, "🏳\u{FE0F}\u{200D}🌈 👩🏽\u{200D}💻"), 2, "ZWJ sequences stay one image each");
     }
 
     /// Each glyph's ink top and bottom in px above the baseline, with its run's weight axis.

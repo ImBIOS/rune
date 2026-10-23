@@ -5,6 +5,7 @@
 use std::ops::Range;
 
 use parley::fontique::Collection;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Why a byte range is routed ahead of the style's own fonts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12,6 +13,9 @@ pub(super) enum Route {
     /// Mathematical Alphanumeric Symbols: one math font for a whole formula, so bold, italic
     /// and script letters don't mix designs when an earlier fallback covers a few of them.
     Math,
+    /// A grapheme asking for emoji presentation with `U+FE0F` (`❤️`, `☀️`, `✔️`): the colour
+    /// emoji font first, so a text font with a plain `❤` doesn't take it.
+    Emoji,
 }
 
 // Math alphanumerics and other symbol blocks. Loaded only when a text has a character in
@@ -119,12 +123,20 @@ pub(super) fn routes(text: &str, out: &mut Vec<(Range<usize>, Route)>) {
     if text.is_ascii() {
         return;
     }
-    for (i, ch) in text.char_indices() {
-        let route = if is_math_alphanumeric(ch) { Route::Math } else { continue };
-        let end = i + ch.len_utf8();
-        match out.last_mut() {
-            Some((range, r)) if *r == route && range.end == i => range.end = end,
-            _ => out.push((i..end, route)),
+    let mut push = |range: Range<usize>, route| match out.last_mut() {
+        Some((last, r)) if *r == route && last.end == range.start => last.end = range.end,
+        _ => out.push((range, route)),
+    };
+    // Whole graphemes, so a ZWJ sequence with an `FE0F` inside keeps one font.
+    for (i, g) in text.grapheme_indices(true) {
+        if g.contains('\u{FE0F}') {
+            push(i..i + g.len(), Route::Emoji);
+            continue;
+        }
+        for (j, ch) in g.char_indices() {
+            if is_math_alphanumeric(ch) {
+                push(i + j..i + j + ch.len_utf8(), Route::Math);
+            }
         }
     }
 }

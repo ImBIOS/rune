@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Emoji with `U+FE0F` draw in colour.** `❤️`, `☀️`, `✔️` and other characters a text font also
+  has use the colour emoji font when the emoji selector follows them; without it they keep their
+  text form, as before.
 - **The caret and backspace step over whole graphemes.** Arrows, Shift-arrows and Backspace treat
   a ZWJ family, a flag or a skin-toned hand as one character instead of splitting its code points.
 - **Inline code chips draw as one rect.** Touching span backgrounds on a line merge even when
