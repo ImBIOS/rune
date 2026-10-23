@@ -61,7 +61,7 @@ mod sealed { pub trait Sealed {} }
 /// Latest-wins text for a fixed layout box. Equal strings do not wake subscribers.
 /// Unlike numeric Live publication, text publication takes a short mutex and may allocate.
 #[derive(Clone)]
-pub struct LiveText { text: Arc<Mutex<Arc<str>>>, source: Arc<Source> }
+pub struct LiveText { text: Arc<Mutex<Arc<str>>>, pub(crate) source: Arc<Source> }
 impl std::fmt::Debug for LiveText {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LiveText").finish_non_exhaustive()
@@ -78,16 +78,15 @@ impl LiveText {
             let mut current = self.text.lock().unwrap();
             if *current == text { return false; }
             *current = text;
-            self.source().value.fetch_add(1, Ordering::Release);
+            self.source.value.fetch_add(1, Ordering::Release);
         }
-        self.source().notify();
+        self.source.notify();
         true
     }
-    pub(crate) fn source(&self) -> &Arc<Source> { &self.source }
     pub(crate) fn read(&self, seen: &mut Option<u128>) -> Option<Arc<str>> {
-        if *seen == Some(self.source().value.load(Ordering::Acquire)) { return None; }
+        if *seen == Some(self.source.value.load(Ordering::Acquire)) { return None; }
         let text = self.text.lock().unwrap();
-        *seen = Some(self.source().value.load(Ordering::Acquire));
+        *seen = Some(self.source.value.load(Ordering::Acquire));
         Some(text.clone())
     }
 }
@@ -124,11 +123,10 @@ impl LiveValue for [f32; 4] {
     }
 }
 impl LiveValue for Color {
-    fn encode(self) -> Option<u128> {
-        Some(self.r.encode()? | (self.g.encode()? << 32) | (self.b.encode()? << 64) | (self.a.encode()? << 96))
-    }
+    fn encode(self) -> Option<u128> { [self.r, self.g, self.b, self.a].encode() }
     fn decode(bits: u128) -> Self {
-        Self { r: f32::decode(bits), g: f32::decode(bits >> 32), b: f32::decode(bits >> 64), a: f32::decode(bits >> 96) }
+        let [r, g, b, a] = <[f32; 4]>::decode(bits);
+        Self { r, g, b, a }
     }
 }
 
@@ -333,11 +331,6 @@ mod tests {
         live.set(102.0);
         assert_eq!(count.load(Ordering::Relaxed), 2);
     }
-}
-
-#[cfg(test)]
-mod nonfinite_tests {
-    use super::*;
 
     #[test]
     fn non_finite_values_never_panic() {

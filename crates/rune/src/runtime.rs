@@ -743,7 +743,7 @@ impl<S: 'static> Runtime<S> {
         for sub in &self.live_subscriptions { sub.active.store(false, Ordering::Release); }
         for node in &self.nodes {
             if self.is_exiting(node.id) { continue; }
-            let text = node.text.as_ref().and_then(|t| t.live.as_ref()).map(|t| t.source());
+            let text = node.text.as_ref().and_then(|t| t.live.as_ref()).map(|t| &t.source);
             for source in node.live.iter().map(|b| &b.source).chain(text) {
                 if let Some(sub) = self.live_subscriptions.iter().find(|s| s.source_id == source.id()) {
                     sub.active.store(true, Ordering::Release);
