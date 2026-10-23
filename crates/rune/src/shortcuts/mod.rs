@@ -76,6 +76,14 @@ fn backend(wayland: bool, sink: Sink) -> Result<NativeBackend, ShortcutError> {
     { let _ = sink; Err(ShortcutError::Unsupported) }
 }
 
+/// The desktop's own claim on a chord. Only macOS publishes one (its symbolic hotkeys).
+fn system_owner(shortcut: &Shortcut) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    return macos::system_owner(shortcut);
+    #[cfg(not(target_os = "macos"))]
+    { let _ = shortcut; None }
+}
+
 // Keep native status mapping pure so tests can inject failures without grabbing the desktop.
 #[cfg(any(test, target_os = "macos", target_os = "windows"))]
 fn native_status(code: i64, conflict: i64) -> Result<(), ShortcutError> {
@@ -109,6 +117,15 @@ impl<S: 'static> crate::AppHandle<S> {
     /// Release a registration owned by this app. Already queued activations become no-ops.
     pub fn unregister_shortcut(&self, id: ShortcutId) -> Result<(), ShortcutError> {
         self.shared.shortcuts.unregister(id)
+    }
+
+    /// Who holds `shortcut`, when Rune or the desktop can say: this App or another Rune App in
+    /// the process (its title), or on macOS a system shortcut ("Spotlight", "Mission Control",
+    /// "macOS" for others). None when unknown, including other apps' Carbon, Win32, X11 and
+    /// portal grabs, before the app runs and for chords headless runs didn't register.
+    /// Ask after `ShortcutError::Conflict` to name the owner in a message.
+    pub fn shortcut_owner(&self, shortcut: &Shortcut) -> Option<String> {
+        self.shared.shortcuts.owner(shortcut)
     }
 
     /// Drain startup registration failures. Runtime methods return their errors directly.

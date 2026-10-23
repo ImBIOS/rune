@@ -31,6 +31,16 @@ let id = handle.register_shortcut("ctrl+alt+k".parse()?, |state, tx| {
 handle.unregister_shortcut(id)?;
 ```
 
+After a `Conflict`, `handle.shortcut_owner(&shortcut)` names the holder when Rune or
+the desktop knows it: this App or another Rune App in the process (its `AppSpec`
+title), or a macOS system shortcut ("Spotlight", "Mission Control", "Input Sources",
+"Screenshot", "App Switcher", "macOS" for other enabled symbolic hotkeys), at the chord
+the user remapped it to. The macOS lookup answers only on the main thread. A chord
+another Rune App in the process holds is refused with `Conflict` on every backend. Other apps'
+grabs, Windows, X11 and the portal name nobody, so it returns None. Headless runs
+answer only for their own virtual registrations. `ShortcutError::Conflict` itself is
+unchanged.
+
 Call runtime registration after the host starts (an `on_window` or queued
 `handle.update` callback works). Calls before startup or after shutdown return
 `NotRunning`. On macOS/Windows other threads may call it, but wait for the app

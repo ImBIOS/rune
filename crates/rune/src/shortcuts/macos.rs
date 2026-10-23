@@ -1,5 +1,6 @@
 //! Carbon hotkeys do not require Accessibility or Input Monitoring permission.
 use super::{Backend, Shortcut, ShortcutError, ShortcutId, Sink, native_status, parse::*};
+use objc2_core_foundation::{CFArray, CFBoolean, CFDictionary, CFNumber, CFPreferencesCopyAppValue, CFRetained, CFString, CFType};
 use std::{cell::RefCell, collections::HashMap, ffi::c_void, ptr};
 
 type Ref = *mut c_void;
@@ -60,10 +61,7 @@ impl Native {
 impl Backend for Native {
     fn register(&mut self, id: ShortcutId, shortcut: &Shortcut) -> Result<(), ShortcutError> {
         let code = keycode(shortcut.key_name()).ok_or_else(|| ShortcutError::InvalidAccelerator(shortcut.to_string()))?;
-        let mut mods = 0;
-        for (bit, carbon) in [(SUPER, 1 << 8), (SHIFT, 1 << 9), (ALT, 1 << 11), (CTRL, 1 << 12)] {
-            if shortcut.mods & bit != 0 { mods |= carbon; }
-        }
+        let mods = carbon_mods(shortcut);
         let mut hotkey = ptr::null_mut();
         // SAFETY: On the main thread; pointers are valid output slots and target is Carbon-owned.
         native_status(unsafe { RegisterEventHotKey(code, mods, HotKeyId { signature: SIGNATURE, id: id.0 },
@@ -91,6 +89,115 @@ impl Drop for Native {
     }
 }
 
+const CMD: u32 = 1 << 8;
+const SHIFT_KEY: u32 = 1 << 9;
+const OPTION: u32 = 1 << 11;
+const CONTROL: u32 = 1 << 12;
+fn carbon_mods(shortcut: &Shortcut) -> u32 {
+    [(SUPER, CMD), (SHIFT, SHIFT_KEY), (ALT, OPTION), (CTRL, CONTROL)].into_iter()
+        .filter(|(bit, _)| shortcut.mods & bit != 0).fold(0, |mods, (_, carbon)| mods | carbon)
+}
+
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    fn CopySymbolicHotKeys(out: *mut *const CFArray) -> i32;
+}
+
+/// Default system shortcuts that can be named: (com.apple.symbolichotkeys id holding a user's
+/// remapping, Carbon key code, Carbon modifiers, owner). The app switcher cannot be remapped.
+const SYSTEM: &[(Option<&str>, u32, u32, &str)] = &[
+    (Some("64"), 49, CMD, "Spotlight"),
+    (Some("65"), 49, CMD | OPTION, "Finder search"),
+    (Some("60"), 49, CONTROL, "Input Sources"),
+    (Some("61"), 49, CONTROL | OPTION, "Input Sources"),
+    (Some("28"), 20, CMD | SHIFT_KEY, "Screenshot"),
+    (Some("29"), 20, CONTROL | CMD | SHIFT_KEY, "Screenshot"),
+    (Some("30"), 21, CMD | SHIFT_KEY, "Screenshot"),
+    (Some("31"), 21, CONTROL | CMD | SHIFT_KEY, "Screenshot"),
+    (Some("184"), 23, CMD | SHIFT_KEY, "Screenshot"),
+    (Some("32"), 126, CONTROL, "Mission Control"),
+    (Some("33"), 125, CONTROL, "Mission Control"),
+    (Some("79"), 123, CONTROL, "Mission Control"),
+    (Some("81"), 124, CONTROL, "Mission Control"),
+    (None, 48, CMD, "App Switcher"),
+    (None, 48, CMD | SHIFT_KEY, "App Switcher"),
+];
+const MODS: u32 = CMD | SHIFT_KEY | OPTION | CONTROL;
+
+/// An enabled macOS symbolic hotkey on this chord: its name when it is a known shortcut assigned
+/// there (by default or remapped), otherwise "macOS". None off the main thread (HIToolbox).
+pub(super) fn system_owner(shortcut: &Shortcut) -> Option<String> {
+    objc2_foundation::MainThreadMarker::new()?;
+    let chord = (keycode(shortcut.key_name())?, carbon_mods(shortcut));
+    if !enabled_symbolic().contains(&chord) { return None; }
+    Some(named(chord, &remapped()).unwrap_or("macOS").into())
+}
+
+/// The known shortcut whose effective chord is this one: the user's remapping, else its default.
+fn named(chord: (u32, u32), remapped: &[(&str, Option<(u32, u32)>)]) -> Option<&'static str> {
+    SYSTEM.iter().find(|(id, code, mods, _)| {
+        let remap = id.and_then(|id| remapped.iter().find(|(r, _)| *r == id));
+        remap.map_or(Some((*code, *mods)), |(_, at)| *at) == Some(chord)
+    }).map(|(.., name)| *name)
+}
+
+/// Carbon's effective symbolic hotkeys, defaults included, as (key code, modifiers).
+fn enabled_symbolic() -> Vec<(u32, u32)> {
+    let mut array = ptr::null();
+    // SAFETY: Copy rule: a successful call returns a retained array, released by CFRetained.
+    let array = unsafe {
+        if CopySymbolicHotKeys(&mut array) != 0 { return Vec::new(); }
+        let Some(array) = ptr::NonNull::new(array.cast_mut()) else { return Vec::new() };
+        CFRetained::from_raw(array)
+    };
+    // SAFETY: Each element is a CFDictionary keyed by CFStrings, per HIToolbox's documentation.
+    let array = unsafe { array.cast_unchecked::<CFDictionary<CFString, CFType>>() };
+    let number = |d: &CFDictionary<CFString, CFType>, key: &CFString| d.get(key)
+        .and_then(|v| v.downcast::<CFNumber>().ok()).and_then(|n| n.as_i64());
+    // HIToolbox defines these keys as CFSTR literals, not exported symbols.
+    let [code, mods, enabled] = ["kHISymbolicHotKeyCode", "kHISymbolicHotKeyModifiers", "kHISymbolicHotKeyEnabled"].map(CFString::from_str);
+    let (code, mods) = (&*code, &*mods);
+    array.iter().filter(|d| d.get(&enabled).and_then(|v| v.downcast::<CFBoolean>().ok()).is_some_and(|b| b.as_bool()))
+        .filter_map(|d| Some((u32::try_from(number(&d, code)?).ok()?, number(&d, mods)? as u32 & MODS))).collect()
+}
+
+/// The user's remappings of the named ids: id and its chord now, None when unassigned or disabled.
+fn remapped() -> Vec<(&'static str, Option<(u32, u32)>)> {
+    let Some(all) = CFPreferencesCopyAppValue(&CFString::from_str("AppleSymbolicHotKeys"),
+        &CFString::from_str("com.apple.symbolichotkeys")).and_then(|v| v.downcast::<CFDictionary>().ok()) else { return Vec::new() };
+    // SAFETY: The preference is a property list: string keys, dictionary or other values.
+    let all = unsafe { all.cast_unchecked::<CFString, CFType>() };
+    let dict = |v: CFRetained<CFType>| v.downcast::<CFDictionary>().ok();
+    SYSTEM.iter().filter_map(|(id, ..)| {
+        let id = (*id)?;
+        let entry = dict(all.get(&CFString::from_str(id))?)?;
+        // SAFETY: As above, a property-list dictionary.
+        let entry = unsafe { entry.cast_unchecked::<CFString, CFType>() };
+        let enabled = entry.get(&CFString::from_str("enabled")).and_then(|v| v.downcast::<CFBoolean>().ok()).map(|b| b.as_bool());
+        let parameters = entry.get(&CFString::from_str("value")).and_then(dict).and_then(|value| {
+            // SAFETY: As above, a property-list dictionary.
+            unsafe { value.cast_unchecked::<CFString, CFType>() }.get(&CFString::from_str("parameters"))?.downcast::<CFArray>().ok()
+        });
+        // SAFETY: parameters is (character, key code, NSEvent modifier flags) as CFNumbers.
+        let parameters = parameters.as_deref().map(|p| unsafe { p.cast_unchecked::<CFType>() });
+        let at = |i| parameters?.get(i).and_then(|v| v.downcast::<CFNumber>().ok()).and_then(|n| n.as_i64());
+        Some((id, remap(enabled, at(1), at(2))?))
+    }).collect()
+}
+
+/// A remap entry's chord: None (unassigned) when disabled or its key code is 65535; no remap
+/// (outer None) when an enabled entry carries no chord.
+fn remap(enabled: Option<bool>, code: Option<i64>, flags: Option<i64>) -> Option<Option<(u32, u32)>> {
+    if enabled == Some(false) { return Some(None); }
+    let (code, flags) = (code?, flags?);
+    Some((code != 65535).then(|| (code as u32, ns_event_mods(flags as u32))))
+}
+
+fn ns_event_mods(flags: u32) -> u32 {
+    [(1 << 17, SHIFT_KEY), (1 << 18, CONTROL), (1 << 19, OPTION), (1 << 20, CMD)].into_iter()
+        .filter(|(bit, _)| flags & bit != 0).fold(0, |mods, (_, carbon)| mods | carbon)
+}
+
 pub(super) fn keycode(key: &str) -> Option<u32> {
     // Carbon virtual key codes (physical ANSI positions, matching winit KeyCode semantics).
     Some(match key {
@@ -108,4 +215,32 @@ pub(super) fn keycode(key: &str) -> Option<u32> {
         "left" => 123, "right" => 124, "down" => 125, "up" => 126,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn preference_modifiers_map_to_carbon_and_drop_fn() {
+        use super::*;
+        assert_eq!(ns_event_mods(1_179_648), CMD | SHIFT_KEY);
+        assert_eq!(ns_event_mods(8_650_752), CONTROL);
+        assert_eq!(ns_event_mods(786_432), CONTROL | OPTION);
+    }
+
+    #[test]
+    fn a_remapped_system_shortcut_is_named_at_its_new_chord_only() {
+        use super::*;
+        // Spotlight (id 64) moved from ⌘Space to ⌃⌥⌘K.
+        let moved = remap(Some(true), Some(40), Some(1_835_008)).unwrap();
+        assert_eq!(moved, Some((40, CMD | OPTION | CONTROL)));
+        assert_eq!(named((40, CMD | OPTION | CONTROL), &[("64", moved)]), Some("Spotlight"));
+        assert_eq!(named((49, CMD), &[("64", moved)]), None);
+        assert_eq!(named((49, CMD), &[]), Some("Spotlight"));
+        // Disabled or unassigned: no chord, so the default no longer names it.
+        assert_eq!(remap(Some(false), Some(49), Some(1_048_576)), Some(None));
+        assert_eq!(remap(None, Some(65535), Some(0)), Some(None));
+        assert_eq!(named((49, CMD), &[("64", None)]), None);
+        // An enabled entry without parameters is no remap.
+        assert_eq!(remap(Some(true), None, None), None);
+    }
 }

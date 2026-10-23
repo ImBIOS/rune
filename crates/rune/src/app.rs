@@ -59,6 +59,8 @@ pub struct App<S: 'static> {
 
 impl<S: 'static> App<S> {
     pub fn new(spec: AppSpec<S>) -> Self {
+        let shared: Arc<Shared<S>> = Arc::default();
+        shared.shortcuts.named(spec.title);
         App {
             #[cfg(all(feature = "dev", debug_assertions))]
             dev: None,
@@ -72,7 +74,7 @@ impl<S: 'static> App<S> {
             keep_running: false,
             on_close: None,
             on_focus: None,
-            shared: Arc::default(),
+            shared,
             overlays: Vec::new(),
             on_window: None,
             on_ready: None,

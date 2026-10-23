@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`AppHandle::shortcut_owner(&Shortcut)`** names who holds a chord after a
+  `ShortcutError::Conflict`, when Rune or the desktop knows: this App or another Rune App in
+  the process (its title), or on macOS an enabled system shortcut ("Spotlight", "Mission
+  Control", or "macOS" for unnamed ones), named at the user's remapped chord. None otherwise,
+  and headless runs never ask the desktop. `Conflict` is still a unit variant. Registering a
+  chord another Rune App in the process holds now returns `Conflict` on every backend, the
+  portal included. No output change.
 - **Keyboard focus scrolls into view.** Tab, Shift-Tab, arrows, Home, End and type-select
   reveal the control they reach inside its scroll view, as `Tx::scroll_into_view` does, so
   focus never moves off-screen.

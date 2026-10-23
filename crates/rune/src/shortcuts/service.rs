@@ -2,7 +2,7 @@ use super::{Shortcut, ShortcutError, ShortcutId, Sink, NativeBackend};
 #[cfg(test)]
 use super::Backend;
 use crate::{Tx, app::Shared, runtime::Waker};
-use std::{collections::HashMap, rc::Rc, sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}}, thread::ThreadId};
+use std::{collections::HashMap, rc::Rc, sync::{Arc, Mutex, OnceLock, atomic::{AtomicU32, Ordering}}, thread::ThreadId};
 #[cfg(not(target_os = "linux"))]
 use std::cell::RefCell;
 #[cfg(not(target_os = "linux"))]
@@ -17,6 +17,9 @@ type Job = Box<dyn FnOnce(&mut Engine) + Send>;
 #[cfg(not(target_os = "linux"))]
 static NEXT_OWNER: AtomicUsize = AtomicUsize::new(1);
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
+/// Every App's native registrations in this process, with the App's title, so a conflict
+/// between two Apps can name its owner. Headless registrations stay out of it.
+static NATIVE: Mutex<Vec<(ShortcutId, Shortcut, &'static str)>> = Mutex::new(Vec::new());
 
 #[derive(Default)]
 struct Routing {
@@ -37,6 +40,7 @@ pub(crate) struct Hub<S> {
     pending: Mutex<Vec<Pending<S>>>,
     handlers: Arc<Mutex<HashMap<ShortcutId, Handler<S>>>>,
     errors: Mutex<Vec<ShortcutError>>,
+    title: OnceLock<&'static str>,
 }
 
 impl<S> Default for Hub<S> {
@@ -49,7 +53,7 @@ impl<S> Default for Hub<S> {
                 #[cfg(target_os = "linux")]
                 engine: Mutex::default(),
             }),
-            pending: Mutex::default(), handlers: Arc::default(), errors: Mutex::default(),
+            pending: Mutex::default(), handlers: Arc::default(), errors: Mutex::default(), title: OnceLock::new(),
         }
     }
 }
@@ -61,6 +65,7 @@ thread_local! {
 }
 
 struct Engine {
+    title: &'static str,
     headless: bool,
     wayland: bool,
     sink: Sink,
@@ -72,12 +77,15 @@ impl Engine {
     fn register(&mut self, id: ShortcutId, shortcut: Shortcut) -> Result<(), ShortcutError> {
         if self.registrations.values().any(|s| s == &shortcut) { return Err(ShortcutError::Conflict); }
         if !self.headless {
+            // Another App in this process holds it; some backends (the portal) wouldn't refuse.
+            if NATIVE.lock().unwrap().iter().any(|(_, s, _)| s == &shortcut) { return Err(ShortcutError::Conflict); }
             if self.native.is_none() { self.native = Some(super::backend(self.wayland, self.sink.clone())?); }
             if let Err(error) = self.native.as_mut().unwrap().register(id, &shortcut) {
                 if self.registrations.is_empty() { self.native = None; }
                 return Err(error);
             }
         }
+        if !self.headless { NATIVE.lock().unwrap().push((id, shortcut.clone(), self.title)); }
         self.registrations.insert(id, shortcut);
         Ok(())
     }
@@ -86,10 +94,30 @@ impl Engine {
         if !self.registrations.contains_key(&id) { return Err(ShortcutError::UnknownId); }
         if let Some(native) = self.native.as_mut() { native.unregister(id)?; }
         self.registrations.remove(&id);
+        NATIVE.lock().unwrap().retain(|(native, ..)| *native != id);
         // Drop the connection/listener when the last registration goes away.
         if self.registrations.is_empty() { self.native = None; }
         Ok(())
     }
+
+    /// Who holds `shortcut`: this App, another App in this process, or the platform.
+    /// Headless engines answer only for their own virtual registrations.
+    fn owner(&self, shortcut: &Shortcut) -> Option<String> {
+        if self.registrations.values().any(|s| s == shortcut) { return Some(self.title.into()); }
+        if self.headless { return None; }
+        let other = NATIVE.lock().unwrap().iter().find(|(_, s, _)| s == shortcut).map(|(.., title)| (*title).into());
+        other.or_else(|| super::system_owner(shortcut))
+    }
+
+    fn release(&mut self) {
+        self.native = None;
+        NATIVE.lock().unwrap().retain(|(id, ..)| !self.registrations.contains_key(id));
+        self.registrations.clear();
+    }
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) { self.release(); }
 }
 
 impl Control {
@@ -157,6 +185,13 @@ impl<S: 'static> Hub<S> {
 
     pub(super) fn errors(&self) -> Vec<ShortcutError> { std::mem::take(&mut self.errors.lock().unwrap()) }
 
+    pub(crate) fn named(&self, title: &'static str) { let _ = self.title.set(title); }
+
+    pub(super) fn owner(&self, shortcut: &Shortcut) -> Option<String> {
+        let shortcut = shortcut.clone();
+        self.control.invoke(move |engine| Ok(engine.owner(&shortcut))).ok().flatten()
+    }
+
     pub(crate) fn fire(&self, shortcut: &Shortcut) -> Result<(), ShortcutError> {
         let shortcut = shortcut.clone();
         self.control.invoke(move |engine| {
@@ -193,7 +228,8 @@ impl Guard {
             }
         });
         let control = shared.shortcuts.control.clone();
-        let engine = Engine { headless, wayland, sink, native: None, registrations: HashMap::new() };
+        let title = shared.shortcuts.title.get().copied().unwrap_or_default();
+        let engine = Engine { title, headless, wayland, sink, native: None, registrations: HashMap::new() };
         #[cfg(not(target_os = "linux"))]
         ENGINES.with(|engines| engines.borrow_mut().insert(control.key, Rc::new(RefCell::new(engine))));
         #[cfg(target_os = "linux")]
@@ -232,9 +268,7 @@ impl Drop for Guard {
         ENGINES.with(|engines| engines.borrow_mut().remove(&self.control.key));
         #[cfg(target_os = "linux")]
         if let Some(engine) = self.control.engine.lock().unwrap().take() {
-            let mut engine = engine.lock().unwrap();
-            engine.native = None;
-            engine.registrations.clear();
+            engine.lock().unwrap().release();
         }
         if let Some(cleanup) = self.cleanup.take() { cleanup(); }
     }
@@ -252,13 +286,46 @@ mod tests {
             fn unregister(&mut self, _: ShortcutId) -> Result<(), ShortcutError> { Ok(()) }
         }
         for error in [ShortcutError::Conflict, ShortcutError::Unsupported, ShortcutError::PermissionDenied, ShortcutError::Backend("disconnected".into())] {
-            let mut engine = Engine { headless: false, wayland: false, sink: Arc::new(|_, _| {}), native: Some(Box::new(Mock(error.clone()))), registrations: HashMap::new() };
+            let mut engine = Engine { title: "mock", headless: false, wayland: false, sink: Arc::new(|_, _| {}), native: Some(Box::new(Mock(error.clone()))), registrations: HashMap::new() };
             assert_eq!(engine.register(ShortcutId(1), "ctrl+a".parse().unwrap()), Err(error));
             assert!(engine.registrations.is_empty());
         }
         assert_eq!(super::super::native_status(-9878, -9878), Err(ShortcutError::Conflict));
         assert_eq!(super::super::native_status(1409, 1409), Err(ShortcutError::Conflict));
         assert!(matches!(super::super::native_status(5, 1409), Err(ShortcutError::Backend(_))));
+    }
+
+    #[test]
+    fn conflicts_name_the_app_that_holds_the_chord() {
+        struct Accept;
+        impl Backend for Accept {
+            fn register(&mut self, _: ShortcutId, _: &Shortcut) -> Result<(), ShortcutError> { Ok(()) }
+            fn unregister(&mut self, _: ShortcutId) -> Result<(), ShortcutError> { Ok(()) }
+        }
+        let chord: Shortcut = "ctrl+alt+shift+f17".parse().unwrap();
+        let native = |title| Engine { title, headless: false, wayland: false, sink: Arc::new(|_, _| {}), native: Some(Box::new(Accept)), registrations: HashMap::new() };
+        let (mut first, mut second) = (native("First"), native("Second"));
+        first.register(ShortcutId(u32::MAX - 1), chord.clone()).unwrap();
+        assert_eq!(second.register(ShortcutId(u32::MAX - 2), chord.clone()), Err(ShortcutError::Conflict),
+            "refused even when the backend accepts a same-process duplicate");
+        assert_eq!(first.owner(&chord).as_deref(), Some("First"));
+        assert_eq!(second.owner(&chord).as_deref(), Some("First"));
+        drop(first);
+        // Off the main thread the system lookup answers None, so the claim is gone entirely.
+        assert_eq!(second.owner(&chord), None, "a dropped App releases its claim");
+        second.register(ShortcutId(u32::MAX - 2), chord.clone()).unwrap();
+
+        let app = App::new(AppSpec::new("Owner", (10.0, 10.0), || (), |_, _| el()));
+        let handle = app.handle();
+        let chord: Shortcut = "ctrl+alt+o".parse().unwrap();
+        assert_eq!(handle.shortcut_owner(&chord), None, "not running");
+        let guard = Guard::attach(&app.shared, Arc::new(|| {}), true, false);
+        handle.register_shortcut(chord.clone(), |_, _| {}).unwrap();
+        assert_eq!(handle.register_shortcut(chord.clone(), |_, _| {}), Err(ShortcutError::Conflict));
+        assert_eq!(handle.shortcut_owner(&chord).as_deref(), Some("Owner"));
+        // Headless runs never ask the desktop, so stills are the same everywhere.
+        assert_eq!(handle.shortcut_owner(&"super+space".parse().unwrap()), None);
+        drop(guard);
     }
 
     #[test]
