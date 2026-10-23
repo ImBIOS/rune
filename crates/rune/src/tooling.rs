@@ -1005,6 +1005,21 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let mut rest_ms = Vec::new();
     let mut next_ev = 0;
     let mut last_down = (0.0f32, 0.0f32);
+    // Events at t = 0 find keys and hit elements in a laid-out first frame, as input reaches a
+    // real window only once it has drawn. That frame mounts the initial state with any queued
+    // updates; frame 0 then draws the events' effects.
+    let mut early_place = None;
+    if script.first().is_some_and(|e| e.t <= 1e-9) {
+        shortcuts.drain();
+        let requests = shared.take();
+        menus.drain();
+        for f in requests.updates {
+            rt.update(f);
+            menus.drain();
+        }
+        early_place = requests.place;
+        rt.frame(0.0);
+    }
 
     for k in 0..=last_frame {
         let real_t = k as f64 * dt;
@@ -1050,7 +1065,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         let step = if k == 0 { 0.0 } else { dt };
         let mut animating = rt.frame(step);
         // Updates, poll and input handlers place too; the latest request this frame wins.
-        if let Some(place) = shared.take_place().or(requests.place) {
+        if let Some(place) = shared.take_place().or(requests.place).or(early_place.take()) {
             let (display, frame) = desktop.place(&place, size);
             let record = json!({ "t": real_t, "display": display, "frame": frame });
             println!("rune-placed {record}");

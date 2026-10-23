@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`--script` events at t = 0 see the first layout.** A script whose first events are at
+  t = 0 (or omit `t`) now lays out a first frame, with the initial state and queued updates,
+  before running them. `{"t": 0, "type": "click", "key": "..."}` used to fail with "no element
+  with key", and t = 0 clicks or moves at x/y hit nothing. Frame 0 then draws the events'
+  effects, so changes they start animate from the mounted state rather than mounting settled.
+  Scripts without t = 0 events are unchanged.
 - **`ConfiguredOverlay::setup(fn(&mut T, Waker))`**, like `AppSpec::setup`, so an overlay can
   build its own `ImageCache` or channel instead of borrowing the main window's waker. It runs
   once on the event thread when the loop starts, before the overlay's first frame and before
