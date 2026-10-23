@@ -137,7 +137,7 @@ pub(crate) struct Node {
     opacity_motion: Option<rune_motion::Anim>,
     lead: Option<(Spring, Spring)>,
     width_leads: bool,
-    transition: Transition,
+    transition: Option<Transition>,
     scroll: Option<ScrollSpec>,
     on_at_bottom: Option<crate::el::AtBottomFn>,
     growth: Option<GrowthSpec>,
@@ -1831,7 +1831,7 @@ impl<S: 'static> Runtime<S> {
             if !was_present || was_exiting {
                 // Presence belongs to the transition. Layout tuning must not replace
                 // the caller's enter/exit springs when this node mounts or revives.
-                let tr = nodes[i].transition;
+                let tr = nodes[i].transition.unwrap_or_else(Transition::opacity);
                 // Revive presence first, then let this transaction own the layout retarget.
                 // Scene::insert otherwise starts its default .4 s reflow before our .25 s
                 // menu curve; the equal target makes the intended retarget a no-op.
@@ -1845,7 +1845,9 @@ impl<S: 'static> Runtime<S> {
                 if let Some(pid) = parent_id {
                     spec = spec.parent(pid);
                 }
-                let mount = if instant || nodes[i].virtual_mount || (row_like && !was_exiting && !self.reduced_motion) { Mount::Initial } else { Mount::Animated };
+                // Growth carries a row's entrance; an explicit transition adds to it.
+                let quiet_row = row_like && nodes[i].transition.is_none() && !was_exiting && !self.reduced_motion;
+                let mount = if instant || nodes[i].virtual_mount || quiet_row { Mount::Initial } else { Mount::Animated };
                 self.scene.insert(id, spec, mount);
             }
             if was_present {

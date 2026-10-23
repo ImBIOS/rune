@@ -425,7 +425,7 @@ pub struct El {
     pub(crate) opacity_motion: Option<Anim>,
     pub(crate) lead: Option<(Spring, Spring)>,
     pub(crate) width_leads: bool,
-    pub(crate) transition: Transition,
+    pub(crate) transition: Option<Transition>,
     pub(crate) scroll: Option<ScrollSpec>,
     pub(crate) on_at_bottom: Option<AtBottomFn>,
     pub(crate) growth: Option<GrowthSpec>,
@@ -471,7 +471,7 @@ fn base(dir: FlexDirection) -> El {
         opacity_motion: None,
         lead: None,
         width_leads: false,
-        transition: Transition::opacity(),
+        transition: None,
         scroll: None,
         on_at_bottom: None,
         growth: None,
@@ -1356,9 +1356,12 @@ impl El {
         self.width_leads = true;
         self
     }
-    /// How this element enters and exits when mounted or removed after the first frame.
+    /// How this element enters and exits when mounted or removed after the first frame
+    /// (default: a fade). Rows inserted into a growth stack only grow open unless they set one,
+    /// so `.transition(Transition::offset(0.0, 8.0).combined(Transition::opacity()))` on a row
+    /// also slides and fades it in. Rows a virtual list remounts on scroll never replay it.
     pub fn transition(mut self, t: Transition) -> Self {
-        self.transition = t;
+        self.transition = Some(t);
         self
     }
 

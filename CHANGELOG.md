@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Growth rows play an explicit `.transition`** (`rooms-gaps` branch). Rows inserted into a
+  growth stack (and elements inserted inside them) used to ignore `.transition(...)` and only grow
+  open. One that sets a transition now also plays its entrance; rows without one are unchanged,
+  and rows a virtual list remounts on scroll still appear settled.
 - **Absolute children size against their parent** (`rooms-gaps` branch). `absolute`/`pin` children
   now resolve `w_full`, `w_frac`, `h_full` and right/bottom pins against their parent's padding
   box, as documented, instead of the window (Taffy hands them to the nearest positioned ancestor,
