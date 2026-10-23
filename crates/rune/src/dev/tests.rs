@@ -96,3 +96,30 @@ fn a_command_after_idle_starts_at_its_arrival_and_cancelled_replays_stay_cancell
     assert_eq!(rt.state, 0.0);
     assert_eq!(ACTIONS.load(Ordering::Relaxed), 1, "a cancelled action must not run its side effects");
 }
+
+#[test]
+fn a_busy_port_moves_on_and_a_full_range_turns_the_panel_off_without_panicking() {
+    fn view(_: &f32, _: &mut Cx<f32>) -> El { el() }
+    let spec = AppSpec::new("test", (100.0, 100.0), || 0.0, view);
+    let runtime = || Runtime::new(0.0, view, spec.size, Env { system_dark: true, scale: 1.0 });
+    let mut config = Config::default();
+    config.bind.set_port(0);
+    let mut first = runtime();
+    let taken = launch(&mut first, &spec, config, Arc::new(|| {})).unwrap();
+    let mut config = Config::default();
+    config.bind = taken;
+    let mut second = runtime();
+    let next = launch(&mut second, &spec, config, Arc::new(|| {})).unwrap();
+    assert!(next.port() > taken.port() && next.port() < taken.port() + 16);
+    assert_eq!(second.dev_address(), Some(next));
+
+    // Hold the whole fallback range; ports someone else holds are just as busy.
+    let base = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let start = base.local_addr().unwrap();
+    let _held: Vec<_> = (1..16).filter_map(|i| std::net::TcpListener::bind((start.ip(), start.port().checked_add(i)?)).ok()).collect();
+    let mut config = Config::default();
+    config.bind = start;
+    let mut third = runtime();
+    assert_eq!(launch(&mut third, &spec, config, Arc::new(|| {})), None);
+    assert!(third.dev.is_none() && third.dev_clock.is_none());
+}

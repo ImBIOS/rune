@@ -99,6 +99,26 @@ pub fn attach<S>(rt: &mut Runtime<S>, spec: &AppSpec<S>, config: &Config<S>, wak
     Ok(address)
 }
 
+/// The app launch path: a busy port moves on to the next few and never stops the app.
+pub(crate) fn launch<S>(rt: &mut Runtime<S>, spec: &AppSpec<S>, mut config: Config<S>, wake: Waker) -> Option<SocketAddr> {
+    let port = config.bind.port();
+    let tries = if port == 0 { 1 } else { 16.min(u16::MAX - port + 1) };
+    for offset in 0..tries {
+        config.bind.set_port(port + offset);
+        match attach(rt, spec, &config, wake.clone()) {
+            Ok(address) => {
+                if offset > 0 { eprintln!("Rune dev panel: port {port} is busy, using {}", address.port()); }
+                return Some(address);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => panic!("Rune dev panel: {e}"),
+            Err(e) => { eprintln!("Rune dev panel off: {e}"); return None; }
+        }
+    }
+    eprintln!("Rune dev panel off: ports {port}–{} are busy", port + (tries - 1));
+    None
+}
+
 impl<S> Session<S> {
     pub(crate) fn scope(&self) -> tune::Registry { self.registry.clone() }
 

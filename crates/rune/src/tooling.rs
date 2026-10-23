@@ -133,9 +133,7 @@ pub(crate) fn runtime_for<S: 'static>(spec: &AppSpec<S>, state: S, size: (f32, f
 /// Attaches `App::dev_panel`'s session once the runtime's clock is set up.
 #[cfg(all(feature = "dev", debug_assertions))]
 pub(crate) fn attach_dev<S: 'static>(rt: &mut Runtime<S>, spec: &AppSpec<S>, config: Option<crate::dev::Config<S>>, waker: Waker) {
-    if let Some(config) = config {
-        crate::dev::attach(rt, spec, &config, waker).unwrap_or_else(|e| panic!("Rune dev panel: {e}"));
-    }
+    if let Some(config) = config { crate::dev::launch(rt, spec, config, waker); }
 }
 
 #[derive(Clone, Default, Debug)]
@@ -753,8 +751,9 @@ fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, tran
         return;
     }
     let mut comp = app.compositor.take();
+    // Snapshots and scripts run in parallel; they open the panel only when asked to.
     #[cfg(all(feature = "dev", debug_assertions))]
-    let dev = app.dev.take();
+    let dev = app.dev.take().filter(|_| std::env::var_os("RUNE_DEV_PANEL").is_some());
     let on_focus = app.on_focus;
     let (spec, state, shared) = app.into_parts(args.scene.as_deref());
     let scale = args.scale.unwrap_or(2.0);

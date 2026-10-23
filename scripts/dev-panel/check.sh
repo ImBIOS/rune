@@ -3,7 +3,7 @@ set -euo pipefail
 # Run through HiveMind, never as a local Studio build.
 if [[ "${1:-all}" != build ]]; then
   cargo test -j 2 -p rune --features dev --lib dev
-  cargo test -j 2 -p rune-dev-panel --features dev --test protocol --test app_spec_literal
+  cargo test -j 2 -p rune-dev-panel --features dev --test protocol --test app_spec_literal --test headless
 fi
 if [[ "${1:-all}" == all ]]; then
   cargo check -j 2 -p lab --features dev
