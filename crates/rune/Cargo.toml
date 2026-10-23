@@ -10,7 +10,8 @@ native-file-dialog = ["dep:rfd"]
 [dependencies]
 rune-motion = { path = "../rune-motion" }
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
-winit = "0.30.13"
+# Keep Wayland client-side frames/buttons without the title font's ab_glyph/ttf-parser.
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
 taffy = { version = "0.15", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "block_layout", "content_size"] }
 parley = { version = "0.12", default-features = false, features = ["std"] }
 swash = "0.2.10"
