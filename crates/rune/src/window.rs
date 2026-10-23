@@ -43,15 +43,15 @@ struct Win {
 
 /// A reveal requested before the hidden frame completes is held behind the fence, as is a
 /// reveal of cached pixels older than the state. Hiding cancels that intent, including when
-/// the GPU frame completes later.
+/// the GPU frame completes later. `deadline` is (next retry, give up) while it prepares.
 #[derive(Default)]
-struct FirstFrame { ready: bool, reveal: bool, notified: bool, retry: Option<Instant>, until: Option<Instant> }
+struct FirstFrame { ready: bool, reveal: bool, notified: bool, deadline: Option<(Instant, Instant)> }
 impl FirstFrame {
     fn request_reveal(&mut self, stale: bool) -> bool {
         if stale { self.ready = false; }
         if self.ready { return true; }
         self.reveal = true;
-        if self.retry.is_none() { self.prepare(); }
+        if self.deadline.is_none() { self.prepare(); }
         false
     }
     /// After readiness, a canceled refresh keeps the cached frame and stops retrying.
@@ -59,23 +59,20 @@ impl FirstFrame {
         self.reveal = false;
         if self.notified {
             self.ready = true;
-            self.retry = None;
-            self.until = None;
+            self.deadline = None;
         }
     }
     /// The drawable deadline passed. The first frame stays hidden (the host reports it); a
     /// refresh returns whether to reveal the cached frame rather than nothing.
     fn expire(&mut self) -> bool {
-        self.retry = None;
-        self.until = None;
+        self.deadline = None;
         if !self.notified { return false; }
         self.ready = true;
         std::mem::take(&mut self.reveal)
     }
     fn prepare(&mut self) {
         let now = Instant::now();
-        self.retry = Some(now);
-        self.until = Some(now + Duration::from_secs(2));
+        self.deadline = Some((now, now + Duration::from_secs(2)));
     }
     /// Hidden frames settle, except the refresh a reveal waits on: its new motion runs on.
     fn settles(&self) -> bool { !(self.reveal && self.notified) }
@@ -83,8 +80,7 @@ impl FirstFrame {
     fn pending(&self) -> bool { self.ready && (!self.notified || self.reveal) }
     fn complete(&mut self) -> bool {
         self.ready = true;
-        self.retry = None;
-        self.until = None;
+        self.deadline = None;
         std::mem::take(&mut self.reveal)
     }
 }
@@ -96,7 +92,7 @@ fn launcher_first_frame_holds_reveal_and_hide_cancels_late_completion() {
     assert!(!frame.request_reveal(false));
     assert!(!frame.ready);
     assert!(frame.complete());
-    assert!(frame.ready && frame.retry.is_none());
+    assert!(frame.ready && frame.deadline.is_none());
     assert!(!frame.complete(), "a second callback must not reopen a hidden panel");
     let mut canceled = FirstFrame::default();
     canceled.prepare();
@@ -105,31 +101,29 @@ fn launcher_first_frame_holds_reveal_and_hide_cancels_late_completion() {
     assert!(!canceled.complete(), "hide before readiness cancels the pending show");
     assert!(canceled.ready);
     assert!(canceled.request_reveal(false), "the prepared frame can be revealed without another preparation");
-    assert!(canceled.retry.is_none());
+    assert!(canceled.deadline.is_none());
 }
 
 #[test]
 fn launcher_stale_reveal_waits_for_an_unsettled_hidden_frame() {
-    let mut frame = FirstFrame { notified: true, ..Default::default() };
-    frame.prepare();
-    frame.ready = true;
+    let mut frame = FirstFrame { ready: true, notified: true, ..Default::default() };
     assert!(!frame.complete());
     assert!(frame.request_reveal(false), "unchanged state reveals the cached frame at once");
     assert!(!frame.pending() && frame.settles());
     assert!(!frame.request_reveal(true), "changed state renders hidden first");
-    assert!(frame.retry.is_some() && !frame.settles(), "the refresh keeps its new motion");
+    assert!(frame.deadline.is_some() && !frame.settles(), "the refresh keeps its new motion");
     frame.ready = true; // The hidden frame's fence completed.
     assert!(frame.pending() && frame.complete());
     assert!(!frame.pending() && frame.settles());
     assert!(!frame.request_reveal(true));
     frame.hide();
     assert!(frame.settles(), "a canceled refresh is an ordinary hidden frame");
-    assert!(frame.ready && frame.retry.is_none() && frame.until.is_none(), "hide stops the refresh retries");
+    assert!(frame.ready && frame.deadline.is_none(), "hide stops the refresh retries");
     assert!(!frame.pending() && !frame.complete(), "a late frame does not reveal");
 
     assert!(!frame.request_reveal(true));
     assert!(frame.expire(), "a refresh with no drawable reveals the cached frame");
-    assert!(frame.ready && !frame.pending() && frame.retry.is_none() && frame.until.is_none());
+    assert!(frame.ready && !frame.pending() && frame.deadline.is_none());
     let mut first = FirstFrame::default();
     first.prepare();
     assert!(!first.request_reveal(true));
@@ -1231,7 +1225,7 @@ impl<S: 'static> Host<S> {
         let _prewarm = if hidden { l.panel.as_ref().map(|p| p.prewarm()) } else { None };
         if hidden && !l.first_frame.ready {
             // Bounded retries while preparing the first frame (including acquisition errors).
-            l.first_frame.retry = l.first_frame.until.map(|_| Instant::now() + Duration::from_millis(16));
+            if let Some((retry, _)) = &mut l.first_frame.deadline { *retry = Instant::now() + Duration::from_millis(16); }
         }
         #[cfg(target_os = "macos")]
         let target = if hidden { None } else if let Some(pacing) = &mut l.pacing {
@@ -1359,8 +1353,8 @@ impl<S: 'static> AnyHost for Host<S> {
     fn finished(&self) -> bool { self.finished }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
-        if let Some(w) = &mut self.win && w.first_frame.retry.is_some_and(|at| at <= Instant::now()) {
-            if w.first_frame.until.is_some_and(|at| at <= Instant::now()) {
+        if let Some(w) = &mut self.win && let Some((retry, until)) = w.first_frame.deadline && retry <= Instant::now() {
+            if until <= Instant::now() {
                 let notified = w.first_frame.notified;
                 if w.first_frame.expire() {
                     self.show_cached();
@@ -1404,7 +1398,7 @@ impl<S: 'static> AnyHost for Host<S> {
         let runtime = runtime.filter(|_| !self.win.as_ref().and_then(|w| w.pacing.as_ref()).is_some_and(|p| p.running()));
         #[cfg(all(feature = "dev", debug_assertions))]
         let runtime = runtime.into_iter().chain(self.rt.dev_hidden_deadline()).min();
-        runtime.into_iter().chain(self.win.as_ref().and_then(|w| w.first_frame.retry)).min()
+        runtime.into_iter().chain(self.win.as_ref().and_then(|w| w.first_frame.deadline.map(|(retry, _)| retry))).min()
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) -> bool {
