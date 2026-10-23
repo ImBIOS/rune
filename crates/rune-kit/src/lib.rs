@@ -55,7 +55,7 @@ pub use feedback::{Loader, Progress, ProgressCircle, Spinner};
 pub use field::Field;
 pub use keybind::{Keybind, KeybindVariant};
 mod shortcut_recorder;
-pub use shortcut_recorder::{ShortcutRecorder, ShortcutRecorderState};
+pub use shortcut_recorder::{ShortcutRecorder, ShortcutRecorderState, shortcut_error_message};
 pub use kit::{Elevation, Glyphs, Kit, Motion, Palette, Radius, StateColors, Type};
 pub use palette::{PaletteFocus, PaletteSeed};
 pub use list::{List, ListItem};

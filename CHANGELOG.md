@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **ShortcutRecorder shows the refused chord and lets the app word the error.** After
+  `on_change` refuses a chord, the keycaps keep showing it (not just the held modifiers) until
+  another modifier starts the next chord, which also clears the error. The message under it
+  defaults to sentence case naming the chord ("⌃J is already in use.") instead of the
+  `ShortcutError` Display text; `.error_message(|error, chord| ...)` replaces it, with
+  `rune_kit::shortcut_error_message` as the fallback, and `ShortcutRecorderState::refused()`
+  reads the chord. Recorder text changes; no goldens show it.
 - **`AppHandle::shortcut_owner(&Shortcut)`** names who holds a chord after a
   `ShortcutError::Conflict`, when Rune or the desktop knows: this App or another Rune App in
   the process (its title), or on macOS an enabled system shortcut ("Spotlight", "Mission

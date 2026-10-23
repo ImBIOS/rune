@@ -9,6 +9,8 @@ pub struct ShortcutRecorderState {
     recording: bool,
     held: Mods,
     error: Option<ShortcutError>,
+    /// The chord the error refused, shown with it until a new chord starts. None for a refused clear.
+    refused: Option<Shortcut>,
     // Swallow auto-repeat until the captured/cancelled key is released.
     finishing: Option<PhysicalKeyCode>,
 }
@@ -18,10 +20,13 @@ impl ShortcutRecorderState {
     pub fn shortcut(&self) -> Option<&Shortcut> { self.shortcut.as_ref() }
     pub fn is_recording(&self) -> bool { self.recording }
     pub fn error(&self) -> Option<&ShortcutError> { self.error.as_ref() }
-    pub fn begin(&mut self) { self.recording = true; self.error = None; self.finishing = None; }
-    pub fn cancel(&mut self) { self.recording = false; self.held = Mods::default(); self.error = None; }
+    /// The chord `on_change` just refused, until another chord starts.
+    pub fn refused(&self) -> Option<&Shortcut> { self.refused.as_ref() }
+    pub fn begin(&mut self) { self.recording = true; self.error = None; self.refused = None; self.finishing = None; }
+    pub fn cancel(&mut self) { self.recording = false; self.held = Mods::default(); self.error = None; self.refused = None; }
     pub fn keycaps(&self) -> Vec<String> {
-        if self.recording { rune::modifier_keycaps(self.held) }
+        if let Some(refused) = self.refused.as_ref().filter(|_| self.recording) { refused.keycaps() }
+        else if self.recording { rune::modifier_keycaps(self.held) }
         else { self.shortcut.as_ref().map(Shortcut::keycaps).unwrap_or_default() }
     }
 
@@ -33,11 +38,11 @@ impl ShortcutRecorderState {
                 if active { Outcome::Consumed } else { Outcome::Pass }
             }
             PhysicalInput::Modifiers(mods) => {
-                self.held = mods;
+                self.hold(mods);
                 if self.recording { Outcome::Consumed } else { Outcome::Pass }
             }
             PhysicalInput::Key { key, mods, pressed, repeat } => {
-                self.held = mods;
+                self.hold(mods);
                 if self.finishing == Some(key) {
                     if !pressed { self.finishing = None; }
                     return Outcome::Consumed;
@@ -49,10 +54,18 @@ impl ShortcutRecorderState {
                 if key == PhysicalKeyCode::Backspace { return Outcome::Change(None); }
                 match Shortcut::from_physical_key(key, mods) {
                     Ok(shortcut) => Outcome::Change(Some(shortcut)),
-                    Err(error) => { self.error = Some(error); Outcome::Consumed }
+                    Err(error) => { self.error = Some(error); self.refused = None; Outcome::Consumed }
                 }
             }
         }
+    }
+
+    /// Pressing another modifier starts a new chord: the refused one and its error go.
+    fn hold(&mut self, mods: Mods) {
+        let held = self.held;
+        if (mods.ctrl && !held.ctrl) || (mods.alt && !held.alt) || (mods.shift && !held.shift)
+            || (mods.cmd && !held.cmd) || (mods.logo && !held.logo) { self.refused = None; self.error = None; }
+        self.held = mods;
     }
 }
 
@@ -63,25 +76,50 @@ fn is_modifier(key: PhysicalKeyCode) -> bool {
 }
 type Access<S> = Rc<dyn for<'a> Fn(&'a mut S) -> &'a mut ShortcutRecorderState>;
 type Change<S> = Rc<dyn Fn(&mut S, Option<&Shortcut>, &mut Tx) -> Result<(), ShortcutError>>;
+type Message = Box<dyn Fn(&ShortcutError, Option<&Shortcut>) -> String>;
+
+/// The recorder's default error text, for `error_message` closures to fall back on:
+/// "⇧⌘K is already in use." The refused chord is None when clearing was refused.
+pub fn shortcut_error_message(error: &ShortcutError, shortcut: Option<&Shortcut>) -> String {
+    let Some(shortcut) = shortcut else {
+        return if matches!(error, ShortcutError::InvalidAccelerator(_)) { "That key can't be part of a shortcut.".into() }
+            else { "The shortcut couldn't be cleared.".into() };
+    };
+    let chord = shortcut.keycaps().join(if cfg!(target_os = "macos") { "" } else { "+" });
+    match error {
+        ShortcutError::Conflict => format!("{chord} is already in use."),
+        ShortcutError::Unsupported => "This desktop doesn't support global shortcuts.".into(),
+        ShortcutError::PermissionDenied => format!("Permission to use {chord} was declined."),
+        _ => format!("{chord} couldn't be registered."),
+    }
+}
 
 /// Click (or activate with Enter/Space) to record. Escape cancels; Backspace clears.
 /// `on_change` must register the proposed binding before releasing the previous registration:
-/// returning an error keeps the old value and displays the error. An unchanged chord is a no-op.
+/// returning an error keeps the old value and shows the refused chord with a message
+/// (`error_message` words it). An unchanged chord is a no-op.
 pub struct ShortcutRecorder<S> {
     key: String,
     state: ShortcutRecorderState,
     access: Access<S>,
     change: Option<Change<S>>,
+    message: Message,
     width: f32,
     disabled: bool,
 }
 impl<S: 'static> ShortcutRecorder<S> {
     pub fn new(key: impl Into<String>, state: &ShortcutRecorderState,
         access: impl for<'a> Fn(&'a mut S) -> &'a mut ShortcutRecorderState + 'static) -> Self {
-        Self { key: key.into(), state: state.clone(), access: Rc::new(access), change: None, width: 240.0, disabled: false }
+        Self { key: key.into(), state: state.clone(), access: Rc::new(access), change: None, message: Box::new(shortcut_error_message), width: 240.0, disabled: false }
     }
     pub fn on_change(mut self, change: impl Fn(&mut S, Option<&Shortcut>, &mut Tx) -> Result<(), ShortcutError> + 'static) -> Self {
         self.change = Some(Rc::new(change)); self
+    }
+    /// Words the error shown under the recorder, given the refused chord (None when clearing
+    /// was refused). The default, `shortcut_error_message`, is sentence-case and names the
+    /// chord: "⌃J is already in use."
+    pub fn error_message(mut self, message: impl Fn(&ShortcutError, Option<&Shortcut>) -> String + 'static) -> Self {
+        self.message = Box::new(message); self
     }
     pub fn width(mut self, width: f32) -> Self { self.width = width; self }
     pub fn disabled(mut self, disabled: bool) -> Self { self.disabled = disabled; self }
@@ -116,7 +154,7 @@ impl<S: 'static> ShortcutRecorder<S> {
                         let state = access(s);
                         match result {
                             Ok(()) => { state.shortcut = next; state.error = None; state.cancel(); }
-                            Err(error) => { state.error = Some(error); }
+                            Err(error) => { state.error = Some(error); state.refused = next; }
                         }
                         true
                     }
@@ -124,8 +162,8 @@ impl<S: 'static> ShortcutRecorder<S> {
             });
         }
         let mut root = col().key(format!("{}-field", self.key)).gap(4.0).child(control);
-        if let Some(error) = self.state.error {
-            root = root.child(text(error.to_string()).font(k.ty.small_medium).color(k.c.danger.fg));
+        if let Some(error) = &self.state.error {
+            root = root.child(text((self.message)(error, self.state.refused.as_ref())).font(k.ty.small_medium).color(k.c.danger.fg));
         }
         root
     }

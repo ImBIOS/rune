@@ -1,7 +1,7 @@
 //! `cargo run -p rune-kit --example shortcut_recorder`
-//! Ctrl-Shift-Space is reserved here to demonstrate real registration conflicts.
+//! Ctrl-Shift-Space is reserved here to demonstrate real registration conflicts and their owner.
 use rune::{App, AppHandle, AppSpec, Cx, El, Shortcut, ShortcutError, ShortcutId, Tx, col, text};
-use rune_kit::{Kit, ShortcutRecorder, ShortcutRecorderState};
+use rune_kit::{Kit, ShortcutRecorder, ShortcutRecorderState, shortcut_error_message};
 
 #[derive(Default)]
 struct State {
@@ -9,8 +9,18 @@ struct State {
     handle: Option<AppHandle<State>>,
     registration: Option<ShortcutId>,
     activations: usize,
+    /// Who holds the chord the last conflict refused, when known.
+    owner: Option<String>,
 }
 fn change(s: &mut State, next: Option<&Shortcut>, _: &mut Tx) -> Result<(), ShortcutError> {
+    let result = register(s, next);
+    s.owner = match (&result, next, &s.handle) {
+        (Err(ShortcutError::Conflict), Some(next), Some(handle)) => handle.shortcut_owner(next),
+        _ => None,
+    };
+    result
+}
+fn register(s: &mut State, next: Option<&Shortcut>) -> Result<(), ShortcutError> {
     let handle = s.handle.as_ref().ok_or(ShortcutError::NotRunning)?;
     let new = next.map(|shortcut| handle.register_shortcut(shortcut.clone(), |s, _| s.activations += 1)).transpose()?;
     if let Some(old) = s.registration
@@ -23,9 +33,14 @@ fn change(s: &mut State, next: Option<&Shortcut>, _: &mut Tx) -> Result<(), Shor
 }
 fn view(s: &State, _: &mut Cx<State>) -> El {
     let k = Kit::neutral(true);
+    let owner = s.owner.clone();
+    let message = move |error: &ShortcutError, chord: Option<&Shortcut>| match (chord, &owner) {
+        (Some(chord), Some(owner)) => format!("{} is used by {owner}.", chord.keycaps().join(" ")),
+        _ => shortcut_error_message(error, chord),
+    };
     col().padding(24.0).gap(16.0).w_full().h_full().fill(k.c.page)
         .child(text("Launcher shortcut").font(k.ty.ui_compact).color(k.c.text_base))
-        .child(ShortcutRecorder::new("shortcut", &s.recorder, |s: &mut State| &mut s.recorder).on_change(change).build(&k))
+        .child(ShortcutRecorder::new("shortcut", &s.recorder, |s: &mut State| &mut s.recorder).on_change(change).error_message(message).build(&k))
         .child(text(format!("Activations: {}", s.activations)).font(k.ty.ui_compact).color(k.c.text_muted))
 }
 fn main() {
