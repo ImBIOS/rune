@@ -89,7 +89,9 @@ impl Tx {
 
     /// Fly the visible text of an existing keyed field to a newly mounted keyed text node.
     /// The runtime captures the previous presentation and measures the live destination each
-    /// frame, after row growth and scroll. Keys must be unique in the view.
+    /// frame, after row growth and scroll. Either side is a key unique in the view, or a key
+    /// path such as `"msg-42/body"`: the `body` text whose nearest keyed ancestor is `msg-42`,
+    /// so every row can reuse the same local keys.
     pub fn fly_text(&mut self, source: impl Into<String>, destination: impl Into<String>) {
         self.text_flights.push((source.into(), destination.into()));
     }

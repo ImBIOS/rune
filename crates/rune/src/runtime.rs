@@ -1044,7 +1044,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn capture_text_flight(&mut self, source: String, target: String) {
-        let Some((i, n)) = self.nodes.iter().enumerate().find(|(_, n)| n.key.as_deref() == Some(&source)) else { return };
+        let Some((i, n)) = self.nodes.iter().enumerate().find(|(_, n)| crate::flight::selects(&source, &n.path, n.key.as_deref())) else { return };
         let (Some(spec), Some(layout), Some(r)) = (&n.text, &n.text_layout, self.drawn.get(i)) else { return };
         if spec.content.is_empty() { return; }
         let scale = self.env.scale;
@@ -1073,11 +1073,11 @@ impl<S: 'static> Runtime<S> {
         let viewport = [0.0, 0.0, self.viewport.0, self.viewport.1];
         let nodes = &self.nodes;
         let scene = &self.scene;
-        self.flights.retain(|f| nodes.iter().any(|n| n.key.as_deref() == Some(&f.target_key)
+        self.flights.retain(|f| nodes.iter().any(|n| f.lands(&n.path, n.key.as_deref())
             && !matches!(scene.phase(n.id), Some(PresencePhase::Exiting { .. }))));
         let mut done = Vec::new();
         for (fi, f) in self.flights.iter_mut().enumerate() {
-            let Some((i, n)) = nodes.iter().enumerate().find(|(_, n)| n.key.as_deref() == Some(&f.target_key)) else { continue };
+            let Some((i, n)) = nodes.iter().enumerate().find(|(_, n)| f.lands(&n.path, n.key.as_deref())) else { continue };
             let (Some(spec), Some(layout)) = (&n.text, &n.text_layout) else { done.push(fi); continue };
             let r = self.drawn[i];
             let target = MRect::new(r[0] + n.inset[0], r[1] + n.inset[1], r[2] - n.inset[0] - n.inset[2], r[3] - n.inset[1] - n.inset[3]);
@@ -2965,7 +2965,7 @@ impl<S: 'static> Runtime<S> {
                     let mut caret = None;
                     if let Some(inp) = &n.input {
                         let e = &inp.edit;
-                        let departing = self.flights.iter().any(|f| n.key.as_deref() == Some(&f.source_key)
+                        let departing = self.flights.iter().any(|f| f.departs(&n.path, n.key.as_deref())
                             && f.alphas(f.destination, now, self.reduced_motion).0 > 0.0);
                         if e.text.is_empty() && e.preedit.is_none() && !inp.placeholder.is_empty() && !departing {
                             let pl = self.text.layout_rich(&inp.placeholder, &[], spec.style, s, Some(w));
@@ -3026,7 +3026,7 @@ impl<S: 'static> Runtime<S> {
                     let gamma = glyph_gamma(color, s);
                     let base = color.premul(o);
                     for q in &self.glyph_scratch {
-                        if self.flights.iter().any(|f| n.key.as_deref() == Some(&f.target_key)) { continue; }
+                        if self.flights.iter().any(|f| f.lands(&n.path, n.key.as_deref())) { continue; }
                         if q.rect[1] > clip[3] || q.rect[1] + q.rect[3] < clip[1] {
                             continue;
                         }
@@ -3149,7 +3149,7 @@ impl<S: 'static> Runtime<S> {
             .enumerate()
             .filter_map(|(i, n)| {
                 let p = self.scene.presented(n.id)?;
-                let flight = self.flights.iter().find(|f| n.key.as_deref() == Some(&f.target_key));
+                let flight = self.flights.iter().find(|f| f.lands(&n.path, n.key.as_deref()));
                 let mut moving = flight.is_some() || (!self.reduced_motion && self.loops.get(&n.id).is_some_and(|l| l.active(self.t)))
                     || store.is_animating(n.id, prop::FRAME)
                     || store.is_animating(n.id, prop::TRAVEL)

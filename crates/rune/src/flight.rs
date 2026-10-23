@@ -45,6 +45,16 @@ impl TextFlight {
         if reduced { self.progress(now, true) >= 1.0 } else { self.progress.is_settled(now) }
     }
 
+    /// The node at `path` keyed `key` is this flight's source.
+    pub fn departs(&self, path: &str, key: Option<&str>) -> bool {
+        selects(&self.source_key, path, key)
+    }
+
+    /// The node at `path` keyed `key` is this flight's destination.
+    pub fn lands(&self, path: &str, key: Option<&str>) -> bool {
+        selects(&self.target_key, path, key)
+    }
+
     pub fn alphas(&self, target: Rect, now: f64, reduced: bool) -> (f32, f32) {
         let p = self.progress(now, reduced);
         if reduced { return (1.0 - p, p); }
@@ -53,6 +63,18 @@ impl TextFlight {
         ((1.0 - p / out).clamp(0.0, 1.0),
             if rewrap { ((p - 0.1) / (end - 0.1)).clamp(0.0, 1.0) } else { (p / end).clamp(0.0, 1.0) })
     }
+}
+
+/// Whether `selector` names the node at `path` keyed `key`: either its key, or a key path such
+/// as `msg-42/body` whose leading keys are the node's nearest keyed ancestors (unkeyed ones are
+/// skipped), so repeated row-local keys can be told apart.
+pub(crate) fn selects(selector: &str, path: &str, key: Option<&str>) -> bool {
+    let Some(key) = key else { return false };
+    if selector == key { return true; }
+    let Some(scope) = selector.strip_suffix(key).and_then(|s| s.strip_suffix('/')) else { return false };
+    let Some(above) = path.strip_suffix(key).and_then(|s| s.strip_suffix('/')) else { return false };
+    let mut keyed = above.rsplit('/').filter(|seg| !seg.starts_with('#'));
+    scope.rsplit('/').all(|seg| keyed.next() == Some(seg))
 }
 
 /// Transform glyph geometry without changing its atlas footprint. Clip edges share the same
@@ -112,5 +134,18 @@ mod tests {
         assert_eq!(f.presented, target);
         assert_eq!(f.alphas(target, 0.075, true), (0.5, 0.5));
         assert!(f.measure(target, 0.15, true));
+    }
+
+    #[test]
+    fn selectors_match_a_key_or_its_keyed_ancestors() {
+        let path = "#0/scroll/#0/msg-42/#1/body";
+        assert!(selects("body", path, Some("body")), "a plain key still matches");
+        assert!(selects("msg-42/body", path, Some("body")), "unkeyed wrappers are skipped");
+        assert!(selects("scroll/msg-42/body", path, Some("body")));
+        assert!(!selects("msg-41/body", path, Some("body")));
+        assert!(!selects("scroll/body", path, Some("body")), "the scope is the nearest keyed ancestors");
+        assert!(!selects("msg-42", path, Some("body")));
+        assert!(!selects("body", "#0/#1", None), "unkeyed nodes never match");
+        assert!(!selects("x/msg-42/body", path, Some("body")), "more scope than ancestors");
     }
 }
