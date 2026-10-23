@@ -1973,8 +1973,9 @@ impl<S: 'static> Runtime<S> {
         self.loops.retain(|id, _| self.scene.contains(*id));
         for n in &self.nodes {
             if let Some(spec) = n.looping {
-                self.loops.entry(n.id).and_modify(|l| { l.retime(spec, self.t); l.enabled(true, self.t); })
+                let track = self.loops.entry(n.id).and_modify(|l| { l.retime(spec, self.t); l.enabled(true, self.t); })
                     .or_insert_with(|| rune_motion::LoopTrack::new(spec, self.t));
+                if tx.settle || self.reduced_motion { track.finish(); }
             } else if let Some(l) = self.loops.get_mut(&n.id) {
                 l.enabled(false, self.t);
             }
@@ -2565,7 +2566,7 @@ impl<S: 'static> Runtime<S> {
                 pinh.group
             };
             let loop_value = self.loops.get(&n.id).map(|l| l.sample_at(now, self.clock, self.reduced_motion));
-            if let (Some(rune_motion::LoopSpec { kind: rune_motion::LoopKind::Opacity { .. } | rune_motion::LoopKind::OpacityCycle(_), .. }), Some(v)) = (n.looping, loop_value) {
+            if let (Some(rune_motion::LoopSpec { kind: rune_motion::LoopKind::Opacity { .. } | rune_motion::LoopKind::OpacityCycle(_) | rune_motion::LoopKind::Sequence(_), .. }), Some(v)) = (n.looping, loop_value) {
                 own *= v;
             }
             let effective_opacity = (own * pinh.opacity).clamp(0.0, 1.0);
@@ -2577,7 +2578,9 @@ impl<S: 'static> Runtime<S> {
             let o = if isolate { 1.0 } else { (own * pinh.paint_opacity).clamp(0.0, 1.0) };
             let (mut clip, mut fade) = (pinh.clip, pinh.fade);
             let mut fade_origin = pinh.fade_origin;
-            let own_sc = p.transform.scale.x;
+            let own_sc = p.transform.scale.x * self.loops.get(&n.id)
+                .filter(|_| matches!(n.looping.map(|l| l.kind), Some(rune_motion::LoopKind::Sequence(_))))
+                .and_then(|l| l.pose(now, self.reduced_motion)).map_or(1.0, |p| p.scale);
             let (sc, anchor) = if (own_sc - 1.0).abs() > 1e-5 {
                 (pinh.scale * own_sc, [p.anchor.x, p.anchor.y + pinh.dy])
             } else {
@@ -3114,7 +3117,8 @@ impl<S: 'static> Runtime<S> {
                     let parent = self.nodes[pi].id;
                     moving |= store.is_animating(parent, prop::FRAME) || store.is_animating(parent, prop::TRAVEL)
                         || store.is_animating(parent, prop::PRESENCE)
-                        || store.is_animating(parent, prop::OFFSET) || store.is_animating(parent, prop::SCALE);
+                        || store.is_animating(parent, prop::OFFSET) || store.is_animating(parent, prop::SCALE)
+                        || (!self.reduced_motion && self.loops.get(&parent).is_some_and(|l| l.active(self.t)));
                     for b in &self.nodes[pi].live {
                         if b.spring.is_none() {
                             live_intent |= match b.property {
@@ -3132,7 +3136,10 @@ impl<S: 'static> Runtime<S> {
                     a = self.nodes[pi].parent;
                 }
                 Some(ElementInfo {
-                    loop_phase: self.loops.get(&n.id).map(|l| if self.reduced_motion { 0.0 } else { l.phase(self.t) }),
+                    loop_phase: self.loops.get(&n.id).map(|l| {
+                        if self.reduced_motion && !matches!(n.looping.map(|s| s.kind), Some(rune_motion::LoopKind::Sequence(_))) { 0.0 }
+                        else { l.phase(self.t) }
+                    }),
                     focusable: self.can_focus(i),
                     focused: self.focused.as_deref() == Some(&n.path),
                     focus_visible: self.keyboard_focus && self.focused.as_deref() == Some(&n.path),
@@ -3619,6 +3626,46 @@ fn flatten(
 mod tests {
     use super::*;
     use crate::el::{col, el};
+
+    #[test]
+    fn sequences_run_without_commits_then_sleep_and_settle() {
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            const BEATS: &[crate::Beat] = &[
+                crate::Beat::new(0.0).opacity(0.0).scale(0.8),
+                crate::Beat::new(0.3).easing(crate::Easing::LINEAR),
+                crate::Beat::new(0.6).opacity(0.5).scale(1.1).easing(crate::Easing::LINEAR),
+                crate::Beat::new(0.9).easing(crate::Easing::LINEAR),
+            ];
+            el().key("root").size(200.0, 100.0).child(el().key("beat").size(80.0, 40.0)
+                .sequence(crate::Sequence::new(BEATS).delay(0.2)))
+        }
+        let make = || Runtime::new((), view, (200.0, 100.0), Env { scale: 1.0, system_dark: true });
+        let mut rt = make();
+        assert!(!rt.frame(0.0));
+        assert_eq!(rt.wake_deadline(), Some(0.2));
+        let commits = rt.stats.commits;
+        assert!(rt.frame(0.35));
+        let pose = |rt: &Runtime<()>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("beat")).unwrap();
+        assert!((pose(&rt).opacity - 0.5).abs() < 1e-5);
+        assert!((pose(&rt).scale - 0.9).abs() < 1e-5);
+        assert_eq!(rt.stats.commits, commits);
+        rt.invalidate(); rt.frame(0.0);
+        assert!((pose(&rt).opacity - 0.5).abs() < 1e-5, "unrelated commits must not restart the sequence");
+        assert!(!rt.frame(1.0));
+        assert_eq!(rt.wake_deadline(), None);
+        assert_eq!(pose(&rt).opacity, 1.0);
+        assert_eq!(pose(&rt).scale, 1.0);
+        let mut settled = make(); settled.frame(0.0); settled.settle_all();
+        assert!(!settled.frame(0.0));
+        assert_eq!(pose(&settled).opacity, 1.0);
+        assert_eq!(settled.wake_deadline(), None);
+        let mut reduced = make(); reduced.reduced_motion = true;
+        assert!(!reduced.frame(0.0));
+        assert_eq!(pose(&reduced).scale, 1.0);
+        assert_eq!(pose(&reduced).opacity, 1.0);
+        assert_eq!(pose(&reduced).loop_phase, Some(1.0));
+        assert_eq!(reduced.wake_deadline(), None);
+    }
 
     #[test]
     fn layout_motion_does_not_replace_explicit_transition_exit() {

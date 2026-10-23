@@ -1,11 +1,13 @@
-//! Clock-driven periodic motion. Visibility is a renderer decision, not a second clock.
-use crate::{Animated, Cycle, Easing, PropClass, Spring};
+//! Clock-driven periodic and finite motion. Visibility is a renderer decision, not a second clock.
+use crate::{Animated, Beat, Cycle, Easing, Sequence, PropClass, Spring};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LoopKind {
     Opacity { low: f32, high: f32 },
     /// Piecewise-linear, wall-clock opacity with a bounded frame rate.
     OpacityCycle(Cycle),
+    /// Finite opacity/scale choreography; holds its last pose at rest.
+    Sequence(Sequence),
     Rotation,
 }
 
@@ -17,6 +19,9 @@ pub struct LoopSpec {
 }
 
 impl LoopSpec {
+    pub fn sequence(frames: Sequence) -> Self {
+        Self { period: frames.duration(), delay: frames.delay, kind: LoopKind::Sequence(frames) }
+    }
     pub fn cycle(cycle: Cycle) -> Self {
         Self { period: f64::from(cycle.period), delay: 0.0, kind: LoopKind::OpacityCycle(cycle) }
     }
@@ -34,6 +39,7 @@ pub struct LoopTrack {
     epoch: f64,
     phase0: f64,
     amplitude: Animated<f32>,
+    finished: bool,
 }
 
 impl LoopTrack {
@@ -41,29 +47,49 @@ impl LoopTrack {
         assert!(spec.period.is_finite() && spec.period > 0.0);
         assert!(spec.delay.is_finite() && spec.delay >= 0.0);
         Self { spec, epoch: now + spec.delay, phase0: 0.0,
-            amplitude: Animated::new(1.0).with_class(PropClass::Opacity) }
+            amplitude: Animated::new(1.0).with_class(PropClass::Opacity), finished: false }
     }
     pub fn phase(&self, now: f64) -> f64 {
+        if matches!(self.spec.kind, LoopKind::Sequence(_)) {
+            return if self.finished { 1.0 } else { ((now - self.epoch) / self.spec.period).clamp(0.0, 1.0) };
+        }
         (self.phase0 + (now - self.epoch).max(0.0) / self.spec.period).rem_euclid(1.0)
     }
     /// Preserve the presented phase when changing speed. An unchanged spec is a no-op.
     pub fn retime(&mut self, spec: LoopSpec, now: f64) {
         assert!(spec.period.is_finite() && spec.period > 0.0);
         if self.spec == spec { return; }
+        if matches!(self.spec.kind, LoopKind::Sequence(_)) || matches!(spec.kind, LoopKind::Sequence(_)) {
+            *self = Self::new(spec, now);
+            return;
+        }
         self.phase0 = self.phase(now);
         self.epoch = now.max(self.epoch);
         self.spec = spec;
     }
     /// Cool to rest without stopping or resetting phase. Reversal inherits envelope velocity.
     pub fn enabled(&mut self, enabled: bool, now: f64) {
+        if matches!(self.spec.kind, LoopKind::Sequence(_)) {
+            if enabled && self.amplitude.target() == 0.0 {
+                self.epoch = now + self.spec.delay;
+                self.finished = false;
+            } else if !enabled { self.finished = true; }
+        }
         self.amplitude.animate_to(if enabled { 1.0 } else { 0.0 }, Spring::new(0.18, 0.0), now);
     }
+    /// Explicit settle/reduced motion lands finite sequences; periodic loops keep their phase.
+    pub fn finish(&mut self) {
+        if matches!(self.spec.kind, LoopKind::Sequence(_)) { self.finished = true; }
+    }
     pub fn active(&self, now: f64) -> bool {
+        if matches!(self.spec.kind, LoopKind::Sequence(_)) {
+            return !self.finished && now >= self.epoch && now < self.epoch + self.spec.period;
+        }
         (self.amplitude.target() > 0.0 && now >= self.epoch) || !self.amplitude.is_settled(now)
     }
     /// The animation-clock instant to wake at; no frames are needed before it.
     pub fn pending_start(&self, now: f64) -> Option<f64> {
-        (self.amplitude.target() > 0.0 && now < self.epoch).then_some(self.epoch)
+        (!self.finished && self.amplitude.target() > 0.0 && now < self.epoch).then_some(self.epoch)
     }
     /// Wall-clock cycles retain their cadence even when animation time is paused.
     pub fn frame_interval(&self) -> Option<f64> {
@@ -79,6 +105,7 @@ impl LoopTrack {
     pub fn sample_at(&self, now: f64, wall: f64, reduced: bool) -> f32 {
         let phase = if reduced { 0.0 } else { self.phase(now) as f32 };
         match self.spec.kind {
+            LoopKind::Sequence(_) => self.pose(now, reduced).unwrap().opacity,
             LoopKind::OpacityCycle(c) => if reduced { c.still } else { c.sample(wall) },
             LoopKind::Rotation => phase * core::f32::consts::TAU,
             LoopKind::Opacity { low, high } => {
@@ -87,11 +114,40 @@ impl LoopTrack {
             }
         }
     }
+    pub fn pose(&self, now: f64, reduced: bool) -> Option<Beat> {
+        let LoopKind::Sequence(frames) = self.spec.kind else { return None };
+        Some(frames.sample(if reduced || self.finished { frames.duration() } else { self.phase(now) * frames.duration() }))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sequence_delays_interpolates_holds_and_finishes_without_restarting() {
+        const BEATS: &[Beat] = &[
+            Beat::new(0.0).opacity(0.0).scale(0.8),
+            Beat::new(0.3).easing(Easing::LINEAR),
+            Beat::new(0.6).opacity(0.5).scale(1.1).easing(Easing::LINEAR),
+            Beat::new(0.9).easing(Easing::LINEAR),
+        ];
+        let spec = LoopSpec::sequence(Sequence::new(BEATS).delay(0.2));
+        let mut track = LoopTrack::new(spec, 4.0);
+        assert_eq!(track.pending_start(4.0), Some(4.2));
+        assert!(!track.active(4.1));
+        let pose = track.pose(4.35, false).unwrap();
+        assert!((pose.opacity - 0.5).abs() < 1e-5 && (pose.scale - 0.9).abs() < 1e-5);
+        track.retime(spec, 4.35);
+        assert_eq!(track.pose(4.35, false).unwrap(), pose);
+        assert!(track.active(4.35));
+        assert!(!track.active(5.2));
+        assert_eq!(track.pose(5.2, false).unwrap().opacity, 1.0);
+        assert_eq!(track.pose(4.35, true).unwrap().scale, 1.0);
+        track.finish();
+        assert!(!track.active(4.35));
+        assert_eq!(track.pending_start(4.0), None);
+        assert_eq!(track.pose(4.35, false).unwrap().scale, 1.0);
+    }
     #[test]
     fn cycle_preserves_wall_phase_stops_still_and_cadence() {
         let c = Cycle { period: 1.7, phase: 0.3, stops: &[(0.0, 0.2), (0.2, 1.0), (0.7, 0.1), (1.0, 0.2)], still: 0.4, fps: 30.0 };

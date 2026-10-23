@@ -656,7 +656,13 @@ impl El {
         if let Some(m) = &mut self.modal { m.outside = enabled; }
         self
     }
-    /// A renderer-owned periodic opacity or icon rotation track, on the shared clock.
+    /// A finite opacity/scale sequence on the shared render clock. The final pose holds;
+    /// reduced motion and explicit settle land it immediately. A new key replays it.
+    pub fn sequence(self, frames: rune_motion::Sequence) -> Self {
+        self.looping(rune_motion::LoopSpec::sequence(frames))
+    }
+
+    /// A renderer-owned periodic or finite presentation track, on the shared clock.
     pub fn looping(mut self, spec: rune_motion::LoopSpec) -> Self {
         self.looping = Some(spec);
         self

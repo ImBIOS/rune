@@ -258,12 +258,35 @@ ignore it; `run_windows` keeps its regular-launch default.
   while one of its descendants holds the press, and only counts the part of it that shows inside a
   clipping parent.
 - **Loops** (`.cycle(Cycle { period, phase, stops, still, fps })`): an opacity loop sampled from the
-  clock (it will become sugar over a general `El::looping`, with one loop engine in rune-motion),
+  clock through `El::looping`, with one loop engine in rune-motion,
   so every loop with the same period stays in phase. Reduced motion holds `still`. While only loops
   move, the window wakes at `fps` instead of every display frame, and a still window does no work.
 - **Drags** report `dx, dy`, the pointer's travel since the press.
 - **`--chrome`** (headless) paints the traffic lights and a 4 pt clearance box onto snapshots and
   prints any element that overlaps them.
+
+### Finite choreography
+
+`El::sequence` uses the same render-clock tracks as loops, then holds the final pose
+and sleeps. No app phases, poll callback, or `wake_after` calls are needed.
+
+```rust,ignore
+use rune::{Beat, Sequence, el};
+const MOMENT: &[Beat] = &[
+    Beat::new(0.0).opacity(0.0).scale(0.96),
+    Beat::new(0.3),
+    Beat::new(0.6).opacity(0.6).scale(1.04),
+    Beat::new(0.9),
+];
+el().key("moment").sequence(Sequence::new(MOMENT).delay(0.1))
+```
+
+Each beat is a full opacity/scale pose at elapsed seconds; omitted values are 1.
+`Beat::easing` sets the arriving segment's easing (default ease-in-out). Unchanged
+specs keep their progress across commits; changing the spec or mounting a new key
+replays it. Reduced motion and explicit settle land the final pose immediately.
+Scale changes presentation, not layout. This finite API is separate from the
+lower-level `rune_motion::Keyframes<T>` property-track builder.
 
 ## High-frequency values
 

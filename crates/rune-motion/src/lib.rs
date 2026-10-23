@@ -37,6 +37,7 @@ mod gesture;
 mod keyframes;
 mod layer;
 mod looping;
+mod sequence;
 pub mod math;
 mod props;
 mod scene;
@@ -58,6 +59,7 @@ pub use gesture::{VelocityTracker, deceleration, project, rubber_band, rubber_ba
 pub use keyframes::{Keyframe, Keyframes};
 pub use layer::Eps;
 pub use looping::{LoopKind, LoopSpec, LoopTrack};
+pub use sequence::{Beat, Sequence};
 pub use props::{NodeId, Prop, PropClass, PropId, REDUCED_FADE, prop};
 pub use scene::{FrameOutput, LayoutAnim, Mask, Mount, NodeSpec, Phase, Presented, Scene, Travel, WIDTH_LEAD};
 pub use spring::{Spring, SpringPair};
