@@ -1220,6 +1220,7 @@ impl El {
 
     // Motion
     /// The spring for this subtree's layout and colour changes (inherited).
+    /// Presence uses the transition's own enter/exit springs.
     pub fn motion(mut self, s: Spring) -> Self {
         self.motion = Some(s);
         self

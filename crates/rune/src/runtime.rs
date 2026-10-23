@@ -17,7 +17,7 @@ use parley::editing::{Cursor, Selection};
 use parley::layout::Affinity;
 use rune_motion::{
     Anim, Corners, LayoutAnim, Mount, NodeId, NodeSpec, Phase as PresencePhase, Prop, PropClass, Rect as MRect, Scene,
-    Spring, SpringPair, Transition, prop, snap::grid,
+    Spring, Transition, prop, snap::grid,
 };
 use taffy::prelude::*;
 use taffy::TraversePartialTree;
@@ -1757,10 +1757,9 @@ impl<S: 'static> Runtime<S> {
             let was_present = self.scene.contains(id);
             let was_exiting = self.is_exiting(id);
             if !was_present || was_exiting {
-                let mut tr = nodes[i].transition;
-                if nodes[i].motion != motion::DEFAULT {
-                    tr.springs = SpringPair::with_exit_ratio(spring_l, 0.8);
-                }
+                // Presence belongs to the transition. Layout tuning must not replace
+                // the caller's enter/exit springs when this node mounts or revives.
+                let tr = nodes[i].transition;
                 // Revive presence first, then let this transaction own the layout retarget.
                 // Scene::insert otherwise starts its default .4 s reflow before our .25 s
                 // menu curve; the equal target makes the intended retarget a no-op.
@@ -3582,6 +3581,29 @@ fn flatten(
 mod tests {
     use super::*;
     use crate::el::{col, el};
+
+    #[test]
+    fn layout_motion_does_not_replace_explicit_transition_exit() {
+        fn view(s: &(bool, f32), _: &mut Cx<(bool, f32)>) -> El {
+            col().size(200.0, 100.0).children(s.0.then(|| el().key("pill").size(100.0, 40.0)
+                .motion(Spring::new(s.1, 0.0))
+                .transition(Transition::scale(0.96).springs(rune_motion::SpringPair {
+                    enter: Spring::new(0.3, 0.0), exit: Spring::new(0.8, 0.0),
+                }))))
+        }
+        let make = |duration| Runtime::new((true, duration), view, (200.0, 100.0), Env { scale: 1.0, system_dark: true });
+        let (mut fast, mut slow) = (make(0.05), make(0.6));
+        for rt in [&mut fast, &mut slow] {
+            rt.frame(0.0);
+            rt.state.0 = false; rt.invalidate(); rt.frame(0.0);
+            rt.frame(0.1);
+        }
+        let opacity = |rt: &Runtime<(bool, f32)>| rt.elements().into_iter()
+            .find(|e| e.key.as_deref() == Some("pill")).unwrap().opacity;
+        assert!(opacity(&fast) > 0.5, "the explicit slow exit must survive fast layout tuning");
+        assert!((opacity(&fast) - opacity(&slow)).abs() < 1e-6);
+    }
+
 
     fn duplicate_view(_: &(), _: &mut Cx<()>) -> El {
         col().children([el().key("card"), el().key("card")])
