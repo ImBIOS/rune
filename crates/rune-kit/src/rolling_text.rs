@@ -96,17 +96,21 @@ impl RollingText {
         let color = self.color.unwrap_or(k.c.text_base);
         let glyphs = keys(&self.key, &self.text);
         let edge = (font.line_px() * 0.12).max(1.0);
-        // The horizontal fade sits in padding that negative margins take back out of layout, so
-        // the resting glyphs are never faded but a growing or shrinking edge stays soft.
+        // The fades sit in padding that negative margins take back out of layout, so the resting
+        // glyphs (descenders included) are never faded but rolling glyphs and a growing or
+        // shrinking edge stay soft.
         let side = (font.size * 0.3).max(2.0);
         let mut e = row()
             .key(self.key.clone())
             .role("text")
             .label(self.text.clone())
-            .h(font.line_px())
+            .h(font.line_px() + 2.0 * edge)
             .px(side)
+            .py(edge)
             .ml(-side)
             .mr(-side)
+            .mt(-edge)
+            .mb(-edge)
             .motion(self.spring)
             .width_leads()
             .clip_fade(side, edge, side, edge);
