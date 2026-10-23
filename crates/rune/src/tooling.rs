@@ -34,8 +34,6 @@ pub struct AppSpec<S: 'static> {
     pub poll: Option<fn(&mut S, f64, &mut Tx) -> bool>,
     /// Keys unhandled by the focused control; true consumes the key.
     pub on_key: Option<fn(&mut S, &KeyEvent, &mut Tx) -> bool>,
-    /// How the window frames the app's content.
-    pub chrome: Chrome,
 }
 
 impl<S: 'static> AppSpec<S> {
@@ -54,7 +52,6 @@ impl<S: 'static> AppSpec<S> {
             setup: None,
             poll: None,
             on_key: None,
-            chrome: Chrome::DEFAULT,
         }
     }
 }
@@ -74,8 +71,8 @@ pub struct Chrome {
     pub traffic_lights: Option<(f32, f32)>,
     /// macOS: only `.window_drag()` regions move the window, so content under a full-size
     /// titlebar stays clickable (Electron's app regions). Off: AppKit's titlebar band drags too.
-    /// AppKit asks winit's shared view class, so this applies to every window in the process
-    /// (overlays included) once any window opens with it.
+    /// Applies only to this window's content view when borderless or full-size-content.
+    /// Ordinary titled windows and NSPanel overlays keep their native behaviour.
     pub drag_regions: bool,
 }
 
@@ -716,6 +713,7 @@ pub fn headless<S: 'static>(app: crate::app::App<S>, args: Args) {
 }
 
 fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, transparent: bool) {
+    let chrome = app.chrome;
     let launched = Instant::now();
     if args.list_scenes {
         for (n, _) in app.spec.scenes {
@@ -854,7 +852,7 @@ fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, tran
             let wait = Instant::now();
             let mut px = target.read(&gpu.device);
             if args.chrome_overlay
-                && let Some(lights) = spec.chrome.traffic_light_rects()
+                && let Some(lights) = chrome.traffic_light_rects()
             {
                 paint_traffic_lights(&mut px, wp, hp, scale, &lights);
             }
@@ -884,7 +882,7 @@ fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, tran
         }
         if k == snap_frame
             && args.chrome_overlay
-            && let Some(lights) = spec.chrome.traffic_light_rects()
+            && let Some(lights) = chrome.traffic_light_rects()
         {
             report_traffic_light_overlaps(&rt, &lights);
         }

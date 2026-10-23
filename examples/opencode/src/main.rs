@@ -584,7 +584,7 @@ fn open_scene(s: &mut App) {
 }
 
 fn main() {
-    rune::run(AppSpec {
+    rune::App::new(AppSpec {
         scenes: &[
             ("home", |_| {}),
             ("session", |s| {
@@ -621,11 +621,12 @@ fn main() {
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_key),
-        chrome: rune::Chrome {
-            full_size_content: true,
-            traffic_lights: Some((25.0, 25.0)),
-            drag_regions: true,
-        },
         ..AppSpec::new("OpenCode", (1280.0, 820.0), App::new, view::app)
-    });
+    })
+    .chrome(rune::Chrome {
+        full_size_content: true,
+        traffic_lights: Some((25.0, 25.0)),
+        drag_regions: true,
+    })
+    .run();
 }
