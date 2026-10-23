@@ -892,9 +892,19 @@ impl TextSystem {
                     let top = (base - asc - 1.0 * scale).round();
                     let bot = (base + desc.abs() + 1.0 * scale).round();
                     let rect = [x0 - pad, top, w + 2.0 * pad, bot - top];
-                    // Adjacent runs with the same background (a span split by style) share one rect.
+                    // Touching runs with the same background on one line (a span split by style, or
+                    // inline code and its padding spaces in the body font) share one rect, as tall as
+                    // its widest run, so a thin run in another font doesn't poke out as a sliver.
                     match out.last_mut() {
-                        Some(d) if d.color == bg && d.rect[1] == top && (d.rect[0] + d.rect[2] - rect[0]).abs() < 1.0 => {
+                        Some(d)
+                            if d.color == bg
+                                && d.rect[1] < bot
+                                && top < d.rect[1] + d.rect[3]
+                                && (d.rect[0] + d.rect[2] - rect[0]).abs() < 1.0 =>
+                        {
+                            if rect[2] > d.rect[2] {
+                                (d.rect[1], d.rect[3]) = (rect[1], rect[3]);
+                            }
                             d.rect[2] = rect[0] + rect[2] - d.rect[0];
                         }
                         _ => out.push(Deco { rect, color: bg, radius: 4.0 * scale }),
@@ -1316,6 +1326,29 @@ mod quality_tests {
         let last = justified.len() - 1;
         assert!(justified[..last].iter().all(|&(l, r)| l < 8.0 && r > 592.0), "{justified:?}");
         assert!(justified[last].1 > 592.0, "justified RTL last line starts at the right: {justified:?}");
+    }
+
+    /// Inline code between padding spaces in the body font draws one chip at the code's height,
+    /// with no separate sliver for each padding run.
+    #[test]
+    fn inline_code_and_its_padding_share_one_chip() {
+        let mut text = TextSystem::default();
+        let bg = Color::BLACK.alpha(0.08);
+        let content = "say \u{202f}code\u{202f} now";
+        let (a, b) = (content.find('c').unwrap(), content.find(" now").unwrap());
+        let pad = |s: usize, e: usize| Span { bg: Some(bg), ..Span::new(s, e) };
+        let code = Span { mono: true, size: Some(13.0 * 0.9), bg: Some(bg), ..Span::new(a, b - 3) };
+        let spans = [pad(4, a), code.clone(), pad(b - 3, b)];
+        let style = TextStyle::new(13.0, 400.0);
+        let layout = text.layout_rich(content, &spans, style, 2.0, None);
+        let mut decos = Vec::new();
+        text.decorations(&layout, &spans, 2.0, [0.0, 0.0], &mut decos);
+        assert_eq!(decos.len(), 1, "{:?}", decos.iter().map(|d| d.rect).collect::<Vec<_>>());
+        let mut alone = Vec::new();
+        let code_only = text.layout_rich(content, std::slice::from_ref(&code), style, 2.0, None);
+        text.decorations(&code_only, std::slice::from_ref(&code), 2.0, [0.0, 0.0], &mut alone);
+        assert_eq!((decos[0].rect[1], decos[0].rect[3]), (alone[0].rect[1], alone[0].rect[3]), "the code's height");
+        assert!(decos[0].rect[2] > alone[0].rect[2], "padding widens it");
     }
 
     #[test]

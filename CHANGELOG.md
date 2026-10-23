@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Inline code chips draw as one rect.** Touching span backgrounds on a line merge even when
+  their runs have different fonts or sizes, at the height of the widest run. Markdown's padding
+  spaces no longer draw lighter slivers at each end of a code chip.
 - **Italics.** `TextStyle::italic()` and `Span::italic` pick the family's italic face (SF's on
   macOS) or lean the upright face 12° when it has none (bundled Inter). rune-kit `Markdown` draws
   `*emphasis*` in italic, so its emphasis runs change pixels; advances don't move.
