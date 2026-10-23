@@ -43,6 +43,22 @@ rune_kit::root(body, layer)          // the view's root
 `AppSpec { fonts: rune_theme_opencode::FONTS, families: rune_theme_opencode::FAMILIES, .. }`
 loads Inter and IBM Plex Mono.
 
+For a small app theme, derive the semantic colours from three opaque tokens:
+
+```rust
+let t = rune::Theme::from_json(THEME, dark)?;
+let mut k = rune_kit::Kit::from_palette(rune_kit::PaletteSeed {
+    bg: t.color("bg"),
+    fg: t.color("text"),
+    accent: t.color("accent"),
+});
+k.radius.sm = 3.0;
+```
+
+This derives surfaces, muted text, borders, states and elevation in linear light. It uses
+neutral typography and motion; override individual tokens on `k` as needed. The default
+glyph set includes `k.glyph.lock`, `k.glyph.eye` and `k.glyph.eye_off`.
+
 - Builders end in `.build(&kit)`; overlays take `.build(&kit, &mut layer)` and return their
   trigger. Content is `El::anchored` to the trigger (flips, shifts, stays inside the window).
 - Handlers attach through the builder (`on_press`, `on_toggle`, `on_select`, `on_choose`,
