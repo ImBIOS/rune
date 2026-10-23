@@ -233,6 +233,8 @@ pub(crate) struct Overlay<T: 'static> {
     canvas_size: (f32, f32),
     name: &'static str,
     at: Placement,
+    /// Where `place_window` last put the window, to carry the pointer across a move.
+    origin: Option<winit::dpi::PhysicalPosition<i32>>,
     interactive: bool,
     shared: Arc<Shared<T>>,
     rt: Runtime<T>,
@@ -284,6 +286,7 @@ impl<T: 'static> Overlay<T> {
             canvas_size: spec.size,
             name: spec.name,
             at: Placement { size: spec.size, edge: spec.edge, margin: spec.margin, align: spec.align, inset: spec.inset },
+            origin: None,
             interactive: spec.interactive,
             shared: shared.clone(),
             rt,
@@ -514,7 +517,21 @@ impl<T: 'static> Overlay<T> {
         Some(live)
     }
 
-    fn place_window(&self, event_loop: &ActiveEventLoop, window: &Window) {
+    /// Moving the window under a still pointer (`place`, `set_placement`, a resize that keeps
+    /// the far edge) keeps the runtime's pointer and a held drag in step, so a drag that moves
+    /// its own overlay reports pointer travel. Hosts that place asynchronously catch up on the
+    /// next pointer event.
+    fn place_window(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
+        self.position_window(event_loop, window);
+        let Ok(origin) = window.outer_position() else { return };
+        if let Some(before) = self.origin.replace(origin) && before != origin {
+            let scale = window.scale_factor();
+            let points = |a: i32, b: i32| (f64::from(a - b) / scale) as f32;
+            self.rt.window_moved(points(origin.x, before.x), points(origin.y, before.y));
+        }
+    }
+
+    fn position_window(&self, event_loop: &ActiveEventLoop, window: &Window) {
         #[cfg(target_os = "macos")]
         if let Some(panel) = &self.panel {
             panel.place(self.at, &self.options);

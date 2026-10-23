@@ -468,6 +468,7 @@ pub struct El {
     pub(crate) on_press: Option<PressFn>,
     pub(crate) on_secondary_press: Option<SecondaryFn>,
     pub(crate) on_hover: Option<PressFn>,
+    pub(crate) on_hover_change: Option<WindowFocusFn>,
     pub(crate) on_pointer_move: Option<SecondaryFn>,
     pub(crate) above: Option<Anchor>,
     pub(crate) on_drag: Option<DragFn>,
@@ -516,6 +517,7 @@ fn base(dir: FlexDirection) -> El {
         on_press: None,
         on_secondary_press: None,
         on_hover: None,
+        on_hover_change: None,
         on_pointer_move: None,
         above: None,
         on_drag: None,
@@ -1142,6 +1144,15 @@ impl El {
     /// Called once when the pointer enters this hit target, not on animation frames.
     pub fn on_hover<S: 'static>(mut self, f: impl Fn(&mut S) + 'static) -> Self {
         self.on_hover = Some(Rc::new(move |s, _| f(downcast::<S>(s))));
+        self
+    }
+
+    /// Called with `true` when the pointer enters this element's visible rect and `false` when
+    /// it leaves, descendants included (moving onto a child button is not a leave). It is not a
+    /// hit target, so it never takes presses or hover from its children. A held press keeps the
+    /// pointer inside until it releases.
+    pub fn on_hover_change<S: 'static>(mut self, f: impl Fn(&mut S, bool, &mut Tx) + 'static) -> Self {
+        self.on_hover_change = Some(Rc::new(move |s, inside, tx| f(downcast::<S>(s), inside, tx)));
         self
     }
 

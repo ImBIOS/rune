@@ -195,6 +195,7 @@ pub(crate) struct Node {
     on_press: Option<PressFn>,
     on_secondary_press: Option<SecondaryFn>,
     on_hover: Option<PressFn>,
+    on_hover_change: Option<crate::el::WindowFocusFn>,
     on_pointer_move: Option<SecondaryFn>,
     above: Option<crate::el::Anchor>,
     on_drag: Option<DragFn>,
@@ -236,6 +237,7 @@ enum Action {
     Dismiss(String),
     PointerMove(String, PointerPress),
     Hover(String),
+    HoverChange(String, bool),
     AtBottom(String, bool),
     Layout(String, [f32; 4]),
     Press(String),
@@ -474,6 +476,8 @@ pub struct Runtime<S: 'static> {
     loop_wake: Option<(f64, f64)>,
     surface_visible: bool,
     hovered: Option<String>,
+    /// Elements with `on_hover_change` that the pointer is inside.
+    hover_within: Vec<String>,
     pub ime_area: Option<[f32; 4]>,
     /// The focused field's caret (path, window rect) the next view sees through `Cx::caret`.
     caret: Option<(String, [f32; 4])>,
@@ -655,6 +659,7 @@ impl<S: 'static> Runtime<S> {
             loop_wake: None,
             surface_visible: true,
             hovered: None,
+            hover_within: Vec::new(),
             ime_area: None,
             caret: None,
             caret_watch: false,
@@ -1371,6 +1376,11 @@ impl<S: 'static> Runtime<S> {
             Action::Hover(path) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_hover.clone()) else { return false };
                 f(handler_state(&mut self.state), &mut one);
+                true
+            }
+            Action::HoverChange(path, inside) => {
+                let Some(f) = self.node(&path).and_then(|n| n.on_hover_change.clone()) else { return false };
+                f(handler_state(&mut self.state), inside, &mut one);
                 true
             }
             Action::Press(path) => {
@@ -2513,6 +2523,14 @@ impl<S: 'static> Runtime<S> {
 
     pub(crate) fn pointer_captured(&self) -> bool { self.capture.is_some() || self.secondary_capture.is_some() }
 
+    /// The host moved its window by (dx, dy) points under a still pointer. Keep the pointer and
+    /// a held press's origin in window points, so a drag that moves its own window still reports
+    /// pointer travel in `Drag::dx`/`dy`.
+    pub(crate) fn window_moved(&mut self, dx: f32, dy: f32) {
+        if let Some((x, y)) = self.pointer { self.pointer = Some((x - dx, y - dy)); }
+        self.press_at = (self.press_at.0 - dx, self.press_at.1 - dy);
+    }
+
     pub(crate) fn cancel_pointer(&mut self) {
         self.capture = None;
         self.secondary_capture = None;
@@ -2521,6 +2539,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn refresh_hover(&mut self, x: f32, y: f32) {
+        self.refresh_hover_within();
         let hovered = self.primary_target(x, y);
         if hovered.map(|i| self.nodes[i].path.as_str()) == self.hovered.as_deref() { return; }
         self.hovered = hovered.map(|i| self.nodes[i].path.clone());
@@ -2630,6 +2649,7 @@ impl<S: 'static> Runtime<S> {
     pub fn pointer_up(&mut self, x: f32, y: f32) {
         self.pointer_move(x, y);
         let Some((path, d)) = self.capture.take() else { return };
+        self.refresh_hover_within();
         let Some((r, has_drag, has_press)) =
             self.node(&path).map(|n| (n.target, n.on_drag.is_some(), n.on_press.is_some()))
         else {
@@ -2650,7 +2670,38 @@ impl<S: 'static> Runtime<S> {
         if self.capture.is_none() && self.secondary_capture.is_none() {
             self.pointer = None;
             self.hovered = None;
+            self.refresh_hover_within();
         }
+    }
+
+    /// Queue `on_hover_change` for elements the pointer entered or left.
+    fn refresh_hover_within(&mut self) {
+        if self.hover_within.is_empty() && !self.hits.iter().any(|(id, _)| self.node_index.get(id).is_some_and(|&i| self.nodes[i].on_hover_change.is_some())) {
+            return;
+        }
+        let mut inside: Vec<String> = Vec::new();
+        if let Some((x, y)) = self.pointer {
+            for &(id, r) in &self.hits {
+                if let Some(n) = self.node_index.get(&id).map(|&i| &self.nodes[i])
+                    && n.on_hover_change.is_some() && crate::overlay_options::contains(r, x, y) && !inside.contains(&n.path)
+                {
+                    inside.push(n.path.clone());
+                }
+            }
+        }
+        // A held press stays inside what it started in until it releases.
+        if self.capture.is_some() {
+            for path in &self.hover_within {
+                if !inside.contains(path) { inside.push(path.clone()); }
+            }
+        }
+        for path in &self.hover_within {
+            if !inside.contains(path) { self.queue.push(Action::HoverChange(path.clone(), false)); }
+        }
+        for path in &inside {
+            if !self.hover_within.contains(path) { self.queue.push(Action::HoverChange(path.clone(), true)); }
+        }
+        self.hover_within = inside;
     }
 
     /// A press on an element is held (the hand drives whatever follows it).
@@ -3519,7 +3570,7 @@ impl<S: 'static> Runtime<S> {
             self.inh_scratch[i] = Inh { opacity: effective_opacity, paint_opacity: o,
                 clip: intersect(hit_clip, clip), fade: hit_fade, fade_origin: hit_origin,
                 paint_clip: clip, paint_fade: fade, paint_fade_origin: fade_origin, rounded, scale: sc, anchor, blur, dy, mark, group };
-            if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_drag.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())
+            if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())
                 && !self.subtree_exiting(i)
                 && self.allowed(i) && effective_opacity > 0.001 && visible
             {
@@ -4023,6 +4074,7 @@ fn flatten(
         on_press,
         on_secondary_press,
         on_hover,
+        on_hover_change,
         on_pointer_move,
         above,
         on_drag,
@@ -4070,6 +4122,7 @@ fn flatten(
         on_press,
         on_secondary_press,
         on_hover,
+        on_hover_change,
         on_pointer_move,
         above,
         on_drag,
@@ -4579,6 +4632,58 @@ mod tests {
         }
         rt.frame(1.0 / 120.0);
         assert_eq!(rt.state.pressed, 1, "the button inside the title bar still presses");
+    }
+
+    #[test]
+    fn hover_change_spans_descendants_and_holds_through_a_press() {
+        type State = (Vec<bool>, u32, u32);
+        fn view(_: &State, _: &mut Cx<State>) -> El {
+            col().size(200.0, 200.0)
+                .child(el().key("pill").size(100.0, 40.0).on_hover_change(|s: &mut State, inside, _| s.0.push(inside))
+                    .child(el().key("button").size(40.0, 40.0)
+                        .on_press(|s: &mut State| s.1 += 1).on_hover(|s: &mut State| s.2 += 1)))
+        }
+        let mut rt = Runtime::new((Vec::new(), 0, 0), view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.pointer_move(80.0, 20.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state.0, [true]);
+        rt.pointer_move(20.0, 20.0);
+        rt.pointer_down(20.0, 20.0);
+        rt.pointer_up(20.0, 20.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state, (vec![true], 1, 1), "the child keeps its hover and press; entering it is not a leave");
+        rt.pointer_down(20.0, 20.0);
+        rt.pointer_move(20.0, 120.0);
+        rt.pointer_leave();
+        rt.frame(0.0);
+        assert_eq!(rt.state.0, [true], "a held press stays inside");
+        rt.pointer_up(20.0, 120.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state.0, [true, false]);
+        rt.pointer_move(50.0, 20.0);
+        rt.pointer_leave();
+        rt.frame(0.0);
+        assert_eq!(rt.state.0, [true, false, true, false]);
+    }
+
+    #[test]
+    fn a_drag_reports_pointer_travel_when_its_window_moves() {
+        type State = Vec<(f32, f32)>;
+        fn view(_: &State, _: &mut Cx<State>) -> El {
+            el().key("pill").size(100.0, 40.0).on_drag(|s: &mut State, d, _| s.push((d.dx, d.dy)))
+        }
+        let mut rt = Runtime::new(Vec::new(), view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.pointer_move(10.0, 10.0);
+        rt.pointer_down(10.0, 10.0);
+        rt.pointer_move(40.0, 14.0);
+        rt.window_moved(30.0, 4.0);
+        rt.pointer_move(15.0, 10.0);
+        rt.pointer_up(15.0, 10.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state.last(), Some(&(35.0, 4.0)), "travel is measured on screen, not in the moving window");
+        assert!(rt.state.contains(&(30.0, 4.0)));
     }
 
     #[test]
