@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Repeatable offscreen workload. Build with HiveMind first; time release binaries locally."""
+"""Repeatable offscreen workload. Build `--profile perf` with HiveMind first; time those binaries locally."""
 import argparse
 import json
 import pathlib
 import re
 import statistics
 import subprocess
+
+from perf_binary import perf_binary
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 p = argparse.ArgumentParser()
@@ -45,7 +47,7 @@ for name, (binary, args) in workloads.items():
         continue
     runs = []
     for i in range(a.runs + 1):
-        cmd = [str(ROOT / 'target/release' / binary), *args, '--fps', '120']
+        cmd = [str(perf_binary(ROOT / 'target/perf' / binary)), *args, '--fps', '120']
         r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=True)
         (a.out / f'{name}-{i}.log').write_text(r.stderr)
         m = rx.search(r.stderr)

@@ -128,7 +128,7 @@ and fill, then removes the source immediately.
 
 ## Benchmarks
 
-`cargo run --release --example bench`. Every track stays active for all 120 ticks at 120 Hz.
+`cargo run --profile perf --example bench`. Every track stays active for all 120 ticks at 120 Hz.
 Each figure is the best of 9 runs on the M4 Mac mini HiveMind worker, which was busy with other
 jobs at the time, so treat these as upper bounds.
 
@@ -145,7 +145,7 @@ jobs at the time, so treat these as upper bounds.
 
 At these speeds, 10k simultaneously moving rects take 0.76 ms per frame and a 1k-node scene
 reflow takes 0.13 ms. A steady-state tick allocates nothing. The kernel micro-bench
-(`cargo test --release -- --ignored bench_layer_kinds`) measures one underdamped lane at 17 ns,
+(`cargo test --profile perf -- --ignored bench_layer_kinds`) measures one underdamped lane at 17 ns,
 one critical lane at 10 ns, `exp` at 5 ns and `sin_cos` at 7.6 ns.
 
 ## Renderer integration contract
@@ -184,10 +184,10 @@ system setting changes. Setting `RUNE_MOTION_TRACE=/path.jsonl` and calling
 
 ## Examples and tests
 
-- `cargo run --release --example curves [dir]` writes SVG plots of the tokens, SwiftUI
+- `cargo run --example curves [dir]` writes SVG plots of the tokens, SwiftUI
   presets, curve kinds, retargeting and presence/travel paths. The current plots are in
   `demo/motion/`.
-- `cargo run --release --example bench` prints the numbers above.
+- `cargo run --profile perf --example bench` prints the numbers above.
 - `cargo test` runs 53 tests and 1 doctest. They check the spring closed form against ODE
   integration in every regime, C¹ continuity under random retargets, that additive and merged
   springs match, delays, decay into bounds, generational reuse, zero allocation, presence revive,

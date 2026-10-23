@@ -15,6 +15,10 @@ import socket
 import signal
 import statistics
 import subprocess
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from perf_binary import perf_binary
 
 parser = argparse.ArgumentParser()
 parser.add_argument("out", type=Path)
@@ -27,7 +31,7 @@ parser.add_argument("--display-sync", choices=["0", "1"])
 parser.add_argument("--guard", choices=["production", "no-half"], help="requires the diagnostic admission patch")
 args = parser.parse_args()
 assert socket.gethostname().startswith("Kits-Shiny-Computer"), "Pro only"
-root, rune = args.out.resolve(), args.rune.resolve()
+root, rune = args.out.resolve(), perf_binary(args.rune)
 root.mkdir(parents=True, exist_ok=True)
 
 

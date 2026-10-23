@@ -34,8 +34,14 @@ Run the demos, the benchmark and the CPU check (headless, offscreen; outputs lan
 ```sh
 hivemind run --kind cargo -- cargo build --release -p rune-light --example light
 target/release/examples/light all        # chat, flashlight, emissive, raised, godrays: PNG, strip, MP4
-target/release/examples/light bench      # GPU timestamps per pass → demo/light/bench.json
 target/release/examples/light verify     # GPU shadow texels vs. CPU estimator and brute-force ground truth
+```
+
+The benchmark (GPU timestamps per pass → `demo/light/bench.json`) needs the perf profile:
+
+```sh
+hivemind run --kind cargo -- cargo build --profile perf -p rune-light --example light
+target/perf/examples/light bench
 ```
 
 ## Integration contract

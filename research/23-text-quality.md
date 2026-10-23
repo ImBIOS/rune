@@ -259,14 +259,14 @@ strips/videos retain their recorded states and are not current text goldens.
 ## Reproduction
 
 ```sh
-mkdir -p .lab-output/text
 hivemind run --kind cargo --worker mini --fetch .lab-output/text -- sh -c '
-  env RUSTC_WRAPPER= cargo test --release -p rune quality_tests &&
-  env RUSTC_WRAPPER= cargo test --release -p rune --test alloc &&
-  env RUSTC_WRAPPER= cargo build --release -p opencode -p settings -p kit-gallery &&
+  mkdir -p .lab-output/text/target/perf &&
+  env RUSTC_WRAPPER= cargo test -p rune quality_tests &&
+  env RUSTC_WRAPPER= cargo test -p rune --test alloc &&
+  env RUSTC_WRAPPER= cargo build --profile perf -p opencode -p settings -p kit-gallery &&
   env RUSTC_WRAPPER= cargo build --release -p rune --example text_quality &&
   swiftc -O scripts/coretext-quality.swift -o .lab-output/text/coretext-quality &&
-  cp "$CARGO_TARGET_DIR/release/opencode" "$CARGO_TARGET_DIR/release/settings" "$CARGO_TARGET_DIR/release/kit-gallery" .lab-output/text/ &&
+  cp "$CARGO_TARGET_DIR/perf/opencode" "$CARGO_TARGET_DIR/perf/settings" "$CARGO_TARGET_DIR/perf/kit-gallery" .lab-output/text/target/perf/ &&
   cp "$CARGO_TARGET_DIR/release/examples/text_quality" .lab-output/text/'
 
 # Headless bitmaps on the measurement host. Repeat for SFNS.ttf / "System Font".
@@ -279,10 +279,12 @@ uv run --with numpy --with pillow --with scikit-image scripts/text-quality.py pe
 uv run --with numpy --with pillow --with scikit-image scripts/text-quality.py perf/autoresearch/text/after/inter
 # After both fonts:
 uv run --with numpy --with pillow scripts/text-report.py perf/autoresearch/text demo/text
-cp .lab-output/text/{opencode,settings,kit-gallery} target/release/
+mkdir -p target/perf target/release
+cp .lab-output/text/target/perf/{opencode,settings,kit-gallery} target/perf/
+cp .lab-output/text/target/perf/{opencode,settings,kit-gallery} target/release/   # for text-goldens.py
 python3 scripts/bench-ui.py --only stream,long-stream --out perf/autoresearch/text/perf-after
-python3 scripts/text-bench.py --before perf/autoresearch/text/opencode-before \
-  --after target/release/opencode --out perf/autoresearch/text/perf-paired-new
+python3 scripts/text-bench.py --before .lab-output/text-before/target/perf/opencode \
+  --after target/perf/opencode --out perf/autoresearch/text/perf-paired-new
 uv run --with numpy --with pillow scripts/text-goldens.py
 ```
 

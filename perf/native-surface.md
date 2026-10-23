@@ -5,7 +5,7 @@ pixel copies. Primary metric: import/encode/submit CPU milliseconds per frame.
 Secondary: GPU render-pass timestamp milliseconds, exact matching-size pixels,
 bounded latest-wins handoff and GPU-safe CoreVideo lifetime.
 
-Benchmark: `target/release/video-tiles --bench-native`. One warmup and seven measured
+Benchmark: `target/perf/video-tiles --bench-native` (`--profile perf`; measured below as release, before the split). One warmup and seven measured
 30-frame runs at 60 Hz per configuration. Reports per-run p50/p95 and median of p50s;
 timestamp-capable adapters must produce all 30 GPU samples in every run.
 Three prefilled synthetic IOSurfaces per tile, fresh frame IDs per draw. Source setup

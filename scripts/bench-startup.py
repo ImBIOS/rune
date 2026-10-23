@@ -8,6 +8,8 @@ import statistics
 import subprocess
 import time
 
+from perf_binary import perf_binary
+
 p = argparse.ArgumentParser()
 p.add_argument('--out', required=True, type=pathlib.Path)
 p.add_argument('--runs', type=int, default=7)
@@ -15,14 +17,15 @@ p.add_argument('--long-fixture', type=pathlib.Path)
 a = p.parse_args()
 a.out.mkdir(parents=True, exist_ok=True)
 cases = {
-    'settings': ['target/release/settings'],
-    'opencode-home': ['target/release/opencode', '--fixture', 'examples/opencode/assets/fixture.json', '--scene', 'home'],
-    'opencode-session': ['target/release/opencode', '--fixture', 'examples/opencode/assets/fixture.json', '--scene', 'session'],
+    'settings': ['target/perf/settings'],
+    'opencode-home': ['target/perf/opencode', '--fixture', 'examples/opencode/assets/fixture.json', '--scene', 'home'],
+    'opencode-session': ['target/perf/opencode', '--fixture', 'examples/opencode/assets/fixture.json', '--scene', 'session'],
 }
 if a.long_fixture:
-    cases['opencode-long'] = ['target/release/opencode', '--fixture', str(a.long_fixture), '--scene', 'session']
+    cases['opencode-long'] = ['target/perf/opencode', '--fixture', str(a.long_fixture), '--scene', 'session']
 result = {}
 for name, cmd in cases.items():
+    cmd = [str(perf_binary(cmd[0])), *cmd[1:]]
     runs = []
     for i in range(a.runs + 1):
         start = time.perf_counter()

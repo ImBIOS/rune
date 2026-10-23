@@ -6,7 +6,9 @@ other platforms use the same shader with uploaded byte planes. `--snap` freezes 
 ```sh
 hivemind run --kind cargo --fetch target/release/video-tiles -- env RUSTC_WRAPPER= cargo build --release -p video-tiles
 target/release/video-tiles --snap tiles.png --scale 2
-target/release/video-tiles --bench-native
+
+hivemind run --kind cargo --fetch target/perf/video-tiles -- env RUSTC_WRAPPER= cargo build --profile perf -p video-tiles
+target/perf/video-tiles --bench-native
 ```
 
 `--bench-native` is headless: 1/4/9 independent 1080p tiles, then one 4K and one 5K

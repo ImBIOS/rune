@@ -15,8 +15,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from perf_binary import perf_binary
+
 assert socket.gethostname().startswith("Kits-Shiny-Computer"), "Pro only"
-out, pacing = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
+out, pacing = Path(sys.argv[1]).resolve(), perf_binary(sys.argv[2])
 runs = int(sys.argv[3]) if len(sys.argv) > 3 else 3
 out.mkdir(parents=True, exist_ok=True)
 library = out / "steady-probe.dylib"

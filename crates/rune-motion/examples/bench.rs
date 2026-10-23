@@ -1,4 +1,4 @@
-//! Per-frame sampling cost. `cargo run --release --example bench`
+//! Per-frame sampling cost. `cargo run --profile perf --example bench`
 //!
 //! Every scenario keeps all tracks active for the whole measurement (long, bouncy springs that
 //! can't settle in time) and reports the best of several runs (robust to a busy machine).

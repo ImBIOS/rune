@@ -5,11 +5,12 @@ positive Metal `presentedTime`, using the overlay team's steady-state endpoint.
 Three batches per mode, two-second warmup, then three three-second intervals;
 the summary is the median of nine interval medians.
 
-Build `cargo build --release -j 2 -p rune --example pacing_overlay --example pacing`
+Build `cargo build --profile perf -j 2 -p rune --example pacing_overlay --example pacing`
 through HiveMind. Generate a SHA-256 source manifest, verify it in each job, and
 run jobs serially with `HIVEMIND_CAS_SYNC=0 HIVEMIND_STRICT_PIN=1`. Native jobs use
 `hivemind run --kind gui --priority high --worker pro --allow-local --fetch <out>`.
-Pass the worker's existing release executable path, not a local executable.
+Pass the worker's existing `target/perf/examples/` executable path, not a local executable;
+the runners refuse binaries from any other profile.
 
 ```sh
 python3 scripts/native-pacing/run.py <out> <pacing_overlay> \

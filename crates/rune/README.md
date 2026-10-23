@@ -675,8 +675,9 @@ $S --native --trace run.jsonl --frames 240  # native submission timestamps, then
 - **Timing**: every headless run prints per-frame CPU time (update, build and encode/submit, without
   readback).
 - **Startup**: `--first-pixels` emits a flushed marker after the first offscreen GPU readback.
-  `python3 scripts/bench-startup.py --out perf/startup` times fresh process launch to that marker
-  (one warmup, seven runs), including loader, app state, GPU work and readback, excluding PNG encoding.
+  Build `target/perf/settings` and `target/perf/opencode` with `--profile perf` (HiveMind
+  `--fetch target/perf/<name>`). Then `python3 scripts/bench-startup.py --out perf/startup` times
+  fresh process launch to that marker (one warmup, seven runs), including loader, app state, GPU work and readback, excluding PNG encoding.
    This measures process-cold startup with warm OS/driver caches, not physical display presentation.
 
 ## Live Rust editing (desktop development)
@@ -834,7 +835,7 @@ policy changes are applied in the same mutation phase.
   `--native --trace` records wall-clock CPU submission timestamps (not GPU completion or scanout).
   In a window factory, `--window KEY` selects the traced window; otherwise the first is traced.
   macOS windows and overlays acquire drawables on coalesced display-link ticks, stopping the
-  link while idle or hidden. `cargo run --release -p rune --example pacing -- --native --trace
+  link while idle or hidden. `cargo run --profile perf -p rune --example pacing -- --native --trace
   pacing.jsonl --frames 240` exercises spring retargets and hide/show; check it with
   `python3 scripts/check-native-pacing.py pacing.jsonl` on a worker with a display.
   Trees expose inherited `opacity`, `scale` and `blur` (logical points); traces keep opacity in
@@ -843,6 +844,7 @@ policy changes are applied in the same mutation phase.
 ## Measured (Studio, M-series, headless at 2×)
 
 - **Build**: incremental `-p settings` release build through HiveMind is about 20–60 s, sync included.
+  Release is incremental; `--profile perf` keeps the non-incremental build for frame timings.
 - **Binary**: 10.9 MB, or 9.3 MB stripped (1.2 MB of that is the three Inter faces).
 - **Frame CPU**: over 180 frames of `examples/settings/scripts/bench.json` (theme switch,
   toggles, accent, a drag, a click-to-seek), the mean is 0.13 ms and p95 0.29 ms. The first frame

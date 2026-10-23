@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paired headless text benchmark. Supply saved release binaries; no build or server."""
+"""Paired headless text benchmark. Supply saved `--profile perf` binaries; no build or server."""
 import argparse
 import hashlib
 import json
@@ -7,6 +7,8 @@ from pathlib import Path
 import re
 import statistics
 import subprocess
+
+from perf_binary import perf_binary
 
 ROOT = Path(__file__).resolve().parents[1]
 p = argparse.ArgumentParser()
@@ -19,7 +21,7 @@ if a.runs < 1:
     p.error('--runs must be positive')
 a.out = a.out.resolve()
 a.out.mkdir(parents=True, exist_ok=True)
-binaries = {'before': a.before.resolve(), 'after': a.after.resolve()}
+binaries = {'before': perf_binary(a.before), 'after': perf_binary(a.after)}
 (a.out / 'binaries.json').write_text(json.dumps({stage: hashlib.sha256(path.read_bytes()).hexdigest()
     for stage, path in binaries.items()}, indent=2) + '\n')
 fixture_path = ROOT / 'examples/opencode/assets/fixture.json'

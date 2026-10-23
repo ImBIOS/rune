@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Run only inside HiveMind. A real one-line leaf edit, with source restored afterwards."""
+"""Run only inside HiveMind. A real one-line leaf edit, with source restored afterwards.
+
+This times the edit loop's incremental release build, so unlike the runtime benches it does not use
+`--profile perf`.
+"""
 import json
 import os
 import pathlib
@@ -21,6 +25,6 @@ try:
 finally:
     src.write_text(original)
 median = statistics.median(times)
-print(json.dumps({'incremental': os.getenv('CARGO_PROFILE_RELEASE_INCREMENTAL', 'false'),
+print(json.dumps({'incremental': os.getenv('CARGO_PROFILE_RELEASE_INCREMENTAL', 'true'),
                   'median_s': median, 'mad_s': statistics.median(abs(t - median) for t in times),
                   'runs_s': times}), flush=True)

@@ -48,14 +48,13 @@ also stays at the commit boundary: remove spatial tracks and use the normal fade
 
 ## Reproduction and correctness
 
-Build through HiveMind, fetch the release executable, then run it headless on Studio:
+Build through HiveMind, fetch the `--profile perf` executable, then run it headless on Studio:
 
 ```sh
-hivemind run --kind cargo --fetch target/release/examples/gpu_springs -- \
-  env RUSTC_WRAPPER= cargo build --release -p rune --example gpu_springs
-target/release/examples/gpu_springs
-hivemind run --kind cargo -- env RUSTC_WRAPPER= \
-  cargo test --release -p rune gpu_springs::tests
+hivemind run --kind cargo --fetch target/perf/examples/gpu_springs -- \
+  env RUSTC_WRAPPER= cargo build --profile perf -p rune --example gpu_springs
+target/perf/examples/gpu_springs
+hivemind run --kind cargo -- env RUSTC_WRAPPER= cargo test -p rune gpu_springs::tests
 ```
 
 If HiveMind spills to Studio, its local path is

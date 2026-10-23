@@ -9,7 +9,7 @@ Build and run through HiveMind from the workspace root:
 
 ```sh
 hivemind run --kind cargo -- cargo run --release -p rune-fx --example gallery   # stills, strips, timings
-hivemind run --kind cargo -- cargo test --release -p rune-fx --lib              # contract tests
+hivemind run --kind cargo -- cargo test -p rune-fx --lib                        # contract tests
 ```
 
 `examples/lab` composites these layers live inside Rune's renderer, with knobs.

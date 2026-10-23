@@ -6,10 +6,13 @@ import re
 import statistics
 import subprocess
 
+from perf_binary import perf_binary
+
 p = argparse.ArgumentParser()
-p.add_argument('--binary', default='target/release/live-values')
+p.add_argument('--binary', default='target/perf/live-values')
 p.add_argument('--baseline', action='store_true')
 a = p.parse_args()
+a.binary = str(perf_binary(a.binary))
 modes = ['rebuild'] if a.baseline else ['rebuild', 'live']
 samples = {mode: [] for mode in modes}
 for run in range(8):

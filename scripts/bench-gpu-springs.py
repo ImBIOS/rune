@@ -8,6 +8,8 @@ import re
 import statistics
 import subprocess
 
+from perf_binary import perf_binary
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 p = argparse.ArgumentParser()
 p.add_argument('--before', required=True, type=pathlib.Path)
@@ -16,7 +18,7 @@ p.add_argument('--out', required=True, type=pathlib.Path)
 p.add_argument('--runs', type=int, default=7)
 a = p.parse_args()
 a.out.mkdir(parents=True, exist_ok=True)
-binaries = [a.before.resolve(), a.after.resolve()]
+binaries = [perf_binary(a.before), perf_binary(a.after)]
 fixture = json.loads((ROOT / 'examples/opencode/assets/fixture.json').read_text())
 sid = fixture['open']
 history = []

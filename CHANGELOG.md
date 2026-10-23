@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Incremental release builds; benchmarks move to `--profile perf`**. This repo's
+  `[profile.release]` is now incremental, so a one-line edit in `rune` rebuilds an example in
+  about 1.5 s instead of about 23 s. The new `perf` profile keeps the old release codegen
+  (opt-level 3, 16 codegen units, no LTO, not incremental), and `cargo bench` stays
+  non-incremental. The runtime benches (`bench-ui`, `bench-startup`, `bench-live`,
+  `bench-gpu-springs`, `text-bench`, `native-pacing`) time only `target/perf/` binaries and exit
+  with an error on anything else. Tests in the docs now run in debug. Apps that depend on Rune
+  use their own profiles and are unaffected.
 - **`El::border_gradient(width, top, bottom)`**. A border whose colour runs from `top` at the
   element's top edge to `bottom` at its bottom edge, such as a top-lit hairline rim on a capsule.
   It has `border`'s corners, coverage and antialiasing, and like `border` it doesn't affect layout.
@@ -42,6 +50,7 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   instead of travel relative to the moving window, so a dragged capsule follows the pointer
   without feeding back. New `El::on_hover_change` reports entering and leaving an element's
   rect, children included, without taking their presses or hover; a held press stays inside.
+||||||| parent of a7ed763 (Make release builds incremental and add a perf profile for benchmarks)
 - **Mac keyboard navigation for menus, selects and lists**. Groups with role `menu`, `listbox`,
   `list` or `tree` move with Up and Down only (Left and Right no longer move them), and those
   plus `tablist` jump to the item whose label you type. `El::focus_highlight(color)` gives a

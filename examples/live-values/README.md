@@ -19,7 +19,9 @@ let pointer = rune::el().live_offset(cursor.smooth(rune::Spring::new(0.16, 0.0))
 hivemind run --kind cargo --fetch target/release/live-values -- cargo build --release -p live-values
 target/release/live-values --snap live.png --at 2
 target/release/live-values --scene smooth --trace live.jsonl --frames 840 --fps 120
-target/release/live-values --bench
+
+hivemind run --kind cargo --fetch target/perf/live-values -- cargo build --profile perf -p live-values
+target/perf/live-values --bench
 ```
 
 `--rebuild` selects the reference poll/view/layout path. `--bench` compares both

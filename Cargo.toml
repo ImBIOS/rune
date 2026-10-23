@@ -33,6 +33,22 @@ debug = false
 
 [profile.release]
 codegen-units = 16
+incremental = true
+
+# Benchmarks and perf numbers. Same codegen as release, without incremental, which can move
+# frame timings. The runtime bench scripts refuse binaries built with any other profile.
+[profile.perf]
+inherits = "release"
+opt-level = 3
+codegen-units = 16
+lto = false
+debug = false
+incremental = false
+
+# `cargo bench` inherits release; scripts/check-reference-instructions.sh compares its instruction
+# counts across revisions.
+[profile.bench]
+incremental = false
 
 [profile.rune-hot]
 inherits = "dev"
