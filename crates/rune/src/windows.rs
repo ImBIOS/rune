@@ -31,24 +31,10 @@ impl PlaceRequest {
 }
 
 /// Process-level settings applied once, before constructing the native event loop.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct RunOptions {
     /// macOS: no Dock icon/default menu and no activation at launch. Ignored elsewhere.
     pub accessory: bool,
-    /// Rune arguments without the program name. None reads the process command line;
-    /// Some(vec![]) isolates Rune from the embedding application's flags.
-    pub args: Option<Vec<String>>,
-}
-
-impl RunOptions {
-    pub fn args(mut self, args: impl IntoIterator<Item = String>) -> Self {
-        self.args = Some(args.into_iter().collect());
-        self
-    }
-
-    pub(crate) fn resolve_args(&self, process: impl FnOnce() -> crate::tooling::Args) -> crate::tooling::Args {
-        self.args.as_ref().map_or_else(process, |args| crate::tooling::Args::parse_from(args.clone()))
-    }
 }
 
 /// A display in desktop physical-pixel coordinates (origins may be negative).
@@ -210,7 +196,7 @@ impl<S> WindowSpec<S> {
     /// Closing a default window removes only it; quitting any app exits the whole event loop.
     /// RunOptions controls factory display discovery and tooling/window selection. App::args
     /// replaces the selected window's arguments (including native/headless mode). Isolate a
-    /// host CLI before factory discovery with RunOptions::default().args([]).
+    /// host CLI before factory discovery with run_windows_with_args(options, [], factory).
     /// App::accessory is process-level: use run_windows_with(RunOptions, factory) instead.
     /// AppHandle::set_dock_icon remains global.
     pub fn from_app(key: impl Into<String>, app: App<S>) -> Self {
@@ -276,11 +262,13 @@ mod tests {
 
     #[test]
     fn explicit_empty_args_never_read_the_host_cli() {
-        let options = RunOptions::default().args([]);
-        let args = options.resolve_args(|| panic!("must not inspect host --trace/--snap flags"));
+        let options = RunOptions { accessory: true };
+        let copied = options;
+        assert!(options.accessory && copied.accessory);
+        let args = crate::tooling::window_args(Some(vec![]), || panic!("must not inspect host --trace/--snap flags"));
         assert!(!args.headless());
         assert!(args.scene.is_none() && args.size.is_none());
-        let inherited = RunOptions::default().resolve_args(|| crate::tooling::Args::parse_from(
+        let inherited = crate::tooling::window_args(None, || crate::tooling::Args::parse_from(
             vec!["--trace".into(), "out.jsonl".into()]));
         assert!(inherited.headless());
     }

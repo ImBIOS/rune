@@ -1173,7 +1173,7 @@ impl<S: 'static> Host<S> {
         self.win = Some(Win {
             first_frame: FirstFrame::default(),
             #[cfg(target_os = "macos")]
-            pacing: crate::display_link::DisplayLink::new(self.frame_wake.clone()),
+            pacing: crate::display_link::DisplayLink::new(&window, self.frame_wake.clone()),
             #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
             activator: None,
             surface,
@@ -1218,7 +1218,7 @@ impl<S: 'static> Host<S> {
         }
         #[cfg(target_os = "macos")]
         let target = if hidden { None } else if let Some(pacing) = &mut l.pacing {
-            let Some(target) = pacing.next_frame(&l.window) else { return };
+            let Some(target) = pacing.next_frame() else { return };
             Some(target)
         } else { None };
         if self.native_handle.native.number.load(Ordering::Relaxed) == 0 {
@@ -1437,7 +1437,10 @@ impl<S: 'static> Host<S> {
             }
             WakeEvent::DisplayTick(_) => {
                 #[cfg(target_os = "macos")]
-                if self.win.as_ref().and_then(|w| w.pacing.as_ref()).is_some_and(|p| p.running()) { self.redraw(); }
+                if self.win.as_ref().and_then(|w| w.pacing.as_ref()).is_some_and(|p| p.running()) {
+                    self.redraw();
+                    self.shell(event_loop);
+                }
             }
             WakeEvent::Live(_) => {
                 if self.rt.live_pending() && let Some(w) = self.win.as_ref().filter(|w| w.visible && !w.occluded) {
@@ -1455,6 +1458,11 @@ impl<S: 'static> Host<S> {
     fn handle_window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if self.win.as_ref().is_none_or(|w| w.window.id() != id) {
             return;
+        }
+        #[cfg(target_os = "macos")]
+        if matches!(event, WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Occluded(_))
+            && let Some(w) = &mut self.win && let Some(pacing) = &mut w.pacing {
+            pacing.update_display(&w.window);
         }
         if matches!(&event, WindowEvent::ScaleFactorChanged { .. }) { self.apply_placement(event_loop); }
         match event {

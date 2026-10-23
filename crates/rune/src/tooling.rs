@@ -281,7 +281,20 @@ pub fn run_windows<S: 'static>(factory: impl FnOnce(&[crate::Display]) -> Vec<cr
 
 /// Run a window factory with process-level options, such as macOS accessory activation.
 pub fn run_windows_with<S: 'static>(options: crate::RunOptions, factory: impl FnOnce(&[crate::Display]) -> Vec<crate::WindowSpec<S>> + 'static) {
-    let args = options.resolve_args(Args::parse);
+    run_window_factory(options, window_args(None, Args::parse), factory);
+}
+
+/// Run a window factory with explicit Rune arguments, without reading the host CLI.
+/// Pass `[]` to isolate an embedding application's flags before display discovery.
+pub fn run_windows_with_args<S: 'static>(options: crate::RunOptions, args: impl IntoIterator<Item = String>, factory: impl FnOnce(&[crate::Display]) -> Vec<crate::WindowSpec<S>> + 'static) {
+    run_window_factory(options, window_args(Some(args.into_iter().collect()), Args::parse), factory);
+}
+
+pub(crate) fn window_args(args: Option<Vec<String>>, process: impl FnOnce() -> Args) -> Args {
+    args.map_or_else(process, Args::parse_from)
+}
+
+fn run_window_factory<S: 'static>(options: crate::RunOptions, args: Args, factory: impl FnOnce(&[crate::Display]) -> Vec<crate::WindowSpec<S>> + 'static) {
     if args.headless() {
         let displays = desktop(&args).displays();
         let display = displays.iter().find(|d| d.primary).unwrap_or(&displays[0]).clone();

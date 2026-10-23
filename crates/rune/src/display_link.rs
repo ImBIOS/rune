@@ -4,19 +4,15 @@
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{CVDisplayLink, CVGetCurrentHostTime, CVGetHostClockFrequency, CVOptionFlags, CVReturn, CVTimeStamp, CVTimeStampFlags};
 use winit::{platform::macos::MonitorHandleExtMacOS, window::Window};
 
-struct Tick {
-    target: Option<Instant>,
-    period: Duration,
-}
-
 struct Callback {
-    tick: Mutex<Tick>,
+    target: AtomicU64,
+    period_ns: AtomicU64,
     wake: crate::runtime::Waker,
     host_frequency: f64,
 }
@@ -39,17 +35,16 @@ unsafe extern "C-unwind" fn tick(
     let callback = unsafe { &*context.cast::<Callback>() };
     // SAFETY: CoreVideo provides a valid timestamp for this callback invocation.
     let output = unsafe { output.as_ref() };
-    let now = Instant::now();
-    let host_now = CVGetCurrentHostTime();
-    let mut tick = callback.tick.lock().unwrap();
-    let pending = tick.target.is_some();
     if output.videoTimeScale > 0 && output.videoRefreshPeriod > 0 {
-        tick.period = Duration::from_secs_f64(output.videoRefreshPeriod as f64 / output.videoTimeScale as f64);
+        let period = Duration::from_secs_f64(output.videoRefreshPeriod as f64 / output.videoTimeScale as f64);
+        callback.period_ns.store(period.as_nanos() as u64, Ordering::Relaxed);
     }
-    tick.target = Some(if output.flags & CVTimeStampFlags::HostTimeValid.0 != 0 {
-        target_time(now, host_now, output.hostTime, callback.host_frequency)
-    } else { now + tick.period });
-    drop(tick);
+    let target = if output.flags & CVTimeStampFlags::HostTimeValid.0 != 0 {
+        output.hostTime
+    } else {
+        CVGetCurrentHostTime() + (callback.period_ns.load(Ordering::Relaxed) as f64 * 1e-9 * callback.host_frequency) as u64
+    };
+    let pending = callback.target.swap(target, Ordering::Release) != 0;
     // Coalesce a backed-up event loop; missed refreshes never become a catch-up burst.
     // Never call Window::request_redraw here: winit synchronously waits on the main
     // thread on macOS, which can itself be waiting in CVDisplayLinkStop.
@@ -59,43 +54,52 @@ unsafe extern "C-unwind" fn tick(
 
 impl DisplayLink {
     pub(crate) fn running(&self) -> bool { self.running }
-    pub(crate) fn refresh_hz(&self) -> f64 { 1.0 / self.callback.tick.lock().unwrap().period.as_secs_f64() }
+    pub(crate) fn refresh_hz(&self) -> f64 { 1e9 / self.callback.period_ns.load(Ordering::Relaxed) as f64 }
 
-    pub(crate) fn new(wake: crate::runtime::Waker) -> Option<Self> {
+    pub(crate) fn new(window: &Window, wake: crate::runtime::Waker) -> Option<Self> {
         let mut raw = std::ptr::null_mut();
         // SAFETY: valid out pointer; the create rule transfers one retained reference.
         let status = unsafe { CVDisplayLink::create_with_active_cg_displays(NonNull::from(&mut raw)) };
         if status != 0 { eprintln!("display link creation failed: {status}"); return None; }
         let link = unsafe { CFRetained::from_raw(NonNull::new(raw)?) };
         let mut callback = Box::new(Callback {
-            tick: Mutex::new(Tick { target: None, period: Duration::from_secs_f64(1.0 / 60.0) }),
+            target: AtomicU64::new(0),
+            period_ns: AtomicU64::new(1_000_000_000 / 60),
             wake,
             host_frequency: CVGetHostClockFrequency(),
         });
         let status = unsafe { link.set_output_callback(Some(tick), (&mut *callback as *mut Callback).cast()) };
         if status != 0 { eprintln!("display link callback failed: {status}"); return None; }
-        Some(Self { link, callback, last_present: None, last_target: None, display: None, running: false })
+        let mut pacing = Self { link, callback, last_present: None, last_target: None, display: None, running: false };
+        pacing.update_display(window);
+        Some(pacing)
     }
 
-    /// Claims one display opportunity and returns its target presentation time. Consume
-    /// before rendering so a tick arriving during rendering can queue the next opportunity.
-    pub(crate) fn next_frame(&mut self, window: &Window) -> Option<Instant> {
+    /// AppKit monitor lookup is only needed on creation and display/visibility changes.
+    pub(crate) fn update_display(&mut self, window: &Window) {
         let display = window.current_monitor().map(|m| m.native_id());
         if display != self.display {
             if let Some(display) = display { self.link.set_current_cg_display(display); }
             self.display = display;
         }
+    }
+
+    /// Claims one display opportunity and returns its target presentation time. Consume
+    /// before rendering so a tick arriving during rendering can queue the next opportunity.
+    pub(crate) fn next_frame(&mut self) -> Option<Instant> {
         if !self.running {
             let status = self.link.start();
             if status != 0 { eprintln!("display link start failed: {status}"); return Some(Instant::now()); }
             self.running = true;
         }
-        let mut tick = self.callback.tick.lock().unwrap();
-        let target = tick.target.take()?;
+        let host_target = self.callback.target.swap(0, Ordering::Acquire);
+        if host_target == 0 { return None; }
         let now = Instant::now();
+        let target = target_time(now, CVGetCurrentHostTime(), host_target, self.callback.host_frequency);
+        let period = Duration::from_nanos(self.callback.period_ns.load(Ordering::Relaxed));
         // A late render followed by an on-time tick must skip, not submit two frames
         // together. Also discard stale callbacks after main-thread stalls.
-        if !permits(self.last_present, self.last_target, target, now, tick.period) { return None; }
+        if !permits(self.last_present, self.last_target, target, now, period) { return None; }
         self.last_target = Some(target);
         Some(target)
     }
@@ -106,7 +110,7 @@ impl DisplayLink {
 
     pub(crate) fn stop(&mut self) {
         if self.running { self.link.stop(); self.running = false; }
-        self.callback.tick.lock().unwrap().target = None;
+        self.callback.target.store(0, Ordering::Relaxed);
     }
 }
 

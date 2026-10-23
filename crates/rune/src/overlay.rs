@@ -340,6 +340,8 @@ impl<T: 'static> Overlay<T> {
             self.show_window(&window);
         }
         self.visible = true;
+        #[cfg(target_os = "macos")]
+        if let Some(live) = &mut self.live { live.occluded = false; }
         if !retained { self.dirty = true; }
         self.idle &= !(self.rt.animating || self.compositor.as_ref().is_some_and(|c| c.animating()));
     }
@@ -390,6 +392,8 @@ impl<T: 'static> Overlay<T> {
     }
 
     fn hide(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(live) = &mut self.live && let Some(pacing) = &mut live.pacing { pacing.stop(); }
         self.rt.set_live_visible(false);
         self.visible = false;
         self.rt.cancel_pointer();
@@ -686,7 +690,10 @@ impl<T: 'static> Overlay<T> {
         self.rt.transparent = true;
         self.rt.set_viewport(self.at.size, scale);
         #[cfg(target_os = "macos")]
-        let pacing = self.frame_wake.clone().and_then(crate::display_link::DisplayLink::new);
+        let pacing = self.frame_wake.clone().and_then(|wake| {
+            let Backing::Window(window) = &backing;
+            crate::display_link::DisplayLink::new(window, wake)
+        });
         Some(Live {
             #[cfg(target_os = "macos")]
             pacing,
@@ -980,8 +987,8 @@ impl<T: 'static> Overlay<T> {
         #[cfg(target_os = "macos")]
         let target = if prewarm { None } else {
             if live.occluded { return false; }
-            if let (Some(pacing), Backing::Window(w)) = (&mut live.pacing, &live.backing) {
-                let Some(target) = pacing.next_frame(w) else { return false };
+            if let Some(pacing) = &mut live.pacing {
+                let Some(target) = pacing.next_frame() else { return false };
                 Some(target)
             } else { None }
         };
@@ -1041,7 +1048,7 @@ impl<T: 'static> Overlay<T> {
         #[cfg(target_os = "macos")]
         if let Some(pacing) = &mut live.pacing {
             pacing.presented(Instant::now());
-            if self.idle { pacing.stop(); }
+            if prewarm || self.idle { pacing.stop(); }
             return false; // The display link wakes this overlay, never ControlFlow::Poll.
         }
         !self.idle
@@ -1076,6 +1083,10 @@ impl<T: 'static> AnyHost for Overlay<T> {
         let deadline = self.rt.wall_start.and_then(|start| {
             start.checked_add(std::time::Duration::try_from_secs_f64(self.rt.wake_deadline()?).ok()?)
         });
+        // A running display link consumes due runtime timers. Keep the independent
+        // pointer deadline, but do not spin on an overdue animation timer.
+        #[cfg(target_os = "macos")]
+        let deadline = deadline.filter(|_| !self.live.as_ref().and_then(|l| l.pacing.as_ref()).is_some_and(|p| p.running()));
         #[cfg(target_os = "macos")]
         let deadline = deadline.into_iter().chain(self.panel.as_ref().and_then(|p| p.pointer_deadline())).min();
         deadline
@@ -1105,6 +1116,12 @@ impl<T: 'static> AnyHost for Overlay<T> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        #[cfg(target_os = "macos")]
+        if matches!(event, WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Occluded(_))
+            && let Some(live) = &mut self.live && let Some(pacing) = &mut live.pacing {
+            let Backing::Window(window) = &live.backing;
+            pacing.update_display(window);
+        }
         if let WindowEvent::Focused(focused) = &event {
             #[cfg(target_os = "macos")]
             if self.panel.as_ref().is_some_and(|p| p.is_key() != *focused) { return; }

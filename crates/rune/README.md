@@ -210,7 +210,7 @@ tray.set_position((-320, 80)); // physical desktop pixels
 tray.show();                  // no focus request; recreates a destroyed window
 tray.focus();                 // a separate, explicit activation request
 // tray.hide() keeps state without invoking on_close; tray.open() shows and activates.
-rune::run_windows_with(rune::RunOptions { accessory: true, ..Default::default() }.args([]), move |_| {
+rune::run_windows_with_args(rune::RunOptions { accessory: true }, [], move |_| {
     vec![rune::WindowSpec::from_app("call", app).options(rune::WindowOptions {
         min_size: Some((320.0, 160.0)),
         max_size: Some((320.0, 160.0)),

@@ -14,7 +14,7 @@ fn view(animate: &bool, _: &mut Cx<bool>) -> El {
 }
 
 fn main() {
-    rune::run_windows_with(RunOptions { accessory: true, ..Default::default() }.args([]), |_| {
+    rune::run_windows_with_args(RunOptions { accessory: true }, [], |_| {
         let spec = AppSpec::new("Pacing overlay", (680.0, 160.0), || false, view);
         let mut app = App::new(spec).windowless();
         let animate = std::env::var_os("PACING_NATIVE").is_some();

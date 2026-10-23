@@ -897,13 +897,13 @@ impl<S: 'static> Runtime<S> {
             merge(&mut tx, one);
         }
         if self.commits == 0 && self.queue.iter().any(|a| matches!(a, Action::WindowFocus(_))) {
-            self.commit(Tx::default());
+            self.commit(&Tx::default());
         }
         for action in std::mem::take(&mut self.queue) {
             // State may have requested focus on a newly mounted field. Resolve the
             // new tree before routing this frame's text, not after it has gone to
             // the previous field. The same boundary covers an earlier handler.
-            if (ran || self.dirty) && matches!(&action, Action::Key(_) | Action::Ime(_) | Action::Paste(_)) {
+            if (ran || self.dirty) && matches!(&action, Action::Key(_) | Action::Ime(_) | Action::Paste(..)) {
                 for (source, target) in std::mem::take(&mut tx.text_flights) {
                     self.capture_text_flight(source, target);
                 }
@@ -3708,7 +3708,7 @@ mod tests {
         assert!(!settled.frame(0.0));
         assert_eq!(pose(&settled).opacity, 1.0);
         assert_eq!(settled.wake_deadline(), None);
-        let mut reduced = make(); reduced.reduced_motion = true;
+        let mut reduced = make(); reduced.set_system_reduced_motion(true);
         assert!(!reduced.frame(0.0));
         assert_eq!(pose(&reduced).scale, 1.0);
         assert_eq!(pose(&reduced).opacity, 1.0);
