@@ -14,23 +14,26 @@ fn pixels<S: 'static>(gpu: &Gpu, rt: &mut Runtime<S>, size: (u32, u32)) -> Vec<u
 
 #[test]
 fn packed_fades_survive_group_layer_projection_without_double_application() {
-    fn layered(alpha: &f32, _: &mut Cx<f32>) -> El {
+    fn layered(state: &(f32, bool), _: &mut Cx<(f32, bool)>) -> El {
+        let mut group = col().size(80.0, 64.0).opacity(state.0)
+            .child(el().size(80.0, 32.0).fill(Color::WHITE))
+            .child(el().size(80.0, 32.0).fill(Color::WHITE));
+        if state.1 { group = group.clip_rounded(16.0); }
         el().size(128.0, 128.0).child(col().absolute(16.0, 16.0).size(80.0, 80.0)
             .clip_fade(0.0, 16.0, 0.0, 0.0)
-            .child(col().absolute(0.0, 8.0).size(80.0, 64.0).opacity(*alpha).clip_soft(0.0)
-                .child(el().size(80.0, 32.0).fill(Color::WHITE))
-                .child(el().size(80.0, 32.0).fill(Color::WHITE))))
+            // Intersect before isolation: the composite must decode a nonzero origin offset.
+            .child(col().absolute(0.0, 8.0).size(80.0, 64.0).clip_soft(0.0).child(group)))
     }
     let gpu = Gpu::headless();
-    for scale in [1.0, 2.0] {
+    for (scale, rounded) in [(1.0, false), (2.0, false), (1.0, true), (2.0, true)] {
         let size = ((128.0 * scale) as u32, (128.0 * scale) as u32);
         let env = Env::new(true, scale);
-        let mut plain = Runtime::new(1.0, layered, (128.0, 128.0), env);
-        let mut isolated = Runtime::new(0.5, layered, (128.0, 128.0), env);
+        let mut plain = Runtime::new((1.0, rounded), layered, (128.0, 128.0), env);
+        let mut isolated = Runtime::new((0.5, rounded), layered, (128.0, 128.0), env);
         plain.frame(0.0); isolated.frame(0.0);
         assert!(isolated.instances.iter().any(|i| i.params[1] == rune::render::KIND_LAYER));
         assert!(isolated.instances.iter().any(|i| i.fade[2] != 0), "exercise inherited origin offsets");
-        assert!(isolated.instances.iter().all(|i| i.fade[3] == 0), "clip-radius lane stays reserved");
+        assert_eq!(isolated.instances.iter().any(|i| i.fade[3] != 0), rounded);
         let a = pixels(&gpu, &mut plain, size);
         let b = pixels(&gpu, &mut isolated, size);
         assert!(a.chunks_exact(4).any(|p| p[3] > 0 && p[3] < 255));
