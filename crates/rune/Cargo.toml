@@ -86,6 +86,10 @@ name = "launcher_wakes"
 harness = false
 
 [[test]]
+name = "macos_overlay_source"
+harness = false
+
+[[test]]
 name = "shortcut_layout_macos"
 harness = false
 

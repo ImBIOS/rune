@@ -156,7 +156,7 @@ mod mac {
             for i in 0..count {
                 let window: *mut AnyObject = msg_send![windows, objectAtIndex: i];
                 let delegate: *mut AnyObject = msg_send![window, delegate];
-                // The real isa: KVO and Rune's overlay bridge both subclass at runtime.
+                // The real isa, which KVO subclasses at runtime.
                 let class = (*window).class().name().to_string();
                 let winit = !delegate.is_null() && (*delegate).class().name() == "WinitWindowDelegate";
                 for _ in 0..50 {
@@ -173,9 +173,9 @@ mod mac {
         }
         observed.sort();
         println!("rune ok winit windows={observed:?}");
-        assert!(observed.iter().any(|c| c.starts_with("RuneOverlaySource_")), "overlay source window missing");
         assert!(observed.iter().any(|c| c == "RuneOverlayPanel"), "overlay panel missing");
-        assert!(observed.iter().any(|c| c.ends_with("WinitWindow")), "ordinary window missing");
+        // The ordinary window and the overlay's hidden source keep winit's (KVO) class.
+        assert_eq!(observed.iter().filter(|c| c.ends_with("WinitWindow")).count(), 2, "ordinary or overlay source window missing");
         std::process::exit(0);
     }
 

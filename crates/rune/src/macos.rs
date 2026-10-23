@@ -33,6 +33,12 @@ declare_class!(
             if self.ivars().warming.get() { 2 }
             else { unsafe { msg_send![super(self), occlusionState] } }
         }
+        #[method(sendEvent:)]
+        fn send_event(&self, event: &NSEvent) {
+            // Without its view the panel would swallow this click and every later one.
+            if crate::macos_panel_bridge::reattach(self.as_super()) { eprintln!("rune: panel lost its view; reattached on input"); }
+            unsafe { let _: () = msg_send![super(self), sendEvent: event]; }
+        }
     }
 );
 
@@ -169,15 +175,19 @@ impl PointerState {
         self.release_since.set(None);
     }
     fn observe_release(&self, buttons: usize, now: Instant, point: (f32, f32)) {
-        if !self.captured.get() || buttons & 1 != 0 || self.clicks.borrow().iter().any(|(down, _, _)| !down) {
+        if !self.captured.get() || buttons & 1 != 0 {
             self.release_since.set(None);
             return;
         }
+        // winit dispatches a queued Up within the turn. One still queued seconds later was
+        // never delivered (the panel lost its view), and would otherwise hold capture forever.
+        let queued_up = self.clicks.borrow().iter().any(|(down, _, _)| !down);
+        let grace = if queued_up { Duration::from_secs(2) } else { Duration::from_millis(100) };
         let (since, released_at) = self.release_since.get().unwrap_or_else(|| {
             self.release_since.set(Some((now, point)));
             (now, point)
         });
-        if now.duration_since(since) < Duration::from_millis(100) { return; }
+        if now.duration_since(since) < grace { return; }
         self.captured.set(false);
         self.clicks.borrow_mut().clear();
         self.release_since.set(None);
@@ -486,7 +496,18 @@ impl Panel {
         overlay_rect_on(at, options, self.panel.screen().map(|s| screen_id(&s)))
     }
 
+    /// Reattaches winit's view if something outside Rune took it from the panel. Clicks
+    /// recorded while it was gone were never delivered, so native capture starts over.
+    fn keep_view(&self) {
+        if !crate::macos_panel_bridge::reattach(&self.panel) { return; }
+        eprintln!("rune: panel lost its view; reattached");
+        self.pointer.captured.set(false);
+        self.pointer.clicks.borrow_mut().clear();
+        self.pointer.release_since.set(None);
+    }
+
     pub fn show(&self) {
+        self.keep_view();
         self.visible.set(true);
         self.refresh_monitors();
         self.pointer.observe(&self.panel, self.wake.as_ref());
@@ -569,6 +590,7 @@ impl Panel {
         }
     }
     pub fn observe_pointer(&self) {
+        self.keep_view();
         if self.visible.get() { self.pointer.observe(&self.panel, None); }
     }
     pub fn set_input(&self, input: OverlayInput) {
@@ -724,6 +746,22 @@ mod tests {
         pointer.clicks.borrow_mut().clear();
         pointer.released();
         assert!(!pointer.captured.get());
+    }
+    #[test]
+    fn overlay_undelivered_click_releases_capture_after_stall() {
+        // The local monitor saw a click that never reached winit, so neither entry dispatches.
+        let pointer = PointerState { input: Cell::new(OverlayInput::Regions), ..Default::default() };
+        pointer.regions.borrow_mut().push([10.0, 10.0, 30.0, 30.0]);
+        pointer.record_click(true, 20.0, 20.0);
+        pointer.record_click(false, 20.0, 20.0);
+        let now = Instant::now();
+        pointer.observe_release(0, now, (20.0, 20.0));
+        pointer.observe_release(0, now + Duration::from_millis(1999), (20.0, 20.0));
+        assert!(pointer.captured.get(), "a briefly queued Up still belongs to winit");
+        pointer.observe_release(0, now + Duration::from_secs(2), (20.0, 20.0));
+        assert!(!pointer.captured.get());
+        assert!(pointer.clicks.borrow().is_empty());
+        assert!(!pointer.hit(50.0, 50.0), "outside the regions passes through again");
     }
     #[test]
     fn overlay_rejected_down_cannot_poison_later_click_and_owned_up_survives_exit() {

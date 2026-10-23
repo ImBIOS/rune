@@ -5,6 +5,18 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Overlay and launcher panels keep their view when something restyles winit's hidden
+  window.** On macOS an overlay or nonactivating launcher panel shows winit's view while
+  winit's own window stays hidden. That hidden window answered `contentView` with the moved
+  view, so AppKit calls on it that rebuild the frame (`setStyleMask:`, `setContentView:`) pulled
+  the view out of the panel, which then dropped every click. Starting a ScreenCaptureKit stream
+  in the same app does this: ReplayKit restyles the first window in `NSApp.windows`. Now only
+  winit gets the moved view; AppKit and other frameworks see the hidden window's real, empty
+  content. If the view is taken anyway, the panel puts it back on the next event-loop turn or
+  event, and an overlay press whose release never reached winit stops holding the pointer
+  after 2 s. The hidden window also keeps winit's class: Rune adds its forwards to winit's
+  window and view classes instead of subclassing each window, which under KVO had made
+  `-[window class]` return nil.
 - **Borders can be dashed.** `El::border_dash(dash, gap)` dashes an element's `border` or
   `border_gradient`, in points, with butt ends:
   `el().radius(13.0).border(1.0, amber).border_dash(4.0, 3.0)`. Dashes follow the ring's
