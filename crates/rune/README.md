@@ -655,6 +655,21 @@ The OpenCode example takes `--server URL`, `--session <id or title words>`, `--e
 `--no-stream` and `--reduced-motion`. It sends prompts only to a fixture's scripted reply, or to a
 non-default server with `--allow-send`.
 
+### Linux prerequisites
+
+Windowed runs need the XKB X11 library, and GPU runs without a physical GPU
+need a software Vulkan driver. On stock Ubuntu 24.04 both are one install away:
+
+```sh
+sudo apt-get install -y libxkbcommon-x11-0 mesa-vulkan-drivers
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json target/debug/settings
+```
+
+Without `libxkbcommon-x11-0` every windowed example panics at startup with
+`Library libxkbcommon-x11.so could not be loaded` (verified on stock Ubuntu
+24.04; installing the package fixes it, and the app then runs cleanly under
+Xvfb). Headless `--snap` runs don't need a display or the XKB library.
+
 ## Agent tooling (headless, no window, same renderer, fixed virtual clock)
 
 ```sh
