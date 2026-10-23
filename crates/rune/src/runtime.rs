@@ -44,6 +44,8 @@ mod physical_dispatch;
 mod scroll_bottom;
 #[path = "caret.rs"]
 mod caret;
+#[path = "layout_read.rs"]
+mod layout_read;
 #[path = "links.rs"]
 mod links;
 
@@ -91,6 +93,8 @@ pub struct Cx<S> {
     time_scale: f32,
     caret: Option<(String, [f32; 4])>,
     caret_read: std::cell::Cell<bool>,
+    layout: layout_read::LayoutSeen,
+    layout_reads: std::cell::RefCell<Vec<String>>,
     _s: PhantomData<fn(&S)>,
 }
 
@@ -121,6 +125,21 @@ impl<S> Cx<S> {
         self.caret_read.set(true);
         let (path, rect) = self.caret.as_ref()?;
         path.split('/').any(|seg| seg == key).then_some(*rect)
+    }
+    /// The laid-out rect `[x, y, w, h]` in window points, after scrolling, of the element keyed
+    /// `key` (or named by a key path such as `"msg-42/body"`, as `Tx::fly_text` takes), or
+    /// `None` when there is none. It is where layout puts the element, not a frame of its spring.
+    ///
+    /// A view that reads it re-runs when that rect moves or resizes past half a point: in the
+    /// same commit when the change comes from layout, the next frame when scrolling moved it.
+    /// Reading an element the view itself resizes (its own size, say) settles: the commit
+    /// re-runs the view at most twice more while the value moves, then keeps the last layout,
+    /// and layout reads alone can't keep causing commits. A view whose output never reaches a
+    /// fixed point gets a stale value rather than oscillating.
+    pub fn layout(&self, key: &str) -> Option<[f32; 4]> {
+        let mut reads = self.layout_reads.borrow_mut();
+        if !reads.iter().any(|k| k == key) { reads.push(key.to_owned()); }
+        self.layout.get(key).copied().flatten()
     }
 }
 
@@ -155,6 +174,7 @@ pub(crate) struct Node {
     transition: Option<Transition>,
     scroll: Option<ScrollSpec>,
     on_at_bottom: Option<crate::el::AtBottomFn>,
+    on_layout: Option<crate::el::LayoutFn>,
     growth: Option<GrowthSpec>,
     streaming: bool,
     input: Option<Box<InputSpec>>,
@@ -183,6 +203,7 @@ enum Action {
     PointerMove(String, PointerPress),
     Hover(String),
     AtBottom(String, bool),
+    Layout(String, [f32; 4]),
     Press(String),
     Link(String, usize),
     SecondaryPress(String, PointerPress),
@@ -403,6 +424,12 @@ pub struct Runtime<S: 'static> {
     caret: Option<(String, [f32; 4])>,
     /// The last view read the caret, so it re-runs when the caret moves.
     caret_watch: bool,
+    /// Keys the last view read with `Cx::layout`, and what each resolved to.
+    layout_seen: layout_read::LayoutSeen,
+    /// Rect last sent to each element's `El::on_layout`.
+    layout_fired: HashMap<NodeId, [f32; 4]>,
+    /// Commits in a row caused only by layout feedback (see `layout_read`).
+    layout_echoes: u32,
     /// An edit ran this frame: keep the caret in its scroll viewport after the commit.
     caret_follow: bool,
     links: links::LinkState,
@@ -566,6 +593,9 @@ impl<S: 'static> Runtime<S> {
             ime_area: None,
             caret: None,
             caret_watch: false,
+            layout_seen: HashMap::new(),
+            layout_fired: HashMap::new(),
+            layout_echoes: 0,
             caret_follow: false,
             links: Default::default(),
             ime_reset: false,
@@ -940,6 +970,7 @@ impl<S: 'static> Runtime<S> {
         if self.commits == 0 && self.queue.iter().any(|a| matches!(a, Action::WindowFocus(_))) {
             self.commit(&Tx::default());
         }
+        let mut ran_layout = false;
         for action in std::mem::take(&mut self.queue) {
             // State may have requested focus on a newly mounted field. Resolve the
             // new tree before routing this frame's text, not after it has gone to
@@ -953,7 +984,11 @@ impl<S: 'static> Runtime<S> {
                 self.commit(&tx);
                 ran = false;
             }
-            ran |= self.run_action(action, &mut tx);
+            if matches!(action, Action::Layout(..)) {
+                ran_layout |= self.run_action(action, &mut tx);
+            } else {
+                ran |= self.run_action(action, &mut tx);
+            }
         }
         for delay in tx.wakes.drain(..) {
             let deadline = self.clock + delay.as_secs_f64();
@@ -972,7 +1007,10 @@ impl<S: 'static> Runtime<S> {
         let scroll_to = std::mem::take(&mut tx.scroll_to);
         let scroll_bottom = std::mem::take(&mut tx.scroll_bottom);
         if self.caret_watch && self.caret_moved(None) { self.dirty = true; }
-        if ran || self.dirty || self.relayout || self.settle || self.virtual_window_changed() {
+        let read_moved = !self.layout_seen.is_empty() && self.layout_feedback_open() && self.layout_moved(None, None);
+        let other = ran || self.dirty || self.relayout || self.settle || self.virtual_window_changed();
+        self.count_layout_echo(ran_layout || read_moved, other);
+        if other || ran_layout || read_moved {
             if self.relayout && !ran && !self.dirty {
                 tx.relayout = true;
             }
@@ -1022,6 +1060,7 @@ impl<S: 'static> Runtime<S> {
         animating |= self.step_growth(step as f32);
         animating |= self.step_scroll(step as f32);
         self.report_at_bottom();
+        self.report_layout();
         animating |= self.reveals_active();
         self.build();
         self.images.end_frame();
@@ -1189,6 +1228,11 @@ impl<S: 'static> Runtime<S> {
             Action::AtBottom(path, at) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_at_bottom.clone()) else { return false };
                 f(&mut self.state as &mut dyn Any, at);
+                true
+            }
+            Action::Layout(path, rect) => {
+                let Some(f) = self.node(&path).and_then(|n| n.on_layout.clone()) else { return false };
+                f(&mut self.state as &mut dyn Any, rect);
                 true
             }
             Action::Hover(path) => {
@@ -1417,6 +1461,8 @@ struct Measurement<'a, S> {
     key_warnings: &'a mut Option<Vec<String>>,
     caret: Option<(String, [f32; 4])>,
     caret_read: bool,
+    layout_seen: layout_read::LayoutSeen,
+    layout_reads: Vec<String>,
 }
 
 /// Owned result of completed measurement. Scene mutation consumes this once; retries never
@@ -1427,6 +1473,7 @@ struct Measured {
     reduced_motion: bool,
     time_scale: f32,
     caret_read: bool,
+    layout_reads: Vec<String>,
 }
 
 fn collect_virtual_inputs(el: &El, parent: &str, index: usize, inputs: &mut HashMap<String, Box<InputSpec>>) {
@@ -1457,7 +1504,7 @@ impl<S> Measurement<'_, S> {
         };
         // Exiting virtual subtrees still use their origin and measured extent while
         // fading. Runtime prunes this metadata with the retained scene nodes.
-        Measured { layout, nodes, reduced_motion: self.reduced_motion, time_scale: self.time_scale, caret_read: self.caret_read }
+        Measured { layout, nodes, reduced_motion: self.reduced_motion, time_scale: self.time_scale, caret_read: self.caret_read, layout_reads: self.layout_reads }
     }
 
     fn node_id(&mut self, path: &str) -> NodeId {
@@ -1573,6 +1620,8 @@ impl<S> Measurement<'_, S> {
             time_scale: self.time_scale,
             caret: self.caret.clone(),
             caret_read: std::cell::Cell::new(false),
+            layout: self.layout_seen.clone(),
+            layout_reads: Default::default(),
             _s: PhantomData,
         };
         let mut root = (self.view)(self.state, &mut cx);
@@ -1591,6 +1640,7 @@ impl<S> Measurement<'_, S> {
         self.reduced_motion = cx.reduced_motion;
         self.time_scale = cx.time_scale;
         self.caret_read = cx.caret_read.get();
+        self.layout_reads = cx.layout_reads.take();
 
         let mut taffy = std::mem::replace(self.layout, TaffyTree::with_capacity(0));
         for entry in self.layout_entries.values_mut() {
@@ -1709,6 +1759,7 @@ impl<S: 'static> Runtime<S> {
             self.layout = measured.layout;
             measured = self.measure(&tx);
         }
+        let measured = self.settle_layout_reads(measured, &tx);
         self.apply(measured, tx);
     }
 
@@ -1723,6 +1774,8 @@ impl<S: 'static> Runtime<S> {
             time_scale: self.time_scale,
             caret: self.caret.clone(),
             caret_read: false,
+            layout_seen: self.layout_seen.clone(),
+            layout_reads: Vec::new(),
             commits: self.commits,
             nodes: &self.nodes,
             text: &mut self.text,
@@ -1742,7 +1795,7 @@ impl<S: 'static> Runtime<S> {
 
     /// The mutation phase cannot accept an El or an unfinished measurement pass.
     fn apply(&mut self, measured: Measured, tx: &Tx) {
-        let Measured { layout: taffy, mut nodes, reduced_motion, time_scale, caret_read } = measured;
+        let Measured { layout: taffy, mut nodes, reduced_motion, time_scale, caret_read, .. } = measured;
         self.caret_watch = caret_read;
         if reduced_motion != self.reduced_motion {
             self.reduced_motion = reduced_motion;
@@ -3667,6 +3720,7 @@ fn flatten(
         transition,
         scroll,
         on_at_bottom,
+        on_layout,
         growth,
         streaming,
         input,
@@ -3712,6 +3766,7 @@ fn flatten(
         transition,
         scroll,
         on_at_bottom,
+        on_layout,
         growth,
         streaming,
         input,

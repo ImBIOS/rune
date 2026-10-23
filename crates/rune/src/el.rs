@@ -408,6 +408,7 @@ impl Default for Visual {
 
 pub(crate) type PasteFn = Rc<dyn Fn(&mut dyn Any, &str, &mut Tx)>;
 pub(crate) type AtBottomFn = Rc<dyn Fn(&mut dyn Any, bool)>;
+pub(crate) type LayoutFn = Rc<dyn Fn(&mut dyn Any, [f32; 4])>;
 pub(crate) type WindowFocusFn = Rc<dyn Fn(&mut dyn Any, bool, &mut Tx)>;
 
 pub struct El {
@@ -443,6 +444,7 @@ pub struct El {
     pub(crate) transition: Option<Transition>,
     pub(crate) scroll: Option<ScrollSpec>,
     pub(crate) on_at_bottom: Option<AtBottomFn>,
+    pub(crate) on_layout: Option<LayoutFn>,
     pub(crate) growth: Option<GrowthSpec>,
     pub(crate) virtual_estimate: Option<f32>,
     pub(crate) virtual_mount: bool,
@@ -489,6 +491,7 @@ fn base(dir: FlexDirection) -> El {
         transition: None,
         scroll: None,
         on_at_bottom: None,
+        on_layout: None,
         growth: None,
         virtual_estimate: None,
         virtual_mount: false,
@@ -1330,6 +1333,14 @@ impl El {
     /// [`Tx::scroll_to_bottom`] for a "jump to latest" button.
     pub fn on_at_bottom<S: 'static>(mut self, f: impl Fn(&mut S, bool) + 'static) -> Self {
         self.on_at_bottom = Some(Rc::new(move |s, at| f(downcast::<S>(s), at)));
+        self
+    }
+    /// Called with this element's laid-out rect `[x, y, w, h]` in window points, after scrolling
+    /// (as [`Cx::layout`](crate::Cx::layout) reads it): once after its first layout, then when it
+    /// moves or resizes by more than half a point. Never per animation frame: the rect is where
+    /// layout puts the element, not where its spring is on the way there.
+    pub fn on_layout<S: 'static>(mut self, f: impl Fn(&mut S, [f32; 4]) + 'static) -> Self {
+        self.on_layout = Some(Rc::new(move |s, r| f(downcast::<S>(s), r)));
         self
     }
     /// Make this column a growth stack (see [`GrowthSpec`]). Required alongside
