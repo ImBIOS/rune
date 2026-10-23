@@ -198,7 +198,7 @@ impl Animatable for Sides {
     }
 }
 
-/// A Gaussian blur radius in points.
+/// A Gaussian blur sigma (standard deviation) in points.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Blur(pub f32);

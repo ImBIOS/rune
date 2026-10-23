@@ -301,7 +301,7 @@ fn main() {
         }
         if let Some(p) = last {
             op.push((t as f32, p.opacity));
-            bl.push((t as f32, p.blur / 4.0));
+            bl.push((t as f32, p.blur / Transition::blur_replace().insertion.blur));
             sc.push((t as f32, (p.transform.scale.x - 0.96) / 0.04));
         }
     }

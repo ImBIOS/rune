@@ -84,6 +84,83 @@ radius lane is `fade[3]`. Adapt marker extraction/composite construction at that
 do not reinterpret the old layout's bottom-feather value as a radius. No confirmation or
 high-level `clip_rounded` integration is claimed here.
 
+### Landing-second contract for Deadbolt and overlays
+
+Whether filters or Deadbolt's repack lands first, the second branch must resolve these points:
+
+1. Move the layer clip radius to **`fade[3]`** in the repacked instance. In `KIND_LAYER`, use
+   Deadbolt's decoded clip and radius, not the old float `i.fade` interpretation.
+2. Drop the **`radii[0]` / `uv` layer marker** and the redundant `Layer::mask` copy. The planner
+   no longer intersects a parent's clip into a child, so `mask == clip`. Use each scope's own
+   `l.clip` for both its rounded rectangle and hard clip. The current comment about preserving
+   a separate original rectangle during intersection is stale; remove it during this merge.
+3. Keep the post-filter rounded coverage and opacity-one mask scope. Do not reintroduce parent
+   clip propagation before convolution. Retain the nested-capsule/source-retention regression.
+4. The non-isolated subtree can use per-primitive rounded clipping. If the clipped element
+   is itself isolated or blurred, emit `LayerSpec::clip_radius` on its scope instead, so the
+   source is not rounded off before blur. Distinct nested masks keep distinct scopes.
+5. Resolve `ElementInfo.blur` using presented **`p.blur`**, own plus presence sigma in points,
+   rather than accumulated `Inh.blur`.
+
+These notes are the parent-reviewed integration contract. This follow-up does not edit the
+core renderer/runtime to preempt the repack or claim a landing slot.
+
+## `blur_replace` now peaks at sigma 1.5 pt
+
+The pre-filter implementation's “4 pt radius” was a linear SDF coverage ramp on rectangles,
+plus extra analytic shadow softness. It did not blur text, vector glyphs, images or video.
+Keeping the numeric value as Gaussian sigma 4 changes the look substantially: text loses
+legibility and shape edges become wider. There is no scalar conversion that reproduces the
+old treatment of all paint types.
+
+![Legacy radius, sigma 4, variance-equivalent sigma, capped preset](../crates/rune/artifacts/layer-filters/blur-replace-comparison.png)
+
+At 50% opacity, top to bottom: reconstructed legacy radius 4 pt; Gaussian peak sigma 4 pt;
+variance-equivalent peak sigma `4 / sqrt(3)` ≈2.31 pt; chosen peak sigma **1.5 pt**. The screenshot
+uses the same scale/opacity progress for every row. It confirms that the capped preset retains
+more text detail, but does not claim byte-identical legacy appearance. Shape edges are sharper
+than the old ramp, while text now softens with the whole state as intended.
+
+The 2.31 pt candidate matches the variance of the old uniform edge kernel, but still enters
+the four-pass path early in a 2× transition and cannot preserve formerly sharp glyphs. The
+chosen preset caps sigma at 1.5 pt, hence ≤3 device pixels at 1×/2×, keeping two filter passes.
+Scale .96, fade, spring timings, lifecycle and explicit `Transition::blur(sigma)` are unchanged.
+Higher display scales or additional explicitly authored blur can still require four passes.
+
+The comparison benchmark renders 300×36 pt rows at 2×, with a fill, circle and real glyph atlas
+text. It samples presence opacity 0.25/0.5/0.75 and the corresponding scale/blur progress, for
+one row and twelve simultaneously transitioning rows. Eight warmups, 60 completed samples,
+M4 Pro/Metal through HiveMind. Variant order rotates each sample; added cost is the median of
+paired differences from the reconstructed legacy frame. Each variant has fresh pooled storage.
+
+| Rows | Opacity | Legacy frame | Sigma-4 frame | Capped frame | Sigma-4 added/row | Capped added/row |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | .25 | 0.107125 ms | 0.219750 ms | 0.169083 ms | 0.112625 ms | 0.061917 ms |
+| 1 | .50 | 0.103292 ms | 0.238833 ms | 0.157750 ms | 0.135625 ms | 0.054416 ms |
+| 1 | .75 | 0.100833 ms | 0.159417 ms | 0.146292 ms | 0.058708 ms | 0.045417 ms |
+| 12 | .25 | 0.765500 ms | 1.953792 ms | 1.293208 ms | 0.098660 ms | 0.043927 ms |
+| 12 | .50 | 0.740291 ms | 1.915250 ms | 1.190667 ms | 0.097990 ms | 0.037490 ms |
+| 12 | .75 | 0.717791 ms | 1.216625 ms | 1.136375 ms | 0.041795 ms | 0.035004 ms |
+
+At half presence the twelve-row frame p95 improves from **2.079708 to 1.230416 ms**. The
+variance-equivalent candidate was 1.901125 ms at .25 and 1.310000 ms at .50; the capped preset
+was 1.293208/1.190667 ms. Four-pass sigma 4 consumes about **1.18 ms extra per twelve-row frame**
+early/mid-transition, versus **0.45–0.53 ms** capped. It does not alone exhaust a 120 Hz frame,
+but consumes roughly 14% of that budget before the rest of the app. The cap preserves headroom
+and better matches the old text clarity. The 0.15 ms target is satisfied per row here, not for
+the aggregate list. Filter passes drop from 48 to 24 for twelve rows at .25/.50; total extra
+passes including isolation drop from 60 to 36, and pooled bytes from 23,592,960 to 15,728,640.
+
+An initial sequential measurement overlapped another render job and produced p95 spans up to
+13.55 ms and even negative variant deltas. Those numbers were rejected as contention, not used
+to justify the cap. The table is from the interleaved rerun with much tighter p95 spans.
+Reproduce with `cargo test -p rune --lib blur_replace_cost_and_appearance -- --ignored
+--nocapture --test-threads=1` through HiveMind; optionally set `RUNE_TRANSITION_PROOF` to a PNG path.
+The existing 11 `rune-motion` scene tests, Rune's exit/revive runtime test and the `curves`
+example typecheck passed after the cap. These cover exact rest, initial mount, removal timing,
+mid-flight revival and reduced motion. No renderer or runtime production file changed in this
+follow-up.
+
 ## The alpha helper is the supported sRGB option
 
 Use `theme::srgb_equivalent(c, bg)` for Scrawl's translucent neutral ink on a known opaque neutral

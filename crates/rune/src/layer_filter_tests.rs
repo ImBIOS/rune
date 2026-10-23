@@ -306,3 +306,106 @@ fn layer_filter_review_still() {
     let output = pixels(&gpu, &renderer, &target);
     write_png(&std::path::PathBuf::from(std::env::var_os("RUNE_FILTER_STILL").unwrap()), 880, 352, &output).unwrap();
 }
+
+#[test]
+#[ignore = "manual legacy/4pt/equivalent/capped presence-blur comparison and list GPU cost"]
+fn blur_replace_cost_and_appearance() {
+    struct State { rows: usize, alpha: f32, sigma: f32, scale: Live<f32> }
+    fn view(s: &State, _: &mut Cx<State>) -> El {
+        el().fill(Color { r: 0.012, g: 0.012, b: 0.016, a: 1.0 }).children((0..s.rows).map(|i| {
+            el().size(300.0, 36.0).absolute(12.0, 12.0 + i as f32 * 48.0)
+                .radius(8.0).fill(Color { r: 0.055, g: 0.07, b: 0.10, a: 1.0 })
+                .opacity(s.alpha).blur(s.sigma).live_scale(&s.scale)
+                .child(el().size(16.0, 16.0).absolute(10.0, 10.0).radius(8.0)
+                    .fill(Color { r: 0.08, g: 0.45, b: 0.8, a: 1.0 }))
+                .child(crate::text("Replace this row").absolute(36.0, 8.0).color(Color::WHITE))
+        }))
+    }
+    let gpu = Gpu::headless();
+    eprintln!("adapter: {:?}", gpu.adapter.get_info());
+    let modes = [("legacy-radius4", 4.0), ("sigma4", 4.0), ("equivalent", 4.0 / 3.0f32.sqrt()),
+        ("capped", rune_motion::Transition::blur_replace().insertion.blur)];
+    let mut sheet = vec![0u8; 648 * 120 * 4 * modes.len()];
+    for rows in [1, 12] {
+        let size = (648, (rows as u32 * 48 + 12) * 2);
+        let target = Offscreen::new(&gpu.device, size.0, size.1);
+        for alpha in [0.25, 0.5, 0.75] {
+            let mut renderers = Vec::new();
+            for (mode, (_, peak)) in modes.into_iter().enumerate() {
+                let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+                let mut rt = Runtime::new(State { rows, alpha, sigma: peak * (1.0 - alpha),
+                    scale: Live::new(0.96 + 0.04 * alpha) }, view,
+                    (size.0 as f32 / 2.0, size.1 as f32 / 2.0), Env { scale: 2.0, system_dark: true });
+                rt.frame(0.0);
+                if mode == 0 {
+                    // Reconstruct pre-b3 emission: opacity scopes already existed; radius was
+                    // a linear SDF ramp on rects, half-radius added to shadows, no glyph blur.
+                    let mut depth = 0;
+                    for i in &mut rt.instances {
+                        match i.params[1] {
+                            KIND_LAYER => { depth += 1; i.params[2] = 0.0; }
+                            KIND_LAYER_END => depth -= 1,
+                            KIND_RECT if depth > 0 => i.params[2] = 4.0 * (1.0 - alpha) * 2.0,
+                            KIND_SHADOW if depth > 0 => i.params[2] += 4.0 * (1.0 - alpha),
+                            _ => {},
+                        }
+                    }
+                }
+                renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, size);
+                if rows == 1 && alpha == 0.5 {
+                    let out = pixels(&gpu, &renderer, &target);
+                    let start = mode * out.len();
+                    sheet[start..start + out.len()].copy_from_slice(&out);
+                }
+                renderers.push(renderer);
+            }
+            let samples = interleaved_gpu_times(&gpu, &renderers, &target);
+            for (mode, (name, _)) in modes.into_iter().enumerate() {
+                let mut times = samples[mode].clone();
+                let mut deltas: Vec<_> = times.iter().zip(&samples[0]).map(|(a,b)| a-b).collect();
+                times.sort_by(f64::total_cmp); deltas.sort_by(f64::total_cmp);
+                eprintln!("blur_replace rows={rows} alpha={alpha} {name}: median={:.6}ms p95={:.6}ms paired-added={:.6}ms per-row={:.6}ms {:?}",
+                    times[30], times[56], deltas[30], deltas[30] / rows as f64, renderers[mode].layer_stats());
+            }
+        }
+    }
+    if let Some(path) = std::env::var_os("RUNE_TRANSITION_PROOF") {
+        write_png(&std::path::PathBuf::from(path), 648, 480, &sheet).unwrap();
+    }
+}
+
+// Rotate order every sample to avoid attributing a changing shared-worker load to a variant.
+fn interleaved_gpu_times(gpu: &Gpu, renderers: &[Renderer], target: &Offscreen) -> Vec<Vec<f64>> {
+    let count = 68 * renderers.len() as u32;
+    let queries = gpu.device.create_query_set(&wgpu::QuerySetDescriptor { label: None, ty: wgpu::QueryType::Timestamp, count: count * 2 });
+    let resolve = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(count) * 16,
+        usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+    let read = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(count) * 16,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+    for sample in 0..68 {
+        for j in 0..renderers.len() {
+            let mode = (j + sample) % renderers.len();
+            let index = (sample * renderers.len() + mode) as u32;
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            renderers[mode].draw_timed(&mut enc, &target.view, [0.0; 4], Some(wgpu::RenderPassTimestampWrites {
+                query_set: &queries, beginning_of_pass_write_index: Some(index * 2), end_of_pass_write_index: Some(index * 2 + 1) }));
+            gpu.queue.submit([enc.finish()]);
+            gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        }
+    }
+    let mut enc = gpu.device.create_command_encoder(&Default::default());
+    enc.resolve_query_set(&queries, 0..count * 2, &resolve, 0);
+    enc.copy_buffer_to_buffer(&resolve, 0, &read, 0, u64::from(count) * 16);
+    gpu.queue.submit([enc.finish()]);
+    read.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let bytes = read.slice(..).get_mapped_range().unwrap();
+    let mut samples = vec![Vec::new(); renderers.len()];
+    for (index, b) in bytes.chunks_exact(16).enumerate().skip(8 * renderers.len()) {
+        let a = u64::from_le_bytes(b[..8].try_into().unwrap());
+        let z = u64::from_le_bytes(b[8..].try_into().unwrap());
+        assert!(z >= a && z != 0);
+        samples[index % renderers.len()].push((z - a) as f64 * f64::from(gpu.queue.get_timestamp_period()) / 1e6);
+    }
+    samples
+}

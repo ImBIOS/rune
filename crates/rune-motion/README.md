@@ -171,7 +171,7 @@ Run this on the render thread once per display-link callback:
 | `rect` | Root-space rect. It already includes every ancestor's translation and this node's own, and both edges are snapped to 1/64 device px. Draw shapes, borders and shadows at this size. |
 | `opacity` | This node's own opacity (presence × property). Apply ancestors' opacity as group opacity. |
 | `transform`, `anchor` | Scale and rotation about the root-space `anchor`, composed down the tree like `CALayer`. `affine()` returns the 2×3 matrix. |
-| `blur` | Gaussian radius in points, ≤ 4. 0 means attach no filter, and it is non-zero only while entering or leaving. |
+| `blur` | Own plus presence Gaussian sigma in points. 0 means attach no filter. Presence effects clamp to ≤ 4 pt; `blur_replace` peaks at 1.5 pt. Explicit property blur can remain at rest. |
 | `radius`, `fill` | Animated corner radii, and the fill as sRGB with straight alpha (interpolated in premultiplied OKLab). |
 | `mask` | `Mask { inset: Sides, feather: Sides }` in the node's own coordinates: how far each side is pulled in, and the gradient width on that side. Evaluate it as an SDF ramp. `mask.is_none()` means no clip. |
 | `phase` | `Entering`, `Present` or `Exiting { generation }`. |

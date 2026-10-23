@@ -61,7 +61,7 @@ fn blur_replace_enters_and_exits_and_never_unmounts_visible() {
     s.insert(id, spec(0.0, 0.0, 200.0, 60.0).transition(Transition::blur_replace()), Mount::Animated);
     let (enter, _) = run(&mut s, 0.0, 1.0, id);
     let first = enter[0].1;
-    assert!(first.opacity < 1e-3 && (first.blur - 4.0).abs() < 1e-3 && (first.transform.scale.x - 0.96).abs() < 1e-4);
+    assert!(first.opacity < 1e-3 && (first.blur - 1.5).abs() < 1e-3 && (first.transform.scale.x - 0.96).abs() < 1e-4);
     let last = enter.last().unwrap().1;
     assert_eq!((last.opacity, last.blur, last.transform.scale.x), (1.0, 0.0, 1.0), "rests exactly, no filter");
     assert_eq!(s.phase(id), Some(Phase::Present));
@@ -75,7 +75,7 @@ fn blur_replace_enters_and_exits_and_never_unmounts_visible() {
     let final_frame = exit.iter().rev().find(|(t, _)| *t <= exited_at).unwrap().1;
     assert!(final_frame.opacity <= 1e-3, "unmounted at opacity {}", final_frame.opacity);
     for (_, p) in &exit {
-        assert!(p.blur <= 4.0 + 1e-3 && p.transform.scale.x >= 0.9);
+        assert!(p.blur <= 1.5 + 1e-3 && p.transform.scale.x >= 0.9);
         assert!(!p.in_flow, "popLayout: exiting nodes leave flow");
     }
     assert!(!s.contains(id));

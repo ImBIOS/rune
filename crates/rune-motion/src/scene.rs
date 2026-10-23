@@ -179,7 +179,7 @@ pub struct Presented {
     pub transform: Transform,
     /// Root-space pivot for `transform`.
     pub anchor: Vec2,
-    /// Gaussian blur radius in points. 0 means "attach no filter". Enter/exit only.
+    /// Own plus presence Gaussian blur sigma in points. Zero means "attach no filter".
     pub blur: f32,
     pub radius: Corners,
     pub fill: Color,

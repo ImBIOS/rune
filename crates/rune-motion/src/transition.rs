@@ -61,7 +61,7 @@ pub struct Effect {
     pub offset: Vec2,
     /// Offset in fractions of the node's own size when absent (`.move(edge)`, `.push`).
     pub offset_fraction: Vec2,
-    /// Blur radius in points when absent (identity 0). At most 4: only for in-place replacement.
+    /// Gaussian blur sigma in points when absent (identity 0). At most 4; in-place replacement only.
     pub blur: f32,
     pub reveal: Option<Reveal>,
 }
@@ -89,8 +89,8 @@ impl Effect {
     pub fn scale(scale: f32) -> Effect {
         Effect { scale, ..Effect::IDENTITY }
     }
-    pub fn blur(radius: f32) -> Effect {
-        Effect { blur: radius, ..Effect::IDENTITY }
+    pub fn blur(sigma: f32) -> Effect {
+        Effect { blur: sigma, ..Effect::IDENTITY }
     }
 
     /// Both effects at once: opacities and scales multiply, offsets add, blur takes the max.
@@ -113,7 +113,7 @@ impl Effect {
         self.offset != Vec2::ZERO || self.offset_fraction != Vec2::ZERO
     }
 
-    /// Kit's rules, enforced: scale in [0.9, 1.1] (never to or from 0), blur ≤ 4 px, no blur on
+    /// Kit's rules, enforced: scale in [0.9, 1.1] (never to or from 0), blur sigma ≤ 4 pt, no blur on
     /// anything that travels (sliding content stays sharp), and nothing leaves at full opacity.
     pub fn kit_rules(mut self, removal: bool) -> Effect {
         self.scale = self.scale.clamp(0.9, 1.1);
@@ -184,13 +184,16 @@ impl Transition {
         let e = |d: Edge| Effect { offset_fraction: d.direction(), ..Effect::IDENTITY };
         Transition { insertion: e(Edge::Leading), removal: e(Edge::Trailing), ..Transition::symmetric(Effect::IDENTITY) }
     }
-    /// `.blurReplace`: Kit's whole-element in-place replacement: 4 px blur, scale .96, fade.
+    /// `.blurReplace`: whole-element in-place replacement: sigma 1.5 pt, scale .96, fade.
+    /// The old 4 pt shape-edge ramp left glyphs sharp; it is not equivalent to sigma 4.
+    /// This preset stays within the two-pass Gaussian path at 1×/2×. Explicit `blur(sigma)`
+    /// remains available for stronger effects.
     pub fn blur_replace() -> Transition {
-        Transition::symmetric(Effect { opacity: 0.0, scale: 0.96, blur: 4.0, ..Effect::IDENTITY })
+        Transition::symmetric(Effect { opacity: 0.0, scale: 0.96, blur: 1.5, ..Effect::IDENTITY })
     }
-    /// Blur and fade only.
-    pub fn blur(radius: f32) -> Transition {
-        Transition::symmetric(Effect { opacity: 0.0, blur: radius, ..Effect::IDENTITY })
+    /// Gaussian blur (sigma in points) and fade only.
+    pub fn blur(sigma: f32) -> Transition {
+        Transition::symmetric(Effect { opacity: 0.0, blur: sigma, ..Effect::IDENTITY })
     }
     /// A soft-edged wipe from `edge` (mask reveal), 24 pt feather.
     pub fn reveal(edge: Edge) -> Transition {
