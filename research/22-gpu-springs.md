@@ -221,7 +221,6 @@ that history. No motion-blur change is included in this spike.
 - [PLAN §6b/§6c](../PLAN.md): reference/fast path, GPU spring spike, idle guarantee.
 - [Research 12 §2](12-research-rendering.md): vertex spring idea and CPU dependencies.
 - [Research 17 §1](17-research-perf-architecture.md): property indirection and retained uploads.
-- [Research 19](19-autoresearch-log.md): retained layout/virtualization/allocation wins preserved.
 - [Chromium compositor design](https://chromium.googlesource.com/chromium/src/+/main/docs/how_cc_works.md): property-tree motivation (linked by research 17; no Chromium speed claim).
 - [WGSL floating-point accuracy](https://www.w3.org/TR/WGSL/#floating-point-accuracy): fusion/reassociation and implementation-dependent transcendental accuracy.
 - `crates/rune-motion/src/{spring,layer,animated}.rs`: CPU formula, damping branches and settle envelopes.

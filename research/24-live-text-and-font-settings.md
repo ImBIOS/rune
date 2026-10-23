@@ -61,12 +61,6 @@ The other 28 regenerated files are byte-identical. The manifest also records six
 historical images the still scripts do not regenerate. Static Inter glyph quads
 and atlas bytes match the legacy policy in a separate 1×/2× regression.
 
-Evidence:
-
-- [Aggregated metrics](../perf/autoresearch/text/batch-c/metrics.json)
-- [Golden hashes](../perf/autoresearch/text/batch-c/goldens.json)
-- [SF at 2×, Rune and CoreText](../perf/autoresearch/text/batch-c/sf-compare-dark-2x.png)
-- [Heading before, after and amplified difference](../perf/autoresearch/text/batch-c/session-top-diff.png)
 
 Reproduce with `RUNE_TEXT_OPSZ=legacy` or `point` when running the `text_quality`
 example, followed by `swift scripts/coretext-quality.swift OUT --native-opsz` and

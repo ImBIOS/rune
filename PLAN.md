@@ -14,9 +14,9 @@ good"). Rune itself bakes in no brand: it ships a token-driven theming
 system, and OpenCode's theme is the first theme built on it and the reference example. The flagship test is
 **recreating OpenCode Desktop** in Rune and raising its bar, which makes Windows and Linux
 first-class from the start. Native stays where it's behaviour, not looks: text input/IME, accessibility, window
-management, clipboard, scroll momentum. The parallel plan (a Rust component
-library with the same names as `@opencode/ui`, gallery + screenshot tests, Hex Settings as the first real screen)
-folds in here instead of becoming a second stack on Slint. Sections below are updated for this.
+management, clipboard, scroll momentum. A Rust component library with the same names as `@opencode/ui`, gallery
+and screenshot tests, and Hex Settings as the first real screen fold in here instead of becoming a second stack on
+Slint. Sections below are updated for this.
 
 | Layer | Pick | Instead of |
 |---|---|---|
@@ -45,7 +45,7 @@ A docs/marketing site comes first to explain it (Kit's idea, as with Deadbolt).
 
 ## 1. Why build this at all
 
-Kit has rebuilt the same small surfaces three times in ten days ([10 §Summary](research/10-kit-repos-audit.md)):
+Kit has rebuilt the same small surfaces three times in ten days:
 the Scrawl pill went GPUI → hand-written Metal → SwiftUI helper process, Flit's launcher went GPUI → SwiftUI with a
 Core Animation glass morph, and Hex's native branch stalled because Hex also ships on Windows and Linux. Each time,
 the reasons were the same:
@@ -192,7 +192,7 @@ shell composes **native underlays and overlays** with Rune's Metal layer: a syst
 transparent region of the Metal layer, and its shape is driven by a mask layer that the render thread updates in the
 same `CATransaction` as the drawable (`presentsWithTransaction`). This is how Scrawl's Metal pill already hosts
 `NSGlassEffectView`, and Flit's CA glass recipe is the fallback material backend
-([10 §2](research/10-kit-repos-audit.md), [11 §2](research/11-platform-shells.md)). Popovers, HUDs and pills use a
+([11 §2](research/11-platform-shells.md)). Popovers, HUDs and pills use a
 fixed, transparent, max-size surface with shape hit-testing, never per-frame window resizes.
 
 Two caveats: glass *morphing* between shapes is SwiftUI-only on iOS, and NSViews are main-thread objects. Spike S2
@@ -264,7 +264,7 @@ fine for tools, wrong for feel).
   `motion-presets/presets/kit-motion.json`.
 - **Every property is a track** of analytic segments `{t0, x0, v0, target, spring}`: position and velocity are exact
   at any time, so retargeting samples `(x, v)` at the presentation time and starts a new segment. This is
-  Psychopomp's model generalised ([10 §2](research/10-kit-repos-audit.md)).
+  Psychopomp's model generalised.
 - **Layout animation** animates each *edge* of a node whose frame changed, one spring per axis. A stationary edge
   gets no track so it can't jiggle; width can lead with a faster X spring; shapes, borders and shadows are drawn at
   the presented size, so there's no scale distortion. Both edges snap to 1/64 px.
@@ -527,8 +527,8 @@ never Studio's desk display). CI runs deterministic correctness on every change 
    is where custom-rendered frameworks most visibly fail, and text that's a shade thinner than CoreText reads as
    cheap. Mitigation: implement the native protocols directly from day one of each platform, borrow Zed's macOS/iOS
    code, and gate on a CoreText side-by-side diff.
-2. **Matching OpenCode Desktop's look.** The bar is a Chromium-rendered app (the reason for considering Slint with
-   Skia). Text rendering on Windows/Linux, shadows, gradients and borders must be indistinguishable from the web kit
+2. **Matching OpenCode Desktop's look.** The bar is a Chromium-rendered app (the reason Slint with Skia was
+   considered). Text rendering on Windows/Linux, shadows, gradients and borders must be indistinguishable from the web kit
    or better. Mitigation: per-component screenshot diffs against the `@opencode/ui` stories, rendered by headless
    Chromium beside Rune's headless renderer. (Native glass sync is now an optional-extra risk, spike S2.)
 3. **Scope.** Renderer, text, IME, a11y, six shells, tooling: this is years of work for a human team. Mitigation:
@@ -567,7 +567,7 @@ first components with the same names as the web kit, each diffed against its web
 explains Rune with headless-rendered stills first and live WebGPU demos once the web build works. The settings demo
 being built now is the seed.
 
-**M2 — Hex Settings on Mac, Windows and Linux.** the first real screen. Forms, toggles, keycap recorder, lists,
+**M2 — Hex Settings on Mac, Windows and Linux.** The first real screen. Forms, toggles, keycap recorder, lists,
 text field (own shells start here: `NSTextInputClient`, TSF, `text-input-v3`), AccessKit, CI goldens on all three.
 Replaces GPUI for that screen in Hex.
 

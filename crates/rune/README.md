@@ -747,8 +747,7 @@ a new `id`; the matching tree includes that ID:
 Each line above is a separate file replacement. `pause` freezes the virtual clock;
 `step` advances it explicitly. This lets an agent inspect an in-flight animation across
 patches. `{"id":5}` requests a fresh snapshot. See
-[`research/20-live-editing.md`](../../research/20-live-editing.md) for measurement results
-and `research/bench-live-edit.py` for the ten-edit benchmark.
+[`research/20-live-editing.md`](../../research/20-live-editing.md) for measurement results.
 The final shared-worker runs preserved exact spring positions/velocities over ten edits
 per example, with median save-to-GPU times of **8.195 s Settings / 21.169 s OpenCode**.
 The approximately one-second target is not yet met.

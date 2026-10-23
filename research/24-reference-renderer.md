@@ -196,7 +196,7 @@ It verified that every Renderer caller supplies target dimensions as the viewpor
 so fragment position has the required coordinates. Static glyphs are pixel-snapped,
 which keeps their texel choices unchanged. The review's nonblocking benchmark nit
 is fixed: non-Linux workspace benches skip cleanly; the instruction-gate script
-still rejects non-Linux execution. After the explicit publication thaw, the
+still rejects non-Linux execution. After the publication thaw, the
 reviewed commit was rebased onto the new public root and current main.
 
 Remaining: Linux instruction execution, x86/arm CPU hash comparison, Vulkan/D3D12

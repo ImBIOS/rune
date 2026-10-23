@@ -78,17 +78,6 @@ Physical iOS devices are unsupported by this backend; simulator support was not 
 
 ## Measure pixels rather than compiler completion
 
-```sh
-# Inside a Pro HiveMind lease, from the synced checkout:
-python3 research/bench-live-edit.py hot settings
-python3 research/bench-live-edit.py hot opencode
-python3 research/bench-live-edit.py rebuild settings
-python3 research/bench-live-edit.py rebuild opencode
-
-# On Studio, including source relay and snapshot retrieval:
-python3 research/bench-live-edit.py relay settings
-```
-
 Each hot benchmark makes ten label edits in one process. It first changes app state,
 pauses virtual time mid-animation, and captures nonzero spring velocities. Every edit
 must execute the new Rust view and change the PNG while preserving PID, state address,
@@ -127,9 +116,7 @@ incompatible-edit rejection before mirror publication:
 | OpenCode fixture | 21.169 s | 23.523 s | 45.293 s | 10 |
 
 With ten samples, nearest-rank p95 is the maximum. The table retains the OpenCode
-summary; its large raw ten-edit dump was removed after review. The reproduction
-script lives at `research/bench-live-edit.py`. Raw [Settings samples](live-edit-evidence/settings-hot.json)
-and the [environment record](live-edit-evidence/environment.json) remain available.
+summary.
 Settings retained a spring velocity of −143.820 points/s; the sampled OpenCode
 project-row springs retained −892.798 points/s. Explicitly stepping the same process
 after the final patch advanced the original animations.
@@ -143,15 +130,12 @@ The ten-sample release rebuild/relaunch comparisons completed:
 
 The PNG endpoint was 4.56× faster for hot Settings and 7.51× faster for hot OpenCode
 in these sequential runs. The processes were retained only by the hot workflow.
-Raw rebuild samples: [Settings](live-edit-evidence/settings-rebuild.json),
-[OpenCode](live-edit-evidence/opencode-rebuild.json).
 These are different compiler profiles and worker-load windows, not an isolated
 estimate of hot-patching's intrinsic speedup.
 
 The Studio relay passed an end-to-end edit in **4.848 s**, from local save to the
 locally fetched PNG/tree. PID and state identity were retained. This is one transport
 check, not a ten-sample latency estimate; its worker-load window differs from the table.
-[Raw relay result](live-edit-evidence/settings-relay.json).
 
 The relay creates an empty Git root in its staging directory for HiveMind's local
 admission, and supplies a source manifest instead of transferring Git history. Leases
@@ -161,7 +145,6 @@ The launcher and benchmark also reject worker-mode execution on Studio.
 All **nine feature-off PNGs are byte-identical** to main at `f4d00b0`: both Settings
 themes and OpenCode home, bottom, top, light, streaming, stream-end and send.
 The normal dependency tree contains neither `subsecond` nor `dioxus-devtools`.
-[Comparison hashes](live-edit-evidence/featureoff.json).
 The first attempt produced stale benchmark output after source relay; the final check
 used a no-CAS sync with verified source hashes and touched the edited source before
 building each side. Both sides used `scripts/snap-ui.py OUT BIN_DIR` with release builds.
@@ -175,7 +158,7 @@ The previous rebase used **`f4d00b0`** (scheduled overlay wakes). It also routes
 secondary-press, input-key and input-change callbacks through the typed app state,
 preserves key diagnostics, and wakes idle headless sessions for timer deadlines.
 After `hivemind sync --worker pro --no-cas`, all twelve
-[recorded source hashes](live-edit-evidence/source-sha256.json) matched the worker.
+recorded source hashes matched the worker.
 Targeted hot-feature checks passed:
 
 - Typed host: press, hover, secondary press, input change/key, text editing, submission
@@ -185,8 +168,7 @@ Targeted hot-feature checks passed:
   animation, and rejection of the incompatible edit before publication.
 
 The last checks are compatibility evidence, not a replacement for the ten-sample
-timing runs: [Settings](live-edit-evidence/settings-final.json),
-[OpenCode](live-edit-evidence/opencode-final.json).
+timing runs.
 These shared-worker runs do not isolate the performance effect of the idle-loop change
 from compiler contention or the intervening main-branch changes.
 
@@ -263,6 +245,5 @@ with `RUSTC_WRAPPER=` while retaining HiveMind admission. That check reports fiv
 warnings for OpenCode's now-unreachable live-loading helpers. No passing tests were rerun.
 The read-only Claude review of these fixes reported no blockers.
 
-The large raw OpenCode ten-edit dump was dropped; the timing tables above are retained.
-`research/bench-live-edit.py` remains the reproduction tool. No new GPU timings or PNG
+No new GPU timings or PNG
 golden comparisons were taken in this follow-up.
