@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Linux builds link `libxkbcommon`** (`a7f0f56`). Display-targeted overlays added the `xkbcommon`
+  crate, so CI and build hosts without `libxkbcommon-dev` (Fedora: `libxkbcommon-devel`) fail at
+  link time. See "Linux system packages" in `crates/rune/README.md`.
 - **`.truncate_fade()` fades 1.5 em instead of 1 em** (Abattoir: 1.5 em on overflowing text).
   Overflowing labels fade over a wider edge; labels that fit don't change. New
   `.truncate_fade_width(em)` sets another width.

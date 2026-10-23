@@ -529,6 +529,16 @@ flat reference scenes retain their original semantics and hashes.
 
 ## Run
 
+### Linux system packages
+
+Linux builds link `libxkbcommon` (layer-shell and display-targeted overlays, since `a7f0f56`) and
+`libwayland-client` (`wayland-backend`'s `client_system`), so the development packages must be
+installed at build time, including in CI:
+
+- Debian/Ubuntu: `apt-get install libxkbcommon-dev libwayland-dev`
+- Fedora: `dnf install libxkbcommon-devel wayland-devel`
+- Arch: `pacman -S libxkbcommon wayland`
+
 ### NativeSurface video
 
 `NativeSurface::new()` is a cloneable latest-wins frame slot. Bind it with
