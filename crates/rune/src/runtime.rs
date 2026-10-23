@@ -2198,11 +2198,6 @@ impl<S: 'static> Runtime<S> {
             if let Some([rest, hov]) = n.vis.group_opacity {
                 own *= rest + (hov - rest) * pinh.group;
             }
-            // Shown at all, apart from where its own loop is in its cycle.
-            let shown = own * pinh.opacity;
-            if let Some(c) = n.vis.cycle {
-                own *= if self.reduced_motion { c.still } else { c.sample(self.clock) };
-            }
             let mut o = (own * pinh.opacity).clamp(0.0, 1.0);
             let group = if n.vis.hover.a > 0.0 || n.vis.hover_group {
                 self.scene.get(n.id, P_HOVER).unwrap_or(0.0).clamp(0.0, 1.0)
@@ -2210,8 +2205,8 @@ impl<S: 'static> Runtime<S> {
                 pinh.group
             };
             let base_opacity = o;
-            let loop_value = self.loops.get(&n.id).map(|l| l.sample(now, self.reduced_motion));
-            if let (Some(rune_motion::LoopSpec { kind: rune_motion::LoopKind::Opacity { .. }, .. }), Some(v)) = (n.looping, loop_value) {
+            let loop_value = self.loops.get(&n.id).map(|l| l.sample_at(now, self.clock, self.reduced_motion));
+            if let (Some(rune_motion::LoopSpec { kind: rune_motion::LoopKind::Opacity { .. } | rune_motion::LoopKind::OpacityCycle(_), .. }), Some(v)) = (n.looping, loop_value) {
                 o *= v;
             }
             let (mut clip, mut fade) = (pinh.clip, pinh.fade);
@@ -2267,26 +2262,26 @@ impl<S: 'static> Runtime<S> {
                 && r[0] <= clip[2].min(vp[2]) + 2.0
                 && r[3] >= clip[1].max(vp[1]) - 2.0
                 && r[1] <= clip[3].min(vp[3]) + 2.0;
-            if let Some(c) = n.vis.cycle
-                && visible
-                && shown > 0.001
-                && !self.reduced_motion
-            {
-                let dt = 1.0 / c.fps.max(1.0);
-                ambient = Some(ambient.map_or(dt, |a: f32| a.min(dt)));
-            }
             let text_tint = |c: Color| match n.vis.group_color {
                 Some(g) if pinh.group > 0.0 => c.mix(g, pinh.group),
                 _ => c,
             };
 
-            if self.surface_visible && base_opacity > 0.001 && !self.reduced_motion && self.time_scale > 0.0
+            if self.surface_visible && base_opacity > 0.001 && !self.reduced_motion
                 && r[2] > clip[0].max(vp[0]) && r[0] < clip[2].min(vp[2])
                 && r[3] > clip[1].max(vp[1]) && r[1] < clip[3].min(vp[3])
                 && let Some(track) = self.loops.get(&n.id)
             {
-                self.loops_active |= track.active(now);
-                if let Some(start) = track.pending_start(now) {
+                if let Some(dt) = track.frame_interval().filter(|_| track.active(now)) {
+                    ambient = Some(ambient.map_or(dt as f32, |a| a.min(dt as f32)));
+                    let wake = self.clock + dt;
+                    if self.loop_wake.is_none_or(|w| wake < w.0) {
+                        self.loop_wake = Some((wake, now + dt * self.time_scale as f64));
+                    }
+                } else if self.time_scale > 0.0 {
+                    self.loops_active |= track.active(now);
+                }
+                if self.time_scale > 0.0 && let Some(start) = track.pending_start(now) {
                     let wake = self.clock + (start - now) / self.time_scale as f64;
                     if self.loop_wake.is_none_or(|w| wake < w.0) { self.loop_wake = Some((wake, start)); }
                 }
@@ -3397,6 +3392,34 @@ mod tests {
             assert!(!rt.frame(0.0));
             assert_eq!(rt.wake_deadline(), None);
         }
+    }
+
+    #[test]
+    fn cycles_share_deadlines_and_sleep_when_hidden_by_hover_groups() {
+        fn view(hidden: &bool, _: &mut Cx<bool>) -> El {
+            el().size(100.0, 100.0).hover_group().child(el().key("cycle").size(20.0, 20.0)
+                .group_opacity(if *hidden { 0.0 } else { 1.0 }, 1.0)
+                .cycle(crate::Cycle { period: 1.0, phase: 0.0,
+                    stops: &[(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)], still: 0.4, fps: 30.0 }))
+        }
+        let mut rt = Runtime::new(false, view, (100.0, 100.0), Env { scale: 1.0, system_dark: true });
+        assert!(!rt.frame(0.0), "cycles must sleep rather than request continuous frames");
+        assert!((rt.wake_deadline().unwrap() - 1.0 / 30.0).abs() < 1e-7);
+        assert_eq!(rt.loops.len(), 1);
+        let commits = rt.stats.commits;
+        rt.frame(0.5);
+        assert_eq!(rt.stats.commits, commits);
+        assert!((rt.ambient.unwrap() - 1.0 / 30.0).abs() < 1e-7);
+        rt.state = true; rt.invalidate(); rt.frame(0.0);
+        assert_eq!(rt.wake_deadline(), None, "group-opacity zero must not wake");
+        rt.state = false; rt.invalidate(); rt.frame(0.0);
+        assert!(rt.wake_deadline().is_some());
+        rt.set_live_visible(false); rt.frame(0.0);
+        assert_eq!(rt.wake_deadline(), None);
+        rt.set_live_visible(true); rt.frame(0.0);
+        assert!(rt.wake_deadline().is_some());
+        rt.reduced_motion = true; rt.frame(0.0);
+        assert_eq!(rt.wake_deadline(), None);
     }
 
     #[test]

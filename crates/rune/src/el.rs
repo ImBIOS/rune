@@ -295,7 +295,6 @@ pub struct Visual {
     pub group_opacity: Option<[f32; 2]>,
     /// Text or icon colour while the nearest ancestor group is hovered.
     pub group_color: Option<Color>,
-    pub cycle: Option<Cycle>,
 }
 
 impl Default for Visual {
@@ -321,7 +320,6 @@ impl Default for Visual {
             hover_motion: None,
             group_opacity: None,
             group_color: None,
-            cycle: None,
         }
     }
 }
@@ -926,11 +924,9 @@ impl El {
         self.vis.group_color = Some(c);
         self
     }
-    /// An opacity loop (see [`Cycle`]). It will become sugar over a general `El::looping`, so
-    /// there is one loop engine.
-    pub fn cycle(mut self, c: Cycle) -> Self {
-        self.vis.cycle = Some(c);
-        self
+    /// Wall-clock opacity loop, using the shared loop engine and host wake deadline.
+    pub fn cycle(self, c: Cycle) -> Self {
+        self.looping(rune_motion::LoopSpec::cycle(c))
     }
 
     // Text

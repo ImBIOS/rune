@@ -101,9 +101,8 @@ then requests no frames. Exact counts need no noisy wall-time repetitions.
   available in this session. The parent has a coordination note in the worktree.
   Final fetch/rebase/reverification is still required before `HEAD:main` if main
   advances after the reviewed head.
-- Desktop-fidelity's `.cycle()` API is not on `origin/main` as of `9864df3`.
-  Once landed, retain its public signature as sugar over `LoopSpec` and move loop
-  wakes onto the shared AnyHost deadline, including group-opacity visibility.
+- `.cycle()` now uses `LoopSpec` and the shared AnyHost deadline; see the dev
+  integration below for its wall-clock and group-opacity compatibility checks.
 - Platform AccessKit attachment is future work; this provides the shared tree hook.
 - Select/menu roving works after focus reaches the group. Their opening autofocus
   and popup keyboard dismissal are not yet unified with the modal API.
@@ -171,3 +170,35 @@ passed. Repeated the 19-still comparison with these binaries: zero changed pixel
 The four loop-unit tests passed before this rebase; their sources did not change.
 The renderer hold note was deleted after confirming NativeSurface on main.
 Nothing has been pushed; the parent must arrange the short delta review.
+
+## Dev landing and cycle unification
+
+The parent reviewed the fixes clean and authorized landing after desktop-fidelity.
+Rebased onto `origin/dev` at `133729e`, retaining window chrome, hover groups,
+equal-column grids, standalone Select triggers and fitted segmented controls.
+The overlapping window-focus match arms are combined so chrome placement cannot
+mask IME cancellation. No changes beyond conflict resolution and cycle unification.
+
+`El::cycle(Cycle)` is sugar over `El::looping(LoopSpec::cycle(...))`. The shared
+track supports Cycle's linear stops, absolute wall-clock phase, reduced-motion
+`still`, and requested fps. Runtime's loop deadline schedules both delayed starts
+and paced cycles; Host no longer owns a separate ambient timer. Zero inherited
+group opacity, offscreen geometry and hidden surfaces suppress loop wakeups.
+
+Verification used one HiveMind job at a time, `HIVEMIND_CAS_SYNC=0`, and SHA-256
+checks of synchronized source (plus capture scripts and golden inputs). Passed
+27 runtime tests, 5 loop tests, 8 kit integration tests and 4 OpenCode picker tests.
+All nine workspace examples built in release mode. The first combined job hit
+HiveMind's one-hour cap after runtime/loop tests; remaining checks resumed from
+the cache, and the final builds have no unreachable-focus-handler warning.
+
+Headless golden checks on mini:
+- Seven OpenCode, two settings, and twelve kit component stills: pixel-identical.
+- Both kit indexes differ from old committed PNGs because of the already-reviewed
+  added scenes; they exactly match the rebased, reviewed pre-sugar stack.
+- Four lab stills differ from committed PNGs under default capture timing. A fresh
+  `133729e` build produces exactly the same four images as this branch.
+- Background, live-values, shapes, overlay controls and video-tiles: pixel-identical
+  against that fresh dev build (these examples have no committed still goldens).
+
+No golden files changed. Builds and captures opened no native windows or audio.

@@ -232,8 +232,6 @@ struct Host<S: 'static> {
     control_click: bool,
     clipboard: Option<arboard::Clipboard>,
     comp: Option<Box<dyn Compositor<S>>>,
-    /// The next frame while only ambient cycles move.
-    wake_at: Option<Instant>,
 }
 
 pub fn run<S: 'static>(app: App<S>, args: Args) {
@@ -312,7 +310,6 @@ impl<S: 'static> Host<S> {
             control_click: false,
             clipboard: arboard::Clipboard::new().ok(),
             comp,
-            wake_at: None,
         }
     }
 }
@@ -886,11 +883,7 @@ impl<S: 'static> Host<S> {
         gpu.queue.present(frame);
         self.idle = !(animating || rt.has_pending_input() || rt.live_pending());
         if !self.idle {
-            self.wake_at = None;
             l.window.request_redraw();
-        } else {
-            // Only cycles (activity spinners) move: sleep until their next step.
-            self.wake_at = rt.ambient.map(|dt| now + Duration::from_secs_f32(dt));
         }
     }
 }
@@ -902,13 +895,6 @@ impl<S: 'static> AnyHost for Host<S> {
     fn finished(&self) -> bool { self.finished }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
-        // An ambient loop's next step: draw it (the redraw schedules the one after).
-        if self.wake_at.is_some_and(|t| t <= Instant::now()) {
-            self.wake_at = None;
-            if let Some(w) = self.win.as_ref().filter(|w| w.visible && !w.occluded) {
-                w.window.request_redraw();
-            }
-        }
         if matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll)
             && self.rt.wall_start.and_then(|start| start.checked_add(Duration::try_from_secs_f64(self.rt.wake_deadline()?).ok()?)).is_some_and(|deadline| deadline <= Instant::now())
         {
@@ -922,11 +908,9 @@ impl<S: 'static> AnyHost for Host<S> {
     }
 
     fn wake_deadline(&self) -> Option<Instant> {
-        let timer = self.rt.wall_start.and_then(|start| {
+        self.rt.wall_start.and_then(|start| {
             start.checked_add(Duration::try_from_secs_f64(self.rt.wake_deadline()?).ok()?)
-        });
-        let ambient = self.wake_at.filter(|_| self.win.as_ref().is_some_and(|w| w.visible && !w.occluded));
-        timer.into_iter().chain(ambient).min()
+        })
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
