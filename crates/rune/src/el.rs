@@ -875,6 +875,16 @@ impl El {
         self.style.align_items = AlignItems::FLEX_START;
         self
     }
+    /// Align children to the end of the cross axis (CSS `align-items: flex-end`).
+    pub fn items_end(mut self) -> Self {
+        self.style.align_items = AlignItems::FLEX_END;
+        self
+    }
+    /// Centre children on the cross axis (CSS `align-items: center`; same as `center_y`).
+    pub fn items_center(mut self) -> Self {
+        self.style.align_items = AlignItems::CENTER;
+        self
+    }
     /// Stretch children across the cross axis (CSS `align-items: stretch`).
     pub fn items_stretch(mut self) -> Self {
         self.style.align_items = AlignItems::STRETCH;
@@ -887,6 +897,34 @@ impl El {
     }
     pub fn self_center(mut self) -> Self {
         self.style.align_self = Some(AlignSelf::CENTER);
+        self
+    }
+    pub fn self_end(mut self) -> Self {
+        self.style.align_self = Some(AlignSelf::FLEX_END);
+        self
+    }
+    pub fn self_stretch(mut self) -> Self {
+        self.style.align_self = Some(AlignSelf::STRETCH);
+        self
+    }
+    /// Pack children at the start of the main axis (CSS `justify-content: flex-start`).
+    pub fn justify_start(mut self) -> Self {
+        self.style.justify_content = JustifyContent::FLEX_START;
+        self
+    }
+    /// Centre children on the main axis (CSS `justify-content: center`).
+    pub fn justify_center(mut self) -> Self {
+        self.style.justify_content = JustifyContent::CENTER;
+        self
+    }
+    /// CSS `justify-content: space-around`.
+    pub fn justify_around(mut self) -> Self {
+        self.style.justify_content = JustifyContent::SPACE_AROUND;
+        self
+    }
+    /// CSS `justify-content: space-evenly`.
+    pub fn justify_evenly(mut self) -> Self {
+        self.style.justify_content = JustifyContent::SPACE_EVENLY;
         self
     }
     pub fn min_w(mut self, w: f32) -> Self {
