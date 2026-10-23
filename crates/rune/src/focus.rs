@@ -11,29 +11,25 @@ const LIST_ROLES: [&str; 4] = ["listbox", "list", "tree", "grid"];
 /// AppKit's type-select resets after this long without a key.
 const TYPE_SELECT_PAUSE: f64 = 1.0;
 
-fn sync_input_focus<S: 'static>(nodes: &mut [Node], state: &mut S, path: Option<&str>) -> bool {
+/// Pushes focus (and a secure flag) into an input's app-owned editor and mirrors it back.
+fn sync_input_focus<S: 'static>(input: &mut crate::el::InputSpec, state: &mut S, focused: bool) -> bool {
+    let Some(access) = &input.access else {
+        input.edit.focused = focused;
+        return false;
+    };
+    let edit = access(handler_state(state));
     let mut changed = false;
-    for n in nodes {
-        if let Some(input) = &mut n.input {
-            let focused = path == Some(n.path.as_str());
-            if let Some(access) = &input.access {
-                let edit = access(handler_state(state));
-                if input.edit.is_secure() && !edit.is_secure() {
-                    edit.set_secure(true);
-                    changed = true;
-                }
-                if edit.focused != focused || (!focused && edit.preedit.is_some()) {
-                    edit.focused = focused;
-                    if !focused { edit.clear_preedit(); }
-                    edit.break_history_group();
-                    changed = true;
-                }
-                input.edit = edit.clone();
-            } else {
-                input.edit.focused = focused;
-            }
-        }
+    if input.edit.is_secure() && !edit.is_secure() {
+        edit.set_secure(true);
+        changed = true;
     }
+    if edit.focused != focused || (!focused && edit.preedit.is_some()) {
+        edit.focused = focused;
+        if !focused { edit.clear_preedit(); }
+        edit.break_history_group();
+        changed = true;
+    }
+    input.edit = edit.clone();
     changed
 }
 
@@ -104,25 +100,14 @@ impl<S: 'static> Runtime<S> {
     }
     pub(super) fn set_focus(&mut self, path: Option<String>, keyboard: bool) -> bool {
         if self.focused != path { self.ime_area = None; self.ime_reset = true; self.blur_links(); self.hover_focus = false; }
-        let lost = self.focused != path && self.physical_focus_lost();
-        let changed = sync_input_focus(&mut self.nodes, &mut self.state, path.as_deref()) || lost;
-        let mut changed = changed;
-        for (p, input) in &mut self.virtual_inputs {
-            if let Some(access) = &input.access {
-                let edit = access(handler_state(&mut self.state));
-                if input.edit.is_secure() && !edit.is_secure() {
-                    edit.set_secure(true);
-                    changed = true;
-                }
-                let focused = path.as_deref() == Some(p.as_str());
-                if edit.focused != focused || (!focused && edit.preedit.is_some()) {
-                    edit.focused = focused;
-                    if !focused { edit.clear_preedit(); }
-                    edit.break_history_group();
-                    changed = true;
-                }
-                input.edit = edit.clone();
+        let mut changed = self.focused != path && self.physical_focus_lost();
+        for n in &mut self.nodes {
+            if let Some(input) = &mut n.input {
+                changed |= sync_input_focus(input, &mut self.state, path.as_deref() == Some(n.path.as_str()));
             }
+        }
+        for (p, input) in &mut self.virtual_inputs {
+            changed |= sync_input_focus(input, &mut self.state, path.as_deref() == Some(p.as_str()));
         }
         self.focused = path;
         self.keyboard_focus = keyboard;
