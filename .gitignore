@@ -11,3 +11,4 @@ demo/**/*-strip.png
 !demo/fx/glow-strip.png
 !demo/fx/motion-quarter-speed.mp4
 !demo/opencode/switch-strip.png
+/captures/

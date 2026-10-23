@@ -737,6 +737,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cursed-settings"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "rune",
+ "rune-fx",
+ "rune-kit",
+ "rune-light",
+ "rune-motion",
+ "rune-theme-opencode",
+ "wgpu",
+]
+
+[[package]]
 name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
