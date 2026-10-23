@@ -45,7 +45,9 @@ pub fn scene_clock() -> SceneClock {
 }
 
 mod shortcuts;
-pub use shortcuts::{Shortcut, ShortcutError, ShortcutId};
+pub use shortcuts::{PhysicalKeyCode, Shortcut, ShortcutError, ShortcutId, modifier_keycaps};
+mod physical_input;
+pub use physical_input::PhysicalInput;
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
 mod layer_shell;
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]

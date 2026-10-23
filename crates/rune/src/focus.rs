@@ -84,7 +84,8 @@ impl<S: 'static> Runtime<S> {
     }
     pub(super) fn set_focus(&mut self, path: Option<String>, keyboard: bool) -> bool {
         if self.focused != path { self.ime_area = None; self.ime_reset = true; }
-        let changed = sync_input_focus(&mut self.nodes, &mut self.state, path.as_deref());
+        let lost = self.focused != path && self.physical_focus_lost();
+        let changed = sync_input_focus(&mut self.nodes, &mut self.state, path.as_deref()) || lost;
         let mut changed = changed;
         for (p, input) in &mut self.virtual_inputs {
             if let Some(access) = &input.access {

@@ -38,6 +38,8 @@ mod layout_diagnostics;
 
 #[path = "focus.rs"]
 mod focus;
+#[path = "physical_dispatch.rs"]
+mod physical_dispatch;
 
 const P_FILL: Prop<Color> = Prop::custom(64, PropClass::Color);
 const P_BORDER: Prop<Color> = Prop::custom(65, PropClass::Color);
@@ -157,6 +159,7 @@ pub(crate) struct Node {
 
 enum Action {
     WindowFocus(bool),
+    Physical(crate::PhysicalInput, Option<physical_dispatch::Fallback>),
     FocusControl(String),
     Dismiss(String),
     PointerMove(String, PointerPress),
@@ -1121,6 +1124,7 @@ impl<S: 'static> Runtime<S> {
                 f(&mut self.state as &mut dyn Any, focused, &mut one);
                 true
             }
+            Action::Physical(event, fallback) => return self.dispatch_physical(event, fallback, tx),
             Action::FocusControl(path) => {
                 self.set_focus(Some(path), false);
                 true

@@ -162,8 +162,9 @@ pub struct PointerPress {
 pub(crate) type DragFn = Rc<dyn Fn(&mut dyn Any, &mut Drag, &mut Tx)>;
 pub(crate) type EditFn = Rc<dyn for<'a> Fn(&'a mut dyn Any) -> &'a mut TextEdit>;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct FocusSpec {
+    pub physical: Option<crate::physical_input::Handler>,
     pub enabled: bool,
     pub order: i32,
     pub group: bool,

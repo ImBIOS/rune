@@ -359,6 +359,7 @@ enum Pos {
 #[derive(Clone, Debug)]
 enum Kind {
     Focus(bool),
+    Physical(crate::PhysicalInput),
     Shortcut(crate::Shortcut),
     Move,
     Down,
@@ -422,6 +423,15 @@ fn parse_script(list: Value) -> Vec<Ev> {
         let t = e["t"].as_f64().unwrap_or(0.0);
         if let Some(focused) = e["focus"].as_bool() {
             out.push(Ev { t, kind: Kind::Focus(focused), pos: Pos::Rel(0.0, 0.0) });
+            continue;
+        }
+        if let Some(chord) = e["physical"].as_str() {
+            let chord: crate::Shortcut = chord.parse().unwrap_or_else(|e: crate::ShortcutError| die(&e.to_string()));
+            for pressed in [true, false] {
+                out.push(Ev { t, kind: Kind::Physical(crate::PhysicalInput::Key {
+                    key: chord.physical_key(), mods: chord.modifiers(), pressed, repeat: false,
+                }), pos: Pos::Rel(0.0, 0.0) });
+            }
             continue;
         }
         if let Some(shortcut) = e["shortcut"].as_str() {
@@ -902,6 +912,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
                 Kind::SecondaryDown => { last_down = (x, y); rt.secondary_down(x, y); }
                 Kind::SecondaryUp => rt.secondary_up(x, y),
                 Kind::Key(k) => rt.key(k.clone()),
+                Kind::Physical(event) => rt.physical_input(*event),
                 Kind::Paste(s) => rt.paste(s.clone()),
                 Kind::Wheel(dy) => rt.wheel(x, y, *dy),
                 Kind::Fling(v) => rt.fling(x, y, *v),

@@ -708,9 +708,13 @@ fn cursor_icon(c: Cursor) -> CursorIcon {
     }
 }
 
+pub(crate) fn map_mods(m: ModifiersState) -> Mods {
+    Mods { shift: m.shift_key(), cmd: if cfg!(target_os = "macos") { m.super_key() } else { m.control_key() },
+        alt: m.alt_key(), ctrl: m.control_key(), logo: m.super_key() }
+}
+
 pub(crate) fn map_key(key: &WKey, m: ModifiersState) -> Option<KeyEvent> {
-    let cmd = if cfg!(target_os = "macos") { m.super_key() } else { m.control_key() };
-    let mods = Mods { shift: m.shift_key(), cmd, alt: m.alt_key(), ctrl: m.control_key(), logo: m.super_key() };
+    let mods = map_mods(m);
     let key = match key {
         WKey::Named(n) => match n {
             NamedKey::Enter => Key::Enter,
@@ -752,7 +756,7 @@ pub(crate) fn map_key(key: &WKey, m: ModifiersState) -> Option<KeyEvent> {
             _ => return None,
         },
         WKey::Character(c) => {
-            if cmd {
+            if mods.cmd {
                 Key::Command(c.chars().next()?.to_ascii_lowercase())
             } else {
                 Key::Text(c.to_string())
@@ -1542,12 +1546,17 @@ impl<S: 'static> Host<S> {
                     l.window.request_redraw();
                 }
             }
-            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::ModifiersChanged(m) => {
+                self.mods = m.state();
+                rt.physical_input(crate::PhysicalInput::Modifiers(map_mods(self.mods)));
+                l.window.request_redraw();
+            }
             WindowEvent::Focused(focused) => {
                 rt.set_system_reduced_motion(crate::preferences::reduced_motion());
                 self.secure_input.set(focused && l.visible && !l.occluded && rt.has_secure_focus());
                 place_chrome(&l.window, chrome);
                 if !focused {
+                    rt.physical_input(crate::PhysicalInput::FocusLost);
                     rt.cancel_composition();
                     l.window.set_ime_allowed(false);
                     self.ime_allowed = false;
@@ -1556,15 +1565,18 @@ impl<S: 'static> Host<S> {
                 }
                 l.window.request_redraw();
             }
-            WindowEvent::KeyboardInput { event, is_synthetic: false, .. } if event.state == ElementState::Pressed => {
-                if let Some(ev) = map_key(&event.logical_key, self.mods) {
-                    if ev.key == Key::Command('v') && rt.accepts_paste() {
-                        self.clipboard.read(rt);
-                    } else {
-                        rt.key(ev);
-                    }
-                    l.window.request_redraw();
+            WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
+                let pressed = event.state == ElementState::Pressed;
+                let logical = pressed.then(|| map_key(&event.logical_key, self.mods)).flatten();
+                if let winit::keyboard::PhysicalKey::Code(key) = event.physical_key {
+                    rt.physical_with_fallback(crate::PhysicalInput::Key {
+                        key, mods: map_mods(self.mods), pressed, repeat: event.repeat,
+                    }, logical, None);
+                } else if let Some(ev) = logical {
+                    if ev.key == Key::Command('v') && rt.accepts_paste() { self.clipboard.read(rt); }
+                    else { rt.key(ev); }
                 }
+                l.window.request_redraw();
             }
             WindowEvent::Ime(ime) => {
                 match ime {
@@ -1602,6 +1614,7 @@ impl<S: 'static> Host<S> {
                         (ElementState::Released, true) => rt.secondary_up(x, y),
                         (ElementState::Pressed, false) => {
                             rt.pointer_down(x, y);
+                            rt.physical_input(crate::PhysicalInput::Modifiers(map_mods(self.mods)));
                             // AppKit needs the drag started inside this mouse-down.
                             match rt.take_titlebar_action() {
                                 Some(TitlebarAction::Drag) => {
