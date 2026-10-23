@@ -468,7 +468,7 @@ impl<S: 'static> Host<S> {
         rt.track_marks = comp.is_some();
         rt.wall_start = Some(Instant::now());
         #[cfg(all(feature = "dev", debug_assertions))]
-        crate::tooling::attach_dev(&mut rt, &spec, dev, waker.clone());
+        if let Some(dev) = dev { crate::dev::launch(&mut rt, &spec, dev, waker.clone()); }
         let mut clipboard = crate::clipboard::Client::default();
         clipboard.connect(waker.clone());
         shared.connect(waker.clone());

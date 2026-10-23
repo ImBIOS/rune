@@ -134,12 +134,6 @@ pub(crate) fn runtime_for<S: 'static>(spec: &AppSpec<S>, state: S, size: (f32, f
     rt
 }
 
-/// Attaches `App::dev_panel`'s session once the runtime's clock is set up.
-#[cfg(all(feature = "dev", debug_assertions))]
-pub(crate) fn attach_dev<S: 'static>(rt: &mut Runtime<S>, spec: &AppSpec<S>, config: Option<crate::dev::Config<S>>, waker: Waker) {
-    if let Some(config) = config { crate::dev::launch(rt, spec, config, waker); }
-}
-
 #[derive(Clone, Default, Debug)]
 pub struct Args {
     #[cfg(feature = "hot")]
@@ -315,7 +309,7 @@ pub(crate) fn window_args(args: Option<Vec<String>>, process: impl FnOnce() -> A
 
 fn run_window_factory<S: 'static>(options: crate::RunOptions, args: Args, factory: impl FnOnce(&[crate::Display]) -> Vec<crate::WindowSpec<S>> + 'static) {
     if args.headless() {
-        let displays = desktop(&args).displays();
+        let displays = desktop(&args, read_script(&args).as_ref()).displays();
         let display = displays.iter().find(|d| d.primary).unwrap_or(&displays[0]).clone();
         let mut windows = factory(&displays);
         crate::windows::validate(&windows).unwrap_or_else(|e| die(&e));
@@ -420,20 +414,21 @@ struct Ev {
     pos: Pos,
 }
 
-fn load_script(path: &PathBuf) -> Vec<Ev> {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
-    let v: Value = serde_json::from_str(&text).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
-    let list = match v { Value::Object(o) => o.get("events").cloned().unwrap_or_else(|| json!([])), v => v };
+fn read_script(args: &Args) -> Option<Value> {
+    args.script.as_ref().map(|path| {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
+        serde_json::from_str(&text).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())))
+    })
+}
+
+fn load_script(script: &Value) -> Vec<Ev> {
+    let list = match script { Value::Object(o) => o.get("events").cloned().unwrap_or_else(|| json!([])), v => v.clone() };
     parse_script(list)
 }
 
 /// The script's displays and pointer, which headless `place()` resolves against.
-fn desktop(args: &Args) -> crate::virtual_desktop::VirtualDesktop {
-    let script = args.script.as_ref().map(|path| {
-        let text = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
-        serde_json::from_str::<Value>(&text).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())))
-    });
-    crate::virtual_desktop::VirtualDesktop::from_script(script.as_ref(), f64::from(args.scale.unwrap_or(2.0))).unwrap_or_else(|e| die(&e))
+fn desktop(args: &Args, script: Option<&Value>) -> crate::virtual_desktop::VirtualDesktop {
+    crate::virtual_desktop::VirtualDesktop::from_script(script, f64::from(args.scale.unwrap_or(2.0))).unwrap_or_else(|e| die(&e))
 }
 
 fn parse_script(list: Value) -> Vec<Ev> {
@@ -865,15 +860,16 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let state_ms = launched.elapsed().as_secs_f64() * 1000.0;
     let mut rt = runtime_for(&spec, state, size, Env::new(dark, scale), std::sync::Arc::new(|| {}));
     #[cfg(all(feature = "dev", debug_assertions))]
-    attach_dev(&mut rt, &spec, dev, std::sync::Arc::new(|| {}));
+    if let Some(dev) = dev { crate::dev::launch(&mut rt, &spec, dev, std::sync::Arc::new(|| {})); }
     rt.on_focus = on_focus;
     rt.transparent = transparent;
     if args.tree.is_some() { rt.key_warnings = Some(Vec::new()); }
     rt.track_marks = comp.is_some();
     let runtime_ms = launched.elapsed().as_secs_f64() * 1000.0 - state_ms;
 
-    let script = args.script.as_ref().map(load_script).unwrap_or_default();
-    let desktop = desktop(&args);
+    let source = read_script(&args);
+    let script = source.as_ref().map(load_script).unwrap_or_default();
+    let desktop = desktop(&args, source.as_ref());
     let mut placed = None;
     let fps = args.fps.max(1.0);
     let dt = 1.0 / fps;
@@ -955,7 +951,8 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         let mut animating = rt.frame(step);
         // Updates, poll and input handlers place too; the latest request this frame wins.
         if let Some(place) = shared.take_place().or(requests.place) {
-            let record = desktop.placed_json(&place, size, real_t);
+            let (display, frame) = desktop.place(&place, size);
+            let record = json!({ "t": real_t, "display": display, "frame": frame });
             println!("rune-placed {record}");
             placed = Some(record);
         }

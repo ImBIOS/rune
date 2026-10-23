@@ -3,7 +3,7 @@
 //! `{"displays":[{"id":1,"frame":[0,0,1512,982],"scale":2,"primary":true}],"pointer":[800,400],"events":[]}`.
 //! Frames and the pointer are points in one global, top-left space (macOS display bounds).
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::{DisplayTarget, NativeDisplayId, windows::PlaceRequest};
 
@@ -74,17 +74,12 @@ impl VirtualDesktop {
         let local = crate::overlay_options::local_rect(PlaceRequest::at(size), Some(request.placement), (d.frame[2] as f32, d.frame[3] as f32));
         (d.id, [d.frame[0] as f32 + local[0], d.frame[1] as f32 + local[1], local[2], local[3]])
     }
-
-    /// The `placed` record headless tools print and add to `--tree`.
-    pub fn placed_json(&self, request: &PlaceRequest, size: (f32, f32), t: f64) -> Value {
-        let (display, frame) = self.place(request, size);
-        json!({ "t": t, "display": display, "frame": frame })
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use crate::{Align, OverlayPlacement, ScreenEdge};
 
     #[test]
