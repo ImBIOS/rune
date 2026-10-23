@@ -86,6 +86,13 @@ to primary. Rect and FullScreen resize as well as place; Edge uses the current w
 Coordinates are display-local points, as for overlays. Wayland ignores placement requests.
 `set_position` replaces a pending/retained display placement, and vice versa.
 
+Headless runs resolve `AppHandle::place` against displays a `--script` object declares,
+`{"displays":[{"id":1,"frame":[0,0,1512,982],"scale":2,"primary":true}],"pointer":[800,400],"events":[]}`
+(frames and pointer in global points; ids match `DisplayTarget::Native`). Without them there is
+one 1920x1080-pixel primary display, which `run_windows` factories also receive. Each
+placement prints `rune-placed {"t":…,"display":1,"frame":[x,y,w,h]}` and the latest one
+appears as `"placed"` in `--tree`. The headless viewport keeps its size.
+
 Headless scripts accept `{"t": 0.1, "focus": false}` (time defaults to zero), delivering
 the same app callback as native input. Existing root `El::on_window_focus` callbacks also
 receive the queued focus event when Runtime next advances.

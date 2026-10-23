@@ -242,7 +242,8 @@ const HELP: &str = "usage: <app> [window]
   --at SECONDS          virtual time of the snapshot/tree (default: end of frames or script)
   --size WxH            viewport in points      --scale N   device scale (default 2)
   --theme dark|light    system appearance
-  --script FILE.json    timestamped input (move/down/up/tap/drag, keys, {\"focus\":false})
+  --script FILE.json    timestamped input (move/down/up/tap/drag, keys, {\"focus\":false}); an
+                        object adds \"displays\" and \"pointer\" for place() (rune-placed, --tree)
   --frames N --fps 60 --start S --out DIR     dump N frames from S seconds
   --strip out.png --crop x,y,w,h --every K    tile dumped frames into one image
                         (repeat --crop to stack several regions per frame; --cols N per row)
@@ -279,9 +280,9 @@ pub fn run_windows<S: 'static>(factory: impl FnOnce(&[crate::Display]) -> Vec<cr
 pub fn run_windows_with<S: 'static>(options: crate::RunOptions, factory: impl FnOnce(&[crate::Display]) -> Vec<crate::WindowSpec<S>> + 'static) {
     let args = Args::parse();
     if args.headless() {
-        let display = crate::Display { id: None, name: Some("headless".into()), position: (0, 0),
-            size: (1920, 1080), scale: f64::from(args.scale.unwrap_or(2.0)), primary: true };
-        let mut windows = factory(std::slice::from_ref(&display));
+        let displays = desktop(&args).displays();
+        let display = displays.iter().find(|d| d.primary).unwrap_or(&displays[0]).clone();
+        let mut windows = factory(&displays);
         crate::windows::validate(&windows).unwrap_or_else(|e| die(&e));
         if args.list_windows {
             for window in windows { println!("{}", window.key); }
@@ -379,8 +380,17 @@ struct Ev {
 fn load_script(path: &PathBuf) -> Vec<Ev> {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
     let v: Value = serde_json::from_str(&text).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
-    let list = v.get("events").cloned().unwrap_or(v);
+    let list = match v { Value::Object(o) => o.get("events").cloned().unwrap_or_else(|| json!([])), v => v };
     parse_script(list)
+}
+
+/// The script's displays and pointer, which headless `place()` resolves against.
+fn desktop(args: &Args) -> crate::virtual_desktop::VirtualDesktop {
+    let script = args.script.as_ref().map(|path| {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
+        serde_json::from_str::<Value>(&text).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())))
+    });
+    crate::virtual_desktop::VirtualDesktop::from_script(script.as_ref(), f64::from(args.scale.unwrap_or(2.0))).unwrap_or_else(|e| die(&e))
 }
 
 fn parse_script(list: Value) -> Vec<Ev> {
@@ -770,6 +780,8 @@ fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, tran
     let runtime_ms = launched.elapsed().as_secs_f64() * 1000.0 - state_ms;
 
     let script = args.script.as_ref().map(load_script).unwrap_or_default();
+    let desktop = desktop(&args);
+    let mut placed = None;
     let fps = args.fps.max(1.0);
     let dt = 1.0 / fps;
     let start_frame = (args.start * fps).round() as usize;
@@ -835,7 +847,13 @@ fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, tran
                 Kind::Fling(v) => rt.fling(x, y, *v),
             }
         }
-        for f in shared.take().updates {
+        let requests = shared.take();
+        if let Some(place) = requests.place {
+            let record = desktop.placed_json(&place, size, real_t);
+            println!("rune-placed {record}");
+            placed = Some(record);
+        }
+        for f in requests.updates {
             rt.update(f);
         }
         let step = if k == 0 { 0.0 } else { dt };
@@ -926,7 +944,9 @@ fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, tran
         if k == snap_frame
             && let Some(p) = &args.tree
         {
-            let text = serde_json::to_string_pretty(&tree_json(&rt, real_t)).unwrap();
+            let mut tree = tree_json(&rt, real_t);
+            if let Some(placed) = &placed { tree["placed"] = placed.clone(); }
+            let text = serde_json::to_string_pretty(&tree).unwrap();
             std::fs::write(p, text).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
         }
     }

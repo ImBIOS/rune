@@ -6,11 +6,13 @@ pub(crate) struct PlaceRequest {
     pub display: crate::DisplayTarget,
     pub placement: crate::OverlayPlacement,
     pub pointer: Option<(i32, i32)>,
+    /// The caller's target, before sampling the pointer; headless runs resolve this.
+    pub requested: crate::DisplayTarget,
 }
 
 impl PlaceRequest {
     pub fn new(display: crate::DisplayTarget, placement: crate::OverlayPlacement) -> Self {
-        let mut request = Self { display, placement, pointer: None };
+        let mut request = Self { requested: display.clone(), display, placement, pointer: None };
         if request.display == crate::DisplayTarget::UnderPointer {
             #[cfg(target_os = "macos")]
             { request.display = crate::macos::pointer_display().map_or(crate::DisplayTarget::Primary,

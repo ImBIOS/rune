@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Headless runs resolve `place()`.** A `--script` object can declare `"displays"` and a
+  `"pointer"`; `AppHandle::place` resolves against them (one 1920x1080-pixel display by
+  default), prints a `rune-placed` line and adds `"placed"` to `--tree`. A script object
+  without `"events"` now means no events instead of an error.
 - **Launcher panels never reveal stale pixels.** A launcher shown in the same turn as an
   `update()` renders one fenced hidden frame before its reveal, where it used to show the
   cached pre-update frame for a frame. The update's motion is not settled; it runs on after

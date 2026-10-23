@@ -1,0 +1,114 @@
+//! The displays and pointer a headless run pretends to have, so `place()` resolves there.
+//! A `--script` object may set them next to its events:
+//! `{"displays":[{"id":1,"frame":[0,0,1512,982],"scale":2,"primary":true}],"pointer":[800,400],"events":[]}`.
+//! Frames and the pointer are points in one global, top-left space (macOS display bounds).
+
+use serde_json::{Value, json};
+
+use crate::{DisplayTarget, NativeDisplayId, windows::PlaceRequest};
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct VirtualDisplay { pub id: u32, pub frame: [f64; 4], pub scale: f64, pub primary: bool }
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct VirtualDesktop { pub displays: Vec<VirtualDisplay>, pub pointer: Option<(f64, f64)> }
+
+impl VirtualDesktop {
+    /// The single 1920x1080-pixel display headless window factories have always received.
+    pub fn single(scale: f64) -> Self {
+        let frame = [0.0, 0.0, 1920.0 / scale, 1080.0 / scale];
+        Self { displays: vec![VirtualDisplay { id: 1, frame, scale, primary: true }], pointer: None }
+    }
+
+    /// The script's desktop; `single` where it sets no displays.
+    pub fn from_script(script: Option<&Value>, scale: f64) -> Result<Self, String> {
+        let mut desktop = Self::single(scale);
+        let Some(Value::Object(script)) = script else { return Ok(desktop) };
+        if let Some(list) = script.get("displays") {
+            let Value::Array(list) = list else { return Err("script: \"displays\" must be an array".into()) };
+            desktop.displays = list.iter().enumerate().map(|(i, d)| {
+                let frame = d["frame"].as_array().filter(|f| f.len() == 4)
+                    .and_then(|f| Some([f[0].as_f64()?, f[1].as_f64()?, f[2].as_f64()?, f[3].as_f64()?]))
+                    .filter(|f| f[2] > 0.0 && f[3] > 0.0)
+                    .ok_or_else(|| format!("script: display {i} needs \"frame\": [x, y, width, height]"))?;
+                Ok(VirtualDisplay {
+                    id: d["id"].as_u64().map_or(i as u32 + 1, |id| id as u32), frame,
+                    scale: d["scale"].as_f64().unwrap_or(scale), primary: d["primary"].as_bool().unwrap_or(false),
+                })
+            }).collect::<Result<_, String>>()?;
+            if desktop.displays.is_empty() { return Err("script: \"displays\" is empty".into()); }
+        }
+        if let Some(p) = script.get("pointer") {
+            desktop.pointer = Some(p.as_array().filter(|p| p.len() == 2).and_then(|p| Some((p[0].as_f64()?, p[1].as_f64()?)))
+                .ok_or("script: \"pointer\" must be [x, y]")?);
+        }
+        Ok(desktop)
+    }
+
+    /// What a window factory sees: desktop pixels, like native displays.
+    pub fn displays(&self) -> Vec<crate::Display> {
+        self.displays.iter().map(|d| crate::Display {
+            id: None, name: Some("headless".into()),
+            position: ((d.frame[0] * d.scale).round() as i32, (d.frame[1] * d.scale).round() as i32),
+            size: ((d.frame[2] * d.scale).round() as u32, (d.frame[3] * d.scale).round() as u32),
+            scale: d.scale, primary: d.primary,
+        }).collect()
+    }
+
+    /// The display and global frame `request` gives a window of `size` points. Unknown
+    /// displays fall back to primary, as natively.
+    pub fn place(&self, request: &PlaceRequest, size: (f32, f32)) -> (u32, [f32; 4]) {
+        let id = match &request.requested {
+            DisplayTarget::Id(id) => id.native_id(),
+            DisplayTarget::Native(id) => Some(*id),
+            DisplayTarget::Primary | DisplayTarget::UnderPointer => None,
+        }.map(|id| match id {
+            NativeDisplayId::MacOS(n) | NativeDisplayId::X11Crtc(n) | NativeDisplayId::X11Output(n) | NativeDisplayId::Wayland(n) => i64::from(n),
+            NativeDisplayId::Windows(n) => n as i64,
+        });
+        let bounds: Vec<_> = self.displays.iter().map(|d| [d.frame[0], d.frame[1], d.frame[0] + d.frame[2], d.frame[1] + d.frame[3]]).collect();
+        let primary = self.displays.iter().position(|d| d.primary);
+        let requested = id.and_then(|id| self.displays.iter().position(|d| i64::from(d.id) == id));
+        let pointer = self.pointer.filter(|_| request.requested == DisplayTarget::UnderPointer);
+        let d = &self.displays[crate::overlay_options::choose_display(&bounds, primary, requested, pointer).unwrap_or(0)];
+        let local = crate::overlay_options::local_rect(PlaceRequest::at(size), Some(request.placement), (d.frame[2] as f32, d.frame[3] as f32));
+        (d.id, [d.frame[0] as f32 + local[0], d.frame[1] as f32 + local[1], local[2], local[3]])
+    }
+
+    /// The `placed` record headless tools print and add to `--tree`.
+    pub fn placed_json(&self, request: &PlaceRequest, size: (f32, f32), t: f64) -> Value {
+        let (display, frame) = self.place(request, size);
+        json!({ "t": t, "display": display, "frame": frame })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Align, OverlayPlacement, ScreenEdge};
+
+    #[test]
+    fn headless_place_resolves_against_the_scripted_desktop() {
+        let script = json!({
+            "displays": [{"id": 1, "frame": [0, 0, 1512, 982], "scale": 2, "primary": true},
+                         {"id": 7, "frame": [1512, -100, 1920, 1080], "scale": 1}],
+            "pointer": [2000, 300], "events": [],
+        });
+        let desktop = VirtualDesktop::from_script(Some(&script), 2.0).unwrap();
+        let top = OverlayPlacement::Edge { edge: ScreenEdge::Top, margin: 160.0, align: Align::Center, inset: 0.0 };
+        let request = |display| PlaceRequest { requested: display, ..PlaceRequest::new(DisplayTarget::Primary, top) };
+        assert_eq!(desktop.place(&request(DisplayTarget::Primary), (600.0, 80.0)), (1, [456.0, 160.0, 600.0, 80.0]));
+        assert_eq!(desktop.place(&request(DisplayTarget::UnderPointer), (600.0, 80.0)), (7, [2172.0, 60.0, 600.0, 80.0]));
+        assert_eq!(desktop.place(&request(DisplayTarget::Native(NativeDisplayId::MacOS(7))), (600.0, 80.0)).0, 7);
+        assert_eq!(desktop.place(&request(DisplayTarget::Native(NativeDisplayId::MacOS(9))), (600.0, 80.0)).0, 1, "unknown ids fall back to primary");
+        let full = PlaceRequest::new(DisplayTarget::Native(NativeDisplayId::MacOS(7)), OverlayPlacement::FullScreen);
+        assert_eq!(desktop.place(&full, (600.0, 80.0)), (7, [1512.0, -100.0, 1920.0, 1080.0]));
+        assert_eq!(desktop.displays()[1].position, (1512, -100));
+        assert_eq!(desktop.displays()[0].size, (3024, 1964));
+
+        let default = VirtualDesktop::from_script(None, 2.0).unwrap();
+        assert_eq!(default.displays(), vec![crate::Display { id: None, name: Some("headless".into()),
+            position: (0, 0), size: (1920, 1080), scale: 2.0, primary: true }], "unchanged factory display");
+        assert!(VirtualDesktop::from_script(Some(&json!({"displays": [{"frame": [0, 0]}]})), 2.0).is_err());
+    }
+}
