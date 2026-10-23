@@ -5072,7 +5072,7 @@ mod tests {
         }
         let mut rt = Runtime::new(Card { pw: TextEdit::new("hunter2").secure(), open: true }, view, (200.0, 100.0), Env::new(true, 2.0));
         rt.frame(0.0);
-        let painted = rt.instances.len();
+        let painted = rt.instances.iter().filter(|i| i.params[1] == KIND_GLYPH).count();
         rt.update(|s, _| { s.pw.clear(); s.open = false; });
         assert!(rt.frame(1.0 / 60.0));
         let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("pw")).expect("exiting field stays drawn");
@@ -5081,7 +5081,8 @@ mod tests {
         assert_eq!(edit.text, "•".repeat(7), "only the mask remains");
         assert!(!edit.has_history() && !edit.focused);
         assert_eq!(n.text.as_ref().unwrap().content, "•".repeat(7));
-        assert_eq!(rt.instances.len(), painted, "the same dots, no placeholder");
+        // Exit blur adds balanced layer markers; compare the actual dots, not scope records.
+        assert_eq!(rt.instances.iter().filter(|i| i.params[1] == KIND_GLYPH).count(), painted, "the same dots, no placeholder");
         assert!(!format!("{:?}", rt.elements()).contains("hunter2"));
     }
 }

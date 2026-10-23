@@ -112,8 +112,9 @@ The updated fade regression checks inherited nonzero offsets on composites at 1Ã
 rounded and rectangular masks. The combined LiveText/truncation regression compares alpha
 against an independent capsule oracle through short and long live updates at both scales.
 
-If `ElementInfo.blur` is added later, report presented `p.blur` (own plus presence sigma in
-points), rather than accumulated `Inh.blur`. This branch does not add that field.
+Dev now includes `ElementInfo.blur` with inherited presented-effect semantics. The landing
+rebase retains that contract and its ancestor/exit-blur regression; it supersedes the earlier
+proposal to expose only the node's own `p.blur`.
 
 ### A real overlay contains the blurred chip
 
@@ -238,6 +239,17 @@ synced checkout, and set `RUNE_SRGB_REFERENCE` to that file for
 `cargo test -p rune --lib appkit_srgb_fidelity_and_cost -- --ignored --nocapture --test-threads=1`.
 
 ## Verification
+
+The October 23 landing rebase onto `b6783ae` passed `cargo check --workspace --all-targets`
+and 24 targeted layer/filter cases. Sequence opacity now participates in dormant-dissolve
+activation; its new GPU test preserves full alpha during complementary fades and skips scopes
+at endpoints. Native video's mirror flag stays in `sampling.w`, independent of `fade[3]` radius.
+
+The requested Rune/rune-kit markdown-enabled test run was invoked once. Its only failure was
+a secure-exit assertion counting blur-scope markers as dots; after changing that assertion to
+count glyph instances, the targeted case passed. All remaining integration targets, rune-kit
+unit tests and runnable doctests passed in separate serial HiveMind jobs. Two opt-in GUI tests
+skipped. See `REVIEW-TO-PARENT.md` for the exact coverage and retained native-capture base.
 
 After packed-fade integration, **22 layer/filter correctness cases**, all **7 Batch C cases**,
 all **3 clip-fade cases** (including the corrected fixture's targeted rerun), and

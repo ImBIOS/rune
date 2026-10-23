@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Rounded subtree clips and dormant dissolves**. `clip_rounded(radius)`
+  clips ordinary paint directly and isolated output after filtering, preserving blur from sources
+  beyond the clip. `dissolve()` skips isolation at opacity endpoints, where overlapping opaque
+  children now use source-over; it activates additive isolation during fades, including sequences.
+- **Blur filters the whole subtree**. `blur`, `live_blur`, `blur_motion`
+  and presence blur now soften text, images and video together. `Transition::blur_replace()` peaks
+  at Gaussian sigma 1.5 pt instead of the old shape-only 4 pt coverage radius; its scale and timing
+  stay the same. The packed instance remains 128 bytes, with clip radius in attribute 7 `fade[3]`.
 - **Opt-in guarded Rust view editing**. `scripts/rune-dev` patches
   Settings and fixture-only OpenCode views while retaining state, scroll and springs.
   Declaration, signature and other build-input changes require a restart. `rune/hot`

@@ -182,6 +182,30 @@ fn dissolve_keeps_opaque_coverage_and_isolates_each_state() {
 }
 
 #[test]
+fn dissolve_samples_sequence_opacity_before_selecting_scopes() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        const OUT: &[crate::Beat] = &[crate::Beat::new(0.0),
+            crate::Beat::new(1.0).opacity(0.0).easing(crate::Easing::LINEAR)];
+        const IN: &[crate::Beat] = &[crate::Beat::new(0.0).opacity(0.0),
+            crate::Beat::new(1.0).easing(crate::Easing::LINEAR)];
+        el().size(32.0, 16.0).dissolve()
+            .child(el().size(32.0, 16.0).absolute(0.0, 0.0).fill(Color::WHITE).sequence(crate::Sequence::new(OUT)))
+            .child(el().size(32.0, 16.0).absolute(0.0, 0.0).fill(Color::WHITE).sequence(crate::Sequence::new(IN)))
+    }
+    let gpu = Gpu::headless();
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let target = Offscreen::new(&gpu.device, 32, 16);
+    let mut rt = Runtime::new((), view, (32.0, 16.0), Env::new(true, 1.0));
+    for (dt, active) in [(0.0, false), (0.5, true), (0.5, false)] {
+        rt.frame(dt);
+        assert_eq!(rt.instances.iter().any(|i| i.params[1] == KIND_LAYER), active);
+        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (32, 16));
+        let out = pixels(&gpu, &renderer, &target);
+        assert!(out.chunks_exact(4).all(|p| p[3] == 255), "complementary sequences retain opaque coverage");
+    }
+}
+
+#[test]
 fn dissolve_adds_direct_primitives_and_native_surfaces_then_clamps_before_opacity() {
     use crate::native_surface::{ByteFrame, ColorInfo, Format, NativeSurface, SurfaceDraw, SurfaceFit};
     let gpu = Gpu::headless();
