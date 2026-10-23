@@ -3,7 +3,7 @@ import { mountPage } from "@kitlangton/knobs/panel"
 
 let controls: RemoteControls | undefined
 let shape = ""
-const socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`)
+const socket = new WebSocket(new URLSearchParams(location.search).get("ws") ?? `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`)
 const send = (message: object) => {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
 }

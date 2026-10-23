@@ -12,7 +12,7 @@ async function run() {
     address = text.match(/Rune dev controls: (http:\/\/\S+)/)?.[1]
     if (address) break
   }
-  if (!address) throw new Error(`No dev socket announced: ${text}`)
+  if (!address) throw new Error(`No dev port (page and socket) announced: ${text}`)
   const page = await fetch(address)
   const script = await fetch(new URL("panel.js", address))
   if (!page.ok || !(await page.text()).includes("/panel.js") || !script.ok) throw new Error(`Page not served: ${page.status} ${script.status}`)

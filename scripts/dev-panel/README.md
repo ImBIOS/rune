@@ -16,14 +16,15 @@ knobs pin. `cargo test -p rune --features dev --lib dev` fails while it is stale
 
 ```sh
 (cd scripts/dev-panel && bun install)
-bun scripts/dev-panel/build.ts           # rewrite the embedded bundle
-bun scripts/dev-panel/build.ts --check   # or only verify it
-bun scripts/dev-panel/serve.ts           # page development: rebuilt per start
+bun scripts/dev-panel/build.ts   # rewrite the embedded bundle
+bun scripts/dev-panel/serve.ts   # page development: rebuilt per start
 ```
 
 `serve.ts` serves an unminified development build on `http://127.0.0.1:7862`
-and proxies the app's socket; `PORT` changes its port and `RUNE_DEV_WS` the
-socket. For a tailnet HTTPS preview, Tailscale Serve can point straight at the
+(`PORT` changes it). The page connects to the socket named by `?ws=`, else to
+`/ws` on its own origin, so open
+`http://127.0.0.1:7862/?ws=ws://127.0.0.1:7863/ws` to drive an app. For a
+tailnet HTTPS preview, Tailscale Serve can point straight at the
 app's port. Inspect Tailscale's existing Serve mappings first.
 
 The same socket accepts JSON `set`, `setBatch`, `reset`, `action`, `get`, and
@@ -40,7 +41,7 @@ the current frame counter, descriptors, complete values, and watch readouts.
 {"type":"tree","id":5}
 ```
 
-App integration and clock semantics: [DESIGN.md](../../DESIGN.md).
+App integration and clock semantics: [research/30-dev-panel.md](../../research/30-dev-panel.md).
 
 The existing `lab` example also accepts `--features dev`: its Motion scene's
 rune-fx shutter pass obeys the panel's Motion blur toggle. Compositors opt in

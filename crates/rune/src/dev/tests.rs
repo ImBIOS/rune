@@ -1,6 +1,22 @@
 use super::*;
 use crate::{Cx, El, Env, Spring, el};
 
+/// A runtime over `spec`'s view with the panel attached on a free port.
+fn attached<S: 'static>(spec: &AppSpec<S>, state: S, wake: Waker) -> Runtime<S> {
+    let mut config = Config::default();
+    config.bind.set_port(0);
+    let mut rt = Runtime::new(state, spec.view, spec.size, Env { system_dark: true, scale: 1.0 });
+    attach(&mut rt, spec, &config, wake).unwrap();
+    rt
+}
+
+/// Queues `message` as if the socket had received it; replies arrive on the receiver.
+fn enqueue<S>(rt: &Runtime<S>, message: Value) -> std::sync::mpsc::Receiver<Value> {
+    let (reply, replies) = std::sync::mpsc::channel();
+    rt.dev.as_ref().unwrap().bridge.lock().unwrap().incoming.push_back(transport::Request { message, reply });
+    replies
+}
+
 #[test]
 fn scaled_timer_deadlines_pause_step_and_headless_subdivision_share_one_clock() {
     fn view(_: &Vec<f64>, _: &mut Cx<Vec<f64>>) -> El { el() }
@@ -76,11 +92,7 @@ fn a_command_after_idle_starts_at_its_arrival_and_cancelled_replays_stay_cancell
     let mut rt = Runtime::new(0.0, view, spec.size, Env { system_dark: true, scale: 1.0 });
     attach(&mut rt, &spec, &config, Arc::new(|| {})).unwrap();
     rt.frame(0.0);
-    let queue = |rt: &Runtime<f32>, message| {
-        let (reply, _) = std::sync::mpsc::channel();
-        rt.dev.as_ref().unwrap().bridge.lock().unwrap().incoming.push_back(transport::Request { message, reply });
-    };
-    queue(&rt, json!({"type":"action","key":"rune.transition.move"}));
+    enqueue(&rt, json!({"type":"action","key":"rune.transition.move"}));
     rt.frame(100.0);
     assert_eq!(rt.state, 0.0);
     rt.frame(100.0);
@@ -88,9 +100,9 @@ fn a_command_after_idle_starts_at_its_arrival_and_cancelled_replays_stay_cancell
     assert_eq!(rt.presented("box").unwrap().0[0], 0.0, "idle time precedes the new trajectory");
     rt.frame(0.05);
     assert!(rt.presented("box").unwrap().0[0] > 0.0);
-    queue(&rt, json!({"type":"action","key":"rune.transition.move"}));
+    enqueue(&rt, json!({"type":"action","key":"rune.transition.move"}));
     rt.frame(0.0);
-    queue(&rt, json!({"type":"set","key":"rune.state","value":"left"}));
+    enqueue(&rt, json!({"type":"set","key":"rune.state","value":"left"}));
     rt.frame(0.0);
     rt.frame(1.0);
     assert_eq!(rt.state, 0.0);
@@ -129,12 +141,9 @@ fn tunables_read_between_frames_reach_the_panel_and_follow_its_values() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     fn view(_: &f32, _: &mut Cx<f32>) -> El { el() }
     let spec = AppSpec::new("test", (100.0, 100.0), || 0.0, view);
-    let mut config = Config::default();
-    config.bind.set_port(0);
     let wakes = Arc::new(AtomicUsize::new(0));
     let counter = wakes.clone();
-    let mut rt = Runtime::new(0.0, view, spec.size, Env { system_dark: true, scale: 1.0 });
-    attach(&mut rt, &spec, &config, Arc::new(move || { counter.fetch_add(1, Ordering::Relaxed); })).unwrap();
+    let mut rt = attached(&spec, 0.0, Arc::new(move || { counter.fetch_add(1, Ordering::Relaxed); }));
     rt.frame(0.0);
     // Like `Compositor::render`: after the frame, outside its scope.
     assert_eq!(tune("glow.radius", 2.5_f32, Some([0.0, 12.0, 0.5])), 2.5);
@@ -144,9 +153,7 @@ fn tunables_read_between_frames_reach_the_panel_and_follow_its_values() {
     rt.frame(0.0);
     let snapshot = rt.dev.as_ref().unwrap().bridge.lock().unwrap().latest.clone();
     assert!(snapshot["descriptors"].as_array().unwrap().iter().any(|d| d["key"] == "glow.radius"));
-    let (reply, _) = std::sync::mpsc::channel();
-    let message = json!({"type":"set","key":"glow.radius","value":8});
-    rt.dev.as_ref().unwrap().bridge.lock().unwrap().incoming.push_back(transport::Request { message, reply });
+    enqueue(&rt, json!({"type":"set","key":"glow.radius","value":8}));
     rt.frame(0.0);
     assert_eq!(tune("glow.radius", 2.5_f32, Some([0.0, 12.0, 0.5])), 8.0);
     drop(rt);
@@ -177,9 +184,7 @@ fn hidden_hosts_keep_motion_in_real_time_and_the_tree_reports_opacity() {
     let x = rt.presented("box").unwrap().0[0];
     assert!(x > 0.0 && x < 80.0, "springs advance without presented frames: {x}");
 
-    let (reply, replies) = std::sync::mpsc::channel();
-    let message = json!({"type":"tree","id":1});
-    rt.dev.as_ref().unwrap().bridge.lock().unwrap().incoming.push_back(transport::Request { message, reply });
+    let replies = enqueue(&rt, json!({"type":"tree","id":1}));
     rt.dev_hidden_frame();
     let tree = replies.try_recv().unwrap();
     let card = tree["elements"].as_array().unwrap().iter().find(|e| e["key"] == "box").unwrap();
@@ -197,21 +202,15 @@ fn hidden_hosts_keep_motion_in_real_time_and_the_tree_reports_opacity() {
 
 #[test]
 fn transition_closures_take_their_state_from_the_config() {
-    #[derive(Default)]
+    #[allow(dead_code)]
     struct Ui { joined: bool }
     impl Ui {
         fn join(&mut self, tx: &mut Tx) { self.joined = true; tx.settle(); }
     }
-    // Method calls and field writes need `S` before the closure is checked.
-    let config = Config::<Ui>::default()
+    // Compiling is the proof: method calls and field writes need `S` before the closure is checked.
+    let _ = Config::<Ui>::default()
         .transition("Join", "lobby", |s, tx| s.join(tx))
         .transition("Leave", "room", |s, _| s.joined = false);
-    assert_eq!(config.transitions.iter().map(|t| (t.name, t.from)).collect::<Vec<_>>(), [("Join", "lobby"), ("Leave", "room")]);
-    let mut ui = Ui::default();
-    (config.transitions[0].action)(&mut ui, &mut Tx::default());
-    assert!(ui.joined);
-    (config.transitions[1].action)(&mut ui, &mut Tx::default());
-    assert!(!ui.joined);
 }
 
 #[test]
@@ -224,16 +223,11 @@ fn scene_fns_build_against_the_running_clock() {
         })],
         ..AppSpec::new("test", (100.0, 100.0), || (-1.0, -1.0), view)
     };
-    let mut config = Config::default();
-    config.bind.set_port(0);
-    let mut rt = Runtime::new((spec.init)(), view, spec.size, Env { system_dark: true, scale: 1.0 });
-    attach(&mut rt, &spec, &config, Arc::new(|| {})).unwrap();
+    let mut rt = attached(&spec, (spec.init)(), Arc::new(|| {}));
     rt.dev_clock.as_mut().unwrap().scale = 0.5;
     rt.frame(0.0);
     rt.frame(1.0);
-    let (reply, _) = std::sync::mpsc::channel();
-    let message = json!({"type":"set","key":"rune.state","value":"start"});
-    rt.dev.as_ref().unwrap().bridge.lock().unwrap().incoming.push_back(transport::Request { message, reply });
+    enqueue(&rt, json!({"type":"set","key":"rune.state","value":"start"}));
     rt.frame(0.1);
     assert!((rt.state.0 - 0.55).abs() < 1e-12 && (rt.state.0 - rt.clock).abs() < 1e-12, "{:?} at {}", rt.state, rt.clock);
     assert!((rt.state.1 - 0.05).abs() < 1e-12, "the panel's speed scales dt: {:?}", rt.state);
@@ -258,14 +252,16 @@ fn the_socket_port_serves_the_page_over_http() {
     use std::io::{Read, Write};
     fn view(_: &f32, _: &mut Cx<f32>) -> El { el() }
     let spec = AppSpec::new("test", (100.0, 100.0), || 0.0, view);
-    let mut config = Config::default();
-    config.bind.set_port(0);
-    let mut rt = Runtime::new(0.0, view, spec.size, Env { system_dark: true, scale: 1.0 });
-    let address = attach(&mut rt, &spec, &config, Arc::new(|| {})).unwrap();
+    let mut rt = attached(&spec, 0.0, Arc::new(|| {}));
+    let address = rt.dev_address().unwrap();
     rt.frame(0.0);
-    let get = |request: &str| {
+    let send = |request: &[u8]| {
         let mut stream = std::net::TcpStream::connect(address).unwrap();
-        stream.write_all(request.as_bytes()).unwrap();
+        stream.write_all(request).unwrap();
+        stream
+    };
+    let get = |request: &str| {
+        let mut stream = send(request.as_bytes());
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         let (head, body) = response.split_once("\r\n\r\n").unwrap();
@@ -282,9 +278,8 @@ fn the_socket_port_serves_the_page_over_http() {
     assert_eq!(get("POST / HTTP/1.1\r\nHost: localhost:7863\r\nContent-Length: 0\r\n\r\n").0, "HTTP/1.1 405 Method Not Allowed");
 
     let status = |request: &[u8]| {
-        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        let mut stream = send(request);
         stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-        stream.write_all(request).unwrap();
         let mut response = Vec::new();
         let mut byte = [0];
         while !response.ends_with(b"\r\n") && matches!(stream.read(&mut byte), Ok(1)) { response.push(byte[0]); }

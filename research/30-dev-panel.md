@@ -69,7 +69,8 @@ Selecting a new state cancels an outstanding replay.
 
 ## Wire protocol and UI
 
-Rune owns a loopback WebSocket listener, default port 7863 ("RUNE" on a phone
+Rune owns one loopback port that serves the knobs page over HTTP and its
+WebSocket at `/ws`, default port 7863 ("RUNE" on a phone
 keypad, clear of motion-lint, knobs, HiveMind and Nexus; port 0 announces a
 free port). A busy port moves on to the next 15 and, past those, leaves the app
 running without a panel. Headless runs (`--snap`, `--tree`, scripts) open it
@@ -151,9 +152,3 @@ Commands first bring existing motion/timers to their arrival timestamp, then
 commit the change with zero elapsed time. This prevents an idle interval from
 being applied to a newly replayed transition. The dev clock is a global
 multiplier; an app's explicit `Cx::time_scale` still affects animation alone.
-
-## Repository notes
-
-Read BRANCH-FROM-PARENT.md and PLAN.md §5. No AGENTS.md exists in this worktree
-or the primary Rune checkout at task start. Parent branch notes are untracked
-and will not be committed. Work stays local on dev-panel.
