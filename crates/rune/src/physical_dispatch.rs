@@ -8,9 +8,28 @@ impl<S: 'static> Runtime<S> {
     pub fn physical_input(&mut self, event: PhysicalInput) {
         self.queue.push(Action::Physical(event, None));
     }
-    pub(crate) fn physical_with_fallback(&mut self, event: PhysicalInput, key: Option<KeyEvent>) {
+    /// Return whether the native host needs to request a frame for this event.
+    pub(crate) fn physical_with_fallback(&mut self, event: PhysicalInput, key: Option<KeyEvent>) -> bool {
+        if matches!(event, PhysicalInput::Modifiers(_) | PhysicalInput::Key { pressed: false, .. }) {
+            return self.physical_observation(event);
+        }
         let fallback = key.map(|key| Fallback { key });
         self.queue.push(Action::Physical(event, fallback));
+        true
+    }
+    /// Modifier/release events have no logical action. When input is already queued,
+    /// its requested frame will process this observation in order after clicks/keys.
+    /// At rest, only a consuming handler invalidates the view and requests a frame.
+    pub(crate) fn physical_observation(&mut self, event: PhysicalInput) -> bool {
+        if !self.queue.is_empty() {
+            self.physical_input(event);
+            return false;
+        }
+        let mut tx = Tx::default();
+        let consumed = self.dispatch_physical(event, None, &mut tx);
+        merge(&mut self.pending, tx);
+        self.dirty |= consumed;
+        consumed
     }
     pub(super) fn dispatch_physical(&mut self, event: PhysicalInput, fallback: Option<Fallback>, tx: &mut Tx) -> bool {
         let handler = self.focused.as_deref().and_then(|p| self.node(p))
@@ -86,6 +105,41 @@ mod tests {
             Some(KeyEvent { key: Key::Escape, mods: Mods::default() }));
         rt.frame(0.0);
         assert_eq!(rt.state.dismissed, 1);
+    }
+
+    #[test]
+    fn modifier_and_release_redraws_require_consumption_and_keep_queued_focus_order() {
+        let mut rt = Runtime::new(State::default(), view, (300.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let modifiers = PhysicalInput::Modifiers(Mods { shift: true, ..Mods::default() });
+        let release = PhysicalInput::Key { key: PhysicalKeyCode::ShiftLeft, mods: Mods::default(), pressed: false, repeat: false };
+        for event in [modifiers, release] {
+            assert!(!rt.physical_with_fallback(event, None));
+            assert!(rt.queue.is_empty() && !rt.dirty, "unused input must not schedule work");
+        }
+        click(&mut rt, "recorder");
+        // The click already requested a frame. Do not deliver modifiers to the old
+        // focus or request another frame before that queued click starts capture.
+        assert!(!rt.physical_with_fallback(modifiers, None));
+        assert_eq!(rt.state.physical, 0);
+        rt.frame(0.0);
+        assert_eq!(rt.state.physical, 1);
+        for event in [modifiers, release] {
+            assert!(rt.physical_with_fallback(event, None));
+            assert!(rt.dirty, "consumption must commit the handler's state changes");
+            rt.frame(0.0);
+        }
+        assert_eq!(rt.state.physical, 3);
+        rt.state.capture = false;
+        assert!(!rt.physical_with_fallback(release, None), "a declining handler needs no frame");
+        rt.state.capture = true;
+        click(&mut rt, "edit");
+        assert!(!rt.physical_with_fallback(modifiers, None));
+        rt.frame(0.0);
+        let delivered = rt.state.physical; // FocusLost may notify the old recorder.
+        assert!(!rt.physical_with_fallback(release, None));
+        assert_eq!(rt.state.physical, delivered);
+        assert!(rt.queue.is_empty() && !rt.dirty);
     }
 
     #[derive(Default)]

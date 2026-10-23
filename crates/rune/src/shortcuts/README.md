@@ -78,3 +78,73 @@ Display normalizes modifiers to `ctrl+alt+shift+super`, then the lowercase key.
 `scripts/check-global-shortcut-macos.py <shortcut_probe>` checks two-process
 conflicts and real CuaDriver input on Pro under an exclusive `/tmp/pro-gui.lock`.
 The probe stays windowless and verifies handler thread identity.
+
+## Shortcut recorder
+
+`rune_kit::ShortcutRecorder` uses app-owned `ShortcutRecorderState` and renders the
+existing `Keybind` component:
+
+```rust,ignore
+ShortcutRecorder::new("shortcut", &state.shortcut, |s: &mut State| &mut s.shortcut)
+    .on_change(|state, shortcut, tx| state.replace_shortcut(shortcut, tx))
+    .build(&kit)
+```
+
+The change callback returns `Result<(), ShortcutError>`. A registration failure
+retains the old binding and displays the error; unchanged chords skip the callback.
+Click or keyboard activation starts recording, held modifiers preview immediately,
+Escape cancels, Backspace clears, and focus loss or disabling cancels recording.
+Repeated key presses are consumed without registering again.
+
+`Shortcut` stores a `PhysicalKeyCode`. Parsing and Display use canonical US physical
+names; `keycaps()` is for display only. On the macOS main thread, printable labels
+use `TISCopyCurrentKeyboardLayoutInputSource` and `UCKeyTranslate` without changing
+the input source. Other platforms, background callers and unavailable layouts use
+US labels. Persist the canonical shortcut, not its translated keycaps.
+
+Physical input and its logical fallback are processed together in event order.
+Focused capture runs before modal Escape, text editing and paste. A consumed chord
+never reads the clipboard. Otherwise eligible Cmd-V requests the asynchronous
+clipboard worker and consumes the command even for empty/image-only clipboards.
+The captured paste target prevents a later focus change from receiving the reply.
+Single-line and secure editors retain their ordinary editing and copy protections.
+Key-taking launcher panels retain winit's input view/delegate and use the window
+input path; overlays and Wayland layer surfaces also forward physical input.
+
+## Native application and Dock menus
+
+```rust,ignore
+let app = App::new(spec)
+    .menu_item(MenuItem::new("Open Quick Panel", open_panel).id("quick")
+        .key_equivalent("cmd+shift+space".parse()?))
+    .menu_item(MenuItem::new("Preferences", preferences).menu("Tools"))
+    .menu_item(MenuItem::new("Open Quick Panel", open_panel).id("dock-quick").dock());
+
+handle.set_menu([
+    MenuItem::new("Open Quick Panel", open_panel).id("quick")
+        .enabled(true).checked(true),
+])?;
+```
+
+Actions are `fn(&mut S, &mut Tx)` queued on the app thread. `set_menu` replaces all
+custom items for that App; an empty list removes them. It validates atomically and
+queues installation. `take_menu_errors()` reports deferred startup/installation
+errors. Replaced, disabled or removed items invalidate stale queued actions.
+
+On macOS, one App owns the process-wide custom menus. Default Quit/Hide items and
+existing named-menu items are preserved. The Dock adapter adds an absent
+`applicationDockMenu:` selector to winit's existing delegate class, retaining the
+delegate and all existing methods. An existing non-Rune selector is an error; the
+Rune hook returns nil after teardown. Key equivalents are native menu equivalents,
+not global registrations. Reapply the snapshot after changing keyboard layout to
+refresh translated equivalents.
+
+Native Windows/Linux return `MenuError::Unsupported`; startup builders report it
+through `take_menu_errors()`. Headless virtual menus work on every platform:
+`{"menu":"Open Quick Panel"}` invokes by exact id or unambiguous title. Unknown,
+disabled and ambiguous items fail the script.
+
+`scripts/check-native-menu-macos.py <menu_probe>` exercises the app-menu click,
+key equivalent, named-menu click, runtime enabled/checked updates, preservation of
+Quit/Hide and the Dock delegate selector on Pro under `/tmp/pro-gui.lock`.
+`scripts/menu.json` exercises title/id dispatch headlessly.

@@ -957,7 +957,10 @@ impl<T: 'static> Overlay<T> {
                         if down { self.rt.pointer_down(x, y); } else { self.rt.pointer_up(x, y); }
                     },
                     Input::Key(key) => self.rt.key(key),
-                    Input::Physical(event, fallback) => self.rt.physical_with_fallback(event, fallback),
+                    Input::Physical(event, fallback) => {
+                        self.dirty |= self.rt.physical_with_fallback(event, fallback);
+                        continue;
+                    }
                 }
                 self.dirty = true;
             }
@@ -1163,8 +1166,7 @@ impl<T: 'static> AnyHost for Overlay<T> {
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.mods = m.state();
-                self.rt.physical_input(crate::PhysicalInput::Modifiers(crate::window::map_mods(self.mods)));
-                self.dirty = true;
+                self.dirty |= self.rt.physical_observation(crate::PhysicalInput::Modifiers(crate::window::map_mods(self.mods)));
             }
             WindowEvent::Focused(focused) => {
                 self.rt.set_system_reduced_motion(crate::preferences::reduced_motion());
@@ -1178,11 +1180,10 @@ impl<T: 'static> AnyHost for Overlay<T> {
                 let pressed = event.state.is_pressed();
                 let fallback = pressed.then(|| crate::window::map_key(&event.logical_key, self.mods)).flatten();
                 if let winit::keyboard::PhysicalKey::Code(key) = event.physical_key {
-                    self.rt.physical_with_fallback(crate::PhysicalInput::Key {
+                    self.dirty |= self.rt.physical_with_fallback(crate::PhysicalInput::Key {
                         key, mods: crate::window::map_mods(self.mods), pressed, repeat: event.repeat,
                     }, fallback);
-                } else if let Some(key) = fallback { self.rt.key(key); }
-                self.dirty = true;
+                } else if let Some(key) = fallback { self.rt.key(key); self.dirty = true; }
             }
             WindowEvent::MouseInput { state, button: winit::event::MouseButton::Left, .. } => {
                 #[cfg(target_os = "macos")]

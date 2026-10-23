@@ -1553,8 +1553,9 @@ impl<S: 'static> Host<S> {
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.mods = m.state();
-                rt.physical_input(crate::PhysicalInput::Modifiers(map_mods(self.mods)));
-                l.window.request_redraw();
+                if rt.physical_observation(crate::PhysicalInput::Modifiers(map_mods(self.mods))) {
+                    l.window.request_redraw();
+                }
             }
             WindowEvent::Focused(focused) => {
                 rt.set_system_reduced_motion(crate::preferences::reduced_motion());
@@ -1573,15 +1574,17 @@ impl<S: 'static> Host<S> {
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
                 let pressed = event.state == ElementState::Pressed;
                 let logical = pressed.then(|| map_key(&event.logical_key, self.mods)).flatten();
+                let mut redraw = false;
                 if let winit::keyboard::PhysicalKey::Code(key) = event.physical_key {
-                    rt.physical_with_fallback(crate::PhysicalInput::Key {
+                    redraw = rt.physical_with_fallback(crate::PhysicalInput::Key {
                         key, mods: map_mods(self.mods), pressed, repeat: event.repeat,
                     }, logical);
                 } else if let Some(ev) = logical {
                     if ev.key == Key::Command('v') && rt.accepts_paste() { self.clipboard.read(rt); }
                     else { rt.key(ev); }
+                    redraw = true;
                 }
-                l.window.request_redraw();
+                if redraw { l.window.request_redraw(); }
             }
             WindowEvent::Ime(ime) => {
                 match ime {
