@@ -9,10 +9,9 @@ let spec = rune::AppSpec {
 };
 let app = rune::App::new(spec);
 #[cfg(all(feature = "dev", debug_assertions))]
-let app = app.dev_panel(rune::dev::Config::default().transitions([
-    rune::dev::Transition::new("Join", "lobby", join),
-    rune::dev::Transition::new("Leave", "room", leave),
-]));
+let app = app.dev_panel(rune::dev::Config::<Rooms>::default()
+    .transition("Join", "lobby", |s, tx| s.join(tx))
+    .transition("Leave", "room", |s, tx| s.leave(tx)));
 app.run();
 
 fn view(state: &Rooms, cx: &mut rune::Cx<Rooms>) -> rune::El {
@@ -30,6 +29,11 @@ build, it expands to the default expression alone (including const contexts).
 With dev compiled but no runtime panel opt-in, no listener or registry exists.
 The default remains at its use site; explicit names survive code movement and
 copy-as-code. An optional numeric bounds form supplies min/max/step.
+
+`Config::transition` takes a plain closure (a `fn` pointer) whose state type
+comes from the config, so the state is named once at the root rather than on
+every `Transition::<Rooms>::new`. Rust checks a closure before later calls in
+a chain can pin `S`, so `Config::default()` alone cannot carry it.
 
 The dev configuration lives on `App`, set only by `App::dev_panel`, so
 `AppSpec` gains no field: Rooms, Hex and Deadbolt keep their exhaustive

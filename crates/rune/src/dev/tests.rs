@@ -194,3 +194,23 @@ fn hidden_hosts_keep_motion_in_real_time_and_the_tree_reports_opacity() {
     assert_eq!(rt.dev_hidden_deadline(), None);
     assert_eq!(rt.presented("box").unwrap().0[0], 80.0);
 }
+
+#[test]
+fn transition_closures_take_their_state_from_the_config() {
+    #[derive(Default)]
+    struct Ui { joined: bool }
+    impl Ui {
+        fn join(&mut self, tx: &mut Tx) { self.joined = true; tx.settle(); }
+    }
+    // Method calls and field writes need `S` before the closure is checked.
+    let config = Config::<Ui>::default()
+        .transition("Join", "lobby", |s, tx| s.join(tx))
+        .transition("Leave", "room", |s, _| s.joined = false);
+    assert_eq!(config.transitions.iter().map(|t| (t.name, t.from)).collect::<Vec<_>>(), [("Join", "lobby"), ("Leave", "room")]);
+    let mut ui = Ui::default();
+    (config.transitions[0].action)(&mut ui, &mut Tx::default());
+    assert!(ui.joined);
+    (config.transitions[1].action)(&mut ui, &mut Tx::default());
+    assert!(!ui.joined);
+}
+

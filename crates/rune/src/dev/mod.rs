@@ -48,6 +48,13 @@ impl<S> Config<S> {
         self.transitions = transitions.into_iter().collect();
         self
     }
+
+    /// Adds one transition. Its closure takes `S` from the config, so name the state once at
+    /// the root: `Config::<Ui>::default().transition("Join", "lobby", |s, tx| s.join(tx))`.
+    pub fn transition(mut self, name: &'static str, from: &'static str, action: fn(&mut S, &mut Tx)) -> Self {
+        self.transitions.push(Transition::new(name, from, action));
+        self
+    }
 }
 
 pub(crate) struct Session<S: 'static> {

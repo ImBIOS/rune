@@ -30,7 +30,6 @@ pub fn view(state: &State, _: &mut Cx<State>) -> El {
 }
 
 pub fn join(state: &mut State, _: &mut Tx) { *state = State::Room; }
-pub fn leave(state: &mut State, _: &mut Tx) { *state = State::Lobby; }
 
 pub fn spec() -> AppSpec<State> {
     AppSpec {
@@ -45,8 +44,7 @@ pub fn spec() -> AppSpec<State> {
 
 #[cfg(all(feature = "dev", debug_assertions))]
 pub fn config() -> rune::dev::Config<State> {
-    rune::dev::Config::default().transitions([
-        rune::dev::Transition::new("Join", "lobby", join),
-        rune::dev::Transition::new("Leave", "room", leave),
-    ])
+    rune::dev::Config::<State>::default()
+        .transition("Join", "lobby", join)
+        .transition("Leave", "room", |state, _| *state = State::Lobby)
 }
