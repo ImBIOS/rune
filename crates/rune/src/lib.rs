@@ -43,6 +43,9 @@ pub fn scene_clock() -> SceneClock {
     #[cfg(not(all(feature = "dev", debug_assertions)))]
     SceneClock::default()
 }
+
+mod shortcuts;
+pub use shortcuts::{Shortcut, ShortcutError, ShortcutId};
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
 mod layer_shell;
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
