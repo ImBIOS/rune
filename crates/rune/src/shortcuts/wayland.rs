@@ -4,7 +4,7 @@ use super::{Backend, Shortcut, ShortcutError, ShortcutId, Sink};
 use futures_util::StreamExt;
 use std::{collections::HashMap, sync::mpsc, thread::JoinHandle, time::Duration};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
-use zbus::{Connection, Proxy, zvariant::{OwnedObjectPath, OwnedValue, Value}};
+use zbus::{Connection, OwnedObjectPath, OwnedVariant, Proxy, Variant, fdo};
 
 const DEST: &str = "org.freedesktop.portal.Desktop";
 const PATH: &str = "/org/freedesktop/portal/desktop";
@@ -16,11 +16,14 @@ enum Command { Register(ShortcutId, Shortcut, Reply), Unregister(ShortcutId, Rep
 pub(super) struct Native { commands: Option<UnboundedSender<Command>>, worker: Option<JoinHandle<()>> }
 
 fn dbus_error(e: zbus::Error) -> ShortcutError {
+    // zbus reports the standard org.freedesktop.DBus.Error.* replies as typed FDO errors.
+    if let zbus::Error::FDO(fdo) = &e
+        && matches!(**fdo, fdo::Error::ServiceUnknown(_) | fdo::Error::NameHasNoOwner(_) | fdo::Error::UnknownInterface(_)
+            | fdo::Error::UnknownMethod(_) | fdo::Error::UnknownObject(_)) {
+        return ShortcutError::Unsupported;
+    }
     if let zbus::Error::MethodError(name, _, _) = &e {
         return match name.as_str() {
-            "org.freedesktop.DBus.Error.ServiceUnknown" | "org.freedesktop.DBus.Error.NameHasNoOwner" |
-            "org.freedesktop.DBus.Error.UnknownInterface" | "org.freedesktop.DBus.Error.UnknownMethod" |
-            "org.freedesktop.DBus.Error.UnknownObject" => ShortcutError::Unsupported,
             "org.freedesktop.portal.Error.Exist" => ShortcutError::Conflict,
             "org.freedesktop.portal.Error.NotAllowed" | "org.freedesktop.portal.Error.Cancelled" => ShortcutError::PermissionDenied,
             "org.freedesktop.portal.Error.InvalidArgument" => ShortcutError::InvalidAccelerator(e.to_string()),
@@ -34,8 +37,8 @@ fn response_status(status: u32) -> Result<(), ShortcutError> {
 }
 fn timed_out() -> ShortcutError { ShortcutError::Backend("portal request timed out".into()) }
 
-async fn request<B: serde::Serialize + zbus::zvariant::Type>(conn: &Connection, portal: &Proxy<'_>, token: &str,
-    method: &str, body: &B) -> Result<HashMap<String, OwnedValue>, ShortcutError> {
+async fn request<B: serde::Serialize + zbus::Type>(conn: &Connection, portal: &Proxy<'_>, token: &str,
+    method: &str, body: &B) -> Result<HashMap<String, OwnedVariant>, ShortcutError> {
     let sender = conn.unique_name().ok_or(ShortcutError::Unsupported)?.trim_start_matches(':').replace('.', "_");
     let path = format!("{PATH}/request/{sender}/{token}");
     let proxy = Proxy::new(conn, DEST, path.as_str(), "org.freedesktop.portal.Request").await.map_err(dbus_error)?;
@@ -45,7 +48,7 @@ async fn request<B: serde::Serialize + zbus::zvariant::Type>(conn: &Connection, 
         let returned: OwnedObjectPath = portal.call(method, body).await.map_err(dbus_error)?;
         if returned.as_str() != path { return Err(ShortcutError::Backend("portal returned an unexpected request path".into())); }
         let response = responses.next().await.ok_or_else(|| ShortcutError::Backend("portal disconnected".into()))?;
-        let (status, values): (u32, HashMap<String, OwnedValue>) = response.body().deserialize().map_err(dbus_error)?;
+        let (status, values): (u32, HashMap<String, OwnedVariant>) = response.body().deserialize().map_err(dbus_error)?;
         response_status(status)?;
         Ok(values)
     }).await.unwrap_or_else(|_| Err(timed_out()));
@@ -65,7 +68,7 @@ async fn close(conn: &Connection, session: &OwnedObjectPath) -> Result<(), Short
 async fn bind(conn: &Connection, portal: &Proxy<'_>, id: ShortcutId, shortcut: &Shortcut) -> Result<OwnedObjectPath, ShortcutError> {
     let create = format!("rune_{}_create", id.0);
     let session_token = format!("rune_{}_session", id.0);
-    let options = HashMap::from([("handle_token", Value::from(create.as_str())), ("session_handle_token", Value::from(session_token.as_str()))]);
+    let options = HashMap::from([("handle_token", Variant::from(create.as_str())), ("session_handle_token", Variant::from(session_token.as_str()))]);
     let response = request(conn, portal, &create, "CreateSession", &(options,)).await?;
     let value = response.get("session_handle").ok_or_else(|| ShortcutError::Backend("portal omitted session_handle".into()))?;
     let session = if let Ok(path) = <&str>::try_from(value) {
@@ -73,17 +76,17 @@ async fn bind(conn: &Connection, portal: &Proxy<'_>, id: ShortcutId, shortcut: &
     } else { OwnedObjectPath::try_from(value.try_clone().map_err(|e| ShortcutError::Backend(e.to_string()))?)
         .map_err(|e| ShortcutError::Backend(e.to_string()))? };
     let bind_token = format!("rune_{}_bind", id.0);
-    let options = HashMap::from([("handle_token", Value::from(bind_token.as_str()))]);
+    let options = HashMap::from([("handle_token", Variant::from(bind_token.as_str()))]);
     let trigger = shortcut.portal_trigger();
     let description = format!("Shortcut {shortcut}");
-    let info = HashMap::from([("description", Value::from(description.as_str())), ("preferred_trigger", Value::from(trigger.as_str()))]);
+    let info = HashMap::from([("description", Variant::from(description.as_str())), ("preferred_trigger", Variant::from(trigger.as_str()))]);
     let shortcuts = vec![(id.0.to_string(), info)];
     match request(conn, portal, &bind_token, "BindShortcuts", &(&session, shortcuts, "", options)).await {
         Ok(response) => {
             // Success with no matching binding is not a registration. The compositor chooses
             // the actual trigger; a preferred-trigger conflict is not standardized by the portal.
             let bindings = response.get("shortcuts").and_then(|v| v.try_clone().ok())
-                .and_then(|v| Vec::<(String, HashMap<String, OwnedValue>)>::try_from(v).ok());
+                .and_then(|v| Vec::<(String, HashMap<String, OwnedVariant>)>::try_from(v).ok());
             if bindings.as_ref().is_some_and(|v| v.iter().any(|(key, _)| key == &id.0.to_string())) { Ok(session) }
             else { let _ = close(conn, &session).await; Err(ShortcutError::PermissionDenied) }
         }
@@ -134,7 +137,7 @@ impl Native {
                         },
                         event = events.next() => {
                             let Some(event) = event else { break };
-                            if let Ok((session, key, _, options)) = event.body().deserialize::<(OwnedObjectPath, String, u64, HashMap<String, OwnedValue>)>()
+                            if let Ok((session, key, _, options)) = event.body().deserialize::<(OwnedObjectPath, String, u64, HashMap<String, OwnedVariant>)>()
                                 && let Ok(id) = key.parse::<u32>().map(ShortcutId)
                                 && sessions.get(&id) == Some(&session) {
                                 let token = options.get("activation_token").and_then(|v| <&str>::try_from(v).ok()).map(str::to_owned);
@@ -178,5 +181,12 @@ mod tests {
     fn portal_cancellation_is_not_a_conflict() {
         assert_eq!(response_status(1), Err(ShortcutError::PermissionDenied));
         assert!(matches!(response_status(2), Err(ShortcutError::Backend(_))));
+    }
+    #[test]
+    fn missing_portal_is_unsupported() {
+        let fdo = |e| zbus::Error::FDO(Box::new(e));
+        assert_eq!(dbus_error(fdo(fdo::Error::ServiceUnknown("portal".into()))), ShortcutError::Unsupported);
+        assert_eq!(dbus_error(fdo(fdo::Error::UnknownMethod("BindShortcuts".into()))), ShortcutError::Unsupported);
+        assert!(matches!(dbus_error(fdo(fdo::Error::Failed("x".into()))), ShortcutError::Backend(_)));
     }
 }
