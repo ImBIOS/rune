@@ -380,6 +380,8 @@ pub struct Visual {
     pub shape: Option<Rc<Shape>>,
     /// An RGBA image scaled into the element's rect, over the fill and shape.
     pub pixels: Option<crate::pixels::Pixels>,
+    /// How `pixels` keeps its aspect ratio; `None` stretches it to the rect.
+    pub pixels_fit: Option<crate::SurfaceFit>,
     /// App-defined tag a compositor reads per instance (`Runtime::marks`); 0 inherits the parent's.
     pub mark: u32,
     /// Tracks hover for its descendants' `group_*` styles even without a hover colour. Any
@@ -417,6 +419,7 @@ impl Default for Visual {
             outline: None,
             shape: None,
             pixels: None,
+            pixels_fit: None,
             mark: 0,
             hover_group: false,
             hover_motion: None,
@@ -1170,6 +1173,14 @@ impl El {
     /// can change without the view re-running: the next frame draws its latest contents.
     pub fn pixels(mut self, pixels: &crate::pixels::Pixels) -> Self {
         self.vis.pixels = Some(pixels.clone());
+        self.vis.pixels_fit = None;
+        self
+    }
+    /// Shows `pixels` at its own aspect ratio, centred: `Fit` letterboxes the whole image inside
+    /// the rect (the corner radius rounds the image), `Fill` covers the rect and crops the overflow.
+    pub fn pixels_fit(mut self, pixels: &crate::pixels::Pixels, fit: crate::SurfaceFit) -> Self {
+        self.vis.pixels = Some(pixels.clone());
+        self.vis.pixels_fit = Some(fit);
         self
     }
     /// A ring `offset` points outside the border box (CSS `outline` + `outline-offset`).

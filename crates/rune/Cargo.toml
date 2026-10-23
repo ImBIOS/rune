@@ -59,6 +59,7 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_Wind
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libloading = "0.8"
+resvg = { version = "0.45", default-features = false }
 libc = "0.2"
 zbus = { version = "6", default-features = false, features = ["tokio", "proxy"] }
 tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }

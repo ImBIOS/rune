@@ -425,6 +425,16 @@ on that worker; rendering chooses a precomputed level from the drawn device-pixe
 fixtures. Dropping all image and pixel handles releases decoded storage. Legacy ICNS codecs
 and SVG are not decoded; provide decoded RGBA for those formats.
 
+`El::pixels_fit(&pixels, SurfaceFit::Fit)` keeps the image's aspect ratio, letterboxed and
+centred on whole device pixels (the corner radius rounds the image itself); `SurfaceFit::Fill`
+covers the rect and crops the centred overflow, choosing the mip for the uncropped size.
+
+`cache.app_icon(path, size_pt)` rasterizes a platform icon on the same worker, keyed by path,
+size and scale: Finder's icon on macOS, an executable's or `.ico`'s first icon on Windows, and
+on Linux a `.desktop` entry's `Icon=` from the hicolor theme (closest size at or above, then
+scalable SVG) or `pixmaps`. Paths without an icon resolve to `Image::error`, so callers keep
+their own fallback. Keep the handle: the cache only shares live handles.
+
 ### Edge overlays (`App::overlay`, `overlay.rs`, `layer_shell.rs`)
 
 `app.overlay(OverlaySpec { name, size, edge, margin, align, inset, interactive, view }, state)

@@ -79,6 +79,24 @@ impl Pixels {
     }
 }
 
+/// Where an image of `size` texels draws in `rect` ([x, y, w, h], device pixels) and which window
+/// of it shows, as fractions [x0, y0, x1, y1]. `None` stretches; `Fit` letterboxes on whole pixels;
+/// `Fill` keeps the rect and crops the centred overflow.
+pub(crate) fn fit(fit: Option<crate::SurfaceFit>, rect: [f32; 4], size: (u32, u32)) -> ([f32; 4], [f32; 4]) {
+    let whole = [0.0, 0.0, 1.0, 1.0];
+    let [x, y, w, h] = rect;
+    let (iw, ih) = (size.0 as f32, size.1 as f32);
+    if fit.is_none() || iw <= 0.0 || ih <= 0.0 || w <= 0.0 || h <= 0.0 { return (rect, whole); }
+    if fit == Some(crate::SurfaceFit::Fit) {
+        let k = (w / iw).min(h / ih);
+        let (dw, dh) = ((iw * k).round().clamp(1.0, w), (ih * k).round().clamp(1.0, h));
+        return ([x + ((w - dw) * 0.5).round(), y + ((h - dh) * 0.5).round(), dw, dh], whole);
+    }
+    let k = (w / iw).max(h / ih);
+    let (sx, sy) = (w / (iw * k), h / (ih * k));
+    (rect, [(1.0 - sx) * 0.5, (1.0 - sy) * 0.5, (1.0 + sx) * 0.5, (1.0 + sy) * 0.5])
+}
+
 struct Slot {
     page: usize,
     x: u32,
@@ -434,6 +452,58 @@ mod tests {
         px.set(4, 4, [10, 20, 30, 255].repeat(16));
         let out = draw(&mut rt);
         assert!(out.chunks_exact(4).all(|p| p.iter().zip([10u8, 20, 30, 255]).all(|(a, b)| a.abs_diff(b) <= 1)), "a new frame shows without re-running the view: {:?}", &out[..4]);
+    }
+
+    #[test]
+    fn fit_letterboxes_on_whole_pixels_and_fill_crops_the_centre() {
+        use crate::SurfaceFit::{Fill, Fit};
+        let rect = [10.0, 20.0, 40.0, 40.0];
+        assert_eq!(fit(None, rect, (80, 20)), (rect, [0.0, 0.0, 1.0, 1.0]));
+        assert_eq!(fit(Some(Fit), rect, (80, 20)), ([10.0, 35.0, 40.0, 10.0], [0.0, 0.0, 1.0, 1.0]));
+        assert_eq!(fit(Some(Fit), rect, (20, 80)).0, [25.0, 20.0, 10.0, 40.0]);
+        assert_eq!(fit(Some(Fill), rect, (80, 20)), (rect, [0.375, 0.0, 0.625, 1.0]));
+        assert_eq!(fit(Some(Fill), rect, (40, 40)), (rect, [0.0, 0.0, 1.0, 1.0]));
+        assert_eq!(fit(Some(Fit), rect, (0, 0)).0, rect, "an empty image keeps the rect");
+    }
+
+    #[test]
+    fn gpu_pixels_fit_letterboxes_and_fill_crops() {
+        use crate::el::{El, el};
+        use crate::render::{Gpu, OFFSCREEN_FORMAT, Offscreen, Renderer};
+        use crate::runtime::{Cx, Env, Runtime};
+        type State = (Pixels, crate::SurfaceFit);
+        fn view(s: &State, _: &mut Cx<State>) -> El { el().size(4.0, 4.0).pixels_fit(&s.0, s.1) }
+        // Four columns, red green blue white, two rows tall.
+        let px = Pixels::new();
+        px.set(4, 2, [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255; 4]].concat().repeat(2));
+        let gpu = Gpu::headless();
+        let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+        let target = Offscreen::new(&gpu.device, 4, 4);
+        let mut draw = |fit| {
+            let mut rt = Runtime::new((px.clone(), fit), view, (4.0, 4.0), Env::new(true, 1.0));
+            rt.frame(0.0);
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (4, 4));
+            renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            renderer.draw(&mut enc, &target.view, [0.0, 0.0, 0.0, 1.0]);
+            target.copy(&mut enc);
+            gpu.queue.submit([enc.finish()]);
+            target.read(&gpu.device)
+        };
+        let at = |out: &[u8], x: usize, y: usize| <[u8; 4]>::try_from(&out[(y * 4 + x) * 4..(y * 4 + x + 1) * 4]).unwrap();
+        let out = draw(crate::SurfaceFit::Fit);
+        for x in 0..4 {
+            assert_eq!(at(&out, x, 0), [0, 0, 0, 255], "letterbox above column {x}");
+            assert_eq!(at(&out, x, 3), [0, 0, 0, 255], "letterbox below column {x}");
+        }
+        assert_eq!([at(&out, 0, 1), at(&out, 1, 2), at(&out, 2, 1), at(&out, 3, 2)],
+            [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255; 4]], "the image draws texel for texel");
+        let out = draw(crate::SurfaceFit::Fill);
+        for y in 0..4 {
+            assert_eq!(at(&out, 0, y), [0, 255, 0, 255], "row {y} starts on green");
+            assert_eq!(at(&out, 3, y), [0, 0, 255, 255], "row {y} ends on blue");
+        }
+        assert!(out.as_chunks::<4>().0.iter().all(|p| p[0] < 200), "red and white columns are cropped");
     }
 
     #[test]

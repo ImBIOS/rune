@@ -3033,6 +3033,7 @@ dependencies = [
  "pollster 1.0.1",
  "portable-atomic",
  "raw-window-handle",
+ "resvg",
  "rfd",
  "rune-motion",
  "serde",

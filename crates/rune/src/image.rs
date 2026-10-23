@@ -119,9 +119,10 @@ impl ImageCache {
     /// window's display scale). Handles are shared by (path, size, scale) rather than by
     /// content, so repeated calls never re-rasterize while a handle is alive. Lookup and
     /// rasterization run on the cache worker like any decode, so this is safe to call from a view.
-    /// Missing paths still get the system's generic document icon on macOS.
-    ///
-    /// Unsupported on Windows and Linux for now: the handle resolves to an error.
+    /// Missing paths still get the system's generic document icon on macOS. Windows reads an
+    /// executable's or icon file's first icon; Linux reads a `.desktop` entry's `Icon=` from the
+    /// hicolor theme or pixmaps (PNG or SVG), or an image file itself. Paths without an icon
+    /// resolve to an error, so callers can draw their own fallback.
     pub fn app_icon_scaled(&self, path: impl AsRef<std::path::Path>, size_pt: f32, scale: f32) -> Image {
         let path = path.as_ref().to_path_buf();
         let px = icon_pixels(size_pt, scale);
@@ -152,20 +153,179 @@ fn icon_pixels(size_pt: f32, scale: f32) -> u32 {
     if px.is_finite() { px.clamp(1.0, 1024.0) as u32 } else { 1 }
 }
 
-/// Rasterize the platform icon for an app bundle or file at `px`×`px`, as straight-alpha
+/// Rasterize the platform icon for an app bundle or file at about `px`×`px`, as straight-alpha
 /// sRGB RGBA8 ready for [`ImageCache::rgba`]. Most code wants [`ImageCache::app_icon`], which
 /// calls this on its worker and caches the result.
 ///
 /// macOS: `NSWorkspace iconForFile:` drawn into a thread-local `NSBitmapImageRep` context.
 /// Neither needs the main thread: `NSWorkspace` is not main-actor isolated in the SDK, and
 /// AppKit allows drawing an `NSImage` into a bitmap context owned by a secondary thread.
-/// Windows and Linux return an "unsupported" error.
+/// Windows: the file's first icon from `PrivateExtractIconsW` at `px` (at most 256).
+/// Linux: the closest theme size at or above `px`, or an SVG rasterized to fit `px`; a
+/// non-square pixmap keeps its aspect ratio.
 pub fn app_icon_rgba(path: &std::path::Path, px: u32) -> Result<(u32, u32, Vec<u8>), ImageError> {
     if px == 0 || px > 1024 { return Err(ImageError("app icon size must be 1..=1024 pixels".into())); }
     #[cfg(target_os = "macos")]
     { macos_icon(path, px) }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    { windows_icon(path, px) }
+    #[cfg(target_os = "linux")]
+    { linux_icon(path, px) }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     { let _ = path; Err(ImageError("app_icon is unsupported on this platform".into())) }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_icon(path: &std::path::Path, px: u32) -> Result<(u32, u32, Vec<u8>), ImageError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDIBits, GetObjectW,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO, PrivateExtractIconsW};
+    let err = |what: &str| ImageError(format!("{what}: {}", path.display()));
+    // PrivateExtractIconsW reads a fixed MAX_PATH buffer.
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    if wide.len() > 260 { return Err(err("icon path is longer than MAX_PATH")); }
+    let mut buffer = [0u16; 260];
+    buffer[..wide.len()].copy_from_slice(&wide);
+    let side = px.min(256) as i32;
+    let mut icon: HICON = std::ptr::null_mut();
+    let extracted = unsafe { PrivateExtractIconsW(buffer.as_ptr(), 0, side, side, &mut icon, std::ptr::null_mut(), 1, 0) };
+    if extracted == 0 || extracted == u32::MAX || icon.is_null() { return Err(err("no icon")); }
+    let mut info: ICONINFO = unsafe { std::mem::zeroed() };
+    if unsafe { GetIconInfo(icon, &mut info) } == 0 {
+        unsafe { DestroyIcon(icon) };
+        return Err(err("unreadable icon"));
+    }
+    let result = (|| {
+        if info.hbmColor.is_null() { return Err(err("monochrome icon")); }
+        let mut bitmap: BITMAP = unsafe { std::mem::zeroed() };
+        if unsafe { GetObjectW(info.hbmColor, std::mem::size_of::<BITMAP>() as i32, (&raw mut bitmap).cast()) } == 0 {
+            return Err(err("unreadable icon bitmap"));
+        }
+        let (w, h) = (bitmap.bmWidth, bitmap.bmHeight);
+        if w <= 0 || h <= 0 || w > 1024 || h > 1024 { return Err(err("icon bitmap has no pixels")); }
+        let mut header = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h, // negative: rows top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                ..unsafe { std::mem::zeroed() }
+            },
+            ..unsafe { std::mem::zeroed() }
+        };
+        let mut pixels = vec![0u8; w as usize * h as usize * 4];
+        let dc = unsafe { CreateCompatibleDC(std::ptr::null_mut()) };
+        let rows = unsafe { GetDIBits(dc, info.hbmColor, 0, h as u32, pixels.as_mut_ptr().cast(), &mut header, DIB_RGB_COLORS) };
+        unsafe { DeleteDC(dc) };
+        if rows == 0 { return Err(err("unreadable icon pixels")); }
+        // BGRA with straight alpha; icons without an alpha channel leave it zero and draw opaque.
+        let opaque = pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 0);
+        for p in pixels.as_chunks_mut::<4>().0 {
+            p.swap(0, 2);
+            if opaque { p[3] = 255; }
+        }
+        Ok((w as u32, h as u32, pixels))
+    })();
+    unsafe {
+        if !info.hbmColor.is_null() { DeleteObject(info.hbmColor); }
+        if !info.hbmMask.is_null() { DeleteObject(info.hbmMask); }
+        DestroyIcon(icon);
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn linux_icon(path: &std::path::Path, px: u32) -> Result<(u32, u32, Vec<u8>), ImageError> {
+    let file = if path.extension().is_some_and(|e| e == "desktop") {
+        freedesktop::icon_file(path, px, &freedesktop::data_dirs())
+            .ok_or_else(|| ImageError(format!("no icon for {}", path.display())))?
+    } else { path.to_path_buf() };
+    let bytes = std::fs::read(&file).map_err(|e| ImageError(format!("{}: {e}", file.display())))?;
+    if bytes.len() > 16 << 20 { return Err(ImageError(format!("{} is too large for an icon", file.display()))); }
+    if file.extension().is_some_and(|e| e == "svg" || e == "svgz") { return svg_rgba(&bytes, px); }
+    let image = image::load_from_memory(&bytes).map_err(|e| ImageError(format!("{}: {e}", file.display())))?.into_rgba8();
+    if image.width() > 1024 || image.height() > 1024 { return Err(ImageError(format!("{} is too large for an icon", file.display()))); }
+    Ok((image.width(), image.height(), image.into_raw()))
+}
+
+/// An SVG scaled to fit `px` square, keeping its aspect ratio.
+#[cfg(target_os = "linux")]
+fn svg_rgba(bytes: &[u8], px: u32) -> Result<(u32, u32, Vec<u8>), ImageError> {
+    use resvg::{tiny_skia, usvg};
+    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).map_err(|e| ImageError(e.to_string()))?;
+    let size = tree.size();
+    let k = px as f32 / size.width().max(size.height());
+    let (w, h) = (((size.width() * k).round() as u32).clamp(1, px), ((size.height() * k).round() as u32).clamp(1, px));
+    let mut pixmap = tiny_skia::Pixmap::new(w, h).ok_or_else(|| ImageError("empty SVG".into()))?;
+    resvg::render(&tree, tiny_skia::Transform::from_scale(k, k), &mut pixmap.as_mut());
+    Ok((w, h, pixmap.pixels().iter().flat_map(|p| {
+        let c = p.demultiply();
+        [c.red(), c.green(), c.blue(), c.alpha()]
+    }).collect()))
+}
+
+/// Freedesktop icon lookup: a `.desktop` entry's `Icon=` as an absolute path, or by name in the
+/// hicolor theme (every size directory, `@2` included) and then `pixmaps`.
+#[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod freedesktop {
+    use std::path::{Path, PathBuf};
+
+    pub(super) fn data_dirs() -> Vec<PathBuf> {
+        let home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")));
+        let system = std::env::var("XDG_DATA_DIRS").ok().filter(|dirs| !dirs.is_empty())
+            .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+        home.into_iter().chain(system.split(':').filter(|d| !d.is_empty()).map(PathBuf::from)).collect()
+    }
+
+    /// The `Icon=` key of the `[Desktop Entry]` group.
+    pub(super) fn icon_name(entry: &str) -> Option<&str> {
+        let mut group = "";
+        for line in entry.lines().map(str::trim) {
+            if line.starts_with('[') { group = line; continue; }
+            if group != "[Desktop Entry]" { continue; }
+            if let Some((key, value)) = line.split_once('=') && key.trim() == "Icon" {
+                return Some(value.trim()).filter(|v| !v.is_empty());
+            }
+        }
+        None
+    }
+
+    pub(super) fn icon_file(entry: &Path, px: u32, data_dirs: &[PathBuf]) -> Option<PathBuf> {
+        let text = std::fs::read_to_string(entry).ok()?;
+        let name = icon_name(&text)?;
+        if Path::new(name).is_absolute() { return Path::new(name).is_file().then(|| name.into()); }
+        let name = name.strip_suffix(".png").or_else(|| name.strip_suffix(".svg")).unwrap_or(name);
+        // (effective pixel size, path); scalable sorts as "any size".
+        let mut found: Vec<(Option<u32>, PathBuf)> = Vec::new();
+        for dir in data_dirs {
+            let Ok(sizes) = std::fs::read_dir(dir.join("icons/hicolor")) else { continue };
+            for size in sizes.flatten() {
+                let label = size.file_name().to_string_lossy().into_owned();
+                let effective = if label == "scalable" { None } else {
+                    let (dims, scale) = label.split_once('@').unwrap_or((&label, "1"));
+                    let size = dims.split_once('x').and_then(|(w, _)| w.parse::<u32>().ok());
+                    let Some(n) = size.zip(scale.parse::<u32>().ok()).map(|(w, s)| w * s.max(1)) else { continue };
+                    Some(n)
+                };
+                for ext in ["png", "svg"] {
+                    let file = size.path().join("apps").join(format!("{name}.{ext}"));
+                    if file.is_file() { found.push((effective, file)); }
+                }
+            }
+        }
+        // Smallest bitmap that covers `px`, else scalable, else the largest bitmap.
+        let covering = found.iter().filter(|(n, _)| n.is_some_and(|n| n >= px)).min_by_key(|(n, _)| *n);
+        let scalable = found.iter().find(|(n, _)| n.is_none());
+        let largest = found.iter().max_by_key(|(n, _)| *n);
+        if let Some((_, file)) = covering.or(scalable).or(largest) { return Some(file.clone()); }
+        data_dirs.iter().flat_map(|dir| ["png", "svg"].map(|ext| dir.join(format!("pixmaps/{name}.{ext}")))).find(|f| f.is_file())
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -363,6 +523,50 @@ mod tests {
         }
         assert!(mip_chain(0, 1, &[]).is_err());
         assert!(mip_chain(1, 1, &[0]).is_err());
+    }
+
+    #[test]
+    fn desktop_entries_resolve_the_closest_theme_size_then_scalable_then_pixmaps() {
+        let root = std::env::temp_dir().join(format!("rune-icon-theme-{}", std::process::id()));
+        let (user, system) = (root.join("user"), root.join("system"));
+        let put = |path: std::path::PathBuf| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"icon").unwrap();
+            path
+        };
+        let entry = |icon: &str| {
+            let path = root.join(format!("{}.desktop", icon.replace('/', "_")));
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(&path, format!("[Desktop Entry]\nName=App\nIcon={icon}\n[Desktop Action new]\nIcon=other\n")).unwrap();
+            path
+        };
+        let dirs = [user.clone(), system.clone()];
+        put(system.join("icons/hicolor/32x32/apps/editor.png"));
+        let at_64 = put(user.join("icons/hicolor/64x64/apps/editor.png"));
+        let at_2x = put(system.join("icons/hicolor/48x48@2/apps/editor.png"));
+        put(system.join("icons/hicolor/256x256/apps/editor.png"));
+        let svg = put(system.join("icons/hicolor/scalable/apps/editor.svg"));
+        assert_eq!(freedesktop::icon_file(&entry("editor"), 48, &dirs), Some(at_64.clone()), "smallest size covering 48px");
+        assert_eq!(freedesktop::icon_file(&entry("editor"), 90, &dirs), Some(at_2x), "48x48@2 is 96px");
+        assert_eq!(freedesktop::icon_file(&entry("editor.png"), 48, &dirs), Some(at_64), "an extension in Icon= is ignored");
+        std::fs::remove_dir_all(system.join("icons/hicolor/256x256")).unwrap();
+        assert_eq!(freedesktop::icon_file(&entry("editor"), 512, &dirs), Some(svg), "scalable beats a too-small bitmap");
+        let pixmap = put(system.join("pixmaps/legacy.png"));
+        assert_eq!(freedesktop::icon_file(&entry("legacy"), 48, &dirs), Some(pixmap.clone()));
+        assert_eq!(freedesktop::icon_file(&entry(pixmap.to_str().unwrap()), 48, &dirs), Some(pixmap), "absolute Icon= path");
+        assert_eq!(freedesktop::icon_file(&entry("missing"), 48, &dirs), None);
+        assert_eq!(freedesktop::icon_name("[Desktop Action x]\nIcon=no\n"), None, "only the main group counts");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn app_icon_reads_an_executables_icon() {
+        let notepad = std::path::Path::new(r"C:\Windows\System32\notepad.exe");
+        if !notepad.is_file() { return; }
+        let (w, h, pixels) = app_icon_rgba(notepad, 48).unwrap();
+        assert_eq!((w, h), (48, 48));
+        assert!(pixels.as_chunks::<4>().0.iter().any(|p| p[3] > 0));
     }
 
     #[cfg(target_os = "macos")]

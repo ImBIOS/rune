@@ -3257,19 +3257,26 @@ impl<S: 'static> Runtime<S> {
                     };
                     push_shape(&mut self.instances, shape, [r[0], r[1]], k, k_px, o, clip, fade);
                 }
-                if let Some(pixels) = &n.vis.pixels
-                    && let Some(image) = self.images.place(pixels, [w, h])
-                {
-                    self.instances.push(Instance {
-                        rect: [r[0], r[1], w, h],
-                        radii,
-                        fill: [0.0, 0.0, 0.0, o],
-                        border: [0.0; 4],
-                        params: [image.page as f32, KIND_IMAGE, image.premultiplied as u8 as f32, 1.0],
-                        uv: image.rect.map(|v| v as f32),
-                        clip,
-                        fade: crate::render::pack_fade(fade, clip, clip),
-                    });
+                if let Some(pixels) = &n.vis.pixels {
+                    let (rect, crop) = crate::pixels::fit(n.vis.pixels_fit, [r[0], r[1], w, h], pixels.size());
+                    let span = [crop[2] - crop[0], crop[3] - crop[1]];
+                    // The mip covers the whole image's drawn size, not just its visible window.
+                    if let Some(image) = self.images.place(pixels, [rect[2] / span[0], rect[3] / span[1]]) {
+                        let [x, y, iw, ih] = image.rect.map(|v| v as f32);
+                        // A letterboxed image rounds its own, smaller corners.
+                        let half = rect[2].min(rect[3]) * 0.5;
+                        self.instances.push(Instance {
+                            rect,
+                            radii: if n.vis.pixels_fit.is_some() { radii.map(|v| v.min(half)) } else { radii },
+                            fill: [0.0, 0.0, 0.0, o],
+                            border: [0.0; 4],
+                            params: [image.page as f32, KIND_IMAGE, image.premultiplied as u8 as f32, 1.0],
+                            // The shader samples from a whole-texel origin; the span may be fractional.
+                            uv: [x + (crop[0] * iw).round(), y + (crop[1] * ih).round(), span[0] * iw, span[1] * ih],
+                            clip,
+                            fade: crate::render::pack_fade(fade, clip, clip),
+                        });
+                    }
                 }
                 if let Some((ic, c)) = n.vis.icon {
                     let color = text_tint(self.color(n.id, P_TEXT, c));

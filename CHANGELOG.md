@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **App icons on Windows and Linux; aspect-fit images**. `ImageCache::app_icon` now rasterizes
+  an executable's or `.ico`'s icon on Windows and a `.desktop` entry's hicolor or `pixmaps`
+  icon (PNG or SVG) on Linux, where it used to resolve to an error, so apps that fell back on
+  error now draw the icon. `El::pixels_fit(&pixels, SurfaceFit::Fit | Fill)` keeps an image's
+  aspect ratio; `El::pixels` still stretches, unchanged.
 - **Indeterminate `Progress` animates.** `Progress::new(None)` used to draw an empty track; it
   now sweeps a quarter-width segment across it every 1.4 s, centred and still under Reduce
   Motion. The sweep is `LoopSpec::slide(period, from, to)`, a new looping offset in fractions of
