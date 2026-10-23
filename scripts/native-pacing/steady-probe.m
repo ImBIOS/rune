@@ -18,6 +18,8 @@ static NSWindow *ownerOf(CALayer *layer) {
 }
 
 static id<CAMetalDrawable> nextDrawable(CAMetalLayer *layer, SEL selector) {
+    if (getenv("STEADY_MAX_DRAWABLES")) layer.maximumDrawableCount = atoi(getenv("STEADY_MAX_DRAWABLES"));
+    if (getenv("STEADY_DISPLAY_SYNC")) layer.displaySyncEnabled = atoi(getenv("STEADY_DISPLAY_SYNC"));
     double entered = CACurrentMediaTime();
     id<CAMetalDrawable> drawable = originalNext(layer, selector);
     double acquired = CACurrentMediaTime();

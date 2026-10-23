@@ -21,6 +21,10 @@ parser.add_argument("out", type=Path)
 parser.add_argument("rune", type=Path)
 parser.add_argument("--scrawl", type=Path)
 parser.add_argument("--modes", default="injected,native")
+parser.add_argument("--display-link", choices=["cv", "ca"], default="cv")
+parser.add_argument("--drawables", choices=["2", "3"])
+parser.add_argument("--display-sync", choices=["0", "1"])
+parser.add_argument("--guard", choices=["production", "no-half"], help="requires the diagnostic admission patch")
 args = parser.parse_args()
 assert socket.gethostname().startswith("Kits-Shiny-Computer"), "Pro only"
 root, rune = args.out.resolve(), args.rune.resolve()
@@ -34,11 +38,15 @@ def stats(values):
                 p95=sorted(values)[math.ceil(len(values) * .95) - 1], min=min(values), max=max(values))
 
 
-def parse(path):
-    rows, configs = [], []
+def parse(path, mode):
+    rows, configs, clocks, guards = [], [], [], []
     for line in path.read_text().splitlines():
         if line.startswith("steady config "):
             configs.append(line)
+        if line.startswith("steady clock "):
+            clocks.append(line)
+        if line.startswith("steady guard "):
+            guards.append(line)
         if line.startswith("steady frame "):
             rows.append({k: float(v) for k, v in re.findall(r"(\w+)=([\d.]+)", line)})
     visible = [r for r in rows if r["visible"] and r["window"] > 0]
@@ -52,7 +60,14 @@ def parse(path):
     requests = [r for r in valid if 0 < r["requested"] <= r["entered"]]
     entries = sorted(r["entered"] for r in selected)
     gaps = [(b - a) * 1000 for a, b in zip(entries, entries[1:])]
-    return dict(configs=configs, positive=len(valid), visible_callbacks=len(selected),
+    presented = sorted(set(r["presented"] for r in valid))
+    presentation_gaps = [(b - a) * 1000 for a, b in zip(presented, presented[1:])]
+    if args.guard and mode != "scrawl":
+        assert guards and all(f"mode={args.guard} " in line for line in guards), "wrong admission-probe binary"
+    return dict(configs=configs, clocks=clocks, guards=guards, positive=len(valid), visible_callbacks=len(selected),
+                acquisition_hz=(len(entries)-1)/(entries[-1]-entries[0]),
+                presentation_hz=(len(presented)-1)/(presented[-1]-presented[0]),
+                presentation_gaps_ms=stats(presentation_gaps),
                 zero_callbacks=sum(r["presented"] == 0 for r in selected),
                 acquire_to_present_ms=stats([(r["presented"] - r["entered"]) * 1000 for r in valid]),
                 next_drawable_wait_ms=stats([(r["acquired"] - r["entered"]) * 1000 for r in valid]),
@@ -74,11 +89,13 @@ with open("/tmp/pro-gui.lock", "a") as lock:
         assert subprocess.run(["pgrep", "-x", name], capture_output=True).returncode != 0, name
     library = root / "steady-probe.dylib"
     subprocess.run(["clang", "-dynamiclib", "-fobjc-arc", "-fblocks", "-O2",
-                    str(Path(__file__).with_name("steady-probe.m")), "-framework", "AppKit",
+                    str(Path(__file__).with_name("steady-probe.m")), str(Path(__file__).with_name("clock-probe.m")),
+                    "-Wno-deprecated-declarations", "-framework", "AppKit", "-framework", "CoreVideo",
                     "-framework", "QuartzCore", "-framework", "Metal", "-o", str(library)], check=True)
     env = dict(os.environ, DYLD_INSERT_LIBRARIES=str(library))
     for key in ["OVERLAY_LAB_CONTROL", "OVERLAY_PROBE_REDRAW", "RUNE_OVERLAY_TRACE_INPUT",
-                "STEADY_RUNE_REDRAW", "STEADY_MAX_DRAWABLES", "STEADY_TRANSACTION", "PACING_NATIVE"]:
+                "STEADY_RUNE_REDRAW", "STEADY_MAX_DRAWABLES", "STEADY_TRANSACTION", "PACING_NATIVE",
+                "STEADY_CA", "STEADY_CLOCK", "STEADY_DISPLAY_SYNC", "STEADY_GUARD"]:
         env.pop(key, None)
     modes = args.modes.split(",") + (["scrawl"] if args.scrawl else [])
     assert all(mode in ["injected", "native", "scrawl"] for mode in modes)
@@ -90,6 +107,12 @@ with open("/tmp/pro-gui.lock", "a") as lock:
                 command = [str(rune)] if mode != "scrawl" else [str(args.scrawl.resolve()), "lab", "pill",
                     "tap-then-screen", "--repeat", "0", "--time-scale", "1", "--no-backdrop"]
                 runenv = dict(env)
+                if mode != "scrawl":
+                    runenv["STEADY_CLOCK"] = "1"
+                    if args.display_link == "ca": runenv["STEADY_CA"] = "1"
+                    if args.drawables: runenv["STEADY_MAX_DRAWABLES"] = args.drawables
+                    if args.display_sync: runenv["STEADY_DISPLAY_SYNC"] = args.display_sync
+                    if args.guard: runenv["STEADY_GUARD"] = args.guard
                 if mode == "injected":
                     runenv["STEADY_RUNE_REDRAW"] = "1"
                 elif mode == "native":
@@ -112,11 +135,13 @@ with open("/tmp/pro-gui.lock", "a") as lock:
                             except subprocess.TimeoutExpired:
                                 process.kill()
                                 process.wait(timeout=5)
-                result = dict(batch=batch, mode=mode, **parse(log))
+                result = dict(batch=batch, mode=mode, **parse(log, mode))
                 results.append(result)
                 print(json.dumps(result), flush=True)
         summary = dict(endpoint="nextDrawable entry to positive Metal presentedTime",
-                       rune_sha256=hashlib.sha256(rune.read_bytes()).hexdigest(), runs=results)
+                       rune_sha256=hashlib.sha256(rune.read_bytes()).hexdigest(), runs=results,
+                       experiment=dict(display_link=args.display_link, drawables=args.drawables,
+                                       display_sync=args.display_sync, guard=args.guard))
         if args.scrawl:
             summary["scrawl_sha256"] = hashlib.sha256(args.scrawl.read_bytes()).hexdigest()
         for mode in modes:
@@ -127,6 +152,6 @@ with open("/tmp/pro-gui.lock", "a") as lock:
         (root / "results.json").write_text(json.dumps(summary, indent=2) + "\n")
         print(json.dumps({k: v for k, v in summary.items() if k != "runs"}), flush=True)
     finally:
+        library.unlink(missing_ok=True)
         (root / "load-after.txt").write_bytes(subprocess.check_output(["top", "-l", "1", "-n", "0"]))
-        library.unlink()
 print("All disposable apps exited; GUI lock released.", flush=True)

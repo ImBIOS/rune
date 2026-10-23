@@ -32,3 +32,41 @@ run and cannot serve as a complete performance baseline.
 The `pacing` example separately exercises state commits, idle, hide/show and
 shutdown. Run it under the same Pro GUI lock with `--native --trace <file>`, then
 check the file with `python3 scripts/check-native-pacing.py <file>`.
+
+## Isolated refresh-rate experiments
+
+Use a fresh output directory for each experiment:
+
+```sh
+# Same production executable; one change at a time, in this order.
+python3 scripts/native-pacing/run.py <out-ca> <pacing_overlay> --modes native --display-link ca
+python3 scripts/native-pacing/run.py <out-two> <pacing_overlay> --modes native --drawables 2
+python3 scripts/native-pacing/run.py <out-unsynced> <pacing_overlay> --modes native --display-sync 0
+```
+
+`clock-probe.m` interposes CV callback registration/start/stop. Its default mode
+counts real CV callbacks. CA mode supplies the same Rune callback from an NSView
+`CADisplayLink` with `CAFrameRateRangeMake(80, 120, 120)` on macOS 14+. This adapter
+selects the fixture's visible panel and supports this single-surface workload;
+it is not a general replacement for Rune's native display-link implementation.
+Layer overrides affect Rune only. An optional Scrawl reference keeps its settings.
+
+For the admission-guard comparison, apply `admission-probe.patch` in a disposable
+checkout, generate a new source manifest, and rebuild the example through
+HiveMind. Run `--guard production` then `--guard no-half` on that same executable.
+The latter removes only elapsed-half-refresh admission, retaining stale-target
+and duplicate-target rejection. The runner requires matching diagnostic output.
+Counters are printed after stopping the link, not in the callback. Revert the
+patch and rebuild when finished. Never ship this patch; it exists to reproduce
+the experiment and intentionally leaves the original unit-test helper unused.
+
+`acquisition_hz` uses `nextDrawable` entry times. `presentation_hz` uses distinct,
+positive `presentedTime` timestamps for frames acquired in the nine-second sample.
+Callback Hz and guard counts cover the full app run, including warmup. Guard
+reason counters can overlap; they are not an exhaustive partition of callbacks
+because pending callbacks coalesce. The summary includes the selected overrides
+and binary hash. Raw logs retain the actual layer settings.
+
+With display sync disabled, positive presentation timestamps do not establish
+tear-free 120-Hz scanout. Apple's API explicitly allows tearing in this mode.
+See [findings](FINDINGS.md) for the measured results and limitations.

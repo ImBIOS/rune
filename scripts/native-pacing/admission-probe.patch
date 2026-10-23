@@ -1,0 +1,59 @@
+diff --git a/crates/rune/src/display_link.rs b/crates/rune/src/display_link.rs
+index fc25f6e..25823f9 100644
+--- a/crates/rune/src/display_link.rs
++++ b/crates/rune/src/display_link.rs
+@@ -25,6 +25,8 @@ pub(crate) struct DisplayLink {
+     last_target: Option<Instant>,
+     display: Option<u32>,
+     running: bool,
++    probe_no_half: bool,
++    probe_counts: [u64; 5],
+ }
+ 
+ unsafe extern "C-unwind" fn tick(
+@@ -70,7 +72,8 @@ impl DisplayLink {
+         });
+         let status = unsafe { link.set_output_callback(Some(tick), (&mut *callback as *mut Callback).cast()) };
+         if status != 0 { eprintln!("display link callback failed: {status}"); return None; }
+-        let mut pacing = Self { link, callback, last_present: None, last_target: None, display: None, running: false };
++        let mut pacing = Self { link, callback, last_present: None, last_target: None, display: None, running: false,
++            probe_no_half: std::env::var("STEADY_GUARD").as_deref() == Ok("no-half"), probe_counts: [0; 5] };
+         pacing.update_display(window);
+         Some(pacing)
+     }
+@@ -93,13 +96,20 @@ impl DisplayLink {
+             self.running = true;
+         }
+         let host_target = self.callback.target.swap(0, Ordering::Acquire);
+-        if host_target == 0 { return None; }
++        if host_target == 0 { self.probe_counts[0] += 1; return None; }
+         let now = Instant::now();
+         let target = target_time(now, CVGetCurrentHostTime(), host_target, self.callback.host_frequency);
+         let period = Duration::from_nanos(self.callback.period_ns.load(Ordering::Relaxed));
+         // A late render followed by an on-time tick must skip, not submit two frames
+         // together. Also discard stale callbacks after main-thread stalls.
+-        if !permits(self.last_present, self.last_target, target, now, period) { return None; }
++        let stale = now >= target;
++        let duplicate = self.last_target.is_some_and(|last| target <= last);
++        let short = self.last_present.is_some_and(|last| now.saturating_duration_since(last) < period / 2);
++        self.probe_counts[1] += u64::from(stale);
++        self.probe_counts[2] += u64::from(duplicate);
++        self.probe_counts[3] += u64::from(short);
++        if stale || duplicate || (!self.probe_no_half && short) { return None; }
++        self.probe_counts[4] += 1;
+         self.last_target = Some(target);
+         Some(target)
+     }
+@@ -110,6 +120,12 @@ impl DisplayLink {
+ 
+     pub(crate) fn stop(&mut self) {
+         if self.running { self.link.stop(); self.running = false; }
++        if self.probe_counts[4] > 0 {
++            eprintln!("steady guard mode={} empty={} stale={} duplicate={} short={} admitted={}",
++                if self.probe_no_half { "no-half" } else { "production" }, self.probe_counts[0], self.probe_counts[1],
++                self.probe_counts[2], self.probe_counts[3], self.probe_counts[4]);
++            self.probe_counts = [0; 5];
++        }
+         self.callback.target.store(0, Ordering::Relaxed);
+     }
+ }
