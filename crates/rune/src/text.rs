@@ -23,7 +23,10 @@ use swash::zeno::{Cap, Fill, Format, Join, Mask, Stroke, Transform, Vector};
 use crate::color::{Color, srgb_encode};
 use crate::tok::{Family, OpticalSize, TextStyle};
 
+mod fallback;
 mod svg_path;
+
+use fallback::Route;
 
 const DEFAULT_FONTS: [&[u8]; 3] = [
     include_bytes!("../assets/Inter-Regular.ttf"),
@@ -104,7 +107,19 @@ fn register_cjk_fallbacks(collection: &mut Collection, registered: &[FamilyId], 
     }
 }
 
+/// Font files whose lowercase name, without spaces and dots, contains one of `fragments`. The
+/// platform's font directories are walked once per process.
 fn system_font_files(fragments: &[&str]) -> Vec<std::path::PathBuf> {
+    static FILES: std::sync::OnceLock<Vec<(String, std::path::PathBuf)>> = std::sync::OnceLock::new();
+    FILES
+        .get_or_init(walk_font_dirs)
+        .iter()
+        .filter(|(name, _)| fragments.iter().any(|fragment| name.contains(fragment)))
+        .map(|(_, path)| path.clone())
+        .collect()
+}
+
+fn walk_font_dirs() -> Vec<(String, std::path::PathBuf)> {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     if cfg!(target_os = "macos") {
         dirs.extend(["/System/Library/Fonts", "/Library/Fonts"].map(Into::into));
@@ -121,13 +136,12 @@ fn system_font_files(fragments: &[&str]) -> Vec<std::path::PathBuf> {
         let data_dirs = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
         dirs.extend(data_dirs.split(':').filter(|d| !d.is_empty()).map(|d| std::path::Path::new(d).join("fonts")));
     }
-    let mut found = Vec::new();
+    let mut found: Vec<(String, std::path::PathBuf)> = Vec::new();
     let mut stack = dirs;
-    let mut visited = 0;
+    let mut visited = std::collections::HashSet::new();
     while let Some(dir) = stack.pop() {
-        visited += 1;
-        if visited > 4096 {
-            break;
+        if visited.len() > 4096 || !visited.insert(dir.clone()) {
+            continue;
         }
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
@@ -138,9 +152,8 @@ fn system_font_files(fragments: &[&str]) -> Vec<std::path::PathBuf> {
             }
             let name = entry.file_name().to_string_lossy().to_lowercase();
             let font = [".ttf", ".otf", ".ttc", ".otc"].iter().any(|ext| name.ends_with(ext));
-            let compact = name.replace([' ', '.'], "");
-            if font && fragments.iter().any(|fragment| compact.contains(fragment)) && !found.contains(&path) {
-                found.push(path);
+            if font {
+                found.push((name.replace([' ', '.'], ""), path));
             }
         }
     }
@@ -462,6 +475,8 @@ pub struct TextSystem {
     pub sans: String,
     pub mono: String,
     symbol_families: Vec<&'static str>,
+    math: fallback::Group,
+    routes: Vec<(std::ops::Range<usize>, Route)>,
     pub atlas: Atlas,
     color_glyphs: HashMap<GlyphKey, ColorGlyph>,
     color_pixels: Vec<crate::pixels::Pixels>,
@@ -528,6 +543,8 @@ impl TextSystem {
             sans: families.0.to_owned(),
             mono: families.1.to_owned(),
             symbol_families,
+            math: fallback::Group::default(),
+            routes: Vec::new(),
             atlas: Atlas::new(),
             color_glyphs: HashMap::new(),
             color_pixels: Vec::new(),
@@ -583,10 +600,15 @@ impl TextSystem {
             return l.clone();
         }
         self.shaped += 1;
+        fallback::routes(text, &mut self.routes);
+        if !text.is_ascii() && text.chars().any(fallback::needs_symbols) {
+            self.math.get(&mut self.font_cx.collection, fallback::MATH_FONT_FILES, fallback::MATH_FAMILIES);
+        }
+        let math = self.math.loaded();
         let with_symbols = |primary| {
             FontFamilyName::parse_css_list(primary)
                 .flatten()
-                .chain(self.symbol_families.iter().map(|name| FontFamilyName::named(name)))
+                .chain(self.symbol_families.iter().chain(math).map(|name| FontFamilyName::named(name)))
                 .collect::<Vec<_>>()
         };
         let sans = match style.family {
@@ -599,6 +621,21 @@ impl TextSystem {
             }
         };
         let mono = with_symbols(self.mono.as_str());
+        // Routed clusters try their fallback first, then the run's own stack (mono spans included).
+        let routed: Vec<_> = self
+            .routes
+            .iter()
+            .filter_map(|(range, route)| {
+                let fonts = match route { Route::Math => math };
+                if fonts.is_empty() {
+                    return None;
+                }
+                let mono_span = spans.iter().any(|s| s.mono && (s.start as usize) < range.end && range.start < s.end as usize);
+                let base = if mono_span { &mono } else { &sans };
+                let families: Vec<_> = fonts.iter().map(|name| FontFamilyName::named(name)).chain(base.iter().cloned()).collect();
+                Some((range.clone(), families))
+            })
+            .collect();
         let mut b = self.layout_cx.ranged_builder(&mut self.font_cx, text, scale, true);
         b.push_default(FontFamily::from(sans.as_slice()));
         b.push_default(StyleProperty::FontSize(style.size));
@@ -632,6 +669,9 @@ impl TextSystem {
                     b.push(parley::FontVariations::List(std::borrow::Cow::Owned(variations(style, sz))), r.clone());
                 }
             }
+        }
+        for (range, families) in &routed {
+            b.push(FontFamily::from(families.as_slice()), range.clone());
         }
         let mut layout: Layout<Ink> = b.build(text);
         layout.break_all_lines(max_width);
@@ -921,6 +961,67 @@ mod tests {
             .flatten()
             .collect();
         assert_eq!(ids, "Hello".chars().map(|ch| u32::from(plex.charmap().map(ch))).collect::<Vec<_>>());
+    }
+
+    /// `(family, glyph id)` for every glyph of `text`, in visual order.
+    fn faces(ts: &mut TextSystem, text: &str, spans: &[Span], style: TextStyle) -> Vec<(String, u32)> {
+        let layout = ts.layout_rich(text, spans, style, 2.0, None);
+        let mut out = Vec::new();
+        for line in layout.lines() {
+            for item in line.items() {
+                let PositionedLayoutItem::GlyphRun(run) = item else { continue };
+                let font = run.run().font();
+                let font_ref = FontRef::from_index(font.data.as_ref(), font.index as usize).unwrap();
+                let family = font_ref
+                    .localized_strings()
+                    .find_by_id(swash::StringId::Family, None)
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                out.extend(run.glyphs().map(|g| (family.clone(), g.id)));
+            }
+        }
+        out
+    }
+
+    /// Math alphanumerics load the math fallback on first use and shape from one math font,
+    /// mono spans included; Latin around them stays on the app's font.
+    #[test]
+    fn math_alphanumerics_use_one_math_font() {
+        let mut ts = TextSystem::default();
+        ts.layout_rich("Hello, “café” — naïve…", &[], TextStyle::new(13.0, 400.0), 2.0, None);
+        assert!(ts.math.loaded().is_empty(), "Latin text must not load the math fallback");
+        if system_font_files(fallback::MATH_FONT_FILES).is_empty() {
+            eprintln!("skipping: no math font installed");
+            return;
+        }
+        let formula = "𝐀𝐁𝐂 𝑥𝑦𝑧 𝒜ℬ𝒞 𝔄𝔅 𝕒𝕓 ℝℂ 𝟎𝟏𝟐 𝛼𝛽𝛾";
+        let latin = faces(&mut ts, "Let ", &[], TextStyle::new(13.0, 400.0));
+        for (style, spans) in [
+            (TextStyle::new(13.0, 400.0), vec![]),
+            (TextStyle::new(13.0, 400.0).mono(), vec![]),
+            (TextStyle::new(13.0, 400.0), vec![Span { mono: true, ..Span::new(4, 4 + formula.len()) }]),
+        ] {
+            let text = format!("Let {formula}");
+            let glyphs = faces(&mut ts, &text, &spans, style);
+            assert!(!ts.math.loaded().is_empty());
+            assert!(glyphs.iter().all(|(_, id)| *id != 0), "tofu in {text:?}: {glyphs:?}");
+            if spans.is_empty() && style.family == Family::Sans {
+                assert_eq!(glyphs[..4], latin[..], "Latin before a formula keeps the app font");
+            }
+            let math_glyphs: Vec<_> = text[4..].chars().zip(&glyphs[4..]).filter(|(ch, _)| !ch.is_whitespace()).collect();
+            let family = &math_glyphs[0].1.0;
+            assert!(fallback::MATH_FAMILIES.contains(&family.as_str()), "{family} is not a math font");
+            assert!(math_glyphs.iter().all(|(_, g)| &g.0 == family), "mixed math designs: {math_glyphs:?}");
+        }
+    }
+
+    #[test]
+    fn math_routes_merge_adjacent_alphanumerics() {
+        let mut routes = Vec::new();
+        fallback::routes("a 𝐀𝐁 b 𝟎", &mut routes);
+        assert_eq!(routes, vec![(2..10, Route::Math), (13..17, Route::Math)]);
+        fallback::routes("plain ascii", &mut routes);
+        assert!(routes.is_empty());
     }
 
     /// Each glyph's ink top and bottom in px above the baseline, with its run's weight axis.
