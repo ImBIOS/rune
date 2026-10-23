@@ -63,6 +63,30 @@ mod tests {
     }
 
     #[test]
+    fn idle_catch_up_uses_scaled_and_paused_render_time() {
+        use crate::{Cx, El, Env, Runtime, el};
+        fn view(width: &f32, _: &mut Cx<f32>) -> El {
+            el().child(el().key("box").size(*width, 10.0))
+        }
+        let mut hidden = Runtime::new(12.0, view, (100.0, 50.0), Env::default());
+        let mut visible = Runtime::new(12.0, view, (100.0, 50.0), Env::default());
+        hidden.dev_clock = Some(DevClock::new(0.0, 0.0));
+        hidden.dev_clock.as_mut().unwrap().scale = 0.5;
+        for rt in [&mut hidden, &mut visible] {
+            rt.frame(0.0);
+            rt.update(|width, _| *width = 20.0);
+        }
+        hidden.frame_after_idle(10.0); // Commit at the end of idle, not its beginning.
+        visible.frame(0.0);
+        for (paused, dt) in [(false, 0.032), (true, 2.0), (false, 0.032)] {
+            hidden.dev_clock.as_mut().unwrap().paused = paused;
+            hidden.frame_after_idle(dt);
+            visible.frame(if paused { 0.0 } else { dt * 0.5 });
+            assert_eq!(hidden.presented("box"), visible.presented("box"));
+        }
+    }
+
+    #[test]
     fn a_spring_committed_after_idle_starts_from_rest_on_its_first_frame() {
         use crate::{Cx, El, Env, Runtime, Spring, el};
         fn view(n: &f32, _: &mut Cx<f32>) -> El {

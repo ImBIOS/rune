@@ -743,6 +743,16 @@ impl<S: 'static> Runtime<S> {
     /// if state changed, steps `Scene`, growth, scroll and reveals, and builds this frame's
     /// instances.
     pub fn frame(&mut self, dt: f64) -> bool {
+        self.frame_ordered(dt, false)
+    }
+
+    /// Catch up a sleeping host's existing motion before committing newly observed state.
+    /// The elapsed gap belongs to old tracks, never to targets first observed on this frame.
+    pub(crate) fn frame_after_idle(&mut self, dt: f64) -> bool {
+        self.frame_ordered(dt, true)
+    }
+
+    fn frame_ordered(&mut self, dt: f64, before_commit: bool) -> bool {
         #[cfg(all(feature = "dev", debug_assertions))]
         if let Some(mut dev) = self.dev.take() {
             let scope = dev.scope();
@@ -750,18 +760,18 @@ impl<S: 'static> Runtime<S> {
                 // Bring existing tracks/timers to the command's timestamp first. Idle wall
                 // time must never be charged to a transition or spring created by that command.
                 let commands = dev.prepare();
-                if commands { self.frame_clock(dt); }
+                if commands { self.frame_clock(dt, before_commit); }
                 dev.before(self);
-                self.frame_clock(if commands { 0.0 } else { dt });
+                self.frame_clock(if commands { 0.0 } else { dt }, before_commit);
                 dev.after(self)
             });
             self.dev = Some(dev);
             return moving;
         }
-        self.frame_clock(dt)
+        self.frame_clock(dt, before_commit)
     }
 
-    fn frame_clock(&mut self, dt: f64) -> bool {
+    fn frame_clock(&mut self, dt: f64, before_commit: bool) -> bool {
         // Like a native shell: the logical clock follows host time (timers, poll), while
         // animations step by the frame's own dt, so idle time never lands on a fresh commit.
         #[cfg(not(all(feature = "dev", debug_assertions)))]
@@ -781,16 +791,16 @@ impl<S: 'static> Runtime<S> {
             while let Some(deadline) = self.logical_wake_deadline()
                 && deadline > self.clock && deadline < target
             {
-                self.frame_step(deadline - self.clock, deadline - self.clock);
+                self.frame_step(deadline - self.clock, deadline - self.clock, before_commit);
             }
             self.queue.extend(input);
-            return self.frame_step(target - self.clock, target - self.clock);
+            return self.frame_step(target - self.clock, target - self.clock, before_commit);
         }
-        self.frame_step(elapsed, dt)
+        self.frame_step(elapsed, dt, before_commit)
     }
 
     /// `elapsed` advances the logical clock when no wall clock drives it; `dt` steps animations.
-    fn frame_step(&mut self, elapsed: f64, dt: f64) -> bool {
+    fn frame_step(&mut self, elapsed: f64, dt: f64, before_commit: bool) -> bool {
         let mut tx = std::mem::take(&mut self.pending);
         let mut ran = false;
         let wall_start = self.wall_start;
@@ -810,6 +820,10 @@ impl<S: 'static> Runtime<S> {
             self.scene.set_time(self.t);
             if self.clock >= deadline { self.loop_wake = None; }
         }
+        // Sample old tracks at this timestamp before a poll/update retargets them. Building
+        // here also brings growth, scroll and text-flight geometry to the same current pose.
+        if before_commit && dt > 0.0 { self.step_motion(dt); }
+        let dt = if before_commit { 0.0 } else { dt };
         let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
         self.wake_deadlines.drain(..due);
         if let Some(poll) = self.poll {
@@ -859,11 +873,20 @@ impl<S: 'static> Runtime<S> {
         for key in scroll_to { self.reveal_row(&key); }
         self.update_interaction();
         let live_animating = self.latch_live();
+        let animating = self.step_motion(dt) || live_animating;
+        self.stats.shaped = self.text.shaped - shaped0;
+        self.animating = animating && self.time_scale > 0.0;
+        #[cfg(all(feature = "dev", debug_assertions))]
+        if self.dev_clock.as_ref().is_some_and(|clock| clock.paused) { self.animating = false; }
+        self.animating
+    }
+
+    fn step_motion(&mut self, dt: f64) -> bool {
         let step = dt * self.time_scale as f64;
         self.t += step;
         self.scene.set_time(self.t);
         let out = self.scene.frame();
-        let mut animating = out.animating || live_animating;
+        let mut animating = out.animating;
         if !out.exited.is_empty() {
             self.prune_exited();
         }
@@ -877,11 +900,7 @@ impl<S: 'static> Runtime<S> {
         if self.track_marks {
             self.marks.resize(self.instances.len(), 0);
         }
-        self.stats.shaped = self.text.shaped - shaped0;
-        self.animating = animating && self.time_scale > 0.0;
-        #[cfg(all(feature = "dev", debug_assertions))]
-        if self.dev_clock.as_ref().is_some_and(|clock| clock.paused) { self.animating = false; }
-        self.animating
+        animating
     }
 
     fn prune_exited(&mut self) {

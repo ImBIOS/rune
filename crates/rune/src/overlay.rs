@@ -148,10 +148,9 @@ impl<T: 'static> OverlayHandle<T> {
     pub fn capture_exclusion(&self) -> OverlaySupport { self.capabilities().capture_exclusion }
     pub fn capabilities(&self) -> crate::OverlayCapabilities { self.shared.native.lock().unwrap().1 }
 
-    /// Reveal the overlay. A macOS prewarmed overlay can animate from its cached pose:
-    /// when a hidden poll changes state and requests show together, a previously current
-    /// frame is revealed and the new motion continues. Already-stale content is refreshed
-    /// and settled before reveal. Unretained hosts keep their settled first-frame behavior.
+    /// Reveal the overlay. Prewarmed macOS overlays refresh hidden changes before reveal,
+    /// preserving motion elapsed since each commit, even when show arrives in a later turn.
+    /// Unretained hosts keep their settled first-frame behavior.
     pub fn show(&self) {
         self.request(|q| q.visible = Some(true));
     }
@@ -366,13 +365,20 @@ impl<T: 'static> Overlay<T> {
     }
 
     fn settle_before_reveal(&mut self) {
-        // Retained pixels were settled by warm(). Leaving a settle flag pending here
+        // Initial retained pixels were settled by warm(). Leaving a settle flag pending here
         // would snap changes arriving after that frame, in the same turn as show().
         if !(cfg!(target_os = "macos") && self.options.prewarm) { self.rt.settle_all(); }
     }
 
     fn refresh_for_reveal(&mut self, retained: bool) {
-        if retained && self.dirty { self.warm(); }
+        self.refresh_for_reveal_at(retained, Instant::now());
+    }
+
+    fn refresh_for_reveal_at(&mut self, retained: bool, now: Instant) {
+        if retained && (self.dirty || self.rt.animating) {
+            self.advance_at(now);
+            self.warm_frame();
+        }
     }
 
     fn hide(&mut self) {
@@ -718,6 +724,11 @@ impl<T: 'static> Overlay<T> {
         self.rt.frame(0.0);
         self.rt.settle_all();
         self.rt.frame(0.0);
+        self.last = Instant::now();
+        self.warm_frame();
+    }
+
+    fn warm_frame(&mut self) {
         self.publish_regions();
         #[cfg(target_os = "macos")]
         if let Some(panel) = &self.panel {
@@ -782,22 +793,24 @@ impl<T: 'static> Overlay<T> {
     }
 
     fn advance(&mut self) {
-        let cached = cfg!(target_os = "macos") && self.options.prewarm && !self.dirty;
-        let showing = self.shared.requests.lock().unwrap().visible == Some(true);
+        self.advance_at(Instant::now());
+    }
+
+    fn advance_at(&mut self, now: Instant) {
         let commits = self.rt.stats.commits;
-        self.rt.frame(0.0);
+        if cfg!(target_os = "macos") && self.options.prewarm {
+            self.rt.frame_after_idle(now.saturating_duration_since(self.last).as_secs_f64());
+            self.last = now;
+        } else {
+            self.rt.frame(0.0);
+        }
         self.rt.shell_request = None;
         self.clipboard.flush(&mut self.rt);
-        let show_from_poll = !showing && self.shared.requests.lock().unwrap().visible == Some(true);
-        if cached && show_from_poll {
-            // dt=0 retargeted the scene from its cached pose without advancing it. Reveal
-            // that pose, then draw the new motion normally; don't settle the new target.
-            // Even an instant/text-only change needs one new frame after the cached reveal.
+        // Even a transition that finished in this step needs its current pixels submitted.
+        // A scheduling-only poll with no motion still preserves the prepared frame.
+        if self.rt.stats.commits != commits || self.rt.animating || !self.idle {
+            self.dirty = true;
             self.idle = false;
-            self.last = Instant::now();
-        } else {
-            // A scheduling-only poll must not make a prepared frame stale.
-            self.dirty |= self.rt.stats.commits != commits || self.rt.animating;
         }
     }
 
@@ -1266,6 +1279,103 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn overlay_hidden_commit_keeps_elapsed_motion_on_later_reveal() {
+        use std::time::Duration;
+        struct State { width: f32, enter: bool, live: crate::LiveText }
+        fn init() -> State { State { width: 12.0, enter: false, live: crate::LiveText::new("00") } }
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            crate::el().children([
+                crate::el().key("box").size(s.width, 8.0),
+                crate::text(if s.width == 12.0 { "A" } else { "B" }).key("content"),
+                crate::text("00").key("live").live_text(&s.live),
+            ])
+        }
+        fn poll(s: &mut State, _: f64, _: &mut Tx) -> bool {
+            if !std::mem::take(&mut s.enter) { return false; }
+            s.width = 20.0;
+            true
+        }
+        let app = AppSpec { poll: Some(poll), ..AppSpec::new("delayed entry", (100.0, 50.0), init, view) };
+        for delay in [Duration::from_millis(16), Duration::from_secs(2)] {
+            let spec = OverlaySpec::new("delayed entry", app.size, view)
+                .options(OverlayOptions { prewarm: true, ..Default::default() });
+            let (mut overlay, handle) = Overlay::new(spec, init(), &app);
+            overlay.rt.wall_start = None;
+            overlay.warm();
+            overlay.dirty = false; // Successful submission of A, without a native window.
+            let commit = overlay.last + Duration::from_secs(10);
+            overlay.rt.state.enter = true;
+            overlay.advance_at(commit); // Hidden turn 1 commits B; no show request yet.
+            assert_eq!(handle.shared.requests.lock().unwrap().visible, None);
+            assert_eq!(overlay.rt.presented("box").unwrap().0[2], 12.0, "idle before B must not age B");
+            assert!(!overlay.draw(), "hidden motion must not drive frames");
+            assert_eq!(overlay.wake_deadline(), None);
+            overlay.rt.state.live.set("01");
+            handle.show(); // Turn 2, after B has been committed.
+            overlay.resume_live();
+            overlay.settle_before_reveal();
+            overlay.refresh_for_reveal_at(true, commit + delay);
+            let width = overlay.rt.presented("box").unwrap().0[2];
+            if delay.as_secs() == 0 {
+                assert!(overlay.rt.animating && width > 12.0 && width < 14.0,
+                    "16ms reveal must be near A and moving: width={width}, moving={}", overlay.rt.animating);
+            } else {
+                assert_eq!(width, 20.0, "2s reveal must have reached B");
+                assert!(!overlay.rt.animating);
+            }
+            let elements = overlay.rt.elements();
+            assert_eq!(elements.iter().find(|e| e.key.as_deref() == Some("content")).unwrap().text.as_deref(), Some("B"));
+            assert_eq!(elements.iter().find(|e| e.key.as_deref() == Some("live")).unwrap().text.as_deref(), Some("01"));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn overlay_hidden_retarget_samples_old_motion_before_committing_new_target() {
+        use std::time::Duration;
+        fn view(width: &f32, _: &mut Cx<f32>) -> El {
+            crate::el().child(crate::el().key("box").size(*width, 8.0))
+        }
+        let app = AppSpec::new("retarget", (100.0, 50.0), || 12.0, view);
+        for (scale, millis) in [(0.0, 16), (0.25, 16), (1.0, 16), (0.0, 2000), (0.25, 2000), (1.0, 2000)] {
+            let delay = Duration::from_millis(millis);
+            let spec = OverlaySpec::new("retarget", app.size, view)
+                .options(OverlayOptions { prewarm: true, ..Default::default() });
+            let (mut overlay, _) = Overlay::new(spec, 12.0, &app);
+            overlay.rt.wall_start = None;
+            overlay.rt.time_scale = scale;
+            overlay.warm();
+            overlay.dirty = false;
+            let commit = overlay.last + Duration::from_secs(10);
+            overlay.rt.update(|width, _| *width = 20.0);
+            overlay.advance_at(commit);
+            overlay.advance_at(commit + Duration::from_millis(8)); // Unchanged intervening poll.
+            overlay.rt.update(|width, _| *width = 30.0); // Newly observed at reveal, not 2s ago.
+            overlay.refresh_for_reveal_at(true, commit + delay);
+
+            // A visible reference ages B first and only then commits C. Compare the next
+            // moving frame too: retargeting must preserve velocity, not just position.
+            let mut reference = Runtime::new(12.0, view, app.size, Env::default());
+            reference.time_scale = scale;
+            reference.frame(0.0);
+            reference.update(|width, _| *width = 20.0);
+            reference.frame(0.0);
+            reference.frame(delay.as_secs_f64());
+            reference.update(|width, _| *width = 30.0);
+            reference.frame(0.0);
+            for dt in [0.0, 0.016] {
+                overlay.rt.frame(dt);
+                reference.frame(dt);
+                let width = overlay.rt.presented("box").unwrap().0[2];
+                let expected = reference.presented("box").unwrap().0[2];
+                assert!((width - expected).abs() < 0.001, "scale={scale}: width={width}, expected={expected}");
+                assert!(width < 30.0, "the fresh target must not inherit the hidden gap");
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn overlay_hidden_poll_can_show_and_animate_from_the_cached_pose() {
         #[derive(Default)]
         struct State { width: f32, enter: bool, instant: bool, handle: Option<OverlayHandle<State>> }
@@ -1280,7 +1390,11 @@ mod tests {
             true
         }
         let app = AppSpec { poll: Some(poll), ..AppSpec::new("entry", (100.0, 50.0), State::default, view) };
-        for (prewarm, stale, instant) in [(true, false, false), (true, true, false), (false, false, false), (true, false, true)] {
+        for (prewarm, stale, instant, queued) in [
+            (true, false, false, false), (true, true, false, false),
+            (false, false, false, false), (true, false, true, false),
+            (true, false, false, true),
+        ] {
             let spec = OverlaySpec::new("entry", app.size, view)
                 .options(OverlayOptions { prewarm, ..Default::default() });
             let (mut overlay, handle) = Overlay::new(spec, State { width: 12.0, instant, ..Default::default() }, &app);
@@ -1293,18 +1407,31 @@ mod tests {
             assert!(!overlay.dirty, "an unchanged hidden poll preserves the prepared frame");
             if stale { overlay.apply_updates(vec![Box::new(|s, _| s.width = 16.0)]); }
             overlay.rt.state.enter = true; // External event observed by the next hidden poll.
-            overlay.advance();
+            if queued {
+                // Scrawl's original kick: a no-op update invalidates the prepared frame
+                // before the hidden poll commits B and requests show.
+                handle.update(|_, _| {});
+                let updates = std::mem::take(&mut handle.shared.requests.lock().unwrap().updates);
+                overlay.apply_updates(updates);
+                assert!(overlay.dirty);
+            } else {
+                overlay.advance();
+            }
             assert_eq!(handle.shared.requests.lock().unwrap().visible, Some(true));
             overlay.settle_before_reveal();
             overlay.refresh_for_reveal(prewarm);
+            if queued {
+                assert!(overlay.rt.animating && overlay.rt.presented("box").unwrap().0[2] < 20.0,
+                    "a queued update kick must not settle the entry during reveal");
+            }
             if prewarm && !stale { assert!(!overlay.idle, "the new target needs a visible frame even with instant motion"); }
             let moving = overlay.rt.frame(1.0 / 60.0);
             let width = overlay.rt.presented("box").unwrap().0[2];
-            if prewarm && !stale && !instant {
+            if prewarm && !instant {
                 assert!(moving && (12.0..20.0).contains(&width),
                     "same-poll show must animate from A: width={width}, moving={moving}");
             } else {
-                assert_eq!(width, 20.0, "stale/unretained frames still settle before reveal");
+                assert_eq!(width, 20.0, "instant changes and unretained frames land at their target");
                 assert!(!moving);
             }
         }
