@@ -619,9 +619,9 @@ fn main() {
             }),
         ],
         fonts: &[
-            include_bytes!("../assets/fonts/InterVariable.ttf"),
-            include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf"),
-            include_bytes!("../assets/fonts/IBMPlexMono-Medium.ttf"),
+            include_bytes!("../../../themes/opencode/assets/fonts/InterVariable.ttf"),
+            include_bytes!("../../../themes/opencode/assets/fonts/IBMPlexMono-Regular.ttf"),
+            include_bytes!("../../../themes/opencode/assets/fonts/IBMPlexMono-Medium.ttf"),
         ],
         families: ("Inter", "IBM Plex Mono"),
         setup: Some(setup),

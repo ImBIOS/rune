@@ -148,7 +148,7 @@ fn main() {
                 include_bytes!("../../../crates/rune/assets/Inter-Regular.ttf"),
                 include_bytes!("../../../crates/rune/assets/Inter-Medium.ttf"),
                 include_bytes!("../../../crates/rune/assets/Inter-SemiBold.ttf"),
-                include_bytes!("../assets/IBMPlexMono-Medium.ttf"),
+                include_bytes!("../../../themes/opencode/assets/fonts/IBMPlexMono-Medium.ttf"),
             ],
             families: ("Inter", "IBM Plex Mono"),
             on_key: Some(on_key),
