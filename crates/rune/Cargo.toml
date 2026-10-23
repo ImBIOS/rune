@@ -63,3 +63,7 @@ wgpu = { version = "30", default-features = false, features = ["vulkan", "dx12"]
 [[test]]
 name = "macos_appearance_kvo"
 harness = false
+
+[[test]]
+name = "launcher_wakes"
+harness = false

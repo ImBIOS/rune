@@ -783,6 +783,7 @@ impl<S: 'static> Host<S> {
 
     /// Applies everything other threads asked for since the last wake-up.
     fn drain(&mut self, event_loop: &ActiveEventLoop) {
+        let shown = self.win.as_ref().is_some_and(|w| w.visible);
         let clipboard = self.clipboard.receive(&mut self.rt);
         let requests = self.shared.take();
         let changed = clipboard || !requests.updates.is_empty();
@@ -811,21 +812,23 @@ impl<S: 'static> Host<S> {
         // A dev command may change a shown launcher, which otherwise redraws only for updates.
         #[cfg(all(feature = "dev", debug_assertions))]
         let changed = changed || self.rt.dev.is_some();
-        if let Some(w) = self.win.as_ref().filter(|w| if self.launcher() { changed } else { w.visible }) {
+        // A launcher's cached reveal draws nothing; a hidden one renders its changes hidden.
+        if let Some(w) = self.win.as_ref().filter(|w| if self.launcher() { changed || shown && w.visible } else { w.visible }) {
             w.window.request_redraw();
         }
     }
 
     /// A hidden, keep-running or windowless window still reads its inbox when woken: `poll` runs
     /// with no drawable, present or animation, and its changes render when the window is next
-    /// shown. A hidden launcher keeps rendering while hidden instead.
+    /// shown. A hidden launcher renders poll's changes hidden, keeping its cached frame fresh.
     fn poll_hidden(&mut self, event_loop: &ActiveEventLoop) {
-        if event_loop.exiting() || self.launcher() || self.win.as_ref().is_some_and(|w| w.visible) { return; }
+        if event_loop.exiting() || self.win.as_ref().is_some_and(|w| w.visible) { return; }
         // Its hidden frames already poll.
         #[cfg(all(feature = "dev", debug_assertions))]
         if self.rt.dev.is_some() { return; }
-        self.rt.poll_hidden();
+        let changed = self.rt.poll_hidden();
         self.shell(event_loop);
+        if changed && self.launcher() && let Some(w) = &self.win { w.window.request_redraw(); }
     }
 
     /// Carries out what a handler or update asked with `Tx::close_window` / `Tx::quit`.

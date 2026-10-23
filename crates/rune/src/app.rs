@@ -625,7 +625,8 @@ mod tests {
             handle.wake();
         }).join().unwrap();
         assert_eq!(wakes.load(Ordering::SeqCst), before + 1);
-        rt.poll_hidden();
+        assert!(rt.poll_hidden(), "a hidden launcher renders when poll reports a change");
+        assert!(!rt.poll_hidden());
         assert_eq!(rt.state.locked, 30, "poll drained the inbox without a frame");
         assert_eq!(width(&rt), 10.0, "nothing laid out, animated or presented while hidden");
         assert!(rt.wake_deadline().is_some(), "poll's own timers still schedule while hidden");

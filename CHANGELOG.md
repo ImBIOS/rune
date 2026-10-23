@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Launcher panels run `poll` on a plain wake.** `AppHandle::wake()` and the setup `Waker`
+  used to skip a launcher's `poll` unless an update came with them. A shown launcher now
+  redraws; a hidden one polls and renders its cached frame at alpha zero when `poll` reports
+  a change, with no frame loop.
 - **Linux builds link `libxkbcommon`** (`a7f0f56`). Display-targeted overlays added the `xkbcommon`
   crate, so CI and build hosts without `libxkbcommon-dev` (Fedora: `libxkbcommon-devel`) fail at
   link time. See "Linux system packages" in `crates/rune/README.md`.

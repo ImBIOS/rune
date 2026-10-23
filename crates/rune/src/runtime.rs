@@ -722,8 +722,9 @@ impl<S: 'static> Runtime<S> {
 
     /// `poll` alone, for a hidden window's wake: its timers and inbox advance while nothing
     /// lays out, animates or draws. Like `update`, its changes wait, dirty, for the next frame.
-    pub(crate) fn poll_hidden(&mut self) {
-        let Some(poll) = self.poll else { return };
+    /// Returns whether `poll` reported a change.
+    pub(crate) fn poll_hidden(&mut self) -> bool {
+        let Some(poll) = self.poll else { return false };
         let wall_start = self.wall_start;
         #[cfg(all(feature = "dev", debug_assertions))]
         let wall_start = wall_start.filter(|_| self.dev_clock.is_none());
@@ -731,7 +732,8 @@ impl<S: 'static> Runtime<S> {
         let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
         self.wake_deadlines.drain(..due);
         let mut one = Tx::default();
-        self.dirty |= poll(&mut self.state, self.clock, &mut one);
+        let changed = poll(&mut self.state, self.clock, &mut one);
+        self.dirty |= changed;
         for delay in one.wakes.drain(..) {
             let deadline = self.clock + delay.as_secs_f64();
             if let Err(index) = self.wake_deadlines.binary_search_by(|t| t.total_cmp(&deadline)) {
@@ -740,6 +742,7 @@ impl<S: 'static> Runtime<S> {
         }
         self.shell_request = self.shell_request.max(one.shell.take());
         merge(&mut self.pending, one);
+        changed
     }
 
     /// Next requested wake on the unscaled app clock. None lets the shell sleep indefinitely.
