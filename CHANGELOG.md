@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Editing scrolls the caret into view** (`rooms-gaps` branch). Typing, pasting, IME composition
+  or caret keys in a field inside a scroll viewport now scroll its nearest viewport just far enough
+  to show the caret line, as a browser textarea does. Before, the caret could run off the bottom.
 - **Growth rows play an explicit `.transition`** (`rooms-gaps` branch). Rows inserted into a
   growth stack (and elements inserted inside them) used to ignore `.transition(...)` and only grow
   open. One that sets a transition now also plays its entrance; rows without one are unchanged,

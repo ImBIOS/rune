@@ -35,6 +35,35 @@ impl<S: 'static> Runtime<S> {
         Some([x + bb.x0 as f32 / s, y + n.inset[1] + bb.y0 as f32 / s, 1.5, h])
     }
 
+    /// After an edit, scrolls the focused field's nearest scroll viewport just far enough to
+    /// show the caret line, as a browser does for a textarea.
+    pub(super) fn follow_caret(&mut self) {
+        let Some(i) = self.nodes.iter().position(|n| self.focused.as_deref() == Some(n.path.as_str())) else { return };
+        let Some(r) = self.caret_rect(&self.nodes, i) else { return };
+        let mut up = self.nodes[i].parent;
+        let v = loop {
+            let Some(p) = up else { return };
+            if self.nodes[p].scroll.is_some() { break p; }
+            up = self.nodes[p].parent;
+        };
+        let mut top = self.nodes[v].target[1];
+        let mut up = self.nodes[v].parent;
+        while let Some(p) = up {
+            if let Some(st) = self.scrolls.get(&self.nodes[p].id) { top -= st.offset as f32; }
+            up = self.nodes[p].parent;
+        }
+        let view_h = f64::from(self.nodes[v].target[3] - self.nodes[v].target[1]);
+        let (y, h) = (f64::from(r[1] - top), f64::from(r[3]));
+        let stick = self.nodes[v].scroll.is_some_and(|s| s.stick_bottom);
+        let Some(st) = self.scrolls.get_mut(&self.nodes[v].id) else { return };
+        let delta = if y < 0.0 { y } else if y + h > view_h { y + h - view_h } else { return };
+        st.offset = (st.offset + delta).clamp(0.0, st.max);
+        st.pinned = stick && st.offset >= st.max - 0.5;
+        st.v = 0.0;
+        st.glide = None;
+        st.direct = true;
+    }
+
     /// Refreshes the caret the next view sees from `nodes` (the current frame's when `None`).
     /// Returns whether it moved.
     pub(super) fn caret_moved(&mut self, nodes: Option<&[Node]>) -> bool {

@@ -400,6 +400,8 @@ pub struct Runtime<S: 'static> {
     caret: Option<(String, [f32; 4])>,
     /// The last view read the caret, so it re-runs when the caret moves.
     caret_watch: bool,
+    /// An edit ran this frame: keep the caret in its scroll viewport after the commit.
+    caret_follow: bool,
     /// The shell cancels native composition before enabling the new text focus.
     pub(crate) ime_reset: bool,
     /// Text the focused field asked to copy (the shell writes it to the clipboard).
@@ -560,6 +562,7 @@ impl<S: 'static> Runtime<S> {
             ime_area: None,
             caret: None,
             caret_watch: false,
+            caret_follow: false,
             ime_reset: false,
             copy_request: None,
             paste_request: None,
@@ -975,9 +978,13 @@ impl<S: 'static> Runtime<S> {
             self.settled = tx.settle;
             self.commit(&tx);
         }
-        if !scroll_to.is_empty() { self.step_scroll(0.0); }
+        let follow = std::mem::take(&mut self.caret_follow);
+        if !scroll_to.is_empty() || follow { self.step_scroll(0.0); }
+        if follow { self.follow_caret(); }
         for key in scroll_to { self.reveal_row(&key); }
         if !scroll_bottom.is_empty() { self.scroll_to_bottom(scroll_bottom); }
+        // Those scrolls moved the caret after the commit a view placed from it saw.
+        if self.caret_watch && self.caret_moved(None) { self.commit(Tx { instant: true, ..Tx::default() }); }
         self.update_interaction();
         let live_animating = self.latch_live();
         if let Some(trace) = tx.trace.take() {
@@ -1312,6 +1319,7 @@ impl<S: 'static> Runtime<S> {
         let out = f(access(&mut self.state as &mut dyn Any));
         // Typing is the user's own hand: no animation.
         tx.instant = !animate_layout;
+        self.caret_follow = true;
         if let Some(change) = change
             && before.as_ref().map(|s| s.as_str()) != Some(access(&mut self.state as &mut dyn Any).text.as_str())
         { change(&mut self.state as &mut dyn Any, tx); }

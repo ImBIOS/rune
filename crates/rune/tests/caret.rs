@@ -10,7 +10,7 @@ fn view(s: &S, cx: &mut Cx<S>) -> El {
         .child(text_input(&s.draft, TextStyle::new(14.0, 400.0)).key("input").w_full().on_edit(|s: &mut S| &mut s.draft));
     let mut root = col().w_full().h_full()
         .child(col().key("scroll").w_full().h(120.0).scroll(ScrollSpec { stick_bottom: false })
-            .child(col().w_full().child(el().h(100.0)).child(field).child(el().h(200.0))));
+            .child(col().w_full().child(el().h(60.0)).child(field).child(el().h(200.0))));
     // An @mention popup hangs from the caret line.
     if let Some([x, y, _, h]) = cx.caret("composer") {
         root = root.child(el().key("popup").absolute(x, y + h).size(80.0, 30.0));
