@@ -30,22 +30,7 @@ fn render(gpu: &Gpu, renderer: &mut SurfaceRenderer, draws: &[SurfaceDraw], size
     let target = Offscreen::new(&gpu.device, size.0, size.1);
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: None,
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &target.view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: renderer.timestamp_writes(),
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
+        let mut pass = clear_pass(&mut encoder, &target.view, wgpu::Color::TRANSPARENT, renderer.timestamp_writes());
         for i in 0..renderer.len() {
             renderer.draw(&mut pass, i);
         }
@@ -57,6 +42,23 @@ fn render(gpu: &Gpu, renderer: &mut SurfaceRenderer, draws: &[SurfaceDraw], size
         completion.recv_timeout(std::time::Duration::from_secs(10)).expect("frame completion");
     }
     pixels
+}
+fn clear_pass<'e>(
+    encoder: &'e mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    clear: wgpu::Color,
+    timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
+) -> wgpu::RenderPass<'e> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store },
+        })],
+        timestamp_writes,
+        ..Default::default()
+    })
 }
 fn srgb(x: f32) -> u8 {
     let x = if x <= 0.0031308 { x * 12.92 } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 };
@@ -125,19 +127,7 @@ fn completion_worker_preserves_cpu_gpu_overlap() {
         pass.dispatch_workgroups(1024, 1, 1);
     }
     {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: None,
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &target.view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: renderer.timestamp_writes(),
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
+        let mut pass = clear_pass(&mut encoder, &target.view, wgpu::Color::BLACK, renderer.timestamp_writes());
         renderer.draw(&mut pass, 0);
     }
     let (done, completed) = std::sync::mpsc::channel();
@@ -209,19 +199,8 @@ fn queued_video_frames_then_readback() {
             renderer.prepare(&gpu.device, &gpu.queue, &draws, (1280, 720));
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
             {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &target.view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    timestamp_writes: renderer.timestamp_writes(),
-                    ..Default::default()
-                });
+                let mut pass =
+                    clear_pass(&mut encoder, &target.view, wgpu::Color::TRANSPARENT, renderer.timestamp_writes());
                 for i in 0..renderer.len() {
                     renderer.draw(&mut pass, i);
                 }
@@ -403,22 +382,7 @@ fn video_gpu_colour_sharpness_geometry_and_lifetime() {
         let target = Offscreen::new(&gpu.device, 16, 16);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: None,
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+            let mut pass = clear_pass(&mut encoder, &target.view, wgpu::Color::TRANSPARENT, None);
             renderer.draw(&mut pass, 0);
         }
         surface.clear();
