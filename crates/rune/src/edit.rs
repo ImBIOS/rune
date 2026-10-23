@@ -134,12 +134,16 @@ pub struct EditOutcome {
     pub blur: bool,
 }
 
+/// The previous grapheme boundary, so a caret or backspace takes a ZWJ emoji, flag or skin
+/// tone whole.
 fn prev_char(s: &str, i: usize) -> usize {
-    s[..i].char_indices().next_back().map_or(0, |(j, _)| j)
+    use unicode_segmentation::UnicodeSegmentation;
+    s[..i].grapheme_indices(true).next_back().map_or(0, |(j, _)| j)
 }
 
 fn next_char(s: &str, i: usize) -> usize {
-    s[i..].chars().next().map_or(i, |c| i + c.len_utf8())
+    use unicode_segmentation::UnicodeSegmentation;
+    s[i..].graphemes(true).next().map_or(i, |g| i + g.len())
 }
 
 fn prev_word(s: &str, i: usize) -> usize {
@@ -519,6 +523,23 @@ mod tests {
         assert!(!format!("{e:?}").contains("h界x"));
         e.clear();
         assert!(e.is_secure());
+    }
+
+    /// Arrows and backspace treat a ZWJ family, a flag and a skin-toned hand as one character.
+    #[test]
+    fn caret_and_backspace_step_over_whole_emoji() {
+        let (family, flag, wave) = ("👨\u{200D}👩\u{200D}👧", "🇯🇵", "👋🏽");
+        let text = format!("a{family}{flag}{wave}");
+        let mut e = TextEdit::new(&text);
+        e.key(&k(Key::Home), None);
+        let mut stops = vec![e.focus];
+        for _ in 0..5 { e.key(&k(Key::Right), None); stops.push(e.focus); }
+        let ends = [0, 1, 1 + family.len(), 1 + family.len() + flag.len(), text.len(), text.len()];
+        assert_eq!(stops, ends);
+        for want in [format!("a{family}{flag}"), format!("a{family}"), "a".into()] {
+            e.key(&k(Key::Backspace), None);
+            assert_eq!(*e.text, want);
+        }
     }
 
     #[test]

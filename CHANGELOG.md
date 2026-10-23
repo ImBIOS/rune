@@ -5,6 +5,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **The caret and backspace step over whole graphemes.** Arrows, Shift-arrows and Backspace treat
+  a ZWJ family, a flag or a skin-toned hand as one character instead of splitting its code points.
 - **Inline code chips draw as one rect.** Touching span backgrounds on a line merge even when
   their runs have different fonts or sizes, at the height of the widest run. Markdown's padding
   spaces no longer draw lighter slivers at each end of a code chip.

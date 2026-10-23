@@ -27,6 +27,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 blake3 = "1"
 zeroize = "1.8"
 half = "2"
+unicode-segmentation = "1.13"
 tungstenite = { version = "0.28", optional = true }
 csscolorparser = { version = "0.7", optional = true }
 
