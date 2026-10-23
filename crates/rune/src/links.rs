@@ -158,7 +158,7 @@ impl<S: 'static> Runtime<S> {
 
     /// Centre of the first drawn line box of the link whose id is `id`, in points.
     pub(super) fn find_link(&self, id: &str) -> Option<(f32, f32)> {
-        (0..self.nodes.len()).filter(|&i| !self.is_exiting(self.nodes[i].id)).find_map(|i| {
+        (0..self.nodes.len()).filter(|&i| !self.subtree_exiting(i)).find_map(|i| {
             let k = self.nodes[i].text.as_ref()?.links.iter().position(|l| l.id == id)?;
             let (_, r) = self.link_boxes(i, self.drawn_box(i)).into_iter().find(|(j, _)| *j == k)?;
             Some(((r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5))

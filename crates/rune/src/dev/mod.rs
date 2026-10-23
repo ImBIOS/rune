@@ -330,7 +330,14 @@ impl<S> Session<S> {
         }
         for (request, reply) in self.replies.drain(..) {
             let response = if request["type"] == "tree" {
-                json!({"type":"tree","id":request["id"],"frame":self.frame,"elements":rt.elements().into_iter().map(|e| json!({"key":e.key,"text":e.text,"rect":e.rect,"target":e.target,"opacity":(e.opacity * 1000.0).round() / 1000.0,"moving":e.moving})).collect::<Vec<_>>()})
+                // Elements playing their exit are gone unless the request asks to watch them.
+                let exiting = request["exiting"] == true;
+                let elements = rt.elements().into_iter().filter(|e| exiting || !e.exiting).map(|e| {
+                    let mut v = json!({"key":e.key,"text":e.text,"rect":e.rect,"target":e.target,"opacity":(e.opacity * 1000.0).round() / 1000.0,"moving":e.moving});
+                    if e.exiting { v["exiting"] = true.into(); }
+                    v
+                }).collect::<Vec<_>>();
+                json!({"type":"tree","id":request["id"],"frame":self.frame,"elements":elements})
             } else { json!({"type":"ack","id":request["id"],"frame":self.frame}) };
             if reply.send(response).is_err() {} // The client may disconnect before its commit.
         }

@@ -877,6 +877,9 @@ pub(crate) fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
             if e.moving {
                 v["moving"] = true.into();
             }
+            if e.exiting {
+                v["exiting"] = true.into();
+            }
             if e.hover > 0.001 {
                 v["hover"] = r2(e.hover).into();
             }
@@ -1442,6 +1445,10 @@ mod tests {
             let mut trace = Trace::open(&path, rt.viewport, 60.0, 1.0);
             trace.frame(&mut rt, 0.0, 0.0);
             rt.state = false; rt.invalidate(); rt.frame(0.0); rt.frame(0.05);
+            let tree = tree_json(&rt, 0.05);
+            let pill = tree["elements"].as_array().unwrap().iter().find(|e| e["key"] == "pill").unwrap();
+            assert_eq!(pill["exiting"], true);
+            assert!(tree["elements"].as_array().unwrap().iter().filter(|e| e["key"] != "pill").all(|e| e.get("exiting").is_none()));
             trace.frame(&mut rt, 50.0, 0.0);
             rt.frame(3.0);
             trace.frame(&mut rt, 3050.0, 0.0);

@@ -82,8 +82,10 @@ and wake the app; model/view mutation stays on the app thread.
 Server `state` messages contain `descriptors`, complete `values`, and readouts.
 Client messages: `{type:"set", key, value}` (`null` restores default),
 `{type:"setBatch", changes:[{key,value}]}`, `{type:"reset", key?, group?}`,
-`{type:"action", key}`, `{type:"get"}`, and `{type:"tree"}` (key, text, rect,
-target, opacity, moving per element). Invalid requests return `error`.
+`{type:"action", key}`, `{type:"get"}`, and `{type:"tree", exiting?}` (key, text,
+rect, target, opacity, moving per element; elements playing their exit are left
+out unless `exiting` is true, then marked `exiting`). Invalid requests return
+`error`.
 Descriptors are knobs `ControlDescriptor`s, not a new Rune panel schema:
 
 | Rune value | knobs descriptor |

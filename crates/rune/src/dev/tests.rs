@@ -201,6 +201,27 @@ fn hidden_hosts_keep_motion_in_real_time_and_the_tree_reports_opacity() {
 }
 
 #[test]
+fn the_tree_drops_exiting_elements_unless_asked() {
+    fn view(show: &bool, _: &mut Cx<bool>) -> El {
+        crate::col().children(show.then(|| el().key("chip").size(10.0, 10.0).transition(crate::Transition::blur(4.0))))
+    }
+    let spec = AppSpec::new("test", (100.0, 100.0), || true, view);
+    let mut rt = attached(&spec, true, Arc::new(|| {}));
+    rt.frame(0.0);
+    rt.state = false;
+    rt.invalidate();
+    rt.frame(0.0);
+    rt.frame(0.05);
+    let chip = |tree: &Value| tree["elements"].as_array().unwrap().iter().find(|e| e["key"] == "chip").cloned();
+    let replies = enqueue(&rt, json!({"type":"tree","id":1}));
+    rt.frame(0.0);
+    assert_eq!(chip(&replies.try_recv().unwrap()), None, "a leaving chip is gone by default");
+    let replies = enqueue(&rt, json!({"type":"tree","id":2,"exiting":true}));
+    rt.frame(0.0);
+    assert_eq!(chip(&replies.try_recv().unwrap()).expect("asked for exiting elements")["exiting"], true);
+}
+
+#[test]
 fn a_windowless_timer_frame_keeps_the_motion_it_starts_running() {
     fn view(s: &(f32, u32), _: &mut Cx<(f32, u32)>) -> El {
         crate::col().child(el().key("box").absolute(s.0, 0.0).size(10.0, 10.0))

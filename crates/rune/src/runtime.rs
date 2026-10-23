@@ -264,6 +264,9 @@ pub struct ElementInfo {
     pub focused: bool,
     pub focus_visible: bool,
     pub inert: bool,
+    /// Playing its exit transition, or inside an element that is. Lookups by key treat it
+    /// as gone; it stays listed so tools can watch the exit.
+    pub exiting: bool,
     pub path: String,
     pub key: Option<String>,
     pub role: &'static str,
@@ -3711,6 +3714,7 @@ impl<S: 'static> Runtime<S> {
             .enumerate()
             .filter_map(|(i, n)| {
                 let p = self.scene.presented(n.id)?;
+                let exiting = self.subtree_exiting(i);
                 let flight = self.flights.iter().find(|f| f.lands(&n.path, n.key.as_deref()));
                 let mut moving = flight.is_some() || (!self.reduced_motion && self.loops.get(&n.id).is_some_and(|l| l.active(self.t)))
                     || store.is_animating(n.id, prop::FRAME)
@@ -3774,7 +3778,8 @@ impl<S: 'static> Runtime<S> {
                     focusable: self.can_focus(i),
                     focused: self.focused.as_deref() == Some(&n.path),
                     focus_visible: self.keyboard_focus && self.focused.as_deref() == Some(&n.path),
-                    inert: !self.allowed(i) || self.subtree_exiting(i),
+                    inert: !self.allowed(i) || exiting,
+                    exiting,
                     path: n.path.clone(),
                     key: n.key.clone(),
                     role: n.role,
@@ -3813,7 +3818,7 @@ impl<S: 'static> Runtime<S> {
                 trace_name: None,
                 trace_namespace: None,
                 loop_phase: None,
-                focusable: false, focused: false, focus_visible: false, inert: true,
+                focusable: false, focused: false, focus_visible: false, inert: true, exiting: false,
                 key: Some(path.clone()), path, role: "text", label: None, text: None,
                 rect: [r.x, r.y, r.w, r.h], target: [t.x, t.y, t.w, t.h],
                 opacity: f.source_alpha, scale: 1.0, blur: 0.0, radius: 0.0, fill: Color::TRANSPARENT, text_color: None,
@@ -3827,16 +3832,14 @@ impl<S: 'static> Runtime<S> {
         elements
     }
 
-    /// Centre of the first non-exiting element whose key is `key`, or whose path ends with `key`
-    /// when it contains a `/` (e.g. `slider/knob`), in points. Failing that, the first line box
-    /// of the link (`El::link`) whose id is `key`.
+    /// Centre of the first element whose key is `key`, or whose path ends with `key` when it
+    /// contains a `/` (e.g. `slider/knob`), in points. Failing that, the first line box of the
+    /// link (`El::link`) whose id is `key`. Exiting elements and their children are gone here;
+    /// [`Runtime::presented`] still reads them.
     pub fn find(&self, key: &str) -> Option<(f32, f32)> {
-        let i = if key.contains('/') {
-            let suffix = format!("/{key}");
-            self.nodes.iter().position(|n| !self.is_exiting(n.id) && (n.path == key || n.path.ends_with(&suffix)))
-        } else {
-            self.nodes.iter().position(|n| !self.is_exiting(n.id) && n.key.as_deref() == Some(key))
-        };
+        let suffix = format!("/{key}");
+        let matches = |n: &Node| if key.contains('/') { n.path == key || n.path.ends_with(&suffix) } else { n.key.as_deref() == Some(key) };
+        let i = (0..self.nodes.len()).find(|&i| matches(&self.nodes[i]) && !self.subtree_exiting(i));
         let Some(i) = i else { return self.find_link(key) };
         let r = self.drawn.get(i).copied()?;
         Some((r[0] + r[2] * 0.5, r[1] + r[3] * 0.5))
@@ -4399,6 +4402,27 @@ mod tests {
         assert!(parent.blur > 0.0);
         assert_eq!(child.blur, parent.blur);
         assert!((child.opacity - parent.opacity * 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn exiting_elements_are_flagged_and_gone_from_key_lookups() {
+        fn view(show: &bool, _: &mut Cx<bool>) -> El {
+            col().size(200.0, 100.0).children(show.then(|| el().key("card").size(100.0, 60.0)
+                .transition(Transition::blur(4.0))
+                .child(el().key("label").size(20.0, 20.0))))
+        }
+        let mut rt = Runtime::new(true, view, (200.0, 100.0), Env { scale: 1.0, system_dark: true });
+        rt.frame(0.0);
+        assert!(rt.find("card").is_some() && rt.find("label").is_some());
+        assert!(rt.elements().iter().all(|e| !e.exiting));
+        rt.state = false; rt.invalidate(); rt.frame(0.0); rt.frame(0.05);
+        let elements = rt.elements();
+        for key in ["card", "label"] {
+            let e = elements.iter().find(|e| e.key.as_deref() == Some(key)).expect("still drawn while it exits");
+            assert!(e.exiting && e.inert, "{key} is exiting");
+            assert_eq!(rt.find(key), None, "{key} is gone from lookups");
+            assert!(rt.presented(key).is_some(), "presented still reads {key}");
+        }
     }
 
     fn duplicate_view(_: &(), _: &mut Cx<()>) -> El {

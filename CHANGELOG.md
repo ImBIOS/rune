@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Exiting elements are marked, and gone from lookups.** `ElementInfo` has a new `exiting`
+  field, true for an element playing its exit transition and for everything inside it. `--tree`
+  (and the hot host's tree) still lists them, now with `"exiting": true`; elements at rest add no
+  key, so existing tree goldens don't change. The dev panel's `tree` reply leaves them out, so a
+  check that something left passes as soon as it starts leaving; send
+  `{"type":"tree","exiting":true}` to keep them, marked. `Runtime::find`, which `--script` key
+  positions and the hot host's `tap` use, already skipped an exiting element and now also skips
+  its children; a script that tapped a child of a leaving element by key now stops with "no
+  element with key". `Runtime::presented` still reads exiting elements.
 - **Dev-panel transitions can capture data.** `dev::Config::transition` now takes any
   `impl Fn(&mut S, &mut Tx) + 'static`, so a transition can close over a scene's fixture:
   `.transition("Open", "list", move |s, tx| s.open(&room, tx))`. `dev::Transition::with` builds

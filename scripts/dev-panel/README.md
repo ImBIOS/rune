@@ -32,6 +32,9 @@ The same socket accepts JSON `set`, `setBatch`, `reset`, `action`, `get`, and
 means the command reached a committed frame. A transition ack marks the settled
 source frame; its action runs on the following frame. `state` messages include
 the current frame counter, descriptors, complete values, and watch readouts.
+A `tree` reply leaves out elements playing their exit transition (and their
+children), so a check that something left passes once it starts leaving. Add
+`"exiting":true` to the request to keep them, each marked `"exiting":true`.
 
 ```json
 {"type":"action","key":"rune.transition.Join","id":1}
