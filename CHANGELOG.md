@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A window's first updates can register on a later window.** `run_windows` now builds every
+  window's host before any of them opens and drains its queued updates, so an update queued on
+  the first window that calls `register_shortcut` or `set_menu` on the second gets `Ok` instead
+  of `NotRunning`. Each window's state initializer and startup shortcuts now run before the
+  first window opens; windows still open in order.
 - **Incremental release builds; benchmarks move to `--profile perf`**. This repo's
   `[profile.release]` is now incremental, so a one-line edit in `rune` rebuilds an example in
   about 1.5 s instead of about 23 s. The new `perf` profile keeps the old release codegen

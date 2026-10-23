@@ -263,6 +263,14 @@ fn native_window_number(window: &Window) -> Option<u32> {
 #[cfg(not(target_os = "macos"))]
 fn native_window_number(_: &Window) -> Option<u32> { None }
 
+/// Builds every host, attaching its shortcut and menu guards, before any resumes: a window's
+/// first updates drain on resume and may register on a later window.
+fn start_all<T, H>(items: Vec<T>, mut build: impl FnMut(usize, T) -> Option<H>, resume: impl FnMut(&mut H)) -> Vec<Option<H>> {
+    let mut hosts: Vec<_> = items.into_iter().enumerate().map(|(slot, item)| build(slot, item)).collect();
+    hosts.iter_mut().flatten().for_each(resume);
+    hosts
+}
+
 struct Windows<S: 'static> {
     factory: Option<Box<dyn FnOnce(&[Display]) -> Vec<WindowSpec<S>>>>,
     args: Args,
@@ -297,7 +305,8 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
         crate::windows::validate(&specs).expect("window keys");
         let trace_window = self.args.window.clone().or_else(|| specs.first().map(|s| s.key.clone()));
         let mut overlays = Vec::new();
-        for (slot, mut spec) in specs.into_iter().enumerate() {
+        let wayland = is_wayland(event_loop);
+        self.hosts = start_all(specs, |slot, mut spec| {
             let mut inherited = self.args.clone();
             if inherited.native && trace_window.as_deref() != Some(spec.key.as_str()) {
                 inherited.trace = None;
@@ -310,14 +319,11 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
                     spec.app.spec.size = (w as f32 / scale, h as f32 / scale);
                 }
                 crate::tooling::headless_configured(spec.app, args, spec.options.transparent);
-                self.hosts.push(None);
-                continue;
+                return None;
             }
             overlays.append(&mut spec.app.overlays);
-            let mut host = Host::new(spec, args, self.proxy.clone(), slot, self.gpu.clone(), is_wayland(event_loop));
-            AnyHost::resumed(&mut host, event_loop);
-            self.hosts.push(Some(Box::new(host)));
-        }
+            Some(Box::new(Host::new(spec, args, self.proxy.clone(), slot, self.gpu.clone(), wayland)) as Box<dyn AnyHost>)
+        }, |host| host.resumed(event_loop));
         for mut overlay in overlays {
             let (slot, proxy) = (self.hosts.len(), self.proxy.clone());
             let frame_proxy = proxy.clone();
@@ -540,6 +546,25 @@ pub(crate) fn is_wayland(event_loop: &ActiveEventLoop) -> bool {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn uses_drag_regions(chrome: Chrome, borderless: bool, panel: bool) -> bool {
     chrome.drag_regions && (borderless || chrome.full_size_content) && !panel
+}
+
+#[test]
+fn a_window_s_first_updates_can_register_on_a_later_window() {
+    use crate::{App, AppSpec, MenuItem, el};
+    type S = Vec<String>;
+    let apps: Vec<App<S>> = ["first", "second"].map(|title| App::new(AppSpec::new(title, (10.0, 10.0), Vec::new, |_, _| el()))).into();
+    let second = apps[1].handle();
+    apps[0].handle().update(move |s: &mut S, _| {
+        s.push(format!("{:?}", second.register_shortcut("ctrl+alt+shift+f18".parse().unwrap(), |_, _| {}).map(|_| ())));
+        s.push(format!("{:?}", second.set_menu([MenuItem::new("Item", |_: &mut S, _| {})])));
+    });
+    // As Host::new and Host::resumed: attach the guards, then drain the first updates.
+    let hosts = start_all(apps.into(), |_, app| {
+        let shortcuts = crate::shortcuts::Guard::attach(&app.shared, Arc::new(|| {}), true, false);
+        let menus = crate::native_menu::Guard::attach(&app.shared, true);
+        Some((app, shortcuts, menus, S::new()))
+    }, |(app, _, _, state)| for f in app.shared.take().updates { f(state, &mut Tx::default()); });
+    assert_eq!(hosts[0].as_ref().unwrap().3, ["Ok(())", "Ok(())"]);
 }
 
 #[test]
