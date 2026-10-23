@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Italics.** `TextStyle::italic()` and `Span::italic` pick the family's italic face (SF's on
+  macOS) or lean the upright face 12° when it has none (bundled Inter). rune-kit `Markdown` draws
+  `*emphasis*` in italic, so its emphasis runs change pixels; advances don't move.
 - **Math alphanumerics and non-Latin scripts render instead of tofu.** Math alphanumerics and
   symbol blocks, plus Hebrew, Arabic, Devanagari, Bengali and Thai, load system fonts the first
   time a text uses them. Text that used these characters changes pixels and advances; Latin-only

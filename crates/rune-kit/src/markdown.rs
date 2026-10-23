@@ -485,7 +485,10 @@ impl Renderer {
                     }
                     Style::CodePad => sp.bg = Some(s.code_bg),
                     Style::Strong => sp.weight = Some(s.strong_weight),
-                    Style::Em => sp.color = Some(s.text),
+                    Style::Em => {
+                        sp.color = Some(s.text);
+                        sp.italic = true;
+                    }
                     Style::Link => {
                         sp.color = Some(s.accent);
                         sp.underline = Some(s.link_underline);

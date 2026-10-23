@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use parley::fontique::{Blob, Collection, CollectionOptions, FallbackKey, FamilyId, Script, SourceCache};
 use parley::{
-    Alignment, AlignmentOptions, FontContext, FontFamily, FontFamilyName, FontWeight, Layout, LayoutContext,
+    Alignment, AlignmentOptions, FontContext, FontFamily, FontFamilyName, FontStyle, FontWeight, Layout, LayoutContext,
     LineHeight, PositionedLayoutItem, StyleProperty,
 };
 use swash::FontRef;
@@ -46,7 +46,8 @@ const CJK_SCRIPTS: [&[u8; 4]; 5] = [b"Hani", b"Hira", b"Kana", b"Hang", b"Bopo"]
 #[cfg(target_os = "macos")]
 const SYMBOL_FAMILIES: &[&str] = &["System Font", ".SF NS", "Apple Symbols", ".SF NS Symbols", "Menlo", "Apple Color Emoji"];
 #[cfg(target_os = "macos")]
-const SYMBOL_FONT_FILES: &[&str] = &["sfnsttf", "applesymbols", "sfnssymbols", "menlo", "applecoloremoji"];
+// SF italic rides along so `Family::Named("System Font").italic()` gets the real face.
+const SYMBOL_FONT_FILES: &[&str] = &["sfnsttf", "sfnsitalic", "applesymbols", "sfnssymbols", "menlo", "applecoloremoji"];
 #[cfg(windows)]
 const SYMBOL_FAMILIES: &[&str] = &["Segoe UI Symbol", "Segoe UI Emoji"];
 #[cfg(windows)]
@@ -210,6 +211,8 @@ pub struct Span {
     pub bg: Option<Color>,
     pub bg_pad: f32,
     pub underline: Option<Color>,
+    /// The family's italic face, or a synthetic oblique when it has none.
+    pub italic: bool,
 }
 
 impl Span {
@@ -227,6 +230,8 @@ struct GlyphKey {
     coords: u64,
     subpx: u8,
     dilation: u32,
+    /// Synthetic oblique, in degrees (0 for none).
+    skew: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -333,9 +338,15 @@ impl Atlas {
     }
 }
 
-fn rasterize(scaler: &mut swash::scale::Scaler<'_>, atlas: &mut Atlas, glyph: u16, subpx: u8, dilation: f32) -> Option<AtlasGlyph> {
+/// Lean of a synthetic oblique, in degrees, for faces with no italic.
+const SYNTHETIC_OBLIQUE: u8 = 12;
+
+fn rasterize(scaler: &mut swash::scale::Scaler<'_>, atlas: &mut Atlas, glyph: u16, subpx: u8, dilation: f32, skew: u8) -> Option<AtlasGlyph> {
+    // Outlines are y-up here, so a positive x-skew leans the tops right.
+    let lean = (skew != 0).then(|| Transform::skew(swash::zeno::Angle::from_degrees(skew as f32), swash::zeno::Angle::ZERO));
     let image = Render::new(&[Source::Outline])
         .format(Format::Alpha)
+        .transform(lean)
         // Swash expands toward +x/+y; offset back to preserve the outline's centre.
         .embolden(dilation)
         .offset(Vector::new(subpx as f32 / SUBPIXEL_STEPS - dilation, -dilation))
@@ -529,7 +540,7 @@ pub fn text_hash(text: &str, spans: &[Span], style: TextStyle, scale: f32, width
     let mut h = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut h);
     for s in spans {
-        (s.start, s.end, s.mono, s.weight.map(f32::to_bits), s.size.map(f32::to_bits)).hash(&mut h);
+        (s.start, s.end, s.mono, s.weight.map(f32::to_bits), s.size.map(f32::to_bits), s.italic).hash(&mut h);
     }
     (style.size.to_bits(), style.weight.to_bits(), style.family, style.line_height.to_bits(), style.tracking.to_bits())
         .hash(&mut h);
@@ -537,7 +548,7 @@ pub fn text_hash(text: &str, spans: &[Span], style: TextStyle, scale: f32, width
     let optical = match style.optical_size {
         OpticalSize::Auto => (0, 0), OpticalSize::FontDefault => (1, 0), OpticalSize::Fixed(size) => (2, size.to_bits()),
     };
-    (style.variations, style.features, optical).hash(&mut h);
+    (style.variations, style.features, optical, style.italic).hash(&mut h);
     h.finish()
 }
 
@@ -684,6 +695,9 @@ impl TextSystem {
         b.push_default(FontFamily::from(sans.as_slice()));
         b.push_default(StyleProperty::FontSize(style.size));
         b.push_default(StyleProperty::FontWeight(FontWeight::new(style.weight)));
+        if style.italic {
+            b.push_default(StyleProperty::FontStyle(FontStyle::Italic));
+        }
         if !style.features.is_empty() {
             b.push_default(StyleProperty::FontFeatures(style.features.into()));
         }
@@ -706,6 +720,9 @@ impl TextSystem {
             }
             if let Some(w) = s.weight {
                 b.push(StyleProperty::FontWeight(FontWeight::new(w)), r.clone());
+            }
+            if s.italic {
+                b.push(StyleProperty::FontStyle(FontStyle::Italic), r.clone());
             }
             if let Some(sz) = s.size {
                 b.push(StyleProperty::FontSize(sz), r.clone());
@@ -777,6 +794,8 @@ impl TextSystem {
                 let coords = run.normalized_coords();
                 let coords_key = coords.iter().fold(0u64, |h, c| h.wrapping_mul(31).wrapping_add(c.to_bits() as u16 as u64));
                 let ink = glyph_run.style().brush.0;
+                // A face without italics leans by a fixed angle instead of fontique's 14°.
+                let skew = if run.synthesis().skew().is_some() { SYNTHETIC_OBLIQUE } else { 0 };
                 let baseline = (origin[1] + glyph_run.baseline()).round();
                 let mut rel = glyph_run.offset();
                 for g in glyph_run.glyphs() {
@@ -800,6 +819,7 @@ impl TextSystem {
                         coords: coords_key,
                         subpx,
                         dilation: dilation.to_bits(),
+                        skew,
                     };
                     let entry = match self.atlas.map.get(&key) {
                         Some(&e) => e,
@@ -828,7 +848,7 @@ impl TextSystem {
                                 out.push(c.quad(gx, gy, ink, byte));
                                 continue;
                             }
-                            let e = rasterize(&mut scaler, &mut self.atlas, g.id as u16, subpx, dilation);
+                            let e = rasterize(&mut scaler, &mut self.atlas, g.id as u16, subpx, dilation, skew);
                             self.atlas.map.insert(key, e);
                             e
                         }
@@ -961,6 +981,55 @@ mod tests {
         assert_eq!(han.len(), 4);
         assert!(han.iter().all(|id| *id != 0), "tofu: {han:?}");
         assert_eq!(glyph_ids("Hello"), glyph_ids("Hello"));
+    }
+
+    /// `(text range, synthetic skew)` of each glyph run of `text`.
+    fn run_skews(ts: &mut TextSystem, text: &str, spans: &[Span], style: TextStyle) -> Vec<(std::ops::Range<usize>, Option<f32>, String)> {
+        let layout = ts.layout_rich(text, spans, style, 2.0, None);
+        let mut out = Vec::new();
+        for line in layout.lines() {
+            for item in line.items() {
+                let PositionedLayoutItem::GlyphRun(run) = item else { continue };
+                let font = run.run().font();
+                let font_ref = FontRef::from_index(font.data.as_ref(), font.index as usize).unwrap();
+                let style = format!("{:?}", font_ref.attributes().style());
+                out.push((run.run().text_range(), run.run().synthesis().skew(), style));
+            }
+        }
+        out
+    }
+
+    /// A face without italics (bundled Inter) leans synthetically, in the whole style or one
+    /// span; a family with an italic face (system SF, DejaVu) uses it unskewed.
+    #[test]
+    fn italic_uses_the_real_face_or_a_synthetic_oblique() {
+        let mut ts = TextSystem::default();
+        let upright = TextStyle::new(13.0, 400.0);
+        assert!(run_skews(&mut ts, "Hello", &[], upright).iter().all(|r| r.1.is_none()));
+        assert!(run_skews(&mut ts, "Hello", &[], upright.italic()).iter().all(|r| r.1.is_some()), "Inter has no italic");
+        let spans = [Span { italic: true, ..Span::new(6, 10) }];
+        for (range, skew, _) in run_skews(&mut ts, "plain emph", &spans, upright) {
+            assert_eq!(skew.is_some(), range.start >= 6, "{range:?}");
+        }
+        // The synthetic lean widens an upright stem's ink and moves its top right.
+        let mut quads = |style| {
+            let l = ts.layout_rich("l", &[], style, 2.0, None);
+            let mut q = Vec::new();
+            ts.glyphs_for_layout(&l, 2.0, [0.0, 0.0], false, &mut q);
+            q[0]
+        };
+        let (a, b) = (quads(upright), quads(upright.italic()));
+        assert!(b.rect[2] >= a.rect[2] + 3.0, "upright {:?}, oblique {:?}", a.rect, b.rect);
+
+        let real = if cfg!(target_os = "macos") { "System Font" } else { "DejaVu Sans" };
+        if ts.font_cx.collection.family_id(real).is_none() {
+            eprintln!("skipping real italic: {real} not loaded");
+            return;
+        }
+        let style = upright.family(Family::Named(real)).italic();
+        for (range, skew, face) in run_skews(&mut ts, "Hello", &[], style) {
+            assert!(skew.is_none() && face != "Normal", "{range:?} of {real}: skew {skew:?}, face {face}");
+        }
     }
 
     /// Hebrew, Arabic, Devanagari, Bengali and Thai load their system fonts on first use and

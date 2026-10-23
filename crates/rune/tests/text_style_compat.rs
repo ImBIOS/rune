@@ -1,7 +1,7 @@
 use rune::{Align, El, Family, OpticalSize, TextStyle, text};
 
-// Exactly TextStyle's public fields before `TextAlign`. Deliberately exhaustive: alignment is an
-// element builder, so adding it must not break struct literals in Hex, Invoke or Rooms.
+// Exactly TextStyle's public fields. Deliberately exhaustive: alignment is an element builder,
+// not a style field. Consumers build styles with `TextStyle::new` and `..` (checked for `italic`).
 const LEGACY_STYLE: TextStyle = TextStyle {
     size: 13.0,
     weight: 400.0,
@@ -11,6 +11,7 @@ const LEGACY_STYLE: TextStyle = TextStyle {
     variations: "",
     features: "",
     optical_size: OpticalSize::Auto,
+    italic: false,
 };
 
 #[test]

@@ -56,12 +56,17 @@ pub struct TextStyle {
     /// CSS OpenType settings, e.g. `"'tnum' 1, 'ss01' 1"`.
     pub features: &'static str,
     pub optical_size: OpticalSize,
+    /// The family's italic face, or a synthetic oblique when it has none.
+    pub italic: bool,
 }
 
 impl TextStyle {
     pub const fn new(size: f32, weight: f32) -> TextStyle {
         TextStyle { size, weight, family: Family::Sans, line_height: 0.0, tracking: 0.0,
-            variations: "", features: "", optical_size: OpticalSize::Auto }
+            variations: "", features: "", optical_size: OpticalSize::Auto, italic: false }
+    }
+    pub const fn italic(self) -> TextStyle {
+        TextStyle { italic: true, ..self }
     }
     pub const fn mono(self) -> TextStyle {
         TextStyle { family: Family::Mono, ..self }
