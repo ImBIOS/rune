@@ -388,6 +388,7 @@ pub struct El {
     pub(crate) looping: Option<rune_motion::LoopSpec>,
     pub(crate) key: Option<String>,
     pub(crate) trace_name: Option<&'static str>,
+    pub(crate) trace_namespace: Option<(&'static str, &'static str)>,
     #[cfg(debug_assertions)]
     key_source: Option<&'static std::panic::Location<'static>>,
     #[cfg(debug_assertions)]
@@ -429,6 +430,7 @@ fn base(dir: FlexDirection) -> El {
         looping: None,
         key: None,
         trace_name: None,
+        trace_namespace: None,
         #[cfg(debug_assertions)]
         key_source: None,
         #[cfg(debug_assertions)]
@@ -590,6 +592,14 @@ impl El {
     /// Give simultaneous generations distinct names when comparing their motion separately.
     pub fn trace_name(mut self, name: &'static str) -> Self {
         self.trace_name = Some(name);
+        self
+    }
+
+    /// Class and host for this subtree's trace metadata (descendants may override them).
+    /// motion-lint pairs names by class too: use `("gpui", "pill")` to match Scrawl's Metal trace.
+    /// Static metadata performs no allocation, including when tracing is disabled.
+    pub fn trace_namespace(mut self, class: &'static str, host: &'static str) -> Self {
+        self.trace_namespace = Some((class, host));
         self
     }
 

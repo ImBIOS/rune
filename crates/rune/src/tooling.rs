@@ -526,7 +526,7 @@ fn window_panel_headless_focus_steps_preserve_false_and_event_order() {
 pub(crate) struct Trace {
     out: std::io::BufWriter<std::fs::File>,
     ids: HashMap<String, u32>,
-    described: HashMap<u32, String>,
+    described: HashMap<u32, (String, &'static str, &'static str)>,
     states: HashMap<u32, ([i64; 6], u32, [i64; 4])>,
     effects: HashMap<u32, [String; 2]>,
     channels: rune_motion::TraceChannels,
@@ -572,10 +572,11 @@ impl Trace {
         for e in els.iter().filter(|e| (e.key.is_some() || e.trace_name.is_some()) && !e.virtual_extent) {
             let id = self.id(&e.path);
             let name = e.trace_name.unwrap_or(&e.path);
+            let (class, host) = e.trace_namespace.unwrap_or(("rune", "rune"));
             seen.insert(id);
-            if self.described.get(&id).is_none_or(|old| old != name) {
-                self.described.insert(id, name.to_owned());
-                let mut meta = json!({ "id": id, "cls": "rune", "nm": name, "host": "rune", "role": e.role });
+            if self.described.get(&id).is_none_or(|old| old.0 != name || old.1 != class || old.2 != host) {
+                self.described.insert(id, (name.to_owned(), class, host));
+                let mut meta = json!({ "id": id, "cls": class, "nm": name, "host": host, "role": e.role });
                 if let Some(p) = e.parent.and_then(|p| els.get(p)).filter(|p| (p.key.is_some() || p.trace_name.is_some()) && !p.virtual_extent) {
                     meta["pv"] = self.id(&p.path).into();
                 }
@@ -1108,10 +1109,13 @@ mod tests {
 
     #[test]
     fn trace_annotations_reach_both_writers_once() {
-        fn view(_: &(), _: &mut Cx<()>) -> El {
-            crate::el().key("root").child(crate::el().key("generation-7").trace_name("chip:Area").size(30.0, 20.0))
+        fn view(changed: &bool, _: &mut Cx<bool>) -> El {
+            let (class, host) = if *changed { ("other", "other-host") } else { ("gpui", "pill") };
+            crate::el().key("root").trace_namespace(class, host)
+                .child(crate::el().key("generation-7").trace_name("chip:Area").size(30.0, 20.0))
+                .child(crate::el().key("fixed").trace_name("fixed").trace_namespace("gpui", "pill"))
         }
-        let mut rt = Runtime::new((), view, (100.0, 100.0), Env { scale: 1.0, system_dark: true });
+        let mut rt = Runtime::new(false, view, (100.0, 100.0), Env { scale: 1.0, system_dark: true });
         let (trace, buffer) = rune_motion::MotionTrace::in_memory(&rune_motion::TraceHeader {
             launch: "pill".into(), width: 100.0, height: 100.0, hz: 60.0, scale: 1.0,
         });
@@ -1134,18 +1138,29 @@ mod tests {
             trace.frame(&mut rt, 0.0, 0.0);
             rt.frame(0.02);
             trace.frame(&mut rt, 20.0, 0.0);
+            rt.update(|s, _| *s = true);
+            rt.frame(0.02);
+            trace.frame(&mut rt, 40.0, 0.0);
         }
         rt.scene.take_trace().unwrap().flush().unwrap();
         let tooling = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_file(path).unwrap();
         for text in [tooling, buffer.contents()] {
             let lines: Vec<Value> = text.lines().map(|s| serde_json::from_str(s).unwrap()).collect();
-            assert!(lines[1]["m"].as_array().unwrap().iter().any(|m| m["nm"] == "chip:Area"));
+            let chip = lines[1]["m"].as_array().unwrap().iter().find(|m| m["nm"] == "chip:Area").unwrap();
+            assert_eq!(chip["cls"], "gpui");
+            assert_eq!(chip["host"], "pill");
             assert_eq!(lines[1]["ev"], json!(["lab:Start", "lab:Ready"]));
             let channel = lines[1]["cm"].as_array().unwrap().iter().find(|m| m["name"] == "shell.width").unwrap();
             assert_eq!(channel["kind"], "position");
             assert!(lines[1]["c"].as_array().unwrap().iter().any(|c| c[0] == channel["id"] && c[1].as_f64() == Some(40.0)));
             for field in ["cm", "c", "ev"] { assert!(lines[2][field].is_null(), "duplicate {field}"); }
+            let updated = lines[3]["m"].as_array().unwrap();
+            let renamed = updated.iter().find(|m| m["nm"] == "chip:Area").unwrap();
+            assert_eq!(renamed["id"], chip["id"]);
+            assert_eq!(renamed["cls"], "other");
+            assert_eq!(renamed["host"], "other-host");
+            assert!(!updated.iter().any(|m| m["nm"] == "fixed"), "descendant override must survive parent namespace changes");
         }
     }
 

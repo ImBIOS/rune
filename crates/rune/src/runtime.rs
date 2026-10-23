@@ -115,6 +115,7 @@ pub(crate) struct Node {
     pub path: String,
     pub key: Option<String>,
     pub trace_name: Option<&'static str>,
+    pub trace_namespace: Option<(&'static str, &'static str)>,
     pub role: &'static str,
     pub label: Option<String>,
     pub vis: Visual,
@@ -174,6 +175,7 @@ enum Action {
 #[derive(Clone, Debug)]
 pub struct ElementInfo {
     pub trace_name: Option<&'static str>,
+    pub trace_namespace: Option<(&'static str, &'static str)>,
     pub loop_phase: Option<f64>,
     pub focusable: bool,
     pub focused: bool,
@@ -959,7 +961,10 @@ impl<S: 'static> Runtime<S> {
         self.t += step;
         self.scene.set_time(self.t);
         if self.scene.tracing() {
-            for node in &self.nodes { self.scene.trace_name(node.id, node.trace_name); }
+            for node in &self.nodes {
+                self.scene.trace_name(node.id, node.trace_name);
+                self.scene.trace_namespace(node.id, node.trace_namespace);
+            }
         }
         let out = self.scene.frame();
         let mut animating = out.animating;
@@ -3168,6 +3173,7 @@ impl<S: 'static> Runtime<S> {
                 }
                 Some(ElementInfo {
                     trace_name: n.trace_name,
+                    trace_namespace: n.trace_namespace,
                     loop_phase: self.loops.get(&n.id).map(|l| {
                         if self.reduced_motion && !matches!(n.looping.map(|s| s.kind), Some(rune_motion::LoopKind::Sequence(_))) { 0.0 }
                         else { l.phase(self.t) }
@@ -3210,6 +3216,7 @@ impl<S: 'static> Runtime<S> {
             let t = f.destination;
             elements.push(ElementInfo {
                 trace_name: None,
+                trace_namespace: None,
                 loop_phase: None,
                 focusable: false, focused: false, focus_visible: false, inert: true,
                 key: Some(path.clone()), path, role: "text", label: None, text: None,
@@ -3534,6 +3541,7 @@ fn flatten(
     let virtual_mount = el.virtual_mount || parent.is_some_and(|p| nodes[p].virtual_mount);
     #[cfg(debug_assertions)]
     let scroll_source = el.scroll_source;
+    let trace_namespace = el.trace_namespace.or_else(|| parent.and_then(|p| nodes[p].trace_namespace));
     let El {
         on_paste,
         on_window_focus,
@@ -3584,6 +3592,7 @@ fn flatten(
         path: path.clone(),
         key,
         trace_name,
+        trace_namespace,
         role,
         label,
         vis,

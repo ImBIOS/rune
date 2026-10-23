@@ -166,7 +166,9 @@ pub struct MotionTrace {
     time_scale: f32,
     line: String,
     names: FxMap<u64, &'static str>,
-    described: FxMap<u64, Option<&'static str>>,
+    described: FxMap<u64, (Option<&'static str>, Option<(&'static str, &'static str)>)>,
+    namespaces: FxMap<u64, (&'static str, &'static str)>,
+    class: String,
     host: String,
     channels: TraceChannels,
     events: Vec<String>,
@@ -194,6 +196,8 @@ impl MotionTrace {
             line: String::new(),
             names: FxMap::default(),
             described: FxMap::default(),
+            namespaces: FxMap::default(),
+            class: "rune".into(),
             host: "scene".into(),
             channels: TraceChannels::default(),
             events: Vec::new(),
@@ -222,6 +226,19 @@ impl MotionTrace {
     pub fn host(mut self, host: impl Into<String>) -> Self {
         self.host = host.into();
         self
+    }
+
+    /// The comparison class. motion-lint pairs named elements by both `nm` and `cls`.
+    /// Use the reference writer's class (e.g. `gpui`) for cross-renderer comparisons.
+    pub fn class(mut self, class: impl Into<String>) -> Self {
+        self.class = class.into();
+        self
+    }
+
+    /// Overrides this node's class and host; None restores the writer's defaults.
+    pub fn namespace(&mut self, node: NodeId, namespace: Option<(&'static str, &'static str)>) -> bool {
+        if let Some(namespace) = namespace { self.namespaces.insert(node.0, namespace) != Some(namespace) }
+        else { self.namespaces.remove(&node.0).is_some() }
     }
 
     /// Stable display name, independent of reconciliation identity. None restores the NodeId.
@@ -289,12 +306,14 @@ impl MotionTrace {
         for p in presented {
             let (id, _) = self.id(p.node);
             let name = self.names.get(&p.node.0).copied();
-            if self.described.insert(p.node.0, name) != Some(name) {
+            let namespace = self.namespaces.get(&p.node.0).copied();
+            if self.described.insert(p.node.0, (name, namespace)) != Some((name, namespace)) {
                 if !metas.is_empty() {
                     metas.push(',');
                 }
                 let name = name.map_or_else(|| p.node.0.to_string(), str::to_owned);
-                let _ = write!(metas, r#"{{"id":{id},"cls":"rune","nm":{},"host":{}"#, json_str(&name), json_str(&self.host));
+                let (class, host) = namespace.unwrap_or((&self.class, &self.host));
+                let _ = write!(metas, r#"{{"id":{id},"cls":{},"nm":{},"host":{}"#, json_str(class), json_str(&name), json_str(host));
                 if let Some(parent) = p.parent {
                     let (pv, _) = self.id(parent);
                     let _ = write!(metas, r#","pv":{pv}"#);

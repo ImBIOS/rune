@@ -10,7 +10,7 @@ fn trace_names_channels_and_events_match_motion_lint() {
     scene.insert(NodeId(40), NodeSpec::new(Rect::new(0.0, 0.0, 100.0, 40.0)), Mount::Initial);
     scene.insert(NodeId(90), NodeSpec::new(Rect::new(10.0, 0.0, 20.0, 20.0)), Mount::Initial);
     scene.frame_at(0.0);
-    scene.set_trace(Some(trace.host("pill")));
+    scene.set_trace(Some(trace.class("gpui").host("pill")));
     scene.trace_name(NodeId(40), Some("chip:\"Area\""));
     let trace = scene.trace_mut().unwrap();
     trace.channel("shell.width", "position", 100.12345);
@@ -31,6 +31,7 @@ fn trace_names_channels_and_events_match_motion_lint() {
     let named = lines[1]["m"].as_array().unwrap().iter().find(|m| m["nm"] == "chip:\"Area\"").unwrap();
     let id = named["id"].clone();
     assert_eq!(named["host"], "pill");
+    assert_eq!(named["cls"], "gpui");
     assert!(lines[1]["m"].as_array().unwrap().iter().any(|m| m["nm"] == "90"));
     assert_eq!(lines[1]["cm"], json!([
         {"id": 1, "name": "shell.width", "kind": "position"},

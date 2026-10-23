@@ -27,7 +27,7 @@ fn disabled_trace_hooks_neither_format_nor_allocate() {
     rt.frame(0.0);
     let element = rune::el();
     let before = allocs();
-    let _named = element.trace_name("chip:Area");
+    let _named = element.trace_name("chip:Area").trace_namespace("gpui", "pill");
     for _ in 0..100 {
         rt.update(|_, tx| {
             assert!(!tx.tracing());

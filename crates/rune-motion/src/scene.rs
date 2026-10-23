@@ -360,6 +360,11 @@ impl Scene {
             if let Some(i) = self.slot(id) { self.nodes[i].dirty = true; }
         }
     }
+    pub fn trace_namespace(&mut self, id: NodeId, namespace: Option<(&'static str, &'static str)>) {
+        if self.trace.as_mut().is_some_and(|trace| trace.namespace(id, namespace)) {
+            if let Some(i) = self.slot(id) { self.nodes[i].dirty = true; }
+        }
+    }
     pub fn take_trace(&mut self) -> Option<MotionTrace> {
         self.trace.take()
     }
