@@ -15,7 +15,7 @@ struct Uniforms {
     fade: [u32; 4],
     // format (0 BGRA, 1 video NV12, 2 full NV12), matrix (0 601, 1 709), transfer, alpha
     color: [f32; 4],
-    // Exact mapping flag, source dimensions, padding.
+    // Exact mapping flag, source dimensions, horizontal mirror flag.
     sampling: [f32; 4],
 }
 pub(crate) struct Imported {
@@ -214,7 +214,7 @@ impl SurfaceRenderer {
         // Keep uniforms/bindings on unchanged frames. The source is latched here, after scene build.
         let mut count = 0;
         for d in draws {
-            let Some(frame) = d.surface.latest() else {
+            let Some((frame, mirrored)) = d.surface.latest_mirrored() else {
                 self.cache.remove(&d.surface.key());
                 continue;
             };
@@ -260,7 +260,7 @@ impl SurfaceRenderer {
                     if f.color.transfer == Transfer::Srgb { 0.0 } else { 1.0 },
                     d.opacity,
                 ],
-                sampling: [if exact { 1.0 } else { 0.0 }, f.size[0] as f32, f.size[1] as f32, 0.0],
+                sampling: [if exact { 1.0 } else { 0.0 }, f.size[0] as f32, f.size[1] as f32, if mirrored { 1.0 } else { 0.0 }],
             };
             if let Some(p) = self.draws.get_mut(count).filter(|p| Arc::ptr_eq(&p.imported, &imported)) {
                 *p.drawn.get_mut() = false;

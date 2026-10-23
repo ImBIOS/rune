@@ -529,3 +529,154 @@ fn video_gpu_colour_sharpness_geometry_and_lifetime() {
         }
     }
 }
+
+/// BGRA whose every pixel differs, so any column swap shows. Returns the source and its RGBA readback.
+fn bgra_ramp(width: u32, height: u32) -> (ByteFrame, Vec<[u8; 4]>) {
+    let mut planes = Vec::new();
+    let mut rgba = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            let v = (x * 13 + y * 61) as u8;
+            planes.extend_from_slice(&[v, 255 - v, (y * 40) as u8, 255]);
+            rgba.push([(y * 40) as u8, 255 - v, v, 255]);
+        }
+    }
+    (ByteFrame { width, height, format: Format::Bgra, color: ColorInfo::default(), planes: [planes, vec![]] }, rgba)
+}
+fn pixel(p: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
+    let i = ((y * width + x) * 4) as usize;
+    p[i..i + 4].try_into().unwrap()
+}
+/// A mirrored draw must equal the unmirrored draw with each row reversed (any centred image).
+fn assert_row_reversed(mirrored: &[u8], plain: &[u8], size: (u32, u32), what: &str) {
+    for y in 0..size.1 {
+        for x in 0..size.0 {
+            let (a, b) = (pixel(mirrored, size.0, x, y), pixel(plain, size.0, size.0 - 1 - x, y));
+            assert!(a.iter().zip(b).all(|(a, b)| a.abs_diff(b) <= 1), "{what} ({x},{y}): {a:?} != {b:?}");
+        }
+    }
+}
+
+#[test]
+fn mirrored_video_is_exact_cropped_centred_and_toggles_without_a_new_frame() {
+    let gpu = Gpu::headless();
+    let mut renderer = SurfaceRenderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let mut id = 0;
+    for native in [false, cfg!(target_os = "macos")] {
+        let surface = NativeSurface::new();
+        surface.set_mirrored(true);
+        let mut publish_next = |b: ByteFrame| {
+            id += 1;
+            publish(&surface, b, id, native);
+        };
+
+        // 1:1 BGRA: each one-pixel column lands exactly on its mirror, also when the node's
+        // odd spare pixel snaps the image origin to x = 1.
+        let (b, src) = bgra_ramp(8, 4);
+        publish_next(b);
+        for (node_w, origin) in [(8u32, 0u32), (9, 1)] {
+            let p = render(&gpu, &mut renderer, &[draw(&surface, [0.0, 0.0, node_w as f32, 4.0])], (node_w, 4));
+            for y in 0..4 {
+                for x in origin..origin + 8 {
+                    let expected = src[(y * 8 + (7 - (x - origin))) as usize];
+                    assert_eq!(pixel(&p, node_w, x, y), expected, "native={native} 1:1 mirror at ({x},{y}) in {node_w}");
+                }
+            }
+        }
+
+        // 1:1 Fill crop of a 16x8 source into 8x8: columns 4..12 show, mirrored about the centre.
+        let (b, src) = bgra_ramp(16, 8);
+        publish_next(b);
+        let mut d = draw(&surface, [0.0, 0.0, 8.0, 8.0]);
+        d.fit = SurfaceFit::Fill;
+        let p = render(&gpu, &mut renderer, &[d], (8, 8));
+        for y in 0..8 {
+            for x in 0..8 {
+                assert_eq!(pixel(&p, 8, x, y), src[(y * 16 + 11 - x) as usize], "native={native} Fill crop ({x},{y})");
+            }
+        }
+
+        // NV12 at 1:1: luma per pixel and each 2x2 chroma block move together.
+        let (w, h) = (8u32, 4u32);
+        let luma: Vec<u8> = (0..w * h).map(|i| (16 + i * 6) as u8).collect();
+        let chroma: Vec<u8> = (0..w * h / 4).flat_map(|i| [(40 + i * 20) as u8, (200 - i * 18) as u8]).collect();
+        let color = ColorInfo { matrix: Matrix::Bt709, transfer: Transfer::Srgb };
+        publish_next(ByteFrame {
+            width: w,
+            height: h,
+            format: Format::Nv12Full,
+            color,
+            planes: [luma.clone(), chroma.clone()],
+        });
+        let p = render(&gpu, &mut renderer, &[draw(&surface, [0.0, 0.0, w as f32, h as f32])], (w, h));
+        for y in 0..h {
+            for x in 0..w {
+                let sx = w - 1 - x;
+                let c = ((y / 2) * (w / 2) + sx / 2) as usize * 2;
+                let reference =
+                    nv12_reference(luma[(y * w + sx) as usize], chroma[c], chroma[c + 1], Format::Nv12Full, color)
+                        .map(srgb);
+                let got = pixel(&p, w, x, y);
+                for i in 0..3 {
+                    assert!(got[i].abs_diff(reference[i]) <= 1, "native={native} NV12 ({x},{y}): {got:?} != {reference:?}");
+                }
+            }
+        }
+
+        // Filtered paths: bilinear Fill (2x, cropped) and the area-grid shrink, BGRA and NV12.
+        let (bgra, _) = bgra_ramp(16, 8);
+        for (frame, rect, fit, size, what) in [
+            (bgra, [0.0, 0.0, 16.0, 16.0], SurfaceFit::Fill, (16, 16), "BGRA bilinear Fill"),
+            (synthetic(32, 16, 3), [0.0, 0.0, 24.0, 20.0], SurfaceFit::Fill, (24, 20), "NV12 bilinear Fill"),
+            (synthetic(128, 32, 5), [0.0, 0.0, 8.0, 8.0], SurfaceFit::Fit, (8, 8), "NV12 area shrink"),
+        ] {
+            publish_next(frame);
+            let mut d = draw(&surface, rect);
+            d.fit = fit;
+            surface.set_mirrored(false);
+            let plain = render(&gpu, &mut renderer, &[d.clone()], size);
+            surface.set_mirrored(true);
+            let mirrored = render(&gpu, &mut renderer, &[d], size);
+            assert_ne!(plain, mirrored, "{what}: the source must not be symmetric");
+            assert_row_reversed(&mirrored, &plain, size, &format!("native={native} {what}"));
+        }
+
+        // Rounded corners, clips and opacity stay put in screen space.
+        let (b, _) = bgra_ramp(16, 16);
+        publish_next(b);
+        let mut d = draw(&surface, [0.0, 0.0, 16.0, 16.0]);
+        d.radii = [8.0, 0.0, 0.0, 0.0];
+        d.clip[2] = 12.0;
+        d.opacity = 0.5;
+        let p = render(&gpu, &mut renderer, &[d], (16, 16));
+        assert_eq!(pixel(&p, 16, 0, 0)[3], 0, "top-left radius");
+        assert_eq!(pixel(&p, 16, 15, 0)[3], 0, "right clip");
+        assert!(pixel(&p, 16, 11, 0)[3].abs_diff(128) <= 1, "opacity");
+    }
+
+    // Toggling wakes once per change and redraws the same cached frame, with no new push.
+    let surface = NativeSurface::new();
+    let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let w = wakes.clone();
+    surface.set_waker(Arc::new(move || {
+        w.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
+    let (b, src) = bgra_ramp(8, 2);
+    surface.push_bytes(b, 1).unwrap();
+    let woken = wakes.load(std::sync::atomic::Ordering::SeqCst);
+    let d = [draw(&surface, [0.0, 0.0, 8.0, 2.0])];
+    let plain = render(&gpu, &mut renderer, &d, (8, 2));
+    assert_eq!(pixel(&plain, 8, 0, 0), src[0]);
+    let clone = surface.clone();
+    clone.set_mirrored(true);
+    clone.set_mirrored(true);
+    assert!(surface.is_mirrored(), "clones share the flag");
+    assert_eq!(wakes.load(std::sync::atomic::Ordering::SeqCst), woken + 1, "one wake per change");
+    let mirrored = render(&gpu, &mut renderer, &d, (8, 2));
+    assert_eq!(pixel(&mirrored, 8, 0, 0), src[7]);
+    assert_row_reversed(&mirrored, &plain, (8, 2), "runtime toggle");
+    surface.set_mirrored(false);
+    assert_eq!(wakes.load(std::sync::atomic::Ordering::SeqCst), woken + 2);
+    assert_eq!(render(&gpu, &mut renderer, &d, (8, 2)), plain, "unmirroring restores the frame");
+    assert_eq!(surface.latest().unwrap().id, 1, "no new frame was pushed");
+}

@@ -5,6 +5,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`NativeSurface::set_mirrored(bool)`** flips video horizontally at draw time, for
+  front-camera previews. It is off by default, so existing output doesn't change.
 - **Exiting password fields drop their secret.** When a secure text input starts its exit
   animation, its copy of the text is wiped and replaced by its mask, so it paints the same dots
   (no placeholder, no caret) through the exit without holding the password.

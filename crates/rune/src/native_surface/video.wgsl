@@ -39,12 +39,16 @@ fn ramp(d: f32, width: f32) -> f32 {
 }
 @fragment fn fs(i: Out) -> @location(0) vec4<f32> {
     let p = i.pos.xy + u.viewport.zw;
-    let uv = (p-u.image.xy) / u.image.zw;
-    if any(uv < vec2<f32>(0.0)) || any(uv >= vec2<f32>(1.0)) { discard; }
+    var local = p - u.image.xy;
+    let unflipped = local / u.image.zw;
+    if any(unflipped < vec2<f32>(0.0)) || any(unflipped >= vec2<f32>(1.0)) { discard; }
+    // Mirror about the image centre: Fill crops stay centred and 1:1 texels stay exact.
+    if u.sampling.w > 0.5 { local.x = u.image.z - local.x; }
+    let uv = local / u.image.zw;
     var col: vec4<f32>;
     if u.sampling.x > 0.5 {
         // Integer device-pixel origin + pixel-centre positions: no interpolation, even at Retina 2x.
-        let texel = vec2<i32>(floor(p - u.image.xy));
+        let texel = vec2<i32>(floor(local));
         col = convert(textureLoad(plane0, texel, 0), textureLoad(plane1, texel / 2, 0).rg);
     } else {
         let ratio = u.sampling.yz / u.image.zw;

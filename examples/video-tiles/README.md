@@ -48,6 +48,23 @@ Import failures (e.g. a non-IOSurface pixel buffer) appear in `surface.last_erro
 unsupported formats/colour metadata are rejected by `push`. On non-macOS, `push_bytes`
 accepts packed BGRA or two packed NV12 planes. The native `PixelBuffer` API is macOS-only.
 
+## Camera preview
+
+Ask `AVCaptureVideoDataOutput` for IOSurface-backed, Metal-compatible BGRA or `420v`
+buffers (`kCVPixelBufferMetalCompatibilityKey`), and `push` each one from its sample-buffer
+delegate. Then:
+
+```rust,ignore
+surface.set_mirrored(front_camera); // draw-time flip; captured stills stay unmirrored
+el().w(480.0).h(480.0).radius(24.0)
+    .native_surface(&surface, rune::SurfaceFit::Fill) // aspect-fill, centred crop
+```
+
+Mirroring flips about the image centre, so a Fill crop stays centred, and 1:1 pixels stay
+exact. Changing it wakes the app and redraws the current frame. When the preview window
+hides, stop the capture session and call `clear()`: a hidden window draws nothing, but
+each `push` still wakes the app.
+
 ## Colour, sampling, ownership and timing
 
 - BGRA, NV12 `420v` (16..235 luma / 16..240 chroma) and `420f` (full range).

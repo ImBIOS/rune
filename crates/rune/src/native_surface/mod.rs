@@ -89,6 +89,7 @@ struct State {
     submitted: u64,
     completed: u64,
     error: Option<String>,
+    mirrored: bool,
 }
 /// Clones share a single bounded slot; pushing never queues frames behind the decoder.
 #[derive(Clone, Default)]
@@ -128,6 +129,32 @@ impl NativeSurface {
         if let Some(wake) = wake {
             wake();
         }
+    }
+    /// Flip the image horizontally at draw time, about its centre, for a front-camera preview.
+    /// Pixels are untouched, so stills taken from the same buffers stay unmirrored. Clones
+    /// share the flag. A change wakes the app and redraws the current frame; no push is needed.
+    ///
+    /// ```
+    /// let preview = rune::NativeSurface::new();
+    /// preview.set_mirrored(true); // front camera
+    /// // el().native_surface(&preview, rune::SurfaceFit::Fill) fills and crops, mirrored.
+    /// assert!(preview.is_mirrored());
+    /// ```
+    pub fn set_mirrored(&self, mirrored: bool) {
+        let wake = {
+            let mut s = self.0.lock().unwrap();
+            if s.mirrored == mirrored {
+                return;
+            }
+            s.mirrored = mirrored;
+            s.waker.clone()
+        };
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
+    pub fn is_mirrored(&self) -> bool {
+        self.0.lock().unwrap().mirrored
     }
     pub fn push_bytes(&self, frame: ByteFrame, frame_id: u64) -> Result<(), String> {
         let [w, h] = [frame.width, frame.height];
@@ -172,8 +199,13 @@ impl NativeSurface {
             wake();
         }
     }
+    #[cfg(test)]
     fn latest(&self) -> Option<Arc<Frame>> {
         self.0.lock().unwrap().latest.clone()
+    }
+    fn latest_mirrored(&self) -> Option<(Arc<Frame>, bool)> {
+        let s = self.0.lock().unwrap();
+        s.latest.clone().map(|f| (f, s.mirrored))
     }
     fn key(&self) -> usize {
         Arc::as_ptr(&self.0) as usize
