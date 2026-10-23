@@ -29,6 +29,52 @@ pub(super) const MATH_FONT_FILES: &[&str] = &["notosansmath", "stixtwomath", "no
 #[cfg(not(any(target_os = "macos", windows)))]
 pub(super) const MATH_FAMILIES: &[&str] = &["Noto Sans Math", "STIX Two Math", "Noto Music", "Symbola"];
 
+/// A script the app's fonts usually lack, the blocks that use it and the system font files
+/// (lowercase, without spaces or dots, most preferred first) that cover it. Loaded the first
+/// time a text uses one of the blocks, as fallbacks for that script only.
+pub(super) struct ScriptFonts {
+    pub script: &'static [u8; 4],
+    pub blocks: &'static [(u32, u32)],
+    pub files: &'static [&'static str],
+}
+
+impl ScriptFonts {
+    pub(super) fn covers(&self, ch: char) -> bool {
+        self.blocks.iter().any(|&(lo, hi)| (lo..=hi).contains(&(ch as u32)))
+    }
+}
+
+const HEBREW: &[(u32, u32)] = &[(0x0590, 0x05FF), (0xFB1D, 0xFB4F)];
+const ARABIC: &[(u32, u32)] = &[(0x0600, 0x06FF), (0x0750, 0x077F), (0x0870, 0x08FF), (0xFB50, 0xFDFF), (0xFE70, 0xFEFF)];
+const DEVANAGARI: &[(u32, u32)] = &[(0x0900, 0x097F), (0xA8E0, 0xA8FF)];
+const BENGALI: &[(u32, u32)] = &[(0x0980, 0x09FF)];
+const THAI: &[(u32, u32)] = &[(0x0E00, 0x0E7F)];
+
+#[cfg(target_os = "macos")]
+pub(super) const SCRIPT_FONTS: &[ScriptFonts] = &[
+    ScriptFonts { script: b"Hebr", blocks: HEBREW, files: &["sfhebrewttf", "arialhb"] },
+    ScriptFonts { script: b"Arab", blocks: ARABIC, files: &["sfarabicttf", "geezapro"] },
+    ScriptFonts { script: b"Deva", blocks: DEVANAGARI, files: &["kohinoorttc", "itfdevanagari"] },
+    ScriptFonts { script: b"Beng", blocks: BENGALI, files: &["kohinoorbangla", "banglamn"] },
+    ScriptFonts { script: b"Thai", blocks: THAI, files: &["thonburi"] },
+];
+#[cfg(windows)]
+pub(super) const SCRIPT_FONTS: &[ScriptFonts] = &[
+    ScriptFonts { script: b"Hebr", blocks: HEBREW, files: &["segoeuittf", "arialttf"] },
+    ScriptFonts { script: b"Arab", blocks: ARABIC, files: &["segoeuittf", "arialttf"] },
+    ScriptFonts { script: b"Deva", blocks: DEVANAGARI, files: &["nirmala"] },
+    ScriptFonts { script: b"Beng", blocks: BENGALI, files: &["nirmala"] },
+    ScriptFonts { script: b"Thai", blocks: THAI, files: &["leelawui", "tahomattf"] },
+];
+#[cfg(not(any(target_os = "macos", windows)))]
+pub(super) const SCRIPT_FONTS: &[ScriptFonts] = &[
+    ScriptFonts { script: b"Hebr", blocks: HEBREW, files: &["notosanshebrew", "freesans"] },
+    ScriptFonts { script: b"Arab", blocks: ARABIC, files: &["notosansarabic", "notonaskharabic", "freesans"] },
+    ScriptFonts { script: b"Deva", blocks: DEVANAGARI, files: &["notosansdevanagari", "lohitdevanagari", "freesans"] },
+    ScriptFonts { script: b"Beng", blocks: BENGALI, files: &["notosansbengali", "lohitbengali", "freesans"] },
+    ScriptFonts { script: b"Thai", blocks: THAI, files: &["notosansthai", "tlwg", "freesans"] },
+];
+
 /// Families of a fallback group, loaded on first use.
 #[derive(Default)]
 pub(super) struct Group {

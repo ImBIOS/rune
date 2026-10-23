@@ -75,7 +75,7 @@ const CJK_FONT_FILES: [&str; 24] = [
 /// the app registered beyond its sans and mono (`AppSpec::fonts`) come first, then the CJK fonts
 /// installed on the system (found by file name in the platform's font directories, including
 /// `$XDG_DATA_HOME/fonts` and `$XDG_DATA_DIRS/*/fonts`).
-fn register_cjk_fallbacks(collection: &mut Collection, registered: &[FamilyId], families: (&str, &str)) {
+fn register_cjk_fallbacks(collection: &mut Collection, loaded: &mut LoadedFiles, registered: &[FamilyId], families: (&str, &str)) {
     let primary = [collection.family_id(families.0), collection.family_id(families.1)];
     let mut fallbacks: Vec<FamilyId> = Vec::new();
     for id in registered {
@@ -89,14 +89,9 @@ fn register_cjk_fallbacks(collection: &mut Collection, registered: &[FamilyId], 
         CJK_FONT_FILES.iter().position(|fragment| name.contains(fragment)).unwrap_or(usize::MAX)
     });
     // Memory-mapped, so a 20 MB CJK collection costs a mapping, not a read.
-    for path in files.into_iter().take(8) {
-        let before: Vec<FamilyId> = collection.family_ids().collect();
-        collection.load_fonts_from_paths([&path]);
-        let added: Vec<FamilyId> = collection.family_ids().filter(|id| !before.contains(id)).collect();
-        for id in added {
-            if !primary.contains(&Some(id)) && !fallbacks.contains(&id) {
-                fallbacks.push(id);
-            }
+    for id in load_files(collection, loaded, files.into_iter().take(8)) {
+        if !primary.contains(&Some(id)) && !fallbacks.contains(&id) {
+            fallbacks.push(id);
         }
     }
     if fallbacks.is_empty() {
@@ -104,6 +99,41 @@ fn register_cjk_fallbacks(collection: &mut Collection, registered: &[FamilyId], 
     }
     for script in CJK_SCRIPTS {
         collection.append_fallbacks(FallbackKey::new(Script::from_bytes(*script), None), fallbacks.iter().copied());
+    }
+}
+
+/// The families each system font file added to the collection, so a file is loaded once.
+type LoadedFiles = HashMap<std::path::PathBuf, Vec<FamilyId>>;
+
+/// The families of `paths`, in order, loading each file the first time.
+fn load_files(collection: &mut Collection, loaded: &mut LoadedFiles, paths: impl IntoIterator<Item = std::path::PathBuf>) -> Vec<FamilyId> {
+    let mut families: Vec<FamilyId> = Vec::new();
+    for path in paths {
+        let ids = loaded.entry(path).or_insert_with_key(|path| {
+            let before: Vec<FamilyId> = collection.family_ids().collect();
+            collection.load_fonts_from_paths([path]);
+            collection.family_ids().filter(|id| !before.contains(id)).collect()
+        });
+        for id in ids.iter() {
+            if !families.contains(id) {
+                families.push(*id);
+            }
+        }
+    }
+    families
+}
+
+/// Appends the system fonts for `fonts.script` as that script's fallbacks.
+fn register_script_fallbacks(collection: &mut Collection, loaded: &mut LoadedFiles, fonts: &fallback::ScriptFonts) {
+    let mut files = system_font_files(fonts.files);
+    let rank = |path: &std::path::PathBuf| {
+        let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase().replace([' ', '.'], "")).unwrap_or_default();
+        fonts.files.iter().position(|fragment| name.contains(fragment)).unwrap_or(usize::MAX)
+    };
+    files.sort_by_key(|path| (rank(path), path.clone()));
+    let added = load_files(collection, loaded, files.into_iter().take(4));
+    if !added.is_empty() {
+        collection.append_fallbacks(FallbackKey::new(Script::from_bytes(*fonts.script), None), added.into_iter());
     }
 }
 
@@ -476,6 +506,9 @@ pub struct TextSystem {
     pub mono: String,
     symbol_families: Vec<&'static str>,
     math: fallback::Group,
+    /// Bit `i` is set once `fallback::SCRIPT_FONTS[i]` has been looked up.
+    scripts: u64,
+    font_files: LoadedFiles,
     routes: Vec<(std::ops::Range<usize>, Route)>,
     pub atlas: Atlas,
     color_glyphs: HashMap<GlyphKey, ColorGlyph>,
@@ -532,7 +565,8 @@ impl TextSystem {
         for data in list {
             registered.extend(collection.register_fonts(Blob::new(Arc::new(*data)), None).into_iter().map(|(id, _)| id));
         }
-        register_cjk_fallbacks(&mut collection, &registered, families);
+        let mut font_files = LoadedFiles::new();
+        register_cjk_fallbacks(&mut collection, &mut font_files, &registered, families);
         let symbol_families = register_symbol_fallbacks(&mut collection);
         TextSystem {
             font_cx: FontContext { collection, source_cache: SourceCache::default() },
@@ -544,6 +578,8 @@ impl TextSystem {
             mono: families.1.to_owned(),
             symbol_families,
             math: fallback::Group::default(),
+            scripts: 0,
+            font_files,
             routes: Vec::new(),
             atlas: Atlas::new(),
             color_glyphs: HashMap::new(),
@@ -601,6 +637,14 @@ impl TextSystem {
         }
         self.shaped += 1;
         fallback::routes(text, &mut self.routes);
+        if !text.is_ascii() {
+            for (i, fonts) in fallback::SCRIPT_FONTS.iter().enumerate() {
+                if self.scripts & (1 << i) == 0 && text.chars().any(|ch| fonts.covers(ch)) {
+                    self.scripts |= 1 << i;
+                    register_script_fallbacks(&mut self.font_cx.collection, &mut self.font_files, fonts);
+                }
+            }
+        }
         if !text.is_ascii() && text.chars().any(fallback::needs_symbols) {
             self.math.get(&mut self.font_cx.collection, fallback::MATH_FONT_FILES, fallback::MATH_FAMILIES);
         }
@@ -917,6 +961,26 @@ mod tests {
         assert_eq!(han.len(), 4);
         assert!(han.iter().all(|id| *id != 0), "tofu: {han:?}");
         assert_eq!(glyph_ids("Hello"), glyph_ids("Hello"));
+    }
+
+    /// Hebrew, Arabic, Devanagari, Bengali and Thai load their system fonts on first use and
+    /// shape with real glyphs; Latin text loads none of them.
+    #[test]
+    fn scripts_load_their_system_fonts_on_first_use() {
+        let mut ts = TextSystem::default();
+        ts.layout_rich("Hello, “café” — naïve…", &[], TextStyle::new(13.0, 400.0), 2.0, None);
+        assert_eq!(ts.scripts, 0, "Latin text must not load script fallbacks");
+        let samples = ["שלום עולם", "مرحبا بالعالم", "नमस्ते दुनिया", "ওহে বিশ্ব", "สวัสดีชาวโลก"];
+        for (fonts, sample) in fallback::SCRIPT_FONTS.iter().zip(samples) {
+            assert!(sample.chars().any(|ch| fonts.covers(ch)), "{sample} is not {:?}", fonts.script);
+            if system_font_files(fonts.files).is_empty() {
+                eprintln!("skipping {}: no font installed", String::from_utf8_lossy(fonts.script));
+                continue;
+            }
+            let glyphs = faces(&mut ts, &format!("a {sample}"), &[], TextStyle::new(13.0, 400.0));
+            assert!(glyphs.iter().all(|(_, id)| *id != 0), "tofu in {sample}: {glyphs:?}");
+        }
+        assert_eq!(ts.scripts.count_ones() as usize, fallback::SCRIPT_FONTS.len());
     }
 
     #[test]
