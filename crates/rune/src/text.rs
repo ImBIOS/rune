@@ -57,11 +57,10 @@ const SYMBOL_FAMILIES: &[&str] = &["DejaVu Sans", "Noto Sans Symbols2", "Noto Sa
 #[cfg(not(any(target_os = "macos", windows)))]
 const SYMBOL_FONT_FILES: &[&str] = &["dejavusans", "notosanssymbols", "notocoloremoji"];
 
-fn register_symbol_fallbacks(collection: &mut Collection) -> Vec<&'static str> {
-    let mut files = system_font_files(SYMBOL_FONT_FILES);
-    files.sort();
-    collection.load_fonts_from_paths(files);
-    SYMBOL_FAMILIES.iter().copied().filter(|name| collection.family_id(name).is_some()).collect()
+/// The installed families among `names`, loading the system font files matching `files`.
+fn load_families(collection: &mut Collection, files: &[&str], names: &[&'static str]) -> Vec<&'static str> {
+    collection.load_fonts_from_paths(system_font_files(files));
+    names.iter().copied().filter(|name| collection.family_id(name).is_some()).collect()
 }
 
 /// File-name fragments (lowercase) of the CJK fonts desktops ship, most preferred first. Only
@@ -84,13 +83,8 @@ fn register_cjk_fallbacks(collection: &mut Collection, loaded: &mut LoadedFiles,
             fallbacks.push(*id);
         }
     }
-    let mut files = system_font_files(&CJK_FONT_FILES);
-    files.sort_by_key(|path| {
-        let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
-        CJK_FONT_FILES.iter().position(|fragment| name.contains(fragment)).unwrap_or(usize::MAX)
-    });
     // Memory-mapped, so a 20 MB CJK collection costs a mapping, not a read.
-    for id in load_files(collection, loaded, files.into_iter().take(8)) {
+    for id in load_files(collection, loaded, system_font_files(&CJK_FONT_FILES).into_iter().take(8)) {
         if !primary.contains(&Some(id)) && !fallbacks.contains(&id) {
             fallbacks.push(id);
         }
@@ -126,28 +120,24 @@ fn load_files(collection: &mut Collection, loaded: &mut LoadedFiles, paths: impl
 
 /// Appends the system fonts for `fonts.script` as that script's fallbacks.
 fn register_script_fallbacks(collection: &mut Collection, loaded: &mut LoadedFiles, fonts: &fallback::ScriptFonts) {
-    let mut files = system_font_files(fonts.files);
-    let rank = |path: &std::path::PathBuf| {
-        let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase().replace([' ', '.'], "")).unwrap_or_default();
-        fonts.files.iter().position(|fragment| name.contains(fragment)).unwrap_or(usize::MAX)
-    };
-    files.sort_by_key(|path| (rank(path), path.clone()));
-    let added = load_files(collection, loaded, files.into_iter().take(4));
+    let added = load_files(collection, loaded, system_font_files(fonts.files).into_iter().take(4));
     if !added.is_empty() {
         collection.append_fallbacks(FallbackKey::new(Script::from_bytes(*fonts.script), None), added.into_iter());
     }
 }
 
-/// Font files whose lowercase name, without spaces and dots, contains one of `fragments`. The
-/// platform's font directories are walked once per process.
+/// Font files whose lowercase name, without spaces and dots, contains one of `fragments`,
+/// ordered by the first fragment they match, then by path. The platform's font directories are
+/// walked once per process.
 fn system_font_files(fragments: &[&str]) -> Vec<std::path::PathBuf> {
     static FILES: std::sync::OnceLock<Vec<(String, std::path::PathBuf)>> = std::sync::OnceLock::new();
-    FILES
+    let mut files: Vec<_> = FILES
         .get_or_init(walk_font_dirs)
         .iter()
-        .filter(|(name, _)| fragments.iter().any(|fragment| name.contains(fragment)))
-        .map(|(_, path)| path.clone())
-        .collect()
+        .filter_map(|(name, path)| Some((fragments.iter().position(|fragment| name.contains(fragment))?, path)))
+        .collect();
+    files.sort();
+    files.into_iter().map(|(_, path)| path.clone()).collect()
 }
 
 fn walk_font_dirs() -> Vec<(String, std::path::PathBuf)> {
@@ -606,11 +596,13 @@ pub struct TextSystem {
     pub sans: String,
     pub mono: String,
     symbol_families: Vec<&'static str>,
-    math: fallback::Group,
+    /// The colour emoji family among `symbol_families`.
+    emoji: Option<&'static str>,
+    /// The installed math families, once a text has needed them.
+    math: Option<Vec<&'static str>>,
     /// Bit `i` is set once `fallback::SCRIPT_FONTS[i]` has been looked up.
     scripts: u64,
     font_files: LoadedFiles,
-    routes: Vec<(std::ops::Range<usize>, Route)>,
     pub atlas: Atlas,
     color_glyphs: HashMap<GlyphKey, ColorGlyph>,
     color_pixels: Vec<crate::pixels::Pixels>,
@@ -816,7 +808,8 @@ impl TextSystem {
         }
         let mut font_files = LoadedFiles::new();
         register_cjk_fallbacks(&mut collection, &mut font_files, &registered, families);
-        let symbol_families = register_symbol_fallbacks(&mut collection);
+        let symbol_families = load_families(&mut collection, SYMBOL_FONT_FILES, SYMBOL_FAMILIES);
+        let emoji = symbol_families.iter().copied().find(|f| f.contains("Emoji"));
         TextSystem {
             font_cx: FontContext { collection, source_cache: SourceCache::default() },
             layout_cx: LayoutContext::new(),
@@ -827,10 +820,10 @@ impl TextSystem {
             sans: families.0.to_owned(),
             mono: families.1.to_owned(),
             symbol_families,
-            math: fallback::Group::default(),
+            emoji,
+            math: None,
             scripts: 0,
             font_files,
-            routes: Vec::new(),
             atlas: Atlas::new(),
             color_glyphs: HashMap::new(),
             color_pixels: Vec::new(),
@@ -888,20 +881,29 @@ impl TextSystem {
             return l.clone();
         }
         self.shaped += 1;
-        fallback::routes(text, &mut self.routes);
+        let routes = fallback::routes(text);
         if !text.is_ascii() {
+            let (mut scripts, mut symbols) = (0u64, false);
+            for ch in text.chars() {
+                for (i, fonts) in fallback::SCRIPT_FONTS.iter().enumerate() {
+                    if (self.scripts | scripts) & (1 << i) == 0 && fonts.covers(ch) {
+                        scripts |= 1 << i;
+                    }
+                }
+                symbols |= self.math.is_none() && fallback::needs_symbols(ch);
+            }
             for (i, fonts) in fallback::SCRIPT_FONTS.iter().enumerate() {
-                if self.scripts & (1 << i) == 0 && text.chars().any(|ch| fonts.covers(ch)) {
+                if scripts & (1 << i) != 0 {
                     self.scripts |= 1 << i;
                     register_script_fallbacks(&mut self.font_cx.collection, &mut self.font_files, fonts);
                 }
             }
+            if symbols {
+                self.math = Some(load_families(&mut self.font_cx.collection, fallback::MATH_FONT_FILES, fallback::MATH_FAMILIES));
+            }
         }
-        if !text.is_ascii() && text.chars().any(fallback::needs_symbols) {
-            self.math.get(&mut self.font_cx.collection, fallback::MATH_FONT_FILES, fallback::MATH_FAMILIES);
-        }
-        let math = self.math.loaded();
-        let emoji = self.symbol_families.iter().position(|f| f.contains("Emoji")).map_or(&[][..], |i| &self.symbol_families[i..=i]);
+        let math = self.math.as_deref().unwrap_or(&[]);
+        let emoji = self.emoji.as_slice();
         let with_symbols = |primary| {
             FontFamilyName::parse_css_list(primary)
                 .flatten()
@@ -919,20 +921,22 @@ impl TextSystem {
         };
         let mono = with_symbols(self.mono.as_str());
         // Routed clusters try their fallback first, then the run's own stack (mono spans included).
-        let routed: Vec<_> = self
-            .routes
-            .iter()
-            .filter_map(|(range, route)| {
-                let fonts = match route { Route::Math => math, Route::Emoji => emoji };
-                if fonts.is_empty() {
-                    return None;
-                }
-                let mono_span = spans.iter().any(|s| s.mono && (s.start as usize) < range.end && range.start < s.end as usize);
+        // Each of the four {math, emoji} × {sans, mono} stacks is built at most once.
+        let mut stacks: [Option<Vec<FontFamilyName<'_>>>; 4] = Default::default();
+        let mut routed = Vec::new();
+        for (range, route) in routes {
+            let fonts = match route { Route::Math => math, Route::Emoji => emoji };
+            if fonts.is_empty() {
+                continue;
+            }
+            let mono_span = spans.iter().any(|s| s.mono && (s.start as usize) < range.end && range.start < s.end as usize);
+            let stack = 2 * (route == Route::Emoji) as usize + mono_span as usize;
+            stacks[stack].get_or_insert_with(|| {
                 let base = if mono_span { &mono } else { &sans };
-                let families: Vec<_> = fonts.iter().map(|name| FontFamilyName::named(name)).chain(base.iter().cloned()).collect();
-                Some((range.clone(), families))
-            })
-            .collect();
+                fonts.iter().map(|name| FontFamilyName::named(name)).chain(base.iter().cloned()).collect()
+            });
+            routed.push((range, stack));
+        }
         let mut b = self.layout_cx.ranged_builder(&mut self.font_cx, text, scale, true);
         b.push_default(FontFamily::from(sans.as_slice()));
         b.push_default(StyleProperty::FontSize(style.size));
@@ -973,8 +977,8 @@ impl TextSystem {
                 }
             }
         }
-        for (range, families) in &routed {
-            b.push(FontFamily::from(families.as_slice()), range.clone());
+        for (range, stack) in routed {
+            b.push(FontFamily::from(stacks[stack].as_deref().unwrap_or_default()), range);
         }
         let mut layout: Layout<Ink> = b.build(text);
         layout.break_all_lines(max_width);
@@ -1096,8 +1100,8 @@ impl TextSystem {
         let entry = match self.atlas.map.get(&key) {
             Some(&e) => e,
             None => {
-                // Colour glyphs sit on whole pixels and ignore emboldening.
-                let color_key = GlyphKey { subpx: 0, dilation: 0, ..key };
+                // Colour glyphs sit on whole pixels and ignore emboldening and obliques.
+                let color_key = GlyphKey { subpx: 0, dilation: 0, skew: 0, ..key };
                 if let Some(c) = self.color_glyphs.get(&color_key) {
                     out.push(c.quad(gx, gy, ink, byte));
                     return;
@@ -1262,19 +1266,24 @@ mod tests {
         assert_eq!(glyph_ids("Hello"), glyph_ids("Hello"));
     }
 
-    /// `(text range, synthetic skew)` of each glyph run of `text`.
-    fn run_skews(ts: &mut TextSystem, text: &str, spans: &[Span], style: TextStyle) -> Vec<(std::ops::Range<usize>, Option<f32>, String)> {
+    /// Each glyph run of `text` with the font it shaped with.
+    fn runs(ts: &mut TextSystem, text: &str, spans: &[Span], style: TextStyle, mut f: impl FnMut(&parley::GlyphRun<'_, Ink>, FontRef<'_>)) {
         let layout = ts.layout_rich(text, spans, style, 2.0, None);
-        let mut out = Vec::new();
         for line in layout.lines() {
             for item in line.items() {
                 let PositionedLayoutItem::GlyphRun(run) = item else { continue };
                 let font = run.run().font();
-                let font_ref = FontRef::from_index(font.data.as_ref(), font.index as usize).unwrap();
-                let style = format!("{:?}", font_ref.attributes().style());
-                out.push((run.run().text_range(), run.run().synthesis().skew(), style));
+                f(&run, FontRef::from_index(font.data.as_ref(), font.index as usize).unwrap());
             }
         }
+    }
+
+    /// `(text range, synthetic skew, face style)` of each glyph run of `text`.
+    fn run_skews(ts: &mut TextSystem, text: &str, spans: &[Span], style: TextStyle) -> Vec<(std::ops::Range<usize>, Option<f32>, String)> {
+        let mut out = Vec::new();
+        runs(ts, text, spans, style, |run, font| {
+            out.push((run.run().text_range(), run.run().synthesis().skew(), format!("{:?}", font.attributes().style())));
+        });
         out
     }
 
@@ -1377,21 +1386,11 @@ mod tests {
 
     /// `(family, glyph id)` for every glyph of `text`, in visual order.
     fn faces(ts: &mut TextSystem, text: &str, spans: &[Span], style: TextStyle) -> Vec<(String, u32)> {
-        let layout = ts.layout_rich(text, spans, style, 2.0, None);
         let mut out = Vec::new();
-        for line in layout.lines() {
-            for item in line.items() {
-                let PositionedLayoutItem::GlyphRun(run) = item else { continue };
-                let font = run.run().font();
-                let font_ref = FontRef::from_index(font.data.as_ref(), font.index as usize).unwrap();
-                let family = font_ref
-                    .localized_strings()
-                    .find_by_id(swash::StringId::Family, None)
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-                out.extend(run.glyphs().map(|g| (family.clone(), g.id)));
-            }
-        }
+        runs(ts, text, spans, style, |run, font| {
+            let family = font.localized_strings().find_by_id(swash::StringId::Family, None).map(|s| s.to_string()).unwrap_or_default();
+            out.extend(run.glyphs().map(|g| (family.clone(), g.id)));
+        });
         out
     }
 
@@ -1401,7 +1400,7 @@ mod tests {
     fn math_alphanumerics_use_one_math_font() {
         let mut ts = TextSystem::default();
         ts.layout_rich("Hello, “café” — naïve…", &[], TextStyle::new(13.0, 400.0), 2.0, None);
-        assert!(ts.math.loaded().is_empty(), "Latin text must not load the math fallback");
+        assert!(ts.math.is_none(), "Latin text must not load the math fallback");
         if system_font_files(fallback::MATH_FONT_FILES).is_empty() {
             eprintln!("skipping: no math font installed");
             return;
@@ -1415,7 +1414,7 @@ mod tests {
         ] {
             let text = format!("Let {formula}");
             let glyphs = faces(&mut ts, &text, &spans, style);
-            assert!(!ts.math.loaded().is_empty());
+            assert!(ts.math.as_ref().is_some_and(|m| !m.is_empty()));
             assert!(glyphs.iter().all(|(_, id)| *id != 0), "tofu in {text:?}: {glyphs:?}");
             if spans.is_empty() && style.family == Family::Sans {
                 assert_eq!(glyphs[..4], latin[..], "Latin before a formula keeps the app font");
@@ -1428,16 +1427,12 @@ mod tests {
     }
 
     #[test]
-    fn math_routes_merge_adjacent_alphanumerics() {
-        let mut routes = Vec::new();
-        fallback::routes("a 𝐀𝐁 b 𝟎", &mut routes);
-        assert_eq!(routes, vec![(2..10, Route::Math), (13..17, Route::Math)]);
-        fallback::routes("plain ascii", &mut routes);
-        assert!(routes.is_empty());
+    fn routes_merge_math_and_emoji_presentation() {
+        assert_eq!(fallback::routes("a 𝐀𝐁 b 𝟎"), vec![(2..10, Route::Math), (13..17, Route::Math)]);
+        assert!(fallback::routes("plain ascii").is_empty());
         let (heart, flag) = ("❤\u{FE0F}", "🏳\u{FE0F}\u{200D}🌈");
-        fallback::routes(&format!("a{heart}❤{flag}"), &mut routes);
         let flag_at = 1 + heart.len() + '❤'.len_utf8();
-        assert_eq!(routes, vec![(1..1 + heart.len(), Route::Emoji), (flag_at..flag_at + flag.len(), Route::Emoji)]);
+        assert_eq!(fallback::routes(&format!("a{heart}❤{flag}")), vec![(1..1 + heart.len(), Route::Emoji), (flag_at..flag_at + flag.len(), Route::Emoji)]);
     }
 
     /// `U+FE0F` asks for the colour emoji even when a text font has the base character; without
@@ -1445,7 +1440,7 @@ mod tests {
     #[test]
     fn emoji_presentation_selector_draws_in_colour() {
         let mut ts = TextSystem::default();
-        if !ts.symbol_families.iter().any(|f| f.contains("Emoji")) {
+        if ts.emoji.is_none() {
             eprintln!("skipping: no colour emoji font installed");
             return;
         }
@@ -1510,7 +1505,7 @@ mod tests {
     #[test]
     fn emoji_draw_as_colour_images_beside_text() {
         let mut ts = TextSystem::default();
-        if !ts.symbol_families.iter().any(|f| f.contains("Emoji")) {
+        if ts.emoji.is_none() {
             eprintln!("skipping: no colour emoji font installed");
             return;
         }

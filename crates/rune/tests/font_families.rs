@@ -1,9 +1,23 @@
 use std::hash::{Hash, Hasher};
-use rune::{Family, TextStyle, text::{Span, TextSystem}};
+use rune::{Family, OpticalSize, TextStyle, text::{Span, TextSystem}};
 
 const INTER: &[u8] = include_bytes!("../assets/Inter-Regular.ttf");
 const PLEX: &[u8] = include_bytes!("../../../themes/opencode/assets/fonts/IBMPlexMono-Regular.ttf");
 const DISPLAY: TextStyle = TextStyle::new(13.0, 400.0).family(Family::Named("IBM Plex Mono"));
+
+// Exactly TextStyle's public fields. Deliberately exhaustive: alignment is an element builder,
+// not a style field. Consumers build styles with `TextStyle::new` and `..` (checked for `italic`).
+const _: TextStyle = TextStyle {
+    size: 13.0,
+    weight: 400.0,
+    family: Family::Sans,
+    line_height: 0.0,
+    tracking: 0.0,
+    variations: "",
+    features: "",
+    optical_size: OpticalSize::Auto,
+    italic: false,
+};
 
 #[test]
 fn registered_family_is_independent_of_slots_and_cache_entries() {

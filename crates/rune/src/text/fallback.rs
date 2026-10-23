@@ -4,7 +4,6 @@
 
 use std::ops::Range;
 
-use parley::fontique::Collection;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Why a byte range is routed ahead of the style's own fonts.
@@ -79,28 +78,6 @@ pub(super) const SCRIPT_FONTS: &[ScriptFonts] = &[
     ScriptFonts { script: b"Thai", blocks: THAI, files: &["notosansthai", "tlwg", "freesans"] },
 ];
 
-/// Families of a fallback group, loaded on first use.
-#[derive(Default)]
-pub(super) struct Group {
-    families: Option<Vec<&'static str>>,
-}
-
-impl Group {
-    /// The group's installed families (empty when none are), loading its files the first time.
-    pub(super) fn get(&mut self, collection: &mut Collection, files: &[&str], names: &[&'static str]) -> &[&'static str] {
-        self.families.get_or_insert_with(|| {
-            let mut paths = super::system_font_files(files);
-            paths.sort();
-            collection.load_fonts_from_paths(paths);
-            names.iter().copied().filter(|name| collection.family_id(name).is_some()).collect()
-        })
-    }
-
-    pub(super) fn loaded(&self) -> &[&'static str] {
-        self.families.as_deref().unwrap_or(&[])
-    }
-}
-
 /// Whether `ch` is in a symbol block the eager symbol fallbacks often miss. General punctuation
 /// and currency (dashes, quotes, €) are left out: Latin prose is full of them.
 pub(super) fn needs_symbols(ch: char) -> bool {
@@ -117,11 +94,11 @@ pub(super) fn is_math_alphanumeric(ch: char) -> bool {
         | 0x212F..=0x2131 | 0x2133..=0x2134 | 0x2145..=0x2149)
 }
 
-/// Appends routed byte ranges of `text`, merging neighbours on the same route.
-pub(super) fn routes(text: &str, out: &mut Vec<(Range<usize>, Route)>) {
-    out.clear();
+/// Routed byte ranges of `text`, merging neighbours on the same route.
+pub(super) fn routes(text: &str) -> Vec<(Range<usize>, Route)> {
+    let mut out = Vec::new();
     if text.is_ascii() {
-        return;
+        return out;
     }
     let mut push = |range: Range<usize>, route| match out.last_mut() {
         Some((last, r)) if *r == route && last.end == range.start => last.end = range.end,
@@ -139,5 +116,6 @@ pub(super) fn routes(text: &str, out: &mut Vec<(Range<usize>, Route)>) {
             }
         }
     }
+    out
 }
 

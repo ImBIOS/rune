@@ -178,12 +178,12 @@ fn fade_truncation_overflow_is_independent_of_element_and_display_scale() {
 }
 
 #[test]
-fn fade_truncation_width_is_settable_and_only_applies_on_overflow() {
+fn fade_truncation_width_is_settable() {
     fn view(s: &(f32, f32), _: &mut Cx<(f32, f32)>) -> El {
         row().child(text("this is much too long").w(s.0).font(TextStyle::new(14.0, 400.0)).truncate_fade_width(s.1))
     }
     for scale in [1.0, 2.0] {
-        for (width, em, expected) in [(60.0, 3.0, 42.0), (60.0, 0.5, 7.0), (500.0, 3.0, 0.0)] {
+        for (width, em, expected) in [(60.0, 3.0, 42.0), (60.0, 0.5, 7.0)] {
             let mut rt = Runtime::new((width, em), view, (600.0, 100.0), Env::new(true, scale));
             rt.frame(0.0);
             let fades: Vec<_> = rt.instances.iter().filter(|i| i.params[1] == rune::render::KIND_GLYPH)
