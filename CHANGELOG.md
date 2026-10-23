@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Key handlers can tell a held key's repeats from its first press.** `tx.key_repeat()` is true
+  in the window's `on_key`, an overlay's `.on_key`, `on_input_key` and `on_physical_input` while
+  the OS auto-repeats a held key, and false for the first press. `KeyEvent` is unchanged, so
+  existing literals keep building. Headless drivers queue a repeat with `Runtime::repeat_key`,
+  and `--script` keys and `physical` chords take `"repeat": true`. Built-in behaviour is
+  unchanged: held keys still type, move the caret, Tab through focus and press a focused button.
 - **Unselected segments hover.** A `SegmentedControl` with `on_pick` now lights an unselected
   segment under the pointer: the `hover` overlay fills it and its label turns `text_base`, on the
   first frame in, fading out over the runtime's default 0.1 s. The selected segment and controls

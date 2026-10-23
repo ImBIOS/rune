@@ -245,7 +245,8 @@ enum Action {
     Link(String, usize),
     SecondaryPress(String, PointerPress),
     Drag(String, Drag),
-    Key(KeyEvent),
+    /// The key and whether it is an auto-repeat of a held key.
+    Key(KeyEvent, bool),
     Ime(Ime),
     Paste(zeroize::Zeroizing<String>, Option<Option<String>>),
     Focus(String, f32, f32),
@@ -1114,7 +1115,7 @@ impl<S: 'static> Runtime<S> {
             // State may have requested focus on a newly mounted field. Resolve the
             // new tree before routing this frame's text, not after it has gone to
             // the previous field. The same boundary covers an earlier handler.
-            if (ran || self.dirty) && matches!(&action, Action::Key(_) | Action::Ime(_) | Action::Paste(..)) {
+            if (ran || self.dirty) && matches!(&action, Action::Key(..) | Action::Ime(_) | Action::Paste(..)) {
                 for (source, target) in std::mem::take(&mut tx.text_flights) {
                     self.capture_text_flight(source, target);
                 }
@@ -1432,7 +1433,8 @@ impl<S: 'static> Runtime<S> {
                 }
                 true
             }
-            Action::Key(ev) => {
+            Action::Key(ev, repeat) => {
+                one.key_repeat = repeat;
                 let shown = self.keyboard_focus || self.hover_focus;
                 self.keyboard_focus = true;
                 // With no focused element, app-owned navigation (e.g. a toolbar)
@@ -2769,7 +2771,13 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub fn key(&mut self, ev: KeyEvent) {
-        self.queue.push(Action::Key(ev));
+        self.queue.push(Action::Key(ev, false));
+    }
+
+    /// Queue an auto-repeat of a held key, as the OS sends after the first press. Handlers see
+    /// `Tx::key_repeat` true for it.
+    pub fn repeat_key(&mut self, ev: KeyEvent) {
+        self.queue.push(Action::Key(ev, true));
     }
 
     pub fn ime(&mut self, ev: Ime) {
@@ -5236,12 +5244,12 @@ mod tests {
         rt.set_focus(Some(input), true);
         let copy_key = KeyEvent { key: Key::Command('c'), mods: Mods { cmd: true, ..Mods::default() } };
         rt.queue.push(Action::Press(button.clone()));
-        rt.queue.push(Action::Key(copy_key.clone()));
+        rt.queue.push(Action::Key(copy_key.clone(), false));
         rt.frame(1.0 / 120.0);
         assert_eq!(rt.copy_request.take().as_deref(), Some("héllo 👋"));
         rt.frame(1.0 / 120.0);
         assert!(rt.copy_request.is_none());
-        rt.queue.push(Action::Key(copy_key));
+        rt.queue.push(Action::Key(copy_key, false));
         rt.queue.push(Action::Press(button));
         rt.frame(1.0 / 120.0);
         assert_eq!(rt.copy_request.take().as_deref(), Some("response"));

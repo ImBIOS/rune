@@ -1208,7 +1208,10 @@ impl<T: 'static> AnyHost for Overlay<T> {
                     self.dirty |= self.rt.physical_with_fallback(crate::PhysicalInput::Key {
                         key, mods: crate::window::map_mods(self.mods), pressed, repeat: event.repeat,
                     }, fallback);
-                } else if let Some(key) = fallback { self.rt.key(key); self.dirty = true; }
+                } else if let Some(key) = fallback {
+                    if event.repeat { self.rt.repeat_key(key); } else { self.rt.key(key); }
+                    self.dirty = true;
+                }
             }
             WindowEvent::MouseInput { state, button: winit::event::MouseButton::Left, .. } => {
                 #[cfg(target_os = "macos")]

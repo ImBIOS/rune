@@ -1659,6 +1659,7 @@ impl<S: 'static> Host<S> {
                     }, logical);
                 } else if let Some(ev) = logical {
                     if ev.key == Key::Command('v') && rt.accepts_paste() { self.clipboard.read(rt); }
+                    else if event.repeat { rt.repeat_key(ev); }
                     else { rt.key(ev); }
                     redraw = true;
                 }

@@ -34,8 +34,9 @@ impl<S: 'static> Runtime<S> {
     pub(super) fn dispatch_physical(&mut self, event: PhysicalInput, fallback: Option<Fallback>, tx: &mut Tx) -> bool {
         let handler = self.focused.as_deref().and_then(|p| self.node(p))
             .and_then(|n| n.focus.physical.clone());
+        let repeat = matches!(event, PhysicalInput::Key { repeat: true, .. });
         if let Some(handler) = handler {
-            let mut one = Tx::default();
+            let mut one = Tx { key_repeat: repeat, ..Tx::default() };
             let consumed = handler(handler_state(&mut self.state), &event, &mut one);
             merge(tx, one);
             if consumed { return true; }
@@ -47,7 +48,7 @@ impl<S: 'static> Runtime<S> {
                     // change focus. An empty/image clipboard still consumes the command.
                     self.paste_request = Some(self.paste_target());
                     false
-                } else { self.run_action(Action::Key(key), tx) }
+                } else { self.run_action(Action::Key(key, repeat), tx) }
             }
             None => false,
         }
@@ -221,6 +222,62 @@ mod tests {
                 assert!(field.text.is_none());
             }
         }
+    }
+
+    #[derive(Default)]
+    struct Held { edit: TextEdit, other: TextEdit, input: Vec<bool>, app: Vec<(Key, bool)> }
+    fn held(s: &Held, _: &mut Cx<Held>) -> El {
+        col().size(300.0, 200.0)
+            .child(text_input(&s.edit, TextStyle::new(14.0, 400.0)).single_line().key("field").size(200.0, 32.0)
+                .on_edit(|s: &mut Held| &mut s.edit)
+                .on_input_key(|s: &mut Held, _, tx| { s.input.push(tx.key_repeat()); false }))
+            .child(text_input(&s.other, TextStyle::new(14.0, 400.0)).single_line().key("other").size(200.0, 32.0)
+                .on_edit(|s: &mut Held| &mut s.other))
+    }
+    fn focused(rt: &Runtime<Held>) -> Option<String> {
+        rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key)
+    }
+    fn press<S: 'static>(rt: &mut Runtime<S>, physical: PhysicalKeyCode, key: Key, repeat: bool) {
+        let mods = Mods::default();
+        rt.physical_with_fallback(PhysicalInput::Key { key: physical, mods, pressed: true, repeat }, Some(KeyEvent { key, mods }));
+        rt.frame(0.0);
+    }
+
+    #[test]
+    fn key_handlers_see_a_held_keys_repeats_and_editing_keeps_repeating() {
+        let mut rt = Runtime::new(Held::default(), held, (300.0, 200.0), Env::new(true, 1.0));
+        rt.on_key = Some(|s, ev, tx| { s.app.push((ev.key.clone(), tx.key_repeat())); true });
+        rt.frame(0.0);
+        // No focus: the app handler gets first refusal, so it sees both presses.
+        press(&mut rt, PhysicalKeyCode::Enter, Key::Enter, false);
+        press(&mut rt, PhysicalKeyCode::Enter, Key::Enter, true);
+        assert_eq!(rt.state.app, [(Key::Enter, false), (Key::Enter, true)]);
+        click(&mut rt, "field");
+        rt.frame(0.0);
+        press(&mut rt, PhysicalKeyCode::KeyX, Key::Text("x".into()), false);
+        press(&mut rt, PhysicalKeyCode::KeyX, Key::Text("x".into()), true);
+        press(&mut rt, PhysicalKeyCode::KeyX, Key::Text("x".into()), true);
+        assert_eq!(rt.state.input, [false, true, true]);
+        assert_eq!(rt.state.edit.text, "xxx", "a held letter keeps typing");
+        // Held Tab keeps moving focus, and Rune consumes it before the app handler.
+        press(&mut rt, PhysicalKeyCode::Tab, Key::Tab, true);
+        assert_eq!(focused(&rt).as_deref(), Some("other"));
+        press(&mut rt, PhysicalKeyCode::Tab, Key::Tab, true);
+        assert_eq!(focused(&rt).as_deref(), Some("field"));
+        assert_eq!(rt.state.app.len(), 2);
+    }
+
+    #[test]
+    fn a_queued_repeat_reaches_the_app_handler_with_the_flag_set() {
+        let mut rt = Runtime::new(Held::default(), held, (300.0, 200.0), Env::new(true, 1.0));
+        rt.on_key = Some(|s, ev, tx| { s.app.push((ev.key.clone(), tx.key_repeat())); true });
+        rt.frame(0.0);
+        rt.key(KeyEvent { key: Key::Text("s".into()), mods: Mods::default() });
+        rt.repeat_key(KeyEvent { key: Key::Text("s".into()), mods: Mods::default() });
+        rt.key(KeyEvent { key: Key::Text("s".into()), mods: Mods::default() });
+        rt.frame(0.0);
+        let s = Key::Text("s".into());
+        assert_eq!(rt.state.app, [(s.clone(), false), (s.clone(), true), (s, false)]);
     }
 
     #[test]

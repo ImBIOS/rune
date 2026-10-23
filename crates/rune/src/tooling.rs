@@ -254,8 +254,8 @@ const HELP: &str = "usage: <app> [window]
   --at SECONDS          virtual time of the snapshot/tree (default: end of frames or script)
   --size WxH            viewport in points      --scale N   device scale (default 2)
   --theme dark|light    system appearance
-  --script FILE.json    timestamped input (move/down/up/tap/drag, keys, {\"focus\":false}); an
-                        object adds \"displays\" and \"pointer\" for place() (rune-placed, --tree)
+  --script FILE.json    timestamped input (move/down/up/tap/drag, keys, {\"focus\":false}); a
+                        key with \"repeat\":true is a held key's auto-repeat; an object adds \"displays\" and \"pointer\" for place() (rune-placed, --tree)
   --frames N --fps 60 --start S --out DIR     dump N frames from S seconds
   --strip out.png --crop x,y,w,h --every K    tile dumped frames into one image
                         (repeat --crop to stack several regions per frame; --cols N per row)
@@ -380,7 +380,8 @@ enum Kind {
     Up,
     SecondaryDown,
     SecondaryUp,
-    Key(KeyEvent),
+    /// The key and whether it is an auto-repeat.
+    Key(KeyEvent, bool),
     Paste(String),
     Wheel(f32),
     Fling(f32),
@@ -446,9 +447,10 @@ fn parse_script(list: Value) -> Vec<Ev> {
         }
         if let Some(chord) = e["physical"].as_str() {
             let chord: crate::Shortcut = chord.parse().unwrap_or_else(|e: crate::ShortcutError| die(&e.to_string()));
+            let repeat = e["repeat"].as_bool().unwrap_or(false);
             for pressed in [true, false] {
                 out.push(Ev { t, kind: Kind::Physical(crate::PhysicalInput::Key {
-                    key: chord.physical_key(), mods: chord.modifiers(), pressed, repeat: false,
+                    key: chord.physical_key(), mods: chord.modifiers(), pressed, repeat: repeat && pressed,
                 }), pos: Pos::Rel(0.0, 0.0) });
             }
             // Then the modifiers come up, as on a real keyboard, so nothing stays held.
@@ -512,7 +514,7 @@ fn parse_script(list: Value) -> Vec<Ev> {
                 let every = e["every"].as_f64().unwrap_or(0.035);
                 for (k, c) in text.chars().enumerate() {
                     let ev = KeyEvent { key: Key::Text(c.to_string()), mods: Mods::default() };
-                    out.push(Ev { t: t + every * k as f64, kind: Kind::Key(ev), pos: Pos::Rel(0.0, 0.0) });
+                    out.push(Ev { t: t + every * k as f64, kind: Kind::Key(ev, false), pos: Pos::Rel(0.0, 0.0) });
                 }
             }
             "key" => {
@@ -529,7 +531,8 @@ fn parse_script(list: Value) -> Vec<Ev> {
                 } else {
                     key_named(name).unwrap_or_else(|| die(&format!("unknown key {name}")))
                 };
-                out.push(Ev { t, kind: Kind::Key(KeyEvent { key, mods }), pos: Pos::Rel(0.0, 0.0) });
+                let repeat = e["repeat"].as_bool().unwrap_or(false);
+                out.push(Ev { t, kind: Kind::Key(KeyEvent { key, mods }, repeat), pos: Pos::Rel(0.0, 0.0) });
             }
             "paste" => out.push(Ev { t, kind: Kind::Paste(e["text"].as_str().unwrap_or("").to_owned()), pos: Pos::Rel(0.0, 0.0) }),
             "scroll" => {
@@ -570,6 +573,30 @@ fn a_physical_chord_releases_its_modifiers_after_the_key() {
     let expected = [key(Space, mods, true), key(Space, mods, false), PhysicalInput::Modifiers(Mods::default()),
         key(F5, Mods::default(), true), key(F5, Mods::default(), false)];
     assert_eq!(format!("{kinds:?}"), format!("{expected:?}"));
+}
+
+#[cfg(test)]
+#[test]
+fn a_script_key_can_be_a_held_keys_repeat() {
+    let script = parse_script(json!([
+        {"type": "key", "name": "Enter"},
+        {"t": 0.1, "type": "key", "name": "Enter", "repeat": true},
+        {"t": 0.2, "physical": "f5", "repeat": true},
+    ]));
+    let mut rt = Runtime::new(Vec::new(), |_: &Vec<bool>, _: &mut crate::Cx<Vec<bool>>| crate::el(), (100.0, 100.0), Env::default());
+    rt.on_key = Some(|s, _, tx| { s.push(tx.key_repeat()); true });
+    let mut physical = Vec::new();
+    for event in script {
+        match event.kind {
+            Kind::Key(k, false) => rt.key(k),
+            Kind::Key(k, true) => rt.repeat_key(k),
+            Kind::Physical(crate::PhysicalInput::Key { pressed, repeat, .. }) => physical.push((pressed, repeat)),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    rt.frame(0.0);
+    assert_eq!(rt.state, [false, true]);
+    assert_eq!(physical, [(true, true), (false, false)], "the release that ends a hold is not a repeat");
 }
 
 #[cfg(test)]
@@ -1005,7 +1032,8 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
                 Kind::Up => rt.pointer_up(x, y),
                 Kind::SecondaryDown => { last_down = (x, y); rt.secondary_down(x, y); }
                 Kind::SecondaryUp => rt.secondary_up(x, y),
-                Kind::Key(k) => rt.key(k.clone()),
+                Kind::Key(k, false) => rt.key(k.clone()),
+                Kind::Key(k, true) => rt.repeat_key(k.clone()),
                 Kind::Physical(event) => rt.physical_input(*event),
                 Kind::Paste(s) => rt.paste(s.clone()),
                 Kind::Wheel(dy) => rt.wheel(x, y, *dy),

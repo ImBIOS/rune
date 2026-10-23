@@ -17,6 +17,7 @@ use crate::tok::TextStyle;
 #[derive(Clone, Debug, Default)]
 pub struct Tx {
     pub(crate) shortcut_activation_token: Option<String>,
+    pub(crate) key_repeat: bool,
     pub(crate) instant: bool,
     pub(crate) motion: Option<Spring>,
     pub(crate) color_motion: Option<Spring>,
@@ -50,6 +51,12 @@ pub enum Shell {
 }
 
 impl Tx {
+    /// Whether the key a key handler is seeing is the OS auto-repeat of a held key: true for
+    /// each repeat, false for the first press and outside key handlers. One-shot actions
+    /// (start recording on Enter, say) can return early on a repeat; arrows and Tab usually
+    /// want every repeat.
+    pub fn key_repeat(&self) -> bool { self.key_repeat }
+
     /// Whether this runtime has an attached motion or tooling trace.
     pub fn tracing(&self) -> bool { self.trace.is_some() }
 
