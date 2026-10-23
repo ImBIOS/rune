@@ -52,7 +52,24 @@ impl FirstFrame {
         if self.retry.is_none() { self.prepare(); }
         false
     }
-    fn hide(&mut self) { self.reveal = false; }
+    /// After readiness, a canceled refresh keeps the cached frame and stops retrying.
+    fn hide(&mut self) {
+        self.reveal = false;
+        if self.notified {
+            self.ready = true;
+            self.retry = None;
+            self.until = None;
+        }
+    }
+    /// The drawable deadline passed. The first frame stays hidden (the host reports it); a
+    /// refresh returns whether to reveal the cached frame rather than nothing.
+    fn expire(&mut self) -> bool {
+        self.retry = None;
+        self.until = None;
+        if !self.notified { return false; }
+        self.ready = true;
+        std::mem::take(&mut self.reveal)
+    }
     fn prepare(&mut self) {
         let now = Instant::now();
         self.retry = Some(now);
@@ -61,7 +78,7 @@ impl FirstFrame {
     /// Hidden frames settle, except the refresh a reveal waits on: its new motion runs on.
     fn settles(&self) -> bool { !(self.reveal && self.notified) }
     /// A finished frame still owes the first readiness, or a refresh owes its reveal.
-    fn pending(&self) -> bool { self.ready && (!self.notified || self.until.is_some()) }
+    fn pending(&self) -> bool { self.ready && (!self.notified || self.reveal || self.until.is_some()) }
     fn complete(&mut self) -> bool {
         self.ready = true;
         self.retry = None;
@@ -105,9 +122,18 @@ fn launcher_stale_reveal_waits_for_an_unsettled_hidden_frame() {
     assert!(!frame.request_reveal(true));
     frame.hide();
     assert!(frame.settles(), "a canceled refresh is an ordinary hidden frame");
-    frame.ready = true;
-    assert!(frame.pending() && !frame.complete(), "hide cancels the refreshed reveal");
-    assert!(frame.retry.is_none() && frame.until.is_none(), "no retries after completion");
+    assert!(frame.ready && frame.retry.is_none() && frame.until.is_none(), "hide stops the refresh retries");
+    assert!(!frame.pending() && !frame.complete(), "a late frame does not reveal");
+
+    assert!(!frame.request_reveal(true));
+    assert!(frame.expire(), "a refresh with no drawable reveals the cached frame");
+    assert!(frame.ready && !frame.pending() && frame.retry.is_none() && frame.until.is_none());
+    let mut first = FirstFrame::default();
+    first.prepare();
+    assert!(!first.request_reveal(true));
+    assert!(!first.expire() && !first.ready, "the first frame stays hidden and reports instead");
+    first.ready = true;
+    assert!(first.pending() && first.complete(), "a late first frame still reveals");
 }
 
 impl Win {
@@ -711,6 +737,11 @@ impl<S: 'static> Host<S> {
             w.window.request_redraw();
             return;
         }
+        self.show_cached();
+    }
+
+    fn show_cached(&mut self) {
+        let Some(w) = &mut self.win else { return };
         w.show(true);
         w.visible = true;
         w.occluded = false;
@@ -1233,9 +1264,14 @@ impl<S: 'static> AnyHost for Host<S> {
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
         if let Some(w) = &mut self.win && w.first_frame.retry.is_some_and(|at| at <= Instant::now()) {
             if w.first_frame.until.is_some_and(|at| at <= Instant::now()) {
-                w.first_frame.retry = None;
-                w.first_frame.until = None;
-                *self.shared.window_error.lock().unwrap() = Some("launcher first frame was not ready within two seconds".into());
+                let notified = w.first_frame.notified;
+                if w.first_frame.expire() {
+                    self.show_cached();
+                    if let Some(w) = &self.win { w.window.request_redraw(); }
+                    self.publish();
+                } else if !notified {
+                    *self.shared.window_error.lock().unwrap() = Some("launcher first frame was not ready within two seconds".into());
+                }
             } else { w.window.request_redraw(); }
         }
         if matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll)
