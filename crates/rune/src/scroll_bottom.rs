@@ -75,6 +75,20 @@ impl<S: 'static> Runtime<S> {
         }
     }
 
+    /// The offset to draw stuck-to-bottom viewport `i` at, whose presented bottom edge is
+    /// `bottom`: layout's offset keeps the content's target bottom on the viewport's target
+    /// bottom, but while either is still animating (the viewport resizing under a banner)
+    /// that would jump the rows and slide them back. This keeps the presented edges together.
+    pub(super) fn stuck_offset(&self, i: usize, bottom: f32) -> Option<f64> {
+        let n = &self.nodes[i];
+        let st = self.scrolls.get(&n.id).filter(|st| st.pinned && st.max > 0.0)?;
+        if !n.scroll.is_some_and(|s| s.stick_bottom) { return None; }
+        let c = (i + 1..self.nodes.len()).find(|&j| self.nodes[j].parent == Some(i))?;
+        let top = self.scene.presented(self.nodes[c].id)?.rect.edges()[1];
+        let lag = (top - self.nodes[c].target[1]) - (bottom - n.target[3]);
+        Some((st.max + f64::from(lag)).max(0.0))
+    }
+
     /// Queues `on_at_bottom` for viewports whose at-bottom state changed this frame.
     pub(super) fn report_at_bottom(&mut self) {
         for i in 0..self.nodes.len() {

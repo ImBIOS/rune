@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Stuck scrolls hold their bottom while they resize** (`rooms-gaps` branch). A stick-to-bottom
+  scroll whose own height animates (a banner opening above it, a footer below) now keeps its last
+  row on its bottom edge every frame. Before, the rows jumped by the size change and slid back.
+  Settled frames and `--snap` goldens are unchanged.
 - **Editing scrolls the caret into view** (`rooms-gaps` branch). Typing, pasting, IME composition
   or caret keys in a field inside a scroll viewport now scroll its nearest viewport just far enough
   to show the caret line, as a browser textarea does. Before, the caret could run off the bottom.

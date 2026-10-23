@@ -3156,7 +3156,7 @@ impl<S: 'static> Runtime<S> {
                 && let Some(st) = self.scrolls.get(&n.id)
             {
                 let origin = self.virtuals.values().find(|v| v.scroll_path == n.path).map_or(0.0, |v| f64::from(v.before));
-                dy -= grid((st.offset - origin) as f32, s);
+                dy -= grid((self.stuck_offset(i, p.rect.edges()[3]).unwrap_or(st.offset) - origin) as f32, s);
             }
             self.inh_scratch[i] = Inh { opacity: effective_opacity, paint_opacity: o, clip, fade, fade_origin, scale: sc, anchor, blur, dy, mark, group };
             if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_drag.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())
