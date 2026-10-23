@@ -377,7 +377,8 @@ pub struct Runtime<S: 'static> {
     pub(crate) ime_reset: bool,
     /// Text the focused field asked to copy (the shell writes it to the clipboard).
     pub copy_request: Option<crate::ClipboardWrite>,
-    pub(crate) paste_request: bool,
+    // Outer None: no read; inner None: app-level paste rather than a focused editor.
+    pub(crate) paste_request: Option<Option<String>>,
     /// A handler or `update` asked to close the window or quit (the shell takes it).
     pub shell_request: Option<Shell>,
     /// What `update` asked of the next commit.
@@ -532,7 +533,7 @@ impl<S: 'static> Runtime<S> {
             ime_area: None,
             ime_reset: false,
             copy_request: None,
-            paste_request: false,
+            paste_request: None,
             shell_request: None,
             pending: Tx::default(),
             animating: false,
@@ -926,7 +927,7 @@ impl<S: 'static> Runtime<S> {
         if let Some(copy) = tx.copy.take() {
             self.copy_request = Some(copy);
         }
-        self.paste_request |= tx.paste;
+        if tx.paste { self.paste_request = Some(self.paste_target()); }
         self.shell_request = self.shell_request.max(tx.shell.take());
         for (source, target) in std::mem::take(&mut tx.text_flights) {
             self.capture_text_flight(source, target);

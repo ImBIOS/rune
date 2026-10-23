@@ -957,7 +957,7 @@ impl<T: 'static> Overlay<T> {
                         if down { self.rt.pointer_down(x, y); } else { self.rt.pointer_up(x, y); }
                     },
                     Input::Key(key) => self.rt.key(key),
-                    Input::Physical(event, fallback) => self.rt.physical_with_fallback(event, fallback, None),
+                    Input::Physical(event, fallback) => self.rt.physical_with_fallback(event, fallback),
                 }
                 self.dirty = true;
             }
@@ -1174,13 +1174,13 @@ impl<T: 'static> AnyHost for Overlay<T> {
                 }
                 self.dirty = true;
             }
-            WindowEvent::KeyboardInput { event, is_synthetic: false, .. } if self.options.keys == KeyPolicy::OnDemand => {
+            WindowEvent::KeyboardInput { event, .. } if self.options.keys == KeyPolicy::OnDemand => {
                 let pressed = event.state.is_pressed();
                 let fallback = pressed.then(|| crate::window::map_key(&event.logical_key, self.mods)).flatten();
                 if let winit::keyboard::PhysicalKey::Code(key) = event.physical_key {
                     self.rt.physical_with_fallback(crate::PhysicalInput::Key {
                         key, mods: crate::window::map_mods(self.mods), pressed, repeat: event.repeat,
-                    }, fallback, None);
+                    }, fallback);
                 } else if let Some(key) = fallback { self.rt.key(key); }
                 self.dirty = true;
             }

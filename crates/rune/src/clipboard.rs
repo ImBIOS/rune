@@ -46,7 +46,10 @@ impl Default for Client {
 impl Client {
     pub fn connect(&mut self, wake: Waker) { self.wake = wake; }
     pub fn read<S: 'static>(&self, rt: &Runtime<S>) {
-        let _ = worker().send(Request::Read { target: rt.paste_target(), reply: self.sender.clone(), wake: self.wake.clone() });
+        self.read_target(rt.paste_target());
+    }
+    fn read_target(&self, target: Option<String>) {
+        let _ = worker().send(Request::Read { target, reply: self.sender.clone(), wake: self.wake.clone() });
     }
     pub fn receive<S: 'static>(&self, rt: &mut Runtime<S>) -> bool {
         let mut received = false;
@@ -55,7 +58,7 @@ impl Client {
     }
     pub fn flush<S: 'static>(&self, rt: &mut Runtime<S>) {
         if let Some(copy) = rt.copy_request.take() { let _ = worker().send(Request::Write(copy)); }
-        if std::mem::take(&mut rt.paste_request) { self.read(rt); }
+        if let Some(target) = rt.paste_request.take() { self.read_target(target); }
     }
 }
 

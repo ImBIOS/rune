@@ -1576,7 +1576,7 @@ impl<S: 'static> Host<S> {
                 if let winit::keyboard::PhysicalKey::Code(key) = event.physical_key {
                     rt.physical_with_fallback(crate::PhysicalInput::Key {
                         key, mods: map_mods(self.mods), pressed, repeat: event.repeat,
-                    }, logical, None);
+                    }, logical);
                 } else if let Some(ev) = logical {
                     if ev.key == Key::Command('v') && rt.accepts_paste() { self.clipboard.read(rt); }
                     else { rt.key(ev); }
