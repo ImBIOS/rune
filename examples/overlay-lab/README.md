@@ -114,6 +114,10 @@ those before reveal, preserving the no-stale-frame guarantee. Ordinary/unretaine
 still settle their first visible frame. A separate update after `show()` can also animate in;
 putting B in an earlier queued hidden update intentionally uses the stale-frame path instead.
 
+Don't wake a hidden overlay with `update()` before the entry: a queued update marks the prepared
+frame stale, so the entry settles instead of animating. Schedule the poll that commits the entry
+with `tx.wake_after(..)` (a scheduling-only poll) instead.
+
 ## Native measurement harness (macOS)
 
 Ordinary windows can opt into the same native switches without changing exhaustive
