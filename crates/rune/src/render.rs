@@ -87,7 +87,7 @@ pub struct Instance {
     /// Attribute 7 is Uint32x4; the instance ABI stays 128 bytes (8 × vec4).
     /// [0] = pack2x16float(left, top), [1] = pack2x16float(right, bottom) widths.
     /// [2] = pack4x8unorm(clamp(inward origin→clip distance / width, 0, 1)), LTRB.
-    /// [3] = f32 clip-radius bits, reserved for rounded clips; currently zero.
+    /// [3] = f32 clip-radius bits; the rounded rectangle is `clip`.
     /// Layer records may leave all four words zero. See `pack_fade`.
     pub fade: [u32; 4],
 }
@@ -114,14 +114,19 @@ pub fn unpack_fade(fade: [u32; 4]) -> ([f32; 4], [f32; 4]) {
 pub const NO_CLIP: [f32; 4] = [-1e6, -1e6, 1e6, 1e6];
 
 impl Instance {
+    /// Rounded clipping shares the packed fade ABI across primitives and layer composites.
+    pub(crate) fn round_clip(&mut self, radius: f32) {
+        self.fade[3] = radius.max(0.0).min(((self.clip[2] - self.clip[0]).min(self.clip[3] - self.clip[1]) * 0.5).max(0.0)).to_bits();
+    }
+
     /// Begin an isolated scope. `bounds` is a device-pixel [x,y,w,h] content bound, including
     /// native surfaces. Primitive bounds (including shadow support) expand it during prepare.
     pub fn begin_layer(bounds: [f32; 4], clip: [f32; 4], spec: LayerSpec) -> Self {
-        Self { rect: bounds, clip, fill: [0.0, 0.0, 0.0, spec.opacity.clamp(0.0, 1.0)],
-            radii: [spec.clip_radius.max(0.0).min(((clip[2] - clip[0]).min(clip[3] - clip[1]) * 0.5).max(0.0)); 4],
-            uv: clip,
+        let mut instance = Self { rect: bounds, clip, fill: [0.0, 0.0, 0.0, spec.opacity.clamp(0.0, 1.0)],
             params: [if spec.blend == Blend::PlusLighter { 1.0 } else { 0.0 }, KIND_LAYER,
-                layer_blur::sigma(spec.blur), 0.0], ..Self::zeroed() }
+                layer_blur::sigma(spec.blur), 0.0], ..Self::zeroed() };
+        instance.round_clip(spec.clip_radius);
+        instance
     }
 
     pub fn end_layer() -> Self {
@@ -134,7 +139,8 @@ impl Instance {
 pub(crate) fn end_layer(instances: &mut Vec<Instance>, surfaces: &mut [crate::native_surface::SurfaceDraw], marks: &mut Vec<u32>, start: usize, surface_start: usize) {
     let primitives = instances.len() - start - 1;
     let videos = surfaces.len() - surface_start;
-    if primitives + videos <= 1 && instances[start].params[0] == 0.0 && instances[start].params[2] == 0.0 && instances[start].radii[0] == 0.0 {
+    if primitives + videos <= 1 && instances[start].params[0] == 0.0 && instances[start].params[2] == 0.0
+        && instances[start].clip == NO_CLIP && instances[start].fade == [0; 4] {
         let opacity = instances[start].fill[3];
         if primitives == 1 {
             let i = &mut instances[start + 1];

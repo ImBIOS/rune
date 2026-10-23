@@ -131,6 +131,11 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
         }
         alpha *= a;
     }
+    let radius = bitcast<f32>(packed.w);
+    if radius > 0.0 {
+        let half = (c.zw - c.xy) * 0.5;
+        alpha *= clamp(0.5 - sd_rounded(p - c.xy - half, half, vec4(radius)), 0.0, 1.0);
+    }
     return alpha;
 }
 
@@ -268,21 +273,15 @@ fn image_texel(t: vec2<i32>, premultiplied: bool) -> vec4<f32> {
 @fragment
 fn fs(i: Out) -> @location(0) vec4<f32> {
     if (i.params.y == 8.0) {
-        // The same Uint32x4 instance ABI feeds this path. Its zero fade words need no
-        // decoding: primitives were clipped/faded while rendering the layer contents.
+        // Filters consume unmasked source pixels. Decode the same packed clip as primitives
+        // only here, on the completed layer, including the radius in word 3.
         let p = i.pos.xy + projection.xy - i.rect.xy;
         if (any(p < vec2<f32>(0.0)) || any(p >= i.rect.zw)) { discard; }
         let color = textureLoad(images, vec2<i32>(floor(p)), 0);
-        var mask = 1.0;
-        if (i.radii.x > 0.0) {
-            let half = (i.uv.zw - i.uv.xy) * 0.5;
-            let d = sd_rounded(i.pos.xy + projection.xy - i.uv.xy - half, half, i.radii);
-            mask = clamp(0.5 - d, 0.0, 1.0);
-        }
         // Float intermediates accumulate One/One without saturation. Clamp before applying
         // this scope's opacity so nesting preserves plus-lighter's bounded coverage.
         return select(color, clamp(color, vec4(0.0), vec4(1.0)), i.params.x == 1.0) * i.fill.a
-            * clip_alpha(i.pos.xy + projection.xy, i.clip, i.fade) * mask;
+            * clip_alpha(i.pos.xy + projection.xy, i.clip, i.fade);
     }
     let kind = i.params.y;
     let half = i.rect.zw * 0.5;

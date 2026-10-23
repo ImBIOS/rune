@@ -370,6 +370,8 @@ pub struct Visual {
     pub press: Color,
     /// Soft clip of children to this rect: fade widths left, top, right, bottom.
     pub clip: Option<[f32; 4]>,
+    /// Rounded clip of this element and its subtree, applied after subtree filters.
+    pub clip_radius: Option<f32>,
     pub icon: Option<(&'static Icon, Color)>,
     /// Vertical linear gradient (top, bottom) painted over the fill, under hover/press overlays.
     pub gradient: Option<[Color; 2]>,
@@ -409,6 +411,7 @@ impl Default for Visual {
             hover: Color::TRANSPARENT,
             press: Color::TRANSPARENT,
             clip: None,
+            clip_radius: None,
             icon: None,
             gradient: None,
             outline: None,
@@ -1188,9 +1191,11 @@ impl El {
         apply(&mut self, alpha.clamp(0.0, 1.0));
         self
     }
-    /// Isolate this container even at opacity 1 and add its children's premultiplied colours.
+    /// Add children's premultiplied colours while a direct child is between opacity 0 and 1.
     /// Give two overlaid states opacity `1-t` and `t` for a dissolve without a midpoint alpha dip.
     /// Put a shared background outside this scope; its own paint also participates in addition.
+    /// At rest (all direct children at 0 or 1), draw normally without a dissolve layer. Overlapping
+    /// opaque states therefore use source-over at rest; this API is for replacing states.
     pub fn dissolve(mut self) -> Self {
         self.vis.blend = crate::render::Blend::PlusLighter;
         self
@@ -1214,6 +1219,13 @@ impl El {
     /// Clip children to this box with soft gradient edges (never a hard crop).
     pub fn clip_soft(mut self, fade: f32) -> Self {
         self.vis.clip = Some([fade; 4]);
+        self
+    }
+    /// Clip this element and its descendants to its presented rounded rectangle. Radius is in
+    /// points, capped at half the shorter edge. Filters run before this mask. Nested masks
+    /// intersect without moving either rectangle's corners; complex intersections use a layer.
+    pub fn clip_rounded(mut self, radius: f32) -> Self {
+        self.vis.clip_radius = Some(radius.max(0.0));
         self
     }
     /// Soft clip with a fade width per side (left, top, right, bottom).

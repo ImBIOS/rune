@@ -136,7 +136,12 @@ fn dissolve_keeps_opaque_coverage_and_isolates_each_state() {
     for t in [0.5, 0.0, 0.25, 0.75, 1.0] {
         rt.state.0.set(1.0 - t); rt.state.1.set(t); rt.frame(0.0);
         renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (32, 16));
-        assert!(renderer.layers.targets[0].is_some(), "opaque dissolve parent must remain isolated");
+        if t == 0.0 || t == 1.0 {
+            assert!(rt.instances.iter().all(|i| i.params[1] != KIND_LAYER), "no dissolve scope at rest");
+            assert_eq!(renderer.layer_stats().extra_passes, 0);
+        } else {
+            assert!(renderer.layers.targets[0].is_some(), "mid-fade dissolve must isolate");
+        }
         let out = pixels(&gpu, &renderer, &target);
         let want = [((1.0-t)*255.0).round() as u8, 0, (t*255.0).round() as u8, 255];
         for x in [6, 16, 26] {
@@ -144,6 +149,18 @@ fn dissolve_keeps_opaque_coverage_and_isolates_each_state() {
             assert_eq!(out[(8*32+x)*4+3], 255, "opaque coverage at t={t}");
         }
         near(&out[..4], [0; 4]);
+    }
+    // The first/last isolated frame must not introduce a rasterization jump. These deltas
+    // are below an output byte but above zero, so they exercise both sides of scope selection.
+    for (rest, moving) in [(0.0, 0.00001), (1.0, 0.99999)] {
+        let mut frames = Vec::new();
+        for t in [rest, moving] {
+            rt.state.0.set(1.0 - t); rt.state.1.set(t); rt.frame(0.0);
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (32, 16));
+            assert_eq!(renderer.layer_stats().targets > 0, t == moving);
+            frames.push(pixels(&gpu, &renderer, &target));
+        }
+        assert_eq!(frames[0], frames[1], "scope boundary at {rest}");
     }
     // A sole multi-draw state at opacity 1 still composites internally with source-over.
     // Using translucent primitives distinguishes correct isolation from additive saturation.

@@ -81,5 +81,14 @@ fn ramp(d: f32, width: f32) -> f32 {
         }
         clip *= a;
     }
-    return col * (clamp(0.5-distance,0.0,1.0)*clip*u.color.w);
+    var mask = 1.0;
+    let clip_radius = bitcast<f32>(u.fade.w);
+    if clip_radius > 0.0 {
+        let h = (u.clip.zw-u.clip.xy)*0.5;
+        let r = min(clip_radius, min(h.x,h.y));
+        let q = abs(p-u.clip.xy-h)-h+r;
+        let d = min(max(q.x,q.y),0.0)+length(max(q,vec2<f32>(0.0)))-r;
+        mask = clamp(0.5-d,0.0,1.0);
+    }
+    return col * (clamp(0.5-distance,0.0,1.0)*clip*mask*u.color.w);
 }

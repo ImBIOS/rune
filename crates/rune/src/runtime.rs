@@ -299,6 +299,11 @@ struct Inh {
     clip: [f32; 4],
     fade: [f32; 4],
     fade_origin: [f32; 4],
+    /// Paint clips are consumed by isolation; logical clips remain for hit tests/inspection.
+    paint_clip: [f32; 4],
+    paint_fade: [f32; 4],
+    paint_fade_origin: [f32; 4],
+    rounded: Option<([f32; 4], f32)>,
     scale: f32,
     anchor: [f32; 2],
     blur: f32,
@@ -311,7 +316,9 @@ struct Inh {
 
 impl Default for Inh {
     fn default() -> Self {
-        Inh { opacity: 1.0, paint_opacity: 1.0, clip: NO_CLIP, fade: [0.0; 4], fade_origin: NO_CLIP, scale: 1.0, anchor: [0.0; 2], blur: 0.0, dy: 0.0, mark: 0, group: 0.0 }
+        Inh { opacity: 1.0, paint_opacity: 1.0, clip: NO_CLIP, fade: [0.0; 4], fade_origin: NO_CLIP,
+            paint_clip: NO_CLIP, paint_fade: [0.0; 4], paint_fade_origin: NO_CLIP, rounded: None,
+            scale: 1.0, anchor: [0.0; 2], blur: 0.0, dy: 0.0, mark: 0, group: 0.0 }
     }
 }
 
@@ -426,6 +433,7 @@ pub struct Runtime<S: 'static> {
     layer_scratch: Vec<(usize, usize, usize)>,
     /// Sideways scroll of focused single-line fields, in points, keyed by node path.
     input_scroll: HashMap<String, f32>,
+    dissolve_scratch: Vec<bool>,
     /// Drawn rect per node (points, root space), for tools and hit tests.
     drawn: Vec<[f32; 4]>,
     scrolls: HashMap<NodeId, ScrollState>,
@@ -606,6 +614,7 @@ impl<S: 'static> Runtime<S> {
             layer_paint_order: Vec::new(),
             layer_scratch: Vec::new(),
             input_scroll: HashMap::new(),
+            dissolve_scratch: Vec::new(),
             drawn: Vec::new(),
             scrolls: HashMap::new(),
             grows: HashMap::new(),
@@ -2772,6 +2781,28 @@ impl<S: 'static> Runtime<S> {
         let mut layers = std::mem::take(&mut self.layer_scratch);
         layers.clear();
 
+        // One linear pass, including retained exits, Live opacity, presence and loops. Reuse
+        // inherited scratch for hover groups so activation samples exactly the paint values.
+        self.dissolve_scratch.clear();
+        self.dissolve_scratch.resize(n_nodes, false);
+        for index in 0..n_nodes {
+            let i = self.layer_paint_order.get(index).copied().unwrap_or(index);
+            let n = &self.nodes[i];
+            let inherited_group = n.parent.map_or(0.0, |p| self.inh_scratch[p].group);
+            self.inh_scratch[i].group = if n.vis.hover.a > 0.0 || n.vis.hover_group {
+                self.scene.get(n.id, P_HOVER).unwrap_or(0.0).clamp(0.0, 1.0)
+            } else { inherited_group };
+            let Some(parent) = n.parent.filter(|&p| self.nodes[p].vis.blend == crate::render::Blend::PlusLighter) else { continue };
+            let Some(p) = self.scene.presented(n.id) else { continue };
+            let mut opacity = p.opacity;
+            if let Some([rest, hov]) = n.vis.group_opacity { opacity *= rest + (hov - rest) * inherited_group; }
+            if matches!(n.looping.map(|l| l.kind), Some(rune_motion::LoopKind::Opacity { .. } | rune_motion::LoopKind::OpacityCycle(_) | rune_motion::LoopKind::Sequence(_)))
+                && let Some(track) = self.loops.get(&n.id) {
+                opacity *= track.sample_at(now, self.clock, self.reduced_motion);
+            }
+            self.dissolve_scratch[parent] |= opacity > 0.0 && opacity < 1.0;
+        }
+
         // Growth rows: presented top offset, height and bottom feather mask per node index.
         self.row_dy.clear();
         self.row_dy.resize(n_nodes, 0.0);
@@ -2807,8 +2838,8 @@ impl<S: 'static> Runtime<S> {
         // only when isolation requires it; the ordinary painter stream stays byte-identical.
         let tree_order = self.layer_paint_order.windows(2).any(|pair| {
             let n = &self.nodes[pair[0]];
-            self.nodes[pair[1]].parent == Some(pair[0]) && (n.vis.blend == crate::render::Blend::PlusLighter || n.vis.group_opacity.is_some()
-                || matches!(n.looping, Some(rune_motion::LoopSpec { kind: rune_motion::LoopKind::Opacity { .. } | rune_motion::LoopKind::OpacityCycle(_), .. }))
+            self.nodes[pair[1]].parent == Some(pair[0]) && (self.dissolve_scratch[pair[0]] || n.vis.clip_radius.is_some() || n.vis.group_opacity.is_some()
+                || matches!(n.looping, Some(rune_motion::LoopSpec { kind: rune_motion::LoopKind::Opacity { .. } | rune_motion::LoopKind::OpacityCycle(_) | rune_motion::LoopKind::Sequence(_), .. }))
                 || self.scene.presented(n.id).is_some_and(|p| (p.opacity > 0.0 && p.opacity < 1.0) || p.blur > 0.0))
         });
         for paint_index in 0..n_nodes {
@@ -2841,13 +2872,13 @@ impl<S: 'static> Runtime<S> {
             }
             let effective_opacity = (own * pinh.opacity).clamp(0.0, 1.0);
             let next = if tree_order { self.layer_paint_order.get(paint_index + 1).copied() } else { (i + 1 < n_nodes).then_some(i + 1) };
-            let additive_parent = n.parent.is_some_and(|p| self.nodes[p].vis.blend == crate::render::Blend::PlusLighter);
-            let isolate = effective_opacity > 0.001 && (p.blur > 0.0 || n.vis.blend == crate::render::Blend::PlusLighter
+            let additive_parent = n.parent.is_some_and(|p| self.dissolve_scratch[p]);
+            let mut isolate = effective_opacity > 0.001 && (p.blur > 0.0 || self.dissolve_scratch[i]
                 || additive_parent || (own > 0.001 && own < 1.0
                     && next.is_some_and(|j| self.nodes[j].parent == Some(i))));
-            let o = if isolate { 1.0 } else { (own * pinh.paint_opacity).clamp(0.0, 1.0) };
-            let (mut clip, mut fade) = (pinh.clip, pinh.fade);
-            let mut fade_origin = pinh.fade_origin;
+            let (mut clip, mut fade) = (pinh.paint_clip, pinh.paint_fade);
+            let mut fade_origin = pinh.paint_fade_origin;
+            let mut rounded = pinh.rounded;
             let own_sc = p.transform.scale.x * self.loops.get(&n.id)
                 .filter(|_| matches!(n.looping.map(|l| l.kind), Some(rune_motion::LoopKind::Sequence(_))))
                 .and_then(|l| l.pose(now, self.reduced_motion)).map_or(1.0, |p| p.scale);
@@ -2899,10 +2930,10 @@ impl<S: 'static> Runtime<S> {
                 ];
                 inherit_fade(&mut fade, &mut fade_origin, [r[0] + ins[0], r[1] + ins[1], r[2] - ins[2], r[3] - ins[3]], fea);
             }
-            let visible = r[2] >= clip[0].max(vp[0] - filter_margin) - 2.0
-                && r[0] <= clip[2].min(vp[2] + filter_margin) + 2.0
-                && r[3] >= clip[1].max(vp[1] - filter_margin) - 2.0
-                && r[1] <= clip[3].min(vp[3] + filter_margin) + 2.0;
+            let visible = r[2] >= clip[0].max(vp[0]) - filter_margin - 2.0
+                && r[0] <= clip[2].min(vp[2]) + filter_margin + 2.0
+                && r[3] >= clip[1].max(vp[1]) - filter_margin - 2.0
+                && r[1] <= clip[3].min(vp[3]) + filter_margin + 2.0;
             let text_tint = |c: Color| match n.vis.group_color {
                 Some(g) if pinh.group > 0.0 => c.mix(g, pinh.group),
                 _ => c,
@@ -2927,11 +2958,56 @@ impl<S: 'static> Runtime<S> {
                     if self.loop_wake.is_none_or(|w| wake < w.0) { self.loop_wake = Some((wake, start)); }
                 }
             }
+            let intersect = |a: [f32; 4], b: [f32; 4]| [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
+            let own_round = n.vis.clip_radius.map(|radius| (r, (radius * sc * s).min(w.min(h) * 0.5)));
+            let mut hit_clip = intersect(pinh.clip, clip);
+            if let Some((rect, _)) = own_round { hit_clip = intersect(hit_clip, rect); }
+            let (mut hit_fade, mut hit_origin) = (pinh.fade, pinh.fade_origin);
+            inherit_fade(&mut hit_fade, &mut hit_origin, fade_origin, fade);
+            // The packed ABI carries one clip rectangle. Preserve a rectangular cut through
+            // a rounded corner on a separate outer scope, never recenter the rounded mask.
+            if let Some((mask, _)) = rounded.or(own_round)
+                && intersect(clip, mask) != mask {
+                let mut marker = Instance::begin_layer([r[0], r[1], w, h], clip, Default::default());
+                marker.fade = crate::render::pack_fade(fade, fade_origin, clip);
+                layers.push((i, self.instances.len(), self.surfaces.len()));
+                self.instances.push(marker);
+                clip = NO_CLIP; fade = [0.0; 4]; fade_origin = NO_CLIP;
+            }
+            // Two rounded rectangles cannot generally be represented by one rounded rectangle.
+            // Consume the ancestor on an outer composite, retaining both original corner centres.
+            if rounded.is_some() && own_round.is_some() && rounded != own_round {
+                let (mask, radius) = rounded.take().unwrap();
+                let mut marker = Instance::begin_layer([r[0], r[1], w, h], mask,
+                    crate::render::LayerSpec { clip_radius: radius, ..Default::default() });
+                marker.fade = crate::render::pack_fade(fade, fade_origin, mask);
+                marker.round_clip(radius);
+                layers.push((i, self.instances.len(), self.surfaces.len()));
+                self.instances.push(marker);
+                clip = NO_CLIP; fade = [0.0; 4]; fade_origin = NO_CLIP;
+            }
+            if let Some(mask) = own_round { rounded = Some(mask); }
+            if let Some((mask, _)) = rounded {
+                clip = intersect(clip, mask);
+            }
+            // Live/truncated text adds a glyph-only rectangle below. Consume the inherited
+            // rounded mask first so the text clip cannot move its corner centres.
+            isolate |= rounded.is_some() && n.text.as_ref().is_some_and(|t| t.truncate_fade || t.live.is_some());
+            let o = if isolate { 1.0 } else { (own * pinh.paint_opacity).clamp(0.0, 1.0) };
             if isolate {
                 layers.push((i, self.instances.len(), self.surfaces.len()));
-                self.instances.push(Instance::begin_layer([r[0], r[1], w, h], clip,
-                    crate::render::LayerSpec { opacity: own * pinh.paint_opacity, blend: n.vis.blend, blur: p.blur * sc * s, ..Default::default() }));
+                let mut marker = Instance::begin_layer([r[0], r[1], w, h], clip,
+                    crate::render::LayerSpec { opacity: own * pinh.paint_opacity,
+                        blend: if self.dissolve_scratch[i] { crate::render::Blend::PlusLighter } else { crate::render::Blend::SourceOver },
+                        blur: p.blur * sc * s, clip_radius: rounded.map_or(0.0, |(_, radius)| radius) });
+                marker.fade = crate::render::pack_fade(fade, fade_origin, clip);
+                if let Some((_, radius)) = rounded { marker.round_clip(radius); }
+                self.instances.push(marker);
+                // Clip the completed layer, never its inputs (including off-wall blur taps).
+                clip = NO_CLIP; fade = [0.0; 4]; fade_origin = NO_CLIP; rounded = None;
             }
+            let primitive_start = self.instances.len();
+            let surface_start = self.surfaces.len();
             // Include native surface geometry, which lives beside the primitive stream.
             if n.vis.surface.is_some() {
                 for &(_, at, _) in &layers {
@@ -3299,6 +3375,10 @@ impl<S: 'static> Runtime<S> {
                     }
                 }
             }
+            if let Some((_, radius)) = rounded {
+                for instance in &mut self.instances[primitive_start..] { instance.round_clip(radius); }
+                for surface in &mut self.surfaces[surface_start..] { surface.fade[3] = radius.to_bits(); }
+            }
             if self.track_marks {
                 self.marks.resize(self.instances.len(), mark);
             }
@@ -3320,7 +3400,10 @@ impl<S: 'static> Runtime<S> {
                 let origin = self.virtuals.values().find(|v| v.scroll_path == n.path).map_or(0.0, |v| f64::from(v.before));
                 dy -= grid((self.stuck_offset(i, p.rect.edges()[3]).unwrap_or(st.offset) - origin) as f32, s);
             }
-            self.inh_scratch[i] = Inh { opacity: effective_opacity, paint_opacity: o, clip, fade, fade_origin, scale: sc, anchor, blur, dy, mark, group };
+            inherit_fade(&mut hit_fade, &mut hit_origin, fade_origin, fade);
+            self.inh_scratch[i] = Inh { opacity: effective_opacity, paint_opacity: o,
+                clip: intersect(hit_clip, clip), fade: hit_fade, fade_origin: hit_origin,
+                paint_clip: clip, paint_fade: fade, paint_fade_origin: fade_origin, rounded, scale: sc, anchor, blur, dy, mark, group };
             if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_drag.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())
                 && !self.subtree_exiting(i)
                 && self.allowed(i) && effective_opacity > 0.001 && visible

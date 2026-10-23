@@ -187,12 +187,12 @@ fn filtered_video_and_image_page_match_primitive_source() {
     surface.push_bytes(ByteFrame { width: 1, height: 1, format: Format::Bgra, color: ColorInfo::default(),
         planes: [vec![255; 4], vec![]] }, 1).unwrap();
     renderer.prepare_surfaces(&gpu.device, &gpu.queue, &[SurfaceDraw { surface: surface.clone(), fit: SurfaceFit::Fill,
-        before_instance: 1, rect: bounds, radii: [0.0; 4], clip: NO_CLIP, fade: [0.0; 4], opacity: 1.0 }], (64, 48));
+        before_instance: 1, rect: bounds, radii: [0.0; 4], clip: NO_CLIP, fade: [0; 4], opacity: 1.0 }], (64, 48));
     assert_eq!(pixels(&gpu, &renderer, &target), reference);
     surface.push_bytes(ByteFrame { width: 1, height: 1, format: Format::Bgra, color: ColorInfo::default(),
         planes: [vec![0, 0, 0, 255], vec![]] }, 2).unwrap();
     renderer.prepare_surfaces(&gpu.device, &gpu.queue, &[SurfaceDraw { surface, fit: SurfaceFit::Fill,
-        before_instance: 1, rect: bounds, radii: [0.0; 4], clip: NO_CLIP, fade: [0.0; 4], opacity: 1.0 }], (64, 48));
+        before_instance: 1, rect: bounds, radii: [0.0; 4], clip: NO_CLIP, fade: [0; 4], opacity: 1.0 }], (64, 48));
     let black = pixels(&gpu, &renderer, &target);
     assert_eq!(black[(18 * 64 + 22) * 4], 0, "new video frame is never cached");
     assert_eq!(black[(18 * 64 + 22) * 4 + 3], reference[(18 * 64 + 22) * 4 + 3]);

@@ -14,6 +14,9 @@ mod tests;
 #[path = "layer_filter_tests.rs"]
 mod filter_tests;
 #[cfg(test)]
+#[path = "rounded_clip_tests.rs"]
+mod rounded_clip_tests;
+#[cfg(test)]
 #[path = "srgb_blend_tests.rs"]
 mod srgb_tests;
 
@@ -36,11 +39,11 @@ struct Layer {
     parent: Option<usize>,
     bounds: [f32; 4], // edges while planning, xywh after preparation
     clip: [f32; 4],
+    fade: [u32; 4],
     opacity: f32,
     blend: Blend,
     blur: f32,
     support: f32,
-    mask: [f32; 4],
     clip_radius: f32,
 }
 
@@ -106,8 +109,8 @@ impl Renderer {
                     begin: index as u32, end: 0, parent,
                     bounds: [i.rect[0], i.rect[1], i.rect[0] + i.rect[2], i.rect[1] + i.rect[3]],
                     clip,
-                    mask: i.uv,
-                    clip_radius: i.radii[0],
+                    fade: i.fade,
+                    clip_radius: f32::from_bits(i.fade[3]),
                     opacity: if hidden { 0.0 } else { i.fill[3].clamp(0.0, 1.0) },
                     blend: if i.params[0] == 1.0 { Blend::PlusLighter } else { Blend::SourceOver },
                     blur: layer_blur::sigma(i.params[2]),
@@ -206,9 +209,7 @@ impl Renderer {
             let l = &self.layers.plan[index];
             let mut quad = Instance::begin_layer(bounds, l.clip, LayerSpec {
                 opacity: l.opacity, blend: l.blend, clip_radius: l.clip_radius, ..Default::default() });
-            // Keep the original rounded rectangle when intersecting rectangular ancestor clips.
-            quad.uv = l.mask;
-            quad.radii = [l.clip_radius; 4];
+            quad.fade = l.fade;
             queue.write_buffer(&t.quad, 0, bytemuck::bytes_of(&quad));
         }
         // Rebind child composites to their nearest materialized parent (opaque scopes flatten).

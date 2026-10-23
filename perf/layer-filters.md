@@ -1,8 +1,8 @@
 # Layer filters for Scrawl
 
-The current Scrawl-height benchmark meets the added-GPU-cost target at Scrawl's default blur.
-The budget is not met for every radius or larger surface. This note records the measured limits
-and the rounded-clip integration work needed when the API lands.
+Scrawl's default blur meets the measured added-GPU-cost target. Wider blurs and larger surfaces
+can exceed it. This branch also implements `El::clip_rounded(radius)` and removes dissolve's
+offscreen pass at rest. The renderer repack still needs the integration steps below.
 
 ![Layer blur with and without a capsule mask](../crates/rune/artifacts/layer-filters/filters.png)
 
@@ -70,40 +70,75 @@ unit-test assertion.
 
 ## Rounded masks belong to each completed scope
 
-This branch implements `LayerSpec::clip_radius`, not a competing `El::mask_rounded` builder.
+`El::clip_rounded(radius)` clips the element's own paint and its descendants to its presented
+rectangle. Radius is in points, scales with the element, and clamps to half its shorter edge.
+Ordinary subtrees apply the inherited rounded rectangle per primitive, without an offscreen
+pass. Opacity, active dissolve and blur scopes apply the mask to their final composite instead.
+Their source primitives remain unmasked so a chip beyond the wall can still contribute blur
+inside it. Hit-test and inspection bounds retain the logical clip when painting consumes it.
+
 `Instance::begin_layer(bounds, clip, spec)` stores the radius in `radii[0]` and original clip edges
 in `uv`; the instance remains 128 bytes. The final composite applies the rounded SDF and hard clip
 after filtering. A masked scope materializes even at opacity one. The planner does not push a
 parent's final clip into its children because that would lose source pixels before parent blur.
 
-A coordination note was left in `desktop-fidelity/LAYER-FILTERS-HANDOFF.md`. His
-`clip_rounded` implementation and Deadbolt's repack are absent from this base. A teammate should attach
-the rounded clip to the appropriate completed scope, including blur at opacity one; distinct
-nested rounded rectangles need distinct mask scopes. After repack, the agreed ordinary-instance
-radius lane is `fade[3]`. Adapt marker extraction/composite construction at that integration point;
-do not reinterpret the old layout's bottom-feather value as a radius. No confirmation or
-high-level `clip_rounded` integration is claimed here.
+Nested rounded rectangles retain both sets of corner centres. A second distinct rounded clip
+consumes the inherited mask on an outer scope; the inner mask stays direct or joins the inner
+filter scope. A rectangular clip cutting through a rounded corner also needs isolation. The
+old-layout marker then carries rectangular intersection in `clip` and original rounded bounds
+in `uv`. Layer feather widths survive onto the composite. These exceptional intersections cost
+a layer; a single capsule with ordinary children does not.
 
-### Landing-second contract for Deadbolt and overlays
+Ordinary primitives temporarily encode radius in negative `params[3]`, except glyphs, which use
+their unused `radii[0]`. Glyph gamma, shape geometry, atlas UVs and four feather widths are intact.
+Native video uses `SurfaceDraw::clip_radius` and the spare `sampling.w` uniform lane. Callers
+constructing `SurfaceDraw` directly must initialize the new field to zero for rectangular clips.
+
+![Exiting chip before and after post-blur capsule clipping](../crates/rune/artifacts/layer-filters/rounded-chip.png)
+
+Left: unmasked. Right: `clip_rounded(20)`. Three horizontal offsets in a 400×40 pt capsule at 2×,
+with sigma 1.5 pt and opacity .65. The last source is fully beyond the wall; its inward halo
+survives while exterior pixels are zero. This is a Rune headless fixture for Scrawl's case,
+not a capture of the Scrawl application. The test compares every alpha byte against unmasked
+blur multiplied by an independent capsule oracle (maximum allowed difference: one byte).
+
+### Landing-second contract for Deadbolt
 
 Whether filters or Deadbolt's repack lands first, the second branch must resolve these points:
 
-1. Move the layer clip radius to **`fade[3]`** in the repacked instance. In `KIND_LAYER`, use
-   Deadbolt's decoded clip and radius, not the old float `i.fade` interpretation.
-2. Drop the **`radii[0]` / `uv` layer marker** and the redundant `Layer::mask` copy. The planner
-   no longer intersects a parent's clip into a child, so `mask == clip`. Use each scope's own
-   `l.clip` for both its rounded rectangle and hard clip. The current comment about preserving
-   a separate original rectangle during intersection is stale; remove it during this merge.
+1. Move layer and ordinary clip radius to **`fade[3]`** in the repacked instance. In `KIND_LAYER`
+   and ordinary clipping, use Deadbolt's decoded clip/radius. Remove `Instance::round_clip`'s
+   temporary per-kind encoding and the old float-feather interpretation together.
+2. Drop the **`radii[0]` / `uv` layer marker** when replacing it with the decoded representation.
+   **The earlier `mask == clip` assumption no longer holds:** the high-level API can intersect a
+   rectangular ancestor with a rounded child. Preserve the original rounded bounds, or split
+   that intersection into two scopes before dropping `Layer::mask`. Never round the intersected
+   bounding box. `rounded_clip_direct_nested_and_rectangular_intersections` covers this case.
 3. Keep the post-filter rounded coverage and opacity-one mask scope. Do not reintroduce parent
    clip propagation before convolution. Retain the nested-capsule/source-retention regression.
-4. The non-isolated subtree can use per-primitive rounded clipping. If the clipped element
-   is itself isolated or blurred, emit `LayerSpec::clip_radius` on its scope instead, so the
-   source is not rounded off before blur. Distinct nested masks keep distinct scopes.
+4. Keep non-isolated subtrees on per-primitive rounded clipping. If the clipped element is
+   itself isolated or blurred, retain `LayerSpec::clip_radius` on its scope. Distinct nested
+   masks keep distinct scopes. Keep native-video clipping in sync with the instance decoder.
 5. Resolve `ElementInfo.blur` using presented **`p.blur`**, own plus presence sigma in points,
    rather than accumulated `Inh.blur`.
 
-These notes are the parent-reviewed integration contract. This follow-up does not edit the
-core renderer/runtime to preempt the repack or claim a landing slot.
+The high-level API supersedes the earlier handoff in
+`desktop-fidelity/LAYER-FILTERS-HANDOFF.md`. The two-rectangle requirement above is new since the
+parent's review of the low-level filter work.
+
+## Dissolve is direct at rest
+
+`dissolve()` activates only while a direct child's presented opacity is strictly between zero
+and one. A linear prepass uses retained exits, presence, Live opacity, hover-group opacity and
+opacity-loop samples. Both the parent's additive blend and child isolation use this decision.
+Scratch capacity is reused across frames. Returning to endpoints removes the dissolve scope;
+starting a fade reinstates it on that frame.
+
+At rest, overlapping opaque children use normal source-over composition, not additive saturation.
+This deliberate semantic change suits mutually replacing states; a permanent additive scene
+should use explicit low-level `Blend::PlusLighter` scopes. Blur or independent group opacity can
+still require their own layer. The GPU test checks zero scopes/passes at endpoints, isolation
+mid-fade, and byte-identical full frames at `0 → .00001` and `.99999 → 1`.
 
 ## `blur_replace` now peaks at sigma 1.5 pt
 
@@ -200,7 +235,15 @@ synced checkout, and set `RUNE_SRGB_REFERENCE` to that file for
 
 ## Verification
 
-All commands ran serially through HiveMind on mini. Seventeen layer/filter correctness cases
+The rounded-clip/dormant-dissolve follow-up passed **22 layer/filter correctness cases** and
+`cargo check -p rune --all-targets`, serially through HiveMind mini. Five new cases cover direct
+and nested masks, rectangular intersections, all eight primitive kinds (including glyph gamma
+and four feather lanes), native-video inheritance, retained exits, and the off-wall chip.
+The existing dissolve test now checks zero rest scopes and byte-identical fade boundaries.
+`Instance` remains 128 bytes. The new still was generated headlessly by the chip regression;
+set `RUNE_CLIP_STILL` to a PNG path when running that test to reproduce it.
+
+For the original filter implementation, seventeen layer/filter correctness cases
 passed, including the original ten layer cases, plus three Live tests. `cargo check -p rune
 --all-targets` passed. GPU cases cover paired taps against a discrete oracle, negative origins,
 zero/negative/NaN bypass, pooling, nested blur, post-filter capsule masks, additive saturation,
