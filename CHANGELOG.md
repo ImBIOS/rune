@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Headless `{"physical": "alt+super+space"}` releases its modifiers.** After the key's down
+  and up, the script now sends the modifiers coming up, as a keyboard does, so a recorder no
+  longer shows ⌥⌘ held in later stills. Scripts whose stills showed held modifiers change.
 - **ShortcutRecorder shows the refused chord and lets the app word the error.** After
   `on_change` refuses a chord, the keycaps keep showing it (not just the held modifiers) until
   another modifier starts the next chord, which also clears the error. The message under it
