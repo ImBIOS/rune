@@ -1,7 +1,7 @@
 //! TextInput and Textarea (`@opencode/ui` forms/text-input, forms/textarea), and the older
 //! TextField (`components/text-field`).
 
-use rune::{Color, El, Icon, TextEdit, TextStyle, Tx, col, el, icon, row, text, text_input};
+use rune::{Color, El, Icon, ScrollSpec, TextEdit, TextStyle, Tx, col, el, icon, row, text, text_input};
 
 use crate::{Acts, Kit, State, over, shadows};
 
@@ -221,6 +221,8 @@ pub struct TextArea {
     placeholder: String,
     width: Option<f32>,
     rows: usize,
+    grow: Option<(usize, usize)>,
+    max_height: Option<f32>,
     invalid: bool,
     state: State,
     edits: EditActs,
@@ -233,6 +235,8 @@ impl TextArea {
             placeholder: String::new(),
             width: Some(280.0),
             rows: 3,
+            grow: None,
+            max_height: None,
             invalid: false,
             state: State::Rest,
             edits: EditActs::default(),
@@ -248,6 +252,19 @@ impl TextArea {
     }
     pub fn rows(mut self, r: usize) -> Self {
         self.rows = r.max(1);
+        self
+    }
+    /// Fit the text: at least `min_rows` lines tall, growing with each wrapped line up to
+    /// `max_rows`, then scrolling inside with the caret kept in view. The height springs on
+    /// the kit's control motion.
+    pub fn auto_grow(mut self, min_rows: usize, max_rows: usize) -> Self {
+        let min = min_rows.max(1);
+        self.grow = Some((min, max_rows.max(min)));
+        self
+    }
+    /// With [`TextArea::auto_grow`], also stop growing at this many points of text.
+    pub fn max_height(mut self, h: f32) -> Self {
+        self.max_height = Some(h);
         self
     }
     pub fn invalid(mut self, i: bool) -> Self {
@@ -268,6 +285,18 @@ impl TextArea {
         self.edits.edit(f);
         self
     }
+    pub fn on_submit<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        self.edits.submit(f);
+        self
+    }
+    pub fn on_key<S: 'static>(mut self, f: impl Fn(&mut S, &rune::KeyEvent, &mut Tx) -> bool + 'static) -> Self {
+        self.edits.key(f);
+        self
+    }
+    pub fn on_change<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        self.edits.change(f);
+        self
+    }
 
     pub fn build(self, k: &Kit) -> El {
         let c = &k.c;
@@ -283,9 +312,17 @@ impl TextArea {
             .placeholder(self.placeholder.clone(), hint)
             .caret(ink, k.alpha(c.text_accent, 0.3));
         let field = if disabled { field } else { self.edits.apply(field) };
-        // A <textarea rows=3>: rows of its line height plus padding, at least 80.
-        let min = (self.rows as f32 * style.line_px() + 16.0).max(80.0);
-        let mut e = col().role("textbox").label(self.placeholder.clone()).min_h(min).padding(8.0).child(field);
+        let line = style.line_px();
+        let mut e = col().role("textbox").label(self.placeholder.clone()).padding(8.0);
+        e = if let Some((min_rows, max_rows)) = self.grow {
+            let max = self.max_height.map_or(max_rows as f32 * line, |h| h.min(max_rows as f32 * line));
+            let field = if disabled { field } else { field.animate_edit_layout() };
+            let viewport = col().key("scroll").w_full().shrink().max_h(max.max(line)).scroll(ScrollSpec { stick_bottom: false });
+            e.min_h(min_rows as f32 * line + 16.0).child(viewport.child(field))
+        } else {
+            // A <textarea rows=3>: rows of its line height plus padding, at least 80.
+            e.min_h((self.rows as f32 * line + 16.0).max(80.0)).child(field)
+        };
         e = match self.width {
             Some(w) => e.w(w),
             None => e.w_full(),
