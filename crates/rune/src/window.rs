@@ -39,12 +39,14 @@ struct Win {
     alpha: Option<crate::surface_alpha::AlphaSurface>,
 }
 
-/// A reveal requested before the hidden frame completes is held behind the fence.
-/// Hiding cancels that intent, including when the first GPU frame completes later.
+/// A reveal requested before the hidden frame completes is held behind the fence, as is a
+/// reveal of cached pixels older than the state. Hiding cancels that intent, including when
+/// the GPU frame completes later.
 #[derive(Default)]
 struct FirstFrame { ready: bool, reveal: bool, notified: bool, retry: Option<Instant>, until: Option<Instant> }
 impl FirstFrame {
-    fn request_reveal(&mut self) -> bool {
+    fn request_reveal(&mut self, stale: bool) -> bool {
+        if stale { self.ready = false; }
         if self.ready { return true; }
         self.reveal = true;
         if self.retry.is_none() { self.prepare(); }
@@ -56,6 +58,10 @@ impl FirstFrame {
         self.retry = Some(now);
         self.until = Some(now + Duration::from_secs(2));
     }
+    /// Hidden frames settle, except the refresh a reveal waits on: its new motion runs on.
+    fn settles(&self) -> bool { !(self.reveal && self.notified) }
+    /// A finished frame still owes the first readiness, or a refresh owes its reveal.
+    fn pending(&self) -> bool { self.ready && (!self.notified || self.until.is_some()) }
     fn complete(&mut self) -> bool {
         self.ready = true;
         self.retry = None;
@@ -68,19 +74,40 @@ impl FirstFrame {
 fn launcher_first_frame_holds_reveal_and_hide_cancels_late_completion() {
     let mut frame = FirstFrame::default();
     frame.prepare();
-    assert!(!frame.request_reveal());
+    assert!(!frame.request_reveal(false));
     assert!(!frame.ready);
     assert!(frame.complete());
     assert!(frame.ready && frame.retry.is_none());
     assert!(!frame.complete(), "a second callback must not reopen a hidden panel");
     let mut canceled = FirstFrame::default();
     canceled.prepare();
-    assert!(!canceled.request_reveal());
+    assert!(!canceled.request_reveal(false));
     canceled.hide();
     assert!(!canceled.complete(), "hide before readiness cancels the pending show");
     assert!(canceled.ready);
-    assert!(canceled.request_reveal(), "the prepared frame can be revealed without another preparation");
+    assert!(canceled.request_reveal(false), "the prepared frame can be revealed without another preparation");
     assert!(canceled.retry.is_none());
+}
+
+#[test]
+fn launcher_stale_reveal_waits_for_an_unsettled_hidden_frame() {
+    let mut frame = FirstFrame { notified: true, ..Default::default() };
+    frame.prepare();
+    frame.ready = true;
+    assert!(!frame.complete());
+    assert!(frame.request_reveal(false), "unchanged state reveals the cached frame at once");
+    assert!(!frame.pending() && frame.settles());
+    assert!(!frame.request_reveal(true), "changed state renders hidden first");
+    assert!(frame.retry.is_some() && !frame.settles(), "the refresh keeps its new motion");
+    frame.ready = true; // The hidden frame's fence completed.
+    assert!(frame.pending() && frame.complete());
+    assert!(!frame.pending() && frame.settles());
+    assert!(!frame.request_reveal(true));
+    frame.hide();
+    assert!(frame.settles(), "a canceled refresh is an ordinary hidden frame");
+    frame.ready = true;
+    assert!(frame.pending() && !frame.complete(), "hide cancels the refreshed reveal");
+    assert!(frame.retry.is_none() && frame.until.is_none(), "no retries after completion");
 }
 
 impl Win {
@@ -678,8 +705,9 @@ impl<S: 'static> Host<S> {
     fn reveal_launcher(&mut self, event_loop: &ActiveEventLoop) {
         self.apply_placement(event_loop);
         if self.win.is_none() { self.create(event_loop, None, false); }
+        let stale = self.rt.needs_commit();
         let Some(w) = &mut self.win else { return };
-        if !w.first_frame.request_reveal() {
+        if !w.first_frame.request_reveal(stale) {
             w.window.request_redraw();
             return;
         }
@@ -687,13 +715,14 @@ impl<S: 'static> Host<S> {
         w.visible = true;
         w.occluded = false;
         self.rt.set_live_visible(true);
-        // No settle, frame, surface configure or acquisition on a cached reveal.
+        // No settle, frame, surface configure or acquisition on a cached reveal, unless
+        // the refreshed frame left motion running.
+        if !self.idle { w.window.request_redraw(); }
     }
 
     fn first_frame_ready(&mut self, event_loop: &ActiveEventLoop) {
         let Some(w) = &mut self.win else { return };
-        if w.first_frame.notified { return; }
-        if !w.first_frame.ready { return; }
+        if !w.first_frame.pending() { return; }
         let reveal = w.first_frame.complete();
         self.native_handle.native.ready.store(true, Ordering::Release);
         *self.shared.window_error.lock().unwrap() = None;
@@ -1132,7 +1161,7 @@ impl<S: 'static> Host<S> {
         let dt = if hidden { 0.0 } else if self.idle { 1.0 / 120.0 } else { (now - self.last).as_secs_f64().min(1.0 / 30.0) };
         self.last = now;
         let rt = &mut self.rt;
-        if hidden { rt.settle_all(); }
+        if hidden && l.first_frame.settles() { rt.settle_all(); }
         let mut animating = rt.frame(dt);
         self.secure_input.set(rt.has_secure_focus() && l.window.has_focus());
         let update_ms = now.elapsed().as_secs_f64() * 1000.0;

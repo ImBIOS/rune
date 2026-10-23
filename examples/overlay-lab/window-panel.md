@@ -31,7 +31,11 @@ rather than end this host. Ordinary non-launcher windows keep their existing sho
 
 The reveal itself does no settling, layout, surface configuration or drawable acquisition.
 Queued state updates, focus handlers and later input can draw fresh frames normally.
-Hidden updates render at alpha zero; hidden animations do not drive a continuous loop.
+Hidden updates, and `poll` changes after `AppHandle::wake()`, render at alpha zero; hidden
+animations do not drive a continuous loop. A shown launcher redraws on every wake. A show
+whose state changed since the cached frame (an `update()` in the same turn) first renders
+one fenced hidden frame, so it never reveals stale pixels. That frame commits the new state
+without settling it: content is fresh on reveal and the update's motion runs on from there.
 First preparation retries unavailable drawables for at most two seconds, then reports through
 `AppHandle::window_error()` and remains hidden; a later show retries preparation. A late
 successful frame still completes readiness. Other platforms use an ordinary hidden

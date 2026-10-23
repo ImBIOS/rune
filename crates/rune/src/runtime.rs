@@ -680,6 +680,11 @@ impl<S: 'static> Runtime<S> {
         }
     }
 
+    /// State changed since the last committed frame (an update, poll or handler).
+    pub(crate) fn needs_commit(&self) -> bool {
+        self.dirty
+    }
+
     /// Marks app state changed outside a handler (the next frame re-runs the view).
     pub fn invalidate(&mut self) {
         self.dirty = true;

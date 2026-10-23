@@ -1,5 +1,6 @@
 //! A retained launcher panel (`WindowOptions::launcher_panel`) runs `poll` on a plain
-//! `AppHandle::wake`, hidden or shown. Opens a native panel, so it only runs with
+//! `AppHandle::wake`, hidden or shown, and never reveals cached pixels older than an update
+//! in the same turn. Prints the reveal latency of both paths. Opens a native panel, so it only runs with
 //! RUNE_GUI_TESTS=1 in a logged-in macOS GUI session.
 
 #[cfg(not(target_os = "macos"))]
@@ -74,6 +75,7 @@ mod mac {
             let run = std::panic::catch_unwind(|| {
                 ready_rx.recv_timeout(Duration::from_secs(10)).expect("launcher ready");
                 hidden_and_shown_wakes(&handle);
+                reveal_after_update(&handle);
             });
             *out.lock().unwrap() = Some(run.is_ok());
             handle.quit();
@@ -100,5 +102,47 @@ mod mac {
         assert_eq!(rendered("shown"), Some(true));
         handle.hide();
         wait("hide", || !handle.is_visible());
+    }
+
+    static UNBLOCKED: Mutex<Option<Instant>> = Mutex::new(None);
+
+    /// Queues `requests` while the event thread is busy, so one drain takes them all, and
+    /// returns the time from that drain's start until the window reports itself shown.
+    fn reveal_in_one_drain(handle: &AppHandle<State>, requests: impl FnOnce()) -> Duration {
+        handle.update(|_, _| {
+            std::thread::sleep(Duration::from_millis(100));
+            *UNBLOCKED.lock().unwrap() = Some(Instant::now());
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        requests();
+        let start = Instant::now();
+        while !handle.is_visible() { assert!(start.elapsed() < Duration::from_secs(5), "timed out waiting for reveal"); }
+        let shown = Instant::now();
+        shown - UNBLOCKED.lock().unwrap().take().expect("blocking update ran")
+    }
+
+    fn hide(handle: &AppHandle<State>) {
+        handle.hide();
+        wait("hide", || !handle.is_visible());
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
+    fn reveal_after_update(handle: &AppHandle<State>) {
+        let (mut cached, mut fresh) = (Vec::new(), Vec::new());
+        for i in 0..12 {
+            cached.push(reveal_in_one_drain(handle, || handle.open()));
+            hide(handle);
+            let label = format!("fresh {i}");
+            let update = label.clone();
+            fresh.push(reveal_in_one_drain(handle, || {
+                handle.update(move |s, _| s.label = update);
+                handle.open();
+            }));
+            assert_eq!(rendered(&label), Some(false), "the update rendered hidden before the reveal");
+            hide(handle);
+        }
+        let median = |v: &mut Vec<Duration>| { v.sort(); v[v.len() / 2].as_secs_f64() * 1000.0 };
+        let (cached, fresh) = (median(&mut cached), median(&mut fresh));
+        println!("launcher_wakes: reveal median {cached:.2} ms cached, {fresh:.2} ms after an update (+{:.2} ms)", fresh - cached);
     }
 }

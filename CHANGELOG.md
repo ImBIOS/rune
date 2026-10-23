@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Launcher panels never reveal stale pixels.** A launcher shown in the same turn as an
+  `update()` renders one fenced hidden frame before its reveal, where it used to show the
+  cached pre-update frame for a frame. The update's motion is not settled; it runs on after
+  the reveal. Reveals with unchanged state keep the cached fast path.
 - **Launcher panels run `poll` on a plain wake.** `AppHandle::wake()` and the setup `Waker`
   used to skip a launcher's `poll` unless an update came with them. A shown launcher now
   redraws; a hidden one polls and renders its cached frame at alpha zero when `poll` reports
