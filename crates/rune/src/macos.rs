@@ -8,7 +8,6 @@ use objc2_app_kit::{NSEvent, NSPanel, NSWindow, NSResponder, NSScreen};
 use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize};
 use crate::{DisplayTarget, KeyPolicy, OverlayInput, OverlayLevel, OverlayOptions, OverlaySupport};
 use std::{cell::{Cell, RefCell}, collections::VecDeque, rc::Rc, time::{Duration, Instant}};
-pub(crate) use show_overlay as show_without_focus;
 
 struct PanelFlags { keys: bool, warming: Rc<Cell<bool>> }
 
@@ -257,8 +256,7 @@ fn configure_native(window: &NSWindow, options: &crate::MacWindowOptions) {
 }
 
 /// Orders a window front without making it key or activating the app.
-#[allow(dead_code)]
-pub(crate) fn show_overlay(window: &winit::window::Window) {
+pub(crate) fn show_without_focus(window: &winit::window::Window) {
     let Some(w) = ns_window(window) else { return };
     // SAFETY: an AppKit call on the main thread.
     unsafe { w.orderFrontRegardless() };
