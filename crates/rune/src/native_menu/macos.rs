@@ -66,13 +66,12 @@ pub(super) struct Native {
     mtm: MainThreadMarker,
     entries: Vec<(Retained<NSMenu>, Retained<NSMenuItem>)>,
     targets: Vec<Retained<MenuTarget>>,
-    created_root: Option<Retained<NSMenu>>,
 }
 impl Native {
     pub(super) fn new() -> Result<Self, MenuError> {
         let mtm = MainThreadMarker::new().ok_or_else(|| MenuError::Backend("menus require the main thread".into()))?;
         if OWNED.with(|owned| owned.replace(true)) { return Err(MenuError::InUse); }
-        Ok(Self { mtm, entries: Vec::new(), targets: Vec::new(), created_root: None })
+        Ok(Self { mtm, entries: Vec::new(), targets: Vec::new() })
     }
     fn clear(&mut self) {
         for (menu, item) in self.entries.drain(..) {
@@ -117,13 +116,8 @@ impl Native {
             let menu = if location == Location::Dock {
                 DOCK.with(|slot| slot.borrow_mut().get_or_insert_with(|| NSMenu::new(self.mtm)).clone())
             } else {
-                let root = app.mainMenu().unwrap_or_else(|| {
-                    let root = NSMenu::new(self.mtm);
-                    app.setMainMenu(Some(&root));
-                    self.created_root = Some(root.clone());
-                    root
-                });
-                // Accessory apps may have no default menu. Reserve the first slot for
+                let root = super::ensure_default_menu(&app);
+                // An app-supplied empty root is preserved. Reserve its first slot for
                 // the app menu even when a named-menu item appears first in the snapshot.
                 if root.numberOfItems() == 0 { self.add_top(&root, "Application"); }
                 match &location {
@@ -162,11 +156,6 @@ impl Native {
 impl Drop for Native {
     fn drop(&mut self) {
         self.clear();
-        if let Some(root) = self.created_root.take() {
-            let app = NSApplication::sharedApplication(self.mtm);
-            // SAFETY: Main-thread read; only remove a root this adapter created.
-            if unsafe { app.mainMenu() }.is_some_and(|current| std::ptr::eq(&*current, &*root)) { app.setMainMenu(None); }
-        }
         OWNED.with(|owned| owned.set(false));
     }
 }

@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Accessory apps get an app menu when showing their Dock icon.** On macOS,
+  `set_dock_icon(true)` installs About, Services, Hide and Quit when no main menu exists,
+  preserving app-supplied menus and composing with Rune's custom menu items.
 - **Headless runs resolve `place()`.** A `--script` object can declare `"displays"` and a
   `"pointer"`; `AppHandle::place` resolves against them (one 1920x1080-pixel display by
   default), prints a `rune-placed` line and adds `"placed"` to `--tree`. A script object

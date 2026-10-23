@@ -34,7 +34,7 @@ csscolorparser = { version = "0.7", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5.2"
 block2 = "0.5"
-objc2-foundation = { version = "0.2.2", features = ["NSArray", "NSGeometry", "NSString", "NSThread", "NSUserDefaults"] }
+objc2-foundation = { version = "0.2.2", features = ["NSArray", "NSGeometry", "NSProcessInfo", "NSString", "NSThread", "NSUserDefaults"] }
 objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSButton", "NSCell", "NSControl", "NSEvent", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSView", "NSWindow", "NSColor", "NSGraphics", "NSPanel", "NSScreen", "NSPasteboard"] }
 objc2-video = { package = "objc2", version = "0.6" }
 objc2-core-foundation = "0.3"
@@ -75,4 +75,8 @@ harness = false
 
 [[test]]
 name = "shortcut_layout_macos"
+harness = false
+
+[[test]]
+name = "default_menu_macos"
 harness = false

@@ -6,6 +6,10 @@ use crate::{App, AppHandle, Shortcut, Tx, app::Shared};
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod default_macos;
+#[cfg(target_os = "macos")]
+pub(crate) use default_macos::ensure as ensure_default_menu;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Location { App, Named(String), Dock }

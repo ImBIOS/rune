@@ -139,6 +139,14 @@ Rune hook returns nil after teardown. Key equivalents are native menu equivalent
 not global registrations. Reapply the snapshot after changing keyboard layout to
 refresh translated equivalents.
 
+An accessory app that calls `set_dock_icon(true)` gets winit's standard app menu
+if `NSApp.mainMenu` is absent: About, Services, Hide, Hide Others, Show All and Quit.
+Creating custom menu items first uses that same default root; adding them later
+inserts alongside the defaults. Existing roots are never replaced, and clearing
+custom items or calling `set_dock_icon(false)` leaves the default menu intact.
+No Edit menu is installed: native edit roles are not implemented, and AppKit's
+standard edit selectors could intercept Rune's focused-field shortcuts.
+
 Native Windows/Linux return `MenuError::Unsupported`; startup builders report it
 through `take_menu_errors()`. Headless virtual menus work on every platform:
 `{"menu":"Open Quick Panel"}` invokes by exact id or unambiguous title. Unknown,

@@ -224,7 +224,9 @@ impl Drop for MouseMonitors {
 pub(crate) fn set_dock_icon(visible: bool) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     let policy = if visible { NSApplicationActivationPolicy::Regular } else { NSApplicationActivationPolicy::Accessory };
-    NSApplication::sharedApplication(mtm).setActivationPolicy(policy);
+    let app = NSApplication::sharedApplication(mtm);
+    if visible { crate::native_menu::ensure_default_menu(&app); }
+    app.setActivationPolicy(policy);
 }
 
 fn ns_window(window: &winit::window::Window) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
