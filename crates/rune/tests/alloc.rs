@@ -17,6 +17,30 @@ static A: Counting = Counting;
 fn allocs() -> usize { ALLOCS.with(Cell::get) }
 
 #[test]
+fn disabled_trace_hooks_neither_format_nor_allocate() {
+    struct Unformatted;
+    impl std::fmt::Display for Unformatted {
+        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { panic!("disabled trace formatted an event") }
+    }
+    fn view(_: &(), _: &mut Cx<()>) -> El { rune::el().trace_name("shell") }
+    let mut rt = Runtime::new((), view, (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+    rt.frame(0.0);
+    let element = rune::el();
+    let before = allocs();
+    let _named = element.trace_name("chip:Area");
+    for _ in 0..100 {
+        rt.update(|_, tx| {
+            assert!(!tx.tracing());
+            tx.trace_event(Unformatted);
+            tx.trace_channel("phase:recording", "phase", 1.0);
+        });
+        rt.trace_event(Unformatted);
+        rt.trace_channel("shell.width", "position", 100.0);
+    }
+    assert_eq!(allocs() - before, 0);
+}
+
+#[test]
 fn static_faded_container_planning_allocates_nothing() {
     use rune::{Color, Live, el};
     fn view(offset: &Live<[f32; 2]>, _: &mut Cx<Live<[f32; 2]>>) -> El {

@@ -114,6 +114,7 @@ pub(crate) struct Node {
     pub id: NodeId,
     pub path: String,
     pub key: Option<String>,
+    pub trace_name: Option<&'static str>,
     pub role: &'static str,
     pub label: Option<String>,
     pub vis: Visual,
@@ -172,6 +173,7 @@ enum Action {
 /// What tools see of one element.
 #[derive(Clone, Debug)]
 pub struct ElementInfo {
+    pub trace_name: Option<&'static str>,
     pub loop_phase: Option<f64>,
     pub focusable: bool,
     pub focused: bool,
@@ -380,6 +382,8 @@ pub struct Runtime<S: 'static> {
     pub settled: bool,
     /// Events since the last frame, for traces.
     pub events: Vec<String>,
+    /// Tooling opts in before any callbacks. Absent in ordinary app runs.
+    pub(crate) trace_channels: Option<HashMap<&'static str, (&'static str, f32)>>,
     /// Counters for perf gates.
     pub stats: FrameStats,
     live_wake: Arc<crate::live::Wake>,
@@ -529,6 +533,7 @@ impl<S: 'static> Runtime<S> {
             animating: false,
             settled: false,
             events: Vec::new(),
+            trace_channels: None,
             stats: FrameStats::default(),
             live_wake: crate::live::Wake::new(Arc::new(|| {})),
             live_clock: Arc::new(()),
@@ -722,7 +727,7 @@ impl<S: 'static> Runtime<S> {
     /// (`AppHandle::update`). Runs now, so it works while no window shows; the next frame commits
     /// it with the motion `f` asked for.
     pub fn update(&mut self, f: impl FnOnce(&mut S, &mut Tx)) {
-        let mut one = Tx::default();
+        let mut one = self.transaction();
         f(&mut self.state, &mut one);
         self.shell_request = self.shell_request.max(one.shell.take());
         merge(&mut self.pending, one);
@@ -752,6 +757,25 @@ impl<S: 'static> Runtime<S> {
         self.shell_request = self.shell_request.max(one.shell.take());
         merge(&mut self.pending, one);
         changed
+    }
+
+    pub fn tracing(&self) -> bool { self.trace_channels.is_some() || self.scene.tracing() }
+
+    fn transaction(&self) -> Tx {
+        Tx { trace: self.tracing().then(crate::el::TraceCalls::default), ..Tx::default() }
+    }
+
+    /// A scalar from the actual draw path (e.g. `shell.width`). Values hold until resampled.
+    /// Call before the tooling writer records the frame; scene traces sample in `frame`.
+    pub fn trace_channel(&mut self, name: &'static str, kind: &'static str, value: f32) {
+        if let Some(channels) = &mut self.trace_channels { channels.insert(name, (kind, value)); }
+        if let Some(trace) = self.scene.trace_mut() { trace.channel(name, kind, value); }
+    }
+
+    /// Queues an app marker once for each attached writer. Formatting is skipped when off.
+    pub fn trace_event(&mut self, event: impl std::fmt::Display) {
+        if self.trace_channels.is_some() { self.events.push(event.to_string()); }
+        if let Some(trace) = self.scene.trace_mut() { trace.event(event); }
     }
 
     /// Next requested wake on the unscaled app clock. None lets the shell sleep indefinitely.
@@ -863,7 +887,7 @@ impl<S: 'static> Runtime<S> {
         let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
         self.wake_deadlines.drain(..due);
         if let Some(poll) = self.poll {
-            let mut one = Tx::default();
+            let mut one = self.transaction();
             // Scheduling does not imply a model change.
             if poll(&mut self.state, self.clock, &mut one) {
                 ran = true;
@@ -918,6 +942,10 @@ impl<S: 'static> Runtime<S> {
         for key in scroll_to { self.reveal_row(&key); }
         self.update_interaction();
         let live_animating = self.latch_live();
+        if let Some(trace) = tx.trace.take() {
+            for event in trace.events { self.trace_event(event); }
+            for (name, kind, value) in trace.channels { self.trace_channel(name, kind, value); }
+        }
         let animating = self.step_motion(dt) || live_animating;
         self.stats.shaped = self.text.shaped - shaped0;
         self.animating = animating && self.time_scale > 0.0;
@@ -930,6 +958,9 @@ impl<S: 'static> Runtime<S> {
         let step = dt * self.time_scale as f64;
         self.t += step;
         self.scene.set_time(self.t);
+        if self.scene.tracing() {
+            for node in &self.nodes { self.scene.trace_name(node.id, node.trace_name); }
+        }
         let out = self.scene.frame();
         let mut animating = out.animating;
         if !out.exited.is_empty() {
@@ -1078,7 +1109,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn run_action(&mut self, action: Action, tx: &mut Tx) -> bool {
-        let mut one = Tx::default();
+        let mut one = self.transaction();
         let ran = match action {
             Action::WindowFocus(focused) => {
                 let Some(f) = self.nodes.first().and_then(|n| n.on_window_focus.clone()) else { return false };
@@ -3136,6 +3167,7 @@ impl<S: 'static> Runtime<S> {
                     a = self.nodes[pi].parent;
                 }
                 Some(ElementInfo {
+                    trace_name: n.trace_name,
                     loop_phase: self.loops.get(&n.id).map(|l| {
                         if self.reduced_motion && !matches!(n.looping.map(|s| s.kind), Some(rune_motion::LoopKind::Sequence(_))) { 0.0 }
                         else { l.phase(self.t) }
@@ -3177,6 +3209,7 @@ impl<S: 'static> Runtime<S> {
             let path = format!("flight-source/{}", f.target_key);
             let t = f.destination;
             elements.push(ElementInfo {
+                trace_name: None,
                 loop_phase: None,
                 focusable: false, focused: false, focus_visible: false, inert: true,
                 key: Some(path.clone()), path, role: "text", label: None, text: None,
@@ -3242,6 +3275,11 @@ fn input_caret(n: &Node, r: [f32; 4], scale: f32, s: f32, scrolls: &mut HashMap<
 
 fn merge(tx: &mut Tx, one: Tx) {
     tx.paste |= one.paste;
+    if let Some(one) = one.trace {
+        let trace = tx.trace.get_or_insert_with(Default::default);
+        trace.events.extend(one.events);
+        trace.channels.extend(one.channels);
+    }
     tx.scroll_to.extend(one.scroll_to);
     tx.wakes.extend(one.wakes);
     tx.text_flights.extend(one.text_flights);
@@ -3503,6 +3541,7 @@ fn flatten(
         modal,
         looping,
         key,
+        trace_name,
         role,
         label,
         style,
@@ -3544,6 +3583,7 @@ fn flatten(
         id: NodeId(0),
         path: path.clone(),
         key,
+        trace_name,
         role,
         label,
         vis,

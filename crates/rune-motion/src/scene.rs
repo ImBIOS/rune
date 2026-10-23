@@ -350,6 +350,15 @@ impl Scene {
     /// Records every frame as motion-lint JSONL.
     pub fn set_trace(&mut self, trace: Option<MotionTrace>) {
         self.trace = trace;
+        for node in self.nodes.iter_mut().filter(|n| n.alive) { node.dirty = true; }
+    }
+    pub fn tracing(&self) -> bool { self.trace.is_some() }
+    pub fn trace_mut(&mut self) -> Option<&mut MotionTrace> { self.trace.as_mut() }
+    /// Updates metadata even if the node's geometry has not changed.
+    pub fn trace_name(&mut self, id: NodeId, name: Option<&'static str>) {
+        if self.trace.as_mut().is_some_and(|trace| trace.name(id, name)) {
+            if let Some(i) = self.slot(id) { self.nodes[i].dirty = true; }
+        }
     }
     pub fn take_trace(&mut self) -> Option<MotionTrace> {
         self.trace.take()

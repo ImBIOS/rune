@@ -27,6 +27,13 @@ pub struct Tx {
     pub(crate) scroll_to: Vec<String>,
     pub(crate) wakes: Vec<std::time::Duration>,
     pub(crate) shell: Option<Shell>,
+    pub(crate) trace: Option<TraceCalls>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TraceCalls {
+    pub events: Vec<String>,
+    pub channels: Vec<(&'static str, &'static str, f32)>,
 }
 
 /// What a handler asks of the window and the app (`Tx::close_window`, `Tx::quit`); the later
@@ -39,6 +46,22 @@ pub enum Shell {
 }
 
 impl Tx {
+    /// Whether this runtime has an attached motion or tooling trace.
+    pub fn tracing(&self) -> bool { self.trace.is_some() }
+
+    /// An app marker on the next frame, e.g. `tx.trace_event(format_args!("lab:{step:?}"))`.
+    /// Formatting is skipped when tracing is off. Avoid eagerly constructing a `String`.
+    pub fn trace_event(&mut self, event: impl std::fmt::Display) {
+        if let Some(trace) = &mut self.trace { trace.events.push(event.to_string()); }
+    }
+
+    /// A sample-and-hold scalar (`position`, `level`, or `phase`), e.g. `phase:recording`.
+    /// No allocation when tracing is off. Use a compositor's `Runtime::trace_channel` for
+    /// presented geometry that changes between commits.
+    pub fn trace_channel(&mut self, name: &'static str, kind: &'static str, value: f32) {
+        if let Some(trace) = &mut self.trace { trace.channels.push((name, kind, value)); }
+    }
+
     /// Reveal a keyed row, including a currently unrealized virtual row.
     pub fn scroll_into_view(&mut self, key: impl Into<String>) {
         self.scroll_to.push(key.into());
@@ -364,6 +387,7 @@ pub struct El {
     pub(crate) modal: Option<ModalSpec>,
     pub(crate) looping: Option<rune_motion::LoopSpec>,
     pub(crate) key: Option<String>,
+    pub(crate) trace_name: Option<&'static str>,
     #[cfg(debug_assertions)]
     key_source: Option<&'static std::panic::Location<'static>>,
     #[cfg(debug_assertions)]
@@ -404,6 +428,7 @@ fn base(dir: FlexDirection) -> El {
         modal: None,
         looping: None,
         key: None,
+        trace_name: None,
         #[cfg(debug_assertions)]
         key_source: None,
         #[cfg(debug_assertions)]
@@ -557,6 +582,14 @@ impl El {
                 text.content = input.edit.display().0;
             }
         }
+        self
+    }
+
+    /// A stable motion-lint name, independent of keys and generations. Defaults to the NodeId
+    /// in MotionTrace; tooling retains its keyed path fallback. Static metadata allocates nothing.
+    /// Give simultaneous generations distinct names when comparing their motion separately.
+    pub fn trace_name(mut self, name: &'static str) -> Self {
+        self.trace_name = Some(name);
         self
     }
 

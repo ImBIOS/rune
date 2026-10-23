@@ -458,6 +458,7 @@ impl<S: 'static> Host<S> {
         let mut rt = runtime_for(&spec, state, size, env, waker.clone());
         rt.on_focus = on_focus;
         rt.set_system_reduced_motion(crate::preferences::reduced_motion());
+        rt.trace_channels = args.trace.as_ref().map(|_| Default::default());
         rt.set_live_waker(Arc::new(move || { let _ = live_proxy.send_event(WakeEvent::Live(slot)); }));
         rt.set_live_visible(false);
         rt.transparent = options.transparent;

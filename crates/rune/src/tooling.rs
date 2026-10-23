@@ -526,9 +526,10 @@ fn window_panel_headless_focus_steps_preserve_false_and_event_order() {
 pub(crate) struct Trace {
     out: std::io::BufWriter<std::fs::File>,
     ids: HashMap<String, u32>,
-    described: HashSet<u32>,
+    described: HashMap<u32, String>,
     states: HashMap<u32, ([i64; 6], u32, [i64; 4])>,
-    effects: HashMap<u32, [i64; 2]>,
+    effects: HashMap<u32, [String; 2]>,
+    channels: rune_motion::TraceChannels,
 }
 
 fn r2(v: f32) -> f64 {
@@ -552,7 +553,7 @@ impl Trace {
         });
         if clock == "wall" { header["timestamp"] = "cpu-submit".into(); }
         let _ = writeln!(out, "{header}");
-        Trace { out, ids: HashMap::new(), described: HashSet::new(), states: HashMap::new(), effects: HashMap::new() }
+        Trace { out, ids: HashMap::new(), described: HashMap::new(), states: HashMap::new(), effects: HashMap::new(), channels: Default::default() }
     }
 
     fn id(&mut self, key: &str) -> u32 {
@@ -565,28 +566,28 @@ impl Trace {
         let settled = rt.settled;
         let mut metas = Vec::new();
         let mut changed = Vec::new();
-        let mut channels = Vec::new();
-        let mut values = Vec::new();
         let mut seen = HashSet::new();
         // A virtual list's invisible estimated extent changes when rows are measured or the
         // window rebases. Record the actual row surfaces, not that bookkeeping rectangle.
-        for e in els.iter().filter(|e| e.key.is_some() && !e.virtual_extent) {
+        for e in els.iter().filter(|e| (e.key.is_some() || e.trace_name.is_some()) && !e.virtual_extent) {
             let id = self.id(&e.path);
+            let name = e.trace_name.unwrap_or(&e.path);
             seen.insert(id);
-            if self.described.insert(id) {
-                let mut meta = json!({ "id": id, "cls": "rune", "nm": e.path, "host": "rune", "role": e.role });
-                if let Some(p) = e.parent.and_then(|p| els.get(p)).filter(|p| p.key.is_some() && !p.virtual_extent) {
+            if self.described.get(&id).is_none_or(|old| old != name) {
+                self.described.insert(id, name.to_owned());
+                let mut meta = json!({ "id": id, "cls": "rune", "nm": name, "host": "rune", "role": e.role });
+                if let Some(p) = e.parent.and_then(|p| els.get(p)).filter(|p| (p.key.is_some() || p.trace_name.is_some()) && !p.virtual_extent) {
                     meta["pv"] = self.id(&p.path).into();
                 }
                 metas.push(meta);
-                for (channel, name, unit) in [(id * 2, "scale", "ratio"), (id * 2 + 1, "blur", "pt")] {
-                    channels.push(json!({ "id": channel, "name": format!("{}.{name}", e.path), "kind": "position", "unit": unit, "owner": e.path }));
-                }
             }
-            let effects = [(e.scale * 10000.0).round() as i64, (e.blur * 1000.0).round() as i64];
-            if self.effects.insert(id, effects) != Some(effects) {
-                values.push(json!([id * 2, effects[0] as f64 / 10000.0]));
-                values.push(json!([id * 2 + 1, effects[1] as f64 / 1000.0]));
+            let effects = [format!("{name}.scale"), format!("{name}.blur")];
+            for (name, value, unit) in [(&effects[0], e.scale, "ratio"), (&effects[1], e.blur, "pt")] {
+                self.channels.sample(name, "position", value);
+                self.channels.owner(name, id, unit);
+            }
+            if let Some(old) = self.effects.insert(id, effects.clone()) {
+                for name in old.iter().filter(|n| !effects.contains(n)) { self.channels.remove(name); }
             }
             let [x, y, w, h] = e.rect;
             // A settle commit is a deliberate cut (everything lands at once); a growth row reveals
@@ -643,7 +644,9 @@ impl Trace {
         // A settle unmounts what it replaces at once: a cut (transition | opacity) at its last place.
         let mut cuts = Vec::new();
         for id in &gone {
-            self.effects.remove(id);
+            if let Some(names) = self.effects.remove(id) {
+                for name in names { self.channels.remove(&name); }
+            }
             if let Some((q, ..)) = self.states.remove(id)
                 && settled
             {
@@ -675,14 +678,18 @@ impl Trace {
             line["e"] = changed.into();
         }
         if !gone.is_empty() {
-            line["cg"] = gone.iter().flat_map(|id| [id * 2, id * 2 + 1]).collect::<Vec<_>>().into();
             line["g"] = gone.into();
         }
-        if !channels.is_empty() { line["cm"] = channels.into(); }
-        if !values.is_empty() { line["c"] = values.into(); }
         if !cuts.is_empty() {
             line["ai"] = cuts.into();
         }
+        if let Some(channels) = &rt.trace_channels {
+            for (&name, &(kind, value)) in channels { self.channels.sample(name, kind, value); }
+        }
+        let mut line = line.to_string();
+        line.pop(); // Append scalar fields to the same frame object.
+        self.channels.write_json(&mut line);
+        line.push('}');
         let _ = writeln!(self.out, "{line}");
     }
 }
@@ -837,6 +844,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let init_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let mut trace = args.trace.as_ref().map(|p| Trace::open(p, size, fps, scale));
+    rt.trace_channels = trace.as_ref().map(|_| HashMap::new());
     rt.scene.store_mut().audit_retargets(trace.is_some());
     let mut strip: Vec<Vec<u8>> = Vec::new();
     let crops_px: Vec<[u32; 4]> = args.crops.iter().map(|c| c.map(|v| (v * scale).round() as u32)).collect();
@@ -1097,6 +1105,49 @@ fn tile_size(w: u32, h: u32, crops: &[[u32; 4]], gap: u32) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trace_annotations_reach_both_writers_once() {
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            crate::el().key("root").child(crate::el().key("generation-7").trace_name("chip:Area").size(30.0, 20.0))
+        }
+        let mut rt = Runtime::new((), view, (100.0, 100.0), Env { scale: 1.0, system_dark: true });
+        let (trace, buffer) = rune_motion::MotionTrace::in_memory(&rune_motion::TraceHeader {
+            launch: "pill".into(), width: 100.0, height: 100.0, hz: 60.0, scale: 1.0,
+        });
+        rt.scene.set_trace(Some(trace));
+        rt.trace_channels = Some(Default::default());
+        let path = std::env::temp_dir().join(format!("rune-annotations-{}.jsonl", std::process::id()));
+        {
+            let mut trace = Trace::open(&path, rt.viewport, 60.0, 1.0);
+            rt.update(|_, tx| {
+                assert!(tx.tracing());
+                tx.trace_event(format_args!("lab:{}", "Start"));
+                tx.trace_channel("shell.width", "position", 30.0);
+            });
+            // A second transaction before the frame must retain the first event.
+            rt.update(|_, tx| {
+                tx.trace_event("lab:Ready");
+                tx.trace_channel("shell.width", "position", 40.0);
+            });
+            rt.frame(0.0);
+            trace.frame(&mut rt, 0.0, 0.0);
+            rt.frame(0.02);
+            trace.frame(&mut rt, 20.0, 0.0);
+        }
+        rt.scene.take_trace().unwrap().flush().unwrap();
+        let tooling = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        for text in [tooling, buffer.contents()] {
+            let lines: Vec<Value> = text.lines().map(|s| serde_json::from_str(s).unwrap()).collect();
+            assert!(lines[1]["m"].as_array().unwrap().iter().any(|m| m["nm"] == "chip:Area"));
+            assert_eq!(lines[1]["ev"], json!(["lab:Start", "lab:Ready"]));
+            let channel = lines[1]["cm"].as_array().unwrap().iter().find(|m| m["name"] == "shell.width").unwrap();
+            assert_eq!(channel["kind"], "position");
+            assert!(lines[1]["c"].as_array().unwrap().iter().any(|c| c[0] == channel["id"] && c[1].as_f64() == Some(40.0)));
+            for field in ["cm", "c", "ev"] { assert!(lines[2][field].is_null(), "duplicate {field}"); }
+        }
+    }
 
     #[test]
     fn native_trace_does_not_select_virtual_rendering() {

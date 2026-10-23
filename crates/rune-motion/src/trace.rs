@@ -10,6 +10,81 @@ use crate::props::{NodeId, PropId, prop};
 use crate::scene::Presented;
 use crate::store::{FxMap, MotionEvent};
 
+/// Delta-encoded motion-lint scalar channels. Values hold until sampled again or removed.
+#[derive(Default)]
+pub struct TraceChannels {
+    ids: FxMap<String, usize>,
+    channels: Vec<Channel>,
+}
+
+struct Channel {
+    name: String,
+    kind: String,
+    value: Option<f64>,
+    previous: Option<f64>,
+    described: bool,
+    owner: Option<(u32, &'static str)>,
+}
+
+impl TraceChannels {
+    /// `kind` is motion-lint's `position`, `level`, or `phase`. Non-finite samples are ignored.
+    pub fn sample(&mut self, name: &str, kind: &str, value: f32) {
+        if !value.is_finite() { return; }
+        assert!(matches!(kind, "position" | "level" | "phase"), "unknown trace channel kind");
+        let i = if let Some(&i) = self.ids.get(name) { i } else {
+            let i = self.channels.len();
+            self.ids.insert(name.to_owned(), i);
+            self.channels.push(Channel { name: name.to_owned(), kind: kind.to_owned(), value: None, previous: None, described: false, owner: None });
+            i
+        };
+        let channel = &mut self.channels[i];
+        if channel.kind != kind { channel.kind = kind.to_owned(); channel.described = false; }
+        channel.value = Some((f64::from(value) * 1e4).round() / 1e4);
+    }
+
+    pub fn remove(&mut self, name: &str) {
+        if let Some(&i) = self.ids.get(name) { self.channels[i].value = None; }
+    }
+
+    /// Associates an effect channel with its element for visibility gating.
+    pub fn owner(&mut self, name: &str, owner: u32, unit: &'static str) {
+        if let Some(&i) = self.ids.get(name) {
+            let channel = &mut self.channels[i];
+            if channel.owner != Some((owner, unit)) { channel.owner = Some((owner, unit)); channel.described = false; }
+        }
+    }
+
+    /// Appends optional `cm`, `c`, and `cg` fields to an open JSON object.
+    pub fn write_json(&mut self, line: &mut String) {
+        let mut metas = String::new();
+        let mut values = String::new();
+        let mut gone = String::new();
+        for (i, channel) in self.channels.iter_mut().enumerate() {
+            let id = i + 1;
+            if let Some(value) = channel.value {
+                if !channel.described {
+                    if !metas.is_empty() { metas.push(','); }
+                    let _ = write!(metas, r#"{{"id":{id},"name":{},"kind":{}"#, json_str(&channel.name), json_str(&channel.kind));
+                    if let Some((owner, unit)) = channel.owner { let _ = write!(metas, r#", "owner":{owner},"unit":{}"#, json_str(unit)); }
+                    metas.push('}');
+                    channel.described = true;
+                }
+                if channel.previous != Some(value) {
+                    if !values.is_empty() { values.push(','); }
+                    let _ = write!(values, "[{id},{value}]");
+                }
+            } else if channel.previous.is_some() {
+                if !gone.is_empty() { gone.push(','); }
+                let _ = write!(gone, "{id}");
+            }
+            channel.previous = channel.value;
+        }
+        for (key, values) in [("cm", metas), ("c", values), ("cg", gone)] {
+            if !values.is_empty() { let _ = write!(line, r#",{key:?}:[{values}]"#); }
+        }
+    }
+}
+
 /// motion-lint element flag bits (`analyze.ts` `Flags`).
 pub mod flags {
     pub const ANIMATED: u32 = 1;
@@ -90,6 +165,11 @@ pub struct MotionTrace {
     hz: f64,
     time_scale: f32,
     line: String,
+    names: FxMap<u64, &'static str>,
+    described: FxMap<u64, Option<&'static str>>,
+    host: String,
+    channels: TraceChannels,
+    events: Vec<String>,
 }
 
 impl MotionTrace {
@@ -112,6 +192,11 @@ impl MotionTrace {
             hz: header.hz.max(1.0) as f64,
             time_scale: 1.0,
             line: String::new(),
+            names: FxMap::default(),
+            described: FxMap::default(),
+            host: "scene".into(),
+            channels: TraceChannels::default(),
+            events: Vec::new(),
         })
     }
 
@@ -132,6 +217,27 @@ impl MotionTrace {
     pub fn set_time_scale(&mut self, sc: f32) {
         self.time_scale = sc;
     }
+
+    /// Set before the first frame when comparing against another host (for example `pill`).
+    pub fn host(mut self, host: impl Into<String>) -> Self {
+        self.host = host.into();
+        self
+    }
+
+    /// Stable display name, independent of reconciliation identity. None restores the NodeId.
+    pub fn name(&mut self, node: NodeId, name: Option<&'static str>) -> bool {
+        if let Some(name) = name { self.names.insert(node.0, name) != Some(name) }
+        else { self.names.remove(&node.0).is_some() }
+    }
+
+    pub fn channel(&mut self, name: &str, kind: &str, value: f32) {
+        self.channels.sample(name, kind, value);
+    }
+
+    pub fn remove_channel(&mut self, name: &str) { self.channels.remove(name); }
+
+    /// Recorded once, on the next frame. `format_args!` avoids eager string allocation.
+    pub fn event(&mut self, event: impl std::fmt::Display) { self.events.push(event.to_string()); }
 
     fn id(&mut self, node: NodeId) -> (u32, bool) {
         let next = self.ids.len() as u32 + 1;
@@ -158,7 +264,7 @@ impl MotionTrace {
         let mut line = std::mem::take(&mut self.line);
         line.clear();
         let _ = write!(line, r#"{{"t":{},"n":{},"sc":{}"#, r3(t_ms), n, self.time_scale);
-        if !events.is_empty() {
+        if !events.is_empty() || !self.events.is_empty() {
             line.push_str(r#","ev":["#);
             for (k, e) in events.iter().enumerate() {
                 if k > 0 {
@@ -172,17 +278,23 @@ impl MotionTrace {
                 };
                 line.push_str(&json_str(&s));
             }
+            for (k, event) in self.events.drain(..).enumerate() {
+                if k > 0 || !events.is_empty() { line.push(','); }
+                line.push_str(&json_str(&event));
+            }
             line.push(']');
         }
         let mut metas = String::new();
         let mut elems = String::new();
         for p in presented {
-            let (id, new) = self.id(p.node);
-            if new {
+            let (id, _) = self.id(p.node);
+            let name = self.names.get(&p.node.0).copied();
+            if self.described.insert(p.node.0, name) != Some(name) {
                 if !metas.is_empty() {
                     metas.push(',');
                 }
-                let _ = write!(metas, r#"{{"id":{id},"cls":"rune","nm":"{}","host":"scene""#, p.node.0);
+                let name = name.map_or_else(|| p.node.0.to_string(), str::to_owned);
+                let _ = write!(metas, r#"{{"id":{id},"cls":"rune","nm":{},"host":{}"#, json_str(&name), json_str(&self.host));
                 if let Some(parent) = p.parent {
                     let (pv, _) = self.id(parent);
                     let _ = write!(metas, r#","pv":{pv}"#);
@@ -260,6 +372,7 @@ impl MotionTrace {
             }
             line.push(']');
         }
+        self.channels.write_json(&mut line);
         line.push('}');
         let _ = writeln!(self.out, "{line}");
         self.line = line;
