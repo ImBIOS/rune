@@ -272,6 +272,8 @@ pub struct TextSpec {
     pub truncate: bool,
     /// Fade the overflowing trailing edge rather than replacing text with an ellipsis.
     pub truncate_fade: bool,
+    /// The `truncate_fade` edge's width in ems (see [`El::truncate_fade_width`]).
+    pub(crate) fade_em: f32,
     /// Spread wrapped lines to fill the width (see [`El::justify`]).
     pub justify: bool,
     /// Plain live run. Layout is measured from the authored placeholder before latching it.
@@ -279,6 +281,9 @@ pub struct TextSpec {
 }
 
 pub use rune_motion::Cycle;
+
+/// Default `truncate_fade` edge, in ems (Abattoir: 1.5 em on overflowing text).
+const TRUNCATE_FADE_EM: f32 = 1.5;
 
 #[derive(Clone, Debug)]
 pub struct Visual {
@@ -463,6 +468,7 @@ pub fn text(content: impl Into<String>) -> El {
         reveal: -1.0,
         truncate: false,
         truncate_fade: false,
+        fade_em: TRUNCATE_FADE_EM,
         justify: false,
         live: None,
     });
@@ -1094,11 +1100,16 @@ impl El {
         self.style.min_size.width = length(0.0);
         self
     }
-    /// One line, clipped with a one-em trailing fade only when it overflows. No ellipsis.
-    pub fn truncate_fade(mut self) -> Self {
+    /// One line, clipped with a 1.5 em trailing fade only when it overflows. No ellipsis.
+    pub fn truncate_fade(self) -> Self {
+        self.truncate_fade_width(TRUNCATE_FADE_EM)
+    }
+    /// [`El::truncate_fade`] with a fade `em` ems wide.
+    pub fn truncate_fade_width(mut self, em: f32) -> Self {
         if let Some(t) = &mut self.text {
             t.truncate = false;
             t.truncate_fade = true;
+            t.fade_em = em.max(0.0);
             t.wrap = false;
         }
         self.style.flex_shrink = 1.0;

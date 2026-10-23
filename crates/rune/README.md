@@ -302,8 +302,8 @@ wins over both. `.optical_sizing(OpticalSize::FontDefault)` restores Parley's ol
 selection. Fonts without an `opsz` axis are unaffected. The measured SF change is
 documented in [Batch C text results](../../research/24-live-text-and-font-settings.md).
 
-`.truncate_fade()` shrinks a single-line label and fades its trailing one-em edge
-only when text overflows. It keeps the full string and paints no ellipsis. For
+`.truncate_fade()` shrinks a single-line label and fades its trailing 1.5 em edge
+only when text overflows (`.truncate_fade_width(em)` sets another width). It keeps the full string and paints no ellipsis. For
 end-aligned labels the overflow fades on the left.
 
 Native hosts populate `cx.system_reduced_motion()` at creation and refresh it on

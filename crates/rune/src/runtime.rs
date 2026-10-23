@@ -2975,7 +2975,7 @@ impl<S: 'static> Runtime<S> {
                 // Layout width already includes display scale `s`; bounds also include the
                 // element/ancestor transform `sc`. Compare both after that transform.
                 if spec.truncate_fade && layout.full_width() * sc > bounds[2] - bounds[0] + 0.5 * sc {
-                    let width = (spec.style.size * sc * s).min((bounds[2] - bounds[0]).max(0.0));
+                    let width = (spec.style.size * spec.fade_em * sc * s).min((bounds[2] - bounds[0]).max(0.0));
                     let own = if spec.align == Align::End { [width, 0.0, 0.0, 0.0] }
                         else { [0.0, 0.0, width, 0.0] };
                     inherit_fade(&mut widths, &mut origins, bounds, own);
@@ -3481,7 +3481,8 @@ fn flatten(
             "live_text requires plain single-line text; use truncate_fade for overflow");
     }
     let measured = text.is_some();
-    let measure = text.as_ref().map(|t| crate::text::text_hash(&t.content, &t.spans, t.style, scale, None) ^ u64::from(t.wrap) ^ (u64::from(t.truncate || t.truncate_fade) << 1));
+    let measure = text.as_ref().map(|t| crate::text::text_hash(&t.content, &t.spans, t.style, scale, None) ^ u64::from(t.wrap) ^ (u64::from(t.truncate || t.truncate_fade) << 1)
+        ^ if t.truncate_fade { u64::from(t.fade_em.to_bits()) << 2 } else { 0 });
     nodes.push(Node {
         on_paste,
         on_window_focus,

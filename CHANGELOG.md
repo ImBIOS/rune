@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`.truncate_fade()` fades 1.5 em instead of 1 em** (Abattoir: 1.5 em on overflowing text).
+  Overflowing labels fade over a wider edge; labels that fit don't change. New
+  `.truncate_fade_width(em)` sets another width.
 - **Emoji with `U+FE0F` draw in colour.** `❤️`, `☀️`, `✔️` and other characters a text font also
   has use the colour emoji font when the emoji selector follows them; without it they keep their
   text form, as before.
