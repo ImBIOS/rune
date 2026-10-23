@@ -1,7 +1,7 @@
 //! The stories, one function per `@opencode/ui` Storybook story id (title + export name).
 //! Layout wrappers copy each story's own inline styles.
 
-use rune::{Edge, El, TextEdit, TextStyle, Tx, col, el, row, text};
+use rune::{Edge, El, TextEdit, TextStyle, Tx, col, row, text};
 use rune_kit::*;
 use rune_theme_opencode::icons as ic;
 
@@ -194,12 +194,6 @@ fn index(s: &G, k: &Kit, overlays: &mut Vec<El>) -> El {
         c = c.child(col().key(*id).gap(8.0).child(caption(k, id)).child(f(s, k, overlays)));
     }
     c
-}
-
-/// The body's default text: 13 px Inter at 440 on a 24 px line (Storybook's `BodyTypography`).
-#[allow(dead_code)]
-fn body(k: &Kit) -> TextStyle {
-    TextStyle { tracking: 0.0, ..k.ty.ui }.lh(24.0)
 }
 
 /// The stories' `font-size: 12px; color: var(--text-weak)` labels (line height inherited).
@@ -1263,11 +1257,6 @@ fn segmented_controlled(s: &G, k: &Kit, _: &mut Vec<El>) -> El {
                 .font(TextStyle::new(12.0, 440.0).lh(24.0))
                 .color(rune::theme::hex("#808080").unwrap_or_default()),
         )
-}
-
-#[allow(dead_code)]
-fn spare() -> El {
-    el()
 }
 
 /// Deadbolt's copy label and countdown, sans and mono. Each press of "Roll" advances one step:
