@@ -2,6 +2,7 @@
 use super::{Backend, Shortcut, ShortcutError, ShortcutId, Sink, parse::*};
 use std::{collections::HashMap, io::{Read, Write}, os::{fd::AsRawFd, unix::net::UnixStream}, sync::{Arc, Mutex}, thread::JoinHandle};
 use x11rb::{connection::Connection, errors::ReplyError, protocol::{ErrorKind, Event, xproto::*}, rust_connection::RustConnection};
+use winit::platform::scancode::PhysicalKeyExtScancode;
 
 #[derive(Clone, Copy)]
 struct Grab { root: u32, code: u8, mods: u16 }
@@ -75,15 +76,15 @@ impl Backend for Native {
         let setup = conn.setup();
         let mapping = conn.get_keyboard_mapping(setup.min_keycode, setup.max_keycode - setup.min_keycode + 1)
             .map_err(error)?.reply().map_err(reply_error)?;
-        let symbol = xkbcommon::xkb::keysym_from_name(&shortcut.keysym_name(), xkbcommon::xkb::KEYSYM_NO_FLAGS).raw();
-        let mut codes = Vec::new();
+        let code = shortcut.physical_key().to_scancode().and_then(|c| u8::try_from(c + 8).ok())
+            .filter(|c| (setup.min_keycode..=setup.max_keycode).contains(c))
+            .ok_or_else(|| ShortcutError::InvalidAccelerator(shortcut.to_string()))?;
+        let codes = [code];
         let mut numcodes = Vec::new();
         for (index, syms) in mapping.keysyms.chunks(mapping.keysyms_per_keycode as usize).enumerate() {
             let code = setup.min_keycode + index as u8;
-            if syms.first() == Some(&symbol) { codes.push(code); }
             if syms.contains(&0xff7f) { numcodes.push(code); } // XK_Num_Lock
         }
-        if codes.is_empty() { return Err(ShortcutError::InvalidAccelerator(shortcut.to_string())); }
         let modifiers = conn.get_modifier_mapping().map_err(error)?.reply().map_err(reply_error)?;
         let mut numlock = 0;
         if modifiers.keycodes_per_modifier() != 0 {

@@ -1,6 +1,7 @@
 //! A message-only window receives WM_HOTKEY inside winit's event-loop thread.
 use super::{Backend, Shortcut, ShortcutError, ShortcutId, Sink, native_status, parse::*};
 use std::{cell::RefCell, collections::HashMap, ptr};
+use winit::platform::scancode::PhysicalKeyExtScancode;
 use windows_sys::Win32::{Foundation::*, System::LibraryLoader::GetModuleHandleW, UI::{WindowsAndMessaging::*, Input::KeyboardAndMouse::*}};
 
 struct Context { sink: Sink, ids: RefCell<HashMap<i32, ShortcutId>> }
@@ -59,8 +60,13 @@ impl Backend for Native {
         for (bit, native) in [(CTRL, MOD_CONTROL), (ALT, MOD_ALT), (SHIFT, MOD_SHIFT), (SUPER, MOD_WIN)] {
             if shortcut.mods & bit != 0 { mods |= native; }
         }
+        let scan = shortcut.physical_key().to_scancode().ok_or_else(|| ShortcutError::InvalidAccelerator(shortcut.to_string()))?;
+        // RegisterHotKey takes a virtual key. Resolve the physical scan code in the
+        // current layout rather than assuming US letters. Re-register on layout changes.
+        let key = unsafe { MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX) };
+        if key == 0 { return Err(ShortcutError::InvalidAccelerator(shortcut.to_string())); }
         // SAFETY: RegisterHotKey and its window run on the event-loop thread.
-        if unsafe { RegisterHotKey(self.window, local, mods, keycode(&shortcut.key)) } == 0 { return Err(last_error()); }
+        if unsafe { RegisterHotKey(self.window, local, mods, key) } == 0 { return Err(last_error()); }
         self.context.ids.borrow_mut().insert(local, id);
         Ok(())
     }
@@ -79,17 +85,5 @@ impl Drop for Native {
             for (id, _) in self.context.ids.get_mut().drain() { UnregisterHotKey(self.window, id); }
             DestroyWindow(self.window);
         }
-    }
-}
-fn keycode(key: &str) -> u32 {
-    if key.len() == 1 { return key.as_bytes()[0].to_ascii_uppercase().into(); }
-    if let Some(n) = key.strip_prefix('f').and_then(|n| n.parse::<u32>().ok()) { return 0x70 + n - 1; }
-    match key {
-        "space" => 0x20, "enter" => 0x0d, "tab" => 9, "escape" => 0x1b, "backspace" => 8,
-        "delete" => 0x2e, "insert" => 0x2d, "home" => 0x24, "end" => 0x23, "pageup" => 0x21, "pagedown" => 0x22,
-        "left" => 0x25, "up" => 0x26, "right" => 0x27, "down" => 0x28,
-        "minus" => 0xbd, "equal" => 0xbb, "comma" => 0xbc, "period" => 0xbe, "slash" => 0xbf,
-        "semicolon" => 0xba, "quote" => 0xde, "bracketleft" => 0xdb, "bracketright" => 0xdd,
-        "backslash" => 0xdc, "backquote" => 0xc0, _ => unreachable!("validated shortcut key"),
     }
 }

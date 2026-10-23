@@ -7,12 +7,13 @@ pub(super) const SHIFT: u8 = 4;
 pub(super) const SUPER: u8 = 8;
 
 /// A validated, layout-independent accelerator. cmd/command/logo/meta are aliases for super;
-/// option is alt. Letters name physical US-layout keys on macOS/Windows, keysyms on X11.
+/// option is alt. Stored keys are physical US positions. Windows resolves these to
+/// virtual keys at registration; Wayland's portal may rebind the preferred trigger.
 /// Display uses ctrl+alt+shift+super order, lowercase keys and normalized aliases.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Shortcut {
     pub(super) mods: u8,
-    pub(super) key: String,
+    pub(super) key: super::PhysicalKeyCode,
 }
 
 impl FromStr for Shortcut {
@@ -44,14 +45,7 @@ impl FromStr for Shortcut {
                     "\\" => "backslash", "`" => "backquote",
                     name => name,
                 };
-                let character = name.len() == 1 && name.as_bytes()[0].is_ascii_alphanumeric();
-                let function = name.strip_prefix('f').and_then(|n| n.parse::<u8>().ok())
-                    .is_some_and(|n| (1..=24).contains(&n) && name == format!("f{n}"));
-                if !character && !function && !matches!(name, "escape" | "enter" | "space" | "tab" | "backspace" |
-                    "delete" | "insert" | "home" | "end" | "pageup" | "pagedown" | "left" | "right" | "up" | "down" |
-                    "minus" | "equal" | "comma" | "period" | "slash" | "semicolon" | "quote" | "bracketleft" |
-                    "bracketright" | "backslash" | "backquote") { return Err(invalid()); }
-                key = Some(name.to_owned());
+                key = Some(super::keys::named(name).ok_or_else(invalid)?);
             }
         }
         Ok(Self { mods, key: key.ok_or_else(invalid)? })
@@ -63,14 +57,14 @@ impl fmt::Display for Shortcut {
         for (bit, name) in [(CTRL, "ctrl"), (ALT, "alt"), (SHIFT, "shift"), (SUPER, "super")] {
             if self.mods & bit != 0 { write!(f, "{name}+")?; }
         }
-        f.write_str(&self.key)
+        f.write_str(self.key_name())
     }
 }
 
 #[cfg(target_os = "linux")]
 impl Shortcut {
     pub(super) fn keysym_name(&self) -> String {
-        match self.key.as_str() {
+        match self.key_name() {
             "escape" => "Escape", "enter" => "Return", "tab" => "Tab", "backspace" => "BackSpace",
             "delete" => "Delete", "insert" => "Insert", "home" => "Home", "end" => "End", "pageup" => "Prior",
             "pagedown" => "Next", "left" => "Left", "right" => "Right", "up" => "Up", "down" => "Down",

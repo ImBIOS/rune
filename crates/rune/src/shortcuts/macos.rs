@@ -59,7 +59,7 @@ impl Native {
 
 impl Backend for Native {
     fn register(&mut self, id: ShortcutId, shortcut: &Shortcut) -> Result<(), ShortcutError> {
-        let code = keycode(&shortcut.key).ok_or_else(|| ShortcutError::InvalidAccelerator(shortcut.to_string()))?;
+        let code = keycode(shortcut.key_name()).ok_or_else(|| ShortcutError::InvalidAccelerator(shortcut.to_string()))?;
         let mut mods = 0;
         for (bit, carbon) in [(SUPER, 1 << 8), (SHIFT, 1 << 9), (ALT, 1 << 11), (CTRL, 1 << 12)] {
             if shortcut.mods & bit != 0 { mods |= carbon; }
@@ -91,7 +91,7 @@ impl Drop for Native {
     }
 }
 
-fn keycode(key: &str) -> Option<u32> {
+pub(super) fn keycode(key: &str) -> Option<u32> {
     // Carbon virtual key codes (physical ANSI positions, matching winit KeyCode semantics).
     Some(match key {
         "a" => 0, "s" => 1, "d" => 2, "f" => 3, "h" => 4, "g" => 5, "z" => 6, "x" => 7, "c" => 8, "v" => 9,

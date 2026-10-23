@@ -1,6 +1,10 @@
 //! System-wide shortcuts. Native registrations belong to the app's event-loop thread.
 //! Nothing connects to the desktop until the first registration.
 mod parse;
+mod keys;
+#[cfg(target_os = "macos")]
+mod layout_macos;
+pub use keys::{PhysicalKeyCode, modifier_keycaps};
 mod service;
 #[cfg(target_os = "macos")]
 mod macos;

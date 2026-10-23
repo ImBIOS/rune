@@ -1,0 +1,5 @@
+[
+  {"t": 0.1, "key": "shortcut", "type": "click"},
+  {"t": 0.3, "physical": "ctrl+alt+k"},
+  {"t": 0.5, "shortcut": "ctrl+alt+k"}
+]
