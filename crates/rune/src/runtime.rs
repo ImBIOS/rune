@@ -747,7 +747,7 @@ impl<S: 'static> Runtime<S> {
         if let Some(t0) = wall_start { self.clock = t0.elapsed().as_secs_f64(); }
         let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
         self.wake_deadlines.drain(..due);
-        let mut one = Tx::default();
+        let mut one = self.transaction();
         let changed = poll(&mut self.state, self.clock, &mut one);
         self.dirty |= changed;
         for delay in one.wakes.drain(..) {

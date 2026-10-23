@@ -1380,13 +1380,11 @@ impl<S: 'static> AnyHost for Host<S> {
     fn wake_deadline(&self) -> Option<Instant> {
         // The next display tick consumes due timers too. Leaving an overdue timer
         // armed while its redraw waits for that tick would spin the event loop.
-        #[cfg(target_os = "macos")]
-        if self.win.as_ref().and_then(|w| w.pacing.as_ref()).is_some_and(|p| p.running()) {
-            return self.win.as_ref().and_then(|w| w.first_frame.retry);
-        }
         let runtime = self.rt.wall_start.and_then(|start| {
             start.checked_add(Duration::try_from_secs_f64(self.rt.wake_deadline()?).ok()?)
         });
+        #[cfg(target_os = "macos")]
+        let runtime = runtime.filter(|_| !self.win.as_ref().and_then(|w| w.pacing.as_ref()).is_some_and(|p| p.running()));
         #[cfg(all(feature = "dev", debug_assertions))]
         let runtime = runtime.into_iter().chain(self.rt.dev_hidden_deadline()).min();
         runtime.into_iter().chain(self.win.as_ref().and_then(|w| w.first_frame.retry)).min()

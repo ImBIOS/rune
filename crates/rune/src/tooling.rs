@@ -1121,6 +1121,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn trace_annotations_from_hidden_poll_survive_idle_catch_up_once() {
+        let mut rt = Runtime::new(false, |_, _: &mut Cx<bool>| crate::el(), (100.0, 100.0), Env::default());
+        let (trace, buffer) = rune_motion::MotionTrace::in_memory(&rune_motion::TraceHeader {
+            launch: "hidden".into(), width: 100.0, height: 100.0, hz: 60.0, scale: 1.0,
+        });
+        rt.scene.set_trace(Some(trace));
+        rt.trace_channels = Some(Default::default());
+        rt.poll = Some(|pending, _, tx| {
+            if !std::mem::take(pending) { return false; }
+            tx.trace_event("hidden:ready");
+            tx.trace_channel("shell.width", "position", 40.0);
+            true
+        });
+        rt.frame(0.0);
+        rt.state = true;
+        let commits = rt.stats.commits;
+        rt.poll_hidden();
+        assert_eq!(rt.stats.commits, commits, "hidden polling must not lay out or render");
+        rt.frame_after_idle(1.0);
+        rt.frame(0.02);
+        assert_eq!(rt.events, ["hidden:ready"]);
+        assert_eq!(rt.trace_channels.as_ref().unwrap()["shell.width"], ("position", 40.0));
+        rt.scene.take_trace().unwrap().flush().unwrap();
+        let lines: Vec<Value> = buffer.contents().lines().map(|s| serde_json::from_str(s).unwrap()).collect();
+        assert_eq!(lines.iter().filter(|line| line["ev"] == json!(["hidden:ready"])).count(), 1);
+    }
+
+    #[test]
     fn trace_annotations_reach_both_writers_once() {
         fn view(changed: &bool, _: &mut Cx<bool>) -> El {
             let (class, host) = if *changed { ("other", "other-host") } else { ("gpui", "pill") };
