@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **RollingText sets like one text.** Each rolling glyph sits at its advance in the whole label
+  shaped once, with kerning and contextual forms, where each used to round up to a device pixel
+  on its own. Rolled labels get narrower and tighter (IBM Plex Mono 11 pt "Copy password": 91 →
+  86 pt) and at rest draw the same glyphs at the same positions as the plain string. New
+  `El::advance_in(run, at)` measures and draws a text as its grapheme in a longer run.
 - **Stuck scrolls hold their bottom while they resize** (`rooms-gaps` branch). A stick-to-bottom
   scroll whose own height animates (a banner opening above it, a footer below) now keeps its last
   row on its bottom edge every frame. Before, the rows jumped by the size change and slid back.

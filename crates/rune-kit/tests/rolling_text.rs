@@ -1,5 +1,7 @@
-use rune::{Cx, El, Env, Runtime};
+use rune::text::TextSystem;
+use rune::{Cx, El, Env, Runtime, TextStyle};
 use rune_kit::{Kit, RollingText};
+use unicode_segmentation::UnicodeSegmentation;
 
 struct S {
     key: &'static str,
@@ -23,7 +25,7 @@ fn runtime(key: &'static str, text: &str, mono: bool, reduced: bool) -> Runtime<
 }
 
 /// The present (not exiting) glyphs of label `key`, as (key, text).
-fn glyph_keys(rt: &Runtime<S>, key: &str) -> Vec<(String, String)> {
+fn glyph_keys<T>(rt: &Runtime<T>, key: &str) -> Vec<(String, String)> {
     let prefix = format!("{key}.");
     rt.elements()
         .into_iter()
@@ -136,7 +138,8 @@ fn a_proportional_label_keeps_its_prefix_and_springs_its_width() {
     let frames = film(&mut rt, &keys, 1.0);
     for f in &frames {
         for i in 0..3 {
-            assert_eq!(f[i].unwrap().0, rest[i], "the kept prefix stays put");
+            // Its glyphs stay put; the "p" cell's width follows its new kerning ("py" → "pi").
+            assert_eq!(f[i].unwrap().0[..2], rest[i][..2], "the kept prefix stays put");
         }
     }
     let widths: Vec<f32> = frames.iter().map(|f| f.last().unwrap().unwrap().0[2]).collect();
@@ -144,6 +147,78 @@ fn a_proportional_label_keeps_its_prefix_and_springs_its_width() {
     assert!(target > width + 40.0, "{width} → {target}");
     assert!(widths[0] < width + (target - width) * 0.2, "the width springs from the old width: {}", widths[0]);
     assert!(largest_step(&frames) < 4.0, "no jumps: {}", largest_step(&frames));
+}
+
+struct Pair {
+    text: String,
+    font: TextStyle,
+}
+
+/// The label rolled, and below it the same string as one text.
+fn pair_view(s: &Pair, _: &mut Cx<Pair>) -> El {
+    let k = Kit::neutral(true);
+    rune::col()
+        .padding(20.0)
+        .child(rune::row().child(RollingText::new("pair", s.text.clone()).font(s.font).build(&k)))
+        .child(rune::row().child(rune::text(s.text.clone()).font(s.font).key("plain")))
+}
+
+fn pair(text: &str, font: TextStyle) -> Runtime<Pair> {
+    const INTER: &[u8] = include_bytes!("../../../themes/opencode/assets/fonts/InterVariable.ttf");
+    const PLEX: &[u8] = include_bytes!("../../../themes/opencode/assets/fonts/IBMPlexMono-Regular.ttf");
+    let fonts = TextSystem::new(&[INTER, PLEX], ("Inter", "IBM Plex Mono"));
+    let mut rt = Runtime::with_text(Pair { text: text.into(), font }, pair_view, (600.0, 120.0), Env::new(true, 2.0), fonts);
+    rt.frame(0.0);
+    rt
+}
+
+/// The rolled cells' extent (first left to last right) and the plain text's width, in points.
+fn widths(rt: &Runtime<Pair>) -> (f32, f32) {
+    let cells: Vec<[f32; 4]> = glyph_keys(rt, "pair").iter().map(|(k, _)| rt.presented(k).unwrap().0).collect();
+    let (first, last) = (cells[0], cells[cells.len() - 1]);
+    (last[0] + last[2] - first[0], rt.presented("plain").unwrap().0[2])
+}
+
+#[test]
+fn a_rolled_label_is_as_wide_as_the_same_string_set_as_one_text() {
+    let plex = TextStyle::new(11.0, 400.0).mono();
+    let inter = TextStyle::new(13.0, 400.0);
+    for (text, font) in [("Copy password", plex), ("Copy password", inter), ("AVATAR Tokyo, WAVE", inter)] {
+        let mut rt = pair(text, font);
+        let (rolled, plain) = widths(&rt);
+        // What each glyph took when it was measured on its own, rounded up to a device pixel.
+        let separate: f32 = text.graphemes(true).map(|g| rt.text.measure(g, font, 2.0).0).sum();
+        eprintln!("{text:?} {}pt: rolled {rolled} pt, one text {plain} pt, glyphs alone {separate} pt", font.size);
+        assert!((rolled - plain).abs() <= 0.25, "{text:?}: rolled {rolled} vs one text {plain} (0.5 device px)");
+        if font.size == 11.0 {
+            assert!(separate - plain > 4.0, "Plex rounds each glyph up: {separate} vs {plain}");
+        }
+    }
+}
+
+#[test]
+fn an_emoji_sequence_is_one_cell() {
+    let family = "👩\u{200d}👩\u{200d}👧";
+    let text = format!("{family} 2 👍🏽 e\u{301}");
+    let rt = pair(&text, TextStyle::new(13.0, 400.0));
+    let cells: Vec<String> = glyph_keys(&rt, "pair").into_iter().map(|(_, t)| t).collect();
+    assert_eq!(cells, [family, " ", "2", " ", "👍🏽", " ", "e\u{301}"]);
+    let (rolled, plain) = widths(&rt);
+    assert!((rolled - plain).abs() <= 0.25, "rolled {rolled} vs one text {plain}");
+}
+
+#[test]
+fn kept_glyphs_glide_to_their_new_advance() {
+    let font = TextStyle::new(13.0, 400.0);
+    let mut rt = pair("1:00", font);
+    rt.state.text = "11:00".into();
+    rt.invalidate();
+    rt.frame(0.0);
+    for _ in 0..240 {
+        rt.frame(1.0 / 120.0);
+    }
+    let (rolled, plain) = widths(&rt);
+    assert!((rolled - plain).abs() <= 0.25, "after a change the cells settle on the new run: {rolled} vs {plain}");
 }
 
 #[test]

@@ -1,7 +1,9 @@
 //! A label whose changed characters roll (iOS numeric/text content transition), for proportional
 //! and monospace fonts alike.
 //!
-//! Each grapheme cluster is its own keyed text node in a soft-clipped row. When the text changes,
+//! Each grapheme cluster is its own keyed text node in a soft-clipped row, as wide as its advance
+//! in the whole label shaped once (kerning included), so at rest the row sets exactly like the
+//! same string as one text. When the text changes,
 //! the new clusters are matched to the old ones (common prefix and suffix, then an LCS of the
 //! middle for short strings): matched clusters keep their key and slide to their new x on the
 //! layout spring; the rest leave through one edge and enter from the other with a small per-glyph
@@ -14,6 +16,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use rune::text::Run;
 use rune::{Color, Edge, El, Spring, TextStyle, Transition, row, text};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -107,8 +110,11 @@ impl RollingText {
             .motion(self.spring)
             .width_leads()
             .clip_fade(side, edge, side, edge);
+        // Every cell measures as its slice of the whole label shaped once, so the row keeps the
+        // run's kerned, fractional advances and the width of the same string set as one text.
+        let run = Run::new(self.text.as_str());
         let mut rank = 0;
-        for g in glyphs {
+        for (g, (at, _)) in glyphs.into_iter().zip(self.text.grapheme_indices(true)) {
             let spring = if g.entered {
                 let s = Spring::new(self.spring.duration + STAGGER * rank.min(STAGGER_CAP) as f32, self.spring.bounce);
                 rank += 1;
@@ -120,6 +126,7 @@ impl RollingText {
                 text(g.cluster)
                     .key(format!("{}.{}", self.key, g.id))
                     .font(font)
+                    .advance_in(&run, at)
                     .color(color)
                     .motion(spring)
                     .transition(Transition::push(self.from)),
