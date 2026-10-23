@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Dev-panel transitions can capture data.** `dev::Config::transition` now takes any
+  `impl Fn(&mut S, &mut Tx) + 'static`, so a transition can close over a scene's fixture:
+  `.transition("Open", "list", move |s, tx| s.open(&room, tx))`. `dev::Transition::with` builds
+  one for `Config::transitions`. `Transition::new` still takes a plain `fn`, so
+  `let t = Transition::<Ui>::new;` lists keep building, but it is no longer `const`, `Transition`
+  is `Clone` rather than `Copy`, and its `action` field is private.
 - **Held keys activate once, as in AppKit.** Auto-repeats no longer press a focused button,
   menu item, row or link (Return, Space), open a popup button (arrows), dismiss another modal
   (Escape), blur a field (Escape) or submit it (Return). Rune consumes those repeats. After a held

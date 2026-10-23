@@ -239,6 +239,24 @@ fn transition_closures_take_their_state_from_the_config() {
 }
 
 #[test]
+fn transitions_can_capture_scene_data() {
+    fn view(_: &f32, _: &mut Cx<f32>) -> El { el() }
+    let spec = AppSpec { scenes: &[("start", |_| {})], ..AppSpec::new("test", (100.0, 100.0), || 0.0, view) };
+    let target = std::rc::Rc::new(std::cell::Cell::new(42.0_f32));
+    let fixture = target.clone();
+    let mut config = Config::<f32>::default().transition("Jump", "start", move |n, _| *n = fixture.get());
+    config.bind.set_port(0);
+    let mut rt = Runtime::new(0.0, view, spec.size, Env { system_dark: true, scale: 1.0 });
+    attach(&mut rt, &spec, &config, Arc::new(|| {})).unwrap();
+    rt.frame(0.0);
+    target.set(7.0);
+    enqueue(&rt, json!({"type":"action","key":"rune.transition.Jump"}));
+    rt.frame(0.1);
+    rt.frame(0.2);
+    assert_eq!(rt.state, 7.0, "the action reads its captured data when it runs");
+}
+
+#[test]
 fn scene_fns_build_against_the_running_clock() {
     fn view(_: &(f64, f64), _: &mut Cx<(f64, f64)>) -> El { el() }
     let spec = AppSpec {

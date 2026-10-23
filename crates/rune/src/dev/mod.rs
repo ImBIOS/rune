@@ -5,6 +5,7 @@ mod tune;
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 use crate::{AppSpec, Runtime, Tx, Waker};
@@ -16,17 +17,25 @@ pub(crate) use tune::scope;
 pub struct Transition<S: 'static> {
     pub name: &'static str,
     pub from: &'static str,
-    pub action: fn(&mut S, &mut Tx),
+    action: Action<S>,
 }
 
-impl<S> Copy for Transition<S> {}
+type Action<S> = Rc<dyn Fn(&mut S, &mut Tx)>;
+
 impl<S> Clone for Transition<S> {
-    fn clone(&self) -> Self { *self }
+    fn clone(&self) -> Self { Self { name: self.name, from: self.from, action: self.action.clone() } }
 }
 
 impl<S> Transition<S> {
-    pub const fn new(name: &'static str, from: &'static str, action: fn(&mut S, &mut Tx)) -> Self {
-        Self { name, from, action }
+    /// Takes a plain `fn`, so `let t = Transition::<Ui>::new;` can build a list of
+    /// transitions from different closures. Use [`Transition::with`] to capture data.
+    pub fn new(name: &'static str, from: &'static str, action: fn(&mut S, &mut Tx)) -> Self {
+        Self::with(name, from, action)
+    }
+
+    /// Like [`Transition::new`], for an action that captures data (a scene's fixture, say).
+    pub fn with(name: &'static str, from: &'static str, action: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        Self { name, from, action: Rc::new(action) }
     }
 }
 
@@ -51,8 +60,9 @@ impl<S> Config<S> {
 
     /// Adds one transition. Its closure takes `S` from the config, so name the state once at
     /// the root: `Config::<Ui>::default().transition("Join", "lobby", |s, tx| s.join(tx))`.
-    pub fn transition(mut self, name: &'static str, from: &'static str, action: fn(&mut S, &mut Tx)) -> Self {
-        self.transitions.push(Transition::new(name, from, action));
+    /// The closure may capture data: `move |s, tx| s.open(&room, tx)`.
+    pub fn transition(mut self, name: &'static str, from: &'static str, action: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        self.transitions.push(Transition::with(name, from, action));
         self
     }
 }
@@ -66,7 +76,7 @@ pub(crate) struct Session<S: 'static> {
     init: fn() -> S,
     setup: Option<fn(&mut S, Waker)>,
     transitions: Vec<Transition<S>>,
-    pending: Option<fn(&mut S, &mut Tx)>,
+    pending: Option<Action<S>>,
     state: String,
     selection: u64,
     blur_control: bool,
@@ -173,7 +183,7 @@ impl<S> Session<S> {
             }
         }
         // A new scene/replay cancels the old action before it can cause app side effects.
-        if self.selection == selection && let Some(action) = pending { rt.update(action); }
+        if self.selection == selection && let Some(action) = pending { rt.update(|s, tx| action(s, tx)); }
         if let Some(mut trace) = rt.scene.take_trace() {
             let clock = rt.dev_clock.as_ref().unwrap();
             trace.set_time_scale(if clock.paused { 0.0 } else { clock.scale as f32 * rt.time_scale });
@@ -207,7 +217,7 @@ impl<S> Session<S> {
                 key => {
                     let name = key.strip_prefix("rune.transition.").ok_or("unknown action")?;
                     let transition = self.transitions.iter().find(|t| t.name == name).ok_or("unknown transition")?;
-                    let (from, action) = (transition.from, transition.action);
+                    let (from, action) = (transition.from, transition.action.clone());
                     self.scene(rt, from)?;
                     self.pending = Some(action);
                     Ok(())
