@@ -20,7 +20,7 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use rune::{Align, Color, El, Span, TextStyle, col, el, rich, row, text};
+use rune::{Align, Color, El, Link, LinkPaint, Span, TextStyle, col, el, rich, row, text};
 
 use crate::Kit;
 
@@ -406,7 +406,7 @@ impl MarkdownStyle {
     }
 }
 
-type LinkWire = Rc<dyn Fn(El, &str) -> El>;
+type LinkWire = Rc<dyn Fn(El) -> El>;
 
 /// Markdown source as an element. See the module docs for cost and keys.
 pub struct Markdown {
@@ -430,14 +430,14 @@ impl Markdown {
         self.reveal = word_fade;
         self
     }
-    /// Called with a link's destination when it is pressed. Links are styled either way, but
-    /// pressing needs clickable rich-text spans in the runtime: until they exist this handler
-    /// is stored and not yet called (see `Renderer::wire_link`, the one place to connect it).
+    /// Called with a link's destination when it is clicked, or pressed with Enter or Space
+    /// while focused. With a handler, links show a hand and a solid underline under the
+    /// pointer and are Tab stops; without one they are styled text only.
     pub fn on_link<S: 'static>(mut self, f: impl Fn(&mut S, &str) + 'static) -> Self {
         let f = Rc::new(f);
-        self.on_link = Some(Rc::new(move |e: El, url: &str| {
-            let (f, url) = (f.clone(), url.to_owned());
-            e.on_press(move |s: &mut S| f(s, &url))
+        self.on_link = Some(Rc::new(move |e: El| {
+            let f = f.clone();
+            e.on_link(move |s: &mut S, url, _| f(s, url))
         }));
         self
     }
@@ -499,12 +499,13 @@ impl Renderer {
             .collect()
     }
 
-    /// The single place a link press is connected. `e` is the text element holding the link
-    /// and `inl.links` has each link's byte range and destination. Once rich text can attach a
-    /// press to a span, call `on_link(<span target>, url)` here; until then links are styled only.
-    fn wire_link(&self, e: El, _inl: &Inline) -> El {
-        let _ = &self.on_link;
-        e
+    /// The single place a link press is connected: each of `inl.links` becomes a pressable
+    /// span of `e` (the text element holding it) reporting its destination.
+    fn wire_link(&self, e: El, inl: &Inline) -> El {
+        let Some(on_link) = self.on_link.as_ref().filter(|_| !inl.links.is_empty()) else { return e };
+        let hover = LinkPaint::new().underline(self.s.accent);
+        let e = inl.links.iter().fold(e, |e, (a, b, url)| e.link(Link::new(*a..*b, url.clone()).hover(hover)));
+        on_link(e)
     }
 
     fn para(&self, inl: &Inline, style: TextStyle, color: Color) -> El {

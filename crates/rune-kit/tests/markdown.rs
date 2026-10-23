@@ -118,3 +118,61 @@ fn identical_source_parses_once() {
     let c = parse_cached("some other text");
     assert!(!Rc::ptr_eq(&a, &c));
 }
+
+struct Reader {
+    src: String,
+    handled: bool,
+    opened: Vec<String>,
+}
+
+fn reader(s: &Reader, _: &mut Cx<Reader>) -> El {
+    let md = Markdown::new(s.src.clone());
+    let md = if s.handled { md.on_link(|s: &mut Reader, url| s.opened.push(url.to_owned())) } else { md };
+    col().w_full().padding(10.0).child(md.build(&Kit::neutral(true)))
+}
+
+const LINKS: &str = "See [one](https://a.dev) and [two](https://b.dev).\n\n- an item with [three](https://c.dev)\n";
+
+#[test]
+fn links_press_through_on_link() {
+    let mut rt = Runtime::new(Reader { src: LINKS.into(), handled: true, opened: Vec::new() }, reader, (480.0, 400.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let find = |rt: &Runtime<Reader>, key: &str| {
+        rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("no {key}"))
+    };
+    let (one, two, three) = (find(&rt, "https://a.dev"), find(&rt, "https://b.dev"), find(&rt, "https://c.dev"));
+    assert_eq!((one.role, one.label.as_deref()), ("link", Some("one")));
+    assert_eq!(three.label.as_deref(), Some("three"));
+    assert!(one.rect[0] + one.rect[2] < two.rect[0] && two.rect[1] < three.rect[1], "{one:?} {two:?} {three:?}");
+
+    // A click on the link's text opens its destination; the plain words beside it don't.
+    let centre = |e: &rune::runtime::ElementInfo| (e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0);
+    let click = |rt: &mut Runtime<Reader>, (x, y): (f32, f32)| {
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+    };
+    rt.pointer_move(centre(&two).0, centre(&two).1);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.cursor(), rune::Cursor::Pointer);
+    click(&mut rt, centre(&two));
+    click(&mut rt, centre(&three));
+    click(&mut rt, ((one.rect[0] + one.rect[2] + two.rect[0]) / 2.0, centre(&one).1));
+    assert_eq!(rt.state.opened, ["https://b.dev", "https://c.dev"]);
+
+    // Links are Tab stops in reading order, opened with Enter.
+    rt.key(rune::KeyEvent { key: rune::Key::Tab, mods: Default::default() });
+    rt.frame(1.0 / 60.0);
+    rt.key(rune::KeyEvent { key: rune::Key::Enter, mods: Default::default() });
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.opened, ["https://b.dev", "https://c.dev", "https://a.dev"]);
+
+    // Without a handler, links are styled text: no stops, no hand.
+    let mut rt = Runtime::new(Reader { src: LINKS.into(), handled: false, opened: Vec::new() }, reader, (480.0, 400.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    assert!(rt.elements().iter().all(|e| !e.path.contains("#link-") && !e.focusable));
+    rt.pointer_move(centre(&two).0, centre(&two).1);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.cursor(), rune::Cursor::Default);
+}
