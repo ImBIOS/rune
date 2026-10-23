@@ -1,10 +1,11 @@
 //! Blocking socket I/O stays off the app thread. Queues and peer counts are bounded.
+//! The port also serves the knobs page over plain HTTP, so `http://<address>/` is the panel.
 use std::collections::VecDeque;
-use std::io;
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tungstenite::{Message, WebSocket, protocol::WebSocketConfig};
@@ -30,11 +31,7 @@ pub(crate) struct Server {
 
 impl Server {
     pub fn bind(address: SocketAddr, bridge: Arc<Mutex<Bridge>>, wake: Waker) -> io::Result<Self> {
-        let allowed = address.ip().is_loopback() || match address.ip() {
-            std::net::IpAddr::V4(ip) => ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]),
-            std::net::IpAddr::V6(ip) => ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
-        };
-        if !allowed { return Err(io::Error::new(io::ErrorKind::InvalidInput, "dev panel must bind loopback or a Tailscale address")); }
+        if !local_ip(address.ip()) { return Err(io::Error::new(io::ErrorKind::InvalidInput, "dev panel must bind loopback or a Tailscale address")); }
         let listener = TcpListener::bind(address)?;
         let address = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -96,6 +93,12 @@ fn peer(stream: TcpStream, bridge: Arc<Mutex<Bridge>>, wake: Waker, stop: Arc<At
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_millis(250)))?;
     stream.set_write_timeout(Some(Duration::from_millis(250)))?;
+    match request_head(&stream) {
+        Ok(Some(head)) if !same_machine_or_tailnet(&head) => return Ok(respond(stream, &head, "403 Forbidden", "text/plain", "Forbidden")?),
+        Ok(Some(head)) if !is_upgrade(&head) => return Ok(serve_page(stream, &head)?),
+        Ok(Some(_)) => {}
+        Ok(None) | Err(_) => return Ok(()), // Closed, oversized or slow: nothing to answer.
+    }
     let config = WebSocketConfig::default().max_message_size(Some(64 * 1024)).max_frame_size(Some(64 * 1024));
     let mut socket = match tungstenite::accept_with_config(stream, Some(config)) {
         Ok(socket) => socket,
@@ -141,4 +144,80 @@ fn peer(stream: TcpStream, bridge: Arc<Mutex<Bridge>>, wake: Waker, stop: Arc<At
         }
     }
     Ok(())
+}
+
+/// The bundle `scripts/dev-panel/build.ts` writes; `cargo test` checks it against its source.
+pub(crate) const PANEL_JS: &str = include_str!("panel.js");
+const PAGE: &str = r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Rune</title></head><body><script type="module" src="/panel.js"></script></body></html>"#;
+
+/// Peeks the request head without consuming it, so a WebSocket handshake still reads it whole.
+fn request_head(stream: &TcpStream) -> io::Result<Option<String>> {
+    let mut buffer = [0; 8192];
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let n = stream.peek(&mut buffer)?;
+        if n == 0 { return Ok(None); }
+        if let Some(end) = buffer[..n].windows(4).position(|w| w == b"\r\n\r\n") {
+            // Its length must match the peeked bytes: the page server consumes exactly that many.
+            return Ok(std::str::from_utf8(&buffer[..end + 4]).ok().map(str::to_owned));
+        }
+        if n == buffer.len() || Instant::now() > deadline { return Ok(None); }
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().skip(1).filter_map(|line| line.split_once(':'))
+        .find(|(n, _)| n.trim().eq_ignore_ascii_case(name)).map(|(_, value)| value.trim())
+}
+
+fn is_upgrade(head: &str) -> bool {
+    header(head, "upgrade").is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+}
+
+fn local_ip(ip: std::net::IpAddr) -> bool {
+    ip.is_loopback() || match ip {
+        std::net::IpAddr::V4(ip) => ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]),
+        std::net::IpAddr::V6(ip) => ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
+    }
+}
+
+/// Another site's tab may reach a loopback port, directly or by DNS rebinding. Both the
+/// `Host` and any `Origin` (native clients send none) must name this machine or the tailnet.
+pub(crate) fn same_machine_or_tailnet(head: &str) -> bool {
+    fn allowed(authority: &str) -> bool {
+        let host = match authority.strip_prefix('[') {
+            Some(rest) => rest.split_once(']').map_or("", |(host, _)| host),
+            None => authority.rsplit_once(':').map_or(authority, |(host, _)| host),
+        }.to_ascii_lowercase();
+        host == "localhost" || host.ends_with(".ts.net") || host.parse().is_ok_and(local_ip)
+    }
+    let origin = header(head, "origin").map(|origin| {
+        origin.split_once("://").is_some_and(|(scheme, rest)| matches!(scheme, "http" | "https") && allowed(rest.split('/').next().unwrap_or(rest)))
+    });
+    header(head, "host").is_some_and(allowed) && origin.unwrap_or(true)
+}
+
+fn serve_page(stream: TcpStream, head: &str) -> io::Result<()> {
+    let mut parts = head.split_ascii_whitespace();
+    let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let path = path.split('?').next().unwrap_or(path);
+    let (status, kind, body) = match (method, path) {
+        ("GET" | "HEAD", "/" | "/index.html") => ("200 OK", "text/html", PAGE),
+        ("GET" | "HEAD", "/panel.js") => ("200 OK", "text/javascript", PANEL_JS),
+        ("GET" | "HEAD", _) => ("404 Not Found", "text/plain", "Not found"),
+        _ => ("405 Method Not Allowed", "text/plain", "Method not allowed"),
+    };
+    respond(stream, head, status, kind, body)
+}
+
+fn respond(mut stream: TcpStream, head: &str, status: &str, kind: &str, body: &str) -> io::Result<()> {
+    // Consume the request first: closing with unread bytes resets the connection mid-response.
+    stream.read_exact(&mut vec![0; head.len()])?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let method = head.split_ascii_whitespace().next().unwrap_or("");
+    write!(stream, "HTTP/1.1 {status}\r\nContent-Type: {kind}; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n", body.len())?;
+    if method != "HEAD" { stream.write_all(body.as_bytes())?; }
+    stream.flush()?;
+    stream.shutdown(std::net::Shutdown::Write)
 }

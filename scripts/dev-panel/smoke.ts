@@ -9,11 +9,14 @@ async function run() {
   let address: string | undefined
   for await (const bytes of processHandle.stderr) {
     text += new TextDecoder().decode(bytes)
-    address = text.match(/Rune dev controls: (ws:\/\/\S+)/)?.[1]
+    address = text.match(/Rune dev controls: (http:\/\/\S+)/)?.[1]
     if (address) break
   }
   if (!address) throw new Error(`No dev socket announced: ${text}`)
-  socket = new WebSocket(address)
+  const page = await fetch(address)
+  const script = await fetch(new URL("panel.js", address))
+  if (!page.ok || !(await page.text()).includes("/panel.js") || !script.ok) throw new Error(`Page not served: ${page.status} ${script.status}`)
+  socket = new WebSocket(new URL("ws", address.replace(/^http/, "ws")))
   let nextID = 0
   const requests = new Map<number, (value: any) => void>()
   const ready = Promise.withResolvers<void>()
@@ -37,7 +40,7 @@ async function run() {
   if (!tree.elements.some((e: any) => e.text === "Joining")) throw new Error("Scene did not reach the tree")
   const spring = await request({ type: "set", key: "rooms.join.spring", value: { duration: 0.55, bounce: 0 } })
   if (spring.type !== "ack") throw new Error(JSON.stringify(spring))
-  console.log(JSON.stringify({ host: "local", socket: address, scene: "Joining", spring: 0.55, frame: spring.frame }))
+  console.log(JSON.stringify({ host: "local", page: address, scene: "Joining", spring: 0.55, frame: spring.frame }))
 }
 let timeout: ReturnType<typeof setTimeout>
 try {

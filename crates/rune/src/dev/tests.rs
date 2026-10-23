@@ -239,3 +239,82 @@ fn scene_fns_build_against_the_running_clock() {
     assert!((rt.state.1 - 0.05).abs() < 1e-12, "the panel's speed scales dt: {:?}", rt.state);
     assert_eq!(crate::scene_clock(), crate::SceneClock::default(), "outside a scene the clock reads zero");
 }
+
+#[test]
+fn the_embedded_page_matches_its_source() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/dev-panel");
+    let mut hash = 0xcbf29ce484222325_u64;
+    for name in ["index.ts", "package.json"] {
+        for byte in std::fs::read(dir.join(name)).unwrap().into_iter().chain([0]) {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+        }
+    }
+    let header = transport::PANEL_JS.lines().next().unwrap();
+    assert!(header.ends_with(&format!("source {hash:016x}")), "stale embedded page ({header}); run bun scripts/dev-panel/build.ts");
+}
+
+#[test]
+fn the_socket_port_serves_the_page_over_http() {
+    use std::io::{Read, Write};
+    fn view(_: &f32, _: &mut Cx<f32>) -> El { el() }
+    let spec = AppSpec::new("test", (100.0, 100.0), || 0.0, view);
+    let mut config = Config::default();
+    config.bind.set_port(0);
+    let mut rt = Runtime::new(0.0, view, spec.size, Env { system_dark: true, scale: 1.0 });
+    let address = attach(&mut rt, &spec, &config, Arc::new(|| {})).unwrap();
+    rt.frame(0.0);
+    let get = |request: &str| {
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        (head.lines().next().unwrap().to_owned(), head.to_owned(), body.to_owned())
+    };
+    let (status, _, page) = get(&format!("GET / HTTP/1.1\r\nHost: {address}\r\n\r\n"));
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(page.contains(r#"src="/panel.js""#));
+    let (status, head, script) = get(&format!("GET /panel.js?v=1 HTTP/1.1\r\nHost: {address}\r\nOrigin: http://{address}\r\n\r\n"));
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(head.contains("text/javascript"));
+    assert_eq!(script, transport::PANEL_JS);
+    assert_eq!(get("GET /nope HTTP/1.1\r\nHost: localhost:7863\r\n\r\n").0, "HTTP/1.1 404 Not Found");
+    assert_eq!(get("POST / HTTP/1.1\r\nHost: localhost:7863\r\nContent-Length: 0\r\n\r\n").0, "HTTP/1.1 405 Method Not Allowed");
+
+    let status = |request: &[u8]| {
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        stream.write_all(request).unwrap();
+        let mut response = Vec::new();
+        let mut byte = [0];
+        while !response.ends_with(b"\r\n") && matches!(stream.read(&mut byte), Ok(1)) { response.push(byte[0]); }
+        String::from_utf8(response).unwrap().trim_end().to_owned()
+    };
+    // A head that isn't UTF-8 is dropped rather than half-consumed.
+    assert_eq!(status(b"GET /\xff HTTP/1.1\r\nHost: localhost\r\n\r\n"), "");
+
+    // Another site's tab, or a rebound DNS name, gets nothing: no page and no socket.
+    let upgrade = "GET /ws HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n";
+    assert_eq!(status(format!("{upgrade}Host: {address}\r\nOrigin: https://evil.example\r\n\r\n").as_bytes()), "HTTP/1.1 403 Forbidden");
+    assert_eq!(status(format!("{upgrade}Host: {address}\r\nOrigin: null\r\n\r\n").as_bytes()), "HTTP/1.1 403 Forbidden");
+    assert_eq!(status(b"GET / HTTP/1.1\r\nHost: evil.example:7863\r\n\r\n"), "HTTP/1.1 403 Forbidden");
+    assert_eq!(status(b"GET / HTTP/1.1\r\n\r\n"), "HTTP/1.1 403 Forbidden");
+    assert_eq!(status(format!("{upgrade}Host: {address}\r\nOrigin: http://{address}\r\n\r\n").as_bytes()), "HTTP/1.1 101 Switching Protocols");
+    for (head, allowed) in [
+        ("Host: [::1]:7863", true),
+        ("Host: host.example.ts.net:7863\r\nOrigin: https://host.example.ts.net:7863", true),
+        ("Host: 100.64.0.1:4795\r\nOrigin: http://100.64.0.1:4795", true),
+        ("Host: 100.128.0.1:7863", false),
+        ("Host: 127.0.0.1.evil.example", false),
+        ("Host: ts.net.evil.example", false),
+        ("Host: 127.0.0.1:7863\r\nOrigin: http://127.0.0.1.evil.example", false),
+    ] {
+        assert_eq!(transport::same_machine_or_tailnet(&format!("GET / HTTP/1.1\r\n{head}\r\n\r\n")), allowed, "{head}");
+    }
+
+    // Native clients send no Origin.
+    let stream = std::net::TcpStream::connect(address).unwrap();
+    let (mut socket, _) = tungstenite::client(format!("ws://{address}/ws"), stream).unwrap();
+    let tungstenite::Message::Text(text) = socket.read().unwrap() else { panic!("expected a state message") };
+    assert_eq!(serde_json::from_str::<Value>(&text).unwrap()["type"], "state");
+}

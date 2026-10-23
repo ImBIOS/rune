@@ -106,7 +106,7 @@ pub fn attach<S>(rt: &mut Runtime<S>, spec: &AppSpec<S>, config: &Config<S>, wak
         blur_control: config.motion_blur, blur: true, velocity: false, frame: 0, hidden: None, replies: Vec::new(), requests: Default::default(),
     });
     rt.invalidate();
-    eprintln!("Rune dev controls: ws://{address} (scripts/dev-panel)");
+    eprintln!("Rune dev controls: http://{address}/ (socket ws://{address})");
     Ok(address)
 }
 

@@ -97,11 +97,16 @@ Descriptors are knobs `ControlDescriptor`s, not a new Rune panel schema:
 | Color | color, CSS colour string |
 | Frame time | watch |
 
-The tiny Bun page adapter only connects the socket and calls
+The tiny page adapter only connects the socket and calls
 `createRemoteControls` + knobs `mountPage`. All controls, layout, history and
 copy UI belong to knobs. Rust copy formatting is a requested knobs extension;
-Rune will not fork its panel. The page can proxy the socket on the same origin
-for a tailnet HTTPS preview.
+Rune will not fork its panel. The listener answers plain HTTP on the same port:
+`/` is a one-line HTML shell and `/panel.js` the bundle, embedded with
+`include_str!` from `scripts/dev-panel/build.ts`'s output, so opening the
+announced `http://` address needs no checkout or Bun. The bundle's header
+carries an FNV-1a stamp of the page source that a unit test recomputes; a stale
+bundle fails `cargo test`. Same-origin paging also means Tailscale Serve over
+HTTPS can front the app's port directly.
 
 ## Clock hook (separate core commit)
 
