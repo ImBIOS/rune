@@ -1371,7 +1371,7 @@ impl<S: 'static> AnyHost for Host<S> {
             if let Some(w) = self.win.as_ref().filter(|w| (self.launcher() || (w.visible && !w.occluded)) && !w.window.is_minimized().unwrap_or(false)) {
                 w.window.request_redraw();
             } else {
-                self.rt.frame(0.0);
+                self.rt.hidden_timer_frame();
                 self.clipboard.flush(&mut self.rt);
                 self.shell(event_loop);
             }

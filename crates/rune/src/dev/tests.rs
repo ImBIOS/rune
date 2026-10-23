@@ -201,6 +201,31 @@ fn hidden_hosts_keep_motion_in_real_time_and_the_tree_reports_opacity() {
 }
 
 #[test]
+fn a_windowless_timer_frame_keeps_the_motion_it_starts_running() {
+    fn view(s: &(f32, u32), _: &mut Cx<(f32, u32)>) -> El {
+        crate::col().child(el().key("box").absolute(s.0, 0.0).size(10.0, 10.0))
+    }
+    let spec = AppSpec::new("test", (100.0, 100.0), || (0.0, 0), view);
+    let mut rt = attached(&spec, (0.0, 0), Arc::new(|| {}));
+    rt.wall_start = Some(std::time::Instant::now());
+    rt.poll = Some(|s, _, tx| {
+        s.1 += 1;
+        if s.1 == 1 { tx.wake_after(std::time::Duration::from_millis(5)); }
+        if s.1 == 2 { s.0 = 80.0; tx.motion(Spring::new(0.3, 0.0)); }
+        s.1 == 2
+    });
+    rt.frame(0.0);
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    rt.hidden_timer_frame();
+    assert_eq!(rt.state.0, 80.0, "the timer's poll ran");
+    assert!(rt.dev_hidden_deadline().is_some(), "motion started by a timer schedules the next hidden tick");
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    rt.dev_hidden_frame();
+    let x = rt.presented("box").unwrap().0[0];
+    assert!(x > 0.0 && x < 80.0, "the spring advances in real time: {x}");
+}
+
+#[test]
 fn transition_closures_take_their_state_from_the_config() {
     #[allow(dead_code)]
     struct Ui { joined: bool }

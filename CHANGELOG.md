@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Timers drive motion in windowless dev runs**. With the dev panel
+  attached and no visible window, a timer that starts a transition now animates it in real time
+  on hidden ticks, as a shown window would. Before, the timer's frame left the motion frozen
+  until the next input or panel command.
+- **Stuck scrolls hold their bottom across fitting and overflowing**.
 - **Stuck scrolls hold their bottom across fitting and overflowing**.
   When a stick-to-bottom scroll's content goes between overflowing its viewport and fitting it
   while the viewport resizes, the rows no longer jump by the size change and slide back.

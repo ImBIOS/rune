@@ -972,6 +972,14 @@ impl<S: 'static> Runtime<S> {
         self.frame_ordered(dt, false)
     }
 
+    /// A hidden or windowless host's due timer. Under the dev panel, motion the timer starts
+    /// keeps real time on hidden ticks, as it would on a shown window's redraws.
+    pub(crate) fn hidden_timer_frame(&mut self) {
+        #[cfg(all(feature = "dev", debug_assertions))]
+        if self.dev.is_some() { return self.dev_hidden_frame(); }
+        self.frame(0.0);
+    }
+
     /// Catch up a sleeping host's existing motion before committing newly observed state.
     /// The elapsed gap belongs to old tracks, never to targets first observed on this frame.
     pub(crate) fn frame_after_idle(&mut self, dt: f64) -> bool {
