@@ -1128,6 +1128,63 @@ mod quality_tests {
         }
     }
 
+    /// Glyph extents per drawn line, in device pixels, for one text element 300 pt wide at 2×.
+    fn line_spans(content: &str, align: crate::Align, justify: bool) -> Vec<(f32, f32)> {
+        use crate::{Cx, El, Env, Runtime};
+        type S = (String, crate::Align, bool);
+        fn view(s: &S, _: &mut Cx<S>) -> El {
+            let t = crate::el::text(s.0.clone()).w(300.0).wrap().align(s.1);
+            if s.2 { t.justify() } else { t }
+        }
+        let mut rt = Runtime::new((content.to_string(), align, justify), view, (300.0, 400.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        let mut quads: Vec<[f32; 4]> =
+            rt.instances.iter().filter(|i| i.params[1] == crate::render::KIND_GLYPH).map(|i| i.rect).collect();
+        quads.sort_by(|a, b| (a[1] + a[3] / 2.0).total_cmp(&(b[1] + b[3] / 2.0)));
+        let mut lines: Vec<(f32, f32, f32)> = Vec::new();
+        for q in quads {
+            let cy = q[1] + q[3] / 2.0;
+            match lines.last_mut() {
+                Some(l) if cy - l.0 < 16.0 => { l.1 = l.1.min(q[0]); l.2 = l.2.max(q[0] + q[2]); }
+                _ => lines.push((cy, q[0], q[0] + q[2])),
+            }
+        }
+        lines.into_iter().map(|(_, l, r)| (l, r)).collect()
+    }
+
+    #[test]
+    fn justified_text_fills_each_wrapped_line_but_the_last() {
+        use crate::Align;
+        let content = "the quick brown fox jumps over the lazy dog while five boxing wizards jump quickly and pack my box with five dozen liquor jugs";
+        let justified = line_spans(content, Align::Start, true);
+        assert!(justified.len() >= 3, "{justified:?}");
+        for &(l, r) in &justified[..justified.len() - 1] {
+            assert!(l < 8.0 && r > 592.0, "justified line spans {l}..{r}");
+        }
+        let start = line_spans(content, Align::Start, false);
+        assert_eq!(start.len(), justified.len(), "justifying never rewraps");
+        assert!(start[..start.len() - 1].iter().any(|&(_, r)| r < 592.0), "start lines stay ragged: {start:?}");
+    }
+
+    #[test]
+    fn wrapped_right_to_left_text_aligns_and_justifies_from_the_right() {
+        use crate::Align;
+        let hebrew = "שלום עולם זהו טקסט ארוך שנשבר לכמה שורות כדי לבדוק יישור מימין לשמאל בתוך רוחב קבוע של האלמנט";
+        let start = line_spans(hebrew, Align::Start, false);
+        if start.is_empty() {
+            eprintln!("skipping: no Hebrew glyphs");
+            return;
+        }
+        assert!(start.len() >= 2, "{start:?}");
+        assert!(start.iter().all(|&(_, r)| r > 592.0), "wrapped RTL start hugs the right edge: {start:?}");
+        let end = line_spans(hebrew, Align::End, false);
+        assert!(end.iter().all(|&(l, _)| l < 8.0), "wrapped RTL end hugs the left edge: {end:?}");
+        let justified = line_spans(hebrew, Align::Start, true);
+        let last = justified.len() - 1;
+        assert!(justified[..last].iter().all(|&(l, r)| l < 8.0 && r > 592.0), "{justified:?}");
+        assert!(justified[last].1 > 592.0, "justified RTL last line starts at the right: {justified:?}");
+    }
+
     #[test]
     fn live_layouts_do_not_accumulate_between_commits() {
         let mut text = TextSystem::default();
