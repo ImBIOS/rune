@@ -42,6 +42,8 @@ mod focus;
 mod physical_dispatch;
 #[path = "scroll_bottom.rs"]
 mod scroll_bottom;
+#[path = "caret.rs"]
+mod caret;
 
 const P_FILL: Prop<Color> = Prop::custom(64, PropClass::Color);
 const P_BORDER: Prop<Color> = Prop::custom(65, PropClass::Color);
@@ -85,6 +87,8 @@ pub struct Cx<S> {
     system_reduced_motion: bool,
     reduced_motion: bool,
     time_scale: f32,
+    caret: Option<(String, [f32; 4])>,
+    caret_read: std::cell::Cell<bool>,
     _s: PhantomData<fn(&S)>,
 }
 
@@ -106,6 +110,15 @@ impl<S> Cx<S> {
     /// Scale the animation clock (slow motion below 1).
     pub fn time_scale(&mut self, scale: f32) {
         self.time_scale = scale.clamp(0.0, 8.0);
+    }
+    /// The focused text field's caret line in window points `[x, y, w, h]`, as last drawn (after
+    /// scrolling, at the cursor inside an IME composition), when that field is keyed `key` or sits
+    /// inside an element keyed `key`. A view that reads it re-runs when the caret moves, so a
+    /// popup placed from it lands the frame after each edit.
+    pub fn caret(&self, key: &str) -> Option<[f32; 4]> {
+        self.caret_read.set(true);
+        let (path, rect) = self.caret.as_ref()?;
+        path.split('/').any(|seg| seg == key).then_some(*rect)
     }
 }
 
@@ -219,6 +232,8 @@ pub struct ElementInfo {
     pub virtual_extent: bool,
     /// Property-specific intentional cuts for 1:1 live bindings (never smoothed bindings).
     pub live_intent: u32,
+    /// On the focused text field: its caret line in window points (see [`Cx::caret`]).
+    pub caret: Option<[f32; 4]>,
 }
 
 #[derive(Clone, Copy)]
@@ -381,6 +396,10 @@ pub struct Runtime<S: 'static> {
     surface_visible: bool,
     hovered: Option<String>,
     pub ime_area: Option<[f32; 4]>,
+    /// The focused field's caret (path, window rect) the next view sees through `Cx::caret`.
+    caret: Option<(String, [f32; 4])>,
+    /// The last view read the caret, so it re-runs when the caret moves.
+    caret_watch: bool,
     /// The shell cancels native composition before enabling the new text focus.
     pub(crate) ime_reset: bool,
     /// Text the focused field asked to copy (the shell writes it to the clipboard).
@@ -539,6 +558,8 @@ impl<S: 'static> Runtime<S> {
             surface_visible: true,
             hovered: None,
             ime_area: None,
+            caret: None,
+            caret_watch: false,
             ime_reset: false,
             copy_request: None,
             paste_request: None,
@@ -942,6 +963,7 @@ impl<S: 'static> Runtime<S> {
         }
         let scroll_to = std::mem::take(&mut tx.scroll_to);
         let scroll_bottom = std::mem::take(&mut tx.scroll_bottom);
+        if self.caret_watch && self.caret_moved(None) { self.dirty = true; }
         if ran || self.dirty || self.relayout || self.settle || self.virtual_window_changed() {
             if self.relayout && !ran && !self.dirty {
                 tx.relayout = true;
@@ -1379,6 +1401,8 @@ struct Measurement<'a, S> {
     virtual_inputs: &'a mut HashMap<String, Box<InputSpec>>,
     stats: &'a mut FrameStats,
     key_warnings: &'a mut Option<Vec<String>>,
+    caret: Option<(String, [f32; 4])>,
+    caret_read: bool,
 }
 
 /// Owned result of completed measurement. Scene mutation consumes this once; retries never
@@ -1388,6 +1412,7 @@ struct Measured {
     nodes: Vec<Node>,
     reduced_motion: bool,
     time_scale: f32,
+    caret_read: bool,
 }
 
 fn collect_virtual_inputs(el: &El, parent: &str, index: usize, inputs: &mut HashMap<String, Box<InputSpec>>) {
@@ -1418,7 +1443,7 @@ impl<S> Measurement<'_, S> {
         };
         // Exiting virtual subtrees still use their origin and measured extent while
         // fading. Runtime prunes this metadata with the retained scene nodes.
-        Measured { layout, nodes, reduced_motion: self.reduced_motion, time_scale: self.time_scale }
+        Measured { layout, nodes, reduced_motion: self.reduced_motion, time_scale: self.time_scale, caret_read: self.caret_read }
     }
 
     fn node_id(&mut self, path: &str) -> NodeId {
@@ -1532,6 +1557,8 @@ impl<S> Measurement<'_, S> {
             system_reduced_motion: self.system_reduced_motion,
             reduced_motion: self.system_reduced_motion,
             time_scale: self.time_scale,
+            caret: self.caret.clone(),
+            caret_read: std::cell::Cell::new(false),
             _s: PhantomData,
         };
         let mut root = (self.view)(self.state, &mut cx);
@@ -1549,6 +1576,7 @@ impl<S> Measurement<'_, S> {
         self.window_tree(&mut root, "", 0, None, tx.settle, force_all);
         self.reduced_motion = cx.reduced_motion;
         self.time_scale = cx.time_scale;
+        self.caret_read = cx.caret_read.get();
 
         let mut taffy = std::mem::replace(self.layout, TaffyTree::with_capacity(0));
         for entry in self.layout_entries.values_mut() {
@@ -1663,6 +1691,10 @@ impl<S: 'static> Runtime<S> {
             self.layout = measured.layout;
             measured = self.measure(tx);
         }
+        if measured.caret_read && self.caret_moved(Some(&measured.nodes)) {
+            self.layout = measured.layout;
+            measured = self.measure(&tx);
+        }
         self.apply(measured, tx);
     }
 
@@ -1675,6 +1707,8 @@ impl<S: 'static> Runtime<S> {
             system_reduced_motion: self.system_reduced_motion,
             reduced_motion: self.reduced_motion,
             time_scale: self.time_scale,
+            caret: self.caret.clone(),
+            caret_read: false,
             commits: self.commits,
             nodes: &self.nodes,
             text: &mut self.text,
@@ -1694,7 +1728,8 @@ impl<S: 'static> Runtime<S> {
 
     /// The mutation phase cannot accept an El or an unfinished measurement pass.
     fn apply(&mut self, measured: Measured, tx: &Tx) {
-        let Measured { layout: taffy, mut nodes, reduced_motion, time_scale } = measured;
+        let Measured { layout: taffy, mut nodes, reduced_motion, time_scale, caret_read } = measured;
+        self.caret_watch = caret_read;
         if reduced_motion != self.reduced_motion {
             self.reduced_motion = reduced_motion;
             self.scene.set_reduced_motion(reduced_motion);
@@ -3235,6 +3270,7 @@ impl<S: 'static> Runtime<S> {
                     in_growing_row,
                     scrolling,
                     live_intent,
+                    caret: self.caret_rect(&self.nodes, i),
                     virtual_extent: self.virtuals.contains_key(&n.path) && n.vis.fill.a == 0.0
                         && n.vis.border_width == 0.0 && n.vis.shadows.is_empty() && n.text.is_none() && n.vis.icon.is_none(),
                 })
@@ -3256,7 +3292,7 @@ impl<S: 'static> Runtime<S> {
                 hover: 0.0, press: 0.0, moving: true, parent: None,
                 visible: [r.x.max(c[0]), r.y.max(c[1]), (r.edges()[2].min(c[2]) - r.x.max(c[0])).max(0.0),
                     (r.edges()[3].min(c[3]) - r.y.max(c[1])).max(0.0)],
-                revealing: true, in_growing_row: false, scrolling: false, virtual_extent: false, live_intent: 0,
+                revealing: true, in_growing_row: false, scrolling: false, virtual_extent: false, live_intent: 0, caret: None,
             });
         }
         elements
@@ -3348,16 +3384,21 @@ fn single_line_scroll(scrolls: &mut HashMap<String, f32>, path: &str, inp: &crat
         scrolls.remove(path);
         return 0.0;
     }
+    let scroll = single_line_offset(scrolls.get(path).copied().unwrap_or(0.0), inp, content, layout, s, visible);
+    scrolls.insert(path.to_owned(), scroll / s);
+    scroll
+}
+
+/// [`single_line_scroll`] for a focused field, from its previous shift `prev` in points.
+fn single_line_offset(prev: f32, inp: &crate::el::InputSpec, content: &str, layout: &Layout<Ink>, s: f32, visible: f32) -> f32 {
     let caret_w = (1.5 * s).round();
     let caret = Cursor::from_byte_index(layout, caret_index(&inp.edit, content), Affinity::Downstream);
     let cx = caret.geometry(layout, 1.5 * s).x0 as f32;
-    let mut scroll = scrolls.get(path).copied().unwrap_or(0.0) * s;
+    let mut scroll = prev * s;
     if cx - scroll > visible - caret_w {
         scroll = cx - visible + caret_w;
     }
-    scroll = scroll.min(cx).clamp(0.0, (layout.full_width() + caret_w - visible).max(0.0));
-    scrolls.insert(path.to_owned(), scroll / s);
-    scroll
+    scroll.min(cx).clamp(0.0, (layout.full_width() + caret_w - visible).max(0.0))
 }
 
 /// The display byte index the caret sits at, inside any IME preedit.
