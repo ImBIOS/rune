@@ -635,7 +635,17 @@ impl Renderer {
         self.springs.as_ref().is_some_and(|p| time < p.settle_at)
     }
 
+    /// Draws over what `view` already holds instead of clearing it (headless overlays).
+    pub(crate) fn draw_over(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+        self.draw_load(encoder, view, wgpu::LoadOp::Load, None);
+    }
+
     pub fn draw_timed(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, clear: [f32; 4], timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>) {
+        let clear = wgpu::Color { r: clear[0] as f64, g: clear[1] as f64, b: clear[2] as f64, a: clear[3] as f64 };
+        self.draw_load(encoder, view, wgpu::LoadOp::Clear(clear), timestamps);
+    }
+
+    fn draw_load(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, load: wgpu::LoadOp<wgpu::Color>, timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>) {
         let timestamps = timestamps.or_else(|| self.surfaces.as_ref().and_then(|s| s.timestamp_writes()));
         self.encode_layers_timed(encoder, timestamps.as_ref());
         let timestamps = timestamps.map(|mut t| {
@@ -648,15 +658,7 @@ impl Renderer {
                 view,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: clear[0] as f64,
-                        g: clear[1] as f64,
-                        b: clear[2] as f64,
-                        a: clear[3] as f64,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
+                ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
             })],
             depth_stencil_attachment: None,
             timestamp_writes: timestamps,

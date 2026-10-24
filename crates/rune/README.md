@@ -879,6 +879,7 @@ $S --list-scenes            # default light dark reduced-motion toggles-off acce
 $S --script examples/settings/scripts/toggle.json --frames 30 --start 0.1 --out frames/
 $S --script examples/settings/scripts/demo.json --video demo.mp4 [--fps 60] [--duration 3|auto]
 $S --script demo.json --snap poster.png --at mark:end+0.5    # a time named by a script mark
+$S --script examples/settings/scripts/keycaps.json --video keys.mp4 --keys [top-right] --pointer
 $S --script examples/settings/scripts/demo.json --start 0.12 --frames 24 --every 3 --cols 4 \
    --strip strip.png --crop 370,74,214,36 --crop 530,305,60,30     # crops stacked per frame
 $S --tree tree.json [--at T]     # key, path, role, label, text, presented rect, target, opacity,
@@ -902,6 +903,12 @@ $S --native --trace run.jsonl --frames 240  # native submission timestamps, then
   its handler, as when the OS delivers it; any other chord reaches the window as a key press
   with its logical key, so a handler watching for it in `on_key` sees `Key::Command(' ')`.
   The older `{"shortcut": "cmd+k"}` still fails unless the chord is registered.
+- **Keycaps**: `--keys [CORNER]` draws the script's keys over the frames, screencast style:
+  typing within a second joins one cap, a repeated chord counts (`↓ ×3`), modifiers show as
+  ⌃⌥⇧⌘ and named keys as glyphs (↩ ⎋ ⇥ ⌫ ␣). Caps spring in and fade out after 1.5 s, three at
+  most, at `bottom-left` (default), `bottom`, `bottom-right`, `top-left`, `top` or `top-right`.
+  `--pointer` adds a ripple at each press. A separate runtime draws both after the app, so they
+  appear in `--video`, `--out`, `--snap` and strips but never in `--tree` or `--trace`.
 - **Marks**: `{"t": 3.2, "type": "mark", "name": "end"}` names a time and does nothing else.
   `--at mark:end`, `--at mark:end+0.5` and `--start mark:intro-0.2` use a mark's time, and
   `--duration auto` (the default with `--video`) ends at the `end` mark, or one second after the

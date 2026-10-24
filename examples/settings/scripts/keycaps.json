@@ -1,0 +1,13 @@
+{"events": [
+  {"t": 0.40, "type": "tap", "key": "Light"},
+  {"t": 1.10, "type": "tap", "key": "pink"},
+  {"t": 1.80, "type": "type", "text": "hello rune", "every": 0.07},
+  {"t": 3.00, "type": "key", "name": "Tab"},
+  {"t": 3.20, "type": "key", "name": "Tab"},
+  {"t": 3.40, "type": "key", "name": "Tab"},
+  {"t": 3.90, "type": "shortcut", "chord": "cmd+k"},
+  {"t": 4.30, "type": "tap", "key": "sounds"},
+  {"t": 4.90, "type": "drag", "key": "slider/knob", "dx": 60, "dur": 0.5},
+  {"t": 5.80, "type": "tap", "key": "Dark"},
+  {"t": 7.20, "type": "mark", "name": "end"}
+]}

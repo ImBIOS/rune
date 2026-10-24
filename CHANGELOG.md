@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Headless frames can show the script's keys.** `--keys [CORNER]` draws screencast keycaps
+  (typing grouped into bursts, ⌃⌥⇧⌘ chords with repeat counts, glyphs for named keys) over
+  `--video`, `--out`, `--snap` and strip frames, and `--pointer` a ripple at each press. A
+  separate runtime draws them after the app, so `--tree` and `--trace` are unchanged.
 - **Scripts can press any chord system-wide.** `{"type": "shortcut", "chord": "cmd+space"}`
   runs the app's handler when it registered the chord, and otherwise delivers it to the window
   as a key press (physical handlers, then `on_key` as `Key::Command(' ')`), so a script can

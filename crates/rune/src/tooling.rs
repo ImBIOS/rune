@@ -175,6 +175,10 @@ pub struct Args {
     /// `--at mark:NAME±S` and `--start mark:NAME±S`: a script mark's time plus an offset.
     pub(crate) at_mark: Option<(String, f64)>,
     pub(crate) start_mark: Option<(String, f64)>,
+    /// `--keys [CORNER]`: keycaps for script keys and chords over dumped frames.
+    pub(crate) keys: Option<crate::keycaps::Corner>,
+    /// `--pointer`: a ripple where the script presses.
+    pub(crate) pointer: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -242,6 +246,12 @@ impl Args {
                     let v = val(&mut i);
                     a.duration = Some(if v == "auto" { Length::Auto } else { Length::Seconds(num(&v)) });
                 }
+                "--keys" => {
+                    let corner = argv.get(i + 1).and_then(|v| crate::keycaps::Corner::parse(v));
+                    if corner.is_some() { i += 1; }
+                    a.keys = Some(corner.unwrap_or_default());
+                }
+                "--pointer" => a.pointer = true,
                 "--tree" => a.tree = Some(val(&mut i).into()),
                 "--trace" => a.trace = Some(val(&mut i).into()),
                 "--native" => a.native = true,
@@ -301,6 +311,9 @@ const HELP: &str = "usage: <app> [window]
   --video out.mp4       stream frames into ffmpeg (.mp4 H.264, .mov ProRes 4444, .webm VP9);
                         --frames N or --duration SECONDS|auto long (default auto: to the
                         script's \"end\" mark, or 1 s after its last event)
+  --keys [CORNER]       draw keycaps for script keys and chords on frames (bottom-left default;
+                        bottom, bottom-right, top-left, top, top-right); never in --tree
+  --pointer             draw a ripple where the script presses
   --strip out.png --crop x,y,w,h --every K    tile dumped frames into one image
                         (repeat --crop to stack several regions per frame; --cols N per row)
   --tree out.json       element tree with animated values
@@ -1157,6 +1170,8 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let target = Offscreen::new(&gpu.device, wp, hp);
     let mut readback = crate::record::Readback::new(&gpu.device, &target, crate::record::DEPTH);
     let alpha = transparent.then(|| crate::surface_alpha::AlphaSurface::new(&gpu.device, OFFSCREEN_FORMAT, (wp, hp)));
+    let mut overlay = (args.keys.is_some() || args.pointer)
+        .then(|| (crate::keycaps::Overlay::new(size, scale, args.keys, args.pointer), Renderer::new(&gpu.device, OFFSCREEN_FORMAT)));
     let init_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let mut trace = args.trace.as_ref().map(|p| Trace::open(p, size, fps, scale));
@@ -1254,6 +1269,17 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
                 Kind::Wheel(dy) => rt.wheel(x, y, *dy),
                 Kind::Fling(v) => rt.fling(x, y, *v),
             }
+            if let Some((ov, _)) = overlay.as_mut() {
+                match &e.kind {
+                    Kind::Key(key, _) => ov.key(e.t, key),
+                    Kind::Shortcut(chord, _) => ov.chord(e.t, chord),
+                    &Kind::Physical(crate::PhysicalInput::Key { key, mods, pressed: true, .. }) => {
+                        if let Ok(chord) = crate::Shortcut::from_physical_key(key, mods) { ov.chord(e.t, &chord) }
+                    }
+                    Kind::Down => ov.press(e.t, x, y),
+                    _ => {}
+                }
+            }
         }
         let requested_place = take_requests(&mut rt);
         let step = if k == 0 { 0.0 } else { dt };
@@ -1291,6 +1317,13 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             renderer.draw(&mut enc, view, rt.clear_color());
         }
         if let Some(alpha) = &alpha { alpha.draw(&mut enc, &target.view); }
+        if let Some((ov, ui)) = overlay.as_mut() {
+            let ort = ov.frame(real_t, step);
+            if !ort.instances.is_empty() {
+                ui.prepare(&gpu.device, &gpu.queue, &mut ort.text.atlas, &ort.instances, (wp, hp));
+                ui.draw_over(&mut enc, &target.view);
+            }
+        }
         let in_range = k >= start_frame && k < start_frame + frames;
         let shot = Shot {
             k,
@@ -1748,6 +1781,35 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         // yuv420p needs even sizes, so the 31-pixel width is padded to 32.
         assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "h264,32,20,yuv420p,12");
+    }
+
+    #[test]
+    fn keycaps_draw_over_frames_but_never_enter_the_tree() {
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rune-keys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("script.json");
+        std::fs::write(&script, r#"[{"t": 0.1, "type": "type", "text": "hi"}, {"t": 0.3, "type": "tap", "x": 150, "y": 30}]"#).unwrap();
+        let run = |name: &str, extra: &[&str]| {
+            let spec = AppSpec::new("keys", (200.0, 120.0), || (), |_, _| crate::el().key("root").w_full().h_full().fill(crate::oklch(0.9, 0.0, 0.0)));
+            let (snap, tree) = (dir.join(format!("{name}.png")), dir.join(format!("{name}.json")));
+            let mut args = vec!["--script", script.to_str().unwrap(), "--scale", "1", "--at", "0.5",
+                "--snap", snap.to_str().unwrap(), "--tree", tree.to_str().unwrap()];
+            args.extend_from_slice(extra);
+            headless(crate::App::new(spec), Args::parse_from(args.into_iter().map(String::from).collect()));
+            (std::fs::read(snap).unwrap(), std::fs::read_to_string(tree).unwrap())
+        };
+        let plain = run("plain", &[]);
+        let keys = run("keys", &["--keys", "top-left", "--pointer"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(plain.1, keys.1, "the overlay never enters the tree");
+        assert_ne!(plain.0, keys.0, "but it draws over the frame");
+
+        use crate::keycaps::Corner;
+        let args = |v: &[&str]| Args::parse_from(v.iter().map(|s| (*s).into()).collect());
+        assert_eq!(args(&["--keys", "--snap", "a.png"]).keys, Some(Corner::BottomLeft), "the corner is optional");
+        assert_eq!(args(&["--keys", "top"]).keys, Some(Corner::Top));
+        assert_eq!(args(&["--snap", "a.png"]).keys, None);
     }
 
     #[test]
