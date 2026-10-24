@@ -1,20 +1,23 @@
 //! `NSDraggingSource` for [`super::begin`]. The session starts inside winit's `mouseDragged:`
 //! (which dispatches `CursorMoved` synchronously), so `NSApp.currentEvent` is the drag event.
 //! Pasteboard types follow what Finder and System Settings' privacy lists accept for a file.
-use super::{DragImage, DragOutStart, DragOutcome, path_text};
+use super::{DragImage, DragItem, DragOperation, DragOutStart, DragOutcome, path_text};
 use std::cell::{Cell, RefCell};
 use objc2::{ClassType, DeclaredClass, declare_class, msg_send_id, mutability, rc::Retained,
     runtime::{AnyObject, NSObjectProtocol, ProtocolObject}};
 use objc2_app_kit::{NSApplication, NSDragOperation, NSDraggingContext, NSDraggingFormation, NSDraggingItem,
     NSDraggingSession, NSDraggingSource, NSEvent, NSEventModifierFlags, NSEventType, NSImage,
-    NSPasteboardItem, NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeURL, NSView};
-use objc2_foundation::{MainThreadMarker, NSArray, NSData, NSObject, NSPoint, NSRect, NSSize, NSString, NSURL};
+    NSFilenamesPboardType, NSPasteboardItem, NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeURL,
+    NSView, NSWindow};
+use objc2_foundation::{MainThreadMarker, NSArray, NSCopying, NSData, NSObject, NSPoint, NSRect, NSSize, NSString, NSURL};
 
 type Done = Box<dyn FnOnce(DragOutcome)>;
 
 struct Ivars {
     done: RefCell<Option<Done>>,
     mask: Cell<NSDragOperation>,
+    /// The app's windows that stop taking drops while this session runs.
+    muted: RefCell<Vec<Retained<NSWindow>>>,
 }
 
 /// Runs the end callback, which must not unwind into AppKit.
@@ -28,6 +31,7 @@ impl Drop for Ivars {
     /// A session AppKit never ended (say, one started after the button was already up) still
     /// reports once, when the next drag replaces its source.
     fn drop(&mut self) {
+        unmute(std::mem::take(self.muted.get_mut()));
         if let Some(done) = self.done.get_mut().take() { report(done, DragOutcome::Cancelled); }
     }
 }
@@ -48,6 +52,7 @@ declare_class!(
         }
         #[method(draggingSession:endedAtPoint:operation:)]
         fn ended(&self, _session: &NSDraggingSession, _point: NSPoint, operation: NSDragOperation) {
+            unmute(std::mem::take(&mut *self.ivars().muted.borrow_mut()));
             let done = self.ivars().done.borrow_mut().take();
             if let Some(done) = done { report(done, outcome(operation)); }
         }
@@ -69,16 +74,40 @@ fn outcome(operation: NSDragOperation) -> DragOutcome {
     else { DragOutcome::Cancelled }
 }
 
-pub(super) fn begin(window: &winit::window::Window, start: DragOutStart, snapshot: Option<DragImage>, done: Done) {
+/// The operations the source offers: what the item allows, ignoring modifier keys.
+fn mask(item: &DragItem) -> NSDragOperation {
+    [(DragOperation::Copy, NSDragOperation::Copy), (DragOperation::Move, NSDragOperation::Move), (DragOperation::Link, NSDragOperation::Link)]
+        .into_iter().filter(|&(op, _)| item.offers(op)).fold(NSDragOperation::None, |m, (_, ns)| m | ns)
+}
+
+/// winit registers every window for file drops and accepts any, answering Copy whatever the
+/// source offers, so a drag let go over the app would end Copied without sliding back (and hand
+/// the app its own file). The app's drop-taking windows stop taking drops for the session.
+fn mute(mtm: MainThreadMarker) -> Vec<Retained<NSWindow>> {
+    // SAFETY: window and delegate calls on the main thread.
+    unsafe {
+        NSApplication::sharedApplication(mtm).windows().into_iter()
+            .filter(|w| w.delegate().is_some_and(|d| d.respondsToSelector(objc2::sel!(draggingEntered:))))
+            .inspect(|w| w.unregisterDraggedTypes())
+            .collect()
+    }
+}
+
+/// Gives the windows back the file drops winit registered them for.
+fn unmute(windows: Vec<Retained<NSWindow>>) {
+    // SAFETY: AppKit's type constants are immutable statics. `muted` is only filled on the main
+    // thread, and its owner, a main-thread-only source, drops there.
+    for w in windows { w.registerForDraggedTypes(&NSArray::from_id_slice(&[unsafe { NSFilenamesPboardType }.copy()])); }
+}
+
+pub(super) fn begin(window: &winit::window::Window, start: DragOutStart, picture: Option<DragImage>, done: Done) {
     let Some(mtm) = MainThreadMarker::new() else { return done(DragOutcome::Cancelled) };
     let Some(view) = crate::macos::content_view(window) else { return done(DragOutcome::Cancelled) };
     let Some(event) = drag_event(mtm, &view) else { return done(DragOutcome::Cancelled) };
-    let custom = start.item.drag_image().is_some();
-    let picture = start.item.drag_image().cloned().or(snapshot);
     // SAFETY: AppKit calls on the main thread with live objects; the source outlives the
     // session through LIVE.
     unsafe {
-        let (image, frame) = image_and_frame(&start, picture.as_ref(), custom);
+        let (image, frame) = image_and_frame(&start, picture.as_ref());
         let items = pasteboard_items(&start);
         if items.is_empty() { return done(DragOutcome::Cancelled); }
         let dragging: Vec<Retained<NSDraggingItem>> = items.iter().enumerate().map(|(i, item)| {
@@ -89,14 +118,13 @@ pub(super) fn begin(window: &winit::window::Window, start: DragOutStart, snapsho
             d.setDraggingFrame_contents(f, image.as_deref().map(|i| &**i as &AnyObject));
             d
         }).collect();
-        let mut mask = NSDragOperation::Copy;
-        if start.item.allows_move() { mask |= NSDragOperation::Move; }
-        let source = mtm.alloc::<Source>().set_ivars(Ivars { done: RefCell::new(Some(done)), mask: Cell::new(mask) });
+        let source = mtm.alloc::<Source>().set_ivars(Ivars { done: RefCell::new(Some(done)), mask: Cell::new(mask(&start.item)), muted: RefCell::new(mute(mtm)) });
         let source: Retained<Source> = msg_send_id![super(source), init];
         // The previous source drops (reporting if it never ended) outside the borrow.
         let previous = LIVE.with(|live| live.replace(Some(source.clone())));
         drop(previous);
         let session = view.beginDraggingSessionWithItems_event_source(&NSArray::from_vec(dragging), &event, ProtocolObject::from_ref(&*source));
+        // A drop nowhere slides the image back over the element.
         session.setAnimatesToStartingPositionsOnCancelOrFail(true);
         session.setDraggingFormation(NSDraggingFormation::None);
     }
@@ -123,30 +151,20 @@ fn drag_event(mtm: MainThreadMarker, view: &NSView) -> Option<Retained<NSEvent>>
 }
 
 /// The drag image and where it starts, in the view's (flipped, top-left) points.
-fn image_and_frame(start: &DragOutStart, picture: Option<&DragImage>, custom: bool) -> (Option<Retained<NSImage>>, NSRect) {
+fn image_and_frame(start: &DragOutStart, picture: Option<&DragImage>) -> (Option<Retained<NSImage>>, NSRect) {
     // SAFETY: NSImage and NSWorkspace calls on the main thread (`begin`'s only caller context).
     unsafe {
         let [x, y, w, h] = start.rect;
         let image = picture.and_then(|p| {
             let image = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(p.png_data()))?;
-            let size = match p.points() {
-                Some((w, h)) => NSSize::new(w as f64, h as f64),
-                None => image.size(),
-            };
-            image.setSize(size);
-            Some(image)
+            let natural = image.size();
+            let [fx, fy, fw, fh] = p.frame(start.rect, start.press, (natural.width as f32, natural.height as f32));
+            // The frame's size scales the picture; setting it on the image too keeps a
+            // high-resolution snapshot at its point size.
+            image.setSize(NSSize::new(fw as f64, fh as f64));
+            Some((image, NSRect::new(NSPoint::new(fx as f64, fy as f64), NSSize::new(fw as f64, fh as f64))))
         });
-        if let Some(image) = image {
-            let size = image.size();
-            let origin = if custom {
-                // A supplied picture is centred under the pointer.
-                NSPoint::new(start.press.0 as f64 - size.width / 2.0, start.press.1 as f64 - size.height / 2.0)
-            } else {
-                // The snapshot sits exactly over the element (cropped to the window's top-left).
-                NSPoint::new(x.max(0.0) as f64, y.max(0.0) as f64)
-            };
-            return (Some(image), NSRect::new(origin, size));
-        }
+        if let Some((image, frame)) = image { return (Some(image), frame); }
         // No picture: the first file's Finder icon, else the element's outline only.
         let icon = start.item.paths().first().map(|path| {
             let workspace: Retained<AnyObject> = msg_send_id![objc2::class!(NSWorkspace), sharedWorkspace];
@@ -193,6 +211,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_mask_offers_what_the_item_allows() {
+        assert_eq!(mask(&DragItem::new()), NSDragOperation::Copy);
+        assert_eq!(mask(&DragItem::new().allow_move()), NSDragOperation::Copy | NSDragOperation::Move);
+        assert_eq!(mask(&DragItem::new().operation(DragOperation::Move)), NSDragOperation::Move);
+        assert_eq!(mask(&DragItem::new().operation(DragOperation::Link).allow(DragOperation::Copy)), NSDragOperation::Link | NSDragOperation::Copy);
+    }
+
+    #[test]
     fn operations_map_to_outcomes() {
         assert_eq!(outcome(NSDragOperation::Copy), DragOutcome::Copied);
         assert_eq!(outcome(NSDragOperation::Move), DragOutcome::Moved);
@@ -204,7 +230,7 @@ mod tests {
 
     fn ivars(log: &std::rc::Rc<RefCell<Vec<DragOutcome>>>) -> Ivars {
         let log = log.clone();
-        Ivars { done: RefCell::new(Some(Box::new(move |o| log.borrow_mut().push(o)))), mask: Cell::new(NSDragOperation::Copy) }
+        Ivars { done: RefCell::new(Some(Box::new(move |o| log.borrow_mut().push(o)))), mask: Cell::new(NSDragOperation::Copy), muted: RefCell::default() }
     }
 
     #[test]

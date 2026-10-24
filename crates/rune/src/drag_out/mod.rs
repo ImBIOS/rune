@@ -3,7 +3,10 @@
 //! An element marked [`crate::El::drag_out`] starts a system drag session once the pointer
 //! travels [`DRAG_THRESHOLD`] points from the press. The session carries a [`DragItem`] (file
 //! URLs, PNG data, plain text) and shows a [`DragImage`], by default a snapshot of the element
-//! as the window last drew it. [`crate::El::on_drag_end`] reports how the drop ended.
+//! as the window last drew it, starting exactly over the element. [`crate::El::on_drag_start`]
+//! and [`crate::El::on_drag_end`] bracket the session, so the app can style the source while
+//! it's dragged; [`DragOutcome`] says how the drop ended. Rune windows take no drops, so a drag
+//! let go over the app ends [`DragOutcome::Cancelled`] and the image slides back.
 //!
 //! macOS runs the session with `NSDraggingSource`. Other platforms don't start one yet: there
 //! `drag_out` is ignored and the element keeps its ordinary press and `on_drag` behaviour.
@@ -14,6 +17,7 @@
 //! dragged event at the current mouse location. The window path is tested on a real desktop;
 //! the overlay path compiles and runs the same code but has no GUI test yet.
 
+use crate::color::{Color, srgb_decode, srgb_encode};
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "macos")]
@@ -40,13 +44,20 @@ pub(crate) fn past_threshold(from: (f32, f32), to: (f32, f32)) -> bool {
 /// let item = DragItem::new().file("/Applications/Example.app");
 /// assert_eq!(item.paths().len(), 1);
 /// ```
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DragItem {
     files: Vec<PathBuf>,
     png: Option<Vec<u8>>,
     text: Option<String>,
     image: Option<DragImage>,
-    allow_move: bool,
+    operations: u8,
+    backing: Option<Color>,
+}
+
+impl Default for DragItem {
+    fn default() -> Self {
+        Self { files: Vec::new(), png: None, text: None, image: None, operations: DragOperation::Copy.bit(), backing: None }
+    }
 }
 
 impl DragItem {
@@ -85,20 +96,73 @@ impl DragItem {
         self
     }
 
-    /// Let the target move files instead of copying them (Finder moves within one volume).
-    /// By default a drag only offers a copy, whatever modifier keys are held.
-    pub fn allow_move(mut self) -> Self {
-        self.allow_move = true;
+    /// Show the drag image composited over `color`, so it's opaque even where the element or
+    /// its window is transparent (an overlay panel, a translucent window material). AppKit
+    /// still draws its drag window at about 90% opacity, as it does for every app's drag.
+    ///
+    /// ```
+    /// # use rune::{Color, DragItem};
+    /// let item = DragItem::new().text("row").opaque(Color::WHITE);
+    /// assert_eq!(item.backing(), Some(Color::WHITE));
+    /// ```
+    pub fn opaque(mut self, color: Color) -> Self {
+        self.backing = Some(color.alpha(1.0));
         self
     }
+
+    /// Offer only `operation` to the target, instead of the default [`DragOperation::Copy`].
+    ///
+    /// ```
+    /// # use rune::{DragItem, DragOperation};
+    /// let item = DragItem::new().text("row").operation(DragOperation::Link);
+    /// assert!(item.offers(DragOperation::Link) && !item.offers(DragOperation::Copy));
+    /// ```
+    pub fn operation(mut self, operation: DragOperation) -> Self {
+        self.operations = operation.bit();
+        self
+    }
+
+    /// Offer `operation` as well as those already offered; the target picks one.
+    pub fn allow(mut self, operation: DragOperation) -> Self {
+        self.operations |= operation.bit();
+        self
+    }
+
+    /// Let the target move files instead of copying them (Finder moves within one volume).
+    /// By default a drag only offers a copy, whatever modifier keys are held.
+    pub fn allow_move(self) -> Self { self.allow(DragOperation::Move) }
 
     pub fn paths(&self) -> &[PathBuf] { &self.files }
     pub fn png_data(&self) -> Option<&[u8]> { self.png.as_deref() }
     pub fn plain_text(&self) -> Option<&str> { self.text.as_deref() }
     pub fn drag_image(&self) -> Option<&DragImage> { self.image.as_ref() }
-    pub fn allows_move(&self) -> bool { self.allow_move }
+    pub fn allows_move(&self) -> bool { self.offers(DragOperation::Move) }
+    /// Whether the drag offers `operation` to the target.
+    pub fn offers(&self, operation: DragOperation) -> bool { self.operations & operation.bit() != 0 }
+    /// The colour the drag image is shown over, from [`DragItem::opaque`].
+    pub fn backing(&self) -> Option<Color> { self.backing }
     /// Carries nothing a target could receive.
     pub fn is_empty(&self) -> bool { self.files.is_empty() && self.png.is_none() && self.text.is_none() }
+}
+
+/// What a drag lets the target do with the data. A drag offers [`DragOperation::Copy`] unless
+/// [`DragItem::operation`] or [`DragItem::allow`] say otherwise, and modifier keys don't change
+/// the offer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DragOperation {
+    /// The target copies the data.
+    Copy,
+    /// The target moves the files.
+    Move,
+    /// The target makes a link or alias to the files.
+    Link,
+}
+
+impl DragOperation {
+    fn bit(self) -> u8 {
+        match self { Self::Copy => 1, Self::Move => 2, Self::Link => 4 }
+    }
 }
 
 /// The picture a drag shows under the pointer, as PNG data.
@@ -107,10 +171,22 @@ pub struct DragImage {
     png: Vec<u8>,
     /// Display size in points; `None` draws one pixel per point at the window's scale.
     size: Option<(f32, f32)>,
+    placement: Placement,
+}
+
+/// Where a drag image starts, in window points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Placement {
+    /// Centred under the press.
+    Pointer,
+    /// Filling the element's visible rect.
+    Element,
+    /// Top-left at this point, at the image's own size (the snapshot's pixel-aligned crop).
+    At(f32, f32),
 }
 
 impl DragImage {
-    pub fn png(bytes: impl Into<Vec<u8>>) -> Self { Self { png: bytes.into(), size: None } }
+    pub fn png(bytes: impl Into<Vec<u8>>) -> Self { Self { png: bytes.into(), size: None, placement: Placement::Pointer } }
 
     /// Straight-alpha sRGB RGBA8 pixels. `None` if `pixels` isn't `width * height * 4` bytes.
     pub fn rgba(width: u32, height: u32, pixels: &[u8]) -> Option<Self> {
@@ -123,8 +199,46 @@ impl DragImage {
         self
     }
 
+    /// Start the drag with the image filling the element's visible bounds (scaled to fit), as
+    /// the default snapshot does, instead of centred under the pointer. Use it for a picture
+    /// rendered at the element's size, so the drag appears to lift the element itself.
+    pub fn over_element(mut self) -> Self {
+        self.placement = Placement::Element;
+        self
+    }
+
     pub fn png_data(&self) -> &[u8] { &self.png }
     pub fn points(&self) -> Option<(f32, f32)> { self.size }
+
+    /// Where the drag image starts, x, y, w, h in window points: `natural` is its size in
+    /// points when [`DragImage::size`] wasn't set.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn frame(&self, rect: [f32; 4], press: (f32, f32), natural: (f32, f32)) -> [f32; 4] {
+        let (w, h) = self.size.unwrap_or(natural);
+        match self.placement {
+            Placement::Pointer => [press.0 - w / 2.0, press.1 - h / 2.0, w, h],
+            Placement::Element => [rect[0], rect[1], rect[2].max(1.0), rect[3].max(1.0)],
+            Placement::At(x, y) => [x, y, w, h],
+        }
+    }
+
+    /// The image composited over an opaque `backing`, blended in linear light as the window
+    /// blends. `None` if the PNG doesn't decode.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn over(&self, backing: Color) -> Option<Self> {
+        let mut rgba = image::load_from_memory_with_format(&self.png, image::ImageFormat::Png).ok()?.to_rgba8();
+        let bg = [backing.r, backing.g, backing.b];
+        for p in rgba.pixels_mut() {
+            let a = p[3] as f32 / 255.0;
+            for c in 0..3 {
+                let v = srgb_decode(p[c] as f32 / 255.0) * a + bg[c] * (1.0 - a);
+                p[c] = (srgb_encode(v) * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+            p[3] = 255;
+        }
+        let png = encode_png(rgba.width(), rgba.height(), rgba.as_raw())?;
+        Some(Self { png, ..self.clone() })
+    }
 }
 
 /// How a drag out of the window ended.
@@ -133,7 +247,8 @@ impl DragImage {
 pub enum DragOutcome {
     /// The target copied the data.
     Copied,
-    /// The target moved the files (only offered after [`DragItem::allow_move`]), or the drop
+    /// The target moved the files (only offered after [`DragItem::allow_move`] or
+    /// [`DragOperation::Move`]), or the drop
     /// asked the source to delete them (the Trash).
     Moved,
     /// The target made a link or alias to the files.
@@ -219,7 +334,10 @@ pub(crate) fn snapshot(gpu: &crate::render::Gpu, renderer: &crate::render::Rende
     }
     buffer.unmap();
     to_straight_rgba(&mut rgba, bgra);
-    DragImage::rgba(w, h, &rgba).map(|i| i.size(w as f32 / scale, h as f32 / scale))
+    let mut image = DragImage::rgba(w, h, &rgba)?.size(w as f32 / scale, h as f32 / scale);
+    // The crop rounds out to whole pixels, so the image sits exactly over what was drawn.
+    image.placement = Placement::At(x as f32 / scale, y as f32 / scale);
+    Some(image)
 }
 
 /// `rect` (points) in device pixels, clamped to the frame: x, y, w, h. `None` when empty.
@@ -247,9 +365,19 @@ fn to_straight_rgba(pixels: &mut [u8], bgra: bool) {
 #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 pub(crate) fn begin(window: &winit::window::Window, start: DragOutStart, snapshot: Option<DragImage>, done: Box<dyn FnOnce(DragOutcome)>) {
     #[cfg(target_os = "macos")]
-    { macos::begin(window, start, snapshot, done); }
+    { let picture = picture(&start.item, snapshot); macos::begin(window, start, picture, done); }
     #[cfg(not(target_os = "macos"))]
     done(DragOutcome::Cancelled);
+}
+
+/// The item's own image, else the snapshot, over the item's backing colour if it has one.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn picture(item: &DragItem, snapshot: Option<DragImage>) -> Option<DragImage> {
+    let picture = item.drag_image().cloned().or(snapshot)?;
+    match item.backing() {
+        Some(backing) => picture.over(backing).or(Some(picture)),
+        None => Some(picture),
+    }
 }
 
 /// The path offered as text when a file drag has no text of its own.
@@ -278,6 +406,61 @@ mod tests {
         assert!(!item.allows_move() && item.drag_image().is_none() && !item.is_empty());
         assert!(DragItem::new().is_empty());
         assert!(DragItem::new().allow_move().allows_move());
+    }
+
+    #[test]
+    fn a_drag_offers_copy_unless_told_otherwise() {
+        let item = DragItem::new();
+        assert!(item.offers(DragOperation::Copy) && !item.offers(DragOperation::Move) && !item.offers(DragOperation::Link));
+        let item = DragItem::new().allow_move();
+        assert!(item.offers(DragOperation::Copy) && item.offers(DragOperation::Move));
+        let item = DragItem::new().operation(DragOperation::Move);
+        assert!(!item.offers(DragOperation::Copy) && item.offers(DragOperation::Move) && item.allows_move());
+        let item = DragItem::new().operation(DragOperation::Link).allow(DragOperation::Copy);
+        assert!(item.offers(DragOperation::Copy) && item.offers(DragOperation::Link) && !item.offers(DragOperation::Move));
+    }
+
+    #[test]
+    fn drag_image_frames_start_over_the_element_or_under_the_pointer() {
+        let rect = [20.0, 40.0, 200.0, 32.0];
+        let press = (50.0, 60.0);
+        let image = DragImage::rgba(1, 1, &[0; 4]).unwrap();
+        assert_eq!(image.frame(rect, press, (64.0, 64.0)), [18.0, 28.0, 64.0, 64.0], "a supplied picture is centred under the press");
+        assert_eq!(image.clone().size(10.0, 20.0).frame(rect, press, (64.0, 64.0)), [45.0, 50.0, 10.0, 20.0]);
+        assert_eq!(image.clone().over_element().frame(rect, press, (64.0, 64.0)), rect, "over_element fills the element's bounds");
+        assert_eq!(image.clone().size(10.0, 10.0).over_element().frame(rect, press, (64.0, 64.0)), rect);
+        assert_eq!(image.over_element().frame([5.0, 5.0, 0.0, 0.0], press, (1.0, 1.0)), [5.0, 5.0, 1.0, 1.0], "never an empty frame");
+    }
+
+    #[test]
+    fn the_snapshot_frame_is_its_pixel_aligned_crop() {
+        let mut image = DragImage::rgba(41, 21, &[0; 41 * 21 * 4]).unwrap().size(20.5, 10.5);
+        image.placement = Placement::At(10.0, 5.0);
+        assert_eq!(image.frame([10.2, 5.3, 20.0, 10.0], (0.0, 0.0), (41.0, 21.0)), [10.0, 5.0, 20.5, 10.5]);
+    }
+
+    #[test]
+    fn an_opaque_backing_fills_transparent_pixels_and_keeps_opaque_ones() {
+        let image = DragImage::rgba(3, 1, &[255, 0, 0, 255, 0, 0, 0, 0, 255, 255, 255, 128]).unwrap().size(3.0, 1.0).over_element();
+        let flat = image.over(Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 }).unwrap();
+        assert_eq!((flat.points(), flat.placement), (Some((3.0, 1.0)), Placement::Element), "size and placement survive");
+        let rgba = image::load_from_memory(flat.png_data()).unwrap().to_rgba8();
+        assert_eq!(rgba.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(rgba.get_pixel(1, 0).0, [0, 0, 255, 255]);
+        let half = rgba.get_pixel(2, 0).0;
+        assert_eq!(half[3], 255);
+        assert!(half[0] == half[1] && half[0] > 150 && half[2] == 255, "half white over blue, mixed in linear light: {half:?}");
+    }
+
+    #[test]
+    fn the_picture_is_the_items_image_else_the_snapshot_over_the_backing() {
+        let snap = DragImage::rgba(1, 1, &[0, 0, 0, 0]).unwrap();
+        let own = DragImage::rgba(1, 1, &[1, 2, 3, 255]).unwrap();
+        assert_eq!(picture(&DragItem::new(), Some(snap.clone())), Some(snap.clone()));
+        assert_eq!(picture(&DragItem::new().image(own.clone()), Some(snap.clone())), Some(own));
+        assert_eq!(picture(&DragItem::new(), None), None);
+        let flat = picture(&DragItem::new().opaque(Color::WHITE), Some(snap)).unwrap();
+        assert_eq!(image::load_from_memory(flat.png_data()).unwrap().to_rgba8().get_pixel(0, 0).0, [255, 255, 255, 255]);
     }
 
     #[test]
