@@ -53,7 +53,8 @@ pub struct Reveal {
 pub struct Effect {
     /// Opacity multiplier when absent (identity 1).
     pub opacity: f32,
-    /// Uniform scale when absent (identity 1). Kept within [0.9, 1.1]: never scale to or from 0.
+    /// Uniform scale when absent (identity 1). Kept within [0.9, 1.1], or
+    /// [[`SMALL_SCALE_FLOOR`], 1.1] with `small_scale`: never scale to or from 0.
     pub scale: f32,
     /// Scale anchor in unit coordinates of the node (0.5, 0.5 = centre).
     pub anchor: Vec2,
@@ -64,7 +65,15 @@ pub struct Effect {
     /// Gaussian blur sigma in points when absent (identity 0). At most 4; in-place replacement only.
     pub blur: f32,
     pub reveal: Option<Reveal>,
+    /// Lets `scale` go down to [`SMALL_SCALE_FLOOR`] instead of 0.9, for small glyphs
+    /// ([`Transition::allow_small_scale`]).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub small_scale: bool,
 }
+
+/// The smallest scale a transition with [`Transition::allow_small_scale`] starts or ends at.
+/// Below it a glyph reads as appearing from a point, which the scale rule exists to avoid.
+pub const SMALL_SCALE_FLOOR: f32 = 0.5;
 
 impl Default for Effect {
     fn default() -> Self {
@@ -81,6 +90,7 @@ impl Effect {
         offset_fraction: Vec2::ZERO,
         blur: 0.0,
         reveal: None,
+        small_scale: false,
     };
 
     pub fn opacity(opacity: f32) -> Effect {
@@ -106,6 +116,7 @@ impl Effect {
             ),
             blur: self.blur.max(o.blur),
             reveal: self.reveal.or(o.reveal),
+            small_scale: self.small_scale || o.small_scale,
         }
     }
 
@@ -113,10 +124,12 @@ impl Effect {
         self.offset != Vec2::ZERO || self.offset_fraction != Vec2::ZERO
     }
 
-    /// Kit's rules, enforced: scale in [0.9, 1.1] (never to or from 0), blur sigma ≤ 4 pt, no blur on
-    /// anything that travels (sliding content stays sharp), and nothing leaves at full opacity.
+    /// Kit's rules, enforced: scale in [0.9, 1.1] (never to or from 0; down to
+    /// [`SMALL_SCALE_FLOOR`] with `small_scale`), blur sigma ≤ 4 pt, no blur on anything that
+    /// travels (sliding content stays sharp), and nothing leaves at full opacity.
     pub fn kit_rules(mut self, removal: bool) -> Effect {
-        self.scale = self.scale.clamp(0.9, 1.1);
+        let floor = if self.small_scale { SMALL_SCALE_FLOOR } else { 0.9 };
+        self.scale = self.scale.clamp(floor, 1.1);
         self.blur = if self.travels() { 0.0 } else { self.blur.clamp(0.0, 4.0) };
         self.opacity = self.opacity.clamp(0.0, 1.0);
         if removal {
@@ -213,6 +226,15 @@ impl Transition {
     }
     pub fn springs(mut self, springs: SpringPair) -> Transition {
         self.springs = springs;
+        self
+    }
+    /// Lets this transition's scale go below 0.9, down to [`SMALL_SCALE_FLOOR`] (0.5), for a
+    /// small glyph such as an icon in a button, which barely seems to move at 0.9:
+    /// `Transition::scale(0.6).allow_small_scale()`. Larger elements keep the default range, and
+    /// nothing scales to or from 0.
+    pub fn allow_small_scale(mut self) -> Transition {
+        self.insertion.small_scale = true;
+        self.removal.small_scale = true;
         self
     }
     /// Keep the exiting node in flow (its slot collapses as it leaves) instead of popping it out.

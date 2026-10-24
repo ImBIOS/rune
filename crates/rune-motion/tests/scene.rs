@@ -1,5 +1,5 @@
 use rune_motion::prelude::*;
-use rune_motion::{MotionTrace, Phase, TraceHeader, flags};
+use rune_motion::{MotionTrace, Phase, SMALL_SCALE_FLOOR, TraceHeader, flags};
 
 const HZ: f64 = 120.0;
 
@@ -342,4 +342,28 @@ fn trace_writes_motion_lint_jsonl() {
     assert!(lines.iter().any(|l| l.contains(r#""ai":[[2,"#)), "intents");
     assert!(lines.iter().any(|l| l.contains(r#""g":[2]"#)), "gone after exit");
     assert!(lines.iter().all(|l| l.starts_with('{') && l.ends_with('}')));
+}
+
+#[test]
+fn scale_stays_above_point_nine_unless_a_small_glyph_opts_in() {
+    let start = |t: Transition| {
+        let mut s = Scene::new();
+        s.insert(NodeId(9), spec(0.0, 0.0, 16.0, 16.0).transition(t), Mount::Animated);
+        find(s.frame_at(0.0).changed, NodeId(9)).unwrap().transform.scale.x
+    };
+    assert!((start(Transition::scale(0.6)) - 0.9).abs() < 1e-4, "the default rule");
+    assert!((start(Transition::scale(0.6).allow_small_scale()) - 0.6).abs() < 1e-4);
+    assert!((start(Transition::scale(0.0).allow_small_scale()) - SMALL_SCALE_FLOOR).abs() < 1e-4, "never from 0");
+    assert!((start(Transition::scale(0.6).allow_small_scale().combined(Transition::opacity())) - 0.6).abs() < 1e-4);
+
+    // The removal leaves at the small scale too, still fading out.
+    let mut s = Scene::new();
+    let id = NodeId(10);
+    s.insert(id, spec(0.0, 0.0, 16.0, 16.0).transition(Transition::scale(0.6).allow_small_scale()), Mount::Initial);
+    s.frame_at(0.0);
+    s.remove(id);
+    let (exit, exited_at) = run(&mut s, 0.0, 1.0, id);
+    let exited_at = exited_at.expect("exit finishes");
+    let last = exit.iter().rev().find(|(t, _)| *t <= exited_at).unwrap().1;
+    assert!(last.transform.scale.x < 0.65 && last.opacity < 1e-3, "{:?}", (last.transform.scale.x, last.opacity));
 }

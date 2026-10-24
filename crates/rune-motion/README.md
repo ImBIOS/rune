@@ -65,7 +65,7 @@ let x = store.get(id, X);
 - The user's direct manipulation is never animated. Gestures write values with `set` and animate only on `release`.
 - Under reduced motion, travel, scale, shape and blur change instantly, and opacity, colour and presence take a 0.18 s ease-in-out fade (`REDUCED_FADE`). Gesture values keep their curve. `match_geometry` turns into a crossfade in place.
 - Both edges of a rect snap to 1/64 device px, and settle thresholds scale with the pixel density.
-- Blur is limited to 4 px and only applies to things entering or leaving in place. A transition that travels drops its blur. Scale stays within [0.9, 1.1] and never goes to 0. A removed node always fades out (`Effect::kit_rules`).
+- Blur is limited to 4 px and only applies to things entering or leaving in place. A transition that travels drops its blur. Scale stays within [0.9, 1.1] and never goes to 0; `Transition::allow_small_scale()` lowers the floor to 0.5 for small glyphs. A removed node always fades out (`Effect::kit_rules`).
 - Width leads: `.width_leads()` runs the X spring at 0.78× the duration (taken from a launcher app).
 - A stationary edge gets no motion at all.
 

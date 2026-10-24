@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Transition::allow_small_scale()` lets a small glyph scale from below 0.9.** Transitions
+  keep scale within [0.9, 1.1] by default. `Transition::scale(0.6).allow_small_scale()` lowers
+  the floor to `SMALL_SCALE_FLOOR` (0.5), for an icon in a button that barely moves at 0.9;
+  nothing scales to or from 0. `Effect` gains a pub `small_scale` field: an `Effect { .. }`
+  literal without `..Effect::IDENTITY` needs it.
 - **A node leaves with the transition of its last render.** `El::transition` was read only when
   a node mounted or revived, so a later render couldn't change how it leaves. Each render now
   updates a present node's transition, as in SwiftUI: removal uses the removal effect and exit

@@ -66,7 +66,7 @@ pub use spring::{Spring, SpringPair};
 pub use store::{AnimationStore, MotionEvent, Release, RetargetAudit, TrackId};
 pub use tokens as motion;
 pub use trace::{Intent, MotionTrace, SharedBuffer, TraceChannels, TraceHeader, flags};
-pub use transition::{Edge, Effect, Reveal, Transition};
+pub use transition::{Edge, Effect, Reveal, SMALL_SCALE_FLOOR, Transition};
 pub use value::{
     Animatable, Blur, Color, Corners, MAX_LANES, Rect, Sides, Transform, Vec2, linear_to_oklab, oklab_to_linear,
     srgb_decode, srgb_encode,
