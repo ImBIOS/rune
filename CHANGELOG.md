@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A Markdown table that ends the text sizes to its last row.** rune-kit read a last table row
+  with no newline after it as still streaming in and left it out of the column widths, so a
+  table ending a trimmed note could wrap that row. It now does so only while `Markdown::reveal`
+  is on; without a reveal the text is taken as whole.
 - **`ui-monospace` in `AppSpec::families` names the platform's monospaced font.** The sans and
   mono slots are CSS lists, and CSS's `ui-monospace` in one now stands for `Family::SystemMono`'s
   families (SF Mono on macOS, whose family name is hidden), followed by the rest of the list. With

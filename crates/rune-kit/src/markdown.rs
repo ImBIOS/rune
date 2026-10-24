@@ -22,9 +22,11 @@
 //!
 //! **Tables** size each column to its content. A table that doesn't fit shrinks its columns in
 //! proportion to their content (wrapping cell text), down to each column's longest word capped at
-//! [`MarkdownStyle::table_min_column`]; past that it clips. While a stream is inside a table, the
-//! row still arriving doesn't widen columns, so columns move at most once per finished row, and a
-//! trailing `| a | b |` line is already drawn as the header it is about to become.
+//! [`MarkdownStyle::table_min_column`]; past that it clips. While a stream is inside a table (the
+//! last row has no newline yet and [`Markdown::reveal`] is on), the row still arriving doesn't
+//! widen columns, so columns move at most once per finished row. Without a reveal the text is
+//! taken as whole, and a table ending it sizes to every row. A trailing `| a | b |` line is
+//! already drawn as the header it is about to become.
 //!
 //! **Diagrams** (`mermaid` feature) render once their fence closes; until then, and for anything
 //! the subset doesn't cover, the source shows as a code block.

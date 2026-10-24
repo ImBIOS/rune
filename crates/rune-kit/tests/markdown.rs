@@ -241,10 +241,15 @@ fn column_edges(rt: &Runtime<String>) -> Vec<f32> {
     rt.elements().into_iter().filter(|e| e.path.contains("th") && e.key.as_deref().is_some_and(|k| k.starts_with('c'))).map(|e| e.rect[0]).collect()
 }
 
+fn revealing(src: &String, _: &mut Cx<String>) -> El {
+    col().w_full().child(Markdown::new(src.clone()).reveal(0.18).build(&Kit::neutral(true)))
+}
+
 #[test]
 fn a_streaming_row_does_not_move_the_columns() {
     let base = "| Step | Result |\n|---|---|\n| one | ok |\n";
-    let mut rt = laid_out(base);
+    let mut rt = Runtime::new(base.to_owned(), revealing, (480.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
     let before = column_edges(&rt);
     assert_eq!(before.len(), 2, "{:?}", keys(&rt));
     for partial in ["| a much longer first cell that is still arriving", "| a much longer first cell that is still arriving | and more"] {
@@ -257,6 +262,19 @@ fn a_streaming_row_does_not_move_the_columns() {
     rt.invalidate();
     rt.frame(1.0 / 60.0);
     assert_ne!(column_edges(&rt), before, "a finished row sizes the columns");
+}
+
+/// Without a reveal the text is whole: a table that ends it, with no newline after its last
+/// row, sizes its columns to that row too.
+#[test]
+fn a_table_ending_a_whole_note_sizes_to_its_last_row() {
+    let src = "| Field | Compared |\n|---|---|\n| title | yes |\n| a much longer cell at the end | no |";
+    assert!(matches!(&parse(src)[0], Block::Table(t) if t.open));
+    let whole = column_edges(&laid_out(src));
+    assert_eq!(whole, column_edges(&laid_out(&format!("{src}\n"))), "the trailing newline changes nothing");
+    let mut rt = Runtime::new(src.to_owned(), revealing, (480.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    assert!(column_edges(&rt)[1] < whole[1], "while revealing, the last row is still arriving");
 }
 
 #[test]
