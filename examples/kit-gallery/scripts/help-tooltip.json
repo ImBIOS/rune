@@ -1,0 +1,4 @@
+[
+  {"t": 0.2, "type": "move", "key": "copy"},
+  {"t": 1.2, "type": "mark", "name": "end"}
+]

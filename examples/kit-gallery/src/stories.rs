@@ -155,6 +155,7 @@ stories! {
     "rune-markdown--diagrams" => markdown_diagrams,
     "rune-markdown--table-styles" => markdown_table_styles,
     "rune-markdown--code" => markdown_code,
+    "rune-text--selectable-help" => text_selectable_help,
 }
 
 fn combobox_searchable(s: &G, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -1462,4 +1463,28 @@ fn markdown_streaming(s: &G, k: &Kit, _: &mut Vec<El>) -> El {
                 .key("stream-more"),
         )
         .child(Markdown::new(&MARKDOWN[..end]).reveal(0.18).build(k))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Selectable text and help
+
+const SERVE: &str = "opencode serve --port 4096 --hostname 0.0.0.0";
+
+/// A settings row: a command people can select and copy, highlighted as the kit's fields
+/// highlight a selection, and an icon-only copy button that explains itself on hover.
+fn text_selectable_help(s: &G, k: &Kit, _: &mut Vec<El>) -> El {
+    let c = &k.c;
+    col().w(480.0).gap(8.0)
+        .child(caption(k, "Run the server from a terminal"))
+        .child(
+            row().key("command-row").h(36.0).pl(12.0).pr(4.0).gap(8.0).center_y()
+                .fill(c.surface_base).radius(k.radius.md).border(1.0, c.border_weak)
+                .child(text(SERVE).key("command").font(k.ty.mono).color(c.text_base).grow(1.0).shrink()
+                    .selectable(true).selection_color(k.selection()))
+                .child(IconButton::new(&ic::COPY).variant(IconButtonVariant::Ghost).size(ButtonSize::Small)
+                    .label("Copy command").on_press_tx(|_: &mut G, tx: &mut Tx| tx.copy(SERVE)).build(k)
+                    .key("copy").help("Copy command")),
+        )
+        .child(row().w(280.0).child(TextInput::new(&s.edits[7]).placeholder("Selected like a field")
+            .on_edit(|s: &mut G| &mut s.edits[7]).build(k).key("field")))
 }

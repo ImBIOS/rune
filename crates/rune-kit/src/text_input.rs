@@ -171,7 +171,7 @@ impl TextInput {
             .shrink()
             .color(ink)
             .placeholder(self.placeholder.clone(), hint)
-            .caret(ink, k.alpha(c.text_accent, 0.3));
+            .caret(ink, k.selection());
         let field = if disabled { field } else { self.edits.apply(field) };
         let mut value = row().key("value").grow(1.0).shrink().gap(6.0).center_y();
         if let Some(i) = self.leading {
@@ -310,7 +310,7 @@ impl TextArea {
             .w_full()
             .color(ink)
             .placeholder(self.placeholder.clone(), hint)
-            .caret(ink, k.alpha(c.text_accent, 0.3));
+            .caret(ink, k.selection());
         let field = if disabled { field } else { self.edits.apply(field) };
         let line = style.line_px();
         let mut e = col().role("textbox").label(self.placeholder.clone()).padding(8.0);
@@ -405,7 +405,7 @@ impl TextField {
             .shrink()
             .color(c.text_strong)
             .placeholder(self.placeholder.clone(), c.text_weak)
-            .caret(c.text_strong, k.alpha(c.text_accent, 0.3));
+            .caret(c.text_strong, k.selection());
         let field = if self.multiline { field } else { field.single_line() };
         let field = if self.state == State::Disabled { field } else { self.edits.apply(field) };
         let mut wrapper = row()

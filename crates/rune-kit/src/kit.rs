@@ -215,6 +215,12 @@ impl Kit {
         self.blend_over.map_or(ca, |bg| rune::theme::srgb_equivalent(ca, bg))
     }
 
+    /// The text selection highlight of the kit's fields. Pass it to `El::selection_color` on
+    /// `El::selectable` text so its selection looks the same.
+    pub fn selection(&self) -> Color {
+        self.alpha(self.c.text_accent, 0.3)
+    }
+
     /// A straight-alpha colour re-solved for the surface it is painted on.
     pub fn on(&self, c: Color, backdrop: Color) -> Color {
         if self.blend_over.is_none() {
