@@ -84,6 +84,22 @@ impl FrameAnim {
     }
 
     pub fn done(&self, now: f64) -> bool { self.spring.is_none() || now >= self.end }
+
+    /// Moves the whole path by `(dx, dy)`: someone dragged the window mid-flight, and the
+    /// size carries on from where they put it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn shift(&mut self, dx: f32, dy: f32) {
+        for rect in [&mut self.from, &mut self.to] {
+            rect[0] += dx;
+            rect[1] += dy;
+        }
+    }
+}
+
+/// A requested content size inside the window's minimum and maximum sizes.
+pub(crate) fn clamp_size(size: (f32, f32), min: (f32, f32), max: Option<(f32, f32)>) -> (f32, f32) {
+    let (max_w, max_h) = max.unwrap_or((f32::INFINITY, f32::INFINITY));
+    (size.0.max(min.0).min(max_w), size.1.max(min.1).min(max_h))
 }
 
 /// Rounds a frame to whole device pixels, so content and drawable sizes agree.
@@ -141,6 +157,23 @@ mod tests {
         let jump = FrameAnim::retarget(Some(&anim), None, 1.1, [9.0; 4], [1.0; 4]);
         assert!(jump.done(1.1));
         assert_eq!(jump.sample(1.1).0, [1.0; 4]);
+    }
+
+    #[test]
+    fn a_drag_mid_flight_keeps_the_new_origin_and_the_size_carries_on() {
+        let spring = Some(Spring::new(0.3, 0.0));
+        let mut anim = FrameAnim::new(spring, 0.0, [10.0, 20.0, 400.0, 400.0], [0.0; 4], [10.0, 20.0, 400.0, 600.0]);
+        let before = anim.sample(0.1).0;
+        anim.shift(50.0, -5.0);
+        let after = anim.sample(0.1).0;
+        assert_eq!(after, [before[0] + 50.0, before[1] - 5.0, before[2], before[3]]);
+        assert_eq!(anim.to, [60.0, 15.0, 400.0, 600.0]);
+    }
+
+    #[test]
+    fn requested_sizes_stay_inside_the_window_limits() {
+        assert_eq!(clamp_size((300.0, 900.0), (420.0, 0.0), Some((800.0, 700.0))), (420.0, 700.0));
+        assert_eq!(clamp_size((500.0, 100.0), (420.0, 200.0), None), (500.0, 200.0));
     }
 
     #[test]

@@ -492,6 +492,9 @@ pub struct Runtime<S: 'static> {
     commits: u64,
     dirty: bool,
     relayout: bool,
+    /// Every viewport change since the last commit came from the window's own resize
+    /// animation (`step_viewport`), not the user or the system.
+    viewport_stepped: bool,
     settle: bool,
     queue: Vec<Action>,
     pointer: Option<(f32, f32)>,
@@ -619,6 +622,8 @@ pub struct Runtime<S: 'static> {
     fit_hold: bool,
     /// The last frame held its motion for the window (`fit_hold`). The host reads it.
     pub(crate) fit_held: bool,
+    /// The host's window frame isn't moving or about to: set by the host before each frame.
+    pub(crate) window_resting: bool,
     /// What `update` asked of the next commit.
     pending: Tx,
     pub animating: bool,
@@ -751,6 +756,7 @@ impl<S: 'static> Runtime<S> {
             commits: 0,
             dirty: true,
             relayout: false,
+            viewport_stepped: false,
             settle: false,
             queue: Vec::new(),
             pointer: None,
@@ -831,6 +837,7 @@ impl<S: 'static> Runtime<S> {
             fit_asked: None,
             fit_hold: false,
             fit_held: false,
+            window_resting: false,
             popup_open: false,
             pending: Tx::default(),
             animating: false,
@@ -894,19 +901,40 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub fn set_viewport(&mut self, viewport: (f32, f32), scale: f32) {
+        // Someone resized a window that fits its content: it goes back to the content's height.
+        if self.fit_height && self.window_resting && (self.fit_asked.unwrap_or(self.viewport.1) - viewport.1).abs() > 0.5 {
+            self.fit_asked = None;
+            self.relayout = true;
+            self.viewport_stepped = false;
+        }
+        if self.change_viewport(viewport, scale) { self.viewport_stepped = false; }
+    }
+
+    /// The viewport one frame of the window's own resize animation moved it to. Unlike a
+    /// user's resize it doesn't land running motion: content at rest follows the window and
+    /// springs keep going.
+    pub(crate) fn step_viewport(&mut self, viewport: (f32, f32), scale: f32) {
+        let fresh = !self.relayout;
+        if self.change_viewport(viewport, scale) && fresh { self.viewport_stepped = true; }
+    }
+
+    /// Whether the change needs a layout.
+    fn change_viewport(&mut self, viewport: (f32, f32), scale: f32) -> bool {
         // A window that fits its content lays out the same at any height: its own resize
         // mustn't cut short the layout springs it is following.
         if self.fit_height && viewport.0 == self.viewport.0 && scale == self.env.scale {
             self.viewport = viewport;
-            return;
+            return false;
         }
-        if viewport != self.viewport || scale != self.env.scale {
+        let changed = viewport != self.viewport || scale != self.env.scale;
+        if changed {
             if scale != self.env.scale { self.flights.clear(); }
             self.viewport = viewport;
             self.env.scale = scale;
             self.scene.set_pixel_scale(scale);
             self.relayout = true;
         }
+        changed
     }
 
     /// Install before the first frame. Live updates use this separate coalesced wake lane.
@@ -1109,7 +1137,8 @@ impl<S: 'static> Runtime<S> {
         if self.fit_asked.unwrap_or(self.viewport.1) == height { return; }
         self.fit_asked = Some(height);
         let jump = first || tx.instant || tx.relayout || self.reduced_motion;
-        if !jump && !self.animating && self.wall_start.is_some() && cfg!(target_os = "macos") { self.fit_hold = true; }
+        // Only a macOS window and headless runs move the frame on a spring.
+        if !jump && self.window_resting && (cfg!(target_os = "macos") || self.wall_start.is_none()) { self.fit_hold = true; }
         let request = crate::window_frame::FrameRequest {
             size: Some((self.viewport.0, height)), animate: !jump,
             spring: (!jump).then(|| tx.motion.unwrap_or(motion::DEFAULT)), center: false,
@@ -1377,7 +1406,7 @@ impl<S: 'static> Runtime<S> {
         self.count_layout_echo(ran_layout || read_moved, other);
         if other || ran_layout || read_moved {
             if self.relayout && !ran && !self.dirty {
-                tx.relayout = true;
+                if self.viewport_stepped { tx.window_step = true } else { tx.relayout = true }
             }
             if self.settle {
                 tx.instant = true;
@@ -2504,11 +2533,15 @@ impl<S: 'static> Runtime<S> {
             }
             if was_present {
                 let stack_row = nodes[i].parent.is_some_and(|p| nodes[p].growth.is_some()) || self.virtuals.contains_key(&nodes[i].path);
-                let layout_anim = if stack_row && !instant && !tx.relayout {
+                // A window's own resize step moves content at rest with the window; motion
+                // already running retargets on its spring.
+                let follows_window = tx.window_step && !self.flying.iter().any(|f| f.0 == id)
+                    && !self.scene.store().is_animating(id, prop::FRAME);
+                let layout_anim = if stack_row && !instant && !tx.relayout && !follows_window {
                     // Growth and virtual windows own a row's vertical place; its horizontal place
                     // still springs, or a re-centred column jumps against its moving parent.
                     LayoutAnim::axes(spring_l, Anim::INSTANT)
-                } else if layout_instant {
+                } else if layout_instant || follows_window {
                     LayoutAnim::INSTANT
                 } else {
                     let mut la = LayoutAnim::new(spring_l);
@@ -2738,6 +2771,7 @@ impl<S: 'static> Runtime<S> {
         self.dirty = false;
         self.relayout = false;
         self.aspect_snap.clear();
+        self.viewport_stepped = false;
         self.settle = false;
     }
 
@@ -4958,6 +4992,58 @@ mod tests {
         rt.update(|_, tx| { tx.resize_window((1.0, 2.0)); tx.center_window(); });
         let request = rt.window_frame.take().unwrap();
         assert_eq!((request.size, request.center), (Some((1.0, 2.0)), true));
+    }
+
+    #[test]
+    fn a_window_resize_step_keeps_springs_and_flights_going() {
+        fn view(grown: &bool, _: &mut Cx<bool>) -> El {
+            let tile = || el().key("tile").matched("tile").size(40.0, 40.0).fill(Color::WHITE);
+            let (mut left, mut right) = (el().key("left").size(100.0, 60.0), el().key("right").size(100.0, 60.0).ml(150.0));
+            if *grown { right = right.child(tile()) } else { left = left.child(tile()) }
+            col().key("root").w_full().h_full()
+                .child(el().key("box").size(50.0, if *grown { 150.0 } else { 50.0 }).fill(Color::WHITE))
+                .child(left).child(right)
+                .child(crate::el::spacer())
+                .child(el().key("bar").w_full().h(20.0).fill(Color::WHITE))
+        }
+        let resize = |user: bool| {
+            let mut rt = Runtime::new(false, view, (300.0, 400.0), Env::new(true, 1.0));
+            rt.frame(0.0);
+            rt.update(|grown, tx| { *grown = true; tx.resize_window((300.0, 600.0)) });
+            rt.frame(1.0 / 60.0);
+            rt.window_frame.take();
+            if user { rt.set_viewport((300.0, 450.0), 1.0) } else { rt.step_viewport((300.0, 450.0), 1.0) }
+            rt.frame(1.0 / 60.0);
+            rt
+        };
+        let rt = resize(false);
+        let rect = |rt: &Runtime<bool>, key: &str| rt.presented(key).unwrap().0;
+        let h = rect(&rt, "box")[3];
+        assert!(h > 50.0 && h < 150.0, "the box's spring keeps going: {h}");
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("tile") && e.moving), "the tile is still in flight");
+        let x = rect(&rt, "tile")[0];
+        assert!(x > 0.0 && x < 150.0, "mid-flight: {x}");
+        assert_eq!(rect(&rt, "bar")[1], 430.0, "content at rest follows the window");
+        assert_eq!(rect(&resize(true), "box")[3], 150.0, "a user's resize lands running motion");
+    }
+
+    #[test]
+    fn a_window_that_fits_its_content_refits_after_a_user_resize() {
+        fn view(_: &(), _: &mut Cx<()>) -> El { col().key("root").w_full().child(el().size(100.0, 90.0)) }
+        let mut rt = Runtime::new((), view, (300.0, 400.0), Env::new(true, 1.0));
+        rt.fit_height = true;
+        let height = rt.content_height();
+        rt.set_viewport((300.0, height), 1.0);
+        rt.frame(0.0);
+        rt.window_frame.take();
+        // Mid-move, the window's own frame changes aren't a user's resize.
+        rt.set_viewport((300.0, height + 40.0), 1.0);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.window_frame.take().is_none());
+        rt.window_resting = true;
+        rt.set_viewport((300.0, height + 100.0), 1.0);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.window_frame.take().and_then(|r| r.size), Some((300.0, height)));
     }
 
     #[test]

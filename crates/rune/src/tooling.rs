@@ -1199,6 +1199,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         windows: Default::default(),
     });
     let fit_height = app.fit_content_height;
+    let app_options = app.window_options.clone();
     let (spec, state, shared) = app.into_parts(args.scene.as_deref());
     let shortcuts = crate::shortcuts::Guard::attach(&shared, std::sync::Arc::new(|| {}), true, false);
     let mut menus = crate::native_menu::Guard::attach(&shared, true);
@@ -1210,7 +1211,12 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     rt.on_focus = on_focus;
     rt.transparent = transparent;
     rt.fit_height = fit_height;
-    if fit_height { let height = rt.content_height(); rt.set_viewport((size.0, height), scale); }
+    // Only limits the app set: the canvas opens at any size, below the default minimum too.
+    let limits = (app_options.min_size.or(spec.min_size).unwrap_or((0.0, 0.0)), app_options.max_size);
+    if fit_height {
+        let height = crate::window_frame::clamp_size((size.0, rt.content_height()), limits.0, limits.1).1;
+        rt.set_viewport((size.0, height), scale);
+    }
     if args.tree.is_some() { rt.key_warnings = Some(Vec::new()); }
     rt.track_marks = comp.is_some();
     let runtime_ms = launched.elapsed().as_secs_f64() * 1000.0 - state_ms;
@@ -1284,6 +1290,8 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let mut early_place = None;
     // `Tx::resize_window` moves the viewport on the virtual clock; the canvas keeps its size.
     let mut frame_anim = None;
+    // As on macOS, a frame change asked for while nothing moves waits a frame to start.
+    let mut idle = true;
     if script.iter().find(|e| !matches!(e.kind, Kind::Mark(_))).is_some_and(|e| e.t <= 1e-9) {
         early_place = take_requests(&mut rt);
         rt.frame(0.0);
@@ -1338,10 +1346,19 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             }
         }
         let requested_place = take_requests(&mut rt);
-        step_window_frame(&mut rt, &mut frame_anim, real_t, scale);
+        take_window_frame(&mut rt, &mut frame_anim, real_t, limits);
+        if !idle { step_window_frame(&mut rt, &mut frame_anim, real_t, scale); }
+        rt.window_resting = frame_anim.is_none() && rt.window_frame.is_none();
         let step = if k == 0 { 0.0 } else { dt };
         let mut animating = rt.frame(step);
         rt.open_popup_headless();
+        // As on macOS, a frame change this commit asked for starts with the springs it
+        // started, which have shown a step unless they held for the window.
+        if rt.window_frame.is_some() {
+            let shown = if rt.fit_held { 0.0 } else { step };
+            take_window_frame(&mut rt, &mut frame_anim, real_t - shown, limits);
+        }
+        idle = !animating && frame_anim.is_none();
         // Updates, poll and input handlers place too; the latest request this frame wins.
         if let Some(place) = shared.take_place().or(requested_place).or(early_place.take()) {
             let (display, frame) = desktop.place(&place, size);
@@ -1502,18 +1519,24 @@ pub(crate) fn write_strip(p: &std::path::Path, strip: &[Vec<u8>], (wp, hp): (u32
     write_png(p, sw, sh, &img).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
 }
 
-/// Moves a headless window's viewport to the size handlers asked for, on the virtual clock,
-/// before the frame lays out. Centring has nothing to centre on.
+/// Takes the size handlers asked for a headless window, inside the limits the app set; its
+/// viewport moves there on the virtual clock from `start`. Centring has nothing to centre on.
+fn take_window_frame<S>(rt: &mut Runtime<S>, anim: &mut Option<crate::window_frame::FrameAnim>, start: f64,
+    (min, max): ((f32, f32), Option<(f32, f32)>)) {
+    use crate::window_frame::{FrameAnim, clamp_size};
+    rt.fit_held = false;
+    let Some(request) = rt.window_frame.take() else { return };
+    let Some(size) = request.size else { return };
+    let (w, h) = clamp_size(size, min, max);
+    let from = [0.0, 0.0, rt.viewport.0, rt.viewport.1];
+    *anim = Some(FrameAnim::retarget(anim.as_ref(), request.spring, start, from, [0.0, 0.0, w, h]));
+}
+
+/// Moves a headless window's viewport one frame along, before the frame lays out.
 fn step_window_frame<S>(rt: &mut Runtime<S>, anim: &mut Option<crate::window_frame::FrameAnim>, now: f64, scale: f32) {
-    use crate::window_frame::{FrameAnim, snap};
-    if let Some(size) = rt.window_frame.take().and_then(|request| request.size.map(|size| (size, request.spring))) {
-        let ((w, h), spring) = size;
-        let from = [0.0, 0.0, rt.viewport.0, rt.viewport.1];
-        *anim = Some(FrameAnim::retarget(anim.as_ref(), spring, now, from, [0.0, 0.0, w, h]));
-    }
     let Some(moving) = *anim else { return };
-    let [_, _, w, h] = snap(moving.sample(now).0, scale);
-    rt.set_viewport((w, h), scale);
+    let [_, _, w, h] = crate::window_frame::snap(moving.sample(now).0, scale);
+    rt.step_viewport((w, h), scale);
     if moving.done(now) { *anim = None; }
 }
 
@@ -1927,6 +1950,10 @@ mod tests {
             (size[0], size[1])
         };
         assert_eq!(viewport("before", false, "0.1"), (300.0, 400.0));
+        // The press lands with the release at 0.18 s, on frame 11; as on macOS, frame 12 moves.
+        assert_eq!(viewport("released", false, "0.1834"), (300.0, 400.0));
+        let (_, first) = viewport("first", false, "0.2");
+        assert!(first > 400.0, "moves the frame after the press: {first}");
         let (w, h) = viewport("moving", false, "0.3");
         assert!(w == 300.0 && h > 400.0 && h < 600.0, "mid-spring at 0.3 s: {h}");
         assert_eq!(viewport("moving-again", false, "0.3"), (w, h), "the virtual clock is deterministic");

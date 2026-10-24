@@ -23,6 +23,8 @@ pub struct Tx {
     pub(crate) color_motion: Option<Spring>,
     pub(crate) settle: bool,
     pub(crate) relayout: bool,
+    /// The viewport moved only because the window's own resize animation stepped it.
+    pub(crate) window_step: bool,
     pub(crate) copy: Option<crate::ClipboardWrite>,
     pub(crate) paste: bool,
     pub(crate) clear_secret: bool,

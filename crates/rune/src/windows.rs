@@ -64,6 +64,9 @@ impl Display {
     }
 }
 
+/// A window's minimum content size when neither `WindowOptions` nor `AppSpec` sets one.
+pub(crate) const DEFAULT_MIN_SIZE: (f32, f32) = (420.0, 400.0);
+
 #[derive(Clone, Debug)]
 pub struct WindowOptions {
     pub transparent: bool,
@@ -76,6 +79,7 @@ pub struct WindowOptions {
     /// Physical content size; overrides AppSpec's logical size when set.
     pub physical_size: Option<(u32, u32)>,
     /// Logical minimum; None inherits AppSpec's minimum, Some((0, 0)) removes the floor.
+    /// Requested sizes (`Tx::resize_window`) stay inside the minimum and maximum.
     pub min_size: Option<(f32, f32)>,
     /// Logical maximum content size. None leaves it unconstrained.
     pub max_size: Option<(f32, f32)>,
@@ -117,11 +121,24 @@ impl WindowOptions {
         }
     }
 
+    /// The window's minimum and maximum content sizes, with `AppSpec::min_size` as the
+    /// fallback minimum.
+    pub(crate) fn size_limits(&self, app_min: Option<(f32, f32)>) -> ((f32, f32), Option<(f32, f32)>) {
+        let mut min = self.min_size.or(app_min).unwrap_or(DEFAULT_MIN_SIZE);
+        if let Some(max) = self.max_size { min = (min.0.min(max.0), min.1.min(max.1)); }
+        (min, self.max_size)
+    }
+
+    /// The minimum a window that fits its content height opens with: the content sets the
+    /// height, so the default minimum height doesn't apply.
+    pub(crate) fn fit_min_size(&self, app_min: Option<(f32, f32)>) -> Option<(f32, f32)> {
+        if app_min.is_none() && self.min_size.is_none() { Some((DEFAULT_MIN_SIZE.0, 0.0)) } else { app_min }
+    }
+
     pub(crate) fn attributes(&self, title: &str, size: (f32, f32), app_min: Option<(f32, f32)>, visible: bool) -> winit::window::WindowAttributes {
         use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
         use winit::window::{Window, WindowLevel};
-        let mut min = self.min_size.or(app_min).unwrap_or((420.0, 400.0));
-        if let Some(max) = self.max_size { min = (min.0.min(max.0), min.1.min(max.1)); }
+        let (min, _) = self.size_limits(app_min);
         let mut attrs = Window::default_attributes()
             .with_title(title)
             .with_inner_size(LogicalSize::new(size.0, size.1))
@@ -286,7 +303,9 @@ impl<S: 'static> ErasedWindow for Erased<S> {
     fn headless(self: Box<Self>, args: crate::tooling::Args, scale: f32) {
         let WindowSpec { mut app, options, .. } = self.spec;
         if let Some((w, h)) = options.physical_size { app.spec.size = (w as f32 / scale, h as f32 / scale); }
-        crate::tooling::headless_configured(app, args, options.transparent);
+        let transparent = options.transparent;
+        app.window_options = options;
+        crate::tooling::headless_configured(app, args, transparent);
     }
     fn desktop(self: Box<Self>, args: &crate::tooling::Args, selected: bool, scale: f32) -> Box<dyn crate::desktop::Member> {
         let Erased { spec, handle, .. } = *self;
@@ -427,5 +446,14 @@ mod tests {
     fn default_options_inherit_the_app_minimum() {
         let attrs = WindowOptions::default().attributes("app", (900.0, 600.0), Some((860.0, 560.0)), true);
         assert_eq!(attrs.min_inner_size, Some(Size::Logical(LogicalSize::new(860.0, 560.0))));
+    }
+
+    #[test]
+    fn a_window_that_fits_its_content_has_no_default_minimum_height() {
+        let fit = WindowOptions::default().fit_min_size(None);
+        assert_eq!(WindowOptions::default().size_limits(fit), ((420.0, 0.0), None));
+        assert_eq!(WindowOptions::default().fit_min_size(Some((300.0, 200.0))), Some((300.0, 200.0)));
+        let options = WindowOptions { min_size: Some((300.0, 500.0)), ..Default::default() };
+        assert_eq!(options.size_limits(options.fit_min_size(None)), ((300.0, 500.0), None));
     }
 }
