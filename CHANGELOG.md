@@ -5,19 +5,20 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
-- **macOS drag-out matches an AppKit drag source more closely.** New
-  `El::on_drag_start(|s, tx|)` runs once the system takes the drag, before its `on_drag_end`,
-  so the app can style the source while it's dragged (the example dims its tile to 0.28).
-  Every start now gets exactly one end: a drag-out the window never handed to the system ends
-  `Cancelled` at the next press. New `DragOperation` (`Copy`, `Move`, `Link`) with
-  `DragItem::operation(op)` to offer just that, `allow(op)` to add one and `offers(op)`;
-  `allow_move()` is `allow(DragOperation::Move)`, and a drag still offers only Copy by default.
-  `DragItem::opaque(color)` composites the drag image over `color`, and
-  `DragImage::over_element()` starts a supplied image over the element instead of centred under
-  the pointer. Behaviour changes: the default snapshot is placed at its pixel-aligned crop, so it
-  is no longer resampled to the element's fractional rect, and a drag let go over the app's own
-  windows ends `Cancelled` and slides back (winit's file-drop handler used to accept it as a
-  Copy and queue a `DroppedFile` for the app's own file).
+- **macOS drag-out matches an AppKit drag source more closely.** New `El::on_drag_start(|s, tx|)`
+  runs once the system takes the drag, before its `on_drag_end`, so the app can style the source
+  while it's dragged (the example dims its tile to 0.28). Every start now gets exactly one end, in
+  order: a drag-out no system took (headless, or a cancelled press) ends `Cancelled` by the next
+  frame. New `DragOperation` (`Copy`, `Move`, `Link`) with `DragItem::operation(op)` to offer just
+  that, `allow(op)` to add one and `offers(op)`; `allow_move()` is `allow(DragOperation::Move)`,
+  and a drag still offers only Copy by default. Modifier keys pick among the offered operations
+  only when there are several. `DragItem::opaque(color)` composites the drag image over `color`,
+  and `DragImage::over_element()` starts a supplied image over the element (at its `size`, else
+  the element's full unclipped size) instead of centred under the pointer. Behaviour changes: the
+  default snapshot is placed at its pixel-aligned crop, so it is no longer resampled to the
+  element's fractional rect, and a drag let go over the app's own windows ends `Cancelled` and
+  slides back (winit's file-drop handler used to accept it as a Copy and queue a `DroppedFile` for
+  the app's own file).
 - **Apps can resize and centre their window.** `Tx::resize_window(size)` animates the
   window's content size on the change's spring with the top edge fixed and the window kept on
   its screen; `Tx::resize_window_instant` jumps, and `Tx::center_window` centres as AppKit's
