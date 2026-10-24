@@ -191,6 +191,10 @@ impl Overlay {
         Overlay { rt, keys: keys.map(|_| Keycaps::default()), ripples: pointer.then(|| (Vec::new(), 0)), theme }
     }
 
+    pub(crate) fn set_srgb_blend(&mut self, enabled: bool) {
+        self.rt.set_srgb_blend(enabled);
+    }
+
     pub(crate) fn key(&mut self, t: f64, ev: &KeyEvent) {
         if let Some(k) = &mut self.keys { k.key(t, ev) }
     }

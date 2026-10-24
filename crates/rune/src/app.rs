@@ -55,6 +55,7 @@ pub struct App<S: 'static> {
     pub(crate) compositor: Option<Box<dyn crate::compose::Compositor<S>>>,
     pub(crate) window_options: crate::WindowOptions,
     pub(crate) fit_content_height: bool,
+    pub(crate) srgb_blend: bool,
     #[cfg(all(feature = "dev", debug_assertions))]
     pub(crate) dev: Option<crate::dev::Config<S>>,
 }
@@ -85,7 +86,16 @@ impl<S: 'static> App<S> {
             compositor: None,
             window_options: crate::WindowOptions::default(),
             fit_content_height: false,
+            srgb_blend: false,
         }
+    }
+
+    /// Composite this window's translucent fills, blurs, shadows, images and video in sRGB
+    /// (gamma) space instead of linear light, matching CSS and Core Animation over dark
+    /// backgrounds. Ignored with a warning when a `Compositor` is set.
+    pub fn srgb_blend(mut self, enabled: bool) -> Self {
+        self.srgb_blend = enabled;
+        self
     }
 
     /// Configure this window's frame. Overlays retain their own native behaviour.
@@ -254,6 +264,11 @@ impl<S: 'static> App<S> {
             Some(argv) => Args::parse_from(argv),
             None => Args::parse(),
         };
+        #[cfg(feature = "hot")]
+        if args.snap_on_patch.is_some() && self.compositor.is_none() {
+            crate::hot::run_app(self, args);
+            return;
+        }
         if args.headless() {
             crate::tooling::headless(self, args);
         } else {

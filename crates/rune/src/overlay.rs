@@ -269,10 +269,17 @@ pub(crate) struct Overlay<T: 'static> {
 
 impl<T: 'static> Overlay<T> {
     pub(crate) fn new<S>(configured: impl Into<ConfiguredOverlay<T>>, state: T, app: &AppSpec<S>) -> (Self, OverlayHandle<T>) {
-        let ConfiguredOverlay { spec, options, on_key, on_created, poll, on_focus, compositor, setup } = configured.into();
+        let ConfiguredOverlay { spec, options, on_key, on_created, poll, on_focus, compositor, setup, srgb_blend } = configured.into();
+        let srgb_blend = if compositor.is_some() && srgb_blend {
+            eprintln!("rune: srgb_blend is ignored when a compositor is set");
+            false
+        } else {
+            srgb_blend
+        };
         let shared = Arc::new(Shared { native: Mutex::default(), requests: Mutex::default(), availability: AtomicU8::new(0), wake: Mutex::new(None) });
         let text = TextSystem::new(app.fonts, app.families);
         let mut rt = Runtime::with_text(state, spec.view, spec.size, Env::default(), text);
+        rt.set_srgb_blend(srgb_blend);
         rt.set_system_reduced_motion(crate::preferences::reduced_motion());
         rt.wall_start = Some(Instant::now());
         rt.native_overlay = true;
@@ -688,18 +695,23 @@ impl<T: 'static> Overlay<T> {
         };
         let gpu = self.gpu.clone()?;
         let (w, h) = ((self.at.size.0 * scale).round() as u32, (self.at.size.1 * scale).round() as u32);
-        let (mut config, translucent) = crate::window::surface_config(&surface, &gpu.adapter, (w, h))?;
+        let (mut config, translucent) = crate::window::surface_config(&surface, &gpu.adapter, (w, h), self.rt.srgb_blend())?;
         config.alpha_mode = translucent.unwrap_or(config.alpha_mode);
         surface.configure(&gpu.device, &config);
-        if self.renderer.as_ref().is_none_or(|(_, f)| *f != config.format) {
-            self.renderer = Some((Renderer::new(&gpu.device, config.format), config.format));
+        let target_format = if self.rt.srgb_blend() { config.format.remove_srgb_suffix() } else { config.format };
+        if self.renderer.as_ref().is_none_or(|(_, f)| *f != target_format) {
+            let mut renderer = Renderer::new(&gpu.device, target_format);
+            renderer.set_srgb_blend(self.rt.srgb_blend());
+            self.renderer = Some((renderer, target_format));
             self.rt.text.atlas.invalidate();
             self.rt.images.invalidate();
+        } else if let Some((renderer, _)) = &mut self.renderer {
+            renderer.set_srgb_blend(self.rt.srgb_blend());
         }
         // Core Animation composites premultiplied pixels even in wgpu's PostMultiplied mode;
         // other straight-alpha surfaces get the conversion pass.
         let alpha = (config.alpha_mode == wgpu::CompositeAlphaMode::PostMultiplied && gpu.adapter.get_info().backend != wgpu::Backend::Metal)
-            .then(|| crate::surface_alpha::AlphaSurface::new(&gpu.device, config.format, (config.width, config.height)));
+            .then(|| crate::surface_alpha::AlphaSurface::new(&gpu.device, target_format, (config.width, config.height)));
         self.rt.transparent = true;
         self.rt.set_viewport(self.at.size, scale);
         #[cfg(target_os = "macos")]
@@ -1140,11 +1152,15 @@ impl<T: 'static> Overlay<T> {
         if self.options.input == OverlayInput::Regions && let Some(x11) = &mut self.x11 { x11.regions(self.rt.hit_regions(), live.scale); }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         if let Backing::Layer(layer) = &live.backing { layer.input_regions(self.rt.hit_regions(), self.interactive); }
-        let view = frame.texture.create_view(&Default::default());
+        let target_format = if self.rt.srgb_blend() { live.config.format.remove_srgb_suffix() } else { live.config.format };
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: (target_format != live.config.format).then_some(target_format),
+            ..Default::default()
+        });
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         animating |= render_frame(&mut Frame {
             device: &gpu.device, queue: &gpu.queue, encoder: &mut enc,
-            target: live.alpha.as_ref().map_or(&view, |a| &a.view), format: live.config.format,
+            target: live.alpha.as_ref().map_or(&view, |a| &a.view), format: target_format,
             size: (live.config.width, live.config.height), dt, update_ms,
             rt: &mut self.rt, ui: renderer,
         }, &mut self.compositor);

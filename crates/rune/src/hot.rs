@@ -66,12 +66,19 @@ fn key_adapter<S: 'static>(host: &mut HostState, key: &KeyEvent, tx: &mut Tx) ->
     spec.on_key.is_some_and(|f| f(host.value.downcast_mut::<S>().unwrap(), key, tx))
 }
 
-pub(crate) fn run<S: 'static>(spec: AppSpec<S>, mut args: Args) {
+pub(crate) fn run<S: 'static>(spec: AppSpec<S>, args: Args) {
+    run_app(crate::App::new(spec), args);
+}
+
+pub(crate) fn run_app<S: 'static>(mut app: crate::App<S>, mut args: Args) {
     if args.list_scenes {
-        for (name, _) in spec.scenes { println!("{name}"); }
+        for (name, _) in app.spec.scenes { println!("{name}"); }
         return;
     }
-    let value = Box::new(initial_state(&spec, args.scene.take().as_deref()));
+    let srgb_blend = app.srgb_blend;
+    let scene = args.scene.take();
+    let (spec, state, _) = app.into_parts(scene.as_deref());
+    let value = Box::new(state);
     let shell = AppSpec {
         title: spec.title, size: spec.size, min_size: spec.min_size, fonts: spec.fonts, families: spec.families,
         scenes: &[], init: || INITIAL.with(|s| s.borrow_mut().take().expect("hot initial state")),
@@ -81,15 +88,15 @@ pub(crate) fn run<S: 'static>(spec: AppSpec<S>, mut args: Args) {
         on_key: Some(|s: &mut HostState, key, tx| (s.key)(s, key, tx)),
     };
     let state = HostState { value, spec: Box::new(spec), view: view_adapter::<S>, poll: poll_adapter::<S>, setup: setup_adapter::<S>, key: key_adapter::<S> };
-    run_host(shell, state, args);
+    run_host(shell, state, args, srgb_blend);
 }
 
 #[inline(never)]
-fn run_host(spec: AppSpec<HostState>, state: HostState, args: Args) {
+fn run_host(spec: AppSpec<HostState>, state: HostState, args: Args, srgb_blend: bool) {
     INITIAL.with(|slot| { assert!(slot.borrow().is_none()); *slot.borrow_mut() = Some(state); });
-    if args.snap_on_patch.is_some() { headless(spec, args); }
-    else if args.headless() { crate::tooling::headless(crate::App::new(spec), args); }
-    else { crate::window::run(crate::App::new(spec), args); }
+    if args.snap_on_patch.is_some() { headless(spec, args, srgb_blend); }
+    else if args.headless() { crate::tooling::headless(crate::App::new(spec).srgb_blend(srgb_blend), args); }
+    else { crate::window::run(crate::App::new(spec).srgb_blend(srgb_blend), args); }
 }
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -157,17 +164,20 @@ fn control_input(rt: &mut crate::Runtime<HostState>, command: &Value) {
 /// `{"id":1,"tap":"login"}`, `{"id":2,"scroll":[800,400,100]}`,
 /// `{"id":3,"pause":true}`, `{"id":4,"step":0.05}`, or `{"id":5,"quit":true}`.
 /// Every request and patch publishes a PNG + JSON tree, then a flushed completion marker.
-fn headless(spec: AppSpec<HostState>, args: Args) {
+fn headless(spec: AppSpec<HostState>, args: Args, srgb_blend: bool) {
     assert!(enabled(), "--snap-on-patch requires --hot (use scripts/rune-dev)");
     let size = args.size.unwrap_or(spec.size);
     let scale = args.scale.unwrap_or(2.0);
     let state = initial_state(&spec, args.scene.as_deref());
     let (wake, sleep) = std::sync::mpsc::channel();
     let mut rt = runtime_for(&spec, state, size, Env { system_dark: args.theme.as_deref() != Some("light"), scale }, Arc::new(move || { let _ = wake.send(()); }));
+    rt.set_srgb_blend(srgb_blend);
     let gpu = Gpu::new(Gpu::instance(), None);
-    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let target_format = if srgb_blend { OFFSCREEN_FORMAT.remove_srgb_suffix() } else { OFFSCREEN_FORMAT };
+    let mut renderer = Renderer::new(&gpu.device, target_format);
+    renderer.set_srgb_blend(srgb_blend);
     let (w, h) = ((size.0 * scale).round() as u32, (size.1 * scale).round() as u32);
-    let target = Offscreen::new(&gpu.device, w, h);
+    let target = Offscreen::with_format(&gpu.device, w, h, target_format);
     let png = args.snap_on_patch.as_ref().unwrap();
     let mut first = true;
     let mut paused = false;
@@ -208,6 +218,7 @@ fn headless(spec: AppSpec<HostState>, args: Args) {
         let generation = rt.hot.as_ref().unwrap().seen;
         if first || requested || before != generation {
             renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
+            renderer.prepare_surfaces(&gpu.device, &gpu.queue, &rt.surfaces, (w, h));
             renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (w, h));
             let mut enc = gpu.device.create_command_encoder(&Default::default());
             renderer.draw(&mut enc, &target.view, rt.clear_color());

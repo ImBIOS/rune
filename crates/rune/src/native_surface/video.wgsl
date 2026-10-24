@@ -15,6 +15,7 @@ struct Out { @builtin(position) pos: vec4<f32> };
 }
 fn linear(v: vec3<f32>) -> vec3<f32> {
     let x = clamp(v, vec3<f32>(0.0), vec3<f32>(1.0));
+    if u.color.z > 1.5 { return x; }
     if u.color.z < 0.5 { return select(pow((x + 0.055) / 1.055, vec3<f32>(2.4)), x / 12.92, x <= vec3<f32>(0.04045)); }
     return select(pow((x + 0.099) / 1.099, vec3<f32>(1.0 / 0.45)), x / 4.5, x < vec3<f32>(0.081));
 }

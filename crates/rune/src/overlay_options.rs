@@ -127,6 +127,7 @@ pub struct ConfiguredOverlay<T: 'static> {
     pub(crate) on_focus: Option<fn(&mut T, bool, &mut crate::Tx)>,
     pub(crate) compositor: Option<Box<dyn crate::compose::Compositor<T>>>,
     pub(crate) setup: Option<fn(&mut T, crate::Waker)>,
+    pub(crate) srgb_blend: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -138,6 +139,10 @@ pub struct OverlayCreated {
 
 impl<T: 'static> ConfiguredOverlay<T> {
     pub fn on_focus(mut self, f: fn(&mut T, bool, &mut crate::Tx)) -> Self { self.on_focus = Some(f); self }
+    /// Composite this overlay's translucent fills, blurs, shadows, images and video in sRGB
+    /// (gamma) space instead of linear light, matching CSS and Core Animation. Ignored with a
+    /// warning when a `Compositor` is set.
+    pub fn srgb_blend(mut self, enabled: bool) -> Self { self.srgb_blend = enabled; self }
     /// Called before each frame; true means state changed, not that another frame is due.
     /// Defaults to the app's poll when its state type matches this overlay's. Other state
     /// types have no inherited poll. Use `Tx::wake_after` for the next timed update;
@@ -168,7 +173,7 @@ impl<T: 'static> OverlaySpec<T> {
     }
 
     pub fn options(self, options: OverlayOptions) -> ConfiguredOverlay<T> {
-        ConfiguredOverlay { spec: self, options, on_key: None, on_created: None, poll: None, on_focus: None, compositor: None, setup: None }
+        ConfiguredOverlay { spec: self, options, on_key: None, on_created: None, poll: None, on_focus: None, compositor: None, setup: None, srgb_blend: false }
     }
 }
 

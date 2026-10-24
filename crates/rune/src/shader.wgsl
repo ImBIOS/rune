@@ -2,13 +2,15 @@
 // Gaussian rounded-rect shadows (kind 1), glyph-atlas text (kind 2), inset shadows (kind 3),
 // vertical-gradient rounded rects or borders (kind 4), stroke segments (kind 5) and filled
 // triangles (kind 6) for vector shapes, RGBA images (kind 7), and premultiplied layer composites
-// (kind 8), and dashed borders (kind 10). Scope-end records (kind 9) never reach this shader.
-// Every ordinary instance carries a
-// soft-edge clip. Output is premultiplied linear colour into an sRGB target (linear blending).
+// (kind 8), dashed borders (kind 10), and radial or angled linear gradients (kind 11).
+// Scope-end records (kind 9) never reach this shader. Every ordinary instance carries a
+// soft-edge clip. Output is premultiplied linear colour into an sRGB target (or sRGB into a
+// non-sRGB target when `srgb_blend` is enabled).
 
 struct Globals {
     viewport: vec2<f32>,
     pad: vec2<f32>,
+    flags: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -259,9 +261,19 @@ fn triangle(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>, aa: u32) -> 
     return cov;
 }
 
+fn srgb_encode(x: vec3<f32>) -> vec3<f32> {
+    let v = clamp(x, vec3<f32>(0.0), vec3<f32>(1.0));
+    return select(1.055 * pow(v, vec3<f32>(1.0 / 2.4)) - 0.055, v * 12.92, v <= vec3<f32>(0.0031308));
+}
+
 /// One image texel, premultiplied (the atlas holds straight alpha) so filtering doesn't darken edges.
 fn image_texel(t: vec2<i32>, premultiplied: bool) -> vec4<f32> {
     let c = textureLoad(images, t, 0);
+    if (g.flags.x > 0.5) {
+        if (c.a <= 0.0) { return vec4<f32>(0.0); }
+        let lin = select(c.rgb, c.rgb / c.a, premultiplied);
+        return vec4<f32>(srgb_encode(lin) * c.a, c.a);
+    }
     if premultiplied { return c; }
     return vec4<f32>(c.rgb * c.a, c.a);
 }
@@ -356,7 +368,31 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         col = i.fill * shadow(i.p - center, half, sigma, corner);
     } else if (kind > 6.5) {
         let d = sd_rounded(i.p - center, half, i.radii);
-        if (kind > 9.5) {
+        if (kind > 10.5) {
+            // Radial (`uv.z > 0`) or angled linear (`uv.z == 0`) gradient stop segment from
+            // `fill` at t0 (`params.x`) to `border` at t1 (`params.w`); `+ 2.0` marks an open
+            // interior stop boundary so adjacent segments partition the quad without overlap.
+            let soft = max(i.params.z, 0.5);
+            let cov = clamp(0.5 - d / (soft * 2.0), 0.0, 1.0);
+            let t0_raw = i.params.x;
+            let t1_raw = i.params.w;
+            let lower_open = t0_raw >= 1.5;
+            let upper_open = t1_raw >= 1.5;
+            let t0 = select(t0_raw, t0_raw - 2.0, lower_open);
+            let t1 = select(t1_raw, t1_raw - 2.0, upper_open);
+            var t: f32;
+            if (i.uv.z > 0.0) {
+                t = length((i.p - i.rect.xy - i.uv.xy) / i.uv.zw);
+            } else {
+                t = 0.5 + dot(i.p - center, i.uv.xy);
+            }
+            if ((lower_open && t < t0) || (upper_open && t >= t1)) {
+                col = vec4<f32>(0.0);
+            } else {
+                let u = select(clamp((t - t0) / (t1 - t0), 0.0, 1.0), select(0.0, 1.0, t >= t0), t1 <= t0 + 1e-6);
+                col = mix(i.fill, i.border, u) * cov;
+            }
+        } else if (kind > 9.5) {
             // Dashed border: kind 0's ring, colour running from `fill` (top) to `border`
             // (bottom), masked by the dash pattern in `uv.xyz` along the ring's centre line.
             let soft = max(i.params.z, 0.5);

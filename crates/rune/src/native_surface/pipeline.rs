@@ -72,6 +72,7 @@ pub struct SurfaceRenderer {
     sampler: wgpu::Sampler,
     cache: HashMap<usize, Arc<Imported>>,
     draws: Vec<Prepared>,
+    srgb_blend: bool,
     #[cfg(target_os = "macos")]
     importer: Option<macos::Importer>,
 }
@@ -150,9 +151,14 @@ impl SurfaceRenderer {
             sampler,
             cache: HashMap::new(),
             draws: Vec::new(),
+            srgb_blend: false,
             #[cfg(target_os = "macos")]
             importer: None,
         }
+    }
+
+    pub fn set_srgb_blend(&mut self, enabled: bool) {
+        self.srgb_blend = enabled;
     }
 
     fn pipeline(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, format: wgpu::TextureFormat, blend: Blend) -> wgpu::RenderPipeline {
@@ -260,7 +266,7 @@ impl SurfaceRenderer {
                         Format::Nv12Full => 2.0,
                     },
                     if f.color.matrix == Matrix::Bt709 { 1.0 } else { 0.0 },
-                    if f.color.transfer == Transfer::Srgb { 0.0 } else { 1.0 },
+                    if self.srgb_blend { 2.0 } else if f.color.transfer == Transfer::Srgb { 0.0 } else { 1.0 },
                     d.opacity,
                 ],
                 sampling: [if exact { 1.0 } else { 0.0 }, f.size[0] as f32, f.size[1] as f32, if mirrored { 1.0 } else { 0.0 }],

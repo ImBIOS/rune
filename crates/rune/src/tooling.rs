@@ -1172,6 +1172,12 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         return;
     }
     let mut comp = app.compositor.take();
+    let srgb_blend = if comp.is_some() && app.srgb_blend {
+        eprintln!("rune: srgb_blend is ignored when a compositor is set");
+        false
+    } else {
+        app.srgb_blend
+    };
     // Snapshots and scripts run in parallel; they open the panel only when asked to.
     #[cfg(all(feature = "dev", debug_assertions))]
     let dev = app.dev.take().filter(|_| std::env::var_os("RUNE_DEV_PANEL").is_some());
@@ -1211,6 +1217,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     rt.on_focus = on_focus;
     rt.transparent = transparent;
     rt.fit_height = fit_height;
+    rt.set_srgb_blend(srgb_blend);
     // Only limits the app set: the canvas opens at any size, below the default minimum too.
     let limits = (app_options.min_size.or(spec.min_size).unwrap_or((0.0, 0.0)), app_options.max_size);
     if fit_height {
@@ -1228,13 +1235,20 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let t0 = Instant::now();
     let features = comp.as_ref().map_or(wgpu::Features::empty(), |c| c.features());
     let gpu = Gpu::try_with_features(Gpu::instance(), None, features).unwrap_or_else(|e| die(&e));
-    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let target_format = if srgb_blend { OFFSCREEN_FORMAT.remove_srgb_suffix() } else { OFFSCREEN_FORMAT };
+    let mut renderer = Renderer::new(&gpu.device, target_format);
+    renderer.set_srgb_blend(srgb_blend);
     let (wp, hp) = ((size.0 * scale).round() as u32, (size.1 * scale).round() as u32);
-    let target = Offscreen::new(&gpu.device, wp, hp);
+    let target = Offscreen::with_format(&gpu.device, wp, hp, target_format);
     let mut readback = crate::record::Readback::new(&gpu.device, &target, crate::record::DEPTH);
-    let alpha = transparent.then(|| crate::surface_alpha::AlphaSurface::new(&gpu.device, OFFSCREEN_FORMAT, (wp, hp)));
-    let mut overlay = (args.keys.is_some() || args.pointer)
-        .then(|| (crate::keycaps::Overlay::new(size, scale, args.keys, args.keys_theme, args.pointer), Renderer::new(&gpu.device, OFFSCREEN_FORMAT)));
+    let alpha = transparent.then(|| crate::surface_alpha::AlphaSurface::new(&gpu.device, target_format, (wp, hp)));
+    let mut overlay = (args.keys.is_some() || args.pointer).then(|| {
+        let mut ov = crate::keycaps::Overlay::new(size, scale, args.keys, args.keys_theme, args.pointer);
+        ov.set_srgb_blend(srgb_blend);
+        let mut ui = Renderer::new(&gpu.device, target_format);
+        ui.set_srgb_blend(srgb_blend);
+        (ov, ui)
+    });
     let init_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let mut trace = args.trace.as_ref().map(|p| Trace::open(p, size, fps, scale));
@@ -1377,7 +1391,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
                 queue: &gpu.queue,
                 encoder: &mut enc,
                 target: view,
-                format: OFFSCREEN_FORMAT,
+                format: target_format,
                 size: (wp, hp),
                 dt: step,
                 update_ms,

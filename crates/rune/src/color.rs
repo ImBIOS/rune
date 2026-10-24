@@ -51,6 +51,12 @@ impl Color {
         [self.r * a, self.g * a, self.b * a, a]
     }
 
+    /// Premultiplied sRGB-encoded RGBA, for gamma-space (`srgb_blend`) targets.
+    pub fn premul_srgb(self, opacity: f32) -> [f32; 4] {
+        let a = self.a * opacity;
+        [srgb_encode(self.r) * a, srgb_encode(self.g) * a, srgb_encode(self.b) * a, a]
+    }
+
     pub fn luminance(self) -> f32 {
         0.2126 * self.r + 0.7152 * self.g + 0.0722 * self.b
     }

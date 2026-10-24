@@ -621,6 +621,12 @@ impl<S: 'static> Host<S> {
         let comp = app.compositor.take();
         let on_focus = app.on_focus;
         let chrome = app.chrome;
+        let srgb_blend = if comp.is_some() && app.srgb_blend {
+            eprintln!("rune: srgb_blend is ignored when a compositor is set");
+            false
+        } else {
+            app.srgb_blend
+        };
         #[cfg(all(feature = "dev", debug_assertions))]
         let dev = app.dev.take();
         let fit_height = app.fit_content_height;
@@ -641,6 +647,7 @@ impl<S: 'static> Host<S> {
             args.size = None;
         }
         rt.on_focus = on_focus;
+        rt.set_srgb_blend(srgb_blend);
         rt.set_system_reduced_motion(crate::preferences::reduced_motion());
         rt.set_full_keyboard_access(crate::preferences::full_keyboard_access());
         rt.trace_channels = args.trace.as_ref().map(|_| Default::default());
@@ -713,13 +720,24 @@ pub(crate) fn wall_wake_deadline<S>(rt: &Runtime<S>) -> Option<Instant> {
     rt.wall_start?.checked_add(Duration::try_from_secs_f64(rt.wake_deadline()?).ok()?)
 }
 
-/// A vsynced sRGB configuration for the surface, and the first alpha mode it supports that
-/// composites translucent pixels.
-pub(crate) fn surface_config(surface: &wgpu::Surface, adapter: &wgpu::Adapter, (width, height): (u32, u32))
+/// A vsynced sRGB (or non-sRGB when `srgb_blend` is set) configuration for the surface, and the
+/// first alpha mode it supports that composites translucent pixels.
+pub(crate) fn surface_config(surface: &wgpu::Surface, adapter: &wgpu::Adapter, (width, height): (u32, u32), srgb_blend: bool)
     -> Option<(wgpu::SurfaceConfiguration, Option<wgpu::CompositeAlphaMode>)> {
     let mut config = surface.get_default_config(adapter, width.max(1), height.max(1))?;
     let caps = surface.get_capabilities(adapter);
-    config.format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(config.format);
+    let srgb = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(config.format);
+    config.format = if srgb_blend {
+        let non_srgb = srgb.remove_srgb_suffix();
+        if caps.formats.contains(&non_srgb) {
+            non_srgb
+        } else {
+            config.view_formats = vec![non_srgb];
+            srgb
+        }
+    } else {
+        srgb
+    };
     config.present_mode = wgpu::PresentMode::AutoVsync;
     config.desired_maximum_frame_latency = 2;
     let translucent = [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::PostMultiplied, wgpu::CompositeAlphaMode::Inherit]
@@ -1489,7 +1507,7 @@ impl<S: 'static> Host<S> {
         };
         let adapter = &gpu.as_ref().or(self.gpu.as_ref().map(|g| &g.0)).unwrap().adapter;
         let phys = window.inner_size();
-        let (mut config, translucent) = surface_config(&surface, adapter, (phys.width, phys.height))
+        let (mut config, translucent) = surface_config(&surface, adapter, (phys.width, phys.height), self.rt.srgb_blend())
             .ok_or("the GPU adapter can't present to this window")?;
         if self.options.transparent {
             config.alpha_mode = translucent.unwrap_or_else(|| {
@@ -1498,23 +1516,27 @@ impl<S: 'static> Host<S> {
             });
             self.rt.transparent = config.alpha_mode != wgpu::CompositeAlphaMode::Opaque;
         }
+        let target_format = if self.rt.srgb_blend() { config.format.remove_srgb_suffix() } else { config.format };
         if let Some(gpu) = gpu {
-            let renderer = Renderer::new(&gpu.device, config.format);
-            self.gpu = Some((gpu, renderer, config.format));
+            let mut renderer = Renderer::new(&gpu.device, target_format);
+            renderer.set_srgb_blend(self.rt.srgb_blend());
+            self.gpu = Some((gpu, renderer, target_format));
         }
         let (gpu, renderer, format) = self.gpu.as_mut().unwrap();
-        if *format != config.format {
-            *renderer = Renderer::new(&gpu.device, config.format);
-            *format = config.format;
+        if *format != target_format {
+            *renderer = Renderer::new(&gpu.device, target_format);
+            renderer.set_srgb_blend(self.rt.srgb_blend());
+            *format = target_format;
             self.rt.text.atlas.invalidate();
             self.rt.images.invalidate();
         }
+        renderer.set_srgb_blend(self.rt.srgb_blend());
         surface.configure(&gpu.device, &config);
         // Metal's PostMultiplied mode only makes CAMetalLayer non-opaque; Core Animation
         // still composites premultiplied pixels. Other backends follow wgpu's straight-alpha contract.
         let alpha = (self.options.transparent && config.alpha_mode == wgpu::CompositeAlphaMode::PostMultiplied
             && gpu.adapter.get_info().backend != wgpu::Backend::Metal)
-            .then(|| crate::surface_alpha::AlphaSurface::new(&gpu.device, config.format, (config.width, config.height)));
+            .then(|| crate::surface_alpha::AlphaSurface::new(&gpu.device, target_format, (config.width, config.height)));
         let scale = window.scale_factor() as f32;
         let dark = match self.args.theme.as_deref() {
             Some("light") => false,
@@ -1657,7 +1679,11 @@ impl<S: 'static> Host<S> {
                 LogicalSize::new(a[2] as f64, a[3] as f64),
             );
         }
-        let view = frame.texture.create_view(&Default::default());
+        let target_format = if rt.srgb_blend() { l.config.format.remove_srgb_suffix() } else { l.config.format };
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: (target_format != l.config.format).then_some(target_format),
+            ..Default::default()
+        });
         renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
         renderer.prepare_surfaces(&gpu.device, &gpu.queue, &rt.surfaces, (l.config.width, l.config.height));
         let mut enc = gpu.device.create_command_encoder(&Default::default());
@@ -1668,7 +1694,7 @@ impl<S: 'static> Host<S> {
                 queue: &gpu.queue,
                 encoder: &mut enc,
                 target,
-                format: l.config.format,
+                format: target_format,
                 size: (l.config.width, l.config.height),
                 dt,
                 update_ms,

@@ -22,14 +22,14 @@ use rune_motion::{
 use taffy::prelude::*;
 use taffy::TraversePartialTree;
 
-use crate::color::{Color, over};
+use crate::color::{Color, over, srgb_encode};
 use crate::edit::{EditOutcome, Ime, KeyEvent};
 use crate::el::{Align, Drag, DragEndFn, DragFn, DragOutFn, El, GrowthSpec, InputSpec, Phase, PointerPress, PressFn, SecondaryFn, ScrollSpec, Shell, TextSpec, Tx, Visual};
 use crate::growth::{GrowTrack, SUBSTEP};
 // Half-open, like overlays, NSPointInRect and PtInRect: a shared edge belongs to one side.
 use crate::overlay_options::contains;
 use crate::flight::{TextFlight, transformed};
-use crate::render::{Instance, KIND_DASHED, KIND_GLYPH, KIND_GRADIENT, KIND_IMAGE, KIND_INSET, KIND_RECT, KIND_SEGMENT, KIND_SHADOW, KIND_TRIANGLE, NO_CLIP};
+use crate::render::{Instance, KIND_DASHED, KIND_GLYPH, KIND_GRADIENT, KIND_IMAGE, KIND_INSET, KIND_RADIAL, KIND_RECT, KIND_SEGMENT, KIND_SHADOW, KIND_TRIANGLE, NO_CLIP};
 use crate::shape::{LineCap, Op, Shape};
 use crate::text::{Deco, GlyphQuad, Ink, TextSystem, layout_height};
 use crate::tok::motion;
@@ -91,6 +91,16 @@ const P_OUTLINE: Prop<Color> = Prop::custom(77, PropClass::Color);
 const P_BORDER_BOTTOM: Prop<Color> = Prop::custom(78, PropClass::Color);
 /// `El::press_scale`'s presented factor, multiplied into the element's own scale.
 const P_PRESS_SCALE: Prop<f32> = Prop::custom(79, PropClass::Scale);
+const P_RADIAL: [Prop<Color>; 8] = [
+    Prop::custom(80, PropClass::Color),
+    Prop::custom(81, PropClass::Color),
+    Prop::custom(82, PropClass::Color),
+    Prop::custom(83, PropClass::Color),
+    Prop::custom(84, PropClass::Color),
+    Prop::custom(85, PropClass::Color),
+    Prop::custom(86, PropClass::Color),
+    Prop::custom(87, PropClass::Color),
+];
 /// Seconds a changed `El::scale` holds still before its text rasterizes at that size.
 const STATIC_SCALE_SETTLE: f64 = 0.1;
 /// How far (points, per axis) a click may travel and still pair into a double click.
@@ -466,6 +476,8 @@ pub struct Runtime<S: 'static> {
     pub viewport: (f32, f32),
     /// Transparent native surfaces/headless exports clear to transparent black.
     pub transparent: bool,
+    /// Opt-in gamma-space (sRGB) blending for translucent fills, shadows and blurs.
+    pub(crate) srgb_blend: bool,
     pub(crate) native_overlay: bool,
     /// Animation time (seconds, scaled by the time scale).
     pub t: f64,
@@ -733,6 +745,7 @@ impl<S: 'static> Runtime<S> {
             env,
             viewport,
             transparent: false,
+            srgb_blend: false,
             native_overlay: false,
             t: 0.0,
             reduced_motion: false,
@@ -1100,7 +1113,7 @@ impl<S: 'static> Runtime<S> {
             let end = [start[0] + vx * 0.05, start[1] + vy * 0.05];
             let shape = Shape::new().line(start, end, 2.0, LineCap::Round, Color::WHITE);
             let scale = self.env.scale;
-            push_shape(&mut self.instances, &shape, [0.0; 2], [scale; 2], scale, 0.8, NO_CLIP, [0.0; 4]);
+            push_shape(&mut self.instances, &shape, [0.0; 2], [scale; 2], scale, 0.8, self.srgb_blend, NO_CLIP, [0.0; 4]);
         }
         if self.track_marks { self.marks.resize(self.instances.len(), 0); }
     }
@@ -1587,9 +1600,10 @@ impl<S: 'static> Runtime<S> {
         self.glyph_scratch.clear();
         self.text.glyphs_for_layout(layout, scale, [rect.x * scale, rect.y * scale], false, &mut self.glyph_scratch);
         let color = spec.color;
+        let srgb = self.srgb_blend;
         // Colour glyphs live in the image atlas, which may move them before the flight ends.
         let glyphs = self.glyph_scratch.iter().filter(|q| q.color == 0 && q.rect[1] < clip[3] * scale && q.rect[1] + q.rect[3] > clip[1] * scale)
-            .map(|q| glyph(q, color.premul(1.0), glyph_gamma(color, scale), clip.map(|v| v * scale), [0.0; 4])).collect();
+            .map(|q| glyph(q, premul(color, 1.0, srgb), glyph_gamma(color, scale, srgb), clip.map(|v| v * scale), [0.0; 4])).collect();
         self.flights.push(TextFlight::new(source, target, rect, clip, glyphs, scale, self.t));
     }
 
@@ -1597,6 +1611,7 @@ impl<S: 'static> Runtime<S> {
     /// The overlay only writes draw instances, never layout or app state.
     fn draw_text_flights(&mut self) -> bool {
         let s = self.env.scale;
+        let srgb = self.srgb_blend;
         let now = self.t;
         let reduced = self.reduced_motion;
         let viewport = [0.0, 0.0, self.viewport.0, self.viewport.1];
@@ -1648,7 +1663,7 @@ impl<S: 'static> Runtime<S> {
             self.glyph_scratch.clear();
             self.text.glyphs_for_layout(layout, s, [target.x * s, target.y * s], false, &mut self.glyph_scratch);
             for q in &self.glyph_scratch {
-                let Some(q) = glyph_or_image(q, &self.text, &mut self.images, spec.color.premul(1.0), glyph_gamma(spec.color, s), NO_CLIP, [0.0; 4]) else { continue };
+                let Some(q) = glyph_or_image(q, &self.text, &mut self.images, premul(spec.color, 1.0, srgb), glyph_gamma(spec.color, s, srgb), NO_CLIP, [0.0; 4]) else { continue };
                 self.instances.push(transformed(q, target, current, s, target_alpha,
                     if reduced { actual_clip } else { clip }, if reduced { final_fade } else { fade }));
             }
@@ -2624,6 +2639,11 @@ impl<S: 'static> Runtime<S> {
             if let Some(g) = vis.gradient {
                 self.set_or_anim(id, P_GRADIENT[0], g[0], spring_c, instant);
                 self.set_or_anim(id, P_GRADIENT[1], g[1], spring_c, instant);
+            }
+            if let Some(rg) = &vis.radial {
+                for (k, &(_, c)) in rg.stops.iter().take(P_RADIAL.len()).enumerate() {
+                    self.set_or_anim(id, P_RADIAL[k], c, spring_c, instant);
+                }
             }
             if let Some(ol) = vis.outline {
                 self.set_or_anim(id, P_OUTLINE, ol.color, spring_c, instant);
@@ -3830,6 +3850,7 @@ impl<S: 'static> Runtime<S> {
                 // Disabled styling is distributed to each authored paint leaf at build time.
                 // Keep this local to emission: it neither propagates to children nor opens scopes.
                 let o = o * n.vis.paint_alpha;
+                let srgb = self.srgb_blend;
                 // Subtree blur runs once after rasterization, never on each primitive as well.
                 let blur = 0.0;
                 let k_px = sc * s;
@@ -3851,8 +3872,8 @@ impl<S: 'static> Runtime<S> {
                         self.instances.push(Instance {
                             rect,
                             radii: sradii,
-                            fill: if ring { [0.0; 4] } else { c.premul(o) },
-                            border: if ring { c.premul(o) } else { [0.0; 4] },
+                            fill: if ring { [0.0; 4] } else { premul(c, o, srgb) },
+                            border: if ring { premul(c, o, srgb) } else { [0.0; 4] },
                             params: [if ring { sp } else { 0.0 }, KIND_RECT, 0.0, 1.0],
                             uv: [0.0; 4],
                             clip,
@@ -3863,7 +3884,7 @@ impl<S: 'static> Runtime<S> {
                     self.instances.push(Instance {
                         rect,
                         radii: sradii,
-                        fill: c.premul(o),
+                        fill: premul(c, o, srgb),
                         border: [0.0; 4],
                         params: [0.0, KIND_SHADOW, ((sh.blur + blur) * s * 0.5).max(0.5), 1.0],
                         uv: [0.0; 4],
@@ -3873,32 +3894,32 @@ impl<S: 'static> Runtime<S> {
                 }
                 let mut overlay = [0.0f32; 4];
                 if let Some(c) = n.focus.highlight && self.highlight_visible(i) {
-                    overlay = over(c.premul(1.0), overlay);
+                    overlay = over(premul(c, 1.0, srgb), overlay);
                 }
                 if n.vis.hover.a > 0.0 || self.scene.store().is_animating(n.id, P_HOVER_C) {
                     let hov_v = self.scene.get(n.id, P_HOVER).unwrap_or(0.0).clamp(0.0, 1.0);
                     if hov_v > 0.0 {
-                        overlay = over(self.color(n.id, P_HOVER_C, n.vis.hover).premul(hov_v), overlay);
+                        overlay = over(premul(self.color(n.id, P_HOVER_C, n.vis.hover), hov_v, srgb), overlay);
                     }
                 }
                 if n.vis.press.a > 0.0 || self.scene.store().is_animating(n.id, P_PRESS_C) {
                     let prs_v = self.scene.get(n.id, P_PRESS).unwrap_or(0.0).clamp(0.0, 1.0);
                     if prs_v > 0.0 {
-                        overlay = over(self.color(n.id, P_PRESS_C, n.vis.press).premul(prs_v), overlay);
+                        overlay = over(premul(self.color(n.id, P_PRESS_C, n.vis.press), prs_v, srgb), overlay);
                     }
                 }
-                let base = self.color(n.id, P_FILL, n.vis.fill).premul(1.0);
-                let layered = n.vis.gradient.is_some() || n.vis.surface.is_some();
+                let base = premul(self.color(n.id, P_FILL, n.vis.fill), 1.0, srgb);
+                let layered = n.vis.gradient.is_some() || n.vis.radial.is_some() || n.vis.surface.is_some();
                 let fill = if layered { base } else { over(overlay, base) }.map(|c| c * o);
                 let bw = n.vis.border_width * sc * s;
-                let border = if bw > 0.0 { self.color(n.id, P_BORDER, n.vis.border).premul(o) } else { [0.0; 4] };
+                let border = if bw > 0.0 { premul(self.color(n.id, P_BORDER, n.vis.border), o, srgb) } else { [0.0; 4] };
                 // A gradient border draws as KIND_GRADIENT with a width: `border` top, `uv` bottom.
                 // After a switch back to `border`, it stays a gradient until both stops meet.
                 let store = self.scene.store();
                 let springing = store.has(n.id, P_BORDER_BOTTOM)
                     && (store.is_animating(n.id, P_BORDER_BOTTOM) || store.is_animating(n.id, P_BORDER));
                 let border_bottom = (bw > 0.0 && (n.vis.border_bottom.is_some() || springing))
-                    .then(|| self.color(n.id, P_BORDER_BOTTOM, n.vis.border_bottom.unwrap_or(n.vis.border)).premul(o))
+                    .then(|| premul(self.color(n.id, P_BORDER_BOTTOM, n.vis.border_bottom.unwrap_or(n.vis.border)), o, srgb))
                     .filter(|b| n.vis.border_bottom.is_some() || *b != border);
                 let (border_kind, border_uv) = border_bottom.map_or((KIND_RECT, [0.0; 4]), |b| (KIND_GRADIENT, b));
                 let border_a = border[3].max(border_uv[3]);
@@ -3930,8 +3951,8 @@ impl<S: 'static> Runtime<S> {
                         });
                     }
                     let g = n.vis.gradient.unwrap_or_default();
-                    let top = self.color(n.id, P_GRADIENT[0], g[0]).premul(o);
-                    let bottom = self.color(n.id, P_GRADIENT[1], g[1]).premul(o);
+                    let top = premul(self.color(n.id, P_GRADIENT[0], g[0]), o, srgb);
+                    let bottom = premul(self.color(n.id, P_GRADIENT[1], g[1]), o, srgb);
                     if top[3] > 0.0005 || bottom[3] > 0.0005 {
                         self.instances.push(Instance {
                             rect: [r[0], r[1], w, h],
@@ -3943,6 +3964,78 @@ impl<S: 'static> Runtime<S> {
                             clip,
                             fade: crate::render::pack_fade(fade, clip, clip),
                         });
+                    }
+                    if let Some(rg) = &n.vis.radial {
+                        let segs = rg.stops.len().saturating_sub(1);
+                        let rmax = radii[0].max(radii[1]).max(radii[2]).max(radii[3]).min(w * 0.5).min(h * 0.5);
+                        let pad = 1.0 + blur * s * 2.0;
+                        for seg in 0..segs {
+                            let c0 = rg.stops[seg].1;
+                            let c0 = if seg < P_RADIAL.len() { self.color(n.id, P_RADIAL[seg], c0) } else { c0 };
+                            let c1 = rg.stops[seg + 1].1;
+                            let c1 = if seg + 1 < P_RADIAL.len() { self.color(n.id, P_RADIAL[seg + 1], c1) } else { c1 };
+                            let c0 = premul(c0, o, srgb);
+                            let c1 = premul(c1, o, srgb);
+                            if c0[3] <= 0.0005 && c1[3] <= 0.0005 {
+                                continue;
+                            }
+                            let t0_val = rg.stops[seg].0;
+                            let t1_val = rg.stops[seg + 1].0;
+                            let (seg_rect, seg_radii, uv) = match rg.geometry {
+                                crate::el::GradientGeometry::Radial { center, radius } => {
+                                    let cx = center[0] * w;
+                                    let cy = center[1] * h;
+                                    let rx = (radius[0] * k_px).max(1e-3);
+                                    let ry = (radius[1] * k_px).max(1e-3);
+                                    if seg + 1 < segs {
+                                        let mut lx0 = (cx - t1_val * rx - pad).floor().max(0.0);
+                                        let mut ly0 = (cy - t1_val * ry - pad).floor().max(0.0);
+                                        let mut lx1 = (cx + t1_val * rx + pad).ceil().min(w);
+                                        let mut ly1 = (cy + t1_val * ry + pad).ceil().min(h);
+                                        if rmax > 0.0 {
+                                            if lx0 < rmax && (ly0 < rmax || ly1 > h - rmax) { lx0 = 0.0; }
+                                            if lx1 > w - rmax && (ly0 < rmax || ly1 > h - rmax) { lx1 = w; }
+                                            if ly0 < rmax && (lx0 < rmax || lx1 > w - rmax) { ly0 = 0.0; }
+                                            if ly1 > h - rmax && (lx0 < rmax || lx1 > w - rmax) { ly1 = h; }
+                                            if lx0 == 0.0 && (ly0 == 0.0 || ly1 == h) { lx1 = lx1.max((2.0 * rmax).min(w)); }
+                                            if lx1 == w && (ly0 == 0.0 || ly1 == h) { lx0 = lx0.min((w - 2.0 * rmax).max(0.0)); }
+                                            if ly0 == 0.0 && (lx0 == 0.0 || lx1 == w) { ly1 = ly1.max((2.0 * rmax).min(h)); }
+                                            if ly1 == h && (lx0 == 0.0 || lx1 == w) { ly0 = ly0.min((h - 2.0 * rmax).max(0.0)); }
+                                        }
+                                        if lx1 <= lx0 || ly1 <= ly0 {
+                                            continue;
+                                        }
+                                        let br = [
+                                            if lx0 == 0.0 && ly0 == 0.0 { radii[0] } else { 0.0 },
+                                            if lx1 == w && ly0 == 0.0 { radii[1] } else { 0.0 },
+                                            if lx1 == w && ly1 == h { radii[2] } else { 0.0 },
+                                            if lx0 == 0.0 && ly1 == h { radii[3] } else { 0.0 },
+                                        ];
+                                        ([r[0] + lx0, r[1] + ly0, lx1 - lx0, ly1 - ly0], br, [cx - lx0, cy - ly0, rx, ry])
+                                    } else {
+                                        ([r[0], r[1], w, h], radii, [cx, cy, rx, ry])
+                                    }
+                                }
+                                crate::el::GradientGeometry::Linear { angle } => {
+                                    let (sin, cos) = angle.sin_cos();
+                                    let (dx, dy) = (sin, -cos);
+                                    let span = (dx.abs() * w + dy.abs() * h).max(1e-3);
+                                    ([r[0], r[1], w, h], radii, [dx / span, dy / span, 0.0, 0.0])
+                                }
+                            };
+                            let t0 = t0_val + if seg > 0 { 2.0 } else { 0.0 };
+                            let t1 = t1_val + if seg + 1 < segs { 2.0 } else { 0.0 };
+                            self.instances.push(Instance {
+                                rect: seg_rect,
+                                radii: seg_radii,
+                                fill: c0,
+                                border: c1,
+                                params: [t0, KIND_RADIAL, blur * s, t1],
+                                uv,
+                                clip,
+                                fade: crate::render::pack_fade(fade, clip, clip),
+                            });
+                        }
                     }
                     if let Some((surface, fit)) = &n.vis.surface {
                         if let Some(pulled) = surface.pull_video(video_clock, &self.live_wake) {
@@ -3991,7 +4084,7 @@ impl<S: 'static> Runtime<S> {
                     self.instances.push(Instance {
                         rect: [r[0], r[1], w, h],
                         radii,
-                        fill: c.premul(o),
+                        fill: premul(c, o, srgb),
                         border: [0.0; 4],
                         params: [sh.spread * k_px, KIND_INSET, if sh.blur > 0.0 { (sh.blur * s * 0.5).max(0.5) } else { 0.0 }, 1.0],
                         uv: [sh.x * k_px, sh.y * k_px, 0.0, 0.0],
@@ -4008,7 +4101,7 @@ impl<S: 'static> Runtime<S> {
                             rect: [r[0] - g, r[1] - g, w + 2.0 * g, h + 2.0 * g],
                             radii: radii.map(|v| if v > 0.0 { v + g } else { 0.0 }),
                             fill: [0.0; 4],
-                            border: c.premul(o),
+                            border: premul(c, o, srgb),
                             params: [ol.width * k_px, KIND_RECT, 0.0, 1.0],
                             uv: [0.0; 4],
                             clip,
@@ -4021,7 +4114,7 @@ impl<S: 'static> Runtime<S> {
                         Some([vw, vh]) => [w / vw, h / vh],
                         None => [k_px, k_px],
                     };
-                    push_shape(&mut self.instances, shape, [r[0], r[1]], k, k_px, o, clip, fade);
+                    push_shape(&mut self.instances, shape, [r[0], r[1]], k, k_px, o, srgb, clip, fade);
                 }
                 if let Some(pixels) = &n.vis.pixels {
                     let (rect, crop) = crate::pixels::fit(n.vis.pixels_fit, [r[0], r[1], w, h], pixels.size());
@@ -4051,7 +4144,7 @@ impl<S: 'static> Runtime<S> {
                         self.instances.push(Instance {
                             rect: q.rect,
                             radii: [0.0; 4],
-                            fill: color.premul(o),
+                            fill: premul(color, o, srgb),
                             border: [0.0; 4],
                             params: [if matches!(n.looping.map(|l| l.kind), Some(rune_motion::LoopKind::Rotation)) { loop_value.unwrap_or(0.0) } else { 0.0 }, KIND_GLYPH, 0.0, 1.0],
                             uv: [q.uv[0], q.uv[1], 0.0, 0.0],
@@ -4094,9 +4187,9 @@ impl<S: 'static> Runtime<S> {
                             let pl = self.text.layout_rich(&inp.placeholder, &[], spec.style, s, Some(w / tk.max(1e-4)));
                             self.glyph_scratch.clear();
                             self.text.glyphs_for_layout_scaled(&pl, s, origin, raster, false, &mut self.glyph_scratch);
-                            let pc = inp.placeholder_color.premul(o);
+                            let pc = premul(inp.placeholder_color, o, srgb);
                             for q in &self.glyph_scratch {
-                                self.instances.extend(glyph_or_image(q, &self.text, &mut self.images, pc, glyph_gamma(inp.placeholder_color, s), clip, fade)
+                                self.instances.extend(glyph_or_image(q, &self.text, &mut self.images, pc, glyph_gamma(inp.placeholder_color, s, srgb), clip, fade)
                                     .map(|g| zoom_glyph(g, origin, tk / raster)));
                             }
                         }
@@ -4110,7 +4203,7 @@ impl<S: 'static> Runtime<S> {
                                 for (bb, _) in sel.geometry(layout) {
                                     self.instances.push(rect_inst(
                                         [origin[0] + bb.x0 as f32 * tk, origin[1] + bb.y0 as f32 * tk, (bb.x1 - bb.x0) as f32 * tk, (bb.y1 - bb.y0) as f32 * tk],
-                                        inp.selection.premul(o),
+                                        premul(inp.selection, o, srgb),
                                         2.0 * s * tk,
                                         clip,
                                         fade,
@@ -4128,7 +4221,7 @@ impl<S: 'static> Runtime<S> {
                                 for (bb, _) in sel.geometry(layout) {
                                     self.instances.push(rect_inst(
                                         [origin[0] + bb.x0 as f32 * tk, origin[1] + bb.y1 as f32 * tk - s, (bb.x1 - bb.x0) as f32 * tk, s],
-                                        color.premul(o),
+                                        premul(color, o, srgb),
                                         0.0,
                                         clip,
                                         fade,
@@ -4149,7 +4242,7 @@ impl<S: 'static> Runtime<S> {
                         }
                     }
                     for d in &self.deco_scratch {
-                        let c = d.color.premul(o);
+                        let c = premul(d.color, o, srgb);
                         self.instances.push(rect_inst(d.rect, c, d.radius, clip, fade));
                     }
                     let reveal = self.reveals.get(&n.id).filter(|st| !st.words.is_empty() && spec.advance_in.is_none());
@@ -4164,8 +4257,8 @@ impl<S: 'static> Runtime<S> {
                         self.text.glyphs_for_layout_scaled(layout, s, origin, raster, reveal.is_some() || !link_fx.is_empty(), &mut self.glyph_scratch);
                         tk / raster
                     };
-                    let gamma = glyph_gamma(color, s);
-                    let base = color.premul(o);
+                    let gamma = glyph_gamma(color, s, srgb);
+                    let base = premul(color, o, srgb);
                     for q in &self.glyph_scratch {
                         if self.flights.iter().any(|f| f.lands(&n.path, n.key.as_deref())) { continue; }
                         let (y0, y1) = if zoom == 1.0 { (q.rect[1], q.rect[1] + q.rect[3]) } else {
@@ -4179,12 +4272,12 @@ impl<S: 'static> Runtime<S> {
                         if q.ink > 0
                             && let Some(c) = spec.spans.get(q.ink as usize - 1).and_then(|sp| sp.color)
                         {
-                            f = c.premul(o);
-                            gm = glyph_gamma(c, s);
+                            f = premul(c, o, srgb);
+                            gm = glyph_gamma(c, s, srgb);
                         }
                         if !link_fx.is_empty() && let Some(c) = link_fx.glyph_color(q.byte) {
-                            f = c.premul(o);
-                            gm = glyph_gamma(c, s);
+                            f = premul(c, o, srgb);
+                            gm = glyph_gamma(c, s, srgb);
                         }
                         if let Some(st) = reveal {
                             let a = Self::reveal_alpha(st, q.byte, now);
@@ -4198,7 +4291,7 @@ impl<S: 'static> Runtime<S> {
                         glyph_count += 1;
                     }
                     if let (Some(c), Some(inp)) = (caret, &n.input) {
-                        self.instances.push(rect_inst(c, inp.caret.premul(o), 0.0, clip, fade));
+                        self.instances.push(rect_inst(c, premul(inp.caret, o, srgb), 0.0, clip, fade));
                     }
                 }
             }
@@ -4478,11 +4571,25 @@ impl<S: 'static> Runtime<S> {
         (c.a > 0.5).then(|| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b < 0.25)
     }
 
+    /// Enable or disable gamma-space (sRGB) blending for translucent fills, shadows, blurs,
+    /// images and video.
+    pub(crate) fn set_srgb_blend(&mut self, enabled: bool) {
+        self.srgb_blend = enabled;
+    }
+
+    pub fn srgb_blend(&self) -> bool {
+        self.srgb_blend
+    }
+
     pub fn clear_color(&self) -> [f32; 4] {
         if self.transparent { return [0.0; 4]; }
         self.nodes.first().map_or([0.0, 0.0, 0.0, 1.0], |n| {
             let c = self.color(n.id, P_FILL, n.vis.fill);
-            [c.r, c.g, c.b, 1.0]
+            if self.srgb_blend {
+                [srgb_encode(c.r), srgb_encode(c.g), srgb_encode(c.b), 1.0]
+            } else {
+                [c.r, c.g, c.b, 1.0]
+            }
         })
     }
 }
@@ -4719,12 +4826,12 @@ fn anchor_position(a: &crate::el::Anchor, t: [f32; 4], size: (f32, f32), vp: (f3
 /// Instances for a vector shape whose origin sits at `origin` (device px), with `k` device px per
 /// coordinate unit on each axis and `k_px` device px per point for stroke widths.
 #[allow(clippy::too_many_arguments)]
-fn push_shape(out: &mut Vec<Instance>, shape: &Shape, origin: [f32; 2], k: [f32; 2], k_px: f32, opacity: f32, clip: [f32; 4], fade: [f32; 4]) {
+fn push_shape(out: &mut Vec<Instance>, shape: &Shape, origin: [f32; 2], k: [f32; 2], k_px: f32, opacity: f32, srgb: bool, clip: [f32; 4], fade: [f32; 4]) {
     let at = |p: [f32; 2]| [origin[0] + p[0] * k[0], origin[1] + p[1] * k[1]];
     for op in &shape.ops {
         match op {
             Op::Stroke { points, closed, width, cap, color } => {
-                let fill = color.premul(opacity);
+                let fill = premul(*color, opacity, srgb);
                 if fill[3] <= 0.0005 {
                     continue;
                 }
@@ -4748,7 +4855,7 @@ fn push_shape(out: &mut Vec<Instance>, shape: &Shape, origin: [f32; 2], k: [f32;
                 }
             }
             Op::Fill { points, color } => {
-                let fill = color.premul(opacity);
+                let fill = premul(*color, opacity, srgb);
                 if fill[3] <= 0.0005 {
                     continue;
                 }
@@ -4785,8 +4892,12 @@ fn rect_inst(rect: [f32; 4], fill: [f32; 4], radius: f32, clip: [f32; 4], fade: 
     }
 }
 
-fn glyph_gamma(c: Color, scale: f32) -> f32 {
-    crate::text::glyph_coverage_exponent(c, scale)
+fn premul(c: Color, opacity: f32, srgb: bool) -> [f32; 4] {
+    if srgb { c.premul_srgb(opacity) } else { c.premul(opacity) }
+}
+
+fn glyph_gamma(c: Color, scale: f32, srgb: bool) -> f32 {
+    if srgb { 1.0 } else { crate::text::glyph_coverage_exponent(c, scale) }
 }
 
 /// Slots the ends hosts reported since the last frame into this frame's actions. One OS drag

@@ -291,6 +291,10 @@ pub struct InputSpec {
 /// A CSS-style box shadow. Outer shadows draw behind the element; `inset` ones draw inside its
 /// shape, over the fill. A zero-blur, zero-offset outer shadow with a spread is a ring outside
 /// the border box (drawn as a ring, so translucent fills don't show it through).
+///
+/// `blur` is the CSS `box-shadow` blur radius (`blur = 2σ`, so Gaussian standard deviation
+/// `σ = blur * 0.5`). `CALayer.shadowRadius` and Sketch / Figma shadow blur specify `r ≈ σ`,
+/// so pass `blur = 2.0 * r` to match a `CALayer` shadow radius (whereas [`El::blur`] takes `σ` directly).
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct Shadow {
     pub x: f32,
@@ -299,6 +303,63 @@ pub struct Shadow {
     pub spread: f32,
     pub color: Color,
     pub inset: bool,
+}
+
+/// Radius of [`El::radial_gradient`], in points: a circle (`f32`) or an `[rx, ry]` ellipse.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RadialRadius(pub [f32; 2]);
+
+impl From<f32> for RadialRadius {
+    fn from(r: f32) -> Self {
+        Self([r, r])
+    }
+}
+
+impl From<[f32; 2]> for RadialRadius {
+    fn from(r: [f32; 2]) -> Self {
+        Self(r)
+    }
+}
+
+impl From<(f32, f32)> for RadialRadius {
+    fn from((rx, ry): (f32, f32)) -> Self {
+        Self([rx, ry])
+    }
+}
+
+pub(crate) const MAX_GRADIENT_STOPS: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum GradientGeometry {
+    Radial { center: [f32; 2], radius: [f32; 2] },
+    Linear { angle: f32 },
+}
+
+/// A radial or angled linear gradient painted over an element's fill.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RadialGradient {
+    pub(crate) geometry: GradientGeometry,
+    /// Sorted `(t, color)` stops in `0.0..=1.0`, capped at [`MAX_GRADIENT_STOPS`].
+    pub(crate) stops: Vec<(f32, Color)>,
+}
+
+fn normalize_gradient_stops(geometry: GradientGeometry, raw: &[(f32, Color)]) -> Option<RadialGradient> {
+    let mut stops: Vec<(f32, Color)> = raw
+        .iter()
+        .copied()
+        .filter(|(t, _)| t.is_finite())
+        .map(|(t, c)| (t.clamp(0.0, 1.0), c))
+        .collect();
+    if stops.is_empty() {
+        return None;
+    }
+    stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+    stops.truncate(MAX_GRADIENT_STOPS);
+    if stops.len() == 1 {
+        let c = stops[0].1;
+        stops = vec![(0.0, c), (1.0, c)];
+    }
+    Some(RadialGradient { geometry, stops })
 }
 
 /// A ring drawn `offset` points outside the border box, `width` points wide (CSS `outline`).
@@ -471,6 +532,8 @@ pub struct Visual {
     pub icon: Option<(&'static Icon, Color)>,
     /// Vertical linear gradient (top, bottom) painted over the fill, under hover/press overlays.
     pub gradient: Option<[Color; 2]>,
+    /// Radial or angled linear gradient painted over the fill, under hover/press overlays.
+    pub(crate) radial: Option<RadialGradient>,
     pub outline: Option<Outline>,
     /// Vector strokes and fills in the element's own points, over the fill.
     pub shape: Option<Rc<Shape>>,
@@ -515,6 +578,7 @@ impl Default for Visual {
             clip_radius: None,
             icon: None,
             gradient: None,
+            radial: None,
             outline: None,
             shape: None,
             pixels: None,
@@ -1341,11 +1405,14 @@ impl El {
         self.vis.border_dash_phase = if phase.is_finite() { phase } else { 0.0 };
         self
     }
+    /// An outer drop shadow offset by `(0, y)` with CSS `blur` radius (`blur = 2σ`; pass
+    /// `2.0 * r` to match `CALayer.shadowRadius`).
     pub fn shadow(mut self, y: f32, blur: f32, color: Color) -> Self {
         self.vis.shadows.push(Shadow { y, blur, color, ..Shadow::default() });
         self
     }
     /// A full box shadow (offset, spread, inset), e.g. one layer of a CSS elevation token.
+    /// `s.blur` follows CSS (`blur = 2σ`, twice `CALayer.shadowRadius`).
     pub fn box_shadow(mut self, s: Shadow) -> Self {
         self.vis.shadows.push(s);
         self
@@ -1353,6 +1420,41 @@ impl El {
     /// A vertical gradient from `top` to `bottom` painted over the fill (CSS `linear-gradient(180deg, ..)`).
     pub fn gradient(mut self, top: Color, bottom: Color) -> Self {
         self.vis.gradient = Some([top, bottom]);
+        self
+    }
+    /// A radial gradient painted over the fill and clipped to the element's rounded corners.
+    ///
+    /// `center` is in normalized element coordinates (`[0.5, 0.5]` is the centre, `[0.0, 0.0]` top-left).
+    /// `radius` is in points (`f32` for a circle or `[rx, ry]` for an ellipse).
+    /// `stops` are up to 8 `(position, color)` pairs along `0.0..=1.0` from `center` (`0.0`) to
+    /// `radius` (`1.0`). Stop colours spring in Oklab when changed and interpolate in premultiplied
+    /// colour across the quad, matching [`El::gradient`].
+    pub fn radial_gradient(
+        mut self,
+        center: [f32; 2],
+        radius: impl Into<RadialRadius>,
+        stops: impl AsRef<[(f32, Color)]>,
+    ) -> Self {
+        let [rx, ry] = radius.into().0;
+        let valid = center[0].is_finite()
+            && center[1].is_finite()
+            && rx.is_finite()
+            && ry.is_finite()
+            && rx > 0.0
+            && ry > 0.0;
+        self.vis.radial = valid
+            .then(|| normalize_gradient_stops(GradientGeometry::Radial { center, radius: [rx, ry] }, stops.as_ref()))
+            .flatten();
+        self
+    }
+    /// A linear gradient at `angle` radians (CSS convention: `0.0` is bottom-to-top, `PI / 2` is
+    /// left-to-right, `PI` is top-to-bottom like [`El::gradient`]) with up to 8 stops, painted over
+    /// the fill.
+    pub fn linear_gradient(mut self, angle: f32, stops: impl AsRef<[(f32, Color)]>) -> Self {
+        self.vis.radial = angle
+            .is_finite()
+            .then(|| normalize_gradient_stops(GradientGeometry::Linear { angle }, stops.as_ref()))
+            .flatten();
         self
     }
     /// Paints `shape` (strokes and fills in this element's points, origin top-left) over the

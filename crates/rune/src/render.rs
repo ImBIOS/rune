@@ -35,6 +35,10 @@ pub const KIND_LAYER_END: f32 = 9.0;
 /// alone (the fill is its own instance, showing through the gaps). Its colour runs from `fill`
 /// at the top to `border` at the bottom; `uv.xyz` = dash, gap, phase in device pixels.
 pub const KIND_DASHED: f32 = 10.0;
+/// A radial (`uv.z > 0`: `uv` = `[cx, cy, rx, ry]` in rect-local device pixels) or angled linear
+/// (`uv.z == 0`: `uv.xy` = gradient vector per device pixel) stop segment from `fill` at `t0`
+/// (`params.x`) to `border` at `t1` (`params.w`), with `+ 2.0` marking an open interior stop edge.
+pub const KIND_RADIAL: f32 = 11.0;
 
 /// How a scope combines its contents. The completed scope still uses source-over on its parent
 /// unless that parent also requests additive composition.
@@ -250,11 +254,19 @@ pub struct Renderer {
     springs: Option<crate::gpu_springs::Bindings>,
     spring_instances: usize,
     layers: layers::Layers,
+    srgb_blend: bool,
 }
 
 impl Renderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Renderer {
         Self::create(device, format, None)
+    }
+
+    pub fn set_srgb_blend(&mut self, enabled: bool) {
+        self.srgb_blend = enabled;
+        if let Some(s) = &mut self.surfaces {
+            s.set_srgb_blend(enabled);
+        }
     }
 
     /// Opt-in retained geometry. IDs map instances to shared translation/opacity nodes.
@@ -315,7 +327,7 @@ impl Renderer {
         });
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: u64::from(device.limits().min_uniform_buffer_offset_alignment) + 16,
+            size: u64::from(device.limits().min_uniform_buffer_offset_alignment).max(32) + 16,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -355,6 +367,7 @@ impl Renderer {
             springs,
             spring_instances,
             layers: Default::default(),
+            srgb_blend: false,
         }
     }
 
@@ -454,7 +467,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&image_view) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: target.unwrap_or(globals),
-                    offset: if target.is_some() { 0 } else { u64::from(device.limits().min_uniform_buffer_offset_alignment) },
+                    offset: if target.is_some() { 0 } else { u64::from(device.limits().min_uniform_buffer_offset_alignment).max(32) },
                     size: std::num::NonZeroU64::new(16),
                 }) },
             ],
@@ -575,6 +588,8 @@ impl Renderer {
         // Geometry uploads must preserve a presentation timestamp already latched this frame.
         let g: [f32; 2] = [viewport.0 as f32, viewport.1 as f32];
         queue.write_buffer(&self.globals, 0, bytemuck::cast_slice(&g));
+        let flags: [f32; 4] = [if self.srgb_blend { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0];
+        queue.write_buffer(&self.globals, 16, bytemuck::cast_slice(&flags));
         self.count = instances.len() as u32;
         self.image_batches.clear();
         let (mut start, mut page) = (0, 0);
@@ -594,10 +609,12 @@ impl Renderer {
     pub fn prepare_surfaces(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, draws: &[crate::native_surface::SurfaceDraw], viewport: (u32,u32)) {
         if !draws.is_empty() && self.surfaces.is_none() {
             let mut surfaces = crate::native_surface::SurfaceRenderer::new(device, self.format);
+            surfaces.set_srgb_blend(self.srgb_blend);
             for (format, _) in &self.extra { surfaces.add_format(device, *format); }
             self.surfaces = Some(surfaces);
         }
         if let Some(s) = &mut self.surfaces {
+            s.set_srgb_blend(self.srgb_blend);
             if self.layers.additive.is_some() { s.add_plus_lighter(device, layers::FORMAT); }
             s.prepare(device,queue,draws,viewport);
         }
