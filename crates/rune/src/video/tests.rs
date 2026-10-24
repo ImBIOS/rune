@@ -363,3 +363,93 @@ mod headless {
         near(centre(&render(&gpu, &mut rt)), [0, 255, 0], "looped");
     }
 }
+
+#[test]
+fn requests_carry_headers_without_printing_their_values() {
+    let request = Player::request("https://example.com/media/a.m4a")
+        .header("Authorization", "Bearer secret-token")
+        .header("authorization", "Bearer newer-token")
+        .header("X-Board", "1");
+    let printed = format!("{request:?}");
+    assert!(printed.contains("Authorization") || printed.contains("authorization"), "{printed}");
+    assert!(!printed.contains("token"), "header values never print: {printed}");
+    let a = request.audio();
+    assert!(a.is_audio());
+    assert_eq!(a.source(), &MediaSource::Url("https://example.com/media/a.m4a".into()));
+    assert_eq!(a.shared.headers, [("authorization".to_string(), "Bearer newer-token".to_string()), ("X-Board".into(), "1".into())]);
+    assert!(!format!("{a:?}").contains("token"));
+    let v = Player::request("https://example.com/media/a.mp4").header("Authorization", "Bearer t").video();
+    assert!(!v.is_audio() && v.muted());
+}
+
+/// A local HTTP server that serves `body` (with byte ranges) only to requests carrying
+/// `Authorization: Bearer let-me-in`, and counts the ones that didn't.
+#[cfg(target_os = "macos")]
+fn serve_with_auth(body: Vec<u8>, content_type: &'static str) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}/media/clip", listener.local_addr().unwrap().port());
+    let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = refused.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { return };
+            let (body, count) = (body.clone(), count.clone());
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut stream = stream;
+                loop {
+                    let (mut authorized, mut range) = (false, None);
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 { return; }
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) == 0 { return; }
+                        let header = header.trim_end();
+                        if header.is_empty() { break; }
+                        let (name, value) = header.split_once(':').unwrap_or((header, ""));
+                        match name.trim().to_ascii_lowercase().as_str() {
+                            "authorization" => authorized = value.trim() == "Bearer let-me-in",
+                            "range" => range = value.trim().strip_prefix("bytes=").map(str::to_owned),
+                            _ => {}
+                        }
+                    }
+                    if !authorized {
+                        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+                        continue;
+                    }
+                    let len = body.len();
+                    let (start, end) = range.and_then(|r| {
+                        let (a, b) = r.split_once('-')?;
+                        let a: usize = a.parse().ok()?;
+                        let b = b.parse::<usize>().map_or(len - 1, |b| b.min(len - 1));
+                        Some((a, b))
+                    }).unwrap_or((0, len - 1));
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Type: {content_type}\r\nAccept-Ranges: bytes\r\nContent-Range: bytes {start}-{end}/{len}\r\nContent-Length: {}\r\n\r\n",
+                        end + 1 - start
+                    );
+                    if stream.write_all(head.as_bytes()).and_then(|_| stream.write_all(&body[start..=end])).is_err() { return; }
+                }
+            });
+        }
+    });
+    (url, refused)
+}
+
+/// AVFoundation sends the request's headers: the clip opens from a server that refuses
+/// anything without them, and fails without them.
+#[cfg(target_os = "macos")]
+#[test]
+fn headless_audio_opens_with_request_headers() {
+    let (url, refused) = serve_with_auth(std::fs::read(sound("silence.wav")).unwrap(), "audio/wav");
+    let a = Player::request(format!("{url}.wav")).header("Authorization", "Bearer let-me-in").audio();
+    assert_eq!(a.state(), PlayerState::Ready);
+    assert!((a.duration().unwrap() - 0.5).abs() < 0.01, "{:?}", a.duration());
+    assert_eq!(refused.load(std::sync::atomic::Ordering::SeqCst), 0, "every request carried the header");
+
+    let without = Player::audio(format!("{url}-2.wav"));
+    assert!(matches!(without.state(), PlayerState::Failed(_)), "{:?}", without.state());
+    assert!(refused.load(std::sync::atomic::Ordering::SeqCst) > 0);
+}

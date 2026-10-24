@@ -18,11 +18,11 @@ pub(super) fn created(shared: &Arc<Shared>) {
 
 pub(super) fn enable() {}
 
-pub(super) fn probe(_: &mut Native, _: &MediaSource, kind: Kind) -> Result<Meta, String> {
+pub(super) fn probe(_: &mut Native, _: &MediaSource, _: &[(String, String)], kind: Kind) -> Result<Meta, String> {
     Err(unsupported(kind))
 }
 
-pub(super) fn decode(_: &mut Native, _: &MediaSource, _: f64) -> Result<ByteFrame, String> {
+pub(super) fn decode(_: &mut Native, _: &MediaSource, _: &[(String, String)], _: f64) -> Result<ByteFrame, String> {
     Err(unsupported(Kind::Video))
 }
 

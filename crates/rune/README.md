@@ -893,6 +893,9 @@ tap.play();
   or `Failed(message)`, plus `time()`, `duration()`, `natural_size()`.
 - **Sound**: `Player::file`/`url`/`new` make videos, which start muted. `Player::audio` makes
   an audio clip, which starts unmuted. `set_muted` changes either.
+- **Request headers**: `Player::request(url).header("Authorization", token).audio()` (or
+  `.video()`) opens a URL with HTTP headers on every request, for media behind
+  authentication. Header values never appear in `Debug` output.
 - **Video frames** (macOS): AVPlayer + AVPlayerItemVideoOutput hand IOSurface-backed buffers
   to the element's `NativeSurface` for each display-link target, without a copy. Frames are
   requested only while a drawn video plays or seeks; paused, ended and off-screen videos draw

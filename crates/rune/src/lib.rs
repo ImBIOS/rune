@@ -155,7 +155,7 @@ pub use runtime::{Cx, Env, Runtime, TitlebarAction, Waker, commit_generation};
 pub use shape::{LineCap, Path, Shape};
 pub use native_surface::{NativeSurface, SurfaceFit};
 pub use system_material::{MAX_NATIVE_MATERIALS, SystemMaterial};
-pub use video::{MediaSource, Player, PlayerState, Video};
+pub use video::{MediaRequest, MediaSource, Player, PlayerState, Video};
 pub use text::{Icon, Link, LinkPaint, Span, TextCase};
 pub use theme::Theme;
 pub use tok::{Family, OpticalSize, TextStyle};

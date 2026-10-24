@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Player::request(url).header(name, value)` opens media with HTTP request headers.** A
+  `MediaRequest` builds a player with `.audio()` or `.video()`, and every request for the clip
+  (load, poster, playback) sends its headers, so media behind `Authorization` streams instead
+  of being downloaded first. On macOS it uses AVURLAsset's HTTP header option. Header values
+  never print in `Debug`. `MediaSource` is unchanged.
 - **`Transition::allow_small_scale()` lets a small glyph scale from below 0.9.** Transitions
   keep scale within [0.9, 1.1] by default. `Transition::scale(0.6).allow_small_scale()` lowers
   the floor to `SMALL_SCALE_FLOOR` (0.5), for an icon in a button that barely moves at 0.9;

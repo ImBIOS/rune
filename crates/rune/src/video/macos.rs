@@ -198,8 +198,19 @@ fn url(source: &MediaSource) -> Result<Retained<NSURL>, String> {
     }
 }
 
-fn asset(source: &MediaSource) -> Result<Retained<AVURLAsset>, String> {
-    Ok(unsafe { AVURLAsset::URLAssetWithURL_options(&*url(source)?, None) })
+fn asset(source: &MediaSource, headers: &[(String, String)]) -> Result<Retained<AVURLAsset>, String> {
+    let url = url(source)?;
+    if headers.is_empty() {
+        return Ok(unsafe { AVURLAsset::URLAssetWithURL_options(&url, None) });
+    }
+    let names: Vec<_> = headers.iter().map(|(name, _)| NSString::from_str(name)).collect();
+    let values: Vec<_> = headers.iter().map(|(_, value)| NSString::from_str(value)).collect();
+    let fields = NSDictionary::from_slices(&names.iter().map(|n| &**n).collect::<Vec<_>>(), &values.iter().map(|v| &**v).collect::<Vec<_>>());
+    // Long-standing and widely used, though missing from AVFoundation's headers.
+    let key = NSString::from_str("AVURLAssetHTTPHeaderFieldsKey");
+    let fields: &AnyObject = &fields;
+    let options = NSDictionary::<NSString, AnyObject>::from_slices(&[&*key], &[fields]);
+    Ok(unsafe { AVURLAsset::URLAssetWithURL_options(&url, Some(&options)) })
 }
 
 fn seconds(t: CMTime) -> f64 {
@@ -294,8 +305,8 @@ fn bgra(image: &CGImage) -> Result<ByteFrame, String> {
     })
 }
 
-pub(super) fn probe(native: &mut Native, source: &MediaSource, kind: Kind) -> Result<Meta, String> {
-    let asset = asset(source)?;
+pub(super) fn probe(native: &mut Native, source: &MediaSource, headers: &[(String, String)], kind: Kind) -> Result<Meta, String> {
+    let asset = asset(source, headers)?;
     let meta = meta(&asset, kind)?;
     if kind == Kind::Video {
         native.generator = Some(generator(&asset, None));
@@ -303,9 +314,9 @@ pub(super) fn probe(native: &mut Native, source: &MediaSource, kind: Kind) -> Re
     Ok(meta)
 }
 
-pub(super) fn decode(native: &mut Native, source: &MediaSource, at: f64) -> Result<ByteFrame, String> {
+pub(super) fn decode(native: &mut Native, source: &MediaSource, headers: &[(String, String)], at: f64) -> Result<ByteFrame, String> {
     if native.generator.is_none() {
-        let asset = asset(source)?;
+        let asset = asset(source, headers)?;
         native.generator = Some(generator(&asset, None));
     }
     image(native.generator.as_ref().unwrap(), at)
@@ -315,7 +326,7 @@ pub(super) fn decode(native: &mut Native, source: &MediaSource, at: f64) -> Resu
 /// stores it (as the player hands it out) with how that turns upright.
 #[cfg(test)]
 pub(crate) fn test_frames(source: &MediaSource, at: f64) -> Result<(ByteFrame, ByteFrame, Orient), String> {
-    let asset = asset(source)?;
+    let asset = asset(source, &[])?;
     let raw = generator(&asset, None);
     unsafe { raw.setAppliesPreferredTrackTransform(false) };
     Ok((image(&generator(&asset, None), at)?, image(&raw, at)?, orient(&asset)))
@@ -333,7 +344,7 @@ fn request_poster(shared: &Arc<Shared>, native: &mut Native, at: f64) {
     slot.busy = true;
     let posters = native.posters.clone();
     let clip = Arc::downgrade(shared);
-    let (source, kind) = (shared.source.clone(), shared.kind);
+    let (source, headers, kind) = (shared.source.clone(), shared.headers.clone(), shared.kind);
     std::thread::Builder::new()
         .name("rune-media-poster".into())
         .spawn(move || {
@@ -355,7 +366,7 @@ fn request_poster(shared: &Arc<Shared>, native: &mut Native, at: f64) {
                 // AVFoundation autoreleases; this thread has no pool of its own.
                 let result = objc2_video::rc::autoreleasepool(|_| {
                     if opened.is_none() {
-                        let asset = asset(&source)?;
+                        let asset = asset(&source, &headers)?;
                         let meta = meta(&asset, kind)?;
                         opened = Some(((kind == Kind::Video).then(|| generator(&asset, Some(POSTER_MAX))), meta));
                     }
@@ -377,8 +388,8 @@ fn request_poster(shared: &Arc<Shared>, native: &mut Native, at: f64) {
         .expect("spawn media poster worker");
 }
 
-fn create_player(source: &MediaSource, kind: Kind, mtm: MainThreadMarker) -> Result<Objects, String> {
-    let asset = asset(source)?;
+fn create_player(source: &MediaSource, headers: &[(String, String)], kind: Kind, mtm: MainThreadMarker) -> Result<Objects, String> {
+    let asset = asset(source, headers)?;
     let item = unsafe { AVPlayerItem::playerItemWithAsset(&asset, mtm) };
     let output = (kind == Kind::Video).then(|| {
         let empty = CFDictionary::<CFString, CFType>::from_slices(&[], &[]);
@@ -546,7 +557,7 @@ fn ensure_player(shared: &Arc<Shared>, native: &mut Native, c: &mut Control, mtm
     if native.player.is_some() {
         return true;
     }
-    match create_player(&shared.source, shared.kind, mtm) {
+    match create_player(&shared.source, &shared.headers, shared.kind, mtm) {
         Ok(objects) => {
             // A fresh player starts at the handle's position.
             if c.time > 0.0 && c.seek.is_none() {
