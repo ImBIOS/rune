@@ -2364,8 +2364,7 @@ impl<S: 'static> Measurement<'_, S> {
 
     fn window_tree(&mut self, el: &mut El, parent: &str, index: usize, scroll: Option<(&str, bool)>, settle: bool, force_all: bool) {
         el.expand_memo();
-        let seg = el.key.clone().unwrap_or_else(|| format!("#{index}"));
-        let path = if parent.is_empty() { seg } else { format!("{parent}/{seg}") };
+        let path = node_path(parent, el.key.as_deref(), index);
         if let Some(estimate) = el.virtual_estimate {
             assert!(el.growth.is_some(), "`.virtualize(..)` at {path:?} needs `.growth(GrowthSpec)` on the same element");
             let (scroll_path, sticky) = scroll.expect("virtual stack must be the direct child of a scroll viewport");
@@ -5615,6 +5614,17 @@ fn pixel_ratio(pixels: &crate::Pixels) -> f32 {
     if w > 0 && h > 0 { w as f32 / h as f32 } else { 0.0 }
 }
 
+// Build the owned path directly, without cloning a key or formatting an index into a
+// temporary segment first. Measurement and flattening must use the same identity rule.
+fn node_path(parent: &str, key: Option<&str>, index: usize) -> String {
+    match (parent.is_empty(), key) {
+        (true, Some(key)) => key.to_owned(),
+        (true, None) => format!("#{index}"),
+        (false, Some(key)) => format!("{parent}/{key}"),
+        (false, None) => format!("{parent}/#{index}"),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn flatten(
     el: El,
@@ -5632,8 +5642,7 @@ fn flatten(
 ) -> taffy::NodeId {
     let mut el = el;
     el.expand_memo();
-    let seg = el.key.clone().unwrap_or_else(|| format!("#{index}"));
-    let path = if parent_path.is_empty() { seg } else { format!("{parent_path}/{seg}") };
+    let path = node_path(parent_path, el.key.as_deref(), index);
     let own_motion = el.motion;
     let motion = own_motion.unwrap_or(motion);
     let me = nodes.len();
