@@ -254,8 +254,8 @@ const HELP: &str = "usage: <app> [window]
   --at SECONDS          virtual time of the snapshot/tree (default: end of frames or script)
   --size WxH            viewport in points      --scale N   device scale (default 2)
   --theme dark|light    system appearance
-  --script FILE.json    timestamped input (move/down/up/tap/drag, keys, {\"focus\":false}); a
-                        key with \"repeat\":true is a held key's auto-repeat; an object adds \"displays\" and \"pointer\" for place() (rune-placed, --tree)
+  --script FILE.json    timestamped input (move/down/up/tap/drag, keys, {\"focus\":false},
+                        menu-pick with an \"id\", menu-cancel); a key with \"repeat\":true is a held key's auto-repeat; an object adds \"displays\" and \"pointer\" for place() (rune-placed, --tree)
   --frames N --fps 60 --start S --out DIR     dump N frames from S seconds
   --strip out.png --crop x,y,w,h --every K    tile dumped frames into one image
                         (repeat --crop to stack several regions per frame; --cols N per row)
@@ -383,6 +383,8 @@ enum Pos {
 enum Kind {
     Focus(bool),
     Menu(String),
+    /// Answers the open pop-up menu: an item's id, or `None` to dismiss it.
+    PopupMenu(Option<String>),
     Physical(crate::PhysicalInput),
     Shortcut(crate::Shortcut),
     Move,
@@ -564,6 +566,11 @@ fn parse_script(list: Value) -> Vec<Ev> {
                 }
             }
             "fling" => out.push(Ev { t, kind: Kind::Fling(e["v"].as_f64().unwrap_or(0.0) as f32), pos }),
+            "menu-pick" => {
+                let id = e["id"].as_str().unwrap_or_else(|| die("menu-pick needs an \"id\""));
+                out.push(Ev { t, kind: Kind::PopupMenu(Some(id.into())), pos: Pos::Rel(0.0, 0.0) });
+            }
+            "menu-cancel" => out.push(Ev { t, kind: Kind::PopupMenu(None), pos: Pos::Rel(0.0, 0.0) }),
             other => die(&format!("unknown event type {other}")),
         }
     }
@@ -583,6 +590,14 @@ fn a_physical_chord_releases_its_modifiers_after_the_key() {
     let expected = [key(Space, mods, true), key(Space, mods, false), PhysicalInput::Modifiers(Mods::default()),
         key(F5, Mods::default(), true), key(F5, Mods::default(), false)];
     assert_eq!(format!("{kinds:?}"), format!("{expected:?}"));
+}
+
+#[cfg(test)]
+#[test]
+fn script_events_answer_a_pop_up_menu() {
+    let kinds: Vec<_> = parse_script(json!([{"t": 0.2, "type": "menu-cancel"}, {"t": 0.1, "type": "menu-pick", "id": "dark"}]))
+        .into_iter().map(|e| match e.kind { Kind::PopupMenu(picked) => picked, _ => panic!("parsed as another event") }).collect();
+    assert_eq!(kinds, [Some("dark".to_owned()), None]);
 }
 
 #[cfg(test)]
@@ -902,7 +917,7 @@ pub(crate) fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
             v
         })
         .collect();
-    json!({
+    let mut tree = json!({
         "t": real_t,
         "anim_t": rt.t,
         "viewport": [rt.viewport.0, rt.viewport.1],
@@ -913,7 +928,9 @@ pub(crate) fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
         "animating": rt.animating,
         "elements": els,
         "warnings": rt.key_warnings.as_deref().unwrap_or_default(),
-    })
+    });
+    if let Some(menu) = rt.popup_json() { tree["popupMenu"] = menu; }
+    tree
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1045,6 +1062,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     if script.first().is_some_and(|e| e.t <= 1e-9) {
         early_place = take_requests(&mut rt);
         rt.frame(0.0);
+        rt.open_popup_headless();
     }
 
     for k in 0..=last_frame {
@@ -1065,6 +1083,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
                 Kind::Focus(focused) => rt.window_focus(*focused),
                 Kind::Shortcut(shortcut) => shared.shortcuts.fire(shortcut).unwrap_or_else(|e| die(&format!("script shortcut: {e}"))),
                 Kind::Menu(item) => crate::native_menu::fire(&shared, item).unwrap_or_else(|e| die(&format!("script menu: {e}"))),
+                Kind::PopupMenu(picked) => rt.resolve_popup(picked.as_deref()).unwrap_or_else(|e| die(&format!("script pop-up menu: {e}"))),
                 Kind::Move => rt.pointer_move(x, y),
                 Kind::Down => {
                     last_down = (x, y);
@@ -1084,6 +1103,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         let requested_place = take_requests(&mut rt);
         let step = if k == 0 { 0.0 } else { dt };
         let mut animating = rt.frame(step);
+        rt.open_popup_headless();
         // Updates, poll and input handlers place too; the latest request this frame wins.
         if let Some(place) = shared.take_place().or(requested_place).or(early_place.take()) {
             let (display, frame) = desktop.place(&place, size);

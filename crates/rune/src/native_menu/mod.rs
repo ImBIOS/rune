@@ -10,6 +10,8 @@ mod macos;
 mod default_macos;
 #[cfg(target_os = "macos")]
 pub(crate) use default_macos::ensure as ensure_default_menu;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::set_key_equivalent;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Location { App, Named(String), Dock }

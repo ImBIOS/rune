@@ -33,6 +33,7 @@ pub struct Tx {
     pub(crate) wakes: Vec<std::time::Duration>,
     pub(crate) shell: Option<Shell>,
     pub(crate) trace: Option<TraceCalls>,
+    pub(crate) popups: Vec<crate::popup_menu::Call>,
 }
 
 #[derive(Clone, Debug, Default)]

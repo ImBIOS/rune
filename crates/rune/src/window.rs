@@ -464,6 +464,7 @@ struct Host<S: 'static> {
     shared: Arc<Shared<S>>,
     shortcuts: crate::shortcuts::Guard,
     menus: crate::native_menu::Guard<S>,
+    popup: crate::popup_menu::Presenter,
     rt: Runtime<S>,
     /// Before `win` and `gpu`: fields drop in order, and the trace waits for the window's last
     /// present times.
@@ -564,6 +565,7 @@ impl<S: 'static> Host<S> {
         let mut clipboard = crate::clipboard::Client::default();
         clipboard.connect(waker.clone());
         shared.connect(waker.clone());
+        let popup = crate::popup_menu::Presenter::new(waker.clone());
         let shortcuts = crate::shortcuts::Guard::attach(&shared, waker, false, wayland);
         let menus = crate::native_menu::Guard::attach(&shared, false);
         Host {
@@ -586,6 +588,7 @@ impl<S: 'static> Host<S> {
             shared,
             shortcuts,
             menus,
+            popup,
             rt,
             win: None,
             gpu: None,
@@ -989,9 +992,10 @@ impl<S: 'static> Host<S> {
     fn drain(&mut self, event_loop: &ActiveEventLoop, wake: bool) {
         let shown = self.win.as_ref().is_some_and(|w| w.visible);
         let clipboard = self.clipboard.receive(&mut self.rt);
+        let answered = self.popup.answer(&mut self.rt);
         self.shortcuts.drain();
         let requests = self.shared.take();
-        let changed = clipboard || !requests.updates.is_empty() || self.rt.drag_ends_pending();
+        let changed = clipboard || answered || !requests.updates.is_empty() || self.rt.drag_ends_pending();
         self.menus.drain();
         for f in requests.updates {
             self.rt.update(f);
@@ -1041,8 +1045,11 @@ impl<S: 'static> Host<S> {
         if changed && self.launcher() && let Some(w) = &self.win { w.window.request_redraw(); }
     }
 
-    /// Carries out what a handler or update asked with `Tx::close_window` / `Tx::quit`.
+    /// Carries out what a handler or update asked with `Tx::close_window` / `Tx::quit`, and
+    /// opens the pop-up menu it asked for.
     fn shell(&mut self, event_loop: &ActiveEventLoop) {
+        let window = self.win.as_ref().filter(|w| w.visible).map(|w| &w.window);
+        if self.popup.open(&mut self.rt, window) && let Some(w) = window { w.request_redraw(); }
         match self.rt.shell_request.take() {
             Some(Shell::Quit) => event_loop.exit(),
             Some(Shell::Close) => self.close(event_loop),

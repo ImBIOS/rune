@@ -243,6 +243,7 @@ pub(crate) struct Overlay<T: 'static> {
     shared: Arc<Shared<T>>,
     rt: Runtime<T>,
     clipboard: crate::clipboard::Client,
+    popup: crate::popup_menu::Presenter,
     compositor: Option<Box<dyn Compositor<T>>>,
     /// The non-activating panel holding winit's view (macOS), kept with the window. Declared
     /// before the window so the view goes back to it first.
@@ -298,6 +299,7 @@ impl<T: 'static> Overlay<T> {
             shared: shared.clone(),
             rt,
             clipboard: Default::default(),
+            popup: Default::default(),
             compositor,
             live: None,
             cursor: None,
@@ -891,6 +893,7 @@ impl<T: 'static> Overlay<T> {
         }
         self.rt.shell_request = None;
         self.clipboard.flush(&mut self.rt);
+        self.open_popup();
         // Even a transition that finished in this step needs its current pixels submitted.
         // A scheduling-only poll with no motion still preserves the prepared frame.
         if self.rt.stats.commits != commits || self.rt.animating || !self.idle {
@@ -915,6 +918,10 @@ impl<T: 'static> Overlay<T> {
     /// Applies requests from other threads: updates, edge, show and hide.
     fn sync(&mut self, event_loop: &ActiveEventLoop) {
         if self.clipboard.receive(&mut self.rt) { self.dirty = true; self.advance(); }
+        if self.popup.answer(&mut self.rt) {
+            self.dirty = true;
+            if !self.visible { self.advance(); }
+        }
         if self.rt.live_pending() || self.rt.drag_ends_pending() { self.dirty = true; }
         let requests = std::mem::take(&mut *self.shared.requests.lock().unwrap());
         if let Some(input) = requests.input { self.pending_input = Some(input); }
@@ -999,7 +1006,19 @@ impl<T: 'static> Overlay<T> {
     /// Draws a frame if one is due; true while it needs more (animating).
     fn draw(&mut self) -> bool {
         if !self.visible { return false; }
-        self.draw_frame(false)
+        let more = self.draw_frame(false);
+        self.open_popup();
+        more
+    }
+
+    /// Opens the pop-up menu a handler asked for over the overlay's panel. A hidden overlay
+    /// answers `None`, committed with its next frame.
+    fn open_popup(&mut self) {
+        let window = match self.live.as_ref().map(|l| &l.backing) {
+            Some(Backing::Window(w)) if self.visible => Some(w.clone()),
+            _ => None,
+        };
+        if self.popup.open(&mut self.rt, window.as_ref()) { self.dirty = true; }
     }
 
     fn draw_frame(&mut self, prewarm: bool) -> bool {
@@ -1339,6 +1358,7 @@ impl<T: 'static> PendingOverlay for Overlay<T> {
         // set_live_waker call replaces the wake lane and resets its subscriptions.
         self.rt.set_live_waker(wake.clone());
         self.clipboard.connect(wake.clone());
+        self.popup.connect(wake.clone());
         self.gpu_pool = gpu;
         *self.shared.wake.lock().unwrap() = Some(wake.clone());
         if let Some(setup) = self.setup.take() {

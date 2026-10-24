@@ -60,6 +60,8 @@ mod layout_diagnostics;
 mod focus;
 #[path = "physical_dispatch.rs"]
 mod physical_dispatch;
+#[path = "popup_dispatch.rs"]
+mod popup_dispatch;
 #[path = "scroll_bottom.rs"]
 mod scroll_bottom;
 #[path = "caret.rs"]
@@ -547,6 +549,10 @@ pub struct Runtime<S: 'static> {
     pub(crate) clipboard: Option<crate::clipboard::MemoryClipboard>,
     /// A handler or `update` asked to close the window or quit (the shell takes it).
     pub shell_request: Option<Shell>,
+    /// Pop-up menus asked for (`Tx::popup_menu`) and not yet answered, oldest first.
+    pub(crate) popups: std::collections::VecDeque<crate::popup_menu::Request>,
+    /// The first of `popups` is showing.
+    pub(crate) popup_open: bool,
     /// What `update` asked of the next commit.
     pending: Tx,
     pub animating: bool,
@@ -732,6 +738,8 @@ impl<S: 'static> Runtime<S> {
             clear_secret_request: false,
             clipboard: None,
             shell_request: None,
+            popups: Default::default(),
+            popup_open: false,
             pending: Tx::default(),
             animating: false,
             settled: false,
@@ -975,6 +983,7 @@ impl<S: 'static> Runtime<S> {
         }
         if let Some(copy) = tx.copy.take() { self.copy_request = Some(copy); }
         if std::mem::take(&mut tx.paste) { self.paste_request = Some(self.paste_target()); }
+        self.popups.extend(tx.popups.drain(..).filter_map(|call| call.take()));
         crate::clipboard::flush_memory(self);
     }
 
@@ -4142,6 +4151,7 @@ fn merge(tx: &mut Tx, one: Tx) {
     tx.scroll_bottom.extend(one.scroll_bottom);
     tx.wakes.extend(one.wakes);
     tx.text_flights.extend(one.text_flights);
+    tx.popups.extend(one.popups);
     if one.clear_secret && tx.copy.as_ref().is_some_and(crate::ClipboardWrite::is_secret) { tx.copy = None; }
     tx.clear_secret |= one.clear_secret;
     if one.copy.is_some() { tx.copy = one.copy; }

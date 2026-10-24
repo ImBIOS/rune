@@ -50,6 +50,8 @@ mod physical_input;
 pub use physical_input::PhysicalInput;
 mod native_menu;
 pub use native_menu::{MenuError, MenuItem};
+mod popup_menu;
+pub use popup_menu::{PopupAnchor, PopupItem, PopupMenu, PopupMenuError, popup_menu_supported};
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
 mod layer_shell;
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
