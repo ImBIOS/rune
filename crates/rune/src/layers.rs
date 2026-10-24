@@ -145,7 +145,7 @@ impl Renderer {
                 let grow = match i.params[1] {
                     KIND_GLYPH => 0.0,
                     KIND_SHADOW => i.params[2] * 3.0 + 1.0,
-                    KIND_RECT | KIND_GRADIENT => 1.0 + i.params[2] * 2.0,
+                    KIND_RECT | KIND_GRADIENT | KIND_DASHED => 1.0 + i.params[2] * 2.0,
                     _ => 1.0,
                 };
                 union(&mut self.layers.plan[at].bounds, [

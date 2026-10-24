@@ -108,6 +108,19 @@ pub fn seeded(seed: u64, count: usize) -> Scene {
     scene(&records)
 }
 
+/// `seeded`, with every primitive redrawn as a dashed border ring (kind 10). A separate corpus,
+/// so adding the kind left the canonical hashes of `seeded` alone.
+pub fn dashed(seed: u64, count: usize) -> Scene {
+    let mut scene = seeded(seed, count);
+    for p in &mut scene.primitives {
+        let b = |n: usize| (p.radii[n % 4] * 8.0 + p.rect[n % 4] * 4.0) as u32;
+        p.params = [0.5 + (b(0) % 8) as f32 * 0.25, 10.0, if b(1) % 4 == 0 { p.params[2] } else { 0.0 }, 1.0];
+        p.uv = [1.0 + (b(2) % 24) as f32 * 0.5, 1.0 + (b(3) % 16) as f32 * 0.5, (b(1) % 32) as f32 * 0.75 - 6.0, 0.0];
+        if b(0) % 3 == 0 { p.border = p.fill; }
+    }
+    scene
+}
+
 pub fn translate(scene: &mut Scene, x: f32, y: f32) {
     for p in &mut scene.primitives {
         p.rect[0] += x;

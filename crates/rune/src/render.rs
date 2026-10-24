@@ -31,6 +31,10 @@ pub const KIND_IMAGE: f32 = 7.0;
 /// rasterized as ordinary quads. Keep scopes intact when partitioning compositor lists.
 pub const KIND_LAYER: f32 = 8.0;
 pub const KIND_LAYER_END: f32 = 9.0;
+/// A dashed border ring (`El::border_dash`), `params.x` wide inside the rounded rect, drawn
+/// alone (the fill is its own instance, showing through the gaps). Its colour runs from `fill`
+/// at the top to `border` at the bottom; `uv.xyz` = dash, gap, phase in device pixels.
+pub const KIND_DASHED: f32 = 10.0;
 
 /// How a scope combines its contents. The completed scope still uses source-over on its parent
 /// unless that parent also requests additive composition.

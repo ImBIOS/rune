@@ -170,3 +170,28 @@ fn gpu_metamorphic() {
         assert_eq!(first, gpu.render(&disjoint));
     }
 }
+
+#[test]
+fn cpu_gpu_dashed() {
+    let mut gpu = GpuRenderer::default();
+    let mut max = 0;
+    for seed in 0..64 {
+        let scene = generate::dashed(seed, 8);
+        for (n, primitive) in scene.primitives.iter().enumerate() {
+            let mut single = scene.clone();
+            single.primitives = vec![primitive.clone()];
+            match check(&mut gpu, &single, 2) {
+                Ok(m) => max = max.max(m),
+                Err(e) => {
+                    save(&format!("dashed-{seed}-{n}"), &single);
+                    panic!("{e}");
+                }
+            }
+        }
+        if let Err(e) = check(&mut gpu, &scene, 2) {
+            save(&format!("dashed-{seed}-composite"), &scene);
+            panic!("{e}");
+        }
+    }
+    eprintln!("METRIC channel_max_dashed={max}");
+}

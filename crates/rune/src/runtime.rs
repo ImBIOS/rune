@@ -27,7 +27,7 @@ use crate::edit::{EditOutcome, Ime, KeyEvent};
 use crate::el::{Align, Drag, DragFn, El, GrowthSpec, InputSpec, Phase, PointerPress, PressFn, SecondaryFn, ScrollSpec, Shell, TextSpec, Tx, Visual};
 use crate::growth::{GrowTrack, SUBSTEP};
 use crate::flight::{TextFlight, transformed};
-use crate::render::{Instance, KIND_GLYPH, KIND_GRADIENT, KIND_IMAGE, KIND_INSET, KIND_RECT, KIND_SEGMENT, KIND_SHADOW, KIND_TRIANGLE, NO_CLIP};
+use crate::render::{Instance, KIND_DASHED, KIND_GLYPH, KIND_GRADIENT, KIND_IMAGE, KIND_INSET, KIND_RECT, KIND_SEGMENT, KIND_SHADOW, KIND_TRIANGLE, NO_CLIP};
 use crate::shape::{LineCap, Op, Shape};
 use crate::text::{Deco, GlyphQuad, Ink, TextSystem, layout_height};
 use crate::tok::motion;
@@ -3350,6 +3350,19 @@ impl<S: 'static> Runtime<S> {
                     .filter(|b| n.vis.border_bottom.is_some() || *b != border);
                 let (border_kind, border_uv) = border_bottom.map_or((KIND_RECT, [0.0; 4]), |b| (KIND_GRADIENT, b));
                 let border_a = border[3].max(border_uv[3]);
+                // A dashed ring is its own instance over the fill, which then draws without a ring.
+                let dashed = n.vis.border_dash.filter(|_| bw > 0.0 && border_a > 0.0005).map(|[dash, gap]| Instance {
+                    rect: [r[0], r[1], w, h],
+                    radii,
+                    fill: border,
+                    border: border_bottom.unwrap_or(border),
+                    params: [bw, KIND_DASHED, blur * s, 1.0],
+                    uv: [dash * k_px, gap * k_px, n.vis.border_dash_phase * k_px, 0.0],
+                    clip,
+                    fade: crate::render::pack_fade(fade, clip, clip),
+                });
+                let (bw, border, border_kind, border_uv, border_a) =
+                    if n.vis.border_dash.is_some() { (0.0, [0.0; 4], KIND_RECT, [0.0; 4], 0.0) } else { (bw, border, border_kind, border_uv, border_a) };
                 if layered {
                     // Fill, gradient and overlays first, then the border on top, as in CSS.
                     if fill[3] > 0.0005 {
@@ -3410,6 +3423,7 @@ impl<S: 'static> Runtime<S> {
                         fade: crate::render::pack_fade(fade, clip, clip),
                     });
                 }
+                self.instances.extend(dashed);
                 for (k, sh) in n.vis.shadows.iter().enumerate() {
                     if !sh.inset {
                         continue;

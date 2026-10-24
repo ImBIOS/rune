@@ -1,7 +1,7 @@
 //! Deliberately scalar transcription of shader.wgsl. No shared shader generator:
 //! keeping the implementations independent catches changes to either lane.
 use crate::{Atlas, Primitive};
-use libm::{expf, floorf, powf, sqrtf};
+use libm::{atan2f, expf, floorf, powf, sqrtf};
 
 fn clamp(x: f32) -> f32 {
     x.clamp(0.0, 1.0)
@@ -63,6 +63,54 @@ fn shadow(p: [f32; 2], h: [f32; 2], sigma: f32, corner: f32) -> f32 {
         y += step;
     }
     v
+}
+
+fn ring_arc(p: [f32; 2], size: [f32; 2], radii: [f32; 4], bw: f32) -> (f32, f32) {
+    let h = bw * 0.5;
+    let m = (size[0] * 0.5).min(size[1] * 0.5);
+    let rc = radii.map(|r| (r.min(m) - h).max(0.0));
+    let e = rc.map(|r| r + h);
+    let arc = rc.map(|r| r * 1.5707964);
+    let s_tr = (size[0] - bw - rc[0] - rc[1]).max(0.0);
+    let s_right = s_tr + arc[1];
+    let s_br = s_right + (size[1] - bw - rc[1] - rc[2]).max(0.0);
+    let s_bottom = s_br + arc[2];
+    let s_bl = s_bottom + (size[0] - bw - rc[2] - rc[3]).max(0.0);
+    let s_left = s_bl + arc[3];
+    let s_tl = s_left + (size[1] - bw - rc[3] - rc[0]).max(0.0);
+    let top = p[0] - e[0];
+    let right = s_right + p[1] - e[1];
+    let bottom = s_bottom + size[0] - e[2] - p[0];
+    let left = s_left + size[1] - e[3] - p[1];
+    let s = if p[0] > size[0] * 0.5 {
+        if p[1] > size[1] * 0.5 {
+            let v = [p[0] - (size[0] - e[2]), p[1] - (size[1] - e[2])];
+            if v[0] > 0.0 && v[1] > 0.0 { s_br + atan2f(v[1], v[0]) * rc[2] }
+            else if size[0] - p[0] < size[1] - p[1] { right } else { bottom }
+        } else {
+            let v = [p[0] - (size[0] - e[1]), p[1] - e[1]];
+            if v[0] > 0.0 && v[1] < 0.0 { s_tr + atan2f(v[0], -v[1]) * rc[1] }
+            else if size[0] - p[0] < p[1] { right } else { top }
+        }
+    } else if p[1] > size[1] * 0.5 {
+        let v = [p[0] - e[3], p[1] - (size[1] - e[3])];
+        if v[0] < 0.0 && v[1] > 0.0 { s_bl + atan2f(-v[0], v[1]) * rc[3] }
+        else if p[0] < size[1] - p[1] { left } else { bottom }
+    } else {
+        let v = [p[0] - e[0], p[1] - e[0]];
+        if v[0] < 0.0 && v[1] < 0.0 { s_tl + atan2f(-v[1], -v[0]) * rc[0] }
+        else if p[0] < p[1] { left } else { top }
+    };
+    (s, s_tl + arc[0])
+}
+fn dash_cov(s: f32, total: f32, d: [f32; 3]) -> f32 {
+    let nominal = d[0] + d[1];
+    let k = total.max(0.001) / ((floorf(total / nominal + 0.5)).max(1.0) * nominal);
+    let period = nominal * k;
+    let dash = d[0] * k;
+    let a = s + d[2] * k - dash * 0.5;
+    let m = a - period * floorf(a / period + 0.5);
+    clamp(dash * 0.5 - m.abs() + 0.5)
 }
 
 pub(crate) fn fragment(i: &Primitive, atlas: &Atlas, p: [f32; 2]) -> [f32; 4] {
@@ -153,6 +201,16 @@ pub(crate) fn fragment(i: &Primitive, atlas: &Atlas, p: [f32; 2]) -> [f32; 4] {
                 mix(i.fill[c], i.uv[c], t) * cov
             });
         }
+        10 => {
+            let d = sd(q, h, i.radii);
+            let soft = i.params[2].max(0.5);
+            let ring = clamp(0.5 - d / (soft * 2.0)) - clamp(0.5 - (d + i.params[0]) / (soft * 2.0));
+            let t = clamp((p[1] - i.rect[1]) / i.rect[3].max(1.0));
+            let local = [p[0] - i.rect[0], p[1] - i.rect[1]];
+            let (s, total) = ring_arc(local, [i.rect[2], i.rect[3]], i.radii, i.params[0]);
+            let cov = ring * dash_cov(s, total, [i.uv[0], i.uv[1], i.uv[2]]);
+            col = std::array::from_fn(|c| mix(i.fill[c], i.border[c], t) * cov);
+        }
         _ => panic!("unsupported primitive kind"),
     }
     let origin = i.fade_origin.unwrap_or(i.clip);
@@ -167,4 +225,75 @@ pub(crate) fn fragment(i: &Primitive, atlas: &Atlas, p: [f32; 2]) -> [f32; 4] {
         else { ramp(hard[edge], width) }
     }).product();
     col.map(|c| c * clip)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Walking the ring's centre line clockwise, arc length grows by the distance walked and
+    // comes back round to zero after exactly the line's length.
+    #[test]
+    fn ring_arc_walks_the_centre_line() {
+        for (size, radii, bw) in [
+            ([40.0f32, 20.0], [10.0f32; 4], 2.0f32),
+            ([30.0, 30.0], [0.0, 6.0, 15.0, 3.0], 1.0),
+            ([50.0, 12.0], [6.0; 4], 0.5),
+            ([24.0, 18.0], [0.0; 4], 1.5),
+        ] {
+            let h = bw * 0.5;
+            let rc = radii.map(|r: f32| (r.min(size[0].min(size[1]) * 0.5) - h).max(0.0));
+            let (_, total) = ring_arc([size[0] * 0.5, h], size, radii, bw);
+            let expected = 2.0 * (size[0] + size[1] - 2.0 * bw)
+                - (2.0 - std::f32::consts::FRAC_PI_2) * rc.iter().sum::<f32>();
+            assert!((total - expected).abs() < 1e-3, "{total} vs {expected}");
+            // Sample the centre line by marching a point round the inset rounded rect.
+            let mut points = Vec::new();
+            let steps = 400;
+            for n in 0..steps {
+                let angle = n as f32 / steps as f32 * std::f32::consts::TAU;
+                let dir = [libm::sinf(angle), -libm::cosf(angle)];
+                // Ray from the centre to the centre line: bisect on the ring's centre distance.
+                let (mut lo, mut hi) = (0.0, size[0] + size[1]);
+                for _ in 0..60 {
+                    let mid = (lo + hi) * 0.5;
+                    let q = [dir[0] * mid, dir[1] * mid];
+                    if sd(q, [size[0] * 0.5, size[1] * 0.5], radii) + h < 0.0 { lo = mid } else { hi = mid }
+                }
+                points.push([size[0] * 0.5 + dir[0] * lo, size[1] * 0.5 + dir[1] * lo]);
+            }
+            // Each step advances s by the chord, or up to a corner's detour where the line turns
+            // sharply, and the steps add up to one trip round.
+            let mut trip = 0.0;
+            for n in 1..=steps {
+                let (a, b) = (points[n - 1], points[n % steps]);
+                let chord = sqrtf((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2));
+                let ds = (ring_arc(b, size, radii, bw).0 - ring_arc(a, size, radii, bw).0).rem_euclid(total);
+                assert!(ds > chord - 1e-3 && ds < chord * 1.5 + 1e-3, "{size:?} {radii:?} step {n}: {ds} vs {chord}");
+                trip += ds;
+            }
+            assert!((trip - total).abs() < 1e-2, "{trip} vs {total}");
+        }
+    }
+
+    #[test]
+    fn dash_pattern_closes_at_the_seam() {
+        for total in [37.3, 100.0, 251.9, 3.0] {
+            for d in [[4.0, 3.0, 0.0], [6.0, 2.5, 1.7], [10.0, 10.0, -4.0]] {
+                for n in 0..50 {
+                    let s = n as f32 * 0.37;
+                    assert!((dash_cov(s, total, d) - dash_cov(s + total, total, d)).abs() < 1e-3);
+                    assert!((dash_cov(s, total, d) - dash_cov(s - total, total, d)).abs() < 1e-3);
+                }
+            }
+        }
+        // With no phase the pattern starts on a dash: half covered at s = 0, full just after.
+        assert!((dash_cov(0.0, 100.0, [4.0, 3.0, 0.0]) - 0.5).abs() < 1e-4);
+        assert_eq!(dash_cov(1.0, 100.0, [4.0, 3.0, 0.0]), 1.0);
+        // One nominal period of phase is one whole stretched period.
+        for n in 0..50 {
+            let s = n as f32 * 1.3;
+            assert!((dash_cov(s, 100.0, [4.0, 3.0, 7.0]) - dash_cov(s, 100.0, [4.0, 3.0, 0.0])).abs() < 1e-3);
+        }
+    }
 }

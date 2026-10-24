@@ -87,3 +87,32 @@ fn canonical_hashes() {
         );
     }
 }
+
+#[test]
+fn dashed_rings_translate_and_stay_inside_their_ring() {
+    for seed in 0..32 {
+        let scene = generate::dashed(seed, 8);
+        let original = render(&scene);
+        let mut shifted = scene.clone();
+        shifted.width += 4; shifted.height += 6;
+        generate::translate(&mut shifted, 4.0, 6.0);
+        let actual = render(&shifted);
+        for y in 0..64 {
+            assert_eq!(&original.rgba[y * 256..(y + 1) * 256], &actual.rgba[((y + 6) * 68 + 4) * 4..((y + 6) * 68 + 68) * 4]);
+        }
+        // Dashes only ever take coverage away from the solid ring.
+        for p in &scene.primitives {
+            let mut one = scene.clone();
+            one.primitives = vec![p.clone()];
+            let dashed = render(&one);
+            one.primitives[0].params[1] = 4.0;
+            one.primitives[0].uv = one.primitives[0].border;
+            one.primitives[0].border = one.primitives[0].fill;
+            one.primitives[0].fill = [0.0; 4];
+            let solid = render(&one);
+            for (n, (d, s)) in dashed.owners.as_ref().unwrap().iter().zip(solid.owners.as_ref().unwrap()).enumerate() {
+                assert!(d.is_none() || s.is_some(), "seed {seed}: pixel {n} dashed outside the ring");
+            }
+        }
+    }
+}

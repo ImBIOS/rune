@@ -2,7 +2,8 @@
 // Gaussian rounded-rect shadows (kind 1), glyph-atlas text (kind 2), inset shadows (kind 3),
 // vertical-gradient rounded rects or borders (kind 4), stroke segments (kind 5) and filled
 // triangles (kind 6) for vector shapes, RGBA images (kind 7), and premultiplied layer composites
-// (kind 8). Scope-end records (kind 9) never reach this shader. Every ordinary instance carries a
+// (kind 8), and dashed borders (kind 10). Scope-end records (kind 9) never reach this shader.
+// Every ordinary instance carries a
 // soft-edge clip. Output is premultiplied linear colour into an sRGB target (linear blending).
 
 struct Globals {
@@ -64,7 +65,7 @@ fn base_vs(i: In) -> Out {
         grow = 0.0;
     } else if (kind > 2.5 && kind < 3.5) {
         grow = 1.0;
-    } else if (kind > 4.5) {
+    } else if (kind > 4.5 && kind < 9.5) {
         grow = 1.0;
     }
     let lo = i.rect.xy - vec2<f32>(grow);
@@ -270,6 +271,61 @@ fn image_texel(t: vec2<i32>, premultiplied: bool) -> vec4<f32> {
     return vec4<f32>(c.rgb * c.a, c.a);
 }
 
+// Arc length to the point nearest `p` (rect-local) on the centre line of a `bw`-wide ring inside
+// the rounded rect, and the line's full length. It runs clockwise from where the top edge leaves
+// the top-left corner; corners count along their arcs.
+fn ring_arc(p: vec2<f32>, size: vec2<f32>, radii: vec4<f32>, bw: f32) -> vec2<f32> {
+    let h = bw * 0.5;
+    let half = size * 0.5;
+    let rc = max(min(radii, vec4<f32>(min(half.x, half.y))) - vec4<f32>(h), vec4<f32>(0.0));
+    let e = rc + vec4<f32>(h);
+    let arc = rc * 1.5707964;
+    let s_tr = max(size.x - bw - rc.x - rc.y, 0.0);
+    let s_right = s_tr + arc.y;
+    let s_br = s_right + max(size.y - bw - rc.y - rc.z, 0.0);
+    let s_bottom = s_br + arc.z;
+    let s_bl = s_bottom + max(size.x - bw - rc.z - rc.w, 0.0);
+    let s_left = s_bl + arc.w;
+    let s_tl = s_left + max(size.y - bw - rc.w - rc.x, 0.0);
+    let top = p.x - e.x;
+    let right = s_right + p.y - e.y;
+    let bottom = s_bottom + size.x - e.z - p.x;
+    let left = s_left + size.y - e.w - p.y;
+    var s: f32;
+    if (p.x > half.x) {
+        if (p.y > half.y) {
+            let v = p - (size - vec2<f32>(e.z));
+            if (v.x > 0.0 && v.y > 0.0) { s = s_br + atan2(v.y, v.x) * rc.z; }
+            else { s = select(bottom, right, size.x - p.x < size.y - p.y); }
+        } else {
+            let v = p - vec2<f32>(size.x - e.y, e.y);
+            if (v.x > 0.0 && v.y < 0.0) { s = s_tr + atan2(v.x, -v.y) * rc.y; }
+            else { s = select(top, right, size.x - p.x < p.y); }
+        }
+    } else if (p.y > half.y) {
+        let v = p - vec2<f32>(e.w, size.y - e.w);
+        if (v.x < 0.0 && v.y > 0.0) { s = s_bl + atan2(-v.x, v.y) * rc.w; }
+        else { s = select(bottom, left, p.x < size.y - p.y); }
+    } else {
+        let v = p - vec2<f32>(e.x);
+        if (v.x < 0.0 && v.y < 0.0) { s = s_tl + atan2(-v.y, -v.x) * rc.x; }
+        else { s = select(top, left, p.x < p.y); }
+    }
+    return vec2<f32>(s, s_tl + arc.x);
+}
+
+// Coverage of a dash pattern (dash, gap, phase) at arc length `s`. The period stretches or
+// shrinks so a whole number of periods fills `total`, and the pattern meets itself at the seam.
+fn dash_cov(s: f32, total: f32, d: vec3<f32>) -> f32 {
+    let nominal = d.x + d.y;
+    let k = max(total, 0.001) / (max(floor(total / nominal + 0.5), 1.0) * nominal);
+    let period = nominal * k;
+    let dash = d.x * k;
+    let a = s + d.z * k - dash * 0.5;
+    let m = a - period * floor(a / period + 0.5);
+    return clamp(dash * 0.5 - abs(m) + 0.5, 0.0, 1.0);
+}
+
 @fragment
 fn fs(i: Out) -> @location(0) vec4<f32> {
     if (i.params.y == 8.0) {
@@ -303,20 +359,32 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         let corner = min(i.radii.x, min(half.x, half.y));
         col = i.fill * shadow(i.p - center, half, sigma, corner);
     } else if (kind > 6.5) {
-        // Bilinear, clamped to the image's own texels so neighbours in the atlas never bleed.
-        let local = (i.p - i.rect.xy) * i.uv.zw / i.rect.zw - vec2<f32>(0.5);
-        let lo = vec2<i32>(i.uv.xy);
-        let hi = lo + vec2<i32>(i.uv.zw) - vec2<i32>(1);
-        let base = floor(local);
-        let f = local - base;
-        let t0 = clamp(lo + vec2<i32>(base), lo, hi);
-        let t1 = clamp(lo + vec2<i32>(base) + vec2<i32>(1, 1), lo, hi);
-        let premultiplied = i.params.z > 0.5;
-        let c = mix(mix(image_texel(t0, premultiplied), image_texel(vec2<i32>(t1.x, t0.y), premultiplied), f.x),
-                    mix(image_texel(vec2<i32>(t0.x, t1.y), premultiplied), image_texel(t1, premultiplied), f.x), f.y);
         let d = sd_rounded(i.p - center, half, i.radii);
-        let cov = clamp(0.5 - d, 0.0, 1.0);
-        col = c * (i.fill.a * cov);
+        if (kind > 9.5) {
+            // Dashed border: kind 0's ring, colour running from `fill` (top) to `border`
+            // (bottom), masked by the dash pattern in `uv.xyz` along the ring's centre line.
+            let soft = max(i.params.z, 0.5);
+            let bw = i.params.x;
+            let ring = clamp(0.5 - d / (soft * 2.0), 0.0, 1.0) - clamp(0.5 - (d + bw) / (soft * 2.0), 0.0, 1.0);
+            let t = clamp((i.p.y - i.rect.y) / max(i.rect.w, 1.0), 0.0, 1.0);
+            // The pixel centre, not `p`: inside a tight corner s jumps across the diagonal, and
+            // interpolation could put a pixel on that diagonal on the other side of it.
+            let arc = ring_arc(i.pos.xy + projection.xy - i.rect.xy, i.rect.zw, i.radii, bw);
+            col = mix(i.fill, i.border, t) * (ring * dash_cov(arc.x, arc.y, i.uv.xyz));
+        } else {
+            // Bilinear, clamped to the image's own texels so neighbours in the atlas never bleed.
+            let local = (i.p - i.rect.xy) * i.uv.zw / i.rect.zw - vec2<f32>(0.5);
+            let lo = vec2<i32>(i.uv.xy);
+            let hi = lo + vec2<i32>(i.uv.zw) - vec2<i32>(1);
+            let base = floor(local);
+            let f = local - base;
+            let t0 = clamp(lo + vec2<i32>(base), lo, hi);
+            let t1 = clamp(lo + vec2<i32>(base) + vec2<i32>(1, 1), lo, hi);
+            let premultiplied = i.params.z > 0.5;
+            let c = mix(mix(image_texel(t0, premultiplied), image_texel(vec2<i32>(t1.x, t0.y), premultiplied), f.x),
+                        mix(image_texel(vec2<i32>(t0.x, t1.y), premultiplied), image_texel(t1, premultiplied), f.x), f.y);
+            col = c * (i.fill.a * clamp(0.5 - d, 0.0, 1.0));
+        }
     } else if (kind > 4.5 && kind < 5.5) {
         col = i.fill * segment(i.pos.xy + projection.xy, i.radii.xy, i.radii.zw, i.params.x, i.params.z > 0.5);
     } else if (kind > 5.5 && kind < 6.5) {

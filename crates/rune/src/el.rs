@@ -416,6 +416,10 @@ pub struct Visual {
     pub border: Color,
     /// Bottom colour of a vertical border gradient whose top is `border` (`El::border_gradient`).
     pub border_bottom: Option<Color>,
+    /// Dash and gap lengths of a dashed border, in points (`El::border_dash`).
+    pub border_dash: Option<[f32; 2]>,
+    /// Points into the dash pattern where it starts (`El::border_dash_phase`).
+    pub border_dash_phase: f32,
     pub shadows: Vec<Shadow>,
     pub opacity: f32,
     pub blur: f32,
@@ -462,6 +466,8 @@ impl Default for Visual {
             border_width: 0.0,
             border: Color::TRANSPARENT,
             border_bottom: None,
+            border_dash: None,
+            border_dash_phase: 0.0,
             shadows: Vec::new(),
             opacity: 1.0,
             blur: 0.0,
@@ -1245,6 +1251,25 @@ impl El {
         self.vis.border_width = width;
         self.vis.border = top;
         self.vis.border_bottom = Some(bottom);
+        self
+    }
+    /// Dashes the border (`border` or `border_gradient`): `dash` points on, `gap` points off,
+    /// with butt ends, along the ring's centre line, round the corners too. The pattern starts
+    /// with a dash where the top edge leaves the top-left corner and runs clockwise. The period
+    /// stretches or shrinks a little so a whole number of dashes fits, and the last gap meets the
+    /// first dash cleanly. Unlike a solid border, the fill shows through the gaps and the dashes
+    /// draw over it. A zero `dash` or `gap` keeps the border solid.
+    pub fn border_dash(mut self, dash: f32, gap: f32) -> Self {
+        let valid = dash.is_finite() && gap.is_finite() && dash > 0.0 && gap > 0.0;
+        self.vis.border_dash = valid.then_some([dash, gap]);
+        self
+    }
+    /// Starts the dash pattern `phase` points into itself (SwiftUI's `dashPhase`), so growing it
+    /// marches the dashes anticlockwise. A phase of `dash + gap` is one whole period. It is
+    /// applied as given every frame and never springs (a spring would run a wrapped phase
+    /// backwards), so drive it from a clock for marching ants.
+    pub fn border_dash_phase(mut self, phase: f32) -> Self {
+        self.vis.border_dash_phase = if phase.is_finite() { phase } else { 0.0 };
         self
     }
     pub fn shadow(mut self, y: f32, blur: f32, color: Color) -> Self {

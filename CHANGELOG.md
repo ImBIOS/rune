@@ -5,6 +5,17 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Borders can be dashed.** `El::border_dash(dash, gap)` dashes an element's `border` or
+  `border_gradient`, in points, with butt ends:
+  `el().radius(13.0).border(1.0, amber).border_dash(4.0, 3.0)`. Dashes follow the ring's
+  centre line round the corners. The pattern starts with a dash where the top edge leaves the
+  top-left corner and runs clockwise, and its period stretches or shrinks a little so a whole
+  number of dashes meets itself at that seam. `El::border_dash_phase(points)` shifts it, like
+  SwiftUI's `dashPhase`; a phase of `dash + gap` is one period. Border colours spring as before;
+  the phase is applied as given. The fill shows through the gaps, so a dashed element draws its
+  fill and its ring as two instances, the ring as the new `render::KIND_DASHED` (10), which
+  `rune-ref` renders too. Elements without dashes paint the same instances as before.
+  `Visual` has new `border_dash` and `border_dash_phase` fields.
 - **Text can draw in capitals.** `El::text_case(TextCase::Uppercase)` (or `Lowercase`) draws
   a text element's letters cased without changing its string, like SwiftUI's `textCase`:
   `text("Text channels").text_case(TextCase::Uppercase)` draws "TEXT CHANNELS". Casing is
