@@ -51,5 +51,7 @@ impl Keybind {
 }
 
 fn keycap(key: String) -> String {
-    if key.chars().count() == 1 { key.to_uppercase() } else { key }
+    let upper = key.to_uppercase();
+    // Only when it maps back: Turkish "ı" would draw as "I", another key.
+    if key.chars().count() == 1 && upper.to_lowercase() == key { upper } else { key }
 }

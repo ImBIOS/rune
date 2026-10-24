@@ -36,10 +36,11 @@ mod mac {
             assert_eq!(root.numberOfItems(), 1, "no Edit shortcuts");
             println!("POLICY {:?}", app.activationPolicy());
             println!("CUSTOM_PRESENT {}", titles.iter().any(|s| s == "Custom Action"));
-            // Cua sends physical US keys. Resolve the current layout's Q without
-            // switching the user's input source (Pro may be running Dvorak).
+            // Cua sends physical US keys. Resolve the current layout's ⌘Q without
+            // switching the user's input source (Pro may be running Dvorak). Under ⌘,
+            // as the script presses it: some layouts change while ⌘ is held.
             let quit_key = ('a'..='z').find(|key| {
-                key.to_string().parse::<rune::Shortcut>().unwrap().keycaps().last().is_some_and(|label| label == "Q")
+                format!("cmd+{key}").parse::<rune::Shortcut>().unwrap().keycaps().last().is_some_and(|label| label == "Q")
             }).expect("current layout must have Q on a letter key for this probe");
             println!("QUIT_KEY {quit_key}");
             line("STATUS");

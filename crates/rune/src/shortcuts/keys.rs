@@ -100,12 +100,15 @@ fn named_label(name: &str) -> Option<String> {
         _ => return None,
     }.into())
 }
-/// "k" draws as "K", as on a keycap. A character without a single capital ("ß") stays.
+/// "k" draws as "K", as on a keycap. A character whose capital isn't one character ("ß"), or
+/// doesn't lower-case back to it (Turkish "ı" → "I" → "i"), stays.
 fn capital(label: String) -> String {
     let mut chars = label.chars();
     let (Some(c), None) = (chars.next(), chars.next()) else { return label };
     let mut upper = c.to_uppercase();
-    match (upper.next(), upper.next()) { (Some(u), None) => u.to_string(), _ => label }
+    let (Some(u), None) = (upper.next(), upper.next()) else { return label };
+    let mut lower = u.to_lowercase();
+    if (lower.next(), lower.next()) == (Some(c), None) { u.to_string() } else { label }
 }
 fn us_label(name: &str) -> &str {
     match name { "minus" => "-", "equal" => "=", "comma" => ",", "period" => ".", "slash" => "/", "semicolon" => ";", "quote" => "'",
@@ -134,6 +137,8 @@ mod tests {
         assert_eq!(key("ctrl+enter"), if cfg!(target_os = "macos") { "↩" } else { "Return" });
         assert_eq!(capital("k".into()), "K");
         assert_eq!(capital("ß".into()), "ß");
+        assert_eq!(capital("ı".into()), "ı");
+        assert_eq!(capital("K".into()), "K");
         assert_eq!(capital("/".into()), "/");
     }
 }
