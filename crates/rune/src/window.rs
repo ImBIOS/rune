@@ -46,6 +46,8 @@ struct Win {
     /// Drawables present inside Core Animation transactions while the frame moves.
     #[cfg(target_os = "macos")]
     frame_present: bool,
+    #[cfg(target_os = "macos")]
+    help: crate::macos_help::NativeHelp,
 }
 
 impl Win {
@@ -1477,11 +1479,14 @@ impl<S: 'static> Host<S> {
         #[cfg(target_os = "macos")]
         {
             self.rt.double_click_interval = mac::double_click_interval();
+            self.rt.set_native_help(true);
         }
         #[cfg(windows)]
         {
             let ms = unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() };
             self.rt.double_click_interval = f64::from(ms) / 1000.0;
+            // A tooltip control's initial delay is the double-click time.
+            self.rt.help_delay = self.rt.double_click_interval;
         }
         let (gpu, surface) = match self.gpu.take() {
             Some((gpu, renderer, format)) => {
@@ -1578,6 +1583,8 @@ impl<S: 'static> Host<S> {
             alpha,
             #[cfg(target_os = "macos")]
             frame_present: false,
+            #[cfg(target_os = "macos")]
+            help: Default::default(),
         });
         if launcher { self.win.as_mut().unwrap().first_frame.prepare(); }
         self.apply_placement(event_loop);
@@ -1672,6 +1679,8 @@ impl<S: 'static> Host<S> {
         }
         let focused = l.window.has_focus();
         l.apply_cursor(rt, focused);
+        #[cfg(target_os = "macos")]
+        l.help.sync(&l.window, rt.help_regions());
         self.clipboard.flush(rt);
         if let Some(a) = rt.ime_area {
             l.window.set_ime_cursor_area(

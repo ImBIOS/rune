@@ -121,3 +121,7 @@ harness = false
 [[test]]
 name = "video_gui"
 harness = false
+
+[[test]]
+name = "help_macos"
+harness = false

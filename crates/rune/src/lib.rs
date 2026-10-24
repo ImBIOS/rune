@@ -77,6 +77,8 @@ pub mod macos_panel_bridge;
 pub mod macos_appearance;
 #[cfg(target_os = "macos")]
 mod display_link;
+#[cfg(target_os = "macos")]
+mod macos_help;
 pub mod color;
 pub mod compose;
 pub mod edit;
