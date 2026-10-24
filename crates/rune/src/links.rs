@@ -19,6 +19,18 @@ pub(super) fn origin(n: &Node, spec: &TextSpec, layout: &Layout<Ink>, rect: [f32
     [x, rect[1] + n.inset[1] * k]
 }
 
+/// Link bytes `a..b` of node `n`'s text as bytes of its drawn layout, which truncation may
+/// have cut (empty when the cut hides the link).
+fn drawn(n: &Node, a: u32, b: u32) -> (u32, u32) {
+    let (a, b) = n.elided.map_or((a as usize, b as usize), |e| e.mark(a as usize, b as usize, true));
+    (a as u32, b as u32)
+}
+
+/// The byte length of node `n`'s drawn text.
+fn layout_len(n: &Node, spec: &TextSpec) -> usize {
+    n.elided.map_or(spec.content.len(), |e| e.drawn_len(spec.content.len()))
+}
+
 /// Line boxes of bytes `start..end` in layout device px, with each box's line index.
 fn boxes(layout: &Layout<Ink>, len: usize, start: u32, end: u32) -> Vec<(parley::BoundingBox, usize)> {
     let (a, b) = ((start as usize).min(len), (end as usize).min(len));
@@ -73,7 +85,8 @@ impl<S: 'static> Runtime<S> {
         let px = s / z.max(1e-4);
         let mut out = Vec::new();
         for (k, l) in spec.links.iter().enumerate() {
-            for (bb, _) in boxes(layout, spec.content.len(), l.start, l.end) {
+            let (a, b) = drawn(n, l.start, l.end);
+            for (bb, _) in boxes(layout, layout_len(n, spec), a, b) {
                 out.push((k, [ox + bb.x0 as f32 / px, oy + bb.y0 as f32 / px, ox + bb.x1 as f32 / px, oy + bb.y1 as f32 / px]));
             }
         }
@@ -127,7 +140,8 @@ impl<S: 'static> Runtime<S> {
                     LinkPaint::new().underline(ink.unwrap_or(spec.color))
                 } else { p }
             } else { continue };
-            fx.push((l.start, l.end, paint));
+            let (a, b) = drawn(&self.nodes[i], l.start, l.end);
+            fx.push((a, b, paint));
         }
         LinkFx(fx)
     }

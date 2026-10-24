@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::truncate_middle()` and `El::truncate_head()`; `Type::caption()`.** Middle truncation
+  keeps a single line's start and end with "…" between, as `NSLineBreakByTruncatingMiddle`
+  does for paths; head truncation keeps the end. `.truncate()` now cuts between graphemes
+  instead of chars, so a combining accent or emoji sequence is never split (text without them
+  draws as before), and a truncated selectable text copies its whole string even across the
+  ellipsis. A link or span the cut hides is dropped rather than moved onto "…" (which takes
+  the style of the text it replaces, as AppKit draws it). `Type::caption()` is `small` on a 16-point line (11 / 16 in the built-in themes),
+  for secondary text under a control; it's a method, so app themes that build `Type` as a
+  literal get it without a change.
 - **`Switch` draws as macOS 27's `NSSwitch`: a capsule track and a pill knob.** The compact
   (default) switch was a 24 × 16 track with a rounded-square 12-point knob; it is now an
   `NSSwitch` mini, 36 × 16 with a 21 × 14 knob inset 1 point, so it is 12 points wider.

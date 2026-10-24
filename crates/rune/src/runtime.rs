@@ -78,6 +78,9 @@ mod selectable;
 mod help;
 #[path = "scroll_edge.rs"]
 mod scroll_edge;
+#[cfg(test)]
+#[path = "truncate_tests.rs"]
+mod truncate_tests;
 
 const P_FILL: Prop<Color> = Prop::custom(64, PropClass::Color);
 const P_BORDER: Prop<Color> = Prop::custom(65, PropClass::Color);
@@ -225,6 +228,8 @@ pub(crate) struct Node {
     live: Vec<crate::live::Bound>,
     pub text: Option<TextSpec>,
     pub text_layout: Option<Rc<Layout<Ink>>>,
+    /// Where `text_layout` cut the text for `El::truncate` and its kin.
+    pub(crate) elided: Option<Elision>,
     /// The run a cell measures and draws from (see `El::advance_in`).
     run_layout: Option<Rc<crate::text::RunLayout>>,
     live_text_seen: Option<u128>,
@@ -2433,10 +2438,13 @@ impl<S> Measurement<'_, S> {
                 let w = (l.size.width - ins[0] - ins[2]).max(0.0);
                 let wrap = spec.wrap.then_some(w * scale);
                 let mut layout = self.text.layout_aligned(&spec.content, &spec.spans, spec.style, scale, wrap, line_alignment(spec));
+                let mut elided = None;
                 if spec.truncate && layout.full_width() > w * scale + 0.5 {
-                    layout = truncated(&mut self.text, &spec.content, spec, scale, w * scale);
+                    let (cut, e) = truncated(&mut self.text, spec, scale, w * scale);
+                    (layout, elided) = (cut, Some(e));
                 }
                 nodes[i].text_layout = Some(layout);
+                nodes[i].elided = elided;
             }
         }
 
@@ -4421,8 +4429,12 @@ impl<S: 'static> Runtime<S> {
                     // Span backgrounds (inline code), a selection over them, then glyphs.
                     let link_fx = self.link_fx(i);
                     self.deco_scratch.clear();
-                    self.text.decorations(layout, &spec.spans, s, origin, &mut self.deco_scratch);
-                    link_fx.decos(layout, spec.content.len(), s, origin, &mut self.deco_scratch);
+                    match n.elided.filter(|_| !spec.spans.is_empty()) {
+                        Some(e) => self.text.decorations(layout, &e.spans(&spec.spans), s, origin, &mut self.deco_scratch),
+                        None => self.text.decorations(layout, &spec.spans, s, origin, &mut self.deco_scratch),
+                    }
+                    let drawn_len = n.elided.map_or(spec.content.len(), |e| e.drawn_len(spec.content.len()));
+                    link_fx.decos(layout, drawn_len, s, origin, &mut self.deco_scratch);
                     if tk != 1.0 {
                         for d in &mut self.deco_scratch {
                             d.rect = scale_about(d.rect, origin, tk);
@@ -4434,6 +4446,7 @@ impl<S: 'static> Runtime<S> {
                         self.instances.push(rect_inst(d.rect, c, d.radius, clip, fade));
                     }
                     if spec.selectable && let Some((a, b)) = self.selected_range(&n.path, &spec.content) {
+                        let (a, b) = n.elided.map_or((a, b), |e| e.range(a, b));
                         selectable::push_selection(&mut self.instances, layout, a, b, origin, tk, premul(spec.selection, o, srgb), s, clip, fade);
                     }
                     let reveal = self.reveals.get(&n.id).filter(|st| !st.words.is_empty() && spec.advance_in.is_none());
@@ -4914,21 +4927,94 @@ fn text_x(spec: &TextSpec, x0: f32, x1: f32, width: f32) -> f32 {
     }
 }
 
-/// The longest prefix of `content` (at a char boundary, trailing space dropped) that fits in
-/// `max_w` device px with an ellipsis.
-fn truncated(text: &mut TextSystem, content: &str, spec: &TextSpec, scale: f32, max_w: f32) -> Rc<Layout<Ink>> {
-    let bounds: Vec<usize> = content.char_indices().map(|(i, _)| i).collect();
-    let (mut lo, mut hi) = (0usize, bounds.len());
-    let make = |text: &mut TextSystem, n: usize| {
-        let cut = bounds.get(n).copied().unwrap_or(content.len());
-        let s = format!("{}…", content[..cut].trim_end());
-        text.layout_rich(&s, &spec.spans, spec.style, scale, None)
+/// Where truncation cut a text: it draws `content[..head]`, "…", then `content[tail..]`.
+/// Selections and links stay in content bytes and map through this onto the drawn layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Elision {
+    head: usize,
+    tail: usize,
+}
+
+impl Elision {
+    const ELLIPSIS: &str = "…";
+
+    /// The drawn byte just past the ellipsis.
+    fn after(self) -> usize { self.head + Self::ELLIPSIS.len() }
+
+    /// The content byte at drawn byte `i`. Past the ellipsis is the end of what it hides.
+    pub(crate) fn content(self, i: usize) -> usize {
+        if i <= self.head { i } else if i < self.after() { self.tail } else { self.tail + (i - self.after()) }
+    }
+
+    /// The drawn byte at content byte `i`. A hidden byte lands before the ellipsis, or after it
+    /// for a range's `end`, so a range reaching into the cut covers the ellipsis.
+    pub(crate) fn drawn(self, i: usize, end: bool) -> usize {
+        if i <= self.head { i } else if i < self.tail { if end { self.after() } else { self.head } } else { self.after() + (i - self.tail) }
+    }
+
+    /// Selected content bytes `a..b` as drawn bytes: a selection reaching into the cut
+    /// highlights the ellipsis.
+    pub(crate) fn range(self, a: usize, b: usize) -> (usize, usize) { (self.drawn(a, false), self.drawn(b, true)) }
+
+    /// A span's or link's content bytes `a..b` as drawn bytes. A range wholly inside the cut
+    /// comes back empty and one crossing an edge keeps its visible side. A link takes the
+    /// ellipsis only when it shows on both sides of it. A span also takes it when it covers the
+    /// first byte the cut hides and shows next to it, so "…" wears the style of the text it
+    /// replaces, as AppKit's truncation draws it.
+    pub(crate) fn mark(self, a: usize, b: usize, link: bool) -> (usize, usize) {
+        let (h, t, after) = (self.head, self.tail, self.after());
+        if b <= h { return (a, b) }
+        if a >= t { return (after + a - t, after + b - t) }
+        let (before, beyond) = (a < h, b > t);
+        let ellipsis = if link { before && beyond } else { a <= h && (before || beyond) };
+        let start = if before { a } else if ellipsis { h } else { after };
+        let end = if beyond { after + b - t } else if ellipsis { after } else { h };
+        if start < end { (start, end) } else { (start, start) }
+    }
+
+    /// The drawn string's length for content `len` bytes long.
+    pub(crate) fn drawn_len(self, len: usize) -> usize { self.drawn(len, true) }
+
+    /// `spans` moved onto the drawn string.
+    fn spans(self, spans: &[crate::text::Span]) -> Vec<crate::text::Span> {
+        spans.iter().map(|sp| {
+            let (start, end) = self.mark(sp.start as usize, sp.end as usize, false);
+            crate::text::Span { start: start as u32, end: end as u32, ..sp.clone() }
+        }).collect()
+    }
+}
+
+/// `spec`'s content cut to fit `max_w` device px with an ellipsis, keeping as many whole
+/// graphemes as fit at the start, the end or both ends (half each) as its `elide` says.
+/// Whitespace graphemes beside the ellipsis are dropped whole.
+fn truncated(text: &mut TextSystem, spec: &TextSpec, scale: f32, max_w: f32) -> (Rc<Layout<Ink>>, Elision) {
+    use unicode_segmentation::UnicodeSegmentation;
+    let content = spec.content.as_str();
+    let bounds: Vec<usize> = content.grapheme_indices(true).map(|(i, _)| i).chain([content.len()]).collect();
+    let n = bounds.len() - 1;
+    let blank = |g: usize| content[bounds[g]..bounds[g + 1]].chars().all(char::is_whitespace);
+    let cut = |k: usize| {
+        let (mut head, tail) = match spec.elide {
+            crate::el::Elide::End => (k, 0),
+            crate::el::Elide::Middle => (k - k / 2, k / 2),
+            crate::el::Elide::Head => (0, k),
+        };
+        let mut tail = n - tail;
+        while head > 0 && blank(head - 1) { head -= 1; }
+        while tail < n && blank(tail) { tail += 1; }
+        Elision { head: bounds[head], tail: bounds[tail] }
     };
+    let make = |text: &mut TextSystem, e: Elision| {
+        let s = [&content[..e.head], Elision::ELLIPSIS, &content[e.tail..]].concat();
+        text.layout_rich(&s, &e.spans(&spec.spans), spec.style, scale, None)
+    };
+    let (mut lo, mut hi) = (0usize, n);
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
-        if make(text, mid).full_width() <= max_w + 0.5 { lo = mid } else { hi = mid - 1 }
+        if make(text, cut(mid)).full_width() <= max_w + 0.5 { lo = mid } else { hi = mid - 1 }
     }
-    make(text, lo)
+    let e = cut(lo);
+    (make(text, e), e)
 }
 
 // Carry the declaring edge with the inherited width. Descendant clipping must not restart
@@ -5242,6 +5328,7 @@ fn flatten(
         live,
         text,
         text_layout: None,
+        elided: None,
         run_layout: None,
         live_text_seen: None,
         on_press,

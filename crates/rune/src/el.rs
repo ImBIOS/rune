@@ -458,6 +458,8 @@ pub struct TextSpec {
     pub reveal: f32,
     /// One line, cut with an ellipsis when wider than the element.
     pub truncate: bool,
+    /// Which part `truncate` cuts (see [`El::truncate_middle`]).
+    pub(crate) elide: Elide,
     /// Fade the overflowing trailing edge rather than replacing text with an ellipsis.
     pub truncate_fade: bool,
     /// The `truncate_fade` edge's width in ems (see [`El::truncate_fade_width`]).
@@ -508,6 +510,18 @@ impl TextSpec {
         self.content = shown;
         self.source = Some(Box::new(source));
     }
+}
+
+/// The part of an overflowing `truncate`d text the ellipsis replaces.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Elide {
+    /// [`El::truncate`]: keeps the start.
+    #[default]
+    End,
+    /// [`El::truncate_middle`]: keeps the start and the end.
+    Middle,
+    /// [`El::truncate_head`]: keeps the end.
+    Head,
 }
 
 /// [`El::on_link`]'s handler.
@@ -781,6 +795,7 @@ pub fn text(content: impl Into<String>) -> El {
         wrap: false,
         reveal: -1.0,
         truncate: false,
+        elide: Elide::End,
         truncate_fade: false,
         fade_em: TRUNCATE_FADE_EM,
         justify: false,
@@ -1683,9 +1698,24 @@ impl El {
     }
     /// One line, cut with "…" when wider than the element; the element may shrink below its
     /// text's width.
-    pub fn truncate(mut self) -> Self {
+    pub fn truncate(self) -> Self {
+        self.elide(Elide::End)
+    }
+    /// [`El::truncate`] keeping both ends: "…" replaces the middle, as AppKit's
+    /// `NSLineBreakByTruncatingMiddle` does for paths and file names. Cuts fall between
+    /// graphemes and refit when the element resizes; copying and the accessibility text keep
+    /// the whole string.
+    pub fn truncate_middle(self) -> Self {
+        self.elide(Elide::Middle)
+    }
+    /// [`El::truncate`] keeping the end: "…" replaces the start.
+    pub fn truncate_head(self) -> Self {
+        self.elide(Elide::Head)
+    }
+    fn elide(mut self, elide: Elide) -> Self {
         if let Some(t) = &mut self.text {
             t.truncate = true;
+            t.elide = elide;
             t.truncate_fade = false;
             t.wrap = false;
         }

@@ -168,6 +168,15 @@ pub struct Type {
     pub mono: TextStyle,
 }
 
+impl Type {
+    /// Secondary text under a control or row (a setting's explanation, a file's size): `small`
+    /// on a 16 line, so 11 / 16 in the built-in themes. A method rather than a field, so a
+    /// theme's own `Type` gets it from its `small`.
+    pub fn caption(&self) -> TextStyle {
+        self.small.lh(16.0)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Radius {
     pub xs: f32,

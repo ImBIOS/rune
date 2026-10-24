@@ -491,6 +491,11 @@ Fonts without an `opsz` axis are unaffected.
 only when text overflows (`.truncate_fade_width(em)` sets another width). It keeps the full string and paints no ellipsis. For
 end-aligned labels the overflow fades on the left.
 
+`.truncate_middle()` cuts like `.truncate()` but keeps both ends, "…" replacing the
+middle (AppKit's `NSLineBreakByTruncatingMiddle`), for paths and file names;
+`.truncate_head()` keeps the end. Cuts fall between graphemes and refit on resize, and
+selecting, copying and `--tree` keep the whole string.
+
 Native hosts populate `cx.system_reduced_motion()` at creation and refresh it on
 window focus changes. Rune uses it by default; `cx.reduced_motion(value)` overrides
 it **for the current commit only**. Call it each time the view runs to keep an

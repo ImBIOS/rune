@@ -157,6 +157,7 @@ stories! {
     "rune-markdown--table-styles" => markdown_table_styles,
     "rune-markdown--code" => markdown_code,
     "rune-text--selectable-help" => text_selectable_help,
+    "rune-text--truncate-middle" => text_truncate_middle,
 }
 
 fn combobox_searchable(s: &G, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -1508,4 +1509,21 @@ fn text_selectable_help(s: &G, k: &Kit, _: &mut Vec<El>) -> El {
         )
         .child(row().w(280.0).child(TextInput::new(&s.edits[7]).placeholder("Selected like a field")
             .on_edit(|s: &mut G| &mut s.edits[7]).build(k).key("field")))
+}
+
+const LONG_PATH: &str = "~/Projects/rune/crates/rune-kit/src/components/settings/appearance_panel.rs";
+
+/// A path keeps its folder and file name as its box narrows, beside the end and head cuts, each
+/// with a `Type::caption` line under it.
+fn text_truncate_middle(_: &G, k: &Kit, _: &mut Vec<El>) -> El {
+    let c = &k.c;
+    let path = |w: f32, cut: fn(El) -> El, how: &str| col().w(w)
+        .child(cut(text(LONG_PATH).font(k.ty.ui).color(c.text_base)).selectable(true).selection_color(k.selection()))
+        .child(text(format!("{how}, {w} pt")).font(k.ty.caption()).color(c.text_weak));
+    col().gap(12.0)
+        .child(path(360.0, El::truncate_middle, "Middle"))
+        .child(path(240.0, El::truncate_middle, "Middle"))
+        .child(path(160.0, El::truncate_middle, "Middle"))
+        .child(path(240.0, El::truncate, "End"))
+        .child(path(240.0, El::truncate_head, "Head"))
 }

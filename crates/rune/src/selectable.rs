@@ -164,7 +164,8 @@ impl<S: 'static> Runtime<S> {
         let z = self.drawn_scale.get(i).copied().unwrap_or(1.0).max(1e-4);
         let [ox, oy] = links::origin(n, spec, layout, self.drawn_box(i), s, z);
         let px = s / z;
-        Some(Cursor::from_point(layout, (x - ox) * px, (y - oy) * px).index().min(spec.content.len()))
+        let at = Cursor::from_point(layout, (x - ox) * px, (y - oy) * px).index();
+        Some(n.elided.map_or(at, |e| e.content(at)).min(spec.content.len()))
     }
 
     /// A primary press on `target` (None: on nothing). On selectable text away from its links it
