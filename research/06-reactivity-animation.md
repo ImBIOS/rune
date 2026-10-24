@@ -1,7 +1,6 @@
 # 06 — State/reactivity model and animation as a first-class primitive
 
-Research agent notes, 2026-10-21. Sources are cited inline. Kit's own code is cited by `path:line`
-(Studio paths unless marked **Pro**). Numbers marked *est.* are estimates, not measurements.
+Research agent notes, 2026-10-21. Sources are cited inline. Kit's own code is cited by `repo/path:line`. Numbers marked *est.* are estimates, not measurements.
 
 ## Summary
 
@@ -21,7 +20,7 @@ Research agent notes, 2026-10-21. Sources are cited inline. Kit's own code is ci
 - **Every property is a piecewise analytic track.** A segment is `{t0, x0, v0, target, curve}`, and
   you sample position *and* velocity at any absolute time. Retargeting = sample `(x, v)` at the
   commit's presentation time, then start a new segment from there. This is psychopomp's model
-  (**Pro** `crates/psychopomp/src/timeline.rs:143-337`) generalised. It fixes Flit's problem that Core
+  (`psychopomp/crates/psychopomp/src/timeline.rs:143-337`) generalised. It fixes Flit's problem that Core
   Animation can't report velocity (`flit/src/macos.rs:2735-2777` has to guess "mid-flight" from
   heights and fall back to an analytical model).
 - **Springs are `Spring::new(duration, bounce)` with ω = 2π/duration and ζ = 1 − bounce**
@@ -329,7 +328,7 @@ fn deleting_a_row_slides_siblings_and_exits_in_place() {
 | Flit `core.rs:2483-2522` | `eval_ca_spring_spec_at`: evaluates the CA spring analytically so `CAShapeLayer` paths stay within < 0.02 pt | If Rune mirrors tracks into CA (system glass), it must evaluate the same function. |
 | Flit `core.rs:2604-2705` + `macos.rs:2735-2777` | `compute_ca_interruption_handoff` (called from `src/ui.rs:1461,1695`): the analytical presented state, overridden by `presentationLayer` values only when "mid-flight" is detected by a height heuristic (`h > 34.5 && |h − analytic| < 80`) | **CA doesn't expose velocity, and presentation values are racy.** Rune's render thread owns the analytic tracks, so `(x, v)` is always exact. |
 | motion-presets `presets/generated/kit_motion.rs:5-43` | `KitSpring{duration,bounce}`, `omega()/zeta()`; enter/exit pairs (`SETTLE` .3/.24, `REFLOW` .4/.32, `MORPH` .3/.16 → .27/.08, …) | Tokens are pairs. Exit springs run 10–25% shorter. |
-| psychopomp (**Pro**) `crates/psychopomp/src/motion.rs:43-73` | `Spring::sample(initial: MotionState{position,velocity}, target, elapsed)` | Pure sampling from `(x0, v0)`. |
+| psychopomp `crates/psychopomp/src/motion.rs:43-73` | `Spring::sample(initial: MotionState{position,velocity}, target, elapsed)` | Pure sampling from `(x0, v0)`. |
 | psychopomp `motion.rs:75-132` | `settling_time`: a deterministic time after which *both* error and speed stay under thresholds (envelope for ζ < 1, bisection for ζ = 1) | Precompute `settle_at` per segment, so finding idle tracks needs no sampling and no hysteresis. |
 | psychopomp `timeline.rs:143-248` | Track = list of segments (`Set`/`Spring`/`Ease`); `sample_at` picks the last segment with start ≤ t | The track data structure. |
 | psychopomp `timeline.rs:250-337`, `timeline/retarget.rs:62-67, 120-215` | A retarget samples the prior state at its start time; `Animate`/`Replay{from}`/`Immediate`; batches are transactional; "an unchanged Animate request retains its pending due time and existing trajectory" | Retarget semantics: transactional commits; setting the same target again is a no-op. |

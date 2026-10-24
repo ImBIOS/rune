@@ -190,7 +190,7 @@ given but not re-read; verify before relying on numbers. Estimates are labelled.
 | `debug = false` everywhere | clean −16/−20% but rebuild-after-edit *slower* (3.1-3.7 s vs 1.6-2.8 s, extra `strip=debuginfo` pass, likely cause unproven) | same | avoid |
 | Linker choice on macOS | final link only ~2-4 s of a 112-216 s clean build; ~2 s incremental | same [fetched] | linker is not the bottleneck on Mac |
 | mold | 4.9× lld, 1.9× wild at median; M1 Ultra (Linux) debug links 1.5-10× lld; README lists `macho/` in repo and says it's now written in Rust with an ASPLOS 2027 paper | [mold README](https://github.com/rui314/mold), [paper](https://arxiv.org/abs/2608.23228) [fetched] | watch: its Mach-O status unverified; check before assuming |
-| wild | Linux-focused ("a very fast linker for Linux") | [wild](https://github.com/wild-linker/wild) [search snippet] | no use on Studio/Pro |
+| wild | Linux-focused ("a very fast linker for Linux") | [wild](https://github.com/wild-linker/wild) [search snippet] | no use on macOS |
 | Cranelift backend (`rustc_codegen_cranelift`) | reported 20-30% less clean-build time on some projects [reddit anecdote]; **no unwinding on macOS, several arm64-macOS ABI incompatibilities with LLVM** (June 2025 report) | [bjorn3 report](https://bjorn3.github.io/2025/06/30/progress-report-june-2025.html) [fetched] | **skip on Apple**; maybe on Linux CI |
 | Parallel front end (`-Zthreads=N`) | claimed 20-30% on nightly; stabilization is a 2026 goal; known deadlock/ICE/incremental issues being fixed, no robust test suite yet | [Rust goals 2026](https://goals.rust-lang.org/2026/parallel-front-end.html) [fetched] | spike on nightly in a throwaway profile, not for the main loop |
 | rustc itself | ~4.6% mean wall-time gain over two months of compiler work | cited in ImportStatic from Nethercote's Sept 2026 roundup [fetched, secondhand] | free over time |
@@ -206,8 +206,8 @@ given but not re-read; verify before relying on numbers. Estimates are labelled.
   [memory].
 - **`cargo check`-speed inner loop for agents** is likelier to be dominated by rust-analyzer-like analysis than linking;
   run `cargo check` with `-Zthreads` only on a spike machine.
-- Per the host doc, builds on Studio go through HiveMind; the numbers above come from a 12-core Apple-silicon Mac, so
-  Studio-class machines should do better. **Do a one-hour measurement on `pro` of the real Rune workspace** before
+- The numbers above come from a 12-core Apple-silicon Mac, so
+  larger machines should do better. **Do a one-hour measurement of the real Rune workspace on a build Mac** before
   committing to any of this beyond the two profile lines.
 
 ### 11. Hot patching: shrink what's patched  — verdict: **spike already in plan; tighten the design**
@@ -281,7 +281,7 @@ given but not re-read; verify before relying on numbers. Estimates are labelled.
 3. **Frame arena in `El`'s type + counting allocator** (idea 7): a signature decision that is expensive to change later;
    decide before the view API ships.
 4. **Command channel = byte SPSC ring + triple buffer, loom-tested** (idea 5), doubling as the replay log.
-5. **Two-line Cargo profile + measured compile baseline on `pro`** (idea 10), then hot-patch hardening (idea 11).
+5. **Two-line Cargo profile + measured compile baseline** (idea 10), then hot-patch hardening (idea 11).
 
 **Rejected alternatives:** Salsa/SwiftUI-style graph (state vs patches); Slate retainers by phase (measured regression);
 Cranelift on Apple (unwinding, ABI); SIMD text (wrong bottleneck); damage-history tracking now (power only, unmeasured).
@@ -293,6 +293,6 @@ Cranelift on Apple (unwinding, ABI); SIMD text (wrong bottleneck); damage-histor
   edge tracks only? (Prototype in the spring scene catalog.)
 - Is mold's Mach-O linker production-ready on macOS 27 (the README lists `macho/`)? Only matters if link time shows up
   in the real Rune workspace, where the nushell data says it won't.
-- Real Rune compile numbers on `pro`: baseline `cargo check`, dev build, and patch time with the crate split.
+- Real Rune compile numbers: baseline `cargo check`, dev build, and patch time with the crate split.
 - Is a layout-hash guard on models enough for agent-trusted hot patching, or do we need a full state-migration hook?
 - Measure energy (not frame time) of full-pass-at-rest-with-small-change to decide whether idea 9 is worth building.

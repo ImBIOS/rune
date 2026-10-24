@@ -123,7 +123,7 @@ Use stable machine-readable stdout, diagnostics on stderr, meaningful exit statu
 
 ### A4. Named scenes should replay real UI with fake external services
 
-Scrawl already has a good local example: `scrawl lab pill <scene>` replays named capsule states with a pretend recording and no mic/capture/ingest side effects. The lab supports time scaling and per-frame motion-lint traces; tuning values reload within 250 ms. This is stronger than a gallery of inert components because it drives the transition sequence used by the app. [Local Scrawl instructions, line 16](../../scrawl/AGENTS.md#L16), implementation in `scrawl/src/ui/lab.rs` and `scrawl/src/ui/motion.rs`.
+Scrawl already has a good local example: `scrawl lab pill <scene>` replays named capsule states with a pretend recording and no mic/capture/ingest side effects. The lab supports time scaling and per-frame motion-lint traces; tuning values reload within 250 ms. This is stronger than a gallery of inert components because it drives the transition sequence used by the app. [Scrawl's AGENTS.md](https://github.com/kitlangton/scrawl/blob/main/AGENTS.md), implementation in `scrawl/src/ui/lab.rs` and `scrawl/src/ui/motion.rs`.
 
 Rune should let every feature register scenes next to its implementation. A scene supplies initial state, fixture services, stable keys, and an input script. Include empty/loading/error states, long text, large text settings, right-to-left layout, keyboard appearance, interruptions, rapid repeated input, resize, and background/resume when relevant.
 
@@ -164,7 +164,7 @@ CDP's `Emulation.setVirtualTimePolicy` and `Animation.seekAnimations`/`setPaused
 
 #### Motion-lint is the initial exchange format
 
-The current writer has a header with `type`, `launch`, `width`, `height`, `hz`, `scale`, `wall`, and optional `platform`, `clock`, `units`, `sampleHz`. Frame records use fields including `t`, `n`, `sc`, `ct`, `m`, `e`, `g`, `cm`, `c`, `cg`, `tx`, `tf`, `k`, `bg`, `s`, and `ev`. `t` is milliseconds; `ct` is seconds. Metadata entries use `{id,cls,nm,view,host,ax,pv}` and geometry entries start `[id,x,y,w,h,opacity,radius,flags]`, optionally followed by visible-rectangle values. The writer rounds geometry to 0.01 and opacity to 0.001. [Local writer](../../motion-lint/src/web/trace.ts), [run discovery](../../motion-lint/src/runs.ts), [rules and usage](../../motion-lint/README.md).
+The current writer has a header with `type`, `launch`, `width`, `height`, `hz`, `scale`, `wall`, and optional `platform`, `clock`, `units`, `sampleHz`. Frame records use fields including `t`, `n`, `sc`, `ct`, `m`, `e`, `g`, `cm`, `c`, `cg`, `tx`, `tf`, `k`, `bg`, `s`, and `ev`. `t` is milliseconds; `ct` is seconds. Metadata entries use `{id,cls,nm,view,host,ax,pv}` and geometry entries start `[id,x,y,w,h,opacity,radius,flags]`, optionally followed by visible-rectangle values. The writer rounds geometry to 0.01 and opacity to 0.001. Sources: motion-lint's `src/web/trace.ts` (writer), `src/runs.ts` (run discovery) and README (rules and usage).
 
 Important compatibility detail: virtual sweeps deliberately use `hz:60` and `sc:60*dt`. A 120 Hz virtual sample therefore uses `sc:0.5`, with sampling frequency represented separately. Do not set `hz:120` in an adapter and silently change motion-lint's normalization assumptions. Validate an adapter against actual writer output and parser fixtures.
 
@@ -172,23 +172,23 @@ Export stable node IDs, presentation rectangles, effective opacity, visible clip
 
 #### Layout-lint supplies a useful failure model
 
-Layout-lint reports shared-line near misses, clipping, overflow, and off-center icons. Its candidate-fix mode applies one change at a time, remeasures, and rejects changes that break previously satisfied invariants. Its scope isolation prevents comparing a transformed device stage's internal coordinates to unrelated page chrome. [Local README, lines 3–10 and 75 onward](../../layout-lint/README.md)
+Layout-lint reports shared-line near misses, clipping, overflow, and off-center icons. Its candidate-fix mode applies one change at a time, remeasures, and rejects changes that break previously satisfied invariants. Its scope isolation prevents comparing a transformed device stage's internal coordinates to unrelated page chrome. (layout-lint README, lines 3–10 and 75 onward.)
 
 For Rune, expose geometry so equivalent rules can run directly on layout snapshots. Return signed deltas, node keys, relevant ancestors, source locations, and the violated invariant. Do not automatically “fix” deliberate asymmetry. Let scenes declare alignment groups, allowed overlap, intentional overflow, and hit-target constraints.
 
 #### MotionXRay supplies presentation-level evidence
 
-The OpenCode iOS tooling document was recovered from Git history because it is absent from the current checkout: `git -C ../opencode-ios show '632aea45:docs/motion-tooling.md'`. The historical MotionXRay documentation describes capture of presentation geometry, opacity, transforms, blur, masks, Core Animation springs, source locations, and tunable keys. It reports approximately 0.8–2 ms/frame capture overhead, with serialization deferred until capture stops. These are historical tooling observations, not a Rune overhead target. Supplemental guidance is in `~/.opencode/skill/kit-motion/tooling/ios.md`.
+The OpenCode iOS tooling document was recovered from Git history (opencode-ios `632aea45:docs/motion-tooling.md`) because it is absent from the current checkout. The historical MotionXRay documentation describes capture of presentation geometry, opacity, transforms, blur, masks, Core Animation springs, source locations, and tunable keys. It reports approximately 0.8–2 ms/frame capture overhead, with serialization deferred until capture stops. These are historical tooling observations, not a Rune overhead target.
 
 Reported failures caught by this tooling include duplicate morph surfaces, gaps during opacity handoffs, premature layer retirement, geometry jumps, and stacked blur overdraw. Those cases should become named Rune regression scenes. MotionAudit-style continuity checks need property ownership and lifecycle data as well as rectangles; otherwise an intentional exit can look like a teleport or a missing surface can simply vanish from the sample set.
 
 #### Knobs supplies the tuning interface
 
-Knobs' remote descriptor protocol supports typed values, spring descriptors with `{duration,bounce}`, single and batched setters, and incoming synchronization without echo. Expose the same descriptor vocabulary through `Tune.*`; acknowledge the applied revision/frame so an agent knows which capture contains its change. Keep tune keys linked to source declarations and active animation IDs. [Local knobs README, remote controls section around lines 490–542](../../knobs/README.md)
+Knobs' remote descriptor protocol supports typed values, spring descriptors with `{duration,bounce}`, single and batched setters, and incoming synchronization without echo. Expose the same descriptor vocabulary through `Tune.*`; acknowledge the applied revision/frame so an agent knows which capture contains its change. Keep tune keys linked to source declarations and active animation IDs. ([knobs README](https://github.com/kitlangton/knobs#readme), remote controls section.)
 
 #### Separate correctness capture from performance capture
 
-Motion-lint warns that walking all layers can add milliseconds per frame, that display-link probes miss render-server/GPU lateness, and that simulator hitch results are relative. A 2 ms observer would consume 24% of a 120 Hz budget. [Local motion-lint README, lines 110 and 237–253](../../motion-lint/README.md)
+Motion-lint warns that walking all layers can add milliseconds per frame, that display-link probes miss render-server/GPU lateness, and that simulator hitch results are relative. A 2 ms observer would consume 24% of a 120 Hz budget. (motion-lint README, lines 110 and 237–253.)
 
 Provide three modes:
 
@@ -346,9 +346,9 @@ For Rune, the renderer contract is viewport-proportional work, incremental inval
 
 ### C1. Pin reference devices before calling a number a gate
 
-Proposed qualification classes are an M2 Pro Mac with 16 GiB and a verified 120 Hz display mode, and an iPhone 14 Pro/A16. These choices are reference classes, not a claim that those exact devices are currently available in Kit's fleet. Pin the actual device, OS, toolchain, renderer, power mode, thermal state, viewport, and scale in the benchmark manifest. If the fleet uses different hardware, establish a new baseline rather than relabeling its results.
+Proposed qualification classes are an M2 Pro Mac with 16 GiB and a verified 120 Hz display mode, and an iPhone 14 Pro/A16. These choices are reference classes, not a claim that those exact devices are available. Pin the actual device, OS, toolchain, renderer, power mode, thermal state, viewport, and scale in the benchmark manifest. If the test hardware differs, establish a new baseline rather than relabeling its results.
 
-Mac reference viewport: 1280×800 logical points at 2× for rendering workloads. iPhone: native full-screen viewport/scale, recorded explicitly. Use Release builds without inspector tree walks or video capture. Fonts and image assets remain fixed. The canonical offscreen lane runs on a pinned build worker; physical qualification runs on a dedicated device, never Studio's desk display.
+Mac reference viewport: 1280×800 logical points at 2× for rendering workloads. iPhone: native full-screen viewport/scale, recorded explicitly. Use Release builds without inspector tree walks or video capture. Fonts and image assets remain fixed. The canonical offscreen lane runs on a pinned build worker; physical qualification runs on a dedicated device, never a developer's desk display.
 
 All values in the following tables are **proposed initial budgets**. They need a first implementation and baseline before becoming release promises. Cross-framework evidence supports their order of magnitude, not a guarantee that Rune will achieve them.
 
@@ -462,6 +462,6 @@ Rejected alternatives:
 
 ## Research scope and reproducibility notes
 
-This report inspected local source/docs for motion-lint, layout-lint, Scrawl, knobs, and historical OpenCode iOS motion tooling; read primary protocol/tooling documentation; examined published benchmark results and measurement code; and recomputed the cited Typometer CSV statistics. It did not independently reproduce the external performance measurements, run release-size builds, open GUI windows, or benchmark Studio's display. No optional build time was consumed.
+This report inspected local source/docs for motion-lint, layout-lint, Scrawl, knobs, and historical OpenCode iOS motion tooling; read primary protocol/tooling documentation; examined published benchmark results and measurement code; and recomputed the cited Typometer CSV statistics. It did not independently reproduce the external performance measurements, run release-size builds, open GUI windows, or benchmark a desk display. No optional build time was consumed.
 
 Repository links to `main` are mutable. Before using an external number as a release gate, pin its source revision and retain the harness, assets, raw data, and machine manifest in the benchmark artifact. Local relative links in this report point to sibling checkouts; the historical iOS document requires the Git revision given above.

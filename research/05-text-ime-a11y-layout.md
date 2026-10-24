@@ -252,7 +252,7 @@
 
 ### 6.1 AccessKit in 2026 (`accesskit` v0.24+)
 
-Inspection of `<tmp>/maukea-src/accesskit/` confirms AccessKit now ships first-party platform adapters across **all five native targets**:
+Inspection of `accesskit/` confirms AccessKit now ships first-party platform adapters across **all five native targets**:
 - **macOS (`accesskit_macos`):** Maps `accesskit::Node` to `NSAccessibilityElement` subclasses (`accesskit/adapters/macos/src/node.rs:36-210`), posting `NSAccessibilityFocusedUIElementChangedNotification`, `NSAccessibilityValueChangedNotification`, and `NSAccessibilityLayoutChangedNotification`.
 - **iOS (`accesskit_ios`):** Implemented in `accesskit/adapters/ios/src/node.rs:1-515` (`v0.4.0`), mapping `accesskit::Node` to `UIAccessibilityElement` with `UIAccessibilityTraits` (`Button`, `Header`, `Adjustable`, `UpdatesFrequently`, `Selected`, `NotEnabled`), `accessibilityFrame` (converted via `UIAccessibilityConvertFrameToScreenCoordinates`), `accessibilityActivate`, `accessibilityIncrement`/`Decrement`, and `accessibilityScroll:`.
 - **Android (`accesskit_android`):** Implemented in `accesskit/adapters/android/` (`v0.6.0`), bridging to Android's `AccessibilityNodeProvider` (`AccessibilityNodeInfo` virtual view hierarchy) for TalkBack.

@@ -1,9 +1,7 @@
 # 23. Text raster quality and motion
 
-2026-10-22. Worktree `text-quality`, pre-squash baseline `9fb5400`. S5 from PLAN.md.
-Headless bitmaps only; no window or display capture. Builds use HiveMind;
-release GPU measurements run on Studio. Results below are filled from outputs,
-not from the hypothesis.
+S5 from PLAN.md. Headless bitmaps only; no window or display capture. Results
+below are filled from outputs, not from the hypothesis.
 
 ## Oracle and metrics
 
@@ -18,7 +16,7 @@ blend quality**. It does not claim parity with CoreText's shaping, optical-size
 selection, SF tracking or line breaking. SF is supplied from the local system
 font, never redistributed.
 
-Measured on Studio M5 Max, macOS 27.0.1 (26A434). Font SHA-256:
+Measured on an Apple M5 Max, macOS 27.0.1 (26A434). Font SHA-256:
 
 - Inter: `40d692fce188e4471e2b3cba937be967878f631ad3ebbbdcd587687c7ebe0c82`.
 - `/System/Library/Fonts/SFNS.ttf`: `44890958f3e0b997028121ed7c7a789f3f5cce227c7a93ce8f86ec0db26da571`.
@@ -55,7 +53,7 @@ coverage metric is separate from perceived brightness after nonlinear blending.
 - `rune-motion/src/layer.rs::settle_after` already computes a conservative
   analytic settle time; the store lands at `(target, 0)` and removes the track.
   Do not replace this with frame-by-frame epsilon tests or a second text spring.
-- Preserve research/19's shaped-layout cache, retained Taffy cache, virtual rows,
+- Preserve the shaped-layout cache, retained Taffy cache, virtual rows,
   reusable cluster scratch and zero-allocation presentation gate.
 
 ## Sources inspected
@@ -179,9 +177,9 @@ virtual timestamps, not physical display cadence or a whole-font motion audit.
 
 ## Performance
 
-Studio headless release, 120 Hz virtual time, one warmup and seven measured runs
+Headless release on the same M5 Max, 120 Hz virtual time, one warmup and seven measured runs
 per workload. Each pair alternates the saved original binary and the final one;
-pair order reverses on successive runs. Synthetic fixtures only. As in research/19,
+pair order reverses on successive runs. Synthetic fixtures only.
 CPU includes update/build/encode/submit, excludes readback and is not GPU latency.
 Both binaries end with **1,126 instances**. The atlas remains 2048² R8, four x
 phases, no color-keyed copies, and warmed presentation still allocates nothing.
@@ -199,41 +197,9 @@ load, so the paired comparison is authoritative. All paired runs and MADs are
 retained in `demo/text/performance.json`. Research/19's structural caches,
 virtualization and cluster scratch were not changed.
 
-These isolated A/B timings precede the rebase onto the public-history root and
-the concurrently landed app-lifetime/live-binding work. Saved executable SHA-256:
+Saved executable SHA-256:
 before `c2bb31da0a331b0fc68e9edbd228ac7df1e42ff3058851d32655d49f4f0cdb44`,
 after `e4c7d51a1ef2b8b05fdc6ec1d9e66944d7cc39c5fc5ce1a312a28c5f86d8b368`.
-
-### Post-rebase integration check
-
-At `22ee236` on base `35766fe`, three text tests (including CJK fallback), both
-allocation tests and all four release targets pass through HiveMind. Both fonts'
-GPU/coverage/phase images are byte-identical to the measured candidate. Regenerating
-the 21 affected UI stills also produces no diff.
-
-A second seven-pair run compares the saved original binary with the integrated
-build on a quieter Studio. This includes upstream app-lifetime and live-binding
-changes, so it does not isolate text cost:
-
-| Workload | CPU p50 before → after | CPU p95 before → after | First CPU frame before → after |
-|---|---:|---:|---:|
-| Stream | .248 → .248 ms | .423 → .407 ms | 4.07 → 4.09 ms |
-| 2,000-message stream | .126 → .148 ms | 2.880 → 2.272 ms | 9.06 → 6.31 ms |
-
-The integrated long-stream p50 rises .022 ms (MAD .004/.006 ms); report it rather
-than calling every timing unchanged. Its mean and p95 improve, and instance count
-stays 1,126. The isolated text comparison above did not show this increase.
-The `rebase_live` section of `demo/text/performance.json` retains every run and
-executable hashes.
-
-Follow-up landing verification: rebased onto `63d8d35` (timeline width hold plus
-the latest AppSpec/macOS changes), producing `726fb0e` / `f85a52c`. All three text
-tests, both allocation tests and four release targets pass again through HiveMind.
-Both fonts' GPU/coverage/phase PNGs and all 21 refreshed stills remain byte-identical.
-Seven-run current-build medians: stream p50/p95 .249/.402 ms, first 4.02 ms;
-long-stream .147/1.969 ms, first 5.92 ms. Both end at 1,126 instances.
-The `timeline_hold` section of `demo/text/performance.json` records these runs; this is an integration
-check, not another isolated before/after claim.
 
 ## Images and goldens
 
@@ -251,7 +217,7 @@ scores need not improve when moving toward macOS weight.
 `scripts/text-goldens.py` refreshes seven settings/OpenCode stills, two kit index
 images and twelve kit side-by-sides. It keeps the committed web columns and
 recomputes Rune plus the diff, without another browser capture. Updated scores
-live in `demo/text/kit-metrics.json`; the old 178-render report is marked historical.
+live in `demo/text/kit-metrics.json`.
 The streaming still is standardized to `--at 4`; its former capture time was
 not recorded, so its change includes that state adjustment. Historical motion
 strips/videos retain their recorded states and are not current text goldens.
@@ -259,15 +225,14 @@ strips/videos retain their recorded states and are not current text goldens.
 ## Reproduction
 
 ```sh
-hivemind run --kind cargo --worker mini --fetch .lab-output/text -- sh -c '
-  mkdir -p .lab-output/text/target/perf &&
-  env RUSTC_WRAPPER= cargo test -p rune quality_tests &&
-  env RUSTC_WRAPPER= cargo test -p rune --test alloc &&
-  env RUSTC_WRAPPER= cargo build --profile perf -p opencode -p settings -p kit-gallery &&
-  env RUSTC_WRAPPER= cargo build --release -p rune --example text_quality &&
-  swiftc -O scripts/coretext-quality.swift -o .lab-output/text/coretext-quality &&
-  cp "$CARGO_TARGET_DIR/perf/opencode" "$CARGO_TARGET_DIR/perf/settings" "$CARGO_TARGET_DIR/perf/kit-gallery" .lab-output/text/target/perf/ &&
-  cp "$CARGO_TARGET_DIR/release/examples/text_quality" .lab-output/text/'
+mkdir -p .lab-output/text/target/perf
+cargo test -p rune quality_tests
+cargo test -p rune --test alloc
+cargo build --profile perf -p opencode -p settings -p kit-gallery
+cargo build --release -p rune --example text_quality
+swiftc -O scripts/coretext-quality.swift -o .lab-output/text/coretext-quality
+cp target/perf/{opencode,settings,kit-gallery} .lab-output/text/target/perf/
+cp target/release/examples/text_quality .lab-output/text/
 
 # Headless bitmaps on the measurement host. Repeat for SFNS.ttf / "System Font".
 FONT=crates/rune/assets/Inter-Regular.ttf
@@ -287,26 +252,3 @@ python3 scripts/text-bench.py --before .lab-output/text-before/target/perf/openc
   --after target/perf/opencode --out perf/autoresearch/text/perf-paired-new
 uv run --with numpy --with pillow scripts/text-goldens.py
 ```
-
-## Landing
-
-The parent dispatched an independent Opus review of the implementation and
-verification commits; it found **no blockers**. The review requested compact
-public evidence, fresh stills after the upstream glyph-texel fix, and shared
-coverage correction in the rune-light example. The example now calls the same
-`glyph_coverage_exponent` as the runtime.
-The history-squash pause was lifted; this branch was rebased onto `35766fe`, then
-refreshed onto `63d8d35` and reverified as described above.
-The only conflict joined the upstream CJK test module and the new quality tests;
-both were retained. Unpushed commits were squashed so the large diagnostic JSON
-never enters public history; performance evidence is consolidated into one file.
-
-Final verification used base `f4d00b0`, including `ad45496`'s fragment-position
-glyph-texel fix. With CAS disabled (`HIVEMIND_CAS_SYNC=0`; this installed runner's
-`run` command does not accept `--no-cas`), all three targeted text tests, both
-allocation tests and five release targets pass, including rune-light's example.
-All 21 stills were freshly rendered from those binaries: 19 are byte-identical,
-while both kit index images now include the upstream combobox story. The Inter/SF
-GPU, coverage and phase images remain byte-identical, so the aggregate quality
-measurements above still apply. Subsequent landing rebases preserve the text,
-runtime and glyph-shader sources used by these checks.

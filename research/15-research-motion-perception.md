@@ -223,8 +223,8 @@ average-fps gates; Motion-style transform/scale-correction projection (solves a 
 motion blur (conflicts with Kit's rules, little benefit at 120 Hz); relying on OS compositor snapping for text.
 
 ## Open questions
-- Exact ms numbers in Ng/Jota (PDF unreadable via the fetch tool; run `pdftotext` on Pro or read it).
-- How much display latency does Metal/wgpu add on macOS ProMotion with `maximumDrawableCount = 2` vs 3, and does `presentAfterMinimumDuration`/`CAMetalDisplayLink` remove it? Needs a reserved-hardware spike (not Studio's screen).
+- Exact ms numbers in Ng/Jota (PDF unreadable via the fetch tool; run `pdftotext` locally or read it).
+- How much display latency does Metal/wgpu add on macOS ProMotion with `maximumDrawableCount = 2` vs 3, and does `presentAfterMinimumDuration`/`CAMetalDisplayLink` remove it? Needs a reserved-hardware spike (not a developer's desk display).
 - GPUI glyph atlas subpixel phase counts in x and y (read `platform.rs` before reusing).
 - Whether iOS exposes enough touch-sample timestamps to a Rust render thread outside UIKit's main-thread delivery (coalesced touches arrive via the main run loop); see [11](11-platform-shells.md).
 - Apple hitch thresholds and the Material 3 Expressive spring tokens were recalled, not re-read; confirm before they become policy.

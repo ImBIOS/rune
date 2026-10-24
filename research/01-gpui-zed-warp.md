@@ -1,11 +1,11 @@
 # 01 — GPUI, Zed Text & Rendering Architecture, and Warp's UI Framework (`warpui`)
 
 **Sources inspected directly:**
-- `~/code/open-source/gpui-fork` (`gpui 0.2.2` + Kit's commit `2582af8`, "Fix Metal display link fallback and rendering quality")
+- `gpui-fork` (`gpui 0.2.2` + Kit's commit `2582af8`, "Fix Metal display link fallback and rendering quality")
 - `zed-industries/zed` (`5447804`, Oct 2026) — `crates/gpui`, `crates/gpui_apple`, `crates/gpui_macos`, `crates/gpui_ios`, `crates/gpui_linux`, `crates/gpui_windows`, `crates/gpui_wgpu`, `crates/gpui_web`, `crates/sum_tree`, `crates/rope`, `crates/text`, `crates/multi_buffer`, `crates/editor`
 - `warpdotdev/warp` (`f8a9c71`, Oct 2026) — `crates/warpui_core` (MIT), `crates/warpui` (MIT), and ["How Warp Works"](https://www.warp.dev/blog/how-warp-works)
-- `~/code/open-source/flit` (`docs/motion.md`, `docs/glass.md`, `docs/perf-log.md`, `docs/raycast-research.md`, `src/native_ui.rs`)
-- `~/code/open-source/scrawl` (`src/native/pill/{mod.rs,model.rs,atlas.rs,pill.metal}`, `perf/start-latency.md`)
+- `flit` (`docs/motion.md`, `docs/glass.md`, `docs/perf-log.md`, `docs/raycast-research.md`, `src/native_ui.rs`)
+- `scrawl` (`src/native/pill/{mod.rs,model.rs,atlas.rs,pill.metal}`, `scrawl/perf/start-latency.md`)
 
 ---
 
@@ -18,7 +18,7 @@
 5. **GPUI's 3-phase `Element` pipeline (`request_layout` → `prepaint` → `paint`) + `EntityMap` lease model is ergonomic for static/editor UIs but brittle for choreographed motion and nested state.** Entities are leased out of a `SecondaryMap<EntityId, Box<dyn Any>>` onto the stack during `update` (`crates/gpui/src/app/entity_map.rs:138-233`), causing runtime `double_lease_panic` crashes whenever an observer, event callback, or AppKit delegate re-enters an entity currently being updated.
 6. **Zed's text engine (`sum_tree` → `rope` → `text` → `multi_buffer` → `editor::display_map`) is best-in-class and cleanly decoupled from GPUI.** `SumTree<T>` (`crates/sum_tree/src/sum_tree.rs:18`, `TREE_BASE = 6`, 12 items/node) + `Chunk` (`crates/rope/src/chunk.rs:9-33`, 128-byte `ArrayString` with four `u128` bitmaps for `chars`, `chars_utf16`, `newlines`, `tabs`) provides $O(\log N)$ seek between UTF-8 bytes, UTF-16 code units, and `Point(row, col)` using hardware `popcnt`/`tzcnt`, and `LineLayoutCache` (`crates/gpui/src/text_system/line_layout.rs:458-560`) adds zero-allocation `shape_line_by_hash` (`crates/gpui/src/text_system.rs:689-720`).
 7. **Upstream GPUI added `spring.rs`, `hot_reload.rs` (`subsecond`), `AccessKit` (`window/a11y.rs`), `gpui_ios`, and `gpui_web`, but animation remains a closure wrapper.** Even with `SpringAnimation` (`crates/gpui/src/spring.rs:1-214`), GPUI animations work by cloning and rebuilding the wrapped element subtree inside `request_layout` on every tick (`crates/gpui/src/elements/animation.rs:208-246`), with no persistent velocity across interrupted retargets, no off-main-thread compositor, and no GPU-property-only fast path.
-8. **Flit and Scrawl both hit hard architectural walls in GPUI and replaced GPUI windows with native AppKit/Core Animation/Metal surfaces.** Flit's GPUI morph suffered 6 structural visual defects (`~/code/open-source/flit/docs/motion.md:20-75`), 11–18 ms cold glyph/emoji stalls (`~/code/open-source/flit/docs/perf-log.md:72-97`), and 641 µs `SyncList` re-measurements, leading Flit to move its launcher to a `WindowServer`-composited `CASpringAnimation` + SwiftUI panel (`~/code/open-source/flit/src/native_ui.rs`). Scrawl replaced GPUI's `HudPillWindow` with a 440-line 3-pass native `CAMetalLayer` + `NSGlassEffectView` renderer (`~/code/open-source/scrawl/src/native/pill/mod.rs:1-31`) to get offscreen blur/glow passes, sub-millisecond cold start (`0.08 ms` hidden init vs `6.93 ms` eager), and zero idle CPU.
+8. **Flit and Scrawl both hit hard architectural walls in GPUI and replaced GPUI windows with native AppKit/Core Animation/Metal surfaces.** Flit's GPUI morph suffered 6 structural visual defects (`flit/docs/motion.md:20-75`), 11–18 ms cold glyph/emoji stalls (`flit/docs/perf-log.md:72-97`), and 641 µs `SyncList` re-measurements, leading Flit to move its launcher to a `WindowServer`-composited `CASpringAnimation` + SwiftUI panel (`flit/src/native_ui.rs`). Scrawl replaced GPUI's `HudPillWindow` with a 440-line 3-pass native `CAMetalLayer` + `NSGlassEffectView` renderer (`scrawl/src/native/pill/mod.rs:1-31`) to get offscreen blur/glow passes, sub-millisecond cold start (`0.08 ms` hidden init vs `6.93 ms` eager), and zero idle CPU.
 9. **Warp's `warpui` (`crates/warpui_core` + `crates/warpui`, MIT-licensed in `warpdotdev/warp`) is GPUI v1's direct sibling—originally co-designed with Nathan Sobo in 2021.** Warp kept the retained `Presenter` + Flutter-style `SizeConstraint` `Element` tree while adding two notable innovations GPUI lacks: thread-local automatic dependency tracking via `Tracked<T>` (`crates/warpui_core/src/core/autotracking/mod.rs:1-200`, eliminating manual `cx.notify()`) and a dual GUI + Ratatui TUI presenter (`crates/warpui_core/src/presenter/tui.rs:1-150`). However, its rendering pipeline (3 shaders, shelf-next-fit atlas without eviction, no subpixel AA, no offscreen filter passes) is less capable than GPUI's.
 10. **Recommendation for Rune: Do NOT fork GPUI (or `warpui`); build a fresh, modular architecture while stealing `sum_tree`/`rope`, `BoundsTree` batching, `etagere` + `LineLayoutCache`, and `gpui-fork` (`2582af8`) shader/text refinements.** Forking GPUI locks Rune into a 174k-LoC monolithic `App`/`Window` god-object where fixing borrow-reentrancy, retained compositor layers, interruptible spring retargeting, offscreen filter graphs, and damage-tracked rendering requires rewriting the core anyway.
 
@@ -64,7 +64,7 @@ On macOS and iOS, `MetalRenderer` (`crates/gpui_apple/src/metal_renderer.rs:226-
 
 ### 1.3 Severe Bottlenecks in GPUI's Renderer
 1. **Path rendering allocates & clears a full-viewport 4x MSAA texture per path batch:** Look at `MetalRenderer::draw_paths_to_intermediate` (`crates/gpui_apple/src/metal_renderer.rs:1100-1215`). Every time `Scene::batches()` yields a `PrimitiveBatch::Paths` (which cannot be merged across an intervening `Quad` or `MonochromeSprite` if bounding boxes overlap), GPUI ends the main `MTLRenderCommandEncoder`, starts a new render pass on a **full-window** `path_sample_count = 4` MSAA texture + resolve texture (`MTLLoadAction::Clear` across the entire viewport, not just the path's bounding box!), renders the path triangles, ends the encoder, and starts a *new* main `MTLRenderCommandEncoder` with `MTLLoadAction::Load` to blit the resolved texture via `path_sprite`. Having N interleaved path layers in a frame triggers $2N + 1$ full render-pass switches and $N$ full-window 4x MSAA clears.
-2. **No offscreen layer stack, backdrop filter, or group opacity:** `window.with_element_opacity(opacity, ...)` (`crates/gpui/src/window.rs:1249`) simply multiplies `element_opacity` into each individual quad/sprite color at CPU paint time. Overlapping children within a translucent container bleed through each other (Classic alpha-compositing bug) instead of compositing as a group. There is zero support for offscreen Gaussian blur, vibrancy, or shader post-processing passes—which is why Scrawl had to bypass GPUI for its glowing/blurred HUD pill (`~/code/open-source/scrawl/src/native/pill/mod.rs:1-31`).
+2. **No offscreen layer stack, backdrop filter, or group opacity:** `window.with_element_opacity(opacity, ...)` (`crates/gpui/src/window.rs:1249`) simply multiplies `element_opacity` into each individual quad/sprite color at CPU paint time. Overlapping children within a translucent container bleed through each other (Classic alpha-compositing bug) instead of compositing as a group. There is zero support for offscreen Gaussian blur, vibrancy, or shader post-processing passes—which is why Scrawl had to bypass GPUI for its glowing/blurred HUD pill (`scrawl/src/native/pill/mod.rs:1-31`).
 3. **Full-window redraw every frame & `Scene::replay` limits:** GPUI has no dirty-rect scissor/damage tracking at the GPU level; `draw()` always runs `MTLLoadAction::Clear` on the full `CAMetalDrawable`. `Entity::cached` (`crates/gpui/src/view.rs:258`) + `Scene::replay` (`crates/gpui/src/scene.rs:208-274`) copies the previous frame's `Quad`/`MonochromeSprite` structs from `rendered_frame.scene` into `next_frame.scene` and re-inserts every primitive into `BoundsTree` on the CPU. If *any* animation ticks in a window, the entire window's `Scene` is re-sorted, re-uploaded to `InstanceBuffer`, and re-rendered by the GPU.
 4. **Synchronous `presentsWithTransaction` stall during resize:** During window resize (`crates/gpui_macos/src/window.rs:3320-3341`), GPUI sets `renderer.set_presents_with_transaction(true)`, which forces `command_buffer.commit(); command_buffer.wait_until_scheduled(); drawable.present();` on the main thread (`crates/gpui_apple/src/metal_renderer.rs:845-853`).
 
@@ -81,8 +81,8 @@ On macOS and iOS, `MetalRenderer` (`crates/gpui_apple/src/metal_renderer.rs:226-
 - Starting page size: **1024×1024** for Monochrome/Subpixel, **2048×2048** for Polychrome (`crates/gpui_apple/src/metal_atlas.rs:138-145`), dynamically allocating additional `MTLTexture` pages when `etagere` fills up.
 - Uploads happen synchronously on the CPU into `MTLStorageModeManaged` (Intel) or `MTLStorageModeShared` (Apple Silicon unified memory) via `replaceRegion_mipmapLevel_withBytes_bytesPerRow` (`crates/gpui_apple/src/metal_atlas.rs:265-285`).
 
-### 1.6 Exact Diff Analysis: `~/code/open-source/gpui-fork` (`2582af8`) vs Upstream Zed (`5447804`)
-In `~/code/open-source/gpui-fork`, commit `2582af8` ("Fix Metal display link fallback and rendering quality", 4 files changed, +127/-16 lines) fixed four concrete production bugs in `gpui 0.2.2`:
+### 1.6 Exact Diff Analysis: `gpui-fork` (`2582af8`) vs Upstream Zed (`5447804`)
+In `gpui-fork`, commit `2582af8` ("Fix Metal display link fallback and rendering quality", 4 files changed, +127/-16 lines) fixed four concrete production bugs in `gpui 0.2.2`:
 
 | Fix in `gpui-fork` (`2582af8`) | How it works in `gpui-fork` | Status in Upstream Zed (`5447804`, Oct 2026) |
 |---|---|---|
@@ -202,23 +202,23 @@ Zed's text architecture is a layered tower of immutable, persistent, `Arc`-share
 ### 4.2 Why Flit and Scrawl Had to Bypass GPUI
 Kit's own production apps (`flit` and `scrawl`) provide the most concrete empirical evidence of where GPUI breaks down:
 
-#### Case Study A: Flit (`~/code/open-source/flit/docs/{motion.md,perf-log.md}`)
+#### Case Study A: Flit (`flit/docs/{motion.md,perf-log.md}`)
 Flit originally built its launcher and compact pill morph in GPUI (`gpui-fork`) and hit two walls:
-1. **Six structural motion/compositing defects (`~/code/open-source/flit/docs/motion.md:20-75`):**
+1. **Six structural motion/compositing defects (`flit/docs/motion.md:20-75`):**
    - *Two competing coordinate spaces:* Moving/resizing the `NSWindow` via AppKit (`window.resize()`) while rendering the inner pill inside GPUI's `Scene` caused 1-frame desynchronization ("two systems fighting over the same pixels").
    - *Top-left anchor jump on collapse:* Switching from the expanded 680×424 window to the compact 100×36 pill caused the pill to render at `(0,0)` (top-left of the large window) for 1–2 frames before `NSWindow::setFrame:` took effect.
    - *Hard content pop & background snap:* Because GPUI cannot cross-fade two retained view snapshots as offscreen textures with independent scale/blur transforms, the search bar and results list popped out in 1 frame (`Frame 12 → Frame 13`), and background alpha snapped (`0.95 → 0.30`).
-   - *Fix in Flit:* Flit replaced the GPUI morph and launcher panel with native AppKit/SwiftUI (`~/code/open-source/flit/src/native_ui.rs:1-99`) using a single `NSGlassEffectView` / `CAMetalLayer` driven by `CASpringAnimation` in `WindowServer` at a locked 120 Hz with zero per-frame Rust/CPU participation.
-2. **Measured GPUI CPU frame times & cold-glyph spikes (`~/code/open-source/flit/docs/perf-log.md:1-145`):**
+   - *Fix in Flit:* Flit replaced the GPUI morph and launcher panel with native AppKit/SwiftUI (`flit/src/native_ui.rs:1-99`) using a single `NSGlassEffectView` / `CAMetalLayer` driven by `CASpringAnimation` in `WindowServer` at a locked 120 Hz with zero per-frame Rust/CPU participation.
+2. **Measured GPUI CPU frame times & cold-glyph spikes (`flit/docs/perf-log.md:1-145`):**
    - Steady-state GPUI `Window::draw` CPU frame time (cached): **2.65 ms** before optimization, **1.46 ms** after removing per-row `SyncList` re-measurement (**641 µs/frame** wasted re-measuring row 0) and `TextInput` re-layout (**266 µs/frame**).
    - **Cold glyph/emoji rasterization spikes:** Opening the Emoji grid in GPUI caused **11.1–18.4 ms** frame spikes (2.2× the 8.33 ms 120 Hz budget) because `AppleTextSystem::rasterize_glyph` (`crates/gpui_apple/src/text_system.rs:435-537`) synchronously allocates a `CGContext`, renders the `CTFont` glyph on the CPU main thread, and uploads to `MetalAtlas` during `paint`.
-   - **Memory footprint:** Even an idle GPUI window with `MetalRenderer` (3× 2 MB `InstanceBuffer`s + `MetalAtlas` pages + font caches) consumed **78.8 MB RSS** at launch (`~/code/open-source/flit/docs/perf-log.md:135`).
+   - **Memory footprint:** Even an idle GPUI window with `MetalRenderer` (3× 2 MB `InstanceBuffer`s + `MetalAtlas` pages + font caches) consumed **78.8 MB RSS** at launch (`flit/docs/perf-log.md:135`).
 
-#### Case Study B: Scrawl (`~/code/open-source/scrawl/src/native/pill/mod.rs`, `perf/start-latency.md`)
+#### Case Study B: Scrawl (`scrawl/src/native/pill/mod.rs`, `scrawl/perf/start-latency.md`)
 Scrawl's HUD pill needs a liquid-glass capsule (`NSGlassEffectView`), an offscreen Gaussian-blurred waveform glow (`glow_a`, `glow_b` intermediate `RGBA8Unorm` textures), and 120 Hz spring animations:
-- GPUI's `Scene` cannot express multi-pass offscreen blur (`Pass 1: Clear glow_a` → `Pass 2: H-blur glow_a -> glow_b` → `Pass 3: Composite V-blurred glow_b + SDF shapes + R8 atlas text onto drawable`, `~/code/open-source/scrawl/src/native/pill/mod.rs:11-23`).
-- Scrawl replaced GPUI's `HudPillWindow` with a 440-line native `NSPanel` + `CAMetalLayer` + `CVDisplayLink` module (`~/code/open-source/scrawl/src/native/pill/{mod.rs,model.rs,atlas.rs,pill.metal}`).
-- **Measured startup win (`~/code/open-source/scrawl/perf/start-latency.md:26-35`):** Deferring `NSPanel`/`CAMetalLayer`/pipeline creation until the pill is shown cut `HudPillHandle::spawn()` cold-start latency from **6.93 ms** to **0.08 ms** (an **86×** reduction), and the display link fully stops (`CVDisplayLinkStop`) when idle for **0% CPU/GPU usage**.
+- GPUI's `Scene` cannot express multi-pass offscreen blur (`Pass 1: Clear glow_a` → `Pass 2: H-blur glow_a -> glow_b` → `Pass 3: Composite V-blurred glow_b + SDF shapes + R8 atlas text onto drawable`, `scrawl/src/native/pill/mod.rs:11-23`).
+- Scrawl replaced GPUI's `HudPillWindow` with a 440-line native `NSPanel` + `CAMetalLayer` + `CVDisplayLink` module (`scrawl/src/native/pill/{mod.rs,model.rs,atlas.rs,pill.metal}`).
+- **Measured startup win (`scrawl/perf/start-latency.md:26-35`):** Deferring `NSPanel`/`CAMetalLayer`/pipeline creation until the pill is shown cut `HudPillHandle::spawn()` cold-start latency from **6.93 ms** to **0.08 ms** (an **86×** reduction), and the display link fully stops (`CVDisplayLinkStop`) when idle for **0% CPU/GPU usage**.
 
 ### 4.3 Mobile (`gpui_ios`), Web (`gpui_web`), Hot Reload (`subsecond`), and Compile Times
 - **`gpui_ios` (`crates/gpui_ios/src/ios/{window.rs,text_input.rs}`, 3,684 LoC):** Uses `objc2-ui-kit` (`UIWindow`, `UIViewController`, `GPUIMetalView` with `CAMetalLayer`, `CADisplayLink`, `UIPanGestureRecognizer`, `UIScreenEdgePanGestureRecognizer` for back-swipe, and `GPUITextInputView` implementing `UITextInput`). Still early: `TouchEvent` in `crates/gpui/src/interactive.rs:114-117` explicitly notes *"Dispatch contract (core implementation pending)"*.
@@ -270,11 +270,11 @@ Studying `warpui_core` side-by-side with `gpui` reveals that **`warpui` is the e
    - *Source:* `zed:crates/gpui/src/bounds_tree.rs:14-180` and `zed:crates/gpui/src/scene.rs:171-206`.
    - *Why:* A ~200-line 4-ary R-tree that assigns each primitive `max_overlapping_order + 1` instead of a global counter. This turns painter's-algorithm trees (e.g. 100 list rows each drawing a background quad + icon + text) into 3 instanced GPU draw calls instead of 300.
 3. **Kit's `gpui-fork` (`2582af8`) Rendering & DisplayLink Fixes:**
-   - *Source:* `~/code/open-source/gpui-fork` commit `2582af8`:
+   - *Source:* `gpui-fork` commit `2582af8`:
      - Triangular blue-noise dithering in **both** gradients and Gaussian drop shadows (`src/platform/mac/shaders.metal:326-331, 495-503`).
      - Perceptual luminance-driven 5-step CoreText glyph dilation (`src/platform/mac/text_system.rs:274-305, 514-525`).
      - Explicit `kCGColorSpaceSRGB` (or `kCGColorSpaceExtendedSRGB` / `DisplayP3`) tagging on `CAMetalLayer` (`src/platform/mac/metal_renderer.rs:257-263`).
-     - `CVDisplayLinkCreateWithCGDisplay` → `CVDisplayLinkCreateWithActiveCGDisplays` fallback (`src/platform/mac/display_link.rs:25-60`) + complete stop when idle (`~/code/open-source/scrawl/src/native/pill/mod.rs:310-340`).
+     - `CVDisplayLinkCreateWithCGDisplay` → `CVDisplayLinkCreateWithActiveCGDisplays` fallback (`src/platform/mac/display_link.rs:25-60`) + complete stop when idle (`scrawl/src/native/pill/mod.rs:310-340`).
 4. **Two-Generation `LineLayoutCache` + `shape_line_by_hash` + Ligature-Breaking ULP Trick:**
    - *Source:* `zed:crates/gpui/src/text_system/line_layout.rs:458-560`, `zed:crates/gpui/src/text_system.rs:689-720`, `zed:crates/gpui_apple/src/text_system.rs:567-579`.
    - *Why:* Swapping `current_frame` and `previous_frame` `FxHashMap`s gives zero-overhead frame-to-frame layout retention and automatic eviction of offscreen lines without LRU bookkeeping, while `px(font_size.next_up())` cleanly breaks CoreText ligatures across syntax/selection boundaries.
@@ -305,7 +305,7 @@ Studying `warpui_core` side-by-side with `gpui` reveals that **`warpui` is the e
    - *Where:* `zed:crates/gpui/src/window.rs:4003-4123` and `zed:crates/gpui/src/view.rs:540-642`.
    - *Why:* Caching views by recording `(start_idx..end_idx)` slices into global per-frame vectors breaks whenever deferred draws or input handlers shift indices, and still forces the CPU to copy primitives and rebuild `BoundsTree` every frame. Retain per-view display lists (`RenderNode` / `Layer`) directly!
 6. **Avoid Synchronous Main-Thread Glyph/Emoji Rasterization Without Prewarming/Async Staging:**
-   - *Where:* `zed:crates/gpui_apple/src/text_system.rs:435-537` (`~/code/open-source/flit/docs/perf-log.md:72-97`).
+   - *Where:* `zed:crates/gpui_apple/src/text_system.rs:435-537` (`flit/docs/perf-log.md:72-97`).
    - *Why:* Cold CoreText/CGContext rasterization of 50+ emojis stalls the main thread for **11–18 ms**, blowing past the 8.33 ms 120 Hz budget.
 
 ---
@@ -321,7 +321,7 @@ Studying `warpui_core` side-by-side with `gpui` reveals that **`warpui` is the e
    - In GPUI, `Window` (`crates/gpui/src/window.rs`, 9,979 LoC) + `App` (`crates/gpui/src/app.rs`) + `Scene` (`crates/gpui/src/scene.rs`) are tightly coupled around a **single-pass, flat-vector, full-window-clear** frame loop.
    - Adding **retained compositor layers** (group opacity, 2D/3D layer transforms, offscreen blur/glow render passes like Scrawl's 3-pass HUD pill, and cross-fade view transitions like Flit's morph), **damage-tracked partial redraws**, **velocity-preserving retargetable springs**, and **fine-grained reactive state that doesn't panic on re-entrant borrows** requires replacing `Scene`, `MetalRenderer::draw`, `ViewElementState`, `AnimationElement`, and `EntityMap`—i.e., rewriting the heart of GPUI while fighting 174,157 lines of Zed-specific coupling.
 2. **Massive complexity and compile-time tax for features Rune doesn't want:**
-   - Upstream GPUI is 174k LoC (and growing rapidly for Zed's specific IDE needs). Maintaining a fork of GPUI (as `~/code/open-source/gpui-fork` already demonstrated) means either freezing on an old snapshot (`0.2.2`, losing `gpui_wgpu`, `gpui_ios`, `gpui_web`, `AccessKit`, `subsecond`) or rebasing against thousands of Zed-internal commits per month.
+   - Upstream GPUI is 174k LoC (and growing rapidly for Zed's specific IDE needs). Maintaining a fork of GPUI (as `gpui-fork` already demonstrated) means either freezing on an old snapshot (`0.2.2`, losing `gpui_wgpu`, `gpui_ios`, `gpui_web`, `AccessKit`, `subsecond`) or rebasing against thousands of Zed-internal commits per month.
 3. **The highest-leverage parts of Zed are already small and separable:**
    - `sum_tree` (3,327 LoC) + `rope` (4,438 LoC) have **zero** dependency on `gpui`.
    - `BoundsTree` is 240 LoC; `MetalAtlas` (`etagere`) is 405 LoC; `shaders.metal` (with `2582af8` fixes) is 910 LoC; `LineLayoutCache` is ~300 LoC. You can bring all of GPUI's best engineering into Rune in **<10,000 LoC** without inheriting the 165,000 LoC of baggage.

@@ -117,7 +117,7 @@ Rejected: process snapshot (6, full); runtime shader JIT; fixed-offset vsync tim
 ## Open questions
 - Does wgpu expose enough presentation control on Metal (target timestamps, drawable count, `presentedTime`), or must the Apple shell own `CAMetalLayer` directly?
 - Achievable max pixel delta between the CPU/headless snapshot and live GPU frame on each Apple GPU family; is tolerance + 1-frame fade enough to be invisible?
-- Real wgpu device init and first-`nextDrawable` costs on M-series cold boot (measure on `pro`, not Studio's screen).
+- Real wgpu device init and first-`nextDrawable` costs on M-series cold boot (measure on a reserved Mac, not a developer's desk display).
 - Size and decode cost of embedded snapshots across appearance × scale × window-size variants; do we store raw, lz4, or BC7?
 - iOS: can a launch-screen replacement be a CALayer image set before `didFinishLaunching`, or must it be a storyboard/`UILaunchScreen` image? (The latter requires a static asset, so the build must emit a PNG into the asset catalog.)
 - Which predictor (Kalman vs least-squares) performs best on Rune's own recorded drag traces?

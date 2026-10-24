@@ -2,7 +2,7 @@
 
 Research date: 2026-10-21. Sources are linked inline. Source code read from shallow clones of
 `flutter/flutter` (HEAD `77f043bc`, committed 2026-10-21) and `rive-runtime` (HEAD as of 2026-10-21)
-in `$TMPDIR/maukea-src/`. Apple claims come from WWDC transcripts and DocC JSON. Anything marked
+in a scratch directory. Apple claims come from WWDC transcripts and DocC JSON. Anything marked
 **(inference)** is my reading and not a documented fact. Anything marked **(estimate)** is not measured.
 
 ---
@@ -757,7 +757,7 @@ The full checklist is in "What Rune must match" below. The core is:
 4. Are Apple's exact rubber-band and paging constants unchanged in iOS 26? Measure by tracing
    `UIScrollView.contentOffset` per frame and fitting.
 5. What is the cost of analytic feathering vs. a separable blur at UI scale (hundreds of soft-edged
-   rects at 120 Hz on an A-series GPU)? Benchmark Rive's renderer `path_fiddle` vs. Vello on `ssh pro`.
+   rects at 120 Hz on an A-series GPU)? Benchmark Rive's renderer `path_fiddle` vs. Vello on a reserved Mac.
 6. Hot reload on a physical iPhone without a JIT: is a wasm UI module, an interpreted DSL, or dylib
    reload viable under iOS code-signing rules in debug builds? (Flutter relies on the Dart VM's JIT in
    debug.)

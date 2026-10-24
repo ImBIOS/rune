@@ -208,7 +208,7 @@ Inspected across `hex/ios/project.yml` and `opencode-ios/project.yml`:
 - **Recommended Pipeline (`XcodeGen` + `cargo` staticlib/XCFramework + `xcrun devicectl`):**
   1. Define the Xcode project declaratively in `project.yml` (`XcodeGen`, used in both `hex` and `opencode-ios`).
   2. Compile Rust as a `staticlib` (`librune_app.a`) for `aarch64-apple-ios` (device) and `aarch64-apple-ios-sim` (simulator) with a header/Swift bridge (`objc2` when Rust owns `main`, or `uniffi` / `@_cdecl` C-ABI when Swift owns `@main`).
-  3. For simulator iteration: `cargo build --target aarch64-apple-ios-sim` → `xcodebuild` → `xcrun simctl install booted ... && xcrun simctl launch booted ...` (routed via `mac-sim-lease` / `fleet`).
+  3. For simulator iteration: `cargo build --target aarch64-apple-ios-sim` → `xcodebuild` → `xcrun simctl install booted ... && xcrun simctl launch booted ...`.
   4. For physical iPhone ProMotion testing: `xcrun devicectl device install app --device <id> <App.app>` + `xcrun devicectl device process launch --device <id> --console <bundle-id>` gives sub-5-second incremental deploy and live stdout/stderr streaming over USB-C or Wi-Fi.
 
 ---
@@ -371,7 +371,7 @@ Support two complementary mechanisms:
 
 | Priority | Platform Shell | Est. Size | Est. Effort | Why This Order |
 |---:|---|---:|---:|---|
-| **1** | **macOS (`rune-macos` + `rune-apple`)** | ~4,500 LOC (`macos`) + ~2,000 LOC (`apple` shared) | **2–3 weeks** | Fastest local compile/debug cycle on Studio; directly powers `scrawl` and `flit`; establishes the `objc2` + `CAMetalLayer` + `CATransaction` + `NSGlassEffectView` + CoreText foundation shared with iOS. |
+| **1** | **macOS (`rune-macos` + `rune-apple`)** | ~4,500 LOC (`macos`) + ~2,000 LOC (`apple` shared) | **2–3 weeks** | Fastest local compile/debug cycle; directly powers `scrawl` and `flit`; establishes the `objc2` + `CAMetalLayer` + `CATransaction` + `NSGlassEffectView` + CoreText foundation shared with iOS. |
 | **2** | **iOS (`rune-ios` + `RuneKit` Swift host)** | ~3,000 LOC Rust + ~400 LOC Swift | **2 weeks** | Reuses `rune-apple` (CoreText, Metal/wgpu, `dispatch2`, `objc2`); unlocks 120 Hz ProMotion touch/spring validation on iPhone and immediate incremental adoption inside `opencode-ios` and `hex` via `RuneView: UIViewRepresentable`. |
 | **3** | **Web (`rune-web`, WASM + WebGPU)** | ~3,500 LOC | **2 weeks** | Safari 26 + Chrome/Firefox/Edge now all support WebGPU; essential for interactive documentation, motion playgrounds, and zero-install demos shared over Tailscale or the web. |
 | **4** | **Windows (`rune-windows`)** | ~6,500 LOC | **3–4 weeks** | Largest desktop user base outside macOS; `gpui_windows` provides a complete blueprint for DirectComposition, `DwmFlush` VSync, and `DirectManipulation` trackpad gestures. |

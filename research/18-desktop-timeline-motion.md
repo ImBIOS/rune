@@ -9,7 +9,7 @@ branch's `.jank` harness) or *not in code*. Bare file names are under `packages/
 - One spring, `timeline.growth` at 0.32 s and bounce 0 (`row-growth.ts:6-14 @ 39eb86d`), drives row growth, gap
   closing, Working's glide and the send flight. Springs are analytic and keep velocity when retuned
   (`packages/ui/src/motion/spring.ts:59-91 @ 39eb86d`), but per-frame pixel caps make growth frame-rate dependent.
-- The streaming edge is still Kit's decision (D-18), and "coming back lands at the bottom" is *not in code*.
+- The streaming edge is still an open decision, and "coming back lands at the bottom" is *not in code*.
 
 ## 1. Streaming edge and word reveal
 
@@ -105,7 +105,7 @@ Following needs pinned, a finished cold mount, no touch and no reduced motion (`
 39eb86d`). Losing it lands every growth (`virtualizer.tsx:1137-1145 @ 39eb86d`). Cold opens stay hidden until
 fonts load and the bottom is pinned (`virtualizer.tsx:1421-1445 @ 39eb86d`).
 
-Kit's new requirement is *not in code*: returning to a session, tab or window paints the bottom in the first
+A newer requirement is *not in code*: returning to a session, tab or window paints the bottom in the first
 frame, with no animated scroll, nothing that arrived while away streaming or growing, and no remembered position.
 While visible and following, a target more than about a viewport away should cut instead of gliding. Today a hidden tab pauses rAF, the first frame back clamps `dt` to 0.1 s (`packages/ui/src/motion/loop.ts:61 @
 39eb86d`), growth clamps it to 1/30, and the backlog animates at the per-frame cap. Paced text doesn't flush.

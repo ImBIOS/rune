@@ -21,7 +21,7 @@ memory of papers and tools and need a link check before anyone relies on a numbe
   optional `f32_pipeline`, plus a `libm` feature so float functions don't depend on the platform libc [read:
   `vello_cpu/src/lib.rs`]. Integer math + `libm` + no FMA contraction gives identical bytes on x86 and arm64.
 - **Perf gates by instruction count** (gungraun / iai-callgrind, CodSpeed) are exact and noise-free in virtualised CI
-  [read: gungraun README], but Valgrind does not run on macOS arm64; run those on Linux (ios-devbox / a Linux
+  [read: gungraun README], but Valgrind does not run on macOS arm64; run those on Linux (a Linux
   runner) and use Apple counters (`kpc`/Instruments) only for reserved-hardware confirmation.
 - **Record/replay at the app level beats `rr`.** Rune owns the clock, input and randomness, so a deterministic
   event-log replay (KBs) gives most of rr/Pernosco's value on macOS/iOS, where rr does not run [read: rr README lists
@@ -251,5 +251,5 @@ Verus broadly, GPU-exact hashing as the contract, Gold as a service (premature).
 - Does text shaping (Parley/HarfRust) output remain bit-stable across versions and platforms with pinned fonts?
   Pin versions and add a shaping-hash lane.
 - Instruction counts on Linux x86-64 vs Apple arm64: how well do they correlate for Rune's kernels? Calibrate once on
-  `pro` with `kpc` counters.
+  a Mac with `kpc` counters.
 - Exact figures for CodSpeed/Bencher/Replay.io/GUI-fuzzing papers need verification when search is back.

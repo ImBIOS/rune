@@ -1,6 +1,6 @@
 # 24. Reference renderer and differential testing
 
-2026-10-22. Reader: the next agent changing Rune's renderer. Run the commands
+Reader: the next agent changing Rune's renderer. Run the commands
 below before changing a tolerance or a shader formula.
 
 `crates/rune-ref` evaluates Rune's current instance stream on the CPU and checks
@@ -88,8 +88,7 @@ uses an image average that could hide an incorrect edge.
 
 ### Measured budget on Apple M4 Pro / Metal
 
-Rust 1.99.0, mini worker, all commands through HiveMind; no windows or screen
-captures. One successful corpus run contains 128 generated scenes × 8 isolated
+Rust 1.99.0 on an Apple M4 Pro build worker; no windows or screen captures. One successful corpus run contains 128 generated scenes × 8 isolated
 primitives, 128 composites, and 16 pinned-font text scenes.
 
 | Primitive | Measured maximum channel delta | Gate |
@@ -126,7 +125,6 @@ use it. Other primitive formulas and clip interpolation are unchanged. The saved
 case and full corpus pass. No existing PNG golden was rewritten. Fractionally
 positioned glyphs can intentionally change where the old lookup selected the wrong
 texel; existing app-wide snapshot equivalence has not been measured in this pass.
-The coordination thread was read before making this shader change [5].
 
 Harness corrections during bring-up: avoid translating the sentinel NO_CLIP
 bounds beyond the replay validator's coordinate limit; permit Rune's actual
@@ -144,8 +142,7 @@ outlier's x/y, expected/actual RGBA, node and source. This is top-contributor bl
 not a claim that the top node caused every error under translucent overlays.
 
 ```sh
-hivemind run --worker mini --kind cargo -- env RUSTC_WRAPPER= \
-  cargo run -p rune-ref --features gpu -- \
+cargo run -p rune-ref --features gpu -- \
   --scene crates/rune-ref/regressions/glyph-texel-boundary.json --diff --blame 13,34
 ```
 
@@ -157,7 +154,7 @@ repeated rendering allocates nothing.
 ## Exact gates are scripts, with Linux instruction measurement pending
 
 ```sh
-hivemind run --worker mini --kind cargo -- sh scripts/check-reference.sh --gpu
+sh scripts/check-reference.sh --gpu
 ```
 
 That runs exact CPU hashes/metamorphic properties, both allocation gates, GPU
@@ -172,34 +169,24 @@ the Rust/Valgrind/runner version manifest and refuses a missing baseline marker.
 Run both revisions on the same Linux worker with the same Cargo target directory.
 Install the matching `gungraun-runner --version 0.20.0` and Valgrind first.
 
-HiveMind's live worker registry exposed Studio, Pro, mini and ios-devbox, all
-macOS; it did not expose kitbox as a Linux job worker. Therefore instruction
-counts and the Linux-only benchmark have not been executed here. No instruction
-number or performance improvement is claimed. The repo had no CI configuration,
-so these scripts are ready for an existing/free Linux runner without adding a
-service. The first Linux run must validate the benchmark and save its baseline.
+No Linux worker was available when this was written, so instruction counts and
+the Linux-only benchmark have not been executed. No instruction
+number or performance improvement is claimed. These scripts are ready for any Linux runner. The first Linux run must validate the benchmark and save its baseline.
 
 ## Sources and remaining verification
 
-1. [Vello fuzz README](https://github.com/linebender/vello/blob/main/fuzz/README.md),
-   fetched 2026-10-22. Its default permits 2 per channel and 4 outlier pixels;
+1. [Vello fuzz README](https://github.com/linebender/vello/blob/main/fuzz/README.md). Its default permits 2 per channel and 4 outlier pixels;
    Rune intentionally permits zero outliers.
 2. [WGSL floating-point evaluation](https://www.w3.org/TR/WGSL/#floating-point-evaluation)
    and research/14 §3 for FMA/reassociation and tolerance policy.
-3. [Gungraun regression guide](https://github.com/gungraun/gungraun/blob/main/docs/src/regressions.md),
-   fetched 2026-10-22. Version 0.20 uses `Callgrind::soft_limits`.
-4. [Gungraun baselines](https://github.com/gungraun/gungraun/blob/main/docs/src/cli_and_env/baselines.md),
-   fetched 2026-10-22.
-5. [Rune coordination thread](https://anoma-ly.slack.com/archives/C0CB59ARQLE/p1792685407384429).
-6. Rune `shader.wgsl` and `render.rs`; research/12, /14 and /19; PLAN tenet 7 and §6c.
+3. [Gungraun regression guide](https://github.com/gungraun/gungraun/blob/main/docs/src/regressions.md). Version 0.20 uses `Callgrind::soft_limits`.
+4. [Gungraun baselines](https://github.com/gungraun/gungraun/blob/main/docs/src/cli_and_env/baselines.md).
+5. Rune `shader.wgsl` and `render.rs`; research/12 and /14; PLAN tenet 7 and §6c.
 
-The parent supplied an independent Opus medium review of `77c92ab`: no blockers.
-It verified that every Renderer caller supplies target dimensions as the viewport,
-so fragment position has the required coordinates. Static glyphs are pixel-snapped,
-which keeps their texel choices unchanged. The review's nonblocking benchmark nit
-is fixed: non-Linux workspace benches skip cleanly; the instruction-gate script
-still rejects non-Linux execution. After the publication thaw, the
-reviewed commit was rebased onto the new public root and current main.
+Every Renderer caller supplies target dimensions as the viewport, so fragment
+position has the required coordinates. Static glyphs are pixel-snapped, which
+keeps their texel choices unchanged. Non-Linux workspace benches skip cleanly; the
+instruction-gate script still rejects non-Linux execution.
 
 Remaining: Linux instruction execution, x86/arm CPU hash comparison, Vulkan/D3D12
 budget measurement, broader app snapshot comparison, and the new vector kinds.

@@ -1,6 +1,6 @@
 # Standalone Rust hot-patching with Subsecond
 
-Hands-on spike, 2026-10-21. [Source and reproduction instructions](../spikes/hot-patch/README.md). All Rust execution took place on the MacBook Pro through HiveMind over SSH. No windows were opened.
+Hands-on spike, 2026-10-21. [Source and reproduction instructions](../spikes/hot-patch/README.md). All Rust execution took place on a remote M2 Max build Mac. No windows were opened.
 
 ## Summary
 
@@ -17,15 +17,15 @@ Hands-on spike, 2026-10-21. [Source and reproduction instructions](../spikes/hot
 
 | Item | Actual setup |
 |---|---|
-| Worker | Pro, `mac.local`, Apple M2 Max, 12 cores / 96 GiB per fleet configuration |
+| Worker | M2 Max build worker, Apple M2 Max, 12 cores / 96 GiB |
 | OS | macOS 27.0.1, build 26A434 |
 | Compiler | `rustc 1.99.0 (b940084d7 2026-09-28)`, stable aarch64 Apple Darwin |
 | CLI | `dioxus 0.7.10 (57d6794)` |
 | Crates | `subsecond = =0.7.10`, `dioxus-devtools = =0.7.10`, lockfile retained |
 | Build settings | `opt-level=0`, `debug=0`, incremental enabled, two Cargo jobs |
-| Execution | `ssh pro` → `hivemind run --worker pro --kind cargo` |
+| Execution | Remote shell on a background-priority job runner |
 
-The pre-existing `/opt/homebrew/bin/dx` was Deno's launcher. I installed the latest available Dioxus release with `cargo-binstall dioxus-cli --no-confirm` under a Pro HiveMind lease. It installed `~/.cargo/bin/dx`, which the driver addresses explicitly. The inherited sccache wrapper rejected incremental compilation, so the driver clears `RUSTC_WRAPPER` for its subprocesses. [Recorded environment](../spikes/hot-patch/evidence/environment.json).
+The pre-existing `dx` on `PATH` was Deno's launcher. I installed the latest available Dioxus release with `cargo-binstall dioxus-cli --no-confirm` on the worker. It installed `~/.cargo/bin/dx`, which the driver addresses explicitly. The inherited sccache wrapper rejected incremental compilation, so the driver clears `RUSTC_WRAPPER` for its subprocesses. [Recorded environment](../spikes/hot-patch/evidence/environment.json).
 
 The binary has a counter, `Vec<u64>`, and nested `Panel` struct owned by `main`. Each nominal 120 Hz tick increments the counter and first Vec entry, calls `render`, and prints a timestamp, PID, state/Vec addresses, and output. It creates no `VirtualDom` or Dioxus renderer. `dioxus-devtools` does bring Dioxus core/signals dependencies transitively; this proves independence from the UI runtime, not a dependency graph free of Dioxus crates.
 
@@ -41,7 +41,7 @@ let output = subsecond::HotFn::current(render).call((&state,));
 
 ## 2. Measured edit latency and builds
 
-The driver writes `src/main.rs`, closes it, records Python `time.time_ns()`, and waits for the first frame whose revision matches the edit. Rust records its epoch timestamp immediately after the patched call returns. Both clocks are on Pro. These numbers include filesystem watching, compilation/linking, patch delivery/loading, and the next actual call. They exclude Studio→Pro source synchronization. The script makes ten revision edits in one process, with at least 30 observed frames between them. [Raw samples](../spikes/hot-patch/evidence/benchmark.json).
+The driver writes `src/main.rs`, closes it, records Python `time.time_ns()`, and waits for the first frame whose revision matches the edit. Rust records its epoch timestamp immediately after the patched call returns. Both clocks are on the worker. These numbers include filesystem watching, compilation/linking, patch delivery/loading, and the next actual call. They exclude syncing the source to the worker. The script makes ten revision edits in one process, with at least 30 observed frames between them. [Raw samples](../spikes/hot-patch/evidence/benchmark.json).
 
 | Edit | Save→new output, ms | Save→patch callback, ms |
 |---:|---:|---:|
@@ -62,7 +62,7 @@ With ten observations, nearest-rank p95 is the maximum. This is one short run on
 
 ### Scheduling qualification
 
-HiveMind launches jobs with background/utility scheduling and `nice 10`. The sleep-based 120 Hz loop was visibly batched: among 1,453 adjacent frame intervals, median was 0.004 ms, p95 16.917 ms, and maximum 207.965 ms. It catches up missed deadlines rather than presenting evenly spaced frames. Patch callback→first new output was 105.374 ms median and 190.332 ms maximum.
+The job runner launches jobs with background/utility scheduling and `nice 10`. The sleep-based 120 Hz loop was visibly batched: among 1,453 adjacent frame intervals, median was 0.004 ms, p95 16.917 ms, and maximum 207.965 ms. It catches up missed deadlines rather than presenting evenly spaced frames. Patch callback→first new output was 105.374 ms median and 190.332 ms maximum.
 
 These are actual background-worker measurements. They do not establish 120 Hz rendering quality or foreground-app latency. The callback timings still show that removing frame-wakeup delay alone would not get this run under 300 ms. A foreground-priority measurement would need a separate controlled run.
 
@@ -113,7 +113,7 @@ Adding a second captured reference makes the measured closure follow the other d
 
 ### Simulator
 
-Not executed. Pro had Xcode 27.1, no booted simulators, and only the `aarch64-apple-darwin` Rust target installed. More importantly, the release's [`start_ios_sim`](https://github.com/DioxusLabs/dioxus/blob/v0.7.10/packages/cli/src/build/apple.rs#L85-L145) boots a simulator and calls `open::that_detached` on `Simulator.app`. A straightforward `dx serve --ios` would violate this spike's no-visible-windows constraint. A headless simulator launcher with an existing lease would be a separate integration task. No simulator latency or state-preservation claim is made here.
+Not executed. The worker had Xcode 27.1, no booted simulators, and only the `aarch64-apple-darwin` Rust target installed. More importantly, the release's [`start_ios_sim`](https://github.com/DioxusLabs/dioxus/blob/v0.7.10/packages/cli/src/build/apple.rs#L85-L145) boots a simulator and calls `open::that_detached` on `Simulator.app`. A straightforward `dx serve --ios` would violate this spike's no-visible-windows constraint. A headless simulator launcher would be a separate integration task. No simulator latency or state-preservation claim is made here.
 
 ### Physical iPhone, researched only
 
