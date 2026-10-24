@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Apps can resize and centre their window.** `Tx::resize_window(size)` animates the
+  window's content size on the change's spring with the top edge fixed and the window kept on
+  its screen; `Tx::resize_window_instant` jumps, and `Tx::center_window` centres as AppKit's
+  `center` does. `WindowHandle::{resize, resize_instant, center}` do the same from outside a
+  handler. On macOS the content follows the frame every display frame; Windows and Linux
+  resize at once; Wayland doesn't keep the window on screen. Headless runs move the viewport
+  on the virtual clock. `App::fit_content_height()` opts a window into following its content's
+  natural height. See the crate README's "Resizing and centring a window".
 - **Headless recordings of the whole desktop.** `--desktop BACKDROP.png` renders every window a
   multi-window app makes, each at its placed frame with rounded corners and a soft shadow (larger
   for the key window), over the backdrop scaled to fill the output. Showing, hiding, placing and
