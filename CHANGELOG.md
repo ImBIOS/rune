@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Nested scales compose.** A scaled element inside a scaled element used to scale about its
+  own unscaled centre, dropping its parent's anchor, so it jumped when its own scale (a press, a
+  live scale) turned on, and a product of 1 ignored the parent's offset. It now scales about its
+  centre where its parent draws it, and hit testing follows. This moves the output of apps
+  that nest scales; a single scale draws exactly as before.
 - **Text scales with its box, and `El::scale`.** Text inside a scaled element used to keep its
   full size while the box shrank around it. Under `live_scale`, `press_scale`, scale transitions
   and scale beats in a sequence loop, glyphs, span backgrounds, selection and caret now scale

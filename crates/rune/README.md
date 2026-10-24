@@ -90,8 +90,9 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
 - **Scale**: `.scale(0.5)` draws an element and everything in it at half size about its centre,
   like SwiftUI's `scaleEffect`. Layout keeps the unscaled size, so siblings don't move, and hit
   testing follows the drawn rect. It multiplies with `press_scale`, `live_scale` and scale
-  transitions. Under all of them, text, icons and images scale with their box (link hit boxes and
-  a text field's caret follow). Text under a still scale rasterizes at the scaled size, so it stays
+  transitions, and nested scales compose: a scaled child scales about its centre where its
+  scaled parent draws it. Under all of them, text, icons and images scale with their box (link
+  hit boxes and a text field's caret follow). Text under a still scale rasterizes at the scaled size, so it stays
   crisp. While a scale springs, text samples its rest-size glyphs, filtered, and turns crisp when
   the spring settles. That way a spring doesn't rasterize a glyph at every frame's size. Text
   under `live_scale` rasterizes at the scale rounded to 1/32. A matched flight's own label keeps

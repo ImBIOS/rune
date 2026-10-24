@@ -342,8 +342,11 @@ struct Inh {
     paint_fade: [f32; 4],
     paint_fade_origin: [f32; 4],
     rounded: Option<([f32; 4], f32)>,
+    /// Ancestors' scales, composed: a point `x` (points, with `dx`/`dy` applied) draws at
+    /// `anchor_to + (x - anchor) * scale`. The anchors differ when scales nest.
     scale: f32,
     anchor: [f32; 2],
+    anchor_to: [f32; 2],
     blur: f32,
     /// Vertical offset in points from scroll viewports and growth rows above.
     dy: f32,
@@ -390,7 +393,7 @@ impl Default for Inh {
     fn default() -> Self {
         Inh { opacity: 1.0, paint_opacity: 1.0, clip: NO_CLIP, fade: [0.0; 4], fade_origin: NO_CLIP,
             paint_clip: NO_CLIP, paint_fade: [0.0; 4], paint_fade_origin: NO_CLIP, rounded: None,
-            scale: 1.0, anchor: [0.0; 2], blur: 0.0, dy: 0.0, dx: 0.0, cover: [0.0; 2], outer: None, mark: 0, group: 0.0,
+            scale: 1.0, anchor: [0.0; 2], anchor_to: [0.0; 2], blur: 0.0, dy: 0.0, dx: 0.0, cover: [0.0; 2], outer: None, mark: 0, group: 0.0,
             scale_motion: ScaleMotion::Still }
     }
 }
@@ -3419,7 +3422,7 @@ impl<S: 'static> Runtime<S> {
                 // flight, also drop that flight's cover offset and clip.
                 let [clip, fade, fade_origin] = pinh.outer.unwrap_or([pinh.clip, pinh.fade, pinh.fade_origin]);
                 pinh = Inh { opacity: 1.0, paint_opacity: 1.0, clip, fade, fade_origin, paint_clip: clip, paint_fade: fade,
-                    paint_fade_origin: fade_origin, rounded: None, scale: 1.0, anchor: [0.0; 2], blur: 0.0,
+                    paint_fade_origin: fade_origin, rounded: None, scale: 1.0, anchor: [0.0; 2], anchor_to: [0.0; 2], blur: 0.0,
                     dx: pinh.dx - pinh.cover[0], dy: pinh.dy - pinh.cover[1], cover: [0.0; 2], outer: None,
                     scale_motion: ScaleMotion::Still, ..pinh };
             }
@@ -3464,13 +3467,15 @@ impl<S: 'static> Runtime<S> {
                 } else {
                     ScaleMotion::Still
                 });
-            let (sc, anchor) = if (own_sc - 1.0).abs() > 1e-5 {
-                (pinh.scale * own_sc, [p.anchor.x + pinh.dx, p.anchor.y + pinh.dy])
-            } else {
-                (pinh.scale, pinh.anchor)
-            };
+            // Scale about this node's centre where its ancestors' scales put it, so a scaled child
+            // of a scaled parent stays in place.
+            let sc = pinh.scale * own_sc;
+            let centre = [p.anchor.x + pinh.dx, p.anchor.y + pinh.dy];
+            let centre_to = [pinh.anchor_to[0] + (centre[0] - pinh.anchor[0]) * pinh.scale,
+                pinh.anchor_to[1] + (centre[1] - pinh.anchor[1]) * pinh.scale];
+            let (anchor, anchor_to) = if (own_sc - 1.0).abs() > 1e-5 { (centre, centre_to) } else { (pinh.anchor, pinh.anchor_to) };
             // A pressed element still hits at its resting size, so a press near its edge stays inside.
-            let press_anchor = anchor;
+            let press_anchor = centre_to;
             let blur = pinh.blur + p.blur * sc;
             let filter_margin = blur * s * 3.0;
 
@@ -3482,12 +3487,13 @@ impl<S: 'static> Runtime<S> {
             if self.row_h[i] >= 0.0 {
                 raw_edges[3] = raw_edges[1] + self.row_h[i];
             }
-            let mut rect_pt = if (sc - 1.0).abs() > 1e-5 {
+            // A product of 1 (0.5 inside 2.0) can still move the box.
+            let mut rect_pt = if (sc - 1.0).abs() > 1e-5 || anchor != anchor_to {
                 [
-                    anchor[0] + (raw_edges[0] - anchor[0]) * sc,
-                    anchor[1] + (raw_edges[1] - anchor[1]) * sc,
-                    anchor[0] + (raw_edges[2] - anchor[0]) * sc,
-                    anchor[1] + (raw_edges[3] - anchor[1]) * sc,
+                    anchor_to[0] + (raw_edges[0] - anchor[0]) * sc,
+                    anchor_to[1] + (raw_edges[1] - anchor[1]) * sc,
+                    anchor_to[0] + (raw_edges[2] - anchor[0]) * sc,
+                    anchor_to[1] + (raw_edges[3] - anchor[1]) * sc,
                 ]
             } else {
                 raw_edges
@@ -4075,7 +4081,7 @@ impl<S: 'static> Runtime<S> {
                 dy -= grid((offset - origin) as f32, s);
                 if let Some(st) = self.scrolls.get_mut(&self.nodes[i].id) { st.held = held; }
             }
-            let (mut scale, mut anchor, mut dx) = (sc, anchor, pinh.dx);
+            let (mut scale, mut anchor, mut anchor_to, mut dx) = (sc, anchor, anchor_to, pinh.dx);
             let (mut cover_offset, mut outer) = (pinh.cover, pinh.outer);
             if let Some((k, c)) = cover {
                 // Children ride this node's presented origin at their rest layout. Scale them by
@@ -4085,14 +4091,14 @@ impl<S: 'static> Runtime<S> {
                 let plain = [dx, dy];
                 dx = rect_pt[0] - p.rect.x + c[0] / k;
                 dy += rect_pt[1] - p.rect.y - pinh.dy + c[1] / k;
-                (scale, anchor) = (k, [rect_pt[0], rect_pt[1]]);
+                (scale, anchor, anchor_to) = (k, [rect_pt[0], rect_pt[1]], [rect_pt[0], rect_pt[1]]);
                 cover_offset = [dx - plain[0], dy - plain[1]];
                 outer = Some([pinh.clip, pinh.fade, pinh.fade_origin]);
             }
             inherit_fade(&mut hit_fade, &mut hit_origin, fade_origin, fade);
             self.inh_scratch[i] = Inh { opacity: effective_opacity, paint_opacity: o,
                 clip: intersect(hit_clip, clip), fade: hit_fade, fade_origin: hit_origin,
-                paint_clip: clip, paint_fade: fade, paint_fade_origin: fade_origin, rounded, scale, anchor, blur, dy, dx,
+                paint_clip: clip, paint_fade: fade, paint_fade_origin: fade_origin, rounded, scale, anchor, anchor_to, blur, dy, dx,
                 cover: cover_offset, outer, mark, group,
                 scale_motion: if cover.is_some() { ScaleMotion::Moving } else { scale_motion } };
             if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_double_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())
@@ -5357,6 +5363,67 @@ mod tests {
         assert!(!crisp, "a moving scale samples its rest-size glyphs");
         for _ in 0..120 { rt.frame(1.0 / 120.0); }
         assert_eq!(glyphs(&rt), (rest, true), "back at rest exactly as before");
+    }
+
+    #[test]
+    fn nested_scales_compose_about_each_mapped_centre() {
+        #[derive(Clone, Copy, PartialEq, Debug)]
+        enum How { Press, Static, ProductOfOne, ThreeLevels }
+        struct State { how: How, pressed: u32 }
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let leaf = el().key("c").size(40.0, 40.0).on_press(|s: &mut State| s.pressed += 1);
+            let inner = match s.how {
+                How::Press => leaf.press_scale(0.96),
+                How::Static => leaf.scale(0.8),
+                How::ProductOfOne => leaf.scale(2.0),
+                How::ThreeLevels => el().key("mid").size(100.0, 100.0).items_start()
+                    .live_scale(&crate::live::Live::new(0.8)).child(leaf.press_scale(0.9)),
+            };
+            col().size(400.0, 400.0).items_start()
+                .child(el().key("p").size(200.0, 200.0).items_start().scale(0.5).child(inner))
+        }
+        let edges = |rt: &Runtime<State>| {
+            let r = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("c")).unwrap().rect;
+            [r[0], r[1], r[0] + r[2], r[1] + r[3]]
+        };
+        let near = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 0.3);
+        let run = |how| {
+            let mut rt = Runtime::new(State { how, pressed: 0 }, view, (400.0, 400.0), Env::new(true, 2.0));
+            rt.frame(0.0);
+            rt.frame(1.0 / 120.0);
+            rt
+        };
+        let press = |rt: &mut Runtime<State>, x: f32, y: f32| {
+            rt.pointer_move(x, y);
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(1.0 / 120.0);
+        };
+        // The parent draws [50, 50, 150, 150]; the child's centre (20, 20) lands at (60, 60).
+        for (how, rest, held) in [
+            (How::Press, [50.0, 50.0, 70.0, 70.0], Some([50.4, 50.4, 69.6, 69.6])),
+            (How::Static, [52.0, 52.0, 68.0, 68.0], None),
+            // 0.5 × 2.0 is 1, but the child still moves with its parent.
+            (How::ProductOfOne, [40.0, 40.0, 80.0, 80.0], None),
+            // The middle level draws [50, 50, 90, 90] at 0.4, putting the child's centre at 63.
+            (How::ThreeLevels, [55.0, 55.0, 71.0, 71.0], Some([55.8, 55.8, 70.2, 70.2])),
+        ] {
+            let mut rt = run(how);
+            assert!(near(edges(&rt), rest), "{how:?} at rest: {:?} vs {rest:?}", edges(&rt));
+            press(&mut rt, rest[0] - 1.0, rest[1] - 1.0);
+            press(&mut rt, rest[0] + 1.0, rest[1] + 1.0);
+            assert_eq!(rt.state.pressed, 1, "{how:?}: hits follow the drawn rect");
+            let Some(held) = held else { continue };
+            let (cx, cy) = ((rest[0] + rest[2]) * 0.5, (rest[1] + rest[3]) * 0.5);
+            rt.pointer_move(cx, cy);
+            rt.pointer_down(cx, cy);
+            for _ in 0..30 { rt.frame(1.0 / 120.0); }
+            assert!(near(edges(&rt), held), "{how:?} held: {:?} vs {held:?}", edges(&rt));
+            // Still hit at its resting size: a release just inside its resting corner presses.
+            rt.pointer_up(rest[2] - 0.2, rest[3] - 0.2);
+            rt.frame(1.0 / 120.0);
+            assert_eq!(rt.state.pressed, 2, "{how:?}: a held press hits at the resting rect");
+        }
     }
 
     #[test]
