@@ -286,7 +286,10 @@ impl<S: 'static> AppHandle<S> {
         self.shared.wake();
     }
 
-    /// Show the window (creating it if needed) and bring it forward.
+    /// Show the window (creating it if needed), restore it if minimized, and activate the app
+    /// with it in front, including the first open of a window that doesn't exist yet. A
+    /// nonactivating panel takes keys without activating. The window open at launch doesn't
+    /// activate the app beyond what the platform does at launch.
     pub fn open(&self) {
         self.request(|q| q.window = Some(WindowRequest::Open(None)));
     }

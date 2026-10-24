@@ -94,6 +94,10 @@ name = "macos_overlay_source"
 harness = false
 
 [[test]]
+name = "open_activates"
+harness = false
+
+[[test]]
 name = "shortcut_layout_macos"
 harness = false
 

@@ -280,7 +280,8 @@ impl WindowHandle {
     pub fn hide(&self) { self.set_visible(false); }
     /// Focus/activate an already-visible window, restoring it if minimized. Wayland requests attention.
     pub fn focus(&self) { self.send(WakeEvent::Focus); }
-    /// Open/focus a retained host. A default close destroys its host; use App::keep_running to reopen.
+    /// Show, restore and activate, creating the window if needed (see `AppHandle::open`).
+    /// A default close destroys its host; use App::keep_running to reopen.
     /// Windows added with `App::window` always reopen. Requests made before the loop runs
     /// apply once the window's host starts.
     pub fn open(&self) { self.send(|slot| WakeEvent::Window(slot, WindowRequest::Open(None))); }
@@ -1123,6 +1124,10 @@ impl<S: 'static> Host<S> {
         let token = token.or(from_env);
         let Some(w) = self.win.as_mut() else {
             self.create(event_loop, token, true);
+            // On macOS a new window becomes key without activating the app, so activate it
+            // like a reopen does. The launch open leaves activation to the platform.
+            #[cfg(target_os = "macos")]
+            if self.started && let Some(w) = self.win.as_ref().filter(|w| w.visible) { w.focus(); }
             return;
         };
         if !w.visible {
