@@ -2228,28 +2228,25 @@ impl<S> Measurement<'_, S> {
                 _ => panic!("virtual stack padding must be in points"),
             };
             let v = self.virtuals.entry(path.clone()).or_default();
-            v.estimate = estimate;
+            v.set_estimate(estimate);
             v.scroll_path = scroll_path.to_owned();
             v.viewport = height;
             v.pad_top = padding(el.style.padding.top);
             v.pad_bottom = padding(el.style.padding.bottom);
             let old_keys: HashSet<_> = v.keys.get(v.range.clone()).unwrap_or_default().iter().cloned().collect();
-            let keys: Vec<_> = el.children.iter().map(|c| c.key.clone().expect("virtual rows require stable keys")).collect();
-            let all: HashSet<_> = keys.iter().cloned().collect();
-            assert_eq!(all.len(), keys.len(), "virtual row keys must be unique");
-            let mut anchor = None;
-            if !pinned {
-                let mut y = v.pad_top;
-                for key in &v.keys {
-                    let h = v.height(key);
-                    if y + h > offset && all.contains(key) { anchor = Some((key.clone(), y)); break; }
-                    y += h;
-                }
-            }
-            v.keys = keys;
-            v.heights.retain(|k, _| all.contains(k));
-            v.born.retain(|k, _| all.contains(k));
-            for key in &v.keys { v.born.entry(key.clone()).or_insert(self.commits); }
+            // Most commits keep the same rows; only a change pays for sets of every key.
+            let anchor = if v.same_keys(el.children.iter().map(|c| c.key.as_deref())) {
+                if pinned { None } else { v.first_visible(offset, |_| true) }
+            } else {
+                let keys: Vec<_> = el.children.iter().map(|c| c.key.clone().expect("virtual rows require stable keys")).collect();
+                let all: HashSet<&str> = keys.iter().map(String::as_str).collect();
+                assert_eq!(all.len(), keys.len(), "virtual row keys must be unique");
+                let anchor = if pinned { None } else { v.first_visible(offset, |k| all.contains(k)) };
+                v.born.retain(|k, _| all.contains(k.as_str()));
+                for key in &keys { v.born.entry(key.clone()).or_insert(self.commits); }
+                v.set_keys(keys);
+                anchor
+            };
             v.anchor = anchor;
             let delta = v.anchor_delta();
             offset = (offset + delta).max(0.0);
@@ -2259,7 +2256,7 @@ impl<S> Measurement<'_, S> {
             v.select(offset, pinned);
             if force_all { v.range = 0..v.keys.len(); v.before = 0.0; v.after = 0.0; }
             let mounted: HashSet<_> = v.keys[v.range.clone()].iter().cloned().collect();
-            for key in old_keys.difference(&mounted).filter(|k| all.contains(*k)) {
+            for key in old_keys.difference(&mounted).filter(|k| v.has(k)) {
                 self.virtual_culled.insert(format!("{path}/{key}"));
             }
             el.style.padding.top = length(v.pad_top + v.before);
@@ -2286,7 +2283,7 @@ impl<S> Measurement<'_, S> {
         for (path, v) in self.virtuals.iter_mut() {
             let Some((ci, _)) = nodes.iter().enumerate().find(|(_, n)| n.path == *path) else { continue };
             for n in nodes.iter().filter(|n| n.parent == Some(ci)) {
-                v.heights.insert(n.key.clone().unwrap(), n.local.h);
+                v.set_height(n.key.as_deref().unwrap(), n.local.h);
             }
             let Some(scroll) = nodes.iter().find(|n| n.path == v.scroll_path) else { continue };
             v.viewport = scroll.local.h;
