@@ -184,10 +184,14 @@ impl Materials {
                 let layers: *mut AnyObject = msg_send![root, sublayers];
                 if let Some(layers) = layers.as_ref() {
                     let at = |layer: &AnyObject| -> usize { msg_send![layers, indexOfObjectIdenticalTo: layer] };
-                    // AppKit orders subview layers; the Metal layer must stay above the host's.
-                    if at(metal) < at(host_layer) || at(metal) == usize::MAX {
+                    if at(metal) == usize::MAX {
                         let _: () = msg_send![root, insertSublayer: metal, above: host_layer];
                     }
+                    // AppKit re-sorts the sublayers to its subviews' order whenever it updates
+                    // the layer tree, such as when a hidden window is shown, which would leave
+                    // the drawn frame under the material until the next frame. Siblings
+                    // composite by zPosition first.
+                    let _: () = msg_send![metal, setZPosition: 1.0f64];
                 }
             }
         }
