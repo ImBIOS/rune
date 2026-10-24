@@ -65,14 +65,16 @@ impl VirtualDesktop {
         ((d.frame[0] + (x - d.frame[0] * d.scale) / d.scale) as f32, (d.frame[1] + (y - d.frame[1] * d.scale) / d.scale) as f32)
     }
 
-    /// The display a point in desktop pixels lies on, else the primary display.
+    /// The display a point in desktop pixels lies on, else the primary display. Each display's
+    /// pixels start at its point origin times its scale (as `displays` reports), so with mixed
+    /// scales those boxes overlap: there the display whose point frame holds the point wins.
     pub fn display_at(&self, at: Option<(i32, i32)>) -> &VirtualDisplay {
-        let on = |d: &&VirtualDisplay| at.is_some_and(|(x, y)| {
-            let [dx, dy, w, h] = d.frame.map(|v| v * d.scale);
-            let (x, y) = (f64::from(x), f64::from(y));
-            x >= dx && y >= dy && x < dx + w && y < dy + h
-        });
-        self.displays.iter().find(on).unwrap_or_else(|| self.primary())
+        let Some((x, y)) = at else { return self.primary() };
+        let (x, y) = (f64::from(x), f64::from(y));
+        let inside = |[dx, dy, w, h]: [f64; 4]| x >= dx && y >= dy && x < dx + w && y < dy + h;
+        let mut owners = self.displays.iter().filter(|d| inside(d.frame.map(|v| v * d.scale)));
+        let first = owners.clone().next();
+        owners.find(|d| inside(d.frame)).or(first).unwrap_or_else(|| self.primary())
     }
 
     /// What a window factory sees: desktop pixels, like native displays.
@@ -135,5 +137,27 @@ mod tests {
         assert_eq!(default.displays(), vec![crate::Display { id: None, name: Some("headless".into()),
             position: (0, 0), size: (1920, 1080), scale: 2.0, primary: true }], "unchanged factory display");
         assert!(VirtualDesktop::from_script(Some(&json!({"displays": [{"frame": [0, 0]}]})), 2.0).is_err());
+    }
+
+    #[test]
+    fn positions_on_mixed_scale_displays_convert_by_the_display_they_land_on() {
+        // A Retina laptop with a 1x monitor to its right: their pixel boxes overlap from x = 1512.
+        let script = json!({"displays": [{"id": 1, "frame": [0, 0, 1512, 982], "scale": 2, "primary": true},
+                                         {"id": 2, "frame": [1512, 0, 1920, 1080], "scale": 1}]});
+        let desktop = VirtualDesktop::from_script(Some(&script), 2.0).unwrap();
+        let on = |p: (i32, i32)| (desktop.display_at(Some(p)).id, desktop.to_points(p));
+        assert_eq!(on((200, 100)), (1, (100.0, 50.0)));
+        assert_eq!(on((1300, 1800)), (1, (650.0, 900.0)));
+        assert_eq!(on(desktop.displays()[1].position), (2, (1512.0, 0.0)), "the monitor's origin is on the monitor");
+        assert_eq!(on((1612, 100)), (2, (1612.0, 100.0)));
+        assert_eq!(on((-50, 0)).0, 1, "off every display: the primary");
+
+        // The 2x display second and to the right: its pixels don't overlap the primary's.
+        let script = json!({"displays": [{"id": 1, "frame": [0, 0, 1920, 1080], "scale": 1, "primary": true},
+                                         {"id": 2, "frame": [1920, 0, 1512, 982], "scale": 2}]});
+        let desktop = VirtualDesktop::from_script(Some(&script), 2.0).unwrap();
+        let on = |p: (i32, i32)| (desktop.display_at(Some(p)).id, desktop.to_points(p));
+        assert_eq!(on((3840 + 200, 1500)), (2, (2020.0, 750.0)));
+        assert_eq!(on((100, 100)), (1, (100.0, 100.0)));
     }
 }
