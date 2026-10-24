@@ -54,6 +54,7 @@ pub struct App<S: 'static> {
     pub(crate) macos_window: crate::MacWindowOptions,
     pub(crate) compositor: Option<Box<dyn crate::compose::Compositor<S>>>,
     pub(crate) window_options: crate::WindowOptions,
+    pub(crate) fit_content_height: bool,
     #[cfg(all(feature = "dev", debug_assertions))]
     pub(crate) dev: Option<crate::dev::Config<S>>,
 }
@@ -83,6 +84,7 @@ impl<S: 'static> App<S> {
             macos_window: crate::MacWindowOptions::default(),
             compositor: None,
             window_options: crate::WindowOptions::default(),
+            fit_content_height: false,
         }
     }
 
@@ -96,6 +98,15 @@ impl<S: 'static> App<S> {
     /// starts from them, and `WindowSpec::options` replaces them.
     pub fn window_options(mut self, options: crate::WindowOptions) -> Self {
         self.window_options = options;
+        self
+    }
+
+    /// Size the window's height to its content, as SwiftUI's `.windowResizability(.contentSize)`
+    /// does: the root lays out at its natural height for the window's width, the window opens
+    /// at that height and follows it when the content changes, on the change's spring like
+    /// `Tx::resize_window`. Give the root no fixed or `fill` height. Users still set the width.
+    pub fn fit_content_height(mut self) -> Self {
+        self.fit_content_height = true;
         self
     }
 

@@ -1198,6 +1198,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         desktop: None,
         windows: Default::default(),
     });
+    let fit_height = app.fit_content_height;
     let (spec, state, shared) = app.into_parts(args.scene.as_deref());
     let shortcuts = crate::shortcuts::Guard::attach(&shared, std::sync::Arc::new(|| {}), true, false);
     let mut menus = crate::native_menu::Guard::attach(&shared, true);
@@ -1208,6 +1209,8 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     if let Some(dev) = dev { crate::dev::launch(&mut rt, &spec, dev, std::sync::Arc::new(|| {})); }
     rt.on_focus = on_focus;
     rt.transparent = transparent;
+    rt.fit_height = fit_height;
+    if fit_height { let height = rt.content_height(); rt.set_viewport((size.0, height), scale); }
     if args.tree.is_some() { rt.key_warnings = Some(Vec::new()); }
     rt.track_marks = comp.is_some();
     let runtime_ms = launched.elapsed().as_secs_f64() * 1000.0 - state_ms;
@@ -1929,6 +1932,31 @@ mod tests {
         assert_eq!(viewport("moving-again", false, "0.3"), (w, h), "the virtual clock is deterministic");
         assert_eq!(viewport("landed", false, "2"), (300.0, 600.0));
         assert_eq!(viewport("instant", true, "0.3"), (300.0, 600.0));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fit_content_height_follows_the_content() {
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rune-fit-content-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("script.json");
+        std::fs::write(&script, r#"[{"t": 0.1, "type": "tap", "key": "more"}]"#).unwrap();
+        let viewport = |name: &str, at: &str| {
+            let spec = AppSpec::new("fit", (300.0, 400.0), || 1usize, |rows, _| crate::col().key("root").w_full()
+                .child(crate::el().key("more").size(50.0, 50.0).on_press(|rows: &mut usize| *rows += 1))
+                .children((0..*rows).map(|i| crate::el().key(format!("row{i}")).size(100.0, 40.0))));
+            let tree = dir.join(format!("{name}.json"));
+            let args = ["--script", script.to_str().unwrap(), "--scale", "2", "--fps", "60", "--at", at, "--tree", tree.to_str().unwrap()];
+            headless(crate::App::new(spec).fit_content_height(), Args::parse_from(args.map(String::from).into()));
+            let tree: Value = serde_json::from_str(&std::fs::read_to_string(tree).unwrap()).unwrap();
+            let size = tree["viewport"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect::<Vec<_>>();
+            (size[0], size[1])
+        };
+        assert_eq!(viewport("open", "0"), (300.0, 90.0), "opens at the content's height");
+        let (_, h) = viewport("moving", "0.3");
+        assert!(h > 90.0 && h < 130.0, "follows on the change's spring: {h}");
+        assert_eq!(viewport("landed", "2"), (300.0, 130.0));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

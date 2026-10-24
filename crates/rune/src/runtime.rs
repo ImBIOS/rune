@@ -610,6 +610,15 @@ pub struct Runtime<S: 'static> {
     pub(crate) popup_open: bool,
     /// A frame change for the window (`Tx::resize_window`), with its spring resolved.
     pub(crate) window_frame: Option<crate::window_frame::FrameRequest>,
+    /// The window's height follows the root's natural height (`App::fit_content_height`).
+    pub(crate) fit_height: bool,
+    /// The content height last asked of the window.
+    fit_asked: Option<f32>,
+    /// A fitting window at rest asked to move: this frame shows the commit's motion at its
+    /// start, as the window can't move until the next frame.
+    fit_hold: bool,
+    /// The last frame held its motion for the window (`fit_hold`). The host reads it.
+    pub(crate) fit_held: bool,
     /// What `update` asked of the next commit.
     pending: Tx,
     pub animating: bool,
@@ -818,6 +827,10 @@ impl<S: 'static> Runtime<S> {
             shell_request: None,
             popups: Default::default(),
             window_frame: None,
+            fit_height: false,
+            fit_asked: None,
+            fit_hold: false,
+            fit_held: false,
             popup_open: false,
             pending: Tx::default(),
             animating: false,
@@ -881,6 +894,12 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub fn set_viewport(&mut self, viewport: (f32, f32), scale: f32) {
+        // A window that fits its content lays out the same at any height: its own resize
+        // mustn't cut short the layout springs it is following.
+        if self.fit_height && viewport.0 == self.viewport.0 && scale == self.env.scale {
+            self.viewport = viewport;
+            return;
+        }
         if viewport != self.viewport || scale != self.env.scale {
             if scale != self.env.scale { self.flights.clear(); }
             self.viewport = viewport;
@@ -1081,6 +1100,30 @@ impl<S: 'static> Runtime<S> {
             self.window_frame = Some(self.window_frame.unwrap_or_default().merge(request));
         }
         crate::clipboard::flush_memory(self);
+    }
+
+    /// Asks the window for the content's new height, on this commit's spring. The first
+    /// commit, a viewport change and `Tx::instant` jump.
+    fn fit_window(&mut self, height: f32, tx: &Tx, first: bool) {
+        let height = height.ceil_to(self.env.scale).max(1.0);
+        if self.fit_asked.unwrap_or(self.viewport.1) == height { return; }
+        self.fit_asked = Some(height);
+        let jump = first || tx.instant || tx.relayout || self.reduced_motion;
+        if !jump && !self.animating && self.wall_start.is_some() && cfg!(target_os = "macos") { self.fit_hold = true; }
+        let request = crate::window_frame::FrameRequest {
+            size: Some((self.viewport.0, height)), animate: !jump,
+            spring: (!jump).then(|| tx.motion.unwrap_or(motion::DEFAULT)), center: false,
+        };
+        self.window_frame = Some(self.window_frame.unwrap_or_default().merge(request));
+    }
+
+    /// The root's natural height at the current width, measured without committing, so a
+    /// window that fits its content can open at that height.
+    pub(crate) fn content_height(&mut self) -> f32 {
+        let measured = self.measure(&Tx::default());
+        let height = measured.nodes.first().map_or(self.viewport.1, |root| root.local.h);
+        self.layout = measured.layout;
+        height.ceil_to(self.env.scale).max(1.0)
     }
 
     /// `poll` alone, for a hidden window's wake: its timers and inbox advance while nothing
@@ -1356,6 +1399,8 @@ impl<S: 'static> Runtime<S> {
             for event in trace.events { self.trace_event(event); }
             for (name, kind, value) in trace.channels { self.trace_channel(name, kind, value); }
         }
+        self.fit_held = std::mem::take(&mut self.fit_hold);
+        let dt = if self.fit_held { 0.0 } else { dt };
         let animating = self.step_motion(dt) || live_animating;
         self.stats.shaped = self.text.shaped - shaped0;
         self.animating = animating && self.time_scale > 0.0;
@@ -1916,6 +1961,7 @@ struct Measurement<'a, S> {
     view: fn(&S, &mut Cx<S>) -> El,
     env: Env,
     viewport: (f32, f32),
+    fit_height: bool,
     system_reduced_motion: bool,
     reduced_motion: bool,
     time_scale: f32,
@@ -2125,7 +2171,8 @@ impl<S> Measurement<'_, S> {
         }
         let mut nodes = Vec::with_capacity(self.nodes.len().max(32));
         // Root constraints are part of the retained style, not a dirty write after flattening.
-        root.style.size = Size { width: length(self.viewport.0), height: length(self.viewport.1) };
+        // A window that fits its content lays the root out at its natural height.
+        root.style.size = Size { width: length(self.viewport.0), height: if self.fit_height { auto() } else { length(self.viewport.1) } };
         let root_id = flatten(root, None, "", 0, motion::DEFAULT, false, &mut taffy, &mut nodes, &mut self.layout_entries, scale);
         self.layout_entries.retain(|_, entry| {
             if !entry.used { taffy.remove(entry.id).unwrap(); }
@@ -2139,7 +2186,7 @@ impl<S> Measurement<'_, S> {
                     root_id,
                     Size {
                         width: AvailableSpace::Definite(self.viewport.0),
-                        height: AvailableSpace::Definite(self.viewport.1),
+                        height: if self.fit_height { AvailableSpace::MaxContent } else { AvailableSpace::Definite(self.viewport.1) },
                     },
                     |inputs, _id, ctx, style| {
                         taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |known, avail| {
@@ -2256,6 +2303,7 @@ impl<S: 'static> Runtime<S> {
             view: self.view,
             env: self.env,
             viewport: self.viewport,
+            fit_height: self.fit_height,
             system_reduced_motion: self.system_reduced_motion,
             reduced_motion: self.reduced_motion,
             time_scale: self.time_scale,
@@ -2312,6 +2360,7 @@ impl<S: 'static> Runtime<S> {
         self.stats.commits = self.commits;
         let instant = tx.instant || first;
         let now = self.t;
+        if self.fit_height && let Some(root) = nodes.first() { self.fit_window(root.local.h, tx, first); }
 
         // Growth stacks: rows of a stack that existed before grow; a new stack mounts settled.
         for c in 0..nodes.len() {

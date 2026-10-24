@@ -584,7 +584,7 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) {
 impl<S: 'static> Host<S> {
     fn new(window_spec: WindowSpec<S>, native_handle: WindowHandle, args: Args, proxy: EventLoopProxy<WakeEvent>, slot: usize, gpu_pool: Rc<RefCell<Weak<Gpu>>>, wayland: bool) -> Self {
         let WindowSpec { mut app, options, key: _, on_created } = window_spec;
-        let args = app.resolve_args(args);
+        let mut args = app.resolve_args(args);
         let on_window = app.on_window.take();
         let on_ready = app.on_ready.take();
         let macos_window = std::mem::take(&mut app.macos_window);
@@ -604,11 +604,21 @@ impl<S: 'static> Host<S> {
         let chrome = app.chrome;
         #[cfg(all(feature = "dev", debug_assertions))]
         let dev = app.dev.take();
-        let (spec, state, shared) = app.into_parts(args.scene.as_deref());
-        let size = args.size.unwrap_or(spec.size);
+        let fit_height = app.fit_content_height;
+        let (mut spec, state, shared) = app.into_parts(args.scene.as_deref());
+        let mut size = args.size.unwrap_or(spec.size);
         // The window reports the system appearance and scale when it opens.
         let env = Env::new(args.theme.as_deref() != Some("light"), 1.0);
         let mut rt = runtime_for(&spec, state, size, env, waker.clone());
+        if fit_height {
+            // Opens at the content's height; the first frame corrects any difference its
+            // real scale makes.
+            rt.fit_height = true;
+            size.1 = rt.content_height();
+            rt.set_viewport(size, env.scale);
+            spec.size = size;
+            args.size = None;
+        }
         rt.on_focus = on_focus;
         rt.set_system_reduced_motion(crate::preferences::reduced_motion());
         rt.set_full_keyboard_access(crate::preferences::full_keyboard_access());
@@ -1659,10 +1669,12 @@ impl<S: 'static> Host<S> {
             l.stop_pacing();
         }
         // A frame change this frame's commit asked for starts with the layout springs it
-        // started, which have shown a step; the next frame moves it.
+        // started, which have shown a step unless they held for the window; the next frame
+        // moves it.
         #[cfg(target_os = "macos")]
         if !hidden && self.rt.window_frame.is_some() {
-            self.take_frame_request(self.frame_secs(frame_time) - crate::frame_clock::RESUME_STEP, true);
+            let shown = if std::mem::take(&mut self.rt.fit_held) { 0.0 } else { crate::frame_clock::RESUME_STEP };
+            self.take_frame_request(self.frame_secs(frame_time) - shown, true);
         }
     }
 }
