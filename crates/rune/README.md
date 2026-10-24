@@ -582,7 +582,16 @@ shift-click to extend. Cmd+C (Ctrl+C off macOS) copies and Cmd+A selects all of 
 the selection; a right-click opens a native Copy menu on macOS unless the element has its own
 `on_secondary_press`. It shows the I-beam (a link inside it keeps the pointing hand and opens on
 click), isn't a Tab stop, and a press anywhere else clears it. One text holds the selection at a
-time. It works across spans, wrapped lines and bidi runs.
+time. It works across spans, wrapped lines and bidi runs. Cmd+C and Cmd+A are the plain chords
+only: with Shift, Option or Control added they go to the app. A click on the text makes it the
+holder, so Cmd+A selects all of it, as in an AppKit text view; Cmd+C with nothing selected goes to
+the app. A view that changes the text, removes it or turns `selectable` off drops its selection.
+
+Inside a row that handles input, the row keeps it: an unmoved click on the text presses (and
+double-presses) the nearest ancestor with a handler, hover and press paint reach that ancestor,
+and its `on_secondary_press` wins over the Copy menu. A drag that selects text doesn't press.
+Inside a draggable row (`on_drag` or `drag_out`), dragging drags the row and double- and
+triple-clicks still select words and lines. Text with its own handlers keeps them.
 
 The selection lives in the runtime, so selecting never re-runs the view or re-lays out the text.
 `El::selection_color` sets the highlight for selectable text and text fields alike, and both draw
@@ -602,8 +611,12 @@ stays hidden until the pointer leaves and comes back. It follows the element if 
 takes no hover or clicks from anything under it.
 
 On macOS it's AppKit's own tooltip: the window registers each help rect with
-`addToolTipRect:owner:userData:` and re-registers only when they change, so the delay, look and
-placement are the system's. Elsewhere Rune draws it: Windows' tooltip control and GTK's would need
+`addToolTipRect:owner:userData:`, snapped to device pixels, and replaces only the rects that
+moved, so scrolling a list doesn't restart a still toolbar button's tooltip. Elements behind a
+modal register nothing, and the parts of an element under something drawn over it (a popover)
+are left out. The delay, look and placement are the system's. Overlays draw theirs on every
+platform: AppKit shows tooltips only in the active app, and most overlays are non-activating
+panels. Elsewhere Rune draws it: Windows' tooltip control and GTK's would need
 to own the window procedure or toolkit that winit already owns, and Linux and the web have no
 toolkit-free tooltip API. The drawn tooltip waits 0.5 s (the double-click time on Windows; set
 `Runtime::help_delay` to change it), sits under the element or above it when there's no room,
