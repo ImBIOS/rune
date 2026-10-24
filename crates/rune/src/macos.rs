@@ -9,7 +9,7 @@ use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize};
 use crate::{DisplayTarget, KeyPolicy, OverlayInput, OverlayLevel, OverlayOptions, OverlaySupport};
 use std::{cell::{Cell, RefCell}, collections::VecDeque, rc::Rc, time::{Duration, Instant}};
 
-struct PanelFlags { keys: bool, warming: Rc<Cell<bool>>, constrain: bool }
+struct PanelFlags { keys: bool, warming: Rc<Cell<bool>>, revealing: Rc<Cell<bool>>, constrain: bool }
 
 // Initialized nonactivating panel. No application activation call.
 declare_class!(
@@ -29,8 +29,9 @@ declare_class!(
         #[method(occlusionState)]
         fn occlusion_state(&self) -> usize {
             // wgpu skips nextDrawable for occluded windows. Permit only the explicit
-            // alpha-zero prewarm acquisition; ordinary visibility readbacks stay native.
-            if self.ivars().warming.get() { 2 }
+            // alpha-zero prewarm acquisition and a fade-in, which AppKit reports as occluded
+            // while its alpha is near zero; other visibility readbacks stay native.
+            if self.ivars().warming.get() || self.ivars().revealing.get() { 2 }
             else { unsafe { msg_send![super(self), occlusionState] } }
         }
         // AppKit keeps windows below the menu bar's level out from under it; an overlay goes
@@ -466,6 +467,8 @@ pub(crate) struct Panel {
     visible: Cell<bool>,
     pointer_poll: Cell<Option<Instant>>,
     warming: Rc<Cell<bool>>,
+    /// A fade-in is running: the panel reads as visible until it finishes or hides.
+    revealing: Rc<Cell<bool>>,
     /// Bumped by every alpha change, so a finished fade-out orders out only if nothing came after.
     fade: Rc<Cell<u64>>,
     wake: Option<crate::Waker>,
@@ -495,9 +498,10 @@ impl Panel {
         let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(at.size.0 as f64, at.size.1 as f64));
         // SAFETY: AppKit calls on the main thread; the panel is retained by `Panel`.
         let warming = Rc::new(Cell::new(false));
+        let revealing = Rc::new(Cell::new(false));
         let style = if ordinary { ns_window.styleMask() } else { NSWindowStyleMask::Borderless };
         let panel = unsafe {
-            let panel: Retained<OverlayPanel> = msg_send_id![super(mtm.alloc().set_ivars(PanelFlags { keys: options.keys == KeyPolicy::OnDemand, warming: warming.clone(), constrain: ordinary })),
+            let panel: Retained<OverlayPanel> = msg_send_id![super(mtm.alloc().set_ivars(PanelFlags { keys: options.keys == KeyPolicy::OnDemand, warming: warming.clone(), revealing: revealing.clone(), constrain: ordinary })),
                 initWithContentRect: rect,
                 styleMask: style | NSWindowStyleMask::NonactivatingPanel,
                 backing: NSBackingStoreType::NSBackingStoreBuffered,
@@ -553,7 +557,7 @@ impl Panel {
             return None;
         }
         panel.setDelegate(unsafe { ns_window.delegate() }.as_deref());
-        Some(Panel { bridge, monitors: RefCell::new(None), pointer, options: options.clone(), follow_pointer: Cell::new(options.follow_pointer), visible: Cell::new(false), pointer_poll: Cell::new(None), warming, fade: Rc::default(), wake, panel, window: ns_window, view })
+        Some(Panel { bridge, monitors: RefCell::new(None), pointer, options: options.clone(), follow_pointer: Cell::new(options.follow_pointer), visible: Cell::new(false), pointer_poll: Cell::new(None), warming, revealing, fade: Rc::default(), wake, panel, window: ns_window, view })
     }
 
     /// On the primary screen (the one with the menu bar), in AppKit's bottom-left coordinates.
@@ -611,15 +615,20 @@ impl Panel {
         use objc2::runtime::{AnyClass, AnyObject};
         let generation = self.fade.get() + 1;
         self.fade.set(generation);
+        let revealing = alpha > 0.0 && !duration.is_zero();
+        self.revealing.set(revealing);
         // SAFETY: AppKit calls on the main thread; the completion handler runs there too.
         unsafe {
             if let Some(context) = AnyClass::get("NSAnimationContext") {
                 let _: () = msg_send![context, beginGrouping];
                 let current: *mut AnyObject = msg_send![context, currentContext];
                 let _: () = msg_send![current, setDuration: duration.as_secs_f64()];
-                if order_out && !duration.is_zero() {
-                    let (panel, fade) = (self.panel.clone(), self.fade.clone());
-                    let done = block2::RcBlock::new(move || if fade.get() == generation { panel.orderOut(None) });
+                if (order_out || revealing) && !duration.is_zero() {
+                    let (panel, fade, flag) = (self.panel.clone(), self.fade.clone(), self.revealing.clone());
+                    let done = block2::RcBlock::new(move || if fade.get() == generation {
+                        flag.set(false);
+                        if order_out { panel.orderOut(None) }
+                    });
                     let _: () = msg_send![current, setCompletionHandler: &*done];
                 }
                 let animator: *mut AnyObject = msg_send![&*self.panel, animator];
@@ -656,6 +665,7 @@ impl Panel {
     /// Hides the panel, fading its alpha out over `fade` (instantly when zero). Input stops at once.
     pub fn hide(&self, fade: Duration) {
         self.visible.set(false);
+        self.revealing.set(false);
         self.pointer_poll.set(None);
         self.monitors.borrow_mut().take();
         self.pointer.captured.set(false);
