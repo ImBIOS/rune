@@ -1303,6 +1303,46 @@ Compiler artifacts live in `target/live-edit-build`.
 The `hot` feature is opt-in. Feature-off builds have no patch dependencies, connection,
 dispatch, generation checks or extra runtime fields. Goldens use feature-off builds.
 
+### An external app crate
+
+An app outside this repository needs one feature, and no code changes:
+
+```toml
+[features]
+hot = ["rune/hot"]
+```
+
+```sh
+scripts/rune-dev --manifest-path ../my-app/Cargo.toml --patch 'src/ui/**/*.rs' \
+  [--bin NAME] [--package NAME] [--features a,b] [-- APP ARGS]
+```
+
+`--patch` globs are relative to the app crate and can repeat; `**` spans directories.
+Function bodies in those files patch live. Every other file in the crate, its path
+dependencies and Rune itself is a restart. The launcher mirrors the crate, each of its
+path dependencies and their workspaces' manifests, lockfiles and Cargo configs to the
+build Mac; a git-pinned Rune needs nothing extra. If the app's workspace has no
+`[profile.rune-hot]`, the launcher passes one with `cargo --config`.
+
+The launcher sets `RUNE_HOT=1`, which turns live editing on like `--hot` without any
+argv plumbing. All entry points dispatch through the patch table: `App::run`/`try_run`,
+`run_windows`, `run_windows_with`, `run_windows_with_args` and `WindowSpec::from_app`.
+A process holds one devserver connection, and each patch reaches every open window.
+Rune's flags after `--`, such as `--snap-on-patch` and `--window KEY`, need an app that
+passes its arguments to Rune; with `--snap-on-patch`, `--window` picks which window of a
+`run_windows` app renders headless.
+
+### The desk Mac
+
+`--desk` (implied on the maintainers' desk Mac) compiles on `--build-host`
+(`RUNE_DEV_BUILD_HOST`, default `pro`; `RUNE_DEV_WORKER` names its build worker) but runs
+the app here. The build Mac's copy of each build records its path and exits; the launcher
+copies that binary here, checks its SHA-256 and platform, and runs it with the app
+arguments. The app connects to dx through an SSH tunnel and a local relay that copies each
+patch dylib here before the app loads it. A patch is refused if the build Mac's binary no
+longer matches the one running here. A rebuild on the build Mac restarts the app here.
+Source edits here are relayed to the build Mac as before.
+
 ### Compatible edits and restart boundaries
 
 The launcher validates Rust syntax, then copies compatible edits into a private compiler
@@ -1322,8 +1362,8 @@ locals can reset after any patch; use them only for disposable caches. Do not re
 view-owned trait objects in app state. Rune replaces its event-handler trait objects
 at the patch boundary. Arbitrary cached vtables, background callbacks and initializer
 edits do not hot-reload. Use this launcher, not raw `dx serve`, to keep the source guard.
-Edits to helpers called only from `poll`, `on_key` or `setup` take effect after a restart:
-those callbacks retain the function pointers captured at startup.
+`poll` and `on_key` go through the patch table each call, like the view. `setup` runs once
+at startup, so edits to it, and to helpers only it calls, take effect after a restart.
 
 If a patched view panics, Rune logs it and renders the original startup view against
 the retained state, discarding the failed view's context changes. A later patch is

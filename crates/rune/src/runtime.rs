@@ -43,8 +43,20 @@ fn handler_state<S: 'static>(state: &mut S) -> &mut dyn Any {
     state
 }
 
+/// Calls an app's `poll` or `on_key`. With `rune/hot` it goes through subsecond's jump table,
+/// so a patched body runs instead of the pointer captured at startup.
+macro_rules! app_call {
+    ($f:expr, $($arg:expr),* $(,)?) => {{
+        #[cfg(feature = "hot")]
+        let called = subsecond::HotFn::current($f).call(($($arg,)*));
+        #[cfg(not(feature = "hot"))]
+        let called = ($f)($($arg),*);
+        called
+    }};
+}
+
 #[inline(always)]
-fn handler_state_ref<S: 'static>(state: &S) -> &dyn Any {
+pub(crate) fn handler_state_ref<S: 'static>(state: &S) -> &dyn Any {
     #[cfg(feature = "hot")]
     if std::any::TypeId::of::<S>() == std::any::TypeId::of::<crate::hot::HostState>() {
         return (state as &dyn Any).downcast_ref::<crate::hot::HostState>().unwrap().value.as_ref();
@@ -1301,7 +1313,7 @@ impl<S: 'static> Runtime<S> {
         self.wake_deadlines.drain(..due);
         let Some(poll) = self.poll else { return false };
         let mut one = self.transaction();
-        let changed = poll(&mut self.state, self.clock, &mut one);
+        let changed = app_call!(poll, &mut self.state, self.clock, &mut one);
         self.dirty |= changed;
         self.schedule_wakes(one.wakes.drain(..));
         self.latch_requests(&mut one);
@@ -1533,7 +1545,7 @@ impl<S: 'static> Runtime<S> {
         if let Some(poll) = self.poll {
             let mut one = self.transaction();
             // Scheduling does not imply a model change.
-            if poll(&mut self.state, self.clock, &mut one) {
+            if app_call!(poll, &mut self.state, self.clock, &mut one) {
                 ran = true;
             }
             merge(&mut tx, one);
@@ -2002,7 +2014,7 @@ impl<S: 'static> Runtime<S> {
         let app_first = self.focused.is_none();
         // Selected text has the keyboard for copying, as AppKit's first responder does.
         if !repeat && self.selection_key(ev, one) { return true; }
-        if app_first && let Some(f) = self.on_key && f(&mut self.state, ev, one) { return true; }
+        if app_first && let Some(f) = self.on_key && app_call!(f, &mut self.state, ev, one) { return true; }
         if let Some(f) = self.focused_input().and_then(|input| input.key.clone())
             && f(handler_state(&mut self.state), ev, one)
         {
@@ -2018,7 +2030,7 @@ impl<S: 'static> Runtime<S> {
             let layout = self.focused_layout();
             if self.with_focused(|e| e.key(ev, layout.as_deref()), one) { return true; }
         }
-        if !app_first && let Some(f) = self.on_key && f(&mut self.state, ev, one) {
+        if !app_first && let Some(f) = self.on_key && app_call!(f, &mut self.state, ev, one) {
             self.events.push(format!("key {:?}", ev.key));
             return true;
         }

@@ -174,13 +174,13 @@ impl<S: 'static> Runtime<S> {
         if !self.modifier_keys.enabled { return false; }
         one.key_repeat = false;
         let app_first = self.focused.is_none();
-        if app_first && let Some(f) = self.on_key && f(&mut self.state, ev, one) { return true; }
+        if app_first && let Some(f) = self.on_key && app_call!(f, &mut self.state, ev, one) { return true; }
         if let Some(f) = self.focused_input().and_then(|input| input.key.clone())
             && f(handler_state(&mut self.state), ev, one)
         {
             return true;
         }
-        if !app_first && let Some(f) = self.on_key && f(&mut self.state, ev, one) {
+        if !app_first && let Some(f) = self.on_key && app_call!(f, &mut self.state, ev, one) {
             self.events.push(format!("key {:?}", ev.key));
             return true;
         }

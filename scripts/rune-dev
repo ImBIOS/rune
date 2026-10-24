@@ -3,37 +3,99 @@
 
 On the desk Mac this relays source edits to the build Mac; on a worker it watches a validated mirror.
 Only view function bodies can patch. All other build inputs require a restart.
+
+  rune-dev settings|opencode [-- APP ARGS]
+  rune-dev --manifest-path APP/Cargo.toml --patch 'src/ui/*.rs' [--bin B] [--features F] [-- APP ARGS]
+
+--desk compiles on the build Mac but runs the app on this Mac, patching it over an SSH tunnel.
 """
 import argparse
+from dataclasses import dataclass
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import platform
 import select
+import shlex
 import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
+EXAMPLES = {"settings": {"examples/settings/src/main.rs"}, "opencode": {"examples/opencode/src/view.rs", "examples/opencode/src/palette.rs"}}
+# Matches the workspace's [profile.rune-hot], for apps that don't define their own.
+PROFILE = ['profile.rune-hot.inherits="dev"', "profile.rune-hot.debug=0", "profile.rune-hot.incremental=true",
+           "profile.rune-hot.package.png.opt-level=3", "profile.rune-hot.package.fdeflate.opt-level=3"]
+SKIP_DIRS = ("target", ".git", "__pycache__", "node_modules")
+
+
+@dataclass
+class External:
+    """An app crate outside Rune. Its files are `external/<path from base>` keys."""
+    base: Path
+    crate: str
+    dirs: list
+    tops: list
+
+
+# Set when this process reads an external crate's original files; a build Mac's staging
+# area already holds them at their keys.
+EXTERNAL = None
+
+
+def git_or_walk(directory, roots=("",)):
+    try:
+        out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", *[r or "." for r in roots]],
+                             cwd=directory, capture_output=True, check=True).stdout.decode()
+        return [p for p in out.split("\0") if p]
+    except (subprocess.CalledProcessError, FileNotFoundError, NotADirectoryError):
+        result = []
+        for root in roots:
+            for parent, dirs, names in os.walk(directory / root):
+                dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+                result.extend(str((Path(parent) / n).relative_to(directory)) for n in names)
+        return result
 
 
 def files():
     manifest = ROOT / ".rune-dev-files.json"
     if manifest.exists():
         return json.loads(manifest.read_text())
+    if EXTERNAL:
+        tooling = [p for p in git_or_walk(ROOT, ("tools/rune-dev-guard",)) if not p.startswith("tools/rune-dev-guard/target/")]
+        keys = set(tooling) | {"scripts/rune-dev"} | {"external/" + p for p in EXTERNAL.tops}
+        for d in EXTERNAL.dirs:
+            keys.update(str(PurePosixPath("external", d, p)) for p in git_or_walk(EXTERNAL.base / d))
+        return sorted(keys)
     if not (ROOT / ".git").exists():
         # The build queue syncs source without Git metadata.
         result = []
         for directory in ("crates", "examples", "themes", "tools", "scripts", ".cargo"):
             for parent, dirs, names in os.walk(ROOT / directory):
-                dirs[:] = [d for d in dirs if d not in ("target", ".git", "__pycache__")]
+                dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
                 result.extend(str((Path(parent) / n).relative_to(ROOT)) for n in names)
         result.extend(p for p in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml") if (ROOT / p).exists())
         return result
     return subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT).decode().strip("\0").split("\0")
+
+
+def source(p):
+    """The file behind a key on this machine."""
+    if EXTERNAL and (p == "external" or p.startswith("external/")):
+        return EXTERNAL.base / p.removeprefix("external").lstrip("/")
+    return ROOT / p
+
+
+def tracked(p):
+    if not p or Path(p).name.startswith(".env") or Path(p).suffix in (".pem", ".key"):
+        return False
+    return p.startswith(("crates/", "examples/", "themes/", "external/")) or p in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/config.toml")
 
 
 def inputs(cache):
@@ -44,14 +106,12 @@ def inputs(cache):
 
     current = {}
     for p in files():
-        if not p or Path(p).name.startswith(".env") or Path(p).suffix in (".pem", ".key"):
+        if not tracked(p):
             continue
-        if not (p.startswith(("crates/", "examples/", "themes/")) or p in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/config.toml")):
-            continue
-        path = ROOT / p
+        path = source(p)
         try:
             before = stamp(path)
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             continue
         old = cache.get(p)
         if old is not None and old[0] == before:
@@ -95,42 +155,477 @@ def stop(process):
             process.wait()
 
 
-def relay(args):
+# --- Arguments --------------------------------------------------------------------------------
+
+def parse(argv):
+    parser = argparse.ArgumentParser(prog="rune-dev", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("example", nargs="?", choices=sorted(EXAMPLES))
+    parser.add_argument("--manifest-path", type=Path, help="an external app crate's Cargo.toml")
+    parser.add_argument("--package", help="default: the manifest's package")
+    parser.add_argument("--bin")
+    parser.add_argument("--features", default="", help="besides hot")
+    parser.add_argument("--patch", action="append", default=[], metavar="GLOB",
+                        help="files, relative to the app crate, whose fn bodies patch live (repeatable; ** spans directories)")
+    parser.add_argument("--port", type=int, default=18744)
+    parser.add_argument("--desk", action="store_true", help="run the app on this Mac and compile on --build-host")
+    parser.add_argument("--build-host", default=os.environ.get("RUNE_DEV_BUILD_HOST", "pro"), help="SSH host (env RUNE_DEV_BUILD_HOST)")
+    split = argv.index("--") if "--" in argv else len(argv)
+    opts, unknown = parser.parse_known_args(argv[:split])
+    # Before `--`, unrecognised arguments go to the app too, as they always have.
+    opts.app_args = unknown + argv[split + 1:]
+    if (opts.example is None) == (opts.manifest_path is None):
+        parser.error("name an example or pass --manifest-path")
+    if opts.manifest_path and not opts.patch:
+        parser.error("--manifest-path needs at least one --patch GLOB; every other file restarts")
+    if opts.example and (opts.patch or opts.package or opts.bin or opts.features):
+        parser.error("--patch, --package, --bin and --features are for --manifest-path")
+    opts.parser = parser
+    return opts
+
+
+def worker(host):
+    return os.environ.get("RUNE_DEV_WORKER", host)
+
+
+# --- External crates --------------------------------------------------------------------------
+
+def read_toml(path):
+    return tomllib.loads(Path(path).read_text())
+
+
+def path_dependencies(doc, directory):
+    """Directories of `path` dependencies in any dependency table, `[patch]` or `[replace]`."""
+    found = []
+    def walk(node, inside):
+        if isinstance(node, dict):
+            if inside and isinstance(node.get("path"), str):
+                found.append((directory / node["path"]).resolve())
+            for key, value in node.items():
+                walk(value, inside or key.endswith("dependencies") or key in ("patch", "replace"))
+    walk(doc, False)
+    return found
+
+
+def workspace_root(package, stop=None):
+    doc = read_toml(package / "Cargo.toml")
+    explicit = doc.get("package", {}).get("workspace")
+    if isinstance(explicit, str):
+        return (package / explicit).resolve()
+    directory = package
+    while True:
+        manifest = directory / "Cargo.toml"
+        if manifest.exists() and "workspace" in read_toml(manifest):
+            return directory
+        if directory.parent == directory or directory == stop:
+            return None
+        directory = directory.parent
+
+
+def external_layout(manifest):
+    """The app crate, every path dependency and their workspaces' manifests and lockfiles."""
+    crate = manifest.resolve().parent
+    packages, roots = [], []
+    pending = [crate]
+    while pending:
+        package = pending.pop()
+        if package in packages:
+            continue
+        if not (package / "Cargo.toml").exists():
+            raise SystemExit(f"rune-dev: path dependency {package} has no Cargo.toml")
+        packages.append(package)
+        pending.extend(path_dependencies(read_toml(package / "Cargo.toml"), package))
+        root = workspace_root(package)
+        if root and root not in roots:
+            roots.append(root)
+            pending.extend(path_dependencies(read_toml(root / "Cargo.toml"), root))
+    base = Path(os.path.commonpath([*packages, *roots]))
+    rel = lambda p: str(PurePosixPath(p.relative_to(base).as_posix()))
+    tops = [rel(r / name) for r in roots for name in ("Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml", ".cargo/config.toml", ".cargo/config")
+            if (r / name).is_file()]
+    return External(base=base, crate=str(PurePosixPath("external", rel(crate))), dirs=sorted({rel(p) for p in packages}), tops=tops)
+
+
+def patchable(crate, globs):
+    """Keys of the app crate's Rust files that `--patch` names. Everything else restarts."""
+    prefix = crate.rstrip("/") + "/"
+    def allowed(key):
+        if not key.startswith(prefix) or not key.endswith(".rs"):
+            return False
+        path = PurePosixPath(key.removeprefix(prefix))
+        return any(path.full_match(glob) for glob in globs)
+    return allowed
+
+
+def crate_settings(crate_dir, stop):
+    """(package name, whether a [profile.rune-hot] is defined) for an app crate on this machine."""
+    doc = read_toml(crate_dir / "Cargo.toml")
+    if "hot" not in doc.get("features", {}):
+        raise SystemExit(f'rune-dev: add `hot = ["rune/hot"]` to [features] in {crate_dir / "Cargo.toml"}')
+    root = workspace_root(crate_dir, stop) or crate_dir
+    profiles = read_toml(root / "Cargo.toml").get("profile", {})
+    return doc.get("package", {}).get("name"), "rune-hot" in profiles
+
+
+def dx_command(dx, port, package, features, bin, cargo_config, app_args):
+    command = [str(dx), "serve", "--hot-patch", "--platform", "server", "--open", "false", "--interactive", "false",
+               "--addr", "127.0.0.1", "--port", str(port), "--package", package, "--features", ",".join(["hot", *filter(None, features.split(","))]), "--profile", "rune-hot"]
+    if bin:
+        command += ["--bin", bin]
+    if cargo_config:
+        command.append("--cargo-args=" + shlex.join(a for c in cargo_config for a in ("--config", c)))
+    if app_args:
+        # dx splits these on whitespace.
+        command.append("--args=" + " ".join(app_args))
+    return command
+
+
+# --- Remote build host ------------------------------------------------------------------------
+
+def ssh_options():
+    # One connection for every rsync, fetch and the tunnel.
+    return ["-o", "ControlMaster=auto", "-o", f"ControlPath=/tmp/rune-dev-{os.getuid()}-%C", "-o", "ControlPersist=60"]
+
+
+def ssh(*args):
+    return ["ssh", *ssh_options(), *args]
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def platform_info():
+    return {"system": platform.system(), "machine": platform.machine()}
+
+
+def remote_argv(opts, desk):
+    """The build Mac's arguments: an external crate is named by its staging path."""
+    argv = [opts.example] if opts.example else ["--manifest-path", EXTERNAL.crate + "/Cargo.toml"]
+    for flag in ("package", "bin"):
+        if getattr(opts, flag):
+            argv += ["--" + flag, getattr(opts, flag)]
+    if opts.features:
+        argv += ["--features", opts.features]
+    for glob in opts.patch:
+        argv += ["--patch", glob]
+    argv += ["--port", str(opts.port)]
+    if desk:
+        # The build Mac's copy only parks; the app's arguments are for the desk copy.
+        return argv + ["--desk"]
+    return argv + ["--", *opts.app_args]
+
+
+def app_argv(opts, root):
+    """Arguments for the app process, with Rune's file flags resolved against `root`."""
+    app_args = list(opts.app_args)
+    for flag in ("--snap-on-patch", "--hot-control", "--fixture"):
+        if flag in app_args:
+            i = app_args.index(flag) + 1
+            if i == len(app_args): opts.parser.error(flag + " needs a path")
+            app_args[i] = str((root / app_args[i]).resolve())
+    if opts.example == "opencode":
+        if any(x in app_args for x in ("--live", "--server", "--allow-send")):
+            opts.parser.error("OpenCode live editing is fixture-only")
+        if "--fixture" not in app_args:
+            app_args += ["--fixture", str(ROOT / "examples/opencode/assets/fixture.json")]
+    return (["--hot"] if opts.example else []) + app_args
+
+
+def check_base(info, local):
+    if (info.get("system"), info.get("machine")) != (local["system"], local["machine"]):
+        return f"rune-dev: the build Mac built for {info.get('system')} {info.get('machine')}; this Mac is {local['system']} {local['machine']}"
+    return None
+
+
+class Desk:
+    """The desk copy of the app: the build Mac's binary, byte for byte, and the patches built for it."""
+
+    def __init__(self, host, cache, argv, cwd, env):
+        self.host, self.cache, self.argv, self.cwd, self.env = host, cache, argv, cwd, env
+        self.lock = threading.Lock()
+        self.app = None
+        self.remote_exe = None
+        self.sha = None
+        self.restarting = False
+        self.failed = None
+
+    def base(self, info):
+        failure = check_base(info, platform_info())
+        if failure:
+            self.failed = failure
+            print(failure, file=sys.stderr, flush=True)
+            return
+        with self.lock:
+            if info["sha256"] == self.sha and self.app and self.app.poll() is None:
+                return
+            exe = self.cache / info["sha256"][:16] / Path(info["exe"]).name
+            if not exe.exists() or sha256(exe) != info["sha256"]:
+                exe.parent.mkdir(parents=True, exist_ok=True)
+                temp = exe.with_suffix(".fetch")
+                subprocess.run(["scp", *ssh_options(), "-q", f"{self.host}:{info['exe']}", str(temp)], check=True)
+                if sha256(temp) != info["sha256"]:
+                    temp.unlink()
+                    self.failed = "rune-dev: the copied app binary does not match the build Mac's"
+                    print(self.failed, file=sys.stderr, flush=True)
+                    return
+                temp.chmod(0o755)
+                temp.replace(exe)
+            self.restarting = True
+            if self.app:
+                print("rune-dev: the build Mac rebuilt the app; restarting it here", flush=True)
+                stop(self.app)
+            self.remote_exe, self.sha = info["exe"], info["sha256"]
+            self.app = subprocess.Popen([str(exe), *self.argv], cwd=self.cwd, env=self.env, start_new_session=True)
+            self.restarting = False
+            print(f"rune-dev: running {exe.name} here (sha256 {self.sha[:12]}), pid {self.app.pid}", flush=True)
+
+    def fetch_patch(self, lib):
+        """Copies a patch dylib, after checking the build Mac still has the binary this one runs."""
+        with self.lock:
+            remote_exe, sha = self.remote_exe, self.sha
+        script = f"shasum -a 256 {shlex.quote(remote_exe)} | cut -c1-64 && cat {shlex.quote(lib)}"
+        out = subprocess.run(ssh(self.host, script), capture_output=True)
+        head, _, data = out.stdout.partition(b"\n")
+        if out.returncode or not data:
+            raise RuntimeError(f"rune-dev: could not fetch patch {lib}: {out.stderr.decode().strip()}")
+        built = head.decode().strip()
+        if built != sha:
+            raise RuntimeError(f"rune-dev: patch built against base {built[:12]}, but this Mac runs {sha[:12]}; not applying it")
+        dest = self.cache / sha[:16] / "patches" / PurePosixPath(lib).name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        temp = dest.with_suffix(".fetch")
+        temp.write_bytes(data)
+        temp.replace(dest)
+        return dest
+
+    def exited(self):
+        with self.lock:
+            return self.app is not None and not self.restarting and self.app.poll() is not None
+
+
+def rewrite_patch(text, pid, fetch):
+    """A devserver message with this process's patch dylib replaced by a local copy."""
+    try:
+        msg = json.loads(text)
+    except ValueError:
+        return text
+    reload = msg.get("HotReload") if isinstance(msg, dict) else None
+    table = reload and reload.get("jump_table")
+    if not table or reload.get("for_pid") != pid:
+        return text
+    table["lib"] = str(fetch(table["lib"]))
+    return json.dumps(msg)
+
+
+def read_exact(stream, n):
+    data = stream.read(n)
+    if len(data) != n:
+        raise EOFError
+    return data
+
+
+def read_frame(stream):
+    b0, b1 = read_exact(stream, 2)
+    n = b1 & 0x7f
+    if n == 126: n = int.from_bytes(read_exact(stream, 2))
+    elif n == 127: n = int.from_bytes(read_exact(stream, 8))
+    mask = read_exact(stream, 4) if b1 & 0x80 else None
+    payload = read_exact(stream, n)
+    if mask:
+        payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    return bool(b0 & 0x80), b0 & 0x0f, payload
+
+
+def frame(opcode, payload, fin=True):
+    """An unmasked server-to-client frame."""
+    n = len(payload)
+    head = bytes([(0x80 if fin else 0) | opcode])
+    if n < 126: head += bytes([n])
+    elif n < 1 << 16: head += bytes([126]) + n.to_bytes(2)
+    else: head += bytes([127]) + n.to_bytes(8)
+    return head + payload
+
+
+class Prefixed:
+    def __init__(self, prefix, stream):
+        self.prefix, self.stream = prefix, stream
+
+    def read(self, n):
+        head, self.prefix = self.prefix[:n], self.prefix[n:]
+        return head + self.stream.read(n - len(head)) if len(head) < n else head
+
+
+def read_head(sock):
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise EOFError
+        data += chunk
+    head, _, rest = data.partition(b"\r\n\r\n")
+    return head + b"\r\n\r\n", rest
+
+
+class PatchRelay:
+    """The desk app's devserver: forwards the websocket to dx through the tunnel, and swaps each
+    patch dylib path on the build Mac for a copy on this one before the app loads it."""
+
+    def __init__(self, upstream, fetch):
+        self.upstream, self.fetch = upstream, fetch
+        self.server = socket.create_server(("127.0.0.1", 0))
+        self.port = self.server.getsockname()[1]
+        threading.Thread(target=self.accept, daemon=True).start()
+
+    def accept(self):
+        while True:
+            try:
+                client, _ = self.server.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.connection, args=(client,), daemon=True).start()
+
+    def connection(self, client):
+        try:
+            head, rest = read_head(client)
+            target = head.split(b"\r\n", 1)[0].split()[1].decode()
+            pid = int(parse_qs(urlsplit(target).query).get("pid", ["0"])[0])
+            # The frame reader below handles plain frames only.
+            lines = [l for l in head.split(b"\r\n") if not l.lower().startswith(b"sec-websocket-extensions:")]
+            upstream = socket.create_connection(self.upstream)
+            upstream.sendall(b"\r\n".join(lines) + rest)
+            response, body = read_head(upstream)
+            if b" 101 " not in response.split(b"\r\n", 1)[0] + b" ":
+                client.sendall(response + body)
+                return
+            client.sendall(response)
+            print(f"rune-dev: app pid {pid} connected to the devserver", flush=True)
+            threading.Thread(target=self.pipe, args=(client, upstream), daemon=True).start()
+            # Frames that arrived with the handshake are parsed like the rest.
+            self.patches(Prefixed(body, upstream.makefile("rb")), client, pid)
+        except (OSError, EOFError, ValueError, IndexError):
+            pass
+        finally:
+            client.close()
+
+    @staticmethod
+    def pipe(source, dest):
+        try:
+            while chunk := source.recv(65536):
+                dest.sendall(chunk)
+        except OSError:
+            pass
+        finally:
+            for s in (source, dest):
+                try: s.shutdown(socket.SHUT_RDWR)
+                except OSError: pass
+
+    def patches(self, stream, client, pid):
+        parts, binary = [], False
+        while True:
+            fin, op, payload = read_frame(stream)
+            if op >= 8 or op == 2 or (op == 0 and binary):
+                # Control and binary frames pass through as they came.
+                if op < 8: binary = not fin
+                client.sendall(frame(op, payload, fin))
+                continue
+            if op == 1:
+                parts = []
+            parts.append(payload)
+            if not fin:
+                continue
+            text = b"".join(parts).decode()
+            try:
+                text = rewrite_patch(text, pid, self.fetch)
+            except (RuntimeError, OSError) as error:
+                print(error, file=sys.stderr, flush=True)
+                continue
+            client.sendall(frame(1, text.encode()))
+
+    def close(self):
+        self.server.close()
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def relay(argv):
     """The desk Mac watches original files. The build Mac's guard sees a source staging area, never dx's mirror."""
-    import shlex
-    tag = hashlib.sha256(str(ROOT).encode()).hexdigest()[:12]
+    global EXTERNAL
+    opts = parse(argv)
+    host = opts.build_host
+    if opts.manifest_path:
+        EXTERNAL = external_layout(opts.manifest_path)
+    key = str(ROOT) if not EXTERNAL else f"{ROOT}\0{EXTERNAL.base}\0{EXTERNAL.crate}"
+    tag = hashlib.sha256(key.encode()).hexdigest()[:12]
     remote = os.environ.get("RUNE_DEV_REMOTE", f"scratch/rune-dev-{tag}")
     # The build queue's local admission requires a Git root. This is an empty staging
     # repository, not a copy of the user's history; the manifest supplies its inputs.
-    subprocess.run(["ssh", "pro", f"mkdir -p {shlex.quote(remote)} && if [ ! -e {shlex.quote(remote + '/.git')} ]; then git -C {shlex.quote(remote)} init -q; fi"], check=True)
+    subprocess.run(ssh(host, f"mkdir -p {shlex.quote(remote)} && if [ ! -e {shlex.quote(remote + '/.git')} ]; then git -C {shlex.quote(remote)} init -q; fi"), check=True)
+    rsh = "ssh " + " ".join(shlex.quote(o) for o in ssh_options())
+
+    def sync(keys, listing):
+        own = [p for p in keys if not p.startswith("external/")]
+        external = [p.removeprefix("external/") for p in keys if p.startswith("external/")]
+        for paths, local, dest in ((own, ROOT, remote), (external, EXTERNAL and EXTERNAL.base, remote + "/external")):
+            if paths:
+                listing.write_text("\n".join(paths) + "\n")
+                subprocess.run(["rsync", "-ac", "-e", rsh, "--files-from", str(listing), str(local) + "/", f"{host}:{dest}/"], check=True)
+
     with tempfile.TemporaryDirectory(prefix="rune-relay-") as tmp:
         cache = {}
         previous = inputs(cache)
         manifest = Path(tmp) / ".rune-dev-files.json"
         manifest.write_text(json.dumps(transfer_files(previous)))
         listing = Path(tmp) / "files"
-        listing.write_text("\n".join(transfer_files(previous)) + "\n")
-        subprocess.run(["rsync", "-ac", "--files-from", str(listing), str(ROOT) + "/", f"pro:{remote}/"], check=True)
-        subprocess.run(["scp", "-q", str(manifest), f"pro:{remote}/.rune-dev-files.json"], check=True)
-        command = f'export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:$PATH"; cd "$HOME/{remote}" && HIVEMIND_STRICT_PIN=1 hivemind run --worker pro --kind cargo --no-sync -- env RUNE_DEV_LEASE=1 python3 scripts/rune-dev ' + shlex.join(args)
-        process = subprocess.Popen(["ssh", "-tt", "pro", command], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
-        def path_arg(flag):
-            return Path(args[args.index(flag) + 1]) if flag in args else None
-        snap = path_arg("--snap-on-patch")
-        control = path_arg("--hot-control")
+        sync(transfer_files(previous), listing)
+        subprocess.run(["scp", *ssh_options(), "-q", str(manifest), f"{host}:{remote}/.rune-dev-files.json"], check=True)
+        command = f'export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:$PATH"; cd "$HOME/{remote}" && HIVEMIND_STRICT_PIN=1 hivemind run --worker {shlex.quote(worker(host))} --kind cargo --no-sync -- env RUNE_DEV_LEASE=1 python3 scripts/rune-dev ' + shlex.join(remote_argv(opts, opts.desk))
+        process = subprocess.Popen(["ssh", "-tt", host, command], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
+        desk = tunnel = patch_relay = None
+        snap = control = None
+        if opts.desk:
+            local = free_port()
+            tunnel = subprocess.Popen(["ssh", "-N", "-o", "ExitOnForwardFailure=yes", "-L", f"127.0.0.1:{local}:127.0.0.1:{opts.port}", host], start_new_session=True)
+            cwd = source(EXTERNAL.crate) if EXTERNAL else ROOT / "examples" / opts.example
+            env = {k: v for k, v in os.environ.items() if k not in ("RUNE_HOT_PARK", "RUNE_DEV_LEASE")}
+            desk = Desk(host, ROOT / "target/rune-dev-desk" / tag, app_argv(opts, Path.cwd()), cwd, env)
+            patch_relay = PatchRelay(("127.0.0.1", local), desk.fetch_patch)
+            env.update(RUNE_DEV_GUARDED="1", RUNE_HOT="1", DIOXUS_DEVSERVER_IP="127.0.0.1", DIOXUS_DEVSERVER_PORT=str(patch_relay.port),
+                       DIOXUS_BUILD_ID="0", CARGO_MANIFEST_DIR=str(cwd))
+        else:
+            def path_arg(flag):
+                return Path(opts.app_args[opts.app_args.index(flag) + 1]) if flag in opts.app_args[:-1] else None
+            snap = path_arg("--snap-on-patch")
+            control = path_arg("--hot-control")
+
         def remote_path(path):
             return str(path) if path.is_absolute() else f"{remote}/{path}"
         if control:
-            subprocess.run(["ssh", "pro", "mkdir -p " + shlex.quote(remote_path(control.parent))], check=True)
+            subprocess.run(ssh(host, "mkdir -p " + shlex.quote(remote_path(control.parent))), check=True)
+
         def receive():
             for line in process.stdout:
+                if desk and line.startswith("rune-dev-base "):
+                    try:
+                        desk.base(json.loads(line.removeprefix("rune-dev-base ")))
+                    except (subprocess.CalledProcessError, OSError, ValueError) as error:
+                        desk.failed = f"rune-dev: could not start the app here: {error}"
+                        print(desk.failed, file=sys.stderr, flush=True)
+                    continue
                 complete = True
                 if snap and "rune-hot-pixels " in line:
                     for path in (snap, snap.with_suffix(".json")):
                         dest = ROOT / path
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         temp = dest.with_suffix(dest.suffix + ".fetch")
-                        fetched = subprocess.run(["scp", "-q", f"pro:{remote_path(path)}", str(temp)])
+                        fetched = subprocess.run(["scp", *ssh_options(), "-q", f"{host}:{remote_path(path)}", str(temp)])
                         if fetched.returncode == 0: temp.replace(dest)
                         else: complete = False
                 if complete:
@@ -141,65 +636,81 @@ def relay(args):
         receiver = threading.Thread(target=receive, daemon=True)
         receiver.start()
         previous_control = None
-        def relay_control():
+        def tick():
             nonlocal previous_control
+            if desk and (desk.failed or desk.exited()):
+                if not desk.failed:
+                    print(f"rune-dev: the app exited ({desk.app.returncode})", flush=True)
+                stop(process)
+                return
             if control:
                 try:
                     data = (ROOT / control).read_bytes()
                 except OSError:
                     return
                 if data != previous_control:
-                    subprocess.run(["scp", "-q", str(ROOT / control), f"pro:{remote_path(control)}"], check=True)
+                    subprocess.run(["scp", *ssh_options(), "-q", str(ROOT / control), f"{host}:{remote_path(control)}"], check=True)
                     previous_control = data
 
         def relay_source(current):
             nonlocal previous
             changed = [p for p, data in current.items() if previous.get(p) != data]
             # Missing/new inputs are caught by the worker's manifest comparison.
-            listing.write_text("\n".join(changed) + "\n")
-            if changed:
-                subprocess.run(["rsync", "-ac", "--files-from", str(listing), str(ROOT) + "/", f"pro:{remote}/"], check=True)
+            sync(changed, listing)
             manifest.write_text(json.dumps(transfer_files(current)))
-            subprocess.run(["scp", "-q", str(manifest), f"pro:{remote}/.rune-dev-files.json"], check=True)
+            subprocess.run(["scp", *ssh_options(), "-q", str(manifest), f"{host}:{remote}/.rune-dev-files.json"], check=True)
             previous = current
 
-        print(f"rune-dev: Pro source ~/" + remote + "; edit this checkout. PNG/tree snapshots are fetched here.", flush=True)
+        where = "the app runs here; patches arrive over SSH" if desk else "PNG/tree snapshots are fetched here"
+        print(f"rune-dev: {host} source ~/{remote}; edit this checkout. {where}.", flush=True)
         try:
-            watch(relay_source, process, previous, cache, relay_control)
+            watch(relay_source, process, previous, cache, tick)
         finally:
-            stop(process)
+            for child in (desk and desk.app, tunnel, process):
+                if child: stop(child)
+            if patch_relay: patch_relay.close()
             receiver.join(timeout=15)
+        if desk and desk.failed:
+            return 1
         return process.returncode
 
 
 def run(args):
+    global EXTERNAL
     if "studio" in socket.gethostname().lower():
         raise SystemExit("rune-dev: compiler and renderer must stay on Pro; restart without RUNE_DEV_LEASE")
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("example", choices=["settings", "opencode"])
-    parser.add_argument("--port", type=int, default=18744)
-    parser.add_argument("app_args", nargs=argparse.REMAINDER)
-    opts = parser.parse_args(args)
-    app_args = opts.app_args
-    if app_args[:1] == ["--"]: app_args = app_args[1:]
-    for flag in ("--snap-on-patch", "--hot-control", "--fixture"):
-        if flag in app_args:
-            i = app_args.index(flag) + 1
-            if i == len(app_args): parser.error(flag + " needs a path")
-            app_args[i] = str((ROOT / app_args[i]).resolve())
-    if opts.example == "opencode":
-        if any(x in app_args for x in ("--live", "--server", "--allow-send")):
-            parser.error("OpenCode live editing is fixture-only")
-        if "--fixture" not in app_args:
-            app_args += ["--fixture", str(ROOT / "examples/opencode/assets/fixture.json")]
-    env = dict(os.environ, RUSTC_WRAPPER="", CARGO_INCREMENTAL="1", CARGO_BUILD_JOBS="2", RUNE_DEV_GUARDED="1",
+    opts = parse(args)
+    parser = opts.parser
+    # The build Mac's copy parks in desk mode, so it needs no app arguments.
+    app_args = app_argv(opts, ROOT) if not opts.desk else (["--hot"] if opts.example else [])
+    env = dict(os.environ, RUSTC_WRAPPER="", CARGO_INCREMENTAL="1", CARGO_BUILD_JOBS="2", RUNE_DEV_GUARDED="1", RUNE_HOT="1",
                CARGO_TARGET_DIR=str(ROOT / "target/live-edit-build"))
+    env.pop("RUNE_HOT_PARK", None)
     guard_root = ROOT / "tools/rune-dev-guard"
     subprocess.run(["cargo", "build", "--manifest-path", str(guard_root / "Cargo.toml")], env=env, check=True)
     guard = Path(env.get("CARGO_TARGET_DIR", str(guard_root / "target"))) / "debug/rune-dev-guard"
-    mirror = ROOT / "target/rune-dev" / opts.example
+    if opts.example:
+        mirror = ROOT / "target/rune-dev" / opts.example
+        allowed = EXAMPLES[opts.example].__contains__
+        package, crate, cargo_config = opts.example, None, []
+    else:
+        if (ROOT / ".rune-dev-files.json").exists():
+            # A relay staged the crate at its key.
+            crate = opts.manifest_path.parent.as_posix()
+            if crate != "external" and not crate.startswith("external/"): parser.error("a staged --manifest-path is external/…/Cargo.toml")
+        else:
+            EXTERNAL = external_layout(opts.manifest_path)
+            crate = EXTERNAL.crate
+        # Outside any checkout: Cargo would take an enclosing [workspace] for the app's.
+        mirror = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "rune-dev" / hashlib.sha256(f"{ROOT}\0{crate}".encode()).hexdigest()[:12]
+        name, has_profile = crate_settings(source(crate), source("external"))
+        package = opts.package or name
+        cargo_config = [] if has_profile else PROFILE
+        allowed = patchable(crate, opts.patch)
     cache = {}
     baseline = inputs(cache)
+    if crate and not any(p.startswith(crate + "/") for p in baseline):
+        parser.error(f"no files staged for {crate}")
     # Remove stale source files, but retain compiler artifacts between invocations.
     old_manifest = mirror / ".inputs.json"
     if old_manifest.exists():
@@ -209,20 +720,36 @@ def run(args):
         dest = mirror / p
         dest.parent.mkdir(parents=True, exist_ok=True)
         if not dest.exists() or dest.read_bytes() != data: dest.write_bytes(data)
+    old_manifest.parent.mkdir(parents=True, exist_ok=True)
     old_manifest.write_text(json.dumps(list(baseline)))
     # Workspace excludes reference this independent tool; Cargo needn't see its source.
     dx = Path(os.environ.get("RUNE_DX", str(Path.home() / ".cargo/bin/dx")))
     if not dx.exists(): parser.error("install dioxus-cli 0.7.10 (the Deno dx command is unrelated)")
-    command = [str(dx), "serve", "--hot-patch", "--platform", "server", "--open", "false", "--interactive", "false", "--addr", "127.0.0.1", "--port", str(opts.port), "--package", opts.example, "--features", "hot", "--profile", "rune-hot", "--args=" + " ".join(["--hot"] + app_args)]
-    process = subprocess.Popen(command, cwd=mirror, env=env, start_new_session=True)
-    allowed = {"examples/settings/src/main.rs"} if opts.example == "settings" else {"examples/opencode/src/view.rs", "examples/opencode/src/palette.rs"}
+    park = mirror / ".rune-hot-park"
+    park.unlink(missing_ok=True)
+    if opts.desk:
+        env["RUNE_HOT_PARK"] = str(park)
+    command = dx_command(dx, opts.port, package, opts.features, opts.bin, cargo_config, app_args)
+    process = subprocess.Popen(command, cwd=mirror / crate if crate else mirror, env=env, start_new_session=True)
+    reported = None
+    def report_base():
+        # Each build's parked copy names the binary the desk Mac must run.
+        nonlocal reported
+        try:
+            exe = park.read_text()
+            stamp = park.stat().st_mtime_ns
+        except FileNotFoundError:
+            return
+        if (exe, stamp) != reported:
+            reported = exe, stamp
+            print("rune-dev-base " + json.dumps({"exe": exe, "sha256": sha256(exe), **platform_info()}), flush=True)
     try:
         with tempfile.TemporaryDirectory(prefix="rune-guard-") as tmp:
             candidate = Path(tmp) / "candidate.rs"
             def publish(current):
                 nonlocal baseline
                 changed = [p for p, data in current.items() if baseline.get(p) != data]
-                incompatible = (set(current) ^ set(baseline)) | (set(changed) - allowed)
+                incompatible = (set(current) ^ set(baseline)) | {p for p in changed if not allowed(p)}
                 if incompatible:
                     print("rune-dev: restart needed: " + ", ".join(sorted(incompatible)), flush=True)
                     return
@@ -238,7 +765,7 @@ def run(args):
                     temp.replace(dest)
                 baseline = current
                 print("rune-dev: accepted " + ", ".join(changed), flush=True)
-            watch(publish, process, baseline, cache)
+            watch(publish, process, baseline, cache, report_base if opts.desk else None)
     finally:
         stop(process)
     return process.returncode
@@ -251,10 +778,12 @@ if __name__ == "__main__":
     signal.signal(signal.SIGHUP, interrupted)
     try:
         if not os.environ.get("RUNE_DEV_LEASE"):
-            if "studio" in socket.gethostname().lower():
+            ours = sys.argv[1:sys.argv.index("--")] if "--" in sys.argv else sys.argv[1:]
+            if "--desk" in ours or "studio" in socket.gethostname().lower():
                 sys.exit(relay(sys.argv[1:]))
             os.environ["HIVEMIND_STRICT_PIN"] = "1"
-            os.execvp("hivemind", ["hivemind", "run", "--worker", "pro", "--kind", "cargo", "--no-sync", "--", "env", "RUNE_DEV_LEASE=1", "python3", str(Path(__file__).resolve()), *sys.argv[1:]])
+            host = os.environ.get("RUNE_DEV_BUILD_HOST", "pro")
+            os.execvp("hivemind", ["hivemind", "run", "--worker", worker(host), "--kind", "cargo", "--no-sync", "--", "env", "RUNE_DEV_LEASE=1", "python3", str(Path(__file__).resolve()), *sys.argv[1:]])
         sys.exit(run(sys.argv[1:]))
     except KeyboardInterrupt:
         sys.exit(130)

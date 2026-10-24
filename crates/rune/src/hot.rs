@@ -3,7 +3,7 @@
 
 use std::path::Path;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
+use std::sync::{Arc, Mutex, OnceLock, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -53,7 +53,7 @@ fn view_or_original<S>(original: fn(&S, &mut Cx<S>) -> El, state: &S, cx: &mut C
 
 fn poll_adapter<S: 'static>(host: &mut HostState, t: f64, tx: &mut Tx) -> bool {
     let spec = host.spec.downcast_ref::<AppSpec<S>>().unwrap();
-    spec.poll.is_some_and(|f| f(host.value.downcast_mut::<S>().unwrap(), t, tx))
+    spec.poll.is_some_and(|f| subsecond::HotFn::current(f).call((host.value.downcast_mut::<S>().unwrap(), t, tx)))
 }
 
 fn setup_adapter<S: 'static>(host: &mut HostState, waker: Waker) {
@@ -63,14 +63,14 @@ fn setup_adapter<S: 'static>(host: &mut HostState, waker: Waker) {
 
 fn key_adapter<S: 'static>(host: &mut HostState, key: &KeyEvent, tx: &mut Tx) -> bool {
     let spec = host.spec.downcast_ref::<AppSpec<S>>().unwrap();
-    spec.on_key.is_some_and(|f| f(host.value.downcast_mut::<S>().unwrap(), key, tx))
+    spec.on_key.is_some_and(|f| subsecond::HotFn::current(f).call((host.value.downcast_mut::<S>().unwrap(), key, tx)))
 }
 
 pub(crate) fn run<S: 'static>(spec: AppSpec<S>, args: Args) {
     run_app(crate::App::new(spec), args);
 }
 
-pub(crate) fn run_app<S: 'static>(mut app: crate::App<S>, mut args: Args) {
+pub(crate) fn run_app<S: 'static>(app: crate::App<S>, mut args: Args) {
     if args.list_scenes {
         for (name, _) in app.spec.scenes { println!("{name}"); }
         return;
@@ -94,47 +94,135 @@ pub(crate) fn run_app<S: 'static>(mut app: crate::App<S>, mut args: Args) {
 #[inline(never)]
 fn run_host(spec: AppSpec<HostState>, state: HostState, args: Args, srgb_blend: bool, modifier_keys: bool) {
     INITIAL.with(|slot| { assert!(slot.borrow().is_none()); *slot.borrow_mut() = Some(state); });
-    if args.snap_on_patch.is_some() { return headless(spec, args, srgb_blend); }
+    if args.snap_on_patch.is_some() {
+        let state = initial_state(&spec, args.scene.as_deref());
+        return headless(&spec, state, args, srgb_blend);
+    }
     let mut app = crate::App::new(spec).srgb_blend(srgb_blend);
     app.modifier_keys = modifier_keys;
     if args.headless() { crate::tooling::headless(app, args); }
     else if let Err(error) = crate::window::run(app, args) { panic!("{error}"); }
 }
 
+/// `--snap-on-patch` for a window from `run_windows*`, `WindowSpec::from_app` or `App::window`:
+/// the same typed `Runtime<S>` a native window builds, so its view, poll and on_key patch the
+/// way they do on screen.
+pub(crate) fn snap_window<S: 'static>(app: crate::App<S>, args: Args) {
+    let srgb_blend = app.srgb_blend && app.compositor.is_none();
+    let (spec, state, _) = app.into_parts(args.scene.as_deref());
+    headless(&spec, state, args, srgb_blend);
+}
+
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn enable() {
     assert!(std::env::var_os("RUNE_DEV_GUARDED").is_some(), "use scripts/rune-dev: unguarded Rust patches can change live state layouts");
+    if let Some(path) = std::env::var_os("RUNE_HOT_PARK") {
+        // Desk mode: another Mac runs this binary. The build Mac's copy only reports where dx
+        // built it, and exits before it can connect and take the patches meant for the desk.
+        let exe = std::env::current_exe().expect("rune-hot: current exe");
+        atomic_write(Path::new(&path), exe.as_os_str().as_encoded_bytes());
+        eprintln!("rune-hot: parked {}; the desk Mac runs it", exe.display());
+        std::process::exit(0);
+    }
     ENABLED.store(true, Ordering::Release);
 }
 
-pub fn enabled() -> bool { ENABLED.load(Ordering::Acquire) }
+/// `RUNE_HOT=1` enables live editing like `--hot`, for apps that keep their argv from Rune.
+pub(crate) fn enable_from_env() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| if std::env::var_os("RUNE_HOT").is_some_and(|v| v == "1") { enable() });
+}
+
+pub fn enabled() -> bool {
+    enable_from_env();
+    ENABLED.load(Ordering::Acquire)
+}
+
+/// One devserver connection per process: dx patches for the last pid and ASLR base that
+/// connected, and every connection would apply each patch again. Windows share it.
+#[derive(Default)]
+struct Hub {
+    generation: AtomicU64,
+    next: AtomicU64,
+    wakers: Mutex<Vec<(u64, Waker)>>,
+}
+
+impl Hub {
+    fn patched(&self) {
+        self.generation.fetch_add(1, Ordering::Release);
+        let wakers: Vec<Waker> = self.wakers.lock().unwrap().iter().map(|(_, w)| w.clone()).collect();
+        for wake in wakers { wake(); }
+    }
+}
+
+fn hub() -> &'static Hub {
+    static HUB: OnceLock<Hub> = OnceLock::new();
+    let mut fresh = false;
+    let hub = HUB.get_or_init(|| { fresh = true; Hub::default() });
+    if fresh {
+        subsecond::register_handler(Arc::new(|| hub.patched()));
+        connect();
+    }
+    hub
+}
+
+fn connect() {
+    // dioxus-devtools reads the same variables and connects silently, or not at all.
+    let var = |name| std::env::var(name).ok();
+    let Some(addr) = var("DIOXUS_DEVSERVER_IP").zip(var("DIOXUS_DEVSERVER_PORT"))
+        .and_then(|(ip, port)| Some(std::net::SocketAddr::new(ip.parse().ok()?, port.parse().ok()?)))
+    else {
+        eprintln!("rune-hot: DIOXUS_DEVSERVER_IP/PORT are unset; edits will not patch (use scripts/rune-dev)");
+        return;
+    };
+    if let Err(error) = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
+        eprintln!("rune-hot: no devserver at {addr} ({error}); edits will not patch");
+        return;
+    }
+    let pid = std::process::id();
+    dioxus_devtools::connect(move |msg| {
+        if let dioxus_devtools::DevserverMsg::HotReload(msg) = msg
+            && let Some(table) = msg.jump_table
+            && msg.for_pid == Some(pid)
+        {
+            let lib = table.lib.clone();
+            // SAFETY: rune-dev's guard admits only edits that keep every type, static and
+            // signature; the patch was linked against this binary's ASLR reference.
+            if let Err(error) = unsafe { subsecond::apply_patch(table) } {
+                eprintln!("rune-hot: patch {} did not load: {error}", lib.display());
+            }
+        }
+    });
+}
 
 pub(crate) struct Session {
-    generation: Arc<AtomicU64>,
+    hub: &'static Hub,
+    id: u64,
     seen: u64,
 }
 
 impl Session {
-    pub(crate) fn connect(wake: Waker) -> Self {
-        let generation = Arc::new(AtomicU64::new(0));
-        let counter = generation.clone();
-        subsecond::register_handler(Arc::new(move || {
-            counter.fetch_add(1, Ordering::Release);
-            wake();
-        }));
-        dioxus_devtools::connect_subsecond();
-        Self { generation, seen: 0 }
+    pub(crate) fn connect(wake: Waker) -> Self { Self::join(hub(), wake) }
+
+    fn join(hub: &'static Hub, wake: Waker) -> Self {
+        let id = hub.next.fetch_add(1, Ordering::Relaxed);
+        hub.wakers.lock().unwrap().push((id, wake));
+        Self { hub, id, seen: hub.generation.load(Ordering::Acquire) }
     }
 
     pub(crate) fn changed(&mut self) -> bool {
-        let next = self.generation.load(Ordering::Acquire);
+        let next = self.hub.generation.load(Ordering::Acquire);
         let changed = next != self.seen;
         self.seen = next;
         changed
     }
 
-    fn pending(&self) -> bool { self.generation.load(Ordering::Acquire) != self.seen }
+    fn pending(&self) -> bool { self.hub.generation.load(Ordering::Acquire) != self.seen }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) { self.hub.wakers.lock().unwrap().retain(|(id, _)| *id != self.id); }
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) {
@@ -144,7 +232,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) {
     std::fs::rename(temp, path).unwrap();
 }
 
-fn control_input(rt: &mut crate::Runtime<HostState>, command: &Value) {
+fn control_input<S: 'static>(rt: &mut crate::Runtime<S>, command: &Value) {
     if let Some(tap) = command.get("tap") {
         if let Some((x, y)) = tap.as_str().and_then(|key| rt.find(key)) {
             rt.pointer_move(x, y);
@@ -166,13 +254,12 @@ fn control_input(rt: &mut crate::Runtime<HostState>, command: &Value) {
 /// `{"id":1,"tap":"login"}`, `{"id":2,"scroll":[800,400,100]}`,
 /// `{"id":3,"pause":true}`, `{"id":4,"step":0.05}`, or `{"id":5,"quit":true}`.
 /// Every request and patch publishes a PNG + JSON tree, then a flushed completion marker.
-fn headless(spec: AppSpec<HostState>, args: Args, srgb_blend: bool) {
-    assert!(enabled(), "--snap-on-patch requires --hot (use scripts/rune-dev)");
+fn headless<S: 'static>(spec: &AppSpec<S>, state: S, args: Args, srgb_blend: bool) {
+    assert!(enabled(), "--snap-on-patch requires --hot or RUNE_HOT=1 (use scripts/rune-dev)");
     let size = args.size.unwrap_or(spec.size);
     let scale = args.scale.unwrap_or(2.0);
-    let state = initial_state(&spec, args.scene.as_deref());
     let (wake, sleep) = std::sync::mpsc::channel();
-    let mut rt = runtime_for(&spec, state, size, Env { system_dark: args.theme.as_deref() != Some("light"), scale }, Arc::new(move || { let _ = wake.send(()); }));
+    let mut rt = runtime_for(spec, state, size, Env { system_dark: args.theme.as_deref() != Some("light"), scale }, Arc::new(move || { let _ = wake.send(()); }));
     rt.set_srgb_blend(srgb_blend);
     let gpu = Gpu::new(Gpu::instance(), None);
     let target_format = if srgb_blend { OFFSCREEN_FORMAT.remove_srgb_suffix() } else { OFFSCREEN_FORMAT };
@@ -237,7 +324,7 @@ fn headless(spec: AppSpec<HostState>, args: Args, srgb_blend: bool) {
             encoder.write_header().unwrap().write_image_data(&pixels).expect("hot snapshot");
             std::fs::rename(temp, png).expect("publish hot snapshot");
             let mut tree = tree_json(&rt, rt.clock);
-            tree["hot"] = json!({"generation": generation, "pid": std::process::id(), "state": format!("{:p}", rt.state.value.as_ref() as *const dyn Any as *const ()), "request": command["id"], "pixels_ns": pixels_ns, "scrolls": rt.hot_scrolls(), "motion": rt.hot_motion()});
+            tree["hot"] = json!({"generation": generation, "pid": std::process::id(), "state": format!("{:p}", crate::runtime::handler_state_ref(&rt.state) as *const dyn Any as *const ()), "request": command["id"], "pixels_ns": pixels_ns, "scrolls": rt.hot_scrolls(), "motion": rt.hot_motion()});
             atomic_write(&png.with_extension("json"), &serde_json::to_vec_pretty(&tree).unwrap());
             println!("rune-hot-pixels {}", tree["hot"]);
             use std::io::Write;
@@ -260,6 +347,33 @@ mod tests {
         let spec = AppSpec::new("test", (300.0, 200.0), S::default, view);
         let host = HostState { value: Box::new((spec.init)()), spec: Box::new(spec), view: view_adapter::<S>, poll: poll_adapter::<S>, setup: setup_adapter::<S>, key: key_adapter::<S> };
         crate::Runtime::new(host, |s, cx| (s.view)(s, cx), (300.0, 200.0), Env::new(true, 1.0))
+    }
+
+    #[test]
+    fn one_patch_reaches_every_window_once_and_closed_windows_leave() {
+        let hub: &'static Hub = Box::leak(Box::default());
+        let woken = Arc::new(AtomicU64::new(0));
+        let waker = |n: u64| -> Waker { let woken = woken.clone(); Arc::new(move || { woken.fetch_add(n, Ordering::Relaxed); }) };
+        let mut main = Session::join(hub, waker(1));
+        let mut settings = Session::join(hub, waker(10));
+        assert!(!main.changed() && !settings.changed());
+        hub.patched();
+        assert_eq!(woken.load(Ordering::Relaxed), 11);
+        assert!(main.pending() && main.changed() && !main.changed());
+        assert!(settings.changed());
+        drop(settings);
+        hub.patched();
+        assert_eq!(woken.load(Ordering::Relaxed), 12, "a closed window's waker is not called");
+        // A window opened after a patch starts from the patched code; it has nothing to recommit.
+        let late = Session::join(hub, waker(100));
+        assert!(!late.pending());
+        assert!(main.changed());
+    }
+
+    #[test]
+    fn snap_on_patch_is_a_headless_window_tool() {
+        let args = Args::parse_from(vec!["--snap-on-patch".into(), "out.png".into(), "--window".into(), "settings".into()]);
+        assert!(args.headless(), "run_windows must render the selected window headless, not open one");
     }
 
     #[test]

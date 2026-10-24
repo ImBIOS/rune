@@ -204,6 +204,8 @@ impl Args {
 
     /// Parses `argv` (without the program name); unrecognised arguments become `extra_args`.
     pub fn parse_from(argv: Vec<String>) -> Args {
+        #[cfg(feature = "hot")]
+        crate::hot::enable_from_env();
         let mut a = Args { fps: 60.0, every: 1, cols: 10, ..Default::default() };
         let mut extra = Vec::new();
         let mut i = 0;
@@ -287,6 +289,8 @@ impl Args {
     }
 
     pub fn headless(&self) -> bool {
+        #[cfg(feature = "hot")]
+        if self.snap_on_patch.is_some() { return true; }
         self.snap.is_some()
             || self.tree.is_some()
             || (!self.native && (self.trace.is_some() || self.frames.is_some() || self.duration.is_some() || self.out.is_some()))
@@ -1204,6 +1208,10 @@ pub(crate) fn try_headless<S: 'static>(mut app: crate::app::App<S>, args: Args) 
 }
 
 pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, transparent: bool) {
+    #[cfg(feature = "hot")]
+    if args.snap_on_patch.is_some() {
+        return crate::hot::snap_window(app, args);
+    }
     let chrome = app.chrome;
     let launched = Instant::now();
     if args.list_scenes {

@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Live editing for external app crates and on the desk Mac.** `scripts/rune-dev
+  --manifest-path APP/Cargo.toml --patch 'src/ui/**/*.rs'` hot-edits an app outside this
+  repo; the app adds only `hot = ["rune/hot"]`. With `--desk` the app compiles on the build
+  Mac and runs on this one, patched over an SSH tunnel after a binary hash and platform check.
+  `RUNE_HOT=1` now enables `--hot` behavior. `run_windows*`, `WindowSpec::from_app` and
+  `App::run` patch every window from one devserver connection, `poll` and `on_key` patch like
+  the view, and `--snap-on-patch` renders a `run_windows` app's `--window` headless. Hot
+  builds only; feature-off builds are unchanged.
+
 - **Hidden overlays and windows don't run their view.** A hidden overlay used to build its view
   and lay it out on every change (an `OverlayHandle::update`, a `setup` waker, a due
   `wake_after`, a clipboard or pop-up answer), and a hidden window did on every due
