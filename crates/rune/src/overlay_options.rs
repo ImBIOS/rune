@@ -128,6 +128,7 @@ pub struct ConfiguredOverlay<T: 'static> {
     pub(crate) compositor: Option<Box<dyn crate::compose::Compositor<T>>>,
     pub(crate) setup: Option<fn(&mut T, crate::Waker)>,
     pub(crate) srgb_blend: bool,
+    pub(crate) macos_level: Option<isize>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -165,6 +166,10 @@ impl<T: 'static> ConfiguredOverlay<T> {
     /// Called once on the event thread after native creation, before the first show.
     /// Use `prewarm: true` to create at startup rather than waiting for `show()`.
     pub fn on_created(mut self, f: impl FnOnce(OverlayCreated) + 'static) -> Self { self.on_created = Some(Box::new(f)); self }
+    /// The macOS window level (`NSWindow.Level`, e.g. 3 for `.floating`), in place of
+    /// `OverlayOptions::level`; `OverlayHandle::set_macos_level` changes it later. At any
+    /// level a macOS overlay goes exactly where it's placed, over the menu bar too.
+    pub fn macos_level(mut self, level: isize) -> Self { self.macos_level = Some(level); self }
 }
 
 impl<T: 'static> OverlaySpec<T> {
@@ -173,7 +178,7 @@ impl<T: 'static> OverlaySpec<T> {
     }
 
     pub fn options(self, options: OverlayOptions) -> ConfiguredOverlay<T> {
-        ConfiguredOverlay { spec: self, options, on_key: None, on_created: None, poll: None, on_focus: None, compositor: None, setup: None, srgb_blend: false }
+        ConfiguredOverlay { spec: self, options, on_key: None, on_created: None, poll: None, on_focus: None, compositor: None, setup: None, srgb_blend: false, macos_level: None }
     }
 }
 

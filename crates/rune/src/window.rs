@@ -167,7 +167,7 @@ impl Win {
         #[cfg(target_os = "macos")]
         {
             if let Some(panel) = &self.panel {
-                panel.show();
+                panel.show(std::time::Duration::ZERO);
                 if focus { panel.request_keys(); }
                 return;
             }
@@ -186,7 +186,7 @@ impl Win {
 
     fn hide(&self) {
         #[cfg(target_os = "macos")]
-        if let Some(panel) = &self.panel { panel.hide(); return; }
+        if let Some(panel) = &self.panel { panel.hide(std::time::Duration::ZERO); return; }
         self.window.set_visible(false);
     }
 

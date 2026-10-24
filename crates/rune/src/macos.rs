@@ -9,7 +9,7 @@ use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize};
 use crate::{DisplayTarget, KeyPolicy, OverlayInput, OverlayLevel, OverlayOptions, OverlaySupport};
 use std::{cell::{Cell, RefCell}, collections::VecDeque, rc::Rc, time::{Duration, Instant}};
 
-struct PanelFlags { keys: bool, warming: Rc<Cell<bool>> }
+struct PanelFlags { keys: bool, warming: Rc<Cell<bool>>, constrain: bool }
 
 // Initialized nonactivating panel. No application activation call.
 declare_class!(
@@ -32,6 +32,13 @@ declare_class!(
             // alpha-zero prewarm acquisition; ordinary visibility readbacks stay native.
             if self.ivars().warming.get() { 2 }
             else { unsafe { msg_send![super(self), occlusionState] } }
+        }
+        // AppKit keeps windows below the menu bar's level out from under it; an overlay goes
+        // exactly where it's placed at any level.
+        #[method(constrainFrameRect:toScreen:)]
+        fn constrain_frame_rect(&self, frame: NSRect, screen: *mut NSScreen) -> NSRect {
+            if self.ivars().constrain { unsafe { msg_send![super(self), constrainFrameRect: frame, toScreen: screen] } }
+            else { frame }
         }
         #[method(sendEvent:)]
         fn send_event(&self, event: &NSEvent) {
@@ -459,6 +466,8 @@ pub(crate) struct Panel {
     visible: Cell<bool>,
     pointer_poll: Cell<Option<Instant>>,
     warming: Rc<Cell<bool>>,
+    /// Bumped by every alpha change, so a finished fade-out orders out only if nothing came after.
+    fade: Rc<Cell<u64>>,
     wake: Option<crate::Waker>,
     panel: objc2::rc::Retained<objc2_app_kit::NSPanel>,
     window: objc2::rc::Retained<objc2_app_kit::NSWindow>,
@@ -488,7 +497,7 @@ impl Panel {
         let warming = Rc::new(Cell::new(false));
         let style = if ordinary { ns_window.styleMask() } else { NSWindowStyleMask::Borderless };
         let panel = unsafe {
-            let panel: Retained<OverlayPanel> = msg_send_id![super(mtm.alloc().set_ivars(PanelFlags { keys: options.keys == KeyPolicy::OnDemand, warming: warming.clone() })),
+            let panel: Retained<OverlayPanel> = msg_send_id![super(mtm.alloc().set_ivars(PanelFlags { keys: options.keys == KeyPolicy::OnDemand, warming: warming.clone(), constrain: ordinary })),
                 initWithContentRect: rect,
                 styleMask: style | NSWindowStyleMask::NonactivatingPanel,
                 backing: NSBackingStoreType::NSBackingStoreBuffered,
@@ -544,7 +553,7 @@ impl Panel {
             return None;
         }
         panel.setDelegate(unsafe { ns_window.delegate() }.as_deref());
-        Some(Panel { bridge, monitors: RefCell::new(None), pointer, options: options.clone(), follow_pointer: Cell::new(options.follow_pointer), visible: Cell::new(false), pointer_poll: Cell::new(None), warming, wake, panel, window: ns_window, view })
+        Some(Panel { bridge, monitors: RefCell::new(None), pointer, options: options.clone(), follow_pointer: Cell::new(options.follow_pointer), visible: Cell::new(false), pointer_poll: Cell::new(None), warming, fade: Rc::default(), wake, panel, window: ns_window, view })
     }
 
     /// On the primary screen (the one with the menu bar), in AppKit's bottom-left coordinates.
@@ -580,15 +589,52 @@ impl Panel {
         occlusion_hidden(&self.panel)
     }
 
-    pub fn show(&self) {
+    /// Reveals the panel, fading its alpha in over `fade` (instantly when zero).
+    pub fn show(&self, fade: Duration) {
         self.keep_view();
         self.visible.set(true);
         self.refresh_monitors();
         self.pointer.observe(&self.panel, self.wake.as_ref());
-        // SAFETY: an AppKit call on the main thread.
-        if self.options.prewarm { unsafe { self.panel.setAlphaValue(1.0); } }
-        else { unsafe { self.panel.orderFrontRegardless() }; }
+        if !self.options.prewarm && !self.panel.isVisible() {
+            // SAFETY: AppKit calls on the main thread.
+            unsafe {
+                if !fade.is_zero() { self.panel.setAlphaValue(0.0); }
+                self.panel.orderFrontRegardless();
+            }
+        }
+        self.fade_to(1.0, fade, false);
     }
+
+    /// Animates the panel's alpha to `alpha` over `duration`, replacing any fade in flight,
+    /// then orders it out if `order_out` and nothing changed it since.
+    fn fade_to(&self, alpha: f64, duration: Duration, order_out: bool) {
+        use objc2::runtime::{AnyClass, AnyObject};
+        let generation = self.fade.get() + 1;
+        self.fade.set(generation);
+        // SAFETY: AppKit calls on the main thread; the completion handler runs there too.
+        unsafe {
+            if let Some(context) = AnyClass::get("NSAnimationContext") {
+                let _: () = msg_send![context, beginGrouping];
+                let current: *mut AnyObject = msg_send![context, currentContext];
+                let _: () = msg_send![current, setDuration: duration.as_secs_f64()];
+                if order_out && !duration.is_zero() {
+                    let (panel, fade) = (self.panel.clone(), self.fade.clone());
+                    let done = block2::RcBlock::new(move || if fade.get() == generation { panel.orderOut(None) });
+                    let _: () = msg_send![current, setCompletionHandler: &*done];
+                }
+                let animator: *mut AnyObject = msg_send![&*self.panel, animator];
+                let _: () = msg_send![animator, setAlphaValue: alpha];
+                let _: () = msg_send![context, endGrouping];
+            }
+            if duration.is_zero() {
+                self.panel.setAlphaValue(alpha);
+                if order_out { self.panel.orderOut(None); }
+            }
+        }
+    }
+
+    /// The panel's AppKit window level (`NSWindow.Level`), changeable while shown.
+    pub fn set_level(&self, level: isize) { self.panel.setLevel(level); }
 
     pub fn prewarm(&self) -> Prewarm {
         debug_assert!(self.options.prewarm);
@@ -607,7 +653,8 @@ impl Panel {
         (RawDisplayHandle::AppKit(AppKitDisplayHandle::new()), RawWindowHandle::AppKit(AppKitWindowHandle::new(view)))
     }
 
-    pub fn hide(&self) {
+    /// Hides the panel, fading its alpha out over `fade` (instantly when zero). Input stops at once.
+    pub fn hide(&self, fade: Duration) {
         self.visible.set(false);
         self.pointer_poll.set(None);
         self.monitors.borrow_mut().take();
@@ -620,9 +667,16 @@ impl Panel {
         self.pointer.recovered_release.set(None);
         self.set_cursor(None);
         if self.options.prewarm {
-            unsafe { self.panel.setAlphaValue(0.0); self.panel.resignKeyWindow(); }
+            self.fade_to(0.0, fade, false);
+            unsafe { self.panel.resignKeyWindow(); }
             self.panel.setIgnoresMouseEvents(true);
-        } else { self.panel.orderOut(None); }
+        } else if fade.is_zero() {
+            self.fade.set(self.fade.get() + 1);
+            self.panel.orderOut(None);
+        } else {
+            unsafe { self.panel.resignKeyWindow(); }
+            self.fade_to(0.0, fade, true);
+        }
     }
 
     pub fn window_number(&self) -> u32 { unsafe { self.panel.windowNumber() as u32 } }

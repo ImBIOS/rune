@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Overlay window levels and fades on macOS.** `ConfiguredOverlay::macos_level(level)` and
+  `OverlayHandle::set_macos_level(level)` set the AppKit window level (e.g. 3 for
+  `.floating`), changeable while shown. `OverlayHandle::fade_in(d)` and `fade_out(d)` fade
+  the window's alpha with AppKit's ease; elsewhere they show and hide at once. Overlay panels
+  now go exactly where they're placed at any level, including over the menu bar, where AppKit
+  used to push windows below it at levels under the menu bar's. Overlays read the system
+  light or dark theme when their window is created rather than on the first theme change.
 - **`Shadow::core_animation(x, y, radius, color)`** builds the shadow a CALayer draws for a
   `shadowRadius`: Core Animation's blur has a standard deviation of about the radius, so
   `blur` is twice it.

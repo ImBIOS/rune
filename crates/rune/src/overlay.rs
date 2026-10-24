@@ -93,6 +93,9 @@ struct Requests<T> {
     margin: Option<f32>,
     align: Option<(Align, f32)>,
     size: Option<(f32, f32)>,
+    /// How long the `visible` change fades the window's alpha (macOS).
+    fade: Option<Duration>,
+    macos_level: Option<isize>,
     /// The `setup` waker fired.
     woken: bool,
     updates: Vec<Update<T>>,
@@ -100,7 +103,7 @@ struct Requests<T> {
 
 impl<T> Default for Requests<T> {
     fn default() -> Self {
-        Requests { input: None, follow_pointer: None, placement: None, display: None, request_keys: false, visible: None, edge: None, margin: None, align: None, size: None, woken: false, updates: Vec::new() }
+        Requests { input: None, follow_pointer: None, placement: None, display: None, request_keys: false, visible: None, edge: None, margin: None, align: None, size: None, fade: None, macos_level: None, woken: false, updates: Vec::new() }
     }
 }
 
@@ -155,11 +158,29 @@ impl<T: 'static> OverlayHandle<T> {
     /// preserving motion elapsed since each commit, even when show arrives in a later turn.
     /// Unretained hosts keep their settled first-frame behavior.
     pub fn show(&self) {
-        self.request(|q| q.visible = Some(true));
+        self.request(|q| { q.visible = Some(true); q.fade = None; });
     }
 
     pub fn hide(&self) {
-        self.request(|q| q.visible = Some(false));
+        self.request(|q| { q.visible = Some(false); q.fade = None; });
+    }
+
+    /// Like `show`, fading the window's alpha in from zero over `duration` on macOS
+    /// (AppKit's default ease). Elsewhere the overlay appears at once.
+    pub fn fade_in(&self, duration: Duration) {
+        self.request(|q| { q.visible = Some(true); q.fade = Some(duration); });
+    }
+
+    /// Like `hide`, fading the window's alpha out over `duration` on macOS before it orders
+    /// out. Input and drawing stop at once; showing again cancels the fade.
+    pub fn fade_out(&self, duration: Duration) {
+        self.request(|q| { q.visible = Some(false); q.fade = Some(duration); });
+    }
+
+    /// Change the macOS window level (`NSWindow.Level`, e.g. 3 for `.floating`), shown or not.
+    /// Overrides `OverlayOptions::level`; other platforms ignore it.
+    pub fn set_macos_level(&self, level: isize) {
+        self.request(|q| q.macos_level = Some(level));
     }
 
     pub fn set_edge(&self, edge: ScreenEdge) {
@@ -241,6 +262,9 @@ pub(crate) struct Overlay<T: 'static> {
     /// Where `place_window` last put the window, to carry the pointer across a move.
     origin: Option<winit::dpi::PhysicalPosition<i32>>,
     interactive: bool,
+    /// `ConfiguredOverlay::macos_level` or the last `set_macos_level`.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    macos_level: Option<isize>,
     shared: Arc<Shared<T>>,
     rt: Runtime<T>,
     clipboard: crate::clipboard::Client,
@@ -278,7 +302,7 @@ pub(crate) struct Overlay<T: 'static> {
 
 impl<T: 'static> Overlay<T> {
     pub(crate) fn new<S>(configured: impl Into<ConfiguredOverlay<T>>, state: T, app: &AppSpec<S>) -> (Self, OverlayHandle<T>) {
-        let ConfiguredOverlay { spec, options, on_key, on_created, poll, on_focus, compositor, setup, srgb_blend } = configured.into();
+        let ConfiguredOverlay { spec, options, on_key, on_created, poll, on_focus, compositor, setup, srgb_blend, macos_level } = configured.into();
         let srgb_blend = if compositor.is_some() && srgb_blend {
             eprintln!("rune: srgb_blend is ignored when a compositor is set");
             false
@@ -312,6 +336,7 @@ impl<T: 'static> Overlay<T> {
             at: Placement { size: spec.size, edge: spec.edge, margin: spec.margin, align: spec.align, inset: spec.inset },
             origin: None,
             interactive: spec.interactive,
+            macos_level,
             shared: shared.clone(),
             rt,
             clipboard: Default::default(),
@@ -352,7 +377,7 @@ impl<T: 'static> Overlay<T> {
         self.shared.availability.store(v, Ordering::Release);
     }
 
-    fn show(&mut self, event_loop: &ActiveEventLoop) {
+    fn show_fading(&mut self, event_loop: &ActiveEventLoop, fade: Duration) {
         self.rt.set_system_dark(self.dark);
         if self.visible { return; }
         let size = self.at.size;
@@ -369,7 +394,7 @@ impl<T: 'static> Overlay<T> {
             // Retained alpha-zero hosts already have pixels. A hidden update must reach
             // the surface before exposing it, rather than flashing the old frame.
             self.refresh_for_reveal_at(Instant::now());
-            self.show_window(&window);
+            self.show_window(&window, fade);
         }
         self.visible = true;
         self.occluded_wait = crate::window::OCCLUDED_RETRY;
@@ -428,7 +453,11 @@ impl<T: 'static> Overlay<T> {
         }
     }
 
-    fn hide(&mut self) {
+    fn hide(&mut self) { self.hide_fading(Duration::ZERO) }
+
+    fn hide_fading(&mut self, fade: Duration) {
+        #[cfg(not(target_os = "macos"))]
+        let _ = fade;
         #[cfg(target_os = "macos")]
         if let Some(live) = &mut self.live && let Some(pacing) = &mut live.pacing { pacing.stop(); }
         self.rt.set_live_visible(false);
@@ -446,7 +475,7 @@ impl<T: 'static> Overlay<T> {
                 if let Some(native) = &mut self.native { native.hide(); }
                 #[cfg(target_os = "macos")]
                 if let Some(panel) = &self.panel {
-                    panel.hide();
+                    panel.hide(fade);
                 }
                 window.set_visible(false);
             }
@@ -518,6 +547,8 @@ impl<T: 'static> Overlay<T> {
             attrs = attrs.with_has_shadow(false);
         }
         let window = Arc::new(event_loop.create_window(attrs).ok()?);
+        self.dark = window.theme().is_none_or(|t| t == winit::window::Theme::Dark);
+        self.rt.set_system_dark(self.dark);
         if self.cursor.is_none() { self.cursor = Some(crate::os_cursor::OsCursor::new(event_loop)); }
         let scale = window.scale_factor() as f32;
         // The surface first: on macOS it binds winit's view and its layer, which then move
@@ -528,6 +559,7 @@ impl<T: 'static> Overlay<T> {
             let wake = self.shared.wake.lock().unwrap().clone();
             self.panel = Some(crate::macos::Panel::adopt(&window, self.at, self.interactive, &self.options, wake)?);
             let panel = self.panel.as_ref().unwrap();
+            if let Some(level) = self.macos_level { panel.set_level(level); }
             let native = (Some(panel.window_number()), crate::OverlayCapabilities {
                 capture_exclusion: panel.capture_exclusion(), nonactivating_keys: OverlaySupport::Supported, global_pointer: OverlaySupport::Supported,
             });
@@ -585,12 +617,13 @@ impl<T: 'static> Overlay<T> {
     }
 
     /// Puts the window on screen without focusing it or activating the app.
-    fn show_window(&mut self, window: &Window) {
+    fn show_window(&mut self, window: &Window, fade: Duration) {
         #[cfg(target_os = "macos")]
         if let Some(panel) = &self.panel {
-            panel.show();
+            panel.show(fade);
             return;
         }
+        let _ = fade;
         #[cfg(target_os = "windows")]
         {
             if let Some(native) = &mut self.native { native.show(); }
@@ -1082,14 +1115,20 @@ impl<T: 'static> Overlay<T> {
             }
         }
         if self.options.prewarm && self.shared.availability.load(Ordering::Acquire) == 0 { self.prepare(event_loop); }
+        if let Some(level) = requests.macos_level {
+            self.macos_level = Some(level);
+            #[cfg(target_os = "macos")]
+            if let Some(panel) = &self.panel { panel.set_level(level); }
+        }
+        let fade = requests.fade.unwrap_or_default();
         match requests.visible {
-            Some(true) => self.show(event_loop),
-            Some(false) => self.hide(),
+            Some(true) => self.show_fading(event_loop, fade),
+            Some(false) => self.hide_fading(fade),
             None => {}
         }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         if recreate_layer && self.live.is_none() {
-            if layer_was_visible && requests.visible != Some(false) { self.show(event_loop); }
+            if layer_was_visible && requests.visible != Some(false) { self.show_fading(event_loop, Duration::ZERO); }
             else if self.options.prewarm { self.prepare(event_loop); }
         }
         self.apply_input();
