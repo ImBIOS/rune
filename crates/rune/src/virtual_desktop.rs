@@ -38,9 +38,14 @@ impl VirtualDesktop {
                     .and_then(|f| Some([f[0].as_f64()?, f[1].as_f64()?, f[2].as_f64()?, f[3].as_f64()?]))
                     .filter(|f| f[2] > 0.0 && f[3] > 0.0)
                     .ok_or_else(|| format!("script: display {i} needs \"frame\": [x, y, width, height]"))?;
+                let scale = match &d["scale"] {
+                    Value::Null => scale,
+                    s => s.as_f64().filter(|s| s.is_finite() && *s > 0.0)
+                        .ok_or_else(|| format!("script: display {i} \"scale\" must be a number above 0"))?,
+                };
                 Ok(VirtualDisplay {
-                    id: d["id"].as_u64().map_or(i as u32 + 1, |id| id as u32), frame,
-                    scale: d["scale"].as_f64().unwrap_or(scale), primary: d["primary"].as_bool().unwrap_or(false),
+                    id: d["id"].as_u64().map_or(i as u32 + 1, |id| id as u32), frame, scale,
+                    primary: d["primary"].as_bool().unwrap_or(false),
                 })
             }).collect::<Result<_, String>>()?;
             if desktop.displays.is_empty() { return Err("script: \"displays\" is empty".into()); }
@@ -137,6 +142,7 @@ mod tests {
         assert_eq!(default.displays(), vec![crate::Display { id: None, name: Some("headless".into()),
             position: (0, 0), size: (1920, 1080), scale: 2.0, primary: true }], "unchanged factory display");
         assert!(VirtualDesktop::from_script(Some(&json!({"displays": [{"frame": [0, 0]}]})), 2.0).is_err());
+        assert!(VirtualDesktop::from_script(Some(&json!({"displays": [{"frame": [0, 0, 10, 10], "scale": 0}]})), 2.0).is_err());
     }
 
     #[test]

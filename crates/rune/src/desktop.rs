@@ -29,6 +29,8 @@ const SHADOW: (f32, f32, f32) = (6.0, 5.0, 0.32);
 const DOWN: u32 = 4;
 /// Bound on rounds of windows asking things of each other within one frame.
 const PASSES: usize = 8;
+/// Largest backdrop image, in pixels per side, decoded.
+const MAX_BACKDROP: u32 = 16384;
 
 /// What a window asked of the desktop while it drained its requests.
 #[derive(Default)]
@@ -525,11 +527,6 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args) {
     let desktop = crate::tooling::desktop(&args, source.as_ref());
     let primary = desktop.primary().frame.map(|v| v as f32);
     let size = args.size.unwrap_or((primary[2], primary[3]));
-    let (wp, hp) = ((size.0 * scale).round() as u32, (size.1 * scale).round() as u32);
-    let mut writer = crate::record::Writer::new((wp, hp));
-    if let Some(path) = &args.video {
-        writer.video(path, timeline.fps).unwrap_or_else(|e| die(&e));
-    }
     let frames_log = Arc::new(std::sync::Mutex::new(Vec::new()));
     crate::headless_run::publish(crate::headless_run::HeadlessRun {
         script: args.script.clone(),
@@ -566,7 +563,14 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args) {
     let t0 = Instant::now();
     let features = desk.members.iter().fold(wgpu::Features::empty(), |f, m| f | m.features());
     let gpu = Gpu::try_with_features(Gpu::instance(), None, features).unwrap_or_else(|e| die(&e));
+    let max = gpu.device.limits().max_texture_dimension_2d;
+    let (wp, hp) = pixels(size, scale, max).unwrap_or_else(|| die(&format!(
+        "--desktop: the output, {}x{} points at --scale {scale}, must be 1 to {max} pixels a side", size.0, size.1)));
     let comp = Composite::new(&gpu, &backdrop, (wp, hp));
+    let mut writer = crate::record::Writer::new((wp, hp));
+    if let Some(path) = &args.video {
+        writer.video(path, fps).unwrap_or_else(|e| die(&e));
+    }
     let target = Offscreen::new(&gpu.device, wp, hp);
     let mut readback = crate::record::Readback::new(&gpu.device, &target, crate::record::DEPTH);
     let mut slots: Vec<Option<Slot>> = (0..n).map(|_| None).collect();
@@ -682,6 +686,9 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args) {
             if !m.visible() { continue; }
             let f = m.frame();
             let px = (((f[2] * scale).round() as u32).max(1), ((f[3] * scale).round() as u32).max(1));
+            if px.0.max(px.1) > max {
+                die(&format!("--desktop: window {:?} is {}x{} pixels, over the GPU's {max} a side", m.key(), px.0, px.1));
+            }
             if slots[i].as_ref().is_none_or(|s| s.px != px) { slots[i] = Some(Slot::new(&gpu.device, &comp, px, scale)); }
             let slot = slots[i].as_ref().unwrap();
             m.render(&gpu, &slot.view, px, step, update_ms);
@@ -944,7 +951,7 @@ impl Composite {
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("desktop shadow"), mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default()
         });
-        let pixels = fit_backdrop(backdrop, size);
+        let pixels = fit_backdrop(backdrop, size).unwrap_or_else(|e| die(&e));
         let (texture, view) = new_texture(device, "desktop backdrop", size, OFFSCREEN_FORMAT, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
         gpu.queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
@@ -1065,20 +1072,71 @@ fn bind(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, uniform: &wgpu::B
 }
 
 /// The backdrop scaled to cover `size` pixels, centred and cropped, as opaque sRGB RGBA.
-fn fit_backdrop(path: &Path, (w, h): (u32, u32)) -> Vec<u8> {
-    let image = ::image::open(path).unwrap_or_else(|e| die(&format!("{}: {e}", path.display()))).into_rgba8();
-    let (iw, ih) = image.dimensions();
-    let s = (f64::from(w) / f64::from(iw)).max(f64::from(h) / f64::from(ih));
-    let (rw, rh) = (((f64::from(iw) * s).round() as u32).max(w), ((f64::from(ih) * s).round() as u32).max(h));
-    let image = if (rw, rh) == (iw, ih) { image } else { ::image::imageops::resize(&image, rw, rh, ::image::imageops::FilterType::CatmullRom) };
-    let (x0, y0) = ((rw - w) / 2, (rh - h) / 2);
-    let mut out = Vec::with_capacity((w * h * 4) as usize);
-    for y in 0..h {
-        for x in 0..w {
-            let [r, g, b, a] = image.get_pixel(x0 + x, y0 + y).0;
-            let over = |c: u8| (u32::from(c) * u32::from(a) / 255) as u8;
-            out.extend([over(r), over(g), over(b), 255]);
-        }
+fn fit_backdrop(path: &Path, (w, h): (u32, u32)) -> Result<Vec<u8>, String> {
+    let fail = |e: ::image::ImageError| format!("{}: {e}", path.display());
+    let (iw, ih) = ::image::image_dimensions(path).map_err(fail)?;
+    if iw.max(ih) > MAX_BACKDROP {
+        return Err(format!("{}: {iw}x{ih} pixels; a backdrop is at most {MAX_BACKDROP} pixels a side", path.display()));
     }
-    out
+    let image = ::image::open(path).map_err(fail)?.into_rgba8();
+    let (iw, ih) = image.dimensions();
+    // The centred part of the source with the output's aspect, then scaled to the output.
+    let (cw, ch) = if u64::from(iw) * u64::from(h) > u64::from(ih) * u64::from(w) {
+        (((f64::from(ih) * f64::from(w) / f64::from(h)).round() as u32).clamp(1, iw), ih)
+    } else {
+        (iw, ((f64::from(iw) * f64::from(h) / f64::from(w)).round() as u32).clamp(1, ih))
+    };
+    let crop = ::image::imageops::crop_imm(&image, (iw - cw) / 2, (ih - ch) / 2, cw, ch);
+    let image = if (cw, ch) == (w, h) { crop.to_image() } else { ::image::imageops::resize(&*crop, w, h, ::image::imageops::FilterType::CatmullRom) };
+    let len = (w as usize).checked_mul(h as usize).and_then(|n| n.checked_mul(4)).ok_or_else(|| format!("{w}x{h} pixels is too large"))?;
+    let mut out = Vec::with_capacity(len);
+    for p in image.pixels() {
+        let [r, g, b, a] = p.0;
+        let over = |c: u8| (u32::from(c) * u32::from(a) / 255) as u8;
+        out.extend([over(r), over(g), over(b), 255]);
+    }
+    Ok(out)
+}
+
+/// `size` points at `scale` in whole pixels, when a texture of at most `max` a side holds them.
+fn pixels(size: (f32, f32), scale: f32, max: u32) -> Option<(u32, u32)> {
+    let side = |v: f32| {
+        let px = (v * scale).round();
+        (px >= 1.0 && px <= max as f32).then_some(px as u32)
+    };
+    Some((side(size.0)?, side(size.1)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backdrop_is_cropped_to_the_output_aspect_then_scaled() {
+        let dir = std::env::temp_dir().join(format!("rune-backdrop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Red, green and blue thirds side by side: a square output keeps the green middle.
+        let wide = dir.join("wide.png");
+        ::image::RgbaImage::from_fn(300, 100, |x, _| ::image::Rgba([if x < 100 { 255 } else { 0 }, if (100..200).contains(&x) { 255 } else { 0 }, if x >= 200 { 255 } else { 0 }, 255]))
+            .save(&wide).unwrap();
+        let px = fit_backdrop(&wide, (50, 50)).unwrap();
+        assert_eq!(px.len(), 50 * 50 * 4);
+        assert!(px.chunks(4).all(|p| p[1] > 200 && p[0] < 40 && p[2] < 40), "only the centre survives");
+        assert_eq!(fit_backdrop(&wide, (300, 100)).unwrap()[..4], [255, 0, 0, 255], "same size: pixels as they are");
+
+        let huge = dir.join("huge.png");
+        ::image::GrayImage::new(MAX_BACKDROP + 1, 1).save(&huge).unwrap();
+        let error = fit_backdrop(&huge, (10, 10)).unwrap_err();
+        assert!(error.contains("16385x1"), "refused before decoding: {error}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn output_pixels_fit_a_texture() {
+        assert_eq!(pixels((1512.0, 982.0), 2.0, 8192), Some((3024, 1964)));
+        assert_eq!(pixels((0.2, 10.0), 2.0, 8192), None, "under a pixel");
+        assert_eq!(pixels((5000.0, 10.0), 2.0, 8192), None, "over the GPU's limit");
+        assert_eq!(pixels((f32::NAN, 10.0), 2.0, 8192), None);
+        assert_eq!(pixels((10.0, 10.0), f32::INFINITY, 8192), None);
+    }
 }

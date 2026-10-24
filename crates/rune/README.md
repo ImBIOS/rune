@@ -1034,7 +1034,8 @@ $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/d
   app first, then the others. Show, hide, place, focus and close requests apply as they would
   natively, in the frame whose handlers made them, but `quit` doesn't end the recording. When the
   key window hides, the topmost visible window that takes clicks gets the keyboard; a
-  click-through window never does.
+  click-through window never does. `--size` and `--scale` must be above 0, the output at most the
+  GPU's texture size, and the backdrop at most 16384 pixels a side.
   `--keys` and `--pointer` draw over the composite. `--window KEY` picks the window `--tree`,
   `--trace` and `--scene` describe, and the tree adds a `windows` list of every window's frame.
   `headless_run()` gives `desktop()`, the window frames as they change (`window_frames()`) and

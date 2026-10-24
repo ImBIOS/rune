@@ -228,12 +228,8 @@ impl Args {
                     a.at_mark = mark_time(&v);
                     a.at = a.at_mark.is_none().then(|| num(&v));
                 }
-                "--size" => {
-                    let v = val(&mut i);
-                    let (w, h) = v.split_once('x').unwrap_or_else(|| die("--size is WxH"));
-                    a.size = Some((num(w) as f32, num(h) as f32));
-                }
-                "--scale" => a.scale = Some(num(&val(&mut i)) as f32),
+                "--size" => a.size = Some(parse_size(&val(&mut i)).unwrap_or_else(|e| die(&e))),
+                "--scale" => a.scale = Some(parse_scale(&val(&mut i)).unwrap_or_else(|e| die(&e))),
                 "--theme" => a.theme = Some(val(&mut i)),
                 "--script" => a.script = Some(val(&mut i).into()),
                 "--frames" => a.frames = Some(num(&val(&mut i)) as usize),
@@ -347,6 +343,20 @@ pub(crate) fn die(msg: &str) -> ! {
 
 fn num(s: &str) -> f64 {
     s.trim().parse().unwrap_or_else(|_| die(&format!("not a number: {s}")))
+}
+
+fn positive(s: &str) -> Option<f32> {
+    s.trim().parse::<f32>().ok().filter(|v| v.is_finite() && *v > 0.0)
+}
+
+/// `--size WxH`, in points.
+fn parse_size(v: &str) -> Result<(f32, f32), String> {
+    v.split_once('x').and_then(|(w, h)| Some((positive(w)?, positive(h)?)))
+        .ok_or_else(|| format!("--size is WxH, both above 0: {v}"))
+}
+
+fn parse_scale(v: &str) -> Result<f32, String> {
+    positive(v).ok_or_else(|| format!("--scale is a number above 0: {v}"))
 }
 
 /// Opens the app's window and quits when it closes (`App` for other lifetimes), or renders
@@ -2140,6 +2150,14 @@ mod tests {
         });
         assert_eq!((focus_of(&run, 0.1, "a"), focus_of(&run, 0.1, "hud")), ((true, true), (true, false)));
         assert_eq!(*KEYED.lock().unwrap(), ["a", "a"]);
+    }
+
+    #[test]
+    fn size_and_scale_must_be_positive() {
+        assert_eq!(parse_size("400x300.5"), Ok((400.0, 300.5)));
+        assert_eq!(parse_scale("1.5"), Ok(1.5));
+        for bad in ["0x0", "400x0", "-1x10", "NaNx10", "infx10", "400", "ax3"] { assert!(parse_size(bad).is_err(), "{bad}"); }
+        for bad in ["0", "-2", "NaN", "inf", "x"] { assert!(parse_scale(bad).is_err(), "{bad}"); }
     }
 
     #[test]
