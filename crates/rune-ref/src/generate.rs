@@ -126,6 +126,52 @@ pub fn dashed(seed: u64, count: usize) -> Scene {
     scene
 }
 
+/// `seeded`, with every primitive redrawn as a radial or angled linear gradient (kind 11),
+/// including multi-stop open band edges (`+ 2.0` on `t0` / `t1`).
+pub fn radial(seed: u64, count: usize) -> Scene {
+    let mut scene = seeded(seed, count);
+    let mut out = Vec::with_capacity(scene.primitives.len() * 2);
+    for mut p in scene.primitives {
+        let b = |n: usize| (p.radii[n % 4] * 8.0 + p.rect[n % 4] * 4.0) as u32;
+        let t0 = (b(0) % 4) as f32 * 0.1;
+        let t1 = (t0 + 0.35 + (b(1) % 6) as f32 * 0.1).min(1.0);
+        let soft = if b(1) % 4 == 0 { p.params[2] } else { 0.0 };
+        p.uv = if b(0) % 4 == 0 {
+            let angle = (b(2) % 16) as f32 * (std::f32::consts::TAU / 16.0);
+            let (dx, dy) = (libm::sinf(angle), -libm::cosf(angle));
+            let span = (dx.abs() * p.rect[2] + dy.abs() * p.rect[3]).max(1.0);
+            [dx / span, dy / span, 0.0, 0.0]
+        } else {
+            let cx = (0.2 + (b(2) % 7) as f32 * 0.1) * p.rect[2];
+            let cy = (0.2 + (b(3) % 7) as f32 * 0.1) * p.rect[3];
+            let rx = (4.0 + (b(0) % 24) as f32).max(1.0);
+            let ry = if b(1) % 2 == 0 { rx } else { (4.0 + (b(1) % 24) as f32).max(1.0) };
+            [cx, cy, rx, ry]
+        };
+        if b(2) % 2 == 0 {
+            let t_mid = 0.5 * (t0 + t1);
+            let mid = [
+                0.5 * (p.fill[0] + p.border[0]),
+                0.5 * (p.fill[1] + p.border[1]),
+                0.5 * (p.fill[2] + p.border[2]),
+                0.5 * (p.fill[3] + p.border[3]),
+            ];
+            let mut inner = p.clone();
+            inner.border = mid;
+            inner.params = [t0, 11.0, soft, t_mid + 2.0];
+            out.push(inner);
+            p.fill = mid;
+            p.params = [t_mid + 2.0, 11.0, soft, t1];
+            out.push(p);
+        } else {
+            p.params = [t0, 11.0, soft, t1];
+            out.push(p);
+        }
+    }
+    scene.primitives = out;
+    scene
+}
+
 pub fn translate(scene: &mut Scene, x: f32, y: f32) {
     for p in &mut scene.primitives {
         p.rect[0] += x;

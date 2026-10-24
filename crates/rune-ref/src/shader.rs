@@ -223,6 +223,32 @@ pub(crate) fn fragment(i: &Primitive, atlas: &Atlas, screen: [f32; 2]) -> [f32; 
             let cov = ring * dash_cov(s, total, [i.uv[0], i.uv[1], i.uv[2]]);
             col = std::array::from_fn(|c| mix(i.fill[c], i.border[c], t) * cov);
         }
+        11 => {
+            let d = sd(q, h, i.radii);
+            let soft = i.params[2].max(0.5);
+            let cov = clamp(0.5 - d / (soft * 2.0));
+            let t0_raw = i.params[0];
+            let t1_raw = i.params[3];
+            let lower_open = t0_raw >= 1.5;
+            let upper_open = t1_raw >= 1.5;
+            let t0 = if lower_open { t0_raw - 2.0 } else { t0_raw };
+            let t1 = if upper_open { t1_raw - 2.0 } else { t1_raw };
+            let t = if i.uv[2] > 0.0 {
+                let dx = (p[0] - i.rect[0] - i.uv[0]) / i.uv[2];
+                let dy = (p[1] - i.rect[1] - i.uv[1]) / i.uv[3];
+                sqrtf(dx * dx + dy * dy)
+            } else {
+                0.5 + (q[0] * i.uv[0] + q[1] * i.uv[1])
+            };
+            if !((lower_open && t < t0) || (upper_open && t >= t1)) {
+                let u = if t1 <= t0 + 1e-6 {
+                    if t >= t0 { 1.0 } else { 0.0 }
+                } else {
+                    clamp((t - t0) / (t1 - t0))
+                };
+                col = std::array::from_fn(|c| mix(i.fill[c], i.border[c], u) * cov);
+            }
+        }
         _ => panic!("unsupported primitive kind"),
     }
     let origin = i.fade_origin.unwrap_or(i.clip);

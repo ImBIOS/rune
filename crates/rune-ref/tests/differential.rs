@@ -232,3 +232,59 @@ fn cpu_gpu_dashed() {
     }
     eprintln!("METRIC channel_max_dashed={max}");
 }
+
+#[test]
+fn cpu_gpu_radial() {
+    let mut gpu = GpuRenderer::default();
+    let mut max = 0;
+    for seed in 0..64 {
+        let scene = generate::radial(seed, 8);
+        for (n, primitive) in scene.primitives.iter().enumerate() {
+            let mut single = scene.clone();
+            single.primitives = vec![primitive.clone()];
+            match check(&mut gpu, &single, 2) {
+                Ok(m) => max = max.max(m),
+                Err(e) => {
+                    save(&format!("radial-{seed}-{n}"), &single);
+                    panic!("{e}");
+                }
+            }
+        }
+        if let Err(e) = check(&mut gpu, &scene, 2) {
+            save(&format!("radial-{seed}-composite"), &scene);
+            panic!("{e}");
+        }
+    }
+    // Multi-stop radial gradient split into two non-overlapping band segments at t = 0.5.
+    let mut multi = generate::scene(&[]);
+    let base = Primitive {
+        node: 1,
+        source: "radial/multi-0".into(),
+        rect: [8.0, 8.0, 48.0, 48.0],
+        radii: [12.0; 4],
+        fill: [0.8, 0.2, 0.1, 0.9],
+        border: [0.2, 0.7, 0.4, 0.9],
+        params: [0.0, 11.0, 0.0, 2.5],
+        uv: [24.0, 24.0, 24.0, 20.0],
+        clip: rune_ref::NO_CLIP,
+        fade: [0.0; 4],
+        fade_origin: None,
+    };
+    let outer = Primitive {
+        node: 2,
+        source: "radial/multi-1".into(),
+        fill: base.border,
+        border: [0.05, 0.1, 0.3, 0.4],
+        params: [2.5, 11.0, 0.0, 1.0],
+        ..base.clone()
+    };
+    multi.primitives = vec![base, outer];
+    match check(&mut gpu, &multi, 2) {
+        Ok(m) => max = max.max(m),
+        Err(e) => {
+            save("radial-multi", &multi);
+            panic!("{e}");
+        }
+    }
+    eprintln!("METRIC channel_max_radial={max}");
+}
