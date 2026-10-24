@@ -8,7 +8,7 @@
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{CVDisplayLink, CVGetCurrentHostTime, CVGetHostClockFrequency, CVOptionFlags, CVReturn, CVTimeStamp, CVTimeStampFlags};
@@ -33,6 +33,7 @@ pub(crate) struct DisplayLink {
 }
 
 const LOW_POWER_FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
+static CREATE_FAILED: AtomicBool = AtomicBool::new(false);
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" { fn CGDisplayIsBuiltin(display: u32) -> u32; }
@@ -84,7 +85,12 @@ impl DisplayLink {
         let mut raw = std::ptr::null_mut();
         // SAFETY: valid out pointer; the create rule transfers one retained reference.
         let status = unsafe { CVDisplayLink::create_with_active_cg_displays(NonNull::from(&mut raw)) };
-        if status != 0 { eprintln!("display link creation failed: {status}"); return None; }
+        // Every display asleep fails this until one wakes, so say so once per sleep.
+        if status != 0 {
+            if !CREATE_FAILED.swap(true, Ordering::Relaxed) { eprintln!("display link creation failed: {status}"); }
+            return None;
+        }
+        CREATE_FAILED.store(false, Ordering::Relaxed);
         let link = unsafe { CFRetained::from_raw(NonNull::new(raw)?) };
         let mut callback = Box::new(Callback {
             target: AtomicU64::new(0),
