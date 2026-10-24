@@ -349,6 +349,37 @@ fn table_options_drop_the_outline_dim_the_header_and_line_up_figures() {
     }
 }
 
+/// A web table's look: cells a step smaller than the body, padded 10 by 4, the first column
+/// flush with the paragraph above.
+#[test]
+fn table_font_and_padding_set_the_cells_and_the_first_column_sits_flush() {
+    fn styled(src: &String, _: &mut Cx<String>) -> El {
+        let body = rune::TextStyle { size: 15.0, line_height: 24.0, ..Kit::neutral(true).ty.body };
+        let style = MarkdownStyle::neutral(true)
+            .body_font(body)
+            .table_outline(None)
+            .table_font(rune::TextStyle { size: 15.0 * 0.93, line_height: 20.0, ..body })
+            .table_cell_padding(10.0, 4.0)
+            .table_flush_left(true);
+        col().w_full().child(Markdown::new(src.clone()).render(&style))
+    }
+    let src = "Intro\n\n| Name | Count |\n|---|---|\n| alpha | 1 |\n";
+    let mut rt = Runtime::new(src.to_owned(), styled, (480.0, 400.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    let all = rt.elements();
+    let text = |t: &str| all.iter().find(|e| e.text.as_deref() == Some(t)).unwrap_or_else(|| panic!("no {t}"));
+    let cells: Vec<_> = all.iter().filter(|e| e.path.contains("th") && e.key.as_deref().is_some_and(|k| k.starts_with('c'))).collect();
+    assert_eq!(text("Name").rect[0], text("Intro").rect[0], "the first column is flush with the paragraph");
+    assert_eq!(text("Name").rect[0], cells[0].rect[0]);
+    assert_eq!(text("Count").rect[0] - cells[1].rect[0], 10.0);
+    assert_eq!(by_key(&rt, "th").rect[3], 20.0 + 2.0 * 4.0, "the table font's line and the cell padding");
+    assert_eq!(by_key(&rt, "r0").rect[3], 28.0);
+    // Columns hold their text on one line: the first is its text plus the right padding only.
+    let name = rune::text::measure("Name", &[], rune::TextStyle { size: 15.0 * 0.93, line_height: 20.0, weight: 670.0, features: "'tnum' 1", ..Kit::neutral(true).ty.body }, None).0;
+    let alpha = rune::text::measure("alpha", &[], rune::TextStyle { size: 15.0 * 0.93, line_height: 20.0, features: "'tnum' 1", ..Kit::neutral(true).ty.body }, None).0;
+    assert_eq!(cells[0].rect[2], name.max(alpha) + 10.0);
+}
+
 #[test]
 fn columns_too_wide_to_fit_stop_at_the_frame_with_or_without_an_outline() {
     fn view(outline: &bool, _: &mut Cx<bool>) -> El {

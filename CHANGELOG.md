@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Markdown tables take their own font and cell padding, and can sit flush left.**
+  `MarkdownStyle::table_font(TextStyle)` sets the cells' font (the body's by default; a web
+  table at `0.93em` is the body at 0.93 of its size), `table_cell_padding(x, y)` the padding (10
+  by 6 by default) and `table_flush_left(true)` drops the first column's left padding so it lines
+  up with the paragraphs around it. A table without an outline (`table_outline(None)`) no longer
+  insets its cells by the half-point border it doesn't draw, so it sits 0.5 pt further left and
+  is 1 pt narrower.
 - **A Markdown table that ends the text sizes to its last row.** rune-kit read a last table row
   with no newline after it as still streaming in and left it out of the column widths, so a
   table ending a trimmed note could wrap that row. It now does so only while `Markdown::reveal`

@@ -635,6 +635,11 @@ pub struct MarkdownStyle {
     table_head_text: Color,
     table_min_column: f32,
     table_tabular: bool,
+    /// Cells' font before tabular figures and the header's weight (`None`: the body's).
+    table_font: Option<TextStyle>,
+    /// Cell padding (x, y), and whether the first column has none on its left.
+    table_pad: [f32; 2],
+    table_flush_left: bool,
     diff_add: Color,
     diff_remove: Color,
     diff_add_text: Color,
@@ -721,6 +726,9 @@ impl MarkdownStyle {
             table_head_text: c.text_base,
             table_min_column: 120.0,
             table_tabular: true,
+            table_font: None,
+            table_pad: [10.0, 6.0],
+            table_flush_left: false,
             diff_add: tint(c.layer_01, c.success.icon, if k.dark { 0.11 } else { 0.14 }),
             diff_remove: tint(c.layer_01, c.danger.icon, if k.dark { 0.11 } else { 0.14 }),
             diff_add_text: c.text_base,
@@ -851,6 +859,26 @@ impl MarkdownStyle {
     /// The narrowest a column shrinks to when its longest word is wider (120 points by default).
     pub fn table_min_column(mut self, points: f32) -> Self {
         self.table_min_column = points.max(0.0);
+        self
+    }
+    /// The cells' font (the body font by default). The header takes it at the strong weight,
+    /// and inline code scales from its size. A web table at `font-size: 0.93em` is the body
+    /// style at 0.93 of its size.
+    pub fn table_font(mut self, f: TextStyle) -> Self {
+        self.table_font = Some(f);
+        self
+    }
+    /// Each cell's padding: `x` on the left and right, `y` above and below (10 and 6 points by
+    /// default).
+    pub fn table_cell_padding(mut self, x: f32, y: f32) -> Self {
+        self.table_pad = [x.max(0.0), y.max(0.0)];
+        self
+    }
+    /// Whether the first column starts at the table's left edge, with no left padding, so its
+    /// text lines up with the paragraphs around it, as a web table whose first cells have
+    /// `padding-left: 0`. Off by default.
+    pub fn table_flush_left(mut self, on: bool) -> Self {
+        self.table_flush_left = on;
         self
     }
     /// The tints behind a diff's added and removed lines (full width).

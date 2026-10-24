@@ -3,8 +3,6 @@
 
 use super::*;
 
-const PAD_X: f32 = 10.0;
-const PAD_Y: f32 = 6.0;
 /// Estimated bytes of column widths kept beyond the tables on screen.
 const WIDTHS_BYTES: usize = 1 << 20;
 
@@ -44,11 +42,16 @@ fn with_tnum(features: &'static str) -> &'static str {
 
 impl Renderer {
     fn head_font(&self) -> TextStyle {
-        self.cell_font(TextStyle { weight: self.s.strong_weight, ..self.s.body })
+        self.cell_font(TextStyle { weight: self.s.strong_weight, ..self.s.table_font.unwrap_or(self.s.body) })
     }
 
     fn body_font(&self) -> TextStyle {
-        self.cell_font(self.s.body)
+        self.cell_font(self.s.table_font.unwrap_or(self.s.body))
+    }
+
+    /// Column `j`'s left padding.
+    fn pad_left(&self, j: usize) -> f32 {
+        if j == 0 && self.s.table_flush_left { 0.0 } else { self.s.table_pad[0] }
     }
 
     fn cell_font(&self, f: TextStyle) -> TextStyle {
@@ -60,9 +63,11 @@ impl Renderer {
         let n = t.align.len().max(t.head.len()).max(1);
         let cols = self.columns(t, n);
         let total: f32 = cols.natural.iter().sum();
-        let mut frame = col().w_full().max_w(total + 1.0).padding(0.5);
-        // Without an outline the corners stay square, so the rules run the full width. Either way
-        // columns too wide to fit stop at the frame.
+        // Without an outline the corners stay square, so the rules run the full width, and no
+        // border inset moves the cells off the text around the table. Either way columns too
+        // wide to fit stop at the frame.
+        let border = if s.table_outline.is_some() { 0.5 } else { 0.0 };
+        let mut frame = col().w_full().max_w(total + 2.0 * border).padding(border);
         frame = match s.table_outline {
             Some(outline) => frame.radius(6.0).border(0.5, outline).clip_rounded(6.0),
             None => frame.clip_soft(0.0),
@@ -80,6 +85,7 @@ impl Renderer {
 
     fn table_row(&self, cells: &[Inline], t: &Table, cols: &Columns, font: TextStyle, color: Color) -> El {
         let empty = Inline::default();
+        let [pad_x, pad_y] = self.s.table_pad;
         let mut r = row().w_full();
         for (j, (natural, min)) in cols.natural.iter().zip(&cols.min).enumerate() {
             let inl = cells.get(j).unwrap_or(&empty);
@@ -93,7 +99,7 @@ impl Renderer {
             r = r.child(
                 // Clipped: a word wider than a shrunk column (or a row still streaming in) must
                 // not run into the next column.
-                col().key(format!("c{j}")).w(*natural).shrink().min_w(*min).px(PAD_X).py(PAD_Y).clip_soft(0.0).child(self.wire_link(content, inl)),
+                col().key(format!("c{j}")).w(*natural).shrink().min_w(*min).pl(self.pad_left(j)).pr(pad_x).py(pad_y).clip_soft(0.0).child(self.wire_link(content, inl)),
             );
         }
         r
@@ -116,6 +122,8 @@ impl Renderer {
             cap.to_bits(),
             self.s.inline_code_scale.to_bits(),
             self.s.inline_code_weight.to_bits(),
+            self.s.table_pad.map(f32::to_bits),
+            self.s.table_flush_left,
         ));
         if let Some(hit) = WIDTHS.with_borrow_mut(|c| c.get(&key).cloned()) {
             return hit;
@@ -133,8 +141,11 @@ impl Renderer {
                 min[j] = min[j].max(rune::text::measure(&inl.text, &spans, font, Some(0.0)).0.min(cap));
             }
         }
-        let pad = |w: f32| w + 2.0 * PAD_X;
-        let cols = Rc::new(Columns { natural: natural.into_iter().map(pad).collect(), min: min.into_iter().map(pad).collect() });
+        let pad = |(j, w): (usize, f32)| w + self.pad_left(j) + self.s.table_pad[0];
+        let cols = Rc::new(Columns {
+            natural: natural.into_iter().enumerate().map(pad).collect(),
+            min: min.into_iter().enumerate().map(pad).collect(),
+        });
         WIDTHS.with_borrow_mut(|c| c.insert(key, cols.clone(), 8 * n + 64));
         cols
     }
