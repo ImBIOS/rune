@@ -571,6 +571,7 @@ pub struct El {
     pub(crate) above: Option<Anchor>,
     pub(crate) on_drag: Option<DragFn>,
     pub(crate) drag_out: Option<DragOutFn>,
+    pub(crate) on_drag_start: Option<PressFn>,
     pub(crate) on_drag_end: Option<DragEndFn>,
     pub(crate) motion: Option<Spring>,
     pub(crate) opacity_motion: Option<Anim>,
@@ -626,6 +627,7 @@ fn base(dir: FlexDirection) -> El {
         above: None,
         on_drag: None,
         drag_out: None,
+        on_drag_start: None,
         on_drag_end: None,
         motion: None,
         opacity_motion: None,
@@ -1806,6 +1808,23 @@ impl El {
     /// session; see [`crate::drag_out`] for how far that path is tested.
     pub fn drag_out<S: 'static>(mut self, f: impl Fn(&S) -> Option<crate::DragItem> + 'static) -> Self {
         self.drag_out = Some(Rc::new(move |s| f(s.downcast_ref::<S>().expect("handler registered for a different state type than the app's"))));
+        self
+    }
+    /// Called when a [`El::drag_out`] drag starts, after the drag image was taken, so the app
+    /// can style the source while it's dragged. Every start is followed by exactly one
+    /// [`El::on_drag_end`], also when the system couldn't start the session.
+    ///
+    /// ```
+    /// # use rune::{DragItem, el::el};
+    /// # struct App { file: std::path::PathBuf, dragging: bool }
+    /// # let s = App { file: "/tmp/a.txt".into(), dragging: false };
+    /// el().opacity(if s.dragging { 0.28 } else { 1.0 })
+    ///     .drag_out(|s: &App| Some(DragItem::new().file(&s.file)))
+    ///     .on_drag_start(|s: &mut App, _| s.dragging = true)
+    ///     .on_drag_end(|s: &mut App, _, _| s.dragging = false);
+    /// ```
+    pub fn on_drag_start<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        self.on_drag_start = Some(Rc::new(move |s, tx| f(downcast::<S>(s), tx)));
         self
     }
     /// Called once when a [`El::drag_out`] drag ends, with what the drop did.

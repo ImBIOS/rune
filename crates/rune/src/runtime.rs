@@ -221,6 +221,7 @@ pub(crate) struct Node {
     above: Option<crate::el::Anchor>,
     on_drag: Option<DragFn>,
     drag_out: Option<DragOutFn>,
+    on_drag_start: Option<PressFn>,
     on_drag_end: Option<DragEndFn>,
     motion: Spring,
     opacity_motion: Option<rune_motion::Anim>,
@@ -275,6 +276,7 @@ enum Action {
     Link(String, usize),
     SecondaryPress(String, PointerPress),
     Drag(String, Drag),
+    DragStart(String),
     DragEnd(String, crate::DragOutcome),
     Key { ev: KeyEvent, repeat: bool },
     Ime(Ime),
@@ -1741,6 +1743,11 @@ impl<S: 'static> Runtime<S> {
                 }
                 true
             }
+            Action::DragStart(path) => {
+                let Some(f) = self.node(&path).and_then(|n| n.on_drag_start.clone()) else { return false };
+                f(handler_state(&mut self.state), &mut one);
+                true
+            }
             Action::DragEnd(path, outcome) => {
                 self.events.push(format!("drag-end {outcome:?} {path}"));
                 let Some(f) = self.node(&path).and_then(|n| n.on_drag_end.clone()) else { return false };
@@ -3005,11 +3012,21 @@ impl<S: 'static> Runtime<S> {
         let (x0, y0) = (r[0].max(clip[0]), r[1].max(clip[1]));
         let rect = [x0, y0, ((r[0] + r[2]).min(clip[2]) - x0).max(0.0), ((r[1] + r[3]).min(clip[3]) - y0).max(0.0)];
         self.events.push(format!("drag-out {path}"));
+        self.queue.push(Action::DragStart(path.clone()));
+        self.drop_drag_out_request();
         self.drag_out_request = Some(crate::drag_out::DragOutStart { path, item, rect, press: self.press_at });
         self.capture = None;
         self.capture_inside = false;
         self.pointer_leave();
         true
+    }
+
+    /// A request no host took (headless tools) ends as `Cancelled`, so `on_drag_start` is always
+    /// followed by `on_drag_end`.
+    fn drop_drag_out_request(&mut self) {
+        if let Some(start) = self.drag_out_request.take() {
+            self.drag_ends.borrow_mut().push((start.path, crate::DragOutcome::Cancelled));
+        }
     }
 
     fn in_viewport(&self, x: f32, y: f32) -> bool {
@@ -3041,6 +3058,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub fn pointer_down(&mut self, x: f32, y: f32) {
+        self.drop_drag_out_request();
         self.pointer = Some((x, y));
         self.keyboard_focus = false;
         let target = self.primary_target(x, y);
@@ -3108,7 +3126,6 @@ impl<S: 'static> Runtime<S> {
             data: 0.0,
         };
         let path = n.path.clone();
-        self.drag_out_request = None;
         self.drag_out_armed = self.drags_out(n);
         if n.on_drag.is_some() && !self.drag_out_armed {
             self.queue.push(Action::Drag(path.clone(), d));
@@ -4819,6 +4836,7 @@ fn flatten(
         above,
         on_drag,
         drag_out,
+        on_drag_start,
         on_drag_end,
         opacity_motion,
         lead,
@@ -4882,6 +4900,7 @@ fn flatten(
         above,
         on_drag,
         drag_out,
+        on_drag_start,
         on_drag_end,
         motion,
         opacity_motion,
@@ -6040,14 +6059,15 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct DragOutState { presses: u32, drags: u32, offer: bool, ended: Vec<crate::DragOutcome> }
+    struct DragOutState { presses: u32, drags: u32, offer: bool, ended: Vec<crate::DragOutcome>, dragging: bool, starts: u32 }
 
     fn drag_out_view(_: &DragOutState, _: &mut Cx<DragOutState>) -> El {
         col().size(200.0, 200.0).child(el().key("file").size(100.0, 40.0)
             .on_press(|s: &mut DragOutState| s.presses += 1)
             .on_drag(|s: &mut DragOutState, _, _| s.drags += 1)
             .drag_out(|s: &DragOutState| s.offer.then(|| crate::DragItem::new().file("/Applications/Example.app")))
-            .on_drag_end(|s: &mut DragOutState, outcome, _| s.ended.push(outcome)))
+            .on_drag_start(|s: &mut DragOutState, _| { s.dragging = true; s.starts += 1; })
+            .on_drag_end(|s: &mut DragOutState, outcome, _| { s.dragging = false; s.ended.push(outcome); }))
     }
 
     fn drag_out_rt(offer: bool) -> Runtime<DragOutState> {
@@ -6138,6 +6158,51 @@ mod tests {
         assert!(!rt.drag_ends_pending());
         assert!(rt.events.iter().any(|e| e.starts_with("drag-end Copied ")));
         assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("file") && e.drag_out));
+    }
+
+    #[test]
+    fn on_drag_start_runs_once_the_drag_is_handed_over_and_before_its_end() {
+        let mut rt = drag_out_rt(true);
+        rt.pointer_move(12.0, 10.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state.starts, 0, "not before the threshold");
+        rt.pointer_move(40.0, 10.0);
+        let start = rt.take_drag_out().unwrap();
+        assert_eq!(rt.state.starts, 0, "handlers run between frames, after the host took the drag image");
+        rt.frame(0.0);
+        assert!(rt.state.dragging && rt.state.starts == 1);
+        rt.drag_end_sink().borrow_mut().push((start.path, crate::DragOutcome::Cancelled));
+        rt.frame(0.0);
+        assert!(!rt.state.dragging);
+        assert_eq!((rt.state.starts, rt.state.ended.as_slice()), (1, &[crate::DragOutcome::Cancelled][..]));
+    }
+
+    #[test]
+    fn a_drag_start_and_end_reported_together_run_in_order() {
+        let mut rt = drag_out_rt(true);
+        rt.pointer_move(40.0, 10.0);
+        let start = rt.take_drag_out().unwrap();
+        rt.drag_end_sink().borrow_mut().push((start.path, crate::DragOutcome::Copied));
+        rt.frame(0.0);
+        assert!(!rt.state.dragging, "the end runs after the start");
+        assert_eq!((rt.state.starts, rt.state.ended.as_slice()), (1, &[crate::DragOutcome::Copied][..]));
+    }
+
+    #[test]
+    fn a_drag_out_no_host_took_ends_cancelled_at_the_next_press() {
+        let mut rt = drag_out_rt(true);
+        rt.pointer_move(40.0, 10.0);
+        rt.frame(0.0);
+        assert!(rt.state.dragging);
+        rt.pointer_up(40.0, 10.0);
+        rt.frame(0.0);
+        assert!(rt.state.dragging, "headless, the drag lasts until the next press");
+        rt.pointer_move(10.0, 10.0);
+        rt.pointer_down(10.0, 10.0);
+        rt.frame(0.0);
+        assert!(!rt.state.dragging);
+        assert_eq!(rt.state.ended, [crate::DragOutcome::Cancelled]);
+        assert!(rt.events.iter().any(|e| e.starts_with("drag-end Cancelled ")));
     }
 
     #[test]
