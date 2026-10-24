@@ -531,6 +531,7 @@ pub struct El {
     pub(crate) text: Option<TextSpec>,
     pub(crate) children: Vec<El>,
     pub(crate) on_press: Option<PressFn>,
+    pub(crate) on_double_press: Option<PressFn>,
     pub(crate) on_secondary_press: Option<SecondaryFn>,
     pub(crate) on_hover: Option<PressFn>,
     pub(crate) on_hover_change: Option<WindowFocusFn>,
@@ -584,6 +585,7 @@ fn base(dir: FlexDirection) -> El {
         text: None,
         children: Vec::new(),
         on_press: None,
+        on_double_press: None,
         on_secondary_press: None,
         on_hover: None,
         on_hover_change: None,
@@ -1707,6 +1709,18 @@ impl El {
         if self.role == "group" {
             self.role = "button";
         }
+        self
+    }
+    /// Runs on the second of two presses on this element, as a double-click does: the second
+    /// press lands within the system double-click interval of the first and within 4 pt of it,
+    /// and releases inside. `on_press` still runs for each press, the first one right away, so a
+    /// row selects on the first click and opens on the second, as in AppKit. A third press starts
+    /// a new pair. Pointer only: Enter and Space run `on_press`.
+    pub fn on_double_press<S: 'static>(self, f: impl Fn(&mut S) + 'static) -> Self {
+        self.on_double_press_tx(move |s: &mut S, _tx: &mut Tx| f(s))
+    }
+    pub fn on_double_press_tx<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        self.on_double_press = Some(Rc::new(move |s, tx| f(downcast::<S>(s), tx)));
         self
     }
     pub fn on_drag<S: 'static>(mut self, f: impl Fn(&mut S, &mut Drag, &mut Tx) + 'static) -> Self {

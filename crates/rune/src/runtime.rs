@@ -209,6 +209,7 @@ pub(crate) struct Node {
     run_layout: Option<Rc<crate::text::RunLayout>>,
     live_text_seen: Option<u128>,
     on_press: Option<PressFn>,
+    on_double_press: Option<PressFn>,
     on_secondary_press: Option<SecondaryFn>,
     on_hover: Option<PressFn>,
     on_hover_change: Option<crate::el::WindowFocusFn>,
@@ -262,6 +263,7 @@ enum Action {
     AtBottom(String, bool),
     Layout(String, [f32; 4]),
     Press(String),
+    DoublePress(String),
     Link(String, usize),
     SecondaryPress(String, PointerPress),
     Drag(String, Drag),
@@ -587,8 +589,14 @@ pub struct Runtime<S: 'static> {
     press_at: (f32, f32),
     /// The last press on a window drag region: when (clock seconds) and where.
     last_drag_press: Option<(f64, f32, f32)>,
+    /// The first of a possible double press: the element, its down time and point.
+    last_press: Option<(String, f64, f32, f32)>,
+    /// The press now held is the second of a double press.
+    double_armed: bool,
+    press_down_t: f64,
     titlebar_action: Option<TitlebarAction>,
-    /// Two presses on a drag region closer than this (seconds) are a double press.
+    /// Two presses closer than this (seconds) are a double press: the system setting on macOS
+    /// and Windows, 0.5 elsewhere and headless.
     pub double_click_interval: f64,
     /// The host starts OS drags, so `drag_out` elements start one (headless tools act as one).
     os_drag: bool,
@@ -768,6 +776,9 @@ impl<S: 'static> Runtime<S> {
             ambient: None,
             press_at: (0.0, 0.0),
             last_drag_press: None,
+            last_press: None,
+            double_armed: false,
+            press_down_t: 0.0,
             titlebar_action: None,
             double_click_interval: 0.5,
             os_drag: true,
@@ -1538,6 +1549,12 @@ impl<S: 'static> Runtime<S> {
             Action::Press(path) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_press.clone()) else { return false };
                 self.events.push(format!("press {path}"));
+                f(handler_state(&mut self.state), &mut one);
+                true
+            }
+            Action::DoublePress(path) => {
+                let Some(f) = self.node(&path).and_then(|n| n.on_double_press.clone()) else { return false };
+                self.events.push(format!("double press {path}"));
                 f(handler_state(&mut self.state), &mut one);
                 true
             }
@@ -2731,7 +2748,7 @@ impl<S: 'static> Runtime<S> {
             let i = *self.node_index.get(&id)?;
             let n = &self.nodes[i];
             // A secondary-only child must not obscure primary input or background blur.
-            (!self.subtree_exiting(i) && self.allowed(i) && (n.on_press.is_some() || n.on_hover.is_some()
+            (!self.subtree_exiting(i) && self.allowed(i) && (n.on_press.is_some() || n.on_double_press.is_some() || n.on_hover.is_some()
                 || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())).then_some(i)
         })
     }
@@ -2866,9 +2883,11 @@ impl<S: 'static> Runtime<S> {
             return;
         };
         let on_link = self.link_down(ti, x, y);
+        // Any press breaks a pending pair unless it's the second press of it.
+        let pending = self.last_press.take();
+        let now = self.now_clock();
         let n = &self.nodes[ti];
-        if n.window_drag && n.on_press.is_none() && n.on_drag.is_none() && n.drag_out.is_none() && n.input.is_none() {
-            let now = self.now_clock();
+        if n.window_drag && n.on_press.is_none() && n.on_double_press.is_none() && n.on_drag.is_none() && n.drag_out.is_none() && n.input.is_none() {
             let double = self.last_drag_press.is_some_and(|(t, px, py)| {
                 now - t <= self.double_click_interval && (x - px).abs() <= 4.0 && (y - py).abs() <= 4.0
             });
@@ -2880,6 +2899,10 @@ impl<S: 'static> Runtime<S> {
             return;
         }
         self.press_at = (x, y);
+        self.double_armed = n.on_double_press.is_some() && pending.is_some_and(|(p, t, px, py)| {
+            p == n.path && now - t <= self.double_click_interval && (x - px).abs() <= 4.0 && (y - py).abs() <= 4.0
+        });
+        self.press_down_t = now;
         let r = self.drawn.get(ti).copied().unwrap_or([n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]]);
         if n.input.is_some() {
             self.queue.push(Action::Focus(n.path.clone(), x - r[0] - n.inset[0], y - r[1] - n.inset[1]));
@@ -2956,9 +2979,10 @@ impl<S: 'static> Runtime<S> {
         self.pointer_move(x, y);
         let Some((path, d)) = self.capture.take() else { return };
         self.refresh_hover_within();
-        let Some((r, has_drag, has_press)) =
-            self.node(&path).map(|n| (n.target, n.on_drag.is_some() && !self.drags_out(n), n.on_press.is_some()))
-        else {
+        let double = std::mem::take(&mut self.double_armed);
+        let Some((r, has_drag, has_press, has_double)) = self.node(&path).map(|n| {
+            (n.target, n.on_drag.is_some() && !self.drags_out(n), n.on_press.is_some(), n.on_double_press.is_some())
+        }) else {
             return;
         };
         if has_drag {
@@ -2967,7 +2991,14 @@ impl<S: 'static> Runtime<S> {
         }
         self.link_up(&path, x, y);
         if has_press && self.capture_inside {
-            self.queue.push(Action::Press(path));
+            self.queue.push(Action::Press(path.clone()));
+        }
+        if has_double && self.capture_inside {
+            if double {
+                self.queue.push(Action::DoublePress(path));
+            } else {
+                self.last_press = Some((path, self.press_down_t, self.press_at.0, self.press_at.1));
+            }
         }
         self.capture_inside = false;
     }
@@ -3973,7 +4004,7 @@ impl<S: 'static> Runtime<S> {
                 clip: intersect(hit_clip, clip), fade: hit_fade, fade_origin: hit_origin,
                 paint_clip: clip, paint_fade: fade, paint_fade_origin: fade_origin, rounded, scale, anchor, blur, dy, dx,
                 cover: cover_offset, outer, mark, group };
-            if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())
+            if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_double_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())
                 && !self.subtree_exiting(i)
                 && self.allowed(i) && effective_opacity > 0.001 && visible
             {
@@ -4507,6 +4538,7 @@ fn flatten(
         text,
         children,
         on_press,
+        on_double_press,
         on_secondary_press,
         on_hover,
         on_hover_change,
@@ -4561,6 +4593,7 @@ fn flatten(
         run_layout: None,
         live_text_seen: None,
         on_press,
+        on_double_press,
         on_secondary_press,
         on_hover,
         on_hover_change,
@@ -5184,6 +5217,97 @@ mod tests {
         reduced.pointer_down(50.0, 50.0);
         settle(&mut reduced);
         assert_eq!(info(&reduced, "tile").scale, 1.0, "Reduce Motion turns press scale off");
+    }
+
+    #[test]
+    fn a_double_press_follows_the_first_press_within_the_interval_and_tolerance() {
+        #[derive(Default)]
+        struct State { presses: u32, doubles: u32, other: u32 }
+        fn view(_: &State, _: &mut Cx<State>) -> El {
+            crate::row().size(300.0, 100.0)
+                .child(el().key("row").size(100.0, 100.0)
+                    .on_press(|s: &mut State| s.presses += 1)
+                    .on_double_press(|s: &mut State| s.doubles += 1))
+                .child(el().key("other").size(100.0, 100.0).on_press(|s: &mut State| s.other += 1))
+        }
+        let tick = |rt: &mut Runtime<State>, seconds: f64| for _ in 0..(seconds * 120.0).round() as usize { rt.frame(1.0 / 120.0); };
+        let click = |rt: &mut Runtime<State>, (x, y): (f32, f32)| {
+            rt.pointer_move(x, y);
+            rt.pointer_down(x, y);
+            rt.frame(1.0 / 120.0);
+            rt.pointer_up(x, y);
+            rt.frame(1.0 / 120.0);
+        };
+        let counts = |rt: &Runtime<State>| (rt.state.presses, rt.state.doubles);
+        let mut rt = Runtime::new(State::default(), view, (300.0, 100.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+
+        click(&mut rt, (50.0, 50.0));
+        assert_eq!(counts(&rt), (1, 0), "the first press runs on_press right away");
+        tick(&mut rt, 0.1);
+        click(&mut rt, (53.0, 47.0));
+        assert_eq!(counts(&rt), (2, 1), "the second press inside the interval and 4 pt is a double press");
+        assert!(rt.events.iter().any(|e| e.starts_with("double press")));
+        tick(&mut rt, 0.1);
+        click(&mut rt, (50.0, 50.0));
+        assert_eq!(counts(&rt), (3, 1), "a third press starts a new pair");
+        tick(&mut rt, 0.1);
+        click(&mut rt, (50.0, 50.0));
+        assert_eq!(counts(&rt), (4, 2));
+
+        tick(&mut rt, 0.1);
+        click(&mut rt, (50.0, 50.0));
+        let slow = rt.double_click_interval + 0.05;
+        tick(&mut rt, slow);
+        click(&mut rt, (50.0, 50.0));
+        assert_eq!(counts(&rt), (6, 2), "too slow");
+
+        tick(&mut rt, 0.6);
+        click(&mut rt, (50.0, 50.0));
+        click(&mut rt, (55.0, 50.0));
+        assert_eq!(counts(&rt), (8, 2), "moved more than 4 pt");
+
+        tick(&mut rt, 0.6);
+        click(&mut rt, (50.0, 50.0));
+        click(&mut rt, (150.0, 50.0));
+        click(&mut rt, (50.0, 50.0));
+        assert_eq!((counts(&rt), rt.state.other), ((10, 2), 1), "a press elsewhere breaks the pair");
+
+        tick(&mut rt, 0.6);
+        click(&mut rt, (50.0, 50.0));
+        rt.pointer_down(50.0, 50.0);
+        rt.frame(1.0 / 120.0);
+        rt.pointer_move(250.0, 50.0);
+        rt.pointer_up(250.0, 50.0);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(counts(&rt), (11, 2), "a second press released outside is cancelled");
+
+        // Headless, a slower system setting is honoured on the same virtual clock.
+        rt.double_click_interval = 1.0;
+        tick(&mut rt, 0.6);
+        click(&mut rt, (50.0, 50.0));
+        tick(&mut rt, 0.8);
+        click(&mut rt, (50.0, 50.0));
+        assert_eq!(counts(&rt), (13, 3));
+    }
+
+    #[test]
+    fn an_element_with_only_a_double_press_is_a_press_target() {
+        struct State { doubles: u32, behind: u32 }
+        fn view(_: &State, _: &mut Cx<State>) -> El {
+            el().size(100.0, 100.0).on_press(|s: &mut State| s.behind += 1)
+                .child(el().size(100.0, 100.0).on_double_press(|s: &mut State| s.doubles += 1))
+        }
+        let mut rt = Runtime::new(State { doubles: 0, behind: 0 }, view, (100.0, 100.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        for _ in 0..2 {
+            rt.pointer_move(50.0, 50.0);
+            rt.pointer_down(50.0, 50.0);
+            rt.frame(1.0 / 120.0);
+            rt.pointer_up(50.0, 50.0);
+            rt.frame(1.0 / 120.0);
+        }
+        assert_eq!((rt.state.doubles, rt.state.behind), (1, 0));
     }
 
     #[test]

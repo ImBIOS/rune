@@ -604,6 +604,16 @@ fn parse_script(list: Value) -> Vec<Ev> {
                 out.push(Ev { t, kind: Kind::Down, pos });
                 out.push(Ev { t: t + e["hold"].as_f64().unwrap_or(0.08), kind: Kind::Up, pos: Pos::Rel(0.0, 0.0) });
             }
+            "double-click" | "double-tap" => {
+                // Two presses `gap` apart (default 0.15 s), inside the default double-click interval.
+                let hold = e["hold"].as_f64().unwrap_or(0.06);
+                let gap = e["gap"].as_f64().unwrap_or(0.15).max(hold + 0.01);
+                for start in [t, t + gap] {
+                    out.push(Ev { t: start, kind: Kind::Move, pos: pos.clone() });
+                    out.push(Ev { t: start, kind: Kind::Down, pos: pos.clone() });
+                    out.push(Ev { t: start + hold, kind: Kind::Up, pos: Pos::Rel(0.0, 0.0) });
+                }
+            }
             "drag" => {
                 let dx = e["dx"].as_f64().unwrap_or(0.0) as f32;
                 let dy = e["dy"].as_f64().unwrap_or(0.0) as f32;

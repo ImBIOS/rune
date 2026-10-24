@@ -73,6 +73,14 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   `.on_secondary_press(|s: &mut App, point, tx| ..)` receives window-point coordinates on
   right-click (also control-click on macOS), without invoking primary actions. Scripts accept
   `secondary-down`, `secondary-up`, and `secondary-click`.
+- **Double press**: `.on_double_press(|s: &mut S| ..)` (or `_tx`) runs when a second press on
+  the element lands within the double-click interval of the first and within 4 pt of it, and
+  releases inside. `on_press` still runs for every press, the first one right away, so a row
+  selects on the first click and opens on the second, as in AppKit; there's no delay to wait
+  out a possible second click. A third press starts a new pair, and a press anywhere else breaks
+  one. The interval is the system setting on macOS and Windows and 0.5 s elsewhere. Headless runs
+  use the virtual clock, so a script's `double-click` (or two `click`s inside 0.5 s) is
+  deterministic. Pointer only: Enter and Space run `on_press`.
 - **Press scale**: `.press_scale(0.97)` shrinks an element (and its children) about its centre
   while a press on it is held, following the pointer in and out like an iOS tile, and springs back
   with a slight bounce on release. Interrupting a spring retargets it without a jump. Layout and
@@ -947,8 +955,8 @@ $S --trace run.jsonl             # motion-trace JSONL (Scrawl's format); keyed e
 $S --native --trace run.jsonl --frames 240  # native submission timestamps, then close the traced window
 ```
 
-- **Scripts** are timestamped `move`, `down`, `up`, `tap` (`hold`) and `drag` (`dx`, `dy`, `dur`)
-  events, at `x,y` in points or at an element by `key` (or a path suffix such as `slider/knob`).
+- **Scripts** are timestamped `move`, `down`, `up`, `tap` (`hold`), `double-click` (`hold`,
+  `gap`, default 0.15 s between presses) and `drag` (`dx`, `dy`, `dur`) events, at `x,y` in points or at an element by `key` (or a path suffix such as `slider/knob`).
   `menu-pick` (with an `id`) and `menu-cancel` answer an open pop-up menu.
 - **Keys in scripts**: `{"type": "key", "name": "Enter"}` (with `cmd`, `shift`, `alt`, `ctrl`)
   and `{"type": "type", "text": "hi"}` reach the window even while the app has hidden it:

@@ -1259,6 +1259,11 @@ impl<S: 'static> Host<S> {
         {
             self.rt.double_click_interval = mac::double_click_interval();
         }
+        #[cfg(windows)]
+        {
+            let ms = unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() };
+            self.rt.double_click_interval = f64::from(ms) / 1000.0;
+        }
         let (gpu, surface) = match self.gpu.take() {
             Some((gpu, renderer, format)) => {
                 let surface = gpu.instance.create_surface(window.clone());
