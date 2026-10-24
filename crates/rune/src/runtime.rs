@@ -1910,13 +1910,9 @@ impl<S> Measurement<'_, S> {
             {
                 // Anchors inside scroll viewports sit where they are scrolled to.
                 let mut target = nodes[j].target;
-                let mut up = nodes[j].parent;
-                while let Some(p) = up {
-                    if let Some(st) = self.scrolls.get(&nodes[p].id) {
-                        target[1] -= st.offset as f32;
-                        target[3] -= st.offset as f32;
-                    }
-                    up = nodes[p].parent;
+                for offset in scroll_offsets(self.scrolls, &nodes, j) {
+                    target[1] -= offset;
+                    target[3] -= offset;
                 }
                 (x, y) = anchor_position(a, target, (l.size.width, l.size.height), self.viewport);
                 nodes[i].local.x = x - px;
@@ -3868,6 +3864,12 @@ fn input_caret(n: &Node, r: [f32; 4], scale: f32, s: f32, scrolls: &mut HashMap<
     let (cx, cy) = (x + bb.x0 as f32, r[1] + ins[1] + bb.y0 as f32);
     let h = if bb.y1 > bb.y0 { (bb.y1 - bb.y0) as f32 } else { spec.style.line_px() * s };
     Some(([cx.round(), cy + h * 0.1, (1.5 * s).round(), h * 0.8], [cx / s, cy / s, 2.0, h / s]))
+}
+
+/// The scroll offsets of node `i`'s viewports in `nodes`, innermost first.
+fn scroll_offsets<'a>(scrolls: &'a HashMap<NodeId, ScrollState>, nodes: &'a [Node], i: usize) -> impl Iterator<Item = f32> + 'a {
+    std::iter::successors(nodes[i].parent, |&p| nodes[p].parent)
+        .filter_map(|p| scrolls.get(&nodes[p].id).map(|st| st.offset as f32))
 }
 
 fn merge(tx: &mut Tx, one: Tx) {

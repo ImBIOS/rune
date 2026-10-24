@@ -11,12 +11,7 @@ impl<S: 'static> Runtime<S> {
         let (inp, spec, layout) = (n.input.as_ref()?, n.text.as_ref()?, n.text_layout.as_ref()?);
         if !inp.edit.focused { return None; }
         let s = self.env.scale;
-        let mut y = n.target[1];
-        let mut up = n.parent;
-        while let Some(p) = up {
-            if let Some(st) = self.scrolls.get(&nodes[p].id) { y -= st.offset as f32; }
-            up = nodes[p].parent;
-        }
+        let y = scroll_offsets(&self.scrolls, nodes, i).fold(n.target[1], |y, offset| y - offset);
         let tw = layout.full_width().ceil() / s;
         let (x0, x1) = (n.target[0] + n.inset[0], n.target[2] - n.inset[2]);
         let mut x = text_x(spec, x0, x1, tw);
@@ -35,18 +30,9 @@ impl<S: 'static> Runtime<S> {
     pub(super) fn follow_caret(&mut self) {
         let Some(i) = self.focused_index() else { return };
         let Some(r) = self.caret_rect(&self.nodes, i) else { return };
-        let mut up = self.nodes[i].parent;
-        let v = loop {
-            let Some(p) = up else { return };
-            if self.nodes[p].scroll.is_some() { break p; }
-            up = self.nodes[p].parent;
-        };
-        let mut top = self.nodes[v].target[1];
-        let mut up = self.nodes[v].parent;
-        while let Some(p) = up {
-            if let Some(st) = self.scrolls.get(&self.nodes[p].id) { top -= st.offset as f32; }
-            up = self.nodes[p].parent;
-        }
+        let Some(v) = std::iter::successors(self.nodes[i].parent, |&p| self.nodes[p].parent)
+            .find(|&p| self.nodes[p].scroll.is_some()) else { return };
+        let top = scroll_offsets(&self.scrolls, &self.nodes, v).fold(self.nodes[v].target[1], |y, offset| y - offset);
         let view_h = f64::from(self.nodes[v].target[3] - self.nodes[v].target[1]);
         let (y, h) = (f64::from(r[1] - top), f64::from(r[3]));
         let stick = self.nodes[v].scroll.is_some_and(|s| s.stick_bottom);
