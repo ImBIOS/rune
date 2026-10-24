@@ -543,6 +543,10 @@ impl<S: 'static> Host<S> {
     }
 }
 
+/// The runtime's next timer, on the wall clock that started with the host.
+pub(crate) fn wall_wake_deadline<S>(rt: &Runtime<S>) -> Option<Instant> {
+    rt.wall_start?.checked_add(Duration::try_from_secs_f64(rt.wake_deadline()?).ok()?)
+}
 
 pub(crate) fn is_wayland(event_loop: &ActiveEventLoop) -> bool {
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
@@ -1416,7 +1420,7 @@ impl<S: 'static> AnyHost for Host<S> {
             } else { w.window.request_redraw(); }
         }
         if matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll)
-            && self.rt.wall_start.and_then(|start| start.checked_add(Duration::try_from_secs_f64(self.rt.wake_deadline()?).ok()?)).is_some_and(|deadline| deadline <= Instant::now())
+            && wall_wake_deadline(&self.rt).is_some_and(|deadline| deadline <= Instant::now())
         {
             if let Some(w) = self.win.as_ref().filter(|w| (self.launcher() || (w.visible && !w.occluded)) && !w.window.is_minimized().unwrap_or(false)) {
                 w.window.request_redraw();
@@ -1441,9 +1445,7 @@ impl<S: 'static> AnyHost for Host<S> {
     fn wake_deadline(&self) -> Option<Instant> {
         // The next display tick consumes due timers too. Leaving an overdue timer
         // armed while its redraw waits for that tick would spin the event loop.
-        let runtime = self.rt.wall_start.and_then(|start| {
-            start.checked_add(Duration::try_from_secs_f64(self.rt.wake_deadline()?).ok()?)
-        });
+        let runtime = wall_wake_deadline(&self.rt);
         #[cfg(target_os = "macos")]
         let runtime = runtime.filter(|_| !self.win.as_ref().and_then(|w| w.pacing.as_ref()).is_some_and(|p| p.running()));
         #[cfg(all(feature = "dev", debug_assertions))]

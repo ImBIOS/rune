@@ -884,7 +884,7 @@ impl<T: 'static> Overlay<T> {
     }
 
     fn wake_due(&mut self, now: Instant) {
-        let deadline = self.rt.wall_start.and_then(|start| start.checked_add(std::time::Duration::try_from_secs_f64(self.rt.wake_deadline()?).ok()?));
+        let deadline = crate::window::wall_wake_deadline(&self.rt);
         if deadline.is_some_and(|deadline| deadline <= now) {
             if self.visible {
                 // Like the window host, poll once in the upcoming frame, after acquiring
@@ -1147,9 +1147,7 @@ impl<T: 'static> AnyHost for Overlay<T> {
     }
 
     fn wake_deadline(&self) -> Option<Instant> {
-        let deadline = self.rt.wall_start.and_then(|start| {
-            start.checked_add(std::time::Duration::try_from_secs_f64(self.rt.wake_deadline()?).ok()?)
-        });
+        let deadline = crate::window::wall_wake_deadline(&self.rt);
         // A running display link consumes due runtime timers. Keep the independent
         // pointer deadline, but do not spin on an overdue animation timer.
         #[cfg(target_os = "macos")]
