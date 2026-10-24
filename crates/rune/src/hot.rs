@@ -382,7 +382,7 @@ mod tests {
                     .on_input_key(|s: &mut State, _, _| { s.keyed = true; false })
                     .on_edit(|s: &mut State| &mut s.edit).on_submit(|s: &mut State, tx| { tx.copy(s.edit.text.clone()); }))
         }
-        let spec = AppSpec { title: "test", size: (200.0, 150.0), min_size: None, init: || State { pressed: false, hovered: false, secondary: false, changed: false, keyed: false, edit: TextEdit::new("") }, view, scenes: &[], fonts: &[], families: ("Inter", "Inter"), setup: None, poll: None, on_key: None };
+        let spec = AppSpec::new("test", (200.0, 150.0), || State { pressed: false, hovered: false, secondary: false, changed: false, keyed: false, edit: TextEdit::new("") }, view);
         let host = HostState { value: Box::new((spec.init)()), spec: Box::new(spec), view: view_adapter::<State>, poll: poll_adapter::<State>, setup: setup_adapter::<State>, key: key_adapter::<State> };
         let mut rt = crate::Runtime::new(host, |s, cx| (s.view)(s, cx), (200.0, 150.0), Env { system_dark: true, scale: 1.0 });
         rt.frame(0.0);
