@@ -15,11 +15,7 @@ pub fn grid(v: f32, scale: f32) -> f32 {
 /// Snaps a rectangle's four edges to the 1/64 px grid and derives its size from them.
 #[inline]
 pub fn snap_rect(r: Rect, scale: f32) -> Rect {
-    let x0 = grid(r.x, scale);
-    let y0 = grid(r.y, scale);
-    let x1 = grid(r.x + r.w, scale);
-    let y1 = grid(r.y + r.h, scale);
-    Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    snap_edges(r.edges(), scale)
 }
 
 /// Snaps edges given directly (left, top, right, bottom).
