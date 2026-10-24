@@ -684,15 +684,8 @@ impl<T: 'static> Overlay<T> {
         };
         let gpu = self.gpu.clone()?;
         let (w, h) = ((self.at.size.0 * scale).round() as u32, (self.at.size.1 * scale).round() as u32);
-        let mut config = surface.get_default_config(&gpu.adapter, w.max(1), h.max(1))?;
-        let caps = surface.get_capabilities(&gpu.adapter);
-        config.format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(config.format);
-        config.alpha_mode = [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::PostMultiplied, wgpu::CompositeAlphaMode::Inherit]
-            .into_iter()
-            .find(|m| caps.alpha_modes.contains(m))
-            .unwrap_or(config.alpha_mode);
-        config.present_mode = wgpu::PresentMode::AutoVsync;
-        config.desired_maximum_frame_latency = 2;
+        let (mut config, translucent) = crate::window::surface_config(&surface, &gpu.adapter, (w, h))?;
+        config.alpha_mode = translucent.unwrap_or(config.alpha_mode);
         surface.configure(&gpu.device, &config);
         if self.renderer.as_ref().is_none_or(|(_, f)| *f != config.format) {
             self.renderer = Some((Renderer::new(&gpu.device, config.format), config.format));

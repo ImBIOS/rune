@@ -561,6 +561,20 @@ pub(crate) fn wall_wake_deadline<S>(rt: &Runtime<S>) -> Option<Instant> {
     rt.wall_start?.checked_add(Duration::try_from_secs_f64(rt.wake_deadline()?).ok()?)
 }
 
+/// A vsynced sRGB configuration for the surface, and the first alpha mode it supports that
+/// composites translucent pixels.
+pub(crate) fn surface_config(surface: &wgpu::Surface, adapter: &wgpu::Adapter, (width, height): (u32, u32))
+    -> Option<(wgpu::SurfaceConfiguration, Option<wgpu::CompositeAlphaMode>)> {
+    let mut config = surface.get_default_config(adapter, width.max(1), height.max(1))?;
+    let caps = surface.get_capabilities(adapter);
+    config.format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(config.format);
+    config.present_mode = wgpu::PresentMode::AutoVsync;
+    config.desired_maximum_frame_latency = 2;
+    let translucent = [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::PostMultiplied, wgpu::CompositeAlphaMode::Inherit]
+        .into_iter().find(|mode| caps.alpha_modes.contains(mode));
+    Some((config, translucent))
+}
+
 pub(crate) fn is_wayland(event_loop: &ActiveEventLoop) -> bool {
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
     return winit::platform::wayland::ActiveEventLoopExtWayland::is_wayland(event_loop);
@@ -1173,22 +1187,15 @@ impl<S: 'static> Host<S> {
         };
         let adapter = &gpu.as_ref().or(self.gpu.as_ref().map(|g| &g.0)).unwrap().adapter;
         let phys = window.inner_size();
-        let mut config = surface
-            .get_default_config(adapter, phys.width.max(1), phys.height.max(1))
+        let (mut config, translucent) = surface_config(&surface, adapter, (phys.width, phys.height))
             .ok_or("the GPU adapter can't present to this window")?;
-        let caps = surface.get_capabilities(adapter);
-        config.format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(config.format);
         if self.options.transparent {
-            config.alpha_mode = [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::PostMultiplied, wgpu::CompositeAlphaMode::Inherit]
-                .into_iter().find(|mode| caps.alpha_modes.contains(mode))
-                .unwrap_or_else(|| {
-                    eprintln!("transparency unavailable for {}; using an opaque window", self.native_handle.key());
-                    wgpu::CompositeAlphaMode::Opaque
-                });
+            config.alpha_mode = translucent.unwrap_or_else(|| {
+                eprintln!("transparency unavailable for {}; using an opaque window", self.native_handle.key());
+                wgpu::CompositeAlphaMode::Opaque
+            });
             self.rt.transparent = config.alpha_mode != wgpu::CompositeAlphaMode::Opaque;
         }
-        config.present_mode = wgpu::PresentMode::AutoVsync;
-        config.desired_maximum_frame_latency = 2;
         if let Some(gpu) = gpu {
             let renderer = Renderer::new(&gpu.device, config.format);
             self.gpu = Some((gpu, renderer, config.format));
