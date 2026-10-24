@@ -26,10 +26,22 @@ use crate::tok::{Family, OpticalSize, TextStyle};
 mod case;
 mod fallback;
 mod svg_path;
+mod trak;
 pub use case::TextCase;
 pub(crate) use case::Source as CaseSource;
 
 use fallback::Route;
+use trak::Trak;
+
+/// Fonts' `trak` tables (None for an untracked font), by blob and index.
+type Traks = HashMap<(u64, u32), Option<Rc<Trak>>>;
+
+fn font_trak(traks: &mut Traks, data: &Blob<u8>, index: u32) -> Option<Rc<Trak>> {
+    traks
+        .entry((data.id(), index))
+        .or_insert_with(|| FontRef::from_index(data.as_ref(), index as usize).and_then(Trak::of).map(Rc::new))
+        .clone()
+}
 
 const DEFAULT_FONTS: [&[u8]; 3] = [
     include_bytes!("../assets/Inter-Regular.ttf"),
@@ -614,6 +626,9 @@ pub struct TextSystem {
     /// Reused across lines and frames when mapping reveal glyphs back to source bytes.
     cluster_scratch: Vec<(f32, u32)>,
     coords_scratch: Vec<i16>,
+    traks: Traks,
+    /// The `trak` table of the first font of a family slot at a weight, upright or italic.
+    primary_traks: HashMap<(Family, u32, bool), Option<Rc<Trak>>>,
 }
 
 impl Default for TextSystem {
@@ -833,7 +848,37 @@ impl TextSystem {
             shaped: 0,
             cluster_scratch: Vec::new(),
             coords_scratch: Vec::new(),
+            traks: Traks::new(),
+            primary_traks: HashMap::new(),
         }
+    }
+
+    /// The `trak` table of the font text in `family` at `weight` shapes with first.
+    fn primary_trak(&mut self, family: Family, weight: f32, italic: bool) -> Option<Rc<Trak>> {
+        let key = (family, weight.to_bits(), italic);
+        if let Some(trak) = self.primary_traks.get(&key) {
+            return trak.clone();
+        }
+        let named = |list: &str| -> Vec<String> {
+            FontFamilyName::parse_css_list(list)
+                .flatten()
+                .filter_map(|f| match f { FontFamilyName::Named(name) => Some(name.into_owned()), _ => None })
+                .collect()
+        };
+        let names = match family {
+            Family::Sans => named(&self.sans),
+            Family::Mono => named(&self.mono),
+            Family::Named(name) => std::iter::once(name.to_owned()).chain(named(&self.sans)).collect(),
+        };
+        let mut query = self.font_cx.collection.query(&mut self.font_cx.source_cache);
+        query.set_families(names.iter().map(|name| parley::fontique::QueryFamily::Named(name)));
+        let style = if italic { FontStyle::Italic } else { FontStyle::Normal };
+        query.set_attributes(parley::fontique::Attributes::new(parley::fontique::FontWidth::NORMAL, style, FontWeight::new(weight)));
+        let font = query.first_available_font();
+        drop(query);
+        let trak = font.and_then(|f| font_trak(&mut self.traks, &f.blob, f.index));
+        self.primary_traks.insert(key, trak.clone());
+        trak
     }
 
     /// The RGBA image of a colour glyph quad (`GlyphQuad::color`, nonzero).
@@ -905,6 +950,30 @@ impl TextSystem {
                 self.math = Some(load_families(&mut self.font_cx.collection, fallback::MATH_FONT_FILES, fallback::MATH_FAMILIES));
             }
         }
+        // `trak` tracking at the point size (see `trak.rs`), on top of `style.tracking`. Each
+        // style range gets its predicted first font's spacing; runs in another font are checked
+        // after shaping.
+        let trak_tag = parley::setting::Tag::new(b"trak");
+        let mut features: Vec<parley::FontFeature> = parley::FontFeature::parse_css_list(style.features).flatten().collect();
+        let tracked = features.iter().rev().find(|f| f.tag == trak_tag).is_none_or(|f| f.value != 0);
+        let listed = features.len();
+        features.retain(|f| f.tag != trak_tag);
+        let stripped = features.len() != listed;
+        let spacing = |trak: Option<Rc<Trak>>, size: f32| {
+            style.tracking + trak.map_or(0.0, |t| t.spacing(size * scale, scale, tracked) / scale)
+        };
+        let base_spacing = spacing(self.primary_trak(style.family, style.weight, style.italic), style.size);
+        let span_spacing: Vec<Option<f32>> = spans
+            .iter()
+            .map(|s| {
+                if !(s.mono || s.italic || s.weight.is_some() || s.size.is_some()) {
+                    return None;
+                }
+                let family = if s.mono { Family::Mono } else { style.family };
+                let trak = self.primary_trak(family, s.weight.unwrap_or(style.weight), s.italic || style.italic);
+                Some(spacing(trak, s.size.unwrap_or(style.size))).filter(|&v| v != base_spacing)
+            })
+            .collect();
         let math = self.math.as_deref().unwrap_or(&[]);
         let emoji = self.emoji.as_slice();
         let with_symbols = |primary| {
@@ -940,51 +1009,94 @@ impl TextSystem {
             });
             routed.push((range, stack));
         }
-        let mut b = self.layout_cx.ranged_builder(&mut self.font_cx, text, scale, true);
-        b.push_default(FontFamily::from(sans.as_slice()));
-        b.push_default(StyleProperty::FontSize(style.size));
-        b.push_default(StyleProperty::FontWeight(FontWeight::new(style.weight)));
-        if style.italic {
-            b.push_default(StyleProperty::FontStyle(FontStyle::Italic));
-        }
-        if !style.features.is_empty() {
-            b.push_default(StyleProperty::FontFeatures(style.features.into()));
-        }
-        let settings = variations(style, style.size);
-        if !settings.is_empty() {
-            b.push_default(parley::FontVariations::List(std::borrow::Cow::Owned(settings)));
-        }
-        b.push_default(LineHeight::Absolute(style.line_px()));
-        if style.tracking != 0.0 {
-            b.push_default(StyleProperty::LetterSpacing(style.tracking));
-        }
-        for (i, s) in spans.iter().enumerate() {
-            let r = (s.start as usize).min(text.len())..(s.end as usize).min(text.len());
-            if r.is_empty() {
-                continue;
+        let span_range = |s: &Span| (s.start as usize).min(text.len())..(s.end as usize).min(text.len());
+        // `exact` overrides the predicted spacing with each run's own, by byte range.
+        let build = |lcx: &mut LayoutContext<Ink>, fcx: &mut FontContext, exact: &[(std::ops::Range<usize>, f32)]| {
+            let mut b = lcx.ranged_builder(fcx, text, scale, true);
+            b.push_default(FontFamily::from(sans.as_slice()));
+            b.push_default(StyleProperty::FontSize(style.size));
+            b.push_default(StyleProperty::FontWeight(FontWeight::new(style.weight)));
+            if style.italic {
+                b.push_default(StyleProperty::FontStyle(FontStyle::Italic));
             }
-            b.push(StyleProperty::Brush(Ink(i as u16 + 1)), r.clone());
-            if s.mono {
-                b.push(FontFamily::from(mono.as_slice()), r.clone());
+            // Parley turns optional ligatures off under letter spacing; Core Text's tracking
+            // keeps them, so spacing that only corrects `trak` turns them back on.
+            let corrected = base_spacing != 0.0 || span_spacing.iter().flatten().chain(exact.iter().map(|e| &e.1)).any(|&v| v != 0.0);
+            if style.tracking == 0.0 && corrected {
+                let ligatures = [b"liga", b"clig"].map(|tag| parley::FontFeature::new(parley::setting::Tag::new(tag), 1));
+                let list = ligatures.iter().chain(&features).copied().collect();
+                b.push_default(StyleProperty::FontFeatures(parley::FontFeatures::List(std::borrow::Cow::Owned(list))));
+            } else if stripped {
+                b.push_default(StyleProperty::FontFeatures(features.as_slice().into()));
+            } else if !style.features.is_empty() {
+                b.push_default(StyleProperty::FontFeatures(style.features.into()));
             }
-            if let Some(w) = s.weight {
-                b.push(StyleProperty::FontWeight(FontWeight::new(w)), r.clone());
+            let settings = variations(style, style.size);
+            if !settings.is_empty() {
+                b.push_default(parley::FontVariations::List(std::borrow::Cow::Owned(settings)));
             }
-            if s.italic {
-                b.push(StyleProperty::FontStyle(FontStyle::Italic), r.clone());
+            b.push_default(LineHeight::Absolute(style.line_px()));
+            if base_spacing != 0.0 {
+                b.push_default(StyleProperty::LetterSpacing(base_spacing));
             }
-            if let Some(sz) = s.size {
-                b.push(StyleProperty::FontSize(sz), r.clone());
-                if style.optical_size == OpticalSize::Auto {
-                    b.push(parley::FontVariations::List(std::borrow::Cow::Owned(variations(style, sz))), r.clone());
+            for (i, s) in spans.iter().enumerate() {
+                let r = span_range(s);
+                if r.is_empty() {
+                    continue;
+                }
+                b.push(StyleProperty::Brush(Ink(i as u16 + 1)), r.clone());
+                if s.mono {
+                    b.push(FontFamily::from(mono.as_slice()), r.clone());
+                }
+                if let Some(w) = s.weight {
+                    b.push(StyleProperty::FontWeight(FontWeight::new(w)), r.clone());
+                }
+                if s.italic {
+                    b.push(StyleProperty::FontStyle(FontStyle::Italic), r.clone());
+                }
+                if let Some(sz) = s.size {
+                    b.push(StyleProperty::FontSize(sz), r.clone());
+                    if style.optical_size == OpticalSize::Auto {
+                        b.push(parley::FontVariations::List(std::borrow::Cow::Owned(variations(style, sz))), r.clone());
+                    }
+                }
+                if let Some(v) = span_spacing[i] {
+                    b.push(StyleProperty::LetterSpacing(v), r.clone());
+                }
+            }
+            for (range, stack) in &routed {
+                b.push(FontFamily::from(stacks[*stack].as_deref().unwrap_or_default()), range.clone());
+            }
+            for (range, v) in exact {
+                b.push(StyleProperty::LetterSpacing(*v), range.clone());
+            }
+            let mut layout: Layout<Ink> = b.build(text);
+            layout.break_all_lines(max_width);
+            layout
+        };
+        let mut layout = build(&mut self.layout_cx, &mut self.font_cx, &[]);
+        // The spacing each run got, against the spacing its own font needs.
+        let given = |at: usize| {
+            spans.iter().zip(&span_spacing).rev().find_map(|(s, v)| v.filter(|_| span_range(s).contains(&at))).unwrap_or(base_spacing)
+        };
+        let mut exact: Vec<(std::ops::Range<usize>, f32)> = Vec::new();
+        let mut mismatch = false;
+        for line in layout.lines() {
+            for run in line.runs() {
+                let font = run.font();
+                let trak = font_trak(&mut self.traks, &font.data, font.index);
+                let needed = spacing(trak, run.font_size() / scale);
+                let range = run.text_range();
+                mismatch |= (needed - given(range.start)).abs() > 1e-4;
+                match exact.last_mut() {
+                    Some((last, v)) if last.end == range.start && *v == needed => last.end = range.end,
+                    _ => exact.push((range, needed)),
                 }
             }
         }
-        for (range, stack) in routed {
-            b.push(FontFamily::from(stacks[stack].as_deref().unwrap_or_default()), range);
+        if mismatch {
+            layout = build(&mut self.layout_cx, &mut self.font_cx, &exact);
         }
-        let mut layout: Layout<Ink> = b.build(text);
-        layout.break_all_lines(max_width);
         layout.align(align, AlignmentOptions::default());
         let l = Rc::new(layout);
         self.layouts.insert(key, (l.clone(), g));
