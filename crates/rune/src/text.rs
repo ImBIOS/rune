@@ -76,6 +76,50 @@ const SYMBOL_FAMILIES: &[&str] = &["DejaVu Sans", "Noto Sans Symbols2", "Noto Sa
 #[cfg(not(any(target_os = "macos", windows)))]
 const SYMBOL_FONT_FILES: &[&str] = &["dejavusans", "notosanssymbols", "notocoloremoji"];
 
+// `Family::SystemMono`: the platform's monospaced UI families, most preferred first, and the
+// files they're in. SF Mono's family name is `.SF NS Mono`, as SF's is `.SF NS`.
+#[cfg(target_os = "macos")]
+const SYSTEM_MONO_FAMILIES: &[&str] = &[".SF NS Mono", "Menlo"];
+#[cfg(target_os = "macos")]
+const SYSTEM_MONO_FILES: &[&str] = &["sfnsmono", "menlo"];
+#[cfg(windows)]
+const SYSTEM_MONO_FAMILIES: &[&str] = &["Cascadia Mono", "Consolas", "Courier New"];
+#[cfg(windows)]
+const SYSTEM_MONO_FILES: &[&str] = &["cascadiamono", "consola", "cour"];
+// After fontconfig's own answer (`fontconfig_monospace`).
+#[cfg(not(any(target_os = "macos", windows)))]
+const SYSTEM_MONO_FAMILIES: &[&str] = &["DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", "Ubuntu Mono"];
+#[cfg(not(any(target_os = "macos", windows)))]
+const SYSTEM_MONO_FILES: &[&str] = &["dejavusansmono", "liberationmono", "notosansmono", "ubuntumono"];
+
+/// The family and file fontconfig resolves `monospace` to, asked once per process.
+#[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
+fn fontconfig_monospace() -> Option<(String, std::path::PathBuf)> {
+    static ANSWER: std::sync::OnceLock<Option<(String, std::path::PathBuf)>> = std::sync::OnceLock::new();
+    ANSWER.get_or_init(|| {
+        let out = std::process::Command::new("fc-match").args(["--format=%{family[0]}\n%{file}", "monospace"]).output().ok()?;
+        let out = String::from_utf8(out.stdout).ok()?;
+        let (family, file) = out.split_once('\n')?;
+        (!family.is_empty() && !file.is_empty()).then(|| (family.to_owned(), file.trim().into()))
+    }).clone()
+}
+
+/// The installed `Family::SystemMono` families, most preferred first, loading their files.
+fn load_system_mono(collection: &mut Collection, loaded: &mut LoadedFiles) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    #[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
+    if let Some((family, file)) = fontconfig_monospace() {
+        load_files(collection, loaded, [file]);
+        names.push(family);
+    }
+    load_files(collection, loaded, system_font_files(SYSTEM_MONO_FILES).into_iter().take(12));
+    for name in SYSTEM_MONO_FAMILIES {
+        if !names.iter().any(|n| n == name) { names.push((*name).to_owned()); }
+    }
+    names.retain(|name| collection.family_id(name).is_some());
+    names
+}
+
 /// The installed families among `names`, loading the system font files matching `files`.
 fn load_families(collection: &mut Collection, files: &[&str], names: &[&'static str]) -> Vec<&'static str> {
     collection.load_fonts_from_paths(system_font_files(files));
@@ -619,6 +663,8 @@ pub struct TextSystem {
     emoji: Option<&'static str>,
     /// The installed math families, once a text has needed them.
     math: Option<Vec<&'static str>>,
+    /// The installed `Family::SystemMono` families, once a text has needed them.
+    system_mono: Option<Vec<String>>,
     /// Bit `i` is set once `fallback::SCRIPT_FONTS[i]` has been looked up.
     scripts: u64,
     font_files: LoadedFiles,
@@ -845,6 +891,7 @@ impl TextSystem {
             symbol_families,
             emoji,
             math: None,
+            system_mono: None,
             scripts: 0,
             font_files,
             atlas: Atlas::new(),
@@ -874,6 +921,11 @@ impl TextSystem {
             Family::Sans => named(&self.sans),
             Family::Mono => named(&self.mono),
             Family::Named(name) => std::iter::once(name.to_owned()).chain(named(&self.sans)).collect(),
+            Family::SystemMono => {
+                let mut names = self.system_mono().to_vec();
+                names.extend(named(&self.mono));
+                names
+            }
         };
         let mut query = self.font_cx.collection.query(&mut self.font_cx.source_cache);
         query.set_families(names.iter().map(|name| parley::fontique::QueryFamily::Named(name)));
@@ -884,6 +936,12 @@ impl TextSystem {
         let trak = font.and_then(|f| font_trak(&mut self.traks, &f.blob, f.index));
         self.primary_traks.insert(key, trak.clone());
         trak
+    }
+
+    /// The installed `Family::SystemMono` families, loading them the first time.
+    fn system_mono(&mut self) -> &[String] {
+        let (collection, loaded) = (&mut self.font_cx.collection, &mut self.font_files);
+        self.system_mono.get_or_insert_with(|| load_system_mono(collection, loaded))
     }
 
     /// The RGBA image of a colour glyph quad (`GlyphQuad::color`, nonzero).
@@ -990,6 +1048,9 @@ impl TextSystem {
                 Some(spacing(trak, s.size.unwrap_or(style.size))).filter(|&v| v != base_spacing)
             })
             .collect();
+        if style.family == Family::SystemMono {
+            self.system_mono();
+        }
         let math = self.math.as_deref().unwrap_or(&[]);
         let emoji = self.emoji.as_slice();
         let with_symbols = |primary| {
@@ -1004,6 +1065,12 @@ impl TextSystem {
             Family::Named(name) => {
                 let mut families = with_symbols(self.sans.as_str());
                 families.insert(0, FontFamilyName::named(name));
+                families
+            }
+            Family::SystemMono => {
+                let mut families = with_symbols(self.mono.as_str());
+                let system = self.system_mono.as_deref().unwrap_or_default();
+                families.splice(0..0, system.iter().map(|name| FontFamilyName::named(name)));
                 families
             }
         };
@@ -1398,6 +1465,25 @@ mod tests {
         assert_eq!(han.len(), 4);
         assert!(han.iter().all(|id| *id != 0), "tofu: {han:?}");
         assert_eq!(glyph_ids("Hello"), glyph_ids("Hello"));
+    }
+
+    /// `Family::SystemMono` shapes with the platform's monospaced font when one is installed, so
+    /// every character advances the same; without one it is the app's mono slot.
+    #[test]
+    fn system_mono_is_monospaced_or_the_mono_slot() {
+        let mut ts = TextSystem::default();
+        let style = TextStyle::new(13.0, 400.0).family(Family::SystemMono);
+        let width = |ts: &mut TextSystem, text: &str, style: TextStyle| ts.layout_rich(text, &[], style, 2.0, None).full_width();
+        if ts.system_mono().is_empty() {
+            eprintln!("skipping the monospace check: no system monospaced font installed");
+            assert_eq!(width(&mut ts, "iiii MMMM", style), width(&mut ts, "iiii MMMM", style.mono()));
+            return;
+        }
+        let (narrow, wide) = (width(&mut ts, "iiiiiiii", style), width(&mut ts, "MMMMMMMM", style));
+        assert!((narrow - wide).abs() < 0.5, "{narrow} vs {wide}");
+        assert!(width(&mut ts, "iiiiiiii", TextStyle::new(13.0, 400.0)) < narrow * 0.7, "the sans slot is proportional");
+        let italic = width(&mut ts, "iiiiiiii", style.italic());
+        assert!((italic - narrow).abs() < 0.5, "italic keeps the cell: {italic} vs {narrow}");
     }
 
     /// Each glyph run of `text` with the font it shaped with.

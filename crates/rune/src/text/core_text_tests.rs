@@ -139,6 +139,50 @@ fn system_font_advances_match_core_text_at_every_scale() {
     assert!(worst < 0.05, "worst per-glyph error {worst:.3} pt");
 }
 
+/// AppKit's `monospacedSystemFont(ofSize:weight:)`, autoreleased.
+fn monospaced_system_font(size: f32, weight: f64) -> Ref {
+    let font: *mut objc2::runtime::AnyObject =
+        unsafe { objc2::msg_send![objc2::class!(NSFont), monospacedSystemFontOfSize: size as f64, weight: weight] };
+    font as Ref
+}
+
+/// `Family::SystemMono` is SF Mono, which has no `trak` table: it matches AppKit's
+/// `monospacedSystemFont` at 8-34 pt, regular and semibold, scales 1-3, and `'trak' 0` changes
+/// nothing while `tracking` still adds.
+#[test]
+fn system_mono_matches_appkit_monospaced_system_font() {
+    let mut ts = TextSystem::default();
+    assert_eq!(ts.system_mono().first().map(String::as_str), Some(".SF NS Mono"));
+    assert!(ts.primary_trak(Family::SystemMono, 400.0, false).is_none(), "SF Mono is untracked");
+    let mut worst = 0.0f64;
+    // NSFont.Weight.regular and .semibold.
+    for (weight, appkit) in [(400.0, 0.0), (600.0, 0.3)] {
+        for size in SIZES {
+            let font = monospaced_system_font(size, appkit);
+            let style = TextStyle::new(size, weight).family(Family::SystemMono);
+            for text in STRINGS.iter().filter(|t| t.is_ascii()) {
+                let ct = core_text_width(text, font);
+                let glyphs = text.chars().count() as f64;
+                for scale in [1.0, 2.0, 3.0] {
+                    worst = worst.max(((rune_width(&mut ts, text, style, scale) - ct) / glyphs).abs());
+                }
+            }
+        }
+    }
+    assert!(worst < 0.05, "worst per-glyph error {worst:.3} pt");
+    let text = STRINGS[0];
+    let n = text.chars().count() as f32;
+    let style = TextStyle::new(13.0, 400.0).family(Family::SystemMono);
+    let plain = widths(&mut ts, text, &[], style);
+    let untracked = widths(&mut ts, text, &[], style.features("'trak' 0"));
+    let extra = widths(&mut ts, text, &[], style.tracking(0.5));
+    for w in [plain, untracked, extra] {
+        assert_scale_free(w, "width");
+    }
+    assert!((plain[0] - untracked[0]).abs() < 0.01, "{plain:?} vs {untracked:?}");
+    assert!((extra[0] - plain[0] - 0.5 * n).abs() < 0.05, "{extra:?} vs {plain:?}");
+}
+
 fn widths(ts: &mut TextSystem, text: &str, spans: &[Span], style: TextStyle) -> [f32; 3] {
     [1.0, 2.0, 3.0].map(|scale| ts.layout_rich(text, spans, style, scale, None).full_width() / scale)
 }

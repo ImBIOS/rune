@@ -388,6 +388,15 @@ fallbacks. `Family::Sans`, `Family::Mono`, and `.mono()` keep their existing mea
 mono rich spans still use the mono slot. Named styles remain `Copy` and const-friendly
 and the family name participates in the layout cache key.
 
+`.family(Family::SystemMono)` uses the platform's monospaced UI font without bundling it:
+SF Mono on macOS (the face AppKit's `monospacedSystemFont` returns, matched to within
+0.05 pt per glyph at 8 to 34 pt), Cascadia Mono, then Consolas, on Windows, and whatever
+fontconfig resolves `monospace` to on Linux (then DejaVu Sans Mono, Liberation Mono, Noto
+Sans Mono). Its files load the first time a text asks for it. Where none is installed it
+falls back to the mono slot. SF Mono has no `trak` table, so it is untracked, as in AppKit;
+`tracking` still adds, and glyphs that fall back to the system font get that font's own
+tracking. Mono rich spans keep using the mono slot.
+
 Optical sizing defaults to each run's point size, including rich spans with a
 different size. An explicit `opsz` variation wins over the default; `.optical_size`
 wins over both. `.optical_sizing(OpticalSize::FontDefault)` restores Parley's old

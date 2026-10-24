@@ -29,6 +29,11 @@ pub enum Family {
     Mono,
     /// A literal font family name, not a CSS list. Falls back to the sans slot if missing.
     Named(&'static str),
+    /// The platform's monospaced UI font, loaded from the system on first use, never bundled:
+    /// SF Mono on macOS (AppKit's `monospacedSystemFont`, Menlo before it existed), Cascadia
+    /// Mono then Consolas on Windows, and fontconfig's `monospace` on Linux. Falls back to the
+    /// mono slot when none is installed (headless on a bare machine, the web).
+    SystemMono,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

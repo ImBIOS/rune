@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **System monospaced font.** `Family::SystemMono` shapes with SF Mono on macOS, Cascadia
+  Mono or Consolas on Windows, and fontconfig's `monospace` on Linux, loaded from the system
+  on first use and falling back to the mono slot. `Family` gains a variant, so an app's
+  exhaustive `match` on it needs a new arm.
 - **Double press.** `El::on_double_press` runs on the second of two presses inside the system
   double-click interval (now read on Windows too) and 4 pt of each other; `on_press` still runs
   for both. Scripts gain a `double-click` event. Elements without it are unchanged.
