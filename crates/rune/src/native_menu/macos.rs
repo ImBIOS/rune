@@ -95,19 +95,12 @@ impl Native {
             let target: Retained<MenuTarget> = msg_send_id![super(self.mtm.alloc().set_ivars(Action {
                 id: d.id.clone(), enabled: d.enabled, sink: sink.clone(),
             })), init];
-            let key = d.equivalent.as_ref().map(key_equivalent).unwrap_or_default();
             let item = NSMenuItem::initWithTitle_action_keyEquivalent(self.mtm.alloc(),
-                &NSString::from_str(&d.title), Some(sel!(runeMenuAction:)), &NSString::from_str(&key));
+                &NSString::from_str(&d.title), Some(sel!(runeMenuAction:)), &NSString::from_str(""));
             item.setTarget(Some(&target));
             item.setEnabled(d.enabled);
             item.setState(if d.checked { 1 } else { 0 });
-            let mods = d.equivalent.as_ref().map(crate::Shortcut::modifiers).unwrap_or_default();
-            let mut flags = NSEventModifierFlags::empty();
-            if mods.ctrl { flags |= NSEventModifierFlags::NSEventModifierFlagControl; }
-            if mods.alt { flags |= NSEventModifierFlags::NSEventModifierFlagOption; }
-            if mods.shift { flags |= NSEventModifierFlags::NSEventModifierFlagShift; }
-            if mods.logo { flags |= NSEventModifierFlags::NSEventModifierFlagCommand; }
-            item.setKeyEquivalentModifierMask(flags);
+            set_key_equivalent(&item, d.equivalent.as_ref());
             (d.location.clone(), item, target)
         }).collect();
         self.clear();
@@ -157,6 +150,22 @@ impl Drop for Native {
     fn drop(&mut self) {
         self.clear();
         OWNED.with(|owned| owned.set(false));
+    }
+}
+
+/// Shows `shortcut` beside the item, or nothing.
+pub(crate) fn set_key_equivalent(item: &NSMenuItem, shortcut: Option<&crate::Shortcut>) {
+    let key = shortcut.map(key_equivalent).unwrap_or_default();
+    let mods = shortcut.map(crate::Shortcut::modifiers).unwrap_or_default();
+    let mut flags = NSEventModifierFlags::empty();
+    if mods.ctrl { flags |= NSEventModifierFlags::NSEventModifierFlagControl; }
+    if mods.alt { flags |= NSEventModifierFlags::NSEventModifierFlagOption; }
+    if mods.shift { flags |= NSEventModifierFlags::NSEventModifierFlagShift; }
+    if mods.logo { flags |= NSEventModifierFlags::NSEventModifierFlagCommand; }
+    // SAFETY: a main-thread item; both setters copy their values.
+    unsafe {
+        item.setKeyEquivalent(&NSString::from_str(&key));
+        item.setKeyEquivalentModifierMask(flags);
     }
 }
 
