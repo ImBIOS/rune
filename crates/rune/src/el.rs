@@ -751,6 +751,7 @@ pub struct El {
     pub(crate) material: Option<crate::SystemMaterial>,
     /// `El::aspect_fit`'s width over height; 0 when unset.
     pub(crate) aspect_fit: f32,
+    pub(crate) selection_group: bool,
 }
 
 fn base(dir: FlexDirection) -> El {
@@ -815,6 +816,7 @@ fn base(dir: FlexDirection) -> El {
         help: None,
         material: None,
         aspect_fit: 0.0,
+        selection_group: false,
     }
 }
 
@@ -2027,6 +2029,16 @@ impl El {
                 self.cursor = Some(Cursor::Text);
             }
         }
+        self
+    }
+    /// Makes the [`El::selectable`] texts inside this element one selection, in tree order, as
+    /// the paragraphs of a web page are: a drag from one into another selects across them (the
+    /// gaps between included), Shift-click extends into any of them, Cmd+A selects them all and
+    /// Cmd+C copies their text joined by a newline, or a tab between texts side by side (table
+    /// cells). Double- and triple-clicks still take a word or paragraph of one text. Text that
+    /// isn't selectable (a list marker) is skipped. Outside a group each text is its own.
+    pub fn selection_group(mut self, on: bool) -> Self {
+        self.selection_group = on;
         self
     }
     /// The selection highlight of [`El::selectable`] text or a text field, drawn alike for both.

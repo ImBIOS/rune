@@ -1,0 +1,243 @@
+//! `El::selection_group`: the selectable texts inside one element select as one flow in tree
+//! order. A drag crosses from one into the next, Shift-click extends into any of them, Cmd+A
+//! takes them all and Cmd+C joins them with newlines (tabs between texts side by side).
+//! Double- and triple-clicks stay inside one text, links still open, a draggable row still
+//! drags, and text appended after the selection keeps it.
+use rune::runtime::ElementInfo;
+use rune::{Cursor, Cx, Drag, El, Env, Key, KeyEvent, Link, Mods, PhysicalInput, Runtime, TextStyle, col, rich, row, text};
+
+const A: &str = "first paragraph here";
+const ITEM: &str = "list item";
+const CODE: &str = "let x = 1;\nlet y = 2;";
+const LINKED: &str = "see docs now";
+
+#[derive(Default)]
+struct S { tail: String, opened: Vec<String>, drags: u32 }
+
+fn view(s: &S, _: &mut Cx<S>) -> El {
+    let style = TextStyle::new(14.0, 400.0).lh(20.0);
+    let docs = LINKED.find("docs").unwrap();
+    let t = |content: &str, key: &str| text(content.to_owned()).key(key).font(style).w_full().selectable(true);
+    col().w_full().h_full().padding(10.0)
+        .child(col().key("group").w(400.0).gap(12.0).selection_group(true)
+            .child(t(A, "a"))
+            .child(row().key("li").w_full().child(text("•").key("marker").font(style).w(20.0)).child(t(ITEM, "item").grow(1.0).shrink()))
+            .child(col().key("block").w_full().padding(8.0).child(t(CODE, "code")))
+            .child(row().key("cells").w_full().child(t("left", "c0").w(120.0)).child(t("right", "c1").w(120.0)))
+            .child(rich(format!("{LINKED}{}", s.tail), Vec::new()).key("linked").font(style).w_full().selectable(true)
+                .link(Link::new(docs..docs + 4, "docs"))
+                .on_link(|s: &mut S, id, _| s.opened.push(id.to_owned()))))
+        .child(t("outside text", "out").w(200.0).mt(12.0))
+        .child(row().key("dragrow").w(400.0).h(30.0).mt(12.0).selection_group(true)
+            .on_drag(|s: &mut S, _: &mut Drag, _| s.drags += 1)
+            .child(t("drag one", "d0").w(150.0)).child(t("drag two", "d1").w(150.0)))
+}
+
+fn runtime() -> Runtime<S> {
+    let mut rt = Runtime::new(S::default(), view, (500.0, 500.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    rt
+}
+
+fn find(rt: &Runtime<S>, key: &str) -> ElementInfo {
+    rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("{key}"))
+}
+
+/// Centres (points) of the glyphs drawn inside element `key`, in reading order by line.
+fn glyphs(rt: &Runtime<S>, key: &str) -> Vec<(f32, f32)> {
+    let e = find(rt, key);
+    let mut out: Vec<(f32, f32)> = rt.instances.iter()
+        .filter(|i| i.params[1] == rune::render::KIND_GLYPH)
+        .map(|i| ((i.rect[0] + i.rect[2] / 2.0) / 2.0, (i.rect[1] + i.rect[3] / 2.0) / 2.0))
+        .filter(|&(x, y)| x >= e.rect[0] && x <= e.rect[0] + e.rect[2] && y >= e.rect[1] && y <= e.rect[1] + e.rect[3])
+        .collect();
+    out.sort_by(|a, b| ((a.1 / 10.0).round(), a.0).partial_cmp(&((b.1 / 10.0).round(), b.0)).unwrap());
+    out
+}
+
+fn tick(rt: &mut Runtime<S>) { rt.frame(1.0 / 60.0); }
+fn wait(rt: &mut Runtime<S>) { rt.frame(1.0); }
+
+fn click(rt: &mut Runtime<S>, (x, y): (f32, f32)) {
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    tick(rt);
+}
+
+fn drag(rt: &mut Runtime<S>, (x0, y0): (f32, f32), (x1, y1): (f32, f32)) {
+    rt.pointer_move(x0, y0);
+    rt.pointer_down(x0, y0);
+    tick(rt);
+    for k in 1..=6 {
+        let f = k as f32 / 6.0;
+        rt.pointer_move(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f);
+        tick(rt);
+    }
+    rt.pointer_up(x1, y1);
+    tick(rt);
+}
+
+fn command(rt: &mut Runtime<S>, c: char) {
+    rt.key(KeyEvent { key: Key::Command(c), mods: Mods { cmd: true, ..Mods::default() } });
+    tick(rt);
+}
+
+/// Just left of glyph `g`: a drag ending there stops before it.
+fn before(g: (f32, f32)) -> (f32, f32) { (g.0 - 3.0, g.1) }
+
+#[test]
+fn a_drag_crosses_texts_and_copy_joins_them() {
+    let mut rt = runtime();
+    let clipboard = rune::clipboard::memory();
+    rt.use_clipboard(&clipboard);
+    let a = glyphs(&rt, "a");
+    let code = glyphs(&rt, "code");
+    // From "paragraph" down into the code block, stopping before "x".
+    drag(&mut rt, before(a[5]), before(code[3]));
+    assert_eq!(rt.selected_text().as_deref(), Some("paragraph here\nlist item\nlet "), "the marker isn't selectable");
+    assert_eq!(find(&rt, "a").selected.as_deref(), Some("paragraph here"));
+    assert_eq!(find(&rt, "item").selected.as_deref(), Some(ITEM), "texts between are selected whole");
+    assert_eq!(find(&rt, "code").selected.as_deref(), Some("let "));
+    assert_eq!(find(&rt, "c0").selected, None);
+    assert_eq!(rt.text_selection().map(|(p, r)| (p.ends_with("/a"), r)), Some((true, 6..A.len())), "the anchor's text");
+    command(&mut rt, 'c');
+    assert_eq!(clipboard.text().as_deref().map(String::as_str), Some("paragraph here\nlist item\nlet "));
+
+    // Upward from the cells into the item: the anchor stays put.
+    wait(&mut rt);
+    let c1 = glyphs(&rt, "c1");
+    let item = glyphs(&rt, "item");
+    drag(&mut rt, before(c1[2]), before(item[4]));
+    assert_eq!(rt.selected_text().as_deref(), Some("item\nlet x = 1;\nlet y = 2;\nleft\tri"), "cells side by side are tab-separated");
+
+    // Cmd+A takes the whole group, and stops at it.
+    command(&mut rt, 'a');
+    assert_eq!(rt.selected_text().as_deref(), Some(format!("{A}\n{ITEM}\n{CODE}\nleft\tright\n{LINKED}").as_str()));
+    assert_eq!(find(&rt, "out").selected, None);
+}
+
+#[test]
+fn gaps_and_the_outside_clamp_to_the_group() {
+    let mut rt = runtime();
+    let a = glyphs(&rt, "a");
+    let item = find(&rt, "li");
+    // Released in the gap above the list item: up to the item's start.
+    drag(&mut rt, before(a[5]), (a[5].0, item.rect[1] - 4.0));
+    assert_eq!(rt.selected_text().as_deref(), Some("paragraph here"));
+    wait(&mut rt);
+    // Past the group into a text outside it: the group's end, not the outside text.
+    let out = glyphs(&rt, "out");
+    drag(&mut rt, before(a[5]), out[3]);
+    let got = rt.selected_text().unwrap();
+    assert!(got.starts_with("paragraph here") && got.ends_with(LINKED), "{got:?}");
+    assert_eq!(find(&rt, "out").selected, None);
+}
+
+#[test]
+fn shift_click_extends_into_another_text() {
+    let mut rt = runtime();
+    let a = glyphs(&rt, "a");
+    let c0 = glyphs(&rt, "c0");
+    click(&mut rt, before(a[6]));
+    rt.physical_input(PhysicalInput::Modifiers(Mods { shift: true, ..Mods::default() }));
+    click(&mut rt, before(c0[2]));
+    assert_eq!(rt.selected_text().as_deref(), Some(format!("aragraph here\n{ITEM}\n{CODE}\nle").as_str()));
+    // And back into the anchor's own text.
+    click(&mut rt, before(a[9]));
+    rt.physical_input(PhysicalInput::Modifiers(Mods::default()));
+    assert_eq!(rt.selected_text().as_deref(), Some("ara"));
+}
+
+#[test]
+fn double_and_triple_clicks_stay_in_one_text() {
+    let mut rt = runtime();
+    let code = glyphs(&rt, "code");
+    let x = (code[3].0 - 1.0, code[3].1);
+    click(&mut rt, x);
+    click(&mut rt, x);
+    assert_eq!(rt.selected_text().as_deref(), Some("x"));
+    click(&mut rt, x);
+    assert_eq!(rt.selected_text().as_deref(), Some("let x = 1;\n"));
+    wait(&mut rt);
+    // A double-click drag across texts extends by whole words.
+    let a = glyphs(&rt, "a");
+    let item = glyphs(&rt, "item");
+    rt.pointer_move(a[7].0, a[7].1);
+    rt.pointer_down(a[7].0, a[7].1);
+    rt.pointer_up(a[7].0, a[7].1);
+    tick(&mut rt);
+    rt.pointer_down(a[7].0, a[7].1);
+    tick(&mut rt);
+    rt.pointer_move(item[1].0, item[1].1);
+    tick(&mut rt);
+    rt.pointer_up(item[1].0, item[1].1);
+    tick(&mut rt);
+    assert_eq!(rt.selected_text().as_deref(), Some("paragraph here\nlist"));
+}
+
+#[test]
+fn links_open_and_show_the_hand_over_selectable_text() {
+    let mut rt = runtime();
+    let a = glyphs(&rt, "a");
+    rt.pointer_move(a[2].0, a[2].1);
+    tick(&mut rt);
+    assert_eq!(rt.cursor(), Cursor::Text);
+    let docs = find(&rt, "docs");
+    let at = (docs.rect[0] + docs.rect[2] / 2.0, docs.rect[1] + docs.rect[3] / 2.0);
+    rt.pointer_move(at.0, at.1);
+    tick(&mut rt);
+    assert_eq!(rt.cursor(), Cursor::Pointer);
+    click(&mut rt, at);
+    assert_eq!(rt.state.opened, ["docs"]);
+    assert_eq!(rt.selected_text(), None);
+    // A drag through the link still selects.
+    wait(&mut rt);
+    let l = glyphs(&rt, "linked");
+    drag(&mut rt, before(a[15]), before(l[5]));
+    assert_eq!(rt.selected_text().as_deref(), Some(format!("ere\n{ITEM}\n{CODE}\nleft\tright\nsee do").as_str()));
+    assert_eq!(rt.state.opened, ["docs"]);
+}
+
+#[test]
+fn appended_text_keeps_the_selection_and_a_changed_one_drops_it() {
+    let mut rt = runtime();
+    let a = glyphs(&rt, "a");
+    let l = glyphs(&rt, "linked");
+    drag(&mut rt, before(a[15]), before(l[5]));
+    let selected = rt.selected_text().unwrap();
+    for word in [" and", " more", " words"] {
+        rt.state.tail.push_str(word);
+        rt.invalidate();
+        tick(&mut rt);
+        assert_eq!(rt.selected_text().as_deref(), Some(selected.as_str()), "streaming after the selection keeps it");
+    }
+    assert_eq!(find(&rt, "linked").selected.as_deref(), Some("see do"));
+    // Shift-click past the old end reaches the new text.
+    let l = glyphs(&rt, "linked");
+    rt.physical_input(PhysicalInput::Modifiers(Mods { shift: true, ..Mods::default() }));
+    click(&mut rt, (l.last().unwrap().0 + 6.0, l.last().unwrap().1));
+    rt.physical_input(PhysicalInput::Modifiers(Mods::default()));
+    assert!(rt.selected_text().unwrap().ends_with("see docs now and more words"));
+    // A change inside what's selected drops it.
+    rt.state.tail = String::new();
+    rt.invalidate();
+    tick(&mut rt);
+    assert_eq!(rt.selected_text(), None);
+}
+
+#[test]
+fn a_draggable_row_drags_and_clicks_still_select() {
+    let mut rt = runtime();
+    let d0 = glyphs(&rt, "d0");
+    let d1 = glyphs(&rt, "d1");
+    drag(&mut rt, d0[0], d1[3]);
+    assert!(rt.state.drags >= 3, "the row drags: {}", rt.state.drags);
+    assert_eq!(rt.selected_text(), None);
+    wait(&mut rt);
+    click(&mut rt, d1[5]);
+    click(&mut rt, d1[5]);
+    assert_eq!(rt.selected_text().as_deref(), Some("two"));
+    command(&mut rt, 'a');
+    assert_eq!(rt.selected_text().as_deref(), Some("drag one\tdrag two"));
+}

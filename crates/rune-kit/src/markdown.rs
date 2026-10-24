@@ -648,6 +648,7 @@ pub struct MarkdownStyle {
     diff_hunk: Color,
     syntax: [Color; Syntax::COUNT],
     highlight: bool,
+    selection: Color,
     pub(crate) diagram: DiagramPaint,
 }
 
@@ -737,6 +738,7 @@ impl MarkdownStyle {
             diff_hunk: c.text_muted,
             syntax: syntax_colours(k),
             highlight: true,
+            selection: k.selection(),
             diagram: DiagramPaint {
                 text: c.text_base,
                 muted: c.text_muted,
@@ -917,6 +919,11 @@ impl MarkdownStyle {
         self.highlight = on;
         self
     }
+    /// The highlight of [`Markdown::selectable`] text (the kit's field selection by default).
+    pub fn selection(mut self, c: Color) -> Self {
+        self.selection = c;
+        self
+    }
     /// Diagram nodes (and sequence participants): their fill and outline, and the colour of
     /// edges, arrows and lifelines.
     pub fn diagram(mut self, node_fill: Color, node_border: Color, line: Color) -> Self {
@@ -960,11 +967,12 @@ pub struct Markdown {
     reveal: f32,
     streaming: bool,
     on_link: Option<LinkWire>,
+    selectable: bool,
 }
 
 impl Markdown {
     pub fn new(src: impl Into<String>) -> Markdown {
-        Markdown { src: src.into(), style: None, reveal: 0.0, streaming: false, on_link: None }
+        Markdown { src: src.into(), style: None, reveal: 0.0, streaming: false, on_link: None, selectable: false }
     }
     /// Replaces the kit-derived style in [`Self::build`].
     pub fn style(mut self, style: MarkdownStyle) -> Self {
@@ -994,6 +1002,16 @@ impl Markdown {
         self
     }
 
+    /// Lets people select and copy the text (see [`El::selectable`]) as one selection across
+    /// paragraphs, headings, list items, quotes, code blocks and table cells
+    /// ([`El::selection_group`]): Cmd+A selects the whole block, and Cmd+C copies the text as
+    /// drawn, a newline between blocks and a tab between table cells, without list markers or
+    /// code fences. Links still open on a click. The highlight is [`MarkdownStyle::selection`].
+    pub fn selectable(mut self, on: bool) -> Self {
+        self.selectable = on;
+        self
+    }
+
     pub fn build(mut self, k: &Kit) -> El {
         let style = self.style.take().unwrap_or_else(|| MarkdownStyle::from_kit(k));
         self.render(&style)
@@ -1003,8 +1021,8 @@ impl Markdown {
     /// [`MarkdownStyle::from_seed`]).
     pub fn render(self, style: &MarkdownStyle) -> El {
         let (blocks, sources) = doc_cached(&self.src);
-        let r = Renderer { s: style.clone(), reveal: self.reveal, streaming: self.streaming, on_link: self.on_link, sources, next_source: Cell::new(0) };
-        r.blocks(&blocks)
+        let r = Renderer { s: style.clone(), reveal: self.reveal, streaming: self.streaming, on_link: self.on_link, selectable: self.selectable, sources, next_source: Cell::new(0) };
+        r.blocks(&blocks).selection_group(self.selectable)
     }
 }
 
@@ -1013,6 +1031,7 @@ struct Renderer {
     reveal: f32,
     streaming: bool,
     on_link: Option<LinkWire>,
+    selectable: bool,
     sources: Rc<[Source]>,
     /// The next of `sources`, advanced at each [`Block::Code`] in document order.
     next_source: Cell<usize>,
@@ -1072,9 +1091,14 @@ impl Renderer {
         on_link(e)
     }
 
+    /// `e`, a text, selectable when the markdown is (after its links, so it shows the I-beam).
+    fn select(&self, e: El) -> El {
+        if self.selectable { e.selectable(true).selection_color(self.s.selection) } else { e }
+    }
+
     fn para(&self, inl: &Inline, style: TextStyle, color: Color) -> El {
         let e = rich(inl.text.clone(), self.spans(inl, style.size)).font(style).color(color).reveal(self.reveal).w_full();
-        self.wire_link(e, inl)
+        self.select(self.wire_link(e, inl))
     }
 
     fn blocks(&self, blocks: &[Block]) -> El {
@@ -1097,7 +1121,7 @@ impl Renderer {
             .radius(6.0)
             .fill(s.code_block_fill)
             .border(0.5, s.code_block_border)
-            .child(rich(code.to_owned(), self.syntax_spans(code, source)).font(s.code_block).color(s.text).reveal(self.reveal).w_full())
+            .child(self.select(rich(code.to_owned(), self.syntax_spans(code, source)).font(s.code_block).color(s.text).reveal(self.reveal).w_full()))
     }
 
     /// Colour-only spans, so highlighting never moves a glyph: a block streaming in draws its
@@ -1134,7 +1158,7 @@ impl Renderer {
                 .key(format!("l{n}"))
                 .w_full()
                 .px(12.0)
-                .child(text(shown.to_owned()).font(s.code_block).color(color).wrap().reveal(self.reveal).w_full());
+                .child(self.select(text(shown.to_owned()).font(s.code_block).color(color).wrap().reveal(self.reveal).w_full()));
             if let Some(t) = tint {
                 r = r.fill(t);
             }
@@ -1227,7 +1251,7 @@ mod tests {
             }
         }
         let (blocks, sources) = doc_cached(src);
-        let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, sources: sources.clone(), next_source: Cell::new(0) };
+        let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, selectable: false, sources: sources.clone(), next_source: Cell::new(0) };
         let mut found = Vec::new();
         codes(&blocks, &mut found);
         assert_eq!(found.len(), sources.len(), "one source per code block");

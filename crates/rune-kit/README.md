@@ -134,6 +134,12 @@ source each time, and earlier blocks stay mounted.
   and is cached. Anything outside the supported subset (listed in `src/mermaid.rs`) shows as
   its code block with a "Diagram not supported" hint. `rune_kit::mermaid::render(src, &style)`
   draws one on its own.
+- **`selectable(true)`** lets people select and copy the text as one selection: a drag runs from
+  a paragraph through list items into a code block, Shift-click extends, Cmd+A selects the
+  whole Markdown and Cmd+C copies the text as drawn, as a web browser does: a newline between
+  blocks, a tab between table cells, no list markers, fences or `**`. Links still open on a
+  click, and a selection stays while the source streams on after it. The highlight is
+  `k.selection()`; set another with `MarkdownStyle::selection`.
 
 `Tooltip::label(..).render(&TooltipStyle::neutral(dark), &mut layer)` builds a tooltip without
 a kit. `TooltipStyle::max_width(w)` caps its width; `label`, `text` and a `.wrap()` text `child` wrap at it. The

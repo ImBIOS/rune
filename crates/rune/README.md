@@ -651,11 +651,18 @@ measure presentation geometry.
 shift-click to extend. Cmd+C (Ctrl+C off macOS) copies and Cmd+A selects all of it while it holds
 the selection; a right-click opens a native Copy menu on macOS unless the element has its own
 `on_secondary_press`. It shows the I-beam (a link inside it keeps the pointing hand and opens on
-click), isn't a Tab stop, and a press anywhere else clears it. One text holds the selection at a
-time. It works across spans, wrapped lines and bidi runs. Cmd+C and Cmd+A are the plain chords
+click), isn't a Tab stop, and a press anywhere else clears it. One text (or selection group) holds
+the selection at a time. It works across spans, wrapped lines and bidi runs. Cmd+C and Cmd+A are the plain chords
 only: with Shift, Option or Control added they go to the app. A click on the text makes it the
 holder, so Cmd+A selects all of it, as in an AppKit text view; Cmd+C with nothing selected goes to
-the app. A view that changes the text, removes it or turns `selectable` off drops its selection.
+the app. A view that changes the selected text, removes it or turns `selectable` off drops its
+selection; text appended after it (a message streaming in) keeps it.
+
+`El::selection_group(true)` makes the selectable texts inside an element one selection, as a web
+page's are: a drag crosses from one into the next in tree order, Shift-click extends into any of
+them, Cmd+A selects them all and Cmd+C joins them with a newline, or a tab between texts side by
+side (table cells). Double- and triple-clicks still take a word or paragraph of one text, and
+non-selectable text inside (a list marker) is left out. Kit's `Markdown::selectable` is one.
 
 Inside a row that handles input, the row keeps it: an unmoved click on the text presses (and
 double-presses) the nearest ancestor with a handler, hover and press paint reach that ancestor,

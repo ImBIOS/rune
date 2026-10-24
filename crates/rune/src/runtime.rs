@@ -333,6 +333,8 @@ pub(crate) struct Node {
     input: Option<Box<InputSpec>>,
     cursor: Option<crate::el::Cursor>,
     window_drag: bool,
+    /// `El::selection_group`.
+    selection_group: bool,
     press_scale: Option<f32>,
     /// `El::scale`: a fixed factor on the element's own scale.
     static_scale: f32,
@@ -4189,6 +4191,7 @@ impl<S: 'static> Runtime<S> {
         self.drawn.resize(n_nodes, [0.0; 4]);
         self.drawn_scale.clear();
         self.drawn_scale.resize(n_nodes, 1.0);
+        let sel_ranges = self.selection_ranges();
         self.ime_area = None;
         let now = self.t;
         let vp = [0.0, 0.0, self.viewport.0 * s, self.viewport.1 * s];
@@ -4955,7 +4958,7 @@ impl<S: 'static> Runtime<S> {
                         let c = premul(d.color, o, srgb);
                         self.instances.push(rect_inst(d.rect, c, d.radius, clip, fade));
                     }
-                    if spec.selectable && let Some((a, b)) = self.selected_range(&n.path, &spec.content) {
+                    if spec.selectable && let Some((a, b)) = selectable::range_in(&sel_ranges, i) {
                         let (a, b) = n.elided.map_or((a, b), |e| e.range(a, b));
                         selectable::push_selection(&mut self.instances, layout, a, b, origin, tk, premul(spec.selection, o, srgb), s, clip, fade);
                     }
@@ -5159,6 +5162,7 @@ impl<S: 'static> Runtime<S> {
         let animating = |id: NodeId| store.is_animating(id, prop::FRAME) || store.is_animating(id, prop::TRAVEL)
             || store.is_animating(id, prop::PRESENCE) || store.is_animating(id, prop::OFFSET) || store.is_animating(id, prop::SCALE) || store.is_animating(id, P_PRESS_SCALE)
             || (!self.reduced_motion && self.loops.get(&id).is_some_and(|l| l.active(store.node_time(id))));
+        let sel_ranges = self.selection_ranges();
         let mut elements: Vec<_> = self.nodes
             .iter()
             .enumerate()
@@ -5238,7 +5242,7 @@ impl<S: 'static> Runtime<S> {
                     drag_out: n.drag_out.is_some(),
                     help: n.help.clone(),
                     selected: n.text.as_ref().filter(|t| t.selectable).and_then(|t| {
-                        let (a, b) = self.selected_range(&n.path, &t.content)?;
+                        let (a, b) = selectable::range_in(&sel_ranges, i)?;
                         t.source_slice(a as u32, b as u32).map(str::to_owned)
                     }),
                     virtual_extent: self.virtuals.contains_key(&n.path) && n.vis.fill.a == 0.0
@@ -5915,6 +5919,7 @@ fn flatten(
         help,
         material,
         aspect_fit,
+        selection_group,
         ..
     } = el;
     if let Some(t) = &text && t.live.is_some() {
@@ -5986,6 +5991,7 @@ fn flatten(
         input,
         cursor,
         window_drag,
+        selection_group,
         press_scale,
         static_scale,
         time_scale,
