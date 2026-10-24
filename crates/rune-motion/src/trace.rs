@@ -256,14 +256,9 @@ impl MotionTrace {
     /// Recorded once, on the next frame. `format_args!` avoids eager string allocation.
     pub fn event(&mut self, event: impl std::fmt::Display) { self.events.push(event.to_string()); }
 
-    fn id(&mut self, node: NodeId) -> (u32, bool) {
+    fn id(&mut self, node: NodeId) -> u32 {
         let next = self.ids.len() as u32 + 1;
-        let mut new = false;
-        let id = *self.ids.entry(node.0).or_insert_with(|| {
-            new = true;
-            next
-        });
-        (id, new)
+        *self.ids.entry(node.0).or_insert(next)
     }
 
     /// Writes one frame. `t` is animation time in seconds.
@@ -304,7 +299,7 @@ impl MotionTrace {
         let mut metas = String::new();
         let mut elems = String::new();
         for p in presented {
-            let (id, _) = self.id(p.node);
+            let id = self.id(p.node);
             let name = self.names.get(&p.node.0).copied();
             let namespace = self.namespaces.get(&p.node.0).copied();
             if self.described.insert(p.node.0, (name, namespace)) != Some((name, namespace)) {
@@ -315,7 +310,7 @@ impl MotionTrace {
                 let (class, host) = namespace.unwrap_or((&self.class, &self.host));
                 let _ = write!(metas, r#"{{"id":{id},"cls":{},"nm":{},"host":{}"#, json_str(class), json_str(&name), json_str(host));
                 if let Some(parent) = p.parent {
-                    let (pv, _) = self.id(parent);
+                    let pv = self.id(parent);
                     let _ = write!(metas, r#","pv":{pv}"#);
                 }
                 metas.push('}');
@@ -356,7 +351,7 @@ impl MotionTrace {
         if !intents.is_empty() {
             line.push_str(r#","ai":["#);
             for (k, &(node, bits, secs)) in intents.iter().enumerate() {
-                let (id, _) = self.id(node);
+                let id = self.id(node);
                 let rect = presented.iter().find(|p| p.node == node).map(|p| p.rect).unwrap_or_default();
                 if k > 0 {
                     line.push(',');
@@ -382,7 +377,7 @@ impl MotionTrace {
         if !gone.is_empty() {
             line.push_str(r#","g":["#);
             for (k, node) in gone.iter().enumerate() {
-                let (id, _) = self.id(*node);
+                let id = self.id(*node);
                 self.states.remove(&id);
                 if k > 0 {
                     line.push(',');
