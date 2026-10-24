@@ -561,12 +561,14 @@ impl Scene {
     }
 
     fn presence_now(&self, i: usize) -> f32 {
+        self.nodes[i].tracks[prop::PRESENCE.id.0 as usize].and_then(|t| self.sample(t)).map_or(1.0, |(x, _)| x[0])
+    }
+
+    /// Lane values and velocities of track `t`, sampled exactly at `now()`.
+    fn sample(&self, t: TrackId) -> Option<([f32; MAX_LANES], [f32; MAX_LANES])> {
         let mut x = [0.0; MAX_LANES];
         let mut v = [0.0; MAX_LANES];
-        match self.nodes[i].tracks[prop::PRESENCE.id.0 as usize] {
-            Some(t) if self.store.sample_exact(t, &mut x, &mut v) => x[0],
-            _ => 1.0,
-        }
+        self.store.sample_exact(t, &mut x, &mut v).then_some((x, v))
     }
 
     // ------------------------------------------------------------------------------------------
@@ -756,17 +758,12 @@ impl Scene {
         (Vec2::new(o[0].x, o[1].x), Vec2::new(o[0].v, o[1].v))
     }
 
-    fn lanes_dual(&self, i: usize, p: PropId, out: &mut [D]) -> bool {
-        let Some(t) = self.nodes[i].tracks[p.0 as usize] else { return false };
-        let mut x = [0.0; MAX_LANES];
-        let mut v = [0.0; MAX_LANES];
-        if !self.store.sample_exact(t, &mut x, &mut v) {
-            return false;
-        }
+    /// Overwrites `out` with the property's exact lanes, if its track has a sample.
+    fn lanes_dual(&self, i: usize, p: PropId, out: &mut [D]) {
+        let Some((x, v)) = self.nodes[i].tracks[p.0 as usize].and_then(|t| self.sample(t)) else { return };
         for (k, o) in out.iter_mut().enumerate() {
             *o = D { x: x[k], v: v[k] };
         }
-        true
     }
 
     fn world_dual(&self, i: usize) -> [D; 4] {
@@ -868,22 +865,22 @@ impl Scene {
 
     fn current<T: Animatable>(&self, i: usize, p: Prop<T>) -> Option<T> {
         let t = self.nodes[i].tracks.get(p.id.0 as usize).copied().flatten()?;
-        let mut x = [0.0; MAX_LANES];
-        let mut v = [0.0; MAX_LANES];
-        self.store.sample_exact(t, &mut x, &mut v).then(|| T::read_lanes(&x[..T::LANES]))
+        self.sample(t).map(|(x, _)| T::read_lanes(&x[..T::LANES]))
     }
 
     fn track_set<T: Animatable>(&mut self, i: usize, p: Prop<T>, value: T) {
         let id = self.store.set(self.nodes[i].id, p, value);
-        if let Some(slot) = self.nodes[i].tracks.get_mut(p.id.0 as usize) {
-            *slot = Some(id);
-        }
-        self.nodes[i].dirty = true;
+        self.record_track(i, p.id, id);
     }
 
     fn track_animate<T: Animatable>(&mut self, i: usize, p: Prop<T>, target: T, anim: Anim) {
         let id = self.store.animate(self.nodes[i].id, p, target, anim);
-        if let Some(slot) = self.nodes[i].tracks.get_mut(p.id.0 as usize) {
+        self.record_track(i, p.id, id);
+    }
+
+    /// Remembers built-in props' tracks on the node (custom props live only in the store).
+    fn record_track(&mut self, i: usize, p: PropId, id: TrackId) {
+        if let Some(slot) = self.nodes[i].tracks.get_mut(p.0 as usize) {
             *slot = Some(id);
         }
         self.nodes[i].dirty = true;
