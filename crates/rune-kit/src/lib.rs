@@ -62,7 +62,7 @@ pub use list::{List, ListItem};
 #[cfg(feature = "markdown")]
 pub use markdown::{Markdown, MarkdownStyle};
 pub use menu::{Menu, MenuEntry, MenuItem, context_menu};
-pub use overlay::{HoverCard, Placement, Popover, Tooltip, TooltipAppearance, body_text, overlay_text, scrim};
+pub use overlay::{HoverCard, Placement, Popover, Tooltip, TooltipAppearance, TooltipStyle, body_text, overlay_text, scrim};
 pub use radio::{RadioGroup, RadioItem};
 pub use rolling_text::RollingText;
 pub use segmented::SegmentedControl;

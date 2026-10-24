@@ -6,7 +6,7 @@
 //! [`crate::root`]. Content is `El::anchored` to the trigger, so it follows layout, flips when
 //! it doesn't fit, and paints above everything mounted before it.
 
-use rune::{Align, Color, El, Side, TextStyle, Transition, col, el, row, text};
+use rune::{Align, Color, El, Shadow, Side, TextStyle, Transition, col, el, row, text};
 use rune_motion::{Effect, Spring, SpringPair, Vec2, tokens};
 
 use crate::{Acts, ButtonSize, IconButton, IconButtonVariant, Kit, shadows};
@@ -60,11 +60,15 @@ impl Placement {
 /// Positions `content` next to the element keyed `anchor` and gives it the overlay entrance:
 /// fade plus 0.96 scale from the trigger side.
 pub(crate) fn anchor(k: &Kit, content: El, anchor: &str, placement: Placement, gap: f32) -> El {
+    anchor_with(k.motion.overlay, content, anchor, placement, gap)
+}
+
+fn anchor_with(motion: Spring, content: El, anchor: &str, placement: Placement, gap: f32) -> El {
     let (side, align) = placement.split();
     content
         .anchored(anchor, side, align, gap)
         .transition(Transition::scale_anchor(0.96, placement.origin()))
-        .motion(k.motion.overlay)
+        .motion(motion)
 }
 
 /// Positions a menu surface next to `anchor` with no entrance: it is there on the next frame,
@@ -214,14 +218,124 @@ pub enum TooltipAppearance {
     Large,
 }
 
-/// A tooltip: `Tooltip::new("save-tip").trigger(btn).value("Save").open(hovered).build(&kit, &mut layer)`.
+/// How a tooltip looks: its surface, padding, type and entrance spring. Built from a kit by
+/// [`TooltipStyle::from_kit`], or without one by [`TooltipStyle::neutral`]; each builder
+/// overrides one thing.
+#[derive(Clone, Debug)]
+pub struct TooltipStyle {
+    fill: Color,
+    border: Option<(f32, Color)>,
+    radius: f32,
+    padding: (f32, f32),
+    max_w: Option<f32>,
+    font: TextStyle,
+    ink: Color,
+    shadows: Vec<Shadow>,
+    motion: Spring,
+}
+
+impl TooltipStyle {
+    /// The kit's look for `appearance`.
+    pub fn from_kit(k: &Kit, appearance: TooltipAppearance) -> TooltipStyle {
+        let c = &k.c;
+        let base = TooltipStyle {
+            fill: c.layer_01,
+            border: None,
+            radius: 4.0,
+            padding: (6.0, 5.0),
+            max_w: None,
+            font: k.ty.small_medium,
+            ink: c.text_base,
+            shadows: k.shadow_layers(&k.elevation.floating).collect(),
+            motion: k.motion.overlay,
+        };
+        match appearance {
+            TooltipAppearance::Compact => base,
+            TooltipAppearance::Large => {
+                TooltipStyle { padding: (12.0, 12.0), font: TextStyle { weight: 530.0, ..k.ty.ui_compact }, ..base }
+            }
+            TooltipAppearance::Standard => TooltipStyle {
+                fill: c.surface_float,
+                border: Some((1.0, c.border_weak)),
+                radius: k.radius.sm,
+                padding: (8.0, 2.0),
+                max_w: Some(320.0),
+                font: k.ty.text_small_medium,
+                ink: c.text_invert_strong,
+                shadows: k.shadow_layers(&k.elevation.md).collect(),
+                ..base
+            },
+        }
+    }
+    /// The compact tooltip on Rune's neutral light or dark tokens, for apps without a kit.
+    pub fn neutral(dark: bool) -> TooltipStyle {
+        TooltipStyle::from_kit(&Kit::neutral(dark), TooltipAppearance::Compact)
+    }
+    pub fn fill(mut self, c: Color) -> Self {
+        self.fill = c;
+        self
+    }
+    /// A ring inside the edge; `width` 0 removes it.
+    pub fn border(mut self, width: f32, c: Color) -> Self {
+        self.border = (width > 0.0).then_some((width, c));
+        self
+    }
+    pub fn radius(mut self, r: f32) -> Self {
+        self.radius = r;
+        self
+    }
+    /// Horizontal and vertical padding.
+    pub fn padding(mut self, x: f32, y: f32) -> Self {
+        self.padding = (x, y);
+        self
+    }
+    /// The widest the tooltip grows before its text wraps.
+    pub fn max_width(mut self, w: f32) -> Self {
+        self.max_w = Some(w);
+        self
+    }
+    /// The type and colour of [`Tooltip::label`] text.
+    pub fn font(mut self, f: TextStyle) -> Self {
+        self.font = f;
+        self
+    }
+    pub fn ink(mut self, c: Color) -> Self {
+        self.ink = c;
+        self
+    }
+    /// Box-shadow layers, painted in order; empty for none.
+    pub fn shadows(mut self, layers: impl Into<Vec<Shadow>>) -> Self {
+        self.shadows = layers.into();
+        self
+    }
+    /// The spring the tooltip fades and scales in on.
+    pub fn motion(mut self, s: Spring) -> Self {
+        self.motion = s;
+        self
+    }
+    pub fn text_style(&self) -> TextStyle {
+        self.font
+    }
+    pub fn text_color(&self) -> Color {
+        self.ink
+    }
+}
+
+/// A tooltip: `Tooltip::new("save-tip").trigger(btn).text(&kit, "Save").open(hovered).build(&kit, &mut layer)`,
+/// or without a kit `Tooltip::new("save-tip").trigger(btn).label("Save").open(hovered).render(&TooltipStyle::neutral(dark), &mut layer)`.
 pub struct Tooltip {
     key: String,
     trigger: Option<El>,
-    value: Vec<El>,
+    value: Vec<Content>,
     appearance: TooltipAppearance,
     open: bool,
     placement: Placement,
+}
+
+enum Content {
+    El(El),
+    /// Text styled when the tooltip is built.
+    Label(String),
 }
 
 impl Tooltip {
@@ -244,12 +358,17 @@ impl Tooltip {
     pub fn text(mut self, k: &Kit, s: impl Into<String>) -> Self {
         let font = self.font(k);
         let color = self.ink(k);
-        self.value.push(text(s).font(font).color(color));
+        self.value.push(Content::El(text(s).font(font).color(color)));
+        self
+    }
+    /// Plain text content in the style's font and ink, whichever style builds the tooltip.
+    pub fn label(mut self, s: impl Into<String>) -> Self {
+        self.value.push(Content::Label(s.into()));
         self
     }
     /// Any content (keybinds, spans in other colours).
     pub fn child(mut self, c: El) -> Self {
-        self.value.push(c);
+        self.value.push(Content::El(c));
         self
     }
     pub fn appearance(mut self, a: TooltipAppearance) -> Self {
@@ -278,27 +397,33 @@ impl Tooltip {
     }
 
     pub fn build(self, k: &Kit, layer: &mut Vec<El>) -> El {
-        let c = &k.c;
+        let style = TooltipStyle::from_kit(k, self.appearance);
+        self.render(&style, layer)
+    }
+
+    /// Builds with `style` instead of a kit's tokens (the appearance is then up to the style).
+    pub fn render(self, style: &TooltipStyle, layer: &mut Vec<El>) -> El {
         let anchor_key = format!("{}-trigger", self.key);
         let trigger = row().key(anchor_key.clone()).children(self.trigger);
         if !self.open {
             return trigger;
         }
-        let body = row().key(format!("{}-tooltip", self.key)).role("tooltip").center_y().gap(6.0).children(self.value);
-        let body = match self.appearance {
-            TooltipAppearance::Compact => {
-                shadows(k, body.px(6.0).py(5.0).radius(4.0).fill(c.layer_01), &k.elevation.floating)
-            }
-            TooltipAppearance::Large => {
-                shadows(k, body.padding(12.0).radius(4.0).fill(c.layer_01), &k.elevation.floating)
-            }
-            TooltipAppearance::Standard => shadows(
-                k,
-                body.max_w(320.0).px(8.0).py(2.0).radius(k.radius.sm).fill(c.surface_float).border(1.0, c.border_weak),
-                &k.elevation.md,
-            ),
-        };
-        layer.push(anchor(k, body, &anchor_key, self.placement, 4.0));
+        let value = self.value.into_iter().map(|c| match c {
+            Content::El(e) => e,
+            Content::Label(s) => text(s).font(style.font).color(style.ink),
+        });
+        let mut body = row().key(format!("{}-tooltip", self.key)).role("tooltip").center_y().gap(6.0).children(value);
+        if let Some(w) = style.max_w {
+            body = body.max_w(w);
+        }
+        body = body.px(style.padding.0).py(style.padding.1).radius(style.radius).fill(style.fill);
+        if let Some((w, c)) = style.border {
+            body = body.border(w, c);
+        }
+        for s in &style.shadows {
+            body = body.box_shadow(*s);
+        }
+        layer.push(anchor_with(style.motion, body, &anchor_key, self.placement, 4.0));
         trigger
     }
 }

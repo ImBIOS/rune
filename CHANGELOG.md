@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **rune-kit `Tooltip` works without a `Kit`:** `Tooltip::label(..).render(&TooltipStyle,
+  &mut layer)` with `TooltipStyle::{neutral, from_kit}` and its builders. `build(&kit)` is
+  unchanged.
 - **`rune::text::measure(text, spans, style, max_width)`** returns a text's laid-out size outside
   a frame, with the fonts the app loaded; `Some(0.0)` gives its min-content width.
 - **Text in fonts with a `trak` table (the macOS system font) now has the same width at every
