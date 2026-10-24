@@ -81,7 +81,7 @@ impl<S: 'static> Runtime<S> {
     pub(super) fn link_at(&self, i: usize, x: f32, y: f32) -> Option<usize> {
         if self.nodes[i].text.as_ref().is_none_or(|t| t.links.is_empty()) { return None; }
         self.link_boxes(i, self.drawn_box(i)).into_iter()
-            .find(|(_, r)| x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3]).map(|(k, _)| k)
+            .find(|(_, r)| contains(*r, x, y)).map(|(k, _)| k)
     }
 
     /// Hit rects for node `i`: only its links' boxes, clipped like `clipped`. False when it

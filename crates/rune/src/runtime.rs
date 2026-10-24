@@ -26,6 +26,8 @@ use crate::color::{Color, over};
 use crate::edit::{EditOutcome, Ime, KeyEvent};
 use crate::el::{Align, Drag, DragFn, El, GrowthSpec, InputSpec, Phase, PointerPress, PressFn, SecondaryFn, ScrollSpec, Shell, TextSpec, Tx, Visual};
 use crate::growth::{GrowTrack, SUBSTEP};
+// Half-open, like overlays, NSPointInRect and PtInRect: a shared edge belongs to one side.
+use crate::overlay_options::contains;
 use crate::flight::{TextFlight, transformed};
 use crate::render::{Instance, KIND_DASHED, KIND_GLYPH, KIND_GRADIENT, KIND_IMAGE, KIND_INSET, KIND_RECT, KIND_SEGMENT, KIND_SHADOW, KIND_TRIANGLE, NO_CLIP};
 use crate::shape::{LineCap, Op, Shape};
@@ -2523,7 +2525,7 @@ impl<S: 'static> Runtime<S> {
 
     fn primary_target(&self, x: f32, y: f32) -> Option<usize> {
         self.hits.iter().rev().find_map(|&(id, r)| {
-            if x < r[0] || x > r[2] || y < r[1] || y > r[3] { return None; }
+            if !contains(r, x, y) { return None; }
             let i = *self.node_index.get(&id)?;
             let n = &self.nodes[i];
             // A secondary-only child must not obscure primary input or background blur.
@@ -2536,7 +2538,7 @@ impl<S: 'static> Runtime<S> {
         self.pointer = Some((x, y));
         if self.in_viewport(x, y) { self.left_in_capture = false; }
         for &(id, rect) in &self.hits {
-            if crate::overlay_options::contains(rect, x, y)
+            if contains(rect, x, y)
                 && let Some(n) = self.node_index.get(&id).map(|&i| &self.nodes[i])
                 && n.on_pointer_move.is_some()
             {
@@ -2550,8 +2552,8 @@ impl<S: 'static> Runtime<S> {
         // unscrolled layout rect, kept only for elements that were never drawn.
         let mut hits = self.hits.iter().filter(|(hit, _)| *hit == id).peekable();
         self.capture_inside = if self.native_overlay || hits.peek().is_some() {
-            hits.any(|(_, r)| crate::overlay_options::contains(*r, x, y))
-        } else { x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3] };
+            hits.any(|(_, r)| contains(*r, x, y))
+        } else { contains(r, x, y) };
         if has_drag {
             let (dx, dy) = (x - self.press_at.0, y - self.press_at.1);
             let d = Drag { phase: Phase::Move, x: x - r[0], y: y - r[1], dx, dy, ..d };
@@ -2565,7 +2567,7 @@ impl<S: 'static> Runtime<S> {
         let visual_changed = self.nodes.iter().enumerate().any(|(i, n)| {
             if n.vis.hover.a <= 0.0 && n.vis.press.a <= 0.0 { return false; }
             let r = self.drawn_edges(i);
-            let inside = |p: Option<(f32, f32)>| p.is_some_and(|(x, y)| x >= r[0] && y >= r[1] && x <= r[2] && y <= r[3]);
+            let inside = |p: Option<(f32, f32)>| p.is_some_and(|(x, y)| contains(r, x, y));
             inside(self.pointer) != inside(Some((x, y)))
         });
         let (queued, capture_inside) = (self.queue.len(), self.capture_inside);
@@ -2591,7 +2593,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn in_viewport(&self, x: f32, y: f32) -> bool {
-        x >= 0.0 && y >= 0.0 && x < self.viewport.0 && y < self.viewport.1
+        contains([0.0, 0.0, self.viewport.0, self.viewport.1], x, y)
     }
 
     /// A release outside the window, or after the pointer left during the press, ends the hover.
@@ -2684,7 +2686,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn secondary_target(&self, x: f32, y: f32) -> Option<&str> {
-        let id = self.hits.iter().rev().find(|&&(_, r)| x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3])?.0;
+        let id = self.hits.iter().rev().find(|&&(_, r)| contains(r, x, y))?.0;
         let mut index = *self.node_index.get(&id)?;
         loop {
             let n = &self.nodes[index];
@@ -2759,7 +2761,7 @@ impl<S: 'static> Runtime<S> {
         if let Some((x, y)) = self.pointer {
             for &(id, r) in &self.hits {
                 if let Some(n) = self.node_index.get(&id).map(|&i| &self.nodes[i])
-                    && n.on_hover_change.is_some() && crate::overlay_options::contains(r, x, y) && !inside.contains(&n.path)
+                    && n.on_hover_change.is_some() && contains(r, x, y) && !inside.contains(&n.path)
                 {
                     inside.push(n.path.clone());
                 }
@@ -2900,7 +2902,7 @@ impl<S: 'static> Runtime<S> {
             .filter(|(i, n)| n.scroll.is_some() && !self.subtree_exiting(*i) && self.allowed(*i))
             .find(|(i, _)| {
                 let r = self.drawn.get(*i).copied().unwrap_or([0.0; 4]);
-                x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]
+                contains([r[0], r[1], r[0] + r[2], r[1] + r[3]], x, y)
             })
             .map(|(_, n)| n.id)
     }
@@ -2947,9 +2949,8 @@ impl<S: 'static> Runtime<S> {
             let r = self.drawn_edges(i);
             // A group inside a clipped region (a scrolled list) only hovers where it shows.
             let c = n.parent.and_then(|p| self.inh_scratch.get(p)).map_or(NO_CLIP, |h| h.clip).map(|v| v / self.env.scale);
-            let inside = self.pointer.is_some_and(|(x, y)| {
-                x >= r[0].max(c[0]) && x <= r[2].min(c[2]) && y >= r[1].max(c[1]) && y <= r[3].min(c[3])
-            });
+            let shown = [r[0].max(c[0]), r[1].max(c[1]), r[2].min(c[2]), r[3].min(c[3])];
+            let inside = self.pointer.is_some_and(|(x, y)| contains(shown, x, y));
             // A group stays hovered while one of its descendants holds the press.
             let within = |p: &str| p == n.path || (p.len() > n.path.len() && p.starts_with(&n.path) && p.as_bytes()[n.path.len()] == b'/');
             let hovered = inside && tracks_hover && captured.is_none_or(within);
@@ -4496,6 +4497,40 @@ mod tests {
         assert!(!rt.observe_pointer(90.0, 90.0));
         assert!(!rt.observe_pointer(200.0, 90.0), "movement outside the canvas needs no frame");
         assert!(!rt.has_pending_input());
+    }
+
+    #[test]
+    fn hit_tests_leave_out_the_right_and_bottom_edges() {
+        fn tile(k: &'static str) -> El {
+            el().key(k).size(40.0, 20.0)
+                .on_press(move |s: &mut Vec<String>| s.push(format!("press {k}")))
+                .on_hover(move |s: &mut Vec<String>| s.push(format!("hover {k}")))
+                .on_hover_change(move |s: &mut Vec<String>, inside, _| if inside { s.push(format!("enter {k}")) })
+                .on_pointer_move(move |s: &mut Vec<String>, _| s.push(format!("move {k}")))
+        }
+        fn view(_: &Vec<String>, _: &mut Cx<Vec<String>>) -> El {
+            col().gap(20.0).child(crate::row().child(tile("a")).child(tile("b"))).child(tile("lone"))
+        }
+        let mut rt = Runtime::new(Vec::new(), view, (200.0, 200.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        assert_eq!(rt.presented("lone").unwrap().0, [0.0, 40.0, 40.0, 20.0]);
+        let mut click = |x, y| {
+            rt.pointer_move(x, y);
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(0.0);
+            let mut events = std::mem::take(&mut rt.state);
+            rt.pointer_leave();
+            rt.frame(0.0);
+            rt.state.clear();
+            events.sort();
+            events.dedup();
+            events
+        };
+        assert_eq!(click(40.0, 10.0), ["enter b", "hover b", "move b", "press b"], "the shared edge is b's alone");
+        assert_eq!(click(40.0, 50.0), Vec::<String>::new(), "a lone node's right edge is outside it");
+        assert_eq!(click(20.0, 60.0), Vec::<String>::new(), "and so is its bottom edge");
+        assert_eq!(click(0.0, 40.0), ["enter lone", "hover lone", "move lone", "press lone"], "its top-left corner is inside");
     }
 
     #[test]

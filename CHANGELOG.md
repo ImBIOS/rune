@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Hit testing leaves out an element's right and bottom edges everywhere.** Press, hover,
+  secondary press, links, wheel targets and hover and press highlights now use the same
+  half-open test as pointer-move, `on_hover_change` and overlays (like `NSPointInRect` and
+  `PtInRect`). A pointer exactly on a shared edge belongs to the right or lower sibling
+  for every handler. A pointer exactly on a lone element's right or bottom edge no longer
+  hovers or presses it.
 - **rune-kit `List` rows with an action are keyboard-reachable.** When any row has
   `on_select`, the rows sit in a `listbox` focus group: Tab enters the list once (on the
   selected row, if any), arrows move between rows, and Enter selects. Those rows show

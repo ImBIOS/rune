@@ -198,7 +198,10 @@ fn link_boxes_match_drawn_glyphs_beside_emoji_and_in_centred_lines() {
     // glyph's centre takes the pointer.
     for (key, glyph_count) in [("user:kit", 4), ("party", 4), ("long", 13)] {
         let link = find(&rt, key);
-        assert!(hovers(&mut rt, centre(&link)), "{key} centre");
+        // Where a script aims: the centre of the link's first line box. The centre of a wrapped
+        // link's union can sit on the edge between its lines, which hits neither.
+        let aim = rt.find(key).unwrap();
+        assert!(hovers(&mut rt, aim), "{key} centre");
         let (glyphs, _) = drawn(&rt, link_ink());
         assert_eq!(glyphs.len(), glyph_count, "{key}: {glyphs:?}");
         for g in glyphs {
