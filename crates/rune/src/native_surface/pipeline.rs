@@ -17,6 +17,8 @@ struct Uniforms {
     color: [f32; 4],
     // Exact mapping flag, source dimensions, horizontal mirror flag.
     sampling: [f32; 4],
+    // `Orient`: centred upright to centred buffer coordinates.
+    orient: [f32; 4],
 }
 pub(crate) struct Imported {
     frame: Arc<Frame>,
@@ -238,9 +240,10 @@ impl SurfaceRenderer {
             }
             let imported = self.cache[&key].clone();
             let f = &imported.frame;
-            let image = image_rect(d.rect, f.size, d.fit);
-            let exact = (image[2] - f.size[0] as f32).abs() < 0.001
-                && (image[3] - f.size[1] as f32).abs() < 0.001
+            let upright = f.orient.upright(f.size);
+            let image = image_rect(d.rect, upright, d.fit);
+            let exact = (image[2] - upright[0] as f32).abs() < 0.001
+                && (image[3] - upright[1] as f32).abs() < 0.001
                 && (image[0] - image[0].round()).abs() < 0.001
                 && (image[1] - image[1].round()).abs() < 0.001;
             let u = Uniforms {
@@ -261,6 +264,7 @@ impl SurfaceRenderer {
                     d.opacity,
                 ],
                 sampling: [if exact { 1.0 } else { 0.0 }, f.size[0] as f32, f.size[1] as f32, if mirrored { 1.0 } else { 0.0 }],
+                orient: f.orient.0.map(f32::from),
             };
             if let Some(p) = self.draws.get_mut(count).filter(|p| Arc::ptr_eq(&p.imported, &imported)) {
                 *p.drawn.get_mut() = false;

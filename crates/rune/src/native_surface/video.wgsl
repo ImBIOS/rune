@@ -1,6 +1,6 @@
 struct Uniforms {
     viewport: vec4<f32>, node: vec4<f32>, image: vec4<f32>, radii: vec4<f32>,
-    clip: vec4<f32>, fade: vec4<u32>, color: vec4<f32>, sampling: vec4<f32>,
+    clip: vec4<f32>, fade: vec4<u32>, color: vec4<f32>, sampling: vec4<f32>, orient: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var plane0: texture_2d<f32>;
@@ -44,20 +44,24 @@ fn ramp(d: f32, width: f32) -> f32 {
     if any(unflipped < vec2<f32>(0.0)) || any(unflipped >= vec2<f32>(1.0)) { discard; }
     // Mirror about the image centre: Fill crops stay centred and 1:1 texels stay exact.
     if u.sampling.w > 0.5 { local.x = u.image.z - local.x; }
-    let uv = local / u.image.zw;
+    // Quarter turns and flips about the centre, into the buffer's (unrotated) image space.
+    let m = mat2x2<f32>(u.orient.xz, u.orient.yw);
+    let size = abs(u.orient.xz) * u.image.z + abs(u.orient.yw) * u.image.w;
+    let buffer = m * (local - u.image.zw * 0.5) + size * 0.5;
+    let uv = buffer / size;
     var col: vec4<f32>;
     if u.sampling.x > 0.5 {
         // Integer device-pixel origin + pixel-centre positions: no interpolation, even at Retina 2x.
-        let texel = vec2<i32>(floor(local));
+        let texel = vec2<i32>(floor(buffer));
         col = convert(textureLoad(plane0, texel, 0), textureLoad(plane1, texel / 2, 0).rg);
     } else {
-        let ratio = u.sampling.yz / u.image.zw;
+        let ratio = u.sampling.yz / size;
         // Bounded area supersampling for large shrink ratios (up to 8x8 bilinear taps).
         // Convert each sample before accumulating so filtering is in linear light.
         let taps = vec2<i32>(clamp(ceil(ratio), vec2<f32>(1.0), vec2<f32>(8.0)));
         col = vec4<f32>(0.0);
         for (var y = 0; y < taps.y; y++) { for (var x = 0; x < taps.x; x++) {
-            let offset = (vec2<f32>(f32(x)+0.5, f32(y)+0.5) / vec2<f32>(taps) - 0.5) / u.image.zw;
+            let offset = (vec2<f32>(f32(x)+0.5, f32(y)+0.5) / vec2<f32>(taps) - 0.5) / size;
             col += sample_linear(uv + offset);
         }}
         col /= f32(taps.x * taps.y);

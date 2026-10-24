@@ -1,9 +1,10 @@
 //! AVFoundation: AVPlayer + AVPlayerItemVideoOutput for windows, AVAssetImageGenerator for
 //! posters and headless frames, and a bare AVPlayer for audio.
 use super::*;
+use crate::native_surface::Orient;
 use crate::native_surface::macos::PixelBuffer;
 use objc2_av_foundation::{
-    AVAssetImageGenerator, AVMediaTypeAudio, AVMediaTypeVideo, AVPlayer, AVPlayerItem, AVPlayerItemStatus, AVPlayerItemVideoOutput,
+    AVAsset, AVAssetImageGenerator, AVMediaTypeAudio, AVMediaTypeVideo, AVPlayer, AVPlayerItem, AVPlayerItemStatus, AVPlayerItemVideoOutput,
     AVURLAsset,
 };
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
@@ -40,6 +41,9 @@ pub(crate) struct Native {
     player: Option<Player>,
     posters: Arc<Mutex<Posters>>,
     poster_started: bool,
+    /// A finished poster may replace the surface's frame: set by a poster request while no
+    /// player has run (first frame, or a paused seek), cleared once a player makes frames.
+    poster_due: bool,
 }
 // The generator is only used under the Shared mutex. Player objects are created, used and
 // released on the main thread: pulls and audio ticks run there and `Player`'s drop hops to it.
@@ -63,6 +67,13 @@ struct Player {
     created: Instant,
     /// When the last seek started, and where to.
     seeking: Option<(Instant, f64)>,
+    /// Video: how its buffers turn upright (they ignore the track's `preferredTransform`).
+    orient: Orient,
+    /// Video: the item time of the frame on the surface.
+    shown: Option<f64>,
+    /// A paused seek within the frame on screen: nothing to wait for, but the player may report
+    /// the old position until it lands, so the handle's time holds.
+    hold: Option<f64>,
 }
 struct Objects {
     player: Retained<AVPlayer>,
@@ -73,7 +84,17 @@ struct Objects {
 
 impl Player {
     fn new(objects: Objects) -> Self {
-        Self { objects: Some(objects), rate: 0.0, muted: false, ready: false, created: Instant::now(), seeking: None }
+        Self {
+            objects: Some(objects),
+            rate: 0.0,
+            muted: false,
+            ready: false,
+            created: Instant::now(),
+            seeking: None,
+            orient: Orient::UP,
+            shown: None,
+            hold: None,
+        }
     }
 }
 
@@ -221,6 +242,16 @@ fn meta(asset: &AVURLAsset, kind: Kind) -> Result<Meta, String> {
     Ok(Meta { duration: duration(), size: Some((w as u32, h as u32)), frame })
 }
 
+/// How the first video track's buffers turn upright. Blocks until tracks load; free once an
+/// item using the asset is ready to play.
+#[allow(deprecated)]
+fn orient(asset: &AVAsset) -> Orient {
+    let Some(video) = (unsafe { AVMediaTypeVideo }) else { return Orient::UP };
+    let Some(track) = unsafe { asset.tracksWithMediaType(video) }.firstObject() else { return Orient::UP };
+    let t = unsafe { track.preferredTransform() };
+    Orient::from_transform(t.a, t.b, t.c, t.d)
+}
+
 fn generator(asset: &AVURLAsset, max: Option<f64>) -> Retained<AVAssetImageGenerator> {
     let g = unsafe { AVAssetImageGenerator::assetImageGeneratorWithAsset(asset) };
     unsafe {
@@ -280,6 +311,16 @@ pub(super) fn decode(native: &mut Native, source: &MediaSource, at: f64) -> Resu
     image(native.generator.as_ref().unwrap(), at)
 }
 
+/// A clip's frame at `at` upright (as posters and headless runs show it), and as its buffer
+/// stores it (as the player hands it out) with how that turns upright.
+#[cfg(test)]
+pub(crate) fn test_frames(source: &MediaSource, at: f64) -> Result<(ByteFrame, ByteFrame, Orient), String> {
+    let asset = asset(source)?;
+    let raw = generator(&asset, None);
+    unsafe { raw.setAppliesPreferredTrackTransform(false) };
+    Ok((image(&generator(&asset, None), at)?, image(&raw, at)?, orient(&asset)))
+}
+
 /// One worker per clip opens it and decodes the newest requested poster (none for audio),
 /// then wakes its windows, or for audio drives it on the main queue.
 fn request_poster(shared: &Arc<Shared>, native: &mut Native, at: f64) {
@@ -311,7 +352,8 @@ fn request_poster(shared: &Arc<Shared>, native: &mut Native, at: f64) {
                 if clip.strong_count() == 0 {
                     return;
                 }
-                let result = (|| {
+                // AVFoundation autoreleases; this thread has no pool of its own.
+                let result = objc2_video::rc::autoreleasepool(|_| {
                     if opened.is_none() {
                         let asset = asset(&source)?;
                         let meta = meta(&asset, kind)?;
@@ -323,7 +365,7 @@ fn request_poster(shared: &Arc<Shared>, native: &mut Native, at: f64) {
                         None => None,
                     };
                     Ok((frame, *meta))
-                })();
+                });
                 posters.lock().unwrap().done = Some(result);
                 let Some(clip) = clip.upgrade() else { return };
                 match kind {
@@ -367,7 +409,8 @@ fn host_seconds(at: Instant) -> f64 {
     if at >= now { host + (at - now).as_secs_f64() } else { host - (now - at).as_secs_f64() }
 }
 
-/// Bring the player in line with the handle: mute, seek, rate.
+/// Bring the player in line with the handle: mute, seek, rate. Seeks wait for the item to be
+/// ready, which drops earlier ones.
 fn reconcile(p: &mut Player, c: &mut Control, now: Instant) {
     let Some(o) = &p.objects else { return };
     unsafe {
@@ -375,9 +418,18 @@ fn reconcile(p: &mut Player, c: &mut Control, now: Instant) {
             o.player.setMuted(c.muted);
             p.muted = c.muted;
         }
-        if let Some(t) = c.seek.take() {
+        if p.ready
+            && let Some(t) = c.seek.take()
+        {
             o.player.seekToTime_toleranceBefore_toleranceAfter(cm(t), zero(), zero());
-            p.seeking = Some((now, t));
+            // A paused seek within the frame on screen brings no new frame to wait for.
+            let same_frame = !c.playing && c.meta.zip(p.shown).is_some_and(|(m, shown)| m.frame_index(shown) == m.frame_index(t));
+            if same_frame {
+                p.hold = Some(t);
+            } else {
+                p.seeking = Some((now, t));
+                p.hold = None;
+            }
         }
         if p.ready {
             let rate = if c.playing { c.rate } else { 0.0 };
@@ -390,30 +442,36 @@ fn reconcile(p: &mut Player, c: &mut Control, now: Instant) {
 }
 
 /// Applies a handle edit at once on the main thread, so a paused, undrawn video stops (and goes
-/// quiet) without waiting for a frame that draws it. Audio edits hop to the main thread.
+/// quiet) without waiting for a frame that draws it. Edits from other threads hop to it.
 pub(super) fn apply(shared: &Arc<Shared>) {
-    if shared.kind == Kind::Audio {
-        if !playback_enabled() || shared.ctl.lock().unwrap().failed.is_some() {
-            return;
-        }
-        if MainThreadMarker::new().is_some() {
-            drive(shared);
-        } else {
-            let clip = Arc::downgrade(shared);
-            on_main(move || {
-                if let Some(clip) = clip.upgrade() {
-                    drive(&clip);
-                }
-            });
-        }
+    if !playback_enabled() || shared.ctl.lock().unwrap().failed.is_some() {
         return;
     }
     if MainThreadMarker::new().is_none() {
+        let clip = Arc::downgrade(shared);
+        on_main(move || {
+            if let Some(clip) = clip.upgrade() {
+                apply(&clip);
+            }
+        });
         return;
     }
+    if shared.kind == Kind::Audio {
+        drive(shared);
+        return;
+    }
+    // Already being pulled further up this stack; that pull reconciles.
     let Ok(mut native) = shared.native.try_lock() else { return };
-    if let Some(p) = native.player.as_mut() {
-        reconcile(p, &mut shared.ctl.lock().unwrap(), Instant::now());
+    let Some(p) = native.player.as_mut() else { return };
+    let playing = {
+        let mut c = shared.ctl.lock().unwrap();
+        reconcile(p, &mut c, Instant::now());
+        c.playing
+    };
+    drop(native);
+    // A parked player that plays again must not be released.
+    if playing {
+        unpark(shared);
     }
 }
 
@@ -437,7 +495,8 @@ fn take_poster(native: &mut Native, c: &mut Control, surface: Option<&NativeSurf
             if !c.opened() {
                 c.open(Ok(meta));
             }
-            if let (Some(bytes), Some(surface), None) = (bytes, surface, &native.player) {
+            // A late poster never covers a frame a player made.
+            if let (Some(bytes), Some(surface), None, true) = (bytes, surface, &native.player, native.poster_due) {
                 let id = c.next_frame_id();
                 if let Err(e) = surface.push_bytes(bytes, id) {
                     c.fail(e);
@@ -468,6 +527,10 @@ fn check_item(native: &mut Native, c: &mut Control, now: Instant) -> bool {
     }
     if status == AVPlayerItemStatus::ReadyToPlay && !p.ready {
         p.ready = true;
+        if o.output.is_some() {
+            let asset = unsafe { o.item.asset() };
+            p.orient = orient(&asset);
+        }
         if !c.opened() {
             let size = unsafe { o.item.presentationSize() };
             let duration = seconds(unsafe { o.item.duration() });
@@ -490,6 +553,9 @@ fn ensure_player(shared: &Arc<Shared>, native: &mut Native, c: &mut Control, mtm
                 c.seek = Some(c.time);
             }
             native.player = Some(Player::new(objects));
+            // From here on, frames come from players: an older poster load must not land.
+            native.poster_started = true;
+            native.poster_due = false;
             true
         }
         Err(e) => {
@@ -506,9 +572,12 @@ fn follow(p: &mut Player, c: &mut Control, now: Instant, frame_time: Option<f64>
     if frame_time.is_none() && p.seeking.is_some_and(|(_, to)| (current - to).abs() < AUDIO_SEEK_SLOP) {
         p.seeking = None;
     }
+    if c.playing || p.hold.is_some_and(|to| (current - to).abs() < 1e-3) {
+        p.hold = None;
+    }
     // Seeks land asynchronously: until then the player still reports the old position, which
     // may be the end.
-    let seeking = p.seeking.is_some();
+    let seeking = p.seeking.is_some() || p.hold.is_some();
     let stopped = p.rate > 0.0 && unsafe { o.player.rate() } == 0.0;
     let at_end = !seeking && (c.duration.is_some_and(|d| current >= d - 1e-3) || stopped);
     let time = if seeking {
@@ -549,6 +618,7 @@ pub(super) fn pull(shared: &Arc<Shared>, surface: &NativeSurface, target: Instan
         let want = c.seek.take().or_else(|| (!native.poster_started).then_some(c.time));
         if let Some(at) = want {
             drop(c);
+            native.poster_due = true;
             request_poster(shared, &mut native, at);
         }
         return false;
@@ -570,17 +640,21 @@ pub(super) fn pull(shared: &Arc<Shared>, surface: &NativeSurface, target: Instan
         let o = p.objects.as_ref().unwrap();
         let output = o.output.as_ref().unwrap();
         let item_time = unsafe { output.itemTimeForHostTime(host_seconds(target)) };
+        let mut shown = item_time;
         if unsafe { output.hasNewPixelBufferForItemTime(item_time) }
-            && let Some(buffer) = unsafe { output.copyPixelBufferForItemTime_itemTimeForDisplay(item_time, std::ptr::null_mut()) }
+            && let Some(buffer) = unsafe { output.copyPixelBufferForItemTime_itemTimeForDisplay(item_time, &mut shown) }
         {
             let id = c.next_frame_id();
+            let orient = p.orient;
             // SAFETY: AVPlayerItemVideoOutput hands out finished buffers it no longer writes.
-            let pushed = unsafe { PixelBuffer::from_raw(Retained::as_ptr(&buffer) as *mut _) }.and_then(|b| surface.push(b, id));
+            let pushed = unsafe { PixelBuffer::from_raw(Retained::as_ptr(&buffer) as *mut _) }
+                .and_then(|b| surface.push_oriented(b, id, orient));
             if let Err(e) = pushed {
                 c.fail(e);
                 native.player = None;
                 return false;
             }
+            p.shown = Some(seconds(shown));
             p.seeking = None;
         }
         follow(p, &mut c, now, Some(seconds(item_time)));
@@ -589,13 +663,13 @@ pub(super) fn pull(shared: &Arc<Shared>, surface: &NativeSurface, target: Instan
 }
 
 /// Seek patience and parking, shared by video pulls and audio drives. Returns whether the
-/// clip is playing or seeking.
+/// clip is playing, seeking or loading (a seek waits for it).
 fn finish(shared: &Arc<Shared>, mut native: MutexGuard<'_, Native>, c: MutexGuard<'_, Control>, now: Instant) -> bool {
     let p = native.player.as_mut().unwrap();
     if p.seeking.is_some_and(|(since, _)| now - since > SEEK_PATIENCE) {
         p.seeking = None;
     }
-    let active = c.playing || p.seeking.is_some();
+    let active = c.playing || p.seeking.is_some() || !p.ready;
     let park = p.ready && !active;
     drop(c);
     drop(native);
@@ -607,7 +681,7 @@ fn finish(shared: &Arc<Shared>, mut native: MutexGuard<'_, Native>, c: MutexGuar
 /// the end, tell the app about changes, and keep the tick going while it plays or seeks.
 pub(super) fn drive(shared: &Arc<Shared>) {
     if step_audio(shared) {
-        AUDIO_BUSY.store(true, Ordering::Release);
+        AUDIO_BUSY.store(true, Ordering::SeqCst);
         start_ticking();
     }
     shared.settle(true);
@@ -641,7 +715,8 @@ fn step_audio(shared: &Arc<Shared>) -> bool {
     let p = native.player.as_mut().unwrap();
     reconcile(p, &mut c, now);
     if !p.ready {
-        return c.playing;
+        // Tick until it loads (or times out), so a pending seek or play lands.
+        return true;
     }
     follow(p, &mut c, now, None);
     finish(shared, native, c, now)
@@ -659,12 +734,13 @@ fn tick() {
         busy |= step_audio(clip);
         clip.settle(true);
     }
-    AUDIO_BUSY.store(busy, Ordering::Release);
+    AUDIO_BUSY.store(busy, Ordering::SeqCst);
 }
 
 /// A thread that posts `tick` to the main queue every `AUDIO_TICK` while audio is busy.
 fn start_ticking() {
-    if TICKING.swap(true, Ordering::AcqRel) {
+    // SeqCst throughout: each side stores one flag, then loads the other.
+    if TICKING.swap(true, Ordering::SeqCst) {
         return;
     }
     std::thread::Builder::new()
@@ -672,11 +748,11 @@ fn start_ticking() {
         .spawn(|| {
             loop {
                 std::thread::sleep(AUDIO_TICK);
-                if !AUDIO_BUSY.load(Ordering::Acquire) {
-                    TICKING.store(false, Ordering::Release);
+                if !AUDIO_BUSY.load(Ordering::SeqCst) {
+                    TICKING.store(false, Ordering::SeqCst);
                     // Something started between the check and the store: keep going if no
                     // other ticker took over.
-                    if !AUDIO_BUSY.load(Ordering::Acquire) || TICKING.swap(true, Ordering::AcqRel) {
+                    if !AUDIO_BUSY.load(Ordering::SeqCst) || TICKING.swap(true, Ordering::SeqCst) {
                         return;
                     }
                 }
@@ -692,18 +768,31 @@ fn unpark(shared: &Arc<Shared>) {
 
 /// Keep at most `PARKED_PLAYERS` paused players; release the oldest. Main thread only.
 fn park(shared: &Arc<Shared>) {
-    let evicted: Vec<Arc<Shared>> = {
-        let mut parked = PARKED.lock().unwrap();
-        parked.retain(|w| w.strong_count() > 0);
-        if !parked.iter().any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(shared))) {
-            parked.push(Arc::downgrade(shared));
-        }
-        let excess = parked.len().saturating_sub(PARKED_PLAYERS);
-        parked.drain(..excess).filter_map(|w| w.upgrade()).collect()
-    };
-    for clip in evicted {
+    for clip in parked_with(shared) {
         // A video's last frame stays on its surface; resuming recreates the player.
-        let player = clip.native.lock().unwrap().player.take();
+        let player = {
+            let mut native = clip.native.lock().unwrap();
+            let player = native.player.take();
+            // A video that never showed a frame shows a poster instead.
+            if clip.kind == Kind::Video && player.as_ref().is_some_and(|p| p.shown.is_none()) {
+                native.poster_started = false;
+            }
+            player
+        };
         drop(player);
     }
+}
+
+/// Parks `shared` and returns the clips to release: the oldest past `PARKED_PLAYERS`. A clip
+/// that plays again (before its next pull unparks it) leaves the list and is never released.
+pub(super) fn parked_with(shared: &Arc<Shared>) -> Vec<Arc<Shared>> {
+    // A clip being edited on another thread right now counts as playing.
+    let playing = |clip: &Shared| clip.ctl.try_lock().map_or(true, |c| c.playing);
+    let mut parked = PARKED.lock().unwrap();
+    parked.retain(|w| w.upgrade().is_some_and(|clip| Arc::ptr_eq(&clip, shared) || !playing(&clip)));
+    if !parked.iter().any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(shared))) {
+        parked.push(Arc::downgrade(shared));
+    }
+    let excess = parked.len().saturating_sub(PARKED_PLAYERS);
+    parked.drain(..excess).filter_map(|w| w.upgrade()).collect()
 }

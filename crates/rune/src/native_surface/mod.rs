@@ -61,9 +61,49 @@ pub(crate) enum Source {
 pub(crate) struct Frame {
     pub id: u64,
     pub source: Source,
+    /// Buffer size, before `orient`.
     pub size: [u32; 2],
     pub format: Format,
     pub color: ColorInfo,
+    pub orient: Orient,
+}
+
+/// How a frame's buffer turns into its upright picture: a quarter-turn rotation and/or flip,
+/// applied while sampling. The matrix maps centred upright coordinates to centred buffer
+/// coordinates: `buffer = [m0 m1; m2 m3] * upright`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Orient(pub [i8; 4]);
+
+impl Default for Orient {
+    fn default() -> Self {
+        Self::UP
+    }
+}
+
+impl Orient {
+    pub const UP: Self = Self([1, 0, 0, 1]);
+
+    /// From an affine transform taking buffer to upright coordinates (`x' = a x + c y`,
+    /// `y' = b x + d y`), such as AVFoundation's `preferredTransform`. Anything but a quarter
+    /// turn or flip is drawn upright as is.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn from_transform(a: f64, b: f64, c: f64, d: f64) -> Self {
+        let m = [a, b, c, d].map(|v| v.round());
+        let unit = m.iter().all(|v| v.abs() <= 1.0) && m.iter().zip([a, b, c, d]).all(|(r, v)| (r - v).abs() < 1e-3);
+        let quarter = (m[0] != 0.0 && m[3] != 0.0 && m[1] == 0.0 && m[2] == 0.0) || (m[0] == 0.0 && m[3] == 0.0 && m[1] != 0.0 && m[2] != 0.0);
+        // Orthogonal, so the inverse is the transpose: [a b; c d].
+        if unit && quarter { Self(m.map(|v| v as i8)) } else { Self::UP }
+    }
+
+    /// Whether width and height trade places.
+    pub fn swaps(self) -> bool {
+        self.0[0] == 0
+    }
+
+    /// The upright size of a buffer of `size`.
+    pub fn upright(self, [w, h]: [u32; 2]) -> [u32; 2] {
+        if self.swaps() { [h, w] } else { [w, h] }
+    }
 }
 
 /// Submit is a CPU monotonic timestamp. Completion is callback-observed CPU time;
@@ -172,6 +212,9 @@ impl NativeSurface {
         self.0.lock().unwrap().mirrored
     }
     pub fn push_bytes(&self, frame: ByteFrame, frame_id: u64) -> Result<(), String> {
+        self.push_bytes_oriented(frame, frame_id, Orient::UP)
+    }
+    pub(crate) fn push_bytes_oriented(&self, frame: ByteFrame, frame_id: u64, orient: Orient) -> Result<(), String> {
         let [w, h] = [frame.width, frame.height];
         if w == 0 || h == 0 || w > 16384 || h > 16384 {
             return Err("video size must be 1..16384".into());
@@ -194,14 +237,19 @@ impl NativeSurface {
             size: [w, h],
             format: frame.format,
             color: frame.color,
+            orient,
             source: Source::Bytes(frame),
         });
         Ok(())
     }
     #[cfg(target_os = "macos")]
     pub fn push(&self, buffer: macos::PixelBuffer, frame_id: u64) -> Result<(), String> {
+        self.push_oriented(buffer, frame_id, Orient::UP)
+    }
+    #[cfg(target_os = "macos")]
+    pub(crate) fn push_oriented(&self, buffer: macos::PixelBuffer, frame_id: u64, orient: Orient) -> Result<(), String> {
         let (size, format, color) = buffer.info()?;
-        self.replace(Frame { id: frame_id, source: Source::PixelBuffer(buffer), size, format, color });
+        self.replace(Frame { id: frame_id, source: Source::PixelBuffer(buffer), size, format, color, orient });
         Ok(())
     }
     fn replace(&self, frame: Frame) {

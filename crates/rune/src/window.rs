@@ -373,6 +373,7 @@ pub(crate) fn start<S: 'static>(mut spec: WindowSpec<S>, handle: Option<WindowHa
         crate::tooling::headless_configured(spec.app, args, spec.options.transparent);
         return None;
     }
+    crate::video::enable_playback();
     cx.overlays.append(&mut spec.app.overlays);
     let handle = handle.unwrap_or_else(|| WindowHandle::new(&spec.key));
     let mut host = Host::new(spec, handle, args, cx.proxy, cx.slot, cx.gpu, cx.wayland);
@@ -525,7 +526,6 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) {
             .with_activate_ignoring_other_apps(false);
     }
     let event_loop = builder.build().expect("event loop");
-    crate::video::enable_playback();
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
     let mut windows = Windows { factory: Some(factory), args, proxy, hosts: Vec::new(), gpu: Rc::default() };

@@ -67,6 +67,49 @@ fn the_waker_hears_each_state_change_once() {
     assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
 }
 
+/// An unsupported format fails inside the constructor, before any waker can be set: setting
+/// one afterwards still delivers that failure, once.
+#[test]
+fn a_waker_set_after_a_failure_hears_it_once() {
+    let a = Player::audio("tap.ogg");
+    assert!(matches!(a.shared.snapshot().state, PlayerState::Failed(_)));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = calls.clone();
+    a.set_waker(Arc::new(move || {
+        seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+    a.shared.settle(true);
+    a.play();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[test]
+fn a_seek_before_the_clip_opens_is_clamped_when_it_does() {
+    let v = Video::file("missing.mp4");
+    v.seek(30.0);
+    assert_eq!(v.shared.ctl.lock().unwrap().seek, Some(30.0), "no duration yet");
+    v.shared.ctl.lock().unwrap().open(Ok(meta()));
+    let c = v.shared.ctl.lock().unwrap();
+    assert_eq!((c.seek, c.time), (Some(1.0), 1.0));
+}
+
+/// `play()` on a parked clip only unparks it on its next pull or edit on the main thread;
+/// until then, parking others must not release it.
+#[cfg(target_os = "macos")]
+#[test]
+fn parking_never_releases_a_playing_clip() {
+    let clips: Vec<Video> = (0..6).map(|_| Video::file(fixture())).collect();
+    let mut released = Vec::new();
+    released.extend(backend::parked_with(&clips[0].shared));
+    clips[0].play();
+    for clip in &clips[1..] {
+        released.extend(backend::parked_with(&clip.shared));
+    }
+    assert!(!released.iter().any(|r| Arc::ptr_eq(r, &clips[0].shared)), "the playing clip stays");
+    assert_eq!(released.len(), 1, "four of the five paused clips stay parked");
+    assert!(Arc::ptr_eq(&released[0], &clips[1].shared), "the oldest paused clip goes");
+}
+
 #[test]
 fn handle_edits_are_shared_and_validated() {
     let v = Video::url("https://example.com/clip.mp4");
@@ -190,10 +233,12 @@ fn the_last_handle_or_element_frees_the_player() {
     assert!(shared.upgrade().is_none());
 }
 
+#[cfg(target_os = "macos")]
 fn fixture() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rgbw.mp4")
 }
 
+#[cfg(target_os = "macos")]
 fn sound(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
 }

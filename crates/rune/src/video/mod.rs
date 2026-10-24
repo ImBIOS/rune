@@ -27,6 +27,8 @@
 mod macos;
 #[cfg(target_os = "macos")]
 use macos as backend;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use macos::test_frames;
 #[cfg(not(target_os = "macos"))]
 mod unsupported;
 #[cfg(not(target_os = "macos"))]
@@ -231,9 +233,11 @@ impl Player {
     }
     /// Called, from any thread, when the state changes: loaded, ended, failed, or started
     /// again by a loop. Hand it the app's `setup` waker so `poll` sees an audio clip end
-    /// without ticking. Nothing calls it for progress.
+    /// without ticking. Nothing calls it for progress. If the state already changed (loaded, or
+    /// failed at once on an unsupported format), it's called once right away.
     pub fn set_waker(&self, waker: crate::Waker) {
-        *self.shared.waker.lock().unwrap() = Some(waker);
+        *self.shared.waker.lock().unwrap() = Some((waker, 0));
+        self.shared.settle(false);
     }
 
     pub fn state(&self) -> PlayerState {
@@ -329,8 +333,9 @@ pub(crate) struct Shared {
     kind: Kind,
     ctl: Mutex<Control>,
     wakes: Mutex<Vec<Weak<crate::live::Wake>>>,
-    waker: Mutex<Option<crate::Waker>>,
-    /// The generation `waker` last heard about.
+    /// The app's waker and the generation it last heard about.
+    waker: Mutex<Option<(crate::Waker, u64)>>,
+    /// The generation windows last heard about.
     notified: AtomicU64,
     native: Mutex<backend::Native>,
 }
@@ -362,14 +367,17 @@ impl Shared {
     /// Call with no locks held.
     fn settle(&self, windows: bool) {
         let generation = self.ctl.lock().unwrap().generation;
-        if self.notified.swap(generation, Ordering::AcqRel) == generation {
-            return;
-        }
-        let waker = self.waker.lock().unwrap().clone();
+        let waker = match &mut *self.waker.lock().unwrap() {
+            Some((waker, heard)) if *heard != generation => {
+                *heard = generation;
+                Some(waker.clone())
+            }
+            _ => None,
+        };
         if let Some(waker) = waker {
             waker();
         }
-        if windows {
+        if self.notified.swap(generation, Ordering::AcqRel) != generation && windows {
             self.wake_windows();
         }
     }
@@ -388,6 +396,8 @@ impl Shared {
         if !self.ctl.lock().unwrap().opened() {
             let meta = backend::probe(&mut native, &self.source, self.kind);
             self.ctl.lock().unwrap().open(meta);
+            drop(native);
+            self.settle(false);
         }
     }
 
@@ -525,6 +535,7 @@ impl Control {
                 self.duration = Some(meta.duration);
                 self.size = meta.size;
                 self.time = self.time.min(meta.duration);
+                self.seek = self.seek.map(|t| t.min(meta.duration));
                 self.generation += 1;
             }
             Err(e) => self.fail(e),

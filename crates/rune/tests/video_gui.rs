@@ -117,12 +117,21 @@ fn main() {
             assert_eq!(clip.time(), at, "paused time holds");
             assert_eq!(clip.surface().counts(), quiet, "a paused video requests no frames");
 
+            // Two of the four 0.25 s frames on from where it paused, so a new frame shows.
+            let target = ((at / 0.25).floor() + 2.0) % 4.0 * 0.25 + 0.1;
             let before = frames();
-            clip.seek(0.6);
+            clip.seek(target);
             wait("seek frame", secs(3), || frames() > before);
             std::thread::sleep(Duration::from_millis(300));
-            assert!((clip.time() - 0.6).abs() < 0.01, "a paused seek lands: {}", clip.time());
+            assert!((clip.time() - target).abs() < 0.01, "a paused seek lands: {} for {target}", clip.time());
             assert_eq!(clip.state(), PlayerState::Ready);
+            // A paused seek within the frame on screen has no frame to wait for: no redraws.
+            clip.seek(target + 0.05);
+            std::thread::sleep(Duration::from_millis(200));
+            let quiet = clip.surface().counts();
+            std::thread::sleep(Duration::from_millis(300));
+            assert_eq!(clip.surface().counts(), quiet, "a same-frame paused seek requests no frames");
+            assert!((clip.time() - target - 0.05).abs() < 0.01, "{}", clip.time());
             println!("video_gui: {played} frames in one play, {looped} while looping");
 
             let wakes = Arc::new(AtomicUsize::new(0));
