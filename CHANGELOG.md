@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Occluded overlays and windows idle instead of spinning; their timers still fire.** A shown
+  overlay or window whose displays sleep or that is covered no longer turns the event loop
+  (about a full core before) when its drawable is occluded or times out. It runs updates, `poll`
+  and due `wake_after` timers without drawing, so a timer can still hide it; re-checks the surface
+  after 250 ms, backing off to 2 s; and redraws once when uncovered. Without a display link
+  (made while the displays slept) macOS motion is paced by a ~60 Hz timer rather than a busy loop,
+  and an overlay's 120 Hz pointer poll for `OverlayInput::Regions` rests while it is occluded.
 - **Help tooltips.** `El::help("…")` shows a tooltip after the system hover delay, as SwiftUI's
   `.help`. A press, scroll, key or the pointer leaving hides it until the pointer comes back. It
   takes no hover or clicks. macOS windows use AppKit's own tooltip, registered per element on
