@@ -338,6 +338,11 @@ struct Inh {
     dy: f32,
     /// Horizontal offset in points: a matched flight centring its scaled children.
     dx: f32,
+    /// The part of `dx`/`dy` from flights' covers above. A flight nested in another travels its
+    /// own root-space path, so it drops this.
+    cover: [f32; 2],
+    /// The clip, fade and fade origin outside the nearest flight above, for a flight nested in it.
+    outer: Option<[[f32; 4]; 3]>,
     mark: u32,
     /// The nearest hover group's hover amount (0–1), for `group_*` styles.
     group: f32,
@@ -347,7 +352,7 @@ impl Default for Inh {
     fn default() -> Self {
         Inh { opacity: 1.0, paint_opacity: 1.0, clip: NO_CLIP, fade: [0.0; 4], fade_origin: NO_CLIP,
             paint_clip: NO_CLIP, paint_fade: [0.0; 4], paint_fade_origin: NO_CLIP, rounded: None,
-            scale: 1.0, anchor: [0.0; 2], blur: 0.0, dy: 0.0, dx: 0.0, mark: 0, group: 0.0 }
+            scale: 1.0, anchor: [0.0; 2], blur: 0.0, dy: 0.0, dx: 0.0, cover: [0.0; 2], outer: None, mark: 0, group: 0.0 }
     }
 }
 
@@ -1280,10 +1285,12 @@ impl<S: 'static> Runtime<S> {
             self.prune_exited();
         }
         if !self.flying.is_empty() {
-            let store = self.scene.store();
+            let scene = &self.scene;
             let before = self.flying.len();
-            // Screen travel ends once it lands and no ancestor still moves.
-            self.flying.retain(|(id, _)| store.has(*id, prop::TRAVEL));
+            // Screen travel ends once it lands and no ancestor still moves. An exiting flight
+            // stays lifted until it's gone.
+            self.flying.retain(|(id, _)| scene.store().has(*id, prop::TRAVEL)
+                || matches!(scene.phase(*id), Some(PresencePhase::Exiting { .. })));
             if self.flying.len() != before { self.update_layer_paint_order(); }
         }
         animating |= self.step_growth(step as f32);
@@ -1322,6 +1329,7 @@ impl<S: 'static> Runtime<S> {
         }
         self.virtuals.retain(|path, _| self.nodes.iter().any(|n| n.path == *path));
         self.refresh_modal_index();
+        self.flying.retain(|(id, _)| self.node_index.contains_key(id));
         if !self.layer_paint_order.is_empty() || !self.flying.is_empty() { self.update_layer_paint_order(); }
     }
 
@@ -1695,9 +1703,12 @@ impl<S: 'static> Runtime<S> {
         let mut current: Vec<(Rc<str>, NodeId)> = by_id.iter().map(|(key, &(i, _))| (key.clone(), nodes[i].id)).collect();
         current.sort_unstable_by_key(|(key, _)| by_id[key].0);
         let old = std::mem::replace(&mut self.matched, current);
-        if instant || tx.settle { return; }
+        // Under Reduce Motion the old one exits and the new one enters, each by its own
+        // transition (a crossfade in place) and with the parents it leaves or enters with.
+        if instant || tx.settle || self.reduced_motion { return; }
         let mut old_index: Option<HashMap<NodeId, usize>> = None;
-        for (key, from) in old {
+        // Descendants first: matching an element unmounts its old subtree, matched ones included.
+        for (key, from) in old.into_iter().rev() {
             let Some(&(i, true)) = by_id.get(&key) else { continue };
             let to = nodes[i].id;
             if from == to || self.node_index.contains_key(&from) || !self.scene.contains(from) || self.is_exiting(from) { continue; }
@@ -1706,7 +1717,8 @@ impl<S: 'static> Runtime<S> {
             // Scroll offsets live outside the scene: start where `from` was seen on screen.
             let mut offset = rune_motion::Vec2::ZERO;
             if self.built {
-                let shift = |k: usize| self.inh_scratch.get(k).map_or([0.0; 2], |h| [h.dx, h.dy]);
+                // Flights drop the cover offsets of flights around them.
+                let shift = |k: usize| self.inh_scratch.get(k).map_or([0.0; 2], |h| [h.dx - h.cover[0], h.dy - h.cover[1]]);
                 let source = self.nodes[from_i].parent.map_or([0.0; 2], shift);
                 let row = self.row_dy.get(from_i).copied().unwrap_or(0.0);
                 let dest = std::iter::successors(nodes[i].parent, |&p| nodes[p].parent)
@@ -1717,7 +1729,6 @@ impl<S: 'static> Runtime<S> {
             let fill = self.color(from, P_FILL, self.nodes[from_i].vis.fill);
             let opacity = self.scene.get(from, prop::OPACITY);
             self.scene.match_geometry_offset(from, to, offset, LayoutAnim::new(spring).screen());
-            if self.reduced_motion { continue; }
             let live = |p: crate::live::Property| nodes[i].live.iter().any(|b| b.property == p);
             if fill != nodes[i].vis.fill && !live(crate::live::Property::Fill) {
                 self.scene.set(to, P_FILL, fill);
@@ -2494,6 +2505,9 @@ impl<S: 'static> Runtime<S> {
                 } else {
                     self.scene.remove(old.id);
                 }
+            } else if !tx.settle && self.flying.iter().any(|f| f.0 == old.id) {
+                // A flight paints outside its ancestors, so it can't fade with an exiting one.
+                self.scene.remove(old.id);
             }
             old.parent = old_parent_id.and_then(|pid| self.node_index.get(&pid).copied());
             old.live.clear();
@@ -2513,8 +2527,8 @@ impl<S: 'static> Runtime<S> {
 
         self.nodes = nodes;
         self.has_dissolve = self.nodes.iter().any(|n| n.vis.blend == crate::render::Blend::PlusLighter);
-        // A flight that left the tree (or rides an exiting ancestor) exits in place.
-        self.flying.retain(|(id, _)| self.node_index.get(id).is_some_and(|&i| i < present_len));
+        // A flight that left the tree stays lifted and covered while it exits, so it doesn't pop.
+        self.flying.retain(|(id, _)| self.node_index.contains_key(id));
         if self.nodes.len() > present_len || !self.flying.is_empty() { self.update_layer_paint_order(); }
         else { self.layer_paint_order.clear(); }
         self.built = false;
@@ -3270,9 +3284,12 @@ impl<S: 'static> Runtime<S> {
             if lift {
                 // Keep the destination's clips (consumed ones included) and offsets. Drop its
                 // ancestors' opacity, scale and blur: an entering parent's fade or scale would
-                // otherwise hide the flight or jump it off the rect it was seen at.
-                pinh = Inh { opacity: 1.0, paint_opacity: 1.0, paint_clip: pinh.clip, paint_fade: pinh.fade,
-                    paint_fade_origin: pinh.fade_origin, rounded: None, scale: 1.0, anchor: [0.0; 2], blur: 0.0, ..pinh };
+                // otherwise hide the flight or jump it off the rect it was seen at. Inside another
+                // flight, also drop that flight's cover offset and clip.
+                let [clip, fade, fade_origin] = pinh.outer.unwrap_or([pinh.clip, pinh.fade, pinh.fade_origin]);
+                pinh = Inh { opacity: 1.0, paint_opacity: 1.0, clip, fade, fade_origin, paint_clip: clip, paint_fade: fade,
+                    paint_fade_origin: fade_origin, rounded: None, scale: 1.0, anchor: [0.0; 2], blur: 0.0,
+                    dx: pinh.dx - pinh.cover[0], dy: pinh.dy - pinh.cover[1], cover: [0.0; 2], outer: None, ..pinh };
             }
             let mark = if n.vis.mark != 0 { n.vis.mark } else { pinh.mark };
             let mut own = p.opacity;
@@ -3888,24 +3905,29 @@ impl<S: 'static> Runtime<S> {
                 if let Some(st) = self.scrolls.get_mut(&self.nodes[i].id) { st.held = held; }
             }
             let (mut scale, mut anchor, mut dx) = (sc, anchor, pinh.dx);
+            let (mut cover_offset, mut outer) = (pinh.cover, pinh.outer);
             if let Some((k, c)) = cover {
                 // Children ride this node's presented origin at their rest layout. Scale them by
                 // `k` about the drawn origin, centred, and clip them to the moving rect.
                 clip = intersect(clip, r);
                 hit_clip = intersect(hit_clip, r);
+                let plain = [dx, dy];
                 dx = rect_pt[0] - p.rect.x + c[0] / k;
                 dy += rect_pt[1] - p.rect.y - pinh.dy + c[1] / k;
                 (scale, anchor) = (k, [rect_pt[0], rect_pt[1]]);
+                cover_offset = [dx - plain[0], dy - plain[1]];
+                outer = Some([pinh.clip, pinh.fade, pinh.fade_origin]);
             }
             inherit_fade(&mut hit_fade, &mut hit_origin, fade_origin, fade);
             self.inh_scratch[i] = Inh { opacity: effective_opacity, paint_opacity: o,
                 clip: intersect(hit_clip, clip), fade: hit_fade, fade_origin: hit_origin,
-                paint_clip: clip, paint_fade: fade, paint_fade_origin: fade_origin, rounded, scale, anchor, blur, dy, dx, mark, group };
+                paint_clip: clip, paint_fade: fade, paint_fade_origin: fade_origin, rounded, scale, anchor, blur, dy, dx,
+                cover: cover_offset, outer, mark, group };
             if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())
                 && !self.subtree_exiting(i)
                 && self.allowed(i) && effective_opacity > 0.001 && visible
             {
-                let c = self.inh_scratch[n.parent.unwrap_or(0)].clip;
+                let c = if n.parent.is_some() { pinh.clip } else { self.inh_scratch[0].clip };
                 let cr = [
                     rect_pt[0].max(c[0] / s),
                     rect_pt[1].max(c[1] / s),

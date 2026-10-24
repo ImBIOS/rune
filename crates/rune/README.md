@@ -332,7 +332,11 @@ if s.zoomed {
 - **Interruptible.** Matching back mid-flight starts from the presented rect with its
   velocity; a commit that leaves its layout alone doesn't re-time it.
 - **Spring.** `tok::motion::REFLOW` unless the commit's `Tx::motion` or the element's own
-  `.motion()` sets one. Reduced motion crossfades in place; settle and first frames swap.
+  `.motion()` sets one. Under reduced motion nothing is matched: the old element exits and
+  the new one enters by their own transitions, in place. Settle and first frames swap.
+- **Nesting and removal.** A matched element inside a flying one flies its own path. A
+  flight lands once the ancestors it sits in stop moving, scaling and fading. One removed
+  mid-way exits by its own transition, still above everything.
 - **Ids are per window.** When two present elements share an id, the last in tree order is
   matched; `--tree` lists a warning and debug builds print one.
 - Elements without a counterpart play their own transitions. Without any `matched`

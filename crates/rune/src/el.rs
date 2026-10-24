@@ -1673,7 +1673,8 @@ impl El {
     /// so a `pixels_fit(.., SurfaceFit::Fill)` picture zooms without distorting. Text moves
     /// with its box but keeps its size, as it does under any scale. The spring is
     /// `tok::motion::REFLOW` unless the commit's `Tx::motion` or this element's
-    /// [`motion`](Self::motion) sets one. Under Reduce Motion the two crossfade in place.
+    /// [`motion`](Self::motion) sets one. Under Reduce Motion nothing is matched: the old one
+    /// exits and the new one enters by their own transitions, in place.
     /// When two elements share an id in one tree, the last one in tree order is matched.
     pub fn matched(mut self, id: impl Into<String>) -> Self {
         self.matched = Some(Rc::from(id.into()));
