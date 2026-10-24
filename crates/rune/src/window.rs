@@ -865,6 +865,23 @@ pub(crate) fn is_wayland(event_loop: &ActiveEventLoop) -> bool {
     }
 }
 
+/// A window's content top-left in points from the primary display's top-left (see
+/// `El::on_screen_layout`), the space an overlay's `OverlayPlacement::Rect` on
+/// `DisplayTarget::Primary` is in. Elsewhere than macOS that's desktop pixels from the
+/// primary's origin over the window's scale, as `overlay::position` converts the other way.
+/// Wayland hides it.
+pub(crate) fn screen_origin(window: &Window) -> Option<(f32, f32)> {
+    #[cfg(target_os = "macos")]
+    return crate::macos::content_origin(window);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let p = window.inner_position().ok()?;
+        let o = window.primary_monitor().map_or(winit::dpi::PhysicalPosition::new(0, 0), |m| m.position());
+        let scale = window.scale_factor();
+        Some(((f64::from(p.x - o.x) / scale) as f32, (f64::from(p.y - o.y) / scale) as f32))
+    }
+}
+
 /// Native titlebar behaviour the framework owns: traffic-light placement, drag regions and the
 /// double-click action. Elsewhere only the portable parts apply.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -1699,11 +1716,21 @@ impl<S: 'static> Host<S> {
         });
         if launcher { self.win.as_mut().unwrap().first_frame.prepare(); }
         self.apply_placement(event_loop);
+        self.sync_origin();
         #[cfg(target_os = "macos")]
         if visible && let Some(w) = &self.win && w.panel.is_some() { w.show(focus); }
         if let Some(created) = self.on_created.take() { created(self.native_handle.clone()); }
         if let Some(on_window) = self.on_window.as_mut() { on_window(&self.native_handle); }
         Ok(())
+    }
+
+    /// Tells the runtime where the window's content is on screen, drawing a frame when that
+    /// moves an `El::on_screen_layout` element.
+    fn sync_origin(&mut self) {
+        let Some(w) = &self.win else { return };
+        if let Some(origin) = screen_origin(&w.window) && self.rt.set_window_origin(origin) {
+            w.window.request_redraw();
+        }
     }
 
     /// Publishes what `AppHandle::is_visible` reports.
@@ -2119,6 +2146,7 @@ impl<S: 'static> Host<S> {
             _ => false,
         };
         if stops { self.land_frame(); }
+        if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }) { self.sync_origin(); }
         let (Some(l), Some((gpu, ..))) = (self.win.as_mut(), self.gpu.as_ref()) else { return };
         let rt = &mut self.rt;
         let scale = l.window.scale_factor() as f32;

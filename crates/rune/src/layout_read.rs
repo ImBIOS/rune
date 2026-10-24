@@ -1,4 +1,6 @@
-//! Reading an element's laid-out rect: `Cx::layout` for views, `El::on_layout` for handlers.
+//! Reading an element's laid-out rect: `Cx::layout` for views, `El::on_layout` for handlers,
+//! and `El::on_screen_layout` for handlers in global screen points (the rect plus the window
+//! origin its host reports through `Runtime::set_window_origin`).
 //!
 //! Both see where layout puts an element (window points, after scrolling), never a frame of
 //! its spring, so they don't re-run through animations. A view reading something its own
@@ -96,23 +98,129 @@ impl<S: 'static> Runtime<S> {
         }
     }
 
-    /// Queues `on_layout` for elements whose laid-out rect changed (or that were just laid out).
+    /// Queues `on_layout` and `on_screen_layout` for elements whose laid-out rect changed (or
+    /// that were just laid out).
     pub(super) fn report_layout(&mut self) {
         let quiet = !self.layout_feedback_open();
-        let mut fired = HashMap::with_capacity(self.layout_fired.len());
+        self.report_rects(quiet, false);
+        self.report_rects(quiet, true);
+    }
+
+    /// The host's window content moved to `origin`, its top-left in global screen points.
+    /// Queues `on_screen_layout` for the elements that moved with it; true when it queued any,
+    /// so the host draws a frame to deliver them. A window move is outside feedback, like a
+    /// scroll, so it reopens layout feedback (see the module docs).
+    pub(crate) fn set_window_origin(&mut self, origin: (f32, f32)) -> bool {
+        if self.window_origin == origin { return false; }
+        self.window_origin = origin;
+        self.layout_echoes = 0;
+        self.report_rects(false, true)
+    }
+
+    /// Queues `on_layout`, or `on_screen_layout` when `screen`, for rects that moved; true when
+    /// it queued any.
+    fn report_rects(&mut self, quiet: bool, screen: bool) -> bool {
+        let last = std::mem::take(if screen { &mut self.screen_fired } else { &mut self.layout_fired });
+        let (ox, oy) = if screen { self.window_origin } else { (0.0, 0.0) };
+        let mut fired = HashMap::with_capacity(last.len());
+        let mut queued = false;
         for i in 0..self.nodes.len() {
-            if self.nodes[i].on_layout.is_none() || self.subtree_exiting(i) { continue; }
-            let id = self.nodes[i].id;
-            let r = self.laid_out(&self.nodes, i);
-            if !quiet && moved(self.layout_fired.get(&id).copied(), Some(r)) {
-                self.queue.push(Action::Layout(self.nodes[i].path.clone(), r));
-            } else if let Some(old) = self.layout_fired.get(&id).filter(|_| !quiet) {
+            let n = &self.nodes[i];
+            if (if screen { n.on_screen_layout.is_none() } else { n.on_layout.is_none() }) || self.subtree_exiting(i) { continue; }
+            let id = n.id;
+            let [x, y, w, h] = self.laid_out(&self.nodes, i);
+            let r = [x + ox, y + oy, w, h];
+            if !quiet && moved(last.get(&id).copied(), Some(r)) {
+                let path = self.nodes[i].path.clone();
+                queued = true;
+                if screen {
+                    // Several moves between frames (a window drag) deliver only the latest.
+                    self.queue.retain(|a| !matches!(a, Action::ScreenLayout(p, _) if *p == path));
+                    self.queue.push(Action::ScreenLayout(path, r));
+                } else {
+                    self.queue.push(Action::Layout(path, r));
+                }
+            } else if let Some(old) = last.get(&id).filter(|_| !quiet) {
                 // Unchanged: keep the rect last reported, so drift below the threshold adds up.
                 fired.insert(id, *old);
                 continue;
             }
             fired.insert(id, r);
         }
-        self.layout_fired = fired;
+        *(if screen { &mut self.screen_fired } else { &mut self.layout_fired }) = fired;
+        queued
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Env, Runtime, col, el};
+
+    #[derive(Default)]
+    struct S { screen: Vec<[f32; 4]>, local: Vec<[f32; 4]> }
+
+    fn view(_: &S, _: &mut crate::Cx<S>) -> crate::El {
+        col().w_full().h_full().padding(10.0).child(el().key("card").w(100.0).h(40.0)
+            .on_layout(|s: &mut S, r| s.local.push(r))
+            .on_screen_layout(|s: &mut S, r| s.screen.push(r)))
+    }
+
+    fn frames(rt: &mut Runtime<S>, n: usize) {
+        for _ in 0..n { rt.frame(1.0 / 120.0); }
+    }
+
+    #[test]
+    fn a_screen_rect_is_the_laid_out_rect_plus_the_window_origin() {
+        let mut rt = Runtime::new(S::default(), view, (300.0, 200.0), Env::new(true, 2.0));
+        assert!(!rt.set_window_origin((400.0, 250.0)), "nothing laid out yet");
+        rt.frame(0.0);
+        frames(&mut rt, 4);
+        assert_eq!(rt.state.local, [[10.0, 10.0, 100.0, 40.0]]);
+        assert_eq!(rt.state.screen, [[410.0, 260.0, 100.0, 40.0]], "first layout, origin added");
+    }
+
+    #[test]
+    fn moving_the_window_reports_screen_rects_without_a_relayout() {
+        let mut rt = Runtime::new(S::default(), view, (300.0, 200.0), Env::new(true, 2.0));
+        rt.set_window_origin((400.0, 250.0));
+        rt.frame(0.0);
+        frames(&mut rt, 4);
+        let commits = rt.stats.commits;
+
+        // A move draws a frame that delivers the new rect; on_layout hears nothing.
+        assert!(rt.set_window_origin((1700.0, -80.0)), "queued, so the host draws");
+        frames(&mut rt, 2);
+        assert_eq!(rt.state.screen.last(), Some(&[1710.0, -70.0, 100.0, 40.0]));
+        assert_eq!(rt.state.local.len(), 1, "on_layout is window points: unmoved");
+
+        // Below half a point it waits, and the drift adds up until it counts.
+        assert!(!rt.set_window_origin((1700.3, -80.0)));
+        assert!(rt.set_window_origin((1700.6, -80.0)));
+        frames(&mut rt, 2);
+        assert_eq!(rt.state.screen.len(), 3, "{:?}", rt.state.screen);
+        assert!((rt.state.screen[2][0] - 1710.6).abs() < 1e-3, "{:?}", rt.state.screen);
+
+        // A drag's moves between two frames deliver only the latest.
+        rt.set_window_origin((1800.0, 0.0));
+        rt.set_window_origin((1900.0, 0.0));
+        frames(&mut rt, 2);
+        assert_eq!(&rt.state.screen[3..], [[1910.0, 10.0, 100.0, 40.0]]);
+        assert!(rt.stats.commits > commits, "handlers changed state");
+
+        // Settled: nothing more runs.
+        let (screen, commits) = (rt.state.screen.len(), rt.stats.commits);
+        frames(&mut rt, 10);
+        assert_eq!((rt.state.screen.len(), rt.stats.commits), (screen, commits));
+    }
+
+    #[test]
+    fn a_window_move_with_no_screen_handler_asks_for_no_frame() {
+        let mut rt = Runtime::new(S::default(), |_: &S, _: &mut crate::Cx<S>| {
+            el().key("card").w(100.0).h(40.0).on_layout(|s: &mut S, r| s.local.push(r))
+        }, (300.0, 200.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        frames(&mut rt, 2);
+        assert!(!rt.set_window_origin((50.0, 50.0)));
+        assert_eq!(rt.state.local.len(), 1);
     }
 }

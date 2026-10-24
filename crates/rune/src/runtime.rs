@@ -248,6 +248,7 @@ pub(crate) struct Node {
     scroll: Option<ScrollSpec>,
     on_at_bottom: Option<crate::el::AtBottomFn>,
     on_layout: Option<crate::el::LayoutFn>,
+    on_screen_layout: Option<crate::el::LayoutFn>,
     scroll_edges: crate::el::ScrollEdges,
     growth: Option<GrowthSpec>,
     streaming: bool,
@@ -289,6 +290,7 @@ enum Action {
     HoverChange(String, bool),
     AtBottom(String, bool),
     Layout(String, [f32; 4]),
+    ScreenLayout(String, [f32; 4]),
     Press(String),
     DoublePress(String),
     Link(String, usize),
@@ -622,6 +624,10 @@ pub struct Runtime<S: 'static> {
     layout_seen: layout_read::LayoutSeen,
     /// Rect last sent to each element's `El::on_layout`.
     layout_fired: HashMap<NodeId, [f32; 4]>,
+    /// Rect last sent to each element's `El::on_screen_layout`.
+    screen_fired: HashMap<NodeId, [f32; 4]>,
+    /// The window's content top-left in global screen points, as its host last saw it.
+    window_origin: (f32, f32),
     /// Commits in a row caused only by layout feedback (see `layout_read`).
     layout_echoes: u32,
     /// An edit ran this frame: keep the caret in its scroll viewport after the commit.
@@ -868,6 +874,8 @@ impl<S: 'static> Runtime<S> {
             caret_watch: false,
             layout_seen: HashMap::new(),
             layout_fired: HashMap::new(),
+            screen_fired: HashMap::new(),
+            window_origin: (0.0, 0.0),
             layout_echoes: 0,
             caret_follow: false,
             links: Default::default(),
@@ -1436,7 +1444,7 @@ impl<S: 'static> Runtime<S> {
                 self.commit(&tx);
                 ran = false;
             }
-            if matches!(action, Action::Layout(..)) {
+            if matches!(action, Action::Layout(..) | Action::ScreenLayout(..)) {
                 ran_layout |= self.run_action(action, &mut tx);
             } else {
                 ran |= self.run_action(action, &mut tx);
@@ -1754,6 +1762,11 @@ impl<S: 'static> Runtime<S> {
             }
             Action::Layout(path, rect) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_layout.clone()) else { return false };
+                f(handler_state(&mut self.state), rect);
+                true
+            }
+            Action::ScreenLayout(path, rect) => {
+                let Some(f) = self.node(&path).and_then(|n| n.on_screen_layout.clone()) else { return false };
                 f(handler_state(&mut self.state), rect);
                 true
             }
@@ -5129,6 +5142,7 @@ fn flatten(
         scroll,
         on_at_bottom,
         on_layout,
+        on_screen_layout,
         scroll_edges,
         growth,
         streaming,
@@ -5197,6 +5211,7 @@ fn flatten(
         scroll,
         on_at_bottom,
         on_layout,
+        on_screen_layout,
         scroll_edges,
         growth,
         streaming,

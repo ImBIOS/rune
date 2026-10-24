@@ -629,11 +629,21 @@ impl<T: 'static> Overlay<T> {
     /// next pointer event.
     fn place_window(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
         self.position_window(event_loop, window);
+        self.sync_origin();
         let Ok(origin) = window.outer_position() else { return };
         if let Some(before) = self.origin.replace(origin) && before != origin {
             let scale = window.scale_factor();
             let points = |a: i32, b: i32| (f64::from(a - b) / scale) as f32;
             self.rt.window_moved(points(origin.x, before.x), points(origin.y, before.y));
+        }
+    }
+
+    /// Tells the runtime where the overlay's content is on screen (see `El::on_screen_layout`).
+    fn sync_origin(&mut self) {
+        let Some(Backing::Window(window)) = self.live.as_ref().map(|l| &l.backing) else { return };
+        if let Some(origin) = crate::window::screen_origin(window) && self.rt.set_window_origin(origin) && self.drawing() {
+            self.dirty = true;
+            self.idle = false;
         }
     }
 
@@ -1518,6 +1528,10 @@ impl<T: 'static> AnyHost for Overlay<T> {
         if let WindowEvent::ThemeChanged(theme) = event {
             return self.theme_changed(theme == winit::window::Theme::Dark);
         }
+        // Hidden too: the queued rects are delivered with the next shown frame.
+        if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }) {
+            self.sync_origin();
+        }
         if !self.visible { return; }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. })
@@ -1611,6 +1625,7 @@ impl<T: 'static> AnyHost for Overlay<T> {
                     self.resolve_size(_event_loop);
                     if size != self.at.size { self.resized(_event_loop); }
                     else if let Some(panel) = &self.panel { panel.place(self.at, &self.options); }
+                    self.sync_origin();
                 }
             }
         }

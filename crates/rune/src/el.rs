@@ -673,6 +673,7 @@ pub struct El {
     pub(crate) scroll: Option<ScrollSpec>,
     pub(crate) on_at_bottom: Option<AtBottomFn>,
     pub(crate) on_layout: Option<LayoutFn>,
+    pub(crate) on_screen_layout: Option<LayoutFn>,
     pub(crate) scroll_edges: ScrollEdges,
     pub(crate) growth: Option<GrowthSpec>,
     pub(crate) virtual_estimate: Option<f32>,
@@ -732,6 +733,7 @@ fn base(dir: FlexDirection) -> El {
         scroll: None,
         on_at_bottom: None,
         on_layout: None,
+        on_screen_layout: None,
         scroll_edges: ScrollEdges::default(),
         growth: None,
         virtual_estimate: None,
@@ -1845,6 +1847,19 @@ impl El {
     /// layout puts the element, not where its spring is on the way there.
     pub fn on_layout<S: 'static>(mut self, f: impl Fn(&mut S, [f32; 4]) + 'static) -> Self {
         self.on_layout = Some(Rc::new(move |s, r| f(downcast::<S>(s), r)));
+        self
+    }
+    /// [`El::on_layout`] in global screen points: `[x, y, w, h]` from the top-left of the
+    /// primary display, y down. That's the space of an overlay's
+    /// [`OverlayPlacement::Rect`](crate::OverlayPlacement) on
+    /// [`DisplayTarget::Primary`](crate::DisplayTarget), so an overlay can open over the
+    /// element. It also runs when the window moves without a relayout. On macOS points are one
+    /// space across displays of any scale. Elsewhere the window's desktop pixel position is
+    /// divided by its own scale, so it's exact on the primary display and wherever displays
+    /// share a scale; on Wayland, which hides window positions, the origin reads `(0, 0)`.
+    /// Headless runs place windows on the script's virtual desktop.
+    pub fn on_screen_layout<S: 'static>(mut self, f: impl Fn(&mut S, [f32; 4]) + 'static) -> Self {
+        self.on_screen_layout = Some(Rc::new(move |s, r| f(downcast::<S>(s), r)));
         self
     }
     /// Make this column a growth stack (see [`GrowthSpec`]). Required alongside

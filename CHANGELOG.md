@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::on_screen_layout`** reports an element's rect in global screen points (from the
+  primary display's top-left, y down), the space of an overlay's `OverlayPlacement::Rect` on
+  `DisplayTarget::Primary`, so a window can open an overlay exactly over one of its elements.
+  It runs when the element lays out somewhere new and when its window moves. Headless runs
+  report against the script's virtual desktop: a window opens centred on the primary display,
+  or at its `position`, and `place()` moves it.
 - **Overlays draw through a fade-out.** `OverlayHandle::fade_out(d)` stops input at once but
   keeps drawing until the fade ends (it used to stop drawing at once), so an exit transition
   started in the same turn plays out as the window fades, and the panel isn't treated as

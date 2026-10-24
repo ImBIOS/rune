@@ -82,6 +82,18 @@ impl VirtualDesktop {
         owners.find(|d| inside(d.frame)).or(first).unwrap_or_else(|| self.primary())
     }
 
+    /// The global frame a window of `size` points opens at: at `position` (desktop pixels),
+    /// else centred on the primary display.
+    pub fn open_at(&self, position: Option<(i32, i32)>, (w, h): (f32, f32)) -> [f32; 4] {
+        match position {
+            Some(p) => { let (x, y) = self.to_points(p); [x, y, w, h] }
+            None => {
+                let d = self.display_at(None).frame.map(|v| v as f32);
+                [d[0] + ((d[2] - w) / 2.0).round(), d[1] + ((d[3] - h) / 2.0).round(), w, h]
+            }
+        }
+    }
+
     /// What a window factory sees: desktop pixels, like native displays.
     pub fn displays(&self) -> Vec<crate::Display> {
         self.displays.iter().map(|d| crate::Display {
@@ -157,6 +169,9 @@ mod tests {
         assert_eq!(on(desktop.displays()[1].position), (2, (1512.0, 0.0)), "the monitor's origin is on the monitor");
         assert_eq!(on((1612, 100)), (2, (1612.0, 100.0)));
         assert_eq!(on((-50, 0)).0, 1, "off every display: the primary");
+        // Where a window opens, which its `El::on_screen_layout` rects start from.
+        assert_eq!(desktop.open_at(None, (400.0, 300.0)), [556.0, 341.0, 400.0, 300.0], "centred on the primary");
+        assert_eq!(desktop.open_at(Some((1612, 100)), (400.0, 300.0)), [1612.0, 100.0, 400.0, 300.0]);
 
         // The 2x display second and to the right: its pixels don't overlap the primary's.
         let script = json!({"displays": [{"id": 1, "frame": [0, 0, 1920, 1080], "scale": 1, "primary": true},

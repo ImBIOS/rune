@@ -1237,6 +1237,8 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let runtime_ms = launched.elapsed().as_secs_f64() * 1000.0 - state_ms;
 
     let desktop = desktop(&args, source.as_ref());
+    let opened = desktop.open_at(app_options.position, size);
+    rt.set_window_origin((opened[0], opened[1]));
     let mut placed = None;
     let Timeline { fps, dt, start_frame, frames, snap_frame, last_frame } = timeline;
 
@@ -1282,6 +1284,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             rt.update(f);
             menus.drain();
         }
+        if let Some(p) = requests.position { rt.set_window_origin(desktop.to_points(p)); }
         requests.place
     };
     let mut frames_written = 0usize;
@@ -1384,6 +1387,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         // Updates, poll and input handlers place too; the latest request this frame wins.
         if let Some(place) = shared.take_place().or(requested_place).or(early_place.take()) {
             let (display, frame) = desktop.place(&place, size);
+            rt.set_window_origin((frame[0], frame[1]));
             let record = json!({ "t": real_t, "display": display, "frame": frame });
             println!("rune-placed {record}");
             placed = Some(record);

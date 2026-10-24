@@ -94,6 +94,15 @@ pub(crate) fn window_geometry(window: &winit::window::Window) -> Option<([f32; 4
     Some((flip(ns.frame()), flip(screen.visibleFrame()), ns.backingScaleFactor() as f32))
 }
 
+/// A window's content top-left in top-down global points: the panel's once one adopts it.
+pub(crate) fn content_origin(window: &winit::window::Window) -> Option<(f32, f32)> {
+    let mtm = MainThreadMarker::new()?;
+    let ns = ns_window(window)?;
+    let primary = NSScreen::screens(mtm).iter().next()?.frame().size.height;
+    let r = ns.contentRectForFrameRect(ns.frame());
+    Some((r.origin.x as f32, (primary - r.origin.y - r.size.height) as f32))
+}
+
 /// The outer size of a window whose content is `content` points.
 pub(crate) fn outer_size(window: &winit::window::Window, (w, h): (f32, f32)) -> Option<(f32, f32)> {
     let ns = ns_window(window)?;

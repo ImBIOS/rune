@@ -207,12 +207,14 @@ impl<S: 'static> Window<S> {
     fn move_to(&mut self, (x, y): (f32, f32)) {
         self.frame[0] = x;
         self.frame[1] = y;
+        self.rt.set_window_origin((x, y));
     }
 
     fn resize(&mut self, frame: [f32; 4]) {
         self.frame = frame;
         let scale = self.rt.env.scale;
         self.rt.set_viewport((frame[2], frame[3]), scale);
+        self.rt.set_window_origin((frame[0], frame[1]));
     }
 }
 
@@ -232,14 +234,7 @@ impl<S: 'static> Member for Window<S> {
             Some((w, h)) => ((f64::from(w) / display.scale) as f32, (f64::from(h) / display.scale) as f32),
             None => (self.frame[2], self.frame[3]),
         };
-        let frame = match self.position {
-            Some(p) => { let (x, y) = desktop.to_points(p); [x, y, w, h] }
-            None => {
-                let d = display.frame.map(|v| v as f32);
-                [d[0] + ((d[2] - w) / 2.0).round(), d[1] + ((d[3] - h) / 2.0).round(), w, h]
-            }
-        };
-        self.resize(frame);
+        self.resize(desktop.open_at(self.position, (w, h)));
     }
 
     fn trace_on(&mut self) {
