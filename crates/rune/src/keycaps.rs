@@ -124,10 +124,10 @@ fn key_label(ev: &KeyEvent) -> (String, bool) {
     let key = match &ev.key {
         Key::Text(s) if !chord => return (s.clone(), true),
         Key::Text(s) if s == " " => "␣".to_owned(),
-        Key::Text(s) => s.to_uppercase(),
+        Key::Text(s) => title(s),
         Key::Command(c) => {
             let mods = Mods { cmd: true, ..m };
-            let label = if *c == ' ' { "␣".to_owned() } else { c.to_uppercase().collect() };
+            let label = if *c == ' ' { "␣".to_owned() } else { title(&c.to_string()) };
             return (format!("{}{label}", mod_glyphs(mods)), false);
         }
         Key::Enter => "↩".into(),
@@ -157,8 +157,18 @@ fn named_glyph(name: &str) -> String {
         "pageup" => "⇞", "pagedown" => "⇟", "insert" => "Ins", "minus" => "-", "equal" => "=", "comma" => ",",
         "period" => ".", "slash" => "/", "semicolon" => ";", "quote" => "'", "bracketleft" => "[",
         "bracketright" => "]", "backslash" => "\\", "backquote" => "`",
-        other => return other.to_uppercase(),
+        other => return title(other),
     }.to_owned()
+}
+
+/// As on a keycap: "k" draws as "K" and "capslock" as "Capslock". A capital that doesn't
+/// lower-case back to the same letter (Turkish "ı" → "I") stays as typed.
+fn title(name: &str) -> String {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else { return String::new() };
+    let upper: String = first.to_uppercase().collect();
+    let first = if upper.to_lowercase() == first.to_string() { upper } else { first.to_string() };
+    format!("{first}{}", chars.as_str().to_lowercase())
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -311,6 +321,17 @@ mod tests {
         k.key(1.0, &KeyEvent { key: Key::Enter, mods: Mods::default() });
         let cmd = if cfg!(target_os = "macos") { "⌘" } else { "⌃" };
         assert_eq!(labels(&mut k, 1.0), [format!("{cmd}␣"), "⎋".into(), "↩".into()]);
+    }
+
+    #[test]
+    fn key_names_are_title_case_and_letters_capitals() {
+        let mut k = Keycaps::default();
+        k.chord(0.0, &"alt+shift+k".parse().unwrap());
+        k.chord(0.1, &"alt+f12".parse().unwrap());
+        let ctrl = |s: &str| KeyEvent { key: Key::Text(s.into()), mods: Mods { ctrl: true, ..Mods::default() } };
+        k.key(0.2, &ctrl("SPACE"));
+        assert_eq!(labels(&mut k, 0.2), ["⌥⇧K", "⌥F12", "⌃Space"]);
+        assert_eq!((title("ı"), title("ß"), title("capslock")), ("ı".into(), "ß".into(), "Capslock".into()));
     }
 
     #[test]

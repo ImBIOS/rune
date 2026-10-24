@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`--keys` caps title-case key names.** A key name without a glyph drew upper case
+  ("CAPSLOCK", or "SPACE" from a script's text key under a modifier). It now draws title case
+  ("Capslock", "Space"), as the in-app keycaps do; single letters stay capitals and `F12` is
+  unchanged.
 - **Hiding a window or overlay is a focus loss for its keys.** `on_physical_input` handlers
   used to hear `PhysicalInput::FocusLost` only when the platform reported a blur, which a hide
   on Wayland, with `release_gpu`, or of an overlay never did, and never in `--desktop` or
