@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Modifier keys on their own reach `on_key`, when an app asks.** `App::modifier_keys()` (also
+  `WindowSpec::modifier_keys()` and `ConfiguredOverlay::modifier_keys()`) sends Shift, Control,
+  Option/Alt, Command/Super and Fn going down and up as `Key::Modifier { modifier, pressed }`,
+  with the side in `Modifier` (`ShiftLeft`, `AltRight`, …, `Modifier::side()`). `mods` hold
+  the state after the change. Nothing changes for apps that don't opt in, but `Key` has a new
+  variant, so an exhaustive `match` on `Key` with no `_` arm stops compiling: add
+  `Key::Modifier { .. } => …` or a `_` arm.
 - **`App::try_run` returns startup errors.** `App::try_run`, `try_run_windows_with` and
   `try_run_windows_with_args` return `Err(String)` when the event loop can't start (no Wayland
   or X11 display, as over ssh or in CI) or fails, where `run` panics. On a Mac no one is logged

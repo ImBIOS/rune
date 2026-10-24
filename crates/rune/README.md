@@ -193,6 +193,13 @@ policy changes are applied in the same mutation phase.
   even when poll returns false. Equal deadlines coalesce; the shell sleeps until the earliest
   deadline without a timer thread. Headless steps visit deadlines exactly. For debounce, store
   the latest due time in state and reschedule its remainder when an older wake arrives.
+- **Modifier keys alone**: `App::modifier_keys()` (also on `WindowSpec` and `ConfiguredOverlay`)
+  sends Shift, Control, Option/Alt, Command/Super and Fn going down and up on their own to
+  `on_key` and the focused field's key handler, as `Key::Modifier { modifier, pressed }`, with
+  the side (`Modifier::AltRight.side() == Some(KeySide::Right)`). `mods` hold the state after
+  the change, as AppKit's flagsChanged does. Off by default; they never type, select, move focus
+  or fire shortcuts, and a chord still arrives as before. Fn reaches macOS windows and overlays
+  only: Windows and Linux keyboards handle Fn in firmware and never report it.
 - **Tooling**: scripts gain `type`, `key`, `paste`, `scroll` and `fling`. Traces carry motion-trace
   intents (settle cuts, growing rows, word reveals) and clipped visible rects.
 

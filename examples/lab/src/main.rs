@@ -6,7 +6,7 @@ mod stage;
 mod ui;
 
 use knobs::{ALL, Scene, specs};
-use rune::{AppSpec, Key, KeyEvent, Tx};
+use rune::{AppSpec, Key, KeyEvent, Modifier, Tx};
 use rune_motion::{Animated, Spring, Vec2, VelocityTracker};
 
 /// What the pointer is holding on the stage.
@@ -114,9 +114,31 @@ fn on_key(s: &mut Lab, e: &KeyEvent, _tx: &mut Tx) -> bool {
     match e.key {
         Key::Up => s.select(ALL[(i + ALL.len() - 1) % ALL.len()]),
         Key::Down => s.select(ALL[(i + 1) % ALL.len()]),
+        // Modifier keys alone play the bottom row of the Keys scene, each side its own key.
+        Key::Modifier { modifier, pressed } if s.scene == Scene::Keys => {
+            let Some(key) = modifier_pad(modifier) else { return false };
+            let (to, spring) = if pressed { (1.0, Spring::new(0.1, 0.0)) } else { (0.0, Spring::new(0.25, 0.0)) };
+            s.keys[key].animate_to(to, spring, s.now);
+        }
         _ => return false,
     }
     true
+}
+
+fn modifier_pad(modifier: Modifier) -> Option<usize> {
+    let row = stage::KEY_COLS;
+    Some(row + match modifier {
+        Modifier::ShiftLeft => 0,
+        Modifier::Fn => 1,
+        Modifier::ControlLeft => 2,
+        Modifier::AltLeft => 3,
+        Modifier::SuperLeft => 4,
+        Modifier::SuperRight => 5,
+        Modifier::AltRight => 6,
+        Modifier::ControlRight => 7,
+        Modifier::ShiftRight => 9,
+        _ => return None,
+    })
 }
 
 /// A throw already in flight at t = 0, for snapshots without a script.
@@ -164,7 +186,7 @@ fn main() {
             on_key: Some(on_key),
             ..AppSpec::new("Rune Lab", (1320.0, 800.0), Lab::new, ui::view)
         },
-    ).compositor(gfx::LabGfx::default());
+    ).compositor(gfx::LabGfx::default()).modifier_keys();
     #[cfg(all(feature = "dev", debug_assertions))]
     let app = app.dev_panel(rune::dev::Config { motion_blur: true, ..Default::default() });
     app.run();
