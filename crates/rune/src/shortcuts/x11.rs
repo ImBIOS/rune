@@ -83,7 +83,6 @@ impl Backend for Native {
         let code = shortcut.physical_key().to_scancode().and_then(|c| u8::try_from(c + 8).ok())
             .filter(|c| (setup.min_keycode..=setup.max_keycode).contains(c))
             .ok_or_else(|| ShortcutError::InvalidAccelerator(shortcut.to_string()))?;
-        let codes = [code];
         let mut numcodes = Vec::new();
         for (index, syms) in mapping.keysyms.chunks(mapping.keysyms_per_keycode as usize).enumerate() {
             let code = setup.min_keycode + index as u8;
@@ -102,16 +101,14 @@ impl Backend for Native {
         variants.sort_unstable(); variants.dedup();
         let mut grabbed = Vec::new();
         for screen in &setup.roots {
-            for &code in &codes {
-                for &mods in &variants {
-                    let result = conn.grab_key(false, screen.root, ModMask::from(mods), code, GrabMode::ASYNC, GrabMode::ASYNC)
-                        .map_err(error).and_then(|cookie| cookie.check().map_err(reply_error));
-                    if let Err(e) = result {
-                        if let Err(rollback) = self.release(&grabbed) { eprintln!("rune: shortcut rollback: {rollback}"); }
-                        return Err(e);
-                    }
-                    grabbed.push(Grab { root: screen.root, code, mods });
+            for &mods in &variants {
+                let result = conn.grab_key(false, screen.root, ModMask::from(mods), code, GrabMode::ASYNC, GrabMode::ASYNC)
+                    .map_err(error).and_then(|cookie| cookie.check().map_err(reply_error));
+                if let Err(e) = result {
+                    if let Err(rollback) = self.release(&grabbed) { eprintln!("rune: shortcut rollback: {rollback}"); }
+                    return Err(e);
                 }
+                grabbed.push(Grab { root: screen.root, code, mods });
             }
         }
         self.registrations.lock().unwrap().insert(id, grabbed);
