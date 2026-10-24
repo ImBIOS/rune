@@ -25,6 +25,8 @@
 //!
 //! Other platforms report [`PlayerState::Failed`] and draw a neutral placeholder for video.
 
+#[cfg(all(target_os = "macos", feature = "ogg-audio"))]
+mod foreign;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -232,9 +234,9 @@ impl Player {
     pub fn url(url: impl Into<String>) -> Self {
         Self::new(MediaSource::Url(url.into()))
     }
-    /// An audio clip (mp3, m4a/AAC, wav, aiff, flac) from a path or URL, unmuted. It plays
-    /// without any element, draws nothing and pulls no frames. Ogg isn't supported on macOS
-    /// and fails at once.
+    /// An audio clip (mp3, m4a/AAC, wav, aiff, flac; Ogg Vorbis, Ogg Opus and WebM Opus with
+    /// the default `ogg-audio` feature) from a path or URL, unmuted. It plays without any
+    /// element, draws nothing and pulls no frames.
     pub fn audio(source: impl Into<MediaSource>) -> Self {
         Self::create(source.into(), Kind::Audio, Vec::new())
     }

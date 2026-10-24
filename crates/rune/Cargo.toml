@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+default = ["ogg-audio"]
 dev = ["dep:tungstenite", "dep:csscolorparser", "rune-motion/dev"]
 native-file-dialog = ["dep:rfd"]
 hot = ["dep:subsecond", "dep:dioxus-devtools"]
@@ -14,6 +15,10 @@ hot = ["dep:subsecond", "dep:dioxus-devtools"]
 # reject an app built with it. Off, the lookup isn't compiled in, and a non-key overlay's
 # cursor shows only while its app is frontmost.
 macos-background-cursor = []
+# macOS: play Ogg (Vorbis, Opus) and WebM/Matroska audio, which AVFoundation can't read, by
+# decoding it in Rust (symphonia, opuscule) and handing AVPlayer the PCM. Off, those clips
+# fail at once with a clear message.
+ogg-audio = ["dep:symphonia", "dep:opuscule"]
 
 [dependencies]
 subsecond = { version = "=0.7.10", optional = true }
@@ -56,7 +61,10 @@ block2-metal = { package = "block2", version = "0.6" }
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVAsset", "AVAssetImageGenerator", "AVAssetTrack", "AVMediaFormat", "AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media", "objc2-core-video"] }
 objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMTime"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage"] }
-objc2-foundation-video = { package = "objc2-foundation", version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSObject", "NSString", "NSURL"] }
+objc2-foundation-video = { package = "objc2-foundation", version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSDictionary", "NSError", "NSObject", "NSString", "NSURL", "NSURLConnection", "NSURLRequest", "NSURLResponse"] }
+# Ogg and WebM audio (`ogg-audio`): pure-Rust demuxers and decoders.
+symphonia = { version = "0.5.5", optional = true, default-features = false, features = ["ogg", "vorbis", "mkv"] }
+opuscule = { version = "0.2.2", optional = true }
 
 [target.'cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))'.dependencies]
 raw-window-handle = "0.6"

@@ -36,14 +36,30 @@ fn audio_starts_unmuted_with_no_size() {
     assert_eq!(a.natural_size(), None);
 }
 
+/// A clip's extension comes from the last segment of its path, never the host or query.
+#[cfg(target_os = "macos")]
 #[test]
-fn ogg_fails_at_once() {
-    let a = Player::audio("https://example.com/clips/tap.ogg?v=2");
+fn extensions_come_from_the_last_path_segment() {
+    let ext = |s: &str| super::macos::extension(&MediaSource::from(s));
+    assert_eq!(ext("https://example.com/media/clip"), None);
+    assert_eq!(ext("https://host.ogg/clip"), None);
+    assert_eq!(ext("https://host.ogg"), None);
+    assert_eq!(ext("https://example.com/a.b/clip?x=1.ogg#t=2.webm"), None);
+    assert_eq!(ext("https://example.com/media/clip.OGG?v=2#t"), Some("ogg".into()));
+    assert_eq!(ext("file:///tmp/a.b/clip.opus"), Some("opus".into()));
+    assert_eq!(ext("sounds.d/clip"), None);
+    assert_eq!(ext("sounds/clip.webm"), Some("webm".into()));
+    assert_eq!(ext("sounds/clip."), None);
+}
+
+#[test]
+fn webm_video_fails_at_once() {
+    let a = Player::url("https://example.com/clips/tap.webm?v=2");
     let PlayerState::Failed(message) = a.state() else { panic!("{:?}", a.state()) };
     #[cfg(target_os = "macos")]
-    assert!(message.contains(".ogg isn't supported on macOS"), "{message}");
+    assert!(message.contains(".webm isn't supported on macOS"), "{message}");
     #[cfg(not(target_os = "macos"))]
-    assert_eq!(message, "audio playback isn't supported on this platform yet");
+    assert_eq!(message, "video playback isn't supported on this platform yet");
     a.play();
     assert!(!a.is_playing(), "a failed clip doesn't play");
 }
@@ -71,7 +87,7 @@ fn the_waker_hears_each_state_change_once() {
 /// one afterwards still delivers that failure, once.
 #[test]
 fn a_waker_set_after_a_failure_hears_it_once() {
-    let a = Player::audio("tap.ogg");
+    let a = Player::url("tap.ogv");
     assert!(matches!(a.shared.snapshot().state, PlayerState::Failed(_)));
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let seen = calls.clone();
@@ -453,6 +469,44 @@ fn headless_audio_opens_with_request_headers() {
     let without = Player::audio(format!("{url}-2.wav"));
     assert!(matches!(without.state(), PlayerState::Failed(_)), "{:?}", without.state());
     assert!(refused.load(std::sync::atomic::Ordering::SeqCst) > 0);
+}
+
+/// Ogg and WebM audio, which AVFoundation can't read, decode and open like any clip: by file
+/// extension, by URL with request headers, and by their bytes when the URL has no extension.
+/// Each fixture is 0.5 s.
+#[cfg(all(target_os = "macos", feature = "ogg-audio"))]
+#[test]
+fn headless_ogg_and_webm_audio_open_and_follow_the_clock() {
+    let near = |a: &Player, what: &str| assert!((a.duration().unwrap_or(0.0) - 0.5).abs() < 0.03, "{what}: {:?} {:?}", a.state(), a.duration());
+    for name in ["sine-vorbis.ogg", "sine-opus.ogg", "sine-opus.webm"] {
+        let a = Player::audio(sound(name));
+        assert_eq!(a.state(), PlayerState::Ready, "{name}");
+        near(&a, name);
+    }
+    let (url, refused) = serve_with_auth(std::fs::read(sound("sine-opus.webm")).unwrap(), "application/octet-stream");
+    let by_url = Player::request(format!("{url}.webm")).header("Authorization", "Bearer let-me-in").audio();
+    near(&by_url, "url");
+    let sniffed = Player::request(url).header("Authorization", "Bearer let-me-in").audio();
+    near(&sniffed, "no extension");
+    assert_eq!(refused.load(std::sync::atomic::Ordering::SeqCst), 0, "every request carried the header");
+
+    let a = Player::audio(sound("sine-vorbis.ogg"));
+    let mut rt = crate::Runtime::new((), |_: &(), _: &mut crate::Cx<()>| crate::el().size(10.0, 10.0), (10.0, 10.0), crate::Env::new(true, 2.0));
+    a.play();
+    rt.frame(0.0);
+    rt.frame(0.2);
+    assert!((a.time() - 0.2).abs() < 1e-6, "{}", a.time());
+    rt.frame(0.5);
+    assert_eq!(a.state(), PlayerState::Ended);
+
+    let broken = Player::audio("/nonexistent/clip.ogg");
+    assert!(matches!(broken.state(), PlayerState::Failed(e) if e.contains("can't read")), "{:?}", broken.state());
+    // Ogg bytes that don't decode, at a URL with no extension, report the decode error.
+    let mut bytes = b"OggS".to_vec();
+    bytes.extend([0x55; 400]);
+    let (url, _) = serve_with_auth(bytes, "application/octet-stream");
+    let garbled = Player::request(url).header("Authorization", "Bearer let-me-in").audio();
+    assert!(matches!(garbled.state(), PlayerState::Failed(e) if e.contains("can't decode")), "{:?}", garbled.state());
 }
 
 /// Headless audio follows the runtime clock silently: play, pause, rate, seek and the end.

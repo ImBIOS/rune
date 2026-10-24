@@ -44,7 +44,15 @@ pub(crate) struct Native {
     /// A finished poster may replace the surface's frame: set by a poster request while no
     /// player has run (first frame, or a paused seek), cleared once a player makes frames.
     poster_due: bool,
+    decoded: Decoded,
 }
+
+/// Audio AVFoundation can't read, decoded once on the load worker (or a headless probe) to a WAV
+/// it can, which every player for the clip then opens.
+#[cfg(feature = "ogg-audio")]
+type Decoded = Arc<std::sync::OnceLock<Result<Option<foreign::Wav>, String>>>;
+#[cfg(not(feature = "ogg-audio"))]
+type Decoded = ();
 // The generator is only used under the Shared mutex. Player objects are created, used and
 // released on the main thread: pulls and audio ticks run there and `Player`'s drop hops to it.
 unsafe impl Send for Native {}
@@ -143,20 +151,37 @@ static AUDIO_BUSY: AtomicBool = AtomicBool::new(false);
 /// The tick thread is running.
 static TICKING: AtomicBool = AtomicBool::new(false);
 
+/// The source's lowercase extension, if any.
+pub(super) fn extension(source: &MediaSource) -> Option<String> {
+    let name = match source {
+        MediaSource::File(path) => path.file_name()?.to_string_lossy().into_owned(),
+        MediaSource::Url(url) => {
+            let path = url.split(['?', '#']).next().unwrap_or_default();
+            // The last segment of the path, never the host.
+            let path = path.split_once("://").map_or(path, |(_, rest)| rest.split_once('/').map_or("", |(_, path)| path));
+            path.rsplit('/').next().unwrap_or_default().to_string()
+        }
+    };
+    Some(name.rsplit_once('.')?.1.to_ascii_lowercase()).filter(|ext| !ext.is_empty())
+}
+
+/// Audio in a container AVFoundation can't read, which `ogg-audio` decodes instead.
+fn foreign_audio(source: &MediaSource, kind: Kind) -> bool {
+    cfg!(feature = "ogg-audio")
+        && kind == Kind::Audio
+        && extension(source).is_some_and(|ext| matches!(ext.as_str(), "ogg" | "oga" | "opus" | "webm" | "mka" | "mkv"))
+}
+
 /// AVFoundation has no Ogg, WebM or Matroska demuxer; fail at once rather than wait on a load
 /// that can only fail.
-fn unsupported_format(source: &MediaSource) -> Option<String> {
-    let path = match source {
-        MediaSource::File(path) => path.to_string_lossy().into_owned(),
-        MediaSource::Url(url) => url.split(['?', '#']).next().unwrap_or_default().to_string(),
-    };
-    let ext = path.rsplit_once('.')?.1.to_ascii_lowercase();
-    matches!(ext.as_str(), "ogg" | "oga" | "ogv" | "opus" | "spx" | "webm" | "mkv" | "mka")
+fn unsupported_format(source: &MediaSource, kind: Kind) -> Option<String> {
+    let ext = extension(source)?;
+    (!foreign_audio(source, kind) && matches!(ext.as_str(), "ogg" | "oga" | "ogv" | "opus" | "spx" | "webm" | "mkv" | "mka"))
         .then(|| format!(".{ext} isn't supported on macOS (AVFoundation can't read it); use mp3, m4a, wav, mp4 or mov"))
 }
 
 pub(super) fn created(shared: &Arc<Shared>) {
-    if let Some(e) = unsupported_format(&shared.source) {
+    if let Some(e) = unsupported_format(&shared.source, shared.kind) {
         shared.ctl.lock().unwrap().fail(e);
         return;
     }
@@ -211,6 +236,87 @@ fn asset(source: &MediaSource, headers: &[(String, String)]) -> Result<Retained<
     let fields: &AnyObject = &fields;
     let options = NSDictionary::<NSString, AnyObject>::from_slices(&[&*key], &[fields]);
     Ok(unsafe { AVURLAsset::URLAssetWithURL_options(&url, Some(&options)) })
+}
+
+/// Opens a clip and reads its facts, blocking. Audio AVFoundation can't read plays from a WAV
+/// decoded from it: up front for a foreign extension, or when its own asset has no audio track
+/// and its bytes are Ogg or WebM.
+fn open(source: &MediaSource, headers: &[(String, String)], kind: Kind, decoded: &Decoded) -> Result<(Retained<AVURLAsset>, Meta), String> {
+    let opened = |asset: Retained<AVURLAsset>| meta(&asset, kind).map(|meta| (asset, meta));
+    #[cfg(feature = "ogg-audio")]
+    {
+        let wav = |wav: &foreign::Wav| opened(asset(&MediaSource::File(wav.path().into()), &[])?);
+        if foreign_audio(source, kind) {
+            return match decoded.get_or_init(|| decode_foreign(source, headers, false)) {
+                Ok(Some(decoded)) => wav(decoded),
+                Ok(None) => Err("no Ogg or WebM audio".into()),
+                Err(e) => Err(e.clone()),
+            };
+        }
+        let own = opened(asset(source, headers)?);
+        if own.is_err() && kind == Kind::Audio {
+            match decoded.get_or_init(|| decode_foreign(source, headers, true)) {
+                Ok(Some(decoded)) => return wav(decoded),
+                // Ogg or WebM that didn't decode: say why, not that AVFoundation found nothing.
+                Err(e) => return Err(e.clone()),
+                Ok(None) => {}
+            }
+        }
+        own
+    }
+    #[cfg(not(feature = "ogg-audio"))]
+    {
+        let () = decoded;
+        opened(asset(source, headers)?)
+    }
+}
+
+/// The asset a player opens: the decoded WAV once there is one.
+fn player_asset(source: &MediaSource, headers: &[(String, String)], decoded: &Decoded) -> Result<Retained<AVURLAsset>, String> {
+    #[cfg(feature = "ogg-audio")]
+    if let Some(Ok(Some(wav))) = decoded.get() {
+        return asset(&MediaSource::File(wav.path().into()), &[]);
+    }
+    #[cfg(not(feature = "ogg-audio"))]
+    let () = decoded;
+    asset(source, headers)
+}
+
+/// Fetches a clip and decodes it to a WAV. When sniffing, bytes that aren't Ogg or WebM give
+/// `None`, and a fetch that fails gives `None` too, leaving AVFoundation's error to report.
+#[cfg(feature = "ogg-audio")]
+fn decode_foreign(source: &MediaSource, headers: &[(String, String)], sniff: bool) -> Result<Option<foreign::Wav>, String> {
+    let bytes = match fetch(source, headers) {
+        Ok(bytes) => bytes,
+        Err(_) if sniff => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if sniff && !foreign::sniff(&bytes) {
+        return Ok(None);
+    }
+    foreign::Wav::decode(bytes).map(Some)
+}
+
+/// A clip's bytes: a file read, or a blocking fetch with its request headers.
+#[cfg(feature = "ogg-audio")]
+#[allow(deprecated)] // NSURLConnection's synchronous load is what a worker or headless run wants.
+fn fetch(source: &MediaSource, headers: &[(String, String)]) -> Result<Vec<u8>, String> {
+    use objc2_foundation_video::{NSHTTPURLResponse, NSMutableURLRequest, NSURLConnection};
+    if let MediaSource::File(path) = source {
+        return std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()));
+    }
+    let request = NSMutableURLRequest::requestWithURL(&*url(source)?);
+    for (name, value) in headers {
+        request.setValue_forHTTPHeaderField(Some(&NSString::from_str(value)), &NSString::from_str(name));
+    }
+    let mut response = None;
+    let data = NSURLConnection::sendSynchronousRequest_returningResponse_error(&request, Some(&mut response))
+        .map_err(|e| e.localizedDescription().to_string())?;
+    let status = response.and_then(|r| r.downcast::<NSHTTPURLResponse>().ok()).map(|r| r.statusCode());
+    if let Some(status) = status.filter(|s| !(200..300).contains(s)) {
+        return Err(format!("HTTP {status}"));
+    }
+    Ok(data.to_vec())
 }
 
 fn seconds(t: CMTime) -> f64 {
@@ -306,8 +412,7 @@ fn bgra(image: &CGImage) -> Result<ByteFrame, String> {
 }
 
 pub(super) fn probe(native: &mut Native, source: &MediaSource, headers: &[(String, String)], kind: Kind) -> Result<Meta, String> {
-    let asset = asset(source, headers)?;
-    let meta = meta(&asset, kind)?;
+    let (asset, meta) = open(source, headers, kind, &native.decoded)?;
     if kind == Kind::Video {
         native.generator = Some(generator(&asset, None));
     }
@@ -344,7 +449,7 @@ fn request_poster(shared: &Arc<Shared>, native: &mut Native, at: f64) {
     slot.busy = true;
     let posters = native.posters.clone();
     let clip = Arc::downgrade(shared);
-    let (source, headers, kind) = (shared.source.clone(), shared.headers.clone(), shared.kind);
+    let (source, headers, kind, decoded) = (shared.source.clone(), shared.headers.clone(), shared.kind, native.decoded.clone());
     std::thread::Builder::new()
         .name("rune-media-poster".into())
         .spawn(move || {
@@ -366,8 +471,7 @@ fn request_poster(shared: &Arc<Shared>, native: &mut Native, at: f64) {
                 // AVFoundation autoreleases; this thread has no pool of its own.
                 let result = objc2_video::rc::autoreleasepool(|_| {
                     if opened.is_none() {
-                        let asset = asset(&source, &headers)?;
-                        let meta = meta(&asset, kind)?;
+                        let (asset, meta) = open(&source, &headers, kind, &decoded)?;
                         opened = Some(((kind == Kind::Video).then(|| generator(&asset, Some(POSTER_MAX))), meta));
                     }
                     let (generator, meta) = opened.as_ref().unwrap();
@@ -388,8 +492,8 @@ fn request_poster(shared: &Arc<Shared>, native: &mut Native, at: f64) {
         .expect("spawn media poster worker");
 }
 
-fn create_player(source: &MediaSource, headers: &[(String, String)], kind: Kind, mtm: MainThreadMarker) -> Result<Objects, String> {
-    let asset = asset(source, headers)?;
+fn create_player(source: &MediaSource, headers: &[(String, String)], kind: Kind, decoded: &Decoded, mtm: MainThreadMarker) -> Result<Objects, String> {
+    let asset = player_asset(source, headers, decoded)?;
     let item = unsafe { AVPlayerItem::playerItemWithAsset(&asset, mtm) };
     let output = (kind == Kind::Video).then(|| {
         let empty = CFDictionary::<CFString, CFType>::from_slices(&[], &[]);
@@ -557,7 +661,15 @@ fn ensure_player(shared: &Arc<Shared>, native: &mut Native, c: &mut Control, mtm
     if native.player.is_some() {
         return true;
     }
-    match create_player(&shared.source, &shared.headers, shared.kind, mtm) {
+    // Audio opens on the load worker first, which may find it needs decoding (an Ogg clip at a
+    // URL with no extension); the worker then drives the clip again, starting a queued play.
+    if shared.kind == Kind::Audio && !c.opened() {
+        if !native.poster_started {
+            request_poster(shared, native, 0.0);
+        }
+        return false;
+    }
+    match create_player(&shared.source, &shared.headers, shared.kind, &native.decoded, mtm) {
         Ok(objects) => {
             // A fresh player starts at the handle's position.
             if c.time > 0.0 && c.seek.is_none() {

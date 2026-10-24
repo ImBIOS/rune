@@ -914,8 +914,13 @@ tap.play();
   fail, and while it plays ask for a coarse tick with `tx.wake_after(Duration::from_millis(33))`.
   Nothing ticks when nothing plays. `examples/video-player` does this for an audio file.
 - **Formats**: whatever AVFoundation reads: mp4/mov (H.264, HEVC), mp3, m4a/AAC, wav, aiff,
-  flac. AVFoundation has no Ogg, Opus, WebM or Matroska support: those fail at once with a
-  clear message. A clip whose item never becomes ready fails after 30 s.
+  flac. Audio in Ogg (Vorbis, Opus), WebM or Matroska (`.ogg`, `.oga`, `.opus`, `.webm`,
+  `.mka`, `.mkv`, or a URL without an extension whose bytes are Ogg or WebM), which
+  AVFoundation can't read, is decoded in Rust (symphonia, opuscule; the default `ogg-audio`
+  feature) to a temporary WAV that AVPlayer plays, with the same API. The WAV takes about
+  11 MB a minute, and a clip over about 6 hours fails. Video in
+  those containers, and that audio with the feature off, fails at once with a clear message. A
+  clip whose item never becomes ready fails after 30 s.
 - **Headless** (`--snap`, `--frames`, `--tree`): no player and never any sound. A video
   decodes the frame at its virtual time synchronously (snapped to the middle of the frame), so
   output is deterministic. Its time starts on the first frame that draws it after `play`,

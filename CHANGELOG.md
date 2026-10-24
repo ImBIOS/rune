@@ -5,6 +5,16 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Ogg and WebM audio plays on macOS.** `Player::audio` on an Ogg Vorbis, Ogg Opus or
+  WebM/Matroska Opus clip failed at once (AVFoundation can't read them). The new default
+  `ogg-audio` feature decodes such a clip in pure Rust (symphonia, opuscule), streaming it to a
+  temporary WAV that AVPlayer plays, so state, time, seeking, rate, looping and request headers
+  work as for any clip. Clips are picked by extension, or by their bytes when a URL has none.
+  The compressed clip is held in memory while it decodes, and the WAV takes about 11 MB a
+  minute of 48 kHz stereo. A clip longer than a WAV holds (about 6 hours of that) fails with a
+  clear message. Video in those containers still fails at once, and with
+  `default-features = false` so does this audio. The feature adds symphonia's Ogg, Matroska
+  and Vorbis crates and opuscule to macOS builds.
 - **Headless audio follows the virtual clock.** A headless run reported a playing audio clip
   with its time stuck at 0. Its time now advances with the runtime clock of the thread that
   made it, as a video's does: `pause`, `seek`, `set_rate`, looping and the end (`Ended`, and
