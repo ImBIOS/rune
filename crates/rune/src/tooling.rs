@@ -822,6 +822,8 @@ pub(crate) struct Trace {
     path: PathBuf,
     /// Lines waiting for present times; `None` writes each frame at once.
     presents: Option<crate::present_time::Presents>,
+    /// The native surface's frame counts and `App::dev_stats`, printed when the trace closes.
+    surface: Option<(std::sync::Arc<std::sync::Mutex<crate::SurfaceStats>>, Option<fn() -> String>)>,
 }
 
 /// A native frame's timing beyond its submission time.
@@ -857,7 +859,7 @@ impl Trace {
         if clock == "wall" { header["timestamp"] = "cpu-submit".into(); }
         let _ = writeln!(out, "{header}");
         Trace { out, ids: HashMap::new(), described: HashMap::new(), states: HashMap::new(), effects: HashMap::new(),
-            channels: Default::default(), path: path.clone(), presents: None }
+            channels: Default::default(), path: path.clone(), presents: None, surface: None }
     }
 
     /// Holds each frame's line until its present time arrives from `source`, then writes
@@ -865,6 +867,11 @@ impl Trace {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn record_presents(&mut self, source: std::sync::Arc<dyn crate::present_time::Source>, start: Instant) {
         self.presents = Some(crate::present_time::Presents::new(source, start));
+    }
+
+    /// Prints the surface's frame counts, and the app's own, when the trace closes.
+    pub(crate) fn record_surface(&mut self, stats: std::sync::Arc<std::sync::Mutex<crate::SurfaceStats>>, app: Option<fn() -> String>) {
+        self.surface = Some((stats, app));
     }
 
     /// Waits up to `wait` for the last frames' present times, then writes every held line.
@@ -1029,6 +1036,10 @@ impl Trace {
 
 impl Drop for Trace {
     fn drop(&mut self) {
+        if let Some((stats, app)) = &self.surface {
+            eprintln!("rune: frames {}", crate::surface_stats::read(stats).summary());
+            if let Some(app) = app { eprintln!("rune: app {}", app()); }
+        }
         if self.presents.is_none() { return; }
         self.settle_presents(crate::present_time::SETTLE);
         let _ = self.out.flush();

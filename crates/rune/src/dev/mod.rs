@@ -327,7 +327,23 @@ impl<S> Session<S> {
             descriptors.push(entry.descriptor.clone());
             values.insert(key.clone(), entry.value.clone());
         }
-        let snapshot = json!({"type":"state","protocol":1,"descriptors":descriptors,"values":values,"readouts":{"rune.time":rt.clock},"frame":self.frame});
+        let mut readouts = serde_json::Map::from_iter([("rune.time".into(), json!(rt.clock))]);
+        if let Some(stats) = rt.surface_stats() {
+            descriptors.push(json!({"key":"rune.frames","kind":"table","label":stats.name,"group":"Frames","columns":["","total","/s"]}));
+            descriptors.push(json!({"key":"rune.pacing","kind":"watch","label":"Pacing","group":"Frames"}));
+            let (t, r) = (stats.totals, stats.per_second);
+            readouts.insert("rune.frames".into(), json!([
+                ["Redraws", t.redraws, r.redraws], ["Unpaced", t.unpaced, r.unpaced], ["Presents", t.presents, r.presents],
+                ["Failed acquires", t.failed(), r.failed()], ["Occluded", t.occluded, r.occluded], ["Timeouts", t.timeouts, r.timeouts],
+                ["Outdated", t.outdated, r.outdated], ["Skipped", t.skipped, r.skipped], ["Loop turns", t.turns, r.turns], ["Wakes", t.wakes, r.wakes],
+            ]));
+            readouts.insert("rune.pacing".into(), json!(stats.pacing.to_string()));
+        }
+        if let Some(app) = rt.app_stats {
+            descriptors.push(json!({"key":"rune.app","kind":"watch","label":"App","group":"Frames"}));
+            readouts.insert("rune.app".into(), json!(app()));
+        }
+        let snapshot = json!({"type":"state","protocol":1,"descriptors":descriptors,"values":values,"readouts":readouts,"frame":self.frame});
         {
             let mut bridge = self.bridge.lock().unwrap();
             bridge.latest = snapshot;

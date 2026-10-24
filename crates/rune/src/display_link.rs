@@ -8,6 +8,7 @@
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use objc2_core_foundation::CFRetained;
@@ -34,6 +35,24 @@ pub(crate) struct DisplayLink {
 
 const LOW_POWER_FRAME: Duration = Duration::from_nanos(1_000_000_000 / 60);
 static CREATE_FAILED: AtomicBool = AtomicBool::new(false);
+/// The last creation's CoreVideo status (0 once one succeeds), and when it failed.
+static LAST_FAILURE: Mutex<Option<(i32, Instant)>> = Mutex::new(None);
+/// How long after a failed creation `retry` tries again.
+const RETRY: Duration = Duration::from_secs(1);
+
+/// Why the last display link couldn't be made, while no creation has succeeded since.
+pub(crate) fn failure() -> Option<i32> { LAST_FAILURE.lock().unwrap().map(|(status, _)| status) }
+
+/// How a surface's frames are paced, from its display link (or the lack of one).
+pub(crate) fn pacing(link: Option<&DisplayLink>, moving: bool) -> crate::surface_stats::Pacing {
+    use crate::surface_stats::Pacing;
+    match (link, failure()) {
+        (Some(link), _) if link.running() => Pacing::DisplayLink,
+        (None, Some(status)) => Pacing::Failed(status),
+        _ if moving => Pacing::Unpaced,
+        _ => Pacing::Idle,
+    }
+}
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" { fn CGDisplayIsBuiltin(display: u32) -> u32; }
@@ -88,9 +107,11 @@ impl DisplayLink {
         // Every display asleep fails this until one wakes, so say so once per sleep.
         if status != 0 {
             if !CREATE_FAILED.swap(true, Ordering::Relaxed) { eprintln!("display link creation failed: {status}"); }
+            *LAST_FAILURE.lock().unwrap() = Some((status, Instant::now()));
             return None;
         }
         CREATE_FAILED.store(false, Ordering::Relaxed);
+        *LAST_FAILURE.lock().unwrap() = None;
         let link = unsafe { CFRetained::from_raw(NonNull::new(raw)?) };
         let mut callback = Box::new(Callback {
             target: AtomicU64::new(0),
@@ -103,6 +124,13 @@ impl DisplayLink {
         let mut pacing = Self { link, callback, last_present: None, last_target: None, display: None, capped: false, running: false };
         pacing.update_display(window);
         Some(pacing)
+    }
+
+    /// A surface presenting without a display link (its creation failed while the displays
+    /// slept) tries again after each present, at most once a `RETRY` across surfaces.
+    pub(crate) fn retry(window: &Window, wake: crate::runtime::Waker) -> Option<Self> {
+        if LAST_FAILURE.lock().unwrap().is_some_and(|(_, at)| at.elapsed() < RETRY) { return None; }
+        Self::new(window, wake)
     }
 
     /// AppKit monitor lookup is only needed on creation and display/visibility changes.

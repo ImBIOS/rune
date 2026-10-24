@@ -99,6 +99,8 @@ mod record;
 mod headless_run;
 mod keycaps;
 mod surface_alpha;
+mod surface_stats;
+pub use surface_stats::{Pacing, SurfaceCounts, SurfaceStats};
 pub mod native_surface;
 mod system_material;
 mod video;

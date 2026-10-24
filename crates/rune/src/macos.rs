@@ -446,11 +446,48 @@ pub(crate) fn window_occluded(window: &winit::window::Window) -> bool {
     ns_window(window).is_some_and(|window| occlusion_hidden(&window))
 }
 
+/// Whether wgpu will decline this surface a drawable as occluded. It reads the window hosting
+/// the layer: the first delegate up the layer tree is the backing view, and its window's
+/// occlusion state is checked before `nextDrawable`. Asking wgpu anyway costs a texture id that
+/// wgpu-core 30.0.1 never frees, so `acquire` asks this first.
+pub(crate) fn surface_occluded(surface: &wgpu::Surface<'_>) -> bool {
+    // SAFETY: only reads the layer wgpu presents into, under wgpu's own lock.
+    let Some(hal) = (unsafe { surface.as_hal::<wgpu::hal::api::Metal>() }) else { return false };
+    let layer = hal.render_layer().lock();
+    let layer = objc2_video::rc::Retained::as_ptr(&*layer).cast::<objc2_video::runtime::AnyObject>();
+    // SAFETY: a live CAMetalLayer, retained by the surface while the lock is held.
+    unsafe { layer_occluded(&*layer) }
+}
+
+/// `surface_occluded` for a layer: the same walk as wgpu-hal's `hosting_window`.
+///
+/// # Safety
+/// `layer` is a CALayer.
+pub(crate) unsafe fn layer_occluded(layer: &objc2_video::runtime::AnyObject) -> bool {
+    use objc2_video::{msg_send, runtime::AnyObject};
+    let mut current: *const AnyObject = layer;
+    // SAFETY: CALayer and NSView property reads; each pointer is live while its layer is.
+    unsafe {
+        while let Some(layer) = current.as_ref() {
+            let delegate: *const AnyObject = msg_send![layer, delegate];
+            if let Some(delegate) = delegate.as_ref() {
+                let window: *const AnyObject = msg_send![delegate, window];
+                let Some(window) = window.as_ref() else { return false };
+                let state: usize = msg_send![window, occlusionState];
+                return state & OCCLUSION_VISIBLE == 0;
+            }
+            current = msg_send![layer, superlayer];
+        }
+    }
+    false
+}
+
+const OCCLUSION_VISIBLE: usize = 1 << 1;
+
 fn occlusion_hidden(window: &NSWindow) -> bool {
-    const VISIBLE: usize = 1 << 1;
     // SAFETY: a property read on the main thread.
     let state: usize = unsafe { msg_send![window, occlusionState] };
-    state & VISIBLE == 0
+    state & OCCLUSION_VISIBLE == 0
 }
 
 pub(crate) fn configure_window(window: &winit::window::Window, options: &crate::MacWindowOptions) {

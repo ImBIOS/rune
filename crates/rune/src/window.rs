@@ -20,6 +20,7 @@ use crate::edit::{Ime, Key, KeyEvent, Mods};
 use crate::el::{Shell, Tx};
 use crate::render::{Gpu, Renderer};
 use crate::runtime::{Env, Runtime, TitlebarAction, Waker};
+use crate::surface_stats::{Pacing, SurfaceMeter, SurfaceStats};
 use crate::tooling::{AppSpec, Args, Chrome, runtime_for};
 use crate::windows::{AnyWindowSpec, Display, WindowOptions, WindowSpec};
 
@@ -198,6 +199,14 @@ impl Win {
         false
     }
 
+    /// What paces the window's frames, for its stats.
+    fn pacing_state(&self, moving: bool) -> Pacing {
+        #[cfg(target_os = "macos")]
+        return crate::display_link::pacing(self.pacing.as_ref(), moving);
+        #[cfg(not(target_os = "macos"))]
+        if moving { Pacing::Vsync } else { Pacing::Idle }
+    }
+
     /// Whether none of the window is on screen, read from AppKit (a prewarm acquisition reads
     /// as visible).
     #[cfg(target_os = "macos")]
@@ -263,6 +272,8 @@ struct NativeWindow {
     window: Mutex<Weak<Window>>,
     number: AtomicU32,
     ready: AtomicBool,
+    /// What the host's meter last published.
+    stats: Arc<Mutex<SurfaceStats>>,
     /// The event loop and slot once the host exists, and the requests made before it did.
     route: Mutex<(Option<(EventLoopProxy<WakeEvent>, usize)>, Vec<Request>)>,
 }
@@ -305,6 +316,9 @@ impl WindowHandle {
     /// this confirms GPU completion of an alpha-zero frame before reveal. False after destruction.
     pub fn is_ready(&self) -> bool { self.window().is_ok() && self.native.ready.load(Ordering::Acquire) }
     pub fn key(&self) -> &str { &self.key }
+    /// The window's frame counts: redraws, presents, failed drawable acquisitions, loop turns
+    /// and pacing, as totals and per-second rates. Updated once a second while it draws.
+    pub fn surface_stats(&self) -> SurfaceStats { crate::surface_stats::read(&self.native.stats) }
     fn window(&self) -> Result<Arc<Window>, String> {
         self.native.window.lock().unwrap().upgrade().ok_or_else(|| "window is closed".into())
     }
@@ -555,6 +569,7 @@ struct Host<S: 'static> {
     trace: Option<crate::tooling::Trace>,
     trace_start: Option<Instant>,
     trace_frames: usize,
+    meter: SurfaceMeter,
     win: Option<Win>,
     gpu: Option<(Arc<Gpu>, Renderer, wgpu::TextureFormat)>,
     gpu_pool: Rc<RefCell<Weak<Gpu>>>,
@@ -682,6 +697,7 @@ impl<S: 'static> Host<S> {
         let dev = app.dev.take();
         let modifier_keys = app.modifier_keys;
         let fit_height = app.fit_content_height;
+        let app_stats = app.dev_stats;
         let (mut spec, state, shared) = app.into_parts(args.scene.as_deref());
         let mut size = args.size.unwrap_or(spec.size);
         // The window reports the system appearance and scale when it opens.
@@ -710,6 +726,9 @@ impl<S: 'static> Host<S> {
         rt.transparent = options.transparent;
         rt.track_marks = comp.is_some();
         rt.wall_start = Some(Instant::now());
+        let meter = SurfaceMeter::new(native_handle.key(), native_handle.native.stats.clone());
+        rt.surface_stats = Some(meter.shared());
+        rt.app_stats = app_stats;
         #[cfg(all(feature = "dev", debug_assertions))]
         if let Some(dev) = dev { crate::dev::launch(&mut rt, &spec, dev, waker.clone()); }
         let mut clipboard = crate::clipboard::Client::default();
@@ -760,6 +779,7 @@ impl<S: 'static> Host<S> {
             trace: None,
             trace_start: None,
             trace_frames: 0,
+            meter,
             #[cfg(target_os = "macos")]
             present_log,
             #[cfg(target_os = "macos")]
@@ -844,11 +864,20 @@ impl Missed {
 }
 
 /// The next drawable. An outdated or lost surface is reconfigured and tried again, up to
-/// `reconfigures` times, synchronously; every other miss returns at once.
-pub(crate) fn acquire(surface: &wgpu::Surface, device: &wgpu::Device, config: &wgpu::SurfaceConfiguration, mut reconfigures: u32)
-    -> Result<wgpu::SurfaceTexture, Missed> {
+/// `reconfigures` times, synchronously; every other miss returns at once. On macOS a surface
+/// wgpu would call occluded is never asked: each failed `get_current_texture` leaks a texture
+/// id in wgpu-core 30.0.1.
+pub(crate) fn acquire(surface: &wgpu::Surface, device: &wgpu::Device, config: &wgpu::SurfaceConfiguration, mut reconfigures: u32,
+    meter: &mut SurfaceMeter) -> Result<wgpu::SurfaceTexture, Missed> {
+    #[cfg(target_os = "macos")]
+    if crate::macos::surface_occluded(surface) {
+        meter.skipped();
+        return Err(Missed::Occluded);
+    }
     loop {
-        match Missed::of(surface.get_current_texture()) {
+        let status = Missed::of(surface.get_current_texture());
+        if let Err(missed) = status { meter.failed(missed); }
+        match status {
             Err(Missed::Outdated) if reconfigures > 0 => {
                 surface.configure(device, config);
                 reconfigures -= 1;
@@ -884,6 +913,85 @@ fn missed_frames_never_poll() {
     assert_eq!(occluded(Duration::from_secs(60)), NextFrame::WaitUntil(now + OCCLUDED_MAX));
     assert_eq!(Missed::Timeout.next(true, now, Duration::ZERO), NextFrame::Idle, "a running display link retries on its tick");
     assert_eq!(Missed::Timeout.next(false, now, Duration::ZERO), NextFrame::WaitUntil(now + TIMEOUT_RETRY));
+}
+
+/// A Metal surface whose window reports itself covered, with no window server needed: the layer's
+/// delegate stands in for the backing view, and is its own window.
+#[cfg(all(test, target_os = "macos"))]
+mod occluded_surface {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use objc2_video::{ClassType, define_class, msg_send, rc::Retained, runtime::{AnyClass, AnyObject, NSObject}};
+
+    /// The fake window's `occlusionState`: 0 covered, 2 (`NSWindowOcclusionStateVisible`) shown.
+    static OCCLUSION: AtomicUsize = AtomicUsize::new(0);
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[name = "RuneFakeOccludedView"]
+        struct FakeView;
+
+        impl FakeView {
+            #[unsafe(method(window))]
+            fn window(&self) -> *const Self { self }
+
+            #[unsafe(method(occlusionState))]
+            fn occlusion_state(&self) -> usize { OCCLUSION.load(Ordering::Relaxed) }
+        }
+    );
+
+    /// An hour covered costs no failed `get_current_texture` (each leaks a texture id in
+    /// wgpu-core 30.0.1) and a re-check at most every two seconds; uncovered, it draws.
+    #[test]
+    fn an_occluded_surface_never_asks_wgpu_and_draws_once_visible() {
+        let view: Retained<FakeView> = unsafe { msg_send![FakeView::class(), new] };
+        let layer: Retained<AnyObject> = unsafe { msg_send![AnyClass::get(c"CAMetalLayer").expect("QuartzCore"), new] };
+        let _: () = unsafe { msg_send![&*layer, setDelegate: &*view] };
+        let instance = Gpu::instance();
+        let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(Retained::as_ptr(&layer) as *mut std::ffi::c_void);
+        let surface = unsafe { instance.create_surface_unsafe(target) }.expect("a Metal layer surface");
+        let gpu = match Gpu::try_new(instance, Some(&surface)) {
+            Ok(gpu) => gpu,
+            Err(error) => return eprintln!("skipped: {error}"),
+        };
+        let Some((config, _)) = surface_config(&surface, &gpu.adapter, (64, 64), false) else {
+            return eprintln!("skipped: the adapter can't present to a Metal layer");
+        };
+        surface.configure(&gpu.device, &config);
+
+        OCCLUSION.store(0, Ordering::Relaxed);
+        assert!(unsafe { crate::macos::layer_occluded(&layer) });
+        let mut meter = SurfaceMeter::new("occluded", Arc::default());
+        let start = Instant::now();
+        let (mut at, mut wait, mut checks) = (start, OCCLUDED_RETRY, 0u64);
+        while at < start + Duration::from_secs(3600) {
+            if let Ok(_frame) = acquire(&surface, &gpu.device, &config, 1, &mut meter) { panic!("an occluded surface got a drawable"); }
+            checks += 1;
+            let NextFrame::WaitUntil(next) = Missed::Occluded.next(false, at, wait) else { panic!("occlusion re-checks on a deadline") };
+            wait = (wait * 2).min(OCCLUDED_MAX);
+            at = next;
+        }
+        let totals = meter.totals();
+        assert_eq!(totals.failed(), 0, "wgpu was asked for drawables it refuses as occluded");
+        assert_eq!(totals.skipped, checks);
+        assert!(checks <= 3600 / 2 + 3, "{checks} re-checks in an hour occluded");
+
+        OCCLUSION.store(2, Ordering::Relaxed);
+        let frame = acquire(&surface, &gpu.device, &config, 1, &mut meter).expect("a visible surface gets a drawable");
+        let target = frame.texture.create_view(&Default::default());
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target, depth_slice: None, resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+            })],
+            ..Default::default()
+        });
+        gpu.queue.submit([encoder.finish()]);
+        gpu.queue.present(frame);
+        meter.presented();
+        assert_eq!((meter.totals().presents, meter.totals().failed()), (1, 0));
+    }
 }
 
 /// `wake_after(Duration::ZERO)` from the poll: a running display link takes it as the next
@@ -1869,6 +1977,7 @@ impl<S: 'static> Host<S> {
             NextFrame::WaitUntil(at) => Some(at),
             NextFrame::Idle => None,
         };
+        self.meter.set_pacing(l.pacing_state(missed != Missed::Occluded));
         // What this frame would have run (updates, poll, due timers) still runs, without
         // drawing. Misses come at the retry's pace, not the display's.
         self.rt.hidden_timer_frame();
@@ -1879,6 +1988,7 @@ impl<S: 'static> Host<S> {
         let launcher = self.launcher();
         let (Some(l), Some(_)) = (self.win.as_mut(), self.gpu.as_ref()) else { return };
         let hidden = launcher && !l.visible;
+        self.meter.redraw(l.paced());
         if (!launcher && (!l.visible || l.occluded)) || l.window.is_minimized().unwrap_or(false) {
             l.stop_pacing();
             let shown = l.visible;
@@ -1895,15 +2005,12 @@ impl<S: 'static> Host<S> {
         // sleeping displays never send, and a running link holds back its timers (`wake_deadline`).
         #[cfg(target_os = "macos")]
         if !hidden && l.natively_occluded() {
+            self.meter.skipped();
             self.missed_frame(Missed::Occluded);
             return;
         }
         #[cfg(target_os = "macos")]
         let _prewarm = if hidden { l.panel.as_ref().map(|p| p.prewarm()) } else { None };
-        if hidden && !l.first_frame.ready {
-            // Bounded retries while preparing the first frame (including acquisition errors).
-            if let Some((retry, _)) = &mut l.first_frame.deadline { *retry = Instant::now() + Duration::from_millis(16); }
-        }
         #[cfg(target_os = "macos")]
         let target = if hidden { None } else if let Some(pacing) = &mut l.pacing {
             let Some(target) = pacing.next_frame() else { return };
@@ -1919,7 +2026,7 @@ impl<S: 'static> Host<S> {
         let (Some(l), Some((gpu, renderer, _))) = (self.win.as_mut(), self.gpu.as_mut()) else { return };
         // Acquire before latching live values so a drawable wait cannot age the input.
         l.retry = None;
-        let frame = match acquire(&l.surface, &gpu.device, &l.config, 1) {
+        let frame = match acquire(&l.surface, &gpu.device, &l.config, 1, &mut self.meter) {
             Ok(frame) => frame,
             // A hidden launcher frame retries on its first-frame deadline.
             Err(_) if hidden => return,
@@ -1946,6 +2053,7 @@ impl<S: 'static> Host<S> {
             let mut trace = crate::tooling::Trace::open_clock(path, self.rt.viewport, hz, l.window.scale_factor() as f32, "wall");
             #[cfg(target_os = "macos")]
             if let Some(log) = self.present_log.clone() && l.present.is_some() { trace.record_presents(log, now); }
+            trace.record_surface(self.meter.shared(), self.rt.app_stats);
             self.trace = Some(trace);
             self.trace_start = Some(now);
             self.rt.scene.store_mut().audit_retargets(true);
@@ -1969,9 +2077,11 @@ impl<S: 'static> Host<S> {
             drop(frame);
             rt.native_materials = true;
             animating |= rt.frame(0.0);
-            match acquire(&l.surface, &gpu.device, &l.config, 1) {
+            match acquire(&l.surface, &gpu.device, &l.config, 1, &mut self.meter) {
                 Ok(frame) => frame,
-                Err(_) => { l.window.request_redraw(); return; }
+                // Retrying at once is what spins while occluded; wait like any missed frame.
+                Err(_) if hidden => { l.retry = Some(Instant::now() + TIMEOUT_RETRY); return; }
+                Err(missed) => return self.missed_frame(missed),
             }
         } else { frame };
         self.secure_input.set(rt.has_secure_focus() && l.window.has_focus());
@@ -2036,8 +2146,12 @@ impl<S: 'static> Host<S> {
             l.first_frame.ready = true;
         }
         let submitted = Instant::now();
+        self.meter.presented();
         #[cfg(target_os = "macos")]
         if let Some(pacing) = &mut l.pacing { pacing.presented(submitted); }
+        // A display link that couldn't be made while the displays slept: they're back.
+        #[cfg(target_os = "macos")]
+        if !hidden && l.pacing.is_none() { l.pacing = crate::display_link::DisplayLink::retry(&l.window, self.frame_wake.clone()); }
         if let Some(trace) = self.trace.as_mut() {
             // A frame count keeps the trace redrawing while idle, as below.
             let continuous = !self.idle || self.args.frames.is_some();
@@ -2067,8 +2181,10 @@ impl<S: 'static> Host<S> {
             if !l.paced() { l.retry = Some(now + TIMER_FRAME); }
             #[cfg(not(target_os = "macos"))]
             l.window.request_redraw();
+            self.meter.set_pacing(l.pacing_state(true));
         } else {
             l.stop_pacing();
+            self.meter.set_pacing(l.pacing_state(false));
         }
         // A frame change this frame's commit asked for starts with the layout springs it
         // started, which have shown a step unless they held for the window; the next frame
@@ -2098,6 +2214,7 @@ impl<S: 'static> AnyHost for Host<S> {
     fn cancel_menus(&mut self) { self.popup.cancel(&mut self.rt); }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        self.meter.turn(matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll));
         if let Some(w) = &mut self.win && let Some((retry, until)) = w.first_frame.deadline && retry <= Instant::now() {
             if until <= Instant::now() {
                 let notified = w.first_frame.notified;
@@ -2108,7 +2225,12 @@ impl<S: 'static> AnyHost for Host<S> {
                 } else if !notified {
                     *self.shared.window_error.lock().unwrap() = Some("launcher first frame was not ready within two seconds".into());
                 }
-            } else { w.window.request_redraw(); }
+            } else {
+                // Bounded retries while the frame prepares, whatever stops each one (occlusion,
+                // no drawable). A retry left due would turn the loop at once until it gives up.
+                w.first_frame.deadline = Some((Instant::now() + Duration::from_millis(16), until));
+                w.window.request_redraw();
+            }
         }
         let launcher = self.launcher();
         if let Some(w) = &mut self.win && w.retry.is_some_and(|retry| retry <= Instant::now()) {

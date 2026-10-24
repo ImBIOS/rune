@@ -520,6 +520,10 @@ pub struct Runtime<S: 'static> {
     /// Opt-in gamma-space (sRGB) blending for translucent fills, shadows and blurs.
     pub(crate) srgb_blend: bool,
     pub(crate) native_overlay: bool,
+    /// The window or overlay surface's frame counts, published by its host.
+    pub(crate) surface_stats: Option<std::sync::Arc<std::sync::Mutex<crate::SurfaceStats>>>,
+    /// `App::dev_stats`.
+    pub(crate) app_stats: Option<fn() -> String>,
     /// Animation time (seconds, scaled by the time scale).
     pub t: f64,
     pub reduced_motion: bool,
@@ -812,6 +816,8 @@ impl<S: 'static> Runtime<S> {
             transparent: false,
             srgb_blend: false,
             native_overlay: false,
+            surface_stats: None,
+            app_stats: None,
             t: 0.0,
             reduced_motion: false,
             system_reduced_motion: false,
@@ -1342,6 +1348,11 @@ impl<S: 'static> Runtime<S> {
         #[cfg(all(feature = "dev", debug_assertions))]
         if let Some(clock) = &self.dev_clock { return clock.deadline(deadline); }
         Some(deadline)
+    }
+
+    /// The native window or overlay's frame counts; `None` headless.
+    pub fn surface_stats(&self) -> Option<crate::SurfaceStats> {
+        self.surface_stats.as_deref().map(crate::surface_stats::read)
     }
 
     /// When `poll` last ran, on `wake_deadline`'s clock.

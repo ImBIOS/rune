@@ -57,6 +57,7 @@ pub struct App<S: 'static> {
     pub(crate) fit_content_height: bool,
     pub(crate) modifier_keys: bool,
     pub(crate) srgb_blend: bool,
+    pub(crate) dev_stats: Option<fn() -> String>,
     #[cfg(all(feature = "dev", debug_assertions))]
     pub(crate) dev: Option<crate::dev::Config<S>>,
 }
@@ -89,6 +90,7 @@ impl<S: 'static> App<S> {
             fit_content_height: false,
             modifier_keys: false,
             srgb_blend: false,
+            dev_stats: None,
         }
     }
 
@@ -264,6 +266,14 @@ impl<S: 'static> App<S> {
     #[cfg(all(feature = "dev", debug_assertions))]
     pub fn dev_panel(mut self, config: crate::dev::Config<S>) -> Self {
         self.dev = Some(config);
+        self
+    }
+
+    /// The app's own counters (memory, caches, queues), shown beside the window's frame stats
+    /// in the dev panel (`App::dev_panel`) and in a native trace's summary. Called at most
+    /// once a frame with the panel open, so keep it cheap.
+    pub fn dev_stats(mut self, stats: fn() -> String) -> Self {
+        self.dev_stats = Some(stats);
         self
     }
 

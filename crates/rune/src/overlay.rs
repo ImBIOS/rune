@@ -113,6 +113,8 @@ struct Shared<T> {
     availability: AtomicU8,
     /// The event loop's wake-up for this overlay; empty until the loop runs.
     wake: Mutex<Option<Waker>>,
+    /// What the overlay's meter last published.
+    stats: Arc<Mutex<crate::SurfaceStats>>,
 }
 
 impl<T> Shared<T> {
@@ -153,6 +155,10 @@ impl<T: 'static> OverlayHandle<T> {
     /// Result of the native capture-exclusion request. Linux reports Unsupported.
     pub fn capture_exclusion(&self) -> OverlaySupport { self.capabilities().capture_exclusion }
     pub fn capabilities(&self) -> crate::OverlayCapabilities { self.shared.native.lock().unwrap().1 }
+
+    /// The overlay's frame counts: redraws, presents, failed drawable acquisitions, loop turns
+    /// and pacing, as totals and per-second rates. Updated once a second while it draws.
+    pub fn surface_stats(&self) -> crate::SurfaceStats { crate::surface_stats::read(&self.shared.stats) }
 
     /// Reveal the overlay. Prewarmed macOS overlays refresh hidden changes before reveal,
     /// preserving motion elapsed since each commit, even when show arrives in a later turn.
@@ -307,6 +313,7 @@ pub(crate) struct Overlay<T: 'static> {
     occluded_wait: Duration,
     #[cfg(target_os = "macos")]
     frame_wake: Option<Waker>,
+    meter: crate::surface_stats::SurfaceMeter,
 }
 
 impl<T: 'static> Overlay<T> {
@@ -318,7 +325,8 @@ impl<T: 'static> Overlay<T> {
         } else {
             srgb_blend
         };
-        let shared = Arc::new(Shared { native: Mutex::default(), requests: Mutex::default(), availability: AtomicU8::new(0), wake: Mutex::new(None) });
+        let shared = Arc::new(Shared { native: Mutex::default(), requests: Mutex::default(), availability: AtomicU8::new(0), wake: Mutex::new(None), stats: Arc::default() });
+        let meter = crate::surface_stats::SurfaceMeter::new(spec.name, shared.stats.clone());
         let text = TextSystem::new(app.fonts, app.families);
         let mut rt = Runtime::with_text(state, spec.view, spec.size, Env::default(), text);
         rt.set_srgb_blend(srgb_blend);
@@ -330,6 +338,7 @@ impl<T: 'static> Overlay<T> {
         rt.set_modifier_keys(modifier_keys);
         rt.on_focus = on_focus;
         rt.set_live_visible(false);
+        rt.surface_stats = Some(meter.shared());
         // App and overlay may use different state types. Downcast the function pointer
         // once, without a per-frame adapter or changing App::overlay's generic API.
         rt.poll = poll.or_else(|| app.poll.and_then(|f| {
@@ -375,6 +384,7 @@ impl<T: 'static> Overlay<T> {
             occluded_wait: crate::window::OCCLUDED_RETRY,
             #[cfg(target_os = "macos")]
             frame_wake: None,
+            meter,
         };
         (overlay, OverlayHandle { shared })
     }
@@ -1152,6 +1162,16 @@ impl<T: 'static> Overlay<T> {
             crate::window::NextFrame::WaitUntil(at) => Some(at),
             crate::window::NextFrame::Idle => None,
         };
+        let pacing = self.pacing_state(missed != crate::window::Missed::Occluded);
+        self.meter.set_pacing(pacing);
+    }
+
+    /// What paces the overlay's frames, for its stats.
+    fn pacing_state(&self, moving: bool) -> crate::Pacing {
+        #[cfg(target_os = "macos")]
+        return crate::display_link::pacing(self.live.as_ref().and_then(|l| l.pacing.as_ref()), moving);
+        #[cfg(not(target_os = "macos"))]
+        if moving { crate::Pacing::Vsync } else { crate::Pacing::Idle }
     }
 
     /// Applies requests from other threads: updates, edge, show and hide.
@@ -1322,7 +1342,11 @@ impl<T: 'static> Overlay<T> {
             // Until it's uncovered, only the retry (or a due timer, in `wake_due`) steps it,
             // however often other windows turn the loop.
             if self.occluded {
-                if self.retry.is_none_or(|retry| retry <= Instant::now()) { self.missed(crate::window::Missed::Occluded, false); }
+                if self.retry.is_none_or(|retry| retry <= Instant::now()) {
+                    self.meter.redraw(false);
+                    self.meter.skipped();
+                    self.missed(crate::window::Missed::Occluded, false);
+                }
                 return false;
             }
         }
@@ -1340,7 +1364,8 @@ impl<T: 'static> Overlay<T> {
         let paced = live.pacing.as_ref().is_some_and(|p| p.running());
         #[cfg(not(target_os = "macos"))]
         let paced = false;
-        let frame = match crate::window::acquire(&live.surface, &gpu.device, &live.config, if prewarm { 2 } else { 1 }) {
+        if !prewarm { self.meter.redraw(paced); }
+        let frame = match crate::window::acquire(&live.surface, &gpu.device, &live.config, if prewarm { 2 } else { 1 }, &mut self.meter) {
             Ok(frame) => frame,
             Err(missed) => {
                 if !prewarm {
@@ -1368,9 +1393,16 @@ impl<T: 'static> Overlay<T> {
                 drop(frame);
                 self.rt.native_materials = true;
                 animating |= self.rt.frame(0.0);
-                match crate::window::acquire(&live.surface, &gpu.device, &live.config, if prewarm { 2 } else { 1 }) {
+                match crate::window::acquire(&live.surface, &gpu.device, &live.config, if prewarm { 2 } else { 1 }, &mut self.meter) {
                     Ok(frame) => frame,
-                    Err(_) => return true,
+                    // Returning true turned the loop with ControlFlow::Poll; wait like any miss.
+                    Err(missed) => {
+                        if !prewarm {
+                            if missed == crate::window::Missed::Occluded { self.set_occluded(true); }
+                            self.missed(missed, paced);
+                        }
+                        return false;
+                    }
                 }
             } else { frame }
         };
@@ -1412,6 +1444,7 @@ impl<T: 'static> Overlay<T> {
         live.materials.present(&self.rt.materials, self.rt.env.scale, || gpu.queue.present(frame));
         #[cfg(not(target_os = "macos"))]
         gpu.queue.present(frame);
+        if !prewarm { self.meter.presented(); }
         self.dirty = false;
         #[cfg(target_os = "macos")]
         let next_tick = live.pacing.as_ref().filter(|p| !prewarm && p.running()).map(|p| Instant::now() + Duration::from_secs_f64(1.0 / p.refresh_hz()));
@@ -1430,10 +1463,19 @@ impl<T: 'static> Overlay<T> {
                 pacing.running()
             });
             if !paced && !prewarm && !idle { self.retry = Some(now + crate::window::TIMER_FRAME); }
+            // A display link that couldn't be made while the displays slept: they're back.
+            if !prewarm && live.pacing.is_none() && let Some(wake) = &self.frame_wake {
+                let Backing::Window(window) = &live.backing;
+                live.pacing = crate::display_link::DisplayLink::retry(window, wake.clone());
+            }
+            if !prewarm { self.meter.set_pacing(crate::display_link::pacing(live.pacing.as_ref(), !idle)); }
             false
         }
         #[cfg(not(target_os = "macos"))]
-        !self.idle
+        {
+            if !prewarm { self.meter.set_pacing(if self.idle { crate::Pacing::Idle } else { crate::Pacing::Vsync }); }
+            !self.idle
+        }
     }
 
     /// Records whether the shown panel is on screen. Occluded, it stops its display link,
@@ -1516,6 +1558,7 @@ fn render_frame<T: 'static>(f: &mut Frame<'_, T>, compositor: &mut Option<Box<dy
 
 impl<T: 'static> AnyHost for Overlay<T> {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
+        self.meter.turn(matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll));
         if matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll) {
             let now = Instant::now();
             self.wake_due(now);
@@ -2470,7 +2513,7 @@ mod tests {
 
     #[test]
     fn handle_requests_collapse_and_updates_keep_their_order() {
-        let shared = Arc::new(Shared::<u32> { native: Mutex::default(), requests: Mutex::default(), availability: AtomicU8::new(0), wake: Mutex::new(None) });
+        let shared = Arc::new(Shared::<u32> { native: Mutex::default(), requests: Mutex::default(), availability: AtomicU8::new(0), wake: Mutex::new(None), stats: Arc::default() });
         let handle = OverlayHandle { shared: shared.clone() };
         assert_eq!(handle.availability(), Availability::Unknown);
         handle.show();

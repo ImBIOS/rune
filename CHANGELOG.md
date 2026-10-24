@@ -5,6 +5,22 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Occluded windows and overlays no longer spin or leak; per-surface frame stats.** A surface
+  whose drawable acquisition kept failing (covered, or the displays asleep) could retry at once,
+  and an overlay's failed re-acquire turned the loop with `ControlFlow::Poll`. Every miss now
+  waits on the occlusion backoff (250 ms doubling to 2 s), and on macOS Rune reads the window's
+  occlusion before asking wgpu, so a covered surface makes no failed `get_current_texture` call
+  at all. That matters on wgpu-core 30.0.1, which leaks a texture id per failed acquisition
+  (fixed on wgpu's `v30` branch, unreleased); an app that wants the fix now can add
+  `[patch.crates-io] wgpu-core = { git = "https://github.com/gfx-rs/wgpu", branch = "v30" }`. A
+  display link that failed to start while the displays slept is retried after the next present.
+  New `WindowHandle::surface_stats()`, `OverlayHandle::surface_stats()` and
+  `Runtime::surface_stats()` return a `SurfaceStats` (redraws, unpaced redraws, presents, failed
+  acquisitions by kind, skipped acquisitions, loop turns and wakes, as totals and per-second
+  rates, plus the `Pacing`). The dev panel shows them under Frames, a native `--trace` prints
+  them when it closes, and `App::dev_stats(fn() -> String)` adds the app's own line beside them.
+  A surface that fails more than 400 acquisitions, or redraws unpaced more than 400 times, a
+  second for two seconds prints one `rune: surface … has spun` line, in release builds too.
 - **`memo(id, version, || el)` reuses a subtree whose inputs haven't changed.** The closure
   runs again only when `version` or the window's dark mode, scale or reduced-motion preference
   changes; otherwise the view gets the subtree the last build returned, with the same node ids,
