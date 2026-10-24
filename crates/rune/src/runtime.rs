@@ -91,6 +91,8 @@ const P_OUTLINE: Prop<Color> = Prop::custom(77, PropClass::Color);
 const P_BORDER_BOTTOM: Prop<Color> = Prop::custom(78, PropClass::Color);
 /// `El::press_scale`'s presented factor, multiplied into the element's own scale.
 const P_PRESS_SCALE: Prop<f32> = Prop::custom(79, PropClass::Scale);
+/// Seconds a changed `El::scale` holds still before its text rasterizes at that size.
+const STATIC_SCALE_SETTLE: f64 = 0.1;
 
 /// Scroll momentum decay (iOS normal: 0.998 per ms).
 const SCROLL_DECAY: f32 = 2.002;
@@ -562,6 +564,11 @@ pub struct Runtime<S: 'static> {
     modal_members: Vec<bool>,
     loops: HashMap<NodeId, rune_motion::LoopTrack>,
     loops_active: bool,
+    /// `El::scale` per node that has one or had one: (factor, animation time it last changed,
+    /// whether it has ever changed). See [`ScaleMotion`].
+    static_scales: HashMap<NodeId, (f32, f64, bool)>,
+    /// A changed `El::scale` hasn't held still long enough for its text to rasterize.
+    static_scale_settling: bool,
     /// Shared host deadline: unscaled wake time and corresponding animation time.
     loop_wake: Option<(f64, f64)>,
     surface_visible: bool,
@@ -778,6 +785,8 @@ impl<S: 'static> Runtime<S> {
             modal_members: Vec::new(),
             loops: HashMap::new(),
             loops_active: false,
+            static_scales: HashMap::new(),
+            static_scale_settling: false,
             loop_wake: None,
             surface_visible: true,
             hovered: None,
@@ -1382,6 +1391,7 @@ impl<S: 'static> Runtime<S> {
         self.build();
         self.images.end_frame();
         animating |= self.loops_active;
+        animating |= self.static_scale_settling;
         animating |= self.videos_active;
         animating |= self.draw_text_flights();
         if self.track_marks {
@@ -2640,6 +2650,7 @@ impl<S: 'static> Runtime<S> {
         self.sync_modals();
         self.sync_follows();
         self.loops.retain(|id, _| self.scene.contains(*id));
+        self.static_scales.retain(|id, _| self.scene.contains(*id));
         for n in &self.nodes {
             if let Some(spec) = n.looping {
                 let track = self.loops.entry(n.id).and_modify(|l| { l.retime(spec, self.t); l.enabled(true, self.t); })
@@ -3307,6 +3318,7 @@ impl<S: 'static> Runtime<S> {
         self.surfaces.clear();
         self.hits.clear();
         self.loops_active = false;
+        self.static_scale_settling = false;
         self.videos_active = false;
         let now = std::time::Instant::now();
         let video_clock = match self.wall_start {
@@ -3456,13 +3468,23 @@ impl<S: 'static> Runtime<S> {
                 .filter(|_| matches!(n.looping.map(|l| l.kind), Some(rune_motion::LoopKind::Sequence(_))));
             let own_sc = p.transform.scale.x * press_k * n.static_scale
                 * sequence.and_then(|l| l.pose(now, self.reduced_motion)).map_or(1.0, |p| p.scale);
+            // An `El::scale` an app drives from a slider or pinch counts as moving until it holds
+            // still, then rasterizes at rounded sizes like a live scale.
+            let (static_moving, static_dynamic) = if n.static_scale != 1.0 || self.static_scales.contains_key(&n.id) {
+                let t = self.t;
+                let seen = self.static_scales.entry(n.id).or_insert((n.static_scale, f64::NEG_INFINITY, false));
+                if seen.0 != n.static_scale { *seen = (n.static_scale, t, true); }
+                let moving = t - seen.1 < STATIC_SCALE_SETTLE;
+                self.static_scale_settling |= moving;
+                (moving, seen.2)
+            } else { (false, false) };
             let store = self.scene.store();
             let scale_motion = pinh.scale_motion.max(
                 if store.is_animating(n.id, prop::SCALE) || store.is_animating(n.id, prop::PRESENCE)
                     || (n.press_scale.is_some() && store.is_animating(n.id, P_PRESS_SCALE))
-                    || sequence.is_some_and(|l| !self.reduced_motion && l.active(now)) {
+                    || sequence.is_some_and(|l| !self.reduced_motion && l.active(now)) || static_moving {
                     ScaleMotion::Moving
-                } else if n.live.iter().any(|b| b.property == crate::live::Property::Scale) {
+                } else if static_dynamic || n.live.iter().any(|b| b.property == crate::live::Property::Scale) {
                     ScaleMotion::Live
                 } else {
                     ScaleMotion::Still
@@ -5424,6 +5446,36 @@ mod tests {
             rt.frame(1.0 / 120.0);
             assert_eq!(rt.state.pressed, 2, "{how:?}: a held press hits at the resting rect");
         }
+    }
+
+    #[test]
+    fn a_changing_static_scale_keeps_the_glyph_atlas_bounded() {
+        struct State { k: f32 }
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            col().size(300.0, 200.0)
+                .child(el().key("card").size(200.0, 80.0).scale(s.k).child(crate::el::text("Hamburgefonstiv")))
+        }
+        let crisp = |rt: &Runtime<State>| rt.instances.iter().filter(|q| q.params[1] == KIND_GLYPH).all(|q| q.uv[2] == 0.0);
+        let mut rt = Runtime::new(State { k: 1.0 }, view, (300.0, 200.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        let rest = rt.text.atlas.glyph_entries();
+        // A slider or pinch: a new scale every frame, holding still now and then.
+        for i in 0..1000 {
+            rt.state.k = 0.5 + i as f32 * 0.0007;
+            rt.invalidate();
+            rt.frame(1.0 / 120.0);
+            assert!(i == 0 || !crisp(&rt), "a scale changing every frame samples rest-size glyphs");
+            if i % 100 == 99 { for _ in 0..30 { rt.frame(1.0 / 120.0); } }
+        }
+        let grown = rt.text.atlas.glyph_entries() - rest;
+        assert!(grown < 1000, "1,000 scales added {grown} glyph entries (one size each would add 15,000)");
+        rt.state.k = 0.75;
+        rt.invalidate();
+        rt.frame(1.0 / 120.0);
+        assert!(!crisp(&rt));
+        for _ in 0..30 { rt.frame(1.0 / 120.0); }
+        assert!(crisp(&rt), "once it holds still, text rasterizes at the scale");
+        assert!(!rt.frame(1.0 / 120.0), "and nothing keeps animating");
     }
 
     #[test]

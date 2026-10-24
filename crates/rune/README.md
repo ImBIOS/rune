@@ -95,8 +95,9 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   hit boxes and a text field's caret follow). Text under a still scale rasterizes at the scaled size, so it stays
   crisp. While a scale springs, text samples its rest-size glyphs, filtered, and turns crisp when
   the spring settles. That way a spring doesn't rasterize a glyph at every frame's size. Text
-  under `live_scale` rasterizes at the scale rounded to 1/32. A matched flight's own label keeps
-  its rest size so it doesn't pop when it lands.
+  under `live_scale`, or under a `scale` an app changes (a zoom slider), rasterizes at the scale
+  rounded to 1/32, and a changing `scale` samples rest-size glyphs until it holds still for
+  0.1 s. A matched flight's own label keeps its rest size so it doesn't pop when it lands.
 - **Focus and modals**: `.focusable(true)`, `.tab_index(n)` (positive overrides, 0 document order,
   negative pointer-only), `.focus_group()` for arrow-key roving (Up/Down only, plus type-select,
   for roles `menu`, `listbox`, `list` and `tree`; Left/Right too for other groups such as

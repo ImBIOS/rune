@@ -16,7 +16,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   with the box. Text under a still scale rasterizes at the scaled size; during a spring it
   samples its rest-size glyphs. This moves the output of any app that scales text. Text that
   isn't under a scale is unchanged. `El::scale(k)` is a static scale on the same mechanism:
-  about the centre, no layout change, with hit testing on the drawn rect.
+  about the centre, no layout change, with hit testing on the drawn rect. A `scale` an app
+  changes (a zoom slider) samples rest-size glyphs until it holds still for 0.1 s, then
+  rasterizes at the scale rounded to 1/32, so the glyph atlas stays bounded.
 - **Pictures size from their image.** An element with `pixels`/`pixels_fit` that sets only
   its width or only its height takes the other side from the image's aspect ratio (it used to
   take its content's size, usually 0). Pictures with both sides set, or neither, are

@@ -440,6 +440,10 @@ impl Atlas {
         self.dirty = Some((0, ATLAS_SIZE));
     }
 
+    /// Rasterized glyph entries, for tests that bound the atlas.
+    #[cfg(test)]
+    pub(crate) fn glyph_entries(&self) -> usize { self.map.len() }
+
     fn new() -> Self {
         Atlas {
             data: vec![0; (ATLAS_SIZE * ATLAS_SIZE) as usize],
