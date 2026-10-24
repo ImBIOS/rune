@@ -259,7 +259,14 @@ impl<S: 'static> App<S> {
 
     /// Runs until the app quits. Agent-tooling arguments (`--snap`, `--tree`, ...) render
     /// headless instead: the window requests are ignored there, and updates apply each frame.
-    pub fn run(mut self) {
+    /// Panics when the app can't start, such as without a display; `try_run` returns that error.
+    pub fn run(self) {
+        if let Err(error) = self.try_run() { panic!("{error}"); }
+    }
+
+    /// `run`, returning an error instead of panicking when the event loop can't start (no
+    /// display over ssh or in CI, no Wayland or X11 server) or fails.
+    pub fn try_run(mut self) -> Result<(), String> {
         let args = match self.argv.take() {
             Some(argv) => Args::parse_from(argv),
             None => Args::parse(),
@@ -267,12 +274,12 @@ impl<S: 'static> App<S> {
         #[cfg(feature = "hot")]
         if args.snap_on_patch.is_some() && self.compositor.is_none() {
             crate::hot::run_app(self, args);
-            return;
+            return Ok(());
         }
         if args.headless() {
-            crate::tooling::headless(self, args);
+            crate::tooling::try_headless(self, args)
         } else {
-            crate::window::run(self, args);
+            crate::window::run(self, args)
         }
     }
 }

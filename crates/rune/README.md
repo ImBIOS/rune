@@ -241,6 +241,9 @@ app.run();
 - `AppHandle::is_visible()` reports whether the window is on screen; `AppHandle::window_error()`
   says why it couldn't be created (no display, no GPU adapter or device). A failed creation is
   logged and leaves the app windowless; the next open tries again (`Gpu::try_new`).
+- `run` panics when the event loop can't start: no Wayland or X11 display, or a Mac no one is
+  logged in to (over ssh or in CI). `App::try_run`, `try_run_windows_with` and
+  `try_run_windows_with_args` return that error instead.
 - `App::on_window(|w: &WindowHandle| ..)` runs on the UI thread after every native creation, for
   icons or native styles through `WindowHandle::with_raw_handle`.
 - `AppSpec::min_size` sets the smallest window (None keeps 420×400).

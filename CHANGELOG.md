@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`App::try_run` returns startup errors.** `App::try_run`, `try_run_windows_with` and
+  `try_run_windows_with_args` return `Err(String)` when the event loop can't start (no Wayland
+  or X11 display, as over ssh or in CI) or fails, where `run` panics. On a Mac no one is logged
+  in to, an app used to start AppKit and wait forever without a window; it now fails at once
+  with "no window server session", and `run` panics with that message. `run` and its siblings
+  otherwise behave as before.
 - **`Pixels::set` wakes the windows showing it.** A `Pixels` is now a live source like `Live`:
   `set` (from any thread) wakes exactly the windows and overlays whose scene shows it with
   `El::pixels`, and no others. Sets between frames coalesce into one wake and one upload; a

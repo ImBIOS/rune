@@ -584,17 +584,45 @@ struct Host<S: 'static> {
     frame_wake: Waker,
 }
 
-pub fn run<S: 'static>(app: App<S>, args: Args) {
+pub fn run<S: 'static>(app: App<S>, args: Args) -> Result<(), String> {
     let accessory = app.accessory;
-    run_configured(Box::new(move |_| vec![WindowSpec::from_app("main", app).into()]), args, accessory);
+    run_configured(Box::new(move |_| vec![WindowSpec::from_app("main", app).into()]), args, accessory)
 }
 
-pub(crate) fn run_windows(factory: Factory, args: Args, options: crate::RunOptions) {
-    run_configured(factory, args, options.accessory);
+pub(crate) fn run_windows(factory: Factory, args: Args, options: crate::RunOptions) -> Result<(), String> {
+    run_configured(factory, args, options.accessory)
 }
 
-fn run_configured(factory: Factory, args: Args, accessory: bool) {
+/// Without a display (no `WAYLAND_DISPLAY` or `DISPLAY`, a refused X11 connection) the event
+/// loop can't be built.
+fn event_loop_error(error: winit::error::EventLoopError) -> String {
+    format!("event loop: {error}")
+}
+
+/// Whether this process can reach the window server. Over ssh to a Mac no one is logged in to,
+/// AppKit starts but never finishes launching, so the app would wait forever.
+#[cfg(target_os = "macos")]
+fn window_server_session() -> bool {
+    use std::ffi::c_void;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" { fn CGSessionCopyCurrentDictionary() -> *const c_void; }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" { fn CFRelease(cf: *const c_void); }
+    // SAFETY: a Copy-rule CF function; a non-null result is released exactly once.
+    unsafe {
+        let session = CGSessionCopyCurrentDictionary();
+        if session.is_null() { return false; }
+        CFRelease(session);
+    }
+    true
+}
+
+fn run_configured(factory: Factory, args: Args, accessory: bool) -> Result<(), String> {
     let _ = accessory;
+    #[cfg(target_os = "macos")]
+    if !window_server_session() {
+        return Err("event loop: no window server session (no one is logged in to this Mac)".into());
+    }
     #[allow(unused_mut)]
     let mut builder = EventLoop::<WakeEvent>::with_user_event();
     #[cfg(target_os = "macos")]
@@ -605,13 +633,19 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) {
             .with_default_menu(false)
             .with_activate_ignoring_other_apps(false);
     }
-    let event_loop = builder.build().expect("event loop");
+    let event_loop = builder.build().map_err(event_loop_error)?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
     let mut windows = Windows { factory: Some(factory), args, proxy, hosts: Vec::new(), gpu: Rc::default() };
     let result = event_loop.run_app(&mut windows);
     crate::clipboard::shutdown(); // Also cover an event-loop error before `exiting`.
-    result.expect("run");
+    result.map_err(|error| format!("run: {error}"))
+}
+
+#[test]
+fn an_event_loop_that_cant_start_is_an_error_naming_the_event_loop() {
+    let error = event_loop_error(winit::error::EventLoopError::RecreationAttempt);
+    assert!(error.starts_with("event loop: ") && error.contains("recreated"), "{error}");
 }
 
 impl<S: 'static> Host<S> {

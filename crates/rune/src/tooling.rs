@@ -377,13 +377,29 @@ pub fn run_windows<I: IntoIterator<Item: Into<crate::AnyWindowSpec>>>(factory: i
 
 /// Run a window factory with process-level options, such as macOS accessory activation.
 pub fn run_windows_with<I: IntoIterator<Item: Into<crate::AnyWindowSpec>>>(options: crate::RunOptions, factory: impl FnOnce(&[crate::Display]) -> I + 'static) {
-    run_window_factory(options, window_args(None, Args::parse), erase(factory));
+    started(try_run_windows_with(options, factory));
+}
+
+/// `run_windows_with`, returning an error instead of panicking when the event loop can't start
+/// (no display over ssh or in CI, no Wayland or X11 server) or fails.
+pub fn try_run_windows_with<I: IntoIterator<Item: Into<crate::AnyWindowSpec>>>(options: crate::RunOptions, factory: impl FnOnce(&[crate::Display]) -> I + 'static) -> Result<(), String> {
+    run_window_factory(options, window_args(None, Args::parse), erase(factory))
 }
 
 /// Run a window factory with explicit Rune arguments, without reading the host CLI.
 /// Pass `[]` to isolate an embedding application's flags before display discovery.
 pub fn run_windows_with_args<I: IntoIterator<Item: Into<crate::AnyWindowSpec>>>(options: crate::RunOptions, args: impl IntoIterator<Item = String>, factory: impl FnOnce(&[crate::Display]) -> I + 'static) {
-    run_window_factory(options, window_args(Some(args.into_iter().collect()), Args::parse), erase(factory));
+    started(try_run_windows_with_args(options, args, factory));
+}
+
+/// `run_windows_with_args`, returning an error instead of panicking when the event loop can't
+/// start or fails.
+pub fn try_run_windows_with_args<I: IntoIterator<Item: Into<crate::AnyWindowSpec>>>(options: crate::RunOptions, args: impl IntoIterator<Item = String>, factory: impl FnOnce(&[crate::Display]) -> I + 'static) -> Result<(), String> {
+    run_window_factory(options, window_args(Some(args.into_iter().collect()), Args::parse), erase(factory))
+}
+
+fn started(result: Result<(), String>) {
+    if let Err(error) = result { panic!("{error}"); }
 }
 
 type Factory = Box<dyn FnOnce(&[crate::Display]) -> Vec<crate::AnyWindowSpec>>;
@@ -396,23 +412,23 @@ pub(crate) fn window_args(args: Option<Vec<String>>, process: impl FnOnce() -> A
     args.map_or_else(process, Args::parse_from)
 }
 
-fn run_window_factory(options: crate::RunOptions, args: Args, factory: Factory) {
+fn run_window_factory(options: crate::RunOptions, args: Args, factory: Factory) -> Result<(), String> {
     if args.headless() {
         let displays = desktop(&args, read_script(&args).as_ref()).displays();
-        headless_window(factory(&displays), &displays, args, options);
+        headless_window(factory(&displays), &displays, args, options)
     } else {
-        crate::window::run_windows(factory, args, options);
+        crate::window::run_windows(factory, args, options)
     }
 }
 
 /// Lists the windows, or renders the one `--window KEY` selects (the first by default) with its
 /// own state. Windows that apps added with `App::window` are selectable too.
-fn headless_window(windows: Vec<crate::AnyWindowSpec>, displays: &[crate::Display], args: Args, options: crate::RunOptions) {
+fn headless_window(windows: Vec<crate::AnyWindowSpec>, displays: &[crate::Display], args: Args, options: crate::RunOptions) -> Result<(), String> {
     let mut windows = crate::windows::flatten(windows);
     crate::windows::validate(&windows).unwrap_or_else(|e| die(&e));
     if args.list_windows {
         for window in windows { println!("{}", window.key()); }
-        return;
+        return Ok(());
     }
     let index = match args.window.as_deref() {
         Some(key) => windows.iter().position(|w| w.key() == key).unwrap_or_else(|| die(&format!("no window {key:?}; use --list-windows"))),
@@ -421,16 +437,16 @@ fn headless_window(windows: Vec<crate::AnyWindowSpec>, displays: &[crate::Displa
     };
     if args.desktop.is_some() {
         crate::desktop::run(windows, index, args);
-        return;
+        return Ok(());
     }
     let mut window = windows.remove(index);
     let args = window.resolve_args(args);
     if !args.headless() {
-        crate::window::run_windows(Box::new(move |_| vec![window]), args, options);
-        return;
+        return crate::window::run_windows(Box::new(move |_| vec![window]), args, options);
     }
     let scale = displays.iter().find(|d| d.primary).unwrap_or(&displays[0]).scale;
     window.headless(args, scale as f32);
+    Ok(())
 }
 
 /// `run` with a compositor drawing every frame (see `compose`); `App::compositor` for other lifetimes.
@@ -1150,9 +1166,14 @@ mod window_tests {
     }
 }
 
-pub fn headless<S: 'static>(mut app: crate::app::App<S>, args: Args) {
+pub fn headless<S: 'static>(app: crate::app::App<S>, args: Args) {
+    started(try_headless(app, args));
+}
+
+/// `headless`, returning the error when a window whose own arguments aren't headless can't open.
+pub(crate) fn try_headless<S: 'static>(mut app: crate::app::App<S>, args: Args) -> Result<(), String> {
     if app.windows.is_empty() && args.desktop.is_none() {
-        if args.list_windows { println!("main"); return; }
+        if args.list_windows { println!("main"); return Ok(()); }
         if args.window.as_deref().is_some_and(|key| key != "main") {
             die("no such window; this app has only 'main'");
         }
@@ -1161,13 +1182,14 @@ pub fn headless<S: 'static>(mut app: crate::app::App<S>, args: Args) {
             app.spec.size = (w as f32 / scale, h as f32 / scale);
         }
         let transparent = app.window_options.transparent;
-        return headless_configured(app, args, transparent);
+        headless_configured(app, args, transparent);
+        return Ok(());
     }
     let windows = std::mem::take(&mut app.windows);
     let displays = desktop(&args, read_script(&args).as_ref()).displays();
     let accessory = app.accessory;
     let main = crate::WindowSpec::from_app("main", app);
-    headless_window(std::iter::once(main.into()).chain(windows).collect(), &displays, args, crate::RunOptions { accessory });
+    headless_window(std::iter::once(main.into()).chain(windows).collect(), &displays, args, crate::RunOptions { accessory })
 }
 
 pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, transparent: bool) {

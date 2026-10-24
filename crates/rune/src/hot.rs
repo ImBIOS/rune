@@ -96,7 +96,7 @@ fn run_host(spec: AppSpec<HostState>, state: HostState, args: Args, srgb_blend: 
     INITIAL.with(|slot| { assert!(slot.borrow().is_none()); *slot.borrow_mut() = Some(state); });
     if args.snap_on_patch.is_some() { headless(spec, args, srgb_blend); }
     else if args.headless() { crate::tooling::headless(crate::App::new(spec).srgb_blend(srgb_blend), args); }
-    else { crate::window::run(crate::App::new(spec).srgb_blend(srgb_blend), args); }
+    else if let Err(error) = crate::window::run(crate::App::new(spec).srgb_blend(srgb_blend), args) { panic!("{error}"); }
 }
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
