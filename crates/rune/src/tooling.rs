@@ -1372,9 +1372,9 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let mut profile = Vec::with_capacity(last_frame + 1);
     for k in 0..=last_frame {
         #[cfg(feature = "frame-profile")]
-        let (alloc0, commits0) = {
+        let (alloc0, commits0, cpu0) = {
             crate::frame_profile::take();
-            (procwatch::alloc::thread_allocations(), rt.stats.commits)
+            (procwatch::alloc::thread_allocations(), rt.stats.commits, crate::frame_profile::cpu_ms())
         };
         let real_t = k as f64 * dt;
         let frame_start = Instant::now();
@@ -1494,7 +1494,8 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         let ms = frame_start.elapsed().as_secs_f64() * 1000.0;
         #[cfg(feature = "frame-profile")]
         profile.push((crate::frame_profile::take(), update_ms, ms - update_ms,
-            procwatch::alloc::thread_allocations() - alloc0, rt.stats.commits - commits0, rt.stats.shaped, animating));
+            procwatch::alloc::thread_allocations() - alloc0, rt.stats.commits - commits0, rt.stats.shaped, animating,
+            cpu0.map(|start| crate::frame_profile::cpu_ms().unwrap() - start)));
         cpu_ms.push(ms);
         if k > 0 {
             if animating { anim_ms.push(ms) } else { rest_ms.push(ms) }
@@ -1560,13 +1561,19 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     {
         let rows = &profile[usize::from(profile.len() > 1)..];
         let n = rows.len() as f64;
-        let avg = |f: fn(&([f64; 5], f64, f64, u64, u64, u32, bool)) -> f64| rows.iter().map(f).sum::<f64>() / n;
+        let avg = |f: fn(&([f64; 10], f64, f64, u64, u64, u32, bool, Option<f64>)) -> f64| rows.iter().map(f).sum::<f64>() / n;
         eprintln!("rune-frame-profile {}", json!({
             "view_ms": avg(|r| r.0[0]), "commit_inclusive_ms": avg(|r| r.0[1]),
             "layout_inclusive_ms": avg(|r| r.0[2]), "shape_ms": avg(|r| r.0[3]),
             "paint_ms": avg(|r| r.0[4]), "update_ms": avg(|r| r.1), "encode_submit_ms": avg(|r| r.2),
             "allocations": avg(|r| r.3 as f64), "commits": avg(|r| r.4 as f64),
             "shaped": avg(|r| r.5 as f64), "animating_fraction": avg(|r| u8::from(r.6) as f64),
+            "thread_cpu_ms": rows[0].7.map(|_| avg(|r| r.7.unwrap())),
+            "view_cpu_ms": rows[0].7.map(|_| avg(|r| r.0[5])),
+            "commit_cpu_ms": rows[0].7.map(|_| avg(|r| r.0[6])),
+            "layout_cpu_ms": rows[0].7.map(|_| avg(|r| r.0[7])),
+            "shape_cpu_ms": rows[0].7.map(|_| avg(|r| r.0[8])),
+            "paint_cpu_ms": rows[0].7.map(|_| avg(|r| r.0[9])),
         }));
     }
     let steady: Vec<f64> = cpu_ms.iter().skip(1).copied().collect();

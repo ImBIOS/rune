@@ -111,6 +111,7 @@ mod virtual_rows;
 mod virtual_desktop;
 mod desktop;
 mod flight;
+mod frame_profile;
 pub mod file_dialog;
 pub mod text;
 pub mod theme;
@@ -161,4 +162,3 @@ pub use theme::Theme;
 pub use tok::{Family, OpticalSize, TextStyle};
 pub use tooling::{AppSpec, Chrome, extra_args, run, run_windows, run_windows_with, run_windows_with_args, run_with, set_app_id,
     try_run_windows_with, try_run_windows_with_args};
-mod frame_profile;

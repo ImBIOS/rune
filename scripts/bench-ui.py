@@ -107,7 +107,7 @@ for name, (binary, args) in workloads.items():
             if a.frame_cpu and not phase:
                 raise RuntimeError('rebuild with --features frame-profile')
             if phase:
-                row.update(json.loads(phase[1]))
+                row.update({k: v for k, v in json.loads(phase[1]).items() if v is not None})
             pixels = re.search(r'rune-first-pixels (.+)', r.stdout)
             if pixels:
                 row.update(json.loads(pixels[1]))
@@ -125,10 +125,11 @@ for name, (binary, args) in workloads.items():
             print(f'METRIC {label}.{key}={value:.6f}', flush=True)
             print(f'METRIC {label}.{key}.mad={mad[key]:.6f}', flush=True)
     if a.compare:
-        ratios = [cur['mean_ms'] / old['mean_ms'] for cur, old in zip(samples['current'], samples['before'])]
+        metric = 'thread_cpu_ms' if 'thread_cpu_ms' in samples['current'][0] and 'thread_cpu_ms' in samples['before'][0] else 'mean_ms'
+        ratios = [cur[metric] / old[metric] for cur, old in zip(samples['current'], samples['before'])]
         ratio = statistics.median(ratios)
         spread = statistics.median(abs(r - ratio) for r in ratios)
-        result[f'{name}.paired'] = {'ratio': ratio, 'mad': spread}
+        result[f'{name}.paired'] = {'metric': metric, 'ratio': ratio, 'mad': spread}
         print(f'METRIC {name}.paired_ratio={ratio:.6f}', flush=True)
         print(f'METRIC {name}.paired_ratio.mad={spread:.6f}', flush=True)
     (a.out / 'results.json').write_text(json.dumps(result, indent=2) + '\n')
