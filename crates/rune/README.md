@@ -78,8 +78,9 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   releases inside. `on_press` still runs for every press, the first one right away, so a row
   selects on the first click and opens on the second, as in AppKit; there's no delay to wait
   out a possible second click. A third press starts a new pair, and a press anywhere else breaks
-  one. The interval is the system setting on macOS and Windows and 0.5 s elsewhere. Headless runs
-  use the virtual clock, so a script's `double-click` (or two `click`s inside 0.5 s) is
+  one. Only clicks pair: a press that travels more than 4 pt, or is held past the interval, is
+  neither half of one. The interval is the system setting on macOS and Windows and 0.5 s
+  elsewhere. Headless runs use the virtual clock, so a script's `double-click` (or two `click`s inside 0.5 s) is
   deterministic. Pointer only: Enter and Space run `on_press`.
 - **Press scale**: `.press_scale(0.97)` shrinks an element (and its children) about its centre
   while a press on it is held, following the pointer in and out like an iOS tile, and springs back

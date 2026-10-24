@@ -93,6 +93,8 @@ const P_BORDER_BOTTOM: Prop<Color> = Prop::custom(78, PropClass::Color);
 const P_PRESS_SCALE: Prop<f32> = Prop::custom(79, PropClass::Scale);
 /// Seconds a changed `El::scale` holds still before its text rasterizes at that size.
 const STATIC_SCALE_SETTLE: f64 = 0.1;
+/// How far (points, per axis) a click may travel and still pair into a double click.
+const CLICK_SLOP: f32 = 4.0;
 
 /// Scroll momentum decay (iOS normal: 0.998 per ms).
 const SCROLL_DECAY: f32 = 2.002;
@@ -640,6 +642,8 @@ pub struct Runtime<S: 'static> {
     /// The press now held is the second of a double press.
     double_armed: bool,
     press_down_t: f64,
+    /// The held press has travelled past the click slop: it isn't a click of a double press.
+    press_moved: bool,
     /// A scroll under the held press cancelled it ([`Runtime::scroll_cancels_press`]).
     press_cancelled: bool,
     titlebar_action: Option<TitlebarAction>,
@@ -831,6 +835,7 @@ impl<S: 'static> Runtime<S> {
             last_press: None,
             double_armed: false,
             press_down_t: 0.0,
+            press_moved: false,
             press_cancelled: false,
             titlebar_action: None,
             double_click_interval: 0.5,
@@ -2840,6 +2845,7 @@ impl<S: 'static> Runtime<S> {
             return;
         }
         let Some((id, r, has_drag)) = self.node(&path).map(|n| (n.id, n.target, n.on_drag.is_some() && !self.drags_out(n))) else { return };
+        self.press_moved |= (x - self.press_at.0).abs() > CLICK_SLOP || (y - self.press_at.1).abs() > CLICK_SLOP;
         // A hit rect is where the element was drawn (after scrolling); `target` is its
         // unscrolled layout rect, kept only for elements that were never drawn.
         let mut hits = self.hits.iter().filter(|(hit, _)| *hit == id).peekable();
@@ -2959,7 +2965,7 @@ impl<S: 'static> Runtime<S> {
         let n = &self.nodes[ti];
         if n.window_drag && n.on_press.is_none() && n.on_double_press.is_none() && n.on_drag.is_none() && n.drag_out.is_none() && n.input.is_none() {
             let double = self.last_drag_press.is_some_and(|(t, px, py)| {
-                now - t <= self.double_click_interval && (x - px).abs() <= 4.0 && (y - py).abs() <= 4.0
+                now - t <= self.double_click_interval && (x - px).abs() <= CLICK_SLOP && (y - py).abs() <= CLICK_SLOP
             });
             self.last_drag_press = if double { None } else { Some((now, x, y)) };
             self.titlebar_action = Some(if double { TitlebarAction::DoubleClick } else { TitlebarAction::Drag });
@@ -2970,9 +2976,10 @@ impl<S: 'static> Runtime<S> {
         }
         self.press_at = (x, y);
         self.double_armed = n.on_double_press.is_some() && pending.is_some_and(|(p, t, px, py)| {
-            p == n.path && now - t <= self.double_click_interval && (x - px).abs() <= 4.0 && (y - py).abs() <= 4.0
+            p == n.path && now - t <= self.double_click_interval && (x - px).abs() <= CLICK_SLOP && (y - py).abs() <= CLICK_SLOP
         });
         self.press_down_t = now;
+        self.press_moved = false;
         self.press_cancelled = false;
         let r = self.drawn.get(ti).copied().unwrap_or([n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]]);
         if n.input.is_some() {
@@ -3066,7 +3073,9 @@ impl<S: 'static> Runtime<S> {
         if has_press && self.capture_inside {
             self.queue.push(Action::Press(path.clone()));
         }
-        if has_double && self.capture_inside {
+        // Only clicks pair: a press that dragged or was held past the interval is neither half.
+        let click = !self.press_moved && self.now_clock() - self.press_down_t <= self.double_click_interval;
+        if has_double && self.capture_inside && click {
             if double {
                 self.queue.push(Action::DoublePress(path));
             } else {
@@ -5668,13 +5677,43 @@ mod tests {
         rt.frame(1.0 / 120.0);
         assert_eq!(counts(&rt), (11, 2), "a second press released outside is cancelled");
 
+        // A second press that drags 40 pt (still inside) and lets go 5 s later is no click.
+        tick(&mut rt, 0.6);
+        click(&mut rt, (50.0, 50.0));
+        rt.pointer_down(50.0, 50.0);
+        rt.frame(1.0 / 120.0);
+        rt.pointer_move(90.0, 50.0);
+        rt.pointer_move(60.0, 50.0);
+        tick(&mut rt, 5.0);
+        rt.pointer_up(60.0, 50.0);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(counts(&rt), (13, 2), "a drag or a long press doesn't finish a double press");
+        // Held without moving past the interval, it's no click either.
+        tick(&mut rt, 0.6);
+        click(&mut rt, (50.0, 50.0));
+        rt.pointer_down(50.0, 50.0);
+        let long = rt.double_click_interval + 0.05;
+        tick(&mut rt, long);
+        rt.pointer_up(50.0, 50.0);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(counts(&rt), (15, 2), "a long second press");
+        // A first press that drags doesn't arm one.
+        tick(&mut rt, 0.6);
+        rt.pointer_down(50.0, 50.0);
+        rt.pointer_move(50.0, 90.0);
+        rt.pointer_move(50.0, 50.0);
+        rt.pointer_up(50.0, 50.0);
+        rt.frame(1.0 / 120.0);
+        click(&mut rt, (50.0, 50.0));
+        assert_eq!(counts(&rt), (17, 2), "a dragged first press");
+
         // Headless, a slower system setting is honoured on the same virtual clock.
         rt.double_click_interval = 1.0;
-        tick(&mut rt, 0.6);
+        tick(&mut rt, 1.1);
         click(&mut rt, (50.0, 50.0));
         tick(&mut rt, 0.8);
         click(&mut rt, (50.0, 50.0));
-        assert_eq!(counts(&rt), (13, 3));
+        assert_eq!(counts(&rt), (19, 3));
     }
 
     #[test]

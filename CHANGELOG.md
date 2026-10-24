@@ -33,7 +33,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   exhaustive `match` on it needs a new arm.
 - **Double press.** `El::on_double_press` runs on the second of two presses inside the system
   double-click interval (now read on Windows too) and 4 pt of each other; `on_press` still runs
-  for both. Scripts gain a `double-click` event. Elements without it are unchanged.
+  for both. Only clicks pair: a press that travels more than 4 pt, or is held past the interval,
+  is neither half of one. Scripts gain a `double-click` event. Elements without it are unchanged.
 - **Press scale.** `El::press_scale(0.97)` shrinks an element about its centre while a press
   on it is held and springs it back on release. Layout and hit testing keep the resting size,
   and a held press keeps its hover. Reduce Motion turns it off. Nothing changes for elements
