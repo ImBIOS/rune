@@ -569,7 +569,7 @@ impl AnimationStore {
             if stacked {
                 for l in range {
                     if self.l_more[l] != NONE {
-                        let (o2, v2) = self.sample_extra(l, now, true);
+                        let (o2, v2) = self.sample_extra(l, now);
                         self.l_value[l] += o2;
                         self.l_vel[l] += v2;
                     }
@@ -915,14 +915,14 @@ impl AnimationStore {
         (self.l_target[l] + o, v)
     }
 
-    /// Sums extra layers; with `prune`, frees the ones that have ended.
-    fn sample_extra(&mut self, l: usize, now: f64, prune: bool) -> (f32, f32) {
+    /// Sums extra layers and frees the ones that have ended.
+    fn sample_extra(&mut self, l: usize, now: f64) -> (f32, f32) {
         let (mut o, mut v) = (0.0, 0.0);
         let mut prev = NONE;
         let mut m = self.l_more[l];
         while m != NONE {
             let e = self.extra[m as usize];
-            if prune && now >= e.layer.end {
+            if now >= e.layer.end {
                 if prev == NONE {
                     self.l_more[l] = e.next;
                 } else {
