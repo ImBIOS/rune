@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Continuous corners.** `El::continuous_corners()` rounds an element's fill, border, image,
+  outline, `clip_rounded` and system material with Apple's continuous curve (CALayer
+  `.continuous`, SwiftUI `.continuous`) instead of circular arcs; shadows stay circular.
+  `LayerSpec::clip_radius` takes a negative radius for the same shape. Adds the public field
+  `Visual::continuous_corners`, so a `Visual { .. }` literal without `..Default::default()`
+  stops building. `SystemMaterial::Glass` was already continuous; `Popover` follows the flag.
 - **System backdrop materials.** `El::system_material(SystemMaterial::Glass | Popover)` backs
   an element with Liquid Glass (`NSGlassEffectView`, macOS 26+; the popover material before)
   or the popover material, as a native view under a transparent window's Metal layer that

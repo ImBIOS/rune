@@ -93,14 +93,30 @@ fn base_vs(i: In) -> Out {
     return o;
 }
 
+// Apple's continuous corner of radius r: its curve leaves each edge K·r from the corner, and
+// from the point (K·r, K·r) inside the corner it lies K·r·g(u) away, u running -1..1 across
+// the quarter turn (0 on the diagonal; within 0.32% of r). Each quadrant takes its own
+// corner's whole curve, as Core Animation does when K·r passes half the shorter side.
+const CONTINUOUS_K: f32 = 1.52866483;
+fn sd_continuous(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 {
+    let e = CONTINUOUS_K * r;
+    let q = half - abs(p);
+    let v = vec2<f32>(e) - q;
+    if (v.x <= 0.0 || v.y <= 0.0) { return max(-q.x, -q.y); }
+    let u = atan2(v.y, v.x) * (4.0 / 3.14159265) - 1.0;
+    let u2 = u * u;
+    return length(v) - e * (1.14602295 + u2 * (-0.37573161 + u2 * (0.30796609 - 0.07724354 * u2)));
+}
+
 fn sd_rounded(p: vec2<f32>, half: vec2<f32>, radii: vec4<f32>) -> f32 {
-    // radii: top-left, top-right, bottom-right, bottom-left (y down).
+    // radii: top-left, top-right, bottom-right, bottom-left (y down). Negative is continuous.
     var r = radii.x;
     if (p.x > 0.0) {
         r = select(radii.y, radii.z, p.y > 0.0);
     } else {
         r = select(radii.x, radii.w, p.y > 0.0);
     }
+    if (r < 0.0) { return sd_continuous(p, half, min(-r, min(half.x, half.y))); }
     r = min(r, min(half.x, half.y));
     let q = abs(p) - half + vec2<f32>(r);
     return min(max(q.x, q.y), 0.0) + length(max(q, vec2<f32>(0.0))) - r;
@@ -130,7 +146,7 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
         alpha *= a;
     }
     let radius = bitcast<f32>(packed.w);
-    if radius > 0.0 {
+    if radius != 0.0 {
         let half = (c.zw - c.xy) * 0.5;
         alpha *= clamp(0.5 - sd_rounded(p - c.xy - half, half, vec4(radius)), 0.0, 1.0);
     }
@@ -284,7 +300,7 @@ fn image_texel(t: vec2<i32>, premultiplied: bool) -> vec4<f32> {
 fn ring_arc(p: vec2<f32>, size: vec2<f32>, radii: vec4<f32>, bw: f32) -> vec2<f32> {
     let h = bw * 0.5;
     let half = size * 0.5;
-    let rc = max(min(radii, vec4<f32>(min(half.x, half.y))) - vec4<f32>(h), vec4<f32>(0.0));
+    let rc = max(min(abs(radii), vec4<f32>(min(half.x, half.y))) - vec4<f32>(h), vec4<f32>(0.0));
     let e = rc + vec4<f32>(h);
     let arc = rc * 1.5707964;
     let s_tr = max(size.x - bw - rc.x - rc.y, 0.0);
@@ -364,7 +380,7 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         }
     } else if (kind < 1.5) {
         let sigma = max(i.params.z, 0.01);
-        let corner = min(i.radii.x, min(half.x, half.y));
+        let corner = min(abs(i.radii.x), min(half.x, half.y));
         col = i.fill * shadow(i.p - center, half, sigma, corner);
         // A shadow under a native system material leaves its interior clear: `uv` holds the
         // hole relative to this rect and `radii.w` its corner radius.
@@ -440,9 +456,9 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
             let q = i.p - center - i.uv.xy;
             var lit: f32;
             if (i.params.z < 0.3) {
-                lit = clamp(0.5 - sd_rounded(q, ih, max(i.radii - vec4<f32>(spread), vec4<f32>(0.0))), 0.0, 1.0);
+                lit = clamp(0.5 - sd_rounded(q, ih, sign(i.radii) * max(abs(i.radii) - vec4<f32>(spread), vec4<f32>(0.0))), 0.0, 1.0);
             } else {
-                lit = shadow(q, ih, i.params.z, max(min(i.radii.x - spread, min(ih.x, ih.y)), 0.0));
+                lit = shadow(q, ih, i.params.z, max(min(abs(i.radii.x) - spread, min(ih.x, ih.y)), 0.0));
             }
             col = i.fill * cov * (1.0 - clamp(lit, 0.0, 1.0));
         } else {

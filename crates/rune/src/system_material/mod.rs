@@ -35,6 +35,8 @@ pub(crate) struct MaterialDraw {
     pub rect: [f32; 4],
     /// Corner radius, already clamped to half the shorter side.
     pub radius: f32,
+    /// Continuous corners (`El::continuous_corners`).
+    pub continuous: bool,
     /// The element's effective opacity, ancestors included.
     pub opacity: f32,
 }

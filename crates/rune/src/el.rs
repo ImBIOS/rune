@@ -515,6 +515,8 @@ pub struct Visual {
     pub surface: Option<(crate::NativeSurface, crate::SurfaceFit)>,
     pub fill: Color,
     pub radius: [f32; 4],
+    /// Corners follow Apple's continuous curve instead of circular arcs (`El::continuous_corners`).
+    pub continuous_corners: bool,
     pub border_width: f32,
     pub border: Color,
     /// Bottom colour of a vertical border gradient whose top is `border` (`El::border_gradient`).
@@ -568,6 +570,7 @@ impl Default for Visual {
             surface: None,
             fill: Color::TRANSPARENT,
             radius: [0.0; 4],
+            continuous_corners: false,
             border_width: 0.0,
             border: Color::TRANSPARENT,
             border_bottom: None,
@@ -1392,6 +1395,15 @@ impl El {
     }
     pub fn radius(mut self, r: f32) -> Self {
         self.vis.radius = [r; 4];
+        self
+    }
+    /// Round the corners with Apple's continuous curve (`CALayerCornerCurve.continuous`, SwiftUI's
+    /// `.continuous` style), which eases into the straight edges over about 1.53 times the radius
+    /// instead of meeting them at a circular arc. Applies to the fill, border, image, outline,
+    /// `clip_rounded` and system material; shadows keep circular corners, like a CALayer
+    /// shadow from a `CGPath(roundedRect:)`.
+    pub fn continuous_corners(mut self) -> Self {
+        self.vis.continuous_corners = true;
         self
     }
     /// Per-corner radius: top-left, top-right, bottom-right, bottom-left.

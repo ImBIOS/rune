@@ -16,6 +16,9 @@ mod filter_tests;
 #[cfg(test)]
 #[path = "rounded_clip_tests.rs"]
 mod rounded_clip_tests;
+#[cfg(test)]
+#[path = "continuous_corner_tests.rs"]
+mod continuous_corner_tests;
 
 #[derive(Default)]
 pub(super) struct Layers {

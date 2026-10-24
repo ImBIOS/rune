@@ -94,6 +94,19 @@ fn ramp(d: f32, width: f32) -> f32 {
         let q = abs(p-u.clip.xy-h)-h+r;
         let d = min(max(q.x,q.y),0.0)+length(max(q,vec2<f32>(0.0)))-r;
         mask = clamp(0.5-d,0.0,1.0);
+    } else if clip_radius < 0.0 {
+        // Continuous corners, as `sd_continuous` in shader.wgsl.
+        let h = (u.clip.zw-u.clip.xy)*0.5;
+        let e = 1.52866483 * min(-clip_radius, min(h.x,h.y));
+        let q = h - abs(p-u.clip.xy-h);
+        let v = vec2<f32>(e) - q;
+        var d = max(-q.x, -q.y);
+        if v.x > 0.0 && v.y > 0.0 {
+            let w = atan2(v.y, v.x) * (4.0 / 3.14159265) - 1.0;
+            let w2 = w * w;
+            d = length(v) - e * (1.14602295 + w2 * (-0.37573161 + w2 * (0.30796609 - 0.07724354 * w2)));
+        }
+        mask = clamp(0.5-d,0.0,1.0);
     }
     return col * (clamp(0.5-distance,0.0,1.0)*clip*mask*u.color.w);
 }

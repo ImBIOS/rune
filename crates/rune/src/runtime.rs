@@ -3859,7 +3859,11 @@ impl<S: 'static> Runtime<S> {
                 }
             }
             let intersect = |a: [f32; 4], b: [f32; 4]| [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
-            let mut own_round = n.vis.clip_radius.map(|radius| (r, (radius * sc * s).min(w.min(h) * 0.5)));
+            // A negative clip radius rounds with continuous corners (`render::corner_extent`).
+            let mut own_round = n.vis.clip_radius.map(|radius| {
+                let radius = (radius * sc * s).min(w.min(h) * 0.5);
+                (r, if n.vis.continuous_corners { -radius } else { radius })
+            });
             let mut hit_clip = intersect(pinh.clip, clip);
             if let Some((rect, _)) = own_round { hit_clip = intersect(hit_clip, rect); }
             let (mut hit_fade, mut hit_origin) = (pinh.fade, pinh.fade_origin);
@@ -3868,6 +3872,7 @@ impl<S: 'static> Runtime<S> {
             // Its hard edges already exclude everything the rounded mask would remove.
             for round in [&mut rounded, &mut own_round] {
                 if let Some((mask, radius)) = *round {
+                    let radius = crate::render::corner_extent(radius);
                     let cut = intersect(clip, mask);
                     if cut[2] <= cut[0] || cut[3] <= cut[1]
                         || (cut[0] >= mask[0] + radius && cut[2] <= mask[2] - radius)
@@ -3952,11 +3957,12 @@ impl<S: 'static> Runtime<S> {
                 let native_material = match n.material {
                     Some(material) if self.materials.len() < crate::MAX_NATIVE_MATERIALS => {
                         let radius = crate::system_material::clamp_radius(radii, w, h);
+                        let continuous = n.vis.continuous_corners;
                         self.materials.push(crate::system_material::MaterialDraw {
-                            id: n.id, material, rect: [r[0], r[1], w, h], radius,
+                            id: n.id, material, rect: [r[0], r[1], w, h], radius, continuous,
                             opacity: effective_opacity * n.vis.paint_alpha,
                         });
-                        self.native_materials.then_some(radius)
+                        self.native_materials.then_some(if continuous { -radius } else { radius })
                     }
                     _ => None,
                 };
@@ -4004,6 +4010,9 @@ impl<S: 'static> Runtime<S> {
                         fade: crate::render::pack_fade(fade, clip, clip),
                     });
                 }
+                // Shadows keep circular corners; the element's own shapes take the sign, and
+                // negative radii draw continuous corners (shader.wgsl `sd_rounded`).
+                let radii = if n.vis.continuous_corners { radii.map(|v| -v) } else { radii };
                 let mut overlay = [0.0f32; 4];
                 if let Some(c) = n.focus.highlight && self.highlight_visible(i) {
                     overlay = over(premul(c, 1.0, srgb), overlay);
@@ -4215,7 +4224,7 @@ impl<S: 'static> Runtime<S> {
                     if c.a > 0.0 && ol.width > 0.0 {
                         self.instances.push(Instance {
                             rect: [r[0] - g, r[1] - g, w + 2.0 * g, h + 2.0 * g],
-                            radii: radii.map(|v| if v > 0.0 { v + g } else { 0.0 }),
+                            radii: radii.map(|v| if v != 0.0 { v + g.copysign(v) } else { 0.0 }),
                             fill: [0.0; 4],
                             border: premul(c, o, srgb),
                             params: [ol.width * k_px, KIND_RECT, 0.0, 1.0],

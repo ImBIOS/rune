@@ -40,7 +40,13 @@ struct Slot {
     material: SystemMaterial,
     /// `NSGlassEffectView`, which rounds itself; the effect views round their layer.
     glass: bool,
-    shown: Option<([f64; 4], f64, f64)>,
+    shown: Option<([f64; 4], f64, f64, bool)>,
+}
+
+#[link(name = "QuartzCore", kind = "framework")]
+unsafe extern "C" {
+    static kCACornerCurveContinuous: &'static AnyObject;
+    static kCACornerCurveCircular: &'static AnyObject;
 }
 
 /// One window's material views.
@@ -121,7 +127,7 @@ impl Materials {
             }
             let slot = &mut self.slots[k];
             let (frame, radius) = draw.points(scale);
-            let state = (frame, radius, f64::from(draw.opacity.clamp(0.0, 1.0)));
+            let state = (frame, radius, f64::from(draw.opacity.clamp(0.0, 1.0)), draw.continuous);
             if slot.shown == Some(state) { continue; }
             let view = &*slot.view;
             // SAFETY: NSView and NSGlassEffectView setters and CALayer properties on the main thread.
@@ -131,7 +137,11 @@ impl Materials {
                     let _: () = msg_send![view, setCornerRadius: radius];
                 } else {
                     let layer: *mut AnyObject = msg_send![view, layer];
-                    if let Some(layer) = layer.as_ref() { let _: () = msg_send![layer, setCornerRadius: radius]; }
+                    if let Some(layer) = layer.as_ref() {
+                        let _: () = msg_send![layer, setCornerRadius: radius];
+                        let curve: &AnyObject = if draw.continuous { kCACornerCurveContinuous } else { kCACornerCurveCircular };
+                        let _: () = msg_send![layer, setCornerCurve: curve];
+                    }
                 }
                 let _: () = msg_send![view, setAlphaValue: state.2];
                 let _: () = msg_send![view, layoutSubtreeIfNeeded];

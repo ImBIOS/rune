@@ -5,7 +5,7 @@ use bytemuck::Zeroable;
 
 #[test]
 fn native_frames_are_points_from_the_top_left() {
-    let draw = MaterialDraw { id: NodeId(1), material: SystemMaterial::Glass, rect: [20.0, 40.0, 200.0, 100.0], radius: 24.0, opacity: 1.0 };
+    let draw = MaterialDraw { id: NodeId(1), material: SystemMaterial::Glass, rect: [20.0, 40.0, 200.0, 100.0], radius: 24.0, continuous: false, opacity: 1.0 };
     assert_eq!(draw.points(2.0), ([10.0, 20.0, 100.0, 50.0], 12.0));
     assert_eq!(draw.points(1.0), ([20.0, 40.0, 200.0, 100.0], 24.0));
 }

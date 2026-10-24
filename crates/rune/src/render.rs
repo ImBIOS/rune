@@ -71,8 +71,9 @@ pub struct LayerSpec {
     pub blend: Blend,
     /// Gaussian standard deviation in device pixels, clamped to 64. Zero bypasses filtering.
     pub blur: f32,
-    /// Radius of the rounded `clip` rectangle, in device pixels; zero is rectangular.
-    /// Applied to the completed layer after filtering. The caller supplies finite clip edges.
+    /// Radius of the rounded `clip` rectangle, in device pixels; zero is rectangular and a
+    /// negative radius rounds with continuous corners (`El::continuous_corners`). Applied to
+    /// the completed layer after filtering. The caller supplies finite clip edges.
     pub clip_radius: f32,
 }
 
@@ -124,8 +125,11 @@ pub const NO_CLIP: [f32; 4] = [-1e6, -1e6, 1e6, 1e6];
 
 impl Instance {
     /// Rounded clipping shares the packed fade ABI across primitives and layer composites.
+    /// A negative radius keeps its sign: continuous corners (`corner_extent`).
     pub(crate) fn round_clip(&mut self, radius: f32) {
-        self.fade[3] = radius.max(0.0).min(((self.clip[2] - self.clip[0]).min(self.clip[3] - self.clip[1]) * 0.5).max(0.0)).to_bits();
+        let half = ((self.clip[2] - self.clip[0]).min(self.clip[3] - self.clip[1]) * 0.5).max(0.0);
+        let r = radius.abs().min(half);
+        self.fade[3] = if radius < 0.0 { -r } else { r }.to_bits();
     }
 
     /// Begin an isolated scope. `bounds` is a device-pixel [x,y,w,h] content bound, including
@@ -685,6 +689,15 @@ impl Renderer {
         self.draw_range(&mut pass, self.format, 0..self.count);
     }
 }
+
+/// How far a corner of radius `radius` reaches along each edge. Radii are signed: a negative
+/// radius draws Apple's continuous corner, whose curve starts 1.528 times the radius from the
+/// corner (`CONTINUOUS_K` in shader.wgsl).
+pub(crate) fn corner_extent(radius: f32) -> f32 {
+    if radius < 0.0 { -radius * CONTINUOUS_K } else { radius }
+}
+
+pub(crate) const CONTINUOUS_K: f32 = 1.528_664_8;
 
 /// An offscreen sRGB target with CPU readback.
 pub struct Offscreen {

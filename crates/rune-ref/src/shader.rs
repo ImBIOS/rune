@@ -17,11 +17,27 @@ fn sd(p: [f32; 2], h: [f32; 2], radii: [f32; 4]) -> f32 {
     } else {
         0
     };
+    if radii[index] < 0.0 {
+        return sd_continuous(p, h, (-radii[index]).min(h[0].min(h[1])));
+    }
     let r = radii[index].min(h[0].min(h[1]));
     let q = [p[0].abs() - h[0] + r, p[1].abs() - h[1] + r];
     let a = q[0].max(0.0);
     let b = q[1].max(0.0);
     q[0].max(q[1]).min(0.0) + sqrtf(a * a + b * b) - r
+}
+/// Apple's continuous corner: from (K·r, K·r) inside the corner, the curve lies K·r·g(u) away.
+fn sd_continuous(p: [f32; 2], h: [f32; 2], r: f32) -> f32 {
+    let e = 1.528_664_8 * r;
+    let q = [h[0] - p[0].abs(), h[1] - p[1].abs()];
+    let v = [e - q[0], e - q[1]];
+    if v[0] <= 0.0 || v[1] <= 0.0 {
+        return (-q[0]).max(-q[1]);
+    }
+    let u = atan2f(v[1], v[0]) * (4.0 / std::f32::consts::PI) - 1.0;
+    let u2 = u * u;
+    let g = 1.146_022_9 + u2 * (-0.375_731_6 + u2 * (0.307_966_1 - 0.077_243_54 * u2));
+    sqrtf(v[0] * v[0] + v[1] * v[1]) - e * g
 }
 fn ramp(d: f32, fade: f32) -> f32 {
     if fade <= 0.0 {
@@ -68,7 +84,7 @@ fn shadow(p: [f32; 2], h: [f32; 2], sigma: f32, corner: f32) -> f32 {
 fn ring_arc(p: [f32; 2], size: [f32; 2], radii: [f32; 4], bw: f32) -> (f32, f32) {
     let h = bw * 0.5;
     let m = (size[0] * 0.5).min(size[1] * 0.5);
-    let rc = radii.map(|r| (r.min(m) - h).max(0.0));
+    let rc = radii.map(|r| (r.abs().min(m) - h).max(0.0));
     let e = rc.map(|r| r + h);
     let arc = rc.map(|r| r * 1.5707964);
     let s_tr = (size[0] - bw - rc[0] - rc[1]).max(0.0);
@@ -159,7 +175,7 @@ pub(crate) fn fragment(i: &Primitive, atlas: &Atlas, screen: [f32; 2]) -> [f32; 
             }
         }
         1 => {
-            let mut cov = shadow(q, h, i.params[2].max(0.01), i.radii[0].min(h[0].min(h[1])));
+            let mut cov = shadow(q, h, i.params[2].max(0.01), i.radii[0].abs().min(h[0].min(h[1])));
             if i.uv[2] > 0.0 {
                 let hole = [i.uv[2] * 0.5, i.uv[3] * 0.5];
                 let at = [p[0] - (i.rect[0] + i.uv[0] + hole[0]), p[1] - (i.rect[1] + i.uv[1] + hole[1])];
@@ -195,13 +211,13 @@ pub(crate) fn fragment(i: &Primitive, atlas: &Atlas, screen: [f32; 2]) -> [f32; 
             let ih = h.map(|v| (v - spread).max(0.0));
             let q = [q[0] - i.uv[0], q[1] - i.uv[1]];
             let lit = if i.params[2] < 0.3 {
-                clamp(0.5 - sd(q, ih, i.radii.map(|r| (r - spread).max(0.0))))
+                clamp(0.5 - sd(q, ih, i.radii.map(|r| (r.abs() - spread).max(0.0).copysign(r))))
             } else {
                 shadow(
                     q,
                     ih,
                     i.params[2],
-                    (i.radii[0] - spread).min(ih[0].min(ih[1])).max(0.0),
+                    (i.radii[0].abs() - spread).min(ih[0].min(ih[1])).max(0.0),
                 )
             };
             col = i.fill.map(|c| c * cov * (1.0 - clamp(lit)));
