@@ -1021,9 +1021,16 @@ impl<S: 'static> Runtime<S> {
             for bound in &mut node.live { bound.attach(&self.live_clock, self.clock); }
         }
         for sub in &self.live_subscriptions { sub.active.store(false, Ordering::Release); }
+        // Pixels only wake: each frame's build uploads their current image, so unlike bound
+        // values they leave nothing to sample on a later visible frame.
+        let mut sampled = false;
         for node in &self.nodes {
-            if self.is_exiting(node.id) { continue; }
+            // An element removed outright leaves the scene now but `nodes` only at the next
+            // prune. Exiting elements and their children are still drawn, so their text and
+            // pixels keep waking until the exit ends (commit already dropped their bindings).
+            if !self.scene.contains(node.id) { continue; }
             let text = node.text.as_ref().and_then(|t| t.live.as_ref()).map(|t| &t.source);
+            sampled |= text.is_some() || !node.live.is_empty();
             let pixels = node.vis.pixels.as_ref().map(|p| &p.source);
             for source in node.live.iter().map(|b| &b.source).chain(text).chain(pixels) {
                 if let Some(sub) = self.live_subscriptions.iter().find(|s| s.source_id == source.id()) {
@@ -1034,15 +1041,18 @@ impl<S: 'static> Runtime<S> {
             }
         }
         self.live_subscriptions.retain(|s| s.active.load(Ordering::Acquire));
-        self.live_dirty = !self.live_subscriptions.is_empty();
+        self.live_dirty = sampled;
     }
 
-    fn latch_live(&mut self) -> bool {
-        if !self.surface_visible { return false; }
-        // Clear before sampling: a concurrent publication either participates in this frame or
-        // retains a pending wake for the next one. Never clear after sampling (lost wake race).
-        let pending = self.live_wake.pending.swap(false, std::sync::atomic::Ordering::AcqRel);
-        if self.live_subscriptions.is_empty() { return false; }
+    /// Clear before this frame reads anything a source publishes (a picture's size for layout,
+    /// a bound value): a concurrent publication either lands in this frame or keeps a wake for
+    /// the next. Never clear after reading (lost wake race). Hidden hosts keep the wake for show.
+    fn take_live_wake(&self) -> bool {
+        self.surface_visible && self.live_wake.pending.swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    fn latch_live(&mut self, pending: bool) -> bool {
+        if !self.surface_visible || self.live_subscriptions.is_empty() { return false; }
         if !pending && !self.live_dirty { return false; }
         self.live_dirty = false;
         for node in &mut self.nodes {
@@ -1396,6 +1406,7 @@ impl<S: 'static> Runtime<S> {
     /// `elapsed` advances the logical clock when no wall clock drives it; `catch_up` steps
     /// running motion before the commit and `dt` steps all motion after it.
     fn frame_step(&mut self, elapsed: f64, catch_up: f64, dt: f64) -> bool {
+        let live_woke = self.take_live_wake();
         #[cfg(feature = "hot")]
         if self.hot.as_mut().is_some_and(crate::hot::Session::changed) {
             // Replace handler trait objects before queued input can call an old vtable.
@@ -1496,7 +1507,9 @@ impl<S: 'static> Runtime<S> {
         // Those scrolls moved the caret after the commit a view placed from it saw.
         if self.caret_watch && self.caret_moved(None) { self.commit(&Tx { instant: true, ..Tx::default() }); }
         self.update_interaction();
-        let live_animating = self.latch_live();
+        #[cfg(test)]
+        if let Some(publish) = tests::MID_FRAME.with(|hook| hook.borrow_mut().take()) { publish(); }
+        let live_animating = self.latch_live(live_woke);
         if let Some(trace) = tx.trace.take() {
             for event in trace.events { self.trace_event(event); }
             for (name, kind, value) in trace.channels { self.trace_channel(name, kind, value); }
@@ -1610,7 +1623,7 @@ impl<S: 'static> Runtime<S> {
         if !self.live_subscriptions.is_empty() {
             let dirty = self.live_dirty;
             self.subscribe_live();
-            self.live_dirty = dirty && !self.live_subscriptions.is_empty();
+            self.live_dirty &= dirty;
         }
     }
 
@@ -5296,6 +5309,12 @@ mod tests {
     use super::*;
     use crate::el::{col, el};
 
+    thread_local! {
+        /// Runs once inside the next frame, after layout and just before live values latch: a
+        /// publication from another thread landing at the worst moment.
+        pub(super) static MID_FRAME: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    }
+
     #[test]
     fn dissolve_prepass_only_runs_for_trees_with_dissolve_nodes() {
         fn view(enabled: &bool, _: &mut Cx<bool>) -> El {
@@ -6299,6 +6318,90 @@ mod tests {
         let w = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("w")).unwrap();
         assert_eq!((w.rect[3], w.target[3]), (60.0, 60.0), "drawn at its size, not springing open");
         assert!(!w.moving);
+    }
+
+    /// A decode or stream landing after this frame read the picture's size still gets a frame
+    /// that sizes it, though the frame latched live values after the set.
+    #[test]
+    fn a_picture_set_mid_frame_wakes_another_frame_to_size_it() {
+        use crate::Pixels;
+        fn view(p: &Pixels, _: &mut Cx<Pixels>) -> El {
+            col().w(240.0).items_start().child(el().key("w").w(120.0).pixels(p))
+        }
+        let height = |rt: &Runtime<Pixels>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("w")).unwrap().target[3];
+        let px = Pixels::new();
+        let mut rt = Runtime::new(px.clone(), view, (240.0, 600.0), Env::new(true, 1.0));
+        let wakes = counting_waker(&mut rt);
+        rt.frame(0.0);
+        assert_eq!(height(&rt), 0.0);
+
+        let set = px.clone();
+        MID_FRAME.with(|hook| *hook.borrow_mut() = Some(Box::new(move || set.set(4, 2, vec![255; 4 * 4 * 2]))));
+        assert!(!rt.frame(1.0 / 120.0));
+        assert_eq!(wakes.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(rt.live_pending(), "the set's wake outlives the frame it landed in");
+        rt.frame(1.0 / 120.0);
+        assert_eq!(height(&rt), 60.0);
+        assert!(!rt.live_pending());
+    }
+
+    fn counting_waker<S: 'static>(rt: &mut Runtime<S>) -> Arc<std::sync::atomic::AtomicUsize> {
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = wakes.clone();
+        rt.set_live_waker(Arc::new(move || { count.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }));
+        wakes
+    }
+
+    #[test]
+    fn a_picture_removed_outright_stops_waking_in_the_frame_that_removes_it() {
+        use crate::Pixels;
+        fn view(s: &(Pixels, bool), _: &mut Cx<(Pixels, bool)>) -> El {
+            let root = el().size(8.0, 8.0);
+            if s.1 { root.child(el().key("pic").size(4.0, 4.0).pixels(&s.0)) } else { root }
+        }
+        let px = Pixels::new();
+        let mut rt = Runtime::new((px.clone(), true), view, (8.0, 8.0), Env::new(true, 1.0));
+        let wakes = counting_waker(&mut rt);
+        rt.frame(0.0);
+        rt.update(|s, tx| { s.1 = false; tx.settle(); });
+        let set = px.clone();
+        MID_FRAME.with(|hook| *hook.borrow_mut() = Some(Box::new(move || set.set(1, 1, vec![255; 4]))));
+        rt.frame(0.0);
+        assert_eq!(wakes.load(std::sync::atomic::Ordering::Relaxed), 0, "unmounted before the set");
+        assert!(!rt.live_pending());
+    }
+
+    /// Everything an exit still draws keeps updating: an exiting picture and a picture inside
+    /// an exiting element both wake until the exit ends.
+    #[test]
+    fn pictures_in_an_exit_wake_until_it_ends() {
+        use crate::Pixels;
+        use std::sync::atomic::Ordering::Relaxed;
+        type State = (Pixels, Pixels, bool);
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let root = el().size(20.0, 20.0);
+            if !s.2 { return root; }
+            root.child(el().key("direct").size(4.0, 4.0).pixels(&s.0).transition(Transition::opacity()))
+                .child(el().key("card").size(8.0, 8.0).transition(Transition::opacity())
+                    .child(el().key("child").size(4.0, 4.0).pixels(&s.1)))
+        }
+        let (direct, child) = (Pixels::new(), Pixels::new());
+        let mut rt = Runtime::new((direct.clone(), child.clone(), true), view, (20.0, 20.0), Env::new(true, 1.0));
+        let wakes = counting_waker(&mut rt);
+        rt.frame(0.0);
+        rt.update(|s, _| s.2 = false);
+        assert!(rt.frame(0.0), "the exit runs");
+        direct.set(1, 1, vec![1; 4]);
+        assert_eq!(wakes.load(Relaxed), 1, "an exiting picture wakes");
+        rt.frame(1.0 / 120.0);
+        child.set(1, 1, vec![1; 4]);
+        assert_eq!(wakes.load(Relaxed), 2, "a picture inside an exiting element wakes");
+        for _ in 0..240 { if !rt.frame(1.0 / 120.0) { break; } }
+        assert!(!rt.elements().iter().any(|e| e.key.as_deref() == Some("child")), "the exit ended");
+        direct.set(1, 1, vec![2; 4]);
+        child.set(1, 1, vec![2; 4]);
+        assert_eq!(wakes.load(Relaxed), 2, "gone pictures stay asleep");
+        assert!(!rt.live_pending());
     }
 
     #[test]

@@ -56,6 +56,13 @@ impl Image {
     pub(crate) fn decoded(&self) -> Option<Result<&Decoded, &ImageError>> {
         self.0.decoded.get().map(|r| r.as_ref().map(Arc::as_ref))
     }
+    // The handle is ready before its pixels wake any window, so a woken frame sees its size.
+    fn finish(&self, decoded: Result<Decoded, ImageError>) {
+        let decoded = decoded.map(Arc::new);
+        let mips = decoded.as_ref().ok().cloned();
+        let _ = self.0.decoded.set(decoded);
+        if let Some(mips) = mips { self.0.pixels.set_mips(mips); }
+    }
 }
 
 enum Input { Encoded(Arc<[u8]>), Rgba(u32, u32, Arc<[u8]>), Icon(std::path::PathBuf, u32) }
@@ -78,9 +85,7 @@ impl ImageCache {
                     Input::Rgba(w, h, bytes) => mip_chain(w, h, &bytes),
                     Input::Icon(path, px) => app_icon_rgba(&path, px).and_then(|(w, h, bytes)| mip_chain(w, h, &bytes)),
                 };
-                let decoded = decoded.map(Arc::new);
-                if let Ok(decoded) = &decoded { job.image.0.pixels.set_mips(decoded.clone()); }
-                let _ = job.image.0.decoded.set(decoded);
+                job.image.finish(decoded);
                 waker();
             }
         }).expect("image worker");
@@ -483,6 +488,19 @@ mod tests {
         assert_eq!(gray.mips[1].pixels, [188, 188, 188, 255]);
         let tail = mip_chain(3, 1, &[255, 255, 255, 1, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
         assert_eq!(tail.mips[1].pixels, [0, 0, 0, 0], "alpha rounded to zero cannot emit light");
+    }
+
+    #[test]
+    fn decoded_pixels_wake_windows_only_once_the_image_reports_ready() {
+        let image = Image(Arc::new(State { id: [0; 32], pixels: crate::Pixels::new(), decoded: OnceLock::new() }));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (probe, record) = (image.clone(), seen.clone());
+        let wake = crate::live::Wake::new(Arc::new(move || {
+            record.lock().unwrap().push((probe.is_ready(), probe.size()));
+        }));
+        let _subscription = image.pixels().source.subscribe(&wake);
+        image.finish(mip_chain(2, 1, &[0, 0, 0, 255, 255, 255, 255, 255]));
+        assert_eq!(*seen.lock().unwrap(), [(true, Some([2, 1]))]);
     }
 
     #[test]

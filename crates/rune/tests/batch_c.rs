@@ -50,6 +50,8 @@ fn live_text_shapes_only_changed_run_without_layout_and_coalesces_visible_wakes(
     assert_eq!(info(&a, "clock").rect, rect, "placeholder still reserves the same box on rebuild");
     assert_eq!(info(&a, "clock").text.as_deref(), Some("a much longer clock value"));
     a.state.bound = false; a.invalidate(); a.frame(0.0);
+    // The clock still draws while it fades out; once it's gone it stops waking.
+    for _ in 0..240 { if !a.frame(1.0 / 120.0) { break; } }
     b.set_live_visible(false);
     let before = wakes.load(Ordering::Relaxed);
     value.set("00:03");

@@ -2353,6 +2353,10 @@ mod tests {
         let count = wakes.clone();
         overlay.rt.set_live_waker(Arc::new(move || { count.fetch_add(1, Ordering::Relaxed); }));
         overlay.rt.frame(0.0);
+        overlay.dirty = false;
+        overlay.resume_live();
+        assert!(!overlay.dirty, "the warmed frame already drew the image");
+        overlay.rt.set_live_visible(false);
         pixels.set(1, 1, vec![255; 4]);
         assert_eq!(wakes.load(Ordering::Relaxed), 0, "a hidden overlay isn't woken");
         overlay.dirty = false;
