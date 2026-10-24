@@ -232,7 +232,7 @@ impl Choreography {
     /// Every step started and every track it animated has settled.
     pub fn is_done(&self, store: &AnimationStore) -> bool {
         self.steps.iter().all(|s| matches!(s.state, State::Running { .. }))
-            && self.tracks.iter().all(|&(t, e)| settled(store, t, e))
+            && all_settled(store, &self.tracks)
     }
 
     /// Starts every step whose cue is due or now known. Cheap when nothing is waiting.
@@ -270,16 +270,20 @@ impl Choreography {
         let tracks = &self.tracks[first as usize..(first + count) as usize];
         match when {
             When::Started => Some(start),
-            When::Arrived => Some(
-                tracks.iter().filter_map(|&(t, _)| store.logical_end(t)).fold(start, f64::max),
-            ),
-            When::Settled => tracks.iter().all(|&(t, e)| settled(store, t, e)).then_some(now),
+            When::Arrived => Some(arrival(store, tracks, start)),
+            When::Settled => all_settled(store, tracks).then_some(now),
         }
     }
 }
 
-fn settled(store: &AnimationStore, t: TrackId, epoch: u32) -> bool {
-    store.is_settled(t) || store.epoch(t) != Some(epoch)
+/// Every track is at rest, or was taken over (its epoch moved on).
+fn all_settled(store: &AnimationStore, tracks: &[(TrackId, u32)]) -> bool {
+    tracks.iter().all(|&(t, epoch)| store.is_settled(t) || store.epoch(t) != Some(epoch))
+}
+
+/// The latest logical end among `tracks`, and never before `from`.
+fn arrival(store: &AnimationStore, tracks: &[(TrackId, u32)], from: f64) -> f64 {
+    tracks.iter().filter_map(|&(t, _)| store.logical_end(t)).fold(from, f64::max)
 }
 
 /// SwiftUI `PhaseAnimator`: cycles through phases, animating each from wherever the last one is,
@@ -357,7 +361,7 @@ impl PhaseAnimator {
         }
         let Some(at) = self.next_at else {
             // Waiting for a settle.
-            if self.tracks.iter().all(|&(t, e)| settled(store, t, e)) {
+            if all_settled(store, &self.tracks) {
                 self.next_at = Some(now + self.hold as f64);
             }
             return;
@@ -373,9 +377,7 @@ impl PhaseAnimator {
         self.tracks.clear();
         self.phases[self.current].apply(store, 0.0, false, &mut self.tracks);
         self.next_at = match self.advance {
-            When::Arrived | When::Started => Some(
-                self.tracks.iter().filter_map(|&(t, _)| store.logical_end(t)).fold(now, f64::max) + self.hold as f64,
-            ),
+            When::Arrived | When::Started => Some(arrival(store, &self.tracks, now) + self.hold as f64),
             When::Settled => None,
         };
     }
