@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Video and audio playback.** `Player` (alias `Video`) plays a file or URL:
+  `el().video(&clip, SurfaceFit::Fit)` draws a video (muted by default), and `Player::audio`
+  plays audio with no element (unmuted by default). macOS uses AVFoundation; headless runs
+  are deterministic and silent; other platforms report `Failed`. Adds the
+  `objc2-av-foundation`, `objc2-core-media` and `objc2-core-graphics` macOS dependencies.
+  `rune::{Player, Video, MediaSource, PlayerState}` are new root exports, so a glob import
+  of `rune::*` can clash with an app type of the same name. See the crate README's "Playing
+  video and audio".
 - **Headless recordings honour single-window transparency and physical size**, including
   alpha in PNG and ProRes output. Default window pixels are unchanged. `--duration auto --out`
   selects headless PNG recording; `--out` alone uses automatic duration unless `--native` is set.

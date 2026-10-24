@@ -673,6 +673,58 @@ See [`examples/video-tiles`](../../examples/video-tiles/README.md) for the copya
 producer/view boundary, portable byte source, headless benchmark, ownership contract,
 colour defaults and current limitations.
 
+### Playing video and audio (`Player`, `video/`)
+
+`Player` (alias `Video`) is a cheap-to-clone handle on one clip. Video plays inside an element;
+audio needs none.
+
+```rust
+let clip = rune::Player::file("capture.mov"); // or Player::url("https://…/clip.mp4")
+clip.set_looping(true);
+clip.play();
+// In a view:
+let (w, h) = clip.natural_size().unwrap_or((16, 9));
+el().w(480.0).h(480.0 * h as f32 / w as f32).video(&clip, SurfaceFit::Fit)
+
+let tap = rune::Player::audio("sounds/tap.m4a"); // a path or an https URL
+tap.play();
+```
+
+- **Controls and state**: `play` (from the start after `Ended`), `pause`, `seek` (clamped),
+  `set_rate`, `set_looping`, `set_muted`; `state()` is `Loading`, `Ready`, `Playing`, `Ended`
+  or `Failed(message)`, plus `time()`, `duration()`, `natural_size()`.
+- **Sound**: `Player::file`/`url`/`new` make videos, which start muted. `Player::audio` makes
+  an audio clip, which starts unmuted. `set_muted` changes either.
+- **Video frames** (macOS): AVPlayer + AVPlayerItemVideoOutput hand IOSurface-backed buffers
+  to the element's `NativeSurface` for each display-link target, without a copy. Frames are
+  requested only while a drawn video plays or seeks; paused, ended and off-screen videos draw
+  nothing. `play` and state changes re-run views that read the state.
+- **Decoders**: before its first `play`, a video shows a poster decoded on a worker thread
+  (at most 1920 px a side) and holds no player. Paused players are parked: the four most
+  recent keep their AVPlayer for a quick resume, and older ones are released (a video keeps
+  its last frame; resuming recreates the player). Dropping the last handle and every element
+  showing the clip frees the player, on the main thread. A grid of paused or unplayed clips
+  holds at most four decoders.
+- **Audio**: no surface, no frames and no redraws. Edits apply at once on the main thread. A
+  20 Hz main-queue tick runs only while a clip plays, loads to play or seeks, to catch the end,
+  loops and load failures. In a window, audio clips read their duration on a worker when
+  created, so tiles can show it before they play. For a progress bar, read `time()` (live on the main thread)
+  from the app's own frames: hand the clip the `setup` waker so `poll` hears it load, end or
+  fail, and while it plays ask for a coarse tick with `tx.wake_after(Duration::from_millis(33))`.
+  Nothing ticks when nothing plays. `examples/video-player` does this for an audio file.
+- **Formats**: whatever AVFoundation reads: mp4/mov (H.264, HEVC), mp3, m4a/AAC, wav, aiff,
+  flac. AVFoundation has no Ogg, Opus, WebM or Matroska support: those fail at once with a
+  clear message. A clip whose item never becomes ready fails after 30 s.
+- **Headless** (`--snap`, `--frames`, `--tree`): no player and never any sound. A video
+  decodes the frame at its virtual time synchronously (snapped to the middle of the frame), so
+  output is deterministic. Its time starts on the first frame that draws it after `play`,
+  advances by the runtime clock times `rate`, and ends (holding the last frame) or loops. An
+  audio clip opens synchronously on the first read of its state, duration or time; its time
+  stays where `seek` left it. `--tree` adds a `video` object (`kind`, `state`, `time`,
+  `duration`, `size`, `rate`, `looping`, `muted`, `error`) to video elements.
+- **Other platforms**: every clip reports `Failed("video playback isn't supported on this
+  platform yet")` (or the audio equivalent), and video draws a neutral grey placeholder.
+
 ### Edge overlays (`App::overlay`, `overlay.rs`, `layer_shell.rs`)
 
 `app.overlay(OverlaySpec { name, size, edge, margin, align, inset, interactive, view }, state)
