@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Rotating icons turn their artwork, not just their outline.** An icon with
+  `.looping(LoopSpec::rotation(..))`, such as rune-kit's `Loader` arc, turned its quad but kept
+  sampling the atlas unturned, so the arc stayed put while the rotating square cropped it. The
+  artwork now turns with the quad and is bilinear-filtered while turned. Icons at rest
+  (angle 0) draw exactly as before.
 - **Rune builds for Intel Macs.** `x86_64-apple-darwin` stopped compiling where Rune read
   the Objective-C runtime's `BOOL`, which is `i8` there and `bool` on Apple silicon.
 - **Overlay and launcher panels keep their view when something restyles winit's hidden

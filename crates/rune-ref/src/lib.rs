@@ -86,7 +86,8 @@ impl Scene {
                 || p.rect[3] <= 0.0
                 || p.radii.iter().chain(p.fade.iter()).any(|v| *v < 0.0)
                 || !(0..=4).chain([10]).any(|k| p.params[1] == k as f32)
-                || p.params[0] < 0.0
+                // A glyph's params[0] is a signed turn; negative is counter-clockwise.
+                || (p.params[0] < 0.0 && p.params[1] != 2.0)
                 || p.params[2] < 0.0
                 || !color(&p.fill)
                 || !color(&p.border)

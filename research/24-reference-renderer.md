@@ -18,15 +18,17 @@ The scalar evaluator implements the five instance kinds present when this work b
 |---|---|
 | 0 | Per-corner rounded-rect SDF, clamped capsule radii, inset border and softness |
 | 1 | Evan Wallace shadow formula, the shader's erf approximation and four y samples |
-| 2 | R8 glyph texel loads, scaled bilinear footprints, coverage exponent |
+| 2 | R8 glyph texel loads, scaled bilinear footprints, coverage exponent; `params[0]` turns the quad about its centre and samples bilinearly in the glyph's own frame |
 | 3 | Inset shadows with spread, offset and the sharp/blurred branch at sigma .3 |
 | 4 | Vertical premultiplied-linear gradient with rounded-rect coverage |
 
 Every kind uses the shader's four independent soft clip ramps. Expanded quad
 bounds are included, since the GPU cannot shade outside its triangles. Outlines
 and capsules already lower to rounded-rect instances. Positions are device pixels.
-Translation and positive glyph scale are the transforms the current instance ABI
-supports for these five kinds. Arbitrary affine transforms, path rendering, group
+Translation, positive glyph scale and glyph rotation are the transforms the current
+instance ABI supports for these five kinds. The generator keeps glyph rotation at zero:
+at arbitrary angles a turned edge can pass within the rasterizer's sub-pixel precision of
+a pixel centre. `rotated_glyphs` covers quarter turns, whose edges stay half a pixel away. Arbitrary affine transforms, path rendering, group
 opacity and backdrop blur are not covered by this oracle.
 
 During the publication rebase, main added vector segment/triangle kinds 5 and 6

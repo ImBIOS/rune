@@ -1,7 +1,7 @@
 //! Deliberately scalar transcription of shader.wgsl. No shared shader generator:
 //! keeping the implementations independent catches changes to either lane.
 use crate::{Atlas, Primitive};
-use libm::{atan2f, expf, floorf, powf, sqrtf};
+use libm::{atan2f, cosf, expf, floorf, powf, sinf, sqrtf};
 
 fn clamp(x: f32) -> f32 {
     x.clamp(0.0, 1.0)
@@ -113,8 +113,19 @@ fn dash_cov(s: f32, total: f32, d: [f32; 3]) -> f32 {
     clamp(dash * 0.5 - m.abs() + 0.5)
 }
 
-pub(crate) fn fragment(i: &Primitive, atlas: &Atlas, p: [f32; 2]) -> [f32; 4] {
+pub(crate) fn fragment(i: &Primitive, atlas: &Atlas, screen: [f32; 2]) -> [f32; 4] {
     let kind = i.params[1] as u32;
+    // A glyph's params[0] turns its quad clockwise about the rect centre. Undo the turn so
+    // bounds and sampling run in the glyph's own frame; the clip stays on screen.
+    let rotated = kind == 2 && i.params[0] != 0.0;
+    let p = if rotated {
+        let (s, c) = (sinf(i.params[0]), cosf(i.params[0]));
+        let center = [i.rect[0] + i.rect[2] * 0.5, i.rect[1] + i.rect[3] * 0.5];
+        let d = [screen[0] - center[0], screen[1] - center[1]];
+        [center[0] + (c * d[0] + s * d[1]), center[1] + (c * d[1] - s * d[0])]
+    } else {
+        screen
+    };
     let grow = match kind {
         1 => i.params[2] * 3.0 + 1.0,
         2 => 0.0,
@@ -152,9 +163,10 @@ pub(crate) fn fragment(i: &Primitive, atlas: &Atlas, p: [f32; 2]) -> [f32; 4] {
             col = i.fill.map(|c| c * cov);
         }
         2 => {
-            let cov = if i.uv[2] > 0.0 {
-                let px = (p[0] - i.rect[0]) * i.uv[2] / i.rect[2] - 0.5;
-                let py = (p[1] - i.rect[1]) * i.uv[3] / i.rect[3] - 0.5;
+            let cov = if i.uv[2] > 0.0 || rotated {
+                let span = if i.uv[2] > 0.0 { [i.uv[2], i.uv[3]] } else { [i.rect[2], i.rect[3]] };
+                let px = (p[0] - i.rect[0]) * span[0] / i.rect[2] - 0.5;
+                let py = (p[1] - i.rect[1]) * span[1] / i.rect[3] - 0.5;
                 let x = (i.uv[0] + floorf(px)) as i32;
                 let y = (i.uv[1] + floorf(py)) as i32;
                 let fx = px - floorf(px);
@@ -214,6 +226,7 @@ pub(crate) fn fragment(i: &Primitive, atlas: &Atlas, p: [f32; 2]) -> [f32; 4] {
         _ => panic!("unsupported primitive kind"),
     }
     let origin = i.fade_origin.unwrap_or(i.clip);
+    let p = screen;
     let hard = [p[0] - i.clip[0], p[1] - i.clip[1], i.clip[2] - p[0], i.clip[3] - p[1]];
     let clip: f32 = (0..4).map(|edge| {
         let width = half::f16::from_f32(i.fade[edge].clamp(0.0, 65504.0)).to_f32();

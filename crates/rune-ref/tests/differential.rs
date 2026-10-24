@@ -4,7 +4,7 @@ use proptest::{
     test_runner::{Config, FileFailurePersistence, TestError, TestRunner},
 };
 use rune_ref::{
-    Frame, Scene, compare, generate,
+    Frame, Primitive, Scene, compare, generate,
     gpu::{GpuRenderer, text_run},
 };
 use std::{cell::RefCell, path::PathBuf};
@@ -106,6 +106,43 @@ fn saved_regressions() {
         let scene: Scene = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         scene.validate().unwrap();
         assert!(check(&mut gpu, &scene, 2).is_ok(), "{}", path.display());
+    }
+}
+
+// Quarter turns about a centre on the pixel grid keep every turned edge half a pixel from the
+// nearest pixel centre and every sample on a texel centre, so rasterizer and oracle agree.
+// The clipped pass cuts the turned footprint unevenly, so a clip in the glyph's own frame differs.
+#[test]
+fn rotated_glyphs() {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let mut gpu = GpuRenderer::default();
+    let clips = [
+        (rune_ref::NO_CLIP, [0.0; 4]),
+        ([24.5, 15.25, 40.0, 26.75], [3.0, 0.0, 0.0, 2.5]),
+    ];
+    for (n, angle) in [FRAC_PI_2, PI, PI + FRAC_PI_2, -FRAC_PI_2].into_iter().enumerate() {
+        for uv in [[1.0, 1.0, 0.0, 0.0], [1.0, 1.0, 8.0, 5.0]] {
+            for (c, (clip, fade)) in clips.into_iter().enumerate() {
+                let mut scene = generate::scene(&[]);
+                scene.primitives.push(Primitive {
+                    node: 1,
+                    source: format!("rotated/{n}"),
+                    rect: [20.0, 17.0, 16.0, 10.0],
+                    radii: [0.0; 4],
+                    fill: [0.7, 0.6, 0.5, 0.8],
+                    border: [0.0; 4],
+                    params: [angle, 2.0, 0.0, 1.0],
+                    uv,
+                    clip,
+                    fade,
+                    fade_origin: None,
+                });
+                if let Err(e) = check(&mut gpu, &scene, 2) {
+                    save(&format!("rotated-{n}-{}-clip-{c}", uv[2]), &scene);
+                    panic!("{e}");
+                }
+            }
+        }
     }
 }
 

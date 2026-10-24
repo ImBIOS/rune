@@ -62,6 +62,11 @@ pub fn scene(records: &[[u8; 32]]) -> Scene {
         match kind as u32 {
             1 => p.radii = [p.radii[0]; 4],
             2 => {
+                // params[0] turns a glyph. At arbitrary angles a rotated edge can pass within
+                // the rasterizer's sub-pixel precision of a pixel centre, where it and the
+                // oracle's inside test may disagree by a whole pixel. Quarter turns have their
+                // own test.
+                p.params[0] = 0.0;
                 // Guard texels keep all textureLoad taps defined on every backend.
                 p.uv = [1.0, 1.0, 0.0, 0.0];
                 p.rect[2] = 1.0 + (b[3] % 24) as f32;

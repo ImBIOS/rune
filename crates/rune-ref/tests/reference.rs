@@ -116,3 +116,35 @@ fn dashed_rings_translate_and_stay_inside_their_ring() {
         }
     }
 }
+
+// Only the glyph's top-left 4x4 texels are lit. On screen (y down), a positive quarter turn
+// carries them clockwise to the top-right and a negative one to the bottom-left.
+#[test]
+fn glyph_rotation_turns_clockwise_and_clips_on_screen() {
+    use std::f32::consts::FRAC_PI_2;
+    let glyph = |angle: f32, clip: [f32; 4]| {
+        let mut s = generate::scene(&[]);
+        s.atlas.data.fill(0);
+        for y in 1..5 {
+            s.atlas.data[y * 32 + 1..y * 32 + 5].fill(255);
+        }
+        let mut p = generate::scene(&[[0; 32]]).primitives.remove(0);
+        p.rect = [20.0, 20.0, 16.0, 16.0];
+        p.radii = [0.0; 4];
+        p.fill = [1.0; 4];
+        p.params = [angle, 2.0, 0.0, 1.0];
+        p.uv = [1.0, 1.0, 0.0, 0.0];
+        p.clip = clip;
+        s.primitives.push(p);
+        render(&s)
+    };
+    let lit = |f: &Frame, x: u32, y: u32| f.rgba[((y * 64 + x) * 4) as usize] == 255;
+    let cw = glyph(FRAC_PI_2, NO_CLIP);
+    let ccw = glyph(-FRAC_PI_2, NO_CLIP);
+    assert_ne!(cw.rgba, ccw.rgba);
+    assert!(lit(&cw, 34, 21) && !lit(&cw, 21, 34) && !lit(&cw, 21, 21));
+    assert!(lit(&ccw, 21, 34) && !lit(&ccw, 34, 21) && !lit(&ccw, 21, 21));
+    // The clip keeps the screen's right half, where the turned texels land.
+    let clipped = glyph(FRAC_PI_2, [28.0, NO_CLIP[1], NO_CLIP[2], NO_CLIP[3]]);
+    assert!(lit(&clipped, 34, 21) && !lit(&clipped, 21, 34));
+}

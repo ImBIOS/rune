@@ -423,17 +423,21 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
     } else {
         // Interpolated screen coordinates can round below an integer texel
         // boundary. Fragment position is the rasterizer's exact pixel center.
-        let p = i.pos.xy + projection.xy;
+        let screen = i.pos.xy + projection.xy;
+        let rotated = i.params.x != 0.0;
         var cov: f32;
-        if i.uv.z > 0.0 {
+        if i.uv.z > 0.0 || rotated {
             // Flying text keeps the original atlas footprint while its quad scales uniformly.
-            let local = (p - i.rect.xy) * i.uv.zw / i.rect.zw - vec2<f32>(0.5);
+            // A turned icon samples at its unturned point, filtered: no texel lines up with a pixel.
+            let p = select(screen, i.p, rotated);
+            let span = select(i.rect.zw, i.uv.zw, i.uv.z > 0.0);
+            let local = (p - i.rect.xy) * span / i.rect.zw - vec2<f32>(0.5);
             let uv = vec2<i32>(i.uv.xy + floor(local));
             let f = fract(local);
             cov = mix(mix(textureLoad(atlas, uv, 0).r, textureLoad(atlas, uv + vec2<i32>(1, 0), 0).r, f.x),
                       mix(textureLoad(atlas, uv + vec2<i32>(0, 1), 0).r, textureLoad(atlas, uv + vec2<i32>(1, 1), 0).r, f.x), f.y);
         } else {
-            let texel = vec2<i32>(i.uv.xy + floor(p - i.rect.xy));
+            let texel = vec2<i32>(i.uv.xy + floor(screen - i.rect.xy));
             cov = textureLoad(atlas, texel, 0).r;
         }
         col = i.fill * pow(cov, i.params.w);
