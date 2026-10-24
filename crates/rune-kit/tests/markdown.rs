@@ -292,3 +292,24 @@ fn markdown_and_tooltips_render_without_a_kit() {
     assert_eq!(tip.role, "tooltip");
     assert!(rt.elements().iter().any(|e| e.text.as_deref() == Some("Help")));
 }
+
+#[cfg(feature = "mermaid")]
+#[test]
+fn a_mermaid_block_draws_a_diagram_or_falls_back_to_its_source() {
+    let rt = laid_out("```mermaid\ngraph TD\n  A[Start] --> B{Ok?}\n```\n");
+    let k = keys(&rt);
+    assert!(k.iter().any(|k| k == "diagram") && !k.iter().any(|k| k == "source"), "{k:?}");
+    assert!(rt.elements().iter().any(|e| e.text.as_deref() == Some("Ok?")));
+
+    for bad in ["pie title Pets\n  \"Dogs\": 3", "graph TD\nA[unclosed --> B", "sequenceDiagram\n  A->>"] {
+        let rt = laid_out(&format!("```mermaid\n{bad}\n```\n"));
+        let k = keys(&rt);
+        assert!(k.iter().any(|k| k == "source") && k.iter().any(|k| k == "hint") && !k.iter().any(|k| k == "diagram"), "{bad:?}: {k:?}");
+    }
+
+    // Until the fence closes, the source is a code block that grows in place.
+    assert!(matches!(&parse("```mermaid\ngraph TD\nA-->B")[0], Block::Code(_)));
+    assert!(matches!(&parse("```mermaid\ngraph TD\nA-->B\n```")[0], Block::Mermaid(_)));
+    assert!(rune_kit::mermaid::supported("sequenceDiagram\nA->>B: hi"));
+    assert!(rune_kit::mermaid::render("gantt\n", &MarkdownStyle::neutral(false)).is_none());
+}

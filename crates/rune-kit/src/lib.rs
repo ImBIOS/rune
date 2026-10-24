@@ -34,6 +34,8 @@ mod list;
 #[cfg(feature = "markdown")]
 pub mod markdown;
 mod menu;
+#[cfg(feature = "mermaid")]
+pub mod mermaid;
 mod overlay;
 mod radio;
 mod rolling_text;

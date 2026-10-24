@@ -14,6 +14,8 @@ pulldown-cmark = { version = "0.13", default-features = false, optional = true }
 [features]
 # `Markdown` and `MarkdownStyle`.
 markdown = ["dep:pulldown-cmark"]
+# Native ```mermaid diagrams in `Markdown` (flowcharts and sequence diagrams), and `mermaid`.
+mermaid = ["markdown"]
 
 [dev-dependencies]
 # Reference rasteriser for the built-in glyphs (tests/glyphs.rs).

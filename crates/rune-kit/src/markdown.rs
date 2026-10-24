@@ -861,7 +861,20 @@ impl Renderer {
         c
     }
 
+    #[cfg_attr(not(feature = "mermaid"), allow(clippy::unused_self))]
     fn mermaid(&self, src: &str) -> El {
+        #[cfg(feature = "mermaid")]
+        {
+            match crate::mermaid::diagram(src, &self.s.diagram) {
+                Some(d) => d,
+                None => col()
+                    .w_full()
+                    .gap(6.0)
+                    .child(self.code(src).key("source"))
+                    .child(text("Diagram not supported").font(TextStyle { size: 12.0, line_height: 16.0, ..self.s.body }).color(self.s.muted).key("hint")),
+            }
+        }
+        #[cfg(not(feature = "mermaid"))]
         self.code(src)
     }
 

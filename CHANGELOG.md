@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **rune-kit feature `mermaid` draws ```` ```mermaid ```` flowcharts and sequence diagrams
+  natively** inside `Markdown` once the fence closes, and through `rune_kit::mermaid::render`.
+  Without the feature, or for unsupported diagrams, the fence stays a code block (with a
+  "Diagram not supported" hint when the feature is on). New `MarkdownStyle` builders:
+  `diagram`, `diagram_surface`, `diagram_note`, `diagram_font`, `diagram_max_width`.
 - **rune-kit `Markdown` renders GFM tables and tints ```` ```diff ```` fences.** Pipe tables
   were flattened into run-on text before; they are now tables with a header row, alignment
   and columns sized from their content (narrow tables wrap, then clip). `diff` and `patch`
