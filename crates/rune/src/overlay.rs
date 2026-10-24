@@ -409,6 +409,12 @@ impl<T: 'static> Overlay<T> {
         self.idle &= !(self.rt.animating || self.compositor.as_ref().is_some_and(|c| c.animating()));
     }
 
+    fn theme_changed(&mut self, dark: bool) {
+        self.dark = dark;
+        self.rt.set_system_dark(dark);
+        self.dirty = true;
+    }
+
     fn prepare(&mut self, event_loop: &ActiveEventLoop) {
         if self.live.is_some() { return; }
         self.resolve_size(event_loop);
@@ -1456,6 +1462,10 @@ impl<T: 'static> AnyHost for Overlay<T> {
                 None => {}
             }
         }
+        // Hidden too, so the retained surface redraws in the new theme before it's revealed.
+        if let WindowEvent::ThemeChanged(theme) = event {
+            return self.theme_changed(theme == winit::window::Theme::Dark);
+        }
         if !self.visible { return; }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. })
@@ -1513,11 +1523,6 @@ impl<T: 'static> AnyHost for Overlay<T> {
                 #[cfg(target_os = "macos")]
                 if !state.is_pressed() && let Some(panel) = &self.panel { panel.pointer_released(); }
                 self.apply_input();
-            }
-            WindowEvent::ThemeChanged(theme) => {
-                self.dark = theme == winit::window::Theme::Dark;
-                self.rt.set_system_dark(self.dark);
-                self.dirty = true;
             }
             _ => {}
         }
@@ -1737,6 +1742,18 @@ mod tests {
             assert!(expected < 211.0, "the spring must still be moving at {t:?}: {expected}");
             assert!((got - expected).abs() < 0.01, "{what}: at {t:?} width={got}, unbroken cadence={expected}");
         }
+    }
+
+    #[test]
+    fn a_hidden_overlay_takes_a_theme_change_and_redraws_before_reveal() {
+        let mut overlay = width_overlay("theme");
+        present(&mut overlay, Instant::now());
+        assert!(!overlay.visible && !overlay.dirty);
+        let dark = !overlay.rt.env.system_dark;
+        overlay.theme_changed(dark);
+        assert_eq!(overlay.rt.env.system_dark, dark);
+        assert!(overlay.dirty, "a retained surface redraws in the new theme before it's revealed");
+        assert_eq!(overlay.dark, dark, "show reapplies this theme");
     }
 
     #[test]

@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Hidden overlays follow theme changes.** A hidden or prewarmed overlay switching between
+  light and dark used to keep the old theme until it was shown and the theme changed again; it
+  now takes the change while hidden and redraws in it before it's revealed.
 - **Overlay window levels and fades on macOS.** `ConfiguredOverlay::macos_level(level)` and
   `OverlayHandle::set_macos_level(level)` set the AppKit window level (e.g. 3 for
   `.floating`), changeable while shown. `OverlayHandle::fade_in(d)` and `fade_out(d)` fade
