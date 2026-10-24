@@ -1321,13 +1321,15 @@ scripts/rune-dev --manifest-path ../my-app/Cargo.toml --patch 'src/ui/**/*.rs' \
 Function bodies in those files patch live. Every other file in the crate, its path
 dependencies and Rune itself is a restart. The launcher mirrors the crate, each of its
 path dependencies and their workspaces' manifests, lockfiles and Cargo configs to the
-build Mac; a git-pinned Rune needs nothing extra. If the app's workspace has no
+build Mac; a git-pinned Rune needs nothing extra. The mirrored workspace manifest lists
+only the members it staged, so other members never need to build. If the app's workspace has no
 `[profile.rune-hot]`, the launcher passes one with `cargo --config`.
 
 The launcher sets `RUNE_HOT=1`, which turns live editing on like `--hot` without any
 argv plumbing. All entry points dispatch through the patch table: `App::run`/`try_run`,
 `run_windows`, `run_windows_with`, `run_windows_with_args` and `WindowSpec::from_app`.
-A process holds one devserver connection, and each patch reaches every open window.
+A process holds one devserver connection, and each patch reaches every window and overlay,
+hidden ones included: a hidden launcher rebuilds before it shows again.
 Rune's flags after `--`, such as `--snap-on-patch` and `--window KEY`, need an app that
 passes its arguments to Rune; with `--snap-on-patch`, `--window` picks which window of a
 `run_windows` app renders headless.
@@ -1338,8 +1340,9 @@ passes its arguments to Rune; with `--snap-on-patch`, `--window` picks which win
 (`RUNE_DEV_BUILD_HOST`, default `pro`; `RUNE_DEV_WORKER` names its build worker) but runs
 the app here. The build Mac's copy of each build records its path and exits; the launcher
 copies that binary here, checks its SHA-256 and platform, and runs it with the app
-arguments. The app connects to dx through an SSH tunnel and a local relay that copies each
-patch dylib here before the app loads it. A patch is refused if the build Mac's binary no
+arguments once dx answers through an SSH tunnel; the app connects through it and a local
+relay that copies each patch dylib here before the app loads it. If the tunnel exits, the
+launcher stops with an error rather than leaving an app that no longer gets edits. A patch is refused if the build Mac's binary no
 longer matches the one running here. A rebuild on the build Mac restarts the app here.
 Source edits here are relayed to the build Mac as before.
 
@@ -1365,10 +1368,12 @@ edits do not hot-reload. Use this launcher, not raw `dx serve`, to keep the sour
 `poll` and `on_key` go through the patch table each call, like the view. `setup` runs once
 at startup, so edits to it, and to helpers only it calls, take effect after a restart.
 
-If a patched view panics, Rune logs it and renders the original startup view against
-the retained state, discarding the failed view's context changes. A later patch is
+If a patched view panics, in any window or overlay, Rune logs it and renders the
+original startup view against the retained state, discarding the failed view's context
+changes and memo cache. A panicking patched `poll` or `on_key` falls back to the startup
+callback the same way, keeping whatever it changed before the panic. A later patch is
 still attempted. Handler-closure panics are not caught; neither are panics in the
-original fallback view. This recovery requires Rust's unwinding panic mode and does
+original fallbacks. This recovery requires Rust's unwinding panic mode and does
 not undo interior-mutability side effects performed by a view before it panics.
 Physical iOS devices are unsupported by this backend.
 

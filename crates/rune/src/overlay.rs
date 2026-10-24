@@ -1794,12 +1794,20 @@ impl<T: 'static> PendingOverlay for Overlay<T> {
         self.popup.connect(wake.clone());
         self.gpu_pool = gpu;
         *self.shared.wake.lock().unwrap() = Some(wake.clone());
-        if let Some(setup) = self.setup.take() {
+        let rerun = || -> Waker {
             let shared = self.shared.clone();
-            setup(&mut self.rt.state, Arc::new(move || {
+            Arc::new(move || {
                 let first = !std::mem::replace(&mut shared.requests.lock().unwrap().woken, true);
                 if first { shared.wake(); }
-            }));
+            })
+        };
+        // A live-edit patch re-runs the view like new data does, shown or hidden.
+        #[cfg(feature = "hot")]
+        if crate::hot::enabled() && self.rt.hot.is_none() {
+            self.rt.hot = Some(crate::hot::Session::connect(rerun()));
+        }
+        if let Some(setup) = self.setup.take() {
+            setup(&mut self.rt.state, rerun());
         }
         // Requests made before the loop existed.
         wake();
@@ -2847,6 +2855,40 @@ mod tests {
         assert!(overlay.drawing() && overlay.backing_off(Instant::now()));
         overlay.retry = Some(Instant::now());
         assert!(!overlay.backing_off(Instant::now() + Duration::from_millis(1)), "a due retry draws");
+    }
+
+    #[cfg(feature = "hot")]
+    #[test]
+    fn a_live_edit_patch_wakes_a_hidden_overlay_and_its_next_frame_rebuilds_the_view() {
+        thread_local! { static BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+        fn view(_: &u8, _: &mut Cx<u8>) -> El {
+            crate::memo("body", 0, || { BUILDS.set(BUILDS.get() + 1); crate::el().size(10.0, 10.0) })
+        }
+        crate::hot::enable_for_tests();
+        let app = AppSpec::new("hot", (30.0, 20.0), || 0u8, view);
+        let (mut overlay, _) = Overlay::new(OverlaySpec::new("hot", app.size, view).options(Default::default()), 0u8, &app);
+        overlay.rt.wall_start = None;
+        let (tx, rx) = std::sync::mpsc::channel();
+        overlay.connect(Arc::new(move || { let _ = tx.send(()); }), Arc::new(|| {}), Rc::default());
+        let hub: &'static crate::hot::Hub = Box::leak(Box::default());
+        overlay.rt.hot.as_mut().expect("connect attaches the overlay to live edits").move_to(hub);
+        while rx.try_recv().is_ok() {}
+        let take = |overlay: &mut Overlay<u8>| std::mem::take(&mut *overlay.shared.requests.lock().unwrap());
+        let _ = take(&mut overlay);
+        overlay.rt.frame(0.0);
+        let built = BUILDS.get();
+        overlay.rt.invalidate();
+        overlay.rt.frame(0.0);
+        assert_eq!(BUILDS.get(), built, "an unchanged memo is reused");
+        hub.patched();
+        rx.recv_timeout(Duration::from_secs(5)).expect("the patch wakes the event loop");
+        let requests = take(&mut overlay);
+        assert!(requests.woken);
+        overlay.apply_wake(requests.woken, requests.updates);
+        assert!(overlay.dirty && overlay.rt.needs_commit(), "hidden, the patch waits for the frame that shows it");
+        overlay.visible = true;
+        overlay.advance();
+        assert_eq!(BUILDS.get(), built + 1, "that frame rebuilds the memo with the patched code");
     }
 
     #[test]

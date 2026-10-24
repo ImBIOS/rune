@@ -420,6 +420,21 @@ mod tests {
     }
 
     #[test]
+    fn a_view_panicking_inside_a_memo_leaves_no_scope_for_the_next_build() {
+        let panicked = std::panic::catch_unwind(|| {
+            let _scope = enter(MemoCache::default(), Env::new(true, 1.0), false, None, HashMap::new());
+            memo("outer", 0, || memo("inner", 0, || panic!("view panicked")))
+        });
+        assert!(panicked.is_err());
+        assert!(SCOPES.with_borrow(|s| s.is_empty()), "unwinding pops the build's scope");
+        BUILDS.set(0);
+        let mut rt = Runtime::new(S { version: 0, ticks: 0, presses: 0 }, view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        commit(&mut rt);
+        assert_eq!(BUILDS.get(), 1, "the next window's memos cache as usual");
+    }
+
+    #[test]
     fn a_memo_inside_a_reused_memo_survives_to_the_outer_ones_next_build() {
         BUILDS.set(0);
         fn view(s: &(u32, u32), _: &mut Cx<(u32, u32)>) -> El {

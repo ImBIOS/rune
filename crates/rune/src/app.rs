@@ -292,11 +292,6 @@ impl<S: 'static> App<S> {
             Some(argv) => Args::parse_from(argv),
             None => Args::parse(),
         };
-        #[cfg(feature = "hot")]
-        if args.snap_on_patch.is_some() && self.compositor.is_none() {
-            crate::hot::run_app(self, args);
-            return Ok(());
-        }
         if args.headless() {
             crate::tooling::try_headless(self, args)
         } else {

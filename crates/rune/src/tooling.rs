@@ -1208,10 +1208,6 @@ pub(crate) fn try_headless<S: 'static>(mut app: crate::app::App<S>, args: Args) 
 }
 
 pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args: Args, transparent: bool) {
-    #[cfg(feature = "hot")]
-    if args.snap_on_patch.is_some() {
-        return crate::hot::snap_window(app, args);
-    }
     let chrome = app.chrome;
     let launched = Instant::now();
     if args.list_scenes {
@@ -1219,6 +1215,10 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             println!("{n}");
         }
         return;
+    }
+    #[cfg(feature = "hot")]
+    if args.snap_on_patch.is_some() {
+        return crate::hot::snap_window(app, args);
     }
     let mut comp = app.compositor.take();
     let srgb_blend = if comp.is_some() && app.srgb_blend {

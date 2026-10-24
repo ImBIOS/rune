@@ -44,11 +44,12 @@ fn handler_state<S: 'static>(state: &mut S) -> &mut dyn Any {
 }
 
 /// Calls an app's `poll` or `on_key`. With `rune/hot` it goes through subsecond's jump table,
-/// so a patched body runs instead of the pointer captured at startup.
+/// so a patched body runs instead of the pointer captured at startup, and a panicking patch
+/// falls back to that pointer.
 macro_rules! app_call {
     ($f:expr, $($arg:expr),* $(,)?) => {{
         #[cfg(feature = "hot")]
-        let called = subsecond::HotFn::current($f).call(($($arg,)*));
+        let called = crate::hot::patched_or_original!("callback", $f, $($arg),*);
         #[cfg(not(feature = "hot"))]
         let called = ($f)($($arg),*);
         called
@@ -1206,12 +1207,20 @@ impl<S: 'static> Runtime<S> {
     /// The last committed frame is out of date: state changed (an update, poll or handler), or
     /// one asked for a scroll or text flight that waits for the next frame.
     pub(crate) fn needs_commit(&self) -> bool {
-        self.dirty || self.pending.frame_work()
+        self.dirty || self.pending.frame_work() || self.patch_pending()
     }
 
     /// The last frame no longer shows the window: state, its size or queued input changed since.
     pub(crate) fn stale(&self) -> bool {
         self.needs_commit() || self.relayout || !self.queue.is_empty()
+    }
+
+    /// A live-edit patch arrived that the next frame hasn't rebuilt the view with yet.
+    fn patch_pending(&self) -> bool {
+        #[cfg(feature = "hot")]
+        return self.hot.as_ref().is_some_and(crate::hot::Session::pending);
+        #[cfg(not(feature = "hot"))]
+        false
     }
 
     /// Marks app state changed outside a handler (the next frame re-runs the view).
@@ -1301,7 +1310,7 @@ impl<S: 'static> Runtime<S> {
     /// `poll` alone, for a hidden window's wake: its timers and inbox advance while nothing
     /// lays out, animates or draws. Like `update`, its changes wait, dirty, for the next frame.
     /// Returns whether the last frame went out of date: `poll` reported a change or asked for a
-    /// scroll or text flight. A `wake_after` alone doesn't count.
+    /// scroll or text flight, or a live-edit patch arrived. A `wake_after` alone doesn't count.
     pub(crate) fn poll_hidden(&mut self) -> bool {
         if let Some(clock) = self.wall_clock() { self.clock = clock; }
         // An `update`'s `wake_after` counts from now; no frame may come to schedule it.
@@ -1311,13 +1320,14 @@ impl<S: 'static> Runtime<S> {
         // would wake the host again every frame interval.
         let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
         self.wake_deadlines.drain(..due);
-        let Some(poll) = self.poll else { return false };
+        let patched = self.patch_pending();
+        let Some(poll) = self.poll else { return patched };
         let mut one = self.transaction();
         let changed = app_call!(poll, &mut self.state, self.clock, &mut one);
         self.dirty |= changed;
         self.schedule_wakes(one.wakes.drain(..));
         self.latch_requests(&mut one);
-        let stale = changed || one.frame_work();
+        let stale = changed || one.frame_work() || patched;
         merge(&mut self.pending, one);
         stale
     }
@@ -2380,22 +2390,38 @@ impl<S> Measurement<'_, S> {
 
     fn measure_view(&mut self, tx: &Tx, force_all: bool) -> (TaffyTree<usize>, Vec<Node>) {
         let scale = self.env.scale;
-        let mut cx = Cx::<S> {
-            env: self.env,
-            system_reduced_motion: self.system_reduced_motion,
-            reduced_motion: self.system_reduced_motion,
-            time_scale: self.time_scale,
-            caret: self.caret.clone(),
+        let fresh_cx = |this: &Self| Cx::<S> {
+            env: this.env,
+            system_reduced_motion: this.system_reduced_motion,
+            reduced_motion: this.system_reduced_motion,
+            time_scale: this.time_scale,
+            caret: this.caret.clone(),
             caret_read: std::cell::Cell::new(false),
-            layout: self.layout_seen.clone(),
+            layout: this.layout_seen.clone(),
             layout_reads: Default::default(),
             _s: PhantomData,
         };
+        let mut cx = fresh_cx(self);
         let memo = crate::memo::enter(std::mem::take(self.memo), self.env, self.system_reduced_motion, cx.caret.clone(), cx.layout.clone());
         #[cfg(not(feature = "hot"))]
         let mut root = (self.view)(self.state, &mut cx);
         #[cfg(feature = "hot")]
-        let mut root = subsecond::HotFn::current(self.view).call((self.state, &mut cx));
+        let (mut root, memo) = {
+            let view = self.view;
+            let state = self.state;
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| subsecond::HotFn::current(view).call((state, &mut cx)))) {
+                Ok(root) => (root, memo),
+                Err(_) => {
+                    eprintln!("rune-hot: view panicked; rendering the original view");
+                    // The failed build's memo scope, cache and context writes go; the startup
+                    // view builds from scratch against the retained state.
+                    drop(memo);
+                    cx = fresh_cx(self);
+                    let memo = crate::memo::enter(Default::default(), self.env, self.system_reduced_motion, cx.caret.clone(), cx.layout.clone());
+                    (view(state, &mut cx), memo)
+                }
+            }
+        };
         let (memo, replayed) = memo.finish();
         *self.memo = memo;
         if let Some(warnings) = self.key_warnings.as_mut() {

@@ -16,6 +16,8 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import platform
+import posixpath
+import re
 import select
 import shlex
 import signal
@@ -24,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tomllib
 from urllib.parse import parse_qs, urlsplit
 
@@ -245,6 +248,79 @@ def external_layout(manifest):
     return External(base=base, crate=str(PurePosixPath("external", rel(crate))), dirs=sorted({rel(p) for p in packages}), tops=tops)
 
 
+def workspace_key(crate, data):
+    """The key of the app crate's workspace manifest among staged inputs, or None."""
+    doc = tomllib.loads(data[crate + "/Cargo.toml"].decode())
+    explicit = doc.get("package", {}).get("workspace")
+    if isinstance(explicit, str):
+        key = posixpath.normpath(posixpath.join(crate, explicit, "Cargo.toml"))
+        return key if key in data else None
+    directory = PurePosixPath(crate)
+    while True:
+        key = str(directory / "Cargo.toml")
+        if key in data and "workspace" in tomllib.loads(data[key].decode()):
+            return key
+        if str(directory) == "external":
+            return None
+        directory = directory.parent
+
+
+def array_end(text, i):
+    """The index after the TOML array whose `[` is at `i`."""
+    depth = 0
+    while i < len(text):
+        c = text[i]
+        if c == "#":
+            i = text.find("\n", i)
+            if i < 0: break
+        elif c in "\"'":
+            i += 1
+            while i < len(text) and text[i] != c:
+                i += 2 if c == '"' and text[i] == "\\" else 1
+        elif c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0: return i + 1
+        i += 1
+    raise ValueError("unterminated TOML array")
+
+
+def staged_workspace(text, staged):
+    """The app's workspace manifest with `members` and `default-members` cut to the staged
+    package directories (relative to it). Cargo loads every member, and the build Mac has
+    only the app and its path dependencies."""
+    workspace = tomllib.loads(text).get("workspace", {})
+    norm = lambda m: str(PurePosixPath(m))
+    excluded = {norm(m) for m in workspace.get("exclude", [])}
+    for key in ("default-members", "members"):
+        header = re.search(r"(?m)^[ \t]*\[workspace\][ \t]*(#.*)?$", text)
+        if key not in workspace or not header:
+            continue
+        end = re.compile(r"(?m)^[ \t]*\[").search(text, header.end())
+        found = re.compile(rf"(?m)^[ \t]*{re.escape(key)}[ \t]*=[ \t]*(?=\[)").search(text, header.end(), end.start() if end else len(text))
+        if not found:
+            continue
+        kept = sorted(d for d in staged if d not in excluded and any(PurePosixPath(d).full_match(norm(g)) for g in workspace[key]))
+        stop = array_end(text, found.end())
+        text = text[:found.end()] + json.dumps(kept) + text[stop:]
+    return text
+
+
+def mirror_overrides(crate, data):
+    """Mirror bytes that differ from the source: the app's workspace members."""
+    key = crate and workspace_key(crate, data)
+    if not key:
+        return {}
+    root = PurePosixPath(key).parent
+    staged = []
+    for k in data:
+        path = PurePosixPath(k)
+        if path.name == "Cargo.toml" and k != key and path.is_relative_to(root) and "package" in tomllib.loads(data[k].decode()):
+            staged.append(str(path.parent.relative_to(root)))
+    return {key: staged_workspace(data[key].decode(), staged).encode()}
+
+
 def patchable(crate, globs):
     """Keys of the app crate's Rust files that `--patch` names. Everything else restarts."""
     prefix = crate.rstrip("/") + "/"
@@ -344,8 +420,10 @@ def check_base(info, local):
 class Desk:
     """The desk copy of the app: the build Mac's binary, byte for byte, and the patches built for it."""
 
-    def __init__(self, host, cache, argv, cwd, env):
+    def __init__(self, host, cache, argv, cwd, env, ready=lambda: None):
         self.host, self.cache, self.argv, self.cwd, self.env = host, cache, argv, cwd, env
+        # Raises unless the app's devserver path works; the app connects once, at startup.
+        self.ready = ready
         self.lock = threading.Lock()
         self.app = None
         self.remote_exe = None
@@ -374,6 +452,7 @@ class Desk:
                     return
                 temp.chmod(0o755)
                 temp.replace(exe)
+            self.ready()
             self.restarting = True
             if self.app:
                 print("rune-dev: the build Mac rebuilt the app; restarting it here", flush=True)
@@ -405,6 +484,43 @@ class Desk:
     def exited(self):
         with self.lock:
             return self.app is not None and not self.restarting and self.app.poll() is not None
+
+
+BASE = "rune-dev-base "
+
+
+def base_message(line):
+    """The build Mac's base report in a line of its output; `ssh -tt` can prefix PTY bytes."""
+    at = line.find(BASE)
+    return None if at < 0 else json.loads(line[at + len(BASE):])
+
+
+def tunnel_failure(tunnel):
+    if tunnel.poll() is not None:
+        return f"rune-dev: the SSH tunnel to dx exited ({tunnel.returncode}); edits can't reach the app. Rerun rune-dev."
+    return None
+
+
+def answers(port):
+    """Whether something answers HTTP through a forwarded port. ssh accepts a forwarded
+    connection before its remote end exists, and closes it silently when that fails."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as s:
+            s.sendall(b"GET / HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+            return bool(s.recv(1))
+    except OSError:
+        return False
+
+
+def wait_forward(port, tunnel, timeout=60.0, interval=.25):
+    deadline = time.monotonic() + timeout
+    while not answers(port):
+        failure = tunnel_failure(tunnel)
+        if failure:
+            raise RuntimeError(failure)
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"rune-dev: dx did not answer through the SSH tunnel within {timeout:.0f} s")
+        time.sleep(interval)
 
 
 def rewrite_patch(text, pid, fetch):
@@ -474,8 +590,9 @@ class PatchRelay:
     """The desk app's devserver: forwards the websocket to dx through the tunnel, and swaps each
     patch dylib path on the build Mac for a copy on this one before the app loads it."""
 
-    def __init__(self, upstream, fetch):
+    def __init__(self, upstream, fetch, attempts=40, interval=.25):
         self.upstream, self.fetch = upstream, fetch
+        self.attempts, self.interval = attempts, interval
         self.server = socket.create_server(("127.0.0.1", 0))
         self.port = self.server.getsockname()[1]
         threading.Thread(target=self.accept, daemon=True).start()
@@ -489,15 +606,14 @@ class PatchRelay:
             threading.Thread(target=self.connection, args=(client,), daemon=True).start()
 
     def connection(self, client):
+        pid = None
         try:
             head, rest = read_head(client)
             target = head.split(b"\r\n", 1)[0].split()[1].decode()
             pid = int(parse_qs(urlsplit(target).query).get("pid", ["0"])[0])
             # The frame reader below handles plain frames only.
             lines = [l for l in head.split(b"\r\n") if not l.lower().startswith(b"sec-websocket-extensions:")]
-            upstream = socket.create_connection(self.upstream)
-            upstream.sendall(b"\r\n".join(lines) + rest)
-            response, body = read_head(upstream)
+            upstream, response, body = self.handshake(b"\r\n".join(lines) + rest)
             if b" 101 " not in response.split(b"\r\n", 1)[0] + b" ":
                 client.sendall(response + body)
                 return
@@ -506,10 +622,31 @@ class PatchRelay:
             threading.Thread(target=self.pipe, args=(client, upstream), daemon=True).start()
             # Frames that arrived with the handshake are parsed like the rest.
             self.patches(Prefixed(body, upstream.makefile("rb")), client, pid)
-        except (OSError, EOFError, ValueError, IndexError):
-            pass
+        except EOFError:
+            if pid is not None:
+                print(f"rune-dev: app pid {pid} left the devserver", flush=True)
+        except (OSError, ValueError, IndexError) as error:
+            print(f"rune-dev: the devserver relay failed for app pid {pid}: {error}; edits will not reach it", file=sys.stderr, flush=True)
         finally:
             client.close()
+
+    def handshake(self, request):
+        """The upgrade through the tunnel, retried while its remote end isn't there yet: ssh
+        accepts the connection and then closes it."""
+        failure = None
+        for _ in range(self.attempts):
+            upstream = None
+            try:
+                upstream = socket.create_connection(self.upstream, timeout=5)
+                upstream.sendall(request)
+                response, body = read_head(upstream)
+                upstream.settimeout(None)
+                return upstream, response, body
+            except (OSError, EOFError) as error:
+                failure = str(error) or "connection closed"
+                if upstream: upstream.close()
+                time.sleep(self.interval)
+        raise OSError(f"dx did not answer through the SSH tunnel ({failure})")
 
     @staticmethod
     def pipe(source, dest):
@@ -595,7 +732,8 @@ def relay(argv):
             tunnel = subprocess.Popen(["ssh", "-N", "-o", "ExitOnForwardFailure=yes", "-L", f"127.0.0.1:{local}:127.0.0.1:{opts.port}", host], start_new_session=True)
             cwd = source(EXTERNAL.crate) if EXTERNAL else ROOT / "examples" / opts.example
             env = {k: v for k, v in os.environ.items() if k not in ("RUNE_HOT_PARK", "RUNE_DEV_LEASE")}
-            desk = Desk(host, ROOT / "target/rune-dev-desk" / tag, app_argv(opts, Path.cwd()), cwd, env)
+            # The app connects to its devserver once, at startup: start it only once dx answers.
+            desk = Desk(host, ROOT / "target/rune-dev-desk" / tag, app_argv(opts, Path.cwd()), cwd, env, lambda: wait_forward(local, tunnel))
             patch_relay = PatchRelay(("127.0.0.1", local), desk.fetch_patch)
             env.update(RUNE_DEV_GUARDED="1", RUNE_HOT="1", DIOXUS_DEVSERVER_IP="127.0.0.1", DIOXUS_DEVSERVER_PORT=str(patch_relay.port),
                        DIOXUS_BUILD_ID="0", CARGO_MANIFEST_DIR=str(cwd))
@@ -612,10 +750,10 @@ def relay(argv):
 
         def receive():
             for line in process.stdout:
-                if desk and line.startswith("rune-dev-base "):
+                if desk and BASE in line:
                     try:
-                        desk.base(json.loads(line.removeprefix("rune-dev-base ")))
-                    except (subprocess.CalledProcessError, OSError, ValueError) as error:
+                        desk.base(base_message(line))
+                    except (subprocess.CalledProcessError, OSError, ValueError, RuntimeError) as error:
                         desk.failed = f"rune-dev: could not start the app here: {error}"
                         print(desk.failed, file=sys.stderr, flush=True)
                     continue
@@ -638,6 +776,9 @@ def relay(argv):
         previous_control = None
         def tick():
             nonlocal previous_control
+            if desk and not desk.failed and (failure := tunnel_failure(tunnel)):
+                desk.failed = failure
+                print(failure, file=sys.stderr, flush=True)
             if desk and (desk.failed or desk.exited()):
                 if not desk.failed:
                     print(f"rune-dev: the app exited ({desk.app.returncode})", flush=True)
@@ -716,7 +857,9 @@ def run(args):
     if old_manifest.exists():
         for p in set(json.loads(old_manifest.read_text())) - set(baseline):
             (mirror / p).unlink(missing_ok=True)
+    overrides = mirror_overrides(crate, baseline)
     for p, data in baseline.items():
+        data = overrides.get(p, data)
         dest = mirror / p
         dest.parent.mkdir(parents=True, exist_ok=True)
         if not dest.exists() or dest.read_bytes() != data: dest.write_bytes(data)
@@ -742,7 +885,7 @@ def run(args):
             return
         if (exe, stamp) != reported:
             reported = exe, stamp
-            print("rune-dev-base " + json.dumps({"exe": exe, "sha256": sha256(exe), **platform_info()}), flush=True)
+            print(BASE + json.dumps({"exe": exe, "sha256": sha256(exe), **platform_info()}), flush=True)
     try:
         with tempfile.TemporaryDirectory(prefix="rune-guard-") as tmp:
             candidate = Path(tmp) / "candidate.rs"

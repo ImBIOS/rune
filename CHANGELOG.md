@@ -11,8 +11,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   Mac and runs on this one, patched over an SSH tunnel after a binary hash and platform check.
   `RUNE_HOT=1` now enables `--hot` behavior. `run_windows*`, `WindowSpec::from_app` and
   `App::run` patch every window from one devserver connection, `poll` and `on_key` patch like
-  the view, and `--snap-on-patch` renders a `run_windows` app's `--window` headless. Hot
-  builds only; feature-off builds are unchanged.
+  the view, and `--snap-on-patch` renders a `run_windows` or `App::window` app's `--window`
+  headless. A panicking patched view, `poll` or `on_key` falls back to the startup one in
+  every window, and patches reach overlays and hidden launchers too. Hot builds only;
+  feature-off builds are unchanged.
 
 - **Hidden overlays and windows don't run their view.** A hidden overlay used to build its view
   and lay it out on every change (an `OverlayHandle::update`, a `setup` waker, a due

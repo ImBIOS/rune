@@ -51,9 +51,26 @@ fn view_or_original<S>(original: fn(&S, &mut Cx<S>) -> El, state: &S, cx: &mut C
     tree
 }
 
+/// Calls `f` through the patch table; if the patched code panics, calls the startup `f` once
+/// instead, as a panicking view renders the original. Side effects of the panicked call stay.
+macro_rules! patched_or_original {
+    ($what:literal, $f:expr, $($arg:expr),* $(,)?) => {{
+        let f = $f;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| subsecond::HotFn::current(f).call(($($arg,)*)))) {
+            Ok(value) => value,
+            Err(_) => {
+                eprintln!(concat!("rune-hot: patched ", $what, " panicked; calling the original"));
+                f($($arg),*)
+            }
+        }
+    }};
+}
+pub(crate) use patched_or_original;
+
 fn poll_adapter<S: 'static>(host: &mut HostState, t: f64, tx: &mut Tx) -> bool {
     let spec = host.spec.downcast_ref::<AppSpec<S>>().unwrap();
-    spec.poll.is_some_and(|f| subsecond::HotFn::current(f).call((host.value.downcast_mut::<S>().unwrap(), t, tx)))
+    let Some(f) = spec.poll else { return false };
+    patched_or_original!("poll", f, host.value.downcast_mut::<S>().unwrap(), t, &mut *tx)
 }
 
 fn setup_adapter<S: 'static>(host: &mut HostState, waker: Waker) {
@@ -63,7 +80,8 @@ fn setup_adapter<S: 'static>(host: &mut HostState, waker: Waker) {
 
 fn key_adapter<S: 'static>(host: &mut HostState, key: &KeyEvent, tx: &mut Tx) -> bool {
     let spec = host.spec.downcast_ref::<AppSpec<S>>().unwrap();
-    spec.on_key.is_some_and(|f| subsecond::HotFn::current(f).call((host.value.downcast_mut::<S>().unwrap(), key, tx)))
+    let Some(f) = spec.on_key else { return false };
+    patched_or_original!("on_key", f, host.value.downcast_mut::<S>().unwrap(), key, &mut *tx)
 }
 
 pub(crate) fn run<S: 'static>(spec: AppSpec<S>, args: Args) {
@@ -142,14 +160,14 @@ pub fn enabled() -> bool {
 /// One devserver connection per process: dx patches for the last pid and ASLR base that
 /// connected, and every connection would apply each patch again. Windows share it.
 #[derive(Default)]
-struct Hub {
+pub(crate) struct Hub {
     generation: AtomicU64,
     next: AtomicU64,
     wakers: Mutex<Vec<(u64, Waker)>>,
 }
 
 impl Hub {
-    fn patched(&self) {
+    pub(crate) fn patched(&self) {
         self.generation.fetch_add(1, Ordering::Release);
         let wakers: Vec<Waker> = self.wakers.lock().unwrap().iter().map(|(_, w)| w.clone()).collect();
         for wake in wakers { wake(); }
@@ -218,8 +236,22 @@ impl Session {
         changed
     }
 
-    fn pending(&self) -> bool { self.hub.generation.load(Ordering::Acquire) != self.seen }
+    pub(crate) fn pending(&self) -> bool { self.hub.generation.load(Ordering::Acquire) != self.seen }
+
+    /// Moves this session, waker and all, to a test's own hub, so a test patch reaches only it.
+    #[cfg(test)]
+    pub(crate) fn move_to(&mut self, hub: &'static Hub) {
+        let wake = {
+            let mut wakers = self.hub.wakers.lock().unwrap();
+            let at = wakers.iter().position(|(id, _)| *id == self.id).unwrap();
+            wakers.remove(at).1
+        };
+        *self = Self::join(hub, wake);
+    }
 }
+
+#[cfg(test)]
+pub(crate) fn enable_for_tests() { ENABLED.store(true, Ordering::Release); }
 
 impl Drop for Session {
     fn drop(&mut self) { self.hub.wakers.lock().unwrap().retain(|(id, _)| *id != self.id); }
@@ -368,6 +400,108 @@ mod tests {
         let late = Session::join(hub, waker(100));
         assert!(!late.pending());
         assert!(main.changed());
+    }
+
+    thread_local! {
+        static CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    /// The first call stands in for a panicking patch: with no patch loaded, the patch table
+    /// and the startup pointer are the same function.
+    fn panics_once() {
+        CALLS.set(CALLS.get() + 1);
+        if CALLS.get() == 1 { panic!("broken patched body"); }
+    }
+
+    #[test]
+    fn a_typed_window_survives_a_panicking_view_and_its_memos_rebuild() {
+        CALLS.set(0);
+        fn view(s: &u32, cx: &mut Cx<u32>) -> El {
+            cx.time_scale(0.25);
+            col().child(crate::memo("card", *s, || {
+                panics_once();
+                el().key("card").size(40.0, 40.0).on_press(|s: &mut u32| *s += 1)
+            }))
+        }
+        let mut rt = crate::Runtime::new(5u32, view, (200.0, 100.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert_eq!(CALLS.get(), 2, "the startup view runs once after the patched one panics");
+        assert!(rt.find("card").is_some());
+        assert_eq!(rt.time_scale, 0.25, "context writes come from the view that built the tree");
+        let (x, y) = rt.find("card").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+        assert_eq!(rt.state, 6);
+        assert_eq!(CALLS.get(), 3, "the memo cache works again: a new version builds once");
+        rt.update(|_, _| {});
+        rt.frame(0.0);
+        assert_eq!(CALLS.get(), 3, "and an unchanged version is reused");
+    }
+
+    #[test]
+    fn panicking_poll_and_on_key_patches_fall_back_to_the_startup_callbacks() {
+        CALLS.set(0);
+        let mut rt = crate::Runtime::new(0u32, |_: &u32, _: &mut Cx<u32>| el().size(10.0, 10.0), (100.0, 100.0), Env::new(true, 1.0));
+        rt.on_key = Some(|s, _, _| { panics_once(); *s += 1; true });
+        rt.frame(0.0);
+        rt.key(KeyEvent { key: Key::Function(5), mods: Default::default() });
+        rt.frame(0.0);
+        assert_eq!((rt.state, CALLS.get()), (1, 2));
+        CALLS.set(0);
+        rt.poll = Some(|s, _, _| { panics_once(); *s += 10; true });
+        rt.frame(0.0);
+        assert_eq!((rt.state, CALLS.get()), (11, 2));
+        // Through the type-erased host as well: its adapters dispatch through the table too.
+        CALLS.set(0);
+        fn view(_: &usize, _: &mut Cx<usize>) -> El { el().size(10.0, 10.0) }
+        let mut host = runtime::<usize>(view);
+        let spec = host.state.spec.downcast_mut::<AppSpec<usize>>().unwrap();
+        spec.on_key = Some(|s, _, _| { panics_once(); *s += 1; true });
+        host.on_key = Some(|s: &mut HostState, key, tx| (s.key)(s, key, tx));
+        host.frame(0.0);
+        host.key(KeyEvent { key: Key::Function(5), mods: Default::default() });
+        host.frame(0.0);
+        assert_eq!((*host.state.value.downcast_ref::<usize>().unwrap(), CALLS.get()), (1, 2));
+    }
+
+    #[test]
+    fn app_try_run_snaps_the_selected_secondary_window_at_its_own_size() {
+        ENABLED.store(true, Ordering::Release);
+        let dir = std::env::temp_dir().join(format!("rune-hot-snap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (png, control) = (dir.join("settings.png"), dir.join("control.json"));
+        // Read after the first snapshot, so the loop ends once it is published.
+        std::fs::write(&control, r#"{"quit":true}"#).unwrap();
+        let mut app = crate::App::new(AppSpec::new("main", (120.0, 90.0), || 0u8, |_, _| el().key("main-root").size(10.0, 10.0)));
+        app.window(crate::WindowSpec::from_app("settings",
+            crate::App::new(AppSpec::new("settings", (60.0, 40.0), || 0u16, |_, _| el().key("settings-root").size(10.0, 10.0)))));
+        let args = ["--snap-on-patch", png.to_str().unwrap(), "--hot-control", control.to_str().unwrap(), "--window", "settings", "--scale", "1"];
+        app.args(args.map(String::from)).try_run().unwrap();
+        let tree: Value = serde_json::from_slice(&std::fs::read(png.with_extension("json")).unwrap()).unwrap();
+        let png_size = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&png).unwrap())).read_info().unwrap().info().size();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let keys: Vec<&str> = tree["elements"].as_array().unwrap().iter().filter_map(|e| e["key"].as_str()).collect();
+        assert_eq!(keys, ["settings-root"], "--window picks App::window's window, not main");
+        assert_eq!(png_size, (60, 40));
+    }
+
+    #[test]
+    fn a_pending_patch_keeps_a_window_stale_until_a_frame_rebuilds_it() {
+        let hub: &'static Hub = Box::leak(Box::default());
+        let mut rt = crate::Runtime::new(0u8, |_: &u8, _: &mut Cx<u8>| el().size(10.0, 10.0), (100.0, 100.0), Env::new(true, 1.0));
+        rt.hot = Some(Session::join(hub, Arc::new(|| {})));
+        rt.frame(0.0);
+        assert!(!rt.needs_commit() && !rt.stale());
+        hub.patched();
+        // A hidden launcher reveals its cached frame unless this says it is out of date, and
+        // refreshes that frame when its hidden poll (the patch's wake) reports it, poll or not.
+        assert!(rt.needs_commit() && rt.stale());
+        assert!(rt.poll_hidden());
+        rt.poll = Some(|_, _, _| false);
+        assert!(rt.poll_hidden());
+        rt.frame(0.0);
+        assert!(!rt.needs_commit() && !rt.stale() && !rt.poll_hidden());
     }
 
     #[test]

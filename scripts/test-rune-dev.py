@@ -7,11 +7,13 @@ import json
 import os
 from pathlib import Path
 import socket
+import sys
 import tempfile
 import threading
 import unittest
 from unittest.mock import Mock, patch
 
+sys.dont_write_bytecode = True  # no __pycache__ beside the script
 loader = importlib.machinery.SourceFileLoader("rune_dev", str(Path(__file__).with_name("rune-dev")))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 dev = importlib.util.module_from_spec(spec)
@@ -175,6 +177,33 @@ class ExternalTests(unittest.TestCase):
             self.assertEqual(dev.source("scripts/rune-dev"), dev.ROOT / "scripts/rune-dev")
             self.assertEqual(set(dev.inputs({})), {"external/Cargo.toml", "external/src/ui/list.rs"})
 
+    def test_the_mirrored_workspace_lists_only_staged_members(self):
+        manifest = ('[workspace]\nresolver = "2"\n# members below\nmembers = [\n  "app",  # the app\n  "crates/*",\n  "tools/[x]",\n]\n'
+                    'default-members = ["app", "tools/cli"]\nexclude = ["crates/old"]\n\n[workspace.dependencies]\nui = { path = "crates/ui" }\n')
+        self.write("ws/Cargo.toml", manifest)
+        self.write("ws/app/Cargo.toml", '[package]\nname = "app"\n[features]\nhot = ["rune/hot"]\n[dependencies]\nui.workspace = true\n')
+        self.write("ws/crates/ui/Cargo.toml", '[package]\nname = "ui"\n')
+        self.write("ws/crates/old/Cargo.toml", '[package]\nname = "old"\n')
+        self.write("ws/crates/other/Cargo.toml", '[package]\nname = "other"\n')
+        self.write("ws/tools/cli/Cargo.toml", '[package]\nname = "cli"\n')
+        layout = dev.external_layout(self.root / "ws/app/Cargo.toml")
+        self.assertEqual(layout.dirs, ["app", "crates/ui"], "unrelated members aren't staged")
+        with patch.object(dev, "EXTERNAL", layout):
+            data = dev.inputs({})
+        # The build Mac has only these: a workspace naming crates/other or tools/cli fails to load.
+        self.assertNotIn("external/crates/other/Cargo.toml", data)
+        overrides = dev.mirror_overrides(layout.crate, data)
+        self.assertEqual(list(overrides), ["external/Cargo.toml"])
+        staged = dev.tomllib.loads(overrides["external/Cargo.toml"].decode())
+        self.assertEqual(staged["workspace"]["members"], ["app", "crates/ui"])
+        self.assertEqual(staged["workspace"]["default-members"], ["app"])
+        self.assertEqual(staged["workspace"]["dependencies"], {"ui": {"path": "crates/ui"}})
+        self.assertIn("# members below", overrides["external/Cargo.toml"].decode(), "the rest of the file is kept")
+        self.write("ws/Cargo.toml", '[workspace]\n')
+        self.write("ws/app/Cargo.toml", '[package]\nname = "app"\nworkspace = ".."\n')
+        self.assertEqual(dev.workspace_key("external/app", {"external/Cargo.toml": b"[workspace]\n", "external/app/Cargo.toml": b'[package]\nworkspace = ".."\n'}), "external/Cargo.toml")
+        self.assertEqual(dev.mirror_overrides("external/app", {"external/app/Cargo.toml": b'[package]\nname = "app"\n'}), {}, "a lone crate is mirrored as is")
+
     def test_only_globbed_rust_files_in_the_app_crate_patch(self):
         allowed = dev.patchable("external/work/app", ["src/ui/*.rs", "src/views/**/*.rs"])
         self.assertTrue(allowed("external/work/app/src/ui/list.rs"))
@@ -228,6 +257,64 @@ class DeskTests(unittest.TestCase):
             desk.base({"exe": "/build/server", "sha256": "a" * 64, "system": "Linux", "machine": "arm64"})
         self.assertIn("Linux", desk.failed)
         run.assert_not_called()
+
+    def test_a_base_report_behind_pty_bytes_still_starts_the_desk_app(self):
+        info = {"exe": "/build/server", "sha256": "a" * 64, "system": "Darwin", "machine": "arm64"}
+        for line in [dev.BASE + json.dumps(info) + "\n", "\r\x1b[K" + dev.BASE + json.dumps(info) + "\r\n"]:
+            self.assertEqual(dev.base_message(line), info)
+        self.assertIsNone(dev.base_message("Compiling app\n"))
+
+    def forwarded(self, behaviour):
+        """A stand-in for an `ssh -L` port: accepts, then answers or closes like a missing remote."""
+        server = socket.create_server(("127.0.0.1", 0))
+        self.addCleanup(server.close)
+        def serve():
+            while True:
+                try:
+                    conn, _ = server.accept()
+                except OSError:
+                    return
+                with conn:
+                    behaviour(conn)
+        threading.Thread(target=serve, daemon=True).start()
+        return server.getsockname()[1]
+
+    def test_the_desk_app_waits_for_dx_through_the_tunnel_and_a_dead_tunnel_fails_loudly(self):
+        silent = self.forwarded(lambda conn: None)
+        self.assertFalse(dev.answers(silent), "ssh accepting a forward isn't dx answering")
+        tunnel = Mock(returncode=255)
+        tunnel.poll.side_effect = [None, None, 255]
+        with self.assertRaisesRegex(RuntimeError, "tunnel to dx exited"):
+            dev.wait_forward(silent, tunnel, timeout=30, interval=.01)
+        with self.assertRaisesRegex(RuntimeError, "did not answer"):
+            dev.wait_forward(silent, Mock(poll=Mock(return_value=None)), timeout=.05, interval=.01)
+        calls = []
+        def dx(conn):
+            calls.append(1)
+            if len(calls) > 2:
+                conn.recv(1024)
+                conn.sendall(b"HTTP/1.1 404 Not Found\r\n\r\n")
+        dev.wait_forward(self.forwarded(dx), Mock(poll=Mock(return_value=None)), timeout=30, interval=.01)
+        self.assertEqual(len(calls), 3, "the app starts once dx answers, not before")
+        self.assertIsNone(dev.tunnel_failure(Mock(poll=Mock(return_value=None))))
+        self.assertIn("Rerun", dev.tunnel_failure(Mock(poll=Mock(return_value=1), returncode=1)))
+
+    def test_the_relay_retries_dx_while_the_forward_comes_up(self):
+        calls = []
+        def dx(conn):
+            calls.append(1)
+            if len(calls) < 3:
+                return  # ssh closing a forward whose remote end isn't listening yet
+            dev.read_head(conn)
+            conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+            conn.recv(1)
+        relay = dev.PatchRelay(("127.0.0.1", self.forwarded(dx)), lambda lib: lib, interval=.01)
+        self.addCleanup(relay.close)
+        with socket.create_connection(("127.0.0.1", relay.port), timeout=10) as app:
+            app.sendall(b"GET /_dioxus?pid=7 HTTP/1.1\r\nHost: x\r\n\r\n")
+            response, _ = dev.read_head(app)
+        self.assertIn(b"101", response)
+        self.assertEqual(len(calls), 3)
 
     def test_relay_rewrites_fragmented_patches_and_passes_other_frames(self):
         upstream = socket.create_server(("127.0.0.1", 0))
