@@ -156,3 +156,39 @@ fn shadow_hole_clears_the_interior_on_the_gpu() {
     // The hole's own corner: rounded, so its very corner keeps some shadow.
     assert!(alpha(&cut, 16, 16) > 0);
 }
+
+/// With `srgb_blend`, a 62% white frost over the material reaches the window as Core Animation
+/// would composite the same CALayer: 158 over black (linear blending gives 206), and
+/// premultiplied 158 over nothing for the window server to blend. The shadow's hole stays clear.
+#[test]
+fn srgb_blend_frost_over_a_native_material_reads_as_core_animation() {
+    fn frosted(frost: &u8, _: &mut Cx<u8>) -> El {
+        let white = Color::WHITE.alpha(0.62 * f32::from(*frost));
+        el().size(200.0, 120.0).child(card().continuous_corners().child(el().size(120.0, 60.0).fill(white)))
+    }
+    let gpu = Gpu::headless();
+    let read = |srgb: bool, frost: u8, clear: [f32; 4]| {
+        let mut rt = Runtime::new(frost, frosted, (200.0, 120.0), Env { scale: 2.0, system_dark: true });
+        rt.native_materials = true;
+        rt.set_srgb_blend(srgb);
+        rt.frame(0.0);
+        let format = if srgb { crate::render::OFFSCREEN_FORMAT.remove_srgb_suffix() } else { crate::render::OFFSCREEN_FORMAT };
+        let mut renderer = Renderer::new(&gpu.device, format);
+        renderer.set_srgb_blend(srgb);
+        let target = Offscreen::with_format(&gpu.device, 400, 240, format);
+        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (400, 240));
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        renderer.draw(&mut enc, &target.view, clear);
+        target.copy(&mut enc);
+        renderer.submit(&gpu.queue, enc);
+        let px = target.read(&gpu.device);
+        let at = (100 * 400 + 180) * 4;
+        [px[at], px[at + 1], px[at + 2], px[at + 3]]
+    };
+    let black = [0.0, 0.0, 0.0, 1.0];
+    let near = |got: [u8; 4], want: [u8; 4]| assert!(got.iter().zip(want).all(|(g, w)| g.abs_diff(w) <= 1), "{got:?} != {want:?}");
+    near(read(false, 1, black), [206, 206, 206, 255]);
+    near(read(true, 1, black), [158, 158, 158, 255]);
+    near(read(true, 1, [0.0; 4]), [158, 158, 158, 158]);
+    near(read(true, 0, [0.0; 4]), [0, 0, 0, 0]);
+}
