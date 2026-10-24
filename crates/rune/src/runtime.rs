@@ -1199,8 +1199,11 @@ impl<S: 'static> Runtime<S> {
     /// lays out, animates or draws. Like `update`, its changes wait, dirty, for the next frame.
     /// Returns whether `poll` reported a change.
     pub(crate) fn poll_hidden(&mut self) -> bool {
-        let Some(poll) = self.poll else { return false };
         if let Some(clock) = self.wall_clock() { self.clock = clock; }
+        // An `update`'s `wake_after` counts from now; no frame may come to schedule it.
+        let wakes = std::mem::take(&mut self.pending.wakes);
+        self.schedule_wakes(wakes);
+        let Some(poll) = self.poll else { return false };
         let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
         self.wake_deadlines.drain(..due);
         let mut one = self.transaction();

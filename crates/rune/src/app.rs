@@ -689,4 +689,21 @@ mod tests {
         rt.frame(1.0 / 60.0);
         assert_eq!(width(&rt), 40.0);
     }
+
+    /// An update's `wake_after`, delivered while no frame draws (hidden, covered, asleep or
+    /// minimised), arms its timer on the next hidden poll.
+    #[test]
+    fn an_update_arriving_without_frames_arms_its_timer() {
+        let mut rt = Runtime::new(0_u32, |_: &u32, _: &mut Cx<u32>| el(), (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        rt.poll = Some(|polls: &mut u32, _, _: &mut Tx| { *polls += 1; false });
+        rt.wall_start = Some(std::time::Instant::now());
+        rt.frame(0.0);
+        assert_eq!(rt.wake_deadline(), None);
+        rt.update(|_, tx| tx.wake_after(std::time::Duration::from_secs(5)));
+        rt.poll_hidden();
+        let deadline = rt.wake_deadline().expect("the update's timer is armed without a frame");
+        assert!((4.9..5.5).contains(&deadline), "it counts from the update: {deadline}");
+        rt.frame(0.0);
+        assert_eq!(rt.wake_deadline(), Some(deadline), "and the next frame doesn't arm it twice");
+    }
 }
