@@ -1011,8 +1011,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     // Events at t = 0 find keys and hit elements in a laid-out first frame, as input reaches a
     // real window only once it has drawn. That frame mounts the initial state with any queued
     // updates; frame 0 then draws the events' effects.
-    let mut early_place = None;
-    if script.first().is_some_and(|e| e.t <= 1e-9) {
+    let mut take_requests = |rt: &mut Runtime<S>| {
         shortcuts.drain();
         let requests = shared.take();
         menus.drain();
@@ -1020,7 +1019,11 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             rt.update(f);
             menus.drain();
         }
-        early_place = requests.place;
+        requests.place
+    };
+    let mut early_place = None;
+    if script.first().is_some_and(|e| e.t <= 1e-9) {
+        early_place = take_requests(&mut rt);
         rt.frame(0.0);
     }
 
@@ -1058,17 +1061,11 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
                 Kind::Fling(v) => rt.fling(x, y, *v),
             }
         }
-        shortcuts.drain();
-        let requests = shared.take();
-        menus.drain();
-        for f in requests.updates {
-            rt.update(f);
-            menus.drain();
-        }
+        let requested_place = take_requests(&mut rt);
         let step = if k == 0 { 0.0 } else { dt };
         let mut animating = rt.frame(step);
         // Updates, poll and input handlers place too; the latest request this frame wins.
-        if let Some(place) = shared.take_place().or(requests.place).or(early_place.take()) {
+        if let Some(place) = shared.take_place().or(requested_place).or(early_place.take()) {
             let (display, frame) = desktop.place(&place, size);
             let record = json!({ "t": real_t, "display": display, "frame": frame });
             println!("rune-placed {record}");
@@ -1185,24 +1182,22 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         write_png(p, sw, sh, &img).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
     }
 
+    let q = |v: &mut Vec<f64>, p: f64| {
+        v.sort_by(f64::total_cmp);
+        if v.is_empty() { 0.0 } else { v[((v.len() - 1) as f64 * p).round() as usize] }
+    };
     let mut sorted = cpu_ms.clone();
-    sorted.sort_by(f64::total_cmp);
-    let pct = |q: f64| sorted[((sorted.len() - 1) as f64 * q).round() as usize];
     let steady: Vec<f64> = cpu_ms.iter().skip(1).copied().collect();
     let mean = if steady.is_empty() { cpu_ms[0] } else { steady.iter().sum::<f64>() / steady.len() as f64 };
     eprintln!(
         "rune: {} frames at {fps} fps, gpu init {init_ms:.1} ms, first frame {:.2} ms, frame cpu mean {mean:.3} ms p50 {:.3} p95 {:.3} max {:.3}, {} instances",
         cpu_ms.len(),
         cpu_ms[0],
-        pct(0.5),
-        pct(0.95),
-        sorted[sorted.len() - 1],
+        q(&mut sorted, 0.5),
+        q(&mut sorted, 0.95),
+        q(&mut sorted, 1.0),
         rt.instances.len()
     );
-    let q = |v: &mut Vec<f64>, p: f64| {
-        v.sort_by(f64::total_cmp);
-        if v.is_empty() { 0.0 } else { v[((v.len() - 1) as f64 * p).round() as usize] }
-    };
     let (a50, a95) = (q(&mut anim_ms, 0.5), q(&mut anim_ms, 0.95));
     let (r50, r95) = (q(&mut rest_ms, 0.5), q(&mut rest_ms, 0.95));
     eprintln!(
