@@ -135,6 +135,17 @@ impl Default for Env {
 /// Wakes the shell from another thread (new data arrived); a no-op headless.
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
+thread_local! {
+    static COMMITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many commits (runs of a view that go on to the screen) have started on this thread,
+/// across all its windows; 0 before the first. A cache of what views draw can keep whatever
+/// the last commit or two used and evict the rest.
+pub fn commit_generation() -> u64 {
+    COMMITS.get()
+}
+
 /// Passed to view functions: the environment, plus runtime settings a view may declare.
 pub struct Cx<S> {
     env: Env,
@@ -2454,6 +2465,7 @@ impl<S> Measurement<'_, S> {
 
 impl<S: 'static> Runtime<S> {
     fn commit(&mut self, tx: &Tx) {
+        COMMITS.set(COMMITS.get() + 1);
         let mut measured = self.measure(tx);
         if self.sync_requested_focus(&mut measured.nodes) {
             self.layout = measured.layout;

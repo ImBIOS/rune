@@ -11,9 +11,10 @@
 
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+
+use super::budget::Budget;
 
 /// A kind of token in fenced code, each with its own colour (see
 /// [`MarkdownStyle::syntax`](super::MarkdownStyle::syntax)).
@@ -87,7 +88,8 @@ pub(super) const MAX_TOKENS: usize = 8192;
 const MAX_DEPTH: u8 = 3;
 /// The longest a JavaScript regex literal can be, which bounds the lookahead after a `/`.
 const MAX_REGEX: usize = 512;
-const CACHE_LEN: usize = 32;
+/// Estimated bytes of colourings kept beyond those on screen (see [`budget`](super::budget)).
+const CACHE_BYTES: usize = 4 << 20;
 
 /// A coloured byte range of the source.
 pub(super) type Token = (u32, u32, Syntax);
@@ -98,39 +100,27 @@ struct Entry {
     tokens: Rc<[Token]>,
 }
 
-#[derive(Default)]
-struct Cache {
-    map: HashMap<u64, Entry>,
-    order: VecDeque<u64>,
-}
-
 thread_local! {
-    static CACHE: RefCell<Cache> = RefCell::new(Cache::default());
+    static CACHE: RefCell<Budget<u64, Entry>> = RefCell::new(Budget::new(CACHE_BYTES));
 }
 
-/// [`highlight`] memoised by language and source on this thread (the last 32 blocks).
+/// [`highlight`] memoised by language and source on this thread: every block the last two
+/// commits drew, and others up to a memory budget.
 pub(super) fn cached(lang: Lang, src: &str) -> Rc<[Token]> {
     let src = &src[..coloured_len(src)];
     let mut h = DefaultHasher::new();
     (lang, src).hash(&mut h);
     let key = h.finish();
     CACHE.with_borrow_mut(|c| {
-        if let Some(e) = c.map.get(&key)
+        if let Some(e) = c.get(&key)
             && e.lang == lang
             && e.src == src
         {
             return e.tokens.clone();
         }
         let tokens: Rc<[Token]> = highlight(lang, src).into();
-        if !c.map.contains_key(&key) {
-            if c.order.len() >= CACHE_LEN
-                && let Some(old) = c.order.pop_front()
-            {
-                c.map.remove(&old);
-            }
-            c.order.push_back(key);
-        }
-        c.map.insert(key, Entry { lang, src: src.to_owned(), tokens: tokens.clone() });
+        let bytes = src.len() + tokens.len() * size_of::<Token>() + 64;
+        c.insert(key, Entry { lang, src: src.to_owned(), tokens: tokens.clone() }, bytes);
         tokens
     })
 }

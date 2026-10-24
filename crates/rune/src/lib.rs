@@ -146,7 +146,7 @@ pub use rune_motion::{
     Anim, AnimExt, Beat, Clock, Curve, Easing, Edge, LayoutAnim, LoopKind, LoopSpec, NodeId, Phase as PresencePhase, Presented,
     Sequence, Spring, SpringPair, Transition, Travel,
 };
-pub use runtime::{Cx, Env, Runtime, TitlebarAction, Waker};
+pub use runtime::{Cx, Env, Runtime, TitlebarAction, Waker, commit_generation};
 pub use shape::{LineCap, Path, Shape};
 pub use native_surface::{NativeSurface, SurfaceFit};
 pub use system_material::{MAX_NATIVE_MATERIALS, SystemMaterial};

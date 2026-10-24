@@ -10,9 +10,10 @@
 //! let view = Markdown::new(&message.text).render(&MarkdownStyle::neutral(dark));
 //! ```
 //!
-//! **Cost.** [`parse_cached`] keeps the parse of the last few source strings, so re-rendering
-//! unchanged text (every frame of an animation, a list of finished messages) parses nothing.
-//! A growing stream parses once per distinct string, which is the unavoidable minimum.
+//! **Cost.** [`parse_cached`] keeps the parse of every source string the last two commits drew
+//! (and others up to a memory budget), so re-rendering unchanged text (every frame of an
+//! animation, a transcript of any length) parses nothing. A growing stream parses only from the
+//! start of its last top-level block each time it grows.
 //!
 //! **Keys.** Top-level blocks are keyed `b{index}`, list items `i{index}` and their blocks by
 //! the same rule inside the item. Appending to a stream only ever changes the last block or
@@ -29,7 +30,6 @@
 //! the subset doesn't cover, the source shows as a code block.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::rc::Rc;
@@ -39,9 +39,11 @@ use rune::{Align, Color, El, Link, LinkPaint, Span, TextStyle, col, el, oklch, r
 
 use crate::{Kit, PaletteSeed};
 
+mod budget;
 mod highlight;
 mod table;
 
+use budget::Budget;
 use highlight::Lang;
 pub use highlight::Syntax;
 
@@ -102,11 +104,21 @@ struct Builder {
     /// The source range of the last paragraph started at the root.
     last_root_para: Option<Range<usize>>,
     sources: Vec<Source>,
+    cuts: Vec<Cut>,
+}
+
+/// Where a top-level block starts: the start of its first line, and how many top-level blocks
+/// and [`Source`]s come before it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Cut {
+    at: usize,
+    blocks: usize,
+    sources: usize,
 }
 
 /// What colours a [`Block::Code`], one per block in document order (the order the renderer
 /// meets them). Kept beside the blocks so `Block` keeps its shape.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Source {
     lang: Option<Lang>,
     /// The code's length, to check this belongs to the block it is matched with.
@@ -248,16 +260,28 @@ pub fn parse(src: &str) -> Vec<Block> {
     parse_doc(src).0
 }
 
-fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>) {
+fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>, Vec<Cut>) {
     let mut b = Builder {
         stack: vec![(Container::Root, Vec::new())],
         inline: None,
         code: None,
         last_root_para: None,
         sources: Vec::new(),
+        cuts: Vec::new(),
     };
     let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
     for (ev, range) in Parser::new_ext(src, opts).into_offset_iter() {
+        let starts_block = matches!(
+            ev,
+            Event::Start(
+                Tag::Paragraph | Tag::Heading { .. } | Tag::CodeBlock(_) | Tag::BlockQuote(_) | Tag::List(_) | Tag::Table(_) | Tag::HtmlBlock
+            ) | Event::Rule
+        );
+        if starts_block && b.stack.len() == 1 && b.code.is_none() {
+            b.flush_inline();
+            let at = src[..range.start].rfind('\n').map_or(0, |i| i + 1);
+            b.cuts.push(Cut { at, blocks: b.stack[0].1.len(), sources: b.sources.len() });
+        }
         match ev {
             Event::Start(tag) => match tag {
                 Tag::Paragraph => {
@@ -399,7 +423,7 @@ fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>) {
     {
         *blocks.last_mut().unwrap() = Block::Table(t);
     }
-    (blocks, b.sources)
+    (blocks, b.sources, b.cuts)
 }
 
 fn code_block(text: String, fence: Fence) -> Block {
@@ -496,41 +520,91 @@ fn end_run(inl: &mut Inline, o: Open) {
     }
     inl.spans.push((o.start, end, o.style));
 }
-const CACHE_LEN: usize = 32;
+/// Estimated bytes of parsed documents kept beyond those on screen (see [`budget`]).
+const CACHE_BYTES: usize = 16 << 20;
 
 type Doc = (Rc<Vec<Block>>, Rc<[Source]>);
 
-#[derive(Default)]
+#[derive(Clone)]
+struct Parsed {
+    doc: Doc,
+    cuts: Rc<[Cut]>,
+}
+
 struct Cache {
-    map: HashMap<String, Doc>,
-    order: VecDeque<String>,
+    docs: Budget<Rc<str>, Parsed>,
+    /// The source parsed last, which a stream's next string extends.
+    last: Option<Rc<str>>,
 }
 
 thread_local! {
-    static CACHE: RefCell<Cache> = RefCell::new(Cache::default());
+    static CACHE: RefCell<Cache> = RefCell::new(Cache { docs: Budget::new(CACHE_BYTES), last: None });
 }
 
-/// [`parse`] memoised by source on this thread (the last 32 distinct strings).
+#[cfg(test)]
+thread_local! {
+    /// (whole documents parsed, streams parsed from their last block).
+    static PARSES: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+}
+
+/// [`parse`] memoised by source on this thread. Every document the last two commits drew stays
+/// cached however many there are; past a memory budget the least recently drawn of the rest go.
 pub fn parse_cached(src: &str) -> Rc<Vec<Block>> {
     doc_cached(src).0
 }
 
 fn doc_cached(src: &str) -> Doc {
     CACHE.with_borrow_mut(|c| {
-        if let Some(hit) = c.map.get(src) {
-            return hit.clone();
+        if let Some(hit) = c.docs.get(src) {
+            return hit.doc.clone();
         }
-        let (blocks, sources) = parse_doc(src);
-        let doc: Doc = (Rc::new(blocks), sources.into());
-        if c.order.len() >= CACHE_LEN
-            && let Some(old) = c.order.pop_front()
+        let grown = c.last.clone().filter(|last| src.len() > last.len() && src.starts_with(&**last));
+        let parsed = grown.as_ref().and_then(|last| extend(c.docs.peek(&**last)?, last.len(), src)).unwrap_or_else(|| {
+            #[cfg(test)]
+            PARSES.with(|p| p.set((p.get().0 + 1, p.get().1)));
+            let (blocks, sources, cuts) = parse_doc(src);
+            Parsed { doc: (Rc::new(blocks), sources.into()), cuts: cuts.into() }
+        });
+        // A stream's earlier string is dead once it grows, unless something drew it this
+        // commit; left in, a long stream would fill the budget with its prefixes.
+        if let Some(last) = grown
+            && !c.docs.used_now(&*last)
         {
-            c.map.remove(&old);
+            c.docs.remove(&*last);
         }
-        c.order.push_back(src.to_owned());
-        c.map.insert(src.to_owned(), doc.clone());
-        doc
+        let key: Rc<str> = src.into();
+        // Parsed text is about as long as its source, plus each block's bookkeeping.
+        let bytes = 2 * src.len() + 64 * parsed.cuts.len() + 128;
+        c.docs.insert(key.clone(), parsed.clone(), bytes);
+        c.last = Some(key);
+        parsed.doc
     })
+}
+
+/// The parse of `src`, which extends the `base_len` bytes `base` parsed, reusing every
+/// top-level block before `base`'s last: appended text can change only the last block or add
+/// blocks after it. Whether a line starts a block can depend on the rest of that line (`|`
+/// ending a table that `| 1 |` would continue), so the reparse starts at the last block that
+/// starts on a finished line. A reference definition (`[x]: url`) can change links anywhere,
+/// so a source that may hold one parses whole.
+fn extend(base: &Parsed, base_len: usize, src: &str) -> Option<Parsed> {
+    let i = base.cuts.iter().rposition(|c| src[c.at..base_len].contains('\n'))?;
+    let cut = base.cuts[i];
+    if cut.at == 0 || cut.blocks >= base.doc.0.len() || src.contains("]:") {
+        return None;
+    }
+    #[cfg(test)]
+    PARSES.with(|p| p.set((p.get().0, p.get().1 + 1)));
+    let (tail, sources, cuts) = parse_doc(&src[cut.at..]);
+    let mut blocks = base.doc.0[..cut.blocks].to_vec();
+    blocks.extend(tail);
+    let sources: Rc<[Source]> = base.doc.1[..cut.sources].iter().copied().chain(sources).collect();
+    let cuts = base.cuts[..i]
+        .iter()
+        .copied()
+        .chain(cuts.into_iter().map(|c| Cut { at: c.at + cut.at, blocks: c.blocks + cut.blocks, sources: c.sources + cut.sources }))
+        .collect();
+    Some(Parsed { doc: (Rc::new(blocks), sources), cuts })
 }
 
 /// How markdown looks. [`MarkdownStyle::from_kit`] takes every colour and font from the kit's
@@ -1213,5 +1287,93 @@ mod tests {
                 assert_eq!(plain, quads(code, &streaming, width), "{lang} mid-stream at {width:?}");
             }
         }
+    }
+
+    fn parses() -> (usize, usize) {
+        PARSES.get()
+    }
+
+    /// A transcript longer than any fixed entry count re-renders without parsing.
+    #[test]
+    fn a_column_of_forty_documents_parses_each_once() {
+        fn view(_: &(), _: &mut rune::Cx<()>) -> El {
+            let style = MarkdownStyle::neutral(true);
+            col().children((0..40).map(|i| Markdown::new(format!("para {i}\n\n- item")).render(&style).key(format!("m{i}"))))
+        }
+        let before = parses();
+        let mut rt = rune::Runtime::new((), view, (400.0, 800.0), rune::Env::default());
+        rt.frame(0.0);
+        assert_eq!(parses().0 - before.0, 40);
+        for _ in 0..3 {
+            rt.invalidate();
+            rt.frame(1.0 / 60.0);
+        }
+        assert_eq!(parses().0 - before.0, 40, "later commits parse nothing");
+    }
+
+    /// Feeding a document in a few bytes at a time parses only from its last block, and gives
+    /// exactly what parsing each string whole gives.
+    #[test]
+    fn a_stream_reparses_from_its_last_block_and_matches_a_whole_parse() {
+        let docs = [
+            "# Title\n\nFirst para with **bold** and `code`.\nSetext\n---\n\n- one\n- two\n\n  more of two\n\n1. a\n2. b\n\nAfter the list.\n\n> quoted\n> lines\n\n```rust\nfn main() {}\n```\n\n    indented code\n\n***\n\n| a | b |\n|:-|-:|\n| 1 | 2 |\n\ntail text <span>html</span>\n\n<div>\nblock\n</div>\n\nlast *words*",
+            "para one\n\npara two\n```ts\nconst a = 1\n```\n- item\nlazy line\n\n| x | y |\n| - | - |\nend",
+        ];
+        for doc in docs {
+            let before = parses();
+            for end in (1..=doc.len()).filter(|&i| doc.is_char_boundary(i)) {
+                let src = &doc[..end];
+                let (blocks, sources) = doc_cached(src);
+                let (want, want_sources, want_cuts) = parse_doc(src);
+                assert_eq!(*blocks, want, "blocks of {src:?}");
+                assert_eq!(&*sources, &want_sources[..], "sources of {src:?}");
+                let cuts = CACHE.with_borrow(|c| c.docs.peek(src).unwrap().cuts.clone());
+                assert_eq!(&*cuts, &want_cuts[..], "cuts of {src:?}");
+            }
+            let (whole, tail) = (parses().0 - before.0, parses().1 - before.1);
+            assert!(tail > whole * 2, "{doc:?}: {whole} whole parses, {tail} from the last block");
+        }
+    }
+
+    /// A long stream keeps only its newest string, so it never pushes other documents out.
+    #[test]
+    fn a_stream_drops_the_strings_it_grew_from() {
+        let mut rt = rune::Runtime::new((), |_: &(), _: &mut rune::Cx<()>| rune::el(), (10.0, 10.0), rune::Env::default());
+        let mut commit = || {
+            rt.invalidate();
+            rt.frame(0.01);
+        };
+        commit();
+        let docs: Vec<String> = (0..40).map(|i| format!("doc {i}\n\n- item {i}\n- another item")).collect();
+        for doc in &docs {
+            doc_cached(doc);
+        }
+        let held = CACHE.with_borrow(|c| c.docs.bytes());
+        let mut stream = String::new();
+        for i in 0.. {
+            stream += &format!("Line {i} of a streamed answer, with a few more words.\n\n");
+            if stream.len() >= 50_000 { break; }
+        }
+        for end in (50..=stream.len()).step_by(50).chain([stream.len()]) {
+            commit();
+            doc_cached(&stream[..end]);
+        }
+        CACHE.with_borrow(|c| {
+            let last = c.docs.peek(stream.as_str()).expect("the whole stream is cached");
+            let bytes = 2 * stream.len() + 64 * last.cuts.len() + 128;
+            assert_eq!(c.docs.bytes(), held + bytes, "only the newest string of the stream is held");
+            for doc in &docs {
+                assert!(c.docs.peek(doc.as_str()).is_some(), "{doc:?} was evicted");
+            }
+        });
+    }
+
+    #[test]
+    fn a_reference_definition_parses_whole() {
+        let before = parses();
+        doc_cached("[x]\n\nsome text");
+        doc_cached("[x]\n\nsome text\n\n[x]: https://example.com");
+        assert_eq!(parses().0 - before.0, 2);
+        assert_eq!(parse_cached("[x]\n\nsome text\n\n[x]: https://example.com")[0], parse("[x]\n\nsome text\n\n[x]: https://example.com")[0]);
     }
 }

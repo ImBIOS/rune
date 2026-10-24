@@ -5,7 +5,8 @@ use super::*;
 
 const PAD_X: f32 = 10.0;
 const PAD_Y: f32 = 6.0;
-const WIDTHS_LEN: usize = 32;
+/// Estimated bytes of column widths kept beyond the tables on screen.
+const WIDTHS_BYTES: usize = 1 << 20;
 
 /// Per column: the content's width on one line and its longest word (capped), padding included.
 #[derive(Debug)]
@@ -14,14 +15,8 @@ struct Columns {
     min: Vec<f32>,
 }
 
-#[derive(Default)]
-struct WidthCache {
-    map: HashMap<u64, Rc<Columns>>,
-    order: VecDeque<u64>,
-}
-
 thread_local! {
-    static WIDTHS: RefCell<WidthCache> = RefCell::new(WidthCache::default());
+    static WIDTHS: RefCell<Budget<u64, Rc<Columns>>> = RefCell::new(Budget::new(WIDTHS_BYTES));
 }
 
 pub(super) fn font_key(f: TextStyle) -> (u32, u32, u32, u32, String) {
@@ -120,7 +115,7 @@ impl Renderer {
             self.s.inline_code_scale.to_bits(),
             self.s.inline_code_weight.to_bits(),
         ));
-        if let Some(hit) = WIDTHS.with_borrow(|c| c.map.get(&key).cloned()) {
+        if let Some(hit) = WIDTHS.with_borrow_mut(|c| c.get(&key).cloned()) {
             return hit;
         }
         let mut natural = vec![0.0f32; n];
@@ -138,15 +133,7 @@ impl Renderer {
         }
         let pad = |w: f32| w + 2.0 * PAD_X;
         let cols = Rc::new(Columns { natural: natural.into_iter().map(pad).collect(), min: min.into_iter().map(pad).collect() });
-        WIDTHS.with_borrow_mut(|c| {
-            if c.order.len() >= WIDTHS_LEN
-                && let Some(old) = c.order.pop_front()
-            {
-                c.map.remove(&old);
-            }
-            c.order.push_back(key);
-            c.map.insert(key, cols.clone());
-        });
+        WIDTHS.with_borrow_mut(|c| c.insert(key, cols.clone(), 8 * n + 64));
         cols
     }
 }

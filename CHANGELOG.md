@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Markdown keeps every document on screen parsed.** `Markdown` and `markdown::parse_cached`
+  kept the last 32 sources, so a transcript showing more than 32 messages parsed every one of
+  them on every commit. The cache (and the code-colour and table-width caches beside it) now
+  keeps whatever the last two commits drew, and evicts the least recently drawn of the rest
+  past a memory budget. A streaming message reparses only from its last top-level block, and
+  only its newest string stays cached.
+  New `rune::commit_generation()` counts commits on the thread, for caches like these.
 - **`El::truncate_middle()` and `El::truncate_head()`; `Type::caption()`.** Middle truncation
   keeps a single line's start and end with "…" between, as `NSLineBreakByTruncatingMiddle`
   does for paths; head truncation keeps the end. `.truncate()` now cuts between graphemes
