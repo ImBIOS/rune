@@ -47,10 +47,17 @@ fn font_trak(traks: &mut Traks, data: &Blob<u8>, index: u32) -> Option<Rc<Trak>>
         .clone()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_FONTS: [&[u8]; 3] = [
     include_bytes!("../assets/Inter-Regular.ttf"),
     include_bytes!("../assets/Inter-Medium.ttf"),
     include_bytes!("../assets/Inter-SemiBold.ttf"),
+];
+
+#[cfg(target_arch = "wasm32")]
+const DEFAULT_FONTS: [&[u8]; 2] = [
+    include_bytes!("../assets/Inter-Regular.ttf"),
+    include_bytes!("../assets/IBMPlexMono-Regular.ttf"),
 ];
 
 /// Scripts the app's own families usually lack: Han, kana, Hangul and Bopomofo.
@@ -218,6 +225,10 @@ fn register_script_fallbacks(collection: &mut Collection, loaded: &mut LoadedFil
 /// Font files whose lowercase name, without spaces and dots, contains one of `fragments`,
 /// ordered by the first fragment they match, then by path. The platform's font directories are
 /// walked once per process.
+#[cfg(target_arch = "wasm32")]
+fn system_font_files(_: &[&str]) -> Vec<std::path::PathBuf> { Vec::new() }
+
+#[cfg(not(target_arch = "wasm32"))]
 fn system_font_files(fragments: &[&str]) -> Vec<std::path::PathBuf> {
     static FILES: std::sync::OnceLock<Vec<(String, std::path::PathBuf)>> = std::sync::OnceLock::new();
     let mut files: Vec<_> = FILES
@@ -229,6 +240,7 @@ fn system_font_files(fragments: &[&str]) -> Vec<std::path::PathBuf> {
     files.into_iter().map(|(_, path)| path.clone()).collect()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn walk_font_dirs() -> Vec<(String, std::path::PathBuf)> {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     if cfg!(target_os = "macos") {
@@ -897,13 +909,20 @@ fn variations(style: TextStyle, size: f32) -> Vec<parley::FontVariation> {
 }
 
 impl TextSystem {
-    /// `fonts` replaces the built-in Inter faces when non-empty; `families` names the sans and
-    /// mono slots. Other registered families are selectable with `Family::Named`.
+    /// `fonts` replaces the built-in Inter faces when non-empty on native. Web keeps its
+    /// bundled sans and mono fallbacks, since there are no system fonts to discover.
+    /// `families` names the sans and mono slots; others are selectable with `Family::Named`.
     pub fn new(fonts: &[&'static [u8]], families: (&str, &str)) -> Self {
         measure::note_fonts(fonts, families);
         let mut collection = Collection::new(CollectionOptions { shared: false, system_fonts: false });
         let list: &[&'static [u8]] = if fonts.is_empty() { &DEFAULT_FONTS } else { fonts };
         let mut registered = Vec::new();
+        #[cfg(target_arch = "wasm32")]
+        if !fonts.is_empty() {
+            for data in DEFAULT_FONTS {
+                collection.register_fonts(Blob::new(Arc::new(data)), None);
+            }
+        }
         for data in list {
             registered.extend(collection.register_fonts(Blob::new(Arc::new(*data)), None).into_iter().map(|(id, _)| id));
         }
@@ -911,6 +930,8 @@ impl TextSystem {
         register_cjk_fallbacks(&mut collection, &mut font_files, &registered, families);
         let symbol_families = load_families(&mut collection, SYMBOL_FONT_FILES, SYMBOL_FAMILIES);
         let emoji = symbol_families.iter().copied().find(|f| f.contains("Emoji"));
+        #[cfg(target_arch = "wasm32")]
+        let families = if fonts.is_empty() { ("Inter", "IBM Plex Mono") } else { families };
         TextSystem {
             font_cx: FontContext { collection, source_cache: SourceCache::default() },
             layout_cx: LayoutContext::new(),
@@ -918,8 +939,8 @@ impl TextSystem {
             layouts: HashMap::new(),
             runs: HashMap::new(),
             generation: 0,
-            sans: families.0.to_owned(),
-            mono: families.1.to_owned(),
+            sans: if cfg!(target_arch = "wasm32") { format!("{}, Inter", families.0) } else { families.0.to_owned() },
+            mono: if cfg!(target_arch = "wasm32") { format!("{}, IBM Plex Mono", families.1) } else { families.1.to_owned() },
             symbol_families,
             emoji,
             math: None,

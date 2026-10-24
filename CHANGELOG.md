@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Web fonts are self-contained.** The browser target bundles Inter Regular and IBM Plex
+  Mono Regular, accepts app-provided font bytes, and never scans system font directories.
+  Apps supply additional weights, symbols and scripts through `AppSpec::fonts`.
+
 - **Experimental WebGPU canvas host.** `App::run` on `wasm32-unknown-unknown` starts one
   winit canvas with asynchronous GPU initialization and demand-driven browser frames.
   `rune::time::Instant` uses the browser clock on wasm and the standard clock on native.
