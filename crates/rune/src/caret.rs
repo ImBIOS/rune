@@ -19,12 +19,7 @@ impl<S: 'static> Runtime<S> {
         }
         let tw = layout.full_width().ceil() / s;
         let (x0, x1) = (n.target[0] + n.inset[0], n.target[2] - n.inset[2]);
-        let mut x = match spec.align {
-            _ if line_alignment(spec) != parley::Alignment::Start => x0,
-            Align::Start => x0,
-            Align::Center => x0 + (x1 - x0 - tw) * 0.5,
-            Align::End => x1 - tw,
-        };
+        let mut x = text_x(spec, x0, x1, tw);
         if inp.single_line {
             let prev = self.input_scroll.get(&n.path).copied().unwrap_or(0.0);
             x -= single_line_offset(prev, inp, &spec.content, layout, s, (x1 - x0) * s) / s;

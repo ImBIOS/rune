@@ -3855,12 +3855,7 @@ fn input_caret(n: &Node, r: [f32; 4], scale: f32, s: f32, scrolls: &mut HashMap<
     let e = &input.edit;
     let ins = n.inset.map(|v| v * scale * s);
     let (x0, x1) = (r[0] + ins[0], r[2] - ins[2]);
-    let mut x = match spec.align {
-        _ if line_alignment(spec) != parley::Alignment::Start => x0,
-        Align::Start => x0,
-        Align::Center => x0 + (x1 - x0 - layout.full_width().ceil()) * 0.5,
-        Align::End => x1 - layout.full_width().ceil(),
-    };
+    let mut x = text_x(spec, x0, x1, layout.full_width().ceil());
     if input.single_line { x -= single_line_scroll(scrolls, &n.path, input, &spec.content, layout, s, x1 - x0); }
     let ci = caret_index(e, &spec.content);
     let bb = Cursor::from_byte_index(layout, ci, Affinity::Downstream).geometry(layout, 1.5 * s);
