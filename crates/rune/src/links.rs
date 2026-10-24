@@ -14,7 +14,7 @@ pub(super) struct LinkState {
 
 /// Where node `n`'s text starts inside its border box `rect` (points, x0 y0 x1 y1), its text
 /// drawn `k` times its size.
-fn origin(n: &Node, spec: &TextSpec, layout: &Layout<Ink>, rect: [f32; 4], s: f32, k: f32) -> [f32; 2] {
+pub(super) fn origin(n: &Node, spec: &TextSpec, layout: &Layout<Ink>, rect: [f32; 4], s: f32, k: f32) -> [f32; 2] {
     let x = text_x(spec, rect[0] + n.inset[0] * k, rect[2] - n.inset[2] * k, (layout.full_width() * k).ceil() / s);
     [x, rect[1] + n.inset[1] * k]
 }
@@ -58,7 +58,7 @@ impl LinkFx {
 
 impl<S: 'static> Runtime<S> {
     /// Node `i`'s border box as drawn this frame (points, x0 y0 x1 y1).
-    fn drawn_box(&self, i: usize) -> [f32; 4] {
+    pub(super) fn drawn_box(&self, i: usize) -> [f32; 4] {
         self.drawn.get(i).filter(|d| d[2] > 0.0 || d[3] > 0.0)
             .map_or(self.nodes[i].target, |d| [d[0], d[1], d[0] + d[2], d[1] + d[3]])
     }
@@ -88,9 +88,9 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// Hit rects for node `i`: only its links' boxes, clipped like `clipped`. False when it
-    /// has no links (it takes its whole box).
+    /// has no links, or is selectable (it takes its whole box).
     pub(super) fn push_link_hits(&mut self, i: usize, rect: [f32; 4], clipped: [f32; 4]) -> bool {
-        if self.nodes[i].text.as_ref().is_none_or(|t| t.links.is_empty()) { return false; }
+        if self.nodes[i].text.as_ref().is_none_or(|t| t.links.is_empty() || t.selectable) { return false; }
         let id = self.nodes[i].id;
         for (_, r) in self.link_boxes(i, rect) {
             let c = [r[0].max(clipped[0]), r[1].max(clipped[1]), r[2].min(clipped[2]), r[3].min(clipped[3])];
@@ -241,6 +241,7 @@ impl<S: 'static> Runtime<S> {
                     press: if pressed == Some(k) { 1.0 } else { 0.0 },
                     parent: Some(i),
                     caret: None,
+                    selected: None,
                     ..text.clone()
                 });
             }

@@ -270,6 +270,9 @@ impl Default for GrowthSpec {
     }
 }
 
+/// The selection highlight until [`El::selection_color`] or [`El::caret`] sets one.
+const DEFAULT_SELECTION: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.2 };
+
 /// A text field bound to a [`TextEdit`] in app state.
 #[derive(Clone)]
 pub struct InputSpec {
@@ -453,6 +456,10 @@ pub struct TextSpec {
     pub(crate) case: Option<crate::TextCase>,
     /// The authored string once `case` has replaced `content` with the drawn one.
     pub(crate) source: Option<Box<crate::text::CaseSource>>,
+    /// See [`El::selectable`].
+    pub(crate) selectable: bool,
+    /// See [`El::selection_color`].
+    pub(crate) selection: Color,
 }
 
 impl TextSpec {
@@ -656,6 +663,7 @@ pub struct El {
     pub(crate) window_drag: bool,
     pub(crate) press_scale: Option<f32>,
     pub(crate) scale: f32,
+    pub(crate) help: Option<String>,
 }
 
 fn base(dir: FlexDirection) -> El {
@@ -712,6 +720,7 @@ fn base(dir: FlexDirection) -> El {
         window_drag: false,
         press_scale: None,
         scale: 1.0,
+        help: None,
     }
 }
 
@@ -754,6 +763,8 @@ pub fn text(content: impl Into<String>) -> El {
         advance_in: None,
         case: None,
         source: None,
+        selectable: false,
+        selection: DEFAULT_SELECTION,
     });
     e
 }
@@ -797,7 +808,7 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
         placeholder: String::new(),
         placeholder_color: Color::WHITE.alpha(0.4),
         caret: Color::WHITE,
-        selection: Color::WHITE.alpha(0.2),
+        selection: DEFAULT_SELECTION,
         single_line: false,
         access: None,
         submit: None,
@@ -1041,6 +1052,15 @@ impl El {
     }
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+    /// A tooltip shown after the system's hover delay while the pointer rests on this element,
+    /// as SwiftUI's `.help`. A press, scroll, key or the pointer leaving hides it; it takes no
+    /// input itself. On macOS it is AppKit's own tooltip; elsewhere Rune draws it. The element
+    /// tree (`Runtime::elements`, `--tree`) carries it as the element's help text.
+    pub fn help(mut self, text: impl Into<String>) -> Self {
+        let text = text.into();
+        self.help = (!text.is_empty()).then_some(text);
         self
     }
     pub fn child(mut self, child: El) -> Self {
@@ -1689,6 +1709,28 @@ impl El {
             i.caret = caret;
             i.selection = selection;
         }
+        self
+    }
+    /// Lets people select this read-only text and copy it, as SwiftUI's
+    /// `.textSelection(.enabled)`: drag across it, double-click a word, triple-click a paragraph,
+    /// shift-click to extend; Cmd+C (Ctrl+C elsewhere) copies and Cmd+A selects all of it while it
+    /// holds the selection; a right-click offers Copy on macOS. It shows the I-beam, isn't a Tab
+    /// stop, and a press anywhere else clears the selection. Selecting never re-lays out the
+    /// text. Set the highlight with [`El::selection_color`].
+    pub fn selectable(mut self, on: bool) -> Self {
+        if let Some(t) = &mut self.text {
+            if self.input.is_some() { return self; }
+            t.selectable = on;
+            if on && (self.cursor.is_none() || (!t.links.is_empty() && self.cursor == Some(Cursor::Pointer))) {
+                self.cursor = Some(Cursor::Text);
+            }
+        }
+        self
+    }
+    /// The selection highlight of [`El::selectable`] text or a text field, drawn alike for both.
+    pub fn selection_color(mut self, color: Color) -> Self {
+        if let Some(i) = &mut self.input { i.selection = color; }
+        if let Some(t) = &mut self.text { t.selection = color; }
         self
     }
     /// Binds the field to a `TextEdit` in app state. `f` may capture (a row index, say); wrap

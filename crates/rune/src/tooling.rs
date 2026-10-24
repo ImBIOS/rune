@@ -637,11 +637,12 @@ fn parse_script(list: Value) -> Vec<Ev> {
                 out.push(Ev { t, kind: Kind::Down, pos });
                 out.push(Ev { t: t + e["hold"].as_f64().unwrap_or(0.08), kind: Kind::Up, pos: Pos::Rel(0.0, 0.0) });
             }
-            "double-click" | "double-tap" => {
-                // Two presses `gap` apart (default 0.15 s), inside the default double-click interval.
+            "double-click" | "double-tap" | "triple-click" => {
+                // Two (three) presses `gap` apart (default 0.15 s), inside the default double-click interval.
                 let hold = e["hold"].as_f64().unwrap_or(0.06);
                 let gap = e["gap"].as_f64().unwrap_or(0.15).max(hold + 0.01);
-                for start in [t, t + gap] {
+                let presses = if ty == "triple-click" { 3 } else { 2 };
+                for start in (0..presses).map(|k| t + gap * k as f64) {
                     out.push(Ev { t: start, kind: Kind::Move, pos: pos.clone() });
                     out.push(Ev { t: start, kind: Kind::Down, pos: pos.clone() });
                     out.push(Ev { t: start + hold, kind: Kind::Up, pos: Pos::Rel(0.0, 0.0) });
@@ -1051,6 +1052,12 @@ pub(crate) fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
             if let Some(c) = e.text_color {
                 v["color"] = c.hex().into();
             }
+            if let Some(h) = &e.help {
+                v["help"] = h.clone().into();
+            }
+            if let Some(s) = &e.selected {
+                v["selected"] = s.clone().into();
+            }
             if e.rect.iter().zip(e.target.iter()).any(|(a, b)| (a - b).abs() > 0.01) {
                 v["target"] = e.target.map(r2).to_vec().into();
             }
@@ -1088,6 +1095,7 @@ pub(crate) fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
         "warnings": rt.key_warnings.as_deref().unwrap_or_default(),
     });
     if let Some(menu) = rt.popup_json() { tree["popupMenu"] = menu; }
+    if let Some((text, rect)) = rt.help_tooltip() { tree["tooltip"] = json!({ "text": text, "rect": rect.map(r2) }); }
     tree
 }
 

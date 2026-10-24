@@ -70,6 +70,10 @@ mod caret;
 mod layout_read;
 #[path = "links.rs"]
 mod links;
+#[path = "selectable.rs"]
+mod selectable;
+#[path = "help.rs"]
+mod help;
 #[path = "scroll_edge.rs"]
 mod scroll_edge;
 
@@ -265,6 +269,8 @@ pub(crate) struct Node {
     pub local: MRect,
     /// Padding plus border (left, top, right, bottom): text draws inside it.
     inset: [f32; 4],
+    /// `El::help`.
+    help: Option<String>,
     #[cfg(debug_assertions)]
     scroll_source: Option<&'static std::panic::Location<'static>>,
 }
@@ -344,6 +350,10 @@ pub struct ElementInfo {
     pub caret: Option<[f32; 4]>,
     /// Dragging it starts an OS drag ([`El::drag_out`]).
     pub drag_out: bool,
+    /// Its tooltip and accessibility help ([`El::help`]).
+    pub help: Option<String>,
+    /// The part of this [`El::selectable`] text that is selected, as copying would take it.
+    pub selected: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -610,6 +620,10 @@ pub struct Runtime<S: 'static> {
     /// An edit ran this frame: keep the caret in its scroll viewport after the commit.
     caret_follow: bool,
     links: links::LinkState,
+    /// The selection in `El::selectable` text.
+    text_sel: selectable::TextSelection,
+    /// `El::help` tooltips.
+    help: help::HelpState,
     /// The shell cancels native composition before enabling the new text focus.
     pub(crate) ime_reset: bool,
     /// Text the focused field asked to copy (the shell writes it to the clipboard).
@@ -682,6 +696,10 @@ pub struct Runtime<S: 'static> {
     /// Two presses closer than this (seconds) are a double press: the system setting on macOS
     /// and Windows, 0.5 elsewhere and headless.
     pub double_click_interval: f64,
+    /// How long (seconds) the pointer rests on an `El::help` element before its tooltip shows:
+    /// the system's hover time on Windows, 0.5 elsewhere and headless. macOS windows use
+    /// AppKit's own tooltips.
+    pub help_delay: f64,
     /// The host starts OS drags, so `drag_out` elements start one (headless tools act as one).
     os_drag: bool,
     /// The held press is on a `drag_out` element that hasn't crossed the threshold yet.
@@ -842,6 +860,9 @@ impl<S: 'static> Runtime<S> {
             layout_echoes: 0,
             caret_follow: false,
             links: Default::default(),
+            text_sel: Default::default(),
+            help: Default::default(),
+            help_delay: 0.5,
             ime_reset: false,
             copy_request: None,
             paste_request: None,
@@ -1826,6 +1847,8 @@ impl<S: 'static> Runtime<S> {
         // With no focused element, app-owned navigation (e.g. a toolbar)
         // gets first refusal before Rune starts a new Tab traversal.
         let app_first = self.focused.is_none();
+        // Selected text has the keyboard for copying, as AppKit's first responder does.
+        if !repeat && self.selection_key(ev, one) { return true; }
         if app_first && let Some(f) = self.on_key && f(&mut self.state, ev, one) { return true; }
         if let Some(f) = self.focused_input().and_then(|input| input.key.clone())
             && f(handler_state(&mut self.state), ev, one)
@@ -2956,7 +2979,8 @@ impl<S: 'static> Runtime<S> {
             let n = &self.nodes[i];
             // A secondary-only child must not obscure primary input or background blur.
             (!self.subtree_exiting(i) && self.allowed(i) && (n.on_press.is_some() || n.on_double_press.is_some() || n.on_hover.is_some()
-                || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())).then_some(i)
+                || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some()
+                || self.is_selectable(i))).then_some(i)
         })
     }
 
@@ -2976,6 +3000,7 @@ impl<S: 'static> Runtime<S> {
         if self.drag_out_armed && crate::drag_out::past_threshold(self.press_at, (x, y)) && self.start_drag_out(path.clone()) {
             return;
         }
+        self.selection_drag(x, y);
         let Some((id, r, has_drag)) = self.node(&path).map(|n| (n.id, n.target, n.on_drag.is_some() && !self.drags_out(n))) else { return };
         self.press_moved |= (x - self.press_at.0).abs() > CLICK_SLOP || (y - self.press_at.1).abs() > CLICK_SLOP;
         // A hit rect is where the element was drawn (after scrolling); `target` is its
@@ -3018,6 +3043,7 @@ impl<S: 'static> Runtime<S> {
     pub(crate) fn cancel_pointer(&mut self) {
         self.drop_drag_out_request();
         self.drag_out_armed = false;
+        self.text_sel.dragging = false;
         self.capture = None;
         self.secondary_capture = None;
         self.capture_inside = false;
@@ -3087,6 +3113,7 @@ impl<S: 'static> Runtime<S> {
         self.drop_drag_out_request();
         self.pointer = Some((x, y));
         self.keyboard_focus = false;
+        self.dismiss_help();
         let target = self.primary_target(x, y);
         if let Some(i) = self.active_modal()
             && target.is_none_or(|t| !self.allowed(t))
@@ -3096,6 +3123,7 @@ impl<S: 'static> Runtime<S> {
             }
             return;
         }
+        self.selection_down(target, x, y);
         let Some(ti) = target else {
             if self.focused.is_some() {
                 self.queue.push(Action::Blur);
@@ -3166,7 +3194,7 @@ impl<S: 'static> Runtime<S> {
         loop {
             let n = &self.nodes[index];
             if self.subtree_exiting(index) || !self.allowed(index) { return None; }
-            if n.on_secondary_press.is_some() { return Some(&n.path); }
+            if n.on_secondary_press.is_some() || self.is_selectable(index) { return Some(&n.path); }
             index = n.parent?;
         }
     }
@@ -3175,6 +3203,7 @@ impl<S: 'static> Runtime<S> {
     pub fn secondary_down(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
         self.keyboard_focus = false;
+        self.dismiss_help();
         self.secondary_capture = self.secondary_target(x, y).map(str::to_owned);
     }
 
@@ -3182,6 +3211,7 @@ impl<S: 'static> Runtime<S> {
         self.pointer = Some((x, y));
         if let Some(path) = self.secondary_capture.take()
             && self.secondary_target(x, y) == Some(path.as_str())
+            && !self.selection_menu(&path, x, y)
         {
             self.queue.push(Action::SecondaryPress(path, PointerPress { x, y }));
         }
@@ -3200,6 +3230,7 @@ impl<S: 'static> Runtime<S> {
         // A release never starts a drag-out: the system session needs the button held.
         self.drag_out_armed = false;
         self.pointer_move(x, y);
+        self.text_sel.dragging = false;
         let Some((path, d)) = self.capture.take() else { return };
         self.refresh_hover_within();
         let double = std::mem::take(&mut self.double_armed);
@@ -3296,6 +3327,9 @@ impl<S: 'static> Runtime<S> {
         if self.nodes[i].cursor.is_none() && self.nodes[i].input.is_some() {
             return crate::el::Cursor::Text;
         }
+        if self.is_selectable(i) && !self.text_sel.dragging && self.link_at(i, x, y).is_some() {
+            return crate::el::Cursor::Pointer;
+        }
         loop {
             if let Some(c) = self.nodes[i].cursor {
                 return c;
@@ -3306,6 +3340,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub fn key(&mut self, ev: KeyEvent) {
+        self.dismiss_help();
         self.queue.push(Action::Key { ev, repeat: false });
     }
 
@@ -3397,6 +3432,7 @@ impl<S: 'static> Runtime<S> {
     /// Wheel or trackpad delta in points (positive `dy` moves content down, like a browser's
     /// negative deltaY). Applied 1:1: the platform supplies its own momentum phases.
     pub fn wheel(&mut self, x: f32, y: f32, dy: f32) {
+        self.dismiss_help();
         let Some(id) = self.scroll_at(x, y) else { return };
         let stick = self.node_index.get(&id).and_then(|&i| self.nodes[i].scroll).is_some_and(|s| s.stick_bottom);
         if let Some(st) = self.scrolls.get_mut(&id) {
@@ -3414,6 +3450,7 @@ impl<S: 'static> Runtime<S> {
     /// Releases a scroll with `velocity` (points per second, positive moves content down);
     /// the runtime decays it (for platforms without OS momentum and headless scripts).
     pub fn fling(&mut self, x: f32, y: f32, velocity: f32) {
+        self.dismiss_help();
         let Some(id) = self.scroll_at(x, y) else { return };
         if let Some(st) = self.scrolls.get_mut(&id) {
             st.v = -velocity;
@@ -3492,6 +3529,7 @@ impl<S: 'static> Runtime<S> {
         self.marks.clear();
         self.surfaces.clear();
         self.hits.clear();
+        self.clear_help_hits();
         self.loops_active = false;
         self.static_scale_settling = false;
         self.videos_active = false;
@@ -4196,19 +4234,8 @@ impl<S: 'static> Runtime<S> {
                         if e.focused && !departing {
                             let (a, b) = e.range();
                             if a != b && e.preedit.is_none() {
-                                let sel = Selection::new(
-                                    Cursor::from_byte_index(layout, e.display_index(a), Affinity::Downstream),
-                                    Cursor::from_byte_index(layout, e.display_index(b), Affinity::Upstream),
-                                );
-                                for (bb, _) in sel.geometry(layout) {
-                                    self.instances.push(rect_inst(
-                                        [origin[0] + bb.x0 as f32 * tk, origin[1] + bb.y0 as f32 * tk, (bb.x1 - bb.x0) as f32 * tk, (bb.y1 - bb.y0) as f32 * tk],
-                                        premul(inp.selection, o, srgb),
-                                        2.0 * s * tk,
-                                        clip,
-                                        fade,
-                                    ));
-                                }
+                                selectable::push_selection(&mut self.instances, layout, e.display_index(a), e.display_index(b),
+                                    origin, tk, premul(inp.selection, o, srgb), s, clip, fade);
                             }
                             caret = input_caret.map(|(caret, _)| caret);
                             if let Some((_, _)) = &e.preedit
@@ -4230,7 +4257,7 @@ impl<S: 'static> Runtime<S> {
                             }
                         }
                     }
-                    // Span backgrounds (inline code), then glyphs.
+                    // Span backgrounds (inline code), a selection over them, then glyphs.
                     let link_fx = self.link_fx(i);
                     self.deco_scratch.clear();
                     self.text.decorations(layout, &spec.spans, s, origin, &mut self.deco_scratch);
@@ -4244,6 +4271,9 @@ impl<S: 'static> Runtime<S> {
                     for d in &self.deco_scratch {
                         let c = premul(d.color, o, srgb);
                         self.instances.push(rect_inst(d.rect, c, d.radius, clip, fade));
+                    }
+                    if spec.selectable && let Some((a, b)) = self.selected_range(&n.path, &spec.content) {
+                        selectable::push_selection(&mut self.instances, layout, a, b, origin, tk, premul(spec.selection, o, srgb), s, clip, fade);
                     }
                     let reveal = self.reveals.get(&n.id).filter(|st| !st.words.is_empty() && spec.advance_in.is_none());
                     self.glyph_scratch.clear();
@@ -4371,7 +4401,9 @@ impl<S: 'static> Runtime<S> {
                 paint_clip: clip, paint_fade: fade, paint_fade_origin: fade_origin, rounded, scale, anchor, anchor_to, blur, dy, dx,
                 cover: cover_offset, outer, mark, group,
                 scale_motion: if cover.is_some() { ScaleMotion::Moving } else { scale_motion } };
-            if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_double_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())
+            let hits_before = self.hits.len();
+            if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_double_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some()
+                || n.text.as_ref().is_some_and(|t| t.selectable))
                 && !self.subtree_exiting(i)
                 && self.allowed(i) && effective_opacity > 0.001 && visible
             {
@@ -4394,10 +4426,16 @@ impl<S: 'static> Runtime<S> {
                     self.overlay_hits.push(rect);
                 }
             }
+            if self.nodes[i].help.is_some() && !self.subtree_exiting(i) && effective_opacity > 0.001 && visible {
+                let c = if self.nodes[i].parent.is_some() { pinh.clip } else { NO_CLIP };
+                let r = [rect_pt[0].max(c[0] / s), rect_pt[1].max(c[1] / s), rect_pt[2].min(c[2] / s), rect_pt[3].min(c[3] / s)];
+                self.push_help_hit(i, r, hits_before);
+            }
         }
         while let Some((_, start, surface_start)) = layers.pop() {
             crate::render::end_layer(&mut self.instances, &mut self.surfaces, &mut self.marks, start, surface_start);
         }
+        self.update_help();
         self.layer_scratch = layers;
         self.built = true;
         if video_signature != self.video_signature {
@@ -4514,6 +4552,11 @@ impl<S: 'static> Runtime<S> {
                     live_intent,
                     caret: self.caret_rect(&self.nodes, i),
                     drag_out: n.drag_out.is_some(),
+                    help: n.help.clone(),
+                    selected: n.text.as_ref().filter(|t| t.selectable).and_then(|t| {
+                        let (a, b) = self.selected_range(&n.path, &t.content)?;
+                        t.source_slice(a as u32, b as u32).map(str::to_owned)
+                    }),
                     virtual_extent: self.virtuals.contains_key(&n.path) && n.vis.fill.a == 0.0
                         && n.vis.border_width == 0.0 && n.vis.shadows.is_empty() && n.text.is_none() && n.vis.icon.is_none(),
                 })
@@ -4536,6 +4579,7 @@ impl<S: 'static> Runtime<S> {
                 visible: [r.x.max(c[0]), r.y.max(c[1]), (r.edges()[2].min(c[2]) - r.x.max(c[0])).max(0.0),
                     (r.edges()[3].min(c[3]) - r.y.max(c[1])).max(0.0)],
                 revealing: true, in_growing_row: false, scrolling: false, virtual_extent: false, live_intent: 0, caret: None, drag_out: false,
+                help: None, selected: None,
             });
         }
         self.link_elements(&mut elements);
@@ -4998,6 +5042,7 @@ fn flatten(
         window_drag,
         press_scale,
         scale: static_scale,
+        help,
         ..
     } = el;
     if let Some(t) = &text && t.live.is_some() {
@@ -5071,6 +5116,7 @@ fn flatten(
         target: [0.0; 4],
         local: MRect::ZERO,
         inset: [0.0; 4],
+        help,
         #[cfg(debug_assertions)]
         scroll_source,
     });

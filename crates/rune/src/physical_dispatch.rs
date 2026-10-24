@@ -10,7 +10,18 @@ pub(super) struct HeldKey { physical: Option<PhysicalKeyCode>, key: Option<crate
 impl<S: 'static> Runtime<S> {
     /// Queue physical input without a logical fallback (also useful for headless drivers).
     pub fn physical_input(&mut self, event: PhysicalInput) {
+        self.observe_mods(&event);
         self.queue.push(Action::Physical(event, None));
+    }
+    /// Shift held now decides whether the next press extends a text selection, ahead of the
+    /// queue the press itself skips. A key press hides a tooltip.
+    fn observe_mods(&mut self, event: &PhysicalInput) {
+        match event {
+            PhysicalInput::Modifiers(m) => self.text_sel.shift = m.shift,
+            PhysicalInput::FocusLost => { self.text_sel.shift = false; self.dismiss_help(); }
+            PhysicalInput::Key { pressed: true, .. } => self.dismiss_help(),
+            _ => {}
+        }
     }
     /// Return whether the native host needs to request a frame for this event.
     pub(crate) fn physical_with_fallback(&mut self, event: PhysicalInput, key: Option<KeyEvent>) -> bool {
@@ -18,6 +29,7 @@ impl<S: 'static> Runtime<S> {
             return self.physical_observation(event);
         }
         let fallback = key.map(|key| Fallback { key });
+        self.dismiss_help();
         self.queue.push(Action::Physical(event, fallback));
         true
     }
@@ -25,6 +37,7 @@ impl<S: 'static> Runtime<S> {
     /// its requested frame will process this observation in order after clicks/keys.
     /// At rest, only a consuming handler invalidates the view and requests a frame.
     pub(crate) fn physical_observation(&mut self, event: PhysicalInput) -> bool {
+        self.observe_mods(&event);
         if !self.queue.is_empty() {
             self.physical_input(event);
             return false;
