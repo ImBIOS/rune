@@ -1068,6 +1068,20 @@ deterministic. `RUNE_SYSTEM_MATERIAL=legacy` forces the pre-26 view, `unsynced` 
 outside the drawable's transaction (for comparison) and `off` draws the fallback.
 `examples/glass-card` flies a card over a test pattern; research note 26 has the measurements.
 
+To match a native AppKit card on top of the material, three more opt-ins:
+
+- `.srgb_blend(true)` on the `App`, `WindowSpec` or `ConfiguredOverlay` blends in sRGB-encoded
+  space, as Core Animation does, so a 62% frost over the glass reads as the same CALayer would.
+- `El::continuous_corners()` gives the element, its clip and its material Apple's continuous
+  curve.
+- `Shadow::core_animation(x, y, radius, color)` takes a CALayer `shadowRadius` and sets
+  `blur` to twice it.
+
+For panels, `ConfiguredOverlay::macos_level` and `OverlayHandle::set_macos_level` set the
+AppKit window level, and `OverlayHandle::fade_in` and `fade_out` fade the window's alpha.
+`examples/glass-panel` puts it together: a card that flies across a large window, hands off
+to a card-sized window that moves 60 times a second, and fades out.
+
 ## Run
 
 ```sh
