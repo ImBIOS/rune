@@ -73,7 +73,7 @@ built or measured here.
   pyramid, not kernel width.
 - Rune use for the `Backdrop` primitive: (a) scissor everything to the union of glass bounds plus the blur margin;
   (b) pick pyramid depth from the requested sigma; (c) **fractional radius**: crossfade the two nearest pyramid
-  levels by the fractional part so an animated radius never steps (the actual risk for kit-motion rules: a radius
+  levels by the fractional part so an animated radius never steps (the actual risk for Kit's motion rules: a radius
   spring must not snap between integer levels); (d) store the pyramid in rgba16f or rg11b10 to avoid banding and
   dither at the final composite (see idea 9); (e) cache the blurred pyramid when the underlying scene is unchanged
   (glass over static content costs one composite).
@@ -184,7 +184,7 @@ built or measured here.
   shaded). Test against a high-resolution CPU rasteriser for AA ramp error.
 - **Smooth union for morphing shapes:** polynomial `smin` (Quilez) over a handful of SDFs gives the metaball merge
   seen in liquid-glass-studio; lerping two SDFs is a cheap shape morph. Fix a maximum number of operands per `Blob`
-  primitive (4) so the shader stays branch-free. This is how Rune can do Flit's glass morph without SwiftUI on
+  primitive (4) so the shader stays branch-free. This is how Rune can do the launcher's glass morph without SwiftUI on
   non-Apple platforms.
 - Cost/risk: low; the main risk is the AA width under non-uniform scale and rotation: derive the pixel footprint
   from the Jacobian (`fwidth` or explicit inverse transform), not a scalar scale. Add a rotation/skew scene.
@@ -193,7 +193,7 @@ built or measured here.
 
 - Sources: Jimenez interleaved gradient noise (same CoD talk as idea 3; cheap per-pixel hash, good temporal
   behaviour); Christoph Peters, free blue-noise textures *(from memory, no link fetched)*; Ottosson's Oklab and
-  gamut-clipping posts *(from memory)*; PLAN §4.3 already cites Kit's gpui-fork dithering fixes.
+  gamut-clipping posts *(from memory)*; PLAN §4.3 already cites Kit's GPUI fork (`kitlangton/gpui`) dithering fixes.
 - Rune use: interpolate gradients in Oklab (or OKLCH for hue ramps) and blend in linear light on Display P3, as the
   plan says; then dither once at the final write, with triangular-PDF noise of about +/-1 LSB, using a tiled blue
   noise texture or IGN. One shared function for gradients, shadows, backdrop output, and video.
@@ -217,7 +217,7 @@ built or measured here.
   ages can drift, so track per drawable.
 - For Rune: the benefit is battery and thermals, not feel; frames that animate usually damage most of the window or a
   big glass region anyway, and at rest Rune submits nothing. Verdict: skip. Keep a per-frame damage rect in the scene
-  (cheap: union of changed instance bounds) so a counter shows how much a frame *could* skip; revisit if Scrawl/Flit
+  (cheap: union of changed instance bounds) so a counter shows how much a frame *could* skip; revisit if Scrawl or the launcher
   idle-animation power shows up in profiling.
 
 ### 11. GPU-driven UI (indirect draws, bindless, compute culling) — **skip**
@@ -276,7 +276,7 @@ all glass (does not reach web, Windows, Linux).
 ## Open questions
 
 - How does fractional pyramid crossfade look at the transition between a thin and a thick blur while the glass also
-  moves? Needs a scene in the deterministic harness plus kit-motion lint.
+  moves? Needs a scene in the deterministic harness plus the motion linter.
 - Does the vertex-shader spring path survive retarget bursts (a drag) without per-frame instance rewrites? Measure
   encode time at 1k animating nodes.
 - Can wgpu on Metal skip the drawable's initial clear and use an `IOSurface`-backed texture presented via CALayer

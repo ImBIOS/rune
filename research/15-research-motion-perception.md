@@ -31,7 +31,7 @@ presented value, a deterministic clock, and agents who can maintain fast-path + 
 8. **Scroll/fling are analytic**: `x(t)` closed form (iOS 0.998/ms, Android spline) so they are frame-rate independent
    and retargetable; project the landing point and hand velocity to a spring for snapping.
 9. **Synthetic motion blur: skip at 120 Hz**; keep a velocity-gated spike for flings, because Rune knows `v` exactly.
-10. **Perception ground truth is thin for springs vs easing**; use Kit's blind A/B Chooser (Bradley–Terry) as the oracle
+10. **Perception ground truth is thin for springs vs easing**; use Kit's blind A/B chooser (Bradley–Terry) as the oracle
     and build it into `mk tune`.
 
 ---
@@ -65,7 +65,7 @@ injecting synthetic delays):
 | **Hitch time ratio** | Σ(excess present-interval over expected) ÷ animation duration, ms/s | Apple's own: WWDC20 "Eliminate animation hitches with XCTest" and WWDC21 "Detect and diagnose hitches" use thresholds ≈ < 5 ms/s good, 5–10 warn, > 10 critical [recall]. Use as the CI gate shape. |
 | **Cadence deviation** | σ and max of `present_interval − period`, in periods | NVIDIA result above: variance, not mean. |
 | **Position error px** | `|x_rendered − x_ideal(t_actual)|` per node per frame; report p99 and max | Judder visibility ≈ `v · Δt` in px; threshold in arcmin using the device's ppi and viewing distance (iPhone ≈ 460 ppi @ 35 cm ⇒ 1 px ≈ 0.55 arcmin, below acuity, but motion hyperacuity is finer). |
-| **Visual jerk** | 3rd difference of presented position over *presented* frames, normalised by peak speed | Catches velocity snaps that hit-time metrics miss (e.g., retarget bugs). motion-lint's "velocity snap" rule, made exact. |
+| **Visual jerk** | 3rd difference of presented position over *presented* frames, normalised by peak speed | Catches velocity snaps that hit-time metrics miss (e.g., retarget bugs). The motion linter's "velocity snap" rule, made exact. |
 | **Velocity continuity at retarget** | `|v_after − v_before|` at every segment boundary (should be 0 up to float eps) | Exact in analytic tracks; interruption bugs show instantly. |
 | **Input-to-photon (virtual)** | `t_present − t_input_hw` per touch-driven frame | Latency budget; reported per frame; trend on reserved hardware. |
 | **Scroll Jank v4-style** | Chrome's per-frame scroll jank counting across input/frames ([blog, 2023](https://blog.google/chromium/smoother-scrolling-how-we-halved-scroll-jank-in-chrome-on-android/); [Chromium post](https://blog.chromium.org/2023/08/smoothing-out-scrolling-experience-in.html)) | Halved scroll jank by ensuring consistent input-to-frame delivery [read headline]. Copy the *definition*, not the code. |
@@ -128,7 +128,7 @@ injecting synthetic delays):
 - **Perception evidence is thin:** I found no controlled study that springs beat easing curves; the case is
   physical continuity (velocity preservation, interruptibility) and animation-principles heritage. Chevalier et al.,
   "Animations 25 Years Later" (AVI 2016) [recall] is the review. So treat "springs feel better" as design rationale, and let Kit's
-  blind A/B Chooser (Bradley–Terry; `motion-presets`) settle specific values.
+  blind A/B chooser (Bradley–Terry) settle specific values.
 - **Rune use:** add a per-track `class: Spatial | Effect`; Effect tracks clamp to [min,max] of start/target and use the
   critically damped solution even when asked for bounce; settle rule = analytic time at which `|x−target|<ε_px and |v|<ε_v`
   (ε_px = 1/64 px for geometry per Kit's snapping rule, 1/256 for opacity), then snap exactly and stop the clock (zero-cost-at-rest).
@@ -139,7 +139,7 @@ injecting synthetic delays):
 ### 6. Interruptibility as a testable property  — **adopt now**
 - Retargeting `(x, v)` is exact for analytic segments. Test generator: random event scripts (retarget at random times,
   random spring class), asserting (i) `x` continuous, (ii) `v` continuous, (iii) no extra pop at settle, (iv) `x` bounded by
-  physical envelope. This is motion-lint's "reversal / velocity snap / stop-dead" family, but checked on *every frame
+  physical envelope. This is the motion linter's "reversal / velocity snap / stop-dead" family, but checked on *every frame
   of every fuzzed script* rather than on recorded clips.
 - **Layered interruption (Apple "pause then redirect"):** a gesture that grabs a running animation must read the *presented*
   value and velocity (not model state), pause the track, drive 1:1, then restart from the finger's velocity. Rune's presented-tree design does this by construction.
@@ -189,7 +189,7 @@ GPUI/Zed rasterise glyphs into an atlas at a few quantised horizontal subpixel p
 - **Verdict:** adopt now (cheap, already in the plan).
 
 ### 12. Auto-tuning feel from comparisons  — **later**
-Kit's Chooser (blind A/B with Bradley–Terry stopping rule) generalises: let agents sweep 3–5 values of duration/bounce for one interaction and ask Kit for ← / → picks, update the preset JSON. That puts *Kit's perception* in the loop at 10 comparisons per parameter, replacing guessing about spring-vs-easing. Cost: UI in `mk tune`. Verdict: later, after presets exist.
+Kit's chooser (blind A/B with Bradley–Terry stopping rule) generalises: let agents sweep 3–5 values of duration/bounce for one interaction and ask Kit for ← / → picks, update the preset JSON. That puts *Kit's perception* in the loop at 10 comparisons per parameter, replacing guessing about spring-vs-easing. Cost: UI in `mk tune`. Verdict: later, after presets exist.
 
 ---
 
@@ -216,7 +216,7 @@ Kit's Chooser (blind A/B with Bradley–Terry stopping rule) generalises: let ag
 2. Put input on the render thread with late latching and Android-style resampling (§3); add the impulse + LSQ2 estimators and the gesture-corpus harness (§4).
 3. Add track classes (Spatial/Effect/Decay), analytic settle times, and fuzzed interruption tests (§5, §6, §8).
 4. Encode the text policy as defaults plus the phase-sweep harness (§7).
-5. Spikes, in order: text-reflow FLIP (§10), fling-only blur (§9), capped prediction for drags (§3d), Chooser in `mk tune` (§12).
+5. Spikes, in order: text-reflow FLIP (§10), fling-only blur (§9), capped prediction for drags (§3d), A/B chooser in `mk tune` (§12).
 
 **Rejected:** a CA-style additive-animation model (equivalent to exact retarget but harder to reason about and lint);
 average-fps gates; Motion-style transform/scale-correction projection (solves a DOM problem Rune lacks); always-on

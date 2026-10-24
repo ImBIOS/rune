@@ -147,7 +147,7 @@ policy changes are applied in the same mutation phase.
   even when poll returns false. Equal deadlines coalesce; the shell sleeps until the earliest
   deadline without a timer thread. Headless steps visit deadlines exactly. For debounce, store
   the latest due time in state and reschedule its remainder when an older wake arrives.
-- **Tooling**: scripts gain `type`, `key`, `paste`, `scroll` and `fling`. Traces carry motion-lint
+- **Tooling**: scripts gain `type`, `key`, `paste`, `scroll` and `fling`. Traces carry motion-trace
   intents (settle cuts, growing rows, word reveals) and clipped visible rects.
 
 ### App lifetime (`app.rs`, for apps that outlive their window)
@@ -743,7 +743,7 @@ $S --script examples/settings/scripts/demo.json --start 0.12 --frames 24 --every
    --strip strip.png --crop 370,74,214,36 --crop 530,305,60,30     # crops stacked per frame
 $S --tree tree.json [--at T]     # key, path, role, label, text, presented rect, target, opacity,
                                  # fill/text colour, hover/press, moving
-$S --trace run.jsonl             # motion-lint JSONL (Scrawl's format); keyed elements only
+$S --trace run.jsonl             # motion-trace JSONL (Scrawl's format); keyed elements only
 $S --native --trace run.jsonl --frames 240  # native submission timestamps, then close the traced window
 ```
 
@@ -873,10 +873,10 @@ one-second target.
   toggles, accent, a drag, a click-to-seek), the mean is 0.13 ms and p95 0.29 ms. The first frame
   takes 1.4 ms (glyph rasterisation) and GPU init about 11 ms. There are 174 instances, drawn in
   one draw call.
-- **motion-lint**: `motion-lint analyze` on that trace finds 0 candidates.
+- **Motion linting**: the internal motion linter finds 0 candidates in that trace.
 - **OpenCode example**: while streaming, frame CPU is about 0.25 ms at p50 and 0.5 ms at p95, with
   about 1,100 instances in one draw call. At rest the window draws nothing. The first frame takes
-  4–7 ms. motion-lint finds 0 candidates in the stream, switch, send and scroll traces.
+  4–7 ms. The internal motion linter finds 0 candidates in the stream, switch, send and scroll traces.
 
 ## Differences from PLAN.md
 

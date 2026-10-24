@@ -66,7 +66,7 @@ coverage metric is separate from perceived brightness after nonlinear blending.
    sizing and contrast enhancement. Full-pixel grayscale gamma adjustment is
    not the same as LCD subpixel correction. CoreText's optical emboldening can
    depend on nominal size, unlike hinting at final pixel size.
-3. Kit's Apache-2.0 gpui-fork, commit
+3. Kit's Apache-2.0 GPUI fork (`kitlangton/gpui`), commit
    `2e52b98886063ddfa828312c83415a14208dfe87`,
    `src/platform/mac/text_system.rs:194–201, 444–458`. Five luminance buckets
    (0, .25, .5, .75, 1) select CoreText smoothing through the **fill color of an
@@ -91,7 +91,7 @@ coverage metric is separate from perceived brightness after nonlinear blending.
 | Centered swash outline emboldening, .1 device px | Partial | Improves 2× weight but overweights 1× light-on-dark with the old exponent. |
 | Centered emboldening, .1 point (.1/.2 device px), scale-aware exponent | Keep | Weight error improves in all eight font/polarity/density groups; SSIM improves in seven. SF dark 1× is the exception below. |
 | Fixed exponent `.375 + .875 * sRGB(luminance)` | Reject | Good static Inter fit, but SF dark 2× brightness variation regresses. The final density-aware expression improves all eight brightness probes. |
-| Five luminance-keyed atlas copies | Reject for this pass | gpui-fork's buckets invoke CoreText, not five interchangeable swash radii. A single shape plus continuous blend correction avoids up to 5× cache cardinality and bucket jumps during theme animation. |
+| Five luminance-keyed atlas copies | Reject for this pass | kitlangton/gpui's buckets invoke CoreText, not five interchangeable swash radii. A single shape plus continuous blend correction avoids up to 5× cache cardinality and bucket jumps during theme animation. |
 | Bilinear filtering of ordinary glyphs | Reject | Quads already land on device pixels with rasterized x phases. Resampling them again softens text; flight filtering remains separate. |
 
 Calibration used the first two strings at each size; the remaining three were

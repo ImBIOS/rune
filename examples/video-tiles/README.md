@@ -18,7 +18,7 @@ seven measured runs after one warmup. CPU includes push/import/encode/submit; GP
 GPU render-pass timestamp duration. A 16-byte timing readback follows each pass; no pixel
 readback is timed. No window, physical display, decoder, or network is measured.
 
-## Rooms integration
+## App integration
 
 ```rust,ignore
 let surface = rune::NativeSurface::new(); // keep in app state; clones share a bounded slot

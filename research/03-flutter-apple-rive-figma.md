@@ -44,7 +44,7 @@ in a scratch directory. Apple claims come from WWDC transcripts and DocC JSON. A
 - **Liquid Glass (iOS/macOS 26) cannot be honestly reproduced by a custom renderer**, because the system
   material adapts continuously to what is behind it. It *can* be hosted: `UIGlassEffect` and
   `NSGlassEffectView` sample whatever the render server composites beneath them, including a
-  `CAMetalLayer` **(inference; matches Flit's experience, verify in a spike)**. Flutter has no
+  `CAMetalLayer` **(inference; matches the launcher's experience, verify in a spike)**. Flutter has no
   first-party Liquid Glass after 16 months
   ([flutter#170310](https://github.com/flutter/flutter/issues/170310)). Its apps fall back to platform
   views for it.
@@ -319,7 +319,7 @@ every frame. It doubles as the agent-queryable inspector tree.
 - **Why CA animations survive a blocked main thread:** a `CAAnimation` is committed once as a
   description (from/to/timing). The render server interpolates it every frame in its own process. The
   model layer holds the final value, and the presentation layer reflects the in-flight value.
-- **Kit's Flit experience** (a 120 Hz glass morph moved to CA) is explained by this. Anything expressed
+- **Kit's launcher experience** (a 120 Hz glass morph moved to CA) is explained by this. Anything expressed
   as CA layer animations is immune to app-side hitches.
 
 ### 2.2 Implicit, additive and interruptible animation (UIKit/CA)

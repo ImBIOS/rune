@@ -46,7 +46,7 @@ let x = store.get(id, X);
 |---|---|
 | `Spring` | SwiftUI `Spring(duration:bounce:)`, bounce 0 by default, closed form in every damping regime. `sample`, `settling_duration`, `css_linear` (WAAPI export), plus constructors from response/damping fraction, ω/ζ, stiffness/damping/mass and Motion `visualDuration`. |
 | `Curve` / `Anim` | `Spring`, `Tween` (CSS cubic-bezier, steps, linear), `Decay` (iOS rates), `Keyframes` (Hermite cubics that keep velocity across keys), `Instant`. `Anim` adds `.delay()`, `.additive()`/`.merge()`, `.velocity()` and `.completion(token)`. |
-| `motion::*` tokens | `INSTANT SNAP SETTLE REFLOW GLIDE MORPH POP DRIFT CAMERA`, each with an `_EXIT` partner 10–25 % shorter (copied from `kit-motion.json`), plus `motion::pair::*` `SpringPair`s and SwiftUI presets. |
+| `motion::*` tokens | `INSTANT SNAP SETTLE REFLOW GLIDE MORPH POP DRIFT CAMERA`, each with an `_EXIT` partner 10–25 % shorter (copied from Kit's motion presets), plus `motion::pair::*` `SpringPair`s and SwiftUI presets. |
 | `Animatable` | `f32`, `Vec2`, `Rect` (four edges), `Color` (premultiplied OKLab), `Corners`, `Sides`, `Transform`, `Blur`, tuples and arrays. Up to `MAX_LANES` f32 lanes. |
 | `AnimationStore` | Every animated value is a track. Retargeting keeps position and velocity. Also delays, settle and completion events, gesture `release` (spring, decay, decay-into-bounds), `retune` for live token edits, and reduced motion per `PropClass`. |
 | `Scene` | Keyed nodes with presence (exits stay mounted, revive mid-exit without a jump), `Transition`s (`opacity scale offset move push slide blur_replace reveal asymmetric combined`), layout by edges (`Travel::Parent`) or one straight screen path (`Travel::Screen`), `match_geometry`, popLayout. |
@@ -55,7 +55,7 @@ let x = store.get(id, X);
 | `Animated<T>` | A single value outside any store, for one-off widgets. |
 | `Clock` | A display clock with pause, scale and seek, or a manual clock for tests and offline renders. |
 | `LoopTrack` / `LoopSpec` | Periodic eased opacity or clockwise rotation, sampled at clock time. `retime` preserves phase; `enabled` springs the pulse amplitude toward rest. The renderer owns visibility and scheduling. |
-| `MotionTrace` | motion-lint JSONL. `MotionTrace::from_env` opens `$RUNE_MOTION_TRACE`. |
+| `MotionTrace` | motion-trace JSONL. `MotionTrace::from_env` opens `$RUNE_MOTION_TRACE`. |
 
 ### Kit's motion rules are the defaults
 
@@ -66,7 +66,7 @@ let x = store.get(id, X);
 - Under reduced motion, travel, scale, shape and blur change instantly, and opacity, colour and presence take a 0.18 s ease-in-out fade (`REDUCED_FADE`). Gesture values keep their curve. `match_geometry` turns into a crossfade in place.
 - Both edges of a rect snap to 1/64 device px, and settle thresholds scale with the pixel density.
 - Blur is limited to 4 px and only applies to things entering or leaving in place. A transition that travels drops its blur. Scale stays within [0.9, 1.1] and never goes to 0. A removed node always fades out (`Effect::kit_rules`).
-- Width leads: `.width_leads()` runs the X spring at 0.78× the duration (taken from Flit).
+- Width leads: `.width_leads()` runs the X spring at 0.78× the duration (taken from a launcher app).
 - A stationary edge gets no motion at all.
 
 ## Design
@@ -176,11 +176,11 @@ Run this on the render thread once per display-link callback:
 | `mask` | `Mask { inset: Sides, feather: Sides }` in the node's own coordinates: how far each side is pulled in, and the gradient width on that side. Evaluate it as an SDF ramp. `mask.is_none()` means no clip. |
 | `phase` | `Entering`, `Present` or `Exiting { generation }`. |
 | `in_flow` | Turns false as soon as a popLayout exit starts. App layout should stop reserving space for the node. |
-| `flags` | motion-lint bits (`flags::ANIMATED`, `ANCESTOR_ANIMATED`, `CLIPPED`, `FILTERED`) and intent bits (own `<< 8`, ancestor `<< 16`). |
+| `flags` | motion-trace bits (`flags::ANIMATED`, `ANCESTOR_ANIMATED`, `CLIPPED`, `FILTERED`) and intent bits (own `<< 8`, ancestor `<< 16`). |
 
 Call `scene.set_pixel_scale(scale)` on display changes and `scene.set_reduced_motion(on)` when the
 system setting changes. Setting `RUNE_MOTION_TRACE=/path.jsonl` and calling
-`scene.set_trace(MotionTrace::from_env(&header))` writes motion-lint traces.
+`scene.set_trace(MotionTrace::from_env(&header))` writes motion traces.
 
 ## Examples and tests
 

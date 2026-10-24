@@ -44,7 +44,7 @@ Rune’s foundational bet is **Rust + a thin custom GPU HAL (~1,800 LOC per nati
 
 3. **Swift (Swift 6.3 / 6.4 in 2026):**
    - Swift has made real cross-platform strides: [Swift 6.3](https://www.swift.org/blog/swift-6.3-released/) shipped an official Android SDK, [Swift 6.4](https://www.swift.org/blog/) defaulted to the unified `Swift Build` engine, and `JavaScriptKit` optimized Wasm bridges. Kit’s own `hot-reload-kit` demonstrates 100–300 ms hot-reloading on macOS via `@_dynamicReplacement` and `-bundle_loader`.
-   - **Why Swift loses as core language (but wins as Apple host glue):** Outside Apple platforms, Swift has no cross-platform GUI/text/accessibility ecosystem; Wasm binaries carry heavy runtime weight unless restricted to Embedded Swift; and pervasive ARC reference counting across dense retained/immediate UI trees introduces atomic retain/release traffic and accidental closure reference cycles. However, using ~500 lines of Swift/Objective-C via `objc2` for macOS/iOS system integration (e.g., `NSGlassEffectView`, menu bars, `RPSystemBroadcastPickerView`, share sheets, as done in `flit/native/LauncherView.swift`) is effortless and strongly recommended.
+   - **Why Swift loses as core language (but wins as Apple host glue):** Outside Apple platforms, Swift has no cross-platform GUI/text/accessibility ecosystem; Wasm binaries carry heavy runtime weight unless restricted to Embedded Swift; and pervasive ARC reference counting across dense retained/immediate UI trees introduces atomic retain/release traffic and accidental closure reference cycles. However, using ~500 lines of Swift/Objective-C via `objc2` for macOS/iOS system integration (e.g., `NSGlassEffectView`, menu bars, `RPSystemBroadcastPickerView`, share sheets, as done in `launcher/native/LauncherView.swift`) is effortless and strongly recommended.
 
 4. **C++23/26, Odin, Jai, Mojo:**
    - **C++** lacks memory safety, suffers from header/build fragmentation, and makes fearless multi-threaded UI state scheduling hazardous.
@@ -59,7 +59,7 @@ Rune’s foundational bet is **Rust + a thin custom GPU HAL (~1,800 LOC per nati
 
 1. **Raw Metal (`objc2-metal`) on macOS & iOS:**
    - **Evidence from GPUI, Scrawl, and Makepad:**
-     - GPUI’s original macOS renderer (`gpui-fork/src/platform/mac/metal_renderer.rs:1-850`) is **850 lines of Rust**.
+     - GPUI’s original macOS renderer (`kitlangton/gpui/src/platform/mac/metal_renderer.rs:1-850`) is **850 lines of Rust**.
      - Kit’s production recording pill renderer in Scrawl (`scrawl/src/native/pill/mod.rs:1-420` + `pill.metal:1-369`) is **~790 lines total**, directly driving a 3-pass separable Gaussian blur + SDF capsule pipeline on a `CAMetalLayer` over an `NSGlassEffectView`.
      - Makepad’s direct Metal backend (`makepad/platform/src/os/apple/metal.rs:1-1100`) gives direct `IOSurface` cross-process texture sharing and exact `MTLCommandBuffer` GPU start/end timestamps (`GPUStartTime`/`GPUEndTime`, lines 318–326).
    - **Capabilities `wgpu` hides or complicates on Apple:**
@@ -91,7 +91,7 @@ Rune’s foundational bet is **Rust + a thin custom GPU HAL (~1,800 LOC per nati
 ### Topic 3: 2D UI Renderer Design
 
 #### 3.1 Instanced SDF Primitives & Analytic Surface Shading
-- **GPUI’s Baseline (`gpui-fork/src/platform/mac/shaders.metal:102-545`):**
+- **GPUI’s Baseline (`kitlangton/gpui/src/platform/mac/shaders.metal:102-545`):**
   - Draws `Shadow`, `Quad`, and `Underline` as instanced 4-vertex unit quads reading per-instance structs from storage/constant buffers (`[[buffer(QuadInputIndex_Quads)]]`).
   - `quad_fragment` evaluates an exact outer rounded-box SDF (`quad_sdf_impl`, line 1065) and an inner border SDF (`quarter_ellipse_sdf`, line 440) that handles non-uniform border widths (`top != left`), plus perimeter-parameterized dashed borders (`dash_alpha`, line 421).
   - **Limitation in GPUI:** Because `Shadow`, `Quad`, and `Border` are separate primitive batches in `scene.rs` (`zed/crates/gpui/src/scene.rs:88-115`), a button with a drop shadow, background fill, inner highlight, and border emits multiple draw instances or requires batch-breaking z-order sorts.
@@ -225,7 +225,7 @@ To achieve sub-frame (~4–6 ms p50) input-to-photon latency while maintaining b
 
 ### What to Steal
 1. **Zed (`gpui_macos` & `gpui_wgpu`):**
-   - **Oklab gradient interpolation + Jimenez IGN 2-tap triangular dithering** (`±1/255`) in `gpui-fork/src/platform/mac/shaders.metal:950-988,1170-1177` to eliminate 8-bit banding in shadows and gradients.
+   - **Oklab gradient interpolation + Jimenez IGN 2-tap triangular dithering** (`±1/255`) in `kitlangton/gpui/src/platform/mac/shaders.metal:950-988,1170-1177` to eliminate 8-bit banding in shadows and gradients.
    - **Quarter-ellipse inner border SDF** and **perimeter-parameterized dashed borders** (`shaders.metal:194-449`).
    - **`wgpu` backend architecture for Linux/Windows/Web** with storage buffers + dual-source subpixel blending (`zed/crates/gpui_wgpu/src/wgpu_renderer.rs:781-795`).
    - **Zero-copy bi-planar `Y`/`CbCr` `IOSurface` video rendering** (`surface_fragment` in `shaders.metal:874-890`).
@@ -244,7 +244,7 @@ To achieve sub-frame (~4–6 ms p50) input-to-photon latency while maintaining b
    - **ThinLink + jump-table hot-patching** ([`docs.rs/subsecond`](https://docs.rs/subsecond/0.7.10/subsecond/)) for <400 ms stateful Rust UI hot-reloading.
 
 ### What to Avoid
-1. **Avoid GPUI’s 4× MSAA Full-Window Intermediate Texture for Paths** (`gpui-fork/src/platform/mac/metal_renderer.rs:195-235`): Allocating a full-window 4× MSAA texture and running a separate resolve + sprite-blit pass just to draw a few SVG icons wastes tens of megabytes of VRAM and breaks batching. Use **Slug** for icons/curves and **`vello_gpu` Sparse Strips** for complex vector art.
+1. **Avoid GPUI’s 4× MSAA Full-Window Intermediate Texture for Paths** (`kitlangton/gpui/src/platform/mac/metal_renderer.rs:195-235`): Allocating a full-window 4× MSAA texture and running a separate resolve + sprite-blit pass just to draw a few SVG icons wastes tens of megabytes of VRAM and breaks batching. Use **Slug** for icons/curves and **`vello_gpu` Sparse Strips** for complex vector art.
 2. **Avoid `CVDisplayLink` on macOS 14+** (`zed/crates/gpui_macos/src/display_link.rs:1-52`): Deprecated, lacks ProMotion `preferredFrameRateRange`, and has unsafe thread teardown races. Use `CADisplayLink` on the main `NSRunLoop` combined with an immediate input-triggered draw fast-path.
 3. **Avoid Windowed `CAMetalDisplayLink` for Latency-Critical Input**: Its 3–5 refresh lead (41–50 ms on macOS windowed mode) makes typing and dragging feel sluggish.
 4. **Avoid Full Compute `vello`**: Moved to `research/` by Linebender in 2026 because its 9-stage compute pipeline has too high a baseline dispatch cost for low-latency 120 Hz UI frames.

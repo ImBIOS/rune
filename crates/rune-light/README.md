@@ -78,13 +78,13 @@ between the uber pass and present. The demos do exactly this by hand with Rune's
 |---|---|---|---|
 | Surface | full | Instanced quads; the topmost primitive writes its own SDF, outward gradient, top z and id | Exact per-pixel bevel normals and receiver height, no texture SDF error at edges |
 | Field | ½ | Brute-force union SDF of occluders, box-distance early-out, plus nearest slab z range and a GI distance | Exact for rounded rects, no jump flood needed. JFA would only be needed for arbitrary shapes (text, vectors) |
-| Soft shadows | ½ | Sphere tracing the slab field from each receiver to the light, Quílez penumbra with Aaltonen's closest-approach fix, clearance measured against the cone to a spherical source (`0.5 + 0.5·h/(t·θ)`, smoothstep, as in Arcade's capsule shadows) | Physically sized penumbrae that harden toward contact for free; early exit once the ray clears the tallest card |
+| Soft shadows | ½ | Sphere tracing the slab field from each receiver to the light, Quílez penumbra with Aaltonen's closest-approach fix, clearance measured against the cone to a spherical source (`0.5 + 0.5·h/(t·θ)`, smoothstep, as in an earlier lighting prototype's capsule shadows) | Physically sized penumbrae that harden toward contact for free; early exit once the ray clears the tallest card |
 | Upsample | full | Joint bilateral on receiver height | Shadows never bleed from the floor onto a card top |
-| Shading | full | Lambert + GGX (viewer overhead) with Karis sphere-light widening, a rim hairline on edges facing the light, contact AO from the field, Arcade's windowed inverse square and torch beam profile | Cards read as raised; highlights sweep; the torch has a hot core and spill, not a flat disc |
+| Shading | full | Lambert + GGX (viewer overhead) with Karis sphere-light widening, a rim hairline on edges facing the light, contact AO from the field, an earlier lighting prototype's windowed inverse square and torch beam profile | Cards read as raised; highlights sweep; the torch has a hot core and spill, not a flat disc |
 | God rays | ½ | A light behind the UI: each pixel integrates the light's glow, masked by the field (prefiltered to the sample spacing), along its path to the light (Mitchell, GPU Gems 3), plus distance falloff | Shafts through every gap and no banding, with the same field |
 | GI | ⅛ | 2D radiance cascades: 5 cascades, 4·4ⁿ directions, Sannikov's bilinear fix, emitters glow, cards absorb only rays from lower probes (light reaches a card from things standing on it), one bounce from direct light on cards | Every emitter lights its neighbours with soft occlusion at a cost fixed by the grid, not the emitter count |
 
-Prior art reused from Arcade:
+Prior art reused from an earlier lighting prototype:
 
 - `packages/kit/gpu/shadows/capsule-shadows.ts:508-527` (cone-relative soft visibility),
 - `packages/kit/gpu/lights/physical.ts:142-163` (windowed inverse square, Karis widening),

@@ -1,7 +1,7 @@
 # 11 — Platform Shells & Platform Order
 
 Research for **Rune** (working title), an experimental Rust UI & animation framework for macOS, iOS, web, Windows, Linux, and Android.
-Checked October 2026 against local checkouts of `winit` (`0.31.0-beta.3`), Zed's `gpui` (`gpui_macos`, `gpui_ios`, `gpui_web`, `gpui_windows`, `gpui_linux`), `makepad`, `flutter/engine`, and Kit's production apps (`scrawl`, `flit`, `opencode-ios`, `hex`).
+Checked October 2026 against local checkouts of `winit` (`0.31.0-beta.3`), Zed's `gpui` (`gpui_macos`, `gpui_ios`, `gpui_web`, `gpui_windows`, `gpui_linux`), `makepad`, `flutter/engine`, and Kit's production apps (`scrawl`, `hex`, a private Mac launcher and a private iOS client).
 
 ---
 
@@ -11,10 +11,10 @@ Checked October 2026 against local checkouts of `winit` (`0.31.0-beta.3`), Zed's
 - **Per-platform shells are smaller than `winit` while doing far more.** Zed's `gpui_macos` (9,711 LOC), `gpui_ios` (3,561 LOC), and `gpui_web` (6,994 LOC) are comparable in size to `winit-appkit` (8,667 LOC), `winit-uikit` (3,471 LOC), and `winit-web` (7,794 LOC), yet include full `NSTextInputClient` / `UITextInput` / hidden-`<textarea>` IME bridges, native menus, pasteboard, drag-and-drop, and `presentsWithTransaction` resize synchronization.
 - **macOS 26 / iOS 26 Liquid Glass requires native backdrop views (`NSGlassEffectView` / `UIVisualEffectView` / `GlassEffectContainer`) behind or around a transparent `CAMetalLayer`.** Apple's private `CASDFElementLayer` + `CABackdropLayer` pipeline samples live desktop/wallpaper buffers behind the window that a client Metal shader cannot read. Scrawl's pill (`scrawl/src/native/pill/mod.rs:447-453, 1111-1147`) proves the exact pattern: an `NSGlassEffectView` under a transparent `CAMetalLayer` (`presentsWithTransaction = true`), updated together inside `CATransaction::begin() ... commit()`.
 - **120 Hz ProMotion requires explicit frame-rate pinning on both macOS and iOS.** On macOS 14+, `NSView.displayLinkWithTarget:selector:` returns a `CADisplayLink` that adaptively throttles to 30 Hz (33.9 ms) unless `setPreferredFrameRateRange:` is pinned to `CAFrameRateRange { minimum: 120.0, maximum: 120.0, preferred: 120.0 }` (`makepad/.../macos_app.rs:1458-1482`). If using `CVDisplayLink`, keep instances immortal per `CGDirectDisplayID` (`gpui_macos/src/display_link.rs:1-86`) to avoid CoreVideo teardown segfaults. On iOS, pair `CADisplayLink.preferredFrameRateRange = CAFrameRateRangeMake(80, 120, 120)` with `CADisableMinimumFrameDurationOnPhone = YES` in `Info.plist`.
-- **Incremental adoption in existing SwiftUI/UIKit apps (`opencode-ios`, `hex`) is a first-class requirement.** Rune must work in two modes on Apple platforms: **Full-Window Shell** (Rune owns `NSApplication`/`UIApplication`) and **Embedded View** (`RuneMetalView: UIView` / `NSView` wrapped in `UIViewRepresentable` / `NSViewRepresentable`, sharing a single process-wide `MTLDevice` and `MTLCommandQueue`).
+- **Incremental adoption in existing SwiftUI/UIKit apps (the iOS client, `hex`) is a first-class requirement.** Rune must work in two modes on Apple platforms: **Full-Window Shell** (Rune owns `NSApplication`/`UIApplication`) and **Embedded View** (`RuneMetalView: UIView` / `NSView` wrapped in `UIViewRepresentable` / `NSViewRepresentable`, sharing a single process-wide `MTLDevice` and `MTLCommandQueue`).
 - **Native view embedding inside a Rune window should use Z-ordered underlay/overlay slots (`NSGlassEffectView` / `WKWebView` / `AVPlayerLayer` / `MKMapView`), not general-purpose interleaved slicing.** Flutter's `FlutterPlatformViewsController.mm` requires `EmbedderViewSlice` picture-recording, `OverlayLayerPool` allocations, and `FlutterTouchInterceptingView` gesture delay buffers for every interleaved platform view. Restricting embedded native views to background underlays (glass materials, video, maps) or top overlays (sheets, popovers, inspectors) eliminates intermediate GPU render targets.
 - **Web in 2026 has universal WebGPU (including Safari 26 on macOS/iOS), but `EditContext` is still Chromium-only.** For web text input, steal `gpui_web`'s sliding-window hidden `<textarea>` (`gpui_web/src/ime_mirror.rs:1-198`, 512 UTF-16 code units each side of the selection, coalesced once per frame) plus an offscreen DOM accessibility mirror (`accesskit_web` pattern).
-- **Ship in strict platform order: (1) macOS → (2) iOS + SwiftUI/UIKit host view → (3) Web (WASM + WebGPU) → (4) Windows → (5) Linux (Wayland-first) → (6) Android.** macOS and iOS share ~40% of their platform code (`gpui_apple`: Metal, CoreText, CoreAnimation, `dispatch2`, `objc2`) and serve all of Kit's immediate apps (`scrawl`, `flit`, `opencode-ios`, `hex`), while Web is mandatory for interactive docs, playgrounds, and shareable demos.
+- **Ship in strict platform order: (1) macOS → (2) iOS + SwiftUI/UIKit host view → (3) Web (WASM + WebGPU) → (4) Windows → (5) Linux (Wayland-first) → (6) Android.** macOS and iOS share ~40% of their platform code (`gpui_apple`: Metal, CoreText, CoreAnimation, `dispatch2`, `objc2`) and serve all of Kit's immediate apps (`scrawl`, `hex`, the launcher and the iOS client), while Web is mandatory for interactive docs, playgrounds, and shareable demos.
 
 ---
 
@@ -50,7 +50,7 @@ Checked October 2026 against local checkouts of `winit` (`0.31.0-beta.3`), Zed's
    - In `gpui_macos/src/window.rs:2260-2285`, the content view implements `wantsUpdateLayer -> YES` and `displayLayer:`. During `displayLayer:`, GPUI stops its display link, flips `metal_layer.set_presents_with_transaction(true)` (`gpui_macos/src/metal_renderer.rs:297-300`), renders synchronously at the new `bounds` and `backingScaleFactor`, calls `command_buffer.waitUntilScheduled()`, calls `drawable.present()`, and restores `presentsWithTransaction = false` when the display link resumes (`window.rs:2058-2075`). The window frame and Metal content resize in the exact same WindowServer commit with zero rubber-banding or black gutter.
 
 4. **Embedded View Mode (`UIViewRepresentable` / `NSViewRepresentable`):**
-   `winit` assumes ownership of `UIApplicationMain` (`winit-uikit/src/event_loop.rs`) or `NSApplication` activation policy and delegate (`winit-appkit`). Embedding a single Rune canvas inside an existing SwiftUI screen in `opencode-ios` or `hex` is awkward and unsupported in `winit`, whereas a thin `RuneHostView` (`UIView` / `NSView`) shares 90% of `rune-ios` / `rune-macos`'s windowing/input/rendering code without owning `UIApplication`.
+   `winit` assumes ownership of `UIApplicationMain` (`winit-uikit/src/event_loop.rs`) or `NSApplication` activation policy and delegate (`winit-appkit`). Embedding a single Rune canvas inside an existing SwiftUI screen in the iOS client or `hex` is awkward and unsupported in `winit`, whereas a thin `RuneHostView` (`UIView` / `NSView`) shares 90% of `rune-ios` / `rune-macos`'s windowing/input/rendering code without owning `UIApplication`.
 
 5. **SDL3 (`sdl3-sys`):**
    SDL3 improved GPU and high-DPI APIs over SDL2 and added `SDL_AddEventWatch` for live resize callbacks, but it remains a C game runtime: it lacks native macOS `NSGlassEffectView` / `NSPanel` vibrancy integration, full document-context `UITextInput` on iOS, native macOS `NSMenu` responder-chain validation, and web accessibility trees, while adding a C build dependency across every target.
@@ -65,8 +65,8 @@ Checked October 2026 against local checkouts of `winit` (`0.31.0-beta.3`), Zed's
   - `GPUIWindow: NSWindow` for standard document/app windows.
   - `GPUIPanel: NSPanel` for floating overlays, HUDs, pills, and launchers (`NSWindowStyleMaskNonactivatingPanel`, `collectionBehavior = CanJoinAllSpaces | FullScreenAuxiliary`, `level = NSFloatingWindowLevel` or `NSPopUpMenuWindowLevel` (`101`)).
 - **Non-Activating Key Input & Cold-Start Warm-Up:**
-  - In both Scrawl (`scrawl/src/native/pill/mod.rs:342-358`) and Flit (`flit/native/Launcher.swift:26-44`), subclass `NSPanel` to override `canBecomeKeyWindow -> YES` and `canBecomeMainWindow -> NO`. This allows typing and Escape/shortcut handling in a floating launcher or recording pill without stealing active-app status from the user's frontmost app.
-  - **Cold-start warm-up:** On first launch, `NSPanel` + Metal/SwiftUI shader compilation can cause a 1-frame flash. Flit (`flit/native/Launcher.swift:566-578`) solves this by setting `panel.alphaValue = 0`, calling `orderFrontRegardless()` + `layoutIfNeeded()`, then `orderOut(nil)` and restoring `alphaValue = 1` at startup.
+  - In both Scrawl (`scrawl/src/native/pill/mod.rs:342-358`) and the launcher (`launcher/native/Launcher.swift:26-44`), subclass `NSPanel` to override `canBecomeKeyWindow -> YES` and `canBecomeMainWindow -> NO`. This allows typing and Escape/shortcut handling in a floating launcher or recording pill without stealing active-app status from the user's frontmost app.
+  - **Cold-start warm-up:** On first launch, `NSPanel` + Metal/SwiftUI shader compilation can cause a 1-frame flash. The launcher (`launcher/native/Launcher.swift:566-578`) solves this by setting `panel.alphaValue = 0`, calling `orderFrontRegardless()` + `layoutIfNeeded()`, then `orderOut(nil)` and restoring `alphaValue = 1` at startup.
 - **Traffic Lights & Titlebar Integration:**
   - Use `NSWindowStyleMaskTitled | NSWindowStyleMaskFullSizeContentView` with `titlebarAppearsTransparent = YES` and `titleVisibility = NSWindowTitleHidden`.
   - Override `layout` in the `NSWindow`/`NSPanel` subclass or inspect `standardWindowButton:` (`NSWindowCloseButton`, `NSWindowMiniaturizeButton`, `NSWindowZoomButton`) to position the traffic lights at a custom inset (`gpui_macos/src/window.rs:780-865`) and report `WindowControls` geometry to Rune's layout engine so app toolbars automatically pad around traffic lights (and shrink that padding to `0` when entering native fullscreen via `windowWillEnterFullScreen:` / `windowDidExitFullScreen:`).
@@ -131,7 +131,7 @@ There are two display-link APIs on macOS, each with a sharp edge discovered in o
 - **Menu-Bar Extras (`NSStatusItem`):** Provide a first-class `StatusItem` API on `rune-macos` (`NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength)`) that can either show a native `NSMenu` or anchor a borderless `NSPanel` popover below the status bar button's `window.frame`.
 - **Clipboard (`NSPasteboard`) & Drag-and-Drop (`NSDraggingDestination` / `NSDraggingSource`):**
   Register `NSPasteboardTypeString`, `NSPasteboardTypeFileURL`, `NSPasteboardTypePNG`, `NSPasteboardTypeTIFF`, and custom UTI types (`window.registerForDraggedTypes:`). Implement `draggingEntered:`, `draggingUpdated:`, `draggingExited:`, and `performDragOperation:` (`gpui_macos/src/window.rs:2338-2435`) to convert external file/image/text drops into `PlatformInput::FileDrop` events with cursor coordinates.
-- **Services & Quick Look:** Forward `validRequestorForSendType:returnType:` for macOS Services and `acceptsPreviewPanelControl:` / `beginPreviewPanelControl:` (`QLPreviewPanel`, as in `flit/native/Launcher.swift:46-75`) so pressing Space on a file item opens native Quick Look.
+- **Services & Quick Look:** Forward `validRequestorForSendType:returnType:` for macOS Services and `acceptsPreviewPanelControl:` / `beginPreviewPanelControl:` (`QLPreviewPanel`, as in `launcher/native/Launcher.swift:46-75`) so pressing Space on a file item opens native Quick Look.
 
 ---
 
@@ -172,7 +172,7 @@ There are two display-link APIs on macOS, each with a sharp edge discovered in o
 - **Haptics:** Wrap `UIImpactFeedbackGenerator` (`Light`, `Medium`, `Heavy`, `Soft`, `Rigid`), `UISelectionFeedbackGenerator`, and `UINotificationFeedbackGenerator` behind a zero-allocation `PlatformWindow::trigger_haptic(HapticPattern)` method, plus `CHHapticEngine` (CoreHaptics) for continuous texture/transient curves synced to spring velocity.
 - **Dynamic Type:** Read `UITraitCollection.currentTraitCollection.preferredContentSizeCategory` and observe `UIContentSizeCategoryDidChangeNotification` (`registerForTraitChanges:@[UITraitPreferredContentSizeCategory.self]`). Expose the user's Dynamic Type scale factor (`UIFontMetrics.defaultMetrics.scaledValueForValue:`) to Rune's style system.
 
-### Platform View Embedding & Bidirectional Hosting (Incremental Adoption in OpenCode iOS / Hex)
+### Platform View Embedding & Bidirectional Hosting (Incremental Adoption in the iOS Client / Hex)
 
 #### How Existing Frameworks Embed Native Views (and the Cost)
 - **Flutter (`FlutterPlatformViewsController.mm:46-210`, `FlutterPlatformViews_Internal.h:23-160`):**
@@ -186,9 +186,9 @@ There are two display-link APIs on macOS, each with a sharp edge discovered in o
   Every component *is* a `UIView`, so embedding is free, at the cost of no unified custom GPU canvas and main-thread `UIView` layout overhead.
 
 #### Rune's Bidirectional Strategy
-1. **Hosting Rune inside SwiftUI / UIKit (`RuneHostView` — Priority #1 for `opencode-ios` and `hex`):**
+1. **Hosting Rune inside SwiftUI / UIKit (`RuneHostView` — Priority #1 for the iOS client and `hex`):**
    - Provide a C-ABI / Swift package wrapper (`RuneKit`) exposing `RuneUIView: UIView` and `RuneView: UIViewRepresentable` (and `RuneNSView` on macOS).
-   - **Shared GPU Context:** Multiple `RuneUIView` instances in an existing SwiftUI app (e.g., an animated voice orb in `hex`, a streaming code/diff canvas or canvas diagram in `opencode-ios`) share a single singleton `WgpuContext` / `MTLDevice` / `MTLCommandQueue` and glyph atlas in Rust, while each `RuneUIView` owns a lightweight `CAMetalLayer` surface and participates in a single shared `CADisplayLink`.
+   - **Shared GPU Context:** Multiple `RuneUIView` instances in an existing SwiftUI app (e.g., an animated voice orb in `hex`, a streaming code/diff canvas or canvas diagram in the iOS client) share a single singleton `WgpuContext` / `MTLDevice` / `MTLCommandQueue` and glyph atlas in Rust, while each `RuneUIView` owns a lightweight `CAMetalLayer` surface and participates in a single shared `CADisplayLink`.
    - **Intrinsic Size & Transparent Background:** `RuneUIView` sets `isOpaque = NO`, `layer.opaque = NO`, and supports `sizeThatFits:` / `intrinsicContentSize` driven by Rune's layout pass so SwiftUI's `ScrollView` or `VStack` can size a Rune component naturally.
 2. **Embedding Native Views inside Rune (Underlay / Overlay Slots):**
    - Instead of Flutter's arbitrary N-layer `EmbedderViewSlice` interleaving, support two explicit native-view slots per Rune window:
@@ -197,16 +197,16 @@ There are two display-link APIs on macOS, each with a sharp edge discovered in o
    - Because Rust runs on the main UI thread (unlike Flutter's separate Dart UI / Raster threads), touch routing and `CATransaction` frame syncing happen **synchronously on the same thread** with zero `FlutterTouchInterceptingView` buffering latency.
 
 ### Liquid Glass on iOS 26
-As documented in `opencode-ios/OpenCode/Glass.swift:1-59` and `opencode-ios/docs/native-ui-guidance.md:11-34`:
+As documented in `ios-client/OpenCode/Glass.swift:1-59` and `ios-client/docs/native-ui-guidance.md:11-34`:
 - iOS 26 introduces `GlassEffectContainer`, `.glassEffect(glass.interactive(), in: shape)` in SwiftUI, and `UIGlassEffect` / `UIGlassContainerEffect` in `UIVisualEffectView` for UIKit.
-- When Rune runs in **Embedded View** mode inside `opencode-ios`, SwiftUI toolbars and floating composer pills use native `OpenCodeGlassContainer` / `.openCodeGlass(in:)` while Rune renders content surfaces or interactive visualizations.
+- When Rune runs in **Embedded View** mode inside the iOS client, SwiftUI toolbars and floating composer pills use native `OpenCodeGlassContainer` / `.openCodeGlass(in:)` while Rune renders content surfaces or interactive visualizations.
 - When Rune owns the full window on iOS 26, `rune-ios` can instantiate `UIVisualEffectView(effect: UIGlassEffect.regular)` in the **Underlay slot** behind the transparent `CAMetalLayer` using the exact same `CATransaction`-synced architecture as Scrawl's macOS pill.
 
 ### Rust-to-iOS Build & Deploy Ergonomics
-Inspected across `hex/ios/project.yml` and `opencode-ios/project.yml`:
+Inspected across `hex/ios/project.yml` and `ios-client/project.yml`:
 - **Avoid `cargo-mobile2` and `dx bundle` for serious iOS work:** They generate brittle template Xcode projects that break as soon as an app adds Share Extensions (`OpenCodeShare`), Custom Keyboard Extensions (`HEXKeyboard`), App Groups, or Xcode Cloud (`ci_scripts/ci_post_clone.sh`).
 - **Recommended Pipeline (`XcodeGen` + `cargo` staticlib/XCFramework + `xcrun devicectl`):**
-  1. Define the Xcode project declaratively in `project.yml` (`XcodeGen`, used in both `hex` and `opencode-ios`).
+  1. Define the Xcode project declaratively in `project.yml` (`XcodeGen`, used in both `hex` and the iOS client).
   2. Compile Rust as a `staticlib` (`librune_app.a`) for `aarch64-apple-ios` (device) and `aarch64-apple-ios-sim` (simulator) with a header/Swift bridge (`objc2` when Rust owns `main`, or `uniffi` / `@_cdecl` C-ABI when Swift owns `@main`).
   3. For simulator iteration: `cargo build --target aarch64-apple-ios-sim` → `xcodebuild` → `xcrun simctl install booted ... && xcrun simctl launch booted ...`.
   4. For physical iPhone ProMotion testing: `xcrun devicectl device install app --device <id> <App.app>` + `xcrun devicectl device process launch --device <id> --console <bundle-id>` gives sub-5-second incremental deploy and live stdout/stderr streaming over USB-C or Wi-Fi.
@@ -295,7 +295,7 @@ Grounded in `gpui_linux` (16,422 LOC):
 
 ### Steal
 1. **Scrawl's `CATransaction`-synchronized `NSGlassEffectView` + `CAMetalLayer` pipeline** (`scrawl/src/native/pill/mod.rs:447-453, 644-675, 1111-1147`): `presentsWithTransaction = true`, initial `window.displayIfNeeded()` while `alphaValue = 0.0` so AppKit materializes `SDFLayer` + `CABackdropLayer`, and `CATransaction::begin() ... cmd.wait_until_scheduled(); drawable.present(); CATransaction::commit()` for zero-lag glass morphing.
-2. **Flit's non-activating `NSPanel` + cold-start warm-up + Quick Look responder chain** (`flit/native/Launcher.swift:26-75, 566-578`): `canBecomeKey = true`, `canBecomeMain = false`, invisible warm-up pass on startup, and `QLPreviewPanel` control forwarding.
+2. **The launcher's non-activating `NSPanel` + cold-start warm-up + Quick Look responder chain** (`launcher/native/Launcher.swift:26-75, 566-578`): `canBecomeKey = true`, `canBecomeMain = false`, invisible warm-up pass on startup, and `QLPreviewPanel` control forwarding.
 3. **Makepad's `CADisplayLink` 120 Hz ProMotion pinning on macOS 14+** (`makepad/platform/src/os/apple/macos/macos_app.rs:1458-1482`): pinning `setPreferredFrameRateRange:` to `window.screen.maximumFramesPerSecond` so macOS never throttles custom GPU views to 30 Hz.
 4. **GPUI's `displayLayer:` synchronous live-resize dance on macOS** (`gpui_macos/src/window.rs:2058-2075, 2260-2285`): pausing the display link during `displayLayer:`, enabling `presentsWithTransaction = true`, rendering at the new size, and committing inside AppKit's resize transaction.
 5. **GPUI's `GPUITextInputView` on iOS** (`gpui_ios/src/ios/text_input.rs:42-350`): full `UITextInput` implementation in Rust with `session_token`-stamped `UITextPosition`/`UITextRange` and deferred `reconcileTextInput`.
@@ -364,15 +364,15 @@ Notice `draw(&mut self, scene: &Scene, glass_underlays: &[GlassRegion], native_o
 
 ### 8.3 Native View Embedding Strategy
 Support two complementary mechanisms:
-1. **Rune-in-Native (`RuneHostView`):** Every platform shell exposes a constructor that wraps an existing native view (`UIView`, `NSView`, `<canvas>`, `HWND`, `SurfaceView`) instead of creating a top-level OS window. On iOS and macOS, ship a thin Swift wrapper (`RuneView: UIViewRepresentable` / `NSViewRepresentable`) so `opencode-ios`, `hex`, `scrawl`, and `flit` can drop a 120 Hz Rune view into any SwiftUI screen today, sharing one process-wide `MTLDevice` and `CADisplayLink`.
+1. **Rune-in-Native (`RuneHostView`):** Every platform shell exposes a constructor that wraps an existing native view (`UIView`, `NSView`, `<canvas>`, `HWND`, `SurfaceView`) instead of creating a top-level OS window. On iOS and macOS, ship a thin Swift wrapper (`RuneView: UIViewRepresentable` / `NSViewRepresentable`) so the iOS client, `hex`, `scrawl`, and the launcher can drop a 120 Hz Rune view into any SwiftUI screen today, sharing one process-wide `MTLDevice` and `CADisplayLink`.
 2. **Native-in-Rune (Underlay & Overlay Slots):** Within a Rune window, support declarative `NativeUnderlay` (for `NSGlassEffectView` / `UIGlassEffect`, `AVPlayerLayer`, `MKMapView` behind a transparent hole in the Metal pass) and `NativeOverlay` (for `WKWebView`, system pickers, and popovers above the Metal layer), synced synchronously on the main thread inside `CATransaction`.
 
 ### 8.4 Platform Order & Effort Estimates
 
 | Priority | Platform Shell | Est. Size | Est. Effort | Why This Order |
 |---:|---|---:|---:|---|
-| **1** | **macOS (`rune-macos` + `rune-apple`)** | ~4,500 LOC (`macos`) + ~2,000 LOC (`apple` shared) | **2–3 weeks** | Fastest local compile/debug cycle; directly powers `scrawl` and `flit`; establishes the `objc2` + `CAMetalLayer` + `CATransaction` + `NSGlassEffectView` + CoreText foundation shared with iOS. |
-| **2** | **iOS (`rune-ios` + `RuneKit` Swift host)** | ~3,000 LOC Rust + ~400 LOC Swift | **2 weeks** | Reuses `rune-apple` (CoreText, Metal/wgpu, `dispatch2`, `objc2`); unlocks 120 Hz ProMotion touch/spring validation on iPhone and immediate incremental adoption inside `opencode-ios` and `hex` via `RuneView: UIViewRepresentable`. |
+| **1** | **macOS (`rune-macos` + `rune-apple`)** | ~4,500 LOC (`macos`) + ~2,000 LOC (`apple` shared) | **2–3 weeks** | Fastest local compile/debug cycle; directly powers `scrawl` and the launcher; establishes the `objc2` + `CAMetalLayer` + `CATransaction` + `NSGlassEffectView` + CoreText foundation shared with iOS. |
+| **2** | **iOS (`rune-ios` + `RuneKit` Swift host)** | ~3,000 LOC Rust + ~400 LOC Swift | **2 weeks** | Reuses `rune-apple` (CoreText, Metal/wgpu, `dispatch2`, `objc2`); unlocks 120 Hz ProMotion touch/spring validation on iPhone and immediate incremental adoption inside the iOS client and `hex` via `RuneView: UIViewRepresentable`. |
 | **3** | **Web (`rune-web`, WASM + WebGPU)** | ~3,500 LOC | **2 weeks** | Safari 26 + Chrome/Firefox/Edge now all support WebGPU; essential for interactive documentation, motion playgrounds, and zero-install demos shared over Tailscale or the web. |
 | **4** | **Windows (`rune-windows`)** | ~6,500 LOC | **3–4 weeks** | Largest desktop user base outside macOS; `gpui_windows` provides a complete blueprint for DirectComposition, `DwmFlush` VSync, and `DirectManipulation` trackpad gestures. |
 | **5** | **Linux (`rune-linux`, Wayland-first)** | ~6,000 LOC (Wayland + `ashpd` portals) | **3 weeks** | Focus on Wayland (`xdg-shell`, `wp-fractional-scale-v1`, `text-input-v3`, `wlr-layer-shell`, `ashpd`); defer native X11 unless XWayland proves insufficient for specific users. |
@@ -383,6 +383,6 @@ Support two complementary mechanisms:
 ## 9. Open Questions
 
 1. **Multiple `NSGlassEffectView` instances vs `NSGlassEffectContainerView` on macOS 26 / iOS 26:** When a Rune window contains multiple floating glass pills that morph and merge (metaball effect), should `GlassRegion` group them under a single `NSGlassEffectContainerView` / `UIGlassContainerEffect` underlay, and how many concurrent glass regions can WindowServer composite at 120 Hz before backdrop bandwidth drops frames?
-2. **Swift 6.2 `@MainActor` interop with `RuneKit`:** In `opencode-ios` (`SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor`), what is the cleanest zero-boilerplate Swift macro or `@MainActor` wrapper so TCA reducers/views can drive `RuneView` state props without copying large buffers across FFI?
+2. **Swift 6.2 `@MainActor` interop with `RuneKit`:** In the iOS client (`SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor`), what is the cleanest zero-boilerplate Swift macro or `@MainActor` wrapper so TCA reducers/views can drive `RuneView` state props without copying large buffers across FFI?
 3. **Web `EditContext` progressive enhancement:** Should `rune-web` use Chromium's `EditContext` API when `window.EditContext !== undefined` and fall back to `ImeMirror` (`<textarea>`) on Safari/Firefox, or use `ImeMirror` everywhere on Web to avoid maintaining two browser IME codepaths?
 4. **Linux X11 support:** Is Wayland + XWayland sufficient for Rune's Linux target in 2026–2027, saving ~6,000 LOC of legacy X11/XCB/XIM code (`gpui_linux/src/linux/x11`), or do target Linux users still require a native X11 backend?

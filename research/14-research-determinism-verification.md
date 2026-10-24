@@ -130,8 +130,8 @@ memory of papers and tools and need a link check before anyone relies on a numbe
   actions), so **coverage-guided event fuzzing over the a11y tree** is straightforward: choose among actionable
   nodes, inject scripted input, coverage = distinct (node-role, state-hash) pairs plus code coverage (`-C
   instrument-coverage`). Run the fuzzer with a fake clock so it's thousands of interactions per second headless.
-- Oracles: no panic, no layout-lint / motion-lint finding, no hitch beyond budget in the counter model, tree
-  invariants. Motion-lint as a *fuzz oracle* is a genuine differentiator (finds pops under random interrupt
+- Oracles: no panic, no layout or motion linter finding, no hitch beyond budget in the counter model, tree
+  invariants. The internal motion linter as a *fuzz oracle* is a genuine differentiator (finds pops under random interrupt
   sequences).
 - Verdict: **spike** after the scene/inspector exist; the LLM-guided variant is **later**.
 

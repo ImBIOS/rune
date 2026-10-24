@@ -55,8 +55,8 @@ an interactive drawing editor is outside this example.
 Windowed paths are compile-checked, not exercised on a desktop. Window-manager support
 for transparency, topmost placement and click-through varies. Monitor placement
 is a startup snapshot; hot-plug reconciliation is the app's next integration step.
-The native window-number accessor supplies the macOS CGWindowID that Rooms can
-match to `SCWindow` for `SCContentFilter`; ScreenCaptureKit itself stays in Rooms.
+The native window-number accessor supplies the macOS CGWindowID that a host app can
+match to `SCWindow` for `SCContentFilter`; ScreenCaptureKit itself stays in the host app.
 It can initially be `None` until AppKit registers the window; retain the handle
 and query again. The native reference refreshes if a retained host is recreated.
 Borrow raw-window-handles only through the handle's callback while the native

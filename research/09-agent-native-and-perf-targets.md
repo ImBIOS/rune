@@ -7,7 +7,7 @@ Research date: 2026-10-21. Reader: Kit and the Rune architecture team. This repo
 - Make the scene runner, inspector protocol, clock, and trace schema part of the framework's first architecture. Adding them after applications exist makes deterministic verification much harder.
 - Give agents stable semantic IDs, small tree queries, computed geometry, presentation values, source locations, and structured errors. A screenshot alone cannot explain which constraint, state update, or animation caused a failure.
 - Use deterministic offscreen rendering for correctness and dedicated devices for performance. Virtual time can prove a spring's continuity; it cannot prove that the GPU presented its frames on time.
-- Reuse Kit's motion-lint JSONL format, Scrawl's named scene labs, layout-lint's invariant checks, and knobs' remote parameter descriptors. Keep a richer internal trace so the compatibility format does not constrain the renderer.
+- Reuse Scrawl's motion-trace JSONL format, Scrawl's named scene labs, the layout linter's invariant checks, and knobs' remote parameter descriptors. Keep a richer internal trace so the compatibility format does not constrain the renderer.
 - Published startup, memory, and size comparisons are useful only with their measurement boundaries attached. One widely cited toolkit benchmark measures container memory rather than process RSS, and its dependency sizes are Docker image deltas.
 - Current small Rust app measurements put stripped executables roughly in the 4–14 MiB range for GPUI, egui, Iced, Slint, and Tauri. These are small todo apps on one Mac, not a universal hello-world baseline.
 - Set initial Mac goals of fresh-process first presentation p95 ≤200 ms, idle hello-app process RSS ≤50 MiB, and a stripped arm64 hello executable ≤5 MiB. These are proposed engineering budgets, not claims that every platform can already meet them.
@@ -116,14 +116,14 @@ rune inspect --key composer.send --fields layout,presentation,source --json
 rune input pointer --phase down --x 300 --y 660 --at-ms 200
 rune clock advance --ms 8.333333
 rune capture --frame current --image --layout --semantics --out frame/
-rune trace stop --formats native,motion-lint,perfetto --out run/
+rune trace stop --formats native,motion-trace,perfetto --out run/
 ```
 
 Use stable machine-readable stdout, diagnostics on stderr, meaningful exit status, and bounded requests. `text` injection should be separate from physical key events and IME composition so an agent does not accidentally claim keyboard/IME coverage from a direct model mutation. Semantic activation is useful for functional tests, but it does not exercise pointer routing or establish latency.
 
 ### A4. Named scenes should replay real UI with fake external services
 
-Scrawl already has a good local example: `scrawl lab pill <scene>` replays named capsule states with a pretend recording and no mic/capture/ingest side effects. The lab supports time scaling and per-frame motion-lint traces; tuning values reload within 250 ms. This is stronger than a gallery of inert components because it drives the transition sequence used by the app. [Scrawl's AGENTS.md](https://github.com/kitlangton/scrawl/blob/main/AGENTS.md), implementation in `scrawl/src/ui/lab.rs` and `scrawl/src/ui/motion.rs`.
+Scrawl already has a good local example: `scrawl lab pill <scene>` replays named capsule states with a pretend recording and no mic/capture/ingest side effects. The lab supports time scaling and per-frame motion traces; tuning values reload within 250 ms. This is stronger than a gallery of inert components because it drives the transition sequence used by the app. [Scrawl's AGENTS.md](https://github.com/kitlangton/scrawl/blob/main/AGENTS.md), implementation in `scrawl/src/ui/lab.rs` and `scrawl/src/ui/motion.rs`.
 
 Rune should let every feature register scenes next to its implementation. A scene supplies initial state, fixture services, stable keys, and an input script. Include empty/loading/error states, long text, large text settings, right-to-left layout, keyboard appearance, interruptions, rapid repeated input, resize, and background/resume when relevant.
 
@@ -162,25 +162,25 @@ CDP's `Emulation.setVirtualTimePolicy` and `Animation.seekAnimations`/`setPaused
 
 ### A6. Reuse Kit's trace tools without corrupting timing measurements
 
-#### Motion-lint is the initial exchange format
+#### Scrawl's motion-trace JSONL is the initial exchange format
 
-The current writer has a header with `type`, `launch`, `width`, `height`, `hz`, `scale`, `wall`, and optional `platform`, `clock`, `units`, `sampleHz`. Frame records use fields including `t`, `n`, `sc`, `ct`, `m`, `e`, `g`, `cm`, `c`, `cg`, `tx`, `tf`, `k`, `bg`, `s`, and `ev`. `t` is milliseconds; `ct` is seconds. Metadata entries use `{id,cls,nm,view,host,ax,pv}` and geometry entries start `[id,x,y,w,h,opacity,radius,flags]`, optionally followed by visible-rectangle values. The writer rounds geometry to 0.01 and opacity to 0.001. Sources: motion-lint's `src/web/trace.ts` (writer), `src/runs.ts` (run discovery) and README (rules and usage).
+The current writer has a header with `type`, `launch`, `width`, `height`, `hz`, `scale`, `wall`, and optional `platform`, `clock`, `units`, `sampleHz`. Frame records use fields including `t`, `n`, `sc`, `ct`, `m`, `e`, `g`, `cm`, `c`, `cg`, `tx`, `tf`, `k`, `bg`, `s`, and `ev`. `t` is milliseconds; `ct` is seconds. Metadata entries use `{id,cls,nm,view,host,ax,pv}` and geometry entries start `[id,x,y,w,h,opacity,radius,flags]`, optionally followed by visible-rectangle values. The writer rounds geometry to 0.01 and opacity to 0.001. Sources: the internal motion linter's writer, run discovery and README.
 
-Important compatibility detail: virtual sweeps deliberately use `hz:60` and `sc:60*dt`. A 120 Hz virtual sample therefore uses `sc:0.5`, with sampling frequency represented separately. Do not set `hz:120` in an adapter and silently change motion-lint's normalization assumptions. Validate an adapter against actual writer output and parser fixtures.
+Important compatibility detail: virtual sweeps deliberately use `hz:60` and `sc:60*dt`. A 120 Hz virtual sample therefore uses `sc:0.5`, with sampling frequency represented separately. Do not set `hz:120` in an adapter and silently change the motion linter's normalization assumptions. Validate an adapter against actual writer output and parser fixtures.
 
-Export stable node IDs, presentation rectangles, effective opacity, visible clips, scalar channels, and transition events. Include channels for blur, mask progress, spring position/velocity, and ownership/gating where supported. Keep full-precision values in Rune's native trace because rounded motion-lint geometry is unsuitable for some numerical continuity checks.
+Export stable node IDs, presentation rectangles, effective opacity, visible clips, scalar channels, and transition events. Include channels for blur, mask progress, spring position/velocity, and ownership/gating where supported. Keep full-precision values in Rune's native trace because rounded motion-trace geometry is unsuitable for some numerical continuity checks.
 
-#### Layout-lint supplies a useful failure model
+#### The internal layout linter supplies a useful failure model
 
-Layout-lint reports shared-line near misses, clipping, overflow, and off-center icons. Its candidate-fix mode applies one change at a time, remeasures, and rejects changes that break previously satisfied invariants. Its scope isolation prevents comparing a transformed device stage's internal coordinates to unrelated page chrome. (layout-lint README, lines 3–10 and 75 onward.)
+The internal layout linter reports shared-line near misses, clipping, overflow, and off-center icons. Its candidate-fix mode applies one change at a time, remeasures, and rejects changes that break previously satisfied invariants. Its scope isolation prevents comparing a transformed device stage's internal coordinates to unrelated page chrome. (the layout linter's README.)
 
 For Rune, expose geometry so equivalent rules can run directly on layout snapshots. Return signed deltas, node keys, relevant ancestors, source locations, and the violated invariant. Do not automatically “fix” deliberate asymmetry. Let scenes declare alignment groups, allowed overlap, intentional overflow, and hit-target constraints.
 
-#### MotionXRay supplies presentation-level evidence
+#### A motion inspector supplies presentation-level evidence
 
-The OpenCode iOS tooling document was recovered from Git history (opencode-ios `632aea45:docs/motion-tooling.md`) because it is absent from the current checkout. The historical MotionXRay documentation describes capture of presentation geometry, opacity, transforms, blur, masks, Core Animation springs, source locations, and tunable keys. It reports approximately 0.8–2 ms/frame capture overhead, with serialization deferred until capture stops. These are historical tooling observations, not a Rune overhead target.
+A private iOS client's tooling document was recovered from Git history (revision `632aea45`) because it is absent from the current checkout. Its motion inspector's documentation describes capture of presentation geometry, opacity, transforms, blur, masks, Core Animation springs, source locations, and tunable keys. It reports approximately 0.8–2 ms/frame capture overhead, with serialization deferred until capture stops. These are historical tooling observations, not a Rune overhead target.
 
-Reported failures caught by this tooling include duplicate morph surfaces, gaps during opacity handoffs, premature layer retirement, geometry jumps, and stacked blur overdraw. Those cases should become named Rune regression scenes. MotionAudit-style continuity checks need property ownership and lifecycle data as well as rectangles; otherwise an intentional exit can look like a teleport or a missing surface can simply vanish from the sample set.
+Reported failures caught by this tooling include duplicate morph surfaces, gaps during opacity handoffs, premature layer retirement, geometry jumps, and stacked blur overdraw. Those cases should become named Rune regression scenes. Continuity checks need property ownership and lifecycle data as well as rectangles; otherwise an intentional exit can look like a teleport or a missing surface can simply vanish from the sample set.
 
 #### Knobs supplies the tuning interface
 
@@ -188,7 +188,7 @@ Knobs' remote descriptor protocol supports typed values, spring descriptors with
 
 #### Separate correctness capture from performance capture
 
-Motion-lint warns that walking all layers can add milliseconds per frame, that display-link probes miss render-server/GPU lateness, and that simulator hitch results are relative. A 2 ms observer would consume 24% of a 120 Hz budget. (motion-lint README, lines 110 and 237–253.)
+The internal motion linter warns that walking all layers can add milliseconds per frame, that display-link probes miss render-server/GPU lateness, and that simulator hitch results are relative. A 2 ms observer would consume 24% of a 120 Hz budget. (the motion linter's README.)
 
 Provide three modes:
 
@@ -413,8 +413,8 @@ Physical latency requires hardware. Ordinary CI can automatically check event-to
 - Playwright's role-based selection and readable semantic snapshots, paired with pixels rather than substituted for them.
 - Skia Gold's environment-keyed accepted images and explicit baseline review.
 - Scrawl's named side-effect-free scene labs and one scaled animation clock.
-- MotionXRay's presentation properties, property ownership, source/tunable links, and deferred serialization.
-- Motion-lint's existing format/rules, layout-lint's scope-aware invariants, and knobs' duration/bounce tuning descriptors.
+- The motion inspector's presentation properties, property ownership, source/tunable links, and deferred serialization.
+- The motion linter's format/rules, the layout linter's scope-aware invariants, and knobs' duration/bounce tuning descriptors.
 - LazyLayoutKit's bounded materialization and its publication of workloads where performance degrades.
 - Zed's streaming large-file approach and clear separation between loading, storage, and rendering work.
 
@@ -431,7 +431,7 @@ Physical latency requires hardware. Ordinary CI can automatically check event-to
 
 ## Recommendation for Rune
 
-Build a small end-to-end vertical slice before expanding the widget catalog: a text field and send/cancel morph, a virtualized list, and the two animation workloads above. Give the slice stable identity, an injected clock, fixture services, semantic/layout/presentation snapshots, source-linked queries, and a motion-lint adapter. Use the same registered scenes in offscreen tests and the real Mac/iPhone app.
+Build a small end-to-end vertical slice before expanding the widget catalog: a text field and send/cancel morph, a virtualized list, and the two animation workloads above. Give the slice stable identity, an injected clock, fixture services, semantic/layout/presentation snapshots, source-linked queries, and a motion-trace adapter. Use the same registered scenes in offscreen tests and the real Mac/iPhone app.
 
 Keep scene state, interaction dispatch, layout, presentation, and backend submission observable at explicit boundaries. This supports agents and also exposes where runtime cost occurs. Add full Perfetto/performance instrumentation after frame IDs and clocks are coherent; otherwise traces will imply precision they do not possess.
 
@@ -457,11 +457,11 @@ Rejected alternatives:
 4. Which platforms expose reliable presentation feedback, and what proxy plus uncertainty must be reported elsewhere?
 5. How much source/dependency provenance can remain available in development without adding per-frame allocation or invalidation cost?
 6. Should the one-million-row and 100 MB editor workloads ship as framework examples or a separate benchmark application? The renderer should not inherit every editor data-model responsibility.
-7. What exact effects scene best represents Flit/Scrawl's glass morph, including blur sampling and soft masks? The provisional 12-card benchmark must be replaced or supplemented by that real workload.
-8. Does the existing motion-lint consumer need any schema extension for Rune's transform/mask/velocity data, or can its current scalar channels carry the first adapter without changes?
+7. What exact effects scene best represents Scrawl's and the launcher's glass morph, including blur sampling and soft masks? The provisional 12-card benchmark must be replaced or supplemented by that real workload.
+8. Does the internal motion linter's consumer need any schema extension for Rune's transform/mask/velocity data, or can its current scalar channels carry the first adapter without changes?
 
 ## Research scope and reproducibility notes
 
-This report inspected local source/docs for motion-lint, layout-lint, Scrawl, knobs, and historical OpenCode iOS motion tooling; read primary protocol/tooling documentation; examined published benchmark results and measurement code; and recomputed the cited Typometer CSV statistics. It did not independently reproduce the external performance measurements, run release-size builds, open GUI windows, or benchmark a desk display. No optional build time was consumed.
+This report inspected local source/docs for internal motion and layout linters, Scrawl, knobs, and a private iOS client's historical motion tooling; read primary protocol/tooling documentation; examined published benchmark results and measurement code; and recomputed the cited Typometer CSV statistics. It did not independently reproduce the external performance measurements, run release-size builds, open GUI windows, or benchmark a desk display. No optional build time was consumed.
 
 Repository links to `main` are mutable. Before using an external number as a release gate, pin its source revision and retain the harness, assets, raw data, and machine manifest in the benchmark artifact. Local relative links in this report point to sibling checkouts; the historical iOS document requires the Git revision given above.

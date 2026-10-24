@@ -256,7 +256,7 @@ Makepad (`makepad/makepad`, created by Rik Arends) is a full-stack GPU-rendered 
 3. **First-Class Multi-Sensory & Motion Engine (Springs, Gestures, Procedural Audio/Haptics):**
    - *Why build:* No existing Rust UI framework links pointer velocity, spring physics, and sub-millisecond procedural UI audio/tactile feedback into a unified interaction primitive.
 4. **Built-in Live Tuning (`knobs`) + Headless Agent Remote Protocol (`/snap`, `/gseq`, `/tweak`, Motion Trace):**
-   - *Why build:* Makepad proved the architecture (`remote.rs`, `tweaker.rs`, `frame_trace.rs`, `live_reload.rs`), and Rune should build a clean, pure-Rust version natively integrated with Kit's `knobs` and `kit-motion` trace format from day one—allowing both humans and coding agents to tune springs/styles live without recompiling and verify motion traces headlessly.
+   - *Why build:* Makepad proved the architecture (`remote.rs`, `tweaker.rs`, `frame_trace.rs`, `live_reload.rs`), and Rune should build a clean, pure-Rust version natively integrated with Kit's `knobs` and Scrawl's motion-trace format from day one—allowing both humans and coding agents to tune springs/styles live without recompiling and verify motion traces headlessly.
 
 ### Rejected Alternatives (and Why)
 - **Forking or building directly on `Xilem` / `Masonry`:** Masonry's `Widget` trait and `imaging` abstraction are well-engineered, but Xilem's deeply nested static tuple view types create hostile compiler diagnostics for humans and agents, and Masonry's rendering model assumes a traditional 2D vector painter (`vello`) rather than a shader-first instanced compositor with FLIP layout springs and backdrop materials.

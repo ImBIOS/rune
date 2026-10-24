@@ -20,13 +20,13 @@ Research agent notes, 2026-10-21. Sources are cited inline. Kit's own code is ci
 - **Every property is a piecewise analytic track.** A segment is `{t0, x0, v0, target, curve}`, and
   you sample position *and* velocity at any absolute time. Retargeting = sample `(x, v)` at the
   commit's presentation time, then start a new segment from there. This is psychopomp's model
-  (`psychopomp/crates/psychopomp/src/timeline.rs:143-337`) generalised. It fixes Flit's problem that Core
-  Animation can't report velocity (`flit/src/macos.rs:2735-2777` has to guess "mid-flight" from
+  (`psychopomp/crates/psychopomp/src/timeline.rs:143-337`) generalised. It fixes the launcher's problem that Core
+  Animation can't report velocity (`launcher/src/macos.rs:2735-2777` has to guess "mid-flight" from
   heights and fall back to an analytical model).
 - **Springs are `Spring::new(duration, bounce)` with ω = 2π/duration and ζ = 1 − bounce**
   (1/(1+bounce) when bounce < 0). This matches SwiftUI, Flutter's `withDurationAndBounce`, knobs,
-  OpenCode iOS and `kit_motion.rs` exactly. Each spring is a named token pair (enter/exit) loaded from
-  `motion-presets/presets/kit-motion.json`, and the render thread re-resolves tokens live, so tuning
+  the private iOS client and Kit's generated presets exactly. Each spring is a named token pair (enter/exit) loaded from
+  Kit's motion presets, and the render thread re-resolves tokens live, so tuning
   retargets springs already in flight.
 - **Layout animation sits between layout and commit.** Layout runs once, at the target. For each
   node whose frame changed, the runtime animates the **edges** (left, right, top, bottom) in
@@ -38,7 +38,7 @@ Research agent notes, 2026-10-21. Sources are cited inline. Kit's own code is ci
   `Exiting{gen}`. By default it leaves layout flow (`popLayout`), plays its exit and unmounts only
   after its opacity track has *settled at 0*. If the same key comes back first, the node revives
   from where it is now. This is PresenceGate's generation guard
-  (`opencode-ios@origin/main:OpenCode/Core/Motion/PresenceGate.swift:12-69`) applied to every node.
+  (`PresenceGate.swift:12-69`) applied to every node.
 - **Kit's rules become defaults, not discipline.** Direct manipulation applies instantly. Nothing
   animates on first mount. Reduced motion is applied per property class by the runtime. Both edges
   snap to 1/64 device px on the render thread. Every clip has soft edges by default; a hard clip is
@@ -47,10 +47,10 @@ Research agent notes, 2026-10-21. Sources are cited inline. Kit's own code is ci
   scale` and re-anchors when the scale changes (`scrawl/src/ui/motion.rs:17-53`). Tracks are sampled
   at the frame's **target presentation timestamp**. Tests use `Clock::Manual{hz}`, and the frames
   come out bit-identical when the math uses deterministic `libm`.
-- **The render thread writes motion-lint traces natively** in Scrawl's JSONL format
+- **The render thread writes motion traces natively** in Scrawl's JSONL format
   (`scrawl/src/ui/motion.rs:563-788`): the element tuple `[id,x,y,w,h,a,r,flags,(vis)]`, plus exact
-  flag and intent bits (`motion-lint/src/analyze.ts:41-43`). The runtime *knows* which changes were
-  intended, so motion-lint no longer has to infer it. Tracing costs nothing when it's off.
+  flag and intent bits (the motion linter's `src/analyze.ts:41-43`). The runtime *knows* which changes were
+  intended, so the internal motion linter no longer has to infer it. Tracing costs nothing when it's off.
 
 ---
 
@@ -181,7 +181,7 @@ All animation below the view layer, on a render thread.**
 
 ```rust
 use rune::prelude::*;
-use rune::motion; // generated from kit-motion.json: SNAP, SETTLE, REFLOW, GLIDE, MORPH, ...
+use rune::motion; // generated from Kit's motion presets: SNAP, SETTLE, REFLOW, GLIDE, MORPH, ...
 
 #[derive(Model, Default)] // Model = reflect (inspector) + serde (hot-reload migration)
 pub struct Mail {
@@ -251,7 +251,7 @@ the user's own hand.
 - Heights live in a **sum tree** keyed by row (GPUI's `list` does the same). That gives O(log n)
   offset↔index lookups, and unmeasured rows use estimates. Measured heights replace estimates with
   **scroll anchoring**: the first visible row keeps its screen position, which matters for streaming
-  transcripts in OpenCode iOS.
+  transcripts in the private iOS client.
 - The main thread materializes the visible rows plus overscan (around 1.5 screens) as row scopes and
   diffs them by key: O(visible) per change, not O(n). The render thread scrolls through what is
   already there (§2.11) and publishes the offset so the main thread can top up overscan. Running out
@@ -293,7 +293,7 @@ fn deleting_a_row_slides_siblings_and_exits_in_place() {
     app.apply(Origin::Remote, |m: &mut Mail| m.threads = fixtures::threads(5));
     app.settle();                                    // runs until no track is active
     app.focus(key!("thread", 2)).press(Key::Backspace);
-    let trace = app.record(|app| app.advance(ms(600))); // motion-lint JSONL, in memory
+    let trace = app.record(|app| app.advance(ms(600))); // motion-trace JSONL, in memory
     trace.assert_clean();                            // pop-in, jump, reversal, fade-cutoff, ...
     assert!(app.node(key!("thread", 2)).is_none());  // unmounted only after its exit settled
     assert_eq!(app.node(key!("thread", 3)).unwrap().frame().y, 2.0 * 56.0);
@@ -313,21 +313,21 @@ fn deleting_a_row_slides_siblings_and_exits_in_place() {
 | knobs `spring.ts:1-2, 33-53` | Semi-implicit Euler in fixed 480 Hz substeps, dt clamped to 0.1 s; retarget keeps `v` | Works, but it can't be sampled at an arbitrary *t*. Rune uses closed form. |
 | knobs `spring.ts:16-26` | `set(target, delay)`: delayed retargets (cascades); repeating the same target is a no-op | Delays and the no-op rule belong in the track model. |
 | knobs `spring.ts:84-96` | Samples a spring into CSS `linear()` | The web backend can bake tracks into `linear()` only where WAAPI offload helps. |
-| OpenCode iOS `SpringSolver.swift:86-90, 96-113, 168-200` (on `origin/main`; the brief's `Core/Utilities/Motion.swift` path doesn't exist, and local `main` is behind) | Closed form for under-, critically and over-damped springs; `retarget(to:preservingVelocity:)` | The exact math Rune's segment uses. Velocity override = gesture handoff. |
-| OpenCode iOS `PresenceGate.swift:12-69` | Mounts immediately on open; unmounts only when *the latest generation's* completion fires while closed | Generation-guarded presence, in the runtime for every keyed node. |
-| OpenCode iOS `PresenceGate.swift:71-97` | Blur forced to 0 at progress ≥ .98 (no offscreen cost at rest), but **kept until unmount on close** so the last frame doesn't flash sharp | Blur filters attach and detach on settle and unmount, never mid-transition. |
-| OpenCode iOS `MotionDisplayLink.swift:4-11, 62-73` | One 80–120 Hz link; `dt` and `now` from `targetTimestamp` through `AnimationTimeScale` | Sample at the predicted presentation time, through the scaled clock. |
-| OpenCode iOS `MotionConstants.swift:10-37` | Every spring and fade is a named, live-tunable token; `reducedFade` .20 s | A token table, not literals. |
+| The private iOS client `SpringSolver.swift:86-90, 96-113, 168-200` (on `origin/main`; the brief's `Core/Utilities/Motion.swift` path doesn't exist, and local `main` is behind) | Closed form for under-, critically and over-damped springs; `retarget(to:preservingVelocity:)` | The exact math Rune's segment uses. Velocity override = gesture handoff. |
+| The private iOS client `PresenceGate.swift:12-69` | Mounts immediately on open; unmounts only when *the latest generation's* completion fires while closed | Generation-guarded presence, in the runtime for every keyed node. |
+| The private iOS client `PresenceGate.swift:71-97` | Blur forced to 0 at progress ≥ .98 (no offscreen cost at rest), but **kept until unmount on close** so the last frame doesn't flash sharp | Blur filters attach and detach on settle and unmount, never mid-transition. |
+| The private iOS client `MotionDisplayLink.swift:4-11, 62-73` | One 80–120 Hz link; `dt` and `now` from `targetTimestamp` through `AnimationTimeScale` | Sample at the predicted presentation time, through the scaled clock. |
+| The private iOS client `MotionConstants.swift:10-37` | Every spring and fade is a named, live-tunable token; `reducedFade` .20 s | A token table, not literals. |
 | Scrawl `src/ui/motion.rs:17-53` | One clock: `base + elapsed × scale`; changing the scale re-anchors so running ages continue | Clock design, verbatim. |
 | Scrawl `motion.rs:58-163, 316-360` | `Tune::DEFAULT` plus `tune.json` polled at 4 Hz in debug builds; presets; `scrawl tune rust` prints a paste-back | Live tuning loop; the source of truth stays in code. |
-| Scrawl `motion.rs:551-788` | motion-lint JSONL: header, per-frame `e/m/g/c/cm/ev`, writes only what changed, `SCRAWL_MOTION_TRACE` | Rune emits the same format from the render thread. |
-| Scrawl `src/native/pill/model.rs:130-200` | Closed-form critically damped step that **snaps to the target if it would cross it** | Prevents velocity overshoot, but it's a velocity cliff (motion-lint `stop-dead`). Rune keeps C¹ by default (open question). |
+| Scrawl `motion.rs:551-788` | motion-trace JSONL: header, per-frame `e/m/g/c/cm/ev`, writes only what changed, `SCRAWL_MOTION_TRACE` | Rune emits the same format from the render thread. |
+| Scrawl `src/native/pill/model.rs:130-200` | Closed-form critically damped step that **snaps to the target if it would cross it** | Prevents velocity overshoot, but it's a velocity cliff (the motion linter's `stop-dead`). Rune keeps C¹ by default (open question). |
 | Scrawl `src/ui.rs:82-95` | `Spring::visual(d, b)` stored in a field called `response` | Naming drift: `response` means different things in psychopomp. Use `duration` everywhere. |
-| Flit `docs/motion.md:41-44` | Pill↔panel morph runs in WindowServer (CA); GPUI renders the panel **once at its final layout**; CA drives clip/scale/blur | Final-layout-once plus animated geometry is FLIP. It works at 120 Hz with zero CPU relayout. |
-| Flit `src/ui/core.rs:2425-2481` | `CaSpringSpec`; velocity **normalized by distance** for `CASpringAnimation.initialVelocity` | Keep velocities in property units; normalize only at a CA boundary. |
-| Flit `core.rs:2483-2522` | `eval_ca_spring_spec_at`: evaluates the CA spring analytically so `CAShapeLayer` paths stay within < 0.02 pt | If Rune mirrors tracks into CA (system glass), it must evaluate the same function. |
-| Flit `core.rs:2604-2705` + `macos.rs:2735-2777` | `compute_ca_interruption_handoff` (called from `src/ui.rs:1461,1695`): the analytical presented state, overridden by `presentationLayer` values only when "mid-flight" is detected by a height heuristic (`h > 34.5 && |h − analytic| < 80`) | **CA doesn't expose velocity, and presentation values are racy.** Rune's render thread owns the analytic tracks, so `(x, v)` is always exact. |
-| motion-presets `presets/generated/kit_motion.rs:5-43` | `KitSpring{duration,bounce}`, `omega()/zeta()`; enter/exit pairs (`SETTLE` .3/.24, `REFLOW` .4/.32, `MORPH` .3/.16 → .27/.08, …) | Tokens are pairs. Exit springs run 10–25% shorter. |
+| The launcher `docs/motion.md:41-44` | Pill↔panel morph runs in WindowServer (CA); GPUI renders the panel **once at its final layout**; CA drives clip/scale/blur | Final-layout-once plus animated geometry is FLIP. It works at 120 Hz with zero CPU relayout. |
+| The launcher `src/ui/core.rs:2425-2481` | `CaSpringSpec`; velocity **normalized by distance** for `CASpringAnimation.initialVelocity` | Keep velocities in property units; normalize only at a CA boundary. |
+| The launcher `core.rs:2483-2522` | `eval_ca_spring_spec_at`: evaluates the CA spring analytically so `CAShapeLayer` paths stay within < 0.02 pt | If Rune mirrors tracks into CA (system glass), it must evaluate the same function. |
+| The launcher `core.rs:2604-2705` + `macos.rs:2735-2777` | `compute_ca_interruption_handoff` (called from `src/ui.rs:1461,1695`): the analytical presented state, overridden by `presentationLayer` values only when "mid-flight" is detected by a height heuristic (`h > 34.5 && |h − analytic| < 80`) | **CA doesn't expose velocity, and presentation values are racy.** Rune's render thread owns the analytic tracks, so `(x, v)` is always exact. |
+| Kit's motion presets (generated Rust) | `KitSpring{duration,bounce}`, `omega()/zeta()`; enter/exit pairs (`SETTLE` .3/.24, `REFLOW` .4/.32, `MORPH` .3/.16 → .27/.08, …) | Tokens are pairs. Exit springs run 10–25% shorter. |
 | psychopomp `crates/psychopomp/src/motion.rs:43-73` | `Spring::sample(initial: MotionState{position,velocity}, target, elapsed)` | Pure sampling from `(x0, v0)`. |
 | psychopomp `motion.rs:75-132` | `settling_time`: a deterministic time after which *both* error and speed stay under thresholds (envelope for ζ < 1, bisection for ζ = 1) | Precompute `settle_at` per segment, so finding idle tracks needs no sampling and no hysteresis. |
 | psychopomp `timeline.rs:143-248` | Track = list of segments (`Set`/`Spring`/`Ease`); `sample_at` picks the last segment with start ≤ t | The track data structure. |
@@ -353,7 +353,7 @@ fn deleting_a_row_slides_siblings_and_exits_in_place() {
   `CASpringAnimation(perceptualDuration:bounce:)` arrived in iOS 17
   ([docs](https://developer.apple.com/documentation/quartzcore/caspringanimation/init(perceptualduration:bounce:))).
   *Steal:* the off-main render thread, model/presentation split, atomic transactions. *Avoid:* no
-  velocity readback (Flit's workaround above), no determinism, Apple-only.
+  velocity readback (the launcher's workaround above), no determinism, Apple-only.
 - **Compose `Animatable`.** `animateTo(target, spec, initialVelocity = velocity)` cancels the running
   animation and continues from its current value and velocity. `animateDecay` handles flings
   ([docs](https://developer.android.com/develop/ui/compose/animation/value-based#animatable)). Deferred
@@ -364,7 +364,7 @@ fn deleting_a_row_slides_siblings_and_exits_in_place() {
   mode="popLayout"` lets exits leave layout flow, and `LayoutGroup` coordinates siblings
   ([layout docs](https://motion.dev/docs/react-layout-animations)). It computes deltas in a
   projection tree so nested elements don't drift. Note that Motion's `visualDuration` = SwiftUI
-  duration / 1.2 (kit-motion skill). *Steal:* popLayout, layoutId, projection to keep paths
+  duration / 1.2 (Kit's motion rules). *Steal:* popLayout, layoutId, projection to keep paths
   straight. *Avoid:* scale-based FLIP, which distorts text and needs corrections. Rune draws
   shapes parametrically instead.
 - **Flutter.** `AnimationController` ticks on the UI (now main) thread with `Simulation`s
@@ -402,13 +402,13 @@ v(t) is the analytic derivative (SpringSolver.swift:168-200).
 ```
 
 - **Units:** velocity is property units per second (pt/s, opacity/s). It's normalized only when a
-  CA mirror needs it (Flit `core.rs:2441-2454`).
+  CA mirror needs it (the launcher `core.rs:2441-2454`).
 - **Settling:** each segment stores `settle_at = t0 + settling_time(x0, v0, T, ε_pos, ε_vel)` using
   psychopomp's bound (`motion.rs:75-132`). `ε_pos` comes from the property class and is set *below the
   snap quantum*: 1/128 device px for geometry, 1/512 for opacity, 1/64 px for blur. So the final snap
   to `T` is invisible. After `settle_at` the track returns exactly `(T, 0)` and is retired.
 - **Conversions** at the boundaries: psychopomp's `SpringPlan::visual` multiplies duration by 1.2,
-  and Motion divides by 1.2 (kit-motion skill; `kit-motion.json` header). Rune stores
+  and Motion divides by 1.2 (Kit's motion rules and presets). Rune stores
   `(duration, bounce)` and exports ω and ζ.
 - **Other curves**, as segment kinds that sample analytically:
   - `Decay{k}` (fling, scroll inertia): `x = x0 + v0/k · (1 − e^{−kt})`, `v = v0 e^{−kt}`.
@@ -571,7 +571,7 @@ fn retarget(track: &mut Track, at: f64, target: f32, curve: Curve, vel: Velocity
   exact frame.
 - Changing a token while tracks are live retargets every live track using that token, at the
   current frame, to the same target with the new ω and ζ. Live tuning is therefore smooth.
-- Reversing mid-flight keeps velocity. There's no snap back to the start (kit-motion checklist).
+- Reversing mid-flight keeps velocity. There's no snap back to the start (Kit's motion checklist).
 
 ### 2.7 Layout animation with the layout engine (FLIP done natively)
 
@@ -611,14 +611,14 @@ for node in layout.changed_nodes():                      // frames in parent spa
     scaled.
   - `Resize::Mask{feather}` (default for clipping containers): children are laid out at the target
     and revealed by a soft-edged mask that follows the presented rect (OpenCode's `TopAnchoredRow`,
-    kit-motion patterns #6; Flit's "static final-layout render").
+    Kit's motion patterns #6; the launcher's "static final-layout render").
   - `Resize::Scale`: FLIP scale for media and thumbnails only.
   - `Resize::Relayout`: re-runs layout per frame with interpolated constraints on the main thread.
     Opt-in only, for text that must reflow. The inspector flags it as main-thread-per-frame.
 - **Siblings sliding into gaps** need nothing extra. When the removed row leaves flow (popLayout),
   the siblings' targets change, so their edges animate on the transaction's spring (`REFLOW`).
 - **Row growth** (streamed text, images loading): a `.growth(Growth::capped(max_speed, max_accel))`
-  policy implements OpenCode's `RowGrowth`/`GrowthRide` (kit-motion patterns #5). It caps speed per
+  policy implements OpenCode's `RowGrowth`/`GrowthRide` (Kit's motion patterns #5). It caps speed per
   frame and cuts immediately on catch-up bursts.
 
 ### 2.8 Presence (exits that stay mounted, identity by key)
@@ -655,10 +655,10 @@ The main-thread node phase is `Present | Exiting{gen}`.
   space, and animate to B's layout target. A hides instantly. While in flight, B is drawn in a
   **flight layer** at the transaction's common ancestor, so it isn't clipped by a scroll container it
   is leaving. Its own soft masks still apply (z-order is an open question).
-- `.morph(ns, id)` — **one shape** (Kit rule 9, Liquid Glass `matchedGeometry`, kit-motion patterns
+- `.morph(ns, id)` — **one shape** (Kit rule 9, Liquid Glass `matchedGeometry`, Kit's motion patterns
   #9). The *surface* (rect, radius, fill or glass) is a single primitive that interpolates from A's
   presented shape to B's. A's content fades out with blur, riding the surface, and B's content fades
-  in on a short lead. Width leads through the X-axis spring (Flit morph: `width_vd = 0.78·vd`,
+  in on a short lead. Width leads through the X-axis spring (launcher morph: `width_vd = 0.78·vd`,
   `docs/motion.md:47-50`).
 - Under reduced motion both become a .15–.2 s crossfade in place (Apple's `.materialize` analogue).
 
@@ -711,7 +711,7 @@ non-blocking `on_scroll` events.
 
 Every scroll viewport gets soft edge masks: 24 pt by default on edges where content overflows. The
 mask strength is `min(1, overflow/feather)`, so it ramps in instead of popping (Kit rule 11). The
-mask is attached to the viewport, not the content (kit-motion "edge travel"). Scrolling runs on the
+mask is attached to the viewport, not the content (Kit's "edge travel" rule). Scrolling runs on the
 render thread, so checkerboarding is possible. The mitigations are an overscan sized to the current
 scroll velocity and a placeholder skeleton (hard problem 3).
 
@@ -722,7 +722,7 @@ The runtime applies it per property class, so authors can't forget it:
 | Class | Under Reduce Motion |
 | --- | --- |
 | Spatial (edges, translate, scale, rotation, layout animation, matched flights, programmatic scroll) | `Set` (no travel) |
-| Opacity, presence enter/exit | Opacity-only `Tween` of .15–.2 s (token `motion::REDUCED_FADE`; OpenCode `reducedFade` .20, `MotionConstants.swift:33-37`; Flit 75 ms, `docs/motion.md:78`) |
+| Opacity, presence enter/exit | Opacity-only `Tween` of .15–.2 s (token `motion::REDUCED_FADE`; OpenCode `reducedFade` .20, `MotionConstants.swift:33-37`; the launcher 75 ms, `docs/motion.md:78`) |
 | Blur | 0 (and the filter is never attached) |
 | Morph | Crossfade in place |
 | User's hand (drag, fling inertia, trackpad momentum) | Unchanged: it's the user's own motion |
@@ -735,7 +735,7 @@ animator scale). Tests can override it: `TestApp::reduce_motion(true)`.
 
 This runs as the last step on the render thread, in device pixels. For axis-aligned world transforms,
 `x0 = grid(left)` and `x1 = grid(right)`, and width is *derived* as `x1 − x0`, where
-`grid(v) = round(v·64)/64` (kit-motion patterns #3; Signal desk v3 `autocomplete.js`). With
+`grid(v) = round(v·64)/64` (Kit's motion patterns #3; Signal desk v3 `autocomplete.js`). With
 rotation or non-uniform scale, only the translation is snapped.
 
 At rest, layout has already rounded both edges to device pixels using the same cumulative two-edge
@@ -753,7 +753,7 @@ thresholds sit below the quantum (§2.3).
   - panels and cards clipping children: a 16 pt inner fade on the clipping side;
   - rounded corners: an anti-aliased SDF, so no stair-steps.
 - **Hard clips** need an explicit `.clip_hard(reason)`. The inspector and the trace (`flags.clipped`
-  plus the `vis` rect) let motion-lint flag unmasked cuts. Every clipping ancestor and axis is
+  plus the `vis` rect) let the internal motion linter flag unmasked cuts. Every clipping ancestor and axis is
   checked, matching the skill's audit rule.
 - **Group isolation.** When a masked subtree has overlapping translucent children, it's rendered to
   an offscreen layer, which the renderer can do automatically (renderer doc).
@@ -766,7 +766,7 @@ thresholds sit below the quantum (§2.3).
   - persistent and sliding content stays sharp.
 - **Blur cost.** Blur is a filter on an offscreen layer (dual-Kawase at reduced resolution, radius
   ≤ 8 px). It's attached when a blur track becomes non-zero and detached when it *settles* at 0.
-  On exit it stays until unmount. Resting UI pays no blur cost (Flit removes `CAFilter`s at rest,
+  On exit it stays until unmount. Resting UI pays no blur cost (the launcher removes `CAFilter`s at rest,
   `docs/motion.md:43`; `PresenceGate.swift:92-97`).
 
 ### 2.16 One clock, time scaling and deterministic stepping
@@ -784,16 +784,16 @@ impl Clock {
 ```
 
 - **Every** consumer reads τ: tracks, scroll simulations, presence timing, trace `t` and `sc`. Slow
-  motion is truthful only when every clock scales together (kit-motion patterns #12). If a CA mirror
+  motion is truthful only when every clock scales together (Kit's motion patterns #12). If a CA mirror
   is used, its `layer.speed` and `timeOffset` get re-anchored in the same step.
 - Frames are sampled at the display link's **target presentation timestamp**
   (`CAMetalDisplayLink`/`CADisplayLink.targetTimestamp`; `MotionDisplayLink.swift:62-68`). Tracks
   sample absolute time, so a hitch lands motion where it should be, which is CA's behaviour.
-  Eye-tracked flights can opt into a dt clamp (kit-motion patterns #1).
+  Eye-tracked flights can opt into a dt clamp (Kit's motion patterns #1).
 - `Manual{hz}`: `app.advance(ms(500))` steps exact frames, `app.settle()` runs until there are no
   active tracks, and `app.frame()` steps one frame.
 
-### 2.17 motion-lint traces
+### 2.17 motion traces
 
 Turn it on with `RUNE_MOTION_TRACE=<file>`, mirroring `SCRAWL_MOTION_TRACE`
 (`scrawl/src/ui/motion.rs:551-561`). When it's off it costs one `OnceLock` read. In tests,
@@ -812,15 +812,15 @@ records **exactly what was presented**: post-snap and post-mask.
  "cm":[{"id":1,"name":"scroll:inbox","kind":"position"}],"c":[[1,840.5]]}
 ```
 
-- **Flags** use motion-lint's bits (`analyze.ts:41-43`): animated 1, ancestorAnimated 2, scrolling 4,
+- **Flags** use the motion linter's bits (`analyze.ts:41-43`): animated 1, ancestorAnimated 2, scrolling 4,
   clipped 8, filtered 16, occluded 32. Intent classes are packed at `<<8` (own) and `<<16`
   (ancestor): position 1, size 2, opacity 4, shape 8, transition 16, reveal 32, contents 64.
-  Rune sets them from the actual track kinds, so motion-lint's "was this intended?" logic gets the
+  Rune sets them from the actual track kinds, so the motion linter's "was this intended?" logic gets the
   truth instead of a guess.
 - **Events** carry the commit id, origin, token name and retarget velocities. Channels carry scroll
   offsets and, optionally, per-track progress.
 - **Scrubbing.** The runtime can also emit a *sweep*: sample a recorded commit sequence at any τ
-  without running the app. Tracks are pure, which gives motion-lint's `sweepClock` the same power
+  without running the app. Tracks are pure, which gives the motion linter's `sweepClock` the same power
   natively.
 - **In-process invariants in debug builds.** "Unmount at opacity > 0" is impossible by construction.
   Warnings fire for a visible `Set` of a spatial prop whose origin isn't Direct (a likely pop), a
@@ -828,8 +828,8 @@ records **exactly what was presented**: post-snap and post-mask.
 
 ### 2.18 Live tuning and tokens
 
-- `motion::*` constants are *token ids* whose defaults are generated from `kit-motion.json`
-  (`kit_motion.rs` today). The render thread resolves tokens through a `TokenTable`.
+- `motion::*` constants are *token ids* whose defaults are generated from Kit's motion presets
+  (generated Rust today). The render thread resolves tokens through a `TokenTable`.
 - Debug builds watch `~/.config/<app>/tune.json` (Scrawl's loop, `motion.rs:316-360`) and accept a
   knobs remote over WebSocket. A change retargets live tracks (§2.6).
 - `rune tune rust` prints the paste-back for the token defaults (`scrawl tune rust`,
@@ -877,9 +877,9 @@ cx.presented(key!("thread", 3)) -> Option<PresentedRect>  // untracked snapshot
 - Flutter: the `Simulation` trait, scroll physics constants and velocity trackers.
 - Rive: a transition table keyed by (from, to) phases.
 - psychopomp: pure piecewise tracks, `settling_time`, transactional retargets.
-- OpenCode iOS: `PresenceGate` generations, blur gating, one display link through `AnimationTimeScale`.
+- The private iOS client: `PresenceGate` generations, blur gating, one display link through `AnimationTimeScale`.
 - Scrawl: the clock, live tuning and the trace writer.
-- Flit: final-layout-once plus animated geometry, and per-axis "width leads" springs.
+- The launcher: final-layout-once plus animated geometry, and per-axis "width leads" springs.
 - Xilem: handlers that receive `&mut State`.
 - GPUI: `Model` entities as the hot-reload unit, and the `list` sum tree.
 - Taffy: two-edge cumulative rounding.
@@ -909,7 +909,7 @@ cx.presented(key!("thread", 3)) -> Option<PresentedRect>  // untracked snapshot
   property, transactional commits with presentation-time `apply_at`, sample-and-restart retargeting,
   edge-based layout animation, generation-guarded presence, render-thread scroll and drag bindings
   with a decay bridge on release, runtime-enforced reduced motion, two-edge snapping, soft masks by
-  default, one scalable or manual clock, and native motion-lint traces.
+  default, one scalable or manual clock, and native motion traces.
 
 **Rejected alternatives:**
 
@@ -948,7 +948,7 @@ cx.presented(key!("thread", 3)) -> Option<PresentedRect>  // untracked snapshot
 7. **Determinism.** Cross-platform float math (deterministic `libm`), the order of commit
    application against forwarded input in tests, and time-scaling CA mirrors in lockstep.
 8. **System materials (Liquid Glass) in lockstep with Rune's Metal layer.** Either mirror tracks
-   into `CASpringAnimation`s evaluated with identical math (Flit `eval_ca_spring_spec_at`), or drive
+   into `CASpringAnimation`s evaluated with identical math (the launcher `eval_ca_spring_spec_at`), or drive
    CA every frame from the render thread with actions disabled (Scrawl's fixed `NSPanel` plus single
    `CATransaction`). Both have a one-frame-skew risk.
 9. **Blur and mask cost at scale.** Offscreen passes per blurred or isolated group, and many
@@ -969,13 +969,13 @@ cx.presented(key!("thread", 3)) -> Option<PresentedRect>  // untracked snapshot
 2. Field-level read tracking (`@Observable`-style derive) in v1, or model-level only?
 3. Does the renderer re-encode the whole scene every frame (Vello-style) or cache layer textures?
    This sets the render-thread budget. Coordinate with the renderer doc.
-4. Port motion-lint's core rules to Rust for in-process `trace.assert_clean()`, or shell out to the
+4. Port the motion linter's core rules to Rust for in-process `trace.assert_clean()`, or shell out to the
    TS CLI?
 5. The default list presence: `pop` (siblings close the gap immediately, while the exit plays) or
    `hold` (the gap closes as the exit plays)? Kit's "siblings slide into the gap" works with both.
-   Needs a Chooser A/B.
+   Needs a blind A/B.
 6. Confirm the semantic token names (`snap`, `settle`, `reflow`, `glide`, `morph`, `pop`, `drift`)
-   proposed in motion-presets. The kit-motion skill still treats the old palette as the reference.
+   proposed in Kit's motion presets. Kit's motion rules still treats the old palette as the reference.
 7. Should `Origin::Direct` include keyboard selection moves? The skill says keys apply 1:1, but a
    selection *highlight* gliding on `SNAP` is often wanted. Probably the highlight animates and the
    content doesn't.

@@ -23,7 +23,7 @@ Slint.
 | GPU | wgpu on every platform first (one backend ships Mac, Windows, Linux and web); a raw Metal backend later only where a measured need shows up (live-resize sync, IOSurface video), via wgpu-hal escape hatches first | Raw Metal first, Vulkan/D3D12 by hand |
 | Renderer | One instanced "uber-quad" SDF pass + glyph atlas + Slug for big/animated text and icons + `vello_gpu` sparse strips for complex vectors; soft-edge masks in-shader on every clip | Full compute Vello, Skia, MSAA path textures |
 | Look | Unbranded core with a token-driven theming system (semantic tokens, themes with light/dark, runtime switching, codegen); the same look on every platform. OpenCode's theme (from `@opencode/ui`) is the first theme and the main example, kept outside the core | A theme baked into the framework; per-OS native look; Liquid Glass as the base (it's an optional Apple extra) |
-| Text | Parley + HarfRust + skrifa + fontique, GPUI-style two-tier line cache, gpui-fork glyph dilation | CoreText-only, cosmic-text |
+| Text | Parley + HarfRust + skrifa + fontique, GPUI-style two-tier line cache, kitlangton/gpui glyph dilation | CoreText-only, cosmic-text |
 | Text editing / IME | Zed's `sum_tree` + rope; each platform's own text protocol, implemented directly (`NSTextInputClient`, `UITextInput`, …) | winit's IME, a hidden native text field |
 | Layout | Taffy (flex, grid, block) on Rune's own node arena, plus a sum-tree height index for huge lists | Own layout engine, SwiftUI-style proposals |
 | State | Keyed retained tree rebuilt from plain view functions; typed models; reads subscribe; handlers queued with `&mut` | Signals, GPUI entities, immediate mode |
@@ -45,7 +45,7 @@ A docs/marketing site comes first to explain it.
 ## 1. Why build this at all
 
 Kit has rebuilt the same small surfaces three times in ten days:
-the Scrawl pill went GPUI → hand-written Metal → SwiftUI helper process, Flit's launcher went GPUI → SwiftUI with a
+the Scrawl pill went GPUI → hand-written Metal → SwiftUI helper process, the launcher app went GPUI → SwiftUI with a
 Core Animation glass morph, and Hex's native branch stalled because Hex also ships on Windows and Linux. Each time,
 the reasons were the same:
 
@@ -69,7 +69,7 @@ Kit's fork) under its Apache-2.0 licence.
 ## 2. Tenets
 
 1. **Feel is the product.** 120 Hz, interruptible springs, nothing pops, jumps or hard-clips. Kit's motion rules
-   (the `kit-motion` skill) are runtime defaults, not discipline.
+   (Kit's motion rules) are runtime defaults, not discipline.
 2. **Animation never runs through app code.** Views state targets; the render thread animates.
 3. **Everything observable.** Every frame, node, layout rect, spring and timing can be queried, traced and replayed.
    The agent's view of the app is the same tree as accessibility's.
@@ -173,7 +173,7 @@ rounded clips **and soft gradient edges per side for free**, so "no hard edges" 
 | `NativeSurface` | zero-copy video and camera frames |
 
 Plus: offscreen layers only when needed (group opacity with blur, cached complex subtrees), dirty-rect scissoring
-for idle-ish frames, linear-light blending, Display P3, and dithering on every gradient and shadow (Kit's gpui-fork
+for idle-ish frames, linear-light blending, Display P3, and dithering on every gradient and shadow (Kit's GPUI fork (`kitlangton/gpui`)
 fixes, now partly upstream).
 
 **Frame pacing and latency.** `CADisplayLink` with `preferredFrameRateRange` up to 120 while anything animates, zero
@@ -190,7 +190,7 @@ Rune can't draw Liquid Glass: the shaders that sample behind the window live in 
 shell composes **native underlays and overlays** with Rune's Metal layer: a system glass view sits behind a
 transparent region of the Metal layer, and its shape is driven by a mask layer that the render thread updates in the
 same `CATransaction` as the drawable (`presentsWithTransaction`). This is how Scrawl's Metal pill already hosts
-`NSGlassEffectView`, and Flit's CA glass recipe is the fallback material backend
+`NSGlassEffectView`, and the launcher's CA glass recipe is the fallback material backend
 ([11 §2](research/11-platform-shells.md)). Popovers, HUDs and pills use a
 fixed, transparent, max-size surface with shape hit-testing, never per-frame window resizes.
 
@@ -204,7 +204,7 @@ measures whether a glass underlay can track a Rune-animated shape at 120 Hz with
 - **Layout:** Parley for bidi, line breaking, rich text and inline boxes, wrapped in GPUI's two-tier cache (shaped
   runs separate from wrap points), so resizing a container never re-shapes text
   ([05](research/05-text-ime-a11y-layout.md)). Overflow is a soft fade mask by default, never an ellipsis.
-- **Rasterizing:** greyscale atlas, 4× horizontal subpixel positioning, and the gpui-fork luminance glyph dilation
+- **Rasterizing:** greyscale atlas, 4× horizontal subpixel positioning, and the kitlangton/gpui luminance glyph dilation
   that fixed "thin text" by matching macOS font smoothing. Text under a scale animation switches to Slug outlines so
   springs never re-rasterize glyphs every frame.
 - **Quality bar:** a side-by-side diff against CoreText on the same strings (spike S5). If Rune text doesn't match
@@ -259,8 +259,8 @@ fine for tools, wrong for feel).
 ### 4.9 Animation, a first-class primitive
 
 - **Springs** are `Spring::new(duration, bounce)` with ω = 2π/duration and ζ = 1 − bounce, exactly SwiftUI's
-  parameterisation (Flit's convention differs by ~20%; Rune standardises). Default tokens come from
-  `motion-presets/presets/kit-motion.json`.
+  parameterisation (the launcher's convention differs by ~20%; Rune standardises). Default tokens come from
+  Kit's motion presets.
 - **Every property is a track** of analytic segments `{t0, x0, v0, target, spring}`: position and velocity are exact
   at any time, so retargeting samples `(x, v)` at the presentation time and starts a new segment. This is
   Psychopomp's model generalised.
@@ -276,7 +276,7 @@ fine for tools, wrong for feel).
   travel for a short fade per property class, blur only on things entering or leaving in place, soft masks on every
   clip.
 - **One clock** with time scale (slow-mo), pause and manual stepping, shared by tests, traces and the inspector. The
-  render thread emits motion-lint JSONL natively, with exact "this was animated on purpose" flags.
+  render thread emits motion-trace JSONL natively, with exact "this was animated on purpose" flags.
 
 ## 5. Hot reload
 
@@ -344,7 +344,7 @@ Agents need to build UI, look at it, and prove it works without a person. Built 
   tokens, per-phase timings, and input injection with exact timestamps.
 - **Time control:** pause, step, scale, seek. `settle` with a deadline that lists what's still pending, instead of
   "wait until idle".
-- **Traces:** motion-lint JSONL from the render thread (no recorder needed), layout-lint rules ported to the layout
+- **Traces:** motion-trace JSONL from the render thread (no recorder needed), the internal layout linter's rules ported to the layout
   tree, Perfetto/Tracy spans per phase, presented-frame ids.
 - **Tuning:** every `Tunable` publishes knobs `ControlDescriptor`s; the knobs panel drives Mac or iPhone; "copy as
   code" emits Rust constants.
@@ -357,7 +357,7 @@ The CLI, sketched:
 mk run [--device iphone] [--split]      # app with hot reload; --split = split-process dev mode on the phone
 mk scenes / mk snap <scene> [--at 0.25s] # list scenes; render one to PNG + tree JSON, deterministic
 mk inspect <query>                       # e.g. mk inspect 'role=button text~"Stop"' → rects, source, springs
-mk trace <scene> --script tap.json       # motion-lint JSONL + frame timings; mk lint runs motion/layout rules
+mk trace <scene> --script tap.json       # motion-trace JSONL + frame timings; mk lint runs motion/layout rules
 mk tune                                  # open the knobs panel for the running app
 mk bench <workload>                      # the perf workloads in §8, with machine manifest
 ```
@@ -367,18 +367,18 @@ mk bench <workload>                      # the perf workloads in §8, with machi
 Things few UI libraries promise, which owning the whole stack and a deterministic clock make possible. Each one is
 checked automatically, not by eye.
 
-**Motion you can prove is smooth (the kit-motion toolkit, built in).** Everything the `kit-motion` skill does today
+**Motion you can prove is smooth (Kit's motion toolkit, built in).** Everything Kit's motion tooling does today
 with external recorders becomes part of the runtime, because Rune owns every presented value on every frame:
 
-- motion-lint's rules (pop-in/out, opacity/size/shape snaps, jumps, reversals, jitter, clip snaps, overlaps,
+- The motion linter's rules (pop-in/out, opacity/size/shape snaps, jumps, reversals, jitter, clip snaps, overlaps,
   flicker, hitches, fade cutoffs, stop-dead, velocity snaps) run live in debug builds, every frame, with the node, its
   spring token and the source `file:line` in the finding; in tests they are hard failures.
 - Animated properties can only change through tracks, so a one-frame jump can't be written; a node can't unmount at
   opacity > 0; persistent items can't blur; stationary edges are two-edge snapped to 1/64 px.
-- A MotionXRay-style overlay (the OpenCode iOS idea): live presented rects, velocities, active springs and their
+- A motion-inspector overlay (an idea from a private iOS client): live presented rects, velocities, active springs and their
   tokens, intent flags, hitch markers, drawn over the app; toggled by a key or the inspector.
-- Render-time slow motion and frame stepping (true time scale, not stretched video), plus `rune trace` → motion-lint
-  JSONL, frame strips and slowed before/after clips (`motion-lint compare-clips`) produced from deterministic
+- Render-time slow motion and frame stepping (true time scale, not stretched video), plus `rune trace` → motion-trace
+  JSONL, frame strips and slowed before/after clips produced from deterministic
   replays, so a fix is shown with evidence before Kit looks.
 - Every hitch is charged to the named interval and node that caused it (HitchProbe-style), with the phase
   (view, layout, shaping, encode, GPU) that ran long.
@@ -391,7 +391,7 @@ with external recorders becomes part of the runtime, because Rune owns every pre
 | **No dropped frames by budget.** Each scene's cost (instances, glyphs, layout nodes, shaping, allocations) is counted exactly; CI fails if a scene exceeds the 8.33 ms budget model for the reference device. | Exact counters, bisectable; wall-clock confirmation on reserved hardware. |
 | **Zero cost at rest.** No ticks, no GPU submissions, no wake-ups once settled. | Counters over a 10 s idle sample. |
 | **Real contrast.** Text contrast is checked against the actual composited pixels behind each glyph (after blur and glass), in every theme. | Per-scene accessibility pass. |
-| **No clipped text, any locale or size.** Every scene is fuzzed across window sizes, text scale, long German, RTL, CJK, light/dark; fails on overflow, overlap, hard clips, tap targets < 44 pt, off-spine alignment (layout-lint rules). | Scene fuzzing in CI. |
+| **No clipped text, any locale or size.** Every scene is fuzzed across window sizes, text scale, long German, RTL, CJK, light/dark; fails on overflow, overlap, hard clips, tap targets < 44 pt, off-spine alignment (layout-linter rules). | Scene fuzzing in CI. |
 | **Every pixel traces to code.** Any pixel → node → `file:line` → commit; screenshot diffs explain themselves. | Inspector query; PR visual diffs. |
 | **Bug reports are replays.** Sessions record inputs and timing (KB, not video) and replay to identical pixels; Scrawl attaches one. | Replay determinism test on every change. |
 | **Same pixels on every platform** for the canonical lane, from a CPU reference renderer that the GPU path is diffed against. | Differential renderer tests. |
@@ -460,7 +460,7 @@ but Kit wants it as an effect, and Rune can do it better than anyone because eve
 interval (sample count scaled by on-screen speed, zero cost at rest) and accumulates them, instead of guessing from
 velocity; a cheap directional blur along the analytic velocity is the fallback for big surfaces. Shutter angle is a
 motion token and a knob, so Kit tunes it live (and can say where it belongs: flings, page/camera moves, flights like
-the timeline's send flight). Kit-motion's "persistent items never blur" rule is about Gaussian blur during reorders;
+the timeline's send flight). Kit's "persistent items never blur" rule is about Gaussian blur during reorders;
 motion blur is a separate, opt-in effect that Kit judges by eye. Same family, all spikes: liquid-glass lensing, glow
 that cools rather than cuts, feathered streaming-text reveal (from Desktop's timeline-motion branch), soft edge masks
 everywhere.
@@ -485,7 +485,7 @@ Rune ships a design system, not just primitives:
   (`themes/opencode` or an example): generated from `@opencode/ui`'s theme (`packages/ui/src/theme`:
   `desktop-theme.schema.json`, 36 themes with seed colours; the `--v2-*` semantic tokens in `styles/tokens/`), the
   same source that feeds Tailwind on the web. The pipeline's output should be a Rune theme,
-  not changes to Rune. Motion tokens default to `motion-presets`.
+  not changes to Rune. Motion tokens default to Kit's motion presets.
 - **Components are generic and themable.** The OpenCode example kit can mirror `@opencode/ui`'s names and variants
   (card, list, popover, context-menu, hover-card, text-field, collapsible, scroll-view, …) so screens port from the
   Solid app by name, and its screenshot tests diff each component against its web story.
@@ -511,7 +511,7 @@ never a developer's desk display). CI runs deterministic correctness on every ch
 | Physical key → photon (Mac, photodiode rig) | p95 ≤ 35 ms, compared against native AppKit on the same rig |
 | App-side work while one value animates | zero (no view, layout or diff) |
 | 1,000 spring-animated quads at 120 Hz, Mac and iPhone | CPU p95 ≤ 4 ms, GPU p95 ≤ 4 ms, < 0.1% missed presents |
-| Effects scene (Flit/Scrawl glass morph, blur, masks, shadows) | same budget |
+| Effects scene (Scrawl and launcher glass morph, blur, masks, shadows) | same budget |
 | 1M-row list (fixed and variable height) | list CPU p95 ≤ 1 ms / 2 ms, first viewport ≤ 100 ms, ≤ 200 realized rows |
 | 100 MB text file (Mac) | first usable viewport p95 ≤ 250 ms, peak extra memory ≤ 2.5× file size |
 | At rest | zero animation ticks and zero GPU submissions |
@@ -561,7 +561,7 @@ by Kit on a real window.
 
 **M1 — Theming, gallery, docs site (now).** Rune's token
 schema and theme system, with the OpenCode theme generated from `@opencode/ui` as its first consumer; core tree, Taffy, springs and presence, wgpu renderer (`UberQuad` + atlas text with
-dilation), winit window, scenes, `--snap` headless goldens, inspector, motion-lint traces, knobs. A gallery of the
+dilation), winit window, scenes, `--snap` headless goldens, inspector, motion traces, knobs. A gallery of the
 first components with the same names as the web kit, each diffed against its web story. A docs/marketing site that
 explains Rune with headless-rendered stills first and live WebGPU demos once the web build works. The settings demo
 being built now is the seed.
@@ -580,20 +580,20 @@ in the composer. Not every feature, just enough to use it. Rules: agents buildin
 GETs and never send prompts or create sessions on the live server (never `GET /api/experimental/session/stats`);
 goldens and committed fixtures are synthetic, never real session content; screenshots of real sessions stay local.
 
-**M4 — Kit's Mac surfaces.** Scrawl pill (zero motion-lint findings, no more dropped frames than the Metal pill, Kit
-picks it blind), Flit tray and launcher, Scrawl review/Settings. Optional Liquid Glass underlays here (spike S2).
+**M4 — Kit's Mac surfaces.** Scrawl pill (zero motion-linter findings, no more dropped frames than the Metal pill, Kit
+picks it blind), the launcher's tray and panel, Scrawl review/Settings. Optional Liquid Glass underlays here (spike S2).
 
 **M5 — Web.** The same app in the browser over WebGPU (docs site demos, knobs, gpu-gallery).
 
 **M6 — iOS.** iOS shell, `UITextInput`, `RuneView` for embedding in SwiftUI, split-process dev mode; first surface
-embedded in OpenCode iOS. **M7 — Android.**
+embedded in the private iOS client. **M7 — Android.**
 
 ## 11. Where Rune fits at Anomaly
 
 One native stack for every Anomaly product, themed with OpenCode's design language (as a theme, not baked in). OpenCode Desktop is the flagship
 test: recreate it and raise the bar, so every app built on Rune inherits that quality, the way Zed built GPUI for Zed
 (but with the compositing, animation and text Zed's lacks). Hex Settings is the first real screen, then Hex, Scrawl
-and Flit, then OpenCode iOS one embedded surface at a time. Psychopomp should share Rune's spring, timeline and text
+and the launcher, then the private iOS client one embedded surface at a time. Psychopomp should share Rune's spring, timeline and text
 primitives rather than duplicate them. Because agents write Rune apps against scenes, an inspector and
 deterministic goldens, it fits "build infinite software": every new app starts with the design language, motion and
 verification harness already in place.
@@ -601,7 +601,7 @@ verification harness already in place.
 ## 12. Open questions
 
 1. App side on the platform main thread (default) or its own thread? Needs S3's latency numbers.
-2. How far to lean on Core Animation for simple transform/opacity animations (Flit's "promote to render server") vs
+2. How far to lean on Core Animation for simple transform/opacity animations (the launcher's "promote to render server") vs
    always animating on our own render thread.
 3. Glass morphing on iOS needs SwiftUI: host a tiny SwiftUI glass container per morph, or accept static glass shapes
    with our own morph on top?

@@ -100,7 +100,7 @@ paper/post, not re-verified now, treat numbers as approximate.
 - What it does: failures are *spatial and structural*, which is exactly what exact layout lint can catch without a vision
   model. A visual critique by a model is the second pass, not the first.
 - Rune use: the PLAN §6 tools already are this. Make it one command an agent runs after every edit: `rune check <scene>` =
-  compile + render scene + layout-lint (overflow, overlap, tap target < 44, off-grid, contrast) + motion-lint on a scripted
+  compile + render scene + the internal layout linter (overflow, overlap, tap target < 44, off-grid, contrast) + the internal motion linter on a scripted
   interaction + tree diff vs golden, and print **findings as fixes keyed to source locations** ("`Row` at inbox.rs:88 is 312
   pt wide in a 290 pt parent; set `.fill()` or wrap in `Scroll`"). Return a marked screenshot only when lint passes or the
   agent asks. One structured result, small text, hot-reload speed (<1 s). This is what turns first-try into
@@ -220,12 +220,12 @@ paper/post, not re-verified now, treat numbers as approximate.
   enter/exit/layout behavior from theme tokens (bounce 0 default, duration-based), identity from `id`, so streaming in a new
   card, reordering a list, or the model rewriting the whole surface all animate correctly with no motion authored by the model.
   Progressive rendering becomes a feature: A2UI-style streamed `updateComponents` inserts nodes that **fade/scale in with presence
-  tracks while text streams**, and layout animates as siblings arrive. The motion-lint rules (pop, jump, reflow) run on
+  tracks while text streams**, and layout animates as siblings arrive. The internal motion linter's rules (pop, jump, reflow) run on
   surfaces too, so you can **prove** a streaming surface never jumps.
 - Specific risk: streaming makes *layout churn* (content height grows token by token). Policy: reserve space (skeleton
   placeholders by component default size), apply layout edge tracks with the standard spring, never animate every token; text
-  grows with a soft trailing mask rather than reflowing the box each token (precedent: the OpenCode iOS streaming text).
-- Verdict: **adopt now**, as a test scene: "stream a 40-component surface at 30 tokens/s, motion-lint must be clean."
+  grows with a soft trailing mask rather than reflowing the box each token (precedent: the private iOS client's streaming text).
+- Verdict: **adopt now**, as a test scene: "stream a 40-component surface at 30 tokens/s, the internal motion linter must be clean."
 
 ### 14. Rune-Bench: our own eval of first-try correctness  → **adopt now (small)**
 - Why: no public benchmark measures LLM first-try correctness for a new Rust UI framework or catalog. Closest: DesignBench
@@ -295,7 +295,7 @@ paper/post, not re-verified now, treat numbers as approximate.
 3. `rune check` single-command verify loop with fix-oriented findings (5).
 4. Rune-Bench v0 with 30 scenes (14).
 5. Surface lane: patch protocol, validator, budgets, provenance chrome, fuzzer; A2UI adapter (1, 11, 12).
-6. Streaming-surface motion scene under motion-lint (13).
+6. Streaming-surface motion scene under the internal motion linter (13).
 7. Spike: Rune MCP Apps profile in OpenCode Desktop (8). Later: WASM plugin lane.
 
 ## Open questions
