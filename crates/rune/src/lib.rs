@@ -91,6 +91,7 @@ pub mod image;
 pub mod hot;
 pub mod render;
 mod record;
+mod headless_run;
 mod surface_alpha;
 pub mod native_surface;
 pub mod runtime;

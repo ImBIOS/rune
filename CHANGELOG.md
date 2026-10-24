@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Apps can read the headless run.** `rune::tooling::headless_run()` returns the run's script
+  path, its expanded events with their times, `--scale`, `--fps`, the viewport, `--start`, the
+  frames it writes and its last frame's time, from `init` on. It is None in a window.
 - **Headless runs can write a finished video.** `--video out.mp4` (`.mov` for ProRes 4444,
   `.webm` for VP9) streams raw frames into an `ffmpeg` child at `--fps` (default 60), so no
   frames touch disk; ffmpeg must be on `PATH`. Its length is `--frames N`, `--duration S`, or

@@ -15,6 +15,8 @@ use crate::render::{Gpu, OFFSCREEN_FORMAT, Offscreen, Renderer, write_png};
 use crate::runtime::{Cx, Env, Runtime, Waker};
 use crate::text::TextSystem;
 
+pub use crate::headless_run::{HeadlessRun, PointerAction, ScriptEvent, ScriptPoint, TimedEvent, headless_run};
+
 pub struct AppSpec<S: 'static> {
     pub title: &'static str,
     pub size: (f32, f32),
@@ -434,6 +436,34 @@ struct Ev {
     t: f64,
     kind: Kind,
     pos: Pos,
+}
+
+impl Ev {
+    /// The event as apps read it through `headless_run`.
+    fn public(&self) -> TimedEvent {
+        let at = || match &self.pos {
+            Pos::Xy(x, y) => ScriptPoint::At(*x, *y),
+            Pos::Key(key) => ScriptPoint::Element(key.clone()),
+            Pos::Rel(dx, dy) => ScriptPoint::FromDown(*dx, *dy),
+        };
+        let pointer = |action| ScriptEvent::Pointer { action, at: at() };
+        let event = match &self.kind {
+            Kind::Focus(focused) => ScriptEvent::Focus(*focused),
+            Kind::Menu(item) => ScriptEvent::Menu(item.clone()),
+            Kind::Physical(input) => ScriptEvent::Physical(*input),
+            Kind::Shortcut(chord) => ScriptEvent::Shortcut(chord.clone()),
+            Kind::Move => pointer(PointerAction::Move),
+            Kind::Down => pointer(PointerAction::Down),
+            Kind::Up => pointer(PointerAction::Up),
+            Kind::SecondaryDown => pointer(PointerAction::SecondaryDown),
+            Kind::SecondaryUp => pointer(PointerAction::SecondaryUp),
+            Kind::Key(key, repeat) => ScriptEvent::Key { key: key.clone(), repeat: *repeat },
+            Kind::Paste(text) => ScriptEvent::Paste(text.clone()),
+            Kind::Wheel(dy) => pointer(PointerAction::Scroll(*dy)),
+            Kind::Fling(v) => pointer(PointerAction::Fling(*v)),
+        };
+        TimedEvent { t: self.t, event }
+    }
 }
 
 fn read_script(args: &Args) -> Option<Value> {
@@ -999,11 +1029,24 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     #[cfg(all(feature = "dev", debug_assertions))]
     let dev = app.dev.take().filter(|_| std::env::var_os("RUNE_DEV_PANEL").is_some());
     let on_focus = app.on_focus;
+    let source = read_script(&args);
+    let script = source.as_ref().map(load_script).unwrap_or_default();
+    let timeline = Timeline::of(&args, &script);
+    let scale = args.scale.unwrap_or(2.0);
+    let size = args.size.unwrap_or(app.spec.size);
+    crate::headless_run::publish(crate::headless_run::HeadlessRun {
+        script: args.script.clone(),
+        events: script.iter().map(Ev::public).collect(),
+        scale,
+        fps: timeline.fps,
+        size,
+        start: timeline.start_frame as f64 * timeline.dt,
+        frames: timeline.frames,
+        end: timeline.last_frame as f64 * timeline.dt,
+    });
     let (spec, state, shared) = app.into_parts(args.scene.as_deref());
     let shortcuts = crate::shortcuts::Guard::attach(&shared, std::sync::Arc::new(|| {}), true, false);
     let mut menus = crate::native_menu::Guard::attach(&shared, true);
-    let scale = args.scale.unwrap_or(2.0);
-    let size = args.size.unwrap_or(spec.size);
     let dark = args.theme.as_deref() != Some("light");
     let state_ms = launched.elapsed().as_secs_f64() * 1000.0;
     let mut rt = runtime_for(&spec, state, size, Env::new(dark, scale), std::sync::Arc::new(|| {}));
@@ -1015,28 +1058,9 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     rt.track_marks = comp.is_some();
     let runtime_ms = launched.elapsed().as_secs_f64() * 1000.0 - state_ms;
 
-    let source = read_script(&args);
-    let script = source.as_ref().map(load_script).unwrap_or_default();
     let desktop = desktop(&args, source.as_ref());
     let mut placed = None;
-    let fps = args.fps.max(1.0);
-    let dt = 1.0 / fps;
-    let start_frame = (args.start * fps).round() as usize;
-    let script_end = script.last().map_or(0.0, |e| e.t);
-    let frames = args.frames.unwrap_or_else(|| match (args.duration, &args.video) {
-        (Some(d), _) => (d * fps).round().max(1.0) as usize,
-        (None, Some(_)) => ((script_end + 1.0 - start_frame as f64 * dt) * fps).round().max(1.0) as usize,
-        (None, None) => 0,
-    });
-    let snap_t = args.at.unwrap_or(if frames > 0 {
-        (start_frame + frames - 1) as f64 * dt
-    } else if script.is_empty() {
-        0.0
-    } else {
-        script_end + 1.0
-    });
-    let snap_frame = (snap_t * fps).round() as usize;
-    let last_frame = snap_frame.max(start_frame + frames.max(1) - 1);
+    let Timeline { fps, dt, start_frame, frames, snap_frame, last_frame } = timeline;
 
     let mut writer = crate::record::Writer::new(((size.0 * scale).round() as u32, (size.1 * scale).round() as u32));
     if let Some(path) = &args.video {
@@ -1298,6 +1322,44 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     }
 }
 
+/// Which frames a headless run renders and dumps.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Timeline {
+    fps: f64,
+    dt: f64,
+    start_frame: usize,
+    /// Frames dumped from `start_frame` (0 when nothing is dumped).
+    frames: usize,
+    snap_frame: usize,
+    last_frame: usize,
+}
+
+impl Timeline {
+    fn of(args: &Args, script: &[Ev]) -> Timeline {
+        let fps = args.fps.max(1.0);
+        let dt = 1.0 / fps;
+        let start_frame = (args.start * fps).round() as usize;
+        let script_end = script.last().map_or(0.0, |e| e.t);
+        // A video without a length runs to one second after the script, as a snapshot does.
+        let until = |t: f64| ((t * fps).round() as usize).saturating_sub(start_frame) + 1;
+        let frames = args.frames.unwrap_or_else(|| match (args.duration, &args.video) {
+            (Some(d), _) => (d * fps).round().max(1.0) as usize,
+            (None, Some(_)) => until(script_end + 1.0),
+            (None, None) => 0,
+        });
+        let snap_t = args.at.unwrap_or(if frames > 0 {
+            (start_frame + frames - 1) as f64 * dt
+        } else if script.is_empty() {
+            0.0
+        } else {
+            script_end + 1.0
+        });
+        let snap_frame = (snap_t * fps).round() as usize;
+        let last_frame = snap_frame.max(start_frame + frames.max(1) - 1);
+        Timeline { fps, dt, start_frame, frames, snap_frame, last_frame }
+    }
+}
+
 /// A frame whose pixels are being read back, and where they go.
 struct Shot {
     k: usize,
@@ -1506,8 +1568,42 @@ mod tests {
         assert!(crate::present_time::Summary::of_trace(&plain).is_none());
     }
 
+    /// Headless runs publish the process's `headless_run`, so tests that render one take turns.
+    static HEADLESS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn apps_read_the_headless_run_from_init() {
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rune-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("script.json");
+        std::fs::write(&script, r#"[{"t": 0.5, "type": "tap", "x": 4, "y": 5}, {"t": 0.25, "type": "type", "text": "hi", "every": 0.1}]"#).unwrap();
+        fn init() -> usize {
+            let run = headless_run().expect("published before init");
+            assert_eq!((run.size(), run.scale(), run.fps()), ((37.0, 23.0), 1.0, 30.0));
+            run.events().len()
+        }
+        let spec = AppSpec::new("run", (37.0, 23.0), init, |_, _| crate::el());
+        let tree = dir.join("tree.json");
+        let args = ["--script", script.to_str().unwrap(), "--scale", "1", "--fps", "30", "--tree", tree.to_str().unwrap()];
+        headless(crate::App::new(spec), Args::parse_from(args.map(String::from).into()));
+        let run = headless_run().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(run.script(), Some(script.as_path()));
+        let summary: Vec<String> = run.events().iter().map(|e| match &e.event {
+            ScriptEvent::Key { key: KeyEvent { key: Key::Text(c), .. }, repeat: false } => format!("{} key {c}", e.t),
+            ScriptEvent::Pointer { action, at } => format!("{} {action:?} {at:?}", e.t),
+            other => panic!("unexpected {other:?}"),
+        }).collect();
+        assert_eq!(summary, ["0.25 key h", "0.35 key i", "0.5 Move At(4.0, 5.0)", "0.5 Down At(4.0, 5.0)", "0.58 Up FromDown(0.0, 0.0)"]);
+        assert_eq!((run.script_end(), run.frames(), run.start()), (0.58, 0, 0.0));
+        // A tree is taken one second after the script, at the nearest frame.
+        assert!((run.end() - 47.0 / 30.0).abs() < 1e-9, "{}", run.end());
+    }
+
     #[test]
     fn video_streams_every_frame_into_ffmpeg() {
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
         if std::process::Command::new("ffprobe").arg("-version").output().is_err() {
             eprintln!("skipped: ffmpeg and ffprobe aren't installed");
             return;

@@ -896,6 +896,17 @@ $S --native --trace run.jsonl --frames 240  # native submission timestamps, then
   frame while the last one is copied out; at 1920×1200 an M-series Mac renders a few hundred
   frames a second and x264 sets the pace. `--out` PNGs share the readback and encode on worker
   threads.
+- **The app can read the run**: `rune::tooling::headless_run()` is `Some` in a headless run,
+  from `init` on, and None in a window. It gives the script path and its events as Rune feeds
+  them (`tap` expanded to move, down and up; `type` to one key per character), `scale()`,
+  `fps()`, `size()`, `start()`, `frames()` written and `end()`, the last frame's time. One run
+  serves every window of a multi-window app.
+
+  ```rust
+  if let Some(run) = rune::tooling::headless_run() {
+      let typed = run.events().iter().filter(|e| matches!(e.event, ScriptEvent::Key { .. })).count();
+  }
+  ```
 - **Timing**: every headless run prints per-frame CPU time (update, build and encode/submit, without
   readback).
 - **Startup**: `--first-pixels` emits a flushed marker after the first offscreen GPU readback.
