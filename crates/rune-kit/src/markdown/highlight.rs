@@ -243,8 +243,16 @@ fn string_end(s: &[u8], i: usize, end: usize, q: u8, multiline: bool) -> usize {
     end
 }
 
-/// The index of the bracket closing the one at `i`, skipping quoted strings, or `end`.
-fn matching(s: &[u8], i: usize, end: usize, open: u8, close: u8) -> usize {
+/// The comments [`matching`] skips: JavaScript's `//` and `/* */`, or the shell's `#`.
+#[derive(Clone, Copy, PartialEq)]
+enum Comments {
+    Js,
+    Shell,
+}
+
+/// The index of the bracket closing the one at `i`, skipping quoted strings and comments, or
+/// `end`.
+fn matching(s: &[u8], i: usize, end: usize, open: u8, close: u8, comments: Comments) -> usize {
     let mut depth = 0usize;
     let mut j = i;
     while j < end {
@@ -252,6 +260,19 @@ fn matching(s: &[u8], i: usize, end: usize, open: u8, close: u8) -> usize {
             b'\\' => j += 1,
             b'"' | b'\'' | b'`' => {
                 j = string_end(s, j, end, s[j], s[j] == b'`');
+                continue;
+            }
+            b'/' if comments == Comments::Js && at(s, j + 1, end) == b'/' => {
+                j = line_end(s, j, end);
+                continue;
+            }
+            b'/' if comments == Comments::Js && at(s, j + 1, end) == b'*' => {
+                j = block_comment_end(s, j + 2, end, false);
+                continue;
+            }
+            // A `#` starting a word; `$#` and `a#b` are not comments.
+            b'#' if comments == Comments::Shell && j > i && matches!(s[j - 1], b' ' | b'\t' | b'\n' | b'(' | b';' | b'|' | b'&') => {
+                j = line_end(s, j, end);
                 continue;
             }
             c if c == open => depth += 1,
@@ -440,7 +461,12 @@ fn c_like(s: &[u8], mut i: usize, end: usize, lang: Lang, out: &mut Out, depth: 
             i = e;
             out.push(start, i, String);
             value = true;
-        } else if b == b'<' && jsx && !value && (is_ident_start(at(s, i + 1, end)) || at(s, i + 1, end) == b'>') {
+        } else if b == b'<'
+            && jsx
+            && !value
+            && (is_ident_start(at(s, i + 1, end)) || at(s, i + 1, end) == b'>')
+            && !type_parameters(s, i, end)
+        {
             i = jsx_element(s, i, end, lang, out, depth);
             value = true;
         } else if b.is_ascii_digit() || (b == b'.' && !value && at(s, i + 1, end).is_ascii_digit()) {
@@ -590,7 +616,7 @@ fn template(s: &[u8], i: usize, end: usize, lang: Lang, out: &mut Out, depth: u8
             }
             b'$' if at(s, j + 1, end) == b'{' => {
                 out.push(seg, j, Syntax::String);
-                let close = matching(s, j + 1, end, b'{', b'}');
+                let close = matching(s, j + 1, end, b'{', b'}', Comments::Js);
                 out.push(j, j + 2, Syntax::Punctuation);
                 if depth < MAX_DEPTH {
                     c_like(s, j + 2, close, lang, out, depth + 1);
@@ -610,7 +636,83 @@ fn template(s: &[u8], i: usize, end: usize, lang: Lang, out: &mut Out, depth: u8
     j
 }
 
-/// A JSX element (with its children and nested elements) from the `<` at `i`.
+/// Whether the `<` at `i` opens TypeScript type parameters rather than a JSX tag: `<T,>(…)`,
+/// `<T extends U>(…)`, or `<T>(…)` followed by `=>` or `:`. Looks at most [`MAX_REGEX`] bytes
+/// ahead, on this line.
+fn type_parameters(s: &[u8], i: usize, end: usize) -> bool {
+    let limit = end.min(i + MAX_REGEX);
+    let mut angles = 0u32;
+    let mut j = i + 1;
+    while j < limit {
+        match s[j] {
+            b'<' => angles += 1,
+            b'>' if angles > 0 => angles -= 1,
+            b'>' => {
+                if at(s, j + 1, limit) != b'(' {
+                    return false;
+                }
+                // `<T>(x: T) => T` is a signature; `<b>(note)</b>` is an element.
+                let mut parens = 0u32;
+                let mut k = j + 1;
+                while k < limit && s[k] != b'\n' {
+                    match s[k] {
+                        b'(' => parens += 1,
+                        b')' => {
+                            parens -= 1;
+                            if parens == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    k += 1;
+                }
+                if at(s, k, limit) != b')' {
+                    return true;
+                }
+                k += 1;
+                while matches!(at(s, k, limit), b' ' | b'\t') {
+                    k += 1;
+                }
+                return starts(s, k, limit, b"=>") || at(s, k, limit) == b':';
+            }
+            b',' if angles == 0 => return true,
+            b'=' | b'{' | b'"' | b'\'' | b'/' | b'\n' => return false,
+            c if is_ident_start(c) => {
+                let e = ident_end(s, j, limit, &[]);
+                if &s[j..e] == b"extends" {
+                    return true;
+                }
+                j = e;
+                continue;
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    false
+}
+
+/// Words that start a statement, not JSX text.
+const STATEMENT_STARTS: &[&str] =
+    &["export", "import", "const", "let", "var", "function", "class", "interface", "enum", "return"];
+
+/// Whether the line from `i` starts like code rather than JSX text: with a statement keyword or a
+/// closing `}`, `)` or `;`. An element still open there never closed, so scanning goes back to
+/// code instead of taking the rest of the block as children.
+fn code_line(s: &[u8], mut i: usize, end: usize) -> bool {
+    while matches!(at(s, i, end), b' ' | b'\t' | b'\r') {
+        i += 1;
+    }
+    match at(s, i, end) {
+        b'}' | b')' | b';' => true,
+        c if is_ident_start(c) => is_word(&s[i..ident_end(s, i, end, &[])], STATEMENT_STARTS),
+        _ => false,
+    }
+}
+
+/// A JSX element (with its children and nested elements) from the `<` at `i`. One that never
+/// closes ends at a stray `<` in a tag or at the first line that reads as code.
 fn jsx_element(s: &[u8], mut i: usize, end: usize, lang: Lang, out: &mut Out, depth: u8) -> usize {
     use Syntax::*;
     let mut open = 0usize;
@@ -649,6 +751,8 @@ fn jsx_element(s: &[u8], mut i: usize, end: usize, lang: Lang, out: &mut Out, de
                     out.push(j, j + 1, Punctuation);
                     j += 1;
                 }
+                b'<' => break,
+                b'\n' if code_line(s, j + 1, end) => break,
                 c if is_ident_start(c) => {
                     let e = ident_end(s, j, end, b"-:");
                     out.push(j, e, Property);
@@ -658,7 +762,7 @@ fn jsx_element(s: &[u8], mut i: usize, end: usize, lang: Lang, out: &mut Out, de
             }
         }
         if !closed {
-            return end;
+            return j.min(end);
         }
         if closing {
             open = open.saturating_sub(1);
@@ -668,14 +772,16 @@ fn jsx_element(s: &[u8], mut i: usize, end: usize, lang: Lang, out: &mut Out, de
         if open == 0 {
             return j;
         }
-        // Children: text stays plain, `{…}` is code, `<` starts the next tag.
+        // Children: text stays plain, `{…}` is code, `<` before a name, `/` or `>` starts the next
+        // tag (`a < b` is text).
         loop {
             if j >= end || out.full {
                 return end;
             }
             match s[j] {
-                b'<' => break,
+                b'<' if matches!(at(s, j + 1, end), b'/' | b'>') || is_ident_start(at(s, j + 1, end)) => break,
                 b'{' => j = jsx_expression(s, j, end, lang, out, depth),
+                b'\n' if code_line(s, j + 1, end) => return j,
                 _ => j += 1,
             }
         }
@@ -684,7 +790,7 @@ fn jsx_element(s: &[u8], mut i: usize, end: usize, lang: Lang, out: &mut Out, de
 }
 
 fn jsx_expression(s: &[u8], j: usize, end: usize, lang: Lang, out: &mut Out, depth: u8) -> usize {
-    let close = matching(s, j, end, b'{', b'}');
+    let close = matching(s, j, end, b'{', b'}', Comments::Js);
     out.push(j, j + 1, Syntax::Punctuation);
     if depth < MAX_DEPTH {
         c_like(s, j + 1, close, lang, out, depth + 1);
@@ -752,8 +858,11 @@ fn shell(s: &[u8], mut i: usize, end: usize, out: &mut Out, depth: u8) {
                 command = false;
             }
             b'\\' => {
-                i = (i + 2).min(end);
-                command = false;
+                // A line continuation keeps whether the next word is a command (after `&&`).
+                let crlf = at(s, i + 1, end) == b'\r' && at(s, i + 2, end) == b'\n';
+                let continues = crlf || at(s, i + 1, end) == b'\n';
+                i = (i + 2 + crlf as usize).min(end);
+                command &= continues;
             }
             b'<' if at(s, i + 1, end) == b'<' && at(s, i + 2, end) != b'<' => {
                 i += 2;
@@ -847,7 +956,7 @@ fn dollar(s: &[u8], i: usize, end: usize, out: &mut Out, depth: u8) -> usize {
         out.push(i, e, Syntax::Property);
         e
     } else if c == b'(' {
-        let close = matching(s, i + 1, end, b'(', b')');
+        let close = matching(s, i + 1, end, b'(', b')', Comments::Shell);
         out.push(i, i + 2, Syntax::Punctuation);
         if depth < MAX_DEPTH {
             shell(s, i + 2, close, out, depth + 1);
@@ -1368,6 +1477,71 @@ mod tests {
         assert!(!toks(Lang::Tsx, src).iter().any(|(t, _)| t.contains("it's")));
         // Plain TypeScript compares instead.
         assert_eq!(kind_of(Lang::Ts, "a <b", "b"), None);
+    }
+
+    fn count(lang: Lang, src: &str, text: &str, kind: Syntax) -> usize {
+        toks(lang, src).iter().filter(|(t, k)| t == text && *k == kind).count()
+    }
+
+    #[test]
+    fn type_parameters_are_not_jsx_tags() {
+        let after = "\nexport function after(n: number) { return n + 1; }";
+        for head in ["const id = <T,>(x: T) => x;", "type Fn = <T>(x: T) => T;", "const f = <T extends object>(x: T) => x;"] {
+            let src = format!("{head}{after}");
+            has(Lang::Tsx, &src, &[("export", Keyword), ("after", Function), ("number", Type), ("1", Number)]);
+        }
+        // An element whose text starts with a bracket is still an element.
+        let src = "const b = <b>(note)</b>;";
+        assert_eq!(count(Lang::Tsx, src, "b", Keyword), 2);
+        assert_eq!(kind_of(Lang::Tsx, src, "note"), None);
+    }
+
+    #[test]
+    fn a_less_than_in_jsx_text_is_text() {
+        let src = "const view = <div>a < b</div>;\nexport const after = 1;";
+        has(Lang::Tsx, src, &[("export", Keyword), ("1", Number)]);
+        assert_eq!(count(Lang::Tsx, src, "div", Keyword), 2);
+        assert_eq!(kind_of(Lang::Tsx, src, "b"), None);
+    }
+
+    #[test]
+    fn an_element_that_never_closes_gives_the_code_after_it_back() {
+        for head in ["const el = <div>\n  unclosed text", "const el = <div className=\"a\"", "const el = <div <span>"] {
+            let src = format!("{head}\nexport const after = 1;");
+            has(Lang::Tsx, &src, &[("export", Keyword), ("1", Number)]);
+        }
+        // Elements over several lines still take their children.
+        let src = "return (\n  <ul>\n    <li>one</li>\n    {items.map(i => <li>{i}</li>)}\n  </ul>\n);";
+        has(Lang::Tsx, src, &[("map", Function)]);
+        assert_eq!(count(Lang::Tsx, src, "ul", Keyword), 2);
+        assert_eq!(kind_of(Lang::Tsx, src, "one"), None);
+    }
+
+    #[test]
+    fn comments_inside_embedded_code_hide_their_brackets_and_quotes() {
+        let after = "\nconst after = 1;";
+        for (lang, head, comment) in [
+            (Lang::Tsx, "<Card onClick={() => { /* don't */ run(); }} />", "/* don't */"),
+            (Lang::Tsx, "<Card onClick={() => {\n  // {\n  run();\n}} />", "// {"),
+            (Lang::Ts, "const s = `${a /* } */}`;", "/* } */"),
+        ] {
+            let src = format!("{head}{after}");
+            has(lang, &src, &[(comment, Comment), ("const", Keyword), ("1", Number)]);
+        }
+        let src = "echo $( # )\n cmd )\necho after";
+        has(Lang::Shell, src, &[("# )", Comment), ("cmd", Function)]);
+        assert_eq!(count(Lang::Shell, src, "echo", Function), 2);
+        // `$#` is a variable, not a comment.
+        let src = "n=$(echo $#); echo after";
+        has(Lang::Shell, src, &[("$#", Property)]);
+        assert_eq!(count(Lang::Shell, src, "echo", Function), 2);
+    }
+
+    #[test]
+    fn a_line_continuation_keeps_the_next_word_a_command() {
+        assert_eq!(count(Lang::Shell, "cargo build && \\\n  cargo test", "cargo", Function), 2);
+        assert_eq!(count(Lang::Shell, "cargo build && \\\r\n  cargo test", "cargo", Function), 2);
+        assert_eq!(kind_of(Lang::Shell, "cargo build \\\n  --release", "--release"), None);
     }
 
     #[test]
