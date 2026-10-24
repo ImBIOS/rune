@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Overlays on macOS draw at the scale of the display they're placed on.** An overlay used to
+  take its scale from winit's window when shown, which for a hidden panel needn't match the
+  display it's about to appear on, so a panel placed on a display of another scale could draw
+  its first frames at the wrong scale. It now reads the panel's `backingScaleFactor` once it's
+  on screen, and before that the scale of the display holding most of its frame. `OverlayPlacement::Rect` on
+  `DisplayTarget::Primary` documents that it's a global rect that may sit on any display.
 - **`El::on_screen_layout`** reports an element's rect in global screen points (from the
   primary display's top-left, y down), the space of an overlay's `OverlayPlacement::Rect` on
   `DisplayTarget::Primary`, so a window can open an overlay exactly over one of its elements.

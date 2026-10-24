@@ -103,6 +103,21 @@ pub(crate) fn content_origin(window: &winit::window::Window) -> Option<(f32, f32
     Some((r.origin.x as f32, (primary - r.origin.y - r.size.height) as f32))
 }
 
+/// The backing scale `window` draws at: its screen's while it's on one, else that of the screen
+/// holding most of its frame, where ordering it in will put it.
+pub(crate) fn backing_scale(window: &winit::window::Window) -> Option<f32> {
+    let mtm = MainThreadMarker::new()?;
+    let ns = ns_window(window)?;
+    if ns.isVisible() { return Some(ns.backingScaleFactor() as f32); }
+    let f = ns.frame();
+    let screens: Vec<_> = NSScreen::screens(mtm).iter().map(|s| {
+        let r = s.frame();
+        ([r.origin.x, r.origin.y, r.size.width, r.size.height], s.backingScaleFactor())
+    }).collect();
+    let scale = crate::overlay_options::scale_under([f.origin.x, f.origin.y, f.size.width, f.size.height], &screens);
+    Some(scale.unwrap_or_else(|| ns.backingScaleFactor()) as f32)
+}
+
 /// The outer size of a window whose content is `content` points.
 pub(crate) fn outer_size(window: &winit::window::Window, (w, h): (f32, f32)) -> Option<(f32, f32)> {
     let ns = ns_window(window)?;

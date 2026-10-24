@@ -882,6 +882,14 @@ pub(crate) fn screen_origin(window: &Window) -> Option<(f32, f32)> {
     }
 }
 
+/// The scale an overlay draws at. On macOS, read from the panel AppKit shows, and before it's
+/// ordered in from the display holding most of its frame, where it will appear.
+pub(crate) fn backing_scale(window: &Window) -> f32 {
+    #[cfg(target_os = "macos")]
+    if let Some(scale) = crate::macos::backing_scale(window) { return scale; }
+    window.scale_factor() as f32
+}
+
 /// Native titlebar behaviour the framework owns: traffic-light placement, drag regions and the
 /// double-click action. Elsewhere only the portable parts apply.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]

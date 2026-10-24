@@ -400,7 +400,7 @@ impl<T: 'static> Overlay<T> {
         if let Some(Backing::Window(window)) = self.live.as_ref().map(|l| &l.backing) {
             let window = window.clone();
             self.place_window(event_loop, &window);
-            if let Some(gpu) = self.gpu.clone() { self.rescale(&gpu, window.scale_factor() as f32); }
+            if let Some(gpu) = self.gpu.clone() { self.rescale(&gpu, crate::window::backing_scale(&window)); }
             // Retained alpha-zero hosts already have pixels. A hidden update must reach
             // the surface before exposing it, rather than flashing the old frame.
             if !fading { self.refresh_for_reveal_at(Instant::now()); }
@@ -584,7 +584,7 @@ impl<T: 'static> Overlay<T> {
         self.dark = window.theme().is_none_or(|t| t == winit::window::Theme::Dark);
         self.rt.set_system_dark(self.dark);
         if self.cursor.is_none() { self.cursor = Some(crate::os_cursor::OsCursor::new(event_loop)); }
-        let scale = window.scale_factor() as f32;
+        let scale = crate::window::backing_scale(&window);
         // The surface first: on macOS it binds winit's view and its layer, which then move
         // into the panel.
         let live = self.attach(Backing::Window(window.clone()), scale)?;
@@ -699,7 +699,7 @@ impl<T: 'static> Overlay<T> {
         if let Some(Backing::Window(w)) = self.live.as_ref().map(|l| &l.backing) {
             let w = w.clone();
             self.place_window(event_loop, &w);
-            if let Some(gpu) = self.gpu.clone() { self.rescale(&gpu, w.scale_factor() as f32); }
+            if let Some(gpu) = self.gpu.clone() { self.rescale(&gpu, crate::window::backing_scale(&w)); }
         }
     }
 
@@ -1148,7 +1148,7 @@ impl<T: 'static> Overlay<T> {
                     Some(Backing::Window(w)) => {
                         let w = w.clone();
                         self.place_window(event_loop, &w);
-                        if let Some(gpu) = self.gpu.clone() { self.rescale(&gpu, w.scale_factor() as f32); }
+                        if let Some(gpu) = self.gpu.clone() { self.rescale(&gpu, crate::window::backing_scale(&w)); }
                     }
                     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
                     Some(Backing::Layer(layer)) => {

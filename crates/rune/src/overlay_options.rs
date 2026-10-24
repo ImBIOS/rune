@@ -51,7 +51,12 @@ pub enum DisplayTarget {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OverlayPlacement {
     Edge { edge: ScreenEdge, margin: f32, align: Align, inset: f32 },
-    /// Points from the selected display's top-left, not desktop pixels.
+    /// Points from the selected display's top-left, not desktop pixels. The rect isn't kept
+    /// on that display, so on [`DisplayTarget::Primary`] it's a global rect that may sit on
+    /// any display: the space [`El::on_screen_layout`] reports in, so an overlay can open
+    /// exactly over an element of a window. On macOS one point space spans displays of any
+    /// scale, and the overlay draws at the backing scale of the display it lands on.
+    /// Elsewhere a rect off the primary display is exact only where displays share a scale.
     Rect { x: f32, y: f32, width: f32, height: f32 },
     FullScreen,
 }
@@ -230,9 +235,33 @@ pub(crate) fn choose_display(bounds: &[[f64; 4]], primary: Option<usize>, reques
     })).or(primary.filter(|i| *i < bounds.len())).or_else(|| (!bounds.is_empty()).then_some(0))
 }
 
+/// The scale of the display holding most of `frame` (`[x, y, w, h]`), as AppKit picks a
+/// window's backing scale; `None` when it's on none. `displays` are `(frame, scale)` in the
+/// same space.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn scale_under(frame: [f64; 4], displays: &[([f64; 4], f64)]) -> Option<f64> {
+    let overlap = |d: [f64; 4]| {
+        let w = (frame[0] + frame[2]).min(d[0] + d[2]) - frame[0].max(d[0]);
+        let h = (frame[1] + frame[3]).min(d[1] + d[3]) - frame[1].max(d[1]);
+        w.max(0.0) * h.max(0.0)
+    };
+    displays.iter().map(|&(d, scale)| (overlap(d), scale)).filter(|(area, _)| *area > 0.0)
+        .max_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, scale)| scale)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frame_takes_the_scale_of_the_display_holding_most_of_it() {
+        // A 2x laptop with a 1x monitor to its right, in one global space.
+        let displays = [([0.0, 0.0, 1512.0, 982.0], 2.0), ([1512.0, 0.0, 1920.0, 1080.0], 1.0)];
+        assert_eq!(scale_under([100.0, 100.0, 400.0, 300.0], &displays), Some(2.0));
+        assert_eq!(scale_under([1400.0, 100.0, 400.0, 300.0], &displays), Some(1.0), "mostly on the monitor");
+        assert_eq!(scale_under([1400.0, 100.0, 200.0, 300.0], &displays), Some(2.0), "mostly on the laptop");
+        assert_eq!(scale_under([-900.0, 0.0, 400.0, 300.0], &displays), None, "on no display");
+    }
 
     #[test]
     fn display_selection_handles_negative_origins_shared_edges_and_disconnects() {
