@@ -530,6 +530,8 @@ pub struct Runtime<S: 'static> {
     has_dissolve: bool,
     /// Some picture sizes a side from its image's ratio (`pixel_aspect`).
     has_pixel_aspect: bool,
+    /// Pictures whose image changed shape since the last commit, which lays them out at once.
+    aspect_snap: Vec<NodeId>,
     /// Drawn rect per node (points, root space), for tools and hit tests.
     drawn: Vec<[f32; 4]>,
     /// The scale each node's text drew at (its own and its ancestors'), for text hit tests.
@@ -766,6 +768,7 @@ impl<S: 'static> Runtime<S> {
             dissolve_scratch: Vec::new(),
             has_dissolve: false,
             has_pixel_aspect: false,
+            aspect_snap: Vec::new(),
             drawn: Vec::new(),
             drawn_scale: Vec::new(),
             scrolls: HashMap::new(),
@@ -1409,16 +1412,16 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// A picture sizing a side from its image changed shape (decoded, or a stream resized).
+    /// The next commit lays those pictures out at once, whatever else it animates.
     fn pixel_aspect_changed(&mut self) -> bool {
-        let mut changed = false;
         for n in &mut self.nodes {
             if let (Some(ratio), Some(pixels)) = (&mut n.pixel_aspect, &n.vis.pixels) {
                 let now = pixel_ratio(pixels);
-                changed |= now != *ratio;
+                if now != *ratio { self.aspect_snap.push(n.id); }
                 *ratio = now;
             }
         }
-        changed
+        !self.aspect_snap.is_empty()
     }
 
     fn prune_exited(&mut self) {
@@ -2404,7 +2407,8 @@ impl<S: 'static> Runtime<S> {
             // Text leads its background so theme crossfades never dip through zero contrast.
             let spring_tc = Spring::new((spring_c.duration * 0.5).max(0.1), spring_c.bounce);
             let row_like = nodes[i].in_row || nodes[i].parent.is_some_and(|p| nodes[p].growth.is_some());
-            let layout_instant = instant || row_like || tx.relayout || self.virtuals.contains_key(&nodes[i].path);
+            let layout_instant = instant || row_like || tx.relayout || self.virtuals.contains_key(&nodes[i].path)
+                || self.aspect_snap.contains(&id);
             let mut scene_rect = nodes[i].local;
             if let Some(v) = nodes[i].parent.and_then(|p| self.virtuals.get(&nodes[p].path)) {
                 scene_rect.y -= v.before;
@@ -2672,6 +2676,7 @@ impl<S: 'static> Runtime<S> {
         self.text.end_commit();
         self.dirty = false;
         self.relayout = false;
+        self.aspect_snap.clear();
         self.settle = false;
     }
 
@@ -5779,6 +5784,18 @@ mod tests {
         let commits = rt.commits;
         for _ in 0..4 { rt.frame(1.0 / 120.0); }
         assert_eq!(rt.commits, commits, "an unchanged image costs no commits");
+
+        // The image lands on a frame that also re-runs the view (`Pixels::set`, then the
+        // handle's `update`, or a hover that frame): it still appears at its size.
+        let px = Pixels::new();
+        let mut rt = Runtime::new(px.clone(), view, (240.0, 600.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        px.set(4, 2, vec![255; 4 * 4 * 2]);
+        rt.invalidate();
+        rt.frame(1.0 / 120.0);
+        let w = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("w")).unwrap();
+        assert_eq!((w.rect[3], w.target[3]), (60.0, 60.0), "drawn at its size, not springing open");
+        assert!(!w.moving);
     }
 
     #[test]
