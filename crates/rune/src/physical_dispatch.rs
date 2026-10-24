@@ -80,7 +80,12 @@ impl<S: 'static> Runtime<S> {
                     // change focus. An empty/image clipboard still consumes the command.
                     self.paste_request = Some(self.paste_target());
                     false
-                } else { self.run_action(Action::Key { ev: key, repeat, physical: true }, tx) }
+                } else {
+                    let mut one = self.transaction();
+                    let ran = self.route_key(&key, repeat, &mut one);
+                    merge(tx, one);
+                    ran
+                }
             }
             None => false,
         }

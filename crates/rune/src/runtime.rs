@@ -245,9 +245,7 @@ enum Action {
     Link(String, usize),
     SecondaryPress(String, PointerPress),
     Drag(String, Drag),
-    /// A logical key. `physical`: it is a physical key's fallback, already gated by
-    /// `held_gate` in `dispatch_physical`.
-    Key { ev: KeyEvent, repeat: bool, physical: bool },
+    Key { ev: KeyEvent, repeat: bool },
     Ime(Ime),
     Paste(zeroize::Zeroizing<String>, Option<Option<String>>),
     Focus(String, f32, f32),
@@ -1451,50 +1449,9 @@ impl<S: 'static> Runtime<S> {
                 }
                 true
             }
-            Action::Key { ev, repeat, physical } => {
-                if !physical && self.held_gate(None, Some(&ev.key), repeat) { return false; }
-                one.key_repeat = repeat;
-                let shown = self.keyboard_focus || self.hover_focus;
-                self.keyboard_focus = true;
-                // With no focused element, app-owned navigation (e.g. a toolbar)
-                // gets first refusal before Rune starts a new Tab traversal.
-                let app_first = self.focused.is_none();
-                if app_first && let Some(f) = self.on_key
-                    && f(&mut self.state, &ev, &mut one)
-                {
-                    merge(tx, one);
-                    return true;
-                }
-                if let Some(f) = self.focused_input().and_then(|input| input.key.clone())
-                    && f(handler_state(&mut self.state), &ev, &mut one)
-                {
-                    merge(tx, one);
-                    return true;
-                }
-                if self.focus_key(&ev, shown, &mut one) {
-                    merge(tx, one);
-                    return true;
-                }
-                let input_handles = match &ev.key {
-                    crate::edit::Key::Function(_) | crate::edit::Key::Tab => false,
-                    crate::edit::Key::Command(c) => matches!(c, 'a' | 'c' | 'x' | 'z'),
-                    _ => !ev.is_command_chord() || ev.control_binding().is_some(),
-                };
-                if input_handles {
-                    let layout = self.focused_layout();
-                    if self.with_focused(|e| e.key(&ev, layout.as_deref()), &mut one) {
-                        merge(tx, one);
-                        return true;
-                    }
-                }
-                if !app_first && let Some(f) = self.on_key
-                    && f(&mut self.state, &ev, &mut one)
-                {
-                    self.events.push(format!("key {:?}", ev.key));
-                    merge(tx, one);
-                    return true;
-                }
-                false
+            Action::Key { ev, repeat } => {
+                if self.held_gate(None, Some(&ev.key), repeat) { return false; }
+                self.route_key(&ev, repeat, &mut one)
             }
             Action::Ime(ev) => self.with_focused(|e| e.ime(&ev), &mut one),
             Action::Paste(s, target) => {
@@ -1533,6 +1490,38 @@ impl<S: 'static> Runtime<S> {
         };
         merge(tx, one);
         ran
+    }
+
+    /// Offer a logical key that already passed `held_gate` to the app, the focused
+    /// input's handler, focus traversal and the focused editor, in that order.
+    fn route_key(&mut self, ev: &KeyEvent, repeat: bool, one: &mut Tx) -> bool {
+        one.key_repeat = repeat;
+        let shown = self.keyboard_focus || self.hover_focus;
+        self.keyboard_focus = true;
+        // With no focused element, app-owned navigation (e.g. a toolbar)
+        // gets first refusal before Rune starts a new Tab traversal.
+        let app_first = self.focused.is_none();
+        if app_first && let Some(f) = self.on_key && f(&mut self.state, ev, one) { return true; }
+        if let Some(f) = self.focused_input().and_then(|input| input.key.clone())
+            && f(handler_state(&mut self.state), ev, one)
+        {
+            return true;
+        }
+        if self.focus_key(ev, shown, one) { return true; }
+        let input_handles = match &ev.key {
+            crate::edit::Key::Function(_) | crate::edit::Key::Tab => false,
+            crate::edit::Key::Command(c) => matches!(c, 'a' | 'c' | 'x' | 'z'),
+            _ => !ev.is_command_chord() || ev.control_binding().is_some(),
+        };
+        if input_handles {
+            let layout = self.focused_layout();
+            if self.with_focused(|e| e.key(ev, layout.as_deref()), one) { return true; }
+        }
+        if !app_first && let Some(f) = self.on_key && f(&mut self.state, ev, one) {
+            self.events.push(format!("key {:?}", ev.key));
+            return true;
+        }
+        false
     }
 
     fn focused_layout(&mut self) -> Option<Rc<Layout<Ink>>> {
@@ -2823,13 +2812,13 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub fn key(&mut self, ev: KeyEvent) {
-        self.queue.push(Action::Key { ev, repeat: false, physical: false });
+        self.queue.push(Action::Key { ev, repeat: false });
     }
 
     /// Queue an auto-repeat of a held key, as the OS sends after the first press. Handlers see
     /// `Tx::key_repeat` true for it.
     pub fn repeat_key(&mut self, ev: KeyEvent) {
-        self.queue.push(Action::Key { ev, repeat: true, physical: false });
+        self.queue.push(Action::Key { ev, repeat: true });
     }
 
     pub fn ime(&mut self, ev: Ime) {
@@ -5403,12 +5392,12 @@ mod tests {
         rt.set_focus(Some(input), true);
         let copy_key = KeyEvent { key: Key::Command('c'), mods: Mods { cmd: true, ..Mods::default() } };
         rt.queue.push(Action::Press(button.clone()));
-        rt.queue.push(Action::Key { ev: copy_key.clone(), repeat: false, physical: false });
+        rt.queue.push(Action::Key { ev: copy_key.clone(), repeat: false });
         rt.frame(1.0 / 120.0);
         assert_eq!(rt.copy_request.take().as_deref(), Some("héllo 👋"));
         rt.frame(1.0 / 120.0);
         assert!(rt.copy_request.is_none());
-        rt.queue.push(Action::Key { ev: copy_key, repeat: false, physical: false });
+        rt.queue.push(Action::Key { ev: copy_key, repeat: false });
         rt.queue.push(Action::Press(button));
         rt.frame(1.0 / 120.0);
         assert_eq!(rt.copy_request.take().as_deref(), Some("response"));
