@@ -235,6 +235,8 @@ pub(crate) struct Node {
     cursor: Option<crate::el::Cursor>,
     window_drag: bool,
     press_scale: Option<f32>,
+    /// `El::scale`: a fixed factor on the element's own scale.
+    static_scale: f32,
     /// The image ratio this picture's layout took, when it sizes one side from its pixels.
     pixel_aspect: Option<f32>,
     /// Inside a growth row: layout snaps (the row's height carries the motion).
@@ -355,13 +357,41 @@ struct Inh {
     mark: u32,
     /// The nearest hover group's hover amount (0–1), for `group_*` styles.
     group: f32,
+    /// How `scale` is changing, which decides how text rasterizes under it.
+    scale_motion: ScaleMotion,
+}
+
+/// How a subtree's scale is changing. Text under a still scale rasterizes at its scaled size.
+/// Under a moving one it samples its rest-size glyphs, so a spring doesn't rasterize every glyph
+/// at every frame's size into the glyph atlas, which never evicts.
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum ScaleMotion {
+    #[default]
+    Still,
+    /// Bound to a live value, which an app may publish every frame: rasterize at rounded sizes.
+    Live,
+    Moving,
+}
+
+impl ScaleMotion {
+    /// The scale text under `sc` rasterizes at. It draws at `sc`, filtered, when they differ.
+    fn raster(self, sc: f32) -> f32 {
+        let k = match self {
+            ScaleMotion::Still => sc,
+            ScaleMotion::Live => (sc * 32.0).round() / 32.0,
+            ScaleMotion::Moving => 1.0,
+        };
+        // A tiny or huge raster isn't worth its atlas space; sample the rest size instead.
+        if (1.0 / 16.0..=4.0).contains(&k) { k } else { 1.0 }
+    }
 }
 
 impl Default for Inh {
     fn default() -> Self {
         Inh { opacity: 1.0, paint_opacity: 1.0, clip: NO_CLIP, fade: [0.0; 4], fade_origin: NO_CLIP,
             paint_clip: NO_CLIP, paint_fade: [0.0; 4], paint_fade_origin: NO_CLIP, rounded: None,
-            scale: 1.0, anchor: [0.0; 2], blur: 0.0, dy: 0.0, dx: 0.0, cover: [0.0; 2], outer: None, mark: 0, group: 0.0 }
+            scale: 1.0, anchor: [0.0; 2], blur: 0.0, dy: 0.0, dx: 0.0, cover: [0.0; 2], outer: None, mark: 0, group: 0.0,
+            scale_motion: ScaleMotion::Still }
     }
 }
 
@@ -495,6 +525,8 @@ pub struct Runtime<S: 'static> {
     has_pixel_aspect: bool,
     /// Drawn rect per node (points, root space), for tools and hit tests.
     drawn: Vec<[f32; 4]>,
+    /// The scale each node's text drew at (its own and its ancestors'), for text hit tests.
+    drawn_scale: Vec<f32>,
     scrolls: HashMap<NodeId, ScrollState>,
     grows: HashMap<NodeId, GrowTrack>,
     stacks: HashMap<NodeId, Stack>,
@@ -719,6 +751,7 @@ impl<S: 'static> Runtime<S> {
             has_dissolve: false,
             has_pixel_aspect: false,
             drawn: Vec::new(),
+            drawn_scale: Vec::new(),
             scrolls: HashMap::new(),
             grows: HashMap::new(),
             stacks: HashMap::new(),
@@ -2925,7 +2958,9 @@ impl<S: 'static> Runtime<S> {
         self.press_down_t = now;
         let r = self.drawn.get(ti).copied().unwrap_or([n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]]);
         if n.input.is_some() {
-            self.queue.push(Action::Focus(n.path.clone(), x - r[0] - n.inset[0], y - r[1] - n.inset[1]));
+            // Its text drew scaled with its box: map the press back to the rest layout.
+            let k = self.drawn_scale.get(ti).copied().unwrap_or(1.0).max(1e-4);
+            self.queue.push(Action::Focus(n.path.clone(), (x - r[0]) / k - n.inset[0], (y - r[1]) / k - n.inset[1]));
             return;
         }
         // Clicking a link leaves focus where it is (a composer keeps typing).
@@ -3283,6 +3318,8 @@ impl<S: 'static> Runtime<S> {
         self.inh_scratch.resize(n_nodes, Inh::default());
         self.drawn.clear();
         self.drawn.resize(n_nodes, [0.0; 4]);
+        self.drawn_scale.clear();
+        self.drawn_scale.resize(n_nodes, 1.0);
         self.ime_area = None;
         let now = self.t;
         let vp = [0.0, 0.0, self.viewport.0 * s, self.viewport.1 * s];
@@ -3383,7 +3420,8 @@ impl<S: 'static> Runtime<S> {
                 let [clip, fade, fade_origin] = pinh.outer.unwrap_or([pinh.clip, pinh.fade, pinh.fade_origin]);
                 pinh = Inh { opacity: 1.0, paint_opacity: 1.0, clip, fade, fade_origin, paint_clip: clip, paint_fade: fade,
                     paint_fade_origin: fade_origin, rounded: None, scale: 1.0, anchor: [0.0; 2], blur: 0.0,
-                    dx: pinh.dx - pinh.cover[0], dy: pinh.dy - pinh.cover[1], cover: [0.0; 2], outer: None, ..pinh };
+                    dx: pinh.dx - pinh.cover[0], dy: pinh.dy - pinh.cover[1], cover: [0.0; 2], outer: None,
+                    scale_motion: ScaleMotion::Still, ..pinh };
             }
             let mark = if n.vis.mark != 0 { n.vis.mark } else { pinh.mark };
             let mut own = p.opacity;
@@ -3411,9 +3449,21 @@ impl<S: 'static> Runtime<S> {
             let mut fade_origin = pinh.paint_fade_origin;
             let mut rounded = pinh.rounded;
             let press_k = if n.press_scale.is_some() { self.scene.get(n.id, P_PRESS_SCALE).unwrap_or(1.0) } else { 1.0 };
-            let own_sc = p.transform.scale.x * press_k * self.loops.get(&n.id)
-                .filter(|_| matches!(n.looping.map(|l| l.kind), Some(rune_motion::LoopKind::Sequence(_))))
-                .and_then(|l| l.pose(now, self.reduced_motion)).map_or(1.0, |p| p.scale);
+            let sequence = self.loops.get(&n.id)
+                .filter(|_| matches!(n.looping.map(|l| l.kind), Some(rune_motion::LoopKind::Sequence(_))));
+            let own_sc = p.transform.scale.x * press_k * n.static_scale
+                * sequence.and_then(|l| l.pose(now, self.reduced_motion)).map_or(1.0, |p| p.scale);
+            let store = self.scene.store();
+            let scale_motion = pinh.scale_motion.max(
+                if store.is_animating(n.id, prop::SCALE) || store.is_animating(n.id, prop::PRESENCE)
+                    || (n.press_scale.is_some() && store.is_animating(n.id, P_PRESS_SCALE))
+                    || sequence.is_some_and(|l| !self.reduced_motion && l.active(now)) {
+                    ScaleMotion::Moving
+                } else if n.live.iter().any(|b| b.property == crate::live::Property::Scale) {
+                    ScaleMotion::Live
+                } else {
+                    ScaleMotion::Still
+                });
             let (sc, anchor) = if (own_sc - 1.0).abs() > 1e-5 {
                 (pinh.scale * own_sc, [p.anchor.x + pinh.dx, p.anchor.y + pinh.dy])
             } else {
@@ -3460,6 +3510,7 @@ impl<S: 'static> Runtime<S> {
             let r = rect_pt.map(snap_px);
             let (w, h) = ((r[2] - r[0]).max(0.0), (r[3] - r[1]).max(0.0));
             self.drawn[i] = [r[0] / s, r[1] / s, w / s, h / s];
+            if cover.is_none() { self.drawn_scale[i] = sc; }
             let radii = p.radius.0.map(|v| v * sc * s);
 
             if !p.mask.is_none() {
@@ -3827,21 +3878,26 @@ impl<S: 'static> Runtime<S> {
                     }
                 } else if let (Some(spec), Some(layout)) = (&n.text, &n.text_layout) {
                     let color = text_tint(self.color(n.id, P_TEXT, spec.color));
-                    // A matched flight places its own text in its scaled content box. Glyphs keep
-                    // their rest size, as under any ancestor scale, so a label doesn't pop at the swap.
+                    // A matched flight places its own text in its scaled content box. Its glyphs keep
+                    // their rest size so a label doesn't pop at the swap.
                     let (zk, zr) = match cover {
                         Some((k, c)) => (k, [r[0] + c[0] * s, r[1] + c[1] * s,
                             r[0] + (c[0] + n.local.w * k) * s, r[1] + (c[1] + n.local.h * k) * s]),
                         None => (sc, r),
                     };
+                    // Everywhere else text scales with its box (`El::scale`, `live_scale`,
+                    // `press_scale`, transitions): `tk` about the text's origin. It rasterizes at
+                    // `raster` and draws filtered by the rest, `tk / raster`.
+                    let tk = if cover.is_some() { 1.0 } else { sc };
+                    let raster = if cover.is_some() { 1.0 } else { scale_motion.raster(sc) };
                     let ins = n.inset.map(|v| v * zk * s);
                     let (x0, x1) = (zr[0] + ins[0], zr[2] - ins[2]);
-                    let mut origin = [text_x(spec, x0, x1, layout.full_width().ceil()), zr[1] + ins[1]];
+                    let mut origin = [text_x(spec, x0, x1, (layout.full_width() * tk).ceil()), zr[1] + ins[1]];
                     let mut clip = clip;
                     if let Some(inp) = n.input.as_ref().filter(|i| i.single_line) {
-                        let scroll = single_line_scroll(&mut self.input_scroll, &n.path, inp, &spec.content, layout, s, x1 - x0);
+                        let scroll = single_line_scroll(&mut self.input_scroll, &n.path, inp, &spec.content, layout, s, (x1 - x0) / tk.max(1e-4)) * tk;
                         origin[0] -= scroll;
-                        if layout.full_width() > x1 - x0 {
+                        if layout.full_width() * tk > x1 - x0 {
                             clip = [clip[0].max(x0), clip[1], clip[2].min(x1), clip[3]];
                         }
                     }
@@ -3852,12 +3908,13 @@ impl<S: 'static> Runtime<S> {
                         let departing = self.flights.iter().any(|f| f.departs(&n.path, n.key.as_deref())
                             && f.alphas(f.destination, now, self.reduced_motion).0 > 0.0);
                         if e.text.is_empty() && e.preedit.is_none() && !inp.placeholder.is_empty() && !departing {
-                            let pl = self.text.layout_rich(&inp.placeholder, &[], spec.style, s, Some(w));
+                            let pl = self.text.layout_rich(&inp.placeholder, &[], spec.style, s, Some(w / tk.max(1e-4)));
                             self.glyph_scratch.clear();
-                            self.text.glyphs_for_layout(&pl, s, origin, false, &mut self.glyph_scratch);
+                            self.text.glyphs_for_layout_scaled(&pl, s, origin, raster, false, &mut self.glyph_scratch);
                             let pc = inp.placeholder_color.premul(o);
                             for q in &self.glyph_scratch {
-                                self.instances.extend(glyph_or_image(q, &self.text, &mut self.images, pc, glyph_gamma(inp.placeholder_color, s), clip, fade));
+                                self.instances.extend(glyph_or_image(q, &self.text, &mut self.images, pc, glyph_gamma(inp.placeholder_color, s), clip, fade)
+                                    .map(|g| zoom_glyph(g, origin, tk / raster)));
                             }
                         }
                         if e.focused && !departing {
@@ -3869,9 +3926,9 @@ impl<S: 'static> Runtime<S> {
                                 );
                                 for (bb, _) in sel.geometry(layout) {
                                     self.instances.push(rect_inst(
-                                        [origin[0] + bb.x0 as f32, origin[1] + bb.y0 as f32, (bb.x1 - bb.x0) as f32, (bb.y1 - bb.y0) as f32],
+                                        [origin[0] + bb.x0 as f32 * tk, origin[1] + bb.y0 as f32 * tk, (bb.x1 - bb.x0) as f32 * tk, (bb.y1 - bb.y0) as f32 * tk],
                                         inp.selection.premul(o),
-                                        2.0 * s,
+                                        2.0 * s * tk,
                                         clip,
                                         fade,
                                     ));
@@ -3887,7 +3944,7 @@ impl<S: 'static> Runtime<S> {
                                 );
                                 for (bb, _) in sel.geometry(layout) {
                                     self.instances.push(rect_inst(
-                                        [origin[0] + bb.x0 as f32, origin[1] + bb.y1 as f32 - s, (bb.x1 - bb.x0) as f32, s],
+                                        [origin[0] + bb.x0 as f32 * tk, origin[1] + bb.y1 as f32 * tk - s, (bb.x1 - bb.x0) as f32 * tk, s],
                                         color.premul(o),
                                         0.0,
                                         clip,
@@ -3902,6 +3959,12 @@ impl<S: 'static> Runtime<S> {
                     self.deco_scratch.clear();
                     self.text.decorations(layout, &spec.spans, s, origin, &mut self.deco_scratch);
                     link_fx.decos(layout, spec.content.len(), s, origin, &mut self.deco_scratch);
+                    if tk != 1.0 {
+                        for d in &mut self.deco_scratch {
+                            d.rect = scale_about(d.rect, origin, tk);
+                            d.radius *= tk;
+                        }
+                    }
                     for d in &self.deco_scratch {
                         let c = d.color.premul(o);
                         self.instances.push(rect_inst(d.rect, c, d.radius, clip, fade));
@@ -3909,18 +3972,24 @@ impl<S: 'static> Runtime<S> {
                     let reveal = self.reveals.get(&n.id).filter(|st| !st.words.is_empty() && spec.advance_in.is_none());
                     self.glyph_scratch.clear();
                     // A cell of a longer run draws its slice of the run's glyphs, shaped in context.
-                    if let (Some(r), Some((_, at))) = (&n.run_layout, &spec.advance_in)
+                    let zoom = if let (Some(r), Some((_, at))) = (&n.run_layout, &spec.advance_in)
                         && let Some(x) = r.x(*at)
                     {
                         self.text.glyphs_in(r, *at, s, [origin[0] - x, origin[1]], &mut self.glyph_scratch);
+                        tk
                     } else {
-                        self.text.glyphs_for_layout(layout, s, origin, reveal.is_some() || !link_fx.is_empty(), &mut self.glyph_scratch);
-                    }
+                        self.text.glyphs_for_layout_scaled(layout, s, origin, raster, reveal.is_some() || !link_fx.is_empty(), &mut self.glyph_scratch);
+                        tk / raster
+                    };
                     let gamma = glyph_gamma(color, s);
                     let base = color.premul(o);
                     for q in &self.glyph_scratch {
                         if self.flights.iter().any(|f| f.lands(&n.path, n.key.as_deref())) { continue; }
-                        if q.rect[1] > clip[3] || q.rect[1] + q.rect[3] < clip[1] {
+                        let (y0, y1) = if zoom == 1.0 { (q.rect[1], q.rect[1] + q.rect[3]) } else {
+                            let y0 = origin[1] + (q.rect[1] - origin[1]) * zoom;
+                            (y0, y0 + q.rect[3] * zoom)
+                        };
+                        if y0 > clip[3] || y1 < clip[1] {
                             continue;
                         }
                         let (mut f, mut gm) = (base, gamma);
@@ -3941,7 +4010,8 @@ impl<S: 'static> Runtime<S> {
                             }
                             f = f.map(|v| v * a);
                         }
-                        self.instances.extend(glyph_or_image(q, &self.text, &mut self.images, f, gm, clip, fade));
+                        self.instances.extend(glyph_or_image(q, &self.text, &mut self.images, f, gm, clip, fade)
+                            .map(|g| zoom_glyph(g, origin, zoom)));
                         glyph_count += 1;
                     }
                     if let (Some(c), Some(inp)) = (caret, &n.input) {
@@ -4023,7 +4093,8 @@ impl<S: 'static> Runtime<S> {
             self.inh_scratch[i] = Inh { opacity: effective_opacity, paint_opacity: o,
                 clip: intersect(hit_clip, clip), fade: hit_fade, fade_origin: hit_origin,
                 paint_clip: clip, paint_fade: fade, paint_fade_origin: fade_origin, rounded, scale, anchor, blur, dy, dx,
-                cover: cover_offset, outer, mark, group };
+                cover: cover_offset, outer, mark, group,
+                scale_motion: if cover.is_some() { ScaleMotion::Moving } else { scale_motion } };
             if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_double_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())
                 && !self.subtree_exiting(i)
                 && self.allowed(i) && effective_opacity > 0.001 && visible
@@ -4239,13 +4310,14 @@ fn input_caret(n: &Node, r: [f32; 4], scale: f32, s: f32, scrolls: &mut HashMap<
     let e = &input.edit;
     let ins = n.inset.map(|v| v * scale * s);
     let (x0, x1) = (r[0] + ins[0], r[2] - ins[2]);
-    let mut x = text_x(spec, x0, x1, layout.full_width().ceil());
-    if input.single_line { x -= single_line_scroll(scrolls, &n.path, input, &spec.content, layout, s, x1 - x0); }
+    // The text scales with its box, so the caret does too.
+    let mut x = text_x(spec, x0, x1, (layout.full_width() * scale).ceil());
+    if input.single_line { x -= single_line_scroll(scrolls, &n.path, input, &spec.content, layout, s, (x1 - x0) / scale.max(1e-4)) * scale; }
     let ci = caret_index(e, &spec.content);
     let bb = Cursor::from_byte_index(layout, ci, Affinity::Downstream).geometry(layout, 1.5 * s);
-    let (cx, cy) = (x + bb.x0 as f32, r[1] + ins[1] + bb.y0 as f32);
-    let h = if bb.y1 > bb.y0 { (bb.y1 - bb.y0) as f32 } else { spec.style.line_px() * s };
-    Some(([cx.round(), cy + h * 0.1, (1.5 * s).round(), h * 0.8], [cx / s, cy / s, 2.0, h / s]))
+    let (cx, cy) = (x + bb.x0 as f32 * scale, r[1] + ins[1] + bb.y0 as f32 * scale);
+    let h = (if bb.y1 > bb.y0 { (bb.y1 - bb.y0) as f32 } else { spec.style.line_px() * s }) * scale;
+    Some(([cx.round(), cy + h * 0.1, (1.5 * s * scale).round().max(1.0), h * 0.8], [cx / s, cy / s, 2.0 * scale, h / s]))
 }
 
 /// The scroll offsets of node `i`'s viewports in `nodes`, innermost first.
@@ -4373,6 +4445,20 @@ fn inherit_fade(width: &mut [f32; 4], origin: &mut [f32; 4], rect: [f32; 4], own
             origin[edge] = rect[edge];
         }
     }
+}
+
+/// `rect` (x, y, w, h) magnified `k` times about `origin`.
+fn scale_about(rect: [f32; 4], origin: [f32; 2], k: f32) -> [f32; 4] {
+    [origin[0] + (rect[0] - origin[0]) * k, origin[1] + (rect[1] - origin[1]) * k, rect[2] * k, rect[3] * k]
+}
+
+/// A glyph instance drawn `k` times its rasterized size about `origin`. An alpha glyph keeps
+/// its atlas footprint in `uv.zw`, so the shader samples it filtered.
+fn zoom_glyph(mut g: Instance, origin: [f32; 2], k: f32) -> Instance {
+    if k == 1.0 { return g; }
+    if g.params[1] == KIND_GLYPH && g.uv[2] == 0.0 { (g.uv[2], g.uv[3]) = (g.rect[2], g.rect[3]); }
+    g.rect = scale_about(g.rect, origin, k);
+    g
 }
 
 fn glyph(q: &GlyphQuad, fill: [f32; 4], gamma: f32, clip: [f32; 4], fade: [f32; 4]) -> Instance {
@@ -4588,6 +4674,7 @@ fn flatten(
         cursor,
         window_drag,
         press_scale,
+        scale: static_scale,
         ..
     } = el;
     if let Some(t) = &text && t.live.is_some() {
@@ -4651,6 +4738,7 @@ fn flatten(
         cursor,
         window_drag,
         press_scale,
+        static_scale,
         pixel_aspect,
         in_row,
         virtual_mount,
@@ -5192,6 +5280,83 @@ mod tests {
         rt.pointer_up(x, y);
         rt.frame(1.0 / 120.0);
         assert_eq!(rt.state.pressed, [5]);
+    }
+
+    #[test]
+    fn text_inside_a_scale_draws_at_that_size() {
+        #[derive(Clone, Copy, PartialEq)]
+        enum How { Static, Live, Press }
+        struct State { k: f32, how: How, pressed: u32 }
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let label = crate::el::text("Hamburgefonstiv").key("label");
+            let card = el().key("card").size(200.0, 80.0).on_press(|s: &mut State| s.pressed += 1).child(label);
+            let card = match s.how {
+                How::Static => card.scale(s.k),
+                How::Live => card.live_scale(&crate::live::Live::new(s.k)),
+                How::Press => card.press_scale(s.k),
+            };
+            col().size(300.0, 200.0).child(card)
+        }
+        // Device px: the glyphs' bounding box, and whether all of them sample their atlas 1:1.
+        fn glyphs(rt: &Runtime<State>) -> ([f32; 4], bool) {
+            let gs: Vec<_> = rt.instances.iter().filter(|q| q.params[1] == KIND_GLYPH).collect();
+            assert!(gs.len() >= 10, "the label draws its glyphs");
+            let b = gs.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, q| {
+                [b[0].min(q.rect[0]), b[1].min(q.rect[1]), b[2].max(q.rect[0] + q.rect[2]), b[3].max(q.rect[1] + q.rect[3])]
+            });
+            (b, gs.iter().all(|q| q.uv[2] == 0.0))
+        }
+        let run = |k: f32, how: How| {
+            let mut rt = Runtime::new(State { k, how, pressed: 0 }, view, (300.0, 200.0), Env::new(true, 2.0));
+            rt.frame(0.0);
+            rt.frame(1.0 / 120.0);
+            rt
+        };
+        let (rest, _) = glyphs(&run(1.0, How::Static));
+        let (w, h) = (rest[2] - rest[0], rest[3] - rest[1]);
+        // The card's centre in device px, which the scale is about.
+        let c = [200.0, 80.0];
+        for how in [How::Static, How::Live] {
+            let rt = run(0.5, how);
+            let (half, crisp) = glyphs(&rt);
+            let (hw, hh) = (half[2] - half[0], half[3] - half[1]);
+            assert!((hw / w - 0.5).abs() < 0.03 && (hh / h - 0.5).abs() < 0.06, "glyphs draw at half size: {hw}x{hh} vs {w}x{h}");
+            for axis in 0..2 {
+                let want = c[axis] + (rest[axis] - c[axis]) * 0.5;
+                assert!((half[axis] - want).abs() < 1.5, "about the card's centre: {} vs {want}", half[axis]);
+            }
+            assert!(crisp, "a still scale rasterizes at the scaled size");
+        }
+
+        // Static scale needs no layout change, and hits follow the drawn rect: 50..150 x 20..60.
+        let mut rt = run(0.5, How::Static);
+        let card = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("card")).unwrap();
+        assert_eq!(card.target, [0.0, 0.0, 200.0, 80.0], "layout keeps the unscaled size");
+        assert!((card.rect[0] - 50.0).abs() < 0.05 && (card.rect[2] - 100.0).abs() < 0.05, "drawn about its centre: {:?}", card.rect);
+        for (x, hit) in [(20.0, 0), (100.0, 1)] {
+            rt.pointer_move(x, 40.0);
+            rt.pointer_down(x, 40.0);
+            rt.pointer_up(x, 40.0);
+            rt.frame(1.0 / 120.0);
+            assert_eq!(rt.state.pressed, hit, "a press at x {x}");
+        }
+
+        // A press scale's text shrinks too; while it springs back, it samples rest-size glyphs.
+        let mut rt = run(0.9, How::Press);
+        rt.pointer_move(100.0, 40.0);
+        rt.pointer_down(100.0, 40.0);
+        for _ in 0..30 { rt.frame(1.0 / 120.0); }
+        let (held, crisp) = glyphs(&rt);
+        assert!(((held[2] - held[0]) / w - 0.9).abs() < 0.02, "held text is 90%: {held:?}");
+        assert!(crisp, "the held size rasterizes crisp");
+        rt.pointer_up(100.0, 40.0);
+        rt.frame(1.0 / 120.0);
+        let (moving, crisp) = glyphs(&rt);
+        let mw = (moving[2] - moving[0]) / w;
+        assert!(mw > 0.9 && mw < 1.0, "springing back: {mw}");
+        assert!(!crisp, "a moving scale samples its rest-size glyphs");
+        for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        assert_eq!(glyphs(&rt), (rest, true), "back at rest exactly as before");
     }
 
     #[test]

@@ -12,10 +12,11 @@ pub(super) struct LinkState {
     focus: Option<usize>,
 }
 
-/// Where node `n`'s text starts inside its border box `rect` (points, x0 y0 x1 y1).
-fn origin(n: &Node, spec: &TextSpec, layout: &Layout<Ink>, rect: [f32; 4], s: f32) -> [f32; 2] {
-    let x = text_x(spec, rect[0] + n.inset[0], rect[2] - n.inset[2], layout.full_width().ceil() / s);
-    [x, rect[1] + n.inset[1]]
+/// Where node `n`'s text starts inside its border box `rect` (points, x0 y0 x1 y1), its text
+/// drawn `k` times its size.
+fn origin(n: &Node, spec: &TextSpec, layout: &Layout<Ink>, rect: [f32; 4], s: f32, k: f32) -> [f32; 2] {
+    let x = text_x(spec, rect[0] + n.inset[0] * k, rect[2] - n.inset[2] * k, (layout.full_width() * k).ceil() / s);
+    [x, rect[1] + n.inset[1] * k]
 }
 
 /// Line boxes of bytes `start..end` in layout device px, with each box's line index.
@@ -67,11 +68,13 @@ impl<S: 'static> Runtime<S> {
         let n = &self.nodes[i];
         let (Some(spec), Some(layout)) = (&n.text, &n.text_layout) else { return Vec::new() };
         let s = self.env.scale;
-        let [ox, oy] = origin(n, spec, layout, rect, s);
+        let z = self.drawn_scale.get(i).copied().unwrap_or(1.0);
+        let [ox, oy] = origin(n, spec, layout, rect, s, z);
+        let px = s / z.max(1e-4);
         let mut out = Vec::new();
         for (k, l) in spec.links.iter().enumerate() {
             for (bb, _) in boxes(layout, spec.content.len(), l.start, l.end) {
-                out.push((k, [ox + bb.x0 as f32 / s, oy + bb.y0 as f32 / s, ox + bb.x1 as f32 / s, oy + bb.y1 as f32 / s]));
+                out.push((k, [ox + bb.x0 as f32 / px, oy + bb.y0 as f32 / px, ox + bb.x1 as f32 / px, oy + bb.y1 as f32 / px]));
             }
         }
         out

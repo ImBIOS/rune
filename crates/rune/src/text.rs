@@ -1233,6 +1233,20 @@ impl TextSystem {
         bytes: bool,
         out: &mut Vec<GlyphQuad>,
     ) {
+        self.glyphs_for_layout_scaled(layout, scale, origin, 1.0, bytes, out);
+    }
+
+    /// [`Self::glyphs_for_layout`] with the layout magnified `k` times about `origin`: pen
+    /// positions scale and each glyph rasterizes at `k` times its size, so it stays crisp.
+    pub(crate) fn glyphs_for_layout_scaled(
+        &mut self,
+        layout: &Layout<Ink>,
+        scale: f32,
+        origin: [f32; 2],
+        k: f32,
+        bytes: bool,
+        out: &mut Vec<GlyphQuad>,
+    ) {
         let mut table = std::mem::take(&mut self.cluster_scratch);
         let mut coords = std::mem::take(&mut self.coords_scratch);
         for line in layout.lines() {
@@ -1249,7 +1263,7 @@ impl TextSystem {
             for item in line.items() {
                 let PositionedLayoutItem::GlyphRun(glyph_run) = item else { continue };
                 let face = Face::of(&glyph_run, &mut coords);
-                let baseline = (origin[1] + face.baseline).round();
+                let baseline = (origin[1] + face.baseline * k).round();
                 let mut rel = glyph_run.offset();
                 for g in glyph_run.glyphs() {
                     let byte = if bytes {
@@ -1258,7 +1272,9 @@ impl TextSystem {
                     } else {
                         0
                     };
-                    self.push_glyph(&face, &coords, g.id, [origin[0] + rel + g.x, baseline + g.y], scale, byte, out);
+                    let at = if k == 1.0 { [origin[0] + rel + g.x, baseline + g.y] }
+                        else { [origin[0] + (rel + g.x) * k, baseline + g.y * k] };
+                    self.push_glyph(&face, &coords, g.id, at, scale, k, byte, out);
                     rel += g.advance;
                 }
             }
@@ -1275,16 +1291,16 @@ impl TextSystem {
         for g in &run.glyphs[glyphs] {
             let face = &run.faces[g.face as usize];
             let baseline = (origin[1] + face.face.baseline).round();
-            self.push_glyph(&face.face, &face.coords, g.id, [origin[0] + g.x, baseline + g.y], scale, at as u32, out);
+            self.push_glyph(&face.face, &face.coords, g.id, [origin[0] + g.x, baseline + g.y], scale, 1.0, at as u32, out);
         }
     }
 
-    /// Rasterizes (once) and appends one glyph at device position `at`.
+    /// Rasterizes (once) and appends one glyph at device position `at`, `k` times its size.
     #[allow(clippy::too_many_arguments)]
-    fn push_glyph(&mut self, face: &Face, coords: &[i16], glyph: u32, at: [f32; 2], scale: f32, byte: u32, out: &mut Vec<GlyphQuad>) {
+    fn push_glyph(&mut self, face: &Face, coords: &[i16], glyph: u32, at: [f32; 2], scale: f32, k: f32, byte: u32, out: &mut Vec<GlyphQuad>) {
         let dilation = 0.1 * scale;
         let [gx, gy] = at;
-        let (font, font_size, ink, skew) = (&face.font, face.size, face.ink, face.skew);
+        let (font, font_size, ink, skew) = (&face.font, face.size * k, face.ink, face.skew);
         let fx = gx.floor();
         let subpx = ((gx - fx) * SUBPIXEL_STEPS).round() as u8;
         let (fx, subpx) = if subpx as f32 >= SUBPIXEL_STEPS { (fx + 1.0, 0) } else { (fx, subpx) };

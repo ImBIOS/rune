@@ -558,6 +558,7 @@ pub struct El {
     pub(crate) cursor: Option<Cursor>,
     pub(crate) window_drag: bool,
     pub(crate) press_scale: Option<f32>,
+    pub(crate) scale: f32,
 }
 
 fn base(dir: FlexDirection) -> El {
@@ -612,6 +613,7 @@ fn base(dir: FlexDirection) -> El {
         cursor: None,
         window_drag: false,
         press_scale: None,
+        scale: 1.0,
     }
 }
 
@@ -786,7 +788,9 @@ impl El {
     pub fn live_offset(mut self, value: impl Into<crate::live::Binding<[f32; 2]>>) -> Self {
         self.bind_live(crate::live::Bound::new(value, crate::live::Property::Offset)); self
     }
-    /// Bind uniform scale around the node's centre; layout remains at its target size.
+    /// Bind uniform scale around the node's centre; layout remains at its target size. Text,
+    /// icons and images in the subtree scale with it, as under [`El::scale`]. Text rasterizes
+    /// at the scale rounded to 1/32, so a dragged value doesn't fill the glyph atlas.
     pub fn live_scale(mut self, value: impl Into<crate::live::Binding<f32>>) -> Self {
         self.bind_live(crate::live::Bound::new(value, crate::live::Property::Scale)); self
     }
@@ -1403,6 +1407,15 @@ impl El {
     /// Reduce Motion turns it off. `1.0` (or anything not positive) removes it.
     pub fn press_scale(mut self, scale: f32) -> Self {
         self.press_scale = (scale.is_finite() && scale > 0.0 && scale != 1.0).then_some(scale);
+        self
+    }
+    /// Draw this element and everything in it `k` times its size about its centre, like
+    /// SwiftUI's `scaleEffect`: fills, borders, text, icons and images all scale, and text
+    /// rasterizes at the scaled size. Layout keeps the unscaled size, so siblings don't move;
+    /// hit testing follows the scaled rect. Multiplies with transitions, `live_scale` and
+    /// `press_scale`. Anything not finite or below zero is `1.0`.
+    pub fn scale(mut self, k: f32) -> Self {
+        self.scale = if k.is_finite() && k >= 0.0 { k } else { 1.0 };
         self
     }
     /// Clip children to this box with soft gradient edges (never a hard crop).
