@@ -568,7 +568,7 @@ impl ApplicationHandler for App {
                 l.surface.configure(&l.gfx.device, &l.config);
                 l.window.request_redraw();
             }
-            WindowEvent::ScaleFactorChanged { .. } => l.window.request_redraw(),
+            WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Occluded(false) => l.window.request_redraw(),
             WindowEvent::CursorMoved { position, .. } => {
                 // winit reports physical px from the content view's top-left; undo the centring, then px → pt.
                 let (k, o) = (l.k(), l.offset());
@@ -607,17 +607,21 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 l.gfx.resize((l.config.width, l.config.height));
                 set_scale(l.k());
-                let surface_tex = match l.surface.get_current_texture() {
+                let mut status = l.surface.get_current_texture();
+                if matches!(status, wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost) {
+                    l.surface.configure(&l.gfx.device, &l.config);
+                    status = l.surface.get_current_texture();
+                }
+                let surface_tex = match status {
                     wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-                    wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                        l.surface.configure(&l.gfx.device, &l.config);
+                    // Uncovering the window redraws it (below). Redrawing now would spin a core.
+                    wgpu::CurrentSurfaceTexture::Occluded => return,
+                    // A timeout already waited for a drawable; anything else needs a new event.
+                    wgpu::CurrentSurfaceTexture::Timeout => {
                         l.window.request_redraw();
                         return;
                     }
-                    _ => {
-                        l.window.request_redraw();
-                        return;
-                    }
+                    _ => return,
                 };
                 let view = surface_tex.texture.create_view(&Default::default());
                 let (mut frame, moving) = st.frame(&mut l.gfx.ts);
