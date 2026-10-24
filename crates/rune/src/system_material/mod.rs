@@ -43,6 +43,7 @@ pub(crate) struct MaterialDraw {
 
 impl MaterialDraw {
     /// The native view's frame (x, y, width, height from the top left) and corner radius, in points.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn points(&self, scale: f32) -> ([f64; 4], f64) {
         let s = f64::from(scale.max(1e-3));
         (self.rect.map(|v| f64::from(v) / s), f64::from(self.radius) / s)
