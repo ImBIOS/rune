@@ -5,6 +5,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`rune::text::measure(text, spans, style, max_width)`** returns a text's laid-out size outside
+  a frame, with the fonts the app loaded; `Some(0.0)` gives its min-content width.
 - **Text in fonts with a `trak` table (the macOS system font) now has the same width at every
   display scale, matching AppKit.** The font's size-specific tracking used to be looked up at
   the size in device pixels, so at 2x 14 pt text was tracked as 28 pt text. It is now applied
@@ -57,6 +59,7 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   like every later `open()`. Before, the new window became key while another app stayed
   active, so typing and ⌘W went to that app. The window opened at launch and nonactivating
   panels are unchanged.
+||||||| parent of 960e2b7 (rune: text::measure sizes text outside a frame)
 - **`App::window` windows still open when the main window closes now run their `on_close`,
   and `WindowSpec::from_app` starts from the app's `window_options`** (before, it used the
   defaults, so headless runs dropped `transparent` and `physical_size`).

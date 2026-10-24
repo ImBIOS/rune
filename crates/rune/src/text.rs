@@ -27,9 +27,11 @@ mod case;
 #[cfg(all(test, target_os = "macos"))]
 mod core_text_tests;
 mod fallback;
+mod measure;
 mod svg_path;
 mod trak;
 pub use case::TextCase;
+pub use measure::measure;
 pub(crate) use case::Source as CaseSource;
 
 use fallback::Route;
@@ -820,6 +822,7 @@ impl TextSystem {
     /// `fonts` replaces the built-in Inter faces when non-empty; `families` names the sans and
     /// mono slots. Other registered families are selectable with `Family::Named`.
     pub fn new(fonts: &[&'static [u8]], families: (&str, &str)) -> Self {
+        measure::note_fonts(fonts, families);
         let mut collection = Collection::new(CollectionOptions { shared: false, system_fonts: false });
         let list: &[&'static [u8]] = if fonts.is_empty() { &DEFAULT_FONTS } else { fonts };
         let mut registered = Vec::new();
