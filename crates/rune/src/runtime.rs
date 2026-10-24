@@ -3704,7 +3704,7 @@ impl<S: 'static> Runtime<S> {
     // Inspection
 
     pub fn elements(&self) -> Vec<ElementInfo> {
-        fn live_intent(n: &Node) -> u32 {
+        fn intent(n: &Node) -> u32 {
             n.live.iter().filter(|b| b.spring.is_none()).fold(0, |bits, b| bits | match b.property {
                 crate::live::Property::Offset => 1,
                 crate::live::Property::Scale | crate::live::Property::Rect => 1 | 2,
@@ -3713,6 +3713,9 @@ impl<S: 'static> Runtime<S> {
             })
         }
         let store = self.scene.store();
+        let animating = |id: NodeId| store.is_animating(id, prop::FRAME) || store.is_animating(id, prop::TRAVEL)
+            || store.is_animating(id, prop::PRESENCE) || store.is_animating(id, prop::OFFSET) || store.is_animating(id, prop::SCALE)
+            || (!self.reduced_motion && self.loops.get(&id).is_some_and(|l| l.active(self.t)));
         let mut elements: Vec<_> = self.nodes
             .iter()
             .enumerate()
@@ -3720,12 +3723,7 @@ impl<S: 'static> Runtime<S> {
                 let p = self.scene.presented(n.id)?;
                 let exiting = self.subtree_exiting(i);
                 let flight = self.flights.iter().find(|f| f.lands(&n.path, n.key.as_deref()));
-                let mut moving = flight.is_some() || (!self.reduced_motion && self.loops.get(&n.id).is_some_and(|l| l.active(self.t)))
-                    || store.is_animating(n.id, prop::FRAME)
-                    || store.is_animating(n.id, prop::TRAVEL)
-                    || store.is_animating(n.id, prop::PRESENCE)
-                    || store.is_animating(n.id, prop::OFFSET) || store.is_animating(n.id, prop::SCALE)
-                    || self.grows.get(&n.id).is_some_and(|g| g.moving());
+                let mut moving = flight.is_some() || animating(n.id) || self.grows.get(&n.id).is_some_and(|g| g.moving());
                 let rect = flight.map_or_else(|| self.drawn.get(i).copied().unwrap_or([p.rect.x, p.rect.y, p.rect.w, p.rect.h]),
                     |f| [f.presented.x, f.presented.y, f.presented.w, f.presented.h]);
                 let s = self.env.scale;
@@ -3737,7 +3735,7 @@ impl<S: 'static> Runtime<S> {
                 let revealing = flight.is_some() || self.reveals.get(&n.id).is_some_and(|r| !r.words.is_empty());
                 let mut in_growing_row = false;
                 let mut scrolling = false;
-                let mut live_intent = live_intent(n);
+                let mut live_intent = intent(n);
                 // A group_opacity swap under an instant hover group is a deliberate cut (Beta's
                 // status/close swap), for it and what it contains: opacity and transition intent.
                 let up = |from: Option<usize>| std::iter::successors(from, |&pi| self.nodes[pi].parent);
@@ -3751,26 +3749,12 @@ impl<S: 'static> Runtime<S> {
                 }
                 let mut a = n.parent;
                 while let Some(pi) = a {
-                    let parent = self.nodes[pi].id;
-                    moving |= store.is_animating(parent, prop::FRAME) || store.is_animating(parent, prop::TRAVEL)
-                        || store.is_animating(parent, prop::PRESENCE)
-                        || store.is_animating(parent, prop::OFFSET) || store.is_animating(parent, prop::SCALE)
-                        || (!self.reduced_motion && self.loops.get(&parent).is_some_and(|l| l.active(self.t)));
-                    for b in &self.nodes[pi].live {
-                        if b.spring.is_none() {
-                            live_intent |= match b.property {
-                                crate::live::Property::Offset => 1,
-                                crate::live::Property::Scale | crate::live::Property::Rect => 1 | 2,
-                                crate::live::Property::Opacity => 4,
-                                crate::live::Property::Fill | crate::live::Property::Blur => 0,
-                            };
-                        }
-                    }
-                    scrolling |= self.scrolls.get(&self.nodes[pi].id).is_some_and(|s| s.scrolling);
-                    if self.grows.get(&self.nodes[pi].id).is_some_and(|g| g.moving()) {
-                        in_growing_row = true;
-                    }
-                    a = self.nodes[pi].parent;
+                    let parent = &self.nodes[pi];
+                    moving |= animating(parent.id);
+                    live_intent |= intent(parent);
+                    scrolling |= self.scrolls.get(&parent.id).is_some_and(|s| s.scrolling);
+                    in_growing_row |= self.grows.get(&parent.id).is_some_and(|g| g.moving());
+                    a = parent.parent;
                 }
                 Some(ElementInfo {
                     trace_name: n.trace_name,
