@@ -1016,6 +1016,11 @@ impl<S: 'static> Runtime<S> {
         self.dirty
     }
 
+    /// The last frame no longer shows the window: state, its size or queued input changed since.
+    pub(crate) fn stale(&self) -> bool {
+        self.dirty || self.relayout || !self.queue.is_empty()
+    }
+
     /// Marks app state changed outside a handler (the next frame re-runs the view).
     pub fn invalidate(&mut self) {
         self.dirty = true;

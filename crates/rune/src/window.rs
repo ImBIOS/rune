@@ -244,6 +244,10 @@ impl WindowHandle {
         queued.into_iter().map(|request| request(0)).collect()
     }
 
+    pub(crate) fn headless_pending(&self) -> bool {
+        !self.native.route.lock().unwrap().1.is_empty()
+    }
+
     fn send(&self, request: impl FnOnce(usize) -> WakeEvent + Send + 'static) {
         let mut route = self.native.route.lock().unwrap();
         match &route.0 {

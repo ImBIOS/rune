@@ -448,6 +448,12 @@ impl<S> Shared<S> {
         std::mem::take(&mut self.requests.lock().unwrap())
     }
 
+    /// A request a `--desktop` run applies to the window (dock and quit aside) waits for `take`.
+    pub(crate) fn window_pending(&self) -> bool {
+        let r = self.requests.lock().unwrap();
+        r.window.is_some() || r.focus || r.position.is_some() || r.place.is_some() || !r.updates.is_empty()
+    }
+
     pub fn take_place(&self) -> Option<crate::windows::PlaceRequest> {
         self.requests.lock().unwrap().place.take()
     }

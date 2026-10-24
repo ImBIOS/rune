@@ -1030,8 +1030,9 @@ $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/d
   A press goes to the topmost window under it that takes clicks, brings it to the front and
   gives it the keyboard; a press on the backdrop deactivates the app. Keys go to the key window;
   shortcuts and menu picks go to the key window's app first, then the others. Show, hide, place,
-  focus and close requests apply as they would natively, but `quit` doesn't end the recording.
-  When the key window hides, the topmost visible window that takes clicks gets the keyboard.
+  focus and close requests apply as they would natively, in the frame whose handlers made them,
+  but `quit` doesn't end the recording. When the key window hides, the topmost visible window
+  that takes clicks gets the keyboard.
   `--keys` and `--pointer` draw over the composite. `--window KEY` picks the window `--tree`,
   `--trace` and `--scene` describe, and the tree adds a `windows` list of every window's frame.
   `headless_run()` gives `desktop()`, the window frames as they change (`window_frames()`) and

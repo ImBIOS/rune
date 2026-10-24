@@ -2006,6 +2006,102 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A `--desktop` window whose key handler does `act` to another window.
+    struct Pair { name: &'static str, color: crate::Color, other: Option<crate::AppHandle<Pair>>, act: fn(&crate::AppHandle<Pair>, &mut crate::Tx) }
+    /// The windows `Pair`'s key handler ran in, in order.
+    static KEYED: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    const RED: crate::Color = crate::Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+    const GREEN: crate::Color = crate::Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 };
+    const BLUE: crate::Color = crate::Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 };
+
+    fn pair(name: &'static str, color: crate::Color, other: Option<crate::AppHandle<Pair>>, act: fn(&crate::AppHandle<Pair>, &mut crate::Tx), options: crate::WindowOptions) -> (crate::WindowSpec<Pair>, crate::AppHandle<Pair>) {
+        let spec = AppSpec {
+            on_key: Some(|p: &mut Pair, _: &crate::KeyEvent, tx: &mut crate::Tx| {
+                KEYED.lock().unwrap().push(p.name);
+                if let Some(other) = &p.other { (p.act)(other, tx); }
+                true
+            }),
+            ..AppSpec::new("pair", (1.0, 1.0), || Pair { name: "", color: crate::Color::TRANSPARENT, other: None, act: |_, _| {} },
+                |p, _| crate::el().w_full().h_full().fill(p.color))
+        };
+        let app = crate::App::new(spec).init(move || Pair { name, color, other, act });
+        let handle = app.handle();
+        (crate::WindowSpec::from_app(name, app).options(options), handle)
+    }
+
+    /// Runs `windows` over a grey 120x80-point backdrop at scale 2: the snap at `at`, and the run.
+    fn desktop_case(name: &str, script: &str, at: f64, extra: &[&str], windows: impl FnOnce() -> Vec<crate::AnyWindowSpec> + 'static) -> (::image::RgbaImage, &'static HeadlessRun) {
+        let dir = std::env::temp_dir().join(format!("rune-desktop-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let backdrop = dir.join("backdrop.png");
+        ::image::RgbaImage::from_pixel(240, 160, ::image::Rgba([128, 128, 128, 255])).save(&backdrop).unwrap();
+        let (script_path, snap) = (dir.join("script.json"), dir.join("snap.png"));
+        std::fs::write(&script_path, script).unwrap();
+        KEYED.lock().unwrap().clear();
+        let at = at.to_string();
+        let mut args = vec!["--desktop", backdrop.to_str().unwrap(), "--script", script_path.to_str().unwrap(),
+            "--scale", "2", "--fps", "10", "--at", &at, "--snap", snap.to_str().unwrap()];
+        args.extend_from_slice(extra);
+        crate::run_windows_with_args(crate::RunOptions::default(), args.into_iter().map(String::from).collect::<Vec<_>>(), move |_| windows());
+        let png = ::image::open(&snap).unwrap().into_rgba8();
+        std::fs::remove_dir_all(&dir).unwrap();
+        (png, headless_run().unwrap())
+    }
+
+    /// Window pixels at (20, 20) to (120, 80) of the output, and at (160, 40) to (220, 100).
+    fn left() -> crate::WindowOptions { crate::WindowOptions { position: Some((20, 20)), physical_size: Some((100, 60)), ..Default::default() } }
+    fn right() -> crate::WindowOptions { crate::WindowOptions { position: Some((160, 40)), physical_size: Some((60, 60)), ..Default::default() } }
+    fn focus_of(run: &HeadlessRun, t: f64, key: &str) -> (bool, bool) {
+        let f = run.windows_at(t).into_iter().find(|f| f.key == key).unwrap();
+        (f.visible, f.focused)
+    }
+
+    #[test]
+    fn desktop_frame_shows_what_a_handler_did_to_another_window_that_frame() {
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+        // The launcher's Return updates and focuses the notes window and closes the launcher;
+        // the frame of that key shows the new note in the focused window.
+        let (png, run) = desktop_case("stale", r#"[{"t": 0.1, "type": "key", "name": "Enter"}]"#, 0.1, &[], || {
+            let (notes, handle) = pair("notes", RED, None, |_, _| {}, left());
+            let (launcher, _) = pair("launcher", BLUE, Some(handle), |notes, tx| {
+                notes.update(|p, tx| { p.color = GREEN; tx.instant(); });
+                notes.focus();
+                tx.close_window();
+            }, right());
+            vec![notes.boxed(), launcher.boxed()]
+        });
+        assert_eq!(*KEYED.lock().unwrap(), ["launcher"]);
+        let p = png.get_pixel(70, 50).0;
+        assert!(p[1] > 245 && p[0] < 10, "the note changed in this frame: {p:?}");
+        assert_eq!((focus_of(&run, 0.1, "notes"), focus_of(&run, 0.1, "launcher")), ((true, true), (false, false)));
+    }
+
+    #[test]
+    fn desktop_window_closing_itself_on_blur_closes_in_that_frame() {
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+        // Return in `a` focuses `b`, which blurs `a`, whose on_focus closes it.
+        let script = r#"[{"t": 0.1, "type": "tap", "x": 30, "y": 25}, {"t": 0.2, "type": "key", "name": "Enter"}]"#;
+        let (png, run) = desktop_case("blur", script, 0.2, &[], || {
+            let (b, handle) = pair("b", BLUE, None, |_, _| {}, right());
+            let (a, _) = pair("a", RED, Some(handle), |b, _| b.focus(), left());
+            vec![a.on_focus(|_, focused, tx| if !focused { tx.close_window() }).boxed(), b.boxed()]
+        });
+        assert_eq!(focus_of(&run, 0.1, "a"), (true, true));
+        assert_eq!((focus_of(&run, 0.2, "a"), focus_of(&run, 0.2, "b")), ((false, false), (true, true)));
+        assert_eq!(png.get_pixel(40, 50).0, [128, 128, 128, 255], "a is gone from the frame");
+
+        // The last shown window closes; losing the keyboard, it opens `c`, which shows at once.
+        let (png, run) = desktop_case("blur-open", r#"[{"t": 0.1, "type": "key", "name": "Enter"}]"#, 0.1, &[], || {
+            let (c, handle) = pair("c", BLUE, None, |_, _| {}, crate::WindowOptions { visible: false, ..right() });
+            let (a, _) = pair("a", RED, Some(handle), |_, tx| tx.close_window(), left());
+            let a = a.on_focus(|p, focused, _| if !focused && let Some(c) = &p.other { c.open() });
+            vec![c.boxed(), a.boxed()]
+        });
+        assert_eq!((focus_of(&run, 0.1, "a"), focus_of(&run, 0.1, "c")), ((false, false), (true, true)));
+        let p = png.get_pixel(190, 70).0;
+        assert!(p[2] > 245 && p[0] < 10, "c draws in that frame: {p:?}");
+    }
+
     #[test]
     fn keycaps_draw_over_frames_but_never_enter_the_tree() {
         let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());

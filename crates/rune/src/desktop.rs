@@ -27,6 +27,8 @@ const KEY_SHADOW: (f32, f32, f32) = (14.0, 14.0, 0.5);
 const SHADOW: (f32, f32, f32) = (6.0, 5.0, 0.32);
 /// Shadow masks are this many window pixels to a texel.
 const DOWN: u32 = 4;
+/// Bound on rounds of windows asking things of each other within one frame.
+const PASSES: usize = 8;
 
 /// What a window asked of the desktop while it drained its requests.
 #[derive(Default)]
@@ -54,6 +56,10 @@ pub(crate) trait Member {
     fn trace_on(&mut self);
     /// Applies what the app asked since the last call (updates, show/hide, place, close).
     fn drain(&mut self, desktop: &VirtualDesktop, t: f64) -> Changes;
+    /// Something asked of it since `drain`, such as by a focus change another window's drain made.
+    fn pending(&self) -> bool;
+    /// Its last frame no longer shows its state, size or input.
+    fn stale(&self) -> bool;
     fn advance(&mut self, dt: f64);
     fn focus(&mut self, focused: bool);
     /// Pointer and keyboard input; pointer kinds at `at`, in window points.
@@ -274,6 +280,11 @@ impl<S: 'static> Member for Window<S> {
         changes
     }
 
+    fn pending(&self) -> bool {
+        self.shared.window_pending() || self.rt.shell_request.is_some() || self.handle.as_ref().is_some_and(WindowHandle::headless_pending)
+    }
+
+    fn stale(&self) -> bool { self.rt.stale() }
     fn advance(&mut self, dt: f64) { self.rt.frame(dt); }
     fn focus(&mut self, focused: bool) { self.rt.window_focus(focused); }
 
@@ -394,12 +405,31 @@ impl Desk {
         }
     }
 
+    /// Applies what every window asked, again while draining one window makes requests of
+    /// another (a focus change runs `on_focus`, which may close its window or update others).
     fn drain(&mut self, desktop: &VirtualDesktop, t: f64) {
-        for i in 0..self.members.len() {
-            let changes = self.members[i].drain(desktop, t);
-            self.apply(i, changes);
+        for _ in 0..PASSES {
+            for i in 0..self.members.len() {
+                let changes = self.members[i].drain(desktop, t);
+                self.apply(i, changes);
+            }
+            self.settle_key();
+            if !self.members.iter().any(|m| m.pending()) { return; }
         }
-        self.settle_key();
+        eprintln!("rune: windows still made requests of each other after {PASSES} passes at t = {t:.3}; the rest wait a frame");
+    }
+
+    /// Steps, without time passing, each shown window whose frame no longer shows what this
+    /// frame's handlers asked of it, so the frame draws their result rather than a frame later.
+    fn catch_up(&mut self, desktop: &VirtualDesktop, t: f64) {
+        for _ in 0..PASSES {
+            let mut stepped = false;
+            for m in &mut self.members {
+                if m.visible() && m.stale() { m.advance(0.0); stepped = true; }
+            }
+            if !stepped { return; }
+            self.drain(desktop, t);
+        }
     }
 
     /// Top-left in output pixels, rounded so window pixels land on output pixels.
@@ -631,8 +661,10 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args) {
         desk.drain(&desktop, real_t);
         let step = if k == 0 { 0.0 } else { dt };
         for m in &mut desk.members { m.advance(step); }
-        // Handlers that ran this frame may show, hide, place or close windows.
+        // Handlers that ran this frame may show, hide, place, focus or close windows, or update
+        // a window that already stepped.
         desk.drain(&desktop, real_t);
+        desk.catch_up(&desktop, real_t);
         record(&desk, real_t);
         let update_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
 
