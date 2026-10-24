@@ -92,8 +92,8 @@ impl<S: 'static> App<S> {
         self
     }
 
-    /// Native options for this app's window under `run` (size limits, resizability, ...);
-    /// `run_windows` takes them per `WindowSpec` instead.
+    /// Native options for this app's window (size limits, resizability, ...). `WindowSpec::from_app`
+    /// starts from them, and `WindowSpec::options` replaces them.
     pub fn window_options(mut self, options: crate::WindowOptions) -> Self {
         self.window_options = options;
         self

@@ -1,6 +1,6 @@
 //! A window added with `App::window` starts hidden, opens later with its own state, closes
 //! by hiding without quitting the app, reopens with that state, and never keeps the app
-//! running once the main window closes. Opens native windows, so it only runs with
+//! running once the main window closes, closing with it. Opens native windows, so it only runs with
 //! RUNE_GUI_TESTS=1 in a logged-in GUI session.
 
 use std::sync::{Mutex, atomic::{AtomicUsize, Ordering}};
@@ -77,5 +77,6 @@ fn main() {
     });
     app.run();
     assert_eq!(*result.lock().unwrap(), Some(true), "secondary_window failed");
+    assert_eq!(CLOSES.load(Ordering::SeqCst), 2, "the open settings window closes with the app");
     println!("secondary_window: ok");
 }

@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`App::window` windows still open when the main window closes now run their `on_close`,
+  and `WindowSpec::from_app` starts from the app's `window_options`** (before, it used the
+  defaults, so headless runs dropped `transparent` and `physical_size`).
 - **One app can host windows with different state types.** `App::window(WindowSpec<T>)` adds
   an ordinary window with its own state and returns its `AppHandle<T>` and `WindowHandle`.
   It honours `visible: false`, closes by hiding (its `on_close` runs and reopening keeps the

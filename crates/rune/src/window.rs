@@ -325,7 +325,14 @@ impl Windows {
         for host in &mut self.hosts {
             if host.as_ref().is_some_and(|h| h.finished()) { *host = None; }
         }
-        if !self.hosts.iter().flatten().any(|h| h.keeps_loop()) { event_loop.exit(); }
+        if !self.hosts.iter().flatten().any(|h| h.keeps_loop()) {
+            // The app ends with its last main window: windows still open close as their close
+            // button would. A quit already asked to exit and skips their hooks.
+            if !event_loop.exiting() {
+                for host in self.hosts.iter_mut().flatten() { host.terminate(); }
+            }
+            event_loop.exit();
+        }
     }
 }
 
@@ -485,8 +492,7 @@ struct Host<S: 'static> {
 
 pub fn run<S: 'static>(app: App<S>, args: Args) {
     let accessory = app.accessory;
-    let options = app.window_options.clone();
-    run_configured(Box::new(move |_| { let mut spec = WindowSpec::from_app("main", app); spec.options = options; vec![spec.into()] }), args, accessory);
+    run_configured(Box::new(move |_| vec![WindowSpec::from_app("main", app).into()]), args, accessory);
 }
 
 pub(crate) fn run_windows(factory: Factory, args: Args, options: crate::RunOptions) {

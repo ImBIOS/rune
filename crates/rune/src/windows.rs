@@ -200,7 +200,7 @@ impl<S> WindowSpec<S> {
     /// App::accessory is process-level: use run_windows_with(RunOptions, factory) instead.
     /// AppHandle::set_dock_icon remains global.
     pub fn from_app(key: impl Into<String>, app: App<S>) -> Self {
-        Self { key: key.into(), app, options: WindowOptions::default(), on_created: None }
+        Self { key: key.into(), options: app.window_options.clone(), app, on_created: None }
     }
     /// Configure this window's frame, including headless traffic-light placement.
     pub fn chrome(mut self, chrome: crate::Chrome) -> Self { self.app = self.app.chrome(chrome); self }
@@ -328,6 +328,8 @@ mod tests {
         let app = App::new(spec).configured_options(WindowOptions::launcher_panel());
         assert!(app.macos_window.launcher);
         assert!(!app.window_options.visible);
+        let window = WindowSpec::from_app("launcher", app);
+        assert!(!window.options.visible && window.options.transparent);
     }
 
     #[test]
