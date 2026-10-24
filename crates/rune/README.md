@@ -73,6 +73,12 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   `.on_secondary_press(|s: &mut App, point, tx| ..)` receives window-point coordinates on
   right-click (also control-click on macOS), without invoking primary actions. Scripts accept
   `secondary-down`, `secondary-up`, and `secondary-click`.
+- **Press scale**: `.press_scale(0.97)` shrinks an element (and its children) about its centre
+  while a press on it is held, following the pointer in and out like an iOS tile, and springs back
+  with a slight bounce on release. Interrupting a spring retargets it without a jump. Layout and
+  hit testing keep the resting size, so a press near the edge stays inside. Elements without it pay
+  nothing, and Reduce Motion turns it off. rune-kit's `Button` and `IconButton` don't use it: they
+  follow `@opencode/ui` and AppKit, whose buttons don't scale.
 - **Focus and modals**: `.focusable(true)`, `.tab_index(n)` (positive overrides, 0 document order,
   negative pointer-only), `.focus_group()` for arrow-key roving (Up/Down only, plus type-select,
   for roles `menu`, `listbox`, `list` and `tree`), `.focus_follows()` to press each item it

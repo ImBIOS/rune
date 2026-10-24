@@ -89,6 +89,8 @@ const P_PRESS: Prop<f32> = Prop::custom(74, PropClass::Opacity);
 const P_GRADIENT: [Prop<Color>; 2] = [Prop::custom(75, PropClass::Color), Prop::custom(76, PropClass::Color)];
 const P_OUTLINE: Prop<Color> = Prop::custom(77, PropClass::Color);
 const P_BORDER_BOTTOM: Prop<Color> = Prop::custom(78, PropClass::Color);
+/// `El::press_scale`'s presented factor, multiplied into the element's own scale.
+const P_PRESS_SCALE: Prop<f32> = Prop::custom(79, PropClass::Scale);
 
 /// Scroll momentum decay (iOS normal: 0.998 per ms).
 const SCROLL_DECAY: f32 = 2.002;
@@ -231,6 +233,7 @@ pub(crate) struct Node {
     input: Option<Box<InputSpec>>,
     cursor: Option<crate::el::Cursor>,
     window_drag: bool,
+    press_scale: Option<f32>,
     /// Inside a growth row: layout snaps (the row's height carries the motion).
     in_row: bool,
     virtual_mount: bool,
@@ -2767,7 +2770,7 @@ impl<S: 'static> Runtime<S> {
     pub(crate) fn observe_pointer(&mut self, x: f32, y: f32) -> bool {
         if self.pointer == Some((x, y)) { return false; }
         let visual_changed = self.nodes.iter().enumerate().any(|(i, n)| {
-            if n.vis.hover.a <= 0.0 && n.vis.press.a <= 0.0 { return false; }
+            if n.vis.hover.a <= 0.0 && n.vis.press.a <= 0.0 && n.press_scale.is_none() { return false; }
             let r = self.drawn_edges(i);
             let inside = |p: Option<(f32, f32)>| p.is_some_and(|(x, y)| contains(r, x, y));
             inside(self.pointer) != inside(Some((x, y)))
@@ -3171,7 +3174,7 @@ impl<S: 'static> Runtime<S> {
         for i in 0..self.nodes.len() {
             let n = &self.nodes[i];
             let tracks_hover = n.vis.hover.a > 0.0 || n.vis.hover_group;
-            if self.is_exiting(n.id) || (!tracks_hover && n.vis.press.a <= 0.0) {
+            if self.is_exiting(n.id) || (!tracks_hover && n.vis.press.a <= 0.0 && n.press_scale.is_none()) {
                 continue;
             }
             let r = self.drawn_edges(i);
@@ -3183,7 +3186,9 @@ impl<S: 'static> Runtime<S> {
             let within = |p: &str| p == n.path || (p.len() > n.path.len() && p.starts_with(&n.path) && p.as_bytes()[n.path.len()] == b'/');
             let hovered = inside && tracks_hover && captured.is_none_or(within);
             let capture_inside = if self.secondary_capture.is_some() { inside } else { self.capture_inside };
-            let pressed = captured == Some(n.path.as_str()) && capture_inside && n.vis.press.a > 0.0;
+            let held = captured == Some(n.path.as_str()) && capture_inside;
+            let pressed = held && n.vis.press.a > 0.0;
+            let press_scale = n.press_scale;
             let id = n.id;
             // Like a native sidebar or menu: the highlight lands with the pointer and
             // fades briefly as it leaves.
@@ -3194,6 +3199,11 @@ impl<S: 'static> Runtime<S> {
             };
             self.scene.animate(id, P_HOVER, hovered as u8 as f32, hover_anim);
             self.scene.animate(id, P_PRESS, pressed as u8 as f32, if pressed { motion::INSTANT } else { motion::SNAPPY });
+            if let Some(k) = press_scale {
+                // Down follows the hand; the release springs back with a little life.
+                let down = held && !self.reduced_motion;
+                self.scene.animate(id, P_PRESS_SCALE, if down { k } else { 1.0 }, if down { motion::INSTANT } else { motion::POP });
+            }
         }
     }
 
@@ -3349,7 +3359,8 @@ impl<S: 'static> Runtime<S> {
             let (mut clip, mut fade) = (pinh.paint_clip, pinh.paint_fade);
             let mut fade_origin = pinh.paint_fade_origin;
             let mut rounded = pinh.rounded;
-            let own_sc = p.transform.scale.x * self.loops.get(&n.id)
+            let press_k = if n.press_scale.is_some() { self.scene.get(n.id, P_PRESS_SCALE).unwrap_or(1.0) } else { 1.0 };
+            let own_sc = p.transform.scale.x * press_k * self.loops.get(&n.id)
                 .filter(|_| matches!(n.looping.map(|l| l.kind), Some(rune_motion::LoopKind::Sequence(_))))
                 .and_then(|l| l.pose(now, self.reduced_motion)).map_or(1.0, |p| p.scale);
             let (sc, anchor) = if (own_sc - 1.0).abs() > 1e-5 {
@@ -3357,6 +3368,8 @@ impl<S: 'static> Runtime<S> {
             } else {
                 (pinh.scale, pinh.anchor)
             };
+            // A pressed element still hits at its resting size, so a press near its edge stays inside.
+            let press_anchor = anchor;
             let blur = pinh.blur + p.blur * sc;
             let filter_margin = blur * s * 3.0;
 
@@ -3965,6 +3978,11 @@ impl<S: 'static> Runtime<S> {
                 && self.allowed(i) && effective_opacity > 0.001 && visible
             {
                 let c = if n.parent.is_some() { pinh.clip } else { self.inh_scratch[0].clip };
+                let rect_pt = if (press_k - 1.0).abs() > 1e-5 {
+                    let [ax, ay] = press_anchor;
+                    [ax + (rect_pt[0] - ax) / press_k, ay + (rect_pt[1] - ay) / press_k,
+                        ax + (rect_pt[2] - ax) / press_k, ay + (rect_pt[3] - ay) / press_k]
+                } else { rect_pt };
                 let cr = [
                     rect_pt[0].max(c[0] / s),
                     rect_pt[1].max(c[1] / s),
@@ -4019,7 +4037,7 @@ impl<S: 'static> Runtime<S> {
         }
         let store = self.scene.store();
         let animating = |id: NodeId| store.is_animating(id, prop::FRAME) || store.is_animating(id, prop::TRAVEL)
-            || store.is_animating(id, prop::PRESENCE) || store.is_animating(id, prop::OFFSET) || store.is_animating(id, prop::SCALE)
+            || store.is_animating(id, prop::PRESENCE) || store.is_animating(id, prop::OFFSET) || store.is_animating(id, prop::SCALE) || store.is_animating(id, P_PRESS_SCALE)
             || (!self.reduced_motion && self.loops.get(&id).is_some_and(|l| l.active(self.t)));
         let mut elements: Vec<_> = self.nodes
             .iter()
@@ -4511,6 +4529,7 @@ fn flatten(
         input,
         cursor,
         window_drag,
+        press_scale,
         ..
     } = el;
     if let Some(t) = &text && t.live.is_some() {
@@ -4565,6 +4584,7 @@ fn flatten(
         input,
         cursor,
         window_drag,
+        press_scale,
         in_row,
         virtual_mount,
         parent,
@@ -5105,6 +5125,65 @@ mod tests {
         rt.pointer_up(x, y);
         rt.frame(1.0 / 120.0);
         assert_eq!(rt.state.pressed, [5]);
+    }
+
+    #[test]
+    fn press_scale_shrinks_while_held_and_springs_back() {
+        struct State { pressed: u32, reduced: bool }
+        fn view(s: &State, cx: &mut Cx<State>) -> El {
+            cx.reduced_motion(s.reduced);
+            col().size(200.0, 200.0).child(el().key("tile").size(100.0, 100.0).press_scale(0.96)
+                .on_press(|s: &mut State| s.pressed += 1)
+                .child(el().key("dot").size(10.0, 10.0)))
+        }
+        fn info(rt: &Runtime<State>, key: &str) -> ElementInfo {
+            rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap()
+        }
+        let settle = |rt: &mut Runtime<State>| for _ in 0..90 { rt.frame(1.0 / 120.0); };
+        let mut rt = Runtime::new(State { pressed: 0, reduced: false }, view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let rest = info(&rt, "tile");
+        assert_eq!(rest.scale, 1.0);
+        // Near the right edge, which the shrunken tile no longer covers.
+        rt.pointer_move(99.0, 50.0);
+        rt.pointer_down(99.0, 50.0);
+        settle(&mut rt);
+        let held = info(&rt, "tile");
+        assert!((held.scale - 0.96).abs() < 1e-4, "held scale {}", held.scale);
+        assert_eq!(held.target, rest.target, "layout keeps the resting size");
+        assert!((held.rect[0] - 2.0).abs() < 0.05 && (held.rect[2] - 96.0).abs() < 0.05, "shrinks about its centre: {:?}", held.rect);
+        assert!((info(&rt, "dot").scale - 0.96).abs() < 1e-4, "children shrink with it");
+        assert!(rt.capture_inside, "a press near the edge stays inside the resting rect");
+        rt.pointer_move(150.0, 50.0);
+        settle(&mut rt);
+        assert!((info(&rt, "tile").scale - 1.0).abs() < 1e-4, "leaving springs back");
+        rt.pointer_move(99.0, 50.0);
+        rt.frame(1.0 / 120.0);
+        let returning = info(&rt, "tile").scale;
+        assert!(returning < 1.0 && returning > 0.96, "re-entering shrinks again, from where it was: {returning}");
+        settle(&mut rt);
+        rt.pointer_up(99.0, 50.0);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(rt.state.pressed, 1);
+        let mut last = info(&rt, "tile").scale;
+        assert!(last > 0.96 && last < 1.0, "the release springs, not jumps: {last}");
+        let mut peak: f32 = last;
+        for _ in 0..90 {
+            rt.frame(1.0 / 120.0);
+            let s = info(&rt, "tile").scale;
+            assert!((s - last).abs() < 0.01, "no frame jumps more than 1%: {last} -> {s}");
+            peak = peak.max(s);
+            last = s;
+        }
+        assert!((last - 1.0).abs() < 1e-4, "settles at rest: {last}");
+        assert!(peak > 1.0, "the release has a little bounce: {peak}");
+
+        let mut reduced = Runtime::new(State { pressed: 0, reduced: true }, view, (200.0, 200.0), Env::new(true, 1.0));
+        reduced.frame(0.0);
+        reduced.pointer_move(50.0, 50.0);
+        reduced.pointer_down(50.0, 50.0);
+        settle(&mut reduced);
+        assert_eq!(info(&reduced, "tile").scale, 1.0, "Reduce Motion turns press scale off");
     }
 
     #[test]

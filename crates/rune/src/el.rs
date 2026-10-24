@@ -556,6 +556,7 @@ pub struct El {
     pub(crate) input: Option<Box<InputSpec>>,
     pub(crate) cursor: Option<Cursor>,
     pub(crate) window_drag: bool,
+    pub(crate) press_scale: Option<f32>,
 }
 
 fn base(dir: FlexDirection) -> El {
@@ -608,6 +609,7 @@ fn base(dir: FlexDirection) -> El {
         input: None,
         cursor: None,
         window_drag: false,
+        press_scale: None,
     }
 }
 
@@ -1376,6 +1378,14 @@ impl El {
     /// Overlay drawn over the fill while pressed.
     pub fn press(mut self, c: Color) -> Self {
         self.vis.press = c;
+        self
+    }
+    /// Shrink to `scale` about the centre while a press on this element is held, as iOS tiles
+    /// and buttons do (0.96 to 0.97), springing back on release or when the pointer leaves.
+    /// Put it on the element with `on_press`. Layout and hit testing keep the resting size, and
+    /// Reduce Motion turns it off. `1.0` (or anything not positive) removes it.
+    pub fn press_scale(mut self, scale: f32) -> Self {
+        self.press_scale = (scale.is_finite() && scale > 0.0 && scale != 1.0).then_some(scale);
         self
     }
     /// Clip children to this box with soft gradient edges (never a hard crop).

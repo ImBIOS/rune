@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Press scale.** `El::press_scale(0.97)` shrinks an element about its centre while a press
+  on it is held and springs it back on release. Layout and hit testing keep the resting size,
+  and Reduce Motion turns it off. Nothing changes for elements without it; rune-kit buttons
+  don't opt in.
 - **An explicit `optical_size(o)` now also picks the `trak` tracking:** text is tracked as Core
   Text tracks `o`-point text scaled to the set size, so
   `TextStyle::new(size * k, w).optical_size(size)` matches a SwiftUI view at `size` with
