@@ -558,25 +558,17 @@ impl<T: 'static> Overlay<T> {
         #[cfg(target_os = "macos")]
         if let Some(panel) = &self.panel {
             panel.show();
-            let support = panel.global_pointer();
-            self.shared.native.lock().unwrap().1.global_pointer = support;
             return;
         }
         #[cfg(target_os = "windows")]
         {
-            if let Some(native) = &mut self.native {
-                native.show();
-                self.shared.native.lock().unwrap().1.global_pointer = native.global_pointer();
-            }
+            if let Some(native) = &mut self.native { native.show(); }
             crate::win32::show_overlay(window);
         }
         #[cfg(not(target_os = "windows"))]
         window.set_visible(true);
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-        if let Some(x11) = &self.x11 {
-            x11.show(self.options.level);
-            self.shared.native.lock().unwrap().1.global_pointer = x11.global_pointer();
-        }
+        if let Some(x11) = &self.x11 { x11.show(self.options.level); }
     }
 
     fn resized(&mut self, event_loop: &ActiveEventLoop) {
