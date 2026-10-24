@@ -24,6 +24,8 @@ use crate::color::{Color, srgb_encode};
 use crate::tok::{Family, OpticalSize, TextStyle};
 
 mod case;
+#[cfg(all(test, target_os = "macos"))]
+mod core_text_tests;
 mod fallback;
 mod svg_path;
 mod trak;
