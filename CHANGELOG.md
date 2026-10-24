@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **rune-kit `List` rows with an action are keyboard-reachable.** When any row has
+  `on_select`, the rows sit in a `listbox` focus group: Tab enters the list once (on the
+  selected row, if any), arrows move between rows, and Enter selects. Those rows show
+  their highlight on keyboard or pointer focus (`focus_highlight`) instead of on hover. Lists
+  without actions are unchanged.
 - **A disabled, invalid rune-kit `TextInput` no longer has a red caret.** The caret now follows
   the text colour, as `TextArea`'s does. Only that one state changes.
 - **Rotating icons turn their artwork, not just their outline.** An icon with

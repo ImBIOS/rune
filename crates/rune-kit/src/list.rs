@@ -122,6 +122,10 @@ impl List {
             );
         }
         let mut scroll = col().key("scroll").w_full().gap(12.0);
+        // Rows with an action are one Tab stop; arrows move between them (AppKit lists).
+        if self.items.iter().any(|i| !i.actions.is_empty()) {
+            scroll = scroll.role("listbox").focus_group();
+        }
         if self.items.is_empty() && self.add.is_none() {
             scroll = scroll.child(
                 col()
@@ -153,6 +157,7 @@ impl List {
                 group_el = Some((item.group.clone(), g));
             }
             let active = self.active == Some(i);
+            let pressable = !item.actions.is_empty();
             let mut r = row()
                 .key(format!("item{i}"))
                 .role("option")
@@ -172,8 +177,13 @@ impl List {
                 if let Some(ai) = self.active_icon {
                     r = r.child(icon(ai, 16.0).color(c.std_icon_strong));
                 }
+            } else if pressable {
+                r = r.focus_highlight(c.surface_raised_hover);
             } else {
                 r = r.hover(c.surface_raised_hover);
+            }
+            if pressable {
+                r = r.focusable(true).focus_selected(item.selected);
             }
             if self.divider && i + 1 < n {
                 r = r
