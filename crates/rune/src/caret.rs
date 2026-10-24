@@ -33,7 +33,7 @@ impl<S: 'static> Runtime<S> {
     /// After an edit, scrolls the focused field's nearest scroll viewport just far enough to
     /// show the caret line, as a browser does for a textarea.
     pub(super) fn follow_caret(&mut self) {
-        let Some(i) = self.nodes.iter().position(|n| self.focused.as_deref() == Some(n.path.as_str())) else { return };
+        let Some(i) = self.focused_index() else { return };
         let Some(r) = self.caret_rect(&self.nodes, i) else { return };
         let mut up = self.nodes[i].parent;
         let v = loop {

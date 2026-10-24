@@ -172,7 +172,7 @@ impl<S: 'static> Runtime<S> {
     /// Tab inside the focused text's links: moves to its next (or previous) link and returns
     /// true, or false at its last (first) link so Tab leaves it.
     pub(super) fn link_tab(&mut self, backward: bool) -> bool {
-        let Some(i) = self.nodes.iter().position(|n| self.focused.as_deref() == Some(n.path.as_str())) else { return false };
+        let Some(i) = self.focused_index() else { return false };
         let count = self.link_count(i);
         let Some(k) = self.links.focus.filter(|_| count > 0) else { return false };
         let next = if backward { k.checked_sub(1) } else { Some(k + 1).filter(|&j| j < count) };

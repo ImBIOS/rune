@@ -1577,6 +1577,12 @@ impl<S: 'static> Runtime<S> {
         self.node(path).and_then(|n| n.input.as_deref()).or_else(|| self.virtual_inputs.get(path).map(Box::as_ref))
     }
 
+    /// The focused element's index. Unlike [`Runtime::node`], this finds it while it exits.
+    fn focused_index(&self) -> Option<usize> {
+        let path = self.focused.as_deref()?;
+        self.nodes.iter().position(|n| n.path == path)
+    }
+
     fn subtree_exiting(&self, mut i: usize) -> bool {
         loop {
             if self.is_exiting(self.nodes[i].id) { return true; }

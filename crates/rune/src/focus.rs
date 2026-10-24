@@ -207,7 +207,7 @@ impl<S: 'static> Runtime<S> {
             self.enter_links(order[next], ev.mods.shift);
             return true;
         }
-        let Some(i) = self.nodes.iter().position(|n| self.focused.as_deref() == Some(&n.path)) else { return false; };
+        let Some(i) = self.focused_index() else { return false; };
         if !self.can_focus(i) { return false; }
         if let Some(g) = self.group(i) {
             let vertical = VERTICAL_ROLES.contains(&self.nodes[g].role);
@@ -273,9 +273,7 @@ impl<S: 'static> Runtime<S> {
             self.secondary_capture = None;
             self.hovered = None;
         }
-        let inside = self.focused.as_deref().and_then(|p| self.nodes.iter().position(|n| n.path == p))
-            .is_some_and(|j| self.allowed(j));
-        if !inside {
+        if !self.focused_index().is_some_and(|j| self.allowed(j)) {
             let target = self.tab_order().first().map(|&j| self.nodes[j].path.clone()).unwrap_or(path);
             self.set_focus(Some(target), self.keyboard_focus);
         }
@@ -284,7 +282,7 @@ impl<S: 'static> Runtime<S> {
     /// In a group whose selection follows focus, focus follows selection too: when the app
     /// selects another item (a shortcut, say), focus in that group moves to it.
     pub(super) fn sync_follows(&mut self) {
-        let Some(i) = self.focused.as_deref().and_then(|p| self.nodes.iter().position(|n| n.path == p)) else { return };
+        let Some(i) = self.focused_index() else { return };
         if self.nodes[i].focus.selected { return; }
         let Some(g) = self.group(i).filter(|&g| self.nodes[g].focus.follows) else { return };
         let Some(j) = (0..self.nodes.len())
