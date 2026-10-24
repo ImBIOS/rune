@@ -243,30 +243,120 @@ fn string_end(s: &[u8], i: usize, end: usize, q: u8, multiline: bool) -> usize {
     end
 }
 
-/// The comments [`matching`] skips: JavaScript's `//` and `/* */`, or the shell's `#`.
+/// The comments [`matching`] skips: JavaScript's `//` and `/* */`, or the shell's `#`. `Jsx` is
+/// `Js` that also steps over JSX elements, whose text is not code (`<p>don't</p>`).
 #[derive(Clone, Copy, PartialEq)]
 enum Comments {
     Js,
+    Jsx,
     Shell,
+}
+
+/// Where [`matching`] is inside JSX: code between brackets (with its bracket depth), or an
+/// element (with how many of its tags are open, and whether it is in a tag rather than text).
+#[derive(Clone, Copy)]
+enum Frame {
+    Code(usize),
+    Element { open: usize, in_tag: bool, closing: bool },
+}
+
+/// How deep [`matching`] follows elements and the code inside them before treating `<` as an
+/// operator.
+const MAX_FRAMES: usize = 32;
+
+/// Whether the `<` at `j` (code from `i`) starts a JSX element: it follows an operator, an opening
+/// bracket or `return`, and opens a tag rather than type parameters.
+fn jsx_starts(s: &[u8], i: usize, j: usize, end: usize) -> bool {
+    if !(is_ident_start(at(s, j + 1, end)) || at(s, j + 1, end) == b'>') || type_parameters(s, j, end) {
+        return false;
+    }
+    let mut k = j;
+    while k > i && j - k < 64 && s[k - 1].is_ascii_whitespace() {
+        k -= 1;
+    }
+    match if k > i { s[k - 1] } else { b'{' } {
+        b'(' | b',' | b'=' | b':' | b'?' | b'&' | b'|' | b'{' | b'[' | b'!' | b';' | b'>' => true,
+        _ => k >= i + 6 && &s[k - 6..k] == b"return" && (k == i + 6 || !is_ident(s[k - 7])),
+    }
 }
 
 /// The index of the bracket closing the one at `i`, skipping quoted strings and comments, or
 /// `end`.
 fn matching(s: &[u8], i: usize, end: usize, open: u8, close: u8, comments: Comments) -> usize {
-    let mut depth = 0usize;
+    let mut stack = vec![Frame::Code(0)];
     let mut j = i;
     while j < end {
+        let top = stack.len() - 1;
+        if let Frame::Element { open: tags, in_tag, closing } = &mut stack[top] {
+            let c = s[j];
+            if *in_tag {
+                match c {
+                    b'"' | b'\'' => {
+                        j = string_end(s, j, end, c, true);
+                        continue;
+                    }
+                    b'{' => {
+                        stack.push(Frame::Code(0));
+                        continue;
+                    }
+                    b'>' | b'/' if c == b'>' || at(s, j + 1, end) == b'>' => {
+                        j += if c == b'>' { 1 } else { 2 };
+                        if *closing {
+                            *tags = tags.saturating_sub(1);
+                        } else if c == b'>' {
+                            *tags += 1;
+                        }
+                        *in_tag = false;
+                        if *tags == 0 {
+                            stack.pop();
+                        }
+                        continue;
+                    }
+                    b'<' => {
+                        // A tag cut short; read on as code.
+                        stack.pop();
+                        continue;
+                    }
+                    _ => {}
+                }
+            } else {
+                match c {
+                    b'{' => {
+                        stack.push(Frame::Code(0));
+                        continue;
+                    }
+                    b'<' if at(s, j + 1, end) == b'/' => {
+                        (*in_tag, *closing) = (true, true);
+                        j += 2;
+                        continue;
+                    }
+                    b'<' if is_ident_start(at(s, j + 1, end)) || at(s, j + 1, end) == b'>' => {
+                        (*in_tag, *closing) = (true, false);
+                    }
+                    b'\n' if code_line(s, j + 1, end) => {
+                        stack.pop();
+                    }
+                    _ => {}
+                }
+            }
+            j += 1;
+            continue;
+        }
+        let Frame::Code(depth) = &mut stack[top] else { unreachable!() };
         match s[j] {
+            b'<' if comments == Comments::Jsx && top + 3 <= MAX_FRAMES && jsx_starts(s, i, j, end) => {
+                stack.push(Frame::Element { open: 0, in_tag: true, closing: false });
+            }
             b'\\' => j += 1,
             b'"' | b'\'' | b'`' => {
                 j = string_end(s, j, end, s[j], s[j] == b'`');
                 continue;
             }
-            b'/' if comments == Comments::Js && at(s, j + 1, end) == b'/' => {
+            b'/' if comments != Comments::Shell && at(s, j + 1, end) == b'/' => {
                 j = line_end(s, j, end);
                 continue;
             }
-            b'/' if comments == Comments::Js && at(s, j + 1, end) == b'*' => {
+            b'/' if comments != Comments::Shell && at(s, j + 1, end) == b'*' => {
                 j = block_comment_end(s, j + 2, end, false);
                 continue;
             }
@@ -275,11 +365,14 @@ fn matching(s: &[u8], i: usize, end: usize, open: u8, close: u8, comments: Comme
                 j = line_end(s, j, end);
                 continue;
             }
-            c if c == open => depth += 1,
+            c if c == open => *depth += 1,
             c if c == close => {
-                depth -= 1;
-                if depth == 0 {
-                    return j;
+                *depth -= 1;
+                if *depth == 0 {
+                    if top == 0 {
+                        return j;
+                    }
+                    stack.pop();
                 }
             }
             _ => {}
@@ -616,7 +709,7 @@ fn template(s: &[u8], i: usize, end: usize, lang: Lang, out: &mut Out, depth: u8
             }
             b'$' if at(s, j + 1, end) == b'{' => {
                 out.push(seg, j, Syntax::String);
-                let close = matching(s, j + 1, end, b'{', b'}', Comments::Js);
+                let close = matching(s, j + 1, end, b'{', b'}', if matches!(lang, Lang::Js | Lang::Tsx) { Comments::Jsx } else { Comments::Js });
                 out.push(j, j + 2, Syntax::Punctuation);
                 if depth < MAX_DEPTH {
                     c_like(s, j + 2, close, lang, out, depth + 1);
@@ -790,7 +883,7 @@ fn jsx_element(s: &[u8], mut i: usize, end: usize, lang: Lang, out: &mut Out, de
 }
 
 fn jsx_expression(s: &[u8], j: usize, end: usize, lang: Lang, out: &mut Out, depth: u8) -> usize {
-    let close = matching(s, j, end, b'{', b'}', Comments::Js);
+    let close = matching(s, j, end, b'{', b'}', Comments::Jsx);
     out.push(j, j + 1, Syntax::Punctuation);
     if depth < MAX_DEPTH {
         c_like(s, j + 1, close, lang, out, depth + 1);
@@ -1535,6 +1628,24 @@ mod tests {
         let src = "n=$(echo $#); echo after";
         has(Lang::Shell, src, &[("$#", Property)]);
         assert_eq!(count(Lang::Shell, src, "echo", Function), 2);
+    }
+
+    #[test]
+    fn an_apostrophe_in_nested_jsx_text_is_not_a_string() {
+        let after = "\nexport const after = 1;";
+        for (src, tag) in [
+            ("return <div>{ok && <p>don't</p>}</div>;", "div"),
+            ("const ul = <ul>{list.map(x => <li>it's {x}</li>)}</ul>;", "ul"),
+        ] {
+            let src = format!("{src}{after}");
+            has(Lang::Tsx, &src, &[("export", Keyword), ("1", Number)]);
+            assert_eq!(count(Lang::Tsx, &src, tag, Keyword), 2, "{src}");
+        }
+        has(Lang::Tsx, &format!("const ul = <ul>{{list.map(x => <li>it's {{x}}</li>)}}</ul>;{after}"), &[("map", Function)]);
+        // Quotes in code and in attributes are still strings.
+        let src = format!("<i>{{a < b ? 'x}}' : <a title=\"}}'\">y</a>}}</i>;{after}");
+        has(Lang::Tsx, &src, &[("'x}'", String), ("\"}'\"", String), ("export", Keyword)]);
+        assert_eq!(count(Lang::Tsx, &src, "i", Keyword), 2);
     }
 
     #[test]
