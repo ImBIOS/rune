@@ -27,7 +27,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   moves in the same Core Animation transaction as each frame. Opaque windows, other platforms
   and headless renders draw the fill or a neutral tint, so goldens don't change. An outer
   shadow on a material element no longer paints under its interior when the native view is
-  on. `rune::{SystemMaterial, MAX_NATIVE_MATERIALS}` are new root exports.
+  on. Each native view stays with its element while it's mounted; an element dimmed to zero
+  takes none. Once the last material element unmounts, the window stops presenting inside
+  transactions. `rune::{SystemMaterial, MAX_NATIVE_MATERIALS}` are new root exports.
   `RUNE_SYSTEM_MATERIAL=legacy|unsynced|off` selects other paths. New example:
   `examples/glass-card`. See the crate README's "System materials".
 - **Occluded overlays and windows idle instead of spinning; their timers still fire.** A shown

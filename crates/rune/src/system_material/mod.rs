@@ -50,6 +50,59 @@ impl MaterialDraw {
     }
 }
 
+/// Which existing view each draw takes: the view that showed the same element, else a free view
+/// of the same material, else none (the caller makes one). `views` holds each view's material
+/// and the element it showed last; `draws` each draw's material and element.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn assign(views: &[(SystemMaterial, Option<NodeId>)], draws: &[(SystemMaterial, NodeId)]) -> Vec<Option<usize>> {
+    let mut taken = vec![false; views.len()];
+    let mut out = vec![None; draws.len()];
+    for (slot, &(material, id)) in out.iter_mut().zip(draws) {
+        if let Some(v) = (0..views.len()).find(|&v| !taken[v] && views[v] == (material, Some(id))) {
+            taken[v] = true;
+            *slot = Some(v);
+        }
+    }
+    for (slot, &(material, _)) in out.iter_mut().zip(draws) {
+        if slot.is_some() { continue; }
+        if let Some(v) = (0..views.len()).find(|&v| !taken[v] && views[v].0 == material) {
+            taken[v] = true;
+            *slot = Some(v);
+        }
+    }
+    out
+}
+
+/// The Metal layer's `presentsWithTransaction`, which both native materials and a moving
+/// window frame need. One owner, so neither turns it off under the other.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PresentFlag {
+    moving: bool,
+    materials: bool,
+    written: bool,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl PresentFlag {
+    /// A window frame animation started or stopped. The value to write, when it changed.
+    pub(crate) fn moving(&mut self, on: bool) -> Option<bool> {
+        self.moving = on;
+        self.write()
+    }
+
+    /// Native materials synced with the drawable switched on or off. The value to write, when it changed.
+    pub(crate) fn materials(&mut self, on: bool) -> Option<bool> {
+        self.materials = on;
+        self.write()
+    }
+
+    fn write(&mut self) -> Option<bool> {
+        let on = self.moving || self.materials;
+        (on != self.written).then(|| { self.written = on; on })
+    }
+}
+
 /// One corner radius for a rect: native materials take a single radius, so this uses the
 /// largest corner, clamped to half the shorter side as Rune's own rounded rects are.
 pub(crate) fn clamp_radius(radii: [f32; 4], width: f32, height: f32) -> f32 {

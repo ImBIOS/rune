@@ -51,9 +51,6 @@ struct Win {
     occluded_wait: Duration,
     cursor: crate::os_cursor::OsCursor,
     alpha: Option<crate::surface_alpha::AlphaSurface>,
-    /// Drawables present inside Core Animation transactions while the frame moves.
-    #[cfg(target_os = "macos")]
-    frame_present: bool,
     #[cfg(target_os = "macos")]
     help: crate::macos_help::NativeHelp,
 }
@@ -218,10 +215,7 @@ impl Win {
     /// Presents drawables inside Core Animation transactions, while the frame moves.
     #[cfg(target_os = "macos")]
     fn present_with_transaction(&mut self, on: bool) {
-        if on != self.frame_present {
-            crate::macos::present_with_transaction(&self.surface, on);
-            self.frame_present = on;
-        }
+        self.materials.set_moving(&self.surface, on);
     }
 
     fn focus(&self) {
@@ -1702,8 +1696,6 @@ impl<S: 'static> Host<S> {
             cursor: crate::os_cursor::OsCursor::new(event_loop),
             alpha,
             #[cfg(target_os = "macos")]
-            frame_present: false,
-            #[cfg(target_os = "macos")]
             help: Default::default(),
         });
         if launcher { self.win.as_mut().unwrap().first_frame.prepare(); }
@@ -1836,12 +1828,16 @@ impl<S: 'static> Host<S> {
             self.clock.advance(rt, frame_time, self.comp.as_ref().is_some_and(|c| c.animating()))
         };
         #[cfg(target_os = "macos")]
-        if l.materials.activate(rt.transparent, !rt.materials.is_empty(), &l.window, &l.surface) {
-            // This frame drew fallback fills into a drawable that presents without the views.
+        let frame = if l.materials.update(rt.transparent, !rt.materials.is_empty(), &l.window, &l.surface) {
+            // This drawable presents without the views: build again natively into a new one.
             drop(frame);
-            l.window.request_redraw();
-            return;
-        }
+            rt.native_materials = true;
+            animating |= rt.frame(0.0);
+            match acquire(&l.surface, &gpu.device, &l.config, 1) {
+                Ok(frame) => frame,
+                Err(_) => { l.window.request_redraw(); return; }
+            }
+        } else { frame };
         self.secure_input.set(rt.has_secure_focus() && l.window.has_focus());
         let update_ms = now.elapsed().as_secs_f64() * 1000.0;
         let ime_allowed = rt.ime_area.is_some() && !rt.has_secure_focus() && l.window.has_focus();

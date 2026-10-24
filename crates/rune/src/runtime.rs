@@ -3955,7 +3955,9 @@ impl<S: 'static> Runtime<S> {
                 let blur = 0.0;
                 let k_px = sc * s;
                 let native_material = match n.material {
-                    Some(material) if self.materials.len() < crate::MAX_NATIVE_MATERIALS => {
+                    // A dimmed-out element takes no native view: its fallback draws nothing.
+                    Some(material) if self.materials.len() < crate::MAX_NATIVE_MATERIALS
+                        && effective_opacity * n.vis.paint_alpha > 0.001 => {
                         let radius = crate::system_material::clamp_radius(radii, w, h);
                         let continuous = n.vis.continuous_corners;
                         self.materials.push(crate::system_material::MaterialDraw {

@@ -8,7 +8,8 @@
 //! frame, corner radius and alpha inside it, so the WindowServer composites the material, the
 //! shadow around it and the content on top from the same commit.
 
-use super::{MaterialDraw, Mode, SystemMaterial, MAX_NATIVE_MATERIALS};
+use super::{assign, MaterialDraw, Mode, PresentFlag, SystemMaterial, MAX_NATIVE_MATERIALS};
+use rune_motion::NodeId;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_video::rc::Retained;
 use objc2_video::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
@@ -40,7 +41,11 @@ struct Slot {
     material: SystemMaterial,
     /// `NSGlassEffectView`, which rounds itself; the effect views round their layer.
     glass: bool,
-    shown: Option<([f64; 4], f64, f64, bool)>,
+    /// The element it showed last, which keeps it while it stays mounted.
+    owner: Option<NodeId>,
+    /// Frame, corner radius and curve last set, and the alpha (`None` once hidden).
+    shape: Option<([f64; 4], f64, bool)>,
+    shown: Option<f64>,
 }
 
 #[link(name = "QuartzCore", kind = "framework")]
@@ -58,30 +63,42 @@ pub(crate) struct Materials {
     view: Option<Retained<AnyObject>>,
     host: Option<Retained<AnyObject>>,
     metal: Option<Retained<AnyObject>>,
+    flag: PresentFlag,
     slots: Vec<Slot>,
 }
 
 impl Materials {
     pub(crate) fn new() -> Self {
-        Materials { mode: Mode::from_env(), active: false, view: None, host: None, metal: None, slots: Vec::new() }
+        Materials { mode: Mode::from_env(), active: false, view: None, host: None, metal: None, flag: PresentFlag::default(), slots: Vec::new() }
     }
 
     /// Whether this frame's elements should leave their interior to native views.
     pub(crate) fn native(&self) -> bool { self.active }
 
-    /// After a build that found material elements: switches native views on for a transparent
-    /// window. True when it did, so the caller drops this frame (built with fallback fills)
-    /// and draws the next one natively, because wgpu reads `presentsWithTransaction` when it
-    /// acquires a drawable and this frame's drawable is already out.
-    pub(crate) fn activate(&mut self, transparent: bool, found: bool, window: &winit::window::Window, surface: &wgpu::Surface<'_>) -> bool {
+    /// A window frame animation started or stopped: it presents with transactions while it
+    /// moves, and native materials keep them on after it lands.
+    pub(crate) fn set_moving(&mut self, surface: &wgpu::Surface<'_>, on: bool) {
+        if let Some(on) = self.flag.moving(on) { crate::macos::present_with_transaction(surface, on); }
+    }
+
+    /// After a build: switches native views on when a transparent window's frame found material
+    /// elements, and off when it found none. True when it switched them on, so the caller
+    /// drops this frame's drawable, builds again natively and acquires another: wgpu reads
+    /// `presentsWithTransaction` when it acquires a drawable, and this one is already out.
+    pub(crate) fn update(&mut self, transparent: bool, found: bool, window: &winit::window::Window, surface: &wgpu::Surface<'_>) -> bool {
+        if self.active && !found {
+            // `present` hides the views in this frame's transaction; they stay for the next activation.
+            self.active = false;
+            if let Some(on) = self.flag.materials(false) { crate::macos::present_with_transaction(surface, on); }
+            return false;
+        }
         if self.active || !found || !transparent || self.mode == Mode::Off { return false; }
         let Some(view) = crate::macos::content_view(window) else { return false };
         // SAFETY: winit's content view outlives this retain, which only adds a reference.
         let Some(view) = (unsafe { Retained::retain(objc2::rc::Retained::as_ptr(&view).cast::<AnyObject>().cast_mut()) }) else { return false };
         let Some(metal) = metal_layer(surface) else { return false };
-        if self.mode != Mode::Unsynced {
-            // SAFETY: a CAMetalLayer property, set on the main thread before the next acquire.
-            unsafe { let _: () = msg_send![&*metal, setPresentsWithTransaction: true]; }
+        if self.mode != Mode::Unsynced && let Some(on) = self.flag.materials(true) {
+            crate::macos::present_with_transaction(surface, on);
         }
         self.view = Some(view);
         self.metal = Some(metal);
@@ -92,7 +109,8 @@ impl Materials {
     /// Presents the frame with the material views matching `draws`: in one transaction with
     /// the drawable when synced, or just before it otherwise.
     pub(crate) fn present(&mut self, draws: &[MaterialDraw], scale: f32, present: impl FnOnce()) {
-        if !self.active { return present(); }
+        if !self.active && self.slots.iter().all(|s| s.shown.is_none()) { return present(); }
+        let draws = if self.active { draws } else { &[] };
         let transaction = AnyClass::get(c"CATransaction");
         let synced = self.mode != Mode::Unsynced && transaction.is_some();
         if let Some(t) = transaction {
@@ -112,48 +130,68 @@ impl Materials {
     }
 
     fn sync(&mut self, draws: &[MaterialDraw], scale: f32) {
-        let used = draws.len().min(MAX_NATIVE_MATERIALS);
-        if used == 0 && self.slots.iter().all(|s| s.shown.is_none()) { return; }
+        let draws = &draws[..draws.len().min(MAX_NATIVE_MATERIALS)];
+        if draws.is_empty() && self.slots.iter().all(|s| s.shown.is_none()) { return; }
         let Some(host) = self.host() else { return };
-        for (k, draw) in draws.iter().take(used).enumerate() {
-            let material = self.mode.resolve(draw.material);
-            if self.slots.get(k).is_some_and(|s| s.material != material) {
-                // SAFETY: removes a view this struct added to the host.
-                unsafe { let _: () = msg_send![&*self.slots.remove(k).view, removeFromSuperview]; }
-            }
-            if self.slots.len() <= k {
-                let Some(slot) = make_view(material, &host) else { return };
-                self.slots.insert(k, slot);
-            }
+        let mode = self.mode;
+        let wanted: Vec<_> = draws.iter().map(|d| (mode.resolve(d.material), d.id)).collect();
+        let views: Vec<_> = self.slots.iter().map(|s| (s.material, s.owner)).collect();
+        let mut taken = vec![false; self.slots.len()];
+        for (draw, (at, &(material, id))) in draws.iter().zip(assign(&views, &wanted).into_iter().zip(&wanted)) {
+            let k = match at {
+                Some(k) => k,
+                None => {
+                    let Some(slot) = make_view(material, &host) else { continue };
+                    self.slots.push(slot);
+                    taken.push(false);
+                    self.slots.len() - 1
+                }
+            };
+            taken[k] = true;
             let slot = &mut self.slots[k];
+            slot.owner = Some(id);
             let (frame, radius) = draw.points(scale);
-            let state = (frame, radius, f64::from(draw.opacity.clamp(0.0, 1.0)), draw.continuous);
-            if slot.shown == Some(state) { continue; }
+            let shape = (frame, radius, draw.continuous);
+            let alpha = f64::from(draw.opacity.clamp(0.0, 1.0));
             let view = &*slot.view;
             // SAFETY: NSView and NSGlassEffectView setters and CALayer properties on the main thread.
             unsafe {
-                let _: () = msg_send![view, setFrame: rect(frame[0], frame[1], frame[2], frame[3])];
-                if slot.glass {
-                    let _: () = msg_send![view, setCornerRadius: radius];
-                } else {
-                    let layer: *mut AnyObject = msg_send![view, layer];
-                    if let Some(layer) = layer.as_ref() {
-                        let _: () = msg_send![layer, setCornerRadius: radius];
-                        let curve: &AnyObject = if draw.continuous { kCACornerCurveContinuous } else { kCACornerCurveCircular };
-                        let _: () = msg_send![layer, setCornerCurve: curve];
+                if slot.shown != Some(alpha) { let _: () = msg_send![view, setAlphaValue: alpha]; }
+                if slot.shape != Some(shape) {
+                    let _: () = msg_send![view, setFrame: rect(frame[0], frame[1], frame[2], frame[3])];
+                    if slot.glass {
+                        let _: () = msg_send![view, setCornerRadius: radius];
+                    } else {
+                        let layer: *mut AnyObject = msg_send![view, layer];
+                        if let Some(layer) = layer.as_ref() {
+                            let _: () = msg_send![layer, setCornerRadius: radius];
+                            let curve: &AnyObject = if draw.continuous { kCACornerCurveContinuous } else { kCACornerCurveCircular };
+                            let _: () = msg_send![layer, setCornerCurve: curve];
+                        }
                     }
+                    let _: () = msg_send![view, layoutSubtreeIfNeeded];
+                    let _: () = msg_send![view, displayIfNeeded];
                 }
-                let _: () = msg_send![view, setAlphaValue: state.2];
-                let _: () = msg_send![view, layoutSubtreeIfNeeded];
-                let _: () = msg_send![view, displayIfNeeded];
             }
-            slot.shown = Some(state);
+            slot.shape = Some(shape);
+            slot.shown = Some(alpha);
         }
-        for slot in self.slots.iter_mut().skip(used).filter(|s| s.shown.is_some()) {
+        for (slot, _) in self.slots.iter_mut().zip(taken).filter(|(s, taken)| !taken && s.shown.is_some()) {
             // SAFETY: an NSView setter on the main thread. Zero alpha rather than hidden keeps
             // the view's backdrop layers, as at creation.
             unsafe { let _: () = msg_send![&*slot.view, setAlphaValue: 0.0f64]; }
             slot.shown = None;
+            slot.owner = None;
+        }
+        // At most one spare view per material: unmounting a few elements needn't keep their views.
+        let mut k = self.slots.len();
+        while k > 0 {
+            k -= 1;
+            let spare = |s: &Slot| s.shown.is_none();
+            if spare(&self.slots[k]) && self.slots[..k].iter().any(|s| spare(s) && s.material == self.slots[k].material) {
+                // SAFETY: removes a view this struct added to the host.
+                unsafe { let _: () = msg_send![&*self.slots.remove(k).view, removeFromSuperview]; }
+            }
         }
     }
 
@@ -245,7 +283,7 @@ fn make_view(material: SystemMaterial, host: &AnyObject) -> Option<Slot> {
         let _: () = msg_send![&*view, setAlphaValue: 0.0f64];
         let _: () = msg_send![host, addSubview: &*view];
         let _: () = msg_send![&*view, displayIfNeeded];
-        Some(Slot { view, material, glass, shown: None })
+        Some(Slot { view, material, glass, owner: None, shape: None, shown: None })
     }
 }
 

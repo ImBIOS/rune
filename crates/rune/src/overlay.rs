@@ -1258,14 +1258,20 @@ impl<T: 'static> Overlay<T> {
         { self.rt.native_materials = live.materials.native(); }
         let (mut animating, dt) = step(&mut self.rt, &mut self.clock, &self.compositor, frame_time, prewarm);
         #[cfg(target_os = "macos")]
-        {
+        let frame = {
             let Backing::Window(window) = &live.backing;
-            if live.materials.activate(self.rt.transparent, !self.rt.materials.is_empty(), window, &live.surface) {
-                // This frame drew fallback fills into a drawable that presents without the views.
+            if live.materials.update(self.rt.transparent, !self.rt.materials.is_empty(), window, &live.surface) {
+                // This drawable presents without the views: build again natively into a new one,
+                // so prewarm and reveal show the material from this frame.
                 drop(frame);
-                return true;
-            }
-        }
+                self.rt.native_materials = true;
+                animating |= self.rt.frame(0.0);
+                match crate::window::acquire(&live.surface, &gpu.device, &live.config, if prewarm { 2 } else { 1 }) {
+                    Ok(frame) => frame,
+                    Err(_) => return true,
+                }
+            } else { frame }
+        };
         let update_ms = if self.compositor.is_some() { now.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
         self.rt.shell_request = None;
         // Overlays size through `OverlayHandle::resize`, not `Tx::resize_window`.

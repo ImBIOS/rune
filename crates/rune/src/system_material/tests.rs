@@ -97,6 +97,52 @@ fn over_native_views_the_fill_goes_and_the_shadow_is_cut_out() {
 }
 
 #[test]
+fn a_dimmed_out_material_takes_no_native_view() {
+    fn dimmed(_: &u8, _: &mut Cx<u8>) -> El {
+        let card = |k: usize| el().absolute(k as f32 * 30.0, 0.0).size(20.0, 20.0).system_material(SystemMaterial::Popover);
+        el().size(200.0, 120.0)
+            .children((0..MAX_NATIVE_MATERIALS).map(|k| card(k).dim(0.0)))
+            .child(card(MAX_NATIVE_MATERIALS))
+    }
+    let rt = runtime(dimmed, true);
+    assert_eq!(rt.materials.len(), 1, "only the visible element takes a view");
+    assert_eq!(rt.materials[0].rect[0], MAX_NATIVE_MATERIALS as f32 * 60.0);
+}
+
+#[test]
+fn views_follow_their_element_across_insertions_and_unmounts() {
+    use SystemMaterial::{Glass, Popover};
+    let (a, b, c) = (NodeId(1), NodeId(2), NodeId(3));
+    // A popover inserted before the glass leaves the glass on its view and gets a new one.
+    assert_eq!(assign(&[(Glass, Some(a))], &[(Popover, b), (Glass, a)]), [None, Some(0)]);
+    // Unmounting the first of two leaves the second on its own view.
+    assert_eq!(assign(&[(Glass, Some(a)), (Glass, Some(b))], &[(Glass, b)]), [Some(1)]);
+    // A new element reuses a spare view of its material, or one freed this frame, never another material's.
+    assert_eq!(assign(&[(Glass, None), (Popover, None)], &[(Popover, c)]), [Some(1)]);
+    assert_eq!(assign(&[(Glass, Some(a))], &[(Glass, c)]), [Some(0)]);
+    assert_eq!(assign(&[(Glass, Some(a))], &[(Popover, a)]), [None]);
+    // An element's own view wins over an earlier draw that could also take it.
+    assert_eq!(assign(&[(Glass, Some(a)), (Glass, Some(b))], &[(Glass, c), (Glass, a)]), [Some(1), Some(0)]);
+}
+
+#[test]
+fn a_window_move_never_turns_off_transactions_materials_need() {
+    let mut flag = PresentFlag::default();
+    assert_eq!(flag.materials(true), Some(true));
+    // A resize animation starts and lands while materials are native: the layer stays on.
+    assert_eq!(flag.moving(true), None);
+    assert_eq!(flag.moving(false), None);
+    // The last material unmounts: off.
+    assert_eq!(flag.materials(false), Some(false));
+    // A move alone turns it on and, landing, off again.
+    assert_eq!(flag.moving(true), Some(true));
+    assert_eq!(flag.materials(true), None);
+    assert_eq!(flag.materials(false), None);
+    assert_eq!(flag.moving(false), Some(false));
+    assert_eq!(flag.moving(false), None);
+}
+
+#[test]
 fn materials_past_the_limit_draw_their_fallback() {
     fn many(_: &u8, _: &mut Cx<u8>) -> El {
         el().size(200.0, 120.0).children((0..MAX_NATIVE_MATERIALS + 1).map(|k| {
