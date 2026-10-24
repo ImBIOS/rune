@@ -763,19 +763,29 @@ impl<T: 'static> Overlay<T> {
     fn begin_drag_out(&mut self) {
         let Some(start) = self.rt.take_drag_out() else { return };
         self.dirty = true;
+        let (sink, path) = (self.rt.drag_end_sink(), start.path.clone());
         #[allow(irrefutable_let_patterns)]
-        let Some(Live { backing: Backing::Window(window), config, scale, .. }) = &self.live else { return };
+        let Some(Live { backing: Backing::Window(window), config, scale, .. }) = &self.live else {
+            sink.borrow_mut().push((path, crate::DragOutcome::Cancelled));
+            return;
+        };
         let image = match (&self.gpu, &self.renderer) {
             (Some(gpu), Some((renderer, _))) if start.item.drag_image().is_none() =>
                 crate::drag_out::snapshot(gpu, renderer, (config.width, config.height), *scale, self.rt.clear_color(), start.rect),
             _ => None,
         };
-        let (sink, path) = (self.rt.drag_end_sink(), start.path.clone());
         let wake = self.shared.wake.lock().unwrap().clone();
         crate::drag_out::begin(window, start, image, Box::new(move |outcome| {
             sink.borrow_mut().push((path, outcome));
             if let Some(wake) = wake { wake(); }
         }));
+        // The system drag swallows the button release, so let go of the panel's capture now
+        // rather than after its missed-release grace: the panel turns click-through outside
+        // its regions (so drops land on the windows below) and deferred input changes apply.
+        #[cfg(target_os = "macos")]
+        if let Some(panel) = &self.panel { panel.pointer_released(); }
+        self.apply_input();
+        self.apply_cursor();
     }
     fn publish_regions(&mut self) {
         let Some(live) = &self.live else { return };

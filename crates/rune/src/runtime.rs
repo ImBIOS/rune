@@ -2596,8 +2596,7 @@ impl<S: 'static> Runtime<S> {
         }
         self.refresh_hover(x, y);
         let Some((path, d)) = self.capture.clone() else { return };
-        if self.drag_out_armed && crate::drag_out::past_threshold(self.press_at, (x, y)) {
-            self.start_drag_out(path);
+        if self.drag_out_armed && crate::drag_out::past_threshold(self.press_at, (x, y)) && self.start_drag_out(path.clone()) {
             return;
         }
         let Some((id, r, has_drag)) = self.node(&path).map(|n| (n.id, n.target, n.on_drag.is_some() && !self.drags_out(n))) else { return };
@@ -2648,11 +2647,12 @@ impl<S: 'static> Runtime<S> {
 
     /// The held press crossed the drag threshold on a `drag_out` element: ask the host for an
     /// OS drag and hand it the pointer, so nothing stays pressed or hovered after the drop.
-    fn start_drag_out(&mut self, path: String) {
+    /// False when the element offers nothing this time and the press stays a press.
+    fn start_drag_out(&mut self, path: String) -> bool {
         self.drag_out_armed = false;
-        let Some(i) = self.nodes.iter().enumerate().position(|(i, n)| n.path == path && !self.subtree_exiting(i)) else { return };
-        let Some(f) = self.nodes[i].drag_out.clone() else { return };
-        let Some(item) = f(handler_state_ref(&self.state)).filter(|item| !item.is_empty()) else { return };
+        let Some(i) = self.nodes.iter().enumerate().position(|(i, n)| n.path == path && !self.subtree_exiting(i)) else { return false };
+        let Some(f) = self.nodes[i].drag_out.clone() else { return false };
+        let Some(item) = f(handler_state_ref(&self.state)).filter(|item| !item.is_empty()) else { return false };
         let n = &self.nodes[i];
         let r = self.drawn.get(i).copied().unwrap_or([n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]]);
         let clip = n.parent.and_then(|pi| self.inh_scratch.get(pi)).map_or(NO_CLIP, |h| h.clip).map(|v| v / self.env.scale);
@@ -2663,6 +2663,7 @@ impl<S: 'static> Runtime<S> {
         self.capture = None;
         self.capture_inside = false;
         self.pointer_leave();
+        true
     }
 
     fn in_viewport(&self, x: f32, y: f32) -> bool {
@@ -4988,6 +4989,15 @@ mod tests {
         rt.pointer_up(20.0, 10.0);
         rt.frame(0.0);
         assert_eq!(rt.state.presses, 1);
+    }
+
+    #[test]
+    fn a_drag_out_that_offers_nothing_tracks_leaving_the_element() {
+        let mut rt = drag_out_rt(false);
+        assert!(rt.capture_inside);
+        rt.pointer_move(150.0, 10.0);
+        assert!(rt.pointer_captured(), "the press holds on");
+        assert!(!rt.capture_inside, "the move that declined the drag left the element, so it no longer shows pressed");
     }
 
     #[test]

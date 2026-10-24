@@ -11,8 +11,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   A drag-out element never runs `on_drag`, and once the system drag starts its press is
   released without firing `on_press`. Elements without `drag_out` are unchanged, and other
   platforms ignore it. Headless traces log `drag-out <path>` and `drag-end <outcome> <path>`,
-  and `--tree` marks the node `dragOut`. `rune::{DragItem, DragImage, DragOutcome}` are new
-  root exports, so a glob import of `rune::*` can clash with an app type of the same name.
+  and `--tree` marks the node `dragOut`. `ElementInfo` has a new pub `drag_out` field, so code
+  that builds it as a literal or destructures it without `..` needs updating.
+  `rune::{DragItem, DragImage, DragOutcome}` are new root exports, so a glob import of
+  `rune::*` can clash with an app type of the same name.
 - **On macOS, the first `open()` of a window that doesn't exist yet now activates the app**,
   like every later `open()`. Before, the new window became key while another app stayed
   active, so typing and ⌘W went to that app. The window opened at launch and nonactivating

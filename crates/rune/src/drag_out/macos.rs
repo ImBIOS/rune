@@ -17,6 +17,21 @@ struct Ivars {
     mask: Cell<NSDragOperation>,
 }
 
+/// Runs the end callback, which must not unwind into AppKit.
+fn report(done: Done, outcome: DragOutcome) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| done(outcome))).is_err() {
+        eprintln!("rune: drag end callback panicked");
+    }
+}
+
+impl Drop for Ivars {
+    /// A session AppKit never ended (say, one started after the button was already up) still
+    /// reports once, when the next drag replaces its source.
+    fn drop(&mut self) {
+        if let Some(done) = self.done.get_mut().take() { report(done, DragOutcome::Cancelled); }
+    }
+}
+
 declare_class!(
     struct Source;
     unsafe impl ClassType for Source {
@@ -34,12 +49,7 @@ declare_class!(
         #[method(draggingSession:endedAtPoint:operation:)]
         fn ended(&self, _session: &NSDraggingSession, _point: NSPoint, operation: NSDragOperation) {
             let done = self.ivars().done.borrow_mut().take();
-            if let Some(done) = done {
-                let outcome = outcome(operation);
-                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| done(outcome))).is_err() {
-                    eprintln!("rune: drag end callback panicked");
-                }
-            }
+            if let Some(done) = done { report(done, outcome(operation)); }
         }
         #[method(ignoreModifierKeysForDraggingSession:)]
         fn ignore_modifiers(&self, _session: &NSDraggingSession) -> bool { true }
@@ -83,7 +93,9 @@ pub(super) fn begin(window: &winit::window::Window, start: DragOutStart, snapsho
         if start.item.allows_move() { mask |= NSDragOperation::Move; }
         let source = mtm.alloc::<Source>().set_ivars(Ivars { done: RefCell::new(Some(done)), mask: Cell::new(mask) });
         let source: Retained<Source> = msg_send_id![super(source), init];
-        LIVE.with(|live| *live.borrow_mut() = Some(source.clone()));
+        // The previous source drops (reporting if it never ended) outside the borrow.
+        let previous = LIVE.with(|live| live.replace(Some(source.clone())));
+        drop(previous);
         let session = view.beginDraggingSessionWithItems_event_source(&NSArray::from_vec(dragging), &event, ProtocolObject::from_ref(&*source));
         session.setAnimatesToStartingPositionsOnCancelOrFail(true);
         session.setDraggingFormation(NSDraggingFormation::None);
@@ -100,6 +112,8 @@ fn drag_event(mtm: MainThreadMarker, view: &NSView) -> Option<Retained<NSEvent>>
         if let Some(event) = &current {
             if matches!(event.r#type(), NSEventType::LeftMouseDragged | NSEventType::LeftMouseDown) { return current; }
         }
+        // With the button already up, AppKit would never end the session.
+        if NSEvent::pressedMouseButtons() & 1 == 0 { return None; }
         let window = view.window()?;
         let at = window.mouseLocationOutsideOfEventStream();
         let time = current.as_ref().map_or(0.0, |e| e.timestamp());
@@ -186,5 +200,32 @@ mod tests {
         assert_eq!(outcome(NSDragOperation::Generic), DragOutcome::Moved);
         assert_eq!(outcome(NSDragOperation::Link), DragOutcome::Linked);
         assert_eq!(outcome(NSDragOperation::None), DragOutcome::Cancelled);
+    }
+
+    fn ivars(log: &std::rc::Rc<RefCell<Vec<DragOutcome>>>) -> Ivars {
+        let log = log.clone();
+        Ivars { done: RefCell::new(Some(Box::new(move |o| log.borrow_mut().push(o)))), mask: Cell::new(NSDragOperation::Copy) }
+    }
+
+    #[test]
+    fn a_session_that_never_ended_reports_cancelled_once_on_drop() {
+        let log = std::rc::Rc::default();
+        drop(ivars(&log));
+        assert_eq!(*log.borrow(), [DragOutcome::Cancelled]);
+    }
+
+    #[test]
+    fn an_ended_session_does_not_report_again_on_drop() {
+        let log = std::rc::Rc::default();
+        let ivars = ivars(&log);
+        let done = ivars.done.borrow_mut().take().unwrap();
+        report(done, DragOutcome::Copied);
+        drop(ivars);
+        assert_eq!(*log.borrow(), [DragOutcome::Copied]);
+    }
+
+    #[test]
+    fn a_panicking_end_callback_does_not_unwind() {
+        report(Box::new(|_| panic!("boom")), DragOutcome::Cancelled);
     }
 }
