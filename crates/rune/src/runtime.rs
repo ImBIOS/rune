@@ -2461,7 +2461,7 @@ impl<S> Measurement<'_, S> {
         // Root constraints are part of the retained style, not a dirty write after flattening.
         // A window that fits its content lays the root out at its natural height.
         root.style.size = Size { width: length(self.viewport.0), height: if self.fit_height { auto() } else { length(self.viewport.1) } };
-        let root_id = flatten(root, None, "", 0, motion::DEFAULT, false, &mut taffy, &mut nodes, &mut self.layout_entries, scale);
+        let root_id = flatten(root, None, "", 0, motion::DEFAULT, false, true, &mut taffy, &mut nodes, &mut self.layout_entries, scale);
         self.layout_entries.retain(|_, entry| {
             if !entry.used { taffy.remove(entry.id).unwrap(); }
             entry.used
@@ -5407,15 +5407,17 @@ fn order_drag_ends(queue: Vec<Action>, ended: Vec<(String, crate::DragOutcome)>,
 }
 
 /// An `aspect_fit` element's first layout: it takes the free space along its parent's main axis
-/// and the whole cross side, within its max sizes, as the room its fitted box must fit.
-fn fit_room(own: &Style) -> Style {
+/// and the whole cross side, within its max sizes, as the room its fitted box must fit. Its
+/// content never sizes the room: with no max along the main axis it starts from 0 and grows.
+fn fit_room(own: &Style, parent_row: bool) -> Style {
     let zero = |d: LengthPercentageAuto| if d.is_auto() { length(0.0) } else { d };
+    let main_max = if parent_row { own.max_size.width } else { own.max_size.height };
     Style {
         size: own.max_size.map(Into::into),
         min_size: Size { width: zero(own.min_size.width), height: zero(own.min_size.height) },
         flex_grow: 1.0,
         flex_shrink: 1.0,
-        flex_basis: auto(),
+        flex_basis: if main_max.is_auto() { length(0.0) } else { auto() },
         align_self: Some(AlignSelf::STRETCH),
         aspect_ratio: None,
         ..own.clone()
@@ -5426,7 +5428,14 @@ fn fit_room(own: &Style) -> Style {
 /// out at once its room is known.
 fn fitted(ratio: f32, own: &Style, room: Size<f32>) -> Style {
     let w = room.width.min(room.height * ratio).max(0.0);
-    Style { size: Size { width: length(w), height: length(w / ratio) }, aspect_ratio: None, ..own.clone() }
+    Style {
+        size: Size { width: length(w), height: length(w / ratio) },
+        flex_grow: 0.0,
+        flex_shrink: 0.0,
+        flex_basis: auto(),
+        aspect_ratio: None,
+        ..own.clone()
+    }
 }
 
 /// Width over height of the image in `pixels`, or 0 while it's empty.
@@ -5443,6 +5452,8 @@ fn flatten(
     index: usize,
     motion: Spring,
     in_row: bool,
+    // The parent lays its children out in a row (its main axis is horizontal).
+    parent_row: bool,
     taffy: &mut TaffyTree<usize>,
     nodes: &mut Vec<Node>,
     entries: &mut HashMap<String, LayoutEntry>,
@@ -5521,7 +5532,7 @@ fn flatten(
         style.aspect_ratio = Some(ratio);
     }
     let aspect_fit = (aspect_fit > 0.0).then(|| {
-        let room = fit_room(&style);
+        let room = fit_room(&style, parent_row);
         Box::new((aspect_fit, std::mem::replace(&mut style, room)))
     });
     let mut text = text;
@@ -5595,10 +5606,11 @@ fn flatten(
         scroll_source,
     });
     let child_in_row = in_row || parent_is_stack;
+    let row = matches!(style.flex_direction, FlexDirection::Row | FlexDirection::RowReverse);
     let kids: Vec<taffy::NodeId> = children
         .into_iter()
         .enumerate()
-        .map(|(i, c)| flatten(c, Some(me), &path, i, motion, child_in_row, taffy, nodes, entries, scale))
+        .map(|(i, c)| flatten(c, Some(me), &path, i, motion, child_in_row, row, taffy, nodes, entries, scale))
         .collect();
     let id = if let Some(entry) = entries.get_mut(&path) {
         let id = entry.id;

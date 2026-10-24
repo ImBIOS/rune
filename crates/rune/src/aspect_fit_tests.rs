@@ -66,3 +66,19 @@ fn max_sizes_bound_it_where_nothing_else_does() {
     assert_eq!(pic, [0.0, 0.0, 160.0, 80.0], "an auto-height column has no free space, so max_h sets the room's height");
     assert_eq!(cap[1], 80.0);
 }
+
+#[test]
+fn grow_and_content_do_not_size_the_fitted_box() {
+    fn view(r: &f32, _: &mut Cx<f32>) -> El {
+        col()
+            .child(col().size(300.0, 200.0).child(el().key("grown").grow(1.0).aspect_fit(*r)))
+            .child(row().size(600.0, 200.0)
+                .child(el().key("a").aspect_fit(*r).child(el().w(200.0).h(10.0)))
+                .child(el().key("b").aspect_fit(*r)))
+    }
+    let rt = run(2.0, view);
+    let [grown, a, b] = rects(&rt, &["grown", "a", "b"])[..] else { unreachable!() };
+    assert_eq!(grown[2..], [300.0, 150.0], "its own grow doesn't stretch it back to the room");
+    assert_eq!((a[2..].to_vec(), b[2..].to_vec()), (vec![300.0, 150.0], vec![300.0, 150.0]),
+        "a 200 pt child doesn't take its cell a bigger share of the row");
+}
