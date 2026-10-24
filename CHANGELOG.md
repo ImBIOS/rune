@@ -75,7 +75,6 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   like every later `open()`. Before, the new window became key while another app stayed
   active, so typing and ⌘W went to that app. The window opened at launch and nonactivating
   panels are unchanged.
-||||||| parent of 960e2b7 (rune: text::measure sizes text outside a frame)
 - **`App::window` windows still open when the main window closes now run their `on_close`,
   and `WindowSpec::from_app` starts from the app's `window_options`** (before, it used the
   defaults, so headless runs dropped `transparent` and `physical_size`).

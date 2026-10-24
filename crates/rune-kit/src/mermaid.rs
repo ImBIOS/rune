@@ -20,7 +20,11 @@
 //! [`render`] returns `None` and [`crate::Markdown`] shows the source as a code block.
 //!
 //! **Cost.** Parsing, measuring and layout happen once per source and style, on the first
-//! build that sees them; later builds reuse the laid-out scene from a small cache.
+//! build that sees them; later builds reuse the laid-out scene from a small cache. Work is
+//! bounded for untrusted input: charts over 400 nodes, edges and subgraphs (or 40
+//! participants), subgraphs nested more than 8 deep, and flowcharts whose long edges need
+//! more than 3,000 bend points fall back to source; links longer than `--------->` draw at
+//! that length.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -241,11 +245,18 @@ impl Canvas {
         let mut dash: Vec<[f32; 2]> = Vec::new();
         let mut drawing = true;
         let mut left = on;
+        // Bounded so a huge or non-finite length (where `t += step` stops advancing) can't spin.
+        let mut budget = 20_000usize;
         for w in points.windows(2) {
             let (a, b) = (w[0], w[1]);
             let len = dist(a, b);
+            if !len.is_finite() {
+                continue;
+            }
             let mut t = 0.0;
             while t < len {
+                let Some(rest) = budget.checked_sub(1) else { return };
+                budget = rest;
                 let step = left.min(len - t);
                 let p0 = lerp(a, b, t / len);
                 let p1 = lerp(a, b, (t + step) / len);
@@ -556,5 +567,114 @@ mod tests {
         assert_eq!(curve.first(), Some(&pts[0]));
         assert_eq!(curve.last(), Some(&pts[2]));
         assert!(curve.iter().any(|p| dist(*p, pts[1]) < 0.01));
+    }
+
+    /// Each source falls back (`false`) or draws (`true`), in well under a second at full speed;
+    /// the bound here is loose for debug builds on a busy machine.
+    fn hostile(src: &str, draws: bool) {
+        let paint = crate::MarkdownStyle::neutral(true).diagram;
+        let t = std::time::Instant::now();
+        let scene = scene(src, &paint);
+        let took = t.elapsed();
+        assert_eq!(scene.is_some(), draws, "{}…", &src[..src.len().min(80)]);
+        assert!(took.as_secs_f32() < 5.0, "{took:?} for {}…", &src[..src.len().min(80)]);
+    }
+
+    fn ids(prefix: &str, n: usize) -> String {
+        (1..=n).map(|i| format!("{prefix}{i}")).collect::<Vec<_>>().join(" & ")
+    }
+
+    #[test]
+    fn deep_subgraphs_fall_back() {
+        hostile(&format!("graph TD\n{}A\n{}", "subgraph s\n".repeat(5000), "end\n".repeat(5000)), false);
+        hostile(&format!("graph TD\n{}A\n{}", "subgraph s\n".repeat(9), "end\n".repeat(9)), false);
+        hostile(&format!("graph TD\n{}A\n{}", "subgraph s\n".repeat(8), "end\n".repeat(8)), true);
+        // Many flat subgraphs count toward the item cap.
+        hostile(&format!("graph TD\nA\n{}", "subgraph s\nend\n".repeat(5000)), false);
+    }
+
+    #[test]
+    fn a_huge_cross_product_falls_back_before_it_is_built() {
+        hostile(&format!("graph TD\n{} --> {}", ids("A", 500), ids("B", 500)), false);
+        hostile(&format!("graph TD\n{}", ids("A", 5000)), false);
+        hostile(&format!("graph TD\n{} --> {}", ids("A", 10), ids("B", 10)), true);
+    }
+
+    #[test]
+    fn a_huge_dash_count_draws_at_the_longest_link() {
+        let paint = crate::MarkdownStyle::neutral(true).diagram;
+        hostile(&format!("graph TD\nA {}> B", "-".repeat(10_000)), true);
+        hostile(&format!("graph TD\nA -{}-> B", ".".repeat(10_000)), true);
+        let longest = scene(&format!("graph TD\nA {}> B", "-".repeat(10_000)), &paint).unwrap();
+        let eight = scene(&format!("graph TD\nA {}> B", "-".repeat(9)), &paint).unwrap();
+        assert_eq!(longest.size, eight.size);
+    }
+
+    #[test]
+    fn long_chords_over_a_chain_fall_back() {
+        let chain: Vec<String> = (0..129).map(|i| format!("N{i} --> N{}", i + 1)).collect();
+        let chords: Vec<String> = (0..140).map(|k| format!("N{} --> N{}", k % 10, 120 + k % 10)).collect();
+        hostile(&format!("graph TD\n{}\n{}", chain.join("\n"), chords.join("\n")), false);
+        // A chain with a few long edges still draws.
+        let short: Vec<String> = (0..4).map(|k| format!("N{k} --> N{}", 30 + k)).collect();
+        hostile(&format!("graph TD\n{}\n{}", chain[..40].join("\n"), short.join("\n")), true);
+    }
+
+    #[test]
+    fn the_biggest_allowed_charts_draw_in_bounded_time() {
+        // Dense: every item spent on nodes and short cross edges.
+        let mut lines = vec!["graph LR".to_owned()];
+        for i in 0..130 {
+            lines.push(format!("N{i} --> N{} & N{}", (i * 7 + 1) % 130, (i * 13 + 5) % 130));
+        }
+        let src = lines.join("\n");
+        assert!(parse(&src).is_some());
+        let paint = crate::MarkdownStyle::neutral(true).diagram;
+        let t = std::time::Instant::now();
+        let drawn = scene(&src, &paint).is_some();
+        println!("dense chart: drawn {drawn} in {:?}", t.elapsed());
+        assert!(t.elapsed().as_secs_f32() < 5.0, "{:?}", t.elapsed());
+        // Just under the long-edge budget: 40 long edges across a 60-node chain, half of it grouped.
+        let mut big = String::from("graph TD\nsubgraph left\n");
+        for i in 0..59 {
+            big.push_str(&format!("N{i} --> N{}\n", i + 1));
+            if i == 30 {
+                big.push_str("end\nsubgraph right\n");
+            }
+        }
+        big.push_str("end\n");
+        for k in 0..40 {
+            big.push_str(&format!("N{} --> N{}\n", k % 20, k % 20 + 37));
+        }
+        let t = std::time::Instant::now();
+        assert!(scene(&big, &paint).is_some());
+        println!("chart at the long-edge budget: {:?}", t.elapsed());
+        assert!(t.elapsed().as_secs_f32() < 5.0, "{:?}", t.elapsed());
+        // Nested subgraphs at the depth cap, each with a few nodes.
+        let mut nested = String::from("graph TD\n");
+        for d in 0..8 {
+            nested.push_str(&format!("subgraph s{d}\nA{d} --> B{d} --> C{d}\n"));
+        }
+        nested.push_str(&"end\n".repeat(8));
+        nested.push_str("A0 --> C7\nC7 --> A0");
+        hostile(&nested, true);
+    }
+
+    #[test]
+    fn repeated_create_falls_back_without_recursing() {
+        hostile(&format!("sequenceDiagram\n{}participant A\nA->>B: hi", "create ".repeat(100_000)), false);
+        hostile("sequenceDiagram\ncreate loop x\nA->>B: hi\nend", false);
+        hostile("sequenceDiagram\ncreate participant A\nA->>B: hi", true);
+        hostile("sequenceDiagram\nA->>B: hi\ncreate actor C as Carol\nB->>C: hello", true);
+    }
+
+    #[test]
+    fn dashes_stop_on_huge_and_non_finite_lengths() {
+        let ink = Color::BLACK;
+        for end in [1e9, f32::INFINITY, f32::NAN] {
+            let mut c = Canvas::default();
+            c.dashed(&[[0.0, 0.0], [end, 0.0]], 1.0, ink, 4.0, 3.0);
+            assert!(c.ops.len() <= 20_000);
+        }
     }
 }

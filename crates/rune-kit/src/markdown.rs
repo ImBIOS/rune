@@ -399,14 +399,15 @@ fn pending_table(src: &str) -> Option<Table> {
     Some(Table { align, head, rows: Vec::new(), open: true })
 }
 
-/// The cells of a `| a | b |` line (a trailing pipe is optional; `\|` doesn't split).
+/// The cells of a `| a | b |` line (a trailing pipe is optional; `\|` doesn't split, and stays
+/// escaped for [`inline_of`] to unescape).
 fn split_row(line: &str) -> Vec<String> {
     let inner = line.strip_prefix('|').unwrap_or(line);
     let mut cells = vec![String::new()];
     let mut chars = inner.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            '\\' if chars.peek() == Some(&'|') => cells.last_mut().unwrap().push(chars.next().unwrap()),
+            '\\' if chars.peek() == Some(&'|') => cells.last_mut().unwrap().extend(['\\', chars.next().unwrap()]),
             '|' => cells.push(String::new()),
             c => cells.last_mut().unwrap().push(c),
         }

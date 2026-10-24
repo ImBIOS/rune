@@ -67,7 +67,9 @@ impl Renderer {
                 .reveal(self.reveal)
                 .w_full();
             r = r.child(
-                col().key(format!("c{j}")).grow(*natural).min_w(*min).px(PAD_X).py(PAD_Y).child(self.wire_link(content, inl)),
+                // Clipped: a word wider than a shrunk column (or a row still streaming in) must
+                // not run into the next column.
+                col().key(format!("c{j}")).grow(*natural).min_w(*min).px(PAD_X).py(PAD_Y).clip_soft(0.0).child(self.wire_link(content, inl)),
             );
         }
         r

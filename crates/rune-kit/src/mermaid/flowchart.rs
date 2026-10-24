@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use rune::{Align, TextStyle};
 
-use super::layered::{GCluster, GEdge, Graph, Spacing, layout};
+use super::layered::{GCluster, GEdge, Graph, MAX_MINLEN, Spacing, layout};
 use super::{Canvas, Cur, DiagramPaint, MAX_ITEMS, Measured, Scene, arc, arrowhead, clean, dist, ellipse, fit, measure, room, rounded_rect, smooth, unit};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,9 +95,6 @@ pub(crate) fn parse(header: &str, body: &[&str]) -> Option<Flowchart> {
     for line in std::iter::once(rest).chain(body.iter().copied()) {
         for stmt in statements(line) {
             p.statement(stmt)?;
-            if p.f.nodes.len() + p.f.edges.len() > MAX_ITEMS {
-                return None;
-            }
         }
     }
     (!p.f.nodes.is_empty()).then_some(p.f)
@@ -127,6 +124,9 @@ struct Parser {
     stack: Vec<usize>,
 }
 
+/// Subgraphs nest at most this deep.
+const MAX_DEPTH: usize = 8;
+
 struct Link {
     line: Line,
     start: Head,
@@ -136,6 +136,12 @@ struct Link {
 }
 
 impl Parser {
+    /// `None` once the chart already holds [`MAX_ITEMS`] nodes, edges and subgraphs, checked
+    /// before each one is added so no single statement can build an unbounded amount.
+    fn budget(&self) -> Option<()> {
+        (self.f.nodes.len() + self.f.edges.len() + self.f.subgraphs.len() < MAX_ITEMS).then_some(())
+    }
+
     fn statement(&mut self, s: &str) -> Option<()> {
         let word = s.split(|c: char| c.is_whitespace() || c == ':').next().unwrap_or("");
         match word {
@@ -145,6 +151,10 @@ impl Parser {
                     Some(i) if rest.ends_with(']') => clean(rest[i + 1..rest.len() - 1].trim().trim_matches('"')),
                     _ => clean(rest.trim_matches('"')),
                 };
+                self.budget()?;
+                if self.stack.len() >= MAX_DEPTH {
+                    return None;
+                }
                 self.f.subgraphs.push(Subgraph { title, parent: self.stack.last().copied() });
                 self.stack.push(self.f.subgraphs.len() - 1);
             }
@@ -170,6 +180,7 @@ impl Parser {
             let right = self.group(&mut c)?;
             for &from in &left {
                 for &to in &right {
+                    self.budget()?;
                     self.f.edges.push(Edge {
                         from,
                         to,
@@ -207,6 +218,7 @@ impl Parser {
         let i = match self.ids.get(&id) {
             Some(&i) => i,
             None => {
+                self.budget()?;
                 self.f.nodes.push(Node { label: id.clone(), id: id.clone(), shape: NodeShape::Rect, cluster });
                 self.ids.insert(id, self.f.nodes.len() - 1);
                 self.f.nodes.len() - 1
@@ -362,7 +374,7 @@ fn link(c: &mut Cur) -> Option<Link> {
             if end == Head::None { n.saturating_sub(2) } else { n.saturating_sub(1) }
         }
     }
-    .max(1);
+    .clamp(1, MAX_MINLEN);
     let save = c.i;
     c.skip_ws();
     if c.eat("|") {
@@ -474,9 +486,9 @@ pub(crate) fn draw(f: &Flowchart, paint: &DiagramPaint) -> Option<Scene> {
     let title_font = TextStyle { weight: 600.0, ..edge_font };
     let titles: Vec<Measured> = f.subgraphs.iter().map(|s| measure(&s.title, title_font)).collect();
     let fonts = Fonts { node: paint.font, edge: edge_font, title: title_font };
-    let mut canvas = draw_in(f, f.dir, &nodes, &labels, &titles, fonts, paint);
+    let mut canvas = draw_in(f, f.dir, &nodes, &labels, &titles, fonts, paint)?;
     if canvas.width() > room(paint) && matches!(f.dir, Dir::Right | Dir::Left) {
-        let down = draw_in(f, if f.dir == Dir::Right { Dir::Down } else { Dir::Up }, &nodes, &labels, &titles, fonts, paint);
+        let down = draw_in(f, if f.dir == Dir::Right { Dir::Down } else { Dir::Up }, &nodes, &labels, &titles, fonts, paint)?;
         if down.width() < canvas.width() {
             canvas = down;
         }
@@ -492,7 +504,7 @@ struct Fonts {
     title: TextStyle,
 }
 
-fn draw_in(f: &Flowchart, dir: Dir, nodes: &[Sized], labels: &[Option<Measured>], titles: &[Measured], fonts: Fonts, paint: &DiagramPaint) -> Canvas {
+fn draw_in(f: &Flowchart, dir: Dir, nodes: &[Sized], labels: &[Option<Measured>], titles: &[Measured], fonts: Fonts, paint: &DiagramPaint) -> Option<Canvas> {
     let across = matches!(dir, Dir::Right | Dir::Left);
     // Layout axes are [along a layer, across layers]; up and left lay out reversed edges.
     let ax = |s: [f32; 2]| if across { [s[1], s[0]] } else { s };
@@ -520,7 +532,7 @@ fn draw_in(f: &Flowchart, dir: Dir, nodes: &[Sized], labels: &[Option<Measured>]
             })
             .collect(),
     };
-    let placed = layout(&graph, &SPACING);
+    let placed = layout(&graph, &SPACING)?;
     let pt = |p: [f32; 2]| if across { [p[1], p[0]] } else { p };
     let mut c = Canvas::default();
 
@@ -589,7 +601,7 @@ fn draw_in(f: &Flowchart, dir: Dir, nodes: &[Sized], labels: &[Option<Measured>]
         let center = if n.shape == NodeShape::Cylinder { [ctr[0], ctr[1] + 4.0] } else { ctr };
         c.label(&nodes[i].label, center, fonts.node, paint.text, Align::Center);
     }
-    c
+    Some(c)
 }
 
 const ARROW: f32 = 8.0;

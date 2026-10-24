@@ -8,6 +8,12 @@
 //! layer's edges.
 
 /// What to lay out. Sizes are in the layout's own axes: `[along a layer, across layers]`.
+/// The most ranks one edge asks to span (`minlen`); longer links draw this long.
+pub const MAX_MINLEN: usize = 8;
+
+/// The most points long edges may add before a graph is left unlaid (see [`layout`]).
+const MAX_DUMMIES: usize = 3000;
+
 pub struct Graph {
     pub sizes: Vec<[f32; 2]>,
     pub edges: Vec<GEdge>,
@@ -64,7 +70,9 @@ struct LNode {
     succs: Vec<usize>,
 }
 
-pub fn layout(g: &Graph, sp: &Spacing) -> Placed {
+/// `None` when long edges would need more than [`MAX_DUMMIES`] points: such a chart is too
+/// tangled to read at markdown width, and every later step grows with that count.
+pub fn layout(g: &Graph, sp: &Spacing) -> Option<Placed> {
     let n = g.sizes.len();
     let chain = |mut c: Option<usize>| {
         let mut v = Vec::new();
@@ -122,7 +130,7 @@ pub fn layout(g: &Graph, sp: &Spacing) -> Placed {
     let live: Vec<usize> = (0..g.edges.len()).filter(|&i| g.edges[i].from != g.edges[i].to).collect();
 
     // 2. Ranks, doubled: every edge spans at least two, so its label has a rank to itself.
-    let span = |i: usize| 2 * g.edges[i].minlen.max(1);
+    let span = |i: usize| 2 * g.edges[i].minlen.clamp(1, MAX_MINLEN);
     let mut indeg = vec![0usize; n];
     let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut pred: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -164,6 +172,13 @@ pub fn layout(g: &Graph, sp: &Spacing) -> Placed {
     }
 
     // 3. The layered graph: real nodes, then one dummy per rank an edge crosses.
+    let dummies: usize = live.iter().map(|&i| {
+        let (a, b) = ends(i);
+        rank[b].saturating_sub(rank[a] + 1)
+    }).sum();
+    if dummies > MAX_DUMMIES {
+        return None;
+    }
     let mut nodes: Vec<LNode> = (0..n)
         .map(|v| LNode { kind: Kind::Real(v), rank: rank[v], size: g.sizes[v], cluster: g.node_cluster[v], preds: Vec::new(), succs: Vec::new() })
         .collect();
@@ -229,8 +244,8 @@ pub fn layout(g: &Graph, sp: &Spacing) -> Placed {
         }
         let down = it % 2 == 0;
         let order: Vec<usize> = if down { (1..ranks).collect() } else { (0..ranks.saturating_sub(1)).rev().collect() };
+        let mut pos = positions(&layers, nodes.len());
         for r in order {
-            let pos = positions(&layers, nodes.len());
             let layer = &layers[r];
             let keys: Vec<f32> = layer
                 .iter()
@@ -241,6 +256,9 @@ pub fn layout(g: &Graph, sp: &Spacing) -> Placed {
                 })
                 .collect();
             layers[r] = grouped_order(layer, &keys, &node_chains);
+            for (i, &v) in layers[r].iter().enumerate() {
+                pos[v] = i;
+            }
         }
         let x = crossings(&layers, &nodes);
         if x < best_x {
@@ -392,10 +410,25 @@ pub fn layout(g: &Graph, sp: &Spacing) -> Placed {
         Item::Cluster(c) => members[c].as_slice(),
         Item::Node(v) => std::slice::from_ref(&layers[nodes[v].rank][pos[v]]),
     };
+    // Each cluster's first member on each rank, so comparing two items is linear in their size.
+    let first_on_rank: Vec<std::collections::HashMap<usize, usize>> = members
+        .iter()
+        .map(|m| {
+            let mut at = std::collections::HashMap::new();
+            for &v in m {
+                at.entry(nodes[v].rank).or_insert(v);
+            }
+            at
+        })
+        .collect();
+    let on_rank = |it: Item, r: usize| match it {
+        Item::Cluster(c) => first_on_rank[c].get(&r).copied(),
+        Item::Node(v) => (nodes[v].rank == r).then_some(v),
+    };
     // Whether `a` sits left of `b`: by their order in a layer they share, else by centre.
     let left_of = |a: Item, b: Item, ba: [f32; 4], bb: [f32; 4]| {
         for &u in item_nodes(a) {
-            if let Some(&w) = item_nodes(b).iter().find(|&&w| nodes[w].rank == nodes[u].rank) {
+            if let Some(w) = on_rank(b, nodes[u].rank) {
                 return pos[u] < pos[w];
             }
         }
@@ -472,7 +505,7 @@ pub fn layout(g: &Graph, sp: &Spacing) -> Placed {
         .iter()
         .map(|b| if b[0] <= b[2] { [b[0] - lo[0], b[1] - lo[1], b[2] - lo[0], b[3] - lo[1]] } else { [0.0; 4] })
         .collect();
-    Placed { centers, paths, labels, clusters }
+    Some(Placed { centers, paths, labels, clusters })
 }
 
 /// Each node's index within its layer.
@@ -585,7 +618,7 @@ mod tests {
 
     #[test]
     fn a_chain_goes_down_in_a_straight_line() {
-        let p = layout(&graph(3, &[(0, 1), (1, 2)]), &SP);
+        let p = layout(&graph(3, &[(0, 1), (1, 2)]), &SP).unwrap();
         assert!(p.centers[0][1] < p.centers[1][1] && p.centers[1][1] < p.centers[2][1]);
         assert!((p.centers[0][0] - p.centers[2][0]).abs() < 0.5, "{:?}", p.centers);
         assert_eq!(p.centers[1][1] - p.centers[0][1], 30.0 + 40.0, "one rank is a node plus the rank gap");
@@ -593,7 +626,7 @@ mod tests {
 
     #[test]
     fn a_fork_spreads_children_without_overlap_and_centres_the_parent() {
-        let p = layout(&graph(3, &[(0, 1), (0, 2)]), &SP);
+        let p = layout(&graph(3, &[(0, 1), (0, 2)]), &SP).unwrap();
         let (a, b) = (p.centers[1], p.centers[2]);
         assert_eq!(a[1], b[1]);
         assert!((a[0] - b[0]).abs() >= 90.0 - 0.01, "{a:?} {b:?}");
@@ -602,7 +635,7 @@ mod tests {
 
     #[test]
     fn cycles_and_self_loops_lay_out() {
-        let p = layout(&graph(3, &[(0, 1), (1, 2), (2, 0), (1, 1)]), &SP);
+        let p = layout(&graph(3, &[(0, 1), (1, 2), (2, 0), (1, 1)]), &SP).unwrap();
         assert_eq!(p.paths.len(), 4);
         let back = &p.paths[2];
         assert_eq!(back.first(), Some(&p.centers[2]), "a reversed edge still runs from its source");
@@ -616,7 +649,7 @@ mod tests {
         let mut g = graph(7, &[(0, 1), (2, 3), (2, 4), (0, 2), (3, 5), (4, 5), (4, 6)]);
         g.clusters = vec![GCluster { parent: None, lead: [0.0, 16.0] }, GCluster { parent: None, lead: [0.0, 16.0] }];
         g.node_cluster = vec![Some(0), Some(0), Some(1), Some(1), Some(1), None, None];
-        let p = layout(&g, &SP);
+        let p = layout(&g, &SP).unwrap();
         let (a, b) = (p.clusters[0], p.clusters[1]);
         let apart = a[2] <= b[0] || b[2] <= a[0] || a[3] <= b[1] || b[3] <= a[1];
         assert!(apart, "{a:?} {b:?}");
@@ -642,7 +675,7 @@ mod tests {
         g.clusters.push(GCluster { parent: None, lead: [0.0, 16.0] });
         g.node_cluster[1] = Some(0);
         g.node_cluster[3] = Some(0);
-        let p = layout(&g, &SP);
+        let p = layout(&g, &SP).unwrap();
         let b = p.clusters[0];
         for v in [1, 3] {
             let c = p.centers[v];

@@ -230,6 +230,10 @@ fn a_trailing_header_line_is_already_a_table() {
     assert_eq!(t.align[1], rune::Align::End);
     assert!(matches!(&parse("| just one |")[0], Block::Para(_)), "a single cell is a paragraph");
     assert!(matches!(&parse("a | b")[0], Block::Para(_)));
+    // An escaped pipe stays in its cell, and the cell's markup still parses.
+    let Block::Table(t) = &parse("| \\| **a** \\| b | c |")[0] else { panic!() };
+    assert_eq!((t.head.len(), t.head[0].text.as_str()), (2, "| a | b"));
+    assert_eq!(t.head[0].spans[0].2, Style::Strong);
 }
 
 /// The x of every cell `c{j}` in the header row, in order.

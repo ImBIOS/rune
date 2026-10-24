@@ -101,7 +101,14 @@ impl Parser {
         let (word, rest) = l.split_once(char::is_whitespace).map_or((l, ""), |(w, r)| (w, r.trim()));
         match word.trim_end_matches(':') {
             "participant" | "actor" => self.declare(rest, word == "actor")?,
-            "create" => return self.line(rest),
+            // `create participant A`: drawn like any participant (from the top).
+            "create" => {
+                let (kind, name) = rest.split_once(char::is_whitespace).map_or((rest, ""), |(w, r)| (w, r.trim()));
+                match kind {
+                    "participant" | "actor" => self.declare(name, kind == "actor")?,
+                    _ => return None,
+                }
+            }
             "destroy" | "title" | "accTitle" | "accDescr" | "link" | "links" | "properties" | "details" => {}
             "autonumber" => self.s.autonumber = true,
             "activate" => {
