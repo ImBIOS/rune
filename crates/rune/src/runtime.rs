@@ -893,16 +893,16 @@ impl<S: 'static> Runtime<S> {
     pub fn update(&mut self, f: impl FnOnce(&mut S, &mut Tx)) {
         let mut one = self.transaction();
         f(&mut self.state, &mut one);
-        self.shell_request = self.shell_request.max(one.shell.take());
-        self.take_clipboard(&mut one);
+        self.latch_requests(&mut one);
         merge(&mut self.pending, one);
         self.dirty = true;
     }
 
-    /// Latches a Tx's clipboard requests for the shell, so `update`, a hidden poll and
-    /// `on_close` reach the clipboard without a frame, and applies them to a memory clipboard
-    /// at once. A secret clear drops an earlier secret copy not yet written.
-    fn take_clipboard(&mut self, tx: &mut Tx) {
+    /// Latches a Tx's shell and clipboard requests for the shell, so `update`, a hidden poll
+    /// and `on_close` reach the clipboard without a frame, and applies clipboard requests to a
+    /// memory clipboard at once. A secret clear drops an earlier secret copy not yet written.
+    fn latch_requests(&mut self, tx: &mut Tx) {
+        self.shell_request = self.shell_request.max(tx.shell.take());
         if std::mem::take(&mut tx.clear_secret) {
             if self.copy_request.as_ref().is_some_and(crate::ClipboardWrite::is_secret) { self.copy_request = None; }
             self.clear_secret_request = true;
@@ -924,8 +924,7 @@ impl<S: 'static> Runtime<S> {
         let changed = poll(&mut self.state, self.clock, &mut one);
         self.dirty |= changed;
         self.schedule_wakes(one.wakes.drain(..));
-        self.shell_request = self.shell_request.max(one.shell.take());
-        self.take_clipboard(&mut one);
+        self.latch_requests(&mut one);
         merge(&mut self.pending, one);
         changed
     }
@@ -1142,8 +1141,7 @@ impl<S: 'static> Runtime<S> {
             }
         }
         self.schedule_wakes(tx.wakes.drain(..));
-        self.take_clipboard(&mut tx);
-        self.shell_request = self.shell_request.max(tx.shell.take());
+        self.latch_requests(&mut tx);
         for (source, target) in std::mem::take(&mut tx.text_flights) {
             self.capture_text_flight(source, target);
         }
