@@ -250,7 +250,7 @@ impl<S: 'static> Member for Window<S> {
         let requests = self.shared.take();
         self.menus.drain();
         for f in requests.updates {
-            self.rt.update(f);
+            self.rt.update_if(f);
             self.menus.drain();
         }
         if let Some(p) = requests.position { self.move_to(desktop.to_points(p)); }

@@ -1264,11 +1264,31 @@ impl<S: 'static> Runtime<S> {
     /// (`AppHandle::update`). Runs now, so it works while no window shows; the next frame commits
     /// it with the motion `f` asked for.
     pub fn update(&mut self, f: impl FnOnce(&mut S, &mut Tx)) {
+        self.update_if(|s, tx| { f(s, tx); true });
+    }
+
+    /// `update` for a change that may be no change: `f` returns whether it changed state the
+    /// view reads, as `poll` does. On false the view doesn't re-run and no frame is asked for,
+    /// while what `f` asked of its `Tx` still happens: clipboard, close and quit, menus and
+    /// window frames reach the shell, a `wake_after` is scheduled from now, and a scroll or text
+    /// flight still takes a frame. Returns whether the last frame went out of date: `f`
+    /// reported a change or asked for work only a frame does.
+    ///
+    /// Returning false after changing state the view reads leaves the screen stale until the
+    /// next change.
+    pub fn update_if(&mut self, f: impl FnOnce(&mut S, &mut Tx) -> bool) -> bool {
         let mut one = self.transaction();
-        f(&mut self.state, &mut one);
+        let changed = f(&mut self.state, &mut one);
+        if !changed {
+            // No frame may come to schedule it.
+            if let Some(clock) = self.wall_clock() { self.clock = clock; }
+            self.schedule_wakes(one.wakes.drain(..));
+        }
+        let stale = changed || one.frame_work() || one.window_frame.is_some();
         self.latch_requests(&mut one);
         merge(&mut self.pending, one);
-        self.dirty = true;
+        self.dirty |= changed;
+        stale
     }
 
     /// Latches a Tx's shell and clipboard requests for the shell, so `update`, a hidden poll

@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use crate::el::Tx;
 use crate::tooling::{AppSpec, Args};
 
-type Update<S> = Box<dyn FnOnce(&mut S, &mut Tx) + Send>;
+type Update<S> = Box<dyn FnOnce(&mut S, &mut Tx) -> bool + Send>;
 /// `App::on_window`'s hook, run after each native window creation.
 pub(crate) type OnWindow = Box<dyn FnMut(&crate::WindowHandle)>;
 
@@ -332,7 +332,7 @@ impl<S: 'static> AppHandle<S> {
     /// Wake the event loop so `AppSpec::poll` runs, also while the window is hidden; for a
     /// background thread that queued work for `poll` to drain.
     pub fn wake(&self) {
-        self.shared.wake();
+        self.request(|q| q.woken = true);
     }
 
     /// Show the window (creating it if needed), restore it if minimized, and activate the app
@@ -414,6 +414,18 @@ impl<S: 'static> AppHandle<S> {
     /// Change the state from this thread: `f` runs on the UI thread, in call order, even while no
     /// window shows, and the next frame commits it with the motion its `Tx` asks for.
     pub fn update(&self, f: impl FnOnce(&mut S, &mut Tx) + Send + 'static) {
+        self.update_if(move |s, tx| { f(s, tx); true });
+    }
+
+    /// `update` for a timer or feed that often finds nothing new: `f` returns whether it changed
+    /// state the view reads, as `AppSpec::poll` does. On false the view doesn't re-run and the
+    /// window doesn't redraw (a hidden one doesn't refresh), while what `f` asked of its `Tx`
+    /// still happens: clipboard, close and quit, menus, `wake_after`, and scrolls, which take
+    /// a frame. Several updates drained together commit once if any returned true.
+    ///
+    /// Returning false after changing state the view reads leaves the screen stale until the
+    /// next change.
+    pub fn update_if(&self, f: impl FnOnce(&mut S, &mut Tx) -> bool + Send + 'static) {
         self.request(|q| q.updates.push(Box::new(f)));
     }
 
@@ -439,7 +451,16 @@ pub(crate) struct Requests<S> {
     pub position: Option<(i32, i32)>,
     pub place: Option<crate::windows::PlaceRequest>,
     pub quit: bool,
+    /// `AppHandle::wake` asked for `poll`.
+    pub woken: bool,
     pub updates: Vec<Update<S>>,
+}
+
+impl<S> Requests<S> {
+    /// Nothing but updates: no wake for `poll`, no window, focus or geometry request.
+    pub(crate) fn only_updates(&self) -> bool {
+        !self.woken && self.window.is_none() && !self.focus && self.position.is_none() && self.place.is_none()
+    }
 }
 
 impl<S> Default for Requests<S> {
@@ -451,6 +472,7 @@ impl<S> Default for Requests<S> {
             position: None,
             place: None,
             quit: false,
+            woken: false,
             updates: Vec::new(),
         }
     }
@@ -676,6 +698,61 @@ mod tests {
         rt.update(|_, tx| tx.quit());
         rt.update(|_, tx| tx.close_window());
         assert_eq!(rt.shell_request.take(), Some(Shell::Quit), "quit outranks close");
+    }
+
+    thread_local! { static BUILDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
+
+    fn counted(n: &u32, _: &mut Cx<u32>) -> El {
+        BUILDS.set(BUILDS.get() + 1);
+        crate::el::row().child(el().key("box").size(10.0 + *n as f32, 10.0))
+    }
+
+    fn drain(rt: &mut Runtime<u32>, app: &App<u32>) -> bool {
+        let mut updated = false;
+        for f in app.shared.take().updates { updated |= rt.update_if(f); }
+        updated
+    }
+
+    #[test]
+    fn updates_that_change_nothing_build_nothing() {
+        let app = App::new(AppSpec::new("t", (100.0, 100.0), || 0, counted));
+        let handle = app.handle();
+        let mut rt = Runtime::new(0u32, counted, (100.0, 100.0), Env::default());
+        rt.frame(0.0);
+        let (builds, commits) = (BUILDS.get(), rt.stats.commits);
+        for _ in 0..100 {
+            handle.update_if(|_, _| false);
+            assert!(!drain(&mut rt, &app));
+            assert!(!rt.stale(), "nothing to redraw");
+            rt.frame(1.0 / 120.0);
+        }
+        assert_eq!((BUILDS.get() - builds, rt.stats.commits - commits), (0, 0));
+
+        handle.update_if(|_, _| false);
+        handle.update_if(|n, tx| { *n = 5; tx.instant(); true });
+        handle.update_if(|_, _| false);
+        assert!(drain(&mut rt, &app), "one change in the batch commits it");
+        rt.frame(1.0 / 120.0);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(BUILDS.get() - builds, 1, "once");
+        assert_eq!(rt.elements().into_iter().find(|e| e.key.as_deref() == Some("box")).unwrap().rect[2], 15.0);
+
+        handle.update(|_, _| {});
+        assert!(drain(&mut rt, &app), "`update` always counts as a change");
+        rt.frame(1.0 / 120.0);
+        assert_eq!(BUILDS.get() - builds, 2);
+    }
+
+    #[test]
+    fn an_update_that_changes_nothing_still_delivers_its_requests() {
+        let mut rt = Runtime::new(0u32, counted, (100.0, 100.0), Env::default());
+        rt.frame(0.0);
+        assert!(!rt.update_if(|_, tx| { tx.copy("hello"); tx.wake_after(std::time::Duration::from_millis(500)); false }));
+        assert!(!rt.stale());
+        assert_eq!(rt.copy_request.as_deref(), Some("hello"));
+        assert_eq!(rt.wake_deadline(), Some(rt.clock + 0.5), "scheduled now: no frame may come");
+        assert!(!rt.update_if(|_, tx| { tx.quit(); false }));
+        assert_eq!(rt.shell_request, Some(Shell::Quit));
     }
 
     #[test]

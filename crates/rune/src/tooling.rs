@@ -1326,7 +1326,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         let requests = shared.take();
         menus.drain();
         for f in requests.updates {
-            rt.update(f);
+            rt.update_if(f);
             menus.drain();
         }
         if let Some(p) = requests.position { rt.set_window_origin(desktop.to_points(p)); }

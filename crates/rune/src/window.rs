@@ -1098,6 +1098,39 @@ mod occluded_surface {
     }
 }
 
+/// Whether a drain of other threads' requests asks the window for a frame. A hidden launcher
+/// renders a change into its cached frame (paced); a shown launcher redraws for a change or
+/// as it shows; any other shown window redraws, unless only updates that changed nothing
+/// (`quiet`) woke it.
+fn drain_frame(launcher: bool, visible: bool, was_shown: bool, changed: bool, quiet: bool) -> bool {
+    if launcher && !visible { return changed; }
+    !quiet && if launcher { changed || was_shown && visible } else { visible }
+}
+
+#[test]
+fn updates_that_change_nothing_ask_no_window_for_a_frame() {
+    use crate::{App, AppSpec, el};
+    let app = App::new(AppSpec::new("t", (10.0, 10.0), || 0u32, |_, _| el()));
+    let (handle, shared) = (app.handle(), app.shared.clone());
+    let mut rt = Runtime::new(0u32, |_, _| el(), (10.0, 10.0), crate::Env::default());
+    rt.frame(0.0);
+    // As `Host::drain`, for 100 timer ticks that found nothing new.
+    for _ in 0..100 {
+        handle.update_if(|_, _| false);
+        let mut requests = shared.take();
+        let mut updated = false;
+        for f in std::mem::take(&mut requests.updates) { updated |= rt.update_if(f); }
+        let quiet = !updated && requests.only_updates() && !rt.needs_commit();
+        for (launcher, visible) in [(false, true), (true, true), (true, false), (false, false)] {
+            assert!(!drain_frame(launcher, visible, visible, updated, quiet), "launcher {launcher} visible {visible}");
+        }
+    }
+    handle.update_if(|_, _| false);
+    handle.wake();
+    assert!(!shared.take().only_updates(), "`wake` still runs a shown window's poll");
+    assert!(drain_frame(false, true, true, false, false) && drain_frame(true, false, false, true, false));
+}
+
 /// `wake_after(Duration::ZERO)` from the poll: a running display link takes it as the next
 /// frame; any host without one waits a frame interval from the poll, never `now`.
 #[test]
@@ -1680,13 +1713,18 @@ impl<S: 'static> Host<S> {
         let clipboard = self.clipboard.receive(&mut self.rt);
         let answered = self.popup.answer(&mut self.rt);
         self.shortcuts.drain();
-        let requests = self.shared.take();
-        let changed = clipboard || answered || !requests.updates.is_empty() || self.rt.drag_ends_pending();
+        let mut requests = self.shared.take();
         self.menus.drain();
-        for f in requests.updates {
-            self.rt.update(f);
+        let updates = std::mem::take(&mut requests.updates);
+        let had_updates = !updates.is_empty();
+        let mut updated = false;
+        for f in updates {
+            updated |= self.rt.update_if(f);
             self.menus.drain();
         }
+        let changed = clipboard || answered || updated || self.rt.drag_ends_pending();
+        // Only updates that changed nothing (`AppHandle::update_if`) woke it.
+        let quiet = had_updates && !changed && requests.only_updates() && !self.rt.needs_commit();
         self.clipboard.flush(&mut self.rt);
         if requests.quit {
             // A tracking menu holds the event loop until it ends.
@@ -1712,20 +1750,19 @@ impl<S: 'static> Host<S> {
         }
         // A dev command may change a shown launcher, which otherwise redraws only for updates.
         #[cfg(all(feature = "dev", debug_assertions))]
-        let changed = changed || self.rt.dev.is_some();
+        let (changed, quiet) = (changed || self.rt.dev.is_some(), quiet && self.rt.dev.is_none());
         // A launcher's cached reveal draws nothing; a hidden one renders its changes hidden,
         // paced (`refresh_hidden`). A covered or minimised one runs them without asking for a
         // frame it wouldn't draw.
         let launcher = self.launcher();
-        if launcher && self.win.as_ref().is_some_and(|w| !w.visible) {
-            if changed { self.refresh_hidden(); }
-        } else if let Some(w) = self.win.as_ref().filter(|w| if launcher { changed || shown && w.visible } else { w.visible }) {
-            if (!launcher && w.occluded) || w.window.is_minimized().unwrap_or(false) {
-                self.covered_frame();
-                self.shell(event_loop);
-            } else {
-                w.window.request_redraw();
-            }
+        let Some(w) = self.win.as_ref().filter(|w| drain_frame(launcher, w.visible, shown, changed, quiet)) else { return };
+        if launcher && !w.visible {
+            self.refresh_hidden();
+        } else if (!launcher && w.occluded) || w.window.is_minimized().unwrap_or(false) {
+            self.covered_frame();
+            self.shell(event_loop);
+        } else {
+            w.window.request_redraw();
         }
     }
 

@@ -5,6 +5,16 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`update_if` for updates that may change nothing.** `AppHandle::update_if`,
+  `OverlayHandle::update_if` and `Runtime::update_if` take a closure that returns whether it
+  changed state the view reads, as `poll` does. On false the view doesn't re-run, a shown window
+  or overlay doesn't redraw and a hidden launcher or prewarmed overlay doesn't refresh, while the
+  closure's `Tx` requests still happen (clipboard, close and quit, menus, `wake_after` scheduled
+  from now; a scroll or `fly_text` still takes a frame). A batch drained together commits once if
+  any returned true. Returning false after changing state the view reads leaves the screen stale
+  until the next change. `update` is unchanged. For a timer that posts every 500 ms with
+  nothing new, a 300-row view's frame drops from 0.70 ms to 0.11 ms median (0 of 100 builds).
+
 - **Tooltip labels wrap at the style's max width.** `Tooltip::label` and `Tooltip::text` stayed
   on one line past `TooltipStyle::max_width` and drew outside the box; they now wrap inside it,
   so a kit's Standard tooltip wraps at 320 pt. Tooltips without a max width are unchanged.

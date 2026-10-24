@@ -229,6 +229,21 @@ mod tests {
     }
 
     #[test]
+    fn an_update_that_changes_nothing_still_scrolls() {
+        let mut rt = chat(Chat { rows: 40, instant: true, ..Default::default() });
+        for _ in 0..5 {
+            rt.wheel(100.0, 100.0, 300.0);
+            rt.frame(1.0 / 120.0);
+        }
+        for _ in 0..60 { rt.frame(1.0 / 120.0); }
+        assert_eq!(rt.scroll_at_bottom("scroll"), Some(false));
+        assert!(rt.update_if(|_, tx| { tx.scroll_to_bottom_instant("stack"); false }), "a scroll takes a frame");
+        assert!(rt.stale());
+        for _ in 0..3 { rt.frame(1.0 / 120.0); }
+        assert_eq!(rt.scroll_at_bottom("scroll"), Some(true));
+    }
+
+    #[test]
     fn wheel_interrupts_a_glide() {
         let mut rt = chat(Chat { rows: 40, ..Default::default() });
         rt.wheel(100.0, 100.0, 400.0);

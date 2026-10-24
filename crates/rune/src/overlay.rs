@@ -70,7 +70,7 @@ pub enum Availability {
     Unavailable,
 }
 
-type Update<T> = Box<dyn FnOnce(&mut T, &mut Tx) + Send>;
+type Update<T> = Box<dyn FnOnce(&mut T, &mut Tx) -> bool + Send>;
 
 /// Where an overlay sits and how big it is, in points.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -220,6 +220,17 @@ impl<T: 'static> OverlayHandle<T> {
     /// once, with the latest state. A prewarmed macOS overlay commits hidden changes at most
     /// every 250 ms to keep its retained frame close.
     pub fn update(&self, f: impl FnOnce(&mut T, &mut Tx) + Send + 'static) {
+        self.update_if(move |s, tx| { f(s, tx); true });
+    }
+
+    /// `update` for a timer or feed that often finds nothing new: `f` returns whether it changed
+    /// state the view reads, as `OverlayOptions::poll` does. On false the view doesn't re-run
+    /// and the overlay neither draws nor refreshes while hidden, while what `f` asked of its
+    /// `Tx` still happens: clipboard, menus, `wake_after`, and scrolls, which take a frame.
+    ///
+    /// Returning false after changing state the view reads leaves the screen stale until the
+    /// next change.
+    pub fn update_if(&self, f: impl FnOnce(&mut T, &mut Tx) -> bool + Send + 'static) {
         self.request(|q| q.updates.push(Box::new(f)));
     }
 
@@ -1075,12 +1086,17 @@ impl<T: 'static> Overlay<T> {
     /// Handle updates, and the `setup` waker (new data arrived) re-runs the view. A shown
     /// overlay draws a frame, which polls; a hidden one polls now, as for a due timer, and
     /// re-runs the view when it shows (`advance_at`).
+    /// Updates that changed nothing (`update_if`) only deliver their requests.
     fn apply_wake(&mut self, woken: bool, updates: Vec<Update<T>>) {
-        let updated = !updates.is_empty();
-        for f in updates { self.rt.update(f); }
+        let queued = !updates.is_empty();
+        let mut updated = false;
+        for f in updates { updated |= self.rt.update_if(f); }
         if woken { self.rt.invalidate(); }
-        if !woken && !updated { return; }
-        self.clipboard.flush(&mut self.rt);
+        if queued || woken { self.clipboard.flush(&mut self.rt); }
+        if !woken && !updated {
+            if queued { self.open_popup(); }
+            return;
+        }
         self.dirty = true; // Queued updates already invalidate the cache before polling.
         if self.frameless() {
             // Register timer requests even before the first show; hidden or occluded overlays
@@ -1950,7 +1966,7 @@ mod tests {
         let start = Instant::now();
         overlay.rt.wall_start = Some(start);
         // An update asks for the next frame, as a poll would.
-        overlay.apply_wake(false, vec![Box::new(|_: &mut u32, tx: &mut Tx| tx.wake_after(Duration::ZERO))]);
+        overlay.apply_wake(false, vec![Box::new(|_: &mut u32, tx: &mut Tx| { tx.wake_after(Duration::ZERO); true })]);
         let before = overlay.rt.state;
         for _ in 0..10_000 {
             if overlay.dirty && !overlay.frameless() { present_paced(overlay, Instant::now(), false); }
@@ -2357,7 +2373,7 @@ mod tests {
             assert_eq!(overlay.rt.presented("box").unwrap().0[2], 12.0);
             overlay.advance();
             assert!(!overlay.dirty, "an unchanged hidden poll preserves the prepared frame");
-            if stale { overlay.apply_wake(false, vec![Box::new(|s, _| s.width = 16.0)]); }
+            if stale { overlay.apply_wake(false, vec![Box::new(|s, _| { s.width = 16.0; true })]); }
             overlay.rt.state.enter = true; // External event observed by the next hidden poll.
             if queued {
                 // Scrawl's original kick: a no-op update invalidates the prepared frame
@@ -2662,6 +2678,36 @@ mod tests {
         assert_eq!(counter_text(&overlay).as_deref(), Some("10"), "with the latest state");
     }
 
+    /// Updates that change nothing neither draw a shown overlay nor refresh a hidden one, and
+    /// still schedule their timers.
+    #[test]
+    fn updates_that_change_nothing_leave_an_overlay_alone() {
+        let app = AppSpec::new("quiet counter", (200.0, 50.0), || 0, counter_view);
+        let (mut overlay, handle) = Overlay::new(OverlaySpec::new("quiet counter", app.size, counter_view).options(Default::default()), 0, &app);
+        overlay.rt.wall_start = None;
+        overlay.rt.frame(0.0);
+        let (builds, commits) = (BUILDS.get(), overlay.rt.stats.commits);
+        let apply = |overlay: &mut Overlay<u32>| {
+            let requests = std::mem::take(&mut *overlay.shared.requests.lock().unwrap());
+            overlay.apply_wake(requests.woken, requests.updates);
+        };
+        for visible in [false, true] {
+            overlay.visible = visible;
+            for _ in 0..100 {
+                overlay.dirty = false;
+                handle.update_if(|_, tx| { tx.wake_after(Duration::from_millis(500)); false });
+                apply(&mut overlay);
+                assert!(!overlay.dirty && !overlay.rt.stale(), "visible {visible}");
+            }
+        }
+        assert_eq!((BUILDS.get() - builds, overlay.rt.stats.commits - commits), (0, 0));
+        assert_eq!(overlay.rt.wake_deadline(), Some(0.5));
+        handle.update_if(|_, _| false);
+        handle.update_if(|n, _| { *n = 3; true });
+        apply(&mut overlay);
+        assert!(overlay.dirty, "a change in the batch draws");
+    }
+
     /// A prewarmed overlay keeps its frame ready while hidden, but commits state that changes
     /// ten times a second at most every `HIDDEN_REFRESH`. Its reveal commits what's left once.
     #[cfg(target_os = "macos")]
@@ -2806,7 +2852,7 @@ mod tests {
 
         // An update arriving while it is covered arms its timer at once, not on a later retry.
         overlay.occluded(true);
-        overlay.apply_wake(false, vec![Box::new(|_: &mut State, tx: &mut Tx| tx.wake_after(Duration::from_secs(5)))]);
+        overlay.apply_wake(false, vec![Box::new(|_: &mut State, tx: &mut Tx| { tx.wake_after(Duration::from_secs(5)); true })]);
         let deadline = overlay.wake_deadline().expect("the update's timer is armed while occluded");
         assert!(deadline > Instant::now() + Duration::from_secs(4), "{:?}", deadline - Instant::now());
     }
