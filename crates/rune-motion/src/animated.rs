@@ -58,19 +58,19 @@ impl<T: Animatable> Animated<T> {
         self.curve = anim.curve;
         for (i, &t) in tg.iter().enumerate().take(T::LANES) {
             let (o, v) = self.layers[i].sample(now);
-            let x = self.target[i] + o;
-            let v = velocity.unwrap_or(v);
-            self.layers[i] = match anim.curve {
-                Curve::Decay(d) => {
-                    self.target[i] = x + v / d.k();
-                    Layer::decay(d.k(), now, v, self.eps)
-                }
-                // One layer per lane here, so every curve merges from the exact (x, v).
-                c => Layer::start(&c, now, x - t, v, self.eps),
-            };
-            if !matches!(anim.curve, Curve::Decay(_)) {
-                self.target[i] = t;
-            }
+            self.restart_lane(i, self.target[i] + o, velocity.unwrap_or(v), t, anim.curve, now);
+        }
+    }
+
+    /// Restarts lane `i` at `x` with velocity `v`. One layer per lane here, so every curve
+    /// merges from the exact (x, v); decay picks its own target.
+    fn restart_lane(&mut self, i: usize, x: f32, v: f32, target: f32, curve: Curve, now: f64) {
+        if let Curve::Decay(d) = curve {
+            self.target[i] = x + v / d.k();
+            self.layers[i] = Layer::decay(d.k(), now, v, self.eps);
+        } else {
+            self.target[i] = target;
+            self.layers[i] = Layer::start(&curve, now, x - target, v, self.eps);
         }
     }
 
@@ -87,15 +87,8 @@ impl<T: Animatable> Animated<T> {
         let curve = curve.into();
         self.curve = curve;
         for i in 0..T::LANES {
-            let (o, _) = self.layers[i].sample(now);
-            let x = self.target[i] + o;
-            if let Curve::Decay(d) = curve {
-                self.target[i] = x + v[i] / d.k();
-                self.layers[i] = Layer::decay(d.k(), now, v[i], self.eps);
-            } else {
-                self.target[i] = tg[i];
-                self.layers[i] = Layer::start(&curve, now, x - tg[i], v[i], self.eps);
-            }
+            let x = self.target[i] + self.layers[i].sample(now).0;
+            self.restart_lane(i, x, v[i], tg[i], curve, now);
         }
     }
 

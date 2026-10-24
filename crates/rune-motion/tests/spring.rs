@@ -139,6 +139,35 @@ fn animated_value_retargets_keeping_velocity() {
     assert!((d.sample(30.0) - d.target()).abs() < 1e-2);
 }
 
+/// Bit-exact golden for `animate_to`/`release` across every curve kind, so a refactor of the
+/// lane restart can't drift the numbers.
+#[test]
+fn animated_retarget_golden() {
+    let tween = Curve::Tween { duration: 0.3, easing: Easing::EASE_OUT };
+    let curves = [Curve::Spring(motion::GLIDE), Curve::Spring(Spring::new(0.5, 0.3)), tween, Curve::Decay(Decay::IOS_NORMAL), Curve::Instant];
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |x: f32| {
+        h ^= u64::from(x.to_bits());
+        h = h.wrapping_mul(0x100_0000_01b3);
+    };
+    for (n, &c) in curves.iter().enumerate() {
+        let mut a = Animated::new(Vec2::new(0.0, 10.0));
+        a.animate_to(Vec2::new(100.0, -40.0), Anim::new(Curve::Spring(motion::SNAP)), 0.0);
+        a.animate_to(Vec2::new(-30.0, 60.0), Anim::new(c), 0.07);
+        a.animate_to(Vec2::new(5.0, 5.0), Anim::new(c).velocity(Velocity::Uniform(250.0)), 0.13);
+        a.release(Vec2::new(-800.0, 400.0), Vec2::new(20.0 * n as f32, 0.0), c, 0.2);
+        for k in 0..40 {
+            let t = 0.2 + f64::from(k) * 0.025;
+            let (x, v) = (a.sample(t), a.velocity(t));
+            [x.x, x.y, v.x, v.y].into_iter().for_each(&mut mix);
+        }
+        let tg = a.target();
+        mix(tg.x);
+        mix(tg.y);
+    }
+    assert_eq!(h, 15_969_925_884_686_696_054, "golden hash");
+}
+
 #[test]
 fn css_linear_export() {
     let (css, ms) = motion::SETTLE.css_linear();
