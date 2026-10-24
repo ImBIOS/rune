@@ -195,3 +195,100 @@ fn links_press_through_on_link() {
     rt.frame(1.0 / 60.0);
     assert_eq!(rt.cursor(), rune::Cursor::Default);
 }
+
+const TABLE: &str = "| Name | Count | Note |\n|:-----|:-----:|-----:|\n| **a** | 1 | [x](https://x.dev) |\n| b |\n";
+
+#[test]
+fn tables_parse_alignment_inline_cells_and_ragged_rows() {
+    let b = parse(TABLE);
+    let Block::Table(t) = &b[0] else { panic!("{b:?}") };
+    assert_eq!(t.align, [rune::Align::Start, rune::Align::Center, rune::Align::End]);
+    let head: Vec<_> = t.head.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(head, ["Name", "Count", "Note"]);
+    assert_eq!(t.rows[0][0].spans[0].2, Style::Strong);
+    assert_eq!(t.rows[0][2].links[0].2, "https://x.dev");
+    assert!(t.rows[1].len() <= 3 && t.rows[1][0].text == "b");
+    assert!(!t.open);
+
+    let rt = laid_out(TABLE);
+    let (th, r0) = (by_key(&rt, "th"), by_key(&rt, "r0"));
+    assert!(th.rect[1] < r0.rect[1]);
+    let texts: Vec<_> = rt.elements().into_iter().filter_map(|e| e.text).collect();
+    for want in ["Name", "Count", "Note", "a", "1", "x", "b"] {
+        assert!(texts.iter().any(|t| t == want), "{want} in {texts:?}");
+    }
+}
+
+#[test]
+fn a_trailing_header_line_is_already_a_table() {
+    for src in ["Intro\n\n| a | b |", "Intro\n\n| a | b |\n|:-", "Intro\n\n| a | b |\n|--|--:|"] {
+        let b = parse(src);
+        let Block::Table(t) = &b[1] else { panic!("{src:?}: {b:?}") };
+        assert!(t.rows.is_empty() && t.head.len() == 2, "{src:?}");
+    }
+    let Block::Table(t) = &parse("| a | b |\n|--|--:|")[0] else { panic!() };
+    assert_eq!(t.align[1], rune::Align::End);
+    assert!(matches!(&parse("| just one |")[0], Block::Para(_)), "a single cell is a paragraph");
+    assert!(matches!(&parse("a | b")[0], Block::Para(_)));
+}
+
+/// The x of every cell `c{j}` in the header row, in order.
+fn column_edges(rt: &Runtime<String>) -> Vec<f32> {
+    rt.elements().into_iter().filter(|e| e.path.contains("th") && e.key.as_deref().is_some_and(|k| k.starts_with('c'))).map(|e| e.rect[0]).collect()
+}
+
+#[test]
+fn a_streaming_row_does_not_move_the_columns() {
+    let base = "| Step | Result |\n|---|---|\n| one | ok |\n";
+    let mut rt = laid_out(base);
+    let before = column_edges(&rt);
+    assert_eq!(before.len(), 2, "{:?}", keys(&rt));
+    for partial in ["| a much longer first cell that is still arriving", "| a much longer first cell that is still arriving | and more"] {
+        rt.state = format!("{base}{partial}");
+        rt.invalidate();
+        rt.frame(1.0 / 60.0);
+        assert_eq!(column_edges(&rt), before, "{partial:?}");
+    }
+    rt.state = format!("{base}| a much longer first cell that is still arriving | and more |\n");
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+    assert_ne!(column_edges(&rt), before, "a finished row sizes the columns");
+}
+
+#[test]
+fn diffs_tint_whole_lines_and_dim_hunk_headers() {
+    let src = "```diff\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n```\n";
+    assert!(matches!(&parse(src)[0], Block::Diff(d) if d.lines().count() == 4));
+    assert!(matches!(&parse("```patch\n+a\n```")[0], Block::Diff(_)));
+    fn styled(src: &String, _: &mut Cx<String>) -> El {
+        let [add, remove, hunk] = [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]].map(|[r, g, b]| rune::Color { r, g, b, a: 1.0 });
+        col().w_full().child(Markdown::new(src.clone()).render(&MarkdownStyle::neutral(false).diff(add, remove).diff_hunk(hunk)))
+    }
+    let mut rt = Runtime::new(src.to_owned(), styled, (480.0, 400.0), Env::new(false, 1.0));
+    rt.frame(0.0);
+    let fill = |k: &str| by_key(&rt, k).fill;
+    let [add, remove, hunk] = [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]].map(|[r, g, b]| rune::Color { r, g, b, a: 1.0 });
+    assert_eq!((fill("l2"), fill("l3")), (remove, add));
+    assert_ne!(fill("l1"), add);
+    let block = by_key(&rt, "b0");
+    assert_eq!(by_key(&rt, "l3").rect[2], block.rect[2], "tints run edge to edge");
+    let header = rt.elements().into_iter().find(|e| e.text.as_deref() == Some("@@ -1,2 +1,2 @@")).unwrap();
+    assert_eq!(header.text_color, Some(hunk));
+}
+
+#[test]
+fn markdown_and_tooltips_render_without_a_kit() {
+    fn plain(src: &String, _: &mut Cx<String>) -> El {
+        let mut layer = Vec::new();
+        let tip = rune_kit::Tooltip::new("t").trigger(rune::text("?")).label("Help").open(true).render(&rune_kit::TooltipStyle::neutral(true), &mut layer);
+        rune_kit::root(col().w_full().child(Markdown::new(src.clone()).render(&MarkdownStyle::neutral(true))).child(tip), layer)
+    }
+    let mut rt = Runtime::new(DOC.to_owned(), plain, (480.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let k = Kit::neutral(true);
+    assert_eq!(by_key(&rt, "b0").text_color, Some(k.c.text_base));
+    assert_eq!(by_key(&rt, "b7").fill, k.c.layer_01, "neutral(dark) matches Kit::neutral(dark)");
+    let tip = by_key(&rt, "t-tooltip");
+    assert_eq!(tip.role, "tooltip");
+    assert!(rt.elements().iter().any(|e| e.text.as_deref() == Some("Help")));
+}

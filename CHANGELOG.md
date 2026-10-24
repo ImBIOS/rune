@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **rune-kit `Markdown` renders GFM tables and tints ```` ```diff ```` fences.** Pipe tables
+  were flattened into run-on text before; they are now tables with a header row, alignment
+  and columns sized from their content (narrow tables wrap, then clip). `diff` and `patch`
+  fences tint `+`/`-` lines and dim `@@` headers instead of drawing a plain code block.
+  Documents with neither render exactly as before. New `MarkdownStyle` builders: `table`,
+  `table_min_column`, `diff`, `diff_hunk`.
+- **rune-kit `Markdown` works without a `Kit`:** `Markdown::render(&MarkdownStyle)` with
+  `MarkdownStyle::neutral(dark)` or `MarkdownStyle::from_seed(seed)`. `build(&kit)` is unchanged.
 - **rune-kit `Tooltip` works without a `Kit`:** `Tooltip::label(..).render(&TooltipStyle,
   &mut layer)` with `TooltipStyle::{neutral, from_kit}` and its builders. `build(&kit)` is
   unchanged.
