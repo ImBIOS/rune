@@ -945,7 +945,7 @@ impl Scene {
                 }
             }
         }
-        // Screen travel ends once it has arrived and no ancestor is still moving.
+        // Screen travel ends once it has arrived and no ancestor is still moving or transitioning.
         let mut k = 0;
         while k < self.travelling.len() {
             let i = self.travelling[k] as usize;
@@ -998,11 +998,13 @@ impl Scene {
         FrameOutput { changed: &self.out, exited: &self.exited, events: self.store.events(), animating }
     }
 
+    /// An ancestor still moving or changing how it draws its subtree: a node ending screen travel
+    /// under it would jump onto its mid-transition offset, scale, opacity or blur.
     fn ancestor_moving(&self, i: usize) -> bool {
         let mut p = self.nodes[i].parent;
         while p != NONE {
             let n = &self.nodes[p as usize];
-            for prop in [prop::FRAME.id, prop::TRAVEL.id, prop::OFFSET.id] {
+            for prop in [prop::FRAME.id, prop::TRAVEL.id, prop::OFFSET.id, prop::PRESENCE.id, prop::SCALE.id, prop::OPACITY.id, prop::BLUR.id] {
                 if n.tracks[prop.0 as usize].is_some_and(|t| self.store.is_active(t)) {
                     return true;
                 }

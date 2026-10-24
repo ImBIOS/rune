@@ -11,6 +11,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   opacity to its own layout (`REFLOW` by default), painting above the window with its
   children scaled to cover the moving frame. `rune_motion::Scene::match_geometry_offset`
   starts a match from a rect offset outside the scene (a scroll). Apps that don't call
+  `matched` draw the same pixels. In `rune_motion::Scene`, screen travel
+  (`LayoutAnim::screen()`) now lands only once its ancestors' presence, scale, opacity and
+  blur settle too, so it can't jump onto a parent mid-transition.
   `matched` draw the same pixels.
 - **Elements can be dragged out to other apps (macOS).** `El::drag_out(|s| Some(DragItem))`
   starts a system drag once the pointer passes `DRAG_THRESHOLD`, carrying file URLs, PNG data
