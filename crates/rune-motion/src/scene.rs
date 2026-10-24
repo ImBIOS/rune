@@ -654,6 +654,13 @@ impl Scene {
     /// at once; `to` starts exactly where `from` was seen, with its velocity, and travels a
     /// straight root-space path. Under Reduce Motion it's a crossfade in place.
     pub fn match_geometry(&mut self, from: NodeId, to: NodeId, anim: impl Into<LayoutAnim>) {
+        self.match_geometry_offset(from, to, Vec2::ZERO, anim);
+    }
+
+    /// [`match_geometry`](Self::match_geometry) for a `from` that was seen `offset` away from its
+    /// scene rect, measured in `to`'s root space: a scroll offset the renderer applies outside the
+    /// scene, which differs between the two places.
+    pub fn match_geometry_offset(&mut self, from: NodeId, to: NodeId, offset: Vec2, anim: impl Into<LayoutAnim>) {
         let (Some(a), Some(b)) = (self.slot(from), self.slot(to)) else { return };
         let anim = anim.into();
         if self.store.reduced_motion() {
@@ -664,7 +671,10 @@ impl Scene {
             self.nodes[b].phase = Phase::Entering;
             return;
         }
-        let (start, vel) = self.exact_world(a);
+        let (mut start, vel) = self.exact_world(a);
+        for (k, edge) in start.iter_mut().enumerate() {
+            *edge += if k % 2 == 0 { offset.x } else { offset.y };
+        }
         let radius = self.current::<Corners>(a, prop::RADIUS).unwrap_or(self.nodes[a].radius);
         let fill = self.current::<Color>(a, prop::FILL).unwrap_or(self.nodes[a].fill);
         let (to_radius, to_fill) = (self.nodes[b].radius, self.nodes[b].fill);
