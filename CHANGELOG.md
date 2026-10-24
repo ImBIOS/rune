@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`wake_after(Duration::ZERO)` never spins the loop.** A wake due sooner than a frame asks
+  for the next frame. A window or overlay a display link paces (macOS) draws it on the next
+  tick: windows now keep their link running for it too, as overlays do. Hidden, covered, faded
+  out or unpaced (no display link, or not macOS), it waits a frame interval (60 Hz) from the
+  last poll. It used to wake the loop at once, so a poll that kept asking ran as fast as the
+  loop could turn while covered, after a fade-out or without a display link.
 - **Overlays on macOS draw at the scale of the display they're placed on.** An overlay used to
   take its scale from winit's window when shown, which for a hidden panel needn't match the
   display it's about to appear on, so a panel placed on a display of another scale could draw

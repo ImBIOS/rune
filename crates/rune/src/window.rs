@@ -734,6 +734,23 @@ pub(crate) fn wall_wake_deadline<S>(rt: &Runtime<S>) -> Option<Instant> {
     rt.wall_start?.checked_add(Duration::try_from_secs_f64(rt.wake_deadline()?).ok()?)
 }
 
+/// The runtime's next timer as a host with no display link to take it waits for it: hidden,
+/// covered, faded out or unpaced. A timer due within a frame interval of the last poll
+/// (`Tx::wake_after(Duration::ZERO)` asks for the next frame) waits for that interval, so a
+/// poll that keeps asking steps at most once per `TIMER_FRAME` and never spins the loop.
+pub(crate) fn timer_deadline<S>(rt: &Runtime<S>) -> Option<Instant> {
+    let due = wall_wake_deadline(rt)?;
+    let polled = rt.wall_start.and_then(|t0| t0.checked_add(Duration::try_from_secs_f64(rt.polled_at()).ok()?));
+    Some(polled.map_or(due, |polled| due.max(polled + TIMER_FRAME)))
+}
+
+/// Whether a timer asks for the frame after one just presented. Only a surface whose display
+/// link paces it (`next_frame` is its next tick) takes a timer due by then as a frame request;
+/// anywhere else the timer waits in `timer_deadline`, so it never turns the loop by itself.
+pub(crate) fn timer_wants_frame<S>(rt: &Runtime<S>, next_frame: Option<Instant>) -> bool {
+    next_frame.is_some_and(|next| wall_wake_deadline(rt).is_some_and(|due| due <= next))
+}
+
 /// Why a surface gave no drawable this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Missed {
@@ -828,6 +845,32 @@ fn missed_frames_never_poll() {
     assert_eq!(occluded(Duration::from_secs(60)), NextFrame::WaitUntil(now + OCCLUDED_MAX));
     assert_eq!(Missed::Timeout.next(true, now, Duration::ZERO), NextFrame::Idle, "a running display link retries on its tick");
     assert_eq!(Missed::Timeout.next(false, now, Duration::ZERO), NextFrame::WaitUntil(now + TIMEOUT_RETRY));
+}
+
+/// `wake_after(Duration::ZERO)` from the poll: a running display link takes it as the next
+/// frame; any host without one waits a frame interval from the poll, never `now`.
+#[test]
+fn a_timer_asking_for_the_next_frame_waits_a_frame_without_a_display_link() {
+    fn poll(polls: &mut u32, _: f64, tx: &mut Tx) -> bool { *polls += 1; tx.wake_after(Duration::ZERO); false }
+    let mut rt = Runtime::new(0u32, |_, _| crate::el(), (10.0, 10.0), crate::Env::default());
+    rt.poll = Some(poll);
+    let start = Instant::now() - Duration::from_secs(1);
+    rt.wall_start = Some(start);
+    rt.frame(0.0);
+    assert_eq!(rt.state, 1);
+    let due = wall_wake_deadline(&rt).expect("armed");
+    let polled = start + Duration::from_secs_f64(rt.polled_at());
+    assert!(due <= polled + Duration::from_micros(1), "due at once on the runtime's clock");
+    let wait = timer_deadline(&rt).expect("armed");
+    assert!(wait >= polled + TIMER_FRAME - Duration::from_micros(1) && wait <= polled + TIMER_FRAME + Duration::from_micros(1));
+    assert!(timer_wants_frame(&rt, Some(polled + Duration::from_millis(8))), "a paced surface draws it next tick");
+    assert!(!timer_wants_frame(&rt, None), "an unpaced one doesn't keep the loop turning");
+    // A timer longer than a frame keeps its own time.
+    let mut rt = Runtime::new(0u32, |_, _| crate::el(), (10.0, 10.0), crate::Env::default());
+    rt.wall_start = Some(start);
+    rt.update(|_, tx| tx.wake_after(Duration::from_millis(100)));
+    rt.frame(0.0);
+    assert_eq!(timer_deadline(&rt), wall_wake_deadline(&rt));
 }
 
 /// A vsynced sRGB (or non-sRGB when `srgb_blend` is set) configuration for the surface, and the
@@ -1950,7 +1993,14 @@ impl<S: 'static> Host<S> {
                 return;
             }
         }
-        self.idle = !(animating || rt.has_pending_input() || rt.live_pending() || rt.window_frame.is_some() || self.frame_anim.is_some());
+        // A poll asking for the next frame (`wake_after(Duration::ZERO)`) keeps a running display
+        // link going; without one its timer waits a frame in `wake_deadline`.
+        #[cfg(target_os = "macos")]
+        let next_tick = l.pacing.as_ref().filter(|p| !hidden && p.running()).map(|p| now + Duration::from_secs_f64(1.0 / p.refresh_hz()));
+        #[cfg(not(target_os = "macos"))]
+        let next_tick: Option<Instant> = None;
+        self.idle = !(animating || rt.has_pending_input() || rt.live_pending() || rt.window_frame.is_some() || self.frame_anim.is_some()
+            || timer_wants_frame(rt, next_tick));
         if !hidden && (!self.idle || (self.trace.is_some() && self.args.frames.is_some())) {
             // Without a running display link, macOS hands out drawables faster than the
             // display shows them, so a timer paces the next frame instead of the loop.
@@ -2009,7 +2059,7 @@ impl<S: 'static> AnyHost for Host<S> {
             if launcher || w.visible { w.window.request_redraw(); }
         }
         if matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll)
-            && wall_wake_deadline(&self.rt).is_some_and(|deadline| deadline <= Instant::now())
+            && timer_deadline(&self.rt).is_some_and(|deadline| deadline <= Instant::now())
         {
             if let Some(w) = self.win.as_ref().filter(|w| (self.launcher() || (w.visible && !w.occluded)) && !w.window.is_minimized().unwrap_or(false)) {
                 w.window.request_redraw();
@@ -2033,8 +2083,9 @@ impl<S: 'static> AnyHost for Host<S> {
 
     fn wake_deadline(&self) -> Option<Instant> {
         // The next display tick consumes due timers too. Leaving an overdue timer
-        // armed while its redraw waits for that tick would spin the event loop.
-        let runtime = wall_wake_deadline(&self.rt).filter(|_| !self.win.as_ref().is_some_and(Win::paced));
+        // armed while its redraw waits for that tick would spin the event loop. Without a
+        // running link, a timer due sooner than a frame waits a frame (`timer_deadline`).
+        let runtime = timer_deadline(&self.rt).filter(|_| !self.win.as_ref().is_some_and(Win::paced));
         #[cfg(all(feature = "dev", debug_assertions))]
         let runtime = runtime.into_iter().chain(self.rt.dev_hidden_deadline()).min();
         let win = self.win.as_ref();

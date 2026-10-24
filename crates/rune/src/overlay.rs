@@ -1058,7 +1058,9 @@ impl<T: 'static> Overlay<T> {
 
     fn wake_due(&mut self, now: Instant) {
         self.end_fade_out(now);
-        let deadline = crate::window::wall_wake_deadline(&self.rt);
+        // Paced to a frame interval: a hidden or covered overlay's poll that keeps asking for
+        // the next frame runs once a frame, however often other events turn the loop.
+        let deadline = crate::window::timer_deadline(&self.rt);
         if deadline.is_some_and(|deadline| deadline <= now) {
             if !self.frameless() {
                 // Like the window host, poll once in the upcoming frame, after acquiring
@@ -1358,10 +1360,10 @@ impl<T: 'static> Overlay<T> {
         gpu.queue.present(frame);
         self.dirty = false;
         #[cfg(target_os = "macos")]
-        let period = live.pacing.as_ref().map_or(crate::window::TIMER_FRAME, |p| Duration::from_secs_f64(1.0 / p.refresh_hz()));
+        let next_tick = live.pacing.as_ref().filter(|p| !prewarm && p.running()).map(|p| Instant::now() + Duration::from_secs_f64(1.0 / p.refresh_hz()));
         #[cfg(not(target_os = "macos"))]
-        let period = crate::window::TIMER_FRAME;
-        self.idle = idle_after(&self.rt, animating, Instant::now() + period);
+        let next_tick = None;
+        self.idle = idle_after(&self.rt, animating, next_tick);
         if !prewarm { self.occluded_wait = crate::window::OCCLUDED_RETRY; }
         // The display link wakes this overlay, never ControlFlow::Poll. Without one (it can't
         // be made while the displays sleep, or didn't start), a timer paces its motion.
@@ -1426,12 +1428,13 @@ impl<T: 'static> Overlay<T> {
     }
 }
 
-/// Whether nothing asks for the frame after one just presented, due by `next_frame`. A timer
-/// due by then counts as asking: a poll stepping its own animation with
-/// `Tx::wake_after(Duration::ZERO)` gets every frame at the display's rate, instead of the
-/// display link stopping after each frame and a timer starting it again.
-fn idle_after<T: 'static>(rt: &Runtime<T>, animating: bool, next_frame: Instant) -> bool {
-    !(animating || rt.has_pending_input() || crate::window::wall_wake_deadline(rt).is_some_and(|due| due <= next_frame))
+/// Whether nothing asks for the frame after one just presented. `next_tick` is the running
+/// display link's next tick, if one paces the overlay: a timer due by then counts as asking,
+/// so a poll stepping its own animation with `Tx::wake_after(Duration::ZERO)` gets every frame
+/// at the display's rate instead of the link stopping after each frame. Unpaced, the timer
+/// waits a frame in `wake_deadline` and never keeps the loop turning.
+fn idle_after<T: 'static>(rt: &Runtime<T>, animating: bool, next_tick: Option<Instant>) -> bool {
+    !(animating || rt.has_pending_input() || crate::window::timer_wants_frame(rt, next_tick))
 }
 
 /// `draw_frame`'s animation step, apart from the surface so tests can drive it.
@@ -1466,9 +1469,10 @@ impl<T: 'static> AnyHost for Overlay<T> {
     }
 
     fn wake_deadline(&self) -> Option<Instant> {
-        let deadline = crate::window::wall_wake_deadline(&self.rt);
         // A running display link consumes due runtime timers. Keep the independent
-        // pointer deadline, but do not spin on an overdue animation timer.
+        // pointer deadline, but do not spin on an overdue animation timer. Without one (hidden,
+        // covered, faded out or unpaced), a timer due sooner than a frame waits a frame.
+        let deadline = crate::window::timer_deadline(&self.rt);
         #[cfg(target_os = "macos")]
         let deadline = deadline.filter(|_| !self.live.as_ref().and_then(|l| l.pacing.as_ref()).is_some_and(|p| p.running()));
         #[cfg(target_os = "macos")]
@@ -1768,11 +1772,83 @@ mod tests {
         overlay
     }
 
-    /// One `draw_frame` without a surface: the frame step, then the idle bookkeeping after present.
+    /// One `draw_frame` without a surface, paced by a display link: the frame step, then the
+    /// idle bookkeeping after present.
     fn present<T: 'static>(overlay: &mut Overlay<T>, at: Instant) {
+        present_paced(overlay, at, true);
+    }
+
+    fn present_paced<T: 'static>(overlay: &mut Overlay<T>, at: Instant, paced: bool) {
         let (animating, _) = step(&mut overlay.rt, &mut overlay.clock, &overlay.compositor, at, false);
         overlay.dirty = false;
-        overlay.idle = idle_after(&overlay.rt, animating, at + FRAME);
+        overlay.idle = idle_after(&overlay.rt, animating, paced.then_some(at + FRAME));
+    }
+
+    /// An overlay whose poll asks for the next frame every time it runs, counting its polls.
+    fn frame_hungry(name: &'static str) -> Overlay<u32> {
+        fn view(_: &u32, _: &mut Cx<u32>) -> El { crate::el().key("box").size(10.0, 10.0) }
+        fn poll(polls: &mut u32, _: f64, tx: &mut Tx) -> bool {
+            *polls += 1;
+            tx.wake_after(Duration::ZERO);
+            false
+        }
+        let app = AppSpec { poll: Some(poll), ..AppSpec::new(name, (100.0, 50.0), || 0, view) };
+        Overlay::new(OverlaySpec::new(name, app.size, view).options(Default::default()), 0, &app).0
+    }
+
+    /// Polls in one simulated second of the event loop as winit turns it: `about_to_wait` (an
+    /// unpaced frame drawn if one is due), a `WaitUntil` on `wake_deadline`, then the wake at
+    /// that time. The wall clock is moved back to simulate the wait, so a deadline at or before
+    /// the current time (a spin) makes no progress and runs out the turn budget instead.
+    fn polls_in_a_second(overlay: &mut Overlay<u32>) -> u32 {
+        let start = Instant::now();
+        overlay.rt.wall_start = Some(start);
+        // An update asks for the next frame, as a poll would.
+        overlay.apply_wake(false, vec![Box::new(|_: &mut u32, tx: &mut Tx| tx.wake_after(Duration::ZERO))]);
+        let before = overlay.rt.state;
+        for _ in 0..10_000 {
+            if overlay.dirty && !overlay.frameless() { present_paced(overlay, Instant::now(), false); }
+            let Some(wake) = overlay.wake_deadline() else { break };
+            let t0 = overlay.rt.wall_start.unwrap();
+            let at = wake.saturating_duration_since(t0).max(t0.elapsed());
+            if at > Duration::from_secs(1) { break; }
+            let now = Instant::now();
+            overlay.rt.wall_start = Some(now - at);
+            overlay.wake_due(now + Duration::from_micros(1));
+        }
+        overlay.rt.state - before
+    }
+
+    fn assert_frame_rate(polls: u32, what: &str) {
+        assert!((50..=61).contains(&polls), "{what}: a poll asking for every frame ran {polls} times in a second, want at most ~60");
+    }
+
+    /// `Tx::wake_after(Duration::ZERO)` asks for the next frame. With no display link to take
+    /// that from, it waits a frame interval: it never wakes the loop at once, which spins.
+    #[test]
+    fn a_poll_asking_for_every_frame_runs_at_the_frame_rate_without_a_display_link() {
+        // Shown with no display link (one couldn't be made, or not macOS).
+        let mut overlay = frame_hungry("unpaced");
+        overlay.visible = true;
+        overlay.rt.set_live_visible(true);
+        assert_frame_rate(polls_in_a_second(&mut overlay), "unpaced");
+
+        // Faded out, or hidden.
+        let mut overlay = frame_hungry("faded out");
+        overlay.visible = true;
+        overlay.hide_fading(Duration::from_millis(150));
+        if let Some(end) = overlay.fading_out { overlay.wake_due(end); }
+        assert!(!overlay.drawing());
+        assert_frame_rate(polls_in_a_second(&mut overlay), "faded out");
+
+        // Covered, or the displays asleep.
+        #[cfg(target_os = "macos")]
+        {
+            let mut overlay = frame_hungry("occluded");
+            overlay.visible = true;
+            overlay.occluded(true);
+            assert_frame_rate(polls_in_a_second(&mut overlay), "occluded");
+        }
     }
 
     fn width<T: 'static>(overlay: &Overlay<T>, key: &str) -> f32 {

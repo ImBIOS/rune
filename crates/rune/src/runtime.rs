@@ -1280,6 +1280,13 @@ impl<S: 'static> Runtime<S> {
         Some(deadline)
     }
 
+    /// When `poll` last ran, on `wake_deadline`'s clock.
+    pub(crate) fn polled_at(&self) -> f64 {
+        #[cfg(all(feature = "dev", debug_assertions))]
+        if let Some(clock) = &self.dev_clock { return clock.deadline(self.clock).unwrap_or(self.clock); }
+        self.clock
+    }
+
     fn logical_wake_deadline(&self) -> Option<f64> {
         self.wake_deadlines.first().copied().into_iter().chain(self.loop_wake.map(|w| w.0)).min_by(f64::total_cmp)
     }

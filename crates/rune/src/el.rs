@@ -98,7 +98,9 @@ impl Tx {
     ///
     /// `wake_after(Duration::ZERO)` from the poll asks for the next frame: a poll that steps
     /// its own animation from the frame clock keeps a shown window or overlay drawing at the
-    /// display's rate this way, until it stops asking.
+    /// display's rate this way, until it stops asking. That needs a display link pacing the
+    /// surface (macOS); hidden, covered, faded out or unpaced, a wake due sooner than a frame
+    /// waits about a frame (60 Hz), so a poll that keeps asking never spins the loop.
     pub fn wake_after(&mut self, duration: std::time::Duration) {
         self.wakes.push(duration);
     }
