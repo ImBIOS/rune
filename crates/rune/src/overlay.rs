@@ -246,6 +246,9 @@ struct Live {
     /// `El::system_material` views behind the Metal layer.
     #[cfg(target_os = "macos")]
     materials: crate::system_material::macos::Materials,
+    /// Fn presses, which winit doesn't send, while the overlay wants modifier keys.
+    #[cfg(target_os = "macos")]
+    fn_key: Option<crate::fn_key::FnKey>,
     alpha: Option<crate::surface_alpha::AlphaSurface>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
@@ -835,11 +838,18 @@ impl<T: 'static> Overlay<T> {
             let Backing::Window(window) = &backing;
             crate::display_link::DisplayLink::new(window, wake)
         });
+        #[cfg(target_os = "macos")]
+        let fn_key = match &backing {
+            Backing::Window(window) if self.rt.modifier_keys() => crate::fn_key::FnKey::new(window),
+            _ => None,
+        };
         Some(Live {
             #[cfg(target_os = "macos")]
             pacing,
             #[cfg(target_os = "macos")]
             materials: crate::system_material::macos::Materials::new(),
+            #[cfg(target_os = "macos")]
+            fn_key,
             alpha, surface, config, backing, scale,
         })
     }
@@ -1650,6 +1660,15 @@ impl<T: 'static> AnyHost for Overlay<T> {
                     else if let Some(panel) = &self.panel { panel.place(self.at, &self.options); }
                     self.sync_live_origin();
                 }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(changes) = self.live.as_ref().and_then(|l| l.fn_key.as_ref()).map(|f| f.take()) {
+            let keys = self.options.keys == KeyPolicy::OnDemand;
+            for pressed in changes.into_iter().filter(|_| keys) {
+                self.dirty |= self.rt.physical_with_fallback(crate::PhysicalInput::Key {
+                    key: winit::keyboard::KeyCode::Fn, mods: crate::window::map_mods(self.mods), pressed, repeat: false,
+                }, None);
             }
         }
         let more = self.draw();

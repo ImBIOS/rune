@@ -53,6 +53,9 @@ struct Win {
     alpha: Option<crate::surface_alpha::AlphaSurface>,
     #[cfg(target_os = "macos")]
     help: crate::macos_help::NativeHelp,
+    /// Fn presses, which winit doesn't send, while the app wants modifier keys.
+    #[cfg(target_os = "macos")]
+    fn_key: Option<crate::fn_key::FnKey>,
 }
 
 impl Win {
@@ -1785,6 +1788,8 @@ impl<S: 'static> Host<S> {
         let present = self.present_log.clone().and_then(|log| crate::present_time::metal::LayerHook::attach(&surface, log));
         #[cfg(target_os = "macos")]
         if self.present_log.is_some() && present.is_none() { eprintln!("rune: trace: this surface reports no present times"); }
+        #[cfg(target_os = "macos")]
+        let fn_key = if self.rt.modifier_keys() { crate::fn_key::FnKey::new(&window) } else { None };
         self.win = Some(Win {
             first_frame: FirstFrame::default(),
             #[cfg(target_os = "macos")]
@@ -1808,6 +1813,8 @@ impl<S: 'static> Host<S> {
             alpha,
             #[cfg(target_os = "macos")]
             help: Default::default(),
+            #[cfg(target_os = "macos")]
+            fn_key,
         });
         if launcher { self.win.as_mut().unwrap().first_frame.prepare(); }
         self.apply_placement(event_loop);
@@ -2140,6 +2147,8 @@ impl<S: 'static> AnyHost for Host<S> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        #[cfg(target_os = "macos")]
+        self.fn_key();
         // Process queued hide/close requests before completing a pending first reveal.
         self.first_frame_ready(event_loop);
         false
@@ -2174,6 +2183,19 @@ impl<S: 'static> Host<S> {
         }
         self.started = true;
         self.drain(event_loop, false);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fn_key(&mut self) {
+        let Some(l) = &self.win else { return };
+        let Some(changes) = l.fn_key.as_ref().map(|f| f.take()) else { return };
+        let mut redraw = false;
+        for pressed in changes {
+            redraw |= self.rt.physical_with_fallback(crate::PhysicalInput::Key {
+                key: winit::keyboard::KeyCode::Fn, mods: map_mods(self.mods), pressed, repeat: false,
+            }, None);
+        }
+        if redraw { l.window.request_redraw(); }
     }
 
     fn handle_user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {

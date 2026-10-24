@@ -79,6 +79,8 @@ pub mod macos_appearance;
 mod display_link;
 #[cfg(target_os = "macos")]
 mod macos_help;
+#[cfg(target_os = "macos")]
+mod fn_key;
 pub mod color;
 pub mod compose;
 pub mod edit;
