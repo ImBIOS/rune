@@ -338,6 +338,7 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
     let half = i.rect.zw * 0.5;
     let center = i.rect.xy + half;
     var col = vec4<f32>(0.0);
+    var clip_p = i.p;
     if (kind < 0.5) {
         let d = sd_rounded(i.p - center, half, i.radii);
         let soft = max(i.params.z, 0.5);
@@ -420,6 +421,8 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         // boundary. Fragment position is the rasterizer's exact pixel center.
         let screen = i.pos.xy + projection.xy;
         let rotated = i.params.x != 0.0;
+        // A turned glyph clips on screen, where its quad is.
+        if rotated { clip_p = screen; }
         var cov: f32;
         if i.uv.z > 0.0 || rotated {
             // Flying text keeps the original atlas footprint while its quad scales uniformly.
@@ -437,7 +440,5 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         }
         col = i.fill * pow(cov, i.params.w);
     }
-    var clip_p = i.p;
-    if (kind > 1.5 && kind < 2.5 && i.params.x != 0.0) { clip_p = i.pos.xy + projection.xy; }
     return col * clip_alpha(clip_p, i.clip, i.fade);
 }
