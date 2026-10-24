@@ -14,7 +14,9 @@
 //!   element tree after the subtree is in it, and see it like any other.
 //! - **Handlers** in the subtree are the ones its build made. They see what they captured then,
 //!   so anything a handler captures that can change must be part of `version`. Handlers that
-//!   only send a message or an id never go stale.
+//!   only send a message or an id never go stale. A row's position is one of those things: a
+//!   handler in a list row should capture the row's id, never its index, which shifts when
+//!   rows are inserted or removed above it while the memo keeps the old handler.
 //! - **Live values and pixels** stay bound: a `Live`, `LiveText` or `Pixels` is a shared handle,
 //!   so a reused subtree shows its newest value or image without a rebuild.
 //! - **Environment.** The window's dark mode, scale and reduced-motion preference are part of
@@ -28,9 +30,10 @@
 //!   or a new value always builds.
 //! - **Virtual rows** that scroll out keep their cached subtree as long as the view still
 //!   creates them (virtualized rows always are); scrolling back in mounts it again without a
-//!   build. A memo the view stops creating is dropped at the end of that view build. Rows
-//!   `El::virtual_rows` builds count as part of the view build, so a memo in one is kept while
-//!   its row stays in the mounted window and dropped once the row leaves it.
+//!   build. A memo the view stops creating is dropped once the commit that stopped creating it
+//!   applies (a commit may build its view more than once). Rows `El::virtual_rows` builds count
+//!   as part of the view build, so a memo in one is kept while its row stays in the mounted
+//!   window and dropped once the row leaves it.
 //!
 //! The id names the subtree within the window, so it must be unique among the memos of one
 //! view build (a message id, say). A memo inside another's closure is named within it, so
@@ -145,6 +148,17 @@ impl MemoCache {
     pub(crate) fn emptied(&self) -> MemoCache {
         MemoCache { pass: self.pass, ..MemoCache::default() }
     }
+
+    /// The pass the next view build will be.
+    pub(crate) fn next_pass(&self) -> u64 {
+        self.pass + 1
+    }
+
+    /// Drops the memos no build since pass `since` (a [`MemoCache::next_pass`]) used: a commit
+    /// keeps what any of its view builds used.
+    pub(crate) fn keep_since(&mut self, since: u64) {
+        self.entries.retain(|_, e| e.pass >= since);
+    }
 }
 
 struct Scope {
@@ -225,13 +239,11 @@ fn record(read: impl FnOnce() -> Read) {
 pub(crate) struct Guard(bool);
 
 impl Guard {
-    /// The cache back, without the memos this build didn't create, and the `Cx` reads of the
-    /// memos it reused.
+    /// The cache back, and the `Cx` reads of the memos this build reused. Unused memos stay
+    /// until [`MemoCache::keep_since`], since a commit may build its view more than once.
     pub(crate) fn finish(mut self) -> (MemoCache, Replayed) {
         self.0 = false;
-        let Scope { mut cache, replayed, .. } = SCOPES.with_borrow_mut(|s| s.pop()).expect("memo scope");
-        let pass = cache.pass;
-        cache.entries.retain(|_, e| e.pass == pass);
+        let Scope { cache, replayed, .. } = SCOPES.with_borrow_mut(|s| s.pop()).expect("memo scope");
         (cache, replayed)
     }
 }

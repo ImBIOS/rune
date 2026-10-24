@@ -4,6 +4,11 @@ use std::collections::HashMap;
 use crate::El;
 
 pub(crate) fn warnings(root: &El) -> Vec<String> {
+    warnings_at(root, root.key.as_deref().unwrap_or("#0"))
+}
+
+/// [`warnings`] for a subtree whose root sits at `path`.
+pub(crate) fn warnings_at(root: &El, path: &str) -> Vec<String> {
     fn walk(el: &El, path: &str, out: &mut Vec<String>) {
         let mut seen: HashMap<&str, &El> = HashMap::new();
         for (index, child) in el.all_children().enumerate() {
@@ -22,7 +27,7 @@ pub(crate) fn warnings(root: &El) -> Vec<String> {
         }
     }
     let mut out = Vec::new();
-    walk(root, root.key.as_deref().unwrap_or("#0"), &mut out);
+    walk(root, path, &mut out);
     out
 }
 

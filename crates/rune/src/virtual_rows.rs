@@ -45,7 +45,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::time::Instant;
 
-    use crate::{Cx, El, Env, GrowthSpec, Runtime, ScrollSpec, col, memo, text};
+    use crate::{Cx, El, Env, GrowthSpec, Runtime, ScrollSpec, col, el, memo, text};
 
     thread_local! {
         static VIEWS: Cell<usize> = const { Cell::new(0) };
@@ -119,7 +119,7 @@ mod tests {
         root
     }
 
-    fn commit(rt: &mut Runtime<Chat>) {
+    fn commit<S: 'static>(rt: &mut Runtime<S>) {
         rt.invalidate();
         rt.frame(1.0 / 120.0);
     }
@@ -138,11 +138,41 @@ mod tests {
     }
 
     /// Visible rows' keys and rects.
-    fn visible(rt: &Runtime<Chat>) -> Vec<(String, [f32; 4])> {
+    fn visible<S: 'static>(rt: &Runtime<S>) -> Vec<(String, [f32; 4])> {
         rt.elements().into_iter()
             .filter(|e| e.visible[3] > 0.0)
             .filter_map(|e| Some((e.path.strip_prefix("#0/scroll/rows/").filter(|k| !k.contains('/'))?.to_owned(), e.rect)))
             .collect()
+    }
+
+    /// Rows `r{i}` of height `s[i]`, estimated at 50 points, in a 500-point viewport that starts
+    /// at the top.
+    fn fixed_view(s: &Vec<u32>, _: &mut Cx<Vec<u32>>) -> El {
+        col().w_full().h_full().child(
+            col().key("scroll").w_full().grow(1.0).scroll(ScrollSpec { stick_bottom: false }).child(
+                col().key("rows").w_full().growth(GrowthSpec::default()).virtual_rows(s.len(), 50.0,
+                    |_: &Vec<u32>, i| format!("r{i}").into(),
+                    |s: &Vec<u32>, i| memo(format!("r{i}"), s[i], || {
+                        BUILT.with_borrow_mut(|b| b.push(i));
+                        el().w_full().h(s[i] as f32)
+                    }))),
+        )
+    }
+
+    fn fixed(n: usize) -> Runtime<Vec<u32>> {
+        let mut rt = Runtime::new(vec![50; n], fixed_view, (300.0, 500.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt
+    }
+
+    /// Draws frames while the runtime asks for them, as an idle host does.
+    fn until_idle<S: 'static>(rt: &mut Runtime<S>) -> usize {
+        let mut frames = 0;
+        while rt.frame(1.0 / 120.0) {
+            frames += 1;
+            assert!(frames < 60, "never rests");
+        }
+        frames
     }
 
     #[test]
@@ -261,6 +291,109 @@ mod tests {
     }
 
     #[test]
+    fn a_count_shrunk_below_the_offset_shows_the_rows_left_in_the_same_frame() {
+        let mut rt = fixed(1000);
+        rt.wheel(150.0, 250.0, -40_000.0);
+        until_idle(&mut rt);
+        assert_eq!(visible(&rt)[0].0, "r800");
+        rt.state.truncate(10);
+        commit(&mut rt);
+        let shown: Vec<_> = visible(&rt).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(shown, (0..10).map(|i| format!("r{i}")).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn scroll_into_view_lands_a_row_taller_than_its_estimate_in_one_frame() {
+        let mut rt = chat(5000, true, Mode::Index);
+        for _ in 0..20 {
+            rt.wheel(300.0, 400.0, 100_000.0);
+            rt.frame(1.0 / 120.0);
+        }
+        assert_eq!(visible(&rt)[0].0, "m100000", "at the top");
+        let key = rt.state.keys[500].clone();
+        rt.update(|_, tx| tx.scroll_into_view(key.clone()));
+        rt.frame(1.0 / 120.0);
+        let viewport = rt.elements().into_iter().find(|e| e.path == "#0/scroll").unwrap().rect;
+        let (_, row) = visible(&rt).into_iter().find(|(k, _)| *k == key).expect("revealed");
+        assert!(row[3] > 90.0, "taller than the 72-point estimate: {row:?}");
+        assert!(row[1] >= viewport[1] - 0.5 && row[1] + row[3] <= viewport[1] + viewport[3] + 0.5, "{row:?} in {viewport:?}");
+    }
+
+    /// Rows shown last commit that the first measurement pass leaves out and a retry brings
+    /// back keep their memos and stay mounted, and a retry mounts its full overscan.
+    #[test]
+    fn a_retry_pass_keeps_what_the_last_commit_showed() {
+        let mut rt = fixed(1000);
+        rt.wheel(150.0, 250.0, -10_000.0);
+        until_idle(&mut rt);
+        assert_eq!(rt.virtuals["#0/scroll/rows"].range, 180..230);
+        // Too small a step to move the window.
+        rt.wheel(150.0, 250.0, -100.0);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(rt.virtuals["#0/scroll/rows"].range, 180..230);
+        built();
+        // The first pass, at 10,100, leaves out rows 180 and 181. The rows it mounts collapse,
+        // which moves the reader's row up and leaves the viewport short, so a retry mounts from
+        // row 162 down, 180 and 181 among them.
+        for h in &mut rt.state[182..232] { *h = 1; }
+        commit(&mut rt);
+        let v = &rt.virtuals["#0/scroll/rows"];
+        assert_eq!(v.range.start, 162, "a retry isn't held to the per-frame budget");
+        let now = built();
+        assert!(!now.contains(&180) && !now.contains(&181), "their memos stay: {now:?}");
+        assert!(now.len() < 120, "built {} rows", now.len());
+        assert!(!rt.virtual_culled.iter().any(|p| p.ends_with("/r180") || p.ends_with("/r181")), "{:?}", rt.virtual_culled);
+    }
+
+    #[test]
+    fn an_idle_window_mounts_all_its_overscan() {
+        let mut rt = fixed(1000);
+        assert_eq!(rt.virtuals["#0/scroll/rows"].range, 0..30, "the first commit mounts the full overscan");
+        rt.wheel(150.0, 250.0, -10_000.0);
+        let frames = until_idle(&mut rt);
+        assert_eq!(rt.virtuals["#0/scroll/rows"].range, 180..230, "after {frames} frames");
+        assert!(!rt.frame(1.0 / 120.0), "then it rests");
+    }
+
+    #[test]
+    fn tooling_records_duplicate_keys_inside_a_row() {
+        fn view(s: &usize, _: &mut Cx<usize>) -> El {
+            col().key("scroll").size(200.0, 200.0).scroll(ScrollSpec { stick_bottom: false }).child(
+                col().key("rows").w_full().growth(GrowthSpec::default()).virtual_rows(*s, 40.0,
+                    |_: &usize, i| format!("r{i}").into(),
+                    |_: &usize, i| col().child(el().key("a").h(20.0)).child(el().key(if i == 1 { "a" } else { "b" }).h(20.0))))
+        }
+        let mut rt = Runtime::new(4, view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.key_warnings = Some(Vec::new());
+        rt.frame(0.0);
+        let warnings = rt.key_warnings.as_ref().unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("duplicate sibling key \"a\" under \"scroll/rows/r1\""), "{warnings:?}");
+    }
+
+    /// A row holding an `aspect_fit` element measures at its fitted height, so rows below it sit
+    /// where the second layout pass put it.
+    #[test]
+    fn rows_measure_an_aspect_fit_element_at_its_fitted_size() {
+        fn view(s: &usize, _: &mut Cx<usize>) -> El {
+            col().w_full().h_full().child(
+                col().key("scroll").w_full().grow(1.0).scroll(ScrollSpec { stick_bottom: false }).child(
+                    col().key("rows").w_full().growth(GrowthSpec::default()).virtual_rows(*s, 50.0,
+                        |_: &usize, i| format!("r{i}").into(),
+                        |_: &usize, _| col().w_full().child(el().key("pic").max_h(80.0).aspect_fit(2.0)))))
+        }
+        let mut rt = Runtime::new(20, view, (300.0, 500.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        until_idle(&mut rt);
+        let rects: Vec<_> = rt.elements().into_iter().filter(|e| e.visible[3] > 0.0).map(|e| (e.path, e.rect)).collect();
+        for i in 0..6 {
+            let pic = rects.iter().find(|(p, _)| *p == format!("#0/scroll/rows/r{i}/pic")).expect("built").1;
+            assert_eq!(pic, [0.0, i as f32 * 80.0, 160.0, 80.0], "r{i}");
+        }
+        assert_eq!(rt.virtuals["#0/scroll/rows"].height("r3"), 80.0);
+    }
+
+    #[test]
     fn heights_persist_for_rows_scrolled_away() {
         let mut rt = chat(800, true, Mode::Index);
         let key = rt.state.keys[795].clone();
@@ -282,7 +415,8 @@ mod tests {
         fn view(s: &Vec<TextEdit>, _: &mut Cx<Vec<TextEdit>>) -> El {
             col().key("viewport").size(200.0, 200.0).scroll(ScrollSpec { stick_bottom: false }).clip_soft(0.0)
                 .child(col().key("rows").w_full().growth(GrowthSpec::default()).virtual_rows(s.len(), 40.0,
-                    |_: &Vec<TextEdit>, i| format!("row-{i}").into(),
+                    // A `/` in a key doesn't lose the row.
+                    |_: &Vec<TextEdit>, i| format!("row/{i}").into(),
                     |s: &Vec<TextEdit>, i| col().size(200.0, 40.0).child(text_input(&s[i], TextStyle::new(14.0, 400.0)).key("field")
                         .size(200.0, 40.0).on_edit(move |s: &mut Vec<TextEdit>| &mut s[i]))))
         }
@@ -292,14 +426,14 @@ mod tests {
         rt.frame(0.0);
         rt.wheel(100.0, 100.0, -20_000.0);
         rt.frame(0.0);
-        assert!(rt.find("row-0/field").is_none(), "the focused row scrolled out");
+        assert!(rt.find("row/0/field").is_none(), "the focused row scrolled out");
         rt.key(KeyEvent { key: Key::Text("offscreen".into()), mods: Default::default() });
         rt.frame(0.0);
         assert_eq!(rt.state[0].text, "offscreen");
         assert!(rt.state[0].focused);
         rt.wheel(100.0, 100.0, 20_000.0);
         rt.frame(0.0);
-        assert!(rt.find("row-0/field").is_some(), "back in view");
+        assert!(rt.find("row/0/field").is_some(), "back in view");
     }
 
     #[test]

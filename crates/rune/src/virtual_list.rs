@@ -1,7 +1,7 @@
 //! Virtual row bookkeeping. Only geometry outside the mounted window is estimated.
 
 use std::cell::{Cell, Ref, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 /// What a row keeps while its key stays.
@@ -32,6 +32,11 @@ pub(crate) struct VirtualList {
     /// Rows are built by index (`El::virtual_rows`), so a commit costs only the rows it mounts.
     /// Such a list moves its window in small steps and spreads rows new to it over frames.
     pub indexed: bool,
+    /// The rows the last applied commit mounted. Every measurement of a commit compares with
+    /// these, not with the pass before it.
+    pub shown: HashSet<String>,
+    /// The row holding the focused element, kept while that row is scrolled out.
+    pub focused_row: Option<String>,
     pub scroll_path: String,
     pub viewport: f32,
     pub pad_top: f32,
@@ -139,11 +144,17 @@ impl VirtualList {
             .map(|i| (self.keys[i].clone(), self.pad_top + sums[i]))
     }
 
-    /// Picks the rows to mount for `offset`. `mounted` says which were mounted last commit; an
-    /// index-built list mounts at most [`INDEXED_BUDGET`] of others per side beyond the viewport.
-    pub fn select(&mut self, offset: f32, pinned: bool, mounted: impl Fn(&str) -> bool) {
+    /// The furthest the rows can scroll: their extent less the viewport.
+    pub fn max_offset(&self) -> f32 {
+        (self.pad_top + self.prefix(self.keys.len()) + self.pad_bottom - self.viewport).max(0.0)
+    }
+
+    /// Picks the rows to mount for `offset`, clamped to the rows' extent. With `budget` (the
+    /// rows shown last commit), at most [`INDEXED_BUDGET`] of rows not among them mount per
+    /// side beyond the viewport.
+    pub fn select(&mut self, offset: f32, pinned: bool, budget: Option<&HashSet<String>>) {
         let total = self.prefix(self.keys.len());
-        let offset = if pinned { (total + self.pad_top + self.pad_bottom - self.viewport).max(0.0) } else { offset };
+        let offset = if pinned { self.max_offset() } else { offset.min(self.max_offset()) };
         let lo = offset - self.viewport * OVERSCAN;
         let hi = offset + self.viewport * (1.0 + OVERSCAN);
         let (mut start, mut end) = {
@@ -151,7 +162,8 @@ impl VirtualList {
             // Rows ending at or above `lo` go; rows starting below `hi` stay.
             let start = sums[1..].partition_point(|&s| self.pad_top + s <= lo);
             let end = sums[..self.keys.len()].partition_point(|&s| self.pad_top + s < hi);
-            if self.indexed && !pinned {
+            if let Some(shown) = budget.filter(|_| !pinned) {
+                let mounted = |k: &str| shown.contains(k);
                 // The viewport's own rows always mount; the overscan takes new rows up to a budget.
                 let first = sums[1..].partition_point(|&s| self.pad_top + s <= offset).max(start);
                 let last = sums[..self.keys.len()].partition_point(|&s| self.pad_top + s < offset + self.viewport).max(first);

@@ -456,6 +456,35 @@ mod tests {
         assert_eq!(CALLS.get(), 3, "and an unchanged version is reused");
     }
 
+    /// Index-built rows run the app's closures after the view returns; a patched one that
+    /// panics falls back like the view, and what the fallback memoized outlives its commit.
+    #[test]
+    fn a_panicking_index_built_row_falls_back_and_keeps_its_memos() {
+        CALLS.set(0);
+        fn view(s: &(u32, bool), _: &mut Cx<(u32, bool)>) -> El {
+            col().key("scroll").size(200.0, 200.0).scroll(crate::ScrollSpec { stick_bottom: false }).child(
+                col().key("rows").w_full().growth(crate::GrowthSpec::default()).virtual_rows(s.0 as usize, 40.0,
+                    |_: &(u32, bool), i| format!("r{i}").into(),
+                    |s: &(u32, bool), i| crate::memo(format!("r{i}"), s.1, || {
+                        if s.1 && i == 0 { panics_once(); }
+                        el().w_full().h(40.0)
+                    })))
+        }
+        let mut rt = crate::Runtime::new((20u32, false), view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        for _ in 0..3 {
+            rt.update(|_, _| {});
+            rt.frame(0.0);
+        }
+        rt.update(|s, _| s.1 = true);
+        rt.frame(0.0);
+        assert_eq!(CALLS.get(), 2, "the startup view builds the row once after the patched one panics");
+        assert!(rt.find("r0").is_some());
+        rt.update(|_, _| {});
+        rt.frame(0.0);
+        assert_eq!(CALLS.get(), 2, "the fallback's memo is reused");
+    }
+
     #[test]
     fn panicking_poll_and_on_key_patches_fall_back_to_the_startup_callbacks() {
         CALLS.set(0);

@@ -154,6 +154,11 @@ impl Default for Env {
 /// Wakes the shell from another thread (new data arrived); a no-op headless.
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
+/// The most frames in a row an index-built list keeps the host drawing to fill its overscan.
+/// Filling takes four at most (half a viewport per side each); this bounds a list whose
+/// heights keep changing.
+const VIRTUAL_FILL_FRAMES: u32 = 12;
+
 thread_local! {
     static COMMITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -629,7 +634,12 @@ pub struct Runtime<S: 'static> {
     grows: HashMap<NodeId, GrowTrack>,
     stacks: HashMap<NodeId, Stack>,
     pub(crate) virtuals: HashMap<String, crate::virtual_list::VirtualList>,
-    virtual_culled: HashSet<String>,
+    /// The memo pass the current commit's first view build was. Memos none of its builds used
+    /// go once it applies.
+    memo_since: u64,
+    /// Frames in a row an index-built list has asked for to fill its overscan.
+    virtual_fill: u32,
+    pub(crate) virtual_culled: HashSet<String>,
     /// Fresh view accessors for focused text fields omitted by virtualization.
     virtual_inputs: HashMap<String, Box<InputSpec>>,
     reveals: HashMap<NodeId, RevealState>,
@@ -905,6 +915,8 @@ impl<S: 'static> Runtime<S> {
             stacks: HashMap::new(),
             virtuals: HashMap::new(),
             virtual_culled: HashSet::new(),
+            memo_since: 0,
+            virtual_fill: 0,
             virtual_inputs: HashMap::new(),
             reveals: HashMap::new(),
             flights: Vec::new(),
@@ -1672,7 +1684,8 @@ impl<S: 'static> Runtime<S> {
         let dt = if self.fit_held { 0.0 } else { dt };
         let animating = self.step_motion(dt) || live_animating;
         self.stats.shaped = self.text.shaped - shaped0;
-        self.animating = animating && self.time_scale > 0.0;
+        let filling = self.virtual_filling();
+        self.animating = (animating && self.time_scale > 0.0) || filling;
         #[cfg(all(feature = "dev", debug_assertions))]
         if self.dev_clock.as_ref().is_some_and(|clock| clock.paused) { self.animating = false; }
         self.animating
@@ -2235,12 +2248,22 @@ impl<S: 'static> Runtime<S> {
     // Commit: view → nodes → layout → Scene retarget
 
     fn virtual_window_changed(&self) -> bool {
-        self.virtuals.iter().any(|(path, v)| {
-            let Some(&i) = self.path_ids.get(path).and_then(|id| self.node_index.get(id)) else { return false };
-            if self.subtree_exiting(i) { return false; }
-            self.path_ids.get(&v.scroll_path).and_then(|id| self.scrolls.get(id))
-                .is_some_and(|s| v.needs_window(s.offset as f32, s.pinned))
-        })
+        self.virtuals.iter().any(|(path, v)| self.wants_window(path, v))
+    }
+
+    fn wants_window(&self, path: &str, v: &crate::virtual_list::VirtualList) -> bool {
+        let Some(&i) = self.path_ids.get(path).and_then(|id| self.node_index.get(id)) else { return false };
+        if self.subtree_exiting(i) { return false; }
+        self.path_ids.get(&v.scroll_path).and_then(|id| self.scrolls.get(id))
+            .is_some_and(|s| v.needs_window(s.offset as f32, s.pinned))
+    }
+
+    /// Whether an index-built list still mounts its overscan a little per frame, so the host
+    /// should draw another. Each such frame commits more rows; a few frames fill it.
+    fn virtual_filling(&mut self) -> bool {
+        let filling = self.virtuals.iter().any(|(path, v)| v.indexed && self.wants_window(path, v));
+        self.virtual_fill = if filling { self.virtual_fill + 1 } else { 0 };
+        filling && self.virtual_fill <= VIRTUAL_FILL_FRAMES
     }
 }
 
@@ -2272,6 +2295,8 @@ struct Measurement<'a, S> {
     key_warnings: &'a mut Option<Vec<String>>,
     /// The focused element's path, so an index-built row holding it is still built.
     focused: Option<&'a str>,
+    /// Whether this pass measures again because estimates left part of a viewport blank.
+    retry: bool,
     caret: Option<(String, [f32; 4])>,
     caret_read: bool,
     layout_seen: layout_read::LayoutSeen,
@@ -2308,10 +2333,11 @@ fn collect_virtual_inputs(el: &El, parent: &str, index: usize, inputs: &mut Hash
 
 impl<S: 'static> Measurement<'_, S> {
     fn finish(mut self, tx: &Tx) -> Measured {
-        self.virtual_culled.clear();
         let mut passes = 0;
         let (layout, nodes) = loop {
             passes += 1;
+            self.retry = passes > 1;
+            self.virtual_culled.clear();
             self.virtual_inputs.clear();
             // Degenerate zero-height runs fall back to a full measurement instead of
             // an unbounded retry loop. Normal transcripts need one pass.
@@ -2353,7 +2379,6 @@ impl<S: 'static> Measurement<'_, S> {
             v.viewport = height;
             v.pad_top = padding(el.style.padding.top);
             v.pad_bottom = padding(el.style.padding.bottom);
-            let old_keys: HashSet<_> = v.keys.get(v.range.clone()).unwrap_or_default().iter().cloned().collect();
             let source = el.virtual_rows.take();
             let state = handler_state_ref(self.state);
             if source.is_some() {
@@ -2380,26 +2405,36 @@ impl<S: 'static> Measurement<'_, S> {
             if let Some(st) = self.path_ids.get(scroll_path).and_then(|id| self.scrolls.get_mut(id)) {
                 if !pinned { st.offset = (st.offset + f64::from(delta)).max(0.0); }
             }
-            v.select(offset, pinned, |k| old_keys.contains(k));
+            // Rows new since the last commit spread over frames, unless this pass is a retry to
+            // fill the viewport, a settle, or the list's first showing.
+            let budget = v.indexed && !self.retry && !settle && !v.shown.is_empty();
+            let shown = std::mem::take(&mut v.shown);
+            v.select(offset, pinned, budget.then_some(&shown));
             if force_all { v.range = 0..v.keys.len(); v.before = 0.0; v.after = 0.0; }
-            let mounted: HashSet<_> = v.keys[v.range.clone()].iter().cloned().collect();
-            for key in old_keys.difference(&mounted).filter(|k| v.has(k)) {
+            let mounted: HashSet<&str> = v.keys[v.range.clone()].iter().map(String::as_str).collect();
+            for key in shown.iter().filter(|k| !mounted.contains(k.as_str()) && v.has(k)) {
                 self.virtual_culled.insert(format!("{path}/{key}"));
             }
+            v.shown = shown;
             el.style.padding.top = length(v.pad_top + v.before);
             el.style.padding.bottom = length(v.pad_bottom + v.after);
             if let Some(rows) = source {
-                let build = |i: usize| {
-                    let row = (rows.build)(state, i).key(v.keys[i].clone());
-                    #[cfg(debug_assertions)]
-                    if self.key_warnings.is_none() {
-                        let warnings = crate::key_diagnostics::warnings(&row);
-                        debug_assert!(warnings.is_empty(), "{}", warnings.join("\n"));
-                    }
-                    row
+                let key_warnings = &mut *self.key_warnings;
+                let mut build = |i: usize| {
+                    let key = &v.keys[i];
+                    let row = (rows.build)(state, i).key(key.clone());
+                    // The view's key check ran before these rows existed.
+                    let check = cfg!(debug_assertions) || key_warnings.is_some();
+                    let warnings = if check { crate::key_diagnostics::warnings_at(&row, &format!("{path}/{key}")) } else { Vec::new() };
+                    if warnings.is_empty() { return row; }
+                    let Some(out) = key_warnings.as_mut() else { panic!("{}", warnings.join("\n")) };
+                    out.extend(warnings);
+                    // Like the view's root, an invalid identity tree doesn't reach Taffy.
+                    crate::el().key(key.clone())
                 };
                 // A focused field's row is built, unmounted, so its typing still lands.
-                let focused = self.focused.and_then(|f| f.strip_prefix(path.as_str())?.strip_prefix('/')?.split('/').next())
+                let under = |f: &str| f.strip_prefix(path.as_str()).is_some_and(|rest| rest.starts_with('/'));
+                let focused = v.focused_row.as_deref().filter(|_| self.focused.is_some_and(under))
                     .and_then(|key| v.index_of(key)).filter(|i| !v.range.contains(i));
                 if let Some(i) = focused {
                     collect_virtual_inputs(&build(i), &path, i, self.virtual_inputs);
@@ -2444,6 +2479,9 @@ impl<S: 'static> Measurement<'_, S> {
                 if !pinned { st.offset = (st.offset + f64::from(v.anchor_delta())).max(0.0); }
                 st.offset as f32
             } else { 0.0 };
+            // Rows that shrank or went leave the offset past the end until scrolling clamps it;
+            // what shows then is the end.
+            let offset = offset.min(v.max_offset());
             let mounted_height = v.prefix(v.range.end) - v.before;
             // Never present a blank caused by an estimate. Expand and measure again first.
             retry |= if pinned {
@@ -2669,6 +2707,7 @@ impl<S: 'static> Measurement<'_, S> {
 impl<S: 'static> Runtime<S> {
     fn commit(&mut self, tx: &Tx) {
         COMMITS.set(COMMITS.get() + 1);
+        self.memo_since = self.memo.next_pass();
         let mut measured = self.measure(tx);
         if self.sync_requested_focus(&mut measured.nodes) {
             self.layout = measured.layout;
@@ -2680,7 +2719,29 @@ impl<S: 'static> Runtime<S> {
         }
         let measured = self.settle_layout_reads(measured, &tx);
         self.apply(measured, tx);
+        self.memo.keep_since(self.memo_since);
+        self.track_focused_rows();
         self.prune_text_selection();
+    }
+
+    /// Records which row of each virtual list holds focus, by key, so the row is still built
+    /// after it scrolls out. Walks the node tree, since a key may itself contain `/`.
+    fn track_focused_rows(&mut self) {
+        if self.virtuals.is_empty() { return; }
+        let focused = self.focused.as_deref().and_then(|f| self.nodes.iter().position(|n| n.path == f));
+        for (path, v) in self.virtuals.iter_mut() {
+            let under = self.focused.as_deref().and_then(|f| f.strip_prefix(path.as_str())).is_some_and(|rest| rest.starts_with('/'));
+            if !under { v.focused_row = None; continue; }
+            // Offscreen, the row keeps the key it had.
+            let Some(mut i) = focused else { continue };
+            while let Some(p) = self.nodes[i].parent {
+                if self.nodes[p].path == *path {
+                    v.focused_row = self.nodes[i].key.clone();
+                    break;
+                }
+                i = p;
+            }
+        }
     }
 
     fn measure(&mut self, tx: &Tx) -> Measured {
@@ -2713,6 +2774,7 @@ impl<S: 'static> Runtime<S> {
             stats: &mut self.stats,
             key_warnings: &mut self.key_warnings,
             focused: self.focused.as_deref(),
+            retry: false,
         }.finish(tx)
     }
 
@@ -2734,6 +2796,9 @@ impl<S: 'static> Runtime<S> {
                 self.scene.unmount(*id);
                 self.grows.remove(id);
             }
+        }
+        for v in self.virtuals.values_mut() {
+            v.shown = v.keys[v.range.clone()].iter().cloned().collect();
         }
         // A row scrolled into view mounts settled with its subtree. Content added later under a
         // row already on screen is a live change and keeps its own entrance.
@@ -3739,7 +3804,19 @@ impl<S: 'static> Runtime<S> {
         self.focused.is_some()
     }
 
+    /// Scrolls so row `key` shows. A virtual row placed by estimates may measure differently
+    /// once mounted, along with the rows around it, so this places it again from what the
+    /// commit measured until it stays put.
     fn reveal_row(&mut self, key: &str) {
+        if !self.reveal_row_once(key, true) { return; }
+        for _ in 0..8 {
+            if !self.reveal_row_once(key, false) { break; }
+        }
+    }
+
+    /// One placement of [`Self::reveal_row`]: whether it committed. After the first, it moves
+    /// only when the row would land somewhere else.
+    fn reveal_row_once(&mut self, key: &str, first: bool) -> bool {
         let geometry = self.virtuals.iter().find_map(|(_, v)| {
             let index = v.index_of(key)?;
             Some((v.scroll_path.clone(), f64::from(v.pad_top + v.prefix(index)), f64::from(v.height(key)), f64::from(v.viewport)))
@@ -3756,17 +3833,20 @@ impl<S: 'static> Runtime<S> {
             }
             None
         });
-        let Some((path, top, height, viewport)) = geometry else { return };
+        let Some((path, top, height, viewport)) = geometry else { return false };
         let margin = self.node(&path).map_or(0.0, |n| f64::from(n.scroll_edges.margin));
-        let Some(id) = self.path_ids.get(&path) else { return };
-        let Some(scroll) = self.scrolls.get_mut(id) else { return };
-        let offset = scroll_edge::reveal(scroll.offset, top, height, viewport, margin);
-        scroll.offset = offset.clamp(0.0, scroll.max);
+        let Some(id) = self.path_ids.get(&path) else { return false };
+        let Some(scroll) = self.scrolls.get_mut(id) else { return false };
+        let offset = scroll_edge::reveal(scroll.offset, top, height, viewport, margin).clamp(0.0, scroll.max);
+        if !first && (offset - scroll.offset).abs() < 0.5 { return false; }
+        scroll.offset = offset;
         scroll.pinned = false;
         scroll.v = 0.0;
         scroll.glide = None;
         scroll.direct = true;
-        if self.virtual_window_changed() { self.commit(&Tx::default()); }
+        let window = self.virtual_window_changed();
+        if window { self.commit(&Tx::default()); }
+        window
     }
 
     fn scroll_at(&self, x: f32, y: f32) -> Option<NodeId> {

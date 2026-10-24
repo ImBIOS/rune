@@ -12,10 +12,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   no longer builds or looks up every row in the view. Rows keep their measured heights by key,
   prepending or inserting keeps the reader's row in place, `scroll_into_view` reaches any row,
   and a focused field keeps typing after its row scrolls out. Rows new to the window beyond
-  the viewport mount half a viewport per side per frame, so a page loaded above the reader or
-  a jump lays out a little text each frame instead of three viewports at once. Elements in
-  rows that aren't built don't exist: the inspector, accessibility, Tab order and text
-  selection see built rows only. `virtualize` lists behave as before.
+  the viewport mount half a viewport per side per frame, and the list asks for frames until
+  they fill, so a page loaded above the reader or a jump lays out a little text each frame
+  instead of three viewports at once. A list's first showing mounts all of them. Write row
+  handlers to find their item by key or id, never by `i`. Elements in rows that aren't built
+  don't exist: the inspector, accessibility, Tab order and text selection see built rows
+  only. Both kinds of virtual list now show their last rows in the same frame when rows are
+  removed below the scroll offset, where the viewport used to stay blank until the next
+  commit. `scroll_into_view` on a row that measures taller than its estimate now lands it in
+  the same frame.
 - **`update_if` for updates that may change nothing.** `AppHandle::update_if`,
   `OverlayHandle::update_if` and `Runtime::update_if` take a closure that returns whether it
   changed state the view reads, as `poll` does. On false the view doesn't re-run, a shown window
@@ -26,7 +31,6 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   view reads leaves the screen stale until the next change. `update` is unchanged. For a timer
   that posts every 500 ms with nothing new, a 300-row view's frame drops from 0.70 ms to 0.11 ms
   median (0 of 100 builds).
-
 - **Tooltip labels wrap at the style's max width.** `Tooltip::label` and `Tooltip::text` stayed
   on one line past `TooltipStyle::max_width` and drew outside the box; they now wrap inside it,
   so a kit's Standard tooltip wraps at 320 pt. Tooltips without a max width are unchanged.

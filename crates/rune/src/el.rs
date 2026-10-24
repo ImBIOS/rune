@@ -1135,11 +1135,20 @@ impl El {
     /// takes focus once the row is. A [`memo`](crate::memo) inside `build` keeps its subtree while
     /// the row stays built; a row built again after scrolling out builds afresh.
     ///
+    /// Handlers in a row must find their item by its key or id, never by `i`. An index is only
+    /// where the item sat when the row was built: a row kept by `memo` keeps its handlers while
+    /// rows are inserted or removed above it, so a handler holding `i` would act on whatever
+    /// item moved into that slot.
+    ///
     /// ```ignore
     /// col().scroll(ScrollSpec { stick_bottom: true }).grow(1.0).child(
     ///     col().key("rows").growth(GrowthSpec::default()).virtual_rows(s.messages.len(), 72.0,
     ///         |s: &App, i| s.messages[i].id.as_str().into(),
-    ///         |s: &App, i| message(&s.messages[i])),
+    ///         |s: &App, i| {
+    ///             let m = &s.messages[i];
+    ///             let id = m.id.clone();
+    ///             memo(&m.id, m.revision, || message(m).on_press(move |s: &mut App| s.open(&id)))
+    ///         }),
     /// )
     /// ```
     pub fn virtual_rows<S: 'static>(
