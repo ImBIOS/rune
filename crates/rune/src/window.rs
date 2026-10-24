@@ -654,7 +654,8 @@ mod mac {
                     unsafe extern "C" fn(*mut AnyObject, Sel) -> Bool,
                     unsafe extern "C" fn(),
                 >(cannot_move_window));
-                assert!(ffi::class_addMethod(cls, sel!(mouseDownCanMoveWindow).as_ptr(), imp, types.as_ptr()));
+                // `BOOL` is `i8` on x86_64 and `bool` on arm64.
+                assert!(Bool::from_raw(ffi::class_addMethod(cls, sel!(mouseDownCanMoveWindow).as_ptr(), imp, types.as_ptr())).as_bool());
                 ffi::objc_registerClassPair(cls);
             }
             ffi::object_setClass(view, cls);

@@ -18,7 +18,7 @@ unsafe extern "C" {
     fn class_getSuperclass(class: *const AnyClass) -> *const AnyClass;
     fn class_getInstanceMethod(class: *const AnyClass, selector: Sel) -> *const c_void;
     fn method_getTypeEncoding(method: *const c_void) -> *const c_char;
-    fn class_addMethod(class: *const AnyClass, selector: Sel, imp: *const c_void, types: *const c_char) -> bool;
+    fn class_addMethod(class: *const AnyClass, selector: Sel, imp: *const c_void, types: *const c_char) -> Bool;
     fn dladdr(address: *const c_void, info: *mut DlInfo) -> i32;
     fn getsegmentdata(header: *const c_void, segment: *const c_char, size: *mut std::ffi::c_ulong) -> *const u8;
 }
@@ -194,7 +194,7 @@ fn install(class: &AnyClass, appkit: &AnyClass, methods: &[(Sel, *const c_void)]
         installed.push((key, parent as usize));
         methods.iter().all(|(selector, implementation)| {
             let types = method_getTypeEncoding(class_getInstanceMethod(class, *selector));
-            class_addMethod(class, *selector, *implementation, types)
+            class_addMethod(class, *selector, *implementation, types).as_bool()
         })
     }
 }
@@ -236,6 +236,25 @@ pub(crate) fn take_reattached(panel: &NSPanel) -> bool {
 #[doc(hidden)]
 pub fn reattach_count() -> usize { REATTACHED.load(Ordering::Relaxed) }
 
+fn window_forwards() -> [(Sel, *const c_void); 14] {
+    [
+        (sel!(contentView), content_view as *const c_void),
+        (sel!(isVisible), visible as *const c_void),
+        (sel!(occlusionState), occlusion as *const c_void),
+        (sel!(backingScaleFactor), scale as *const c_void),
+        (sel!(screen), screen as *const c_void),
+        (sel!(invalidateCursorRectsForView:), invalidate_cursor_rects as *const c_void),
+        (sel!(frame), frame as *const c_void),
+        (sel!(isKeyWindow), key as *const c_void),
+        (sel!(setFrame:display:), set_frame as *const c_void),
+        (sel!(setFrameOrigin:), set_origin as *const c_void),
+        (sel!(setContentSize:), set_size as *const c_void),
+        (sel!(setTitle:), set_title as *const c_void),
+        (sel!(setLevel:), set_level as *const c_void),
+        (sel!(setIgnoresMouseEvents:), set_hit as *const c_void),
+    ]
+}
+
 pub(crate) struct Bridge { source: usize, view: Option<usize> }
 impl Bridge {
     /// Main-thread only. The owner retains all three objects until after this bridge drops.
@@ -249,23 +268,7 @@ impl Bridge {
         use objc2::ClassType;
         // `-class` is the class winit declared, below any KVO subclass.
         let class: &AnyClass = unsafe { msg_send![source, class] };
-        let forwards = [
-            (sel!(contentView), content_view as *const c_void),
-            (sel!(isVisible), visible as *const c_void),
-            (sel!(occlusionState), occlusion as *const c_void),
-            (sel!(backingScaleFactor), scale as *const c_void),
-            (sel!(screen), screen as *const c_void),
-            (sel!(invalidateCursorRectsForView:), invalidate_cursor_rects as *const c_void),
-            (sel!(frame), frame as *const c_void),
-            (sel!(isKeyWindow), key as *const c_void),
-            (sel!(setFrame:display:), set_frame as *const c_void),
-            (sel!(setFrameOrigin:), set_origin as *const c_void),
-            (sel!(setContentSize:), set_size as *const c_void),
-            (sel!(setTitle:), set_title as *const c_void),
-            (sel!(setLevel:), set_level as *const c_void),
-            (sel!(setIgnoresMouseEvents:), set_hit as *const c_void),
-        ];
-        if !install(class, NSWindow::class(), &forwards) { return None; }
+        if !install(class, NSWindow::class(), &window_forwards()) { return None; }
         if filter.is_some() {
             let view_class: &AnyClass = unsafe { msg_send![view, class] };
             if !install(view_class, NSView::class(), &[(sel!(hitTest:), hit_test as *const c_void)]) { return None; }
@@ -284,5 +287,65 @@ impl Drop for Bridge {
     fn drop(&mut self) {
         if let Some(entry) = WINDOWS.with(|w| w.borrow_mut().remove(&self.source)) { LOST.with(|lost| lost.borrow_mut().remove(&entry.panel)); }
         if let Some(view) = self.view { VIEWS.with(|v| v.borrow_mut().remove(&view)); }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objc2::{class, declare::ClassBuilder};
+
+    thread_local! { static RECEIVED: RefCell<Vec<String>> = RefCell::default(); }
+    fn received(message: String) { RECEIVED.with(|r| r.borrow_mut().push(message)); }
+    extern "C" fn got_frame(_: *mut AnyObject, _: Sel, rect: NSRect, display: Bool) {
+        received(format!("frame {} {} {} {} {}", rect.origin.x, rect.origin.y, rect.size.width, rect.size.height, display.as_bool()));
+    }
+    extern "C" fn got_origin(_: *mut AnyObject, _: Sel, point: NSPoint) { received(format!("origin {} {}", point.x, point.y)); }
+    extern "C" fn got_size(_: *mut AnyObject, _: Sel, size: NSSize) { received(format!("size {} {}", size.width, size.height)); }
+    extern "C" fn got_level(_: *mut AnyObject, _: Sel, level: isize) { received(format!("level {level}")); }
+    extern "C" fn got_hit(_: *mut AnyObject, _: Sel, ignore: Bool) { received(format!("ignore {}", ignore.as_bool())); }
+
+    /// The trampolines on this architecture: each hands its own arguments and the sender's
+    /// return address to the Rust side. A wrong register would read garbage as the caller and
+    /// send the message on to the (uninitialized) window instead of the panel.
+    #[test]
+    fn trampolines_pass_the_arguments_and_the_sender() {
+        use objc2::ClassType;
+        let window_class = ClassBuilder::new("RuneBridgeTestWindow", NSWindow::class()).unwrap().register();
+        assert!(install(window_class, NSWindow::class(), &window_forwards()));
+        let mut panel_class = ClassBuilder::new("RuneBridgeTestPanel", class!(NSObject)).unwrap();
+        unsafe {
+            panel_class.add_method(sel!(setFrame:display:), got_frame as extern "C" fn(*mut AnyObject, Sel, NSRect, Bool));
+            panel_class.add_method(sel!(setFrameOrigin:), got_origin as extern "C" fn(*mut AnyObject, Sel, NSPoint));
+            panel_class.add_method(sel!(setContentSize:), got_size as extern "C" fn(*mut AnyObject, Sel, NSSize));
+            panel_class.add_method(sel!(setLevel:), got_level as extern "C" fn(*mut AnyObject, Sel, isize));
+            panel_class.add_method(sel!(setIgnoresMouseEvents:), got_hit as extern "C" fn(*mut AnyObject, Sel, Bool));
+        }
+        let panel_class = panel_class.register();
+        // A real NSWindow needs the window server, so the source is only allocated. All leak.
+        let (window, panel, view): (*mut AnyObject, *mut AnyObject, *mut AnyObject) = unsafe {
+            (msg_send![window_class, alloc], msg_send![panel_class, new], msg_send![class!(NSObject), new])
+        };
+        WINDOWS.with(|w| w.borrow_mut().insert(window as usize, Source { view: view as usize, panel: panel as usize, ordinary: true }));
+        unsafe {
+            let content: *mut AnyObject = msg_send![window, contentView];
+            assert_eq!(content, view, "Rune's call gets the moved view");
+            // NSInvocation calls the method from CoreFoundation, as AppKit would.
+            let signature: *mut AnyObject = msg_send![window, methodSignatureForSelector: sel!(contentView)];
+            let invocation: *mut AnyObject = msg_send![class!(NSInvocation), invocationWithMethodSignature: signature];
+            let _: () = msg_send![invocation, setSelector: sel!(contentView)];
+            let _: () = msg_send![invocation, invokeWithTarget: window];
+            let mut foreign: *mut AnyObject = view;
+            let _: () = msg_send![invocation, getReturnValue: &mut foreign as *mut *mut AnyObject as *mut c_void];
+            assert!(foreign.is_null(), "a framework's call gets the window's own, empty content");
+
+            let _: () = msg_send![window, setFrame: NSRect::new(NSPoint::new(1.5, 2.5), NSSize::new(300.0, 200.0)), display: Bool::YES];
+            let _: () = msg_send![window, setFrameOrigin: NSPoint::new(7.0, 8.0)];
+            let _: () = msg_send![window, setContentSize: NSSize::new(40.0, 50.0)];
+            let _: () = msg_send![window, setLevel: 3isize];
+            let _: () = msg_send![window, setIgnoresMouseEvents: Bool::YES];
+        }
+        WINDOWS.with(|w| w.borrow_mut().remove(&(window as usize)));
+        assert_eq!(RECEIVED.with(|r| r.take()), ["frame 1.5 2.5 300 200 true", "origin 7 8", "size 40 50", "level 3", "ignore true"]);
     }
 }

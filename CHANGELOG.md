@@ -5,6 +5,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Rune builds for Intel Macs.** `x86_64-apple-darwin` stopped compiling where Rune read
+  the Objective-C runtime's `BOOL`, which is `i8` there and `bool` on Apple silicon.
 - **Overlay and launcher panels keep their view when something restyles winit's hidden
   window.** On macOS an overlay or nonactivating launcher panel shows winit's view while
   winit's own window stays hidden. That hidden window answered `contentView` with the moved
