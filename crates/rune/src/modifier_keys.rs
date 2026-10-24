@@ -195,7 +195,7 @@ mod tests {
 
     #[derive(Default)]
     struct Keys { edit: TextEdit, app: Vec<KeyEvent>, field: Vec<KeyEvent>, field_takes: bool, chords: usize,
-        recording: bool, recorded: Vec<PhysicalInput> }
+        recording: bool, recorded: Vec<PhysicalInput>, focus_lost: usize }
     fn view(s: &Keys, _: &mut Cx<Keys>) -> El {
         col().size(300.0, 200.0)
             .child(text_input(&s.edit, TextStyle::new(14.0, 400.0)).single_line().key("field").size(200.0, 32.0)
@@ -209,6 +209,7 @@ mod tests {
             // A shortcut recorder: it takes every key while recording.
             .child(el().key("recorder").size(100.0, 40.0).focusable(true)
                 .on_physical_input(|s: &mut Keys, ev, _| {
+                    if matches!(ev, PhysicalInput::FocusLost) { s.focus_lost += 1; }
                     if s.recording { s.recorded.push(*ev); }
                     s.recording
                 }))
@@ -408,6 +409,32 @@ mod tests {
         assert!(!modifier(&mut rt, Code::ShiftLeft, false, SHIFT), "Shift was already ended");
         modifier(&mut rt, Code::AltRight, true, Mods::default());
         assert_eq!(modifiers(&rt.state.app)[2..], [(Modifier::AltRight, true)], "a key the recorder took is heard next time");
+    }
+
+    #[test]
+    fn a_blur_or_a_hide_releases_held_keys_once() {
+        let mut rt = runtime(true);
+        click(&mut rt, "recorder");
+        rt.window_focus(true);
+        modifier(&mut rt, Code::ShiftLeft, true, Mods::default());
+        // How `--desktop` and headless scripts blur a window.
+        rt.window_focus(false);
+        rt.frame(0.0);
+        assert_eq!(modifiers(&rt.state.app), [(Modifier::ShiftLeft, true), (Modifier::ShiftLeft, false)]);
+        assert_eq!(rt.state.focus_lost, 1, "the recorder hears the blur too");
+        // A hide, then the blur it may or may not bring.
+        rt.window_focus(true);
+        modifier(&mut rt, Code::AltRight, true, Mods::default());
+        rt.keys_lost();
+        assert!(rt.keys_queued(), "a hidden host steps a frame to deliver it");
+        rt.window_focus(false);
+        rt.frame(0.0);
+        assert_eq!(modifiers(&rt.state.app)[2..], [(Modifier::AltRight, true), (Modifier::AltRight, false)]);
+        assert_eq!(rt.state.focus_lost, 2);
+        rt.window_focus(true);
+        rt.keys_lost();
+        rt.frame(0.0);
+        assert_eq!(rt.state.focus_lost, 3, "a hide without a blur, after focus came back");
     }
 
     #[test]

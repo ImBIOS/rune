@@ -683,6 +683,8 @@ pub struct Runtime<S: 'static> {
     live_wake: Arc<crate::live::Wake>,
     live_clock: Arc<()>,
     window_focused: Option<bool>,
+    /// `keys_lost` queued its `FocusLost` since the window last had focus.
+    keys_lost: bool,
     live_subscriptions: Vec<Arc<crate::live::Subscription>>,
     live_dirty: bool,
     /// When the frame being built will present; videos pull the picture for it.
@@ -913,6 +915,7 @@ impl<S: 'static> Runtime<S> {
             videos_active: false,
             video_signature: 0,
             window_focused: None,
+            keys_lost: false,
             on_focus: None,
             live_subscriptions: Vec::new(),
             live_dirty: false,
@@ -1129,12 +1132,30 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// Queue a native focus transition. Repeated notifications do not repeat the callback.
+    /// Losing focus is also `keys_lost`.
     pub fn window_focus(&mut self, focused: bool) {
+        // Every focus gain, even one a hide without blur left unreported.
+        if focused { self.keys_lost = false; }
         if self.window_focused != Some(focused) {
             self.window_focused = Some(focused);
             if let Some(f) = self.on_focus { self.update(|s, tx| f(s, focused, tx)); }
             self.queue.push(Action::WindowFocus(focused));
+            if !focused { self.keys_lost(); }
         }
+    }
+
+    /// The window gets no more keys: it lost focus or hid, which may never report a blur. The
+    /// focused physical handler hears `FocusLost` and held modifier keys are released, once
+    /// until the window has focus again. A hidden host steps `hidden_timer_frame` while
+    /// `keys_queued` to deliver them.
+    pub(crate) fn keys_lost(&mut self) {
+        if std::mem::replace(&mut self.keys_lost, true) { return; }
+        self.physical_input(crate::PhysicalInput::FocusLost);
+    }
+
+    /// Keyboard input or a focus change is queued for the next frame.
+    pub(crate) fn keys_queued(&self) -> bool {
+        self.queue.iter().any(|a| matches!(a, Action::Physical(..) | Action::Key { .. } | Action::WindowFocus(_)))
     }
 
     /// State changed since the last committed frame (an update, poll or handler).

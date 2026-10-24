@@ -499,6 +499,11 @@ impl<T: 'static> Overlay<T> {
     }
 
     fn hide_fading(&mut self, fade: Duration) {
+        // A hide need not report a blur, and a hidden overlay hears none: what it held is
+        // released, after any Fn change the monitor saw first.
+        #[cfg(target_os = "macos")]
+        self.fn_key();
+        if self.options.keys == KeyPolicy::OnDemand { self.rt.keys_lost(); }
         // Only macOS fades the window; elsewhere it goes at once, and so does drawing.
         let fading = cfg!(target_os = "macos") && !fade.is_zero() && (self.visible || self.fading_out.is_some());
         if fading {
@@ -510,6 +515,7 @@ impl<T: 'static> Overlay<T> {
         self.popup.cancel(&mut self.rt);
         self.rt.cancel_pointer();
         self.apply_cursor();
+        self.hidden_input();
         let Some(live) = &self.live else { return };
         match &live.backing {
             Backing::Window(window) => {
@@ -1028,6 +1034,25 @@ impl<T: 'static> Overlay<T> {
 
     fn advance(&mut self) {
         self.advance_at(Instant::now());
+    }
+
+    /// An overlay that draws nothing delivers queued input without drawing, such as the
+    /// releases of the modifier keys held when it hid, rather than when it next shows.
+    fn hidden_input(&mut self) {
+        if !self.drawing() && self.rt.keys_queued() { self.advance(); }
+    }
+
+    /// Fn changes the monitor saw since the loop last turned. A hidden overlay drops them: its
+    /// hide released Fn, and it takes no keys.
+    #[cfg(target_os = "macos")]
+    fn fn_key(&mut self) {
+        let Some(changes) = self.live.as_ref().and_then(|l| l.fn_key.as_ref()).map(|f| f.take()) else { return };
+        if !self.visible || self.options.keys != KeyPolicy::OnDemand { return; }
+        for pressed in changes {
+            self.dirty |= self.rt.physical_with_fallback(crate::PhysicalInput::Key {
+                key: winit::keyboard::KeyCode::Fn, mods: crate::window::map_mods(self.mods), pressed, repeat: false,
+            }, None);
+        }
     }
 
     /// Handle updates, and the `setup` waker (new data arrived) re-runs the view. A shown
@@ -1591,10 +1616,7 @@ impl<T: 'static> AnyHost for Overlay<T> {
             }
             WindowEvent::Focused(focused) => {
                 self.rt.set_system_reduced_motion(crate::preferences::reduced_motion());
-                if !focused {
-                    self.rt.physical_input(crate::PhysicalInput::FocusLost);
-                    self.rt.cancel_composition();
-                }
+                if !focused { self.rt.cancel_composition(); }
                 self.dirty = true;
             }
             WindowEvent::KeyboardInput { event, .. } if self.options.keys == KeyPolicy::OnDemand => {
@@ -1628,8 +1650,13 @@ impl<T: 'static> AnyHost for Overlay<T> {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) -> bool {
+        #[cfg(target_os = "macos")]
+        self.fn_key();
         // A fading-out overlay takes no input; it only draws its exit.
-        if !self.visible { return self.draw(); }
+        if !self.visible {
+            self.hidden_input();
+            return self.draw();
+        }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         if let Some(live) = &self.live && let Some(x11) = &self.x11 && let Some((point, desktop)) = x11.take_pointer(live.scale) {
             self.observe_pointer(point.0, point.1);
@@ -1660,15 +1687,6 @@ impl<T: 'static> AnyHost for Overlay<T> {
                     else if let Some(panel) = &self.panel { panel.place(self.at, &self.options); }
                     self.sync_live_origin();
                 }
-            }
-        }
-        #[cfg(target_os = "macos")]
-        if let Some(changes) = self.live.as_ref().and_then(|l| l.fn_key.as_ref()).map(|f| f.take()) {
-            let keys = self.options.keys == KeyPolicy::OnDemand;
-            for pressed in changes.into_iter().filter(|_| keys) {
-                self.dirty |= self.rt.physical_with_fallback(crate::PhysicalInput::Key {
-                    key: winit::keyboard::KeyCode::Fn, mods: crate::window::map_mods(self.mods), pressed, repeat: false,
-                }, None);
             }
         }
         let more = self.draw();
@@ -2319,6 +2337,35 @@ mod tests {
         assert_eq!(overlay.rt.state, [true, false]);
         assert_eq!(overlay.rt.shell_request, Some(crate::el::Shell::Close));
         assert!(overlay.live.is_none());
+    }
+
+    #[test]
+    fn hiding_a_key_overlay_releases_the_modifiers_it_held() {
+        use crate::{Key, Modifier, Mods, PhysicalInput, PhysicalKeyCode as Code};
+        fn view(_: &Vec<(Modifier, bool)>, _: &mut Cx<Vec<(Modifier, bool)>>) -> El { crate::el() }
+        let app = AppSpec::new("keys", (100.0, 100.0), Vec::new, view);
+        let spec = OverlaySpec::new("keys", app.size, view)
+            .options(OverlayOptions { keys: KeyPolicy::OnDemand, ..Default::default() })
+            .on_key(|s, ev, _| match ev.key { Key::Modifier { modifier, pressed } => { s.push((modifier, pressed)); true } _ => false });
+        let (mut overlay, _) = Overlay::new(spec, Vec::new(), &app);
+        overlay.rt.set_modifier_keys(true);
+        overlay.rt.frame(0.0);
+        let press = |overlay: &mut Overlay<_>, key| {
+            overlay.visible = true;
+            overlay.rt.window_focus(true);
+            overlay.rt.physical_with_fallback(PhysicalInput::Key { key, mods: Mods::default(), pressed: true, repeat: false }, None);
+            overlay.advance();
+        };
+        press(&mut overlay, Code::AltRight);
+        press(&mut overlay, Code::Fn);
+        // Hidden from its own handler: no blur reaches it, and no frame draws.
+        overlay.hide();
+        assert_eq!(overlay.rt.state, [(Modifier::AltRight, true), (Modifier::Fn, true), (Modifier::AltRight, false), (Modifier::Fn, false)]);
+        overlay.rt.window_focus(false);
+        overlay.hidden_input();
+        assert_eq!(overlay.rt.state.len(), 4, "the blur after the hide releases nothing again");
+        press(&mut overlay, Code::AltRight);
+        assert_eq!(overlay.rt.state[4..], [(Modifier::AltRight, true)], "shown again, the key is heard");
     }
 
     #[test]

@@ -1563,6 +1563,11 @@ impl<S: 'static> Host<S> {
 
     fn hide(&mut self, event_loop: &ActiveEventLoop) {
         self.land_frame();
+        // Before the window can go: a hide need not report a blur. `about_to_wait` delivers it,
+        // after any Fn change the monitor saw first.
+        #[cfg(target_os = "macos")]
+        self.fn_key();
+        self.rt.keys_lost();
         if let Some(w) = &mut self.win { w.first_frame.hide(); }
         self.secure_input.set(false);
         self.ime_allowed = false;
@@ -1573,7 +1578,8 @@ impl<S: 'static> Host<S> {
         if let Some(w) = &mut self.win { w.apply_cursor(&self.rt, false); }
         self.mods = ModifiersState::empty();
         if let Some(w) = &self.win { w.hide(); }
-        if self.release_gpu && !self.launcher() {
+        let launcher = self.launcher();
+        if self.release_gpu && !launcher {
             self.win = None;
             self.native_handle.native.ready.store(false, Ordering::Release);
             self.native_handle.native.number.store(0, Ordering::Release);
@@ -1589,6 +1595,8 @@ impl<S: 'static> Host<S> {
             w.stop_pacing();
             w.visible = false;
             w.retry = None;
+            // Its hidden frame delivers the focus loss.
+            if launcher { w.window.request_redraw(); }
         }
     }
 
@@ -2149,6 +2157,7 @@ impl<S: 'static> AnyHost for Host<S> {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) -> bool {
         #[cfg(target_os = "macos")]
         self.fn_key();
+        self.hidden_input(event_loop);
         // Process queued hide/close requests before completing a pending first reveal.
         self.first_frame_ready(event_loop);
         false
@@ -2183,6 +2192,17 @@ impl<S: 'static> Host<S> {
         }
         self.started = true;
         self.drain(event_loop, false);
+    }
+
+    /// A hidden window delivers queued input without drawing, such as the releases of the
+    /// modifier keys held when it hid, rather than when it next shows. A shown window's
+    /// redraw delivers it, as does a hidden launcher's.
+    fn hidden_input(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.started || self.finished || self.win.as_ref().is_some_and(|w| w.visible || self.launcher()) { return; }
+        if !self.rt.keys_queued() { return; }
+        self.rt.hidden_timer_frame();
+        self.clipboard.flush(&mut self.rt);
+        self.shell(event_loop);
     }
 
     #[cfg(target_os = "macos")]
@@ -2338,7 +2358,6 @@ impl<S: 'static> Host<S> {
                 self.secure_input.set(focused && l.visible && !l.occluded && rt.has_secure_focus());
                 place_chrome(&l.window, chrome);
                 if !focused {
-                    rt.physical_input(crate::PhysicalInput::FocusLost);
                     rt.cancel_composition();
                     l.window.set_ime_allowed(false);
                     self.ime_allowed = false;
