@@ -48,6 +48,7 @@ pub struct App<S: 'static> {
     pub(crate) on_focus: Option<fn(&mut S, bool, &mut Tx)>,
     pub(crate) shared: Arc<Shared<S>>,
     pub(crate) overlays: Vec<Box<dyn crate::overlay::PendingOverlay>>,
+    pub(crate) windows: Vec<crate::AnyWindowSpec>,
     pub(crate) on_window: Option<OnWindow>,
     pub(crate) on_ready: Option<OnWindow>,
     pub(crate) macos_window: crate::MacWindowOptions,
@@ -76,6 +77,7 @@ impl<S: 'static> App<S> {
             on_focus: None,
             shared,
             overlays: Vec::new(),
+            windows: Vec::new(),
             on_window: None,
             on_ready: None,
             macos_window: crate::MacWindowOptions::default(),
@@ -125,6 +127,23 @@ impl<S: 'static> App<S> {
         let (overlay, handle) = crate::overlay::Overlay::new(spec.into(), state, &self.spec);
         self.overlays.push(Box::new(overlay));
         handle
+    }
+
+    /// Adds an ordinary window with its own state type to this app's event loop, such as a
+    /// settings window beside the main one. `spec.options` applies (`visible: false` creates it
+    /// hidden; `App::windowless` on its app defers creation), and either handle opens it later.
+    /// Focus, input, clocks and redraws stay with each window; quitting, the Dock icon and
+    /// accessory mode stay with the process.
+    ///
+    /// Closing it hides it and runs its `on_close`, like `keep_running`: reopening shows the
+    /// same state (Wayland destroys and recreates the window). It never keeps the app running
+    /// alone: the app still ends with its own window, and `Tx::quit` from either quits both.
+    /// Headless tools select it with `--window KEY`; otherwise `--scene` and `--size` are left
+    /// to the primary window.
+    pub fn window<T: 'static>(&mut self, spec: crate::WindowSpec<T>) -> (AppHandle<T>, crate::WindowHandle) {
+        let (app, window) = (spec.app.handle(), crate::WindowHandle::new(&spec.key));
+        self.windows.push(crate::AnyWindowSpec::secondary(spec, window.clone()));
+        (app, window)
     }
 
     /// Build the first state with `f` instead of `AppSpec::init`, so it can capture what the

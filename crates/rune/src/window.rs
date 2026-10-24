@@ -21,7 +21,7 @@ use crate::el::{Shell, Tx};
 use crate::render::{Gpu, Renderer};
 use crate::runtime::{Env, Runtime, TitlebarAction, Waker};
 use crate::tooling::{AppSpec, Args, Chrome, runtime_for};
-use crate::windows::{Display, WindowOptions, WindowSpec};
+use crate::windows::{AnyWindowSpec, Display, WindowOptions, WindowSpec};
 
 /// The open window. Fields drop in order: the surface before its window.
 struct Win {
@@ -208,22 +208,41 @@ pub(crate) trait AnyHost {
     fn keeps_loop(&self) -> bool { true }
 }
 
+type Request = Box<dyn FnOnce(usize) -> WakeEvent + Send>;
+
 #[derive(Default)]
 struct NativeWindow {
     window: Mutex<Weak<Window>>,
     number: AtomicU32,
     ready: AtomicBool,
+    /// The event loop and slot once the host exists, and the requests made before it did.
+    route: Mutex<(Option<(EventLoopProxy<WakeEvent>, usize)>, Vec<Request>)>,
 }
 
 /// A window's native reference, refreshed across App close/reopen without owning the window.
 #[derive(Clone)]
 pub struct WindowHandle {
     native: Arc<NativeWindow>,
-    slot: usize,
     key: Arc<str>,
-    proxy: EventLoopProxy<WakeEvent>,
 }
 impl WindowHandle {
+    pub(crate) fn new(key: &str) -> Self { Self { native: Arc::default(), key: key.into() } }
+
+    /// Routes requests to the window's host, starting with those queued before it existed.
+    fn bind(&self, proxy: EventLoopProxy<WakeEvent>, slot: usize) {
+        let mut route = self.native.route.lock().unwrap();
+        for request in std::mem::take(&mut route.1) { let _ = proxy.send_event(request(slot)); }
+        route.0 = Some((proxy, slot));
+    }
+
+    fn send(&self, request: impl FnOnce(usize) -> WakeEvent + Send + 'static) {
+        let mut route = self.native.route.lock().unwrap();
+        match &route.0 {
+            Some((proxy, slot)) => { let _ = proxy.send_event(request(*slot)); }
+            None => route.1.push(Box::new(request)),
+        }
+    }
+
     /// The first frame has completed for the current native lifetime. For a launcher
     /// this confirms GPU completion of an alpha-zero frame before reveal. False after destruction.
     pub fn is_ready(&self) -> bool { self.window().is_ok() && self.native.ready.load(Ordering::Acquire) }
@@ -241,28 +260,31 @@ impl WindowHandle {
         self.window()?.set_cursor_hittest(!click_through).map_err(|e| e.to_string())
     }
     pub fn set_always_on_top(&self, on: bool) {
-        let _ = self.proxy.send_event(WakeEvent::Level(self.slot, on));
+        self.send(move |slot| WakeEvent::Level(slot, on));
     }
     /// Physical desktop pixels; retained across recreation. Unsupported on Wayland.
     pub fn set_position(&self, position: (i32, i32)) {
-        let _ = self.proxy.send_event(WakeEvent::Position(self.slot, position));
+        self.send(move |slot| WakeEvent::Position(slot, position));
     }
     pub fn place(&self, display: crate::DisplayTarget, placement: crate::OverlayPlacement) {
-        let _ = self.proxy.send_event(WakeEvent::Place(self.slot, crate::windows::PlaceRequest::new(display, placement)));
+        let place = crate::windows::PlaceRequest::new(display, placement);
+        self.send(move |slot| WakeEvent::Place(slot, place));
     }
     /// Show/recreate, or hide while keeping state. A launcher takes keys and reveals cached
     /// pixels; an ordinary window shows without requesting focus.
     pub fn set_visible(&self, visible: bool) {
         let request = if visible { WindowRequest::Show } else { WindowRequest::Hide };
-        let _ = self.proxy.send_event(WakeEvent::Window(self.slot, request));
+        self.send(move |slot| WakeEvent::Window(slot, request));
     }
     pub fn show(&self) { self.set_visible(true); }
     pub fn hide(&self) { self.set_visible(false); }
     /// Focus/activate an already-visible window, restoring it if minimized. Wayland requests attention.
-    pub fn focus(&self) { let _ = self.proxy.send_event(WakeEvent::Focus(self.slot)); }
+    pub fn focus(&self) { self.send(WakeEvent::Focus); }
     /// Open/focus a retained host. A default close destroys its host; use App::keep_running to reopen.
-    pub fn open(&self) { let _ = self.proxy.send_event(WakeEvent::Window(self.slot, WindowRequest::Open(None))); }
-    pub fn close(&self) { let _ = self.proxy.send_event(WakeEvent::Window(self.slot, WindowRequest::Close)); }
+    /// Windows added with `App::window` always reopen. Requests made before the loop runs
+    /// apply once the window's host starts.
+    pub fn open(&self) { self.send(|slot| WakeEvent::Window(slot, WindowRequest::Open(None))); }
+    pub fn close(&self) { self.send(|slot| WakeEvent::Window(slot, WindowRequest::Close)); }
     /// Borrow a raw native handle while alive. Platform thread restrictions still apply;
     /// do not retain an extracted pointer beyond the callback.
     pub fn with_raw_handle<R>(&self, f: impl for<'a> FnOnce(winit::raw_window_handle::WindowHandle<'a>) -> R) -> Result<R, String> {
@@ -288,15 +310,17 @@ fn start_all<T, H>(items: Vec<T>, mut build: impl FnMut(usize, T) -> Option<H>, 
     hosts
 }
 
-struct Windows<S: 'static> {
-    factory: Option<Box<dyn FnOnce(&[Display]) -> Vec<WindowSpec<S>>>>,
+type Factory = Box<dyn FnOnce(&[Display]) -> Vec<AnyWindowSpec>>;
+
+struct Windows {
+    factory: Option<Factory>,
     args: Args,
     proxy: EventLoopProxy<WakeEvent>,
     hosts: Vec<Option<Box<dyn AnyHost>>>,
     // Weak pool preserves release_gpu_when_closed when the last GPU owner closes.
     gpu: Rc<RefCell<Weak<Gpu>>>,
 }
-impl<S: 'static> Windows<S> {
+impl Windows {
     fn cleanup(&mut self, event_loop: &ActiveEventLoop) {
         for host in &mut self.hosts {
             if host.as_ref().is_some_and(|h| h.finished()) { *host = None; }
@@ -304,7 +328,41 @@ impl<S: 'static> Windows<S> {
         if !self.hosts.iter().flatten().any(|h| h.keeps_loop()) { event_loop.exit(); }
     }
 }
-impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
+
+/// What a window needs from the shell to start, whatever its state type.
+pub(crate) struct Start<'a> {
+    proxy: EventLoopProxy<WakeEvent>,
+    slot: usize,
+    gpu: Rc<RefCell<Weak<Gpu>>>,
+    wayland: bool,
+    /// Whether this window records `--native` traces.
+    traced: bool,
+    overlays: &'a mut Vec<Box<dyn crate::overlay::PendingOverlay>>,
+}
+
+/// Starts one window's host, or renders it headless when its own arguments ask for that.
+pub(crate) fn start<S: 'static>(mut spec: WindowSpec<S>, handle: Option<WindowHandle>, keeps_loop: bool, mut inherited: Args, cx: Start<'_>) -> Option<Box<dyn AnyHost>> {
+    if inherited.native && !cx.traced {
+        inherited.trace = None;
+        inherited.frames = None;
+    }
+    let args = spec.app.resolve_args(inherited);
+    if args.headless() {
+        if let Some((w, h)) = spec.options.physical_size {
+            let scale = args.scale.unwrap_or(2.0);
+            spec.app.spec.size = (w as f32 / scale, h as f32 / scale);
+        }
+        crate::tooling::headless_configured(spec.app, args, spec.options.transparent);
+        return None;
+    }
+    cx.overlays.append(&mut spec.app.overlays);
+    let handle = handle.unwrap_or_else(|| WindowHandle::new(&spec.key));
+    let mut host = Host::new(spec, handle, args, cx.proxy, cx.slot, cx.gpu, cx.wayland);
+    host.keeps_loop = keeps_loop;
+    Some(Box::new(host))
+}
+
+impl ApplicationHandler<WakeEvent> for Windows {
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
         for host in self.hosts.iter_mut().flatten() { host.new_events(event_loop, cause); }
         // Before resumed there are no hosts to clean up.
@@ -318,28 +376,14 @@ impl<S: 'static> ApplicationHandler<WakeEvent> for Windows<S> {
             name: m.name(), position: (m.position().x, m.position().y),
             size: (m.size().width, m.size().height), scale: m.scale_factor(), primary: primary.as_ref() == Some(&m),
         }).collect();
-        let specs = factory(&displays);
+        let specs = crate::windows::flatten(factory(&displays));
         crate::windows::validate(&specs).expect("window keys");
-        let trace_window = self.args.window.clone().or_else(|| specs.first().map(|s| s.key.clone()));
+        let trace_window = self.args.window.clone().or_else(|| specs.first().map(|s| s.key().to_owned()));
         let mut overlays = Vec::new();
         let wayland = is_wayland(event_loop);
-        self.hosts = start_all(specs, |slot, mut spec| {
-            let mut inherited = self.args.clone();
-            if inherited.native && trace_window.as_deref() != Some(spec.key.as_str()) {
-                inherited.trace = None;
-                inherited.frames = None;
-            }
-            let args = spec.app.resolve_args(inherited);
-            if args.headless() {
-                if let Some((w, h)) = spec.options.physical_size {
-                    let scale = args.scale.unwrap_or(2.0);
-                    spec.app.spec.size = (w as f32 / scale, h as f32 / scale);
-                }
-                crate::tooling::headless_configured(spec.app, args, spec.options.transparent);
-                return None;
-            }
-            overlays.append(&mut spec.app.overlays);
-            Some(Box::new(Host::new(spec, args, self.proxy.clone(), slot, self.gpu.clone(), wayland)) as Box<dyn AnyHost>)
+        self.hosts = start_all(specs, |slot, spec| {
+            let traced = trace_window.as_deref() == Some(spec.key());
+            spec.start(self.args.clone(), Start { proxy: self.proxy.clone(), slot, gpu: self.gpu.clone(), wayland, traced, overlays: &mut overlays })
         }, |host| host.resumed(event_loop));
         for mut overlay in overlays {
             let (slot, proxy) = (self.hosts.len(), self.proxy.clone());
@@ -401,6 +445,8 @@ struct Host<S: 'static> {
     on_window: Option<crate::app::OnWindow>,
     on_ready: Option<crate::app::OnWindow>,
     finished: bool,
+    /// False for windows `App::window` added: they live as long as the loop, never keep it.
+    keeps_loop: bool,
     spec: AppSpec<S>,
     args: Args,
     keep_running: bool,
@@ -440,14 +486,14 @@ struct Host<S: 'static> {
 pub fn run<S: 'static>(app: App<S>, args: Args) {
     let accessory = app.accessory;
     let options = app.window_options.clone();
-    run_configured(move |_| { let mut spec = WindowSpec::from_app("main", app); spec.options = options; vec![spec] }, args, accessory);
+    run_configured(Box::new(move |_| { let mut spec = WindowSpec::from_app("main", app); spec.options = options; vec![spec.into()] }), args, accessory);
 }
 
-pub(crate) fn run_windows<S: 'static>(factory: impl FnOnce(&[Display]) -> Vec<WindowSpec<S>> + 'static, args: Args, options: crate::RunOptions) {
+pub(crate) fn run_windows(factory: Factory, args: Args, options: crate::RunOptions) {
     run_configured(factory, args, options.accessory);
 }
 
-fn run_configured<S: 'static>(factory: impl FnOnce(&[Display]) -> Vec<WindowSpec<S>> + 'static, args: Args, accessory: bool) {
+fn run_configured(factory: Factory, args: Args, accessory: bool) {
     let _ = accessory;
     #[allow(unused_mut)]
     let mut builder = EventLoop::<WakeEvent>::with_user_event();
@@ -462,20 +508,20 @@ fn run_configured<S: 'static>(factory: impl FnOnce(&[Display]) -> Vec<WindowSpec
     let event_loop = builder.build().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
-    let mut windows = Windows { factory: Some(Box::new(factory)), args, proxy, hosts: Vec::new(), gpu: Rc::default() };
+    let mut windows = Windows { factory: Some(factory), args, proxy, hosts: Vec::new(), gpu: Rc::default() };
     let result = event_loop.run_app(&mut windows);
     crate::clipboard::shutdown(); // Also cover an event-loop error before `exiting`.
     result.expect("run");
 }
 
 impl<S: 'static> Host<S> {
-    fn new(window_spec: WindowSpec<S>, args: Args, proxy: EventLoopProxy<WakeEvent>, slot: usize, gpu_pool: Rc<RefCell<Weak<Gpu>>>, wayland: bool) -> Self {
-        let WindowSpec { mut app, options, key, on_created } = window_spec;
+    fn new(window_spec: WindowSpec<S>, native_handle: WindowHandle, args: Args, proxy: EventLoopProxy<WakeEvent>, slot: usize, gpu_pool: Rc<RefCell<Weak<Gpu>>>, wayland: bool) -> Self {
+        let WindowSpec { mut app, options, key: _, on_created } = window_spec;
         let args = app.resolve_args(args);
         let on_window = app.on_window.take();
         let on_ready = app.on_ready.take();
         let macos_window = std::mem::take(&mut app.macos_window);
-        let native_handle = WindowHandle { native: Arc::default(), slot, key: key.into(), proxy: proxy.clone() };
+        native_handle.bind(proxy.clone(), slot);
         let live_proxy = proxy.clone();
         #[cfg(target_os = "macos")]
         let frame_proxy = proxy.clone();
@@ -522,6 +568,7 @@ impl<S: 'static> Host<S> {
             on_window,
             on_ready,
             finished: false,
+            keeps_loop: true,
             spec,
             args,
             keep_running,
@@ -1412,6 +1459,7 @@ impl<S: 'static> AnyHost for Host<S> {
         self.win.as_ref().is_some_and(|w| w.window.id() == id)
     }
     fn finished(&self) -> bool { self.finished }
+    fn keeps_loop(&self) -> bool { self.keeps_loop }
     fn terminate(&mut self) {
         // Once: a window that already closed ran its hook then.
         if self.finished || !self.closes() { return; }

@@ -227,10 +227,86 @@ impl<S> WindowSpec<S> {
     }
 }
 
-pub(crate) fn validate<S>(windows: &[WindowSpec<S>]) -> Result<(), String> {
+impl<S: 'static> WindowSpec<S> {
+    /// Erase the state type, so one factory can return windows of different state types.
+    pub fn boxed(self) -> AnyWindowSpec { self.into() }
+}
+
+/// A `WindowSpec` of any state type, for factories that mix them:
+/// `vec![review.boxed(), settings.into()]`.
+pub struct AnyWindowSpec(Box<dyn ErasedWindow>);
+
+impl AnyWindowSpec {
+    pub fn key(&self) -> &str { self.0.key() }
+
+    /// A window `App::window` added: it closes by hiding and never keeps the loop running alone.
+    pub(crate) fn secondary<T: 'static>(mut spec: WindowSpec<T>, handle: crate::WindowHandle) -> Self {
+        spec.app.keep_running = true;
+        Self(Box::new(Erased { spec, handle: Some(handle), secondary: true }))
+    }
+
+    pub(crate) fn resolve_args(&mut self, inherited: crate::tooling::Args) -> crate::tooling::Args { self.0.resolve_args(inherited) }
+
+    /// Render this window headless; `scale` converts a physical size option to points.
+    pub(crate) fn headless(self, args: crate::tooling::Args, scale: f32) { self.0.headless(args, scale) }
+
+    pub(crate) fn start(self, inherited: crate::tooling::Args, cx: crate::window::Start<'_>) -> Option<Box<dyn crate::window::AnyHost>> {
+        self.0.start(inherited, cx)
+    }
+}
+
+impl<S: 'static> From<WindowSpec<S>> for AnyWindowSpec {
+    fn from(spec: WindowSpec<S>) -> Self { Self(Box::new(Erased { spec, handle: None, secondary: false })) }
+}
+
+trait ErasedWindow {
+    fn key(&self) -> &str;
+    fn take_windows(&mut self) -> Vec<AnyWindowSpec>;
+    fn resolve_args(&mut self, inherited: crate::tooling::Args) -> crate::tooling::Args;
+    fn headless(self: Box<Self>, args: crate::tooling::Args, scale: f32);
+    fn start(self: Box<Self>, inherited: crate::tooling::Args, cx: crate::window::Start<'_>) -> Option<Box<dyn crate::window::AnyHost>>;
+}
+
+struct Erased<S: 'static> {
+    spec: WindowSpec<S>,
+    handle: Option<crate::WindowHandle>,
+    secondary: bool,
+}
+
+impl<S: 'static> ErasedWindow for Erased<S> {
+    fn key(&self) -> &str { &self.spec.key }
+    fn take_windows(&mut self) -> Vec<AnyWindowSpec> { std::mem::take(&mut self.spec.app.windows) }
+    fn resolve_args(&mut self, inherited: crate::tooling::Args) -> crate::tooling::Args { self.spec.app.resolve_args(inherited) }
+    fn headless(self: Box<Self>, args: crate::tooling::Args, scale: f32) {
+        let WindowSpec { mut app, options, .. } = self.spec;
+        if let Some((w, h)) = options.physical_size { app.spec.size = (w as f32 / scale, h as f32 / scale); }
+        crate::tooling::headless_configured(app, args, options.transparent);
+    }
+    fn start(self: Box<Self>, mut inherited: crate::tooling::Args, cx: crate::window::Start<'_>) -> Option<Box<dyn crate::window::AnyHost>> {
+        // A secondary window is not what --scene or --size describe unless --window selects it.
+        if self.secondary && inherited.window.as_deref() != Some(self.spec.key.as_str()) {
+            inherited.scene = None;
+            inherited.size = None;
+        }
+        crate::window::start(self.spec, self.handle, !self.secondary, inherited, cx)
+    }
+}
+
+/// Each window followed by those its app added with `App::window`, depth first.
+pub(crate) fn flatten(windows: impl IntoIterator<Item = AnyWindowSpec>) -> Vec<AnyWindowSpec> {
+    let mut out = Vec::new();
+    for mut window in windows {
+        let children = window.0.take_windows();
+        out.push(window);
+        out.extend(flatten(children));
+    }
+    out
+}
+
+pub(crate) fn validate(windows: &[AnyWindowSpec]) -> Result<(), String> {
     let mut keys = std::collections::HashSet::new();
     for window in windows {
-        if window.key.is_empty() || !keys.insert(&window.key) { return Err(format!("empty or duplicate window key: {:?}", window.key)); }
+        if window.key().is_empty() || !keys.insert(window.key()) { return Err(format!("empty or duplicate window key: {:?}", window.key())); }
     }
     Ok(())
 }
@@ -252,6 +328,21 @@ mod tests {
         let app = App::new(spec).configured_options(WindowOptions::launcher_panel());
         assert!(app.macos_window.launcher);
         assert!(!app.window_options.visible);
+    }
+
+    #[test]
+    fn app_windows_follow_their_app_and_share_its_key_space() {
+        let mut main = App::new(AppSpec::new("main", (100.0, 100.0), || 0u32, |_, _| crate::el()));
+        let settings = || WindowSpec::new("settings", AppSpec::new("settings", (100.0, 100.0), String::new, |_, _| crate::el()));
+        let (_, handle) = main.window(settings());
+        assert_eq!(handle.key(), "settings");
+        let other = WindowSpec::new("other", AppSpec::new("other", (100.0, 100.0), || (), |_, _| crate::el()));
+        let flat = flatten([WindowSpec::from_app("main", main).boxed(), other.into()]);
+        assert_eq!(flat.iter().map(AnyWindowSpec::key).collect::<Vec<_>>(), ["main", "settings", "other"]);
+        assert!(validate(&flat).is_ok());
+        let mut clash = App::new(AppSpec::new("main", (100.0, 100.0), || 0u32, |_, _| crate::el()));
+        clash.window(settings());
+        assert!(validate(&flatten([WindowSpec::from_app("settings", clash).boxed()])).is_err());
     }
 
     #[test]

@@ -109,7 +109,7 @@ mod preferences;
 pub use clipboard::{ClipboardWrite, SecretCopy, SecretState};
 pub mod windows;
 pub use window::WindowHandle;
-pub use windows::{ConfiguredWindowOptions, Display, MacWindowOptions, RunOptions, WindowOptions, WindowSpec};
+pub use windows::{AnyWindowSpec, ConfiguredWindowOptions, Display, MacWindowOptions, RunOptions, WindowOptions, WindowSpec};
 pub use winit::raw_window_handle;
 
 pub use app::{App, AppHandle};
