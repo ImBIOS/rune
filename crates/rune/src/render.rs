@@ -339,7 +339,7 @@ impl Renderer {
             immediate_size: 0,
         });
         let vertex_entry = if properties.is_some() { "vs_springs" } else { "vs" };
-        let pipeline = Self::pipeline(device, &layout, &shader, format, vertex_entry);
+        let pipeline = Self::pipeline(device, &layout, &shader, format, vertex_entry, Blend::SourceOver);
         let capacity = 256;
         let instances = Self::instance_buffer(device, capacity);
         let spring_instances = properties.map_or(0, |(_, ids)| ids.len());
@@ -368,16 +368,6 @@ impl Renderer {
     }
 
     fn pipeline(
-        device: &wgpu::Device,
-        layout: &wgpu::PipelineLayout,
-        shader: &wgpu::ShaderModule,
-        format: wgpu::TextureFormat,
-        vertex_entry: &str,
-    ) -> wgpu::RenderPipeline {
-        Self::pipeline_blend(device, layout, shader, format, vertex_entry, Blend::SourceOver)
-    }
-
-    fn pipeline_blend(
         device: &wgpu::Device,
         layout: &wgpu::PipelineLayout,
         shader: &wgpu::ShaderModule,
@@ -494,7 +484,7 @@ impl Renderer {
     /// Builds the pipeline for another target format (e.g. an `Rgba16Float` layer), once.
     pub fn add_format(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
         if format != self.format && !self.extra.iter().any(|(f, _)| *f == format) {
-            let p = Self::pipeline(device, &self.layout, &self.shader, format, self.vertex_entry);
+            let p = Self::pipeline(device, &self.layout, &self.shader, format, self.vertex_entry, Blend::SourceOver);
             self.extra.push((format, p));
         }
         if self.layer_stats().targets > 0 { self.add_layer_format(device, format); }
