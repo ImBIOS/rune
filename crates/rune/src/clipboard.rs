@@ -214,12 +214,7 @@ pub fn memory() -> MemoryClipboard {
     MemoryClipboard(Arc::new(Mutex::new(Memory { core: Core::default(), board: Board::default() })))
 }
 impl MemoryClipboard {
-    pub fn text(&self) -> Option<Zeroizing<String>> {
-        let mut m = lock(&self.0);
-        let Memory { core, board } = &mut *m;
-        core.tick(board);
-        board.text.clone()
-    }
+    pub fn text(&self) -> Option<Zeroizing<String>> { self.ticked(|_, board| board.text.clone()) }
     /// Changes the clipboard as another app would.
     pub fn set_text(&self, text: &str) {
         let mut m = lock(&self.0);
@@ -230,16 +225,14 @@ impl MemoryClipboard {
     }
     /// Makes later writes fail with `error`, or succeed again with `None`.
     pub fn fail_writes(&self, error: Option<&str>) { lock(&self.0).board.fail = error.map(Into::into); }
-    fn tick(&self) {
+    fn tick(&self) { self.ticked(|_, _| ()) }
+    fn handle(&self, request: Request) { self.ticked(|core, board| core.handle(board, request)) }
+    /// Lets a held secret expire or notice a change first, as the OS worker does per request.
+    fn ticked<R>(&self, f: impl FnOnce(&mut Core, &mut Board) -> R) -> R {
         let mut m = lock(&self.0);
         let Memory { core, board } = &mut *m;
         core.tick(board);
-    }
-    fn handle(&self, request: Request) {
-        let mut m = lock(&self.0);
-        let Memory { core, board } = &mut *m;
-        core.tick(board);
-        core.handle(board, request);
+        f(core, board)
     }
 }
 impl std::fmt::Debug for MemoryClipboard {
