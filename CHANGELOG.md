@@ -5,6 +5,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A disabled, invalid rune-kit `TextInput` no longer has a red caret.** The caret now follows
+  the text colour, as `TextArea`'s does. Only that one state changes.
 - **Rotating icons turn their artwork, not just their outline.** An icon with
   `.looping(LoopSpec::rotation(..))`, such as rune-kit's `Loader` arc, turned its quad but kept
   sampling the atlas unturned, so the arc stayed put while the rotating square cropped it. The

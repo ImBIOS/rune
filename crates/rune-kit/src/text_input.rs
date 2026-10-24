@@ -171,7 +171,7 @@ impl TextInput {
             .shrink()
             .color(ink)
             .placeholder(self.placeholder.clone(), hint)
-            .caret(if self.invalid && k.invalid_text { c.danger.fg } else { c.text_base }, k.alpha(c.text_accent, 0.3));
+            .caret(ink, k.alpha(c.text_accent, 0.3));
         let field = if disabled { field } else { self.edits.apply(field) };
         let mut value = row().key("value").grow(1.0).shrink().gap(6.0).center_y();
         if let Some(i) = self.leading {
