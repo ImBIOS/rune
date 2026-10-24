@@ -173,8 +173,8 @@ pub struct Args {
     /// How long to dump frames for, when `frames` isn't given.
     pub(crate) duration: Option<Length>,
     /// `--at mark:NAME±S` and `--start mark:NAME±S`: a script mark's time plus an offset.
-    pub(crate) at_mark: Option<(String, f64)>,
-    pub(crate) start_mark: Option<(String, f64)>,
+    pub(crate) at_mark: Option<String>,
+    pub(crate) start_mark: Option<String>,
     /// `--keys [CORNER]`: keycaps for script keys and chords over dumped frames.
     pub(crate) keys: Option<crate::keycaps::Corner>,
     /// `--keys-theme light|dark`; None (`auto`) follows the app's theme.
@@ -190,12 +190,9 @@ pub(crate) enum Length {
     Auto,
 }
 
-/// `mark:NAME`, optionally followed by a signed offset in seconds (`mark:end+0.5`).
-fn mark_time(v: &str) -> Option<(String, f64)> {
-    let spec = v.strip_prefix("mark:")?;
-    let split = spec.char_indices().skip(1).filter(|&(_, c)| c == '+' || c == '-')
-        .find_map(|(i, _)| spec[i..].parse::<f64>().ok().map(|offset| (spec[..i].to_owned(), offset)));
-    Some(split.unwrap_or_else(|| (spec.to_owned(), 0.0)))
+/// Retain the whole expression until the script is loaded: a mark's name can end in `-1`.
+fn mark_time(v: &str) -> Option<String> {
+    v.strip_prefix("mark:").map(str::to_owned)
 }
 
 impl Args {
@@ -226,7 +223,8 @@ impl Args {
                 "--scene" => a.scene = Some(val(&mut i)),
                 "--at" => {
                     let v = val(&mut i);
-                    match mark_time(&v) { Some(mark) => a.at_mark = Some(mark), None => a.at = Some(num(&v)) }
+                    a.at_mark = mark_time(&v);
+                    a.at = a.at_mark.is_none().then(|| num(&v));
                 }
                 "--size" => {
                     let v = val(&mut i);
@@ -239,7 +237,8 @@ impl Args {
                 "--frames" => a.frames = Some(num(&val(&mut i)) as usize),
                 "--start" => {
                     let v = val(&mut i);
-                    match mark_time(&v) { Some(mark) => a.start_mark = Some(mark), None => a.start = num(&v) }
+                    a.start_mark = mark_time(&v);
+                    if a.start_mark.is_none() { a.start = num(&v); }
                 }
                 "--fps" => a.fps = num(&val(&mut i)),
                 "--out" => a.out = Some(val(&mut i).into()),
@@ -291,7 +290,7 @@ impl Args {
     pub fn headless(&self) -> bool {
         self.snap.is_some()
             || self.tree.is_some()
-            || (!self.native && (self.trace.is_some() || self.frames.is_some()))
+            || (!self.native && (self.trace.is_some() || self.frames.is_some() || self.duration.is_some() || self.out.is_some()))
             || self.video.is_some()
             || self.strip.is_some()
             || self.list_scenes
@@ -310,7 +309,7 @@ const HELP: &str = "usage: <app> [window]
   --script FILE.json    timestamped input (move/down/up/tap/drag, keys, {\"focus\":false}); a
                         key with \"repeat\":true is a held key's auto-repeat; {\"type\":\"mark\",\"name\":N}
                         marks a time; {\"type\":\"shortcut\",\"chord\":\"cmd+space\"} presses a chord
-                         through its registered global shortcut handler, never on_key;
+                        through its registered global shortcut handler, never on_key;
                         an object adds \"displays\" and \"pointer\" for place() (rune-placed, --tree)
                         menu-pick with an \"id\" and menu-cancel answer a pop-up menu
   --frames N --fps 60 --start S --out DIR     dump N frames from S seconds
@@ -1073,7 +1072,12 @@ pub fn headless<S: 'static>(mut app: crate::app::App<S>, args: Args) {
         if args.window.as_deref().is_some_and(|key| key != "main") {
             die("no such window; this app has only 'main'");
         }
-        return headless_configured(app, args, false);
+        let scale = args.scale.unwrap_or(2.0);
+        if let Some((w, h)) = app.window_options.physical_size {
+            app.spec.size = (w as f32 / scale, h as f32 / scale);
+        }
+        let transparent = app.window_options.transparent;
+        return headless_configured(app, args, transparent);
     }
     let windows = std::mem::take(&mut app.windows);
     let displays = desktop(&args, read_script(&args).as_ref()).displays();
@@ -1425,24 +1429,39 @@ struct Timeline {
 impl Timeline {
     fn of(args: &Args, script: &[Ev]) -> Result<Timeline, String> {
         let mark = |name: &str| script.iter().find_map(|e| matches!(&e.kind, Kind::Mark(n) if n == name).then_some(e.t));
-        let resolve = |(name, offset): &(String, f64)| mark(name).map(|t| (t + offset).max(0.0)).ok_or_else(|| {
+        let resolve = |spec: &String| {
+            // Exact names win over offsets, including names such as "step-1" or "end+0.5".
+            if let Some(t) = mark(spec) { return Ok(t); }
             let names: Vec<_> = script.iter().filter_map(|e| match &e.kind { Kind::Mark(n) => Some(n.as_str()), _ => None }).collect();
-            format!("no mark {name:?} in the script (marks: {})", if names.is_empty() { "none".into() } else { names.join(", ") })
-        });
+            let known = if names.is_empty() { "none".into() } else { names.join(", ") };
+            // Only a complete numeric suffix is an offset. Starting at the first valid sign
+            // keeps a scientific exponent's sign inside the number (end-1e-3).
+            for (i, _) in spec.char_indices().skip(1).filter(|&(_, c)| c == '+' || c == '-') {
+                if let Ok(offset) = spec[i..].parse::<f64>() && offset.is_finite() {
+                    let name = &spec[..i];
+                    return mark(name).map(|t| (t + offset).max(0.0))
+                        .ok_or_else(|| format!("no mark {name:?} in the script (marks: {known})"));
+                }
+            }
+            if spec.contains(['+', '-']) {
+                Err(format!("invalid mark time {spec:?}: expected an exact mark name or NAME+SECONDS/NAME-SECONDS (marks: {known})"))
+            } else {
+                Err(format!("no mark {spec:?} in the script (marks: {known})"))
+            }
+        };
         let fps = args.fps.max(1.0);
         let dt = 1.0 / fps;
         let start = args.start_mark.as_ref().map_or(Ok(args.start), resolve)?;
         let at = args.at_mark.as_ref().map(resolve).transpose()?.or(args.at);
         let start_frame = (start * fps).round() as usize;
         let script_end = script.last().map_or(0.0, |e| e.t);
-        // A video without a length runs to the `end` mark, or one second after the script as a
-        // snapshot does.
+        // Output without a length runs to the `end` mark, or one second after the script.
         let until = |t: f64| ((t * fps).round() as usize).saturating_sub(start_frame) + 1;
         let auto = || until(mark("end").unwrap_or(script_end + 1.0));
-        let frames = args.frames.unwrap_or_else(|| match (args.duration, &args.video) {
+        let frames = args.frames.unwrap_or_else(|| match (args.duration, args.video.is_some() || args.out.is_some()) {
             (Some(Length::Seconds(d)), _) => (d * fps).round().max(1.0) as usize,
-            (Some(Length::Auto), _) | (None, Some(_)) => auto(),
-            (None, None) => 0,
+            (Some(Length::Auto), _) | (None, true) => auto(),
+            (None, false) => 0,
         });
         let snap_t = at.unwrap_or(if frames > 0 {
             (start_frame + frames - 1) as f64 * dt
@@ -1676,10 +1695,8 @@ mod tests {
         assert_eq!(marks, [("end-card", 1.0), ("end", 3.2)]);
         assert!(matches!(script[4].public().event, ScriptEvent::Mark(ref n) if n == "end"));
 
-        assert_eq!(mark_time("mark:end"), Some(("end".into(), 0.0)));
-        assert_eq!(mark_time("mark:end+0.5"), Some(("end".into(), 0.5)));
-        assert_eq!(mark_time("mark:end-card-0.25"), Some(("end-card".into(), -0.25)));
-        assert_eq!(mark_time("mark:end-1e-3"), Some(("end".into(), -0.001)));
+        assert_eq!(mark_time("mark:end"), Some("end".into()));
+        assert_eq!(mark_time("mark:end+0.5"), Some("end+0.5".into()));
         assert_eq!(mark_time("1.5"), None);
 
         let args = |v: &[&str]| Args::parse_from(v.iter().map(|s| (*s).into()).collect());
@@ -1700,6 +1717,92 @@ mod tests {
 
     /// Headless runs publish the process's `headless_run`, so tests that render one take turns.
     static HEADLESS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn mark_names_win_over_offsets_and_offsets_must_be_complete() {
+        let script = parse_script(json!([
+            {"t": 2.0, "type": "mark", "name": "step-1"},
+            {"t": 4.0, "type": "mark", "name": "end-card"},
+            {"t": 6.0, "type": "mark", "name": "end+0.5"},
+            {"t": 8.0, "type": "mark", "name": "step"},
+            {"t": 10.0, "type": "mark", "name": "end"},
+        ]));
+        let resolve = |flag: &str, value: &str| {
+            let args = Args::parse_from(["--snap", "a.png", "--fps", "1000", flag, value].map(String::from).into());
+            Timeline::of(&args, &script)
+        };
+        for (value, frame) in [("mark:step-1", 2000), ("mark:step-1+0.25", 2250),
+            ("mark:step-1-0.5", 1500), ("mark:end+0.5", 6000), ("mark:end-card-0.25", 3750),
+            ("mark:end-1e-3", 9999), ("mark:end+1e-3", 10001)] {
+            assert_eq!(resolve("--at", value).unwrap().snap_frame, frame, "{value}");
+            assert_eq!(resolve("--start", value).unwrap().start_frame, frame, "{value}");
+        }
+        for value in ["mark:end+0.5s", "mark:end-", "mark:end+NaN", "mark:end+inf", "mark:end+1e999"] {
+            let error = resolve("--at", value).unwrap_err();
+            assert!(error.contains("invalid mark time") && error.contains("marks: step-1, end-card, end+0.5, step, end"), "{error}");
+        }
+        let args = Args::parse_from(["--at", "mark:end", "--at", "1", "--start", "mark:step", "--start", "0"].map(String::from).into());
+        let timeline = Timeline::of(&args, &script).unwrap();
+        assert_eq!((timeline.snap_frame, timeline.start_frame), (60, 0), "the last flag wins");
+    }
+
+    #[test]
+    fn duration_and_out_select_headless_png_output_unless_native() {
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+        let args = |v: &[&str]| Args::parse_from(v.iter().map(|s| (*s).into()).collect());
+        for flags in [vec!["--out", "frames"], vec!["--duration", "auto"], vec!["--duration", "auto", "--out", "frames"]] {
+            assert!(args(&flags).headless());
+            let mut native = flags;
+            native.push("--native");
+            assert!(!args(&native).headless());
+        }
+        let dir = std::env::temp_dir().join(format!("rune-duration-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("script.json");
+        std::fs::write(&script, r#"[{"t": 0.1, "type": "mark", "name": "end"}]"#).unwrap();
+        let spec = || AppSpec::new("duration", (8.0, 8.0), || (), |_, _| crate::el());
+        for automatic in [false, true] {
+            let out = dir.join(if automatic { "explicit" } else { "default" });
+            let mut flags = vec!["--script", script.to_str().unwrap(), "--out", out.to_str().unwrap(), "--fps", "30", "--scale", "1"];
+            if automatic { flags.extend(["--duration", "auto"]); }
+            let args = args(&flags);
+            assert!(args.headless());
+            headless(crate::App::new(spec()), args);
+            let mut files: Vec<_> = std::fs::read_dir(out).unwrap().map(|e| e.unwrap().file_name()).collect();
+            files.sort();
+            assert_eq!(files, ["frame_0000.png", "frame_0001.png", "frame_0002.png", "frame_0003.png"]);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn single_window_snapshots_honor_transparency_and_physical_size() {
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rune-window-options-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let render = |name: &str, options: crate::WindowOptions, size: Option<(f32, f32)>, legacy: bool| {
+            let spec = AppSpec::new("options", (20.0, 12.0), || (), |_, _| crate::el().w_full().h_full()
+                .child(crate::el().absolute(2.0, 2.0).size(8.0, 8.0).fill(crate::oklcha(0.6, 0.2, 30.0, 0.5))));
+            let app = crate::App::new(spec).window_options(options);
+            let snap = dir.join(format!("{name}.png"));
+            let args = Args { snap: Some(snap.clone()), scale: Some(2.0), size, ..Default::default() };
+            if legacy { headless_configured(app, args, false); } else { headless(app, args); }
+            (std::fs::read(&snap).unwrap(), image::open(snap).unwrap().into_rgba8())
+        };
+        let plain = render("plain", crate::WindowOptions::default(), None, false);
+        let legacy = render("legacy", crate::WindowOptions::default(), None, true);
+        assert_eq!(plain.0, legacy.0, "default windows retain byte-identical PNG output");
+        assert_eq!(plain.1.dimensions(), (40, 24));
+        assert!(plain.1.pixels().all(|p| p[3] == 255));
+        let options = crate::WindowOptions { transparent: true, physical_size: Some((80, 60)), ..Default::default() };
+        let transparent = render("transparent", options.clone(), None, false).1;
+        assert_eq!(transparent.dimensions(), (80, 60));
+        assert_eq!(transparent.get_pixel(0, 0)[3], 0);
+        assert!((127..=128).contains(&transparent.get_pixel(8, 8)[3]));
+        let overridden = render("override", options, Some((16.0, 10.0)), false).1;
+        assert_eq!(overridden.dimensions(), (32, 20), "--size overrides the physical-size option");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn apps_read_the_headless_run_from_init() {
@@ -1746,7 +1849,10 @@ mod tests {
             let spec = AppSpec::new("video", (31.0, 20.0), || (), |_, _| crate::el().size(10.0, 10.0).fill(crate::oklch(0.6, 0.2, 30.0)));
             let args = ["--video", path.to_str().unwrap(), "--frames", "12", "--scale", "1", "--fps", "30",
                 "--out", out.to_str().unwrap(), "--every", "3", "--snap", snap.to_str().unwrap(), "--at", "0.3"];
-            headless(crate::App::new(spec), Args::parse_from(args.map(String::from).into()));
+            let app = crate::App::new(spec).window_options(crate::WindowOptions {
+                transparent: extension == "mov", ..Default::default()
+            });
+            headless(app, Args::parse_from(args.map(String::from).into()));
             let probe = std::process::Command::new("ffprobe")
                 .args(["-v", "error", "-count_frames", "-select_streams", "v:0",
                     "-show_entries", "stream=codec_name,width,height,nb_read_frames,r_frame_rate", "-of", "json"])
@@ -1759,6 +1865,15 @@ mod tests {
             assert_eq!(stream["height"], 20);
             assert_eq!(stream["r_frame_rate"], "30/1");
             assert_eq!(stream["nb_read_frames"], "12", "--every must not sample video");
+            if extension == "mov" {
+                let decoded = std::process::Command::new("ffmpeg")
+                    .args(["-v", "error", "-i"]).arg(&path)
+                    .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"]).output().unwrap();
+                assert!(decoded.status.success(), "{}", String::from_utf8_lossy(&decoded.stderr));
+                assert_eq!(decoded.stdout.len(), 31 * 20 * 4);
+                assert_eq!(decoded.stdout[(15 * 31 + 20) * 4 + 3], 0, "transparent background survives ProRes encoding");
+                assert_eq!(decoded.stdout[(5 * 31 + 5) * 4 + 3], 255);
+            }
             let mut files: Vec<_> = std::fs::read_dir(&out).unwrap().map(|e| e.unwrap().file_name()).collect();
             files.sort();
             assert_eq!(files, ["frame_0000.png", "frame_0003.png", "frame_0006.png", "frame_0009.png"]);

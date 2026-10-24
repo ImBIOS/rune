@@ -170,7 +170,8 @@ pub(crate) fn ffmpeg_args(path: &Path, size: (u32, u32), fps: f64) -> Result<Vec
     let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "rawvideo", "-pix_fmt", "rgba",
         "-s", &format!("{}x{}", size.0, size.1), "-r", &fps.to_string(), "-i", "-"].map(String::from).into();
     args.extend(container.codec().iter().map(|s| (*s).to_owned()));
-    args.push(path.display().to_string());
+    let output = path.display().to_string();
+    args.push(if path.is_relative() && output.starts_with('-') { format!("./{output}") } else { output });
     Ok(args)
 }
 
@@ -315,6 +316,9 @@ mod tests {
         let joined = args.join(" ");
         assert!(joined.contains("-f rawvideo -pix_fmt rgba -s 1920x1200 -r 60 -i -"), "{joined}");
         assert!(joined.contains("libx264") && joined.contains("+faststart") && joined.ends_with("out.mp4"), "{joined}");
+        for (path, output) in [("-out.mp4", "./-out.mp4"), ("-dir/out.mov", "./-dir/out.mov"), ("dir/-out.webm", "dir/-out.webm")] {
+            assert_eq!(ffmpeg_args(Path::new(path), (2, 2), 60.0).unwrap().last().unwrap(), output);
+        }
     }
 
     #[test]

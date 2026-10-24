@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Headless recordings honour single-window transparency and physical size**, including
+  alpha in PNG and ProRes output. Default window pixels are unchanged. `--duration auto --out`
+  selects headless PNG recording; `--out` alone uses automatic duration unless `--native` is set.
+  Exact mark names such as `step-1` take precedence over time offsets, malformed offsets report
+  the available marks, and video filenames starting with `-` work.
 - **Global script shortcuts only run their registered handler**, even when a window is key;
   they never reach `on_key` or physical-input handlers. Unregistered chords fail the script.
 - **Recording keycaps follow light and dark backgrounds.** `--keys-theme auto|light|dark`

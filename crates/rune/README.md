@@ -921,6 +921,8 @@ $S --native --trace run.jsonl --frames 240  # native submission timestamps, then
   `--at mark:end`, `--at mark:end+0.5` and `--start mark:intro-0.2` use a mark's time, and
   `--duration auto` (the default with `--video`) ends at the `end` mark, or one second after the
   last event without one. Apps read them with `headless_run().mark("end")`.
+  Exact names take precedence: `mark:step-1` selects the mark named `step-1`, if present;
+  `mark:step-1+0.5` adds half a second. Offsets are numbers in seconds, without a unit suffix.
 - **Video**: `--video out.mp4` streams frames into `ffmpeg` (which must be on `PATH`) over a
   pipe: `.mp4` is H.264 yuv420p with `+faststart`, `.mov` ProRes 4444 with alpha, `.webm` VP9.
   It runs `--frames N` or `--duration SECONDS` from `--start` (default: through the `end` mark,
@@ -929,6 +931,9 @@ $S --native --trace run.jsonl --frames 240  # native submission timestamps, then
   and encode on worker threads, retaining their `frame_0000.png` names and `--every` sampling.
   Video always includes every frame at `--fps`; `--every` only samples PNGs and strips.
   Missing ffmpeg fails before GPU startup; encoder errors fail the command with its exit status.
+  `--duration auto --out frames/` also records headlessly; `--out` alone uses auto duration.
+  Single-window apps honour `window_options` transparency and physical size; `--size` overrides
+  that size. PNG and ProRes preserve transparent backgrounds.
 - **The app can read the run**: `rune::tooling::headless_run()` is `Some` in a headless run,
   from `init` on, and None in a window. It gives the script path and its events as Rune feeds
   them (`tap` expanded to move, down and up; `type` to one key per character), `scale()`,
