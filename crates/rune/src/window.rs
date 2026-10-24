@@ -595,15 +595,14 @@ fn drag_region_policy_preserves_titled_windows_and_panels() {
 
 #[cfg(target_os = "macos")]
 mod mac {
-    use objc2::rc::Retained;
-    use objc2::runtime::{AnyObject, Bool, Sel};
-    use objc2::{ffi, msg_send, sel, ClassType};
+    use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
+    use objc2::{msg_send, sel, ClassType};
     use objc2_app_kit::{NSEvent, NSPanel, NSWindowButton, NSWindowStyleMask};
     use objc2_foundation::{NSPoint, NSString, NSUserDefaults};
     use winit::window::Window;
     use crate::macos::{content_view, ns_window};
 
-    unsafe extern "C" fn cannot_move_window(_: *mut AnyObject, _: Sel) -> Bool {
+    unsafe extern "C" fn cannot_move_window(_: &AnyObject, _: Sel) -> Bool {
         Bool::NO
     }
 
@@ -618,41 +617,33 @@ mod mac {
         let borderless = !win.styleMask().contains(NSWindowStyleMask::Titled);
         let chrome = super::Chrome { full_size_content: full_size, drag_regions: true, ..super::Chrome::DEFAULT };
         if !super::uses_drag_regions(chrome, borderless, panel.as_bool()) { return; }
-        unsafe { scope_drag_regions(Retained::as_ptr(&view).cast_mut().cast()) };
+        unsafe { scope_drag_regions(&view) };
     }
 
     /// Main-thread native views only. The subclass adds no ivars, preserving winit's layout,
     /// methods and deallocation. Registered classes live for the process lifetime.
-    unsafe fn scope_drag_regions(view: *mut ffi::objc_object) {
-        use std::ffi::{CStr, CString};
-        let types = if cfg!(target_arch = "aarch64") { c"B@:" } else { c"c@:" };
-        // SAFETY: called on a live view on the main thread. Only its isa changes; the original
-        // class is never modified. The IMP matches `BOOL (id, SEL)` on both architectures.
-        unsafe {
-            let base = ffi::object_getClass(view);
-            let base_name = CStr::from_ptr(ffi::class_getName(base)).to_string_lossy();
-            if base_name.starts_with("RuneDragRegions_") { return; }
-            let name = CString::new(format!("RuneDragRegions_{base_name}")).unwrap();
-            let mut cls = ffi::objc_lookUpClass(name.as_ptr()).cast_mut();
-            if cls.is_null() {
-                cls = ffi::objc_allocateClassPair(base, name.as_ptr(), 0);
-                assert!(!cls.is_null(), "register Rune drag-region view");
-                let imp: ffi::IMP = Some(std::mem::transmute::<
-                    unsafe extern "C" fn(*mut AnyObject, Sel) -> Bool,
-                    unsafe extern "C" fn(),
-                >(cannot_move_window));
-                // `BOOL` is `i8` on x86_64 and `bool` on arm64.
-                assert!(Bool::from_raw(ffi::class_addMethod(cls, sel!(mouseDownCanMoveWindow).as_ptr(), imp, types.as_ptr())).as_bool());
-                ffi::objc_registerClassPair(cls);
+    unsafe fn scope_drag_regions(view: &AnyObject) {
+        let base = view.class();
+        if base.name().starts_with("RuneDragRegions_") { return; }
+        let name = format!("RuneDragRegions_{}", base.name());
+        let class = match ClassBuilder::new(&name, base) {
+            Some(mut builder) => {
+                // SAFETY: the signature matches -[NSView mouseDownCanMoveWindow].
+                unsafe { builder.add_method(sel!(mouseDownCanMoveWindow), cannot_move_window as unsafe extern "C" fn(_, _) -> _) };
+                builder.register()
             }
-            ffi::object_setClass(view, cls);
-        }
+            None => AnyClass::get(&name).expect("register Rune drag-region view"),
+        };
+        // SAFETY: called on a live view on the main thread. Only its isa changes, to a subclass
+        // without ivars; the original class is never modified.
+        unsafe { AnyObject::set_class(view, class) };
     }
 
     #[test]
     fn drag_subclass_changes_only_the_selected_instance() {
         // NSObject exercises the Objective-C class operation without constructing a window
         // or requiring an AppKit event loop on the test thread.
+        use objc2::{ffi, rc::Retained};
         let selected = objc2_foundation::NSObject::new();
         let sibling = objc2_foundation::NSObject::new();
         unsafe {
@@ -661,7 +652,7 @@ mod mac {
             let base = ffi::object_getClass(selected_ptr);
             let selector = sel!(mouseDownCanMoveWindow).as_ptr();
             let original = ffi::class_getInstanceMethod(base, selector);
-            scope_drag_regions(selected_ptr);
+            scope_drag_regions(&selected);
             let scoped = ffi::object_getClass(selected_ptr);
             assert_ne!(scoped, base);
             assert_eq!(ffi::class_getSuperclass(scoped), base);
@@ -670,7 +661,7 @@ mod mac {
             assert_eq!(ffi::class_getInstanceMethod(base, selector), original);
             let moves: Bool = msg_send![&*selected, mouseDownCanMoveWindow];
             assert!(!moves.as_bool());
-            scope_drag_regions(selected_ptr);
+            scope_drag_regions(&selected);
             assert_eq!(ffi::object_getClass(selected_ptr), scoped);
         }
     }
