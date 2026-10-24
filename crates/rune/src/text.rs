@@ -127,12 +127,23 @@ fn names_system_mono(list: &str) -> bool {
 }
 
 /// `list` parsed, with `ui-monospace` replaced by the installed `Family::SystemMono` families.
-fn family_list<'a>(list: &'a str, system_mono: &'a [String]) -> impl Iterator<Item = FontFamilyName<'a>> {
-    FontFamilyName::parse_css_list(list).flatten().flat_map(move |f| {
-        let system = f == FontFamilyName::Generic(parley::GenericFamily::UiMonospace);
-        let names = if system { system_mono } else { &[] };
-        names.iter().map(|name| FontFamilyName::named(name)).chain((!system).then_some(f))
-    })
+/// When that leaves no named family (no monospace font installed, or the web), `sans` follows,
+/// so text still finds a font.
+fn family_list<'a>(list: &'a str, system_mono: &'a [String], sans: &'a str) -> Vec<FontFamilyName<'a>> {
+    let mut system = false;
+    let mut out: Vec<FontFamilyName<'a>> = FontFamilyName::parse_css_list(list)
+        .flatten()
+        .flat_map(|f| {
+            let ui_mono = f == FontFamilyName::Generic(parley::GenericFamily::UiMonospace);
+            system |= ui_mono;
+            let names = if ui_mono { system_mono } else { &[] };
+            names.iter().map(|name| FontFamilyName::named(name)).chain((!ui_mono).then_some(f)).collect::<Vec<_>>()
+        })
+        .collect();
+    if system && !out.iter().any(|f| matches!(f, FontFamilyName::Named(_))) {
+        out.extend(FontFamilyName::parse_css_list(sans).flatten());
+    }
+    out
 }
 
 /// The installed families among `names`, loading the system font files matching `files`.
@@ -938,7 +949,8 @@ impl TextSystem {
         }
         let system = self.system_mono.as_deref().unwrap_or_default();
         let named = |list: &str| -> Vec<String> {
-            family_list(list, system)
+            family_list(list, system, &self.sans)
+                .into_iter()
                 .filter_map(|f| match f { FontFamilyName::Named(name) => Some(name.into_owned()), _ => None })
                 .collect()
         };
@@ -1076,7 +1088,8 @@ impl TextSystem {
         let emoji = self.emoji.as_slice();
         let system = self.system_mono.as_deref().unwrap_or_default();
         let with_symbols = |primary| {
-            family_list(primary, system)
+            family_list(primary, system, self.sans.as_str())
+                .into_iter()
                 .chain(self.symbol_families.iter().chain(math).map(|name| FontFamilyName::named(name)))
                 .collect::<Vec<_>>()
         };
@@ -1541,6 +1554,22 @@ mod tests {
             let mut plain = TextSystem::new(&[], ("Inter", "Inter"));
             assert_ne!(fonts(&mut plain, "see code", code, TextStyle::new(13.0, 400.0)).last(), block.last());
         }
+    }
+
+    /// With no monospace font to stand for `ui-monospace`, the mono slot falls back to sans
+    /// rather than to no named family at all.
+    #[test]
+    fn ui_monospace_with_no_mono_font_falls_back_to_sans() {
+        let names = |list: &str, mono: &[String]| {
+            family_list(list, mono, "Inter, sans-serif")
+                .into_iter()
+                .map(|f| match f { FontFamilyName::Named(n) => n.into_owned(), FontFamilyName::Generic(g) => format!("{g:?}") })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("ui-monospace", &[]), ["Inter", "SansSerif"]);
+        assert_eq!(names("ui-monospace", &["Menlo".into()]), ["Menlo"]);
+        assert_eq!(names("ui-monospace, Iosevka", &[]), ["Iosevka"], "a named family after it still wins");
+        assert_eq!(names("monospace", &[]), ["Monospace"], "only ui-monospace falls back");
     }
 
     /// Each glyph run of `text` with the font it shaped with.
