@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **One app can host windows with different state types.** `App::window(WindowSpec<T>)` adds
+  an ordinary window with its own state and returns its `AppHandle<T>` and `WindowHandle`.
+  It honours `visible: false`, closes by hiding (its `on_close` runs and reopening keeps the
+  state), and never keeps the app running alone. `run_windows*` factories may return
+  `AnyWindowSpec`s (`WindowSpec::boxed()` or `.into()`) to mix state types. Factories
+  returning `Vec<WindowSpec<S>>` still compile, but a turbofish like `run_windows::<S>(..)`
+  no longer does: drop it. Headless `--window KEY` and `--list-windows` include `App::window`
+  windows and render them with their own state.
 - **Hit testing leaves out an element's right and bottom edges everywhere.** Press, hover,
   secondary press, links, wheel targets and hover and press highlights now use the same
   half-open test as pointer-move, `on_hover_change` and overlays (like `NSPointInRect` and

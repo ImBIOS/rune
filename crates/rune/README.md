@@ -463,7 +463,28 @@ close callbacks and optional GPU release for that window. Retained hosts can reo
 through their AppHandle or WindowHandle. `Tx::quit` / `AppHandle::quit` exit the
 whole event loop. Both entry points use the same lifetime host and render path.
 
-Headless tools accept `--window KEY` and `--list-windows`. They use one virtual
+Windows can have different state types. `App::window` adds an ordinary titled window with
+its own state to a running app, beside its main window and overlays:
+
+```rust,ignore
+let mut app = rune::App::new(review_spec).accessory();
+let capsule = app.overlay(capsule_spec, Capsule::default());
+let hidden = rune::WindowOptions { visible: false, ..Default::default() };
+let (settings, settings_window) = app.window(rune::WindowSpec::new("settings", settings_spec).options(hidden));
+settings.update(|ui: &mut SettingsUi, _| ui.load());
+// Later, from a menu item or another thread:
+settings_window.open();
+app.run();
+```
+
+The window takes keys and focus like any other; overlays still never activate. Closing it
+hides it and runs its `on_close`, and reopening shows the same state. It never keeps the
+app running by itself: the app ends with its main window, and `Tx::quit` from either window
+quits the process. Factories mix state types with `AnyWindowSpec`:
+`run_windows(|_| vec![review.boxed(), settings.boxed()])`.
+
+Headless tools accept `--window KEY` and `--list-windows`, including windows added with
+`App::window`, and render the selected window with its own state. They use one virtual
 1920×1080 display, create no native windows, and export overlays as straight-alpha
 PNGs. See [`examples/overlay`](../../examples/overlay) for a normal control window,
 one overlay per monitor, a shared remote cursor, a stroke and hit-test toggling.
