@@ -22,6 +22,7 @@ members = [
     "examples/video-tiles",
     "examples/dev-panel",
     "examples/cursed-settings",
+    "examples/drag-out",
 ]
 exclude = ["tools/rune-dev-guard"]
 
