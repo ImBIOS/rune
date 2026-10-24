@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Headless recordings of the whole desktop.** `--desktop BACKDROP.png` renders every window a
+  multi-window app makes, each at its placed frame with rounded corners and a soft shadow (larger
+  for the key window), over the backdrop scaled to fill the output. Showing, hiding, placing and
+  focusing follow the script and the app over time, and script pointer coordinates are output
+  points. It works with `--video`, `--out`, `--snap`, `--strip`, `--keys` and `--pointer`;
+  `--tree` describes the `--window` window and lists every window's frame. `headless_run()` adds
+  `desktop()`, `window_frames()` and `windows_at(t)` (`rune::tooling::WindowFrame`). Runs without
+  `--desktop` are unchanged. `examples/launcher` records a notes app and its ⌘Space panel.
 - **A scroll cancels a held press.** Scrolling a list by wheel or fling while a press inside it
   is held now cancels the press, as a `UIScrollView` cancels its content's touches: the element
   lets go and the release doesn't press. A drag keeps its capture, and programmatic scrolls

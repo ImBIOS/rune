@@ -986,6 +986,9 @@ $S --tree tree.json [--at T]     # key, path, role, label, text, presented rect,
                                  # fill/text colour, hover/press, moving
 $S --trace run.jsonl             # motion-trace JSONL (Scrawl's format); keyed elements only
 $S --native --trace run.jsonl --frames 240  # native submission timestamps, then close the traced window
+L=target/release/launcher        # every window of a multi-window app, composited over a backdrop
+$L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/demo.json \
+   --video desktop.mp4 --keys --pointer
 ```
 
 - **Scripts** are timestamped `move`, `down`, `up`, `tap` (`hold`), `double-click` (`hold`,
@@ -1013,6 +1016,27 @@ $S --native --trace run.jsonl --frames 240  # native submission timestamps, then
   the app's root background, falling back to `--theme` when the background is transparent.
   `--pointer` adds a ripple at each press. A separate runtime draws both after the app, so they
   appear in `--video`, `--out`, `--snap` and strips but never in `--tree` or `--trace`.
+- **Desktop recordings**: `--desktop BACKDROP.png` renders all of a multi-window app's visible
+  windows into one frame, so a launcher, its panel and the app's other windows record together
+  the way a screen recording would show them. Each window renders with its own state into its
+  own texture and is drawn at its frame: `WindowOptions::position`, `place()`, else centred on
+  the primary display. Titled windows get 10 pt rounded corners; borderless and transparent
+  windows keep their own shape and alpha. Each window casts a soft shadow from its visible pixels,
+  larger for the key window, unless `MacWindowOptions::shadow(false)`. Always-on-top windows stay
+  above the rest. The backdrop is scaled to cover the output, centred and cropped. The output is
+  `--size` points if given, else the script's primary display (`{"displays": [...]}`), else the
+  backdrop's pixels ÷ `--scale`, times `--scale` pixels; without scripted displays the window
+  factory sees one display of that size. Script `x,y` and `key` positions are output points.
+  A press goes to the topmost window under it that takes clicks, brings it to the front and
+  gives it the keyboard; a press on the backdrop deactivates the app. Keys go to the key window;
+  shortcuts and menu picks go to the key window's app first, then the others. Show, hide, place,
+  focus and close requests apply as they would natively, but `quit` doesn't end the recording.
+  When the key window hides, the topmost visible window that takes clicks gets the keyboard.
+  `--keys` and `--pointer` draw over the composite. `--window KEY` picks the window `--tree`,
+  `--trace` and `--scene` describe, and the tree adds a `windows` list of every window's frame.
+  `headless_run()` gives `desktop()`, the window frames as they change (`window_frames()`) and
+  as they stand at a time (`windows_at(t)`). The compositor draws no window chrome, so an app that
+  wants a title bar or a menu bar in the recording draws one (`examples/launcher` does both).
 - **Rounded panels**: `el().clip_rounded(radius)` clips an element and its descendants to a
   rounded rectangle, so a recording of a view meant for a rounded window can round it in the
   frame the way the window would.
