@@ -1581,6 +1581,12 @@ impl<S: 'static> Runtime<S> {
         self.nodes.iter().position(|n| n.path == path)
     }
 
+    /// Node `i`'s edges as drawn this frame (points, x0 y0 x1 y1), or its layout box before
+    /// it draws.
+    fn drawn_edges(&self, i: usize) -> [f32; 4] {
+        self.drawn.get(i).map_or(self.nodes[i].target, |d| [d[0], d[1], d[0] + d[2], d[1] + d[3]])
+    }
+
     fn subtree_exiting(&self, mut i: usize) -> bool {
         loop {
             if self.is_exiting(self.nodes[i].id) { return true; }
@@ -2558,7 +2564,7 @@ impl<S: 'static> Runtime<S> {
         if self.pointer == Some((x, y)) { return false; }
         let visual_changed = self.nodes.iter().enumerate().any(|(i, n)| {
             if n.vis.hover.a <= 0.0 && n.vis.press.a <= 0.0 { return false; }
-            let r = self.drawn.get(i).map_or(n.target, |d| [d[0], d[1], d[0] + d[2], d[1] + d[3]]);
+            let r = self.drawn_edges(i);
             let inside = |p: Option<(f32, f32)>| p.is_some_and(|(x, y)| x >= r[0] && y >= r[1] && x <= r[2] && y <= r[3]);
             inside(self.pointer) != inside(Some((x, y)))
         });
@@ -2938,10 +2944,7 @@ impl<S: 'static> Runtime<S> {
             if self.is_exiting(n.id) || (!tracks_hover && n.vis.press.a <= 0.0) {
                 continue;
             }
-            let r = self.drawn.get(i).map_or(
-                [n.target[0], n.target[1], n.target[2], n.target[3]],
-                |d| [d[0], d[1], d[0] + d[2], d[1] + d[3]],
-            );
+            let r = self.drawn_edges(i);
             // A group inside a clipped region (a scrolled list) only hovers where it shows.
             let c = n.parent.and_then(|p| self.inh_scratch.get(p)).map_or(NO_CLIP, |h| h.clip).map(|v| v / self.env.scale);
             let inside = self.pointer.is_some_and(|(x, y)| {
