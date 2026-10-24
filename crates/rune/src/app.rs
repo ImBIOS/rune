@@ -734,4 +734,29 @@ mod tests {
         rt.frame(0.0);
         assert_eq!(rt.wake_deadline(), Some(deadline), "and the next frame doesn't arm it twice");
     }
+
+    /// A hidden host's due timer runs `poll` and spends the timer without building the view,
+    /// poll or not. The view waits, dirty, for the frame that shows the host.
+    #[test]
+    fn a_hidden_timer_polls_without_building_the_view() {
+        use std::time::{Duration, Instant};
+        for with_poll in [true, false] {
+            let mut rt = Runtime::new(0_u32, |_: &u32, _: &mut Cx<u32>| el(), (100.0, 100.0), Env { system_dark: true, scale: 1.0 });
+            if with_poll { rt.poll = Some(|polls: &mut u32, _, _: &mut Tx| { *polls += 1; true }); }
+            let t0 = Instant::now();
+            rt.wall_start = Some(t0);
+            rt.frame(0.0);
+            let commits = rt.stats.commits;
+            rt.update(|_, tx| tx.wake_after(Duration::from_millis(10)));
+            assert_eq!(rt.hidden_wake(), with_poll);
+            assert!(rt.wake_deadline().is_some());
+            rt.wall_start = Some(t0 - Duration::from_secs(1));
+            assert_eq!(rt.hidden_wake(), with_poll);
+            assert_eq!(rt.wake_deadline(), None, "the due timer is spent, so it doesn't wake the host again");
+            assert_eq!(rt.stats.commits, commits, "no view or layout while hidden");
+            assert!(rt.needs_commit());
+            rt.frame(0.0);
+            assert_eq!(rt.stats.commits, commits + 1, "the frame that shows it builds once");
+        }
+    }
 }

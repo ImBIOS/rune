@@ -216,6 +216,9 @@ impl<T: 'static> OverlayHandle<T> {
 
     /// Change the overlay's state on the UI thread, in call order, shown or not.
     /// `Tx::wake_after` invokes the configured poll at its deadline, including while hidden.
+    /// A hidden overlay's view doesn't run for it: the frame that shows the overlay builds it
+    /// once, with the latest state. A prewarmed macOS overlay commits hidden changes at most
+    /// every 250 ms to keep its retained frame close.
     pub fn update(&self, f: impl FnOnce(&mut T, &mut Tx) + Send + 'static) {
         self.request(|q| q.updates.push(Box::new(f)));
     }
@@ -311,6 +314,8 @@ pub(crate) struct Overlay<T: 'static> {
     retry: Option<Instant>,
     /// The next occluded re-check's wait, backing off while the surface stays occluded.
     occluded_wait: Duration,
+    /// When a hidden retained overlay commits the changes it hasn't yet.
+    hidden_pace: crate::window::HiddenPace,
     #[cfg(target_os = "macos")]
     frame_wake: Option<Waker>,
     meter: crate::surface_stats::SurfaceMeter,
@@ -382,6 +387,7 @@ impl<T: 'static> Overlay<T> {
             occluded: false,
             retry: None,
             occluded_wait: crate::window::OCCLUDED_RETRY,
+            hidden_pace: Default::default(),
             #[cfg(target_os = "macos")]
             frame_wake: None,
             meter,
@@ -421,6 +427,7 @@ impl<T: 'static> Overlay<T> {
             self.show_window(&window, fade);
         }
         self.visible = true;
+        self.hidden_pace.reset();
         self.occluded_wait = crate::window::OCCLUDED_RETRY;
         // Shown onto sleeping displays or under another window, the panel stays occluded.
         #[cfg(target_os = "macos")]
@@ -484,7 +491,7 @@ impl<T: 'static> Overlay<T> {
 
     fn refresh_for_reveal_at(&mut self, now: Instant) {
         if self.retained() && (self.dirty || self.rt.animating) {
-            self.advance_at(now);
+            self.commit_at(now);
             self.warm_frame();
         }
     }
@@ -1066,8 +1073,8 @@ impl<T: 'static> Overlay<T> {
     }
 
     /// Handle updates, and the `setup` waker (new data arrived) re-runs the view. A shown
-    /// overlay draws a frame, which polls; a hidden one runs a frame without drawing, as for a
-    /// due timer.
+    /// overlay draws a frame, which polls; a hidden one polls now, as for a due timer, and
+    /// re-runs the view when it shows (`advance_at`).
     fn apply_wake(&mut self, woken: bool, updates: Vec<Update<T>>) {
         let updated = !updates.is_empty();
         for f in updates { self.rt.update(f); }
@@ -1090,16 +1097,27 @@ impl<T: 'static> Overlay<T> {
     fn advance_at(&mut self, now: Instant) {
         // Covered or asleep, a shown overlay only polls. What it would commit waits for the
         // first uncovered frame, which resumes running motion and starts new motion fresh
-        // (`step`). Input and drag ends still run their handlers now.
-        if self.visible && self.is_occluded() && !self.rt.has_pending_input() && !self.rt.drag_ends_pending() {
-            self.rt.poll_hidden();
-            self.rt.shell_request = None;
-            self.rt.window_frame = None;
-            self.clipboard.flush(&mut self.rt);
-            self.open_popup();
+        // (`step`). Hidden, an overlay only polls too, and its view waits for the frame that
+        // shows it; a retained one commits at most every `HIDDEN_REFRESH` to keep its cached
+        // frame near. Input and drag ends still run their handlers now.
+        let handlers = self.rt.has_pending_input() || self.rt.drag_ends_pending();
+        let polls_only = !handlers && if self.drawing() { self.visible && self.is_occluded() } else { !self.retained() || !self.hidden_pace.ready(now) };
+        if !polls_only { return self.commit_at(now); }
+        self.rt.poll_hidden();
+        self.rt.shell_request = None;
+        self.rt.window_frame = None;
+        self.clipboard.flush(&mut self.rt);
+        self.open_popup();
+        if self.drawing() {
             self.dirty = true;
-            return;
+        } else if self.rt.needs_commit() {
+            self.dirty = true;
+            if self.retained() { self.hidden_pace.changed(now); }
         }
+    }
+
+    /// Runs a frame without drawing: handlers, poll, the view and layout.
+    fn commit_at(&mut self, now: Instant) {
         let commits = self.rt.stats.commits;
         if self.retained() {
             self.rt.frame_split(now.saturating_duration_since(self.clock.last()).as_secs_f64(), 0.0);
@@ -1112,6 +1130,7 @@ impl<T: 'static> Overlay<T> {
         self.rt.window_frame = None;
         self.clipboard.flush(&mut self.rt);
         self.open_popup();
+        if !self.drawing() && self.rt.stats.commits != commits { self.hidden_pace.rendered(now); }
         // Even a transition that finished in this step needs its current pixels submitted.
         // A scheduling-only poll with no motion still preserves the prepared frame.
         if self.rt.stats.commits != commits || self.rt.animating || !self.idle {
@@ -1137,6 +1156,8 @@ impl<T: 'static> Overlay<T> {
                 self.advance();
             }
         }
+        // A hidden retained overlay's paced commit of what changed since its last.
+        if !self.drawing() && self.hidden_pace.take_due(now) { self.advance_at(now); }
         if self.retry.is_some_and(|retry| retry <= now) {
             self.retry = None;
             self.dirty = true;
@@ -1589,7 +1610,8 @@ impl<T: 'static> AnyHost for Overlay<T> {
         let deadline = deadline.filter(|_| !self.live.as_ref().and_then(|l| l.pacing.as_ref()).is_some_and(|p| p.running()));
         #[cfg(target_os = "macos")]
         let deadline = deadline.into_iter().chain(self.panel.as_ref().filter(|_| !self.occluded).and_then(|p| p.pointer_deadline())).min();
-        deadline.into_iter().chain(self.retry.filter(|_| self.drawing())).chain(self.fading_out).min()
+        deadline.into_iter().chain(self.retry.filter(|_| self.drawing())).chain(self.fading_out)
+            .chain(self.hidden_pace.deadline().filter(|_| !self.drawing())).min()
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -2586,6 +2608,90 @@ mod tests {
         assert!(overlay.live.is_none() && overlay.gpu.is_none());
     }
 
+    thread_local! { static BUILDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
+
+    fn counter_view(n: &u32, _: &mut Cx<u32>) -> El {
+        BUILDS.set(BUILDS.get() + 1);
+        crate::el().child(crate::text(n.to_string()).key("n"))
+    }
+
+    fn counter_text(overlay: &Overlay<u32>) -> Option<String> {
+        overlay.rt.elements().into_iter().find(|e| e.key.as_deref() == Some("n")).and_then(|e| e.text)
+    }
+
+    /// A hidden overlay whose state changes ten times a second, from updates and their timers,
+    /// builds no view and lays nothing out. The frame that shows it builds once, with the
+    /// latest state.
+    #[test]
+    fn a_hidden_overlay_builds_nothing_until_it_shows() {
+        let app = AppSpec::new("hidden counter", (200.0, 50.0), || 0, counter_view);
+        let (mut overlay, handle) = Overlay::new(OverlaySpec::new("hidden counter", app.size, counter_view).options(Default::default()), 0, &app);
+        let start = Instant::now();
+        overlay.rt.wall_start = Some(start);
+        present(&mut overlay, start);
+        assert_eq!(counter_text(&overlay).as_deref(), Some("0"));
+        let (builds, commits) = (BUILDS.get(), overlay.rt.stats.commits);
+        for k in 1..=10 {
+            handle.update(|n, tx| { *n += 1; tx.wake_after(Duration::from_millis(50)); });
+            let requests = std::mem::take(&mut *overlay.shared.requests.lock().unwrap());
+            overlay.apply_wake(requests.woken, requests.updates);
+            // Its timer comes due before the next update.
+            overlay.rt.wall_start = Some(Instant::now() - k * Duration::from_millis(100));
+            overlay.wake_due(Instant::now());
+        }
+        assert_eq!(overlay.rt.state, 10);
+        assert_eq!(BUILDS.get() - builds, 0, "no view builds while hidden");
+        assert_eq!(overlay.rt.stats.commits, commits, "no layout while hidden");
+        assert_eq!(overlay.wake_deadline(), None, "and nothing left to wake it");
+
+        // Shown: `show_fading` settles an unretained overlay and asks for a frame.
+        overlay.visible = true;
+        overlay.rt.set_live_visible(true);
+        overlay.settle_before_reveal();
+        overlay.dirty = true;
+        present(&mut overlay, Instant::now());
+        assert_eq!(BUILDS.get() - builds, 1, "the frame that shows it builds once");
+        assert_eq!(counter_text(&overlay).as_deref(), Some("10"), "with the latest state");
+    }
+
+    /// A prewarmed overlay keeps its frame ready while hidden, but commits state that changes
+    /// ten times a second at most every `HIDDEN_REFRESH`. Its reveal commits what's left once.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_hidden_prewarmed_overlay_commits_at_most_every_refresh() {
+        use crate::window::HIDDEN_REFRESH;
+        let app = AppSpec::new("prewarmed counter", (200.0, 50.0), || 0, counter_view);
+        let spec = OverlaySpec::new("prewarmed counter", app.size, counter_view).options(OverlayOptions { prewarm: true, ..Default::default() });
+        let (mut overlay, _) = Overlay::new(spec, 0, &app);
+        overlay.rt.wall_start = None;
+        overlay.warm();
+        overlay.dirty = false;
+        let start = overlay.clock.last();
+        let builds = BUILDS.get();
+        let mut pace_wakes = Vec::new();
+        for tick in 1..=100 {
+            let now = start + tick * Duration::from_millis(10);
+            if tick % 10 == 0 {
+                overlay.rt.update(|n, _| *n += 1);
+                overlay.dirty = true;
+                overlay.advance_at(now);
+            }
+            if let Some(wake) = overlay.wake_deadline().filter(|&wake| wake <= now) {
+                pace_wakes.push(wake - start);
+                overlay.wake_due(now);
+            }
+        }
+        let hidden = BUILDS.get() - builds;
+        let bound = 1 + (Duration::from_secs(1).as_millis() / HIDDEN_REFRESH.as_millis()) as u32;
+        assert!((2..=bound).contains(&hidden), "{hidden} builds in a hidden second, want at most {bound}; paced wakes at {pace_wakes:?}");
+        assert_eq!(overlay.rt.state, 10);
+        assert_ne!(counter_text(&overlay).as_deref(), Some("10"), "the last change waits for the pace or the reveal");
+        let before = BUILDS.get();
+        overlay.refresh_for_reveal_at(start + Duration::from_millis(1005));
+        assert_eq!(BUILDS.get() - before, 1, "the reveal builds once");
+        assert_eq!(counter_text(&overlay).as_deref(), Some("10"), "with the latest state");
+    }
+
     #[test]
     fn overlay_poll_inherits_overrides_and_wakes_visible_state_once() {
         use std::time::Duration;
@@ -2771,8 +2877,8 @@ mod tests {
         let take = |overlay: &mut Overlay<State>| std::mem::take(&mut *overlay.shared.requests.lock().unwrap());
         let _ = take(&mut overlay);
 
-        // Hidden: the overlay has laid out without the icon; a background decode wakes the
-        // loop, and the overlay re-runs the view in a frame without drawing.
+        // Hidden: a background decode wakes the loop, and the overlay polls; the view waits
+        // for the frame that shows it.
         overlay.advance();
         assert!(!overlay.rt.state.saw_icon.get());
         let state = &mut overlay.rt.state;
@@ -2781,11 +2887,14 @@ mod tests {
         let requests = take(&mut overlay);
         assert!(requests.woken);
         overlay.apply_wake(requests.woken, requests.updates);
-        assert!(overlay.rt.state.saw_icon.get(), "the view saw the decoded image");
+        assert!(!overlay.rt.state.saw_icon.get(), "a hidden overlay's view doesn't run");
+        assert!(overlay.dirty && overlay.rt.needs_commit());
         let polls = overlay.rt.state.polls;
+        overlay.visible = true;
+        overlay.advance(); // the frame that shows it
+        assert!(overlay.rt.state.saw_icon.get(), "shown, the view saw the decoded image");
 
         // Shown: the next wake schedules a frame that re-runs the view.
-        overlay.visible = true;
         overlay.rt.state.icon = None;
         overlay.rt.invalidate();
         overlay.advance();

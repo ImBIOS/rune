@@ -1293,9 +1293,11 @@ impl<S: 'static> Runtime<S> {
         // An `update`'s `wake_after` counts from now; no frame may come to schedule it.
         let wakes = std::mem::take(&mut self.pending.wakes);
         self.schedule_wakes(wakes);
-        let Some(poll) = self.poll else { return false };
+        // Due timers are spent with or without a poll, as a frame spends them; one left due
+        // would wake the host again every frame interval.
         let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
         self.wake_deadlines.drain(..due);
+        let Some(poll) = self.poll else { return false };
         let mut one = self.transaction();
         let changed = poll(&mut self.state, self.clock, &mut one);
         self.dirty |= changed;
@@ -1400,6 +1402,21 @@ impl<S: 'static> Runtime<S> {
         #[cfg(all(feature = "dev", debug_assertions))]
         if self.dev.is_some() { return self.dev_hidden_frame(); }
         self.frame(0.0);
+    }
+
+    /// A hidden host's due timer or wake. `poll` and due timers run now; the view and layout
+    /// wait, dirty, for the frame that shows the host. Queued input and drag ends take a frame
+    /// without drawing (`hidden_timer_frame`) so their handlers hear them now. Returns whether
+    /// state changed.
+    pub(crate) fn hidden_wake(&mut self) -> bool {
+        if self.has_pending_input() || self.drag_ends_pending() {
+            let commits = self.stats.commits;
+            self.hidden_timer_frame();
+            return self.stats.commits != commits;
+        }
+        #[cfg(all(feature = "dev", debug_assertions))]
+        if self.dev.is_some() { self.dev_hidden_frame(); return true; }
+        self.poll_hidden()
     }
 
     /// One frame in one pass that steps `catch_up + dt` seconds. Motion already running advances

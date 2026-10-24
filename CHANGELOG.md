@@ -5,6 +5,17 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Hidden overlays and windows don't run their view.** A hidden overlay used to build its view
+  and lay it out on every change (an `OverlayHandle::update`, a `setup` waker, a due
+  `wake_after`, a clipboard or pop-up answer), and a hidden window did on every due
+  `wake_after`. Now handlers, `poll`, timers, queued input, drag ends, clipboard and window
+  commands still run while hidden, but the view waits for the frame that shows the host, which
+  builds it once with the latest state. An app that relied on side effects in view code while
+  hidden will see them only on show. Hosts that keep a ready frame while hidden (a launcher
+  panel's cached pixels, a prewarmed macOS overlay's retained commit) still refresh it, but at
+  most every 250 ms: the first change after a quiet spell renders at once, later ones wait. A
+  show whose state changed since that frame renders it first, as for an update in the same
+  turn.
 - **Occluded windows and overlays no longer spin or leak; per-surface frame stats.** A surface
   whose drawable acquisition kept failing (covered, or the displays asleep) could retry at once,
   and an overlay's failed re-acquire turned the loop with `ControlFlow::Poll`. Every miss now

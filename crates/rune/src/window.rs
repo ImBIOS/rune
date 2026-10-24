@@ -52,6 +52,8 @@ struct Win {
     occluded_wait: Duration,
     /// A hidden launcher's next try after a refresh got no drawable, backing off likewise.
     hidden_wait: Duration,
+    /// When a hidden launcher renders the changes it hasn't yet.
+    hidden_pace: HiddenPace,
     cursor: crate::os_cursor::OsCursor,
     alpha: Option<crate::surface_alpha::AlphaSurface>,
     #[cfg(target_os = "macos")]
@@ -847,6 +849,64 @@ pub(crate) fn timer_deadline<S>(rt: &Runtime<S>) -> Option<Instant> {
     Some(polled.map_or(due, |polled| due.max(polled + TIMER_FRAME)))
 }
 
+/// Paces the frame a hidden host keeps ready to show (a launcher's cached pixels, a retained
+/// overlay's commit). A change after a quiet spell renders at once; later ones wait until
+/// `HIDDEN_REFRESH` has passed since the last render, so state that changes many times a
+/// second costs a few builds a second while nobody sees them.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct HiddenPace { last: Option<Instant>, waiting: bool }
+
+pub(crate) const HIDDEN_REFRESH: Duration = Duration::from_millis(250);
+
+impl HiddenPace {
+    /// Whether a change at `now` renders now. Otherwise it waits for `deadline`.
+    pub(crate) fn changed(&mut self, now: Instant) -> bool {
+        self.waiting = !self.ready(now);
+        !self.waiting
+    }
+    /// Whether a change at `now` would render at once.
+    pub(crate) fn ready(&self, now: Instant) -> bool {
+        self.last.is_none_or(|last| now >= last + HIDDEN_REFRESH)
+    }
+    /// When the change that waits renders.
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.last.filter(|_| self.waiting).map(|last| last + HIDDEN_REFRESH)
+    }
+    /// Whether the change that waits is due at `now`; it stops waiting either way it renders.
+    pub(crate) fn take_due(&mut self, now: Instant) -> bool {
+        let due = self.deadline().is_some_and(|at| at <= now);
+        if due { self.waiting = false; }
+        due
+    }
+    /// A hidden frame rendered what had changed.
+    pub(crate) fn rendered(&mut self, now: Instant) {
+        *self = HiddenPace { last: Some(now), waiting: false };
+    }
+    /// Shown, the host draws its own frames; hidden again, the first change renders at once.
+    pub(crate) fn reset(&mut self) { *self = HiddenPace::default(); }
+}
+
+#[test]
+fn hidden_pace_renders_a_change_at_once_then_at_most_every_refresh() {
+    let t0 = Instant::now();
+    let mut pace = HiddenPace::default();
+    assert!(pace.changed(t0), "the first change renders at once");
+    pace.rendered(t0);
+    assert_eq!(pace.deadline(), None);
+    assert!(!pace.changed(t0 + Duration::from_millis(100)));
+    assert!(!pace.changed(t0 + Duration::from_millis(200)));
+    assert_eq!(pace.deadline(), Some(t0 + HIDDEN_REFRESH), "later ones wait for one render");
+    assert!(!pace.take_due(t0 + Duration::from_millis(249)));
+    assert!(pace.take_due(t0 + HIDDEN_REFRESH));
+    assert_eq!(pace.deadline(), None, "a due render asked for doesn't wake the loop again");
+    assert!(pace.changed(t0 + HIDDEN_REFRESH));
+    pace.rendered(t0 + HIDDEN_REFRESH);
+    assert_eq!(pace.deadline(), None);
+    assert!(pace.changed(t0 + Duration::from_secs(5)), "after a quiet spell, at once again");
+    pace.reset();
+    assert!(pace.changed(t0 + Duration::from_secs(5)));
+}
+
 /// Whether a timer asks for the frame after one just presented. Only a surface whose display
 /// link paces it (`next_frame` is its next tick) takes a timer due by then as a frame request;
 /// anywhere else the timer waits in `timer_deadline`, so it never turns the loop by itself.
@@ -1360,6 +1420,7 @@ impl<S: 'static> Host<S> {
         if self.win.is_none() { self.create(event_loop, None, false); }
         let stale = self.rt.needs_commit();
         let Some(w) = &mut self.win else { return };
+        w.hidden_pace.reset();
         let visible = w.visible;
         if !w.first_frame.request_reveal(stale, visible) {
             w.window.request_redraw();
@@ -1632,10 +1693,13 @@ impl<S: 'static> Host<S> {
         // A dev command may change a shown launcher, which otherwise redraws only for updates.
         #[cfg(all(feature = "dev", debug_assertions))]
         let changed = changed || self.rt.dev.is_some();
-        // A launcher's cached reveal draws nothing; a hidden one renders its changes hidden.
-        // A covered or minimised one runs them without asking for a frame it wouldn't draw.
+        // A launcher's cached reveal draws nothing; a hidden one renders its changes hidden,
+        // paced (`refresh_hidden`). A covered or minimised one runs them without asking for a
+        // frame it wouldn't draw.
         let launcher = self.launcher();
-        if let Some(w) = self.win.as_ref().filter(|w| if launcher { changed || shown && w.visible } else { w.visible }) {
+        if launcher && self.win.as_ref().is_some_and(|w| !w.visible) {
+            if changed { self.refresh_hidden(); }
+        } else if let Some(w) = self.win.as_ref().filter(|w| if launcher { changed || shown && w.visible } else { w.visible }) {
             if (!launcher && w.occluded) || w.window.is_minimized().unwrap_or(false) {
                 self.covered_frame();
                 self.shell(event_loop);
@@ -1647,7 +1711,8 @@ impl<S: 'static> Host<S> {
 
     /// A hidden, keep-running or windowless window still reads its inbox when woken: `poll` runs
     /// with no drawable, present or animation, and its changes render when the window is next
-    /// shown. A hidden launcher renders poll's changes hidden, keeping its cached frame fresh.
+    /// shown. A hidden launcher renders poll's changes hidden, paced, keeping its cached frame
+    /// fresh.
     fn poll_hidden(&mut self, event_loop: &ActiveEventLoop) {
         if event_loop.exiting() || self.win.as_ref().is_some_and(|w| w.visible) { return; }
         // Its hidden frames already poll.
@@ -1656,7 +1721,25 @@ impl<S: 'static> Host<S> {
         let changed = self.rt.poll_hidden();
         self.clipboard.flush(&mut self.rt);
         self.shell(event_loop);
-        if changed && self.launcher() && let Some(w) = &self.win { w.window.request_redraw(); }
+        if changed && self.launcher() { self.refresh_hidden(); }
+    }
+
+    /// A hidden launcher renders what changed into its cached frame: at once after a quiet
+    /// spell, then at most every `HIDDEN_REFRESH` (`HiddenPace`). A show of state newer than
+    /// that frame renders it hidden first (`reveal_launcher`), as for an update in the same
+    /// turn. A frame being prepared, or one a reveal waits on, renders at once.
+    fn refresh_hidden(&mut self) {
+        let now_due = self.hidden_launcher_renders();
+        let Some(w) = &mut self.win else { return };
+        if now_due || w.first_frame.deadline.is_some() || w.hidden_pace.changed(Instant::now()) { w.window.request_redraw(); }
+    }
+
+    /// What a hidden launcher's frame must render as it commits: queued input, drag ends and
+    /// dev commands. Committed without a render, they'd leave a cached frame that looks fresh.
+    fn hidden_launcher_renders(&self) -> bool {
+        #[cfg(all(feature = "dev", debug_assertions))]
+        if self.rt.dev.is_some() { return true; }
+        self.rt.has_pending_input() || self.rt.drag_ends_pending()
     }
 
     /// Carries out what a handler or update asked with `Tx::close_window` / `Tx::quit`, then
@@ -1980,6 +2063,7 @@ impl<S: 'static> Host<S> {
             retry: None,
             occluded_wait: OCCLUDED_RETRY,
             hidden_wait: TIMEOUT_RETRY,
+            hidden_pace: HiddenPace::default(),
             cursor: crate::os_cursor::OsCursor::new(event_loop),
             alpha,
             #[cfg(target_os = "macos")]
@@ -2148,6 +2232,7 @@ impl<S: 'static> Host<S> {
         } else { frame };
         l.occluded_wait = OCCLUDED_RETRY;
         l.hidden_wait = TIMEOUT_RETRY;
+        if hidden { l.hidden_pace.rendered(now); }
         self.secure_input.set(rt.has_secure_focus() && l.window.has_focus());
         let update_ms = now.elapsed().as_secs_f64() * 1000.0;
         let ime_allowed = rt.ime_area.is_some() && !rt.has_secure_focus() && l.window.has_focus();
@@ -2303,11 +2388,22 @@ impl<S: 'static> AnyHost for Host<S> {
             w.occluded = false;
             if launcher || w.visible { w.window.request_redraw(); }
         }
+        if let Some(w) = &mut self.win && !w.visible && w.hidden_pace.take_due(Instant::now()) {
+            w.window.request_redraw();
+        }
         if matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll)
             && timer_deadline(&self.rt).is_some_and(|deadline| deadline <= Instant::now())
         {
+            let hidden = self.win.as_ref().is_none_or(|w| !w.visible);
+            if hidden && !(launcher && self.hidden_launcher_renders()) {
+                // Hidden or windowless: poll and due timers run, and the view waits for the
+                // frame that shows the window. A launcher's cached frame follows, paced.
+                let changed = self.rt.hidden_wake();
+                self.clipboard.flush(&mut self.rt);
+                self.shell(event_loop);
+                if changed && launcher { self.refresh_hidden(); }
             // A redraw while the window backs off would draw nothing and leave the timer due.
-            if let Some(w) = self.win.as_ref().filter(|w| (self.launcher() || (w.visible && !w.occluded)) && !w.window.is_minimized().unwrap_or(false)
+            } else if let Some(w) = self.win.as_ref().filter(|w| (self.launcher() || (w.visible && !w.occluded)) && !w.window.is_minimized().unwrap_or(false)
                 && !w.backing_off(Instant::now())) {
                 w.window.request_redraw();
             } else {
@@ -2339,6 +2435,7 @@ impl<S: 'static> AnyHost for Host<S> {
         runtime.into_iter()
             .chain(win.and_then(|w| w.first_frame.deadline.map(|(retry, _)| retry)))
             .chain(win.and_then(|w| w.retry))
+            .chain(win.filter(|w| !w.visible).and_then(|w| w.hidden_pace.deadline()))
             .min()
     }
 
