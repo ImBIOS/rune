@@ -2374,6 +2374,7 @@ impl<S: 'static> Runtime<S> {
         }
         let measured = self.settle_layout_reads(measured, &tx);
         self.apply(measured, tx);
+        self.prune_text_selection();
     }
 
     fn measure(&mut self, tx: &Tx) -> Measured {
@@ -2972,7 +2973,8 @@ impl<S: 'static> Runtime<S> {
     // ---------------------------------------------------------------------------------------
     // Input: queued, handled at the next frame.
 
-    fn primary_target(&self, x: f32, y: f32) -> Option<usize> {
+    /// The topmost element under (x, y) that takes primary input, selectable text included.
+    fn top_target(&self, x: f32, y: f32) -> Option<usize> {
         self.hits.iter().rev().find_map(|&(id, r)| {
             if !contains(r, x, y) { return None; }
             let i = *self.node_index.get(&id)?;
@@ -2982,6 +2984,31 @@ impl<S: 'static> Runtime<S> {
                 || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some()
                 || self.is_selectable(i))).then_some(i)
         })
+    }
+
+    /// The element a press, hover or drag at (x, y) goes to. Selectable text passes them to the
+    /// nearest ancestor that handles them (a clickable or draggable row), unless the text has
+    /// its own handlers or the point is on one of its links; selecting goes on beside that
+    /// (`selectable_at`).
+    fn primary_target(&self, x: f32, y: f32) -> Option<usize> {
+        let i = self.top_target(x, y)?;
+        let n = &self.nodes[i];
+        let own = n.on_press.is_some() || n.on_double_press.is_some() || n.on_hover.is_some() || n.on_drag.is_some() || n.drag_out.is_some();
+        if !self.is_selectable(i) || own || self.link_at(i, x, y).is_some() { return Some(i); }
+        let handles = |n: &Node| n.on_press.is_some() || n.on_double_press.is_some() || n.on_hover.is_some()
+            || n.on_drag.is_some() || n.drag_out.is_some() || n.focus.enabled;
+        let mut p = n.parent;
+        while let Some(a) = p {
+            if self.subtree_exiting(a) || !self.allowed(a) || self.nodes[a].modal.is_some() { break; }
+            if handles(&self.nodes[a]) { return Some(a); }
+            p = self.nodes[a].parent;
+        }
+        Some(i)
+    }
+
+    /// The selectable text under (x, y), if it's the topmost thing there that takes input.
+    fn selectable_at(&self, x: f32, y: f32) -> Option<usize> {
+        self.top_target(x, y).filter(|&i| self.is_selectable(i))
     }
 
     pub fn pointer_move(&mut self, x: f32, y: f32) {
@@ -3125,7 +3152,11 @@ impl<S: 'static> Runtime<S> {
             }
             return;
         }
-        self.selection_down(target, x, y);
+        self.selection_down(self.selectable_at(x, y), x, y);
+        // Inside a draggable row, dragging drags the row; clicks still select words and lines.
+        if target.is_some_and(|t| self.nodes[t].on_drag.is_some() || self.nodes[t].drag_out.is_some()) {
+            self.text_sel.dragging = false;
+        }
         let Some(ti) = target else {
             if self.focused.is_some() {
                 self.queue.push(Action::Blur);
@@ -3162,8 +3193,9 @@ impl<S: 'static> Runtime<S> {
             self.queue.push(Action::Focus(n.path.clone(), (x - r[0]) / k - n.inset[0], (y - r[1]) / k - n.inset[1]));
             return;
         }
-        // Clicking a link leaves focus where it is (a composer keeps typing).
-        if !on_link && n.focus.enabled {
+        // Clicking a link leaves focus where it is (a composer keeps typing). Selectable text
+        // off its links isn't a control: the press blurs, as a click on plain content does.
+        if !on_link && n.focus.enabled && !self.is_selectable(ti) {
             self.queue.push(Action::FocusControl(n.path.clone()));
         } else if !on_link && self.focused.is_some() {
             self.queue.push(Action::Blur);
@@ -3190,15 +3222,21 @@ impl<S: 'static> Runtime<S> {
         self.capture_inside = true;
     }
 
+    /// The nearest element with `on_secondary_press` at (x, y), else the selectable text there
+    /// (its Copy menu): an app's context menu on a row wins over its text's.
     fn secondary_target(&self, x: f32, y: f32) -> Option<&str> {
         let id = self.hits.iter().rev().find(|&&(_, r)| contains(r, x, y))?.0;
         let mut index = *self.node_index.get(&id)?;
+        let mut text = None;
         loop {
             let n = &self.nodes[index];
-            if self.subtree_exiting(index) || !self.allowed(index) { return None; }
-            if n.on_secondary_press.is_some() || self.is_selectable(index) { return Some(&n.path); }
-            index = n.parent?;
+            if self.subtree_exiting(index) || !self.allowed(index) { break; }
+            if n.on_secondary_press.is_some() { return Some(&n.path); }
+            if text.is_none() && self.is_selectable(index) { text = Some(n.path.as_str()); }
+            let Some(p) = n.parent else { break };
+            index = p;
         }
+        text
     }
 
     /// Capture a secondary gesture without activating primary actions or text selection.
@@ -3232,6 +3270,8 @@ impl<S: 'static> Runtime<S> {
         // A release never starts a drag-out: the system session needs the button held.
         self.drag_out_armed = false;
         self.pointer_move(x, y);
+        // A drag that selected text is a selection, not a press.
+        let selected = self.selected_by_drag();
         self.text_sel.dragging = false;
         let Some((path, d)) = self.capture.take() else { return };
         self.refresh_hover_within();
@@ -3246,7 +3286,7 @@ impl<S: 'static> Runtime<S> {
             self.queue.push(Action::Drag(path.clone(), Drag { phase: Phase::Up, x: x - r[0], y: y - r[1], dx, dy, ..d }));
         }
         self.link_up(&path, x, y);
-        if has_press && self.capture_inside {
+        if has_press && self.capture_inside && !selected {
             self.queue.push(Action::Press(path.clone()));
         }
         // Only clicks pair: a press that dragged or was held past the interval is neither half.
@@ -3319,9 +3359,11 @@ impl<S: 'static> Runtime<S> {
     pub fn cursor(&self) -> crate::el::Cursor {
         let Some((x, y)) = self.pointer.filter(|&(x, y)| self.in_viewport(x, y)) else { return crate::el::Cursor::Default };
         // An element on its way out has no cursor: `Cursor::Hidden` ends when it's removed.
+        // Selectable text shows its I-beam even where its presses go to a row around it.
         let target = match &self.capture {
+            Some(_) if self.text_sel.dragging => self.selection_holder(),
             Some((p, _)) => (0..self.nodes.len()).find(|&i| self.nodes[i].path == *p && !self.subtree_exiting(i)),
-            None => self.primary_target(x, y),
+            None => self.selectable_at(x, y).or_else(|| self.primary_target(x, y)),
         };
         let Some(mut i) = target else {
             return crate::el::Cursor::Default;

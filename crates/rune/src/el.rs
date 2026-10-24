@@ -1717,6 +1717,11 @@ impl El {
     /// holds the selection; a right-click offers Copy on macOS. It shows the I-beam, isn't a Tab
     /// stop, and a press anywhere else clears the selection. Selecting never re-lays out the
     /// text. Set the highlight with [`El::selection_color`].
+    ///
+    /// Inside a row that handles input, the row keeps it: a click on the text presses the row,
+    /// hover and press paint reach it, and its `on_secondary_press` wins over Copy. A drag that
+    /// selects text doesn't press. Inside a draggable (`on_drag`, `drag_out`) row, dragging
+    /// drags the row, and double- and triple-clicks still select.
     pub fn selectable(mut self, on: bool) -> Self {
         if let Some(t) = &mut self.text {
             if self.input.is_some() { return self; }

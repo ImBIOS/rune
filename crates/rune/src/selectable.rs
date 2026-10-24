@@ -36,14 +36,30 @@ pub(super) struct TextSelection {
     pub(super) shift: bool,
 }
 
+/// The char boundary at or before byte `i` of `text`.
+fn floor_boundary(text: &str, i: usize) -> usize {
+    let mut i = i.min(text.len());
+    while !text.is_char_boundary(i) { i -= 1; }
+    i
+}
+
+/// The char boundary before byte `i` (a boundary) of `text`.
+fn prev_boundary(text: &str, i: usize) -> usize { floor_boundary(text, i.saturating_sub(1)) }
+
 /// The range of `unit` at byte `i` of `text`: a word (or run of spaces or punctuation) by
-/// Unicode word boundaries, or a paragraph with its line break.
+/// Unicode word boundaries, or a paragraph with its line break. Past the end of a line (on its
+/// break, or past the end of the text) it takes the line's last word or paragraph, as AppKit does.
 fn unit_at(text: &str, i: usize, unit: Unit) -> (usize, usize) {
     use unicode_segmentation::UnicodeSegmentation;
-    let i = i.min(text.len());
+    let mut i = floor_boundary(text, i);
+    if i > 0 && i == text.len() && unit != Unit::Char { i = prev_boundary(text, i); }
     match unit {
         Unit::Char => (i, i),
         Unit::Word => {
+            if i > 0 && text[i..].starts_with(['\n', '\r']) && !text[..i].ends_with('\n') {
+                i = prev_boundary(text, i);
+                if text[i..].starts_with('\r') && i > 0 && !text[..i].ends_with('\n') { i = prev_boundary(text, i); }
+            }
             let mut last = (i, i);
             for (start, word) in text.split_word_bound_indices() {
                 let end = start + word.len();
@@ -98,21 +114,41 @@ impl<S: 'static> Runtime<S> {
         (a < b && b <= content.len()).then_some((a, b))
     }
 
+    /// The node holding the selection, while it's still there, still selectable and still shows
+    /// the content the selection was made in.
+    pub(super) fn selection_holder(&self) -> Option<usize> {
+        let sel = &self.text_sel;
+        let path = sel.path.as_deref()?;
+        let i = (0..self.nodes.len()).find(|&i| self.nodes[i].path == path && !self.subtree_exiting(i))?;
+        (self.is_selectable(i) && self.nodes[i].text.as_ref().is_some_and(|t| t.content == sel.content)).then_some(i)
+    }
+
+    /// After a commit: drop a selection whose text went away, stopped being selectable or
+    /// changed its content.
+    pub(super) fn prune_text_selection(&mut self) {
+        if self.text_sel.path.is_some() && self.selection_holder().is_none() { self.clear_text_selection(); }
+    }
+
     /// The text holding the selection and its selected byte range (empty after a single click),
     /// for tests and tools.
     pub fn text_selection(&self) -> Option<(&str, std::ops::Range<usize>)> {
+        self.selection_holder()?;
         let sel = &self.text_sel;
-        let path = sel.path.as_deref()?;
-        Some((path, sel.anchor.min(sel.focus)..sel.anchor.max(sel.focus)))
+        Some((sel.path.as_deref()?, sel.anchor.min(sel.focus)..sel.anchor.max(sel.focus)))
     }
 
     /// The selected text, as copying would put it on the clipboard (as authored, before
     /// `El::text_case`).
     pub fn selected_text(&self) -> Option<String> {
-        let path = self.text_sel.path.as_deref()?;
-        let spec = self.node(path)?.text.as_ref()?;
-        let (a, b) = self.selected_range(path, &spec.content)?;
+        let i = self.selection_holder()?;
+        let spec = self.nodes[i].text.as_ref()?;
+        let (a, b) = self.selected_range(&self.nodes[i].path, &spec.content)?;
         spec.source_slice(a as u32, b as u32).map(str::to_owned)
+    }
+
+    /// The held press is selecting text by dragging, and has selected some.
+    pub(super) fn selected_by_drag(&self) -> bool {
+        self.text_sel.dragging && self.press_moved && self.text_selection().is_some_and(|(_, r)| !r.is_empty())
     }
 
     pub(super) fn clear_text_selection(&mut self) {
@@ -167,29 +203,31 @@ impl<S: 'static> Runtime<S> {
         sel.dragging = true;
     }
 
-    /// The held press moved: extend the selection it started to the pointer, by its unit.
+    /// The held press moved: extend the selection it started to the pointer, by its unit. The
+    /// press itself may belong to an ancestor (a clickable row), so this follows the selection's
+    /// own text.
     pub(super) fn selection_drag(&mut self, x: f32, y: f32) {
-        let sel = &self.text_sel;
-        if !sel.dragging { return; }
-        let Some((path, _)) = &self.capture else { return };
-        if sel.path.as_ref() != Some(path) { return; }
-        let Some(i) = (0..self.nodes.len()).find(|&i| self.nodes[i].path == *path && !self.subtree_exiting(i)) else { return };
+        if !self.text_sel.dragging { return; }
+        let Some(i) = self.selection_holder() else { self.clear_text_selection(); return };
         let Some(at) = self.text_index_at(i, x, y) else { return };
         let sel = &mut self.text_sel;
         let at = unit_at(&sel.content, at, sel.unit);
         (sel.anchor, sel.focus) = extend(sel.origin, at);
     }
 
-    /// Cmd+C (Ctrl+C elsewhere) copies the selection and Cmd+A selects all of the text holding
-    /// it, unless a text field has the keyboard.
+    /// Cmd+C (Ctrl+C elsewhere) copies a non-empty selection and Cmd+A selects all of the text
+    /// holding it (a click on it makes it the holder, as it makes an AppKit text view first
+    /// responder), unless a text field has the keyboard. Only the plain chord: with Shift, Option
+    /// (Alt) or Control added it's the app's shortcut.
     pub(super) fn selection_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         let crate::Key::Command(c @ ('c' | 'a')) = ev.key else { return false };
-        let Some(path) = self.text_sel.path.clone() else { return false };
-        if self.focused_input().is_some() { return false; }
-        let Some(spec) = self.node(&path).and_then(|n| n.text.as_ref()) else { return false };
-        if spec.content != self.text_sel.content { return false; }
+        let m = ev.mods;
+        let plain = m.cmd && !m.shift && !m.alt && if cfg!(target_os = "macos") { !m.ctrl } else { !m.logo };
+        if !plain || self.text_sel.path.is_none() || self.focused_input().is_some() { return false; }
+        let Some(i) = self.selection_holder() else { self.clear_text_selection(); return false };
+        let path = self.nodes[i].path.clone();
         if c == 'a' {
-            let len = spec.content.len();
+            let len = self.text_sel.content.len();
             let sel = &mut self.text_sel;
             (sel.anchor, sel.focus, sel.origin, sel.unit) = (0, len, (0, len), Unit::Char);
             self.events.push(format!("select all {path}"));
@@ -244,6 +282,27 @@ mod tests {
         assert_eq!(unit_at(s, 5, Unit::Paragraph), (0, 21), "a paragraph takes its line break");
         assert_eq!(unit_at(s, 23, Unit::Paragraph), (21, s.len()));
         assert_eq!(unit_at("", 0, Unit::Word), (0, 0));
+    }
+
+    #[test]
+    fn line_ends_take_the_lines_last_word_and_paragraph() {
+        let s = "first line\nsecond";
+        assert_eq!(unit_at(s, 10, Unit::Word), (6, 10), "on the break: the line's last word");
+        assert_eq!(unit_at("a\r\nb", 1, Unit::Word), (0, 1));
+        assert_eq!(unit_at("first line\n", 11, Unit::Paragraph), (0, 11), "past the end: the last paragraph");
+        assert_eq!(unit_at("first line\n", 11, Unit::Word), (6, 10));
+        assert_eq!(unit_at("a\n\nb", 2, Unit::Word), (2, 3), "an empty line's break is its own word");
+    }
+
+    #[test]
+    fn offsets_inside_a_character_stay_on_its_boundary() {
+        let s = "a —";
+        for i in 0..=s.len() + 2 {
+            for unit in [Unit::Char, Unit::Word, Unit::Paragraph] {
+                let (a, b) = unit_at(s, i, unit);
+                assert!(s.is_char_boundary(a) && s.is_char_boundary(b), "{i} {unit:?}");
+            }
+        }
     }
 
     #[test]
