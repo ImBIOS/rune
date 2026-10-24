@@ -287,13 +287,18 @@ rune::App::new(spec).fit_content_height().run();
 
 - The top edge stays put and the window stays on its screen: growing past the bottom lifts
   it just enough, and a window the user dragged partly off screen moves no further off.
+- Sizes stay inside the window's `min_size` and `max_size` (`WindowOptions`, else
+  `AppSpec::min_size`) on every platform. Headless runs apply only limits the app set.
 - `center_window` matches AppKit's `center`: centred across, with a quarter of the spare
   height above and three quarters below.
 - On macOS the frame moves on a Rune spring, one display frame at a time. Each frame sets the
   window's frame before taking its drawable and lays the content out at the new size, and
   drawables present inside the frame's Core Animation transaction while it moves, so content
-  pinned to an edge follows it with no stretched, stale or blank strip. A resize mid-flight
-  keeps its speed. Reduced motion jumps.
+  pinned to an edge follows it with no stretched, stale or blank strip. Content at rest
+  follows the window; layout springs and matched flights already running keep going. A
+  resize mid-flight keeps its speed. Dragging the window mid-flight wins: it stays where the
+  user puts it and the size carries on from there. Hiding or minimising it lands the frame.
+  Reduced motion jumps.
 - Windows and Linux resize at once with `request_inner_size`. Wayland can't see or set a
   window's position, so it resizes without being kept on screen and ignores centring.
 - Headless runs move the viewport on the virtual clock, so `--tree` and scripts see each
@@ -301,7 +306,9 @@ rune::App::new(spec).fit_content_height().run();
 - A requested size outlives the window: a closed window reopens at it.
 - `fit_content_height` lays the root out at its natural height for the window's width (give
   it no fixed or `fill` height), opens at that height and follows the content on each
-  change's spring. A width change jumps.
+  change's spring. A width change jumps, and a window the user resizes goes back to its
+  content's height. Unless the app sets a minimum, its minimum height is 0 rather than the
+  default 400 pt.
 - Overlays ignore these; use `OverlayHandle::resize`.
 
 ### Window chrome and shell controls (OpenCode Desktop fidelity)
