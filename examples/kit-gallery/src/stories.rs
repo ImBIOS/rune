@@ -148,6 +148,7 @@ stories! {
     "ui-segmented-control--basic" => segmented_basic,
     "ui-segmented-control--controlled" => segmented_controlled,
     "rune-keybind--symbols" => keybind_symbols,
+    "rune-switch--sizes" => switch_sizes,
     "rune-rolling-text--basic" => rolling_text_basic,
     "rune-markdown--basic" => markdown_basic,
     "rune-markdown--streaming" => markdown_streaming,
@@ -368,6 +369,22 @@ fn switch_states(s: &G, k: &Kit, _: &mut Vec<El>) -> El {
         .child(Switch::new(on_by_default(s, "a")).label("Enabled").on_toggle(flip("a")).build(k))
         .child(Switch::new(s.is("b")).label("Disabled").on_toggle(flip("b")).build(k))
         .child(Switch::new(false).label("Disabled switch").disabled(true).build(k))
+}
+
+/// Every control size off, on, hovered and pressed.
+fn switch_sizes(s: &G, k: &Kit, _: &mut Vec<El>) -> El {
+    let sizes = [("Mini", ControlSize::Mini), ("Small", ControlSize::Small), ("Regular", ControlSize::Regular),
+        ("Large", ControlSize::Large), ("Extra large", ControlSize::ExtraLarge)];
+    col().gap(12.0).children(sizes.into_iter().map(|(name, size)| {
+        let key = format!("size-{name}");
+        let sw = |on: bool, st: State| Switch::new(on).control_size(size).state(st).build(k);
+        row().gap(12.0).center_y()
+            .child(caption(k, name).w(80.0))
+            .child(Switch::new(s.is(&key)).control_size(size).label(name).hide_label().on_toggle(move |s: &mut G| s.flip(&key)).build(k))
+            .child(sw(true, State::Rest))
+            .child(sw(false, State::Hover))
+            .child(sw(true, State::Pressed))
+    }))
 }
 
 fn switch_hidden_label(s: &G, k: &Kit, _: &mut Vec<El>) -> El {

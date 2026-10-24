@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Switch` draws as macOS 27's `NSSwitch`: a capsule track and a pill knob.** The compact
+  (default) switch was a 24 × 16 track with a rounded-square 12-point knob; it is now an
+  `NSSwitch` mini, 36 × 16 with a 21 × 14 knob inset 1 point, so it is 12 points wider.
+  `Switch::control_size(ControlSize)` picks the other measured sizes: Small 44 × 20 (knob
+  26 × 16), Regular 54 × 24 (32 × 20), Large 64 × 28 (38 × 24) and ExtraLarge 80 × 36 (48 × 30).
+  `State::Hover` and `State::Pressed` stretch the knob towards the middle instead of rounding
+  its corners. The standard appearance keeps its 28 × 16 size with a capsule track and round
+  thumb.
 - **Breaking (visual): a `Button` with no size set is 24 points tall, as a regular macOS
   push button, not 28.** New `ControlSize { Mini, Small, Regular, Large, ExtraLarge }` (AppKit's
   names, `#[non_exhaustive]`) with `Button::control_size` and `IconButton::control_size` sizes

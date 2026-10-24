@@ -2,12 +2,13 @@
 
 use rune::{El, TextStyle, Tx, el, row, text};
 
-use crate::{Acts, Kit, State, over, shadows};
+use crate::{Acts, ControlSize, Kit, State, over, shadows};
 
 pub struct Switch {
     label: Option<String>,
     checked: bool,
     standard: bool,
+    size: ControlSize,
     hide_label: bool,
     description: Option<String>,
     state: State,
@@ -20,6 +21,7 @@ impl Switch {
             label: None,
             checked,
             standard: false,
+            size: ControlSize::Mini,
             hide_label: false,
             description: None,
             state: State::Rest,
@@ -42,6 +44,12 @@ impl Switch {
     /// The older, larger look (`appearance="standard"`).
     pub fn standard(mut self) -> Self {
         self.standard = true;
+        self
+    }
+    /// The track and knob of an `NSSwitch` of this size on macOS 27: Mini (36 × 16, the size
+    /// System Settings uses) unless set. The standard appearance keeps its own size.
+    pub fn control_size(mut self, s: ControlSize) -> Self {
+        self.size = s;
         self
     }
     pub fn state(mut self, s: State) -> Self {
@@ -68,7 +76,7 @@ impl Switch {
         let c = &k.c;
         let hover = self.state == State::Hover;
         let disabled = self.state == State::Disabled;
-        let control = if self.standard { self.standard_control(k, hover) } else { self.compact_control(k, hover) };
+        let control = if self.standard { self.standard_control(k, hover) } else { self.compact_control(k) };
         let control = if disabled && !self.standard { control.dim(0.5) } else { control };
         let control = if self.state == State::Focus && !self.standard {
             control.outline(2.0, 1.0, c.border_focus)
@@ -94,23 +102,37 @@ impl Switch {
         self.acts.apply(root.focusable(!disabled), !disabled)
     }
 
-    fn compact_control(&self, k: &Kit, hover: bool) -> El {
+    fn compact_control(&self, k: &Kit) -> El {
         let c = &k.c;
+        let hover = self.state == State::Hover;
         let (base, sheen_bottom, elevation, knob) = if self.checked {
             (c.bg_accent, k.light_on(0.1, c.bg_accent), &k.elevation.switch_on, c.knob_on)
         } else {
             (c.layer_04, k.light_on(0.2, c.layer_04), &k.elevation.switch_off, c.knob)
         };
         let overlay = if self.checked { k.on(c.contrast_hover, c.bg_accent) } else { c.hover };
-        // The thumb grows a point on hover and leans towards the middle when on.
-        let (w, radius) = if hover { (13.0, 3.0) } else { (12.0, 2.0) };
-        let x = 2.0 + if self.checked { if hover { 7.0 } else { 8.0 } } else { 0.0 };
+        // NSSwitch's capsule track and pill knob, measured on macOS 27: (track w, h, knob w, h, inset).
+        let (tw, th, kw, kh, inset) = match self.size {
+            ControlSize::Mini => (36.0, 16.0, 21.0, 14.0, 1.0),
+            ControlSize::Small => (44.0, 20.0, 26.0, 16.0, 2.0),
+            ControlSize::Regular => (54.0, 24.0, 32.0, 20.0, 2.0),
+            ControlSize::Large => (64.0, 28.0, 38.0, 24.0, 2.0),
+            ControlSize::ExtraLarge => (80.0, 36.0, 48.0, 30.0, 3.0),
+        };
+        // The knob stretches towards the middle on hover, and further while pressed.
+        let stretch = match self.state {
+            State::Hover => (kh * 0.15f32).round(),
+            State::Pressed => (kh * 0.35f32).round(),
+            _ => 0.0,
+        };
+        let w = kw + stretch;
+        let x = if self.checked { tw - inset - w } else { inset };
         let thumb = shadows(
             k,
             el().key("thumb")
-                .size(w, 12.0)
-                .absolute(x, 2.0)
-                .radius(radius)
+                .size(w, kh)
+                .absolute(x, inset)
+                .radius(kh / 2.0)
                 .fill(knob)
                 .gradient(k.on(c.depth_top, knob), k.on(c.depth_bottom, knob))
                 .border(0.5, k.on(c.depth_top, knob)),
@@ -118,7 +140,7 @@ impl Switch {
         )
         .motion(k.motion.control);
         let fill = if hover { over(overlay, base) } else { base };
-        let mut track = el().size(24.0, 16.0).radius(4.0).fill(fill).gradient(k.light(0.0), sheen_bottom);
+        let mut track = el().size(tw, th).radius(th / 2.0).fill(fill).gradient(k.light(0.0), sheen_bottom);
         if !hover && self.state == State::Rest {
             track = track.hover(overlay);
         }
@@ -138,15 +160,17 @@ impl Switch {
             (c.surface_base, c.border_weak)
         };
         // A content-box thumb (14 + 1 px border each side) nudged 1 px left over the 1 px track
-        // border; when on it loses its border and moves 12 px right.
+        // border; when on it loses its border and moves 12 px right. Pressed, it stretches
+        // towards the middle.
         let thumb_fill = if disabled { c.std_icon } else { c.std_icon_invert };
-        let mut thumb = el().key("thumb").radius(2.0).fill(thumb_fill);
+        let stretch = if self.state == State::Pressed { 4.0 } else { 0.0 };
+        let mut thumb = el().key("thumb").fill(thumb_fill);
         thumb = if self.checked {
-            thumb.size(14.0, 14.0).absolute(13.0, 1.0)
+            thumb.size(14.0 + stretch, 14.0).absolute(13.0 - stretch, 1.0).radius(7.0)
         } else {
-            thumb.size(16.0, 16.0).absolute(0.0, 0.0).border(1.0, c.std_border)
+            thumb.size(16.0 + stretch, 16.0).absolute(0.0, 0.0).radius(8.0).border(1.0, c.std_border)
         };
         thumb = shadows(k, thumb, &k.elevation.knob).motion(k.motion.control);
-        el().size(28.0, 16.0).radius(3.0).fill(fill).border(1.0, border).motion(k.motion.control).child(thumb)
+        el().size(28.0, 16.0).radius(8.0).fill(fill).border(1.0, border).motion(k.motion.control).child(thumb)
     }
 }
