@@ -195,6 +195,16 @@ impl Win {
         false
     }
 
+    /// Whether none of the window is on screen, read from AppKit (a prewarm acquisition reads
+    /// as visible).
+    #[cfg(target_os = "macos")]
+    fn natively_occluded(&self) -> bool {
+        match &self.panel {
+            Some(panel) => panel.occluded(),
+            None => crate::macos::window_occluded(&self.window),
+        }
+    }
+
     fn stop_pacing(&mut self) {
         #[cfg(target_os = "macos")]
         if let Some(pacing) = &mut self.pacing { pacing.stop(); }
@@ -1706,13 +1716,53 @@ impl<S: 'static> Host<S> {
         self.shared.visible.store(visible, Ordering::Release);
     }
 
+    /// A shown frame with no drawable. Asking for a redraw here would turn the loop at once, for
+    /// as long as the window is occluded or its displays sleep, so it waits for `retry`.
+    fn missed_frame(&mut self, missed: Missed) {
+        let Some(l) = self.win.as_mut() else { return };
+        let now = Instant::now();
+        let wait = l.occluded_wait;
+        if missed == Missed::Occluded {
+            // Covered or asleep with no notification yet: rest as if one came, and look
+            // again on `retry`.
+            l.occluded = true;
+            l.occluded_wait = (wait * 2).min(OCCLUDED_MAX);
+            l.stop_pacing();
+            self.rt.set_live_visible(false);
+            self.secure_input.set(false);
+            self.idle = true;
+        }
+        l.retry = match missed.next(l.paced(), now, wait) {
+            NextFrame::WaitUntil(at) => Some(at),
+            NextFrame::Idle => None,
+        };
+        // What this frame would have run (updates, poll, due timers) still runs, without
+        // drawing. Misses come at the retry's pace, not the display's.
+        self.rt.hidden_timer_frame();
+        self.clipboard.flush(&mut self.rt);
+    }
+
     fn redraw(&mut self) {
         let launcher = self.launcher();
         let (Some(l), Some(_)) = (self.win.as_mut(), self.gpu.as_ref()) else { return };
         let hidden = launcher && !l.visible;
         if (!launcher && (!l.visible || l.occluded)) || l.window.is_minimized().unwrap_or(false) {
             l.stop_pacing();
+            let shown = l.visible;
             self.land_frame();
+            // Covered, asleep or minimised: what the frame would have run (updates, poll, due
+            // timers) still runs, without drawing.
+            if shown {
+                self.rt.hidden_timer_frame();
+                self.clipboard.flush(&mut self.rt);
+            }
+            return;
+        }
+        // Starting the display link for a window that isn't on screen would wait for a tick that
+        // sleeping displays never send, and a running link holds back its timers (`wake_deadline`).
+        #[cfg(target_os = "macos")]
+        if !hidden && l.natively_occluded() {
+            self.missed_frame(Missed::Occluded);
             return;
         }
         #[cfg(target_os = "macos")]
@@ -1740,31 +1790,7 @@ impl<S: 'static> Host<S> {
             Ok(frame) => frame,
             // A hidden launcher frame retries on its first-frame deadline.
             Err(_) if hidden => return,
-            Err(missed) => {
-                // Asking for a redraw here would turn the loop at once, for as long as the
-                // window is occluded or its displays sleep.
-                let now = Instant::now();
-                let wait = l.occluded_wait;
-                if missed == Missed::Occluded {
-                    // Covered or asleep with no notification yet: rest as if one came, and
-                    // look again on `retry`.
-                    l.occluded = true;
-                    l.occluded_wait = (wait * 2).min(OCCLUDED_MAX);
-                    l.stop_pacing();
-                    self.rt.set_live_visible(false);
-                    self.secure_input.set(false);
-                    self.idle = true;
-                }
-                l.retry = match missed.next(l.paced(), now, wait) {
-                    NextFrame::WaitUntil(at) => Some(at),
-                    NextFrame::Idle => None,
-                };
-                // What this frame would have run (updates, poll, due timers) still runs,
-                // without drawing. Misses come at the retry's pace, not the display's.
-                self.rt.hidden_timer_frame();
-                self.clipboard.flush(&mut self.rt);
-                return;
-            }
+            Err(missed) => return self.missed_frame(missed),
         };
         l.occluded_wait = OCCLUDED_RETRY;
         if !hidden && !self.rt.live_visible() && { let size = l.window.inner_size(); size.width > 0 && size.height > 0 } {

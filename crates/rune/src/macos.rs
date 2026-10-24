@@ -407,6 +407,20 @@ pub(crate) fn ns_window(window: &winit::window::Window) -> Option<Retained<NSWin
     content_view(window)?.window()
 }
 
+/// Whether none of `window` is on screen: covered, or its displays asleep. AppKit keeps the
+/// state from the window server's notifications, so reading it costs one message send. wgpu
+/// declines a drawable on the same check.
+pub(crate) fn window_occluded(window: &winit::window::Window) -> bool {
+    ns_window(window).is_some_and(|window| occlusion_hidden(&window))
+}
+
+fn occlusion_hidden(window: &NSWindow) -> bool {
+    const VISIBLE: usize = 1 << 1;
+    // SAFETY: a property read on the main thread.
+    let state: usize = unsafe { msg_send![window, occlusionState] };
+    state & VISIBLE == 0
+}
+
 pub(crate) fn configure_window(window: &winit::window::Window, options: &crate::MacWindowOptions) {
     crate::macos_appearance::install();
     if let Some(window) = ns_window(window) { configure_native(&window, options); }
@@ -563,10 +577,7 @@ impl Panel {
     /// Whether none of the panel is on screen: covered, or its displays asleep. Reads as
     /// visible during a prewarm acquisition.
     pub fn occluded(&self) -> bool {
-        const VISIBLE: usize = 1 << 1;
-        // SAFETY: a property read on the main thread.
-        let state: usize = unsafe { msg_send![&*self.panel, occlusionState] };
-        state & VISIBLE == 0
+        occlusion_hidden(&self.panel)
     }
 
     pub fn show(&self) {
