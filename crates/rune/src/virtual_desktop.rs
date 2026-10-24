@@ -21,8 +21,15 @@ impl VirtualDesktop {
     }
 
     /// The script's desktop; `single` where it sets no displays.
+    #[cfg(test)]
     pub fn from_script(script: Option<&Value>, scale: f64) -> Result<Self, String> {
+        Self::from_script_sized(script, scale, None)
+    }
+
+    /// `from_script`, with one display of `size` points where the script sets none.
+    pub fn from_script_sized(script: Option<&Value>, scale: f64, size: Option<(f64, f64)>) -> Result<Self, String> {
         let mut desktop = Self::single(scale);
+        if let Some((w, h)) = size { desktop.displays[0].frame = [0.0, 0.0, w, h]; }
         let Some(Value::Object(script)) = script else { return Ok(desktop) };
         if let Some(list) = script.get("displays") {
             let Value::Array(list) = list else { return Err("script: \"displays\" must be an array".into()) };
@@ -43,6 +50,29 @@ impl VirtualDesktop {
                 .ok_or("script: \"pointer\" must be [x, y]")?);
         }
         Ok(desktop)
+    }
+
+    /// The primary display (the first when none is marked).
+    pub fn primary(&self) -> &VirtualDisplay {
+        self.displays.iter().find(|d| d.primary).unwrap_or(&self.displays[0])
+    }
+
+    /// A point in desktop pixels (`WindowOptions::position`) in global points, by the scale of
+    /// the display it lies on, else the primary display's.
+    pub fn to_points(&self, (x, y): (i32, i32)) -> (f32, f32) {
+        let d = self.display_at(Some((x, y)));
+        let (x, y) = (f64::from(x), f64::from(y));
+        ((d.frame[0] + (x - d.frame[0] * d.scale) / d.scale) as f32, (d.frame[1] + (y - d.frame[1] * d.scale) / d.scale) as f32)
+    }
+
+    /// The display a point in desktop pixels lies on, else the primary display.
+    pub fn display_at(&self, at: Option<(i32, i32)>) -> &VirtualDisplay {
+        let on = |d: &&VirtualDisplay| at.is_some_and(|(x, y)| {
+            let [dx, dy, w, h] = d.frame.map(|v| v * d.scale);
+            let (x, y) = (f64::from(x), f64::from(y));
+            x >= dx && y >= dy && x < dx + w && y < dy + h
+        });
+        self.displays.iter().find(on).unwrap_or_else(|| self.primary())
     }
 
     /// What a window factory sees: desktop pixels, like native displays.

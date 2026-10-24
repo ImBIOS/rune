@@ -15,7 +15,7 @@ use crate::render::{Gpu, OFFSCREEN_FORMAT, Offscreen, Renderer, write_png};
 use crate::runtime::{Cx, Env, Runtime, Waker};
 use crate::text::TextSystem;
 
-pub use crate::headless_run::{HeadlessRun, PointerAction, ScriptEvent, ScriptPoint, TimedEvent, headless_run};
+pub use crate::headless_run::{HeadlessRun, PointerAction, ScriptEvent, ScriptPoint, TimedEvent, WindowFrame, headless_run};
 
 pub struct AppSpec<S: 'static> {
     pub title: &'static str,
@@ -181,6 +181,8 @@ pub struct Args {
     pub(crate) keys_theme: Option<bool>,
     /// `--pointer`: a ripple where the script presses.
     pub(crate) pointer: bool,
+    /// `--desktop BACKDROP`: every visible window composited at its frame over this image.
+    pub(crate) desktop: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -257,6 +259,7 @@ impl Args {
                     a.keys_theme = crate::keycaps::parse_theme(&v).unwrap_or_else(|| die("--keys-theme is auto, light or dark"));
                 }
                 "--pointer" => a.pointer = true,
+                "--desktop" => a.desktop = Some(val(&mut i).into()),
                 "--tree" => a.tree = Some(val(&mut i).into()),
                 "--trace" => a.trace = Some(val(&mut i).into()),
                 "--native" => a.native = true,
@@ -296,6 +299,7 @@ impl Args {
             || self.list_scenes
             || self.first_pixels
             || self.list_windows
+            || self.desktop.is_some()
     }
 }
 
@@ -320,6 +324,11 @@ const HELP: &str = "usage: <app> [window]
                         bottom, bottom-right, top-left, top, top-right); never in --tree
   --keys-theme auto|light|dark   cap colours (default auto: match the app's background)
   --pointer             draw a ripple where the script presses
+  --desktop BACKDROP.png  draw every visible window at its placed frame, with corners and
+                        shadows, over the backdrop (scaled to fill). The output is --size
+                        points, else the script's primary display, else the backdrop's pixels
+                        at --scale; script x/y are output points, keys go to the key window;
+                        --window KEY picks the window --scene and --tree describe
   --strip out.png --crop x,y,w,h --every K    tile dumped frames into one image
                         (repeat --crop to stack several regions per frame; --cols N per row)
   --tree out.json       element tree with animated values
@@ -331,7 +340,7 @@ const HELP: &str = "usage: <app> [window]
   --chrome              draw where macOS puts the traffic lights; list elements overlapping them
   other arguments are passed to the app (rune::tooling::extra_args)";
 
-fn die(msg: &str) -> ! {
+pub(crate) fn die(msg: &str) -> ! {
     eprintln!("{msg}");
     std::process::exit(2)
 }
@@ -400,6 +409,10 @@ fn headless_window(windows: Vec<crate::AnyWindowSpec>, displays: &[crate::Displa
         None if !windows.is_empty() => 0,
         None => die("the app created no windows"),
     };
+    if args.desktop.is_some() {
+        crate::desktop::run(windows, index, args);
+        return;
+    }
     let mut window = windows.remove(index);
     let args = window.resolve_args(args);
     if !args.headless() {
@@ -435,7 +448,7 @@ pub(crate) fn with_scene<S: 'static>(spec: &AppSpec<S>, mut s: S, scene: Option<
 // Scripts
 
 #[derive(Clone, Debug)]
-enum Pos {
+pub(crate) enum Pos {
     Xy(f32, f32),
     Key(String),
     /// Relative to the last pointer-down position.
@@ -443,7 +456,7 @@ enum Pos {
 }
 
 #[derive(Clone, Debug)]
-enum Kind {
+pub(crate) enum Kind {
     /// A named time with no input effect.
     Mark(String),
     Focus(bool),
@@ -487,15 +500,15 @@ fn key_named(name: &str) -> Option<Key> {
 }
 
 #[derive(Clone, Debug)]
-struct Ev {
-    t: f64,
-    kind: Kind,
-    pos: Pos,
+pub(crate) struct Ev {
+    pub t: f64,
+    pub kind: Kind,
+    pub pos: Pos,
 }
 
 impl Ev {
     /// The event as apps read it through `headless_run`.
-    fn public(&self) -> TimedEvent {
+    pub(crate) fn public(&self) -> TimedEvent {
         let at = || match &self.pos {
             Pos::Xy(x, y) => ScriptPoint::At(*x, *y),
             Pos::Key(key) => ScriptPoint::Element(key.clone()),
@@ -523,21 +536,31 @@ impl Ev {
     }
 }
 
-fn read_script(args: &Args) -> Option<Value> {
+pub(crate) fn read_script(args: &Args) -> Option<Value> {
     args.script.as_ref().map(|path| {
         let text = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
         serde_json::from_str(&text).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())))
     })
 }
 
-fn load_script(script: &Value) -> Vec<Ev> {
+pub(crate) fn load_script(script: &Value) -> Vec<Ev> {
     let list = match script { Value::Object(o) => o.get("events").cloned().unwrap_or_else(|| json!([])), v => v.clone() };
     parse_script(list)
 }
 
-/// The script's displays and pointer, which headless `place()` resolves against.
-fn desktop(args: &Args, script: Option<&Value>) -> crate::virtual_desktop::VirtualDesktop {
-    crate::virtual_desktop::VirtualDesktop::from_script(script, f64::from(args.scale.unwrap_or(2.0))).unwrap_or_else(|e| die(&e))
+/// The script's displays and pointer, which headless `place()` resolves against. Without
+/// scripted displays, a `--desktop` run has one display the size of its output: `--size`, else
+/// the backdrop's pixels at `--scale`.
+pub(crate) fn desktop(args: &Args, script: Option<&Value>) -> crate::virtual_desktop::VirtualDesktop {
+    let scale = f64::from(args.scale.unwrap_or(2.0));
+    let size = args.desktop.as_ref().map(|path| match args.size {
+        Some((w, h)) => (f64::from(w), f64::from(h)),
+        None => {
+            let (w, h) = ::image::image_dimensions(path).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
+            (f64::from(w) / scale, f64::from(h) / scale)
+        }
+    });
+    crate::virtual_desktop::VirtualDesktop::from_script_sized(script, scale, size).unwrap_or_else(|e| die(&e))
 }
 
 fn parse_script(list: Value) -> Vec<Ev> {
@@ -1110,7 +1133,7 @@ mod window_tests {
 }
 
 pub fn headless<S: 'static>(mut app: crate::app::App<S>, args: Args) {
-    if app.windows.is_empty() {
+    if app.windows.is_empty() && args.desktop.is_none() {
         if args.list_windows { println!("main"); return; }
         if args.window.as_deref().is_some_and(|key| key != "main") {
             die("no such window; this app has only 'main'");
@@ -1162,6 +1185,8 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         start: timeline.start_frame as f64 * timeline.dt,
         frames: timeline.frames,
         end: timeline.last_frame as f64 * timeline.dt,
+        desktop: None,
+        windows: Default::default(),
     });
     let (spec, state, shared) = app.into_parts(args.scene.as_deref());
     let shortcuts = crate::shortcuts::Guard::attach(&shared, std::sync::Arc::new(|| {}), true, false);
@@ -1406,22 +1431,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     }
     gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
 
-    if let (Some(p), false) = (&args.strip, strip.is_empty()) {
-        let (cw, ch) = tile_size(wp, hp, &crops_px, gap);
-        let cols = strip.len().min(args.cols) as u32;
-        let rows = (strip.len() as u32).div_ceil(cols);
-        let (sw, sh) = (cols * cw + (cols - 1) * gap, rows * ch + (rows - 1) * gap);
-        let mut img: Vec<u8> = [128, 128, 128, 255].repeat((sw * sh) as usize);
-        for (i, f) in strip.iter().enumerate() {
-            let (cx, cy) = ((i as u32 % cols) * (cw + gap), (i as u32 / cols) * (ch + gap));
-            for y in 0..ch {
-                let dst = (((cy + y) * sw + cx) * 4) as usize;
-                let src = (y * cw * 4) as usize;
-                img[dst..dst + (cw * 4) as usize].copy_from_slice(&f[src..src + (cw * 4) as usize]);
-            }
-        }
-        write_png(p, sw, sh, &img).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
-    }
+    if let Some(p) = &args.strip { write_strip(p, &strip, (wp, hp), &crops_px, gap, args.cols); }
 
     if frames > 0 {
         let wall = wall.elapsed().as_secs_f64();
@@ -1457,20 +1467,39 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     }
 }
 
+/// Tiles `--strip`'s frames, `cols` to a row, into one PNG.
+pub(crate) fn write_strip(p: &std::path::Path, strip: &[Vec<u8>], (wp, hp): (u32, u32), crops_px: &[[u32; 4]], gap: u32, cols: usize) {
+    if strip.is_empty() { return; }
+    let (cw, ch) = tile_size(wp, hp, crops_px, gap);
+    let cols = strip.len().min(cols) as u32;
+    let rows = (strip.len() as u32).div_ceil(cols);
+    let (sw, sh) = (cols * cw + (cols - 1) * gap, rows * ch + (rows - 1) * gap);
+    let mut img: Vec<u8> = [128, 128, 128, 255].repeat((sw * sh) as usize);
+    for (i, f) in strip.iter().enumerate() {
+        let (cx, cy) = ((i as u32 % cols) * (cw + gap), (i as u32 / cols) * (ch + gap));
+        for y in 0..ch {
+            let dst = (((cy + y) * sw + cx) * 4) as usize;
+            let src = (y * cw * 4) as usize;
+            img[dst..dst + (cw * 4) as usize].copy_from_slice(&f[src..src + (cw * 4) as usize]);
+        }
+    }
+    write_png(p, sw, sh, &img).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
+}
+
 /// Which frames a headless run renders and dumps.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Timeline {
-    fps: f64,
-    dt: f64,
-    start_frame: usize,
+pub(crate) struct Timeline {
+    pub fps: f64,
+    pub dt: f64,
+    pub start_frame: usize,
     /// Frames dumped from `start_frame` (0 when nothing is dumped).
-    frames: usize,
-    snap_frame: usize,
-    last_frame: usize,
+    pub frames: usize,
+    pub snap_frame: usize,
+    pub last_frame: usize,
 }
 
 impl Timeline {
-    fn of(args: &Args, script: &[Ev]) -> Result<Timeline, String> {
+    pub(crate) fn of(args: &Args, script: &[Ev]) -> Result<Timeline, String> {
         let mark = |name: &str| script.iter().find_map(|e| matches!(&e.kind, Kind::Mark(n) if n == name).then_some(e.t));
         let resolve = |spec: &String| {
             // Exact names win over offsets, including names such as "step-1" or "end+0.5".
@@ -1520,11 +1549,11 @@ impl Timeline {
 }
 
 /// A frame whose pixels are being read back, and where they go.
-struct Shot {
-    k: usize,
-    dump: bool,
-    video: bool,
-    snap: bool,
+pub(crate) struct Shot {
+    pub k: usize,
+    pub dump: bool,
+    pub video: bool,
+    pub snap: bool,
 }
 
 /// Antialiased discs where macOS draws close, minimise and zoom, plus a hairline box 4 pt
@@ -1580,7 +1609,7 @@ fn report_traffic_light_overlaps<S>(rt: &Runtime<S>, lights: &[[f32; 4]; 3]) {
     eprintln!("rune: chrome: traffic lights at {:?}, {n} overlapping elements", lights[0].map(r2));
 }
 
-fn tile_size(w: u32, h: u32, crops: &[[u32; 4]], gap: u32) -> (u32, u32) {
+pub(crate) fn tile_size(w: u32, h: u32, crops: &[[u32; 4]], gap: u32) -> (u32, u32) {
     if crops.is_empty() {
         return (w, h);
     }
@@ -1927,6 +1956,57 @@ mod tests {
     }
 
     #[test]
+    fn desktop_composites_each_window_at_its_frame_with_a_shadow() {
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rune-desktop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let backdrop = dir.join("backdrop.png");
+        ::image::RgbaImage::from_pixel(240, 160, ::image::Rgba([128, 128, 128, 255])).save(&backdrop).unwrap();
+        let script = dir.join("script.json");
+        // A click on the back window gives it the keyboard and brings it to the front.
+        std::fs::write(&script, r#"[{"t": 0.1, "type": "tap", "x": 45, "y": 35}]"#).unwrap();
+        let fill = || AppSpec::new("fill", (1.0, 1.0), || crate::Color::TRANSPARENT, |c, _| crate::el().w_full().h_full().fill(*c));
+        let red = crate::Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+        let blue = crate::Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 };
+        let render = |name: &str| {
+            let snap = dir.join(name);
+            let args = ["--desktop", backdrop.to_str().unwrap(), "--script", script.to_str().unwrap(),
+                "--scale", "2", "--at", "0.5", "--snap", snap.to_str().unwrap()];
+            crate::run_windows_with_args(crate::RunOptions::default(), args.map(String::from), move |displays| {
+                assert_eq!(displays[0].size, (240, 160), "one display the backdrop's size");
+                [crate::WindowSpec::new("back", fill()).state(red).options(crate::WindowOptions {
+                    position: Some((40, 40)), physical_size: Some((100, 60)), ..Default::default()
+                }), crate::WindowSpec::new("panel", fill()).state(blue).configured_options(crate::WindowOptions {
+                    borderless: true, position: Some((160, 100)), physical_size: Some((40, 40)), ..Default::default()
+                }.macos(crate::MacWindowOptions::default().shadow(false)))]
+            });
+            std::fs::read(snap).unwrap()
+        };
+        let bytes = render("a.png");
+        assert_eq!(bytes, render("b.png"), "byte-identical across runs");
+        let png = ::image::load_from_memory(&bytes).unwrap().into_rgba8();
+        let px = |x: u32, y: u32| png.get_pixel(x, y).0;
+        assert_eq!(png.dimensions(), (240, 160));
+        // The back window covers points (20, 20) to (70, 50); the panel (80, 50) to (100, 70).
+        let (red, blue) = (|p: [u8; 4]| p[0] > 245 && p[1] < 10 && p[2] < 10, |p: [u8; 4]| p[2] > 245 && p[0] < 10 && p[1] < 10);
+        assert!(red(px(90, 70)) && red(px(40, 70)) && red(px(139, 70)) && red(px(90, 40)) && red(px(90, 99)), "the window's pixels land at its frame");
+        assert!(!red(px(39, 70)) && !red(px(140, 70)) && !red(px(90, 100)), "and stop at its edges");
+        assert!(blue(px(160, 100)) && blue(px(199, 139)) && blue(px(180, 120)));
+        assert!(!red(px(40, 40)), "a titled window's corners are rounded");
+        let below = px(90, 106);
+        assert!(below[0] < 112 && below[0] == below[2], "a soft shadow under the window: {below:?}");
+        assert_eq!(px(180, 146), [128, 128, 128, 255], "no shadow when the window asks for none");
+        assert_eq!(px(4, 156), [128, 128, 128, 255], "the backdrop elsewhere");
+        let run = headless_run().unwrap();
+        assert_eq!(run.desktop(), Some(backdrop.as_path()));
+        let frames = run.windows_at(0.5);
+        let back = frames.iter().find(|f| f.key == "back").unwrap();
+        assert_eq!((back.frame, back.visible, back.focused), ([20.0, 20.0, 50.0, 30.0], true, true));
+        assert!(run.window_frames().iter().any(|f| f.key == "panel" && f.focused && f.t == 0.0), "the topmost window starts with the keyboard");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn keycaps_draw_over_frames_but_never_enter_the_tree() {
         let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("rune-keys-{}", std::process::id()));
@@ -2037,7 +2117,7 @@ mod tests {
 }
 
 /// The crops of one frame stacked vertically (the whole frame when there are none).
-fn tile(px: &[u8], w: u32, h: u32, crops: &[[u32; 4]], gap: u32) -> Vec<u8> {
+pub(crate) fn tile(px: &[u8], w: u32, h: u32, crops: &[[u32; 4]], gap: u32) -> Vec<u8> {
     if crops.is_empty() {
         return px.to_vec();
     }

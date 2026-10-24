@@ -250,6 +250,11 @@ impl AnyWindowSpec {
     /// Render this window headless; `scale` converts a physical size option to points.
     pub(crate) fn headless(self, args: crate::tooling::Args, scale: f32) { self.0.headless(args, scale) }
 
+    /// This window as one member of a `--desktop` composite; `selected` takes `--scene`.
+    pub(crate) fn desktop(self, args: &crate::tooling::Args, selected: bool, scale: f32) -> Box<dyn crate::desktop::Member> {
+        self.0.desktop(args, selected, scale)
+    }
+
     pub(crate) fn start(self, inherited: crate::tooling::Args, cx: crate::window::Start<'_>) -> Option<Box<dyn crate::window::AnyHost>> {
         self.0.start(inherited, cx)
     }
@@ -264,6 +269,7 @@ trait ErasedWindow {
     fn take_windows(&mut self) -> Vec<AnyWindowSpec>;
     fn resolve_args(&mut self, inherited: crate::tooling::Args) -> crate::tooling::Args;
     fn headless(self: Box<Self>, args: crate::tooling::Args, scale: f32);
+    fn desktop(self: Box<Self>, args: &crate::tooling::Args, selected: bool, scale: f32) -> Box<dyn crate::desktop::Member>;
     fn start(self: Box<Self>, inherited: crate::tooling::Args, cx: crate::window::Start<'_>) -> Option<Box<dyn crate::window::AnyHost>>;
 }
 
@@ -281,6 +287,10 @@ impl<S: 'static> ErasedWindow for Erased<S> {
         let WindowSpec { mut app, options, .. } = self.spec;
         if let Some((w, h)) = options.physical_size { app.spec.size = (w as f32 / scale, h as f32 / scale); }
         crate::tooling::headless_configured(app, args, options.transparent);
+    }
+    fn desktop(self: Box<Self>, args: &crate::tooling::Args, selected: bool, scale: f32) -> Box<dyn crate::desktop::Member> {
+        let Erased { spec, handle, .. } = *self;
+        Box::new(crate::desktop::Window::new(spec, handle, args, selected, scale))
     }
     fn start(self: Box<Self>, mut inherited: crate::tooling::Args, cx: crate::window::Start<'_>) -> Option<Box<dyn crate::window::AnyHost>> {
         // A secondary window is not what --scene or --size describe unless --window selects it.

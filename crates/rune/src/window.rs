@@ -238,6 +238,12 @@ impl WindowHandle {
         route.0 = Some((proxy, slot));
     }
 
+    /// A headless run never binds a host; it takes the queued requests instead.
+    pub(crate) fn take_headless(&self) -> Vec<WakeEvent> {
+        let queued = std::mem::take(&mut self.native.route.lock().unwrap().1);
+        queued.into_iter().map(|request| request(0)).collect()
+    }
+
     fn send(&self, request: impl FnOnce(usize) -> WakeEvent + Send + 'static) {
         let mut route = self.native.route.lock().unwrap();
         match &route.0 {

@@ -100,6 +100,7 @@ pub mod runtime;
 pub mod shape;
 mod virtual_list;
 mod virtual_desktop;
+mod desktop;
 mod flight;
 pub mod file_dialog;
 pub mod text;

@@ -18,9 +18,44 @@ pub struct HeadlessRun {
     pub(crate) start: f64,
     pub(crate) frames: usize,
     pub(crate) end: f64,
+    pub(crate) desktop: Option<PathBuf>,
+    pub(crate) windows: std::sync::Arc<std::sync::Mutex<Vec<WindowFrame>>>,
+}
+
+/// Where a `--desktop` run drew one window from time `t` on.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowFrame {
+    pub t: f64,
+    pub key: String,
+    /// x, y, width, height in output points (script coordinates).
+    pub frame: [f32; 4],
+    pub visible: bool,
+    /// The key window, which script keys reach.
+    pub focused: bool,
 }
 
 impl HeadlessRun {
+    /// The `--desktop` backdrop, when the run composites every window over it.
+    pub fn desktop(&self) -> Option<&Path> { self.desktop.as_deref() }
+
+    /// A `--desktop` run's window frames so far: each window at the start, then one entry
+    /// whenever one moves, resizes, shows, hides or takes keys. Empty otherwise.
+    pub fn window_frames(&self) -> Vec<WindowFrame> { self.windows.lock().unwrap().clone() }
+
+    /// Each window as it stands at time `t` in a `--desktop` run, in the order the app made them.
+    pub fn windows_at(&self, t: f64) -> Vec<WindowFrame> {
+        let frames = self.windows.lock().unwrap();
+        let mut out: Vec<WindowFrame> = Vec::new();
+        for f in frames.iter().filter(|f| f.t <= t + 1e-9) {
+            match out.iter_mut().find(|o| o.key == f.key) {
+                Some(o) => *o = f.clone(),
+                None => out.push(f.clone()),
+            }
+        }
+        out
+    }
+
     /// The `--script` file.
     pub fn script(&self) -> Option<&Path> { self.script.as_deref() }
 
@@ -45,7 +80,8 @@ impl HeadlessRun {
     /// Frames per virtual second (`--fps`, default 60).
     pub fn fps(&self) -> f64 { self.fps }
 
-    /// The rendered window's viewport in points (`--size`, or the window's own size).
+    /// The rendered window's viewport in points (`--size`, or the window's own size); the whole
+    /// output with `--desktop`.
     pub fn size(&self) -> (f32, f32) { self.size }
 
     /// Seconds of virtual time at the first dumped frame (`--start`, marks resolved).
