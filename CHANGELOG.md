@@ -5,6 +5,16 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Text in fonts with a `trak` table (the macOS system font) now has the same width at every
+  display scale, matching AppKit.** The font's size-specific tracking used to be looked up at
+  the size in device pixels, so at 2x 14 pt text was tracked as 28 pt text. It is now applied
+  at the point size, as Core Text does, within 0.003 pt per glyph of Core Text at 8–34 pt. At
+  2x, system-font text gets narrower per glyph by 0.18 pt at 13 pt, 0.34 pt at 14 pt, 0.52 pt
+  at 16 pt and 0.63 pt at 17–20 pt (a 34-character 14 pt label is 11.6 pt narrower), and wider
+  by 0.19 pt at 11 pt and 0.36 pt at 8 pt; 12 pt and 24 pt barely move. Text at 1x moves by
+  at most 1/2048 em per glyph. Wrapped text can break at different words. Fonts without
+  `trak`, like the bundled Inter and IBM Plex Mono, are unchanged. `TextStyle::tracking` adds
+  to the font's tracking; `TextStyle::features("'trak' 0")` turns the font's tracking off.
 - **Shortcut labels follow layouts that change under ⌘ (macOS).** `Shortcut::keycaps` (the
   recorder, its error text and native menu key equivalents) now reads the key's character
   under the chord's ⌘ and ⌃, so on "Dvorak – QWERTY ⌘" ⌘ plus the US-K key shows ⌘K, not ⌘T,
@@ -14,6 +24,7 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   upper-cases only single characters, so "Space" no longer draws "SPACE". The layout lookup
   also declares `UCKeyTranslate`'s string lengths at their real 8-byte width; it wrote past a
   4-byte stack slot on every call.
+||||||| parent of 491a7d7 (Document trak tracking and its opt-out)
 - **Native pop-up and context menus.** `tx.popup_menu(PopupMenu, anchor, on_pick)` opens an
   `NSMenu` over an element key (a picker's selected item sits over the element, as SwiftUI's
   menu-style `Picker` does) or at a `PointerPress`. `on_pick` gets the picked id after the menu

@@ -49,11 +49,13 @@ pub struct TextStyle {
     pub family: Family,
     /// Line height in points; 0 means 1.25 × size.
     pub line_height: f32,
-    /// Letter spacing in points.
+    /// Letter spacing in points, added to the font's own size-specific tracking (see `features`).
     pub tracking: f32,
     /// CSS OpenType settings, e.g. `"'opsz' 14, 'wght' 500"`. Empty preserves font defaults.
     pub variations: &'static str,
-    /// CSS OpenType settings, e.g. `"'tnum' 1, 'ss01' 1"`.
+    /// CSS OpenType settings, e.g. `"'tnum' 1, 'ss01' 1"`. Fonts with a `trak` table (the macOS
+    /// system font among them) are tracked at their point size, as Core Text does; `'trak' 0`
+    /// turns that off.
     pub features: &'static str,
     pub optical_size: OpticalSize,
     /// The family's italic face, or a synthetic oblique when it has none.
