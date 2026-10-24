@@ -112,7 +112,9 @@ source each time, and earlier blocks stay mounted.
   row rules and header fill; `table_outline(None)`, `table_rules` and `table_header_text` give
   the look of a web table (no outline, a rule under every row, a dimmer header).
 - **```` ```diff ````** (or `patch`) fences tint `+` and `-` lines edge to edge, and dim `@@`
-  and file header lines. Set colours with `MarkdownStyle::diff` and `diff_hunk`.
+  and file header lines. Set colours with `MarkdownStyle::diff` and `diff_hunk`. Line text
+  keeps the body colour unless `diff_text(added, removed)` or `diff_text_tint(0.5)` (toward the
+  theme's green and red) colours it.
 - **```` ```mermaid ````** (feature `mermaid`) draws flowcharts and sequence diagrams natively,
   with no JS or webview, themed through `MarkdownStyle::diagram*`. Layout runs once per source
   and is cached. Anything outside the supported subset (listed in `src/mermaid.rs`) shows as

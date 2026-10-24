@@ -350,6 +350,18 @@ fn diffs_tint_whole_lines_and_dim_hunk_headers() {
     assert_eq!(by_key(&rt, "l3").rect[2], block.rect[2], "tints run edge to edge");
     let header = rt.elements().into_iter().find(|e| e.text.as_deref() == Some("@@ -1,2 +1,2 @@")).unwrap();
     assert_eq!(header.text_color, Some(hunk));
+    let line_color = |rt: &Runtime<String>, t: &str| rt.elements().into_iter().find(|e| e.text.as_deref() == Some(t)).unwrap().text_color.unwrap();
+    let text = Kit::neutral(false).c.text_base;
+    assert_eq!((line_color(&rt, "+new"), line_color(&rt, "-old")), (text, text), "line text is untinted by default");
+
+    fn tinted(src: &String, _: &mut Cx<String>) -> El {
+        col().w_full().child(Markdown::new(src.clone()).render(&MarkdownStyle::neutral(false).diff_text_tint(0.5)))
+    }
+    let mut rt = Runtime::new(src.to_owned(), tinted, (480.0, 400.0), Env::new(false, 1.0));
+    rt.frame(0.0);
+    let (add, remove) = (line_color(&rt, "+new"), line_color(&rt, "-old"));
+    assert!(add.g > add.r && remove.r > remove.g, "{add:?} {remove:?}");
+    assert_eq!(line_color(&rt, " keep"), text);
 }
 
 #[test]

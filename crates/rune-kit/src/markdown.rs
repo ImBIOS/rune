@@ -504,6 +504,9 @@ pub struct MarkdownStyle {
     table_tabular: bool,
     diff_add: Color,
     diff_remove: Color,
+    diff_add_text: Color,
+    diff_remove_text: Color,
+    diff_hues: [Color; 2],
     diff_hunk: Color,
     pub(crate) diagram: DiagramPaint,
 }
@@ -525,11 +528,11 @@ pub(crate) struct DiagramPaint {
     pub max_width: f32,
 }
 
-/// `t` of the way from `base` toward `hue` in Oklab, opaque: a quiet wash that keeps `base`'s
-/// lightness close in both themes.
+/// `t` of the way from `base` toward `hue` in Oklab, at `base`'s alpha: a quiet wash that keeps
+/// `base`'s lightness close in both themes.
 fn tint(base: Color, hue: Color, t: f32) -> Color {
     let [a, b] = [base.to_oklab(), hue.to_oklab()];
-    Color::from_oklab([0, 1, 2, 3].map(|i| if i == 3 { 1.0 } else { a[i] + (b[i] - a[i]) * t }))
+    Color::from_oklab([0, 1, 2, 3].map(|i| if i == 3 { a[3] } else { a[i] + (b[i] - a[i]) * t }))
 }
 
 impl MarkdownStyle {
@@ -561,6 +564,9 @@ impl MarkdownStyle {
             table_tabular: true,
             diff_add: tint(c.layer_01, c.success.icon, if k.dark { 0.11 } else { 0.14 }),
             diff_remove: tint(c.layer_01, c.danger.icon, if k.dark { 0.11 } else { 0.14 }),
+            diff_add_text: c.text_base,
+            diff_remove_text: c.text_base,
+            diff_hues: [c.success.icon, c.danger.icon],
             diff_hunk: c.text_muted,
             diagram: DiagramPaint {
                 text: c.text_base,
@@ -687,6 +693,20 @@ impl MarkdownStyle {
     pub fn diff(mut self, added: Color, removed: Color) -> Self {
         self.diff_add = added;
         self.diff_remove = removed;
+        self
+    }
+    /// The text colours of a diff's added and removed lines (the body text colour by default).
+    pub fn diff_text(mut self, added: Color, removed: Color) -> Self {
+        self.diff_add_text = added;
+        self.diff_remove_text = removed;
+        self
+    }
+    /// Tints added and removed lines' text `amount` (0 to 1) of the way toward the theme's green
+    /// and red, from the text colour set so far; around 0.5 reads clearly in both themes.
+    pub fn diff_text_tint(mut self, amount: f32) -> Self {
+        let t = amount.clamp(0.0, 1.0);
+        self.diff_add_text = tint(self.text, self.diff_hues[0], t);
+        self.diff_remove_text = tint(self.text, self.diff_hues[1], t);
         self
     }
     /// The text colour of a diff's `@@` hunk headers and file header lines.
@@ -873,8 +893,8 @@ impl Renderer {
             let header = ["@@", "diff ", "index ", "--- ", "+++ "].iter().any(|p| line.starts_with(p));
             let (tint, color) = match line.as_bytes().first() {
                 _ if header => (None, s.diff_hunk),
-                Some(b'+') => (Some(s.diff_add), s.text),
-                Some(b'-') => (Some(s.diff_remove), s.text),
+                Some(b'+') => (Some(s.diff_add), s.diff_add_text),
+                Some(b'-') => (Some(s.diff_remove), s.diff_remove_text),
                 _ => (None, s.text),
             };
             let shown = if line.is_empty() { " " } else { line };

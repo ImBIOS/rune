@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`MarkdownStyle::diff_text(added, removed)` and `diff_text_tint(amount)`** colour the text
+  of a diff's added and removed lines (`diff_text_tint` blends the text colour toward the
+  theme's green and red). Off by default: line text keeps the body colour.
 - **rune-kit `Markdown` table cells use tabular figures** (`'tnum' 1`), so numbers line up down
   a column; only digits change width. New `MarkdownStyle` builders: `table_outline(Option<Color>)`
   (`None` draws no outline and adds a rule under the last row), `table_rules`,
