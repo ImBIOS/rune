@@ -107,19 +107,19 @@ impl Renderer {
                     [p.clip[0].max(p.limit[0]) - grow, p.clip[1].max(p.limit[1]) - grow,
                         p.clip[2].min(p.limit[2]) + grow, p.clip[3].min(p.limit[3]) + grow]
                 });
-                let clip = i.clip;
+                let blur = layer_blur::sigma(i.params[2]);
                 self.layers.stack.push(self.layers.plan.len());
                 self.layers.plan.push(Layer {
                     begin: index as u32, end: 0, parent,
                     bounds: [i.rect[0], i.rect[1], i.rect[0] + i.rect[2], i.rect[1] + i.rect[3]],
-                    clip,
+                    clip: i.clip,
                     limit,
                     fade: i.fade,
                     clip_radius: f32::from_bits(i.fade[3]),
                     opacity: if hidden { 0.0 } else { i.fill[3].clamp(0.0, 1.0) },
                     blend: if i.params[0] == 1.0 { Blend::PlusLighter } else { Blend::SourceOver },
-                    blur: layer_blur::sigma(i.params[2]),
-                    support: parent.map_or(0.0, |p| self.layers.plan[p].support) + (3.0 * layer_blur::sigma(i.params[2])).ceil(),
+                    blur,
+                    support: parent.map_or(0.0, |p| self.layers.plan[p].support) + (3.0 * blur).ceil(),
                 });
             } else if i.params[1] == KIND_LAYER_END {
                 let at = self.layers.stack.pop().expect("unbalanced layer end");
