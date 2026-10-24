@@ -23,6 +23,7 @@ members = [
     "examples/dev-panel",
     "examples/cursed-settings",
     "examples/drag-out",
+    "examples/matched",
 ]
 exclude = ["tools/rune-dev-guard"]
 
