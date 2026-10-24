@@ -60,6 +60,8 @@ mod layout_diagnostics;
 mod focus;
 #[path = "physical_dispatch.rs"]
 mod physical_dispatch;
+#[path = "modifier_keys.rs"]
+mod modifier_keys;
 #[path = "popup_dispatch.rs"]
 mod popup_dispatch;
 #[path = "scroll_bottom.rs"]
@@ -596,6 +598,8 @@ pub struct Runtime<S: 'static> {
     /// on. Its repeats are dropped once focus has moved, so a held key that closed something
     /// can't act again on whatever took focus next.
     held: Option<physical_dispatch::HeldKey>,
+    /// Modifier keys down, for `Key::Modifier` (off unless the app opts in).
+    modifier_keys: modifier_keys::ModifierKeys,
     /// Tab visits every control; off, only text fields and lists (macOS Full Keyboard
     /// Access off). Native hosts sample the system setting; headless runtimes default on.
     full_keyboard_access: bool,
@@ -857,6 +861,7 @@ impl<S: 'static> Runtime<S> {
             hover_focus: false,
             typeahead: (String::new(), f64::NEG_INFINITY),
             held: None,
+            modifier_keys: Default::default(),
             full_keyboard_access: true,
             modal_stack: Vec::new(),
             modal_index: None,
@@ -1897,6 +1902,7 @@ impl<S: 'static> Runtime<S> {
     /// Offer a logical key that already passed `held_gate` to the app, the focused
     /// input's handler, focus traversal and the focused editor, in that order.
     fn route_key(&mut self, ev: &KeyEvent, repeat: bool, one: &mut Tx) -> bool {
+        if matches!(ev.key, crate::Key::Modifier { .. }) { return !repeat && self.route_modifier(ev, one); }
         one.key_repeat = repeat;
         let shown = self.keyboard_focus || self.hover_focus;
         self.keyboard_focus = true;

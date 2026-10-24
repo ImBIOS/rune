@@ -226,6 +226,8 @@ impl<S> WindowSpec<S> {
     /// warning when a `Compositor` is set.
     pub fn srgb_blend(mut self, enabled: bool) -> Self { self.app = self.app.srgb_blend(enabled); self }
     pub fn on_focus(mut self, f: fn(&mut S, bool, &mut crate::Tx)) -> Self { self.app = self.app.on_focus(f); self }
+    /// Send `Key::Modifier` presses and releases to this window, like `App::modifier_keys`.
+    pub fn modifier_keys(mut self) -> Self { self.app = self.app.modifier_keys(); self }
     /// Called on the event thread after the first frame is ready, once per native creation.
     pub fn on_ready(mut self, f: impl FnMut(&crate::WindowHandle) + 'static) -> Self {
         self.app = self.app.on_ready(f); self

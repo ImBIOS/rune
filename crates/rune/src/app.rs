@@ -55,6 +55,7 @@ pub struct App<S: 'static> {
     pub(crate) compositor: Option<Box<dyn crate::compose::Compositor<S>>>,
     pub(crate) window_options: crate::WindowOptions,
     pub(crate) fit_content_height: bool,
+    pub(crate) modifier_keys: bool,
     pub(crate) srgb_blend: bool,
     #[cfg(all(feature = "dev", debug_assertions))]
     pub(crate) dev: Option<crate::dev::Config<S>>,
@@ -86,6 +87,7 @@ impl<S: 'static> App<S> {
             compositor: None,
             window_options: crate::WindowOptions::default(),
             fit_content_height: false,
+            modifier_keys: false,
             srgb_blend: false,
         }
     }
@@ -117,6 +119,14 @@ impl<S: 'static> App<S> {
     /// `Tx::resize_window`. Give the root no fixed or `fill` height. Users still set the width.
     pub fn fit_content_height(mut self) -> Self {
         self.fit_content_height = true;
+        self
+    }
+
+    /// Send modifier keys pressed and released on their own (`Key::Modifier`, with the side)
+    /// to `on_key` and the focused input's key handler, for hold-to-talk on Fn or Right Option,
+    /// or a Shift tap. Off by default, since handlers written without it may act on any key.
+    pub fn modifier_keys(mut self) -> Self {
+        self.modifier_keys = true;
         self
     }
 

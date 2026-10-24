@@ -677,6 +677,7 @@ impl<S: 'static> Host<S> {
         };
         #[cfg(all(feature = "dev", debug_assertions))]
         let dev = app.dev.take();
+        let modifier_keys = app.modifier_keys;
         let fit_height = app.fit_content_height;
         let (mut spec, state, shared) = app.into_parts(args.scene.as_deref());
         let mut size = args.size.unwrap_or(spec.size);
@@ -695,6 +696,7 @@ impl<S: 'static> Host<S> {
             args.size = None;
         }
         rt.on_focus = on_focus;
+        rt.set_modifier_keys(modifier_keys);
         rt.set_srgb_blend(srgb_blend);
         rt.set_system_reduced_motion(crate::preferences::reduced_motion());
         rt.set_full_keyboard_access(crate::preferences::full_keyboard_access());

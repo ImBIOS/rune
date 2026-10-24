@@ -118,6 +118,7 @@ impl<S: 'static> Window<S> {
         let comp = app.compositor.take();
         let (open, keep_running, on_close, on_focus) = (app.open, app.keep_running, app.on_close, app.on_focus);
         let native = std::mem::take(&mut app.macos_window);
+        let modifier_keys = app.modifier_keys;
         let (spec, state, shared) = app.into_parts(own.scene.as_deref());
         let shortcuts = crate::shortcuts::Guard::attach(&shared, Arc::new(|| {}), true, false);
         let menus = crate::native_menu::Guard::attach(&shared, true);
@@ -125,6 +126,7 @@ impl<S: 'static> Window<S> {
         let dark = own.theme.as_deref() != Some("light");
         let mut rt = crate::tooling::runtime_for(&spec, state, size, Env::new(dark, scale), Arc::new(|| {}));
         rt.on_focus = on_focus;
+        rt.set_modifier_keys(modifier_keys);
         rt.transparent = options.transparent;
         rt.track_marks = comp.is_some();
         if selected && args.tree.is_some() { rt.key_warnings = Some(Vec::new()); }

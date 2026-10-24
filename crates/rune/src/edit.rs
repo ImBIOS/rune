@@ -102,6 +102,48 @@ pub enum Key {
     Command(char),
     /// A function key, F1 through F24. Text fields ignore it; apps can bind it.
     Function(u8),
+    /// A modifier key going down (`pressed`) or up on its own, sent only where the app opts in
+    /// with `App::modifier_keys` (or `Runtime::set_modifier_keys`). `mods` holds the modifiers
+    /// after the change, as AppKit's flagsChanged does: Shift's press has `shift` set and its
+    /// release doesn't, unless the other Shift is still down. A held modifier never repeats.
+    /// Text fields, selection, focus traversal and shortcuts ignore it.
+    Modifier { modifier: Modifier, pressed: bool },
+}
+
+/// A modifier key, by side. Alt is Option on macOS; Super is Command on macOS and the Windows
+/// key elsewhere.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Modifier {
+    ShiftLeft,
+    ShiftRight,
+    ControlLeft,
+    ControlRight,
+    AltLeft,
+    AltRight,
+    SuperLeft,
+    SuperRight,
+    /// Fn, or Globe on recent Mac keyboards. Other platforms rarely report it: their keyboards
+    /// handle Fn in firmware.
+    Fn,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum KeySide {
+    Left,
+    Right,
+}
+
+impl Modifier {
+    /// Which side of the keyboard the key is on; None for Fn.
+    pub fn side(self) -> Option<KeySide> {
+        use Modifier::*;
+        match self {
+            ShiftLeft | ControlLeft | AltLeft | SuperLeft => Some(KeySide::Left),
+            ShiftRight | ControlRight | AltRight | SuperRight => Some(KeySide::Right),
+            Fn => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -394,6 +436,7 @@ impl TextEdit {
     /// Applies one key. `layout` is the field's layout for the current text (device px).
     pub fn key(&mut self, ev: &KeyEvent, layout: Option<&Layout<Ink>>) -> EditOutcome {
         let mut out = EditOutcome::default();
+        if matches!(ev.key, Key::Modifier { .. }) { return out; }
         let m = ev.mods;
         if let Some(c) = ev.control_binding() {
             let (key, line) = match c {
@@ -494,7 +537,7 @@ impl TextEdit {
                 }
                 _ => {}
             },
-            Key::Function(_) => {}
+            Key::Function(_) | Key::Modifier { .. } => {}
         }
         out
     }

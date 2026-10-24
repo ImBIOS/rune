@@ -134,6 +134,7 @@ pub struct ConfiguredOverlay<T: 'static> {
     pub(crate) setup: Option<fn(&mut T, crate::Waker)>,
     pub(crate) srgb_blend: bool,
     pub(crate) macos_level: Option<isize>,
+    pub(crate) modifier_keys: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -162,6 +163,9 @@ impl<T: 'static> ConfiguredOverlay<T> {
         self
     }
     pub fn on_key(mut self, f: fn(&mut T, &crate::KeyEvent, &mut crate::Tx) -> bool) -> Self { self.on_key = Some(f); self }
+    /// Like `App::modifier_keys`: send modifier keys pressed and released on their own
+    /// (`Key::Modifier`) to `on_key` and the focused input. Off by default.
+    pub fn modifier_keys(mut self) -> Self { self.modifier_keys = true; self }
     /// Like `AppSpec::setup`: called once with a waker other threads use when new data arrives
     /// (an `ImageCache` decode, a channel). It runs on the event thread when the event loop
     /// starts, before the overlay's first frame and before updates queued through its handle.
@@ -183,7 +187,7 @@ impl<T: 'static> OverlaySpec<T> {
     }
 
     pub fn options(self, options: OverlayOptions) -> ConfiguredOverlay<T> {
-        ConfiguredOverlay { spec: self, options, on_key: None, on_created: None, poll: None, on_focus: None, compositor: None, setup: None, srgb_blend: false, macos_level: None }
+        ConfiguredOverlay { spec: self, options, on_key: None, on_created: None, poll: None, on_focus: None, compositor: None, setup: None, srgb_blend: false, macos_level: None, modifier_keys: false }
     }
 }
 

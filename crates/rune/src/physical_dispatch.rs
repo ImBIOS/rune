@@ -9,38 +9,44 @@ pub(super) struct HeldKey { physical: Option<PhysicalKeyCode>, key: Option<crate
 
 impl<S: 'static> Runtime<S> {
     /// Queue physical input without a logical fallback (also useful for headless drivers).
+    /// A modifier key still gets its `Key::Modifier` when modifier keys are on.
     pub fn physical_input(&mut self, event: PhysicalInput) {
         self.observe_mods(&event);
-        self.queue.push(Action::Physical(event, None));
+        let fallback = self.modifier_key(&event).map(|key| Fallback { key });
+        self.queue.push(Action::Physical(event, fallback));
     }
     /// Shift held now decides whether the next press extends a text selection, ahead of the
-    /// queue the press itself skips. A key press hides a tooltip.
-    fn observe_mods(&mut self, event: &PhysicalInput) {
+    /// queue the press itself skips. A key press hides a tooltip. True when it queued the
+    /// release of a modifier key the event shows is up.
+    fn observe_mods(&mut self, event: &PhysicalInput) -> bool {
         match event {
             PhysicalInput::Modifiers(m) => self.text_sel.shift = m.shift,
             PhysicalInput::FocusLost => { self.text_sel.shift = false; self.dismiss_help(); }
             PhysicalInput::Key { pressed: true, .. } => self.dismiss_help(),
             _ => {}
         }
+        self.modifier_releases(event)
     }
     /// Return whether the native host needs to request a frame for this event.
     pub(crate) fn physical_with_fallback(&mut self, event: PhysicalInput, key: Option<KeyEvent>) -> bool {
-        if matches!(event, PhysicalInput::Modifiers(_) | PhysicalInput::Key { pressed: false, .. }) {
+        let key = key.or_else(|| self.modifier_key(&event));
+        if key.is_none() && matches!(event, PhysicalInput::Modifiers(_) | PhysicalInput::Key { pressed: false, .. }) {
             return self.physical_observation(event);
         }
-        let fallback = key.map(|key| Fallback { key });
-        self.dismiss_help();
-        self.queue.push(Action::Physical(event, fallback));
+        if matches!(event, PhysicalInput::FocusLost) { self.modifier_releases(&event); }
+        if !matches!(event, PhysicalInput::Key { pressed: false, .. }) { self.dismiss_help(); }
+        self.queue.push(Action::Physical(event, key.map(|key| Fallback { key })));
         true
     }
     /// Modifier/release events have no logical action. When input is already queued,
     /// its requested frame will process this observation in order after clicks/keys.
     /// At rest, only a consuming handler invalidates the view and requests a frame.
     pub(crate) fn physical_observation(&mut self, event: PhysicalInput) -> bool {
-        self.observe_mods(&event);
-        if !self.queue.is_empty() {
-            self.physical_input(event);
-            return false;
+        let busy = !self.queue.is_empty();
+        // A modifier key's release, inferred from the flags, queues a key event that needs one.
+        if self.observe_mods(&event) || busy {
+            self.queue.push(Action::Physical(event, None));
+            return !busy;
         }
         let mut tx = Tx::default();
         let consumed = self.dispatch_physical(event, None, &mut tx);
@@ -56,7 +62,7 @@ impl<S: 'static> Runtime<S> {
             // The OS keeps repeating a held key through modifier presses.
             if physical.is_some_and(|c| matches!(c, Code::ShiftLeft | Code::ShiftRight | Code::ControlLeft
                 | Code::ControlRight | Code::AltLeft | Code::AltRight | Code::SuperLeft | Code::SuperRight
-                | Code::CapsLock | Code::Fn)) { return false; }
+                | Code::CapsLock | Code::Fn)) || key.is_some_and(|k| matches!(k, Key::Modifier { .. })) { return false; }
             let activation = physical.is_some_and(|c| matches!(c, Code::Enter | Code::NumpadEnter | Code::Escape | Code::Space))
                 || key.is_some_and(|k| matches!(k, Key::Enter | Key::Escape) || matches!(k, Key::Text(t) if t == " "));
             self.held = activation.then(|| HeldKey { physical, key: key.cloned(), focus: self.focused.clone() });

@@ -75,7 +75,7 @@ pub(crate) fn run_app<S: 'static>(mut app: crate::App<S>, mut args: Args) {
         for (name, _) in app.spec.scenes { println!("{name}"); }
         return;
     }
-    let srgb_blend = app.srgb_blend;
+    let (srgb_blend, modifier_keys) = (app.srgb_blend, app.modifier_keys);
     let scene = args.scene.take();
     let (spec, state, _) = app.into_parts(scene.as_deref());
     let value = Box::new(state);
@@ -88,15 +88,17 @@ pub(crate) fn run_app<S: 'static>(mut app: crate::App<S>, mut args: Args) {
         on_key: Some(|s: &mut HostState, key, tx| (s.key)(s, key, tx)),
     };
     let state = HostState { value, spec: Box::new(spec), view: view_adapter::<S>, poll: poll_adapter::<S>, setup: setup_adapter::<S>, key: key_adapter::<S> };
-    run_host(shell, state, args, srgb_blend);
+    run_host(shell, state, args, srgb_blend, modifier_keys);
 }
 
 #[inline(never)]
-fn run_host(spec: AppSpec<HostState>, state: HostState, args: Args, srgb_blend: bool) {
+fn run_host(spec: AppSpec<HostState>, state: HostState, args: Args, srgb_blend: bool, modifier_keys: bool) {
     INITIAL.with(|slot| { assert!(slot.borrow().is_none()); *slot.borrow_mut() = Some(state); });
-    if args.snap_on_patch.is_some() { headless(spec, args, srgb_blend); }
-    else if args.headless() { crate::tooling::headless(crate::App::new(spec).srgb_blend(srgb_blend), args); }
-    else if let Err(error) = crate::window::run(crate::App::new(spec).srgb_blend(srgb_blend), args) { panic!("{error}"); }
+    if args.snap_on_patch.is_some() { return headless(spec, args, srgb_blend); }
+    let mut app = crate::App::new(spec).srgb_blend(srgb_blend);
+    app.modifier_keys = modifier_keys;
+    if args.headless() { crate::tooling::headless(app, args); }
+    else if let Err(error) = crate::window::run(app, args) { panic!("{error}"); }
 }
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
