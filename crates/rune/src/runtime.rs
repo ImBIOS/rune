@@ -3008,8 +3008,7 @@ impl<S: 'static> Runtime<S> {
             let Some(p) = self.scene.presented(n.id) else { continue };
             let mut opacity = p.opacity;
             if let Some([rest, hov]) = n.vis.group_opacity { opacity *= rest + (hov - rest) * inherited_group; }
-            if matches!(n.looping.map(|l| l.kind), Some(rune_motion::LoopKind::Opacity { .. } | rune_motion::LoopKind::OpacityCycle(_) | rune_motion::LoopKind::Sequence(_)))
-                && let Some(track) = self.loops.get(&n.id) {
+            if fades(n.looping) && let Some(track) = self.loops.get(&n.id) {
                 opacity *= track.sample_at(now, self.clock, self.reduced_motion);
             }
             self.dissolve_scratch[parent] |= opacity > 0.0 && opacity < 1.0;
@@ -3051,7 +3050,7 @@ impl<S: 'static> Runtime<S> {
         let tree_order = self.layer_paint_order.windows(2).any(|pair| {
             let n = &self.nodes[pair[0]];
             self.nodes[pair[1]].parent == Some(pair[0]) && ((self.has_dissolve && self.dissolve_scratch[pair[0]]) || n.vis.clip_radius.is_some() || n.vis.group_opacity.is_some()
-                || matches!(n.looping, Some(rune_motion::LoopSpec { kind: rune_motion::LoopKind::Opacity { .. } | rune_motion::LoopKind::OpacityCycle(_) | rune_motion::LoopKind::Sequence(_), .. }))
+                || fades(n.looping)
                 || self.scene.presented(n.id).is_some_and(|p| (p.opacity > 0.0 && p.opacity < 1.0) || p.blur > 0.0))
         });
         for paint_index in 0..n_nodes {
@@ -3079,7 +3078,7 @@ impl<S: 'static> Runtime<S> {
                 pinh.group
             };
             let loop_value = self.loops.get(&n.id).map(|l| l.sample_at(now, self.clock, self.reduced_motion));
-            if let (Some(rune_motion::LoopSpec { kind: rune_motion::LoopKind::Opacity { .. } | rune_motion::LoopKind::OpacityCycle(_) | rune_motion::LoopKind::Sequence(_), .. }), Some(v)) = (n.looping, loop_value) {
+            if fades(n.looping) && let Some(v) = loop_value {
                 own *= v;
             }
             let effective_opacity = (own * pinh.opacity).clamp(0.0, 1.0);
@@ -3867,6 +3866,11 @@ fn input_caret(n: &Node, r: [f32; 4], scale: f32, s: f32, scrolls: &mut HashMap<
 fn scroll_offsets<'a>(scrolls: &'a HashMap<NodeId, ScrollState>, nodes: &'a [Node], i: usize) -> impl Iterator<Item = f32> + 'a {
     std::iter::successors(nodes[i].parent, |&p| nodes[p].parent)
         .filter_map(|p| scrolls.get(&nodes[p].id).map(|st| st.offset as f32))
+}
+
+/// Whether `looping`'s sampled value multiplies the element's opacity.
+fn fades(looping: Option<rune_motion::LoopSpec>) -> bool {
+    matches!(looping.map(|l| l.kind), Some(rune_motion::LoopKind::Opacity { .. } | rune_motion::LoopKind::OpacityCycle(_) | rune_motion::LoopKind::Sequence(_)))
 }
 
 fn merge(tx: &mut Tx, one: Tx) {
