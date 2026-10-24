@@ -2502,7 +2502,7 @@ impl<S> Measurement<'_, S> {
                             }
                             let l = text_sys.layout_rich(&spec.content, &spec.spans, spec.style, scale, w.map(|w| w * scale));
                             let mut lw = (l.full_width() / scale).ceil_to(scale);
-                            if (spec.truncate || spec.truncate_fade)
+                            if (spec.truncate || spec.truncate_fade || spec.max_lines > 0)
                                 && let AvailableSpace::Definite(a) = avail.width
                             {
                                 lw = lw.min(a);
@@ -5165,31 +5165,41 @@ fn clamped_height(l: &Layout<Ink>, spec: &TextSpec, scale: f32) -> f32 {
     }
 }
 
+/// The advance of the last line `l` shows when clamped to `lines`, in device px.
+fn last_line_width(l: &Layout<Ink>, lines: usize) -> f32 {
+    l.lines().take(lines).last().map_or(0.0, |line| line.metrics().advance - line.metrics().hanging_advance)
+}
+
 /// `spec`'s content wrapped at `max_w` device px and cut after `spec.max_lines` lines, "…"
-/// ending the last with as many whole graphemes before it as fit. None when `full` (the
-/// uncut layout) already fits. Whitespace and line breaks before the ellipsis are dropped.
+/// ending the last with as many whole graphemes before it as fit within `max_w`, a word that
+/// wraps or overflows included. None when `full` (the uncut layout) already fits.
+/// Whitespace and line breaks before the ellipsis are dropped.
 fn clamped(text: &mut TextSystem, spec: &TextSpec, scale: f32, max_w: f32, full: &Layout<Ink>) -> Option<(Rc<Layout<Ink>>, Elision)> {
     use unicode_segmentation::UnicodeSegmentation;
     let lines = spec.max_lines;
-    if lines == 0 || full.len() <= lines {
+    if lines == 0 || full.len() <= lines && last_line_width(full, lines) <= max_w + 0.5 {
         return None;
     }
     let content = spec.content.as_str();
-    let end = full.lines().nth(lines - 1)?.text_range().end.min(content.len());
-    let bounds: Vec<usize> = content[..end].grapheme_indices(true).map(|(i, _)| i).chain([end]).collect();
+    // The cut falls in the last shown line or the next, whose first word may fill the last.
+    let start = full.lines().nth(lines.min(full.len()).max(1) - 1)?.text_range().start.min(content.len());
+    let end = full.lines().nth(lines).map_or(content.len(), |l| l.text_range().end.min(content.len()));
+    let bounds: Vec<usize> = content[start..end].grapheme_indices(true).map(|(i, _)| start + i).chain([end]).collect();
     let blank = |g: usize| content[bounds[g]..bounds[g + 1]].chars().all(char::is_whitespace);
     let cut = |mut k: usize| {
         while k > 0 && blank(k - 1) { k -= 1; }
-        Elision { head: bounds[k], tail: content.len() }
+        let head = if k == 0 { content[..start].trim_end().len() } else { bounds[k] };
+        Elision { head, tail: content.len() }
     };
     let make = |text: &mut TextSystem, e: Elision| {
         let s = [&content[..e.head], Elision::ELLIPSIS].concat();
         text.layout_aligned(&s, &e.spans(&spec.spans), spec.style, scale, Some(max_w), line_alignment(spec))
     };
+    let fits = |l: &Layout<Ink>| l.len() <= lines && last_line_width(l, lines) <= max_w + 0.5;
     let (mut lo, mut hi) = (0usize, bounds.len() - 1);
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
-        if make(text, cut(mid)).len() <= lines { lo = mid } else { hi = mid - 1 }
+        if fits(&make(text, cut(mid))) { lo = mid } else { hi = mid - 1 }
     }
     let e = cut(lo);
     Some((make(text, e), e))

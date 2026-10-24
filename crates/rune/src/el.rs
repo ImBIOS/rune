@@ -1739,7 +1739,7 @@ impl El {
         self
     }
     /// One line, cut with "…" when wider than the element; the element may shrink below its
-    /// text's width.
+    /// text's width. A [`text_input`] ignores it and the other truncations.
     pub fn truncate(self) -> Self {
         self.elide(Elide::End)
     }
@@ -1755,6 +1755,8 @@ impl El {
         self.elide(Elide::Head)
     }
     fn elide(mut self, elide: Elide) -> Self {
+        // A field's caret and selection index its own text, which a cut would break.
+        if self.input.is_some() { return self; }
         if let Some(t) = &mut self.text {
             t.truncate = true;
             t.elide = elide;
@@ -1770,8 +1772,9 @@ impl El {
     /// as CSS's `line-clamp`. The element measures at most `lines` lines tall. The cut falls
     /// between graphemes and refits when the element resizes; spans and links keep their
     /// looks up to it, and copying and the accessibility text keep the whole string. 0 shows
-    /// every line.
+    /// every line. A [`text_input`] ignores it; use [`auto_grow`] there.
     pub fn max_lines(mut self, lines: usize) -> Self {
+        if self.input.is_some() { return self; }
         if let Some(t) = &mut self.text {
             t.wrap = true;
             t.max_lines = lines;

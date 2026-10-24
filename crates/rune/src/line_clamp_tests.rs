@@ -132,3 +132,65 @@ fn spans_and_links_past_the_cut_are_hidden() {
     assert!(rt.elements().iter().any(|e| e.path.ends_with("#link-0")));
     assert!(coloured(&rt) > 0, "shown, the span draws its colour");
 }
+
+/// One word with no break opportunity, wider than the box.
+const TOKEN: &str = "line_clamp_measures_the_whole_identifier_before_it_decides_where_the_ellipsis_falls";
+
+/// The drawn last line's width and the element's, in points.
+fn widths(rt: &Runtime<S>) -> (f32, f32) {
+    let n = node(rt);
+    (last_line_width(n.text_layout.as_ref().unwrap(), n.text.as_ref().unwrap().max_lines.max(1)) / 2.0, n.target[2] - n.target[0])
+}
+
+#[test]
+fn a_word_wider_than_the_box_is_cut_to_fit() {
+    let rt = clamp(TOKEN, 0, None, 200.0);
+    assert_eq!(drawn(&rt).2, 1, "the word shapes as one overflowing line");
+    let rt = clamp(TOKEN, 1, None, 200.0);
+    let (shown, e, lines, h) = drawn(&rt);
+    assert!(e.is_some() && shown.ends_with('…') && shown.len() > 10, "{shown}");
+    assert_eq!((lines, h), (1, 16.0));
+    let (line, element) = widths(&rt);
+    assert!(line <= 200.25 && line > 150.0 && element <= 200.0, "{line} {element}: {shown}");
+}
+
+#[test]
+fn a_wrapped_word_fills_the_last_line() {
+    let content: &'static str = Box::leak(format!("See {TOKEN}").into_boxed_str());
+    let rt = clamp(content, 1, None, 200.0);
+    let (shown, _, lines, _) = drawn(&rt);
+    assert!(shown.starts_with("See line_") && shown.ends_with('…') && lines == 1, "{shown}");
+    let (line, element) = widths(&rt);
+    assert!(line <= 200.25 && line > 150.0 && element <= 200.0, "{line} {element}: {shown}");
+
+    // In two lines the word moves to the second and is cut there.
+    let rt = clamp(content, 2, None, 200.0);
+    let (shown, _, lines, _) = drawn(&rt);
+    assert!(shown.starts_with("See\nline_") || shown.starts_with("See line_"), "{shown}");
+    assert!(lines <= 2 && widths(&rt).0 <= 200.25, "{shown}");
+}
+
+/// A field's caret and selection index its own text, so it takes no cut.
+#[test]
+fn a_text_field_ignores_the_clamp_and_truncation() {
+    fn view(e: &crate::TextEdit, _: &mut Cx<crate::TextEdit>) -> El {
+        col().w_full()
+            .child(crate::text_input(e, style()).key("t").w_full().max_lines(1))
+            .child(crate::text_input(e, style()).key("u").w_full().truncate_middle())
+    }
+    let mut rt = Runtime::new(crate::TextEdit::new(TITLE), view, (200.0, 400.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    for key in ["t", "u"] {
+        let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some(key)).unwrap();
+        let t = n.text.as_ref().unwrap();
+        assert!(n.elided.is_none() && t.max_lines == 0 && !t.truncate, "{key}");
+        let r = n.target;
+        let (x, y) = (r[2] - 4.0, r[1] + 8.0);
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0);
+        rt.key(KeyEvent { key: Key::Right, mods: Mods::default() });
+        rt.frame(1.1);
+    }
+}

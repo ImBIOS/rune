@@ -504,8 +504,9 @@ selecting, copying and `--tree` keep the whole string.
 
 `.max_lines(n)` wraps and stops after `n` lines, "…" ending the last when more would
 follow (CSS `line-clamp`). The element measures at most `n` lines tall; the cut falls
-between graphemes, spans and links keep their looks up to it, and copying and the
-accessibility text keep the whole string.
+between graphemes (inside a word too wide for the box too), spans and links keep their
+looks up to it, and copying and the accessibility text keep the whole string. Text fields
+ignore it.
 
 Native hosts populate `cx.system_reduced_motion()` at creation and refresh it on
 window focus changes. Rune uses it by default; `cx.reduced_motion(value)` overrides
