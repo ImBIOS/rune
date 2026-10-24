@@ -24,7 +24,6 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   upper-cases only single characters, so "Space" no longer draws "SPACE". The layout lookup
   also declares `UCKeyTranslate`'s string lengths at their real 8-byte width; it wrote past a
   4-byte stack slot on every call.
-||||||| parent of 491a7d7 (Document trak tracking and its opt-out)
 - **Native pop-up and context menus.** `tx.popup_menu(PopupMenu, anchor, on_pick)` opens an
   `NSMenu` over an element key (a picker's selected item sits over the element, as SwiftUI's
   menu-style `Picker` does) or at a `PointerPress`. `on_pick` gets the picked id after the menu
