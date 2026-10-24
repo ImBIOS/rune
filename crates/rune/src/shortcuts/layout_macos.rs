@@ -8,8 +8,8 @@ unsafe extern "C" {
     static kTISPropertyUnicodeKeyLayoutData: *const c_void;
     fn LMGetKbdType() -> u8;
     fn UCKeyTranslate(layout: *const c_void, key: u16, action: u16, modifiers: u32,
-        keyboard_type: u32, options: u32, dead: *mut u32, capacity: u32,
-        length: *mut u32, chars: *mut u16) -> i32;
+        keyboard_type: u32, options: u32, dead: *mut u32, capacity: usize,
+        length: *mut usize, chars: *mut u16) -> i32;
 }
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
@@ -59,13 +59,13 @@ pub(super) unsafe fn chord_label(layout: *const c_void, key: u32, modifiers: u32
 /// The layout must point to live TIS Unicode layout data, on the main thread.
 pub(super) unsafe fn translate(layout: *const c_void, key: u32, modifiers: u32) -> Option<String> {
     let mut chars = [0u16; 16];
-    let mut length = 0;
+    let mut length = 0usize;
     let mut dead = 0;
     // kUCKeyActionDisplay, kUCKeyTranslateNoDeadKeysMask. UCKeyTranslate takes Carbon
     // modifiers shifted down a byte.
     let status = unsafe { UCKeyTranslate(layout, key as u16, 3, (modifiers >> 8) & 0xff, LMGetKbdType() as u32,
-        1, &mut dead, chars.len() as u32, &mut length, chars.as_mut_ptr()) };
-    if status != 0 || length == 0 || length as usize > chars.len() { return None; }
-    let label = String::from_utf16(&chars[..length as usize]).ok()?;
+        1, &mut dead, chars.len(), &mut length, chars.as_mut_ptr()) };
+    if status != 0 || length == 0 || length > chars.len() { return None; }
+    let label = String::from_utf16(&chars[..length]).ok()?;
     (!label.chars().any(char::is_control)).then_some(label)
 }
