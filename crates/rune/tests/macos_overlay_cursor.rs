@@ -4,6 +4,7 @@
 //! (handed to it with CuaDriver when nothing yields). The overlay polls the real pointer, so the
 //! test warps it (which moves the cursor but posts no events) and reads the window server's
 //! cursor with `[NSCursor currentSystemCursor]`. Off the hit region it is the arrow again.
+//! Fading out, the panel clicks through at once, for the whole fade.
 //! Opens windows, so it only runs with RUNE_GUI_TESTS=1 in a logged-in GUI session.
 
 #[cfg(not(target_os = "macos"))]
@@ -187,6 +188,29 @@ mod mac {
         on_main(handle, move || warp(away));
         expect_cursor(handle, "off the overlay", |_, arrow| arrow);
         assert_eq!(on_main(handle, frontmost_pid), pid, "the helper kept the front throughout");
+
+        // Fading out, the panel stops taking clicks at once, though it's still on screen.
+        on_main(handle, move || warp(card));
+        expect_cursor(handle, "over the card before the fade", |hand, _| hand);
+        overlay.fade_out(Duration::from_secs(2));
+        wait("the fading panel to click through", || on_main(handle, move || panel(number).is_some_and(|(_, ignores)| ignores)));
+        assert!(on_main(handle, move || ordered_in(number)), "checked while the fade runs, before the panel orders out");
+        overlay.show();
+        wait("the shown panel to take the pointer again", || on_main(handle, move || panel(number).is_some_and(|(_, ignores)| !ignores)));
+    }
+
+    /// Whether the panel with CGWindowID `number` is still ordered in (a fade-out orders it out
+    /// when it ends).
+    fn ordered_in(number: u32) -> bool {
+        unsafe {
+            let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+            let windows: Retained<NSArray<AnyObject>> = msg_send_id![app, windows];
+            windows.iter().any(|w| {
+                let n: isize = msg_send![&*w, windowNumber];
+                let visible: Bool = msg_send![&*w, isVisible];
+                n == number as isize && visible.as_bool()
+            })
+        }
     }
 
     fn helper() {

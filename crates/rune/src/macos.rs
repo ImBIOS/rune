@@ -701,10 +701,12 @@ impl Panel {
         self.pointer.release_since.set(None);
         self.pointer.recovered_release.set(None);
         self.set_cursor(None);
+        // Clicks and scrolls go to the window below for the whole fade; `show` restores
+        // hit-testing through `pointer.observe`.
+        self.panel.setIgnoresMouseEvents(true);
         if self.options.prewarm {
             self.fade_to(0.0, fade, false);
             unsafe { self.panel.resignKeyWindow(); }
-            self.panel.setIgnoresMouseEvents(true);
         } else if fade.is_zero() {
             self.fade.set(self.fade.get() + 1);
             self.panel.orderOut(None);

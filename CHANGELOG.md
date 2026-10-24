@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A fading-out overlay clicks through on macOS.** `OverlayHandle::fade_out(d)` stopped Rune's
+  input at once, but a panel that wasn't prewarmed still took clicks and scrolls for the whole
+  fade, so they never reached the window below. It now ignores the mouse from the start of the
+  fade.
 - **`wake_after(Duration::ZERO)` never spins the loop.** A wake due sooner than a frame asks
   for the next frame. A window or overlay a display link paces (macOS) draws it on the next
   tick: windows now keep their link running for it too, as overlays do. Hidden, covered, faded
