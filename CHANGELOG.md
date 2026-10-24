@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Scripts can mark times.** `{"t": 3.2, "type": "mark", "name": "end"}` has no input effect;
+  apps read marks through `headless_run().marks()` and `mark(name)`. `--at` and `--start`
+  take `mark:NAME` with an optional offset (`mark:end+0.5`), and `--duration auto` (the
+  default for `--video`) runs to the `end` mark, or one second after the last event.
 - **Apps can read the headless run.** `rune::tooling::headless_run()` returns the run's script
   path, its expanded events with their times, `--scale`, `--fps`, the viewport, `--start`, the
   frames it writes and its last frame's time, from `init` on. It is None in a window.

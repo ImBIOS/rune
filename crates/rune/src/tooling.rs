@@ -170,8 +170,26 @@ pub struct Args {
     pub chrome_overlay: bool,
     /// Stream the dumped frames into ffmpeg, which writes this video.
     pub(crate) video: Option<PathBuf>,
-    /// Seconds of frames to dump, when `frames` isn't given.
-    pub(crate) duration: Option<f64>,
+    /// How long to dump frames for, when `frames` isn't given.
+    pub(crate) duration: Option<Length>,
+    /// `--at mark:NAME±S` and `--start mark:NAME±S`: a script mark's time plus an offset.
+    pub(crate) at_mark: Option<(String, f64)>,
+    pub(crate) start_mark: Option<(String, f64)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Length {
+    Seconds(f64),
+    /// To the script's `end` mark, or one second after its last event.
+    Auto,
+}
+
+/// `mark:NAME`, optionally followed by a signed offset in seconds (`mark:end+0.5`).
+fn mark_time(v: &str) -> Option<(String, f64)> {
+    let spec = v.strip_prefix("mark:")?;
+    let split = spec.char_indices().skip(1).filter(|&(_, c)| c == '+' || c == '-')
+        .find_map(|(i, _)| spec[i..].parse::<f64>().ok().map(|offset| (spec[..i].to_owned(), offset)));
+    Some(split.unwrap_or_else(|| (spec.to_owned(), 0.0)))
 }
 
 impl Args {
@@ -200,7 +218,10 @@ impl Args {
                 "--hot" | "--snap-on-patch" | "--hot-control" => die("live editing requires the rune/hot feature; use scripts/rune-dev"),
                 "--snap" => a.snap = Some(val(&mut i).into()),
                 "--scene" => a.scene = Some(val(&mut i)),
-                "--at" => a.at = Some(num(&val(&mut i))),
+                "--at" => {
+                    let v = val(&mut i);
+                    match mark_time(&v) { Some(mark) => a.at_mark = Some(mark), None => a.at = Some(num(&v)) }
+                }
                 "--size" => {
                     let v = val(&mut i);
                     let (w, h) = v.split_once('x').unwrap_or_else(|| die("--size is WxH"));
@@ -210,11 +231,17 @@ impl Args {
                 "--theme" => a.theme = Some(val(&mut i)),
                 "--script" => a.script = Some(val(&mut i).into()),
                 "--frames" => a.frames = Some(num(&val(&mut i)) as usize),
-                "--start" => a.start = num(&val(&mut i)),
+                "--start" => {
+                    let v = val(&mut i);
+                    match mark_time(&v) { Some(mark) => a.start_mark = Some(mark), None => a.start = num(&v) }
+                }
                 "--fps" => a.fps = num(&val(&mut i)),
                 "--out" => a.out = Some(val(&mut i).into()),
                 "--video" => a.video = Some(val(&mut i).into()),
-                "--duration" => a.duration = Some(num(&val(&mut i))),
+                "--duration" => {
+                    let v = val(&mut i);
+                    a.duration = Some(if v == "auto" { Length::Auto } else { Length::Seconds(num(&v)) });
+                }
                 "--tree" => a.tree = Some(val(&mut i).into()),
                 "--trace" => a.trace = Some(val(&mut i).into()),
                 "--native" => a.native = true,
@@ -260,14 +287,18 @@ impl Args {
 const HELP: &str = "usage: <app> [window]
   --snap out.png        render offscreen (no window) at --at seconds
   --scene NAME          start from a named scene (--list-scenes)
-  --at SECONDS          virtual time of the snapshot/tree (default: end of frames or script)
+  --at SECONDS          virtual time of the snapshot/tree (default: end of frames or script);
+                        mark:NAME or mark:NAME+0.5 for a script mark's time (also --start)
   --size WxH            viewport in points      --scale N   device scale (default 2)
   --theme dark|light    system appearance
-  --script FILE.json    timestamped input (move/down/up/tap/drag, keys, {\"focus\":false},
-                        menu-pick with an \"id\", menu-cancel); a key with \"repeat\":true is a held key's auto-repeat; an object adds \"displays\" and \"pointer\" for place() (rune-placed, --tree)
+  --script FILE.json    timestamped input (move/down/up/tap/drag, keys, {\"focus\":false}); a
+                        key with \"repeat\":true is a held key's auto-repeat; {\"type\":\"mark\",\"name\":N}
+                        marks a time; an object adds \"displays\" and \"pointer\" for place() (rune-placed, --tree)
+                        menu-pick with an \"id\" and menu-cancel answer a pop-up menu
   --frames N --fps 60 --start S --out DIR     dump N frames from S seconds
   --video out.mp4       stream frames into ffmpeg (.mp4 H.264, .mov ProRes 4444, .webm VP9);
-                        --frames N or --duration SECONDS long (default: to 1 s after the script)
+                        --frames N or --duration SECONDS|auto long (default auto: to the
+                        script's \"end\" mark, or 1 s after its last event)
   --strip out.png --crop x,y,w,h --every K    tile dumped frames into one image
                         (repeat --crop to stack several regions per frame; --cols N per row)
   --tree out.json       element tree with animated values
@@ -392,6 +423,8 @@ enum Pos {
 
 #[derive(Clone, Debug)]
 enum Kind {
+    /// A named time with no input effect.
+    Mark(String),
     Focus(bool),
     Menu(String),
     /// Answers the open pop-up menu: an item's id, or `None` to dismiss it.
@@ -448,6 +481,7 @@ impl Ev {
         };
         let pointer = |action| ScriptEvent::Pointer { action, at: at() };
         let event = match &self.kind {
+            Kind::Mark(name) => ScriptEvent::Mark(name.clone()),
             Kind::Focus(focused) => ScriptEvent::Focus(*focused),
             Kind::Menu(item) => ScriptEvent::Menu(item.clone()),
             Kind::Physical(input) => ScriptEvent::Physical(*input),
@@ -610,6 +644,10 @@ fn parse_script(list: Value) -> Vec<Ev> {
                 out.push(Ev { t, kind: Kind::PopupMenu(Some(id.into())), pos: Pos::Rel(0.0, 0.0) });
             }
             "menu-cancel" => out.push(Ev { t, kind: Kind::PopupMenu(None), pos: Pos::Rel(0.0, 0.0) }),
+            "mark" => {
+                let name = e["name"].as_str().filter(|n| !n.is_empty()).unwrap_or_else(|| die("a mark needs a \"name\""));
+                out.push(Ev { t, kind: Kind::Mark(name.to_owned()), pos });
+            }
             other => die(&format!("unknown event type {other}")),
         }
     }
@@ -1031,7 +1069,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let on_focus = app.on_focus;
     let source = read_script(&args);
     let script = source.as_ref().map(load_script).unwrap_or_default();
-    let timeline = Timeline::of(&args, &script);
+    let timeline = Timeline::of(&args, &script).unwrap_or_else(|e| die(&e));
     let scale = args.scale.unwrap_or(2.0);
     let size = args.size.unwrap_or(app.spec.size);
     crate::headless_run::publish(crate::headless_run::HeadlessRun {
@@ -1128,7 +1166,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         }
     };
     let mut early_place = None;
-    if script.first().is_some_and(|e| e.t <= 1e-9) {
+    if script.iter().find(|e| !matches!(e.kind, Kind::Mark(_))).is_some_and(|e| e.t <= 1e-9) {
         early_place = take_requests(&mut rt);
         rt.frame(0.0);
         rt.open_popup_headless();
@@ -1149,6 +1187,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
                 },
             };
             match &e.kind {
+                Kind::Mark(_) => {}
                 Kind::Focus(focused) => rt.window_focus(*focused),
                 Kind::Shortcut(shortcut) => shared.shortcuts.fire(shortcut).unwrap_or_else(|e| die(&format!("script shortcut: {e}"))),
                 Kind::Menu(item) => crate::native_menu::fire(&shared, item).unwrap_or_else(|e| die(&format!("script menu: {e}"))),
@@ -1335,19 +1374,28 @@ struct Timeline {
 }
 
 impl Timeline {
-    fn of(args: &Args, script: &[Ev]) -> Timeline {
+    fn of(args: &Args, script: &[Ev]) -> Result<Timeline, String> {
+        let mark = |name: &str| script.iter().find_map(|e| matches!(&e.kind, Kind::Mark(n) if n == name).then_some(e.t));
+        let resolve = |(name, offset): &(String, f64)| mark(name).map(|t| (t + offset).max(0.0)).ok_or_else(|| {
+            let names: Vec<_> = script.iter().filter_map(|e| match &e.kind { Kind::Mark(n) => Some(n.as_str()), _ => None }).collect();
+            format!("no mark {name:?} in the script (marks: {})", if names.is_empty() { "none".into() } else { names.join(", ") })
+        });
         let fps = args.fps.max(1.0);
         let dt = 1.0 / fps;
-        let start_frame = (args.start * fps).round() as usize;
+        let start = args.start_mark.as_ref().map_or(Ok(args.start), resolve)?;
+        let at = args.at_mark.as_ref().map(resolve).transpose()?.or(args.at);
+        let start_frame = (start * fps).round() as usize;
         let script_end = script.last().map_or(0.0, |e| e.t);
-        // A video without a length runs to one second after the script, as a snapshot does.
+        // A video without a length runs to the `end` mark, or one second after the script as a
+        // snapshot does.
         let until = |t: f64| ((t * fps).round() as usize).saturating_sub(start_frame) + 1;
+        let auto = || until(mark("end").unwrap_or(script_end + 1.0));
         let frames = args.frames.unwrap_or_else(|| match (args.duration, &args.video) {
-            (Some(d), _) => (d * fps).round().max(1.0) as usize,
-            (None, Some(_)) => until(script_end + 1.0),
+            (Some(Length::Seconds(d)), _) => (d * fps).round().max(1.0) as usize,
+            (Some(Length::Auto), _) | (None, Some(_)) => auto(),
             (None, None) => 0,
         });
-        let snap_t = args.at.unwrap_or(if frames > 0 {
+        let snap_t = at.unwrap_or(if frames > 0 {
             (start_frame + frames - 1) as f64 * dt
         } else if script.is_empty() {
             0.0
@@ -1356,7 +1404,7 @@ impl Timeline {
         });
         let snap_frame = (snap_t * fps).round() as usize;
         let last_frame = snap_frame.max(start_frame + frames.max(1) - 1);
-        Timeline { fps, dt, start_frame, frames, snap_frame, last_frame }
+        Ok(Timeline { fps, dt, start_frame, frames, snap_frame, last_frame })
     }
 }
 
@@ -1566,6 +1614,39 @@ mod tests {
         let summary = crate::present_time::Summary::of_trace(&timed).unwrap();
         assert_eq!((summary.frames, summary.presented, summary.bunched, summary.missed), (3, 3, 0, 0));
         assert!(crate::present_time::Summary::of_trace(&plain).is_none());
+    }
+
+    #[test]
+    fn marks_are_inert_events_that_times_can_name() {
+        let script = parse_script(json!([
+            {"t": 0.5, "type": "tap", "x": 1, "y": 1},
+            {"t": 3.2, "type": "mark", "name": "end"},
+            {"t": 1.0, "type": "mark", "name": "end-card"},
+        ]));
+        let marks: Vec<_> = script.iter().filter_map(|e| match &e.kind { Kind::Mark(n) => Some((n.as_str(), e.t)), _ => None }).collect();
+        assert_eq!(marks, [("end-card", 1.0), ("end", 3.2)]);
+        assert!(matches!(script[4].public().event, ScriptEvent::Mark(ref n) if n == "end"));
+
+        assert_eq!(mark_time("mark:end"), Some(("end".into(), 0.0)));
+        assert_eq!(mark_time("mark:end+0.5"), Some(("end".into(), 0.5)));
+        assert_eq!(mark_time("mark:end-card-0.25"), Some(("end-card".into(), -0.25)));
+        assert_eq!(mark_time("mark:end-1e-3"), Some(("end".into(), -0.001)));
+        assert_eq!(mark_time("1.5"), None);
+
+        let args = |v: &[&str]| Args::parse_from(v.iter().map(|s| (*s).into()).collect());
+        let timeline = |v: &[&str]| Timeline::of(&args(v), &script);
+        let snap = timeline(&["--snap", "a.png", "--at", "mark:end+0.5"]).unwrap();
+        assert_eq!((snap.snap_frame, snap.frames), (222, 0));
+        let video = timeline(&["--video", "a.mp4", "--start", "mark:end-card"]).unwrap();
+        assert_eq!((video.start_frame, video.frames, video.last_frame), (60, 133, 192), "auto runs to the end mark");
+        let auto = timeline(&["--frames", "1", "--duration", "auto"]).unwrap();
+        assert_eq!(auto.frames, 1, "--frames wins over --duration");
+        let seconds = timeline(&["--video", "a.mp4", "--duration", "2", "--fps", "30"]).unwrap();
+        assert_eq!((seconds.frames, seconds.last_frame), (60, 59));
+        let err = timeline(&["--snap", "a.png", "--at", "mark:intro"]).unwrap_err();
+        assert_eq!(err, "no mark \"intro\" in the script (marks: end-card, end)");
+        let unmarked = Timeline::of(&args(&["--video", "a.mp4"]), &parse_script(json!([{"t": 0.5, "type": "tap", "x": 1, "y": 1}]))).unwrap();
+        assert_eq!(unmarked.frames, 96, "without an end mark, one second after the last event (the tap's release at 0.58 s)");
     }
 
     /// Headless runs publish the process's `headless_run`, so tests that render one take turns.

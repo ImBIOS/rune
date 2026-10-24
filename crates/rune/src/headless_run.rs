@@ -28,7 +28,15 @@ impl HeadlessRun {
     /// down and an up; `type` is one key per character at its `every` interval.
     pub fn events(&self) -> &[TimedEvent] { &self.events }
 
-    /// The time of the script's last event or 0 without one.
+    /// The script's `mark` events, in time order: (name, seconds).
+    pub fn marks(&self) -> impl Iterator<Item = (&str, f64)> {
+        self.events.iter().filter_map(|e| match &e.event { ScriptEvent::Mark(name) => Some((name.as_str(), e.t)), _ => None })
+    }
+
+    /// The time of the first mark called `name`.
+    pub fn mark(&self, name: &str) -> Option<f64> { self.marks().find(|(n, _)| *n == name).map(|(_, t)| t) }
+
+    /// The time of the script's last event (marks included), or 0 without one.
     pub fn script_end(&self) -> f64 { self.events.last().map_or(0.0, |e| e.t) }
 
     /// Device pixels per point (`--scale`, default 2).
@@ -40,7 +48,7 @@ impl HeadlessRun {
     /// The rendered window's viewport in points (`--size`, or the window's own size).
     pub fn size(&self) -> (f32, f32) { self.size }
 
-    /// Seconds of virtual time at the first dumped frame (`--start`).
+    /// Seconds of virtual time at the first dumped frame (`--start`, marks resolved).
     pub fn start(&self) -> f64 { self.start }
 
     /// Frames written to `--video` or `--out` (0 for a `--snap` or `--tree` run).
@@ -58,10 +66,12 @@ pub struct TimedEvent {
     pub event: ScriptEvent,
 }
 
-/// One input a script feeds the app.
+/// One input (or marker) a script feeds the app.
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum ScriptEvent {
+    /// `{"type": "mark", "name": …}`: a named point in time with no input effect.
+    Mark(String),
     /// A logical key; `repeat` is a held key's auto-repeat.
     Key { key: KeyEvent, repeat: bool },
     Paste(String),
