@@ -23,7 +23,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   `.continuous`, SwiftUI `.continuous`) instead of circular arcs; shadows stay circular.
   `LayerSpec::clip_radius` takes a negative radius for the same shape. Adds the public field
   `Visual::continuous_corners`, so a `Visual { .. }` literal without `..Default::default()`
-  stops building. `SystemMaterial::Glass` was already continuous; `Popover` follows the flag.
+  stops building. `system_material(SystemMaterial::Glass)` turns the flag on, since
+  `NSGlassEffectView` draws no other curve, so the element's fill, clip and shadow hole match
+  the glass; `Popover` follows the flag.
 - **System backdrop materials.** `El::system_material(SystemMaterial::Glass | Popover)` backs
   an element with Liquid Glass (`NSGlassEffectView`, macOS 26+; the popover material before)
   or the popover material, as a native view under a transparent window's Metal layer that

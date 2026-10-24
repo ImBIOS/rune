@@ -1073,7 +1073,7 @@ To match a native AppKit card on top of the material, three more opt-ins:
 - `.srgb_blend(true)` on the `App`, `WindowSpec` or `ConfiguredOverlay` blends in sRGB-encoded
   space, as Core Animation does, so a 62% frost over the glass reads as the same CALayer would.
 - `El::continuous_corners()` gives the element, its clip and its material Apple's continuous
-  curve.
+  curve. Glass always has it, since `NSGlassEffectView` draws no other.
 - `Shadow::core_animation(x, y, radius, color)` takes a CALayer `shadowRadius` and sets
   `blur` to twice it.
 

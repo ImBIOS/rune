@@ -93,7 +93,24 @@ fn over_native_views_the_fill_goes_and_the_shadow_is_cut_out() {
     let s = shadows[0];
     // The hole is the element's own rect, relative to the shadow's grown and offset rect.
     assert_eq!([s.rect[0] + s.uv[0], s.rect[1] + s.uv[1], s.uv[2], s.uv[3]], [60.0, 40.0, 240.0, 120.0]);
-    assert_eq!(s.radii[3], 36.0);
+    // Glass draws only continuous corners, so the hole is continuous too (a negative radius).
+    assert_eq!(s.radii[3], -36.0);
+}
+
+#[test]
+fn glass_rounds_continuously_and_popover_follows_the_flag() {
+    fn cards(_: &u8, _: &mut Cx<u8>) -> El {
+        let popover = |x: f32| el().absolute(x, 20.0).size(40.0, 40.0).radius(10.0).system_material(SystemMaterial::Popover);
+        el().size(200.0, 120.0)
+            .child(el().absolute(10.0, 20.0).size(40.0, 40.0).radius(10.0).system_material(SystemMaterial::Glass))
+            .child(popover(60.0))
+            .child(popover(110.0).continuous_corners())
+    }
+    let rt = runtime(cards, false);
+    assert_eq!(rt.materials.iter().map(|m| m.continuous).collect::<Vec<_>>(), [true, false, true]);
+    // The fallback fills take the same curve: negative radii draw continuous corners.
+    let fill = |x: f32| kind(&rt, KIND_RECT).into_iter().find(|q| q.rect[0] == x * 2.0).unwrap().radii[0];
+    assert_eq!([fill(10.0), fill(60.0), fill(110.0)], [-20.0, 20.0, -20.0]);
 }
 
 #[test]
