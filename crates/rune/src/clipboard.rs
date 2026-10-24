@@ -7,7 +7,8 @@
 use std::hash::{BuildHasher, RandomState};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, mpsc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use crate::time::Instant;
 use zeroize::Zeroizing;
 use crate::{Runtime, Waker};
 
@@ -255,6 +256,7 @@ struct Worker {
     sender: mpsc::Sender<Request>,
     join: Mutex<Option<(std::thread::JoinHandle<()>, mpsc::Receiver<()>)>>,
 }
+#[cfg(not(target_arch = "wasm32"))]
 impl Worker {
     fn spawn<B: Backend + 'static>(open: impl FnMut() -> Option<B> + Send + 'static) -> Self {
         let (sender, recv) = mpsc::channel();
@@ -273,12 +275,19 @@ impl Worker {
         if completed.recv_timeout(Duration::from_millis(250)).is_ok() { let _ = handle.join(); }
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
 fn worker() -> &'static mpsc::Sender<Request> {
     &WORKER.get_or_init(|| Worker::spawn(|| arboard::Clipboard::new().ok())).sender
 }
 
+#[cfg(target_arch = "wasm32")]
+fn worker() -> &'static mpsc::Sender<Request> {
+    panic!("native clipboard is unsupported on web")
+}
+
 /// Called by the shared event-loop exit path, including overlay-only applications.
 pub(crate) fn shutdown() {
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(worker) = WORKER.get() { worker.stop(); }
 }
 
@@ -288,6 +297,7 @@ trait Backend {
     fn revision(&self) -> Option<u64>;
     fn clear(&mut self);
 }
+#[cfg(not(target_arch = "wasm32"))]
 impl Backend for arboard::Clipboard {
     fn write(&mut self, copy: &ClipboardWrite) -> Result<(), String> { write(self, copy).map_err(|e| e.to_string()) }
     fn text(&mut self) -> Option<Zeroizing<String>> { self.get_text().ok().map(Zeroizing::new) }
@@ -332,6 +342,7 @@ fn run_worker<B: Backend>(recv: mpsc::Receiver<Request>, mut open: impl FnMut() 
     drop(clipboard);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn write(cb: &mut arboard::Clipboard, copy: &ClipboardWrite) -> Result<(), arboard::Error> {
     if copy.clear_after.is_none() { return cb.set_text(copy.text.as_str()); }
     #[cfg(target_os = "macos")]

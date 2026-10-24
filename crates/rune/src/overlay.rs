@@ -18,7 +18,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use crate::time::Instant;
 
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{StartCause, WindowEvent};
@@ -1058,6 +1059,8 @@ impl<T: 'static> Overlay<T> {
         let Some(input) = self.pending_input.take() else { return };
         self.options.input = input;
         let resolved = input.resolved(self.interactive);
+        #[cfg(target_arch = "wasm32")]
+        let _ = resolved;
         #[cfg(target_os = "macos")]
         if let Some(panel) = &self.panel { panel.set_input(resolved); }
         #[cfg(target_os = "windows")]
@@ -1917,7 +1920,7 @@ pub(crate) fn monitor_at(event_loop: &ActiveEventLoop, target: &DisplayTarget, s
     let pointer = (*target == DisplayTarget::UnderPointer).then(crate::win32::pointer_position).flatten();
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
     let pointer = if *target == DisplayTarget::UnderPointer && !crate::window::is_wayland(event_loop) { crate::x11_overlay::pointer_position() } else { None };
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android", target_arch = "wasm32"))]
     let pointer: Option<(i32, i32)> = None;
     let i = crate::overlay_options::choose_display(&bounds, primary, requested, sampled.or(pointer).map(|(x, y)| (f64::from(x), f64::from(y))))?;
     Some(monitors[i].clone())

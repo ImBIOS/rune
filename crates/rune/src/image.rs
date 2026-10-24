@@ -1,7 +1,9 @@
 //! Content-addressed raster images. Decode and linear-light mip generation run on one
 //! sleeping worker per cache, never in a view or a render frame.
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, Weak, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc;
 
 pub type ImageId = [u8; 32];
 
@@ -50,7 +52,11 @@ impl Image {
     /// Wait for fixture assets before advancing a deterministic headless scene. Interactive
     /// apps use the cache's waker instead; decode still happens on the cache worker.
     pub fn wait(&self) -> Result<[u32; 2], &ImageError> {
-        let mip = &self.0.decoded.wait().as_ref()?.mips[0];
+        #[cfg(target_arch = "wasm32")]
+        let decoded = self.0.decoded.get().expect("Image::wait cannot block on web; use is_ready and the cache waker");
+        #[cfg(not(target_arch = "wasm32"))]
+        let decoded = self.0.decoded.wait();
+        let mip = &decoded.as_ref()?.mips[0];
         Ok([mip.width, mip.height])
     }
     pub(crate) fn decoded(&self) -> Option<Result<&Decoded, &ImageError>> {
@@ -73,9 +79,17 @@ struct Job { image: Image, input: Input }
 /// queued requests complete. The waker should be the one supplied by `AppSpec::setup`.
 pub struct ImageCache {
     entries: Mutex<HashMap<ImageId, Weak<State>>>,
+    #[cfg(not(target_arch = "wasm32"))]
     jobs: mpsc::Sender<Job>,
+    #[cfg(target_arch = "wasm32")]
+    wake: crate::Waker,
 }
 impl ImageCache {
+    #[cfg(target_arch = "wasm32")]
+    pub fn new(wake: crate::Waker) -> Self {
+        Self { entries: Mutex::new(HashMap::new()), wake }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(waker: crate::Waker) -> Self {
         let (jobs, receive) = mpsc::channel::<Job>();
         std::thread::Builder::new().name("rune-images".into()).spawn(move || {
@@ -146,8 +160,23 @@ impl ImageCache {
         entries.retain(|_, value| value.strong_count() > 0);
         let image = Image(Arc::new(State { id, pixels: crate::Pixels::new(), decoded: OnceLock::new() }));
         entries.insert(id, Arc::downgrade(&image.0));
+        #[cfg(not(target_arch = "wasm32"))]
         if self.jobs.send(Job { image: image.clone(), input }).is_err() {
             let _ = image.0.decoded.set(Err(ImageError("image worker stopped".into())));
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let image = image.clone();
+            let wake = self.wake.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let decoded = match input {
+                    Input::Encoded(bytes) => decode(&bytes),
+                    Input::Rgba(w, h, bytes) => mip_chain(w, h, &bytes),
+                    Input::Icon(..) => Err(ImageError("filesystem icons are unsupported on web".into())),
+                };
+                image.finish(decoded);
+                wake();
+            });
         }
         image
     }

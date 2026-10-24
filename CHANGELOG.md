@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Experimental WebGPU canvas host.** `App::run` on `wasm32-unknown-unknown` starts one
+  winit canvas with asynchronous GPU initialization and demand-driven browser frames.
+  `rune::time::Instant` uses the browser clock on wasm and the standard clock on native.
+  Overlays, extra windows, native window hooks and blocking GPU operations are unsupported.
+
 - **Page keys skip a scroll view with nothing to scroll, and `Tx::scroll_page`.** With a chat's
   short multi-line composer focused, Page Up and Page Down paged the composer's own scroll area
   (a no-op) instead of the message list beside it. Rune now skips scroll views whose content

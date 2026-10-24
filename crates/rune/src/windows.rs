@@ -12,6 +12,7 @@ pub(crate) struct PlaceRequest {
 
 impl PlaceRequest {
     pub fn new(display: crate::DisplayTarget, placement: crate::OverlayPlacement) -> Self {
+        #[allow(unused_mut)] // Only desktop hosts can sample a pointer's display.
         let mut request = Self { requested: display.clone(), display, placement, pointer: None };
         if request.display == crate::DisplayTarget::UnderPointer {
             #[cfg(target_os = "macos")]

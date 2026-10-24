@@ -34,10 +34,8 @@ taffy = { version = "0.15", default-features = false, features = ["std", "taffy_
 parley = { version = "0.12", default-features = false, features = ["std"] }
 swash = "0.2.10"
 bytemuck = { version = "1.25", features = ["derive"] }
-pollster = "1"
 png = "0.18"
 serde_json = "1"
-arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
 portable-atomic = "1"
 rfd = { version = "0.15", optional = true, default-features = false, features = ["xdg-portal", "async-std"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
@@ -50,6 +48,19 @@ csscolorparser = { version = "0.7", optional = true }
 
 [target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
 libc = { version = "0.2", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "1"
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+wgpu = { version = "30", default-features = false, features = ["webgpu"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "CssStyleDeclaration", "MediaQueryList", "console"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5.2"
@@ -93,7 +104,7 @@ tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
 futures-util = "0.3"
 serde = "1"
 
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+[target.'cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))'.dependencies]
 wgpu = { version = "30", default-features = false, features = ["vulkan", "dx12"] }
 
 [[test]]

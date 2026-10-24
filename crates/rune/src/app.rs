@@ -318,6 +318,12 @@ impl<S: 'static> App<S> {
 
     /// `run`, returning an error instead of panicking when the event loop can't start (no
     /// display over ssh or in CI, no Wayland or X11 server) or fails.
+    #[cfg(target_arch = "wasm32")]
+    pub fn try_run(self) -> Result<(), String> {
+        crate::web::run(self)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn try_run(mut self) -> Result<(), String> {
         let args = match self.argv.take() {
             Some(argv) => Args::parse_from(argv),

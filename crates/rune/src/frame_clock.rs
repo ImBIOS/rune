@@ -7,7 +7,7 @@
 //! retargeted on the frame starts at the frame's time and shows one small step, so it never
 //! jumps by the gap. Both happen in one runtime pass ([`Runtime::frame_split`]).
 
-use std::time::Instant;
+use crate::time::Instant;
 use crate::runtime::Runtime;
 
 /// The most a frame steps motion it starts. Its first frame shows one 120 Hz frame of movement,

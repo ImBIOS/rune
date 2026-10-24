@@ -32,7 +32,7 @@ impl DisplayId {
             use winit::platform::x11::MonitorHandleExtX11;
             NativeDisplayId::X11Crtc(monitor.native_id())
         });
-        #[cfg(any(target_os = "ios", target_os = "android"))]
+        #[cfg(any(target_os = "ios", target_os = "android", target_arch = "wasm32"))]
         let native = None;
         Self(monitor, native)
     }

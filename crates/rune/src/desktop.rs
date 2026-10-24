@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use crate::time::Instant;
 
 use serde_json::{Value, json};
 

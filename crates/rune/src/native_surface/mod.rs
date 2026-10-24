@@ -9,7 +9,7 @@ pub mod macos;
 mod pipeline;
 pub use pipeline::SurfaceRenderer;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use crate::time::Instant;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SurfaceFit {

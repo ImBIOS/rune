@@ -4,7 +4,8 @@
 //! texture id per failed acquisition), so the meter says so once, in release builds too.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use crate::time::Instant;
 
 use crate::window::Missed;
 

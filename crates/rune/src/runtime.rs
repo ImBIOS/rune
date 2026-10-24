@@ -598,7 +598,7 @@ pub struct Runtime<S: 'static> {
     pub(crate) dev: Option<crate::dev::Session<S>>,
     wake_deadlines: Vec<f64>,
     /// Windowed runs read the clock from the wall instead of summing frame steps.
-    pub wall_start: Option<std::time::Instant>,
+    pub wall_start: Option<crate::time::Instant>,
     /// Called for keys unhandled by the focused control; return true to consume it.
     pub on_key: Option<fn(&mut S, &KeyEvent, &mut Tx) -> bool>,
     pub(crate) nodes: Vec<Node>,
@@ -791,7 +791,7 @@ pub struct Runtime<S: 'static> {
     live_subscriptions: Vec<Arc<crate::live::Subscription>>,
     live_dirty: bool,
     /// When the frame being built will present; videos pull the picture for it.
-    pub(crate) frame_target: Option<std::time::Instant>,
+    pub(crate) frame_target: Option<crate::time::Instant>,
     /// A drawn video is playing or seeking: keep drawing frames.
     videos_active: bool,
     /// Drawn videos' state generations; a change re-runs the view.
@@ -4151,7 +4151,7 @@ impl<S: 'static> Runtime<S> {
         self.loops_active = false;
         self.static_scale_settling = false;
         self.videos_active = false;
-        let now = std::time::Instant::now();
+        let now = crate::time::Instant::now();
         let video_clock = match self.wall_start {
             None => crate::video::Clock::Virtual(self.clock),
             Some(_) => crate::video::Clock::Display(self.frame_target.filter(|t| *t > now).unwrap_or(now)),

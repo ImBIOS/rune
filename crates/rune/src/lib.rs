@@ -3,9 +3,15 @@
 //! input, scroll viewports, growth stacks, streaming reveals, themes as data, and headless agent
 //! tooling.
 
+#[cfg(all(target_arch = "wasm32", any(feature = "hot", feature = "dev", feature = "native-file-dialog")))]
+compile_error!("web does not support Rune's hot, dev, or native-file-dialog features; disable them for wasm32");
+
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
 mod activation;
 mod app;
+pub mod time;
+#[cfg(target_arch = "wasm32")]
+mod web;
 #[cfg(all(feature = "dev", debug_assertions))]
 mod dev_clock;
 #[cfg(all(feature = "dev", debug_assertions))]

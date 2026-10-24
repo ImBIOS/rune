@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::Instant;
+use crate::time::Instant;
 
 use serde_json::{Value, json};
 
@@ -209,6 +209,9 @@ fn mark_time(v: &str) -> Option<String> {
 
 impl Args {
     pub fn parse() -> Args {
+        #[cfg(target_arch = "wasm32")]
+        return Args::parse_from(Vec::new());
+        #[cfg(not(target_arch = "wasm32"))]
         Args::parse_from(std::env::args().skip(1).collect())
     }
 

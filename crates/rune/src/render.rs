@@ -204,6 +204,7 @@ impl Gpu {
     }
 
     /// Like `try_new`, also enabling whichever of `wanted` the adapter supports.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn try_with_features(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, wanted: wgpu::Features) -> Result<Gpu, String> {
         let _serial = GPU_INIT.lock().unwrap_or_else(|e| e.into_inner());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -224,6 +225,11 @@ impl Gpu {
         }))
         .map_err(|error| format!("no GPU device: {error}"))?;
         Ok(Gpu { instance, adapter, device, queue })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn try_with_features(_: wgpu::Instance, _: Option<&wgpu::Surface<'_>>, _: wgpu::Features) -> Result<Gpu, String> {
+        Err("synchronous GPU initialization is unsupported on web; use App::run".into())
     }
 
     pub fn headless() -> Gpu {
@@ -767,6 +773,7 @@ impl Offscreen {
     }
 
     /// Tightly packed sRGB RGBA8 after `copy` was submitted.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn read(&self, device: &wgpu::Device) -> Vec<u8> {
         let slice = self.buffer.slice(..);
         slice.map_async(wgpu::MapMode::Read, |r| r.expect("map readback"));
@@ -777,6 +784,11 @@ impl Offscreen {
         };
         self.buffer.unmap();
         out
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn read(&self, _: &wgpu::Device) -> Vec<u8> {
+        panic!("blocking GPU readback is unsupported on web")
     }
 }
 

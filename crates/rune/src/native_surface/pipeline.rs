@@ -77,6 +77,12 @@ pub struct SurfaceRenderer {
     importer: Option<macos::Importer>,
 }
 impl SurfaceRenderer {
+    #[cfg(target_arch = "wasm32")]
+    pub fn new(_: &wgpu::Device, _: wgpu::TextureFormat) -> Self {
+        panic!("native surfaces are unsupported on web")
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let timing_pool = device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| {
             Arc::new(TimingPool {
@@ -407,6 +413,13 @@ impl SurfaceRenderer {
         pass.set_bind_group(0, &self.draws[index].bind, &[]);
         pass.draw(0..4, 0..1);
     }
+    #[cfg(target_arch = "wasm32")]
+    pub fn submit(&self, queue: &wgpu::Queue, encoder: wgpu::CommandEncoder) -> wgpu::SubmissionIndex {
+        assert!(self.draws.is_empty(), "native video surfaces are unsupported on web");
+        queue.submit([encoder.finish()])
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn submit(&self, queue: &wgpu::Queue, encoder: wgpu::CommandEncoder) -> wgpu::SubmissionIndex {
         let submitted_at = Instant::now();
         let frames: Vec<_> = self

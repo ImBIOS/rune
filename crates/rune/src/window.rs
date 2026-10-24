@@ -3,12 +3,15 @@
 
 use std::sync::{Arc, Mutex, Weak, atomic::{AtomicBool, AtomicU32, Ordering}};
 use std::{cell::RefCell, rc::Rc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use crate::time::Instant;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, Ime as WIme, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
+#[cfg(not(target_arch = "wasm32"))]
+use winit::event_loop::EventLoop;
 use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
 use winit::window::{Theme, Window, WindowId, WindowLevel};
 use winit::raw_window_handle::HasWindowHandle;
@@ -688,6 +691,12 @@ fn minimize_ignored(what: &str) {
     if cfg!(debug_assertions) { eprintln!("rune: minimize ignored: {what} can't minimize"); }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn run_configured(_: Factory, _: Args, _: bool) -> Result<(), String> {
+    Err("native window factories are unsupported on web; use App::run for one canvas".into())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn run_configured(factory: Factory, args: Args, accessory: bool) -> Result<(), String> {
     let _ = accessory;
     #[cfg(target_os = "macos")]

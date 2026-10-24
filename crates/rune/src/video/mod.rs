@@ -42,7 +42,7 @@ use crate::native_surface::{ByteFrame, ColorInfo, Format, NativeSurface};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::time::Instant;
+use crate::time::Instant;
 
 /// Set once a window event loop runs. Until then (headless runs, tests) no player is created.
 static PLAYBACK: AtomicBool = AtomicBool::new(false);

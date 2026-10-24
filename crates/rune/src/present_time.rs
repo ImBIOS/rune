@@ -11,7 +11,8 @@
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use crate::time::Instant;
 
 /// A drawable's sequence number and when it reached the screen, or `None` when the system
 /// skipped it.

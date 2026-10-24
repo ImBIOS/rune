@@ -583,6 +583,8 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
+ "serde",
+ "termcolor",
  "unicode-width",
 ]
 
@@ -603,6 +605,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
+]
+
+[[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -3157,11 +3169,13 @@ dependencies = [
  "block2 0.5.1",
  "block2 0.6.2",
  "bytemuck",
+ "console_error_panic_hook",
  "csscolorparser",
  "dioxus-devtools",
  "futures-util",
  "half",
  "image",
+ "js-sys",
  "libc",
  "libloading",
  "objc2 0.5.3",
@@ -3195,10 +3209,14 @@ dependencies = [
  "tokio",
  "tungstenite",
  "unicode-segmentation",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",
+ "web-sys",
+ "web-time",
  "wgpu",
  "windows-sys 0.59.0",
  "winit",
@@ -3812,6 +3830,15 @@ dependencies = [
  "once_cell",
  "rustix 1.1.5",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "termcolor"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
+dependencies = [
+ "winapi-util",
 ]
 
 [[package]]
@@ -4452,6 +4479,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "js-sys",
  "log",
+ "naga",
  "parking_lot",
  "portable-atomic",
  "profiling",
