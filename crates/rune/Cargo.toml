@@ -119,6 +119,11 @@ name = "macos_overlay_drag_out"
 harness = false
 
 [[test]]
+name = "macos_overlay_cursor"
+harness = false
+required-features = ["macos-background-cursor"]
+
+[[test]]
 name = "popup_menu_macos"
 harness = false
 
