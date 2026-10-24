@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 rune = { path = "../../crates/rune" }
-rune-kit = { path = "../../crates/rune-kit", features = ["markdown"] }
+rune-kit = { path = "../../crates/rune-kit", features = ["markdown", "mermaid"] }
 rune-theme-opencode = { path = "../../themes/opencode" }
 
 [dev-dependencies]

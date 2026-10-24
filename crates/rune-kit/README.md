@@ -95,6 +95,30 @@ context menus via `.at(x, y)`), Tooltip (compact, standard, large), HoverCard, T
 ToastRegion, Card, List, Accordion, Collapsible, Badge, Divider, Keybind, Spinner, Loader,
 Progress, ProgressCircle, SegmentedControl.
 
+## Markdown
+
+Feature `markdown`: `Markdown::new(src).build(&kit)`, or without a kit
+`Markdown::new(src).render(&MarkdownStyle::neutral(dark))` (also `MarkdownStyle::from_seed`).
+It renders CommonMark plus GFM tables, and is built for streaming: re-render with the longer
+source each time, and earlier blocks stay mounted.
+
+- **Tables** keep their header row, per-column alignment and inline formatting. Columns start
+  at their content's width and shrink in proportion when the table doesn't fit; text wraps
+  inside a column down to its longest word (at most `table_min_column`, 120 points), then the
+  table clips. There is no horizontal scroll. While a row is still arriving it doesn't resize
+  the columns, and a header line alone already shows as a table.
+- **```` ```diff ````** (or `patch`) fences tint `+` and `-` lines edge to edge, and dim `@@`
+  and file header lines. Set colours with `MarkdownStyle::diff` and `diff_hunk`.
+- **```` ```mermaid ````** (feature `mermaid`) draws flowcharts and sequence diagrams natively,
+  with no JS or webview, themed through `MarkdownStyle::diagram*`. Layout runs once per source
+  and is cached. Anything outside the supported subset (listed in `src/mermaid.rs`) shows as
+  its code block with a "Diagram not supported" hint. `rune_kit::mermaid::render(src, &style)`
+  draws one on its own.
+
+`Tooltip::label(..).render(&TooltipStyle::neutral(dark), &mut layer)` builds a tooltip without
+a kit. The gallery's `rune-markdown--walkthrough` and `rune-markdown--diagrams` scenes show
+every feature.
+
 ## Checking against Storybook
 
 ```sh

@@ -151,6 +151,8 @@ stories! {
     "rune-rolling-text--basic" => rolling_text_basic,
     "rune-markdown--basic" => markdown_basic,
     "rune-markdown--streaming" => markdown_streaming,
+    "rune-markdown--walkthrough" => markdown_walkthrough,
+    "rune-markdown--diagrams" => markdown_diagrams,
 }
 
 fn combobox_searchable(s: &G, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -1294,6 +1296,94 @@ Links are styled now and become clickable with rich-text spans.\n\n## Lists\n\n-
 
 fn markdown_basic(_: &G, k: &Kit, _: &mut Vec<El>) -> El {
     col().w(560.0).child(Markdown::new(MARKDOWN).on_link(|_: &mut G, _| {}).build(k))
+}
+
+/// Tables, diffs and diagrams: what an agent's answer about a code change looks like.
+const WALKTHROUGH: &str = r#"## Retry with backoff
+
+The client now retries failed requests with **exponential backoff**, capped at `max_delay`.
+
+| Attempt | Delay | Jitter | Notes |
+|:--------|------:|:------:|-------|
+| 1 | 0 ms | none | first try |
+| 2 | 200 ms | ±20% | after a `503` |
+| 3 | 400 ms | ±20% | |
+| 4 | 800 ms | ±20% | gives up after this one and reports the **last** error |
+
+```diff
+@@ -12,7 +12,9 @@ impl Client {
+     pub async fn send(&self, req: Request) -> Result<Response> {
+-        self.inner.send(req).await
++        retry(self.policy, || self.inner.send(req.clone()))
++            .await
++            .map_err(Error::from)
+     }
+```
+
+```mermaid
+flowchart LR
+    A[Request] --> B{Status?}
+    B -->|2xx| C([Done])
+    B -->|503| D[Wait backoff]
+    D --> E[(Retry budget)]
+    E -.->|left| A
+    E -->|spent| F[Report error]
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant C as Client
+    participant S as Server
+    U->>+C: send(req)
+    loop until success or budget spent
+        C->>S: POST /items
+        S--xC: 503 Unavailable
+        Note right of S: overloaded
+    end
+    C-->>-U: Err(last error)
+```
+"#;
+
+/// Subgraphs, every node shape, a left-to-right chart that fits, and an unsupported diagram.
+const DIAGRAMS: &str = r#"```mermaid
+graph TD
+    subgraph client [Client]
+        UI[Web app] --> Cache[(Local cache)]
+    end
+    subgraph edge [Edge]
+        LB{{Load balancer}} --> W1[Worker 1] & W2[Worker 2]
+    end
+    UI ==> LB
+    W1 --> DB[(Postgres)]
+    W2 --> DB
+    W2 -.-> Q>Queue]
+```
+
+```mermaid
+flowchart LR
+    a([Stadium]) --> b[[Subroutine]] --> c((Circle)) --o d{Diamond}
+    d --x e[/Lean/] <--> f[/Trapezoid\]
+```
+
+| Narrow | Table |
+|---|---|
+| wraps | when its column runs out of room, like this long cell does |
+
+```mermaid
+pie title Pets
+    "Dogs" : 386
+    "Cats" : 85
+```
+"#;
+
+fn markdown_diagrams(_: &G, k: &Kit, _: &mut Vec<El>) -> El {
+    col().w(520.0).child(Markdown::new(DIAGRAMS).build(k))
+}
+
+fn markdown_walkthrough(_: &G, k: &Kit, _: &mut Vec<El>) -> El {
+    col().w(680.0).child(Markdown::new(WALKTHROUGH).on_link(|_: &mut G, _| {}).build(k))
 }
 
 fn markdown_streaming(s: &G, k: &Kit, _: &mut Vec<El>) -> El {
