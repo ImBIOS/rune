@@ -96,11 +96,7 @@ impl Builder {
     fn flush_inline(&mut self) {
         if let Some((kind, mut inl, open)) = self.inline.take() {
             for o in open {
-                let end = inl.text.len();
-                if let Some(url) = o.url {
-                    inl.links.push((o.start, end, url));
-                }
-                inl.spans.push((o.start, end, o.style));
+                end_run(&mut inl, o);
             }
             let trimmed = inl.text.trim_end().len();
             inl.text.truncate(trimmed);
@@ -119,6 +115,22 @@ impl Builder {
                 InlineKind::Para => Block::Para(inl),
                 InlineKind::Heading(l) => Block::Heading(l, inl),
             });
+        }
+    }
+
+    /// Closes the innermost container into its parent.
+    fn pop_container(&mut self) {
+        self.flush_inline();
+        let Some((c, blocks)) = self.stack.pop() else { return };
+        match c {
+            Container::Item => {
+                if let Some((Container::List(_, items), _)) = self.stack.last_mut() {
+                    items.push(blocks);
+                }
+            }
+            Container::List(start, items) => self.push(Block::List { start, items }),
+            Container::Quote => self.push(Block::Quote(blocks)),
+            Container::Root => {}
         }
     }
 }
@@ -177,26 +189,7 @@ pub fn parse(src: &str) -> Vec<Block> {
                         b.push(Block::Code(text));
                     }
                 }
-                TagEnd::BlockQuote(_) => {
-                    b.flush_inline();
-                    if let Some((_, blocks)) = b.stack.pop() {
-                        b.push(Block::Quote(blocks));
-                    }
-                }
-                TagEnd::Item => {
-                    b.flush_inline();
-                    if let Some((_, blocks)) = b.stack.pop()
-                        && let Some((Container::List(_, items), _)) = b.stack.last_mut()
-                    {
-                        items.push(blocks);
-                    }
-                }
-                TagEnd::List(_) => {
-                    b.flush_inline();
-                    if let Some((Container::List(start, items), _)) = b.stack.pop() {
-                        b.push(Block::List { start, items });
-                    }
-                }
+                TagEnd::BlockQuote(_) | TagEnd::Item | TagEnd::List(_) => b.pop_container(),
                 TagEnd::Strong | TagEnd::Emphasis | TagEnd::Link => close(&mut b),
                 _ => {}
             },
@@ -234,17 +227,7 @@ pub fn parse(src: &str) -> Vec<Block> {
     }
     // Unwind containers left open by a partial stream.
     while b.stack.len() > 1 {
-        let (c, blocks) = b.stack.pop().unwrap();
-        match c {
-            Container::Item => {
-                if let Some((Container::List(_, items), _)) = b.stack.last_mut() {
-                    items.push(blocks);
-                }
-            }
-            Container::List(start, items) => b.push(Block::List { start, items }),
-            Container::Quote => b.push(Block::Quote(blocks)),
-            Container::Root => {}
-        }
+        b.pop_container();
     }
     b.stack.pop().unwrap().1
 }
@@ -256,17 +239,20 @@ fn open(b: &mut Builder, style: Style, url: Option<String>) {
 }
 
 fn close(b: &mut Builder) {
-    let inl = b.inline();
-    if let Some(o) = inl.2.pop() {
-        let end = inl.1.text.len();
-        if let Some(url) = o.url {
-            inl.1.links.push((o.start, end, url));
-        }
-        inl.1.spans.push((o.start, end, o.style));
+    let (_, inl, open) = b.inline();
+    if let Some(o) = open.pop() {
+        end_run(inl, o);
     }
 }
 
-
+/// Ends run `o` at the current end of the text.
+fn end_run(inl: &mut Inline, o: Open) {
+    let end = inl.text.len();
+    if let Some(url) = o.url {
+        inl.links.push((o.start, end, url));
+    }
+    inl.spans.push((o.start, end, o.style));
+}
 const CACHE_LEN: usize = 32;
 
 #[derive(Default)]

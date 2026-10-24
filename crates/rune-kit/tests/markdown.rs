@@ -110,6 +110,21 @@ fn a_streaming_append_keeps_earlier_blocks_mounted() {
     assert!(seen.iter().any(|k| k == "b3"), "{seen:?}");
 }
 
+/// Every prefix of a nested document parses to the same blocks as before the parser's
+/// container handling was shared (a hash of the debug output, captured on the old code).
+#[test]
+fn every_streaming_prefix_parses_like_before() {
+    let doc = "# T\n\n> quote *em [link](https://x.dev) **bold\n>\n> - in `quote`\n>   1. deep\n\n- a\n  > b\n- c **d\n\n```\ncode\n";
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for end in (0..=doc.len()).filter(|&i| doc.is_char_boundary(i)) {
+        for byte in format!("{:?}", parse(&doc[..end])).bytes() {
+            h ^= u64::from(byte);
+            h = h.wrapping_mul(0x100_0000_01b3);
+        }
+    }
+    assert_eq!(h, 3_224_808_071_872_330_980, "golden hash");
+}
+
 #[test]
 fn identical_source_parses_once() {
     let a = parse_cached("some **cached** text");
