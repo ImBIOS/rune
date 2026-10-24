@@ -834,6 +834,7 @@ impl<S: 'static> Runtime<S> {
     pub fn with_text(state: S, view: fn(&S, &mut Cx<S>) -> El, viewport: (f32, f32), env: Env, text: TextSystem) -> Self {
         let mut scene = Scene::new();
         scene.set_pixel_scale(env.scale);
+        crate::video::headless_reset();
         Runtime {
             state,
             view,
@@ -1584,6 +1585,9 @@ impl<S: 'static> Runtime<S> {
         let shaped0 = self.text.shaped;
         self.settled = false;
         self.clock = self.wall_clock().unwrap_or(self.clock + elapsed);
+        if self.wall_start.is_none() {
+            crate::video::headless_frame(self.clock);
+        }
         if let Some((deadline, animation_time)) = self.loop_wake
             && !self.animating
         {

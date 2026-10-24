@@ -263,7 +263,8 @@ fn failures_draw_a_placeholder_and_stop_drawing() {
     assert!(!rt.frame(0.1), "a failed video requests no frames");
 }
 
-/// Headless audio opens on first read and never plays: no player, no sound, time holds.
+/// Headless audio opens on first read and never plays: no player, no sound. With no runtime
+/// stepping on its thread, time holds.
 #[cfg(target_os = "macos")]
 #[test]
 fn headless_audio_opens_on_read_and_holds_time() {
@@ -452,4 +453,63 @@ fn headless_audio_opens_with_request_headers() {
     let without = Player::audio(format!("{url}-2.wav"));
     assert!(matches!(without.state(), PlayerState::Failed(_)), "{:?}", without.state());
     assert!(refused.load(std::sync::atomic::Ordering::SeqCst) > 0);
+}
+
+/// Headless audio follows the runtime clock silently: play, pause, rate, seek and the end.
+#[cfg(target_os = "macos")]
+#[test]
+fn headless_audio_time_follows_the_virtual_clock() {
+    let a = Player::audio(sound("silence.wav"));
+    let ends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let heard = ends.clone();
+    let clip = a.clone();
+    a.set_waker(Arc::new(move || {
+        if clip.shared.ctl.lock().unwrap().ended {
+            heard.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }));
+    let mut rt = crate::Runtime::new((), |_: &(), _: &mut crate::Cx<()>| crate::el().size(10.0, 10.0), (10.0, 10.0), crate::Env::new(true, 2.0));
+    let near = |t: f64, want: f64, what: &str| assert!((t - want).abs() < 1e-6, "{what}: {t}, want {want}");
+    a.play();
+    rt.frame(0.0);
+    rt.frame(0.1);
+    near(a.time(), 0.1, "playing");
+    assert_eq!(a.state(), PlayerState::Playing);
+    a.pause();
+    rt.frame(0.2);
+    near(a.time(), 0.1, "paused");
+    a.set_rate(2.0);
+    a.play();
+    rt.frame(0.05);
+    near(a.time(), 0.2, "double speed");
+    a.seek(0.05);
+    near(a.time(), 0.05, "seek");
+    rt.frame(0.1);
+    near(a.time(), 0.25, "plays on from the seek");
+    assert_eq!(ends.load(std::sync::atomic::Ordering::SeqCst), 0);
+    rt.frame(0.5);
+    assert_eq!(a.state(), PlayerState::Ended);
+    near(a.time(), 0.5, "holds the end");
+    assert_eq!(ends.load(std::sync::atomic::Ordering::SeqCst), 1, "the waker hears the end once");
+    a.set_looping(true);
+    a.set_rate(1.0);
+    a.play();
+    rt.frame(0.6);
+    near(a.time(), 0.1, "loops");
+    assert!(a.is_playing());
+}
+
+/// A new runtime's clock starts at 0, never where an earlier runtime on this thread left off.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_new_runtime_starts_the_headless_clock_again() {
+    let view = |_: &(), _: &mut crate::Cx<()>| crate::el().size(10.0, 10.0);
+    let mut old = crate::Runtime::new((), view, (10.0, 10.0), crate::Env::new(true, 2.0));
+    old.frame(5.0);
+    drop(old);
+    let a = Player::audio(sound("silence.wav"));
+    let mut rt = crate::Runtime::new((), view, (10.0, 10.0), crate::Env::new(true, 2.0));
+    a.play();
+    rt.frame(0.1);
+    assert!((a.time() - 0.1).abs() < 1e-6, "{}", a.time());
 }

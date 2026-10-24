@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Headless audio follows the virtual clock.** A headless run reported a playing audio clip
+  with its time stuck at 0. Its time now advances with the runtime clock of the thread that
+  made it, as a video's does: `pause`, `seek`, `set_rate`, looping and the end (`Ended`, and
+  the clip's waker hears it) behave as in a window, still without a player or any sound. A
+  still or `--frames` capture of a progress bar now shows it moving. Each new `Runtime` starts
+  that clock again at 0.
 - **`Player::request(url).header(name, value)` opens media with HTTP request headers.** A
   `MediaRequest` builds a player with `.audio()` or `.video()`, and every request for the clip
   (load, poster, playback) sends its headers, so media behind `Authorization` streams instead

@@ -920,8 +920,9 @@ tap.play();
   decodes the frame at its virtual time synchronously (snapped to the middle of the frame), so
   output is deterministic. Its time starts on the first frame that draws it after `play`,
   advances by the runtime clock times `rate`, and ends (holding the last frame) or loops. An
-  audio clip opens synchronously on the first read of its state, duration or time; its time
-  stays where `seek` left it. `--tree` adds a `video` object (`kind`, `state`, `time`,
+  audio clip opens synchronously on the first read of its state, duration or time. Its time
+  follows the virtual clock of the runtime on the thread that made it, as a video's does
+  (pause, seek, rate, loop, and the end, which wakes the clip's waker), with no sound. `--tree` adds a `video` object (`kind`, `state`, `time`,
   `duration`, `size`, `rate`, `looping`, `muted`, `error`) to video elements.
 - **Other platforms**: every clip reports `Failed("video playback isn't supported on this
   platform yet")` (or the audio equivalent), and video draws a neutral grey placeholder.

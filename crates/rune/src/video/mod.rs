@@ -19,7 +19,9 @@
 //! frame at its virtual time synchronously, so `--snap` and `--frames` are deterministic: time
 //! starts on the first frame that draws the element after `play`, and advances by the runtime
 //! clock times `rate`. Audio opens synchronously on the first read of its state, duration or
-//! time, and its time holds still.
+//! time (or on a frame once it plays), and its time follows the clock of the runtime stepping
+//! on the thread that made it, from the first frame or edit after `play`: pausing, seeking,
+//! rate, looping and the end (which wakes the app's waker) all as in a window, silently.
 //!
 //! Other platforms report [`PlayerState::Failed`] and draw a neutral placeholder for video.
 
@@ -52,6 +54,39 @@ pub(crate) fn enable_playback() {
 
 fn playback_enabled() -> bool {
     PLAYBACK.load(Ordering::Acquire)
+}
+
+/// Headless: the clock of the runtime stepping on this thread, and the audio clips made here.
+#[derive(Default)]
+struct Headless {
+    clock: Option<f64>,
+    audio: Vec<Weak<Shared>>,
+}
+
+thread_local! {
+    static HEADLESS: std::cell::RefCell<Headless> = std::cell::RefCell::default();
+}
+
+/// A headless runtime starts a frame at `clock`: audio clips made on this thread follow it,
+/// and the app's waker hears one end.
+pub(crate) fn headless_frame(clock: f64) {
+    let clips: Vec<Arc<Shared>> = HEADLESS.with_borrow_mut(|h| {
+        h.clock = Some(clock);
+        h.audio.retain(|w| w.strong_count() > 0);
+        h.audio.iter().filter_map(Weak::upgrade).collect()
+    });
+    for clip in clips {
+        clip.follow_clock();
+    }
+}
+
+/// A new runtime on this thread starts its clock at 0, replacing an earlier runtime's.
+pub(crate) fn headless_reset() {
+    HEADLESS.with_borrow_mut(|h| h.clock = Some(0.0));
+}
+
+fn headless_clock() -> Option<f64> {
+    HEADLESS.with_borrow(|h| h.clock)
 }
 
 /// Where media comes from. Strings containing `://` are URLs; anything else is a file path.
@@ -222,6 +257,9 @@ impl Player {
             native: Mutex::new(backend::Native::default()),
         });
         backend::created(&shared);
+        if kind == Kind::Audio && !playback_enabled() {
+            HEADLESS.with_borrow_mut(|h| h.audio.push(Arc::downgrade(&shared)));
+        }
         Self { surface: NativeSurface::with_video(shared.clone()), shared }
     }
 
@@ -328,12 +366,31 @@ impl Player {
     fn read(&self) -> MutexGuard<'_, Control> {
         if self.shared.kind == Kind::Audio && !playback_enabled() {
             self.shared.open_now();
+            self.shared.follow_clock();
         }
         self.shared.ctl.lock().unwrap()
     }
 
     fn edit(&self, f: impl FnOnce(&mut Control)) {
-        f(&mut self.shared.ctl.lock().unwrap());
+        // Headless audio: fold in the time played up to now at the old rate, then restart the
+        // clock from the edit.
+        let clock = (self.shared.kind == Kind::Audio && !playback_enabled()).then(headless_clock).flatten();
+        if clock.is_some() {
+            self.shared.open_now();
+        }
+        {
+            let mut c = self.shared.ctl.lock().unwrap();
+            if let Some(now) = clock {
+                c.advance_virtual(now);
+            }
+            f(&mut c);
+            if let Some(now) = clock {
+                c.advance_virtual(now);
+            }
+        }
+        if clock.is_some() {
+            self.shared.settle(false);
+        }
         backend::apply(&self.shared);
         self.shared.wake_windows();
     }
@@ -451,6 +508,19 @@ impl Shared {
             drop(native);
             self.settle(false);
         }
+    }
+
+    /// Headless audio: playback time follows the runtime clock of this thread, if one steps.
+    fn follow_clock(&self) {
+        if self.kind != Kind::Audio || playback_enabled() {
+            return;
+        }
+        let Some(now) = headless_clock() else { return };
+        if self.ctl.lock().unwrap().playing {
+            self.open_now();
+        }
+        self.ctl.lock().unwrap().advance_virtual(now);
+        self.settle(false);
     }
 
     /// Runs on the UI thread for each element that draws this player, once per frame.
@@ -616,7 +686,11 @@ impl Control {
         if !self.playing {
             return;
         }
-        let (start_clock, start_time) = *self.anchor.get_or_insert((now, self.time));
+        // A clock behind the anchor (another runtime on this thread) restarts from here.
+        let (start_clock, start_time) = match self.anchor {
+            Some((clock, time)) if clock <= now => (clock, time),
+            _ => *self.anchor.insert((now, self.time)),
+        };
         let t = start_time + (now - start_clock).max(0.0) * self.rate as f64;
         if t < meta.duration {
             self.time = t;
