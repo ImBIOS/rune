@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Web text and touch input.** A hidden textarea mirrors a sliding UTF-16 context for
+  browser composition, predictive replacements, selection and paste. Touch pans use
+  momentum and a damped edge return; completed taps focus editors synchronously.
+
 - **Web fonts are self-contained.** The browser target bundles Inter Regular and IBM Plex
   Mono Regular, accepts app-provided font bytes, and never scans system font directories.
   Apps supply additional weights, symbols and scripts through `AppSpec::fonts`.

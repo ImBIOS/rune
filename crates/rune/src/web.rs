@@ -4,6 +4,7 @@ use std::{cell::RefCell, rc::Rc, sync::{Arc, atomic::Ordering}, time::Duration};
 use winit::{application::ApplicationHandler, event::WindowEvent, event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys, WindowExtWebSys}, window::{Window, WindowId}};
 use crate::{App, Runtime, Env, render::{Gpu, Renderer}, time::Instant};
+mod input;
 
 #[derive(Clone, Copy)]
 enum Wake { Ready, App }
@@ -19,7 +20,7 @@ pub(crate) fn run<S: 'static>(app: App<S>) -> Result<(), String> {
     let event_loop = EventLoop::<Wake>::with_user_event().build().map_err(|e| e.to_string())?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
-    event_loop.spawn_app(Browser { app: Some(app), proxy, window: None, pending: Rc::default(), running: None });
+    event_loop.spawn_app(Browser { app: Some(app), proxy, window: None, pending: Rc::default(), running: Rc::default() });
     Ok(())
 }
 
@@ -28,7 +29,7 @@ struct Browser<S: 'static> {
     proxy: EventLoopProxy<Wake>,
     window: Option<Arc<Window>>,
     pending: Rc<RefCell<Option<Result<(Gpu, wgpu::Surface<'static>), String>>>>,
-    running: Option<Running<S>>,
+    running: Rc<RefCell<Option<Running<S>>>>,
 }
 
 struct Running<S: 'static> {
@@ -43,6 +44,7 @@ struct Running<S: 'static> {
     suspended: bool,
     _menus: crate::native_menu::Guard<S>,
     shortcuts: crate::shortcuts::Guard,
+    input: input::Bridge,
 }
 
 fn error(message: &str) {
@@ -137,10 +139,11 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
             surface.configure(&gpu.device, &config);
             let mut renderer = Renderer::new(&gpu.device, format);
             renderer.set_srgb_blend(srgb_blend);
-            self.running = Some(Running { gpu, surface, config, renderer, rt, shared,
+            let input = input::Bridge::new(&window.canvas().unwrap(), Rc::downgrade(&self.running), window.clone());
+            *self.running.borrow_mut() = Some(Running { gpu, surface, config, renderer, rt, shared, input,
                 clock: crate::frame_clock::FrameClock::new(now), compositor, suspended: false, _menus: menus, shortcuts });
         }
-        if let Some(r) = &mut self.running {
+        if let Some(r) = &mut *self.running.borrow_mut() {
             r.shortcuts.drain();
             let requests = r.shared.take();
             if requests.quit { event_loop.exit(); return; }
@@ -153,7 +156,9 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
-        let (Some(window), Some(r)) = (&self.window, &mut self.running) else { return };
+        let mut running = self.running.borrow_mut();
+        let (Some(window), Some(r)) = (&self.window, &mut *running) else { return };
+        if r.window_input(&event, window) { window.request_redraw(); return; }
         match event {
             WindowEvent::Resized(size) => {
                 r.suspended = size.width == 0 || size.height == 0;
@@ -170,6 +175,7 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
             WindowEvent::RedrawRequested if !r.suspended => {
                 let now = Instant::now();
                 let (animating, dt) = r.clock.advance(&mut r.rt, now, r.compositor.as_ref().is_some_and(|c| c.animating()));
+                r.sync_input(false);
                 if !r.rt.surfaces.is_empty() {
                     error("native video surfaces are unsupported on web"); event_loop.exit(); return;
                 }
@@ -203,7 +209,8 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(r) = &self.running else { return };
+        let running = self.running.borrow();
+        let Some(r) = &*running else { return };
         event_loop.set_control_flow(match r.rt.wake_deadline() {
             Some(deadline) if deadline <= r.rt.wall_start.unwrap().elapsed().as_secs_f64() => {
                 if let Some(window) = &self.window { window.request_redraw(); }
@@ -221,7 +228,7 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
-        if let Some(r) = &self.running { r.shared.visible.store(false, Ordering::Release); }
+        if let Some(r) = self.running.borrow_mut().take() { r.shared.visible.store(false, Ordering::Release); }
         if let Some(canvas) = self.window.as_ref().and_then(|w| w.canvas()) { canvas.remove(); }
     }
 }

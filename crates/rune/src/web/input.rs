@@ -1,0 +1,175 @@
+use super::*;
+use wasm_bindgen::{JsCast, JsValue, prelude::*};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase};
+use winit::keyboard::ModifiersState;
+
+#[wasm_bindgen(module = "/src/web/bridge.js")]
+extern "C" {
+    fn mount(canvas: &web_sys::HtmlCanvasElement, callback: &js_sys::Function) -> JsValue;
+    fn sync(handle: &JsValue, key: &str, text: &str, anchor: u32, focus: u32, activate: bool);
+    fn destroy(handle: &JsValue);
+}
+
+pub(super) struct Bridge {
+    handle: JsValue,
+    _callback: Closure<dyn FnMut(String)>,
+    mods: ModifiersState,
+    touch: Option<Touch>,
+}
+struct Touch {
+    id: u64,
+    scroll: Option<crate::NodeId>,
+    origin: (f32, f32),
+    last: (f32, f32),
+    at: Instant,
+    velocity: f32,
+    pan: bool,
+}
+
+impl Bridge {
+    pub(super) fn new<S: 'static>(canvas: &web_sys::HtmlCanvasElement,
+        running: std::rc::Weak<RefCell<Option<Running<S>>>>, window: Arc<Window>) -> Self {
+        let callback = Closure::new(move |event: String| {
+            let Some(running) = running.upgrade() else { return };
+            if let Ok(event) = serde_json::from_str(&event) {
+                if let Some(r) = &mut *running.borrow_mut() { r.input_event(&event); }
+                window.request_redraw();
+            }
+        });
+        Self { handle: mount(canvas, callback.as_ref().unchecked_ref()), _callback: callback,
+            mods: ModifiersState::empty(), touch: None }
+    }
+}
+impl Drop for Bridge { fn drop(&mut self) { destroy(&self.handle); } }
+
+impl<S: 'static> Running<S> {
+    pub(super) fn sync_input(&self, activate: bool) {
+        if let Some((key, text, anchor, focus)) = self.rt.web_context() {
+            sync(&self.input.handle, &key, &text, anchor, focus, activate);
+        } else {
+            sync(&self.input.handle, "", "", 0, 0, false);
+        }
+    }
+
+    pub(super) fn input_event(&mut self, event: &serde_json::Value) {
+        match event["kind"].as_str() {
+            Some("edit" | "selection") => self.rt.web_edit(event),
+            Some("paste") => self.rt.paste(event["text"].as_str().unwrap_or_default()),
+            Some("preedit") => {
+                if self.rt.web_context().as_ref().map(|c| c.0.as_str()) != event["key"].as_str() { return; }
+                let text = event["text"].as_str().unwrap_or_default().to_owned();
+                let end = text.len();
+                self.rt.ime(crate::Ime::Preedit(text, Some((end, end))));
+            }
+            Some("key") => {
+                let flag = |key: &str| event[key].as_bool().unwrap_or(false);
+                let mut mods = ModifiersState::empty();
+                mods.set(ModifiersState::SHIFT, flag("shift"));
+                mods.set(ModifiersState::CONTROL, flag("ctrl"));
+                mods.set(ModifiersState::ALT, flag("alt"));
+                mods.set(ModifiersState::SUPER, flag("meta"));
+                let key = match event["key"].as_str().unwrap_or_default() {
+                    "Enter" => crate::Key::Enter, "Tab" => crate::Key::Tab, "Escape" => crate::Key::Escape,
+                    "ArrowLeft" => crate::Key::Left, "ArrowRight" => crate::Key::Right,
+                    "ArrowUp" => crate::Key::Up, "ArrowDown" => crate::Key::Down,
+                    "Home" => crate::Key::Home, "End" => crate::Key::End,
+                    "Backspace" => crate::Key::Backspace, "Delete" => crate::Key::Delete,
+                    name if name.chars().count() == 1 && (mods.control_key() || mods.super_key()) => crate::Key::Command(name.chars().next().unwrap().to_ascii_lowercase()),
+                    _ => return,
+                };
+                let event_key = crate::KeyEvent { key, mods: modifiers(mods) };
+                if flag("repeat") { self.rt.repeat_key(event_key); } else { self.rt.key(event_key); }
+            }
+            _ => {}
+        }
+        // Commit within the DOM event: clipboard, link and soft-keyboard APIs need activation.
+        self.rt.frame(0.0);
+        self.sync_input(false);
+    }
+
+    pub(super) fn window_input(&mut self, event: &WindowEvent, window: &Window) -> bool {
+        let scale = window.scale_factor() as f32;
+        let mut activate = false;
+        match event {
+            WindowEvent::ModifiersChanged(mods) => { self.input.mods = mods.state(); return false; }
+            WindowEvent::CursorMoved { position, .. } if self.input.touch.is_none() => {
+                self.rt.pointer_move(position.x as f32 / scale, position.y as f32 / scale);
+            }
+            WindowEvent::CursorLeft { .. } if self.input.touch.is_none() => self.rt.pointer_leave(),
+            WindowEvent::MouseInput { button, state, .. } if self.input.touch.is_none() => {
+                let Some((x, y)) = self.rt.pointer() else { return false };
+                match (button, state) {
+                    (MouseButton::Left, ElementState::Pressed) => { self.rt.pointer_down(x, y); activate = true; }
+                    (MouseButton::Left, ElementState::Released) => self.rt.pointer_up(x, y),
+                    (MouseButton::Right, ElementState::Pressed) => self.rt.secondary_down(x, y),
+                    (MouseButton::Right, ElementState::Released) => self.rt.secondary_up(x, y),
+                    _ => return false,
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // Trackpad pinch is ctrl+wheel. Rune ignores it; the page never zooms.
+                if self.input.mods.control_key() { return false; }
+                let Some((x, y)) = self.rt.pointer() else { return false };
+                let dy = match delta { MouseScrollDelta::PixelDelta(p) => p.y as f32 / scale, MouseScrollDelta::LineDelta(_, y) => y * 40.0 };
+                self.rt.wheel(x, y, dy);
+            }
+            WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
+                let mut logical = (event.state == ElementState::Pressed).then(|| crate::window::map_key(&event.logical_key, self.input.mods)).flatten();
+                if let Some(key) = &mut logical {
+                    key.mods = modifiers(self.input.mods);
+                    if key.mods.cmd && let crate::Key::Text(text) = &key.key && text.chars().count() == 1 {
+                        key.key = crate::Key::Command(text.chars().next().unwrap().to_ascii_lowercase());
+                    }
+                }
+                activate = logical.as_ref().is_some_and(|k| k.key == crate::Key::Tab);
+                if let winit::keyboard::PhysicalKey::Code(key) = event.physical_key {
+                    self.rt.physical_with_fallback(crate::PhysicalInput::Key { key, mods: modifiers(self.input.mods),
+                        pressed: event.state == ElementState::Pressed, repeat: event.repeat }, logical);
+                } else if let Some(key) = logical { self.rt.key(key); }
+            }
+            WindowEvent::Touch(touch) => {
+                let point = (touch.location.x as f32 / scale, touch.location.y as f32 / scale);
+                match touch.phase {
+                    TouchPhase::Started if self.input.touch.is_none() => {
+                        self.input.touch = Some(Touch { id: touch.id, scroll: self.rt.web_touch_start(point.0, point.1),
+                            origin: point, last: point, at: Instant::now(), velocity: 0.0, pan: false });
+                    }
+                    TouchPhase::Moved => {
+                        let Some(t) = &mut self.input.touch else { return false };
+                        if t.id != touch.id { return false; }
+                        t.pan |= (point.0 - t.origin.0).hypot(point.1 - t.origin.1) > 8.0;
+                        let now = Instant::now();
+                        let dt = now.duration_since(t.at).as_secs_f32();
+                        if dt > 0.0 { t.velocity = (point.1 - t.last.1) / dt; }
+                        if t.pan { if let Some(id) = t.scroll { self.rt.web_touch_move(id, point.1 - t.origin.1); } }
+                        t.last = point; t.at = now;
+                    }
+                    TouchPhase::Ended | TouchPhase::Cancelled => {
+                        if self.input.touch.as_ref().is_none_or(|t| t.id != touch.id) { return false; }
+                        let t = self.input.touch.take().unwrap();
+                        if let Some(id) = t.scroll {
+                            let velocity = if t.pan && touch.phase == TouchPhase::Ended && t.at.elapsed().as_millis() < 100 { t.velocity } else { 0.0 };
+                            self.rt.web_touch_end(id, velocity);
+                        }
+                        if !t.pan && touch.phase == TouchPhase::Ended {
+                            self.rt.pointer_down(point.0, point.1);
+                            self.rt.pointer_up(point.0, point.1);
+                            activate = true;
+                        }
+                        self.rt.pointer_leave();
+                    }
+                    _ => return false,
+                }
+            }
+            _ => return false,
+        }
+        self.rt.frame(0.0);
+        self.sync_input(activate);
+        true
+    }
+}
+
+fn modifiers(mods: ModifiersState) -> crate::Mods {
+    crate::Mods { shift: mods.shift_key(), alt: mods.alt_key(), ctrl: mods.control_key(),
+        logo: mods.super_key(), cmd: mods.super_key() || mods.control_key() }
+}

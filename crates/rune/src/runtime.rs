@@ -139,6 +139,10 @@ const CLICK_SLOP: f32 = 4.0;
 /// Scroll momentum decay (iOS normal: 0.998 per ms).
 const SCROLL_DECAY: f32 = 2.002;
 
+#[cfg(any(test, target_arch = "wasm32"))]
+#[path = "web_runtime.rs"]
+mod web_runtime;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Env {
     pub system_dark: bool,
@@ -664,6 +668,8 @@ pub struct Runtime<S: 'static> {
     /// The scale each node's text drew at (its own and its ancestors'), for text hit tests.
     drawn_scale: Vec<f32>,
     scrolls: HashMap<NodeId, ScrollState>,
+    #[cfg(any(test, target_arch = "wasm32"))]
+    web_scroll: Option<web_runtime::TouchScroll>,
     grows: HashMap<NodeId, GrowTrack>,
     stacks: HashMap<NodeId, Stack>,
     pub(crate) virtuals: HashMap<String, crate::virtual_list::VirtualList>,
@@ -956,6 +962,8 @@ impl<S: 'static> Runtime<S> {
             drawn: Vec::new(),
             drawn_scale: Vec::new(),
             scrolls: HashMap::new(),
+            #[cfg(any(test, target_arch = "wasm32"))]
+            web_scroll: None,
             grows: HashMap::new(),
             stacks: HashMap::new(),
             virtuals: HashMap::new(),
@@ -3467,6 +3475,11 @@ impl<S: 'static> Runtime<S> {
             if self.subtree_exiting(i) { continue; }
             let id = self.nodes[i].id;
             let overflow = self.scroll_overflow(i);
+            #[cfg(target_arch = "wasm32")]
+            if let Some(active) = self.web_step_scroll(id, overflow, dt) {
+                moving |= active;
+                continue;
+            }
             let Some(st) = self.scrolls.get_mut(&id) else { continue };
             st.scrolling = st.direct || st.v.abs() > 1.0;
             st.direct = false;
