@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A scroll cancels a held press.** Scrolling a list by wheel or fling while a press inside it
+  is held now cancels the press, as a `UIScrollView` cancels its content's touches: the element
+  lets go and the release doesn't press. A drag keeps its capture, and programmatic scrolls
+  (a chat pinned to its bottom) don't cancel.
 - **Nested scales compose.** A scaled element inside a scaled element used to scale about its
   own unscaled centre, dropping its parent's anchor, so it jumped when its own scale (a press, a
   live scale) turned on, and a product of 1 ignored the parent's offset. It now scales about its
@@ -32,8 +36,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   for both. Scripts gain a `double-click` event. Elements without it are unchanged.
 - **Press scale.** `El::press_scale(0.97)` shrinks an element about its centre while a press
   on it is held and springs it back on release. Layout and hit testing keep the resting size,
-  and Reduce Motion turns it off. Nothing changes for elements without it; rune-kit buttons
-  don't opt in.
+  and a held press keeps its hover. Reduce Motion turns it off. Nothing changes for elements
+  without it; rune-kit buttons don't opt in.
 - **An explicit `optical_size(o)` now also picks the `trak` tracking:** text is tracked as Core
   Text tracks `o`-point text scaled to the set size, so
   `TextStyle::new(size * k, w).optical_size(size)` matches a SwiftUI view at `size` with

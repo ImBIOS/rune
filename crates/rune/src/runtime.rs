@@ -640,6 +640,8 @@ pub struct Runtime<S: 'static> {
     /// The press now held is the second of a double press.
     double_armed: bool,
     press_down_t: f64,
+    /// A scroll under the held press cancelled it ([`Runtime::scroll_cancels_press`]).
+    press_cancelled: bool,
     titlebar_action: Option<TitlebarAction>,
     /// Two presses closer than this (seconds) are a double press: the system setting on macOS
     /// and Windows, 0.5 elsewhere and headless.
@@ -829,6 +831,7 @@ impl<S: 'static> Runtime<S> {
             last_press: None,
             double_armed: false,
             press_down_t: 0.0,
+            press_cancelled: false,
             titlebar_action: None,
             double_click_interval: 0.5,
             os_drag: true,
@@ -2840,7 +2843,7 @@ impl<S: 'static> Runtime<S> {
         // A hit rect is where the element was drawn (after scrolling); `target` is its
         // unscrolled layout rect, kept only for elements that were never drawn.
         let mut hits = self.hits.iter().filter(|(hit, _)| *hit == id).peekable();
-        self.capture_inside = if self.native_overlay || hits.peek().is_some() {
+        self.capture_inside = !self.press_cancelled && if self.native_overlay || hits.peek().is_some() {
             hits.any(|(_, r)| contains(*r, x, y))
         } else { contains(r, x, y) };
         if has_drag {
@@ -2970,6 +2973,7 @@ impl<S: 'static> Runtime<S> {
             p == n.path && now - t <= self.double_click_interval && (x - px).abs() <= 4.0 && (y - py).abs() <= 4.0
         });
         self.press_down_t = now;
+        self.press_cancelled = false;
         let r = self.drawn.get(ti).copied().unwrap_or([n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]]);
         if n.input.is_some() {
             // Its text drew scaled with its box: map the press back to the rest layout.
@@ -3244,12 +3248,14 @@ impl<S: 'static> Runtime<S> {
         let Some(id) = self.scroll_at(x, y) else { return };
         let stick = self.node_index.get(&id).and_then(|&i| self.nodes[i].scroll).is_some_and(|s| s.stick_bottom);
         if let Some(st) = self.scrolls.get_mut(&id) {
+            let before = st.offset;
             st.offset = (st.offset - f64::from(dy)).clamp(0.0, st.max);
             st.v = 0.0;
             st.glide = None;
             st.direct = true;
             st.pinned = stick && st.offset >= st.max - 0.5;
             self.events.push(format!("wheel {dy:.1}"));
+            if st.offset != before { self.scroll_cancels_press(id); }
         }
     }
 
@@ -3262,11 +3268,26 @@ impl<S: 'static> Runtime<S> {
             st.pinned = false;
             st.glide = None;
             self.events.push(format!("fling {velocity:.0}"));
+            if velocity != 0.0 { self.scroll_cancels_press(id); }
         }
     }
 
     pub fn has_pending_input(&self) -> bool {
         !self.queue.is_empty()
+    }
+
+    /// Scrolling viewport `id` under a held press inside it cancels the press, as a UIScrollView
+    /// cancels its content's touches: the row lets go and the release doesn't press. A drag
+    /// keeps its capture.
+    fn scroll_cancels_press(&mut self, id: NodeId) {
+        let Some((path, _)) = &self.capture else { return };
+        let Some(i) = self.nodes.iter().position(|n| &n.path == path) else { return };
+        let inside = std::iter::successors(self.nodes[i].parent, |&p| self.nodes[p].parent).any(|p| self.nodes[p].id == id);
+        if inside && self.nodes[i].on_drag.is_none() {
+            self.press_cancelled = true;
+            self.capture_inside = false;
+            self.double_armed = false;
+        }
     }
 
     fn update_interaction(&mut self) {
@@ -3284,9 +3305,11 @@ impl<S: 'static> Runtime<S> {
             let inside = self.pointer.is_some_and(|(x, y)| contains(shown, x, y));
             // A group stays hovered while one of its descendants holds the press.
             let within = |p: &str| p == n.path || (p.len() > n.path.len() && p.starts_with(&n.path) && p.as_bytes()[n.path.len()] == b'/');
-            let hovered = inside && tracks_hover && captured.is_none_or(within);
             let capture_inside = if self.secondary_capture.is_some() { inside } else { self.capture_inside };
             let held = captured == Some(n.path.as_str()) && capture_inside;
+            // A held press stays hovered while it's inside, though a press scale shrank the
+            // drawn rect away from the pointer.
+            let hovered = (inside || held) && tracks_hover && captured.is_none_or(within);
             let pressed = held && n.vis.press.a > 0.0;
             let press_scale = n.press_scale;
             let id = n.id;
@@ -5476,6 +5499,51 @@ mod tests {
         for _ in 0..30 { rt.frame(1.0 / 120.0); }
         assert!(crisp(&rt), "once it holds still, text rasterizes at the scale");
         assert!(!rt.frame(1.0 / 120.0), "and nothing keeps animating");
+    }
+
+    #[test]
+    fn a_held_press_scale_keeps_its_hover_and_a_scroll_cancels_it() {
+        struct State { pressed: Vec<usize> }
+        fn view(_: &State, _: &mut Cx<State>) -> El {
+            let mut list = col().key("list").w_full();
+            for i in 0..10 {
+                list = list.child(el().key(format!("b{i}")).size(200.0, 40.0).hover(crate::color::oklcha(1.0, 0.0, 0.0, 0.1))
+                    .press_scale(0.96).on_press(move |s: &mut State| s.pressed.push(i)));
+            }
+            col().size(200.0, 200.0).child(col().key("scroll").size(200.0, 200.0).scroll(ScrollSpec { stick_bottom: false }).child(list))
+        }
+        let mut rt = Runtime::new(State { pressed: Vec::new() }, view, (200.0, 200.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        let id = rt.nodes.iter().find(|n| n.key.as_deref() == Some("b0")).unwrap().id;
+        // Held at its right edge, which the shrunk row no longer covers: still hovered.
+        rt.pointer_move(199.0, 20.0);
+        rt.pointer_down(199.0, 20.0);
+        for _ in 0..30 { rt.frame(1.0 / 120.0); }
+        assert_eq!(rt.scene.get(id, P_PRESS_SCALE), Some(0.96));
+        assert_eq!(rt.scene.get(id, P_HOVER), Some(1.0), "the held row keeps its highlight");
+        rt.pointer_up(199.0, 20.0);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(rt.state.pressed, [0]);
+
+        // Scrolling under a held press cancels it: the row lets go, and the release presses nothing.
+        for _ in 0..60 { rt.frame(1.0 / 120.0); }
+        rt.pointer_move(100.0, 20.0);
+        rt.pointer_down(100.0, 20.0);
+        for _ in 0..10 { rt.frame(1.0 / 120.0); }
+        assert!(rt.scene.get(id, P_PRESS_SCALE).unwrap() < 0.97, "held");
+        rt.wheel(100.0, 100.0, -120.0);
+        for _ in 0..60 { rt.frame(1.0 / 120.0); }
+        assert!((rt.scene.get(id, P_PRESS_SCALE).unwrap() - 1.0).abs() < 1e-3, "the scrolled-away row springs back");
+        rt.pointer_up(100.0, 20.0);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(rt.state.pressed, [0], "a scroll cancels the press");
+        // A fling does too.
+        rt.pointer_move(100.0, 20.0);
+        rt.pointer_down(100.0, 20.0);
+        rt.fling(100.0, 100.0, 600.0);
+        rt.pointer_up(100.0, 20.0);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(rt.state.pressed, [0]);
     }
 
     #[test]

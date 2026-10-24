@@ -84,9 +84,11 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
 - **Press scale**: `.press_scale(0.97)` shrinks an element (and its children) about its centre
   while a press on it is held, following the pointer in and out like an iOS tile, and springs back
   with a slight bounce on release. Interrupting a spring retargets it without a jump. Layout and
-  hit testing keep the resting size, so a press near the edge stays inside. Elements without it pay
-  nothing, and Reduce Motion turns it off. rune-kit's `Button` and `IconButton` don't use it: they
-  follow `@opencode/ui` and AppKit, whose buttons don't scale.
+  hit testing keep the resting size, so a press near the edge stays inside and keeps its hover.
+  Scrolling the list under a held press (wheel or fling) cancels it, as a `UIScrollView` cancels
+  its content's touches: the element springs back and the release doesn't press. Elements without
+  it pay nothing, and Reduce Motion turns it off. rune-kit's `Button` and `IconButton` don't use
+  it: they follow `@opencode/ui` and AppKit, whose buttons don't scale.
 - **Scale**: `.scale(0.5)` draws an element and everything in it at half size about its centre,
   like SwiftUI's `scaleEffect`. Layout keeps the unscaled size, so siblings don't move, and hit
   testing follows the drawn rect. It multiplies with `press_scale`, `live_scale` and scale
