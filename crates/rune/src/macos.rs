@@ -193,6 +193,13 @@ impl PointerState {
         self.release_since.set(None);
         self.recovered_release.set(Some(released_at));
     }
+    /// winit's view was out of the panel, so the clicks recorded meanwhile never reached it.
+    fn view_lost(&self) {
+        self.captured.set(false);
+        self.clicks.borrow_mut().clear();
+        self.release_since.set(None);
+        if let Some(last) = self.last.get() { self.recovered_release.set(Some(last)); }
+    }
     /// Sets the cursor again after a mouse event, which may have let another window's cursor
     /// rects replace it. The arrow once the pointer is off the hit area.
     fn reapply_cursor(&self, panel: &NSPanel) {
@@ -496,14 +503,12 @@ impl Panel {
         overlay_rect_on(at, options, self.panel.screen().map(|s| screen_id(&s)))
     }
 
-    /// Reattaches winit's view if something outside Rune took it from the panel. Clicks
-    /// recorded while it was gone were never delivered, so native capture starts over.
+    /// Reattaches winit's view if something outside Rune took it from the panel, here or in
+    /// `sendEvent:`. Clicks recorded while it was gone were never delivered, so native capture
+    /// starts over, and a press the runtime still holds is released where the pointer was.
     fn keep_view(&self) {
-        if !crate::macos_panel_bridge::reattach(&self.panel) { return; }
-        eprintln!("rune: panel lost its view; reattached");
-        self.pointer.captured.set(false);
-        self.pointer.clicks.borrow_mut().clear();
-        self.pointer.release_since.set(None);
+        if crate::macos_panel_bridge::reattach(&self.panel) { eprintln!("rune: panel lost its view; reattached"); }
+        if crate::macos_panel_bridge::take_reattached(&self.panel) { self.pointer.view_lost(); }
     }
 
     pub fn show(&self) {
@@ -762,6 +767,17 @@ mod tests {
         assert!(!pointer.captured.get());
         assert!(pointer.clicks.borrow().is_empty());
         assert!(!pointer.hit(50.0, 50.0), "outside the regions passes through again");
+    }
+    #[test]
+    fn overlay_lost_view_releases_capture_where_the_pointer_was() {
+        let pointer = PointerState { input: Cell::new(OverlayInput::Regions), ..Default::default() };
+        pointer.regions.borrow_mut().push([10.0, 10.0, 30.0, 30.0]);
+        pointer.last.set(Some((25.0, 15.0)));
+        pointer.record_click(true, 20.0, 20.0);
+        pointer.view_lost();
+        assert!(!pointer.captured.get());
+        assert!(pointer.clicks.borrow().is_empty());
+        assert_eq!(pointer.recovered_release.take(), Some((25.0, 15.0)), "the runtime's press is released");
     }
     #[test]
     fn overlay_rejected_down_cannot_poison_later_click_and_owned_up_survives_exit() {

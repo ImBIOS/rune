@@ -1,8 +1,9 @@
 //! An overlay or launcher panel keeps winit's view, and its clicks, when AppKit or another
 //! framework restyles the hidden winit window behind it. ScreenCaptureKit does exactly that:
 //! ReplayKit's `setWindowRotationLocked:` calls `setStyleMask:` on the first window in
-//! `NSApp.windows`. Also checks the source keeps its KVO class, and that a panel whose view
-//! was taken anyway gets it back. Opens windows, so it only runs with RUNE_GUI_TESTS=1 in a
+//! `NSApp.windows`. Also checks that restyling leaves the launcher panel's frame and level
+//! alone, that the source keeps its KVO class, and that a panel whose view was taken anyway
+//! gets it back. Opens windows, so it only runs with RUNE_GUI_TESTS=1 in a
 //! logged-in GUI session. Clicks are synthesized with `postEvent:`; the real pointer never moves.
 
 #[cfg(not(target_os = "macos"))]
@@ -15,7 +16,7 @@ fn main() { mac::main() }
 mod mac {
     use std::sync::{Mutex, atomic::{AtomicBool, AtomicUsize, Ordering}};
     use std::time::Duration;
-    use objc2::{class, msg_send, sel, runtime::{AnyClass, AnyObject, Bool}};
+    use objc2::{class, msg_send, sel, declare::ClassBuilder, runtime::{AnyClass, AnyObject, Bool, Sel}};
     use objc2_foundation::{NSPoint, NSRect, NSSize};
 
     #[link(name = "ReplayKit", kind = "framework")]
@@ -30,6 +31,7 @@ mod mac {
 
     static CLICKS: AtomicUsize = AtomicUsize::new(0);
     static CREATED: AtomicBool = AtomicBool::new(false);
+    static TITLE_CHANGES: AtomicUsize = AtomicUsize::new(0);
     static FAILURES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
     const TITLED: usize = 1 << 0;
@@ -181,6 +183,23 @@ mod mac {
         ]
     }
 
+    /// An NSObject that counts KVO notifications.
+    fn observer_class() -> &'static AnyClass {
+        static CLASS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        extern "C" fn observe(_: *mut AnyObject, _: Sel, _: *mut AnyObject, _: *mut AnyObject, _: *mut AnyObject, _: *mut std::ffi::c_void) {
+            TITLE_CHANGES.fetch_add(1, Ordering::SeqCst);
+        }
+        let class = *CLASS.get_or_init(|| {
+            let mut builder = ClassBuilder::new("RuneOverlaySourceTitleObserver", class!(NSObject)).unwrap();
+            unsafe {
+                builder.add_method(sel!(observeValueForKeyPath:ofObject:change:context:),
+                    observe as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject, *mut AnyObject, *mut std::ffi::c_void));
+            }
+            builder.register() as *const AnyClass as usize
+        });
+        unsafe { &*(class as *const AnyClass) }
+    }
+
     fn rotation_lock(lock: bool) -> bool {
         unsafe {
             let recorder: *mut AnyObject = msg_send![class!(RPScreenRecorder), sharedRecorder];
@@ -211,8 +230,12 @@ mod mac {
     }
 
     fn drive(handle: rune::AppHandle<()>) {
-        std::thread::sleep(Duration::from_secs(2));
+        for _ in 0..200 {
+            if CREATED.load(Ordering::SeqCst) { break; }
+            std::thread::sleep(Duration::from_millis(100));
+        }
         assert!(CREATED.load(Ordering::SeqCst), "overlay was not created");
+        std::thread::sleep(Duration::from_millis(500));
         let (tx, rx) = std::sync::mpsc::channel();
         handle.update(move |_, _| { let _ = tx.send(pairs()); });
         let pairs = rx.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -220,14 +243,25 @@ mod mac {
         let overlay = *pairs.iter().find(|p| p.overlay).unwrap();
         on_main(&handle, move || kvo_report(overlay.source as *mut AnyObject));
         expect_click(&handle, overlay, "baseline");
+        // None of the restyles below may take the view: a panel quietly taking it back would
+        // hide that.
+        let reattached = rune::macos_panel_bridge::reattach_count();
 
         for (index, (path, _)) in paths().into_iter().enumerate() {
             let (pairs, again) = (pairs.clone(), pairs.clone());
             on_main(&handle, move || {
                 let apply = &paths()[index].1;
+                // These two are this binary resizing a launcher, which winit's calls do.
+                let resizes = matches!(path, "setContentSize:" | "setFrame:display:");
                 for pair in &pairs {
+                    let panel = pair.panel as *mut AnyObject;
+                    let (frame, level): (NSRect, isize) = unsafe { (msg_send![panel, frame], msg_send![panel, level]) };
                     apply(pair.source as *mut AnyObject);
                     check(*pair, path);
+                    let (after, after_level): (NSRect, isize) = unsafe { (msg_send![panel, frame], msg_send![panel, level]) };
+                    if !resizes && (after != frame || after_level != level) {
+                        fail(format!("{path}: restyling the source moved the panel ({frame:?} level {level} -> {after:?} level {after_level})"));
+                    }
                 }
             });
             expect_click(&handle, overlay, path);
@@ -253,26 +287,37 @@ mod mac {
         } else {
             println!("RPScreenRecorder has no setWindowRotationLocked: on this macOS");
         }
+        let taken = rune::macos_panel_bridge::reattach_count() - reattached;
+        if taken != 0 { fail(format!("restyles took the view {taken} times; the panels took it back")); }
 
-        // KVO keeps working on the source: a later observer, and the setter override it adds,
-        // still reach the panel through Rune's forward.
+        // KVO keeps working on the source: with a title observer attached, `-class` still
+        // reports winit's class, and the setter override KVO adds still reaches the panel
+        // and keeps the source's own title, which winit's `title()` reads.
         let pairs_kvo = pairs.clone();
         on_main(&handle, move || unsafe {
-            let observer: *mut AnyObject = msg_send![class!(NSObject), new];
+            let observer: *mut AnyObject = msg_send![observer_class(), new];
             let key = objc2_foundation::NSString::from_str("title");
             for pair in &pairs_kvo {
+                let _: () = msg_send![pair.source as *mut AnyObject, addObserver: observer, forKeyPath: &*key, options: 0usize, context: std::ptr::null_mut::<std::ffi::c_void>()];
+            }
+            for pair in &pairs_kvo {
                 let source = pair.source as *mut AnyObject;
-                let _: () = msg_send![source, addObserver: observer, forKeyPath: &*key, options: 0usize, context: std::ptr::null_mut::<std::ffi::c_void>()];
-                let _: () = msg_send![source, removeObserver: observer, forKeyPath: &*key];
                 let reported: *const AnyClass = msg_send![source, class];
-                if class_name(reported) != "WinitWindow" { fail(format!("-class after KVO observer: {}", class_name(reported))); }
+                if class_name(reported) != "WinitWindow" { fail(format!("-class with a KVO observer: {}", class_name(reported))); }
                 if !pair.overlay {
+                    let before = TITLE_CHANGES.load(Ordering::SeqCst);
                     let title = objc2_foundation::NSString::from_str("retitled");
                     let _: () = msg_send![source, setTitle: &*title];
-                    let shown: *mut AnyObject = msg_send![pair.panel as *mut AnyObject, title];
-                    let equal: Bool = msg_send![shown, isEqualToString: &*title];
-                    if !equal.as_bool() { fail("launcher setTitle: stopped reaching the panel after KVO".into()); }
+                    for (window, name) in [(pair.panel as *mut AnyObject, "panel"), (source, "source")] {
+                        let shown: *mut AnyObject = msg_send![window, title];
+                        let equal: Bool = msg_send![shown, isEqualToString: &*title];
+                        if !equal.as_bool() { fail(format!("launcher setTitle: under KVO didn't reach the {name}")); }
+                    }
+                    if TITLE_CHANGES.load(Ordering::SeqCst) == before { fail("the title observer was never notified".into()); }
                 }
+            }
+            for pair in &pairs_kvo {
+                let _: () = msg_send![pair.source as *mut AnyObject, removeObserver: observer, forKeyPath: &*key];
             }
             let _: () = msg_send![observer, release];
         });

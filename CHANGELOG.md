@@ -12,9 +12,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   the view out of the panel, which then dropped every click. Starting a ScreenCaptureKit stream
   in the same app does this: ReplayKit restyles the first window in `NSApp.windows`. Now only
   winit gets the moved view; AppKit and other frameworks see the hidden window's real, empty
-  content. If the view is taken anyway, the panel puts it back on the next event-loop turn or
-  event, and an overlay press whose release never reached winit stops holding the pointer
-  after 2 s. The hidden window also keeps winit's class: Rune adds its forwards to winit's
+  content. Likewise only winit's frame, level and mouse-ignoring calls on a launcher's hidden
+  window move its panel, so restyling that window no longer resizes the panel, and a title set
+  there also stays on the hidden window for `Window::title()`. If the view is taken anyway,
+  the panel puts it back on the next event-loop turn or event and releases an overlay press
+  it was holding, and an overlay press whose release never reached winit stops holding the
+  pointer after 2 s. The hidden window also keeps winit's class: Rune adds its forwards to winit's
   window and view classes instead of subclassing each window, which under KVO had made
   `-[window class]` return nil.
 - **Borders can be dashed.** `El::border_dash(dash, gap)` dashes an element's `border` or

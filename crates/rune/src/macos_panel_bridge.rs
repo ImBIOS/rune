@@ -7,7 +7,7 @@
 //! exact class. A subclass of it makes `-class` return nil. Objects Rune hasn't bridged, and
 //! calls off the main thread, fall through to AppKit.
 
-use std::{cell::RefCell, collections::HashMap, ffi::{c_char, c_void}, sync::{Mutex, OnceLock}};
+use std::{cell::RefCell, collections::{HashMap, HashSet}, ffi::{c_char, c_void}, sync::{Mutex, OnceLock, atomic::{AtomicUsize, Ordering}}};
 use objc2::{msg_send, sel, runtime::{AnyClass, AnyObject, Bool, Sel}};
 use objc2_app_kit::{NSPanel, NSView, NSWindow};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
@@ -20,6 +20,7 @@ unsafe extern "C" {
     fn method_getTypeEncoding(method: *const c_void) -> *const c_char;
     fn class_addMethod(class: *const AnyClass, selector: Sel, imp: *const c_void, types: *const c_char) -> bool;
     fn dladdr(address: *const c_void, info: *mut DlInfo) -> i32;
+    fn getsegmentdata(header: *const c_void, segment: *const c_char, size: *mut std::ffi::c_ulong) -> *const u8;
 }
 
 #[repr(C)]
@@ -31,7 +32,10 @@ struct Source { view: usize, panel: usize, ordinary: bool }
 thread_local! {
     static WINDOWS: RefCell<HashMap<usize, Source>> = RefCell::default();
     static VIEWS: RefCell<HashMap<usize, Rc<crate::macos::PointerState>>> = RefCell::default();
+    /// Panels `reattach` has returned a view to, until their owner notices.
+    static LOST: RefCell<HashSet<usize>> = RefCell::default();
 }
+static REATTACHED: AtomicUsize = AtomicUsize::new(0);
 /// (class, its superclass) for every class Rune added methods to.
 static INSTALLED: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
 
@@ -75,19 +79,49 @@ forward!(invalidate_cursor_rects, false, (view: *mut AnyObject) -> (), invalidat
 // gets these forwards; overlay placement continues to manage both native frames itself.
 forward!(frame, true, () -> NSRect, frame);
 forward!(key, true, () -> Bool, isKeyWindow);
-forward!(set_frame, true, (rect: NSRect, display: Bool) -> (), setFrame: rect, display: display);
-forward!(set_origin, true, (point: NSPoint) -> (), setFrameOrigin: point);
-forward!(set_size, true, (size: NSSize) -> (), setContentSize: size);
-forward!(set_title, true, (title: *mut AnyObject) -> (), setTitle: title);
-forward!(set_level, true, (level: isize) -> (), setLevel: level);
-forward!(set_hit, true, (ignore: Bool) -> (), setIgnoresMouseEvents: ignore);
+/// The title also stays on the source, where winit's `title()` reads it back.
+extern "C" fn set_title(window: &AnyObject, _: Sel, title: *mut AnyObject) {
+    unsafe {
+        if let Some(panel) = panel(window, true) { let _: () = msg_send![panel, setTitle: title]; }
+        msg_send![super(window, base(window)), setTitle: title]
+    }
+}
+
+/// A mutating forward that only winit's calls take. AppKit restyling the source recomputes
+/// and sets the source's own frame, which must not move or resize the panel. The trampoline
+/// passes the sender's return address as the argument after the message's own: `$arm` and
+/// `$x86` name that register for the message's integer arguments.
+macro_rules! gated {
+    ($name:ident, $from:ident, ($($arg:ident: $ty:ty),*), $arm:literal, $x86:literal, $($message:tt)+) => {
+        #[unsafe(naked)]
+        extern "C" fn $name(_: &AnyObject, _: Sel $(, _: $ty)*) {
+            #[cfg(target_arch = "aarch64")]
+            core::arch::naked_asm!($arm, "b {}", sym $from);
+            #[cfg(target_arch = "x86_64")]
+            core::arch::naked_asm!($x86, "jmp {}", sym $from);
+        }
+        extern "C" fn $from(window: &AnyObject, _: Sel $(, $arg: $ty)*, caller: usize) {
+            unsafe { match panel(window, true).filter(|_| from_rune(caller)) {
+                Some(panel) => msg_send![panel, $($message)+],
+                None => msg_send![super(window, base(window)), $($message)+],
+            } }
+        }
+    };
+}
+// NSRect, NSPoint and NSSize are all doubles, so they take float registers and leave the
+// integer ones alone (on x86_64 an NSRect goes on the stack, which the tail jump keeps).
+gated!(set_frame, set_frame_from, (rect: NSRect, display: Bool), "mov x3, x30", "mov rcx, [rsp]", setFrame: rect, display: display);
+gated!(set_origin, set_origin_from, (point: NSPoint), "mov x2, x30", "mov rdx, [rsp]", setFrameOrigin: point);
+gated!(set_size, set_size_from, (size: NSSize), "mov x2, x30", "mov rdx, [rsp]", setContentSize: size);
+gated!(set_level, set_level_from, (level: isize), "mov x3, x30", "mov rcx, [rsp]", setLevel: level);
+gated!(set_hit, set_hit_from, (ignore: Bool), "mov x3, x30", "mov rcx, [rsp]", setIgnoresMouseEvents: ignore);
 
 /// `-contentView`. AppKit restyles a window by removing `[self contentView]` from its
 /// superview (`setStyleMask:`, `setContentView:`, toolbars), and other frameworks restyle the
 /// first window in `NSApp.windows`, which is the hidden source (ReplayKit does when a
 /// ScreenCaptureKit stream starts). Handing them the view that now lives in the panel would
-/// pull it out of the panel. So only callers in this image, where winit is linked, get the
-/// moved view; everyone else sees the source's real, empty content.
+/// pull it out of the panel. So only Rune and winit get the moved view (`from_rune`);
+/// everyone else sees the source's real, empty content.
 #[unsafe(naked)]
 extern "C" fn content_view(_window: &AnyObject, _selector: Sel) -> *mut AnyObject {
     // objc_msgSend tail-calls the IMP, so the return address still points into the sender.
@@ -97,17 +131,34 @@ extern "C" fn content_view(_window: &AnyObject, _selector: Sel) -> *mut AnyObjec
     core::arch::naked_asm!("mov rdx, [rsp]", "jmp {}", sym content_view_from);
 }
 extern "C" fn content_view_from(window: &AnyObject, _: Sel, caller: usize) -> *mut AnyObject {
-    if let Some(source) = source(window) && in_this_image(caller) { return source.view as *mut AnyObject; }
+    if let Some(source) = source(window) && from_rune(caller) { return source.view as *mut AnyObject; }
     unsafe { msg_send![super(window, base(window)), contentView] }
 }
-fn image(address: usize) -> usize {
+/// The `__TEXT` range of the image holding `address`.
+fn text(address: usize) -> Option<(usize, usize)> {
     let mut info = DlInfo { fname: std::ptr::null(), fbase: std::ptr::null_mut(), sname: std::ptr::null(), saddr: std::ptr::null_mut() };
-    if unsafe { dladdr(address as *const c_void, &mut info) } == 0 { 0 } else { info.fbase as usize }
+    if unsafe { dladdr(address as *const c_void, &mut info) } == 0 { return None; }
+    let mut size = 0;
+    let start = unsafe { getsegmentdata(info.fbase, c"__TEXT".as_ptr(), &mut size) };
+    (!start.is_null()).then(|| (start as usize, start as usize + size as usize))
 }
-fn in_this_image(address: usize) -> bool {
-    static OWN: OnceLock<usize> = OnceLock::new();
-    let own = *OWN.get_or_init(|| image(content_view_from as *const () as usize));
-    own != 0 && image(address) == own
+/// Whether a message came from Rune, winit or the objc2 crates they send through. Linked
+/// statically, that's all one image. Linked dynamically (`prefer-dynamic`), winit's
+/// `contentView()` and frame setters are objc2-app-kit's methods, sending through objc2's
+/// generics. A static library inside a Swift or Objective-C app shares the host's image,
+/// which is fine: the host's AppKit calls still come from AppKit.
+fn from_rune(caller: usize) -> bool {
+    static IMAGES: OnceLock<Vec<(usize, usize)>> = OnceLock::new();
+    IMAGES.get_or_init(|| {
+        let anchors = [
+            content_view_from as *const () as usize,
+            NSWindow::contentView as *const () as usize,
+            AnyClass::get as *const () as usize,
+        ];
+        let mut images: Vec<_> = anchors.into_iter().filter_map(text).collect();
+        images.dedup();
+        images
+    }).iter().any(|(start, end)| (*start..*end).contains(&caller))
 }
 
 extern "C" fn hit_test(view: &AnyObject, _: Sel, point: NSPoint) -> *mut AnyObject {
@@ -148,24 +199,42 @@ fn install(class: &AnyClass, appkit: &AnyClass, methods: &[(Sel, *const c_void)]
     }
 }
 
-/// Returns `view` to `panel` if anything took it, and reports whether it had to.
+/// Returns `view` to `panel` if anything took it, and reports whether it had to. Runs inside
+/// `sendEvent:`, so it never panics.
 pub(crate) fn reattach(panel: &NSPanel) -> bool {
     let key = panel as *const NSPanel as usize;
-    let Some((source, entry)) = WINDOWS.with(|w| w.borrow().iter().find(|(_, s)| s.panel == key).map(|(k, s)| (*k, *s))) else { return false };
+    let found = WINDOWS.try_with(|w| w.borrow().iter().find(|(_, s)| s.panel == key).map(|(k, s)| (*k, *s))).ok().flatten();
+    let Some((source, entry)) = found else { return false };
     let view = entry.view as *mut AnyObject;
     unsafe {
         let content: *mut AnyObject = msg_send![panel, contentView];
-        if content == view { return false; }
+        let window: *mut AnyObject = msg_send![view, window];
+        if content == view && window == key as *mut AnyObject { return false; }
         let source = source as *mut AnyObject;
-        // A foreign setContentView: may have installed the view in the source itself.
+        // A foreign setContentView: may have installed the view in the source itself. AppKit
+        // can also leave it in the source's frame view without making it the content view.
         let real: *mut AnyObject = msg_send![super(&*source, base(&*source)), contentView];
         if real == view { let _: () = msg_send![source, setContentView: std::ptr::null_mut::<AnyObject>()]; }
+        let _: () = msg_send![view, removeFromSuperview];
+        // The panel would ignore its own stale content view.
+        if content == view { let _: () = msg_send![panel, setContentView: std::ptr::null_mut::<AnyObject>()]; }
         let _: () = msg_send![panel, setContentView: view];
         let key_window: Bool = msg_send![panel, isKeyWindow];
         if key_window.as_bool() { let _: Bool = msg_send![panel, makeFirstResponder: view]; }
     }
+    REATTACHED.fetch_add(1, Ordering::Relaxed);
+    let _ = LOST.try_with(|lost| lost.borrow_mut().insert(key));
     true
 }
+
+/// Whether `reattach` returned `panel`'s view since the last call.
+pub(crate) fn take_reattached(panel: &NSPanel) -> bool {
+    LOST.try_with(|lost| lost.borrow_mut().remove(&(panel as *const NSPanel as usize))).unwrap_or(false)
+}
+
+/// How many times a panel has had to take its view back. Tests assert the view was never taken.
+#[doc(hidden)]
+pub fn reattach_count() -> usize { REATTACHED.load(Ordering::Relaxed) }
 
 pub(crate) struct Bridge { source: usize, view: Option<usize> }
 impl Bridge {
@@ -213,7 +282,7 @@ impl Bridge {
 }
 impl Drop for Bridge {
     fn drop(&mut self) {
-        WINDOWS.with(|w| w.borrow_mut().remove(&self.source));
+        if let Some(entry) = WINDOWS.with(|w| w.borrow_mut().remove(&self.source)) { LOST.with(|lost| lost.borrow_mut().remove(&entry.panel)); }
         if let Some(view) = self.view { VIEWS.with(|v| v.borrow_mut().remove(&view)); }
     }
 }
