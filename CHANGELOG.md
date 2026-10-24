@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **rune-kit `Markdown` tables no longer wrap a cell when the table has room.** Columns started
+  at zero width and grew by their content width, but each column's padding was reserved
+  first, so wide columns came up short and their longest cell wrapped. Columns now start at
+  their content's width and shrink in proportion to their text when the table doesn't fit.
+  Most tables' column widths move by a few points.
 - **Video and audio playback.** `Player` (alias `Video`) plays a file or URL:
   `el().video(&clip, SurfaceFit::Fit)` draws a video (muted by default), and `Player::audio`
   plays audio with no element (unmuted by default). macOS uses AVFoundation; headless runs

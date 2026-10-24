@@ -260,6 +260,41 @@ fn a_streaming_row_does_not_move_the_columns() {
 }
 
 #[test]
+fn a_table_narrower_than_its_container_never_wraps_a_cell() {
+    struct Doc {
+        src: &'static str,
+        family: rune::Family,
+    }
+    fn view(d: &Doc, _: &mut Cx<Doc>) -> El {
+        let body = rune::TextStyle { family: d.family, line_height: 22.4, ..Kit::neutral(true).ty.body };
+        col().w_full().child(Markdown::new(d.src).render(&MarkdownStyle::neutral(true).body_font(body)))
+    }
+    let src = "| Field | Compared |\n|---|---|\n| title | yes |\n| updatedAt | yes |\n| draft cursor | no |\n| 1,234.50 | 98% |\n";
+    for family in [rune::Family::Sans, rune::Family::Named("System Font")] {
+        for scale in [1.0, 2.0, 3.0] {
+            let mut rt = Runtime::new(Doc { src, family }, view, (1100.0, 600.0), Env::new(true, scale));
+            rt.frame(0.0);
+            let all = rt.elements();
+            let in_cell = |mut i: usize| loop {
+                if all[i].key.as_deref().is_some_and(|k| k.len() > 1 && k.starts_with('c') && k[1..].bytes().all(|b| b.is_ascii_digit())) {
+                    return true;
+                }
+                match all[i].parent {
+                    Some(p) => i = p,
+                    None => return false,
+                }
+            };
+            let cells: Vec<_> = (0..all.len()).filter(|&i| all[i].text.is_some() && in_cell(i)).map(|i| &all[i]).collect();
+            assert_eq!(cells.len(), 10, "{family:?} @{scale}");
+            let line = cells[0].rect[3];
+            for c in &cells {
+                assert_eq!(c.rect[3], line, "{:?} wraps at {family:?} @{scale}: {:?}", c.text, c.rect);
+            }
+        }
+    }
+}
+
+#[test]
 fn diffs_tint_whole_lines_and_dim_hunk_headers() {
     let src = "```diff\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n```\n";
     assert!(matches!(&parse(src)[0], Block::Diff(d) if d.lines().count() == 4));
