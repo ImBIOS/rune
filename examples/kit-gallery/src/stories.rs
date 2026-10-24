@@ -263,15 +263,17 @@ fn button_variants(_: &G, k: &Kit, _: &mut Vec<El>) -> El {
 
 fn button_sizes(_: &G, k: &Kit, _: &mut Vec<El>) -> El {
     flex(12.0)
-        .child(Button::new("Small").size(ButtonSize::Small).build(k))
-        .child(Button::new("Normal").size(ButtonSize::Normal).build(k))
-        .child(Button::new("Large").size(ButtonSize::Large).build(k))
+        .child(Button::new("Mini").control_size(ControlSize::Mini).build(k))
+        .child(Button::new("Small").control_size(ControlSize::Small).build(k))
+        .child(Button::new("Regular").build(k))
+        .child(Button::new("Large").control_size(ControlSize::Large).build(k))
+        .child(Button::new("Extra large").control_size(ControlSize::ExtraLarge).build(k))
 }
 
 fn button_icon(_: &G, k: &Kit, _: &mut Vec<El>) -> El {
     flex(12.0)
-        .child(Button::new("Normal").icon(&ic::PLUS).build(k))
-        .child(Button::new("Large").variant(ButtonVariant::Contrast).size(ButtonSize::Large).icon(&ic::PLUS).build(k))
+        .child(Button::new("Regular").icon(&ic::PLUS).build(k))
+        .child(Button::new("Large").variant(ButtonVariant::Contrast).control_size(ControlSize::Large).icon(&ic::PLUS).build(k))
 }
 
 fn button_all_states(_: &G, k: &Kit, _: &mut Vec<El>) -> El {
@@ -316,9 +318,11 @@ fn icon_button_variants(_: &G, k: &Kit, _: &mut Vec<El>) -> El {
 
 fn icon_button_sizes(_: &G, k: &Kit, _: &mut Vec<El>) -> El {
     flex(12.0)
-        .child(IconButton::new(&ic::PLUS).size(ButtonSize::Small).build(k))
-        .child(IconButton::new(&ic::PLUS).size(ButtonSize::Normal).build(k))
-        .child(IconButton::new(&ic::PLUS).size(ButtonSize::Large).build(k))
+        .child(IconButton::new(&ic::PLUS).control_size(ControlSize::Mini).build(k))
+        .child(IconButton::new(&ic::PLUS).control_size(ControlSize::Small).build(k))
+        .child(IconButton::new(&ic::PLUS).build(k))
+        .child(IconButton::new(&ic::PLUS).control_size(ControlSize::Large).build(k))
+        .child(IconButton::new(&ic::PLUS).control_size(ControlSize::ExtraLarge).build(k))
 }
 
 fn icon_button_all_states(_: &G, k: &Kit, _: &mut Vec<El>) -> El {
@@ -961,7 +965,7 @@ fn card(k: &Kit, accent: Option<rune::Color>, icon: Option<&'static rune::Icon>)
     let mut c = Card::new()
         .title("Card title", icon)
         .description("Small supporting text.")
-        .action(Button::new("Action").size(ButtonSize::Small).build(k));
+        .action(Button::new("Action").build(k));
     if let Some(a) = accent {
         c = c.accent(a);
     }
@@ -1481,7 +1485,7 @@ fn text_selectable_help(s: &G, k: &Kit, _: &mut Vec<El>) -> El {
                 .fill(c.surface_base).radius(k.radius.md).border(1.0, c.border_weak)
                 .child(text(SERVE).key("command").font(k.ty.mono).color(c.text_base).grow(1.0).shrink()
                     .selectable(true).selection_color(k.selection()))
-                .child(IconButton::new(&ic::COPY).variant(IconButtonVariant::Ghost).size(ButtonSize::Small)
+                .child(IconButton::new(&ic::COPY).variant(IconButtonVariant::Ghost).control_size(ControlSize::Small)
                     .label("Copy command").on_press_tx(|_: &mut G, tx: &mut Tx| tx.copy(SERVE)).build(k)
                     .key("copy").help("Copy command")),
         )

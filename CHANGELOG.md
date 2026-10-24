@@ -5,6 +5,17 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Breaking (visual): a `Button` with no size set is 24 points tall, as a regular macOS
+  push button, not 28.** New `ControlSize { Mini, Small, Regular, Large, ExtraLarge }` (AppKit's
+  names, `#[non_exhaustive]`) with `Button::control_size` and `IconButton::control_size` sizes
+  controls as macOS 27 measures them: push buttons 16, 20, 24, 28 and 36 points tall with 8, 10,
+  12, 14 and 18 points of padding a side, Mini in 9-point type and Small in `ty.small_medium`;
+  icon buttons are squares of the same heights. `ButtonSize` and `.size()` are deprecated and
+  keep their old metrics, so existing calls draw as before: for a `Button`, `Small` (24) is
+  `Regular`, `Normal` (28) is `Large` and `Large` (32) sits between `Large` and `ExtraLarge`;
+  for an `IconButton` the names match (20, 24 and 28 are `Small`, `Regular` and `Large`). Only a
+  `Button` that never called `.size()` moves: set `.control_size(ControlSize::Large)` to keep
+  28. Toast actions now use `Regular` (same height, 12-point padding and the `md` radius).
 - **`--keys` caps title-case key names.** A key name without a glyph drew upper case
   ("CAPSLOCK", or "SPACE" from a script's text key under a modifier). It now draws title case
   ("Capslock", "Space"), as the in-app keycaps do; single letters stay capitals and `F12` is

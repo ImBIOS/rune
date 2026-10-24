@@ -1,15 +1,26 @@
 //! Button and IconButton (`@opencode/ui` actions/button, actions/icon-button).
 
-use rune::{Color, El, Icon, Tx, icon, row, text};
+use rune::{Color, El, Icon, TextStyle, Tx, icon, row, text};
 
-use crate::{Acts, Kit, State, over, press_over, shadows};
+use crate::{Acts, ControlSize, Kit, State, over, press_over, shadows};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+/// The older button sizes. A `Button` is 24, 28 or 32 points tall and an `IconButton` 20, 24
+/// or 28. For a `Button`, `Small` is `ControlSize::Regular`, `Normal` is `ControlSize::Large`
+/// and `Large` sits between `Large` (28) and `ExtraLarge` (36). For an `IconButton` the names
+/// match: `Small`, `Regular` and `Large`.
+#[deprecated(note = "use `control_size(ControlSize::..)`: for a Button, Small → Regular, Normal → Large, Large → Large or ExtraLarge; for an IconButton, Small → Small, Normal → Regular, Large → Large")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ButtonSize {
     Small,
-    #[default]
     Normal,
     Large,
+}
+
+#[allow(deprecated)]
+impl Default for ButtonSize {
+    fn default() -> ButtonSize {
+        ButtonSize::Normal
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -133,11 +144,32 @@ fn paint(k: &Kit, mut e: El, s: Skin, state: State, interactive: bool) -> El {
     }
 }
 
+/// A size set with `control_size`, or with the deprecated `size`, which keeps its old metrics.
+#[derive(Clone, Copy)]
+#[allow(deprecated)]
+enum Size {
+    Control(ControlSize),
+    Legacy(ButtonSize),
+}
+
+/// A push button's height, horizontal padding, corner radius and icon size, as macOS 27's
+/// `NSButton` push buttons measure. Large and ExtraLarge are capsules there; here they take
+/// the theme's larger radii.
+fn push_metrics(k: &Kit, size: ControlSize) -> (f32, f32, f32, f32) {
+    match size {
+        ControlSize::Mini => (16.0, 8.0, k.radius.sm, 12.0),
+        ControlSize::Small => (20.0, 10.0, k.radius.sm, 14.0),
+        ControlSize::Regular => (24.0, 12.0, k.radius.md, 16.0),
+        ControlSize::Large => (28.0, 14.0, k.radius.lg, 16.0),
+        ControlSize::ExtraLarge => (36.0, 18.0, k.radius.xl, 16.0),
+    }
+}
+
 /// A text button: `Button::new("Save").variant(ButtonVariant::Contrast).build(&kit)`.
 pub struct Button {
     label: String,
     variant: ButtonVariant,
-    size: ButtonSize,
+    size: Size,
     icon: Option<&'static Icon>,
     state: State,
     expanded: bool,
@@ -149,7 +181,7 @@ impl Button {
         Button {
             label: label.into(),
             variant: ButtonVariant::Neutral,
-            size: ButtonSize::Normal,
+            size: Size::Control(ControlSize::Regular),
             icon: None,
             state: State::Rest,
             expanded: false,
@@ -160,8 +192,15 @@ impl Button {
         self.variant = v;
         self
     }
+    /// The button's size, as AppKit's: Regular (24 points tall) unless set.
+    pub fn control_size(mut self, s: ControlSize) -> Self {
+        self.size = Size::Control(s);
+        self
+    }
+    #[deprecated(note = "use `control_size`: Small → Regular, Normal → Large, Large → Large or ExtraLarge")]
+    #[allow(deprecated)]
     pub fn size(mut self, s: ButtonSize) -> Self {
-        self.size = s;
+        self.size = Size::Legacy(s);
         self
     }
     pub fn icon(mut self, i: &'static Icon) -> Self {
@@ -193,10 +232,15 @@ impl Button {
     }
 
     pub fn build(self, k: &Kit) -> El {
-        let (h, px, radius) = match self.size {
-            ButtonSize::Small => (24.0, 9.0, k.radius.sm),
-            ButtonSize::Normal => (28.0, 11.0, k.radius.md),
-            ButtonSize::Large => (32.0, 15.0, k.radius.md),
+        #[allow(deprecated)]
+        let (h, px, radius, icon_size, gap, control) = match self.size {
+            Size::Legacy(ButtonSize::Small) => (24.0, 9.0, k.radius.sm, 16.0, 6.0, None),
+            Size::Legacy(ButtonSize::Normal) => (28.0, 11.0, k.radius.md, 16.0, 6.0, None),
+            Size::Legacy(ButtonSize::Large) => (32.0, 15.0, k.radius.md, 16.0, 6.0, None),
+            Size::Control(c) => {
+                let (h, px, radius, icon_size) = push_metrics(k, c);
+                (h, px, radius, icon_size, if c == ControlSize::Mini { 4.0 } else { 6.0 }, Some(c))
+            }
         };
         let mut s = skin(k, self.variant);
         let ghostly =
@@ -211,14 +255,21 @@ impl Button {
         if self.variant == ButtonVariant::GhostMuted {
             font = k.ty.ui;
         }
+        // AppKit sets small buttons in 11 points and mini ones in 9.
+        let small = if self.variant == ButtonVariant::GhostMuted { k.ty.small } else { k.ty.small_medium };
+        match control {
+            Some(ControlSize::Small) => font = small,
+            Some(ControlSize::Mini) => font = TextStyle { size: 9.0, ..small },
+            _ => {}
+        }
         let (ink, icon_c) = (s.ink, s.icon);
         let disabled_alpha = s.disabled_opacity;
         let interactive = self.variant != ButtonVariant::Loading;
         let enabled = self.state != State::Disabled && interactive;
-        let mut e = row().role("button").label(self.label.clone()).h(h).px(px).gap(6.0).center().radius(radius);
+        let mut e = row().role("button").label(self.label.clone()).h(h).px(px).gap(gap).center().radius(radius);
         e = paint(k, e, s, self.state, interactive);
         if let Some(i) = self.icon {
-            e = e.child(icon(i, 16.0).key("icon").color(icon_c));
+            e = e.child(icon(i, icon_size).key("icon").color(icon_c));
         }
         e = e.child(text(self.label).key("label").font(font).color(ink));
         if self.state == State::Disabled { e = e.dim(disabled_alpha); }
@@ -240,7 +291,7 @@ pub enum IconButtonVariant {
 pub struct IconButton {
     icon: &'static Icon,
     variant: IconButtonVariant,
-    size: ButtonSize,
+    size: Size,
     state: State,
     expanded: bool,
     label: Option<String>,
@@ -252,7 +303,7 @@ impl IconButton {
         IconButton {
             icon: i,
             variant: IconButtonVariant::Neutral,
-            size: ButtonSize::Normal,
+            size: Size::Control(ControlSize::Regular),
             state: State::Rest,
             expanded: false,
             label: None,
@@ -263,8 +314,15 @@ impl IconButton {
         self.variant = v;
         self
     }
+    /// A square as tall as a push button of this size: Regular (24 points) unless set.
+    pub fn control_size(mut self, s: ControlSize) -> Self {
+        self.size = Size::Control(s);
+        self
+    }
+    #[deprecated(note = "use `control_size`: Small → Small, Normal → Regular, Large → Large")]
+    #[allow(deprecated)]
     pub fn size(mut self, s: ButtonSize) -> Self {
-        self.size = s;
+        self.size = Size::Legacy(s);
         self
     }
     pub fn state(mut self, s: State) -> Self {
@@ -296,10 +354,20 @@ impl IconButton {
     }
 
     pub fn build(self, k: &Kit) -> El {
-        let (side, radius) = match self.size {
-            ButtonSize::Small => (20.0, k.radius.sm),
-            ButtonSize::Normal => (24.0, k.radius.md),
-            ButtonSize::Large => (28.0, k.radius.md),
+        #[allow(deprecated)]
+        let size = match self.size {
+            Size::Legacy(ButtonSize::Small) => ControlSize::Small,
+            Size::Legacy(ButtonSize::Normal) => ControlSize::Regular,
+            Size::Legacy(ButtonSize::Large) => ControlSize::Large,
+            Size::Control(c) => c,
+        };
+        // The older sizes' radii, so Small, Regular and Large draw as they did.
+        let (side, radius, glyph) = match size {
+            ControlSize::Mini => (16.0, k.radius.sm, 12.0),
+            ControlSize::Small => (20.0, k.radius.sm, 16.0),
+            ControlSize::Regular => (24.0, k.radius.md, 16.0),
+            ControlSize::Large => (28.0, k.radius.md, 16.0),
+            ControlSize::ExtraLarge => (36.0, k.radius.lg, 18.0),
         };
         let mut s = match self.variant {
             IconButtonVariant::Neutral => skin(k, ButtonVariant::Neutral),
@@ -329,7 +397,7 @@ impl IconButton {
         if let Some(l) = self.label {
             e = e.label(l);
         }
-        e = paint(k, e, s, self.state, true).child(icon(self.icon, 16.0).key("icon").color(ink));
+        e = paint(k, e, s, self.state, true).child(icon(self.icon, glyph).key("icon").color(ink));
         if self.state == State::Disabled { e = e.dim(disabled_alpha); }
         self.acts.apply(e, enabled)
     }

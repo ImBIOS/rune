@@ -2,7 +2,7 @@
 
 use rune::{Edge, El, Icon, TextStyle, Transition, Tx, col, el, icon, row, text};
 
-use crate::{Acts, Button, ButtonSize, ButtonVariant, Kit, press_over, shadows};
+use crate::{Acts, Button, ButtonVariant, ControlSize, Kit, press_over, shadows};
 
 pub struct Toast {
     title: String,
@@ -40,7 +40,7 @@ impl Toast {
         f: impl Fn(&mut S, &mut Tx) + 'static,
     ) -> Self {
         let v = if primary { ButtonVariant::Neutral } else { ButtonVariant::Ghost };
-        self.actions.push(Button::new(label).variant(v).size(ButtonSize::Small).on_press_tx(f).build(k));
+        self.actions.push(Button::new(label).variant(v).control_size(ControlSize::Regular).on_press_tx(f).build(k));
         self
     }
     /// Shows the close button; `f` dismisses.

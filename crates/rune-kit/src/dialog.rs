@@ -1,6 +1,6 @@
 //! Modal surface; focus, dismissal and background inertness belong to Rune.
 use rune::{El, TextStyle, col, el, row, text};
-use crate::{ButtonSize, IconButton, IconButtonVariant, Kit, shadows};
+use crate::{ControlSize, IconButton, IconButtonVariant, Kit, shadows};
 
 pub struct Dialog {
     key: String,
@@ -34,7 +34,7 @@ impl Dialog {
         if !self.open { return; }
         let Some(close) = self.close else { return; };
         let mut dismiss = IconButton::new(k.glyph.close).variant(IconButtonVariant::Ghost)
-            .size(ButtonSize::Normal).label("Close").build(k).key("close");
+            .control_size(ControlSize::Regular).label("Close").build(k).key("close");
         if let Some(button) = self.button { dismiss = button(dismiss); }
         dismiss = dismiss.size(20.0, 20.0).mt(-2.0).mr(-2.0);
         let mut title = col().grow(1.0).gap(4.0).child(text(self.title.clone())

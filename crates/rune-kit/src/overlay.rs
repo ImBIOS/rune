@@ -9,7 +9,7 @@
 use rune::{Align, Color, El, Shadow, Side, TextStyle, Transition, col, el, row, text};
 use rune_motion::{Effect, Spring, SpringPair, Vec2, tokens};
 
-use crate::{Acts, ButtonSize, IconButton, IconButtonVariant, Kit, shadows};
+use crate::{Acts, ControlSize, IconButton, IconButtonVariant, Kit, shadows};
 
 /// Where an overlay sits relative to its trigger (Kobalte/Floating UI placements).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,7 +171,7 @@ impl Popover {
         if let Some(t) = &self.title {
             let close = IconButton::new(k.glyph.close)
                 .variant(IconButtonVariant::Ghost)
-                .size(ButtonSize::Normal)
+                .control_size(ControlSize::Regular)
                 .label("Close");
             let close = self.close.apply(close.build(k).key("close"), true);
             content = content.label(t.clone()).child(

@@ -46,7 +46,9 @@ mod text_input;
 mod toast;
 
 pub use accordion::{Accordion, AccordionItem};
-pub use actions::{Button, ButtonSize, ButtonVariant, IconButton, IconButtonVariant};
+#[allow(deprecated)]
+pub use actions::ButtonSize;
+pub use actions::{Button, ButtonVariant, IconButton, IconButtonVariant};
 pub use badge::{Badge, BadgeVariant, Divider};
 pub use card::Card;
 pub use checkbox::Checkbox;
@@ -84,6 +86,19 @@ pub enum State {
     Pressed,
     Focus,
     Disabled,
+}
+
+/// A control's size, named and measured as AppKit's `NSControl.ControlSize` on macOS 27. A
+/// push button is 16, 20, 24, 28 or 36 points tall; a switch's track 16, 20, 24, 28 or 36.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Hash)]
+#[non_exhaustive]
+pub enum ControlSize {
+    Mini,
+    Small,
+    #[default]
+    Regular,
+    Large,
+    ExtraLarge,
 }
 
 type Apply = Box<dyn FnOnce(El) -> El>;

@@ -4,7 +4,7 @@
 
 use rune::tok::motion;
 use rune::{Align, Color, Cx, Drag, El, Phase, Shape, Spring, TextStyle, Transition, Tx, canvas, col, el, icon, row, spacer, text};
-use rune_kit::{Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Kit, SegmentedControl, Select, Switch, TextInput, Toast, ToastRegion};
+use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Kit, SegmentedControl, Select, Switch, TextInput, Toast, ToastRegion};
 use rune_theme_opencode::icons as oc;
 
 use crate::{APPEARANCES, Cursed, HAPTICS, PAGES, Page, icons};
@@ -566,7 +566,7 @@ fn developer(s: &Cursed, k: &Kit, hair: f32) -> El {
         ]
     };
     let flush = Button::new("Flush cache")
-        .size(ButtonSize::Small)
+        .control_size(ControlSize::Regular)
         .disabled(p.flushed || s.flush_t0.is_some())
         .on_press(tap(|s: &mut Cursed| s.flush_requested = true))
         .build(k)
