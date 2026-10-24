@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Prewarmed overlays report where they are.** A prewarmed overlay's `El::on_screen_layout`
+  used to report rects from (0, 0) when it warmed, and its warm frame drew at the scale winit
+  gave the window rather than the panel's display. A rect that moved while it was hidden
+  also wasn't delivered when it was shown. It now warms at its placed origin and display
+  scale, and the reveal delivers rects that moved while hidden.
 - **A fading-out overlay clicks through on macOS.** `OverlayHandle::fade_out(d)` stopped Rune's
   input at once, but a panel that wasn't prewarmed still took clicks and scrolls for the whole
   fade, so they never reached the window below. It now ignores the mouse from the start of the

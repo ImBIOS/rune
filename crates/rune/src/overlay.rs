@@ -432,6 +432,12 @@ impl<T: 'static> Overlay<T> {
         match made {
             Some(live) => {
                 self.live = Some(live);
+                // The surface was made before the panel was adopted and placed; its display's
+                // scale is known now, before `warm` draws.
+                if let Some(Backing::Window(window)) = self.live.as_ref().map(|l| &l.backing) && let Some(gpu) = self.gpu.clone() {
+                    let scale = crate::window::backing_scale(window);
+                    self.rescale(&gpu, scale);
+                }
                 self.set_availability(Availability::Available);
                 self.rt.settle_all();
                 self.dirty = true;
@@ -629,7 +635,8 @@ impl<T: 'static> Overlay<T> {
     /// next pointer event.
     fn place_window(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
         self.position_window(event_loop, window);
-        self.sync_origin();
+        // From the window itself: `window()` places it before it's live.
+        self.sync_origin(window);
         let Ok(origin) = window.outer_position() else { return };
         if let Some(before) = self.origin.replace(origin) && before != origin {
             let scale = window.scale_factor();
@@ -639,12 +646,23 @@ impl<T: 'static> Overlay<T> {
     }
 
     /// Tells the runtime where the overlay's content is on screen (see `El::on_screen_layout`).
-    fn sync_origin(&mut self) {
+    fn sync_origin(&mut self, window: &Window) {
+        if let Some(origin) = crate::window::screen_origin(window) { self.origin_moved(origin); }
+    }
+
+    fn sync_live_origin(&mut self) {
         let Some(Backing::Window(window)) = self.live.as_ref().map(|l| &l.backing) else { return };
-        if let Some(origin) = crate::window::screen_origin(window) && self.rt.set_window_origin(origin) && self.drawing() {
-            self.dirty = true;
-            self.idle = false;
-        }
+        let window = window.clone();
+        self.sync_origin(&window);
+    }
+
+    /// Hidden too, the moved rects wait in the queue and mark the overlay dirty, so a retained
+    /// reveal steps once (`refresh_for_reveal_at`) and delivers them; only a drawing overlay
+    /// turns the loop for them now.
+    fn origin_moved(&mut self, origin: (f32, f32)) {
+        if !self.rt.set_window_origin(origin) { return; }
+        self.dirty = true;
+        if self.drawing() { self.idle = false; }
     }
 
     fn position_window(&self, event_loop: &ActiveEventLoop, window: &Window) {
@@ -1534,7 +1552,7 @@ impl<T: 'static> AnyHost for Overlay<T> {
         }
         // Hidden too: the queued rects are delivered with the next shown frame.
         if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }) {
-            self.sync_origin();
+            self.sync_live_origin();
         }
         if !self.visible { return; }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
@@ -1629,7 +1647,7 @@ impl<T: 'static> AnyHost for Overlay<T> {
                     self.resolve_size(_event_loop);
                     if size != self.at.size { self.resized(_event_loop); }
                     else if let Some(panel) = &self.panel { panel.place(self.at, &self.options); }
-                    self.sync_origin();
+                    self.sync_live_origin();
                 }
             }
         }
@@ -1821,6 +1839,32 @@ mod tests {
 
     fn assert_frame_rate(polls: u32, what: &str) {
         assert!((50..=61).contains(&polls), "{what}: a poll asking for every frame ran {polls} times in a second, want at most ~60");
+    }
+
+    /// A prewarmed overlay moved while hidden reports the new screen rect when it's revealed,
+    /// though the reveal draws nothing new (its retained pixels stand).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_retained_overlay_moved_while_hidden_reports_its_screen_rect_on_show() {
+        fn view(_: &Option<[f32; 4]>, _: &mut Cx<Option<[f32; 4]>>) -> El {
+            crate::el().child(crate::el().key("box").absolute(10.0, 5.0).size(20.0, 8.0)
+                .on_screen_layout(|s: &mut Option<[f32; 4]>, r| *s = Some(r)))
+        }
+        let app = AppSpec::new("moved hidden", (100.0, 50.0), || None, view);
+        let options = OverlayOptions { prewarm: true, ..Default::default() };
+        let (mut overlay, _) = Overlay::new(OverlaySpec::new("moved hidden", app.size, view).options(options), None, &app);
+        overlay.rt.wall_start = None;
+        overlay.warm();
+        assert_eq!(overlay.rt.state, Some([10.0, 5.0, 20.0, 8.0]));
+        overlay.dirty = false;
+        overlay.idle = true;
+
+        overlay.origin_moved((300.0, 200.0));
+        assert!(overlay.dirty, "the moved rect waits for the next step");
+        assert!(overlay.idle, "a hidden overlay doesn't turn the loop for it");
+        assert_eq!(overlay.rt.state, Some([10.0, 5.0, 20.0, 8.0]));
+        overlay.refresh_for_reveal_at(Instant::now());
+        assert_eq!(overlay.rt.state, Some([310.0, 205.0, 20.0, 8.0]), "the reveal delivers it");
     }
 
     /// `Tx::wake_after(Duration::ZERO)` asks for the next frame. With no display link to take
