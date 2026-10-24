@@ -85,11 +85,12 @@ impl Trak {
     }
 
     /// Letter spacing, in device px, that turns the tracking HarfRust applied to a run at `px`
-    /// device pixels into Core Text's tracking at its point size, `px / scale`, or removes it
-    /// when `on` is false. HarfRust rounds tracking to whole font units; Core Text truncates.
-    pub(super) fn spacing(&self, px: f32, scale: f32, on: bool) -> f32 {
+    /// device pixels into Core Text's tracking for `points`-point text (its point size, or the
+    /// size an explicit optical size stands for) scaled to the run, or removes it when `on` is
+    /// false. HarfRust rounds tracking to whole font units; Core Text truncates.
+    pub(super) fn spacing(&self, px: f32, points: f32, on: bool) -> f32 {
         let applied = self.units(px).round();
-        let wanted = if on { self.units(px / scale).trunc() } else { 0.0 };
+        let wanted = if on { self.units(points).trunc() } else { 0.0 };
         (wanted - applied) * px / self.units_per_em
     }
 }
@@ -108,13 +109,15 @@ mod tests {
     fn spacing_moves_tracking_from_the_pixel_size_to_the_point_size() {
         let t = system();
         // 14 pt at 2x: HarfRust tracked 28 px by +28 units; 14 pt wants -22.
-        assert!((t.spacing(28.0, 2.0, true) - (-22.0 - 28.0) * 28.0 / 2048.0).abs() < 1e-5);
+        assert!((t.spacing(28.0, 14.0, true) - (-22.0 - 28.0) * 28.0 / 2048.0).abs() < 1e-5);
         // At 1x, listed sizes need nothing.
-        assert_eq!(t.spacing(14.0, 1.0, true), 0.0);
+        assert_eq!(t.spacing(14.0, 14.0, true), 0.0);
         // Off removes what HarfRust applied.
-        assert!((t.spacing(14.0, 1.0, false) - 22.0 * 14.0 / 2048.0).abs() < 1e-5);
+        assert!((t.spacing(14.0, 14.0, false) - 22.0 * 14.0 / 2048.0).abs() < 1e-5);
         // Between listed sizes Core Text truncates and HarfRust rounds: 33 pt is 24.75 units.
-        assert!((t.spacing(33.0, 1.0, true) - (24.0 - 25.0) * 33.0 / 2048.0).abs() < 1e-5);
+        assert!((t.spacing(33.0, 33.0, true) - (24.0 - 25.0) * 33.0 / 2048.0).abs() < 1e-5);
+        // An explicit optical size of 14 pt at 28 pt, 2x: 14 pt's -22 units, at the real size.
+        assert!((t.spacing(56.0, 14.0, true) - (-22.0 - t.units(56.0).round()) * 56.0 / 2048.0).abs() < 1e-5);
         // Beyond the table the ends hold.
         assert_eq!(t.units(8.0), 0.0);
         assert_eq!(t.units(500.0), 21.0);
@@ -145,7 +148,7 @@ mod tests {
 
     /// Tracking that can't go wrong: finite, and 0 when there's no table.
     fn sane(t: Option<Trak>) -> f32 {
-        let spacing = t.map_or(0.0, |t| t.spacing(28.0, 2.0, true) + t.spacing(9.0, 1.0, false));
+        let spacing = t.map_or(0.0, |t| t.spacing(28.0, 14.0, true) + t.spacing(9.0, 9.0, false));
         assert!(spacing.is_finite(), "{spacing}");
         spacing
     }

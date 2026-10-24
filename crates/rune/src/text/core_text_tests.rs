@@ -39,12 +39,32 @@ unsafe fn dictionary(keys: &[Ref], values: &[Ref]) -> Ref {
 /// The system UI font at `size` points with its `wght` axis at `weight` and `opsz` at `size`,
 /// the instance Rune shapes for `Family::Named("System Font")`.
 fn system_font(size: f32, weight: f32) -> Ref {
+    system_font_opsz(size, weight, size.clamp(17.0, 96.0))
+}
+
+fn number(v: f64) -> Ref {
+    unsafe { CFNumberCreate(std::ptr::null(), 6, (&v as *const f64).cast()) }
+}
+
+/// The system UI font at `size` points with `opsz` set through its variation axes.
+fn system_font_opsz(size: f32, weight: f32, opsz: f32) -> Ref {
     unsafe {
         let base = CTFontCreateUIFontForLanguage(2, size as f64, std::ptr::null());
         let tag = |t: &[u8; 4]| { let v = i32::from_be_bytes(*t); CFNumberCreate(std::ptr::null(), 3, (&v as *const i32).cast()) };
-        let number = |v: f64| CFNumberCreate(std::ptr::null(), 6, (&v as *const f64).cast());
-        let axes = dictionary(&[tag(b"wght"), tag(b"opsz")], &[number(weight as f64), number(size.clamp(17.0, 96.0) as f64)]);
+        let axes = dictionary(&[tag(b"wght"), tag(b"opsz")], &[number(weight as f64), number(opsz as f64)]);
         let descriptor = CTFontDescriptorCreateWithAttributes(dictionary(&[kCTFontVariationAttribute], &[axes]));
+        CTFontCreateCopyWithAttributes(base, size as f64, std::ptr::null(), descriptor)
+    }
+}
+
+/// The regular system UI font at `size` points with Core Text's optical size attribute
+/// (`kCTFontOpticalSizeAttribute`, by its string value so older systems still load the tests).
+fn system_font_optical(size: f32, optical: f32) -> Ref {
+    unsafe {
+        let base = CTFontCreateUIFontForLanguage(2, size as f64, std::ptr::null());
+        let key = b"NSCTFontOpticalSizeAttribute";
+        let key = CFStringCreateWithBytes(std::ptr::null(), key.as_ptr(), key.len() as isize, 0x0800_0100, 0);
+        let descriptor = CTFontDescriptorCreateWithAttributes(dictionary(&[key], &[number(optical as f64)]));
         CTFontCreateCopyWithAttributes(base, size as f64, std::ptr::null(), descriptor)
     }
 }
@@ -198,4 +218,50 @@ fn carets_follow_corrected_glyph_positions() {
         let caret = parley::editing::Cursor::from_byte_index(&layout, i, parley::layout::Affinity::Downstream).geometry(&layout, 1.0);
         assert!((caret.x0 as f32 - pen).abs() < 1e-3, "byte {i}: caret {} vs pen {pen}", caret.x0);
     }
+}
+
+/// Tracking in points: the width with the font's tracking less the width with it off.
+fn trak_points(ts: &mut TextSystem, text: &str, spans: &[Span], style: TextStyle, scale: f32) -> f32 {
+    let width = |ts: &mut TextSystem, style| ts.layout_rich(text, spans, style, scale, None).full_width() / scale;
+    width(ts, style) - width(ts, style.features("'trak' 0"))
+}
+
+/// An explicit optical size picks the `trak` entry, as Core Text's optical size attribute does:
+/// a 28 pt font with `kCTFontOpticalSizeAttribute` 14 lays out exactly as 14 pt text scaled 2x,
+/// tracking included, while 28 pt with only the `opsz` axis at 14 is still tracked for 28 pt
+/// (Rune's `variations("'opsz' 14")`). So 28 pt text at optical size 14 matches a 14 pt view
+/// under `scaleEffect(2)`. `'trak' 0` still tracks nothing.
+#[test]
+fn explicit_optical_size_picks_the_trak_entry() {
+    let mut ts = TextSystem::default();
+    let family = Family::Named("System Font");
+    if ts.font_cx.collection.family_id("System Font").is_none() {
+        eprintln!("skipping: no macOS system font");
+        return;
+    }
+    let text = STRINGS[0];
+    let n = text.chars().count() as f32;
+    let style = TextStyle::new(28.0, 400.0).family(family).optical_size(14.0);
+    // HarfRust tracks by a different amount at each device size; all of it comes off.
+    assert_scale_free(widths(&mut ts, text, &[], style.features("'trak' 0")), "untracked");
+    let [plain, optical, axis] = [system_font(14.0, 400.0), system_font_optical(28.0, 14.0), system_font_opsz(28.0, 400.0, 14.0)]
+        .map(|font| { let width = core_text_width(text, font) as f32; unsafe { CFRelease(font) }; width });
+    assert!((optical - 2.0 * plain).abs() < 0.01, "Core Text: optical size 14 at 28 pt {optical} vs 14 pt scaled {}", 2.0 * plain);
+    let opsz_axis = TextStyle::new(28.0, 400.0).family(family).variations("'opsz' 14");
+    for scale in [1.0, 2.0] {
+        let tracked = trak_points(&mut ts, text, &[], style, scale);
+        assert!((tracked - -22.0 / 2048.0 * 28.0 * n).abs() < 0.02, "{scale}x: {tracked}");
+        let width = ts.layout_rich(text, &[], style, scale, None).full_width() / scale;
+        assert!((width - optical).abs() / n < 0.05, "{scale}x: {width} vs Core Text {optical}");
+        let width = ts.layout_rich(text, &[], opsz_axis, scale, None).full_width() / scale;
+        assert!((width - axis).abs() / n < 0.05, "{scale}x opsz axis: {width} vs Core Text {axis}");
+        // A span at twice the size looks its tracking up at twice the optical size, 28 pt.
+        let spans = [Span { size: Some(56.0), ..Span::new(0, 4) }];
+        let tracked = trak_points(&mut ts, text, &spans, style, scale);
+        let expected = (n - 4.0) * -22.0 / 2048.0 * 28.0 + 4.0 * 28.0 / 2048.0 * 56.0;
+        assert!((tracked - expected).abs() < 0.02, "{scale}x span: {tracked} vs {expected}");
+    }
+    // An optical size equal to the size tracks as Auto does.
+    let auto = TextStyle::new(17.0, 400.0).family(family);
+    assert_eq!(widths(&mut ts, text, &[], auto.optical_size(17.0)), widths(&mut ts, text, &[], auto));
 }

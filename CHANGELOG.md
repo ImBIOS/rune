@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **An explicit `optical_size(o)` now also picks the `trak` tracking:** text is tracked as Core
+  Text tracks `o`-point text scaled to the set size, so
+  `TextStyle::new(size * k, w).optical_size(size)` matches a SwiftUI view at `size` with
+  `scaleEffect(k)`. This is what Core Text does with its optical size attribute
+  (`kCTFontOpticalSizeAttribute`): a 28 pt font at optical size 14 lays out exactly as 14 pt
+  text scaled 2x. Setting only the `opsz` axis (`variations("'opsz' 14")`, or
+  `kCTFontVariationAttribute`) still tracks at the point size. Auto optical size is unchanged.
 - **rune-kit `Markdown` colours fenced code** in ts, tsx, js, json, rust, swift, css, html,
   sh/bash, sql and yaml; on by default, so code blocks in those languages render with coloured
   tokens (goldens with such blocks move). Unknown languages and indented blocks stay plain, and

@@ -955,17 +955,28 @@ impl TextSystem {
                 self.math = Some(load_families(&mut self.font_cx.collection, fallback::MATH_FONT_FILES, fallback::MATH_FAMILIES));
             }
         }
-        // `trak` tracking at the point size (see `trak.rs`), on top of `style.tracking`. Each
-        // style range gets its predicted first font's spacing; runs in another font are checked
-        // after shaping.
+        // `trak` tracking at the point size (see `trak.rs`), on top of `style.tracking`. An
+        // explicit optical size `o` picks the entry instead, as Core Text tracks `o`-point text
+        // scaled to the set size; spans scale the lookup with their size. Each style range gets
+        // its predicted first font's spacing; runs in another font are checked after shaping.
         let trak_tag = parley::setting::Tag::new(b"trak");
         let mut features: Vec<parley::FontFeature> = parley::FontFeature::parse_css_list(style.features).flatten().collect();
         let tracked = features.iter().rev().find(|f| f.tag == trak_tag).is_none_or(|f| f.value != 0);
         let listed = features.len();
         features.retain(|f| f.tag != trak_tag);
         let stripped = features.len() != listed;
+        let optical = match style.optical_size {
+            OpticalSize::Fixed(o) if o.is_finite() && o > 0.0 && style.size > 0.0 => Some(o),
+            _ => None,
+        };
         let spacing = |trak: Option<Rc<Trak>>, size: f32| {
-            style.tracking + trak.map_or(0.0, |t| t.spacing(size * scale, scale, tracked) / scale)
+            let px = size * scale;
+            let points = px / scale;
+            // `o` itself at the style's size (a run's size comes back through device px).
+            let points = optical.map_or(points, |o| {
+                if (points - style.size).abs() <= style.size * 1e-6 { o } else { o * points / style.size }
+            });
+            style.tracking + trak.map_or(0.0, |t| t.spacing(px, points, tracked) / scale)
         };
         let base_spacing = spacing(self.primary_trak(style.family, style.weight, style.italic), style.size);
         let span_spacing: Vec<Option<f32>> = spans

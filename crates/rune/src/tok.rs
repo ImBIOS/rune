@@ -38,7 +38,9 @@ pub enum OpticalSize {
     Auto,
     /// Leave optical sizing to Parley/the font (the legacy Rune behavior).
     FontDefault,
-    /// Override `opsz`, in points, including an `opsz` in the variation settings.
+    /// Override `opsz`, in points, including an `opsz` in the variation settings. Also picks the
+    /// `trak` tracking: text is tracked as Core Text tracks text of this size scaled to the set
+    /// size.
     Fixed(f32),
 }
 
@@ -54,8 +56,8 @@ pub struct TextStyle {
     /// CSS OpenType settings, e.g. `"'opsz' 14, 'wght' 500"`. Empty preserves font defaults.
     pub variations: &'static str,
     /// CSS OpenType settings, e.g. `"'tnum' 1, 'ss01' 1"`. Fonts with a `trak` table (the macOS
-    /// system font among them) are tracked at their point size, as Core Text does; `'trak' 0`
-    /// turns that off.
+    /// system font among them) are tracked at their point size (or explicit optical size), as Core
+    /// Text does; `'trak' 0` turns that off.
     pub features: &'static str,
     pub optical_size: OpticalSize,
     /// The family's italic face, or a synthetic oblique when it has none.
@@ -88,6 +90,10 @@ impl TextStyle {
     pub const fn features(self, features: &'static str) -> TextStyle {
         TextStyle { features, ..self }
     }
+    /// Fixes `opsz` at `size` points and picks the `trak` tracking with it: text is tracked as
+    /// Core Text tracks `size`-point text scaled to the set size, so
+    /// `TextStyle::new(size * k, w).optical_size(size)` matches a SwiftUI view at `size` with
+    /// `scaleEffect(k)`. Auto optical size tracks at the point size.
     pub const fn optical_size(self, size: f32) -> TextStyle {
         TextStyle { optical_size: OpticalSize::Fixed(size), ..self }
     }
