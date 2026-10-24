@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run only on a build worker, inside a HiveMind cargo lease.
+"""Run only on a build worker, inside a cargo lease on the build queue.
 
 Consumes actual frame events (no status polling). All clocks are on the worker.
 The save timestamp is immediately after close; no network sync is in the metric.

@@ -1,6 +1,6 @@
 """Pro-only, no capture. Same 3 batches x 3 intervals and endpoint as the overlay team's probe.
 
-Run through hash-checked HiveMind GUI admission. A matched 1360x320 Rune surface is
+Run through hash-checked GUI admission on the build queue. A matched 1360x320 Rune surface is
 tested with both injected 60 Hz redraws and its real continuous animation scheduler.
 """
 import argparse

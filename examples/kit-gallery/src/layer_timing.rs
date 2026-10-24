@@ -41,7 +41,7 @@ fn legacy(instances: &[Instance]) -> Vec<Instance> {
 #[ignore = "manual byte-for-byte disabled styling check; provide RUNE_KIT_PIXEL_BASELINE"]
 fn disabled_controls_match_legacy_pixels() {
     // Record against the pre-dimming kit source (reconstructing dev's per-instance opacity),
-    // then run without RECORD on the new source. Keep the directory outside HiveMind's checkout.
+    // then run without RECORD on the new source. Keep the directory outside the build checkout.
     let directory = std::path::PathBuf::from(std::env::var_os("RUNE_KIT_PIXEL_BASELINE").unwrap());
     let record = std::env::var_os("RUNE_KIT_RECORD_BASELINE").is_some();
     std::fs::create_dir_all(&directory).unwrap();
@@ -82,7 +82,7 @@ fn disabled_controls_match_legacy_pixels() {
 }
 
 #[test]
-#[ignore = "manual disabled-controls GPU comparison; run through HiveMind"]
+#[ignore = "manual disabled-controls GPU comparison; run on a build worker"]
 fn disabled_controls_gpu_cost() {
     let gpu = Gpu::headless();
     assert!(gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY));

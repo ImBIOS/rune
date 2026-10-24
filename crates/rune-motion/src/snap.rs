@@ -1,4 +1,4 @@
-//! Two-edge 1/64 device-pixel snapping (kit-motion patterns #3, research 06 §2.13).
+//! Two-edge 1/64 device-pixel snapping.
 //!
 //! Snap both edges, then derive the size. Snapping origin and size separately makes a stationary
 //! edge flicker by one quantum as the other edge moves.

@@ -8,7 +8,7 @@
 //! - Every effect is a pure function of (pixel, params, time, seed). No hidden state, no RNG.
 //! - Intensity 0 or bounds off the viewport => the layer is culled in `prepare` (no draw, no cost).
 //! - Speeds never multiply raw time inside a shader without going through `Phase` on the caller side
-//!   when the speed animates; otherwise the phase jumps (kit-motion: no phase jump on speed change).
+//!   when the speed animates; otherwise the phase jumps (no phase jump on speed change).
 
 mod cpu;
 mod renderer;
@@ -57,7 +57,7 @@ impl Rgb {
 // ---------------------------------------------------------------- time helpers
 
 /// Continuous phase clock for effects whose speed animates: `at(t)` never jumps when `set_speed`
-/// is called (kit-motion: no phase jump when a speed changes).
+/// is called (no phase jump when a speed changes).
 #[derive(Clone, Copy, Debug)]
 pub struct Phase {
     pub speed: f32,

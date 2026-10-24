@@ -1,5 +1,5 @@
 //! One animation clock for everything: tracks, presence, choreography and traces read it, so slow
-//! motion is truthful (kit-motion patterns #12; Scrawl `src/ui/motion.rs:17-53`).
+//! motion is truthful.
 
 /// Animation time `τ = base + (host − anchor) · scale`, re-anchored whenever the scale changes so
 /// running animations continue from where they are.

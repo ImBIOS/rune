@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Guarded Rune hot editing. The compiler and app always run in the same HiveMind lease.
+"""Guarded Rune hot editing. The compiler and app always run in the same build lease.
 
-On Studio this relays source edits to Pro; on a worker it watches a validated mirror.
+On the desk Mac this relays source edits to the build Mac; on a worker it watches a validated mirror.
 Only view function bodies can patch. All other build inputs require a restart.
 """
 import argparse
@@ -25,7 +25,7 @@ def files():
     if manifest.exists():
         return json.loads(manifest.read_text())
     if not (ROOT / ".git").exists():
-        # HiveMind syncs source without Git metadata.
+        # The build queue syncs source without Git metadata.
         result = []
         for directory in ("crates", "examples", "themes", "tools", "scripts", ".cargo"):
             for parent, dirs, names in os.walk(ROOT / directory):
@@ -96,11 +96,11 @@ def stop(process):
 
 
 def relay(args):
-    """Studio watches original files. Pro's guard sees a source staging area, never dx's mirror."""
+    """The desk Mac watches original files. The build Mac's guard sees a source staging area, never dx's mirror."""
     import shlex
     tag = hashlib.sha256(str(ROOT).encode()).hexdigest()[:12]
     remote = os.environ.get("RUNE_DEV_REMOTE", f"scratch/rune-dev-{tag}")
-    # HiveMind's local admission requires a Git root. This is an empty staging
+    # The build queue's local admission requires a Git root. This is an empty staging
     # repository, not a copy of the user's history; the manifest supplies its inputs.
     subprocess.run(["ssh", "pro", f"mkdir -p {shlex.quote(remote)} && if [ ! -e {shlex.quote(remote + '/.git')} ]; then git -C {shlex.quote(remote)} init -q; fi"], check=True)
     with tempfile.TemporaryDirectory(prefix="rune-relay-") as tmp:
@@ -134,7 +134,7 @@ def relay(args):
                         if fetched.returncode == 0: temp.replace(dest)
                         else: complete = False
                 if complete:
-                    # A completion marker on Studio means its local PNG/tree have arrived too.
+                    # A completion marker on the desk Mac means its local PNG/tree have arrived too.
                     print(line, end="", flush=True)
                 else:
                     print("rune-dev: snapshot fetch failed", file=sys.stderr, flush=True)

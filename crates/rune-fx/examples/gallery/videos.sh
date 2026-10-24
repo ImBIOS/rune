@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Render PNG sequences for a few effects and encode them to MP4 into demo/fx (run via HiveMind).
+# Render PNG sequences for a few effects and encode them to MP4 into demo/fx (run on a build worker).
 set -euo pipefail
 export PATH=/opt/homebrew/bin:$PATH
 cd "${0:A:h}/../.."

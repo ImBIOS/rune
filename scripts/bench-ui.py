@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Repeatable offscreen workload. Build `--profile perf` with HiveMind first; time those binaries locally."""
+"""Repeatable offscreen workload. Build `--profile perf` on a build worker first; time those binaries locally."""
 import argparse
 import json
 import pathlib

@@ -1,6 +1,6 @@
 //! motion-lint JSONL traces, written from what was actually presented (post-snap, post-mask), with
 //! exact "this was animated on purpose" intent bits. Same format Scrawl writes
-//! (`scrawl/src/ui/motion.rs`) and `motion-lint analyze` reads (`motion-lint/src/analyze.ts`).
+//! and `motion-lint analyze` reads.
 
 use std::fmt::Write as _;
 use std::io::{self, Write};
@@ -85,7 +85,7 @@ impl TraceChannels {
     }
 }
 
-/// motion-lint element flag bits (`analyze.ts` `Flags`).
+/// motion-lint element flag bits (motion-lint's `Flags`).
 pub mod flags {
     pub const ANIMATED: u32 = 1;
     pub const ANCESTOR_ANIMATED: u32 = 2;
@@ -95,7 +95,7 @@ pub mod flags {
     pub const OCCLUDED: u32 = 32;
 }
 
-/// motion-lint intent classes (`analyze.ts` `Intent`): in flags at `<< 8` (own) and `<< 16`
+/// motion-lint intent classes (motion-lint's `Intent`): in flags at `<< 8` (own) and `<< 16`
 /// (ancestor), and in `ai` intent records.
 pub struct Intent;
 

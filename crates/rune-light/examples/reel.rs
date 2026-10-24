@@ -422,7 +422,7 @@ fn build(ui: &mut Ui, st: &St) {
         ui.text(tx + 28.0 - cw2 * 0.5, 94.0, "✓", 14.0, 700.0, oklch(0.25, 0.05, 70.0));
     }
     ui.text(tx + 54.0, 88.0, "Build passed", 13.0, 600.0, txt);
-    ui.text(tx + 54.0, 107.0, "hivemind · 1m 12s", 12.0, 400.0, txt2);
+    ui.text(tx + 54.0, 107.0, "ci · 1m 12s", 12.0, 400.0, txt2);
 }
 
 // Window placement on the 1280×800 pt canvas: a caption band sits below it.

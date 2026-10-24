@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run only inside HiveMind. A real one-line leaf edit, with source restored afterwards.
+"""Run only on a build worker. A real one-line leaf edit, with source restored afterwards.
 
 This times the edit loop's incremental release build, so unlike the runtime benches it does not use
 `--profile perf`.

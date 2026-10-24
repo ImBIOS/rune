@@ -1,5 +1,5 @@
 #!/bin/sh
-# Invoke through HiveMind on a worker. GPU is headless but still needs an adapter.
+# Invoke on a build worker through the build queue. GPU is headless but still needs an adapter.
 set -eu
 export RUSTC_WRAPPER=
 export RUSTFLAGS="${RUSTFLAGS:-} -C llvm-args=-fp-contract=off"

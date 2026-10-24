@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Run through HiveMind, never as a local Studio build.
+# Run through the build queue, never as a local build on the desk Mac.
 if [[ "${1:-all}" != build ]]; then
   cargo test -j 2 -p rune --features dev --lib dev
   cargo test -j 2 -p rune-dev-panel --features dev --test protocol --test app_spec_literal --test headless

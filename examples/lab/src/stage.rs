@@ -515,7 +515,7 @@ fn gi(s: &Lab, p: &P) -> Vec<El> {
     }
     v.push(circle([REC[0], REC[1], 50.0]).fill(oklch(0.27, 0.008, 265.0)).border(1.0, p.hair).mark(mk(p.sc, mat::DIAL, 0)));
     v.push(circle(REC).fill(oklch(0.66, 0.2, 25.0)).mark(mk(p.sc, mat::EMIT, node::REC)));
-    for (i, (t, sub)) in [("Agent finished", "Demos rendered"), ("Build passed", "hivemind · 1m 12s"), ("Review", "No blockers")].iter().enumerate() {
+    for (i, (t, sub)) in [("Agent finished", "Demos rendered"), ("Build passed", "ci · 1m 12s"), ("Review", "No blockers")].iter().enumerate() {
         let y = 80.0 + i as f32 * 110.0;
         v.push(card(Rect::new(560.0, y, 200.0, 96.0), 16.0));
         v.push(label(598.0, y + 18.0, t, 14.0, 600.0, p.txt));

@@ -1,4 +1,4 @@
-"""One native capsule still on Pro, while holding its shared GUI lock. Run via HiveMind."""
+"""One native capsule still on the build Mac, while holding its shared GUI lock. Run on a build worker."""
 import fcntl
 import json
 import os

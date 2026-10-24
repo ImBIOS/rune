@@ -1,4 +1,4 @@
-//! Kit's motion tokens, from `motion-presets/presets/kit-motion.json` (generated as
+//! The shared motion tokens, from the motion presets (generated as
 //! `presets/generated/kit_motion.rs`). Every spring is duration + bounce, bounce 0 by default.
 //!
 //! Plain names are the enter springs; `*_EXIT` the exit springs; [`pair`] holds both.
@@ -32,7 +32,7 @@ pub const POP_EXIT: Spring = Spring::new(0.2, 0.05);
 /// Slow reveals and wipes the eye should follow, never utility UI.
 pub const DRIFT: Spring = Spring::new(0.85, 0.0);
 pub const DRIFT_EXIT: Spring = Spring::new(0.6, 0.0);
-/// Explainer camera moves (kit-motion palette: 1.0–1.8 / 0).
+/// Explainer camera moves (motion palette: 1.0–1.8 / 0).
 pub const CAMERA: Spring = Spring::new(1.2, 0.0);
 
 // Old palette names (the JSON's `aka`).

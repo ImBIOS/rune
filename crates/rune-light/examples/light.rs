@@ -768,7 +768,7 @@ impl Demo for Emissive {
 
         // Right column: notifications with a small green status dot (emissive)
         let green = oklch(0.78, 0.17, 150.0);
-        for (i, (title, sub)) in [("Agent finished", "rune-light demos rendered"), ("Build passed", "hivemind · 1m 12s"), ("Review", "Argon: no blockers")].iter().enumerate() {
+        for (i, (title, sub)) in [("Agent finished", "rune-light demos rendered"), ("Build passed", "ci · 1m 12s"), ("Review", "Argon: no blockers")].iter().enumerate() {
             let y = 150.0 + i as f32 * 128.0;
             ui.rect(900.0, y, 300.0, 108.0, 16.0, card, Some((hair, 1.0)), raise);
             ui.text(940.0, y + 20.0, title, 14.0, 600.0, txt);
