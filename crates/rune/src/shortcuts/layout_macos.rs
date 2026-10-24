@@ -23,7 +23,8 @@ impl Drop for Source {
     fn drop(&mut self) { unsafe { CFRelease(self.0) }; }
 }
 
-pub(super) fn label(key: u32) -> Option<String> {
+/// The label for `key` pressed with Carbon `modifiers` (`cmdKey`, `shiftKey`, ...).
+pub(super) fn label(key: u32, modifiers: u32) -> Option<String> {
     // AppKit also calls TIS. A private mutex cannot serialize with it; stay on the
     // UI thread. Background/headless callers get the documented US fallback.
     if unsafe { pthread_main_np() } == 0 { return None; }
@@ -36,17 +37,33 @@ pub(super) fn label(key: u32) -> Option<String> {
         if data.is_null() { return None; }
         let layout = CFDataGetBytePtr(data);
         if layout.is_null() { return None; }
-        translate(layout.cast(), key)
+        chord_label(layout.cast(), key, modifiers)
     }
 }
 
+const CMD: u32 = 1 << 8;
+const CONTROL: u32 = 1 << 12;
+
+/// The character a menu shows for `key` in a chord with Carbon `modifiers`. Some input sources
+/// switch layout while a modifier is held ("Dvorak – QWERTY ⌘" is QWERTY under ⌘), so ⌘ and ⌃
+/// pick the layout's table. ⇧ and ⌥ don't: like an AppKit key equivalent, the label is the
+/// base key (⌥⌘K, not ⌥⌘˚). ⌃ tables usually hold control characters; those fall back to the
+/// table without ⌃, then the base table.
+///
 /// The layout must point to live TIS Unicode layout data, on the main thread.
-pub(super) unsafe fn translate(layout: *const c_void, key: u32) -> Option<String> {
+pub(super) unsafe fn chord_label(layout: *const c_void, key: u32, modifiers: u32) -> Option<String> {
+    let modifiers = modifiers & (CMD | CONTROL);
+    [modifiers, modifiers & !CONTROL, 0].into_iter().find_map(|state| unsafe { translate(layout, key, state) })
+}
+
+/// The layout must point to live TIS Unicode layout data, on the main thread.
+pub(super) unsafe fn translate(layout: *const c_void, key: u32, modifiers: u32) -> Option<String> {
     let mut chars = [0u16; 16];
     let mut length = 0;
     let mut dead = 0;
-    // kUCKeyActionDisplay, no modifiers, kUCKeyTranslateNoDeadKeysMask.
-    let status = unsafe { UCKeyTranslate(layout, key as u16, 3, 0, LMGetKbdType() as u32,
+    // kUCKeyActionDisplay, kUCKeyTranslateNoDeadKeysMask. UCKeyTranslate takes Carbon
+    // modifiers shifted down a byte.
+    let status = unsafe { UCKeyTranslate(layout, key as u16, 3, (modifiers >> 8) & 0xff, LMGetKbdType() as u32,
         1, &mut dead, chars.len() as u32, &mut length, chars.as_mut_ptr()) };
     if status != 0 || length == 0 || length as usize > chars.len() { return None; }
     let label = String::from_utf16(&chars[..length as usize]).ok()?;

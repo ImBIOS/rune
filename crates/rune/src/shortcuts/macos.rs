@@ -93,7 +93,7 @@ const CMD: u32 = 1 << 8;
 const SHIFT_KEY: u32 = 1 << 9;
 const OPTION: u32 = 1 << 11;
 const CONTROL: u32 = 1 << 12;
-fn carbon_mods(shortcut: &Shortcut) -> u32 {
+pub(super) fn carbon_mods(shortcut: &Shortcut) -> u32 {
     [(SUPER, CMD), (SHIFT, SHIFT_KEY), (ALT, OPTION), (CTRL, CONTROL)].into_iter()
         .filter(|(bit, _)| shortcut.mods & bit != 0).fold(0, |mods, (_, carbon)| mods | carbon)
 }

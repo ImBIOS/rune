@@ -54,9 +54,11 @@ impl Shortcut {
 
     pub(super) fn key_name(&self) -> &'static str { name(self.key).expect("validated physical shortcut key") }
 
-    /// Human-facing keycaps. macOS translates the physical key using the current keyboard
-    /// layout on the UI thread; elsewhere (or when layout data is unavailable) these
-    /// are US labels. Persist Display/FromStr, not these labels.
+    /// Human-facing keycaps, ending in the key: a capital letter or symbol ("K", "/"), or a
+    /// name ("Space", "F5"; glyphs such as ↩ ⇥ ⎋ ⌫ on macOS). macOS translates the physical key
+    /// using the current keyboard layout on the UI thread, under the chord's ⌘ and ⌃ (some
+    /// layouts change while they're held); elsewhere (or when layout data is unavailable)
+    /// these are US labels. Persist Display/FromStr, not these labels.
     pub fn keycaps(&self) -> Vec<String> {
         let mut labels = modifier_keycaps(self.modifiers());
         labels.push(self.key_label());
@@ -65,10 +67,11 @@ impl Shortcut {
 
     fn key_label(&self) -> String {
         let name = self.key_name();
-        if let Some(label) = named_label(name) { return label.into(); }
+        if let Some(label) = named_label(name) { return label; }
         #[cfg(target_os = "macos")]
-        if let Some(label) = super::macos::keycode(name).and_then(super::layout_macos::label) { return label; }
-        us_label(name).into()
+        if let Some(label) = super::macos::keycode(name)
+            .and_then(|key| super::layout_macos::label(key, super::macos::carbon_mods(self))) { return capital(label); }
+        capital(us_label(name).into())
     }
 }
 
@@ -84,14 +87,25 @@ pub fn modifier_keycaps(mods: crate::Mods) -> Vec<String> {
     labels
 }
 
-fn named_label(name: &str) -> Option<&str> {
+fn named_label(name: &str) -> Option<String> {
+    let mac = cfg!(target_os = "macos");
     Some(match name {
-        "escape" => "Esc", "enter" => "Return", "space" => "Space", "tab" => "Tab", "backspace" => "⌫",
-        "delete" => "Delete", "insert" => "Insert", "home" => "Home", "end" => "End", "pageup" => "Page Up", "pagedown" => "Page Down",
+        "escape" => if mac { "⎋" } else { "Esc" }, "enter" => if mac { "↩" } else { "Return" },
+        "space" => "Space", "tab" => if mac { "⇥" } else { "Tab" }, "backspace" => "⌫",
+        "delete" => if mac { "⌦" } else { "Delete" }, "insert" => "Insert",
+        "home" => if mac { "↖" } else { "Home" }, "end" => if mac { "↘" } else { "End" },
+        "pageup" => if mac { "⇞" } else { "Page Up" }, "pagedown" => if mac { "⇟" } else { "Page Down" },
         "left" => "←", "right" => "→", "up" => "↑", "down" => "↓",
-        n if n.starts_with('f') && n.len() > 1 => n,
+        n if n.starts_with('f') && n.len() > 1 => return Some(n.to_uppercase()),
         _ => return None,
-    })
+    }.into())
+}
+/// "k" draws as "K", as on a keycap. A character without a single capital ("ß") stays.
+fn capital(label: String) -> String {
+    let mut chars = label.chars();
+    let (Some(c), None) = (chars.next(), chars.next()) else { return label };
+    let mut upper = c.to_uppercase();
+    match (upper.next(), upper.next()) { (Some(u), None) => u.to_string(), _ => label }
 }
 fn us_label(name: &str) -> &str {
     match name { "minus" => "-", "equal" => "=", "comma" => ",", "period" => ".", "slash" => "/", "semicolon" => ";", "quote" => "'",
@@ -109,5 +123,17 @@ mod tests {
             assert_eq!(shortcut.physical_key(), key);
         }
         assert!(Shortcut::from_physical_key(PhysicalKeyCode::ShiftLeft, crate::Mods::default()).is_err());
+    }
+
+    #[test]
+    fn keycaps_capitalize_characters_and_name_keys() {
+        let key = |s: &str| s.parse::<Shortcut>().unwrap().keycaps().pop().unwrap();
+        assert_eq!(key("ctrl+space"), "Space");
+        assert_eq!(key("ctrl+f5"), "F5");
+        assert_eq!(key("ctrl+left"), "←");
+        assert_eq!(key("ctrl+enter"), if cfg!(target_os = "macos") { "↩" } else { "Return" });
+        assert_eq!(capital("k".into()), "K");
+        assert_eq!(capital("ß".into()), "ß");
+        assert_eq!(capital("/".into()), "/");
     }
 }

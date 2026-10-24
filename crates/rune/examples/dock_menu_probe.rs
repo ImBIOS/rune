@@ -39,7 +39,7 @@ mod mac {
             // Cua sends physical US keys. Resolve the current layout's Q without
             // switching the user's input source (Pro may be running Dvorak).
             let quit_key = ('a'..='z').find(|key| {
-                key.to_string().parse::<rune::Shortcut>().unwrap().keycaps().last().is_some_and(|label| label == "q")
+                key.to_string().parse::<rune::Shortcut>().unwrap().keycaps().last().is_some_and(|label| label == "Q")
             }).expect("current layout must have Q on a letter key for this probe");
             println!("QUIT_KEY {quit_key}");
             line("STATUS");

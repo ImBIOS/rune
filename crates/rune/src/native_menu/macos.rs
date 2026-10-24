@@ -176,7 +176,8 @@ fn key_equivalent(shortcut: &crate::Shortcut) -> String {
         ArrowUp => 0xf700, ArrowDown => 0xf701, ArrowLeft => 0xf702, ArrowRight => 0xf703,
         Insert => 0xf727, Delete => 0xf728, Home => 0xf729, End => 0xf72b, PageUp => 0xf72c, PageDown => 0xf72d,
         key if (F1..=F24).contains(&key) => 0xf704 + key as u32 - F1 as u32,
-        _ => return shortcut.keycaps().pop().unwrap_or_default(),
+        // AppKit reads a capital as ⇧; the mask already carries it.
+        _ => return shortcut.keycaps().pop().unwrap_or_default().to_lowercase(),
     };
     char::from_u32(scalar).unwrap().to_string()
 }

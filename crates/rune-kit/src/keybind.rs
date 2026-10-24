@@ -1,4 +1,5 @@
-//! Keybind (`@opencode/ui` data-display/keybind): small keycaps, upper-cased.
+//! Keybind (`@opencode/ui` data-display/keybind): small keycaps. A single character is
+//! upper-cased ("k" draws K); names such as `Shortcut::keycaps`'s "Space" draw as given.
 
 use rune::{El, TextStyle, row, text};
 
@@ -43,8 +44,12 @@ impl Keybind {
                     .center()
                     .radius(2.0)
                     .fill(fill)
-                    .child(text(key.to_uppercase()).font(font).color(ink))
+                    .child(text(keycap(key)).font(font).color(ink))
             },
         ))
     }
+}
+
+fn keycap(key: String) -> String {
+    if key.chars().count() == 1 { key.to_uppercase() } else { key }
 }

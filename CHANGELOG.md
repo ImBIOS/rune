@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Shortcut labels follow layouts that change under ⌘ (macOS).** `Shortcut::keycaps` (the
+  recorder, its error text and native menu key equivalents) now reads the key's character
+  under the chord's ⌘ and ⌃, so on "Dvorak – QWERTY ⌘" ⌘ plus the US-K key shows ⌘K, not ⌘T,
+  and menu items fire on the key they show. ⇧ and ⌥ still show the base key (⌥⌘K, not ⌥⌘˚),
+  as AppKit does. The key keycap is now a capital ("K", was "k"), F-keys read "F5", and on
+  macOS named keys use menu glyphs: ↩ ⇥ ⎋ ⌫ ⌦ ↖ ↘ ⇞ ⇟ (Space stays "Space"). `Keybind`
+  upper-cases only single characters, so "Space" no longer draws "SPACE".
 - **Native pop-up and context menus.** `tx.popup_menu(PopupMenu, anchor, on_pick)` opens an
   `NSMenu` over an element key (a picker's selected item sits over the element, as SwiftUI's
   menu-style `Picker` does) or at a `PointerPress`. `on_pick` gets the picked id after the menu
