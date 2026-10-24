@@ -909,6 +909,9 @@ $S --native --trace run.jsonl --frames 240  # native submission timestamps, then
   most, at `bottom-left` (default), `bottom`, `bottom-right`, `top-left`, `top` or `top-right`.
   `--pointer` adds a ripple at each press. A separate runtime draws both after the app, so they
   appear in `--video`, `--out`, `--snap` and strips but never in `--tree` or `--trace`.
+- **Rounded panels**: `el().clip_rounded(radius)` clips an element and its descendants to a
+  rounded rectangle, so a recording of a view meant for a rounded window can round it in the
+  frame the way the window would.
 - **Marks**: `{"t": 3.2, "type": "mark", "name": "end"}` names a time and does nothing else.
   `--at mark:end`, `--at mark:end+0.5` and `--start mark:intro-0.2` use a mark's time, and
   `--duration auto` (the default with `--video`) ends at the `end` mark, or one second after the
