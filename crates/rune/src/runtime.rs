@@ -218,6 +218,8 @@ pub(crate) struct Node {
     lead: Option<(Spring, Spring)>,
     width_leads: bool,
     transition: Option<Transition>,
+    /// `El::matched` id, with the element's own (not inherited) layout spring.
+    matched: Option<(Rc<str>, Option<Spring>)>,
     scroll: Option<ScrollSpec>,
     on_at_bottom: Option<crate::el::AtBottomFn>,
     on_layout: Option<crate::el::LayoutFn>,
@@ -334,6 +336,8 @@ struct Inh {
     blur: f32,
     /// Vertical offset in points from scroll viewports and growth rows above.
     dy: f32,
+    /// Horizontal offset in points: a matched flight centring its scaled children.
+    dx: f32,
     mark: u32,
     /// The nearest hover group's hover amount (0–1), for `group_*` styles.
     group: f32,
@@ -343,7 +347,7 @@ impl Default for Inh {
     fn default() -> Self {
         Inh { opacity: 1.0, paint_opacity: 1.0, clip: NO_CLIP, fade: [0.0; 4], fade_origin: NO_CLIP,
             paint_clip: NO_CLIP, paint_fade: [0.0; 4], paint_fade_origin: NO_CLIP, rounded: None,
-            scale: 1.0, anchor: [0.0; 2], blur: 0.0, dy: 0.0, mark: 0, group: 0.0 }
+            scale: 1.0, anchor: [0.0; 2], blur: 0.0, dy: 0.0, dx: 0.0, mark: 0, group: 0.0 }
     }
 }
 
@@ -457,8 +461,17 @@ pub struct Runtime<S: 'static> {
     glyph_scratch: Vec<GlyphQuad>,
     deco_scratch: Vec<Deco>,
     inh_scratch: Vec<Inh>,
-    /// Only nonempty when retained exit nodes make storage order differ from subtree order.
+    /// Only nonempty when retained exit nodes or matched flights make storage order differ
+    /// from paint order.
     layer_paint_order: Vec<usize>,
+    /// The last commit's `El::matched` ids, one present element each (the last in tree order).
+    matched: Vec<(Rc<str>, NodeId)>,
+    /// Elements flying from a matched one, with their scene target. They paint last.
+    flying: Vec<(NodeId, MRect)>,
+    /// `inh_scratch` and `row_dy` index `nodes`: no commit since the last build.
+    built: bool,
+    #[cfg(debug_assertions)]
+    matched_warned: HashSet<Rc<str>>,
     layer_scratch: Vec<(usize, usize, usize)>,
     /// Sideways scroll of focused single-line fields, in points, keyed by node path.
     input_scroll: HashMap<String, f32>,
@@ -663,6 +676,11 @@ impl<S: 'static> Runtime<S> {
             deco_scratch: Vec::new(),
             inh_scratch: Vec::new(),
             layer_paint_order: Vec::new(),
+            matched: Vec::new(),
+            flying: Vec::new(),
+            built: false,
+            #[cfg(debug_assertions)]
+            matched_warned: HashSet::new(),
             layer_scratch: Vec::new(),
             input_scroll: HashMap::new(),
             dissolve_scratch: Vec::new(),
@@ -1261,6 +1279,13 @@ impl<S: 'static> Runtime<S> {
         if !out.exited.is_empty() {
             self.prune_exited();
         }
+        if !self.flying.is_empty() {
+            let store = self.scene.store();
+            let before = self.flying.len();
+            // Screen travel ends once it lands and no ancestor still moves.
+            self.flying.retain(|(id, _)| store.has(*id, prop::TRAVEL));
+            if self.flying.len() != before { self.update_layer_paint_order(); }
+        }
         animating |= self.step_growth(step as f32);
         animating |= self.step_scroll(step as f32);
         self.report_at_bottom();
@@ -1297,9 +1322,10 @@ impl<S: 'static> Runtime<S> {
         }
         self.virtuals.retain(|path, _| self.nodes.iter().any(|n| n.path == *path));
         self.refresh_modal_index();
-        if !self.layer_paint_order.is_empty() { self.update_layer_paint_order(); }
+        if !self.layer_paint_order.is_empty() || !self.flying.is_empty() { self.update_layer_paint_order(); }
     }
 
+    /// Subtree (preorder) paint order, then each flying element's subtree on top.
     fn update_layer_paint_order(&mut self) {
         let n = self.nodes.len();
         let mut first = vec![n; n + 1];
@@ -1308,16 +1334,23 @@ impl<S: 'static> Runtime<S> {
             let parent = self.nodes[i].parent.map_or(0, |p| p + 1);
             next[i] = first[parent]; first[parent] = i;
         }
+        let mut lifted: Vec<usize> = self.flying.iter().filter_map(|(id, _)| self.node_index.get(id).copied()).collect();
+        lifted.sort_unstable();
         self.layer_paint_order.clear();
-        let mut i = first[0];
-        while i < n {
-            self.layer_paint_order.push(i);
-            if first[i + 1] < n { i = first[i + 1]; continue; }
-            while next[i] == n {
-                let Some(parent) = self.nodes[i].parent else { i = n; break };
-                i = parent;
+        for top in std::iter::once(None).chain(lifted.iter().map(|&r| Some(r))) {
+            let mut i = top.unwrap_or(first[0]);
+            while i < n {
+                // A flying subtree paints in its own pass, not where the tree reaches it.
+                if top == Some(i) || lifted.binary_search(&i).is_err() {
+                    self.layer_paint_order.push(i);
+                    if first[i + 1] < n { i = first[i + 1]; continue; }
+                }
+                loop {
+                    if top == Some(i) { i = n; break; }
+                    if next[i] < n { i = next[i]; break; }
+                    match self.nodes[i].parent { Some(parent) => i = parent, None => { i = n; break; } }
+                }
             }
-            if i < n { i = next[i]; }
         }
         if self.layer_paint_order.iter().copied().eq(0..n) { self.layer_paint_order.clear(); }
     }
@@ -1648,6 +1681,62 @@ impl<S: 'static> Runtime<S> {
 
     fn is_exiting(&self, id: NodeId) -> bool {
         matches!(self.scene.phase(id), Some(PresencePhase::Exiting { .. }))
+    }
+
+    /// Shared-element motion (`El::matched`): each of the last commit's matched elements that
+    /// left the tree hands its geometry, radius, fill and opacity to the element with its id that
+    /// just mounted. Costs nothing without matched elements; else O(matched), plus one pass over
+    /// the old nodes when a pair matches.
+    fn match_elements(&mut self, nodes: &[Node], arrivals: Vec<(Rc<str>, usize, bool)>, tx: &Tx, instant: bool) {
+        let mut by_id: HashMap<Rc<str>, (usize, bool)> = HashMap::with_capacity(arrivals.len());
+        for (key, i, arriving) in arrivals {
+            if by_id.insert(key.clone(), (i, arriving)).is_some() { self.warn_duplicate_match(&key); }
+        }
+        let mut current: Vec<(Rc<str>, NodeId)> = by_id.iter().map(|(key, &(i, _))| (key.clone(), nodes[i].id)).collect();
+        current.sort_unstable_by_key(|(key, _)| by_id[key].0);
+        let old = std::mem::replace(&mut self.matched, current);
+        if instant || tx.settle { return; }
+        let mut old_index: Option<HashMap<NodeId, usize>> = None;
+        for (key, from) in old {
+            let Some(&(i, true)) = by_id.get(&key) else { continue };
+            let to = nodes[i].id;
+            if from == to || self.node_index.contains_key(&from) || !self.scene.contains(from) || self.is_exiting(from) { continue; }
+            let index = old_index.get_or_insert_with(|| self.nodes.iter().enumerate().map(|(k, n)| (n.id, k)).collect());
+            let Some(&from_i) = index.get(&from) else { continue };
+            // Scroll offsets live outside the scene: start where `from` was seen on screen.
+            let mut offset = rune_motion::Vec2::ZERO;
+            if self.built {
+                let shift = |k: usize| self.inh_scratch.get(k).map_or([0.0; 2], |h| [h.dx, h.dy]);
+                let source = self.nodes[from_i].parent.map_or([0.0; 2], shift);
+                let row = self.row_dy.get(from_i).copied().unwrap_or(0.0);
+                let dest = std::iter::successors(nodes[i].parent, |&p| nodes[p].parent)
+                    .find_map(|p| index.get(&nodes[p].id).copied()).map_or([0.0; 2], shift);
+                offset = rune_motion::Vec2::new(source[0] - dest[0], source[1] + row - dest[1]);
+            }
+            let spring = tx.motion.or(nodes[i].matched.as_ref().and_then(|m| m.1)).unwrap_or(motion::REFLOW);
+            let fill = self.color(from, P_FILL, self.nodes[from_i].vis.fill);
+            let opacity = self.scene.get(from, prop::OPACITY);
+            self.scene.match_geometry_offset(from, to, offset, LayoutAnim::new(spring).screen());
+            if self.reduced_motion { continue; }
+            let live = |p: crate::live::Property| nodes[i].live.iter().any(|b| b.property == p);
+            if fill != nodes[i].vis.fill && !live(crate::live::Property::Fill) {
+                self.scene.set(to, P_FILL, fill);
+                self.scene.animate(to, P_FILL, nodes[i].vis.fill, spring);
+            }
+            if let Some(o) = opacity.filter(|&o| o != nodes[i].vis.opacity) && !live(crate::live::Property::Opacity) {
+                self.scene.set(to, prop::OPACITY, o);
+                self.scene.animate(to, prop::OPACITY, nodes[i].vis.opacity, spring);
+            }
+            self.flying.retain(|f| f.0 != to);
+            self.flying.push((to, nodes[i].local));
+        }
+    }
+
+    fn warn_duplicate_match(&mut self, key: &Rc<str>) {
+        let message = || format!("duplicate matched id {key:?}: the last element in tree order is matched; give each element its own id");
+        if let Some(warnings) = self.key_warnings.as_mut() { warnings.push(message()); }
+        #[cfg(debug_assertions)]
+        if self.matched_warned.insert(key.clone()) { eprintln!("rune: {}", message()); }
     }
 
     fn set_or_anim<T: rune_motion::Animatable>(&mut self, id: NodeId, p: Prop<T>, val: T, s: Spring, instant: bool) {
@@ -2175,6 +2264,8 @@ impl<S: 'static> Runtime<S> {
             self.stacks.insert(cid, stack);
         }
 
+        // `El::matched` elements of this tree: (id, index, newly mounted).
+        let mut arrivals: Vec<(Rc<str>, usize, bool)> = Vec::new();
         for i in 0..nodes.len() {
             let id = nodes[i].id;
             let parent_id = nodes[i].parent.map(|p| nodes[p].id);
@@ -2191,6 +2282,9 @@ impl<S: 'static> Runtime<S> {
 
             let was_present = self.scene.contains(id);
             let was_exiting = self.is_exiting(id);
+            if let Some((key, _)) = &nodes[i].matched {
+                arrivals.push((key.clone(), i, !was_present || was_exiting));
+            }
             if !was_present || was_exiting {
                 // Presence belongs to the transition. Layout tuning must not replace
                 // the caller's enter/exit springs when this node mounts or revives.
@@ -2232,7 +2326,16 @@ impl<S: 'static> Runtime<S> {
                     }
                     la
                 };
-                if !nodes[i].live.iter().any(|b| b.property == crate::live::Property::Rect) {
+                let flying = if self.flying.is_empty() || layout_anim == LayoutAnim::INSTANT { None }
+                    else { self.flying.iter().position(|f| f.0 == id) };
+                if let Some(f) = flying {
+                    // Keep a matched flight on its one screen path; retarget it only if its
+                    // layout moved, so an unrelated commit doesn't re-time it.
+                    if self.flying[f].1 != nodes[i].local {
+                        self.flying[f].1 = nodes[i].local;
+                        self.scene.set_frame(id, scene_rect, layout_anim.screen());
+                    }
+                } else if !nodes[i].live.iter().any(|b| b.property == crate::live::Property::Rect) {
                     self.scene.set_frame(id, scene_rect, layout_anim);
                 }
                 self.set_or_anim(id, prop::RADIUS, Corners(nodes[i].vis.radius), spring_l, instant);
@@ -2329,6 +2432,10 @@ impl<S: 'static> Runtime<S> {
             }
         }
 
+        if !arrivals.is_empty() || !self.matched.is_empty() {
+            self.match_elements(&nodes, arrivals, tx, instant);
+        }
+
         // Scroll viewports: a new sticky viewport opens at the end.
         for n in &nodes {
             if let Some(sp) = n.scroll {
@@ -2406,8 +2513,11 @@ impl<S: 'static> Runtime<S> {
 
         self.nodes = nodes;
         self.has_dissolve = self.nodes.iter().any(|n| n.vis.blend == crate::render::Blend::PlusLighter);
-        if self.nodes.len() > present_len { self.update_layer_paint_order(); }
+        // A flight that left the tree (or rides an exiting ancestor) exits in place.
+        self.flying.retain(|(id, _)| self.node_index.get(id).is_some_and(|&i| i < present_len));
+        if self.nodes.len() > present_len || !self.flying.is_empty() { self.update_layer_paint_order(); }
         else { self.layer_paint_order.clear(); }
+        self.built = false;
         self.virtuals.retain(|path, _| self.nodes.iter().any(|n| n.path == *path));
         self.subscribe_live();
         self.refresh_modal_index();
@@ -3129,7 +3239,9 @@ impl<S: 'static> Runtime<S> {
 
         // Exiting descendants are appended to storage. Bring them back into their subtree
         // only when isolation requires it; the ordinary painter stream stays byte-identical.
-        let tree_order = self.layer_paint_order.windows(2).any(|pair| {
+        // Matched flights paint last (see `update_layer_paint_order`).
+        let flying = !self.flying.is_empty();
+        let tree_order = (flying && !self.layer_paint_order.is_empty()) || self.layer_paint_order.windows(2).any(|pair| {
             let n = &self.nodes[pair[0]];
             self.nodes[pair[1]].parent == Some(pair[0]) && ((self.has_dissolve && self.dissolve_scratch[pair[0]]) || n.vis.clip_radius.is_some() || n.vis.group_opacity.is_some()
                 || fades(n.looping)
@@ -3138,6 +3250,13 @@ impl<S: 'static> Runtime<S> {
         for paint_index in 0..n_nodes {
             let i = if tree_order { self.layer_paint_order[paint_index] } else { paint_index };
             let n = &self.nodes[i];
+            // A flight paints outside every ancestor's layer, above the whole window.
+            let lift = flying && self.flying.iter().any(|f| f.0 == n.id);
+            if lift {
+                while let Some((_, start, surface_start)) = layers.pop() {
+                    crate::render::end_layer(&mut self.instances, &mut self.surfaces, &mut self.marks, start, surface_start);
+                }
+            }
             while let Some(&(ancestor, start, surface_start)) = layers.last() {
                 let mut parent = n.parent;
                 while parent.is_some_and(|p| p != ancestor) { parent = self.nodes[parent.unwrap()].parent; }
@@ -3148,6 +3267,13 @@ impl<S: 'static> Runtime<S> {
             let Some(p) = self.scene.presented(n.id) else { continue };
             let mut pinh = n.parent.map_or(Inh::default(), |pr| self.inh_scratch[pr]);
             pinh.dy += self.row_dy[i];
+            if lift {
+                // Keep the destination's clips (consumed ones included) and offsets. Drop its
+                // ancestors' opacity, scale and blur: an entering parent's fade or scale would
+                // otherwise hide the flight or jump it off the rect it was seen at.
+                pinh = Inh { opacity: 1.0, paint_opacity: 1.0, paint_clip: pinh.clip, paint_fade: pinh.fade,
+                    paint_fade_origin: pinh.fade_origin, rounded: None, scale: 1.0, anchor: [0.0; 2], blur: 0.0, ..pinh };
+            }
             let mark = if n.vis.mark != 0 { n.vis.mark } else { pinh.mark };
             let mut own = p.opacity;
             if let Some([rest, hov]) = n.vis.group_opacity {
@@ -3177,7 +3303,7 @@ impl<S: 'static> Runtime<S> {
                 .filter(|_| matches!(n.looping.map(|l| l.kind), Some(rune_motion::LoopKind::Sequence(_))))
                 .and_then(|l| l.pose(now, self.reduced_motion)).map_or(1.0, |p| p.scale);
             let (sc, anchor) = if (own_sc - 1.0).abs() > 1e-5 {
-                (pinh.scale * own_sc, [p.anchor.x, p.anchor.y + pinh.dy])
+                (pinh.scale * own_sc, [p.anchor.x + pinh.dx, p.anchor.y + pinh.dy])
             } else {
                 (pinh.scale, pinh.anchor)
             };
@@ -3185,6 +3311,8 @@ impl<S: 'static> Runtime<S> {
             let filter_margin = blur * s * 3.0;
 
             let mut raw_edges = p.rect.edges();
+            raw_edges[0] += pinh.dx;
+            raw_edges[2] += pinh.dx;
             raw_edges[1] += pinh.dy;
             raw_edges[3] += pinh.dy;
             if self.row_h[i] >= 0.0 {
@@ -3208,6 +3336,13 @@ impl<S: 'static> Runtime<S> {
                     rect_pt[axis + 2] = rect_pt[axis] + target;
                 }
             }
+            // A matched flight scales its laid-out content uniformly to cover the moving rect,
+            // centred: `k` and the centring offset in points.
+            let cover = if lift && n.local.w > 0.0 && n.local.h > 0.0 {
+                let (pw, ph) = (rect_pt[2] - rect_pt[0], rect_pt[3] - rect_pt[1]);
+                let k = (pw / n.local.w).max(ph / n.local.h).max(1e-3);
+                Some((k, [(pw - n.local.w * k) * 0.5, (ph - n.local.h * k) * 0.5]))
+            } else { None };
             let r = rect_pt.map(snap_px);
             let (w, h) = ((r[2] - r[0]).max(0.0), (r[3] - r[1]).max(0.0));
             self.drawn[i] = [r[0] / s, r[1] / s, w / s, h / s];
@@ -3574,9 +3709,16 @@ impl<S: 'static> Runtime<S> {
                     }
                 } else if let (Some(spec), Some(layout)) = (&n.text, &n.text_layout) {
                     let color = text_tint(self.color(n.id, P_TEXT, spec.color));
-                    let ins = n.inset.map(|v| v * sc * s);
-                    let (x0, x1) = (r[0] + ins[0], r[2] - ins[2]);
-                    let mut origin = [text_x(spec, x0, x1, layout.full_width().ceil()), r[1] + ins[1]];
+                    // A matched flight places its own text in its scaled content box. Glyphs keep
+                    // their rest size, as under any ancestor scale, so a label doesn't pop at the swap.
+                    let (zk, zr) = match cover {
+                        Some((k, c)) => (k, [r[0] + c[0] * s, r[1] + c[1] * s,
+                            r[0] + (c[0] + n.local.w * k) * s, r[1] + (c[1] + n.local.h * k) * s]),
+                        None => (sc, r),
+                    };
+                    let ins = n.inset.map(|v| v * zk * s);
+                    let (x0, x1) = (zr[0] + ins[0], zr[2] - ins[2]);
+                    let mut origin = [text_x(spec, x0, x1, layout.full_width().ceil()), zr[1] + ins[1]];
                     let mut clip = clip;
                     if let Some(inp) = n.input.as_ref().filter(|i| i.single_line) {
                         let scroll = single_line_scroll(&mut self.input_scroll, &n.path, inp, &spec.content, layout, s, x1 - x0);
@@ -3745,10 +3887,20 @@ impl<S: 'static> Runtime<S> {
                 dy -= grid((offset - origin) as f32, s);
                 if let Some(st) = self.scrolls.get_mut(&self.nodes[i].id) { st.held = held; }
             }
+            let (mut scale, mut anchor, mut dx) = (sc, anchor, pinh.dx);
+            if let Some((k, c)) = cover {
+                // Children ride this node's presented origin at their rest layout. Scale them by
+                // `k` about the drawn origin, centred, and clip them to the moving rect.
+                clip = intersect(clip, r);
+                hit_clip = intersect(hit_clip, r);
+                dx = rect_pt[0] - p.rect.x + c[0] / k;
+                dy += rect_pt[1] - p.rect.y - pinh.dy + c[1] / k;
+                (scale, anchor) = (k, [rect_pt[0], rect_pt[1]]);
+            }
             inherit_fade(&mut hit_fade, &mut hit_origin, fade_origin, fade);
             self.inh_scratch[i] = Inh { opacity: effective_opacity, paint_opacity: o,
                 clip: intersect(hit_clip, clip), fade: hit_fade, fade_origin: hit_origin,
-                paint_clip: clip, paint_fade: fade, paint_fade_origin: fade_origin, rounded, scale: sc, anchor, blur, dy, mark, group };
+                paint_clip: clip, paint_fade: fade, paint_fade_origin: fade_origin, rounded, scale, anchor, blur, dy, dx, mark, group };
             if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())
                 && !self.subtree_exiting(i)
                 && self.allowed(i) && effective_opacity > 0.001 && visible
@@ -3772,6 +3924,7 @@ impl<S: 'static> Runtime<S> {
             crate::render::end_layer(&mut self.instances, &mut self.surfaces, &mut self.marks, start, surface_start);
         }
         self.layer_scratch = layers;
+        self.built = true;
         if self.track_marks { self.marks.resize(self.instances.len(), 0); }
         self.stats.glyphs = glyph_count;
         self.ambient = ambient;
@@ -4230,7 +4383,8 @@ fn flatten(
 ) -> taffy::NodeId {
     let seg = el.key.clone().unwrap_or_else(|| format!("#{index}"));
     let path = if parent_path.is_empty() { seg } else { format!("{parent_path}/{seg}") };
-    let motion = el.motion.unwrap_or(motion);
+    let own_motion = el.motion;
+    let motion = own_motion.unwrap_or(motion);
     let me = nodes.len();
     let parent_is_stack = parent.is_some_and(|p| nodes[p].growth.is_some());
     let virtual_mount = el.virtual_mount;
@@ -4265,6 +4419,7 @@ fn flatten(
         lead,
         width_leads,
         transition,
+        matched,
         scroll,
         on_at_bottom,
         on_layout,
@@ -4318,6 +4473,7 @@ fn flatten(
         lead,
         width_leads,
         transition,
+        matched: matched.map(|id| (id, own_motion)),
         scroll,
         on_at_bottom,
         on_layout,
@@ -4758,6 +4914,21 @@ mod tests {
         assert_eq!(rt.key_warnings.as_ref().unwrap().len(), 1);
         assert_eq!(rt.nodes.len(), 1);
         assert_eq!(rt.nodes[0].local.w, 100.0);
+    }
+
+    #[test]
+    fn a_duplicate_matched_id_matches_the_last_one_and_warns() {
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            col().child(el().key("a").matched("tile").size(10.0, 10.0))
+                .child(el().key("b").matched("tile").size(10.0, 10.0))
+        }
+        let mut rt = Runtime::new((), view, (100.0, 100.0), Env::new(true, 1.0));
+        rt.key_warnings = Some(Vec::new());
+        rt.frame(0.0);
+        let warnings = rt.key_warnings.as_ref().unwrap();
+        assert!(warnings.len() == 1 && warnings[0].contains("duplicate matched id \"tile\""), "{warnings:?}");
+        let b = rt.nodes.iter().find(|n| n.key.as_deref() == Some("b")).unwrap().id;
+        assert_eq!(rt.matched.iter().map(|m| m.1).collect::<Vec<_>>(), [b]);
     }
 
     #[test]

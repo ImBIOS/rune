@@ -543,6 +543,7 @@ pub struct El {
     pub(crate) lead: Option<(Spring, Spring)>,
     pub(crate) width_leads: bool,
     pub(crate) transition: Option<Transition>,
+    pub(crate) matched: Option<Rc<str>>,
     pub(crate) scroll: Option<ScrollSpec>,
     pub(crate) on_at_bottom: Option<AtBottomFn>,
     pub(crate) on_layout: Option<LayoutFn>,
@@ -594,6 +595,7 @@ fn base(dir: FlexDirection) -> El {
         lead: None,
         width_leads: false,
         transition: None,
+        matched: None,
         scroll: None,
         on_at_bottom: None,
         on_layout: None,
@@ -1657,6 +1659,24 @@ impl El {
     /// also slides and fades it in. Rows a virtual list remounts on scroll never replay it.
     pub fn transition(mut self, t: Transition) -> Self {
         self.transition = Some(t);
+        self
+    }
+    /// Shared-element motion (SwiftUI `matchedGeometryEffect`, Motion `layoutId`). When an
+    /// element with `id` leaves the tree in the same commit that another with `id` mounts
+    /// somewhere else, the new one starts exactly where the old one was seen, with its
+    /// velocity, corner radius, fill and opacity, and springs to its own layout on one straight
+    /// path. The old one disappears at once; neither plays its transition.
+    ///
+    /// Ids are per window. While it flies the element draws above the whole window at its own
+    /// opacity, inside its destination's clips (a scroll viewport included), and its children
+    /// keep their final layout, scaled uniformly to cover the moving frame and clipped to it,
+    /// so a `pixels_fit(.., SurfaceFit::Fill)` picture zooms without distorting. Text moves
+    /// with its box but keeps its size, as it does under any scale. The spring is
+    /// `tok::motion::REFLOW` unless the commit's `Tx::motion` or this element's
+    /// [`motion`](Self::motion) sets one. Under Reduce Motion the two crossfade in place.
+    /// When two elements share an id in one tree, the last one in tree order is matched.
+    pub fn matched(mut self, id: impl Into<String>) -> Self {
+        self.matched = Some(Rc::from(id.into()));
         self
     }
 

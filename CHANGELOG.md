@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::matched(id)` adds shared-element motion** (SwiftUI `matchedGeometryEffect`, Motion
+  `layoutId`). When an element with an id leaves and another with that id mounts elsewhere in
+  the same commit, the new one springs from the old one's presented rect, radius, fill and
+  opacity to its own layout (`REFLOW` by default), painting above the window with its
+  children scaled to cover the moving frame. `rune_motion::Scene::match_geometry_offset`
+  starts a match from a rect offset outside the scene (a scroll). Apps that don't call
+  `matched` draw the same pixels.
 - **Elements can be dragged out to other apps (macOS).** `El::drag_out(|s| Some(DragItem))`
   starts a system drag once the pointer passes `DRAG_THRESHOLD`, carrying file URLs, PNG data
   or text to Finder, System Settings and other apps; `El::on_drag_end` reports a `DragOutcome`.
