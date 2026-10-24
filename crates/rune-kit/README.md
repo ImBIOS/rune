@@ -81,7 +81,7 @@ Popover, TextInput and virtual rows. Options carry stable ids, labels, details a
 state; `.current(..).on_choose(..)` binds selection. It filters case-insensitively, loops
 ArrowUp/Down and Ctrl-N/P across enabled rows, scrolls keyboard choices into view, and ignores
 selection keys during IME composition. Escape closes it. The contract follows OpenCode's
-`components/list` and `use-filtered-list` (origin/dev, fetched 2026-10-22); Rune's fuzzy ranking
+`components/list` and `use-filtered-list`; Rune's fuzzy ranking
 is its own, not bit-identical to fuzzysort. `rune-combobox--searchable` is its 200-row gallery
 scene; there is no matching combobox Storybook story to diff.
 
@@ -98,7 +98,7 @@ Progress, ProgressCircle, SegmentedControl.
 ## Checking against Storybook
 
 ```sh
-OPENCODE=~/dev/projects/anomalyco/opencode scripts/kit-diff.py [--only button,switch] [--schemes light]
+OPENCODE=<path to an opencode checkout> scripts/kit-diff.py [--only button,switch] [--schemes light]
 ```
 
 Renders every gallery scene and the Storybook story of the same id at 2× (Chromium from the
@@ -114,39 +114,13 @@ OPENCODE=… node themes/opencode/tools/theme.mjs > themes/opencode/assets/theme
 python3 themes/opencode/tools/icons.py $OPENCODE/packages/ui/src/icons > themes/opencode/src/icons.rs
 ```
 
-## Results (2026-10-22, lavapipe vs headless Chromium 1.60, 2×)
+## Comparison (lavapipe vs headless Chromium, 2×)
 
-88 stories × light/dark, mean similarity **99.63** (`demo/kit/report.md` has every render).
 Side by sides (web | Rune | amplified difference): [button states](../../demo/kit/side-ui-button--all-states-light.png),
 [rich menu](../../demo/kit/side-ui-menu--rich-dark.png), [grouped select](../../demo/kit/side-ui-select--grouped-light.png),
 [text inputs](../../demo/kit/side-ui-text-input--states-light.png), [toast](../../demo/kit/side-ui-toast--all-examples-light.png),
-[card](../../demo/kit/side-components-card--warning-dark.png).
-
-| Component | Stories | Mean | Worst |
-|---|---:|---:|---:|
-| Button | 5 | 98.96 | 97.65 (variants: width drift wraps a row) |
-| IconButton | 4 | 99.78 | 99.45 |
-| Switch | 4 | 99.76 | 99.54 |
-| Checkbox | 4 | 99.83 | 99.71 |
-| Radio | 3 | 99.53 | 99.38 |
-| TextInput | 6 | 99.71 | 99.49 |
-| Textarea | 4 | 99.52 | 99.29 |
-| Field | 4 | 99.81 | 99.78 |
-| Select | 5 | 99.65 | 99.49 |
-| Popover | 2 | 98.93 | 98.87 (web focuses the close button) |
-| Menu | 6 | 99.50 | 98.52 |
-| Tooltip | 4 | 99.84 | 99.73 |
-| HoverCard | 1 | 99.42 | 99.36 |
-| Toast | 1 | 99.21 | 99.10 |
-| Card | 5 | 99.50 | 99.41 |
-| List | 7 | 99.83 | 99.74 |
-| Accordion | 3 | 99.49 | 99.04 |
-| Collapsible | 2 | 99.72 | 99.69 |
-| Badge | 5 | 99.70 | 99.52 |
-| Keybind | 4 | 99.79 | 99.56 |
-| Spinner / Loader | 4 | 99.90 | 99.75 |
-| Progress | 3 | 99.62 | 99.36 |
-| SegmentedControl | 2 | 99.76 | 99.69 |
+[card](../../demo/kit/side-components-card--warning-dark.png). Run `scripts/kit-diff.py` for
+current per-story scores.
 
 Known differences, and why:
 

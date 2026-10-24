@@ -1,7 +1,7 @@
-# rune (first slice)
+# rune
 
-The first runnable piece of Rune: enough framework to draw a small Settings window
-(`examples/settings`) entirely with Rune's own code.
+Rune's core crate: views, layout, animation, rendering, text and the native shell.
+`examples/settings` draws a small Settings window entirely with Rune's own code.
 
 ![dark](../../demo/settings-dark.png)
 
@@ -13,7 +13,7 @@ The first runnable piece of Rune: enough framework to draw a small Settings wind
   re-runs, and the diff retargets property tracks. Hover and press only retarget tracks; they never
   re-run the view.
 - **Tokens** (`tok.rs`): colours in OKLCH (dark and light themes, six accents), plus space, radius, type
-  and Kit's motion palette (snappy .25/0, default .3/0, calm .4/0, a .2/0 lead, a .15 fade).
+  and the motion palette (snappy .25/0, default .3/0, calm .4/0, a .2/0 lead, a .15 fade).
 - **Layout**: Taffy 0.15 at the target state. Text sizes round up to whole device pixels, so layout
   stays on the pixel grid. Keyed nodes retain Taffy's constraint cache between commits; only changed
   styles, children or text measurements dirty it. Text colour does not invalidate measurement.
@@ -87,7 +87,13 @@ The first runnable piece of Rune: enough framework to draw a small Settings wind
   while visible through ancestor clips. Removal uses the existing spring presence fade. Reduced
   motion holds the first pose; time scale 0 pauses. Occluded windows stop drawing.
 
-### Added for the OpenCode example (M3)
+Commit layout runs through a `Measurement` capability that can access text/layout
+caches and virtual geometry, but cannot access the scene, animation tracks, draw
+instances, or mutable app state. It finishes all measurement retries before
+returning an owned `Measured` result. Scene mutation consumes that result; motion
+policy changes are applied in the same mutation phase.
+
+### Rich text, scrolling and app hooks
 
 ![session](../../demo/opencode/session-bottom.png)
 
@@ -133,7 +139,7 @@ The first runnable piece of Rune: enough framework to draw a small Settings wind
   requests a shell clipboard write. Requests follow handler order; headless runs never write the
   system clipboard.
 - **Text input** (`text_input(&edit, style)`, `edit.rs`): caret, selection, word and line motion,
-  select all, copy, cut and paste, and IME preedit through winit (no undo yet). `.on_edit(..)` binds the `TextEdit` in app
+  select all, copy, cut and paste, undo, and IME preedit through winit (see [Text fields](#text-fields)). `.on_edit(..)` binds the `TextEdit` in app
   state and `.on_submit(..)` runs on Enter.
 - **App hooks**: `AppSpec::setup` (once, with a `Waker` for background threads), `poll(state, clock,
   tx)` before every frame, `on_key`, and `extra_args()` for the app's own flags.
@@ -185,11 +191,6 @@ app.run();
   `with_activation_token`. An open Wayland window is activated with `xdg_activation_v1` bound on
   winit's own display (`activation.rs`), since winit 0.30 can't. Without a token Wayland can only
   request attention (most compositors mark it urgent); X11, macOS and Windows use `focus_window`.
-- Verified in a headless sway 1.12 (`focus_on_window_activation focus`) on Linux: windowless start,
-  open, a forwarded token focusing an open window and a recreated one (without a token: urgent
-  only), close by handle, compositor and `Tx::close_window`, `Tx::quit`, state kept across
-  reopen, `release_gpu_when_closed`; and under Xwayland, hide/show and `focus_window`. Not yet run on KWin, Mutter, niri,
-  macOS or Windows.
 - Headless tooling runs ignore window requests and apply updates before each frame.
 - `AppHandle::is_visible()` reports whether the window is on screen; `AppHandle::window_error()`
   says why it couldn't be created (no display, no GPU adapter or device). A failed creation is
@@ -198,7 +199,7 @@ app.run();
   icons or native styles through `WindowHandle::with_raw_handle`.
 - `AppSpec::min_size` sets the smallest window (None keeps 420×400).
 - `AppHandle::set_dock_icon(bool)` switches macOS between the regular and accessory activation
-  policies at runtime (observed on macOS 26.2 with `lsappinfo`: UIElement ↔ Foreground).
+  policies at runtime.
 - Edge overlays (HUDs): see `App::overlay` below.
 
 ### Compact tray-controlled windows
@@ -234,7 +235,7 @@ close/recreation. On Wayland, use `activate(token)` for authorized focus; tokenl
 also restores them. On macOS, no-focus show uses `orderFrontRegardless`, rather than winit's
 `makeKeyAndOrderFront`. Window-manager focus policy still applies. `WindowHandle`
 also provides show/hide/focus, placement and topmost control on the event thread.
-Rooms owns its tray; Rune supplies the window lifetime and handles.
+The app owns its tray; Rune supplies the window lifetime and handles.
 `RunOptions::accessory` applies the macOS process policy before the event loop is
 created: no Dock icon/default menu and no activation at launch. Other platforms
 ignore it; `run_windows` keeps its regular-launch default.
@@ -327,8 +328,8 @@ and the family name participates in the layout cache key.
 Optical sizing defaults to each run's point size, including rich spans with a
 different size. An explicit `opsz` variation wins over the default; `.optical_size`
 wins over both. `.optical_sizing(OpticalSize::FontDefault)` restores Parley's old
-selection. Fonts without an `opsz` axis are unaffected. The measured SF change is
-documented in [Batch C text results](../../research/24-live-text-and-font-settings.md).
+selection. The point-size default tracks CoreText more closely in measured SF samples.
+Fonts without an `opsz` axis are unaffected.
 
 `.truncate_fade()` shrinks a single-line label and fades its trailing 1.5 em edge
 only when text overflows (`.truncate_fade_width(em)` sets another width). It keeps the full string and paints no ellipsis. For
@@ -365,6 +366,82 @@ renderer, not a dedicated late-uniform/render-thread path. `Live::new` requires
 lock-free 128-bit atomics on the host CPU. Publication allocates nothing; platform
 wake callbacks are not hard-real-time guarantees.
 
+For a countdown, keep a `Tween` in app state and bind it through a live property:
+
+```rust,ignore
+let bar = rune::Tween::linear(
+    [0.0, 0.0, 272.0, 4.0], [0.0, 0.0, 0.0, 4.0],
+    std::time::Duration::from_secs(30),
+);
+// In the view:
+el().size(272.0, 4.0).live_rect(&s.bar)
+```
+
+The track starts on first attachment to a runtime and uses elapsed real time
+(virtual time in headless runs). Rebuilds retain progress; replacing the `Tween`
+starts a new track. It needs no app ticks, layout, shaping, or timer wakes.
+Hidden windows stop sampling and resume at the elapsed value. At the endpoint
+the renderer sleeps. This is a timed value, including under reduced motion;
+it does not use the decorative motion spring or jump to the end on settle.
+The shared handle retains each runtime's start across unmount/remount (including
+virtual-list culling). Replacing the handle, rather than remounting the view,
+starts a new countdown.
+
+## Text fields
+
+`TextEdit::focused` is maintained by the runtime. Set it once to request focus, then
+let the runtime clear it when another field takes focus; do not force it on every view rebuild.
+
+Text fields support Cmd/Ctrl-Z and Cmd/Ctrl-Shift-Z. Consecutive typing is one undo
+group; selection changes, navigation, paste, cut and IME commits separate groups.
+Undo restores selection direction as well as text. History shares storage with view
+snapshots and retains at most 128 edits / 1 MiB of text (oversized edits drop history).
+Call `TextEdit::clear()` after submission to clear history while retaining focus;
+call `break_history_group()` when setting a selection from custom pointer handling.
+
+Use `TextEdit::new("").secure()` or `text_input(&edit, style).secure()` for passwords;
+kit's `TextInput::secure()` passes it through. Each Unicode scalar displays as one
+bullet, with model-byte selection and caret positions mapped to those bullets.
+Secure fields have no undo, copy, cut, IME composition, or inspector text. macOS
+Secure Event Input is held only while their native window is focused and visible.
+Model buffers and history wipe on drop; secure edits wipe replaced allocations.
+Use `replace_text(..)` or `clear()` for programmatic replacement. Direct assignment
+to the public `text: String` field bypasses replacement wiping.
+
+`tx.copy_secret(text, Duration::from_secs(30))` writes with the platform's clipboard
+history-exclusion marker and expires on Rune's shared clipboard worker. Expiry
+compares the current text and, on macOS/Windows, the clipboard revision; copying
+something else cancels the old expiry. Linux's portable API exposes no revision,
+so it compares text. Clipboard managers must honor the platform marker themselves.
+
+Put `.on_paste(|s: &mut State, text: &str, tx| { ... })` on the view root (or modal
+root) to handle Cmd/Ctrl-V when no field is focused. `tx.request_paste()` requests
+the same asynchronous clipboard read from a button, including in overlays.
+Focused editors take precedence; late reads are discarded if the target changed.
+Headless `--script` `paste` supplies text directly through the same routing and
+records `paste window` or `paste field` in `--trace`, without recording contents.
+
+`tx.fly_text("prompt", "sent-text")` hands a visible plain-text field to a newly
+mounted, uniquely keyed text node. The runtime captures its visible glyphs before
+committing and measures the destination after growth/scroll each frame. One 0.32 s
+growth-spring progress drives the screen-space handoff; reduced motion uses a
+150 ms crossfade. `settle()` lands it immediately. Neither view code nor handlers
+measure presentation geometry.
+
+### File dialogs
+
+Enable Rune's `native-file-dialog` feature and inject `FileDialogs::native()` in the shell.
+`dialogs.open(options).await` and `dialogs.save(options).await` return an optional path
+(None means cancelled). `FileDialogOptions` carries title, directory, suggested filename and
+`.filter("Audio", &["wav", "flac"])`. rfd handles Cocoa on macOS and the XDG portal on Linux;
+poll these futures on the app's async executor and wake Rune when the result arrives.
+Never block the window's main thread with `pollster::block_on` for a native dialog;
+Cocoa needs that thread's event loop to present and complete it.
+
+Headless fixtures inject `FileDialogs::scripted([ScriptedFileDialog { kind:
+FileDialogKind::Open, path: Some("/fixture/recording.wav".into()) }])`. Requests resolve
+without a window; wrong request order or exhausted fixtures return an error.
+
 ## Multiple windows and overlays
 
 `run_windows(|displays| Vec<WindowSpec<S>>)` creates independent retained trees on
@@ -394,8 +471,7 @@ one overlay per monitor, a shared remote cursor, a stroke and hit-test toggling.
 Monitor enumeration is a startup snapshot. Winit platform/window-manager support
 still governs transparency, placement and topmost behavior. Non-activating macOS
 `NSPanel`s, all-Spaces/fullscreen-space policy and status items need Rune's own Mac
-shell; they are not implemented here. Native window behavior remains untested on
-Studio; verification uses compilation and selected-window headless renders.
+shell; they are not implemented here.
 Unsupported transparency falls back to opaque rendering; unsupported click-through
 prints the platform error. Metal surfaces retain premultiplied colour for Core Animation.
 
@@ -438,6 +514,27 @@ on Linux a `.desktop` entry's `Icon=` from the hicolor theme (closest size at or
 scalable SVG) or `pixmaps`. Paths without an icon resolve to `Image::error`, so callers keep
 their own fallback. Keep the handle: the cache only shares live handles.
 
+### NativeSurface video
+
+`NativeSurface::new()` is a cloneable latest-wins frame slot. Bind it with
+`el().native_surface(&surface, SurfaceFit::Fit)` (or `Fill`), install the app's `Waker`,
+and push retained immutable CoreVideo buffers from a decoder thread. macOS uses
+CVMetalTextureCache and wgpu-hal Metal texture import without CPU pixel copies.
+BGRA and NV12 420v/420f are supported with BT.601/709 matrices and sRGB/709 transfer
+attachments. Pixel-matched video uses exact texel loads at Retina scale.
+
+Per-draw notifications carry source frame ID, CPU submit time, completion-observed time,
+and optional GPU render-pass timestamp queries. These are **not presented-frame timestamps**:
+true presentation feedback needs the planned own Mac shell with CAMetalLayer /
+CAMetalDisplayLink. wgpu-hal 30 does not expose its acquired drawable, and wgpu 30
+forbids mixing normal encoding with the raw command-buffer completed-handler escape
+hatch. Completion uses wgpu's per-submission callback/readback, serviced by a sleeping
+completion worker so the last frame reports even after the window goes idle.
+
+See [`examples/video-tiles`](../../examples/video-tiles/README.md) for the copyable
+producer/view boundary, portable byte source, headless benchmark, ownership contract,
+colour defaults and current limitations.
+
 ### Edge overlays (`App::overlay`, `overlay.rs`, `layer_shell.rs`)
 
 `app.overlay(OverlaySpec { name, size, edge, margin, align, inset, interactive, view }, state)
@@ -461,17 +558,10 @@ of the primary display, centred or `inset` points from a side. Clicks pass throu
 - Windows: a topmost tool window with `WS_EX_NOACTIVATE` (plus `WS_EX_TRANSPARENT|WS_EX_LAYERED`
   unless interactive), shown with `SW_SHOWNOACTIVATE`; a bottom overlay sits above the taskbar
   (`win32.rs`).
-- Observed in headless sway 1.12 on apollo: layer-shell placement (top, bottom, switching),
-  transparency, scale 2, show/hide/reshow with the app window open or closed, the focused
-  window keeping focus, and a `zwlr_virtual_pointer` click passing through a large overlay to
-  the button under it. Under Xwayland the same, plus an interactive corner capsule taking a
-  virtual-pointer click (once flaky: the first try lost the click to an enter/leave pair from the
-  new virtual device) while the app window kept focus, `set_align` and `resize`. macOS 26.2
-  (hailmary, screen at the login window): both panels at level 25 with the right bounds (top
-  centre; top right, then left and wider), hide, reshow and quit (CGWindowList); clicks, pixels
-  and non-activation not observed. Windows: `cargo xwin clippy` only.
+- Checked under headless sway (layer shell, and Xwayland for X11) and on macOS (panel level,
+  bounds, hide and reshow). Windows builds are checked with `cargo xwin clippy` only.
 - `Tx::copy` works in overlays (a meeting capsule's Copy button).
-- Not yet: interactive overlays on Wayland, hover in a non-key macOS panel (mouse-moved events
+- Unsupported: interactive overlays on Wayland, hover in a non-key macOS panel (mouse-moved events
   go to the key window), per-monitor placement.
 
 ### Compositor hook (lighting and effects)
@@ -518,13 +608,9 @@ paint in the built subtree, including fills, strokes, text, icons, images and na
 Call it after adding children. It neither changes inherited/hit-test opacity nor introduces
 layers. Rune-kit uses this for disabled controls; normal container `opacity` still isolates.
 
-The manual kit-gallery `disabled_controls_gpu_cost` benchmark combines radio, text-input and
-select state stories plus disabled segmented controls at 1024×640 pt, 2×. On M4 Pro/Metal,
-60 paired frames originally measured legacy/isolated median **0.927917/1.076041 ms** with
-seven targets (1,605,632 bytes). Disabled leaf styling now measures **0.948250 ms** median,
-**0.950583 ms** p95, with **zero targets/passes/allocations** (flat reference: 0.948333 ms).
-This measures the whole GPU frame, not CPU planning. Layer content caching is unnecessary
-for these controls; ordinary container opacity keeps its correct isolation semantics.
+The manual kit-gallery `disabled_controls_gpu_cost` benchmark measures the whole GPU frame
+for disabled controls: leaf dimming allocates no layer targets or passes and matches a flat
+reference, where container opacity would cost one isolated target per control.
 
 Low-level compositors can use `Instance::begin_layer(bounds, clip, LayerSpec { opacity, ..Default::default() })` and
 `Instance::end_layer()`. Bounds are device-pixel `[x,y,w,h]`; include native surfaces and the full
@@ -599,7 +685,7 @@ keeps its own rounded rectangle, so nested masks do not move when rectangles int
 Use `el().clip_rounded(radius)` for the same mask in logical points on an element and its
 descendants. Ordinary paint clips directly; isolated subtrees clip after filtering. Hit tests
 remain rectangular, including visually clipped corners. The 128-byte instance stores radius
-in attribute 7 `fade[3]`. See [`perf/layer-filters.md`](../../perf/layer-filters.md).
+in attribute 7 `fade[3]`.
 
 For a known opaque neutral backdrop, use `theme::srgb_equivalent(white.alpha(authored_alpha), bg)`
 to match AppKit's sRGB source-over in Rune's linear renderer. Recompute from the current authored
@@ -609,43 +695,12 @@ unknown/translucent backdrops, group opacity and overlapping paints require diff
 
 ## Run
 
-### Linux system packages
-
-Linux builds link `libxkbcommon` (layer-shell and display-targeted overlays, since `a7f0f56`) and
-`libwayland-client` (`wayland-backend`'s `client_system`), so the development packages must be
-installed at build time, including in CI:
-
-- Debian/Ubuntu: `apt-get install libxkbcommon-dev libwayland-dev`
-- Fedora: `dnf install libxkbcommon-devel wayland-devel`
-- Arch: `pacman -S libxkbcommon wayland`
-
-### NativeSurface video
-
-`NativeSurface::new()` is a cloneable latest-wins frame slot. Bind it with
-`el().native_surface(&surface, SurfaceFit::Fit)` (or `Fill`), install the app's `Waker`,
-and push retained immutable CoreVideo buffers from a decoder thread. macOS uses
-CVMetalTextureCache and wgpu-hal Metal texture import without CPU pixel copies.
-BGRA and NV12 420v/420f are supported with BT.601/709 matrices and sRGB/709 transfer
-attachments. Pixel-matched video uses exact texel loads at Retina scale.
-
-Per-draw notifications carry source frame ID, CPU submit time, completion-observed time,
-and optional GPU render-pass timestamp queries. These are **not presented-frame timestamps**:
-true presentation feedback needs the planned own Mac shell with CAMetalLayer /
-CAMetalDisplayLink. wgpu-hal 30 does not expose its acquired drawable, and wgpu 30
-forbids mixing normal encoding with the raw command-buffer completed-handler escape
-hatch. Completion uses wgpu's per-submission callback/readback, serviced by a sleeping
-completion worker so the last frame reports even after the window goes idle.
-
-See [`examples/video-tiles`](../../examples/video-tiles/README.md) for the copyable
-producer/view boundary, portable byte source, headless benchmark, ownership contract,
-colour defaults and current limitations.
-
 ```sh
-hivemind run --kind cargo -- cargo build --release -p settings
-target/release/settings                       # the window (don't open it on Studio)
+cargo build --release -p settings
+target/release/settings                       # the window
 
-hivemind run --kind cargo -- cargo build --release -p opencode
-target/release/opencode                       # live, read-only, when 127.0.0.1:4096 answers
+cargo build --release -p opencode
+target/release/opencode                       # live, read-only, when an OpenCode server answers at 127.0.0.1:4096
 F=(--fixture examples/opencode/assets/fixture.json)
 target/release/opencode $F --scene streaming --snap out.png   # scenes: home session streaming draft sidebar-closed status
 target/release/opencode $F --script examples/opencode/scripts/switch.json --frames 540 --out frames/
@@ -655,7 +710,15 @@ The OpenCode example takes `--server URL`, `--session <id or title words>`, `--e
 `--no-stream` and `--reduced-motion`. It sends prompts only to a fixture's scripted reply, or to a
 non-default server with `--allow-send`.
 
-### Linux prerequisites
+### Linux
+
+Linux builds link `libxkbcommon` (layer-shell and display-targeted overlays) and
+`libwayland-client` (`wayland-backend`'s `client_system`), so the development packages must be
+installed at build time, including in CI:
+
+- Debian/Ubuntu: `apt-get install libxkbcommon-dev libwayland-dev`
+- Fedora: `dnf install libxkbcommon-devel wayland-devel`
+- Arch: `pacman -S libxkbcommon wayland`
 
 Windowed runs need the XKB X11 library, and GPU runs without a physical GPU
 need a software Vulkan driver. On stock Ubuntu 24.04 both are one install away:
@@ -666,9 +729,8 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json target/debug/settings
 ```
 
 Without `libxkbcommon-x11-0` every windowed example panics at startup with
-`Library libxkbcommon-x11.so could not be loaded` (verified on stock Ubuntu
-24.04; installing the package fixes it, and the app then runs cleanly under
-Xvfb). Headless `--snap` runs don't need a display or the XKB library.
+`Library libxkbcommon-x11.so could not be loaded`; installing the package fixes
+it, and the app then runs under Xvfb. Headless `--snap` runs don't need a display or the XKB library.
 
 ## Agent tooling (headless, no window, same renderer, fixed virtual clock)
 
@@ -690,10 +752,33 @@ $S --native --trace run.jsonl --frames 240  # native submission timestamps, then
 - **Timing**: every headless run prints per-frame CPU time (update, build and encode/submit, without
   readback).
 - **Startup**: `--first-pixels` emits a flushed marker after the first offscreen GPU readback.
-  Build `target/perf/settings` and `target/perf/opencode` with `--profile perf` (HiveMind
-  `--fetch target/perf/<name>`). Then `python3 scripts/bench-startup.py --out perf/startup` times
+  Build `target/perf/settings` and `target/perf/opencode` with `--profile perf`. Then `python3 scripts/bench-startup.py --out perf/startup` times
   fresh process launch to that marker (one warmup, seven runs), including loader, app state, GPU work and readback, excluding PNG encoding.
    This measures process-cold startup with warm OS/driver caches, not physical display presentation.
+- **Trace quality**: `python3 scripts/trace-quality.py run.jsonl` reports scene-edge error against
+  analytic samples, inherited spatial spring velocity error at retarget, CPU budget excess, and
+  virtual cadence. Growth/scroll are renderer-owned and excluded from the analytic edge metric;
+  virtual timestamps do not measure display hitches. Diagnostics are enabled only with `--trace`.
+  `--native --trace` records wall-clock CPU submission timestamps (not GPU completion or scanout).
+  In a window factory, `--window KEY` selects the traced window; otherwise the first is traced.
+  macOS windows and overlays acquire drawables on coalesced display-link ticks, stopping the
+  link while idle or hidden. `cargo run --profile perf -p rune --example pacing -- --native --trace
+  pacing.jsonl --frames 240` exercises spring retargets and hide/show; check it with
+  `python3 scripts/check-native-pacing.py pacing.jsonl` on a machine with a display.
+  Trees expose inherited `opacity`, `scale` and `blur` (logical points); traces keep opacity in
+  element rows and encode scale/blur as named scalar channels (`cm`/`c`/`cg`).
+- **Present times** (macOS windows): `--native --trace` frames also carry `target_ms`, the
+  display link's target for the frame, and `present_ms`, the drawable's Metal `presentedTime`
+  (when it reached the screen), both in ms on `t`'s clock. `present_dt_ms` is the gap since the
+  previous presented frame, written only when that frame asked for this one right away, so idle
+  time isn't counted.
+  `present_ms` is `null` when the system skipped the drawable and absent when no time arrived.
+  Lines are written once their present time arrives, two or three frames late. When the trace
+  ends, stderr gets a summary: present-interval p50/p95/max, intervals under 2 ms (frames
+  bunched onto the screen together) and over 1.5 refresh periods (missed refreshes), and the
+  lag from target to present. Overlays, other platforms and headless traces write no present
+  fields. Without `--trace` nothing changes. Capture on a display, not headless:
+  `cargo run --profile perf -p rune --example pacing -- --native --trace pacing.jsonl --frames 240`.
 
 ## Live Rust editing (desktop development)
 
@@ -713,15 +798,13 @@ shell compile once in the Rune library rather than in each changing executable.
 The explicit `HotFn` boundary still calls the app's typed view function. The headless
 PNG encoder uses its fastest lossless mode; normal snapshots keep their existing encoding.
 
-The launcher currently requires Kit's Studio/Pro fleet and HiveMind setup.
-On Studio the command runs the app and compiler together on Pro through HiveMind,
-relays source edits, and fetches each PNG and matching `.json` tree into this checkout.
-It never opens a Studio window. On Pro it takes a local HiveMind lease. Install
-**Dioxus CLI 0.7.10** at `~/.cargo/bin/dx` first (`RUNE_DX` overrides the path);
-the Homebrew/Deno command with the same name is unrelated. The first build is a full
+The launcher currently assumes the maintainers' remote build-worker setup: it runs
+the compiler and app together in one worker lease, relays source edits, and fetches
+each PNG and matching `.json` tree into this checkout. Install **Dioxus CLI 0.7.10**
+as `dx` in Cargo's bin directory first (`RUNE_DX` overrides the path); the
+Homebrew/Deno command with the same name is unrelated. The first build is a full
 development build; subsequent runs reuse `target/rune-dev/<example>`.
-Compiler artifacts live in `target/live-edit-build`. Worker leases are strictly pinned
-to Pro so a busy worker cannot spill the renderer onto Studio.
+Compiler artifacts live in `target/live-edit-build`.
 
 The `hot` feature is opt-in. Feature-off builds have no patch dependencies, connection,
 dispatch, generation checks or extra runtime fields. Goldens use feature-off builds.
@@ -775,103 +858,16 @@ a new `id`; the matching tree includes that ID:
 
 Each line above is a separate file replacement. `pause` freezes the virtual clock;
 `step` advances it explicitly. This lets an agent inspect an in-flight animation across
-patches. `{"id":5}` requests a fresh snapshot. See
-[`research/20-live-editing.md`](../../research/20-live-editing.md) for measurement results.
-The final shared-worker runs preserved exact spring positions/velocities over ten edits
-per example, with median save-to-GPU times of **8.195 s Settings / 21.169 s OpenCode**.
-The approximately one-second target is not yet met.
+patches. `{"id":5}` requests a fresh snapshot.
 
-Text fields support Cmd/Ctrl-Z and Cmd/Ctrl-Shift-Z. Consecutive typing is one undo
-group; selection changes, navigation, paste, cut and IME commits separate groups.
-Undo restores selection direction as well as text. History shares storage with view
-snapshots and retains at most 128 edits / 1 MiB of text (oversized edits drop history).
-Call `TextEdit::clear()` after submission to clear history while retaining focus;
-call `break_history_group()` when setting a selection from custom pointer handling.
+Over ten edits per example, spring positions and velocities stay exact. Median
+save-to-GPU time is about 8 s for Settings and 21 s for OpenCode, short of the
+one-second target.
 
-Use `TextEdit::new("").secure()` or `text_input(&edit, style).secure()` for passwords;
-kit's `TextInput::secure()` passes it through. Each Unicode scalar displays as one
-bullet, with model-byte selection and caret positions mapped to those bullets.
-Secure fields have no undo, copy, cut, IME composition, or inspector text. macOS
-Secure Event Input is held only while their native window is focused and visible.
-Model buffers and history wipe on drop; secure edits wipe replaced allocations.
-Use `replace_text(..)` or `clear()` for programmatic replacement. Direct assignment
-to the public `text: String` field bypasses replacement wiping.
+## Measured (Apple silicon, headless at 2×)
 
-`tx.copy_secret(text, Duration::from_secs(30))` writes with the platform's clipboard
-history-exclusion marker and expires on Rune's shared clipboard worker. Expiry
-compares the current text and, on macOS/Windows, the clipboard revision; copying
-something else cancels the old expiry. Linux's portable API exposes no revision,
-so it compares text. Clipboard managers must honor the platform marker themselves.
-
-Put `.on_paste(|s: &mut State, text: &str, tx| { ... })` on the view root (or modal
-root) to handle Cmd/Ctrl-V when no field is focused. `tx.request_paste()` requests
-the same asynchronous clipboard read from a button, including in overlays.
-Focused editors take precedence; late reads are discarded if the target changed.
-Headless `--script` `paste` supplies text directly through the same routing and
-records `paste window` or `paste field` in `--trace`, without recording contents.
-
-For a countdown, keep a `Tween` in app state and bind it through a live property:
-
-```rust,ignore
-let bar = rune::Tween::linear(
-    [0.0, 0.0, 272.0, 4.0], [0.0, 0.0, 0.0, 4.0],
-    std::time::Duration::from_secs(30),
-);
-// In the view:
-el().size(272.0, 4.0).live_rect(&s.bar)
-```
-
-The track starts on first attachment to a runtime and uses elapsed real time
-(virtual time in headless runs). Rebuilds retain progress; replacing the `Tween`
-starts a new track. It needs no app ticks, layout, shaping, or timer wakes.
-Hidden windows stop sampling and resume at the elapsed value. At the endpoint
-the renderer sleeps. This is a timed value, including under reduced motion;
-it does not use the decorative motion spring or jump to the end on settle.
-The shared handle retains each runtime's start across unmount/remount (including
-virtual-list culling). Replacing the handle, rather than remounting the view,
-starts a new countdown.
-
-`tx.fly_text("prompt", "sent-text")` hands a visible plain-text field to a newly
-mounted, uniquely keyed text node. The runtime captures its visible glyphs before
-committing and measures the destination after growth/scroll each frame. One 0.32 s
-growth-spring progress drives the screen-space handoff; reduced motion uses a
-150 ms crossfade. `settle()` lands it immediately. Neither view code nor handlers
-measure presentation geometry.
-
-Commit layout runs through a `Measurement` capability that can access text/layout
-caches and virtual geometry, but cannot access the scene, animation tracks, draw
-instances, or mutable app state. It finishes all measurement retries before
-returning an owned `Measured` result. Scene mutation consumes that result; motion
-policy changes are applied in the same mutation phase.
-- **Trace quality**: `python3 scripts/trace-quality.py run.jsonl` reports scene-edge error against
-  analytic samples, inherited spatial spring velocity error at retarget, CPU budget excess, and
-  virtual cadence. Growth/scroll are renderer-owned and excluded from the analytic edge metric;
-  virtual timestamps do not measure display hitches. Diagnostics are enabled only with `--trace`.
-  `--native --trace` records wall-clock CPU submission timestamps (not GPU completion or scanout).
-  In a window factory, `--window KEY` selects the traced window; otherwise the first is traced.
-  macOS windows and overlays acquire drawables on coalesced display-link ticks, stopping the
-  link while idle or hidden. `cargo run --profile perf -p rune --example pacing -- --native --trace
-  pacing.jsonl --frames 240` exercises spring retargets and hide/show; check it with
-  `python3 scripts/check-native-pacing.py pacing.jsonl` on a worker with a display.
-  Trees expose inherited `opacity`, `scale` and `blur` (logical points); traces keep opacity in
-  element rows and encode scale/blur as named scalar channels (`cm`/`c`/`cg`).
-- **Present times** (macOS windows): `--native --trace` frames also carry `target_ms`, the
-  display link's target for the frame, and `present_ms`, the drawable's Metal `presentedTime`
-  (when it reached the screen), both in ms on `t`'s clock. `present_dt_ms` is the gap since the
-  previous presented frame, written only when that frame asked for this one right away, so idle
-  time isn't counted.
-  `present_ms` is `null` when the system skipped the drawable and absent when no time arrived.
-  Lines are written once their present time arrives, two or three frames late. When the trace
-  ends, stderr gets a summary: present-interval p50/p95/max, intervals under 2 ms (frames
-  bunched onto the screen together) and over 1.5 refresh periods (missed refreshes), and the
-  lag from target to present. Overlays, other platforms and headless traces write no present
-  fields. Without `--trace` nothing changes. Capture on a display, not headless:
-  `cargo run --profile perf -p rune --example pacing -- --native --trace pacing.jsonl --frames 240`.
-
-## Measured (Studio, M-series, headless at 2×)
-
-- **Build**: incremental `-p settings` release build through HiveMind is about 20–60 s, sync included.
-  Release is incremental; `--profile perf` keeps the non-incremental build for frame timings.
+- **Build**: release builds are incremental; `--profile perf` keeps the non-incremental build
+  for frame timings.
 - **Binary**: 10.9 MB, or 9.3 MB stripped (1.2 MB of that is the three Inter faces).
 - **Frame CPU**: over 180 frames of `examples/settings/scripts/bench.json` (theme switch,
   toggles, accent, a drag, a click-to-seek), the mean is 0.13 ms and p95 0.29 ms. The first frame
@@ -882,36 +878,13 @@ policy changes are applied in the same mutation phase.
   about 1,100 instances in one draw call. At rest the window draws nothing. The first frame takes
   4–7 ms. motion-lint finds 0 candidates in the stream, switch, send and scroll traces.
 
-## Deviations from PLAN.md (fine for a prototype)
+## Differences from PLAN.md
 
 - wgpu (Metal backend) on macOS instead of the own thin HAL over raw Metal.
-- winit for the window instead of an own shell (no non-activating panels or glass underlays).
+- winit for the window instead of an own shell (edge overlays move winit's view into a
+  non-activating panel; no glass underlays).
 - Animation is evaluated on the main thread at frame time, not on a render thread. View functions still
   never run for animation: views produce targets, and tracks animate between them.
 - One pipeline with three fragment paths instead of separate quad and text pipelines (draw order is free).
 - No AccessKit or inspector socket (the CLI flags stand in). Scrolling is
   vertical only.
-- The windowed path is untested on Studio by rule. Only the headless path has been run.
-
-## Known gaps and next
-
-`TextEdit::focused` is maintained by the runtime. Set it once to request focus, then
-let the runtime clear it when another field takes focus; do not force it on every view rebuild.
-
-### File dialogs
-
-Enable Rune's `native-file-dialog` feature and inject `FileDialogs::native()` in the shell.
-`dialogs.open(options).await` and `dialogs.save(options).await` return an optional path
-(None means cancelled). `FileDialogOptions` carries title, directory, suggested filename and
-`.filter("Audio", &["wav", "flac"])`. rfd handles Cocoa on macOS and the XDG portal on Linux;
-poll these futures on the app's async executor and wake Rune when the result arrives.
-Never block the window's main thread with `pollster::block_on` for a native dialog;
-Cocoa needs that thread's event loop to present and complete it.
-
-Headless fixtures inject `FileDialogs::scripted([ScriptedFileDialog { kind:
-FileDialogKind::Open, path: Some("/fixture/recording.wav".into()) }])`. Requests resolve
-without a window; wrong request order or exhausted fixtures return an error.
-
-- Group opacity through offscreen layers.
-- Next: a render thread with a command channel, broader text shaping/optical-size parity (S5), Slug for
-  scaled text, the inspector socket, knobs/tunables, and the Scrawl pill (M1).
