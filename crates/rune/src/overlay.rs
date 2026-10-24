@@ -790,6 +790,30 @@ impl<T: 'static> Overlay<T> {
         self.apply_input();
         self.apply_cursor();
     }
+    /// A left press or release, at the panel's click point when it has one.
+    fn left_button(&mut self, pressed: bool, point: Option<(f32, f32)>) {
+        if pressed {
+            if let Some((x, y)) = point { self.rt.pointer_move(x, y); }
+            if let Some((x, y)) = self.rt.pointer() {
+                self.rt.pointer_down(x, y);
+                self.rt.physical_input(crate::PhysicalInput::Modifiers(crate::window::map_mods(self.mods)));
+            }
+        } else if let Some((x, y)) = point.or(self.rt.pointer()) {
+            // `pointer_up` moves to the release point itself, after disarming a drag-out: a
+            // release never starts an OS drag.
+            self.rt.pointer_up(x, y);
+        }
+        self.dirty = true;
+    }
+
+    /// Delivers drag ends a host reported. An `on_drag_start` may have hidden the overlay;
+    /// its `on_drag_end` still runs.
+    fn drag_ends_due(&mut self) {
+        if !self.rt.drag_ends_pending() { return; }
+        self.dirty = true;
+        if !self.visible { self.advance(); }
+    }
+
     fn publish_regions(&mut self) {
         let Some(live) = &self.live else { return };
         #[cfg(target_os = "macos")]
@@ -925,7 +949,8 @@ impl<T: 'static> Overlay<T> {
             self.dirty = true;
             if !self.visible { self.advance(); }
         }
-        if self.rt.live_pending() || self.rt.drag_ends_pending() { self.dirty = true; }
+        if self.rt.live_pending() { self.dirty = true; }
+        self.drag_ends_due();
         let requests = std::mem::take(&mut *self.shared.requests.lock().unwrap());
         if let Some(input) = requests.input { self.pending_input = Some(input); }
         self.apply_input();
@@ -1288,20 +1313,11 @@ impl<T: 'static> AnyHost for Overlay<T> {
                 #[cfg(target_os = "macos")]
                 let point = self.panel.as_ref().and_then(|p| p.take_click(state.is_pressed()));
                 if self.options.input.resolved(self.interactive) != OverlayInput::None {
-                    #[cfg(target_os = "macos")]
-                    if let Some(point) = point { self.rt.pointer_move(point.0, point.1); }
                     #[cfg(target_os = "windows")]
-                    if let Some(point) = self.native.as_ref().and_then(|p| p.take_click(state.is_pressed())) { self.rt.pointer_move(point.0, point.1); }
-                    if let Some((x, y)) = self.rt.pointer() {
-                        match state {
-                            winit::event::ElementState::Pressed => {
-                                self.rt.pointer_down(x, y);
-                                self.rt.physical_input(crate::PhysicalInput::Modifiers(crate::window::map_mods(self.mods)));
-                            }
-                            winit::event::ElementState::Released => self.rt.pointer_up(x, y),
-                        }
-                    }
-                    self.dirty = true;
+                    let point = self.native.as_ref().and_then(|p| p.take_click(state.is_pressed()));
+                    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                    let point: Option<(f32, f32)> = None;
+                    self.left_button(state.is_pressed(), point);
                 }
                 #[cfg(target_os = "macos")]
                 if !state.is_pressed() && let Some(panel) = &self.panel { panel.pointer_released(); }
@@ -2103,5 +2119,42 @@ mod tests {
             assert_eq!(&pixels[(15*32+31)*4..(15*32+32)*4], &[0; 4], "draw_ui preserves the transparent clear");
         }
         assert_eq!(*trace.borrow(), [8.0, 12.0, 20.0], "one observation per rendered frame, with current geometry");
+    }
+
+    #[derive(Default)]
+    struct Drags { starts: u32, ended: Vec<crate::DragOutcome> }
+
+    fn drag_overlay(name: &'static str) -> Overlay<Drags> {
+        fn view(_: &Drags, _: &mut Cx<Drags>) -> El {
+            crate::el().child(crate::el().key("tile").size(100.0, 40.0)
+                .drag_out(|_: &Drags| Some(crate::DragItem::new().text("tile")))
+                .on_drag_start(|s: &mut Drags, _| s.starts += 1)
+                .on_drag_end(|s: &mut Drags, outcome, _| s.ended.push(outcome)))
+        }
+        let app = AppSpec::new(name, (200.0, 50.0), Drags::default, view);
+        let (mut overlay, _) = Overlay::new(OverlaySpec::new(name, app.size, view).options(Default::default()), Drags::default(), &app);
+        overlay.rt.wall_start = None;
+        present(&mut overlay, Instant::now());
+        overlay
+    }
+
+    #[test]
+    fn a_release_past_the_threshold_does_not_start_a_drag_out() {
+        let mut overlay = drag_overlay("flick");
+        overlay.rt.pointer_move(10.0, 10.0);
+        overlay.left_button(true, None);
+        overlay.left_button(false, Some((60.0, 10.0)));
+        assert!(overlay.rt.take_drag_out().is_none());
+        present(&mut overlay, Instant::now());
+        assert_eq!(overlay.rt.state.starts, 0);
+    }
+
+    #[test]
+    fn a_hidden_overlay_still_runs_on_drag_end() {
+        let mut overlay = drag_overlay("hidden drag end");
+        assert!(!overlay.visible);
+        overlay.rt.drag_end_sink().borrow_mut().push(("#0/tile".into(), crate::DragOutcome::Copied));
+        overlay.drag_ends_due();
+        assert_eq!(overlay.rt.state.ended, [crate::DragOutcome::Copied]);
     }
 }
