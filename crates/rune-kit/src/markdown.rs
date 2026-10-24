@@ -496,9 +496,12 @@ pub struct MarkdownStyle {
     inline_code_scale: f32,
     inline_code_weight: f32,
     strong_weight: f32,
-    table_border: Color,
+    table_outline: Option<Color>,
+    table_rule: Color,
     table_head_fill: Color,
+    table_head_text: Color,
     table_min_column: f32,
+    table_tabular: bool,
     diff_add: Color,
     diff_remove: Color,
     diff_hunk: Color,
@@ -550,9 +553,12 @@ impl MarkdownStyle {
             inline_code_scale: 0.9,
             inline_code_weight: 400.0,
             strong_weight: 670.0,
-            table_border: c.border_muted,
+            table_outline: Some(c.border_muted),
+            table_rule: c.border_muted,
             table_head_fill: c.layer_01,
+            table_head_text: c.text_base,
             table_min_column: 120.0,
+            table_tabular: true,
             diff_add: tint(c.layer_01, c.success.icon, if k.dark { 0.11 } else { 0.14 }),
             diff_remove: tint(c.layer_01, c.danger.icon, if k.dark { 0.11 } else { 0.14 }),
             diff_hunk: c.text_muted,
@@ -645,8 +651,31 @@ impl MarkdownStyle {
     }
     /// A table's outline and row rules, and its header row's fill.
     pub fn table(mut self, border: Color, header_fill: Color) -> Self {
-        self.table_border = border;
+        self.table_outline = Some(border);
+        self.table_rule = border;
         self.table_head_fill = header_fill;
+        self
+    }
+    /// The rounded outline around a table, or `None` for none; a rule then runs under the
+    /// last row too, as on a web page.
+    pub fn table_outline(mut self, outline: Option<Color>) -> Self {
+        self.table_outline = outline;
+        self
+    }
+    /// The hairline under the header and between rows.
+    pub fn table_rules(mut self, c: Color) -> Self {
+        self.table_rule = c;
+        self
+    }
+    /// The header row's text colour (the body text colour by default).
+    pub fn table_header_text(mut self, c: Color) -> Self {
+        self.table_head_text = c;
+        self
+    }
+    /// Whether cells set figures at one width (OpenType `tnum`) so numbers line up down a
+    /// column. On by default; only digits change.
+    pub fn table_tabular_figures(mut self, on: bool) -> Self {
+        self.table_tabular = on;
         self
     }
     /// The narrowest a column shrinks to when its longest word is wider (120 points by default).

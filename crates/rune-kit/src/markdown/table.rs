@@ -28,9 +28,36 @@ pub(super) fn font_key(f: TextStyle) -> (u32, u32, u32, u32, String) {
     (f.size.to_bits(), f.weight.to_bits(), f.line_height.to_bits(), f.tracking.to_bits(), format!("{:?}{}{}{}", f.family, f.variations, f.features, f.italic))
 }
 
+/// `features` with tabular figures on, interned so the result is `'static` like a
+/// [`TextStyle`]'s features (a style has few distinct feature lists).
+fn with_tnum(features: &'static str) -> &'static str {
+    if features.is_empty() {
+        return "'tnum' 1";
+    }
+    if features.contains("tnum") {
+        return features;
+    }
+    static INTERNED: std::sync::Mutex<Vec<(&'static str, &'static str)>> = std::sync::Mutex::new(Vec::new());
+    let mut interned = INTERNED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(&(_, out)) = interned.iter().find(|(f, _)| *f == features) {
+        return out;
+    }
+    let out: &'static str = Box::leak(format!("{features}, 'tnum' 1").into_boxed_str());
+    interned.push((features, out));
+    out
+}
+
 impl Renderer {
     fn head_font(&self) -> TextStyle {
-        TextStyle { weight: self.s.strong_weight, ..self.s.body }
+        self.cell_font(TextStyle { weight: self.s.strong_weight, ..self.s.body })
+    }
+
+    fn body_font(&self) -> TextStyle {
+        self.cell_font(self.s.body)
+    }
+
+    fn cell_font(&self, f: TextStyle) -> TextStyle {
+        if self.s.table_tabular { TextStyle { features: with_tnum(f.features), ..f } } else { f }
     }
 
     pub(super) fn table(&self, t: &Table) -> El {
@@ -38,23 +65,23 @@ impl Renderer {
         let n = t.align.len().max(t.head.len()).max(1);
         let cols = self.columns(t, n);
         let total: f32 = cols.natural.iter().sum();
-        let mut frame = col()
-            .w_full()
-            .max_w(total + 1.0)
-            .padding(0.5)
-            .radius(6.0)
-            .border(0.5, s.table_border)
-            .clip_rounded(6.0)
-            .child(self.table_row(&t.head, t, &cols, self.head_font()).key("th").fill(s.table_head_fill));
+        let mut frame = col().w_full().max_w(total + 1.0).padding(0.5);
+        // Without an outline the corners stay square, so the rules run the full width.
+        if let Some(outline) = s.table_outline {
+            frame = frame.radius(6.0).border(0.5, outline).clip_rounded(6.0);
+        }
+        frame = frame.child(self.table_row(&t.head, t, &cols, self.head_font(), s.table_head_text).key("th").fill(s.table_head_fill));
+        let rule = |key: String| el().key(key).w_full().h(0.5).fill(s.table_rule);
         for (i, cells) in t.rows.iter().enumerate() {
-            frame = frame
-                .child(el().key(format!("s{i}")).w_full().h(0.5).fill(s.table_border))
-                .child(self.table_row(cells, t, &cols, s.body).key(format!("r{i}")));
+            frame = frame.child(rule(format!("s{i}"))).child(self.table_row(cells, t, &cols, self.body_font(), s.text).key(format!("r{i}")));
+        }
+        if s.table_outline.is_none() {
+            frame = frame.child(rule("s-end".into()));
         }
         frame
     }
 
-    fn table_row(&self, cells: &[Inline], t: &Table, cols: &Columns, font: TextStyle) -> El {
+    fn table_row(&self, cells: &[Inline], t: &Table, cols: &Columns, font: TextStyle, color: Color) -> El {
         let empty = Inline::default();
         let mut r = row().w_full();
         for (j, (natural, min)) in cols.natural.iter().zip(&cols.min).enumerate() {
@@ -62,7 +89,7 @@ impl Renderer {
             let align = t.align.get(j).copied().unwrap_or_default();
             let content = rich(inl.text.clone(), self.spans(inl, font.size))
                 .font(font)
-                .color(self.s.text)
+                .color(color)
                 .align(align)
                 .reveal(self.reveal)
                 .w_full();
@@ -77,7 +104,7 @@ impl Renderer {
 
     /// Column widths from the header and every finished row, cached by content and font.
     fn columns(&self, t: &Table, n: usize) -> Rc<Columns> {
-        let (head, body) = (self.head_font(), self.s.body);
+        let (head, body) = (self.head_font(), self.body_font());
         let settled = if t.open { t.rows.len().saturating_sub(1) } else { t.rows.len() };
         let rows = &t.rows[..settled];
         let cap = self.s.table_min_column;

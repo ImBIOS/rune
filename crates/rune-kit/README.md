@@ -104,9 +104,13 @@ source each time, and earlier blocks stay mounted.
 
 - **Tables** keep their header row, per-column alignment and inline formatting. Columns start
   at their content's width, so a table with room never wraps a cell, and shrink in proportion
-  to their text when it doesn't fit; text wraps inside a column down to its longest word (at
-  most `table_min_column`, 120 points), then the cell clips. There is no horizontal scroll. While a row is still arriving it doesn't resize
-  the columns, and a header line alone already shows as a table.
+  to their text when the table doesn't fit; text wraps inside a column down to its longest
+  word (at most `table_min_column`, 120 points), then the cell clips. There is no horizontal
+  scroll. While a row is still arriving it doesn't resize the columns, and a header line alone
+  already shows as a table. Cells set figures at one width (`tnum`) so numbers line up; turn
+  that off with `table_tabular_figures(false)`. `table(border, header_fill)` sets the outline,
+  row rules and header fill; `table_outline(None)`, `table_rules` and `table_header_text` give
+  the look of a web table (no outline, a rule under every row, a dimmer header).
 - **```` ```diff ````** (or `patch`) fences tint `+` and `-` lines edge to edge, and dim `@@`
   and file header lines. Set colours with `MarkdownStyle::diff` and `diff_hunk`.
 - **```` ```mermaid ````** (feature `mermaid`) draws flowcharts and sequence diagrams natively,

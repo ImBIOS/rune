@@ -295,6 +295,43 @@ fn a_table_narrower_than_its_container_never_wraps_a_cell() {
 }
 
 #[test]
+fn table_options_drop_the_outline_dim_the_header_and_line_up_figures() {
+    let [dim, rule] = [[0.5, 0.5, 0.5], [0.0, 0.0, 1.0]].map(|[r, g, b]| rune::Color { r, g, b, a: 1.0 });
+    fn styled(src: &String, _: &mut Cx<String>) -> El {
+        let [dim, rule] = [[0.5, 0.5, 0.5], [0.0, 0.0, 1.0]].map(|[r, g, b]| rune::Color { r, g, b, a: 1.0 });
+        col().w_full().child(Markdown::new(src.clone()).render(&MarkdownStyle::neutral(true).table_outline(None).table_rules(rule).table_header_text(dim)))
+    }
+    let src = "| Name | Count |\n|---|--:|\n| a | 1111 |\n| b | 0000 |\n";
+    let text_color = |rt: &Runtime<String>, t: &str| rt.elements().into_iter().find(|e| e.text.as_deref() == Some(t)).unwrap().text_color;
+    let frame_radius = |rt: &Runtime<String>| {
+        let all = rt.elements();
+        let th = all.iter().position(|e| e.key.as_deref() == Some("th")).unwrap();
+        all[all[th].parent.unwrap()].radius
+    };
+    let rt = laid_out(src);
+    assert!(!keys(&rt).iter().any(|k| k == "s-end"), "the outline closes the last row by default");
+    assert_eq!(frame_radius(&rt), 6.0);
+    assert_eq!(text_color(&rt, "Name"), text_color(&rt, "a"));
+
+    let mut rt = Runtime::new(src.to_owned(), styled, (480.0, 400.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    assert_eq!((by_key(&rt, "s0").fill, by_key(&rt, "s-end").fill), (rule, rule));
+    assert_eq!(frame_radius(&rt), 0.0, "square corners leave the last rule whole");
+    assert_eq!(text_color(&rt, "Name"), Some(dim));
+    assert_eq!(text_color(&rt, "a"), Some(Kit::neutral(true).c.text_base));
+
+    // Tabular figures (on by default) give every digit one width and leave other text alone.
+    for family in [rune::Family::Sans, rune::Family::Named("System Font")] {
+        let plain = rune::TextStyle::new(14.0, 400.0).family(family);
+        let tnum = plain.features("'tnum' 1");
+        let w = |t: &str, f| rune::text::measure(t, &[], f, None).0;
+        assert_eq!(w("1111", tnum), w("0000", tnum), "{family:?}");
+        assert_ne!(w("1111", plain), w("0000", plain), "{family:?}'s default figures are proportional");
+        assert_eq!(w("draft cursor, updatedAt", tnum), w("draft cursor, updatedAt", plain), "{family:?}");
+    }
+}
+
+#[test]
 fn diffs_tint_whole_lines_and_dim_hunk_headers() {
     let src = "```diff\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n```\n";
     assert!(matches!(&parse(src)[0], Block::Diff(d) if d.lines().count() == 4));

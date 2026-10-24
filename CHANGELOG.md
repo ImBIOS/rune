@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **rune-kit `Markdown` table cells use tabular figures** (`'tnum' 1`), so numbers line up down
+  a column; only digits change width. New `MarkdownStyle` builders: `table_outline(Option<Color>)`
+  (`None` draws no outline and adds a rule under the last row), `table_rules`,
+  `table_header_text` and `table_tabular_figures(bool)`. `table(border, header_fill)` still sets
+  the outline and the rules. The default look is otherwise unchanged.
 - **rune-kit `Markdown` tables no longer wrap a cell when the table has room.** Columns started
   at zero width and grew by their content width, but each column's padding was reserved
   first, so wide columns came up short and their longest cell wrapped. Columns now start at
