@@ -108,3 +108,7 @@ harness = false
 [[test]]
 name = "macos_drag_out"
 harness = false
+
+[[test]]
+name = "popup_menu_macos"
+harness = false
