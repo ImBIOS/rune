@@ -36,7 +36,7 @@ fn shade(in: VOut) -> vec4f {
     let c = ctx(i, in.px);
     let w = max(i.p0.w, c.aa * 0.7);
     let inten = i.p1.x;
-    let gr = i.p1.y;
+    let gr = max(i.p1.y, 1e-3);
     let gap = i.p2.y;
     let first = u32(i.xf.x);
     let n = u32(i.xf.y);

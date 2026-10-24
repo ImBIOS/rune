@@ -1158,11 +1158,13 @@ impl FxLayer {
                         if p.repeat <= 0.0 && (self.time < p.t0 || self.time > p.t0 + p.duration * 2.2) {
                             return None;
                         }
-                        i.aux = [from[0], from[1], dir[0], dir[1]];
+                        // A zero direction points right rather than nowhere (the shader would normalise it to NaN).
+                        let l = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt();
+                        let d = if l > 1e-6 { [dir[0] / l, dir[1] / l] } else { [1.0, 0.0] };
+                        i.aux = [from[0], from[1], d[0], d[1]];
                         i.p2[0] = travel;
-                        let l = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt().max(1e-6);
-                        let to = [from[0] + dir[0] / l * travel, from[1] + dir[1] / l * travel];
-                        let back = [from[0] - dir[0] / l * travel * 0.06, from[1] - dir[1] / l * travel * 0.06];
+                        let to = [from[0] + d[0] * travel, from[1] + d[1] * travel];
+                        let back = [from[0] - d[0] * travel * 0.06, from[1] - d[1] * travel * 0.06];
                         (3.0, Rect::from_points(back, to).inflate(p.head_radius * 10.0 + 30.0))
                     }
                     PulseStyle::Ripple { at } => {
