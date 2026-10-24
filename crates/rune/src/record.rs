@@ -156,6 +156,7 @@ impl Container {
             Container::Mp4 => &["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-vf", EVEN,
                 TAGS[0], TAGS[1], TAGS[2], TAGS[3], TAGS[4], TAGS[5], "-movflags", "+faststart"],
             Container::Mov => &["-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le",
+                "-vf", "scale=out_color_matrix=bt709:out_range=tv",
                 "-vendor", "apl0", TAGS[0], TAGS[1], TAGS[2], TAGS[3], TAGS[4], TAGS[5]],
             Container::Webm => &["-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0", "-row-mt", "1", "-deadline", "good",
                 "-cpu-used", "4", "-vf", EVEN, TAGS[0], TAGS[1], TAGS[2], TAGS[3], TAGS[4], TAGS[5]],
@@ -180,6 +181,18 @@ pub(crate) struct Writer {
     size: (u32, u32),
 }
 
+/// Reap the encoder even if spawning its writer thread fails or the thread panics.
+struct Encoder(std::process::Child);
+
+impl Drop for Encoder {
+    fn drop(&mut self) {
+        if !matches!(self.0.try_wait(), Ok(Some(_))) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
 impl Writer {
     pub(crate) fn new(size: (u32, u32)) -> Writer {
         Writer { video: None, pngs: None, size }
@@ -191,25 +204,33 @@ impl Writer {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        let mut child = std::process::Command::new("ffmpeg").args(&args)
+        let child = std::process::Command::new("ffmpeg").args(&args)
             .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null())
             .spawn().map_err(|e| match e.kind() {
                 std::io::ErrorKind::NotFound => "--video needs ffmpeg on PATH (macOS: brew install ffmpeg; Debian/Ubuntu: apt install ffmpeg)".to_owned(),
                 _ => format!("ffmpeg: {e}"),
             })?;
+        self.encode(child, path)
+    }
+
+    fn encode(&mut self, mut child: std::process::Child, path: &Path) -> Result<(), String> {
         let mut stdin = child.stdin.take().unwrap();
+        let mut child = Encoder(child);
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(DEPTH);
         let out = path.to_owned();
         let thread = std::thread::Builder::new().name("rune-video".into()).spawn(move || {
             let mut failed = None;
             for frame in rx {
-                if failed.is_none() && let Err(e) = stdin.write_all(&frame) { failed = Some(e); }
+                if let Err(e) = stdin.write_all(&frame) {
+                    failed = Some(e);
+                    break;
+                }
             }
             drop(stdin);
-            let status = child.wait().map_err(|e| format!("ffmpeg: {e}"))?;
+            let status = child.0.wait().map_err(|e| format!("ffmpeg: {e}"))?;
             match (status.success(), failed) {
                 (true, None) => Ok(()),
-                (_, Some(e)) => Err(format!("ffmpeg stopped reading frames ({e}); see its message above")),
+                (_, Some(e)) => Err(format!("ffmpeg stopped reading frames ({e}; {status}); see its message above")),
                 (false, None) => Err(format!("ffmpeg failed writing {} ({status})", out.display())),
             }
         }).map_err(|e| e.to_string())?;
@@ -219,12 +240,16 @@ impl Writer {
 
     pub(crate) fn has_video(&self) -> bool { self.video.is_some() }
 
-    pub(crate) fn frame(&mut self, pixels: Vec<u8>) {
-        if let Some((tx, ..)) = &self.video { let _ = tx.send(pixels); }
+    pub(crate) fn frame(&mut self, pixels: Vec<u8>) -> Result<(), String> {
+        if let Some((tx, ..)) = &self.video && tx.send(pixels).is_err() {
+            self.finish_inner()?;
+            return Err("video writer disconnected".into());
+        }
+        Ok(())
     }
 
     /// Encodes `pixels` as a PNG at `path` on a worker thread.
-    pub(crate) fn png(&mut self, path: PathBuf, pixels: Vec<u8>) {
+    pub(crate) fn png(&mut self, path: PathBuf, pixels: Vec<u8>) -> Result<(), String> {
         let size = self.size;
         let (tx, _) = self.pngs.get_or_insert_with(|| {
             let (tx, rx) = mpsc::sync_channel::<(PathBuf, Vec<u8>)>(DEPTH * 2);
@@ -242,22 +267,37 @@ impl Writer {
             }).collect();
             (tx, threads)
         });
-        let _ = tx.send((path, pixels));
+        if tx.send((path, pixels)).is_err() {
+            self.finish_inner()?;
+            return Err("PNG writers disconnected".into());
+        }
+        Ok(())
     }
 
     /// Waits for every frame to be written; the video path when one was made.
-    pub(crate) fn finish(self) -> Result<Option<PathBuf>, String> {
-        let mut video = None;
-        if let Some((tx, threads)) = self.pngs {
-            drop(tx);
-            for t in threads { t.join().map_err(|_| "PNG writer panicked".to_owned())??; }
+    pub(crate) fn finish(mut self) -> Result<Option<PathBuf>, String> { self.finish_inner() }
+
+    fn finish_inner(&mut self) -> Result<Option<PathBuf>, String> {
+        // Close both queues before joining, and always join every writer even if one failed.
+        let pngs = self.pngs.take().map(|(tx, threads)| { drop(tx); threads });
+        let video = self.video.take().map(|(tx, thread, path)| { drop(tx); (thread, path) });
+        let mut result = Ok(None);
+        if let Some(threads) = pngs {
+            for t in threads {
+                if let Err(e) = t.join().unwrap_or_else(|_| Err("PNG writer panicked".into())) { result = Err(e); }
+            }
         }
-        if let Some((tx, thread, path)) = self.video {
-            drop(tx);
-            thread.join().map_err(|_| "video writer panicked".to_owned())??;
-            video = Some(path);
+        if let Some((thread, path)) = video {
+            let encoded = thread.join().unwrap_or_else(|_| Err("video writer panicked".into()));
+            result = result.and(encoded.map(|()| Some(path)));
         }
-        Ok(video)
+        result
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        if let Err(e) = self.finish_inner() { eprintln!("rune: {e}"); }
     }
 }
 
@@ -281,5 +321,83 @@ mod tests {
     fn unpad_drops_row_padding() {
         let data = [1, 2, 3, 4, 9, 9, 9, 9, 5, 6, 7, 8, 9, 9, 9, 9];
         assert_eq!(unpad(&data, 1, 2, 8), [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn encoder_errors_close_stdin_and_report_the_exit_status() {
+        let start = |command| {
+            let child = std::process::Command::new("sh").args(["-c", command])
+                .stdin(std::process::Stdio::piped()).spawn().unwrap();
+            let mut writer = Writer::new((64, 64));
+            writer.encode(child, Path::new("test.mp4")).unwrap();
+            writer
+        };
+        let mut early = start("exit 17");
+        let error = (0..20).find_map(|_| early.frame(vec![0; 64 * 64 * 4]).err())
+            .expect("an early exit must stop accepting frames");
+        assert!(error.contains("17") && error.contains("stopped reading"), "{error}");
+
+        // This child cannot exit until finish closes stdin, and fails only after consuming it.
+        let mut late = start("cat >/dev/null; exit 23");
+        late.frame(vec![0; 64 * 64 * 4]).unwrap();
+        let error = late.finish().unwrap_err();
+        assert!(error.contains("23") && error.contains("failed writing"), "{error}");
+
+        let mut success = start("cat >/dev/null");
+        success.frame(vec![0; 64 * 64 * 4]).unwrap();
+        assert_eq!(success.finish().unwrap(), Some(PathBuf::from("test.mp4")));
+    }
+
+    #[test]
+    fn pipelined_readbacks_match_serial_pixels_in_order_across_wraps() {
+        let gpu = crate::render::Gpu::headless();
+        // An odd width exercises row-padding removal as well as ring reuse and final draining.
+        let target = Offscreen::new(&gpu.device, 37, 23);
+        let mut ring = Readback::new(&gpu.device, &target, DEPTH);
+        let mut actual = Vec::new();
+        let mut expected = Vec::new();
+        for i in 0..11 {
+            actual.extend(ring.make_room(&gpu.device));
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            {
+                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &target.view, depth_slice: None, resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: i as f64 / 12.0, g: 0.1, b: 0.3, a: 1.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+            }
+            ring.copy(&mut encoder, &target, i);
+            gpu.queue.submit([encoder.finish()]);
+            ring.submitted();
+            // Let full rings exercise blocking make_room; others exercise nonblocking ready.
+            if i % 4 == 0 { actual.extend(ring.ready(&gpu.device)); }
+        }
+        actual.extend(ring.finish(&gpu.device));
+        // Independent serial reference, rendered after the pipelined run so it cannot pace it.
+        for i in 0..11 {
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            {
+                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &target.view, depth_slice: None, resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: i as f64 / 12.0, g: 0.1, b: 0.3, a: 1.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+            }
+            target.copy(&mut encoder);
+            gpu.queue.submit([encoder.finish()]);
+            expected.push((i, target.read(&gpu.device)));
+        }
+        assert_eq!(actual, expected, "no drops, duplicates, reordering or stale slot contents");
     }
 }

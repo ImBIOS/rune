@@ -177,6 +177,8 @@ pub struct Args {
     pub(crate) start_mark: Option<(String, f64)>,
     /// `--keys [CORNER]`: keycaps for script keys and chords over dumped frames.
     pub(crate) keys: Option<crate::keycaps::Corner>,
+    /// `--keys-theme light|dark`; None (`auto`) follows the app's theme.
+    pub(crate) keys_theme: Option<bool>,
     /// `--pointer`: a ripple where the script presses.
     pub(crate) pointer: bool,
 }
@@ -251,6 +253,10 @@ impl Args {
                     if corner.is_some() { i += 1; }
                     a.keys = Some(corner.unwrap_or_default());
                 }
+                "--keys-theme" => {
+                    let v = val(&mut i);
+                    a.keys_theme = crate::keycaps::parse_theme(&v).unwrap_or_else(|| die("--keys-theme is auto, light or dark"));
+                }
                 "--pointer" => a.pointer = true,
                 "--tree" => a.tree = Some(val(&mut i).into()),
                 "--trace" => a.trace = Some(val(&mut i).into()),
@@ -304,7 +310,7 @@ const HELP: &str = "usage: <app> [window]
   --script FILE.json    timestamped input (move/down/up/tap/drag, keys, {\"focus\":false}); a
                         key with \"repeat\":true is a held key's auto-repeat; {\"type\":\"mark\",\"name\":N}
                         marks a time; {\"type\":\"shortcut\",\"chord\":\"cmd+space\"} presses a chord
-                        system-wide (a registered global shortcut, else a key press in the window);
+                         through its registered global shortcut handler, never on_key;
                         an object adds \"displays\" and \"pointer\" for place() (rune-placed, --tree)
                         menu-pick with an \"id\" and menu-cancel answer a pop-up menu
   --frames N --fps 60 --start S --out DIR     dump N frames from S seconds
@@ -313,6 +319,7 @@ const HELP: &str = "usage: <app> [window]
                         script's \"end\" mark, or 1 s after its last event)
   --keys [CORNER]       draw keycaps for script keys and chords on frames (bottom-left default;
                         bottom, bottom-right, top-left, top, top-right); never in --tree
+  --keys-theme auto|light|dark   cap colours (default auto: match the app's background)
   --pointer             draw a ripple where the script presses
   --strip out.png --crop x,y,w,h --every K    tile dumped frames into one image
                         (repeat --crop to stack several regions per frame; --cols N per row)
@@ -445,9 +452,8 @@ enum Kind {
     /// Answers the open pop-up menu: an item's id, or `None` to dismiss it.
     PopupMenu(Option<String>),
     Physical(crate::PhysicalInput),
-    /// A chord pressed system-wide. True (`"type": "shortcut"`) lets a chord the app never
-    /// registered reach the window as a key press; false (`{"shortcut": …}`) requires a registration.
-    Shortcut(crate::Shortcut, bool),
+    /// A registered global shortcut, delivered only to its handler.
+    Shortcut(crate::Shortcut),
     Move,
     Down,
     Up,
@@ -481,40 +487,6 @@ fn key_named(name: &str) -> Option<Key> {
     })
 }
 
-/// A chord no app registered, pressed into the window the way a keyboard would: the physical
-/// key with its logical key (physical handlers, then `on_key` and focus), then the release.
-fn press_chord<S: 'static>(rt: &mut Runtime<S>, chord: &crate::Shortcut) {
-    let (key, mods) = (chord.physical_key(), chord.modifiers());
-    rt.physical_with_fallback(crate::PhysicalInput::Key { key, mods, pressed: true, repeat: false }, chord_key(chord));
-    rt.physical_input(crate::PhysicalInput::Key { key, mods, pressed: false, repeat: false });
-    if mods != Mods::default() { rt.physical_input(crate::PhysicalInput::Modifiers(Mods::default())); }
-}
-
-/// The logical key a chord types, as a script `key` event with the same modifiers would.
-/// Page Up, Page Down and Insert have none.
-fn chord_key(chord: &crate::Shortcut) -> Option<KeyEvent> {
-    let mods = chord.modifiers();
-    let name = chord.to_string();
-    let name = name.rsplit('+').next().unwrap_or_default();
-    let ch = match name {
-        "space" => Some(' '), "minus" => Some('-'), "equal" => Some('='), "comma" => Some(','), "period" => Some('.'),
-        "slash" => Some('/'), "semicolon" => Some(';'), "quote" => Some('\''), "bracketleft" => Some('['),
-        "bracketright" => Some(']'), "backslash" => Some('\\'), "backquote" => Some('`'),
-        n if n.chars().count() == 1 => n.chars().next(),
-        _ => None,
-    };
-    let key = match ch {
-        Some(c) if mods.cmd => Key::Command(c),
-        Some(c) => Key::Text(if mods.shift { c.to_uppercase().collect() } else { c.to_string() }),
-        None => {
-            let mut title = name.to_owned();
-            title[..1].make_ascii_uppercase();
-            key_named(&title)?
-        }
-    };
-    Some(KeyEvent { key, mods })
-}
-
 #[derive(Clone, Debug)]
 struct Ev {
     t: f64,
@@ -536,7 +508,7 @@ impl Ev {
             Kind::Focus(focused) => ScriptEvent::Focus(*focused),
             Kind::Menu(item) => ScriptEvent::Menu(item.clone()),
             Kind::Physical(input) => ScriptEvent::Physical(*input),
-            Kind::Shortcut(chord, _) => ScriptEvent::Shortcut(chord.clone()),
+            Kind::Shortcut(chord) => ScriptEvent::Shortcut(chord.clone()),
             Kind::Move => pointer(PointerAction::Move),
             Kind::Down => pointer(PointerAction::Down),
             Kind::Up => pointer(PointerAction::Up),
@@ -597,13 +569,13 @@ fn parse_script(list: Value) -> Vec<Ev> {
         }
         if let Some(shortcut) = e["shortcut"].as_str() {
             let shortcut = shortcut.parse().unwrap_or_else(|e: crate::ShortcutError| die(&e.to_string()));
-            out.push(Ev { t, kind: Kind::Shortcut(shortcut, false), pos: Pos::Rel(0.0, 0.0) });
+            out.push(Ev { t, kind: Kind::Shortcut(shortcut), pos: Pos::Rel(0.0, 0.0) });
             continue;
         }
         if e["type"] == "shortcut" {
             let chord = e["chord"].as_str().unwrap_or_else(|| die("a \"shortcut\" event needs a \"chord\", like \"cmd+space\""));
             let chord = chord.parse().unwrap_or_else(|e: crate::ShortcutError| die(&e.to_string()));
-            out.push(Ev { t, kind: Kind::Shortcut(chord, true), pos: Pos::Rel(0.0, 0.0) });
+            out.push(Ev { t, kind: Kind::Shortcut(chord), pos: Pos::Rel(0.0, 0.0) });
             continue;
         }
         let pos = if let Some(k) = e["key"].as_str() {
@@ -1129,6 +1101,11 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let timeline = Timeline::of(&args, &script).unwrap_or_else(|e| die(&e));
     let scale = args.scale.unwrap_or(2.0);
     let size = args.size.unwrap_or(app.spec.size);
+    // Check the encoder before app initialization or GPU work.
+    let mut writer = crate::record::Writer::new(((size.0 * scale).round() as u32, (size.1 * scale).round() as u32));
+    if let Some(path) = &args.video {
+        writer.video(path, timeline.fps).unwrap_or_else(|e| die(&e));
+    }
     crate::headless_run::publish(crate::headless_run::HeadlessRun {
         script: args.script.clone(),
         events: script.iter().map(Ev::public).collect(),
@@ -1157,11 +1134,6 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let mut placed = None;
     let Timeline { fps, dt, start_frame, frames, snap_frame, last_frame } = timeline;
 
-    let mut writer = crate::record::Writer::new(((size.0 * scale).round() as u32, (size.1 * scale).round() as u32));
-    if let Some(path) = &args.video {
-        writer.video(path, fps).unwrap_or_else(|e| die(&e));
-    }
-
     let t0 = Instant::now();
     let features = comp.as_ref().map_or(wgpu::Features::empty(), |c| c.features());
     let gpu = Gpu::try_with_features(Gpu::instance(), None, features).unwrap_or_else(|e| die(&e));
@@ -1171,7 +1143,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let mut readback = crate::record::Readback::new(&gpu.device, &target, crate::record::DEPTH);
     let alpha = transparent.then(|| crate::surface_alpha::AlphaSurface::new(&gpu.device, OFFSCREEN_FORMAT, (wp, hp)));
     let mut overlay = (args.keys.is_some() || args.pointer)
-        .then(|| (crate::keycaps::Overlay::new(size, scale, args.keys, args.pointer), Renderer::new(&gpu.device, OFFSCREEN_FORMAT)));
+        .then(|| (crate::keycaps::Overlay::new(size, scale, args.keys, args.keys_theme, args.pointer), Renderer::new(&gpu.device, OFFSCREEN_FORMAT)));
     let init_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     let mut trace = args.trace.as_ref().map(|p| Trace::open(p, size, fps, scale));
@@ -1213,15 +1185,15 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
                 strip.push(tile(&px, wp, hp, &crops_px, gap));
             }
             if let Some(dir) = &args.out {
-                writer.png(dir.join(format!("frame_{:04}.png", shot.k - start_frame)), px.clone());
+                writer.png(dir.join(format!("frame_{:04}.png", shot.k - start_frame)), px.clone()).unwrap_or_else(|e| die(&e));
             }
         }
         if shot.snap {
-            writer.png(args.snap.clone().unwrap(), px.clone());
+            writer.png(args.snap.clone().unwrap(), px.clone()).unwrap_or_else(|e| die(&e));
         }
         if shot.video {
             frames_written += 1;
-            writer.frame(px);
+            writer.frame(px).unwrap_or_else(|e| die(&e));
         }
     };
     let mut early_place = None;
@@ -1248,10 +1220,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             match &e.kind {
                 Kind::Mark(_) => {}
                 Kind::Focus(focused) => rt.window_focus(*focused),
-                Kind::Shortcut(shortcut, unclaimed_to_window) => match shared.shortcuts.fire(shortcut) {
-                    Err(crate::ShortcutError::UnknownId) if *unclaimed_to_window => press_chord(&mut rt, shortcut),
-                    result => result.unwrap_or_else(|e| die(&format!("script shortcut: {e}"))),
-                },
+                Kind::Shortcut(shortcut) => shared.shortcuts.fire(shortcut).unwrap_or_else(|e| die(&format!("script shortcut: {e}"))),
                 Kind::Menu(item) => crate::native_menu::fire(&shared, item).unwrap_or_else(|e| die(&format!("script menu: {e}"))),
                 Kind::PopupMenu(picked) => rt.resolve_popup(picked.as_deref()).unwrap_or_else(|e| die(&format!("script pop-up menu: {e}"))),
                 Kind::Move => rt.pointer_move(x, y),
@@ -1272,7 +1241,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             if let Some((ov, _)) = overlay.as_mut() {
                 match &e.kind {
                     Kind::Key(key, _) => ov.key(e.t, key),
-                    Kind::Shortcut(chord, _) => ov.chord(e.t, chord),
+                    Kind::Shortcut(chord) => ov.chord(e.t, chord),
                     &Kind::Physical(crate::PhysicalInput::Key { key, mods, pressed: true, .. }) => {
                         if let Ok(chord) = crate::Shortcut::from_physical_key(key, mods) { ov.chord(e.t, &chord) }
                     }
@@ -1316,14 +1285,14 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (wp, hp));
             renderer.draw(&mut enc, view, rt.clear_color());
         }
-        if let Some(alpha) = &alpha { alpha.draw(&mut enc, &target.view); }
         if let Some((ov, ui)) = overlay.as_mut() {
-            let ort = ov.frame(real_t, step);
+            let ort = ov.frame(real_t, step, rt.backdrop_dark().unwrap_or(dark));
             if !ort.instances.is_empty() {
                 ui.prepare(&gpu.device, &gpu.queue, &mut ort.text.atlas, &ort.instances, (wp, hp));
-                ui.draw_over(&mut enc, &target.view);
+                ui.draw_over(&mut enc, view);
             }
         }
+        if let Some(alpha) = &alpha { alpha.draw(&mut enc, &target.view); }
         let in_range = k >= start_frame && k < start_frame + frames;
         let shot = Shot {
             k,
@@ -1770,17 +1739,32 @@ mod tests {
             return;
         }
         let dir = std::env::temp_dir().join(format!("rune-video-{}", std::process::id()));
-        let path = dir.join("tiny.mp4");
-        let spec = AppSpec::new("video", (31.0, 20.0), || (), |_, _| crate::el().size(10.0, 10.0).fill(crate::oklch(0.6, 0.2, 30.0)));
-        let args = ["--video", path.to_str().unwrap(), "--frames", "12", "--scale", "1"];
-        headless(crate::App::new(spec), Args::parse_from(args.map(String::from).into()));
-        let probe = std::process::Command::new("ffprobe")
-            .args(["-v", "error", "-count_frames", "-select_streams", "v:0",
-                "-show_entries", "stream=codec_name,width,height,nb_read_frames,pix_fmt", "-of", "csv=p=0"])
-            .arg(&path).output().unwrap();
+        for (extension, codec, width) in [("mp4", "h264", 32), ("mov", "prores", 31), ("webm", "vp9", 32)] {
+            let path = dir.join(format!("tiny.{extension}"));
+            let out = dir.join(format!("{extension}-frames"));
+            let snap = dir.join(format!("{extension}-last.png"));
+            let spec = AppSpec::new("video", (31.0, 20.0), || (), |_, _| crate::el().size(10.0, 10.0).fill(crate::oklch(0.6, 0.2, 30.0)));
+            let args = ["--video", path.to_str().unwrap(), "--frames", "12", "--scale", "1", "--fps", "30",
+                "--out", out.to_str().unwrap(), "--every", "3", "--snap", snap.to_str().unwrap(), "--at", "0.3"];
+            headless(crate::App::new(spec), Args::parse_from(args.map(String::from).into()));
+            let probe = std::process::Command::new("ffprobe")
+                .args(["-v", "error", "-count_frames", "-select_streams", "v:0",
+                    "-show_entries", "stream=codec_name,width,height,nb_read_frames,r_frame_rate", "-of", "json"])
+                .arg(&path).output().unwrap();
+            assert!(probe.status.success(), "{}", String::from_utf8_lossy(&probe.stderr));
+            let probe: Value = serde_json::from_slice(&probe.stdout).unwrap();
+            let stream = &probe["streams"][0];
+            assert_eq!(stream["codec_name"], codec);
+            assert_eq!(stream["width"], width, "420 formats pad odd sizes; ProRes does not");
+            assert_eq!(stream["height"], 20);
+            assert_eq!(stream["r_frame_rate"], "30/1");
+            assert_eq!(stream["nb_read_frames"], "12", "--every must not sample video");
+            let mut files: Vec<_> = std::fs::read_dir(&out).unwrap().map(|e| e.unwrap().file_name()).collect();
+            files.sort();
+            assert_eq!(files, ["frame_0000.png", "frame_0003.png", "frame_0006.png", "frame_0009.png"]);
+            assert_eq!(std::fs::read(snap).unwrap(), std::fs::read(out.join("frame_0009.png")).unwrap());
+        }
         std::fs::remove_dir_all(&dir).unwrap();
-        // yuv420p needs even sizes, so the 31-pixel width is padded to 32.
-        assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "h264,32,20,yuv420p,12");
     }
 
     #[test]
@@ -1801,9 +1785,13 @@ mod tests {
         };
         let plain = run("plain", &[]);
         let keys = run("keys", &["--keys", "top-left", "--pointer"]);
+        let light = run("light", &["--keys", "top-left", "--pointer", "--keys-theme", "light"]);
+        let dark = run("dark", &["--keys", "top-left", "--pointer", "--keys-theme", "dark"]);
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(plain.1, keys.1, "the overlay never enters the tree");
         assert_ne!(plain.0, keys.0, "but it draws over the frame");
+        assert_eq!(keys.0, light.0, "auto caps follow the app's light background");
+        assert_ne!(light.0, dark.0);
 
         use crate::keycaps::Corner;
         let args = |v: &[&str]| Args::parse_from(v.iter().map(|s| (*s).into()).collect());
@@ -1813,34 +1801,32 @@ mod tests {
     }
 
     #[test]
-    fn script_chords_fire_registered_shortcuts_and_otherwise_reach_the_window() {
+    fn script_chords_only_fire_global_handlers_even_when_the_window_is_key() {
         let script = parse_script(json!([{"t": 0.1, "type": "shortcut", "chord": "cmd+space"}, {"t": 0.2, "shortcut": "cmd+k"}]));
-        assert!(matches!(&script[0].kind, Kind::Shortcut(c, true) if *c == "cmd+space".parse().unwrap()));
-        assert!(matches!(&script[1].kind, Kind::Shortcut(_, false)), "the old form still requires a registration");
-        let key = |chord: &str| chord_key(&chord.parse().unwrap()).map(|k| k.key.clone());
-        assert_eq!(key("cmd+space"), Some(Key::Command(' ')));
-        assert_eq!(key("cmd+comma"), Some(Key::Command(',')));
-        assert_eq!(key("shift+a"), Some(Key::Text("A".into())));
-        assert_eq!(key("alt+enter"), Some(Key::Enter));
-        assert_eq!(key("f5"), Some(Key::Function(5)));
-        assert_eq!(key("cmd+pageup"), None, "no logical key: only physical handlers see it");
+        assert!(matches!(&script[0].kind, Kind::Shortcut(c) if *c == "cmd+space".parse().unwrap()));
+        assert!(matches!(&script[1].kind, Kind::Shortcut(c) if *c == "cmd+k".parse().unwrap()));
 
         let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
         static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
         let dir = std::env::temp_dir().join(format!("rune-chords-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("script.json");
-        std::fs::write(&path, r#"[{"t": 0.1, "type": "shortcut", "chord": "cmd+k"}, {"t": 0.2, "type": "shortcut", "chord": "cmd+space"},
-            {"t": 0.3, "type": "shortcut", "chord": "escape"}]"#).unwrap();
+        SEEN.lock().unwrap().clear();
+        std::fs::write(&path, r#"[{"focus": true}, {"t": 0.1, "type": "shortcut", "chord": "cmd+k"},
+            {"t": 0.2, "type": "shortcut", "chord": "cmd+space"}, {"t": 0.3, "shortcut": "cmd+k"},
+            {"t": 0.4, "focus": false}, {"t": 0.5, "type": "shortcut", "chord": "cmd+space"},
+            {"t": 0.6, "type": "key", "name": "Escape"}]"#).unwrap();
         let spec = AppSpec {
             on_key: Some(|_, ev, _| { SEEN.lock().unwrap().push(format!("on_key {:?}", ev.key)); true }),
             ..AppSpec::new("chords", (40.0, 30.0), || (), |_, _| crate::el())
         };
-        let app = crate::App::new(spec).global_shortcut("cmd+k", |_, _| SEEN.lock().unwrap().push("global cmd+k".into()));
+        let app = crate::App::new(spec)
+            .global_shortcut("cmd+k", |_, _| SEEN.lock().unwrap().push("global cmd+k".into()))
+            .global_shortcut("cmd+space", |_, _| SEEN.lock().unwrap().push("global cmd+space".into()));
         let tree = dir.join("tree.json");
         headless(app, Args::parse_from(["--script", path.to_str().unwrap(), "--tree", tree.to_str().unwrap()].map(String::from).into()));
         std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(*SEEN.lock().unwrap(), ["global cmd+k", "on_key Command(' ')", "on_key Escape"]);
+        assert_eq!(*SEEN.lock().unwrap(), ["global cmd+k", "global cmd+space", "global cmd+k", "global cmd+space", "on_key Escape"]);
     }
 
     #[test]

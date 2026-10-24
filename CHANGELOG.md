@@ -5,14 +5,18 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Global script shortcuts only run their registered handler**, even when a window is key;
+  they never reach `on_key` or physical-input handlers. Unregistered chords fail the script.
+- **Recording keycaps follow light and dark backgrounds.** `--keys-theme auto|light|dark`
+  selects the colours of their fixed screencast style; `auto` follows the app's root fill.
+  Overlays blend correctly over transparent frames, and a failed video encoder stops the run
+  and reports its exit status.
 - **Headless frames can show the script's keys.** `--keys [CORNER]` draws screencast keycaps
   (typing grouped into bursts, ⌃⌥⇧⌘ chords with repeat counts, glyphs for named keys) over
   `--video`, `--out`, `--snap` and strip frames, and `--pointer` a ripple at each press. A
   separate runtime draws them after the app, so `--tree` and `--trace` are unchanged.
-- **Scripts can press any chord system-wide.** `{"type": "shortcut", "chord": "cmd+space"}`
-  runs the app's handler when it registered the chord, and otherwise delivers it to the window
-  as a key press (physical handlers, then `on_key` as `Key::Command(' ')`), so a script can
-  summon an app that watches for the chord itself. `{"shortcut": …}` is unchanged.
+- **Scripts can press global chords.** `{"type": "shortcut", "chord": "cmd+space"}`
+  runs the app's registered shortcut handler. `{"shortcut": …}` is unchanged.
 - **Scripts can mark times.** `{"t": 3.2, "type": "mark", "name": "end"}` has no input effect;
   apps read marks through `headless_run().marks()` and `mark(name)`. `--at` and `--start`
   take `mark:NAME` with an optional offset (`mark:end+0.5`), and `--duration auto` (the
@@ -24,8 +28,7 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   `.webm` for VP9) streams raw frames into an `ffmpeg` child at `--fps` (default 60), so no
   frames touch disk; ffmpeg must be on `PATH`. Its length is `--frames N`, `--duration S`, or
   through one second after the script's last event. Readback now keeps three frames in flight
-  and PNGs (`--out`, `--snap`) encode on worker threads, so `--frames --out` dumps are several
-  times faster too.
+  and PNGs (`--out`, `--snap`) encode on worker threads.
 - **rune-kit feature `mermaid` draws ```` ```mermaid ```` flowcharts and sequence diagrams
   natively** inside `Markdown` once the fence closes, and through `rune_kit::mermaid::render`.
   Without the feature, or for unsupported diagrams, the fence stays a code block (with a

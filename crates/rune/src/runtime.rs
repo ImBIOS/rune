@@ -4112,6 +4112,15 @@ impl<S: 'static> Runtime<S> {
         Some((*self.drawn.get(i)?, self.inh_scratch.get(i)?.opacity))
     }
 
+    /// Whether the root's own fill is dark, when it has an opaque one (headless `--keys` caps
+    /// follow it, so they flip when the app changes theme itself).
+    pub(crate) fn backdrop_dark(&self) -> Option<bool> {
+        if self.transparent { return None; }
+        let n = self.nodes.first()?;
+        let c = self.color(n.id, P_FILL, n.vis.fill);
+        (c.a > 0.5).then(|| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b < 0.25)
+    }
+
     pub fn clear_color(&self) -> [f32; 4] {
         if self.transparent { return [0.0; 4]; }
         self.nodes.first().map_or([0.0, 0.0, 0.0, 1.0], |n| {

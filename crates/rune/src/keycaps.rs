@@ -126,7 +126,8 @@ fn key_label(ev: &KeyEvent) -> (String, bool) {
         Key::Text(s) => s.to_uppercase(),
         Key::Command(c) => {
             let mods = Mods { cmd: true, ..m };
-            return (format!("{}{}", mod_glyphs(mods), c.to_uppercase()), false);
+            let label = if *c == ' ' { "␣".to_owned() } else { c.to_uppercase().collect() };
+            return (format!("{}{label}", mod_glyphs(mods)), false);
         }
         Key::Enter => "↩".into(),
         Key::Backspace => "⌫".into(),
@@ -161,6 +162,17 @@ pub(crate) struct Scene {
     caps: Vec<(u64, String)>,
     ripples: Vec<(u64, f32, f32)>,
     corner: Corner,
+    dark: bool,
+}
+
+/// `--keys-theme`: dark or light caps, or (None) whichever matches the app's theme.
+pub(crate) fn parse_theme(s: &str) -> Option<Option<bool>> {
+    Some(match s {
+        "auto" => None,
+        "light" => Some(false),
+        "dark" => Some(true),
+        _ => return None,
+    })
 }
 
 /// The overlay's own runtime: caps and ripples as keyed elements whose enter and exit run on
@@ -169,13 +181,14 @@ pub(crate) struct Overlay {
     rt: Runtime<Scene>,
     keys: Option<Keycaps>,
     ripples: Option<(Vec<(u64, f32, f32, f64)>, u64)>,
+    theme: Option<bool>,
 }
 
 impl Overlay {
-    pub(crate) fn new(size: (f32, f32), scale: f32, keys: Option<Corner>, pointer: bool) -> Overlay {
+    pub(crate) fn new(size: (f32, f32), scale: f32, keys: Option<Corner>, theme: Option<bool>, pointer: bool) -> Overlay {
         let scene = Scene { corner: keys.unwrap_or_default(), ..Scene::default() };
         let rt = Runtime::new(scene, view, size, Env::new(true, scale));
-        Overlay { rt, keys: keys.map(|_| Keycaps::default()), ripples: pointer.then(|| (Vec::new(), 0)) }
+        Overlay { rt, keys: keys.map(|_| Keycaps::default()), ripples: pointer.then(|| (Vec::new(), 0)), theme }
     }
 
     pub(crate) fn key(&mut self, t: f64, ev: &KeyEvent) {
@@ -193,15 +206,18 @@ impl Overlay {
         }
     }
 
-    /// Advances to `t` (`dt` after the last frame) and returns the instances to draw.
-    pub(crate) fn frame(&mut self, t: f64, dt: f64) -> &mut Runtime<Scene> {
+    /// Advances to `t` (`dt` after the last frame) over an app that is `app_dark`, and returns
+    /// the instances to draw.
+    pub(crate) fn frame(&mut self, t: f64, dt: f64, app_dark: bool) -> &mut Runtime<Scene> {
+        let dark = self.theme.unwrap_or(app_dark);
         let caps = self.keys.as_mut().map(|k| k.visible(t).iter().map(|c| (c.id, c.label())).collect()).unwrap_or_default();
         let ripples = match &mut self.ripples {
             Some((r, _)) => { r.retain(|&(.., t0)| t - t0 < RIPPLE); r.iter().map(|&(id, x, y, _)| (id, x, y)).collect() }
             None => Vec::new(),
         };
-        if self.rt.state.caps != caps || self.rt.state.ripples != ripples {
-            self.rt.update(move |s, _| { s.caps = caps; s.ripples = ripples; });
+        let s = &self.rt.state;
+        if s.caps != caps || s.ripples != ripples || s.dark != dark {
+            self.rt.update(move |s, _| { s.caps = caps; s.ripples = ripples; s.dark = dark; });
         }
         self.rt.frame(dt);
         &mut self.rt
@@ -209,7 +225,7 @@ impl Overlay {
 }
 
 fn view(s: &Scene, _: &mut Cx<Scene>) -> El {
-    let caps = col().gap(8.0).children(s.caps.iter().map(|(id, label)| cap(*id, label)));
+    let caps = col().gap(8.0).children(s.caps.iter().map(|(id, label)| cap(*id, label, s.dark)));
     let m = Some(MARGIN);
     let caps = match s.corner {
         Corner::BottomLeft => caps.items_start().pin(m, None, None, m),
@@ -222,13 +238,18 @@ fn view(s: &Scene, _: &mut Cx<Scene>) -> El {
     el().w_full().h_full().child(caps).children(s.ripples.iter().map(|&(id, x, y)| ripple(id, x, y)))
 }
 
-fn cap(id: u64, label: &str) -> El {
+fn cap(id: u64, label: &str, dark: bool) -> El {
     // Blending is linear, so a dark cap needs a high alpha to read as dark over light content.
+    let (fill, border, ink, shadow) = if dark {
+        (oklcha(0.22, 0.0, 0.0, 0.96), oklcha(1.0, 0.0, 0.0, 0.16), Color::WHITE, 0.4)
+    } else {
+        (oklcha(0.99, 0.0, 0.0, 0.96), oklcha(0.0, 0.0, 0.0, 0.12), oklcha(0.2, 0.0, 0.0, 1.0), 0.18)
+    };
     el().key(format!("cap-{id}")).px(12.0).py(6.0).radius(9.0)
-        .fill(oklcha(0.22, 0.0, 0.0, 0.96))
-        .border(1.0, oklcha(1.0, 0.0, 0.0, 0.16))
-        .shadow(4.0, 14.0, oklcha(0.0, 0.0, 0.0, 0.4))
-        .child(text(label).font(crate::TextStyle::new(18.0, 600.0)).color(Color::WHITE))
+        .fill(fill)
+        .border(1.0, border)
+        .shadow(4.0, 14.0, oklcha(0.0, 0.0, 0.0, shadow))
+        .child(text(label).font(crate::TextStyle::new(18.0, 600.0)).color(ink))
         // Leaving caps keep their slot as it collapses, so the rest slide instead of jumping.
         .transition(Transition::asymmetric(Transition::scale(0.85), Transition::opacity()).hold_layout())
 }
@@ -295,8 +316,10 @@ mod tests {
     }
 
     #[test]
-    fn corners_parse() {
+    fn corners_and_themes_parse() {
         assert_eq!(Corner::parse("top-right"), Some(Corner::TopRight));
         assert_eq!(Corner::parse("middle"), None);
+        assert_eq!((parse_theme("auto"), parse_theme("light"), parse_theme("dark"), parse_theme("blue")),
+            (Some(None), Some(Some(false)), Some(Some(true)), None));
     }
 }

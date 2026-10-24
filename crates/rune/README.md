@@ -880,6 +880,7 @@ $S --script examples/settings/scripts/toggle.json --frames 30 --start 0.1 --out 
 $S --script examples/settings/scripts/demo.json --video demo.mp4 [--fps 60] [--duration 3|auto]
 $S --script demo.json --snap poster.png --at mark:end+0.5    # a time named by a script mark
 $S --script examples/settings/scripts/keycaps.json --video keys.mp4 --keys [top-right] --pointer
+$S --script examples/settings/scripts/keycaps.json --video keys.mov --keys --keys-theme light
 $S --script examples/settings/scripts/demo.json --start 0.12 --frames 24 --every 3 --cols 4 \
    --strip strip.png --crop 370,74,214,36 --crop 530,305,60,30     # crops stacked per frame
 $S --tree tree.json [--at T]     # key, path, role, label, text, presented rect, target, opacity,
@@ -899,14 +900,18 @@ $S --native --trace run.jsonl --frames 240  # native submission timestamps, then
   `Key::Command(' ')`); other keys keep their modifiers in `KeyEvent::mods`.
   `{"physical": "cmd+k"}` reaches only `on_physical_input` handlers.
 - **Chords**: `{"type": "shortcut", "chord": "cmd+space"}` is the user pressing a chord
-  system-wide. A chord the app registered (`App::global_shortcut`, `register_shortcut`) runs
-  its handler, as when the OS delivers it; any other chord reaches the window as a key press
-  with its logical key, so a handler watching for it in `on_key` sees `Key::Command(' ')`.
-  The older `{"shortcut": "cmd+k"}` still fails unless the chord is registered.
+  system-wide. Register it with `App::global_shortcut` or `register_shortcut`. Only its
+  shortcut handler runs, exactly as when the OS delivers it: it never reaches `on_key`,
+  focused controls or physical-input handlers, even when the window is key. An unregistered
+  chord fails the script. The older `{"shortcut": "cmd+k"}` has the same semantics. To send
+  a window key instead, use `{"type": "key", "cmd": true, "name": " "}`.
 - **Keycaps**: `--keys [CORNER]` draws the script's keys over the frames, screencast style:
   typing within a second joins one cap, a repeated chord counts (`↓ ×3`), modifiers show as
   ⌃⌥⇧⌘ and named keys as glyphs (↩ ⎋ ⇥ ⌫ ␣). Caps spring in and fade out after 1.5 s, three at
   most, at `bottom-left` (default), `bottom`, `bottom-right`, `top-left`, `top` or `top-right`.
+  Caps have one fixed screencast style, independent of the app's palette and fonts.
+  `--keys-theme auto|light|dark` chooses its light or dark colours; `auto` (default) follows
+  the app's root background, falling back to `--theme` when the background is transparent.
   `--pointer` adds a ripple at each press. A separate runtime draws both after the app, so they
   appear in `--video`, `--out`, `--snap` and strips but never in `--tree` or `--trace`.
 - **Rounded panels**: `el().clip_rounded(radius)` clips an element and its descendants to a
@@ -918,11 +923,12 @@ $S --native --trace run.jsonl --frames 240  # native submission timestamps, then
   last event without one. Apps read them with `headless_run().mark("end")`.
 - **Video**: `--video out.mp4` streams frames into `ffmpeg` (which must be on `PATH`) over a
   pipe: `.mp4` is H.264 yuv420p with `+faststart`, `.mov` ProRes 4444 with alpha, `.webm` VP9.
-  It runs `--frames N` or `--duration SECONDS` from `--start` (default: until one second after
-  the script's last event). Readback keeps three frames in flight, so the GPU renders the next
-  frame while the last one is copied out; at 1920×1200 an M-series Mac renders a few hundred
-  frames a second and x264 sets the pace. `--out` PNGs share the readback and encode on worker
-  threads.
+  It runs `--frames N` or `--duration SECONDS` from `--start` (default: through the `end` mark,
+  or one second after the script's last event). Readback keeps three frames in flight, so the
+  GPU renders the next frame while the last one is copied out. `--out` PNGs share the readback
+  and encode on worker threads, retaining their `frame_0000.png` names and `--every` sampling.
+  Video always includes every frame at `--fps`; `--every` only samples PNGs and strips.
+  Missing ffmpeg fails before GPU startup; encoder errors fail the command with its exit status.
 - **The app can read the run**: `rune::tooling::headless_run()` is `Some` in a headless run,
   from `init` on, and None in a window. It gives the script path and its events as Rune feeds
   them (`tap` expanded to move, down and up; `type` to one key per character), `scale()`,
@@ -930,8 +936,11 @@ $S --native --trace run.jsonl --frames 240  # native submission timestamps, then
   serves every window of a multi-window app.
 
   ```rust
+  use rune::tooling::ScriptEvent;
+
   if let Some(run) = rune::tooling::headless_run() {
       let typed = run.events().iter().filter(|e| matches!(e.event, ScriptEvent::Key { .. })).count();
+      let end_card = run.mark("end").unwrap_or(run.script_end() + 1.0);
   }
   ```
 - **Timing**: every headless run prints per-frame CPU time (update, build and encode/submit, without
