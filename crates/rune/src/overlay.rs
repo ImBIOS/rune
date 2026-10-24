@@ -157,7 +157,7 @@ impl<T: 'static> OverlayHandle<T> {
     pub fn capabilities(&self) -> crate::OverlayCapabilities { self.shared.native.lock().unwrap().1 }
 
     /// The overlay's frame counts: redraws, presents, failed drawable acquisitions, loop turns
-    /// and pacing, as totals and per-second rates. Updated once a second while it draws.
+    /// and pacing: current totals, and per-second rates updated once a second while it draws.
     pub fn surface_stats(&self) -> crate::SurfaceStats { crate::surface_stats::read(&self.shared.stats) }
 
     /// Reveal the overlay. Prewarmed macOS overlays refresh hidden changes before reveal,
@@ -1126,13 +1126,14 @@ impl<T: 'static> Overlay<T> {
         // the next frame runs once a frame, however often other events turn the loop.
         let deadline = crate::window::timer_deadline(&self.rt);
         if deadline.is_some_and(|deadline| deadline <= now) {
-            if !self.frameless() {
+            // Backing off, the frame waits for the retry and would leave the timer due.
+            if !self.frameless() && !self.backing_off(now) {
                 // Like the window host, poll once in the upcoming frame, after acquiring
                 // the drawable. A false poll result does not keep the display loop alive.
                 self.dirty = true;
             } else {
-                // No frame will come to run it: a hidden or occluded overlay steps without
-                // drawing, so its timers fire (and may hide it) on time.
+                // No frame will come to run it in time: a hidden, occluded or backing-off
+                // overlay steps without drawing, so its timers fire (and may hide it) on time.
                 self.advance();
             }
         }
@@ -1150,10 +1151,17 @@ impl<T: 'static> Overlay<T> {
     }
 
     /// A frame with no drawable still runs what it would have (updates, poll, due timers)
-    /// without drawing, as a hidden overlay does, and the next try waits.
-    fn missed(&mut self, missed: crate::window::Missed, paced: bool) {
+    /// without drawing, as a hidden overlay does, unless it already `stepped`. The next try
+    /// waits, with the display link stopped so no tick tries sooner.
+    fn missed(&mut self, missed: crate::window::Missed, paced: bool, stepped: bool) {
         let now = Instant::now();
-        self.advance_at(now);
+        if stepped {
+            self.rt.shell_request = None;
+            self.rt.window_frame = None;
+            self.clipboard.flush(&mut self.rt);
+        } else {
+            self.advance_at(now);
+        }
         let wait = self.occluded_wait;
         if missed == crate::window::Missed::Occluded {
             self.occluded_wait = (wait * 2).min(crate::window::OCCLUDED_MAX);
@@ -1162,9 +1170,14 @@ impl<T: 'static> Overlay<T> {
             crate::window::NextFrame::WaitUntil(at) => Some(at),
             crate::window::NextFrame::Idle => None,
         };
+        #[cfg(target_os = "macos")]
+        if self.retry.is_some() && let Some(pacing) = self.live.as_mut().and_then(|l| l.pacing.as_mut()) { pacing.stop(); }
         let pacing = self.pacing_state(missed != crate::window::Missed::Occluded);
         self.meter.set_pacing(pacing);
     }
+
+    /// Waiting for a missed frame's retry, or for the timer pacing unpaced motion.
+    fn backing_off(&self, now: Instant) -> bool { self.retry.is_some_and(|retry| retry > now) }
 
     /// What paces the overlay's frames, for its stats.
     fn pacing_state(&self, moving: bool) -> crate::Pacing {
@@ -1343,14 +1356,15 @@ impl<T: 'static> Overlay<T> {
             // however often other windows turn the loop.
             if self.occluded {
                 if self.retry.is_none_or(|retry| retry <= Instant::now()) {
-                    self.meter.redraw(false);
                     self.meter.skipped();
-                    self.missed(crate::window::Missed::Occluded, false);
+                    self.missed(crate::window::Missed::Occluded, false, false);
                 }
                 return false;
             }
         }
         if !self.dirty && self.idle { return false; }
+        // Input waits for the retry too; `wake_due` runs due timers meanwhile.
+        if !prewarm && self.backing_off(Instant::now()) { return false; }
         if !prewarm { self.retry = None; }
         let (Some(live), Some((renderer, _)), Some(gpu)) = (self.live.as_mut(), self.renderer.as_mut(), self.gpu.as_ref()) else {
             return false;
@@ -1364,14 +1378,15 @@ impl<T: 'static> Overlay<T> {
         let paced = live.pacing.as_ref().is_some_and(|p| p.running());
         #[cfg(not(target_os = "macos"))]
         let paced = false;
-        if !prewarm { self.meter.redraw(paced); }
+        // The present queue's vsync paces redraws where no display link does.
+        if !prewarm { self.meter.redraw(paced || !cfg!(target_os = "macos")); }
         let frame = match crate::window::acquire(&live.surface, &gpu.device, &live.config, if prewarm { 2 } else { 1 }, &mut self.meter) {
             Ok(frame) => frame,
             Err(missed) => {
                 if !prewarm {
                     #[cfg(target_os = "macos")]
                     if missed == crate::window::Missed::Occluded { self.set_occluded(true); }
-                    self.missed(missed, paced);
+                    self.missed(missed, paced, false);
                 }
                 return false;
             }
@@ -1399,7 +1414,7 @@ impl<T: 'static> Overlay<T> {
                     Err(missed) => {
                         if !prewarm {
                             if missed == crate::window::Missed::Occluded { self.set_occluded(true); }
-                            self.missed(missed, paced);
+                            self.missed(missed, paced, true);
                         }
                         return false;
                     }
@@ -1558,7 +1573,7 @@ fn render_frame<T: 'static>(f: &mut Frame<'_, T>, compositor: &mut Option<Box<dy
 
 impl<T: 'static> AnyHost for Overlay<T> {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
-        self.meter.turn(matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll));
+        self.meter.turn(matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll), crate::surface_stats::slept(cause));
         if matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll) {
             let now = Instant::now();
             self.wake_due(now);
@@ -1582,6 +1597,7 @@ impl<T: 'static> AnyHost for Overlay<T> {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
+        self.meter.waited();
         #[cfg(target_os = "macos")]
         if matches!(event, WakeEvent::DisplayTick(_))
             && self.live.as_ref().and_then(|l| l.pacing.as_ref()).is_some_and(|p| p.running()) {
@@ -1601,6 +1617,7 @@ impl<T: 'static> AnyHost for Overlay<T> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if !matches!(event, WindowEvent::RedrawRequested) { self.meter.waited(); }
         #[cfg(target_os = "macos")]
         if matches!(event, WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Occluded(_))
             && let Some(live) = &mut self.live && let Some(pacing) = &mut live.pacing {
@@ -2176,7 +2193,7 @@ mod tests {
         for prewarm in [false, true] {
             let options = OverlayOptions { prewarm, ..Default::default() };
             let (a, b) = run_with(options, |o| { o.visible = true; o.occluded(true); },
-                |o| { o.missed(crate::window::Missed::Occluded, false); o.occluded(false); }, Duration::from_secs(3));
+                |o| { o.missed(crate::window::Missed::Occluded, false, false); o.occluded(false); }, Duration::from_secs(3));
             assert!((b - fresh).abs() < 0.02, "missed while occluded (prewarm: {prewarm}): b={b}, fresh={fresh}");
             assert!((a - capped).abs() < 0.01, "missed while occluded (prewarm: {prewarm}): a={a}, expected={capped}");
         }
@@ -2641,7 +2658,7 @@ mod tests {
         overlay.rt.wall_start = None;
         // Shown onto sleeping displays: the first frame misses, and still polls.
         overlay.occluded(true);
-        overlay.missed(Missed::Occluded, false);
+        overlay.missed(Missed::Occluded, false, false);
         assert_eq!(overlay.rt.state.polls, 1);
         assert_eq!(overlay.rt.wake_deadline(), Some(0.25));
         overlay.retry = None;
@@ -2660,14 +2677,14 @@ mod tests {
         let mut waits = Vec::new();
         for _ in 0..6 {
             let before = Instant::now();
-            overlay.missed(Missed::Occluded, false);
+            overlay.missed(Missed::Occluded, false, false);
             let retry = overlay.retry.expect("an occluded miss re-checks later");
             assert_eq!(overlay.wake_deadline(), Some(retry));
             waits.push(retry - before);
         }
         assert!(waits[0] >= OCCLUDED_RETRY && waits.windows(2).all(|w| w[1] + Duration::from_millis(1) >= w[0]), "{waits:?}");
         assert!(waits[5] >= OCCLUDED_MAX && waits.iter().all(|&w| w <= OCCLUDED_MAX + Duration::from_millis(50)), "{waits:?}");
-        overlay.missed(Missed::Timeout, true);
+        overlay.missed(Missed::Timeout, true, false);
         assert_eq!(overlay.retry, None);
         overlay.occluded(false);
         assert!(overlay.dirty, "uncovered, it redraws once");
@@ -2678,6 +2695,52 @@ mod tests {
         overlay.apply_wake(false, vec![Box::new(|_: &mut State, tx: &mut Tx| tx.wake_after(Duration::from_secs(5)))]);
         let deadline = overlay.wake_deadline().expect("the update's timer is armed while occluded");
         assert!(deadline > Instant::now() + Duration::from_secs(4), "{:?}", deadline - Instant::now());
+    }
+
+    /// Any miss that sets a retry backs off: frames wait for it, a fading-out overlay's too,
+    /// and a timer due meanwhile runs without asking for a frame that wouldn't come.
+    #[test]
+    fn overlay_misses_back_off_until_their_retry() {
+        use crate::window::{Missed, OCCLUDED_RETRY, TIMEOUT_RETRY};
+        #[derive(Default)]
+        struct State { polls: usize }
+        fn view(_: &State, _: &mut Cx<State>) -> El { crate::el() }
+        fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
+            s.polls += 1;
+            tx.wake_after(Duration::from_millis(250));
+            false
+        }
+        let app = AppSpec { poll: Some(poll), ..AppSpec::new("backoff", (30.0, 20.0), State::default, view) };
+        let (mut overlay, _handle) = Overlay::new(OverlaySpec::new("backoff", app.size, view), State::default(), &app);
+        overlay.visible = true;
+        overlay.rt.wall_start = None;
+
+        let now = Instant::now();
+        overlay.missed(Missed::Timeout, false, false);
+        assert_eq!(overlay.rt.state.polls, 1, "the missed frame still polls");
+        assert!(overlay.retry.is_some_and(|at| at >= now + TIMEOUT_RETRY));
+        assert!(overlay.backing_off(Instant::now()), "an unpaced timeout waits for its retry");
+        overlay.missed(Missed::Outdated, true, true);
+        assert_eq!(overlay.rt.state.polls, 1, "a frame that already stepped doesn't step again");
+        assert!(overlay.retry.is_some_and(|at| at >= now + OCCLUDED_RETRY) && overlay.backing_off(Instant::now()),
+            "an outdated surface waits even while a display link runs");
+
+        // A timer comes due while it backs off: it runs now, and the next deadline is a frame on.
+        overlay.rt.wall_start = Some(Instant::now() - Duration::from_millis(251));
+        overlay.dirty = false;
+        let due = Instant::now();
+        overlay.wake_due(due);
+        assert_eq!(overlay.rt.state.polls, 2, "the due timer runs without a frame");
+        assert!(overlay.wake_deadline().is_some_and(|at| at > due), "and doesn't leave the loop spinning on it");
+
+        // Fading out, an occluded miss can't mark it occluded, yet it still waits.
+        overlay.visible = false;
+        overlay.fading_out = Some(Instant::now() + Duration::from_secs(1));
+        overlay.retry = None;
+        overlay.missed(Missed::Occluded, false, false);
+        assert!(overlay.drawing() && overlay.backing_off(Instant::now()));
+        overlay.retry = Some(Instant::now());
+        assert!(!overlay.backing_off(Instant::now() + Duration::from_millis(1)), "a due retry draws");
     }
 
     #[test]

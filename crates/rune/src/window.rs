@@ -50,6 +50,8 @@ struct Win {
     retry: Option<Instant>,
     /// The next occluded re-check's wait, backing off while the surface stays occluded.
     occluded_wait: Duration,
+    /// A hidden launcher's next try after a refresh got no drawable, backing off likewise.
+    hidden_wait: Duration,
     cursor: crate::os_cursor::OsCursor,
     alpha: Option<crate::surface_alpha::AlphaSurface>,
     #[cfg(target_os = "macos")]
@@ -78,7 +80,10 @@ impl Win {
 #[derive(Default)]
 struct FirstFrame { ready: bool, reveal: bool, notified: bool, deadline: Option<(Instant, Instant)> }
 impl FirstFrame {
-    fn request_reveal(&mut self, stale: bool) -> bool {
+    /// Whether to show the cached frame now. One already on screen shows at once; its next
+    /// frame (or retry) draws a stale state, with no first-frame deadline.
+    fn request_reveal(&mut self, stale: bool, visible: bool) -> bool {
+        if visible { return true; }
         if stale { self.ready = false; }
         if self.ready { return true; }
         self.reveal = true;
@@ -101,6 +106,15 @@ impl FirstFrame {
         self.ready = true;
         std::mem::take(&mut self.reveal)
     }
+    /// A hidden frame that got no drawable leaves the cached one stale. Unless the deadline
+    /// retries it, the next try waits `wait`, which doubles up to `OCCLUDED_MAX`.
+    fn missed(&mut self, now: Instant, wait: &mut Duration) -> Option<Instant> {
+        self.ready = false;
+        if self.deadline.is_some() { return None; }
+        let at = now + *wait;
+        *wait = (*wait * 2).min(OCCLUDED_MAX);
+        Some(at)
+    }
     fn prepare(&mut self) {
         let now = Instant::now();
         self.deadline = Some((now, now + Duration::from_secs(2)));
@@ -120,18 +134,18 @@ impl FirstFrame {
 fn launcher_first_frame_holds_reveal_and_hide_cancels_late_completion() {
     let mut frame = FirstFrame::default();
     frame.prepare();
-    assert!(!frame.request_reveal(false));
+    assert!(!frame.request_reveal(false, false));
     assert!(!frame.ready);
     assert!(frame.complete());
     assert!(frame.ready && frame.deadline.is_none());
     assert!(!frame.complete(), "a second callback must not reopen a hidden panel");
     let mut canceled = FirstFrame::default();
     canceled.prepare();
-    assert!(!canceled.request_reveal(false));
+    assert!(!canceled.request_reveal(false, false));
     canceled.hide();
     assert!(!canceled.complete(), "hide before readiness cancels the pending show");
     assert!(canceled.ready);
-    assert!(canceled.request_reveal(false), "the prepared frame can be revealed without another preparation");
+    assert!(canceled.request_reveal(false, false), "the prepared frame can be revealed without another preparation");
     assert!(canceled.deadline.is_none());
 }
 
@@ -139,28 +153,48 @@ fn launcher_first_frame_holds_reveal_and_hide_cancels_late_completion() {
 fn launcher_stale_reveal_waits_for_an_unsettled_hidden_frame() {
     let mut frame = FirstFrame { ready: true, notified: true, ..Default::default() };
     assert!(!frame.complete());
-    assert!(frame.request_reveal(false), "unchanged state reveals the cached frame at once");
+    assert!(frame.request_reveal(false, false), "unchanged state reveals the cached frame at once");
     assert!(!frame.pending() && frame.settles());
-    assert!(!frame.request_reveal(true), "changed state renders hidden first");
+    assert!(!frame.request_reveal(true, false), "changed state renders hidden first");
     assert!(frame.deadline.is_some() && !frame.settles(), "the refresh keeps its new motion");
     frame.ready = true; // The hidden frame's fence completed.
     assert!(frame.pending() && frame.complete());
     assert!(!frame.pending() && frame.settles());
-    assert!(!frame.request_reveal(true));
+    assert!(!frame.request_reveal(true, false));
     frame.hide();
     assert!(frame.settles(), "a canceled refresh is an ordinary hidden frame");
     assert!(frame.ready && frame.deadline.is_none(), "hide stops the refresh retries");
     assert!(!frame.pending() && !frame.complete(), "a late frame does not reveal");
 
-    assert!(!frame.request_reveal(true));
+    assert!(!frame.request_reveal(true, false));
     assert!(frame.expire(), "a refresh with no drawable reveals the cached frame");
     assert!(frame.ready && !frame.pending() && frame.deadline.is_none());
     let mut first = FirstFrame::default();
     first.prepare();
-    assert!(!first.request_reveal(true));
+    assert!(!first.request_reveal(true, false));
     assert!(!first.expire() && !first.ready, "the first frame stays hidden and reports instead");
     first.ready = true;
     assert!(first.pending() && first.complete(), "a late first frame still reveals");
+}
+
+#[test]
+fn launcher_refresh_with_no_drawable_retries_and_never_reveals_stale_pixels() {
+    let now = Instant::now();
+    let mut frame = FirstFrame { ready: true, notified: true, ..Default::default() };
+    let mut wait = TIMEOUT_RETRY;
+    assert_eq!(frame.missed(now, &mut wait), Some(now + TIMEOUT_RETRY), "a hidden refresh that got no drawable tries again");
+    assert!(!frame.ready, "its cached frame no longer counts as ready");
+    assert_eq!(frame.missed(now, &mut wait), Some(now + TIMEOUT_RETRY * 2), "and backs off");
+    for _ in 0..10 { frame.missed(now, &mut wait); }
+    assert_eq!(wait, OCCLUDED_MAX);
+    assert!(!frame.request_reveal(false, false), "a reveal waits for the refresh even with nothing new to commit");
+    assert!(frame.deadline.is_some());
+    assert_eq!(frame.missed(now, &mut wait), None, "the first-frame deadline owns its retries");
+
+    // One already on screen shows at once and redraws, rather than retrying a first frame.
+    let mut shown = FirstFrame { ready: true, notified: true, ..Default::default() };
+    assert!(shown.request_reveal(true, true));
+    assert!(shown.deadline.is_none() && shown.ready);
 }
 
 impl Win {
@@ -197,6 +231,16 @@ impl Win {
         return self.pacing.as_ref().is_some_and(|p| p.running());
         #[cfg(not(target_os = "macos"))]
         false
+    }
+
+    /// Whether something other than events paces the window's redraws: the display link on
+    /// macOS, the present queue's vsync elsewhere.
+    fn paced_for_stats(&self) -> bool { !cfg!(target_os = "macos") || self.paced() }
+
+    /// Waiting for a missed frame's retry, or for the timer pacing unpaced motion. A hidden
+    /// launcher's first-frame deadline owns its own retries.
+    fn backing_off(&self, now: Instant) -> bool {
+        self.retry.is_some_and(|retry| retry > now) && self.first_frame.deadline.is_none()
     }
 
     /// What paces the window's frames, for its stats.
@@ -317,7 +361,7 @@ impl WindowHandle {
     pub fn is_ready(&self) -> bool { self.window().is_ok() && self.native.ready.load(Ordering::Acquire) }
     pub fn key(&self) -> &str { &self.key }
     /// The window's frame counts: redraws, presents, failed drawable acquisitions, loop turns
-    /// and pacing, as totals and per-second rates. Updated once a second while it draws.
+    /// and pacing: current totals, and per-second rates updated once a second while it draws.
     pub fn surface_stats(&self) -> SurfaceStats { crate::surface_stats::read(&self.native.stats) }
     fn window(&self) -> Result<Arc<Window>, String> {
         self.native.window.lock().unwrap().upgrade().ok_or_else(|| "window is closed".into())
@@ -1316,10 +1360,13 @@ impl<S: 'static> Host<S> {
         if self.win.is_none() { self.create(event_loop, None, false); }
         let stale = self.rt.needs_commit();
         let Some(w) = &mut self.win else { return };
-        if !w.first_frame.request_reveal(stale) {
+        let visible = w.visible;
+        if !w.first_frame.request_reveal(stale, visible) {
             w.window.request_redraw();
             return;
         }
+        // Already showing: its next frame draws the new state, or a covered one's retry does.
+        if visible && stale { w.window.request_redraw(); }
         self.show_cached();
     }
 
@@ -1586,8 +1633,15 @@ impl<S: 'static> Host<S> {
         #[cfg(all(feature = "dev", debug_assertions))]
         let changed = changed || self.rt.dev.is_some();
         // A launcher's cached reveal draws nothing; a hidden one renders its changes hidden.
-        if let Some(w) = self.win.as_ref().filter(|w| if self.launcher() { changed || shown && w.visible } else { w.visible }) {
-            w.window.request_redraw();
+        // A covered or minimised one runs them without asking for a frame it wouldn't draw.
+        let launcher = self.launcher();
+        if let Some(w) = self.win.as_ref().filter(|w| if launcher { changed || shown && w.visible } else { w.visible }) {
+            if (!launcher && w.occluded) || w.window.is_minimized().unwrap_or(false) {
+                self.covered_frame();
+                self.shell(event_loop);
+            } else {
+                w.window.request_redraw();
+            }
         }
     }
 
@@ -1925,6 +1979,7 @@ impl<S: 'static> Host<S> {
             occluded: false,
             retry: None,
             occluded_wait: OCCLUDED_RETRY,
+            hidden_wait: TIMEOUT_RETRY,
             cursor: crate::os_cursor::OsCursor::new(event_loop),
             alpha,
             #[cfg(target_os = "macos")]
@@ -1958,8 +2013,10 @@ impl<S: 'static> Host<S> {
     }
 
     /// A shown frame with no drawable. Asking for a redraw here would turn the loop at once, for
-    /// as long as the window is occluded or its displays sleep, so it waits for `retry`.
-    fn missed_frame(&mut self, missed: Missed) {
+    /// as long as the window is occluded or its displays sleep, so it waits for `retry`, with
+    /// its display link stopped so no tick redraws sooner. `stepped` when this frame already
+    /// ran the runtime.
+    fn missed_frame(&mut self, missed: Missed, stepped: bool) {
         let Some(l) = self.win.as_mut() else { return };
         let now = Instant::now();
         let wait = l.occluded_wait;
@@ -1968,7 +2025,6 @@ impl<S: 'static> Host<S> {
             // again on `retry`.
             l.occluded = true;
             l.occluded_wait = (wait * 2).min(OCCLUDED_MAX);
-            l.stop_pacing();
             self.rt.set_live_visible(false);
             self.secure_input.set(false);
             self.idle = true;
@@ -1977,36 +2033,43 @@ impl<S: 'static> Host<S> {
             NextFrame::WaitUntil(at) => Some(at),
             NextFrame::Idle => None,
         };
+        if l.retry.is_some() { l.stop_pacing(); }
         self.meter.set_pacing(l.pacing_state(missed != Missed::Occluded));
         // What this frame would have run (updates, poll, due timers) still runs, without
         // drawing. Misses come at the retry's pace, not the display's.
-        self.rt.hidden_timer_frame();
+        if !stepped { self.rt.hidden_timer_frame(); }
         self.clipboard.flush(&mut self.rt);
+    }
+
+    /// A frame for a window that's hidden, covered, asleep or minimised: what it would have
+    /// run (updates, poll, due timers) still runs while shown, without drawing.
+    fn covered_frame(&mut self) {
+        let Some(l) = self.win.as_mut() else { return };
+        l.stop_pacing();
+        let shown = l.visible;
+        self.land_frame();
+        if shown {
+            self.rt.hidden_timer_frame();
+            self.clipboard.flush(&mut self.rt);
+        }
     }
 
     fn redraw(&mut self) {
         let launcher = self.launcher();
         let (Some(l), Some(_)) = (self.win.as_mut(), self.gpu.as_ref()) else { return };
         let hidden = launcher && !l.visible;
-        self.meter.redraw(l.paced());
         if (!launcher && (!l.visible || l.occluded)) || l.window.is_minimized().unwrap_or(false) {
-            l.stop_pacing();
-            let shown = l.visible;
-            self.land_frame();
-            // Covered, asleep or minimised: what the frame would have run (updates, poll, due
-            // timers) still runs, without drawing.
-            if shown {
-                self.rt.hidden_timer_frame();
-                self.clipboard.flush(&mut self.rt);
-            }
-            return;
+            return self.covered_frame();
         }
+        // A missed frame's retry, or the timer pacing unpaced motion: input waits for it, and
+        // `new_events` runs due timers meanwhile.
+        if l.backing_off(Instant::now()) { return; }
         // Starting the display link for a window that isn't on screen would wait for a tick that
         // sleeping displays never send, and a running link holds back its timers (`wake_deadline`).
         #[cfg(target_os = "macos")]
         if !hidden && l.natively_occluded() {
             self.meter.skipped();
-            self.missed_frame(Missed::Occluded);
+            self.missed_frame(Missed::Occluded, false);
             return;
         }
         #[cfg(target_os = "macos")]
@@ -2021,6 +2084,7 @@ impl<S: 'static> Host<S> {
         }
         #[cfg(not(target_os = "macos"))]
         let target: Option<Instant> = None;
+        if !hidden { self.meter.redraw(l.paced_for_stats()); }
         // The frame moves before the drawable is acquired, so it has the new size.
         if !hidden { self.step_frame(target.unwrap_or_else(Instant::now)); }
         let (Some(l), Some((gpu, renderer, _))) = (self.win.as_mut(), self.gpu.as_mut()) else { return };
@@ -2028,11 +2092,9 @@ impl<S: 'static> Host<S> {
         l.retry = None;
         let frame = match acquire(&l.surface, &gpu.device, &l.config, 1, &mut self.meter) {
             Ok(frame) => frame,
-            // A hidden launcher frame retries on its first-frame deadline.
-            Err(_) if hidden => return,
-            Err(missed) => return self.missed_frame(missed),
+            Err(_) if hidden => { l.retry = l.first_frame.missed(Instant::now(), &mut l.hidden_wait); return; }
+            Err(missed) => return self.missed_frame(missed, false),
         };
-        l.occluded_wait = OCCLUDED_RETRY;
         if !hidden && !self.rt.live_visible() && { let size = l.window.inner_size(); size.width > 0 && size.height > 0 } {
             // Uncovered after a missed frame said it was occluded.
             self.rt.set_live_visible(true);
@@ -2080,10 +2142,12 @@ impl<S: 'static> Host<S> {
             match acquire(&l.surface, &gpu.device, &l.config, 1, &mut self.meter) {
                 Ok(frame) => frame,
                 // Retrying at once is what spins while occluded; wait like any missed frame.
-                Err(_) if hidden => { l.retry = Some(Instant::now() + TIMEOUT_RETRY); return; }
-                Err(missed) => return self.missed_frame(missed),
+                Err(_) if hidden => { l.retry = l.first_frame.missed(Instant::now(), &mut l.hidden_wait); return; }
+                Err(missed) => return self.missed_frame(missed, true),
             }
         } else { frame };
+        l.occluded_wait = OCCLUDED_RETRY;
+        l.hidden_wait = TIMEOUT_RETRY;
         self.secure_input.set(rt.has_secure_focus() && l.window.has_focus());
         let update_ms = now.elapsed().as_secs_f64() * 1000.0;
         let ime_allowed = rt.ime_area.is_some() && !rt.has_secure_focus() && l.window.has_focus();
@@ -2214,7 +2278,7 @@ impl<S: 'static> AnyHost for Host<S> {
     fn cancel_menus(&mut self) { self.popup.cancel(&mut self.rt); }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
-        self.meter.turn(matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll));
+        self.meter.turn(matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll), crate::surface_stats::slept(cause));
         if let Some(w) = &mut self.win && let Some((retry, until)) = w.first_frame.deadline && retry <= Instant::now() {
             if until <= Instant::now() {
                 let notified = w.first_frame.notified;
@@ -2242,7 +2306,9 @@ impl<S: 'static> AnyHost for Host<S> {
         if matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll)
             && timer_deadline(&self.rt).is_some_and(|deadline| deadline <= Instant::now())
         {
-            if let Some(w) = self.win.as_ref().filter(|w| (self.launcher() || (w.visible && !w.occluded)) && !w.window.is_minimized().unwrap_or(false)) {
+            // A redraw while the window backs off would draw nothing and leave the timer due.
+            if let Some(w) = self.win.as_ref().filter(|w| (self.launcher() || (w.visible && !w.occluded)) && !w.window.is_minimized().unwrap_or(false)
+                && !w.backing_off(Instant::now())) {
                 w.window.request_redraw();
             } else {
                 self.rt.hidden_timer_frame();
@@ -2291,11 +2357,13 @@ impl<S: 'static> AnyHost for Host<S> {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
+        self.meter.waited();
         self.handle_user_event(event_loop, event);
         self.publish();
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if !matches!(event, WindowEvent::RedrawRequested) { self.meter.waited(); }
         self.handle_window_event(event_loop, id, event);
         self.publish();
     }

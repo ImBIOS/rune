@@ -12,9 +12,10 @@ use crate::window::Missed;
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct SurfaceCounts {
-    /// Frames the host set out to draw: redraw requests and display ticks it handled while shown.
+    /// Frames the host set out to draw while shown, once its display link (if running) gave it
+    /// the frame.
     pub redraws: u64,
-    /// Redraws no running display link paced (on macOS, a timer or an event asked for them).
+    /// Redraws that waited for nothing: no display tick, vsync, timer or event came first.
     pub unpaced: u64,
     /// Frames presented.
     pub presents: u64,
@@ -90,7 +91,7 @@ impl std::fmt::Display for Pacing {
 }
 
 /// One surface's frame counts: `WindowHandle::surface_stats`, `OverlayHandle::surface_stats`
-/// and `Runtime::surface_stats`. Published once a second.
+/// and `Runtime::surface_stats`. Totals and pacing are current; rates roll over once a second.
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct SurfaceStats {
@@ -136,6 +137,8 @@ pub(crate) struct SurfaceMeter {
     base: SurfaceCounts,
     started: Instant,
     pacing: Pacing,
+    /// A timer or event came since the last redraw.
+    waited: bool,
     /// Seconds in a row over `SPIN_RATE`.
     hot: u32,
     warned: bool,
@@ -145,18 +148,27 @@ pub(crate) struct SurfaceMeter {
 impl SurfaceMeter {
     pub(crate) fn new(name: &str, shared: Arc<Mutex<SurfaceStats>>) -> Self {
         shared.lock().unwrap().name = name.to_owned();
-        Self { totals: SurfaceCounts::default(), base: SurfaceCounts::default(), started: Instant::now(), pacing: Pacing::Idle, hot: 0, warned: false, shared }
+        Self {
+            totals: SurfaceCounts::default(), base: SurfaceCounts::default(), started: Instant::now(), pacing: Pacing::Idle,
+            waited: false, hot: 0, warned: false, shared,
+        }
     }
 
     pub(crate) fn shared(&self) -> Arc<Mutex<SurfaceStats>> { self.shared.clone() }
     #[cfg(test)]
     pub(crate) fn totals(&self) -> SurfaceCounts { self.totals }
 
+    /// A redraw. `paced` when a display tick or vsync paces it; otherwise it's unpaced unless
+    /// a timer or event (`waited`) came since the last one.
     pub(crate) fn redraw(&mut self, paced: bool) {
         self.totals.redraws += 1;
-        if !paced { self.totals.unpaced += 1; }
+        if !paced && !self.waited { self.totals.unpaced += 1; }
+        self.waited = false;
         self.tick(Instant::now());
     }
+
+    /// An event the surface's host handled, which may ask for the next redraw.
+    pub(crate) fn waited(&mut self) { self.waited = true; }
 
     pub(crate) fn presented(&mut self) {
         self.totals.presents += 1;
@@ -178,36 +190,48 @@ impl SurfaceMeter {
         self.tick(Instant::now());
     }
 
-    pub(crate) fn turn(&mut self, woke: bool) {
+    /// An event-loop turn, `woke` by a deadline or poll rather than an event. A deadline that
+    /// was still ahead when the loop slept (`waited`) paces the redraw it asks for.
+    pub(crate) fn turn(&mut self, woke: bool, waited: bool) {
         self.totals.turns += 1;
         if woke { self.totals.wakes += 1; }
+        self.waited |= waited;
         self.tick(Instant::now());
     }
 
-    pub(crate) fn set_pacing(&mut self, pacing: Pacing) { self.pacing = pacing; }
+    pub(crate) fn set_pacing(&mut self, pacing: Pacing) {
+        self.pacing = pacing;
+        self.shared.lock().unwrap().pacing = pacing;
+    }
 
-    /// Rolls the window over once a second has passed; the spin warning, if this roll is it.
+    /// Publishes the totals, and rolls the rates over once a second has passed; the spin
+    /// warning, if this roll is it.
     fn tick(&mut self, now: Instant) -> Option<String> {
         let elapsed = now.saturating_duration_since(self.started);
-        if elapsed < WINDOW { return None; }
-        let rates = self.totals.since(&self.base).per(elapsed.as_secs_f64());
-        self.base = self.totals;
-        self.started = now;
-        let stats = {
+        let summary = {
             let mut stats = self.shared.lock().unwrap();
             stats.totals = self.totals;
-            stats.per_second = rates;
-            stats.pacing = self.pacing;
+            if elapsed < WINDOW { return None; }
+            stats.per_second = self.totals.since(&self.base).per(elapsed.as_secs_f64());
             stats.published = Some(now);
-            stats.clone()
+            // A long quiet window averages low, which also ends a hot streak.
+            let rates = stats.per_second;
+            self.hot = if rates.failed() > SPIN_RATE || rates.unpaced > SPIN_RATE { self.hot + 1 } else { 0 };
+            stats.summary()
         };
-        // A long quiet window averages low, which also ends a hot streak.
-        self.hot = if rates.failed() > SPIN_RATE || rates.unpaced > SPIN_RATE { self.hot + 1 } else { 0 };
+        self.base = self.totals;
+        self.started = now;
         if self.hot < SPIN_SECONDS || std::mem::replace(&mut self.warned, true) { return None; }
-        let warning = format!("rune: surface {} has spun for {} s, a bug in Rune: {}", stats.name, self.hot, stats.summary());
+        let warning = format!("rune: surface has spun for {} s, a bug in Rune: {summary}", self.hot);
         eprintln!("{warning}");
         Some(warning)
     }
+}
+
+/// Whether the loop turned on a deadline that was still ahead when it slept: an overdue one
+/// turns it at once, as a poll does.
+pub(crate) fn slept(cause: winit::event::StartCause) -> bool {
+    matches!(cause, winit::event::StartCause::ResumeTimeReached { start, requested_resume } if requested_resume > start)
 }
 
 /// The published stats, with rates zeroed once they are stale.
@@ -231,10 +255,10 @@ mod tests {
         for _ in 0..120 { meter.redraw(true); meter.presented(); }
         for _ in 0..3 { meter.failed(Missed::Timeout); }
         meter.skipped();
-        meter.turn(false);
-        meter.turn(true);
+        meter.turn(false, false);
+        meter.turn(true, false);
         meter.set_pacing(Pacing::DisplayLink);
-        assert_eq!(meter.shared.lock().unwrap().totals, SurfaceCounts::default(), "nothing publishes inside the first second");
+        assert_eq!(meter.shared.lock().unwrap().per_second, SurfaceCounts::default(), "rates wait for a whole second");
         assert!(meter.tick(start + Duration::from_millis(1000)).is_none());
         let stats = meter.shared.lock().unwrap().clone();
         assert_eq!(stats.name, "main");
@@ -257,6 +281,41 @@ mod tests {
         let stale = stats.aged(start + Duration::from_millis(5500));
         assert_eq!(stale.per_second, SurfaceCounts::default(), "a surface quiet for two seconds reports no rate");
         assert_eq!(stale.totals.presents, 180);
+    }
+
+    #[test]
+    fn totals_and_pacing_publish_at_once() {
+        // A window that draws for less than a second, then rests, still reports what it drew.
+        let (mut meter, _) = meter();
+        meter.set_pacing(Pacing::DisplayLink);
+        assert_eq!(read(&meter.shared).pacing, Pacing::DisplayLink, "pacing set after the frame's counts still lands");
+        for _ in 0..3 { meter.redraw(true); meter.presented(); }
+        meter.set_pacing(Pacing::Idle);
+        let stats = read(&meter.shared);
+        assert_eq!((stats.totals.redraws, stats.totals.presents), (3, 3));
+        assert_eq!(stats.pacing, Pacing::Idle);
+        assert_eq!(stats.per_second, SurfaceCounts::default());
+        assert!(stats.summary().contains("totals 3 presents"), "{}", stats.summary());
+    }
+
+    #[test]
+    fn only_redraws_that_waited_for_nothing_are_unpaced() {
+        let (mut meter, _) = meter();
+        meter.redraw(true);
+        assert_eq!(meter.totals().unpaced, 0, "a display tick or vsync paces it");
+        meter.waited();
+        meter.redraw(false);
+        assert_eq!(meter.totals().unpaced, 0, "an event asked for it");
+        meter.turn(true, true);
+        meter.redraw(false);
+        assert_eq!(meter.totals().unpaced, 0, "a timer that was still ahead paced it");
+        meter.turn(true, false);
+        meter.redraw(false);
+        assert_eq!(meter.totals().unpaced, 1, "an overdue deadline or poll waited for nothing");
+        meter.waited();
+        meter.redraw(true);
+        meter.redraw(false);
+        assert_eq!(meter.totals().unpaced, 2, "each wait paces one redraw");
     }
 
     #[test]
