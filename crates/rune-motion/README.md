@@ -129,7 +129,7 @@ and fill, then removes the source immediately.
 ## Benchmarks
 
 `cargo run --profile perf --example bench`. Every track stays active for all 120 ticks at 120 Hz.
-Each figure is the best of 9 runs on the M4 Mac mini HiveMind worker, which was busy with other
+Each figure is the best of 9 runs on an Apple M4 build machine, which was busy with other
 jobs at the time, so treat these as upper bounds.
 
 | Scenario | 10k tracks | 100k tracks |

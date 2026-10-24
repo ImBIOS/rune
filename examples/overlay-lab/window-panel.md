@@ -2,7 +2,7 @@
 
 ## Cached launcher panels
 
-Deadbolt and Invoke can use the same retained launcher:
+Launcher-style apps can use a retained quick panel:
 
 ```rust,ignore
 WindowSpec::from_app("quick", App::new(spec).keep_running())
@@ -99,4 +99,4 @@ receive the queued focus event when Runtime next advances.
 
 `cargo run -p rune --example window-panel --release` supplies two independent windows with
 the same state type. `WINDOW_PANEL_SOCKET` enables the fixture's open/focus/hide/status/quit
-commands. `native/run-window-panel-probe.py` holds the Pro GUI lock for a bounded Cua proof.
+commands. `native/run-window-panel-probe.py` holds the GUI test host's lock for a bounded Cua proof.

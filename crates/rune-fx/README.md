@@ -5,11 +5,11 @@ Effect layers for Rune: glow, pulses, electricity, fire, motion blur, distortion
 typed params. Given (time, seed), every frame is deterministic. A layer whose intensity is 0, whose
 one-shot has finished, or that is off screen is never drawn.
 
-Build and run through HiveMind from the workspace root:
+Build and run from the workspace root:
 
 ```sh
-hivemind run --kind cargo -- cargo run --release -p rune-fx --example gallery   # stills, strips, timings
-hivemind run --kind cargo -- cargo test -p rune-fx --lib                        # contract tests
+cargo run --release -p rune-fx --example gallery   # stills, strips, timings
+cargo test -p rune-fx --lib                        # contract tests
 ```
 
 `examples/lab` composites these layers live inside Rune's renderer, with knobs.
@@ -145,7 +145,7 @@ Lengths are in points, times in seconds.
 
 ## Costs
 
-From `demo/fx/timings.md`: Apple M2 Max (Pro, shared with other jobs). One layer covers a
+From `demo/fx/timings.md`: Apple M2 Max, shared with other jobs. One layer covers a
 600×400 pt region at 2× (1200×800 = 960k px, smaller where noted). GPU time per draw is the median
 over 10 draws per timestamped pass. "reads" = texture taps plus CPU-table reads per pixel; "noise" =
 gradient-noise evaluations per pixel.
@@ -169,7 +169,7 @@ gradient-noise evaluations per pixel.
 These are worst-case full-region numbers. Real layers hug their node: the gallery's 224 pt card
 with flames and embers covers about 195k px (about 0.5 ms), and a charged 196×50 button border
 about 115k px (about 0.05 ms).
-Timings on the shared Pro varied by about 1.5–3× between runs (cheap effects like grain and chroma split
+Timings on the shared machine varied by about 1.5–3× between runs (cheap effects like grain and chroma split
 measured 0.1–0.2 ms in a quieter run), so read them as relative costs. A reserved machine is needed
 for gating.
 

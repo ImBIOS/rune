@@ -37,7 +37,7 @@ for a menu-bar app whose command-line flags belong to its host, not Rune.
 An AppHandle's `set_dock_icon` still changes the whole process at runtime.
 
 ```sh
-hivemind run --kind cargo --fetch target/release/overlay -- cargo build --release -p overlay
+cargo build --release -p overlay
 target/release/overlay --list-windows
 target/release/overlay --window controls --snap controls.png
 target/release/overlay --window overlay-0 --snap overlay.png --at 2

@@ -7,16 +7,15 @@ Both use a 400×40 pt capsule, nested dissolve/blur, sigma 1.5 pt and opacity .6
 row is unmasked; the lower row uses `clip_rounded(20)`. Run from the repo root:
 
 ```sh
-HIVEMIND_CAS_SYNC=0 hivemind run --kind render --worker pro \
-  --fetch crates/rune/artifacts/layer-filters/native-overlay -- sh -c \
-  'env RUSTC_WRAPPER= cargo build -p overlay-lab --bin layer-filter-overlay -j 2 && python3 examples/overlay-lab/native/run-filter-probe.py crates/rune/artifacts/layer-filters/native-overlay'
+cargo build -p overlay-lab --bin layer-filter-overlay -j 2
+python3 examples/overlay-lab/native/run-filter-probe.py crates/rune/artifacts/layer-filters/native-overlay
 ```
 
-The runner holds Pro's GUI lock, waits for visible alpha and positive Metal presentation,
+Run it on a GUI test Mac, never on a developer's desk display. The runner holds the host's GUI lock, waits for visible alpha and positive Metal presentation,
 then captures that exact window with Cua. It closes the app's stdin to quit, ends the Cua
 session and removes its diagnostic dylib. Evidence includes `native-overlay.png`, the
 presentation log and Cua's valid-frame/window metadata. This proves Rune's native rendering
-of Scrawl's capsule case; the separate headless regression covers fully off-wall sources.
+of a blurred, rounded capsule; the separate headless regression covers fully off-wall sources.
 
 ## Interactive lab
 
@@ -34,8 +33,8 @@ cargo run -p overlay-lab -- --scene picker --size 960x600 --snap picker.png
 ```
 
 Set `OVERLAY_LAB_SECONDS=15` for a bounded desktop probe with panel-ID/capture-request
-logging. `OVERLAY_LAB_PICKER=1` opens the picker immediately. Run desktop probes in Pro's
-logged-in GUI session, at normal priority. Do not launch/capture Studio's desktop.
+logging. `OVERLAY_LAB_PICKER=1` opens the picker immediately. Run desktop probes in a GUI test
+Mac's logged-in session, at normal priority, not on a developer's desk display.
 `OVERLAY_LAB_UNDERLAY=1` runs a separate normal-window process that logs clicks, for
 cross-process pass-through/focus checks. `OVERLAY_LAB_INCLUDE_IN_CAPTURE=1` disables the
 capture request while grounding input coordinates; omit it for the exclusion check.
@@ -48,7 +47,7 @@ ScreenCaptureKit window-ID filter when the OS capture path ignores NSWindow shar
 Wayland keeps all three levels on the compositor's overlay layer; it has no higher layer and
 does not guarantee ordering among peers. Native status/status+1 levels are macOS-specific.
 
-## Scrawl integration
+## Integrating an app's overlays
 
 - The lab prewarms hidden hosts and logs `on_created` with the actual macOS CGWindowID.
   `window_number()` is available after that callback and stays stable through hide/show.
@@ -57,7 +56,7 @@ does not guarantee ordering among peers. Native status/status+1 levels are macOS
   pass-through ink/glow on the same host. Mode changes wait for an owned drag's release.
   `Regions` uses `.hit()` geometry; `Legacy` restores the spec's `interactive` behavior.
 - `set_follow_pointer(bool)` enables/disables following independently of placement/input.
-  Scrawl can keep it disabled and supply its own `Rect` and `set_display` requests.
+  An app can keep it disabled and supply its own `Rect` and `set_display` requests.
 - `ConfiguredOverlay::poll(fn(&mut T, f64, &mut Tx) -> bool)` overrides the app's poll.
   Overlays with the same state type inherit `AppSpec::poll`; different state types use the
   builder. Return true when state changed, and use `Tx::wake_after` for the next deadline.
@@ -67,8 +66,8 @@ does not guarantee ordering among peers. Native status/status+1 levels are macOS
   including alpha-zero/offscreen prewarm. Runtime-only hidden updates do not call it.
   `animating()` keeps visible frames running; false allows them to go idle.
 - Standalone modifier transitions (for example, pressing/releasing Shift without another
-  key) are not delivered yet. They follow the shared modifier-only key event in item 6;
-  the desktop and Wayland overlay callbacks have TODOs for that integration. Pressed keys
+  key) are not delivered; the desktop and Wayland overlay callbacks have TODOs for a
+  shared modifier-only key event. Pressed keys
   still carry modifier state, and Escape works.
 - `Display::native_id()` maps to `DisplayTarget::Native`: macOS CGDirectDisplayID, Windows
   full-width HMONITOR, X11 RandR CRTC, Wayland wl_output registry name. X11 output IDs can
@@ -89,7 +88,7 @@ does not guarantee ordering among peers. Native status/status+1 levels are macOS
    observed button-up clears ownership and forwards one recovered release to Runtime at the
    first observed release position. Every Left Up acknowledges native ownership, even in None.
    None/All and hidden modes stop the polling deadline. Unchanged hover does not draw.
-- Release measurements on a shared Pro: 30 retained re-shows reached the alpha setter in
+- Release measurements on a shared M2 Max: 30 retained re-shows reached the alpha setter in
   **0.369 ms median / 0.776 ms p95**. This is **not a presentation timestamp**. Alpha-only
   reveal reuses a drawable; Metal does not timestamp its compositor reveal. Opt-in diagnostic
   redraws reached positive `presentedTime` at **49.728 ms median / 75.907 ms p95**.
@@ -163,9 +162,8 @@ logs native readbacks when the diagnostic library is loaded.
 Use `configured_options` for native builders; `options(WindowOptions)` remains concrete so
 existing `.options(Default::default())` calls keep compiling.
 
-`native/` contains diagnostic tools, loaded only into the lab process. Build through
-HiveMind on a worker, then copy the products into a fresh temporary directory on the
-authorized GUI host:
+`native/` contains diagnostic tools, loaded only into the lab process. Build them, then
+copy the products into a fresh temporary directory on the GUI test host:
 
 ```sh
 cargo build --release -p overlay-lab -j 2
@@ -175,9 +173,8 @@ xcrun swiftc -parse-as-library examples/overlay-lab/native/capture-probe.swift -
 ```
 
 Put `overlay-lab`, `presentation-probe.dylib` and `capture-probe` in that directory. Hold
-the host's GUI lock (`/tmp/pro-gui.lock`, `fcntl.LOCK_EX` on Pro), then run
+the host's GUI lock file (`fcntl.LOCK_EX`), then run
 `python3 examples/overlay-lab/native/run-native-probe.py <directory>` at normal priority.
-Never run it on Studio's screen.
 
 `OVERLAY_LAB_CONTROL` names a unique Unix socket and starts the pill prewarmed but hidden.
 Newline-terminated `show`, `hide`, `status`, `none`, `all`, `regions`, and `quit` commands are accepted. The driver
@@ -197,31 +194,28 @@ endpoint separately from the alpha-only reveal; it includes work absent in norma
 `run-idle-probe.py` samples process CPU and interrupt wake counters over ten-second intervals,
 without redraw assistance, and counts drawable callbacks. `--modes` measures All/None/Regions.
 `run-scrawl-probe.py <installed-binary> <directory>` runs 30 `lab pill tap-then-screen`
-cycles using the same diagnostic library without redraw assistance. It measures native
-already-visible `orderFrontRegardless` entry to positive presentation, not the beginning of
-the coordinator request. Pro's installed Metal pill measured 81.833 ms median / 101.002 ms
-p95; its optimization profile is unknown, so this is not a controlled release-to-release comparison.
+cycles of an installed reference app using the same diagnostic library without redraw
+assistance. It measures native already-visible `orderFrontRegardless` entry to positive
+presentation, not the beginning of the app's request.
 `run-input-probe.py` drives an independent underlay and twenty raw-motion enter/click/leave/click
 cycles. Build `mouse-path.swift`, copy it to a stable path and ad-hoc sign once before the
-user grants Accessibility. Do not replace the granted binary. The runner defaults to
-`~/tmp/rune-overlay-probe/mouse-path`; `OVERLAY_MOUSE_HELPER` overrides it. Set
+user grants Accessibility. Do not replace the granted binary. Point
+`OVERLAY_MOUSE_HELPER` at it; the runner's default path is machine-specific. Set
 `RUNE_OVERLAY_TRACE_INPUT=1` to log regions, monitor callbacks, polls, and native input flips.
 
-`run-cua-input-probe.py <directory> prepare` is the parent's approved CuaDriver alternative.
-It holds `/tmp/pro-gui.lock`, starts two disposable lab processes, captures `grounding.png`,
+`run-cua-input-probe.py <directory> prepare` drives the same checks through CuaDriver.
+It holds the GUI lock file, starts two disposable lab processes, captures `grounding.png`,
 then waits up to two minutes on `cua-control.sock`. After inspecting that screenshot and
 its backing scale, send JSON `{"run":true,"scale":2}` over the socket. It verifies twenty
 enter/click/leave/click cycles, hide-mid-press recovery, and `hit-only` → None during an
 owned press; `hit-only` and `chips` control commands switch the fixture. The final None
 assertion checks underlay delivery because None stops polling. `cycles:0,hide_case:false`
 runs only the handlerless case. Preserve `actions.jsonl`, `steps.jsonl`, and both process
-logs. Current evidence passed 20 boundary cycles, hide recovery and the handlerless case;
-see `artifacts/overlays/cua-boundary/README.md` for method and diagnostic-run caveats.
+logs.
 
 The capture helper uses ScreenCaptureKit with and without the exact CGWindowID in
-`excludingWindows`. It checks permission first and exits 77 if unavailable. Capture exclusion
-is **pending Scrawl integration**: Scrawl.app will verify its CGWindowID exclusion filter
-using its existing Screen Recording permission. The probe does not change TCC.
+`excludingWindows`. It checks permission first and exits 77 if unavailable. The probe does not change TCC;
+an app verifies its own CGWindowID exclusion filter with its Screen Recording permission.
 
 For click-through checks, use an independent underlay process. A coordinate-only synthetic
 click does not establish that native mouse-move observation ran first. Check actual pointer

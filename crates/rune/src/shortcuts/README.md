@@ -93,7 +93,7 @@ Display normalizes modifiers to `ctrl+alt+shift+super`, then the lowercase key.
 `cmd`, `command`, `meta`, and `logo` alias `super`; `option` aliases `alt`.
 
 `scripts/check-global-shortcut-macos.py <shortcut_probe>` checks two-process
-conflicts and real CuaDriver input on Pro under an exclusive `/tmp/pro-gui.lock`.
+conflicts and real CuaDriver input on a GUI test Mac, under an exclusive GUI lock file.
 The probe stays windowless and verifies handler thread identity.
 
 ## Shortcut recorder
@@ -179,5 +179,5 @@ disabled and ambiguous items fail the script.
 
 `scripts/check-native-menu-macos.py <menu_probe>` exercises the app-menu click,
 key equivalent, named-menu click, runtime enabled/checked updates, preservation of
-Quit/Hide and the Dock delegate selector on Pro under `/tmp/pro-gui.lock`.
+Quit/Hide and the Dock delegate selector on a GUI test Mac, under the same lock.
 `scripts/menu.json` exercises title/id dispatch headlessly.

@@ -1,44 +1,33 @@
 # Headless Subsecond spike
 
-Measured on Pro on 2026-10-21. See [the research report](../../research/08-spike-hot-patch.md) for conclusions and qualifications. `evidence/` contains the recorded JSON results; `results/` contains disposable full logs from a run.
+Measured on an Apple M2 Max build Mac. See [the research report](../../research/08-spike-hot-patch.md) for conclusions and qualifications. `evidence/` contains the recorded JSON results; `results/` contains disposable full logs from a run.
 
 This is a Rust terminal binary, with no Dioxus UI or window. `main` owns the state and runs a nominal 120 Hz loop. The patched function returns a string. The Python driver edits Rust source and consumes actual frame events, using timestamps from the same machine.
 
-## Run on Pro
+## Run
 
-Do not run Cargo on Studio.
+Copy this directory into its own scratch Git repository on the build machine, outside the Rune workspace:
 
 ```sh
-ssh pro 'mkdir -p ~/scratch/rune-hot-patch; git -C ~/scratch/rune-hot-patch init'
+mkdir -p <scratch>/rune-hot-patch && git -C <scratch>/rune-hot-patch init
 rsync -az --exclude target --exclude results --exclude evidence \
-  ~/code/open-source/rune/spikes/hot-patch/ pro:scratch/rune-hot-patch/
-```
-
-Open a shell on Pro and set its tool paths:
-
-```sh
-ssh pro
-export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:$PATH"
+  spikes/hot-patch/ <scratch>/rune-hot-patch/
 ```
 
 If Dioxus CLI is missing, install the release used by this spike:
 
 ```sh
-hivemind run --worker pro --kind cargo \
-  --dir "$HOME/scratch/rune-hot-patch" --no-sync -- \
-  cargo-binstall dioxus-cli --version 0.7.10 --no-confirm
+cargo-binstall dioxus-cli --version 0.7.10 --no-confirm
 "$HOME/.cargo/bin/dx" --version
 ```
 
-`/opt/homebrew/bin/dx` was Deno's command, not Dioxus. The harness deliberately uses the absolute Dioxus path.
+Homebrew's `dx` is Deno's command, not Dioxus. The harness deliberately uses the absolute Dioxus path.
 
-Run each mode under a lease:
+Run each mode from the scratch repository, one at a time:
 
 ```sh
 for mode in builds benchmark probes extras; do
-  hivemind run --worker pro --kind cargo \
-    --dir "$HOME/scratch/rune-hot-patch" --no-sync -- \
-    python3 "$HOME/scratch/rune-hot-patch/run.py" "$mode"
+  python3 run.py "$mode"
 done
 ```
 
@@ -47,19 +36,17 @@ done
 The boundary-signature probe can be run alone:
 
 ```sh
-hivemind run --worker pro --kind cargo \
-  --dir "$HOME/scratch/rune-hot-patch" --no-sync -- \
-  python3 "$HOME/scratch/rune-hot-patch/run.py" extras --case explicit_hotfn_signature
+python3 run.py extras --case explicit_hotfn_signature
 ```
 
 The underlying headless command is:
 
 ```sh
-~/.cargo/bin/dx serve --hot-patch --platform server \
+"$HOME/.cargo/bin/dx" serve --hot-patch --platform server \
   --open false --interactive false --addr 127.0.0.1 --port 18743
 ```
 
-The harness disables the worker's inherited sccache wrapper, enables incremental compilation, and limits Cargo to two jobs. It retains HiveMind's background scheduling policy. A nominal 120 Hz sleep loop runs in bursts under that policy; this is not a display-pacing benchmark.
+The harness disables any inherited sccache wrapper, enables incremental compilation, and limits Cargo to two jobs. The measured runs used background scheduling priority, under which a nominal 120 Hz sleep loop runs in bursts; this is not a display-pacing benchmark.
 
 ## Interpreting the probes
 

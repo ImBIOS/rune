@@ -4,10 +4,10 @@ Four Rune nodes fed by a background producer. macOS creates synthetic NV12 IOSur
 other platforms use the same shader with uploaded byte planes. `--snap` freezes frame 0.
 
 ```sh
-hivemind run --kind cargo --fetch target/release/video-tiles -- env RUSTC_WRAPPER= cargo build --release -p video-tiles
+cargo build --release -p video-tiles
 target/release/video-tiles --snap tiles.png --scale 2
 
-hivemind run --kind cargo --fetch target/perf/video-tiles -- env RUSTC_WRAPPER= cargo build --profile perf -p video-tiles
+cargo build --profile perf -p video-tiles
 target/perf/video-tiles --bench-native
 ```
 
@@ -114,7 +114,7 @@ each `push` still wakes the app.
   command buffer but keeps the acquired drawable private. There is no cheap, supported
   presented-handler hook to prototype without owning that shell. GPU-done is not present.
 
-Verification: `hivemind run --kind cargo -- env RUSTC_WRAPPER= cargo test -p rune native_surface -- --test-threads=1`.
+Verification: `cargo test -p rune native_surface -- --test-threads=1`.
 The GPU test compares native IOSurface and byte-upload results with a scalar colour oracle,
 checks exact one-pixel patterns, fitting/clipping, notifications, and released backing ownership.
 The overlap test acquires the same exclusive device lock as presentation while GPU work

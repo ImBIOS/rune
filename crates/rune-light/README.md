@@ -32,7 +32,7 @@ let drew = lights.render(&device, &queue, &mut encoder,
 Run the demos, the benchmark and the CPU check (headless, offscreen; outputs land in `demo/light/`):
 
 ```sh
-hivemind run --kind cargo -- cargo build --release -p rune-light --example light
+cargo build --release -p rune-light --example light
 target/release/examples/light all        # chat, flashlight, emissive, raised, godrays: PNG, strip, MP4
 target/release/examples/light verify     # GPU shadow texels vs. CPU estimator and brute-force ground truth
 ```
@@ -40,7 +40,7 @@ target/release/examples/light verify     # GPU shadow texels vs. CPU estimator a
 The benchmark (GPU timestamps per pass → `demo/light/bench.json`) needs the perf profile:
 
 ```sh
-hivemind run --kind cargo -- cargo build --profile perf -p rune-light --example light
+cargo build --profile perf -p rune-light --example light
 target/perf/examples/light bench
 ```
 
@@ -84,7 +84,7 @@ between the uber pass and present. The demos do exactly this by hand with Rune's
 | God rays | ½ | A light behind the UI: each pixel integrates the light's glow, masked by the field (prefiltered to the sample spacing), along its path to the light (Mitchell, GPU Gems 3), plus distance falloff | Shafts through every gap and no banding, with the same field |
 | GI | ⅛ | 2D radiance cascades: 5 cascades, 4·4ⁿ directions, Sannikov's bilinear fix, emitters glow, cards absorb only rays from lower probes (light reaches a card from things standing on it), one bounce from direct light on cards | Every emitter lights its neighbours with soft occlusion at a cost fixed by the grid, not the emitter count |
 
-Prior art I reused (Arcade, `~/code/open-source/arcade`):
+Prior art reused from Arcade:
 
 - `packages/kit/gpu/shadows/capsule-shadows.ts:508-527` (cone-relative soft visibility),
 - `packages/kit/gpu/lights/physical.ts:142-163` (windowed inverse square, Karis widening),
@@ -95,7 +95,7 @@ Prior art I reused (Arcade, `~/code/open-source/arcade`):
 
 ## GPU cost
 
-Measured on an Apple M5 Max (Studio, under other load) at 1280×800 pt × 2 = 2560×1600 device px, with 100 raised,
+Measured on an Apple M5 Max (under other load) at 1280×800 pt × 2 = 2560×1600 device px, with 100 raised,
 bevelled occluders. Compute passes are timed with wgpu timestamp queries (medians of 60 frames). Render-pass
 timestamps aren't ordered against compute on tile GPUs, so the whole frame is also measured as the wall clock of
 120 back-to-back frames with no readback. That's GPU-bound and an upper bound that includes submission

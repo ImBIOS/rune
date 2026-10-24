@@ -1,22 +1,21 @@
 # Rune: plan
 
-*2026-10-21. Research notes behind every claim are in [`research/`](research/) (01–11). Numbers marked "target" are
-commitments to measure against, not results.*
+*Research notes behind every claim are in [`research/`](research/). Numbers marked "target" are commitments to
+measure against, not results.*
 
 ## The short version
 
 Rune is a Rust UI framework with its own renderer, text, layout, state,
 animation and platform shells, built to feel like SwiftUI-on-iOS at 120 Hz and to be written and checked by agents.
 
-**Direction update (2026-10-21):** Rune apps carry **their own design language on every
-platform, Mac included**, rather than imitating each OS ("the native [Mac] ones don't feel good… native iOS apps feel
-good"). Rune itself bakes in no brand: it ships a token-driven theming
+**Direction:** Rune apps carry **their own design language on every
+platform, Mac included**, rather than imitating each OS. Rune itself bakes in no brand: it ships a token-driven theming
 system, and OpenCode's theme is the first theme built on it and the reference example. The flagship test is
 **recreating OpenCode Desktop** in Rune and raising its bar, which makes Windows and Linux
 first-class from the start. Native stays where it's behaviour, not looks: text input/IME, accessibility, window
 management, clipboard, scroll momentum. A Rust component library with the same names as `@opencode/ui`, gallery
 and screenshot tests, and Hex Settings as the first real screen fold in here instead of becoming a second stack on
-Slint. Sections below are updated for this.
+Slint.
 
 | Layer | Pick | Instead of |
 |---|---|---|
@@ -39,7 +38,7 @@ OpenCode Desktop's Chromium-rendered look closely enough (text above all), and s
 
 **First milestones:** Rune's theming system plus an OpenCode theme generated from `@opencode/ui` as its first
 consumer, and a component gallery styled by it; Hex's Settings as the first real screen on Mac, Windows and Linux; then OpenCode Desktop's main screens.
-A docs/marketing site comes first to explain it (Kit's idea, as with Deadbolt).
+A docs/marketing site comes first to explain it.
 
 ---
 
@@ -59,7 +58,7 @@ the reasons were the same:
 5. **No springs or layout animation,** so every app hand-rolled them.
 6. **Upstream was frozen** at 0.2.2 for Kit's apps, so every fix lived in a fork.
 
-Upstream GPUI has since moved a lot: Zed's tree at `5447804` (today) has `gpui_ios`, `gpui_web`, a wgpu backend,
+Upstream GPUI has since moved a lot: Zed's tree at `5447804` has `gpui_ios`, `gpui_web`, a wgpu backend,
 `spring.rs`, AccessKit and subsecond hot reload (verified in a clone). It still redraws the whole window every dirty
 frame, has no layer compositing or group opacity, runs animations by re-rendering views on the main thread, and
 panics on re-entrant entity borrows ([01](research/01-gpui-zed-warp.md)). Those are the exact things that sent Kit
@@ -79,8 +78,8 @@ Kit's fork) under its Apache-2.0 licence.
    native per platform. Controls, type, motion and materials come from the app's theme, the same on every platform,
    Mac included. The framework ships no brand of its own.
 6. **Owned, not wrapped.** Depend on foundational crates (Taffy, Parley, AccessKit), never on another UI framework.
-7. **Optimise for performance, correctness, speed of change and prototyping; not for human readability** (Kit,
-   2026-10-21). Agents write and maintain the code, so:
+7. **Optimise for performance, correctness, speed of change and prototyping; not for human readability**.
+   Agents write and maintain the code, so:
    - **Fast path plus reference path.** Each hard subsystem (layout, text, renderer, springs) has a slow, obviously
      correct reference implementation (CPU, no tricks) and a fast one (SoA, SIMD, `unsafe` where measured, specialised,
      duplicated). Every change differential-tests the fast one against the reference on generated inputs. Correctness
@@ -148,7 +147,7 @@ way (SwiftUI-only glass morphing, the `RuneView` representable).
 
 ### 4.2 GPU API: own thin HAL, raw Metal on Apple, wgpu elsewhere
 
-*Updated: start with wgpu on every platform, since the desktop trio ships together; the raw Metal backend below
+*Start with wgpu on every platform, since the desktop trio ships together; the raw Metal backend below
 becomes a later optimization, added only where measurements show wgpu falls short.*
 
 A ~400-line internal trait over two backends. Raw Metal (`objc2-metal`) on Apple gets precompiled `.metallib`
@@ -185,7 +184,7 @@ ahead ([04 §4](research/04-language-gpu-renderer.md)); spike S3 checks this bef
 
 ### 4.4 Compositing with native layers (Apple)
 
-*Updated: optional now that Rune carries OpenCode's look on every platform; kept for Kit's Mac surfaces (M4).*
+*Optional now that Rune carries OpenCode's look on every platform; kept for Kit's Mac surfaces (M4).*
 
 Rune can't draw Liquid Glass: the shaders that sample behind the window live in the window server. So the Apple
 shell composes **native underlays and overlays** with Rune's Metal layer: a system glass view sits behind a
@@ -289,24 +288,24 @@ loading code signed after install aren't available without a debugger; Injection
 unresolved 2026 failure report; Kit's HotReloadKit is simulator- and Mac-only for the same reasons
 ([07](research/07-hot-reload.md)). So Rune layers it:
 
-Views stay plain Rust; there is no separate view language (Kit's call, 2026-10-21).
+Views stay plain Rust; there is no separate view language.
 
 | Layer | What changes | How | Target (edit → presented frame) |
 |---|---|---|---|
 | 0. Tokens and knobs | colours, spacing, type, springs, any `Tunable` | token file watched + knobs remote protocol over WebSocket; render thread re-resolves live, in-flight springs retarget | ≤ 50 ms Mac, ≤ 100 ms iPhone |
 | 1. Live literals | any edit that only changes literals in view code (a number, colour, string, spring, enum variant) | Xcode-Previews-style: in dev builds a macro gives each literal in a view function a `file:line:col` id; the watcher re-parses the saved file and, if only literals changed, pushes the new values down the token channel. No compile. | ≤ 100 ms Mac and iPhone |
 | 2. Shaders | Metal/WGSL | rebuild the one pipeline at runtime in dev | ≤ 150 ms |
-| 3. Rust on the Mac | structural edits: view functions, handlers, layout, logic | subsecond hot-patching through `dx` (the same path upstream GPUI now uses); models live outside patched code, so state stays | **measured ~1 s today** (989 ms median, S1); goal ≤ 300 ms |
+| 3. Rust on the Mac | structural edits: view functions, handlers, layout, logic | subsecond hot-patching through `dx` (the same path upstream GPUI now uses); models live outside patched code, so state stays | **measured ~1 s** (989 ms median, S1); goal ≤ 300 ms |
 | 4. Rust on the iPhone | the same edits | **split-process dev mode** (below) | layer 3 + one USB round trip *(spike S4)* |
 | 5. Everything else | struct layout changes, new deps | full rebuild; models restored from a snapshot keyed by id, incompatible ones reset | ≤ 2 s Mac incremental (1.85 s measured for a tiny crate); device install as fast as Xcode allows |
 
 **What spike S1 found** ([08](research/08-spike-hot-patch.md)). Subsecond 0.7.10 hot-patches a plain Rust binary
 with no Dioxus UI, keeping main-owned state across ten edits: 989 ms median, 1,150 ms p95 from save to new output
-(826 ms to patch applied; the CLI's own patch time was 687 ms median), on the Pro under HiveMind's background
+(826 ms to patch applied; the CLI's own patch time was 687 ms median), on an M2 Max build worker at background
 priority. A normal incremental rebuild was 1.85 s, and cold 71 s. It also found traps Rune's integration has to
 close: a single-reference closure capture silently kept running old code (use `HotFn::current(f).call(args)` at
 explicit boundaries), statics and thread locals reset on patch, cached `Box<dyn Trait>` objects keep their old
-methods, and adding a struct field isn't detected. So the ≤ 300 ms target holds today for layers 0–2, which cover
+methods, and adding a struct field isn't detected. So the ≤ 300 ms target holds for layers 0–2, which cover
 most tuning edits; structural Rust edits are about a second. Getting those under 300 ms is M1 work: measure at
 foreground priority on the Mac, keep each app's views in a tiny leaf crate, use the fastest linker, and try the
 cranelift backend for dev builds. Patch boundaries are Rune's view functions and handlers, not arbitrary code; a
@@ -455,7 +454,7 @@ were recalled rather than re-read; each note marks which. Cite-check before rely
   validate-then-commit, budgets and capability grants ([16]).
 - Perceptual diffs (NVIDIA FLIP) and Kani on core invariants ([14]).
 
-**Effects Kit wants (2026-10-21): motion blur and friends.** Research [15] said motion blur isn't needed at 120 Hz,
+**Effects: motion blur and friends.** Research [15] said motion blur isn't needed at 120 Hz,
 but Kit wants it as an effect, and Rune can do it better than anyone because every track is analytic: true
 **shutter motion blur** samples a node's exact position/scale/opacity at several instants inside the frame's shutter
 interval (sample count scaled by on-screen speed, zero cost at rest) and accumulates them, instead of guessing from
@@ -500,8 +499,8 @@ Rune ships a design system, not just primitives:
 
 ## 8. Performance targets
 
-Reference devices get pinned before any number becomes a gate (a 120 Hz Apple-silicon Mac and a ProMotion iPhone;
-never Studio's desk display). CI runs deterministic correctness on every change and performance on reserved hardware
+Reference devices get pinned before any number becomes a gate (a 120 Hz Apple-silicon Mac and a ProMotion iPhone,
+never a developer's desk display). CI runs deterministic correctness on every change and performance on reserved hardware
 ([09 §C](research/09-agent-native-and-perf-targets.md)).
 
 | Metric | Target |
@@ -518,7 +517,7 @@ never Studio's desk display). CI runs deterministic correctness on every change 
 | At rest | zero animation ticks and zero GPU submissions |
 | Idle memory | Mac ≤ 50 MiB RSS, iPhone ≤ 40 MiB footprint |
 | Binary | Mac stripped arm64 hello ≤ 5 MiB |
-| Reload: tokens / live literals / structural Rust edit on Mac / same on iPhone split | ≤ 50 ms / ≤ 100 ms / ≤ 300 ms goal (≈ 1 s today) / Mac + USB |
+| Reload: tokens / live literals / structural Rust edit on Mac / same on iPhone split | ≤ 50 ms / ≤ 100 ms / ≤ 300 ms goal (≈ 1 s measured) / Mac + USB |
 | Incremental compile after a view edit | ≤ 2 s on the build worker |
 
 ## 9. Risks
@@ -549,10 +548,10 @@ never Studio's desk display). CI runs deterministic correctness on every change 
 | Spike | Question | Where |
 |---|---|---|
 | S1 hot patch | edit → patched function running, with state, via subsecond in a non-Dioxus Rust binary | **done:** works; 989 ms median, 1,150 ms p95 ([08](research/08-spike-hot-patch.md)) |
-| S1b fast patch | same edit at foreground priority, views in a leaf crate, fastest linker, cranelift: can it reach 300 ms? | Pro |
-| S2 glass sync | can an `NSGlassEffectView` underlay track a render-thread-animated shape at 120 Hz with the main thread blocked, no edge glitches? | Pro or mini, recorded off Studio |
-| S3 pacing | `CADisplayLink` vs `CAMetalDisplayLink` latency and stability; immediate draw on input; event → present numbers | Pro or mini |
-| S4 split mode | renderer on an iPhone, app side on the Mac over USB: round-trip latency and edit → pixels | Pro + Kit's iPhone |
+| S1b fast patch | same edit at foreground priority, views in a leaf crate, fastest linker, cranelift: can it reach 300 ms? | build Mac |
+| S2 glass sync | can an `NSGlassEffectView` underlay track a render-thread-animated shape at 120 Hz with the main thread blocked, no edge glitches? | GUI test Mac, recorded off the desk display |
+| S3 pacing | `CADisplayLink` vs `CAMetalDisplayLink` latency and stability; immediate draw on input; event → present numbers | GUI test Mac |
+| S4 split mode | renderer on an iPhone, app side on the Mac over USB: round-trip latency and edit → pixels | build Mac + an iPhone |
 | S5 text | Parley + atlas + dilation vs CoreText, pixel diff on 200 strings at 1× and 2× | headless worker |
 
 **M0.5 — Rendering smoke test (now).** Before any of the theming or component work: one small window (a settings
@@ -574,8 +573,8 @@ Replaces GPUI for that screen in Hex.
 **M3 — OpenCode Desktop's main screens.** Sidebar and session list, the streaming transcript (markdown, code blocks,
 tool pills), composer, diff view, command palette, popovers and menus, at 120 Hz with Kit's motion. Done when it looks
 like OpenCode Desktop side by side and feels clearly better, on all three desktops. This is the flagship test.
-It runs against **real data**: a live mode connects to the OpenCode server (on Studio, the Beta service at
-`127.0.0.1:4096`, basic auth from the profile's password file, read but never printed), lists real projects and
+It runs against **real data**: a live mode connects to the OpenCode server (by default `127.0.0.1:4096`, with basic auth
+read from local config and never printed), lists real projects and
 sessions, renders real transcripts, follows the event stream as turns arrive, and can send a prompt when Kit types one
 in the composer. Not every feature, just enough to use it. Rules: agents building and testing it only use read-only
 GETs and never send prompts or create sessions on the live server (never `GET /api/experimental/session/stats`);
