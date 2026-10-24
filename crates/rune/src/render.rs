@@ -319,16 +319,7 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let atlas = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("glyph atlas"),
-            size: wgpu::Extent3d { width: ATLAS_SIZE, height: ATLAS_SIZE, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
+        let atlas = Self::texture(device, "glyph atlas", wgpu::TextureFormat::R8Unorm, ATLAS_SIZE, ATLAS_SIZE);
         let stand_in = Self::image_texture(device, 1, 1);
         let bind_group = Self::bind_group(device, &bgl, &globals, &atlas, &stand_in, None);
         let spring_layout = properties.map(|_| crate::gpu_springs::Bindings::layout(device));
@@ -411,16 +402,37 @@ impl Renderer {
     }
 
     fn image_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+        Self::texture(device, "image atlas", wgpu::TextureFormat::Rgba8UnormSrgb, width, height)
+    }
+
+    /// A sampled texture the CPU fills with `write_rows`.
+    fn texture(device: &wgpu::Device, label: &str, format: wgpu::TextureFormat, width: u32, height: u32) -> wgpu::Texture {
         device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("image atlas"),
+            label: Some(label),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         })
+    }
+
+    /// Uploads rows `y0..y1` of `texture` from its tightly packed CPU copy `data`.
+    fn write_rows(queue: &wgpu::Queue, texture: &wgpu::Texture, data: &[u8], (y0, y1): (u32, u32)) {
+        let row = texture.width() * texture.format().block_copy_size(None).unwrap();
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y: y0, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &data[(y0 * row) as usize..(y1 * row) as usize],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None },
+            wgpu::Extent3d { width: texture.width(), height: y1 - y0, depth_or_array_layers: 1 },
+        );
     }
 
     fn bind_group(
@@ -463,19 +475,8 @@ impl Renderer {
                 changed = true;
                 page.dirty = Some((0, page.height));
             }
-            let Some((y0, y1)) = page.dirty.take() else { continue };
-            let row = page.width * 4;
-            queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.images[index].as_ref().unwrap().0,
-                mip_level: 0,
-                origin: wgpu::Origin3d { x: 0, y: y0, z: 0 },
-                aspect: wgpu::TextureAspect::All,
-            },
-            &page.data[(y0 * row) as usize..(y1 * row) as usize],
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None },
-            wgpu::Extent3d { width: page.width, height: y1 - y0, depth_or_array_layers: 1 },
-        );
+            let Some(rows) = page.dirty.take() else { continue };
+            Self::write_rows(queue, &self.images[index].as_ref().unwrap().0, &page.data, rows);
         }
         if changed { self.images_changed(); }
         self.refresh_layer_bindings(device);
@@ -565,19 +566,7 @@ impl Renderer {
         viewport: (u32, u32),
     ) {
         if self.springs.is_some() { assert_eq!(instances.len(), self.spring_instances); }
-        if let Some((y0, y1)) = atlas.dirty.take() {
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.atlas,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d { x: 0, y: y0, z: 0 },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &atlas.data[(y0 * ATLAS_SIZE) as usize..(y1 * ATLAS_SIZE) as usize],
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(ATLAS_SIZE), rows_per_image: None },
-                wgpu::Extent3d { width: ATLAS_SIZE, height: y1 - y0, depth_or_array_layers: 1 },
-            );
-        }
+        if let Some(rows) = atlas.dirty.take() { Self::write_rows(queue, &self.atlas, &atlas.data, rows); }
         if instances.len() > self.capacity {
             self.capacity = instances.len().next_power_of_two();
             self.instances = Self::instance_buffer(device, self.capacity);
