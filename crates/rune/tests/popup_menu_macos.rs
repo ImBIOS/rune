@@ -186,9 +186,7 @@ mod mac {
         let (ready_tx, ready_rx) = mpsc::channel();
         let app = App::new(spec).args(Vec::new()).on_ready(move |_| { let _ = ready_tx.send(()); });
         let handle = app.handle();
-        let result = std::sync::Arc::new(Mutex::new(None));
-        let out = result.clone();
-        std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
             let run = std::panic::catch_unwind(|| {
                 let started = Instant::now();
                 ready_rx.recv_timeout(Duration::from_secs(60)).expect("window ready");
@@ -196,12 +194,22 @@ mod mac {
                 std::thread::sleep(Duration::from_millis(300));
                 run(&handle);
             });
-            *out.lock().unwrap() = Some(run.is_ok());
             handle.quit();
+            run.is_ok()
         });
         app.run();
-        assert_eq!(*result.lock().unwrap(), Some(true), "popup_menu_macos failed");
+        // The last step closes the window while its menu tracks: `run` returning means the
+        // tracking loop ended with it.
+        assert!(!TRACKING.load(Ordering::SeqCst), "the menu still tracked after the app ended");
+        assert!(worker.join().unwrap(), "popup_menu_macos failed");
+        assert_eq!(picks().len(), 4, "every menu answered once: {:?}", picks());
         println!("popup_menu_macos: ok");
+    }
+
+    /// Opens the menu over the button, by a click if clicks reach the window.
+    fn open_menu(handle: &AppHandle<State>, clicks: bool) {
+        if clicks { click(handle); } else { handle.update(|_, tx| tx.popup_menu(menu(), "theme", record)); }
+        assert!(wait("the menu", Duration::from_secs(3), || TRACKING.load(Ordering::SeqCst)), "the menu never opened");
     }
 
     fn run(handle: &AppHandle<State>) {
@@ -267,5 +275,23 @@ mod mac {
         std::thread::sleep(Duration::from_millis(200));
         assert!(FRAMES.load(Ordering::SeqCst) > before, "frames keep running after the menu");
         println!("popup_menu_macos: click {}, keys {}", if clicked { "delivered" } else { "dropped" }, if typed { "delivered" } else { "dropped" });
+
+        // 5. Hiding the window while its menu tracks ends the menu and answers None.
+        open_menu(handle, clicked);
+        handle.hide();
+        assert!(wait("the menu to end with the hide", Duration::from_secs(3), || !TRACKING.load(Ordering::SeqCst)), "the menu outlived its hidden window");
+        assert!(wait("the hide's answer", Duration::from_secs(3), || picks().len() == 3));
+        assert_eq!(picks()[2], None);
+        assert!(!handle.is_visible());
+        handle.open();
+        assert!(wait("the window back", Duration::from_secs(3), || handle.is_visible()));
+        std::thread::sleep(Duration::from_millis(300));
+
+        // 6. Closing it while its menu tracks answers None while the state lives, and the app
+        // (which doesn't keep running) ends; `main` checks the rest.
+        open_menu(handle, clicked);
+        handle.close();
+        assert!(wait("the close's answer", Duration::from_secs(3), || picks().len() == 4));
+        assert_eq!(picks()[3], None);
     }
 }

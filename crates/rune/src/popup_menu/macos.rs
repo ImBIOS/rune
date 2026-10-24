@@ -3,7 +3,7 @@
 //! run-loop block, after the handler returns: while it tracks, winit's observers (registered
 //! for the common modes, which include the tracking mode) keep delivering redraws, display
 //! ticks and wakes.
-use std::{cell::{Cell, RefCell}, ffi::c_void, sync::Arc};
+use std::{cell::{Cell, RefCell}, ffi::c_void, rc::Rc, sync::Arc};
 
 use block2::{Block, RcBlock};
 use objc2::{ClassType, DeclaredClass, declare_class, msg_send, msg_send_id, mutability, sel, rc::Retained,
@@ -12,7 +12,7 @@ use objc2_app_kit::{NSMenu, NSMenuItem};
 use objc2_foundation::{MainThreadMarker, NSObject, NSPoint, NSString};
 use winit::window::Window;
 
-use super::{Answer, Entry, PopupMenu, Show};
+use super::{Entry, PopupMenu, Session, Show};
 use crate::runtime::Waker;
 
 /// Every item's id, by tag, and the one picked.
@@ -39,8 +39,10 @@ declare_class!(
 );
 
 /// Opens `show` over `window` once the current winit handler returns. The answer lands in
-/// `answer` and `wake` brings the host to read it. False when the window has no AppKit view.
-pub(super) fn show(window: &Arc<Window>, show: Show, answer: Answer, wake: Option<Waker>) -> bool {
+/// `session` and `wake` brings the host to read it. False when the window has no AppKit view.
+/// A session cancelled before then never opens; one whose window was hidden by then answers
+/// `None`.
+pub(super) fn show(window: &Arc<Window>, show: Show, session: Rc<Session>, wake: Option<Waker>) -> bool {
     let Some(mtm) = MainThreadMarker::new() else { return false };
     let Some(view) = crate::macos::content_view(window) else { return false };
     let mut ids = Vec::new();
@@ -53,15 +55,23 @@ pub(super) fn show(window: &Arc<Window>, show: Show, answer: Answer, wake: Optio
     unsafe { menu.setMinimumWidth(show.min_width.max(0.0) as f64) };
     let at = NSPoint::new(show.at.0 as f64, show.at.1 as f64);
     run_later(move || {
-        // SAFETY: main thread (a main run-loop block). winit's view is flipped, so `at` is
-        // in window points from the top-left, the coordinates Rune lays out in; AppKit maps
-        // them through the view to the screen at its backing scale.
-        let chose = unsafe { menu.popUpMenuPositioningItem_atLocation_inView(positioned.as_deref(), at, Some(&view)) };
-        let picked = target.ivars().picked.borrow_mut().take();
-        if chose && picked.is_none() { eprintln!("rune: pop-up menu reported a pick without its action"); }
+        if session.cancelled.get() { return; }
+        // A close or hide in the same turn as the request, after the host handed it over.
+        let picked = if view.window().is_some_and(|w| w.isVisible()) {
+            *session.tracking.borrow_mut() = Some(menu.clone());
+            // SAFETY: main thread (a main run-loop block). winit's view is flipped, so `at` is
+            // in window points from the top-left, the coordinates Rune lays out in; AppKit maps
+            // them through the view to the screen at its backing scale.
+            let chose = unsafe { menu.popUpMenuPositioningItem_atLocation_inView(positioned.as_deref(), at, Some(&view)) };
+            session.tracking.borrow_mut().take();
+            let picked = target.ivars().picked.borrow_mut().take();
+            if chose && picked.is_none() { eprintln!("rune: pop-up menu reported a pick without its action"); }
+            picked
+        } else { None };
         clear_targets(&menu);
         drop((menu, target));
-        *answer.borrow_mut() = Some(picked);
+        if session.cancelled.get() { return; }
+        *session.answer.borrow_mut() = Some(picked);
         if let Some(wake) = wake { wake(); }
     });
     true

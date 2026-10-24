@@ -2,7 +2,7 @@ use super::*;
 use crate::{Cx, El, Env, el};
 
 #[derive(Default)]
-struct State { theme: String, picks: Vec<Option<String>>, anchor: Option<PopupAnchor> }
+struct State { theme: String, picks: Vec<Option<String>>, anchor: Option<PopupAnchor>, hovers: Vec<bool>, extra: bool }
 
 fn theme_menu(selected: &str) -> PopupMenu {
     PopupMenu::picker([("system", "System"), ("light", "Light"), ("dark", "Dark")], selected)
@@ -13,13 +13,15 @@ fn record(s: &mut State, picked: Option<&str>, _: &mut Tx) {
     if let Some(id) = picked { s.theme = id.into(); }
 }
 
-fn view(_: &State, _: &mut Cx<State>) -> El {
+fn view(s: &State, _: &mut Cx<State>) -> El {
     el()
         .child(el().key("theme").size(80.0, 20.0).pin(Some(40.0), Some(30.0), None, None)
+            .on_hover_change(|s: &mut State, inside: bool, _: &mut Tx| s.hovers.push(inside))
             .on_press_tx(|s: &mut State, tx: &mut Tx| {
                 let anchor = s.anchor.clone().unwrap_or_else(|| "theme".into());
                 tx.popup_menu(theme_menu(&s.theme), anchor, record);
             }))
+        .children(s.extra.then(|| el().key("extra").size(30.0, 10.0).pin(Some(150.0), Some(5.0), None, None)))
         .child(el().key("canvas").size(100.0, 40.0).pin(Some(0.0), Some(60.0), None, None)
             .on_secondary_press(|_: &mut State, press: PointerPress, tx: &mut Tx| {
                 let menu = PopupMenu::new().item(PopupItem::new("copy", "Copy")).separator()
@@ -160,6 +162,95 @@ fn the_tree_shows_the_open_menu() {
     assert_eq!(menu["items"][0]["symbol"], "doc.on.doc");
     assert!(menu["items"][0]["keyEquivalent"].is_string());
     assert_eq!(menu["items"][1], json!({ "separator": true }));
+}
+
+#[test]
+fn a_window_going_away_answers_every_waiting_menu_none_once() {
+    let mut rt = runtime();
+    let mut presenter = Presenter::default();
+    rt.update(|_, tx| {
+        tx.popup_menu(theme_menu("system"), "theme", record);
+        // A dismissal that asks again is answered too.
+        tx.popup_menu(theme_menu("dark"), "theme", |s: &mut State, picked, tx: &mut Tx| {
+            record(s, picked, tx);
+            tx.popup_menu(theme_menu("light"), "theme", record);
+        });
+    });
+    rt.open_popup_headless();
+    // The menu that was showing gives its answer only after the window went away.
+    let showing = Rc::new(Session::default());
+    presenter.session = Some(showing.clone());
+    presenter.cancel(&mut rt);
+    assert_eq!(rt.state.picks, [None, None, None]);
+    assert_eq!(rt.popup_menu(), None);
+    assert!(!rt.popup_open);
+    assert!(showing.cancelled.get(), "a tracking menu stops, and one not yet up never opens");
+
+    *showing.answer.borrow_mut() = Some(Some("dark".into()));
+    assert!(!presenter.answer(&mut rt), "a late answer doesn't call back a second time");
+    presenter.cancel(&mut rt);
+    assert_eq!(rt.state.picks, [None, None, None]);
+}
+
+#[test]
+fn a_callback_that_always_asks_again_cannot_hold_a_closing_window() {
+    fn again(s: &mut State, picked: Option<&str>, tx: &mut Tx) {
+        record(s, picked, tx);
+        tx.popup_menu(theme_menu("system"), "theme", again);
+    }
+    let mut rt = runtime();
+    rt.update(|_, tx| tx.popup_menu(theme_menu("system"), "theme", again));
+    rt.cancel_popups();
+    assert_eq!(rt.state.picks.len(), 64);
+    assert_eq!(rt.popup_menu(), None);
+}
+
+#[test]
+fn a_menu_from_a_press_ends_the_hover_in_that_frame() {
+    let mut rt = runtime();
+    let (x, y) = rt.find("theme").unwrap();
+    rt.pointer_move(x, y);
+    rt.frame(0.0);
+    assert_eq!(rt.state.hovers, [true]);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.0);
+    assert!(rt.popup_menu().is_some());
+    assert_eq!(rt.state.hovers, [true, false], "the hover ends with the frame that asked for the menu");
+    assert_eq!((rt.pointer(), rt.pressing()), (None, false), "nothing draws hovered or pressed under the menu");
+}
+
+#[test]
+fn a_menu_from_an_update_ends_the_hover_when_it_opens() {
+    let mut rt = runtime();
+    let (x, y) = rt.find("theme").unwrap();
+    rt.pointer_move(x, y);
+    rt.frame(0.0);
+    rt.update(|_, tx| tx.popup_menu(theme_menu("system"), (x, y), record));
+    rt.open_popup_headless();
+    assert_eq!(rt.pointer(), None);
+    rt.frame(0.0);
+    assert_eq!(rt.state.hovers, [true, false]);
+}
+
+#[test]
+fn a_menu_a_pick_asks_for_waits_for_the_element_the_pick_mounts() {
+    let mut rt = runtime();
+    rt.update(|_, tx| tx.popup_menu(theme_menu("system"), "theme", |s: &mut State, picked, tx: &mut Tx| {
+        record(s, picked, tx);
+        s.extra = true;
+        tx.popup_menu(theme_menu("dark"), "extra", record);
+    }));
+    rt.frame(0.0);
+    assert!(!rt.popup_waits_for_layout(), "the frame committed");
+    rt.open_popup_headless();
+    rt.resolve_popup(Some("dark")).unwrap();
+    assert!(rt.popup_waits_for_layout(), "\"extra\" mounts with the next commit");
+    rt.frame(0.0);
+    assert!(!rt.popup_waits_for_layout());
+    let show = rt.take_popup().unwrap().unwrap();
+    assert_eq!((show.at, show.min_width), ((150.0, 5.0), 30.0));
+    assert_eq!(rt.state.picks, [Some("dark".to_owned())]);
 }
 
 #[test]

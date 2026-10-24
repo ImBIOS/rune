@@ -1217,8 +1217,15 @@ impl<S: 'static> Runtime<S> {
                 ran |= self.run_action(action, &mut tx);
             }
         }
-        self.schedule_wakes(tx.wakes.drain(..));
         self.latch_requests(&mut tx);
+        // A handler asked for a menu: the hover it takes ends in this commit, not a frame later.
+        if self.release_pointer_for_popup() {
+            for action in std::mem::take(&mut self.queue) {
+                if matches!(action, Action::HoverChange(..)) { ran |= self.run_action(action, &mut tx); } else { self.queue.push(action); }
+            }
+            self.latch_requests(&mut tx);
+        }
+        self.schedule_wakes(tx.wakes.drain(..));
         for (source, target) in std::mem::take(&mut tx.text_flights) {
             self.capture_text_flight(source, target);
         }

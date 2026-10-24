@@ -520,7 +520,8 @@ macOS only for now. Elsewhere `drag_out` is ignored and the element keeps its pr
 `tx.popup_menu(menu, anchor, on_pick)` opens a native menu once the handler's frame is done.
 `on_pick` runs like an update, with the picked item's id after the menu closes, or `None` when it's
 dismissed. It's called exactly once per request. A menu asked for while another is open waits its
-turn.
+turn. Hiding, closing or quitting the window ends a tracking menu and answers every waiting request
+`None` first.
 
 ```rust
 row().key("theme").child(text(theme_title(&s.theme)))

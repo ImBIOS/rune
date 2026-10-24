@@ -43,6 +43,8 @@ impl<S: 'static> Runtime<S> {
             Ok(rect) => {
                 let show = Show::new(request.menu.clone(), &request.anchor, rect);
                 self.trace_event("popup-menu:open");
+                // Asked for outside a frame (an update): the next frame drops the hover.
+                if self.release_pointer_for_popup() { self.dirty = true; }
                 Some(Some(show))
             }
             Err(problem) => {
@@ -50,6 +52,34 @@ impl<S: 'static> Runtime<S> {
                 Some(None)
             }
         }
+    }
+
+    /// The next menu anchors to an element and the runtime has changes the next frame commits
+    /// (a pick that asked for another menu over what it mounted): open it after that frame.
+    pub(crate) fn popup_waits_for_layout(&self) -> bool {
+        !self.popup_open && (self.dirty || self.relayout)
+            && self.popups.front().is_some_and(|r| matches!(r.anchor, PopupAnchor::Key(_)))
+    }
+
+    /// A menu is about to take the mouse: press, capture and hover end now, as if the pointer
+    /// left, rather than when it next moves. True when that changed anything.
+    pub(crate) fn release_pointer_for_popup(&mut self) -> bool {
+        if self.popups.is_empty() || (self.pointer.is_none() && self.capture.is_none() && self.secondary_capture.is_none()) {
+            return false;
+        }
+        self.cancel_pointer();
+        true
+    }
+
+    /// Answers every waiting menu with `None`, as its window goes away. A callback that asks
+    /// for another menu is answered too, up to a bound against one that always asks again.
+    pub(crate) fn cancel_popups(&mut self) {
+        for _ in 0..64 {
+            if self.resolve_popup(None).is_err() { return; }
+        }
+        eprintln!("rune: pop-up menu callbacks kept asking for menus while their window went away; dropping {}", self.popups.len());
+        self.popups.clear();
+        self.popup_open = false;
     }
 
     /// A headless run's stand-in for the window's menu: the next menu opens and waits for

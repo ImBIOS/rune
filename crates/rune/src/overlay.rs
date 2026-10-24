@@ -407,6 +407,7 @@ impl<T: 'static> Overlay<T> {
         if let Some(live) = &mut self.live && let Some(pacing) = &mut live.pacing { pacing.stop(); }
         self.rt.set_live_visible(false);
         self.visible = false;
+        self.popup.cancel(&mut self.rt);
         self.rt.cancel_pointer();
         self.apply_cursor();
         let Some(live) = &self.live else { return };
@@ -1012,13 +1013,14 @@ impl<T: 'static> Overlay<T> {
     }
 
     /// Opens the pop-up menu a handler asked for over the overlay's panel. A hidden overlay
-    /// answers `None`, committed with its next frame.
+    /// answers `None`, committed with its next frame. One anchored to an element waits for the
+    /// frame that commits what changed since the last.
     fn open_popup(&mut self) {
         let window = match self.live.as_ref().map(|l| &l.backing) {
             Some(Backing::Window(w)) if self.visible => Some(w.clone()),
             _ => None,
         };
-        if self.popup.open(&mut self.rt, window.as_ref()) { self.dirty = true; }
+        if self.popup.open(&mut self.rt, window.as_ref(), true) { self.dirty = true; }
     }
 
     fn draw_frame(&mut self, prewarm: bool) -> bool {
@@ -1348,6 +1350,8 @@ impl<T: 'static> AnyHost for Overlay<T> {
     fn keeps_loop(&self) -> bool {
         false
     }
+
+    fn cancel_menus(&mut self) { self.popup.cancel(&mut self.rt); }
 }
 
 impl<T: 'static> PendingOverlay for Overlay<T> {

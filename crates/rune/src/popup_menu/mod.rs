@@ -262,26 +262,36 @@ impl Show {
     }
 }
 
-/// A closed native menu's answer, waiting for the host: `Some(picked)`.
-pub(crate) type Answer = Rc<RefCell<Option<Option<String>>>>;
+/// One native menu, from the host handing it over until its answer is read. A cancelled
+/// session's menu never opens (or stops tracking), and its answer is never read.
+#[derive(Default)]
+pub(crate) struct Session {
+    /// The closed menu's answer: `Some(picked)`.
+    pub answer: RefCell<Option<Option<String>>>,
+    pub cancelled: std::cell::Cell<bool>,
+    /// The menu while it tracks, to cancel it.
+    #[cfg(target_os = "macos")]
+    pub tracking: RefCell<Option<objc2::rc::Retained<objc2_app_kit::NSMenu>>>,
+}
 
 /// One window's native menu: opens what its runtime asks for, and hands the answer back after
 /// `wake` brings the host to its inbox.
 #[derive(Default)]
 pub(crate) struct Presenter {
-    answer: Answer,
+    session: Option<Rc<Session>>,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     wake: Option<Waker>,
 }
 
 impl Presenter {
-    pub(crate) fn new(wake: Waker) -> Self { Self { answer: Answer::default(), wake: Some(wake) } }
+    pub(crate) fn new(wake: Waker) -> Self { Self { session: None, wake: Some(wake) } }
 
     pub(crate) fn connect(&mut self, wake: Waker) { self.wake = Some(wake); }
 
     /// Runs the callback of a menu that closed since the last event. True when one ran.
-    pub(crate) fn answer<S: 'static>(&self, rt: &mut Runtime<S>) -> bool {
-        let Some(picked) = self.answer.borrow_mut().take() else { return false };
+    pub(crate) fn answer<S: 'static>(&mut self, rt: &mut Runtime<S>) -> bool {
+        let Some(picked) = self.session.as_ref().and_then(|s| s.answer.borrow_mut().take()) else { return false };
+        self.session = None;
         if let Err(error) = rt.resolve_popup(picked.as_deref()) {
             eprintln!("rune: {error}");
             let _ = rt.resolve_popup(None);
@@ -289,24 +299,52 @@ impl Presenter {
         true
     }
 
-    /// Opens the runtime's next menu over `window`, releasing the pointer first since the menu
-    /// takes the mouse. Without a shown window or native menus the callback gets `None` at once.
-    /// True when a callback ran.
-    pub(crate) fn open<S: 'static>(&self, rt: &mut Runtime<S>, window: Option<&Arc<Window>>) -> bool {
-        let mut ran = false;
-        while let Some(show) = rt.take_popup() {
+    /// Opens the runtime's next menu over `window`. Without a shown window or native menus the
+    /// callback gets `None` at once. With `paints`, a menu anchored to an element waits while
+    /// the runtime has changes to commit, so the next frame places it from the new layout.
+    /// True when the window should draw: a callback ran, the pointer was released, or a menu
+    /// waits for that frame.
+    pub(crate) fn open<S: 'static>(&mut self, rt: &mut Runtime<S>, window: Option<&Arc<Window>>, paints: bool) -> bool {
+        let mut redraw = false;
+        loop {
+            if window.is_some() && paints && rt.popup_waits_for_layout() { return true; }
+            let Some(show) = rt.take_popup() else { return redraw };
+            redraw = true;
             #[cfg(target_os = "macos")]
             if let (Some(show), Some(window)) = (show, window) {
-                rt.cancel_pointer();
-                if macos::show(window, show, self.answer.clone(), self.wake.clone()) { return ran; }
+                let session = Rc::new(Session::default());
+                if macos::show(window, show, session.clone(), self.wake.clone()) {
+                    self.session = Some(session);
+                    return true;
+                }
             }
             #[cfg(not(target_os = "macos"))]
             let _ = (window, show);
             let _ = rt.resolve_popup(None);
-            ran = true;
         }
-        ran
     }
+
+    /// The window is going away (hidden, closed or quitting): the open menu stops tracking and
+    /// every request still waiting is answered `None`, while its state is alive. An answer the
+    /// cancelled menu gives later is dropped.
+    pub(crate) fn cancel<S: 'static>(&mut self, rt: &mut Runtime<S>) {
+        self.stop();
+        rt.cancel_popups();
+    }
+
+    fn stop(&mut self) {
+        let Some(session) = self.session.take() else { return };
+        session.cancelled.set(true);
+        #[cfg(target_os = "macos")]
+        if let Some(menu) = session.tracking.borrow_mut().take() {
+            // SAFETY: the host's (main) thread. The tracking loop ends once this handler returns.
+            unsafe { menu.cancelTrackingWithoutAnimation() };
+        }
+    }
+}
+
+impl Drop for Presenter {
+    fn drop(&mut self) { self.stop(); }
 }
 
 #[cfg(test)]

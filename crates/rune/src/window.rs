@@ -204,6 +204,9 @@ pub(crate) trait AnyHost {
     fn finished(&self) -> bool { false }
     /// The OS is ending the app without Rune asking: run close hooks before the hosts drop.
     fn terminate(&mut self) {}
+    /// Ends a tracking pop-up menu and answers waiting ones `None`, before the host drops or
+    /// the loop exits.
+    fn cancel_menus(&mut self) {}
     /// False for hosts that must not keep the loop running alone (overlays).
     fn keeps_loop(&self) -> bool { true }
 }
@@ -324,7 +327,14 @@ struct Windows {
 impl Windows {
     fn cleanup(&mut self, event_loop: &ActiveEventLoop) {
         for host in &mut self.hosts {
-            if host.as_ref().is_some_and(|h| h.finished()) { *host = None; }
+            if let Some(h) = host.as_mut().filter(|h| h.finished()) {
+                h.cancel_menus();
+                *host = None;
+            }
+        }
+        // Another window's quit: a menu still tracking would hold the loop open.
+        if event_loop.exiting() {
+            for host in self.hosts.iter_mut().flatten() { host.cancel_menus(); }
         }
         if !self.hosts.iter().flatten().any(|h| h.keeps_loop()) {
             // The app ends with its last main window: windows still open close as their close
@@ -436,6 +446,7 @@ impl ApplicationHandler<WakeEvent> for Windows {
         if !event_loop.exiting() {
             for host in self.hosts.iter_mut().flatten() { host.terminate(); }
         }
+        for host in self.hosts.iter_mut().flatten() { host.cancel_menus(); }
         // Surfaces go while winit's display connection is still open (layer surfaces live on it).
         self.hosts.clear();
         crate::clipboard::shutdown();
@@ -1003,6 +1014,8 @@ impl<S: 'static> Host<S> {
         }
         self.clipboard.flush(&mut self.rt);
         if requests.quit {
+            // A tracking menu holds the event loop until it ends.
+            self.popup.cancel(&mut self.rt);
             event_loop.exit();
             return;
         }
@@ -1045,15 +1058,28 @@ impl<S: 'static> Host<S> {
         if changed && self.launcher() && let Some(w) = &self.win { w.window.request_redraw(); }
     }
 
-    /// Carries out what a handler or update asked with `Tx::close_window` / `Tx::quit`, and
-    /// opens the pop-up menu it asked for.
+    /// Carries out what a handler or update asked with `Tx::close_window` / `Tx::quit`, then
+    /// opens the pop-up menu it asked for, if the window is still there to open it over.
     fn shell(&mut self, event_loop: &ActiveEventLoop) {
-        let window = self.win.as_ref().filter(|w| w.visible).map(|w| &w.window);
-        if self.popup.open(&mut self.rt, window) && let Some(w) = window { w.request_redraw(); }
-        match self.rt.shell_request.take() {
-            Some(Shell::Quit) => event_loop.exit(),
-            Some(Shell::Close) => self.close(event_loop),
-            None => {}
+        for _ in 0..8 {
+            match self.rt.shell_request.take() {
+                Some(Shell::Quit) => {
+                    self.popup.cancel(&mut self.rt);
+                    event_loop.exit();
+                }
+                Some(Shell::Close) => self.close(event_loop),
+                None => {}
+            }
+            if self.finished || event_loop.exiting() {
+                self.popup.cancel(&mut self.rt);
+                return;
+            }
+            let shown = self.win.as_ref().filter(|w| w.visible);
+            let paints = shown.is_some_and(|w| !w.occluded && !w.window.is_minimized().unwrap_or(false));
+            let window = shown.map(|w| &w.window);
+            if self.popup.open(&mut self.rt, window, paints) && let Some(w) = window { w.request_redraw(); }
+            // A callback that ran (a menu that couldn't open) may have asked to close or quit.
+            if self.rt.shell_request.is_none() { return; }
         }
     }
 
@@ -1066,10 +1092,12 @@ impl<S: 'static> Host<S> {
         // While the window still shows its last frames.
         if let Some(trace) = &mut self.trace { trace.settle_presents(crate::present_time::SETTLE); }
         if self.rt.shell_request.take() == Some(Shell::Quit) {
+            self.popup.cancel(&mut self.rt);
             event_loop.exit();
             return;
         }
         if !self.keep_running {
+            self.popup.cancel(&mut self.rt);
             self.rt.cancel_pointer();
             if let Some(w) = &mut self.win { w.apply_cursor(&self.rt, false); w.hide(); }
             self.finished = true;
@@ -1095,6 +1123,7 @@ impl<S: 'static> Host<S> {
         self.ime_allowed = false;
         if let Some(w) = &self.win { w.window.set_ime_allowed(false); }
         self.rt.set_live_visible(false);
+        self.popup.cancel(&mut self.rt);
         self.rt.cancel_pointer();
         if let Some(w) = &mut self.win { w.apply_cursor(&self.rt, false); }
         self.mods = ModifiersState::empty();
@@ -1484,7 +1513,10 @@ impl<S: 'static> AnyHost for Host<S> {
         if self.finished || !self.closes() { return; }
         self.finished = true;
         self.close_hook();
+        self.popup.cancel(&mut self.rt);
     }
+
+    fn cancel_menus(&mut self) { self.popup.cancel(&mut self.rt); }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
         if let Some(w) = &mut self.win && let Some((retry, until)) = w.first_frame.deadline && retry <= Instant::now() {

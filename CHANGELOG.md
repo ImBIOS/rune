@@ -8,7 +8,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 - **Native pop-up and context menus.** `tx.popup_menu(PopupMenu, anchor, on_pick)` opens an
   `NSMenu` over an element key (a picker's selected item sits over the element, as SwiftUI's
   menu-style `Picker` does) or at a `PointerPress`. `on_pick` gets the picked id after the menu
-  closes, or `None` on dismissal. Frames and updates keep running while it's open. Other
+  closes, or `None` on dismissal or when its window hides, closes or quits. Frames and updates
+  keep running while it's open. Other
   platforms answer `None` on the next frame (`popup_menu_supported()` is false). New:
   `PopupMenu`, `PopupItem`, `PopupAnchor`, `PopupMenuError`. Headless trees gain a `popupMenu`
   object while one is open, and scripts gain `menu-pick` and `menu-cancel` events. Nothing
