@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::on_screen_layout` follows a window's own moves in the same frame.** An animated
+  resize or centre, `place()`, a position change and a resize landing used to report the new
+  layout against the previous origin, then correct it a frame later when the move arrived.
+  The window now reads its origin as soon as it sets its frame.
 - **Prewarmed overlays report where they are.** A prewarmed overlay's `El::on_screen_layout`
   used to report rects from (0, 0) when it warmed, and its warm frame drew at the scale winit
   gave the window rather than the panel's display. A rect that moved while it was hidden

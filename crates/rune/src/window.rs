@@ -1205,7 +1205,7 @@ impl<S: 'static> Host<S> {
         self.apply_placement(event_loop);
     }
 
-    fn apply_placement(&self, event_loop: &ActiveEventLoop) {
+    fn apply_placement(&mut self, event_loop: &ActiveEventLoop) {
         let (Some(request), Some(w)) = (&self.placement, &self.win) else { return };
         if is_wayland(event_loop) { return; }
         #[cfg(target_os = "macos")]
@@ -1224,6 +1224,7 @@ impl<S: 'static> Host<S> {
             w.window.set_outer_position(PhysicalPosition::new(origin.x + (f64::from(rect[0]) * scale).round() as i32,
                 origin.y + (f64::from(rect[1]) * scale).round() as i32));
         }
+        self.sync_origin();
     }
 
     /// Seconds on the host's frame clock, which frame animations sample.
@@ -1261,6 +1262,7 @@ impl<S: 'static> Host<S> {
             } else {
                 self.frame_anim = None;
                 crate::macos::set_window_frame(&w.window, to);
+                self.sync_origin();
             }
         }
         #[cfg(not(target_os = "macos"))]
@@ -1287,6 +1289,7 @@ impl<S: 'static> Host<S> {
             let [x, y, ..] = crate::window_frame::target(current, size, request.center, visible);
             if [x, y] != [current[0], current[1]] {
                 window.set_outer_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
+                self.sync_origin();
             }
         }
     }
@@ -1324,6 +1327,8 @@ impl<S: 'static> Host<S> {
             w.resize_surface(&gpu.device, size);
             let scale = w.window.scale_factor() as f32;
             self.rt.step_viewport((size.width as f32 / scale, size.height as f32 / scale), scale);
+            // In this frame's layout, not the next one when `Moved` arrives.
+            self.sync_origin();
         }
     }
 
@@ -1335,6 +1340,8 @@ impl<S: 'static> Host<S> {
             w.present_with_transaction(false);
             if let Some(anim) = anim { crate::macos::set_window_frame(&w.window, anim.to); }
         }
+        #[cfg(target_os = "macos")]
+        self.sync_origin();
         #[cfg(not(target_os = "macos"))]
         let _ = anim;
     }
@@ -1354,6 +1361,7 @@ impl<S: 'static> Host<S> {
         if !is_wayland(event_loop) && let Some(w) = &self.win {
             w.window.set_outer_position(PhysicalPosition::new(position.0, position.1));
         }
+        self.sync_origin();
     }
 
     fn set_always_on_top(&mut self, event_loop: &ActiveEventLoop, on: bool) {
