@@ -43,15 +43,10 @@ struct Out {
     @location(8) @interpolate(flat) fade: vec4<u32>,
 };
 
+// Layer composites use `vs` even with GPU springs: the layer's contents already sampled the
+// retained instance tracks using their original absolute instance indices.
 @vertex
 fn vs(i: In) -> Out {
-    return base_vs(i);
-}
-
-// Composites deliberately bypass retained instance tracks: the layer's contents already
-// sampled those tracks using their original absolute instance indices.
-@vertex
-fn vs_layer(i: In) -> Out {
     return base_vs(i);
 }
 

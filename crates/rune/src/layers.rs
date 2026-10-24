@@ -239,7 +239,7 @@ impl Renderer {
             if self.layers.additive.is_none() {
                 self.layers.additive = Some((
                     Self::pipeline_blend(device, &self.layout, &self.shader, FORMAT, self.vertex_entry, Blend::PlusLighter),
-                    Self::pipeline_blend(device, &self.layout, &self.shader, FORMAT, "vs_layer", Blend::PlusLighter)));
+                    Self::pipeline_blend(device, &self.layout, &self.shader, FORMAT, "vs", Blend::PlusLighter)));
             }
             if let Some(s) = &mut self.surfaces { s.add_plus_lighter(device, FORMAT); }
         }
@@ -249,7 +249,7 @@ impl Renderer {
 
     pub(super) fn add_layer_format(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
         if !self.layers.pipelines.iter().any(|(f, _)| *f == format) {
-            self.layers.pipelines.push((format, Self::pipeline(device, &self.layout, &self.shader, format, "vs_layer")));
+            self.layers.pipelines.push((format, Self::pipeline(device, &self.layout, &self.shader, format, "vs")));
         }
     }
 
