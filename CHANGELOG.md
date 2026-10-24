@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Pixels::set` wakes the windows showing it.** A `Pixels` is now a live source like `Live`:
+  `set` (from any thread) wakes exactly the windows and overlays whose scene shows it with
+  `El::pixels`, and no others. Sets between frames coalesce into one wake and one upload; a
+  hidden or covered window sleeps and draws the latest image when it shows again; a removed
+  element or a closed window stops waking. Apps that woke a window after `set` themselves can
+  drop that. Finished `ImageCache` decodes also wake the windows showing them.
 - **`El::on_screen_layout` follows a window's own moves in the same frame.** An animated
   resize or centre, `place()`, a position change and a resize landing used to report the new
   layout against the previous origin, then correct it a frame later when the move arrived.

@@ -765,8 +765,9 @@ prints the platform error. Metal surfaces retain premultiplied colour for Core A
 `rune::Pixels` is a cloneable, thread-safe RGBA image a producer replaces with
 `set(width, height, rgba)` (straight-alpha sRGB). `El::pixels(&pixels)` draws it scaled
 into the element's rect, clipped to its corner radius, without re-running the view when the
-image changes: the next frame uploads the new rows (wake the window with an `update` or a
-`Live` value). Images live in stable per-runtime 1024² RGBA pages (`Rgba8UnormSrgb`, binding 2,
+image changes. Like a `Live` value, `set` (from any thread) wakes only the windows and overlays
+whose scene shows the image; sets between frames coalesce into one wake and one upload, and a
+hidden or covered window catches up when it shows again. Images live in stable per-runtime 1024² RGBA pages (`Rgba8UnormSrgb`, binding 2,
 instance kind 7); larger images get exact-size standalone pages, up to 8192 pixels per axis.
 Pages are created on demand and unused trailing pages are released. Rendering breaks batches
 only when the image page changes, preserving painter order. Filtering is bilinear on

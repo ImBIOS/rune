@@ -1024,7 +1024,8 @@ impl<S: 'static> Runtime<S> {
         for node in &self.nodes {
             if self.is_exiting(node.id) { continue; }
             let text = node.text.as_ref().and_then(|t| t.live.as_ref()).map(|t| &t.source);
-            for source in node.live.iter().map(|b| &b.source).chain(text) {
+            let pixels = node.vis.pixels.as_ref().map(|p| &p.source);
+            for source in node.live.iter().map(|b| &b.source).chain(text).chain(pixels) {
                 if let Some(sub) = self.live_subscriptions.iter().find(|s| s.source_id == source.id()) {
                     sub.active.store(true, Ordering::Release);
                 } else {
@@ -1605,6 +1606,12 @@ impl<S: 'static> Runtime<S> {
         self.refresh_modal_index();
         self.flying.retain(|(id, _)| self.node_index.contains_key(id));
         if !self.layer_paint_order.is_empty() || !self.flying.is_empty() { self.update_layer_paint_order(); }
+        // A removed element's live sources (a `Pixels` stream) stop waking this window.
+        if !self.live_subscriptions.is_empty() {
+            let dirty = self.live_dirty;
+            self.subscribe_live();
+            self.live_dirty = dirty && !self.live_subscriptions.is_empty();
+        }
     }
 
     /// Subtree (preorder) paint order, then each flying element's subtree on top.

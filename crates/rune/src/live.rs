@@ -225,7 +225,7 @@ pub(crate) struct Source {
     listeners: AtomicPtr<Listener>,
 }
 impl Source {
-    fn new(value: u128) -> Arc<Self> {
+    pub(crate) fn new(value: u128) -> Arc<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Arc::new(Self { id: NEXT.fetch_add(1, Ordering::Relaxed), value: AtomicU128::new(value),
             listeners: AtomicPtr::new(std::ptr::null_mut()), linear: None })
@@ -257,7 +257,7 @@ impl Source {
             }
         }
     }
-    fn notify(&self) {
+    pub(crate) fn notify(&self) {
         let mut p = self.listeners.load(Ordering::Acquire);
         while !p.is_null() {
             // SAFETY: this source is alive through the caller's Arc; list is immutable.

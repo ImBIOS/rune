@@ -2337,6 +2337,39 @@ mod tests {
     }
 
     #[test]
+    fn overlay_pixels_wake_only_while_shown_and_catch_up_on_show() {
+        use std::sync::atomic::AtomicUsize;
+        fn init() -> crate::Pixels { crate::Pixels::new() }
+        fn view(pixels: &crate::Pixels, _: &mut Cx<crate::Pixels>) -> El {
+            crate::el().size(4.0, 4.0).pixels(pixels)
+        }
+        let app = AppSpec::new("pixels overlay", (4.0, 4.0), init, view);
+        let spec = OverlaySpec::new("pixels overlay", app.size, view).options(OverlayOptions {
+            prewarm: true, keys: KeyPolicy::OnDemand, ..Default::default()
+        });
+        let pixels = init();
+        let (mut overlay, _) = Overlay::new(spec, pixels.clone(), &app);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let count = wakes.clone();
+        overlay.rt.set_live_waker(Arc::new(move || { count.fetch_add(1, Ordering::Relaxed); }));
+        overlay.rt.frame(0.0);
+        pixels.set(1, 1, vec![255; 4]);
+        assert_eq!(wakes.load(Ordering::Relaxed), 0, "a hidden overlay isn't woken");
+        overlay.dirty = false;
+        overlay.resume_live();
+        assert!(overlay.dirty, "showing draws the image set while hidden");
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        overlay.rt.frame(0.0);
+        pixels.set(1, 1, vec![0; 4]);
+        pixels.set(1, 1, vec![1; 4]);
+        assert_eq!(wakes.load(Ordering::Relaxed), 2, "shown, sets wake it once per frame");
+        overlay.rt.frame(0.0);
+        overlay.hide();
+        pixels.set(1, 1, vec![2; 4]);
+        assert_eq!(wakes.load(Ordering::Relaxed), 2, "hidden again, it sleeps");
+    }
+
+    #[test]
     fn overlay_input_switch_waits_for_owned_drag_release() {
         fn view(_: &Vec<crate::Phase>, _: &mut Cx<Vec<crate::Phase>>) -> El {
             crate::el().w_full().h_full().hit().on_drag(|phases: &mut Vec<crate::Phase>, drag, _| phases.push(drag.phase))

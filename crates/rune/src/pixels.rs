@@ -21,6 +21,8 @@ struct Frame {
 pub struct Pixels {
     id: u64,
     frame: Arc<Mutex<Frame>>,
+    /// Wakes the windows and overlays whose scene shows this image.
+    pub(crate) source: Arc<crate::live::Source>,
 }
 
 impl std::fmt::Debug for Pixels {
@@ -42,30 +44,39 @@ impl Pixels {
         Pixels {
             id: NEXT.fetch_add(1, Ordering::Relaxed),
             frame: Arc::new(Mutex::new(Frame { width: 0, height: 0, rgba: Vec::new(), generation: 0, mips: None })),
+            source: crate::live::Source::new(0),
         }
     }
 
     /// Replaces the image: `rgba` is `width * height` straight-alpha sRGB pixels, rows top
-    /// first. The next frame of any window showing it uploads the change; wake that window
-    /// (an `update`, a `Live` value) when nothing else will. This is the streaming path:
-    /// no decoding or mip generation, and a same-size frame reuses its atlas slot.
+    /// first. Call it from any thread: it wakes only the windows and overlays showing the
+    /// image, and their next frame uploads it. Sets between two frames coalesce into one wake
+    /// and one upload of the latest image; a hidden or covered window catches up when it shows
+    /// again. This is the streaming path: no decoding or mip generation, and a same-size
+    /// frame reuses its atlas slot.
     pub fn set(&self, width: u32, height: u32, rgba: Vec<u8>) {
         assert_eq!(Some(rgba.len()), (width as usize).checked_mul(height as usize).and_then(|n| n.checked_mul(4)), "rgba must hold width * height pixels");
-        let mut frame = self.frame.lock().unwrap();
-        frame.width = width;
-        frame.height = height;
-        frame.rgba = rgba;
-        frame.generation += 1;
-        frame.mips = None;
+        {
+            let mut frame = self.frame.lock().unwrap();
+            frame.width = width;
+            frame.height = height;
+            frame.rgba = rgba;
+            frame.generation += 1;
+            frame.mips = None;
+        }
+        self.source.notify();
     }
 
     pub(crate) fn set_mips(&self, mips: Arc<crate::image::Decoded>) {
-        let mut frame = self.frame.lock().unwrap();
-        frame.width = mips.mips[0].width;
-        frame.height = mips.mips[0].height;
-        frame.rgba.clear();
-        frame.mips = Some(mips);
-        frame.generation += 1;
+        {
+            let mut frame = self.frame.lock().unwrap();
+            frame.width = mips.mips[0].width;
+            frame.height = mips.mips[0].height;
+            frame.rgba.clear();
+            frame.mips = Some(mips);
+            frame.generation += 1;
+        }
+        self.source.notify();
     }
 
     pub fn size(&self) -> (u32, u32) {

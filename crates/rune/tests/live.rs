@@ -187,6 +187,82 @@ fn linear_countdown_uses_render_time_without_commits_wakes_or_hidden_samples() {
     assert_eq!(wakes.load(Ordering::Relaxed), 0);
 }
 
+type PixelsState = (rune::Pixels, bool);
+fn pixels_view(s: &PixelsState, _: &mut Cx<PixelsState>) -> El {
+    let root = el().size(8.0, 8.0);
+    if s.1 { root.child(el().key("picture").size(4.0, 4.0).pixels(&s.0)) } else { root }
+}
+fn pixels_runtime(pixels: &rune::Pixels, shown: bool) -> (Runtime<PixelsState>, Arc<AtomicUsize>) {
+    let mut rt = Runtime::new((pixels.clone(), shown), pixels_view, (8.0, 8.0), Env::new(true, 1.0));
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let count = wakes.clone();
+    rt.set_live_waker(Arc::new(move || { count.fetch_add(1, Ordering::Relaxed); }));
+    rt.frame(0.0);
+    (rt, wakes)
+}
+
+#[test]
+fn pixels_set_wakes_only_the_runtime_showing_it() {
+    let pixels = rune::Pixels::new();
+    let (mut shown, shown_wakes) = pixels_runtime(&pixels, true);
+    let (mut other, other_wakes) = pixels_runtime(&pixels, false);
+    std::thread::scope(|s| { s.spawn(|| pixels.set(1, 1, vec![255; 4])); });
+    assert_eq!(shown_wakes.load(Ordering::Relaxed), 1, "a set on another thread wakes the window showing it");
+    assert!(shown.live_pending());
+    assert_eq!(other_wakes.load(Ordering::Relaxed), 0, "a window that doesn't show it stays asleep");
+    assert!(!other.live_pending());
+    shown.frame(0.01); other.frame(0.01);
+    assert!(!shown.live_pending());
+    // Hidden or covered: no wake until it shows again, then one.
+    shown.set_live_visible(false);
+    pixels.set(1, 1, vec![0; 4]);
+    assert_eq!(shown_wakes.load(Ordering::Relaxed), 1);
+    assert!(!shown.frame(0.01), "a hidden window doesn't spin");
+    shown.set_live_visible(true);
+    assert_eq!(shown_wakes.load(Ordering::Relaxed), 2);
+    shown.frame(0.01);
+    assert_eq!(&shown.images.pages[0].data[..4], &[0; 4], "it draws the latest image once it shows again");
+}
+
+#[test]
+fn repeated_pixel_sets_coalesce_into_one_wake_and_one_upload() {
+    let pixels = rune::Pixels::new();
+    pixels.set(2, 1, vec![1; 8]);
+    let (mut rt, wakes) = pixels_runtime(&pixels, true);
+    rt.images.pages[0].dirty = None;
+    for n in 0..50u8 { pixels.set(2, 1, vec![n; 8]); }
+    assert_eq!(wakes.load(Ordering::Relaxed), 1, "fifty sets between frames wake once");
+    rt.frame(0.01);
+    assert_eq!(rt.images.pages[0].dirty, Some((0, 1)), "one row upload");
+    assert_eq!(&rt.images.pages[0].data[..8], &[49; 8], "of the latest image");
+    assert!(!rt.live_pending());
+    rt.images.pages[0].dirty = None;
+    rt.frame(0.01);
+    assert_eq!(rt.images.pages[0].dirty, None, "no new image, no upload");
+    pixels.set(2, 1, vec![50; 8]);
+    assert_eq!(wakes.load(Ordering::Relaxed), 2, "the next frame's set wakes again");
+}
+
+#[test]
+fn a_removed_pixels_element_or_closed_window_stops_waking() {
+    let pixels = rune::Pixels::new();
+    let (mut rt, wakes) = pixels_runtime(&pixels, true);
+    rt.update(|s, tx| { s.1 = false; tx.settle(); });
+    rt.frame(0.0);
+    assert!(!rt.elements().iter().any(|e| e.key.as_deref() == Some("picture")));
+    pixels.set(1, 1, vec![255; 4]);
+    assert_eq!(wakes.load(Ordering::Relaxed), 0, "the element is gone");
+    assert!(!rt.live_pending());
+    rt.update(|s, _| s.1 = true);
+    rt.frame(0.0);
+    pixels.set(1, 1, vec![0; 4]);
+    assert_eq!(wakes.load(Ordering::Relaxed), 1, "shown again, it wakes again");
+    rt.frame(0.01);
+    drop(rt);
+    pixels.set(1, 1, vec![9; 4]);
+    assert_eq!(wakes.load(Ordering::Relaxed), 1, "a closed window's runtime is never woken");
+}
+
 #[test]
 fn tween_handle_keeps_its_start_across_unmount_and_remount() {
     type State = (Tween<f32>, bool);
