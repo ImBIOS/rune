@@ -84,6 +84,8 @@ pub enum ScriptEvent {
     Focus(bool),
     /// A native menu item fired by name.
     Menu(String),
+    /// A pop-up menu's picked item id, or None when the script dismisses it.
+    PopupMenu(Option<String>),
 }
 
 #[non_exhaustive]

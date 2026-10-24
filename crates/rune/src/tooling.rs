@@ -506,6 +506,7 @@ impl Ev {
             Kind::Mark(name) => ScriptEvent::Mark(name.clone()),
             Kind::Focus(focused) => ScriptEvent::Focus(*focused),
             Kind::Menu(item) => ScriptEvent::Menu(item.clone()),
+            Kind::PopupMenu(picked) => ScriptEvent::PopupMenu(picked.clone()),
             Kind::Physical(input) => ScriptEvent::Physical(*input),
             Kind::Shortcut(chord) => ScriptEvent::Shortcut(chord.clone()),
             Kind::Move => pointer(PointerAction::Move),
@@ -701,7 +702,12 @@ fn a_physical_chord_releases_its_modifiers_after_the_key() {
 #[test]
 fn script_events_answer_a_pop_up_menu() {
     let kinds: Vec<_> = parse_script(json!([{"t": 0.2, "type": "menu-cancel"}, {"t": 0.1, "type": "menu-pick", "id": "dark"}]))
-        .into_iter().map(|e| match e.kind { Kind::PopupMenu(picked) => picked, _ => panic!("parsed as another event") }).collect();
+        .into_iter().map(|e| {
+            let ScriptEvent::PopupMenu(public) = e.public().event else { panic!("public event lost the pop-up answer") };
+            let Kind::PopupMenu(picked) = e.kind else { panic!("parsed as another event") };
+            assert_eq!(public, picked);
+            picked
+        }).collect();
     assert_eq!(kinds, [Some("dark".to_owned()), None]);
 }
 
@@ -1846,7 +1852,8 @@ mod tests {
             let path = dir.join(format!("tiny.{extension}"));
             let out = dir.join(format!("{extension}-frames"));
             let snap = dir.join(format!("{extension}-last.png"));
-            let spec = AppSpec::new("video", (31.0, 20.0), || (), |_, _| crate::el().size(10.0, 10.0).fill(crate::oklch(0.6, 0.2, 30.0)));
+            let spec = AppSpec::new("video", (31.0, 20.0), || (), |_, _| crate::el().w_full().h_full()
+                .child(crate::el().absolute(0.0, 0.0).size(10.0, 10.0).fill(crate::oklch(0.6, 0.2, 30.0))));
             let args = ["--video", path.to_str().unwrap(), "--frames", "12", "--scale", "1", "--fps", "30",
                 "--out", out.to_str().unwrap(), "--every", "3", "--snap", snap.to_str().unwrap(), "--at", "0.3"];
             let app = crate::App::new(spec).window_options(crate::WindowOptions {
