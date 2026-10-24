@@ -799,12 +799,15 @@ impl MarkdownStyle {
         self.headings[(level.clamp(1, 3) - 1) as usize] = f;
         self
     }
+    /// Code blocks and diffs. Inline code is set in the app's mono slot, so keep this on
+    /// `Family::Mono` for the two to match; for the platform's monospaced font (SF Mono) in
+    /// both, name `ui-monospace` in the mono slot of `AppSpec::families`.
     pub fn code_block_font(mut self, f: TextStyle) -> Self {
         self.code_block = f;
         self
     }
     /// Inline code's size as a multiple of the surrounding text, and its weight (the family is
-    /// always the mono face).
+    /// always the mono slot's).
     pub fn inline_code_font(mut self, scale: f32, weight: f32) -> Self {
         self.inline_code_scale = scale;
         self.inline_code_weight = weight;

@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`ui-monospace` in `AppSpec::families` names the platform's monospaced font.** The sans and
+  mono slots are CSS lists, and CSS's `ui-monospace` in one now stands for `Family::SystemMono`'s
+  families (SF Mono on macOS, whose family name is hidden), followed by the rest of the list. With
+  `families: ("Inter", "ui-monospace")`, `Family::Mono`, `.mono()` and mono rich spans (rune-kit
+  Markdown's inline code among them) shape with the same font as a `Family::SystemMono` code
+  block. Apps that don't name it are unchanged.
 - **Live editing for external app crates and on the desk Mac.** `scripts/rune-dev
   --manifest-path APP/Cargo.toml --patch 'src/ui/**/*.rs'` hot-edits an app outside this
   repo; the app adds only `hot = ["rune/hot"]`. With `--desk` the app compiles on the build

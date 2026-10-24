@@ -481,6 +481,12 @@ falls back to the mono slot. SF Mono has no `trak` table, so it is untracked, as
 `tracking` still adds, and glyphs that fall back to the system font get that font's own
 tracking. Mono rich spans keep using the mono slot.
 
+To put the mono slot itself (so `Family::Mono`, `.mono()` and mono rich spans) in that
+font, name CSS's `ui-monospace` in it: `families: ("Inter", "ui-monospace")`. It stands for
+the same families as `Family::SystemMono`, and the rest of the list follows it, so
+`"ui-monospace, Menlo"` falls back to Menlo where none is installed. Inline code then
+matches a code block set in `Family::SystemMono`.
+
 Optical sizing defaults to each run's point size, including rich spans with a
 different size. An explicit `opsz` variation wins over the default; `.optical_size`
 wins over both. `.optical_sizing(OpticalSize::FontDefault)` restores Parley's old

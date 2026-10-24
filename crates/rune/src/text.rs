@@ -120,6 +120,21 @@ fn load_system_mono(collection: &mut Collection, loaded: &mut LoadedFiles) -> Ve
     names
 }
 
+/// Whether the CSS family list `list` names `ui-monospace`, which stands for `Family::SystemMono`'s
+/// families, so the mono slot can be SF Mono, whose family name is hidden.
+fn names_system_mono(list: &str) -> bool {
+    FontFamilyName::parse_css_list(list).flatten().any(|f| f == FontFamilyName::Generic(parley::GenericFamily::UiMonospace))
+}
+
+/// `list` parsed, with `ui-monospace` replaced by the installed `Family::SystemMono` families.
+fn family_list<'a>(list: &'a str, system_mono: &'a [String]) -> impl Iterator<Item = FontFamilyName<'a>> {
+    FontFamilyName::parse_css_list(list).flatten().flat_map(move |f| {
+        let system = f == FontFamilyName::Generic(parley::GenericFamily::UiMonospace);
+        let names = if system { system_mono } else { &[] };
+        names.iter().map(|name| FontFamilyName::named(name)).chain((!system).then_some(f))
+    })
+}
+
 /// The installed families among `names`, loading the system font files matching `files`.
 fn load_families(collection: &mut Collection, files: &[&str], names: &[&'static str]) -> Vec<&'static str> {
     collection.load_fonts_from_paths(system_font_files(files));
@@ -669,6 +684,8 @@ pub struct TextSystem {
     math: Option<Vec<&'static str>>,
     /// The installed `Family::SystemMono` families, once a text has needed them.
     system_mono: Option<Vec<String>>,
+    /// The sans or mono slot names `ui-monospace` (see `family_list`).
+    slot_system_mono: bool,
     /// Bit `i` is set once `fallback::SCRIPT_FONTS[i]` has been looked up.
     scripts: u64,
     font_files: LoadedFiles,
@@ -896,6 +913,7 @@ impl TextSystem {
             emoji,
             math: None,
             system_mono: None,
+            slot_system_mono: names_system_mono(families.0) || names_system_mono(families.1),
             scripts: 0,
             font_files,
             atlas: Atlas::new(),
@@ -915,9 +933,12 @@ impl TextSystem {
         if let Some(trak) = self.primary_traks.get(&key) {
             return trak.clone();
         }
+        if family == Family::SystemMono || self.slot_system_mono {
+            self.system_mono();
+        }
+        let system = self.system_mono.as_deref().unwrap_or_default();
         let named = |list: &str| -> Vec<String> {
-            FontFamilyName::parse_css_list(list)
-                .flatten()
+            family_list(list, system)
                 .filter_map(|f| match f { FontFamilyName::Named(name) => Some(name.into_owned()), _ => None })
                 .collect()
         };
@@ -925,11 +946,7 @@ impl TextSystem {
             Family::Sans => named(&self.sans),
             Family::Mono => named(&self.mono),
             Family::Named(name) => std::iter::once(name.to_owned()).chain(named(&self.sans)).collect(),
-            Family::SystemMono => {
-                let mut names = self.system_mono().to_vec();
-                names.extend(named(&self.mono));
-                names
-            }
+            Family::SystemMono => system.iter().cloned().chain(named(&self.mono)).collect(),
         };
         let mut query = self.font_cx.collection.query(&mut self.font_cx.source_cache);
         query.set_families(names.iter().map(|name| parley::fontique::QueryFamily::Named(name)));
@@ -1052,14 +1069,14 @@ impl TextSystem {
                 Some(spacing(trak, s.size.unwrap_or(style.size))).filter(|&v| v != base_spacing)
             })
             .collect();
-        if style.family == Family::SystemMono {
+        if style.family == Family::SystemMono || self.slot_system_mono {
             self.system_mono();
         }
         let math = self.math.as_deref().unwrap_or(&[]);
         let emoji = self.emoji.as_slice();
+        let system = self.system_mono.as_deref().unwrap_or_default();
         let with_symbols = |primary| {
-            FontFamilyName::parse_css_list(primary)
-                .flatten()
+            family_list(primary, system)
                 .chain(self.symbol_families.iter().chain(math).map(|name| FontFamilyName::named(name)))
                 .collect::<Vec<_>>()
         };
@@ -1073,7 +1090,6 @@ impl TextSystem {
             }
             Family::SystemMono => {
                 let mut families = with_symbols(self.mono.as_str());
-                let system = self.system_mono.as_deref().unwrap_or_default();
                 families.splice(0..0, system.iter().map(|name| FontFamilyName::named(name)));
                 families
             }
@@ -1504,6 +1520,27 @@ mod tests {
         assert!(width(&mut ts, "iiiiiiii", TextStyle::new(13.0, 400.0)) < narrow * 0.7, "the sans slot is proportional");
         let italic = width(&mut ts, "iiiiiiii", style.italic());
         assert!((italic - narrow).abs() < 0.5, "italic keeps the cell: {italic} vs {narrow}");
+    }
+
+    /// `ui-monospace` in the mono slot puts mono spans and `.mono()` in `Family::SystemMono`'s
+    /// font, so inline code matches a code block set in it.
+    #[test]
+    fn ui_monospace_in_the_mono_slot_is_system_mono() {
+        let fonts = |ts: &mut TextSystem, text: &str, spans: &[Span], style: TextStyle| {
+            let mut ids = Vec::new();
+            runs(ts, text, spans, style, |_, font| ids.push((font.data.as_ptr() as usize, font.offset)));
+            ids
+        };
+        let code = &[Span { mono: true, ..Span::new(4, 8) }];
+        let mut ts = TextSystem::new(&[], ("Inter", "ui-monospace, Inter"));
+        let block = fonts(&mut ts, "code", &[], TextStyle::new(13.0, 400.0).family(Family::SystemMono));
+        let spans = fonts(&mut ts, "see code", code, TextStyle::new(13.0, 400.0));
+        assert_eq!(spans.last(), block.last(), "the span shapes with the code block's font");
+        assert_eq!(fonts(&mut ts, "code", &[], TextStyle::new(13.0, 400.0).mono()), block);
+        if !ts.system_mono().is_empty() {
+            let mut plain = TextSystem::new(&[], ("Inter", "Inter"));
+            assert_ne!(fonts(&mut plain, "see code", code, TextStyle::new(13.0, 400.0)).last(), block.last());
+        }
     }
 
     /// Each glyph run of `text` with the font it shaped with.
