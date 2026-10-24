@@ -30,10 +30,11 @@ pub(crate) const SUPPORTED: bool = cfg!(target_os = "macos");
 /// AppKit views commonly use 4; GTK's default is 8; Windows' `SM_CXDRAG` is 4 pixels.
 pub const DRAG_THRESHOLD: f32 = if cfg!(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))) { 8.0 } else { 4.0 };
 
-/// Whether a pointer that went down at `from` and is now at `to` has started a drag.
-pub(crate) fn past_threshold(from: (f32, f32), to: (f32, f32)) -> bool {
+/// Whether a pointer that went down at `from` and is now at `to` has travelled past
+/// `threshold` points. [`crate::El::drag_threshold`] sets it per element.
+pub(crate) fn past_threshold(from: (f32, f32), to: (f32, f32), threshold: f32) -> bool {
     let (dx, dy) = (to.0 - from.0, to.1 - from.1);
-    dx * dx + dy * dy > DRAG_THRESHOLD * DRAG_THRESHOLD
+    dx * dx + dy * dy > threshold * threshold
 }
 
 /// What a drag carries to another app: any of file URLs, PNG data and plain text, plus the
@@ -399,11 +400,12 @@ mod tests {
 
     #[test]
     fn threshold_is_straight_line_travel_beyond_the_platform_distance() {
-        assert!(!past_threshold((10.0, 10.0), (10.0, 10.0)));
-        assert!(!past_threshold((10.0, 10.0), (10.0 + DRAG_THRESHOLD, 10.0)), "exactly the threshold doesn't start");
-        assert!(past_threshold((10.0, 10.0), (10.0 + DRAG_THRESHOLD + 0.1, 10.0)));
-        let d = DRAG_THRESHOLD * 0.75;
-        assert!(past_threshold((0.0, 0.0), (d, d)), "diagonal travel counts its length");
+        let t = DRAG_THRESHOLD;
+        assert!(!past_threshold((10.0, 10.0), (10.0, 10.0), t));
+        assert!(!past_threshold((10.0, 10.0), (10.0 + t, 10.0), t), "exactly the threshold doesn't start");
+        assert!(past_threshold((10.0, 10.0), (10.0 + t + 0.1, 10.0), t));
+        let d = t * 0.75;
+        assert!(past_threshold((0.0, 0.0), (d, d), t), "diagonal travel counts its length");
     }
 
     #[test]

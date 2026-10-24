@@ -657,6 +657,7 @@ pub struct El {
     pub(crate) above: Option<Anchor>,
     pub(crate) on_drag: Option<DragFn>,
     pub(crate) drag_out: Option<DragOutFn>,
+    pub(crate) drag_threshold: Option<f32>,
     pub(crate) on_drag_start: Option<PressFn>,
     pub(crate) on_drag_end: Option<DragEndFn>,
     pub(crate) motion: Option<Spring>,
@@ -715,6 +716,7 @@ fn base(dir: FlexDirection) -> El {
         above: None,
         on_drag: None,
         drag_out: None,
+        drag_threshold: None,
         on_drag_start: None,
         on_drag_end: None,
         motion: None,
@@ -1996,6 +1998,19 @@ impl El {
     /// session; see [`crate::drag_out`] for how far that path is tested.
     pub fn drag_out<S: 'static>(mut self, f: impl Fn(&S) -> Option<crate::DragItem> + 'static) -> Self {
         self.drag_out = Some(Rc::new(move |s| f(s.downcast_ref::<S>().expect("handler registered for a different state type than the app's"))));
+        self
+    }
+    /// How far (points, straight-line) the pointer travels from the press before this
+    /// element's [`El::drag_out`] starts, instead of [`crate::drag_out::DRAG_THRESHOLD`]. A
+    /// port of a native control that used another distance keeps its feel this way.
+    ///
+    /// ```
+    /// # use rune::{DragItem, el::el};
+    /// # struct App;
+    /// el().drag_out(|_: &App| Some(DragItem::new().text("row"))).drag_threshold(3.0);
+    /// ```
+    pub fn drag_threshold(mut self, points: f32) -> Self {
+        self.drag_threshold = Some(points.max(0.0));
         self
     }
     /// Called when a [`El::drag_out`] drag starts, after the drag image was taken, so the app

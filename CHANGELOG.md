@@ -5,6 +5,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::drag_threshold(points)`** sets how far the pointer travels before that element's
+  `drag_out` starts, in place of `DRAG_THRESHOLD` (4 pt, 8 on Linux), which stays the default.
 - **Hidden overlays follow theme changes.** A hidden or prewarmed overlay switching between
   light and dark used to keep the old theme until it was shown and the theme changed again; it
   now takes the change while hidden and redraws in it before it's revealed.

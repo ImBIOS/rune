@@ -235,6 +235,7 @@ pub(crate) struct Node {
     above: Option<crate::el::Anchor>,
     on_drag: Option<DragFn>,
     drag_out: Option<DragOutFn>,
+    drag_threshold: Option<f32>,
     on_drag_start: Option<PressFn>,
     on_drag_end: Option<DragEndFn>,
     motion: Spring,
@@ -710,6 +711,8 @@ pub struct Runtime<S: 'static> {
     os_drag: bool,
     /// The held press is on a `drag_out` element that hasn't crossed the threshold yet.
     drag_out_armed: bool,
+    /// The armed element's drag threshold (points).
+    drag_out_threshold: f32,
     drag_out_request: Option<crate::drag_out::DragOutStart>,
     /// How OS drags ended, filled by the host's session callbacks between frames.
     drag_ends: crate::drag_out::DragEnds,
@@ -913,6 +916,7 @@ impl<S: 'static> Runtime<S> {
             double_click_interval: 0.5,
             os_drag: true,
             drag_out_armed: false,
+            drag_out_threshold: crate::drag_out::DRAG_THRESHOLD,
             drag_out_request: None,
             drag_ends: Default::default(),
             drags_open: 0,
@@ -3036,7 +3040,7 @@ impl<S: 'static> Runtime<S> {
         }
         self.refresh_hover(x, y);
         let Some((path, d)) = self.capture.clone() else { return };
-        if self.drag_out_armed && crate::drag_out::past_threshold(self.press_at, (x, y)) && self.start_drag_out(path.clone()) {
+        if self.drag_out_armed && crate::drag_out::past_threshold(self.press_at, (x, y), self.drag_out_threshold) && self.start_drag_out(path.clone()) {
             return;
         }
         self.selection_drag(x, y);
@@ -3227,6 +3231,7 @@ impl<S: 'static> Runtime<S> {
         };
         let path = n.path.clone();
         self.drag_out_armed = self.drags_out(n);
+        self.drag_out_threshold = n.drag_threshold.unwrap_or(crate::drag_out::DRAG_THRESHOLD);
         if n.on_drag.is_some() && !self.drag_out_armed {
             self.queue.push(Action::Drag(path.clone(), d));
         }
@@ -5113,6 +5118,7 @@ fn flatten(
         above,
         on_drag,
         drag_out,
+        drag_threshold,
         on_drag_start,
         on_drag_end,
         opacity_motion,
@@ -5179,6 +5185,7 @@ fn flatten(
         above,
         on_drag,
         drag_out,
+        drag_threshold,
         on_drag_start,
         on_drag_end,
         motion,
@@ -6378,6 +6385,33 @@ mod tests {
         rt.pointer_up(40.0, 30.0);
         rt.frame(0.0);
         assert_eq!((rt.state.presses, rt.state.drags), (0, 0), "neither on_press nor on_drag runs");
+    }
+
+    #[test]
+    fn an_element_sets_its_own_drag_threshold() {
+        fn view(_: &DragOutState, _: &mut Cx<DragOutState>) -> El {
+            col().size(200.0, 200.0)
+                .child(el().key("near").size(100.0, 40.0).drag_threshold(3.0)
+                    .drag_out(|_: &DragOutState| Some(crate::DragItem::new().text("near"))))
+                .child(el().key("far").size(100.0, 40.0).drag_threshold(12.0)
+                    .drag_out(|_: &DragOutState| Some(crate::DragItem::new().text("far"))))
+        }
+        let mut rt = Runtime::new(DragOutState::default(), view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.pointer_move(10.0, 10.0);
+        rt.pointer_down(10.0, 10.0);
+        rt.pointer_move(13.0, 10.0);
+        assert!(rt.take_drag_out().is_none(), "exactly 3 pt is still a press");
+        rt.pointer_move(13.5, 10.0);
+        assert!(rt.take_drag_out().is_some_and(|s| s.path.ends_with("near")), "3.5 pt passes a 3 pt threshold, under the default");
+        rt.pointer_up(13.5, 10.0);
+        rt.frame(0.0);
+        rt.pointer_move(10.0, 50.0);
+        rt.pointer_down(10.0, 50.0);
+        rt.pointer_move(18.0, 50.0);
+        assert!(rt.take_drag_out().is_none(), "8 pt is past the default but under this element's 12");
+        rt.pointer_move(23.0, 50.0);
+        assert!(rt.take_drag_out().is_some_and(|s| s.path.ends_with("far")));
     }
 
     #[test]
