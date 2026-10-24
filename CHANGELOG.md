@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::max_lines(n)` clamps wrapped text to `n` lines.** Like CSS `line-clamp`, it wraps,
+  measures at most `n` lines tall and ends the last line with "…" when more would follow. The
+  cut falls between graphemes and refits on resize; spans and links keep their looks, and copy
+  and accessibility keep the whole string. `.truncate()` and `.truncate_fade()` turn it off, and
+  `.max_lines` turns them off. Text without it is unchanged.
 - **Markdown tables take their own font and cell padding, and can sit flush left.**
   `MarkdownStyle::table_font(TextStyle)` sets the cells' font (the body's by default; a web
   table at `0.93em` is the body at 0.93 of its size), `table_cell_padding(x, y)` the padding (10

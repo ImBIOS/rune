@@ -466,6 +466,8 @@ pub struct TextSpec {
     pub truncate: bool,
     /// Which part `truncate` cuts (see [`El::truncate_middle`]).
     pub(crate) elide: Elide,
+    /// Wrapped lines shown before "…" ends the last (see [`El::max_lines`]); 0 for all.
+    pub(crate) max_lines: usize,
     /// Fade the overflowing trailing edge rather than replacing text with an ellipsis.
     pub truncate_fade: bool,
     /// The `truncate_fade` edge's width in ems (see [`El::truncate_fade_width`]).
@@ -807,6 +809,7 @@ pub fn text(content: impl Into<String>) -> El {
         reveal: -1.0,
         truncate: false,
         elide: Elide::End,
+        max_lines: 0,
         truncate_fade: false,
         fade_em: TRUNCATE_FADE_EM,
         justify: false,
@@ -1742,9 +1745,24 @@ impl El {
             t.elide = elide;
             t.truncate_fade = false;
             t.wrap = false;
+            t.max_lines = 0;
         }
         self.style.flex_shrink = 1.0;
         self.style.min_size.width = length(0.0);
+        self
+    }
+    /// Wrapped text that stops after `lines` lines, "…" ending the last when more would follow,
+    /// as CSS's `line-clamp`. The element measures at most `lines` lines tall. The cut falls
+    /// between graphemes and refits when the element resizes; spans and links keep their
+    /// looks up to it, and copying and the accessibility text keep the whole string. 0 shows
+    /// every line.
+    pub fn max_lines(mut self, lines: usize) -> Self {
+        if let Some(t) = &mut self.text {
+            t.wrap = true;
+            t.max_lines = lines;
+            t.truncate = false;
+            t.truncate_fade = false;
+        }
         self
     }
     /// One line, clipped with a 1.5 em trailing fade only when it overflows. No ellipsis.
@@ -1758,6 +1776,7 @@ impl El {
             t.truncate_fade = true;
             t.fade_em = em.max(0.0);
             t.wrap = false;
+            t.max_lines = 0;
         }
         self.style.flex_shrink = 1.0;
         self.style.min_size.width = length(0.0);

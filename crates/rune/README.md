@@ -502,6 +502,11 @@ middle (AppKit's `NSLineBreakByTruncatingMiddle`), for paths and file names;
 `.truncate_head()` keeps the end. Cuts fall between graphemes and refit on resize, and
 selecting, copying and `--tree` keep the whole string.
 
+`.max_lines(n)` wraps and stops after `n` lines, "…" ending the last when more would
+follow (CSS `line-clamp`). The element measures at most `n` lines tall; the cut falls
+between graphemes, spans and links keep their looks up to it, and copying and the
+accessibility text keep the whole string.
+
 Native hosts populate `cx.system_reduced_motion()` at creation and refresh it on
 window focus changes. Rune uses it by default; `cx.reduced_motion(value)` overrides
 it **for the current commit only**. Call it each time the view runs to keep an

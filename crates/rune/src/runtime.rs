@@ -94,6 +94,9 @@ mod scroll_edge;
 #[cfg(test)]
 #[path = "truncate_tests.rs"]
 mod truncate_tests;
+#[cfg(test)]
+#[path = "line_clamp_tests.rs"]
+mod line_clamp_tests;
 
 const P_FILL: Prop<Color> = Prop::custom(64, PropClass::Color);
 const P_BORDER: Prop<Color> = Prop::custom(65, PropClass::Color);
@@ -2499,7 +2502,7 @@ impl<S> Measurement<'_, S> {
                             }
                             Size {
                                 width: known.width.unwrap_or(lw),
-                                height: known.height.unwrap_or(layout_height(&l, spec.style, scale) / scale),
+                                height: known.height.unwrap_or(clamped_height(&l, spec, scale) / scale),
                             }
                         })
                     },
@@ -2554,6 +2557,8 @@ impl<S> Measurement<'_, S> {
                 let mut elided = None;
                 if spec.truncate && layout.full_width() > w * scale + 0.5 {
                     let (cut, e) = truncated(&mut self.text, spec, scale, w * scale);
+                    (layout, elided) = (cut, Some(e));
+                } else if let Some((cut, e)) = clamped(&mut self.text, spec, scale, w * scale, &layout) {
                     (layout, elided) = (cut, Some(e));
                 }
                 nodes[i].text_layout = Some(layout);
@@ -5132,6 +5137,45 @@ fn truncated(text: &mut TextSystem, spec: &TextSpec, scale: f32, max_w: f32) -> 
     (make(text, e), e)
 }
 
+/// The height (device px) of `l` as `spec` shows it: its first `max_lines` lines when set.
+fn clamped_height(l: &Layout<Ink>, spec: &TextSpec, scale: f32) -> f32 {
+    let full = layout_height(l, spec.style, scale);
+    match spec.max_lines.checked_sub(1).and_then(|last| l.lines().nth(last)).filter(|_| l.len() > spec.max_lines) {
+        Some(line) => line.metrics().block_max_coord.ceil().min(full),
+        None => full,
+    }
+}
+
+/// `spec`'s content wrapped at `max_w` device px and cut after `spec.max_lines` lines, "…"
+/// ending the last with as many whole graphemes before it as fit. None when `full` (the
+/// uncut layout) already fits. Whitespace and line breaks before the ellipsis are dropped.
+fn clamped(text: &mut TextSystem, spec: &TextSpec, scale: f32, max_w: f32, full: &Layout<Ink>) -> Option<(Rc<Layout<Ink>>, Elision)> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let lines = spec.max_lines;
+    if lines == 0 || full.len() <= lines {
+        return None;
+    }
+    let content = spec.content.as_str();
+    let end = full.lines().nth(lines - 1)?.text_range().end.min(content.len());
+    let bounds: Vec<usize> = content[..end].grapheme_indices(true).map(|(i, _)| i).chain([end]).collect();
+    let blank = |g: usize| content[bounds[g]..bounds[g + 1]].chars().all(char::is_whitespace);
+    let cut = |mut k: usize| {
+        while k > 0 && blank(k - 1) { k -= 1; }
+        Elision { head: bounds[k], tail: content.len() }
+    };
+    let make = |text: &mut TextSystem, e: Elision| {
+        let s = [&content[..e.head], Elision::ELLIPSIS].concat();
+        text.layout_aligned(&s, &e.spans(&spec.spans), spec.style, scale, Some(max_w), line_alignment(spec))
+    };
+    let (mut lo, mut hi) = (0usize, bounds.len() - 1);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if make(text, cut(mid)).len() <= lines { lo = mid } else { hi = mid - 1 }
+    }
+    let e = cut(lo);
+    Some((make(text, e), e))
+}
+
 // Carry the declaring edge with the inherited width. Descendant clipping must not restart
 // its ramp; an inner fade takes over once the ancestor's ramp is fully opaque there.
 fn inherit_fade(width: &mut [f32; 4], origin: &mut [f32; 4], rect: [f32; 4], own: [f32; 4]) {
@@ -5427,6 +5471,7 @@ fn flatten(
     if input.is_none() && let Some(t) = &mut text { t.apply_case(); }
     let measured = text.is_some();
     let measure = text.as_ref().map(|t| crate::text::text_hash(&t.content, &t.spans, t.style, scale, None) ^ u64::from(t.wrap) ^ (u64::from(t.truncate || t.truncate_fade) << 1)
+        ^ ((t.max_lines as u64) << 2)
         ^ t.advance_in.as_ref().map_or(0, |(run, at)| run.hash.rotate_left(3) ^ (*at as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)));
     nodes.push(Node {
         on_paste,
