@@ -707,6 +707,14 @@ impl Offscreen {
     }
 
     pub fn copy(&self, encoder: &mut wgpu::CommandEncoder) {
+        self.copy_to(encoder, &self.buffer);
+    }
+
+    /// Bytes between rows in a readback buffer (`width * 4`, rounded up to wgpu's alignment).
+    pub(crate) fn padded_row(&self) -> u32 { self.padded_row }
+
+    /// Copies the target into `buffer`, which holds `padded_row() * height` bytes.
+    pub(crate) fn copy_to(&self, encoder: &mut wgpu::CommandEncoder, buffer: &wgpu::Buffer) {
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
@@ -715,7 +723,7 @@ impl Offscreen {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
-                buffer: &self.buffer,
+                buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(self.padded_row),
@@ -731,14 +739,10 @@ impl Offscreen {
         let slice = self.buffer.slice(..);
         slice.map_async(wgpu::MapMode::Read, |r| r.expect("map readback"));
         device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-        let mut out = Vec::with_capacity((self.width * self.height * 4) as usize);
-        {
+        let out = {
             let data = slice.get_mapped_range().expect("mapped range");
-            for row in 0..self.height {
-                let start = (row * self.padded_row) as usize;
-                out.extend_from_slice(&data[start..start + (self.width * 4) as usize]);
-            }
-        }
+            crate::record::unpad(&data, self.width, self.height, self.padded_row)
+        };
         self.buffer.unmap();
         out
     }

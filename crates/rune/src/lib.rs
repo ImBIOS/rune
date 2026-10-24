@@ -90,6 +90,7 @@ pub mod image;
 #[cfg(feature = "hot")]
 pub mod hot;
 pub mod render;
+mod record;
 mod surface_alpha;
 pub mod native_surface;
 pub mod runtime;

@@ -166,6 +166,10 @@ pub struct Args {
     /// Draw where macOS will put the traffic lights over headless frames, and report elements
     /// that overlap them.
     pub chrome_overlay: bool,
+    /// Stream the dumped frames into ffmpeg, which writes this video.
+    pub(crate) video: Option<PathBuf>,
+    /// Seconds of frames to dump, when `frames` isn't given.
+    pub(crate) duration: Option<f64>,
 }
 
 impl Args {
@@ -207,6 +211,8 @@ impl Args {
                 "--start" => a.start = num(&val(&mut i)),
                 "--fps" => a.fps = num(&val(&mut i)),
                 "--out" => a.out = Some(val(&mut i).into()),
+                "--video" => a.video = Some(val(&mut i).into()),
+                "--duration" => a.duration = Some(num(&val(&mut i))),
                 "--tree" => a.tree = Some(val(&mut i).into()),
                 "--trace" => a.trace = Some(val(&mut i).into()),
                 "--native" => a.native = true,
@@ -241,6 +247,7 @@ impl Args {
         self.snap.is_some()
             || self.tree.is_some()
             || (!self.native && (self.trace.is_some() || self.frames.is_some()))
+            || self.video.is_some()
             || self.strip.is_some()
             || self.list_scenes
             || self.first_pixels
@@ -257,6 +264,8 @@ const HELP: &str = "usage: <app> [window]
   --script FILE.json    timestamped input (move/down/up/tap/drag, keys, {\"focus\":false},
                         menu-pick with an \"id\", menu-cancel); a key with \"repeat\":true is a held key's auto-repeat; an object adds \"displays\" and \"pointer\" for place() (rune-placed, --tree)
   --frames N --fps 60 --start S --out DIR     dump N frames from S seconds
+  --video out.mp4       stream frames into ffmpeg (.mp4 H.264, .mov ProRes 4444, .webm VP9);
+                        --frames N or --duration SECONDS long (default: to 1 s after the script)
   --strip out.png --crop x,y,w,h --every K    tile dumped frames into one image
                         (repeat --crop to stack several regions per frame; --cols N per row)
   --tree out.json       element tree with animated values
@@ -1013,8 +1022,12 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let fps = args.fps.max(1.0);
     let dt = 1.0 / fps;
     let start_frame = (args.start * fps).round() as usize;
-    let frames = args.frames.unwrap_or(0);
     let script_end = script.last().map_or(0.0, |e| e.t);
+    let frames = args.frames.unwrap_or_else(|| match (args.duration, &args.video) {
+        (Some(d), _) => (d * fps).round().max(1.0) as usize,
+        (None, Some(_)) => ((script_end + 1.0 - start_frame as f64 * dt) * fps).round().max(1.0) as usize,
+        (None, None) => 0,
+    });
     let snap_t = args.at.unwrap_or(if frames > 0 {
         (start_frame + frames - 1) as f64 * dt
     } else if script.is_empty() {
@@ -1025,12 +1038,18 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let snap_frame = (snap_t * fps).round() as usize;
     let last_frame = snap_frame.max(start_frame + frames.max(1) - 1);
 
+    let mut writer = crate::record::Writer::new(((size.0 * scale).round() as u32, (size.1 * scale).round() as u32));
+    if let Some(path) = &args.video {
+        writer.video(path, fps).unwrap_or_else(|e| die(&e));
+    }
+
     let t0 = Instant::now();
     let features = comp.as_ref().map_or(wgpu::Features::empty(), |c| c.features());
     let gpu = Gpu::try_with_features(Gpu::instance(), None, features).unwrap_or_else(|e| die(&e));
     let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
     let (wp, hp) = ((size.0 * scale).round() as u32, (size.1 * scale).round() as u32);
     let target = Offscreen::new(&gpu.device, wp, hp);
+    let mut readback = crate::record::Readback::new(&gpu.device, &target, crate::record::DEPTH);
     let alpha = transparent.then(|| crate::surface_alpha::AlphaSurface::new(&gpu.device, OFFSCREEN_FORMAT, (wp, hp)));
     let init_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
@@ -1040,6 +1059,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let mut strip: Vec<Vec<u8>> = Vec::new();
     let crops_px: Vec<[u32; 4]> = args.crops.iter().map(|c| c.map(|v| (v * scale).round() as u32)).collect();
     let gap = (4.0 * scale) as u32;
+    let wall = Instant::now();
     let mut cpu_ms = Vec::new();
     let mut anim_ms = Vec::new();
     let mut rest_ms = Vec::new();
@@ -1057,6 +1077,31 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             menus.drain();
         }
         requests.place
+    };
+    let mut frames_written = 0usize;
+    let has_video = writer.has_video();
+    // Finished readbacks, in frame order.
+    let mut deliver = |shot: Shot, mut px: Vec<u8>| {
+        if args.chrome_overlay
+            && let Some(lights) = chrome.traffic_light_rects()
+        {
+            paint_traffic_lights(&mut px, wp, hp, scale, &lights);
+        }
+        if shot.dump {
+            if args.strip.is_some() {
+                strip.push(tile(&px, wp, hp, &crops_px, gap));
+            }
+            if let Some(dir) = &args.out {
+                writer.png(dir.join(format!("frame_{:04}.png", shot.k - start_frame)), px.clone());
+            }
+        }
+        if shot.snap {
+            writer.png(args.snap.clone().unwrap(), px.clone());
+        }
+        if shot.video {
+            frames_written += 1;
+            writer.frame(px);
+        }
     };
     let mut early_place = None;
     if script.first().is_some_and(|e| e.t <= 1e-9) {
@@ -1136,13 +1181,21 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             renderer.draw(&mut enc, view, rt.clear_color());
         }
         if let Some(alpha) = &alpha { alpha.draw(&mut enc, &target.view); }
-        let dump = k >= start_frame && k < start_frame + frames && (args.out.is_some() || args.strip.is_some()) && (k - start_frame).is_multiple_of(args.every);
-        let want_snap = k == snap_frame && args.snap.is_some();
-        let want_pixels = dump || want_snap || (args.first_pixels && k == 0);
+        let in_range = k >= start_frame && k < start_frame + frames;
+        let shot = Shot {
+            k,
+            dump: in_range && (args.out.is_some() || args.strip.is_some()) && (k - start_frame).is_multiple_of(args.every),
+            video: in_range && has_video,
+            snap: k == snap_frame && args.snap.is_some(),
+        };
+        let first_pixels = args.first_pixels && k == 0;
+        let want_pixels = shot.dump || shot.video || shot.snap || first_pixels;
         if want_pixels {
-            target.copy(&mut enc);
+            for (shot, px) in readback.make_room(&gpu.device) { deliver(shot, px); }
+            readback.copy(&mut enc, &target, shot);
         }
         renderer.submit(&gpu.queue, enc);
+        if want_pixels { readback.submitted(); }
         let ms = frame_start.elapsed().as_secs_f64() * 1000.0;
         cpu_ms.push(ms);
         if k > 0 {
@@ -1156,37 +1209,20 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         if let Some(tr) = trace.as_mut() {
             tr.frame(&mut rt, real_t * 1000.0, ms);
         }
-        if want_pixels {
+        if first_pixels {
             let wait = Instant::now();
-            let mut px = target.read(&gpu.device);
-            if args.chrome_overlay
-                && let Some(lights) = chrome.traffic_light_rects()
-            {
-                paint_traffic_lights(&mut px, wp, hp, scale, &lights);
-            }
-            if args.first_pixels && k == 0 {
-                let marker = json!({
-                    "headless_ms": launched.elapsed().as_secs_f64() * 1000.0,
-                    "state_ms": state_ms, "runtime_ms": runtime_ms, "gpu_init_ms": init_ms,
-                    "frame_cpu_ms": ms, "readback_ms": wait.elapsed().as_secs_f64() * 1000.0,
-                    "pixel_bytes": px.len(),
-                });
-                println!("rune-first-pixels {marker}");
-                std::io::stdout().flush().unwrap();
-            }
-            if dump {
-                if let Some(dir) = &args.out {
-                    let p = dir.join(format!("frame_{:04}.png", k - start_frame));
-                    write_png(&p, wp, hp, &px).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
-                }
-                if args.strip.is_some() {
-                    strip.push(tile(&px, wp, hp, &crops_px, gap));
-                }
-            }
-            if want_snap {
-                let p = args.snap.as_ref().unwrap();
-                write_png(p, wp, hp, &px).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
-            }
+            let done = readback.finish(&gpu.device);
+            let marker = json!({
+                "headless_ms": launched.elapsed().as_secs_f64() * 1000.0,
+                "state_ms": state_ms, "runtime_ms": runtime_ms, "gpu_init_ms": init_ms,
+                "frame_cpu_ms": ms, "readback_ms": wait.elapsed().as_secs_f64() * 1000.0,
+                "pixel_bytes": done.last().map_or(0, |(_, px)| px.len()),
+            });
+            println!("rune-first-pixels {marker}");
+            std::io::stdout().flush().unwrap();
+            for (shot, px) in done { deliver(shot, px); }
+        } else if want_pixels {
+            for (shot, px) in readback.ready(&gpu.device) { deliver(shot, px); }
         }
         if k == snap_frame
             && args.chrome_overlay
@@ -1202,6 +1238,12 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             let text = serde_json::to_string_pretty(&tree).unwrap();
             std::fs::write(p, text).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
         }
+    }
+    for (shot, px) in readback.finish(&gpu.device) { deliver(shot, px); }
+    drop(deliver);
+    let written = frames_written;
+    if let Some(video) = writer.finish().unwrap_or_else(|e| die(&e)) {
+        eprintln!("rune: wrote {} ({written} frames at {fps} fps)", video.display());
     }
     gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok();
 
@@ -1222,6 +1264,10 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         write_png(p, sw, sh, &img).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
     }
 
+    if frames > 0 {
+        let wall = wall.elapsed().as_secs_f64();
+        eprintln!("rune: {} frames in {wall:.2} s wall ({:.1} frames/s)", last_frame + 1, (last_frame + 1) as f64 / wall);
+    }
     let q = |v: &mut Vec<f64>, p: f64| {
         v.sort_by(f64::total_cmp);
         if v.is_empty() { 0.0 } else { v[((v.len() - 1) as f64 * p).round() as usize] }
@@ -1250,6 +1296,14 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     if let Some(s) = comp.as_mut().and_then(|c| c.summary(&gpu.device)) {
         eprintln!("{s}");
     }
+}
+
+/// A frame whose pixels are being read back, and where they go.
+struct Shot {
+    k: usize,
+    dump: bool,
+    video: bool,
+    snap: bool,
 }
 
 /// Antialiased discs where macOS draws close, minimise and zoom, plus a hairline box 4 pt
@@ -1450,6 +1504,26 @@ mod tests {
         let summary = crate::present_time::Summary::of_trace(&timed).unwrap();
         assert_eq!((summary.frames, summary.presented, summary.bunched, summary.missed), (3, 3, 0, 0));
         assert!(crate::present_time::Summary::of_trace(&plain).is_none());
+    }
+
+    #[test]
+    fn video_streams_every_frame_into_ffmpeg() {
+        if std::process::Command::new("ffprobe").arg("-version").output().is_err() {
+            eprintln!("skipped: ffmpeg and ffprobe aren't installed");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("rune-video-{}", std::process::id()));
+        let path = dir.join("tiny.mp4");
+        let spec = AppSpec::new("video", (31.0, 20.0), || (), |_, _| crate::el().size(10.0, 10.0).fill(crate::oklch(0.6, 0.2, 30.0)));
+        let args = ["--video", path.to_str().unwrap(), "--frames", "12", "--scale", "1"];
+        headless(crate::App::new(spec), Args::parse_from(args.map(String::from).into()));
+        let probe = std::process::Command::new("ffprobe")
+            .args(["-v", "error", "-count_frames", "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name,width,height,nb_read_frames,pix_fmt", "-of", "csv=p=0"])
+            .arg(&path).output().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        // yuv420p needs even sizes, so the 31-pixel width is padded to 32.
+        assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "h264,32,20,yuv420p,12");
     }
 
     #[test]

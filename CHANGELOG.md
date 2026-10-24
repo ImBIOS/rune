@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Headless runs can write a finished video.** `--video out.mp4` (`.mov` for ProRes 4444,
+  `.webm` for VP9) streams raw frames into an `ffmpeg` child at `--fps` (default 60), so no
+  frames touch disk; ffmpeg must be on `PATH`. Its length is `--frames N`, `--duration S`, or
+  through one second after the script's last event. Readback now keeps three frames in flight
+  and PNGs (`--out`, `--snap`) encode on worker threads, so `--frames --out` dumps are several
+  times faster too.
 - **rune-kit feature `mermaid` draws ```` ```mermaid ```` flowcharts and sequence diagrams
   natively** inside `Markdown` once the fence closes, and through `rune_kit::mermaid::render`.
   Without the feature, or for unsupported diagrams, the fence stays a code block (with a
