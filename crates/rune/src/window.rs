@@ -261,15 +261,8 @@ impl WindowHandle {
 
 #[cfg(target_os = "macos")]
 fn native_window_number(window: &Window) -> Option<u32> {
-    use objc2::rc::Retained;
-    use objc2_app_kit::NSView;
-    use winit::raw_window_handle::RawWindowHandle;
-    let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else { return None };
-    // SAFETY: called on winit's event thread; the live window owns the retained view.
-    unsafe {
-        let view = Retained::retain(handle.ns_view.as_ptr().cast::<NSView>())?;
-        u32::try_from(view.window()?.windowNumber()).ok().filter(|n| *n != 0)
-    }
+    // SAFETY: called on winit's event thread.
+    u32::try_from(unsafe { crate::macos::ns_window(window)?.windowNumber() }).ok().filter(|n| *n != 0)
 }
 #[cfg(not(target_os = "macos"))]
 fn native_window_number(_: &Window) -> Option<u32> { None }
@@ -605,16 +598,10 @@ mod mac {
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, Bool, Sel};
     use objc2::{ffi, msg_send, sel, ClassType};
-    use objc2_app_kit::{NSEvent, NSPanel, NSView, NSWindowButton, NSWindowStyleMask};
+    use objc2_app_kit::{NSEvent, NSPanel, NSWindowButton, NSWindowStyleMask};
     use objc2_foundation::{NSPoint, NSString, NSUserDefaults};
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use winit::window::Window;
-
-    fn content_view(window: &Window) -> Option<Retained<NSView>> {
-        let RawWindowHandle::AppKit(h) = window.window_handle().ok()?.as_raw() else { return None };
-        // SAFETY: winit's AppKit handle points at its live content view, used on the main thread.
-        unsafe { Retained::retain(h.ns_view.as_ptr().cast::<NSView>()) }
-    }
+    use crate::macos::{content_view, ns_window};
 
     unsafe extern "C" fn cannot_move_window(_: *mut AnyObject, _: Sel) -> Bool {
         Bool::NO
@@ -692,7 +679,7 @@ mod mac {
     /// plus twice `y`, and the buttons sit `x, y` from the top-left at AppKit's own pitch.
     /// AppKit lays the titlebar out again on resize, so the shell calls this after each.
     pub fn place_traffic_lights(window: &Window, (x, y): (f32, f32)) {
-        let Some(win) = content_view(window).and_then(|v| v.window()) else { return };
+        let Some(win) = ns_window(window) else { return };
         if win.styleMask().contains(NSWindowStyleMask::FullScreen) {
             return;
         }

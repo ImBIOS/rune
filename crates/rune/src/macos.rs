@@ -351,12 +351,16 @@ pub(crate) fn set_dock_icon(visible: bool) {
     app.setActivationPolicy(policy);
 }
 
-fn ns_window(window: &winit::window::Window) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+/// winit's content view. Once a [`Panel`] adopts it, its window is the panel.
+pub(crate) fn content_view(window: &winit::window::Window) -> Option<Retained<objc2_app_kit::NSView>> {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else { return None };
     // SAFETY: winit's content view is alive as long as its window, which the caller holds.
-    let view: &objc2_app_kit::NSView = unsafe { handle.ns_view.cast().as_ref() };
-    view.window()
+    unsafe { Retained::retain(handle.ns_view.as_ptr().cast()) }
+}
+
+pub(crate) fn ns_window(window: &winit::window::Window) -> Option<Retained<NSWindow>> {
+    content_view(window)?.window()
 }
 
 pub(crate) fn configure_window(window: &winit::window::Window, options: &crate::MacWindowOptions) {
@@ -416,14 +420,10 @@ impl Panel {
     }
 
     fn adopt_kind(window: &winit::window::Window, at: crate::overlay::Placement, interactive: bool, options: &OverlayOptions, wake: Option<crate::Waker>, ordinary: bool) -> Option<Panel> {
-        use objc2_app_kit::{NSBackingStoreType, NSColor, NSPanel, NSView, NSWindowCollectionBehavior, NSWindowStyleMask};
-        use objc2_foundation::{NSPoint, NSRect, NSSize};
-        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use objc2_app_kit::{NSBackingStoreType, NSColor, NSWindowCollectionBehavior, NSWindowStyleMask};
         let mtm = MainThreadMarker::new()?;
         crate::macos_appearance::install();
-        let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else { return None };
-        // SAFETY: winit's content view is alive while its window is, and we retain it.
-        let view = unsafe { objc2::rc::Retained::retain(handle.ns_view.as_ptr().cast::<NSView>()) }?;
+        let view = content_view(window)?;
         let ns_window = view.window()?;
         let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(at.size.0 as f64, at.size.1 as f64));
         // SAFETY: AppKit calls on the main thread; the panel is retained by `Panel`.
