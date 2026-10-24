@@ -1590,9 +1590,12 @@ mod tests {
         };
         // Running motion keeps real time up to the resume cap.
         let (capped, _) = run(|_| {}, |_| {}, Duration::from_secs_f64(crate::frame_clock::MAX_GAP));
-        let mut cases: Vec<(&str, fn(&mut Overlay<Pair>), fn(&mut Overlay<Pair>))> = vec![("hidden", |o| o.hide(), |o| o.visible = true)];
+        type Case = (&'static str, fn(&mut Overlay<Pair>), fn(&mut Overlay<Pair>));
+        let hidden: Case = ("hidden", |o| o.hide(), |o| o.visible = true);
         #[cfg(target_os = "macos")]
-        cases.push(("occluded", |o| o.occluded(true), |o| o.occluded(false)));
+        let cases: [Case; 2] = [hidden, ("occluded", |o| o.occluded(true), |o| o.occluded(false))];
+        #[cfg(not(target_os = "macos"))]
+        let cases: [Case; 1] = [hidden];
         for (what, pause, resume) in cases {
             let (a, b) = run(pause, resume, Duration::from_secs(3));
             // `b` sits beside `a`, so its edges snap to a different 1/64 pt grid than `fresh`.
