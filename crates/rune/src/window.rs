@@ -164,6 +164,19 @@ impl Win {
         self.window.set_visible(false);
     }
 
+    /// Whether the display link drives redraws. Other platforms redraw on request.
+    fn paced(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return self.pacing.as_ref().is_some_and(|p| p.running());
+        #[cfg(not(target_os = "macos"))]
+        false
+    }
+
+    fn stop_pacing(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(pacing) = &mut self.pacing { pacing.stop(); }
+    }
+
     fn focus(&self) {
         #[cfg(target_os = "macos")]
         if let Some(panel) = &self.panel { panel.request_keys(); return; }
@@ -1023,8 +1036,7 @@ impl<S: 'static> Host<S> {
             self.native_handle.native.ready.store(false, Ordering::Release);
             self.native_handle.native.number.store(0, Ordering::Release);
         } else if let Some(w) = self.win.as_mut() {
-            #[cfg(target_os = "macos")]
-            if let Some(pacing) = &mut w.pacing { pacing.stop(); }
+            w.stop_pacing();
             w.visible = false;
         }
     }
@@ -1254,8 +1266,7 @@ impl<S: 'static> Host<S> {
         let (Some(l), Some((gpu, renderer, _))) = (self.win.as_mut(), self.gpu.as_mut()) else { return };
         let hidden = launcher && !l.visible;
         if (!launcher && (!l.visible || l.occluded)) || l.window.is_minimized().unwrap_or(false) {
-            #[cfg(target_os = "macos")]
-            if let Some(pacing) = &mut l.pacing { pacing.stop(); }
+            l.stop_pacing();
             return;
         }
         #[cfg(target_os = "macos")]
@@ -1382,14 +1393,9 @@ impl<S: 'static> Host<S> {
         }
         self.idle = !(animating || rt.has_pending_input() || rt.live_pending());
         if !hidden && (!self.idle || (self.trace.is_some() && self.args.frames.is_some())) {
-            #[cfg(target_os = "macos")]
-            let paced = l.pacing.as_ref().is_some_and(|p| p.running());
-            #[cfg(not(target_os = "macos"))]
-            let paced = false;
-            if !paced { l.window.request_redraw(); }
+            if !l.paced() { l.window.request_redraw(); }
         } else {
-            #[cfg(target_os = "macos")]
-            if let Some(pacing) = &mut l.pacing { pacing.stop(); }
+            l.stop_pacing();
         }
     }
 }
@@ -1445,9 +1451,7 @@ impl<S: 'static> AnyHost for Host<S> {
     fn wake_deadline(&self) -> Option<Instant> {
         // The next display tick consumes due timers too. Leaving an overdue timer
         // armed while its redraw waits for that tick would spin the event loop.
-        let runtime = wall_wake_deadline(&self.rt);
-        #[cfg(target_os = "macos")]
-        let runtime = runtime.filter(|_| !self.win.as_ref().and_then(|w| w.pacing.as_ref()).is_some_and(|p| p.running()));
+        let runtime = wall_wake_deadline(&self.rt).filter(|_| !self.win.as_ref().is_some_and(Win::paced));
         #[cfg(all(feature = "dev", debug_assertions))]
         let runtime = runtime.into_iter().chain(self.rt.dev_hidden_deadline()).min();
         runtime.into_iter().chain(self.win.as_ref().and_then(|w| w.first_frame.deadline.map(|(retry, _)| retry))).min()
@@ -1497,8 +1501,7 @@ impl<S: 'static> Host<S> {
                 self.drain(event_loop, true);
             }
             WakeEvent::DisplayTick(_) => {
-                #[cfg(target_os = "macos")]
-                if self.win.as_ref().and_then(|w| w.pacing.as_ref()).is_some_and(|p| p.running()) {
+                if self.win.as_ref().is_some_and(Win::paced) {
                     self.redraw();
                     self.shell(event_loop);
                 }
@@ -1561,8 +1564,7 @@ impl<S: 'static> Host<S> {
                 rt.set_live_visible(l.visible && !l.occluded && size.width > 0 && size.height > 0 && !l.window.is_minimized().unwrap_or(false));
                 if size.width == 0 || size.height == 0 {
                     self.secure_input.set(false);
-                    #[cfg(target_os = "macos")]
-                    if let Some(pacing) = &mut l.pacing { pacing.stop(); }
+                    l.stop_pacing();
                     self.idle = true; return;
                 }
                 l.config.width = size.width.max(1);
@@ -1586,8 +1588,7 @@ impl<S: 'static> Host<S> {
                 rt.set_live_visible(l.visible && !occluded && !l.window.is_minimized().unwrap_or(false));
                 if occluded {
                     self.secure_input.set(false);
-                    #[cfg(target_os = "macos")]
-                    if let Some(pacing) = &mut l.pacing { pacing.stop(); }
+                    l.stop_pacing();
                     self.idle = true; return;
                 }
                 place_chrome(&l.window, chrome);
