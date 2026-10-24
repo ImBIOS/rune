@@ -153,6 +153,7 @@ stories! {
     "rune-markdown--streaming" => markdown_streaming,
     "rune-markdown--walkthrough" => markdown_walkthrough,
     "rune-markdown--diagrams" => markdown_diagrams,
+    "rune-markdown--table-styles" => markdown_table_styles,
 }
 
 fn combobox_searchable(s: &G, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -1380,6 +1381,19 @@ pie title Pets
 
 fn markdown_diagrams(_: &G, k: &Kit, _: &mut Vec<El>) -> El {
     col().w(520.0).child(Markdown::new(DIAGRAMS).build(k))
+}
+
+/// A table without an outline, with a dimmed header and figures that line up, and a diff whose
+/// line text is tinted too.
+const TABLE_STYLES: &str = "| Field | Compared |\n|---|---|\n| title | yes |\n| updatedAt | yes |\n| draft cursor | no |\n\n| Build | Files | Time | Size |\n|:--|--:|--:|--:|\n| debug | 1,204 | 41.8 s | 118.4 MB |\n| release | 1,204 | 71.0 s | 31.1 MB |\n| perf | 1,211 | 69.6 s | 33.7 MB |\n\n```diff\n@@ -3,3 +3,3 @@ fields:\n   title: compared\n-  draft: compared\n+  draft: ignored\n```\n";
+
+fn markdown_table_styles(_: &G, k: &Kit, _: &mut Vec<El>) -> El {
+    let style = MarkdownStyle::from_kit(k)
+        .table(k.c.border_muted, rune::Color::TRANSPARENT)
+        .table_outline(None)
+        .table_header_text(k.c.text_muted)
+        .diff_text_tint(0.5);
+    col().w(560.0).child(Markdown::new(TABLE_STYLES).style(style).build(k))
 }
 
 fn markdown_walkthrough(_: &G, k: &Kit, _: &mut Vec<El>) -> El {

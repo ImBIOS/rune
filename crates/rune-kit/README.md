@@ -122,8 +122,8 @@ source each time, and earlier blocks stay mounted.
   draws one on its own.
 
 `Tooltip::label(..).render(&TooltipStyle::neutral(dark), &mut layer)` builds a tooltip without
-a kit. The gallery's `rune-markdown--walkthrough` and `rune-markdown--diagrams` scenes show
-every feature.
+a kit. The gallery's `rune-markdown--walkthrough`, `rune-markdown--diagrams` and
+`rune-markdown--table-styles` scenes show every feature.
 
 ## Checking against Storybook
 
