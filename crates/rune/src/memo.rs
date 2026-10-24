@@ -28,7 +28,9 @@
 //!   or a new value always builds.
 //! - **Virtual rows** that scroll out keep their cached subtree as long as the view still
 //!   creates them (virtualized rows always are); scrolling back in mounts it again without a
-//!   build. A memo the view stops creating is dropped at the end of that view build.
+//!   build. A memo the view stops creating is dropped at the end of that view build. Rows
+//!   `El::virtual_rows` builds count as part of the view build, so a memo in one is kept while
+//!   its row stays in the mounted window and dropped once the row leaves it.
 //!
 //! The id names the subtree within the window, so it must be unique among the memos of one
 //! view build (a message id, say). A memo inside another's closure is named within it, so
@@ -136,6 +138,12 @@ impl MemoCache {
     #[cfg_attr(not(any(test, feature = "hot", all(feature = "dev", debug_assertions))), expect(dead_code))]
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    /// No memos, counting passes on from this cache's, for a build that must start from scratch.
+    #[cfg(feature = "hot")]
+    pub(crate) fn emptied(&self) -> MemoCache {
+        MemoCache { pass: self.pass, ..MemoCache::default() }
     }
 }
 

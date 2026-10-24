@@ -28,6 +28,18 @@ pub(crate) struct HostState {
 
 thread_local! {
     static INITIAL: std::cell::RefCell<Option<HostState>> = const { std::cell::RefCell::new(None) };
+    static ORIGINAL_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with views built by their startup code, skipping the patch table: the fallback
+/// after a patched view, or a row it built, panicked.
+pub(crate) fn original_only<R>(f: impl FnOnce() -> R) -> R {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) { ORIGINAL_ONLY.set(self.0); }
+    }
+    let _reset = Reset(ORIGINAL_ONLY.replace(true));
+    f()
 }
 
 fn view_adapter<S: 'static>(host: &HostState, cx: &mut Cx<HostState>) -> El {
@@ -38,6 +50,11 @@ fn view_adapter<S: 'static>(host: &HostState, cx: &mut Cx<HostState>) -> El {
 
 fn view_or_original<S>(original: fn(&S, &mut Cx<S>) -> El, state: &S, cx: &mut Cx<HostState>, patched: impl FnOnce(&S, &mut Cx<S>) -> El) -> El {
     let mut typed = cx.retype();
+    if ORIGINAL_ONLY.get() {
+        let tree = original(state, &mut typed);
+        cx.settings_from(typed);
+        return tree;
+    }
     let tree = match catch_unwind(AssertUnwindSafe(|| patched(state, &mut typed))) {
         Ok(tree) => tree,
         Err(_) => {

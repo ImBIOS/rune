@@ -5,6 +5,17 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::virtual_rows(count, estimate, key, build)` builds a virtual list's rows by index.**
+  It is `virtualize` with rows the list builds itself: layout calls `build(state, i)` only
+  for the rows in the mounted window, after it knows where the window is, so a commit costs a
+  key check per row plus the rows it mounts. A 5,000-row list whose counter ticks every frame
+  no longer builds or looks up every row in the view. Rows keep their measured heights by key,
+  prepending or inserting keeps the reader's row in place, `scroll_into_view` reaches any row,
+  and a focused field keeps typing after its row scrolls out. Rows new to the window beyond
+  the viewport mount half a viewport per side per frame, so a page loaded above the reader or
+  a jump lays out a little text each frame instead of three viewports at once. Elements in
+  rows that aren't built don't exist: the inspector, accessibility, Tab order and text
+  selection see built rows only. `virtualize` lists behave as before.
 - **`update_if` for updates that may change nothing.** `AppHandle::update_if`,
   `OverlayHandle::update_if` and `Runtime::update_if` take a closure that returns whether it
   changed state the view reads, as `poll` does. On false the view doesn't re-run, a shown window

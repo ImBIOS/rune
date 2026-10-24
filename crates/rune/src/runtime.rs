@@ -628,7 +628,7 @@ pub struct Runtime<S: 'static> {
     scrolls: HashMap<NodeId, ScrollState>,
     grows: HashMap<NodeId, GrowTrack>,
     stacks: HashMap<NodeId, Stack>,
-    virtuals: HashMap<String, crate::virtual_list::VirtualList>,
+    pub(crate) virtuals: HashMap<String, crate::virtual_list::VirtualList>,
     virtual_culled: HashSet<String>,
     /// Fresh view accessors for focused text fields omitted by virtualization.
     virtual_inputs: HashMap<String, Box<InputSpec>>,
@@ -2270,6 +2270,8 @@ struct Measurement<'a, S> {
     virtual_inputs: &'a mut HashMap<String, Box<InputSpec>>,
     stats: &'a mut FrameStats,
     key_warnings: &'a mut Option<Vec<String>>,
+    /// The focused element's path, so an index-built row holding it is still built.
+    focused: Option<&'a str>,
     caret: Option<(String, [f32; 4])>,
     caret_read: bool,
     layout_seen: layout_read::LayoutSeen,
@@ -2304,7 +2306,7 @@ fn collect_virtual_inputs(el: &El, parent: &str, index: usize, inputs: &mut Hash
     }
 }
 
-impl<S> Measurement<'_, S> {
+impl<S: 'static> Measurement<'_, S> {
     fn finish(mut self, tx: &Tx) -> Measured {
         self.virtual_culled.clear();
         let mut passes = 0;
@@ -2352,18 +2354,25 @@ impl<S> Measurement<'_, S> {
             v.pad_top = padding(el.style.padding.top);
             v.pad_bottom = padding(el.style.padding.bottom);
             let old_keys: HashSet<_> = v.keys.get(v.range.clone()).unwrap_or_default().iter().cloned().collect();
+            let source = el.virtual_rows.take();
+            let state = handler_state_ref(self.state);
+            if source.is_some() {
+                assert!(el.children.is_empty(), "`.virtual_rows(..)` at {path:?} builds its own rows; it takes no children");
+            }
+            v.indexed = source.is_some();
+            let same = match &source {
+                Some(rows) => rows.count == v.keys.len() && (0..rows.count).all(|i| (rows.key)(state, i) == v.keys[i]),
+                None => v.same_keys(el.children.iter().map(|c| c.key.as_deref())),
+            };
             // Most commits keep the same rows; only a change pays for sets of every key.
-            let anchor = if v.same_keys(el.children.iter().map(|c| c.key.as_deref())) {
+            let anchor = if same {
                 if pinned { None } else { v.first_visible(offset, |_| true) }
             } else {
-                let keys: Vec<_> = el.children.iter().map(|c| c.key.clone().expect("virtual rows require stable keys")).collect();
-                let all: HashSet<&str> = keys.iter().map(String::as_str).collect();
-                assert_eq!(all.len(), keys.len(), "virtual row keys must be unique");
-                let anchor = if pinned { None } else { v.first_visible(offset, |k| all.contains(k)) };
-                v.born.retain(|k, _| all.contains(k.as_str()));
-                for key in &keys { v.born.entry(key.clone()).or_insert(self.commits); }
-                v.set_keys(keys);
-                anchor
+                let keys: Vec<_> = match &source {
+                    Some(rows) => (0..rows.count).map(|i| (rows.key)(state, i).into_owned()).collect(),
+                    None => el.children.iter().map(|c| c.key.clone().expect("virtual rows require stable keys")).collect(),
+                };
+                v.set_keys(keys, self.commits, (!pinned).then_some(offset))
             };
             v.anchor = anchor;
             let delta = v.anchor_delta();
@@ -2371,7 +2380,7 @@ impl<S> Measurement<'_, S> {
             if let Some(st) = self.path_ids.get(scroll_path).and_then(|id| self.scrolls.get_mut(id)) {
                 if !pinned { st.offset = (st.offset + f64::from(delta)).max(0.0); }
             }
-            v.select(offset, pinned);
+            v.select(offset, pinned, |k| old_keys.contains(k));
             if force_all { v.range = 0..v.keys.len(); v.before = 0.0; v.after = 0.0; }
             let mounted: HashSet<_> = v.keys[v.range.clone()].iter().cloned().collect();
             for key in old_keys.difference(&mounted).filter(|k| v.has(k)) {
@@ -2379,14 +2388,37 @@ impl<S> Measurement<'_, S> {
             }
             el.style.padding.top = length(v.pad_top + v.before);
             el.style.padding.bottom = length(v.pad_bottom + v.after);
-            el.children = std::mem::take(&mut el.children).into_iter().enumerate().filter_map(|(i, mut child)| {
-                if !v.range.contains(&i) {
-                    collect_virtual_inputs(&child, &path, i, self.virtual_inputs);
-                    return None;
+            if let Some(rows) = source {
+                let build = |i: usize| {
+                    let row = (rows.build)(state, i).key(v.keys[i].clone());
+                    #[cfg(debug_assertions)]
+                    if self.key_warnings.is_none() {
+                        let warnings = crate::key_diagnostics::warnings(&row);
+                        debug_assert!(warnings.is_empty(), "{}", warnings.join("\n"));
+                    }
+                    row
+                };
+                // A focused field's row is built, unmounted, so its typing still lands.
+                let focused = self.focused.and_then(|f| f.strip_prefix(path.as_str())?.strip_prefix('/')?.split('/').next())
+                    .and_then(|key| v.index_of(key)).filter(|i| !v.range.contains(i));
+                if let Some(i) = focused {
+                    collect_virtual_inputs(&build(i), &path, i, self.virtual_inputs);
                 }
-                child.virtual_mount = v.born[child.key.as_ref().unwrap()] < self.commits;
-                Some(child)
-            }).collect();
+                el.children = v.range.clone().map(|i| {
+                    let mut row = build(i);
+                    row.virtual_mount = v.born(i) < self.commits;
+                    row
+                }).collect();
+            } else {
+                el.children = std::mem::take(&mut el.children).into_iter().enumerate().filter_map(|(i, mut child)| {
+                    if !v.range.contains(&i) {
+                        collect_virtual_inputs(&child, &path, i, self.virtual_inputs);
+                        return None;
+                    }
+                    child.virtual_mount = v.born(i) < self.commits;
+                    Some(child)
+                }).collect();
+            }
         }
         let scroll = el.scroll.map(|s| (path.as_str(), s.stick_bottom));
         for (i, child) in el.children.iter_mut().enumerate() {
@@ -2424,6 +2456,24 @@ impl<S> Measurement<'_, S> {
         retry
     }
 
+    /// Checks the view's keys and builds the virtual windows, index-built rows included.
+    fn build_tree(&mut self, mut root: El, tx: &Tx, force_all: bool) -> El {
+        if let Some(warnings) = self.key_warnings.as_mut() {
+            *warnings = crate::key_diagnostics::warnings(&root);
+            // Do not hand an invalid identity tree to Taffy. --tree still emits diagnostics.
+            if !warnings.is_empty() { root = crate::el(); }
+        } else {
+            #[cfg(debug_assertions)]
+            {
+                let warnings = crate::key_diagnostics::warnings(&root);
+                debug_assert!(warnings.is_empty(), "{}", warnings.join("\n"));
+            }
+        }
+        // Index-built rows build here, so memos inside them share the view's cache.
+        self.window_tree(&mut root, "", 0, None, tx.settle, force_all);
+        root
+    }
+
     fn measure_view(&mut self, tx: &Tx, force_all: bool) -> (TaffyTree<usize>, Vec<Node>) {
         let scale = self.env.scale;
         let fresh_cx = |this: &Self| Cx::<S> {
@@ -2438,40 +2488,39 @@ impl<S> Measurement<'_, S> {
             _s: PhantomData,
         };
         let mut cx = fresh_cx(self);
+        #[cfg(feature = "hot")]
+        let emptied = self.memo.emptied();
         let memo = crate::memo::enter(std::mem::take(self.memo), self.env, self.system_reduced_motion, cx.caret.clone(), cx.layout.clone());
         #[cfg(not(feature = "hot"))]
-        let mut root = (self.view)(self.state, &mut cx);
+        let mut root = { let root = (self.view)(self.state, &mut cx); self.build_tree(root, tx, force_all) };
+        // Index-built rows run the app's closures in `build_tree`, so a patch's panic there
+        // falls back like one in the view.
         #[cfg(feature = "hot")]
         let (mut root, memo) = {
             let view = self.view;
             let state = self.state;
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| subsecond::HotFn::current(view).call((state, &mut cx)))) {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let root = subsecond::HotFn::current(view).call((state, &mut cx));
+                self.build_tree(root, tx, force_all)
+            })) {
                 Ok(root) => (root, memo),
                 Err(_) => {
                     eprintln!("rune-hot: view panicked; rendering the original view");
                     // The failed build's memo scope, cache and context writes go; the startup
                     // view builds from scratch against the retained state.
                     drop(memo);
+                    self.virtual_culled.clear();
+                    self.virtual_inputs.clear();
                     cx = fresh_cx(self);
-                    let memo = crate::memo::enter(Default::default(), self.env, self.system_reduced_motion, cx.caret.clone(), cx.layout.clone());
-                    (view(state, &mut cx), memo)
+                    let memo = crate::memo::enter(emptied, self.env, self.system_reduced_motion, cx.caret.clone(), cx.layout.clone());
+                    let root = crate::hot::original_only(|| view(state, &mut cx));
+                    (crate::hot::original_only(|| self.build_tree(root, tx, force_all)), memo)
                 }
             }
         };
+        // Both paths finish the memo here, after the rows are built.
         let (memo, replayed) = memo.finish();
         *self.memo = memo;
-        if let Some(warnings) = self.key_warnings.as_mut() {
-            *warnings = crate::key_diagnostics::warnings(&root);
-            // Do not hand an invalid identity tree to Taffy. --tree still emits diagnostics.
-            if !warnings.is_empty() { root = crate::el(); }
-        } else {
-            #[cfg(debug_assertions)]
-            {
-                let warnings = crate::key_diagnostics::warnings(&root);
-                debug_assert!(warnings.is_empty(), "{}", warnings.join("\n"));
-            }
-        }
-        self.window_tree(&mut root, "", 0, None, tx.settle, force_all);
         self.reduced_motion = cx.reduced_motion;
         self.time_scale = cx.time_scale;
         // Reads made by memos this build reused count as made again.
@@ -2663,6 +2712,7 @@ impl<S: 'static> Runtime<S> {
             virtual_inputs: &mut self.virtual_inputs,
             stats: &mut self.stats,
             key_warnings: &mut self.key_warnings,
+            focused: self.focused.as_deref(),
         }.finish(tx)
     }
 
@@ -3691,7 +3741,7 @@ impl<S: 'static> Runtime<S> {
 
     fn reveal_row(&mut self, key: &str) {
         let geometry = self.virtuals.iter().find_map(|(_, v)| {
-            let index = v.keys.iter().position(|candidate| candidate == key)?;
+            let index = v.index_of(key)?;
             Some((v.scroll_path.clone(), f64::from(v.pad_top + v.prefix(index)), f64::from(v.height(key)), f64::from(v.viewport)))
         }).or_else(|| {
             let (i, row) = self.nodes.iter().enumerate().find(|(_, n)| n.key.as_deref() == Some(key) || n.path == key)?;

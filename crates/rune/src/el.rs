@@ -705,6 +705,8 @@ pub struct El {
     pub(crate) scroll_edges: ScrollEdges,
     pub(crate) growth: Option<GrowthSpec>,
     pub(crate) virtual_estimate: Option<f32>,
+    /// Rows `El::virtual_rows` builds at layout time, in place of `children`.
+    pub(crate) virtual_rows: Option<Rc<crate::virtual_rows::RowSource>>,
     pub(crate) virtual_mount: bool,
     pub(crate) streaming: bool,
     pub(crate) input: Option<Box<InputSpec>>,
@@ -768,6 +770,7 @@ fn base(dir: FlexDirection) -> El {
         scroll_edges: ScrollEdges::default(),
         growth: None,
         virtual_estimate: None,
+        virtual_rows: None,
         virtual_mount: false,
         streaming: false,
         input: None,
@@ -1109,6 +1112,45 @@ impl El {
     pub fn virtualize(mut self, estimated_row_height: f32) -> Self {
         self.virtual_estimate = Some(estimated_row_height.max(1.0));
         self
+    }
+
+    /// [`El::virtualize`] with rows built by index: `count` rows, row `i` keyed `key(s, i)` and
+    /// built by `build(s, i)`. Layout calls `build` only for the rows in the mounted window (the
+    /// viewport and up to two viewports either side), after it knows where that window is, so a
+    /// commit costs one `key` call per row plus the rows it mounts, however long the list is.
+    /// Rows new to the window beyond the viewport mount half a viewport per side per frame, so a
+    /// jump or a page loaded above the reader doesn't lay out three viewports of text at once.
+    /// Both closures get the window's state, so they capture nothing borrowed.
+    ///
+    /// Everything `virtualize` does holds: rows keep their measured heights by key while the key
+    /// stays, unvisited rows use the estimate, inserting or prepending rows keeps the reader's
+    /// row in place, and `Tx::scroll_into_view` reaches any row by key. A row's key is
+    /// `key(s, i)`, whatever key its element had. The same element needs `.growth(GrowthSpec)`
+    /// and must be the direct child of a `.scroll(..)` viewport, and holds no other children.
+    ///
+    /// A row outside the window isn't built, so it has no elements at all: the inspector,
+    /// `Runtime::elements`, accessibility, Tab order, text selection and matched elements see the
+    /// built rows only. A focused field in a row that scrolls out keeps its focus and typing (its
+    /// row is built for that, not mounted); a field focused from state in a row that isn't built
+    /// takes focus once the row is. A [`memo`](crate::memo) inside `build` keeps its subtree while
+    /// the row stays built; a row built again after scrolling out builds afresh.
+    ///
+    /// ```ignore
+    /// col().scroll(ScrollSpec { stick_bottom: true }).grow(1.0).child(
+    ///     col().key("rows").growth(GrowthSpec::default()).virtual_rows(s.messages.len(), 72.0,
+    ///         |s: &App, i| s.messages[i].id.as_str().into(),
+    ///         |s: &App, i| message(&s.messages[i])),
+    /// )
+    /// ```
+    pub fn virtual_rows<S: 'static>(
+        mut self,
+        count: usize,
+        estimated_row_height: f32,
+        key: impl for<'a> Fn(&'a S, usize) -> std::borrow::Cow<'a, str> + 'static,
+        build: impl Fn(&S, usize) -> El + 'static,
+    ) -> Self {
+        self.virtual_rows = Some(Rc::new(crate::virtual_rows::RowSource::new(count, key, build)));
+        self.virtualize(estimated_row_height)
     }
 
     #[cfg_attr(debug_assertions, track_caller)]
