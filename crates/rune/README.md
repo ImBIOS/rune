@@ -50,8 +50,21 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   - The animation clock has a time scale, which the Settings speed slider drives.
 - **Renderer** (`render.rs`, `shader.wgsl`): one instanced uber-quad pipeline and one draw call per
   frame.
-  - Kinds: rounded rects (per-corner radius, border), analytic Gaussian shadows, and glyphs from the
-    atlas.
+  - Kinds: rounded rects (per-corner radius, border), analytic Gaussian shadows (outer and inset),
+    vertical and angled linear gradients, circular and elliptical radial gradients (`KIND_RADIAL`),
+    dashed border rings (`KIND_DASHED`), RGBA images, and glyphs from the atlas.
+  - **Gradients** (`.gradient(top, bottom)`, `.radial_gradient(center, radius, stops)`,
+    `.linear_gradient(angle, stops)`): painted over `.fill(..)` and under hover/press overlays and
+    borders, clipped to `.radius(..)`, and composited with `.opacity(..)` and `.blur(..)`.
+    `radial_gradient` takes normalized `center: [f32; 2]` (`[0.5, 0.5]` = element centre), `radius` in
+    points (`f32` for a circle or `[rx, ry]` for an ellipse), and up to 8 `stops` as `(t, Color)` pairs in
+    `0.0..=1.0` (inner radial bands shrink their quads to the band bounding box). `linear_gradient`
+    takes `angle` in radians (CSS convention: `0.0` up, `PI / 2` right, `PI` down) and up to 8 `stops`.
+    Stop colours spring in Oklab when changed and interpolate in premultiplied colour across the quad.
+  - **Shadows** (`.shadow(y, blur, color)`, `.box_shadow(Shadow)`): `blur` follows CSS `box-shadow`
+    (`blur = 2σ`, so the Gaussian standard deviation is `σ = blur * 0.5`). `CALayer.shadowRadius` and
+    Sketch / Figma shadow blur specify `r ≈ σ`, so pass `blur = 2.0 * r` to match a `CALayer` shadow
+    radius (whereas `.blur(sigma)` takes `σ` directly).
   - Vector shapes (`shape.rs`): `El::shape(Shape)` and `canvas(shape)` paint strokes (polylines,
     round or butt caps, open or closed) and fills (simple polygons, ear-clipped) in the element's own
     points, or in a `view_box` stretched to the element's size; `Path` flattens quadratic and cubic
@@ -60,8 +73,12 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
     edges, so they have no seams. No atlas, so a shape can change every frame (`examples/shapes`).
     Translucent strokes blend twice where segments overlap at a joint; fills do not overlap.
   - Every instance has a soft-edge clip (`clip_soft`, `clip_fade`).
-  - Colour is premultiplied linear and drawn into an sRGB target, so blending is linear-light. Glyph
-    coverage uses a CoreText-calibrated luminance/scale exponent.
+  - Colour is premultiplied linear and drawn into an sRGB target by default (linear-light blending),
+    with a CoreText-calibrated luminance/scale glyph coverage exponent. Windows and overlays that want
+    CSS / Core Animation gamma-space compositing for faint glows, blurs, shadows, images and video over
+    dark canvases can opt into `.srgb_blend(true)` on `App`, `WindowSpec` or `ConfiguredOverlay`,
+    which encodes premultiplied colours in sRGB (`Color::premul_srgb`) and renders into a non-sRGB
+    target view (`format.remove_srgb_suffix()`). Ignored with a warning when a `Compositor` is set.
   - The Retina scale is applied throughout.
 - **Text** (`text.rs`): Parley 0.12 lays out embedded Inter 4.1 (OFL, `assets/`). swash 0.2
   rasterises unhinted, centered, .1-point-emboldened outlines into a 2048² R8 atlas with four

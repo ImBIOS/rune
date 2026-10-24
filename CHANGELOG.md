@@ -5,6 +5,21 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Radial and angled linear gradients, opt-in sRGB blending, and shadow blur docs.**
+  `El::radial_gradient(center, radius, stops)` draws circular (`f32`) or elliptical (`[rx, ry]`)
+  radial gradients with up to 8 `(f32, Color)` stops in `0.0..=1.0` in the instanced uber-quad
+  pass (`KIND_RADIAL`), with `center` in normalized element coordinates (`[0.5, 0.5]` = centre)
+  and `radius` in points; `El::linear_gradient(angle, stops)` draws linear gradients at `angle`
+  radians (CSS convention) with up to 8 stops. Both compose with `.fill`, `.border`, `.radius`,
+  `.opacity` and `.blur`, and spring stop colours in Oklab. `App::srgb_blend(true)`,
+  `WindowSpec::srgb_blend(true)` and `ConfiguredOverlay::srgb_blend(true)` (plus
+  `Renderer::set_srgb_blend`, `SurfaceRenderer::set_srgb_blend`, `Runtime::srgb_blend` and
+  `Color::premul_srgb`) opt into gamma-space (sRGB) compositing for translucent fills, gradients,
+  shadows, blurs, shapes, text, premultiplied and straight-alpha images, native/video surfaces,
+  headless `--keys` overlays and `--snap-on-patch` so faint glows over dark backgrounds match CSS
+  and Core Animation (`CALayer.shadowRadius ≈ σ`, CSS `blur = 2σ`); `srgb_blend` is ignored with a
+  warning when a `Compositor` is set, and default linear-light rendering is unchanged.
+  `rune::RadialRadius` is a new root export.
 - **macOS drag-out matches an AppKit drag source more closely.** New `El::on_drag_start(|s, tx|)`
   runs once the system takes the drag, before its `on_drag_end`, so the app can style the source
   while it's dragged (the example dims its tile to 0.28). Every start now gets exactly one end, in
