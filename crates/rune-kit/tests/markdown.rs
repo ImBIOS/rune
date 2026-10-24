@@ -241,14 +241,19 @@ fn column_edges(rt: &Runtime<String>) -> Vec<f32> {
     rt.elements().into_iter().filter(|e| e.path.contains("th") && e.key.as_deref().is_some_and(|k| k.starts_with('c'))).map(|e| e.rect[0]).collect()
 }
 
-fn revealing(src: &String, _: &mut Cx<String>) -> El {
+fn streaming(src: &String, _: &mut Cx<String>) -> El {
+    col().w_full().child(Markdown::new(src.clone()).streaming(true).build(&Kit::neutral(true)))
+}
+
+/// A finished message with a word fade, as a transcript draws every row.
+fn revealed(src: &String, _: &mut Cx<String>) -> El {
     col().w_full().child(Markdown::new(src.clone()).reveal(0.18).build(&Kit::neutral(true)))
 }
 
 #[test]
 fn a_streaming_row_does_not_move_the_columns() {
     let base = "| Step | Result |\n|---|---|\n| one | ok |\n";
-    let mut rt = Runtime::new(base.to_owned(), revealing, (480.0, 800.0), Env::new(true, 1.0));
+    let mut rt = Runtime::new(base.to_owned(), streaming, (480.0, 800.0), Env::new(true, 1.0));
     rt.frame(0.0);
     let before = column_edges(&rt);
     assert_eq!(before.len(), 2, "{:?}", keys(&rt));
@@ -264,17 +269,20 @@ fn a_streaming_row_does_not_move_the_columns() {
     assert_ne!(column_edges(&rt), before, "a finished row sizes the columns");
 }
 
-/// Without a reveal the text is whole: a table that ends it, with no newline after its last
-/// row, sizes its columns to that row too.
+/// Unless it streams the text is whole: a table that ends it, with no newline after its last
+/// row, sizes its columns to that row too, word fade or not.
 #[test]
 fn a_table_ending_a_whole_note_sizes_to_its_last_row() {
     let src = "| Field | Compared |\n|---|---|\n| title | yes |\n| a much longer cell at the end | no |";
     assert!(matches!(&parse(src)[0], Block::Table(t) if t.open));
     let whole = column_edges(&laid_out(src));
     assert_eq!(whole, column_edges(&laid_out(&format!("{src}\n"))), "the trailing newline changes nothing");
-    let mut rt = Runtime::new(src.to_owned(), revealing, (480.0, 800.0), Env::new(true, 1.0));
+    let mut rt = Runtime::new(src.to_owned(), revealed, (480.0, 800.0), Env::new(true, 1.0));
     rt.frame(0.0);
-    assert!(column_edges(&rt)[1] < whole[1], "while revealing, the last row is still arriving");
+    assert_eq!(column_edges(&rt), whole, "a word fade alone doesn't mean the text is still arriving");
+    let mut rt = Runtime::new(src.to_owned(), streaming, (480.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    assert!(column_edges(&rt)[1] < whole[1], "while streaming, the last row is still arriving");
 }
 
 #[test]

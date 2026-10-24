@@ -1484,7 +1484,7 @@ fn markdown_streaming(s: &G, k: &Kit, _: &mut Vec<El>) -> El {
                 .build(k)
                 .key("stream-more"),
         )
-        .child(Markdown::new(&MARKDOWN[..end]).reveal(0.18).build(k))
+        .child(Markdown::new(&MARKDOWN[..end]).reveal(0.18).streaming(end < MARKDOWN.len()).build(k))
 }
 
 // ---------------------------------------------------------------------------------------------

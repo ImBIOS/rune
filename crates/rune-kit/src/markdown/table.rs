@@ -106,11 +106,11 @@ impl Renderer {
     }
 
     /// Column widths from the header and every finished row, cached by content and font. A last
-    /// row without a newline is still arriving only while the text reveals; otherwise the
+    /// row without a newline is still arriving only while the text streams; otherwise the
     /// document is whole and it counts too.
     fn columns(&self, t: &Table, n: usize) -> Rc<Columns> {
         let (head, body) = (self.head_font(), self.body_font());
-        let settled = if t.open && self.reveal > 0.0 { t.rows.len().saturating_sub(1) } else { t.rows.len() };
+        let settled = if t.open && self.streaming { t.rows.len().saturating_sub(1) } else { t.rows.len() };
         let rows = &t.rows[..settled];
         let cap = self.s.table_min_column;
         let key = hash_of((

@@ -777,7 +777,7 @@ fn rows(s: &App, p: &Pal, t: &Transcript, fade: f32) -> Vec<RowSpec> {
                             }
                             out.push(RowSpec {
                                 key: format!("t-{}-{pi}", a.id),
-                                el: markdown_view(p, body, fade).pb(12.0),
+                                el: markdown_view(p, body, fade, is_last).pb(12.0),
                                 streaming: is_last,
                             });
                         }
@@ -967,7 +967,7 @@ fn turn_actions(p: &Pal, busy: bool, session: &str, message: &Message) -> El {
 // ---------------------------------------------------------------------------------------------
 // Markdown
 
-fn markdown_view(p: &Pal, src: &str, fade: f32) -> El {
+fn markdown_view(p: &Pal, src: &str, fade: f32, streaming: bool) -> El {
     let kit = Kit::neutral(p.dark);
     let style = MarkdownStyle::from_kit(&kit)
         .text(p.text)
@@ -982,7 +982,7 @@ fn markdown_view(p: &Pal, src: &str, fade: f32) -> El {
         .heading_font(2, H2)
         .heading_font(3, H3)
         .code_block_font(CODE);
-    Markdown::new(src).style(style).reveal(fade).build(&kit)
+    Markdown::new(src).style(style).reveal(fade).streaming(streaming).build(&kit)
 }
 
 // ---------------------------------------------------------------------------------------------

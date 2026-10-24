@@ -23,10 +23,10 @@
 //! **Tables** size each column to its content. A table that doesn't fit shrinks its columns in
 //! proportion to their content (wrapping cell text), down to each column's longest word capped at
 //! [`MarkdownStyle::table_min_column`]; past that it clips. While a stream is inside a table (the
-//! last row has no newline yet and [`Markdown::reveal`] is on), the row still arriving doesn't
-//! widen columns, so columns move at most once per finished row. Without a reveal the text is
-//! taken as whole, and a table ending it sizes to every row. A trailing `| a | b |` line is
-//! already drawn as the header it is about to become.
+//! last row has no newline yet and [`Markdown::streaming`] is on), the row still arriving doesn't
+//! widen columns, so columns move at most once per finished row. Otherwise the text is taken as
+//! whole, and a table ending it sizes to every row. A trailing `| a | b |` line is already drawn
+//! as the header it is about to become.
 //!
 //! **Diagrams** (`mermaid` feature) render once their fence closes; until then, and for anything
 //! the subset doesn't cover, the source shows as a code block.
@@ -958,12 +958,13 @@ pub struct Markdown {
     src: String,
     style: Option<MarkdownStyle>,
     reveal: f32,
+    streaming: bool,
     on_link: Option<LinkWire>,
 }
 
 impl Markdown {
     pub fn new(src: impl Into<String>) -> Markdown {
-        Markdown { src: src.into(), style: None, reveal: 0.0, on_link: None }
+        Markdown { src: src.into(), style: None, reveal: 0.0, streaming: false, on_link: None }
     }
     /// Replaces the kit-derived style in [`Self::build`].
     pub fn style(mut self, style: MarkdownStyle) -> Self {
@@ -973,6 +974,12 @@ impl Markdown {
     /// Streaming word reveal in seconds (see [`El::reveal`]); 0 shows words at once.
     pub fn reveal(mut self, word_fade: f32) -> Self {
         self.reveal = word_fade;
+        self
+    }
+    /// The source is still arriving: a table's last row, with no newline after it yet, is left
+    /// out of the column widths until it ends. Off, the text is whole.
+    pub fn streaming(mut self, on: bool) -> Self {
+        self.streaming = on;
         self
     }
     /// Called with a link's destination when it is clicked, or pressed with Enter or Space
@@ -996,7 +1003,7 @@ impl Markdown {
     /// [`MarkdownStyle::from_seed`]).
     pub fn render(self, style: &MarkdownStyle) -> El {
         let (blocks, sources) = doc_cached(&self.src);
-        let r = Renderer { s: style.clone(), reveal: self.reveal, on_link: self.on_link, sources, next_source: Cell::new(0) };
+        let r = Renderer { s: style.clone(), reveal: self.reveal, streaming: self.streaming, on_link: self.on_link, sources, next_source: Cell::new(0) };
         r.blocks(&blocks)
     }
 }
@@ -1004,6 +1011,7 @@ impl Markdown {
 struct Renderer {
     s: MarkdownStyle,
     reveal: f32,
+    streaming: bool,
     on_link: Option<LinkWire>,
     sources: Rc<[Source]>,
     /// The next of `sources`, advanced at each [`Block::Code`] in document order.
@@ -1219,7 +1227,7 @@ mod tests {
             }
         }
         let (blocks, sources) = doc_cached(src);
-        let r = Renderer { s: style.clone(), reveal: 0.0, on_link: None, sources: sources.clone(), next_source: Cell::new(0) };
+        let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, sources: sources.clone(), next_source: Cell::new(0) };
         let mut found = Vec::new();
         codes(&blocks, &mut found);
         assert_eq!(found.len(), sources.len(), "one source per code block");
