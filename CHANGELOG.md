@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::aspect_fit(ratio)` sizes an element to the largest box at a ratio that fits its room.**
+  As SwiftUI's `.aspectRatio(ratio, contentMode: .fit)`, the element takes the free space along
+  its parent's main axis and the whole cross side (within `max_w` and `max_h`), then lays out at
+  the largest box at `ratio` inside it, so siblings such as a caption follow the fitted box and
+  the parent's alignment places it. Layout runs a second pass only for trees that use it.
 - **`El::max_lines(n)` clamps wrapped text to `n` lines.** Like CSS `line-clamp`, it wraps,
   measures at most `n` lines tall and ends the last line with "…" when more would follow. The
   cut falls between graphemes and refits on resize; spans and links keep their looks, and copy

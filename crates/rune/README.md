@@ -829,6 +829,20 @@ without animating when it arrives or a stream changes shape. Pictures with both 
 neither, keep their box. `.aspect_ratio(16.0 / 9.0)` sets a ratio on any element (CSS
 `aspect-ratio`), overriding the image's; use it for a `video` before its size is known.
 
+`.aspect_fit(w / h)` sizes the element itself to the largest box at that ratio inside the room
+its parent gives it: the free space along the parent's main axis and its whole cross side,
+within `max_w` and `max_h`. A picture in a bounded cell with a caption under it fits what the
+caption leaves, and the caption sits under the picture rather than under a letterbox:
+
+```rust,ignore
+col().w(cell_w).h(cell_h).center().gap(6.0)
+    .child(el().aspect_fit(iw / ih).radius(8.0).pixels_fit(image.pixels(), SurfaceFit::Fill))
+    .child(text(caption))
+```
+
+The ratio comes from the view (`Image::size`, `Player::natural_size`), so it works for a
+`video` or a box with children too. In a column with no bounded height, `max_h` sets the room.
+
 `cache.app_icon(path, size_pt)` rasterizes a platform icon on the same worker, keyed by path,
 size and scale: Finder's icon on macOS, an executable's or `.ico`'s first icon on Windows, and
 on Linux a `.desktop` entry's `Icon=` from the hicolor theme (closest size at or above, then

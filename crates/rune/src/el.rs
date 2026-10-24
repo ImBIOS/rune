@@ -714,6 +714,8 @@ pub struct El {
     pub(crate) scale: f32,
     pub(crate) help: Option<String>,
     pub(crate) material: Option<crate::SystemMaterial>,
+    /// `El::aspect_fit`'s width over height; 0 when unset.
+    pub(crate) aspect_fit: f32,
 }
 
 fn base(dir: FlexDirection) -> El {
@@ -775,6 +777,7 @@ fn base(dir: FlexDirection) -> El {
         scale: 1.0,
         help: None,
         material: None,
+        aspect_fit: 0.0,
     }
 }
 
@@ -1171,6 +1174,18 @@ impl El {
     /// any other box. Anything not positive removes it.
     pub fn aspect_ratio(mut self, ratio: f32) -> Self {
         self.style.aspect_ratio = (ratio.is_finite() && ratio > 0.0).then_some(ratio);
+        self
+    }
+    /// The largest box at `ratio` (width over height) that fits the room the element is given,
+    /// as SwiftUI's `.aspectRatio(ratio, contentMode: .fit)` or CSS `object-fit: contain` for
+    /// the element itself. The room is the free space along the parent's main axis and its
+    /// whole cross side, within `max_w` and `max_h`; siblings keep theirs, so a caption under
+    /// a picture sits under the picture. The parent's alignment places the fitted box. Use it
+    /// for a picture or video in a bounded cell: `el().aspect_fit(w / h).pixels_fit(p, Fill)`.
+    /// In a column with no bounded height, bound it with `max_h`. It sets both sides, so `w`
+    /// and `h` don't apply; anything not positive removes it.
+    pub fn aspect_fit(mut self, ratio: f32) -> Self {
+        self.aspect_fit = if ratio.is_finite() && ratio > 0.0 { ratio } else { 0.0 };
         self
     }
     pub fn w_full(mut self) -> Self {

@@ -97,6 +97,9 @@ mod truncate_tests;
 #[cfg(test)]
 #[path = "line_clamp_tests.rs"]
 mod line_clamp_tests;
+#[cfg(test)]
+#[path = "aspect_fit_tests.rs"]
+mod aspect_fit_tests;
 
 const P_FILL: Prop<Color> = Prop::custom(64, PropClass::Color);
 const P_BORDER: Prop<Color> = Prop::custom(65, PropClass::Color);
@@ -303,6 +306,8 @@ pub(crate) struct Node {
     static_scale: f32,
     /// The image ratio this picture's layout took, when it sizes one side from its pixels.
     pixel_aspect: Option<f32>,
+    /// `El::aspect_fit`: the ratio and the element's own style, which the fitted size replaces.
+    aspect_fit: Option<Box<(f32, Style)>>,
     material: Option<crate::SystemMaterial>,
     /// Inside a growth row: layout snaps (the row's height carries the motion).
     in_row: bool,
@@ -2464,12 +2469,14 @@ impl<S> Measurement<'_, S> {
         {
             let text_sys = &mut self.text;
             let nodes_ref = &nodes;
-            taffy
+            let viewport = self.viewport;
+            let fit_height = self.fit_height;
+            let mut compute = |taffy: &mut TaffyTree<usize>| taffy
                 .compute_layout_with_measure(
                     root_id,
                     Size {
-                        width: AvailableSpace::Definite(self.viewport.0),
-                        height: if self.fit_height { AvailableSpace::MaxContent } else { AvailableSpace::Definite(self.viewport.1) },
+                        width: AvailableSpace::Definite(viewport.0),
+                        height: if fit_height { AvailableSpace::MaxContent } else { AvailableSpace::Definite(viewport.1) },
                     },
                     |inputs, _id, ctx, style| {
                         taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |known, avail| {
@@ -2508,6 +2515,18 @@ impl<S> Measurement<'_, S> {
                     },
                 )
                 .unwrap();
+            compute(&mut taffy);
+            // `aspect_fit` elements laid out filling their room; fix each at the largest box
+            // at its ratio inside it and lay out again, so siblings and alignment follow.
+            let mut refit = false;
+            for n in nodes_ref {
+                if let Some(fit) = &n.aspect_fit {
+                    let style = fitted(fit.0, &fit.1, taffy.layout(n.taffy).unwrap().size);
+                    taffy.set_style(n.taffy, style).unwrap();
+                    refit = true;
+                }
+            }
+            if refit { compute(&mut taffy); }
         }
         self.stats.layout_nodes = nodes.len();
         #[cfg(debug_assertions)]
@@ -5377,6 +5396,29 @@ fn order_drag_ends(queue: Vec<Action>, ended: Vec<(String, crate::DragOutcome)>,
     out
 }
 
+/// An `aspect_fit` element's first layout: it takes the free space along its parent's main axis
+/// and the whole cross side, within its max sizes, as the room its fitted box must fit.
+fn fit_room(own: &Style) -> Style {
+    let zero = |d: LengthPercentageAuto| if d.is_auto() { length(0.0) } else { d };
+    Style {
+        size: own.max_size.map(Into::into),
+        min_size: Size { width: zero(own.min_size.width), height: zero(own.min_size.height) },
+        flex_grow: 1.0,
+        flex_shrink: 1.0,
+        flex_basis: auto(),
+        align_self: Some(AlignSelf::STRETCH),
+        aspect_ratio: None,
+        ..own.clone()
+    }
+}
+
+/// The largest box at `ratio` inside `room`, as the fixed size an `aspect_fit` element lays
+/// out at once its room is known.
+fn fitted(ratio: f32, own: &Style, room: Size<f32>) -> Style {
+    let w = room.width.min(room.height * ratio).max(0.0);
+    Style { size: Size { width: length(w), height: length(w / ratio) }, aspect_ratio: None, ..own.clone() }
+}
+
 /// Width over height of the image in `pixels`, or 0 while it's empty.
 fn pixel_ratio(pixels: &crate::Pixels) -> f32 {
     let (w, h) = pixels.size();
@@ -5454,6 +5496,7 @@ fn flatten(
         scale: static_scale,
         help,
         material,
+        aspect_fit,
         ..
     } = el;
     if let Some(t) = &text && t.live.is_some() {
@@ -5467,6 +5510,10 @@ fn flatten(
     if let Some(ratio) = pixel_aspect.filter(|&r| r > 0.0) {
         style.aspect_ratio = Some(ratio);
     }
+    let aspect_fit = (aspect_fit > 0.0).then(|| {
+        let room = fit_room(&style);
+        Box::new((aspect_fit, std::mem::replace(&mut style, room)))
+    });
     let mut text = text;
     if input.is_none() && let Some(t) = &mut text { t.apply_case(); }
     let measured = text.is_some();
@@ -5524,6 +5571,7 @@ fn flatten(
         press_scale,
         static_scale,
         pixel_aspect,
+        aspect_fit,
         material,
         in_row,
         virtual_mount,
