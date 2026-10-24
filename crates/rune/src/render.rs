@@ -621,7 +621,7 @@ impl Renderer {
     /// A retarget touches one node record; caller computes inherited position/velocity on CPU.
     pub fn write_spring_node(&mut self, queue: &wgpu::Queue, id: usize, node: &crate::gpu_springs::Node) {
         let properties = self.springs.as_mut().expect("renderer has no GPU springs");
-        assert!(id < properties.count);
+        assert!(id < properties.deadlines.len());
         properties.deadlines[id] = node.settle_at();
         properties.settle_at = properties.deadlines.iter().copied().fold(0.0, f64::max);
         queue.write_buffer(&properties.nodes, (id * std::mem::size_of::<crate::gpu_springs::Node>()) as u64, bytemuck::bytes_of(node));

@@ -78,7 +78,6 @@ impl Node {
 pub(crate) struct Bindings {
     pub group: wgpu::BindGroup,
     pub nodes: wgpu::Buffer,
-    pub count: usize,
     pub deadlines: Vec<f64>,
     pub settle_at: f64,
 }
@@ -104,7 +103,6 @@ impl Bindings {
         use wgpu::util::DeviceExt;
         assert!(!nodes.is_empty() && !ids.is_empty());
         assert!(ids.iter().all(|&id| (id as usize) < nodes.len()));
-        let count = nodes.len();
         let deadlines: Vec<_> = nodes.iter().map(Node::settle_at).collect();
         let settle_at = deadlines.iter().copied().fold(0.0, f64::max);
         let nodes = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -125,7 +123,7 @@ impl Bindings {
                 wgpu::BindGroupEntry { binding: 1, resource: ids.as_entire_binding() },
             ],
         });
-        Self { group, nodes, count, deadlines, settle_at }
+        Self { group, nodes, deadlines, settle_at }
     }
 }
 
