@@ -219,6 +219,9 @@ enum Backing {
 struct Live {
     #[cfg(target_os = "macos")]
     pacing: Option<crate::display_link::DisplayLink>,
+    /// `El::system_material` views behind the Metal layer.
+    #[cfg(target_os = "macos")]
+    materials: crate::system_material::macos::Materials,
     alpha: Option<crate::surface_alpha::AlphaSurface>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
@@ -739,6 +742,8 @@ impl<T: 'static> Overlay<T> {
         Some(Live {
             #[cfg(target_os = "macos")]
             pacing,
+            #[cfg(target_os = "macos")]
+            materials: crate::system_material::macos::Materials::new(),
             alpha, surface, config, backing, scale,
         })
     }
@@ -1210,7 +1215,18 @@ impl<T: 'static> Overlay<T> {
         let frame_time = now;
         #[cfg(target_os = "macos")]
         let frame_time = target.unwrap_or(now);
+        #[cfg(target_os = "macos")]
+        { self.rt.native_materials = live.materials.native(); }
         let (mut animating, dt) = step(&mut self.rt, &mut self.clock, &self.compositor, frame_time, prewarm);
+        #[cfg(target_os = "macos")]
+        {
+            let Backing::Window(window) = &live.backing;
+            if live.materials.activate(self.rt.transparent, !self.rt.materials.is_empty(), window, &live.surface) {
+                // This frame drew fallback fills into a drawable that presents without the views.
+                drop(frame);
+                return true;
+            }
+        }
         let update_ms = if self.compositor.is_some() { now.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
         self.rt.shell_request = None;
         // Overlays size through `OverlayHandle::resize`, not `Tx::resize_window`.
@@ -1245,6 +1261,9 @@ impl<T: 'static> Overlay<T> {
         if let Backing::Window(w) = &live.backing {
             w.pre_present_notify();
         }
+        #[cfg(target_os = "macos")]
+        live.materials.present(&self.rt.materials, self.rt.env.scale, || gpu.queue.present(frame));
+        #[cfg(not(target_os = "macos"))]
         gpu.queue.present(frame);
         self.dirty = false;
         self.idle = !(animating || self.rt.has_pending_input());

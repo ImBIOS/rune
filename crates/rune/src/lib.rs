@@ -97,6 +97,7 @@ mod headless_run;
 mod keycaps;
 mod surface_alpha;
 pub mod native_surface;
+mod system_material;
 mod video;
 pub mod runtime;
 pub mod shape;
@@ -146,6 +147,7 @@ pub use rune_motion::{
 pub use runtime::{Cx, Env, Runtime, TitlebarAction, Waker};
 pub use shape::{LineCap, Path, Shape};
 pub use native_surface::{NativeSurface, SurfaceFit};
+pub use system_material::{MAX_NATIVE_MATERIALS, SystemMaterial};
 pub use video::{MediaSource, Player, PlayerState, Video};
 pub use text::{Icon, Link, LinkPaint, Span, TextCase};
 pub use theme::Theme;

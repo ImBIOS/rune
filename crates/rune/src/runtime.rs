@@ -258,6 +258,7 @@ pub(crate) struct Node {
     static_scale: f32,
     /// The image ratio this picture's layout took, when it sizes one side from its pixels.
     pixel_aspect: Option<f32>,
+    material: Option<crate::SystemMaterial>,
     /// Inside a growth row: layout snaps (the row's height carries the motion).
     in_row: bool,
     virtual_mount: bool,
@@ -534,6 +535,11 @@ pub struct Runtime<S: 'static> {
     pub marks: Vec<u32>,
     pub track_marks: bool,
     pub surfaces: Vec<crate::native_surface::SurfaceDraw>,
+    /// `El::system_material` elements built this frame, in paint order.
+    pub(crate) materials: Vec<crate::system_material::MaterialDraw>,
+    /// The shell shows native views for the first `MAX_NATIVE_MATERIALS` of `materials`; their
+    /// elements skip their fill and cut their shadows out of their interior.
+    pub(crate) native_materials: bool,
     hits: Vec<(NodeId, [f32; 4])>,
     overlay_hits: Vec<[f32; 4]>,
     glyph_scratch: Vec<GlyphQuad>,
@@ -804,6 +810,8 @@ impl<S: 'static> Runtime<S> {
             marks: Vec::new(),
             track_marks: false,
             surfaces: Vec::new(),
+            materials: Vec::new(),
+            native_materials: false,
             hits: Vec::new(),
             overlay_hits: Vec::new(),
             glyph_scratch: Vec::new(),
@@ -3576,6 +3584,7 @@ impl<S: 'static> Runtime<S> {
         self.instances.clear();
         self.marks.clear();
         self.surfaces.clear();
+        self.materials.clear();
         self.hits.clear();
         self.clear_help_hits();
         self.loops_active = false;
@@ -3940,6 +3949,17 @@ impl<S: 'static> Runtime<S> {
                 // Subtree blur runs once after rasterization, never on each primitive as well.
                 let blur = 0.0;
                 let k_px = sc * s;
+                let native_material = match n.material {
+                    Some(material) if self.materials.len() < crate::MAX_NATIVE_MATERIALS => {
+                        let radius = crate::system_material::clamp_radius(radii, w, h);
+                        self.materials.push(crate::system_material::MaterialDraw {
+                            id: n.id, material, rect: [r[0], r[1], w, h], radius,
+                            opacity: effective_opacity * n.vis.paint_alpha,
+                        });
+                        self.native_materials.then_some(radius)
+                    }
+                    _ => None,
+                };
                 for (k, sh) in n.vis.shadows.iter().enumerate() {
                     let c = if k < P_SHADOWS.len() { self.color(n.id, P_SHADOWS[k], sh.color) } else { sh.color };
                     if c.a <= 0.0 || sh.inset {
@@ -3967,13 +3987,19 @@ impl<S: 'static> Runtime<S> {
                         });
                         continue;
                     }
+                    // Over a native material, the shadow leaves the material's interior clear:
+                    // `uv` holds the hole relative to the shadow's rect, `radii[3]` its radius.
+                    let (radii, uv) = match native_material {
+                        Some(hole) => ([sradii[0], sradii[1], sradii[2], hole], [r[0] - rect[0], r[1] - rect[1], w, h]),
+                        None => (sradii, [0.0; 4]),
+                    };
                     self.instances.push(Instance {
                         rect,
-                        radii: sradii,
+                        radii,
                         fill: premul(c, o, srgb),
                         border: [0.0; 4],
                         params: [0.0, KIND_SHADOW, ((sh.blur + blur) * s * 0.5).max(0.5), 1.0],
-                        uv: [0.0; 4],
+                        uv,
                         clip,
                         fade: crate::render::pack_fade(fade, clip, clip),
                     });
@@ -3994,7 +4020,11 @@ impl<S: 'static> Runtime<S> {
                         overlay = over(premul(self.color(n.id, P_PRESS_C, n.vis.press), prs_v, srgb), overlay);
                     }
                 }
-                let base = premul(self.color(n.id, P_FILL, n.vis.fill), 1.0, srgb);
+                let base = match n.material {
+                    _ if native_material.is_some() => [0.0; 4],
+                    Some(_) => premul(self.color(n.id, P_FILL, crate::system_material::fallback_fill(n.vis.fill, self.env.system_dark)), 1.0, srgb),
+                    None => premul(self.color(n.id, P_FILL, n.vis.fill), 1.0, srgb),
+                };
                 let layered = n.vis.gradient.is_some() || n.vis.radial.is_some() || n.vis.surface.is_some();
                 let fill = if layered { base } else { over(overlay, base) }.map(|c| c * o);
                 let bw = n.vis.border_width * sc * s;
@@ -5091,6 +5121,7 @@ fn flatten(
         press_scale,
         scale: static_scale,
         help,
+        material,
         ..
     } = el;
     if let Some(t) = &text && t.live.is_some() {
@@ -5157,6 +5188,7 @@ fn flatten(
         press_scale,
         static_scale,
         pixel_aspect,
+        material,
         in_row,
         virtual_mount,
         parent,

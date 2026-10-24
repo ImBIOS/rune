@@ -37,6 +37,9 @@ struct Win {
     config: wgpu::SurfaceConfiguration,
     #[cfg(target_os = "macos")]
     panel: Option<crate::macos::Panel>,
+    /// `El::system_material` views behind the Metal layer.
+    #[cfg(target_os = "macos")]
+    materials: crate::system_material::macos::Materials,
     window: Arc<Window>,
     /// False while hidden (platforms that can hide a window keep it for the next open).
     visible: bool,
@@ -1689,6 +1692,8 @@ impl<S: 'static> Host<S> {
             config,
             #[cfg(target_os = "macos")]
             panel,
+            #[cfg(target_os = "macos")]
+            materials: crate::system_material::macos::Materials::new(),
             window,
             visible,
             occluded: false,
@@ -1821,6 +1826,8 @@ impl<S: 'static> Host<S> {
         self.rt.window_resting = self.frame_anim.is_none() && self.rt.window_frame.is_none();
         let target_ms = target.zip(self.trace_start).map(|(target, start)| crate::present_time::ms_since(start, target));
         let rt = &mut self.rt;
+        #[cfg(target_os = "macos")]
+        { rt.native_materials = l.materials.native(); }
         if hidden && l.first_frame.settles() { rt.settle_all(); }
         let (mut animating, dt) = if hidden {
             self.clock.hold(frame_time);
@@ -1828,6 +1835,13 @@ impl<S: 'static> Host<S> {
         } else {
             self.clock.advance(rt, frame_time, self.comp.as_ref().is_some_and(|c| c.animating()))
         };
+        #[cfg(target_os = "macos")]
+        if l.materials.activate(rt.transparent, !rt.materials.is_empty(), &l.window, &l.surface) {
+            // This frame drew fallback fills into a drawable that presents without the views.
+            drop(frame);
+            l.window.request_redraw();
+            return;
+        }
         self.secure_input.set(rt.has_secure_focus() && l.window.has_focus());
         let update_ms = now.elapsed().as_secs_f64() * 1000.0;
         let ime_allowed = rt.ime_area.is_some() && !rt.has_secure_focus() && l.window.has_focus();
@@ -1878,6 +1892,9 @@ impl<S: 'static> Host<S> {
         if let Some(alpha) = &l.alpha { alpha.draw(&mut enc, &view); }
         renderer.submit(&gpu.queue, enc);
         l.window.pre_present_notify();
+        #[cfg(target_os = "macos")]
+        l.materials.present(&rt.materials, rt.env.scale, || gpu.queue.present(frame));
+        #[cfg(not(target_os = "macos"))]
         gpu.queue.present(frame);
         // The frame landed with this present; later ones needn't wait for a transaction.
         #[cfg(target_os = "macos")]

@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **System backdrop materials.** `El::system_material(SystemMaterial::Glass | Popover)` backs
+  an element with Liquid Glass (`NSGlassEffectView`, macOS 26+; the popover material before)
+  or the popover material, as a native view under a transparent window's Metal layer that
+  moves in the same Core Animation transaction as each frame. Opaque windows, other platforms
+  and headless renders draw the fill or a neutral tint, so goldens don't change. An outer
+  shadow on a material element no longer paints under its interior when the native view is
+  on. `rune::{SystemMaterial, MAX_NATIVE_MATERIALS}` are new root exports.
+  `RUNE_SYSTEM_MATERIAL=legacy|unsynced|off` selects other paths. New example:
+  `examples/glass-card`. See the crate README's "System materials".
 - **Occluded overlays and windows idle instead of spinning; their timers still fire.** A shown
   overlay or window whose displays sleep or that is covered no longer turns the event loop
   (about a full core before) when its drawable is occluded or times out. It runs updates, `poll`

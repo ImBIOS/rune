@@ -664,6 +664,7 @@ pub struct El {
     pub(crate) press_scale: Option<f32>,
     pub(crate) scale: f32,
     pub(crate) help: Option<String>,
+    pub(crate) material: Option<crate::SystemMaterial>,
 }
 
 fn base(dir: FlexDirection) -> El {
@@ -721,6 +722,7 @@ fn base(dir: FlexDirection) -> El {
         press_scale: None,
         scale: 1.0,
         help: None,
+        material: None,
     }
 }
 
@@ -946,6 +948,16 @@ impl El {
     /// Paint the newest video frame inside this node. Node dimensions are in points.
     pub fn native_surface(mut self, surface: &crate::NativeSurface, fit: crate::SurfaceFit) -> Self {
         self.vis.surface = Some((surface.clone(), fit));
+        self
+    }
+    /// Back this node with a system backdrop material: the platform blurs what is behind the
+    /// window under the node's rect and corner radius (the largest of its corners), which follow
+    /// layout and animation like any other paint. Native on macOS in transparent windows, where
+    /// it replaces the fill and the node's shadows skip its interior; elsewhere, in opaque
+    /// windows and in headless renders, the fill (or a neutral tint without one) draws instead.
+    /// Native materials sit under everything the window draws and ignore ancestor clips.
+    pub fn system_material(mut self, material: crate::SystemMaterial) -> Self {
+        self.material = Some(material);
         self
     }
     /// Play `video` inside this node: `Fit` letterboxes, `Fill` crops. Frames come from the

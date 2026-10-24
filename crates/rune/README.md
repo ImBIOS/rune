@@ -1039,6 +1039,35 @@ alpha during animation. This changes only alpha and adds no GPU work. It is exac
 foreground/background pairs apart from quantization, but chromatic pairs are approximate;
 unknown/translucent backdrops, group opacity and overlapping paints require different math.
 
+### System materials (`El::system_material`, `system_material/`)
+
+```rust,ignore
+col().radius(28.0).shadow(18.0, 44.0, black.alpha(0.35))
+    .system_material(SystemMaterial::Glass)
+    .motion(Spring::new(0.7, 0.22))
+    .child(content)
+```
+
+The platform blurs whatever is behind the window under the element's rounded rect. On macOS in
+a transparent window, `Glass` is Liquid Glass (`NSGlassEffectView`) on macOS 26 and later and the
+popover material before; `Popover` is `NSVisualEffectView`'s popover material, behind window.
+Each is a native view under the Metal layer that takes no clicks, with its frame, corner radius
+and opacity set in the same Core Animation transaction as the frame's drawable. So the material
+keeps up with springs, Rune's shadow and the content drawn on it. Native views take one corner
+radius, the largest corner clamped to half the shorter side. They sit under everything the
+window draws and ignore ancestor clips, and a window gets at most `MAX_NATIVE_MATERIALS`; later
+elements draw the fallback.
+
+Rune draws the shadow, so make the window larger than the card and turn the system shadow off
+with `MacWindowOptions::default().shadow(false)`, or the window gets a second, rectangular
+shadow. An outer shadow under a material leaves the material's interior clear.
+
+Opaque windows, other platforms and headless renders draw the element's fill instead, or a
+neutral tint when it has none; native views never appear in offscreen output, so goldens stay
+deterministic. `RUNE_SYSTEM_MATERIAL=legacy` forces the pre-26 view, `unsynced` moves the views
+outside the drawable's transaction (for comparison) and `off` draws the fallback.
+`examples/glass-card` flies a card over a test pattern; research note 26 has the measurements.
+
 ## Run
 
 ```sh

@@ -366,6 +366,12 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         let sigma = max(i.params.z, 0.01);
         let corner = min(i.radii.x, min(half.x, half.y));
         col = i.fill * shadow(i.p - center, half, sigma, corner);
+        // A shadow under a native system material leaves its interior clear: `uv` holds the
+        // hole relative to this rect and `radii.w` its corner radius.
+        if (i.uv.z > 0.0) {
+            let hole = i.uv.zw * 0.5;
+            col = col * clamp(0.5 + sd_rounded(i.p - (i.rect.xy + i.uv.xy + hole), hole, vec4<f32>(i.radii.w)), 0.0, 1.0);
+        }
     } else if (kind > 6.5) {
         let d = sd_rounded(i.p - center, half, i.radii);
         if (kind > 10.5) {

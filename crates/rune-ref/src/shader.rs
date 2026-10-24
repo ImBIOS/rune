@@ -159,7 +159,12 @@ pub(crate) fn fragment(i: &Primitive, atlas: &Atlas, screen: [f32; 2]) -> [f32; 
             }
         }
         1 => {
-            let cov = shadow(q, h, i.params[2].max(0.01), i.radii[0].min(h[0].min(h[1])));
+            let mut cov = shadow(q, h, i.params[2].max(0.01), i.radii[0].min(h[0].min(h[1])));
+            if i.uv[2] > 0.0 {
+                let hole = [i.uv[2] * 0.5, i.uv[3] * 0.5];
+                let at = [p[0] - (i.rect[0] + i.uv[0] + hole[0]), p[1] - (i.rect[1] + i.uv[1] + hole[1])];
+                cov *= clamp(0.5 + sd(at, hole, [i.radii[3]; 4]));
+            }
             col = i.fill.map(|c| c * cov);
         }
         2 => {
