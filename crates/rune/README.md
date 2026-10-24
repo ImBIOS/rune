@@ -669,6 +669,15 @@ and SVG are not decoded; provide decoded RGBA for those formats.
 `El::pixels_fit(&pixels, SurfaceFit::Fit)` keeps the image's aspect ratio, letterboxed and
 centred on whole device pixels (the corner radius rounds the image itself); `SurfaceFit::Fill`
 covers the rect and crops the centred overflow, choosing the mip for the uncropped size.
+In a fixed box these behave like SwiftUI's `.aspectRatio(contentMode: .fit)` and
+`.aspectRatio(contentMode: .fill)` followed by `.clipped()`.
+
+A picture that sets only one side takes the other from its image, so
+`el().w(240.0).pixels(icon.pixels())` is as tall as the image's shape makes it, and
+`el().w_full()` fills its parent's width. The height is 0 while the image decodes and settles
+without animating when it arrives or a stream changes shape. Pictures with both sides set, or
+neither, keep their box. `.aspect_ratio(16.0 / 9.0)` sets a ratio on any element (CSS
+`aspect-ratio`), overriding the image's; use it for a `video` before its size is known.
 
 `cache.app_icon(path, size_pt)` rasterizes a platform icon on the same worker, keyed by path,
 size and scale: Finder's icon on macOS, an executable's or `.ico`'s first icon on Windows, and

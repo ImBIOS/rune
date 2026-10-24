@@ -962,6 +962,14 @@ impl El {
     pub fn size(self, w: f32, h: f32) -> Self {
         self.w(w).h(h)
     }
+    /// Width over height, as CSS `aspect-ratio`: with one side set (or stretched by the parent)
+    /// the other follows; a box with both sides set ignores it. A picture that sets only one
+    /// side already takes its image's ratio ([`pixels`](Self::pixels)); use this for video or
+    /// any other box. Anything not positive removes it.
+    pub fn aspect_ratio(mut self, ratio: f32) -> Self {
+        self.style.aspect_ratio = (ratio.is_finite() && ratio > 0.0).then_some(ratio);
+        self
+    }
     pub fn w_full(mut self) -> Self {
         self.style.size.width = percent(1.0);
         self
@@ -1317,6 +1325,9 @@ impl El {
     }
     /// Shows `pixels`, scaled into the element's rect and clipped to its corner radius. The image
     /// can change without the view re-running: the next frame draws its latest contents.
+    /// An element that sets only its width (`w`, `w_full`) or only its height takes the other
+    /// side from the image's aspect ratio, updating when the image decodes or changes shape;
+    /// [`aspect_ratio`](Self::aspect_ratio) overrides it.
     pub fn pixels(mut self, pixels: &crate::pixels::Pixels) -> Self {
         self.vis.pixels = Some(pixels.clone());
         self.vis.pixels_fit = None;

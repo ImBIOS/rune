@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Pictures size from their image.** An element with `pixels`/`pixels_fit` that sets only
+  its width or only its height takes the other side from the image's aspect ratio (it used to
+  take its content's size, usually 0). Pictures with both sides set, or neither, are
+  unchanged. `El::aspect_ratio(r)` sets a ratio on any element.
 - **System monospaced font.** `Family::SystemMono` shapes with SF Mono on macOS, Cascadia
   Mono or Consolas on Windows, and fontconfig's `monospace` on Linux, loaded from the system
   on first use and falling back to the mono slot. `Family` gains a variant, so an app's

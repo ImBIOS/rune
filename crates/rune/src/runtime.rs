@@ -235,6 +235,8 @@ pub(crate) struct Node {
     cursor: Option<crate::el::Cursor>,
     window_drag: bool,
     press_scale: Option<f32>,
+    /// The image ratio this picture's layout took, when it sizes one side from its pixels.
+    pixel_aspect: Option<f32>,
     /// Inside a growth row: layout snaps (the row's height carries the motion).
     in_row: bool,
     virtual_mount: bool,
@@ -489,6 +491,8 @@ pub struct Runtime<S: 'static> {
     input_scroll: HashMap<String, f32>,
     dissolve_scratch: Vec<bool>,
     has_dissolve: bool,
+    /// Some picture sizes a side from its image's ratio (`pixel_aspect`).
+    has_pixel_aspect: bool,
     /// Drawn rect per node (points, root space), for tools and hit tests.
     drawn: Vec<[f32; 4]>,
     scrolls: HashMap<NodeId, ScrollState>,
@@ -713,6 +717,7 @@ impl<S: 'static> Runtime<S> {
             input_scroll: HashMap::new(),
             dissolve_scratch: Vec::new(),
             has_dissolve: false,
+            has_pixel_aspect: false,
             drawn: Vec::new(),
             scrolls: HashMap::new(),
             grows: HashMap::new(),
@@ -1256,6 +1261,7 @@ impl<S: 'static> Runtime<S> {
         let scroll_bottom = std::mem::take(&mut tx.scroll_bottom);
         if self.caret_watch && self.caret_moved(None) { self.dirty = true; }
         let read_moved = !self.layout_seen.is_empty() && self.layout_feedback_open() && self.layout_moved(None, None);
+        if self.has_pixel_aspect && self.pixel_aspect_changed() { self.relayout = true; }
         let other = ran || self.dirty || self.relayout || self.settle || self.virtual_window_changed();
         self.count_layout_echo(ran_layout || read_moved, other);
         if other || ran_layout || read_moved {
@@ -1346,6 +1352,19 @@ impl<S: 'static> Runtime<S> {
             self.marks.resize(self.instances.len(), 0);
         }
         animating
+    }
+
+    /// A picture sizing a side from its image changed shape (decoded, or a stream resized).
+    fn pixel_aspect_changed(&mut self) -> bool {
+        let mut changed = false;
+        for n in &mut self.nodes {
+            if let (Some(ratio), Some(pixels)) = (&mut n.pixel_aspect, &n.vis.pixels) {
+                let now = pixel_ratio(pixels);
+                changed |= now != *ratio;
+                *ratio = now;
+            }
+        }
+        changed
     }
 
     fn prune_exited(&mut self) {
@@ -2573,6 +2592,7 @@ impl<S: 'static> Runtime<S> {
 
         self.nodes = nodes;
         self.has_dissolve = self.nodes.iter().any(|n| n.vis.blend == crate::render::Blend::PlusLighter);
+        self.has_pixel_aspect = self.nodes.iter().any(|n| n.pixel_aspect.is_some());
         // A flight that left the tree stays lifted and covered while it exits, so it doesn't pop.
         self.flying.retain(|(id, _)| self.node_index.contains_key(id));
         if self.nodes.len() > present_len || !self.flying.is_empty() { self.update_layer_paint_order(); }
@@ -4500,6 +4520,12 @@ fn glyph_gamma(c: Color, scale: f32) -> f32 {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Width over height of the image in `pixels`, or 0 while it's empty.
+fn pixel_ratio(pixels: &crate::Pixels) -> f32 {
+    let (w, h) = pixels.size();
+    if w > 0 && h > 0 { w as f32 / h as f32 } else { 0.0 }
+}
+
 fn flatten(
     el: El,
     parent: Option<usize>,
@@ -4568,6 +4594,13 @@ fn flatten(
         assert!(input.is_none() && !t.wrap && t.spans.is_empty() && t.reveal < 0.0 && !t.truncate,
             "live_text requires plain single-line text; use truncate_fade for overflow");
     }
+    let mut style = style;
+    let pixel_aspect = vis.pixels.as_ref()
+        .filter(|_| style.aspect_ratio.is_none() && style.size.width.is_auto() != style.size.height.is_auto())
+        .map(pixel_ratio);
+    if let Some(ratio) = pixel_aspect.filter(|&r| r > 0.0) {
+        style.aspect_ratio = Some(ratio);
+    }
     let mut text = text;
     if input.is_none() && let Some(t) = &mut text { t.apply_case(); }
     let measured = text.is_some();
@@ -4618,6 +4651,7 @@ fn flatten(
         cursor,
         window_drag,
         press_scale,
+        pixel_aspect,
         in_row,
         virtual_mount,
         parent,
@@ -5308,6 +5342,52 @@ mod tests {
             rt.frame(1.0 / 120.0);
         }
         assert_eq!((rt.state.doubles, rt.state.behind), (1, 0));
+    }
+
+    /// A picture with one side set takes the other from its image, as SwiftUI's
+    /// `.resizable().aspectRatio(contentMode:)` does; both sides set keep the box.
+    #[test]
+    fn a_picture_with_one_side_sizes_the_other_from_its_image() {
+        use crate::Pixels;
+        use crate::SurfaceFit::{Fill, Fit};
+        fn view(p: &Pixels, _: &mut Cx<Pixels>) -> El {
+            crate::col().w(240.0).items_start()
+                .child(el().key("w").w(120.0).pixels(p))
+                .child(el().key("h").h(30.0).pixels_fit(p, Fit))
+                .child(el().key("full").w_full().pixels_fit(p, Fill))
+                .child(el().key("box").size(100.0, 100.0).pixels_fit(p, Fit))
+                .child(el().key("neither").pixels(p))
+                .child(el().key("explicit").w(120.0).aspect_ratio(4.0).pixels(p))
+                .child(el().key("plain").h(25.0).aspect_ratio(2.0))
+        }
+        let size = |rt: &Runtime<Pixels>, key: &str| {
+            let e = rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap();
+            [e.target[2], e.target[3]]
+        };
+        let px = Pixels::new();
+        let mut rt = Runtime::new(px.clone(), view, (240.0, 600.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert_eq!(size(&rt, "w"), [120.0, 0.0], "an empty (still decoding) image has no ratio yet");
+        assert_eq!(size(&rt, "explicit"), [120.0, 30.0]);
+        assert_eq!(size(&rt, "plain"), [50.0, 25.0], "any box can set a ratio");
+
+        // The image arrives without the view re-running, as a decode completing does.
+        px.set(4, 2, vec![255; 4 * 4 * 2]);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(size(&rt, "w"), [120.0, 60.0]);
+        assert_eq!(size(&rt, "h"), [60.0, 30.0]);
+        assert_eq!(size(&rt, "full"), [240.0, 120.0]);
+        assert_eq!(size(&rt, "box"), [100.0, 100.0], "a fixed box keeps its size and letterboxes");
+        assert_eq!(size(&rt, "neither"), [0.0, 0.0], "a picture with no side set is unchanged");
+        assert_eq!(size(&rt, "explicit"), [120.0, 30.0], "an explicit ratio wins");
+        assert!(!rt.elements().iter().any(|e| e.moving), "the new shape lands without animating");
+
+        px.set(2, 4, vec![255; 4 * 2 * 4]);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(size(&rt, "w"), [120.0, 240.0], "a stream that changes shape relays out");
+        let commits = rt.commits;
+        for _ in 0..4 { rt.frame(1.0 / 120.0); }
+        assert_eq!(rt.commits, commits, "an unchanged image costs no commits");
     }
 
     #[test]
