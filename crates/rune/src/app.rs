@@ -271,7 +271,8 @@ impl<S: 'static> App<S> {
 
     /// The app's own counters (memory, caches, queues), shown beside the window's frame stats
     /// in the dev panel (`App::dev_panel`) and in a native trace's summary. Called at most
-    /// once a frame with the panel open, so keep it cheap.
+    /// once a frame with the panel open, so keep it cheap. For example, with the `procwatch`
+    /// crate: `.dev_stats(|| procwatch::snapshot().map_or_else(String::new, |s| format!("{} MB, {} fds", s.footprint >> 20, s.fds)))`.
     pub fn dev_stats(mut self, stats: fn() -> String) -> Self {
         self.dev_stats = Some(stats);
         self
