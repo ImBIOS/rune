@@ -90,6 +90,7 @@ impl FrameClock {
     /// anything still animates and the seconds stepped.
     pub(crate) fn advance<S: 'static>(&mut self, rt: &mut Runtime<S>, at: Instant, compositing: bool) -> (bool, f64) {
         let step = self.step(at, rt.animating || compositing);
+        rt.frame_target = Some(at);
         (rt.frame_split(step.catch_up, step.dt), step.total())
     }
 }

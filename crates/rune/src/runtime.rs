@@ -569,6 +569,12 @@ pub struct Runtime<S: 'static> {
     window_focused: Option<bool>,
     live_subscriptions: Vec<Arc<crate::live::Subscription>>,
     live_dirty: bool,
+    /// When the frame being built will present; videos pull the picture for it.
+    pub(crate) frame_target: Option<std::time::Instant>,
+    /// A drawn video is playing or seeking: keep drawing frames.
+    videos_active: bool,
+    /// Drawn videos' state generations; a change re-runs the view.
+    video_signature: u64,
     /// Opt-in tooling checks. None keeps release commits free of key traversal/allocation.
     pub(crate) key_warnings: Option<Vec<String>>,
     /// Seconds until the next frame while only [`Cycle`](crate::el::Cycle)s move on screen
@@ -748,6 +754,9 @@ impl<S: 'static> Runtime<S> {
             stats: FrameStats::default(),
             live_wake: crate::live::Wake::new(Arc::new(|| {})),
             live_clock: Arc::new(()),
+            frame_target: None,
+            videos_active: false,
+            video_signature: 0,
             window_focused: None,
             on_focus: None,
             live_subscriptions: Vec::new(),
@@ -1317,6 +1326,7 @@ impl<S: 'static> Runtime<S> {
         self.build();
         self.images.end_frame();
         animating |= self.loops_active;
+        animating |= self.videos_active;
         animating |= self.draw_text_flights();
         if self.track_marks {
             self.marks.resize(self.instances.len(), 0);
@@ -3198,6 +3208,13 @@ impl<S: 'static> Runtime<S> {
         self.surfaces.clear();
         self.hits.clear();
         self.loops_active = false;
+        self.videos_active = false;
+        let now = std::time::Instant::now();
+        let video_clock = match self.wall_start {
+            None => crate::video::Clock::Virtual(self.clock),
+            Some(_) => crate::video::Clock::Display(self.frame_target.filter(|t| *t > now).unwrap_or(now)),
+        };
+        let mut video_signature = 0u64;
         self.loop_wake = None;
         self.overlay_hits.clear();
         let n_nodes = self.nodes.len();
@@ -3630,6 +3647,10 @@ impl<S: 'static> Runtime<S> {
                         });
                     }
                     if let Some((surface, fit)) = &n.vis.surface {
+                        if let Some(pulled) = surface.pull_video(video_clock, &self.live_wake) {
+                            self.videos_active |= pulled.active;
+                            video_signature = video_signature.wrapping_mul(0x100_0000_01b3).wrapping_add(pulled.generation ^ surface.key() as u64);
+                        }
                         self.surfaces.push(crate::native_surface::SurfaceDraw {
                             surface: surface.clone(), fit: *fit, before_instance: self.instances.len() as u32,
                             rect: [r[0], r[1], w, h], radii, clip, fade: crate::render::pack_fade(fade, fade_origin, clip), opacity: o,
@@ -3963,6 +3984,12 @@ impl<S: 'static> Runtime<S> {
         }
         self.layer_scratch = layers;
         self.built = true;
+        if video_signature != self.video_signature {
+            // A video loaded, ended or failed: views reading its state re-run next frame.
+            self.video_signature = video_signature;
+            self.dirty = true;
+            self.videos_active = true;
+        }
         if self.track_marks { self.marks.resize(self.instances.len(), 0); }
         self.stats.glyphs = glyph_count;
         self.ambient = ambient;
@@ -3973,6 +4000,13 @@ impl<S: 'static> Runtime<S> {
 
     // ---------------------------------------------------------------------------------------
     // Inspection
+
+    /// Video elements' playback state by element path, for `--tree`.
+    pub(crate) fn videos(&self) -> HashMap<String, crate::video::Snapshot> {
+        self.nodes.iter()
+            .filter_map(|n| Some((n.path.clone(), n.vis.surface.as_ref()?.0.video()?.snapshot())))
+            .collect()
+    }
 
     pub fn elements(&self) -> Vec<ElementInfo> {
         fn intent(n: &Node) -> u32 {

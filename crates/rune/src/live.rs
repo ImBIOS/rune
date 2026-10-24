@@ -204,7 +204,7 @@ impl Wake {
         let was_visible = self.visible.swap(visible, Ordering::AcqRel);
         if visible && !was_visible && self.pending.load(Ordering::Acquire) { (self.callback)(); }
     }
-    fn notify(&self) {
+    pub(crate) fn notify(&self) {
         if !self.pending.swap(true, Ordering::AcqRel) && self.visible.load(Ordering::Acquire) {
             (self.callback)();
         }

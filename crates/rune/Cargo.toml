@@ -52,6 +52,11 @@ objc2-core-video = { version = "0.3", features = ["CVPixelBufferIOSurface", "obj
 objc2-io-surface = "0.3"
 objc2-metal = "0.3"
 block2-metal = { package = "block2", version = "0.6" }
+# Video playback (`Video`): AVPlayer, its video output and the poster/headless image generator.
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVAsset", "AVAssetImageGenerator", "AVAssetTrack", "AVMediaFormat", "AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media", "objc2-core-video"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMTime"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage"] }
+objc2-foundation-video = { package = "objc2-foundation", version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSString", "NSURL"] }
 
 [target.'cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))'.dependencies]
 raw-window-handle = "0.6"
@@ -111,4 +116,8 @@ harness = false
 
 [[test]]
 name = "popup_menu_macos"
+harness = false
+
+[[test]]
+name = "video_gui"
 harness = false

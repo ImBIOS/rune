@@ -979,6 +979,7 @@ impl Drop for Trace {
 }
 
 pub(crate) fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
+    let videos = rt.videos();
     let els: Vec<Value> = rt
         .elements()
         .iter()
@@ -1025,6 +1026,9 @@ pub(crate) fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
             if e.drag_out {
                 v["dragOut"] = true.into();
             }
+            if let Some(video) = videos.get(&e.path) {
+                v["video"] = video_json(video);
+            }
             v
         })
         .collect();
@@ -1042,6 +1046,29 @@ pub(crate) fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
     });
     if let Some(menu) = rt.popup_json() { tree["popupMenu"] = menu; }
     tree
+}
+
+fn video_json(v: &crate::video::Snapshot) -> Value {
+    use crate::PlayerState;
+    let (state, error) = match &v.state {
+        PlayerState::Loading => ("loading", None),
+        PlayerState::Ready => ("ready", None),
+        PlayerState::Playing => ("playing", None),
+        PlayerState::Ended => ("ended", None),
+        PlayerState::Failed(e) => ("failed", Some(e.clone())),
+    };
+    let mut out = json!({
+        "kind": match v.kind { crate::video::Kind::Video => "video", crate::video::Kind::Audio => "audio" },
+        "state": state,
+        "time": (v.time * 1000.0).round() / 1000.0,
+        "duration": v.duration.map(|d| (d * 1000.0).round() / 1000.0),
+        "size": v.size.map(|(w, h)| [w, h]),
+        "rate": v.rate,
+        "looping": v.looping,
+        "muted": v.muted,
+    });
+    if let Some(e) = error { out["error"] = e.into(); }
+    out
 }
 
 // -------------------------------------------------------------------------------------------

@@ -831,6 +831,12 @@ impl El {
         self.vis.surface = Some((surface.clone(), fit));
         self
     }
+    /// Play `video` inside this node: `Fit` letterboxes, `Fill` crops. Frames come from the
+    /// display link while it plays; a paused video draws no frames of its own. Audio players
+    /// need no element.
+    pub fn video(self, video: &crate::Player, fit: crate::SurfaceFit) -> Self {
+        self.native_surface(video.surface(), fit)
+    }
     /// Opt into keyboard and pointer focus. Disabled controls must set this false.
     pub fn focusable(mut self, enabled: bool) -> Self {
         self.focus.enabled = enabled;

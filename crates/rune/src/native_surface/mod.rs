@@ -90,6 +90,8 @@ struct State {
     completed: u64,
     error: Option<String>,
     mirrored: bool,
+    /// The player feeding this surface, pulled once per frame that draws it.
+    video: Option<Arc<crate::video::Shared>>,
 }
 /// Clones share a single bounded slot; pushing never queues frames behind the decoder.
 #[derive(Clone, Default)]
@@ -102,6 +104,19 @@ impl std::fmt::Debug for NativeSurface {
 impl NativeSurface {
     pub fn new() -> Self {
         Self::default()
+    }
+    pub(crate) fn with_video(video: Arc<crate::video::Shared>) -> Self {
+        let surface = Self::default();
+        surface.0.lock().unwrap().video = Some(video);
+        surface
+    }
+    pub(crate) fn video(&self) -> Option<Arc<crate::video::Shared>> {
+        self.0.lock().unwrap().video.clone()
+    }
+    /// Pull this frame's picture from the surface's video, if it has one.
+    pub(crate) fn pull_video(&self, clock: crate::video::Clock, wake: &Arc<crate::live::Wake>) -> Option<crate::video::Pulled> {
+        let video = self.video()?;
+        Some(video.pull(self, clock, wake))
     }
     pub fn set_waker(&self, waker: crate::Waker) {
         self.0.lock().unwrap().waker = Some(waker);
@@ -200,14 +215,14 @@ impl NativeSurface {
         }
     }
     #[cfg(test)]
-    fn latest(&self) -> Option<Arc<Frame>> {
+    pub(crate) fn latest(&self) -> Option<Arc<Frame>> {
         self.0.lock().unwrap().latest.clone()
     }
     fn latest_mirrored(&self) -> Option<(Arc<Frame>, bool)> {
         let s = self.0.lock().unwrap();
         s.latest.clone().map(|f| (f, s.mirrored))
     }
-    fn key(&self) -> usize {
+    pub(crate) fn key(&self) -> usize {
         Arc::as_ptr(&self.0) as usize
     }
     fn report(&self, timing: FrameTiming) {

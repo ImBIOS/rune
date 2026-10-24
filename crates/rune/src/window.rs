@@ -525,6 +525,7 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) {
             .with_activate_ignoring_other_apps(false);
     }
     let event_loop = builder.build().expect("event loop");
+    crate::video::enable_playback();
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
     let mut windows = Windows { factory: Some(factory), args, proxy, hosts: Vec::new(), gpu: Rc::default() };
