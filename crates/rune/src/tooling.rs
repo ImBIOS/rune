@@ -2103,6 +2103,46 @@ mod tests {
     }
 
     #[test]
+    fn desktop_click_on_the_backdrop_deactivates_the_app_until_it_refocuses() {
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+        // As on macOS, a click on the desktop activates another app: no window has focus and
+        // keys go nowhere until the app is active again.
+        let script = r#"[{"t": 0.1, "type": "tap", "x": 110, "y": 75}, {"t": 0.2, "type": "key", "name": "Enter"},
+            {"t": 0.3, "focus": true}, {"t": 0.4, "type": "key", "name": "Enter"}]"#;
+        let dir = std::env::temp_dir().join(format!("rune-desktop-tree-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tree = dir.join("tree.json");
+        let (_, run) = desktop_case("inactive", script, 0.2, &["--tree", tree.to_str().unwrap()], || {
+            vec![pair("a", RED, None, |_, _| {}, left()).0.boxed()]
+        });
+        let tree: Value = serde_json::from_str(&std::fs::read_to_string(&tree).unwrap()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(tree["windows"][0]["focused"], json!(false), "--tree reports no focus while inactive");
+        assert_eq!(focus_of(&run, 0.0, "a"), (true, true));
+        assert_eq!(focus_of(&run, 0.2, "a"), (true, false));
+        assert!(KEYED.lock().unwrap().is_empty(), "keys while inactive go to another app");
+
+        let (_, run) = desktop_case("inactive", script, 0.5, &[], || vec![pair("a", RED, None, |_, _| {}, left()).0.boxed()]);
+        assert_eq!(focus_of(&run, 0.3, "a"), (true, true));
+        assert_eq!(*KEYED.lock().unwrap(), ["a"], "only the key after refocusing lands");
+    }
+
+    #[test]
+    fn desktop_click_through_window_never_takes_the_keyboard() {
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+        // `a` opens and focuses a click-through HUD; `a` keeps the keyboard.
+        let script = r#"[{"t": 0.1, "type": "key", "name": "Enter"}, {"t": 0.2, "type": "key", "name": "Enter"}]"#;
+        let (_, run) = desktop_case("hud", script, 0.3, &[], || {
+            let hud = crate::WindowOptions { visible: false, click_through: true, borderless: true, ..right() };
+            let (hud, handle) = pair("hud", BLUE, None, |_, _| {}, hud);
+            let (a, _) = pair("a", RED, Some(handle), |hud, _| { hud.open(); hud.focus(); }, left());
+            vec![a.boxed(), hud.boxed()]
+        });
+        assert_eq!((focus_of(&run, 0.1, "a"), focus_of(&run, 0.1, "hud")), ((true, true), (true, false)));
+        assert_eq!(*KEYED.lock().unwrap(), ["a", "a"]);
+    }
+
+    #[test]
     fn keycaps_draw_over_frames_but_never_enter_the_tree() {
         let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("rune-keys-{}", std::process::id()));

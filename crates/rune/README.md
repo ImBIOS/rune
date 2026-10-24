@@ -1028,11 +1028,13 @@ $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/d
   backdrop's pixels ÷ `--scale`, times `--scale` pixels; without scripted displays the window
   factory sees one display of that size. Script `x,y` and `key` positions are output points.
   A press goes to the topmost window under it that takes clicks, brings it to the front and
-  gives it the keyboard; a press on the backdrop deactivates the app. Keys go to the key window;
-  shortcuts and menu picks go to the key window's app first, then the others. Show, hide, place,
-  focus and close requests apply as they would natively, in the frame whose handlers made them,
-  but `quit` doesn't end the recording. When the key window hides, the topmost visible window
-  that takes clicks gets the keyboard.
+  gives it the keyboard; a press on the backdrop deactivates the app, as clicking the macOS
+  desktop does: no window has focus and keys go nowhere until a press on a window or
+  `{"focus": true}`. Keys go to the key window; shortcuts and menu picks go to the key window's
+  app first, then the others. Show, hide, place, focus and close requests apply as they would
+  natively, in the frame whose handlers made them, but `quit` doesn't end the recording. When the
+  key window hides, the topmost visible window that takes clicks gets the keyboard; a
+  click-through window never does.
   `--keys` and `--pointer` draw over the composite. `--window KEY` picks the window `--tree`,
   `--trace` and `--scene` describe, and the tree adds a `windows` list of every window's frame.
   `headless_run()` gives `desktop()`, the window frames as they change (`window_frames()`) and

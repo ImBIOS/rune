@@ -384,17 +384,22 @@ impl Desk {
     /// The window that gets the keyboard when no window asks for it: the topmost visible one
     /// that takes clicks.
     fn topmost_visible(&self) -> Option<usize> {
-        self.z.iter().rev().copied().find(|&i| self.members[i].visible() && !self.members[i].click_through())
+        self.z.iter().rev().copied().find(|&i| self.can_key(i))
+    }
+
+    /// Whether window `i` can have the keyboard: it shows and takes clicks.
+    fn can_key(&self, i: usize) -> bool {
+        self.members[i].visible() && !self.members[i].click_through()
     }
 
     fn apply(&mut self, i: usize, changes: Changes) {
         if changes.front && self.members[i].visible() { self.front(i); }
-        if changes.keys && self.members[i].visible() { self.focus(Some(i), true); }
+        if changes.keys && self.can_key(i) { self.focus(Some(i), true); }
     }
 
     /// A hidden key window hands the keyboard to the topmost visible one.
     fn settle_key(&mut self) {
-        if self.key.is_some_and(|k| self.members[k].visible()) { return; }
+        if self.key.is_some_and(|k| self.can_key(k)) { return; }
         let next = self.topmost_visible();
         if next != self.key { self.focus(next, self.active); }
         for i in [self.hover, self.pressed].into_iter().flatten() {
@@ -493,11 +498,12 @@ impl Desk {
         }
     }
 
-    /// Window `i`'s frame in output points, whether it shows, and whether it has the keyboard.
+    /// Window `i`'s frame in output points, whether it shows, and whether it has the keyboard
+    /// (never while another app is active).
     fn state(&self, i: usize) -> ([f32; 4], bool, bool) {
         let m = &self.members[i];
         let f = m.frame();
-        ([f[0] - self.origin.0, f[1] - self.origin.1, f[2], f[3]], m.visible(), self.key == Some(i))
+        ([f[0] - self.origin.0, f[1] - self.origin.1, f[2], f[3]], m.visible(), self.active && self.key == Some(i))
     }
 
     fn snapshot(&self, i: usize, t: f64) -> WindowFrame {
@@ -638,8 +644,9 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args) {
                     let i = open.or(desk.key).unwrap_or(selected);
                     desk.members[i].resolve_popup(picked.as_deref()).unwrap_or_else(|e| die(&format!("script pop-up menu: {e}")));
                 }
+                // While another app is active, as after a click on the backdrop, keys go to it.
                 Kind::Key(..) | Kind::Physical(_) | Kind::Paste(_) => {
-                    if let Some(i) = desk.key { desk.members[i].input(&e.kind, (x, y)); }
+                    if let Some(i) = desk.key.filter(|_| desk.active) { desk.members[i].input(&e.kind, (x, y)); }
                 }
                 Kind::Move | Kind::Down | Kind::Up | Kind::SecondaryDown | Kind::SecondaryUp | Kind::Wheel(_) | Kind::Fling(_) => {
                     if matches!(e.kind, Kind::Down | Kind::SecondaryDown) { last_down = (x, y); }
