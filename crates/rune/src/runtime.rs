@@ -990,6 +990,7 @@ impl<S: 'static> Runtime<S> {
         self.surface_visible = visible;
         if !visible { self.loop_wake = None; }
     }
+    pub(crate) fn live_visible(&self) -> bool { self.surface_visible }
     pub fn live_pending(&self) -> bool {
         self.surface_visible && (self.live_dirty || self.live_wake.pending.load(std::sync::atomic::Ordering::Acquire))
     }

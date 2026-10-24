@@ -41,6 +41,11 @@ struct Win {
     /// False while hidden (platforms that can hide a window keep it for the next open).
     visible: bool,
     occluded: bool,
+    /// When to redraw after a frame that had no drawable, or the next frame of motion when no
+    /// display link paces it (macOS).
+    retry: Option<Instant>,
+    /// The next occluded re-check's wait, backing off while the surface stays occluded.
+    occluded_wait: Duration,
     cursor: crate::os_cursor::OsCursor,
     alpha: Option<crate::surface_alpha::AlphaSurface>,
     /// Drawables present inside Core Animation transactions while the frame moves.
@@ -722,6 +727,103 @@ pub(crate) fn wall_wake_deadline<S>(rt: &Runtime<S>) -> Option<Instant> {
     rt.wall_start?.checked_add(Duration::try_from_secs_f64(rt.wake_deadline()?).ok()?)
 }
 
+/// Why a surface gave no drawable this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Missed {
+    /// Nothing of the window is on screen (covered, or its displays asleep).
+    Occluded,
+    /// No drawable was free, or acquisition failed some other passing way.
+    Timeout,
+    /// Outdated or lost, and reconfiguring didn't bring it back.
+    Outdated,
+}
+
+/// How a host waits after a frame it couldn't draw. There is no `ControlFlow::Poll` here:
+/// retrying at once is what spins a core while a window is occluded or its displays sleep.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NextFrame {
+    WaitUntil(Instant),
+    /// Sleep until an event: a display tick, a notification, input or a timer.
+    Idle,
+}
+
+/// The first re-check of an occluded surface. Its occlusion notification usually redraws it
+/// first; this catches one that never arrives. Consecutive misses back off to `OCCLUDED_MAX`.
+pub(crate) const OCCLUDED_RETRY: Duration = Duration::from_millis(250);
+pub(crate) const OCCLUDED_MAX: Duration = Duration::from_secs(2);
+/// An unpaced surface's retry after a drawable timeout: about one frame.
+pub(crate) const TIMEOUT_RETRY: Duration = Duration::from_millis(16);
+/// Motion's frame interval on macOS when no display link paces a surface.
+#[cfg(target_os = "macos")]
+pub(crate) const TIMER_FRAME: Duration = Duration::from_micros(16_667);
+
+impl Missed {
+    fn of(status: wgpu::CurrentSurfaceTexture) -> Result<wgpu::SurfaceTexture, Missed> {
+        use wgpu::CurrentSurfaceTexture as S;
+        match status {
+            S::Success(f) | S::Suboptimal(f) => Ok(f),
+            S::Occluded => Err(Missed::Occluded),
+            S::Outdated | S::Lost => Err(Missed::Outdated),
+            S::Timeout | S::Validation => Err(Missed::Timeout),
+        }
+    }
+
+    /// What follows a frame this surface couldn't draw. A display link that is still running
+    /// retries a timeout on its next tick. `occluded_wait` is the caller's backoff, held to
+    /// `OCCLUDED_RETRY..=OCCLUDED_MAX`.
+    pub(crate) fn next(self, paced: bool, now: Instant, occluded_wait: Duration) -> NextFrame {
+        match self {
+            Missed::Occluded => NextFrame::WaitUntil(now + occluded_wait.clamp(OCCLUDED_RETRY, OCCLUDED_MAX)),
+            Missed::Timeout if paced => NextFrame::Idle,
+            Missed::Timeout => NextFrame::WaitUntil(now + TIMEOUT_RETRY),
+            Missed::Outdated => NextFrame::WaitUntil(now + OCCLUDED_RETRY),
+        }
+    }
+}
+
+/// The next drawable. An outdated or lost surface is reconfigured and tried again, up to
+/// `reconfigures` times, synchronously; every other miss returns at once.
+pub(crate) fn acquire(surface: &wgpu::Surface, device: &wgpu::Device, config: &wgpu::SurfaceConfiguration, mut reconfigures: u32)
+    -> Result<wgpu::SurfaceTexture, Missed> {
+    loop {
+        match Missed::of(surface.get_current_texture()) {
+            Err(Missed::Outdated) if reconfigures > 0 => {
+                surface.configure(device, config);
+                reconfigures -= 1;
+            }
+            Err(Missed::Outdated) => {
+                surface.configure(device, config);
+                return Err(Missed::Outdated);
+            }
+            other => return other,
+        }
+    }
+}
+
+#[test]
+fn missed_frames_never_poll() {
+    use wgpu::CurrentSurfaceTexture as S;
+    let now = Instant::now();
+    for status in [S::Occluded, S::Timeout, S::Outdated, S::Lost, S::Validation] {
+        let missed = Missed::of(status).err().expect("a miss");
+        for paced in [false, true] {
+            for wait in [Duration::ZERO, OCCLUDED_RETRY, Duration::from_secs(60)] {
+                // `NextFrame` has no Poll; a deadline at or before now would spin the same way.
+                let flow = match missed.next(paced, now, wait) {
+                    NextFrame::WaitUntil(at) => { assert!(at > now, "{missed:?} retries later, not now"); ControlFlow::WaitUntil(at) }
+                    NextFrame::Idle => ControlFlow::Wait,
+                };
+                assert_ne!(flow, ControlFlow::Poll, "{missed:?} (paced: {paced}) must not poll");
+            }
+        }
+    }
+    let occluded = |wait| Missed::Occluded.next(true, now, wait);
+    assert_eq!(occluded(Duration::ZERO), NextFrame::WaitUntil(now + OCCLUDED_RETRY), "the safety net is slow");
+    assert_eq!(occluded(Duration::from_secs(60)), NextFrame::WaitUntil(now + OCCLUDED_MAX));
+    assert_eq!(Missed::Timeout.next(true, now, Duration::ZERO), NextFrame::Idle, "a running display link retries on its tick");
+    assert_eq!(Missed::Timeout.next(false, now, Duration::ZERO), NextFrame::WaitUntil(now + TIMEOUT_RETRY));
+}
+
 /// A vsynced sRGB (or non-sRGB when `srgb_blend` is set) configuration for the surface, and the
 /// first alpha mode it supports that composites translucent pixels.
 pub(crate) fn surface_config(surface: &wgpu::Surface, adapter: &wgpu::Adapter, (width, height): (u32, u32), srgb_blend: bool)
@@ -1365,6 +1467,7 @@ impl<S: 'static> Host<S> {
         } else if let Some(w) = self.win.as_mut() {
             w.stop_pacing();
             w.visible = false;
+            w.retry = None;
         }
     }
 
@@ -1579,6 +1682,8 @@ impl<S: 'static> Host<S> {
             window,
             visible,
             occluded: false,
+            retry: None,
+            occluded_wait: OCCLUDED_RETRY,
             cursor: crate::os_cursor::OsCursor::new(event_loop),
             alpha,
             #[cfg(target_os = "macos")]
@@ -1630,17 +1735,45 @@ impl<S: 'static> Host<S> {
         if !hidden { self.step_frame(target.unwrap_or_else(Instant::now)); }
         let (Some(l), Some((gpu, renderer, _))) = (self.win.as_mut(), self.gpu.as_mut()) else { return };
         // Acquire before latching live values so a drawable wait cannot age the input.
-        let frame = match l.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                l.surface.configure(&gpu.device, &l.config);
-                if !hidden { l.window.request_redraw(); }
+        l.retry = None;
+        let frame = match acquire(&l.surface, &gpu.device, &l.config, 1) {
+            Ok(frame) => frame,
+            // A hidden launcher frame retries on its first-frame deadline.
+            Err(_) if hidden => return,
+            Err(missed) => {
+                // Asking for a redraw here would turn the loop at once, for as long as the
+                // window is occluded or its displays sleep.
+                let now = Instant::now();
+                let wait = l.occluded_wait;
+                if missed == Missed::Occluded {
+                    // Covered or asleep with no notification yet: rest as if one came, and
+                    // look again on `retry`.
+                    l.occluded = true;
+                    l.occluded_wait = (wait * 2).min(OCCLUDED_MAX);
+                    l.stop_pacing();
+                    self.rt.set_live_visible(false);
+                    self.secure_input.set(false);
+                    self.idle = true;
+                }
+                l.retry = match missed.next(l.paced(), now, wait) {
+                    NextFrame::WaitUntil(at) => Some(at),
+                    NextFrame::Idle => None,
+                };
+                // What this frame would have run (updates, poll, due timers) still runs,
+                // without drawing. Misses come at the retry's pace, not the display's.
+                self.rt.hidden_timer_frame();
+                self.clipboard.flush(&mut self.rt);
                 return;
             }
-            _ => {
-                if !hidden { l.window.request_redraw(); } return;
-            }
         };
+        l.occluded_wait = OCCLUDED_RETRY;
+        if !hidden && !self.rt.live_visible() && { let size = l.window.inner_size(); size.width > 0 && size.height > 0 } {
+            // Uncovered after a missed frame said it was occluded.
+            self.rt.set_live_visible(true);
+            self.rt.settle_all();
+            #[cfg(target_os = "macos")]
+            if l.pacing.is_none() { l.pacing = crate::display_link::DisplayLink::new(&l.window, self.frame_wake.clone()); }
+        }
         #[cfg(target_os = "macos")]
         let drawable = l.present.as_ref().and(self.present_log.as_ref()).and_then(|log| log.acquired());
         #[cfg(not(target_os = "macos"))]
@@ -1746,7 +1879,12 @@ impl<S: 'static> Host<S> {
         }
         self.idle = !(animating || rt.has_pending_input() || rt.live_pending() || rt.window_frame.is_some() || self.frame_anim.is_some());
         if !hidden && (!self.idle || (self.trace.is_some() && self.args.frames.is_some())) {
-            if !l.paced() { l.window.request_redraw(); }
+            // Without a running display link, macOS hands out drawables faster than the
+            // display shows them, so a timer paces the next frame instead of the loop.
+            #[cfg(target_os = "macos")]
+            if !l.paced() { l.retry = Some(now + TIMER_FRAME); }
+            #[cfg(not(target_os = "macos"))]
+            l.window.request_redraw();
         } else {
             l.stop_pacing();
         }
@@ -1790,6 +1928,13 @@ impl<S: 'static> AnyHost for Host<S> {
                 }
             } else { w.window.request_redraw(); }
         }
+        let launcher = self.launcher();
+        if let Some(w) = &mut self.win && w.retry.is_some_and(|retry| retry <= Instant::now()) {
+            w.retry = None;
+            // A missed frame marked it occluded; look at the surface again.
+            w.occluded = false;
+            if launcher || w.visible { w.window.request_redraw(); }
+        }
         if matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll)
             && wall_wake_deadline(&self.rt).is_some_and(|deadline| deadline <= Instant::now())
         {
@@ -1819,7 +1964,11 @@ impl<S: 'static> AnyHost for Host<S> {
         let runtime = wall_wake_deadline(&self.rt).filter(|_| !self.win.as_ref().is_some_and(Win::paced));
         #[cfg(all(feature = "dev", debug_assertions))]
         let runtime = runtime.into_iter().chain(self.rt.dev_hidden_deadline()).min();
-        runtime.into_iter().chain(self.win.as_ref().and_then(|w| w.first_frame.deadline.map(|(retry, _)| retry))).min()
+        let win = self.win.as_ref();
+        runtime.into_iter()
+            .chain(win.and_then(|w| w.first_frame.deadline.map(|(retry, _)| retry)))
+            .chain(win.and_then(|w| w.retry))
+            .min()
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) -> bool {
@@ -1964,6 +2113,8 @@ impl<S: 'static> Host<S> {
                 // Their native occlusion transitions must not settle or redraw a reveal.
                 if self.macos_window.launcher && cfg!(target_os = "macos") { return; }
                 l.occluded = occluded;
+                l.retry = None;
+                l.occluded_wait = OCCLUDED_RETRY;
                 rt.set_live_visible(l.visible && !occluded && !l.window.is_minimized().unwrap_or(false));
                 if occluded {
                     self.secure_input.set(false);
@@ -1971,6 +2122,9 @@ impl<S: 'static> Host<S> {
                     self.idle = true; return;
                 }
                 place_chrome(&l.window, chrome);
+                // A window opened while the displays slept has no display link yet.
+                #[cfg(target_os = "macos")]
+                if l.pacing.is_none() { l.pacing = crate::display_link::DisplayLink::new(&l.window, self.frame_wake.clone()); }
                 // Coming back paints the settled state in the first frame (guarantee 8).
                 rt.settle_all();
                 l.window.request_redraw();
