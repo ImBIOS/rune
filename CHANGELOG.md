@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Tooltip labels wrap at the style's max width.** `Tooltip::label` and `Tooltip::text` stayed
+  on one line past `TooltipStyle::max_width` and drew outside the box; they now wrap inside it,
+  so a kit's Standard tooltip wraps at 320 pt. Tooltips without a max width are unchanged.
 - **`El::aspect_fit(ratio)` sizes an element to the largest box at a ratio that fits its room.**
   As SwiftUI's `.aspectRatio(ratio, contentMode: .fit)`, the element takes the free space along
   its parent's main axis and the whole cross side (within `max_w` and `max_h`), then lays out at

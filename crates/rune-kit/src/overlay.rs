@@ -289,7 +289,8 @@ impl TooltipStyle {
         self.padding = (x, y);
         self
     }
-    /// The widest the tooltip grows before its text wraps.
+    /// The widest the tooltip grows: [`Tooltip::label`] and [`Tooltip::text`] wrap at it. A
+    /// wrapping [`Tooltip::child`] needs `.shrink()` as well as `.wrap()` to wrap there.
     pub fn max_width(mut self, w: f32) -> Self {
         self.max_w = Some(w);
         self
@@ -334,8 +335,9 @@ pub struct Tooltip {
 
 enum Content {
     El(El),
-    /// Text styled when the tooltip is built.
-    Label(String),
+    /// Text, in the given type and colour or else the building style's. It wraps at the
+    /// style's max width.
+    Text(String, Option<(TextStyle, Color)>),
 }
 
 impl Tooltip {
@@ -354,16 +356,16 @@ impl Tooltip {
         self.trigger = Some(t);
         self
     }
-    /// Plain text content.
+    /// Plain text content. It wraps at the style's [`max_width`](TooltipStyle::max_width).
     pub fn text(mut self, k: &Kit, s: impl Into<String>) -> Self {
-        let font = self.font(k);
-        let color = self.ink(k);
-        self.value.push(Content::El(text(s).font(font).color(color)));
+        let look = (self.font(k), self.ink(k));
+        self.value.push(Content::Text(s.into(), Some(look)));
         self
     }
-    /// Plain text content in the style's font and ink, whichever style builds the tooltip.
+    /// Plain text content in the style's font and ink, whichever style builds the tooltip. It
+    /// wraps at the style's [`max_width`](TooltipStyle::max_width).
     pub fn label(mut self, s: impl Into<String>) -> Self {
-        self.value.push(Content::Label(s.into()));
+        self.value.push(Content::Text(s.into(), None));
         self
     }
     /// Any content (keybinds, spans in other colours).
@@ -410,7 +412,11 @@ impl Tooltip {
         }
         let value = self.value.into_iter().map(|c| match c {
             Content::El(e) => e,
-            Content::Label(s) => text(s).font(style.font).color(style.ink),
+            Content::Text(s, look) => {
+                let (font, ink) = look.unwrap_or((style.font, style.ink));
+                let t = text(s).font(font).color(ink);
+                if style.max_w.is_some() { t.wrap().shrink() } else { t }
+            }
         });
         let mut body = row().key(format!("{}-tooltip", self.key)).role("tooltip").center_y().gap(6.0).children(value);
         if let Some(w) = style.max_w {
