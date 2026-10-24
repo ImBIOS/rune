@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Scripts can press any chord system-wide.** `{"type": "shortcut", "chord": "cmd+space"}`
+  runs the app's handler when it registered the chord, and otherwise delivers it to the window
+  as a key press (physical handlers, then `on_key` as `Key::Command(' ')`), so a script can
+  summon an app that watches for the chord itself. `{"shortcut": …}` is unchanged.
 - **Scripts can mark times.** `{"t": 3.2, "type": "mark", "name": "end"}` has no input effect;
   apps read marks through `headless_run().marks()` and `mark(name)`. `--at` and `--start`
   take `mark:NAME` with an optional offset (`mark:end+0.5`), and `--duration auto` (the

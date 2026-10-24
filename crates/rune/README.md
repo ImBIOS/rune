@@ -890,6 +890,18 @@ $S --native --trace run.jsonl --frames 240  # native submission timestamps, then
 - **Scripts** are timestamped `move`, `down`, `up`, `tap` (`hold`) and `drag` (`dx`, `dy`, `dur`)
   events, at `x,y` in points or at an element by `key` (or a path suffix such as `slider/knob`).
   `menu-pick` (with an `id`) and `menu-cancel` answer an open pop-up menu.
+- **Keys in scripts**: `{"type": "key", "name": "Enter"}` (with `cmd`, `shift`, `alt`, `ctrl`)
+  and `{"type": "type", "text": "hi"}` reach the window even while the app has hidden it:
+  headless there is no real window to hide, so `on_key` sees every key it would see in a
+  focused window (first when nothing has focus, otherwise what the focused control and focus
+  navigation leave). `cmd` with a single character arrives as `Key::Command(c)` (`" "` gives
+  `Key::Command(' ')`); other keys keep their modifiers in `KeyEvent::mods`.
+  `{"physical": "cmd+k"}` reaches only `on_physical_input` handlers.
+- **Chords**: `{"type": "shortcut", "chord": "cmd+space"}` is the user pressing a chord
+  system-wide. A chord the app registered (`App::global_shortcut`, `register_shortcut`) runs
+  its handler, as when the OS delivers it; any other chord reaches the window as a key press
+  with its logical key, so a handler watching for it in `on_key` sees `Key::Command(' ')`.
+  The older `{"shortcut": "cmd+k"}` still fails unless the chord is registered.
 - **Marks**: `{"t": 3.2, "type": "mark", "name": "end"}` names a time and does nothing else.
   `--at mark:end`, `--at mark:end+0.5` and `--start mark:intro-0.2` use a mark's time, and
   `--duration auto` (the default with `--video`) ends at the `end` mark, or one second after the

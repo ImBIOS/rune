@@ -293,7 +293,9 @@ const HELP: &str = "usage: <app> [window]
   --theme dark|light    system appearance
   --script FILE.json    timestamped input (move/down/up/tap/drag, keys, {\"focus\":false}); a
                         key with \"repeat\":true is a held key's auto-repeat; {\"type\":\"mark\",\"name\":N}
-                        marks a time; an object adds \"displays\" and \"pointer\" for place() (rune-placed, --tree)
+                        marks a time; {\"type\":\"shortcut\",\"chord\":\"cmd+space\"} presses a chord
+                        system-wide (a registered global shortcut, else a key press in the window);
+                        an object adds \"displays\" and \"pointer\" for place() (rune-placed, --tree)
                         menu-pick with an \"id\" and menu-cancel answer a pop-up menu
   --frames N --fps 60 --start S --out DIR     dump N frames from S seconds
   --video out.mp4       stream frames into ffmpeg (.mp4 H.264, .mov ProRes 4444, .webm VP9);
@@ -430,7 +432,9 @@ enum Kind {
     /// Answers the open pop-up menu: an item's id, or `None` to dismiss it.
     PopupMenu(Option<String>),
     Physical(crate::PhysicalInput),
-    Shortcut(crate::Shortcut),
+    /// A chord pressed system-wide. True (`"type": "shortcut"`) lets a chord the app never
+    /// registered reach the window as a key press; false (`{"shortcut": …}`) requires a registration.
+    Shortcut(crate::Shortcut, bool),
     Move,
     Down,
     Up,
@@ -464,6 +468,40 @@ fn key_named(name: &str) -> Option<Key> {
     })
 }
 
+/// A chord no app registered, pressed into the window the way a keyboard would: the physical
+/// key with its logical key (physical handlers, then `on_key` and focus), then the release.
+fn press_chord<S: 'static>(rt: &mut Runtime<S>, chord: &crate::Shortcut) {
+    let (key, mods) = (chord.physical_key(), chord.modifiers());
+    rt.physical_with_fallback(crate::PhysicalInput::Key { key, mods, pressed: true, repeat: false }, chord_key(chord));
+    rt.physical_input(crate::PhysicalInput::Key { key, mods, pressed: false, repeat: false });
+    if mods != Mods::default() { rt.physical_input(crate::PhysicalInput::Modifiers(Mods::default())); }
+}
+
+/// The logical key a chord types, as a script `key` event with the same modifiers would.
+/// Page Up, Page Down and Insert have none.
+fn chord_key(chord: &crate::Shortcut) -> Option<KeyEvent> {
+    let mods = chord.modifiers();
+    let name = chord.to_string();
+    let name = name.rsplit('+').next().unwrap_or_default();
+    let ch = match name {
+        "space" => Some(' '), "minus" => Some('-'), "equal" => Some('='), "comma" => Some(','), "period" => Some('.'),
+        "slash" => Some('/'), "semicolon" => Some(';'), "quote" => Some('\''), "bracketleft" => Some('['),
+        "bracketright" => Some(']'), "backslash" => Some('\\'), "backquote" => Some('`'),
+        n if n.chars().count() == 1 => n.chars().next(),
+        _ => None,
+    };
+    let key = match ch {
+        Some(c) if mods.cmd => Key::Command(c),
+        Some(c) => Key::Text(if mods.shift { c.to_uppercase().collect() } else { c.to_string() }),
+        None => {
+            let mut title = name.to_owned();
+            title[..1].make_ascii_uppercase();
+            key_named(&title)?
+        }
+    };
+    Some(KeyEvent { key, mods })
+}
+
 #[derive(Clone, Debug)]
 struct Ev {
     t: f64,
@@ -485,7 +523,7 @@ impl Ev {
             Kind::Focus(focused) => ScriptEvent::Focus(*focused),
             Kind::Menu(item) => ScriptEvent::Menu(item.clone()),
             Kind::Physical(input) => ScriptEvent::Physical(*input),
-            Kind::Shortcut(chord) => ScriptEvent::Shortcut(chord.clone()),
+            Kind::Shortcut(chord, _) => ScriptEvent::Shortcut(chord.clone()),
             Kind::Move => pointer(PointerAction::Move),
             Kind::Down => pointer(PointerAction::Down),
             Kind::Up => pointer(PointerAction::Up),
@@ -546,7 +584,13 @@ fn parse_script(list: Value) -> Vec<Ev> {
         }
         if let Some(shortcut) = e["shortcut"].as_str() {
             let shortcut = shortcut.parse().unwrap_or_else(|e: crate::ShortcutError| die(&e.to_string()));
-            out.push(Ev { t, kind: Kind::Shortcut(shortcut), pos: Pos::Rel(0.0, 0.0) });
+            out.push(Ev { t, kind: Kind::Shortcut(shortcut, false), pos: Pos::Rel(0.0, 0.0) });
+            continue;
+        }
+        if e["type"] == "shortcut" {
+            let chord = e["chord"].as_str().unwrap_or_else(|| die("a \"shortcut\" event needs a \"chord\", like \"cmd+space\""));
+            let chord = chord.parse().unwrap_or_else(|e: crate::ShortcutError| die(&e.to_string()));
+            out.push(Ev { t, kind: Kind::Shortcut(chord, true), pos: Pos::Rel(0.0, 0.0) });
             continue;
         }
         let pos = if let Some(k) = e["key"].as_str() {
@@ -1189,7 +1233,10 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             match &e.kind {
                 Kind::Mark(_) => {}
                 Kind::Focus(focused) => rt.window_focus(*focused),
-                Kind::Shortcut(shortcut) => shared.shortcuts.fire(shortcut).unwrap_or_else(|e| die(&format!("script shortcut: {e}"))),
+                Kind::Shortcut(shortcut, unclaimed_to_window) => match shared.shortcuts.fire(shortcut) {
+                    Err(crate::ShortcutError::UnknownId) if *unclaimed_to_window => press_chord(&mut rt, shortcut),
+                    result => result.unwrap_or_else(|e| die(&format!("script shortcut: {e}"))),
+                },
                 Kind::Menu(item) => crate::native_menu::fire(&shared, item).unwrap_or_else(|e| die(&format!("script menu: {e}"))),
                 Kind::PopupMenu(picked) => rt.resolve_popup(picked.as_deref()).unwrap_or_else(|e| die(&format!("script pop-up menu: {e}"))),
                 Kind::Move => rt.pointer_move(x, y),
@@ -1701,6 +1748,37 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         // yuv420p needs even sizes, so the 31-pixel width is padded to 32.
         assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "h264,32,20,yuv420p,12");
+    }
+
+    #[test]
+    fn script_chords_fire_registered_shortcuts_and_otherwise_reach_the_window() {
+        let script = parse_script(json!([{"t": 0.1, "type": "shortcut", "chord": "cmd+space"}, {"t": 0.2, "shortcut": "cmd+k"}]));
+        assert!(matches!(&script[0].kind, Kind::Shortcut(c, true) if *c == "cmd+space".parse().unwrap()));
+        assert!(matches!(&script[1].kind, Kind::Shortcut(_, false)), "the old form still requires a registration");
+        let key = |chord: &str| chord_key(&chord.parse().unwrap()).map(|k| k.key.clone());
+        assert_eq!(key("cmd+space"), Some(Key::Command(' ')));
+        assert_eq!(key("cmd+comma"), Some(Key::Command(',')));
+        assert_eq!(key("shift+a"), Some(Key::Text("A".into())));
+        assert_eq!(key("alt+enter"), Some(Key::Enter));
+        assert_eq!(key("f5"), Some(Key::Function(5)));
+        assert_eq!(key("cmd+pageup"), None, "no logical key: only physical handlers see it");
+
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+        static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let dir = std::env::temp_dir().join(format!("rune-chords-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("script.json");
+        std::fs::write(&path, r#"[{"t": 0.1, "type": "shortcut", "chord": "cmd+k"}, {"t": 0.2, "type": "shortcut", "chord": "cmd+space"},
+            {"t": 0.3, "type": "shortcut", "chord": "escape"}]"#).unwrap();
+        let spec = AppSpec {
+            on_key: Some(|_, ev, _| { SEEN.lock().unwrap().push(format!("on_key {:?}", ev.key)); true }),
+            ..AppSpec::new("chords", (40.0, 30.0), || (), |_, _| crate::el())
+        };
+        let app = crate::App::new(spec).global_shortcut("cmd+k", |_, _| SEEN.lock().unwrap().push("global cmd+k".into()));
+        let tree = dir.join("tree.json");
+        headless(app, Args::parse_from(["--script", path.to_str().unwrap(), "--tree", tree.to_str().unwrap()].map(String::from).into()));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(*SEEN.lock().unwrap(), ["global cmd+k", "on_key Command(' ')", "on_key Escape"]);
     }
 
     #[test]
