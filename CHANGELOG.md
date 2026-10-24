@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Shadow::core_animation(x, y, radius, color)`** builds the shadow a CALayer draws for a
+  `shadowRadius`: Core Animation's blur has a standard deviation of about the radius, so
+  `blur` is twice it.
 - **Continuous corners.** `El::continuous_corners()` rounds an element's fill, border, image,
   outline, `clip_rounded` and system material with Apple's continuous curve (CALayer
   `.continuous`, SwiftUI `.continuous`) instead of circular arcs; shadows stay circular.

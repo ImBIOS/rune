@@ -302,6 +302,7 @@ pub struct InputSpec {
 pub struct Shadow {
     pub x: f32,
     pub y: f32,
+    /// Twice the Gaussian's standard deviation, in points (CSS blur radius).
     pub blur: f32,
     pub spread: f32,
     pub color: Color,
@@ -363,6 +364,17 @@ fn normalize_gradient_stops(geometry: GradientGeometry, raw: &[(f32, Color)]) ->
         stops = vec![(0.0, c), (1.0, c)];
     }
     Some(RadialGradient { geometry, stops })
+}
+
+impl Shadow {
+    /// A CALayer shadow: `shadowRadius` `radius`, `shadowOffset` (`x`, `y`) with y down as in a
+    /// flipped view, and `shadowColor` at `shadowOpacity` folded into `color`. Core Animation's
+    /// blur has a standard deviation of about `shadowRadius` (0.97 to 1.02 times it, measured
+    /// from 1.5 to 32 pt), so `blur` is twice the radius. Corners stay circular, as with a
+    /// `CGPath(roundedRect:)` shadow path. With `srgb_blend(true)` it also composites as one.
+    pub fn core_animation(x: f32, y: f32, radius: f32, color: Color) -> Shadow {
+        Shadow { x, y, blur: 2.0 * radius, color, ..Shadow::default() }
+    }
 }
 
 /// A ring drawn `offset` points outside the border box, `width` points wide (CSS `outline`).
