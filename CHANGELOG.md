@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A node leaves with the transition of its last render.** `El::transition` was read only when
+  a node mounted or revived, so a later render couldn't change how it leaves. Each render now
+  updates a present node's transition, as in SwiftUI: removal uses the removal effect and exit
+  spring from the last commit before it, and a revive enters with the latest insertion. An
+  entrance already running keeps the look it started with. An element whose transition changes
+  between renders (or that drops one, falling back to `.opacity`) now exits differently than
+  before.
 - **`El::virtual_rows(count, estimate, key, build)` builds a virtual list's rows by index.**
   It is `virtualize` with rows the list builds itself: layout calls `build(state, i)` only
   for the rows in the mounted window, after it knows where the window is, so a commit costs a

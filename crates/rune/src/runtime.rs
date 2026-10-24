@@ -2956,6 +2956,10 @@ impl<S: 'static> Runtime<S> {
                 self.scene.insert(id, spec, mount);
             }
             if was_present {
+                // As in SwiftUI, a node leaves with the transition of its last render.
+                if !was_exiting {
+                    self.scene.set_transition(id, nodes[i].transition.unwrap_or_else(Transition::opacity));
+                }
                 let stack_row = nodes[i].parent.is_some_and(|p| nodes[p].growth.is_some()) || self.virtuals.contains_key(&nodes[i].path);
                 // A window's own resize step moves content at rest with the window; motion
                 // already running retargets on its spring.
@@ -5998,6 +6002,37 @@ mod tests {
             .find(|e| e.key.as_deref() == Some("pill")).unwrap().opacity;
         assert!(opacity(&fast) > 0.5, "the explicit slow exit must survive fast layout tuning");
         assert!((opacity(&fast) - opacity(&slow)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_node_leaves_with_the_transition_of_its_last_render() {
+        // (shown, way): the page slides out the way of the last render.
+        fn view(s: &(bool, f32), _: &mut Cx<(bool, f32)>) -> El {
+            col().size(200.0, 100.0).children(s.0.then(|| el().key("page").size(100.0, 40.0)
+                .transition(Transition::offset(40.0 * s.1, 0.0))))
+        }
+        let x = |rt: &Runtime<(bool, f32)>| rt.elements().into_iter()
+            .find(|e| e.key.as_deref() == Some("page")).unwrap().rect[0];
+        let make = |shown| Runtime::new((shown, -1.0), view, (200.0, 100.0), Env { scale: 1.0, system_dark: true });
+
+        // Entering from the left; a new render mid-entrance doesn't change the entrance.
+        let (mut kept, mut turned) = (make(false), make(false));
+        for rt in [&mut kept, &mut turned] {
+            rt.frame(0.0);
+            rt.state.0 = true; rt.invalidate(); rt.frame(0.0); rt.frame(0.05);
+        }
+        turned.state.1 = 1.0; turned.invalidate();
+        kept.frame(0.05); turned.frame(0.05);
+        assert!(x(&turned) < 0.0, "still entering from the left: {}", x(&turned));
+        assert!((x(&kept) - x(&turned)).abs() < 1e-4, "the running entrance is unaffected");
+
+        // Removed after the render that turned it: it leaves to the right.
+        let mut rt = make(true);
+        rt.frame(0.0); rt.frame(2.0);
+        assert_eq!(x(&rt), 0.0);
+        rt.state.1 = 1.0; rt.invalidate(); rt.frame(0.0);
+        rt.state.0 = false; rt.invalidate(); rt.frame(0.0); rt.frame(0.1);
+        assert!(x(&rt) > 1.0, "leaves the way of its last render: {}", x(&rt));
     }
 
     #[test]

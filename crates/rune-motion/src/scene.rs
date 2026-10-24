@@ -479,6 +479,17 @@ impl Scene {
         }
     }
 
+    /// A present node's transition from its latest render: the removal effect and exit spring it
+    /// leaves with, and how it enters if it revives. An entrance already running keeps its look;
+    /// an exiting node keeps the transition it is leaving with.
+    pub fn set_transition(&mut self, id: NodeId, transition: Transition) {
+        if let Some(i) = self.slot(id)
+            && !matches!(self.nodes[i].phase, Phase::Exiting { .. })
+        {
+            self.nodes[i].transition = transition;
+        }
+    }
+
     /// The app removed a keyed node. It stays drawn, plays its removal effect on the exit spring,
     /// and is reported in `exited` only once its presence has settled at 0 (opacity 0).
     pub fn remove(&mut self, id: NodeId) {
