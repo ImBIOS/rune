@@ -677,6 +677,8 @@ pub struct Runtime<S: 'static> {
     drag_out_request: Option<crate::drag_out::DragOutStart>,
     /// How OS drags ended, filled by the host's session callbacks between frames.
     drag_ends: crate::drag_out::DragEnds,
+    /// Drag-outs whose `on_drag_start` ran and whose `on_drag_end` hasn't yet.
+    drags_open: usize,
 }
 
 /// What a press on a window drag region asks the shell to do, synchronously in that press.
@@ -871,6 +873,7 @@ impl<S: 'static> Runtime<S> {
             drag_out_armed: false,
             drag_out_request: None,
             drag_ends: Default::default(),
+            drags_open: 0,
         }
     }
 
@@ -1366,9 +1369,11 @@ impl<S: 'static> Runtime<S> {
             self.commit(&Tx::default());
         }
         let mut ran_layout = false;
+        // Hosts take a drag-out inside the move that asked for it; by now nothing will.
+        self.drop_drag_out_request();
         let ended: Vec<_> = self.drag_ends.borrow_mut().drain(..).collect();
-        self.queue.extend(ended.into_iter().map(|(path, outcome)| Action::DragEnd(path, outcome)));
-        for action in std::mem::take(&mut self.queue) {
+        let queue = order_drag_ends(std::mem::take(&mut self.queue), ended, &mut self.drags_open);
+        for action in queue {
             // State may have requested focus on a newly mounted field. Resolve the
             // new tree before routing this frame's text, not after it has gone to
             // the previous field. The same boundary covers an earlier handler.
@@ -2991,6 +2996,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub(crate) fn cancel_pointer(&mut self) {
+        self.drop_drag_out_request();
         self.drag_out_armed = false;
         self.capture = None;
         self.secondary_capture = None;
@@ -3012,20 +3018,20 @@ impl<S: 'static> Runtime<S> {
         let (x0, y0) = (r[0].max(clip[0]), r[1].max(clip[1]));
         let rect = [x0, y0, ((r[0] + r[2]).min(clip[2]) - x0).max(0.0), ((r[1] + r[3]).min(clip[3]) - y0).max(0.0)];
         self.events.push(format!("drag-out {path}"));
-        self.queue.push(Action::DragStart(path.clone()));
         self.drop_drag_out_request();
-        self.drag_out_request = Some(crate::drag_out::DragOutStart { path, item, rect, press: self.press_at });
+        self.queue.push(Action::DragStart(path.clone()));
+        self.drag_out_request = Some(crate::drag_out::DragOutStart { path, item, rect, bounds: r, press: self.press_at });
         self.capture = None;
         self.capture_inside = false;
         self.pointer_leave();
         true
     }
 
-    /// A request no host took (headless tools) ends as `Cancelled`, so `on_drag_start` is always
-    /// followed by `on_drag_end`.
+    /// A request no host took (headless tools, a cancelled press) ends as `Cancelled`, queued
+    /// behind its start, so `on_drag_start` is always followed by `on_drag_end`.
     fn drop_drag_out_request(&mut self) {
         if let Some(start) = self.drag_out_request.take() {
-            self.drag_ends.borrow_mut().push((start.path, crate::DragOutcome::Cancelled));
+            self.queue.push(Action::DragEnd(start.path, crate::DragOutcome::Cancelled));
         }
     }
 
@@ -4783,6 +4789,33 @@ fn glyph_gamma(c: Color, scale: f32) -> f32 {
     crate::text::glyph_coverage_exponent(c, scale)
 }
 
+/// Slots the ends hosts reported since the last frame into this frame's actions. One OS drag
+/// runs at a time and hosts report ends in order, so each belongs to the oldest open drag: it
+/// runs before any later drag's start, and after its own start when both are queued.
+fn order_drag_ends(queue: Vec<Action>, ended: Vec<(String, crate::DragOutcome)>, open: &mut usize) -> Vec<Action> {
+    let mut ended = ended.into_iter().map(|(path, outcome)| Action::DragEnd(path, outcome));
+    let mut out = Vec::with_capacity(queue.len() + ended.len());
+    for action in queue {
+        match &action {
+            Action::DragStart(_) => {
+                while *open > 0 && let Some(end) = ended.next() {
+                    out.push(end);
+                    *open -= 1;
+                }
+                *open += 1;
+            }
+            Action::DragEnd(..) => *open = open.saturating_sub(1),
+            _ => {}
+        }
+        out.push(action);
+    }
+    for end in ended {
+        *open = open.saturating_sub(1);
+        out.push(end);
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Width over height of the image in `pixels`, or 0 while it's empty.
 fn pixel_ratio(pixels: &crate::Pixels) -> f32 {
@@ -6059,15 +6092,15 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct DragOutState { presses: u32, drags: u32, offer: bool, ended: Vec<crate::DragOutcome>, dragging: bool, starts: u32 }
+    struct DragOutState { presses: u32, drags: u32, offer: bool, ended: Vec<crate::DragOutcome>, dragging: bool, starts: u32, log: Vec<String> }
 
     fn drag_out_view(_: &DragOutState, _: &mut Cx<DragOutState>) -> El {
         col().size(200.0, 200.0).child(el().key("file").size(100.0, 40.0)
             .on_press(|s: &mut DragOutState| s.presses += 1)
             .on_drag(|s: &mut DragOutState, _, _| s.drags += 1)
             .drag_out(|s: &DragOutState| s.offer.then(|| crate::DragItem::new().file("/Applications/Example.app")))
-            .on_drag_start(|s: &mut DragOutState, _| { s.dragging = true; s.starts += 1; })
-            .on_drag_end(|s: &mut DragOutState, outcome, _| { s.dragging = false; s.ended.push(outcome); }))
+            .on_drag_start(|s: &mut DragOutState, _| { s.dragging = true; s.starts += 1; s.log.push("start".into()); })
+            .on_drag_end(|s: &mut DragOutState, outcome, _| { s.dragging = false; s.ended.push(outcome); s.log.push(format!("end {outcome:?}")); }))
     }
 
     fn drag_out_rt(offer: bool) -> Runtime<DragOutState> {
@@ -6189,20 +6222,73 @@ mod tests {
     }
 
     #[test]
-    fn a_drag_out_no_host_took_ends_cancelled_at_the_next_press() {
+    fn a_drag_out_no_host_took_ends_cancelled_on_the_next_frame() {
         let mut rt = drag_out_rt(true);
         rt.pointer_move(40.0, 10.0);
         rt.frame(0.0);
-        assert!(rt.state.dragging);
-        rt.pointer_up(40.0, 10.0);
+        assert!(!rt.state.dragging);
+        assert_eq!(rt.state.log, ["start", "end Cancelled"]);
+        assert!(rt.events.iter().any(|e| e.starts_with("drag-end Cancelled ")));
         rt.frame(0.0);
-        assert!(rt.state.dragging, "headless, the drag lasts until the next press");
+        assert_eq!(rt.state.log.len(), 2, "exactly one end");
+    }
+
+    #[test]
+    fn a_cancelled_press_ends_a_drag_out_no_host_took() {
+        let mut rt = drag_out_rt(true);
+        rt.pointer_move(40.0, 10.0);
+        rt.cancel_pointer();
+        assert!(rt.take_drag_out().is_none(), "the cancel ended the request");
+        rt.frame(0.0);
+        assert_eq!(rt.state.log, ["start", "end Cancelled"]);
+    }
+
+    #[test]
+    fn untaken_drags_started_in_one_turn_end_in_order() {
+        let mut rt = drag_out_rt(true);
+        rt.pointer_move(40.0, 10.0);
+        rt.pointer_up(40.0, 10.0);
         rt.pointer_move(10.0, 10.0);
         rt.pointer_down(10.0, 10.0);
+        rt.pointer_move(40.0, 10.0);
         rt.frame(0.0);
-        assert!(!rt.state.dragging);
-        assert_eq!(rt.state.ended, [crate::DragOutcome::Cancelled]);
-        assert!(rt.events.iter().any(|e| e.starts_with("drag-end Cancelled ")));
+        assert_eq!(rt.state.log, ["start", "end Cancelled", "start", "end Cancelled"]);
+    }
+
+    #[test]
+    fn a_stale_sessions_end_runs_before_the_next_drags_start() {
+        let mut rt = drag_out_rt(true);
+        rt.pointer_move(40.0, 10.0);
+        let first = rt.take_drag_out().unwrap();
+        rt.frame(0.0);
+        rt.pointer_move(10.0, 10.0);
+        rt.pointer_down(10.0, 10.0);
+        rt.pointer_move(40.0, 10.0);
+        let second = rt.take_drag_out().unwrap();
+        // macOS reports a session it never ended when the next one replaces it.
+        rt.drag_end_sink().borrow_mut().push((first.path, crate::DragOutcome::Cancelled));
+        rt.frame(0.0);
+        assert_eq!(rt.state.log, ["start", "end Cancelled", "start"]);
+        assert!(rt.state.dragging, "the second drag is still running");
+        rt.drag_end_sink().borrow_mut().push((second.path, crate::DragOutcome::Copied));
+        rt.frame(0.0);
+        assert_eq!(rt.state.log, ["start", "end Cancelled", "start", "end Copied"]);
+    }
+
+    #[test]
+    fn a_drag_image_over_the_element_gets_its_unclipped_bounds() {
+        fn view(_: &DragOutState, _: &mut Cx<DragOutState>) -> El {
+            col().child(col().size(200.0, 100.0).clip_soft(0.0).child(el().size(200.0, 80.0)).child(el().key("row").size(200.0, 40.0)
+                .drag_out(|_: &DragOutState| Some(crate::DragItem::new().text("row")))))
+        }
+        let mut rt = Runtime::new(DragOutState::default(), view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.pointer_move(10.0, 90.0);
+        rt.pointer_down(10.0, 90.0);
+        rt.pointer_move(40.0, 90.0);
+        let start = rt.take_drag_out().unwrap();
+        assert_eq!(start.rect, [0.0, 80.0, 200.0, 20.0], "the visible strip");
+        assert_eq!(start.bounds, [0.0, 80.0, 200.0, 40.0], "the whole row");
     }
 
     #[test]

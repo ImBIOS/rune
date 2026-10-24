@@ -179,7 +179,7 @@ pub struct DragImage {
 enum Placement {
     /// Centred under the press.
     Pointer,
-    /// Filling the element's visible rect.
+    /// Over the element's top-left, at the element's full (unclipped) size unless sized.
     Element,
     /// Top-left at this point, at the image's own size (the snapshot's pixel-aligned crop).
     At(f32, f32),
@@ -199,9 +199,11 @@ impl DragImage {
         self
     }
 
-    /// Start the drag with the image filling the element's visible bounds (scaled to fit), as
+    /// Start the drag with the image over the element, filling its bounds (scaled to fit), as
     /// the default snapshot does, instead of centred under the pointer. Use it for a picture
-    /// rendered at the element's size, so the drag appears to lift the element itself.
+    /// rendered at the element's size, so the drag appears to lift the element itself. With
+    /// [`DragImage::size`] it keeps that size, from the element's top-left. A row scrolled
+    /// partly out of view still gets its whole size, not the visible strip.
     pub fn over_element(mut self) -> Self {
         self.placement = Placement::Element;
         self
@@ -210,14 +212,18 @@ impl DragImage {
     pub fn png_data(&self) -> &[u8] { &self.png }
     pub fn points(&self) -> Option<(f32, f32)> { self.size }
 
-    /// Where the drag image starts, x, y, w, h in window points: `natural` is its size in
-    /// points when [`DragImage::size`] wasn't set.
+    /// Where the drag image starts, x, y, w, h in window points: `bounds` is the element's
+    /// unclipped rect, and `natural` the image's size in points when [`DragImage::size`]
+    /// wasn't set.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub(crate) fn frame(&self, rect: [f32; 4], press: (f32, f32), natural: (f32, f32)) -> [f32; 4] {
+    pub(crate) fn frame(&self, bounds: [f32; 4], press: (f32, f32), natural: (f32, f32)) -> [f32; 4] {
         let (w, h) = self.size.unwrap_or(natural);
         match self.placement {
             Placement::Pointer => [press.0 - w / 2.0, press.1 - h / 2.0, w, h],
-            Placement::Element => [rect[0], rect[1], rect[2].max(1.0), rect[3].max(1.0)],
+            Placement::Element => {
+                let (w, h) = self.size.unwrap_or((bounds[2], bounds[3]));
+                [bounds[0], bounds[1], w.max(1.0), h.max(1.0)]
+            }
             Placement::At(x, y) => [x, y, w, h],
         }
     }
@@ -264,6 +270,9 @@ pub(crate) struct DragOutStart {
     pub item: DragItem,
     /// The element's visible drawn rect in window points: x, y, w, h.
     pub rect: [f32; 4],
+    /// The element's whole drawn rect, before scroll clipping.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub bounds: [f32; 4],
     /// Where the pointer went down, in window points.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub press: (f32, f32),
@@ -428,7 +437,7 @@ mod tests {
         assert_eq!(image.frame(rect, press, (64.0, 64.0)), [18.0, 28.0, 64.0, 64.0], "a supplied picture is centred under the press");
         assert_eq!(image.clone().size(10.0, 20.0).frame(rect, press, (64.0, 64.0)), [45.0, 50.0, 10.0, 20.0]);
         assert_eq!(image.clone().over_element().frame(rect, press, (64.0, 64.0)), rect, "over_element fills the element's bounds");
-        assert_eq!(image.clone().size(10.0, 10.0).over_element().frame(rect, press, (64.0, 64.0)), rect);
+        assert_eq!(image.clone().size(10.0, 12.0).over_element().frame(rect, press, (64.0, 64.0)), [20.0, 40.0, 10.0, 12.0], "an explicit size wins");
         assert_eq!(image.over_element().frame([5.0, 5.0, 0.0, 0.0], press, (1.0, 1.0)), [5.0, 5.0, 1.0, 1.0], "never an empty frame");
     }
 

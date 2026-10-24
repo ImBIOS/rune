@@ -76,6 +76,7 @@ mod tests {
         rt.pointer_move(x + 20.0, y);
         assert!(rt.events.iter().any(|e| e.starts_with("drag-out ") && e.ends_with("app")), "{:?}", rt.events);
         rt.frame(0.0);
-        assert_eq!(rt.state.dragging, Some("app"), "the tile dims while it's dragged");
+        // No system took the drag here, so it ends Cancelled in the same frame it started.
+        assert_eq!((rt.state.dragging, rt.state.last), (None, Some(("app", DragOutcome::Cancelled))));
     }
 }
