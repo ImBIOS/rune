@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+frame-profile = ["rune/frame-profile", "dep:procwatch"]
 hot = ["rune/hot"]
 
 [dependencies]
+procwatch = { path = "../../crates/procwatch", optional = true }
 rune = { path = "../../crates/rune" }

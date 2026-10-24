@@ -639,3 +639,6 @@ fn main() {
     })
     .run();
 }
+#[cfg(feature = "frame-profile")]
+#[global_allocator]
+static ALLOC: procwatch::alloc::Counting = procwatch::alloc::Counting::system();

@@ -6,6 +6,9 @@ import pathlib
 import re
 import statistics
 import subprocess
+import os
+import selectors
+import time
 
 from perf_binary import perf_binary
 
@@ -14,7 +17,11 @@ p = argparse.ArgumentParser()
 p.add_argument('--out', required=True, type=pathlib.Path)
 p.add_argument('--runs', type=int, default=7)
 p.add_argument('--only', default='')
+p.add_argument('--frame-cpu', action='store_true', help='include dense fixtures and phase/allocation metrics (build --features frame-profile)')
+p.add_argument('--compare', type=pathlib.Path, help='alternate with saved baseline binaries in a target/perf directory')
 a = p.parse_args()
+if a.runs < 1:
+    p.error('--runs must be positive')
 a.out.mkdir(parents=True, exist_ok=True)
 fixture = json.loads((ROOT / 'examples/opencode/assets/fixture.json').read_text())
 sid = fixture['open']
@@ -39,24 +46,89 @@ workloads = {
     'long-stream': ('opencode', ['--fixture', str(long), '--scene', 'streaming', '--frames', '1440']),
     'long-scroll': ('opencode', ['--fixture', str(long), '--scene', 'session', '--script', 'examples/opencode/scripts/scroll.json', '--frames', '480']),
 }
+if a.frame_cpu:
+    hover = a.out.resolve() / 'hover.json'
+    hover.write_text(json.dumps({'events': [
+        {'t': i / 120, 'type': 'move', 'x': 120, 'y': 40 + (i % 22) * 28}
+        for i in range(1, 480)]}))
+    scroll = a.out.resolve() / 'dense-scroll.json'
+    scroll.write_text(json.dumps({'events': [
+        {'t': 0.01, 'type': 'scroll', 'x': 200, 'y': 300, 'dy': -10000, 'dur': 3.9}]}))
+    workloads.update({
+        'idle': ('examples/frame-cpu', ['--scene', 'idle', '--frames', '480']),
+        'spring': ('examples/frame-cpu', ['--scene', 'spring', '--frames', '480']),
+        'hover': ('examples/frame-cpu', ['--script', str(hover), '--frames', '480']),
+        'dense-scroll': ('examples/frame-cpu', ['--script', str(scroll), '--frames', '480']),
+        'markdown-every-frame': ('examples/frame-cpu', ['--scene', 'stream', '--frames', '480']),
+        'resize': ('examples/frame-cpu', ['--scene', 'resize', '--frames', '240']),
+        'startup': ('settings', ['--first-pixels', '--frames', '1']),
+    })
 rx = re.compile(r'gpu init ([\d.]+) ms, first frame ([\d.]+) ms, frame cpu mean ([\d.]+) ms p50 ([\d.]+) p95 ([\d.]+) max ([\d.]+), (\d+) instances')
 names = ['gpu_ms', 'first_ms', 'mean_ms', 'p50_ms', 'p95_ms', 'max_ms', 'instances']
 result = {}
+targets = {'current': pathlib.Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target')) / 'perf'}
+if a.compare:
+    targets['before'] = a.compare.resolve()
 for name, (binary, args) in workloads.items():
     if a.only and name not in a.only.split(','):
         continue
-    runs = []
+    samples = {stage: [] for stage in targets}
     for i in range(a.runs + 1):
-        cmd = [str(perf_binary(ROOT / 'target/perf' / binary)), *args, '--fps', '120']
-        r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=True)
-        (a.out / f'{name}-{i}.log').write_text(r.stderr)
-        m = rx.search(r.stderr)
-        if not m:
-            raise RuntimeError(r.stderr)
-        if i:
-            runs.append(dict(zip(names, map(float, m.groups()))))
-    med = {k: statistics.median(r[k] for r in runs) for k in names}
-    mad = {k: statistics.median(abs(r[k] - med[k]) for r in runs) for k in names}
-    result[name] = {'median': med, 'mad': mad, 'runs': runs}
-    print(name, json.dumps(med), flush=True)
+        for stage in list(targets)[::(-1 if i % 2 else 1)]:
+            cmd = [str(perf_binary(targets[stage] / binary)), *args, '--fps', '120']
+            process_ms = None
+            if name == 'startup':
+                start = time.perf_counter()
+                with subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
+                    try:
+                        with selectors.DefaultSelector() as selector:
+                            selector.register(proc.stdout, selectors.EVENT_READ)
+                            if not selector.select(timeout=30):
+                                raise TimeoutError('first pixels not ready after 30s')
+                            first = proc.stdout.readline()
+                        process_ms = (time.perf_counter() - start) * 1000
+                        if not first.startswith('rune-first-pixels '):
+                            raise RuntimeError(f'unexpected first-pixels marker: {first}')
+                        stdout, stderr = proc.communicate(timeout=30)
+                        r = subprocess.CompletedProcess(cmd, proc.returncode, first + stdout, stderr)
+                        r.check_returncode()
+                    finally:
+                        if proc.poll() is None:
+                            proc.kill()
+                            proc.wait()
+            else:
+                r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=True, timeout=180)
+            (a.out / f'{name}-{stage}-{i}.log').write_text(r.stderr)
+            m = rx.search(r.stderr)
+            if not m:
+                raise RuntimeError(r.stderr)
+            row = dict(zip(names, map(float, m.groups())))
+            phase = re.search(r'rune-frame-profile (.+)', r.stderr)
+            if a.frame_cpu and not phase:
+                raise RuntimeError('rebuild with --features frame-profile')
+            if phase:
+                row.update(json.loads(phase[1]))
+            pixels = re.search(r'rune-first-pixels (.+)', r.stdout)
+            if pixels:
+                row.update(json.loads(pixels[1]))
+            if process_ms is not None:
+                row['process_ms'] = process_ms
+            if i:
+                samples[stage].append(row)
+    for stage, runs in samples.items():
+        med = {k: statistics.median(r[k] for r in runs) for k in runs[0]}
+        mad = {k: statistics.median(abs(r[k] - med[k]) for r in runs) for k in med}
+        label = f'{name}.{stage}' if a.compare else name
+        result[label] = {'median': med, 'mad': mad, 'runs': runs}
+        print(label, json.dumps(med), flush=True)
+        for key, value in med.items():
+            print(f'METRIC {label}.{key}={value:.6f}', flush=True)
+            print(f'METRIC {label}.{key}.mad={mad[key]:.6f}', flush=True)
+    if a.compare:
+        ratios = [cur['mean_ms'] / old['mean_ms'] for cur, old in zip(samples['current'], samples['before'])]
+        ratio = statistics.median(ratios)
+        spread = statistics.median(abs(r - ratio) for r in ratios)
+        result[f'{name}.paired'] = {'ratio': ratio, 'mad': spread}
+        print(f'METRIC {name}.paired_ratio={ratio:.6f}', flush=True)
+        print(f'METRIC {name}.paired_ratio.mad={spread:.6f}', flush=True)
     (a.out / 'results.json').write_text(json.dumps(result, indent=2) + '\n')

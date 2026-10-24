@@ -1025,6 +1025,7 @@ impl TextSystem {
             return l.clone();
         }
         self.shaped += 1;
+        let _shape_time = crate::frame_profile::Scope::new(crate::frame_profile::Phase::Text);
         let routes = fallback::routes(text);
         if !text.is_ascii() {
             let (mut scripts, mut symbols) = (0u64, false);

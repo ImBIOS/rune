@@ -1,6 +1,9 @@
 //! A small Settings window rendered entirely by Rune.
 
 use rune::tok::{self, Theme, motion, radius, space, type_};
+#[cfg(feature = "frame-profile")]
+#[global_allocator]
+static ALLOC: procwatch::alloc::Counting = procwatch::alloc::Counting::system();
 use rune::{Align, AppSpec, Color, Cx, Drag, El, Phase, Spring, col, el, row, text};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

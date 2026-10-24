@@ -1368,7 +1368,14 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         rt.open_popup_headless();
     }
 
+    #[cfg(feature = "frame-profile")]
+    let mut profile = Vec::with_capacity(last_frame + 1);
     for k in 0..=last_frame {
+        #[cfg(feature = "frame-profile")]
+        let (alloc0, commits0) = {
+            crate::frame_profile::take();
+            (procwatch::alloc::thread_allocations(), rt.stats.commits)
+        };
         let real_t = k as f64 * dt;
         let frame_start = Instant::now();
         while next_ev < script.len() && script[next_ev].t <= real_t + 1e-9 {
@@ -1485,6 +1492,9 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         renderer.submit(&gpu.queue, enc);
         if want_pixels { readback.submitted(); }
         let ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+        #[cfg(feature = "frame-profile")]
+        profile.push((crate::frame_profile::take(), update_ms, ms - update_ms,
+            procwatch::alloc::thread_allocations() - alloc0, rt.stats.commits - commits0, rt.stats.shaped, animating));
         cpu_ms.push(ms);
         if k > 0 {
             if animating { anim_ms.push(ms) } else { rest_ms.push(ms) }
@@ -1546,6 +1556,19 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         if v.is_empty() { 0.0 } else { v[((v.len() - 1) as f64 * p).round() as usize] }
     };
     let mut sorted = cpu_ms.clone();
+    #[cfg(feature = "frame-profile")]
+    {
+        let rows = &profile[usize::from(profile.len() > 1)..];
+        let n = rows.len() as f64;
+        let avg = |f: fn(&([f64; 5], f64, f64, u64, u64, u32, bool)) -> f64| rows.iter().map(f).sum::<f64>() / n;
+        eprintln!("rune-frame-profile {}", json!({
+            "view_ms": avg(|r| r.0[0]), "commit_inclusive_ms": avg(|r| r.0[1]),
+            "layout_inclusive_ms": avg(|r| r.0[2]), "shape_ms": avg(|r| r.0[3]),
+            "paint_ms": avg(|r| r.0[4]), "update_ms": avg(|r| r.1), "encode_submit_ms": avg(|r| r.2),
+            "allocations": avg(|r| r.3 as f64), "commits": avg(|r| r.4 as f64),
+            "shaped": avg(|r| r.5 as f64), "animating_fraction": avg(|r| u8::from(r.6) as f64),
+        }));
+    }
     let steady: Vec<f64> = cpu_ms.iter().skip(1).copied().collect();
     let mean = if steady.is_empty() { cpu_ms[0] } else { steady.iter().sum::<f64>() / steady.len() as f64 };
     eprintln!(

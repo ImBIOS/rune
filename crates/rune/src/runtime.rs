@@ -2533,6 +2533,7 @@ impl<S: 'static> Measurement<'_, S> {
         #[cfg(feature = "hot")]
         let emptied = self.memo.emptied();
         let memo = crate::memo::enter(std::mem::take(self.memo), self.env, self.system_reduced_motion, cx.caret.clone(), cx.layout.clone());
+        let view_time = crate::frame_profile::Scope::new(crate::frame_profile::Phase::View);
         #[cfg(not(feature = "hot"))]
         let mut root = { let root = (self.view)(self.state, &mut cx); self.build_tree(root, tx, force_all) };
         // Index-built rows run the app's closures in `build_tree`, so a patch's panic there
@@ -2562,6 +2563,7 @@ impl<S: 'static> Measurement<'_, S> {
         };
         // Both paths finish the memo here, after the rows are built.
         let (memo, replayed) = memo.finish();
+        drop(view_time);
         *self.memo = memo;
         self.reduced_motion = cx.reduced_motion;
         self.time_scale = cx.time_scale;
@@ -2587,6 +2589,7 @@ impl<S: 'static> Measurement<'_, S> {
         });
         {
             let text_sys = &mut self.text;
+            let _layout_time = crate::frame_profile::Scope::new(crate::frame_profile::Phase::Layout);
             let nodes_ref = &nodes;
             let viewport = self.viewport;
             let fit_height = self.fit_height;
@@ -2710,6 +2713,7 @@ impl<S: 'static> Measurement<'_, S> {
 
 impl<S: 'static> Runtime<S> {
     fn commit(&mut self, tx: &Tx) {
+        let _commit_time = crate::frame_profile::Scope::new(crate::frame_profile::Phase::Commit);
         COMMITS.set(COMMITS.get() + 1);
         self.memo_since = self.memo.next_pass();
         let mut measured = self.measure(tx);
@@ -3964,6 +3968,7 @@ impl<S: 'static> Runtime<S> {
     // Frame build: Scene Presented → instances
 
     fn build(&mut self) {
+        let _paint_time = crate::frame_profile::Scope::new(crate::frame_profile::Phase::Paint);
         let s = self.env.scale;
         let snap_px = |v: f32| grid(v, s) * s;
         self.instances.clear();
