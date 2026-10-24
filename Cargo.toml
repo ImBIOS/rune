@@ -19,6 +19,7 @@ members = [
     "examples/overlay",
     "examples/overlay-lab",
     "examples/lab",
+    "examples/video-player",
     "examples/video-tiles",
     "examples/dev-panel",
     "examples/cursed-settings",
