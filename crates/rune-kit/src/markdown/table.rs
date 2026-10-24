@@ -66,10 +66,12 @@ impl Renderer {
         let cols = self.columns(t, n);
         let total: f32 = cols.natural.iter().sum();
         let mut frame = col().w_full().max_w(total + 1.0).padding(0.5);
-        // Without an outline the corners stay square, so the rules run the full width.
-        if let Some(outline) = s.table_outline {
-            frame = frame.radius(6.0).border(0.5, outline).clip_rounded(6.0);
-        }
+        // Without an outline the corners stay square, so the rules run the full width. Either way
+        // columns too wide to fit stop at the frame.
+        frame = match s.table_outline {
+            Some(outline) => frame.radius(6.0).border(0.5, outline).clip_rounded(6.0),
+            None => frame.clip_soft(0.0),
+        };
         frame = frame.child(self.table_row(&t.head, t, &cols, self.head_font(), s.table_head_text).key("th").fill(s.table_head_fill));
         let rule = |key: String| el().key(key).w_full().h(0.5).fill(s.table_rule);
         for (i, cells) in t.rows.iter().enumerate() {

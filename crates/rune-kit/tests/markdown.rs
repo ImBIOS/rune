@@ -332,6 +332,36 @@ fn table_options_drop_the_outline_dim_the_header_and_line_up_figures() {
 }
 
 #[test]
+fn columns_too_wide_to_fit_stop_at_the_frame_with_or_without_an_outline() {
+    fn view(outline: &bool, _: &mut Cx<bool>) -> El {
+        let head: String = (0..10).map(|i| format!("| heading{i} ")).collect();
+        let row: String = (0..10).map(|i| format!("| unbreakablecell{i} ")).collect();
+        let src = format!("{head}|\n{}|\n{row}|\n", "|---".repeat(10));
+        let style = MarkdownStyle::neutral(true);
+        let style = if *outline { style } else { style.table_outline(None) };
+        col().w(400.0).child(Markdown::new(src).render(&style))
+    }
+    for outline in [true, false] {
+        let mut rt = Runtime::new(outline, view, (600.0, 400.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let all = rt.elements();
+        let th = all.iter().position(|e| e.key.as_deref() == Some("th")).unwrap();
+        let frame = all[all[th].parent.unwrap()].rect;
+        let right = frame[0] + frame[2];
+        let cells: Vec<_> = all.iter().filter(|e| e.key.as_deref().is_some_and(|k| k.len() == 2 && k.starts_with('c'))).collect();
+        assert_eq!(cells.len(), 20, "outline {outline}");
+        assert!(
+            cells.iter().any(|c| c.rect[0] < right && c.rect[0] + c.rect[2] > right),
+            "outline {outline}: a column straddles the frame's edge, {frame:?}"
+        );
+        for c in cells {
+            let shown = c.visible[2] == 0.0 || c.visible[0] + c.visible[2] <= right + 0.01;
+            assert!(shown, "outline {outline}: {:?} spills past {frame:?}", c.visible);
+        }
+    }
+}
+
+#[test]
 fn diffs_tint_whole_lines_and_dim_hunk_headers() {
     let src = "```diff\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n```\n";
     assert!(matches!(&parse(src)[0], Block::Diff(d) if d.lines().count() == 4));
