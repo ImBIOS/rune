@@ -26,6 +26,7 @@ members = [
     "examples/drag-out",
     "examples/matched",
     "examples/launcher",
+    "examples/glass-card",
 ]
 exclude = ["tools/rune-dev-guard"]
 
