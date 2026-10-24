@@ -276,7 +276,10 @@ impl<S> Session<S> {
         }
         for (key, value) in normalized {
             match key.as_str() {
-                "rune.state" => self.scene(rt, value.as_str().unwrap())?,
+                "rune.state" => {
+                    rt.memo.clear();
+                    self.scene(rt, value.as_str().unwrap())?
+                }
                 "rune.scale" => rt.dev_clock.as_mut().unwrap().scale = value.as_f64().unwrap(),
                 "rune.paused" => rt.dev_clock.as_mut().unwrap().paused = value.as_bool().unwrap(),
                 "rune.velocity" => self.velocity = value.as_bool().unwrap(),
@@ -284,6 +287,8 @@ impl<S> Session<S> {
                 _ => {
                     self.registry.lock().unwrap().get_mut(key).unwrap().value = value;
                     rt.scene.store_mut().retune_springs = true;
+                    // Views read tunables from outside their state, where no memo version sees them.
+                    rt.memo.clear();
                     rt.invalidate();
                 }
             }

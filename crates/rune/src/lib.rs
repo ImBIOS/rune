@@ -88,6 +88,7 @@ pub mod el;
 mod key_diagnostics;
 pub mod growth;
 pub mod live;
+pub mod memo;
 mod pixels;
 pub mod gpu_springs;
 pub mod image;
@@ -139,6 +140,7 @@ pub use el::{
 };
 pub use growth::{GROWTH, StreamEdge, edge};
 pub use live::{Live, LiveText, Tween};
+pub use memo::memo;
 pub use pixels::Pixels;
 pub use file_dialog::{FileDialogError, FileDialogKind, FileDialogOptions, FileDialogs, ScriptedFileDialog};
 pub use image::{Image, ImageCache, ImageError, ImageId};

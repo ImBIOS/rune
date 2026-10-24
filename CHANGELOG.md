@@ -5,6 +5,17 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`memo(id, version, || el)` reuses a subtree whose inputs haven't changed.** The closure
+  runs again only when `version` or the window's dark mode, scale or reduced-motion preference
+  changes; otherwise the view gets the subtree the last build returned, with the same node ids,
+  hover, focus and springs. An offscreen `virtualize` row that is memoized costs a lookup, so a
+  long transcript whose counter ticks every frame no longer rebuilds every message.
+  `Cx::layout` and `Cx::caret` read inside the closure are tracked: a reuse still re-runs the
+  view when they move, and builds again when one returns something else. `TextEdit` now
+  implements `Hash` over what a field draws (text, selection, composition, focus), so a
+  memoized field passes the edit itself as its version. Hot reload and dev tunables drop the
+  cache. Virtualized lists also find their mounted rows by binary search now, rather than
+  walking every row each commit.
 - **Markdown keeps every document on screen parsed.** `Markdown` and `markdown::parse_cached`
   kept the last 32 sources, so a transcript showing more than 32 messages parsed every one of
   them on every commit. The cache (and the code-colour and table-width caches beside it) now

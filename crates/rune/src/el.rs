@@ -648,6 +648,7 @@ pub(crate) type AtBottomFn = Rc<dyn Fn(&mut dyn Any, bool)>;
 pub(crate) type LayoutFn = Rc<dyn Fn(&mut dyn Any, [f32; 4])>;
 pub(crate) type WindowFocusFn = Rc<dyn Fn(&mut dyn Any, bool, &mut Tx)>;
 
+#[derive(Clone)]
 pub struct El {
     pub(crate) on_paste: Option<PasteFn>,
     pub(crate) on_window_focus: Option<WindowFocusFn>,
@@ -668,6 +669,9 @@ pub struct El {
     pub(crate) live: Vec<crate::live::Bound>,
     pub(crate) text: Option<TextSpec>,
     pub(crate) children: Vec<El>,
+    /// Children a [`memo`](crate::memo) shares with its cache, before `children`. Copied in
+    /// by [`El::expand_memo`] only when the element mounts.
+    pub(crate) memo_children: Option<Rc<crate::memo::Shared>>,
     pub(crate) on_press: Option<PressFn>,
     pub(crate) on_double_press: Option<PressFn>,
     pub(crate) on_secondary_press: Option<SecondaryFn>,
@@ -728,6 +732,7 @@ fn base(dir: FlexDirection) -> El {
         live: Vec::new(),
         text: None,
         children: Vec::new(),
+        memo_children: None,
         on_press: None,
         on_double_press: None,
         on_secondary_press: None,
@@ -1121,6 +1126,18 @@ impl El {
     pub fn child(mut self, child: El) -> Self {
         self.children.push(child);
         self
+    }
+    /// Every child: those shared with a memo cache, then the element's own.
+    pub(crate) fn all_children(&self) -> impl Iterator<Item = &El> {
+        self.memo_children.iter().flat_map(|c| c.children.iter()).chain(&self.children)
+    }
+    /// Copies in the children shared with a memo cache, so the element owns all of them.
+    pub(crate) fn expand_memo(&mut self) {
+        if let Some(shared) = self.memo_children.take() {
+            let shared = Rc::unwrap_or_clone(shared).children;
+            let own = std::mem::replace(&mut self.children, shared);
+            self.children.extend(own);
+        }
     }
     pub fn children(mut self, children: impl IntoIterator<Item = El>) -> Self {
         self.children.extend(children);
@@ -1590,6 +1607,7 @@ impl El {
     /// opacity still belong to `opacity` / `live_opacity`.
     pub fn dim(mut self, alpha: f32) -> Self {
         fn apply(e: &mut El, alpha: f32) {
+            e.expand_memo();
             e.vis.paint_alpha *= alpha;
             for child in &mut e.children { apply(child, alpha); }
         }

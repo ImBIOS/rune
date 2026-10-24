@@ -37,6 +37,20 @@ impl std::fmt::Debug for TextEdit {
     }
 }
 
+/// Hashes everything a field draws: text, selection, IME composition, focus and whether it's
+/// secure. Pass the edit itself in a [`memo`](crate::memo) version so the field redraws as the
+/// caret moves. A secure field hashes its length, not its text.
+impl std::hash::Hash for TextEdit {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        if self.secure { self.text.chars().count().hash(h) } else { self.text.hash(h) }
+        self.anchor.hash(h);
+        self.focus.hash(h);
+        self.preedit.hash(h);
+        self.focused.hash(h);
+        self.secure.hash(h);
+    }
+}
+
 impl Drop for TextEdit {
     fn drop(&mut self) {
         self.text.zeroize();

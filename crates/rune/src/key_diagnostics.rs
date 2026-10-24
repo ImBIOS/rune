@@ -6,7 +6,7 @@ use crate::El;
 pub(crate) fn warnings(root: &El) -> Vec<String> {
     fn walk(el: &El, path: &str, out: &mut Vec<String>) {
         let mut seen: HashMap<&str, &El> = HashMap::new();
-        for (index, child) in el.children.iter().enumerate() {
+        for (index, child) in el.all_children().enumerate() {
             if let Some(key) = &child.key {
                 if let Some(first) = seen.get(key.as_str()) {
                     out.push(format!(

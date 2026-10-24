@@ -202,8 +202,9 @@ impl<S> Cx<S> {
     /// popup placed from it lands the frame after each edit.
     pub fn caret(&self, key: &str) -> Option<[f32; 4]> {
         self.caret_read.set(true);
-        let (path, rect) = self.caret.as_ref()?;
-        path.split('/').any(|seg| seg == key).then_some(*rect)
+        let rect = caret_of(&self.caret, key);
+        crate::memo::read_caret(key, rect);
+        rect
     }
     /// The laid-out rect `[x, y, w, h]` in window points, after scrolling, of the element keyed
     /// `key` (or named by a key path such as `"msg-42/body"`, as `Tx::fly_text` takes), or
@@ -218,8 +219,16 @@ impl<S> Cx<S> {
     pub fn layout(&self, key: &str) -> Option<[f32; 4]> {
         let mut reads = self.layout_reads.borrow_mut();
         if !reads.iter().any(|k| k == key) { reads.push(key.to_owned()); }
-        self.layout.get(key).copied().flatten()
+        let rect = self.layout.get(key).copied().flatten();
+        crate::memo::read_layout(key, rect);
+        rect
     }
+}
+
+/// [`Cx::caret`] for the caret `caret` (the focused field's path and rect).
+pub(crate) fn caret_of(caret: &Option<(String, [f32; 4])>, key: &str) -> Option<[f32; 4]> {
+    let (path, rect) = caret.as_ref()?;
+    path.split('/').any(|seg| seg == key).then_some(*rect)
 }
 
 pub(crate) struct Node {
@@ -529,11 +538,12 @@ pub struct Runtime<S: 'static> {
     pub wall_start: Option<std::time::Instant>,
     /// Called for keys unhandled by the focused control; return true to consume it.
     pub on_key: Option<fn(&mut S, &KeyEvent, &mut Tx) -> bool>,
-    nodes: Vec<Node>,
+    pub(crate) nodes: Vec<Node>,
     layout: TaffyTree<usize>,
     layout_entries: HashMap<String, LayoutEntry>,
     node_index: HashMap<NodeId, usize>,
     path_ids: HashMap<String, NodeId>,
+    pub(crate) memo: crate::memo::MemoCache,
     next_id: u64,
     commits: u64,
     dirty: bool,
@@ -824,6 +834,7 @@ impl<S: 'static> Runtime<S> {
             layout_entries: HashMap::new(),
             node_index: HashMap::new(),
             path_ids: HashMap::new(),
+            memo: Default::default(),
             next_id: 1,
             commits: 0,
             dirty: true,
@@ -1453,6 +1464,7 @@ impl<S: 'static> Runtime<S> {
         if self.hot.as_mut().is_some_and(crate::hot::Session::changed) {
             // Replace handler trait objects before queued input can call an old vtable.
             // A regular commit preserves keyed nodes, scrolls and spring velocities.
+            self.memo.clear();
             self.commit(&Tx::default());
         }
         let mut tx = std::mem::take(&mut self.pending);
@@ -2150,6 +2162,7 @@ struct Measurement<'a, S> {
     layout_entries: &'a mut HashMap<String, LayoutEntry>,
     node_index: &'a mut HashMap<NodeId, usize>,
     path_ids: &'a mut HashMap<String, NodeId>,
+    memo: &'a mut crate::memo::MemoCache,
     next_id: &'a mut u64,
     scrolls: &'a mut HashMap<NodeId, ScrollState>,
     virtuals: &'a mut HashMap<String, crate::virtual_list::VirtualList>,
@@ -2175,14 +2188,18 @@ struct Measured {
 }
 
 fn collect_virtual_inputs(el: &El, parent: &str, index: usize, inputs: &mut HashMap<String, Box<InputSpec>>) {
+    let input = el.input.as_ref().filter(|i| i.edit.focused && i.access.is_some());
+    // A memo's shared children are skipped whole when none is a focused field.
+    let skip = el.memo_children.as_ref().filter(|m| !m.focused_input).map_or(0, |m| m.children.len());
+    if input.is_none() && el.children.is_empty() && skip == el.memo_children.as_ref().map_or(0, |m| m.children.len()) {
+        return;
+    }
     let segment = el.key.clone().unwrap_or_else(|| format!("#{index}"));
     let path = format!("{parent}/{segment}");
-    if let Some(input) = &el.input
-        && input.edit.focused && input.access.is_some()
-    {
+    if let Some(input) = input {
         inputs.insert(path.clone(), input.clone());
     }
-    for (i, child) in el.children.iter().enumerate() {
+    for (i, child) in el.all_children().enumerate().skip(skip) {
         collect_virtual_inputs(child, &path, i, inputs);
     }
 }
@@ -2214,6 +2231,7 @@ impl<S> Measurement<'_, S> {
     }
 
     fn window_tree(&mut self, el: &mut El, parent: &str, index: usize, scroll: Option<(&str, bool)>, settle: bool, force_all: bool) {
+        el.expand_memo();
         let seg = el.key.clone().unwrap_or_else(|| format!("#{index}"));
         let path = if parent.is_empty() { seg } else { format!("{parent}/{seg}") };
         if let Some(estimate) = el.virtual_estimate {
@@ -2319,10 +2337,13 @@ impl<S> Measurement<'_, S> {
             layout_reads: Default::default(),
             _s: PhantomData,
         };
+        let memo = crate::memo::enter(std::mem::take(self.memo), self.env, self.system_reduced_motion, cx.caret.clone(), cx.layout.clone());
         #[cfg(not(feature = "hot"))]
         let mut root = (self.view)(self.state, &mut cx);
         #[cfg(feature = "hot")]
         let mut root = subsecond::HotFn::current(self.view).call((self.state, &mut cx));
+        let (memo, replayed) = memo.finish();
+        *self.memo = memo;
         if let Some(warnings) = self.key_warnings.as_mut() {
             *warnings = crate::key_diagnostics::warnings(&root);
             // Do not hand an invalid identity tree to Taffy. --tree still emits diagnostics.
@@ -2337,8 +2358,12 @@ impl<S> Measurement<'_, S> {
         self.window_tree(&mut root, "", 0, None, tx.settle, force_all);
         self.reduced_motion = cx.reduced_motion;
         self.time_scale = cx.time_scale;
-        self.caret_read = cx.caret_read.get();
+        // Reads made by memos this build reused count as made again.
+        self.caret_read = cx.caret_read.get() || replayed.caret;
         self.layout_reads = cx.layout_reads.take();
+        for key in replayed.layout {
+            if !self.layout_reads.contains(&key) { self.layout_reads.push(key); }
+        }
 
         let mut taffy = std::mem::replace(self.layout, TaffyTree::with_capacity(0));
         for entry in self.layout_entries.values_mut() {
@@ -2498,6 +2523,7 @@ impl<S: 'static> Runtime<S> {
             layout_entries: &mut self.layout_entries,
             node_index: &mut self.node_index,
             path_ids: &mut self.path_ids,
+            memo: &mut self.memo,
             next_id: &mut self.next_id,
             scrolls: &mut self.scrolls,
             virtuals: &mut self.virtuals,
@@ -5246,6 +5272,8 @@ fn flatten(
     entries: &mut HashMap<String, LayoutEntry>,
     scale: f32,
 ) -> taffy::NodeId {
+    let mut el = el;
+    el.expand_memo();
     let seg = el.key.clone().unwrap_or_else(|| format!("#{index}"));
     let path = if parent_path.is_empty() { seg } else { format!("{parent_path}/{seg}") };
     let own_motion = el.motion;
