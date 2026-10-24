@@ -15,43 +15,57 @@ impl Trak {
     /// The table of a font HarfRust tracks: one with both `trak` and `STAT`.
     pub(super) fn of(font: FontRef<'_>) -> Option<Trak> {
         font.table(swash::tag_from_bytes(b"STAT"))?;
-        let data = font.table(swash::tag_from_bytes(b"trak"))?;
-        let u16_at = |at: usize| Some(u16::from_be_bytes(data.get(at..at + 2)?.try_into().ok()?));
-        let fixed_at = |at: usize| Some(i32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?) as f32 / 65536.0);
-        let units_per_em = font.metrics(&[]).units_per_em as f32;
+        Trak::parse(font.table(swash::tag_from_bytes(b"trak"))?, font.metrics(&[]).units_per_em)
+    }
+
+    /// Track 0 of a `trak` table, or the interpolation between the tracks around it, read the way
+    /// HarfRust reads it: a table it can't read tracks nothing, and a track whose values it can't
+    /// read tracks by 0. Fonts can be untrusted, so every offset is checked.
+    fn parse(data: &[u8], units_per_em: u16) -> Option<Trak> {
+        if units_per_em == 0 {
+            return None;
+        }
+        let bytes = |at: usize, len: usize| data.get(at..at.checked_add(len)?);
+        let u16_at = |at: usize| Some(u16::from_be_bytes(bytes(at, 2)?.try_into().ok()?));
+        let fixed = |b: &[u8]| i32::from_be_bytes([b[0], b[1], b[2], b[3]]) as f32 / 65536.0;
         let horizontal = u16_at(6)? as usize;
         if horizontal == 0 {
-            return Some(Trak { sizes: Vec::new(), units_per_em });
+            return None;
         }
-        let (tracks, sizes) = (u16_at(horizontal)? as usize, u16_at(horizontal + 2)? as usize);
-        let size_table = u32::from_be_bytes(data.get(horizontal + 4..horizontal + 8)?.try_into().ok()?) as usize;
-        let track = |i: usize| -> Option<(f32, Vec<f32>)> {
-            let entry = horizontal + 8 + i * 8;
-            let values = u16_at(entry + 6)? as usize;
-            let values = (0..sizes).map(|s| Some(u16_at(values + 2 * s)? as i16 as f32)).collect::<Option<Vec<_>>>()?;
-            Some((fixed_at(entry)?, values))
+        let (tracks, sizes) = (u16_at(horizontal)? as usize, u16_at(horizontal.checked_add(2)?)? as usize);
+        let size_table = u32::from_be_bytes(bytes(horizontal.checked_add(4)?, 4)?.try_into().ok()?);
+        let entries = bytes(horizontal.checked_add(8)?, tracks.checked_mul(8)?)?;
+        let size_values = bytes(usize::try_from(size_table).ok()?, sizes.checked_mul(4)?)?;
+        if tracks == 0 || sizes == 0 {
+            return None;
+        }
+        let entry = |i: usize| &entries[i * 8..i * 8 + 8];
+        let track = |i: usize| fixed(entry(i));
+        let values = |i: usize| -> Vec<f32> {
+            let at = u16::from_be_bytes([entry(i)[6], entry(i)[7]]) as usize;
+            match bytes(at, sizes * 2) {
+                Some(b) => b.chunks_exact(2).map(|v| i16::from_be_bytes([v[0], v[1]]) as f32).collect(),
+                None => vec![0.0; sizes],
+            }
         };
-        let tracks = (0..tracks).map(track).collect::<Option<Vec<_>>>()?;
-        if tracks.is_empty() {
-            return Some(Trak { sizes: Vec::new(), units_per_em });
-        }
-        // Track 0, or the interpolation between the tracks around it, as HarfRust picks it.
         let mut i = 0;
-        while i + 1 < tracks.len() && tracks[i + 1].0 <= 0.0 {
+        while i + 1 < tracks && track(i + 1) <= 0.0 {
             i += 1;
         }
-        let mut j = tracks.len() - 1;
-        while j > 0 && tracks[j - 1].0 >= 0.0 {
+        let mut j = tracks - 1;
+        while j > 0 && track(j - 1) >= 0.0 {
             j -= 1;
         }
-        let t = if i == j || (tracks[j].0 - tracks[i].0).abs() < f32::EPSILON { 0.0 } else { -tracks[i].0 / (tracks[j].0 - tracks[i].0) };
-        let sizes = (0..sizes)
-            .map(|s| {
-                let (a, b) = (tracks[i].1[s], tracks[j].1[s]);
-                Some((fixed_at(size_table + 4 * s)?, a + t * (b - a)))
-            })
-            .collect::<Option<Vec<_>>>()?;
-        Some(Trak { sizes, units_per_em })
+        let (a, b) = (values(i), if i == j { Vec::new() } else { values(j) });
+        let (t0, t1) = (track(i), track(j));
+        let t = if i == j || (t1 - t0).abs() < f32::EPSILON { 0.0 } else { -t0 / (t1 - t0) };
+        let sizes = size_values
+            .chunks_exact(4)
+            .zip(&a)
+            .enumerate()
+            .map(|(s, (size, &a))| (fixed(size), b.get(s).map_or(a, |&b| a + t * (b - a))))
+            .collect();
+        Some(Trak { sizes, units_per_em: units_per_em as f32 })
     }
 
     /// Tracking at `points`, in font units: interpolated between the listed sizes and held
@@ -104,5 +118,77 @@ mod tests {
         // Beyond the table the ends hold.
         assert_eq!(t.units(8.0), 0.0);
         assert_eq!(t.units(500.0), 21.0);
+    }
+
+    /// A `trak` table with one horizontal track per `(track, values)` at `sizes`.
+    fn table(tracks: &[(f32, &[i16])], sizes: &[f32]) -> Vec<u8> {
+        let fixed = |v: f32| ((v * 65536.0) as i32).to_be_bytes();
+        let size_table = 12 + 8 + tracks.len() * 8;
+        let values = size_table + sizes.len() * 4;
+        let mut t = vec![0, 1, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0];
+        t.extend((tracks.len() as u16).to_be_bytes());
+        t.extend((sizes.len() as u16).to_be_bytes());
+        t.extend((size_table as u32).to_be_bytes());
+        for (i, (track, _)) in tracks.iter().enumerate() {
+            t.extend(fixed(*track));
+            t.extend([0, 0]);
+            t.extend(((values + i * sizes.len() * 2) as u16).to_be_bytes());
+        }
+        t.extend(sizes.iter().flat_map(|&s| fixed(s)));
+        t.extend(tracks.iter().flat_map(|(_, v)| v.iter().flat_map(|v| v.to_be_bytes())));
+        t
+    }
+
+    fn put(t: &mut [u8], at: usize, bytes: &[u8]) {
+        t[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+
+    /// Tracking that can't go wrong: finite, and 0 when there's no table.
+    fn sane(t: Option<Trak>) -> f32 {
+        let spacing = t.map_or(0.0, |t| t.spacing(28.0, 2.0, true) + t.spacing(9.0, 1.0, false));
+        assert!(spacing.is_finite(), "{spacing}");
+        spacing
+    }
+
+    #[test]
+    fn parse_reads_track_zero_or_interpolates_around_it() {
+        let sizes = [12.0, 24.0];
+        let t = Trak::parse(&table(&[(-1.0, &[-40, -20]), (0.0, &[0, 10]), (1.0, &[40, 20])], &sizes), 2048).unwrap();
+        assert_eq!(t.sizes, [(12.0, 0.0), (24.0, 10.0)]);
+        let t = Trak::parse(&table(&[(-1.0, &[-40, -20]), (1.0, &[40, 60])], &sizes), 2048).unwrap();
+        assert_eq!(t.sizes, [(12.0, 0.0), (24.0, 20.0)]);
+        let t = Trak::parse(&table(&[(0.5, &[8, 16])], &sizes), 2048).unwrap();
+        assert_eq!(t.sizes, [(12.0, 8.0), (24.0, 16.0)]);
+    }
+
+    #[test]
+    fn malformed_tables_track_nothing_without_panicking() {
+        let good = table(&[(-1.0, &[-40, -20]), (0.0, &[0, 10]), (1.0, &[40, 20])], &[12.0, 24.0]);
+        assert!(Trak::parse(&good, 0).is_none(), "zero units per em");
+        for len in 0..good.len() {
+            sane(Trak::parse(&good[..len], 2048));
+        }
+        let mut huge_offsets = good.clone();
+        put(&mut huge_offsets, 6, &[0xff, 0xff]);
+        assert!(Trak::parse(&huge_offsets, 2048).is_none());
+        let mut huge_size_table = good.clone();
+        put(&mut huge_size_table, 16, &[0xff; 4]);
+        assert!(Trak::parse(&huge_size_table, 2048).is_none());
+        let mut huge_counts = good.clone();
+        put(&mut huge_counts, 12, &[0xff; 4]);
+        assert!(Trak::parse(&huge_counts, 2048).is_none());
+        // Track 0's values out of bounds: it tracks by 0, as in HarfRust.
+        let mut bad_values = good.clone();
+        put(&mut bad_values, 20 + 8 + 6, &[0xff, 0xff]);
+        assert_eq!(Trak::parse(&bad_values, 2048).unwrap().sizes, [(12.0, 0.0), (24.0, 0.0)]);
+        // A bad offset on a track that isn't used doesn't spoil the table.
+        let mut bad_unused = good.clone();
+        put(&mut bad_unused, 20 + 6, &[0xff, 0xff]);
+        assert_eq!(Trak::parse(&bad_unused, 2048).unwrap().sizes, [(12.0, 0.0), (24.0, 10.0)]);
+        for at in 0..good.len() {
+            let mut t = good.clone();
+            t[at] = 0xff;
+            sane(Trak::parse(&t, 2048));
+        }
     }
 }

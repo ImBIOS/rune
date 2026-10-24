@@ -1089,6 +1089,9 @@ impl TextSystem {
                 let trak = font_trak(&mut self.traks, &font.data, font.index);
                 let needed = spacing(trak, run.font_size() / scale);
                 let range = run.text_range();
+                if range.is_empty() {
+                    continue;
+                }
                 mismatch |= (needed - given(range.start)).abs() > 1e-4;
                 match exact.last_mut() {
                     Some((last, v)) if last.end == range.start && *v == needed => last.end = range.end,
