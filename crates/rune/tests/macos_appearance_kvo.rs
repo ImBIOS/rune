@@ -27,7 +27,7 @@ mod mac {
 
     pub fn main() {
         if std::env::var_os(CASE).is_some() {
-            std::thread::spawn(|| { std::thread::sleep(Duration::from_secs(30)); eprintln!("timeout"); std::process::exit(2) });
+            std::thread::spawn(|| { std::thread::sleep(Duration::from_secs(60)); eprintln!("timeout"); std::process::exit(2) });
         }
         match std::env::var(CASE).as_deref() {
             Ok("unguarded") => winit_case(false),
@@ -146,7 +146,6 @@ mod mac {
     fn view<T>(_: &T, _: &mut rune::Cx<T>) -> rune::El { rune::el().w_full().h_full() }
 
     fn stress() {
-        assert!(OVERLAY_CREATED.load(Ordering::Relaxed), "overlay was not created");
         let (aqua, dark) = (appearance("NSAppearanceNameAqua"), appearance("NSAppearanceNameDarkAqua"));
         let mut observed = Vec::new();
         unsafe {
@@ -183,9 +182,17 @@ mod mac {
         let spec = rune::AppSpec::new("appearance-kvo", (320.0, 200.0), || (), view::<()>);
         let mut app = rune::App::new(spec).args(["appearance-kvo".to_string()]);
         let handle = app.handle();
-        std::thread::spawn(move || { std::thread::sleep(Duration::from_secs(2)); handle.update(|_, _| stress()); });
+        // Launch can take seconds on a busy machine: stress once the overlay's panel exists.
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(45);
+            while !OVERLAY_CREATED.load(Ordering::Acquire) {
+                if Instant::now() > deadline { eprintln!("overlay was not created within 45 s"); std::process::exit(3) }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            handle.update(|_, _| stress());
+        });
         let overlay = app.overlay(rune::OverlaySpec::new("appearance-kvo overlay", (200.0, 80.0), view::<()>).options(rune::OverlayOptions::default())
-            .on_created(|_| OVERLAY_CREATED.store(true, Ordering::Relaxed)), ());
+            .on_created(|_| OVERLAY_CREATED.store(true, Ordering::Release)), ());
         overlay.show();
         app.run();
     }
