@@ -40,33 +40,25 @@ impl Badge {
 
     pub fn build(self, k: &Kit) -> El {
         let c = &k.c;
-        let mut e = row().role("status").label(self.label.clone()).center().gap(4.0);
-        if self.standard {
-            e = e.h(18.0).px(6.0).radius(k.radius.xs);
-            let (fill, ink, border) = match self.variant {
-                BadgeVariant::Neutral => (c.surface_raised_base, c.std_text, Some(c.border_weak)),
-                BadgeVariant::Accent => (c.bg_accent, c.text_contrast, None),
-                BadgeVariant::Subtle => (c.layer_03, c.text_muted, None),
-            };
-            e = e.fill(fill).child(text(self.label).font(k.ty.text_small_medium).color(ink));
-            if let Some(b) = border {
-                e = e.border(0.5, b);
-            }
-            return e;
-        }
-        let font = TextStyle { line_height: 11.0, ..k.ty.small_medium };
         let (fill, ink, border) = match self.variant {
+            BadgeVariant::Neutral if self.standard => (c.surface_raised_base, c.std_text, Some(c.border_weak)),
             BadgeVariant::Neutral => {
                 (c.layer_02, c.text_muted, Some(if self.high_contrast { c.border_strong } else { c.border_base }))
             }
             BadgeVariant::Accent => (c.bg_accent, c.text_contrast, None),
             BadgeVariant::Subtle => (c.layer_03, c.text_muted, None),
         };
-        e = e.h(16.0).px(4.0).radius(2.0).fill(fill).child(text(self.label).font(font).color(ink));
-        if let Some(b) = border {
-            e = e.border(0.5, b);
+        let (h, px, radius, font) = if self.standard {
+            (18.0, 6.0, k.radius.xs, k.ty.text_small_medium)
+        } else {
+            (16.0, 4.0, 2.0, TextStyle { line_height: 11.0, ..k.ty.small_medium })
+        };
+        let e = row().role("status").label(self.label.clone()).center().gap(4.0).h(h).px(px).radius(radius).fill(fill);
+        let e = e.child(text(self.label).font(font).color(ink));
+        match border {
+            Some(b) => e.border(0.5, b),
+            None => e,
         }
-        e
     }
 }
 
