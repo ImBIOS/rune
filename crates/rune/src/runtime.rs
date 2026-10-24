@@ -1916,15 +1916,13 @@ impl<S: 'static> Runtime<S> {
         let (Some(spec), Some(layout), Some(r)) = (&n.text, &n.text_layout, self.drawn.get(i)) else { return };
         if spec.content.is_empty() { return; }
         let scale = self.env.scale;
-        let rect = MRect::new(r[0] + n.inset[0], r[1] + n.inset[1],
-            (layout.full_width() / scale).min(r[2] - n.inset[0] - n.inset[2]),
-            (layout_height(layout, spec.style, scale) / scale).min(r[3] - n.inset[1] - n.inset[3]));
+        let (rect, origin) = text_extent(n, spec, layout, *r, scale);
         let clip = n.parent.and_then(|p| self.inh_scratch.get(p)).map_or(NO_CLIP, |h| h.clip).map(|v| v / scale);
         let clip = [rect.x.max(clip[0]).max(0.0), rect.y.max(clip[1]).max(0.0),
             (rect.x + rect.w).min(clip[2]).min(self.viewport.0), (rect.y + rect.h).min(clip[3]).min(self.viewport.1)];
         if rect.w <= 0.0 || clip[2] <= clip[0] || clip[3] <= clip[1] { return; }
         self.glyph_scratch.clear();
-        self.text.glyphs_for_layout(layout, scale, [rect.x * scale, rect.y * scale], false, &mut self.glyph_scratch);
+        self.text.glyphs_for_layout(layout, scale, [origin[0] * scale, origin[1] * scale], false, &mut self.glyph_scratch);
         let color = spec.color;
         let srgb = self.srgb_blend;
         // Colour glyphs live in the image atlas, which may move them before the flight ends.
@@ -1949,8 +1947,9 @@ impl<S: 'static> Runtime<S> {
         for (fi, f) in self.flights.iter_mut().enumerate() {
             let Some((i, n)) = nodes.iter().enumerate().find(|(_, n)| f.lands(&n.path, n.key.as_deref())) else { continue };
             let (Some(spec), Some(layout)) = (&n.text, &n.text_layout) else { done.push(fi); continue };
-            let r = self.drawn[i];
-            let target = MRect::new(r[0] + n.inset[0], r[1] + n.inset[1], r[2] - n.inset[0] - n.inset[2], r[3] - n.inset[1] - n.inset[3]);
+            // Both ends are measured by their laid-out text, so a destination box wider than its
+            // text (a body stretched across a column) doesn't scale the flight.
+            let (target, origin) = text_extent(n, spec, layout, self.drawn[i], s);
             if f.measure(target, now, reduced) { done.push(fi); }
             // Land sub-quantum size residuals before snapping both edges. Otherwise a settled
             // height can alternate by one quantum while its still-moving top crosses the grid.
@@ -1987,7 +1986,7 @@ impl<S: 'static> Runtime<S> {
                 }
             }
             self.glyph_scratch.clear();
-            self.text.glyphs_for_layout(layout, s, [target.x * s, target.y * s], false, &mut self.glyph_scratch);
+            self.text.glyphs_for_layout(layout, s, [origin[0] * s, origin[1] * s], false, &mut self.glyph_scratch);
             for q in &self.glyph_scratch {
                 let Some(q) = glyph_or_image(q, &self.text, &mut self.images, premul(spec.color, 1.0, srgb), glyph_gamma(spec.color, s, srgb), NO_CLIP, [0.0; 4]) else { continue };
                 self.instances.push(transformed(q, target, current, s, target_alpha,
@@ -5426,6 +5425,20 @@ fn line_alignment(spec: &TextSpec) -> parley::Alignment {
         Align::End if spec.wrap => parley::Alignment::End,
         _ => parley::Alignment::Start,
     }
+}
+
+/// The rectangle a text node's laid-out lines cover inside its drawn box `r` (logical points),
+/// and the layout origin its glyphs are placed from. Lines aligned inside a wrap width count
+/// from their own offsets, so the rect hugs the text rather than the box.
+fn text_extent(n: &Node, spec: &TextSpec, layout: &Layout<Ink>, r: [f32; 4], scale: f32) -> (MRect, [f32; 2]) {
+    let (x0, x1) = (r[0] + n.inset[0], r[0] + r[2] - n.inset[2]);
+    let (lo, hi) = layout.lines().map(|l| (l.metrics().offset, l.metrics().advance))
+        .fold((f32::MAX, 0.0f32), |(lo, hi), (offset, advance)| (lo.min(offset), hi.max(offset + advance)));
+    let (lo, hi) = if lo > hi { (0.0, layout.full_width()) } else { (lo, hi) };
+    let origin = [text_x(spec, x0, x1, layout.full_width() / scale), r[1] + n.inset[1]];
+    let x = origin[0] + lo / scale;
+    (MRect::new(x, origin[1], ((hi - lo) / scale).min(x1 - x).max(0.0),
+        (layout_height(layout, spec.style, scale) / scale).min(r[3] - n.inset[1] - n.inset[3])), origin)
 }
 
 /// Where a `width`-wide text line starts between `x0` and `x1`. Wrapped text aligns each line

@@ -44,7 +44,9 @@ fn a_scoped_destination_lands_on_its_own_row() {
         // Every row's body shares the key; the flight's destination is the named row's.
         let row = match destination { "msg-2/body" => 2, _ => 0 };
         let bodies: Vec<_> = rt.elements().into_iter().filter(|e| e.key.as_deref() == Some("body")).collect();
-        assert_eq!(target, bodies[row].target, "{destination}: lands on msg-{row}'s text");
+        let body = bodies[row].target;
+        assert_eq!(target[..2], body[..2], "{destination}: lands on msg-{row}'s text");
+        assert!(target[2] <= body[2] && target[3] <= body[3], "{destination}: within msg-{row}'s text box");
         for (i, b) in bodies.iter().enumerate() {
             assert_eq!(b.rect != b.target, i == row, "{destination}: only msg-{row}'s text rides the flight");
         }

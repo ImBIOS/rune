@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Tx::fly_text` lands on the destination's text, not its box.** The source was measured by
+  its laid-out lines but the destination by the whole element, so a destination wider than its
+  text (a message body stretched across a column) scaled the flight into a large ghost and a
+  small copy. Both ends now use the same rule each frame: the lines' extent from their offsets
+  and advances, placed by the text's alignment, clamped to the content box. A flight between
+  same-size text now stays at rest scale, and centred or end-aligned text flies from and to
+  where it's drawn.
 - **Return and Escape during an input method composition only confirm or cancel it.** A
   Return or Escape key event that reaches a field while it has a preedit (Japanese, Chinese
   or Korean input, say) no longer runs its `on_submit`, presses the default button, inserts a
