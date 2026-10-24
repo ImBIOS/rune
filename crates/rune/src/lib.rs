@@ -108,6 +108,7 @@ pub mod theme;
 pub mod tok;
 pub mod tooling;
 mod window;
+mod window_frame;
 mod frame_clock;
 mod present_time;
 mod secure_input;

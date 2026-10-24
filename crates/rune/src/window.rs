@@ -43,6 +43,22 @@ struct Win {
     occluded: bool,
     cursor: crate::os_cursor::OsCursor,
     alpha: Option<crate::surface_alpha::AlphaSurface>,
+    /// Drawables present inside Core Animation transactions while the frame moves.
+    #[cfg(target_os = "macos")]
+    frame_present: bool,
+}
+
+impl Win {
+    /// Matches the drawable to the window's size; false when it already did.
+    fn resize_surface(&mut self, device: &wgpu::Device, size: winit::dpi::PhysicalSize<u32>) -> bool {
+        let (width, height) = (size.width.max(1), size.height.max(1));
+        if (self.config.width, self.config.height) == (width, height) { return false; }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(device, &self.config);
+        if let Some(alpha) = &mut self.alpha { alpha.resize(device, (width, height)); }
+        true
+    }
 }
 
 /// A reveal requested before the hidden frame completes is held behind the fence, as is a
@@ -189,6 +205,7 @@ pub(crate) enum WakeEvent {
     App(usize), Live(usize), Window(usize, WindowRequest), Focus(usize),
     Position(usize, (i32, i32)), Level(usize, bool),
     Place(usize, crate::windows::PlaceRequest),
+    Frame(usize, crate::window_frame::FrameRequest),
 }
 
 /// What `Windows` needs of a host, whatever its state type: an app window or an overlay.
@@ -282,6 +299,21 @@ impl WindowHandle {
     pub fn place(&self, display: crate::DisplayTarget, placement: crate::OverlayPlacement) {
         let place = crate::windows::PlaceRequest::new(display, placement);
         self.send(move |slot| WakeEvent::Place(slot, place));
+    }
+    /// [`Tx::resize_window`] from outside a handler, on `tok::motion::DEFAULT`.
+    pub fn resize(&self, size: (f32, f32)) {
+        self.frame(crate::window_frame::FrameRequest { size: Some(size), animate: true, ..Default::default() });
+    }
+    /// [`Tx::resize_window_instant`] from outside a handler.
+    pub fn resize_instant(&self, size: (f32, f32)) {
+        self.frame(crate::window_frame::FrameRequest { size: Some(size), ..Default::default() });
+    }
+    /// [`Tx::center_window`] from outside a handler.
+    pub fn center(&self) {
+        self.frame(crate::window_frame::FrameRequest { center: true, ..Default::default() });
+    }
+    fn frame(&self, request: crate::window_frame::FrameRequest) {
+        self.send(move |slot| WakeEvent::Frame(slot, request));
     }
     /// Show/recreate, or hide while keeping state. A launcher takes keys and reveals cached
     /// pixels; an ordinary window shows without requesting focus.
@@ -427,7 +459,7 @@ impl ApplicationHandler<WakeEvent> for Windows {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
         let slot = match &event {
             WakeEvent::DisplayTick(i) | WakeEvent::App(i) | WakeEvent::Live(i) | WakeEvent::Window(i, _) | WakeEvent::Focus(i)
-                | WakeEvent::Position(i, _) | WakeEvent::Level(i, _) | WakeEvent::Place(i, _) => *i,
+                | WakeEvent::Position(i, _) | WakeEvent::Level(i, _) | WakeEvent::Place(i, _) | WakeEvent::Frame(i, _) => *i,
         };
         if let Some(Some(host)) = self.hosts.get_mut(slot) {
             host.user_event(event_loop, event);
@@ -507,6 +539,11 @@ struct Host<S: 'static> {
     secure_input: crate::secure_input::SecureInput,
     ime_allowed: bool,
     comp: Option<Box<dyn Compositor<S>>>,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    wayland: bool,
+    /// The window's frame moving to where a handler asked (`Tx::resize_window`), top-down
+    /// screen points on the host's frame clock. macOS only; elsewhere frames change at once.
+    frame_anim: Option<crate::window_frame::FrameAnim>,
     /// Present times of every window this host opens while tracing.
     #[cfg(target_os = "macos")]
     present_log: Option<Arc<crate::present_time::metal::Log>>,
@@ -625,6 +662,8 @@ impl<S: 'static> Host<S> {
             secure_input: Default::default(),
             ime_allowed: false,
             comp,
+            wayland,
+            frame_anim: None,
             trace: None,
             trace_start: None,
             trace_frames: 0,
@@ -958,6 +997,100 @@ impl<S: 'static> Host<S> {
         }
     }
 
+    /// Seconds on the host's frame clock, which frame animations sample.
+    fn frame_secs(&self, at: Instant) -> f64 {
+        self.rt.wall_start.map_or(0.0, |start| at.saturating_duration_since(start).as_secs_f64())
+    }
+
+    /// Takes the frame change handlers asked for. A painting macOS window moves over its next
+    /// frames on the request's spring, from `start`; anywhere else the frame jumps. A size
+    /// outlives the window: one created later opens at it.
+    fn take_frame_request(&mut self, start: f64, painting: bool) {
+        let Some(request) = self.rt.window_frame.take() else { return };
+        if let Some(size) = request.size {
+            self.spec.size = size;
+            self.args.size = None;
+        }
+        let Some(w) = &self.win else { return };
+        #[cfg(target_os = "macos")]
+        {
+            use crate::window_frame::{FrameAnim, snap, target};
+            let Some((frame, visible, scale)) = crate::macos::window_geometry(&w.window) else { return };
+            // Resizing again mid-flight keeps the edge the first resize keeps.
+            let base = self.frame_anim.map_or(frame, |a| a.to);
+            let outer = request.size.and_then(|size| crate::macos::outer_size(&w.window, size));
+            let to = snap(target(base, outer, request.center, visible), scale);
+            // Centring alone carries on with a resize already moving.
+            let spring = request.spring.or(self.frame_anim.and_then(|a| a.spring).filter(|_| request.size.is_none()));
+            if painting {
+                self.frame_anim = Some(FrameAnim::retarget(self.frame_anim.as_ref(), spring, start, frame, to));
+            } else {
+                self.frame_anim = None;
+                crate::macos::set_window_frame(&w.window, to);
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (start, painting);
+            let window = &w.window;
+            if let Some((width, height)) = request.size {
+                let _ = window.request_inner_size(LogicalSize::new(width, height));
+            }
+            // Wayland windows can't see or set their position.
+            if self.wayland { return; }
+            let (Some(monitor), Ok(position)) = (window.current_monitor(), window.outer_position()) else { return };
+            let (outer, inner, scale) = (window.outer_size(), window.inner_size(), window.scale_factor() as f32);
+            let size = request.size.map(|(width, height)| (
+                width * scale + outer.width.saturating_sub(inner.width) as f32,
+                height * scale + outer.height.saturating_sub(inner.height) as f32,
+            ));
+            let current = [position.x as f32, position.y as f32, outer.width as f32, outer.height as f32];
+            let (origin, area) = (monitor.position(), monitor.size());
+            let visible = [origin.x as f32, origin.y as f32, area.width as f32, area.height as f32];
+            let [x, y, ..] = crate::window_frame::target(current, size, request.center, visible);
+            if [x, y] != [current[0], current[1]] {
+                window.set_outer_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
+            }
+        }
+    }
+
+    /// Moves the frame one display frame along, before the frame's drawable is acquired, and
+    /// lays the content out at the new size: content follows the edge in the same frame, with
+    /// no stretched or blank strip.
+    fn step_frame(&mut self, at: Instant) {
+        let now = self.frame_secs(at);
+        self.take_frame_request(now, true);
+        #[cfg(target_os = "macos")]
+        {
+            // The window server shows a move on the first frame after an idle spell before the
+            // frame drawn for it, leaving a stale strip. A request taken then starts here and
+            // moves from the next frame.
+            let resting = self.idle;
+            let moving = self.frame_anim.is_some();
+            let (Some(w), Some((gpu, ..))) = (self.win.as_mut(), self.gpu.as_ref()) else { return };
+            if moving != w.frame_present {
+                crate::macos::present_with_transaction(&w.surface, moving);
+                w.frame_present = moving;
+            }
+            if resting { return; }
+            let Some(anim) = self.frame_anim else { return };
+            crate::macos::set_window_frame(&w.window, anim.sample(now).0);
+            if anim.done(now) { self.frame_anim = None; }
+            place_chrome(&w.window, self.chrome);
+            let size = w.window.inner_size();
+            w.resize_surface(&gpu.device, size);
+            let scale = w.window.scale_factor() as f32;
+            self.rt.set_viewport((size.width as f32 / scale, size.height as f32 / scale), scale);
+        }
+    }
+
+    /// A window that stops painting mid-move lands where it was going.
+    fn land_frame(&mut self) {
+        let Some(_anim) = self.frame_anim.take() else { return };
+        #[cfg(target_os = "macos")]
+        if let Some(w) = &self.win { crate::macos::set_window_frame(&w.window, _anim.to); }
+    }
+
     fn window_request(&mut self, event_loop: &ActiveEventLoop, request: WindowRequest) {
         match request {
             WindowRequest::Open(token) => self.open(event_loop, token),
@@ -1087,6 +1220,11 @@ impl<S: 'static> Host<S> {
             }
             let shown = self.win.as_ref().filter(|w| w.visible);
             let paints = shown.is_some_and(|w| !w.occluded && !w.window.is_minimized().unwrap_or(false));
+            // A painting macOS window moves its frame over its next frames (`redraw`).
+            if self.rt.window_frame.is_some() && !(paints && cfg!(target_os = "macos")) {
+                self.take_frame_request(self.frame_secs(Instant::now()), false);
+            }
+            let shown = self.win.as_ref().filter(|w| w.visible);
             let window = shown.map(|w| &w.window);
             if self.popup.open(&mut self.rt, window, paints) && let Some(w) = window { w.request_redraw(); }
             // A callback that ran (a menu that couldn't open) may have asked to close or quit.
@@ -1129,6 +1267,7 @@ impl<S: 'static> Host<S> {
     }
 
     fn hide(&mut self, event_loop: &ActiveEventLoop) {
+        self.land_frame();
         if let Some(w) = &mut self.win { w.first_frame.hide(); }
         self.secure_input.set(false);
         self.ime_allowed = false;
@@ -1363,6 +1502,8 @@ impl<S: 'static> Host<S> {
             occluded: false,
             cursor: crate::os_cursor::OsCursor::new(event_loop),
             alpha,
+            #[cfg(target_os = "macos")]
+            frame_present: false,
         });
         if launcher { self.win.as_mut().unwrap().first_frame.prepare(); }
         self.apply_placement(event_loop);
@@ -1381,7 +1522,7 @@ impl<S: 'static> Host<S> {
 
     fn redraw(&mut self) {
         let launcher = self.launcher();
-        let (Some(l), Some((gpu, renderer, _))) = (self.win.as_mut(), self.gpu.as_mut()) else { return };
+        let (Some(l), Some(_)) = (self.win.as_mut(), self.gpu.as_ref()) else { return };
         let hidden = launcher && !l.visible;
         if (!launcher && (!l.visible || l.occluded)) || l.window.is_minimized().unwrap_or(false) {
             l.stop_pacing();
@@ -1401,6 +1542,11 @@ impl<S: 'static> Host<S> {
         if self.native_handle.native.number.load(Ordering::Relaxed) == 0 {
             self.native_handle.native.number.store(native_window_number(&l.window).unwrap_or(0), Ordering::Release);
         }
+        #[cfg(not(target_os = "macos"))]
+        let target: Option<Instant> = None;
+        // The frame moves before the drawable is acquired, so it has the new size.
+        if !hidden { self.step_frame(target.unwrap_or_else(Instant::now)); }
+        let (Some(l), Some((gpu, renderer, _))) = (self.win.as_mut(), self.gpu.as_mut()) else { return };
         // Acquire before latching live values so a drawable wait cannot age the input.
         let frame = match l.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -1430,9 +1576,6 @@ impl<S: 'static> Host<S> {
             self.trace_start = Some(now);
             self.rt.scene.store_mut().audit_retargets(true);
         }
-        #[cfg(not(target_os = "macos"))]
-        let (frame_time, target): (_, Option<Instant>) = (now, None);
-        #[cfg(target_os = "macos")]
         let frame_time = target.unwrap_or(now);
         let target_ms = target.zip(self.trace_start).map(|(target, start)| crate::present_time::ms_since(start, target));
         let rt = &mut self.rt;
@@ -1509,11 +1652,17 @@ impl<S: 'static> Host<S> {
                 return;
             }
         }
-        self.idle = !(animating || rt.has_pending_input() || rt.live_pending());
+        self.idle = !(animating || rt.has_pending_input() || rt.live_pending() || rt.window_frame.is_some() || self.frame_anim.is_some());
         if !hidden && (!self.idle || (self.trace.is_some() && self.args.frames.is_some())) {
             if !l.paced() { l.window.request_redraw(); }
         } else {
             l.stop_pacing();
+        }
+        // A frame change this frame's commit asked for starts with the layout springs it
+        // started, which have shown a step; the next frame moves it.
+        #[cfg(target_os = "macos")]
+        if !hidden && self.rt.window_frame.is_some() {
+            self.take_frame_request(self.frame_secs(frame_time) - crate::frame_clock::RESUME_STEP, true);
         }
     }
 }
@@ -1638,6 +1787,12 @@ impl<S: 'static> Host<S> {
             WakeEvent::Position(_, position) => self.set_position(event_loop, position),
             WakeEvent::Place(_, place) => self.place(event_loop, place),
             WakeEvent::Level(_, on) => self.set_always_on_top(event_loop, on),
+            WakeEvent::Frame(_, mut request) => {
+                request.spring = (request.animate && !self.rt.reduced_motion).then_some(crate::tok::motion::DEFAULT);
+                self.rt.window_frame = Some(self.rt.window_frame.unwrap_or_default().merge(request));
+                if let Some(w) = self.win.as_ref().filter(|w| w.visible) { w.window.request_redraw(); }
+                self.shell(event_loop);
+            }
         }
     }
 
@@ -1689,10 +1844,8 @@ impl<S: 'static> Host<S> {
                     l.stop_pacing();
                     self.idle = true; return;
                 }
-                l.config.width = size.width.max(1);
-                l.config.height = size.height.max(1);
-                l.surface.configure(&gpu.device, &l.config);
-                if let Some(alpha) = &mut l.alpha { alpha.resize(&gpu.device, (l.config.width, l.config.height)); }
+                // A frame Rune moved itself has its drawable already.
+                l.resize_surface(&gpu.device, size);
                 rt.set_viewport((size.width as f32 / scale, size.height as f32 / scale), scale);
                 l.window.request_redraw();
             }

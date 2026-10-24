@@ -608,6 +608,8 @@ pub struct Runtime<S: 'static> {
     pub(crate) popups: std::collections::VecDeque<crate::popup_menu::Request>,
     /// The first of `popups` is showing.
     pub(crate) popup_open: bool,
+    /// A frame change for the window (`Tx::resize_window`), with its spring resolved.
+    pub(crate) window_frame: Option<crate::window_frame::FrameRequest>,
     /// What `update` asked of the next commit.
     pending: Tx,
     pub animating: bool,
@@ -815,6 +817,7 @@ impl<S: 'static> Runtime<S> {
             clipboard: None,
             shell_request: None,
             popups: Default::default(),
+            window_frame: None,
             popup_open: false,
             pending: Tx::default(),
             animating: false,
@@ -1073,6 +1076,10 @@ impl<S: 'static> Runtime<S> {
         if let Some(copy) = tx.copy.take() { self.copy_request = Some(copy); }
         if std::mem::take(&mut tx.paste) { self.paste_request = Some(self.paste_target()); }
         self.popups.extend(tx.popups.drain(..).filter_map(|call| call.take()));
+        if let Some(mut request) = tx.window_frame.take() {
+            request.spring = (request.animate && !tx.instant && !self.reduced_motion).then(|| tx.motion.unwrap_or(motion::DEFAULT));
+            self.window_frame = Some(self.window_frame.unwrap_or_default().merge(request));
+        }
         crate::clipboard::flush_memory(self);
     }
 
@@ -4413,6 +4420,7 @@ fn merge(tx: &mut Tx, one: Tx) {
     tx.wakes.extend(one.wakes);
     tx.text_flights.extend(one.text_flights);
     tx.popups.extend(one.popups);
+    if let Some(request) = one.window_frame { tx.window_frame = Some(tx.window_frame.unwrap_or_default().merge(request)); }
     if one.clear_secret && tx.copy.as_ref().is_some_and(crate::ClipboardWrite::is_secret) { tx.copy = None; }
     tx.clear_secret |= one.clear_secret;
     if one.copy.is_some() { tx.copy = one.copy; }
@@ -4882,6 +4890,25 @@ mod tests {
             assert_eq!(rt.dissolve_scratch.is_empty(), !enabled);
             if enabled { assert!(rt.dissolve_scratch[0]); }
         }
+    }
+
+    #[test]
+    fn window_frame_requests_take_the_change_spring() {
+        let mut rt = Runtime::new((), |_: &(), _: &mut Cx<()>| el(), (100.0, 100.0), Env::new(true, 1.0));
+        let spring = |rt: &mut Runtime<()>, f: fn(&mut Tx)| {
+            rt.update(move |_, tx| f(tx));
+            rt.window_frame.take().unwrap().spring
+        };
+        assert_eq!(spring(&mut rt, |tx| tx.resize_window((1.0, 2.0))), Some(motion::DEFAULT));
+        assert_eq!(spring(&mut rt, |tx| { tx.motion(motion::SNAP); tx.resize_window((1.0, 2.0)) }), Some(motion::SNAP));
+        assert_eq!(spring(&mut rt, |tx| { tx.instant(); tx.resize_window((1.0, 2.0)) }), None);
+        assert_eq!(spring(&mut rt, |tx| tx.resize_window_instant((1.0, 2.0))), None);
+        rt.set_system_reduced_motion(true);
+        rt.frame(0.0);
+        assert_eq!(spring(&mut rt, |tx| tx.resize_window((1.0, 2.0))), None);
+        rt.update(|_, tx| { tx.resize_window((1.0, 2.0)); tx.center_window(); });
+        let request = rt.window_frame.take().unwrap();
+        assert_eq!((request.size, request.center), (Some((1.0, 2.0)), true));
     }
 
     #[test]

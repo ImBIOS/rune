@@ -34,6 +34,7 @@ pub struct Tx {
     pub(crate) shell: Option<Shell>,
     pub(crate) trace: Option<TraceCalls>,
     pub(crate) popups: Vec<crate::popup_menu::Call>,
+    pub(crate) window_frame: Option<crate::window_frame::FrameRequest>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -136,6 +137,35 @@ impl Tx {
     /// Quit the app after this handler, whether or not it keeps running without a window.
     pub fn quit(&mut self) {
         self.shell = Some(Shell::Quit);
+    }
+
+    /// Resize this window's content to `size` points, as an onboarding window changes height
+    /// per step. The top edge stays put and the window stays on its screen. The frame moves
+    /// on this change's spring (`Tx::motion`, else `tok::motion::DEFAULT`), so content laid
+    /// out against the window's edges follows it frame by frame; `Tx::instant` or reduced
+    /// motion jumps. On macOS it animates; Windows and Linux resize at once, and Wayland
+    /// can't keep the window on screen. Headless runs resize the viewport on the virtual
+    /// clock, so `--tree` and scripts see it; their frames keep the launch canvas size.
+    /// Overlays ignore it: use `OverlayHandle::resize`.
+    pub fn resize_window(&mut self, size: (f32, f32)) {
+        self.frame_request(crate::window_frame::FrameRequest { size: Some(size), animate: true, ..Default::default() });
+    }
+
+    /// [`Tx::resize_window`] without the animation.
+    pub fn resize_window_instant(&mut self, size: (f32, f32)) {
+        self.frame_request(crate::window_frame::FrameRequest { size: Some(size), ..Default::default() });
+    }
+
+    /// Centre the window on its screen as AppKit's `center` does: centred across, slightly
+    /// above the middle. With [`Tx::resize_window`] in the same change it centres the new
+    /// size, on the same spring; alone it jumps, or retargets a resize already moving.
+    /// Wayland and headless runs ignore it.
+    pub fn center_window(&mut self) {
+        self.frame_request(crate::window_frame::FrameRequest { center: true, ..Default::default() });
+    }
+
+    fn frame_request(&mut self, request: crate::window_frame::FrameRequest) {
+        self.window_frame = Some(self.window_frame.unwrap_or_default().merge(request));
     }
 
     /// Apply this change with no animation (direct manipulation).

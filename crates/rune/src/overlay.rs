@@ -893,6 +893,8 @@ impl<T: 'static> Overlay<T> {
             self.rt.frame(0.0);
         }
         self.rt.shell_request = None;
+        // Overlays size through `OverlayHandle::resize`, not `Tx::resize_window`.
+        self.rt.window_frame = None;
         self.clipboard.flush(&mut self.rt);
         self.open_popup();
         // Even a transition that finished in this step needs its current pixels submitted.
@@ -1101,6 +1103,8 @@ impl<T: 'static> Overlay<T> {
         let (mut animating, dt) = step(&mut self.rt, &mut self.clock, &self.compositor, frame_time, prewarm);
         let update_ms = if self.compositor.is_some() { now.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
         self.rt.shell_request = None;
+        // Overlays size through `OverlayHandle::resize`, not `Tx::resize_window`.
+        self.rt.window_frame = None;
         self.clipboard.flush(&mut self.rt);
         // Publish the geometry just rendered, never a layout cached from the preceding frame.
         #[cfg(target_os = "macos")]

@@ -1279,6 +1279,8 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         }
     };
     let mut early_place = None;
+    // `Tx::resize_window` moves the viewport on the virtual clock; the canvas keeps its size.
+    let mut frame_anim = None;
     if script.iter().find(|e| !matches!(e.kind, Kind::Mark(_))).is_some_and(|e| e.t <= 1e-9) {
         early_place = take_requests(&mut rt);
         rt.frame(0.0);
@@ -1333,6 +1335,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             }
         }
         let requested_place = take_requests(&mut rt);
+        step_window_frame(&mut rt, &mut frame_anim, real_t, scale);
         let step = if k == 0 { 0.0 } else { dt };
         let mut animating = rt.frame(step);
         rt.open_popup_headless();
@@ -1494,6 +1497,21 @@ pub(crate) fn write_strip(p: &std::path::Path, strip: &[Vec<u8>], (wp, hp): (u32
         }
     }
     write_png(p, sw, sh, &img).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
+}
+
+/// Moves a headless window's viewport to the size handlers asked for, on the virtual clock,
+/// before the frame lays out. Centring has nothing to centre on.
+fn step_window_frame<S>(rt: &mut Runtime<S>, anim: &mut Option<crate::window_frame::FrameAnim>, now: f64, scale: f32) {
+    use crate::window_frame::{FrameAnim, snap};
+    if let Some(size) = rt.window_frame.take().and_then(|request| request.size.map(|size| (size, request.spring))) {
+        let ((w, h), spring) = size;
+        let from = [0.0, 0.0, rt.viewport.0, rt.viewport.1];
+        *anim = Some(FrameAnim::retarget(anim.as_ref(), spring, now, from, [0.0, 0.0, w, h]));
+    }
+    let Some(moving) = *anim else { return };
+    let [_, _, w, h] = snap(moving.sample(now).0, scale);
+    rt.set_viewport((w, h), scale);
+    if moving.done(now) { *anim = None; }
 }
 
 /// Which frames a headless run renders and dumps.
@@ -1883,6 +1901,34 @@ mod tests {
         assert!((127..=128).contains(&transparent.get_pixel(8, 8)[3]));
         let overridden = render("override", options, Some((16.0, 10.0)), false).1;
         assert_eq!(overridden.dimensions(), (32, 20), "--size overrides the physical-size option");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn window_resizes_move_the_headless_viewport_on_the_virtual_clock() {
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("rune-window-resize-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("script.json");
+        std::fs::write(&script, r#"[{"t": 0.1, "type": "tap", "key": "grow"}]"#).unwrap();
+        let viewport = |name: &str, instant: bool, at: &str| {
+            let spec = AppSpec::new("resize", (300.0, 400.0), || false, |_, _| crate::el().key("root").w_full().h_full()
+                .child(crate::el().key("grow").size(50.0, 50.0).on_press_tx(|instant: &mut bool, tx| {
+                    if *instant { tx.resize_window_instant((300.0, 600.0)) } else { tx.resize_window((300.0, 600.0)) }
+                })));
+            let tree = dir.join(format!("{name}.json"));
+            let args = ["--script", script.to_str().unwrap(), "--scale", "1", "--fps", "60", "--at", at, "--tree", tree.to_str().unwrap()];
+            headless(crate::App::new(spec).init(move || instant), Args::parse_from(args.map(String::from).into()));
+            let tree: Value = serde_json::from_str(&std::fs::read_to_string(tree).unwrap()).unwrap();
+            let size = tree["viewport"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect::<Vec<_>>();
+            (size[0], size[1])
+        };
+        assert_eq!(viewport("before", false, "0.1"), (300.0, 400.0));
+        let (w, h) = viewport("moving", false, "0.3");
+        assert!(w == 300.0 && h > 400.0 && h < 600.0, "mid-spring at 0.3 s: {h}");
+        assert_eq!(viewport("moving-again", false, "0.3"), (w, h), "the virtual clock is deterministic");
+        assert_eq!(viewport("landed", false, "2"), (300.0, 600.0));
+        assert_eq!(viewport("instant", true, "0.3"), (300.0, 600.0));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
