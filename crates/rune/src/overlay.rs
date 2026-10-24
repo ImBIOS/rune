@@ -375,7 +375,7 @@ impl<T: 'static> Overlay<T> {
         {
             self.occluded = false;
             self.sync_occlusion();
-            self.ensure_pacing();
+            if !self.occluded { self.ensure_pacing(); }
         }
         if !self.retained() { self.dirty = true; }
         self.idle &= !(self.rt.animating || self.compositor.as_ref().is_some_and(|c| c.animating()));
@@ -838,7 +838,7 @@ impl<T: 'static> Overlay<T> {
     fn drag_ends_due(&mut self) {
         if !self.rt.drag_ends_pending() { return; }
         self.dirty = true;
-        if !self.visible { self.advance(); }
+        if self.frameless() { self.advance(); }
     }
 
     fn publish_regions(&mut self) {
@@ -929,13 +929,31 @@ impl<T: 'static> Overlay<T> {
         if !woken && !updated { return; }
         self.clipboard.flush(&mut self.rt);
         self.dirty = true; // Queued updates already invalidate the cache before polling.
-        if !self.visible {
-            // Register timer requests even before the first show; hidden overlays never draw.
+        if self.frameless() {
+            // Register timer requests even before the first show; hidden or occluded overlays
+            // don't draw.
             self.advance();
         }
     }
 
+    /// Hidden, or shown but not on screen: no frame will come to run what's due.
+    fn frameless(&self) -> bool {
+        !self.visible || self.is_occluded()
+    }
+
     fn advance_at(&mut self, now: Instant) {
+        // Covered or asleep, a shown overlay only polls. What it would commit waits for the
+        // first uncovered frame, which resumes running motion and starts new motion fresh
+        // (`step`). Input and drag ends still run their handlers now.
+        if self.visible && self.is_occluded() && !self.rt.has_pending_input() && !self.rt.drag_ends_pending() {
+            self.rt.poll_hidden();
+            self.rt.shell_request = None;
+            self.rt.window_frame = None;
+            self.clipboard.flush(&mut self.rt);
+            self.open_popup();
+            self.dirty = true;
+            return;
+        }
         let commits = self.rt.stats.commits;
         if self.retained() {
             self.rt.frame_split(now.saturating_duration_since(self.clock.last()).as_secs_f64(), 0.0);
@@ -959,7 +977,7 @@ impl<T: 'static> Overlay<T> {
     fn wake_due(&mut self, now: Instant) {
         let deadline = crate::window::wall_wake_deadline(&self.rt);
         if deadline.is_some_and(|deadline| deadline <= now) {
-            if self.visible && !self.is_occluded() {
+            if !self.frameless() {
                 // Like the window host, poll once in the upcoming frame, after acquiring
                 // the drawable. A false poll result does not keep the display loop alive.
                 self.dirty = true;
@@ -1002,7 +1020,7 @@ impl<T: 'static> Overlay<T> {
         if self.clipboard.receive(&mut self.rt) { self.dirty = true; self.advance(); }
         if self.popup.answer(&mut self.rt) {
             self.dirty = true;
-            if !self.visible { self.advance(); }
+            if self.frameless() { self.advance(); }
         }
         if self.rt.live_pending() { self.dirty = true; }
         self.drag_ends_due();
@@ -1094,12 +1112,12 @@ impl<T: 'static> Overlay<T> {
         more
     }
 
-    /// Opens the pop-up menu a handler asked for over the overlay's panel. A hidden overlay
-    /// answers `None`, committed with its next frame. One anchored to an element waits for the
-    /// frame that commits what changed since the last.
+    /// Opens the pop-up menu a handler asked for over the overlay's panel. A hidden or occluded
+    /// overlay answers `None`, committed with its next frame. One anchored to an element waits
+    /// for the frame that commits what changed since the last.
     fn open_popup(&mut self) {
         let window = match self.live.as_ref().map(|l| &l.backing) {
-            Some(Backing::Window(w)) if self.visible => Some(w.clone()),
+            Some(Backing::Window(w)) if self.visible && !self.is_occluded() => Some(w.clone()),
             _ => None,
         };
         if self.popup.open(&mut self.rt, window.as_ref(), true) { self.dirty = true; }
@@ -1147,9 +1165,11 @@ impl<T: 'static> Overlay<T> {
             }
         }
         self.apply_input();
-        if self.live.is_none() || self.renderer.is_none() || self.gpu.is_none() || (!self.dirty && self.idle) {
+        if self.live.is_none() || self.renderer.is_none() || self.gpu.is_none() {
             return false;
         }
+        // Even an idle overlay looks again on its retry while occluded: the occlusion
+        // notification that should uncover it may never come.
         #[cfg(target_os = "macos")]
         if !prewarm {
             self.sync_occlusion();
@@ -1160,6 +1180,7 @@ impl<T: 'static> Overlay<T> {
                 return false;
             }
         }
+        if !self.dirty && self.idle { return false; }
         if !prewarm { self.retry = None; }
         let (Some(live), Some((renderer, _)), Some(gpu)) = (self.live.as_mut(), self.renderer.as_mut(), self.gpu.as_ref()) else {
             return false;
@@ -1270,13 +1291,16 @@ impl<T: 'static> Overlay<T> {
         if occluded != self.occluded { self.occluded(occluded); }
     }
 
-    /// A display link made while the displays slept fails; try again once they may be back.
+    /// A display link made while the displays slept fails; try again once they may be back. One
+    /// that exists follows the panel to the display it is on now.
     #[cfg(target_os = "macos")]
     fn ensure_pacing(&mut self) {
         let (Some(live), Some(wake)) = (&mut self.live, &self.frame_wake) else { return };
-        if live.pacing.is_some() { return; }
         let Backing::Window(window) = &live.backing;
-        live.pacing = crate::display_link::DisplayLink::new(window, wake.clone());
+        match &mut live.pacing {
+            Some(pacing) => pacing.update_display(window),
+            None => live.pacing = crate::display_link::DisplayLink::new(window, wake.clone()),
+        }
     }
 }
 
@@ -1447,6 +1471,9 @@ impl<T: 'static> AnyHost for Overlay<T> {
             self.observe_pointer(point.0, point.1);
             if let Some(point) = crate::win32::pointer_position() { self.follow_pointer(_event_loop, point); }
         }
+        // Covering or sleeping displays can come without an event the overlay sees.
+        #[cfg(target_os = "macos")]
+        if self.live.is_some() { self.sync_occlusion(); }
         #[cfg(target_os = "macos")]
         if self.live.is_some() && let Some(panel) = &self.panel {
             // Covered or asleep, the 120 Hz regions poll rests; input events still sample.
@@ -1690,8 +1717,8 @@ mod tests {
         let app = AppSpec::new("resume", (500.0, 50.0), || Pair { a: 12.0, b: 12.0 }, view);
         // `a` springs from FRAME; `pause` runs after 3 frames, and `b` starts on the frame
         // presented `gap` later.
-        let run = |pause: fn(&mut Overlay<Pair>), resume: fn(&mut Overlay<Pair>), gap: Duration| {
-            let (mut overlay, _) = Overlay::new(OverlaySpec::new("resume", app.size, view).options(Default::default()), Pair { a: 12.0, b: 12.0 }, &app);
+        let run_with = |options: OverlayOptions, pause: fn(&mut Overlay<Pair>), resume: fn(&mut Overlay<Pair>), gap: Duration| {
+            let (mut overlay, _) = Overlay::new(OverlaySpec::new("resume", app.size, view).options(options), Pair { a: 12.0, b: 12.0 }, &app);
             overlay.rt.wall_start = None;
             let start = Instant::now();
             present(&mut overlay, start);
@@ -1703,6 +1730,7 @@ mod tests {
             present(&mut overlay, start + 3 * FRAME + gap);
             (width(&overlay, "a"), width(&overlay, "b"))
         };
+        let run = |pause: fn(&mut Overlay<Pair>), resume: fn(&mut Overlay<Pair>), gap: Duration| run_with(Default::default(), pause, resume, gap);
         let fresh = {
             let mut overlay = width_overlay("fresh");
             let start = Instant::now();
@@ -1724,6 +1752,16 @@ mod tests {
             // `b` sits beside `a`, so its edges snap to a different 1/64 pt grid than `fresh`.
             assert!((b - fresh).abs() < 0.02, "{what}: motion starting on the resume frame must not jump: b={b}, fresh={fresh}");
             assert!(capped < 211.0 && (a - capped).abs() < 0.01, "{what}: running motion resumes {:?} along: a={a}, expected={capped}", crate::frame_clock::MAX_GAP);
+        }
+        // A missed frame while covered or asleep polls but commits nothing, retained or not: `b`
+        // starts on the first uncovered frame, as above.
+        #[cfg(target_os = "macos")]
+        for prewarm in [false, true] {
+            let options = OverlayOptions { prewarm, ..Default::default() };
+            let (a, b) = run_with(options, |o| { o.visible = true; o.occluded(true); },
+                |o| { o.missed(crate::window::Missed::Occluded, false); o.occluded(false); }, Duration::from_secs(3));
+            assert!((b - fresh).abs() < 0.02, "missed while occluded (prewarm: {prewarm}): b={b}, fresh={fresh}");
+            assert!((a - capped).abs() < 0.01, "missed while occluded (prewarm: {prewarm}): a={a}, expected={capped}");
         }
     }
 
@@ -2151,6 +2189,12 @@ mod tests {
         overlay.occluded(false);
         assert!(overlay.dirty, "uncovered, it redraws once");
         assert_eq!(overlay.occluded_wait, OCCLUDED_RETRY);
+
+        // An update arriving while it is covered arms its timer at once, not on a later retry.
+        overlay.occluded(true);
+        overlay.apply_wake(false, vec![Box::new(|_: &mut State, tx: &mut Tx| tx.wake_after(Duration::from_secs(5)))]);
+        let deadline = overlay.wake_deadline().expect("the update's timer is armed while occluded");
+        assert!(deadline > Instant::now() + Duration::from_secs(4), "{:?}", deadline - Instant::now());
     }
 
     #[test]
