@@ -4816,13 +4816,13 @@ fn order_drag_ends(queue: Vec<Action>, ended: Vec<(String, crate::DragOutcome)>,
     out
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Width over height of the image in `pixels`, or 0 while it's empty.
 fn pixel_ratio(pixels: &crate::Pixels) -> f32 {
     let (w, h) = pixels.size();
     if w > 0 && h > 0 { w as f32 / h as f32 } else { 0.0 }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn flatten(
     el: El,
     parent: Option<usize>,
