@@ -257,6 +257,32 @@ mod tests {
         }
     }
 
+    /// A hidden host's poll that scrolls changes no state, yet the last frame no longer shows
+    /// the window: a launcher's cached reveal must refresh. A poll that only schedules a wake
+    /// leaves it fresh.
+    #[test]
+    fn a_hidden_poll_that_scrolls_leaves_the_last_frame_out_of_date() {
+        let mut rt = chat(Chat { rows: 40, ..Default::default() });
+        rt.wheel(100.0, 100.0, 800.0);
+        for _ in 0..30 { rt.frame(1.0 / 120.0); }
+        let up = bottom_gap(&rt);
+        assert!(up < -100.0, "{up}");
+        rt.poll = Some(|s: &mut Chat, _, tx: &mut Tx| {
+            tx.wake_after(std::time::Duration::from_secs(1));
+            if std::mem::take(&mut s.instant) { tx.scroll_to_bottom_instant("stack"); }
+            false
+        });
+        assert!(!rt.poll_hidden(), "a wake alone draws nothing new");
+        assert!(!rt.needs_commit());
+        rt.state.instant = true;
+        assert!(rt.poll_hidden(), "a scroll asked for while hidden schedules a hidden refresh");
+        assert!(rt.needs_commit(), "and the cached frame isn't fresh");
+        assert_eq!(bottom_gap(&rt), up, "nothing scrolled while hidden");
+        rt.frame(0.0);
+        assert!(bottom_gap(&rt).abs() < 0.05, "{}", bottom_gap(&rt));
+        assert!(!rt.needs_commit());
+    }
+
     #[test]
     fn glides_to_the_exact_bottom_of_a_virtual_list() {
         let mut rt = chat(Chat { rows: 600, virtualized: true, ..Default::default() });

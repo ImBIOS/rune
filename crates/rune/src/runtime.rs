@@ -1191,14 +1191,15 @@ impl<S: 'static> Runtime<S> {
         self.queue.iter().any(|a| matches!(a, Action::Physical(..) | Action::Key { .. } | Action::WindowFocus(_)))
     }
 
-    /// State changed since the last committed frame (an update, poll or handler).
+    /// The last committed frame is out of date: state changed (an update, poll or handler), or
+    /// one asked for a scroll or text flight that waits for the next frame.
     pub(crate) fn needs_commit(&self) -> bool {
-        self.dirty
+        self.dirty || self.pending.frame_work()
     }
 
     /// The last frame no longer shows the window: state, its size or queued input changed since.
     pub(crate) fn stale(&self) -> bool {
-        self.dirty || self.relayout || !self.queue.is_empty()
+        self.needs_commit() || self.relayout || !self.queue.is_empty()
     }
 
     /// Marks app state changed outside a handler (the next frame re-runs the view).
@@ -1287,7 +1288,8 @@ impl<S: 'static> Runtime<S> {
 
     /// `poll` alone, for a hidden window's wake: its timers and inbox advance while nothing
     /// lays out, animates or draws. Like `update`, its changes wait, dirty, for the next frame.
-    /// Returns whether `poll` reported a change.
+    /// Returns whether the last frame went out of date: `poll` reported a change or asked for a
+    /// scroll or text flight. A `wake_after` alone doesn't count.
     pub(crate) fn poll_hidden(&mut self) -> bool {
         if let Some(clock) = self.wall_clock() { self.clock = clock; }
         // An `update`'s `wake_after` counts from now; no frame may come to schedule it.
@@ -1303,8 +1305,9 @@ impl<S: 'static> Runtime<S> {
         self.dirty |= changed;
         self.schedule_wakes(one.wakes.drain(..));
         self.latch_requests(&mut one);
+        let stale = changed || one.frame_work();
         merge(&mut self.pending, one);
-        changed
+        stale
     }
 
     /// Host time on the logical clock, unless a dev clock owns it.
@@ -1404,10 +1407,21 @@ impl<S: 'static> Runtime<S> {
         self.frame(0.0);
     }
 
+    /// Builds what changed while a window that fits its content was hidden, before the host
+    /// shows it, so the content's height (`window_frame`, a jump) is known before the window
+    /// is ordered in and its first drawable taken. Lands every track, as showing does.
+    /// Returns whether it built; the first frame then has nothing left to build.
+    pub(crate) fn build_for_show(&mut self) -> bool {
+        if !self.fit_height || self.commits == 0 || !self.stale() { return false; }
+        self.settle_all();
+        self.hidden_timer_frame();
+        true
+    }
+
     /// A hidden host's due timer or wake. `poll` and due timers run now; the view and layout
     /// wait, dirty, for the frame that shows the host. Queued input and drag ends take a frame
     /// without drawing (`hidden_timer_frame`) so their handlers hear them now. Returns whether
-    /// state changed.
+    /// the last drawn frame went out of date.
     pub(crate) fn hidden_wake(&mut self) -> bool {
         if self.has_pending_input() || self.drag_ends_pending() {
             let commits = self.stats.commits;
@@ -5578,6 +5592,39 @@ mod tests {
         rt.set_viewport((300.0, height + 100.0), 1.0);
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.window_frame.take().and_then(|r| r.size), Some((300.0, height)));
+    }
+
+    /// A window that fits its content, and grew while hidden, learns its new height before it
+    /// shows: its first frame isn't clipped, then resized in view.
+    #[test]
+    fn a_hidden_window_that_fits_its_content_learns_its_height_before_it_shows() {
+        fn view(s: &(usize, bool), _: &mut Cx<(usize, bool)>) -> El {
+            col().key("root").w_full().children((0..s.0).map(|_| el().size(100.0, 40.0)))
+        }
+        let mut rt = Runtime::new((1, false), view, (300.0, 400.0), Env::new(true, 1.0));
+        rt.fit_height = true;
+        let height = rt.content_height();
+        rt.set_viewport((300.0, height), 1.0);
+        rt.frame(0.0);
+        rt.window_frame.take();
+        assert!(!rt.build_for_show(), "unchanged, the last frame still shows it");
+        rt.poll = Some(|s: &mut (usize, bool), _, _: &mut Tx| {
+            if !std::mem::take(&mut s.1) { return false; }
+            s.0 += 1;
+            true
+        });
+        rt.state.1 = true;
+        let commits = rt.stats.commits;
+        assert!(rt.poll_hidden());
+        assert!(rt.window_frame.is_none() && rt.stats.commits == commits, "hidden, nothing builds yet");
+        assert!(rt.build_for_show());
+        let request = rt.window_frame.take().expect("the new height, before the window shows");
+        assert_eq!(request.size, Some((300.0, 80.0)));
+        assert!(!request.animate, "it opens at that height");
+        rt.set_viewport((300.0, 80.0), 1.0);
+        rt.frame(0.0);
+        assert_eq!(rt.stats.commits, commits + 1, "the first frame shown has nothing left to build");
+        assert!(rt.window_frame.is_none());
     }
 
     #[test]

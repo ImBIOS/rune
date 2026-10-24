@@ -1629,6 +1629,7 @@ impl<S: 'static> Host<S> {
 
     fn show(&mut self, event_loop: &ActiveEventLoop) {
         if self.launcher() { self.reveal_launcher(event_loop); return; }
+        let built = self.win.as_ref().is_some_and(|w| !w.visible) && self.build_for_show();
         self.apply_placement(event_loop);
         let Some(w) = self.win.as_mut() else { self.create(event_loop, None, false); return };
         if !w.visible {
@@ -1639,8 +1640,27 @@ impl<S: 'static> Host<S> {
         self.rt.set_live_visible(!w.window.is_minimized().unwrap_or(false));
         self.idle = true;
         self.native_handle.native.number.store(native_window_number(&w.window).unwrap_or(0), Ordering::Release);
-        self.rt.settle_all();
+        if !built { self.rt.settle_all(); }
         w.window.request_redraw();
+    }
+
+    /// A hidden or released window that fits its content builds what changed while it was
+    /// away and takes its new height before it is ordered in (`Runtime::build_for_show`).
+    /// Returns whether it built, settled.
+    fn build_for_show(&mut self) -> bool {
+        if !self.rt.build_for_show() { return false; }
+        self.clipboard.flush(&mut self.rt);
+        self.take_frame_request(0.0, false);
+        // macOS sets the frame at once: the first drawable and layout take the new size.
+        // Elsewhere the window's `Resized` brings it.
+        #[cfg(target_os = "macos")]
+        if let (Some(w), Some((gpu, ..))) = (self.win.as_mut(), self.gpu.as_ref()) {
+            let size = w.window.inner_size();
+            w.resize_surface(&gpu.device, size);
+            let scale = w.window.scale_factor() as f32;
+            self.rt.set_viewport((size.width as f32 / scale, size.height as f32 / scale), scale);
+        }
+        true
     }
 
     fn focus(&self, event_loop: &ActiveEventLoop) {
@@ -1847,6 +1867,7 @@ impl<S: 'static> Host<S> {
 
     fn open(&mut self, event_loop: &ActiveEventLoop, token: Option<String>) {
         if self.launcher() { self.reveal_launcher(event_loop); return; }
+        let built = self.win.as_ref().is_some_and(|w| !w.visible) && self.build_for_show();
         self.apply_placement(event_loop);
         // The launcher's startup token belongs to the first window only.
         #[allow(unused_mut)]
@@ -1869,7 +1890,7 @@ impl<S: 'static> Host<S> {
         if !w.visible {
             w.show(false);
             w.visible = true;
-            self.rt.settle_all();
+            if !built { self.rt.settle_all(); }
             self.idle = true;
         }
         if w.window.is_minimized() == Some(true) {
@@ -1912,6 +1933,8 @@ impl<S: 'static> Host<S> {
 
     #[cfg_attr(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))), allow(unused_variables))]
     fn try_create(&mut self, event_loop: &ActiveEventLoop, token: Option<String>, focus: bool) -> Result<(), String> {
+        // A released window reopens at the height its content reached while it was gone.
+        let built = self.shown && self.build_for_show();
         let size = self.args.size.unwrap_or(self.spec.size);
         let launcher = self.launcher();
         let visible = !launcher && (self.started || self.options.visible);
@@ -2027,7 +2050,7 @@ impl<S: 'static> Host<S> {
         };
         self.rt.set_system_dark(dark);
         self.rt.set_viewport((phys.width as f32 / scale, phys.height as f32 / scale), scale);
-        if self.shown || launcher {
+        if (self.shown || launcher) && !built {
             // Reopening paints the settled state in the first frame (guarantee 8).
             self.rt.settle_all();
         }

@@ -15,7 +15,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   panel's cached pixels, a prewarmed macOS overlay's retained commit) still refresh it, but at
   most every 250 ms: the first change after a quiet spell renders at once, later ones wait. A
   show whose state changed since that frame renders it first, as for an update in the same
-  turn.
+  turn. A `scroll_to_bottom`, `scroll_into_view` or `fly_text` asked for while hidden counts
+  as a change; a `wake_after` alone doesn't. A window with `fit_content_height` whose content
+  changed while hidden builds it as it shows and opens at the new height.
 - **Occluded windows and overlays no longer spin or leak; per-surface frame stats.** A surface
   whose drawable acquisition kept failing (covered, or the displays asleep) could retry at once,
   and an overlay's failed re-acquire turned the loop with `ControlFlow::Poll`. Every miss now

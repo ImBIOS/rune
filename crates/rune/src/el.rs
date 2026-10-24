@@ -64,6 +64,12 @@ impl Tx {
     /// Whether this runtime has an attached motion or tooling trace.
     pub fn tracing(&self) -> bool { self.trace.is_some() }
 
+    /// Work only a frame carries out that changes its pixels without a model change: a scroll
+    /// or a text flight. A `wake_after` only schedules.
+    pub(crate) fn frame_work(&self) -> bool {
+        !self.scroll_to.is_empty() || !self.scroll_bottom.is_empty() || !self.text_flights.is_empty()
+    }
+
     /// An app marker on the next frame, e.g. `tx.trace_event(format_args!("lab:{step:?}"))`.
     /// Formatting is skipped when tracing is off. Avoid eagerly constructing a `String`.
     pub fn trace_event(&mut self, event: impl std::fmt::Display) {
