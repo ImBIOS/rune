@@ -3012,6 +3012,7 @@ dependencies = [
  "arboard",
  "blake3",
  "block2 0.5.1",
+ "block2 0.6.2",
  "bytemuck",
  "csscolorparser",
  "dioxus-devtools",
