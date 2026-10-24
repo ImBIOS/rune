@@ -14,8 +14,9 @@
 //!
 //! Windows start the session from the mouse-dragged event AppKit is delivering. Overlay panels
 //! track the pointer by polling, so there may be no such event; the overlay then builds a
-//! dragged event at the current mouse location. The window path is tested on a real desktop;
-//! the overlay path compiles and runs the same code but has no GUI test yet.
+//! dragged event at the current mouse location. Both paths have GUI tests on a real desktop
+//! (`tests/macos_drag_out.rs`, and `tests/macos_overlay_drag_out.rs` for a non-activating
+//! overlay that takes input only on its hit regions).
 
 use crate::color::{Color, srgb_decode, srgb_encode};
 use std::path::{Path, PathBuf};
