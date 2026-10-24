@@ -2441,8 +2441,7 @@ impl<S: 'static> Runtime<S> {
     /// How far scroll viewport `i`'s content reaches past its bottom, negative while it fits.
     fn scroll_overflow(&self, i: usize) -> f64 {
         let view = self.nodes[i].target;
-        let content = (i + 1..self.nodes.len()).find(|&j| self.nodes[j].parent == Some(i));
-        let content_h = content.map_or(0.0, |c| {
+        let content_h = self.scroll_content(i).map_or(0.0, |c| {
             let n = &self.nodes[c];
             let top = n.target[1] - view[1];
             f64::from(top) + self.stack_extent(c).unwrap_or(f64::from(n.target[3] - n.target[1]))

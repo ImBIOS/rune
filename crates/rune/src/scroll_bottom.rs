@@ -88,7 +88,7 @@ impl<S: 'static> Runtime<S> {
         let n = &self.nodes[i];
         let st = self.scrolls.get(&n.id).filter(|st| st.pinned)?;
         if !n.scroll.is_some_and(|s| s.stick_bottom) { return None; }
-        let c = (i + 1..self.nodes.len()).find(|&j| self.nodes[j].parent == Some(i))?;
+        let c = self.scroll_content(i)?;
         let lag = self.stuck_lag(i, c, bottom)?;
         // How far the rows end above the bottom in the layout (negative past it), beside the
         // stack's own bottom padding and border.
@@ -105,8 +105,13 @@ impl<S: 'static> Runtime<S> {
 
     /// The offset that draws viewport `i`'s content bottom on its presented bottom `bottom`.
     pub(super) fn bottom_offset(&self, i: usize, bottom: f32) -> Option<f64> {
-        let c = (i + 1..self.nodes.len()).find(|&j| self.nodes[j].parent == Some(i))?;
+        let c = self.scroll_content(i)?;
         Some(self.scroll_overflow(i) + self.stuck_lag(i, c, bottom)?)
+    }
+
+    /// Scroll viewport `i`'s content: its first child.
+    pub(super) fn scroll_content(&self, i: usize) -> Option<usize> {
+        (i + 1..self.nodes.len()).find(|&j| self.nodes[j].parent == Some(i))
     }
 
     /// How much further content `c` of viewport `i` has to travel to its layout than the
