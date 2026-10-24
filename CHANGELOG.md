@@ -5,6 +5,21 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Help tooltips.** `El::help("…")` shows a tooltip after the system hover delay, as SwiftUI's
+  `.help`. A press, scroll, key or the pointer leaving hides it until the pointer comes back. It
+  takes no hover or clicks. macOS windows use AppKit's own tooltip; elsewhere, and headless,
+  Rune draws one (0.5 s, the double-click time on Windows; `Runtime::help_delay`). Headless
+  `--snap` shows the drawn tooltip, and `--tree` gains a top-level `tooltip` plus `help` on each
+  element. `ElementInfo` gains `help` and `selected`. Elements without `help` are unchanged.
+- **Selectable text.** `El::selectable(true)` lets people select and copy read-only text, as
+  SwiftUI's `.textSelection(.enabled)`: drag, double-click a word, triple-click a paragraph,
+  shift-click to extend, Cmd/Ctrl+C, Cmd/Ctrl+A, and a Copy context menu on macOS. While text
+  holds a selection, Cmd/Ctrl+C and Cmd/Ctrl+A go to it before the view's key handlers; with nothing
+  selected they fall through as before. A link inside selectable text still opens on click.
+  Scripts gain a `triple-click` event. Text without `selectable` is unchanged.
+- **`El::selection_color`** sets the selection highlight of a field or selectable text; both
+  draw it the same way, and fields draw exactly as before. Kit's `k.selection()` is the colour
+  its fields use (unchanged), so selectable text can match them.
 - **Radial and angled linear gradients, opt-in sRGB blending, and shadow blur docs.**
   `El::radial_gradient(center, radius, stops)` draws circular (`f32`) or elliptical (`[rx, ry]`)
   radial gradients with up to 8 `(f32, Color)` stops in `0.0..=1.0` in the instanced uber-quad

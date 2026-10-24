@@ -88,6 +88,11 @@ scene; there is no matching combobox Storybook story to diff.
 `TextInput::on_key` intercepts a focused field's keys before editing; `on_change` runs after
 text changes and receives a `Tx`, for filtering and exact debounce wakes.
 
+`k.selection()` is the selection highlight TextInput and TextArea draw. Pass it to Rune's
+selectable text so a selected command line looks like a selected field:
+`text(cmd).selectable(true).selection_color(k.selection())`. `rune-text--selectable-help` in the
+gallery shows both, with an icon button explained by `.help`.
+
 Button (10 variants × 3 sizes × 5 states), IconButton, Switch (compact, standard), Checkbox,
 RadioGroup/RadioItem, TextInput, TextArea, TextField (older), Field, Select (inline and field
 triggers, grouped), Popover, Menu (compact and standard, checkbox/radio items, submenus,

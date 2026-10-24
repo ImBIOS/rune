@@ -574,6 +574,43 @@ growth-spring progress drives the screen-space handoff; reduced motion uses a
 150 ms crossfade. `settle()` lands it immediately. Neither view code nor handlers
 measure presentation geometry.
 
+### Selectable text
+
+`text(..).selectable(true)` lets people select and copy read-only text, as SwiftUI's
+`.textSelection(.enabled)`: drag across it, double-click a word, triple-click a paragraph,
+shift-click to extend. Cmd+C (Ctrl+C off macOS) copies and Cmd+A selects all of it while it holds
+the selection; a right-click opens a native Copy menu on macOS unless the element has its own
+`on_secondary_press`. It shows the I-beam (a link inside it keeps the pointing hand and opens on
+click), isn't a Tab stop, and a press anywhere else clears it. One text holds the selection at a
+time. It works across spans, wrapped lines and bidi runs.
+
+The selection lives in the runtime, so selecting never re-runs the view or re-lays out the text.
+`El::selection_color` sets the highlight for selectable text and text fields alike, and both draw
+it the same way; kit's `k.selection()` is the colour its `TextInput` uses, so pass it to match.
+`Runtime::text_selection()` and `selected_text()` read the selection; `--tree` marks the text's
+node `selected` with the selected string, and scripts gain a `triple-click` event.
+
+```rust
+text(&command).font(k.ty.mono).selectable(true).selection_color(k.selection())
+```
+
+### Help tooltips
+
+`.help("Copy command")` shows a tooltip after the system hover delay while the pointer rests on
+an element, as SwiftUI's `.help`. A press, scroll, key or the pointer leaving hides it, and it
+stays hidden until the pointer leaves and comes back. It follows the element if it moves, and it
+takes no hover or clicks from anything under it.
+
+On macOS it's AppKit's own tooltip: the window registers each help rect with
+`addToolTipRect:owner:userData:` and re-registers only when they change, so the delay, look and
+placement are the system's. Elsewhere Rune draws it: Windows' tooltip control and GTK's would need
+to own the window procedure or toolkit that winit already owns, and Linux and the web have no
+toolkit-free tooltip API. The drawn tooltip waits 0.5 s (the double-click time on Windows; set
+`Runtime::help_delay` to change it), sits under the element or above it when there's no room,
+stays inside the window, and follows the theme's light or dark appearance. Headless runs always
+draw it, so `--snap` shows it and `--tree` has a top-level `tooltip` object.
+`Runtime::help_regions()` and `help_tooltip()` read them; `--tree` carries each element's `help`.
+
 ### File dialogs
 
 Enable Rune's `native-file-dialog` feature and inject `FileDialogs::native()` in the shell.
