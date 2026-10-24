@@ -3025,9 +3025,11 @@ impl<S: 'static> Runtime<S> {
             let inside = |p: Option<(f32, f32)>| p.is_some_and(|(x, y)| contains(r, x, y));
             inside(self.pointer) != inside(Some((x, y)))
         });
+        // Reaching or leaving a help element starts or ends its tooltip's wait.
+        let help_changed = self.help_target_changes(x, y);
         let (queued, capture_inside) = (self.queue.len(), self.capture_inside);
         self.pointer_move(x, y);
-        visual_changed || self.queue.len() != queued || self.capture_inside != capture_inside
+        visual_changed || help_changed || self.queue.len() != queued || self.capture_inside != capture_inside
     }
 
     pub(crate) fn pointer_captured(&self) -> bool { self.capture.is_some() || self.secondary_capture.is_some() }

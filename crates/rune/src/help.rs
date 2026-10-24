@@ -25,6 +25,19 @@ pub(super) struct HelpState {
     regions: Vec<([f32; 4], String)>,
 }
 
+fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool {
+    a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+}
+
+/// `a` minus `b` (x0 y0 x1 y1), as up to four rects: the bands above and below `b`, then the
+/// pieces left and right of it.
+fn subtract(a: [f32; 4], b: [f32; 4]) -> Vec<[f32; 4]> {
+    if !overlaps(a, b) { return vec![a]; }
+    let (y0, y1) = (b[1].max(a[1]), b[3].min(a[3]));
+    [[a[0], a[1], a[2], y0], [a[0], y1, a[2], a[3]], [a[0], y0, b[0].max(a[0]), y1], [b[2].min(a[2]), y0, a[2], y1]]
+        .into_iter().filter(|r| r[2] > r[0] && r[3] > r[1]).collect()
+}
+
 const PAD: [f32; 2] = [7.0, 4.0];
 const GAP: f32 = 6.0;
 const MAX_W: f32 = 300.0;
@@ -79,14 +92,39 @@ impl<S: 'static> Runtime<S> {
         Some(h)
     }
 
+    /// Whether moving the pointer to (x, y) changes the help element under it, so a host that
+    /// skips frames for unchanged pixels still starts or ends a tooltip's wait.
+    pub(super) fn help_target_changes(&self, x: f32, y: f32) -> bool {
+        if self.help.native || self.help.hits.is_empty() && self.help.target.is_none() { return false; }
+        let at = self.help_at(x, y).map(|i| self.nodes[i].path.as_str());
+        at != self.help.target.as_ref().map(|(p, _)| p.as_str())
+    }
+
+    /// The parts of help element `h`'s rect `r` that nothing interactive drawn over it (not
+    /// inside it), from hit `seq` on, covers.
+    fn unoccluded(&self, h: usize, r: [f32; 4], seq: usize) -> Vec<[f32; 4]> {
+        let mut parts = vec![r];
+        for &(id, o) in &self.hits[seq.min(self.hits.len())..] {
+            if !parts.iter().any(|p| overlaps(*p, o)) { continue; }
+            let Some(&t) = self.node_index.get(&id) else { continue };
+            if std::iter::successors(Some(t), |&p| self.nodes[p].parent).any(|p| p == h) { continue; }
+            parts = parts.into_iter().flat_map(|p| subtract(p, o)).collect();
+        }
+        parts
+    }
+
     /// After `build`'s hits: track the rest, show or hide the tooltip and draw it.
     pub(super) fn update_help(&mut self) {
         self.help.regions.clear();
         if self.help.native {
-            let regions = self.help.hits.iter().filter_map(|&(id, r, _)| {
-                let i = *self.node_index.get(&id)?;
-                Some((r, self.nodes[i].help.clone()?))
-            }).collect();
+            // Nothing behind a modal, and only where nothing else is drawn over the element.
+            let mut regions = Vec::new();
+            for &(id, r, seq) in &self.help.hits {
+                let Some(&i) = self.node_index.get(&id) else { continue };
+                let Some(text) = &self.nodes[i].help else { continue };
+                if self.subtree_exiting(i) || !self.allowed(i) { continue; }
+                regions.extend(self.unoccluded(i, r, seq).into_iter().map(|p| (p, text.clone())));
+            }
             self.help.regions = regions;
             self.help.tip = None;
             return;
@@ -155,5 +193,71 @@ impl<S: 'static> Runtime<S> {
             self.instances.extend(glyph_or_image(q, &self.text, &mut self.images, premul(ink, 1.0, srgb), gamma, NO_CLIP, [0.0; 4]));
         }
         self.help.tip = Some((text, [x, y, w, h]));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Cx, El, Env, el, row};
+    use super::{Runtime, subtract};
+
+    #[derive(Default)]
+    struct S { modal: bool, cover: bool }
+
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        let mut root = el().w_full().h_full()
+            .child(el().key("copy").size(40.0, 20.0).pin(Some(20.0), Some(20.0), None, None).help("Copy"))
+            .child(el().key("low").size(40.0, 20.0).pin(Some(20.0), Some(200.0), None, None).help("Low"));
+        if s.cover {
+            // A popover drawn over the right half of "copy".
+            root = root.child(el().key("pop").size(100.0, 60.0).pin(Some(40.0), Some(10.0), None, None).on_press(|_: &mut S| {}));
+        }
+        if s.modal {
+            root = root.child(row().key("sheet").size(80.0, 40.0).pin(Some(200.0), Some(200.0), None, None)
+                .modal(false, |_: &mut S| {})
+                .child(el().key("inside").size(30.0, 20.0).help("Inside")));
+        }
+        root
+    }
+
+    fn runtime(s: S, native: bool) -> Runtime<S> {
+        let mut rt = Runtime::new(s, view, (300.0, 300.0), Env::new(true, 2.0));
+        rt.help.native = native;
+        rt.frame(0.0);
+        rt
+    }
+
+    fn texts(rt: &Runtime<S>) -> Vec<&str> { rt.help_regions().iter().map(|(_, t)| t.as_str()).collect() }
+
+    #[test]
+    fn native_regions_skip_what_a_modal_or_popover_covers() {
+        let rt = runtime(S::default(), true);
+        assert_eq!(texts(&rt), ["Copy", "Low"]);
+        let rt = runtime(S { modal: true, ..S::default() }, true);
+        assert_eq!(texts(&rt), ["Inside"], "behind a modal, nothing registers");
+        let rt = runtime(S { cover: true, ..S::default() }, true);
+        let copy: Vec<[f32; 4]> = rt.help_regions().iter().filter(|(_, t)| t == "Copy").map(|(r, _)| *r).collect();
+        assert_eq!(copy, [[20.0, 20.0, 40.0, 40.0]], "only the uncovered half of copy");
+    }
+
+    #[test]
+    fn subtract_leaves_what_is_outside() {
+        assert_eq!(subtract([0.0, 0.0, 10.0, 10.0], [20.0, 0.0, 30.0, 10.0]), [[0.0, 0.0, 10.0, 10.0]]);
+        assert_eq!(subtract([0.0, 0.0, 10.0, 10.0], [-1.0, -1.0, 11.0, 11.0]), Vec::<[f32; 4]>::new());
+        assert_eq!(subtract([0.0, 0.0, 10.0, 10.0], [4.0, 4.0, 6.0, 6.0]).len(), 4);
+    }
+
+    #[test]
+    fn reaching_help_wakes_a_host_that_skips_unchanged_frames() {
+        // An overlay draws only when observe_pointer says something changed; help that has no
+        // hover paint of its own must still start its wait.
+        let mut rt = runtime(S::default(), false);
+        assert!(!rt.observe_pointer(150.0, 150.0), "nothing there");
+        assert!(rt.observe_pointer(30.0, 30.0), "onto help");
+        rt.frame(1.0 / 60.0);
+        assert!(!rt.observe_pointer(31.0, 30.0), "still on it");
+        rt.frame(rt.help_delay);
+        assert!(rt.help_tooltip().is_some());
+        assert!(rt.observe_pointer(150.0, 150.0), "off it hides the tooltip");
     }
 }
