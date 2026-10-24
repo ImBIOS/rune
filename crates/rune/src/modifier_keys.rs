@@ -2,6 +2,8 @@
 //!
 //! Hosts already pass every physical key, modifiers included, to `physical_with_fallback`, so
 //! the logical event is made here once for windows, overlays, layer surfaces and headless runs.
+//! It is made in queue order, once the focused `on_physical_input` handler has declined the
+//! physical event, so a shortcut recorder sees modifiers first, as it sees every key.
 //! Presses come only from physical keys. A release also comes from a modifier that a
 //! `PhysicalInput::Modifiers` turns off while its key is down (a key-up the platform never
 //! sent), and every held key is released on `FocusLost`.
@@ -77,6 +79,10 @@ fn with(mut mods: Mods, m: Modifier, on: bool) -> Mods {
     mods
 }
 
+/// Windows clears Control and Alt in the flags while AltGr (Right Alt) is down, even with
+/// Left Control or Left Alt held.
+const ALTGR_CLEARS_FLAGS: bool = cfg!(target_os = "windows");
+
 impl ModifierKeys {
     fn event(&self, m: Modifier, pressed: bool, mods: Mods) -> KeyEvent {
         // Platforms differ on whether a modifier's own key event carries the flags from
@@ -84,30 +90,54 @@ impl ModifierKeys {
         KeyEvent { key: Key::Modifier { modifier: m, pressed }, mods: with(mods, m, self.held & pair(m) != 0) }
     }
 
-    /// A modifier key going down or up. None for other keys, repeats, and a press or release
-    /// that changes nothing (a release already sent, or a press while held).
-    fn key(&mut self, code: Code, pressed: bool, repeat: bool, mods: Mods) -> Option<KeyEvent> {
-        let m = modifier(code).filter(|_| self.enabled && !repeat)?;
-        if (self.held & bit(m) != 0) == pressed { return None; }
-        self.held ^= bit(m);
-        Some(self.event(m, pressed, mods))
+    /// The keys `event` presses and releases, without changing anything. A press while held,
+    /// a release not held and a repeat change nothing. `Modifiers` releases held keys whose
+    /// flag turns off (Fn has none, so only its key-up or focus loss ends it); `FocusLost`
+    /// releases them all.
+    fn changes(&self, event: &PhysicalInput, altgr_clears: bool) -> (u16, u16) {
+        if !self.enabled { return (0, 0); }
+        match *event {
+            PhysicalInput::Key { key, pressed, repeat, .. } => match modifier(key) {
+                Some(m) if !repeat && (self.held & bit(m) != 0) != pressed => if pressed { (bit(m), 0) } else { (0, bit(m)) },
+                _ => (0, 0),
+            },
+            PhysicalInput::Modifiers(now) => {
+                let altgr = altgr_clears && self.held & bit(Modifier::AltRight) != 0;
+                let lifted = ALL.into_iter().filter(|&m| {
+                    use Modifier::*;
+                    let cleared = altgr && matches!(m, ControlLeft | ControlRight | AltLeft | AltRight);
+                    self.held & bit(m) != 0 && active(self.last, m) && !active(now, m) && !cleared
+                });
+                (0, lifted.fold(0, |all, m| all | bit(m)))
+            }
+            PhysicalInput::FocusLost => (0, self.held),
+        }
     }
 
-    /// Releases for held keys that `event` shows are up: every one on `FocusLost`, and those
-    /// whose flag `Modifiers` turns off (Fn has none, so only its key-up or focus loss ends it).
-    fn releases(&mut self, event: &PhysicalInput) -> Vec<KeyEvent> {
-        let (now, all) = match *event {
-            PhysicalInput::Modifiers(mods) => (mods, false),
-            PhysicalInput::FocusLost => (Mods::default(), true),
-            PhysicalInput::Key { .. } => return Vec::new(),
+    /// Whether `event` presses or releases a modifier key.
+    fn pending(&self, event: &PhysicalInput) -> bool { self.changes(event, ALTGR_CLEARS_FLAGS) != (0, 0) }
+
+    /// Takes `event` in, with the `Key::Modifier` events it makes. None when a physical handler
+    /// `consumed` it: a press it took is never held, so its release is never sent either, and a
+    /// release or focus loss it took ends held keys silently. That is the one way `on_key` sees
+    /// a press without its release: a handler, such as a shortcut recorder that starts while a
+    /// modifier is down, takes the key-up.
+    fn apply(&mut self, event: &PhysicalInput, consumed: bool, altgr_clears: bool) -> Vec<KeyEvent> {
+        let (pressed, released) = self.changes(event, altgr_clears);
+        let mods = match *event {
+            PhysicalInput::Key { mods, .. } => mods,
+            PhysicalInput::Modifiers(now) => { self.last = now; now }
+            PhysicalInput::FocusLost => { self.last = Mods::default(); Mods::default() }
         };
-        let last = std::mem::replace(&mut self.last, now);
-        if !self.enabled { self.held = 0; }
         let mut out = Vec::new();
         for m in ALL {
-            if self.held & bit(m) == 0 || !(all || (active(last, m) && !active(now, m))) { continue; }
-            self.held &= !bit(m);
-            out.push(self.event(m, false, now));
+            if pressed & bit(m) != 0 && !consumed {
+                self.held |= bit(m);
+                out.push(self.event(m, true, mods));
+            } else if released & bit(m) != 0 {
+                self.held &= !bit(m);
+                if !consumed { out.push(self.event(m, false, mods)); }
+            }
         }
         out
     }
@@ -117,23 +147,25 @@ impl<S: 'static> Runtime<S> {
     /// Send `Key::Modifier` presses and releases to `on_key` and the focused input's key
     /// handler. Off by default: handlers written before it may act on any key.
     pub fn set_modifier_keys(&mut self, enabled: bool) {
+        if self.modifier_keys.enabled != enabled { self.modifier_keys.held = 0; }
         self.modifier_keys.enabled = enabled;
     }
 
     pub fn modifier_keys(&self) -> bool { self.modifier_keys.enabled }
 
-    /// The logical event for a physical modifier key, if it is one and modifier keys are on.
-    pub(super) fn modifier_key(&mut self, event: &PhysicalInput) -> Option<KeyEvent> {
-        let PhysicalInput::Key { key, mods, pressed, repeat } = *event else { return None };
-        self.modifier_keys.key(key, pressed, repeat, mods)
-    }
+    /// Whether `event` presses or releases a modifier key, which needs a frame to deliver.
+    pub(super) fn modifier_pending(&self, event: &PhysicalInput) -> bool { self.modifier_keys.pending(event) }
 
-    /// Queue releases for held modifier keys that `event` shows are up; true if any.
-    pub(super) fn modifier_releases(&mut self, event: &PhysicalInput) -> bool {
-        let released = self.modifier_keys.releases(event);
-        let any = !released.is_empty();
-        self.queue.extend(released.into_iter().map(|ev| Action::Key { ev, repeat: false }));
-        any
+    /// After the focused physical handler saw `event` (and `consumed` it or not): route the
+    /// modifier keys it presses and releases. True if a handler took one.
+    pub(super) fn modifier_dispatch(&mut self, event: &PhysicalInput, consumed: bool, tx: &mut Tx) -> bool {
+        let mut ran = false;
+        for ev in self.modifier_keys.apply(event, consumed, ALTGR_CLEARS_FLAGS) {
+            let mut one = self.transaction();
+            ran |= self.route_modifier(&ev, &mut one);
+            merge(tx, one);
+        }
+        ran
     }
 
     /// A modifier key goes to the app and the focused input's key handler, in `route_key`'s
@@ -162,7 +194,8 @@ mod tests {
     use crate::{Cx, El, Env, KeySide, TextEdit, TextStyle, col, el, text_input};
 
     #[derive(Default)]
-    struct Keys { edit: TextEdit, app: Vec<KeyEvent>, field: Vec<KeyEvent>, field_takes: bool, chords: usize }
+    struct Keys { edit: TextEdit, app: Vec<KeyEvent>, field: Vec<KeyEvent>, field_takes: bool, chords: usize,
+        recording: bool, recorded: Vec<PhysicalInput> }
     fn view(s: &Keys, _: &mut Cx<Keys>) -> El {
         col().size(300.0, 200.0)
             .child(text_input(&s.edit, TextStyle::new(14.0, 400.0)).single_line().key("field").size(200.0, 32.0)
@@ -173,6 +206,12 @@ mod tests {
                     s.field_takes
                 }))
             .child(el().key("blank").size(100.0, 40.0))
+            // A shortcut recorder: it takes every key while recording.
+            .child(el().key("recorder").size(100.0, 40.0).focusable(true)
+                .on_physical_input(|s: &mut Keys, ev, _| {
+                    if s.recording { s.recorded.push(*ev); }
+                    s.recording
+                }))
     }
     fn runtime(enabled: bool) -> Runtime<Keys> {
         let mut rt = Runtime::new(Keys::default(), view, (300.0, 200.0), Env::new(true, 1.0));
@@ -333,5 +372,74 @@ mod tests {
         assert_eq!(modifiers(&rt.state.app), [(Modifier::AltRight, true)]);
         modifier(&mut rt, Code::AltRight, false, SHIFT);
         assert_eq!(modifiers(&rt.state.app), [(Modifier::AltRight, true), (Modifier::AltRight, false)]);
+    }
+
+    #[test]
+    fn a_recorder_takes_modifiers_first_and_on_key_never_hears_half_of_what_it_took() {
+        let mut rt = runtime(true);
+        click(&mut rt, "recorder");
+        rt.state.recording = true;
+        // Recording ⌥K: the recorder takes every key, and on_key hears none of it.
+        modifier(&mut rt, Code::AltLeft, true, Mods::default());
+        flags(&mut rt, ALT);
+        rt.physical_with_fallback(PhysicalInput::Key { key: Code::KeyK, mods: ALT, pressed: true, repeat: false },
+            Some(KeyEvent { key: Key::Text("k".into()), mods: ALT }));
+        rt.frame(0.0);
+        rt.state.recording = false;
+        assert!(!flags(&mut rt, Mods::default()), "Option's flag off is no release: its press was taken");
+        assert!(!modifier(&mut rt, Code::AltLeft, false, ALT), "nor is its key-up");
+        assert_eq!(rt.state.recorded.len(), 3);
+        assert!(rt.state.app.is_empty());
+        // A release the recorder takes ends the key silently, so the next press is heard.
+        modifier(&mut rt, Code::ShiftLeft, true, Mods::default());
+        rt.state.recording = true;
+        modifier(&mut rt, Code::ShiftLeft, false, SHIFT);
+        modifier(&mut rt, Code::AltRight, true, Mods::default());
+        rt.state.recording = false;
+        modifier(&mut rt, Code::ShiftLeft, true, Mods::default());
+        assert_eq!(modifiers(&rt.state.app), [(Modifier::ShiftLeft, true), (Modifier::ShiftLeft, true)]);
+        // A focus loss the recorder takes ends held keys silently, releases included.
+        rt.state.recording = true;
+        rt.physical_input(PhysicalInput::FocusLost);
+        rt.frame(0.0);
+        rt.state.recording = false;
+        assert!(matches!(rt.state.recorded.last(), Some(PhysicalInput::FocusLost)));
+        assert_eq!(rt.state.app.len(), 2);
+        assert!(!modifier(&mut rt, Code::ShiftLeft, false, SHIFT), "Shift was already ended");
+        modifier(&mut rt, Code::AltRight, true, Mods::default());
+        assert_eq!(modifiers(&rt.state.app)[2..], [(Modifier::AltRight, true)], "a key the recorder took is heard next time");
+    }
+
+    #[test]
+    fn a_focus_move_inside_the_window_keeps_modifiers_held() {
+        let mut rt = runtime(true);
+        modifier(&mut rt, Code::ShiftLeft, true, Mods::default());
+        click(&mut rt, "recorder");
+        click(&mut rt, "field");
+        modifier(&mut rt, Code::ShiftLeft, false, SHIFT);
+        assert_eq!(modifiers(&rt.state.app), [(Modifier::ShiftLeft, true), (Modifier::ShiftLeft, false)]);
+    }
+
+    #[test]
+    fn windows_altgr_clearing_control_and_alt_is_no_release() {
+        let key = |key, pressed, mods| PhysicalInput::Key { key, mods, pressed, repeat: false };
+        let ctrl = Mods { ctrl: true, ..Mods::default() };
+        let sent = |out: Vec<KeyEvent>| modifiers(&out);
+        for altgr_clears in [true, false] {
+            let mut keys = ModifierKeys { enabled: true, ..ModifierKeys::default() };
+            keys.apply(&key(Code::ControlLeft, true, Mods::default()), false, altgr_clears);
+            keys.apply(&PhysicalInput::Modifiers(ctrl), false, altgr_clears);
+            keys.apply(&key(Code::AltRight, true, ctrl), false, altgr_clears);
+            // Windows clears both flags while AltGr is down; X11 and Wayland leave Control on.
+            let cleared = sent(keys.apply(&PhysicalInput::Modifiers(Mods::default()), false, altgr_clears));
+            if !altgr_clears {
+                assert_eq!(cleared, [(Modifier::ControlLeft, false)], "elsewhere a flag off is a key-up");
+                continue;
+            }
+            assert!(cleared.is_empty(), "Left Control is still down");
+            assert_eq!(sent(keys.apply(&key(Code::AltRight, false, Mods::default()), false, true)), [(Modifier::AltRight, false)]);
+            assert!(sent(keys.apply(&PhysicalInput::Modifiers(ctrl), false, true)).is_empty());
+            assert_eq!(sent(keys.apply(&key(Code::ControlLeft, false, ctrl), false, true)), [(Modifier::ControlLeft, false)]);
+        }
     }
 }

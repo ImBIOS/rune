@@ -9,7 +9,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   `WindowSpec::modifier_keys()` and `ConfiguredOverlay::modifier_keys()`) sends Shift, Control,
   Option/Alt, Command/Super and Fn going down and up as `Key::Modifier { modifier, pressed }`,
   with the side in `Modifier` (`ShiftLeft`, `AltRight`, …, `Modifier::side()`). `mods` hold
-  the state after the change. Nothing changes for apps that don't opt in, but `Key` has a new
+  the state after the change. A focused `on_physical_input` handler, such as a shortcut
+  recorder, hears the key first, and one it takes is never sent. A blur releases every key
+  held. Nothing changes for apps that don't opt in, but `Key` has a new
   variant, so an exhaustive `match` on `Key` with no `_` arm stops compiling: add
   `Key::Modifier { .. } => …` or a `_` arm.
 - **`App::try_run` returns startup errors.** `App::try_run`, `try_run_windows_with` and

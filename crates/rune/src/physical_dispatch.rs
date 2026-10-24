@@ -12,28 +12,23 @@ impl<S: 'static> Runtime<S> {
     /// A modifier key still gets its `Key::Modifier` when modifier keys are on.
     pub fn physical_input(&mut self, event: PhysicalInput) {
         self.observe_mods(&event);
-        let fallback = self.modifier_key(&event).map(|key| Fallback { key });
-        self.queue.push(Action::Physical(event, fallback));
+        self.queue.push(Action::Physical(event, None));
     }
     /// Shift held now decides whether the next press extends a text selection, ahead of the
-    /// queue the press itself skips. A key press hides a tooltip. True when it queued the
-    /// release of a modifier key the event shows is up.
-    fn observe_mods(&mut self, event: &PhysicalInput) -> bool {
+    /// queue the press itself skips. A key press hides a tooltip.
+    fn observe_mods(&mut self, event: &PhysicalInput) {
         match event {
             PhysicalInput::Modifiers(m) => self.text_sel.shift = m.shift,
             PhysicalInput::FocusLost => { self.text_sel.shift = false; self.dismiss_help(); }
             PhysicalInput::Key { pressed: true, .. } => self.dismiss_help(),
             _ => {}
         }
-        self.modifier_releases(event)
     }
     /// Return whether the native host needs to request a frame for this event.
     pub(crate) fn physical_with_fallback(&mut self, event: PhysicalInput, key: Option<KeyEvent>) -> bool {
-        let key = key.or_else(|| self.modifier_key(&event));
         if key.is_none() && matches!(event, PhysicalInput::Modifiers(_) | PhysicalInput::Key { pressed: false, .. }) {
             return self.physical_observation(event);
         }
-        if matches!(event, PhysicalInput::FocusLost) { self.modifier_releases(&event); }
         if !matches!(event, PhysicalInput::Key { pressed: false, .. }) { self.dismiss_help(); }
         self.queue.push(Action::Physical(event, key.map(|key| Fallback { key })));
         true
@@ -43,8 +38,9 @@ impl<S: 'static> Runtime<S> {
     /// At rest, only a consuming handler invalidates the view and requests a frame.
     pub(crate) fn physical_observation(&mut self, event: PhysicalInput) -> bool {
         let busy = !self.queue.is_empty();
-        // A modifier key's release, inferred from the flags, queues a key event that needs one.
-        if self.observe_mods(&event) || busy {
+        self.observe_mods(&event);
+        // The release of a modifier key the app hears needs a frame, in order like a press.
+        if self.modifier_pending(&event) || busy {
             self.queue.push(Action::Physical(event, None));
             return !busy;
         }
@@ -83,16 +79,11 @@ impl<S: 'static> Runtime<S> {
             }
             PhysicalInput::FocusLost | PhysicalInput::Modifiers(_) => {}
         }
-        let handler = self.focused.as_deref().and_then(|p| self.node(p))
-            .and_then(|n| n.focus.physical.clone());
         let repeat = matches!(event, PhysicalInput::Key { repeat: true, .. });
-        if let Some(handler) = handler {
-            let mut one = Tx { key_repeat: repeat, ..Tx::default() };
-            let consumed = handler(handler_state(&mut self.state), &event, &mut one);
-            merge(tx, one);
-            if consumed { return true; }
-        }
-        match fallback {
+        let consumed = self.offer_physical(&event, tx);
+        let modifier = self.modifier_dispatch(&event, consumed, tx);
+        if consumed { return true; }
+        modifier | match fallback {
             Some(Fallback { key }) => {
                 if key.key == crate::Key::Command('v') && self.accepts_paste() {
                     // Capture the target in event order, before another queued click can
@@ -109,9 +100,20 @@ impl<S: 'static> Runtime<S> {
             None => false,
         }
     }
+    /// The focused element's `on_physical_input` handler; true if it consumed `event`.
+    fn offer_physical(&mut self, event: &PhysicalInput, tx: &mut Tx) -> bool {
+        let Some(handler) = self.focused.as_deref().and_then(|p| self.node(p))
+            .and_then(|n| n.focus.physical.clone()) else { return false };
+        let mut one = Tx { key_repeat: matches!(event, PhysicalInput::Key { repeat: true, .. }), ..Tx::default() };
+        let consumed = handler(handler_state(&mut self.state), event, &mut one);
+        merge(tx, one);
+        consumed
+    }
+    /// Focus moving off an element inside the window: its handler hears `FocusLost`, and
+    /// modifier keys stay held.
     pub(super) fn physical_focus_lost(&mut self) -> bool {
         let mut tx = Tx::default();
-        let changed = self.dispatch_physical(PhysicalInput::FocusLost, None, &mut tx);
+        let changed = self.offer_physical(&PhysicalInput::FocusLost, &mut tx);
         merge(&mut self.pending, tx);
         changed
     }
