@@ -95,6 +95,10 @@ impl Tx {
     /// This schedules a frame, not a view commit; poll returns true if state changed.
     /// For debounce, keep the latest due time in app state and reschedule the remaining
     /// duration when an earlier wake arrives. No timer thread is created.
+    ///
+    /// `wake_after(Duration::ZERO)` from the poll asks for the next frame: a poll that steps
+    /// its own animation from the frame clock keeps a shown window or overlay drawing at the
+    /// display's rate this way, until it stops asking.
     pub fn wake_after(&mut self, duration: std::time::Duration) {
         self.wakes.push(duration);
     }

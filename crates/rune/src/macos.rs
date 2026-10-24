@@ -29,8 +29,8 @@ declare_class!(
         #[method(occlusionState)]
         fn occlusion_state(&self) -> usize {
             // wgpu skips nextDrawable for occluded windows. Permit only the explicit
-            // alpha-zero prewarm acquisition and a fade-in, which AppKit reports as occluded
-            // while its alpha is near zero; other visibility readbacks stay native.
+            // alpha-zero prewarm acquisition and a fade in or out, which AppKit reports as
+            // occluded while its alpha is near zero; other visibility readbacks stay native.
             if self.ivars().warming.get() || self.ivars().revealing.get() { 2 }
             else { unsafe { msg_send![super(self), occlusionState] } }
         }
@@ -467,7 +467,8 @@ pub(crate) struct Panel {
     visible: Cell<bool>,
     pointer_poll: Cell<Option<Instant>>,
     warming: Rc<Cell<bool>>,
-    /// A fade-in is running: the panel reads as visible until it finishes or hides.
+    /// A fade in or out is running: the panel reads as visible until it finishes, so a
+    /// fading-out overlay can still draw its exit.
     revealing: Rc<Cell<bool>>,
     /// Bumped by every alpha change, so a finished fade-out orders out only if nothing came after.
     fade: Rc<Cell<u64>>,
@@ -615,15 +616,15 @@ impl Panel {
         use objc2::runtime::{AnyClass, AnyObject};
         let generation = self.fade.get() + 1;
         self.fade.set(generation);
-        let revealing = alpha > 0.0 && !duration.is_zero();
-        self.revealing.set(revealing);
+        let fading = !duration.is_zero();
+        self.revealing.set(fading);
         // SAFETY: AppKit calls on the main thread; the completion handler runs there too.
         unsafe {
             if let Some(context) = AnyClass::get("NSAnimationContext") {
                 let _: () = msg_send![context, beginGrouping];
                 let current: *mut AnyObject = msg_send![context, currentContext];
                 let _: () = msg_send![current, setDuration: duration.as_secs_f64()];
-                if (order_out || revealing) && !duration.is_zero() {
+                if fading {
                     let (panel, fade, flag) = (self.panel.clone(), self.fade.clone(), self.revealing.clone());
                     let done = block2::RcBlock::new(move || if fade.get() == generation {
                         flag.set(false);

@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Overlays draw through a fade-out.** `OverlayHandle::fade_out(d)` stops input at once but
+  keeps drawing until the fade ends (it used to stop drawing at once), so an exit transition
+  started in the same turn plays out as the window fades, and the panel isn't treated as
+  occluded while its alpha falls. Showing again mid-fade carries that motion on instead of
+  settling it. A shown overlay whose poll calls `tx.wake_after(Duration::ZERO)` now keeps its
+  display link running and polls every frame, instead of stopping after each frame and
+  restarting on a timer, so a poll stepping its own animation needs no looping element.
 - **`El::drag_threshold(points)`** sets how far the pointer travels before that element's
   `drag_out` starts, in place of `DRAG_THRESHOLD` (4 pt, 8 on Linux), which stays the default.
 - **Hidden overlays follow theme changes.** A hidden or prewarmed overlay switching between

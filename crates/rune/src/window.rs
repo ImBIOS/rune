@@ -760,8 +760,7 @@ pub(crate) const OCCLUDED_RETRY: Duration = Duration::from_millis(250);
 pub(crate) const OCCLUDED_MAX: Duration = Duration::from_secs(2);
 /// An unpaced surface's retry after a drawable timeout: about one frame.
 pub(crate) const TIMEOUT_RETRY: Duration = Duration::from_millis(16);
-/// Motion's frame interval on macOS when no display link paces a surface.
-#[cfg(target_os = "macos")]
+/// Motion's frame interval when no display link paces a surface.
 pub(crate) const TIMER_FRAME: Duration = Duration::from_micros(16_667);
 
 impl Missed {

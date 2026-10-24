@@ -172,7 +172,10 @@ impl<T: 'static> OverlayHandle<T> {
     }
 
     /// Like `hide`, fading the window's alpha out over `duration` on macOS before it orders
-    /// out. Input and drawing stop at once; showing again cancels the fade.
+    /// out. Input stops at once, but the overlay keeps drawing until the fade ends, so motion
+    /// started in the same turn (an exit transition, a poll stepping its own animation) plays
+    /// out during it. Showing again cancels the fade, and that motion carries on from where it
+    /// is. Elsewhere the overlay hides at once.
     pub fn fade_out(&self, duration: Duration) {
         self.request(|q| { q.visible = Some(false); q.fade = Some(duration); });
     }
@@ -255,6 +258,9 @@ pub(crate) struct Overlay<T: 'static> {
     setup: Option<fn(&mut T, Waker)>,
     pending_input: Option<OverlayInput>,
     visible: bool,
+    /// When a fade-out started by `OverlayHandle::fade_out` ends. Until then the hidden
+    /// overlay takes no input but keeps drawing, and isn't treated as occluded.
+    fading_out: Option<Instant>,
     options: OverlayOptions,
     canvas_size: (f32, f32),
     name: &'static str,
@@ -330,6 +336,7 @@ impl<T: 'static> Overlay<T> {
             setup,
             pending_input: None,
             visible: false,
+            fading_out: None,
             options,
             canvas_size: spec.size,
             name: spec.name,
@@ -380,20 +387,23 @@ impl<T: 'static> Overlay<T> {
     fn show_fading(&mut self, event_loop: &ActiveEventLoop, fade: Duration) {
         self.rt.set_system_dark(self.dark);
         if self.visible { return; }
+        // Shown again mid fade-out: the window is still up with current pixels, and its motion
+        // carries on rather than settling.
+        let fading = self.fading_out.take().is_some();
         let size = self.at.size;
         self.resolve_size(event_loop);
         if self.live.is_none() { self.prepare(event_loop); }
         if self.live.is_none() { return; }
         self.resume_live();
         if size != self.at.size { self.resized(event_loop); }
-        self.settle_before_reveal();
+        if !fading { self.settle_before_reveal(); }
         if let Some(Backing::Window(window)) = self.live.as_ref().map(|l| &l.backing) {
             let window = window.clone();
             self.place_window(event_loop, &window);
             if let Some(gpu) = self.gpu.clone() { self.rescale(&gpu, window.scale_factor() as f32); }
             // Retained alpha-zero hosts already have pixels. A hidden update must reach
             // the surface before exposing it, rather than flashing the old frame.
-            self.refresh_for_reveal_at(Instant::now());
+            if !fading { self.refresh_for_reveal_at(Instant::now()); }
             self.show_window(&window, fade);
         }
         self.visible = true;
@@ -461,14 +471,32 @@ impl<T: 'static> Overlay<T> {
 
     fn hide(&mut self) { self.hide_fading(Duration::ZERO) }
 
-    fn hide_fading(&mut self, fade: Duration) {
-        #[cfg(not(target_os = "macos"))]
-        let _ = fade;
+    /// Shown, or fading out: frames still draw.
+    fn drawing(&self) -> bool { self.visible || self.fading_out.is_some() }
+
+    /// A hidden overlay draws nothing more: its display link, timer frames and live values stop.
+    fn stop_drawing(&mut self) {
+        self.fading_out = None;
         #[cfg(target_os = "macos")]
         if let Some(live) = &mut self.live && let Some(pacing) = &mut live.pacing { pacing.stop(); }
         self.rt.set_live_visible(false);
-        self.visible = false;
         self.retry = None;
+    }
+
+    /// Ends a fade-out that has run its course.
+    fn end_fade_out(&mut self, now: Instant) {
+        if self.fading_out.is_some_and(|end| end <= now) { self.stop_drawing(); }
+    }
+
+    fn hide_fading(&mut self, fade: Duration) {
+        // Only macOS fades the window; elsewhere it goes at once, and so does drawing.
+        let fading = cfg!(target_os = "macos") && !fade.is_zero() && (self.visible || self.fading_out.is_some());
+        if fading {
+            self.fading_out = Some(Instant::now() + fade);
+        } else {
+            self.stop_drawing();
+        }
+        self.visible = false;
         self.popup.cancel(&mut self.rt);
         self.rt.cancel_pointer();
         self.apply_cursor();
@@ -982,7 +1010,7 @@ impl<T: 'static> Overlay<T> {
 
     /// Hidden, or shown but not on screen: no frame will come to run what's due.
     fn frameless(&self) -> bool {
-        !self.visible || self.is_occluded()
+        !self.drawing() || self.is_occluded()
     }
 
     fn advance_at(&mut self, now: Instant) {
@@ -1019,6 +1047,7 @@ impl<T: 'static> Overlay<T> {
     }
 
     fn wake_due(&mut self, now: Instant) {
+        self.end_fade_out(now);
         let deadline = crate::window::wall_wake_deadline(&self.rt);
         if deadline.is_some_and(|deadline| deadline <= now) {
             if !self.frameless() {
@@ -1156,7 +1185,8 @@ impl<T: 'static> Overlay<T> {
 
     /// Draws a frame if one is due; true while it needs more (animating).
     fn draw(&mut self) -> bool {
-        if !self.visible { return false; }
+        self.end_fade_out(Instant::now());
+        if !self.drawing() { return false; }
         let more = self.draw_frame(false);
         self.open_popup();
         more
@@ -1249,7 +1279,7 @@ impl<T: 'static> Overlay<T> {
             Err(missed) => {
                 if !prewarm {
                     #[cfg(target_os = "macos")]
-                    if missed == crate::window::Missed::Occluded { self.occluded(true); }
+                    if missed == crate::window::Missed::Occluded { self.set_occluded(true); }
                     self.missed(missed, paced);
                 }
                 return false;
@@ -1317,7 +1347,11 @@ impl<T: 'static> Overlay<T> {
         #[cfg(not(target_os = "macos"))]
         gpu.queue.present(frame);
         self.dirty = false;
-        self.idle = !(animating || self.rt.has_pending_input());
+        #[cfg(target_os = "macos")]
+        let period = live.pacing.as_ref().map_or(crate::window::TIMER_FRAME, |p| Duration::from_secs_f64(1.0 / p.refresh_hz()));
+        #[cfg(not(target_os = "macos"))]
+        let period = crate::window::TIMER_FRAME;
+        self.idle = idle_after(&self.rt, animating, Instant::now() + period);
         if !prewarm { self.occluded_wait = crate::window::OCCLUDED_RETRY; }
         // The display link wakes this overlay, never ControlFlow::Poll. Without one (it can't
         // be made while the displays sleep, or didn't start), a timer paces its motion.
@@ -1345,7 +1379,7 @@ impl<T: 'static> Overlay<T> {
         if occluded {
             if let Some(live) = &mut self.live && let Some(pacing) = &mut live.pacing { pacing.stop(); }
             self.rt.set_live_visible(false);
-        } else if self.visible {
+        } else if self.drawing() {
             self.dirty = true;
             self.occluded_wait = crate::window::OCCLUDED_RETRY;
             self.rt.set_live_visible(true);
@@ -1358,6 +1392,14 @@ impl<T: 'static> Overlay<T> {
     #[cfg(target_os = "macos")]
     fn sync_occlusion(&mut self) {
         let occluded = self.panel.as_ref().is_some_and(|p| p.occluded());
+        self.set_occluded(occluded);
+    }
+
+    /// Applies an occlusion reading. A fading-out panel reads as covered once its alpha nears
+    /// zero, but it's still drawing its exit, so it never becomes occluded mid-fade.
+    #[cfg(target_os = "macos")]
+    fn set_occluded(&mut self, occluded: bool) {
+        if occluded && self.fading_out.is_some() { return; }
         if occluded != self.occluded { self.occluded(occluded); }
     }
 
@@ -1372,6 +1414,14 @@ impl<T: 'static> Overlay<T> {
             None => live.pacing = crate::display_link::DisplayLink::new(window, wake.clone()),
         }
     }
+}
+
+/// Whether nothing asks for the frame after one just presented, due by `next_frame`. A timer
+/// due by then counts as asking: a poll stepping its own animation with
+/// `Tx::wake_after(Duration::ZERO)` gets every frame at the display's rate, instead of the
+/// display link stopping after each frame and a timer starting it again.
+fn idle_after<T: 'static>(rt: &Runtime<T>, animating: bool, next_frame: Instant) -> bool {
+    !(animating || rt.has_pending_input() || crate::window::wall_wake_deadline(rt).is_some_and(|due| due <= next_frame))
 }
 
 /// `draw_frame`'s animation step, apart from the surface so tests can drive it.
@@ -1413,7 +1463,7 @@ impl<T: 'static> AnyHost for Overlay<T> {
         let deadline = deadline.filter(|_| !self.live.as_ref().and_then(|l| l.pacing.as_ref()).is_some_and(|p| p.running()));
         #[cfg(target_os = "macos")]
         let deadline = deadline.into_iter().chain(self.panel.as_ref().filter(|_| !self.occluded).and_then(|p| p.pointer_deadline())).min();
-        deadline.into_iter().chain(self.retry.filter(|_| self.visible)).min()
+        deadline.into_iter().chain(self.retry.filter(|_| self.drawing())).chain(self.fading_out).min()
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -1449,7 +1499,9 @@ impl<T: 'static> AnyHost for Overlay<T> {
         // The panel's own state, which winit's source window forwards; kept while hidden too.
         #[cfg(target_os = "macos")]
         if let WindowEvent::Occluded(occluded) = event {
-            self.occluded(self.panel.as_ref().map_or(occluded, |p| p.occluded()));
+            let occluded = self.panel.as_ref().map_or(occluded, |p| p.occluded());
+            if occluded && self.fading_out.is_some() { return; }
+            self.occluded(occluded);
             return;
         }
         if let WindowEvent::Focused(focused) = &event {
@@ -1529,7 +1581,8 @@ impl<T: 'static> AnyHost for Overlay<T> {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) -> bool {
-        if !self.visible { return false; }
+        // A fading-out overlay takes no input; it only draws its exit.
+        if !self.visible { return self.draw(); }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         if let Some(live) = &self.live && let Some(x11) = &self.x11 && let Some((point, desktop)) = x11.take_pointer(live.scale) {
             self.observe_pointer(point.0, point.1);
@@ -1704,7 +1757,7 @@ mod tests {
     fn present<T: 'static>(overlay: &mut Overlay<T>, at: Instant) {
         let (animating, _) = step(&mut overlay.rt, &mut overlay.clock, &overlay.compositor, at, false);
         overlay.dirty = false;
-        overlay.idle = !(animating || overlay.rt.has_pending_input());
+        overlay.idle = idle_after(&overlay.rt, animating, at + FRAME);
     }
 
     fn width<T: 'static>(overlay: &Overlay<T>, key: &str) -> f32 {
@@ -1742,6 +1795,73 @@ mod tests {
             assert!(expected < 211.0, "the spring must still be moving at {t:?}: {expected}");
             assert!((got - expected).abs() < 0.01, "{what}: at {t:?} width={got}, unbroken cadence={expected}");
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_fading_out_overlay_draws_its_exit_until_the_fade_ends() {
+        let mut overlay = width_overlay("fade out");
+        overlay.visible = true;
+        overlay.rt.set_live_visible(true);
+        let start = Instant::now();
+        present(&mut overlay, start);
+        // The handler that fades the overlay out starts its exit in the same turn.
+        overlay.rt.update(|width, _| *width = 212.0);
+        overlay.dirty = true;
+        overlay.hide_fading(Duration::from_millis(150));
+        assert!(!overlay.visible, "input stops at once");
+        assert!(overlay.drawing() && !overlay.frameless(), "frames keep coming during the fade");
+        assert!(overlay.rt.live_visible());
+        overlay.set_occluded(true);
+        assert!(!overlay.occluded, "a panel fading toward alpha zero isn't occluded");
+        let end = overlay.fading_out.expect("fading out");
+        assert!(overlay.wake_deadline().is_some_and(|due| due <= end), "the loop wakes to end the fade");
+        let mut last = width(&overlay, "box");
+        for k in 1..=6 {
+            present(&mut overlay, start + k * FRAME);
+            let now = width(&overlay, "box");
+            assert!(now > last, "frame {k}: the exit moves ({last} -> {now})");
+            last = now;
+        }
+        assert!(!overlay.idle);
+        overlay.apply_wake(true, Vec::new());
+        assert!(overlay.dirty && !overlay.idle, "a wake mid-fade waits for the next drawn frame");
+        overlay.wake_due(end);
+        assert!(!overlay.drawing() && overlay.frameless(), "drawing stops when the fade ends");
+        assert!(!overlay.rt.live_visible());
+        assert_eq!(overlay.wake_deadline(), None);
+    }
+
+    #[test]
+    fn hiding_without_a_fade_stops_drawing_at_once() {
+        let mut overlay = width_overlay("hide");
+        overlay.visible = true;
+        overlay.rt.set_live_visible(true);
+        overlay.hide_fading(Duration::ZERO);
+        assert!(!overlay.drawing() && overlay.frameless() && !overlay.rt.live_visible());
+        overlay.hide_fading(Duration::from_millis(150));
+        assert!(!overlay.drawing(), "fading out an overlay that's already hidden draws nothing");
+    }
+
+    #[test]
+    fn a_poll_asking_for_the_next_frame_keeps_a_shown_overlay_stepping() {
+        fn view(_: &u32, _: &mut Cx<u32>) -> El { crate::el().key("box").size(10.0, 10.0) }
+        // Steps its own animation from the frame clock, as a port of a display-link loop does.
+        fn poll(steps: &mut u32, _: f64, tx: &mut Tx) -> bool {
+            *steps += 1;
+            if *steps < 4 { tx.wake_after(Duration::ZERO); }
+            true
+        }
+        let app = AppSpec { poll: Some(poll), ..AppSpec::new("frame poll", (100.0, 50.0), || 0, view) };
+        let (mut overlay, _) = Overlay::new(OverlaySpec::new("frame poll", app.size, view).options(Default::default()), 0, &app);
+        overlay.visible = true;
+        let start = Instant::now();
+        let idle: Vec<_> = (1..=5).map(|k| {
+            present(&mut overlay, start + k * FRAME);
+            overlay.idle
+        }).collect();
+        assert_eq!(overlay.rt.state, 5);
+        assert_eq!(idle, [false, false, false, true, true], "the display link runs while the poll asks for frames, and stops after");
     }
 
     #[test]
