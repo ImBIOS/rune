@@ -896,6 +896,9 @@ pub(crate) fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
             if e.press > 0.001 {
                 v["press"] = r2(e.press).into();
             }
+            if e.drag_out {
+                v["dragOut"] = true.into();
+            }
             v
         })
         .collect();

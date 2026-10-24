@@ -604,6 +604,8 @@ impl Renderer {
         if self.layer_stats().targets > 0 { self.position_layer_surfaces(queue); }
     }
 
+    pub(crate) fn format(&self) -> wgpu::TextureFormat { self.format }
+
     pub fn submit(&self, queue: &wgpu::Queue, encoder: wgpu::CommandEncoder) -> wgpu::SubmissionIndex {
         if let Some(s) = &self.surfaces { s.submit(queue,encoder) } else { queue.submit([encoder.finish()]) }
     }

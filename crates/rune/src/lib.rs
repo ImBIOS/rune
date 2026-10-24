@@ -107,6 +107,8 @@ mod secure_input;
 pub mod clipboard;
 mod preferences;
 pub use clipboard::{ClipboardWrite, SecretCopy, SecretState};
+pub mod drag_out;
+pub use drag_out::{DragImage, DragItem, DragOutcome};
 pub mod windows;
 pub use window::WindowHandle;
 pub use windows::{AnyWindowSpec, ConfiguredWindowOptions, Display, MacWindowOptions, RunOptions, WindowOptions, WindowSpec};

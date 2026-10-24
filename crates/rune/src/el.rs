@@ -192,6 +192,8 @@ pub struct PointerPress {
     pub y: f32,
 }
 pub(crate) type DragFn = Rc<dyn Fn(&mut dyn Any, &mut Drag, &mut Tx)>;
+pub(crate) type DragOutFn = Rc<dyn Fn(&dyn Any) -> Option<crate::DragItem>>;
+pub(crate) type DragEndFn = Rc<dyn Fn(&mut dyn Any, crate::DragOutcome, &mut Tx)>;
 pub(crate) type EditFn = Rc<dyn for<'a> Fn(&'a mut dyn Any) -> &'a mut TextEdit>;
 
 #[derive(Clone, Default)]
@@ -534,6 +536,8 @@ pub struct El {
     pub(crate) on_pointer_move: Option<SecondaryFn>,
     pub(crate) above: Option<Anchor>,
     pub(crate) on_drag: Option<DragFn>,
+    pub(crate) drag_out: Option<DragOutFn>,
+    pub(crate) on_drag_end: Option<DragEndFn>,
     pub(crate) motion: Option<Spring>,
     pub(crate) opacity_motion: Option<Anim>,
     pub(crate) lead: Option<(Spring, Spring)>,
@@ -583,6 +587,8 @@ fn base(dir: FlexDirection) -> El {
         on_pointer_move: None,
         above: None,
         on_drag: None,
+        drag_out: None,
+        on_drag_end: None,
         motion: None,
         opacity_motion: None,
         lead: None,
@@ -1667,6 +1673,32 @@ impl El {
     }
     pub fn on_drag<S: 'static>(mut self, f: impl Fn(&mut S, &mut Drag, &mut Tx) + 'static) -> Self {
         self.on_drag = Some(Rc::new(move |s, d, tx| f(downcast::<S>(s), d, tx)));
+        self
+    }
+    /// Drag this element out of the window into another app, as a file, image or text. Once
+    /// the pointer travels [`crate::drag_out::DRAG_THRESHOLD`] from the press, `f` reads the
+    /// state and returns what to carry (`None`: no drag this time, the press stays a press),
+    /// and the system takes over the pointer until the drop. The drag shows a snapshot of the
+    /// element unless the item sets [`crate::DragItem::image`].
+    ///
+    /// ```
+    /// # use rune::{DragItem, el::el};
+    /// # struct App { bundle: std::path::PathBuf }
+    /// el().drag_out(|s: &App| Some(DragItem::new().file(&s.bundle)));
+    /// ```
+    ///
+    /// A drag-out element never runs its `on_drag`; a press released before the threshold still
+    /// runs `on_press`. macOS only for now: on other platforms the system drag doesn't start,
+    /// and the element behaves as if it had no `drag_out`. Headless tools record `drag-out
+    /// <path>` in the trace and `dragOut` in the tree instead. Overlay panels start the same
+    /// session; see [`crate::drag_out`] for how far that path is tested.
+    pub fn drag_out<S: 'static>(mut self, f: impl Fn(&S) -> Option<crate::DragItem> + 'static) -> Self {
+        self.drag_out = Some(Rc::new(move |s| f(s.downcast_ref::<S>().expect("handler registered for a different state type than the app's"))));
+        self
+    }
+    /// Called once when a [`El::drag_out`] drag ends, with what the drop did.
+    pub fn on_drag_end<S: 'static>(mut self, f: impl Fn(&mut S, crate::DragOutcome, &mut Tx) + 'static) -> Self {
+        self.on_drag_end = Some(Rc::new(move |s, outcome, tx| f(downcast::<S>(s), outcome, tx)));
         self
     }
 }

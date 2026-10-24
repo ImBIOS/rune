@@ -275,6 +275,7 @@ impl<T: 'static> Overlay<T> {
         rt.set_system_reduced_motion(crate::preferences::reduced_motion());
         rt.wall_start = Some(Instant::now());
         rt.native_overlay = true;
+        rt.set_os_drag(crate::drag_out::SUPPORTED);
         rt.on_key = on_key;
         rt.on_focus = on_focus;
         rt.set_live_visible(false);
@@ -751,10 +752,30 @@ impl<T: 'static> Overlay<T> {
     fn observe_pointer(&mut self, x: f32, y: f32) {
         if self.rt.pointer_captured() || (x >= 0.0 && y >= 0.0 && x < self.at.size.0 && y < self.at.size.1) {
             self.dirty |= self.rt.observe_pointer(x, y);
+            self.begin_drag_out();
         } else if self.rt.pointer().is_some() {
             self.rt.pointer_leave();
             self.dirty = true;
         }
+    }
+
+    /// Starts the OS drag a pointer move asked for, before the move event returns.
+    fn begin_drag_out(&mut self) {
+        let Some(start) = self.rt.take_drag_out() else { return };
+        self.dirty = true;
+        #[allow(irrefutable_let_patterns)]
+        let Some(Live { backing: Backing::Window(window), config, scale, .. }) = &self.live else { return };
+        let image = match (&self.gpu, &self.renderer) {
+            (Some(gpu), Some((renderer, _))) if start.item.drag_image().is_none() =>
+                crate::drag_out::snapshot(gpu, renderer, (config.width, config.height), *scale, self.rt.clear_color(), start.rect),
+            _ => None,
+        };
+        let (sink, path) = (self.rt.drag_end_sink(), start.path.clone());
+        let wake = self.shared.wake.lock().unwrap().clone();
+        crate::drag_out::begin(window, start, image, Box::new(move |outcome| {
+            sink.borrow_mut().push((path, outcome));
+            if let Some(wake) = wake { wake(); }
+        }));
     }
     fn publish_regions(&mut self) {
         let Some(live) = &self.live else { return };
@@ -884,7 +905,7 @@ impl<T: 'static> Overlay<T> {
     /// Applies requests from other threads: updates, edge, show and hide.
     fn sync(&mut self, event_loop: &ActiveEventLoop) {
         if self.clipboard.receive(&mut self.rt) { self.dirty = true; self.advance(); }
-        if self.rt.live_pending() { self.dirty = true; }
+        if self.rt.live_pending() || self.rt.drag_ends_pending() { self.dirty = true; }
         let requests = std::mem::take(&mut *self.shared.requests.lock().unwrap());
         if let Some(input) = requests.input { self.pending_input = Some(input); }
         self.apply_input();
@@ -1198,6 +1219,7 @@ impl<T: 'static> AnyHost for Overlay<T> {
             WindowEvent::CursorMoved { position, .. } if self.options.input.resolved(self.interactive) != OverlayInput::None => {
                 let scale = self.live.as_ref().map_or(1.0, |l| l.scale);
                 self.dirty |= self.rt.observe_pointer(position.x as f32 / scale, position.y as f32 / scale);
+                self.begin_drag_out();
             }
             WindowEvent::CursorLeft { .. } if self.options.input.resolved(self.interactive) != OverlayInput::None => {
                 self.rt.pointer_leave();

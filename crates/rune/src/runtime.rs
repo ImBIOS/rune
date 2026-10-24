@@ -24,7 +24,7 @@ use taffy::TraversePartialTree;
 
 use crate::color::{Color, over};
 use crate::edit::{EditOutcome, Ime, KeyEvent};
-use crate::el::{Align, Drag, DragFn, El, GrowthSpec, InputSpec, Phase, PointerPress, PressFn, SecondaryFn, ScrollSpec, Shell, TextSpec, Tx, Visual};
+use crate::el::{Align, Drag, DragEndFn, DragFn, DragOutFn, El, GrowthSpec, InputSpec, Phase, PointerPress, PressFn, SecondaryFn, ScrollSpec, Shell, TextSpec, Tx, Visual};
 use crate::growth::{GrowTrack, SUBSTEP};
 // Half-open, like overlays, NSPointInRect and PtInRect: a shared edge belongs to one side.
 use crate::overlay_options::contains;
@@ -39,6 +39,15 @@ fn handler_state<S: 'static>(state: &mut S) -> &mut dyn Any {
     #[cfg(feature = "hot")]
     if std::any::TypeId::of::<S>() == std::any::TypeId::of::<crate::hot::HostState>() {
         return (state as &mut dyn Any).downcast_mut::<crate::hot::HostState>().unwrap().value.as_mut();
+    }
+    state
+}
+
+#[inline(always)]
+fn handler_state_ref<S: 'static>(state: &S) -> &dyn Any {
+    #[cfg(feature = "hot")]
+    if std::any::TypeId::of::<S>() == std::any::TypeId::of::<crate::hot::HostState>() {
+        return (state as &dyn Any).downcast_ref::<crate::hot::HostState>().unwrap().value.as_ref();
     }
     state
 }
@@ -202,6 +211,8 @@ pub(crate) struct Node {
     on_pointer_move: Option<SecondaryFn>,
     above: Option<crate::el::Anchor>,
     on_drag: Option<DragFn>,
+    drag_out: Option<DragOutFn>,
+    on_drag_end: Option<DragEndFn>,
     motion: Spring,
     opacity_motion: Option<rune_motion::Anim>,
     lead: Option<(Spring, Spring)>,
@@ -247,6 +258,7 @@ enum Action {
     Link(String, usize),
     SecondaryPress(String, PointerPress),
     Drag(String, Drag),
+    DragEnd(String, crate::DragOutcome),
     Key { ev: KeyEvent, repeat: bool },
     Ime(Ime),
     Paste(zeroize::Zeroizing<String>, Option<Option<String>>),
@@ -301,6 +313,8 @@ pub struct ElementInfo {
     pub live_intent: u32,
     /// On the focused text field: its caret line in window points (see [`Cx::caret`]).
     pub caret: Option<[f32; 4]>,
+    /// Dragging it starts an OS drag ([`El::drag_out`]).
+    pub drag_out: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -543,6 +557,13 @@ pub struct Runtime<S: 'static> {
     titlebar_action: Option<TitlebarAction>,
     /// Two presses on a drag region closer than this (seconds) are a double press.
     pub double_click_interval: f64,
+    /// The host starts OS drags, so `drag_out` elements start one (headless tools act as one).
+    os_drag: bool,
+    /// The held press is on a `drag_out` element that hasn't crossed the threshold yet.
+    drag_out_armed: bool,
+    drag_out_request: Option<crate::drag_out::DragOutStart>,
+    /// How OS drags ended, filled by the host's session callbacks between frames.
+    drag_ends: crate::drag_out::DragEnds,
 }
 
 /// What a press on a window drag region asks the shell to do, synchronously in that press.
@@ -706,8 +727,28 @@ impl<S: 'static> Runtime<S> {
             last_drag_press: None,
             titlebar_action: None,
             double_click_interval: 0.5,
+            os_drag: true,
+            drag_out_armed: false,
+            drag_out_request: None,
+            drag_ends: Default::default(),
         }
     }
+
+    /// A drag-out the pointer move just delivered asked for. The shell must start the OS
+    /// session before returning from that move event.
+    pub(crate) fn take_drag_out(&mut self) -> Option<crate::drag_out::DragOutStart> {
+        self.drag_out_request.take()
+    }
+
+    /// Where the host reports how a drag-out ended; delivered to `on_drag_end` next frame.
+    pub(crate) fn drag_end_sink(&self) -> crate::drag_out::DragEnds { self.drag_ends.clone() }
+    pub(crate) fn drag_ends_pending(&self) -> bool { !self.drag_ends.borrow().is_empty() }
+
+    /// Whether this host can start OS drags. Without, `drag_out` elements act as if they had
+    /// none.
+    pub(crate) fn set_os_drag(&mut self, supported: bool) { self.os_drag = supported; }
+
+    fn drags_out(&self, n: &Node) -> bool { self.os_drag && n.drag_out.is_some() }
 
     /// A window drag or titlebar double-click requested by the press just delivered. The shell
     /// must act on it before returning from that press event.
@@ -1123,6 +1164,8 @@ impl<S: 'static> Runtime<S> {
             self.commit(&Tx::default());
         }
         let mut ran_layout = false;
+        let ended: Vec<_> = self.drag_ends.borrow_mut().drain(..).collect();
+        self.queue.extend(ended.into_iter().map(|(path, outcome)| Action::DragEnd(path, outcome)));
         for action in std::mem::take(&mut self.queue) {
             // State may have requested focus on a newly mounted field. Resolve the
             // new tree before routing this frame's text, not after it has gone to
@@ -1447,6 +1490,12 @@ impl<S: 'static> Runtime<S> {
                 if d.phase != Phase::Move {
                     self.events.push(format!("drag {:?} {path}", d.phase));
                 }
+                true
+            }
+            Action::DragEnd(path, outcome) => {
+                self.events.push(format!("drag-end {outcome:?} {path}"));
+                let Some(f) = self.node(&path).and_then(|n| n.on_drag_end.clone()) else { return false };
+                f(handler_state(&mut self.state), outcome, &mut one);
                 true
             }
             Action::Key { ev, repeat } => {
@@ -2530,7 +2579,7 @@ impl<S: 'static> Runtime<S> {
             let n = &self.nodes[i];
             // A secondary-only child must not obscure primary input or background blur.
             (!self.subtree_exiting(i) && self.allowed(i) && (n.on_press.is_some() || n.on_hover.is_some()
-                || n.on_drag.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())).then_some(i)
+                || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())).then_some(i)
         })
     }
 
@@ -2547,7 +2596,11 @@ impl<S: 'static> Runtime<S> {
         }
         self.refresh_hover(x, y);
         let Some((path, d)) = self.capture.clone() else { return };
-        let Some((id, r, has_drag)) = self.node(&path).map(|n| (n.id, n.target, n.on_drag.is_some())) else { return };
+        if self.drag_out_armed && crate::drag_out::past_threshold(self.press_at, (x, y)) {
+            self.start_drag_out(path);
+            return;
+        }
+        let Some((id, r, has_drag)) = self.node(&path).map(|n| (n.id, n.target, n.on_drag.is_some() && !self.drags_out(n))) else { return };
         // A hit rect is where the element was drawn (after scrolling); `target` is its
         // unscrolled layout rect, kept only for elements that were never drawn.
         let mut hits = self.hits.iter().filter(|(hit, _)| *hit == id).peekable();
@@ -2586,8 +2639,28 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub(crate) fn cancel_pointer(&mut self) {
+        self.drag_out_armed = false;
         self.capture = None;
         self.secondary_capture = None;
+        self.capture_inside = false;
+        self.pointer_leave();
+    }
+
+    /// The held press crossed the drag threshold on a `drag_out` element: ask the host for an
+    /// OS drag and hand it the pointer, so nothing stays pressed or hovered after the drop.
+    fn start_drag_out(&mut self, path: String) {
+        self.drag_out_armed = false;
+        let Some(i) = self.nodes.iter().enumerate().position(|(i, n)| n.path == path && !self.subtree_exiting(i)) else { return };
+        let Some(f) = self.nodes[i].drag_out.clone() else { return };
+        let Some(item) = f(handler_state_ref(&self.state)).filter(|item| !item.is_empty()) else { return };
+        let n = &self.nodes[i];
+        let r = self.drawn.get(i).copied().unwrap_or([n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]]);
+        let clip = n.parent.and_then(|pi| self.inh_scratch.get(pi)).map_or(NO_CLIP, |h| h.clip).map(|v| v / self.env.scale);
+        let (x0, y0) = (r[0].max(clip[0]), r[1].max(clip[1]));
+        let rect = [x0, y0, ((r[0] + r[2]).min(clip[2]) - x0).max(0.0), ((r[1] + r[3]).min(clip[3]) - y0).max(0.0)];
+        self.events.push(format!("drag-out {path}"));
+        self.drag_out_request = Some(crate::drag_out::DragOutStart { path, item, rect, press: self.press_at });
+        self.capture = None;
         self.capture_inside = false;
         self.pointer_leave();
     }
@@ -2640,7 +2713,7 @@ impl<S: 'static> Runtime<S> {
         };
         let on_link = self.link_down(ti, x, y);
         let n = &self.nodes[ti];
-        if n.window_drag && n.on_press.is_none() && n.on_drag.is_none() && n.input.is_none() {
+        if n.window_drag && n.on_press.is_none() && n.on_drag.is_none() && n.drag_out.is_none() && n.input.is_none() {
             let now = self.now_clock();
             let double = self.last_drag_press.is_some_and(|(t, px, py)| {
                 now - t <= self.double_click_interval && (x - px).abs() <= 4.0 && (y - py).abs() <= 4.0
@@ -2678,7 +2751,9 @@ impl<S: 'static> Runtime<S> {
             data: 0.0,
         };
         let path = n.path.clone();
-        if n.on_drag.is_some() {
+        self.drag_out_request = None;
+        self.drag_out_armed = self.drags_out(n);
+        if n.on_drag.is_some() && !self.drag_out_armed {
             self.queue.push(Action::Drag(path.clone(), d));
         }
         self.capture = Some((path, d));
@@ -2722,11 +2797,13 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn release(&mut self, x: f32, y: f32) {
+        // A release never starts a drag-out: the system session needs the button held.
+        self.drag_out_armed = false;
         self.pointer_move(x, y);
         let Some((path, d)) = self.capture.take() else { return };
         self.refresh_hover_within();
         let Some((r, has_drag, has_press)) =
-            self.node(&path).map(|n| (n.target, n.on_drag.is_some(), n.on_press.is_some()))
+            self.node(&path).map(|n| (n.target, n.on_drag.is_some() && !self.drags_out(n), n.on_press.is_some()))
         else {
             return;
         };
@@ -3671,7 +3748,7 @@ impl<S: 'static> Runtime<S> {
             self.inh_scratch[i] = Inh { opacity: effective_opacity, paint_opacity: o,
                 clip: intersect(hit_clip, clip), fade: hit_fade, fade_origin: hit_origin,
                 paint_clip: clip, paint_fade: fade, paint_fade_origin: fade_origin, rounded, scale: sc, anchor, blur, dy, mark, group };
-            if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())
+            if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some())
                 && !self.subtree_exiting(i)
                 && self.allowed(i) && effective_opacity > 0.001 && visible
             {
@@ -3794,6 +3871,7 @@ impl<S: 'static> Runtime<S> {
                     scrolling,
                     live_intent,
                     caret: self.caret_rect(&self.nodes, i),
+                    drag_out: n.drag_out.is_some(),
                     virtual_extent: self.virtuals.contains_key(&n.path) && n.vis.fill.a == 0.0
                         && n.vis.border_width == 0.0 && n.vis.shadows.is_empty() && n.text.is_none() && n.vis.icon.is_none(),
                 })
@@ -3815,7 +3893,7 @@ impl<S: 'static> Runtime<S> {
                 hover: 0.0, press: 0.0, moving: true, parent: None,
                 visible: [r.x.max(c[0]), r.y.max(c[1]), (r.edges()[2].min(c[2]) - r.x.max(c[0])).max(0.0),
                     (r.edges()[3].min(c[3]) - r.y.max(c[1])).max(0.0)],
-                revealing: true, in_growing_row: false, scrolling: false, virtual_extent: false, live_intent: 0, caret: None,
+                revealing: true, in_growing_row: false, scrolling: false, virtual_extent: false, live_intent: 0, caret: None, drag_out: false,
             });
         }
         self.link_elements(&mut elements);
@@ -4180,6 +4258,8 @@ fn flatten(
         on_pointer_move,
         above,
         on_drag,
+        drag_out,
+        on_drag_end,
         opacity_motion,
         lead,
         width_leads,
@@ -4230,6 +4310,8 @@ fn flatten(
         on_pointer_move,
         above,
         on_drag,
+        drag_out,
+        on_drag_end,
         motion,
         opacity_motion,
         lead,
@@ -4843,6 +4925,98 @@ mod tests {
         rt.frame(0.0);
         assert_eq!(rt.state.last(), Some(&(35.0, 4.0)), "travel is measured on screen, not in the moving window");
         assert!(rt.state.contains(&(30.0, 4.0)));
+    }
+
+    #[derive(Default)]
+    struct DragOutState { presses: u32, drags: u32, offer: bool, ended: Vec<crate::DragOutcome> }
+
+    fn drag_out_view(_: &DragOutState, _: &mut Cx<DragOutState>) -> El {
+        col().size(200.0, 200.0).child(el().key("file").size(100.0, 40.0)
+            .on_press(|s: &mut DragOutState| s.presses += 1)
+            .on_drag(|s: &mut DragOutState, _, _| s.drags += 1)
+            .drag_out(|s: &DragOutState| s.offer.then(|| crate::DragItem::new().file("/Applications/Example.app")))
+            .on_drag_end(|s: &mut DragOutState, outcome, _| s.ended.push(outcome)))
+    }
+
+    fn drag_out_rt(offer: bool) -> Runtime<DragOutState> {
+        let mut rt = Runtime::new(DragOutState { offer, ..Default::default() }, drag_out_view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.pointer_move(10.0, 10.0);
+        rt.pointer_down(10.0, 10.0);
+        rt
+    }
+
+    #[test]
+    fn crossing_the_threshold_hands_a_drag_out_to_the_host_and_releases_the_pointer() {
+        let mut rt = drag_out_rt(true);
+        let t = crate::drag_out::DRAG_THRESHOLD;
+        rt.pointer_move(10.0 + t, 10.0);
+        assert!(rt.take_drag_out().is_none(), "at the threshold it's still a press");
+        assert!(rt.pointer_captured());
+        rt.pointer_move(12.0 + t, 10.0);
+        let start = rt.take_drag_out().expect("drag-out requested");
+        assert_eq!(start.item.paths(), [std::path::PathBuf::from("/Applications/Example.app")]);
+        assert_eq!(start.press, (10.0, 10.0));
+        assert_eq!(start.rect, [0.0, 0.0, 100.0, 40.0]);
+        assert!(rt.events.iter().any(|e| e.starts_with("drag-out ") && e.ends_with("file")), "{:?}", rt.events);
+        assert!(!rt.pointer_captured() && rt.pointer().is_none(), "nothing stays pressed or hovered");
+        rt.pointer_move(40.0, 30.0);
+        assert!(rt.take_drag_out().is_none(), "one request per press");
+        rt.pointer_up(40.0, 30.0);
+        rt.frame(0.0);
+        assert_eq!((rt.state.presses, rt.state.drags), (0, 0), "neither on_press nor on_drag runs");
+    }
+
+    #[test]
+    fn a_drag_out_released_before_the_threshold_is_a_press() {
+        let mut rt = drag_out_rt(true);
+        rt.pointer_move(11.0, 11.0);
+        rt.pointer_up(11.0, 11.0);
+        rt.frame(0.0);
+        assert!(rt.take_drag_out().is_none());
+        assert_eq!((rt.state.presses, rt.state.drags), (1, 0), "on_drag never runs on a drag-out element");
+        assert!(rt.events.iter().all(|e| !e.starts_with("drag-out")));
+    }
+
+    #[test]
+    fn a_drag_out_that_offers_nothing_stays_a_press() {
+        let mut rt = drag_out_rt(false);
+        rt.pointer_move(40.0, 10.0);
+        assert!(rt.take_drag_out().is_none());
+        assert!(rt.pointer_captured(), "the press holds on");
+        rt.pointer_move(20.0, 10.0);
+        rt.pointer_up(20.0, 10.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state.presses, 1);
+    }
+
+    #[test]
+    fn hosts_without_os_drags_keep_on_drag() {
+        let mut rt = Runtime::new(DragOutState { offer: true, ..Default::default() }, drag_out_view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.set_os_drag(false);
+        rt.frame(0.0);
+        rt.pointer_move(10.0, 10.0);
+        rt.pointer_down(10.0, 10.0);
+        rt.pointer_move(40.0, 10.0);
+        rt.pointer_up(40.0, 10.0);
+        rt.frame(0.0);
+        assert!(rt.take_drag_out().is_none());
+        assert!(rt.state.drags > 0, "on_drag runs as before");
+    }
+
+    #[test]
+    fn a_reported_drag_end_reaches_on_drag_end_next_frame() {
+        let mut rt = drag_out_rt(true);
+        rt.pointer_move(40.0, 10.0);
+        let start = rt.take_drag_out().unwrap();
+        let sink = rt.drag_end_sink();
+        sink.borrow_mut().push((start.path, crate::DragOutcome::Copied));
+        assert!(rt.drag_ends_pending());
+        rt.frame(0.0);
+        assert_eq!(rt.state.ended, [crate::DragOutcome::Copied]);
+        assert!(!rt.drag_ends_pending());
+        assert!(rt.events.iter().any(|e| e.starts_with("drag-end Copied ")));
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("file") && e.drag_out));
     }
 
     #[test]

@@ -555,6 +555,7 @@ impl<S: 'static> Host<S> {
         rt.trace_channels = args.trace.as_ref().map(|_| Default::default());
         rt.set_live_waker(Arc::new(move || { let _ = live_proxy.send_event(WakeEvent::Live(slot)); }));
         rt.set_live_visible(false);
+        rt.set_os_drag(crate::drag_out::SUPPORTED);
         rt.transparent = options.transparent;
         rt.track_marks = comp.is_some();
         rt.wall_start = Some(Instant::now());
@@ -990,7 +991,7 @@ impl<S: 'static> Host<S> {
         let clipboard = self.clipboard.receive(&mut self.rt);
         self.shortcuts.drain();
         let requests = self.shared.take();
-        let changed = clipboard || !requests.updates.is_empty();
+        let changed = clipboard || !requests.updates.is_empty() || self.rt.drag_ends_pending();
         self.menus.drain();
         for f in requests.updates {
             self.rt.update(f);
@@ -1727,6 +1728,18 @@ impl<S: 'static> Host<S> {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 rt.pointer_move(position.x as f32 / scale, position.y as f32 / scale);
+                // AppKit needs the drag session started inside this mouse-dragged event.
+                if let Some(start) = rt.take_drag_out() {
+                    let image = self.gpu.as_ref().filter(|_| start.item.drag_image().is_none()).and_then(|(gpu, renderer, _)|
+                        crate::drag_out::snapshot(gpu, renderer, (l.config.width, l.config.height), scale, rt.clear_color(), start.rect));
+                    let (sink, path) = (rt.drag_end_sink(), start.path.clone());
+                    let handle = self.native_handle.clone();
+                    crate::drag_out::begin(&l.window, start, image, Box::new(move |outcome| {
+                        sink.borrow_mut().push((path, outcome));
+                        handle.send(WakeEvent::App);
+                    }));
+                    l.apply_cursor(rt, false);
+                }
                 l.window.request_redraw();
             }
             WindowEvent::CursorLeft { .. } => {
