@@ -4,7 +4,7 @@ use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use objc2_foundation::MainThreadMarker;
 use objc2::{ClassType, DeclaredClass, declare_class, msg_send, msg_send_id, mutability};
 use objc2::rc::Retained;
-use objc2_app_kit::{NSEvent, NSPanel, NSWindow, NSResponder, NSScreen};
+use objc2_app_kit::{NSEvent, NSPanel, NSWindow, NSResponder, NSScreen, NSView};
 use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize};
 use crate::{DisplayTarget, KeyPolicy, OverlayInput, OverlayLevel, OverlayOptions, OverlaySupport};
 use std::{cell::{Cell, RefCell}, collections::VecDeque, rc::Rc, time::{Duration, Instant}};
@@ -551,8 +551,22 @@ impl Panel {
     /// `sendEvent:`. Clicks recorded while it was gone were never delivered, so native capture
     /// starts over, and a press the runtime still holds is released where the pointer was.
     fn keep_view(&self) {
-        if crate::macos_panel_bridge::reattach(&self.panel) { eprintln!("rune: panel lost its view; reattached"); }
+        // SAFETY: plain readbacks on the main thread; nothing is retained.
+        let (content, window): (*const NSView, *const NSWindow) = unsafe {
+            (msg_send![&*self.panel, contentView], msg_send![&*self.view, window])
+        };
+        let attached = std::ptr::eq(content, &*self.view) && std::ptr::eq(window.cast::<NSPanel>(), &*self.panel);
+        if !attached && crate::macos_panel_bridge::reattach(&self.panel) { eprintln!("rune: panel lost its view; reattached"); }
         if crate::macos_panel_bridge::take_reattached(&self.panel) { self.pointer.view_lost(); }
+    }
+
+    /// Whether none of the panel is on screen: covered, or its displays asleep. Reads as
+    /// visible during a prewarm acquisition.
+    pub fn occluded(&self) -> bool {
+        const VISIBLE: usize = 1 << 1;
+        // SAFETY: a property read on the main thread.
+        let state: usize = unsafe { msg_send![&*self.panel, occlusionState] };
+        state & VISIBLE == 0
     }
 
     pub fn show(&self) {
@@ -631,16 +645,21 @@ impl Panel {
         if self.visible.get() { self.pointer.observe(&self.panel, self.wake.as_ref()); }
     }
     pub fn pointer_deadline(&self) -> Option<Instant> { self.pointer_poll.get() }
-    pub fn poll_pointer(&self, now: Instant) {
+    /// Samples the pointer if its poll is due; true if it did.
+    fn poll_pointer(&self, now: Instant) -> bool {
         if self.pointer_poll.get().is_some_and(|at| at <= now) {
             self.pointer_poll.set(Some(now + Duration::from_secs_f64(1.0 / 120.0)));
             self.pointer.trace(&self.panel, "poll", None);
             self.pointer.observe(&self.panel, None);
+            return true;
         }
+        false
     }
-    pub fn observe_pointer(&self) {
+    /// Once per event-loop turn: keeps the view and samples the pointer, through the timed
+    /// poll when it is due and `poll` allows it.
+    pub fn observe_pointer(&self, now: Instant, poll: bool) {
         self.keep_view();
-        if self.visible.get() { self.pointer.observe(&self.panel, None); }
+        if self.visible.get() && !(poll && self.poll_pointer(now)) { self.pointer.observe(&self.panel, None); }
     }
     pub fn set_input(&self, input: OverlayInput) {
         self.pointer.input.set(input);
