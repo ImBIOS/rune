@@ -852,6 +852,10 @@ impl El {
         self
     }
     /// Arrow keys rove among focusable descendants; Tab visits only the current/selected item.
+    /// Groups with role `menu`, `listbox`, `list` or `tree` move on Up and Down only; other
+    /// groups (segments, tabs, radios, toolbars) move on Left and Right as well. Home and End
+    /// jump to the ends. `list`, `tree` and `grid` stop at their ends, as NSTableView does;
+    /// menus, popups and segments wrap.
     pub fn focus_group(mut self) -> Self {
         self.focus.group = true;
         self

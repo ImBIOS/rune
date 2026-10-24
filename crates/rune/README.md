@@ -89,7 +89,8 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   follow `@opencode/ui` and AppKit, whose buttons don't scale.
 - **Focus and modals**: `.focusable(true)`, `.tab_index(n)` (positive overrides, 0 document order,
   negative pointer-only), `.focus_group()` for arrow-key roving (Up/Down only, plus type-select,
-  for roles `menu`, `listbox`, `list` and `tree`), `.focus_follows()` to press each item it
+  for roles `menu`, `listbox`, `list` and `tree`; Left/Right too for other groups such as
+  segments and tabs; `list`, `tree` and `grid` stop at their ends while menus and segments wrap), `.focus_follows()` to press each item it
   reaches, `.focus_selected(on)` for a group's initial Tab stop, `.focus_ring(width, offset,
   color)` for keyboard-only rings, and `.focus_highlight(color)` for a menu row's shared pointer
   and keyboard highlight. Enter/Space
