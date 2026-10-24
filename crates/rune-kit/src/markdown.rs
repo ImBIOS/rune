@@ -1,7 +1,8 @@
 //! Markdown (pulldown-cmark): headings, paragraphs, emphasis, inline code, code blocks, lists,
 //! block quotes, rules, links, GFM tables, ```` ```diff ```` fences and (with the `mermaid`
-//! feature) ```` ```mermaid ```` diagrams, rendered from a [`MarkdownStyle`]. Partial input while
-//! streaming is fine: an unclosed fence is a code block that keeps growing.
+//! feature) ```` ```mermaid ```` diagrams, rendered from a [`MarkdownStyle`]. Fences in ts, tsx,
+//! js, json, rust, swift, css, html, sh, sql and yaml are syntax-coloured (see [`Syntax`]). Partial input while streaming is fine: an
+//! unclosed fence is a code block that keeps growing.
 //!
 //! ```ignore
 //! let view = Markdown::new(&message.text).reveal(0.18).on_link(|s: &mut App, url| s.open(url)).build(&kit);
@@ -27,18 +28,22 @@
 //! **Diagrams** (`mermaid` feature) render once their fence closes; until then, and for anything
 //! the subset doesn't cover, the source shows as a code block.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::rc::Rc;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use rune::{Align, Color, El, Link, LinkPaint, Span, TextStyle, col, el, rich, row, text};
+use rune::{Align, Color, El, Link, LinkPaint, Span, TextStyle, col, el, oklch, rich, row, text};
 
 use crate::{Kit, PaletteSeed};
 
+mod highlight;
 mod table;
+
+use highlight::Lang;
+pub use highlight::Syntax;
 
 /// An inline style run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -96,11 +101,26 @@ struct Builder {
     code: Option<(String, Fence)>,
     /// The source range of the last paragraph started at the root.
     last_root_para: Option<Range<usize>>,
+    sources: Vec<Source>,
+}
+
+/// What colours a [`Block::Code`], one per block in document order (the order the renderer
+/// meets them). Kept beside the blocks so `Block` keeps its shape.
+#[derive(Clone, Copy, Debug)]
+struct Source {
+    lang: Option<Lang>,
+    /// The code's length, to check this belongs to the block it is matched with.
+    len: usize,
+    /// How many leading bytes get colour: all of them, or while an unclosed fence streams in,
+    /// the complete lines (the line still arriving draws plain until its newline).
+    coloured: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Fence {
-    Plain,
+    /// A code block; its language, if it is one [`highlight`] colours, and whether its closing
+    /// fence has arrived.
+    Plain(Option<Lang>, bool),
     Diff,
     /// A mermaid fence; whether its closing fence has arrived.
     Mermaid(bool),
@@ -131,6 +151,27 @@ enum InlineKind {
 impl Builder {
     fn push(&mut self, b: Block) {
         self.stack.last_mut().unwrap().1.push(b);
+    }
+
+    /// Pushes a code block's text: without its final newline, or at the end of input without
+    /// any trailing newlines.
+    fn push_code(&mut self, mut text: String, fence: Fence, eof: bool) {
+        let line_ended = text.ends_with('\n');
+        if eof {
+            text.truncate(text.trim_end_matches('\n').len());
+        } else if line_ended {
+            text.pop();
+        }
+        let block = code_block(text, fence);
+        if let Block::Code(code) = &block {
+            let (lang, closed) = match fence {
+                Fence::Plain(lang, closed) => (lang, closed),
+                _ => (None, false),
+            };
+            let coloured = if closed || line_ended { code.len() } else { code.rfind('\n').unwrap_or(0) };
+            self.sources.push(Source { lang, len: code.len(), coloured });
+        }
+        self.push(block);
     }
 
     fn inline(&mut self) -> &mut (InlineKind, Inline, Vec<Open>) {
@@ -204,7 +245,17 @@ const PAD: &str = "\u{202f}";
 
 /// Parses `src` into blocks. Unclosed constructs are closed at the end of input.
 pub fn parse(src: &str) -> Vec<Block> {
-    let mut b = Builder { stack: vec![(Container::Root, Vec::new())], inline: None, code: None, last_root_para: None };
+    parse_doc(src).0
+}
+
+fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>) {
+    let mut b = Builder {
+        stack: vec![(Container::Root, Vec::new())],
+        inline: None,
+        code: None,
+        last_root_para: None,
+        sources: Vec::new(),
+    };
     let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
     for (ev, range) in Parser::new_ext(src, opts).into_offset_iter() {
         match ev {
@@ -230,13 +281,15 @@ pub fn parse(src: &str) -> Vec<Block> {
                     b.flush_inline();
                     let fence = match &kind {
                         CodeBlockKind::Fenced(info) => {
-                            match info.split_whitespace().next().unwrap_or("").to_ascii_lowercase().as_str() {
+                            // `rust,ignore` and `ts title="a.ts"` name their language first.
+                            let word = info.split(|c: char| c.is_whitespace() || c == ',').next().unwrap_or("");
+                            match word.to_ascii_lowercase().as_str() {
                                 "diff" | "patch" => Fence::Diff,
                                 "mermaid" => Fence::Mermaid(fence_closed(&src[range])),
-                                _ => Fence::Plain,
+                                _ => Fence::Plain(Lang::from_name(word), fence_closed(&src[range])),
                             }
                         }
-                        CodeBlockKind::Indented => Fence::Plain,
+                        CodeBlockKind::Indented => Fence::Plain(None, true),
                     };
                     b.code = Some((String::new(), fence));
                 }
@@ -283,11 +336,8 @@ pub fn parse(src: &str) -> Vec<Block> {
             Event::End(tag) => match tag {
                 TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::TableCell => b.flush_inline(),
                 TagEnd::CodeBlock => {
-                    if let Some((mut text, fence)) = b.code.take() {
-                        if text.ends_with('\n') {
-                            text.pop();
-                        }
-                        b.push(code_block(text, fence));
+                    if let Some((text, fence)) = b.code.take() {
+                        b.push_code(text, fence, false);
                     }
                 }
                 TagEnd::TableHead => {
@@ -336,7 +386,7 @@ pub fn parse(src: &str) -> Vec<Block> {
     }
     b.flush_inline();
     if let Some((text, fence)) = b.code.take() {
-        b.push(code_block(text.trim_end_matches('\n').to_owned(), fence));
+        b.push_code(text, fence, true);
     }
     // Unwind containers left open by a partial stream.
     while b.stack.len() > 1 {
@@ -349,12 +399,12 @@ pub fn parse(src: &str) -> Vec<Block> {
     {
         *blocks.last_mut().unwrap() = Block::Table(t);
     }
-    blocks
+    (blocks, b.sources)
 }
 
 fn code_block(text: String, fence: Fence) -> Block {
     match fence {
-        Fence::Plain | Fence::Mermaid(false) => Block::Code(text),
+        Fence::Plain(..) | Fence::Mermaid(false) => Block::Code(text),
         Fence::Diff => Block::Diff(text),
         Fence::Mermaid(true) => Block::Mermaid(text),
     }
@@ -448,9 +498,11 @@ fn end_run(inl: &mut Inline, o: Open) {
 }
 const CACHE_LEN: usize = 32;
 
+type Doc = (Rc<Vec<Block>>, Rc<[Source]>);
+
 #[derive(Default)]
 struct Cache {
-    map: HashMap<String, Rc<Vec<Block>>>,
+    map: HashMap<String, Doc>,
     order: VecDeque<String>,
 }
 
@@ -460,19 +512,24 @@ thread_local! {
 
 /// [`parse`] memoised by source on this thread (the last 32 distinct strings).
 pub fn parse_cached(src: &str) -> Rc<Vec<Block>> {
+    doc_cached(src).0
+}
+
+fn doc_cached(src: &str) -> Doc {
     CACHE.with_borrow_mut(|c| {
         if let Some(hit) = c.map.get(src) {
             return hit.clone();
         }
-        let blocks = Rc::new(parse(src));
+        let (blocks, sources) = parse_doc(src);
+        let doc: Doc = (Rc::new(blocks), sources.into());
         if c.order.len() >= CACHE_LEN
             && let Some(old) = c.order.pop_front()
         {
             c.map.remove(&old);
         }
         c.order.push_back(src.to_owned());
-        c.map.insert(src.to_owned(), blocks.clone());
-        blocks
+        c.map.insert(src.to_owned(), doc.clone());
+        doc
     })
 }
 
@@ -508,6 +565,8 @@ pub struct MarkdownStyle {
     diff_remove_text: Color,
     diff_hues: [Color; 2],
     diff_hunk: Color,
+    syntax: [Color; Syntax::COUNT],
+    highlight: bool,
     pub(crate) diagram: DiagramPaint,
 }
 
@@ -533,6 +592,30 @@ pub(crate) struct DiagramPaint {
 fn tint(base: Color, hue: Color, t: f32) -> Color {
     let [a, b] = [base.to_oklab(), hue.to_oklab()];
     Color::from_oklab([0, 1, 2, 3].map(|i| if i == 3 { a[3] } else { a[i] + (b[i] - a[i]) * t }))
+}
+
+/// Muted token colours: the familiar hues (violet keywords, green strings, orange numbers, teal
+/// types, blue functions, rose properties) at one lightness a step from the text's, so contrast
+/// follows the theme. Comments and punctuation are the theme's quieter text greys.
+///
+/// The hues are fixed rather than taken from the theme's status colours: those vary too much
+/// between themes (OpenCode's "info" is magenta) to keep the token kinds apart.
+fn syntax_colours(k: &Kit) -> [Color; Syntax::COUNT] {
+    let c = &k.c;
+    let text_l = c.text_base.to_oklab()[0];
+    let (l, chroma) =
+        if k.dark { ((text_l - 0.16).clamp(0.62, 0.84), 0.1) } else { ((text_l + 0.3).clamp(0.38, 0.52), 0.12) };
+    let paint = |h: f32| oklch(l, chroma, h);
+    let mut s = [c.text_base; Syntax::COUNT];
+    s[Syntax::Keyword as usize] = paint(305.0);
+    s[Syntax::String as usize] = paint(145.0);
+    s[Syntax::Number as usize] = paint(60.0);
+    s[Syntax::Comment as usize] = c.text_muted.mix(c.text_faint, 0.4);
+    s[Syntax::Type as usize] = paint(195.0);
+    s[Syntax::Function as usize] = paint(255.0);
+    s[Syntax::Property as usize] = paint(15.0);
+    s[Syntax::Punctuation as usize] = c.text_muted;
+    s
 }
 
 impl MarkdownStyle {
@@ -568,6 +651,8 @@ impl MarkdownStyle {
             diff_remove_text: c.text_base,
             diff_hues: [c.success.icon, c.danger.icon],
             diff_hunk: c.text_muted,
+            syntax: syntax_colours(k),
+            highlight: true,
             diagram: DiagramPaint {
                 text: c.text_base,
                 muted: c.text_muted,
@@ -714,6 +799,17 @@ impl MarkdownStyle {
         self.diff_hunk = c;
         self
     }
+    /// The colour of one kind of token in highlighted code blocks.
+    pub fn syntax(mut self, kind: Syntax, c: Color) -> Self {
+        self.syntax[kind as usize] = c;
+        self
+    }
+    /// Whether fenced code in a known language is coloured (on by default). Off, every code
+    /// block draws in the text colour.
+    pub fn syntax_highlight(mut self, on: bool) -> Self {
+        self.highlight = on;
+        self
+    }
     /// Diagram nodes (and sequence participants): their fill and outline, and the colour of
     /// edges, arrows and lifelines.
     pub fn diagram(mut self, node_fill: Color, node_border: Color, line: Color) -> Self {
@@ -792,8 +888,9 @@ impl Markdown {
     /// Builds with `style`, for apps without a [`Kit`] (see [`MarkdownStyle::neutral`] and
     /// [`MarkdownStyle::from_seed`]).
     pub fn render(self, style: &MarkdownStyle) -> El {
-        let r = Renderer { s: style.clone(), reveal: self.reveal, on_link: self.on_link };
-        r.blocks(&parse_cached(&self.src))
+        let (blocks, sources) = doc_cached(&self.src);
+        let r = Renderer { s: style.clone(), reveal: self.reveal, on_link: self.on_link, sources, next_source: Cell::new(0) };
+        r.blocks(&blocks)
     }
 }
 
@@ -801,6 +898,9 @@ struct Renderer {
     s: MarkdownStyle,
     reveal: f32,
     on_link: Option<LinkWire>,
+    sources: Rc<[Source]>,
+    /// The next of `sources`, advanced at each [`Block::Code`] in document order.
+    next_source: Cell<usize>,
 }
 
 /// (margin-top, margin-bottom) per block, collapsed like CSS margins.
@@ -874,7 +974,7 @@ impl Renderer {
         c
     }
 
-    fn code(&self, code: &str) -> El {
+    fn code(&self, code: &str, source: Option<Source>) -> El {
         let s = &self.s;
         col()
             .w_full()
@@ -882,7 +982,24 @@ impl Renderer {
             .radius(6.0)
             .fill(s.code_block_fill)
             .border(0.5, s.code_block_border)
-            .child(text(code.to_owned()).font(s.code_block).color(s.text).wrap().reveal(self.reveal).w_full())
+            .child(rich(code.to_owned(), self.syntax_spans(code, source)).font(s.code_block).color(s.text).reveal(self.reveal).w_full())
+    }
+
+    /// Colour-only spans, so highlighting never moves a glyph: a block streaming in draws its
+    /// newest line plain and colours it in place once the line ends.
+    fn syntax_spans(&self, code: &str, source: Option<Source>) -> Vec<Span> {
+        let Some((lang, coloured)) = source.filter(|_| self.s.highlight).and_then(|src| Some((src.lang?, src.coloured))) else {
+            return Vec::new();
+        };
+        let Some(prefix) = code.get(..coloured) else { return Vec::new() };
+        highlight::cached(lang, prefix)
+            .iter()
+            .map(|&(a, b, kind)| {
+                let mut sp = Span::new(a as usize, b as usize);
+                sp.color = Some(self.s.syntax[kind as usize]);
+                sp
+            })
+            .collect()
     }
 
     /// One row per line, so added and removed lines are tinted edge to edge.
@@ -920,12 +1037,12 @@ impl Renderer {
                 None => col()
                     .w_full()
                     .gap(6.0)
-                    .child(self.code(src).key("source"))
+                    .child(self.code(src, None).key("source"))
                     .child(text("Diagram not supported").font(TextStyle { size: 12.0, line_height: 16.0, ..self.s.body }).color(self.s.muted).key("hint")),
             }
         }
         #[cfg(not(feature = "mermaid"))]
-        self.code(src)
+        self.code(src, None)
     }
 
     fn block(&self, b: &Block) -> El {
@@ -935,7 +1052,11 @@ impl Renderer {
             Block::Heading(l, inl) => {
                 self.para(inl, s.headings[(*l as usize - 1).min(2)], if *l >= 4 { s.muted } else { s.text })
             }
-            Block::Code(code) => self.code(code),
+            Block::Code(code) => {
+                let n = self.next_source.get();
+                self.next_source.set(n + 1);
+                self.code(code, self.sources.get(n).copied().filter(|src| src.len == code.len()))
+            }
             Block::Diff(src) => self.diff(src),
             Block::Mermaid(src) => self.mermaid(src),
             Block::Table(t) => self.table(t),
@@ -971,4 +1092,126 @@ fn hash_of(v: impl Hash) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     v.hash(&mut h);
     h.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rune::text::{GlyphQuad, TextSystem};
+
+    /// Each code block's syntax spans, in document order, rendered with `style`.
+    fn spans(src: &str, style: &MarkdownStyle) -> Vec<(String, Vec<Span>)> {
+        fn codes<'a>(blocks: &'a [Block], out: &mut Vec<&'a str>) {
+            for b in blocks {
+                match b {
+                    Block::Code(c) => out.push(c),
+                    Block::Quote(inner) => codes(inner, out),
+                    Block::List { items, .. } => items.iter().for_each(|i| codes(i, out)),
+                    _ => {}
+                }
+            }
+        }
+        let (blocks, sources) = doc_cached(src);
+        let r = Renderer { s: style.clone(), reveal: 0.0, on_link: None, sources: sources.clone(), next_source: Cell::new(0) };
+        let mut found = Vec::new();
+        codes(&blocks, &mut found);
+        assert_eq!(found.len(), sources.len(), "one source per code block");
+        found
+            .into_iter()
+            .zip(sources.iter())
+            .map(|(code, s)| {
+                assert_eq!(s.len, code.len(), "sources line up with blocks in document order");
+                (code.to_owned(), r.syntax_spans(code, Some(*s)))
+            })
+            .collect()
+    }
+
+    fn coloured<'a>(code: &'a str, spans: &[Span], c: Color) -> Vec<&'a str> {
+        spans.iter().filter(|s| s.color == Some(c)).map(|s| &code[s.start as usize..s.end as usize]).collect()
+    }
+
+    #[test]
+    fn known_languages_are_coloured_and_others_stay_plain() {
+        let style = MarkdownStyle::neutral(true);
+        let src = "```ts\nconst a = 1\n```\n\n```brainfuck\n+[-]\n```\n\n    indented\n\n```\nnone\n```\n\n- ```rust,ignore\n  fn f() {}\n  ```\n\n> ```SQL\n> select 1\n> ```";
+        let got = spans(src, &style);
+        assert_eq!(got.len(), 6);
+        let (ts, s) = &got[0];
+        assert_eq!(coloured(ts, s, style.syntax[Syntax::Keyword as usize]), ["const"]);
+        assert_eq!(coloured(ts, s, style.syntax[Syntax::Number as usize]), ["1"]);
+        assert!(s.iter().all(|s| s.color.is_some() && s.weight.is_none() && !s.italic && !s.mono && s.size.is_none() && s.bg.is_none()));
+        for (code, s) in &got[1..4] {
+            assert!(s.is_empty(), "{code:?} stays plain");
+        }
+        assert_eq!(coloured(&got[4].0, &got[4].1, style.syntax[Syntax::Function as usize]), ["f"]);
+        assert_eq!(coloured(&got[5].0, &got[5].1, style.syntax[Syntax::Keyword as usize]), ["select"]);
+    }
+
+    #[test]
+    fn a_streaming_fence_colours_only_its_finished_lines() {
+        let style = MarkdownStyle::neutral(false);
+        let last_end = |src: &str| spans(src, &style)[0].1.last().map_or(0, |s| s.end as usize);
+        assert_eq!(last_end("```ts\nconst"), 0, "the first line is still arriving");
+        assert_eq!(last_end("```ts\nconst a = 1\nconst b"), "const a = 1".len());
+        assert_eq!(last_end("```ts\nconst a = 1\nconst b = 2\n"), "const a = 1\nconst b = 2".len());
+        assert_eq!(last_end("```ts\nconst a = 1\nlet b = 2\n```"), "const a = 1\nlet b = 2".len());
+    }
+
+    #[test]
+    fn syntax_builders_override_and_switch_off_colour() {
+        let red = Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+        let src = "```rust\nlet x = 1;\n```";
+        let style = MarkdownStyle::neutral(true).syntax(Syntax::Keyword, red);
+        let (code, s) = &spans(src, &style)[0];
+        assert_eq!(coloured(code, s, red), ["let"]);
+        assert!(spans(src, &style.syntax_highlight(false))[0].1.is_empty());
+    }
+
+    #[test]
+    fn default_token_colours_are_distinct_in_both_themes() {
+        for dark in [false, true] {
+            let s = MarkdownStyle::neutral(dark).syntax;
+            for i in 0..s.len() {
+                for j in 0..i {
+                    assert_ne!(s[i], s[j], "dark {dark}: tokens {i} and {j}");
+                }
+            }
+        }
+    }
+
+    /// Colour is the only thing a highlight changes: every glyph lands in the same place, wrapped
+    /// or not, as in the plain block and in the block mid-stream.
+    #[test]
+    fn highlighting_never_moves_a_glyph() {
+        const INTER: &[u8] = include_bytes!("../../../themes/opencode/assets/fonts/InterVariable.ttf");
+        const PLEX: &[u8] = include_bytes!("../../../themes/opencode/assets/fonts/IBMPlexMono-Regular.ttf");
+        let mut ts = TextSystem::new(&[INTER, PLEX], ("Inter", "IBM Plex Mono"));
+        let style = MarkdownStyle::neutral(true);
+        let font = style.code_block;
+        let mut quads = |code: &str, spans: &[Span], width: Option<f32>| {
+            let l = ts.layout_rich(code, spans, font, 2.0, width);
+            let mut out: Vec<GlyphQuad> = Vec::new();
+            ts.glyphs_for_layout(&l, 2.0, [0.0, 0.0], true, &mut out);
+            out.iter().map(|q| (q.rect.map(f32::to_bits), q.uv.map(f32::to_bits), q.byte)).collect::<Vec<_>>()
+        };
+        for (lang, code) in [
+            ("tsx", "export function Card({ title }: { title: string }) {\n  return <div className=\"card\">{title.toUpperCase()}</div>; // done\n}"),
+            ("rust", "fn main() { let v: Vec<u8> = vec![1, 2, 3]; println!(\"{v:?} → ok\"); }"),
+            ("sh", "FOO=1 npm run build --if-present && echo \"$HOME/${X}\" | tee out.txt # café"),
+            ("yaml", "name: rune\nlist: [a, 1, {b: c}]\nscript: |\n  echo hi"),
+        ] {
+            let closed = format!("```{lang}\n{code}\n```");
+            let (shown, full) = spans(&closed, &style).remove(0);
+            assert_eq!(shown, code);
+            assert!(!full.is_empty(), "{lang} gets colour");
+            let cut = code.find('\n').map_or(code.len() / 2, |n| n + 4);
+            let cut = (cut..).find(|&i| code.is_char_boundary(i)).unwrap();
+            let (_, streaming) = spans(&format!("```{lang}\n{}", &code[..cut]), &style).remove(0);
+            for width in [None, Some(900.0), Some(420.0), Some(260.0)] {
+                let plain = quads(code, &[], width);
+                assert_eq!(plain, quads(code, &full, width), "{lang} at {width:?}");
+                assert_eq!(plain, quads(code, &streaming, width), "{lang} mid-stream at {width:?}");
+            }
+        }
+    }
 }

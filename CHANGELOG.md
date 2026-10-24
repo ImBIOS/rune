@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **rune-kit `Markdown` colours fenced code** in ts, tsx, js, json, rust, swift, css, html,
+  sh/bash, sql and yaml; on by default, so code blocks in those languages render with coloured
+  tokens (goldens with such blocks move). Unknown languages and indented blocks stay plain, and
+  layout is unchanged (colour-only spans). New: `rune_kit::markdown::Syntax`,
+  `MarkdownStyle::syntax(kind, color)` and `syntax_highlight(bool)`. `Block` is unchanged.
 - **`MarkdownStyle::diff_text(added, removed)` and `diff_text_tint(amount)`** colour the text
   of a diff's added and removed lines (`diff_text_tint` blends the text colour toward the
   theme's green and red). Off by default: line text keeps the body colour.

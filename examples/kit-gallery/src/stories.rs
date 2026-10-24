@@ -154,6 +154,7 @@ stories! {
     "rune-markdown--walkthrough" => markdown_walkthrough,
     "rune-markdown--diagrams" => markdown_diagrams,
     "rune-markdown--table-styles" => markdown_table_styles,
+    "rune-markdown--code" => markdown_code,
 }
 
 fn combobox_searchable(s: &G, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -1394,6 +1395,54 @@ fn markdown_table_styles(_: &G, k: &Kit, _: &mut Vec<El>) -> El {
         .table_header_text(k.c.text_muted)
         .diff_text_tint(0.5);
     col().w(560.0).child(Markdown::new(TABLE_STYLES).style(style).build(k))
+}
+
+/// Fenced code in each language family the highlighter knows.
+const CODE: &str = r#"```tsx
+// Loads a user, then renders their card.
+export async function load(id: string): Promise<User | null> {
+  const res = await fetch(`/api/users/${id}`, { method: "GET" });
+  return res.ok ? res.json() : null;
+}
+const Card = ({ user }: Props) => <div className="card">{user.name}</div>;
+```
+
+```rust
+#[derive(Debug, Clone)]
+pub struct Retry<'a> { name: &'a str, attempts: u32 }
+
+fn backoff(n: u32) -> Duration {
+    Duration::from_millis(200 * 2u64.pow(n)) // capped by the caller
+}
+```
+
+```sh
+# Build, then ship the release.
+FEATURES=markdown cargo build --release && echo "done in $SECONDS s"
+if [ -n "$TAG" ]; then gh release create "$TAG" ./target/*.tar.gz; fi
+```
+
+```sql
+SELECT u.id, count(*) AS posts
+FROM users u JOIN posts p ON p.user_id = u.id
+WHERE u.created_at > '2026-01-01' AND p.draft = false
+GROUP BY u.id ORDER BY posts DESC LIMIT 10;
+```
+
+```yaml
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: macos-15 # Apple silicon
+    timeout-minutes: 30
+    steps:
+      - run: cargo test --workspace
+```
+"#;
+
+fn markdown_code(_: &G, k: &Kit, _: &mut Vec<El>) -> El {
+    col().w(620.0).child(Markdown::new(CODE).build(k))
 }
 
 fn markdown_walkthrough(_: &G, k: &Kit, _: &mut Vec<El>) -> El {

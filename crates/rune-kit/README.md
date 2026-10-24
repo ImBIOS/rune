@@ -111,6 +111,15 @@ source each time, and earlier blocks stay mounted.
   that off with `table_tabular_figures(false)`. `table(border, header_fill)` sets the outline,
   row rules and header fill; `table_outline(None)`, `table_rules` and `table_header_text` give
   the look of a web table (no outline, a rule under every row, a dimmer header).
+- **Code fences are syntax-coloured** in TypeScript, TSX, JavaScript, JSON, Rust, Swift, CSS,
+  HTML/XML, shell, SQL and YAML (common aliases such as `ts`, `rs`, `sh`, `yml` work). Other
+  languages stay plain. Colour is all that changes, never weight or style, so a fence streaming
+  in draws its newest line plain and colours it in place when the line ends, with nothing
+  moving. Token colours come from `MarkdownStyle` (keyword, string, number, comment, type,
+  function, property, punctuation); override one with `syntax(Syntax::Keyword, color)` or turn
+  colouring off with `syntax_highlight(false)`. Each language is a small hand-written scanner
+  that runs in linear time; a block colours its first 32 KiB (or 8192 coloured runs) and draws
+  the rest plain, and results are cached per source.
 - **```` ```diff ````** (or `patch`) fences tint `+` and `-` lines edge to edge, and dim `@@`
   and file header lines. Set colours with `MarkdownStyle::diff` and `diff_hunk`. Line text
   keeps the body colour unless `diff_text(added, removed)` or `diff_text_tint(0.5)` (toward the
@@ -122,8 +131,8 @@ source each time, and earlier blocks stay mounted.
   draws one on its own.
 
 `Tooltip::label(..).render(&TooltipStyle::neutral(dark), &mut layer)` builds a tooltip without
-a kit. The gallery's `rune-markdown--walkthrough`, `rune-markdown--diagrams` and
-`rune-markdown--table-styles` scenes show every feature.
+a kit. The gallery's `rune-markdown--walkthrough`, `rune-markdown--diagrams`,
+`rune-markdown--table-styles` and `rune-markdown--code` scenes show every feature.
 
 ## Checking against Storybook
 
