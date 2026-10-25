@@ -337,12 +337,14 @@ app.run();
 - Reopening (macOS): a click on the Dock icon, or opening the app again from Finder, Spotlight or
   `open` while it runs, brings back a window when none shows, as in other Mac apps. Rune shows
   and activates a minimized window, else the window it hid last (closed with `keep_running`, or
-  `hide`), else the main window. Windows that already show stay as they are. It never brings back
+  `hide`), else the main window, and unhides an app hidden with ⌘H. Windows that already show stay
+  as they are; the activation that comes with the reopen brings them forward. It never brings back
   a launcher or other nonactivating panel, an overlay, a window that closed for good, or anything
   in an accessory app (`accessory()`,
   or `set_dock_icon(false)` at the time). `App::on_reopen(|s, has_visible_windows, tx| -> bool)`
   runs first, on the main thread with the app's state; returning true skips the default. Every
   window's hook runs, and `has_visible_windows` counts only windows reopening could bring back.
+  The default looks again after the hooks, so a window a hook opened counts as showing.
   Rune adds `applicationShouldHandleReopen:hasVisibleWindows:` to winit's app delegate, which
   lacks it. An app that installs its own reopen Apple event handler replaces AppKit's, which is
   what asks the delegate, so Rune's reopening never runs; use `on_reopen` instead. Other platforms

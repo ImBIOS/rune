@@ -8,8 +8,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 - **Reopening a Mac app brings its window back.** A click on the Dock icon, or opening the app
   again from Finder, Spotlight or `open` while it runs, now shows and activates a window when
   none shows: a minimized one, else the one Rune hid last (⌘W with `keep_running`, `hide`), else
-  the main window. Before, a window hidden that way stayed hidden, because AppKit only brings back
-  minimized windows and winit's app delegate didn't answer
+  the main window, and unhides an app hidden with ⌘H. Before, a window hidden that way stayed
+  hidden, because AppKit only brings back minimized windows and winit's app delegate didn't answer
   `applicationShouldHandleReopen:hasVisibleWindows:`; Rune now adds that method. Launcher and
   other nonactivating panels, overlays, windows that closed for good and accessory apps never
   come back. New `App::on_reopen(|s, has_visible_windows, tx| -> bool)` (and

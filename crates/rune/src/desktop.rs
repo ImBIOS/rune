@@ -565,13 +565,15 @@ impl Desk {
     /// The app reopened: every window's `on_reopen` runs, then, unless one handled it or the app
     /// is an accessory, the default shows a window when none does (`reopen::target`) and
     /// activates the app with it in front.
-    fn reopen(&mut self, accessory: bool) {
-        let candidates: Vec<_> = self.members.iter().map(|m| m.reopen_candidate()).collect();
-        let has_visible = crate::reopen::has_visible(&candidates);
+    fn reopen(&mut self, accessory: bool, desktop: &VirtualDesktop, t: f64) {
+        let candidates = |desk: &Self| -> Vec<_> { desk.members.iter().map(|m| m.reopen_candidate()).collect() };
+        let has_visible = crate::reopen::has_visible(&candidates(self));
         let mut handled = false;
         for m in &mut self.members { handled |= m.reopen_hook(has_visible); }
         if handled || accessory { return; }
-        if let Some(i) = crate::reopen::target(&candidates) {
+        // The default sees what the hooks did.
+        self.drain(desktop, t);
+        if let Some(i) = crate::reopen::target(&candidates(self)) {
             let changes = self.members[i].reopen();
             self.apply(i, changes);
         }
@@ -719,7 +721,7 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
             match &e.kind {
                 Kind::Mark(_) => {}
                 Kind::Focus(focused) => desk.focus(desk.key, *focused),
-                Kind::Reopen => desk.reopen(accessory),
+                Kind::Reopen => desk.reopen(accessory, &desktop, real_t),
                 Kind::Shortcut(shortcut) => fire(&desk, |m| m.shortcut(shortcut)).unwrap_or_else(|e| die(&format!("script shortcut: {e}"))),
                 Kind::Menu(item) => fire(&desk, |m| m.menu(item)).unwrap_or_else(|e| die(&format!("script menu: {e}"))),
                 Kind::PopupMenu(picked) => {

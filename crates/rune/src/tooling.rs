@@ -2475,19 +2475,31 @@ mod tests {
     /// The reopen hooks that ran: window, `has_visible_windows`.
     static REOPENED: std::sync::Mutex<Vec<(&'static str, bool)>> = std::sync::Mutex::new(Vec::new());
 
-    /// A `keep_running` window that closes on any key, and records reopens, handling them when
-    /// `handles`.
-    fn closer(name: &'static str, color: crate::Color, handles: bool, options: crate::ConfiguredWindowOptions) -> crate::AnyWindowSpec {
+    /// Reopen hooks for `closer`: each records the reopen.
+    fn record(p: &mut Pair, visible: bool, _: &mut crate::Tx) -> bool { REOPENED.lock().unwrap().push((p.name, visible)); false }
+    fn handle(p: &mut Pair, visible: bool, tx: &mut crate::Tx) -> bool { record(p, visible, tx); true }
+    /// Opens the other window and leaves the rest to the default.
+    fn open_other(p: &mut Pair, visible: bool, tx: &mut crate::Tx) -> bool {
+        if let Some(other) = &p.other { other.open(); }
+        record(p, visible, tx)
+    }
+
+    /// A `keep_running` window that closes on any key, with `hook` as its `on_reopen`.
+    fn closer_with(name: &'static str, color: crate::Color, other: Option<crate::AppHandle<Pair>>,
+        hook: fn(&mut Pair, bool, &mut crate::Tx) -> bool, options: crate::ConfiguredWindowOptions) -> (crate::AnyWindowSpec, crate::AppHandle<Pair>) {
         let spec = AppSpec {
             on_key: Some(|_: &mut Pair, _: &crate::KeyEvent, tx: &mut crate::Tx| { tx.close_window(); true }),
             ..AppSpec::new("closer", (1.0, 1.0), || Pair { name: "", color: crate::Color::TRANSPARENT, other: None, act: |_, _| {} },
                 |p, _| crate::el().w_full().h_full().fill(p.color))
         };
-        fn record(p: &mut Pair, visible: bool, _: &mut crate::Tx) -> bool { REOPENED.lock().unwrap().push((p.name, visible)); false }
-        fn handle(p: &mut Pair, visible: bool, tx: &mut crate::Tx) -> bool { record(p, visible, tx); true }
-        let app = crate::App::new(spec).init(move || Pair { name, color, other: None, act: |_, _| {} })
-            .keep_running().on_reopen(if handles { handle } else { record });
-        crate::WindowSpec::from_app(name, app).configured_options(options).boxed()
+        let app = crate::App::new(spec).init(move || Pair { name, color, other, act: |_, _| {} }).keep_running().on_reopen(hook);
+        let handle = app.handle();
+        (crate::WindowSpec::from_app(name, app).configured_options(options).boxed(), handle)
+    }
+
+    /// `closer_with` that records reopens, handling them when `handles`.
+    fn closer(name: &'static str, color: crate::Color, handles: bool, options: crate::ConfiguredWindowOptions) -> crate::AnyWindowSpec {
+        closer_with(name, color, None, if handles { handle } else { record }, options).0
     }
 
     /// Runs `windows` on a headless desktop with `script`, as `desktop_case` does.
@@ -2529,6 +2541,23 @@ mod tests {
             closer("b", BLUE, false, right().macos(Default::default()))]);
         assert_eq!((focus_of(run, 0.2, "a"), focus_of(run, 0.2, "b")), ((true, true), (false, false)));
         assert_eq!(*REOPENED.lock().unwrap(), [("a", true), ("b", true)]);
+    }
+
+    #[test]
+    fn desktop_reopen_default_sees_what_the_hooks_did() {
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+        // `a` closes, then `b`, so `b` would come back; but `b`'s hook opens `a` and leaves
+        // the rest to the default, which then finds a window showing.
+        let script = r#"[{"t": 0.1, "type": "tap", "x": 30, "y": 25}, {"t": 0.2, "type": "key", "name": "Enter"},
+            {"t": 0.3, "type": "key", "name": "Enter"}, {"t": 0.4, "reopen": true}]"#;
+        let run = reopen_case(script, false, || {
+            let (a, handle) = closer_with("a", RED, None, record, left().macos(Default::default()));
+            let (b, _) = closer_with("b", BLUE, Some(handle), open_other, right().macos(Default::default()));
+            vec![a, b]
+        });
+        assert_eq!((focus_of(run, 0.3, "a"), focus_of(run, 0.3, "b")), ((false, false), (false, false)), "both closed");
+        assert_eq!((focus_of(run, 0.4, "a"), focus_of(run, 0.4, "b")), ((true, true), (false, false)));
+        assert_eq!(*REOPENED.lock().unwrap(), [("a", false), ("b", false)]);
     }
 
     #[test]

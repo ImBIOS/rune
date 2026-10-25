@@ -46,56 +46,74 @@ static HIDES: AtomicU64 = AtomicU64::new(0);
 /// A number larger than every earlier one, for the order windows hid in.
 pub(crate) fn stamp() -> u64 { HIDES.fetch_add(1, Ordering::Relaxed) + 1 }
 
+/// What the reopen method answers AppKit: whether AppKit should run its own reopen handling.
+/// When AppKit sees a visible window its handling changes nothing, and the activation that
+/// came with the reopen already brought the app forward, to the window's Space; so it goes
+/// ahead. Otherwise Rune brings the window back itself, unless the event never reached Rune's
+/// loop (it has exited), when AppKit still restores what it can.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn appkit_handles(sent: bool, appkit_sees_visible: bool) -> bool { !sent || appkit_sees_visible }
+
 #[cfg(target_os = "macos")]
-pub(crate) use mac::{accessory, install};
+pub(crate) use mac::{accessory, front, install, unhide};
 
 #[cfg(target_os = "macos")]
 mod mac {
-    use std::cell::RefCell;
-    use objc2::rc::Retained;
-    use objc2::runtime::{AnyObject, Bool, Sel};
-    use objc2::{ffi, msg_send_id, sel};
+    use std::cell::{Cell, RefCell};
+    use std::ffi::{c_char, c_void};
+    use objc2::{msg_send, sel};
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
     use objc2_foundation::MainThreadMarker;
 
     thread_local! {
-        static REOPEN: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+        /// Sends the reopen to Rune's loop; false once the loop is gone.
+        static REOPEN: RefCell<Option<Box<dyn Fn() -> bool>>> = const { RefCell::new(None) };
+        /// The delegate class Rune added the method to.
+        static HOOKED: Cell<*const AnyClass> = const { Cell::new(std::ptr::null()) };
     }
 
-    unsafe extern "C" fn should_handle_reopen(_: &AnyObject, _: Sel, _: *mut AnyObject, _: Bool) -> Bool {
-        let sent = REOPEN.with(|reopen| reopen.borrow().as_ref().map(|f| f()).is_some());
-        // Rune decides what a reopen shows; AppKit's own handling would only deminiaturize.
-        Bool::new(!sent)
+    unsafe extern "C" {
+        fn class_addMethod(class: *const AnyClass, selector: Sel, implementation: *const c_void, types: *const c_char) -> Bool;
     }
 
-    /// Calls `reopen` on the main thread each time the app is reopened. Adds the reopen method
-    /// to the app delegate's class unless the class already answers it (a later winit, or an app's
-    /// own delegate), in which case reopening stays with that delegate. Main thread only.
-    pub(crate) fn install(reopen: impl Fn() + 'static) {
+    extern "C" fn should_handle_reopen(_: *mut AnyObject, _: Sel, _: *mut AnyObject, visible: Bool) -> Bool {
+        let sent = std::panic::catch_unwind(|| {
+            REOPEN.with(|reopen| reopen.try_borrow().ok().and_then(|f| f.as_ref().map(|f| f())).unwrap_or(false))
+        }).unwrap_or_else(|_| { eprintln!("rune: reopen callback panicked"); false });
+        Bool::new(super::appkit_handles(sent, visible.as_bool()))
+    }
+
+    /// Calls `reopen` on the main thread each time the app is reopened; it returns whether the
+    /// event reached Rune's loop. Adds the reopen method to the app delegate's class unless the
+    /// class already answers it (a later winit, or an app's own delegate), in which case
+    /// reopening stays with that delegate. Main thread only; a later call replaces `reopen`.
+    pub(crate) fn install(reopen: impl Fn() -> bool + 'static) {
         let Some(mtm) = MainThreadMarker::new() else { return };
         let app = NSApplication::sharedApplication(mtm);
-        // SAFETY: NSApplication's delegate getter, on the main thread.
-        let delegate: Option<Retained<AnyObject>> = unsafe { msg_send_id![&app, delegate] };
-        let Some(delegate) = delegate else { return };
         let selector = sel!(applicationShouldHandleReopen:hasVisibleWindows:);
-        let class = delegate.class();
-        let ours = REOPEN.with(|r| r.borrow().is_some());
-        if !ours && class.responds_to(selector) { return; }
-        REOPEN.with(|r| *r.borrow_mut() = Some(Box::new(reopen)));
-        if ours { return; }
-        // BOOL is `bool` on Apple silicon and `signed char` on Intel.
-        let types = if cfg!(target_arch = "aarch64") { c"B@:@B" } else { c"c@:@c" };
-        let imp = should_handle_reopen as unsafe extern "C" fn(&AnyObject, Sel, *mut AnyObject, Bool) -> Bool;
-        // SAFETY: the function's signature matches the selector's and `types`; adding a method
-        // the class lacks leaves its other methods and instances as they were.
+        // SAFETY: AppKit calls and runtime changes on the main thread. The added function has
+        // the selector's ABI (`types`: BOOL is `bool` on Apple silicon, `signed char` on Intel),
+        // and adding a method the class lacks leaves its other methods and instances alone.
         unsafe {
-            ffi::class_addMethod(
-                (class as *const objc2::runtime::AnyClass).cast_mut().cast(),
-                selector.as_ptr(),
-                Some(std::mem::transmute::<_, unsafe extern "C" fn()>(imp)),
-                types.as_ptr(),
-            );
+            let delegate: *mut AnyObject = msg_send![&app, delegate];
+            let Some(delegate) = delegate.as_ref() else { return };
+            let class = delegate.class();
+            if !HOOKED.with(|hooked| std::ptr::eq(hooked.get(), class)) {
+                let answers: bool = msg_send![delegate, respondsToSelector: selector];
+                if answers { return; }
+                let types = if cfg!(target_arch = "aarch64") { c"B@:@B" } else { c"c@:@c" };
+                let imp = should_handle_reopen as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject, Bool) -> Bool;
+                if !class_addMethod(class, selector, imp as *const c_void, types.as_ptr()).as_bool() {
+                    eprintln!("rune: could not add the reopen method to the app delegate");
+                    return;
+                }
+                HOOKED.with(|hooked| hooked.set(class));
+                // AppKit caches which optional methods its delegate answers when it is set.
+                let _: () = msg_send![&app, setDelegate: delegate];
+            }
         }
+        REOPEN.with(|r| if let Ok(mut r) = r.try_borrow_mut() { *r = Some(Box::new(reopen)); });
     }
 
     /// The app has no Dock icon now (`App::accessory`, `AppHandle::set_dock_icon(false)`).
@@ -103,6 +121,23 @@ mod mac {
         let Some(mtm) = MainThreadMarker::new() else { return false };
         // SAFETY: reading the activation policy on the main thread.
         unsafe { NSApplication::sharedApplication(mtm).activationPolicy() != NSApplicationActivationPolicy::Regular }
+    }
+
+    /// Unhides the app if it is hidden (⌘H, Hide Others), which also activates it.
+    pub(crate) fn unhide() {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        let app = NSApplication::sharedApplication(mtm);
+        // SAFETY: AppKit calls on the main thread.
+        unsafe { if app.isHidden() { app.unhide(None); } }
+    }
+
+    /// Activates the app with `window` key and in front. Unlike winit's `focus_window`, this
+    /// also works while the window is still deminiaturizing.
+    pub(crate) fn front(window: &winit::window::Window) {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        #[allow(deprecated)]
+        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+        if let Some(window) = crate::macos::ns_window(window) { window.makeKeyAndOrderFront(None); }
     }
 }
 
@@ -147,6 +182,13 @@ mod tests {
         assert!(!has_visible(&[panel, closed]));
         assert_eq!(target(&[panel, closed]), None);
         assert_eq!(target(&[panel, closed, window(false, Some(1))]), Some(2));
+    }
+
+    #[test]
+    fn appkit_handles_a_reopen_unless_rune_brings_a_window_back() {
+        assert!(appkit_handles(true, true), "a window shows: AppKit's handling, which changes nothing");
+        assert!(!appkit_handles(true, false), "none shows: Rune's");
+        assert!(appkit_handles(false, false), "the loop is gone: AppKit's");
     }
 
     #[test]

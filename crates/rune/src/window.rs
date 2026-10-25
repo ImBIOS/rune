@@ -327,8 +327,11 @@ pub(crate) trait AnyHost {
     fn keeps_loop(&self) -> bool { true }
     /// How reopening the app sees it; overlays never come back.
     fn reopen_candidate(&self) -> crate::reopen::Candidate { Default::default() }
-    /// Runs `App::on_reopen`; true when it handled the reopen.
+    /// Runs `App::on_reopen` as an update; true when it handled the reopen.
     fn reopen_hook(&mut self, _event_loop: &ActiveEventLoop, _has_visible_windows: bool) -> bool { false }
+    /// Applies what was asked of it through its handle since the last wake, now rather than
+    /// when that wake arrives.
+    fn apply_pending(&mut self, _event_loop: &ActiveEventLoop) {}
     /// Shows, restores and activates it as the default reopen.
     fn reopen(&mut self, _event_loop: &ActiveEventLoop) {}
 }
@@ -501,16 +504,23 @@ impl Windows {
     /// The app was reopened: every `on_reopen` hook runs, then, unless one handled it or the
     /// app is an accessory, the default brings back a window when none shows (`reopen::target`).
     fn reopen(&mut self, event_loop: &ActiveEventLoop) {
-        let candidates: Vec<_> = self.hosts.iter().map(|h| h.as_ref().map(|h| h.reopen_candidate()).unwrap_or_default()).collect();
-        let has_visible = crate::reopen::has_visible(&candidates);
+        let candidates = |hosts: &[Option<Box<dyn AnyHost>>]| -> Vec<_> {
+            hosts.iter().map(|h| h.as_ref().map(|h| h.reopen_candidate()).unwrap_or_default()).collect()
+        };
+        let has_visible = crate::reopen::has_visible(&candidates(&self.hosts));
         let mut handled = false;
         for host in self.hosts.iter_mut().flatten() {
             handled |= host.reopen_hook(event_loop, has_visible);
         }
+        if handled || event_loop.exiting() { return; }
         #[cfg(target_os = "macos")]
         if crate::reopen::accessory() { return; }
-        if handled || event_loop.exiting() { return; }
-        if let Some(Some(host)) = crate::reopen::target(&candidates).and_then(|i| self.hosts.get_mut(i)) {
+        // The default sees what the hooks did, to other windows too.
+        for host in self.hosts.iter_mut().flatten() { host.apply_pending(event_loop); }
+        if event_loop.exiting() { return; }
+        #[cfg(target_os = "macos")]
+        crate::reopen::unhide();
+        if let Some(Some(host)) = crate::reopen::target(&candidates(&self.hosts)).and_then(|i| self.hosts.get_mut(i)) {
             host.reopen(event_loop);
         }
     }
@@ -586,7 +596,7 @@ impl ApplicationHandler<WakeEvent> for Windows {
         #[cfg(target_os = "macos")]
         {
             let proxy = self.proxy.clone();
-            crate::reopen::install(move || { let _ = proxy.send_event(WakeEvent::Reopen); });
+            crate::reopen::install(move || proxy.send_event(WakeEvent::Reopen).is_ok());
         }
         self.cleanup(event_loop);
     }
@@ -2273,7 +2283,9 @@ impl<S: 'static> Host<S> {
 
     fn open(&mut self, event_loop: &ActiveEventLoop, token: Option<String>) {
         if self.launcher() { self.reveal_launcher(event_loop); return; }
-        let built = self.win.as_ref().is_some_and(|w| !w.visible) && self.build_for_show();
+        // A minimized window drew nothing either, so it comes back as a hidden one does.
+        let restoring = self.win.as_ref().is_some_and(|w| w.window.is_minimized() == Some(true));
+        let built = self.win.as_ref().is_some_and(|w| !w.visible || restoring) && self.build_for_show();
         self.apply_placement(event_loop);
         // The launcher's startup token belongs to the first window only.
         #[allow(unused_mut)]
@@ -2299,8 +2311,9 @@ impl<S: 'static> Host<S> {
             if !built { self.rt.settle_all(); }
             self.idle = true;
         }
-        if w.window.is_minimized() == Some(true) {
+        if restoring {
             w.window.set_minimized(false);
+            if !built { self.rt.settle_all(); }
         }
         w.occluded = false;
         self.rt.set_live_visible(true);
@@ -2813,20 +2826,28 @@ impl<S: 'static> AnyHost for Host<S> {
 
     fn reopen_hook(&mut self, event_loop: &ActiveEventLoop, has_visible_windows: bool) -> bool {
         let Some(f) = self.on_reopen.filter(|_| self.started && !self.finished) else { return false };
-        let mut handled = false;
-        self.rt.update(|s, tx| handled = f(s, has_visible_windows, tx));
-        self.clipboard.flush(&mut self.rt);
-        self.shell(event_loop);
-        match self.win.as_ref().filter(|w| w.visible) {
-            Some(w) => w.window.request_redraw(),
-            None if self.launcher() => { self.refresh_hidden(); }
-            None => self.rt.schedule_pending_wakes(),
-        }
-        handled
+        // As an update, so its frame, wakes, window requests and quit go as an update's do.
+        let handled = Arc::new(AtomicBool::new(false));
+        let answer = handled.clone();
+        self.shared.queue_update(Box::new(move |s, tx| { answer.store(f(s, has_visible_windows, tx), Ordering::Relaxed); true }));
+        self.drain(event_loop, false);
+        self.publish();
+        handled.load(Ordering::Relaxed)
+    }
+
+    fn apply_pending(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.started || self.finished || !self.shared.window_pending() { return; }
+        self.drain(event_loop, false);
+        self.publish();
     }
 
     fn reopen(&mut self, event_loop: &ActiveEventLoop) {
-        if self.started && !self.finished { self.open(event_loop, None); }
+        if !self.started || self.finished { return; }
+        self.open(event_loop, None);
+        // winit's focus does nothing while the window is still deminiaturizing.
+        #[cfg(target_os = "macos")]
+        if let Some(w) = self.win.as_ref().filter(|w| w.visible) { crate::reopen::front(&w.window); }
+        self.publish();
     }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {

@@ -585,6 +585,11 @@ impl<S> Shared<S> {
         std::mem::take(&mut self.requests.lock().unwrap())
     }
 
+    /// Queues `f` for the next `take`, as `AppHandle::update_if` does, without waking the loop.
+    pub(crate) fn queue_update(&self, f: Update<S>) {
+        self.requests.lock().unwrap().updates.push(f);
+    }
+
     /// A request a `--desktop` run applies to the window (dock and quit aside) waits for `take`.
     pub(crate) fn window_pending(&self) -> bool {
         let r = self.requests.lock().unwrap();
