@@ -681,6 +681,8 @@ pub struct Visual {
     pub pixels_fit: Option<crate::SurfaceFit>,
     /// App-defined tag a compositor reads per instance (`Runtime::marks`); 0 inherits the parent's.
     pub mark: u32,
+    /// An effect slot (`El::effect`): the bleed past the rect, in points, a compositor may paint.
+    pub(crate) effect: Option<f32>,
     /// Tracks hover for its descendants' `group_*` styles even without a hover colour. Any
     /// element with a hover colour is a group too.
     pub hover_group: bool,
@@ -723,6 +725,7 @@ impl Default for Visual {
             pixels: None,
             pixels_fit: None,
             mark: 0,
+            effect: None,
             hover_group: false,
             hover_motion: None,
             group_opacity: None,
@@ -908,6 +911,11 @@ pub fn col() -> El {
 /// A plain box.
 pub fn el() -> El {
     base(FlexDirection::Row)
+}
+
+/// An effect slot (`El::effect`): size it like any box.
+pub fn effect(mark: u32) -> El {
+    base(FlexDirection::Row).effect(mark)
 }
 
 /// Takes the free space along its parent's main axis.
@@ -1866,6 +1874,21 @@ impl El {
     /// compositor: `Runtime::marks` runs parallel to `Runtime::instances`.
     pub fn mark(mut self, mark: u32) -> Self {
         self.vis.mark = mark;
+        self
+    }
+    /// Makes this element an effect slot for a compositor, tagged `mark`. It draws nothing
+    /// itself but keeps its place in the painter stream with its rect, clip, rounded clip and
+    /// enclosing isolated layer (opacity, blur, dissolve), so a compositor can paint its own
+    /// pass there. See `Renderer::draw_range_with`.
+    pub fn effect(mut self, mark: u32) -> Self {
+        self.vis.mark = mark;
+        self.vis.effect.get_or_insert(0.0);
+        self
+    }
+    /// Points past the rect an effect slot may paint (a glow's reach). Grows the bounds of an
+    /// enclosing isolated layer; the clip still applies.
+    pub fn effect_bleed(mut self, pt: f32) -> Self {
+        self.vis.effect = Some(pt.max(0.0));
         self
     }
     /// Overlay drawn over the fill while hovered.

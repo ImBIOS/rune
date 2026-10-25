@@ -66,7 +66,8 @@ fn base_vs(i: In) -> Out {
         grow = 1.0;
     }
     let lo = i.rect.xy - vec2<f32>(grow);
-    let size = i.rect.zw + vec2<f32>(2.0 * grow);
+    // Effect slots (kind 12) reserve their place in the stream and cover no pixels.
+    let size = select(i.rect.zw + vec2<f32>(2.0 * grow), vec2<f32>(0.0), kind > 11.5);
     let p = lo + corner * size;
     var screen = p;
     // Icon loops rotate the quad, not its atlas allocation. Local p still samples the glyph.
@@ -91,66 +92,6 @@ fn base_vs(i: In) -> Out {
     o.clip = i.clip;
     o.fade = i.fade;
     return o;
-}
-
-// Apple's continuous corner of radius r: its curve leaves each edge K·r from the corner, and
-// from the point (K·r, K·r) inside the corner it lies K·r·g(u) away, u running -1..1 across
-// the quarter turn (0 on the diagonal; within 0.32% of r). Each quadrant takes its own
-// corner's whole curve, as Core Animation does when K·r passes half the shorter side.
-const CONTINUOUS_K: f32 = 1.52866483;
-fn sd_continuous(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 {
-    let e = CONTINUOUS_K * r;
-    let q = half - abs(p);
-    let v = vec2<f32>(e) - q;
-    if (v.x <= 0.0 || v.y <= 0.0) { return max(-q.x, -q.y); }
-    let u = atan2(v.y, v.x) * (4.0 / 3.14159265) - 1.0;
-    let u2 = u * u;
-    return length(v) - e * (1.14602295 + u2 * (-0.37573161 + u2 * (0.30796609 - 0.07724354 * u2)));
-}
-
-fn sd_rounded(p: vec2<f32>, half: vec2<f32>, radii: vec4<f32>) -> f32 {
-    // radii: top-left, top-right, bottom-right, bottom-left (y down). Negative is continuous.
-    var r = radii.x;
-    if (p.x > 0.0) {
-        r = select(radii.y, radii.z, p.y > 0.0);
-    } else {
-        r = select(radii.x, radii.w, p.y > 0.0);
-    }
-    if (r < 0.0) { return sd_continuous(p, half, min(-r, min(half.x, half.y))); }
-    r = min(r, min(half.x, half.y));
-    let q = abs(p) - half + vec2<f32>(r);
-    return min(max(q.x, q.y), 0.0) + length(max(q, vec2<f32>(0.0))) - r;
-}
-
-fn ramp(d: f32, fade: f32) -> f32 {
-    if (fade <= 0.0) {
-        return clamp(d + 0.5, 0.0, 1.0);
-    }
-    let x = clamp(d / fade, 0.0, 1.0);
-    return x * x * (3.0 - 2.0 * x);
-}
-
-fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
-    let f = vec4<f32>(unpack2x16float(packed.x), unpack2x16float(packed.y));
-    let offset = unpack4x8unorm(packed.z);
-    let hard = vec4<f32>(p - c.xy, c.zw - p);
-    var alpha = 1.0;
-    for (var edge = 0u; edge < 4u; edge++) {
-        // Keep the original sub-pixel ramp exactly when its origin is the hard edge.
-        var a = ramp(hard[edge], f[edge]);
-        if offset[edge] >= 1.0 {
-            a = ramp(hard[edge], 0.0);
-        } else if offset[edge] > 0.0 {
-            a = min(ramp(hard[edge], 0.0), ramp(hard[edge] + offset[edge] * f[edge], f[edge]));
-        }
-        alpha *= a;
-    }
-    let radius = bitcast<f32>(packed.w);
-    if radius != 0.0 {
-        let half = (c.zw - c.xy) * 0.5;
-        alpha *= clamp(0.5 - sd_rounded(p - c.xy - half, half, vec4(radius)), 0.0, 1.0);
-    }
-    return alpha;
 }
 
 // Evan Wallace's analytic rounded-box shadow (as in GPUI): exact along x, 4 samples along y.
@@ -363,6 +304,7 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
             * clip_alpha(i.pos.xy + projection.xy, i.clip, i.fade);
     }
     let kind = i.params.y;
+    if (kind > 11.5) { discard; }
     let half = i.rect.zw * 0.5;
     let center = i.rect.xy + half;
     var col = vec4<f32>(0.0);

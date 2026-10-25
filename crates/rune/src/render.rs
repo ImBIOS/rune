@@ -39,6 +39,13 @@ pub const KIND_DASHED: f32 = 10.0;
 /// (`uv.z == 0`: `uv.xy` = gradient vector per device pixel) stop segment from `fill` at `t0`
 /// (`params.x`) to `border` at `t1` (`params.w`), with `+ 2.0` marking an open interior stop edge.
 pub const KIND_RADIAL: f32 = 11.0;
+/// An effect slot (`El::effect`). It rasterizes no pixels but keeps its place in the painter
+/// stream, so `Renderer::draw_range_with` can hand the compositor the pass at exactly this point,
+/// inside the enclosing isolated layer if there is one. `rect` is the element, `clip`/`fade`
+/// (and the rounded-clip radius in `fade[3]`) its clip, `fill[3]` its opacity (already folded
+/// from a scope that was flattened), `params.z` the bleed past `rect` in device pixels and
+/// `params.w` the display scale. `Runtime::marks` carries its `El::effect` tag.
+pub const KIND_EFFECT: f32 = 12.0;
 
 /// How a scope combines its contents. The completed scope still uses source-over on its parent
 /// unless that parent also requests additive composition.
@@ -80,6 +87,36 @@ pub struct LayerSpec {
 impl Default for LayerSpec {
     fn default() -> Self { Self { opacity: 1.0, blend: Blend::SourceOver, blur: 0.0, clip_radius: 0.0 } }
 }
+
+/// WGSL for clipping like Rune does: `sd_rounded`, `ramp` and `clip_alpha(p, clip, fade)`. `p` is
+/// a window device-pixel position, `clip` an instance's `clip` and `fade` (`vec4<u32>`) its packed
+/// soft edges and rounded-clip radius, so a compositor shader cuts its effect with the same
+/// rectangle, feathers and circular or continuous corners as the primitives around it. Prepend it
+/// to the shader source.
+pub const CLIP_WGSL: &str = include_str!("clip.wgsl");
+
+/// Where a compositor is asked to draw an effect slot (`Renderer::draw_range_with`).
+pub struct EffectSite<'a> {
+    /// The slot's position in the painter stream.
+    pub index: u32,
+    /// The slot's record (`KIND_EFFECT`): rect, radii, clip, fade, opacity in `fill[3]`.
+    pub instance: &'a Instance,
+    /// Format of the pass being recorded.
+    pub format: wgpu::TextureFormat,
+    /// Window device-pixel position of this pass's top-left pixel: zero in the frame target,
+    /// the layer's bounds origin inside an isolated layer. Subtract it from window coordinates.
+    pub origin: [f32; 2],
+    /// Size of this pass's target in device pixels.
+    pub size: [u32; 2],
+    /// True inside an isolated layer: the pass is that layer's offscreen target.
+    pub in_layer: bool,
+    /// Whether colours are sRGB-encoded for blending (`Renderer::srgb_blend`).
+    pub srgb_blend: bool,
+}
+
+/// Called at each effect slot, with the pass open and everything painted before the slot already
+/// recorded. It may record draws; the viewport and scissor are reset to the full target after.
+pub type EffectHook<'h> = dyn FnMut(&mut wgpu::RenderPass<'_>, &EffectSite<'_>) + 'h;
 
 /// One instance, in device pixels.
 #[repr(C)]
@@ -265,6 +302,8 @@ pub struct Renderer {
     spring_instances: usize,
     layers: layers::Layers,
     srgb_blend: bool,
+    /// Effect slots of the uploaded instances, by index.
+    effects: Vec<(u32, Instance)>,
 }
 
 impl Renderer {
@@ -287,8 +326,8 @@ impl Renderer {
 
     fn create(device: &wgpu::Device, format: wgpu::TextureFormat, properties: Option<(&[crate::gpu_springs::Node], &[u32])>) -> Renderer {
         let source = if properties.is_some() {
-            format!("{}\n{}", include_str!("shader.wgsl"), crate::gpu_springs::SHADER)
-        } else { include_str!("shader.wgsl").to_owned() };
+            format!("{CLIP_WGSL}\n{}\n{}", include_str!("shader.wgsl"), crate::gpu_springs::SHADER)
+        } else { format!("{CLIP_WGSL}\n{}", include_str!("shader.wgsl")) };
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("uber"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -378,6 +417,7 @@ impl Renderer {
             spring_instances,
             layers: Default::default(),
             srgb_blend: false,
+            effects: Vec::new(),
         }
     }
 
@@ -542,7 +582,31 @@ impl Renderer {
     pub fn draw_range(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat, range: std::ops::Range<u32>) {
         if range.is_empty() && range.end != self.count { return; }
         self.validate_layer_range(&range);
-        self.draw_layer_range(pass, format, range, None);
+        self.draw_layer_range(pass, format, range, None, &mut |_, _| {});
+    }
+
+    /// `draw_range` that stops at each effect slot (`El::effect`) in `range` and calls `hook`
+    /// there, in painter order. Effects inside an isolated layer are reached through
+    /// `encode_layers_with`, which draws that layer's pass; scopes nest as in `draw_range`.
+    pub fn draw_range_with(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat, range: std::ops::Range<u32>, hook: &mut EffectHook<'_>) {
+        if range.is_empty() && range.end != self.count { return; }
+        self.validate_layer_range(&range);
+        self.draw_layer_range(pass, format, range, None, hook);
+    }
+
+    /// `draw_instances`, split after each effect slot in `range` so `hook` runs at its place.
+    fn draw_with_effects(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat, range: std::ops::Range<u32>, target: Option<usize>, hook: &mut EffectHook<'_>) {
+        let first = self.effects.partition_point(|(at, _)| *at < range.start);
+        let mut cursor = range.start;
+        for (at, instance) in self.effects[first..].iter().take_while(|(at, _)| *at < range.end) {
+            self.draw_instances(pass, format, cursor..*at + 1, target);
+            cursor = *at + 1;
+            let (origin, size) = self.target_frame(target);
+            hook(pass, &EffectSite { index: *at, instance, format, origin, size, in_layer: target.is_some(), srgb_blend: self.srgb_blend });
+            pass.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
+            pass.set_scissor_rect(0, 0, size[0], size[1]);
+        }
+        self.draw_instances(pass, format, cursor..range.end, target);
     }
 
     fn draw_instances(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat, range: std::ops::Range<u32>, target: Option<usize>) {
@@ -604,8 +668,10 @@ impl Renderer {
         self.image_batches.clear();
         let (mut start, mut page) = (0, 0);
         let mut has_layers = false;
+        self.effects.clear();
         for (i, instance) in instances.iter().enumerate() {
             has_layers |= instance.params[1] == KIND_LAYER;
+            if instance.params[1] == KIND_EFFECT { self.effects.push((i as u32, *instance)); }
             if instance.params[1] == KIND_IMAGE && instance.params[0] as usize != page {
                 if start < i as u32 { self.image_batches.push((start..i as u32, page)); }
                 start = i as u32;
@@ -631,7 +697,13 @@ impl Renderer {
         if self.layer_stats().targets > 0 { self.position_layer_surfaces(queue); }
     }
 
-    pub(crate) fn format(&self) -> wgpu::TextureFormat { self.format }
+    /// The format of the target the renderer was built for (`draw_range` with this format).
+    pub fn format(&self) -> wgpu::TextureFormat { self.format }
+
+    /// True when colours are sRGB-encoded for blending: the target is a non-sRGB view and every
+    /// pass, offscreen layers included, holds encoded premultiplied values. False means linear
+    /// premultiplied values, encoded by the `*Srgb` target on write.
+    pub fn srgb_blend(&self) -> bool { self.srgb_blend }
 
     pub fn submit(&self, queue: &wgpu::Queue, encoder: wgpu::CommandEncoder) -> wgpu::SubmissionIndex {
         if let Some(s) = &self.surfaces { s.submit(queue,encoder) } else { queue.submit([encoder.finish()]) }
@@ -674,7 +746,7 @@ impl Renderer {
 
     fn draw_load(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, load: wgpu::LoadOp<wgpu::Color>, timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>) {
         let timestamps = timestamps.or_else(|| self.surfaces.as_ref().and_then(|s| s.timestamp_writes()));
-        self.encode_layers_timed(encoder, timestamps.as_ref());
+        self.encode_layers_timed(encoder, timestamps.as_ref(), &mut |_, _| {});
         let timestamps = timestamps.map(|mut t| {
             if self.layer_stats().extra_passes > 0 { t.beginning_of_pass_write_index = None; }
             t

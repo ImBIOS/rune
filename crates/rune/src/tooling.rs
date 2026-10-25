@@ -1350,12 +1350,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
         return crate::hot::snap_window(app, args);
     }
     let mut comp = app.compositor.take();
-    let srgb_blend = if comp.is_some() && app.srgb_blend {
-        eprintln!("rune: srgb_blend is ignored when a compositor is set");
-        false
-    } else {
-        app.srgb_blend
-    };
+    let srgb_blend = app.srgb_blend;
     // Snapshots and scripts run in parallel; they open the panel only when asked to.
     #[cfg(all(feature = "dev", debug_assertions))]
     let dev = app.dev.take().filter(|_| std::env::var_os("RUNE_DEV_PANEL").is_some());

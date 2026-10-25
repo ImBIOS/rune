@@ -29,7 +29,7 @@ use crate::growth::{GrowTrack, SUBSTEP};
 // Half-open, like overlays, NSPointInRect and PtInRect: a shared edge belongs to one side.
 use crate::overlay_options::contains;
 use crate::flight::{TextFlight, transformed};
-use crate::render::{Instance, KIND_DASHED, KIND_GLYPH, KIND_GRADIENT, KIND_IMAGE, KIND_INSET, KIND_RADIAL, KIND_RECT, KIND_SEGMENT, KIND_SHADOW, KIND_TRIANGLE, NO_CLIP};
+use crate::render::{Instance, KIND_DASHED, KIND_EFFECT, KIND_GLYPH, KIND_GRADIENT, KIND_IMAGE, KIND_INSET, KIND_RADIAL, KIND_RECT, KIND_SEGMENT, KIND_SHADOW, KIND_TRIANGLE, NO_CLIP};
 use crate::shape::{LineCap, Op, Shape};
 use crate::text::{Deco, GlyphQuad, Ink, TextSystem, layout_height};
 use crate::tok::motion;
@@ -4953,6 +4953,18 @@ impl<S: 'static> Runtime<S> {
                         border: [0.0; 4],
                         params: [sh.spread * k_px, KIND_INSET, if sh.blur > 0.0 { (sh.blur * s * 0.5).max(0.5) } else { 0.0 }, 1.0],
                         uv: [sh.x * k_px, sh.y * k_px, 0.0, 0.0],
+                        clip,
+                        fade: crate::render::pack_fade(fade, clip, clip),
+                    });
+                }
+                if let Some(bleed) = n.vis.effect {
+                    self.instances.push(Instance {
+                        rect: [r[0], r[1], w, h],
+                        radii,
+                        fill: [0.0, 0.0, 0.0, o],
+                        border: [0.0; 4],
+                        params: [0.0, KIND_EFFECT, bleed * k_px, s],
+                        uv: [0.0; 4],
                         clip,
                         fade: crate::render::pack_fade(fade, clip, clip),
                     });

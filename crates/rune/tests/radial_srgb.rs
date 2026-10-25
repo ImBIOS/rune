@@ -456,12 +456,12 @@ fn srgb_blend_images_surfaces_keycaps_and_compositor() {
         "keycaps overlay runtime should encode cap fill in sRGB space (~26, not ~4), got {p_cap:?}"
     );
 
-    // 5. Attaching a Compositor ignores srgb_blend (with a warning) so compositors never double-encode.
+    // 5. A Compositor sees the blend mode and the matching non-sRGB target format.
     static COMP_STATE: std::sync::OnceLock<(bool, wgpu::TextureFormat)> = std::sync::OnceLock::new();
     struct CheckComp;
     impl Compositor<()> for CheckComp {
         fn render(&mut self, f: &mut Frame<'_, ()>) {
-            let _ = COMP_STATE.set((f.rt.srgb_blend(), f.format));
+            let _ = COMP_STATE.set((f.srgb_blend(), f.format));
             f.draw_ui();
         }
     }
@@ -474,7 +474,7 @@ fn srgb_blend_images_surfaces_keycaps_and_compositor() {
     );
     assert_eq!(
         COMP_STATE.get().copied(),
-        Some((false, OFFSCREEN_FORMAT)),
-        "compositor must ignore srgb_blend and keep the sRGB target format"
+        Some((true, OFFSCREEN_FORMAT.remove_srgb_suffix())),
+        "a compositor must see srgb_blend and the non-sRGB target format"
     );
 }

@@ -103,7 +103,7 @@ impl<S: 'static> App<S> {
 
     /// Composite this window's translucent fills, blurs, shadows, images and video in sRGB
     /// (gamma) space instead of linear light, matching CSS and Core Animation over dark
-    /// backgrounds. Ignored with a warning when a `Compositor` is set.
+    /// backgrounds. With a `Compositor`, `Frame::srgb_blend` says which encoding its passes must match.
     pub fn srgb_blend(mut self, enabled: bool) -> Self {
         self.srgb_blend = enabled;
         self

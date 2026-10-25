@@ -148,6 +148,7 @@ impl Renderer {
                 let grow = match i.params[1] {
                     KIND_GLYPH => 0.0,
                     KIND_SHADOW => i.params[2] * 3.0 + 1.0,
+                    KIND_EFFECT => i.params[2] + 1.0,
                     KIND_RECT | KIND_GRADIENT | KIND_DASHED | KIND_RADIAL => 1.0 + i.params[2] * 2.0,
                     _ => 1.0,
                 };
@@ -297,10 +298,29 @@ impl Renderer {
     /// `draw`/`draw_timed` do this automatically. Contents are redrawn each presentation so GPU
     /// springs and newly latched native surfaces stay live; textures, not content, are pooled.
     pub fn encode_layers(&self, encoder: &mut wgpu::CommandEncoder) {
-        self.encode_layers_timed(encoder, None);
+        self.encode_layers_timed(encoder, None, &mut |_, _| {});
     }
 
-    pub(super) fn encode_layers_timed(&self, encoder: &mut wgpu::CommandEncoder, timestamps: Option<&wgpu::RenderPassTimestampWrites<'_>>) {
+    /// `encode_layers` that calls `hook` at each effect slot inside an isolated layer, in painter
+    /// order within that layer's pass. The layer's opacity, blur, dissolve and clip then apply to
+    /// whatever the hook drew when the layer composites. Slots outside any layer are reached by
+    /// `draw_range_with`.
+    pub fn encode_layers_with(&self, encoder: &mut wgpu::CommandEncoder, hook: &mut EffectHook<'_>) {
+        self.encode_layers_timed(encoder, None, hook);
+    }
+
+    /// Origin and size of a pass's target: a layer's bounds, or the frame viewport.
+    pub(super) fn target_frame(&self, target: Option<usize>) -> ([f32; 2], [u32; 2]) {
+        match target {
+            Some(index) => {
+                let b = self.layers.plan[index].bounds;
+                ([b[0], b[1]], [b[2] as u32, b[3] as u32])
+            }
+            None => ([0.0, 0.0], [self.layers.viewport.0, self.layers.viewport.1]),
+        }
+    }
+
+    pub(super) fn encode_layers_timed(&self, encoder: &mut wgpu::CommandEncoder, timestamps: Option<&wgpu::RenderPassTimestampWrites<'_>>, hook: &mut EffectHook<'_>) {
         let mut first = true;
         for (index, l) in self.layers.plan.iter().enumerate().rev() {
             let Some(target) = &self.layers.targets[index] else { continue };
@@ -318,7 +338,7 @@ impl Renderer {
             });
             first = false;
             pass.set_viewport(0.0, 0.0, l.bounds[2], l.bounds[3], 0.0, 1.0);
-            self.draw_layer_range(&mut pass, FORMAT, l.begin + 1..l.end, Some(index));
+            self.draw_layer_range(&mut pass, FORMAT, l.begin + 1..l.end, Some(index), hook);
             drop(pass);
             if let Some(blur) = &target.blur {
                 self.layers.blur.as_ref().unwrap().encode(encoder, blur, &target.view);
@@ -326,12 +346,12 @@ impl Renderer {
         }
     }
 
-    pub(super) fn draw_layer_range(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat, range: Range<u32>, target: Option<usize>) {
+    pub(super) fn draw_layer_range(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat, range: Range<u32>, target: Option<usize>, hook: &mut EffectHook<'_>) {
         let mut cursor = range.start;
         for (index, l) in self.layers.plan.iter().enumerate() {
             if l.begin < cursor || l.begin >= range.end { continue; }
             assert!(l.end < range.end, "draw_range must not split a layer scope");
-            self.draw_plain(pass, format, cursor..l.begin, target, true);
+            self.draw_plain(pass, format, cursor..l.begin, target, true, hook);
             if let Some(t) = &self.layers.targets[index] {
                 let pipeline = if self.layer_blend(target) == Blend::PlusLighter {
                     &self.layers.additive.as_ref().expect("prepared dissolve").1
@@ -342,12 +362,12 @@ impl Renderer {
                 pass.set_vertex_buffer(0, t.quad.slice(..));
                 pass.draw(0..4, 0..1);
             } else if l.opacity == 1.0 {
-                self.draw_layer_range(pass, format, l.begin + 1..l.end, target);
+                self.draw_layer_range(pass, format, l.begin + 1..l.end, target, hook);
             }
             cursor = l.end + 1;
         }
         let include_end = range.end == self.count || self.layers.plan.iter().any(|l| l.end == range.end);
-        self.draw_plain(pass, format, cursor..range.end, target, include_end);
+        self.draw_plain(pass, format, cursor..range.end, target, include_end, hook);
     }
 
     pub(super) fn validate_layer_range(&self, range: &Range<u32>) {
@@ -357,17 +377,17 @@ impl Renderer {
         }
     }
 
-    fn draw_plain(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat, range: Range<u32>, target: Option<usize>, include_end: bool) {
+    fn draw_plain(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat, range: Range<u32>, target: Option<usize>, include_end: bool, hook: &mut EffectHook<'_>) {
         let mut cursor = range.start;
         if let Some(s) = &self.surfaces {
             for index in 0..s.len() {
                 let before = s.before_instance(index);
                 if before < range.start || before > range.end || (before == range.end && !include_end) { continue; }
-                self.draw_instances(pass, format, cursor..before, target);
+                self.draw_with_effects(pass, format, cursor..before, target, hook);
                 s.draw_blended(pass, index, format, self.layer_blend(target));
                 cursor = before;
             }
         }
-        self.draw_instances(pass, format, cursor..range.end, target);
+        self.draw_with_effects(pass, format, cursor..range.end, target, hook);
     }
 }

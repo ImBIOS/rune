@@ -844,12 +844,7 @@ impl<S: 'static> Host<S> {
         let comp = app.compositor.take();
         let on_focus = app.on_focus;
         let chrome = app.chrome;
-        let srgb_blend = if comp.is_some() && app.srgb_blend {
-            eprintln!("rune: srgb_blend is ignored when a compositor is set");
-            false
-        } else {
-            app.srgb_blend
-        };
+        let srgb_blend = app.srgb_blend;
         #[cfg(all(feature = "dev", debug_assertions))]
         let dev = app.dev.take();
         let modifier_keys = app.modifier_keys;

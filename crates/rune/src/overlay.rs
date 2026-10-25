@@ -336,12 +336,6 @@ pub(crate) struct Overlay<T: 'static> {
 impl<T: 'static> Overlay<T> {
     pub(crate) fn new<S>(configured: impl Into<ConfiguredOverlay<T>>, state: T, app: &AppSpec<S>) -> (Self, OverlayHandle<T>) {
         let ConfiguredOverlay { spec, options, on_key, on_created, poll, on_focus, compositor, setup, srgb_blend, macos_level, modifier_keys } = configured.into();
-        let srgb_blend = if compositor.is_some() && srgb_blend {
-            eprintln!("rune: srgb_blend is ignored when a compositor is set");
-            false
-        } else {
-            srgb_blend
-        };
         let shared = Arc::new(Shared { native: Mutex::default(), requests: Mutex::default(), availability: AtomicU8::new(0), wake: Mutex::new(None), stats: Arc::default() });
         let meter = crate::surface_stats::SurfaceMeter::new(spec.name, shared.stats.clone());
         let text = TextSystem::new(app.fonts, app.families);

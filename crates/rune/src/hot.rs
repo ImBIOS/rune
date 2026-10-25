@@ -143,7 +143,7 @@ fn run_host(spec: AppSpec<HostState>, state: HostState, args: Args, srgb_blend: 
 /// the same typed `Runtime<S>` a native window builds, so its view, poll and on_key patch the
 /// way they do on screen.
 pub(crate) fn snap_window<S: 'static>(app: crate::App<S>, args: Args) {
-    let srgb_blend = app.srgb_blend && app.compositor.is_none();
+    let srgb_blend = app.srgb_blend;
     let (spec, state, _) = app.into_parts(args.scene.as_deref());
     headless(&spec, state, args, srgb_blend);
 }

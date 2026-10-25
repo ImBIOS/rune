@@ -78,7 +78,7 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
     CSS / Core Animation gamma-space compositing for faint glows, blurs, shadows, images and video over
     dark canvases can opt into `.srgb_blend(true)` on `App`, `WindowSpec` or `ConfiguredOverlay`,
     which encodes premultiplied colours in sRGB (`Color::premul_srgb`) and renders into a non-sRGB
-    target view (`format.remove_srgb_suffix()`). Ignored with a warning when a `Compositor` is set.
+    target view (`format.remove_srgb_suffix()`). With a `Compositor`, `Frame::srgb_blend()` and `Frame::format` tell it which encoding and view its own passes must match.
   - The Retina scale is applied throughout.
 - **Text** (`text.rs`): Parley 0.12 lays out embedded Inter 4.1 (OFL, `assets/`). swash 0.2
   rasterises unhinted, centered, .1-point-emboldened outlines into a 2048² R8 atlas with four

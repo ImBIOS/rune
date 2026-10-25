@@ -223,8 +223,8 @@ impl<S> WindowSpec<S> {
     /// Configure this window's frame, including headless traffic-light placement.
     pub fn chrome(mut self, chrome: crate::Chrome) -> Self { self.app = self.app.chrome(chrome); self }
     /// Composite this window's translucent fills, blurs, shadows, images and video in sRGB
-    /// (gamma) space instead of linear light, matching CSS and Core Animation. Ignored with a
-    /// warning when a `Compositor` is set.
+    /// (gamma) space instead of linear light, matching CSS and Core Animation. With a
+    /// `Compositor`, `Frame::srgb_blend` says which encoding its passes must match.
     pub fn srgb_blend(mut self, enabled: bool) -> Self { self.app = self.app.srgb_blend(enabled); self }
     pub fn on_focus(mut self, f: fn(&mut S, bool, &mut crate::Tx)) -> Self { self.app = self.app.on_focus(f); self }
     /// Runs when the app is reopened, like `App::on_reopen`.
