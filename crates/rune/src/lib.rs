@@ -149,8 +149,8 @@ pub use pixels::Pixels;
 pub use file_dialog::{FileDialogError, FileDialogKind, FileDialogOptions, FileDialogs, ScriptedFileDialog};
 pub use image::{Image, ImageCache, ImageError, ImageId};
 pub use rune_motion::{
-    Anim, AnimExt, Beat, Clock, Curve, Easing, Edge, LayoutAnim, LoopKind, LoopSpec, NodeId, Phase as PresencePhase, Presented,
-    Sequence, Spring, SpringPair, Transition, Travel,
+    Anim, AnimExt, Beat, Blend, Clock, CubicBezier, Curve, Decay, Easing, Edge, Effect, LayoutAnim, LoopKind, LoopSpec, NodeId,
+    Phase as PresencePhase, Presented, Reveal, Sequence, Spring, SpringPair, StepPosition, Transition, Travel, Vec2, Velocity,
 };
 pub use runtime::{Cx, Env, Runtime, TitlebarAction, Waker, commit_generation};
 pub use shape::{LineCap, Path, Shape};

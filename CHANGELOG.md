@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`rune` re-exports the motion types its transition and animation API takes.** `Vec2` (for
+  `Transition::scale_anchor` and `Edge::direction`), `Effect`, `Reveal`, `CubicBezier`,
+  `StepPosition`, `Decay`, `Blend` and `Velocity` are now nameable as `rune::…`, so an app
+  needn't depend on `rune-motion`. `rune::Blend` is the animation blend; the GPU blend mode stays
+  `rune::render::Blend`. An app that glob-imports `rune::*` and defines one of these names
+  itself keeps its own.
 - **`Key::PageUp` and `Key::PageDown`, and page keys scroll.** Page Up and Page Down used to
   reach no handler; winit, Wayland layer shells and headless `--keys` (`PageUp`, `PageDown`)
   now send them. A key nobody claims scrolls the focused element's scroll view (else the one
