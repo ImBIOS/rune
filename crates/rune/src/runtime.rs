@@ -2139,7 +2139,11 @@ impl<S: 'static> Runtime<S> {
     fn page_scroll(&mut self, ev: &KeyEvent) -> bool {
         use crate::Key::*;
         if !matches!(ev.key, PageUp | PageDown | Home | End) || ev.mods.cmd || ev.mods.alt || ev.mods.ctrl { return false; }
-        let focused = self.focused.as_deref().and_then(|path| self.nodes.iter().position(|n| n.path == path));
+        // A focused field in a virtual row that scrolled out has no node: page its list.
+        let focused = self.focused.as_deref().and_then(|path| {
+            std::iter::successors(Some(path), |p| p.rsplit_once('/').map(|(head, _)| head))
+                .find_map(|p| self.nodes.iter().position(|n| n.path == p))
+        });
         let usable = |i: usize| self.nodes[i].scroll.is_some() && !self.subtree_exiting(i) && self.allowed(i);
         let i = focused.and_then(|f| std::iter::successors(Some(f), |&i| self.nodes[i].parent).find(|&i| usable(i)))
             .or_else(|| self.pointer.and_then(|(x, y)| self.scroll_at(x, y)).and_then(|id| self.node_index.get(&id).copied()))
@@ -6593,6 +6597,37 @@ mod tests {
         page(&mut rt, crate::Key::PageUp, 0.5);
         assert_eq!(top(&rt), 40.0 - 460.0);
         assert_eq!(crate::tooling::key_named("PageDown"), Some(crate::Key::PageDown));
+    }
+
+    #[test]
+    fn page_keys_keep_paging_the_list_of_a_focused_field_that_scrolled_out() {
+        struct State { edit: crate::TextEdit }
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let field = crate::text_input(&s.edit, crate::TextStyle::new(14.0, 400.0)).key("field").size(100.0, 40.0)
+                .on_edit(|s: &mut State| &mut s.edit);
+            let rows = col().key("rows").w_full().growth(crate::GrowthSpec::default())
+                .child(col().key("r0").child(field))
+                .children((1..100).map(|i| el().key(format!("r{i}")).size(100.0, 40.0)))
+                .virtualize(40.0);
+            let other = col().key("other").w_full().children((0..100).map(|i| el().key(format!("o{i}")).size(100.0, 40.0)));
+            crate::row().size(200.0, 200.0)
+                .child(col().key("left").size(100.0, 200.0).scroll(ScrollSpec { stick_bottom: false }).child(rows))
+                .child(col().key("right").size(100.0, 200.0).scroll(ScrollSpec { stick_bottom: false }).child(other))
+        }
+        let mut edit = crate::TextEdit::new("hello");
+        edit.focused = true;
+        let mut rt = Runtime::new(State { edit }, view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.pointer_move(150.0, 100.0);
+        let y = |rt: &Runtime<State>, key: &str| rt.presented(key).map(|p| p.0[1]);
+        for n in 1..=8 {
+            rt.key(KeyEvent { key: crate::Key::PageDown, mods: Default::default() });
+            rt.frame(n as f64 * 0.1);
+        }
+        assert!(y(&rt, "field").is_none(), "the field's row scrolled out of the window");
+        assert_eq!(y(&rt, "r40"), Some(40.0 * 40.0 - 8.0 * 180.0), "every page moved the focused field's list");
+        assert_eq!(y(&rt, "o0"), Some(0.0), "the list under the pointer stayed");
+        assert!(rt.state.edit.focused);
     }
 
     #[test]
