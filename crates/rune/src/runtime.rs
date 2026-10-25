@@ -4241,6 +4241,7 @@ impl<S: 'static> Runtime<S> {
                 || fades(n.looping)
                 || self.scene.presented(n.id).is_some_and(|p| (p.opacity > 0.0 && p.opacity < 1.0) || p.blur > 0.0))
         });
+        let default_ring = self.default_ring_owner();
         for paint_index in 0..n_nodes {
             let i = if tree_order { self.layer_paint_order[paint_index] } else { paint_index };
             let n = &self.nodes[i];
@@ -4787,7 +4788,8 @@ impl<S: 'static> Runtime<S> {
                         fade: crate::render::pack_fade(fade, clip, clip),
                     });
                 }
-                let focus_ring = self.focus_ring_visible(i).then_some(n.focus.ring).flatten();
+                let focus_ring = if default_ring == Some(i) { Some(self.default_focus_ring()) }
+                    else { self.focus_ring_visible(i).then_some(n.focus.ring).flatten() };
                 if let Some(ol) = focus_ring.or(n.vis.outline) {
                     let c = if focus_ring.is_some() { ol.color } else { self.color(n.id, P_OUTLINE, ol.color) };
                     let g = (ol.offset + ol.width) * k_px;

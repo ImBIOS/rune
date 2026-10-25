@@ -271,6 +271,8 @@ pub(crate) struct FocusSpec {
     pub group: bool,
     pub selected: bool,
     pub ring: Option<Outline>,
+    /// `no_focus_ring`: no default ring on this control, and none from this element.
+    pub ring_off: bool,
     pub highlight: Option<Color>,
     pub follows: bool,
     pub return_to: Option<String>,
@@ -1094,9 +1096,26 @@ impl El {
         self.focus.return_to = Some(trigger.into());
         self
     }
-    /// Keyboard-only ring, on this element or a visual child of the focused control.
+    /// Keyboard-only ring, on this element or a visual child of the focused control. A
+    /// control with no ring of its own draws the default one (see [`El::no_focus_ring`]).
     pub fn focus_ring(mut self, width: f32, offset: f32, color: Color) -> Self {
         self.focus.ring = Some(Outline { width, offset, color });
+        self.focus.ring_off = false;
+        self
+    }
+    /// No focus ring: not the default one, and not one set with [`El::focus_ring`]. A control
+    /// that shows focus its own way (a fill, an outline it animates) sets it on itself or on
+    /// the child that would draw the ring.
+    ///
+    /// Without it, a `focusable` element focused from the keyboard draws AppKit's ring when
+    /// neither it nor a child (short of another focusable) sets `focus_ring`: 3 points wide
+    /// in [`Cx::focus_color`](crate::Cx::focus_color), just outside its border box, following
+    /// its corner radii. Text fields, `focus_highlight` rows and the items of a `menu`,
+    /// `listbox`, `list`, `tree` or `grid` group draw none, as in AppKit: their caret,
+    /// highlight or selection shows focus.
+    pub fn no_focus_ring(mut self) -> Self {
+        self.focus.ring = None;
+        self.focus.ring_off = true;
         self
     }
     /// Trap focus and make the background inert while mounted. Escape requests dismissal.

@@ -100,6 +100,23 @@ impl<S: 'static> Runtime<S> {
             i = p;
         }
     }
+    /// The focused element that draws the default ring, if any (see `El::no_focus_ring`).
+    pub(super) fn default_ring_owner(&self) -> Option<usize> {
+        if !self.keyboard_focus { return None; }
+        let i = self.focused_index()?;
+        let n = &self.nodes[i];
+        if n.input.is_some() || n.focus.highlight.is_some() { return None; }
+        if self.group(i).is_some_and(|g| LIST_ROLES.contains(&self.nodes[g].role) || VERTICAL_ROLES.contains(&self.nodes[g].role)) {
+            return None;
+        }
+        let own = self.nodes.iter().enumerate()
+            .any(|(j, m)| (m.focus.ring.is_some() || m.focus.ring_off) && self.focus_ring_visible(j));
+        (!own).then_some(i)
+    }
+    /// AppKit's focus ring: 3 points just outside the border box.
+    pub(super) fn default_focus_ring(&self) -> crate::el::Outline {
+        crate::el::Outline { width: 3.0, offset: 0.0, color: self.system_accent.focus(self.env.system_dark) }
+    }
     pub(super) fn set_focus(&mut self, path: Option<String>, keyboard: bool) -> bool {
         if self.focused != path { self.ime_area = None; self.ime_reset = true; self.blur_links(); self.hover_focus = false; }
         // Tabbing away or into a field takes the selection's keyboard; a hovered row doesn't.
@@ -716,6 +733,49 @@ mod tests {
         press(&mut rt, Key::Down);
         // The first Tab reaches on_key before focus moves; the second never does.
         assert_eq!(rt.state.seen, [None, None, Some("switch".into()), Some("#1".into())]);
+    }
+
+    #[test]
+    fn a_control_without_a_ring_draws_the_default_one_from_the_keyboard_only() {
+        fn view(s: &crate::TextEdit, _: &mut Cx<crate::TextEdit>) -> El {
+            let control = |key: &str| el().key(key).size(40.0, 20.0).radius(6.0).fill(crate::Color::WHITE).focusable(true);
+            let field = crate::text_input(s, crate::TextStyle::new(14.0, 400.0)).key("field").size(80.0, 20.0)
+                .on_edit(|s: &mut crate::TextEdit| s);
+            let menu = col().key("menu").role("menu").focus_group().child(control("item"));
+            col().padding(20.0).gap(10.0).items_start()
+                .child(control("plain"))
+                .child(control("off").no_focus_ring())
+                .child(control("own").child(el().key("knob").size(10.0, 10.0).focus_ring(2.0, 1.0, crate::Color::BLACK)))
+                .child(field)
+                .child(menu)
+        }
+        let mut rt = Runtime::new(crate::TextEdit::new(""), view, (200.0, 300.0), Env::new(true, 1.0));
+        rt.set_tab_visits_controls(true);
+        rt.frame(0.0);
+        let rings = |rt: &Runtime<crate::TextEdit>| -> Vec<([f32; 4], [f32; 4], f32)> {
+            rt.instances.iter().filter(|i| i.fill == [0.0; 4] && i.border[3] > 0.0 && i.params[1] == KIND_RECT)
+                .map(|i| (i.rect, i.border, i.radii[0])).collect()
+        };
+        assert!(rings(&rt).is_empty());
+        rt.pointer_down(30.0, 30.0); rt.pointer_up(30.0, 30.0); rt.frame(0.0);
+        assert_eq!(focused(&rt), "plain");
+        assert!(rings(&rt).is_empty(), "a click focuses without a ring");
+        let tab_to = |rt: &mut Runtime<crate::TextEdit>, key: &str| {
+            for _ in 0..10 { press(rt, Key::Tab); if focused(rt) == key { return; } }
+            panic!("Tab never reached {key}");
+        };
+        tab_to(&mut rt, "plain");
+        let focus = crate::SystemAccent::DEFAULT.focus(true).premul(1.0);
+        assert_eq!(rings(&rt), [([17.0, 17.0, 46.0, 26.0], focus, 9.0)], "3 points outside, radii grown by 3");
+        tab_to(&mut rt, "off");
+        assert!(rings(&rt).is_empty(), "no_focus_ring");
+        tab_to(&mut rt, "own");
+        assert_eq!(rings(&rt).len(), 1, "a child's ring replaces the default one");
+        assert_eq!(rings(&rt)[0].1, crate::Color::BLACK.premul(1.0));
+        tab_to(&mut rt, "field");
+        assert!(rings(&rt).is_empty(), "the caret shows a field's focus");
+        tab_to(&mut rt, "item");
+        assert!(rings(&rt).is_empty(), "a menu item's highlight shows its focus");
     }
 
     #[test]

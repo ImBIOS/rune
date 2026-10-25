@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A focusable control with no `focus_ring` draws AppKit's ring.** Focused from the keyboard,
+  a `focusable(true)` element whose ring was never set (on it or a child, short of another
+  focusable) now draws a 3 pt ring just outside its border box in `cx.focus_color()`,
+  following its corner radii. Before, it drew nothing. Text fields, `focus_highlight` rows and
+  the items of `menu`, `listbox`, `list`, `tree` and `grid` groups still draw none, and rune-kit
+  controls keep their own rings. `El::no_focus_ring()` turns the ring off for a control that
+  shows focus its own way.
 - **`cx.accent()` and `cx.focus_color()` follow the user's accent colour.** `rune::system_accent()`
   returns a `SystemAccent`: on macOS the accent picked in System Settings
   (`NSColor.controlAccentColor` and `keyboardFocusIndicatorColor`), elsewhere and headless
