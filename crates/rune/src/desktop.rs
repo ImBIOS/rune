@@ -176,6 +176,8 @@ impl<S: 'static> Window<S> {
             }
             WindowRequest::Hide => self.hide(),
             WindowRequest::Close => self.close(),
+            // A headless desktop draws no Dock to minimize into.
+            WindowRequest::Minimize => {}
         }
     }
 
@@ -273,6 +275,7 @@ impl<S: 'static> Member for Window<S> {
             }
         }
         for _ in 0..8 {
+            self.rt.minimize_request = false;
             match self.rt.shell_request.take() {
                 Some(Shell::Close) => self.close(),
                 Some(Shell::Quit) | None => {}

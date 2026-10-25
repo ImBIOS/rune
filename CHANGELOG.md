@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Tx::minimize()` and `AppHandle::minimize()` minimize a window** as its minimize button
+  would (winit's `set_minimized` off macOS). A close or quit in the same change wins. Hidden
+  windows, panels, launchers, overlays and windows without a minimize button ignore it, saying
+  so in debug builds.
 - **`KeyEvent::is_command(c)`** matches Cmd (Ctrl off macOS) plus any character, including
   Cmd-Space's `Key::Text(" ")` form. The `Key::Command` docs now say it carries any character
   (⌘, and ⌘1 too), lowercased, not just editing letters.

@@ -684,6 +684,10 @@ fn window_server_session() -> bool {
     true
 }
 
+fn minimize_ignored(what: &str) {
+    if cfg!(debug_assertions) { eprintln!("rune: minimize ignored: {what} can't minimize"); }
+}
+
 fn run_configured(factory: Factory, args: Args, accessory: bool) -> Result<(), String> {
     let _ = accessory;
     #[cfg(target_os = "macos")]
@@ -1759,7 +1763,21 @@ impl<S: 'static> Host<S> {
             WindowRequest::Show => self.show(event_loop),
             WindowRequest::Hide => self.hide(event_loop),
             WindowRequest::Close => self.close(event_loop),
+            WindowRequest::Minimize => self.minimize(),
         }
+    }
+
+    /// `Tx::minimize` and `AppHandle::minimize`: miniaturize on macOS, `set_minimized`
+    /// elsewhere. A hidden window, a panel or launcher, and a window that can't minimize
+    /// ignore it.
+    fn minimize(&mut self) {
+        let Some(w) = self.win.as_ref().filter(|w| w.visible) else { return minimize_ignored("a hidden window") };
+        #[cfg(target_os = "macos")]
+        if w.panel.is_some() || self.launcher() { return minimize_ignored("a panel"); }
+        if !w.window.enabled_buttons().contains(winit::window::WindowButtons::MINIMIZE) {
+            return minimize_ignored("a window without a minimize button");
+        }
+        w.window.set_minimized(true);
     }
 
     fn set_position(&mut self, event_loop: &ActiveEventLoop, position: (i32, i32)) {
@@ -1935,12 +1953,14 @@ impl<S: 'static> Host<S> {
     /// opens the pop-up menu it asked for, if the window is still there to open it over.
     fn shell(&mut self, event_loop: &ActiveEventLoop) {
         for _ in 0..8 {
+            let minimize = std::mem::take(&mut self.rt.minimize_request);
             match self.rt.shell_request.take() {
                 Some(Shell::Quit) => {
                     self.popup.cancel(&mut self.rt);
                     event_loop.exit();
                 }
                 Some(Shell::Close) => self.close(event_loop),
+                None if minimize => self.minimize(),
                 None => {}
             }
             if self.finished || event_loop.exiting() {

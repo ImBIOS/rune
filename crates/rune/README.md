@@ -224,6 +224,7 @@ std::thread::spawn(move || {
     handle.open();             // show + focus without one
     handle.update(|s, tx| ..); // change state on the UI thread; commits on the next frame
     handle.close();            // as the close button (on_close runs)
+    handle.minimize();         // as the minimize button
     handle.quit();             // run returns
 });
 app.run();
@@ -233,7 +234,9 @@ app.run();
   inside the event loop, even while no window shows, so a closed app keeps its state current and
   an update may do main-thread native work (a status item, a tray). Window requests collapse to
   the latest.
-- Handlers ask the shell with `Tx::close_window()` and `Tx::quit()` (quit wins).
+- Handlers ask the shell with `Tx::close_window()`, `Tx::minimize()` and `Tx::quit()` (quit wins,
+  and either wins over minimize). Minimize does nothing for a hidden window, a panel, a launcher,
+  an overlay or a window that can't minimize (debug builds say so).
 - The `Runtime` (state, scene, text, scroll offsets) belongs to the app, so a reopened window
   shows the same UI, settled on its first frame. The GPU device and renderer stay too, unless
   `release_gpu_when_closed` (then closing destroys the window and device everywhere).

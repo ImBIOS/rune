@@ -1128,6 +1128,7 @@ impl<T: 'static> Overlay<T> {
         if !polls_only { return self.commit_at(now); }
         self.rt.poll_hidden();
         self.rt.shell_request = None;
+        self.rt.ignore_minimize("an overlay");
         self.rt.window_frame = None;
         self.clipboard.flush(&mut self.rt);
         self.open_popup();
@@ -1149,6 +1150,7 @@ impl<T: 'static> Overlay<T> {
             self.rt.frame(0.0);
         }
         self.rt.shell_request = None;
+        self.rt.ignore_minimize("an overlay");
         // Overlays size through `OverlayHandle::resize`, not `Tx::resize_window`.
         self.rt.window_frame = None;
         self.clipboard.flush(&mut self.rt);
@@ -1201,6 +1203,7 @@ impl<T: 'static> Overlay<T> {
         let now = Instant::now();
         if stepped {
             self.rt.shell_request = None;
+            self.rt.ignore_minimize("an overlay");
             self.rt.window_frame = None;
             self.clipboard.flush(&mut self.rt);
         } else {
@@ -1467,6 +1470,7 @@ impl<T: 'static> Overlay<T> {
         };
         let update_ms = if self.compositor.is_some() { now.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
         self.rt.shell_request = None;
+        self.rt.ignore_minimize("an overlay");
         // Overlays size through `OverlayHandle::resize`, not `Tx::resize_window`.
         self.rt.window_frame = None;
         self.clipboard.flush(&mut self.rt);
@@ -1681,6 +1685,7 @@ impl<T: 'static> AnyHost for Overlay<T> {
             #[cfg(target_os = "macos")]
             if self.panel.as_ref().is_some_and(|p| p.is_key() != *focused) { return; }
             self.rt.window_focus(*focused);
+            self.rt.ignore_minimize("an overlay");
             match self.rt.shell_request.take() {
                 Some(crate::el::Shell::Close) => self.hide(),
                 Some(crate::el::Shell::Quit) => event_loop.exit(),

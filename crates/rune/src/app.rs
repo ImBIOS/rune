@@ -398,6 +398,12 @@ impl<S: 'static> AppHandle<S> {
         self.request(|q| q.window = Some(WindowRequest::Close));
     }
 
+    /// Minimize the window, as `Tx::minimize` does from a handler. Does nothing for a hidden
+    /// window, a panel or launcher, or one that can't minimize.
+    pub fn minimize(&self) {
+        self.request(|q| q.window = Some(WindowRequest::Minimize));
+    }
+
     /// Quit the app: the window closes without `on_close`, and `run` returns.
     pub fn quit(&self) {
         self.request(|q| q.quit = true);
@@ -452,6 +458,7 @@ pub(crate) enum WindowRequest {
     Show,
     Hide,
     Close,
+    Minimize,
 }
 
 pub(crate) struct Requests<S> {
@@ -708,6 +715,23 @@ mod tests {
         rt.update(|_, tx| tx.quit());
         rt.update(|_, tx| tx.close_window());
         assert_eq!(rt.shell_request.take(), Some(Shell::Quit), "quit outranks close");
+    }
+
+    #[test]
+    fn minimize_reaches_the_shell_from_handlers_updates_and_handles() {
+        let mut rt = Runtime::new(0u32, |_: &u32, _: &mut Cx<u32>| el(), (100.0, 100.0), Env::default());
+        rt.on_focus = Some(|_, focused, tx| if !focused { tx.minimize(); });
+        rt.window_focus(true);
+        assert!(!rt.minimize_request);
+        rt.window_focus(false);
+        assert!(rt.minimize_request && rt.shell_request.is_none(), "a handler's minimize is latched for the shell");
+        rt.ignore_minimize("a test");
+        assert!(!rt.minimize_request, "a shell that can't minimize takes the request");
+        rt.update(|_, tx| tx.minimize());
+        assert!(rt.minimize_request);
+        let app = App::new(spec());
+        app.handle().minimize();
+        assert_eq!(app.shared.take().window, Some(WindowRequest::Minimize));
     }
 
     thread_local! { static BUILDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }

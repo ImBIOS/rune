@@ -34,6 +34,7 @@ pub struct Tx {
     pub(crate) scroll_bottom: Vec<(String, bool)>,
     pub(crate) wakes: Vec<std::time::Duration>,
     pub(crate) shell: Option<Shell>,
+    pub(crate) minimize: bool,
     pub(crate) trace: Option<TraceCalls>,
     pub(crate) popups: Vec<crate::popup_menu::Call>,
     pub(crate) window_frame: Option<crate::window_frame::FrameRequest>,
@@ -151,6 +152,14 @@ impl Tx {
     /// Quit the app after this handler, whether or not it keeps running without a window.
     pub fn quit(&mut self) {
         self.shell = Some(Shell::Quit);
+    }
+
+    /// Minimize this window after this handler, as its minimize button would (winit's
+    /// `set_minimized` off macOS). Does nothing (logging in debug builds) where a window
+    /// can't minimize: an overlay, a panel or launcher, or a window without a minimize button.
+    /// A close or quit asked in the same change wins.
+    pub fn minimize(&mut self) {
+        self.minimize = true;
     }
 
     /// Resize this window's content to `size` points, as an onboarding window changes height

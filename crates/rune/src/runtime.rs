@@ -735,6 +735,8 @@ pub struct Runtime<S: 'static> {
     pub(crate) clipboard: Option<crate::clipboard::MemoryClipboard>,
     /// A handler or `update` asked to close the window or quit (the shell takes it).
     pub shell_request: Option<Shell>,
+    /// A handler or `update` asked to minimize the window (`Tx::minimize`); the shell takes it.
+    pub(crate) minimize_request: bool,
     /// Pop-up menus asked for (`Tx::popup_menu`) and not yet answered, oldest first.
     pub(crate) popups: std::collections::VecDeque<crate::popup_menu::Request>,
     /// The first of `popups` is showing.
@@ -988,6 +990,7 @@ impl<S: 'static> Runtime<S> {
             clear_secret_request: false,
             clipboard: None,
             shell_request: None,
+            minimize_request: false,
             popups: Default::default(),
             window_frame: None,
             fit_height: false,
@@ -1340,11 +1343,19 @@ impl<S: 'static> Runtime<S> {
         stale
     }
 
+    /// Takes a `Tx::minimize` that `what` can't carry out, saying so in debug builds.
+    pub(crate) fn ignore_minimize(&mut self, what: &str) {
+        if std::mem::take(&mut self.minimize_request) && cfg!(debug_assertions) {
+            eprintln!("rune: minimize ignored: {what} can't minimize");
+        }
+    }
+
     /// Latches a Tx's shell and clipboard requests for the shell, so `update`, a hidden poll
     /// and `on_close` reach the clipboard without a frame, and applies clipboard requests to a
     /// memory clipboard at once. A secret clear drops an earlier secret copy not yet written.
     fn latch_requests(&mut self, tx: &mut Tx) {
         self.shell_request = self.shell_request.max(tx.shell.take());
+        self.minimize_request |= std::mem::take(&mut tx.minimize);
         if std::mem::take(&mut tx.clear_secret) {
             if self.copy_request.as_ref().is_some_and(crate::ClipboardWrite::is_secret) { self.copy_request = None; }
             self.clear_secret_request = true;
@@ -5293,6 +5304,7 @@ fn merge(tx: &mut Tx, one: Tx) {
     tx.clear_secret |= one.clear_secret;
     if one.copy.is_some() { tx.copy = one.copy; }
     tx.shell = tx.shell.max(one.shell);
+    tx.minimize |= one.minimize;
     tx.instant |= one.instant;
     tx.settle |= one.settle;
     tx.motion = one.motion.or(tx.motion);
