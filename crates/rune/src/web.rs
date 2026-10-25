@@ -165,7 +165,7 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
             if requests.window.is_some() || requests.position.is_some() || requests.place.is_some() {
                 error("native window management is unsupported on web");
             }
-            for update in requests.updates { r.rt.update(update); }
+            for update in requests.updates { r.rt.update_if(update); }
             window.request_redraw();
         }
     }

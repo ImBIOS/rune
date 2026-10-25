@@ -86,6 +86,7 @@ impl<S: 'static> Running<S> {
                     "ArrowLeft" => crate::Key::Left, "ArrowRight" => crate::Key::Right,
                     "ArrowUp" => crate::Key::Up, "ArrowDown" => crate::Key::Down,
                     "Home" => crate::Key::Home, "End" => crate::Key::End,
+                    "PageUp" => crate::Key::PageUp, "PageDown" => crate::Key::PageDown,
                     "Backspace" => crate::Key::Backspace, "Delete" => crate::Key::Delete,
                     name if name.chars().count() == 1 && (mods.control_key() || mods.super_key()) => crate::Key::Command(name.chars().next().unwrap().to_ascii_lowercase()),
                     _ => return,

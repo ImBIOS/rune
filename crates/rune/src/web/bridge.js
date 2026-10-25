@@ -58,7 +58,7 @@ export function mount(canvas, callback) {
         if (event.isComposing || h.composing || event.keyCode === 229) return;
         const chord = event.metaKey || event.ctrlKey;
         // Ordinary typing, deletion and predictive replacements belong to input, not keydown.
-        if (!chord && !['Enter', 'Tab', 'Escape', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+        if (!chord && !['Enter', 'Tab', 'Escape', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) return;
         if ((chord && event.key.toLowerCase() === 'v') || (event.key === 'Enter' && event.shiftKey)) return;
         event.preventDefault();
         send({ kind: 'key', key: event.key, shift: event.shiftKey, ctrl: event.ctrlKey,

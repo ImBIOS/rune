@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Web follows conditional updates and page navigation.** Browser handles use the same
+  `update_if` runtime path as native; the textarea routes PageUp and PageDown to Rune.
+
 - **Build static web apps.** `scripts/web-build.sh` packages a wasm app, JavaScript snippets
   and an HTML entrypoint for HTTPS hosting. `examples/web-hello` exercises message input,
   scrolling and clipboard; `WEB.md` covers app integration and browser limits.
