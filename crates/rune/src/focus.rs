@@ -62,14 +62,41 @@ impl<S: 'static> Runtime<S> {
     }
     pub(super) fn can_focus(&self, i: usize) -> bool {
         let n = &self.nodes[i];
+        (n.focus.enabled || n.input.as_ref().is_some_and(|s| s.access.is_some())) && self.reachable(i)
+    }
+    /// Shown, sized, not exiting and not behind a modal.
+    fn reachable(&self, i: usize) -> bool {
+        let n = &self.nodes[i];
         let mut parent = n.parent;
         while let Some(p) = parent {
             if self.nodes[p].vis.opacity <= 0.0 { return false; }
             parent = self.nodes[p].parent;
         }
-        (n.focus.enabled || n.input.as_ref().is_some_and(|s| s.access.is_some()))
-            && self.allowed(i) && !self.subtree_exiting(i)
-            && n.vis.opacity > 0.0 && n.local.w > 0.0 && n.local.h > 0.0
+        self.allowed(i) && !self.subtree_exiting(i) && n.vis.opacity > 0.0 && n.local.w > 0.0 && n.local.h > 0.0
+    }
+    /// Whether Return goes to focused element `i` rather than the default button: a focused
+    /// link, a `focus_highlight` row, or an item of a menu, list, tree or grid group.
+    fn takes_return(&self, i: usize) -> bool {
+        self.link_focused(i) || self.nodes[i].focus.highlight.is_some()
+            || self.group(i).is_some_and(|g| LIST_ROLES.contains(&self.nodes[g].role) || VERTICAL_ROLES.contains(&self.nodes[g].role))
+    }
+    /// Return with no modifiers presses the window's default button (`El::default_button`)
+    /// unless the focused element takes Return itself. Text fields decide in `with_focused`.
+    pub(super) fn default_button_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        if ev.key != Key::Enter || ev.mods != crate::Mods::default() { return false; }
+        if self.focused_input().is_some() || self.focused_index().is_some_and(|i| self.takes_return(i)) { return false; }
+        self.press_default_button(tx)
+    }
+    /// Presses the default button, if one is in reach; a held Return presses it once.
+    pub(super) fn press_default_button(&mut self, tx: &mut Tx) -> bool {
+        let Some(i) = (0..self.nodes.len()).rev()
+            .find(|&i| self.nodes[i].focus.default && self.nodes[i].on_press.is_some() && self.reachable(i))
+        else { return false };
+        if tx.key_repeat { return true; }
+        let f = self.nodes[i].on_press.clone().unwrap();
+        self.events.push(format!("default {}", self.nodes[i].path));
+        f(handler_state(&mut self.state), tx);
+        true
     }
     fn group(&self, i: usize) -> Option<usize> {
         let mut p = self.nodes[i].parent;
@@ -266,12 +293,15 @@ impl<S: 'static> Runtime<S> {
                 return true;
             }
         } else if self.nodes[i].role == "combobox" && self.nodes[i].input.is_none() && matches!(ev.key, Key::Up | Key::Down) {
-            // A popup button opens on its arrows as well as Space and Return (NSPopUpButton).
+            // A popup button opens on its arrows as well as Space (NSPopUpButton).
             if repeat { return true; }
             if let Some(f) = self.nodes[i].on_press.clone() { f(handler_state(&mut self.state), tx); }
             return true;
         }
-        if self.nodes[i].input.is_none() && (ev.key == Key::Enter || ev.key == Key::Text(" ".into())) {
+        // Space presses the focused control. Return presses only rows and links; for a button
+        // it goes on to the default button (`default_button_key`, which ran first) or `on_key`.
+        let space = ev.key == Key::Text(" ".into());
+        if self.nodes[i].input.is_none() && (space || (ev.key == Key::Enter && self.takes_return(i))) {
             // A row the user cannot see highlighted (the pointer left it) chooses nothing.
             if self.nodes[i].focus.highlight.is_some() && !shown { self.keyboard_focus = false; return true; }
             if repeat { return true; }
@@ -497,20 +527,20 @@ mod tests {
     fn modal_traps_restores_nested_and_blocks_background() {
         let mut rt = runtime();
         key(&mut rt, Key::Tab, false); key(&mut rt, Key::Tab, false);
-        key(&mut rt, Key::Enter, false); assert_eq!(focused(&rt), "one");
+        key(&mut rt, Key::Text(" ".into()), false); assert_eq!(focused(&rt), "one");
         let (x, y) = rt.find("one").unwrap();
         rt.secondary_down(x, y); rt.secondary_up(x, y); rt.frame(0.0);
         assert_eq!(rt.state.secondary_picks, 0, "secondary events must not bubble past a modal");
         key(&mut rt, Key::Tab, true); assert_eq!(focused(&rt), "two");
         key(&mut rt, Key::Tab, false); assert_eq!(focused(&rt), "one");
-        key(&mut rt, Key::Enter, false); assert_eq!(focused(&rt), "inner");
+        key(&mut rt, Key::Text(" ".into()), false); assert_eq!(focused(&rt), "inner");
         let (x, y) = rt.find("opener").unwrap();
         rt.pointer_down(x, y); rt.pointer_up(x, y); rt.frame(0.0);
         assert!(rt.state.nested); assert_eq!(focused(&rt), "inner");
         key(&mut rt, Key::Escape, false); assert_eq!(focused(&rt), "one");
         key(&mut rt, Key::Escape, false); assert_eq!(focused(&rt), "opener");
         assert!(!rt.state.open);
-        key(&mut rt, Key::Enter, false);
+        key(&mut rt, Key::Text(" ".into()), false);
         rt.state.nested = false; rt.invalidate(); rt.frame(0.0);
         rt.pointer_down(5.0, 280.0); rt.pointer_up(5.0, 280.0); rt.frame(0.0);
         assert!(!rt.state.open); assert_eq!(focused(&rt), "opener");
@@ -779,6 +809,60 @@ mod tests {
     }
 
     #[test]
+    fn return_presses_the_default_button_and_space_the_focused_one() {
+        #[derive(Default)]
+        struct Steps { field: crate::TextEdit, named: crate::TextEdit, sheet: bool, log: Vec<&'static str> }
+        fn view(s: &Steps, _: &mut Cx<Steps>) -> El {
+            let style = crate::TextStyle::new(14.0, 400.0);
+            let mut root = col().size(300.0, 300.0)
+                .child(crate::text_input(&s.field, style).key("field").size(100.0, 20.0).on_edit(|s: &mut Steps| &mut s.field))
+                .child(crate::text_input(&s.named, style).key("named").size(100.0, 20.0).on_edit(|s: &mut Steps| &mut s.named)
+                    .on_submit(|s: &mut Steps, _| s.log.push("submit")))
+                .child(col().key("list").role("listbox").focus_group()
+                    .child(button("row").on_press(|s: &mut Steps| s.log.push("row"))))
+                .child(button("later").on_press(|s: &mut Steps| s.log.push("later")))
+                .child(button("continue").default_button().on_press(|s: &mut Steps| s.log.push("continue")))
+                .child(button("hidden").default_button().opacity(0.0).on_press(|s: &mut Steps| s.log.push("hidden")));
+            if s.sheet {
+                root = root.child(col().key("sheet").absolute(150.0, 0.0).size(100.0, 100.0)
+                    .modal(true, |s: &mut Steps| s.sheet = false)
+                    .child(button("cancel").on_press(|s: &mut Steps| s.sheet = false))
+                    .child(button("done").default_button().on_press(|s: &mut Steps| { s.log.push("done"); s.sheet = false; })));
+            }
+            root
+        }
+        let mut rt = Runtime::new(Steps::default(), view, (300.0, 300.0), Env::new(true, 1.0));
+        rt.on_key = Some(|s, ev, _| { if ev.key == Key::Enter { s.log.push("on_key"); } false });
+        rt.frame(0.0);
+        let log = |rt: &mut Runtime<Steps>| std::mem::take(&mut rt.state.log);
+        hold(&mut rt, Key::Enter);
+        assert_eq!(log(&mut rt), ["continue"], "nothing focused: the default button, once per press");
+        let tab_to = |rt: &mut Runtime<Steps>, key: &str| {
+            for _ in 0..10 { press(rt, Key::Tab); if focused(rt) == key { return; } }
+            panic!("Tab never reached {key}");
+        };
+        tab_to(&mut rt, "later");
+        press(&mut rt, Key::Enter);
+        press(&mut rt, Key::Text(" ".into()));
+        assert_eq!(log(&mut rt), ["continue", "later"], "Return passes a focused button by; Space presses it");
+        rt.key(KeyEvent { key: Key::Enter, mods: Mods { shift: true, ..Mods::default() } }); rt.frame(0.0);
+        assert_eq!(log(&mut rt), ["on_key"], "a modified Return isn't the default button's");
+        tab_to(&mut rt, "field");
+        press(&mut rt, Key::Enter);
+        assert_eq!(log(&mut rt), ["continue"], "a field with nothing to submit");
+        tab_to(&mut rt, "named");
+        press(&mut rt, Key::Enter);
+        assert_eq!(log(&mut rt), ["submit"]);
+        tab_to(&mut rt, "row");
+        press(&mut rt, Key::Enter);
+        assert_eq!(log(&mut rt), ["row"], "a list row takes Return");
+        rt.state.sheet = true; rt.invalidate(); rt.frame(0.0);
+        press(&mut rt, Key::Enter);
+        assert_eq!(log(&mut rt), ["done"], "a modal's default button, not the one behind it");
+        assert!(!rt.state.sheet);
+    }
+
+    #[test]
     fn keyboard_focus_scrolls_into_view() {
         fn view(_: &State, _: &mut Cx<State>) -> El {
             col().key("root").size(200.0, 200.0).child(button("before"))
@@ -887,9 +971,10 @@ mod tests {
     fn held_activation_keys_fire_once_while_navigation_repeats() {
         let mut rt = held_runtime(Held::default());
         press(&mut rt, Key::Tab); assert_eq!(focused(&rt), "press");
-        hold(&mut rt, Key::Enter);
         hold(&mut rt, Key::Text(" ".into()));
-        assert_eq!(rt.state.presses, 2, "Return and Space press a button once per press");
+        assert_eq!(rt.state.presses, 1, "Space presses a button once per press");
+        hold(&mut rt, Key::Enter);
+        assert_eq!(rt.state.presses, 1, "Return passes a focused button by");
         press(&mut rt, Key::Tab); assert_eq!(focused(&rt), "popup");
         hold(&mut rt, Key::Down);
         assert_eq!(rt.state.opens, 1, "arrows open a popup button once");

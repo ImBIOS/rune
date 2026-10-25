@@ -207,6 +207,11 @@ impl<S: 'static> Runtime<S> {
         self.links.focus = None;
     }
 
+    /// Whether focused node `i` has a link focused, which takes Return.
+    pub(super) fn link_focused(&self, i: usize) -> bool {
+        self.links.focus.is_some_and(|k| k < self.link_count(i))
+    }
+
     /// Enter or Space on a focused link presses it.
     pub(super) fn link_key(&mut self, i: usize, tx: &mut Tx) -> bool {
         let Some(k) = self.links.focus.filter(|&k| k < self.link_count(i)) else { return false };

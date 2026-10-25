@@ -113,13 +113,13 @@ fn focused_combobox_handles_keys_before_app_and_returns_focus_on_close() {
     let trigger = rt.elements().into_iter().find(|e| e.focused).unwrap();
     assert_eq!(trigger.key.as_deref(), Some("models-value-trigger"));
     assert!(trigger.focus_visible);
-    key(&mut rt, Key::Enter, Mods::default());
+    key(&mut rt, Key::Text(" ".into()), Mods::default());
     assert!(rt.state.combo.open && rt.state.combo.search.focused);
     key(&mut rt, Key::Escape, Mods::default());
     assert!(!rt.state.combo.open);
-    assert_eq!(rt.state.app_keys, 1, "Enter/arrows/Escape belong to the control");
+    assert_eq!(rt.state.app_keys, 1, "Enter/Space/arrows/Escape belong to the control");
     assert_eq!(rt.elements().into_iter().find(|e| e.focused).unwrap().key.as_deref(), Some("models-value-trigger"));
-    key(&mut rt, Key::Enter, Mods::default());
+    key(&mut rt, Key::Text(" ".into()), Mods::default());
     for _ in 0..60 { rt.frame(1.0 / 60.0); }
     rt.ime(Ime::Preedit("pending".into(), None)); rt.frame(0.0);
     rt.pointer_down(390.0, 390.0); rt.pointer_up(390.0, 390.0); rt.frame(0.0);

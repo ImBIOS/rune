@@ -5,6 +5,17 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Breaking: Return no longer presses a focused button; Space does, and Return goes to the
+  default button.** As in AppKit, Space presses the focused button, checkbox, switch, radio,
+  segment or popup button, and Return presses the new `El::default_button()` in the window or
+  open modal, else reaches `on_key` (with `tx.focused()` naming the focused control). A
+  focused element that takes Return keeps it: a text field with `on_submit`, a row of a
+  `menu`, `listbox`, `list`, `tree` or `grid` group, a `focus_highlight` row, or a link. A
+  text field without `on_submit` passes Return to the default button. An app
+  that relied on Return pressing a focused button should mark its primary action
+  `.default_button()`, or handle Return in `on_key`. Return no longer opens a focused popup
+  button (role `combobox`) either; Space, Up and Down still do. The rune README's "Key
+  routing" has the full table.
 - **A focusable control with no `focus_ring` draws AppKit's ring.** Focused from the keyboard,
   a `focusable(true)` element whose ring was never set (on it or a child, short of another
   focusable) now draws a 3 pt ring just outside its border box in `cx.focus_color()`,

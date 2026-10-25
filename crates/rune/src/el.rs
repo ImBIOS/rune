@@ -273,6 +273,8 @@ pub(crate) struct FocusSpec {
     pub ring: Option<Outline>,
     /// `no_focus_ring`: no default ring on this control, and none from this element.
     pub ring_off: bool,
+    /// `default_button`: Return presses it.
+    pub default: bool,
     pub highlight: Option<Color>,
     pub follows: bool,
     pub return_to: Option<String>,
@@ -1089,6 +1091,17 @@ impl El {
     /// highlight (NSMenu). Use instead of `hover` and `focus_ring`.
     pub fn focus_highlight(mut self, color: Color) -> Self {
         self.focus.highlight = Some(color);
+        self
+    }
+    /// The window's default button, which Return presses (AppKit's `keyEquivalent = "\r"`).
+    /// Return goes to it from anywhere in the window, or the open modal, unless the focused
+    /// element takes Return itself: a text field with `on_submit`, a link, or a row of a
+    /// `menu`, `listbox`, `list`, `tree` or `grid` group or a `focus_highlight` row, which
+    /// Return presses. With several, the last one shown wins (a
+    /// sheet's over its window's). It needs an `on_press`, and stays out of reach while hidden
+    /// or behind a modal. A focused button presses on Space, and passes Return on to this.
+    pub fn default_button(mut self) -> Self {
+        self.focus.default = true;
         self
     }
     /// Return focus to this keyed trigger (or its first focusable child) when removed.
@@ -2198,7 +2211,7 @@ impl El {
     /// press lands within the system double-click interval of the first and within 4 pt of it,
     /// and releases inside. `on_press` still runs for each press, the first one right away, so a
     /// row selects on the first click and opens on the second, as in AppKit. A third press starts
-    /// a new pair. Pointer only: Enter and Space run `on_press`.
+    /// a new pair. Pointer only: the keyboard runs `on_press` (Space, and Return on a row).
     pub fn on_double_press<S: 'static>(self, f: impl Fn(&mut S) + 'static) -> Self {
         self.on_double_press_tx(move |s: &mut S, _tx: &mut Tx| f(s))
     }

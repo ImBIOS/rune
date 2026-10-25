@@ -78,7 +78,7 @@ fn conflicts_keep_old_binding_and_unchanged_chords_skip_registration() {
 fn keyboard_activation_and_both_kinds_of_blur() {
     let mut rt = runtime();
     rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
-    rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() }); rt.frame(0.0);
+    rt.key(KeyEvent { key: Key::Text(" ".into()), mods: Mods::default() }); rt.frame(0.0);
     assert!(rt.state.recorder.is_recording());
     click(&mut rt, "other"); rt.frame(0.0);
     assert!(!rt.state.recorder.is_recording());

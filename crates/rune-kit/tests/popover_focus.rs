@@ -19,11 +19,11 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
 fn popover_close_restores_its_trigger_before_exit_finishes() {
     let mut rt = Runtime::new(State::default(), view, (400.0, 400.0), Env::new(true, 1.0));
     rt.frame(0.0);
-    for key in [Key::Tab, Key::Enter, Key::Tab] {
+    for key in [Key::Tab, Key::Text(" ".into()), Key::Tab] {
         rt.key(KeyEvent { key, mods: Default::default() }); rt.frame(0.0);
     }
     assert_eq!(rt.elements().into_iter().find(|e| e.focused).unwrap().key.as_deref(), Some("close"));
-    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() }); rt.frame(0.0);
+    rt.key(KeyEvent { key: Key::Text(" ".into()), mods: Default::default() }); rt.frame(0.0);
     assert!(!rt.state.open);
     assert_eq!(rt.elements().into_iter().find(|e| e.focused).unwrap().key.as_deref(), Some("open"));
     for _ in 0..60 { rt.frame(1.0 / 60.0); }

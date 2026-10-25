@@ -2157,6 +2157,7 @@ impl<S: 'static> Runtime<S> {
         let app_first = self.focused.is_none();
         // Selected text has the keyboard for copying, as AppKit's first responder does.
         if !repeat && self.selection_key(ev, one) { return true; }
+        if self.default_button_key(ev, one) { return true; }
         if app_first && let Some(f) = self.on_key && app_call!(f, &mut self.state, ev, one) { return true; }
         if let Some(f) = self.focused_input().and_then(|input| input.key.clone())
             && f(handler_state(&mut self.state), ev, one)
@@ -2248,6 +2249,9 @@ impl<S: 'static> Runtime<S> {
             self.events.push(format!("submit {path}"));
             tx.instant = false;
             sub(handler_state(&mut self.state), tx);
+        } else if out.submit {
+            // A field with nothing to submit passes Return to the default button, as in a sheet.
+            self.press_default_button(tx);
         }
         true
     }

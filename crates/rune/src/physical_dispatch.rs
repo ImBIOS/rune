@@ -435,10 +435,10 @@ mod tests {
         // A built-in press opens the modal: the new focus's physical handler sees no repeat.
         let mut rt = opener_focused_on(1);
         assert_eq!(focused_key(&rt).as_deref(), Some("go"));
-        press(&mut rt, PhysicalKeyCode::Enter, Key::Enter, false);
+        press(&mut rt, PhysicalKeyCode::Space, Key::Text(" ".into()), false);
         assert_eq!(focused_key(&rt).as_deref(), Some("sink"));
-        press(&mut rt, PhysicalKeyCode::Enter, Key::Enter, true);
-        press(&mut rt, PhysicalKeyCode::Enter, Key::Enter, true);
+        press(&mut rt, PhysicalKeyCode::Space, Key::Text(" ".into()), true);
+        press(&mut rt, PhysicalKeyCode::Space, Key::Text(" ".into()), true);
         assert_eq!(rt.state.sink, 0);
         // A physical handler consumes the first press and opens it: still recorded and dropped.
         let mut rt = opener_focused_on(2);
@@ -453,10 +453,10 @@ mod tests {
     fn a_repeat_queued_in_the_same_frame_sees_the_focus_its_press_moved() {
         let mut rt = opener_focused_on(1);
         let mods = Mods::default();
-        rt.physical_with_fallback(PhysicalInput::Key { key: PhysicalKeyCode::Enter, mods, pressed: true, repeat: false },
-            Some(KeyEvent { key: Key::Enter, mods }));
-        rt.physical_with_fallback(PhysicalInput::Key { key: PhysicalKeyCode::Enter, mods, pressed: true, repeat: true },
-            Some(KeyEvent { key: Key::Enter, mods }));
+        rt.physical_with_fallback(PhysicalInput::Key { key: PhysicalKeyCode::Space, mods, pressed: true, repeat: false },
+            Some(KeyEvent { key: Key::Text(" ".into()), mods }));
+        rt.physical_with_fallback(PhysicalInput::Key { key: PhysicalKeyCode::Space, mods, pressed: true, repeat: true },
+            Some(KeyEvent { key: Key::Text(" ".into()), mods }));
         rt.frame(0.0);
         assert_eq!(focused_key(&rt).as_deref(), Some("sink"));
         assert_eq!((rt.state.go_repeats, rt.state.sink), (0, 0), "the repeat went nowhere");

@@ -98,7 +98,7 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   one. Only clicks pair: a press that travels more than 4 pt, or is held past the interval, is
   neither half of one. The interval is the system setting on macOS and Windows and 0.5 s
   elsewhere. Headless runs use the virtual clock, so a script's `double-click` (or two `click`s inside 0.5 s) is
-  deterministic. Pointer only: Enter and Space run `on_press`.
+  deterministic. Pointer only: the keyboard runs `on_press` (Space, and Return on a row).
 - **Press scale**: `.press_scale(0.97)` shrinks an element (and its children) about its centre
   while a press on it is held, following the pointer in and out like an iOS tile, and springs back
   with a slight bounce on release. Interrupting a spring retargets it without a jump. Layout and
@@ -131,15 +131,31 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
 - **Key routing**: a key the OS delivers to the window goes to the first of these that takes it.
   Global shortcuts and native menu key equivalents are handled before the window sees the key.
   1. Selected text, for its copy keys.
-  2. Nothing focused: the window's `on_key`, with `tx.focused()` `None`.
-  3. The focused field's `on_input_key`.
-  4. Focus navigation: Escape dismisses the open modal, Tab and Shift-Tab move focus, arrows,
-     Home, End and type-select move inside a `focus_group`, Up and Down open a focused popup
-     button (role `combobox`), and Return and Space press the focused control.
-  5. The focused text field's editor.
-  6. The window's `on_key` again, now with `tx.focused()` naming the focused element, for keys
+  2. Return, with no modifiers, presses the window's (or open modal's) `default_button()`
+     unless the focused element takes Return (see the table below).
+  3. Nothing focused: the window's `on_key`, with `tx.focused()` `None`.
+  4. The focused field's `on_input_key`.
+  5. Focus navigation: Escape dismisses the open modal, Tab and Shift-Tab move focus, arrows,
+     Home, End and type-select move inside a `focus_group`, Space or Up and Down open a focused
+     popup button (role `combobox`), Space presses the focused control, and Return presses a
+     focused row or link.
+  6. The focused text field's editor.
+  7. The window's `on_key` again, now with `tx.focused()` naming the focused element, for keys
      the focused control passed on.
-  7. Page Up, Page Down, Home and End scroll the focused (else hovered) scroll view.
+  8. Page Up, Page Down, Home and End scroll the focused (else hovered) scroll view.
+
+  Return follows AppKit, where it belongs to the default button and Space presses the focused
+  one:
+
+  | Focused | Return |
+  | --- | --- |
+  | Nothing, a button, checkbox, switch, radio, segment or popup button | The default button, else `on_key` |
+  | A text field with `on_submit` | `on_submit` (in a multi-line field Shift- or Option-Return types a newline) |
+  | A text field without `on_submit` | The default button |
+  | A row of a `menu`, `listbox`, `list`, `tree` or `grid` group, or a `focus_highlight` row | Presses the row |
+  | A link in text | Opens the link |
+
+  A field's `on_input_key` sees Return before any of these.
 - **Periodic motion**: `.looping(rune_motion::LoopSpec::opacity(..))` or `LoopSpec::rotation(period)`
   (icon quads). Tracks use animation time, preserve phase when retimed and only request frames
   while visible through ancestor clips. Removal uses the existing spring presence fade. Reduced
