@@ -110,7 +110,7 @@ impl DisplayLink {
             *LAST_FAILURE.lock().unwrap() = Some((status, Instant::now()));
             return None;
         }
-        CREATE_FAILED.store(false, Ordering::Relaxed);
+        if CREATE_FAILED.swap(false, Ordering::Relaxed) { eprintln!("display link created once a display woke"); }
         *LAST_FAILURE.lock().unwrap() = None;
         let link = unsafe { CFRetained::from_raw(NonNull::new(raw)?) };
         let mut callback = Box::new(Callback {
