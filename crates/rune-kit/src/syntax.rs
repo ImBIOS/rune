@@ -162,22 +162,22 @@ impl Highlighter {
     pub fn highlight(&self, lang: Option<&str>, code: &str) -> Rc<[Highlight]> {
         let code = &code[..scan::coloured_len(code)];
         let key = hash_of((self.id, lang, code));
+        if let Some(out) = CACHE.with_borrow_mut(|c| {
+            c.get(&key)
+                .filter(|e| e.id == self.id && e.lang.as_deref() == lang && e.src == code)
+                .map(|e| e.out.clone())
+        }) {
+            return out;
+        }
+        let out: Rc<[Highlight]> = match &self.f {
+            None => builtin(lang, code).into(),
+            Some(f) => tidy(f(lang, code), code).into(),
+        };
+        let bytes = code.len() + out.len() * size_of::<Highlight>() + 96;
         CACHE.with_borrow_mut(|c| {
-            if let Some(e) = c.get(&key)
-                && e.id == self.id
-                && e.lang.as_deref() == lang
-                && e.src == code
-            {
-                return e.out.clone();
-            }
-            let out: Rc<[Highlight]> = match &self.f {
-                None => builtin(lang, code).into(),
-                Some(f) => tidy(f(lang, code), code).into(),
-            };
-            let bytes = code.len() + out.len() * size_of::<Highlight>() + 96;
             c.insert(key, Entry { id: self.id, lang: lang.map(Into::into), src: code.to_owned(), out: out.clone() }, bytes);
-            out
-        })
+        });
+        out
     }
 
     /// Whether this is [`Highlighter::builtin`], which leaves languages [`known`] doesn't list plain.
@@ -340,6 +340,8 @@ mod tests {
         assert_eq!(RUNS.get(), 3);
         make().key("dark").highlight(Some("x"), "abcdef");
         assert_eq!(RUNS.get(), 4, "a keyed highlighter has its own entries");
+        let delegating = Highlighter::new(|lang, code| highlight(lang, code).to_vec());
+        assert_eq!(delegating.highlight(Some("rust"), "let x = 1"), highlight(Some("rust"), "let x = 1"));
     }
 
     #[test]

@@ -1128,7 +1128,8 @@ fn shell(s: &[u8], mut i: usize, end: usize, out: &mut Out, depth: u8) {
                 // A line continuation keeps whether the next word is a command (after `&&`).
                 let crlf = at(s, i + 1, end) == b'\r' && at(s, i + 2, end) == b'\n';
                 let continues = crlf || at(s, i + 1, end) == b'\n';
-                i = (i + 2 + crlf as usize).min(end);
+                let step = if crlf { 3 } else { 1 + utf8_len(at(s, i + 1, end)) };
+                i = (i + step).min(end);
                 command &= continues;
             }
             b'<' if at(s, i + 1, end) == b'<' && at(s, i + 2, end) != b'<' => {
@@ -1142,7 +1143,7 @@ fn shell(s: &[u8], mut i: usize, end: usize, out: &mut Out, depth: u8) {
                 let q = at(s, i, end);
                 let quoted = q == b'\'' || q == b'"';
                 let name = i + quoted as usize;
-                let name_end = ident_end(s, name, end.min(name + 64), b"-");
+                let name_end = ident_end(s, name, end, b"-");
                 if name_end > name {
                     i = name_end + (quoted && at(s, name_end, end) == q) as usize;
                     out.push(start + 2 + dash as usize, i, String);
@@ -1971,11 +1972,48 @@ mod tests {
 
     #[test]
     fn ranges_are_ordered_and_on_char_boundaries() {
-        let src = "const café = \"naïve 🎉\"; // ✓\n<p>é</p> `${'ü'}`";
-        for lang in [Lang::Js, Lang::Ts, Lang::Tsx, Lang::Rust, Lang::Swift, Lang::Go, Lang::Python, Lang::Shell, Lang::Html, Lang::Css, Lang::Sql, Lang::Yaml, Lang::Json, Lang::Diff] {
-            let t = highlight(lang, src);
-            assert!(t.windows(2).all(|w| w[0].1 <= w[1].0), "{lang:?}");
-            assert!(t.iter().all(|&(a, b, _)| a < b && src.is_char_boundary(a as usize) && src.is_char_boundary(b as usize)));
+        let delim = format!("{}é", "a".repeat(63));
+        let heredoc = format!("cat << {delim}\nhi\n{delim}\nls");
+        let body = format!("hi\n{delim}");
+        has(Lang::Shell, &heredoc, &[("cat", Function), (&body, String), ("ls", Function)]);
+        let cap_utf8 = format!("let x = 1;\n{}", "🎉".repeat(MAX_SOURCE / 4 + 4));
+        let pieces: &[&str] = &[
+            "\"", "'", "`", "\"\"\"", "'''", "r#\"", "\"#", "b\"", "b'", "f\"", "f'{", "${", "$(", "/*", "*/", "//",
+            "<!--", "-->", "<![CDATA[", "]]>", "<script>", "</script>", "<style>", "<<EOF\n", "<<-\t", "\\", "\\uD800",
+            "\\u{D800}", "\\x00", "\r\n", "\r", "\n", "\t", " ", "é", "🎉", "日本語", "a", "1_000.5e-2", ":", "|", ">",
+            "- ", "@", "#", "$", "&amp;", "=", "(", ")", "[", "]", "{", "}", "/", "+",
+        ];
+        let mut fuzz = Vec::with_capacity(64);
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        for len in 1..=64 {
+            let mut s = std::string::String::new();
+            for _ in 0..len {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                s.push_str(pieces[(seed >> 32) as usize % pieces.len()]);
+            }
+            fuzz.push(s);
+        }
+        let fixed = [
+            "const café = \"naïve 🎉\"; // ✓\n<p>é</p> `${'ü'}`",
+            "echo \\🎉 123 \\é",
+            heredoc.as_str(),
+            cap_utf8.as_str(),
+        ];
+        let langs = [
+            Lang::Js, Lang::Ts, Lang::Tsx, Lang::Rust, Lang::Swift, Lang::Go, Lang::Python, Lang::Shell, Lang::Html,
+            Lang::Css, Lang::Sql, Lang::Yaml, Lang::Json, Lang::Diff,
+        ];
+        for src in fixed.into_iter().chain(fuzz.iter().map(std::string::String::as_str)) {
+            let end = coloured_len(src);
+            assert!(src.is_char_boundary(end));
+            for lang in langs {
+                let mut raw = Out::default();
+                scan(lang, src.as_bytes(), 0, end, &mut raw, 0);
+                assert!(raw.tokens.iter().all(|&(a, b, _)| src.is_char_boundary(a as usize) && src.is_char_boundary(b as usize)), "{lang:?}: {src:?}");
+                let t = highlight(lang, src);
+                assert!(t.windows(2).all(|w| w[0].1 <= w[1].0), "{lang:?}");
+                assert!(t.iter().all(|&(a, b, _)| a < b && (b as usize) <= end && src.is_char_boundary(a as usize) && src.is_char_boundary(b as usize)));
+            }
         }
     }
 
