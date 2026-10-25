@@ -1738,6 +1738,7 @@ impl<S: 'static> Runtime<S> {
         }
         let scroll_to = std::mem::take(&mut tx.scroll_to);
         let scroll_bottom = std::mem::take(&mut tx.scroll_bottom);
+        let scroll_pages = std::mem::take(&mut tx.scroll_pages);
         if self.caret_watch && self.caret_moved(None) { self.dirty = true; }
         let read_moved = !self.layout_seen.is_empty() && self.layout_feedback_open() && self.layout_moved(None, None);
         if self.has_pixel_aspect && self.pixel_aspect_changed() { self.relayout = true; }
@@ -1759,6 +1760,7 @@ impl<S: 'static> Runtime<S> {
         if follow { self.follow_caret(); }
         for key in scroll_to { self.reveal_row(&key); }
         if !scroll_bottom.is_empty() { self.scroll_to_bottom(scroll_bottom); }
+        if !scroll_pages.is_empty() { self.scroll_pages(scroll_pages); }
         // Those scrolls moved the caret after the commit a view placed from it saw.
         if self.caret_watch && self.caret_moved(None) { self.commit(&Tx { instant: true, ..Tx::default() }); }
         self.update_interaction();
@@ -2191,7 +2193,11 @@ impl<S: 'static> Runtime<S> {
 
     /// Page Up and Page Down scroll by most of a viewport, and Home and End to the top and
     /// bottom, as an NSScrollView does, when nothing else took the key. The scroll view is the
-    /// focused element's nearest, else the one under the pointer, else the first in the tree.
+    /// nearest one around the focused element, else around the pointer, else the first in the
+    /// tree, skipping any whose content fits (nothing to scroll): a chat's short composer passes
+    /// the keys to the message list beside it. A view that overflows keeps them even at the edge
+    /// a key moves toward, where it does nothing, as an NSTextView does; an app that wants
+    /// another view paged there routes the key itself with `Tx::scroll_page`.
     fn page_scroll(&mut self, ev: &KeyEvent) -> bool {
         use crate::Key::*;
         if !matches!(ev.key, PageUp | PageDown | Home | End) || ev.mods.cmd || ev.mods.alt || ev.mods.ctrl { return false; }
@@ -2200,20 +2206,33 @@ impl<S: 'static> Runtime<S> {
             std::iter::successors(Some(path), |p| p.rsplit_once('/').map(|(head, _)| head))
                 .find_map(|p| self.nodes.iter().position(|n| n.path == p))
         });
-        let usable = |i: usize| self.nodes[i].scroll.is_some() && !self.subtree_exiting(i) && self.allowed(i);
-        let i = focused.and_then(|f| std::iter::successors(Some(f), |&i| self.nodes[i].parent).find(|&i| usable(i)))
-            .or_else(|| self.pointer.and_then(|(x, y)| self.scroll_at(x, y)).and_then(|id| self.node_index.get(&id).copied()))
-            .or_else(|| (0..self.nodes.len()).find(|&i| usable(i)));
+        let around = |from: usize| std::iter::successors(Some(from), |&i| self.nodes[i].parent).find(|&i| self.pageable(i));
+        let i = focused.and_then(around)
+            .or_else(|| self.pointer.and_then(|(x, y)| self.scroll_at(x, y)).and_then(|id| self.node_index.get(&id).copied()).and_then(around))
+            .or_else(|| (0..self.nodes.len()).find(|&i| self.pageable(i)));
         let Some(i) = i else { return false };
+        if !self.page_to(i, |offset, max, page| match ev.key { PageUp => offset - page, PageDown => offset + page, Home => 0.0, _ => max }) { return false; }
+        self.events.push(format!("page {:?}", ev.key));
+        true
+    }
+
+    /// Whether node `i` is a live scroll view whose content overflows it.
+    fn pageable(&self, i: usize) -> bool {
+        self.nodes[i].scroll.is_some() && !self.subtree_exiting(i) && self.allowed(i)
+            && self.scrolls.get(&self.nodes[i].id).is_some_and(|st| st.max > 0.5)
+    }
+
+    /// Moves scroll view `i` to `to(offset, max, page)`, clamped, a page being 90% of its
+    /// height. The hand moved it: any fling or glide stops, and a `stick_bottom` view that
+    /// lands on its end follows it again.
+    fn page_to(&mut self, i: usize, to: impl FnOnce(f64, f64, f64) -> f64) -> bool {
         let (id, page, stick) = (self.nodes[i].id, f64::from(self.nodes[i].local.h * 0.9), self.nodes[i].scroll.is_some_and(|s| s.stick_bottom));
         let Some(st) = self.scrolls.get_mut(&id) else { return false };
-        let to = match ev.key { PageUp => st.offset - page, PageDown => st.offset + page, Home => 0.0, _ => st.max };
-        st.offset = to.clamp(0.0, st.max);
+        st.offset = to(st.offset, st.max, page).clamp(0.0, st.max);
         st.v = 0.0;
         st.glide = None;
         st.direct = true;
         st.pinned = stick && st.offset >= st.max - 0.5;
-        self.events.push(format!("page {:?}", ev.key));
         true
     }
 
@@ -5362,6 +5381,7 @@ fn merge(tx: &mut Tx, one: Tx) {
     }
     tx.scroll_to.extend(one.scroll_to);
     tx.scroll_bottom.extend(one.scroll_bottom);
+    tx.scroll_pages.extend(one.scroll_pages);
     tx.wakes.extend(one.wakes);
     tx.text_flights.extend(one.text_flights);
     tx.popups.extend(one.popups);

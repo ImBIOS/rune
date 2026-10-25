@@ -33,6 +33,8 @@ pub struct Tx {
     pub(crate) scroll_to: Vec<String>,
     /// Scroll viewports to send to their bottom: (key, animated).
     pub(crate) scroll_bottom: Vec<(String, bool)>,
+    /// Scroll viewports to page: (key, pages).
+    pub(crate) scroll_pages: Vec<(String, i32)>,
     pub(crate) wakes: Vec<std::time::Duration>,
     pub(crate) shell: Option<Shell>,
     pub(crate) minimize: bool,
@@ -80,7 +82,7 @@ impl Tx {
     /// Work only a frame carries out that changes its pixels without a model change: a scroll
     /// or a text flight. A `wake_after` only schedules.
     pub(crate) fn frame_work(&self) -> bool {
-        !self.scroll_to.is_empty() || !self.scroll_bottom.is_empty() || !self.text_flights.is_empty()
+        !self.scroll_to.is_empty() || !self.scroll_bottom.is_empty() || !self.scroll_pages.is_empty() || !self.text_flights.is_empty()
     }
 
     /// An app marker on the next frame, e.g. `tx.trace_event(format_args!("lab:{step:?}"))`.
@@ -109,6 +111,14 @@ impl Tx {
     /// [`Tx::scroll_to_bottom`] without the glide.
     pub fn scroll_to_bottom_instant(&mut self, key: impl Into<String>) {
         self.scroll_bottom.push((key.into(), false));
+    }
+    /// Page the scroll viewport keyed `key` (or the one containing it) by `pages` pages, down
+    /// for positive, as Page Up and Page Down do: a page is 90% of its height, the move is
+    /// instant and clamped, and a `stick_bottom` viewport that lands on its end follows it
+    /// again. An app routes the page keys itself with it, e.g. from a composer's
+    /// `on_input_key` to the message list.
+    pub fn scroll_page(&mut self, key: impl Into<String>, pages: i32) {
+        self.scroll_pages.push((key.into(), pages));
     }
     /// Wake the app's poll hook after an unscaled duration. Equal deadlines coalesce.
     /// This schedules a frame, not a view commit; poll returns true if state changed.

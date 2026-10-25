@@ -145,7 +145,12 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   6. The focused text field's editor.
   7. The window's `on_key` again, now with `tx.focused()` naming the focused element (or link), for keys
      the focused control passed on.
-  8. Page Up, Page Down, Home and End scroll the focused (else hovered) scroll view.
+  8. Page Up, Page Down, Home and End scroll the nearest scroll view around the focused
+     element, else around the pointer, else the first in the tree, skipping any whose content
+     fits: a chat's short composer passes them to the message list beside it. A view that
+     overflows keeps them, even at the edge a key moves toward (where it does nothing), as an
+     NSTextView does. To page another view, route the keys yourself with
+     `tx.scroll_page(key, pages)`.
 
   Return follows AppKit, where it belongs to the default button and Space presses the focused
   one:
@@ -196,6 +201,9 @@ policy changes are applied in the same mutation phase.
   a gap. Render coordinates are rebased near the window and scroll extents use double precision.
   View construction still visits every row; a lazy view API is a remaining optimization.
   `tx.scroll_into_view(key)` reveals a row, including one outside the realized window.
+  `tx.scroll_page(key, pages)` pages the viewport keyed `key` (or containing it) by `pages` × 90%
+  of its height, as Page Up and Page Down do; a `stick_bottom` viewport that lands on its end
+  follows it again.
   `.scroll_edge_fade(w)` fades a viewport's top and bottom only while content is hidden under
   them (strength = hidden extent / 15 pt), and `.scroll_margin(pts)` stops revealed rows clear of it.
 - **Timeline growth** (`.growth(GrowthSpec { spring, edge })`, `growth.rs`): rows of a stack ease

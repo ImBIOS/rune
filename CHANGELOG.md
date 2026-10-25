@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Page keys skip a scroll view with nothing to scroll, and `Tx::scroll_page`.** With a chat's
+  short multi-line composer focused, Page Up and Page Down paged the composer's own scroll area
+  (a no-op) instead of the message list beside it. Rune now skips scroll views whose content
+  fits when it picks one: around the focused element, then around the pointer, then the first
+  in the tree. A view that overflows still keeps the keys at its edge, as an NSTextView does.
+  New `Tx::scroll_page(key, pages)` pages a viewport by `pages` × 90% of its height with the
+  same rules, so an app can route the keys itself from `on_input_key` or `on_key`.
 - **Selectable Markdown, and selection across texts with `El::selection_group`.** New
   `Markdown::selectable(true)` lets people select and copy a whole Markdown block as one
   selection: a drag runs from a paragraph through list items into a code block, Shift-click

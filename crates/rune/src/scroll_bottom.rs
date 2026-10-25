@@ -75,6 +75,20 @@ impl<S: 'static> Runtime<S> {
         }
     }
 
+    /// `Tx::scroll_page`: each viewport moves by its requested pages.
+    pub(super) fn scroll_pages(&mut self, requests: Vec<(String, i32)>) {
+        // This frame's commit may have changed the content: measure the extent first.
+        self.step_scroll(0.0);
+        for (key, pages) in requests {
+            let Some(i) = self.scroll_viewport(&key) else { continue };
+            self.page_to(i, |offset, _, page| offset + page * f64::from(pages));
+        }
+        if self.virtual_window_changed() {
+            self.commit(&Tx::default());
+            self.step_scroll(0.0);
+        }
+    }
+
     /// The offset to draw stuck-to-bottom viewport `i` at, whose presented bottom edge is
     /// `bottom`: layout's offset keeps the content's target bottom on the viewport's target
     /// bottom, but while either is still animating (the viewport resizing under a banner)
@@ -148,8 +162,9 @@ mod tests {
     use super::*;
     use crate::el::{col, el};
 
+    // One state type for every test here: each type monomorphises a whole `Runtime<S>`.
     #[derive(Default)]
-    struct Chat { rows: usize, reports: Vec<bool>, instant: bool, reduced: bool, virtualized: bool, loose: bool, tall_tail: bool }
+    struct Chat { rows: usize, reports: Vec<bool>, instant: bool, reduced: bool, virtualized: bool, loose: bool, tall_tail: bool, composer: Option<crate::TextEdit> }
 
     fn view(s: &Chat, cx: &mut Cx<Chat>) -> El {
         cx.reduced_motion(s.reduced);
@@ -159,13 +174,18 @@ mod tests {
             let h = if s.tall_tail && i + 10 >= s.rows { 150.0 } else { 40.0 + (i % 3) as f32 * 10.0 };
             stack = stack.child(el().key(format!("r{i}")).w_full().h(h));
         }
-        col().w_full().h_full()
+        let root = col().w_full().h_full()
             .child(col().key("scroll").w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: !s.loose })
                 .on_at_bottom(|s: &mut Chat, at| s.reports.push(at))
                 .child(stack))
             .child(el().key("jump").w_full().h(40.0).on_press_tx(|s: &mut Chat, tx| {
                 if s.instant { tx.scroll_to_bottom_instant("stack") } else { tx.scroll_to_bottom("scroll") }
-            }))
+            }));
+        // A multi-line composer below the list, in its own small scroll area.
+        let Some(edit) = &s.composer else { return root };
+        let field = crate::text_input(edit, crate::TextStyle::new(14.0, 400.0)).key("composer").w_full()
+            .on_edit(|s: &mut Chat| s.composer.as_mut().unwrap());
+        root.child(col().key("composer-scroll").w_full().h(60.0).scroll(ScrollSpec { stick_bottom: false }).child(field))
     }
 
     fn chat(state: Chat) -> Runtime<Chat> {
@@ -359,6 +379,100 @@ mod tests {
             assert!(frames > 10, "loose {loose}: animated ({frames} frames)");
             assert!(bottom_gap(&rt).abs() < 0.05, "loose {loose}: {}", bottom_gap(&rt));
         }
+    }
+
+    fn scroll_state<'a>(rt: &'a Runtime<Chat>, key: &str) -> &'a ScrollState {
+        let i = rt.scroll_viewport(key).unwrap();
+        &rt.scrolls[&rt.nodes[i].id]
+    }
+
+    fn page_height(rt: &Runtime<Chat>, key: &str) -> f64 {
+        f64::from(rt.nodes[rt.scroll_viewport(key).unwrap()].local.h * 0.9)
+    }
+
+    fn key(rt: &mut Runtime<Chat>, key: crate::Key) {
+        rt.key(KeyEvent { key, mods: Default::default() });
+        rt.frame(1.0 / 120.0);
+    }
+
+    fn with_composer(text: &str) -> Runtime<Chat> {
+        let mut edit = crate::TextEdit::new(text);
+        edit.focused = true;
+        chat(Chat { rows: 40, composer: Some(edit), ..Default::default() })
+    }
+
+    #[test]
+    fn page_keys_from_a_short_composer_page_the_message_list_beside_it() {
+        let mut rt = with_composer("hello");
+        assert_eq!(scroll_state(&rt, "composer-scroll").max, 0.0, "the draft fits its scroll area");
+        let (bottom, page) = (max(&rt), page_height(&rt, "scroll"));
+        assert!(bottom > 3.0 * page);
+        assert_eq!(scroll_state(&rt, "scroll").offset, bottom);
+        key(&mut rt, crate::Key::PageUp);
+        assert_eq!(scroll_state(&rt, "scroll").offset, bottom - page, "the list pages, not the composer");
+        assert!(!scroll_state(&rt, "scroll").pinned);
+        // The pointer over the composer doesn't claim the keys either.
+        let (x, y) = rt.find("composer").unwrap();
+        rt.pointer_move(x, y);
+        key(&mut rt, crate::Key::PageUp);
+        assert_eq!(scroll_state(&rt, "scroll").offset, bottom - 2.0 * page);
+        key(&mut rt, crate::Key::PageDown);
+        key(&mut rt, crate::Key::PageDown);
+        assert_eq!(scroll_state(&rt, "scroll").offset, bottom);
+        assert!(scroll_state(&rt, "scroll").pinned, "back on the end, the list follows it again");
+        let composer = rt.state.composer.as_ref().unwrap();
+        assert!(composer.focused);
+        assert_eq!(composer.text, "hello");
+    }
+
+    #[test]
+    fn an_overflowing_composer_keeps_the_page_keys_even_at_its_edge() {
+        let mut rt = with_composer(&vec!["line"; 12].join("\n"));
+        let list = max(&rt);
+        let composer = scroll_state(&rt, "composer-scroll").max;
+        assert!(composer > 0.0, "the draft overflows: {composer}");
+        for _ in 0..10 { key(&mut rt, crate::Key::PageUp); }
+        assert_eq!(scroll_state(&rt, "composer-scroll").offset, 0.0, "the composer paged to its top");
+        assert_eq!(scroll_state(&rt, "scroll").offset, list, "and the list never moved, as an NSTextView keeps them");
+    }
+
+    #[test]
+    fn tx_scroll_page_pages_a_viewport_and_repins_its_end() {
+        let mut rt = chat(Chat { rows: 40, ..Default::default() });
+        let (bottom, page) = (max(&rt), page_height(&rt, "scroll"));
+        assert!(rt.update_if(|_, tx| { tx.scroll_page("scroll", -2); false }), "a page takes a frame");
+        rt.frame(1.0 / 120.0);
+        assert_eq!(scroll_state(&rt, "scroll").offset, bottom - 2.0 * page);
+        assert_eq!(rt.scroll_at_bottom("scroll"), Some(false));
+        let row = rt.elements().into_iter().find(|e| e.rect[1] > 0.0 && e.rect[1] < 200.0 && e.key.as_deref().is_some_and(|k| k.starts_with('r'))).unwrap().key.unwrap();
+        rt.update_if(move |_, tx| { tx.scroll_page(row, 1); false });
+        rt.frame(1.0 / 120.0);
+        assert_eq!(scroll_state(&rt, "scroll").offset, bottom - page, "a row's key pages the viewport it's in");
+        rt.update_if(|_, tx| { tx.scroll_page("scroll", 5); false });
+        rt.frame(1.0 / 120.0);
+        assert_eq!(scroll_state(&rt, "scroll").offset, bottom, "clamped at the end");
+        assert!(scroll_state(&rt, "scroll").pinned);
+        rt.state.rows += 5;
+        rt.invalidate();
+        for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        assert!(bottom_gap(&rt).abs() < 0.05, "a stick_bottom list follows new rows again: {}", bottom_gap(&rt));
+        assert!(!rt.animating);
+    }
+
+    #[test]
+    fn tx_scroll_page_finds_the_list_of_a_key_inside_a_virtual_row() {
+        let mut rt = chat(Chat { rows: 600, virtualized: true, ..Default::default() });
+        let (bottom, page) = (max(&rt), page_height(&rt, "scroll"));
+        assert!(rt.nodes.iter().all(|n| n.key.as_deref() != Some("r0")), "the head is unmounted");
+        rt.update_if(|_, tx| { tx.scroll_page("r599", -3); false });
+        rt.frame(1.0 / 120.0);
+        // Rows mounting on the way measure against their estimate, which moves the extent a little.
+        let st = scroll_state(&rt, "scroll");
+        let pages = (st.max - st.offset) / page;
+        assert!((2.5..3.5).contains(&pages), "three pages above the end: {pages} (bottom was {bottom})");
+        assert!(!scroll_state(&rt, "scroll").pinned);
+        let shown = rt.elements().into_iter().filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with('r')) && e.rect[1] + e.rect[3] > 0.0 && e.rect[1] < 300.0).count();
+        assert!(shown >= 5, "the window mounted the rows it pages to ({shown})");
     }
 }
 
