@@ -144,7 +144,7 @@ impl Compositor<()> for Plain {
     }
 }
 
-fn snap(name: &str, view: fn(&(), &mut Cx<()>) -> El, srgb: bool, comp: impl Compositor<()>) -> (u32, Vec<u8>) {
+fn snap(name: &'static str, view: fn(&(), &mut Cx<()>) -> El, srgb: bool, comp: impl Compositor<()>) -> (u32, Vec<u8>) {
     let dir = std::env::temp_dir().join(format!("rune-effect-slot-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("snap.png");
