@@ -36,16 +36,17 @@ impl<S: 'static> Runtime<S> {
     /// Node `i`'s laid-out rect `[x, y, w, h]` in window points, after its viewports' scrolling.
     fn laid_out(&self, nodes: &[Node], i: usize) -> [f32; 4] {
         let t = nodes[i].target;
-        let mut dy = 0.0;
+        let (mut dx, mut dy) = (0.0, 0.0);
         let mut up = nodes[i].parent;
         while let Some(p) = up {
             if let Some(st) = self.scrolls.get(&nodes[p].id) {
                 let origin = self.virtuals.values().find(|v| v.scroll_path == nodes[p].path).map_or(0.0, |v| v.before);
                 dy += st.offset as f32 - origin;
+                dx += st.x.offset as f32;
             }
             up = nodes[p].parent;
         }
-        [t[0], t[1] - dy, t[2] - t[0], t[3] - t[1]]
+        [t[0] - dx, t[1] - dy, t[2] - t[0], t[3] - t[1]]
     }
 
     fn layout_of(&self, nodes: &[Node], key: &str) -> Option<[f32; 4]> {

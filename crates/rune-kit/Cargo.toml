@@ -17,6 +17,10 @@ markdown = ["dep:pulldown-cmark"]
 # Native ```mermaid diagrams in `Markdown` (flowcharts and sequence diagrams), and `mermaid`.
 mermaid = ["markdown"]
 
+[[example]]
+name = "scroll_x"
+required-features = ["markdown"]
+
 [dev-dependencies]
 # Reference rasteriser for the built-in glyphs (tests/glyphs.rs).
 resvg = { version = "0.45", default-features = false }

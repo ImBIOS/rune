@@ -15,7 +15,7 @@ pub(super) fn collapsed_scrolls(taffy: &TaffyTree<usize>, nodes: &[Node]) {
     let height = |i: usize| taffy.layout(nodes[i].taffy).map_or(0.0, |l| l.size.height);
     let grown = |i: usize| taffy.style(nodes[i].taffy).is_ok_and(|s| s.flex_grow > 0.0 && s.flex_basis == length(0.0));
     for (i, n) in nodes.iter().enumerate() {
-        if n.scroll.is_none() || height(i) >= 0.5 { continue; }
+        if n.scroll.is_none() || !n.scroll_axes.y() || height(i) >= 0.5 { continue; }
         let content = nodes.get(i + 1).filter(|c| c.parent == Some(i)).map_or(0.0, |_| height(i + 1));
         if content < 0.5 { continue; }
         let mut up = Some(i);

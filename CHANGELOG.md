@@ -5,6 +5,21 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Horizontal scrolling: `El::scroll_x()` and `El::scroll_xy()`.** A viewport scrolls its
+  first child sideways (a filmstrip, a wide code block or table, a tab strip), or both ways.
+  The content takes its natural width, unwrapped, and at least the viewport's. Each axis has its
+  own offset, momentum and clamping. A wheel or trackpad gesture locks to the axis of its first
+  delta until it ends, momentum included: mostly horizontal moves the innermost horizontal
+  viewport under the pointer, and anything else the innermost vertical one, so a diagonal never
+  moves both. A web touch pan does the same. `tx.scroll_into_view` and caret follow work on both
+  axes, `.scroll_edge_fade` fades left and right, and `tx.scroll_to_x(key, x)` is new.
+  `Markdown::scroll_wide(true)` lets code blocks and tables scroll instead of wrapping and
+  shrinking (off by default). Scripts take `dx` on `scroll` and `vx` on `fling`.
+  Things apps can notice: Shift with a mouse wheel now scrolls horizontally on Windows, Linux
+  and the web, and a horizontal trackpad swipe that used to move a vertical list by its tiny
+  vertical part only does so when no horizontal viewport is under the pointer. Hosts that drive
+  `Runtime` themselves can report wheels through `Runtime::wheel_xy` with `wheel_began` and
+  `wheel_ended`; `Runtime::wheel` and `Runtime::fling` are unchanged.
 - **`El::on_drop_files`: drop files in from other apps.** Files dragged from Finder, Explorer
   or a file manager go to the innermost `on_drop_files` element under the pointer that accepts
   any of them, in one call with the files it accepts. `.accepts_files(|path| ..)` or

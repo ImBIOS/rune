@@ -517,8 +517,10 @@ pub(crate) enum Kind {
     /// The key and whether it is an auto-repeat.
     Key(KeyEvent, bool),
     Paste(String),
-    Wheel(f32),
-    Fling(f32),
+    /// A wheel delta (dx, dy) in points.
+    Wheel(f32, f32),
+    /// A release velocity (vx, vy) in points per second.
+    Fling(f32, f32),
     /// A file drag from another app (`drag_files`, `drop_files`).
     Files(FileStep),
 }
@@ -528,6 +530,16 @@ pub(crate) enum FileStep {
     Hover(Vec<std::path::PathBuf>),
     Drop(Vec<std::path::PathBuf>),
     Leave,
+}
+
+/// A scripted wheel delta: vertical-only ones take the plain vertical path.
+pub(crate) fn wheel<S: 'static>(rt: &mut Runtime<S>, (x, y): (f32, f32), dx: f32, dy: f32) {
+    if dx == 0.0 { rt.wheel(x, y, dy) } else { rt.wheel_xy(x, y, dx, dy) }
+}
+
+/// A scripted release velocity: vertical-only ones take the plain vertical path.
+pub(crate) fn fling<S: 'static>(rt: &mut Runtime<S>, (x, y): (f32, f32), vx: f32, vy: f32) {
+    if vx == 0.0 { rt.fling(x, y, vy) } else { rt.fling_xy(x, y, vx, vy) }
 }
 
 pub(crate) fn key_named(name: &str) -> Option<Key> {
@@ -583,8 +595,10 @@ impl Ev {
             Kind::SecondaryUp => pointer(PointerAction::SecondaryUp),
             Kind::Key(key, repeat) => ScriptEvent::Key { key: key.clone(), repeat: *repeat },
             Kind::Paste(text) => ScriptEvent::Paste(text.clone()),
-            Kind::Wheel(dy) => pointer(PointerAction::Scroll(*dy)),
-            Kind::Fling(v) => pointer(PointerAction::Fling(*v)),
+            Kind::Wheel(0.0, dy) => pointer(PointerAction::Scroll(*dy)),
+            Kind::Wheel(dx, dy) => pointer(PointerAction::ScrollXy(*dx, *dy)),
+            Kind::Fling(0.0, v) => pointer(PointerAction::Fling(*v)),
+            Kind::Fling(vx, vy) => pointer(PointerAction::FlingXy(*vx, *vy)),
             Kind::Files(FileStep::Hover(paths)) => ScriptEvent::DragFiles { paths: paths.clone(), at: at() },
             Kind::Files(FileStep::Drop(paths)) => ScriptEvent::DropFiles { paths: paths.clone(), at: at() },
             Kind::Files(FileStep::Leave) => ScriptEvent::DragFilesLeave,
@@ -743,23 +757,27 @@ fn parse_script(list: Value) -> Vec<Ev> {
             "paste" => out.push(Ev { t, kind: Kind::Paste(e["text"].as_str().unwrap_or("").to_owned()), pos: Pos::Rel(0.0, 0.0) }),
             "scroll" => {
                 // A trackpad swipe: deltas eased over `dur`, then (with "fling") the release velocity.
+                let dx = e["dx"].as_f64().unwrap_or(0.0) as f32;
                 let dy = e["dy"].as_f64().unwrap_or(0.0) as f32;
                 let dur = e["dur"].as_f64().unwrap_or(0.2).max(0.01);
                 out.push(Ev { t, kind: Kind::Move, pos: pos.clone() });
                 let steps = (dur * 120.0).ceil() as usize;
-                let mut prev = 0.0;
+                let mut prev = (0.0, 0.0);
                 for s in 1..=steps {
                     let f = s as f32 / steps as f32;
                     let f = f * (2.0 - f);
-                    out.push(Ev { t: t + dur * s as f64 / steps as f64, kind: Kind::Wheel(dy * f - prev), pos: pos.clone() });
-                    prev = dy * f;
+                    out.push(Ev { t: t + dur * s as f64 / steps as f64, kind: Kind::Wheel(dx * f - prev.0, dy * f - prev.1), pos: pos.clone() });
+                    prev = (dx * f, dy * f);
                 }
                 if e["fling"].as_bool().unwrap_or(false) {
-                    let v = 2.0 * dy / dur as f32 * 0.25;
-                    out.push(Ev { t: t + dur + 1e-4, kind: Kind::Fling(v), pos });
+                    let v = |d: f32| 2.0 * d / dur as f32 * 0.25;
+                    out.push(Ev { t: t + dur + 1e-4, kind: Kind::Fling(v(dx), v(dy)), pos });
                 }
             }
-            "fling" => out.push(Ev { t, kind: Kind::Fling(e["v"].as_f64().unwrap_or(0.0) as f32), pos }),
+            "fling" => {
+                let v = |k: &str| e[k].as_f64().unwrap_or(0.0) as f32;
+                out.push(Ev { t, kind: Kind::Fling(v("vx"), v("v")), pos });
+            }
             "menu-pick" => {
                 let id = e["id"].as_str().unwrap_or_else(|| die("menu-pick needs an \"id\""));
                 out.push(Ev { t, kind: Kind::PopupMenu(Some(id.into())), pos: Pos::Rel(0.0, 0.0) });
@@ -1472,7 +1490,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
                 Pos::Xy(x, y) => (*x, *y),
                 Pos::Key(key) => rt.find(key).unwrap_or_else(|| die(&format!("script: no element with key {key:?}"))),
                 Pos::Rel(dx, dy) => match e.kind {
-                    Kind::Wheel(_) | Kind::Fling(_) => rt.pointer().unwrap_or((0.0, 0.0)),
+                    Kind::Wheel(..) | Kind::Fling(..) => rt.pointer().unwrap_or((0.0, 0.0)),
                     _ => (last_down.0 + dx, last_down.1 + dy),
                 },
             };
@@ -1494,8 +1512,8 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
                 Kind::Key(k, true) => rt.repeat_key(k.clone()),
                 Kind::Physical(event) => rt.physical_input(*event),
                 Kind::Paste(s) => rt.paste(s.clone()),
-                Kind::Wheel(dy) => rt.wheel(x, y, *dy),
-                Kind::Fling(v) => rt.fling(x, y, *v),
+                Kind::Wheel(dx, dy) => wheel(&mut rt, (x, y), *dx, *dy),
+                Kind::Fling(vx, vy) => fling(&mut rt, (x, y), *vx, *vy),
                 Kind::Files(step) => file_input(&mut rt, step, (x, y)),
             }
             if let Some((ov, _)) = overlay.as_mut() {

@@ -8,7 +8,7 @@ use crate::time::Instant;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, Ime as WIme, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
+use winit::event::{ElementState, Ime as WIme, MouseButton, StartCause, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 #[cfg(not(target_arch = "wasm32"))]
 use winit::event_loop::EventLoop;
@@ -3143,15 +3143,15 @@ impl<S: 'static> Host<S> {
                 }
                 l.window.request_redraw();
             }
-            WindowEvent::MouseWheel { delta, .. } => {
+            WindowEvent::MouseWheel { delta, phase, .. } => {
+                if phase == TouchPhase::Started { rt.wheel_began(); }
                 if let Some((x, y)) = rt.pointer() {
-                    let dy = match delta {
-                        MouseScrollDelta::PixelDelta(p) => p.y as f32 / scale,
-                        MouseScrollDelta::LineDelta(_, ly) => ly * 40.0,
-                    };
-                    rt.wheel(x, y, dy);
+                    let shift = crate::runtime::SHIFT_TURNS_WHEEL && self.mods.shift_key();
+                    let (dx, dy) = crate::runtime::wheel_delta(delta, scale, shift);
+                    rt.wheel_xy(x, y, dx, dy);
                     l.window.request_redraw();
                 }
+                if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) { rt.wheel_ended(); }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 rt.pointer_move(position.x as f32 / scale, position.y as f32 / scale);

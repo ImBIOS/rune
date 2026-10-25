@@ -142,6 +142,10 @@ pub enum PointerAction {
     Scroll(f32),
     /// A trackpad release velocity in points per second.
     Fling(f32),
+    /// A wheel or trackpad delta (dx, dy) in points with a horizontal part.
+    ScrollXy(f32, f32),
+    /// A release velocity (vx, vy) in points per second with a horizontal part.
+    FlingXy(f32, f32),
 }
 
 /// Where a pointer event lands, as the script wrote it.

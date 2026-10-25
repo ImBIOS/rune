@@ -35,6 +35,8 @@ pub struct Tx {
     pub(crate) scroll_bottom: Vec<(String, bool)>,
     /// Scroll viewports to page: (key, pages).
     pub(crate) scroll_pages: Vec<(String, i32)>,
+    /// Horizontal scroll viewports to move: (key, offset in points).
+    pub(crate) scroll_x: Vec<(String, f32)>,
     pub(crate) wakes: Vec<std::time::Duration>,
     pub(crate) shell: Option<Shell>,
     pub(crate) minimize: bool,
@@ -82,7 +84,8 @@ impl Tx {
     /// Work only a frame carries out that changes its pixels without a model change: a scroll
     /// or a text flight. A `wake_after` only schedules.
     pub(crate) fn frame_work(&self) -> bool {
-        !self.scroll_to.is_empty() || !self.scroll_bottom.is_empty() || !self.scroll_pages.is_empty() || !self.text_flights.is_empty()
+        !self.scroll_to.is_empty() || !self.scroll_bottom.is_empty() || !self.scroll_pages.is_empty() || !self.scroll_x.is_empty()
+            || !self.text_flights.is_empty()
     }
 
     /// An app marker on the next frame, e.g. `tx.trace_event(format_args!("lab:{step:?}"))`.
@@ -98,7 +101,9 @@ impl Tx {
         if let Some(trace) = &mut self.trace { trace.channels.push((name, kind, value)); }
     }
 
-    /// Reveal a keyed row, including a currently unrealized virtual row.
+    /// Reveal a keyed row, including a currently unrealized virtual row. It scrolls the nearest
+    /// vertical viewport around the row and, through [`El::scroll_x`] or [`El::scroll_xy`], the
+    /// nearest horizontal one, each just far enough.
     pub fn scroll_into_view(&mut self, key: impl Into<String>) {
         self.scroll_to.push(key.into());
     }
@@ -119,6 +124,12 @@ impl Tx {
     /// `on_input_key` to the message list.
     pub fn scroll_page(&mut self, key: impl Into<String>, pages: i32) {
         self.scroll_pages.push((key.into(), pages));
+    }
+    /// Move the horizontal scroll viewport keyed `key` (or the nearest one containing it) so it
+    /// shows its content from `x` points in, clamped to its ends: 0 is the start, as a carousel's
+    /// "back to the first" does. Instant; any momentum stops. See [`El::scroll_x`].
+    pub fn scroll_to_x(&mut self, key: impl Into<String>, x: f32) {
+        self.scroll_x.push((key.into(), x));
     }
     /// Wake the app's poll hook after an unscaled duration. Equal deadlines coalesce.
     /// This schedules a frame, not a view commit; poll returns true if state changed.
@@ -730,6 +741,22 @@ pub(crate) struct ScrollEdges {
     pub(crate) margin: f32,
 }
 
+/// The axes a scroll viewport moves on: `El::scroll` (vertical), `El::scroll_x`, `El::scroll_xy`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ScrollAxes {
+    #[default]
+    Y,
+    X,
+    Both,
+}
+
+impl ScrollAxes {
+    pub(crate) fn x(self) -> bool { self != ScrollAxes::Y }
+    pub(crate) fn y(self) -> bool { self != ScrollAxes::X }
+    /// Whether it moves on the horizontal axis (`true`) or the vertical one.
+    pub(crate) fn has(self, horizontal: bool) -> bool { if horizontal { self.x() } else { self.y() } }
+}
+
 pub(crate) type AtBottomFn = Rc<dyn Fn(&mut dyn Any, bool)>;
 pub(crate) type LayoutFn = Rc<dyn Fn(&mut dyn Any, [f32; 4])>;
 pub(crate) type WindowFocusFn = Rc<dyn Fn(&mut dyn Any, bool, &mut Tx)>;
@@ -778,6 +805,7 @@ pub struct El {
     pub(crate) transition: Option<Transition>,
     pub(crate) matched: Option<Rc<str>>,
     pub(crate) scroll: Option<ScrollSpec>,
+    pub(crate) scroll_axes: ScrollAxes,
     pub(crate) on_at_bottom: Option<AtBottomFn>,
     pub(crate) on_layout: Option<LayoutFn>,
     pub(crate) on_screen_layout: Option<LayoutFn>,
@@ -846,6 +874,7 @@ fn base(dir: FlexDirection) -> El {
         transition: None,
         matched: None,
         scroll: None,
+        scroll_axes: ScrollAxes::Y,
         on_at_bottom: None,
         on_layout: None,
         on_screen_layout: None,
@@ -2134,9 +2163,51 @@ impl El {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn scroll(mut self, spec: ScrollSpec) -> Self {
         self.scroll = Some(spec);
+        self.scroll_axes = ScrollAxes::Y;
         #[cfg(debug_assertions)]
         { self.scroll_source = Some(std::panic::Location::caller()); }
         self.style.overflow = taffy::Point { x: taffy::Overflow::Hidden, y: taffy::Overflow::Scroll };
+        self
+    }
+    /// A horizontal scroll viewport over its first child: a filmstrip, a wide code block or
+    /// table, a tab strip that overflows.
+    ///
+    /// The content is laid out at its natural width, unwrapped as SwiftUI's
+    /// `ScrollView(.horizontal)` proposes, and at least as wide as the viewport (CSS
+    /// `width: max-content; min-width: 100%`), unless it sets its own width, and never
+    /// shrinks. The viewport takes its parent's width as any element does; its height is the
+    /// content's unless set, and the content fills a set height unless it sets its own.
+    ///
+    /// The wheel, a trackpad and touch move it like a vertical viewport, with Rune's own
+    /// momentum after a fling. A mostly-vertical trackpad swipe or touch pan that starts over
+    /// it scrolls the vertical viewport around it instead, and the axis holds for the whole
+    /// gesture, as in AppKit. Shift with a mouse wheel scrolls it on Windows, Linux and the web
+    /// (macOS does that itself). Left and Right arrows don't scroll it (text fields own them),
+    /// nor do Page Up and Page Down. [`El::scroll_edge_fade`] fades its left and right edges,
+    /// and [`Tx::scroll_into_view`] scrolls it to show a row. `El::virtualize` and
+    /// `El::virtual_rows` window vertical lists only.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn scroll_x(mut self) -> Self {
+        self.scroll = Some(ScrollSpec { stick_bottom: false });
+        self.scroll_axes = ScrollAxes::X;
+        #[cfg(debug_assertions)]
+        { self.scroll_source = Some(std::panic::Location::caller()); }
+        self.style.overflow = taffy::Point { x: taffy::Overflow::Scroll, y: taffy::Overflow::Hidden };
+        self
+    }
+    /// A viewport that scrolls both ways over its first child (a wide timeline, a large
+    /// table): [`El::scroll`] and [`El::scroll_x`] together. A trackpad gesture moves it along
+    /// the axis it starts on, as AppKit's predominant-axis scrolling does. It keeps the
+    /// `stick_bottom` of an earlier [`El::scroll`] call. Needs a bounded height like
+    /// [`El::scroll`]. The content takes its natural width as in [`El::scroll_x`] and its
+    /// natural height.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn scroll_xy(mut self) -> Self {
+        self.scroll = Some(self.scroll.unwrap_or(ScrollSpec { stick_bottom: false }));
+        self.scroll_axes = ScrollAxes::Both;
+        #[cfg(debug_assertions)]
+        { self.scroll_source = Some(std::panic::Location::caller()); }
+        self.style.overflow = taffy::Point { x: taffy::Overflow::Scroll, y: taffy::Overflow::Scroll };
         self
     }
     /// On a scroll viewport, called with whether it shows its bottom (within a point): once
@@ -2149,8 +2220,10 @@ impl El {
     /// On a scroll viewport, fade its top and bottom edges over `width` points (16–32 reads well),
     /// each only while content is hidden under it: the fade's strength is the hidden extent / 15
     /// points, so a viewport at its top (or bottom, or stuck to it) shows that edge hard. Replaces
-    /// any top/bottom [`El::clip_fade`] widths; left/right ones still apply. Pair with
-    /// [`El::scroll_margin`] so rows brought into view stop clear of the fade.
+    /// any top/bottom [`El::clip_fade`] widths; left/right ones still apply. On a horizontal
+    /// viewport ([`El::scroll_x`]) the left and right edges fade the same way instead, and on
+    /// [`El::scroll_xy`] all four. Pair with [`El::scroll_margin`] so rows brought into view
+    /// stop clear of the fade.
     pub fn scroll_edge_fade(mut self, width: f32) -> Self {
         self.scroll_edges.fade = width.max(0.0);
         self

@@ -1,6 +1,6 @@
 use super::*;
 use wasm_bindgen::{JsCast, JsValue, prelude::*};
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase};
+use winit::event::{ElementState, MouseButton, TouchPhase};
 use winit::keyboard::ModifiersState;
 
 #[wasm_bindgen(module = "/src/web/bridge.js")]
@@ -27,6 +27,8 @@ struct Touch {
     at: Instant,
     velocity: f32,
     pan: bool,
+    /// The pan moves a horizontal viewport (picked when it starts).
+    horizontal: bool,
 }
 
 impl Bridge {
@@ -136,8 +138,8 @@ impl<S: 'static> Running<S> {
                 // Trackpad pinch is ctrl+wheel. Rune ignores it; the page never zooms.
                 if self.input.mods.control_key() { return false; }
                 let Some((x, y)) = self.rt.pointer() else { return false };
-                let dy = match delta { MouseScrollDelta::PixelDelta(p) => p.y as f32 / scale, MouseScrollDelta::LineDelta(_, y) => y * 40.0 };
-                self.rt.wheel(x, y, dy);
+                let (dx, dy) = crate::runtime::wheel_delta(*delta, scale, self.input.mods.shift_key());
+                self.rt.wheel_xy(x, y, dx, dy);
             }
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
                 immediate = true;
@@ -159,16 +161,23 @@ impl<S: 'static> Running<S> {
                 match touch.phase {
                     TouchPhase::Started if self.input.touch.is_none() => {
                         self.input.touch = Some(Touch { id: touch.id, scroll: self.rt.web_touch_start(point.0, point.1),
-                            origin: point, last: point, at: Instant::now(), velocity: 0.0, pan: false });
+                            origin: point, last: point, at: Instant::now(), velocity: 0.0, pan: false, horizontal: false });
                     }
                     TouchPhase::Moved => {
                         let Some(t) = &mut self.input.touch else { return false };
                         if t.id != touch.id { return false; }
-                        t.pan |= (point.0 - t.origin.0).hypot(point.1 - t.origin.1) > 8.0;
+                        let (dx, dy) = (point.0 - t.origin.0, point.1 - t.origin.1);
+                        if !t.pan && dx.hypot(dy) > 8.0 {
+                            // The pan's first direction picks the axis for the rest of the touch.
+                            t.pan = true;
+                            (t.scroll, t.horizontal) = self.rt.web_touch_pan(t.origin.0, t.origin.1, dx.abs() > dy.abs(), t.scroll);
+                        }
+                        let horizontal = t.horizontal;
+                        let along = move |p: (f32, f32)| if horizontal { p.0 } else { p.1 };
                         let now = Instant::now();
                         let dt = now.duration_since(t.at).as_secs_f32();
-                        if dt > 0.0 { t.velocity = (point.1 - t.last.1) / dt; }
-                        if t.pan { if let Some(id) = t.scroll { self.rt.web_touch_move(id, point.1 - t.origin.1); } }
+                        if dt > 0.0 { t.velocity = (along(point) - along(t.last)) / dt; }
+                        if t.pan { if let Some(id) = t.scroll { self.rt.web_touch_move(id, along(point) - along(t.origin)); } }
                         t.last = point; t.at = now;
                     }
                     TouchPhase::Ended | TouchPhase::Cancelled => {

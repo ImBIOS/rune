@@ -488,3 +488,33 @@ fn a_mermaid_block_draws_a_diagram_or_falls_back_to_its_source() {
     assert!(rune_kit::mermaid::supported("sequenceDiagram\nA->>B: hi"));
     assert!(rune_kit::mermaid::render("gantt\n", &MarkdownStyle::neutral(false)).is_none());
 }
+
+#[test]
+fn scroll_wide_keeps_code_lines_whole_and_scrolls_them_sideways() {
+    fn wide(src: &String, _: &mut Cx<String>) -> El {
+        col().w_full().child(Markdown::new(src.clone()).scroll_wide(true).build(&Kit::neutral(true)))
+    }
+    let line = format!("let wide = [{}];", (0..60).map(|i| i.to_string()).collect::<Vec<_>>().join(", "));
+    let src = format!("Intro\n\n```rust\n{line}\nshort();\n```\n");
+    let code = |rt: &Runtime<String>| rt.elements().into_iter().find(|e| e.text.as_deref().is_some_and(|t| t.starts_with("let wide"))).expect("code");
+
+    // Off (the default) the line wraps inside the column.
+    let plain = laid_out(&src);
+    assert!(code(&plain).rect[2] <= 480.0, "{:?}", code(&plain).rect);
+    assert!(!keys(&plain).iter().any(|k| k == "scroll"));
+
+    let mut rt = Runtime::new(src.clone(), wide, (480.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let before = code(&rt).rect;
+    assert!(before[2] > 600.0 && before[3] < code(&plain).rect[3], "one long line, unwrapped: {before:?} vs {:?}", code(&plain).rect);
+    let viewport = by_key(&rt, "scroll").rect;
+    assert!((viewport[3] - (before[3] + 24.0)).abs() < 0.5, "the block fits the unwrapped lines: {viewport:?} {before:?}");
+    let (x, y) = (240.0, before[1] + 8.0);
+    rt.wheel_xy(x, y, -100.0, -5.0);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(code(&rt).rect[0], before[0] - 100.0);
+    rt.wheel_xy(x, y, -100_000.0, 0.0);
+    rt.frame(1.0 / 60.0);
+    let end = code(&rt).rect;
+    assert!((end[0] + end[2] + 12.0 - 480.0).abs() < 1.0, "the line's end and its padding reach the right edge: {end:?}");
+}

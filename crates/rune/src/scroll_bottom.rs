@@ -29,7 +29,7 @@ impl<S: 'static> Runtime<S> {
         let mut i = self.nodes.iter().enumerate()
             .position(|(i, n)| (n.key.as_deref() == Some(key) || n.path == key) && !self.subtree_exiting(i))?;
         loop {
-            if self.nodes[i].scroll.is_some() { return Some(i); }
+            if self.nodes[i].scroll.is_some() && self.nodes[i].scroll_axes.y() { return Some(i); }
             i = self.nodes[i].parent?;
         }
     }

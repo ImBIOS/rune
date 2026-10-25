@@ -80,6 +80,10 @@ impl Renderer {
         if s.table_outline.is_none() {
             frame = frame.child(rule("s-end".into()));
         }
+        if self.scroll_wide {
+            // Every column at its natural width, scrolling when the table is wider than the text.
+            return col().key("scroll").w_full().scroll_x().child(frame.w(total + 2.0 * border));
+        }
         frame
     }
 

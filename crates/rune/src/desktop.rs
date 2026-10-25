@@ -306,8 +306,8 @@ impl<S: 'static> Member for Window<S> {
             Kind::Key(k, true) => rt.repeat_key(k.clone()),
             Kind::Physical(event) => rt.physical_input(*event),
             Kind::Paste(s) => rt.paste(s.clone()),
-            Kind::Wheel(dy) => rt.wheel(x, y, *dy),
-            Kind::Fling(v) => rt.fling(x, y, *v),
+            Kind::Wheel(dx, dy) => crate::tooling::wheel(rt, (x, y), *dx, *dy),
+            Kind::Fling(vx, vy) => crate::tooling::fling(rt, (x, y), *vx, *vy),
             Kind::Files(step) => crate::tooling::file_input(rt, step, (x, y)),
             Kind::Mark(_) | Kind::Menu(_) | Kind::PopupMenu(_) | Kind::Shortcut(_) => {}
         }
@@ -654,7 +654,7 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args) {
                 Pos::Xy(x, y) => (*x, *y),
                 Pos::Key(key) => desk.find(key).unwrap_or_else(|| die(&format!("script: no element with key {key:?} in a visible window"))),
                 Pos::Rel(dx, dy) => match e.kind {
-                    Kind::Wheel(_) | Kind::Fling(_) => desk.pointer().unwrap_or((0.0, 0.0)),
+                    Kind::Wheel(..) | Kind::Fling(..) => desk.pointer().unwrap_or((0.0, 0.0)),
                     _ => (last_down.0 + dx, last_down.1 + dy),
                 },
             };
@@ -673,7 +673,7 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args) {
                 Kind::Key(..) | Kind::Physical(_) | Kind::Paste(_) => {
                     if let Some(i) = desk.key.filter(|_| desk.active) { desk.members[i].input(&e.kind, (x, y)); }
                 }
-                Kind::Move | Kind::Down | Kind::Up | Kind::SecondaryDown | Kind::SecondaryUp | Kind::Wheel(_) | Kind::Fling(_) => {
+                Kind::Move | Kind::Down | Kind::Up | Kind::SecondaryDown | Kind::SecondaryUp | Kind::Wheel(..) | Kind::Fling(..) => {
                     if matches!(e.kind, Kind::Down | Kind::SecondaryDown) { last_down = (x, y); }
                     desk.pointer_input(&e.kind, (x, y));
                 }

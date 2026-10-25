@@ -95,6 +95,9 @@ mod selectable;
 mod help;
 #[path = "scroll_edge.rs"]
 mod scroll_edge;
+#[path = "scroll_x.rs"]
+mod scroll_x;
+pub(crate) use scroll_x::{SHIFT_TURNS_WHEEL, wheel_delta};
 #[cfg(test)]
 #[path = "truncate_tests.rs"]
 mod truncate_tests;
@@ -342,6 +345,7 @@ pub(crate) struct Node {
     /// `El::matched` id, with the element's own (not inherited) layout spring.
     matched: Option<(Rc<str>, Option<Spring>)>,
     scroll: Option<ScrollSpec>,
+    scroll_axes: crate::el::ScrollAxes,
     on_at_bottom: Option<crate::el::AtBottomFn>,
     on_layout: Option<crate::el::LayoutFn>,
     on_screen_layout: Option<crate::el::LayoutFn>,
@@ -546,6 +550,16 @@ struct ScrollState {
     at_bottom: Option<bool>,
     /// Whether the last frame drew the content's bottom on the viewport's (see `stuck_offset`).
     held: bool,
+    /// The horizontal axis of `El::scroll_x` and `El::scroll_xy`; all zero on a vertical one.
+    x: AxisScroll,
+}
+
+/// A scroll viewport's horizontal offset, momentum velocity and limit (points).
+#[derive(Clone, Copy, Debug, Default)]
+struct AxisScroll {
+    offset: f64,
+    v: f32,
+    max: f64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -684,6 +698,8 @@ pub struct Runtime<S: 'static> {
     /// The scale each node's text drew at (its own and its ancestors'), for text hit tests.
     drawn_scale: Vec<f32>,
     scrolls: HashMap<NodeId, ScrollState>,
+    /// The axis the current wheel or trackpad gesture scrolls (`scroll_x.rs`).
+    wheel_lock: scroll_x::WheelLock,
     #[cfg(any(test, target_arch = "wasm32"))]
     web_scroll: Option<web_runtime::TouchScroll>,
     grows: HashMap<NodeId, GrowTrack>,
@@ -981,6 +997,7 @@ impl<S: 'static> Runtime<S> {
             drawn: Vec::new(),
             drawn_scale: Vec::new(),
             scrolls: HashMap::new(),
+            wheel_lock: Default::default(),
             #[cfg(any(test, target_arch = "wasm32"))]
             web_scroll: None,
             grows: HashMap::new(),
@@ -1776,6 +1793,7 @@ impl<S: 'static> Runtime<S> {
         let scroll_to = std::mem::take(&mut tx.scroll_to);
         let scroll_bottom = std::mem::take(&mut tx.scroll_bottom);
         let scroll_pages = std::mem::take(&mut tx.scroll_pages);
+        let scroll_x = std::mem::take(&mut tx.scroll_x);
         if self.caret_watch && self.caret_moved(None) { self.dirty = true; }
         let read_moved = !self.layout_seen.is_empty() && self.layout_feedback_open() && self.layout_moved(None, None);
         if self.has_pixel_aspect && self.pixel_aspect_changed() { self.relayout = true; }
@@ -1798,6 +1816,7 @@ impl<S: 'static> Runtime<S> {
         for key in scroll_to { self.reveal_row(&key); }
         if !scroll_bottom.is_empty() { self.scroll_to_bottom(scroll_bottom); }
         if !scroll_pages.is_empty() { self.scroll_pages(scroll_pages); }
+        if !scroll_x.is_empty() { self.scroll_to_x(scroll_x); }
         // Those scrolls moved the caret after the commit a view placed from it saw.
         if self.caret_watch && self.caret_moved(None) { self.commit(&Tx { instant: true, ..Tx::default() }); }
         self.update_interaction();
@@ -2841,9 +2860,11 @@ impl<S: 'static> Measurement<'_, S> {
             {
                 // Anchors inside scroll viewports sit where they are scrolled to.
                 let mut target = nodes[j].target;
-                for offset in scroll_offsets(self.scrolls, &nodes, j) {
-                    target[1] -= offset;
-                    target[3] -= offset;
+                for [ox, oy] in scroll_offsets(self.scrolls, &nodes, j) {
+                    target[0] -= ox;
+                    target[2] -= ox;
+                    target[1] -= oy;
+                    target[3] -= oy;
                 }
                 (x, y) = anchor_position(a, target, (l.size.width, l.size.height), self.viewport);
                 nodes[i].local.x = x - px;
@@ -3299,6 +3320,7 @@ impl<S: 'static> Runtime<S> {
                     glide: None,
                     at_bottom: None,
                     held: false,
+                    x: AxisScroll::default(),
                 });
                 if tx.settle && sp.stick_bottom {
                     e.pinned = true;
@@ -3509,14 +3531,17 @@ impl<S: 'static> Runtime<S> {
             let Some(sp) = self.nodes[i].scroll else { continue };
             if self.subtree_exiting(i) { continue; }
             let id = self.nodes[i].id;
-            let overflow = self.scroll_overflow(i);
+            let axes = self.nodes[i].scroll_axes;
+            if axes.x() { moving |= self.step_scroll_x(i, dt); }
+            // A horizontal viewport doesn't move vertically, even with content taller than it.
+            let overflow = if axes.y() { self.scroll_overflow(i) } else { 0.0 };
             #[cfg(target_arch = "wasm32")]
-            if let Some(active) = self.web_step_scroll(id, overflow, dt) {
+            if let Some(active) = self.web_step_scroll(id, overflow, dt, false) {
                 moving |= active;
                 continue;
             }
             let Some(st) = self.scrolls.get_mut(&id) else { continue };
-            st.scrolling = st.direct || st.v.abs() > 1.0;
+            st.scrolling = st.direct || st.v.abs() > 1.0 || st.x.v.abs() > 1.0;
             st.direct = false;
             st.max = overflow.max(0.0);
             if st.pinned && sp.stick_bottom {
@@ -4040,10 +4065,12 @@ impl<S: 'static> Runtime<S> {
     /// once mounted, along with the rows around it, so this places it again from what the
     /// commit measured until it stays put.
     fn reveal_row(&mut self, key: &str) {
-        if !self.reveal_row_once(key, true) { return; }
-        for _ in 0..8 {
-            if !self.reveal_row_once(key, false) { break; }
+        if self.reveal_row_once(key, true) {
+            for _ in 0..8 {
+                if !self.reveal_row_once(key, false) { break; }
+            }
         }
+        self.reveal_row_x(key);
     }
 
     /// One placement of [`Self::reveal_row`]: whether it committed. After the first, it moves
@@ -4057,7 +4084,7 @@ impl<S: 'static> Runtime<S> {
             let mut ancestor = self.nodes[i].parent;
             while let Some(p) = ancestor {
                 let parent = &self.nodes[p];
-                if parent.scroll.is_some() {
+                if parent.scroll.is_some() && parent.scroll_axes.y() {
                     return Some((parent.path.clone(), f64::from(row.target[1] - parent.target[1]),
                         f64::from(row.local.h), f64::from(parent.local.h)));
                 }
@@ -4081,12 +4108,18 @@ impl<S: 'static> Runtime<S> {
         window
     }
 
+    /// The innermost vertical scroll viewport at (x, y).
     fn scroll_at(&self, x: f32, y: f32) -> Option<NodeId> {
+        self.scroll_at_axis(x, y, false)
+    }
+
+    /// The innermost scroll viewport at (x, y) that moves on the horizontal axis or the vertical.
+    fn scroll_at_axis(&self, x: f32, y: f32, horizontal: bool) -> Option<NodeId> {
         self.nodes
             .iter()
             .enumerate()
             .rev()
-            .filter(|(i, n)| n.scroll.is_some() && !self.subtree_exiting(*i) && self.allowed(*i))
+            .filter(|(i, n)| n.scroll.is_some() && n.scroll_axes.has(horizontal) && !self.subtree_exiting(*i) && self.allowed(*i))
             .find(|(i, _)| {
                 let r = self.drawn.get(*i).copied().unwrap_or([0.0; 4]);
                 contains([r[0], r[1], r[0] + r[2], r[1] + r[3]], x, y)
@@ -5094,6 +5127,9 @@ impl<S: 'static> Runtime<S> {
                 if let Some(st) = self.scrolls.get_mut(&self.nodes[i].id) { st.held = held; }
             }
             let (mut scale, mut anchor, mut anchor_to, mut dx) = (sc, anchor, anchor_to, pinh.dx);
+            if n.scroll_axes.x() && let Some(st) = self.scrolls.get(&n.id) {
+                dx -= grid(st.x.offset as f32, s);
+            }
             let (mut cover_offset, mut outer) = (pinh.cover, pinh.outer);
             if let Some((k, c)) = cover {
                 // Children ride this node's presented origin at their rest layout. Scale them by
@@ -5372,10 +5408,22 @@ fn input_caret(n: &Node, r: [f32; 4], scale: f32, s: f32, scrolls: &mut HashMap<
     Some(([cx.round(), cy + h * 0.1, (1.5 * s * scale).round().max(1.0), h * 0.8], [cx / s, cy / s, 2.0 * scale, h / s]))
 }
 
-/// The scroll offsets of node `i`'s viewports in `nodes`, innermost first.
-fn scroll_offsets<'a>(scrolls: &'a HashMap<NodeId, ScrollState>, nodes: &'a [Node], i: usize) -> impl Iterator<Item = f32> + 'a {
+/// A horizontal scroll viewport's content without a width of its own takes its natural one,
+/// unwrapped, and at least the viewport's (CSS `width: max-content; min-width: 100%`), and
+/// never shrinks. The viewport lays it out as a row, where taffy measures a max-content main
+/// size unwrapped (a column measures its height wrapped at the viewport's width). With
+/// vertical scrolling too it keeps its natural height instead of stretching to the viewport's.
+fn unwrapped_width(style: &mut Style, vertical: bool) {
+    if style.size.width.is_auto() { style.size.width = Dimension::max_content(); }
+    if style.min_size.width.is_auto() { style.min_size.width = percent(1.0); }
+    style.flex_shrink = 0.0;
+    if vertical && style.align_self.is_none() { style.align_self = Some(AlignSelf::FLEX_START); }
+}
+
+/// The (x, y) scroll offsets of node `i`'s scroll viewports, innermost first.
+fn scroll_offsets<'a>(scrolls: &'a HashMap<NodeId, ScrollState>, nodes: &'a [Node], i: usize) -> impl Iterator<Item = [f32; 2]> + 'a {
     std::iter::successors(nodes[i].parent, |&p| nodes[p].parent)
-        .filter_map(|p| scrolls.get(&nodes[p].id).map(|st| st.offset as f32))
+        .filter_map(|p| scrolls.get(&nodes[p].id).map(|st| [st.x.offset as f32, st.offset as f32]))
 }
 
 /// Whether `looping`'s sampled value multiplies the element's opacity.
@@ -5393,6 +5441,7 @@ fn merge(tx: &mut Tx, one: Tx) {
     tx.scroll_to.extend(one.scroll_to);
     tx.scroll_bottom.extend(one.scroll_bottom);
     tx.scroll_pages.extend(one.scroll_pages);
+    tx.scroll_x.extend(one.scroll_x);
     tx.wakes.extend(one.wakes);
     tx.text_flights.extend(one.text_flights);
     tx.popups.extend(one.popups);
@@ -5978,6 +6027,7 @@ fn flatten(
         transition,
         matched,
         scroll,
+        scroll_axes,
         on_at_bottom,
         on_layout,
         on_screen_layout,
@@ -6057,6 +6107,7 @@ fn flatten(
         transition,
         matched: matched.map(|id| (id, own_motion)),
         scroll,
+        scroll_axes,
         on_at_bottom,
         on_layout,
         on_screen_layout,
@@ -6085,6 +6136,11 @@ fn flatten(
         scroll_source,
     });
     let child_in_row = in_row || parent_is_stack;
+    let mut children = children;
+    if scroll.is_some() && scroll_axes.x() && let Some(content) = children.first_mut() {
+        style.flex_direction = FlexDirection::Row;
+        unwrapped_width(&mut content.style, scroll_axes.y());
+    }
     let row = matches!(style.flex_direction, FlexDirection::Row | FlexDirection::RowReverse);
     let kids: Vec<taffy::NodeId> = children
         .into_iter()

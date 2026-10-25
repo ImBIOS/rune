@@ -968,11 +968,12 @@ pub struct Markdown {
     streaming: bool,
     on_link: Option<LinkWire>,
     selectable: bool,
+    scroll_wide: bool,
 }
 
 impl Markdown {
     pub fn new(src: impl Into<String>) -> Markdown {
-        Markdown { src: src.into(), style: None, reveal: 0.0, streaming: false, on_link: None, selectable: false }
+        Markdown { src: src.into(), style: None, reveal: 0.0, streaming: false, on_link: None, selectable: false, scroll_wide: false }
     }
     /// Replaces the kit-derived style in [`Self::build`].
     pub fn style(mut self, style: MarkdownStyle) -> Self {
@@ -1012,6 +1013,14 @@ impl Markdown {
         self
     }
 
+    /// Code blocks keep their lines whole and tables their columns' natural widths, each
+    /// scrolling sideways in its own [`El::scroll_x`] viewport when wider than the text column,
+    /// with soft left and right edges on code. Off (the default), code wraps and columns shrink.
+    pub fn scroll_wide(mut self, on: bool) -> Self {
+        self.scroll_wide = on;
+        self
+    }
+
     pub fn build(mut self, k: &Kit) -> El {
         let style = self.style.take().unwrap_or_else(|| MarkdownStyle::from_kit(k));
         self.render(&style)
@@ -1021,7 +1030,8 @@ impl Markdown {
     /// [`MarkdownStyle::from_seed`]).
     pub fn render(self, style: &MarkdownStyle) -> El {
         let (blocks, sources) = doc_cached(&self.src);
-        let r = Renderer { s: style.clone(), reveal: self.reveal, streaming: self.streaming, on_link: self.on_link, selectable: self.selectable, sources, next_source: Cell::new(0) };
+        let r = Renderer { s: style.clone(), reveal: self.reveal, streaming: self.streaming, on_link: self.on_link, selectable: self.selectable,
+            scroll_wide: self.scroll_wide, sources, next_source: Cell::new(0) };
         r.blocks(&blocks).selection_group(self.selectable)
     }
 }
@@ -1032,6 +1042,8 @@ struct Renderer {
     streaming: bool,
     on_link: Option<LinkWire>,
     selectable: bool,
+    /// `Markdown::scroll_wide`.
+    scroll_wide: bool,
     sources: Rc<[Source]>,
     /// The next of `sources`, advanced at each [`Block::Code`] in document order.
     next_source: Cell<usize>,
@@ -1122,13 +1134,15 @@ impl Renderer {
 
     fn code(&self, code: &str, source: Option<Source>) -> El {
         let s = &self.s;
-        col()
-            .w_full()
-            .padding(12.0)
-            .radius(6.0)
-            .fill(s.code_block_fill)
-            .border(0.5, s.code_block_border)
-            .child(self.select(rich(code.to_owned(), self.syntax_spans(code, source)).font(s.code_block).color(s.text).reveal(self.reveal).w_full()))
+        let body = rich(code.to_owned(), self.syntax_spans(code, source)).font(s.code_block).color(s.text).reveal(self.reveal);
+        let frame = col().w_full().radius(6.0).fill(s.code_block_fill).border(0.5, s.code_block_border);
+        if self.scroll_wide {
+            // The text sizes to its longest line inside the viewport, which scrolls under the
+            // padding so lines run to the frame's edge.
+            return frame.child(col().key("scroll").w_full().scroll_x().scroll_edge_fade(12.0)
+                .child(col().padding(12.0).child(self.select(body))));
+        }
+        frame.padding(12.0).child(self.select(body.w_full()))
     }
 
     /// Colour-only spans, so highlighting never moves a glyph: a block streaming in draws its
@@ -1258,7 +1272,7 @@ mod tests {
             }
         }
         let (blocks, sources) = doc_cached(src);
-        let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, selectable: false, sources: sources.clone(), next_source: Cell::new(0) };
+        let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, selectable: false, scroll_wide: false, sources: sources.clone(), next_source: Cell::new(0) };
         let mut found = Vec::new();
         codes(&blocks, &mut found);
         assert_eq!(found.len(), sources.len(), "one source per code block");

@@ -40,7 +40,9 @@ impl<S: 'static> Runtime<S> {
         let offset = stuck.unwrap_or(st.offset);
         let below = if stuck.is_some() { 0.0 } else { st.max - offset };
         let mut origin = r;
-        for (edge, hidden, out) in [(1, offset, -1.0), (3, below, 1.0)] {
+        let (y, x) = (n.scroll_axes.y(), n.scroll_axes.x());
+        let edges = [(y, 1, offset, -1.0), (y, 3, below, 1.0), (x, 0, st.x.offset, -1.0), (x, 2, st.x.max - st.x.offset, 1.0)];
+        for (_, edge, hidden, out) in edges.into_iter().filter(|e| e.0) {
             let (w, o) = partial(width * k, ((hidden / FADE_IN).clamp(0.0, 1.0)) as f32);
             own[edge] = w;
             origin[edge] = r[edge] + out * o * w;
