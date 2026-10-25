@@ -2606,7 +2606,8 @@ impl<S: 'static> Measurement<'_, S> {
             let v = self.virtuals.entry(path.clone()).or_default();
             v.set_estimate(estimate);
             v.scroll_path = scroll_path.to_owned();
-            v.viewport = height;
+            // A retry keeps the viewport the last pass measured; `self.nodes` is the last commit's.
+            if !self.retry { v.viewport = height; }
             v.pad_top = padding(el.style.padding.top);
             v.pad_bottom = padding(el.style.padding.bottom);
             let source = el.virtual_rows.take();
@@ -2753,8 +2754,10 @@ impl<S: 'static> Measurement<'_, S> {
             Some(warnings) => *warnings = duplicates.into_iter().map(|d| d.message).collect(),
             None => crate::key_diagnostics::warn_once(&duplicates),
         }
-        // Index-built rows build here, so memos inside them share the view's cache.
-        self.window_tree(&mut root, "", 0, None, tx.settle, force_all, self.viewport.1);
+        // Index-built rows build here, so memos inside them share the view's cache. A window that
+        // fits its content lays its root out at its natural height, which nothing bounds.
+        let bound = if self.fit_height { f32::INFINITY } else { self.viewport.1 };
+        self.window_tree(&mut root, "", 0, None, tx.settle, force_all, bound);
         root
     }
 
@@ -4105,8 +4108,8 @@ impl<S: 'static> Runtime<S> {
         });
         let Some((path, top, height, viewport)) = geometry else { return false };
         let margin = self.node(&path).map_or(0.0, |n| f64::from(n.scroll_edges.margin));
-        let Some(id) = self.path_ids.get(&path) else { return false };
-        let Some(scroll) = self.scrolls.get_mut(id) else { return false };
+        let Some(&id) = self.path_ids.get(&path) else { return false };
+        let Some(scroll) = self.scrolls.get_mut(&id) else { return false };
         let offset = scroll_edge::reveal(scroll.offset, top, height, viewport, margin).clamp(0.0, scroll.max);
         if !first && (offset - scroll.offset).abs() < 0.5 { return false; }
         scroll.offset = offset;
@@ -4115,7 +4118,15 @@ impl<S: 'static> Runtime<S> {
         scroll.glide = None;
         scroll.direct = true;
         let window = self.virtual_window_changed();
-        if window { self.commit(&Tx::default()); }
+        if window {
+            self.commit(&Tx::default());
+            // The commit measured rows that were estimates: the next placement clamps to the end
+            // they make.
+            if let Some(i) = self.nodes.iter().position(|n| n.id == id) {
+                let max = self.scroll_overflow(i).max(0.0);
+                if let Some(scroll) = self.scrolls.get_mut(&id) { scroll.max = max; }
+            }
+        }
         window
     }
 

@@ -51,6 +51,8 @@ mod tests {
         static VIEWS: Cell<usize> = const { Cell::new(0) };
         static VIEW_NS: Cell<u128> = const { Cell::new(0) };
         static BUILT: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+        /// Calls of `grid_rows`' builder for its first row: one per measurement pass.
+        static PASSES: Cell<usize> = const { Cell::new(0) };
     }
 
     #[derive(Clone, Copy, PartialEq)]
@@ -362,17 +364,24 @@ mod tests {
     /// `s.0` shows the grid; until then the body is a label.
     fn grid_view(s: &(bool, usize), _: &mut Cx<(bool, usize)>) -> El {
         let body = if s.0 {
-            col().key("scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(
-                col().key("rows").w_full().growth(GrowthSpec::default()).virtual_rows(s.1, 74.4,
-                    |_: &(bool, usize), i| format!("g{i}").into(),
-                    |_: &(bool, usize), i| memo(format!("g{i}"), 0, || {
-                        BUILT.with_borrow_mut(|b| b.push(i));
-                        el().w_full().h(74.4)
-                    })))
+            col().key("scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(grid_rows::<(bool, usize)>(s.1, 74.4))
         } else {
             text("root").key("root")
         };
         col().w_full().h_full().children([el().key("header").w_full().h(100.0), body, el().key("footer").w_full().h(50.0)])
+    }
+
+    /// `n` index-built rows `g{i}` that lay out at 74.4 points, estimated at `estimate`.
+    fn grid_rows<S: 'static>(n: usize, estimate: f32) -> El {
+        col().key("rows").w_full().growth(GrowthSpec::default()).virtual_rows(n, estimate,
+            |_: &S, i| format!("g{i}").into(),
+            |_: &S, i| {
+                if i == 0 { PASSES.set(PASSES.get() + 1) }
+                memo(format!("g{i}"), 0, || {
+                    BUILT.with_borrow_mut(|b| b.push(i));
+                    el().w_full().h(74.4)
+                })
+            })
     }
 
     /// The viewport's rows: none missing between its top and bottom.
@@ -410,20 +419,83 @@ mod tests {
     }
 
     /// A header that takes less than its height (a negative margin) makes the first showing's
-    /// estimate short; the retry fills the viewport before anything is presented.
+    /// estimate short, 90 points of a 430-point viewport; one retry, measuring the viewport,
+    /// fills it before anything is presented.
     #[test]
     fn a_first_showing_estimated_short_still_fills_its_viewport() {
         fn view(s: &(bool, usize), cx: &mut Cx<(bool, usize)>) -> El {
             let mut root = grid_view(s, cx);
-            root.children[0] = el().key("header").w_full().h(300.0).mb(-280.0);
+            root.children[0] = el().key("header").w_full().h(360.0).mb(-340.0);
             root
         }
         let mut rt = Runtime::new((false, 20), view, (300.0, 500.0), Env::new(true, 1.0));
         rt.frame(0.0);
         rt.update(|s, _| s.0 = true);
+        PASSES.set(0);
         rt.frame(1.0 / 120.0);
         assert_covered(&rt, "first showing");
         assert_eq!(rt.elements().into_iter().find(|e| e.path == "#0/scroll").unwrap().rect[3], 430.0);
+        assert_eq!(PASSES.get(), 2, "the estimate's pass and one retry");
+        assert!(rt.virtuals["#0/scroll/rows"].range.end < 20, "not every row");
+    }
+
+    /// A window that fits its content has no height to bound its root: a results list opening
+    /// under a 56-point search bar estimates its viewport from its own `max_h`.
+    #[test]
+    fn a_first_showing_in_a_window_that_fits_its_content_estimates_from_max_h() {
+        fn view(s: &bool, _: &mut Cx<bool>) -> El {
+            let results = s.then(|| col().key("scroll").w_full().max_h(350.0).scroll(ScrollSpec { stick_bottom: false })
+                .child(grid_rows::<bool>(20, 74.4)));
+            col().w_full().child(el().key("search").w_full().h(56.0)).children(results)
+        }
+        let mut rt = Runtime::new(false, view, (300.0, 500.0), Env::new(true, 1.0));
+        rt.fit_height = true;
+        let height = rt.content_height();
+        rt.set_viewport((300.0, height), 1.0);
+        rt.frame(0.0);
+        assert_eq!(rt.viewport.1, 56.0);
+        rt.update(|s, _| *s = true);
+        PASSES.set(0);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(PASSES.get(), 1, "measured once");
+        assert_eq!(rt.virtuals["#0/scroll/rows"].range, 0..8, "350 points' rows and the overscan budget");
+    }
+
+    /// An out-of-flow popover isn't bounded by the 32-point header it hangs from, only by its
+    /// own `max_h`.
+    #[test]
+    fn a_first_showing_in_an_absolute_popover_estimates_from_its_own_max_h() {
+        fn view(s: &bool, _: &mut Cx<bool>) -> El {
+            let popover = s.then(|| col().key("scroll").absolute(0.0, 32.0).w_full().max_h(300.0)
+                .scroll(ScrollSpec { stick_bottom: false }).child(grid_rows::<bool>(20, 74.4)));
+            col().w_full().h_full().child(el().key("header").w_full().h(32.0).children(popover))
+        }
+        let mut rt = Runtime::new(false, view, (300.0, 500.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.update(|s, _| *s = true);
+        PASSES.set(0);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(PASSES.get(), 1, "measured once");
+        assert_eq!(rt.virtuals["#0/header/scroll/rows"].range, 0..8, "300 points' rows and the overscan budget");
+    }
+
+    /// Rows estimated short of their height: revealing the last on the first showing measures
+    /// the rows it mounts on the way, and lands it in view against the end they make.
+    #[test]
+    fn a_first_showing_reveals_its_last_row_taller_than_estimated() {
+        fn view(s: &(bool, usize), cx: &mut Cx<(bool, usize)>) -> El {
+            let mut root = grid_view(s, cx);
+            if s.0 { root.children[1].children[0] = grid_rows::<(bool, usize)>(s.1, 50.0) }
+            root
+        }
+        let mut rt = Runtime::new((false, 20), view, (300.0, 500.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.update(|s, tx| { s.0 = true; tx.scroll_into_view("g19") });
+        rt.frame(1.0 / 120.0);
+        let viewport = rt.elements().into_iter().find(|e| e.path == "#0/scroll").unwrap().rect;
+        let (_, row) = visible(&rt).into_iter().find(|(k, _)| k == "g19").expect("g19 mounted");
+        assert!(row[1] >= viewport[1] - 0.5 && row[1] + row[3] <= viewport[1] + viewport[3] + 0.5, "{row:?} in {viewport:?}");
+        assert_covered(&rt, "revealed");
     }
 
     #[test]

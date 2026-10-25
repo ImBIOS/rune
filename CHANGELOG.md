@@ -14,10 +14,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   height as its viewport and mounted two of those either side: a 200-cell emoji grid in a
   five-row viewport built all 20 of its rows. Now the first showing estimates the viewport from
   the tree (the window's height less the fixed-height siblings, padding and gaps of the columns
-  around it, or the scroll viewport's own height), and an index-built list (`virtual_rows`)
-  mounts the viewport's rows and half a viewport of overscan, as it does when all its rows are
-  new; the rest of the overscan mounts over the next few frames. An estimate short of the laid
-  out height retries before presenting, so no frame shows blank rows. `virtualize` lists keep
+  around it, or the scroll viewport's own height; in a window that fits its content or an
+  out-of-flow popover, only the viewport's own height and `max_h`), and an index-built list
+  (`virtual_rows`) mounts the viewport's rows and half a viewport of overscan, as it does when
+  all its rows are new; the rest of the overscan mounts over the next few frames. An estimate
+  short of the laid out height retries once, with the measured viewport, before presenting, so
+  no frame shows blank rows. `scroll_into_view` of a row taller than its estimate now lands it
+  in view: each placement clamps to the end the rows it mounted measure. `virtualize` lists keep
   their full overscan from the better estimate. In a launcher-shaped bench (`tree_swap --cells
   200 --lazy-grid`) the grid's first showing lays out 288 nodes instead of 629, the swap back
   to a 200-row list 107 instead of 240, and their commits cost 40–50% less. Tests that count

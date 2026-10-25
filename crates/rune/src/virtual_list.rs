@@ -60,9 +60,10 @@ pub(crate) fn height_bound(style: &Style, avail: f32) -> f32 {
 
 /// The most each child of an element whose bound is `bound` can be tall: what padding leaves
 /// and, in a column, what siblings of fixed height and gaps don't take. A scroll viewport's
-/// content is unbounded.
+/// content is unbounded, as is an out-of-flow child not pinned to both its parent's top and
+/// bottom.
 pub(crate) fn child_bounds(style: &Style, scrolls: bool, bound: f32, children: &[El]) -> ChildBounds {
-    if scrolls { return ChildBounds { inner: f32::INFINITY, fixed: 0.0, column: false } }
+    if scrolls { return ChildBounds { outer: f32::INFINITY, inner: f32::INFINITY, fixed: 0.0, column: false } }
     let points = |p: LengthPercentage| match p.expand() {
         taffy::style::ExpandedLengthPercentage::Length(x) => x,
         _ => 0.0,
@@ -70,12 +71,14 @@ pub(crate) fn child_bounds(style: &Style, scrolls: bool, bound: f32, children: &
     let inner = bound - points(style.padding.top) - points(style.padding.bottom);
     let column = style.display == Display::Flex && style.flex_wrap == FlexWrap::NoWrap
         && matches!(style.flex_direction, FlexDirection::Column | FlexDirection::ColumnReverse);
-    if !column || children.len() < 2 { return ChildBounds { inner, fixed: 0.0, column: false } }
+    if !column || children.len() < 2 { return ChildBounds { outer: bound, inner, fixed: 0.0, column: false } }
     let gaps = points(style.gap.height) * children.iter().filter(|c| in_flow(&c.style)).count().saturating_sub(1) as f32;
-    ChildBounds { inner: inner - gaps, fixed: children.iter().map(|c| fixed_height(&c.style)).sum(), column }
+    ChildBounds { outer: bound, inner: inner - gaps, fixed: children.iter().map(|c| fixed_height(&c.style)).sum(), column }
 }
 
 pub(crate) struct ChildBounds {
+    /// The parent's bound: an absolute child's insets are from its padding box.
+    outer: f32,
     inner: f32,
     fixed: f32,
     column: bool,
@@ -83,7 +86,17 @@ pub(crate) struct ChildBounds {
 
 impl ChildBounds {
     pub fn of(&self, child: &El) -> f32 {
-        let bound = if self.column && in_flow(&child.style) { self.inner - (self.fixed - fixed_height(&child.style)) } else { self.inner };
+        let style = &child.style;
+        let bound = if style.position == Position::Absolute {
+            match (length(style.inset.top), length(style.inset.bottom)) {
+                (Some(top), Some(bottom)) => self.outer - top - bottom,
+                _ => f32::INFINITY,
+            }
+        } else if self.column && in_flow(style) {
+            self.inner - (self.fixed - fixed_height(style))
+        } else {
+            self.inner
+        };
         bound.max(0.0)
     }
 }
@@ -279,5 +292,26 @@ impl VirtualList {
         let bottom = self.pad_top + self.prefix(self.range.end);
         (self.range.start > 0 && offset < top + edge)
             || (self.range.end < self.keys.len() && offset + self.viewport > bottom - edge)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{col, el};
+
+    #[test]
+    fn an_absolute_child_is_bounded_only_when_pinned_top_and_bottom() {
+        let children = [
+            el().pin(Some(0.0), Some(10.0), Some(0.0), Some(20.0)),
+            el().absolute(0.0, 10.0),
+            el().h(40.0),
+            el(),
+        ];
+        let parent = col().h(100.0).pt(5.0);
+        let bounds = child_bounds(&parent.style, false, 100.0, &children);
+        assert_eq!(bounds.of(&children[0]), 70.0, "between its insets in the padding box");
+        assert_eq!(bounds.of(&children[1]), f32::INFINITY, "free to grow past its parent");
+        assert_eq!(bounds.of(&children[3]), 55.0, "in flow, what padding and the fixed sibling leave");
     }
 }
