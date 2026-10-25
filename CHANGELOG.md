@@ -5,11 +5,16 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Return and Escape during an input method composition only confirm or cancel it.** A
+  Return or Escape key event that reaches a field while it has a preedit (Japanese, Chinese
+  or Korean input, say) no longer runs its `on_submit`, presses the default button, inserts a
+  newline, blurs the field or reaches `on_key`.
 - **`El::on_step` gives a slider its keyboard.** While the element is focused, Left and Down
   call it with -1, Right and Up with +1, Page Down with -10 and Page Up with +10, repeating
-  while held; `El::on_step_limit` takes Home (`false`) and End (`true`) to the ends. A slider
-  built from `on_drag` adds them to become focusable and adjustable from the keyboard, with
-  role `slider`. Its keys come before its `focus_group`'s arrows.
+  while held; `El::on_step_limit` takes Home (`false`) and End (`true`) to the ends, and
+  without it they go on to the app. A slider built from `on_drag` adds them to become
+  focusable and adjustable from the keyboard, with role `slider`. Its keys come before its
+  `focus_group`'s arrows.
 - **Breaking: Return no longer presses a focused button; Space does, and Return goes to the
   default button.** As in AppKit, Space presses the focused button, checkbox, switch, radio,
   segment or popup button, and Return presses the new `El::default_button()` in the window or
@@ -19,12 +24,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   text field without `on_submit` passes Return to the default button. An app
   that relied on Return pressing a focused button should mark its primary action
   `.default_button()`, or handle Return in `on_key`. Return no longer opens a focused popup
-  button (role `combobox`) either; Space, Up and Down still do. The rune README's "Key
-  routing" has the full table.
+  button (role `combobox`) either; Space, Up and Down still do. Shift-modified keys other than
+  Tab and typed text no longer navigate a `focus_group` or press anything: Shift-Space,
+  Shift-Return and Shift-arrows go on to `on_key`. The rune README's "Key routing" has the
+  full table.
 - **A focusable control with no `focus_ring` draws AppKit's ring.** Focused from the keyboard,
   a `focusable(true)` element whose ring was never set (on it or a child, short of another
   focusable) now draws a 3 pt ring just outside its border box in `cx.focus_color()`,
-  following its corner radii. Before, it drew nothing. Text fields, `focus_highlight` rows and
+  following its corner radii. Before, it drew nothing. Text fields, focused links, `focus_highlight` rows and
   the items of `menu`, `listbox`, `list`, `tree` and `grid` groups still draw none, and rune-kit
   controls keep their own rings. `El::no_focus_ring()` turns the ring off for a control that
   shows focus its own way.

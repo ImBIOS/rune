@@ -1804,6 +1804,8 @@ impl<S: 'static> Host<S> {
 
     fn show(&mut self, event_loop: &ActiveEventLoop) {
         if self.launcher() { self.reveal_launcher(event_loop); return; }
+        // Hidden, it may have missed a new accent's redraw: build with the current one.
+        self.rt.set_system_accent(crate::system_accent());
         let built = self.win.as_ref().is_some_and(|w| !w.visible) && self.build_for_show();
         self.apply_placement(event_loop);
         let Some(w) = self.win.as_mut() else { self.create(event_loop, None, false); return };

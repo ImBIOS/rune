@@ -212,6 +212,12 @@ impl<S: 'static> Runtime<S> {
         self.links.focus.is_some_and(|k| k < self.link_count(i))
     }
 
+    /// The id of focused node `i`'s focused link, which tools list as its own element.
+    pub(super) fn focused_link_id(&self, i: usize) -> Option<String> {
+        let k = self.links.focus?;
+        self.nodes[i].text.as_ref()?.links.get(k).map(|l| l.id.clone())
+    }
+
     /// Enter or Space on a focused link presses it.
     pub(super) fn link_key(&mut self, i: usize, tx: &mut Tx) -> bool {
         let Some(k) = self.links.focus.filter(|&k| k < self.link_count(i)) else { return false };

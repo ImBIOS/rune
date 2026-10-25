@@ -65,7 +65,7 @@ impl Tx {
 
     /// In a key handler, the key of the element that had focus when the key arrived, `None`
     /// when nothing had (and in every other handler). An unkeyed element reads as `#n`, its
-    /// index among its siblings. A window's `on_key` hears
+    /// index among its siblings, and a focused [`Link`](crate::Link) as its id. A window's `on_key` hears
     /// a key either before anything else (nothing focused) or after the focused control passed
     /// it on, so `tx.focused().is_none()` picks out the first case: plain arrows can drive the
     /// window (a settings pane) only while no control has focus, as in System Settings. The
@@ -1148,7 +1148,7 @@ impl El {
     /// Without it, a `focusable` element focused from the keyboard draws AppKit's ring when
     /// neither it nor a child (short of another focusable) sets `focus_ring`: 3 points wide
     /// in [`Cx::focus_color`](crate::Cx::focus_color), just outside its border box, following
-    /// its corner radii. Text fields, `focus_highlight` rows and the items of a `menu`,
+    /// its corner radii. Text fields, focused links, `focus_highlight` rows and the items of a `menu`,
     /// `listbox`, `list`, `tree` or `grid` group draw none, as in AppKit: their caret,
     /// highlight or selection shows focus.
     pub fn no_focus_ring(mut self) -> Self {

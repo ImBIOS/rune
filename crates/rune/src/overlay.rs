@@ -419,6 +419,8 @@ impl<T: 'static> Overlay<T> {
 
     fn show_fading(&mut self, event_loop: &ActiveEventLoop, fade: Duration) {
         self.rt.set_system_dark(self.dark);
+        // Hidden, it missed the redraws a new accent asks for (`accent::watch`).
+        self.accent_changed(crate::system_accent());
         if self.visible { return; }
         // Shown again mid fade-out: the window is still up with current pixels, and its motion
         // carries on rather than settling.
@@ -451,6 +453,12 @@ impl<T: 'static> Overlay<T> {
         }
         if !self.retained() { self.dirty = true; }
         self.idle &= !(self.rt.animating || self.compositor.as_ref().is_some_and(|c| c.animating()));
+    }
+
+    fn accent_changed(&mut self, accent: crate::SystemAccent) {
+        if accent == self.rt.system_accent() { return; }
+        self.rt.set_system_accent(accent);
+        self.dirty = true;
     }
 
     fn theme_changed(&mut self, dark: bool) {
@@ -1716,7 +1724,7 @@ impl<T: 'static> AnyHost for Overlay<T> {
             }
             WindowEvent::RedrawRequested | WindowEvent::Resized(_) => {
                 // A new accent asks every window to redraw (`accent::watch`).
-                self.rt.set_system_accent(crate::system_accent());
+                self.accent_changed(crate::system_accent());
                 self.dirty = true;
             }
             WindowEvent::CursorMoved { position, .. } if self.options.input.resolved(self.interactive) != OverlayInput::None => {
@@ -2161,6 +2169,20 @@ mod tests {
         }).collect();
         assert_eq!(overlay.rt.state, 5);
         assert_eq!(idle, [false, false, false, true, true], "the display link runs while the poll asks for frames, and stops after");
+    }
+
+    #[test]
+    fn a_hidden_overlay_takes_a_new_accent_and_redraws_before_reveal() {
+        let mut overlay = width_overlay("accent");
+        present(&mut overlay, Instant::now());
+        assert!(!overlay.visible && !overlay.dirty);
+        overlay.accent_changed(overlay.rt.system_accent());
+        assert!(!overlay.dirty, "the same accent redraws nothing");
+        let pink = crate::Color { r: 1.0, g: 0.05, b: 0.4, a: 1.0 };
+        let pink = crate::SystemAccent::new(pink, pink);
+        overlay.accent_changed(pink);
+        assert_eq!(overlay.rt.system_accent(), pink);
+        assert!(overlay.dirty, "a retained surface redraws in the new accent before it's revealed");
     }
 
     #[test]

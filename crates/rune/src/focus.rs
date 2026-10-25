@@ -132,7 +132,8 @@ impl<S: 'static> Runtime<S> {
         if !self.keyboard_focus { return None; }
         let i = self.focused_index()?;
         let n = &self.nodes[i];
-        if n.input.is_some() || n.focus.highlight.is_some() { return None; }
+        // A focused link shows its focus with its own hover look.
+        if n.input.is_some() || n.focus.highlight.is_some() || self.link_focused(i) { return None; }
         if self.group(i).is_some_and(|g| LIST_ROLES.contains(&self.nodes[g].role) || VERTICAL_ROLES.contains(&self.nodes[g].role)) {
             return None;
         }
@@ -260,15 +261,19 @@ impl<S: 'static> Runtime<S> {
         }
         let Some(i) = self.focused_index() else { return false; };
         if !self.can_focus(i) { return false; }
+        // Past Tab, a Shift-modified key navigates and presses nothing: it goes on to the app.
+        // Typed text still type-selects (Shift-A is "A").
+        if ev.mods.shift && !matches!(&ev.key, Key::Text(t) if !t.trim().is_empty()) { return false; }
         // A slider's keys come before its group's arrows.
-        if let Some(step) = self.nodes[i].focus.step.clone() && !ev.mods.shift {
+        if let Some(step) = self.nodes[i].focus.step.clone() {
             let delta = match ev.key {
                 Key::Left | Key::Down => Some(-1), Key::Right | Key::Up => Some(1),
                 Key::PageDown => Some(-10), Key::PageUp => Some(10),
                 _ => None,
             };
             if let Some(delta) = delta { step(handler_state(&mut self.state), delta, tx); return true; }
-            if matches!(ev.key, Key::Home | Key::End) && let Some(f) = self.nodes[i].focus.step_limit.clone() {
+            if matches!(ev.key, Key::Home | Key::End) {
+                let Some(f) = self.nodes[i].focus.step_limit.clone() else { return false };
                 f(handler_state(&mut self.state), ev.key == Key::End, tx);
                 return true;
             }
@@ -614,6 +619,13 @@ mod tests {
         assert!(rt.state.search.focused);
     }
 
+    /// One state for the key routing tests: each state type builds a whole `Runtime<S>`.
+    #[derive(Default)]
+    struct Keys {
+        pane: usize, seen: Vec<Option<String>>, field: crate::TextEdit, named: crate::TextEdit,
+        sheet: bool, page: bool, value: i32, steps: Vec<i32>, log: Vec<&'static str>, app: Vec<Key>,
+    }
+
     #[derive(Default)]
     struct Menu { open: bool, checked: Option<usize>, picks: Vec<usize>, follows: bool, search: bool, field: crate::TextEdit }
     const ITEMS: [&str; 4] = ["Alpha", "Beta", "Bravo", "Charlie"];
@@ -753,12 +765,10 @@ mod tests {
 
     #[test]
     fn on_key_tells_a_key_nothing_focused_had_from_one_a_control_passed_on() {
-        #[derive(Default)]
-        struct Panes { pane: usize, seen: Vec<Option<String>> }
-        fn view(_: &Panes, _: &mut Cx<Panes>) -> El {
+        fn view(_: &Keys, _: &mut Cx<Keys>) -> El {
             col().size(200.0, 200.0).child(button("switch")).child(el().size(30.0, 30.0).focusable(true))
         }
-        let mut rt = Runtime::new(Panes::default(), view, (200.0, 200.0), Env::new(true, 1.0));
+        let mut rt = Runtime::new(Keys::default(), view, (200.0, 200.0), Env::new(true, 1.0));
         rt.on_key = Some(|s, ev, tx| {
             s.seen.push(tx.focused().map(str::to_owned));
             // System Settings: plain Down changes the pane only while no control has focus.
@@ -823,34 +833,32 @@ mod tests {
 
     #[test]
     fn return_presses_the_default_button_and_space_the_focused_one() {
-        #[derive(Default)]
-        struct Steps { field: crate::TextEdit, named: crate::TextEdit, sheet: bool, log: Vec<&'static str> }
-        fn view(s: &Steps, _: &mut Cx<Steps>) -> El {
+        fn view(s: &Keys, _: &mut Cx<Keys>) -> El {
             let style = crate::TextStyle::new(14.0, 400.0);
             let mut root = col().size(300.0, 300.0)
-                .child(crate::text_input(&s.field, style).key("field").size(100.0, 20.0).on_edit(|s: &mut Steps| &mut s.field))
-                .child(crate::text_input(&s.named, style).key("named").size(100.0, 20.0).on_edit(|s: &mut Steps| &mut s.named)
-                    .on_submit(|s: &mut Steps, _| s.log.push("submit")))
+                .child(crate::text_input(&s.field, style).key("field").size(100.0, 20.0).on_edit(|s: &mut Keys| &mut s.field))
+                .child(crate::text_input(&s.named, style).key("named").size(100.0, 20.0).on_edit(|s: &mut Keys| &mut s.named)
+                    .on_submit(|s: &mut Keys, _| s.log.push("submit")))
                 .child(col().key("list").role("listbox").focus_group()
-                    .child(button("row").on_press(|s: &mut Steps| s.log.push("row"))))
-                .child(button("later").on_press(|s: &mut Steps| s.log.push("later")))
-                .child(button("continue").default_button().on_press(|s: &mut Steps| s.log.push("continue")))
-                .child(button("hidden").default_button().opacity(0.0).on_press(|s: &mut Steps| s.log.push("hidden")));
+                    .child(button("row").on_press(|s: &mut Keys| s.log.push("row"))))
+                .child(button("later").on_press(|s: &mut Keys| s.log.push("later")))
+                .child(button("continue").default_button().on_press(|s: &mut Keys| s.log.push("continue")))
+                .child(button("hidden").default_button().opacity(0.0).on_press(|s: &mut Keys| s.log.push("hidden")));
             if s.sheet {
                 root = root.child(col().key("sheet").absolute(150.0, 0.0).size(100.0, 100.0)
-                    .modal(true, |s: &mut Steps| s.sheet = false)
-                    .child(button("cancel").on_press(|s: &mut Steps| s.sheet = false))
-                    .child(button("done").default_button().on_press(|s: &mut Steps| { s.log.push("done"); s.sheet = false; })));
+                    .modal(true, |s: &mut Keys| s.sheet = false)
+                    .child(button("cancel").on_press(|s: &mut Keys| s.sheet = false))
+                    .child(button("done").default_button().on_press(|s: &mut Keys| { s.log.push("done"); s.sheet = false; })));
             }
             root
         }
-        let mut rt = Runtime::new(Steps::default(), view, (300.0, 300.0), Env::new(true, 1.0));
+        let mut rt = Runtime::new(Keys::default(), view, (300.0, 300.0), Env::new(true, 1.0));
         rt.on_key = Some(|s, ev, _| { if ev.key == Key::Enter { s.log.push("on_key"); } false });
         rt.frame(0.0);
-        let log = |rt: &mut Runtime<Steps>| std::mem::take(&mut rt.state.log);
+        let log = |rt: &mut Runtime<Keys>| std::mem::take(&mut rt.state.log);
         hold(&mut rt, Key::Enter);
         assert_eq!(log(&mut rt), ["continue"], "nothing focused: the default button, once per press");
-        let tab_to = |rt: &mut Runtime<Steps>, key: &str| {
+        let tab_to = |rt: &mut Runtime<Keys>, key: &str| {
             for _ in 0..10 { press(rt, Key::Tab); if focused(rt) == key { return; } }
             panic!("Tab never reached {key}");
         };
@@ -877,15 +885,14 @@ mod tests {
 
     #[test]
     fn a_focused_slider_steps_on_arrows_and_pages_and_jumps_on_home_and_end() {
-        #[derive(Default)]
-        struct Slider { value: i32, steps: Vec<i32>, page: bool }
-        fn view(s: &Slider, _: &mut Cx<Slider>) -> El {
+        fn view(s: &Keys, _: &mut Cx<Keys>) -> El {
             let slider = el().key("volume").size(100.0, 20.0)
-                .on_step(|s: &mut Slider, delta, _| { s.steps.push(delta); s.value = (s.value + delta).clamp(0, 100); });
-            let slider = if s.page { slider } else { slider.on_step_limit(|s: &mut Slider, max, _| s.value = if max { 100 } else { 0 }) };
+                .on_step(|s: &mut Keys, delta, _| { s.steps.push(delta); s.value = (s.value + delta).clamp(0, 100); });
+            let slider = if s.page { slider } else { slider.on_step_limit(|s: &mut Keys, max, _| s.value = if max { 100 } else { 0 }) };
             col().size(200.0, 200.0).child(row().role("toolbar").focus_group().child(button("before")).child(slider))
         }
-        let mut rt = Runtime::new(Slider { value: 50, ..Slider::default() }, view, (200.0, 200.0), Env::new(true, 1.0));
+        let mut rt = Runtime::new(Keys { value: 50, ..Keys::default() }, view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.on_key = Some(|s, ev, _| { s.app.push(ev.key.clone()); false });
         rt.set_tab_visits_controls(true);
         rt.frame(0.0);
         assert_eq!(rt.elements().into_iter().find(|e| e.key.as_deref() == Some("volume")).unwrap().role, "slider");
@@ -904,10 +911,97 @@ mod tests {
         press(&mut rt, Key::Home);
         assert_eq!(rt.state.value, 0);
         rt.state.page = true; rt.invalidate(); rt.frame(0.0);
-        press(&mut rt, Key::End);
-        assert_eq!(rt.state.value, 0, "without on_step_limit Home and End aren't the slider's");
+        rt.state.app.clear();
+        rt.state.value = 50;
+        press(&mut rt, Key::Home);
+        assert_eq!(rt.state.value, 50, "without on_step_limit Home and End aren't the slider's");
+        assert_eq!(focused(&rt), "volume", "nor the toolbar's: they go on to the app");
         rt.key(KeyEvent { key: Key::Right, mods: Mods { shift: true, ..Mods::default() } }); rt.frame(0.0);
         assert!(rt.state.steps.is_empty(), "a modified arrow isn't a step");
+        assert_eq!(focused(&rt), "volume", "and doesn't move the toolbar's focus");
+        assert_eq!(std::mem::take(&mut rt.state.app), [Key::Home, Key::Right]);
+    }
+
+    #[test]
+    fn shift_modified_keys_past_tab_go_to_the_app_and_press_nothing() {
+        fn view(_: &Keys, _: &mut Cx<Keys>) -> El {
+            col().size(200.0, 200.0)
+                .child(button("go").on_press(|s: &mut Keys| s.log.push("go")))
+                .child(col().key("list").role("listbox").focus_group()
+                    .child(button("apple").label("apple").on_press(|s: &mut Keys| s.log.push("apple")))
+                    .child(button("banana").label("banana").on_press(|s: &mut Keys| s.log.push("banana"))))
+        }
+        let mut rt = Runtime::new(Keys::default(), view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.on_key = Some(|s, ev, _| { s.app.push(ev.key.clone()); false });
+        rt.set_tab_visits_controls(true);
+        rt.frame(0.0);
+        let shifted = |rt: &mut Runtime<Keys>, key: Key| {
+            rt.key(KeyEvent { key, mods: Mods { shift: true, ..Mods::default() } }); rt.frame(0.0);
+        };
+        press(&mut rt, Key::Tab);
+        assert_eq!(focused(&rt), "go");
+        shifted(&mut rt, Key::Text(" ".into()));
+        press(&mut rt, Key::Tab);
+        assert_eq!(focused(&rt), "apple");
+        shifted(&mut rt, Key::Enter);
+        shifted(&mut rt, Key::Down);
+        assert_eq!(focused(&rt), "apple", "Shift-Down is the app's (to extend a selection, say)");
+        assert!(rt.state.log.is_empty(), "Shift-Space and Shift-Return press nothing");
+        assert_eq!(rt.state.app, [Key::Tab, Key::Text(" ".into()), Key::Enter, Key::Down], "the first Tab found nothing focused");
+        shifted(&mut rt, Key::Text("B".into()));
+        assert_eq!(focused(&rt), "banana", "a capital still type-selects");
+        shifted(&mut rt, Key::Tab);
+        assert_eq!(focused(&rt), "go", "Shift-Tab still goes back");
+    }
+
+    #[test]
+    fn return_and_escape_confirm_and_cancel_a_composition_and_nothing_else() {
+        fn view(s: &Keys, _: &mut Cx<Keys>) -> El {
+            let style = crate::TextStyle::new(14.0, 400.0);
+            col().size(300.0, 300.0)
+                .child(crate::text_input(&s.field, style).key("field").size(100.0, 20.0).on_edit(|s: &mut Keys| &mut s.field))
+                .child(crate::text_input(&s.named, style).key("named").size(100.0, 20.0).on_edit(|s: &mut Keys| &mut s.named)
+                    .on_submit(|s: &mut Keys, _| s.log.push("submit")))
+                .child(button("continue").default_button().on_press(|s: &mut Keys| s.log.push("continue")))
+        }
+        let mut rt = Runtime::new(Keys::default(), view, (300.0, 300.0), Env::new(true, 1.0));
+        rt.on_key = Some(|s, ev, _| { if ev.key == Key::Escape { s.log.push("escape"); } false });
+        rt.frame(0.0);
+        for (field, after) in [("field", "continue"), ("named", "submit")] {
+            for _ in 0..4 { if rt.elements().iter().any(|e| e.focused && e.key.as_deref() == Some(field)) { break; } press(&mut rt, Key::Tab); }
+            assert_eq!(focused(&rt), field);
+            rt.ime(crate::Ime::Preedit("ka".into(), None)); rt.frame(0.0);
+            press(&mut rt, Key::Enter);
+            press(&mut rt, Key::Escape);
+            assert!(rt.state.log.is_empty(), "{field}: the composition's Return and Escape: {:?}", rt.state.log);
+            assert_eq!(focused(&rt), field, "Escape cancels the composition, not the field's focus");
+            rt.ime(crate::Ime::Commit("か".into())); rt.frame(0.0);
+            press(&mut rt, Key::Enter);
+            assert_eq!(std::mem::take(&mut rt.state.log), [after], "{field}: Return once it's committed");
+        }
+        assert_eq!((rt.state.field.text.as_str(), rt.state.named.text.as_str()), ("か", "か"));
+    }
+
+    #[test]
+    fn a_focused_link_draws_no_default_ring_and_is_what_tx_focused_names() {
+        fn view(_: &Keys, _: &mut Cx<Keys>) -> El {
+            let text = "see the docs";
+            col().size(300.0, 100.0).child(crate::rich(text, Vec::new()).key("para").w(200.0)
+                .link(crate::Link::new(8..12, "docs"))
+                .on_link(|_: &mut Keys, _, _| {}))
+        }
+        let mut rt = Runtime::new(Keys::default(), view, (300.0, 100.0), Env::new(true, 1.0));
+        rt.on_key = Some(|s, _, tx| { s.seen.push(tx.focused().map(str::to_owned)); false });
+        rt.set_tab_visits_controls(true);
+        rt.frame(0.0);
+        press(&mut rt, Key::Tab);
+        let link = rt.elements().into_iter().find(|e| e.focused).unwrap();
+        assert_eq!(link.key.as_deref(), Some("docs"));
+        let rings = rt.instances.iter().filter(|i| i.fill == [0.0; 4] && i.border[3] > 0.0 && i.params[1] == KIND_RECT).count();
+        assert_eq!(rings, 0, "the link's own look shows its focus, not a ring round the paragraph");
+        assert_eq!(rt.state.seen, [None], "Tab with nothing focused");
+        press(&mut rt, Key::Text("x".into()));
+        assert_eq!(rt.state.seen, [None, Some("docs".to_owned())]);
     }
 
     #[test]

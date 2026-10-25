@@ -503,6 +503,8 @@ impl TextEdit {
                     if !s.is_empty() { self.replace(self.range(), &s, !s.contains(['\r', '\n'])); }
                 }
             }
+            // A composition's Return and Escape are the input method's.
+            Key::Enter | Key::Escape if self.preedit.is_some() => {}
             Key::Enter => {
                 // A single-line field submits on any Enter, like `<input>`.
                 if (m.shift || m.alt) && !self.secure && !self.single_line {

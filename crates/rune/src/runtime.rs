@@ -1241,6 +1241,10 @@ impl<S: 'static> Runtime<S> {
     /// rings. Native windows set it from [`system_accent`](crate::system_accent) and again when
     /// the user picks another accent; a change re-runs the view. Headless runs keep
     /// [`SystemAccent::DEFAULT`](crate::SystemAccent::DEFAULT) unless a test sets one.
+    pub(crate) fn system_accent(&self) -> crate::SystemAccent {
+        self.system_accent
+    }
+
     pub fn set_system_accent(&mut self, accent: crate::SystemAccent) {
         if accent != self.system_accent {
             self.system_accent = accent;
@@ -2157,6 +2161,9 @@ impl<S: 'static> Runtime<S> {
         let app_first = self.focused.is_none();
         // Selected text has the keyboard for copying, as AppKit's first responder does.
         if !repeat && self.selection_key(ev, one) { return true; }
+        // Return and Escape that reach a field mid-composition belong to the input method: they
+        // confirm or cancel it, and submit, blur and press nothing.
+        if matches!(ev.key, crate::Key::Enter | crate::Key::Escape) && self.composing() { return true; }
         if self.default_button_key(ev, one) { return true; }
         if app_first && let Some(f) = self.on_key && app_call!(f, &mut self.state, ev, one) { return true; }
         if let Some(f) = self.focused_input().and_then(|input| input.key.clone())
@@ -2256,6 +2263,15 @@ impl<S: 'static> Runtime<S> {
         true
     }
 
+    /// Whether the focused field has an input method composition (preedit) open.
+    fn composing(&mut self) -> bool {
+        let Some(access) = self.focused_input().map(|i| i.access.clone()) else { return false };
+        match access {
+            Some(access) => access(handler_state(&mut self.state)).preedit.is_some(),
+            None => self.focused_input().is_some_and(|i| i.edit.preedit.is_some()),
+        }
+    }
+
     fn node(&self, path: &str) -> Option<&Node> {
         self.nodes.iter().enumerate().find(|(i, n)| n.path == path && !self.subtree_exiting(*i)).map(|(_, n)| n)
     }
@@ -2265,10 +2281,11 @@ impl<S: 'static> Runtime<S> {
         self.node(path).and_then(|n| n.input.as_deref()).or_else(|| self.virtual_inputs.get(path).map(Box::as_ref))
     }
 
-    /// What [`Tx::focused`] reports: the focused element's key, else its path's last segment
-    /// (a field in a virtual row that scrolled out has no node).
+    /// What [`Tx::focused`] reports: the focused link's id, else the focused element's key,
+    /// else its path's last segment (a field in a virtual row that scrolled out has no node).
     fn focused_key(&self) -> Option<String> {
         let path = self.focused.as_deref()?;
+        if let Some(id) = self.focused_index().and_then(|i| self.focused_link_id(i)) { return Some(id); }
         Some(self.focused_index().and_then(|i| self.nodes[i].key.clone())
             .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(path).to_owned()))
     }

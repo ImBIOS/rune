@@ -130,7 +130,8 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   flags (`focusable`, `focused`, `focusVisible`, `inert`) are the future platform AX hook.
 - **Key routing**: a key the OS delivers to the window goes to the first of these that takes it.
   Global shortcuts and native menu key equivalents are handled before the window sees the key.
-  1. Selected text, for its copy keys.
+  1. Selected text, for its copy keys. Return and Escape while a field composes (IME preedit)
+     go to the composition and no further.
   2. Return, with no modifiers, presses the window's (or open modal's) `default_button()`
      unless the focused element takes Return (see the table below).
   3. Nothing focused: the window's `on_key`, with `tx.focused()` `None`.
@@ -139,9 +140,10 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
      focused slider's arrows and Page Up and Down step it (`on_step`) and Home and End take it
      to its ends (`on_step_limit`), arrows, Home, End and type-select move inside a
      `focus_group`, Space or Up and Down open a focused popup button (role `combobox`), Space
-     presses the focused control, and Return presses a focused row or link.
+     presses the focused control, and Return presses a focused row or link. Past Tab, keys
+     with Shift do none of this (typed capitals still type-select); they go on.
   6. The focused text field's editor.
-  7. The window's `on_key` again, now with `tx.focused()` naming the focused element, for keys
+  7. The window's `on_key` again, now with `tx.focused()` naming the focused element (or link), for keys
      the focused control passed on.
   8. Page Up, Page Down, Home and End scroll the focused (else hovered) scroll view.
 
