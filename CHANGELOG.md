@@ -15,6 +15,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   blur, dissolve and clip. `render::CLIP_WGSL` shares the clip maths with compositor shaders.
   Apps without a compositor or effect slots render exactly as before; one that set `srgb_blend`
   alongside a compositor now gets gamma blending, which its compositor must match.
+  `rune-fx` follows: `FxRenderer::add_format`, `draw_layer_in` and `set_srgb_blend` draw its effects
+  in a layer's float target and in either blend mode (`demo/fx/in-layer.png`).
 
 - **Traces say what animated.** Each `--trace` frame now carries `quality.why` (what kept the
   frame animating: tracks, growth, scroll, reveal, loop, text-flight, …) and `tk`, the motion

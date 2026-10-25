@@ -144,6 +144,16 @@ Fx::fill(FlutedGlassParams { rib: 10.0, frost: 0.4, ..FlutedGlassParams::reeded(
   blend on dark UI. `occlusion` controls how much they also cover what's behind.
 - Distortion and motion blur write replacement pixels with `a = 1` inside their mask.
 
+**Targets and blend modes**
+- One `FxRenderer` draws into any number of target formats: `add_format` builds the pipelines for
+  another one, and `draw_layer_in(pass, format, origin, layer)` draws into a pass of that format
+  whose top-left pixel is at `origin` in window pixels (a Rune effect slot's `EffectSite`: the
+  frame target, or an isolated layer's `Rgba16Float` target, where the layer's opacity, blur and
+  clip then apply). Effects are still shaded in window coordinates.
+- `set_srgb_blend(frame.srgb_blend())` matches a gamma-blended Rune frame: the premultiplied output
+  is sRGB-encoded for the non-sRGB target. An opaque effect then looks the same in both modes; a
+  translucent one differs only as the linear-versus-gamma blend itself does.
+
 **Cost and culling**
 - `prepare` does all culling: idle layers (intensity 0, a fully cooled glow, a one-shot outside its
   window) and layers whose bounds miss the viewport get no instance, no CPU tables and no draw.
