@@ -59,8 +59,8 @@ struct Win {
     #[cfg(target_os = "macos")]
     help: crate::macos_help::NativeHelp,
     #[cfg(target_os = "macos")]
-    /// Kept for its observers, which redraw on full screen changes.
-    _full_screen: mac::FullScreenWatch,
+    /// Redraws on full screen changes.
+    full_screen: mac::FullScreenWatch,
     /// Fn presses, which winit doesn't send, while the app wants modifier keys.
     #[cfg(target_os = "macos")]
     fn_key: Option<crate::fn_key::FnKey>,
@@ -1394,37 +1394,50 @@ mod mac {
         }
     }
 
-    /// Redraws the window as it enters and leaves full screen, so the redraw can read the new
-    /// `titlebar_inset`: winit sends no event for either, and its resizes can arrive before
-    /// AppKit updates the style mask.
-    pub struct FullScreenWatch(Vec<objc2::rc::Retained<objc2_foundation::NSObject>>);
+    /// Redraws the window once it has entered or left full screen, so the redraw can place the
+    /// traffic lights and read the new `titlebar_inset`: winit sends no event for either, and
+    /// resizes during the transition arrive while the style mask still says full screen.
+    pub struct FullScreenWatch {
+        observers: Vec<objc2::rc::Retained<objc2_foundation::NSObject>>,
+        changed: std::rc::Rc<std::cell::Cell<bool>>,
+    }
 
     impl FullScreenWatch {
         pub fn new(window: &Window) -> Self {
             use objc2::rc::{Retained, Weak};
             use objc2_foundation::NSObject;
-            let (Some(win), Some(view)) = (ns_window(window), content_view(window)) else { return Self(Vec::new()) };
-            let Some(center) = AnyClass::get("NSNotificationCenter") else { return Self(Vec::new()) };
+            let changed = std::rc::Rc::new(std::cell::Cell::new(false));
+            let none = || Self { observers: Vec::new(), changed: changed.clone() };
+            let (Some(win), Some(view)) = (ns_window(window), content_view(window)) else { return none() };
+            let Some(center) = AnyClass::get("NSNotificationCenter") else { return none() };
             let weak = Weak::from_retained(&view);
+            let flag = changed.clone();
             let block = block2::RcBlock::new(move |_: *mut AnyObject| {
+                flag.set(true);
                 if let Some(view) = weak.load() { unsafe { view.setNeedsDisplay(true) }; }
             });
             let names = ["NSWindowDidEnterFullScreenNotification", "NSWindowDidExitFullScreenNotification"];
             // SAFETY: main thread; the block outlives the observers, which `Drop` removes.
-            Self(names.into_iter().filter_map(|name| unsafe {
+            let observers = names.into_iter().filter_map(|name| unsafe {
                 let center: Retained<AnyObject> = objc2::msg_send_id![center, defaultCenter];
                 let name = NSString::from_str(name);
                 let token: Option<Retained<NSObject>> = objc2::msg_send_id![&*center, addObserverForName: &*name, object: &*win,
                     queue: std::ptr::null::<AnyObject>(), usingBlock: &*block];
                 token
-            }).collect())
+            }).collect();
+            Self { observers, changed }
+        }
+
+        /// Whether full screen started or ended since the last call.
+        pub fn take(&self) -> bool {
+            self.changed.replace(false)
         }
     }
 
     impl Drop for FullScreenWatch {
         fn drop(&mut self) {
             let Some(center) = AnyClass::get("NSNotificationCenter") else { return };
-            for token in &self.0 {
+            for token in &self.observers {
                 // SAFETY: removes an observer this watch added.
                 unsafe {
                     let center: objc2::rc::Retained<AnyObject> = objc2::msg_send_id![center, defaultCenter];
@@ -2250,7 +2263,7 @@ impl<S: 'static> Host<S> {
             #[cfg(target_os = "macos")]
             help: Default::default(),
             #[cfg(target_os = "macos")]
-            _full_screen: full_screen,
+            full_screen,
             #[cfg(target_os = "macos")]
             fn_key,
         });
@@ -2749,7 +2762,9 @@ impl<S: 'static> Host<S> {
             }
             WindowEvent::RedrawRequested => {
                 #[cfg(target_os = "macos")]
-                if let Some(l) = &self.win { self.rt.set_titlebar_inset(mac::titlebar_inset(&l.window)); }
+                if let Some(l) = self.win.as_ref().filter(|l| l.full_screen.take()) {
+                    self.rt.set_titlebar_inset(place_chrome(&l.window, self.chrome));
+                }
                 self.redraw();
                 self.shell(event_loop);
                 return;
