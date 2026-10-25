@@ -167,6 +167,8 @@ pub struct Args {
     pub trace: Option<PathBuf>,
     /// Trace the native window's submission clock instead of a virtual headless clock.
     pub native: bool,
+    /// Trace every element, keyed or not (paths name the unkeyed ones).
+    pub trace_all: bool,
     pub strip: Option<PathBuf>,
     pub crops: Vec<[f32; 4]>,
     pub every: usize,
@@ -274,6 +276,7 @@ impl Args {
                 "--tree" => a.tree = Some(val(&mut i).into()),
                 "--trace" => a.trace = Some(val(&mut i).into()),
                 "--native" => a.native = true,
+                "--trace-all" => a.trace_all = true,
                 "--strip" => a.strip = Some(val(&mut i).into()),
                 "--crop" => {
                     let v: Vec<f32> = val(&mut i).split(',').map(|s| num(s) as f32).collect();
@@ -345,7 +348,9 @@ const HELP: &str = "usage: <app> [window]
   --strip out.png --crop x,y,w,h --every K    tile dumped frames into one image
                         (repeat --crop to stack several regions per frame; --cols N per row)
   --tree out.json       element tree with animated values
-  --trace out.jsonl     per-frame rects/opacity in motion-lint JSONL
+  --trace out.jsonl     per-frame rects/opacity in motion-lint JSONL, with the tracks each frame
+                        sampled (tk) and why it was animating (quality.why)
+  --trace-all           trace unkeyed elements too, by path
   --native             trace native submissions; --frames N stops after N frames
   --first-pixels        report when the first GPU-complete offscreen pixels are readable
   --window KEY         select a window for headless tools (run_windows, App::window)
@@ -935,6 +940,8 @@ pub(crate) struct Trace {
     effects: HashMap<u32, [String; 2]>,
     channels: rune_motion::TraceChannels,
     path: PathBuf,
+    /// Trace every element, not only keyed and named ones (`--trace-all`).
+    pub(crate) all: bool,
     /// Lines waiting for present times; `None` writes each frame at once.
     presents: Option<crate::present_time::Presents>,
     /// The native surface's frame counts and `App::dev_stats`, printed when the trace closes.
@@ -974,7 +981,7 @@ impl Trace {
         if clock == "wall" { header["timestamp"] = "cpu-submit".into(); }
         let _ = writeln!(out, "{header}");
         Trace { out, ids: HashMap::new(), described: HashMap::new(), states: HashMap::new(), effects: HashMap::new(),
-            channels: Default::default(), path: path.clone(), presents: None, surface: None }
+            channels: Default::default(), path: path.clone(), all: false, presents: None, surface: None }
     }
 
     /// Holds each frame's line until its present time arrives from `source`, then writes
@@ -1016,7 +1023,9 @@ impl Trace {
         let mut seen = HashSet::new();
         // A virtual list's invisible estimated extent changes when rows are measured or the
         // window rebases. Record the actual row surfaces, not that bookkeeping rectangle.
-        for e in els.iter().filter(|e| (e.key.is_some() || e.trace_name.is_some()) && !e.virtual_extent) {
+        let all = self.all;
+        let traced = |e: &crate::runtime::ElementInfo| (all || e.key.is_some() || e.trace_name.is_some()) && !e.virtual_extent;
+        for e in els.iter().filter(|e| traced(e)) {
             let id = self.id(&e.path);
             let name = e.trace_name.unwrap_or(&e.path);
             let (class, host) = e.trace_namespace.unwrap_or(("rune", "rune"));
@@ -1024,7 +1033,7 @@ impl Trace {
             if self.described.get(&id).is_none_or(|old| old.0 != name || old.1 != class || old.2 != host) {
                 self.described.insert(id, (name.to_owned(), class, host));
                 let mut meta = json!({ "id": id, "cls": class, "nm": name, "host": host, "role": e.role });
-                if let Some(p) = e.parent.and_then(|p| els.get(p)).filter(|p| (p.key.is_some() || p.trace_name.is_some()) && !p.virtual_extent) {
+                if let Some(p) = e.parent.and_then(|p| els.get(p)).filter(|p| traced(p)) {
                     meta["pv"] = self.id(&p.path).into();
                 }
                 metas.push(meta);
@@ -1114,7 +1123,16 @@ impl Trace {
             "cpu_ms": cpu_ms, "scene_edges": edges, "position_error_px": position_error,
             "retarget_lanes": retarget.lanes, "velocity_error_pt_s": retarget.max_velocity_error,
             "animating": rt.animating,
+            "why": crate::runtime::AnimSource::names(if rt.animating { rt.anim_sources } else { 0 }),
         });
+        // What the motion store spent this frame on, by traced element id (or path when untraced).
+        let touched = rt.touched_tracks();
+        if !touched.is_empty() {
+            line["tk"] = touched.into_iter().map(|(path, prop, active)| {
+                let who = self.ids.get(&path).map_or_else(|| json!(path), |&id| json!(id));
+                json!([who, prop, u8::from(active)])
+            }).collect::<Vec<_>>().into();
+        }
         let events = std::mem::take(&mut rt.events);
         if !events.is_empty() {
             line["ev"] = events.into();
@@ -1419,7 +1437,11 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     });
     let init_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-    let mut trace = args.trace.as_ref().map(|p| Trace::open(p, size, fps, scale));
+    let mut trace = args.trace.as_ref().map(|p| {
+        let mut trace = Trace::open(p, size, fps, scale);
+        trace.all = args.trace_all;
+        trace
+    });
     rt.trace_channels = trace.as_ref().map(|_| HashMap::new());
     rt.scene.store_mut().audit_retargets(trace.is_some());
     let mut strip: Vec<Vec<u8>> = Vec::new();
@@ -2712,6 +2734,40 @@ mod tests {
         assert!(values.iter().any(|v| v[0] == blur && v[1].as_f64().unwrap() > 0.0));
         assert!(lines[3]["cg"].as_array().unwrap().contains(&json!(blur)));
         assert_eq!(lines[1]["e"][0].as_array().unwrap().len(), 8, "element row schema stays compatible");
+    }
+
+    #[test]
+    fn trace_all_names_unkeyed_elements_and_reports_what_animated() {
+        fn view(wide: &bool, _: &mut Cx<bool>) -> El {
+            crate::el().key("root").size(100.0, 100.0)
+                .children([crate::el().size(if *wide { 80.0 } else { 20.0 }, 20.0)])
+        }
+        assert!(Args::parse_from(["--trace-all"].map(String::from).into()).trace_all);
+        let lines = |all: bool| {
+            let mut rt = Runtime::new(false, view, (100.0, 100.0), Env { scale: 1.0, system_dark: true });
+            rt.frame(0.0);
+            let path = std::env::temp_dir().join(format!("rune-trace-all-{all}-{}.jsonl", std::process::id()));
+            {
+                let mut trace = Trace::open(&path, rt.viewport, 60.0, 1.0);
+                trace.all = all;
+                trace.frame(&mut rt, 0.0, 0.0);
+                rt.state = true; rt.invalidate(); rt.frame(0.0); rt.frame(0.05);
+                trace.frame(&mut rt, 50.0, 0.0);
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            std::fs::remove_file(path).unwrap();
+            text.lines().map(|line| serde_json::from_str(line).unwrap()).collect::<Vec<Value>>()
+        };
+        let keyed = lines(false);
+        assert_eq!(keyed[1]["m"].as_array().unwrap().len(), 1, "only the keyed root without --trace-all");
+        let all = lines(true);
+        let metas = all[1]["m"].as_array().unwrap();
+        let root = metas.iter().find(|m| m["nm"] == "root").unwrap();
+        let child = metas.iter().find(|m| m["nm"] != "root").expect("unkeyed child traced");
+        assert_eq!(child["pv"], root["id"], "parent link to the root");
+        assert_eq!(all[2]["quality"]["why"], json!(["tracks"]));
+        let tk = all[2]["tk"].as_array().unwrap();
+        assert!(tk.iter().any(|t| t[0] == child["id"] && t[1] == "frame" && t[2] == 1), "{tk:?}");
     }
 }
 

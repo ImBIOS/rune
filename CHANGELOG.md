@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Traces say what animated.** Each `--trace` frame now carries `quality.why` (what kept the
+  frame animating: tracks, growth, scroll, reveal, loop, text-flight, …) and `tk`, the motion
+  tracks it sampled as `[element, property, active]`. New `--trace-all` traces unkeyed elements
+  too, named by path. `scripts/motion-audit/` records the example apps with it and flags snaps,
+  pops, neighbour jumps, overshoot, motion that never settles and animation nobody can see.
+  Things apps can notice: trace files are larger (the new fields, and every element with
+  `--trace-all`); element rows are unchanged.
+
 - **Syntax highlighting is shared, swappable and covers Python and Go.** The scanners behind
   Markdown's coloured fences moved to `rune_kit::syntax`, which builds without the `markdown`
   feature: `syntax::highlight(lang, code)` returns cached `(Range<usize>, Paint)` ranges and

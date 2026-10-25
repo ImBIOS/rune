@@ -1,0 +1,30 @@
+{
+ "events": [
+  {
+   "t": 0.3,
+   "type": "move",
+   "key": "t-ses_fx0003aaaaaaaaaaaaaaaaaa"
+  },
+  {
+   "t": 0.6,
+   "type": "tap",
+   "key": "t-ses_fx0003aaaaaaaaaaaaaaaaaa/close"
+  },
+  {
+   "t": 1.6,
+   "type": "move",
+   "key": "t-ses_fx0006aaaaaaaaaaaaaaaaaa"
+  },
+  {
+   "t": 1.9,
+   "type": "tap",
+   "key": "t-ses_fx0006aaaaaaaaaaaaaaaaaa/close"
+  },
+  {
+   "t": 2.9,
+   "type": "move",
+   "x": 700,
+   "y": 400
+  }
+ ]
+}

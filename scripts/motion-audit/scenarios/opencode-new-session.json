@@ -1,0 +1,36 @@
+{
+ "events": [
+  {
+   "t": 0.3,
+   "type": "tap",
+   "key": "new"
+  },
+  {
+   "t": 1.3,
+   "type": "tap",
+   "key": "prompt"
+  },
+  {
+   "t": 1.4,
+   "type": "type",
+   "text": "hello there",
+   "every": 0.03
+  },
+  {
+   "t": 2.2,
+   "type": "tap",
+   "key": "home"
+  },
+  {
+   "t": 3.2,
+   "type": "tap",
+   "key": "t-ses_fx0001aaaaaaaaaaaaaaaaaa"
+  },
+  {
+   "t": 4.4,
+   "type": "move",
+   "x": 700,
+   "y": 400
+  }
+ ]
+}

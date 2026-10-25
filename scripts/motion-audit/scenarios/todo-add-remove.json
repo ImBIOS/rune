@@ -1,0 +1,40 @@
+{
+ "events": [
+  {
+   "t": 0.3,
+   "type": "tap",
+   "key": "add"
+  },
+  {
+   "t": 0.9,
+   "type": "tap",
+   "key": "add"
+  },
+  {
+   "t": 1.5,
+   "type": "tap",
+   "key": "todo-1/#2"
+  },
+  {
+   "t": 2.1,
+   "type": "tap",
+   "key": "todo-2/check"
+  },
+  {
+   "t": 2.7,
+   "type": "tap",
+   "key": "todo-0/#2"
+  },
+  {
+   "t": 2.75,
+   "type": "tap",
+   "key": "add"
+  },
+  {
+   "t": 3.6,
+   "type": "move",
+   "x": 10,
+   "y": 10
+  }
+ ]
+}

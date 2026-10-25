@@ -139,6 +139,28 @@ const P_RADIAL: [Prop<Color>; 8] = [
     Prop::custom(86, PropClass::Color),
     Prop::custom(87, PropClass::Color),
 ];
+/// A property's name in traces.
+fn prop_name(id: u16) -> &'static str {
+    const BUILTIN: [&str; 12] = ["opacity", "frame", "offset", "scale", "rotation", "blur", "radius", "fill", "mask", "scroll", "presence", "travel"];
+    match id {
+        0..12 => BUILTIN[id as usize],
+        64 => "fill-color",
+        65 => "border-color",
+        66 => "text-color",
+        67 => "hover-color",
+        68 => "press-color",
+        69..=72 => "shadow-color",
+        73 => "hover",
+        74 => "press",
+        75 | 76 => "gradient-color",
+        77 => "outline-color",
+        78 => "border-bottom-color",
+        79 => "press-scale",
+        80..=87 => "radial-color",
+        _ => "custom",
+    }
+}
+
 /// Seconds a changed `El::scale` holds still before its text rasterizes at that size.
 const STATIC_SCALE_SETTLE: f64 = 0.1;
 /// How far (points, per axis) a click may travel and still pair into a double click.
@@ -411,6 +433,28 @@ enum Action {
     Paste(zeroize::Zeroizing<String>, Option<Option<String>>),
     Focus(String, f32, f32),
     Blur,
+}
+
+/// What kept a frame animating, as bits in traces (`quality.why`).
+pub(crate) struct AnimSource;
+
+impl AnimSource {
+    pub const TRACKS: u16 = 1;
+    pub const GROWTH: u16 = 2;
+    pub const SCROLL: u16 = 4;
+    pub const REVEAL: u16 = 8;
+    pub const LOOP: u16 = 16;
+    pub const SCALE_SETTLE: u16 = 32;
+    pub const VIDEO: u16 = 64;
+    pub const TEXT_FLIGHT: u16 = 128;
+    pub const LIVE: u16 = 256;
+    pub const VIRTUAL_FILL: u16 = 512;
+    pub const NAMES: [&'static str; 10] =
+        ["tracks", "growth", "scroll", "reveal", "loop", "scale-settle", "video", "text-flight", "live", "virtual-fill"];
+
+    pub fn names(bits: u16) -> Vec<&'static str> {
+        Self::NAMES.iter().enumerate().filter(|(i, _)| bits & (1 << i) != 0).map(|(_, n)| *n).collect()
+    }
 }
 
 /// What tools see of one element.
@@ -815,6 +859,8 @@ pub struct Runtime<S: 'static> {
     /// What `update` asked of the next commit.
     pending: Tx,
     pub animating: bool,
+    /// Why the last frame was animating, as [`AnimSource`] bits, for traces.
+    pub(crate) anim_sources: u16,
     /// This frame's commit landed every track (`Tx::settle`): a deliberate cut.
     pub settled: bool,
     /// Events since the last frame, for traces.
@@ -1065,6 +1111,7 @@ impl<S: 'static> Runtime<S> {
             popup_open: false,
             pending: Tx::default(),
             animating: false,
+            anim_sources: 0,
             settled: false,
             events: Vec::new(),
             trace_channels: None,
@@ -1833,6 +1880,8 @@ impl<S: 'static> Runtime<S> {
         let animating = self.step_motion(dt) || live_animating;
         self.stats.shaped = self.text.shaped - shaped0;
         let filling = self.virtual_filling();
+        if live_animating { self.anim_sources |= AnimSource::LIVE; }
+        if filling { self.anim_sources |= AnimSource::VIRTUAL_FILL; }
         self.animating = (animating && self.time_scale > 0.0) || filling;
         #[cfg(all(feature = "dev", debug_assertions))]
         if self.dev_clock.as_ref().is_some_and(|clock| clock.paused) { self.animating = false; }
@@ -1869,6 +1918,7 @@ impl<S: 'static> Runtime<S> {
         }
         let out = self.scene.frame();
         let mut animating = out.animating;
+        let mut sources = if out.animating { AnimSource::TRACKS } else { 0 };
         if !out.exited.is_empty() {
             self.prune_exited();
         }
@@ -1881,20 +1931,22 @@ impl<S: 'static> Runtime<S> {
                 || matches!(scene.phase(*id), Some(PresencePhase::Exiting { .. })));
             if self.flying.len() != before { self.update_layer_paint_order(); }
         }
-        animating |= self.step_growth(step as f32);
-        animating |= self.step_scroll(step as f32);
+        let mut source = |on: bool, bit: u16| { if on { sources |= bit; } on };
+        animating |= source(self.step_growth(step as f32), AnimSource::GROWTH);
+        animating |= source(self.step_scroll(step as f32), AnimSource::SCROLL);
         self.report_at_bottom();
         self.report_layout();
-        animating |= self.reveals_active();
+        animating |= source(self.reveals_active(), AnimSource::REVEAL);
         self.build();
         self.images.end_frame();
-        animating |= self.loops_active;
-        animating |= self.static_scale_settling;
-        animating |= self.videos_active;
-        animating |= self.draw_text_flights();
+        animating |= source(self.loops_active, AnimSource::LOOP);
+        animating |= source(self.static_scale_settling, AnimSource::SCALE_SETTLE);
+        animating |= source(self.videos_active, AnimSource::VIDEO);
+        animating |= source(self.draw_text_flights(), AnimSource::TEXT_FLIGHT);
         if self.track_marks {
             self.marks.resize(self.instances.len(), 0);
         }
+        self.anim_sources = sources;
         animating
     }
 
@@ -3990,6 +4042,19 @@ impl<S: 'static> Runtime<S> {
     /// A press on an element is held (the hand drives whatever follows it).
     pub fn pressing(&self) -> bool {
         self.capture.is_some()
+    }
+
+    /// Tracks the last tick sampled, by element path and property name: what spent this
+    /// frame animating. Tracks of nodes no longer in the tree report their node id.
+    pub(crate) fn touched_tracks(&self) -> Vec<(String, &'static str, bool)> {
+        let store = self.scene.store();
+        let mut out: Vec<_> = store.touched_tracks().map(|(track, node, p)| {
+            let path = self.node_index.get(&node).map_or_else(|| format!("node:{}", node.0), |&i| self.nodes[i].path.clone());
+            (path, prop_name(p.0), store.is_active(track))
+        }).collect();
+        out.sort();
+        out.dedup();
+        out
     }
     pub fn pointer(&self) -> Option<(f32, f32)> {
         self.pointer

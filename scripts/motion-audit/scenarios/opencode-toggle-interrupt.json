@@ -1,0 +1,25 @@
+{
+ "events": [
+  {
+   "t": 0.3,
+   "type": "tap",
+   "key": "sidebar-toggle"
+  },
+  {
+   "t": 0.45,
+   "type": "tap",
+   "key": "sidebar-toggle"
+  },
+  {
+   "t": 0.6,
+   "type": "tap",
+   "key": "sidebar-toggle"
+  },
+  {
+   "t": 1.8,
+   "type": "move",
+   "x": 700,
+   "y": 400
+  }
+ ]
+}
