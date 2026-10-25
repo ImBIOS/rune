@@ -1094,8 +1094,15 @@ impl<T: 'static> Overlay<T> {
         if woken { self.rt.invalidate(); }
         if queued || woken { self.clipboard.flush(&mut self.rt); }
         if !woken && !updated {
-            if queued { self.open_popup(); }
-            return;
+            if !queued { return; }
+            // A pop-up they asked for may be answered at once, running its callback: a change.
+            let stale = self.rt.needs_commit();
+            self.open_popup();
+            if stale || !self.rt.needs_commit() {
+                self.rt.schedule_pending_wakes();
+                return;
+            }
+            self.clipboard.flush(&mut self.rt);
         }
         self.dirty = true; // Queued updates already invalidate the cache before polling.
         if self.frameless() {
@@ -2706,6 +2713,17 @@ mod tests {
         handle.update_if(|n, _| { *n = 3; true });
         apply(&mut overlay);
         assert!(overlay.dirty, "a change in the batch draws");
+        // A hidden overlay answers a pop-up menu at once; its callback's change draws.
+        overlay.visible = false;
+        overlay.dirty = false;
+        overlay.rt.frame(1.0);
+        handle.update_if(|_, tx| {
+            tx.popup_menu(crate::PopupMenu::new().item(crate::PopupItem::new("a", "A")), (0.0, 0.0), |n: &mut u32, _, _| *n = 7);
+            false
+        });
+        apply(&mut overlay);
+        assert_eq!(overlay.rt.state, 7);
+        assert!(overlay.dirty);
     }
 
     /// A prewarmed overlay keeps its frame ready while hidden, but commits state that changes

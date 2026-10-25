@@ -1224,7 +1224,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// A live-edit patch arrived that the next frame hasn't rebuilt the view with yet.
-    fn patch_pending(&self) -> bool {
+    pub(crate) fn patch_pending(&self) -> bool {
         #[cfg(feature = "hot")]
         return self.hot.as_ref().is_some_and(crate::hot::Session::pending);
         #[cfg(not(feature = "hot"))]
@@ -1270,20 +1270,16 @@ impl<S: 'static> Runtime<S> {
     /// `update` for a change that may be no change: `f` returns whether it changed state the
     /// view reads, as `poll` does. On false the view doesn't re-run and no frame is asked for,
     /// while what `f` asked of its `Tx` still happens: clipboard, close and quit, menus and
-    /// window frames reach the shell, a `wake_after` is scheduled from now, and a scroll or text
-    /// flight still takes a frame. Returns whether the last frame went out of date: `f`
-    /// reported a change or asked for work only a frame does.
+    /// window frames reach the shell, a scroll or text flight still takes a frame, and a
+    /// `wake_after` waits, like `update`'s, for the next frame or hidden poll to schedule it
+    /// (a host that runs neither calls `schedule_pending_wakes`). Returns whether the last frame
+    /// went out of date: `f` reported a change or asked for work only a frame does.
     ///
     /// Returning false after changing state the view reads leaves the screen stale until the
     /// next change.
     pub fn update_if(&mut self, f: impl FnOnce(&mut S, &mut Tx) -> bool) -> bool {
         let mut one = self.transaction();
         let changed = f(&mut self.state, &mut one);
-        if !changed {
-            // No frame may come to schedule it.
-            if let Some(clock) = self.wall_clock() { self.clock = clock; }
-            self.schedule_wakes(one.wakes.drain(..));
-        }
         let stale = changed || one.frame_work() || one.window_frame.is_some();
         self.latch_requests(&mut one);
         merge(&mut self.pending, one);
@@ -1368,10 +1364,22 @@ impl<S: 'static> Runtime<S> {
         wall_start.map(|t0| t0.elapsed().as_secs_f64())
     }
 
+    /// Schedules the `wake_after`s that updates left for a frame, counting from now, when no
+    /// frame or hidden poll comes to. The clock stays at the last poll, so the frame-interval
+    /// floor on timers (`window::timer_deadline`) still counts from that poll.
+    pub(crate) fn schedule_pending_wakes(&mut self) {
+        let wakes = std::mem::take(&mut self.pending.wakes);
+        self.schedule_wakes_from(self.wall_clock().unwrap_or(self.clock), wakes);
+    }
+
     /// Sorted, de-duplicated deadlines on the logical clock.
     fn schedule_wakes(&mut self, wakes: impl IntoIterator<Item = std::time::Duration>) {
+        self.schedule_wakes_from(self.clock, wakes);
+    }
+
+    fn schedule_wakes_from(&mut self, now: f64, wakes: impl IntoIterator<Item = std::time::Duration>) {
         for delay in wakes {
-            let deadline = self.clock + delay.as_secs_f64();
+            let deadline = now + delay.as_secs_f64();
             if let Err(index) = self.wake_deadlines.binary_search_by(|t| t.total_cmp(&deadline)) {
                 self.wake_deadlines.insert(index, deadline);
             }

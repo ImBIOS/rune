@@ -750,9 +750,27 @@ mod tests {
         assert!(!rt.update_if(|_, tx| { tx.copy("hello"); tx.wake_after(std::time::Duration::from_millis(500)); false }));
         assert!(!rt.stale());
         assert_eq!(rt.copy_request.as_deref(), Some("hello"));
-        assert_eq!(rt.wake_deadline(), Some(rt.clock + 0.5), "scheduled now: no frame may come");
+        assert_eq!(rt.wake_deadline(), None, "left for the next frame, as `update` leaves it");
+        rt.schedule_pending_wakes();
+        assert_eq!(rt.wake_deadline(), Some(rt.clock + 0.5), "or scheduled by a host that runs none");
         assert!(!rt.update_if(|_, tx| { tx.quit(); false }));
         assert_eq!(rt.shell_request, Some(Shell::Quit));
+    }
+
+    /// A `wake_after(ZERO)` from an update that changed nothing, in a batch that still draws,
+    /// asks for the frame after, as `update`'s does: the frame doesn't spend it before polling.
+    #[test]
+    fn an_unchanging_updates_next_frame_timer_survives_a_frame() {
+        let run = |changed: bool| {
+            let mut rt = Runtime::new(0u32, counted, (100.0, 100.0), Env::default());
+            rt.frame(0.0);
+            rt.update_if(move |_, tx| { tx.wake_after(std::time::Duration::ZERO); changed });
+            rt.update(|n, _| *n += 1);
+            rt.frame(1.0);
+            rt.wake_deadline()
+        };
+        assert!(run(true).is_some());
+        assert_eq!(run(false), run(true));
     }
 
     #[test]

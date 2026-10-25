@@ -748,7 +748,7 @@ impl<S: 'static> Host<S> {
         let mut size = args.size.unwrap_or(spec.size);
         // The window reports the system appearance and scale when it opens.
         let env = Env::new(args.theme.as_deref() != Some("light"), 1.0);
-        let mut rt = runtime_for(&spec, state, size, env, waker.clone());
+        let mut rt = runtime_for(&spec, state, size, env, setup_waker(&shared));
         if fit_height {
             spec.min_size = options.fit_min_size(spec.min_size);
             // Opens at the content's height; the first frame corrects any difference its
@@ -1098,6 +1098,13 @@ mod occluded_surface {
     }
 }
 
+/// `setup`'s waker: `AppHandle::wake`, so a drain that also holds updates that changed nothing
+/// still polls and redraws for it.
+fn setup_waker<S: 'static>(shared: &Arc<crate::app::Shared<S>>) -> Waker {
+    let handle = crate::AppHandle { shared: shared.clone() };
+    Arc::new(move || handle.wake())
+}
+
 /// Whether a drain of other threads' requests asks the window for a frame. A hidden launcher
 /// renders a change into its cached frame (paced); a shown launcher redraws for a change or
 /// as it shows; any other shown window redraws, unless only updates that changed nothing
@@ -1120,7 +1127,7 @@ fn updates_that_change_nothing_ask_no_window_for_a_frame() {
         let mut requests = shared.take();
         let mut updated = false;
         for f in std::mem::take(&mut requests.updates) { updated |= rt.update_if(f); }
-        let quiet = !updated && requests.only_updates() && !rt.needs_commit();
+        let quiet = !updated && requests.only_updates() && !rt.patch_pending() && !rt.needs_commit();
         for (launcher, visible) in [(false, true), (true, true), (true, false), (false, false)] {
             assert!(!drain_frame(launcher, visible, visible, updated, quiet), "launcher {launcher} visible {visible}");
         }
@@ -1128,7 +1135,34 @@ fn updates_that_change_nothing_ask_no_window_for_a_frame() {
     handle.update_if(|_, _| false);
     handle.wake();
     assert!(!shared.take().only_updates(), "`wake` still runs a shown window's poll");
+    handle.update_if(|_, _| false);
+    setup_waker(&shared)();
+    assert!(!shared.take().only_updates(), "so does `setup`'s waker");
     assert!(drain_frame(false, true, true, false, false) && drain_frame(true, false, false, true, false));
+}
+
+/// A stream of updates that change nothing, faster than a frame, on a host that neither polls
+/// nor draws for them, doesn't push back a due timer, and one's own `wake_after(ZERO)` after
+/// idle is due at once.
+#[test]
+fn updates_that_change_nothing_do_not_delay_due_timers() {
+    let mut rt = Runtime::new(0u32, |_, _| crate::el(), (10.0, 10.0), crate::Env::default());
+    rt.wall_start = Some(Instant::now());
+    rt.frame(0.0);
+    // A second idle since that frame.
+    rt.wall_start = rt.wall_start.map(|t| t - Duration::from_secs(1));
+    let polled = rt.polled_at();
+    rt.update_if(|_, tx| { tx.wake_after(Duration::ZERO); false });
+    rt.schedule_pending_wakes();
+    let due = timer_deadline(&rt).expect("armed");
+    assert!(due <= Instant::now(), "due now, not a frame interval from now");
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(2));
+        rt.update_if(|_, _| false);
+        rt.schedule_pending_wakes();
+        assert_eq!(timer_deadline(&rt), Some(due));
+    }
+    assert_eq!(rt.polled_at(), polled, "the clock stays at the last poll");
 }
 
 /// `wake_after(Duration::ZERO)` from the poll: a running display link takes it as the next
@@ -1710,6 +1744,7 @@ impl<S: 'static> Host<S> {
     /// hidden window first, so a reveal in the same turn sees what `poll` changed.
     fn drain(&mut self, event_loop: &ActiveEventLoop, wake: bool) {
         let shown = self.win.as_ref().is_some_and(|w| w.visible);
+        let stale_before = self.rt.needs_commit();
         let clipboard = self.clipboard.receive(&mut self.rt);
         let answered = self.popup.answer(&mut self.rt);
         self.shortcuts.drain();
@@ -1723,8 +1758,9 @@ impl<S: 'static> Host<S> {
             self.menus.drain();
         }
         let changed = clipboard || answered || updated || self.rt.drag_ends_pending();
-        // Only updates that changed nothing (`AppHandle::update_if`) woke it.
-        let quiet = had_updates && !changed && requests.only_updates() && !self.rt.needs_commit();
+        // Only updates that changed nothing (`AppHandle::update_if`) woke it: no poll, no frame.
+        let quiet = had_updates && !changed && requests.only_updates() && !self.rt.patch_pending()
+            && (stale_before || !self.rt.needs_commit());
         self.clipboard.flush(&mut self.rt);
         if requests.quit {
             // A tracking menu holds the event loop until it ends.
@@ -1736,12 +1772,16 @@ impl<S: 'static> Host<S> {
         if let Some(visible) = requests.dock {
             crate::macos::set_dock_icon(visible);
         }
-        if wake { self.poll_hidden(event_loop); }
+        let polled = wake && !quiet && self.poll_hidden(event_loop);
         if let Some(position) = requests.position { self.set_position(event_loop, position); }
         if let Some(place) = requests.place { self.place(event_loop, place); }
         if let Some(request) = requests.window { self.window_request(event_loop, request); }
         if requests.focus { self.focus(event_loop); }
         self.shell(event_loop);
+        // A pop-up a quiet update asked for may have been answered at once, running its callback.
+        let answered = quiet && !stale_before && self.rt.needs_commit();
+        if quiet { self.clipboard.flush(&mut self.rt); }
+        let (changed, quiet) = (changed || answered, quiet && !answered);
         #[cfg(all(feature = "dev", debug_assertions))]
         if self.rt.dev.is_some() && self.win.as_ref().is_none_or(|w| !w.visible || w.occluded || w.window.is_minimized().unwrap_or(false)) {
             // A hidden/windowless app still services its dev channel without a GPU or redraw.
@@ -1755,40 +1795,47 @@ impl<S: 'static> Host<S> {
         // paced (`refresh_hidden`). A covered or minimised one runs them without asking for a
         // frame it wouldn't draw.
         let launcher = self.launcher();
-        let Some(w) = self.win.as_ref().filter(|w| drain_frame(launcher, w.visible, shown, changed, quiet)) else { return };
-        if launcher && !w.visible {
-            self.refresh_hidden();
-        } else if (!launcher && w.occluded) || w.window.is_minimized().unwrap_or(false) {
-            self.covered_frame();
-            self.shell(event_loop);
-        } else {
-            w.window.request_redraw();
-        }
+        let framed = match self.win.as_ref().filter(|w| drain_frame(launcher, w.visible, shown, changed, quiet)) {
+            None => false,
+            Some(w) if launcher && !w.visible => self.refresh_hidden(),
+            Some(w) if (!launcher && w.occluded) || w.window.is_minimized().unwrap_or(false) => {
+                self.covered_frame();
+                self.shell(event_loop);
+                true
+            }
+            Some(w) => { w.window.request_redraw(); true }
+        };
+        // Neither a poll nor a frame comes to schedule the updates' `wake_after`s.
+        if !polled && !framed { self.rt.schedule_pending_wakes(); }
     }
 
     /// A hidden, keep-running or windowless window still reads its inbox when woken: `poll` runs
     /// with no drawable, present or animation, and its changes render when the window is next
     /// shown. A hidden launcher renders poll's changes hidden, paced, keeping its cached frame
-    /// fresh.
-    fn poll_hidden(&mut self, event_loop: &ActiveEventLoop) {
-        if event_loop.exiting() || self.win.as_ref().is_some_and(|w| w.visible) { return; }
+    /// fresh. Returns whether it polled.
+    fn poll_hidden(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        if event_loop.exiting() || self.win.as_ref().is_some_and(|w| w.visible) { return false; }
         // Its hidden frames already poll.
         #[cfg(all(feature = "dev", debug_assertions))]
-        if self.rt.dev.is_some() { return; }
+        if self.rt.dev.is_some() { return false; }
         let changed = self.rt.poll_hidden();
         self.clipboard.flush(&mut self.rt);
         self.shell(event_loop);
         if changed && self.launcher() { self.refresh_hidden(); }
+        true
     }
 
     /// A hidden launcher renders what changed into its cached frame: at once after a quiet
     /// spell, then at most every `HIDDEN_REFRESH` (`HiddenPace`). A show of state newer than
     /// that frame renders it hidden first (`reveal_launcher`), as for an update in the same
-    /// turn. A frame being prepared, or one a reveal waits on, renders at once.
-    fn refresh_hidden(&mut self) {
+    /// turn. A frame being prepared, or one a reveal waits on, renders at once. Returns whether
+    /// it asked for a frame.
+    fn refresh_hidden(&mut self) -> bool {
         let now_due = self.hidden_launcher_renders();
-        let Some(w) = &mut self.win else { return };
-        if now_due || w.first_frame.deadline.is_some() || w.hidden_pace.changed(Instant::now()) { w.window.request_redraw(); }
+        let Some(w) = &mut self.win else { return false };
+        let render = now_due || w.first_frame.deadline.is_some() || w.hidden_pace.changed(Instant::now());
+        if render { w.window.request_redraw(); }
+        render
     }
 
     /// What a hidden launcher's frame must render as it commits: queued input, drag ends and
