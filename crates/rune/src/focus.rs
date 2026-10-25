@@ -274,7 +274,11 @@ impl<S: 'static> Runtime<S> {
         let Some(i) = self.active_modal() else { return };
         let path = self.nodes[i].path.clone();
         if !self.modal_stack.iter().any(|(p, _)| p == &path) {
-            self.modal_stack.push((path.clone(), self.focused.clone()));
+            // A field in the modal that asked for focus took it earlier in this commit; closing
+            // returns to what had focus before.
+            let inside = self.focused_index().is_some_and(|j| self.allowed(j));
+            let restore = if inside { self.focus_before_commit.clone() } else { self.focused.clone() };
+            self.modal_stack.push((path.clone(), restore));
             // Cancel any gesture captured before the modal opened.
             self.capture = None;
             self.secondary_capture = None;
@@ -491,6 +495,34 @@ mod tests {
         rt.pointer_down(5.0, 280.0); rt.pointer_up(5.0, 280.0); rt.frame(0.0);
         assert!(!rt.state.open); assert_eq!(focused(&rt), "opener");
         assert!(!rt.elements().iter().any(|e| e.focus_visible));
+    }
+
+    #[test]
+    fn a_modal_whose_field_opens_focused_returns_focus_to_the_opener() {
+        use crate::{text_input, TextEdit, TextStyle};
+        #[derive(Default)]
+        struct Form { open: bool, field: TextEdit }
+        fn view(s: &Form, _: &mut Cx<Form>) -> El {
+            col().key("root").size(300.0, 300.0)
+                .child(button("opener").on_press(|s: &mut Form| { s.open = true; s.field.focused = true; }))
+                .children(s.open.then(|| col().key("sheet").absolute(100.0, 0.0).size(150.0, 100.0)
+                    .modal(true, |s: &mut Form| s.open = false)
+                    .child(text_input(&s.field, TextStyle::new(14.0, 400.0)).key("field").size(120.0, 30.0)
+                        .on_edit(|s: &mut Form| &mut s.field))))
+        }
+        for escape in [false, true] {
+            let mut rt = Runtime::new(Form::default(), view, (300.0, 300.0), Env::new(true, 1.0));
+            rt.frame(0.0);
+            let (x, y) = rt.find("opener").unwrap();
+            rt.pointer_down(x, y); rt.pointer_up(x, y); rt.frame(0.0);
+            assert!(rt.state.open);
+            let now = |rt: &Runtime<Form>| rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key);
+            assert_eq!(now(&rt).as_deref(), Some("field"), "the field's own focus request wins inside the modal");
+            if escape { press(&mut rt, Key::Escape) } else { rt.update(|s, _| s.open = false); rt.frame(0.0); }
+            assert!(!rt.state.open);
+            assert_eq!(now(&rt).as_deref(), Some("opener"), "closing (escape: {escape}) returns focus to the opener");
+            if escape { assert!(!rt.state.field.focused, "Escape blurs the field before it goes"); }
+        }
     }
 
     #[derive(Default)]

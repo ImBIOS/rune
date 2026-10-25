@@ -665,6 +665,9 @@ pub struct Runtime<S: 'static> {
     /// Access off). Native hosts sample the system setting; headless runtimes default on.
     full_keyboard_access: bool,
     modal_stack: Vec<(String, Option<String>)>,
+    /// Focus when the running commit began, before a new view's focus request applied: what a
+    /// modal that opens in this commit returns focus to.
+    focus_before_commit: Option<String>,
     modal_index: Option<usize>,
     modal_members: Vec<bool>,
     loops: HashMap<NodeId, rune_motion::LoopTrack>,
@@ -933,6 +936,7 @@ impl<S: 'static> Runtime<S> {
             modifier_keys: Default::default(),
             full_keyboard_access: true,
             modal_stack: Vec::new(),
+            focus_before_commit: None,
             modal_index: None,
             modal_members: Vec::new(),
             loops: HashMap::new(),
@@ -2735,6 +2739,7 @@ impl<S: 'static> Runtime<S> {
         COMMITS.set(COMMITS.get() + 1);
         self.memo_since = self.memo.next_pass();
         let mut measured = self.measure(tx);
+        self.focus_before_commit = self.focused.clone();
         if self.sync_requested_focus(&mut measured.nodes) {
             self.layout = measured.layout;
             measured = self.measure(tx);

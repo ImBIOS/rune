@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A modal whose field opens focused returns focus to what had it.** Opening a `.modal(..)`
+  in the same update that set its `text_input`'s `edit.focused` recorded the field as the place
+  focus returns to, so closing the modal left nothing focused. It now records what had focus
+  before that update, such as the button that opened it.
 - **`rune` re-exports the motion types its transition and animation API takes.** `Vec2` (for
   `Transition::scale_anchor` and `Edge::direction`), `Effect`, `Reveal`, `CubicBezier`,
   `StepPosition`, `Decay`, `Blend` and `Velocity` are now nameable as `rune::…`, so an app
