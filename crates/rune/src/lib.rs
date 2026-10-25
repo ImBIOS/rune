@@ -124,6 +124,8 @@ mod present_time;
 mod secure_input;
 pub mod clipboard;
 mod preferences;
+mod accent;
+pub use accent::{SystemAccent, system_accent};
 pub use clipboard::{ClipboardWrite, SecretCopy, SecretState};
 pub mod drag_out;
 pub use drag_out::{DragImage, DragItem, DragOperation, DragOutcome};

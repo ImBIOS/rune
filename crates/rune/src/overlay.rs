@@ -347,6 +347,8 @@ impl<T: 'static> Overlay<T> {
         let mut rt = Runtime::with_text(state, spec.view, spec.size, Env::default(), text);
         rt.set_srgb_blend(srgb_blend);
         rt.set_system_reduced_motion(crate::preferences::reduced_motion());
+        crate::accent::watch();
+        rt.set_system_accent(crate::system_accent());
         rt.wall_start = Some(Instant::now());
         rt.native_overlay = true;
         rt.set_os_drag(crate::drag_out::SUPPORTED);
@@ -1712,7 +1714,11 @@ impl<T: 'static> AnyHost for Overlay<T> {
                     self.rescale(&gpu, scale_factor as f32);
                 }
             }
-            WindowEvent::RedrawRequested | WindowEvent::Resized(_) => self.dirty = true,
+            WindowEvent::RedrawRequested | WindowEvent::Resized(_) => {
+                // A new accent asks every window to redraw (`accent::watch`).
+                self.rt.set_system_accent(crate::system_accent());
+                self.dirty = true;
+            }
             WindowEvent::CursorMoved { position, .. } if self.options.input.resolved(self.interactive) != OverlayInput::None => {
                 let scale = self.live.as_ref().map_or(1.0, |l| l.scale);
                 self.dirty |= self.rt.observe_pointer(position.x as f32 / scale, position.y as f32 / scale);

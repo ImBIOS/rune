@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`cx.accent()` and `cx.focus_color()` follow the user's accent colour.** `rune::system_accent()`
+  returns a `SystemAccent`: on macOS the accent picked in System Settings
+  (`NSColor.controlAccentColor` and `keyboardFocusIndicatorColor`), elsewhere and headless
+  macOS's default blue with focus rings at 50%. Views read it for the window's appearance with
+  `Cx::accent` and `Cx::focus_color`. When the user picks another accent every window and
+  overlay re-runs its view, memos included. Tests set one with `Runtime::set_system_accent`. A
+  rune-kit theme can follow it with
+  `Kit::from_palette_focus(seed, PaletteFocus::Custom(cx.focus_color()))`.
 - **`Tx::focused()` tells `on_key` whether a control has focus.** A window's `on_key` hears a
   key first while nothing has focus and again after a focused control passes it on, and
   couldn't tell the two apart. In key handlers `tx.focused()` is now the focused element's key

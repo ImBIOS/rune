@@ -777,6 +777,8 @@ impl<S: 'static> Host<S> {
         rt.set_system_reduced_motion(crate::preferences::reduced_motion());
         rt.set_full_keyboard_access(crate::preferences::full_keyboard_access());
         rt.set_tab_visits_controls(tab_visits_controls);
+        crate::accent::watch();
+        rt.set_system_accent(crate::system_accent());
         rt.trace_channels = args.trace.as_ref().map(|_| Default::default());
         rt.set_live_waker(Arc::new(move || { let _ = live_proxy.send_event(WakeEvent::Live(slot)); }));
         rt.set_live_visible(false);
@@ -2794,6 +2796,8 @@ impl<S: 'static> Host<S> {
                 return;
             }
             WindowEvent::RedrawRequested => {
+                // A new accent asks every window to redraw (`accent::watch`).
+                self.rt.set_system_accent(crate::system_accent());
                 #[cfg(target_os = "macos")]
                 if let Some(l) = self.win.as_ref().filter(|l| l.full_screen.take()) {
                     self.rt.set_titlebar_inset(place_chrome(&l.window, self.chrome));

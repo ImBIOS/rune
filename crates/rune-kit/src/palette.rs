@@ -28,6 +28,8 @@ pub enum PaletteFocus {
     Accent,
     /// The seed's foreground (text) colour.
     Ink,
+    /// This colour. `Custom(cx.focus_color())` follows the user's system accent, as AppKit's
+    /// rings do.
     Custom(Color),
 }
 

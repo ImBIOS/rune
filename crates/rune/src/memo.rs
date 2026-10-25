@@ -19,9 +19,10 @@
 //!   rows are inserted or removed above it while the memo keeps the old handler.
 //! - **Live values and pixels** stay bound: a `Live`, `LiveText` or `Pixels` is a shared handle,
 //!   so a reused subtree shows its newest value or image without a rebuild.
-//! - **Environment.** The window's dark mode, scale and reduced-motion preference are part of
-//!   every version, so changing any of them builds again. App state the closure reads (a
-//!   theme, a locale, a selection) must be part of `version`. For a text field that's the
+//! - **Environment.** The window's dark mode, scale, reduced-motion preference and system accent
+//!   (`Cx::accent`, `Cx::focus_color`) are part of every version, so changing any of them builds
+//!   again. App state the closure reads (a theme, a locale, a selection) must be part of
+//!   `version`. For a text field that's the
 //!   `TextEdit` itself, which hashes its text, selection, composition and focus.
 //! - **`Cx` reads.** `Cx::layout` and `Cx::caret` called inside the closure are recorded with
 //!   what they returned. A reuse counts them as read again, so the view still re-runs when they
@@ -199,12 +200,14 @@ thread_local! {
 pub(crate) fn enter(
     mut cache: MemoCache,
     env: crate::Env,
+    accent: crate::SystemAccent,
     reduced_motion: bool,
     caret: Option<(String, [f32; 4])>,
     layout: HashMap<String, Option<[f32; 4]>>,
 ) -> Guard {
     cache.pass += 1;
-    let env = hash_of(&(env.system_dark, env.scale.to_bits(), reduced_motion));
+    let accent = [accent.accent(env.system_dark), accent.focus(env.system_dark)].map(|c| [c.r, c.g, c.b, c.a].map(f32::to_bits));
+    let env = hash_of(&(env.system_dark, env.scale.to_bits(), reduced_motion, accent));
     let scope = Scope {
         cache,
         env,
@@ -446,7 +449,7 @@ mod tests {
     #[test]
     fn a_view_panicking_inside_a_memo_leaves_no_scope_for_the_next_build() {
         let panicked = std::panic::catch_unwind(|| {
-            let _scope = enter(MemoCache::default(), Env::new(true, 1.0), false, None, HashMap::new());
+            let _scope = enter(MemoCache::default(), Env::new(true, 1.0), crate::SystemAccent::DEFAULT, false, None, HashMap::new());
             memo("outer", 0, || memo("inner", 0, || panic!("view panicked")))
         });
         assert!(panicked.is_err());

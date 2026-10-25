@@ -176,6 +176,7 @@ pub fn commit_generation() -> u64 {
 pub struct Cx<S> {
     env: Env,
     titlebar_inset: f32,
+    system_accent: crate::SystemAccent,
     system_reduced_motion: bool,
     reduced_motion: bool,
     time_scale: f32,
@@ -190,8 +191,8 @@ impl<S> Cx<S> {
     #[cfg(feature = "hot")]
     pub(crate) fn retype<T>(&self) -> Cx<T> {
         Cx {
-            env: self.env, titlebar_inset: self.titlebar_inset, system_reduced_motion: self.system_reduced_motion,
-            reduced_motion: self.reduced_motion, time_scale: self.time_scale,
+            env: self.env, titlebar_inset: self.titlebar_inset, system_accent: self.system_accent,
+            system_reduced_motion: self.system_reduced_motion, reduced_motion: self.reduced_motion, time_scale: self.time_scale,
             caret: self.caret.clone(), caret_read: self.caret_read.clone(),
             layout: self.layout.clone(), layout_reads: self.layout_reads.clone(), _s: PhantomData,
         }
@@ -219,6 +220,18 @@ impl<S> Cx<S> {
     /// it needs it in its version.
     pub fn titlebar_inset(&self) -> f32 {
         self.titlebar_inset
+    }
+    /// The user's accent colour (System Settings › Appearance on macOS) for this window's
+    /// appearance, [`SystemAccent::DEFAULT`](crate::SystemAccent::DEFAULT)'s blue elsewhere and
+    /// headless. The view re-runs, memos included, when the user picks another accent.
+    pub fn accent(&self) -> Color {
+        self.system_accent.accent(self.env.system_dark)
+    }
+    /// The keyboard focus ring colour for this window's appearance: AppKit's
+    /// `keyboardFocusIndicatorColor`, the accent at 50% elsewhere. Elements with no ring of
+    /// their own draw their default focus ring in it.
+    pub fn focus_color(&self) -> Color {
+        self.system_accent.focus(self.env.system_dark)
     }
     /// The host's OS accessibility preference, independent of this commit's override.
     pub fn system_reduced_motion(&self) -> bool {
@@ -571,6 +584,7 @@ pub struct Runtime<S: 'static> {
     pub reduced_motion: bool,
     system_reduced_motion: bool,
     titlebar_inset: f32,
+    system_accent: crate::SystemAccent,
     pub time_scale: f32,
     /// Called at the start of every frame with the clock; return true when state changed (new data).
     pub poll: Option<fn(&mut S, f64, &mut Tx) -> bool>,
@@ -880,6 +894,7 @@ impl<S: 'static> Runtime<S> {
             reduced_motion: false,
             system_reduced_motion: false,
             titlebar_inset: 0.0,
+            system_accent: crate::SystemAccent::DEFAULT,
             time_scale: 1.0,
             poll: None,
             clock: 0.0,
@@ -1218,6 +1233,17 @@ impl<S: 'static> Runtime<S> {
     pub fn set_titlebar_inset(&mut self, points: f32) {
         if points != self.titlebar_inset {
             self.titlebar_inset = points;
+            self.dirty = true;
+        }
+    }
+
+    /// What [`Cx::accent`] and [`Cx::focus_color`] report, and the colour of default focus
+    /// rings. Native windows set it from [`system_accent`](crate::system_accent) and again when
+    /// the user picks another accent; a change re-runs the view. Headless runs keep
+    /// [`SystemAccent::DEFAULT`](crate::SystemAccent::DEFAULT) unless a test sets one.
+    pub fn set_system_accent(&mut self, accent: crate::SystemAccent) {
+        if accent != self.system_accent {
+            self.system_accent = accent;
             self.dirty = true;
         }
     }
@@ -2371,6 +2397,7 @@ struct Measurement<'a, S> {
     fit_height: bool,
     system_reduced_motion: bool,
     titlebar_inset: f32,
+    system_accent: crate::SystemAccent,
     reduced_motion: bool,
     time_scale: f32,
     commits: u64,
@@ -2624,6 +2651,7 @@ impl<S: 'static> Measurement<'_, S> {
         let fresh_cx = |this: &Self| Cx::<S> {
             env: this.env,
             titlebar_inset: this.titlebar_inset,
+            system_accent: this.system_accent,
             system_reduced_motion: this.system_reduced_motion,
             reduced_motion: this.system_reduced_motion,
             time_scale: this.time_scale,
@@ -2636,7 +2664,7 @@ impl<S: 'static> Measurement<'_, S> {
         let mut cx = fresh_cx(self);
         #[cfg(feature = "hot")]
         let emptied = self.memo.emptied();
-        let memo = crate::memo::enter(std::mem::take(self.memo), self.env, self.system_reduced_motion, cx.caret.clone(), cx.layout.clone());
+        let memo = crate::memo::enter(std::mem::take(self.memo), self.env, self.system_accent, self.system_reduced_motion, cx.caret.clone(), cx.layout.clone());
         let view_time = crate::frame_profile::Scope::new(crate::frame_profile::Phase::View);
         #[cfg(not(feature = "hot"))]
         let mut root = { let root = (self.view)(self.state, &mut cx); self.build_tree(root, tx, force_all) };
@@ -2659,7 +2687,7 @@ impl<S: 'static> Measurement<'_, S> {
                     self.virtual_culled.clear();
                     self.virtual_inputs.clear();
                     cx = fresh_cx(self);
-                    let memo = crate::memo::enter(emptied, self.env, self.system_reduced_motion, cx.caret.clone(), cx.layout.clone());
+                    let memo = crate::memo::enter(emptied, self.env, self.system_accent, self.system_reduced_motion, cx.caret.clone(), cx.layout.clone());
                     let root = crate::hot::original_only(|| view(state, &mut cx));
                     (crate::hot::original_only(|| self.build_tree(root, tx, force_all)), memo)
                 }
@@ -2866,6 +2894,7 @@ impl<S: 'static> Runtime<S> {
             fit_height: self.fit_height,
             system_reduced_motion: self.system_reduced_motion,
             titlebar_inset: self.titlebar_inset,
+            system_accent: self.system_accent,
             reduced_motion: self.reduced_motion,
             time_scale: self.time_scale,
             caret: self.caret.clone(),
@@ -6638,6 +6667,26 @@ mod tests {
         assert_eq!(x(&rt), 0.0, "full screen hides them");
         let titled = crate::Chrome { full_size_content: false, ..crate::Chrome::DEFAULT };
         assert_eq!(titled.titlebar_inset(), 0.0);
+    }
+
+    #[test]
+    fn a_new_system_accent_rebuilds_the_view_and_its_memos() {
+        // Widths stand in for colours: the view draws what it read.
+        fn view(_: &(), cx: &mut Cx<()>) -> El {
+            let (accent, focus) = (cx.accent(), cx.focus_color());
+            crate::row().size(300.0, 40.0)
+                .child(el().key("accent").size(accent.g * 100.0, 10.0))
+                .child(crate::memo("ring", 0, || el().key("ring").size(focus.a * 100.0, 10.0)))
+        }
+        let mut rt = Runtime::new((), view, (300.0, 40.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let w = |rt: &Runtime<()>, key: &str| (rt.presented(key).unwrap().0[2] * 10.0).round() / 10.0;
+        assert_eq!((w(&rt, "accent"), w(&rt, "ring")), (23.1, 50.0), "macOS's dark blue, rings at 50%");
+        let pink = crate::Color { r: 1.0, g: 0.2, b: 0.6, a: 1.0 };
+        rt.set_system_accent(crate::SystemAccent::new(pink, pink).with_focus(pink, pink.alpha(0.7)));
+        rt.frame(0.1);
+        rt.frame(5.0);
+        assert_eq!((w(&rt, "accent"), w(&rt, "ring")), (20.0, 70.0));
     }
 
     #[test]
