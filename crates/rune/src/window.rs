@@ -726,6 +726,9 @@ impl<S: 'static> Host<S> {
         let on_window = app.on_window.take();
         let on_ready = app.on_ready.take();
         let macos_window = std::mem::take(&mut app.macos_window);
+        // Before the menu guard, so custom items in Edit or Window join these menus.
+        #[cfg(target_os = "macos")]
+        crate::native_menu::install_standard_menus(app.standard_menus);
         native_handle.bind(proxy.clone(), slot);
         let live_proxy = proxy.clone();
         #[cfg(target_os = "macos")]
@@ -2150,6 +2153,8 @@ impl<S: 'static> Host<S> {
         }
         let window = Arc::new(event_loop.create_window(attrs).map_err(|e| e.to_string())?);
         #[cfg(target_os = "macos")]
+        crate::native_menu::adopt_standard_view();
+        #[cfg(target_os = "macos")]
         let panel = if self.macos_window.nonactivating_panel {
             Some(crate::macos::Panel::adopt_window(&window, size, &self.macos_window).ok_or("could not create nonactivating panel")?)
         } else { None };
@@ -2879,10 +2884,16 @@ impl<S: 'static> Host<S> {
                 let pressed = event.state == ElementState::Pressed;
                 let logical = pressed.then(|| map_key(&event.logical_key, self.mods)).flatten();
                 let mut redraw = false;
+                // A standard ⌘W or ⌘M menu item handing Rune its key: close or minimize after,
+                // if no handler takes it.
+                #[cfg(target_os = "macos")]
+                let unhandled = logical.as_ref().and_then(crate::native_menu::take_unhandled);
+                #[cfg(not(target_os = "macos"))]
+                let unhandled = None;
                 if let winit::keyboard::PhysicalKey::Code(key) = event.physical_key {
-                    redraw = rt.physical_with_fallback(crate::PhysicalInput::Key {
+                    redraw = rt.physical_then(crate::PhysicalInput::Key {
                         key, mods: map_mods(self.mods), pressed, repeat: event.repeat,
-                    }, logical);
+                    }, logical, unhandled);
                 } else if let Some(ev) = logical {
                     if ev.key == Key::Command('v') && rt.accepts_paste() { self.clipboard.read(rt); }
                     else if event.repeat { rt.repeat_key(ev); }

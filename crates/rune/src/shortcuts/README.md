@@ -170,8 +170,39 @@ if `NSApp.mainMenu` is absent: About, Services, Hide, Hide Others, Show All and 
 Creating custom menu items first uses that same default root; adding them later
 inserts alongside the defaults. Existing roots are never replaced, and clearing
 custom items or calling `set_dock_icon(false)` leaves the default menu intact.
-No Edit menu is installed: native edit roles are not implemented, and AppKit's
-standard edit selectors could intercept Rune's focused-field shortcuts.
+A regular app whose menu bar is still winit's default also gets the standard items
+below; an accessory app gets them only with `standard_menus()`.
+
+### Standard menus
+
+`App::standard_menus()` adds an Edit menu (Undo ⌘Z, Redo ⇧⌘Z, Cut ⌘X, Copy ⌘C, Paste
+⌘V, Select All ⌘A) and a Window menu (Minimize ⌘M, Close ⌘W) to the process menu bar
+when the first window of that App starts. A regular (non-accessory) app gets the same
+items without asking, as long as its menu bar is still winit's default when its first
+window starts; an app that set its own menu bar is left alone. Rune never adds Quit:
+an accessory app that later shows its Dock icon gets winit's app menu (with Quit) as
+before. Items go into existing menus of the same title, an item whose action is
+already there is skipped, and custom `MenuItem`s keep working in either order. An
+accessory app's menu bar is hidden, but AppKit still matches its key equivalents.
+
+Every item has a nil target, so AppKit sends it to the key window's first responder:
+
+- An AppKit window in the process (an open panel, an updater's window) gets the
+  normal `copy:`, `paste:`, `selectAll:`, `undo:`, `performMiniaturize:` and
+  `performClose:` of its focused field or window.
+- A Rune window's first responder is winit's view. AppKit consumes a matched key
+  equivalent even when no responder implements its action, which is why a plain Edit
+  menu would swallow ⌘C before Rune sees it. So the view gains the eight actions (added
+  to winit's view class, never replacing a method it has), and each hands Rune the key:
+  the very event that fired the item, so text fields, `on_key` and shortcuts see exactly
+  the `Key::Command` they did without the menu, once. A click on the item sends a
+  made-up press and release of its key instead.
+- ⌘W and ⌘M reach Rune the same way first. If no handler takes them and the window has
+  that title-bar button, the window then closes or minimizes as a click on the button
+  would: `on_close` and `keep_running` hiding apply. A window without the button
+  (borderless, an overlay panel) only gets the key. An app that binds ⌘W itself keeps it.
+
+Without `standard_menus`, an accessory app's keys don't change.
 
 Native Windows/Linux return `MenuError::Unsupported`; startup builders report it
 through `take_menu_errors()`. Headless virtual menus work on every platform:

@@ -1,7 +1,13 @@
 use super::*;
 use crate::{PhysicalInput, PhysicalKeyCode};
 
-pub(super) struct Fallback { key: KeyEvent }
+pub(super) struct Fallback { key: KeyEvent, unhandled: Option<Unhandled> }
+
+/// What a window does with a logical key no handler took: close or minimize as its title-bar
+/// button would. A standard ⌘W or ⌘M menu item asks for it, so an app's own binding wins.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unhandled { Close, Minimize }
 
 /// An activation key held down: its physical code (native and physical input) or logical key
 /// (`Runtime::key`), and the focus its first press landed on.
@@ -26,11 +32,15 @@ impl<S: 'static> Runtime<S> {
     }
     /// Return whether the native host needs to request a frame for this event.
     pub(crate) fn physical_with_fallback(&mut self, event: PhysicalInput, key: Option<KeyEvent>) -> bool {
+        self.physical_then(event, key, None)
+    }
+    /// `physical_with_fallback`, and `unhandled` happens when no handler takes the logical key.
+    pub(crate) fn physical_then(&mut self, event: PhysicalInput, key: Option<KeyEvent>, unhandled: Option<Unhandled>) -> bool {
         if key.is_none() && matches!(event, PhysicalInput::Modifiers(_) | PhysicalInput::Key { pressed: false, .. }) {
             return self.physical_observation(event);
         }
         if !matches!(event, PhysicalInput::Key { pressed: false, .. }) { self.dismiss_help(); }
-        self.queue.push(Action::Physical(event, key.map(|key| Fallback { key })));
+        self.queue.push(Action::Physical(event, key.map(|key| Fallback { key, unhandled })));
         true
     }
     /// Modifier/release events have no logical action. When input is already queued,
@@ -84,7 +94,7 @@ impl<S: 'static> Runtime<S> {
         let modifier = self.modifier_dispatch(&event, consumed, tx);
         if consumed { return true; }
         modifier | match fallback {
-            Some(Fallback { key }) => {
+            Some(Fallback { key, unhandled }) => {
                 if key.key == crate::Key::Command('v') && self.accepts_paste() {
                     // Capture the target in event order, before another queued click can
                     // change focus. An empty/image clipboard still consumes the command.
@@ -93,8 +103,14 @@ impl<S: 'static> Runtime<S> {
                 } else {
                     let mut one = self.transaction();
                     let ran = self.route_key(&key, repeat, &mut one);
+                    let unhandled = unhandled.filter(|_| !ran && !repeat);
+                    match unhandled {
+                        Some(Unhandled::Close) => one.close_window(),
+                        Some(Unhandled::Minimize) => one.minimize(),
+                        None => {}
+                    }
                     merge(tx, one);
-                    ran
+                    ran || unhandled.is_some()
                 }
             }
             None => false,

@@ -216,6 +216,7 @@ let app = rune::App::new(spec)
     .keep_running()                // closing the window keeps the process, state and loop
     .release_gpu_when_closed()     // optional: drop the GPU device while closed
     .accessory()                   // macOS: menu-bar app, no Dock icon (h.set_dock_icon(true) shows it)
+    .standard_menus()              // macOS: Edit, Minimize ⌘M and Close ⌘W (no Quit); regular apps get them anyway
     .on_close(|s, tx| ..);         // runs before every close; tx.quit() quits instead
     // .window_options(WindowOptions { max_size, resizable, .. }) for this window
 let handle = app.handle();     // AppHandle<S>: Clone + Send + Sync, usable before run
@@ -259,6 +260,14 @@ app.run();
 - `AppSpec::min_size` sets the smallest window (None keeps 420×400).
 - `AppHandle::set_dock_icon(bool)` switches macOS between the regular and accessory activation
   policies at runtime.
+- `App::standard_menus()` (macOS) adds the items every Mac app has: Edit with Undo ⌘Z, Redo ⇧⌘Z,
+  Cut, Copy, Paste and Select All, and Window with Minimize ⌘M and Close ⌘W, all sent to the first
+  responder. A regular app whose menu bar is still winit's default gets them without asking. An
+  accessory app's menu bar is hidden, but its key equivalents still work, so AppKit windows in the
+  process (an open panel, an updater) get copy, paste, select-all and close back. In a Rune window
+  the keys still reach fields and `on_key` first; an untaken ⌘W or ⌘M closes or minimizes as the
+  title-bar button would. It never adds Quit. Details in `src/shortcuts/README.md` under native
+  menus.
 - Edge overlays (HUDs): see `App::overlay` below.
 
 ### Compact tray-controlled windows

@@ -73,6 +73,8 @@ mod layout_diagnostics;
 mod focus;
 #[path = "physical_dispatch.rs"]
 mod physical_dispatch;
+#[cfg_attr(not(target_os = "macos"), allow(unused_imports))]
+pub(crate) use physical_dispatch::Unhandled;
 #[path = "modifier_keys.rs"]
 mod modifier_keys;
 #[path = "popup_dispatch.rs"]

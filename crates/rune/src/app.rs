@@ -43,6 +43,8 @@ pub struct App<S: 'static> {
     pub(crate) release_gpu: bool,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) accessory: bool,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) standard_menus: bool,
     pub(crate) keep_running: bool,
     pub(crate) on_close: Option<fn(&mut S, &mut Tx)>,
     pub(crate) on_focus: Option<fn(&mut S, bool, &mut Tx)>,
@@ -77,6 +79,7 @@ impl<S: 'static> App<S> {
             open: true,
             release_gpu: false,
             accessory: false,
+            standard_menus: false,
             keep_running: false,
             on_close: None,
             on_focus: None,
@@ -228,9 +231,27 @@ impl<S: 'static> App<S> {
 
     /// macOS: run as an accessory (menu-bar) app: no Dock icon, no default menu bar, and
     /// launching doesn't activate the app or take focus. The app installs its own menu if it
-    /// wants one, and may change the activation policy later. No effect on other platforms.
+    /// wants one (`standard_menus` gives it Close, Minimize and Edit), and may change the
+    /// activation policy later. No effect on other platforms.
     pub fn accessory(mut self) -> Self {
         self.accessory = true;
+        self
+    }
+
+    /// macOS: add the standard menu items every Mac app has to the menu bar of this process
+    /// (hidden for an accessory app, whose key equivalents still work): an Edit menu (Undo ⌘Z,
+    /// Redo ⇧⌘Z, Cut, Copy, Paste, Select All) and Window › Minimize ⌘M and Close ⌘W, each
+    /// sent to the first responder. AppKit windows in the process (an open panel, an updater)
+    /// get their editing and close keys back. In a Rune window every one of these keys still
+    /// reaches text fields, `on_key` and shortcuts first, once, exactly as without the menu;
+    /// a ⌘W or ⌘M nothing takes then closes or minimizes a window that has that title-bar
+    /// button, as a click on it would (`on_close` and `keep_running` apply). No Quit item.
+    /// Existing menus and custom `MenuItem`s are kept; items go into menus of the same title.
+    /// Installed once per process when the first window of an app with it starts. A regular
+    /// (non-accessory) app whose menu bar is still winit's default gets these items without
+    /// asking. No effect on other platforms.
+    pub fn standard_menus(mut self) -> Self {
+        self.standard_menus = true;
         self
     }
 
@@ -732,6 +753,29 @@ mod tests {
         let app = App::new(spec());
         app.handle().minimize();
         assert_eq!(app.shared.take().window, Some(WindowRequest::Minimize));
+    }
+
+    #[test]
+    fn a_standard_close_or_minimize_key_acts_only_when_no_handler_takes_it() {
+        use crate::runtime::Unhandled;
+        use crate::{Key, KeyEvent, Mods, PhysicalInput, PhysicalKeyCode as Code};
+        let cmd = Mods { cmd: true, ..Mods::default() };
+        let press = |rt: &mut Runtime<u32>, code, c, then| {
+            rt.physical_then(PhysicalInput::Key { key: code, mods: cmd, pressed: true, repeat: false },
+                Some(KeyEvent { key: Key::Command(c), mods: cmd }), Some(then));
+            rt.frame(0.0);
+        };
+        let mut rt = Runtime::new(0u32, |_: &u32, _: &mut Cx<u32>| el(), (100.0, 100.0), Env::default());
+        press(&mut rt, Code::KeyW, 'w', Unhandled::Close);
+        assert_eq!(rt.shell_request.take(), Some(Shell::Close), "an unhandled ⌘W closes as the button would");
+        press(&mut rt, Code::KeyM, 'm', Unhandled::Minimize);
+        assert!(std::mem::take(&mut rt.minimize_request) && rt.shell_request.is_none());
+        rt.on_key = Some(|n, ev, _| { *n += 1; ev.is_command('w') });
+        press(&mut rt, Code::KeyW, 'w', Unhandled::Close);
+        assert_eq!((rt.state, rt.shell_request), (1, None), "the app's own ⌘W wins, once");
+        press(&mut rt, Code::KeyM, 'm', Unhandled::Minimize);
+        assert_eq!(rt.state, 2, "the app saw ⌘M first");
+        assert!(rt.minimize_request, "and didn't take it");
     }
 
     thread_local! { static BUILDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }

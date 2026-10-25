@@ -8,8 +8,14 @@ use crate::{App, AppHandle, Shortcut, Tx, app::Shared};
 mod macos;
 #[cfg(target_os = "macos")]
 mod default_macos;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod standard;
 #[cfg(target_os = "macos")]
-pub(crate) use default_macos::ensure as ensure_default_menu;
+mod standard_macos;
+#[cfg(target_os = "macos")]
+pub(crate) use default_macos::{ensure as ensure_default_menu, promote as promote_default_menu};
+#[cfg(target_os = "macos")]
+pub(crate) use standard_macos::{adopt as adopt_standard_view, install as install_standard_menus, take_unhandled};
 #[cfg(target_os = "macos")]
 pub(crate) use macos::set_key_equivalent;
 

@@ -625,6 +625,8 @@ impl<T: 'static> Overlay<T> {
             attrs = attrs.with_has_shadow(false);
         }
         let window = Arc::new(event_loop.create_window(attrs).ok()?);
+        #[cfg(target_os = "macos")]
+        crate::native_menu::adopt_standard_view();
         self.dark = window.theme().is_none_or(|t| t == winit::window::Theme::Dark);
         self.rt.set_system_dark(self.dark);
         if self.cursor.is_none() { self.cursor = Some(crate::os_cursor::OsCursor::new(event_loop)); }

@@ -423,7 +423,7 @@ pub(crate) fn set_dock_icon(visible: bool) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     let policy = if visible { NSApplicationActivationPolicy::Regular } else { NSApplicationActivationPolicy::Accessory };
     let app = NSApplication::sharedApplication(mtm);
-    if visible { crate::native_menu::ensure_default_menu(&app); }
+    if visible { crate::native_menu::promote_default_menu(&app); }
     app.setActivationPolicy(policy);
 }
 
