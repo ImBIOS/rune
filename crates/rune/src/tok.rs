@@ -49,6 +49,14 @@ pub enum OpticalSize {
     Fixed(f32),
 }
 
+/// Hashes as `==` compares, `-0.0` as `0.0`, so a style can be a `memo` version.
+impl std::hash::Hash for OpticalSize {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        if let OpticalSize::Fixed(size) = self { crate::color::hash_bits(*size).hash(state) }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextStyle {
     pub size: f32,
@@ -67,6 +75,15 @@ pub struct TextStyle {
     pub optical_size: OpticalSize,
     /// The family's italic face, or a synthetic oblique when it has none.
     pub italic: bool,
+}
+
+/// Hashes as `==` compares, `-0.0` as `0.0`, so a style can be a `memo` version.
+impl std::hash::Hash for TextStyle {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let TextStyle { size, weight, family, line_height, tracking, variations, features, optical_size, italic } = *self;
+        [size, weight, line_height, tracking].map(crate::color::hash_bits).hash(state);
+        (family, variations, features, optical_size, italic).hash(state);
+    }
 }
 
 impl TextStyle {

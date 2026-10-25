@@ -20,6 +20,19 @@ pub fn oklcha(l: f32, c: f32, h: f32, a: f32) -> Color {
     Color::from_oklab([l, c * co, c * s, a])
 }
 
+/// An `f32`'s bits for hashing a type that compares its floats with `==`: `-0.0` hashes as
+/// `0.0`, which it equals, and every NaN alike.
+pub(crate) fn hash_bits(x: f32) -> u32 {
+    if x == 0.0 { 0 } else if x.is_nan() { f32::NAN.to_bits() } else { x.to_bits() }
+}
+
+/// Hashes as `==` compares (see [`hash_bits`]), so a colour can be a `memo` version.
+impl std::hash::Hash for Color {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        [self.r, self.g, self.b, self.a].map(hash_bits).hash(state);
+    }
+}
+
 impl Color {
     pub const TRANSPARENT: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
     pub const WHITE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
@@ -102,5 +115,28 @@ impl rune_motion::Animatable for Color {
             return Color::TRANSPARENT;
         }
         Color::from_oklab([x[0] / al, x[1] / al, x[2] / al, al])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::hash::{BuildHasher, Hash, RandomState};
+
+    fn hash(x: impl Hash, s: &RandomState) -> u64 {
+        s.hash_one(x)
+    }
+
+    #[test]
+    fn equal_colours_hash_equal() {
+        let s = RandomState::new();
+        let a = oklcha(0.6, 0.1, 250.0, 0.5);
+        assert_eq!(hash(a, &s), hash(oklcha(0.6, 0.1, 250.0, 0.5), &s));
+        let zero = Color { r: 0.0, ..Color::BLACK };
+        let negative = Color { r: -0.0, ..Color::BLACK };
+        assert_eq!(zero, negative);
+        assert_eq!(hash(zero, &s), hash(negative, &s));
+        assert_ne!(hash(a, &s), hash(a.alpha(0.6), &s));
+        assert_eq!(hash(Color { a: f32::NAN, ..a }, &s), hash(Color { a: -f32::NAN, ..a }, &s));
     }
 }

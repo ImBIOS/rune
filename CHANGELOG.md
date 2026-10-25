@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Theme tokens hash.** `Color`, `TextStyle` and rune-kit's `Palette`, `StateColors`, `Type`
+  and `Radius` implement `Hash`, so a row can pass the tokens it reads to `memo` as its version
+  instead of hashing their `Debug` text. Floats hash by bits, `-0.0` as `0.0` (they compare
+  equal) and every NaN alike; none of them is `Eq`, since NaN isn't equal to itself.
 - **A virtual list's first showing mounts its viewport, not three windows.** A new scroll
   viewport has no measured height, so a virtual list shown for the first time used the window's
   height as its viewport and mounted two of those either side: a 200-cell emoji grid in a

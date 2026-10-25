@@ -5,7 +5,7 @@
 use rune::{Color, Icon, Shadow, Spring, TextStyle};
 
 /// Colours for one status role (success, warning, danger, info).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash)]
 pub struct StateColors {
     pub bg: Color,
     pub fg: Color,
@@ -15,8 +15,9 @@ pub struct StateColors {
 }
 
 /// Semantic colours. Translucent tokens are already solved for the theme's blending (see
-/// `rune::theme::srgb_equivalent`).
-#[derive(Clone, Copy, Debug)]
+/// `rune::theme::srgb_equivalent`). Hashable, as [`Type`] and [`Radius`] are, so a row can use
+/// the tokens it reads as a `memo` version.
+#[derive(Clone, Copy, Debug, Hash)]
 pub struct Palette {
     /// The page behind components (Storybook's frame, an app's window).
     pub page: Color,
@@ -145,7 +146,7 @@ pub struct Glyphs {
 }
 
 /// The type scale. Sizes, weights, line heights and tracking in points.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash)]
 pub struct Type {
     /// Controls and body copy: 13 / 20.
     pub ui: TextStyle,
@@ -184,6 +185,14 @@ pub struct Radius {
     pub md: f32,
     pub lg: f32,
     pub xl: f32,
+}
+
+/// Hashes the radii's bits, `-0.0` as `0.0` and every NaN alike, as `Color` does.
+impl std::hash::Hash for Radius {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let bits = |x: f32| if x == 0.0 { 0 } else if x.is_nan() { f32::NAN.to_bits() } else { x.to_bits() };
+        [self.xs, self.sm, self.md, self.lg, self.xl].map(bits).hash(state);
+    }
 }
 
 /// Motion tokens. Hover/press overlays use the runtime's own snappy track.
@@ -260,5 +269,27 @@ impl Kit {
     /// Black at opacity `a` (the `alpha-dark-*` ramp).
     pub fn dark_a(&self, a: f32) -> Color {
         self.alpha(self.c.black, a)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::hash::{BuildHasher, RandomState};
+
+    #[test]
+    fn equal_tokens_hash_equal() {
+        let s = RandomState::new();
+        let (a, b, light) = (Kit::neutral(true), Kit::neutral(true), Kit::neutral(false));
+        assert_eq!(s.hash_one(a.c), s.hash_one(b.c));
+        assert_eq!(s.hash_one(a.ty), s.hash_one(b.ty));
+        assert_eq!(s.hash_one(a.radius), s.hash_one(b.radius));
+        assert_ne!(s.hash_one(a.c), s.hash_one(light.c));
+        let negative = Radius { xs: -0.0, ..a.radius };
+        assert_eq!(s.hash_one(Radius { xs: 0.0, ..a.radius }), s.hash_one(negative));
+        assert_ne!(s.hash_one(a.radius), s.hash_one(Radius { md: a.radius.md + 1.0, ..a.radius }));
+        let ty = Type { ui: a.ty.ui.lh(a.ty.ui.line_height + 1.0), ..a.ty };
+        assert_ne!(s.hash_one(a.ty), s.hash_one(ty));
+        assert_eq!(s.hash_one(a.ty.ui.tracking(0.0)), s.hash_one(a.ty.ui.tracking(-0.0)));
     }
 }
