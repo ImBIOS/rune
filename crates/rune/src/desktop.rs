@@ -628,7 +628,9 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
     let mut trace = args.trace.as_ref().map(|p| {
         let f = members[selected].frame();
         members[selected].trace_on();
-        Trace::open(p, (f[2], f[3]), fps, scale)
+        let mut trace = Trace::open(p, (f[2], f[3]), fps, scale);
+        trace.all = args.trace_all;
+        trace
     });
     let n = members.len();
     let mut desk = Desk {

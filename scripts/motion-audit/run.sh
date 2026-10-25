@@ -16,7 +16,7 @@ run() {
   name=$1; secs=$2; shift 2
   frames=$(python3 -c "print(int($secs * $FPS))")
   echo "== $name ($frames frames)"
-  "$@" --fps $FPS --frames "$frames" --trace-all --trace "$O/$name.jsonl" --tree "$O/$name-end.json" 2>&1 | grep -E "error|panic" || true
+  "$@" --fps $FPS --frames "$frames" --trace-all --trace "$O/$name.jsonl" --tree "$O/$name-end.json"
 }
 
 run oc-idle-session   3.0 $OC --scene session

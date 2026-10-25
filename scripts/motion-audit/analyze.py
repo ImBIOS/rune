@@ -193,13 +193,15 @@ def analyze(path):
         if longest < 6:
             continue
         e = els[id]
+        kset = set(ks)
+        unseen = [st for st in e.hist if st[0] in kset]
         why = []
-        last = e.hist[-1] if e.hist else None
-        if e.op <= VISIBLE_OPACITY:
-            why.append(f"opacity {e.op}")
-        if last and last[8] == 0:
+        if any(st[5] <= VISIBLE_OPACITY for st in unseen):
+            op = min(st[5] for st in unseen)
+            why.append(f"opacity {op}")
+        if any(st[7] == 0 and st[8] for st in unseen):
             why.append("clipped away")
-        if e.rect and not on_screen(e.rect, W, H):
+        if any(not st[8] for st in unseen):
             why.append("off-window")
         findings.append(dict(kind="invisible-work", element=name, prop=prop, frames=len(ks), longest=longest,
                              at=fmt_runs(rs), detail=f"{prop} sampled on {len(ks)} frames while unseen ({', '.join(why) or 'unseen'})"))

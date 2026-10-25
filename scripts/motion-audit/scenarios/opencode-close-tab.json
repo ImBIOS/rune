@@ -3,22 +3,26 @@
   {
    "t": 0.3,
    "type": "move",
-   "key": "t-ses_fx0003aaaaaaaaaaaaaaaaaa"
+   "x": 134,
+   "y": 218
   },
   {
    "t": 0.6,
    "type": "tap",
-   "key": "t-ses_fx0003aaaaaaaaaaaaaaaaaa/close"
+   "x": 244,
+   "y": 218
   },
   {
    "t": 1.6,
    "type": "move",
-   "key": "t-ses_fx0006aaaaaaaaaaaaaaaaaa"
+   "x": 134,
+   "y": 218
   },
   {
    "t": 1.9,
    "type": "tap",
-   "key": "t-ses_fx0006aaaaaaaaaaaaaaaaaa/close"
+   "x": 244,
+   "y": 218
   },
   {
    "t": 2.9,

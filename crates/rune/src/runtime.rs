@@ -1881,6 +1881,7 @@ impl<S: 'static> Runtime<S> {
         self.stats.shaped = self.text.shaped - shaped0;
         let filling = self.virtual_filling();
         if live_animating { self.anim_sources |= AnimSource::LIVE; }
+        if self.time_scale <= 0.0 { self.anim_sources = 0; }
         if filling { self.anim_sources |= AnimSource::VIRTUAL_FILL; }
         self.animating = (animating && self.time_scale > 0.0) || filling;
         #[cfg(all(feature = "dev", debug_assertions))]
