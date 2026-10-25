@@ -17,7 +17,7 @@ const W: f32 = 640.0;
 const H: f32 = 360.0;
 const S: f32 = 2.0;
 const FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-const EFFECTS: [&str; 7] = ["glow", "pulse", "electric", "fire", "motion", "distort", "extras"];
+const EFFECTS: [&str; 14] = ["glow", "pulse", "electric", "fire", "motion", "distort", "extras", "liquid-metal", "mesh-gradient", "dither", "grain-gradient", "fluted-glass", "fills", "fill-presets"];
 
 // ------------------------------------------------------------------ scene builder
 
@@ -451,6 +451,128 @@ fn scene(name: &str, b: &mut B) {
             b.fx(Fx::sparkles(SparkleParams { margin: 20.0, size: 8.0, count: 6, ..Default::default() }).on(Shape::capsule(pro.x, pro.y, pro.w, pro.h)).seed(4));
             b.caption(432.0, 344.0, "Sparkles");
         }
+        "liquid-metal" => {
+            b.background("Liquid metal", "chrome · gold · rose gold · gunmetal · as a border");
+            let shadow = |b: &mut B, r: Rect, radius: f32| b.shadow(Rect::new(r.x, r.y + 10.0, r.w, r.h), radius, 16.0, [0.0, 0.0, 0.0, 0.55]);
+            let slab = Rect::new(32.0, 58.0, 260.0, 160.0);
+            shadow(b, slab, 40.0);
+            b.fx(Fx::fill(LiquidMetalParams::chrome()).on(Shape::rounded(slab.x, slab.y, slab.w, slab.h, 40.0)));
+            b.caption(32.0, 238.0, "Chrome");
+            let btn = Rect::new(318.0, 62.0, 180.0, 52.0);
+            shadow(b, btn, 26.0);
+            b.fx(Fx::fill(LiquidMetalParams::gold()).on(Shape::capsule(btn.x, btn.y, btn.w, btn.h)));
+            b.caption(318.0, 134.0, "Gold");
+            shadow(b, Rect::new(534.0, 54.0, 68.0, 68.0), 34.0);
+            b.fx(Fx::fill(LiquidMetalParams::rose()).on(Shape::circle(568.0, 88.0, 34.0)));
+            b.caption(534.0, 134.0, "Rose gold");
+            let gm = Rect::new(318.0, 152.0, 290.0, 66.0);
+            shadow(b, gm, 18.0);
+            b.fx(Fx::fill(LiquidMetalParams::gunmetal()).on(Shape::rounded(gm.x, gm.y, gm.w, gm.h, 18.0)));
+            b.caption(318.0, 238.0, "Gunmetal");
+            // Borders: a chrome tube round a card, a gold ring round an avatar, a rose-gold capsule.
+            let card = Rect::new(32.0, 262.0, 260.0, 74.0);
+            b.card(card, 24.0);
+            b.fx(Fx::fill(LiquidMetalParams::chrome().border(7.0)).on(Shape::rounded(card.x, card.y, card.w, card.h, 24.0)));
+            b.text_c(card.center().x, card.center().y, "Chrome border", 15.0, 2, col(0xe8eaee, 1.0));
+            b.rect(Rect::new(330.0, 263.0, 72.0, 72.0), 36.0, col(0x7c5cff, 1.0), col(0x2b1b5a, 1.0), [0.0; 4], 0.0);
+            b.text_c(366.0, 299.0, "KL", 22.0, 2, col(0xffffff, 0.95));
+            b.fx(Fx::fill(LiquidMetalParams::gold().border(4.0)).on(Shape::circle(366.0, 299.0, 36.0)));
+            let cap = Rect::new(428.0, 272.0, 180.0, 54.0);
+            b.rect(cap, 27.0, col(0x1a1c22, 1.0), col(0x121419, 1.0), [0.0; 4], 0.0);
+            b.fx(Fx::fill(LiquidMetalParams::rose().border(5.0)).on(Shape::capsule(cap.x, cap.y, cap.w, cap.h)));
+            b.text_c(cap.center().x, cap.center().y, "Rose border", 14.0, 2, col(0xf2d4c8, 1.0));
+        }
+        "mesh-gradient" => {
+            b.background("Mesh gradient", "dusk · lagoon · orchid · graphite: drifting points, blended in OKLab");
+            b.fx(Fx::fill(MeshGradientParams::dusk()).on(Shape::rounded(32.0, 58.0, 300.0, 272.0, 28.0)));
+            b.text(56.0, 306.0, "Dusk", 28.0, 2, col(0xffffff, 0.95));
+            for (k, (p, name)) in [(MeshGradientParams::lagoon(), "Lagoon"), (MeshGradientParams::orchid(), "Orchid"), (MeshGradientParams::graphite(), "Graphite")].into_iter().enumerate() {
+                let y = 58.0 + k as f32 * 94.0;
+                b.fx(Fx::fill(p).on(Shape::rounded(352.0, y, 256.0, 84.0, 18.0)).seed(k as u32 + 2));
+                b.text(372.0, y + 68.0, name, 15.0, 2, col(0xffffff, 0.92));
+            }
+        }
+        "dither" => {
+            b.background("Dither", "Bayer 2×2, 4×4, 8×8 · blue noise · of a ramp, noise or the backdrop");
+            let xs = [32.0, 182.0, 332.0, 482.0];
+            let tiles = [(DitherParams::bayer(), "Bayer 4×4, ramp"), (DitherParams::handheld(), "Palette, noise"), (DitherParams::grain(), "Blue noise, radial"), (DitherParams::backdrop(), "Backdrop")];
+            for (x, (p, name)) in xs.into_iter().zip(tiles) {
+                let r = Rect::new(x, 58.0, 140.0, 128.0);
+                if p.input == FillInput::Backdrop {
+                    b.rect(r, 16.0, col(0xff7aa2, 1.0), col(0x3b2a8f, 1.0), [0.0; 4], 0.0);
+                    b.rect(Rect::new(x + 62.0, 74.0, 64.0, 64.0), 32.0, col(0xfff1c2, 1.0), col(0xffb44d, 1.0), [0.0; 4], 0.0);
+                    b.text(x + 14.0, 172.0, "Aa", 40.0, 2, col(0xffffff, 1.0));
+                    b.backdrop();
+                }
+                b.fx(Fx::fill(p).on(Shape::rounded(r.x, r.y, r.w, r.h, 16.0)));
+                b.caption(x, 204.0, name);
+            }
+            let pats = [(DitherPattern::Bayer2, "Bayer 2×2"), (DitherPattern::Bayer4, "Bayer 4×4"), (DitherPattern::Bayer8, "Bayer 8×8"), (DitherPattern::White, "White noise")];
+            for (x, (pattern, name)) in xs.into_iter().zip(pats) {
+                let p = DitherParams { pattern, pixel: 3.0, angle: 0.0, colors: Stops::hex(&[0x1b1530, 0x9be7ff]), ..DitherParams::bayer() };
+                b.fx(Fx::fill(p).on(Shape::rounded(x, 222.0, 140.0, 96.0, 14.0)));
+                b.caption(x, 336.0, name);
+            }
+        }
+        "grain-gradient" => {
+            b.background("Grain gradient", "linear · radial · conic, with film grain (mono or colour)");
+            for (x, (p, name)) in [32.0, 229.0, 426.0].into_iter().zip([(GrainGradientParams::ember(), "Ember (linear, mono)"), (GrainGradientParams::halo(), "Halo (radial)"), (GrainGradientParams::sweep(), "Sweep (conic, colour grain)")]) {
+                b.fx(Fx::fill(p).on(Shape::rounded(x, 58.0, 182.0, 250.0, 22.0)));
+                b.caption(x, 328.0, name);
+            }
+        }
+        "fluted-glass" => {
+            b.background("Fluted glass", "reeded · fine · frosted · wide ribs, over moving content");
+            b.rect(Rect::new(24.0, 48.0, 592.0, 266.0), 24.0, col(0x1e2a5a, 1.0), col(0x0d1226, 1.0), [0.0; 4], 0.0);
+            let blobs = [(0xff8a3d, 0xe0451f, 140.0, 118.0, 54.0), (0x8b5cf6, 0x4c1d95, 255.0, 236.0, 62.0), (0x2dd4bf, 0x0f766e, 405.0, 112.0, 50.0), (0xf472b6, 0xbe185d, 548.0, 226.0, 58.0)];
+            for (k, (a, c, x, y, r)) in blobs.into_iter().enumerate() {
+                let dx = if b.reduced { 0.0 } else { 26.0 * (t * 0.9 + k as f32 * 1.7).sin() };
+                b.rect(Rect::new(x - r + dx, y - r, 2.0 * r, 2.0 * r), r, col(a, 1.0), col(c, 1.0), [0.0; 4], 0.0);
+            }
+            b.text(46.0, 214.0, "Fluted", 96.0, 2, col(0xffffff, 0.96));
+            for (x, (p, name)) in [40.0, 190.0, 340.0, 490.0].into_iter().zip([(FlutedGlassParams::reeded(), "Reeded"), (FlutedGlassParams::fine(), "Fine"), (FlutedGlassParams::frosted(), "Frosted"), (FlutedGlassParams::wide(), "Wide")]) {
+                b.backdrop();
+                b.fx(Fx::fill(p).on(Shape::rounded(x, 60.0, 120.0, 240.0, 16.0)));
+                b.caption(x, 324.0, name);
+            }
+        }
+        "fills" => {
+            b.background("More fills", "metaballs · swirl · voronoi · waves · halftone");
+            let xs = [32.0, 229.0, 426.0];
+            let row1: [(FillParams, &str); 3] = [(MetaballParams::lava().into(), "Metaballs"), (SwirlParams::ink().into(), "Swirl"), (VoronoiParams::stained().into(), "Voronoi")];
+            for (x, (p, name)) in xs.into_iter().zip(row1) {
+                b.fx(Fx::fill(p).on(Shape::rounded(x, 56.0, 182.0, 118.0, 18.0)));
+                b.caption(x, 192.0, name);
+            }
+            b.fx(Fx::fill(WaveParams::sea()).on(Shape::rounded(32.0, 208.0, 182.0, 118.0, 18.0)));
+            b.caption(32.0, 344.0, "Waves");
+            b.fx(Fx::fill(HalftoneParams::print()).on(Shape::rounded(229.0, 208.0, 182.0, 118.0, 18.0)));
+            b.caption(229.0, 344.0, "Halftone");
+            let r = Rect::new(426.0, 208.0, 182.0, 118.0);
+            b.rect(r, 18.0, col(0xf6d365, 1.0), col(0xfda085, 1.0), [0.0; 4], 0.0);
+            b.rect(Rect::new(470.0, 222.0, 90.0, 90.0), 45.0, col(0x5b8def, 1.0), col(0x1d2b64, 1.0), [0.0; 4], 0.0);
+            b.backdrop();
+            b.fx(Fx::fill(HalftoneParams::backdrop()).on(Shape::rounded(r.x, r.y, r.w, r.h, 18.0)));
+            b.caption(426.0, 344.0, "Halftone of the backdrop");
+        }
+        "fill-presets" => {
+            b.background("Fill presets", "every style and preset in the catalog");
+            let all: Vec<(&StyleInfo, &Preset)> = fill_styles().iter().flat_map(|s| s.presets.iter().map(move |p| (s, p))).collect();
+            for (k, (s, p)) in all.into_iter().enumerate() {
+                let (x, y) = (28.0 + (k % 8) as f32 * 74.0, 50.0 + (k / 8) as f32 * 78.0);
+                let r = Rect::new(x, y, 66.0, 44.0);
+                let f = p.fill();
+                if f.needs_backdrop() {
+                    b.rect(r, 10.0, col(0x3b82f6, 1.0), col(0x1e1b4b, 1.0), [0.0; 4], 0.0);
+                    b.rect(Rect::new(x + 8.0, y + 6.0, 30.0, 30.0), 15.0, col(0xffd166, 1.0), col(0xef476f, 1.0), [0.0; 4], 0.0);
+                    b.text(x + 34.0, y + 36.0, "Aa", 22.0, 2, col(0xffffff, 1.0));
+                    b.backdrop();
+                }
+                b.fx(Fx::fill(f).on(Shape::rounded(r.x, r.y, r.w, r.h, 10.0)).seed(k as u32));
+                b.text(x, y + 56.0, s.name, 9.0, 1, col(0x6b7280, 1.0));
+                b.text(x, y + 67.0, p.name, 9.0, 2, col(0xb4b9c4, 1.0));
+            }
+        }
         _ => panic!("unknown effect {name}"),
     }
 }
@@ -657,6 +779,8 @@ fn strip_times(name: &str) -> (f32, f32) {
         "glow" => (0.0, 1.4),
         "pulse" => (0.0, 1.4),
         "distort" => (0.0, 0.9),
+        // Fills move slowly: eight frames over four seconds.
+        "liquid-metal" | "mesh-gradient" | "dither" | "grain-gradient" | "fluted-glass" | "fills" | "fill-presets" => (0.0, 4.0),
         _ => (1.0, 1.0),
     }
 }
@@ -669,6 +793,7 @@ fn still_time(name: &str) -> f32 {
         "fire" => 2.0,
         "motion" => 0.1,
         "distort" => 0.3,
+        "liquid-metal" | "mesh-gradient" | "dither" | "grain-gradient" | "fluted-glass" | "fills" | "fill-presets" => 1.2,
         _ => 0.55,
     }
 }
@@ -726,6 +851,24 @@ fn timing_layers() -> Vec<(&'static str, FxLayer)> {
         ("sparkles x9", Fx::sparkles(SparkleParams::default()).on(Shape::rounded(0.0, 0.0, 600.0, 400.0, 12.0))),
         ("aurora", Fx::aurora(AuroraParams::default()).on(Shape::rounded(0.0, 0.0, 600.0, 400.0, 12.0))),
         ("grain", Fx::grain(GrainParams::default()).on(Shape::rounded(0.0, 0.0, 600.0, 400.0, 12.0))),
+        ("fill liquid metal", Fx::fill(LiquidMetalParams::chrome()).on(sh)),
+        ("fill liquid metal, still", Fx::fill(LiquidMetalParams { flow: 0.0, ..LiquidMetalParams::chrome() }).on(sh)),
+        ("fill liquid metal border 8", Fx::fill(LiquidMetalParams::gold().border(8.0)).on(sh)),
+        ("fill mesh gradient (5 colours)", Fx::fill(MeshGradientParams::dusk()).on(sh)),
+        ("fill dither bayer (ramp)", Fx::fill(DitherParams::bayer()).on(sh)),
+        ("fill dither blue noise (radial)", Fx::fill(DitherParams::grain()).on(sh)),
+        ("fill dither palette (noise)", Fx::fill(DitherParams::handheld()).on(sh)),
+        ("fill dither backdrop", Fx::fill(DitherParams::backdrop()).on(sh)),
+        ("fill grain gradient", Fx::fill(GrainGradientParams::ember()).on(sh)),
+        ("fill grain gradient conic, colour", Fx::fill(GrainGradientParams::sweep()).on(sh)),
+        ("fill fluted glass", Fx::fill(FlutedGlassParams::reeded()).on(sh)),
+        ("fill fluted glass + frost", Fx::fill(FlutedGlassParams::frosted()).on(sh)),
+        ("fill metaballs x6", Fx::fill(MetaballParams::lava()).on(sh)),
+        ("fill swirl", Fx::fill(SwirlParams::ink()).on(sh)),
+        ("fill voronoi", Fx::fill(VoronoiParams::cells()).on(sh)),
+        ("fill waves (5 bands)", Fx::fill(WaveParams::sea()).on(sh)),
+        ("fill halftone (radial)", Fx::fill(HalftoneParams::print()).on(sh)),
+        ("fill halftone backdrop", Fx::fill(HalftoneParams::backdrop()).on(sh)),
     ];
     for (n, mode, angle) in [("motion shutter (fling peak)", BlurMode::Shutter, 360.0f32), ("motion directional", BlurMode::Directional, 360.0)] {
         let rest = Rect::new(100.0, 100.0, 400.0, 200.0);
