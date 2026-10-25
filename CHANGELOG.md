@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`KeyEvent::is_command(c)`** matches Cmd (Ctrl off macOS) plus any character, including
+  Cmd-Space's `Key::Text(" ")` form. The `Key::Command` docs now say it carries any character
+  (⌘, and ⌘1 too), lowercased, not just editing letters.
 - **`El::time_scale(k)` runs one subtree's animations at `k` times normal speed.** Springs,
   transitions (enter, exit, layout), implicit animations, hover and press fades, loops and word
   reveals inside it advance by `dt × k`; `0.0` freezes them exactly and requests no frames, and

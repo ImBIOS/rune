@@ -1216,8 +1216,11 @@ $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/d
   and `{"type": "type", "text": "hi"}` reach the window even while the app has hidden it:
   headless there is no real window to hide, so `on_key` sees every key it would see in a
   focused window (first when nothing has focus, otherwise what the focused control and focus
-  navigation leave). `cmd` with a single character arrives as `Key::Command(c)` (`" "` gives
-  `Key::Command(' ')`); other keys keep their modifiers in `KeyEvent::mods`.
+  navigation leave). `cmd` with any single character (a letter, `1`, `,`) arrives as
+  `Key::Command(c)`, lowercased, as in a window; other keys keep their modifiers in
+  `KeyEvent::mods`. `" "` gives `Key::Command(' ')`, where a window sends Cmd-Space as
+  `Key::Text(" ")` with `mods.cmd`, the only `Text` that carries `cmd`;
+  `KeyEvent::is_command(' ')` matches both.
   `{"physical": "cmd+k"}` reaches only `on_physical_input` handlers.
 - **Chords**: `{"type": "shortcut", "chord": "cmd+space"}` is the user pressing a chord
   system-wide. Register it with `App::global_shortcut` or `register_shortcut`. Only its

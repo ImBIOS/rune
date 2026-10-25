@@ -119,7 +119,11 @@ pub enum Key {
     PageDown,
     Escape,
     Tab,
-    /// A letter with the command modifier ("a", "c", "v", "x", "z").
+    /// Any character typed with Cmd (Ctrl off macOS), lowercased: a letter ("a", "c", "v"), a
+    /// digit (⌘1) or punctuation (⌘,). `mods` still says whether Shift, Option or Ctrl were
+    /// held too. Space is the exception: Cmd-Space arrives natively as `Text(" ")` with
+    /// `mods.cmd` (scripts send `Command(' ')`); no other native `Text` comes with `mods.cmd`.
+    /// [`KeyEvent::is_command`] matches either form.
     Command(char),
     /// A function key, F1 through F24. Text fields ignore it; apps can bind it.
     Function(u8),
@@ -174,6 +178,18 @@ pub struct KeyEvent {
 }
 
 impl KeyEvent {
+    /// Whether this is Cmd (Ctrl off macOS) plus `c`, whatever else is held: `Key::Command(c)`,
+    /// or for `' '` the `Key::Text(" ")` a native Cmd-Space sends. Letters match either case;
+    /// check `mods.shift` for ⇧⌘ chords.
+    pub fn is_command(&self, c: char) -> bool {
+        let c = c.to_ascii_lowercase();
+        match &self.key {
+            Key::Command(k) => *k == c,
+            Key::Text(t) => c == ' ' && t == " " && self.mods.cmd,
+            _ => false,
+        }
+    }
+
     /// Text typed with Cmd (macOS) or Ctrl held, such as an unclaimed Shift-Cmd-Space. It never
     /// inserts, matching browsers and AppKit, but still reaches key handlers. Ctrl+Alt is AltGr
     /// on Windows and Linux, so text typed with both still inserts there; Option alone types.
@@ -622,6 +638,21 @@ mod tests {
 
     fn k(key: Key) -> KeyEvent {
         KeyEvent { key, mods: Mods::default() }
+    }
+
+    #[test]
+    fn is_command_matches_any_character_and_both_forms_of_cmd_space() {
+        let cmd = Mods { cmd: true, ..Mods::default() };
+        let ev = |key, mods| KeyEvent { key, mods };
+        assert!(ev(Key::Command(','), cmd).is_command(','));
+        assert!(ev(Key::Command('1'), cmd).is_command('1'));
+        assert!(ev(Key::Command('k'), cmd).is_command('K'));
+        assert!(ev(Key::Command('z'), Mods { shift: true, ..cmd }).is_command('z'));
+        assert!(!ev(Key::Command('k'), cmd).is_command('j'));
+        assert!(ev(Key::Text(" ".into()), cmd).is_command(' '));
+        assert!(ev(Key::Command(' '), cmd).is_command(' '));
+        assert!(!ev(Key::Text(" ".into()), Mods::default()).is_command(' '));
+        assert!(!ev(Key::Text("k".into()), Mods::default()).is_command('k'));
     }
 
     fn undo(e: &mut TextEdit, redo: bool) {
