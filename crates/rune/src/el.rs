@@ -1792,6 +1792,11 @@ impl El {
         }
         self
     }
+    /// Whether this is text that wraps (`.wrap()`), for containers that let such text shrink
+    /// to their width.
+    pub fn wraps(&self) -> bool {
+        self.text.as_ref().is_some_and(|t| t.wrap)
+    }
     /// One line, cut with "…" when wider than the element; the element may shrink below its
     /// text's width. A [`text_input`] ignores it and the other truncations.
     pub fn truncate(self) -> Self {

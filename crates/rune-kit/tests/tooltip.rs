@@ -26,6 +26,8 @@ fn a_tooltip_label_wraps_inside_its_max_width() {
                 let long = format!("{LONG} {LONG}");
                 tip.text(&k, long).build(&k, &mut layer)
             }
+            3 => tip.child(text(LONG).wrap()).child(text("⌘K").key("chip"))
+                .render(&TooltipStyle::neutral(true).max_width(160.0).padding(8.0, 5.0), &mut layer),
             _ => tip.label("Help").render(&TooltipStyle::neutral(true).max_width(160.0).padding(8.0, 5.0), &mut layer),
         };
         rune_kit::root(col().w_full().pt(200.0).items_center().child(tip), layer)
@@ -48,6 +50,14 @@ fn a_tooltip_label_wraps_inside_its_max_width() {
     let (tip, w) = (by_key(&rt, "t-tooltip").target, words(&rt, &long).target);
     assert_eq!(tip[2], 320.0);
     assert!(w[0] + w[2] <= tip[0] + tip[2] && w[3] > 20.0, "{w:?} inside {tip:?}");
+
+    // A wrapping child wraps inside the box without `.shrink()`, and a chip beside it keeps its width.
+    let rt = laid_out(3);
+    let (tip, w, chip) = (by_key(&rt, "t-tooltip").target, words(&rt, LONG).target, by_key(&rt, "chip").target);
+    assert_eq!(tip[2], 160.0);
+    assert!(w[2] <= tip[2] - 16.0 && w[0] + w[2] <= chip[0], "{w:?} inside {tip:?}, before {chip:?}");
+    assert!(chip[0] + chip[2] <= tip[0] + tip[2] - 8.0 + 0.01 && chip[2] > 10.0, "{chip:?} inside {tip:?}");
+    assert!(w[3] > 30.0, "several lines: {w:?}");
 
     let rt = laid_out(2);
     let (tip, w) = (by_key(&rt, "t-tooltip").target, words(&rt, "Help").target);

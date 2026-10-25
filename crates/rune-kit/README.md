@@ -136,7 +136,7 @@ source each time, and earlier blocks stay mounted.
   draws one on its own.
 
 `Tooltip::label(..).render(&TooltipStyle::neutral(dark), &mut layer)` builds a tooltip without
-a kit. `TooltipStyle::max_width(w)` caps its width; `label` and `text` wrap at it. The
+a kit. `TooltipStyle::max_width(w)` caps its width; `label`, `text` and a `.wrap()` text `child` wrap at it. The
 app owns `open`, so the hover delay is a `wake_after` in its hover handler; `El::help(text)` is
 the delayed, self-dismissing system tooltip when the look needn't match. The gallery's `rune-markdown--walkthrough`, `rune-markdown--diagrams`,
 `rune-markdown--table-styles` and `rune-markdown--code` scenes show every feature.

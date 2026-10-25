@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A wrapping tooltip child wraps inside the box.** `Tooltip::child(text(..).wrap())` laid out
+  at its one-line width and drew past `TooltipStyle::max_width`; it now shrinks to the box and
+  wraps there without `.shrink()`, beside a chip that keeps its width. Wrapping text nested
+  deeper in a child still needs `.shrink()` on that child. `El::wraps()` reports whether an
+  element is wrapping text.
 - **`App::tab_visits_controls(true)` lets Tab reach every control.** By default Tab follows
   macOS: with Keyboard navigation off it visits only text fields and lists. With this opt-in
   (also `WindowSpec::tab_visits_controls` and `Runtime::set_tab_visits_controls`) Tab and

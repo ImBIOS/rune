@@ -289,8 +289,9 @@ impl TooltipStyle {
         self.padding = (x, y);
         self
     }
-    /// The widest the tooltip grows: [`Tooltip::label`] and [`Tooltip::text`] wrap at it. A
-    /// wrapping [`Tooltip::child`] needs `.shrink()` as well as `.wrap()` to wrap there.
+    /// The widest the tooltip grows: [`Tooltip::label`], [`Tooltip::text`] and a
+    /// `.wrap()` text [`Tooltip::child`] wrap at it. Wrapping text nested deeper in a child
+    /// needs `.shrink()` on the child as well.
     pub fn max_width(mut self, w: f32) -> Self {
         self.max_w = Some(w);
         self
@@ -411,6 +412,8 @@ impl Tooltip {
             return trigger;
         }
         let value = self.value.into_iter().map(|c| match c {
+            // Wrapping text may shrink below its one-line width, so it wraps inside the box.
+            Content::El(e) if style.max_w.is_some() && e.wraps() => e.shrink(),
             Content::El(e) => e,
             Content::Text(s, look) => {
                 let (font, ink) = look.unwrap_or((style.font, style.ink));
