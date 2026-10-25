@@ -1438,6 +1438,8 @@ pub(crate) fn map_key(key: &WKey, m: ModifiersState) -> Option<KeyEvent> {
             NamedKey::ArrowDown => Key::Down,
             NamedKey::Home => Key::Home,
             NamedKey::End => Key::End,
+            NamedKey::PageUp => Key::PageUp,
+            NamedKey::PageDown => Key::PageDown,
             NamedKey::Escape => Key::Escape,
             NamedKey::Tab => Key::Tab,
             NamedKey::Space => Key::Text(" ".into()),

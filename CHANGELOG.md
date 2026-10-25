@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Key::PageUp` and `Key::PageDown`, and page keys scroll.** Page Up and Page Down used to
+  reach no handler; winit, Wayland layer shells and headless `--keys` (`PageUp`, `PageDown`)
+  now send them. A key nobody claims scrolls the focused element's scroll view (else the one
+  under the pointer, else the first) by 90% of its height, and Home and End scroll it to the
+  top and bottom, as an NSScrollView does. Text fields pass page keys on, so the caret stays
+  put while the view scrolls. `Key` is now `#[non_exhaustive]`: a `match` on it needs a `_` arm.
 - **A duplicate sibling key no longer closes the app.** Two siblings with one key used to stop
   a debug build at an assertion and panic inside Taffy in a release build, closing the window.
   Every build now keeps the first sibling's key, renames each later one `key#dup1`, `key#dup2`,

@@ -510,7 +510,7 @@ pub(crate) enum Kind {
     Fling(f32),
 }
 
-fn key_named(name: &str) -> Option<Key> {
+pub(crate) fn key_named(name: &str) -> Option<Key> {
     Some(match name {
         "Enter" => Key::Enter,
         "Backspace" => Key::Backspace,
@@ -521,6 +521,8 @@ fn key_named(name: &str) -> Option<Key> {
         "Down" => Key::Down,
         "Home" => Key::Home,
         "End" => Key::End,
+        "PageUp" => Key::PageUp,
+        "PageDown" => Key::PageDown,
         "Escape" => Key::Escape,
         "Tab" => Key::Tab,
         f if f.len() > 1 && f.starts_with('F') && f[1..].parse::<u8>().is_ok_and(|n| (1..=24).contains(&n)) => {

@@ -98,6 +98,8 @@ pub struct Mods {
     pub logo: bool,
 }
 
+/// A logical key. More keys may come, so a `match` needs a `_` arm.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Key {
     Text(String),
@@ -110,6 +112,11 @@ pub enum Key {
     Down,
     Home,
     End,
+    /// Page Up. Unclaimed, it scrolls the nearest scroll view up by most of a viewport.
+    /// Text fields leave it alone, as AppKit's do: the view scrolls and the caret stays.
+    PageUp,
+    /// Page Down, as `PageUp` the other way.
+    PageDown,
     Escape,
     Tab,
     /// A letter with the command modifier ("a", "c", "v", "x", "z").
@@ -488,7 +495,7 @@ impl TextEdit {
                     out.submit = true;
                 }
             }
-            Key::Tab => {}
+            Key::Tab | Key::PageUp | Key::PageDown => {}
             Key::Escape => out.blur = true,
             Key::Backspace => {
                 let (a, b) = self.range();

@@ -139,6 +139,8 @@ fn key_label(ev: &KeyEvent) -> (String, bool) {
         Key::Down => "↓".into(),
         Key::Home => "↖".into(),
         Key::End => "↘".into(),
+        Key::PageUp => "⇞".into(),
+        Key::PageDown => "⇟".into(),
         Key::Escape => "⎋".into(),
         Key::Tab => "⇥".into(),
         Key::Function(n) => format!("F{n}"),

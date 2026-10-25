@@ -141,7 +141,7 @@ fn key_event(state: &xkbcommon::xkb::State, key: u32) -> Option<crate::KeyEvent>
     let key = match symbol {
         0xff1b => crate::Key::Escape, 0xff0d => crate::Key::Enter, 0xff08 => crate::Key::Backspace,
         0xffff => crate::Key::Delete, 0xff09 | 0xfe20 => crate::Key::Tab,
-        0xff50 => crate::Key::Home, 0xff57 => crate::Key::End,
+        0xff50 => crate::Key::Home, 0xff57 => crate::Key::End, 0xff55 => crate::Key::PageUp, 0xff56 => crate::Key::PageDown,
         0xff51 => crate::Key::Left, 0xff52 => crate::Key::Up, 0xff53 => crate::Key::Right, 0xff54 => crate::Key::Down,
         0xffbe..=0xffd5 => crate::Key::Function((symbol - 0xffbe + 1) as u8),
         _ => {

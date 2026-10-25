@@ -2085,7 +2085,7 @@ impl<S: 'static> Runtime<S> {
         }
         if self.focus_key(ev, shown, one) { return true; }
         let input_handles = match &ev.key {
-            crate::edit::Key::Function(_) | crate::edit::Key::Tab => false,
+            crate::edit::Key::Function(_) | crate::edit::Key::Tab | crate::edit::Key::PageUp | crate::edit::Key::PageDown => false,
             crate::edit::Key::Command(c) => matches!(c, 'a' | 'c' | 'x' | 'z'),
             _ => !ev.is_command_chord() || ev.control_binding().is_some(),
         };
@@ -2097,7 +2097,31 @@ impl<S: 'static> Runtime<S> {
             self.events.push(format!("key {:?}", ev.key));
             return true;
         }
-        false
+        self.page_scroll(ev)
+    }
+
+    /// Page Up and Page Down scroll by most of a viewport, and Home and End to the top and
+    /// bottom, as an NSScrollView does, when nothing else took the key. The scroll view is the
+    /// focused element's nearest, else the one under the pointer, else the first in the tree.
+    fn page_scroll(&mut self, ev: &KeyEvent) -> bool {
+        use crate::Key::*;
+        if !matches!(ev.key, PageUp | PageDown | Home | End) || ev.mods.cmd || ev.mods.alt || ev.mods.ctrl { return false; }
+        let focused = self.focused.as_deref().and_then(|path| self.nodes.iter().position(|n| n.path == path));
+        let usable = |i: usize| self.nodes[i].scroll.is_some() && !self.subtree_exiting(i) && self.allowed(i);
+        let i = focused.and_then(|f| std::iter::successors(Some(f), |&i| self.nodes[i].parent).find(|&i| usable(i)))
+            .or_else(|| self.pointer.and_then(|(x, y)| self.scroll_at(x, y)).and_then(|id| self.node_index.get(&id).copied()))
+            .or_else(|| (0..self.nodes.len()).find(|&i| usable(i)));
+        let Some(i) = i else { return false };
+        let (id, page, stick) = (self.nodes[i].id, f64::from(self.nodes[i].local.h * 0.9), self.nodes[i].scroll.is_some_and(|s| s.stick_bottom));
+        let Some(st) = self.scrolls.get_mut(&id) else { return false };
+        let to = match ev.key { PageUp => st.offset - page, PageDown => st.offset + page, Home => 0.0, _ => st.max };
+        st.offset = to.clamp(0.0, st.max);
+        st.v = 0.0;
+        st.glide = None;
+        st.direct = true;
+        st.pinned = stick && st.offset >= st.max - 0.5;
+        self.events.push(format!("page {:?}", ev.key));
+        true
     }
 
     fn focused_layout(&mut self) -> Option<Rc<Layout<Ink>>> {
@@ -6459,6 +6483,40 @@ mod tests {
         rt.pointer_up(x, y);
         rt.frame(1.0 / 120.0);
         assert_eq!(rt.state.pressed, [5]);
+    }
+
+    #[test]
+    fn page_keys_reach_an_input_and_scroll_its_scroll_view_by_most_of_a_viewport() {
+        struct State { edit: crate::TextEdit, keys: Vec<crate::Key> }
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let field = crate::text_input(&s.edit, crate::TextStyle::new(14.0, 400.0)).key("field").size(200.0, 40.0)
+                .on_edit(|s: &mut State| &mut s.edit)
+                .on_input_key(|s: &mut State, ev, _| { s.keys.push(ev.key.clone()); false });
+            let list = col().key("list").w_full().child(field)
+                .children((0..20).map(|i| el().key(format!("r{i}")).size(200.0, 40.0)));
+            col().size(200.0, 200.0).child(col().key("scroll").size(200.0, 200.0).scroll(ScrollSpec { stick_bottom: false }).child(list))
+        }
+        let mut edit = crate::TextEdit::new("hello");
+        edit.focused = true;
+        let mut rt = Runtime::new(State { edit, keys: Vec::new() }, view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let top = |rt: &Runtime<State>| rt.presented("r0").unwrap().0[1];
+        assert_eq!(top(&rt), 40.0);
+        let page = |rt: &mut Runtime<State>, key: crate::Key, t: f64| {
+            rt.key(KeyEvent { key, mods: Default::default() });
+            rt.frame(t);
+        };
+        page(&mut rt, crate::Key::PageDown, 0.1);
+        assert_eq!(rt.state.keys, [crate::Key::PageDown], "the input's key handler sees it");
+        assert_eq!(top(&rt), 40.0 - 180.0, "a page is 90% of the viewport");
+        assert_eq!(rt.state.edit.text, "hello");
+        page(&mut rt, crate::Key::PageDown, 0.2);
+        page(&mut rt, crate::Key::PageDown, 0.3);
+        page(&mut rt, crate::Key::PageDown, 0.4);
+        assert_eq!(top(&rt), 40.0 - 640.0, "clamped at the bottom");
+        page(&mut rt, crate::Key::PageUp, 0.5);
+        assert_eq!(top(&rt), 40.0 - 460.0);
+        assert_eq!(crate::tooling::key_named("PageDown"), Some(crate::Key::PageDown));
     }
 
     #[test]
