@@ -160,6 +160,9 @@ impl Ops {
             if set {
                 store.set_raw(t as u32, tg);
             } else {
+                // `delay` is store time; the op's node may run on a scaled clock.
+                let k = store.node_time_scale(op.node);
+                let delay = if k > 0.0 { delay * k } else { delay };
                 let anim = Anim { delay: op.anim.delay + delay, ..op.anim };
                 store.animate_raw(t, tg, anim, None);
             }
@@ -270,7 +273,8 @@ impl Choreography {
         let tracks = &self.tracks[first as usize..(first + count) as usize];
         match when {
             When::Started => Some(start),
-            When::Arrived => Some(arrival(store, tracks, start)),
+            // A frozen step hasn't a known arrival yet: keep waiting.
+            When::Arrived => Some(arrival(store, tracks, start)).filter(|t| t.is_finite()),
             When::Settled => all_settled(store, tracks).then_some(now),
         }
     }
@@ -359,13 +363,18 @@ impl PhaseAnimator {
         if store.reduced_motion() {
             return;
         }
-        let Some(at) = self.next_at else {
+        let Some(mut at) = self.next_at else {
             // Waiting for a settle.
             if all_settled(store, &self.tracks) {
                 self.next_at = Some(now + self.hold as f64);
             }
             return;
         };
+        if at == f64::INFINITY {
+            // The phase was frozen when it started (`set_node_time_scale(_, 0.0)`): ask again.
+            at = arrival(store, &self.tracks, now) + self.hold as f64;
+            self.next_at = Some(at);
+        }
         if now < at {
             return;
         }

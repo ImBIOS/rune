@@ -101,3 +101,90 @@ fn phase_animator_cycles_and_holds_under_reduced_motion() {
     let held = pulse(&mut AnimationStore::new(), true);
     assert!(held.iter().all(|&p| p == 0));
 }
+
+#[test]
+fn a_cue_on_a_frozen_step_waits_and_scaled_steps_keep_one_clock() {
+    // A frozen first step: the second waits for its arrival instead of never running.
+    let mut store = AnimationStore::new();
+    let (a, b) = (NodeId(1), NodeId(2));
+    for n in [a, b] {
+        store.set(n, prop::OPACITY, 0.0);
+    }
+    store.set_node_time_scale(a, 0.0);
+    let mut ch = Choreography::new();
+    let s1 = ch.step(Cue::now(), |s| {
+        s.animate(a, prop::OPACITY, 1.0, motion::SETTLE);
+    });
+    let s2 = ch.step(Cue::arrived(s1), |s| {
+        s.animate(b, prop::OPACITY, 1.0, motion::SETTLE);
+    });
+    for i in 0..=480 {
+        store.set_time(i as f64 / 120.0);
+        if i == 120 {
+            store.set_node_time_scale(a, 1.0);
+        }
+        ch.tick(&mut store);
+        store.tick();
+        if i == 119 {
+            assert_eq!(ch.start_time(s2), None, "waits while its cue is frozen");
+        }
+    }
+    // Resumed at 1 s, `a` arrives 0.3 s later.
+    assert!((ch.start_time(s2).unwrap() - 1.3).abs() < 1e-3, "{:?}", ch.start_time(s2));
+    assert_eq!(store.get(b, prop::OPACITY), Some(1.0));
+
+    // Both at half speed: `b` starts when `a` arrives, 0.6 s in, and runs on the same curve.
+    let mut store = AnimationStore::new();
+    for n in [a, b] {
+        store.set(n, prop::OPACITY, 0.0);
+        store.set_node_time_scale(n, 0.5);
+    }
+    let mut ch = Choreography::new();
+    let s1 = ch.step(Cue::now(), |s| {
+        s.animate(a, prop::OPACITY, 1.0, motion::SETTLE);
+    });
+    ch.step(Cue::arrived(s1), |s| {
+        s.animate(b, prop::OPACITY, 1.0, motion::SETTLE);
+    });
+    let (mut a_at, mut b_at) = (0.0, 0.0);
+    for i in 0..=120 {
+        store.set_time(i as f64 / 120.0);
+        ch.tick(&mut store);
+        store.tick();
+        if i == 24 {
+            a_at = store.get(a, prop::OPACITY).unwrap();
+        }
+        if i == 96 {
+            b_at = store.get(b, prop::OPACITY).unwrap();
+        }
+    }
+    assert!(a_at > 0.05 && (a_at - b_at).abs() < 1e-3, "b at 0.8 s {b_at} vs a at 0.2 s {a_at}");
+}
+
+#[test]
+fn a_phase_started_frozen_advances_after_resuming() {
+    let mut store = AnimationStore::new();
+    let n = NodeId(1);
+    store.set_node_time_scale(n, 0.0);
+    let mut ph = PhaseAnimator::new()
+        .phase(|p| {
+            p.animate(n, prop::SCALE, 1.0, motion::SETTLE);
+        })
+        .phase(|p| {
+            p.animate(n, prop::SCALE, 1.04, motion::SETTLE);
+        });
+    let mut phases = Vec::new();
+    for i in 0..=480 {
+        store.set_time(i as f64 / 120.0);
+        if i == 120 {
+            store.set_node_time_scale(n, 1.0);
+        }
+        ph.tick(&mut store);
+        store.tick();
+        phases.push(ph.current());
+    }
+    let switches = |p: &[usize]| p.windows(2).filter(|w| w[0] != w[1]).count();
+    assert_eq!(switches(&phases[1..120]), 0, "frozen in its first animated phase");
+    // 0.3 s per phase for 3 s ≈ 10 switches.
+    assert!(switches(&phases[120..]) >= 8, "{}", switches(&phases[120..]));
+}

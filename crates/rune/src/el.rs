@@ -1743,8 +1743,9 @@ impl El {
     /// all of them multiply with the window's [`Cx::time_scale`](crate::Cx::time_scale).
     ///
     /// Only time slows. State still updates at once: a hover or press is tracked as usual and
-    /// only its fade waits. An element exiting under a frozen subtree stays mid-exit until the
-    /// scale rises, then finishes and is removed. A frozen subtree requests no frames.
+    /// only its fade waits. An exiting element drops its own factor and follows its ancestors
+    /// still in the tree, so one under a frozen subtree stays mid-exit until that scale rises,
+    /// then finishes and is removed. A frozen subtree requests no frames.
     /// Scrolling, growth stacks and `Tween` keep the window's clock: they follow input and
     /// layout, and a frozen scroll view would ignore the wheel. Anything not finite or below
     /// zero is `1.0`.

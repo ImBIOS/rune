@@ -367,3 +367,26 @@ fn scale_stays_above_point_nine_unless_a_small_glyph_opts_in() {
     let last = exit.iter().rev().find(|(t, _)| *t <= exited_at).unwrap().1;
     assert!(last.transform.scale.x < 0.65 && last.opacity < 1e-3, "{:?}", (last.transform.scale.x, last.opacity));
 }
+
+#[test]
+fn a_frozen_ancestor_holds_screen_travel_without_frames() {
+    let mut s = Scene::new();
+    let (p, c) = (NodeId(10), NodeId(11));
+    s.insert(p, spec(0.0, 0.0, 400.0, 400.0), Mount::Initial);
+    s.insert(c, spec(10.0, 10.0, 50.0, 50.0).parent(p), Mount::Initial);
+    s.frame_at(0.0);
+    s.set_frame(p, Rect::new(200.0, 100.0, 400.0, 400.0), motion::GLIDE);
+    s.set_frame(c, Rect::new(100.0, 200.0, 50.0, 50.0), LayoutAnim::new(motion::DRIFT).screen());
+    s.frame_at(0.05);
+    s.set_time_scale(p, 0.0);
+    let mut t = 0.05;
+    while t < 3.0 {
+        t += 1.0 / HZ;
+        s.frame_at(t);
+    }
+    assert!(!s.frame_at(t).animating, "the child arrived and its frozen parent asks for no frames");
+    s.set_time_scale(p, 1.0);
+    let (seen, _) = run(&mut s, t, t + 3.0, c);
+    assert!(!s.frame_at(t + 3.1).animating);
+    assert_eq!(seen.last().unwrap().1.rect.origin(), Vec2::new(300.0, 300.0));
+}

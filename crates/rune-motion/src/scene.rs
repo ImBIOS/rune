@@ -1006,8 +1006,9 @@ impl Scene {
             }
         }
         self.exited_seen = self.exited.len();
-        let animating = self.store.running()
-            || self.travelling.iter().any(|&i| self.store.node_time_scale(self.nodes[i as usize].id) > 0.0);
+        // A node still travelling waits on an active track of its own or an ancestor's, so this
+        // covers it, and a frozen one doesn't keep the frames coming.
+        let animating = self.store.running();
         if let Some(trace) = self.trace.as_mut() {
             trace.frame(self.store.now(), &self.out, &self.exited, self.store.events(), &self.intents);
             self.intents.clear();

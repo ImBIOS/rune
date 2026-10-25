@@ -3006,7 +3006,7 @@ impl<S: 'static> Runtime<S> {
         // Put nodes on their subtree's clock before this commit animates them.
         let time_scaled = self.time_scaled || nodes.iter().any(|n| n.time_scale != 1.0);
         let mut time_scales = Vec::new();
-        if time_scaled { self.sync_time_scales(&nodes, &mut time_scales); }
+        if time_scaled { self.sync_time_scales(&nodes, &mut time_scales, false); }
 
         // `El::matched` elements of this tree: (id, index, newly mounted).
         let mut arrivals: Vec<(Rc<str>, usize, bool)> = Vec::new();
@@ -3274,8 +3274,9 @@ impl<S: 'static> Runtime<S> {
         }
 
         if time_scaled {
-            // Exits keep following their subtree's scale, so a frozen one finishes once it resumes.
-            self.sync_time_scales(&nodes, &mut time_scales);
+            // Exits keep following their present ancestors' scale, so one under a frozen subtree
+            // finishes once it resumes.
+            self.sync_time_scales(&nodes, &mut time_scales, true);
             self.time_scaled = time_scales.iter().any(|&k| k != 1.0);
         }
         self.nodes = nodes;
@@ -3313,12 +3314,17 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// Runs each of `nodes` from `scales.len()` on at its `El::time_scale` times its parent's,
-    /// pushing the products onto `scales`. A node whose clock changes keeps its place: the store
-    /// rebases its tracks, and its reveal words and loop shift by the same amount.
-    fn sync_time_scales(&mut self, nodes: &[Node], scales: &mut Vec<f32>) {
+    /// pushing the products onto `scales`. `exiting` nodes drop their own factor, which the app
+    /// can no longer change, and follow their parent's. A node whose clock changes keeps its
+    /// place: the store rebases its tracks, and its reveal words and loop shift by the same amount.
+    fn sync_time_scales(&mut self, nodes: &[Node], scales: &mut Vec<f32>, exiting: bool) {
         for n in &nodes[scales.len()..] {
-            let k = n.time_scale * n.parent.and_then(|p| scales.get(p).copied()).unwrap_or(1.0);
+            let own = if exiting { 1.0 } else { n.time_scale };
+            let k = own * n.parent.and_then(|p| scales.get(p).copied()).unwrap_or(1.0);
             scales.push(k);
+            // Unmounted at once this commit: its clock went with it. (Present nodes not yet in
+            // the scene get theirs now, before their first tracks.)
+            if exiting && !self.scene.contains(n.id) { continue; }
             let store = self.scene.store_mut();
             let before = store.node_time(n.id);
             store.set_node_time_scale(n.id, k);
@@ -8334,6 +8340,39 @@ mod tests {
         lab_steps(&mut rt, 120);
         assert!(!rt.animating);
         assert_eq!(lab_opacity(&rt, "badge"), None, "and is removed");
+    }
+
+    #[test]
+    fn a_node_unmounted_at_once_in_a_scaled_subtree_drops_its_clock() {
+        let mut rt = Lab::at(1.0, 0.5).runtime();
+        let badge = rt.nodes.iter().find(|n| n.key.as_deref() == Some("badge")).unwrap().id;
+        assert_eq!(rt.scene.store().node_time_scale(badge), 0.5);
+        lab_set(&mut rt, |s| s.badge = false);
+        rt.settle_all();
+        rt.frame(LAB_DT);
+        assert_eq!(lab_opacity(&rt, "badge"), None);
+        assert_eq!(rt.scene.store().node_time_scale(badge), 1.0, "its clock went with it");
+    }
+
+    #[test]
+    fn an_exiting_element_drops_its_own_time_scale() {
+        fn view(show: &bool, _: &mut Cx<bool>) -> El {
+            let mut root = col().key("root").size(200.0, 100.0);
+            if *show {
+                root = root.child(el().key("card").size(80.0, 30.0).fill(Color::WHITE)
+                    .time_scale(0.0).transition(Transition::opacity()));
+            }
+            root
+        }
+        let mut rt = Runtime::new(true, view, (200.0, 100.0), Env::new(true, 1.0));
+        assert!(!rt.frame(0.0));
+        rt.state = false;
+        rt.dirty = true;
+        for _ in 0..3 { rt.frame(LAB_DT); }
+        let card = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("card")).expect("exiting");
+        assert!(card.exiting && card.opacity < 1.0, "its exit runs: {}", card.opacity);
+        for _ in 0..120 { rt.frame(LAB_DT); }
+        assert!(rt.elements().iter().all(|e| e.key.as_deref() != Some("card")), "and it leaves");
     }
 
     #[test]
