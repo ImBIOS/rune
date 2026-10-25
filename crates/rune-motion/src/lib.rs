@@ -63,6 +63,8 @@ pub use sequence::{Beat, Sequence};
 pub use props::{NodeId, Prop, PropClass, PropId, REDUCED_FADE, prop};
 pub use scene::{FrameOutput, LayoutAnim, Mask, Mount, NodeSpec, Phase, Presented, Scene, Travel, WIDTH_LEAD};
 pub use spring::{Spring, SpringPair};
+#[doc(hidden)]
+pub use store::Fx;
 pub use store::{AnimationStore, MotionEvent, Release, RetargetAudit, TrackId};
 pub use tokens as motion;
 pub use trace::{Intent, MotionTrace, SharedBuffer, TraceChannels, TraceHeader, flags};

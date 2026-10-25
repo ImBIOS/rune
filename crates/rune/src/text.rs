@@ -401,6 +401,9 @@ impl LinkPaint {
     }
 }
 
+/// Looked up for every glyph of every frame, so hashed with Fx rather than SipHash.
+type GlyphMap<V> = HashMap<GlyphKey, V, std::hash::BuildHasherDefault<rune_motion::Fx>>;
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct GlyphKey {
     font: u64,
@@ -468,7 +471,7 @@ pub struct Atlas {
     shelf_x: u32,
     shelf_y: u32,
     shelf_h: u32,
-    map: HashMap<GlyphKey, Option<AtlasGlyph>>,
+    map: GlyphMap<Option<AtlasGlyph>>,
     icons: HashMap<(usize, u32), Option<AtlasGlyph>>,
 }
 
@@ -489,7 +492,7 @@ impl Atlas {
             shelf_x: 1,
             shelf_y: 1,
             shelf_h: 0,
-            map: HashMap::new(),
+            map: GlyphMap::default(),
             icons: HashMap::new(),
         }
     }
@@ -713,7 +716,7 @@ pub struct TextSystem {
     scripts: u64,
     font_files: LoadedFiles,
     pub atlas: Atlas,
-    color_glyphs: HashMap<GlyphKey, ColorGlyph>,
+    color_glyphs: GlyphMap<ColorGlyph>,
     color_pixels: Vec<crate::pixels::Pixels>,
     /// Layouts built since the last commit (shaping work counter for perf gates).
     pub shaped: u32,
@@ -949,7 +952,7 @@ impl TextSystem {
             scripts: 0,
             font_files,
             atlas: Atlas::new(),
-            color_glyphs: HashMap::new(),
+            color_glyphs: GlyphMap::default(),
             color_pixels: Vec::new(),
             shaped: 0,
             cluster_scratch: Vec::new(),

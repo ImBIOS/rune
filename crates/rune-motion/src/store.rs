@@ -88,8 +88,9 @@ struct Meta {
     node_next: u32,
 }
 
+/// A fast, unkeyed hasher for small fixed-size keys (ids, glyph keys) that no input chooses.
 #[derive(Default)]
-pub(crate) struct Fx(u64);
+pub struct Fx(u64);
 impl Hasher for Fx {
     fn write(&mut self, bytes: &[u8]) {
         for &b in bytes {
