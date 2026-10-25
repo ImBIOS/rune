@@ -4022,7 +4022,12 @@ impl<S: 'static> Runtime<S> {
         self.top_target(x, y).filter(|&i| self.is_selectable(i))
     }
 
-    pub fn pointer_move(&mut self, x: f32, y: f32) {
+    pub fn pointer_move(&mut self, x: f32, y: f32) { self.move_pointer(x, y, true); }
+
+    /// `drag_move` false keeps a held drag from getting a `Phase::Move`: a release at the
+    /// point the drag last saw has nothing new to report, and its instant transaction would
+    /// cut short whatever the press started (a tapped slider's knob mid-spring).
+    fn move_pointer(&mut self, x: f32, y: f32, drag_move: bool) {
         self.pointer = Some((x, y));
         if self.in_viewport(x, y) { self.left_in_capture = false; }
         for &(id, rect) in &self.hits {
@@ -4048,7 +4053,7 @@ impl<S: 'static> Runtime<S> {
         self.capture_inside = !self.press_cancelled && if self.native_overlay || hits.peek().is_some() {
             hits.any(|(_, r)| contains(*r, x, y))
         } else { contains(r, x, y) };
-        if has_drag {
+        if has_drag && drag_move {
             let (dx, dy) = (x - self.press_at.0, y - self.press_at.1);
             let [lx, ly] = self.to_local(i, x, y);
             let d = Drag { phase: Phase::Move, x: lx, y: ly, dx, dy, ..d };
@@ -4305,7 +4310,8 @@ impl<S: 'static> Runtime<S> {
     fn release(&mut self, x: f32, y: f32) {
         // A release never starts a drag-out: the system session needs the button held.
         self.drag_out_armed = false;
-        self.pointer_move(x, y);
+        let moved = self.pointer != Some((x, y));
+        self.move_pointer(x, y, moved);
         // A drag that selected text is a selection, not a press.
         let selected = self.selected_by_drag();
         self.text_sel.dragging = false;

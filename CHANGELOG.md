@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A tap's release no longer counts as a drag move.** Letting go where the pointer already was
+  used to queue a `Phase::Move` drag event, which instant-commits in most handlers: a slider tap
+  sprang the knob toward the tap and then jumped the rest of the way on release. A release now
+  sends a move only when the pointer moved since the last move. Things apps can notice: a drag
+  handler gets no Move for a release at the last position, and tap-to-seek controls animate
+  through the release.
+
 - **The `Tx` scroll requests take key paths**, as `Cx::layout` and `Tx::fly_text` do:
   `scroll_into_view`, `scroll_to_bottom`, `scroll_page`, `scroll_to`, `scroll_to_instant`,
   `scroll_to_x`, `scroll_to_y` and `Runtime::scroll_at_bottom` accept `"list/label"` (leading keys
