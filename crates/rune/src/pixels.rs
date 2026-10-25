@@ -115,7 +115,6 @@ struct Slot {
     w: u32,
     h: u32,
     generation: u64,
-    used: bool,
 }
 
 /// One stable shelf page, or an exact-size standalone page for a large image.
@@ -128,6 +127,10 @@ pub struct ImagePage {
     shelf_x: u32,
     shelf_y: u32,
     shelf_h: u32,
+    /// Drawn from in the last completed frame.
+    shown: bool,
+    /// Drawn from in this frame so far; only ever set until the frame ends.
+    touched: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,10 +175,10 @@ impl ImageAtlas {
         }
         if !self.slots.contains_key(&key) {
             let (page, x, y) = self.allocate(w, h);
-            self.slots.insert(key, Slot { page, x, y, w, h, generation: 0, used: true });
+            self.slots.insert(key, Slot { page, x, y, w, h, generation: 0 });
         }
         let slot = self.slots.get_mut(&key).unwrap();
-        slot.used = true;
+        self.pages[slot.page].touched = true;
         if slot.generation != frame.generation {
             slot.generation = frame.generation;
             let page = &mut self.pages[slot.page];
@@ -191,11 +194,17 @@ impl ImageAtlas {
         Some(Placed { rect: [slot.x, slot.y, w, h], page: slot.page, premultiplied: frame.mips.is_some() })
     }
 
-    /// Forgets images no element showed since the last call; when nothing is left, the shelves
-    /// start over so replaced sizes don't fill the atlas.
+    /// Forgets images no element showed since the last call, except on pages that still show
+    /// one and on the first page: shelves never reuse a slot's space until their page starts
+    /// over, so an image shown again there (a view come back to) needs no copy or upload. A
+    /// page left with nothing starts over so replaced sizes don't fill the atlas; a full atlas
+    /// starts over a page that showed nothing last frame or yet this one before it adds one.
     pub fn end_frame(&mut self) {
-        self.slots.retain(|_, s| std::mem::take(&mut s.used));
+        let pages = &self.pages;
+        let first_kept = pages.first().is_some_and(|p| p.width <= IMAGE_ATLAS_SIZE && p.height <= IMAGE_ATLAS_SIZE);
+        self.slots.retain(|_, s| pages[s.page].touched || (s.page == 0 && first_kept));
         for (i, page) in self.pages.iter_mut().enumerate() {
+            page.shown = std::mem::take(&mut page.touched);
             if !self.slots.values().any(|slot| slot.page == i) {
                 (page.shelf_x, page.shelf_y, page.shelf_h) = (0, 0, 0);
                 page.dirty = None;
@@ -218,6 +227,17 @@ impl ImageAtlas {
             if page.data.is_empty() { *page = ImagePage::new(w, h); }
             if let Some((x, y)) = page.allocate(w, h) { return (i, x, y); }
         }
+        // Full: start over a shelf page that showed nothing last frame or yet this one. A page
+        // not drawn from yet this frame may still be, later in the tree.
+        let idle = |p: &ImagePage| !p.shown && !p.touched && p.width <= IMAGE_ATLAS_SIZE && p.height <= IMAGE_ATLAS_SIZE
+            && p.shelf_y + p.shelf_h > 0;
+        if w <= IMAGE_ATLAS_SIZE && h <= IMAGE_ATLAS_SIZE && let Some(i) = self.pages.iter().position(idle) {
+            self.slots.retain(|_, s| s.page != i);
+            let page = &mut self.pages[i];
+            (page.shelf_x, page.shelf_y, page.shelf_h) = (0, 0, 0);
+            let (x, y) = page.allocate(w, h).unwrap();
+            return (i, x, y);
+        }
         let mut page = ImagePage::new(w, h);
         let (x, y) = page.allocate(w, h).unwrap();
         self.pages.push(page);
@@ -230,7 +250,7 @@ impl ImagePage {
         let (width, height) = if w > IMAGE_ATLAS_SIZE || h > IMAGE_ATLAS_SIZE { (w, h) }
             else { (IMAGE_ATLAS_SIZE, IMAGE_ATLAS_SIZE) };
         Self { width, height, data: vec![0; width as usize * height as usize * 4],
-            dirty: None, shelf_x: 0, shelf_y: 0, shelf_h: 0 }
+            dirty: None, shelf_x: 0, shelf_y: 0, shelf_h: 0, shown: false, touched: false }
     }
 
     fn allocate(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
@@ -538,7 +558,74 @@ mod tests {
         atlas.end_frame();
         atlas.place(&px, [3.0, 2.0]);
         atlas.end_frame();
-        assert!(atlas.slots.contains_key(&(px.id, 0)) && !atlas.slots.contains_key(&(other.id, 0)), "unshown images are forgotten");
+        assert!(atlas.slots.contains_key(&(px.id, 0)) && atlas.slots.contains_key(&(other.id, 0)), "the first page keeps unshown images");
+    }
+
+    #[test]
+    fn an_image_shown_again_after_a_while_is_not_copied_again() {
+        let mut atlas = ImageAtlas::default();
+        let (list, grid) = (Pixels::new(), Pixels::new());
+        list.set(32, 32, vec![1; 32 * 32 * 4]);
+        grid.set(48, 48, vec![2; 48 * 48 * 4]);
+        let shown = atlas.place(&list, [32.0; 2]).unwrap();
+        atlas.end_frame();
+        for _ in 0..4 {
+            atlas.place(&grid, [48.0; 2]);
+            atlas.end_frame();
+        }
+        atlas.pages[0].dirty = None;
+        assert_eq!(atlas.place(&list, [32.0; 2]), Some(shown));
+        assert_eq!(atlas.pages[0].dirty, None, "no copy, no upload");
+    }
+
+    #[test]
+    fn a_full_atlas_starts_over_pages_that_show_nothing_before_it_grows() {
+        let mut atlas = ImageAtlas::default();
+        let old: Vec<Pixels> = (0..4).map(|_| { let p = Pixels::new(); p.set(512, 512, vec![1; 512 * 512 * 4]); p }).collect();
+        for p in &old { atlas.place(p, [512.0; 2]); }
+        atlas.end_frame();
+        atlas.end_frame();
+        assert_eq!(atlas.pages.len(), 1);
+        let new = Pixels::new();
+        new.set(512, 512, vec![2; 512 * 512 * 4]);
+        assert_eq!(atlas.place(&new, [512.0; 2]).unwrap().rect, [0, 0, 512, 512]);
+        assert_eq!(atlas.pages.len(), 1);
+        assert!(!atlas.slots.contains_key(&(old[0].id, 0)), "the page's old images are forgotten");
+    }
+
+    /// A new image earlier in the tree than a body that fills the first page: the body isn't
+    /// drawn yet this frame when the new image needs room.
+    #[test]
+    fn a_full_page_shown_last_frame_is_not_started_over_before_its_images_are_drawn() {
+        let mut atlas = ImageAtlas::default();
+        let body: Vec<Pixels> = (0..4).map(|i| { let p = Pixels::new(); p.set(512, 512, vec![i; 512 * 512 * 4]); p }).collect();
+        let placed: Vec<_> = body.iter().map(|p| atlas.place(p, [512.0; 2]).unwrap()).collect();
+        atlas.end_frame();
+        atlas.pages[0].dirty = None;
+        let new = Pixels::new();
+        new.set(64, 64, vec![9; 64 * 64 * 4]);
+        assert_eq!(atlas.place(&new, [64.0; 2]).unwrap().page, 1);
+        assert_eq!(body.iter().map(|p| atlas.place(p, [512.0; 2]).unwrap()).collect::<Vec<_>>(), placed);
+        assert_eq!(atlas.pages[0].dirty, None, "the body copies in nothing");
+    }
+
+    /// An image drawn twice in a frame, resized by its producer in between: the first draw's
+    /// pixels stay put while this frame still samples them.
+    #[test]
+    fn an_image_resized_between_two_draws_keeps_the_first_draws_pixels() {
+        let mut atlas = ImageAtlas::default();
+        let px = Pixels::new();
+        px.set(512, 512, vec![1; 512 * 512 * 4]);
+        let fill: Vec<Pixels> = (0..3).map(|_| { let p = Pixels::new(); p.set(512, 512, vec![2; 512 * 512 * 4]); p }).collect();
+        atlas.place(&px, [512.0; 2]);
+        for p in &fill { atlas.place(p, [512.0; 2]); }
+        atlas.end_frame();
+        let first = atlas.place(&px, [512.0; 2]).unwrap();
+        px.set(600, 600, vec![3; 600 * 600 * 4]);
+        let second = atlas.place(&px, [600.0; 2]).unwrap();
+        assert_ne!(second.page, first.page);
+        let [x, y, ..] = first.rect;
+        assert_eq!(atlas.pages[first.page].data[((y * IMAGE_ATLAS_SIZE + x) * 4) as usize], 1);
     }
 
     #[test]
@@ -568,6 +655,6 @@ mod tests {
         atlas.end_frame();
         assert_eq!(atlas.pages.len(), 1, "unused trailing pages release their storage");
         atlas.end_frame();
-        assert!(atlas.pages.is_empty());
+        assert_eq!(atlas.pages.len(), 1, "the first page keeps its images");
     }
 }
