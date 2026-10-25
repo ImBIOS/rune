@@ -687,6 +687,41 @@ Focused editors take precedence; late reads are discarded if the target changed.
 Headless `--script` `paste` supplies text directly through the same routing and
 records `paste window` or `paste field` in `--trace`, without recording contents.
 
+#### Rich clipboard
+
+A `ClipboardContent` is plain text plus, optionally, HTML and RTF. Copy formatted text with
+`tx.copy_rich(ClipboardContent::new("Ship it").with_html("<b>Ship</b> it").with_rtf(rtf))`;
+plain text is always written, so every app can paste it. `copy_secret` stays plain text only.
+
+Pasting delivers the richest form the source offered. A field hears it before its editor with
+`.on_input_paste(|s, content, tx| -> bool)`: return true when the app took the paste (say, a
+rich composer parsing `content.html()` into its model), false to let the editor paste
+`content.text()` as before. The root's `.on_paste_content(|s, content, tx| ..)` is `on_paste`
+with every form. `tx.read_clipboard(|s, content, tx| ..)` reads without pasting; it always
+answers, with empty content when there's nothing to read. Fields without a hook and text
+`on_paste` handlers behave exactly as before, and a clipboard with HTML but no plain text
+reaches only the rich hooks. Reads run on the clipboard worker, never the event thread.
+
+Clipboard HTML is another app's untrusted input. Rune runs it through `sanitize_html` before
+any hook sees it: scripts, event handlers, frames, embeds, `javascript:` and other non-web
+URLs, comments and CSS that loads anything are removed; text, tags, `class`,
+inline styles and inert `<style>` stay. Treat the result as markup to parse into a model, not
+to hand a web view as is. RTF is passed through untouched.
+
+| Platform | Copy | Paste |
+| --- | --- | --- |
+| macOS | text, `public.html`, `public.rtf` in one pasteboard change | HTML; else RTF converted to HTML (TextEdit, Notes, Pages); else text |
+| Windows | text and CF_HTML (`HTML Format`); no RTF | CF_HTML fragment, else text |
+| Linux (X11, Wayland data-control) | text and `text/html`; no RTF | `text/html`, else text |
+| Web | `text/plain` and `text/html` through the async Clipboard API; no RTF | `text/html` from the paste event or `navigator.clipboard.read()`, else text |
+
+On macOS the RTF conversion uses `NSAttributedString` on the worker; AppKit's RTF reader and
+HTML writer don't need the main thread. In tests, `clipboard::memory()` keeps every form:
+`set_content(ClipboardContent::new("Hi").with_html("<b>Hi</b>"))` stands in for another app's
+copy and `content()` shows what Rune wrote. `Runtime::paste_content` and the script step
+`{"paste": {"text": "Hi", "html": "<b>Hi</b>", "rtf": "…"}}` (or `{"paste": "Hi"}`) paste
+several forms through the same routing, sanitised as a real paste is.
+
 `tx.fly_text("prompt", "sent-text")` hands a visible plain-text field to a newly
 mounted, uniquely keyed text node. The runtime captures its visible glyphs before
 committing and measures the destination after growth/scroll each frame. One 0.32 s

@@ -68,8 +68,8 @@ rfd = { version = "0.17", optional = true, default-features = false }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5.2"
 block2 = "0.5"
-objc2-foundation = { version = "0.2.2", features = ["NSArray", "NSData", "NSGeometry", "NSProcessInfo", "NSString", "NSThread", "NSURL", "NSUserDefaults"] }
-objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSButton", "NSCell", "NSControl", "NSEvent", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSView", "NSWindow", "NSColor", "NSGraphics", "NSPanel", "NSScreen", "NSPasteboard", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSGraphicsContext", "NSImage"] }
+objc2-foundation = { version = "0.2.2", features = ["NSArray", "NSAttributedString", "NSData", "NSDictionary", "NSError", "NSGeometry", "NSObject", "NSRange", "NSValue", "NSProcessInfo", "NSString", "NSThread", "NSURL", "NSUserDefaults"] }
+objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSButton", "NSCell", "NSControl", "NSEvent", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSView", "NSWindow", "NSColor", "NSGraphics", "NSPanel", "NSScreen", "NSPasteboard", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSGraphicsContext", "NSImage", "NSAttributedString"] }
 objc2-video = { package = "objc2", version = "0.6" }
 objc2-core-foundation = "0.3"
 objc2-core-video = { version = "0.3", features = ["CVPixelBufferIOSurface", "objc2-io-surface"] }

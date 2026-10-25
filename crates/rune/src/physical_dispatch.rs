@@ -176,7 +176,7 @@ mod tests {
             Some(KeyEvent { key: Key::Command('v'), mods }));
         rt.frame(0.0);
         let target = rt.paste_request.take().expect("paste requested");
-        rt.paste_result(target, zeroize::Zeroizing::new("paste".into()));
+        rt.paste_result(target, crate::ClipboardContent::new("paste"));
         rt.frame(0.0);
         assert_eq!(rt.state.edit.text, "paste");
         rt.physical_with_fallback(PhysicalInput::Key { key: PhysicalKeyCode::Escape, mods: Mods::default(), pressed: true, repeat: false },
@@ -280,7 +280,7 @@ mod tests {
         assert_eq!((rt.state.keys, rt.state.app_keys), (0, 1));
         // Image-only clipboard sends no reply. An empty text reply also never falls
         // through to either key handler.
-        rt.paste_result(first.clone(), zeroize::Zeroizing::new(String::new()));
+        rt.paste_result(first.clone(), crate::ClipboardContent::new(""));
         rt.frame(0.0);
         assert_eq!((rt.state.keys, rt.state.app_keys), (0, 1));
         key(&mut rt, PhysicalKeyCode::KeyV, Key::Command('v'));
@@ -289,7 +289,7 @@ mod tests {
         let target = rt.paste_request.take().unwrap();
         assert_eq!(target, first, "target captured before the next click, not at worker flush");
         assert_ne!(target, rt.paste_target());
-        rt.paste_result(target, zeroize::Zeroizing::new("late".into()));
+        rt.paste_result(target, crate::ClipboardContent::new("late"));
         rt.frame(0.0);
         assert!(rt.state.first.text.is_empty() && rt.state.second.text.is_empty());
     }
@@ -310,7 +310,7 @@ mod tests {
             key(&mut rt, PhysicalKeyCode::KeyV, Key::Command('v'));
             rt.frame(0.0);
             let target = rt.paste_request.take().unwrap();
-            rt.paste_result(target, zeroize::Zeroizing::new("replacement".into()));
+            rt.paste_result(target, crate::ClipboardContent::new("replacement"));
             rt.frame(0.0);
             assert_eq!(rt.state.first.text, "replacement");
             if secure {
@@ -496,7 +496,7 @@ mod tests {
         rt.frame(0.0);
         assert_eq!(rt.paste_request, Some(None));
         let target = rt.paste_request.take().unwrap();
-        rt.paste_result(target, zeroize::Zeroizing::new("app".into()));
+        rt.paste_result(target, crate::ClipboardContent::new("app"));
         rt.frame(0.0);
         assert_eq!(rt.state, "app");
     }

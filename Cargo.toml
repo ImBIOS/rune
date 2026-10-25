@@ -27,6 +27,7 @@ members = [
     "examples/cursed-settings",
     "examples/drag-out",
     "examples/drop-files",
+    "examples/rich-clipboard",
     "examples/matched",
     "examples/launcher",
     "examples/glass-card",

@@ -86,7 +86,8 @@ export function mount(canvas, callback) {
     for (const field of [textarea, password]) {
         listen(field, 'paste', event => {
             event.preventDefault();
-            send({ kind: 'paste', text: event.clipboardData?.getData('text/plain') ?? '' });
+            const data = event.clipboardData;
+            send({ kind: 'paste', text: data?.getData('text/plain') ?? '', html: field === textarea ? data?.getData('text/html') ?? '' : '' });
         });
         listen(field, 'beforeinput', event => {
             if (event.inputType === 'insertLineBreak' || event.inputType === 'insertParagraph') {

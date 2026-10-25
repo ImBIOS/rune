@@ -2875,6 +2875,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rich-clipboard"
+version = "0.0.1"
+dependencies = [
+ "rune",
+]
+
+[[package]]
 name = "roxmltree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

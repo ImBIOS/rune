@@ -523,7 +523,7 @@ pub(crate) enum Kind {
     SecondaryUp,
     /// The key and whether it is an auto-repeat.
     Key(KeyEvent, bool),
-    Paste(String),
+    Paste(crate::ClipboardContent),
     /// A wheel delta (dx, dy) in points.
     Wheel(f32, f32),
     /// A release velocity (vx, vy) in points per second.
@@ -602,7 +602,8 @@ impl Ev {
             Kind::SecondaryDown => pointer(PointerAction::SecondaryDown),
             Kind::SecondaryUp => pointer(PointerAction::SecondaryUp),
             Kind::Key(key, repeat) => ScriptEvent::Key { key: key.clone(), repeat: *repeat },
-            Kind::Paste(text) => ScriptEvent::Paste(text.clone()),
+            Kind::Paste(content) if content.is_rich() => ScriptEvent::PasteContent(content.clone()),
+            Kind::Paste(content) => ScriptEvent::Paste(content.text().to_owned()),
             Kind::Wheel(0.0, dy) => pointer(PointerAction::Scroll(*dy)),
             Kind::Wheel(dx, dy) => pointer(PointerAction::ScrollXy(*dx, *dy)),
             Kind::Fling(0.0, v) => pointer(PointerAction::Fling(*v)),
@@ -642,6 +643,14 @@ pub(crate) fn desktop(args: &Args, script: Option<&Value>) -> crate::virtual_des
     crate::virtual_desktop::VirtualDesktop::from_script_sized(script, scale, size).unwrap_or_else(|e| die(&e))
 }
 
+/// `{"text": …, "html": …, "rtf": …}`, each optional, as another app's clipboard would hold.
+fn paste_content(e: &Value) -> crate::ClipboardContent {
+    let mut content = crate::ClipboardContent::new(e["text"].as_str().unwrap_or(""));
+    if let Some(html) = e["html"].as_str() { content = content.with_html(html); }
+    if let Some(rtf) = e["rtf"].as_str() { content = content.with_rtf(rtf); }
+    content
+}
+
 fn parse_script(list: Value) -> Vec<Ev> {
     let Value::Array(items) = list else { die("script must be an array of events or {\"events\": [...]}") };
     let mut out = Vec::new();
@@ -676,6 +685,11 @@ fn parse_script(list: Value) -> Vec<Ev> {
         if let Some(shortcut) = e["shortcut"].as_str() {
             let shortcut = shortcut.parse().unwrap_or_else(|e: crate::ShortcutError| die(&e.to_string()));
             out.push(Ev { t, kind: Kind::Shortcut(shortcut), pos: Pos::Rel(0.0, 0.0) });
+            continue;
+        }
+        if !e["paste"].is_null() {
+            let paste = if e["paste"].is_string() { serde_json::json!({ "text": e["paste"] }) } else { e["paste"].clone() };
+            out.push(Ev { t, kind: Kind::Paste(paste_content(&paste)), pos: Pos::Rel(0.0, 0.0) });
             continue;
         }
         if parse_files(&e, t, &mut out) { continue; }
@@ -766,7 +780,7 @@ fn parse_script(list: Value) -> Vec<Ev> {
                 let repeat = e["repeat"].as_bool().unwrap_or(false);
                 out.push(Ev { t, kind: Kind::Key(KeyEvent { key, mods }, repeat), pos: Pos::Rel(0.0, 0.0) });
             }
-            "paste" => out.push(Ev { t, kind: Kind::Paste(e["text"].as_str().unwrap_or("").to_owned()), pos: Pos::Rel(0.0, 0.0) }),
+            "paste" => out.push(Ev { t, kind: Kind::Paste(paste_content(&e)), pos: Pos::Rel(0.0, 0.0) }),
             "scroll" => {
                 // A trackpad swipe: deltas eased over `dur`, then (with "fling") the release velocity.
                 let dx = e["dx"].as_f64().unwrap_or(0.0) as f32;
@@ -889,6 +903,30 @@ fn script_events_answer_a_pop_up_menu() {
             picked
         }).collect();
     assert_eq!(kinds, [Some("dark".to_owned()), None]);
+}
+
+#[cfg(test)]
+#[test]
+fn a_script_paste_can_carry_html_and_rtf() {
+    let script = parse_script(json!([
+        {"type": "paste", "text": "plain"},
+        {"paste": "short"},
+        {"paste": {"text": "Hi", "html": "<b>Hi</b><img src=x onerror=y>", "rtf": "{\\rtf1 Hi}"}},
+    ]));
+    let public: Vec<_> = script.iter().map(|e| format!("{:?}", e.public().event)).collect();
+    assert_eq!(public[..2], [r#"Paste("plain")"#, r#"Paste("short")"#]);
+    assert!(public[2].starts_with("PasteContent("), "{}", public[2]);
+    let mut rt = Runtime::new(Vec::new(), |_: &Vec<crate::ClipboardContent>, _: &mut crate::Cx<Vec<crate::ClipboardContent>>| {
+        crate::el().on_paste_content(|s: &mut Vec<crate::ClipboardContent>, content, _| s.push(content.clone()))
+    }, (100.0, 100.0), Env::default());
+    rt.frame(0.0);
+    for event in script {
+        let Kind::Paste(content) = event.kind else { panic!("paste parsed as another event") };
+        rt.paste_content(content);
+    }
+    rt.frame(0.0);
+    let texts: Vec<_> = rt.state.iter().map(|c| (c.text(), c.html(), c.rtf())).collect();
+    assert_eq!(texts, [("plain", None, None), ("short", None, None), ("Hi", Some(r#"<b>Hi</b><img src="x">"#), Some("{\\rtf1 Hi}"))]);
 }
 
 #[cfg(test)]
@@ -1538,7 +1576,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
                 Kind::Key(k, false) => rt.key(k.clone()),
                 Kind::Key(k, true) => rt.repeat_key(k.clone()),
                 Kind::Physical(event) => rt.physical_input(*event),
-                Kind::Paste(s) => rt.paste(s.clone()),
+                Kind::Paste(content) => rt.paste_content(content.clone()),
                 Kind::Wheel(dx, dy) => wheel(&mut rt, (x, y), *dx, *dy),
                 Kind::Fling(vx, vy) => fling(&mut rt, (x, y), *vx, *vy),
                 Kind::Files(step) => file_input(&mut rt, step, (x, y)),

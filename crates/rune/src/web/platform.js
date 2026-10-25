@@ -1,9 +1,31 @@
-export async function writeClipboard(text) {
-    return navigator.clipboard?.writeText(text) ?? Promise.reject(new Error('Clipboard requires HTTPS.'));
+// Plain text, with HTML beside it when there is some (`html` is '' otherwise).
+export async function writeClipboard(text, html) {
+    const clipboard = navigator.clipboard;
+    if (!clipboard) throw new Error('Clipboard requires HTTPS.');
+    if (!html || typeof ClipboardItem === 'undefined') return clipboard.writeText(text);
+    return clipboard.write([new ClipboardItem({
+        'text/plain': new Blob([text], { type: 'text/plain' }),
+        'text/html': new Blob([html], { type: 'text/html' }),
+    })]);
 }
 
-export async function readClipboard() {
-    return navigator.clipboard?.readText() ?? Promise.reject(new Error('Clipboard requires HTTPS.'));
+// `{ text, html }`, either undefined when the clipboard lacks it; `html` only when `rich`.
+// `read()` starts before the first await, inside the input handler; where it fails, plain
+// `readText()` is the fallback.
+export async function readClipboard(rich) {
+    const clipboard = navigator.clipboard;
+    if (!clipboard) throw new Error('Clipboard requires HTTPS.');
+    if (rich && clipboard.read) {
+        try {
+            let text, html;
+            for (const item of await clipboard.read()) {
+                if (text === undefined && item.types.includes('text/plain')) text = await (await item.getType('text/plain')).text();
+                if (html === undefined && item.types.includes('text/html')) html = await (await item.getType('text/html')).text();
+            }
+            return { text, html };
+        } catch {}
+    }
+    return { text: await clipboard.readText() };
 }
 
 export function openLink(url) {

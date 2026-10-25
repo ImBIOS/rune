@@ -28,6 +28,7 @@ pub struct Tx {
     pub(crate) window_step: bool,
     pub(crate) copy: Option<crate::ClipboardWrite>,
     pub(crate) paste: bool,
+    pub(crate) clipboard_reads: Vec<ClipboardRead>,
     pub(crate) clear_secret: bool,
     pub(crate) text_flights: Vec<(String, String)>,
     pub(crate) scroll_to: Vec<String>,
@@ -156,7 +157,18 @@ impl Tx {
 
     /// Request a clipboard write from the shell after this handler finishes.
     pub fn copy(&mut self, text: impl Into<String>) {
-        self.copy = Some(crate::ClipboardWrite::new(text.into(), None));
+        self.copy = Some(crate::ClipboardWrite::new(crate::ClipboardContent::new(text)));
+    }
+
+    /// Copy formatted text: plain text for every app, plus HTML and RTF for apps that paste
+    /// formatting (Mail, Notes, Pages, Google Docs). Windows and Linux write the plain text and
+    /// HTML, and the web plain text and HTML, without RTF.
+    ///
+    /// ```ignore
+    /// tx.copy_rich(ClipboardContent::new("Ship it").with_html("<b>Ship</b> it"));
+    /// ```
+    pub fn copy_rich(&mut self, content: crate::ClipboardContent) {
+        self.copy = Some(crate::ClipboardWrite::new(content));
     }
 
     /// Exclude this text from clipboard histories and clear it after `clear_after` if unchanged.
@@ -176,6 +188,21 @@ impl Tx {
 
     /// Read the OS clipboard asynchronously and paste into the focused field or root `on_paste`.
     pub fn request_paste(&mut self) { self.paste = true; }
+
+    /// Read the clipboard off the event thread and hand what it holds to `f`, as an update,
+    /// once it arrives: an empty [`ClipboardContent`](crate::ClipboardContent) when it holds
+    /// nothing readable. HTML is sanitised, and on macOS made from RTF when that's all there
+    /// is. Nothing is pasted anywhere. The web asks the browser, which may prompt or refuse.
+    ///
+    /// ```ignore
+    /// tx.read_clipboard(|s: &mut Composer, content, _| s.preview = content.html().map(Into::into));
+    /// ```
+    pub fn read_clipboard<S: 'static>(&mut self, f: impl FnOnce(&mut S, &crate::ClipboardContent, &mut Tx) + 'static) {
+        let f: ReadFn = Box::new(move |s, content, tx| {
+            f(s.downcast_mut::<S>().expect("read_clipboard registered for a different state type than the app's"), content, tx);
+        });
+        self.clipboard_reads.push(ClipboardRead(Rc::new(std::cell::Cell::new(Some(f)))));
+    }
 
     /// Close the window after this handler, as the close button would (`App::on_close` runs).
     pub fn close_window(&mut self) {
@@ -372,6 +399,7 @@ pub struct InputSpec {
     pub(crate) submit: Option<PressFn>,
     pub(crate) key: Option<InputKeyFn>,
     pub(crate) change: Option<PressFn>,
+    pub(crate) paste: Option<InputPasteFn>,
 }
 
 /// A CSS-style box shadow. Outer shadows draw behind the element; `inset` ones draw inside its
@@ -734,7 +762,20 @@ impl Default for Visual {
     }
 }
 
-pub(crate) type PasteFn = Rc<dyn Fn(&mut dyn Any, &str, &mut Tx)>;
+/// A root paste handler; false when it doesn't take this content (rich-only, for a text handler).
+pub(crate) type PasteFn = Rc<dyn Fn(&mut dyn Any, &crate::ClipboardContent, &mut Tx) -> bool>;
+pub(crate) type InputPasteFn = Rc<dyn Fn(&mut dyn Any, &crate::ClipboardContent, &mut Tx) -> bool>;
+pub(crate) type ReadFn = Box<dyn FnOnce(&mut dyn Any, &crate::ClipboardContent, &mut Tx)>;
+
+/// A `Tx::read_clipboard` callback. `Tx` is `Clone`; clones share it and the runtime takes it once.
+#[derive(Clone)]
+pub(crate) struct ClipboardRead(Rc<std::cell::Cell<Option<ReadFn>>>);
+impl ClipboardRead {
+    pub(crate) fn take(&self) -> Option<ReadFn> { self.0.take() }
+}
+impl std::fmt::Debug for ClipboardRead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("ClipboardRead") }
+}
 /// A scroll viewport's content-aware edges: `El::scroll_edge_fade` and `El::scroll_margin`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct ScrollEdges {
@@ -998,6 +1039,7 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
         submit: None,
         key: None,
         change: None,
+        paste: None,
     }));
     e
 }
@@ -1033,8 +1075,17 @@ impl El {
     }
     /// On the root (or modal root), handle paste when no text field is focused.
     /// Native clipboard reads are asynchronous. Script `paste` uses the same handler.
+    /// It hears the plain text; [`El::on_paste_content`] hears every form.
     pub fn on_paste<S: 'static>(mut self, f: impl Fn(&mut S, &str, &mut Tx) + 'static) -> Self {
-        self.on_paste = Some(Rc::new(move |s, text, tx| f(s.downcast_mut::<S>().unwrap(), text, tx)));
+        self.on_paste = Some(Rc::new(move |s, content, tx| {
+            content.has_plain() && { f(s.downcast_mut::<S>().unwrap(), content.text(), tx); true }
+        }));
+        self
+    }
+    /// [`El::on_paste`] with everything the clipboard held: plain text and, when the source
+    /// offered them, sanitised HTML and RTF. Replaces an `on_paste` on the same element.
+    pub fn on_paste_content<S: 'static>(mut self, f: impl Fn(&mut S, &crate::ClipboardContent, &mut Tx) + 'static) -> Self {
+        self.on_paste = Some(Rc::new(move |s, content, tx| { f(s.downcast_mut::<S>().unwrap(), content, tx); true }));
         self
     }
     /// Mask a text input before layout; disable undo, copy, cut and IME composition.
@@ -1103,6 +1154,23 @@ impl El {
     pub fn on_input_change<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
         if let Some(input) = &mut self.input {
             input.change = Some(Rc::new(move |s, tx| f(s.downcast_mut::<S>().expect("input change state type"), tx)));
+        }
+        self
+    }
+    /// Handle a paste into this focused text field before the editor, with every form the
+    /// clipboard held ([`ClipboardContent`](crate::ClipboardContent): plain text, and sanitised
+    /// HTML and RTF when the source offered them). Return true when the app took it; false lets
+    /// the editor paste the plain text as usual. Without it a field pastes plain text only.
+    ///
+    /// ```ignore
+    /// text_input(&s.draft).on_input_paste(|s: &mut Chat, content, _| match content.html() {
+    ///     Some(html) => { s.draft_rich.paste_html(html, content.text()); true }
+    ///     None => false,
+    /// })
+    /// ```
+    pub fn on_input_paste<S: 'static>(mut self, f: impl Fn(&mut S, &crate::ClipboardContent, &mut Tx) -> bool + 'static) -> Self {
+        if let Some(input) = &mut self.input {
+            input.paste = Some(Rc::new(move |s, content, tx| f(s.downcast_mut::<S>().expect("input paste state type"), content, tx)));
         }
         self
     }

@@ -5,6 +5,23 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Rich clipboard: copy and paste HTML and RTF beside plain text.** New `ClipboardContent`
+  (`ClipboardContent::new(text).with_html(..).with_rtf(..)`) and `Tx::copy_rich`, which writes
+  every form in one clipboard change; `copy_secret` stays plain text. A field's new
+  `.on_input_paste(|s, content, tx| -> bool)` hears a paste before its editor (true takes it),
+  the root's `.on_paste_content(..)` is `on_paste` with every form, and
+  `Tx::read_clipboard(|s, content, tx| ..)` reads without pasting. Pastes hold the richest form
+  the source offered: on macOS `public.html`, else `public.rtf` converted to HTML on the
+  clipboard worker; Windows CF_HTML; Linux `text/html`; the web's `text/html`. HTML from the
+  clipboard passes through the new `clipboard::sanitize_html` (scripts, handlers, frames,
+  embeds, script URLs and loading CSS removed) before an app sees it. Windows, Linux and the web
+  write no RTF. Tests: `MemoryClipboard::set_content`/`content`, `Runtime::paste_content`, and
+  the script step `{"paste": {"text": .., "html": .., "rtf": ..}}` (public as
+  `ScriptEvent::PasteContent`). Things apps can notice: nothing, unless they add a hook. Fields
+  without `on_input_paste` and text `on_paste` handlers read only the text, as before; a
+  clipboard with HTML and no text reaches only rich hooks. On the web, rich reads use
+  `navigator.clipboard.read()`, which some browsers confirm with a paste prompt.
+
 - **`srgb_blend` works with a `Compositor`, and compositors can draw inside layers.** Before,
   `.srgb_blend(true)` was ignored (with a warning) once a compositor was set. Now the frame is
   gamma-blended as without one, `Frame::srgb_blend()` reports it, and a compositor that matches

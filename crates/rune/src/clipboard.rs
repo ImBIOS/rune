@@ -4,6 +4,10 @@
 //! keyed fingerprint of the secret, never its text, and watches the clipboard's change count
 //! while it holds one. Tests can give runtimes a shared `memory()` clipboard instead; without
 //! one, headless runtimes never touch the OS clipboard.
+//!
+//! Copies and pastes can carry HTML and RTF beside the plain text ([`ClipboardContent`]).
+//! HTML read from the clipboard passes through [`sanitize_html`] on the worker; on macOS an
+//! RTF-only clipboard (TextEdit, Notes, Pages) is converted to HTML there too.
 use std::hash::{BuildHasher, RandomState};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, mpsc};
@@ -12,24 +16,94 @@ use crate::time::Instant;
 use zeroize::Zeroizing;
 use crate::{Runtime, Waker};
 
+mod html;
+#[cfg(target_os = "macos")]
+mod macos;
+pub use html::sanitize_html;
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> { m.lock().unwrap_or_else(|e| e.into_inner()) }
+
+/// What a copy puts on the clipboard, or what a paste found there: plain text always, and
+/// optionally HTML and RTF. Debug output never includes its contents.
+///
+/// ```
+/// # use rune::clipboard::ClipboardContent;
+/// let content = ClipboardContent::new("Hello world").with_html("<b>Hello</b> world");
+/// assert_eq!(content.html(), Some("<b>Hello</b> world"));
+/// ```
+///
+/// Read from the clipboard, `html` has had scripts and other active content removed
+/// ([`sanitize_html`]), and on macOS holds RTF converted to HTML when the source offered only
+/// RTF. It's still untrusted input from another app: parse it into your model, don't render it
+/// in a web view as is. `rtf` is passed through untouched.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct ClipboardContent {
+    text: Zeroizing<String>,
+    html: Option<Zeroizing<String>>,
+    rtf: Option<Zeroizing<String>>,
+}
+impl ClipboardContent {
+    /// Plain text, the form every app can paste.
+    pub fn new(text: impl Into<String>) -> Self { Self { text: Zeroizing::new(text.into()), html: None, rtf: None } }
+    /// Adds an HTML form (a fragment or a document), for apps that paste formatted text.
+    pub fn with_html(mut self, html: impl Into<String>) -> Self { self.html = Some(Zeroizing::new(html.into())); self }
+    /// Adds an RTF form, for apps that read RTF but not HTML.
+    pub fn with_rtf(mut self, rtf: impl Into<String>) -> Self { self.rtf = Some(Zeroizing::new(rtf.into())); self }
+    pub fn text(&self) -> &str { &self.text }
+    pub fn html(&self) -> Option<&str> { self.html.as_deref().map(String::as_str) }
+    pub fn rtf(&self) -> Option<&str> { self.rtf.as_deref().map(String::as_str) }
+    /// HTML or RTF beside the text.
+    pub fn is_rich(&self) -> bool { self.html.is_some() || self.rtf.is_some() }
+    /// No text and no other form.
+    pub fn is_empty(&self) -> bool { self.text.is_empty() && !self.is_rich() }
+    /// Content from another app: its HTML sanitised.
+    pub(crate) fn untrusted(mut self) -> Self {
+        if let Some(html) = &mut self.html { *html = Zeroizing::new(sanitize_html(html)); }
+        self
+    }
+    /// Plain consumers (a field without an `on_input_paste`, a text `on_paste`) take it: it
+    /// has text, or nothing else. Rich-only content (an HTML clipboard with no plain text)
+    /// reaches only rich hooks, as before it reached no one.
+    pub(crate) fn has_plain(&self) -> bool { !self.text.is_empty() || !self.is_rich() }
+}
+impl From<String> for ClipboardContent {
+    fn from(text: String) -> Self { Self::new(text) }
+}
+impl From<&str> for ClipboardContent {
+    fn from(text: &str) -> Self { Self::new(text) }
+}
+impl From<Zeroizing<String>> for ClipboardContent {
+    fn from(text: Zeroizing<String>) -> Self { Self { text, html: None, rtf: None } }
+}
+impl std::fmt::Debug for ClipboardContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClipboardContent")
+            .field("text", &self.text.len())
+            .field("html", &self.html.as_ref().map(|h| h.len()))
+            .field("rtf", &self.rtf.as_ref().map(|r| r.len()))
+            .finish()
+    }
+}
 
 /// A pending clipboard write. Debug output never includes its contents.
 #[derive(Clone)]
 pub struct ClipboardWrite {
-    text: Zeroizing<String>,
+    content: ClipboardContent,
     clear_after: Option<Duration>,
     secret: Option<Arc<Unwritten>>,
 }
 impl ClipboardWrite {
-    pub(crate) fn new(text: String, clear_after: Option<Duration>) -> Self {
-        Self { text: Zeroizing::new(text), clear_after, secret: None }
+    pub(crate) fn new(content: ClipboardContent) -> Self {
+        Self { content, clear_after: None, secret: None }
     }
+    /// Secrets are plain text only: no HTML or RTF copy of a password lingers.
     pub(crate) fn secret(text: String, clear_after: Duration) -> (Self, SecretCopy) {
         let slot = Arc::new(Slot::default());
-        let write = Self { text: Zeroizing::new(text), clear_after: Some(clear_after), secret: Some(Arc::new(Unwritten(slot.clone()))) };
+        let write = Self { content: ClipboardContent::new(text), clear_after: Some(clear_after), secret: Some(Arc::new(Unwritten(slot.clone()))) };
         (write, SecretCopy(slot))
     }
+    /// Everything this write puts on the clipboard.
+    pub fn content(&self) -> &ClipboardContent { &self.content }
     pub(crate) fn is_secret(&self) -> bool { self.clear_after.is_some() }
     fn slot(&self) -> Option<&Arc<Slot>> { self.secret.as_ref().map(|u| &u.0) }
     fn bind(&self, route: Route) {
@@ -38,7 +112,7 @@ impl ClipboardWrite {
 }
 impl std::ops::Deref for ClipboardWrite {
     type Target = str;
-    fn deref(&self) -> &str { &self.text }
+    fn deref(&self) -> &str { self.content.text() }
 }
 impl std::fmt::Debug for ClipboardWrite {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -126,7 +200,16 @@ impl Route {
     }
 }
 
-struct Reply { target: Option<String>, text: Zeroizing<String> }
+/// Why the clipboard is read.
+#[derive(Clone, Debug, PartialEq)]
+enum Purpose {
+    /// Cmd/Ctrl-V or `Tx::request_paste`, for this focused field or (`None`) the app, and
+    /// whether that target has a hook for HTML and RTF. A plain one reads only the text.
+    Paste(Option<String>, bool),
+    /// `Tx::read_clipboard`'s callback with this id. It always hears back, empty or not.
+    Read(u64),
+}
+struct Reply { purpose: Purpose, content: ClipboardContent }
 #[derive(Clone)]
 struct Notify { changed: Arc<AtomicBool>, wake: Waker }
 impl Notify {
@@ -137,7 +220,27 @@ enum Request {
     Write(ClipboardWrite, Option<Notify>),
     /// Clear this secret, or whichever secret is held, if the clipboard still holds it.
     Clear(Option<Arc<Slot>>),
-    Read { target: Option<String>, reply: mpsc::Sender<Reply>, wake: Waker },
+    Read { purpose: Purpose, reply: mpsc::Sender<Reply>, wake: Waker },
+}
+impl Purpose {
+    fn paste<S: 'static>(rt: &Runtime<S>, target: Option<String>) -> Self {
+        let rich = rt.paste_wants_rich(target.as_deref());
+        Purpose::Paste(target, rich)
+    }
+    fn rich(&self) -> bool { !matches!(self, Purpose::Paste(_, false)) }
+    /// Reads what this purpose needs from `cb` and what to send back: a paste skips an empty
+    /// clipboard.
+    fn answer<B: Backend>(self, cb: &mut B) -> Option<Reply> {
+        let content = if self.rich() { cb.content() } else { cb.text().map(ClipboardContent::from) };
+        self.reply(content)
+    }
+    fn reply(self, content: Option<ClipboardContent>) -> Option<Reply> {
+        let content = match self {
+            Purpose::Paste(..) => content?,
+            Purpose::Read(_) => content.unwrap_or_default(),
+        };
+        Some(Reply { purpose: self, content: content.untrusted() })
+    }
 }
 
 pub(crate) struct Client {
@@ -156,33 +259,44 @@ impl Default for Client {
 impl Client {
     pub fn connect(&mut self, wake: Waker) { self.wake = wake; }
     pub fn read<S: 'static>(&self, rt: &Runtime<S>) {
+        let purpose = Purpose::paste(rt, rt.paste_target());
         if let Some(m) = &rt.clipboard {
-            if let Some(text) = m.text() && self.sender.send(Reply { target: rt.paste_target(), text }).is_ok() { (self.wake)(); }
+            if let Some(reply) = m.answer(purpose) && self.sender.send(reply).is_ok() { (self.wake)(); }
             return;
         }
-        self.read_target(rt.paste_target());
+        self.read_for(purpose);
     }
     #[cfg(not(target_arch = "wasm32"))]
-    fn read_target(&self, target: Option<String>) {
-        let _ = worker().send(Request::Read { target, reply: self.sender.clone(), wake: self.wake.clone() });
+    fn read_for(&self, purpose: Purpose) {
+        let _ = worker().send(Request::Read { purpose, reply: self.sender.clone(), wake: self.wake.clone() });
     }
     #[cfg(target_arch = "wasm32")]
-    fn read_target(&self, target: Option<String>) {
+    fn read_for(&self, purpose: Purpose) {
         // Start the permission-sensitive operation before yielding the input handler.
-        let promise = crate::web::platform::read_clipboard();
+        let promise = crate::web::platform::read_clipboard(purpose.rich());
         let (sender, wake) = (self.sender.clone(), self.wake.clone());
         wasm_bindgen_futures::spawn_local(async move {
-            match wasm_bindgen_futures::JsFuture::from(promise).await {
-                Ok(value) => if let Some(text) = value.as_string() {
-                    if sender.send(Reply { target, text: Zeroizing::new(text) }).is_ok() { wake(); }
-                },
-                Err(_) => web_sys::console::warn_1(&"Clipboard read denied; use the browser's Paste command.".into()),
-            }
+            let content = match wasm_bindgen_futures::JsFuture::from(promise).await {
+                Ok(value) => {
+                    let field = |name: &str| js_sys::Reflect::get(&value, &name.into()).ok().and_then(|v| v.as_string());
+                    let html = field("html").filter(|h| !h.is_empty());
+                    let text = field("text");
+                    (text.is_some() || html.is_some()).then(|| {
+                        let content = ClipboardContent::new(text.unwrap_or_default());
+                        match html { Some(html) => content.with_html(html), None => content }
+                    })
+                }
+                Err(_) => {
+                    web_sys::console::warn_1(&"Clipboard read denied; use the browser's Paste command.".into());
+                    None
+                }
+            };
+            if let Some(reply) = purpose.reply(content) && sender.send(reply).is_ok() { wake(); }
         });
     }
     pub fn receive<S: 'static>(&self, rt: &mut Runtime<S>) -> bool {
         let mut received = self.changed.swap(false, Ordering::SeqCst);
-        for reply in self.replies.try_iter() { rt.paste_result(reply.target, reply.text); received = true; }
+        for reply in self.replies.try_iter() { deliver(rt, reply); received = true; }
         received
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -195,7 +309,8 @@ impl Client {
             copy.bind(Route::System(worker.clone()));
             let _ = worker.send(Request::Write(copy, Some(Notify { changed: self.changed.clone(), wake: self.wake.clone() })));
         }
-        if let Some(target) = rt.paste_request.take() { self.read_target(target); }
+        if let Some(target) = rt.paste_request.take() { self.read_for(Purpose::paste(rt, target)); }
+        for id in std::mem::take(&mut rt.read_requests) { self.read_for(Purpose::Read(id)); }
     }
     #[cfg(target_arch = "wasm32")]
     pub fn flush<S: 'static>(&self, rt: &mut Runtime<S>) {
@@ -209,7 +324,8 @@ impl Client {
                     (self.wake)();
                 }
             } else {
-                let promise = crate::web::platform::write_clipboard(&copy);
+                // The browser's Clipboard API takes plain text and HTML; RTF stays behind.
+                let promise = crate::web::platform::write_clipboard(&copy, copy.content().html().unwrap_or(""));
                 wasm_bindgen_futures::spawn_local(async move {
                     if wasm_bindgen_futures::JsFuture::from(promise).await.is_err() {
                         web_sys::console::warn_1(&"Clipboard write denied by the browser.".into());
@@ -217,7 +333,15 @@ impl Client {
                 });
             }
         }
-        if let Some(target) = rt.paste_request.take() { self.read_target(target); }
+        if let Some(target) = rt.paste_request.take() { self.read_for(Purpose::paste(rt, target)); }
+        for id in std::mem::take(&mut rt.read_requests) { self.read_for(Purpose::Read(id)); }
+    }
+}
+
+fn deliver<S: 'static>(rt: &mut Runtime<S>, reply: Reply) {
+    match reply.purpose {
+        Purpose::Paste(target, _) => rt.paste_result(target, reply.content),
+        Purpose::Read(id) => rt.read_result(id, reply.content),
     }
 }
 
@@ -230,8 +354,10 @@ pub(crate) fn flush_memory<S: 'static>(rt: &mut Runtime<S>) {
         copy.bind(Route::Memory(m.clone()));
         m.handle(Request::Write(copy, None));
     }
-    if let Some(target) = rt.paste_request.take() && let Some(text) = m.text() {
-        rt.paste_result(target, text);
+    let paste = rt.paste_request.take().map(|target| Purpose::paste(rt, target));
+    let reads = paste.into_iter().chain(std::mem::take(&mut rt.read_requests).into_iter().map(Purpose::Read));
+    for purpose in reads.collect::<Vec<_>>() {
+        if let Some(reply) = m.answer(purpose) { deliver(rt, reply); }
     }
 }
 
@@ -247,24 +373,30 @@ impl<S: 'static> Runtime<S> {
 pub struct MemoryClipboard(Arc<Mutex<Memory>>);
 struct Memory { core: Core, board: Board }
 #[derive(Default)]
-struct Board { text: Option<Zeroizing<String>>, revision: u64, fail: Option<String> }
+struct Board { content: Option<ClipboardContent>, revision: u64, fail: Option<String> }
 
 pub fn memory() -> MemoryClipboard {
     MemoryClipboard(Arc::new(Mutex::new(Memory { core: Core::default(), board: Board::default() })))
 }
 impl MemoryClipboard {
-    pub fn text(&self) -> Option<Zeroizing<String>> { self.ticked(|_, board| board.text.clone()) }
+    pub fn text(&self) -> Option<Zeroizing<String>> { self.content().map(|c| c.text) }
+    /// Every form on the clipboard, as written: pastes from it are sanitised, this isn't.
+    pub fn content(&self) -> Option<ClipboardContent> { self.ticked(|_, board| board.content.clone()) }
     /// Changes the clipboard as another app would.
-    pub fn set_text(&self, text: &str) {
+    pub fn set_text(&self, text: &str) { self.set_content(ClipboardContent::new(text)); }
+    /// Puts several forms on the clipboard as another app would, e.g. HTML from a browser or
+    /// RTF alone from a word processor.
+    pub fn set_content(&self, content: ClipboardContent) {
         let mut m = lock(&self.0);
         let Memory { core, board } = &mut *m;
-        board.text = Some(Zeroizing::new(text.into()));
+        board.content = Some(content);
         board.revision += 1;
         core.tick(board);
     }
     /// Makes later writes fail with `error`, or succeed again with `None`.
     pub fn fail_writes(&self, error: Option<&str>) { lock(&self.0).board.fail = error.map(Into::into); }
     fn tick(&self) { self.ticked(|_, _| ()) }
+    fn answer(&self, purpose: Purpose) -> Option<Reply> { self.ticked(|_, board| purpose.answer(board)) }
     fn handle(&self, request: Request) { self.ticked(|core, board| core.handle(board, request)) }
     /// Lets a held secret expire or notice a change first, as the OS worker does per request.
     fn ticked<R>(&self, f: impl FnOnce(&mut Core, &mut Board) -> R) -> R {
@@ -280,13 +412,14 @@ impl std::fmt::Debug for MemoryClipboard {
 impl Backend for Board {
     fn write(&mut self, copy: &ClipboardWrite) -> Result<(), String> {
         if let Some(error) = &self.fail { return Err(error.clone()); }
-        self.text = Some(copy.text.clone());
+        self.content = Some(copy.content.clone());
         self.revision += 1;
         Ok(())
     }
-    fn text(&mut self) -> Option<Zeroizing<String>> { self.text.clone() }
+    fn text(&mut self) -> Option<Zeroizing<String>> { self.content.as_ref().map(|c| c.text.clone()) }
+    fn content(&mut self) -> Option<ClipboardContent> { self.content.clone() }
     fn revision(&self) -> Option<u64> { Some(self.revision) }
-    fn clear(&mut self) { self.text = None; self.revision += 1; }
+    fn clear(&mut self) { self.content = None; self.revision += 1; }
 }
 
 static WORKER: OnceLock<Worker> = OnceLock::new();
@@ -332,13 +465,28 @@ pub(crate) fn shutdown() {
 trait Backend {
     fn write(&mut self, copy: &ClipboardWrite) -> Result<(), String>;
     fn text(&mut self) -> Option<Zeroizing<String>>;
+    /// Every form a paste can use, unsanitised.
+    fn content(&mut self) -> Option<ClipboardContent> { self.text().map(ClipboardContent::from) }
     fn revision(&self) -> Option<u64>;
     fn clear(&mut self);
 }
 #[cfg(not(target_arch = "wasm32"))]
 impl Backend for arboard::Clipboard {
-    fn write(&mut self, copy: &ClipboardWrite) -> Result<(), String> { write(self, copy).map_err(|e| e.to_string()) }
+    fn write(&mut self, copy: &ClipboardWrite) -> Result<(), String> { write(self, copy) }
     fn text(&mut self) -> Option<Zeroizing<String>> { self.get_text().ok().map(Zeroizing::new) }
+    #[cfg(target_os = "macos")]
+    fn content(&mut self) -> Option<ClipboardContent> {
+        macos::read(&*unsafe { objc2_app_kit::NSPasteboard::generalPasteboard() })
+    }
+    /// Text and HTML; RTF isn't read here.
+    #[cfg(not(target_os = "macos"))]
+    fn content(&mut self) -> Option<ClipboardContent> {
+        let text = self.text();
+        let html = self.get().html().ok().filter(|h| !h.is_empty());
+        if text.is_none() && html.is_none() { return None; }
+        let content = ClipboardContent::from(text.unwrap_or_default());
+        Some(match html { Some(html) => content.with_html(html), None => content })
+    }
     fn revision(&self) -> Option<u64> { revision() }
     fn clear(&mut self) { let _ = arboard::Clipboard::clear(self); }
 }
@@ -381,16 +529,30 @@ fn run_worker<B: Backend>(recv: mpsc::Receiver<Request>, mut open: impl FnMut() 
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn write(cb: &mut arboard::Clipboard, copy: &ClipboardWrite) -> Result<(), arboard::Error> {
-    if copy.clear_after.is_none() { return cb.set_text(copy.text.as_str()); }
+fn write(cb: &mut arboard::Clipboard, copy: &ClipboardWrite) -> Result<(), String> {
+    let content = &copy.content;
+    if copy.clear_after.is_none() && content.is_rich() {
+        #[cfg(target_os = "macos")]
+        { return macos::write(&*unsafe { objc2_app_kit::NSPasteboard::generalPasteboard() }, content); }
+        // Windows writes CF_HTML and Linux `text/html` beside the text; neither writes RTF.
+        #[allow(unreachable_code)]
+        if let Some(html) = content.html() { return cb.set().html(html, Some(content.text())).map_err(|e| e.to_string()); }
+    }
+    write_text(cb, copy).map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_text(cb: &mut arboard::Clipboard, copy: &ClipboardWrite) -> Result<(), arboard::Error> {
+    let text = copy.content.text();
+    if copy.clear_after.is_none() { return cb.set_text(text); }
     #[cfg(target_os = "macos")]
-    { use arboard::SetExtApple; return cb.set().exclude_from_history().text(copy.text.as_str()); }
+    { use arboard::SetExtApple; return cb.set().exclude_from_history().text(text); }
     #[cfg(target_os = "windows")]
-    { use arboard::SetExtWindows; return cb.set().exclude_from_monitoring().text(copy.text.as_str()); }
+    { use arboard::SetExtWindows; return cb.set().exclude_from_monitoring().text(text); }
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-    { use arboard::SetExtLinux; return cb.set().exclude_from_history().text(copy.text.as_str()); }
+    { use arboard::SetExtLinux; return cb.set().exclude_from_history().text(text); }
     #[allow(unreachable_code)]
-    cb.set_text(copy.text.as_str())
+    cb.set_text(text)
 }
 
 /// The secret Rune wrote last, while the clipboard may still hold it.
@@ -417,8 +579,8 @@ impl Core {
         match request {
             Request::Write(copy, notify) => self.write(cb, copy, notify),
             Request::Clear(which) => self.clear(cb, which.as_ref()),
-            Request::Read { target, reply, wake } => {
-                if let Some(text) = cb.text() && reply.send(Reply { target, text }).is_ok() { wake(); }
+            Request::Read { purpose, reply, wake } => {
+                if let Some(answer) = purpose.answer(cb) && reply.send(answer).is_ok() { wake(); }
             }
             Request::Shutdown => {}
         }
@@ -442,7 +604,7 @@ impl Core {
                 notify: notify.clone(),
                 deadline: Instant::now().checked_add(delay),
                 revision: cb.revision(),
-                print: self.keys.hash_one(copy.text.as_str()),
+                print: self.keys.hash_one(copy.content.text()),
             });
             if let Some(n) = &notify { n.send(); }
             if cancelled(&slot) { self.clear(cb, slot.as_ref()); }
@@ -533,9 +695,9 @@ mod tests {
             let state = Arc::new(Mutex::new(State::default()));
             let shared = state.clone();
             let worker = Worker::spawn(move || Some(Fake { state: shared.clone(), dropped: None }));
-            worker.sender.send(Request::Write(ClipboardWrite::new("fixture".into(), Some(LONG)), None)).unwrap();
+            worker.sender.send(Request::Write(ClipboardWrite::secret("fixture".into(), LONG).0, None)).unwrap();
             let (reply, received) = mpsc::channel();
-            worker.sender.send(Request::Read { target: None, reply, wake: Arc::new(|| {}) }).unwrap();
+            worker.sender.send(Request::Read { purpose: Purpose::Paste(None, false), reply, wake: Arc::new(|| {}) }).unwrap();
             received.recv_timeout(Duration::from_secs(1)).unwrap(); // Write and revision recorded.
             if let Some(text) = replacement {
                 let mut s = state.lock().unwrap(); s.text = text.into(); s.revision += 1;
@@ -558,7 +720,7 @@ mod tests {
             released.recv().unwrap();
             Some(Fake { state: Arc::default(), dropped: Some(dropped.clone()) })
         });
-        worker.sender.send(Request::Write(ClipboardWrite::new("fixture".into(), Some(LONG)), None)).unwrap();
+        worker.sender.send(Request::Write(ClipboardWrite::secret("fixture".into(), LONG).0, None)).unwrap();
         waiting.recv_timeout(Duration::from_secs(1)).unwrap();
         let start = Instant::now();
         worker.stop();
@@ -662,6 +824,48 @@ mod tests {
         let mut headless = Runtime::new(None, view, (100.0, 100.0), Env::new(true, 1.0));
         headless.update(|s, tx| *s = Some(tx.copy_secret("nowhere", LONG))); headless.frame(0.0);
         assert_eq!(headless.state.as_ref().unwrap().state(), SecretState::Pending, "no clipboard, no write");
+    }
+
+    #[test]
+    fn rich_copies_carry_every_form_and_secrets_stay_plain() {
+        use crate::{col, Cx, El, Env};
+        fn view(_: &u8, _: &mut Cx<u8>) -> El { col() }
+        let m = memory();
+        let mut rt = Runtime::new(0, view, (100.0, 100.0), Env::new(true, 1.0));
+        rt.use_clipboard(&m);
+        rt.frame(0.0);
+        let rich = ClipboardContent::new("Ship it").with_html("<b>Ship</b> it").with_rtf(r"{\rtf1 {\b Ship} it}");
+        rt.update(|_, tx| tx.copy_rich(rich.clone()));
+        assert_eq!(m.content().as_ref(), Some(&rich), "HTML is written as given; only reads are sanitised");
+        assert_eq!(text(&m).as_deref(), Some("Ship it"));
+        assert!(!format!("{rich:?} {:?}", ClipboardWrite::new(rich.clone())).contains("Ship"));
+
+        rt.update(|_, tx| { tx.copy_secret("hunter2", LONG); });
+        let secret = m.content().unwrap();
+        assert!(!secret.is_rich() && secret.text() == "hunter2", "no HTML or RTF copy of a secret");
+        rt.update(|_, tx| tx.clear_secret_clipboard());
+        assert_eq!(m.content(), None);
+    }
+
+    /// A plain paste leaves an empty clipboard alone; a read always answers.
+    #[test]
+    fn the_worker_answers_reads_with_sanitised_content() {
+        let state = Arc::new(Mutex::new(State::default()));
+        let shared = state.clone();
+        let worker = Worker::spawn(move || Some(Fake { state: shared.clone(), dropped: None }));
+        state.lock().unwrap().text = "<script>".into();
+        let (reply, replies) = mpsc::channel();
+        worker.sender.send(Request::Read { purpose: Purpose::Read(7), reply, wake: Arc::new(|| {}) }).unwrap();
+        let answer = replies.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!((answer.purpose, answer.content.text()), (Purpose::Read(7), "<script>"), "plain text is never rewritten");
+        worker.stop();
+        assert!(Purpose::Paste(None, true).reply(None).is_none());
+        let mut board = Board { content: Some(ClipboardContent::new("t").with_html("<b>t</b>")), ..Board::default() };
+        let plain = Purpose::Paste(None, false).answer(&mut board).unwrap().content;
+        assert!(!plain.is_rich() && plain.text() == "t", "a plain target reads only the text, as before");
+        let read = Purpose::Read(1).reply(Some(ClipboardContent::new("").with_html("<p onclick=x>t</p>"))).unwrap();
+        assert_eq!(read.content.html(), Some("<p>t</p>"));
+        assert_eq!(Purpose::Read(2).reply(None).unwrap().content, ClipboardContent::default());
     }
 
     /// `on_close` runs through `update`, and a hidden window only polls: both must reach the

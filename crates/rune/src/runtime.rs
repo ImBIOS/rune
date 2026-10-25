@@ -430,7 +430,9 @@ enum Action {
     Files(drop_dispatch::FileEvent),
     Key { ev: KeyEvent, repeat: bool },
     Ime(Ime),
-    Paste(zeroize::Zeroizing<String>, Option<Option<String>>),
+    Paste(crate::ClipboardContent, Option<Option<String>>),
+    /// A `Tx::read_clipboard` callback's id and what the clipboard held.
+    ClipboardRead(u64, crate::ClipboardContent),
     Focus(String, f32, f32),
     Blur,
 }
@@ -832,6 +834,11 @@ pub struct Runtime<S: 'static> {
     pub copy_request: Option<crate::ClipboardWrite>,
     // Outer None: no read; inner None: app-level paste rather than a focused editor.
     pub(crate) paste_request: Option<Option<String>>,
+    /// `Tx::read_clipboard` reads for the shell to start, by id.
+    pub(crate) read_requests: Vec<u64>,
+    /// Their callbacks, until the clipboard answers.
+    clipboard_reads: Vec<(u64, crate::el::ReadFn)>,
+    next_clipboard_read: u64,
     pub(crate) clear_secret_request: bool,
     /// `Runtime::use_clipboard`: a test clipboard that replaces the OS one.
     pub(crate) clipboard: Option<crate::clipboard::MemoryClipboard>,
@@ -1097,6 +1104,9 @@ impl<S: 'static> Runtime<S> {
             ime_reset: false,
             copy_request: None,
             paste_request: None,
+            read_requests: Vec::new(),
+            clipboard_reads: Vec::new(),
+            next_clipboard_read: 0,
             clear_secret_request: false,
             clipboard: None,
             shell_request: None,
@@ -1489,6 +1499,11 @@ impl<S: 'static> Runtime<S> {
         }
         if let Some(copy) = tx.copy.take() { self.copy_request = Some(copy); }
         if std::mem::take(&mut tx.paste) { self.paste_request = Some(self.paste_target()); }
+        for read in tx.clipboard_reads.drain(..).filter_map(|read| read.take()) {
+            self.next_clipboard_read += 1;
+            self.clipboard_reads.push((self.next_clipboard_read, read));
+            self.read_requests.push(self.next_clipboard_read);
+        }
         self.popups.extend(tx.popups.drain(..).filter_map(|call| call.take()));
         if let Some(mut request) = tx.window_frame.take() {
             request.spring = (request.animate && !tx.instant && !self.reduced_motion).then(|| tx.motion.unwrap_or(motion::DEFAULT));
@@ -2224,16 +2239,26 @@ impl<S: 'static> Runtime<S> {
                 self.route_key(&ev, repeat, &mut one)
             }
             Action::Ime(ev) => self.with_focused(|e| e.ime(&ev), &mut one),
-            Action::Paste(s, target) => {
+            Action::Paste(content, target) => {
                 if target.is_some_and(|target| target != self.paste_target()) { return false; }
-                if self.with_focused(|e| e.paste(&s), &mut one) {
+                let hook = self.focused_input().and_then(|i| i.paste.clone());
+                let into_field = |state: &mut dyn Any, access: &crate::el::EditFn, tx: &mut Tx| {
+                    if hook.is_some_and(|hook| hook(state, &content, tx)) || !content.has_plain() { return EditOutcome::default(); }
+                    access(state).paste(content.text())
+                };
+                if self.with_focused_state(into_field, &mut one) {
                     self.events.push("paste field".into());
                     true
-                } else if let Some(f) = self.app_paste_handler() {
-                    f(handler_state(&mut self.state), &s, &mut one);
+                } else if let Some(f) = self.app_paste_handler() && f(handler_state(&mut self.state), &content, &mut one) {
                     self.events.push("paste window".into());
                     true
                 } else { false }
+            }
+            Action::ClipboardRead(id, content) => {
+                let Some(i) = self.clipboard_reads.iter().position(|(read, _)| *read == id) else { return false };
+                let (_, f) = self.clipboard_reads.remove(i);
+                f(handler_state(&mut self.state), &content, &mut one);
+                true
             }
             Action::Focus(path, x, y) => {
                 let Some(access) = self.node(&path).and_then(|n| n.input.as_ref()?.access.clone()) else { return false };
@@ -2357,6 +2382,11 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn with_focused(&mut self, f: impl FnOnce(&mut crate::edit::TextEdit) -> EditOutcome, tx: &mut Tx) -> bool {
+        self.with_focused_state(|state, access, _| f(access(state)), tx)
+    }
+
+    /// [`Self::with_focused`] for an edit that needs the app state (an app's paste hook).
+    fn with_focused_state(&mut self, f: impl FnOnce(&mut dyn Any, &crate::el::EditFn, &mut Tx) -> EditOutcome, tx: &mut Tx) -> bool {
         let Some(path) = self.focused.clone() else { return false };
         let Some((access, submit, change, animate_layout, single_line)) =
             self.focused_input().map(|i| (i.access.clone(), i.submit.clone(), i.change.clone(), i.animate_layout, i.single_line))
@@ -2366,7 +2396,7 @@ impl<S: 'static> Runtime<S> {
         let Some(access) = access else { return false };
         access(handler_state(&mut self.state)).set_single_line(single_line);
         let before = change.as_ref().map(|_| zeroize::Zeroizing::new(access(handler_state(&mut self.state)).text.clone()));
-        let mut out = f(access(handler_state(&mut self.state)));
+        let mut out = f(handler_state(&mut self.state), &access, tx);
         // Submit and Escape's blur act once per press; held keys still type, move and delete.
         if tx.key_repeat { out.submit = false; out.blur = false; }
         // Typing is the user's own hand: no animation.
@@ -4116,7 +4146,12 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub fn paste(&mut self, text: impl Into<String>) {
-        self.queue.push(Action::Paste(zeroize::Zeroizing::new(text.into()), None));
+        self.queue.push(Action::Paste(crate::ClipboardContent::new(text), None));
+    }
+    /// [`Runtime::paste`] with several forms, as from another app's clipboard: its HTML is
+    /// sanitised as a real paste's is. For tests and scripts.
+    pub fn paste_content(&mut self, content: crate::ClipboardContent) {
+        self.queue.push(Action::Paste(content.untrusted(), None));
     }
 
     fn app_paste_handler(&self) -> Option<crate::el::PasteFn> {
@@ -4128,8 +4163,20 @@ impl<S: 'static> Runtime<S> {
     pub(crate) fn paste_target(&self) -> Option<String> {
         self.focused_input().filter(|i| i.access.is_some()).and(self.focused.clone())
     }
-    pub(crate) fn paste_result(&mut self, target: Option<String>, text: zeroize::Zeroizing<String>) {
-        self.queue.push(Action::Paste(text, Some(target)));
+    /// The paste target hears HTML and RTF: a field with `on_input_paste`, or the window's
+    /// paste handler. Anything else reads only the clipboard's text.
+    pub(crate) fn paste_wants_rich(&self, target: Option<&str>) -> bool {
+        match target {
+            Some(path) => self.node(path).and_then(|n| n.input.as_deref()).or_else(|| self.virtual_inputs.get(path).map(Box::as_ref))
+                .is_some_and(|input| input.paste.is_some()),
+            None => self.app_paste_handler().is_some(),
+        }
+    }
+    pub(crate) fn paste_result(&mut self, target: Option<String>, content: crate::ClipboardContent) {
+        self.queue.push(Action::Paste(content, Some(target)));
+    }
+    pub(crate) fn read_result(&mut self, id: u64, content: crate::ClipboardContent) {
+        self.queue.push(Action::ClipboardRead(id, content));
     }
 
     /// Whether the focused editor requires secure native keyboard input.
@@ -5557,6 +5604,7 @@ fn fades(looping: Option<rune_motion::LoopSpec>) -> bool {
 
 fn merge(tx: &mut Tx, one: Tx) {
     tx.paste |= one.paste;
+    tx.clipboard_reads.extend(one.clipboard_reads);
     if let Some(one) = one.trace {
         let trace = tx.trace.get_or_insert_with(Default::default);
         trace.events.extend(one.events);
@@ -8117,13 +8165,91 @@ mod tests {
         assert!(rt.events.iter().any(|e| e == "paste window"));
         assert!(!format!("{:?}", rt.copy_request).contains("window fixture"));
         rt.update(|s, _| s.field.focused = true); rt.frame(0.0);
-        rt.paste_result(None, zeroize::Zeroizing::new("late window reply".into())); rt.frame(0.0);
+        rt.paste_result(None, crate::ClipboardContent::new("late window reply")); rt.frame(0.0);
         assert!(rt.state.field.text.is_empty());
         assert_eq!(rt.state.pasted, "window fixture");
         let target = rt.paste_target();
-        rt.paste_result(target, zeroize::Zeroizing::new("field fixture".into())); rt.frame(0.0);
+        rt.paste_result(target, crate::ClipboardContent::new("field fixture")); rt.frame(0.0);
         assert_eq!(rt.state.field.text, "field fixture");
         assert!(rt.events.iter().any(|e| e == "paste field"));
+    }
+
+    #[test]
+    fn rich_pastes_reach_paste_hooks_and_plain_fields_keep_pasting_text() {
+        use crate::ClipboardContent;
+        #[derive(Default)]
+        struct State { plain: crate::TextEdit, rich: crate::TextEdit, take: bool, hook: Vec<Option<String>>, changes: u32, window: Vec<ClipboardContent> }
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let style = crate::TextStyle::new(16.0, 400.0);
+            col().size(200.0, 100.0)
+                .on_paste_content(|s: &mut State, content, _| s.window.push(content.clone()))
+                .child(crate::text_input(&s.plain, style).key("plain").size(200.0, 40.0).on_edit(|s: &mut State| &mut s.plain))
+                .child(crate::text_input(&s.rich, style).key("rich").size(200.0, 40.0).on_edit(|s: &mut State| &mut s.rich)
+                    .on_input_change(|s: &mut State, _| s.changes += 1)
+                    .on_input_paste(|s: &mut State, content, _| {
+                        s.hook.push(content.html().map(Into::into));
+                        if s.take { s.rich.paste("[rich]"); }
+                        s.take
+                    }))
+        }
+        let m = crate::clipboard::memory();
+        let mut rt = Runtime::new(State::default(), view, (200.0, 100.0), Env::new(true, 1.0));
+        rt.use_clipboard(&m);
+        rt.frame(0.0);
+        let paste = |rt: &mut Runtime<State>| { rt.update(|_, tx| tx.request_paste()); rt.frame(0.0); };
+        m.set_content(ClipboardContent::new("Hello").with_html("<b>Hello</b><script>steal()</script>"));
+
+        paste(&mut rt);
+        let window = rt.state.window.pop().unwrap();
+        assert_eq!((window.text(), window.html()), ("Hello", Some("<b>Hello</b>")), "the window hears every form, sanitised");
+
+        rt.update(|s, _| s.plain.focused = true); rt.frame(0.0);
+        paste(&mut rt);
+        assert_eq!(rt.state.plain.text, "Hello", "a field without a hook pastes the text, as before");
+
+        rt.update(|s, _| { s.plain.focused = false; s.rich.focused = true; }); rt.frame(0.0);
+        paste(&mut rt);
+        assert_eq!((rt.state.rich.text.as_str(), rt.state.changes), ("Hello", 1), "a declining hook leaves the paste to the editor");
+        rt.update(|s, _| { s.take = true; s.rich.text.clear(); s.rich.anchor = 0; s.rich.focus = 0; }); rt.frame(0.0);
+        paste(&mut rt);
+        assert_eq!((rt.state.rich.text.as_str(), rt.state.changes), ("[rich]", 2), "a hook that takes it edits the field; on_input_change runs");
+        assert_eq!(rt.state.hook, vec![Some("<b>Hello</b>".to_owned()); 2]);
+
+        // HTML with no plain text: only rich hooks hear it, never a plain field or text handler.
+        m.set_content(ClipboardContent::new("").with_html("<i>only</i>"));
+        rt.update(|s, _| s.take = false); rt.frame(0.0);
+        paste(&mut rt);
+        assert_eq!((rt.state.rich.text.as_str(), rt.state.hook.last().cloned().flatten().as_deref()), ("[rich]", Some("<i>only</i>")));
+        assert!(rt.state.window.is_empty(), "a focused field's paste never falls through to the window");
+    }
+
+    #[test]
+    fn read_clipboard_answers_once_even_when_empty_and_pastes_nowhere() {
+        use crate::ClipboardContent;
+        #[derive(Default)]
+        struct State { field: crate::TextEdit, reads: Vec<ClipboardContent> }
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            col().size(200.0, 100.0).child(crate::text_input(&s.field, crate::TextStyle::new(16.0, 400.0)).key("field").size(200.0, 40.0)
+                .on_edit(|s: &mut State| &mut s.field))
+        }
+        let m = crate::clipboard::memory();
+        let mut rt = Runtime::new(State::default(), view, (200.0, 100.0), Env::new(true, 1.0));
+        rt.use_clipboard(&m);
+        rt.frame(0.0);
+        rt.update(|s, _| s.field.focused = true); rt.frame(0.0);
+        let read = |rt: &mut Runtime<State>| {
+            rt.update(|_, tx| tx.read_clipboard(|s: &mut State, content, _| s.reads.push(content.clone())));
+            rt.frame(0.0);
+            rt.frame(0.0);
+        };
+        read(&mut rt);
+        assert_eq!(rt.state.reads, [ClipboardContent::default()], "an empty clipboard still answers");
+        m.set_content(ClipboardContent::new("a").with_html("<a href='javascript:x'>a</a>").with_rtf("{\\rtf1 a}"));
+        read(&mut rt);
+        let got = rt.state.reads.pop().unwrap();
+        assert_eq!((got.text(), got.html(), got.rtf()), ("a", Some("<a>a</a>"), Some("{\\rtf1 a}")));
+        assert!(rt.state.field.text.is_empty() && rt.state.reads.len() == 1);
+        assert!(rt.clipboard_reads.is_empty() && rt.read_requests.is_empty());
     }
 
     #[test]

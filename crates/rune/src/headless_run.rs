@@ -111,6 +111,8 @@ pub enum ScriptEvent {
     /// A logical key; `repeat` is a held key's auto-repeat.
     Key { key: KeyEvent, repeat: bool },
     Paste(String),
+    /// A paste with HTML or RTF beside the text (`{"paste": {"text": …, "html": …}}`).
+    PasteContent(crate::ClipboardContent),
     /// A registered global shortcut chord. Only its handler runs; it never reaches `on_key`.
     Shortcut(crate::Shortcut),
     /// A hardware key or modifier change (`{"physical": …}`).
