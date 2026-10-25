@@ -247,6 +247,8 @@ policy changes are applied in the same mutation phase.
   `live_scale` on the world), hit tests follow the drawn rects, `Drag` points and the pointer
   in these events are in the element's own (unzoomed) points, and `.on_drawn_layout(|s, r|)`
   reports where an element shows in the window, on each frame a pan or zoom moves it.
+  `cargo run -p rune --example canvas_input` drives a canvas through all of it headlessly:
+  wheel pan, pinch about the pointer, Space + drag, middle drag and a Focus button.
 - **Timeline growth** (`.growth(GrowthSpec { spring, edge })`, `growth.rs`): rows of a stack ease
   their heights render-side on `GROWTH` (0.32 s, bounce 0) in fixed 1/240 s substeps, so 30, 60 and
   120 fps give the same curve. Desktop's per-frame caps are per-second here (start, ramp, max, long,
