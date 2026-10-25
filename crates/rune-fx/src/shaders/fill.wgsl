@@ -86,7 +86,7 @@ fn tone_at(i: Inst, c: Ctx, p: vec2f, kind: i32, angle: f32) -> f32 {
     } else if (kind == 3) {
         v = to_srgb(vec3f(lum(bd(p, c.scale).rgb))).x;
     } else {
-        let s = textureSampleLevel(source, samp, (p - i.aux2.xy) / i.aux2.zw, 0.0);
+        let s = textureSampleLevel(source, samp, (p - i.aux2.xy) / max(i.aux2.zw, vec2f(1e-3)), 0.0);
         v = to_srgb(vec3f(lum(s.rgb))).x;
     }
     return clamp((v - 0.5) * i.p1.w + 0.5 + i.p1.z * 0.5, 0.0, 1.0);
@@ -188,7 +188,9 @@ fn liquid_metal(i: Inst, c: Ctx, m: f32, px: vec2f) -> vec4f {
     let env = studio(normalize(r), contrast) * i.c1.rgb;
     // Conductor Fresnel (Schlick): the tint at normal incidence, rising to white at grazing angles.
     let f0 = i.c0.rgb;
-    var f = f0 + (vec3f(1.0) - f0) * pow(1.0 - n.z, 5.0);
+    let cz = clamp(1.0 - n.z, 0.0, 1.0);
+    let cz2 = cz * cz;
+    var f = f0 + (vec3f(1.0) - f0) * (cz2 * cz2 * cz);
     let ir = i.p1.z;
     if (ir > 0.0) {
         // Thin-film colour where the surface bends hardest.
@@ -260,8 +262,8 @@ fn mesh_gradient(i: Inst, c: Ctx, m: f32, px: vec2f) -> vec4f {
     if (warp > 0.0) {
         uv += warp * 0.09 * vec2f(gnoise(uv * 2.1 + vec2f(t * 0.11, 0.0), c.seed + 5u), gnoise(uv * 2.1 + vec2f(3.7, -t * 0.09), c.seed + 9u));
     }
-    let aspect = i.rect.zw / max(i.rect.z, i.rect.w);
-    let sharp = i.p0.z;
+    let aspect = i.rect.zw / max(max(i.rect.z, i.rect.w), 1.0);
+    let sharp = clamp(i.p0.z, 0.1, 8.0);
     var lab = vec3f(0.0);
     var wsum = 0.0;
     for (var k = 0u; k < n; k++) {
@@ -276,18 +278,18 @@ fn mesh_gradient(i: Inst, c: Ctx, m: f32, px: vec2f) -> vec4f {
 
 fn dither(i: Inst, c: Ctx, m: f32) -> vec4f {
     let f0 = u32(i.xf.x);
-    let n = u32(i.xf.y);
+    let n = max(u32(i.xf.y), 1u);
     let pix = max(i.p0.z, 0.25);
     let rel = c.p - i.rect.xy;
     let cell = floor(rel / pix);
-    let ci = vec2u(vec2i(cell) + vec2i(4096));
+    let ci = bitcast<vec2u>(vec2i(cell));
     let tone = tone_at(i, c, i.rect.xy + (cell + 0.5) * pix, i32(i.p0.y + 0.5), i.p0.w);
-    let pat = i32(i.p0.x + 0.5);
+    let pat = clamp(i32(i.p0.x + 0.5), 1, 5);
     var th: f32;
     if (pat <= 3) {
         th = bayer(ci, u32(pat));
     } else if (pat == 4) {
-        let side = u32(i.xf.w);
+        let side = max(u32(i.xf.w), 1u);
         th = dat1(u32(i.xf.z), (ci.y % side) * side + ci.x % side);
     } else {
         th = u01(ci.x * 7919u + pcg(ci.y + c.seed));
@@ -314,13 +316,14 @@ fn grain_gradient(i: Inst, c: Ctx, m: f32, px: vec2f) -> vec4f {
         x = length(c.p - ctr) / max(length(c.half), 1e-3);
     } else {
         let d = c.p - ctr;
-        x = fract((atan2(d.y, d.x) - ang) / TAU);
+        let th = select(0.0, atan2(d.y, d.x), any(d != vec2f(0.0)));
+        x = fract((th - ang) / TAU);
     }
     let amount = i.p1.x;
     let size = max(i.p1.y, 0.25);
     var frame = 0u;
     if (i.p1.w > 0.0) { frame = u32(floor(c.t * i.p1.w)); }
-    let gc = vec2u(vec2i(floor((c.p - i.rect.xy) / size)) + vec2i(4096));
+    let gc = bitcast<vec2u>(vec2i(floor((c.p - i.rect.xy) / size)));
     let h = pcg(gc.x + pcg(gc.y + pcg(frame + c.seed * 977u)));
     // Triangular noise scatters the ramp position: colours stipple into each other.
     let nx = u01(h) + u01(h + 1u) - 1.0;
@@ -358,17 +361,17 @@ fn metaballs(i: Inst, c: Ctx, m: f32, px: vec2f) -> vec4f {
         rsum += b.z * f;
     }
     let base = i.c0.rgb;
-    let col = oklab_to_lin(lab / max(field, 1e-6));
+    let col = select(base, oklab_to_lin(lab / max(field, 1e-6)), field > 1e-5);
     let ravg = rsum / max(field, 1e-6);
     // Distance to the iso-surface field = 1, roughly (1 - field) * r / 2 near the edge.
-    let cov = clamp(0.5 + (field - 1.0) * ravg * 0.5 * c.scale, 0.0, 1.0);
+    let cov = select(0.0, clamp(0.5 + (field - 1.0) * ravg * 0.5 * c.scale, 0.0, 1.0), field > 1e-3);
     // Glossy body: the field's slope tilts the normal near the rim, flat in the middle.
     let steep = 1.0 - smoothstep(1.0, 2.6, field);
-    let nxy = -normalize(grad + vec2f(1e-6)) * steep * 0.9;
+    let nxy = -grad / sqrt(dot(grad, grad) + 1e-6) * steep * 0.9;
     let nrm = normalize(vec3f(nxy, 1.0));
     let l = normalize(vec3f(-0.45, -0.6, 0.66));
     let diff = max(dot(nrm, l), 0.0);
-    let spec = pow(max(dot(reflect(-l, nrm), vec3f(0.0, 0.0, 1.0)), 0.0), 28.0);
+    let spec = pow(max(dot(reflect(-l, nrm), vec3f(0.0, 0.0, 1.0)), 1e-4), 28.0);
     let body = col * (0.6 + 0.5 * diff) + vec3f(spec * i.p0.w * 0.8);
     // A soft glow of each blob's colour into the base.
     let halo = col * smoothstep(0.25, 1.0, field) * 0.18;
@@ -392,6 +395,8 @@ fn voronoi(i: Inst, c: Ctx, m: f32, px: vec2f) -> vec4f {
     let n = u32(i.xf.y);
     let sc = max(i.p0.x, 2.0);
     let t = c.t * i.p0.y;
+    let t0 = fract(t * (1.0 / TAU)) * TAU;
+    let t1 = fract(t * (0.8 / TAU)) * TAU;
     let p = (c.p - i.rect.xy) / sc;
     let ip = floor(p);
     // Each cell's seed point orbits its own spot.
@@ -403,7 +408,7 @@ fn voronoi(i: Inst, c: Ctx, m: f32, px: vec2f) -> vec4f {
             let cc = vec2i(ip) + vec2i(x, y);
             let h = hcell(cc, c.seed);
             let h2 = hcell(cc, c.seed + 1u);
-            let o = vec2f(0.5) + 0.38 * vec2f(sin(t + TAU * h), cos(t * 0.8 + TAU * h2));
+            let o = vec2f(0.5) + 0.38 * vec2f(sin(t0 + TAU * h), cos(t1 + TAU * h2));
             let d = vec2f(cc) + o - p;
             let dd = dot(d, d);
             if (dd < best) { best = dd; bc = cc; bo = d; }
@@ -418,7 +423,7 @@ fn voronoi(i: Inst, c: Ctx, m: f32, px: vec2f) -> vec4f {
             if (x == 0 && y == 0) { continue; }
             let h = hcell(cc, c.seed);
             let h2 = hcell(cc, c.seed + 1u);
-            let o = vec2f(0.5) + 0.38 * vec2f(sin(t + TAU * h), cos(t * 0.8 + TAU * h2));
+            let o = vec2f(0.5) + 0.38 * vec2f(sin(t0 + TAU * h), cos(t1 + TAU * h2));
             let d = vec2f(cc) + o - p;
             let dv = d - bo;
             if (dot(dv, dv) > 1e-6) { edge = min(edge, dot(0.5 * (bo + d), normalize(dv))); }
@@ -452,7 +457,9 @@ fn waves(i: Inst, c: Ctx, m: f32, px: vec2f) -> vec4f {
         let fk = f32(k);
         let h = hcell(vec2i(i32(k), 3), c.seed);
         let fq = i.p0.y * (0.8 + 0.4 * h);
-        let y = fk / f32(n) + i.p0.x * (0.7 * sin(TAU * (fq * s + t * 0.2 * (1.0 + 0.3 * fk)) + TAU * h) + 0.3 * sin(TAU * (fq * 2.3 * s - t * 0.13) + 1.7 * fk));
+        let ph1 = fract(t * 0.2 * (1.0 + 0.3 * fk) + h);
+        let ph2 = fract(-t * 0.13) * TAU + 1.7 * fk;
+        let y = fk / f32(n) + i.p0.x * (0.7 * sin(TAU * (fq * s + ph1)) + 0.3 * sin(TAU * fq * 2.3 * s + ph2));
         // The front band shades the one behind it just above its crest.
         let shade = exp(-max(y - v, 0.0) / 0.025) * 0.18 * step(v, y);
         col *= 1.0 - shade;

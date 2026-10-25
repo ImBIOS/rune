@@ -633,15 +633,26 @@ pub(crate) fn aurora(p: &AuroraParams, rect: Rect, t: f32, seed: u32, data: &mut
     first
 }
 
+/// Fold unbounded time into `0..=512` s with a continuous triangle wave (exact identity on
+/// `0..=512`), so spatial noise coordinates keep full `f32` precision after hours of uptime.
+pub(crate) fn fold_t(t: f32) -> f32 {
+    if !t.is_finite() {
+        return 0.0;
+    }
+    let u = (t as f64 * (1.0 / 1024.0)).rem_euclid(1.0);
+    (if u <= 0.5 { u * 1024.0 } else { (1.0 - u) * 1024.0 }) as f32
+}
+
 /// Mesh gradient control points at time `t`: each wanders from its rest point by up to `drift`.
 pub(crate) fn mesh_points(p: &MeshGradientParams, t: f32, seed: u32) -> [[f32; 2]; MAX_STOPS] {
-    let tt = t * p.speed * 0.5;
+    let tt = fold_t(t * p.speed * 0.5);
+    let drift = if p.drift.is_finite() { p.drift } else { 0.0 };
     let mut out = p.points;
     for (k, q) in out.iter_mut().enumerate() {
         let s = seed.wrapping_add(k as u32 * 31);
         let x = tt + k as f32 * 13.1;
-        q[0] += p.drift * 1.4 * gnoise(x, 0.5, 0, s);
-        q[1] += p.drift * 1.4 * gnoise(x, 7.5, 0, s.wrapping_add(97));
+        q[0] += drift * 1.4 * gnoise(x, 0.5, 0, s);
+        q[1] += drift * 1.4 * gnoise(x, 7.5, 0, s.wrapping_add(97));
     }
     out
 }
@@ -649,8 +660,9 @@ pub(crate) fn mesh_points(p: &MeshGradientParams, t: f32, seed: u32) -> [[f32; 2
 /// Metaball centres (pt), radii (pt) and colour index: one vec4 per ball.
 pub(crate) fn metaballs(p: &MetaballParams, rect: Rect, t: f32, seed: u32, data: &mut Vec<[f32; 4]>) {
     let n = p.count.clamp(1, 8);
-    let short = rect.w.min(rect.h);
-    let tt = t * p.speed * 0.5;
+    let short = rect.w.min(rect.h).max(0.0);
+    let tt = fold_t(t * p.speed * 0.5);
+    let size = if p.size.is_finite() { p.size.max(0.0) } else { 0.0 };
     let colors = p.colors.len() as u32;
     for k in 0..n {
         let h = hu(seed, k + 1);
@@ -659,7 +671,7 @@ pub(crate) fn metaballs(p: &MetaballParams, rect: Rect, t: f32, seed: u32, data:
         let x = tt + k as f32 * 7.3;
         let wx = gnoise(x, 1.5, 0, h) * 0.5;
         let wy = gnoise(x, 4.5, 0, h.wrapping_add(5)) * 0.5;
-        let r = p.size * short * (0.7 + 0.6 * u01(h + 2));
+        let r = size * short * (0.7 + 0.6 * u01(h + 2));
         data.push([rect.x + rect.w * (base[0] + wx), rect.y + rect.h * (base[1] + wy), r, (k % colors) as f32]);
     }
 }

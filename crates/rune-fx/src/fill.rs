@@ -496,7 +496,7 @@ impl VoronoiParams {
         VoronoiParams { colors: Stops::hex(&[0x1f2a44, 0x2c3e66, 0x3d5a8a, 0x5577b0]), edge_color: rgb(0x0b0f1a), scale: 36.0, speed: 0.25, edge: 1.5, depth: 0.4 }
     }
     pub fn stained() -> Self {
-        VoronoiParams { colors: Stops::hex(&[0xd7263d, 0xf46036, 0x2e294e, 0x1b998b, 0xc5d86d]), edge_color: rgb(0x111111), scale: 44.0, edge: 2.5, depth: 0.25, ..Self::cells() }
+        VoronoiParams { colors: Stops::hex(&[0xd7263d, 0xf46036, 0x2e294e, 0x1b998b, 0xc5d86d]), edge_color: rgb(0x111111), scale: 20.0, edge: 2.0, depth: 0.25, ..Self::cells() }
     }
 }
 
@@ -707,7 +707,7 @@ impl FillParams {
             FillStyle::Metaballs(p) => p.speed > 0.0,
             FillStyle::Swirl(p) => p.speed > 0.0,
             FillStyle::Voronoi(p) => p.speed > 0.0,
-            FillStyle::Waves(p) => p.speed > 0.0,
+            FillStyle::Waves(p) => p.speed > 0.0 && p.amplitude > 0.0,
             FillStyle::Halftone(p) => p.input.animates() && p.speed > 0.0,
         }
     }
@@ -744,12 +744,12 @@ impl FillParams {
 
     /// Pack into `i` (kind is `KIND_FILL`); `None` when the fill draws nothing.
     pub(crate) fn pack(&self, i: &mut InstRaw, rm: bool, time: f32) -> Option<Rect> {
-        if self.intensity <= 0.0 || self.border < 0.0 {
+        let r = rect_of(i);
+        if !(self.intensity > 0.0) || !(self.border >= 0.0) || !(r.w > 0.0) || !(r.h > 0.0) {
             return None;
         }
-        let r = rect_of(i);
-        // Looping styles settle on one pose under reduced motion.
-        i.t[0] = if rm { CALM_T } else { time };
+        // Looping styles settle on one pose under reduced motion, and fold large times to keep f32 precision.
+        i.t[0] = if rm { CALM_T } else { cpu::fold_t(time) };
         i.t[2] = self.style.index() as f32;
         i.aux = [self.border, self.intensity.min(1.0), 0.0, 0.0];
         match self.style {
@@ -760,7 +760,7 @@ impl FillParams {
                 i.p1 = [p.dome, p.angle, p.iridescence, p.contrast];
             }
             FillStyle::MeshGradient(p) => {
-                i.p0 = [p.drift, p.speed, p.sharpness.max(0.1), p.warp];
+                i.p0 = [p.drift, p.speed, p.sharpness.clamp(0.1, 8.0), p.warp];
             }
             FillStyle::Dither(p) => {
                 let pat = match p.pattern {
@@ -890,7 +890,10 @@ mod tests {
     fn idle_fills_are_culled() {
         for (s, p) in every_preset() {
             assert!(Fx::fill(p.fill().intensity(0.0)).on(card()).pack().is_none(), "{} {}", s.id, p.id);
+            assert!(Fx::fill(p.fill().intensity(f32::NAN)).on(card()).pack().is_none(), "{} {}", s.id, p.id);
             assert!(Fx::fill(p.fill().border(-1.0)).on(card()).pack().is_none());
+            assert!(Fx::fill(p.fill()).on(Shape::rounded(10.0, 10.0, 0.0, 40.0, 0.0)).pack().is_none(), "{} {}: zero width", s.id, p.id);
+            assert!(Fx::fill(p.fill()).on(Shape::rounded(10.0, 10.0, 40.0, 0.0, 0.0)).pack().is_none(), "{} {}: zero height", s.id, p.id);
             assert!(Fx::fill(p.fill()).on(card()).pack().is_some());
         }
     }
@@ -923,6 +926,30 @@ mod tests {
         assert!(!moving(LiquidMetalParams { flow: 0.0, ..LiquidMetalParams::gold() }.into()));
         assert!(!moving(FlutedGlassParams::reeded().into()));
         assert!(!moving(DitherParams::bayer().into()), "a ramp holds still");
+        assert!(!moving(WaveParams { amplitude: 0.0, ..WaveParams::sea() }.into()), "flat waves hold still");
+    }
+
+    #[test]
+    fn large_times_fold_without_precision_loss_or_jump() {
+        assert_eq!(cpu::fold_t(0.0), 0.0);
+        assert_eq!(cpu::fold_t(1.2), 1.2);
+        assert_eq!(cpu::fold_t(512.0), 512.0);
+        for t in [1e4f32, 1e5, -1e5] {
+            let a = cpu::fold_t(t);
+            let b = cpu::fold_t(t + 1.0 / 60.0);
+            assert!((0.0..=512.0).contains(&a) && (0.0..=512.0).contains(&b), "{t} -> {a}");
+            assert!((b - a).abs() > 1e-3 && (b - a).abs() < 0.05, "smooth step at {t}: {a} -> {b}");
+        }
+        for (s, p) in every_preset() {
+            let l = Fx::fill(p.fill()).on(card()).seed(7);
+            let (i0, d0) = packed(&l.at(1e5)).unwrap();
+            let (i1, d1) = packed(&l.at(1e5 + 0.25)).unwrap();
+            assert!(i0.t[0] >= 0.0 && i0.t[0] <= 512.0, "{} {}", s.id, p.id);
+            assert!(d0.iter().flatten().all(|v| v.is_finite()), "{} {}", s.id, p.id);
+            if p.fill().animates() {
+                assert!(i0.t[0] != i1.t[0] || d0 != d1, "{} {} still moves at t = 1e5", s.id, p.id);
+            }
+        }
     }
 
     #[test]
