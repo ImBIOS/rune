@@ -7,7 +7,7 @@ license.workspace = true
 [features]
 default = ["ogg-audio"]
 # Headless benchmark instrumentation; ordinary builds contain no phase clocks.
-frame-profile = ["dep:procwatch"]
+frame-profile = ["dep:procwatch", "dep:libc"]
 dev = ["dep:tungstenite", "dep:csscolorparser", "rune-motion/dev"]
 native-file-dialog = ["dep:rfd"]
 hot = ["dep:subsecond", "dep:dioxus-devtools"]
@@ -44,10 +44,12 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 blake3 = "1"
 zeroize = "1.8"
 half = "2"
-libc = "0.2"
 unicode-segmentation = "1.13"
 tungstenite = { version = "0.28", optional = true }
 csscolorparser = { version = "0.7", optional = true }
+
+[target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
+libc = { version = "0.2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5.2"
@@ -83,6 +85,7 @@ xkbcommon = "0.9"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_DataExchange"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 libloading = "0.8"
 resvg = { version = "0.45", default-features = false }
 zbus = { version = "6", default-features = false, features = ["tokio", "proxy"] }

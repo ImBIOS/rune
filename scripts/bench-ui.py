@@ -1,6 +1,22 @@
 #!/usr/bin/env python3
-"""Repeatable offscreen workload. Build `--profile perf` on a build worker first; time those binaries locally."""
+"""Repeatable offscreen workloads; build and run on a headless GPU worker.
+
+Frame-CPU mode:
+  cargo build --profile perf -p settings -p opencode --bins --example frame-cpu --features frame-profile
+  python3 scripts/bench-ui.py --frame-cpu --out target/frame-cpu --runs 9
+Save the baseline binaries (including examples/frame-cpu) in saved/target/perf,
+then build the candidate and add --compare saved/target/perf. Use separate Cargo
+target directories for separate source roots. Comparison verifies binary hashes
+differ, discards one warmup per side, and alternates paired runs; report medians
+and MAD, and keep timing changes only above the observed noise.
+
+Commit includes view/layout/shaping, and Layout includes shaping: phases overlap;
+do not sum them. CPU clocks measure the calling thread; elapsed encode/submit may
+include queue backpressure. The runner forces idle frames, so idle is not native
+wake CPU; startup measures first completed pixels, not display presentation.
+"""
 import argparse
+import hashlib
 import json
 import pathlib
 import re
@@ -13,7 +29,7 @@ import time
 from perf_binary import perf_binary
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-p = argparse.ArgumentParser()
+p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 p.add_argument('--out', required=True, type=pathlib.Path)
 p.add_argument('--runs', type=int, default=7)
 p.add_argument('--only', default='')
@@ -72,33 +88,47 @@ if a.compare:
 for name, (binary, args) in workloads.items():
     if a.only and name not in a.only.split(','):
         continue
+    binaries = {stage: perf_binary(target / binary) for stage, target in targets.items()}
+    if a.compare:
+        hashes = []
+        for path in binaries.values():
+            digest = hashlib.sha256()
+            with path.open('rb') as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                    digest.update(chunk)
+            hashes.append(digest.digest())
+        if hashes[0] == hashes[1]:
+            p.error(f'{name}: current and before binaries have identical SHA-256 hashes; rebuild separate candidates')
     samples = {stage: [] for stage in targets}
     for i in range(a.runs + 1):
         for stage in list(targets)[::(-1 if i % 2 else 1)]:
-            cmd = [str(perf_binary(targets[stage] / binary)), *args, '--fps', '120']
+            cmd = [str(binaries[stage]), *args, '--fps', '120']
             process_ms = None
+            log_path = a.out / f'{name}-{stage}-{i}.log'
             if name == 'startup':
-                start = time.perf_counter()
-                with subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
-                    try:
-                        with selectors.DefaultSelector() as selector:
-                            selector.register(proc.stdout, selectors.EVENT_READ)
-                            if not selector.select(timeout=30):
-                                raise TimeoutError('first pixels not ready after 30s')
-                            first = proc.stdout.readline()
-                        process_ms = (time.perf_counter() - start) * 1000
-                        if not first.startswith('rune-first-pixels '):
-                            raise RuntimeError(f'unexpected first-pixels marker: {first}')
-                        stdout, stderr = proc.communicate(timeout=30)
-                        r = subprocess.CompletedProcess(cmd, proc.returncode, first + stdout, stderr)
-                        r.check_returncode()
-                    finally:
-                        if proc.poll() is None:
-                            proc.kill()
-                            proc.wait()
+                with log_path.open('w+') as log:
+                    start = time.perf_counter()
+                    with subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=log, text=True) as proc:
+                        try:
+                            with selectors.DefaultSelector() as selector:
+                                selector.register(proc.stdout, selectors.EVENT_READ)
+                                if not selector.select(timeout=30):
+                                    raise TimeoutError('first pixels not ready after 30s')
+                                first = proc.stdout.readline()
+                            process_ms = (time.perf_counter() - start) * 1000
+                            if not first.startswith('rune-first-pixels '):
+                                raise RuntimeError(f'unexpected first-pixels marker: {first}')
+                            stdout, _ = proc.communicate(timeout=30)
+                            log.seek(0)
+                            r = subprocess.CompletedProcess(cmd, proc.returncode, first + stdout, log.read())
+                            r.check_returncode()
+                        finally:
+                            if proc.poll() is None:
+                                proc.kill()
+                                proc.wait()
             else:
                 r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=True, timeout=180)
-            (a.out / f'{name}-{stage}-{i}.log').write_text(r.stderr)
+                log_path.write_text(r.stderr)
             m = rx.search(r.stderr)
             if not m:
                 raise RuntimeError(r.stderr)
@@ -130,6 +160,7 @@ for name, (binary, args) in workloads.items():
         ratio = statistics.median(ratios)
         spread = statistics.median(abs(r - ratio) for r in ratios)
         result[f'{name}.paired'] = {'metric': metric, 'ratio': ratio, 'mad': spread}
+        print(f'{name}: paired ratio uses {metric}', flush=True)
         print(f'METRIC {name}.paired_ratio={ratio:.6f}', flush=True)
         print(f'METRIC {name}.paired_ratio.mad={spread:.6f}', flush=True)
     (a.out / 'results.json').write_text(json.dumps(result, indent=2) + '\n')
