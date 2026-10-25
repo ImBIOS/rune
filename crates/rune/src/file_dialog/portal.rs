@@ -36,7 +36,9 @@ fn unavailable() -> FileDialogError { FileDialogError("no XDG desktop portal Fil
 fn dbus_error(e: zbus::Error) -> FileDialogError {
     if let zbus::Error::FDO(fdo) = &e
         && matches!(**fdo, fdo::Error::ServiceUnknown(_) | fdo::Error::NameHasNoOwner(_) | fdo::Error::UnknownInterface(_)
-            | fdo::Error::UnknownMethod(_) | fdo::Error::UnknownObject(_)) {
+            | fdo::Error::UnknownMethod(_) | fdo::Error::UnknownObject(_)
+            | fdo::Error::SpawnExecFailed(_) | fdo::Error::SpawnForkFailed(_) | fdo::Error::SpawnChildExited(_)
+            | fdo::Error::SpawnChildSignaled(_) | fdo::Error::SpawnFailed(_) | fdo::Error::SpawnServiceNotFound(_)) {
         return unavailable();
     }
     FileDialogError(e.to_string())
@@ -46,9 +48,11 @@ fn request_options<'a>(kind: FileDialogKind, options: &'a FileDialogOptions, tok
     let mut map = HashMap::from([("handle_token", Variant::from(token)), ("modal", Variant::from(true))]);
     let filters = filters(options);
     if !filters.is_empty() { map.insert("filters", Variant::from(filters)); }
-    if let Some(directory) = &options.directory { map.insert("current_folder", Variant::from(path_bytes(directory))); }
-    if kind == FileDialogKind::Save && let Some(name) = &options.file_name {
-        map.insert("current_name", Variant::from(name.as_str()));
+    if let Some(bytes) = options.directory.as_deref().and_then(path_bytes) {
+        map.insert("current_folder", Variant::from(bytes));
+    }
+    if kind == FileDialogKind::Save && let Some(name) = options.file_name.as_deref().filter(|s| !s.is_empty()) {
+        map.insert("current_name", Variant::from(name));
     }
     map
 }
@@ -74,13 +78,19 @@ async fn run(kind: FileDialogKind, options: FileDialogOptions, parent: String, m
     let token = format!("rune_file_dialog_{}", TOKEN.fetch_add(1, Ordering::Relaxed));
     let started = tokio::time::timeout(RPC_TIMEOUT, async {
         // No session bus means this desktop cannot supply the portal.
-        let conn = Connection::session().await.map_err(|_| unavailable())?;
+        let conn = tokio::select! {
+            conn = Connection::session() => conn.map_err(|_| unavailable())?,
+            _ = reply.closed() => return Ok(None),
+        };
         let portal = Proxy::new(&conn, DEST, PATH, INTERFACE).await.map_err(dbus_error)?;
         let sender = conn.unique_name().ok_or_else(unavailable)?.trim_start_matches(':').replace('.', "_");
         let path = format!("{PATH}/request/{sender}/{token}");
         let mut request = Proxy::new(&conn, DEST, path.clone(), "org.freedesktop.portal.Request").await.map_err(dbus_error)?;
         // Subscribe before calling: the portal can respond before the method returns.
-        let mut responses = request.receive_signal("Response").await.map_err(dbus_error)?;
+        let mut responses = tokio::select! {
+            res = request.receive_signal("Response") => res.map_err(dbus_error)?,
+            _ = reply.closed() => { let _ = conn.close().await; return Ok(None); }
+        };
         let method = match kind { FileDialogKind::Open => "OpenFile", FileDialogKind::Save => "SaveFile" };
         let body = (parent.as_str(), options.title.as_str(), request_options(kind, &options, &token));
         let handle: OwnedObjectPath = portal.call(method, &body).await.map_err(dbus_error)?;
@@ -89,10 +99,11 @@ async fn run(kind: FileDialogKind, options: FileDialogOptions, parent: String, m
             request = Proxy::new(&conn, DEST, handle.as_str().to_owned(), "org.freedesktop.portal.Request").await.map_err(dbus_error)?;
             responses = request.receive_signal("Response").await.map_err(dbus_error)?;
         }
-        Ok::<_, FileDialogError>((conn, request, responses))
+        Ok::<_, FileDialogError>(Some((conn, request, responses)))
     }).await.unwrap_or_else(|_| Err(FileDialogError("file dialog portal timed out".into())));
     let (conn, request, mut responses) = match started {
-        Ok(v) => v,
+        Ok(Some(v)) => v,
+        Ok(None) => return,
         Err(e) => { let _ = reply.send(Err(e)); return; }
     };
     tokio::select! {
@@ -136,13 +147,19 @@ mod tests {
         assert!(!open.contains_key("current_name"));
         let save = request_options(FileDialogKind::Save, &options, "t2");
         assert_eq!(save.get("current_name"), Some(&Variant::from("export.csv")));
-        assert!(!request_options(FileDialogKind::Open, &FileDialogOptions::default(), "t3").contains_key("filters"));
+        let empty = FileDialogOptions { directory: Some(PathBuf::new()), file_name: Some(String::new()), ..Default::default() }
+            .filter("Empty", &[]);
+        let empty_save = request_options(FileDialogKind::Save, &empty, "t3");
+        assert!(!empty_save.contains_key("filters"));
+        assert!(!empty_save.contains_key("current_folder"));
+        assert!(!empty_save.contains_key("current_name"));
     }
     #[test]
     fn missing_portal_is_a_clear_error() {
         let fdo = |e| zbus::Error::FDO(Box::new(e));
         assert_eq!(dbus_error(fdo(fdo::Error::ServiceUnknown("portal".into()))), unavailable());
         assert_eq!(dbus_error(fdo(fdo::Error::UnknownMethod("OpenFile".into()))), unavailable());
+        assert_eq!(dbus_error(fdo(fdo::Error::SpawnChildExited("portal".into()))), unavailable());
         assert_ne!(dbus_error(fdo(fdo::Error::Failed("x".into()))), unavailable());
     }
 }

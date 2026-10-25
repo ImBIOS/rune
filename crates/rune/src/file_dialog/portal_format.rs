@@ -9,9 +9,16 @@ pub(super) fn parent_window(xid: u32) -> String { if xid == 0 { String::new() } 
 
 pub(super) type Filter = (String, Vec<(u32, String)>);
 /// Portal filters are glob (0) or MIME (1) patterns; Rune's filters are extensions.
+/// The portal rejects filters with an empty name or an empty pattern list.
 pub(super) fn filters(options: &FileDialogOptions) -> Vec<Filter> {
-    options.filters.iter().map(|(name, extensions)| {
-        (name.clone(), extensions.iter().map(|ext| (0, glob(ext))).collect())
+    options.filters.iter().filter(|(_, extensions)| !extensions.is_empty()).map(|(name, extensions)| {
+        let patterns: Vec<_> = extensions.iter().map(|ext| (0, glob(ext))).collect();
+        let label = if name.is_empty() {
+            patterns.iter().map(|(_, g)| g.as_str()).collect::<Vec<_>>().join(", ")
+        } else {
+            name.clone()
+        };
+        (label, patterns)
     }).collect()
 }
 fn glob(extension: &str) -> String {
@@ -19,11 +26,15 @@ fn glob(extension: &str) -> String {
     if ext.is_empty() || ext == "*" { "*".into() } else { format!("*.{ext}") }
 }
 
-/// The portal takes folders as NUL-terminated bytes.
-pub(super) fn path_bytes(path: &Path) -> Vec<u8> {
-    let mut bytes = path.as_os_str().as_bytes().to_vec();
-    bytes.push(0);
-    bytes
+/// The portal takes folders as NUL-terminated bytes with no interior NULs.
+pub(super) fn path_bytes(path: &Path) -> Option<Vec<u8>> {
+    let bytes = path.as_os_str().as_bytes();
+    (!bytes.is_empty() && !bytes.contains(&0)).then(|| {
+        let mut out = Vec::with_capacity(bytes.len() + 1);
+        out.extend_from_slice(bytes);
+        out.push(0);
+        out
+    })
 }
 
 /// The `Response` signal: 0 is a choice, 1 a cancelled dialog, 2 a dialog that ended another
@@ -42,7 +53,7 @@ pub(super) fn uri_path(uri: &str) -> Result<PathBuf, FileDialogError> {
     let rest = uri.strip_prefix("file://").ok_or_else(invalid)?;
     let path = match rest.find('/') {
         Some(0) => rest,
-        Some(at) if &rest[..at] == "localhost" => &rest[at..],
+        Some(at) if rest[..at].eq_ignore_ascii_case("localhost") => &rest[at..],
         _ => return Err(invalid()),
     };
     let bytes = path.split(['?', '#']).next().unwrap_or_default().as_bytes();
@@ -72,6 +83,7 @@ mod tests {
             Some(PathBuf::from("/home/a/My Export 录.csv")));
         assert_eq!(outcome(0, &uris(&["file://localhost/tmp/a%2fb", "file:///tmp/second"])).unwrap(),
             Some(PathBuf::from("/tmp/a/b")));
+        assert_eq!(outcome(0, &uris(&["file://LOCALHOST/tmp/a"])).unwrap(), Some(PathBuf::from("/tmp/a")));
         assert_eq!(outcome(0, &[]).unwrap(), None);
         // A malformed or truncated escape stays literal.
         assert_eq!(uri_path("file:///tmp/100%").unwrap(), PathBuf::from("/tmp/100%"));
@@ -90,12 +102,19 @@ mod tests {
     }
     #[test]
     fn filters_folders_and_parents_use_portal_formats() {
-        let options = FileDialogOptions::default().filter("Exports", &["csv", ".json", "*.txt"]).filter("All files", &["*"]);
+        let options = FileDialogOptions::default()
+            .filter("Exports", &["csv", ".json", "*.txt"])
+            .filter("Empty", &[])
+            .filter("", &["wav"])
+            .filter("All files", &["*"]);
         assert_eq!(filters(&options), vec![
             ("Exports".to_string(), vec![(0, "*.csv".to_string()), (0, "*.json".to_string()), (0, "*.txt".to_string())]),
+            ("*.wav".to_string(), vec![(0, "*.wav".to_string())]),
             ("All files".to_string(), vec![(0, "*".to_string())]),
         ]);
-        assert_eq!(path_bytes(Path::new("/home/a/Downloads")), b"/home/a/Downloads\0");
+        assert_eq!(path_bytes(Path::new("/home/a/Downloads")).as_deref(), Some(&b"/home/a/Downloads\0"[..]));
+        assert_eq!(path_bytes(Path::new("")), None);
+        assert_eq!(path_bytes(Path::new("/tmp/a\0b")), None);
         assert_eq!(parent_window(0), "");
         assert_eq!(parent_window(0x3a0000f), "x11:3a0000f");
     }

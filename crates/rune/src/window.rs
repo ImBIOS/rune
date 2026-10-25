@@ -228,6 +228,8 @@ impl Win {
     }
 
     fn hide(&self) {
+        #[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
+        crate::file_dialog::window_focus(&self.window, false);
         #[cfg(target_os = "macos")]
         if let Some(panel) = &self.panel { panel.hide(std::time::Duration::ZERO); return; }
         self.window.set_visible(false);
@@ -3084,8 +3086,6 @@ impl<S: 'static> Host<S> {
         if matches!(&event, WindowEvent::ScaleFactorChanged { .. }) { self.apply_placement(event_loop); }
         match event {
             WindowEvent::Focused(focused) => {
-                #[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
-                if let Some(w) = &self.win { crate::file_dialog::window_focus(&w.window, focused); }
                 if self.launcher() && self.win.as_ref().is_some_and(|w| !w.first_frame.notified) { return; }
                 #[cfg(target_os = "macos")]
                 if self.win.as_ref().and_then(|w| w.panel.as_ref()).is_some_and(|p| p.is_key() != focused) {
@@ -3093,6 +3093,8 @@ impl<S: 'static> Host<S> {
                     // adoption. It must not dismiss an already-key panel on first open.
                     return;
                 }
+                #[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
+                if let Some(w) = &self.win { crate::file_dialog::window_focus(&w.window, focused && w.visible); }
                 // Deliver independently of drawable availability, including hide/occlusion.
                 self.rt.window_focus(focused);
                 self.shell(event_loop);
