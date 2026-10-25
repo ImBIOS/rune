@@ -371,7 +371,7 @@ impl<S: 'static> AppHandle<S> {
     /// nonactivating panel takes keys without activating. The window open at launch doesn't
     /// activate the app beyond what the platform does at launch.
     pub fn open(&self) {
-        self.request(|q| q.window = Some(WindowRequest::Open(None)));
+        self.request(|q| { q.window = Some(WindowRequest::Open(None)); q.minimize = false; });
     }
 
     /// Show or recreate the window without requesting focus. A minimized window stays minimized;
@@ -382,13 +382,13 @@ impl<S: 'static> AppHandle<S> {
 
     /// Hide the window, retaining its host and state. Does not invoke the close callback.
     pub fn hide(&self) {
-        self.request(|q| q.window = Some(WindowRequest::Hide));
+        self.request(|q| { q.window = Some(WindowRequest::Hide); q.minimize = false; });
     }
 
     /// Focus/activate an already-visible window, restoring it if minimized.
     /// On Wayland this requests attention; use activate(token) for compositor-authorized focus.
     pub fn focus(&self) {
-        self.request(|q| q.focus = true);
+        self.request(|q| { q.focus = true; q.minimize = false; });
     }
 
     /// Set the outer position in physical desktop pixels (negative coordinates are valid).
@@ -410,19 +410,21 @@ impl<S: 'static> AppHandle<S> {
     /// lets it take focus. Where tokens don't exist this is `open`.
     pub fn activate(&self, token: impl Into<String>) {
         let token = token.into();
-        self.request(|q| q.window = Some(WindowRequest::Open(Some(token).filter(|t| !t.is_empty()))));
+        self.request(|q| { q.window = Some(WindowRequest::Open(Some(token).filter(|t| !t.is_empty()))); q.minimize = false; });
     }
 
     /// Close the window as the close button would (`App::on_close` runs; without
     /// `keep_running` the app quits).
     pub fn close(&self) {
-        self.request(|q| q.window = Some(WindowRequest::Close));
+        self.request(|q| { q.window = Some(WindowRequest::Close); q.minimize = false; });
     }
 
     /// Minimize the window, as `Tx::minimize` does from a handler. Does nothing for a hidden
-    /// window, a panel or launcher, or one that can't minimize.
+    /// window, a panel or launcher, or one that can't minimize. After a `show` it minimizes
+    /// the shown window; a later `open`, `focus`, `hide` or `close` cancels it, and it cancels
+    /// an earlier `focus`.
     pub fn minimize(&self) {
-        self.request(|q| q.window = Some(WindowRequest::Minimize));
+        self.request(|q| { q.minimize = true; q.focus = false; });
     }
 
     /// Quit the app: the window closes without `on_close`, and `run` returns.
@@ -479,13 +481,14 @@ pub(crate) enum WindowRequest {
     Show,
     Hide,
     Close,
-    Minimize,
 }
 
 pub(crate) struct Requests<S> {
     pub window: Option<WindowRequest>,
     pub dock: Option<bool>,
     pub focus: bool,
+    /// `AppHandle::minimize`, after `window`. It and `focus` are last-wins.
+    pub minimize: bool,
     pub position: Option<(i32, i32)>,
     pub place: Option<crate::windows::PlaceRequest>,
     pub quit: bool,
@@ -497,7 +500,7 @@ pub(crate) struct Requests<S> {
 impl<S> Requests<S> {
     /// Nothing but updates: no wake for `poll`, no window, focus or geometry request.
     pub(crate) fn only_updates(&self) -> bool {
-        !self.woken && self.window.is_none() && !self.focus && self.position.is_none() && self.place.is_none()
+        !self.woken && self.window.is_none() && !self.focus && !self.minimize && self.position.is_none() && self.place.is_none()
     }
 }
 
@@ -507,6 +510,7 @@ impl<S> Default for Requests<S> {
             window: None,
             dock: None,
             focus: false,
+            minimize: false,
             position: None,
             place: None,
             quit: false,
@@ -560,7 +564,7 @@ impl<S> Shared<S> {
     /// A request a `--desktop` run applies to the window (dock and quit aside) waits for `take`.
     pub(crate) fn window_pending(&self) -> bool {
         let r = self.requests.lock().unwrap();
-        r.window.is_some() || r.focus || r.position.is_some() || r.place.is_some() || !r.updates.is_empty()
+        r.window.is_some() || r.focus || r.minimize || r.position.is_some() || r.place.is_some() || !r.updates.is_empty()
     }
 
     pub fn take_place(&self) -> Option<crate::windows::PlaceRequest> {
@@ -752,7 +756,22 @@ mod tests {
         assert!(rt.minimize_request);
         let app = App::new(spec());
         app.handle().minimize();
-        assert_eq!(app.shared.take().window, Some(WindowRequest::Minimize));
+        let requests = app.shared.take();
+        assert!(requests.minimize && requests.window.is_none());
+    }
+
+    #[test]
+    fn a_handles_minimize_and_focus_are_last_wins_and_hide_close_or_open_cancel_it() {
+        let app = App::new(spec());
+        let h = app.handle();
+        let after = |calls: &dyn Fn()| { calls(); let r = app.shared.take(); (r.window, r.focus, r.minimize) };
+        assert_eq!(after(&|| { h.focus(); h.minimize(); }), (None, false, true), "focus then minimize stays minimized");
+        assert_eq!(after(&|| { h.minimize(); h.focus(); }), (None, true, false));
+        assert_eq!(after(&|| { h.show(); h.minimize(); }), (Some(WindowRequest::Show), false, true), "shows, then minimizes");
+        assert_eq!(after(&|| { h.minimize(); h.show(); }), (Some(WindowRequest::Show), false, true));
+        assert_eq!(after(&|| { h.minimize(); h.hide(); }), (Some(WindowRequest::Hide), false, false));
+        assert_eq!(after(&|| { h.minimize(); h.close(); }), (Some(WindowRequest::Close), false, false));
+        assert_eq!(after(&|| { h.minimize(); h.open(); }), (Some(WindowRequest::Open(None)), false, false), "open restores");
     }
 
     #[test]

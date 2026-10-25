@@ -1766,7 +1766,6 @@ impl<S: 'static> Host<S> {
             WindowRequest::Show => self.show(event_loop),
             WindowRequest::Hide => self.hide(event_loop),
             WindowRequest::Close => self.close(event_loop),
-            WindowRequest::Minimize => self.minimize(),
         }
     }
 
@@ -1777,7 +1776,8 @@ impl<S: 'static> Host<S> {
         let Some(w) = self.win.as_ref().filter(|w| w.visible) else { return minimize_ignored("a hidden window") };
         #[cfg(target_os = "macos")]
         if w.panel.is_some() || self.launcher() { return minimize_ignored("a panel"); }
-        if !w.window.enabled_buttons().contains(winit::window::WindowButtons::MINIMIZE) {
+        // Off macOS winit reports a minimize button on a borderless window too.
+        if self.options.borderless || !w.window.enabled_buttons().contains(winit::window::WindowButtons::MINIMIZE) {
             return minimize_ignored("a window without a minimize button");
         }
         w.window.set_minimized(true);
@@ -1878,11 +1878,14 @@ impl<S: 'static> Host<S> {
         if let Some(visible) = requests.dock {
             crate::macos::set_dock_icon(visible);
         }
-        let polled = wake && !quiet && self.poll_hidden(event_loop);
+        let shows = matches!(requests.window, Some(WindowRequest::Show | WindowRequest::Open(_)));
+        let polled = wake && !quiet && self.poll_hidden(event_loop, shows);
         if let Some(position) = requests.position { self.set_position(event_loop, position); }
         if let Some(place) = requests.place { self.place(event_loop, place); }
         if let Some(request) = requests.window { self.window_request(event_loop, request); }
         if requests.focus { self.focus(event_loop); }
+        // After the show it may follow; `focus` and `minimize` are last-wins (`AppHandle`).
+        self.rt.minimize_request |= requests.minimize;
         self.shell(event_loop);
         // A pop-up a quiet update asked for may have been answered at once, running its callback.
         let answered = quiet && !stale_before && self.rt.needs_commit();
@@ -1918,15 +1921,17 @@ impl<S: 'static> Host<S> {
     /// A hidden, keep-running or windowless window still reads its inbox when woken: `poll` runs
     /// with no drawable, present or animation, and its changes render when the window is next
     /// shown. A hidden launcher renders poll's changes hidden, paced, keeping its cached frame
-    /// fresh. Returns whether it polled.
-    fn poll_hidden(&mut self, event_loop: &ActiveEventLoop) -> bool {
+    /// fresh. A minimize waits for a show in the same turn (`shows`). Returns whether it polled.
+    fn poll_hidden(&mut self, event_loop: &ActiveEventLoop, shows: bool) -> bool {
         if event_loop.exiting() || self.win.as_ref().is_some_and(|w| w.visible) { return false; }
         // Its hidden frames already poll.
         #[cfg(all(feature = "dev", debug_assertions))]
         if self.rt.dev.is_some() { return false; }
         let changed = self.rt.poll_hidden();
         self.clipboard.flush(&mut self.rt);
+        let minimize = shows && std::mem::take(&mut self.rt.minimize_request);
         self.shell(event_loop);
+        self.rt.minimize_request |= minimize;
         if changed && self.launcher() { self.refresh_hidden(); }
         true
     }
@@ -1979,12 +1984,14 @@ impl<S: 'static> Host<S> {
             let shown = self.win.as_ref().filter(|w| w.visible);
             let window = shown.map(|w| &w.window);
             if self.popup.open(&mut self.rt, window, paints) && let Some(w) = window { w.request_redraw(); }
-            // A callback that ran (a menu that couldn't open) may have asked to close or quit.
-            if self.rt.shell_request.is_none() { return; }
+            // A callback that ran (a menu that couldn't open) may have asked to close, quit or
+            // minimize.
+            if self.rt.shell_request.is_none() && !self.rt.minimize_request { return; }
         }
     }
 
     fn close(&mut self, event_loop: &ActiveEventLoop) {
+        self.rt.minimize_request = false;
         if let Some(w) = &mut self.win { w.first_frame.hide(); }
         self.secure_input.set(false);
         if !self.closes() { return; }
@@ -2019,6 +2026,7 @@ impl<S: 'static> Host<S> {
     }
 
     fn hide(&mut self, event_loop: &ActiveEventLoop) {
+        self.rt.minimize_request = false;
         self.land_frame();
         // Before the window can go: a hide need not report a blur. `about_to_wait` delivers it,
         // after any Fn change the monitor saw first.
