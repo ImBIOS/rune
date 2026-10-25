@@ -44,6 +44,10 @@ pub enum RecordFormat {
 }
 
 /// Where a recorder is.
+///
+/// The `Interrupted` and `Failed` messages start lower case and have no final period, so they
+/// read after a colon ("Couldn't record: {message}"). Capitalize the first letter to show one
+/// on its own. Later versions keep this form.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RecorderState {
@@ -80,7 +84,9 @@ pub enum MicPermission {
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Recording {
-    /// The file, ready for [`Player::audio`](crate::Player::audio).
+    /// The file, ready for [`Player::audio`](crate::Player::audio). Its extension follows
+    /// the format, and a [fake microphone](Recorder::fake) always writes `.wav`, so read the
+    /// type from this path rather than from the one given to [`Recorder::to_file`].
     pub path: PathBuf,
     /// Seconds of audio, pauses excluded.
     pub duration: f64,

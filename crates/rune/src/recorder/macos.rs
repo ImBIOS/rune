@@ -133,7 +133,7 @@ fn number_bool(value: bool) -> Retained<AnyObject> {
 
 /// An AVAudioRecorder for `path`, not yet prepared or recording: no file and no capture.
 pub(super) fn make_recorder(path: &Path, opts: &Options) -> Result<Retained<AnyObject>, String> {
-    let class = AnyClass::get(c"AVAudioRecorder").ok_or("AVAudioRecorder is unavailable")?;
+    let class = AnyClass::get(c"AVAudioRecorder").ok_or("the system recorder (AVAudioRecorder) is unavailable")?;
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
     let mut entries: Vec<(&NSString, Retained<AnyObject>)> = unsafe {
