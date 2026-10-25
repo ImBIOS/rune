@@ -167,7 +167,7 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
 - **Periodic motion**: `.looping(rune_motion::LoopSpec::opacity(..))` or `LoopSpec::rotation(period)`
   (icon quads). Tracks use animation time, preserve phase when retimed and only request frames
   while visible through ancestor clips. Removal uses the existing spring presence fade. Reduced
-  motion holds the first pose; time scale 0 pauses. Occluded windows stop drawing.
+  motion holds the first pose; time scale 0 pauses. Occluded windows stop drawing and building.
 
 Commit layout runs through a `Measurement` capability that can access text/layout
 caches and virtual geometry, but cannot access the scene, animation tracks, draw
@@ -274,6 +274,12 @@ app.run();
   inside the event loop, even while no window shows, so a closed app keeps its state current and
   an update may do main-thread native work (a status item, a tray). Window requests collapse to
   the latest.
+- A window that's hidden, minimized or fully covered (another window over all of it, or another
+  Space; macOS and X11 report covering, Wayland neither covering nor minimizing) runs updates, `poll`, `wake_after` timers, `on_close` and queued
+  input as usual, but not its view or layout, and draws nothing. The frame that shows it again
+  builds once with the latest state, with motion already landed where it would have ended. A
+  window any part of which shows draws as usual. The dev panel's tree and headless runs always
+  see a current tree.
 - Handlers ask the shell with `Tx::close_window()`, `Tx::minimize()` and `Tx::quit()` (quit wins,
   and either wins over minimize). Minimize does nothing for a hidden window, a panel, a launcher,
   an overlay, a borderless window or a window that can't minimize (debug builds say so).

@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Covered and minimized windows don't run their view.** A shown window that was fully
+  covered (macOS and X11 report it), minimized, or waiting out a missed frame used to build
+  its view and lay it out on every update, wake and due timer. Now it runs updates, `poll`,
+  timers, `on_close` and queued input as a hidden window does, and the view waits, dirty, for
+  the frame that uncovers it, which builds once with the latest state. Uncovering already
+  landed running motion; a window restored from minimized on Windows, which gets no occlusion
+  event, now lands it too, so it doesn't play out what changed meanwhile. An app that relied on
+  side effects in view code while covered will see them only when the window shows. The dev
+  panel's tree still builds on demand.
 - **`Recorder`: record the microphone to a file.** `Recorder::to_file("note.m4a")` records AAC
   (a `.wav` path, or `.format(RecordFormat::Wav)`, records WAV; the format decides the
   file's extension) with `start`, `pause`, `resume`,

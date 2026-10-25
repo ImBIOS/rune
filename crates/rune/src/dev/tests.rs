@@ -200,6 +200,23 @@ fn hidden_hosts_keep_motion_in_real_time_and_the_tree_reports_opacity() {
     assert_eq!(rt.presented("box").unwrap().0[0], 80.0);
 }
 
+/// A covered window skips its view, but the panel watches the tree: asked for it, a covered
+/// window's step builds, so the reply shows the latest state.
+#[test]
+fn a_covered_window_answers_the_tree_with_the_latest_state() {
+    fn view(n: &u32, _: &mut Cx<u32>) -> El { crate::col().child(crate::text(n.to_string()).key("n")) }
+    let spec = AppSpec::new("test", (100.0, 100.0), || 0, view);
+    let mut rt = attached(&spec, 0, Arc::new(|| {}));
+    rt.frame(0.0);
+    rt.set_live_visible(false);
+    rt.update(|n, _| *n = 7);
+    let replies = enqueue(&rt, json!({"type":"tree","id":1}));
+    crate::window::covered_step(&mut rt);
+    let tree = replies.try_recv().unwrap();
+    let n = tree["elements"].as_array().unwrap().iter().find(|e| e["key"] == "n").unwrap();
+    assert_eq!(n["text"], "7");
+}
+
 #[test]
 fn the_tree_drops_exiting_elements_unless_asked() {
     fn view(show: &bool, _: &mut Cx<bool>) -> El {
