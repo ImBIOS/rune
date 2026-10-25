@@ -2,7 +2,8 @@
 //! glyphs and SVG icons into one greyscale atlas.
 //!
 //! Invariants: layouts are in device pixels; every layout is cached by a 64-bit hash of
-//! (text, spans, style, scale, width) and evicted after two commits unused; glyph keys include
+//! (text, spans, style, scale, width), kept for two commits unused and then while a budget of
+//! stale text lasts (`STALE_TEXT`), least recently used out first; glyph keys include
 //! the run's variation coordinates, so one variable font serves every weight.
 
 use std::collections::HashMap;
@@ -694,12 +695,50 @@ pub fn icon_coverage(icon: &Icon, px: u32) -> Vec<u8> {
 
 // ---------------------------------------------------------------------------------------------
 
+/// Shaped text by hash: the value, the commit generation it was last used in, and its text's
+/// length in bytes.
+type Cache<T> = HashMap<u64, (Rc<T>, u32, u32)>;
+
+/// Bytes of text, each layout counting [`STALE_ENTRY`] more, kept shaped after the commits
+/// that used it, so a view shown again after a while (a list returned to from a grid someone
+/// browsed) doesn't reshape. About 800 short labels or 64 KB of paragraphs, either about 3 MB.
+const STALE_TEXT: usize = 64 * 1024;
+const STALE_ENTRY: usize = 64;
+
+/// Drops what `cache` hasn't used in the last two commits once it outgrows [`STALE_TEXT`],
+/// least recently used first. A view's layouts all share the commit it was last shown in, so
+/// that commit's are kept while the budget lasts rather than all dropped together.
+fn evict<T>(cache: &mut Cache<T>, g: u32) {
+    let stale = |used: u32| g.wrapping_sub(used) >= 2;
+    let cost = |bytes: u32| bytes as usize + STALE_ENTRY;
+    let total: usize = cache.values().filter(|e| stale(e.1)).map(|e| cost(e.2)).sum();
+    if total <= STALE_TEXT {
+        return;
+    }
+    let mut ages: Vec<(u32, usize)> = cache.values().filter(|e| stale(e.1)).map(|e| (g.wrapping_sub(e.1), cost(e.2))).collect();
+    ages.sort_unstable_by_key(|a| a.0);
+    let (mut younger, mut kept, mut cutoff) = (0, 0, u32::MAX);
+    for (i, &(age, cost)) in ages.iter().enumerate() {
+        if i > 0 && ages[i - 1].0 != age { younger = kept; }
+        kept += cost;
+        if kept > STALE_TEXT {
+            cutoff = age;
+            break;
+        }
+    }
+    let mut room = STALE_TEXT - younger;
+    cache.retain(|_, e| {
+        let age = g.wrapping_sub(e.1);
+        age < cutoff || age == cutoff && cost(e.2) <= room && { room -= cost(e.2); true }
+    });
+}
+
 pub struct TextSystem {
     font_cx: FontContext,
     layout_cx: LayoutContext<Ink>,
     scale_cx: ScaleContext,
-    layouts: HashMap<u64, (Rc<Layout<Ink>>, u32)>,
-    runs: HashMap<u64, (Rc<RunLayout>, u32)>,
+    layouts: Cache<Layout<Ink>>,
+    runs: Cache<RunLayout>,
     generation: u32,
     pub sans: String,
     pub mono: String,
@@ -1006,11 +1045,12 @@ impl TextSystem {
         &self.color_pixels[color as usize - 1]
     }
 
-    /// Drops layouts unused for two commits.
+    /// Keeps layouts used in the last two commits, and older ones, most recently used first,
+    /// while they fit in [`STALE_TEXT`].
     pub fn end_commit(&mut self) {
         let g = self.generation;
-        self.layouts.retain(|_, (_, used)| g.wrapping_sub(*used) < 2);
-        self.runs.retain(|_, (_, used)| g.wrapping_sub(*used) < 2);
+        evict(&mut self.layouts, g);
+        evict(&mut self.runs, g);
         self.generation = g.wrapping_add(1);
     }
 
@@ -1044,7 +1084,7 @@ impl TextSystem {
             key = h.finish();
         }
         let g = self.generation;
-        if let Some((l, used)) = self.layouts.get_mut(&key) {
+        if let Some((l, used, _)) = self.layouts.get_mut(&key) {
             *used = g;
             return l.clone();
         }
@@ -1243,7 +1283,7 @@ impl TextSystem {
         }
         layout.align(align, AlignmentOptions::default());
         let l = Rc::new(layout);
-        self.layouts.insert(key, (l.clone(), g));
+        self.layouts.insert(key, (l.clone(), g, text.len() as u32));
         l
     }
 
@@ -1253,16 +1293,16 @@ impl TextSystem {
         (l.full_width().ceil() / scale, layout_height(&l, style, scale) / scale)
     }
 
-    /// `run` shaped as one line in `style`, cached until two commits pass without a lookup.
+    /// `run` shaped as one line in `style`, cached as [`Self::end_commit`] keeps layouts.
     pub fn run_layout(&mut self, run: &Run, style: TextStyle, scale: f32) -> Rc<RunLayout> {
         let key = run.key(style, scale);
         let g = self.generation;
-        if let Some((r, used)) = self.runs.get_mut(&key) {
+        if let Some((r, used, _)) = self.runs.get_mut(&key) {
             *used = g;
             return r.clone();
         }
         let r = Rc::new(RunLayout::new(self.layout_rich(run.as_str(), &[], style, scale, None), run.as_str()));
-        self.runs.insert(key, (r.clone(), g));
+        self.runs.insert(key, (r.clone(), g, run.as_str().len() as u32));
         r
     }
 
@@ -2022,6 +2062,62 @@ mod quality_tests {
         for tick in 0..256 { text.layout_live(&tick.to_string(), style, 2.0); }
         assert_eq!(text.layouts.len(), 1);
         assert!(Rc::ptr_eq(&stable, &text.layout_rich("stable label", &[], style, 2.0, None)));
+    }
+
+    #[test]
+    fn a_view_shown_again_after_a_while_does_not_reshape() {
+        let mut text = TextSystem::default();
+        let style = TextStyle::new(13.0, 400.0);
+        let row = text.layout_rich("Back to the list", &[], style, 2.0, None);
+        for _ in 0..8 { text.end_commit(); }
+        let shaped = text.shaped;
+        assert!(Rc::ptr_eq(&row, &text.layout_rich("Back to the list", &[], style, 2.0, None)));
+        assert_eq!(text.shaped, shaped);
+    }
+
+    #[test]
+    fn stale_layouts_stay_within_their_budget_newest_kept() {
+        let mut text = TextSystem::default();
+        let style = TextStyle::new(13.0, 400.0);
+        let labels: Vec<String> = (0..1200).map(|i| format!("label {i:04}")).collect();
+        for label in &labels {
+            text.layout_rich(label, &[], style, 2.0, None);
+            text.end_commit();
+        }
+        // Two more, so even the last label is stale.
+        for _ in 0..2 { text.end_commit(); }
+        let cost: usize = text.layouts.values().map(|e| e.2 as usize + STALE_ENTRY).sum();
+        assert!(cost <= STALE_TEXT, "{cost}");
+        assert!(cost > STALE_TEXT * 9 / 10, "{cost}");
+        let key = |label: &str| text_hash(label, &[], style, 2.0, None);
+        assert!(text.layouts.contains_key(&key(&labels[1199])));
+        assert!(!text.layouts.contains_key(&key(&labels[0])));
+    }
+
+    /// A view's labels all share the commit it was last shown in.
+    #[test]
+    fn a_view_over_the_budget_keeps_a_budget_of_its_layouts() {
+        let mut text = TextSystem::default();
+        let style = TextStyle::new(13.0, 400.0);
+        let labels: Vec<String> = (0..1200).map(|i| format!("label {i:04}")).collect();
+        let show = |text: &mut TextSystem| for label in &labels { text.layout_rich(label, &[], style, 2.0, None); };
+        show(&mut text);
+        for _ in 0..2 {
+            text.end_commit();
+            assert_eq!(text.layouts.len(), 1200, "the current and previous commits are never evicted");
+        }
+        text.end_commit();
+        let cost: usize = text.layouts.values().map(|e| e.2 as usize + STALE_ENTRY).sum();
+        assert!(cost <= STALE_TEXT, "{cost}");
+        assert!(cost > STALE_TEXT * 9 / 10, "{cost}");
+        let kept = text.layouts.len();
+        let shaped = text.shaped;
+        show(&mut text);
+        assert_eq!((text.shaped - shaped) as usize, 1200 - kept, "shown again, only what was dropped reshapes");
+        for _ in 0..2 {
+            text.end_commit();
+            assert_eq!(text.layouts.len(), 1200, "the current and previous commits are never evicted");
+        }
     }
 
     #[test]
