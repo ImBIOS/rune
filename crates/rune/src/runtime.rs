@@ -1739,19 +1739,18 @@ impl<S: 'static> Runtime<S> {
             }
             None => (catch_up + dt, catch_up, dt),
         };
-        // A coarse headless step still polls at every timer deadline, independent of FPS.
+        // A coarse headless step still polls at its timer deadlines, independent of FPS, as an
+        // idle window wakes for them. Like a window's timer floor (`window::timer_deadline`),
+        // a poll comes at most once a frame interval and takes every deadline due by then, so
+        // wakes that polls keep asking for collapse instead of each adding a poll per frame.
         // Input queued for the requested frame stays at that frame's timestamp. The catch-up
         // is the earliest part of the step.
-        if self.wall_start.is_none()
-            && self.logical_wake_deadline().is_some_and(|deadline| deadline > self.clock && deadline < self.clock + elapsed)
-        {
-            let target = self.clock + elapsed;
+        let target = self.clock + elapsed;
+        if self.wall_start.is_none() && self.timer_step(target).is_some() {
             let input = std::mem::take(&mut self.queue);
             let mut catch_up = catch_up;
-            while let Some(deadline) = self.logical_wake_deadline()
-                && deadline > self.clock && deadline < target
-            {
-                let step = deadline - self.clock;
+            while let Some(at) = self.timer_step(target) {
+                let step = at - self.clock;
                 let old = step.min(catch_up);
                 catch_up -= old;
                 self.frame_step(step, old, step - old);
@@ -1762,6 +1761,15 @@ impl<S: 'static> Runtime<S> {
             return self.frame_step(step, old, step - old);
         }
         self.frame_step(elapsed, catch_up, dt)
+    }
+
+    /// When a headless step toward `target` stops early for a timer: the next deadline, but no
+    /// sooner than a frame interval after the last poll. None when the step's own poll at
+    /// `target` takes everything due.
+    fn timer_step(&self, target: f64) -> Option<f64> {
+        let deadline = self.logical_wake_deadline().filter(|deadline| *deadline > self.clock)?;
+        let at = deadline.max(self.clock + crate::window::TIMER_FRAME.as_secs_f64());
+        (at < target).then_some(at)
     }
 
     /// `elapsed` advances the logical clock when no wall clock drives it; `catch_up` steps
@@ -7100,6 +7108,30 @@ mod tests {
         assert_eq!(rt.commits, 1);
         assert_eq!(rt.wake_deadline(), None);
         assert!((rt.t - 0.05).abs() < 1e-8);
+    }
+
+    #[test]
+    fn wakes_a_poll_keeps_asking_for_collapse_to_one_poll_a_frame() {
+        use std::time::Duration;
+        // (polls this frame, delay each poll asks for)
+        fn poll(s: &mut (usize, f64), _: f64, tx: &mut Tx) -> bool {
+            s.0 += 1;
+            tx.wake_after(Duration::from_secs_f64(s.1));
+            false
+        }
+        // A wake every frame, a wake that lands between frames, a save timer that rearms on
+        // every poll, and one that lands just past a frame boundary.
+        for delay in [0.0, 1.0 / 60.0, 1.0 / 120.0, 0.505, 0.5] {
+            fn view(_: &(usize, f64), _: &mut Cx<(usize, f64)>) -> El { el() }
+            let mut rt = Runtime::new((0, delay), view, (100.0, 100.0), Env::new(true, 1.0));
+            rt.poll = Some(poll);
+            for frame in 0..1000 {
+                rt.state.0 = 0;
+                rt.frame(1.0 / 60.0);
+                assert_eq!(rt.state.0, 1, "delay {delay}: frame {frame} polled {} times", rt.state.0);
+            }
+            assert!(rt.wake_deadlines.len() <= 32, "delay {delay}: {} deadlines pending", rt.wake_deadlines.len());
+        }
     }
 
     #[test]

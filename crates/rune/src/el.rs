@@ -132,7 +132,8 @@ impl Tx {
     pub fn scroll_to_x(&mut self, key: impl Into<String>, x: f32) {
         self.scroll_x.push((key.into(), x));
     }
-    /// Wake the app's poll hook after an unscaled duration. Equal deadlines coalesce.
+    /// Wake the app's poll hook after an unscaled duration. Every deadline due by a frame
+    /// collapses into that frame's one poll, so asking on every poll never adds polls.
     /// This schedules a frame, not a view commit; poll returns true if state changed.
     /// For debounce, keep the latest due time in app state and reschedule the remaining
     /// duration when an earlier wake arrives. No timer thread is created.

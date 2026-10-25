@@ -249,7 +249,9 @@ policy changes are applied in the same mutation phase.
   tx)` before every frame, `on_key`, and `extra_args()` for the app's own flags.
   `tx.wake_after(Duration::from_millis(250))` schedules a poll on the unscaled app clock,
   even when poll returns false. Equal deadlines coalesce; the shell sleeps until the earliest
-  deadline without a timer thread. Headless steps visit deadlines exactly. For debounce, store
+  deadline without a timer thread. Every deadline due by a frame collapses into that frame's
+  one poll, so a poll that asks for a wake each time it runs costs one poll a frame, never
+  more. Coarse headless steps stop at deadlines at least a frame interval apart. For debounce, store
   the latest due time in state and reschedule its remainder when an older wake arrives.
 - **Modifier keys alone**: `App::modifier_keys()` (also on `WindowSpec` and `ConfiguredOverlay`)
   sends Shift, Control, Option/Alt, Command/Super and Fn going down and up on their own to

@@ -5,6 +5,17 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Wakes no longer pile up in headless runs.** A coarse headless step polled once per
+  `wake_after` deadline that fell inside it, so a poll that asked for a wake each time it ran
+  (a save timer that rearms, a scripted gesture) started a new chain of wakes every frame: one
+  that asked for 505 ms on every poll ran 14 polls a frame by frame 400 and 34 by frame 1000.
+  Now a step stops for a timer no sooner than a frame interval (1/60 s) after the last poll, as
+  a window's timer floor already did, and each poll takes every deadline due by then: one poll a
+  frame at 60 fps or faster, whatever the app asks for. Coarse steps (`rt.frame(0.5)`) still
+  stop at deadlines at least a frame interval apart. Windows, overlays, hidden hosts and the
+  web already ran one poll for all due deadlines. Things apps can notice: a headless run or
+  hot-reload session whose deadlines fall less than 1/60 s apart polls fewer times.
+
 - **Attributed rich-text editing (`TextEdit` marks, blocks, decorations and HTML).** `TextEdit`
   now stores inline [`MarkRange`](crates/rune/src/edit.rs)s (`Mark::Bold`, `Italic`, `Underline`,
   `Strike`, `Code`, `Link(url)`) and per-paragraph [`Block`](crates/rune/src/edit.rs) attributes
