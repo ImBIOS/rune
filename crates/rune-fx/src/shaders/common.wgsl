@@ -8,7 +8,7 @@
 struct Globals {
     viewport: vec2f, // target size in px
     dither: f32,     // 1 = add TPDF dither (8-bit targets)
-    _pad: f32,
+    srgb: f32,       // 1 = sRGB-blended frame: encode the premultiplied output for a non-sRGB target
 }
 
 struct Inst {
@@ -68,7 +68,14 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
 // output, so a retiring one-shot fades instead of cutting.
 @fragment
 fn fs(in: VOut) -> @location(0) vec4f {
-    return shade(in) * insts[in.id].shape.z;
+    let c = shade(in) * insts[in.id].shape.z;
+    if (g.srgb > 0.5) {
+        // Premultiplied light, which may exceed alpha: encode the straight colour, or the light
+        // itself where there is no alpha to divide by.
+        let k = select(1.0, c.a, c.a > 1e-4);
+        return vec4f(to_srgb(c.rgb / k) * k, c.a);
+    }
+    return c;
 }
 
 const TAU: f32 = 6.2831853;

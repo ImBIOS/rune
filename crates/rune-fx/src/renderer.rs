@@ -117,6 +117,12 @@ impl BlurPyramid {
 
 pub struct FxRenderer {
     pipelines: Vec<wgpu::RenderPipeline>,
+    format: wgpu::TextureFormat,
+    layout: wgpu::PipelineLayout,
+    modules: Vec<wgpu::ShaderModule>,
+    /// Pipelines for other target formats (`add_format`), one per effect family.
+    extra: Vec<(wgpu::TextureFormat, Vec<wgpu::RenderPipeline>)>,
+    srgb: bool,
     bgl0: wgpu::BindGroupLayout,
     bgl1: wgpu::BindGroupLayout,
     bg0: Option<wgpu::BindGroup>,
@@ -191,43 +197,14 @@ impl FxRenderer {
             bind_group_layouts: &[Some(&bgl0), Some(&bgl1)],
             immediate_size: 0,
         });
-        let pipelines = SOURCES
+        let modules: Vec<wgpu::ShaderModule> = SOURCES
             .iter()
-            .map(|(name, src)| {
-                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(name),
-                    source: wgpu::ShaderSource::Wgsl(format!("{COMMON}\n{src}").into()),
-                });
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(name),
-                    layout: Some(&layout),
-                    vertex: wgpu::VertexState {
-                        module: &module,
-                        entry_point: Some("vs"),
-                        compilation_options: Default::default(),
-                        buffers: &[],
-                    },
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleStrip,
-                        ..Default::default()
-                    },
-                    depth_stencil: None,
-                    multisample: Default::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module: &module,
-                        entry_point: Some("fs"),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format,
-                            blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    multiview_mask: None,
-                    cache: None,
-                })
-            })
+            .map(|(name, src)| device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(name),
+                source: wgpu::ShaderSource::Wgsl(format!("{COMMON}\n{src}").into()),
+            }))
             .collect();
+        let pipelines = Self::pipelines(device, &layout, &modules, format);
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fx globals"),
             size: 16,
@@ -347,6 +324,11 @@ impl FxRenderer {
         let xform_cap = 4096;
         FxRenderer {
             pipelines,
+            format,
+            layout,
+            modules,
+            extra: Vec::new(),
+            srgb: false,
             bgl0,
             bgl1,
             bg0: None,
@@ -373,6 +355,52 @@ impl FxRenderer {
             opts,
             sims: None,
         }
+    }
+
+    fn pipelines(device: &wgpu::Device, layout: &wgpu::PipelineLayout, modules: &[wgpu::ShaderModule], format: wgpu::TextureFormat) -> Vec<wgpu::RenderPipeline> {
+        modules
+            .iter()
+            .zip(SOURCES)
+            .map(|(module, (name, _))| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(name),
+                    layout: Some(layout),
+                    vertex: wgpu::VertexState { module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+                    primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module,
+                        entry_point: Some("fs"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            })
+            .collect()
+    }
+
+    /// Builds the effect pipelines for another target format, once, so one renderer serves a
+    /// window target and the `Rgba16Float` target of an isolated layer alike (`draw_layer_in`).
+    pub fn add_format(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
+        if format != self.format && !self.extra.iter().any(|(f, _)| *f == format) {
+            let p = Self::pipelines(device, &self.layout, &self.modules, format);
+            self.extra.push((format, p));
+        }
+    }
+
+    /// Match the frame's blend mode (`rune::Frame::srgb_blend`): when true, the premultiplied
+    /// output is sRGB-encoded for a non-sRGB target, as Rune's own pass is, so an effect looks
+    /// the same in both modes apart from the blend's own linear-versus-gamma difference.
+    /// Takes effect at the next `prepare`.
+    pub fn set_srgb_blend(&mut self, on: bool) {
+        self.srgb = on;
     }
 
     fn buffer(device: &wgpu::Device, label: &str, size: usize) -> wgpu::Buffer {
@@ -502,7 +530,7 @@ impl FxRenderer {
         if !self.scratch_xf.is_empty() {
             queue.write_buffer(&self.xforms, 0, bytemuck::cast_slice(&self.scratch_xf));
         }
-        let g = [vw, vh, if self.opts.dither { 1.0 } else { 0.0 }, 0.0];
+        let g = [vw, vh, if self.opts.dither { 1.0 } else { 0.0 }, if self.srgb { 1.0 } else { 0.0 }];
         queue.write_buffer(&self.globals, 0, bytemuck::cast_slice(&g));
         stats
     }
@@ -531,11 +559,29 @@ impl FxRenderer {
 
     /// Draw one prepared layer (no-op when it was culled).
     pub fn draw_layer(&self, pass: &mut wgpu::RenderPass<'_>, layer: usize) {
+        self.draw_layer_in(pass, self.format, [0.0; 2], layer);
+    }
+
+    /// `draw_layer` into a pass whose target has `format` (the renderer's own, or one from
+    /// `add_format`) and whose top-left pixel sits at `origin` in window device pixels: zero for
+    /// the frame target, `rune::render::EffectSite::origin` inside an isolated layer. Effects are
+    /// shaded in window coordinates; the viewport is shifted so they land in that target, so they
+    /// take the layer's opacity, blur and clip when it composites. Resets the viewport after.
+    pub fn draw_layer_in(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat, origin: [f32; 2], layer: usize) {
         let Some(Some(p)) = self.prepared.get(layer) else { return };
-        pass.set_pipeline(&self.pipelines[p.kind]);
+        let pipelines = if format == self.format { &self.pipelines }
+            else { &self.extra.iter().find(|(f, _)| *f == format).expect("FxRenderer::add_format first").1 };
+        let shifted = origin != [0.0; 2];
+        if shifted {
+            pass.set_viewport(-origin[0], -origin[1], self.viewport[0] as f32, self.viewport[1] as f32, 0.0, 1.0);
+        }
+        pass.set_pipeline(&pipelines[p.kind]);
         pass.set_bind_group(0, self.bg0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, &self.binds[p.bind], &[]);
         pass.draw(0..4, p.instance..p.instance + 1);
+        if shifted {
+            pass.set_viewport(0.0, 0.0, self.viewport[0] as f32, self.viewport[1] as f32, 0.0, 1.0);
+        }
     }
 
     /// Draw every prepared layer with `place` in order.
