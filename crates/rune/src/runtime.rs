@@ -5055,7 +5055,8 @@ impl<S: 'static> Runtime<S> {
                 }
                 _ => r,
             };
-            if self.surface_visible && base_opacity > 0.001 && !self.reduced_motion
+            // A loop at its brightest under one 8-bit step can't be seen: let it sleep.
+            if self.surface_visible && base_opacity >= 1.0 / 255.0 && !self.reduced_motion
                 && home[2] > clip[0].max(vp[0] - filter_margin) && home[0] < clip[2].min(vp[2] + filter_margin)
                 && home[3] > clip[1].max(vp[1] - filter_margin) && home[1] < clip[3].min(vp[3] + filter_margin)
                 && let Some(track) = self.loops.get(&n.id)
@@ -9361,6 +9362,21 @@ mod tests {
         assert!(rt.wake_deadline().is_some());
         rt.reduced_motion = true; rt.frame(0.0);
         assert_eq!(rt.wake_deadline(), None);
+    }
+
+    #[test]
+    fn loops_sleep_below_one_8_bit_step_of_opacity() {
+        fn view(rest: &f32, _: &mut Cx<f32>) -> El {
+            el().size(100.0, 100.0).hover_group().child(el().key("cycle").size(20.0, 20.0)
+                .group_opacity(*rest, 1.0)
+                .cycle(crate::Cycle { period: 1.0, phase: 0.0,
+                    stops: &[(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)], still: 0.4, fps: 30.0 }))
+        }
+        for (rest, wakes) in [(0.003, false), (0.005, true)] {
+            let mut rt = Runtime::new(rest, view, (100.0, 100.0), Env::new(true, 1.0));
+            rt.frame(0.0);
+            assert_eq!(rt.wake_deadline().is_some(), wakes, "rest opacity {rest}");
+        }
     }
 
     #[test]

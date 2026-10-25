@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Loops sleep below one 8-bit step of opacity.** A loop (`.cycle`, `.looping`) whose brightest
+  frame would draw under 1/255 opacity no longer wakes the app; the cut-off was 0.001. Things
+  apps can notice: a loop under a group or parent faded to between 0.001 and 0.004 stops
+  scheduling frames.
+
 - **Exits unmount once they fade out of sight.** An exiting node used to stay mounted until its
   presence settled at 1e-5, about 40 frames (~325 ms) after its opacity fell under one 8-bit step.
   It now unmounts the frame its transition's opacity drops below 1/255. Things apps can notice:
