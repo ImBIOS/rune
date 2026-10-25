@@ -57,6 +57,9 @@ pub(crate) struct Shared {
     /// Whether a focused field is among them, so an offscreen virtual row that has none isn't
     /// searched for one.
     pub(crate) focused_input: bool,
+    /// Whether two siblings anywhere among them share a key, so the per-commit key check can
+    /// skip a memo without any.
+    pub(crate) duplicate_keys: bool,
 }
 
 /// Whether `el` or anything under it is a focused field.
@@ -77,7 +80,8 @@ impl Built {
         el.expand_memo();
         let children = std::mem::take(&mut el.children);
         let focused_input = children.iter().any(has_focused_input);
-        Rc::new(Built { root: el, children: Rc::new(Shared { children, focused_input }) })
+        let duplicate_keys = crate::key_diagnostics::memo_children_have_duplicates(&el, &children);
+        Rc::new(Built { root: el, children: Rc::new(Shared { children, focused_input, duplicate_keys }) })
     }
 
     /// The root, with its children shared rather than copied.

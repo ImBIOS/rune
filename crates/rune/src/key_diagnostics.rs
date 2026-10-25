@@ -1,5 +1,8 @@
-//! Key checks run before virtualization, so offscreen siblings are checked too.
+//! Sibling key checks and repair. They run on the view before virtualization, so offscreen
+//! siblings are checked too; a `virtualize` list's own rows are checked as it windows them.
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 use crate::El;
 
@@ -10,9 +13,62 @@ pub(crate) struct Duplicate {
     pub message: String,
 }
 
+/// Whether no two of these siblings share a key. A hash collision can say false for unique
+/// keys, which only sends the caller to the exact check. Allocates nothing once `hashes` has
+/// grown to the widest parent.
+fn unique(shared: &[El], own: &[El], hashes: &mut Vec<u64>) -> bool {
+    let keys = shared.iter().chain(own).filter_map(|c| c.key.as_deref());
+    let n = keys.clone().count();
+    if n < 2 { return true; }
+    if n <= 8 {
+        return keys.clone().enumerate().all(|(i, a)| keys.clone().skip(i + 1).all(|b| a != b));
+    }
+    hashes.clear();
+    hashes.extend(keys.map(|k| {
+        let mut h = std::hash::DefaultHasher::new();
+        k.hash(&mut h);
+        h.finish()
+    }));
+    hashes.sort_unstable();
+    hashes.windows(2).all(|w| w[0] != w[1])
+}
+
+/// The sibling sets under `el` that need checking: a memo's shared children were checked when
+/// it built, and a virtual list's rows are checked as it windows them.
+fn checks_siblings(el: &El) -> bool {
+    el.virtual_estimate.is_none() && !(el.memo_children.is_some() && el.children.is_empty())
+}
+
+fn shared_children(el: &El) -> &[El] {
+    el.memo_children.as_ref().map_or(&[], |m| &m.children)
+}
+
+fn clean_with(el: &El, hashes: &mut Vec<u64>) -> bool {
+    if el.memo_children.as_ref().is_some_and(|m| m.duplicate_keys) { return false; }
+    if checks_siblings(el) && !unique(shared_children(el), &el.children, hashes) { return false; }
+    el.children.iter().all(|c| clean_with(c, hashes))
+}
+
+/// Whether no parent in `root` has two children with one key: the per-commit check, which
+/// allocates nothing and skips the subtrees of memos (checked once, when they build).
+pub(crate) fn clean(root: &El) -> bool {
+    thread_local! { static HASHES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) }; }
+    HASHES.with_borrow_mut(|hashes| clean_with(root, hashes))
+}
+
+/// Whether a memo's children, as built, hold duplicate keys anywhere below the memo's root.
+pub(crate) fn memo_children_have_duplicates(root: &El, children: &[El]) -> bool {
+    let mut hashes = Vec::new();
+    (root.virtual_estimate.is_none() && !unique(children, &[], &mut hashes))
+        || !children.iter().all(|c| clean_with(c, &mut hashes))
+}
+
+/// The duplicates under `root`, with messages naming both call sites. Only for trees [`clean`]
+/// rejected: paths are built only down to the duplicates.
 fn find(root: &El, path: &str) -> Vec<Duplicate> {
-    fn walk(el: &El, path: &str, out: &mut Vec<Duplicate>) {
-        if el.all_children().filter(|c| c.key.is_some()).nth(1).is_some() {
+    fn walk(el: &El, path: &str, hashes: &mut Vec<u64>, out: &mut Vec<Duplicate>) {
+        let shared = el.memo_children.as_ref().is_some_and(|m| m.duplicate_keys);
+        if checks_siblings(el) || (shared && el.virtual_estimate.is_none()) {
             let mut seen: HashMap<&str, &El> = HashMap::new();
             for child in el.all_children() {
                 let Some(key) = &child.key else { continue };
@@ -30,13 +86,13 @@ fn find(root: &El, path: &str) -> Vec<Duplicate> {
             }
         }
         for (index, child) in el.all_children().enumerate() {
-            if child.all_children().next().is_none() { continue; }
+            if clean_with(child, hashes) { continue; }
             let segment = child.key.clone().unwrap_or_else(|| format!("#{index}"));
-            walk(child, &format!("{path}/{segment}"), out);
+            walk(child, &format!("{path}/{segment}"), hashes, out);
         }
     }
     let mut out = Vec::new();
-    walk(root, path, &mut out);
+    walk(root, path, &mut Vec::new(), &mut out);
     out
 }
 
@@ -49,43 +105,61 @@ pub(crate) fn warnings(root: &El) -> Vec<String> {
     find(root, root_path(root)).into_iter().map(|d| d.message).collect()
 }
 
+/// Renames each later copy of a key `key#dup1`, `key#dup2`, ... in order, skipping names
+/// already taken, so the first keeps its key. Returns each renamed index with its old key.
+pub(crate) fn rename_duplicates<'a>(keys: impl Iterator<Item = &'a mut String>) -> Vec<(usize, String)> {
+    let mut keys: Vec<&mut String> = keys.collect();
+    let mut taken: HashSet<String> = keys.iter().map(|k| k.to_string()).collect();
+    let mut kept: HashSet<String> = HashSet::new();
+    let mut renamed = Vec::new();
+    for (i, key) in keys.iter_mut().enumerate() {
+        if kept.insert(key.to_string()) { continue; }
+        let name = (1..).map(|n| format!("{key}#dup{n}")).find(|k| !taken.contains(k)).unwrap();
+        taken.insert(name.clone());
+        kept.insert(name.clone());
+        renamed.push((i, std::mem::replace(*key, name)));
+    }
+    renamed
+}
+
 /// Makes sibling keys unique so the layout tree never sees two siblings share a node. The first
 /// sibling keeps its key; each later one is renamed `key#dup1`, `key#dup2`, ... in tree order, so
-/// it still draws and keeps a stable identity across builds. Returns what it renamed.
+/// it still draws and keeps a stable identity across builds. Returns what it renamed; a tree
+/// without duplicates costs one allocation-free walk.
 pub(crate) fn repair(root: &mut El) -> Vec<Duplicate> {
+    if clean(root) { return Vec::new(); }
     let path = root_path(root).to_owned();
     repair_at(root, &path)
 }
 
 /// [`repair`] for a subtree whose root sits at `path`.
 pub(crate) fn repair_at(root: &mut El, path: &str) -> Vec<Duplicate> {
+    if clean(root) { return Vec::new(); }
     let found = find(root, path);
     if found.is_empty() { return found; }
-    fn walk(el: &mut El) {
-        el.expand_memo();
-        let mut seen: HashSet<String> = el.children.iter().filter_map(|c| c.key.clone()).collect();
-        let mut kept: HashSet<String> = HashSet::new();
-        for child in &mut el.children {
-            let Some(key) = child.key.clone() else { continue };
-            if kept.insert(key.clone()) { continue; }
-            let renamed = (1..).map(|n| format!("{key}#dup{n}")).find(|k| !seen.contains(k)).unwrap();
-            seen.insert(renamed.clone());
-            kept.insert(renamed.clone());
-            child.key = Some(renamed);
+    // Only memos on the way to a duplicate are copied out of the cache.
+    fn walk(el: &mut El, hashes: &mut Vec<u64>) {
+        let shared = el.memo_children.as_ref().is_some_and(|m| m.duplicate_keys);
+        let siblings = checks_siblings(el) && !unique(shared_children(el), &el.children, hashes);
+        if shared || siblings { el.expand_memo(); }
+        if siblings || (shared && el.virtual_estimate.is_none()) {
+            rename_duplicates(el.children.iter_mut().filter_map(|c| c.key.as_mut()));
         }
-        for child in &mut el.children { walk(child); }
+        for child in &mut el.children {
+            if !clean_with(child, hashes) { walk(child, hashes); }
+        }
     }
-    walk(root);
+    walk(root, &mut Vec::new());
     found
 }
 
 /// Prints each duplicate once per key for the life of the process.
 pub(crate) fn warn_once(found: &[Duplicate]) {
-    thread_local! { static WARNED: std::cell::RefCell<HashSet<String>> = Default::default(); }
+    thread_local! { static WARNED: RefCell<HashSet<String>> = Default::default(); }
     if found.is_empty() { return; }
     WARNED.with_borrow_mut(|warned| {
         for d in found {
-            if warned.insert(d.key.clone()) { eprintln!("rune: {}; the later sibling is renamed {:?}", d.message, format!("{}#dupN", d.key)); }
+            if warned.insert(d.key.clone()) { eprintln!("rune: {}; the later one is renamed {:?}", d.message, format!("{}#dupN", d.key)); }
         }
     });
 }
@@ -114,6 +188,63 @@ mod tests {
             col().key("b").child(el().key("card")),
             el(), el(),
         ])).is_empty());
+    }
+
+    /// A memo's children are checked once, when it builds: a clean memo is skipped and left
+    /// shared, and repair copies out only the memo holding the duplicate.
+    #[test]
+    fn memos_are_checked_when_built_and_only_a_dirty_one_is_expanded() {
+        fn memo(key: &str, children: Vec<El>) -> El {
+            let mut root = el().key(key);
+            let duplicate_keys = memo_children_have_duplicates(&root, &children);
+            root.memo_children = Some(std::rc::Rc::new(crate::memo::Shared { children, focused_input: false, duplicate_keys }));
+            root
+        }
+        let clean_memo = || memo("a", vec![el().key("x"), el().key("y").child(el().key("z"))]);
+        let tree = col().children([clean_memo(), memo("b", vec![el().key("x")])]);
+        assert!(clean(&tree));
+        let dirty = memo("c", vec![el().key("p").children([el().key("x"), el().key("x")])]);
+        assert!(dirty.memo_children.as_ref().unwrap().duplicate_keys);
+        let mut tree = col().children([clean_memo(), dirty]);
+        assert!(!clean(&tree));
+        let found = repair(&mut tree);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].message.contains("under \"#0/c/p\""), "{}", found[0].message);
+        assert!(tree.children[0].memo_children.is_some(), "the clean memo stays shared");
+        assert!(tree.children[1].memo_children.is_none());
+        let keys: Vec<_> = tree.children[1].children[0].children.iter().map(|c| c.key.clone().unwrap()).collect();
+        assert_eq!(keys, ["x", "x#dup1"]);
+        assert!(clean(&tree));
+        // Sibling keys past the short-list compare go through the hashes.
+        let wide = |dup: bool| col().children((0..40).map(|i| el().key(if dup && i == 39 { "k3".to_string() } else { format!("k{i}") })));
+        assert!(clean(&wide(false)));
+        assert!(!clean(&wide(true)));
+    }
+
+    struct Counting;
+    thread_local! { static ALLOCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+    fn bump() { let _ = ALLOCS.try_with(|c| c.set(c.get() + 1)); }
+    // SAFETY: forwards to the system allocator, counting calls on this thread.
+    unsafe impl std::alloc::GlobalAlloc for Counting {
+        unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 { bump(); unsafe { std::alloc::System.alloc(l) } }
+        unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) { unsafe { std::alloc::System.dealloc(p, l) } }
+        unsafe fn realloc(&self, p: *mut u8, l: std::alloc::Layout, n: usize) -> *mut u8 { bump(); unsafe { std::alloc::System.realloc(p, l, n) } }
+    }
+    #[global_allocator]
+    static COUNTING: Counting = Counting;
+
+    /// The per-commit repair of a 3,700-row tree without duplicates allocates nothing.
+    #[test]
+    fn repairing_a_tree_without_duplicates_allocates_nothing() {
+        let row = |i: usize| el().key(format!("row:{i}")).children([el().key("title"), el().key("meta").child(el().key("time"))]);
+        let mut tree = col().key("root").children([col().key("rows").children((0..3700).map(row)), el().key("footer")]);
+        assert!(repair(&mut tree).is_empty());
+        let before = ALLOCS.with(std::cell::Cell::get);
+        let t = std::time::Instant::now();
+        assert!(repair(&mut tree).is_empty());
+        let elapsed = t.elapsed();
+        assert_eq!(ALLOCS.with(std::cell::Cell::get) - before, 0);
+        eprintln!("clean 3,700-row repair: {elapsed:?}");
     }
 
     #[test]

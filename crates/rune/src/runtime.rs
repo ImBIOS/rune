@@ -2485,6 +2485,7 @@ impl<S: 'static> Measurement<'_, S> {
                     let key = &v.keys[i];
                     let mut row = (rows.build)(state, i).key(key.clone());
                     // The view's key repair ran before these rows existed.
+                    if crate::key_diagnostics::clean(&row) { return row; }
                     let duplicates = crate::key_diagnostics::repair_at(&mut row, &format!("{path}/{key}"));
                     match key_warnings.as_mut() {
                         Some(out) => out.extend(duplicates.into_iter().map(|d| d.message)),
