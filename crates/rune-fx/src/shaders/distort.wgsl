@@ -9,14 +9,6 @@
 // crt:    p0 (bulge, scanline period pt, scanline depth, chroma pt)  p1 (vignette, glow, roll, feather)
 // split:  p0 (offset x pt, offset y pt, glitch, feather)
 
-fn bd(p: vec2f, scale: f32) -> vec4f {
-    return textureSampleLevel(backdrop, samp, p * scale / g.viewport, 0.0);
-}
-
-fn bdb(p: vec2f, scale: f32) -> vec3f {
-    return textureSampleLevel(blurred, samp, p * scale / g.viewport, 0.0).rgb;
-}
-
 // Frosted material, after Apple's "regular" glass: a saturation boost puts back the colour that
 // blur and scrim take out, and a compressive transfer lifts dark backdrops while light ones
 // barely move (macOS 26 Control Center measures sRGB L' = 0.58 L + 0.134; iOS keeps more of

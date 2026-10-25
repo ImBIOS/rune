@@ -632,3 +632,112 @@ pub(crate) fn aurora(p: &AuroraParams, rect: Rect, t: f32, seed: u32, data: &mut
     }
     first
 }
+
+/// Mesh gradient control points at time `t`: each wanders from its rest point by up to `drift`.
+pub(crate) fn mesh_points(p: &MeshGradientParams, t: f32, seed: u32) -> [[f32; 2]; MAX_STOPS] {
+    let tt = t * p.speed * 0.5;
+    let mut out = p.points;
+    for (k, q) in out.iter_mut().enumerate() {
+        let s = seed.wrapping_add(k as u32 * 31);
+        let x = tt + k as f32 * 13.1;
+        q[0] += p.drift * 1.4 * gnoise(x, 0.5, 0, s);
+        q[1] += p.drift * 1.4 * gnoise(x, 7.5, 0, s.wrapping_add(97));
+    }
+    out
+}
+
+/// Metaball centres (pt), radii (pt) and colour index: one vec4 per ball.
+pub(crate) fn metaballs(p: &MetaballParams, rect: Rect, t: f32, seed: u32, data: &mut Vec<[f32; 4]>) {
+    let n = p.count.clamp(1, 8);
+    let short = rect.w.min(rect.h);
+    let tt = t * p.speed * 0.5;
+    let colors = p.colors.len() as u32;
+    for k in 0..n {
+        let h = hu(seed, k + 1);
+        let a = (k as f32 + u01(h) * 0.6) / n as f32 * TAU;
+        let base = [0.5 + 0.24 * a.cos(), 0.5 + 0.24 * a.sin()];
+        let x = tt + k as f32 * 7.3;
+        let wx = gnoise(x, 1.5, 0, h) * 0.5;
+        let wy = gnoise(x, 4.5, 0, h.wrapping_add(5)) * 0.5;
+        let r = p.size * short * (0.7 + 0.6 * u01(h + 2));
+        data.push([rect.x + rect.w * (base[0] + wx), rect.y + rect.h * (base[1] + wy), r, (k % colors) as f32]);
+    }
+}
+
+/// Side of the blue-noise tile.
+pub(crate) const BLUE_N: usize = 32;
+
+/// A BLUE_N × BLUE_N blue-noise threshold tile (ranks 0..1, row-major, 4 per vec4), built once by
+/// void-and-cluster: Gaussian energy on a torus, relax an initial pattern, then rank every pixel
+/// by removing tightest clusters and filling largest voids.
+pub(crate) fn blue_noise() -> &'static [[f32; 4]] {
+    static TILE: std::sync::OnceLock<Vec<[f32; 4]>> = std::sync::OnceLock::new();
+    TILE.get_or_init(|| {
+        const N: usize = BLUE_N;
+        const M: usize = N * N;
+        let sigma = 1.5f32;
+        let mut kern = vec![0.0f32; M];
+        for y in 0..N {
+            for x in 0..N {
+                let dx = x.min(N - x) as f32;
+                let dy = y.min(N - y) as f32;
+                kern[y * N + x] = (-(dx * dx + dy * dy) / (2.0 * sigma * sigma)).exp();
+            }
+        }
+        let mut on = vec![false; M];
+        let mut energy = vec![0.0f32; M];
+        let splat = |energy: &mut [f32], i: usize, sign: f32| {
+            let (ix, iy) = (i % N, i / N);
+            for y in 0..N {
+                for x in 0..N {
+                    let k = ((y + N - iy) % N) * N + (x + N - ix) % N;
+                    energy[y * N + x] += sign * kern[k];
+                }
+            }
+        };
+        let tightest = |on: &[bool], energy: &[f32]| (0..M).filter(|&i| on[i]).max_by(|&a, &b| energy[a].total_cmp(&energy[b])).unwrap();
+        let voidest = |on: &[bool], energy: &[f32]| (0..M).filter(|&i| !on[i]).min_by(|&a, &b| energy[a].total_cmp(&energy[b])).unwrap();
+        // Initial pattern: about a tenth of the pixels, from the shared hash.
+        let mut ones = 0;
+        for (i, o) in on.iter_mut().enumerate() {
+            if u01(hu(i as u32, 0xb10e)) < 0.1 {
+                *o = true;
+                ones += 1;
+            }
+        }
+        for i in 0..M {
+            if on[i] {
+                splat(&mut energy, i, 1.0);
+            }
+        }
+        for _ in 0..M {
+            let c = tightest(&on, &energy);
+            on[c] = false;
+            splat(&mut energy, c, -1.0);
+            let v = voidest(&on, &energy);
+            on[v] = true;
+            splat(&mut energy, v, 1.0);
+            if v == c {
+                break;
+            }
+        }
+        let mut rank = vec![0usize; M];
+        let (proto_on, proto_e) = (on.clone(), energy.clone());
+        for r in (0..ones).rev() {
+            let c = tightest(&on, &energy);
+            on[c] = false;
+            splat(&mut energy, c, -1.0);
+            rank[c] = r;
+        }
+        on = proto_on;
+        energy = proto_e;
+        for r in ones..M {
+            let v = voidest(&on, &energy);
+            on[v] = true;
+            splat(&mut energy, v, 1.0);
+            rank[v] = r;
+        }
+        let v: Vec<f32> = rank.iter().map(|&r| (r as f32 + 0.5) / M as f32).collect();
+        v.chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect()
+    })
+}

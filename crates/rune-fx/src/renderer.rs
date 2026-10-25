@@ -13,6 +13,7 @@ const SOURCES: [(&str, &str); KINDS] = [
     ("distort", include_str!("shaders/distort.wgsl")),
     ("motion", include_str!("shaders/motion.wgsl")),
     ("extras", include_str!("shaders/extras.wgsl")),
+    ("fill", include_str!("shaders/fill.wgsl")),
 ];
 
 /// Everything one frame of effects needs.
@@ -397,6 +398,7 @@ impl FxRenderer {
         self.blur_slot = 0;
         let wants_blur = |l: &FxLayer| match l.fx {
             Fx::Distort(DistortParams::Lens(p)) => p.frost > 0.0,
+            Fx::Fill(FillParams { style: FillStyle::FlutedGlass(p), .. }) => p.frost > 0.0,
             _ => false,
         };
         if frame.backdrop.is_some() && frame.layers.iter().any(wants_blur) && self.blur.as_ref().is_none_or(|b| b.size != frame.viewport) {
@@ -440,6 +442,7 @@ impl FxRenderer {
             stats.needs_backdrop |= needs_bd;
             let blur_px = match layer.fx {
                 Fx::Distort(DistortParams::Lens(p)) if frame.backdrop.is_some() => (p.frost.clamp(0.0, 1.0) * LENS_FROST_SIGMA * s).max(0.0),
+                Fx::Fill(FillParams { style: FillStyle::FlutedGlass(p), .. }) if frame.backdrop.is_some() => (p.frost.clamp(0.0, 1.0) * LENS_FROST_SIGMA * s).max(0.0),
                 _ => 0.0,
             };
             let key = (needs_bd && frame.backdrop.is_some(), layer.source.map(|s| s.slot), blur_px > 0.0, grid);
@@ -544,7 +547,8 @@ impl FxRenderer {
         }
     }
 
-    /// Blur the backdrop for a frosted lens (`LensParams::frost > 0`), scissored to the layer.
+    /// Blur the backdrop for frosted glass (`LensParams::frost` or `FlutedGlassParams::frost`
+    /// above 0), scissored to the layer.
     ///
     /// Call it after copying the backdrop for layer `layer` and before drawing that layer, outside
     /// any render pass. Returns false (and does nothing) for other layers; a frosted lens drawn

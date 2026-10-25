@@ -1,5 +1,6 @@
 //! rune-fx: composable GPU effect layers for Rune (glow, pulses, electricity, fire, motion blur,
-//! distortion, shimmer, sparkles, aurora, grain).
+//! distortion, shimmer, sparkles, aurora, grain) and fills (liquid metal, mesh gradient, dither,
+//! grain gradient, fluted glass and more; see `fill_styles()`).
 //!
 //! Contract (see README): a layer = effect params + node shape (rounded rect / capsule / circle,
 //! in points) + time (Rune's clock) + seed (+ optional source texture, backdrop, motion samples).
@@ -10,9 +11,13 @@
 //! - Speeds never multiply raw time inside a shader without going through `Phase` on the caller side
 //!   when the speed animates; otherwise the phase jumps (no phase jump on speed change).
 
+mod catalog;
 mod cpu;
+mod fill;
 mod renderer;
 mod sim;
+pub use catalog::*;
+pub use fill::*;
 pub use renderer::*;
 
 // ---------------------------------------------------------------- geometry / colour
@@ -926,6 +931,8 @@ pub enum Fx {
     Sparkles(SparkleParams),
     Aurora(AuroraParams),
     Grain(GrainParams),
+    /// A fill style (`FillParams`): paints the shape or a border band inside its edge.
+    Fill(FillParams),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -966,12 +973,17 @@ impl Fx {
     pub fn sparkles(p: SparkleParams) -> Fx { Fx::Sparkles(p) }
     pub fn aurora(p: AuroraParams) -> Fx { Fx::Aurora(p) }
     pub fn grain(p: GrainParams) -> Fx { Fx::Grain(p) }
+    /// `Fx::fill(LiquidMetalParams::gold())`, `Fx::fill(DitherParams::bayer().border(3.0))`.
+    pub fn fill(p: impl Into<FillParams>) -> Fx { Fx::Fill(p.into()) }
 
     /// Attach to a node shape. Defaults: under the node for light that spills out (glow, pulse,
     /// fire), over it for things that replace or overlay pixels (distortion, motion blur, extras).
+    /// Fills go under the node, as its background, unless they read the backdrop (glass, or a
+    /// dither or halftone of what is behind), which goes over.
     pub fn on(self, shape: Shape) -> FxLayer {
         let place = match self {
             Fx::Glow(_) | Fx::Pulse(_) | Fx::Fire(_) | Fx::Aurora(_) => Place::Under,
+            Fx::Fill(p) if !p.needs_backdrop() => Place::Under,
             Fx::Electric(_) => Place::Over,
             _ => Place::Over,
         };
@@ -979,7 +991,11 @@ impl Fx {
     }
 
     pub fn needs_backdrop(&self) -> bool {
-        matches!(self, Fx::Distort(_))
+        match self {
+            Fx::Distort(_) => true,
+            Fx::Fill(p) => p.needs_backdrop(),
+            _ => false,
+        }
     }
 
     /// Static cost declaration per covered pixel: `samples` = texture taps + CPU-table reads,
@@ -1018,6 +1034,7 @@ impl Fx {
             Fx::Sparkles(p) => c(p.count.min(32) * 2, 0),
             Fx::Aurora(_) => c(12, 3),
             Fx::Grain(_) => c(0, 0),
+            Fx::Fill(p) => p.cost(),
         }
     }
 }
@@ -1057,6 +1074,7 @@ impl FxLayer {
             Fx::Distort(DistortParams::ChromaSplit { glitch, .. }) => *glitch > 0.0 && !rm,
             Fx::MotionBlur(_, s) => s.is_moving(),
             Fx::Grain(g) => g.fps > 0.0 && !rm,
+            Fx::Fill(p) => p.animates() && !rm,
             Fx::Electric(ElectricParams { zap: Some(t0), .. }) => t < t0 + ElectricParams::ZAP_LIFE,
             Fx::Sparkles(p @ SparkleParams { burst: Some(t0), .. }) => t < t0 + p.burst_life(),
             _ => !rm,
@@ -1092,7 +1110,8 @@ pub(crate) const KIND_FIRE: usize = 3;
 pub(crate) const KIND_DISTORT: usize = 4;
 pub(crate) const KIND_MOTION: usize = 5;
 pub(crate) const KIND_EXTRAS: usize = 6;
-pub(crate) const KINDS: usize = 7;
+pub(crate) const KIND_FILL: usize = 7;
+pub(crate) const KINDS: usize = 8;
 
 /// Blur sigma (pt) of a fully frosted lens (`LensParams::frost = 1`).
 pub(crate) const LENS_FROST_SIGMA: f32 = 18.0;
@@ -1356,6 +1375,7 @@ impl FxLayer {
                 i.p0 = [p.amount, p.fps, p.feather, 0.0];
                 (KIND_EXTRAS, r.inflate(1.0))
             }
+            Fx::Fill(p) => (KIND_FILL, p.pack(&mut i, rm, self.time)?),
         };
         Some((kind, i, bounds))
     }
@@ -1387,6 +1407,7 @@ impl FxLayer {
                 let tt = if rm { CALM_T } else { t };
                 i.xf = [cpu::aurora(p, self.shape.rect, tt, self.seed, data), cpu::AURORA_SAMPLES as f32, 0.0, 0.0];
             }
+            Fx::Fill(p) => p.tables(i, self.shape.rect, t, self.seed, data),
             _ => {}
         }
     }

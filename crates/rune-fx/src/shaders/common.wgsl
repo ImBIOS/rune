@@ -36,8 +36,15 @@ fn dat1(base: u32, i: u32) -> f32 { return data[base + (i >> 2u)][i & 3u]; }
 @group(1) @binding(0) var backdrop: texture_2d<f32>;
 @group(1) @binding(1) var source: texture_2d<f32>;
 @group(1) @binding(2) var samp: sampler;
-// The backdrop's blur pyramid result (frosted lenses only; see FxRenderer::blur_backdrop).
+// The backdrop's blur pyramid result (frosted glass only; see FxRenderer::blur_backdrop).
 @group(1) @binding(3) var blurred: texture_2d<f32>;
+// The backdrop at p (pt), sharp and blurred.
+fn bd(p: vec2f, scale: f32) -> vec4f {
+    return textureSampleLevel(backdrop, samp, p * scale / g.viewport, 0.0);
+}
+fn bdb(p: vec2f, scale: f32) -> vec3f {
+    return textureSampleLevel(blurred, samp, p * scale / g.viewport, 0.0).rgb;
+}
 
 struct VOut {
     @builtin(position) pos: vec4f,
