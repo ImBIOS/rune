@@ -267,7 +267,10 @@ impl<S: 'static> Runtime<S> {
     pub(super) fn sync_modals(&mut self) {
         // Removed modals restore in reverse nesting order. Exiting visuals are already inert.
         while self.modal_stack.last().is_some_and(|(p, _)| self.node(p).is_none()) {
-            let (_, restore) = self.modal_stack.pop().unwrap();
+            let (modal, restore) = self.modal_stack.pop().unwrap();
+            // Focus the closing commit moved elsewhere (a field outside, say) stays there.
+            let inside = |f: &str| f.strip_prefix(modal.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
+            if self.focused.as_deref().is_some_and(|f| !inside(f) && self.node(f).is_some()) { continue; }
             let restore = restore.filter(|p| self.node(p).is_some());
             self.set_focus(restore, self.keyboard_focus);
         }
@@ -523,6 +526,32 @@ mod tests {
             assert_eq!(now(&rt).as_deref(), Some("opener"), "closing (escape: {escape}) returns focus to the opener");
             if escape { assert!(!rt.state.field.focused, "Escape blurs the field before it goes"); }
         }
+    }
+
+    #[test]
+    fn closing_a_modal_keeps_a_focus_request_outside_it() {
+        use crate::{text_input, TextEdit, TextStyle};
+        #[derive(Default)]
+        struct Form { open: bool, field: TextEdit, search: TextEdit }
+        fn view(s: &Form, _: &mut Cx<Form>) -> El {
+            col().key("root").size(300.0, 300.0)
+                .child(button("opener").on_press(|s: &mut Form| { s.open = true; s.field.focused = true; }))
+                .child(text_input(&s.search, TextStyle::new(14.0, 400.0)).key("search").size(120.0, 30.0)
+                    .on_edit(|s: &mut Form| &mut s.search))
+                .children(s.open.then(|| col().key("sheet").absolute(100.0, 100.0).size(150.0, 100.0)
+                    .modal(true, |s: &mut Form| s.open = false)
+                    .child(text_input(&s.field, TextStyle::new(14.0, 400.0)).key("field").size(120.0, 30.0)
+                        .on_edit(|s: &mut Form| &mut s.field))))
+        }
+        let mut rt = Runtime::new(Form::default(), view, (300.0, 300.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let (x, y) = rt.find("opener").unwrap();
+        rt.pointer_down(x, y); rt.pointer_up(x, y); rt.frame(0.0);
+        assert_eq!(focused(&rt), "field");
+        rt.update(|s, _| { s.open = false; s.field.focused = false; s.search.focused = true; });
+        rt.frame(0.0);
+        assert_eq!(focused(&rt), "search", "the handler's focus request outside the modal wins over the opener");
+        assert!(rt.state.search.focused);
     }
 
     #[derive(Default)]
