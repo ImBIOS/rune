@@ -260,6 +260,19 @@ impl<S: 'static> Runtime<S> {
         }
         let Some(i) = self.focused_index() else { return false; };
         if !self.can_focus(i) { return false; }
+        // A slider's keys come before its group's arrows.
+        if let Some(step) = self.nodes[i].focus.step.clone() && !ev.mods.shift {
+            let delta = match ev.key {
+                Key::Left | Key::Down => Some(-1), Key::Right | Key::Up => Some(1),
+                Key::PageDown => Some(-10), Key::PageUp => Some(10),
+                _ => None,
+            };
+            if let Some(delta) = delta { step(handler_state(&mut self.state), delta, tx); return true; }
+            if matches!(ev.key, Key::Home | Key::End) && let Some(f) = self.nodes[i].focus.step_limit.clone() {
+                f(handler_state(&mut self.state), ev.key == Key::End, tx);
+                return true;
+            }
+        }
         if let Some(g) = self.group(i) {
             let vertical = VERTICAL_ROLES.contains(&self.nodes[g].role);
             let backward = matches!(ev.key, Key::Up) || (!vertical && ev.key == Key::Left);
@@ -356,7 +369,7 @@ impl<S: 'static> Runtime<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{col, el, Mods};
+    use crate::{col, el, row, Mods};
 
     #[derive(Default)]
     struct State { open: bool, nested: bool, picks: usize, selected: usize, secondary_picks: usize }
@@ -860,6 +873,41 @@ mod tests {
         press(&mut rt, Key::Enter);
         assert_eq!(log(&mut rt), ["done"], "a modal's default button, not the one behind it");
         assert!(!rt.state.sheet);
+    }
+
+    #[test]
+    fn a_focused_slider_steps_on_arrows_and_pages_and_jumps_on_home_and_end() {
+        #[derive(Default)]
+        struct Slider { value: i32, steps: Vec<i32>, page: bool }
+        fn view(s: &Slider, _: &mut Cx<Slider>) -> El {
+            let slider = el().key("volume").size(100.0, 20.0)
+                .on_step(|s: &mut Slider, delta, _| { s.steps.push(delta); s.value = (s.value + delta).clamp(0, 100); });
+            let slider = if s.page { slider } else { slider.on_step_limit(|s: &mut Slider, max, _| s.value = if max { 100 } else { 0 }) };
+            col().size(200.0, 200.0).child(row().role("toolbar").focus_group().child(button("before")).child(slider))
+        }
+        let mut rt = Runtime::new(Slider { value: 50, ..Slider::default() }, view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.set_tab_visits_controls(true);
+        rt.frame(0.0);
+        assert_eq!(rt.elements().into_iter().find(|e| e.key.as_deref() == Some("volume")).unwrap().role, "slider");
+        press(&mut rt, Key::Tab);
+        assert_eq!(focused(&rt), "before");
+        press(&mut rt, Key::Right);
+        assert_eq!(focused(&rt), "volume", "on_step makes it focusable");
+        assert!(rt.state.steps.is_empty());
+        for key in [Key::Left, Key::Down, Key::Right, Key::Up, Key::PageDown, Key::PageUp] { press(&mut rt, key); }
+        assert_eq!(std::mem::take(&mut rt.state.steps), [-1, -1, 1, 1, -10, 10]);
+        assert_eq!(focused(&rt), "volume", "the toolbar's arrows don't take focus off it");
+        hold(&mut rt, Key::Right);
+        assert_eq!((std::mem::take(&mut rt.state.steps), rt.state.value), (vec![1, 1, 1], 53), "held arrows repeat");
+        press(&mut rt, Key::End);
+        assert_eq!(rt.state.value, 100);
+        press(&mut rt, Key::Home);
+        assert_eq!(rt.state.value, 0);
+        rt.state.page = true; rt.invalidate(); rt.frame(0.0);
+        press(&mut rt, Key::End);
+        assert_eq!(rt.state.value, 0, "without on_step_limit Home and End aren't the slider's");
+        rt.key(KeyEvent { key: Key::Right, mods: Mods { shift: true, ..Mods::default() } }); rt.frame(0.0);
+        assert!(rt.state.steps.is_empty(), "a modified arrow isn't a step");
     }
 
     #[test]

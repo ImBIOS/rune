@@ -135,10 +135,11 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
      unless the focused element takes Return (see the table below).
   3. Nothing focused: the window's `on_key`, with `tx.focused()` `None`.
   4. The focused field's `on_input_key`.
-  5. Focus navigation: Escape dismisses the open modal, Tab and Shift-Tab move focus, arrows,
-     Home, End and type-select move inside a `focus_group`, Space or Up and Down open a focused
-     popup button (role `combobox`), Space presses the focused control, and Return presses a
-     focused row or link.
+  5. Focus navigation: Escape dismisses the open modal, Tab and Shift-Tab move focus, a
+     focused slider's arrows and Page Up and Down step it (`on_step`) and Home and End take it
+     to its ends (`on_step_limit`), arrows, Home, End and type-select move inside a
+     `focus_group`, Space or Up and Down open a focused popup button (role `combobox`), Space
+     presses the focused control, and Return presses a focused row or link.
   6. The focused text field's editor.
   7. The window's `on_key` again, now with `tx.focused()` naming the focused element, for keys
      the focused control passed on.
@@ -149,7 +150,7 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
 
   | Focused | Return |
   | --- | --- |
-  | Nothing, a button, checkbox, switch, radio, segment or popup button | The default button, else `on_key` |
+  | Nothing, a button, checkbox, switch, radio, segment, popup button or slider | The default button, else `on_key` |
   | A text field with `on_submit` | `on_submit` (in a multi-line field Shift- or Option-Return types a newline) |
   | A text field without `on_submit` | The default button |
   | A row of a `menu`, `listbox`, `list`, `tree` or `grid` group, or a `focus_highlight` row | Presses the row |

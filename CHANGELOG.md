@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::on_step` gives a slider its keyboard.** While the element is focused, Left and Down
+  call it with -1, Right and Up with +1, Page Down with -10 and Page Up with +10, repeating
+  while held; `El::on_step_limit` takes Home (`false`) and End (`true`) to the ends. A slider
+  built from `on_drag` adds them to become focusable and adjustable from the keyboard, with
+  role `slider`. Its keys come before its `focus_group`'s arrows.
 - **Breaking: Return no longer presses a focused button; Space does, and Return goes to the
   default button.** As in AppKit, Space presses the focused button, checkbox, switch, radio,
   segment or popup button, and Return presses the new `El::default_button()` in the window or

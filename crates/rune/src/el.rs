@@ -251,6 +251,8 @@ pub struct Drag {
 pub(crate) type PressFn = Rc<dyn Fn(&mut dyn Any, &mut Tx)>;
 pub(crate) type SecondaryFn = Rc<dyn Fn(&mut dyn Any, PointerPress, &mut Tx)>;
 pub(crate) type InputKeyFn = Rc<dyn Fn(&mut dyn Any, &crate::KeyEvent, &mut Tx) -> bool>;
+pub(crate) type StepFn = Rc<dyn Fn(&mut dyn Any, i32, &mut Tx)>;
+pub(crate) type StepLimitFn = Rc<dyn Fn(&mut dyn Any, bool, &mut Tx)>;
 
 /// A press position in window points, suitable for a context-menu anchor.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -278,6 +280,10 @@ pub(crate) struct FocusSpec {
     pub highlight: Option<Color>,
     pub follows: bool,
     pub return_to: Option<String>,
+    /// `on_step`: a slider's arrow and page keys.
+    pub step: Option<StepFn>,
+    /// `on_step_limit`: a slider's Home and End.
+    pub step_limit: Option<StepLimitFn>,
 }
 
 #[derive(Clone)]
@@ -1102,6 +1108,25 @@ impl El {
     /// or behind a modal. A focused button presses on Space, and passes Return on to this.
     pub fn default_button(mut self) -> Self {
         self.focus.default = true;
+        self
+    }
+    /// A slider's keyboard, as NSSlider's: while this element is focused, Left and Down call
+    /// `f` with -1, Right and Up with +1, Page Down with -10 and Page Up with +10, repeating
+    /// while held. `f` moves the value by that many of its steps and clamps it. The element
+    /// becomes focusable, and its role `slider` unless it has another. Home and End go to the
+    /// ends with [`El::on_step_limit`].
+    pub fn on_step<S: 'static>(mut self, f: impl Fn(&mut S, i32, &mut Tx) + 'static) -> Self {
+        self.focus.step = Some(Rc::new(move |s, delta, tx| f(downcast::<S>(s), delta, tx)));
+        self.focus.enabled = true;
+        if self.role == "group" {
+            self.role = "slider";
+        }
+        self
+    }
+    /// A slider's Home and End (see [`El::on_step`]): `f` gets `false` for Home, which goes to
+    /// the minimum, and `true` for End, the maximum. Without it they scroll, as elsewhere.
+    pub fn on_step_limit<S: 'static>(mut self, f: impl Fn(&mut S, bool, &mut Tx) + 'static) -> Self {
+        self.focus.step_limit = Some(Rc::new(move |s, max, tx| f(downcast::<S>(s), max, tx)));
         self
     }
     /// Return focus to this keyed trigger (or its first focusable child) when removed.
