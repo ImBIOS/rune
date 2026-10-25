@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **rune-kit has an app shell.** `rune_kit::shell` adds `SplitView` (a resizable, collapsible
+  sidebar, the main pane under a toolbar, an optional inspector, and a 48 point title bar band
+  that drags the window and clears the traffic lights), `Toolbar`, `Sidebar` with
+  `SidebarSection`, `SidebarHeader` and `SidebarRow` (keyboard selection, type-select, nesting,
+  badges, inline rename, virtualised rows), the app-owned `PaneState` and
+  `shell::is_sidebar_toggle`. New API only; existing output is unchanged.
 - **Rects under live transforms: `El::on_drawn_layout`, and `Drag` points in the element's
   own points.** `on_drawn_layout` reports an element's rect as drawn (after scrolling and its
   ancestors' `live_offset`, `live_scale`, `live_rect` and `scale`), on every frame a live value

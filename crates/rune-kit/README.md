@@ -106,6 +106,54 @@ context menus via `.at(x, y)`), Tooltip (compact, standard, large), HoverCard, T
 ToastRegion, Card, List, Accordion, Collapsible, Badge, Divider, Keybind, Spinner, Loader,
 Progress, ProgressCircle, SegmentedControl.
 
+## App shell
+
+`rune_kit::shell` is a desktop window's frame: a resizable, collapsible sidebar, the main pane
+under a toolbar, and an optional inspector. It uses only rune's and rune-kit's public API.
+
+```rust
+// state: sidebar: PaneState, inspector: PaneState (saved and restored by the app)
+let sidebar = Sidebar::new()
+    .header(SidebarRow::new("New session").icon(&PLUS).build(k).key("new"))
+    .section(SidebarSection::new("Today").count(n).collapsed(s.today_closed)
+        .on_toggle(|s: &mut App, _| s.today_closed ^= true)
+        .rows(today.iter().map(|x| SidebarRow::new(&x.title).detail(&x.age)
+            .selected(s.selected == x.id).on_select(select(x.id)).build(k).key(x.id.clone()))))
+    .footer(settings_row)
+    .build(k);
+SplitView::new(main)
+    .sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar)
+    .inspector(&s.inspector, |s: &mut App| &mut s.inspector, details)
+    .toolbar(Toolbar::new().title(title).trailing(inspector_button))
+    .titlebar_inset(cx.titlebar_inset())
+    .build(k)
+```
+
+- `PaneState::new(width).range(min, max)` is the app's: widths clamp and round, dragging a
+  pane's inner edge resizes it, a double-click resets it, and dragging below half the minimum
+  collapses it. Panes open and close on `k.motion.disclosure` (shorter for narrow panes) and
+  snap under Reduce Motion. `shell::is_sidebar_toggle(ev)` matches ⇧⌘B (and ⌃⌘S on macOS);
+  call it from `AppSpec::on_key`.
+- A 48 point band across the top drags the window. Its leading end clears the traffic lights
+  (`Cx::titlebar_inset`, 0 in full screen), and the sidebar's toggle sits past them. Place the
+  lights in the band's middle with `Chrome { traffic_lights: Some((16.0, 17.0)), .. }`.
+- The sidebar's list is one Tab stop: Up and Down move the selection, Home and End, typing a
+  row's first letters jumps to it, Return presses. Rows indent with `.depth(n)`, take an icon,
+  a faint detail (a time), a badge or any trailing element, and rename in place with
+  `.renaming(&edit, access, commit, cancel)`. `Sidebar::virtual_rows` builds only the rows near
+  the viewport, for long histories; mix `SidebarHeader`s into the flattened list for sections.
+- `Toolbar` has leading, centre (or `title`) and trailing slots, and `.material(..)` backs it
+  with a system material.
+
+`cargo run -p rune-kit --example shell` shows a mock app (`-- virtual` for 5,000 rows).
+
+![The shell, light](../../demo/kit/shell-light.png)
+
+To move a hand-built sidebar over, keep its rows' data and selection, replace the column, its
+scroll and focus group with `Sidebar`, each row with a `SidebarRow` keyed by the item's id, and
+the width field and resize handlers with a `PaneState` given to `SplitView::sidebar`. Drop the
+app's own titlebar spacer and drag region: the split view draws both.
+
 ## Markdown
 
 Feature `markdown`: `Markdown::new(src).build(&kit)`, or without a kit
