@@ -46,6 +46,8 @@ pub struct Tx {
     pub(crate) window_frame: Option<crate::window_frame::FrameRequest>,
     /// The mouse button driving this press or drag (`Tx::button`).
     pub(crate) button: crate::PointerButton,
+    /// Modifier keys held as the handler runs.
+    pub(crate) mods: crate::Mods,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -69,6 +71,11 @@ impl Tx {
     /// (start recording on Enter, say) can return early on a repeat; arrows and Tab usually
     /// want every repeat.
     pub fn key_repeat(&self) -> bool { self.key_repeat }
+
+    /// The modifier keys held as this handler runs, so a click can tell Shift-click (extend a
+    /// list's selection) and Cmd-click (toggle a row) from a plain one. A key handler reads
+    /// the key's own [`KeyEvent::mods`](crate::KeyEvent) instead.
+    pub fn mods(&self) -> crate::Mods { self.mods }
 
     /// In a key handler, the key of the element that had focus when the key arrived, `None`
     /// when nothing had (and in every other handler). An unkeyed element reads as `#n`, its
@@ -355,6 +362,13 @@ impl DropSpec {
 }
 pub(crate) type EditFn = Rc<dyn for<'a> Fn(&'a mut dyn Any) -> &'a mut TextEdit>;
 
+/// Accessibility state beyond role and label (`El::level`, `El::expanded`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct A11y {
+    pub level: Option<u32>,
+    pub expanded: Option<bool>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct FocusSpec {
     pub physical: Option<crate::physical_input::Handler>,
@@ -376,6 +390,8 @@ pub(crate) struct FocusSpec {
     pub step_limit: Option<StepLimitFn>,
     /// `on_key_up`.
     pub key_up: Option<InputKeyFn>,
+    /// `El::on_key`: keys while this element or one inside it has focus.
+    pub key: Option<InputKeyFn>,
 }
 
 #[derive(Clone)]
@@ -756,6 +772,8 @@ pub struct Visual {
     pub group_opacity: Option<[f32; 2]>,
     /// Text or icon colour while the nearest ancestor group is hovered.
     pub group_color: Option<Color>,
+    /// `El::icon_rotation`: the icon's turn in radians, clockwise.
+    pub(crate) icon_turn: f32,
 }
 
 impl Default for Visual {
@@ -794,6 +812,7 @@ impl Default for Visual {
             hover_motion: None,
             group_opacity: None,
             group_color: None,
+            icon_turn: 0.0,
         }
     }
 }
@@ -911,10 +930,14 @@ pub struct El {
     pub(crate) scale: f32,
     pub(crate) time_scale: f32,
     pub(crate) help: Option<String>,
+    /// `El::help_when_truncated`: the tooltip shows only while the text is cut short.
+    pub(crate) help_cut: bool,
     pub(crate) material: Option<crate::SystemMaterial>,
     /// `El::aspect_fit`'s width over height; 0 when unset.
     pub(crate) aspect_fit: f32,
     pub(crate) selection_group: bool,
+    /// `El::level` and `El::expanded`.
+    pub(crate) a11y: A11y,
 }
 
 fn base(dir: FlexDirection) -> El {
@@ -981,9 +1004,11 @@ fn base(dir: FlexDirection) -> El {
         scale: 1.0,
         time_scale: 1.0,
         help: None,
+        help_cut: false,
         material: None,
         aspect_fit: 0.0,
         selection_group: false,
+        a11y: A11y::default(),
     }
 }
 
@@ -1243,6 +1268,18 @@ impl El {
         }
         self
     }
+    /// Keys while this element, or a control inside it, has focus: `f` sees each key before
+    /// focus navigation (arrows in a group, Return and Space presses), the default button and
+    /// the window's `on_key`, and returns true to consume it. Keys typed into a focused text
+    /// field stay the field's. Nested handlers run innermost first.
+    ///
+    /// With `focusable(true)`, this is a control that owns its keyboard, like a virtualised
+    /// list whose rows aren't all built: it keeps focus while its rows scroll in and out, and a
+    /// click anywhere inside it focuses it (an NSTableView).
+    pub fn on_key<S: 'static>(mut self, f: impl Fn(&mut S, &crate::KeyEvent, &mut Tx) -> bool + 'static) -> Self {
+        self.focus.key = Some(Rc::new(move |s, key, tx| f(downcast::<S>(s), key, tx)));
+        self
+    }
     /// Secondary release inside the captured element (right-click or macOS control-click).
     pub fn on_secondary_press<S: 'static>(mut self, f: impl Fn(&mut S, PointerPress, &mut Tx) + 'static) -> Self {
         self.on_secondary_press = Some(Rc::new(move |s, p, tx| {
@@ -1479,6 +1516,27 @@ impl El {
         self.label = Some(label.into());
         self
     }
+    /// An outline row's depth for accessibility, 1 at the top (ARIA `aria-level`), as a
+    /// `treeitem` carries it. The element tree reports it as `level`.
+    pub fn level(mut self, level: u32) -> Self {
+        self.a11y.level = Some(level);
+        self
+    }
+    /// Whether a disclosure (a tree row with children, a collapsible header) is open, for
+    /// accessibility (ARIA `aria-expanded`). Leave it unset on an element that can't open.
+    /// The element tree reports it as `expanded`.
+    pub fn expanded(mut self, open: bool) -> Self {
+        self.a11y.expanded = Some(open);
+        self
+    }
+    /// Turn this element's icon by `radians`, clockwise about its centre: a disclosure chevron
+    /// pointing right when closed and down when open. A change springs on the element's
+    /// [`motion`](Self::motion) and jumps under reduced motion. Only the glyph turns; layout and
+    /// hit testing keep the upright box.
+    pub fn icon_rotation(mut self, radians: f32) -> Self {
+        self.vis.icon_turn = if radians.is_finite() { radians } else { 0.0 };
+        self
+    }
     /// A tooltip shown after the system's hover delay while the pointer rests on this element,
     /// as SwiftUI's `.help`. A press, scroll, key or the pointer leaving hides it; it takes no
     /// input itself. On macOS it is AppKit's own tooltip; elsewhere Rune draws it. The element
@@ -1486,7 +1544,15 @@ impl El {
     pub fn help(mut self, text: impl Into<String>) -> Self {
         let text = text.into();
         self.help = (!text.is_empty()).then_some(text);
+        self.help_cut = false;
         self
+    }
+    /// [`El::help`] that shows only while this [`truncate`](Self::truncate)d text is cut short,
+    /// as AppKit's expansion tooltips show a table cell's whole text. Text that fits shows none.
+    pub fn help_when_truncated(self, text: impl Into<String>) -> Self {
+        let mut e = self.help(text);
+        e.help_cut = true;
+        e
     }
     pub fn child(mut self, child: El) -> Self {
         self.children.push(child);

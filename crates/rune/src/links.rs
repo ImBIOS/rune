@@ -267,6 +267,9 @@ impl<S: 'static> Runtime<S> {
                     parent: Some(i),
                     caret: None,
                     selected: None,
+                    level: None,
+                    expanded: None,
+                    item_selected: false,
                     ..text.clone()
                 });
             }

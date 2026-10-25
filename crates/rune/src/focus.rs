@@ -242,7 +242,8 @@ impl<S: 'static> Runtime<S> {
             if self.link_tab(ev.mods.shift) { return true; }
             let mut order = self.tab_order();
             if !self.full_keyboard_access && !self.tab_visits_controls {
-                order.retain(|&i| self.nodes[i].input.is_some()
+                // A control that owns its keyboard (`El::on_key`) is a list of its own.
+                order.retain(|&i| self.nodes[i].input.is_some() || self.nodes[i].focus.key.is_some()
                     || self.group(i).is_some_and(|g| LIST_ROLES.contains(&self.nodes[g].role)));
             }
             if order.is_empty() { return self.active_modal().is_some(); }

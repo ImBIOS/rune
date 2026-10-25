@@ -115,6 +115,9 @@ mod aspect_fit_tests;
 #[cfg(test)]
 #[path = "drop_tests.rs"]
 mod drop_tests;
+#[cfg(test)]
+#[path = "on_key_tests.rs"]
+mod on_key_tests;
 
 const P_FILL: Prop<Color> = Prop::custom(64, PropClass::Color);
 const P_BORDER: Prop<Color> = Prop::custom(65, PropClass::Color);
@@ -162,10 +165,13 @@ fn prop_name(id: u16) -> &'static str {
         78 => "border-bottom-color",
         79 => "press-scale",
         80..=87 => "radial-color",
+        88 => "icon-turn",
         _ => "custom",
     }
 }
 
+/// `El::icon_rotation`'s presented turn, in radians.
+const P_ICON_TURN: Prop<f32> = Prop::custom(88, PropClass::Rotation);
 /// Seconds a changed `El::scale` holds still before its text rasterizes at that size.
 const STATIC_SCALE_SETTLE: f64 = 0.1;
 /// How far (points, per axis) a click may travel and still pair into a double click.
@@ -386,6 +392,7 @@ pub(crate) struct Node {
     window_drag: bool,
     /// `El::selection_group`.
     selection_group: bool,
+    a11y: crate::el::A11y,
     press_scale: Option<f32>,
     /// `El::scale`: a fixed factor on the element's own scale.
     static_scale: f32,
@@ -409,6 +416,8 @@ pub(crate) struct Node {
     inset: [f32; 4],
     /// `El::help`.
     help: Option<String>,
+    /// `El::help_when_truncated`.
+    help_cut: bool,
     #[cfg(debug_assertions)]
     scroll_source: Option<&'static std::panic::Location<'static>>,
 }
@@ -526,6 +535,12 @@ pub struct ElementInfo {
     pub help: Option<String>,
     /// The part of this [`El::selectable`] text that is selected, as copying would take it.
     pub selected: Option<String>,
+    /// Its outline depth ([`El::level`]).
+    pub level: Option<u32>,
+    /// Whether it is open ([`El::expanded`]); `None` when it can't open.
+    pub expanded: Option<bool>,
+    /// A selected item of a list, tree, table or group ([`El::focus_selected`]).
+    pub item_selected: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -858,6 +873,8 @@ pub struct Runtime<S: 'static> {
     links: links::LinkState,
     /// The selection in `El::selectable` text.
     text_sel: selectable::TextSelection,
+    /// Modifier keys held now, as the window last reported them (`Tx::mods`).
+    held_mods: crate::Mods,
     /// `El::help` tooltips.
     help: help::HelpState,
     /// The shell cancels native composition before enabling the new text focus.
@@ -1139,6 +1156,7 @@ impl<S: 'static> Runtime<S> {
             caret_follow: false,
             links: Default::default(),
             text_sel: Default::default(),
+            held_mods: Default::default(),
             help: Default::default(),
             help_delay: 0.5,
             ime_reset: false,
@@ -1635,7 +1653,7 @@ impl<S: 'static> Runtime<S> {
     pub fn tracing(&self) -> bool { self.trace_channels.is_some() || self.scene.tracing() }
 
     fn transaction(&self) -> Tx {
-        Tx { trace: self.tracing().then(crate::el::TraceCalls::default), ..Tx::default() }
+        Tx { trace: self.tracing().then(crate::el::TraceCalls::default), mods: self.held_mods, ..Tx::default() }
     }
 
     /// A scalar from the actual draw path (e.g. `shell.width`). Values hold until resampled.
@@ -2377,6 +2395,7 @@ impl<S: 'static> Runtime<S> {
         // Return and Escape that reach a field mid-composition belong to the input method: they
         // confirm or cancel it, and submit, blur and press nothing.
         if matches!(ev.key, crate::Key::Enter | crate::Key::Escape) && self.composing() { return true; }
+        if self.element_key(ev, one) { return true; }
         if self.default_button_key(ev, one) { return true; }
         if app_first && let Some(f) = self.on_key && app_call!(f, &mut self.state, ev, one) { return true; }
         if let Some(f) = self.focused_input().and_then(|input| input.key.clone())
@@ -2545,6 +2564,17 @@ impl<S: 'static> Runtime<S> {
 
     fn node(&self, path: &str) -> Option<&Node> {
         self.nodes.iter().enumerate().find(|(i, n)| n.path == path && !self.subtree_exiting(*i)).map(|(_, n)| n)
+    }
+
+    /// `El::on_key` handlers on the focused element and its ancestors, innermost first. A
+    /// focused text field's keys stay its own.
+    fn element_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        let Some(i) = self.focused_index() else { return false };
+        if self.focused_input().is_some() { return false; }
+        let handlers: Vec<_> = std::iter::successors(Some(i), |&j| self.nodes[j].parent)
+            .filter_map(|j| self.nodes[j].focus.key.clone())
+            .collect();
+        handlers.into_iter().any(|f| f(handler_state(&mut self.state), ev, tx))
     }
 
     fn focused_input(&self) -> Option<&InputSpec> {
@@ -3455,6 +3485,9 @@ impl<S: 'static> Runtime<S> {
             if let Some(c) = nodes[i].text.as_ref().map(|t| t.color).or(nodes[i].vis.icon.map(|(_, c)| c)) {
                 self.set_or_anim(id, P_TEXT, c, spring_tc, instant);
             }
+            if nodes[i].vis.icon.is_some() && (nodes[i].vis.icon_turn != 0.0 || self.scene.store().has(id, P_ICON_TURN)) {
+                self.set_or_anim(id, P_ICON_TURN, nodes[i].vis.icon_turn, spring_l, instant);
+            }
             if vis.hover.a > 0.0 || self.scene.store().has(id, P_HOVER_C) {
                 self.set_or_anim(id, P_HOVER_C, vis.hover, spring_c, instant);
             }
@@ -4052,8 +4085,14 @@ impl<S: 'static> Runtime<S> {
         }
         // Clicking a link leaves focus where it is (a composer keeps typing). Selectable text
         // off its links isn't a control: the press blurs, as a click on plain content does.
+        // Inside a control that owns its keyboard (`El::on_key`), a click on any part of it
+        // focuses it, as a click on a table view's row focuses the table.
+        let keyed = (!n.focus.enabled).then(|| std::iter::successors(n.parent, |&p| self.nodes[p].parent)
+            .find(|&p| self.nodes[p].focus.enabled && self.nodes[p].focus.key.is_some())).flatten();
         if !on_link && n.focus.enabled && !self.is_selectable(ti) {
             self.queue.push(Action::FocusControl(n.path.clone()));
+        } else if !on_link && let Some(p) = keyed {
+            self.queue.push(Action::FocusControl(self.nodes[p].path.clone()));
         } else if !on_link && self.focused.is_some() {
             self.queue.push(Action::Blur);
         }
@@ -5220,6 +5259,10 @@ impl<S: 'static> Runtime<S> {
                 }
                 if let Some((ic, c)) = n.vis.icon {
                     let color = text_tint(self.color(n.id, P_TEXT, c));
+                    let looped = if matches!(n.looping.map(|l| l.kind), Some(rune_motion::LoopKind::Rotation)) { loop_value.unwrap_or(0.0) } else { 0.0 };
+                    let turn = looped + if self.scene.store().has(n.id, P_ICON_TURN) {
+                        self.scene.get(n.id, P_ICON_TURN).unwrap_or(n.vis.icon_turn)
+                    } else { n.vis.icon_turn };
                     let px = (w.min(h)).round().max(1.0) as u32;
                     if let Some(q) = self.text.icon_quad(ic, px, [r[0], r[1]]) {
                         self.instances.push(Instance {
@@ -5227,7 +5270,7 @@ impl<S: 'static> Runtime<S> {
                             radii: [0.0; 4],
                             fill: premul(color, o, srgb),
                             border: [0.0; 4],
-                            params: [if matches!(n.looping.map(|l| l.kind), Some(rune_motion::LoopKind::Rotation)) { loop_value.unwrap_or(0.0) } else { 0.0 }, KIND_GLYPH, 0.0, 1.0],
+                            params: [turn, KIND_GLYPH, 0.0, 1.0],
                             uv: [q.uv[0], q.uv[1], 0.0, 0.0],
                             clip,
                             fade: crate::render::pack_fade(fade, clip, clip),
@@ -5509,7 +5552,7 @@ impl<S: 'static> Runtime<S> {
                     self.overlay_hits.push(rect);
                 }
             }
-            if self.nodes[i].help.is_some() && !self.subtree_exiting(i) && effective_opacity > 0.001 && visible {
+            if self.nodes[i].help.is_some() && (!self.nodes[i].help_cut || self.nodes[i].elided.is_some()) && !self.subtree_exiting(i) && effective_opacity > 0.001 && visible {
                 let c = if self.nodes[i].parent.is_some() { pinh.clip } else { NO_CLIP };
                 let r = [rect_pt[0].max(c[0] / s), rect_pt[1].max(c[1] / s), rect_pt[2].min(c[2] / s), rect_pt[3].min(c[3] / s)];
                 self.push_help_hit(i, r, hits_before);
@@ -5646,6 +5689,9 @@ impl<S: 'static> Runtime<S> {
                         let (a, b) = selectable::range_in(&sel_ranges, i)?;
                         t.copy_slice(a as u32, b as u32)
                     }),
+                    level: n.a11y.level,
+                    expanded: n.a11y.expanded,
+                    item_selected: n.focus.selected,
                     virtual_extent: self.virtuals.contains_key(&n.path) && n.vis.fill.a == 0.0
                         && n.vis.border_width == 0.0 && n.vis.shadows.is_empty() && n.text.is_none() && n.vis.icon.is_none(),
                 })
@@ -5668,7 +5714,7 @@ impl<S: 'static> Runtime<S> {
                 visible: [r.x.max(c[0]), r.y.max(c[1]), (r.edges()[2].min(c[2]) - r.x.max(c[0])).max(0.0),
                     (r.edges()[3].min(c[3]) - r.y.max(c[1])).max(0.0)],
                 revealing: true, in_growing_row: false, scrolling: false, virtual_extent: false, live_intent: 0, caret: None, drag_out: false,
-                help: None, selected: None,
+                help: None, selected: None, level: None, expanded: None, item_selected: false,
             });
         }
         self.link_elements(&mut elements);
@@ -6572,9 +6618,11 @@ fn flatten(
         scale: static_scale,
         time_scale,
         help,
+        help_cut,
         material,
         aspect_fit,
         selection_group,
+        a11y,
         ..
     } = el;
     if let Some(t) = &text && t.live.is_some() {
@@ -6651,6 +6699,7 @@ fn flatten(
         cursor,
         window_drag,
         selection_group,
+        a11y,
         press_scale,
         static_scale,
         time_scale,
@@ -6665,6 +6714,7 @@ fn flatten(
         local: MRect::ZERO,
         inset: [0.0; 4],
         help,
+        help_cut,
         #[cfg(debug_assertions)]
         scroll_source,
     });

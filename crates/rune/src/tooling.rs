@@ -1347,6 +1347,15 @@ pub(crate) fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
             if let Some(s) = &e.selected {
                 v["selected"] = s.clone().into();
             }
+            if let Some(l) = e.level {
+                v["level"] = l.into();
+            }
+            if let Some(x) = e.expanded {
+                v["expanded"] = x.into();
+            }
+            if e.item_selected {
+                v["itemSelected"] = true.into();
+            }
             if e.rect.iter().zip(e.target.iter()).any(|(a, b)| (a - b).abs() > 0.01) {
                 v["target"] = e.target.map(r2).to_vec().into();
             }

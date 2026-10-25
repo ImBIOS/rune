@@ -1,0 +1,215 @@
+//! `El::on_key`, `El::icon_rotation`, `El::level` and `El::expanded`, `El::help_when_truncated`
+//! and `Tx::mods`: what a virtualised tree or table needs from the core.
+use super::*;
+use crate::{Cx, El, Env, Icon, Key, KeyEvent, Mods, PhysicalInput, TextEdit, TextStyle, col, el, icon, row, text, text_input};
+
+#[derive(Default)]
+struct Keys {
+    log: Vec<String>,
+    field: TextEdit,
+    /// The outer handler takes Down too.
+    outer_down: bool,
+}
+
+/// A focusable list that owns its keys (with a focus-group child row it must beat to the
+/// arrows), inside an outer handler, beside a text field.
+fn keyed(s: &Keys, _: &mut Cx<Keys>) -> El {
+    let rows = col().key("rows").role("listbox").focus_group().children((0..3).map(|i| {
+        row().key(format!("row{i}")).size(100.0, 20.0).focusable(true).on_press(move |s: &mut Keys| s.log.push(format!("press {i}")))
+    }));
+    let list = col()
+        .key("list")
+        .role("tree")
+        .focusable(true)
+        .size(120.0, 80.0)
+        .on_key(|s: &mut Keys, ev: &KeyEvent, _: &mut Tx| {
+            let hit = matches!(ev.key, Key::Down | Key::Up);
+            if hit {
+                s.log.push(format!("list {:?}", ev.key));
+            }
+            hit
+        })
+        .child(rows);
+    let outer = col()
+        .key("outer")
+        .on_key(|s: &mut Keys, ev: &KeyEvent, _: &mut Tx| {
+            let hit = matches!(ev.key, Key::Down | Key::Left) && (ev.key == Key::Left || s.outer_down);
+            if hit {
+                s.log.push(format!("outer {:?}", ev.key));
+            }
+            hit
+        })
+        .child(list)
+        .child(text_input(&s.field, TextStyle::new(14.0, 400.0)).key("field").size(200.0, 30.0).on_edit(|s: &mut Keys| &mut s.field));
+    col().size(300.0, 200.0).child(el().key("pad").size(300.0, 10.0)).child(outer)
+}
+
+fn press(rt: &mut Runtime<Keys>, key: Key) {
+    rt.key(KeyEvent { key, mods: Mods::default() });
+    rt.frame(0.0);
+}
+
+fn focused<S: 'static>(rt: &Runtime<S>) -> Option<String> {
+    rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key)
+}
+
+fn center<S: 'static>(rt: &Runtime<S>, key: &str) -> (f32, f32) {
+    let r = rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap().rect;
+    (r[0] + r[2] * 0.5, r[1] + r[3] * 0.5)
+}
+
+fn click<S: 'static>(rt: &mut Runtime<S>, (x, y): (f32, f32)) {
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.0);
+}
+
+#[test]
+fn a_keyed_control_takes_its_keys_before_focus_navigation_innermost_first() {
+    let mut rt = Runtime::new(Keys::default(), keyed, (300.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    press(&mut rt, Key::Tab);
+    assert_eq!(focused(&rt).as_deref(), Some("list"), "Tab reaches a control that owns its keys, without Full Keyboard Access");
+    rt.state.outer_down = true;
+    press(&mut rt, Key::Down);
+    press(&mut rt, Key::Left);
+    assert_eq!(rt.state.log, ["list Down", "outer Left"], "the list answers Down before the outer handler; Left falls through to it");
+    assert_eq!(focused(&rt).as_deref(), Some("list"), "focus navigation never saw the arrow");
+}
+
+#[test]
+fn a_focused_text_field_keeps_its_keys() {
+    let mut rt = Runtime::new(Keys::default(), keyed, (300.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|s, _| s.field.focused = true);
+    rt.frame(0.0);
+    press(&mut rt, Key::Left);
+    press(&mut rt, Key::Text("a".into()));
+    assert!(rt.state.log.is_empty(), "{:?}", rt.state.log);
+    assert_eq!(rt.state.field.text, "a");
+}
+
+#[test]
+fn a_click_inside_a_keyed_control_focuses_it() {
+    #[derive(Default)]
+    struct S {
+        pressed: u32,
+    }
+    fn view(_: &S, _: &mut Cx<S>) -> El {
+        col().size(300.0, 200.0).child(
+            col()
+                .key("table")
+                .focusable(true)
+                .size(200.0, 100.0)
+                .on_key(|_: &mut S, _: &KeyEvent, _: &mut Tx| false)
+                .child(row().key("row").size(200.0, 20.0).on_press(|s: &mut S| s.pressed += 1)),
+        )
+    }
+    let mut rt = Runtime::new(S::default(), view, (300.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let at = center(&rt, "row");
+    click(&mut rt, at);
+    assert_eq!(rt.state.pressed, 1);
+    assert_eq!(focused(&rt).as_deref(), Some("table"), "the row's click focuses the table, not nothing");
+}
+
+#[test]
+fn a_press_sees_the_modifiers_held() {
+    #[derive(Default)]
+    struct S {
+        seen: Vec<Mods>,
+    }
+    fn view(_: &S, _: &mut Cx<S>) -> El {
+        col().size(100.0, 100.0).child(el().key("b").size(100.0, 100.0).on_press_tx(|s: &mut S, tx: &mut Tx| s.seen.push(tx.mods())))
+    }
+    let mut rt = Runtime::new(S::default(), view, (100.0, 100.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    click(&mut rt, (50.0, 50.0));
+    let shift = Mods { shift: true, ..Mods::default() };
+    rt.physical_input(PhysicalInput::Modifiers(shift));
+    rt.frame(0.0);
+    click(&mut rt, (50.0, 50.0));
+    rt.physical_input(PhysicalInput::Modifiers(Mods::default()));
+    rt.frame(0.0);
+    click(&mut rt, (50.0, 50.0));
+    assert_eq!(rt.state.seen, [Mods::default(), shift, Mods::default()]);
+}
+
+#[test]
+fn icon_rotation_springs_and_jumps_under_reduced_motion() {
+    struct S {
+        open: bool,
+    }
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        static CHEVRON: Icon = Icon { name: "test-chevron", view: 16.0, body: r#"<path d="M5 6.5L8 9.5L11 6.5" stroke="currentColor"/>"# };
+        col().size(100.0, 100.0).child(
+            icon(&CHEVRON, 16.0)
+                .key("chevron")
+                .color(Color::WHITE)
+                .icon_rotation(if s.open { 0.0 } else { -std::f32::consts::FRAC_PI_2 })
+                .motion(motion::DEFAULT),
+        )
+    }
+    fn turn(rt: &Runtime<S>) -> f32 {
+        rt.instances.iter().find(|q| q.params[1] == KIND_GLYPH).expect("the chevron draws").params[0]
+    }
+    let quarter = -std::f32::consts::FRAC_PI_2;
+    for reduced in [false, true] {
+        let mut rt = Runtime::new(S { open: false }, view, (100.0, 100.0), Env::new(true, 1.0));
+        rt.set_system_reduced_motion(reduced);
+        rt.frame(0.0);
+        assert!((turn(&rt) - quarter).abs() < 1e-4, "a closed chevron starts turned, without animating in");
+        rt.update(|s, _| s.open = true);
+        rt.frame(1.0 / 60.0);
+        rt.frame(2.0 / 60.0);
+        let mid = turn(&rt);
+        if reduced {
+            assert!(mid.abs() < 1e-4, "reduced motion lands at once: {mid}");
+        } else {
+            assert!(mid < -0.05 && mid > quarter + 0.05, "two frames in, the turn is on its way: {mid}");
+        }
+        for f in 3..120 {
+            rt.frame(f as f64 / 60.0);
+        }
+        assert!(turn(&rt).abs() < 1e-3, "it settles open");
+    }
+}
+
+#[test]
+fn outline_state_reaches_the_element_tree() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        col()
+            .size(200.0, 100.0)
+            .role("tree")
+            .child(row().key("folder").role("treeitem").level(1).expanded(true).focus_selected(true).size(200.0, 20.0))
+            .child(row().key("file").role("treeitem").level(2).size(200.0, 20.0))
+    }
+    let mut rt = Runtime::new((), view, (200.0, 100.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let e = rt.elements();
+    let get = |k: &str| e.iter().find(|e| e.key.as_deref() == Some(k)).unwrap();
+    let (folder, file) = (get("folder"), get("file"));
+    assert_eq!((folder.level, folder.expanded, folder.item_selected), (Some(1), Some(true), true));
+    assert_eq!((file.level, file.expanded, file.item_selected), (Some(2), None, false));
+}
+
+#[test]
+fn a_truncation_tooltip_shows_only_while_the_text_is_cut() {
+    struct S {
+        w: f32,
+    }
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        col().size(400.0, 100.0).child(
+            row().size(s.w, 20.0).child(
+                text("A rather long file name.rs").key("cell").font(TextStyle::new(13.0, 400.0)).truncate().shrink().help_when_truncated("A rather long file name.rs"),
+            ),
+        )
+    }
+    let mut rt = Runtime::new(S { w: 60.0 }, view, (400.0, 100.0), Env::new(true, 1.0));
+    rt.set_native_help(true);
+    rt.frame(0.0);
+    assert_eq!(rt.help_regions().len(), 1, "cut short, the cell offers its whole text");
+    rt.update(|s, _| s.w = 380.0);
+    rt.frame(0.0);
+    assert!(rt.help_regions().is_empty(), "the whole text shows, so no tooltip");
+}
