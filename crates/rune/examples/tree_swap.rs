@@ -4,21 +4,27 @@
 //! The list is 200 rows of icon, title and subtitle under `virtual_rows`. The grid is 1,800
 //! emoji cells, ten to a row, under `virtualize` with every row built, as an app builds it
 //! today (`--lazy-grid` builds its rows with `virtual_rows` instead; `--eager-list` builds every
-//! list row under `virtualize`, as apps did before `virtual_rows`). Tab opens the grid and
-//! Escape returns to the list. Each direction runs three cases on a fresh runtime per sample:
+//! list row under `virtualize`, as apps did before `virtual_rows`). `--cells N` sets the grid's
+//! cell count; 200 is a launcher's emoji grid, 20 rows of 74.4 points in a 388-point viewport
+//! that shows about five. Tab opens the grid and Escape returns to the list. Each direction runs
+//! four cases on a fresh runtime per sample:
 //! `first`, the target never shown before; `recent`, the target shown, then the source for one
 //! commit; `quick`, as `recent` but back one frame after leaving, with both trees still
 //! moving; `stale`, the source for four commits, so the target's shaped text has been evicted
 //! (what a person who browsed the grid comes back to).
 //!
 //! cargo build --profile perf -p rune --example tree_swap --features frame-profile
-//! target/perf/examples/tree_swap [--samples 15] [--only grid-list] [--lazy-grid] [--eager-list]
+//! target/perf/examples/tree_swap [--samples 15] [--only grid-list] [--lazy-grid] [--eager-list] [--cells 1800]
 //!
 //! Prints `METRIC dir=.. case=.. metric=.. median=.. p95=..` per measurement. `cpu_ms` is the
 //! thread CPU of the key and the frame it commits; `encode_ms` is prepare, draw and submit
 //! after it. Phases are thread CPU and overlap: commit includes view, layout and apply, and
 //! layout includes text. `tail_ms` is the CPU of the frames after the swap until motion settles.
+//! `rows_built` counts row builder calls in the swap frame (an eager list builds every row in
+//! its view); `rows_mounted` counts the shown list's rows laid out after it, and
+//! `rows_settled` after the frames that follow.
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::time::Instant;
 
 use rune::render::{Gpu, OFFSCREEN_FORMAT, Offscreen, Renderer};
@@ -44,6 +50,10 @@ const EMOJI: &[&str] = &[
     "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔", "❣️", "💕", "💞", "💓", "💗", "💖", "💘", "💝",
 ];
 
+thread_local! {
+    static BUILT: Cell<usize> = const { Cell::new(0) };
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Mode { List, Grid }
 
@@ -60,8 +70,8 @@ struct State {
 }
 
 impl State {
-    fn new(mode: Mode, lazy_grid: bool, eager: bool) -> Self {
-        let cells: Vec<String> = (0..1800).map(|i| EMOJI[i % EMOJI.len()].to_owned()).collect();
+    fn new(mode: Mode, lazy_grid: bool, eager: bool, cells: usize) -> Self {
+        let cells: Vec<String> = (0..cells).map(|i| EMOJI[i % EMOJI.len()].to_owned()).collect();
         State {
             mode,
             selected: 0,
@@ -85,6 +95,7 @@ const HOVER: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.06 };
 fn ui() -> TextStyle { TextStyle::new(14.0, 400.0) }
 
 fn list_row(s: &State, i: usize) -> El {
+    BUILT.set(BUILT.get() + 1);
     let selected = i == s.selected;
     let letter = s.titles[i].chars().next().unwrap().to_string();
     row().w_full().h(ROW).px(10.0).gap(10.0).center_y().radius(8.0)
@@ -111,6 +122,7 @@ fn list(s: &State) -> El {
 }
 
 fn grid_row(s: &State, r: usize) -> El {
+    BUILT.set(BUILT.get() + 1);
     let cell = (SIZE.0 - 16.0) / COLUMNS as f32;
     let glyph = (cell * 0.5).min(34.0);
     let mut line = row().w_full().h(cell);
@@ -191,9 +203,18 @@ fn settle(rt: &mut Runtime<State>, d: &mut Draw) -> (f64, usize) {
 }
 
 const METRICS: &[&str] = &["cpu_ms", "frame_ms", "encode_ms", "view_ms", "commit_ms", "layout_ms", "text_ms", "paint_ms",
-    "apply_ms", "shaped", "layout_nodes", "allocations", "tail_ms", "tail_frames"];
+    "apply_ms", "shaped", "layout_nodes", "allocations", "tail_ms", "tail_frames", "rows_built", "rows_mounted", "rows_settled"];
 
-fn sample(d: &mut Draw, from: Mode, case: &str, lazy_grid: bool, eager: bool) -> Vec<f64> {
+/// How many of the shown list's rows are laid out.
+fn mounted(rt: &Runtime<State>) -> f64 {
+    let (list, keys) = match rt.state.mode {
+        Mode::List => ("list", &rt.state.keys),
+        Mode::Grid => ("grid", &rt.state.row_keys),
+    };
+    keys.iter().filter(|k| rt.find(&format!("#0/{list}/rows/{k}")).is_some()).count() as f64
+}
+
+fn sample(d: &mut Draw, from: Mode, case: &str, lazy_grid: bool, eager: bool, cells: usize) -> Vec<f64> {
     let to = if from == Mode::Grid { Mode::List } else { Mode::Grid };
     let key = |m: Mode| if m == Mode::List { Key::Escape } else { Key::Tab };
     // Fonts load outside the timed frame; the warm-up layouts are evicted before it.
@@ -203,7 +224,7 @@ fn sample(d: &mut Draw, from: Mode, case: &str, lazy_grid: bool, eager: bool) ->
     }
     for _ in 0..3 { text.end_commit(); }
     let start = if case == "first" { from } else { to };
-    let mut rt = Runtime::with_text(State::new(start, lazy_grid, eager), view, SIZE, Env::new(true, 2.0), text);
+    let mut rt = Runtime::with_text(State::new(start, lazy_grid, eager, cells), view, SIZE, Env::new(true, 2.0), text);
     rt.on_key = Some(on_key);
     rt.frame(0.0);
     settle(&mut rt, d);
@@ -223,6 +244,7 @@ fn sample(d: &mut Draw, from: Mode, case: &str, lazy_grid: bool, eager: bool) ->
         }
     }
     rune::take_frame_phases();
+    BUILT.set(0);
     let (alloc0, cpu0, wall0) = (procwatch::alloc::thread_allocations(), rune::thread_cpu_ms(), Instant::now());
     press(&mut rt, key(to));
     rt.frame(1.0 / 120.0);
@@ -234,10 +256,11 @@ fn sample(d: &mut Draw, from: Mode, case: &str, lazy_grid: bool, eager: bool) ->
     let encode = encode0.elapsed().as_secs_f64() * 1000.0;
     d.wait();
     let (shaped, nodes) = (rt.stats.shaped as f64, rt.stats.layout_nodes as f64);
+    let (built, mounted_now) = (BUILT.get() as f64, mounted(&rt));
     let (tail, tail_frames) = settle(&mut rt, d);
     let p = rune::PHASES;
     vec![cpu, frame, encode, phases[p], phases[p + 1], phases[p + 2], phases[p + 3], phases[p + 4], phases[p + 5],
-        shaped, nodes, allocations, tail, tail_frames as f64]
+        shaped, nodes, allocations, tail, tail_frames as f64, built, mounted_now, mounted(&rt)]
 }
 
 fn main() {
@@ -247,6 +270,7 @@ fn main() {
     let only = value("--only");
     let lazy_grid = args.iter().any(|a| a == "--lazy-grid");
     let eager = args.iter().any(|a| a == "--eager-list");
+    let cells: usize = value("--cells").map_or(1800, |s| s.parse().expect("--cells N"));
     if cfg!(debug_assertions) { eprintln!("tree_swap: debug build; time a --profile perf build"); }
     let gpu = Gpu::headless();
     let renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
@@ -256,7 +280,7 @@ fn main() {
         if only.as_ref().is_some_and(|o| !dir.starts_with(o.as_str()) && !o.contains(&format!("{dir}/"))) { continue; }
         for case in ["first", "quick", "recent", "stale"] {
             if only.as_ref().is_some_and(|o| o.contains('/') && *o != format!("{dir}/{case}")) { continue; }
-            let rows: Vec<Vec<f64>> = (0..=samples).map(|_| sample(&mut d, from, case, lazy_grid, eager)).skip(1).collect();
+            let rows: Vec<Vec<f64>> = (0..=samples).map(|_| sample(&mut d, from, case, lazy_grid, eager, cells)).skip(1).collect();
             for (m, name) in METRICS.iter().enumerate() {
                 let mut v: Vec<f64> = rows.iter().map(|r| r[m]).collect();
                 v.sort_by(f64::total_cmp);

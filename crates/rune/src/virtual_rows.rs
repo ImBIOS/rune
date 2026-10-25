@@ -348,11 +348,94 @@ mod tests {
     #[test]
     fn an_idle_window_mounts_all_its_overscan() {
         let mut rt = fixed(1000);
-        assert_eq!(rt.virtuals["#0/scroll/rows"].range, 0..30, "the first commit mounts the full overscan");
+        assert_eq!(rt.virtuals["#0/scroll/rows"].range, 0..15, "the first commit mounts the viewport and half a viewport");
+        until_idle(&mut rt);
+        assert_eq!(rt.virtuals["#0/scroll/rows"].range, 0..30, "then the full overscan");
         rt.wheel(150.0, 250.0, -10_000.0);
         let frames = until_idle(&mut rt);
         assert_eq!(rt.virtuals["#0/scroll/rows"].range, 180..230, "after {frames} frames");
         assert!(!rt.frame(1.0 / 120.0), "then it rests");
+    }
+
+    /// A launcher's emoji grid: `s.1` rows of 74.4 points under a 100-point header and above a
+    /// 50-point footer in a 500-point window, so the viewport is 350 points, under five rows.
+    /// `s.0` shows the grid; until then the body is a label.
+    fn grid_view(s: &(bool, usize), _: &mut Cx<(bool, usize)>) -> El {
+        let body = if s.0 {
+            col().key("scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(
+                col().key("rows").w_full().growth(GrowthSpec::default()).virtual_rows(s.1, 74.4,
+                    |_: &(bool, usize), i| format!("g{i}").into(),
+                    |_: &(bool, usize), i| memo(format!("g{i}"), 0, || {
+                        BUILT.with_borrow_mut(|b| b.push(i));
+                        el().w_full().h(74.4)
+                    })))
+        } else {
+            text("root").key("root")
+        };
+        col().w_full().h_full().children([el().key("header").w_full().h(100.0), body, el().key("footer").w_full().h(50.0)])
+    }
+
+    /// The viewport's rows: none missing between its top and bottom.
+    fn assert_covered<S: 'static>(rt: &Runtime<S>, step: &str) {
+        let viewport = rt.elements().into_iter().find(|e| e.path == "#0/scroll").expect("scroll").rect;
+        let mut rows: Vec<_> = visible(rt).into_iter().map(|(_, r)| (r[1], r[1] + r[3])).collect();
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut y = viewport[1];
+        for (top, bottom) in rows {
+            assert!(top <= y + 0.5, "{step}: blank from {y} to {top} in {viewport:?}");
+            y = y.max(bottom);
+        }
+        assert!(y >= viewport[1] + viewport[3] - 0.5, "{step}: blank below {y} in {viewport:?}");
+    }
+
+    #[test]
+    fn a_first_showing_builds_its_viewport_not_the_window_times_overscan() {
+        let mut rt = Runtime::new((false, 20), grid_view, (300.0, 500.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        built();
+        rt.update(|s, _| s.0 = true);
+        rt.frame(1.0 / 120.0);
+        assert_covered(&rt, "first showing");
+        let first = built();
+        // The viewport's rows and half a viewport of overscan, from its 350 points, not the
+        // window's 500 times the full overscan.
+        assert_eq!(first, (0..8).collect::<Vec<_>>());
+        // The rows' entrance outlasts the fill; the overscan fills within a few frames of it.
+        for frame in 1..=6 {
+            rt.frame(1.0 / 120.0);
+            assert_covered(&rt, &format!("frame {frame}"));
+        }
+        assert_eq!(rt.virtuals["#0/scroll/rows"].range, 0..14, "then rows until its edge is 1.75 viewports away");
+        assert_eq!(built(), (8..14).collect::<Vec<_>>(), "building only rows new to it");
+    }
+
+    /// A header that takes less than its height (a negative margin) makes the first showing's
+    /// estimate short; the retry fills the viewport before anything is presented.
+    #[test]
+    fn a_first_showing_estimated_short_still_fills_its_viewport() {
+        fn view(s: &(bool, usize), cx: &mut Cx<(bool, usize)>) -> El {
+            let mut root = grid_view(s, cx);
+            root.children[0] = el().key("header").w_full().h(300.0).mb(-280.0);
+            root
+        }
+        let mut rt = Runtime::new((false, 20), view, (300.0, 500.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.update(|s, _| s.0 = true);
+        rt.frame(1.0 / 120.0);
+        assert_covered(&rt, "first showing");
+        assert_eq!(rt.elements().into_iter().find(|e| e.path == "#0/scroll").unwrap().rect[3], 430.0);
+    }
+
+    #[test]
+    fn a_first_showing_reveals_a_row_below_its_first_window() {
+        let mut rt = Runtime::new((false, 20), grid_view, (300.0, 500.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.update(|s, tx| { s.0 = true; tx.scroll_into_view("g16") });
+        rt.frame(1.0 / 120.0);
+        assert_covered(&rt, "revealed");
+        let viewport = rt.elements().into_iter().find(|e| e.path == "#0/scroll").unwrap().rect;
+        let (_, row) = visible(&rt).into_iter().find(|(k, _)| k == "g16").expect("revealed in the first frame");
+        assert!(row[1] >= viewport[1] - 0.5 && row[1] + row[3] <= viewport[1] + viewport[3] + 0.5, "{row:?} in {viewport:?}");
     }
 
     #[test]

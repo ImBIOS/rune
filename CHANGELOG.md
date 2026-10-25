@@ -5,6 +5,19 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A virtual list's first showing mounts its viewport, not three windows.** A new scroll
+  viewport has no measured height, so a virtual list shown for the first time used the window's
+  height as its viewport and mounted two of those either side: a 200-cell emoji grid in a
+  five-row viewport built all 20 of its rows. Now the first showing estimates the viewport from
+  the tree (the window's height less the fixed-height siblings, padding and gaps of the columns
+  around it, or the scroll viewport's own height), and an index-built list (`virtual_rows`)
+  mounts the viewport's rows and half a viewport of overscan, as it does when all its rows are
+  new; the rest of the overscan mounts over the next few frames. An estimate short of the laid
+  out height retries before presenting, so no frame shows blank rows. `virtualize` lists keep
+  their full overscan from the better estimate. In a launcher-shaped bench (`tree_swap --cells
+  200 --lazy-grid`) the grid's first showing lays out 288 nodes instead of 629, the swap back
+  to a 200-row list 107 instead of 240, and their commits cost 40–50% less. Tests that count
+  the rows mounted or built in a list's first frame see fewer.
 - **Horizontal scrolling: `El::scroll_x()` and `El::scroll_xy()`.** A viewport scrolls its
   first child sideways (a filmstrip, a wide code block or table, a tab strip), or both ways.
   The content takes its natural width, unwrapped, and at least the viewport's, unless it sets a

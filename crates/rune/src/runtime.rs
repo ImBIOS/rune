@@ -2583,16 +2583,22 @@ impl<S: 'static> Measurement<'_, S> {
         id
     }
 
-    fn window_tree(&mut self, el: &mut El, parent: &str, index: usize, scroll: Option<(&str, bool)>, settle: bool, force_all: bool) {
+    /// `bound` is the most `el` can be tall (see [`crate::virtual_list::height_bound`]); `scroll`
+    /// is the scroll viewport `el` is the content of, whether it sticks to the bottom, and its bound.
+    #[allow(clippy::too_many_arguments)]
+    fn window_tree(&mut self, el: &mut El, parent: &str, index: usize, scroll: Option<(&str, bool, f32)>, settle: bool, force_all: bool, bound: f32) {
         el.expand_memo();
+        let bound = crate::virtual_list::height_bound(&el.style, bound);
         let path = node_path(parent, el.key.as_deref(), index);
         if let Some(estimate) = el.virtual_estimate {
             assert!(el.growth.is_some(), "`.virtualize(..)` at {path:?} needs `.growth(GrowthSpec)` on the same element");
-            let (scroll_path, sticky) = scroll.expect("virtual stack must be the direct child of a scroll viewport");
+            let (scroll_path, sticky, scroll_bound) = scroll.expect("virtual stack must be the direct child of a scroll viewport");
             let old_scroll = self.path_ids.get(scroll_path).and_then(|id| self.scrolls.get(id));
             let pinned = (settle && sticky) || old_scroll.map_or(sticky, |s| s.pinned);
             let mut offset = old_scroll.map_or(0.0, |s| s.offset as f32);
-            let height = self.nodes.iter().find(|n| n.path == scroll_path).map_or(self.viewport.1, |n| n.local.h);
+            // A new viewport has no height yet: its bound from the tree, else the window's.
+            let first = if scroll_bound.is_finite() { scroll_bound } else { self.viewport.1 };
+            let height = self.nodes.iter().find(|n| n.path == scroll_path).map_or(first, |n| n.local.h);
             let padding = |p: LengthPercentage| match p.expand() {
                 taffy::style::ExpandedLengthPercentage::Length(x) => x,
                 _ => panic!("virtual stack padding must be in points"),
@@ -2647,8 +2653,9 @@ impl<S: 'static> Measurement<'_, S> {
                 if !pinned { st.offset = (st.offset + f64::from(delta)).max(0.0); }
             }
             // Rows new since the last commit spread over frames, unless this pass is a retry to
-            // fill the viewport, a settle, or the list's first showing.
-            let budget = v.indexed && !self.retry && !settle && !v.shown.is_empty();
+            // fill the viewport or a settle. A list's first showing is all new rows: it mounts
+            // its viewport and a budget of overscan, and the rest fills over the next frames.
+            let budget = v.indexed && !self.retry && !settle;
             let shown = std::mem::take(&mut v.shown);
             v.select(offset, pinned, budget.then_some(&shown));
             if force_all { v.range = 0..v.keys.len(); v.before = 0.0; v.after = 0.0; }
@@ -2696,9 +2703,11 @@ impl<S: 'static> Measurement<'_, S> {
                 }).collect();
             }
         }
-        let scroll = el.scroll.map(|s| (path.as_str(), s.stick_bottom));
+        let bounds = crate::virtual_list::child_bounds(&el.style, el.scroll.is_some(), bound, &el.children);
+        let scroll = el.scroll.map(|s| (path.as_str(), s.stick_bottom, bound));
         for (i, child) in el.children.iter_mut().enumerate() {
-            self.window_tree(child, &path, i, scroll, settle, force_all);
+            let bound = bounds.of(child);
+            self.window_tree(child, &path, i, scroll, settle, force_all, bound);
         }
     }
 
@@ -2745,7 +2754,7 @@ impl<S: 'static> Measurement<'_, S> {
             None => crate::key_diagnostics::warn_once(&duplicates),
         }
         // Index-built rows build here, so memos inside them share the view's cache.
-        self.window_tree(&mut root, "", 0, None, tx.settle, force_all);
+        self.window_tree(&mut root, "", 0, None, tx.settle, force_all, self.viewport.1);
         root
     }
 

@@ -4,6 +4,10 @@ use std::cell::{Cell, Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
+use taffy::style::{Display, FlexDirection, FlexWrap, LengthPercentage, LengthPercentageAuto, Position, Style};
+
+use crate::El;
+
 /// What a row keeps while its key stays.
 #[derive(Debug, Clone, Copy)]
 struct Row {
@@ -42,6 +46,67 @@ pub(crate) struct VirtualList {
     pub pad_top: f32,
     pub pad_bottom: f32,
     pub anchor: Option<(String, f32)>,
+}
+
+/// The most an element can be tall before layout, so a list's first showing, which has no
+/// measured viewport yet, mounts what its viewport can show rather than the window's height.
+/// Its own height in points wins; otherwise `avail`, what its parent leaves it. An estimate
+/// short of the laid-out height only costs a retry pass, which never presents a blank.
+pub(crate) fn height_bound(style: &Style, avail: f32) -> f32 {
+    let h = style.size.height.into_option().unwrap_or(avail);
+    let h = length(style.max_size.height).map_or(h, |m| h.min(m));
+    length(style.min_size.height).map_or(h, |m| h.max(m))
+}
+
+/// The most each child of an element whose bound is `bound` can be tall: what padding leaves
+/// and, in a column, what siblings of fixed height and gaps don't take. A scroll viewport's
+/// content is unbounded.
+pub(crate) fn child_bounds(style: &Style, scrolls: bool, bound: f32, children: &[El]) -> ChildBounds {
+    if scrolls { return ChildBounds { inner: f32::INFINITY, fixed: 0.0, column: false } }
+    let points = |p: LengthPercentage| match p.expand() {
+        taffy::style::ExpandedLengthPercentage::Length(x) => x,
+        _ => 0.0,
+    };
+    let inner = bound - points(style.padding.top) - points(style.padding.bottom);
+    let column = style.display == Display::Flex && style.flex_wrap == FlexWrap::NoWrap
+        && matches!(style.flex_direction, FlexDirection::Column | FlexDirection::ColumnReverse);
+    if !column || children.len() < 2 { return ChildBounds { inner, fixed: 0.0, column: false } }
+    let gaps = points(style.gap.height) * children.iter().filter(|c| in_flow(&c.style)).count().saturating_sub(1) as f32;
+    ChildBounds { inner: inner - gaps, fixed: children.iter().map(|c| fixed_height(&c.style)).sum(), column }
+}
+
+pub(crate) struct ChildBounds {
+    inner: f32,
+    fixed: f32,
+    column: bool,
+}
+
+impl ChildBounds {
+    pub fn of(&self, child: &El) -> f32 {
+        let bound = if self.column && in_flow(&child.style) { self.inner - (self.fixed - fixed_height(&child.style)) } else { self.inner };
+        bound.max(0.0)
+    }
+}
+
+fn length(d: LengthPercentageAuto) -> Option<f32> {
+    match d.expand() {
+        taffy::style::ExpandedLengthPercentageAuto::Length(x) => Some(x),
+        _ => None,
+    }
+}
+
+fn in_flow(style: &Style) -> bool {
+    style.display != Display::None && style.position != Position::Absolute
+}
+
+/// The height a column's child takes whatever the others need: its own height when it can't
+/// shrink, and its minimum.
+fn fixed_height(style: &Style) -> f32 {
+    if !in_flow(style) { return 0.0 }
+    let min = length(style.min_size.height).unwrap_or(0.0);
+    if style.flex_shrink > 0.0 { return min }
+    let h = style.size.height.into_option().unwrap_or(0.0);
+    length(style.max_size.height).map_or(h, |m| h.min(m)).max(min)
 }
 
 /// How far ahead an index-built list keeps rows mounted, in viewports either side.
