@@ -51,15 +51,15 @@ pub struct Frame<'a, S: 'static> {
 }
 
 impl<S: 'static> Frame<'_, S> {
-    /// The default frame: every instance into the target, cleared to the window colour.
     /// True when the frame is sRGB-blended (`App::srgb_blend`): `target` is a non-sRGB view and
     /// premultiplied colours, in `ui` passes and in layers, are sRGB-encoded. False: linear
     /// premultiplied values, encoded by the `*Srgb` target on write. Build effect pipelines and
-    /// encode their output to match (`FxOptions::srgb_blend` in rune-fx).
+    /// encode their output to match (`FxRenderer::set_srgb_blend` in rune-fx).
     pub fn srgb_blend(&self) -> bool {
         self.ui.srgb_blend()
     }
 
+    /// The default frame: every instance into the target, cleared to the window colour.
     pub fn draw_ui(&mut self) {
         let clear = self.rt.clear_color();
         self.ui.prepare(self.device, self.queue, &mut self.rt.text.atlas, &self.rt.instances, self.size);

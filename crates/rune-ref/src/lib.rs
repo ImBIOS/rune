@@ -82,10 +82,12 @@ impl Scene {
             .iter()
             .flatten()
             .any(|v| !v.is_finite() || v.abs() > 1e6)
-                || p.rect[2] <= 0.0
-                || p.rect[3] <= 0.0
+                // An effect slot (kind 12) draws nothing and may be empty.
+                || (p.params[1] != 12.0 && (p.rect[2] <= 0.0 || p.rect[3] <= 0.0))
+                || p.rect[2] < 0.0
+                || p.rect[3] < 0.0
                 || p.radii.iter().chain(p.fade.iter()).any(|v| *v < 0.0)
-                || !(0..=4).chain([10, 11]).any(|k| p.params[1] == k as f32)
+                || !(0..=4).chain([10, 11, 12]).any(|k| p.params[1] == k as f32)
                 // A glyph's params[0] is a signed turn; negative is counter-clockwise.
                 || (p.params[0] < 0.0 && p.params[1] != 2.0)
                 || p.params[2] < 0.0

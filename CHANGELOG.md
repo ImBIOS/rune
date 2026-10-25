@@ -12,7 +12,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   adds a box that draws nothing but holds its place in the painter stream, and
   `Renderer::draw_range_with` / `encode_layers_with` call a hook there, inside the enclosing
   isolated layer's pass when there is one, so the compositor's pass takes the layer's opacity,
-  blur, dissolve and clip. `render::CLIP_WGSL` shares the clip maths with compositor shaders.
+  blur, dissolve and clip. A faded slot always gets its own layer, so its opacity can't be
+  skipped, and the hook runs scissored to the slot's clip rectangle.
+  `render::CLIP_WGSL` shares the clip maths with compositor shaders.
   Apps without a compositor or effect slots render exactly as before; one that set `srgb_blend`
   alongside a compositor now gets gamma blending, which its compositor must match.
   `rune-fx` follows: `FxRenderer::add_format`, `draw_layer_in` and `set_srgb_blend` draw its effects

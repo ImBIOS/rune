@@ -70,10 +70,12 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
 fn fs(in: VOut) -> @location(0) vec4f {
     let c = shade(in) * insts[in.id].shape.z;
     if (g.srgb > 0.5) {
-        // Premultiplied light, which may exceed alpha: encode the straight colour, or the light
-        // itself where there is no alpha to divide by.
-        let k = select(1.0, c.a, c.a > 1e-4);
-        return vec4f(to_srgb(c.rgb / k) * k, c.a);
+        // Premultiplied light may exceed alpha: a covering colour (up to alpha) plus added light.
+        // Encode the straight covering colour times alpha, and the added light as over black, so
+        // light doesn't dim as a glow's occlusion takes its alpha from zero to a little.
+        let cover = min(max(c.rgb, vec3f(0.0)), vec3f(c.a));
+        let straight = select(vec3f(0.0), cover / c.a, c.a > 1e-6);
+        return vec4f(to_srgb(straight) * c.a + to_srgb(max(c.rgb, vec3f(0.0)) - cover), c.a);
     }
     return c;
 }

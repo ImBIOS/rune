@@ -117,6 +117,27 @@ fn dashed_rings_translate_and_stay_inside_their_ring() {
     }
 }
 
+#[test]
+fn effect_slots_are_accepted_and_draw_nothing() {
+    for seed in 0..16 {
+        let scene = generate::seeded(seed, 8);
+        let mut slotted = scene.clone();
+        for (n, p) in scene.primitives.iter().enumerate().rev() {
+            let mut slot = p.clone();
+            slot.source = format!("effect/{n}");
+            slot.fill = [0.0, 0.0, 0.0, 1.0];
+            slot.border = [0.0; 4];
+            slot.params = [0.0, 12.0, 6.0, 1.0];
+            slot.uv = [0.0; 4];
+            if n % 3 == 0 { slot.rect[2] = 0.0; }
+            slotted.primitives.insert(n, slot);
+        }
+        let (a, b) = (render(&scene), render(&slotted));
+        assert_eq!(a.rgba, b.rgba, "seed {seed}");
+        assert!(b.owners.unwrap().iter().flatten().all(|&i| slotted.primitives[i].params[1] != 12.0));
+    }
+}
+
 // Only the glyph's top-left 4x4 texels are lit. On screen (y down), a positive quarter turn
 // carries them clockwise to the top-right and a negative one to the bottom-left.
 #[test]

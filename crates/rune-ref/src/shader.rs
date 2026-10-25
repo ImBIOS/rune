@@ -131,6 +131,10 @@ fn dash_cov(s: f32, total: f32, d: [f32; 3]) -> f32 {
 
 pub(crate) fn fragment(i: &Primitive, atlas: &Atlas, screen: [f32; 2]) -> [f32; 4] {
     let kind = i.params[1] as u32;
+    // An effect slot (kind 12) holds a compositor's place in the stream and covers no pixels.
+    if kind == 12 {
+        return [0.0; 4];
+    }
     // A glyph's params[0] turns its quad clockwise about the rect centre. Undo the turn so
     // bounds and sampling run in the glyph's own frame; the clip stays on screen.
     let rotated = kind == 2 && i.params[0] != 0.0;

@@ -234,6 +234,27 @@ fn cpu_gpu_dashed() {
 }
 
 #[test]
+fn cpu_gpu_effect_slots() {
+    let mut gpu = GpuRenderer::default();
+    for seed in 0..16 {
+        let mut scene = generate::seeded(seed, 8);
+        let mut slots = scene.primitives.clone();
+        for slot in &mut slots {
+            slot.fill = [0.0, 0.0, 0.0, 1.0];
+            slot.border = [0.0; 4];
+            slot.params = [0.0, 12.0, 6.0, 1.0];
+            slot.uv = [0.0; 4];
+        }
+        scene.primitives.extend(slots);
+        scene.primitives.rotate_right(4);
+        if let Err(e) = check(&mut gpu, &scene, 2) {
+            save(&format!("effect-{seed}"), &scene);
+            panic!("{e}");
+        }
+    }
+}
+
+#[test]
 fn cpu_gpu_radial() {
     let mut gpu = GpuRenderer::default();
     let mut max = 0;

@@ -4505,7 +4505,8 @@ impl<S: 'static> Runtime<S> {
             // A pressed element still hits at its resting size, so a press near its edge stays inside.
             let press_anchor = centre_to;
             let blur = pinh.blur + p.blur * sc;
-            let filter_margin = blur * s * 3.0;
+            // An effect slot's bleed can reach into view from a rect outside it.
+            let filter_margin = blur * s * 3.0 + n.vis.effect.map_or(0.0, |bleed| bleed * sc * s);
 
             let mut raw_edges = p.rect.edges();
             raw_edges[0] += pinh.dx;
@@ -4676,6 +4677,7 @@ impl<S: 'static> Runtime<S> {
             }
 
             let first_instance = self.instances.len();
+            let mut faded_slot = None;
             // Native input readiness follows focus, not entrance opacity. An input
             // mounting at opacity zero still needs its IME area in this frame.
             let input_caret = n.input.as_ref().filter(|input| input.edit.focused && self.can_focus(i))
@@ -4958,16 +4960,28 @@ impl<S: 'static> Runtime<S> {
                     });
                 }
                 if let Some(bleed) = n.vis.effect {
-                    self.instances.push(Instance {
+                    let slot = Instance {
                         rect: [r[0], r[1], w, h],
                         radii,
-                        fill: [0.0, 0.0, 0.0, o],
+                        fill: [0.0, 0.0, 0.0, 1.0],
                         border: [0.0; 4],
                         params: [0.0, KIND_EFFECT, bleed * k_px, s],
                         uv: [0.0; 4],
                         clip,
                         fade: crate::render::pack_fade(fade, clip, clip),
-                    });
+                    };
+                    // A compositor paints whatever it likes at a slot, so a faded slot gets its
+                    // own layer that applies the opacity, instead of a factor it could forget.
+                    if o < 1.0 {
+                        let mut marker = Instance::begin_layer(slot.rect, clip, crate::render::LayerSpec { opacity: o, ..Default::default() });
+                        marker.fade = slot.fade;
+                        self.instances.push(marker);
+                        faded_slot = Some(self.instances.len());
+                        self.instances.push(Instance { clip: NO_CLIP, ..slot });
+                        self.instances.push(Instance::end_layer());
+                    } else {
+                        self.instances.push(slot);
+                    }
                 }
                 let focus_ring = if default_ring == Some(i) { Some(self.default_focus_ring()) }
                     else { self.focus_ring_visible(i).then_some(n.focus.ring).flatten() };
@@ -5203,6 +5217,10 @@ impl<S: 'static> Runtime<S> {
             if let Some((_, radius)) = rounded {
                 for instance in &mut self.instances[primitive_start..] { instance.round_clip(radius); }
                 for surface in &mut self.surfaces[surface_start..] { surface.fade[3] = radius.to_bits(); }
+            }
+            // A faded effect slot's layer carries its clip; the slot and the layer's end don't.
+            if let Some(at) = faded_slot {
+                for instance in &mut self.instances[at..at + 2] { instance.fade = [0; 4]; }
             }
             if self.track_marks {
                 self.marks.resize(self.instances.len(), mark);

@@ -12,6 +12,15 @@ use rune_fx::*;
 struct Dusk {
     fx: Option<FxRenderer>,
     formats: Arc<Mutex<Vec<wgpu::TextureFormat>>>,
+    effect: fn() -> Fx,
+}
+
+fn dusk() -> Fx {
+    Fx::fill(MeshGradientParams::dusk())
+}
+
+fn glow(occlusion: f32) -> Fx {
+    Fx::glow(GlowParams { radius: 12.0, occlusion, ..Default::default() })
 }
 
 impl Compositor<()> for Dusk {
@@ -20,7 +29,7 @@ impl Compositor<()> for Dusk {
         let slots: Vec<(u32, [f32; 4])> = f.rt.instances.iter().enumerate()
             .filter(|(_, i)| i.params[1] == KIND_EFFECT).map(|(n, i)| (n as u32, i.rect)).collect();
         let layers: Vec<FxLayer> = slots.iter()
-            .map(|(_, r)| Fx::fill(MeshGradientParams::dusk()).on(Shape::rounded(r[0], r[1], r[2], r[3], 0.0)).at(1.0)).collect();
+            .map(|(_, r)| (self.effect)().on(Shape::rounded(r[0], r[1], r[2], r[3], 0.0)).at(1.0)).collect();
         let fx = self.fx.get_or_insert_with(|| FxRenderer::new(device, f.format, FxOptions::default()));
         fx.set_srgb_blend(f.srgb_blend());
         fx.add_format(device, wgpu::TextureFormat::Rgba16Float);
@@ -58,15 +67,19 @@ impl Compositor<()> for Dusk {
 }
 
 fn snap(name: &'static str, view: fn(&(), &mut Cx<()>) -> El, srgb: bool, formats: Arc<Mutex<Vec<wgpu::TextureFormat>>>) -> (u32, Vec<u8>) {
-    snap_at(name, view, srgb, formats, 1)
+    snap_with(name, view, srgb, formats, 1, dusk)
 }
 
 fn snap_at(name: &'static str, view: fn(&(), &mut Cx<()>) -> El, srgb: bool, formats: Arc<Mutex<Vec<wgpu::TextureFormat>>>, scale: u32) -> (u32, Vec<u8>) {
+    snap_with(name, view, srgb, formats, scale, dusk)
+}
+
+fn snap_with(name: &'static str, view: fn(&(), &mut Cx<()>) -> El, srgb: bool, formats: Arc<Mutex<Vec<wgpu::TextureFormat>>>, scale: u32, effect: fn() -> Fx) -> (u32, Vec<u8>) {
     let dir = std::env::temp_dir().join(format!("rune-fx-layer-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("snap.png");
     App::new(AppSpec::new(name, (96.0, 96.0), || (), view))
-        .compositor(Dusk { fx: None, formats })
+        .compositor(Dusk { fx: None, formats, effect })
         .srgb_blend(srgb)
         .args(["--snap".to_string(), path.to_str().unwrap().to_string(), "--scale".to_string(), scale.to_string()])
         .run();
@@ -128,6 +141,26 @@ fn fills_match_across_blend_modes_when_opaque() {
     let (_, gamma) = snap("gam", plain, true, Arc::default());
     let worst = linear.iter().zip(&gamma).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
     assert!(worst <= 3, "modes differ by {worst}");
+}
+
+fn glow_on_black(_: &(), _: &mut Cx<()>) -> El {
+    el().size(96.0, 96.0).fill(hex("#000000").unwrap()).child(effect(1).absolute(32.0, 32.0).size(32.0, 32.0))
+}
+
+/// A glow's light is premultiplied colour past its occlusion alpha. In a gamma-blended frame a
+/// faint occlusion must barely change it, not encode the light as a straight colour many times
+/// full scale and all but black it out.
+#[test]
+fn faint_occlusion_keeps_the_glow_lit_in_gamma_blend() {
+    let (w, clear) = snap_with("glow-clear", glow_on_black, true, Arc::default(), 1, || glow(0.0));
+    let (_, faint) = snap_with("glow-faint", glow_on_black, true, Arc::default(), 1, || glow(0.002));
+    let mut lit = 0;
+    for (x, y) in [(28, 48), (24, 48), (48, 27), (48, 22), (68, 48), (28, 28)] {
+        let (a, b) = (px(&clear, w, x, y), px(&faint, w, x, y));
+        lit += a.iter().any(|c| *c > 24) as u32;
+        assert!(a.iter().zip(b).all(|(a, b)| a.abs_diff(b) <= 6), "({x}, {y}): clear {a:?}, faint {b:?}");
+    }
+    assert!(lit >= 3, "the glow should light the samples");
 }
 
 /// Writes `demo/fx/in-layer.png`: a fill in a faded, rounded, clipped card, linear blend on the

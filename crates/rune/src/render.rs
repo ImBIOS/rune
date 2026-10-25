@@ -42,9 +42,9 @@ pub const KIND_RADIAL: f32 = 11.0;
 /// An effect slot (`El::effect`). It rasterizes no pixels but keeps its place in the painter
 /// stream, so `Renderer::draw_range_with` can hand the compositor the pass at exactly this point,
 /// inside the enclosing isolated layer if there is one. `rect` is the element, `clip`/`fade`
-/// (and the rounded-clip radius in `fade[3]`) its clip, `fill[3]` its opacity (already folded
-/// from a scope that was flattened), `params.z` the bleed past `rect` in device pixels and
-/// `params.w` the display scale. `Runtime::marks` carries its `El::effect` tag.
+/// (and the rounded-clip radius in `fade[3]`) its clip, `params.z` the bleed past `rect` in device
+/// pixels and `params.w` the display scale. `fill[3]` is always 1: a faded slot is drawn in an
+/// isolated layer that applies its opacity. `Runtime::marks` carries its `El::effect` tag.
 pub const KIND_EFFECT: f32 = 12.0;
 
 /// How a scope combines its contents. The completed scope still uses source-over on its parent
@@ -99,7 +99,7 @@ pub const CLIP_WGSL: &str = include_str!("clip.wgsl");
 pub struct EffectSite<'a> {
     /// The slot's position in the painter stream.
     pub index: u32,
-    /// The slot's record (`KIND_EFFECT`): rect, radii, clip, fade, opacity in `fill[3]`.
+    /// The slot's record (`KIND_EFFECT`): rect, radii, clip and fade.
     pub instance: &'a Instance,
     /// Format of the pass being recorded.
     pub format: wgpu::TextureFormat,
@@ -115,7 +115,9 @@ pub struct EffectSite<'a> {
 }
 
 /// Called at each effect slot, with the pass open and everything painted before the slot already
-/// recorded. It may record draws; the viewport and scissor are reset to the full target after.
+/// recorded, and the scissor set to the slot's clip rectangle (a slot clipped away entirely is
+/// skipped). Soft edges and rounded corners on a slot outside a layer are the hook's to apply
+/// (`CLIP_WGSL`). It may record draws; the viewport and scissor are reset to the full target after.
 pub type EffectHook<'h> = dyn FnMut(&mut wgpu::RenderPass<'_>, &EffectSite<'_>) + 'h;
 
 /// One instance, in device pixels.
@@ -196,7 +198,9 @@ pub(crate) fn end_layer(instances: &mut Vec<Instance>, surfaces: &mut [crate::na
         surfaces[surface_start].clip == NO_CLIP && surfaces[surface_start].fade == [0; 4]
     } else { true };
     let transfer_clip = scope.fade[3] == 0 && unmasked;
-    if primitives + videos <= 1 && scope.params[0] == 0.0 && scope.params[2] == 0.0
+    // A lone effect slot keeps a faded scope: the compositor's paint can't take the opacity.
+    let faded_effect = primitives == 1 && instances[start + 1].params[1] == KIND_EFFECT && scope.fill[3] != 1.0;
+    if !faded_effect && primitives + videos <= 1 && scope.params[0] == 0.0 && scope.params[2] == 0.0
         && (transfer_clip || (scope.clip == NO_CLIP && scope.fade == [0; 4])) {
         let opacity = scope.fill[3];
         if primitives == 1 {
@@ -602,6 +606,14 @@ impl Renderer {
             self.draw_instances(pass, format, cursor..*at + 1, target);
             cursor = *at + 1;
             let (origin, size) = self.target_frame(target);
+            // Scissor to the slot's clip rectangle, so a compositor that ignores `clip` still
+            // stays inside its scroll view or clipped ancestor.
+            let c = instance.clip;
+            let edge = |v: f32, o: f32, max: u32| (v - o).clamp(0.0, max as f32) as u32;
+            let (x0, y0) = (edge(c[0].floor(), origin[0], size[0]), edge(c[1].floor(), origin[1], size[1]));
+            let (x1, y1) = (edge(c[2].ceil(), origin[0], size[0]), edge(c[3].ceil(), origin[1], size[1]));
+            if x1 <= x0 || y1 <= y0 { continue; }
+            pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
             hook(pass, &EffectSite { index: *at, instance, format, origin, size, in_layer: target.is_some(), srgb_blend: self.srgb_blend });
             pass.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
             pass.set_scissor_rect(0, 0, size[0], size[1]);

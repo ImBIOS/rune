@@ -29,17 +29,19 @@ fn enc(x: vec3f) -> vec3f {
 }
 ";
 
-/// Paints every effect slot solid red, clipped and faded like the instance asks, with one
-/// pipeline per target format.
+/// Paints every effect slot and its bleed solid red, clipped like the instance asks (or not at
+/// all, with `ignore_clip`), with one pipeline per target format. It never applies an opacity:
+/// Rune must.
 struct Flat {
     pipes: Vec<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
     bgl: Option<wgpu::BindGroupLayout>,
     formats: Arc<Mutex<Vec<wgpu::TextureFormat>>>,
+    ignore_clip: bool,
 }
 
 impl Flat {
     fn new(formats: Arc<Mutex<Vec<wgpu::TextureFormat>>>) -> Self {
-        Flat { pipes: Vec::new(), bgl: None, formats }
+        Flat { pipes: Vec::new(), bgl: None, formats, ignore_clip: false }
     }
 
     fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, pass: &mut wgpu::RenderPass<'_>, s: &EffectSite<'_>) {
@@ -84,14 +86,20 @@ impl Flat {
             self.pipes.push((s.format, pipe));
         }
         let i = s.instance;
+        assert_eq!(i.fill[3], 1.0, "a slot's opacity is Rune's to apply");
+        let bleed = i.params[2];
         let mut data = [0.0f32; 24];
-        data[0..4].copy_from_slice(&i.rect);
-        data[4..8].copy_from_slice(&i.clip);
-        for k in 0..4 { data[8 + k] = f32::from_bits(i.fade[k]); }
+        data[0..4].copy_from_slice(&[i.rect[0] - bleed, i.rect[1] - bleed, i.rect[2] + 2.0 * bleed, i.rect[3] + 2.0 * bleed]);
+        if self.ignore_clip {
+            data[4..8].copy_from_slice(&rune::render::NO_CLIP);
+        } else {
+            data[4..8].copy_from_slice(&i.clip);
+            for k in 0..4 { data[8 + k] = f32::from_bits(i.fade[k]); }
+        }
         data[12..14].copy_from_slice(&s.origin);
         data[14] = s.size[0] as f32;
         data[15] = s.size[1] as f32;
-        data[16..20].copy_from_slice(&[1.0, 0.0, 0.0, i.fill[3]]);
+        data[16..20].copy_from_slice(&[1.0, 0.0, 0.0, 1.0]);
         data[20] = if s.srgb_blend { 1.0 } else { 0.0 };
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: None, size: 96, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
@@ -249,6 +257,54 @@ fn opaque_effects_match_across_blend_modes() {
     let worst = linear.chunks(4).zip(gamma.chunks(4)).flat_map(|(a, b)| a.iter().zip(b).map(|(a, b)| a.abs_diff(*b))).max().unwrap();
     assert!(worst <= 2, "modes differ by {worst}");
     near(px(&linear, w, 48, 48), [255, 0, 0], "effect covers its rect");
+}
+
+fn faded_leaf(_: &(), _: &mut Cx<()>) -> El {
+    background().child(effect(1).absolute(16.0, 16.0).size(64.0, 64.0).opacity(0.5))
+}
+
+fn faded_only_child(_: &(), _: &mut Cx<()>) -> El {
+    background().child(el().absolute(16.0, 16.0).size(64.0, 64.0).opacity(0.5).child(effect(1).size(64.0, 64.0)))
+}
+
+fn dimmed(_: &(), _: &mut Cx<()>) -> El {
+    background().child(effect(1).absolute(16.0, 16.0).size(64.0, 64.0).dim(0.5))
+}
+
+fn faded_rounded_leaf(_: &(), _: &mut Cx<()>) -> El {
+    background().child(el().size(64.0, 64.0).absolute(16.0, 16.0).clip_rounded(24.0)
+        .child(effect(1).size(64.0, 64.0).opacity(0.5)))
+}
+
+/// A faded slot gets a layer that applies its opacity, whichever way it was faded, so a
+/// compositor that paints at full strength is still faded.
+#[test]
+fn a_faded_slot_is_faded_for_the_compositor() {
+    for srgb in [false, true] {
+        for (name, view) in [("leaf", faded_leaf as fn(&(), &mut Cx<()>) -> El), ("only-child", faded_only_child), ("dimmed", dimmed)] {
+            let (w, rgba) = snap(name, view, srgb, Flat::new(Arc::default()));
+            near(px(&rgba, w, 48, 48), over(RED, 0.5, srgb), name);
+            near(px(&rgba, w, 8, 8), over([32.0 / 255.0; 3], 1.0, srgb), name);
+        }
+        let (w, rgba) = snap("faded-rounded-leaf", faded_rounded_leaf, srgb, Flat::new(Arc::default()));
+        near(px(&rgba, w, 17, 17), over([32.0 / 255.0; 3], 1.0, srgb), "faded slot keeps its rounded clip");
+        near(px(&rgba, w, 48, 48), over(RED, 0.5, srgb), "faded slot under a rounded clip");
+    }
+}
+
+fn bleeding(_: &(), _: &mut Cx<()>) -> El {
+    background().child(el().absolute(16.0, 16.0).size(64.0, 64.0).clip_fade(0.0, 0.0, 0.0, 0.0)
+        .child(effect(1).effect_bleed(16.0).absolute(-12.0, 0.0).size(8.0, 8.0)))
+}
+
+/// A slot whose rect lies outside its clip still paints the bleed that reaches in, and a
+/// compositor that ignores the clip is held to it by the scissor.
+#[test]
+fn bleed_reaches_in_and_the_scissor_holds_the_clip() {
+    let (w, rgba) = snap("bleeding", bleeding, false, Flat { ignore_clip: true, ..Flat::new(Arc::default()) });
+    near(px(&rgba, w, 20, 20), over(RED, 1.0, false), "bleed inside the clip");
+    near(px(&rgba, w, 10, 20), over([32.0 / 255.0; 3], 1.0, false), "bleed outside the clip");
+    near(px(&rgba, w, 20, 44), over([32.0 / 255.0; 3], 1.0, false), "past the bleed");
 }
 
 #[test]
