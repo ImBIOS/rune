@@ -229,7 +229,7 @@ policy changes are applied in the same mutation phase.
 - **Canvas input** (`canvas_input.rs`): what an infinite canvas, map or image viewer needs.
   `.on_wheel(|s, e: WheelEvent, tx| -> bool)` hears wheel and trackpad deltas over the element
   before any scroll view does, innermost first up to the nearest scroll view, with `dx`, `dy`,
-  the pointer in the element's points as drawn, `mods`, `phase`, `momentum` and `precise`.
+  the pointer in the element's own layout points (under any `live_scale`), `mods`, `phase`, `momentum` and `precise`.
   Returning true takes the delta, and the element then hears the rest of that gesture, its
   momentum included, wherever the pointer goes; false lets it scroll, and a gesture that
   scrolled stays a scroll. `.on_magnify(|s, e: MagnifyEvent, tx| -> bool)` hears trackpad
@@ -243,7 +243,10 @@ policy changes are applied in the same mutation phase.
   logical keys `on_key` sees: the focused element's first, then its ancestors', and with
   nothing focused the root's, so a handler on a window's root hears every release. A focused
   `on_physical_input` that takes a release keeps it from `on_key_up`. Hosts map releases to
-  logical keys only while some element has `on_key_up`.
+  logical keys only while some element has `on_key_up`. Under a camera (`live_offset` and
+  `live_scale` on the world), hit tests follow the drawn rects, `Drag` points and the pointer
+  in these events are in the element's own (unzoomed) points, and `.on_drawn_layout(|s, r|)`
+  reports where an element shows in the window, on each frame a pan or zoom moves it.
 - **Timeline growth** (`.growth(GrowthSpec { spring, edge })`, `growth.rs`): rows of a stack ease
   their heights render-side on `GROWTH` (0.32 s, bounce 0) in fixed 1/240 s substeps, so 30, 60 and
   120 fps give the same curve. Desktop's per-frame caps are per-second here (start, ramp, max, long,

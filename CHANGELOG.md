@@ -5,6 +5,17 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Rects under live transforms: `El::on_drawn_layout`, and `Drag` points in the element's
+  own points.** `on_drawn_layout` reports an element's rect as drawn (after scrolling and its
+  ancestors' `live_offset`, `live_scale`, `live_rect` and `scale`), on every frame a live value
+  moves it with no commit, and where a spring brings it to rest; it's the rect hit tests and
+  `ElementInfo::rect` already use. `Drag`'s `x`, `y`, `start_x` and `start_y`, and the pointer
+  in `WheelEvent`, `MagnifyEvent`, `RotateEvent` and `on_smart_magnify`, are now in the
+  element's own layout points: from its top-left as drawn, divided by the scale it draws at.
+  They were measured from its unscrolled layout box, so a drag on a row of a scrolled list
+  read the scroll offset too, and one on a zoomed canvas read window points from where the
+  element would be at rest. An unscrolled, unscaled element reads what it did.
+
 - **`Tx::scroll_to(key, x, y)` glides a viewport to an offset.** It runs on the spring
   `scroll_to_bottom` uses, clamps each axis to the content as the glide runs (virtual rows
   measure as they mount), ignores axes the viewport doesn't scroll, and a wheel, fling or new

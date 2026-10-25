@@ -67,7 +67,7 @@ impl<S: 'static> Runtime<S> {
     /// Element `path`'s `on_wheel` on `ev`, in its own points; None when it's gone.
     fn call_wheel(&mut self, path: &str, ev: WheelEvent, tx: &mut Tx) -> Option<bool> {
         let (i, f) = self.gesture_handler(path, |g| g.wheel.clone())?;
-        let [x, y] = self.local_point(i, ev.x, ev.y);
+        let [x, y] = self.to_local(i, ev.x, ev.y);
         Some(f(handler_state(&mut self.state), WheelEvent { x, y, ..ev }, tx))
     }
 
@@ -106,15 +106,15 @@ impl<S: 'static> Runtime<S> {
         for path in chain {
             let taken = match gesture {
                 Gesture::Magnify(ev) => self.gesture_handler(&path, |g| g.magnify.clone()).map(|(i, f)| {
-                    let [x, y] = self.local_point(i, ev.x, ev.y);
+                    let [x, y] = self.to_local(i, ev.x, ev.y);
                     f(handler_state(&mut self.state), MagnifyEvent { x, y, ..ev }, tx)
                 }),
                 Gesture::Rotate(ev) => self.gesture_handler(&path, |g| g.rotate.clone()).map(|(i, f)| {
-                    let [x, y] = self.local_point(i, ev.x, ev.y);
+                    let [x, y] = self.to_local(i, ev.x, ev.y);
                     f(handler_state(&mut self.state), RotateEvent { x, y, ..ev }, tx)
                 }),
                 Gesture::SmartMagnify(x, y) => self.gesture_handler(&path, |g| g.smart_magnify.clone()).map(|(i, f)| {
-                    let [x, y] = self.local_point(i, x, y);
+                    let [x, y] = self.to_local(i, x, y);
                     f(handler_state(&mut self.state), x, y, tx)
                 }),
             };
@@ -155,12 +155,6 @@ impl<S: 'static> Runtime<S> {
         Some((i, pick(self.nodes[i].gestures.as_deref()?)?))
     }
 
-    /// Window point (x, y) in node `i`'s points from its drawn top-left.
-    fn local_point(&self, i: usize, x: f32, y: f32) -> [f32; 2] {
-        let r = self.drawn_edges(i);
-        [x - r[0], y - r[1]]
-    }
-
     /// A mouse button went down at (x, y). The primary and secondary buttons do what
     /// [`Self::pointer_down`] and [`Self::secondary_down`] do; another presses the innermost
     /// element there that takes it ([`El::pointer_buttons`]), whose `on_drag` and `on_press`
@@ -184,7 +178,7 @@ impl<S: 'static> Runtime<S> {
         let Some(i) = target else { return };
         let n = &self.nodes[i];
         let r = n.target;
-        let (lx, ly) = (x - r[0], y - r[1]);
+        let [lx, ly] = self.to_local(i, x, y);
         let d = Drag { phase: Phase::Down, x: lx, y: ly, w: r[2] - r[0], h: r[3] - r[1], start_x: lx, start_y: ly, dx: 0.0, dy: 0.0, data: 0.0 };
         let path = n.path.clone();
         if n.on_drag.is_some() { self.queue.push(Action::Drag(path.clone(), d, button)); }

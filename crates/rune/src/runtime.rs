@@ -377,6 +377,7 @@ pub(crate) struct Node {
     on_at_bottom: Option<crate::el::AtBottomFn>,
     on_layout: Option<crate::el::LayoutFn>,
     on_screen_layout: Option<crate::el::LayoutFn>,
+    on_drawn_layout: Option<crate::el::LayoutFn>,
     scroll_edges: crate::el::ScrollEdges,
     growth: Option<GrowthSpec>,
     streaming: bool,
@@ -425,6 +426,8 @@ enum Action {
     AtBottom(String, bool),
     Layout(String, [f32; 4]),
     ScreenLayout(String, [f32; 4]),
+    /// `El::on_drawn_layout`; true when only a live value, scroll or animation moved it.
+    DrawnLayout(String, [f32; 4], bool),
     Press(String, crate::PointerButton),
     DoublePress(String),
     Link(String, usize),
@@ -836,6 +839,8 @@ pub struct Runtime<S: 'static> {
     layout_fired: HashMap<NodeId, [f32; 4]>,
     /// Rect last sent to each element's `El::on_screen_layout`.
     screen_fired: HashMap<NodeId, [f32; 4]>,
+    /// (Drawn rect, laid-out rect) last sent to each element's `El::on_drawn_layout`.
+    drawn_fired: HashMap<NodeId, ([f32; 4], [f32; 4])>,
     /// The window's content top-left in global screen points, as its host last saw it.
     window_origin: (f32, f32),
     /// Commits in a row caused only by layout feedback (see `layout_read`).
@@ -1114,6 +1119,7 @@ impl<S: 'static> Runtime<S> {
             layout_seen: HashMap::new(),
             layout_fired: HashMap::new(),
             screen_fired: HashMap::new(),
+            drawn_fired: HashMap::new(),
             window_origin: (0.0, 0.0),
             layout_echoes: 0,
             caret_follow: false,
@@ -1862,7 +1868,7 @@ impl<S: 'static> Runtime<S> {
                 self.commit(&tx);
                 ran = false;
             }
-            if matches!(action, Action::Layout(..) | Action::ScreenLayout(..)) {
+            if matches!(action, Action::Layout(..) | Action::ScreenLayout(..) | Action::DrawnLayout(_, _, false)) {
                 ran_layout |= self.run_action(action, &mut tx);
             } else {
                 ran |= self.run_action(action, &mut tx);
@@ -1982,6 +1988,8 @@ impl<S: 'static> Runtime<S> {
         self.report_layout();
         animating |= source(self.reveals_active(), AnimSource::REVEAL);
         self.build();
+        // A report waits for the next frame: draw one to deliver it.
+        animating |= self.report_drawn();
         self.images.end_frame();
         animating |= source(self.loops_active, AnimSource::LOOP);
         animating |= source(self.static_scale_settling, AnimSource::SCALE_SETTLE);
@@ -2204,6 +2212,11 @@ impl<S: 'static> Runtime<S> {
             }
             Action::ScreenLayout(path, rect) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_screen_layout.clone()) else { return false };
+                f(handler_state(&mut self.state), rect);
+                true
+            }
+            Action::DrawnLayout(path, rect, _) => {
+                let Some(f) = self.node(&path).and_then(|n| n.on_drawn_layout.clone()) else { return false };
                 f(handler_state(&mut self.state), rect);
                 true
             }
@@ -2538,6 +2551,18 @@ impl<S: 'static> Runtime<S> {
     /// it draws.
     fn drawn_edges(&self, i: usize) -> [f32; 4] {
         self.drawn.get(i).map_or(self.nodes[i].target, |d| [d[0], d[1], d[0] + d[2], d[1] + d[3]])
+    }
+
+    /// Window point (x, y) in node `i`'s own layout points: from its top-left as drawn, divided
+    /// by the scale it draws at, so it follows scrolling, `live_offset`, `live_scale` and
+    /// `El::scale`. From its layout box before it draws.
+    pub(crate) fn to_local(&self, i: usize, x: f32, y: f32) -> [f32; 2] {
+        let Some(d) = self.drawn.get(i) else {
+            let t = self.nodes[i].target;
+            return [x - t[0], y - t[1]];
+        };
+        let k = self.drawn_scale.get(i).copied().unwrap_or(1.0).max(1e-4);
+        [(x - d[0]) / k, (y - d[1]) / k]
     }
 
     fn subtree_exiting(&self, mut i: usize) -> bool {
@@ -3831,7 +3856,8 @@ impl<S: 'static> Runtime<S> {
             return;
         }
         self.selection_drag(x, y);
-        let Some((id, r, has_drag)) = self.node(&path).map(|n| (n.id, n.target, n.on_drag.is_some() && !self.drags_out(n))) else { return };
+        let Some(i) = self.nodes.iter().enumerate().position(|(i, n)| n.path == path && !self.subtree_exiting(i)) else { return };
+        let (id, r, has_drag) = (self.nodes[i].id, self.nodes[i].target, self.nodes[i].on_drag.is_some() && !self.drags_out(&self.nodes[i]));
         self.press_moved |= (x - self.press_at.0).abs() > CLICK_SLOP || (y - self.press_at.1).abs() > CLICK_SLOP;
         // A hit rect is where the element was drawn (after scrolling); `target` is its
         // unscrolled layout rect, kept only for elements that were never drawn.
@@ -3841,7 +3867,8 @@ impl<S: 'static> Runtime<S> {
         } else { contains(r, x, y) };
         if has_drag {
             let (dx, dy) = (x - self.press_at.0, y - self.press_at.1);
-            let d = Drag { phase: Phase::Move, x: x - r[0], y: y - r[1], dx, dy, ..d };
+            let [lx, ly] = self.to_local(i, x, y);
+            let d = Drag { phase: Phase::Move, x: lx, y: ly, dx, dy, ..d };
             self.queue.push(Action::Drag(path, d, self.capture_button));
         }
     }
@@ -4005,14 +4032,15 @@ impl<S: 'static> Runtime<S> {
             self.queue.push(Action::Blur);
         }
         let r = n.target;
+        let [lx, ly] = self.to_local(ti, x, y);
         let d = Drag {
             phase: Phase::Down,
-            x: x - r[0],
-            y: y - r[1],
+            x: lx,
+            y: ly,
             w: r[2] - r[0],
             h: r[3] - r[1],
-            start_x: x - r[0],
-            start_y: y - r[1],
+            start_x: lx,
+            start_y: ly,
             dx: 0.0,
             dy: 0.0,
             data: 0.0,
@@ -4083,14 +4111,13 @@ impl<S: 'static> Runtime<S> {
         let button = std::mem::take(&mut self.capture_button);
         self.refresh_hover_within();
         let double = std::mem::take(&mut self.double_armed);
-        let Some((r, has_drag, has_press, has_double)) = self.node(&path).map(|n| {
-            (n.target, n.on_drag.is_some() && !self.drags_out(n), n.on_press.is_some(), n.on_double_press.is_some())
-        }) else {
-            return;
-        };
+        let Some(i) = self.nodes.iter().enumerate().position(|(i, n)| n.path == path && !self.subtree_exiting(i)) else { return };
+        let n = &self.nodes[i];
+        let (has_drag, has_press, has_double) = (n.on_drag.is_some() && !self.drags_out(n), n.on_press.is_some(), n.on_double_press.is_some());
         if has_drag {
             let (dx, dy) = (x - self.press_at.0, y - self.press_at.1);
-            self.queue.push(Action::Drag(path.clone(), Drag { phase: Phase::Up, x: x - r[0], y: y - r[1], dx, dy, ..d }, button));
+            let [lx, ly] = self.to_local(i, x, y);
+            self.queue.push(Action::Drag(path.clone(), Drag { phase: Phase::Up, x: lx, y: ly, dx, dy, ..d }, button));
         }
         self.link_up(&path, x, y);
         if has_press && self.capture_inside && !selected {
@@ -6500,6 +6527,7 @@ fn flatten(
         on_at_bottom,
         on_layout,
         on_screen_layout,
+        on_drawn_layout,
         scroll_edges,
         growth,
         streaming,
@@ -6581,6 +6609,7 @@ fn flatten(
         on_at_bottom,
         on_layout,
         on_screen_layout,
+        on_drawn_layout,
         scroll_edges,
         growth,
         streaming,

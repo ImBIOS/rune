@@ -26,7 +26,8 @@ pub struct WheelEvent {
     /// with natural scrolling).
     pub dx: f32,
     pub dy: f32,
-    /// The pointer, in points from the handling element's top-left as drawn.
+    /// The pointer in the handling element's own layout points: from its top-left as drawn,
+    /// divided by any scale it draws at (a canvas camera's `live_scale`).
     pub x: f32,
     pub y: f32,
     pub mods: Mods,
@@ -54,7 +55,8 @@ impl WheelEvent {
 pub struct MagnifyEvent {
     /// The change in magnification: scale by `1.0 + delta`. Positive zooms in.
     pub delta: f32,
-    /// The pointer, in points from the handling element's top-left as drawn.
+    /// The pointer in the handling element's own layout points: from its top-left as drawn,
+    /// divided by any scale it draws at (a canvas camera's `live_scale`).
     pub x: f32,
     pub y: f32,
     pub phase: GesturePhase,
@@ -176,7 +178,7 @@ impl El {
     }
 
     /// A two-finger double tap over this element (macOS smart magnify), with the pointer in
-    /// points from its top-left as drawn: return true to take it.
+    /// its own layout points (as [`WheelEvent::x`] and `y`): return true to take it.
     pub fn on_smart_magnify<S: 'static>(mut self, f: impl Fn(&mut S, f32, f32, &mut Tx) -> bool + 'static) -> Self {
         self.canvas_input().smart_magnify = Some(Rc::new(move |s, x, y, tx| f(state::<S>(s), x, y, tx)));
         self

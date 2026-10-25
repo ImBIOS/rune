@@ -301,7 +301,9 @@ pub enum Phase {
     Up,
 }
 
-/// A pointer gesture on an element, in points relative to its layout rect.
+/// A pointer gesture on an element. `x`, `y`, `start_x`, `start_y`, `w` and `h` are in the
+/// element's own layout points: from its top-left as drawn (after scrolling and live
+/// offsets), divided by any scale it draws at, so they hold on a zoomed canvas.
 #[derive(Clone, Copy, Debug)]
 pub struct Drag {
     pub phase: Phase,
@@ -894,6 +896,7 @@ pub struct El {
     pub(crate) on_at_bottom: Option<AtBottomFn>,
     pub(crate) on_layout: Option<LayoutFn>,
     pub(crate) on_screen_layout: Option<LayoutFn>,
+    pub(crate) on_drawn_layout: Option<LayoutFn>,
     pub(crate) scroll_edges: ScrollEdges,
     pub(crate) growth: Option<GrowthSpec>,
     pub(crate) virtual_estimate: Option<f32>,
@@ -964,6 +967,7 @@ fn base(dir: FlexDirection) -> El {
         on_at_bottom: None,
         on_layout: None,
         on_screen_layout: None,
+        on_drawn_layout: None,
         scroll_edges: ScrollEdges::default(),
         growth: None,
         virtual_estimate: None,
@@ -2469,6 +2473,20 @@ impl El {
     /// Headless runs place windows on the script's virtual desktop.
     pub fn on_screen_layout<S: 'static>(mut self, f: impl Fn(&mut S, [f32; 4]) + 'static) -> Self {
         self.on_screen_layout = Some(Rc::new(move |s, r| f(downcast::<S>(s), r)));
+        self
+    }
+    /// [`El::on_layout`] as drawn: `[x, y, w, h]` in window points where this frame put the
+    /// element, after scrolling and its ancestors' [`El::live_offset`], [`El::live_scale`],
+    /// [`El::live_rect`] and [`El::scale`], so an element on a zoomed canvas reports where it
+    /// shows (the rect hit tests use, and [`ElementInfo::rect`](crate::ElementInfo)). It runs
+    /// once after the element is first drawn, then when that rect moves by more than half a
+    /// point, including on every frame a live value moves it (a camera pan, with no commit). A
+    /// spring moving it, its own or an ancestor's, reports where it comes to rest, as
+    /// `on_layout` does. Its handler runs on the next frame. Keep it to the few elements
+    /// something follows (a selection a toolbar floats over), not every node on a canvas: each
+    /// report is a state change, so the view runs again.
+    pub fn on_drawn_layout<S: 'static>(mut self, f: impl Fn(&mut S, [f32; 4]) + 'static) -> Self {
+        self.on_drawn_layout = Some(Rc::new(move |s, r| f(downcast::<S>(s), r)));
         self
     }
     /// Make this column a growth stack (see [`GrowthSpec`]). Required alongside

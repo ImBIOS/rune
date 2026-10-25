@@ -118,6 +118,58 @@ impl<S: 'static> Runtime<S> {
         self.report_rects(false, true)
     }
 
+    /// Queues `on_drawn_layout` for elements whose drawn rect moved since it last reported,
+    /// once their own and their ancestors' springs rest. A move its laid-out rect explains is
+    /// layout feedback and falls quiet with the rest of it; one it doesn't (a live value) always
+    /// reports, as scrolling reopens feedback. True when it queued any.
+    pub(super) fn report_drawn(&mut self) -> bool {
+        if self.drawn_fired.is_empty() && self.nodes.iter().all(|n| n.on_drawn_layout.is_none()) { return false; }
+        let mut queued = false;
+        let quiet = !self.layout_feedback_open();
+        let last = std::mem::take(&mut self.drawn_fired);
+        let mut fired = HashMap::with_capacity(last.len());
+        for i in 0..self.nodes.len() {
+            let n = &self.nodes[i];
+            if n.on_drawn_layout.is_none() || self.subtree_exiting(i) { continue; }
+            let Some(&drawn) = self.drawn.get(i) else { continue };
+            let id = n.id;
+            if self.rect_springing(i) {
+                if let Some(old) = last.get(&id) { fired.insert(id, *old); }
+                continue;
+            }
+            let laid = self.laid_out(&self.nodes, i);
+            let old = last.get(&id).copied();
+            if !moved(old.map(|o| o.0), Some(drawn)) {
+                fired.insert(id, old.unwrap_or((drawn, laid)));
+                continue;
+            }
+            let external = old.is_some_and(|(_, l)| !moved(Some(l), Some(laid)));
+            if quiet && !external {
+                fired.insert(id, (drawn, laid));
+                continue;
+            }
+            let path = n.path.clone();
+            self.queue.retain(|a| !matches!(a, Action::DrawnLayout(p, ..) if *p == path));
+            self.queue.push(Action::DrawnLayout(path, drawn, external));
+            fired.insert(id, (drawn, laid));
+            queued = true;
+        }
+        self.drawn_fired = fired;
+        queued
+    }
+
+    /// Whether a spring is moving node `i`'s drawn rect: its own, or an ancestor's.
+    fn rect_springing(&self, i: usize) -> bool {
+        let store = self.scene.store();
+        let n = &self.nodes[i];
+        self.flights.iter().any(|f| f.lands(&n.path, n.key.as_deref()))
+            || std::iter::successors(Some(i), |&p| self.nodes[p].parent).any(|p| {
+                let id = self.nodes[p].id;
+                store.is_animating(id, prop::FRAME) || store.is_animating(id, prop::TRAVEL) || store.is_animating(id, prop::PRESENCE)
+                    || store.is_animating(id, prop::OFFSET) || store.is_animating(id, prop::SCALE) || store.is_animating(id, P_PRESS_SCALE)
+            })
+    }
+
     /// Queues `on_layout`, or `on_screen_layout` when `screen`, for rects that moved; true when
     /// it queued any.
     fn report_rects(&mut self, quiet: bool, screen: bool) -> bool {
