@@ -890,6 +890,7 @@ impl<S: 'static> Runtime<S> {
     pub fn with_text(state: S, view: fn(&S, &mut Cx<S>) -> El, viewport: (f32, f32), env: Env, text: TextSystem) -> Self {
         let mut scene = Scene::new();
         scene.set_pixel_scale(env.scale);
+        crate::recorder::headless_reset();
         crate::video::headless_reset();
         Runtime {
             state,
@@ -1673,7 +1674,7 @@ impl<S: 'static> Runtime<S> {
     /// `elapsed` advances the logical clock when no wall clock drives it; `catch_up` steps
     /// running motion before the commit and `dt` steps all motion after it.
     fn frame_step(&mut self, elapsed: f64, catch_up: f64, dt: f64) -> bool {
-        let live_woke = self.take_live_wake();
+        let mut live_woke = self.take_live_wake();
         #[cfg(feature = "hot")]
         if self.hot.as_mut().is_some_and(crate::hot::Session::changed) {
             // Replace handler trait objects before queued input can call an old vtable.
@@ -1688,6 +1689,9 @@ impl<S: 'static> Runtime<S> {
         self.clock = self.wall_clock().unwrap_or(self.clock + elapsed);
         if self.wall_start.is_none() {
             crate::video::headless_frame(self.clock);
+            // Fake recorders publish this frame's level to bound meters, drawn this frame.
+            crate::recorder::headless_frame(self.clock);
+            live_woke |= self.take_live_wake();
         }
         if let Some((deadline, animation_time)) = self.loop_wake
             && !self.animating

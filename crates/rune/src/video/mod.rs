@@ -54,7 +54,7 @@ pub(crate) fn enable_playback() {
     }
 }
 
-fn playback_enabled() -> bool {
+pub(crate) fn playback_enabled() -> bool {
     PLAYBACK.load(Ordering::Acquire)
 }
 
@@ -87,7 +87,7 @@ pub(crate) fn headless_reset() {
     HEADLESS.with_borrow_mut(|h| h.clock = Some(0.0));
 }
 
-fn headless_clock() -> Option<f64> {
+pub(crate) fn headless_clock() -> Option<f64> {
     HEADLESS.with_borrow(|h| h.clock)
 }
 

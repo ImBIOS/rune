@@ -5,6 +5,21 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Recorder`: record the microphone to a file.** `Recorder::to_file("note.m4a")` records AAC
+  (a `.wav` path, or `.format(RecordFormat::Wav)`, records WAV) with `start`, `pause`, `resume`,
+  `stop` (returns a `Recording { path, duration }`) and `cancel` (deletes a recording in
+  progress). `state()`, `elapsed()` and a smoothed `level()` (peak and RMS in dBFS, `meter()`
+  in 0..1) are read without allocating; `live_level()` drives a bound meter that redraws while
+  recording and draws nothing while idle. `Recorder::permission()` and `request_permission`
+  report and ask for microphone access; starting without it ends in `Failed` with a clear
+  message, and a bundled macOS app without `NSMicrophoneUsageDescription` fails to start
+  instead of being ended by the system. macOS records with AVAudioRecorder and reports an
+  unplugged or switched input as `Interrupted`, keeping what was captured. Other platforms
+  fail with "recording isn't supported on this platform". Headless runs record from a
+  `FakeMicrophone` on the virtual clock and write a real WAV on stop. New exports:
+  `Recorder`, `Recording`, `RecorderState`, `RecordFormat`, `MicPermission`, `Level`,
+  `FakeMicrophone`; an app with its own type of one of these names imported by glob needs a
+  qualified path.
 - **Web keyboard focus and composition stay with the field.** Leaving an editor returns
   keyboard focus to the canvas; secure fields use an emptied password input. Taps no longer
   force focus through the canvas, recomposition replaces its old range, and mobile
