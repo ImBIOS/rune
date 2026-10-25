@@ -1,0 +1,123 @@
+import assert from 'node:assert/strict';
+
+export async function inputSmoke(page, url) {
+    await page.goto(`${url}/?input-proof`);
+    await page.waitForFunction(() => window.__inputProof);
+    assert.equal(await page.title(), 'Input proof');
+    assert.equal(await page.locator('pre').count(), 0, 'window requests must not replace the app');
+    const snapshot = () => page.evaluate(() => window.__inputProof);
+    const settle = () => page.waitForTimeout(60);
+    await page.touchscreen.tap(100, 36);
+    assert.equal(await page.evaluate(() => document.activeElement.tagName), 'TEXTAREA');
+    await page.keyboard.insertText('hello ');
+    await settle();
+    assert.equal((await snapshot()).plain, 'hello ');
+
+    // A touch inside the same editor must never pass focus through the canvas/body.
+    await page.evaluate(() => {
+        window.__editorBlurs = 0;
+        document.querySelector('textarea').addEventListener('blur', () => window.__editorBlurs++);
+    });
+    await page.touchscreen.tap(100, 36);
+    assert.equal(await page.evaluate(() => window.__editorBlurs), 0);
+
+    // Gboard reopens an existing word: include its unchanged prefix in the preedit range.
+    await page.locator('textarea').evaluate(field => {
+        field.dispatchEvent(new CompositionEvent('compositionstart'));
+        field.value = 'hello'; field.setSelectionRange(5, 5);
+        field.dispatchEvent(new CompositionEvent('compositionupdate', { data: 'hello' }));
+        field.dispatchEvent(new InputEvent('input', { data: 'hello', inputType: 'insertCompositionText', isComposing: true }));
+    });
+    await settle();
+    assert.equal((await snapshot()).display, 'hello');
+    assert.equal((await snapshot()).plain, 'hello ');
+    await page.locator('textarea').evaluate(field => field.dispatchEvent(new CompositionEvent('compositionend', { data: 'hello' })));
+    await settle();
+    assert.equal((await snapshot()).plain, 'hello');
+
+    // Enter with keyCode 229 may have no usable keydown; beforeinput is authoritative.
+    const lineBreak = async (inputType, shift = false) => page.locator('textarea').evaluate((field, { inputType, shift }) => {
+        field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Unidentified', keyCode: 229, shiftKey: shift, bubbles: true }));
+        const event = new InputEvent('beforeinput', { inputType, cancelable: true, bubbles: true });
+        field.dispatchEvent(event);
+        if (!event.defaultPrevented) { field.setRangeText('\n', field.selectionStart, field.selectionEnd, 'end'); field.dispatchEvent(new InputEvent('input')); }
+        field.dispatchEvent(new KeyboardEvent('keyup', { shiftKey: false }));
+        return event.defaultPrevented;
+    }, { inputType, shift });
+    assert.equal(await lineBreak('insertParagraph'), true);
+    await settle();
+    assert.equal((await snapshot()).submits, 1);
+    assert.equal(await lineBreak('insertLineBreak', true), true);
+    await settle();
+    assert.equal((await snapshot()).plain, 'hello\n');
+    assert.equal((await snapshot()).submits, 1);
+
+    await page.keyboard.press('Tab'); // Single-line editor.
+    await page.keyboard.insertText('one line');
+    assert.equal(await lineBreak('insertLineBreak', true), true);
+    await settle();
+    assert.equal((await snapshot()).single, 'one line');
+    assert.equal((await snapshot()).submits, 2);
+
+    await page.keyboard.press('Tab'); // Secure editor must activate a password sink.
+    assert.equal(await page.evaluate(() => document.activeElement.type), 'password');
+    const password = page.locator('input[type=password]');
+    assert.equal(await password.getAttribute('autocomplete'), 'off');
+    assert.equal(await password.getAttribute('autocorrect'), 'off');
+    assert.equal(await password.evaluate(p => p.spellcheck), false);
+    await page.keyboard.insertText('sëcret');
+    assert.equal(await password.inputValue(), '', 'the secret must not remain in the DOM');
+    await settle();
+    assert.equal((await snapshot()).secretLength, 6);
+    await password.evaluate(field => field.dispatchEvent(new InputEvent('beforeinput', {
+        inputType: 'deleteContentBackward', cancelable: true, bubbles: true,
+    })));
+    await settle();
+    assert.equal((await snapshot()).secretLength, 5);
+    await page.keyboard.press('Enter');
+    await settle();
+    assert.equal((await snapshot()).submits, 3);
+
+    await page.keyboard.press('Tab'); // A non-editor control must return DOM focus to canvas.
+    assert.equal(await page.evaluate(() => document.activeElement.tagName), 'CANVAS');
+    await page.keyboard.press('Meta+k');
+    await settle();
+    assert.equal((await snapshot()).shortcuts, 1);
+    await page.keyboard.press('Shift+Tab');
+    assert.equal(await page.evaluate(() => document.activeElement.type), 'password');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.evaluate(() => document.activeElement.tagName), 'CANVAS');
+    await page.keyboard.press('Meta+k');
+    await settle();
+    assert.equal((await snapshot()).shortcuts, 2);
+
+    await page.touchscreen.tap(100, 36);
+    await page.touchscreen.tap(300, 500); // Background tap dismisses the editor.
+    assert.equal(await page.evaluate(() => document.activeElement.tagName), 'CANVAS');
+    // Dispatch a burst in one JS turn: movement/wheels must wait for rAF, not run frames.
+    const polls = await page.evaluate(() => {
+        const before = window.__inputProof.polls;
+        const canvas = document.querySelector('canvas');
+        for (let i = 0; i < 20; i++) {
+            canvas.dispatchEvent(new PointerEvent('pointermove', { pointerType: 'mouse', pointerId: 1, clientX: 100 + i, clientY: 500 }));
+            canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: 1, clientX: 100, clientY: 500 }));
+        }
+        return window.__inputProof.polls - before;
+    });
+    assert.equal(polls, 0, 'continuous pointer events must not run synchronous frames');
+    await page.evaluate(() => {
+        Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+        document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await settle();
+    assert.equal((await snapshot()).visible, false);
+    await page.evaluate(() => {
+        delete document.hidden;
+        document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await settle();
+    assert.equal((await snapshot()).visible, true);
+    console.log(JSON.stringify({ inputRegressions: 'passed', checks: ['stable editor focus', 'recomposition range',
+        'beforeinput Enter', 'multiline vs single-line', 'password sink and deletion', 'Tab to canvas',
+        'Escape shortcuts', 'outside dismiss', 'coalesced pointer frames', 'visibility', 'app title', 'nonfatal window requests'] }));
+}

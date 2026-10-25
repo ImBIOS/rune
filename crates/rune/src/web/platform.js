@@ -28,14 +28,16 @@ export function viewport(canvas, callback) {
     const motion = matchMedia('(prefers-reduced-motion: reduce)');
     const reduced = () => callback(JSON.stringify({ kind: 'motion', reduced: motion.matches }));
     const focus = () => callback(JSON.stringify({ kind: 'focus', focused: document.hasFocus() }));
+    const visibility = () => callback(JSON.stringify({ kind: 'visibility', visible: !document.hidden }));
     window.visualViewport?.addEventListener('resize', update);
     window.visualViewport?.addEventListener('scroll', update);
     window.addEventListener('resize', update);
     motion.addEventListener('change', reduced);
     window.addEventListener('focus', focus);
     window.addEventListener('blur', focus);
+    document.addEventListener('visibilitychange', visibility);
     // Mount is called while Rust is installing the shell; enter it only after installation.
-    queueMicrotask(() => { update(); reduced(); });
+    queueMicrotask(() => { update(); reduced(); focus(); visibility(); });
     return () => {
         window.visualViewport?.removeEventListener('resize', update);
         window.visualViewport?.removeEventListener('scroll', update);
@@ -43,6 +45,7 @@ export function viewport(canvas, callback) {
         motion.removeEventListener('change', reduced);
         window.removeEventListener('focus', focus);
         window.removeEventListener('blur', focus);
+        document.removeEventListener('visibilitychange', visibility);
         probe.remove();
     };
 }

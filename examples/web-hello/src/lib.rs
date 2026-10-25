@@ -1,5 +1,7 @@
 use rune::{AppSpec, Cx, El, ScrollSpec, TextEdit, Tx, col, el, row, text, text_input};
 use rune::tok::{self, type_};
+#[cfg(target_arch = "wasm32")]
+mod input_proof;
 
 struct State {
     messages: Vec<String>,
@@ -53,5 +55,7 @@ fn view(state: &State, cx: &mut Cx<State>) -> El {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen(start))]
 pub fn start() {
+    #[cfg(target_arch = "wasm32")]
+    if input_proof::enabled() { input_proof::run(); return; }
     rune::run(AppSpec::new("Messages", (390.0, 760.0), State::default, view));
 }

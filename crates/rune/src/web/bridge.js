@@ -1,4 +1,4 @@
-// Browser text services. The textarea is a sliding UTF-16 context, never an empty key sink.
+// Browser text services. Rust supplies a bounded UTF-16 context with a UTF-8 base offset.
 const coarse = () => matchMedia('(pointer: coarse)').matches;
 const high = n => n >= 0xd800 && n <= 0xdbff;
 const low = n => n >= 0xdc00 && n <= 0xdfff;
@@ -7,100 +7,165 @@ function boundary(text, at, forward) {
     return at;
 }
 
+function replacement(old, next, composition, caret) {
+    let start = 0;
+    while (start < old.length && start < next.length && old[start] === next[start]) start++;
+    start = boundary(old, start, false);
+    let end = old.length, nextEnd = next.length;
+    while (end > start && nextEnd > start && old[end - 1] === next[nextEnd - 1]) { end--; nextEnd--; }
+    const adjusted = boundary(old, end, true) - end;
+    end += adjusted; nextEnd += adjusted;
+    // Recomposition can contain unchanged letters (even the entire old word). Include
+    // those in the replaced range, otherwise preedit would be appended to committed text.
+    if (composition && caret >= composition.length && next.slice(caret - composition.length, caret) === composition) {
+        const from = caret - composition.length;
+        const to = caret + old.length - next.length;
+        if (from <= to && to <= old.length) {
+            if (old === next) { start = from; end = to; nextEnd = caret; }
+            else { start = Math.min(start, from); end = Math.max(end, to); nextEnd = end + next.length - old.length; }
+        }
+    }
+    return { start, end, text: next.slice(start, nextEnd) };
+}
+
 export function mount(canvas, callback) {
     const textarea = document.createElement('textarea');
     textarea.setAttribute('aria-label', 'Text input');
     textarea.setAttribute('autocapitalize', 'sentences');
-    textarea.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;padding:0;border:0;opacity:0;font-size:16px;resize:none;pointer-events:none;';
-    textarea.inputMode = coarse() ? 'none' : 'text';
-    document.body.append(textarea);
-    const h = { textarea, key: '', base: 0, value: '', composing: false, listeners: [], syncing: false };
+    const password = document.createElement('input');
+    password.type = 'password';
+    password.setAttribute('aria-label', 'Password input');
+    password.autocomplete = 'off';
+    password.setAttribute('autocorrect', 'off');
+    password.setAttribute('autocapitalize', 'off');
+    password.spellcheck = false;
+    for (const field of [textarea, password]) {
+        field.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;padding:0;border:0;opacity:0;font-size:16px;resize:none;pointer-events:none;';
+        field.tabIndex = -1;
+        field.inputMode = coarse() ? 'none' : 'text';
+        document.body.append(field);
+    }
+    const h = { canvas, textarea, password, field: textarea, key: '', base: 0, value: '',
+        composing: false, composition: '', shift: false, listeners: [], syncing: false, disposed: false };
     const send = event => {
         const message = JSON.stringify(event);
-        if (h.syncing) queueMicrotask(() => callback(message));
-        else callback(message);
+        if (h.syncing) queueMicrotask(() => { if (!h.disposed) callback(message); });
+        else if (!h.disposed) callback(message);
     };
     const listen = (target, name, handler, options) => {
         target.addEventListener(name, handler, options);
         h.listeners.push(() => target.removeEventListener(name, handler, options));
     };
-    function changed() {
-        const next = textarea.value;
-        const old = h.value;
-        let start = 0;
-        while (start < old.length && start < next.length && old[start] === next[start]) start++;
-        start = boundary(old, start, false);
-        let end = old.length, nextEnd = next.length;
-        while (end > start && nextEnd > start && old[end - 1] === next[nextEnd - 1]) { end--; nextEnd--; }
-        const adjusted = boundary(old, end, true) - end;
-        end += adjusted; nextEnd += adjusted;
+    function changed(preedit = false) {
         const backward = textarea.selectionDirection === 'backward';
-        // Keep composition locked through the synchronous callback: only the final sync may
-        // rewrite the mirror, after both the replacement and selection have reached Rune.
-        send({ kind: 'edit', key: h.key, base: h.base, expected: old,
-            start: h.base + start, end: h.base + end, text: next.slice(start, nextEnd),
-            anchor: h.base + (backward ? textarea.selectionEnd : textarea.selectionStart),
-            focus: h.base + (backward ? textarea.selectionStart : textarea.selectionEnd) });
+        send({ kind: preedit ? 'preedit' : 'edit', key: h.key, base: h.base, expected: h.value,
+            ...replacement(h.value, textarea.value, preedit ? h.composition : '', textarea.selectionEnd),
+            anchor: backward ? textarea.selectionEnd : textarea.selectionStart,
+            focus: backward ? textarea.selectionStart : textarea.selectionEnd });
     }
-    listen(textarea, 'input', event => { if (!h.composing && !event.isComposing) changed(); });
-    listen(textarea, 'compositionstart', () => { h.composing = true; });
-    listen(textarea, 'compositionupdate', event => send({ kind: 'preedit', key: h.key, text: event.data ?? '' }));
+    const key = (name, event = {}) => send({ kind: 'key', key: name, shift: !!event.shiftKey,
+        ctrl: !!event.ctrlKey, alt: !!event.altKey, meta: !!event.metaKey, repeat: !!event.repeat });
+    listen(textarea, 'input', event => changed(h.composing || event.isComposing));
+    listen(textarea, 'compositionstart', () => { h.composing = true; h.composition = ''; });
+    listen(textarea, 'compositionupdate', event => {
+        h.composition = event.data ?? '';
+        // compositionupdate can precede the DOM replacement; input observes it immediately,
+        // and this microtask also covers engines that omit that intermediate input event.
+        queueMicrotask(() => { if (!h.disposed && h.composing) changed(true); });
+    });
     listen(textarea, 'compositionend', () => {
         changed();
-        h.composing = false;
+        h.composing = false; h.composition = '';
         send({ kind: 'sync' });
     });
-    listen(textarea, 'paste', event => {
-        event.preventDefault();
-        send({ kind: 'paste', text: event.clipboardData?.getData('text/plain') ?? '' });
+    listen(password, 'input', () => {
+        const text = password.value;
+        password.value = ''; // A transient input sink, never a mirror of the secret model.
+        if (text) send({ kind: 'secure', key: h.key, text });
     });
-    listen(textarea, 'keydown', event => {
-        if (event.isComposing || h.composing || event.keyCode === 229) return;
-        const chord = event.metaKey || event.ctrlKey;
-        // Ordinary typing, deletion and predictive replacements belong to input, not keydown.
-        if (!chord && !['Enter', 'Tab', 'Escape', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) return;
-        if ((chord && event.key.toLowerCase() === 'v') || (event.key === 'Enter' && event.shiftKey)) return;
-        event.preventDefault();
-        send({ kind: 'key', key: event.key, shift: event.shiftKey, ctrl: event.ctrlKey,
-            alt: event.altKey, meta: event.metaKey, repeat: event.repeat });
-    });
+    for (const field of [textarea, password]) {
+        listen(field, 'paste', event => {
+            event.preventDefault();
+            send({ kind: 'paste', text: event.clipboardData?.getData('text/plain') ?? '' });
+        });
+        listen(field, 'beforeinput', event => {
+            if (event.inputType === 'insertLineBreak' || event.inputType === 'insertParagraph') {
+                event.preventDefault();
+                if (!h.composing && !event.isComposing) key('Enter', { shiftKey: h.shift });
+            } else if (field === password && event.inputType.startsWith('delete')) {
+                event.preventDefault();
+                key(event.inputType.endsWith('Forward') ? 'Delete' : 'Backspace',
+                    { altKey: event.inputType.includes('Word') });
+            }
+        });
+        listen(field, 'keydown', event => {
+            h.shift = event.shiftKey;
+            if (event.isComposing || h.composing || event.keyCode === 229) return;
+            const chord = event.metaKey || event.ctrlKey;
+            const editing = ['Enter', 'Tab', 'Escape', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'];
+            if (field === password) editing.push('Backspace', 'Delete');
+            if (!chord && !editing.includes(event.key)) return;
+            if (chord && event.key.toLowerCase() === 'v') return;
+            event.preventDefault();
+            key(event.key, event);
+        });
+        listen(field, 'keyup', event => { h.shift = event.shiftKey; });
+        listen(field, 'blur', () => { h.shift = false; });
+    }
     listen(textarea, 'select', () => {
         if (h.syncing || h.composing || document.activeElement !== textarea) return;
         const backward = textarea.selectionDirection === 'backward';
         send({ kind: 'selection', key: h.key, base: h.base, expected: h.value,
-            anchor: h.base + (backward ? textarea.selectionEnd : textarea.selectionStart),
-            focus: h.base + (backward ? textarea.selectionStart : textarea.selectionEnd) });
+            anchor: backward ? textarea.selectionEnd : textarea.selectionStart,
+            focus: backward ? textarea.selectionStart : textarea.selectionEnd });
     });
-    // winit prevents scrolling on its canvas; stop pinch zoom on the editor as well.
+    // Disable browser default focus without winit's forced canvas.focus(): a touch in an
+    // already-focused field must not dismiss its software keyboard before Rune sees the tap.
+    listen(canvas, 'pointerdown', event => event.preventDefault(), { capture: true });
+    listen(canvas, 'keydown', event => event.preventDefault());
+    listen(canvas, 'wheel', event => event.preventDefault(), { passive: false });
     listen(document, 'gesturestart', event => event.preventDefault(), { passive: false });
+    queueMicrotask(() => {
+        if (!h.disposed && document.activeElement === document.body) canvas.focus({ preventScroll: true });
+    });
     return h;
 }
 
-export function sync(h, key, text, anchor, focus, activate) {
+export function sync(h, key, text, base, anchor, focus, secure) {
     if (h.composing && key === h.key) return;
     h.composing = false;
-    const field = h.textarea;
     h.syncing = true;
+    const editing = document.activeElement === h.textarea || document.activeElement === h.password;
+    h.key = key; h.base = base; h.value = text;
+    h.password.value = '';
+    h.field = secure ? h.password : h.textarea;
     if (!key) {
-        if (document.activeElement === field) field.blur();
-        h.key = ''; h.value = ''; field.value = '';
-        field.inputMode = coarse() ? 'none' : 'text';
-        h.syncing = false;
-        return;
+        h.textarea.value = '';
+        if (editing) h.canvas.focus({ preventScroll: true });
+        h.textarea.inputMode = h.password.inputMode = coarse() ? 'none' : 'text';
+    } else {
+        if (h.textarea.value !== text) h.textarea.value = text;
+        if (!secure) {
+            const start = Math.min(anchor, focus), end = Math.max(anchor, focus);
+            const direction = anchor > focus ? 'backward' : 'forward';
+            if (h.textarea.selectionStart !== start || h.textarea.selectionEnd !== end || h.textarea.selectionDirection !== direction) {
+                h.textarea.setSelectionRange(start, end, direction);
+            }
+        }
+        if (editing && document.activeElement !== h.field) activate(h);
     }
-    const base = boundary(text, Math.max(0, Math.min(anchor, focus) - 512), false);
-    const end = boundary(text, Math.min(text.length, Math.max(anchor, focus) + 512), true);
-    const value = text.slice(base, end);
-    h.syncing = true;
-    h.key = key; h.base = base; h.value = value;
-    if (field.value !== value) field.value = value;
-    const start = Math.min(anchor, focus) - base, finish = Math.max(anchor, focus) - base;
-    const direction = anchor > focus ? 'backward' : 'forward';
-    if (field.selectionStart !== start || field.selectionEnd !== finish || field.selectionDirection !== direction) {
-        field.setSelectionRange(start, finish, direction);
-    }
-    if (activate) { field.inputMode = 'text'; field.focus({ preventScroll: true }); }
     h.syncing = false;
 }
 
-export function destroy(h) { for (const remove of h.listeners) remove(); h.textarea.remove(); }
+export function activate(h) {
+    const field = h.key ? h.field : h.canvas;
+    if (h.key) field.inputMode = 'text';
+    if (document.activeElement !== field) field.focus({ preventScroll: true });
+}
+
+export function destroy(h) {
+    h.disposed = true;
+    for (const remove of h.listeners) remove();
+    h.password.value = ''; h.textarea.value = '';
+    h.password.remove(); h.textarea.remove();
+}

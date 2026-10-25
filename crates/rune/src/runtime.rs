@@ -141,7 +141,7 @@ const SCROLL_DECAY: f32 = 2.002;
 
 #[cfg(any(test, target_arch = "wasm32"))]
 #[path = "web_runtime.rs"]
-mod web_runtime;
+pub(crate) mod web_runtime;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Env {

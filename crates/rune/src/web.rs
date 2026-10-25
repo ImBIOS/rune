@@ -91,7 +91,8 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() { return; }
         let app = self.app.as_ref().expect("app before canvas");
-        let window = match event_loop.create_window(Window::default_attributes().with_title(app.spec.title).with_append(true)) {
+        let window = match event_loop.create_window(Window::default_attributes().with_title(app.spec.title)
+            .with_append(true).with_prevent_default(false)) {
             Ok(window) => Arc::new(window),
             Err(e) => { error(&e.to_string()); event_loop.exit(); return; }
         };
@@ -99,6 +100,7 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
         // No border/padding: winit's physical input and resize coordinates must match pixels.
         canvas.style().set_css_text("position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;outline:none;user-select:none;-webkit-user-select:none");
         if let Some(document) = web_sys::window().and_then(|w| w.document()) {
+            document.set_title(app.spec.title);
             if let Some(body) = document.body() { body.style().set_css_text("margin:0;overflow:hidden;overscroll-behavior:none"); }
         }
         let features = app.compositor.as_ref().map_or(wgpu::Features::empty(), |c| c.features());
@@ -162,8 +164,9 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
             r.clipboard.receive(&mut r.rt);
             let requests = r.shared.take();
             if requests.quit { event_loop.exit(); return; }
-            if requests.window.is_some() || requests.position.is_some() || requests.place.is_some() {
-                error("native window management is unsupported on web");
+            if requests.window.as_ref().is_some_and(|r| !matches!(r, crate::app::WindowRequest::Open(_) | crate::app::WindowRequest::Show))
+                || requests.position.is_some() || requests.place.is_some() || requests.minimize {
+                web_sys::console::warn_1(&"Native window management is ignored on web.".into());
             }
             for update in requests.updates { r.rt.update_if(update); }
             window.request_redraw();
@@ -171,6 +174,9 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        // Canvas/editor focus moves are internal, and may occur while a DOM callback owns
+        // Running. Actual window focus comes from the DOM bridge, not the canvas listener.
+        if matches!(event, WindowEvent::Focused(_)) { return; }
         let mut running = self.running.borrow_mut();
         let (Some(window), Some(r)) = (&self.window, &mut *running) else { return };
         if r.window_input(&event, window) { window.request_redraw(); return; }
@@ -186,8 +192,6 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
                 window.request_redraw();
             }
             WindowEvent::ThemeChanged(theme) => { r.rt.set_system_dark(theme == winit::window::Theme::Dark); window.request_redraw(); }
-            // Canvas -> textarea is an internal focus move. Window blur comes from the DOM bridge.
-            WindowEvent::Focused(true) => { r.rt.window_focus(true); window.request_redraw(); }
             WindowEvent::RedrawRequested if !r.suspended => {
                 let now = Instant::now();
                 let (animating, dt) = r.clock.advance(&mut r.rt, now, r.compositor.as_ref().is_some_and(|c| c.animating()));

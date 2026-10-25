@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Web keyboard focus and composition stay with the field.** Leaving an editor returns
+  keyboard focus to the canvas; secure fields use an emptied password input. Taps no longer
+  force focus through the canvas, recomposition replaces its old range, and mobile
+  `beforeinput` Enter follows Rune's submit/newline rules. Rust sends only changed text
+  windows, continuous pointer input waits for rAF, unsupported window requests warn without
+  covering the app, and tab visibility updates `AppHandle::is_visible`.
+
 - **Web follows conditional updates and page navigation.** Browser handles use the same
   `update_if` runtime path as native; the textarea routes PageUp and PageDown to Rune.
 

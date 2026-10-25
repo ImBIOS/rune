@@ -61,11 +61,18 @@ For example, extend a static slice of `rune_theme_opencode::FONTS` with
 the combined slice to `spec.fonts`. Keep the theme's sans/mono family names in `spec.families`.
 Missing emoji and CJK glyphs display fallback boxes; they do not trigger font downloads.
 
-The hidden textarea carries 512 UTF-16 units on each side of the selection, expanding for
-the selected range. Browser input events supply replacements; Rune validates the mirrored
-context and converts UTF-16 positions to UTF-8 boundaries before editing. Composition holds
-the mirror stable until commit. A completed touch tap focuses the textarea synchronously;
+Rust supplies the hidden textarea with up to 512 UTF-16 units on each side of the selection,
+expanding for the selected range, and skips unchanged mirrors. Browser input events supply replacements; Rune validates the mirrored
+context and converts window-relative UTF-16 positions to UTF-8 boundaries before editing.
+Composition holds the mirror stable until commit and replaces the composing word's range.
+Mobile `beforeinput` line breaks use Rune's Enter rules: submit, or Shift/Alt+Enter newline
+in a multiline field. A completed touch tap focuses the editor synchronously;
 a pan scrolls instead, with momentum and a damped edge return.
+
+Secure fields use an `<input type="password">` with autocomplete, autocorrect and spellcheck
+disabled. It receives only new keystrokes and is emptied after every input; the model's
+secret is never mirrored into the DOM. Leaving a field returns focus to the canvas so
+shortcuts and Tab keep working. Continuous pointer movement and wheel events wait for rAF.
 
 `Tx::copy` and `Tx::request_paste` use the browser clipboard. Call them from a user input
 handler: permission and transient-activation rules still apply. Native Paste events work
@@ -83,7 +90,8 @@ page's `viewport-fit=cover` meta tag and the textarea's 16 px font size.
 This target needs WebGPU. It has no WebGL fallback, DOM accessibility mirror, overlays,
 extra windows, native menus, drag-out, native audio/video, networking layer or hot patching.
 Native configuration types remain source-compatible, but their desktop host paths are not
-used on wasm. Secure native text-entry mode is not mirrored into the textarea.
+used on wasm. Unsupported window requests warn in the console; Show/Open are ignored.
+The document title follows `AppSpec::title`, and hidden tabs report `is_visible() == false`.
 
 The functional proof uses headless Chromium and Playwright:
 
@@ -97,6 +105,8 @@ and reports whether it has a WebGPU adapter. The proof checks GPU errors, idle r
 and submissions, touch
 focus and momentum, Unicode edits, a long sliding context, predictive replacement,
 composition, selection, paste, copied model text, link isolation, theme and viewport resize.
+The `?input-proof` fixture adds password input, Tab/Escape focus, mobile Enter, recomposition,
+same-field focus stability, continuous-input coalescing and visibility regression checks.
 Its mobile DPR check exercises the Safari-style CSS-size fallback because Chromium device
 emulation does not scale `devicePixelContentBoxSize`. This is not a real iPhone keyboard,
 dictation, autocorrect or Safari WebGPU test; those still need device verification.

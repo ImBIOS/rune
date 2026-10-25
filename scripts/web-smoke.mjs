@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
+import { inputSmoke } from './web-input-smoke.mjs';
 const { chromium, webkit } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const engine = process.env.WEB_ENGINE || 'chromium';
 const root = resolve(process.argv[2] || 'target/web');
@@ -20,7 +21,7 @@ const server = createServer(async (request, response) => {
 await new Promise(done => server.listen(0, '127.0.0.1', done));
 const browser = await (engine === 'webkit' ? webkit.launch({ headless: true }) :
     chromium.launch({ headless: true, executablePath: process.env.CHROMIUM_PATH,
-        args: ['--enable-unsafe-webgpu', '--use-angle=metal'] }));
+        args: ['--enable-unsafe-webgpu', ...(process.platform === 'darwin' ? ['--use-angle=metal'] : [])] }));
 const errors = [];
 try {
     const context = await browser.newContext({ viewport: { width: 390, height: 760 }, deviceScaleFactor: 3,
@@ -134,6 +135,10 @@ try {
     console.log(JSON.stringify({ ok: true, engine, idleSubmits: 0, idleRafs: 0, dpr: 3, sizingPath: 'Safari fallback', checks: ['WebGPU render', 'idle', 'touch focus',
         'touch momentum', 'Unicode input', 'send', 'clipboard copy', 'sliding context', 'predictive replacement',
         'composition', 'selection replacement', 'paste', 'noopener link', 'theme', 'resize'], gpuErrors }));
+    await page.setViewportSize({ width: 390, height: 760 });
+    await inputSmoke(page, url);
+    assert.deepEqual(await page.evaluate(() => window.__proof.gpuErrors), []);
+    assert.deepEqual(errors.filter(e => !e.includes('404')), []);
     }
 } finally {
     await browser.close();

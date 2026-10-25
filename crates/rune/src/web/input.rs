@@ -6,7 +6,8 @@ use winit::keyboard::ModifiersState;
 #[wasm_bindgen(module = "/src/web/bridge.js")]
 extern "C" {
     fn mount(canvas: &web_sys::HtmlCanvasElement, callback: &js_sys::Function) -> JsValue;
-    fn sync(handle: &JsValue, key: &str, text: &str, anchor: u32, focus: u32, activate: bool);
+    fn sync(handle: &JsValue, key: &str, text: &str, base: usize, anchor: u32, focus: u32, secure: bool);
+    fn activate(handle: &JsValue);
     fn destroy(handle: &JsValue);
 }
 
@@ -16,6 +17,7 @@ pub(super) struct Bridge {
     dispose_viewport: js_sys::Function,
     mods: ModifiersState,
     touch: Option<Touch>,
+    mirror: crate::runtime::web_runtime::Mirror,
 }
 struct Touch {
     id: u64,
@@ -32,14 +34,15 @@ impl Bridge {
         running: std::rc::Weak<RefCell<Option<Running<S>>>>, window: Arc<Window>) -> Self {
         let callback = Closure::new(move |event: String| {
             let Some(running) = running.upgrade() else { return };
-            if let Ok(event) = serde_json::from_str(&event) {
-                if let Some(r) = &mut *running.borrow_mut() { r.input_event(&event); }
+            let event = zeroize::Zeroizing::new(event);
+            if let Ok(mut event) = serde_json::from_str(&event) {
+                if let Some(r) = &mut *running.borrow_mut() { r.input_event(&mut event); }
                 window.request_redraw();
             }
         });
         let dispose_viewport = platform::viewport(canvas, callback.as_ref().unchecked_ref());
         Self { handle: mount(canvas, callback.as_ref().unchecked_ref()), _callback: callback, dispose_viewport,
-            mods: ModifiersState::empty(), touch: None }
+            mods: ModifiersState::empty(), touch: None, mirror: Default::default() }
     }
 }
 impl Drop for Bridge {
@@ -50,15 +53,16 @@ impl Drop for Bridge {
 }
 
 impl<S: 'static> Running<S> {
-    pub(super) fn sync_input(&self, activate: bool) {
-        if let Some((key, text, anchor, focus)) = self.rt.web_context() {
-            sync(&self.input.handle, &key, &text, anchor, focus, activate);
-        } else {
-            sync(&self.input.handle, "", "", 0, 0, false);
+    pub(super) fn sync_input(&mut self, focus: bool) {
+        if self.rt.web_context(&mut self.input.mirror) {
+            let m = &self.input.mirror;
+            sync(&self.input.handle, &m.key, &m.text, m.base, m.anchor, m.focus, m.secure);
         }
+        if focus { activate(&self.input.handle); }
     }
 
-    pub(super) fn input_event(&mut self, event: &serde_json::Value) {
+    pub(super) fn input_event(&mut self, event: &mut serde_json::Value) {
+        let mut activate = false;
         match event["kind"].as_str() {
             Some("viewport") => {
                 let insets = std::array::from_fn(|i| event["insets"][i].as_f64().unwrap_or(0.0).max(0.0) as f32);
@@ -66,13 +70,17 @@ impl<S: 'static> Running<S> {
             }
             Some("motion") => self.rt.set_system_reduced_motion(event["reduced"].as_bool().unwrap_or(false)),
             Some("focus") => self.rt.window_focus(event["focused"].as_bool().unwrap_or(false)),
-            Some("edit" | "selection") => self.rt.web_edit(event),
+            Some("visibility") => {
+                self.shared.visible.store(event["visible"].as_bool().unwrap_or(false), Ordering::Release);
+                return;
+            }
+            Some("edit" | "selection" | "preedit") => self.rt.web_edit(event),
+            Some("sync") => self.input.mirror.key.clear(), // Composition's final sync was deferred by the DOM.
             Some("paste") => self.rt.paste(event["text"].as_str().unwrap_or_default()),
-            Some("preedit") => {
-                if self.rt.web_context().as_ref().map(|c| c.0.as_str()) != event["key"].as_str() { return; }
-                let text = event["text"].as_str().unwrap_or_default().to_owned();
-                let end = text.len();
-                self.rt.ime(crate::Ime::Preedit(text, Some((end, end))));
+            Some("secure") => {
+                if let serde_json::Value::String(text) = event["text"].take() {
+                    self.rt.web_secure(event["key"].as_str().unwrap_or_default(), text);
+                }
             }
             Some("key") => {
                 let flag = |key: &str| event[key].as_bool().unwrap_or(false);
@@ -92,6 +100,7 @@ impl<S: 'static> Running<S> {
                     _ => return,
                 };
                 let event_key = crate::KeyEvent { key, mods: modifiers(mods) };
+                activate = event_key.key == crate::Key::Tab;
                 if flag("repeat") { self.rt.repeat_key(event_key); } else { self.rt.key(event_key); }
             }
             _ => {}
@@ -99,12 +108,13 @@ impl<S: 'static> Running<S> {
         // Commit within the DOM event: clipboard, link and soft-keyboard APIs need activation.
         self.rt.frame(0.0);
         self.clipboard.flush(&mut self.rt);
-        self.sync_input(false);
+        self.sync_input(activate);
     }
 
     pub(super) fn window_input(&mut self, event: &WindowEvent, window: &Window) -> bool {
         let scale = window.scale_factor() as f32;
         let mut activate = false;
+        let mut immediate = false;
         match event {
             WindowEvent::ModifiersChanged(mods) => { self.input.mods = mods.state(); return false; }
             WindowEvent::CursorMoved { position, .. } if self.input.touch.is_none() => {
@@ -112,6 +122,7 @@ impl<S: 'static> Running<S> {
             }
             WindowEvent::CursorLeft { .. } if self.input.touch.is_none() => self.rt.pointer_leave(),
             WindowEvent::MouseInput { button, state, .. } if self.input.touch.is_none() => {
+                immediate = true;
                 let Some((x, y)) = self.rt.pointer() else { return false };
                 match (button, state) {
                     (MouseButton::Left, ElementState::Pressed) => { self.rt.pointer_down(x, y); activate = true; }
@@ -129,6 +140,7 @@ impl<S: 'static> Running<S> {
                 self.rt.wheel(x, y, dy);
             }
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
+                immediate = true;
                 let mut logical = (event.state == ElementState::Pressed).then(|| crate::window::map_key(&event.logical_key, self.input.mods)).flatten();
                 if let Some(key) = &mut logical {
                     key.mods = modifiers(self.input.mods);
@@ -170,6 +182,7 @@ impl<S: 'static> Running<S> {
                             self.rt.pointer_down(point.0, point.1);
                             self.rt.pointer_up(point.0, point.1);
                             activate = true;
+                            immediate = true;
                         }
                         self.rt.pointer_leave();
                     }
@@ -178,9 +191,13 @@ impl<S: 'static> Running<S> {
             }
             _ => return false,
         }
-        self.rt.frame(0.0);
-        self.clipboard.flush(&mut self.rt);
-        self.sync_input(activate);
+        // Moves and wheels are coalesced by rAF. Only activation-sensitive input must
+        // commit before the DOM handler returns (clipboard, links and keyboard focus).
+        if immediate {
+            self.rt.frame(0.0);
+            self.clipboard.flush(&mut self.rt);
+            self.sync_input(activate);
+        }
         true
     }
 }
