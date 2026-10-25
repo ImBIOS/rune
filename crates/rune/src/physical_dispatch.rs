@@ -50,7 +50,9 @@ impl<S: 'static> Runtime<S> {
         let busy = !self.queue.is_empty();
         self.observe_mods(&event);
         // The release of a modifier key the app hears needs a frame, in order like a press.
-        if self.modifier_pending(&event) || busy {
+        // So does one while state changed since the last frame (a covered window keeps it
+        // changed until it uncovers): the focused handler is the new view's.
+        if self.modifier_pending(&event) || busy || self.dirty {
             self.queue.push(Action::Physical(event, None));
             return !busy;
         }
@@ -141,14 +143,15 @@ mod tests {
     use crate::{Cx, El, Env, Key, Mods, PhysicalKeyCode, TextEdit, TextStyle, col, el, text_input};
 
     #[derive(Default)]
-    struct State { capture: bool, physical: usize, logical: usize, dismissed: usize, edit: TextEdit }
+    struct State { capture: bool, physical: usize, logical: usize, dismissed: usize, edit: TextEdit, gone: bool }
     fn view(s: &State, _: &mut Cx<State>) -> El {
+        let recorder = el().key("recorder").size(100.0, 40.0).focusable(true)
+            .on_press(|s: &mut State| s.capture = true)
+            .on_physical_input(|s: &mut State, _, _| {
+                if s.capture { s.physical += 1; true } else { false }
+            });
         col().key("modal").size(300.0, 200.0).modal(false, |s: &mut State| s.dismissed += 1)
-            .child(el().key("recorder").size(100.0, 40.0).focusable(true)
-                .on_press(|s: &mut State| s.capture = true)
-                .on_physical_input(|s: &mut State, _, _| {
-                    if s.capture { s.physical += 1; true } else { false }
-                }))
+            .children((!s.gone).then_some(recorder))
             .child(text_input(&s.edit, TextStyle::new(14.0, 400.0)).key("edit").size(200.0, 40.0)
                 .on_edit(|s: &mut State| &mut s.edit))
     }
@@ -215,6 +218,26 @@ mod tests {
         assert!(!rt.physical_with_fallback(release, None));
         assert_eq!(rt.state.physical, delivered);
         assert!(rt.queue.is_empty() && !rt.dirty);
+    }
+
+    /// A modifier change while state changed since the last frame, as a covered window's does
+    /// until it uncovers, goes to the focused handler of the view that state builds, not the
+    /// last frame's.
+    #[test]
+    fn a_modifier_change_after_an_update_waits_for_the_new_view() {
+        let mut rt = Runtime::new(State::default(), view, (300.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        click(&mut rt, "recorder");
+        rt.frame(0.0);
+        assert!(rt.state.capture);
+        let heard = rt.state.physical;
+        rt.update(|s, _| s.gone = true);
+        let modifiers = PhysicalInput::Modifiers(Mods { shift: true, ..Mods::default() });
+        assert!(rt.physical_with_fallback(modifiers, None), "it asks for the frame that builds the new view");
+        assert_eq!(rt.state.physical, heard, "the last frame's recorder doesn't hear it");
+        rt.frame(0.0);
+        assert!(rt.find("recorder").is_none());
+        assert_eq!(rt.state.physical, heard, "and the new view has none");
     }
 
     #[derive(Default)]

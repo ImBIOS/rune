@@ -11,9 +11,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   timers, `on_close` and queued input as a hidden window does, and the view waits, dirty, for
   the frame that uncovers it, which builds once with the latest state. Uncovering already
   landed running motion; a window restored from minimized on Windows, which gets no occlusion
-  event, now lands it too, so it doesn't play out what changed meanwhile. An app that relied on
-  side effects in view code while covered will see them only when the window shows. The dev
-  panel's tree still builds on demand.
+  event, now lands it too, so it doesn't play out what changed meanwhile, and asks for its frame
+  when it comes back at the same size. So does any window whose next drawn frame follows a
+  minimize no event reported (X11). On macOS, whether a window can draw follows occlusion alone,
+  since `isMiniaturized` stays set into a deminiaturize. A `scroll_to_bottom` asked while a
+  window was covered or hidden lands in the frame that shows it, rather than gliding after. A
+  modifier change that arrives after an update, before its frame, goes to the focused handler
+  of the view that update builds. An app that relied on side effects in view code while covered
+  will see them only when the window shows. The dev panel's tree still builds on demand.
 - **`Recorder`: record the microphone to a file.** `Recorder::to_file("note.m4a")` records AAC
   (a `.wav` path, or `.format(RecordFormat::Wav)`, records WAV; the format decides the
   file's extension) with `start`, `pause`, `resume`,

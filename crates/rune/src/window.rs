@@ -259,6 +259,13 @@ impl Win {
         if moving { Pacing::Vsync } else { Pacing::Idle }
     }
 
+    /// Minimized, as far as drawing goes. On macOS occlusion says it instead (the `Occluded`
+    /// event, `natively_occluded`): `isMiniaturized` stays true into a deminiaturize whose
+    /// occlusion change and first redraws would otherwise draw nothing, with no event after.
+    fn minimized(&self) -> bool {
+        !cfg!(target_os = "macos") && self.window.is_minimized().unwrap_or(false)
+    }
+
     /// Whether none of the window is on screen, read from AppKit (a prewarm acquisition reads
     /// as visible).
     #[cfg(target_os = "macos")]
@@ -1128,10 +1135,6 @@ fn setup_waker<S: 'static>(shared: &Arc<crate::app::Shared<S>>) -> Waker {
     Arc::new(move || handle.wake())
 }
 
-/// Whether a drain of other threads' requests asks the window for a frame. A hidden launcher
-/// renders a change into its cached frame (paced); a shown launcher redraws for a change or
-/// as it shows; any other shown window redraws, unless only updates that changed nothing
-/// (`quiet`) woke it.
 /// What a shown window that can't draw runs for an update, a wake, a due timer or a redraw:
 /// covered (an occlusion event, or a drawable refused as occluded), minimised, or waiting out
 /// a missed frame. `poll`, due timers and queued input run now, as for a hidden window
@@ -1239,6 +1242,10 @@ mod covered {
     }
 }
 
+/// Whether a drain of other threads' requests asks the window for a frame. A hidden launcher
+/// renders a change into its cached frame (paced); a shown launcher redraws for a change or
+/// as it shows; any other shown window redraws, unless only updates that changed nothing
+/// (`quiet`) woke it.
 fn drain_frame(launcher: bool, visible: bool, was_shown: bool, changed: bool, quiet: bool) -> bool {
     if launcher && !visible { return changed; }
     !quiet && if launcher { changed || was_shown && visible } else { visible }
@@ -1930,7 +1937,7 @@ impl<S: 'static> Host<S> {
         }
         w.visible = true;
         w.occluded = false;
-        self.rt.set_live_visible(!w.window.is_minimized().unwrap_or(false));
+        self.rt.set_live_visible(!w.minimized());
         self.idle = true;
         self.native_handle.native.number.store(native_window_number(&w.window).unwrap_or(0), Ordering::Release);
         if !built { self.rt.settle_all(); }
@@ -2012,7 +2019,7 @@ impl<S: 'static> Host<S> {
         if quiet { self.clipboard.flush(&mut self.rt); }
         let (changed, quiet) = (changed || answered, quiet && !answered);
         #[cfg(all(feature = "dev", debug_assertions))]
-        if self.rt.dev.is_some() && self.win.as_ref().is_none_or(|w| !w.visible || w.occluded || w.window.is_minimized().unwrap_or(false)) {
+        if self.rt.dev.is_some() && self.win.as_ref().is_none_or(|w| !w.visible || w.occluded || w.minimized()) {
             // A hidden/windowless app still services its dev channel without a GPU or redraw.
             if self.launcher() && let Some(w) = &self.win { w.window.request_redraw(); }
             else { self.rt.dev_hidden_frame(); self.shell(event_loop); }
@@ -2027,7 +2034,7 @@ impl<S: 'static> Host<S> {
         let framed = match self.win.as_ref().filter(|w| drain_frame(launcher, w.visible, shown, changed, quiet)) {
             None => false,
             Some(w) if launcher && !w.visible => self.refresh_hidden(),
-            Some(w) if (!launcher && w.occluded) || w.window.is_minimized().unwrap_or(false) => {
+            Some(w) if (!launcher && w.occluded) || w.minimized() => {
                 self.covered_frame();
                 self.shell(event_loop);
                 true
@@ -2096,7 +2103,7 @@ impl<S: 'static> Host<S> {
                 return;
             }
             let shown = self.win.as_ref().filter(|w| w.visible);
-            let paints = shown.is_some_and(|w| !w.occluded && !w.window.is_minimized().unwrap_or(false));
+            let paints = shown.is_some_and(|w| !w.occluded && !w.minimized());
             // A painting macOS window moves its frame over its next frames (`redraw`).
             if self.rt.window_frame.is_some() && !(paints && cfg!(target_os = "macos")) {
                 self.take_frame_request(self.frame_secs(Instant::now()), false);
@@ -2475,13 +2482,15 @@ impl<S: 'static> Host<S> {
     }
 
     /// A frame for a window that's hidden, covered, asleep or minimised: while shown, what it
-    /// would have run runs without drawing (`covered_step`).
+    /// would have run runs without drawing (`covered_step`). It isn't live: a minimize X11
+    /// reports with no event lands here first, and the frame that next draws settles.
     fn covered_frame(&mut self) {
         let Some(l) = self.win.as_mut() else { return };
         l.stop_pacing();
         let shown = l.visible;
         self.land_frame();
         if shown {
+            self.rt.set_live_visible(false);
             covered_step(&mut self.rt);
             self.clipboard.flush(&mut self.rt);
         }
@@ -2491,7 +2500,7 @@ impl<S: 'static> Host<S> {
         let launcher = self.launcher();
         let (Some(l), Some(_)) = (self.win.as_mut(), self.gpu.as_ref()) else { return };
         let hidden = launcher && !l.visible;
-        if (!launcher && (!l.visible || l.occluded)) || l.window.is_minimized().unwrap_or(false) {
+        if (!launcher && (!l.visible || l.occluded)) || l.minimized() {
             return self.covered_frame();
         }
         // A missed frame's retry, or the timer pacing unpaced motion: input waits for it, and
@@ -2752,7 +2761,7 @@ impl<S: 'static> AnyHost for Host<S> {
                 self.shell(event_loop);
                 if changed && launcher { self.refresh_hidden(); }
             // A redraw while the window backs off would draw nothing and leave the timer due.
-            } else if let Some(w) = self.win.as_ref().filter(|w| (self.launcher() || (w.visible && !w.occluded)) && !w.window.is_minimized().unwrap_or(false)
+            } else if let Some(w) = self.win.as_ref().filter(|w| (self.launcher() || (w.visible && !w.occluded)) && !w.minimized()
                 && !w.backing_off(Instant::now())) {
                 w.window.request_redraw();
             } else {
@@ -2763,7 +2772,7 @@ impl<S: 'static> AnyHost for Host<S> {
         }
         #[cfg(all(feature = "dev", debug_assertions))]
         if self.rt.dev_hidden_deadline().is_some_and(|deadline| deadline <= Instant::now()) {
-            if let Some(w) = self.win.as_ref().filter(|w| (self.launcher() || (w.visible && !w.occluded)) && !w.window.is_minimized().unwrap_or(false)) {
+            if let Some(w) = self.win.as_ref().filter(|w| (self.launcher() || (w.visible && !w.occluded)) && !w.minimized()) {
                 w.window.request_redraw();
                 self.rt.dev_hidden_stop();
             } else {
@@ -2942,10 +2951,11 @@ impl<S: 'static> Host<S> {
             WindowEvent::Resized(size) => {
                 rt.set_titlebar_inset(place_chrome(&l.window, chrome));
                 let was_live = rt.live_visible();
-                rt.set_live_visible(l.visible && !l.occluded && size.width > 0 && size.height > 0 && !l.window.is_minimized().unwrap_or(false));
+                rt.set_live_visible(l.visible && !l.occluded && size.width > 0 && size.height > 0 && !l.minimized());
                 // Restored where no occlusion event says so (Windows): as uncovering does, the
                 // first frame paints the settled state of what changed meanwhile.
-                if !was_live && rt.live_visible() { rt.settle_all(); }
+                let restored = !was_live && rt.live_visible();
+                if restored { rt.settle_all(); }
                 if size.width == 0 || size.height == 0 {
                     self.secure_input.set(false);
                     l.stop_pacing();
@@ -2954,7 +2964,10 @@ impl<S: 'static> Host<S> {
                 // A frame Rune moved itself has its drawable and viewport already.
                 let resized = l.resize_surface(&gpu.device, size);
                 let viewport = (size.width as f32 / scale, size.height as f32 / scale);
-                if !resized && viewport == rt.viewport && scale == rt.env.scale { return; }
+                if !resized && viewport == rt.viewport && scale == rt.env.scale {
+                    if restored { l.window.request_redraw(); }
+                    return;
+                }
                 let asked = self.frame_jump.take().is_some_and(|(w, h)| (w - viewport.0).abs() < 1.0 && (h - viewport.1).abs() < 1.0);
                 if asked { rt.step_viewport(viewport, scale) } else { rt.set_viewport(viewport, scale) }
                 l.window.request_redraw();
@@ -2972,7 +2985,7 @@ impl<S: 'static> Host<S> {
                 l.occluded = occluded;
                 l.retry = None;
                 l.occluded_wait = OCCLUDED_RETRY;
-                rt.set_live_visible(l.visible && !occluded && !l.window.is_minimized().unwrap_or(false));
+                rt.set_live_visible(l.visible && !occluded && !l.minimized());
                 if occluded {
                     self.secure_input.set(false);
                     l.stop_pacing();

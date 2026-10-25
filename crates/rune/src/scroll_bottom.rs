@@ -60,7 +60,8 @@ impl<S: 'static> Runtime<S> {
         }
         for (id, animated, sticky, view_h, start, glide) in targets {
             let Some(st) = self.scrolls.get_mut(&id) else { continue };
-            if animated && !self.reduced_motion && st.max - start > 0.5 {
+            // A settled frame (a window showing or uncovering) lands at the end.
+            if animated && !self.reduced_motion && !self.settled && st.max - start > 0.5 {
                 st.offset = start.max(st.max - GLIDE_REACH * view_h);
                 st.glide = Some(glide.unwrap_or(0.0));
                 st.pinned = false;
@@ -246,6 +247,29 @@ mod tests {
         assert!(bottom_gap(&rt).abs() < 0.05, "a sticky viewport follows the end again after landing");
         assert_eq!(rt.state.reports, [true, false, true]);
         assert!(!rt.animating);
+    }
+
+    /// A scroll to the bottom asked for while the window is covered (or hidden) waits for the
+    /// frame that uncovers it, which settles: that frame shows the bottom, with no glide after.
+    /// (Settling already pins a sticky viewport; this one isn't.)
+    #[test]
+    fn a_scroll_asked_while_covered_lands_when_it_uncovers() {
+        let mut rt = chat(Chat { rows: 40, loose: true, ..Default::default() });
+        for _ in 0..5 {
+            rt.wheel(100.0, 100.0, 300.0);
+            rt.frame(1.0 / 120.0);
+        }
+        for _ in 0..60 { rt.frame(1.0 / 120.0); }
+        assert!(bottom_gap(&rt) < -1000.0, "reading far up: {}", bottom_gap(&rt));
+        rt.set_live_visible(false);
+        rt.update(|_, tx| tx.scroll_to_bottom("scroll"));
+        rt.hidden_wake();
+        assert!(bottom_gap(&rt) < -1000.0, "nothing moves while covered");
+        rt.set_live_visible(true);
+        rt.settle_all();
+        rt.frame(1.0 / 120.0);
+        assert!(bottom_gap(&rt).abs() < 0.05, "the uncovering frame shows the bottom: {}", bottom_gap(&rt));
+        assert!(!rt.animating, "with no glide left to play");
     }
 
     #[test]
