@@ -68,14 +68,20 @@ fn srgb(x: f32) -> u8 {
 /// Buffer destruction and queue.present both acquire wgpu-core's device snatch write lock.
 /// Exercise that lock without a window: it must remain available while the completion
 /// worker services a submission whose GPU workload is deliberately still running.
+///
+/// Checked by ordering, not wall-clock time: the lock was taken and released, and a poll
+/// after it still found the GPU work pending. A worker that held the snatch read lock through
+/// a fence wait would block `destroy` until the work completed, and the poll would then fire
+/// its callback. An attempt whose workload finished before the probe (a loaded machine
+/// delaying this thread) proves nothing either way, so it retries with more work.
 #[test]
 fn completion_worker_preserves_cpu_gpu_overlap() {
+    use std::sync::mpsc::TryRecvError;
     use std::time::Duration;
     let gpu = Gpu::headless();
     let surface = NativeSurface::new();
     surface.push_bytes(synthetic(16, 16, 0), 1).unwrap();
     let mut renderer = SurfaceRenderer::new(&gpu.device, OFFSCREEN_FORMAT);
-    renderer.prepare(&gpu.device, &gpu.queue, &[draw(&surface, [0.0, 0.0, 16.0, 16.0])], (16, 16));
     let shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("overlap workload"),
         source: wgpu::ShaderSource::Wgsl(
@@ -112,53 +118,62 @@ fn completion_worker_preserves_cpu_gpu_overlap() {
         layout: &compute.get_bind_group_layout(0),
         entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
     });
-    let probe = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("present lock probe"),
-        size: 4,
-        usage: wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
     let target = Offscreen::new(&gpu.device, 16, 16);
-    let mut encoder = gpu.device.create_command_encoder(&Default::default());
-    {
-        let mut pass = encoder.begin_compute_pass(&Default::default());
-        pass.set_pipeline(&compute);
-        pass.set_bind_group(0, &bind, &[]);
-        pass.dispatch_workgroups(1024, 1, 1);
+    let mut outcomes = Vec::new();
+    // Each dispatch is one unit of work (a few hundred ms on a desktop GPU); later attempts
+    // queue more of them in the same submission rather than lengthening one dispatch.
+    for dispatches in [1, 2, 4, 8, 16] {
+        renderer.prepare(&gpu.device, &gpu.queue, &[draw(&surface, [0.0, 0.0, 16.0, 16.0])], (16, 16));
+        let probe = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("present lock probe"),
+            size: 4,
+            usage: wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&compute);
+            pass.set_bind_group(0, &bind, &[]);
+            for _ in 0..dispatches {
+                pass.dispatch_workgroups(1024, 1, 1);
+            }
+        }
+        {
+            let mut pass = clear_pass(&mut encoder, &target.view, wgpu::Color::BLACK, renderer.timestamp_writes());
+            renderer.draw(&mut pass, 0);
+        }
+        let (done, completed) = std::sync::mpsc::channel();
+        encoder.on_submitted_work_done(move || {
+            let _ = done.send(());
+        });
+        renderer.submit(&gpu.queue, encoder);
+        // The worker has taken submit's wakeup once its one-slot channel has room again: it is
+        // in its polling loop, which only leaves once the queue is empty.
+        while renderer.completion.try_send(()).is_err() {
+            std::thread::yield_now();
+        }
+        std::thread::sleep(Duration::from_millis(1));
+        let outcome = if completed.try_recv().is_ok() {
+            "finished before the probe"
+        } else {
+            probe.destroy();
+            gpu.device.poll(wgpu::PollType::Poll).unwrap();
+            match completed.try_recv() {
+                Err(TryRecvError::Empty) => {
+                    completed.recv_timeout(Duration::from_secs(30)).expect("GPU workload completed");
+                    "overlapped"
+                }
+                _ => "finished by the time the write lock returned",
+            }
+        };
+        eprintln!("overlap probe: {dispatches} dispatches, {outcome}");
+        if outcome == "overlapped" {
+            return;
+        }
+        outcomes.push(outcome);
     }
-    {
-        let mut pass = clear_pass(&mut encoder, &target.view, wgpu::Color::BLACK, renderer.timestamp_writes());
-        renderer.draw(&mut pass, 0);
-    }
-    let (done, completed) = std::sync::mpsc::channel();
-    encoder.on_submitted_work_done(move || {
-        let _ = done.send(Instant::now());
-    });
-    let start = Instant::now();
-    renderer.submit(&gpu.queue, encoder);
-    let submitted = Instant::now();
-    // Allow the completion thread to enter its polling path before taking the write lock.
-    std::thread::sleep(Duration::from_millis(10));
-    let lock_start = Instant::now();
-    probe.destroy();
-    let unlocked = Instant::now();
-    gpu.device.poll(wgpu::PollType::Poll).unwrap();
-    let state = completed.try_recv();
-    eprintln!(
-        "overlap probe: submit {:.3} ms, write lock {:.3} ms, callback {state:?}",
-        (submitted - start).as_secs_f64() * 1000.0,
-        (unlocked - lock_start).as_secs_f64() * 1000.0
-    );
-    let still_running = matches!(state, Err(std::sync::mpsc::TryRecvError::Empty));
-    assert!(still_running, "snatch write lock was serialized behind GPU completion (or workload too short)");
-    let finish = completed.recv_timeout(Duration::from_secs(30)).expect("GPU workload completed");
-    assert!(unlocked - lock_start < (finish - start) / 2, "write lock consumed the GPU workload's duration");
-    eprintln!(
-        "CPU/GPU overlap: write lock {:.3} ms, returned {:.3} ms before GPU completion ({:.3} ms workload)",
-        (unlocked - lock_start).as_secs_f64() * 1000.0,
-        (finish - unlocked).as_secs_f64() * 1000.0,
-        (finish - start).as_secs_f64() * 1000.0
-    );
+    panic!("the snatch write lock never returned while GPU work was pending: {outcomes:?}");
 }
 fn publish(s: &NativeSurface, b: ByteFrame, id: u64, native: bool) {
     #[cfg(target_os = "macos")]

@@ -63,7 +63,7 @@ pub struct SurfaceRenderer {
     timing_pool: Option<Arc<TimingPool>>,
     queries: Option<Arc<TimingSlot>>,
     queries_used: std::sync::atomic::AtomicBool,
-    completion: std::sync::mpsc::SyncSender<()>,
+    pub(super) completion: std::sync::mpsc::SyncSender<()>,
     pipeline: wgpu::RenderPipeline,
     format: wgpu::TextureFormat,
     extra: Vec<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
