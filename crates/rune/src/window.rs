@@ -3084,6 +3084,8 @@ impl<S: 'static> Host<S> {
         if matches!(&event, WindowEvent::ScaleFactorChanged { .. }) { self.apply_placement(event_loop); }
         match event {
             WindowEvent::Focused(focused) => {
+                #[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
+                if let Some(w) = &self.win { crate::file_dialog::window_focus(&w.window, focused); }
                 if self.launcher() && self.win.as_ref().is_some_and(|w| !w.first_frame.notified) { return; }
                 #[cfg(target_os = "macos")]
                 if self.win.as_ref().and_then(|w| w.panel.as_ref()).is_some_and(|p| p.is_key() != focused) {

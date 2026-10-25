@@ -761,8 +761,10 @@ draw it, so `--snap` shows it and `--tree` has a top-level `tooltip` object.
 Enable Rune's `native-file-dialog` feature and inject `FileDialogs::native()` in the shell.
 `dialogs.open(options).await` and `dialogs.save(options).await` return an optional path
 (None means cancelled). `FileDialogOptions` carries title, directory, suggested filename and
-`.filter("Audio", &["wav", "flac"])`. rfd handles Cocoa on macOS and the XDG portal on Linux;
-poll these futures on the app's async executor and wake Rune when the result arrives.
+`.filter("Audio", &["wav", "flac"])`. rfd handles macOS and Windows; on Linux Rune calls the
+XDG desktop portal's FileChooser itself over zbus, parented to the focused X11 window, and
+returns an error when the desktop has no portal. Poll these futures on the app's async executor
+and wake Rune when the result arrives.
 Never block the window's main thread with `pollster::block_on` for a native dialog;
 Cocoa needs that thread's event loop to present and complete it.
 

@@ -9,6 +9,7 @@ default = ["ogg-audio"]
 # Headless benchmark instrumentation; ordinary builds contain no phase clocks.
 frame-profile = ["dep:procwatch", "dep:libc"]
 dev = ["dep:tungstenite", "dep:csscolorparser", "rune-motion/dev"]
+# Native Open and Save dialogs: rfd on macOS and Windows, the XDG desktop portal over zbus on Linux.
 native-file-dialog = ["dep:rfd"]
 hot = ["dep:subsecond", "dep:dioxus-devtools"]
 # macOS: let an overlay set its element's cursor while its app isn't frontmost. macOS ignores
@@ -37,7 +38,6 @@ bytemuck = { version = "1.25", features = ["derive"] }
 png = "0.18"
 serde_json = "1"
 portable-atomic = "1"
-rfd = { version = "0.15", optional = true, default-features = false, features = ["xdg-portal", "async-std"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 blake3 = "1"
 zeroize = "1.8"
@@ -61,6 +61,9 @@ js-sys = "0.3"
 console_error_panic_hook = "0.1"
 wgpu = { version = "30", default-features = false, features = ["webgpu"] }
 web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "CssStyleDeclaration", "MediaQueryList", "console"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+rfd = { version = "0.17", optional = true, default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5.2"

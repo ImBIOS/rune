@@ -5,6 +5,17 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`native-file-dialog` passes `cargo deny`.** On Linux the Open and Save dialogs now call the XDG
+  desktop portal's FileChooser directly over zbus 6, which Rune already uses for global shortcuts,
+  instead of through rfd's portal backend (ashpd and zbus 5, whose `zvariant`, `zbus_names` and
+  `zvariant_derive` are flagged unmaintained: RUSTSEC-2026-0370, 0371 and 0372). rfd moves to 0.17
+  and is only a macOS and Windows dependency, with no features; the Linux tree loses 75 crates.
+  Things apps can notice: on Linux a desktop with no portal FileChooser now returns an error
+  instead of falling back to zenity, a dialog dropped before it answers is closed, and the dialog
+  is parented to the focused X11 window (Wayland windows stay unparented). Paths, filters, the
+  starting folder, the suggested name and cancellation behave as before. Apps need no code
+  changes.
+
 - **rune-fx fills.** `Fx::fill(params)` paints a node's shape, or with `.border(w)` a band inside
   its edge: liquid metal (chrome, gold, rose gold, gunmetal; also as a tube border), mesh
   gradient, dither (Bayer 2×2/4×4/8×8, blue noise, white noise; of a ramp, noise, the backdrop or
