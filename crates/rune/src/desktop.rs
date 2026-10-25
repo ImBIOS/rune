@@ -327,6 +327,7 @@ impl<S: 'static> Member for Window<S> {
             Kind::Fling(vx, vy) => crate::tooling::fling(rt, (x, y), *vx, *vy),
             Kind::Files(step) => crate::tooling::file_input(rt, step, (x, y)),
             Kind::Mark(_) | Kind::Reopen | Kind::Menu(_) | Kind::PopupMenu(_) | Kind::Shortcut(_) => {}
+            kind => { crate::tooling::canvas_input(rt, kind, (x, y)); }
         }
     }
 
@@ -525,13 +526,13 @@ impl Desk {
 
     /// Pointer input at `at` in output points: to the window a press captured, else the one under it.
     fn pointer_input(&mut self, kind: &Kind, at: (f32, f32)) {
-        let captured = matches!(kind, Kind::Move | Kind::Up | Kind::SecondaryUp).then_some(self.pressed).flatten();
+        let captured = (matches!(kind, Kind::Move) || kind.is_up()).then_some(self.pressed).flatten();
         let target = captured.or_else(|| self.hit(at));
-        if matches!(kind, Kind::Move | Kind::Down | Kind::SecondaryDown) && self.hover != target && captured.is_none() {
+        if (matches!(kind, Kind::Move) || kind.is_down()) && self.hover != target && captured.is_none() {
             if let Some(h) = self.hover { self.members[h].leave(); }
             self.hover = target;
         }
-        if matches!(kind, Kind::Down | Kind::SecondaryDown) {
+        if kind.is_down() {
             self.pressed = target;
             match target {
                 // A click brings its window to the front with the keyboard, activating the app.
@@ -540,7 +541,7 @@ impl Desk {
                 None => self.focus(self.key, false),
             }
         }
-        if matches!(kind, Kind::Up | Kind::SecondaryUp) { self.pressed = None; }
+        if kind.is_up() { self.pressed = None; }
         if let Some(i) = target {
             let (ox, oy) = self.origin_pt(i);
             self.members[i].input(kind, (at.0 - ox, at.1 - oy));
@@ -714,10 +715,8 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
             let at = || match &e.pos {
                 Pos::Xy(x, y) => (*x, *y),
                 Pos::Key(key) => desk.find(key).unwrap_or_else(|| die(&format!("script: no element with key {key:?} in a visible window"))),
-                Pos::Rel(dx, dy) => match e.kind {
-                    Kind::Wheel(..) | Kind::Fling(..) => desk.pointer().unwrap_or((0.0, 0.0)),
-                    _ => (last_down.0 + dx, last_down.1 + dy),
-                },
+                Pos::Rel(_, _) if e.kind.at_pointer() => desk.pointer().unwrap_or((0.0, 0.0)),
+                Pos::Rel(dx, dy) => (last_down.0 + dx, last_down.1 + dy),
             };
             let (x, y) = at();
             match &e.kind {
@@ -732,14 +731,15 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
                     desk.members[i].resolve_popup(picked.as_deref()).unwrap_or_else(|e| die(&format!("script pop-up menu: {e}")));
                 }
                 // While another app is active, as after a click on the backdrop, keys go to it.
-                Kind::Key(..) | Kind::Physical(_) | Kind::Paste(_) => {
+                Kind::Key(..) | Kind::KeyUp(_) | Kind::Physical(_) | Kind::Paste(_) => {
                     if let Some(i) = desk.key.filter(|_| desk.active) { desk.members[i].input(&e.kind, (x, y)); }
                 }
-                Kind::Move | Kind::Down | Kind::Up | Kind::SecondaryDown | Kind::SecondaryUp | Kind::Wheel(..) | Kind::Fling(..) => {
-                    if matches!(e.kind, Kind::Down | Kind::SecondaryDown) { last_down = (x, y); }
+                Kind::Files(step) => desk.file_input(step, (x, y)),
+                // The rest are pointer input.
+                kind => {
+                    if kind.is_down() { last_down = (x, y); }
                     desk.pointer_input(&e.kind, (x, y));
                 }
-                Kind::Files(step) => desk.file_input(step, (x, y)),
             }
             if let Some((ov, _)) = overlay.as_mut() {
                 match &e.kind {

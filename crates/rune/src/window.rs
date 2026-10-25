@@ -1718,6 +1718,26 @@ fn titlebar_double_click(window: &Window) {
     window.set_maximized(!window.is_maximized());
 }
 
+pub(crate) fn pointer_button(button: MouseButton) -> crate::PointerButton {
+    match button {
+        MouseButton::Left => crate::PointerButton::Primary,
+        MouseButton::Right => crate::PointerButton::Secondary,
+        MouseButton::Middle => crate::PointerButton::Middle,
+        MouseButton::Back => crate::PointerButton::Back,
+        MouseButton::Forward => crate::PointerButton::Forward,
+        MouseButton::Other(n) => crate::PointerButton::Other(n),
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn gesture_phase(phase: TouchPhase) -> crate::GesturePhase {
+    match phase {
+        TouchPhase::Started => crate::GesturePhase::Began,
+        TouchPhase::Moved => crate::GesturePhase::Moved,
+        TouchPhase::Ended | TouchPhase::Cancelled => crate::GesturePhase::Ended,
+    }
+}
+
 pub(crate) fn map_mods(m: ModifiersState) -> Mods {
     Mods { shift: m.shift_key(), cmd: if cfg!(target_os = "macos") { m.super_key() } else { m.control_key() },
         alt: m.alt_key(), ctrl: m.control_key(), logo: m.super_key() }
@@ -3209,12 +3229,13 @@ impl<S: 'static> Host<S> {
             }
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
                 let pressed = event.state == ElementState::Pressed;
-                let logical = pressed.then(|| map_key(&event.logical_key, self.mods)).flatten();
+                // A release's logical key only matters to `on_key_up` handlers.
+                let logical = (pressed || rt.wants_key_up()).then(|| map_key(&event.logical_key, self.mods)).flatten();
                 let mut redraw = false;
                 // A standard ⌘W or ⌘M menu item handing Rune its key: close or minimize after,
                 // if no handler takes it.
                 #[cfg(target_os = "macos")]
-                let unhandled = logical.as_ref().and_then(crate::native_menu::take_unhandled);
+                let unhandled = logical.as_ref().filter(|_| pressed).and_then(crate::native_menu::take_unhandled);
                 #[cfg(not(target_os = "macos"))]
                 let unhandled = None;
                 if let winit::keyboard::PhysicalKey::Code(key) = event.physical_key {
@@ -3222,10 +3243,11 @@ impl<S: 'static> Host<S> {
                         key, mods: map_mods(self.mods), pressed, repeat: event.repeat,
                     }, logical, unhandled);
                 } else if let Some(ev) = logical {
-                    if ev.key == Key::Command('v') && rt.accepts_paste() { self.clipboard.read(rt); }
+                    if !pressed { redraw = rt.key_up(ev); }
+                    else if ev.key == Key::Command('v') && rt.accepts_paste() { self.clipboard.read(rt); }
                     else if event.repeat { rt.repeat_key(ev); }
                     else { rt.key(ev); }
-                    redraw = true;
+                    redraw |= pressed;
                 }
                 if redraw { l.window.request_redraw(); }
             }
@@ -3238,14 +3260,38 @@ impl<S: 'static> Host<S> {
                 l.window.request_redraw();
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
-                if phase == TouchPhase::Started { rt.wheel_began(); }
+                let shift = crate::runtime::SHIFT_TURNS_WHEEL && self.mods.shift_key();
+                let (dx, dy) = crate::runtime::wheel_delta(delta, scale, shift);
+                let precise = matches!(delta, winit::event::MouseScrollDelta::PixelDelta(_));
+                let phase = gesture_phase(phase);
+                match rt.pointer() {
+                    // Off macOS a trackpad pinch is a Ctrl + wheel.
+                    Some((x, y)) if !cfg!(target_os = "macos") && self.mods.control_key() && rt.pinch_wheel(x, y, dy) => {}
+                    Some((x, y)) => rt.wheel_event(crate::WheelEvent::new(dx, dy).at(x, y).mods(map_mods(self.mods))
+                        .phase(phase).precise(precise)),
+                    None if phase == crate::GesturePhase::Began => rt.wheel_began(),
+                    None if phase == crate::GesturePhase::Ended => rt.wheel_ended(),
+                    None => {}
+                }
+                l.window.request_redraw();
+            }
+            WindowEvent::PinchGesture { delta, phase, .. } => {
                 if let Some((x, y)) = rt.pointer() {
-                    let shift = crate::runtime::SHIFT_TURNS_WHEEL && self.mods.shift_key();
-                    let (dx, dy) = crate::runtime::wheel_delta(delta, scale, shift);
-                    rt.wheel_xy(x, y, dx, dy);
+                    rt.magnify_event(crate::MagnifyEvent::new(delta as f32).at(x, y).phase(gesture_phase(phase)));
                     l.window.request_redraw();
                 }
-                if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) { rt.wheel_ended(); }
+            }
+            WindowEvent::RotationGesture { delta, phase, .. } => {
+                if let Some((x, y)) = rt.pointer() {
+                    rt.rotate_event(crate::RotateEvent::new(delta).at(x, y).phase(gesture_phase(phase)));
+                    l.window.request_redraw();
+                }
+            }
+            WindowEvent::DoubleTapGesture { .. } => {
+                if let Some((x, y)) = rt.pointer() {
+                    rt.smart_magnify(x, y);
+                    l.window.request_redraw();
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 rt.pointer_move(position.x as f32 / scale, position.y as f32 / scale);
@@ -3298,6 +3344,15 @@ impl<S: 'static> Host<S> {
                     match state {
                         ElementState::Pressed => rt.secondary_down(x, y),
                         ElementState::Released => rt.secondary_up(x, y),
+                    }
+                }
+                l.window.request_redraw();
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if let Some((x, y)) = rt.pointer() {
+                    match state {
+                        ElementState::Pressed => rt.button_down(x, y, pointer_button(button)),
+                        ElementState::Released => rt.button_up(x, y, pointer_button(button)),
                     }
                 }
                 l.window.request_redraw();

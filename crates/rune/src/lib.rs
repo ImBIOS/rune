@@ -54,6 +54,8 @@ mod shortcuts;
 pub use shortcuts::{PhysicalKeyCode, Shortcut, ShortcutError, ShortcutId, modifier_keycaps};
 mod physical_input;
 pub use physical_input::PhysicalInput;
+mod canvas_input;
+pub use canvas_input::{GesturePhase, MagnifyEvent, PointerButton, RotateEvent, WheelEvent};
 mod native_menu;
 pub use native_menu::{MenuError, MenuItem};
 mod popup_menu;

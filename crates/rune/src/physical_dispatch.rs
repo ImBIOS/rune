@@ -96,6 +96,13 @@ impl<S: 'static> Runtime<S> {
         let modifier = self.modifier_dispatch(&event, consumed, tx);
         if consumed { return true; }
         modifier | match fallback {
+            // A release's logical key, for `on_key_up`.
+            Some(Fallback { key, .. }) if matches!(event, PhysicalInput::Key { pressed: false, .. }) => {
+                let mut one = self.transaction();
+                let ran = self.route_key_up(&key, &mut one);
+                merge(tx, one);
+                ran
+            }
             Some(Fallback { key, unhandled }) => {
                 if key.key == crate::Key::Command('v') && self.accepts_paste() {
                     // Capture the target in event order, before another queued click can

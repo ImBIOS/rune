@@ -138,19 +138,23 @@ impl<S: 'static> Running<S> {
                     (MouseButton::Left, ElementState::Released) => self.rt.pointer_up(x, y),
                     (MouseButton::Right, ElementState::Pressed) => self.rt.secondary_down(x, y),
                     (MouseButton::Right, ElementState::Released) => self.rt.secondary_up(x, y),
-                    _ => return false,
+                    (&button, ElementState::Pressed) => self.rt.button_down(x, y, crate::window::pointer_button(button)),
+                    (&button, ElementState::Released) => self.rt.button_up(x, y, crate::window::pointer_button(button)),
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                // Trackpad pinch is ctrl+wheel. Rune ignores it; the page never zooms.
-                if self.input.mods.control_key() { return false; }
                 let Some((x, y)) = self.rt.pointer() else { return false };
                 let (dx, dy) = crate::runtime::wheel_delta(*delta, scale, self.input.mods.shift_key());
-                self.rt.wheel_xy(x, y, dx, dy);
+                // Trackpad pinch is ctrl+wheel: an `on_magnify` handler's, else ignored, and the
+                // page never zooms.
+                if self.input.mods.control_key() { return self.rt.pinch_wheel(x, y, dy); }
+                let precise = matches!(delta, winit::event::MouseScrollDelta::PixelDelta(_));
+                self.rt.wheel_event(crate::WheelEvent::new(dx, dy).at(x, y).mods(modifiers(self.input.mods)).precise(precise));
             }
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
                 immediate = true;
-                let mut logical = (event.state == ElementState::Pressed).then(|| crate::window::map_key(&event.logical_key, self.input.mods)).flatten();
+                let pressed = event.state == ElementState::Pressed;
+                let mut logical = (pressed || self.rt.wants_key_up()).then(|| crate::window::map_key(&event.logical_key, self.input.mods)).flatten();
                 if let Some(key) = &mut logical {
                     key.mods = modifiers(self.input.mods);
                     if key.mods.cmd && let crate::Key::Text(text) = &key.key && text.chars().count() == 1 {
@@ -161,7 +165,9 @@ impl<S: 'static> Running<S> {
                 if let winit::keyboard::PhysicalKey::Code(key) = event.physical_key {
                     self.rt.physical_with_fallback(crate::PhysicalInput::Key { key, mods: modifiers(self.input.mods),
                         pressed: event.state == ElementState::Pressed, repeat: event.repeat }, logical);
-                } else if let Some(key) = logical { self.rt.key(key); }
+                } else if let Some(key) = logical {
+                    if pressed { self.rt.key(key); } else { self.rt.key_up(key); }
+                }
             }
             WindowEvent::Touch(touch) => {
                 let point = (touch.location.x as f32 / scale, touch.location.y as f32 / scale);

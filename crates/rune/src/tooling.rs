@@ -530,6 +530,41 @@ pub(crate) enum Kind {
     Fling(f32, f32),
     /// A file drag from another app (`drag_files`, `drop_files`).
     Files(FileStep),
+    /// `{"type": "wheel"}`: one delta with modifiers and a phase, at the pointer.
+    WheelEvent(crate::WheelEvent),
+    Magnify(crate::MagnifyEvent),
+    Rotate(crate::RotateEvent),
+    SmartMagnify,
+    /// A button besides the primary and secondary (`"button": "middle"`).
+    ButtonDown(crate::PointerButton),
+    ButtonUp(crate::PointerButton),
+    KeyUp(KeyEvent),
+}
+
+impl Kind {
+    /// A press that later `Rel` positions are relative to.
+    pub(crate) fn is_down(&self) -> bool { matches!(self, Kind::Down | Kind::SecondaryDown | Kind::ButtonDown(_)) }
+    pub(crate) fn is_up(&self) -> bool { matches!(self, Kind::Up | Kind::SecondaryUp | Kind::ButtonUp(_)) }
+    /// Without a position it lands where the pointer is, not at the last press.
+    pub(crate) fn at_pointer(&self) -> bool {
+        matches!(self, Kind::Wheel(..) | Kind::Fling(..) | Kind::WheelEvent(_) | Kind::Magnify(_) | Kind::Rotate(_) | Kind::SmartMagnify)
+    }
+}
+
+/// The canvas input of a script (`canvas_input.rs`) at window point (x, y); false for any
+/// other kind.
+pub(crate) fn canvas_input<S: 'static>(rt: &mut Runtime<S>, kind: &Kind, (x, y): (f32, f32)) -> bool {
+    match kind {
+        Kind::WheelEvent(ev) => rt.wheel_event(ev.at(x, y)),
+        Kind::Magnify(ev) => rt.magnify_event(ev.at(x, y)),
+        Kind::Rotate(ev) => rt.rotate_event(ev.at(x, y)),
+        Kind::SmartMagnify => rt.smart_magnify(x, y),
+        Kind::ButtonDown(b) => rt.button_down(x, y, *b),
+        Kind::ButtonUp(b) => rt.button_up(x, y, *b),
+        Kind::KeyUp(k) => { rt.key_up(k.clone()); }
+        _ => return false,
+    }
+    true
 }
 
 #[derive(Clone, Debug)]
@@ -539,9 +574,25 @@ pub(crate) enum FileStep {
     Leave,
 }
 
-/// A scripted wheel delta: vertical-only ones take the plain vertical path.
+/// A scripted wheel delta: vertical-only ones take the plain vertical path, unless an
+/// `on_wheel` handler may take them.
 pub(crate) fn wheel<S: 'static>(rt: &mut Runtime<S>, (x, y): (f32, f32), dx: f32, dy: f32) {
-    if dx == 0.0 { rt.wheel(x, y, dy) } else { rt.wheel_xy(x, y, dx, dy) }
+    if dx == 0.0 && !rt.hears_wheel() { rt.wheel(x, y, dy) } else { rt.wheel_xy(x, y, dx, dy) }
+}
+
+/// A script step's modifier flags.
+fn script_mods(e: &Value) -> Mods {
+    let flag = |k: &str| e[k].as_bool().unwrap_or(false);
+    Mods { shift: flag("shift"), cmd: flag("cmd"), alt: flag("alt"), ctrl: flag("ctrl"), logo: flag("logo") }
+}
+
+fn script_phase(e: &Value) -> crate::GesturePhase {
+    match e["phase"].as_str().unwrap_or("moved") {
+        "began" => crate::GesturePhase::Began,
+        "moved" => crate::GesturePhase::Moved,
+        "ended" => crate::GesturePhase::Ended,
+        other => die(&format!("unknown gesture phase {other}; use began, moved or ended")),
+    }
 }
 
 /// A scripted release velocity: vertical-only ones take the plain vertical path.
@@ -611,6 +662,13 @@ impl Ev {
             Kind::Files(FileStep::Hover(paths)) => ScriptEvent::DragFiles { paths: paths.clone(), at: at() },
             Kind::Files(FileStep::Drop(paths)) => ScriptEvent::DropFiles { paths: paths.clone(), at: at() },
             Kind::Files(FileStep::Leave) => ScriptEvent::DragFilesLeave,
+            Kind::WheelEvent(ev) => pointer(PointerAction::Wheel(*ev)),
+            Kind::Magnify(ev) => pointer(PointerAction::Magnify(*ev)),
+            Kind::Rotate(ev) => pointer(PointerAction::Rotate(*ev)),
+            Kind::SmartMagnify => pointer(PointerAction::SmartMagnify),
+            Kind::ButtonDown(b) => pointer(PointerAction::ButtonDown(*b)),
+            Kind::ButtonUp(b) => pointer(PointerAction::ButtonUp(*b)),
+            Kind::KeyUp(key) => ScriptEvent::KeyUp(key.clone()),
         };
         TimedEvent { t: self.t, event }
     }
@@ -707,13 +765,29 @@ fn parse_script(list: Value) -> Vec<Ev> {
             Pos::Rel(0.0, 0.0)
         };
         let ty = e["type"].as_str().unwrap_or("tap");
+        // `"button": "middle"` (or "back", "forward", "secondary") presses with another button.
+        let button = match e["button"].as_str().unwrap_or("primary") {
+            "primary" => crate::PointerButton::Primary,
+            "secondary" => crate::PointerButton::Secondary,
+            "middle" => crate::PointerButton::Middle,
+            "back" => crate::PointerButton::Back,
+            "forward" => crate::PointerButton::Forward,
+            other => die(&format!("unknown button {other}")),
+        };
+        let (down, up) = match button {
+            crate::PointerButton::Primary => (Kind::Down, Kind::Up),
+            crate::PointerButton::Secondary => (Kind::SecondaryDown, Kind::SecondaryUp),
+            b => (Kind::ButtonDown(b), Kind::ButtonUp(b)),
+        };
+        // A gesture at an element or point moves the pointer there first.
+        let gesture_at = |out: &mut Vec<Ev>, pos: &Pos| if !matches!(pos, Pos::Rel(..)) { out.push(Ev { t, kind: Kind::Move, pos: pos.clone() }) };
         match ty {
             "move" => out.push(Ev { t, kind: Kind::Move, pos }),
             "down" => {
                 out.push(Ev { t, kind: Kind::Move, pos: pos.clone() });
-                out.push(Ev { t, kind: Kind::Down, pos });
+                out.push(Ev { t, kind: down, pos });
             }
-            "up" => out.push(Ev { t, kind: Kind::Up, pos }),
+            "up" => out.push(Ev { t, kind: up, pos }),
             "secondary-down" => out.push(Ev { t, kind: Kind::SecondaryDown, pos }),
             "secondary-up" => out.push(Ev { t, kind: Kind::SecondaryUp, pos }),
             "secondary-click" => {
@@ -722,8 +796,8 @@ fn parse_script(list: Value) -> Vec<Ev> {
             }
             "tap" | "click" => {
                 out.push(Ev { t, kind: Kind::Move, pos: pos.clone() });
-                out.push(Ev { t, kind: Kind::Down, pos });
-                out.push(Ev { t: t + e["hold"].as_f64().unwrap_or(0.08), kind: Kind::Up, pos: Pos::Rel(0.0, 0.0) });
+                out.push(Ev { t, kind: down, pos });
+                out.push(Ev { t: t + e["hold"].as_f64().unwrap_or(0.08), kind: up, pos: Pos::Rel(0.0, 0.0) });
             }
             "double-click" | "double-tap" | "triple-click" => {
                 // Two (three) presses `gap` apart (default 0.15 s), inside the default double-click interval.
@@ -741,7 +815,7 @@ fn parse_script(list: Value) -> Vec<Ev> {
                 let dy = e["dy"].as_f64().unwrap_or(0.0) as f32;
                 let dur = e["dur"].as_f64().unwrap_or(0.3).max(0.01);
                 out.push(Ev { t, kind: Kind::Move, pos: pos.clone() });
-                out.push(Ev { t, kind: Kind::Down, pos });
+                out.push(Ev { t, kind: down, pos });
                 let steps = (dur * 120.0).ceil() as usize;
                 for s in 1..=steps {
                     let f = s as f32 / steps as f32;
@@ -753,7 +827,7 @@ fn parse_script(list: Value) -> Vec<Ev> {
                         pos: Pos::Rel(dx * f, dy * f),
                     });
                 }
-                out.push(Ev { t: t + dur + 0.02, kind: Kind::Up, pos: Pos::Rel(dx, dy) });
+                out.push(Ev { t: t + dur + 0.02, kind: up, pos: Pos::Rel(dx, dy) });
             }
             "type" => {
                 let text = e["text"].as_str().unwrap_or("");
@@ -763,22 +837,39 @@ fn parse_script(list: Value) -> Vec<Ev> {
                     out.push(Ev { t: t + every * k as f64, kind: Kind::Key(ev, false), pos: Pos::Rel(0.0, 0.0) });
                 }
             }
-            "key" => {
+            "key" | "key-up" => {
                 let name = e["name"].as_str().unwrap_or("");
-                let mods = Mods {
-                    shift: e["shift"].as_bool().unwrap_or(false),
-                    cmd: e["cmd"].as_bool().unwrap_or(false),
-                    alt: e["alt"].as_bool().unwrap_or(false),
-                    ctrl: e["ctrl"].as_bool().unwrap_or(false),
-                    logo: e["logo"].as_bool().unwrap_or(false),
-                };
+                let mods = script_mods(&e);
                 let key = if mods.cmd && name.len() == 1 {
                     Key::Command(name.chars().next().unwrap().to_ascii_lowercase())
                 } else {
                     key_named(name).unwrap_or_else(|| die(&format!("unknown key {name}")))
                 };
                 let repeat = e["repeat"].as_bool().unwrap_or(false);
-                out.push(Ev { t, kind: Kind::Key(KeyEvent { key, mods }, repeat), pos: Pos::Rel(0.0, 0.0) });
+                let kind = if ty == "key-up" { Kind::KeyUp(KeyEvent { key, mods }) } else { Kind::Key(KeyEvent { key, mods }, repeat) };
+                out.push(Ev { t, kind, pos: Pos::Rel(0.0, 0.0) });
+            }
+            "wheel" => {
+                // One delta, unlike "scroll"'s eased swipe, with modifiers and a phase.
+                let d = |k: &str| e[k].as_f64().unwrap_or(0.0) as f32;
+                gesture_at(&mut out, &pos);
+                let ev = crate::WheelEvent::new(d("dx"), d("dy")).mods(script_mods(&e)).phase(script_phase(&e))
+                    .precise(e["precise"].as_bool().unwrap_or(true));
+                out.push(Ev { t, kind: Kind::WheelEvent(ev), pos });
+            }
+            "magnify" => {
+                gesture_at(&mut out, &pos);
+                let ev = crate::MagnifyEvent::new(e["delta"].as_f64().unwrap_or(0.0) as f32).phase(script_phase(&e));
+                out.push(Ev { t, kind: Kind::Magnify(ev), pos });
+            }
+            "rotate" => {
+                gesture_at(&mut out, &pos);
+                let ev = crate::RotateEvent::new(e["degrees"].as_f64().unwrap_or(0.0) as f32).phase(script_phase(&e));
+                out.push(Ev { t, kind: Kind::Rotate(ev), pos });
+            }
+            "smart-magnify" => {
+                gesture_at(&mut out, &pos);
+                out.push(Ev { t, kind: Kind::SmartMagnify, pos });
             }
             "paste" => out.push(Ev { t, kind: Kind::Paste(paste_content(&e)), pos: Pos::Rel(0.0, 0.0) }),
             "scroll" => {
@@ -1552,10 +1643,8 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             let (x, y) = match &e.pos {
                 Pos::Xy(x, y) => (*x, *y),
                 Pos::Key(key) => rt.find(key).unwrap_or_else(|| die(&format!("script: no element with key {key:?}"))),
-                Pos::Rel(dx, dy) => match e.kind {
-                    Kind::Wheel(..) | Kind::Fling(..) => rt.pointer().unwrap_or((0.0, 0.0)),
-                    _ => (last_down.0 + dx, last_down.1 + dy),
-                },
+                Pos::Rel(_, _) if e.kind.at_pointer() => rt.pointer().unwrap_or((0.0, 0.0)),
+                Pos::Rel(dx, dy) => (last_down.0 + dx, last_down.1 + dy),
             };
             match &e.kind {
                 Kind::Mark(_) => {}
@@ -1580,6 +1669,10 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
                 Kind::Wheel(dx, dy) => wheel(&mut rt, (x, y), *dx, *dy),
                 Kind::Fling(vx, vy) => fling(&mut rt, (x, y), *vx, *vy),
                 Kind::Files(step) => file_input(&mut rt, step, (x, y)),
+                kind => {
+                    if kind.is_down() { last_down = (x, y); }
+                    canvas_input(&mut rt, kind, (x, y));
+                }
             }
             if let Some((ov, _)) = overlay.as_mut() {
                 match &e.kind {
@@ -2822,4 +2915,27 @@ pub(crate) fn tile(px: &[u8], w: u32, h: u32, crops: &[[u32; 4]], gap: u32) -> V
         oy += ch + gap;
     }
     out
+}
+
+#[cfg(test)]
+#[test]
+fn scripts_drive_wheels_pinches_other_buttons_and_key_releases() {
+    use crate::{GesturePhase, PointerButton};
+    let script = parse_script(json!([
+        {"type": "wheel", "x": 10, "y": 20, "dx": -4, "dy": 6, "cmd": true, "phase": "began"},
+        {"t": 0.1, "type": "magnify", "delta": 0.2},
+        {"t": 0.2, "type": "drag", "button": "middle", "key": "canvas", "dx": 30, "dur": 0.01},
+        {"t": 0.3, "type": "key-up", "name": " "},
+    ]));
+    let kinds: Vec<_> = script.iter().map(|e| format!("{:?}", e.kind)).collect();
+    assert!(matches!(script[0].kind, Kind::Move), "a wheel at a point moves the pointer there: {kinds:?}");
+    let Kind::WheelEvent(w) = script[1].kind else { panic!("{kinds:?}") };
+    assert_eq!((w.dx, w.dy, w.mods.cmd, w.phase, w.precise), (-4.0, 6.0, true, GesturePhase::Began, true));
+    assert!(matches!(script[2].kind, Kind::Magnify(m) if m.delta == 0.2) && matches!(script[2].pos, Pos::Rel(..)));
+    assert!(matches!(script[4].kind, Kind::ButtonDown(PointerButton::Middle)), "{kinds:?}");
+    assert!(script.iter().any(|e| matches!(e.kind, Kind::ButtonUp(PointerButton::Middle))));
+    let last = script.last().unwrap();
+    assert!(matches!(&last.kind, Kind::KeyUp(k) if k.key == Key::Text(" ".into())));
+    assert!(matches!(last.public().event, ScriptEvent::KeyUp(_)));
+    assert!(matches!(script[1].public().event, ScriptEvent::Pointer { action: PointerAction::Wheel(_), .. }));
 }

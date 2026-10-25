@@ -97,6 +97,8 @@ mod help;
 mod scroll_edge;
 #[path = "scroll_x.rs"]
 mod scroll_x;
+#[path = "gesture_dispatch.rs"]
+mod gesture_dispatch;
 pub(crate) use scroll_x::{SHIFT_TURNS_WHEEL, wheel_delta};
 #[cfg(test)]
 #[path = "truncate_tests.rs"]
@@ -352,6 +354,7 @@ pub(crate) struct Node {
     on_hover: Option<PressFn>,
     on_hover_change: Option<crate::el::WindowFocusFn>,
     on_pointer_move: Option<SecondaryFn>,
+    gestures: Option<Box<crate::canvas_input::CanvasInput>>,
     above: Option<crate::el::Anchor>,
     on_drag: Option<DragFn>,
     drag_out: Option<DragOutFn>,
@@ -419,16 +422,21 @@ enum Action {
     AtBottom(String, bool),
     Layout(String, [f32; 4]),
     ScreenLayout(String, [f32; 4]),
-    Press(String),
+    Press(String, crate::PointerButton),
     DoublePress(String),
     Link(String, usize),
     SecondaryPress(String, PointerPress),
-    Drag(String, Drag),
+    Drag(String, Drag, crate::PointerButton),
     DragStart(String),
     DragEnd(String, crate::DragOutcome),
     /// A file drag from another app moved, left, or dropped (`drop_dispatch`).
     Files(drop_dispatch::FileEvent),
     Key { ev: KeyEvent, repeat: bool },
+    KeyUp(KeyEvent),
+    /// A wheel delta at window point (x, y) for the `on_wheel` handlers at the pointer,
+    /// innermost first (`gesture_dispatch.rs`).
+    Wheel(Vec<String>, crate::WheelEvent),
+    Gesture(Vec<String>, gesture_dispatch::Gesture),
     Ime(Ime),
     Paste(crate::ClipboardContent, Option<Option<String>>),
     /// A `Tx::read_clipboard` callback's id and what the clipboard held.
@@ -698,6 +706,8 @@ pub struct Runtime<S: 'static> {
     queue: Vec<Action>,
     pointer: Option<(f32, f32)>,
     capture: Option<(String, Drag)>,
+    /// The button holding `capture` (`El::pointer_buttons`).
+    capture_button: crate::PointerButton,
     secondary_capture: Option<String>,
     capture_inside: bool,
     /// The pointer left while a press held it; the leave lands on release.
@@ -1020,6 +1030,7 @@ impl<S: 'static> Runtime<S> {
             queue: Vec::new(),
             pointer: None,
             capture: None,
+            capture_button: crate::PointerButton::Primary,
             secondary_capture: None,
             capture_inside: false,
             left_in_capture: false,
@@ -2197,9 +2208,10 @@ impl<S: 'static> Runtime<S> {
                 f(handler_state(&mut self.state), inside, &mut one);
                 true
             }
-            Action::Press(path) => {
+            Action::Press(path, button) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_press.clone()) else { return false };
                 self.events.push(format!("press {path}"));
+                one.button = button;
                 f(handler_state(&mut self.state), &mut one);
                 true
             }
@@ -2217,11 +2229,12 @@ impl<S: 'static> Runtime<S> {
                 f(handler_state(&mut self.state), point, &mut one);
                 true
             }
-            Action::Drag(path, mut d) => {
+            Action::Drag(path, mut d, button) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_drag.clone()) else { return false };
                 if d.phase == Phase::Move {
                     one.instant = true;
                 }
+                one.button = button;
                 d.data = if d.phase == Phase::Down { 0.0 } else { self.drag_data };
                 f(handler_state(&mut self.state), &mut d, &mut one);
                 self.drag_data = d.data;
@@ -2246,6 +2259,9 @@ impl<S: 'static> Runtime<S> {
                 if self.held_gate(None, Some(&ev.key), repeat) { return false; }
                 self.route_key(&ev, repeat, &mut one)
             }
+            Action::KeyUp(ev) => self.route_key_up(&ev, &mut one),
+            Action::Wheel(chain, ev) => self.run_wheel(chain, ev, &mut one),
+            Action::Gesture(chain, gesture) => self.run_gesture(chain, gesture, &mut one),
             Action::Ime(ev) => self.with_focused(|e| e.ime(&ev), &mut one),
             Action::Paste(content, target) => {
                 if target.is_some_and(|target| target != self.paste_target()) { return false; }
@@ -3816,7 +3832,7 @@ impl<S: 'static> Runtime<S> {
         if has_drag {
             let (dx, dy) = (x - self.press_at.0, y - self.press_at.1);
             let d = Drag { phase: Phase::Move, x: x - r[0], y: y - r[1], dx, dy, ..d };
-            self.queue.push(Action::Drag(path, d));
+            self.queue.push(Action::Drag(path, d, self.capture_button));
         }
     }
 
@@ -3995,9 +4011,10 @@ impl<S: 'static> Runtime<S> {
         self.drag_out_armed = self.drags_out(n);
         self.drag_out_threshold = n.drag_threshold.unwrap_or(crate::drag_out::DRAG_THRESHOLD);
         if n.on_drag.is_some() && !self.drag_out_armed {
-            self.queue.push(Action::Drag(path.clone(), d));
+            self.queue.push(Action::Drag(path.clone(), d, crate::PointerButton::Primary));
         }
         self.capture = Some((path, d));
+        self.capture_button = crate::PointerButton::Primary;
         self.capture_inside = true;
     }
 
@@ -4053,6 +4070,7 @@ impl<S: 'static> Runtime<S> {
         let selected = self.selected_by_drag();
         self.text_sel.dragging = false;
         let Some((path, d)) = self.capture.take() else { return };
+        let button = std::mem::take(&mut self.capture_button);
         self.refresh_hover_within();
         let double = std::mem::take(&mut self.double_armed);
         let Some((r, has_drag, has_press, has_double)) = self.node(&path).map(|n| {
@@ -4062,15 +4080,15 @@ impl<S: 'static> Runtime<S> {
         };
         if has_drag {
             let (dx, dy) = (x - self.press_at.0, y - self.press_at.1);
-            self.queue.push(Action::Drag(path.clone(), Drag { phase: Phase::Up, x: x - r[0], y: y - r[1], dx, dy, ..d }));
+            self.queue.push(Action::Drag(path.clone(), Drag { phase: Phase::Up, x: x - r[0], y: y - r[1], dx, dy, ..d }, button));
         }
         self.link_up(&path, x, y);
         if has_press && self.capture_inside && !selected {
-            self.queue.push(Action::Press(path.clone()));
+            self.queue.push(Action::Press(path.clone(), button));
         }
         // Only clicks pair: a press that dragged or was held past the interval is neither half.
         let click = !self.press_moved && self.now_clock() - self.press_down_t <= self.double_click_interval;
-        if has_double && self.capture_inside && click {
+        if has_double && self.capture_inside && click && button == crate::PointerButton::Primary {
             if double {
                 self.queue.push(Action::DoublePress(path));
             } else {
@@ -5397,7 +5415,7 @@ impl<S: 'static> Runtime<S> {
                 scale_motion: if cover.is_some() { ScaleMotion::Moving } else { scale_motion } };
             let hits_before = self.hits.len();
             if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_double_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some()
-                || n.text.as_ref().is_some_and(|t| t.selectable))
+                || n.text.as_ref().is_some_and(|t| t.selectable) || n.gestures.as_ref().is_some_and(|g| g.takes_gestures()))
                 && !self.subtree_exiting(i)
                 && self.allowed(i) && effective_opacity > 0.001 && visible
             {
@@ -6454,6 +6472,7 @@ fn flatten(
         on_hover,
         on_hover_change,
         on_pointer_move,
+        gestures,
         above,
         on_drag,
         drag_out,
@@ -6533,6 +6552,7 @@ fn flatten(
         on_hover,
         on_hover_change,
         on_pointer_move,
+        gestures,
         above,
         on_drag,
         drag_out,
@@ -7015,7 +7035,7 @@ mod tests {
         let mut rt = Runtime::new(vec![edit], view, (100.0, 100.0), Env::new(true, 1.0));
         rt.frame(0.0);
         let path = rt.nodes.iter().find(|n| n.key.as_deref() == Some("delete")).unwrap().path.clone();
-        rt.queue.push(Action::Press(path));
+        rt.queue.push(Action::Press(path, crate::PointerButton::Primary));
         rt.frame(0.0);
         assert!(rt.state.is_empty());
         assert!(!rt.has_focus());
@@ -8890,14 +8910,14 @@ mod tests {
         let input = rt.nodes.iter().find(|n| n.key.as_deref() == Some("input")).unwrap().path.clone();
         rt.set_focus(Some(input), true);
         let copy_key = KeyEvent { key: Key::Command('c'), mods: Mods { cmd: true, ..Mods::default() } };
-        rt.queue.push(Action::Press(button.clone()));
+        rt.queue.push(Action::Press(button.clone(), crate::PointerButton::Primary));
         rt.queue.push(Action::Key { ev: copy_key.clone(), repeat: false });
         rt.frame(1.0 / 120.0);
         assert_eq!(rt.copy_request.take().as_deref(), Some("héllo 👋"));
         rt.frame(1.0 / 120.0);
         assert!(rt.copy_request.is_none());
         rt.queue.push(Action::Key { ev: copy_key, repeat: false });
-        rt.queue.push(Action::Press(button));
+        rt.queue.push(Action::Press(button, crate::PointerButton::Primary));
         rt.frame(1.0 / 120.0);
         assert_eq!(rt.copy_request.take().as_deref(), Some("response"));
     }

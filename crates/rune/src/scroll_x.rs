@@ -25,7 +25,7 @@ const MOMENTUM_GAP: f64 = 0.05;
 #[derive(Debug, Default)]
 pub(super) struct WheelLock {
     /// Horizontal (`true`) or vertical, once the gesture's first delta picked it.
-    horizontal: Option<bool>,
+    pub(super) horizontal: Option<bool>,
     /// When the last delta came, in clock seconds (`now_clock`: the wall in a window, the
     /// virtual clock headless, so scripts lock axes deterministically).
     at: Option<f64>,
@@ -35,7 +35,9 @@ pub(super) struct WheelLock {
     ended: Option<f64>,
     /// The gesture is the momentum of one that ended. One that begins as momentum ends is a
     /// new touch (a finger caught the coasting content), not more momentum.
-    momentum: bool,
+    pub(super) momentum: bool,
+    /// The `on_wheel` element that took the gesture's first delta and hears the rest.
+    pub(super) handler: Option<String>,
 }
 
 /// A wheel event's delta in points, positive moving content right and down. With Shift, a delta
@@ -68,15 +70,28 @@ impl<S: 'static> Runtime<S> {
     /// mostly horizontal scrolls the innermost [`El::scroll_x`] or [`El::scroll_xy`] viewport
     /// under (x, y), anything else the innermost vertical one as [`Self::wheel`] does. Call
     /// [`Self::wheel_began`] and [`Self::wheel_ended`] where the platform reports phases;
-    /// without them a pause of 0.1 s ends a gesture.
+    /// without them a pause of 0.1 s ends a gesture. An [`El::on_wheel`] handler under the
+    /// pointer hears it first; [`Self::wheel_event`] also passes modifiers and phases.
     pub fn wheel_xy(&mut self, x: f32, y: f32, dx: f32, dy: f32) {
         if dx == 0.0 && dy == 0.0 { return; }
+        self.wheel_event(crate::WheelEvent::new(dx, dy).at(x, y));
+    }
+
+    /// A delta arrived: a gesture idle too long, or ended and not followed by its momentum,
+    /// is over, and this delta starts the next.
+    pub(super) fn wheel_delta_arrived(&mut self) {
         let now = self.now_clock();
         let l = &mut self.wheel_lock;
         let idle = if l.phased { PHASED_IDLE } else { WHEEL_IDLE };
         let stale = l.ended.is_some_and(|e| now - e > MOMENTUM_GAP) || l.at.is_none_or(|a| now - a > idle);
         if stale { *l = WheelLock::default(); }
         l.at = Some(now);
+    }
+
+    /// Scrolls by a delta no `on_wheel` handler took, on the axis the gesture locked to.
+    pub(super) fn wheel_scroll(&mut self, x: f32, y: f32, dx: f32, dy: f32) {
+        if dx == 0.0 && dy == 0.0 { return; }
+        let l = &self.wheel_lock;
         let horizontal = match l.horizontal {
             // Without phases, a delta wholly on the other axis is another wheel turning (Shift
             // let go, a tilt, a second device), so it picks afresh rather than being dropped.
@@ -94,9 +109,11 @@ impl<S: 'static> Runtime<S> {
     /// its first delta picks the axis afresh, unless it is the momentum of one that just ended.
     pub fn wheel_began(&mut self) {
         let now = self.now_clock();
+        // A delta queued for `on_wheel` handlers hasn't picked who has the gesture yet.
+        let queued = self.queue.iter().any(|a| matches!(a, Action::Wheel(..)));
         let l = &mut self.wheel_lock;
-        let momentum = !l.momentum && l.horizontal.is_some() && l.ended.is_some_and(|e| now - e <= MOMENTUM_GAP);
-        if !momentum { l.horizontal = None; }
+        let momentum = !l.momentum && (l.horizontal.is_some() || l.handler.is_some() || queued) && l.ended.is_some_and(|e| now - e <= MOMENTUM_GAP);
+        if !momentum { l.horizontal = None; l.handler = None; }
         l.momentum = momentum;
         l.phased = true;
         l.ended = None;

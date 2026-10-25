@@ -223,8 +223,26 @@ policy changes are applied in the same mutation phase.
   viewport to an offset. Left and Right arrows don't scroll a viewport (text fields own them), and
   Page Up and Page Down stay vertical; AppKit scrolls an `NSScrollView` with Left and Right only
   when nothing focused takes them. Virtual rows are vertical only. Platforms report wheels through
-  `Runtime::wheel_xy` with `wheel_began` and `wheel_ended` around trackpad gestures;
-  `Runtime::wheel` stays the vertical path.
+  `Runtime::wheel_xy` with `wheel_began` and `wheel_ended` around trackpad gestures, or
+  `Runtime::wheel_event` with modifiers and phases; `Runtime::wheel` stays the vertical path.
+- **Canvas input** (`canvas_input.rs`): what an infinite canvas, map or image viewer needs.
+  `.on_wheel(|s, e: WheelEvent, tx| -> bool)` hears wheel and trackpad deltas over the element
+  before any scroll view does, innermost first up to the nearest scroll view, with `dx`, `dy`,
+  the pointer in the element's points as drawn, `mods`, `phase`, `momentum` and `precise`.
+  Returning true takes the delta, and the element then hears the rest of that gesture, its
+  momentum included, wherever the pointer goes; false lets it scroll, and a gesture that
+  scrolled stays a scroll. `.on_magnify(|s, e: MagnifyEvent, tx| -> bool)` hears trackpad
+  pinches (scale by `1 + delta`) at the pointer: macOS reports them, and on Windows, Linux and
+  the web a pinch arrives as Ctrl + wheel, which goes to `on_magnify` (`-dy / 200` per point)
+  when one is under the pointer. `.on_rotate` and `.on_smart_magnify` (a two-finger double tap)
+  are macOS only. `.pointer_buttons([PointerButton::Middle])` lets the middle (or back,
+  forward) button press and drag the element through its own `on_press` and `on_drag`, from
+  anywhere inside it; `tx.button()` says which button. Without it those handlers stay
+  primary-only. `.on_key_up(|s, e: &KeyEvent, tx| -> bool)` hears releases with the same
+  logical keys `on_key` sees: the focused element's first, then its ancestors', and with
+  nothing focused the root's, so a handler on a window's root hears every release. A focused
+  `on_physical_input` that takes a release keeps it from `on_key_up`. Hosts map releases to
+  logical keys only while some element has `on_key_up`.
 - **Timeline growth** (`.growth(GrowthSpec { spring, edge })`, `growth.rs`): rows of a stack ease
   their heights render-side on `GROWTH` (0.32 s, bounce 0) in fixed 1/240 s substeps, so 30, 60 and
   120 fps give the same curve. Desktop's per-frame caps are per-second here (start, ramp, max, long,
@@ -1548,7 +1566,14 @@ $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/d
   `KeyEvent::mods`. `" "` gives `Key::Command(' ')`, where a window sends Cmd-Space as
   `Key::Text(" ")` with `mods.cmd`, the only `Text` that carries `cmd`;
   `KeyEvent::is_command(' ')` matches both.
-  `{"physical": "cmd+k"}` reaches only `on_physical_input` handlers.
+  `{"physical": "cmd+k"}` reaches only `on_physical_input` handlers. `{"type": "key-up",
+  "name": " "}` releases a key for `on_key_up`.
+- **Canvas input in scripts**: `{"type": "wheel", "dx": 0, "dy": -40}` is one wheel delta (with
+  `cmd` and the other modifiers, `"phase": "began" | "moved" | "ended"` and `"precise"`, true
+  by default), unlike `scroll`'s eased swipe. `{"type": "magnify", "delta": 0.1}`, `{"type":
+  "rotate", "degrees": 15}` and `{"type": "smart-magnify"}` are trackpad gestures. Each lands at
+  `x,y` or `key`, else where the pointer is. `"button": "middle"` (or `back`, `forward`,
+  `secondary`) on `down`, `up`, `tap` and `drag` presses with that button.
 - **Chords**: `{"type": "shortcut", "chord": "cmd+space"}` is the user pressing a chord
   system-wide. Register it with `App::global_shortcut` or `register_shortcut`. Only its
   shortcut handler runs, exactly as when the OS delivers it: it never reaches `on_key`,

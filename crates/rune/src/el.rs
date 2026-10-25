@@ -44,6 +44,8 @@ pub struct Tx {
     pub(crate) trace: Option<TraceCalls>,
     pub(crate) popups: Vec<crate::popup_menu::Call>,
     pub(crate) window_frame: Option<crate::window_frame::FrameRequest>,
+    /// The mouse button driving this press or drag (`Tx::button`).
+    pub(crate) button: crate::PointerButton,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -351,6 +353,8 @@ pub(crate) struct FocusSpec {
     pub step: Option<StepFn>,
     /// `on_step_limit`: a slider's Home and End.
     pub step_limit: Option<StepLimitFn>,
+    /// `on_key_up`.
+    pub key_up: Option<InputKeyFn>,
 }
 
 #[derive(Clone)]
@@ -851,6 +855,8 @@ pub struct El {
     pub(crate) on_hover: Option<PressFn>,
     pub(crate) on_hover_change: Option<WindowFocusFn>,
     pub(crate) on_pointer_move: Option<SecondaryFn>,
+    /// `on_wheel`, `on_magnify` and the other canvas handlers (`canvas_input.rs`).
+    pub(crate) gestures: Option<Box<crate::canvas_input::CanvasInput>>,
     pub(crate) above: Option<Anchor>,
     pub(crate) on_drag: Option<DragFn>,
     pub(crate) drag_out: Option<DragOutFn>,
@@ -920,6 +926,7 @@ fn base(dir: FlexDirection) -> El {
         on_hover: None,
         on_hover_change: None,
         on_pointer_move: None,
+        gestures: None,
         above: None,
         on_drag: None,
         drag_out: None,

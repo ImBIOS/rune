@@ -110,6 +110,8 @@ pub enum ScriptEvent {
     Mark(String),
     /// A logical key; `repeat` is a held key's auto-repeat.
     Key { key: KeyEvent, repeat: bool },
+    /// `{"type": "key-up"}`: a logical key's release.
+    KeyUp(KeyEvent),
     Paste(String),
     /// A paste with HTML or RTF beside the text (`{"paste": {"text": …, "html": …}}`).
     PasteContent(crate::ClipboardContent),
@@ -150,6 +152,17 @@ pub enum PointerAction {
     ScrollXy(f32, f32),
     /// A release velocity (vx, vy) in points per second with a horizontal part.
     FlingXy(f32, f32),
+    /// `{"type": "wheel"}`: one wheel delta with its modifiers and phase.
+    Wheel(crate::WheelEvent),
+    /// `{"type": "magnify"}`: a trackpad pinch.
+    Magnify(crate::MagnifyEvent),
+    /// `{"type": "rotate"}`: a two-finger rotation.
+    Rotate(crate::RotateEvent),
+    /// `{"type": "smart-magnify"}`: a two-finger double tap.
+    SmartMagnify,
+    /// A press of a button besides the primary and secondary (`"button": "middle"`).
+    ButtonDown(crate::PointerButton),
+    ButtonUp(crate::PointerButton),
 }
 
 /// Where a pointer event lands, as the script wrote it.

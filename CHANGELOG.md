@@ -5,6 +5,18 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Canvas input: `on_wheel`, `on_magnify`, other mouse buttons and `on_key_up`.** An element
+  can take wheel and trackpad deltas before any scroll view (`El::on_wheel`, with modifiers,
+  phase, momentum and precision), trackpad pinches, rotation and smart magnify (`on_magnify`,
+  `on_rotate`, `on_smart_magnify`), middle, back and forward button presses and drags through
+  its own `on_press` and `on_drag` (`El::pointer_buttons`, `Tx::button`), and key releases
+  (`El::on_key_up`). Scripts gain `wheel`, `magnify`, `rotate`, `smart-magnify` and `key-up`
+  steps and a `button` on presses and drags; `ScriptEvent` and `PointerAction` gain variants
+  for them. Nothing changes for an app without these handlers, except that a scripted
+  vertical `scroll` goes through `wheel_xy` once some element has `on_wheel`. On Windows and
+  Linux a Ctrl + wheel (a trackpad pinch) over an `on_magnify` element pinches instead of
+  scrolling.
+
 - **Wakes no longer pile up in headless runs.** A coarse headless step polled once per
   `wake_after` deadline that fell inside it, so a poll that asked for a wake each time it ran
   (a save timer that rearms, a scripted gesture) started a new chain of wakes every frame: one

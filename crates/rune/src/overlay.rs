@@ -1744,14 +1744,15 @@ impl<T: 'static> AnyHost for Overlay<T> {
             }
             WindowEvent::KeyboardInput { event, .. } if self.options.keys == KeyPolicy::OnDemand => {
                 let pressed = event.state.is_pressed();
-                let fallback = pressed.then(|| crate::window::map_key(&event.logical_key, self.mods)).flatten();
+                let fallback = (pressed || self.rt.wants_key_up()).then(|| crate::window::map_key(&event.logical_key, self.mods)).flatten();
                 if let winit::keyboard::PhysicalKey::Code(key) = event.physical_key {
                     self.dirty |= self.rt.physical_with_fallback(crate::PhysicalInput::Key {
                         key, mods: crate::window::map_mods(self.mods), pressed, repeat: event.repeat,
                     }, fallback);
                 } else if let Some(key) = fallback {
-                    if event.repeat { self.rt.repeat_key(key); } else { self.rt.key(key); }
-                    self.dirty = true;
+                    if !pressed { self.dirty |= self.rt.key_up(key); }
+                    else if event.repeat { self.rt.repeat_key(key); } else { self.rt.key(key); }
+                    self.dirty |= pressed;
                 }
             }
             WindowEvent::MouseInput { state, button: winit::event::MouseButton::Left, .. } => {
