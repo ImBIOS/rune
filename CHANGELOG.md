@@ -5,6 +5,17 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`srgb_blend` works with a `Compositor`, and compositors can draw inside layers.** Before,
+  `.srgb_blend(true)` was ignored (with a warning) once a compositor was set. Now the frame is
+  gamma-blended as without one, `Frame::srgb_blend()` reports it, and a compositor that matches
+  the encoding (`Frame::format`, `EffectSite`) looks the same in both modes. `El::effect(mark)`
+  adds a box that draws nothing but holds its place in the painter stream, and
+  `Renderer::draw_range_with` / `encode_layers_with` call a hook there, inside the enclosing
+  isolated layer's pass when there is one, so the compositor's pass takes the layer's opacity,
+  blur, dissolve and clip. `render::CLIP_WGSL` shares the clip maths with compositor shaders.
+  Apps without a compositor or effect slots render exactly as before; one that set `srgb_blend`
+  alongside a compositor now gets gamma blending, which its compositor must match.
+
 - **Traces say what animated.** Each `--trace` frame now carries `quality.why` (what kept the
   frame animating: tracks, growth, scroll, reveal, loop, text-flight, …) and `tk`, the motion
   tracks it sampled as `[element, property, active]`. New `--trace-all` traces unkeyed elements

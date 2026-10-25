@@ -1198,6 +1198,28 @@ and its goldens are unchanged. `examples/lab` uses it to composite `rune-light` 
   `features` requests device features (e.g. `TIMESTAMP_QUERY`) when the adapter has them;
   `summary` prints after a headless run.
 - Headless tooling (`--snap`, `--script`, `--trace`, strips) runs through the same compositor.
+- `.srgb_blend(true)` works with a compositor. `Frame::srgb_blend()` and `Frame::format` say which
+  encoding and view the frame uses; every pass, isolated layers included, holds premultiplied
+  values in that encoding. Build pipelines for the format a pass is given (`EffectSite::format`),
+  and encode a shader's colour when `srgb_blend` is set. Everything the uber shader draws already
+  matches.
+- **Effect slots.** `effect(mark)` / `El::effect(mark)` is a box that draws nothing (it covers no
+  pixels) but keeps its place in the painter stream, with its rect, rounded clip, soft edges and
+  opacity (`Instance::fill[3]`, folded in when its scope flattened), inside whatever isolated
+  layer encloses it. `El::effect_bleed(pt)` grows that layer's bounds for a glow's reach.
+  `Renderer::draw_range_with(pass, format, range, hook)` and
+  `Renderer::encode_layers_with(encoder, hook)` call `hook(pass, &EffectSite)` at each slot in painter
+  order, so a compositor paints its pass exactly there: in the frame target for a slot outside any
+  layer, in the layer's offscreen target (`Rgba16Float`) for one inside, where the layer's opacity,
+  blur, dissolve and clip then apply to it. `EffectSite` gives the slot's instance, the pass's
+  format, the window position of its top-left pixel (`origin`, subtract it from window
+  coordinates) and its size; the viewport and scissor are reset to the full target after the hook.
+  One compositor serves any number of formats: build pipelines per `EffectSite::format`.
+- `render::CLIP_WGSL` is Rune's own clip maths as WGSL (`clip_alpha(p, clip, fade)` with `p` in
+  window pixels, plus `sd_rounded`). Prepend it to a compositor shader and pass the slot's `clip`
+  and `fade` words, so the effect is cut by the same rectangle, feathers and circular or continuous
+  rounded corners as the primitives around it. A rounded clip on an isolated layer applies to the
+  completed layer instead, so nothing extra is needed there.
 
 ### Isolated opacity
 
