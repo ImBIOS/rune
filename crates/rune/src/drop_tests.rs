@@ -11,6 +11,9 @@ struct Drops {
     /// Each `on_drop_hover` call.
     hover: Vec<(&'static str, bool)>,
     root_takes: bool,
+    /// The inner zone is gone, and a modal that takes drops is open.
+    no_inner: bool,
+    modal: bool,
 }
 
 fn zone(key: &'static str) -> El {
@@ -22,8 +25,12 @@ fn zone(key: &'static str) -> El {
 /// An outer zone that takes anything around an inner one that takes pictures, in a 400 by 300
 /// window whose root takes drops when `root_takes`.
 fn view(s: &Drops, _: &mut Cx<Drops>) -> El {
-    let root = col().w_full().h_full()
-        .child(zone("outer").size(200.0, 200.0).child(zone("inner").size(100.0, 100.0).accepts_extensions(&["png", ".JPG"])));
+    let outer = zone("outer").size(200.0, 200.0);
+    let outer = if s.no_inner { outer } else { outer.child(zone("inner").size(100.0, 100.0).accepts_extensions(&["png", ".JPG"])) };
+    let mut root = col().w_full().h_full().child(outer);
+    if s.modal {
+        root = root.child(zone("modal").absolute(100.0, 50.0).size(200.0, 200.0).modal(false, |s: &mut Drops| s.modal = false));
+    }
     if s.root_takes { root.on_drop_files(|s: &mut Drops, files, _| s.dropped.push(("root", files.iter().map(|f| f.display().to_string()).collect()))) } else { root }
 }
 
@@ -104,6 +111,91 @@ fn several_files_arrive_in_one_call() {
     assert_eq!(dropped(&rt), [("inner", vec!["a.png", "b.JPG"])], "the target gets the files it accepts, together");
     drop_at(&mut rt, &["a.png", "c.txt"], (150.0, 150.0));
     assert_eq!(dropped(&rt)[1], ("outer", vec!["a.png", "c.txt"]));
+}
+
+#[test]
+fn a_covered_window_takes_a_drop_on_the_tree_it_has_now() {
+    let mut rt = run(true);
+    rt.set_live_visible(false);
+    // While covered, the window builds nothing: the inner zone unmounts only in state.
+    rt.update(|s, _| s.no_inner = true);
+    rt.drag_files(files(&["a.png"]), Some((50.0, 50.0)));
+    rt.drop_files(files(&["a.png"]), Some((50.0, 50.0)));
+    rt.hidden_wake();
+    assert_eq!(dropped(&rt), [("outer", vec!["a.png"])], "not the inner zone, which has gone");
+    assert_eq!(rt.state.hover, [("outer", true), ("outer", false)]);
+
+    // Nor the zone behind a modal opened while covered (which, still fading in, takes none).
+    rt.update(|s, _| s.modal = true);
+    rt.drop_files(files(&["b.png"]), Some((150.0, 150.0)));
+    rt.hidden_wake();
+    assert_eq!(dropped(&rt).len(), 1);
+}
+
+#[test]
+fn a_drop_outside_the_window_or_an_open_modal_reaches_nothing() {
+    let mut rt = run(true);
+    drop_at(&mut rt, &["a.png"], (450.0, 50.0));
+    assert_eq!(dropped(&rt), [], "the root takes drops only inside the window");
+    rt.update(|s, _| s.modal = true);
+    rt.frame(2.0 / 60.0);
+    rt.drag_files(files(&["a.png"]), Some((50.0, 50.0)));
+    rt.frame(3.0 / 60.0);
+    assert_eq!(rt.drop_hovered(), None, "the dimmed window behind a modal takes no drag");
+    rt.drop_files(files(&["a.png"]), Some((50.0, 50.0)));
+    rt.frame(4.0 / 60.0);
+    assert_eq!(dropped(&rt), []);
+    drop_at(&mut rt, &["b.png"], (150.0, 150.0));
+    assert_eq!(dropped(&rt), [("modal", vec!["b.png"])]);
+    assert_eq!(rt.state.hover, [("modal", true), ("modal", false)]);
+}
+
+#[test]
+fn a_hovered_target_that_unmounts_hears_its_hover_end() {
+    let mut rt = run(false);
+    rt.drag_files(files(&["a.png"]), Some((50.0, 50.0)));
+    rt.frame(1.0 / 60.0);
+    rt.update(|s, _| s.no_inner = true);
+    rt.frame(2.0 / 60.0);
+    // The host samples the pointer while the drag lasts; the target under it has changed.
+    assert!(rt.drag_files_to(Some((50.0, 50.0))));
+    rt.frame(3.0 / 60.0);
+    assert_eq!(rt.state.hover, [("inner", true), ("inner", false), ("outer", true)]);
+    assert_eq!(rt.drop_hovered().as_deref(), Some("outer"));
+}
+
+#[test]
+fn moving_over_one_target_queues_no_frames() {
+    let mut rt = run(false);
+    rt.drag_files(files(&["a.png"]), Some((50.0, 50.0)));
+    rt.frame(1.0 / 60.0);
+    for x in 51..90 {
+        assert!(!rt.drag_files_to(Some((x as f32, 50.0))), "still over the inner zone");
+    }
+    assert!(!rt.has_pending_input(), "so the host draws nothing");
+    assert!(rt.drag_files_to(Some((150.0, 150.0))), "onto the outer zone");
+    assert!(rt.has_pending_input());
+}
+
+#[test]
+fn a_drop_zone_over_other_elements_leaves_their_menus_and_help() {
+    #[derive(Default)]
+    struct S { menus: u32 }
+    fn view(_: &S, _: &mut Cx<S>) -> El {
+        el().w_full().h_full()
+            .child(el().key("row").size(100.0, 40.0).help("Row").on_secondary_press(|s: &mut S, _, _| s.menus += 1))
+            .child(el().key("zone").absolute(0.0, 0.0).w_full().h_full().on_drop_files(|_: &mut S, _, _| {}))
+    }
+    let mut rt = Runtime::new(S::default(), view, (300.0, 300.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.secondary_down(10.0, 10.0);
+    rt.secondary_up(10.0, 10.0);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.menus, 1, "the row's context menu");
+    rt.observe_pointer(10.0, 10.0);
+    rt.frame(2.0 / 60.0);
+    rt.frame(rt.help_delay);
+    assert_eq!(rt.help_tooltip().map(|(t, _)| t), Some("Row"));
 }
 
 #[test]

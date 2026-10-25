@@ -11,7 +11,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   `.accepts_extensions(&["png"])` filters them; a target that accepts none passes the drag to
   the next accepting element around it. `.on_drop_hover(|s, over, tx| ..)` hears the drag
   reach and leave the target, for a highlight. A drop over no accepting element goes to the
-  root's `on_drop_files`, else it's ignored. winit gives no drag position, so the window
+  root's `on_drop_files` (or, while a modal is open, the modal's, and only inside it), else
+  it's ignored. Drop zones take no pointer events, so one laid over other elements leaves
+  their clicks, menus and help. winit gives no drag position, so the window
   samples the system pointer while a drag is over it. macOS, Windows and X11; Wayland and the
   web report no file drags. Headless scripts use `drag_files` and `drop_files` events, and
   `headless_run` has `ScriptEvent::DragFiles`, `DropFiles` and `DragFilesLeave`.

@@ -41,24 +41,25 @@ impl DropPointer {
         #[cfg(target_os = "windows")]
         {
             let (x, y) = crate::win32::pointer_position()?;
-            return Some(screen_to_window(window, (x, y)));
+            return screen_to_window(window, (x, y));
         }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         {
             use x11rb::protocol::xproto::ConnectionExt as _;
             let (c, root) = self.x11.as_ref()?;
             let p = c.query_pointer(*root).ok()?.reply().ok()?;
-            return p.same_screen.then(|| screen_to_window(window, (i32::from(p.root_x), i32::from(p.root_y))));
+            return p.same_screen.then(|| screen_to_window(window, (i32::from(p.root_x), i32::from(p.root_y)))).flatten();
         }
         #[allow(unreachable_code)]
         { let _ = window; None }
     }
 }
 
-/// A screen point in physical pixels, in `window`'s content in points.
+/// A screen point in physical pixels, in `window`'s content in points. `None` when the window
+/// can't say where it is (Wayland, including an X11 connection under XWayland).
 #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
-fn screen_to_window(window: &Window, (x, y): (i32, i32)) -> (f32, f32) {
-    let origin = window.inner_position().unwrap_or_default();
+fn screen_to_window(window: &Window, (x, y): (i32, i32)) -> Option<(f32, f32)> {
+    let origin = window.inner_position().ok()?;
     let scale = window.scale_factor() as f32;
-    ((x - origin.x) as f32 / scale, (y - origin.y) as f32 / scale)
+    Some(((x - origin.x) as f32 / scale, (y - origin.y) as f32 / scale))
 }

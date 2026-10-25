@@ -1325,9 +1325,9 @@ impl<S: 'static> Runtime<S> {
         self.physical_input(crate::PhysicalInput::FocusLost);
     }
 
-    /// Keyboard input or a focus change is queued for the next frame.
+    /// Keyboard input, a focus change or a file drag step is queued for the next frame.
     pub(crate) fn keys_queued(&self) -> bool {
-        self.queue.iter().any(|a| matches!(a, Action::Physical(..) | Action::Key { .. } | Action::WindowFocus(_)))
+        self.queue.iter().any(|a| matches!(a, Action::Physical(..) | Action::Key { .. } | Action::WindowFocus(_) | Action::Files(_)))
     }
 
     /// The last committed frame is out of date: state changed (an update, poll or handler), or
@@ -1610,6 +1610,8 @@ impl<S: 'static> Runtime<S> {
         if self.has_pending_input() || self.drag_ends_pending() {
             let commits = self.stats.commits;
             self.hidden_timer_frame();
+            // File steps held for that frame's build land in another.
+            if self.files_held() { self.hidden_timer_frame(); }
             return self.stats.commits != commits;
         }
         #[cfg(all(feature = "dev", debug_assertions))]
@@ -1736,11 +1738,14 @@ impl<S: 'static> Runtime<S> {
         self.drop_drag_out_request();
         let ended: Vec<_> = self.drag_ends.borrow_mut().drain(..).collect();
         let queue = order_drag_ends(std::mem::take(&mut self.queue), ended, &mut self.drags_open);
+        let queue = self.hold_files(queue, ran || self.dirty);
         for action in queue {
             // State may have requested focus on a newly mounted field. Resolve the
             // new tree before routing this frame's text, not after it has gone to
-            // the previous field. The same boundary covers an earlier handler.
-            if (ran || self.dirty) && matches!(&action, Action::Key { .. } | Action::Physical(..) | Action::Ime(_) | Action::Paste(..)) {
+            // the previous field. The same boundary covers an earlier handler, and lets a
+            // file drag find only what is mounted and reachable now (a covered window builds
+            // nothing until this).
+            if (ran || self.dirty) && matches!(&action, Action::Key { .. } | Action::Physical(..) | Action::Ime(_) | Action::Paste(..) | Action::Files(_)) {
                 for (source, target) in std::mem::take(&mut tx.text_flights) {
                     self.capture_text_flight(source, target);
                 }
@@ -1763,6 +1768,7 @@ impl<S: 'static> Runtime<S> {
             }
             self.latch_requests(&mut tx);
         }
+        self.release_files();
         self.schedule_wakes(tx.wakes.drain(..));
         for (source, target) in std::mem::take(&mut tx.text_flights) {
             self.capture_text_flight(source, target);
@@ -3675,6 +3681,7 @@ impl<S: 'static> Runtime<S> {
         self.secondary_capture = None;
         self.capture_inside = false;
         self.pointer_leave();
+        self.drag_files_leave();
     }
 
     /// The held press crossed the drag threshold on a `drag_out` element: ask the host for an
@@ -4190,6 +4197,7 @@ impl<S: 'static> Runtime<S> {
         self.materials.clear();
         self.hits.clear();
         self.clear_help_hits();
+        self.clear_drop_hits();
         self.loops_active = false;
         self.static_scale_settling = false;
         self.videos_active = false;
@@ -5107,7 +5115,7 @@ impl<S: 'static> Runtime<S> {
                 scale_motion: if cover.is_some() { ScaleMotion::Moving } else { scale_motion } };
             let hits_before = self.hits.len();
             if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_double_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some()
-                || n.text.as_ref().is_some_and(|t| t.selectable) || n.drop.is_some())
+                || n.text.as_ref().is_some_and(|t| t.selectable))
                 && !self.subtree_exiting(i)
                 && self.allowed(i) && effective_opacity > 0.001 && visible
             {
@@ -5134,6 +5142,11 @@ impl<S: 'static> Runtime<S> {
                 let c = if self.nodes[i].parent.is_some() { pinh.clip } else { NO_CLIP };
                 let r = [rect_pt[0].max(c[0] / s), rect_pt[1].max(c[1] / s), rect_pt[2].min(c[2] / s), rect_pt[3].min(c[3] / s)];
                 self.push_help_hit(i, r, hits_before);
+            }
+            if self.nodes[i].drop.is_some() && !self.subtree_exiting(i) && self.allowed(i) && effective_opacity > 0.001 && visible {
+                let c = if self.nodes[i].parent.is_some() { pinh.clip } else { NO_CLIP };
+                let r = [rect_pt[0].max(c[0] / s), rect_pt[1].max(c[1] / s), rect_pt[2].min(c[2] / s), rect_pt[3].min(c[3] / s)];
+                self.push_drop_hit(i, r, hits_before);
             }
         }
         while let Some((_, start, surface_start)) = layers.pop() {

@@ -280,8 +280,9 @@ pub(crate) type DropFilesFn = Rc<dyn Fn(&mut dyn Any, &[std::path::PathBuf], &mu
 pub(crate) struct DropSpec {
     pub on_drop: Option<DropFilesFn>,
     pub accepts: Option<Rc<dyn Fn(&std::path::Path) -> bool>>,
-    pub on_hover: Option<Rc<dyn Fn(&mut dyn Any, bool, &mut Tx)>>,
+    pub on_hover: Option<DropHoverFn>,
 }
+pub(crate) type DropHoverFn = Rc<dyn Fn(&mut dyn Any, bool, &mut Tx)>;
 
 impl DropSpec {
     /// The files of `paths` this element takes, when it's a drop target.
@@ -2376,7 +2377,10 @@ impl El {
     /// Take files dropped on this element from another app (Finder, Explorer, a file manager).
     /// The innermost target under the drop that accepts any of the files gets the ones it
     /// accepts, all in one call; files it doesn't accept are left out. A drop no target takes
-    /// is ignored: put `on_drop_files` on the root as well to catch drops anywhere.
+    /// is ignored: put `on_drop_files` on the root as well to catch drops anywhere. While a modal
+    /// is open, its root stands in for the window's, and a drop outside it reaches nothing. A drop
+    /// target takes no pointer events, so one laid over other elements leaves their clicks,
+    /// context menus and help.
     ///
     /// ```
     /// # use rune::el::el;
@@ -2410,7 +2414,8 @@ impl El {
     }
     /// Called with `true` when a file drag over the window makes this element the drop target
     /// (the innermost [`El::on_drop_files`] under the pointer that accepts the files), and with
-    /// `false` when the drag moves off it, leaves the window, or drops. Draw a drop
+    /// `false` when the drag moves off it, leaves the window, or drops, or when the element goes
+    /// away under the drag. Draw a drop
     /// highlight from it.
     pub fn on_drop_hover<S: 'static>(mut self, f: impl Fn(&mut S, bool, &mut Tx) + 'static) -> Self {
         self.drop.get_or_insert_default().on_hover = Some(Rc::new(move |s, over, tx| f(downcast::<S>(s), over, tx)));

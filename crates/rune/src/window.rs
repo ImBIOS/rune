@@ -603,12 +603,29 @@ impl ApplicationHandler<WakeEvent> for Windows {
 /// gathers them and hands the runtime one drag and one drop (`Host::flush_files`).
 #[derive(Default)]
 struct FileDrop {
-    entered: Vec<std::path::PathBuf>,
-    dropped: Vec<std::path::PathBuf>,
-    left: bool,
+    /// What winit reported since the last pass, in order.
+    steps: Vec<FileStep>,
     /// Samples the pointer while the drag is over the window, and where it last was.
     pointer: Option<crate::drop_pointer::DropPointer>,
     at: Option<(f32, f32)>,
+}
+
+enum FileStep {
+    Enter(Vec<std::path::PathBuf>),
+    Drop(Vec<std::path::PathBuf>),
+    Leave,
+}
+
+impl FileDrop {
+    /// One file of a drag that entered (`drop` false) or dropped: the run of files it belongs
+    /// to grows, or a new run starts.
+    fn file(&mut self, path: std::path::PathBuf, drop: bool) {
+        match self.steps.last_mut() {
+            Some(FileStep::Enter(files)) if !drop => files.push(path),
+            Some(FileStep::Drop(files)) if drop => files.push(path),
+            _ => self.steps.push(if drop { FileStep::Drop(vec![path]) } else { FileStep::Enter(vec![path]) }),
+        }
+    }
 }
 
 /// How often a file drag's position is sampled while it's over the window.
@@ -2151,6 +2168,7 @@ impl<S: 'static> Host<S> {
         if !self.keep_running {
             self.popup.cancel(&mut self.rt);
             self.rt.cancel_pointer();
+            self.files = FileDrop::default();
             if let Some(w) = &mut self.win { w.apply_cursor(&self.rt, false); w.hide(); }
             self.finished = true;
             return;
@@ -2184,6 +2202,7 @@ impl<S: 'static> Host<S> {
         self.rt.set_live_visible(false);
         self.popup.cancel(&mut self.rt);
         self.rt.cancel_pointer();
+        self.files = FileDrop::default();
         if let Some(w) = &mut self.win { w.apply_cursor(&self.rt, false); }
         self.mods = ModifiersState::empty();
         if let Some(w) = &self.win { w.hide(); }
@@ -2811,7 +2830,7 @@ impl<S: 'static> AnyHost for Host<S> {
             .chain(win.and_then(|w| w.first_frame.deadline.map(|(retry, _)| retry)))
             .chain(win.and_then(|w| w.retry))
             .chain(win.filter(|w| !w.visible).and_then(|w| w.hidden_pace.deadline()))
-            .chain(self.files.pointer.as_ref().map(|_| Instant::now() + DROP_SAMPLE))
+            .chain(self.files.pointer.as_ref().filter(|_| win.is_some_and(|w| w.visible)).map(|_| Instant::now() + DROP_SAMPLE))
             .min()
     }
 
@@ -2882,38 +2901,46 @@ impl<S: 'static> Host<S> {
         if redraw { l.window.request_redraw(); }
     }
 
-    /// Hands the runtime the file drag winit reported since the last pass: the files that
-    /// entered, as one drag, then those dropped, as one drop, each at the sampled pointer; and,
-    /// while the drag is over the window, where it has moved. Runs even while the window is
-    /// covered, as queued input does.
+    /// Hands the runtime the file drag winit reported since the last pass, in order: the files
+    /// that entered, as one drag, and those dropped, as one drop, each at a fresh pointer
+    /// sample; and, while the drag is over the window, a new sample, which redraws only when it
+    /// changes the drop target. Runs even while the window is covered, as queued input does.
     fn flush_files(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(l) = &self.win else { return };
+        let Some(l) = self.win.as_ref().filter(|w| w.visible) else {
+            self.files = FileDrop::default();
+            return;
+        };
         let f = &mut self.files;
         let mut queued = false;
-        if !f.entered.is_empty() {
-            let pointer = crate::drop_pointer::DropPointer::new();
-            f.at = pointer.sample(&l.window).or_else(|| self.rt.pointer());
-            f.pointer = Some(pointer);
-            self.rt.drag_files(std::mem::take(&mut f.entered), f.at);
+        for step in std::mem::take(&mut f.steps) {
             queued = true;
+            match step {
+                FileStep::Enter(paths) => {
+                    let pointer = crate::drop_pointer::DropPointer::new();
+                    f.at = pointer.sample(&l.window).or_else(|| self.rt.pointer());
+                    f.pointer = Some(pointer);
+                    self.rt.drag_files(paths, f.at);
+                }
+                FileStep::Drop(paths) => {
+                    // A drop with no drag before it (Windows' WM_DROPFILES) samples too.
+                    let pointer = f.pointer.take().unwrap_or_else(crate::drop_pointer::DropPointer::new);
+                    let at = pointer.sample(&l.window).or(f.at.take()).or_else(|| self.rt.pointer());
+                    self.rt.drop_files(paths, at);
+                }
+                FileStep::Leave => {
+                    f.pointer = None;
+                    f.at = None;
+                    self.rt.drag_files_leave();
+                }
+            }
         }
-        if !f.dropped.is_empty() {
-            if let Some(at) = f.pointer.as_ref().and_then(|p| p.sample(&l.window)) { f.at = Some(at); }
-            self.rt.drop_files(std::mem::take(&mut f.dropped), f.at.take());
-            f.pointer = None;
-            queued = true;
-        } else if std::mem::take(&mut f.left) {
-            self.rt.drag_files_leave();
-            f.pointer = None;
-            f.at = None;
-            queued = true;
-        } else if let Some(at) = f.pointer.as_ref().and_then(|p| p.sample(&l.window)) && f.at != Some(at) && !queued {
+        // Sampled even when still, which also notices a target that unmounted under the drag.
+        if !queued && let Some(at) = f.pointer.as_ref().and_then(|p| p.sample(&l.window)) {
             f.at = Some(at);
-            self.rt.drag_files_to(Some(at));
-            queued = true;
+            queued = self.rt.drag_files_to(Some(at));
         }
         if !queued { return; }
-        if l.visible && !l.occluded && !l.minimized() { l.window.request_redraw(); } else {
+        if !l.occluded && !l.minimized() { l.window.request_redraw(); } else {
             self.covered_frame();
             self.shell(event_loop);
         }
@@ -2978,13 +3005,9 @@ impl<S: 'static> Host<S> {
                 self.close(event_loop);
                 return;
             }
-            WindowEvent::HoveredFile(path) => { self.files.entered.push(path); return; }
-            WindowEvent::DroppedFile(path) => { self.files.dropped.push(path); return; }
-            WindowEvent::HoveredFileCancelled => {
-                self.files.entered.clear();
-                self.files.left = true;
-                return;
-            }
+            WindowEvent::HoveredFile(path) => { self.files.file(path, false); return; }
+            WindowEvent::DroppedFile(path) => { self.files.file(path, true); return; }
+            WindowEvent::HoveredFileCancelled => { self.files.steps.push(FileStep::Leave); return; }
             WindowEvent::RedrawRequested => {
                 // A new accent asks every window to redraw (`accent::watch`).
                 self.rt.set_system_accent(crate::system_accent());

@@ -776,14 +776,20 @@ el().fill(if s.over { Color::WHITE.alpha(0.1) } else { Color::TRANSPARENT })
   element around it.
 - The target gets the files it accepts, all in one call. The rest are left out.
 - Only that target is drop-hovered. It hears `on_drop_hover(true)` when the drag reaches it, and
-  `false` when the drag moves to another target, leaves the window or drops.
+  `false` when the drag moves to another target, leaves the window or drops, or when the
+  target goes away under the drag.
 - A drop over no accepting element goes to the root's `on_drop_files`, if it has one, else
   it's ignored. Put the handler on the root to take drops anywhere in the window.
+- While a modal is open, its root stands in for the window's, and a drop outside the modal
+  reaches nothing, as a drop on the dimmed window behind a sheet does.
+- Drop zones take no pointer events: a zone laid over other elements leaves their clicks,
+  context menus and help alone.
 - Each window routes drops to its own tree. A covered window still delivers them.
 
 winit 0.30 reports a file drag without its position, and no pointer moves arrive while the
 drag lasts. So the window samples the system pointer when the drag enters, about every 16 ms
-while it's over the window, and when it drops. On macOS that's
+while it's over the window (drawing a frame only when that changes the target), and when it
+drops. On macOS that's
 `NSWindow.mouseLocationOutsideOfEventStream`, on Windows `GetCursorPos` and on X11
 `QueryPointer`. Where no sample is possible it uses the last pointer position, else the root.
 macOS, Windows and X11. Wayland reports no file drags in winit 0.30, and the web build has no
