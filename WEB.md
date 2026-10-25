@@ -56,6 +56,10 @@ Use `rune::time::Instant` for deadlines passed to Rune; it is `std::time::Instan
 Web includes Inter Regular and IBM Plex Mono Regular. There is no system-font discovery.
 Set `AppSpec::fonts` to static font bytes and `AppSpec::families` to your sans/mono family
 names for branding, additional weights, emoji and scripts outside the default fonts.
+For example, extend a static slice of `rune_theme_opencode::FONTS` with
+`include_bytes!("assets/NotoColorEmoji.ttf")` and the CJK fonts your app needs, then assign
+the combined slice to `spec.fonts`. Keep the theme's sans/mono family names in `spec.families`.
+Missing emoji and CJK glyphs display fallback boxes; they do not trigger font downloads.
 
 The hidden textarea carries 512 UTF-16 units on each side of the selection, expanding for
 the selected range. Browser input events supply replacements; Rune validates the mirrored
@@ -88,7 +92,9 @@ node scripts/web-smoke.mjs target/web target/web-proof
 ```
 
 Install Playwright with its Chromium browser first. `PLAYWRIGHT_MODULE` and `CHROMIUM_PATH`
-can select an existing installation. The proof checks GPU errors, idle submissions, touch
+can select an existing installation. `WEB_ENGINE=webkit` tries an installed Playwright WebKit
+and reports whether it has a WebGPU adapter. The proof checks GPU errors, idle rAF requests
+and submissions, touch
 focus and momentum, Unicode edits, a long sliding context, predictive replacement,
 composition, selection, paste, copied model text, link isolation, theme and viewport resize.
 Its mobile DPR check exercises the Safari-style CSS-size fallback because Chromium device
@@ -97,5 +103,6 @@ dictation, autocorrect or Safari WebGPU test; those still need device verificati
 
 The shell follows PLAN's winit-first approach, retaining winit 0.30's rAF and ResizeObserver
 implementation. Unlike research/11's proposed custom shell, it adds a document-aware
-textarea beside winit rather than replacing winit. WebGL fallback, EditContext and a DOM
+textarea beside winit rather than replacing winit. This also defers PLAN's proposed switch
+to an owned shell when text input lands. WebGL fallback, EditContext and a DOM
 accessibility mirror from that research remain later work.
