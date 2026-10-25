@@ -58,13 +58,17 @@ impl Compositor<()> for Dusk {
 }
 
 fn snap(name: &'static str, view: fn(&(), &mut Cx<()>) -> El, srgb: bool, formats: Arc<Mutex<Vec<wgpu::TextureFormat>>>) -> (u32, Vec<u8>) {
+    snap_at(name, view, srgb, formats, 1)
+}
+
+fn snap_at(name: &'static str, view: fn(&(), &mut Cx<()>) -> El, srgb: bool, formats: Arc<Mutex<Vec<wgpu::TextureFormat>>>, scale: u32) -> (u32, Vec<u8>) {
     let dir = std::env::temp_dir().join(format!("rune-fx-layer-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("snap.png");
     App::new(AppSpec::new(name, (96.0, 96.0), || (), view))
         .compositor(Dusk { fx: None, formats })
         .srgb_blend(srgb)
-        .args(["--snap".to_string(), path.to_str().unwrap().to_string(), "--scale".to_string(), "1".to_string()])
+        .args(["--snap".to_string(), path.to_str().unwrap().to_string(), "--scale".to_string(), scale.to_string()])
         .run();
     let mut reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap())).read_info().unwrap();
     let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
@@ -124,4 +128,25 @@ fn fills_match_across_blend_modes_when_opaque() {
     let (_, gamma) = snap("gam", plain, true, Arc::default());
     let worst = linear.iter().zip(&gamma).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
     assert!(worst <= 3, "modes differ by {worst}");
+}
+
+/// Writes `demo/fx/in-layer.png`: a fill in a faded, rounded, clipped card, linear blend on the
+/// left and gamma blend on the right. `cargo test -p rune-fx --test in_layer -- --ignored`.
+#[test]
+#[ignore]
+fn write_demo_still() {
+    let (w, linear) = snap_at("demo-lin", faded_rounded, false, Arc::default(), 3);
+    let (_, gamma) = snap_at("demo-gam", faded_rounded, true, Arc::default(), 3);
+    let h = linear.len() as u32 / 4 / w;
+    let mut out = Vec::with_capacity(linear.len() * 2);
+    for y in 0..h as usize {
+        let row = y * w as usize * 4..(y + 1) * w as usize * 4;
+        out.extend_from_slice(&linear[row.clone()]);
+        out.extend_from_slice(&gamma[row]);
+    }
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../demo/fx/in-layer.png");
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(path).unwrap()), w * 2, h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header().unwrap().write_image_data(&out).unwrap();
 }
