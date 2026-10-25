@@ -193,6 +193,7 @@ fn faded(_: &(), _: &mut Cx<()>) -> El {
             .child(effect(1).absolute(0.0, 0.0).size(64.0, 64.0))
             .child(el().absolute(40.0, 40.0).size(24.0, 24.0).fill(hex("#0000ff").unwrap())),
     )
+    .child(effect(2).absolute(84.0, 84.0).size(8.0, 8.0))
 }
 
 fn faded_rounded(_: &(), _: &mut Cx<()>) -> El {
@@ -219,6 +220,7 @@ fn effect_in_a_faded_layer_is_faded_and_under_later_content() {
         near(px(&rgba, w, 24, 24), over(RED, 0.5, srgb), "effect alone, half faded");
         near(px(&rgba, w, 68, 68), over(BLUE, 0.5, srgb), "later content covers the effect inside the layer");
         near(px(&rgba, w, 8, 8), over([32.0 / 255.0; 3], 1.0, srgb), "outside the card");
+        near(px(&rgba, w, 88, 88), over(RED, 1.0, srgb), "a slot outside any layer");
         // One compositor drew into the layer's float target and the frame target.
         let formats = formats.lock().unwrap();
         assert_eq!(formats.len(), 2, "{formats:?}");
