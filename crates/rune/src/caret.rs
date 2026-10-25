@@ -21,7 +21,7 @@ impl<S: 'static> Runtime<S> {
             x -= single_line_offset(prev, inp, &spec.content, layout, s, (x1 - x0) * s) / s;
         }
         let cur = Cursor::from_byte_index(layout, caret_index(&inp.edit, &spec.content), Affinity::Downstream);
-        let bb = cur.geometry(layout, 1.5 * s);
+        let bb = crate::text::cursor_geometry(&cur, layout, 1.5 * s);
         let h = if bb.y1 > bb.y0 { (bb.y1 - bb.y0) as f32 / s } else { spec.style.line_px() };
         Some([x + bb.x0 as f32 / s, y + n.inset[1] + bb.y0 as f32 / s, 1.5, h])
     }

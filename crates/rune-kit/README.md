@@ -86,7 +86,12 @@ is its own, not bit-identical to fuzzysort. `rune-combobox--searchable` is its 2
 scene; there is no matching combobox Storybook story to diff.
 
 `TextInput::on_key` intercepts a focused field's keys before editing; `on_change` runs after
-text changes and receives a `Tx`, for filtering and exact debounce wakes.
+text changes and receives a `Tx`, for filtering and exact debounce wakes. `TextInput`, `TextArea`
+and `TextField` also accept `.decorations(spans)` (or `.spans(spans)`) and `.rich_style(style)` for
+attributed `TextEdit` marks, paragraph blocks and per-frame syntax highlights (see
+[`examples/rich_editor.rs`](examples/rich_editor.rs)):
+
+![rich editor](../../demo/kit/rich-editor.png)
 
 `k.selection()` is the selection highlight TextInput and TextArea draw. Pass it to Rune's
 selectable text so a selected command line looks like a selected field:

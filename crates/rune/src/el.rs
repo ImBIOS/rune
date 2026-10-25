@@ -395,6 +395,8 @@ pub struct InputSpec {
     pub selection: Color,
     /// One unwrapped line that scrolls sideways to keep the caret visible, like `<input>`.
     pub single_line: bool,
+    pub(crate) decorations: Vec<Span>,
+    pub(crate) rich_style: crate::edit::RichStyle,
     pub(crate) access: Option<EditFn>,
     pub(crate) submit: Option<PressFn>,
     pub(crate) key: Option<InputKeyFn>,
@@ -589,6 +591,14 @@ pub struct TextSpec {
     pub(crate) selection: Color,
     /// See [`El::uncopied`]: byte ranges of `content`, sorted.
     pub(crate) uncopied: Vec<(u32, u32)>,
+    /// Strikethrough byte ranges `(start, end, color)` of `content`.
+    pub(crate) strikes: Vec<(u32, u32, Option<Color>)>,
+    /// Per-paragraph [`Block`](crate::Block) attributes for `content`.
+    pub(crate) blocks: Vec<crate::edit::Block>,
+    /// Line indices (`> 0`) created by `Shift+Return` (`<br>`).
+    pub(crate) soft_breaks: Vec<u32>,
+    /// Visual palette for rich block and inline decorations.
+    pub(crate) rich_style: crate::edit::RichStyle,
 }
 
 impl TextSpec {
@@ -995,6 +1005,10 @@ pub fn text(content: impl Into<String>) -> El {
         selectable: false,
         selection: DEFAULT_SELECTION,
         uncopied: Vec::new(),
+        strikes: Vec::new(),
+        blocks: Vec::new(),
+        soft_breaks: Vec::new(),
+        rich_style: crate::edit::RichStyle::default(),
     });
     e
 }
@@ -1003,7 +1017,7 @@ pub fn text(content: impl Into<String>) -> El {
 pub fn rich(content: impl Into<String>, spans: Vec<Span>) -> El {
     let mut e = text(content);
     if let Some(t) = &mut e.text {
-        t.spans = spans;
+        t.spans = crate::text::flatten_spans(&spans);
         t.wrap = true;
     }
     e
@@ -1040,12 +1054,15 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
         caret: Color::WHITE,
         selection: DEFAULT_SELECTION,
         single_line: false,
+        decorations: Vec::new(),
+        rich_style: crate::edit::RichStyle::default(),
         access: None,
         submit: None,
         key: None,
         change: None,
         paste: None,
     }));
+    e.sync_input_rich();
     e
 }
 
@@ -2063,7 +2080,66 @@ impl El {
         if let Some(t) = &mut self.text {
             t.style = s;
         }
+        if self.input.is_some() {
+            self.sync_input_rich();
+        }
         self
+    }
+    /// Per-frame styled or coloured byte ranges (syntax highlights, mentions, inline styles)
+    /// painted over a [`text`], [`rich`] or [`text_input`] element without mutating [`TextEdit`].
+    /// On a [`text_input`], byte offsets are relative to `edit.text` and shift automatically
+    /// across any active IME preedit.
+    pub fn spans(mut self, spans: impl Into<Vec<Span>>) -> Self {
+        let spans = spans.into();
+        if let Some(inp) = &mut self.input {
+            inp.decorations = spans;
+            self.sync_input_rich();
+        } else if let Some(t) = &mut self.text {
+            t.spans = crate::text::flatten_spans(&spans);
+        }
+        self
+    }
+    /// Alias for [`El::spans`]: per-frame syntax or highlight [`Span`]s painted over text
+    /// (for example `SyntaxTheme::from_kit(&kit).spans(&highlights, code_offset)`).
+    pub fn decorations(self, spans: impl Into<Vec<Span>>) -> Self {
+        self.spans(spans)
+    }
+    /// Set the visual palette for rich inline marks (`code`, `link`) and paragraph blocks
+    /// (`quote`, `code block`, list markers) on a [`text_input`].
+    pub fn rich_style(mut self, style: crate::edit::RichStyle) -> Self {
+        if let Some(inp) = &mut self.input {
+            inp.rich_style = style;
+            self.sync_input_rich();
+        } else if let Some(t) = &mut self.text {
+            t.rich_style = style;
+        }
+        self
+    }
+    pub(crate) fn sync_input_rich(&mut self) {
+        let (Some(inp), Some(t)) = (&self.input, &mut self.text) else { return };
+        let (mut base_spans, strikes, rich_links, blocks) =
+            inp.edit.rich_display_specs(t.style, inp.rich_style);
+        for d in &inp.decorations {
+            for (ds, de) in inp.edit.map_range_to_display(d.start as usize, d.end as usize) {
+                let mut sp = d.clone();
+                sp.start = ds;
+                sp.end = de;
+                base_spans.push(sp);
+            }
+        }
+        let mut flat = crate::text::flatten_spans(&base_spans);
+        for s in &mut flat {
+            if s.underline == Some(Color::TRANSPARENT) {
+                s.underline = Some(s.color.unwrap_or(t.color));
+            }
+        }
+        t.spans = flat;
+        t.strikes = strikes;
+        t.blocks = blocks;
+        t.soft_breaks = inp.edit.soft_breaks.clone();
+        t.rich_style = inp.rich_style;
+        // Replace links generated from `Mark::Link` while keeping any explicit `.link(...)` calls.
+        t.links = rich_links;
     }
     /// Wrap text at the element's width.
     pub fn wrap(mut self) -> Self {
@@ -2375,6 +2451,9 @@ impl El {
         }
         if let Some((_, ic)) = &mut self.vis.icon {
             *ic = c;
+        }
+        if self.input.is_some() {
+            self.sync_input_rich();
         }
         self
     }

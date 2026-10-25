@@ -151,7 +151,7 @@ pub use overlay::{Availability, OverlayHandle, OverlaySpec, ScreenEdge};
 pub use overlay_options::{ConfiguredOverlay, DisplayId, DisplayTarget, NativeDisplayId, KeyPolicy, OverlayCapabilities, OverlayCreated, OverlayInput, OverlayLevel, OverlayOptions, OverlayPlacement, OverlaySupport};
 pub use color::{Color, oklch, oklcha};
 pub use compose::{Compositor, Frame};
-pub use edit::{Ime, Key, KeyEvent, KeySide, Modifier, Mods, TextEdit};
+pub use edit::{Block, Ime, Key, KeyEvent, KeySide, MAX_LIST_LEVEL, Mark, MarkRange, Modifier, Mods, Paragraph, RichStyle, TextEdit};
 pub use el::{
     Align, Anchor, Cursor, Cycle, Drag, El, GrowthSpec, Outline, Phase, PointerPress, RadialRadius, ScrollSpec, Shadow, Shell, Side, Tx, auto_grow, canvas, col, edit_access, effect, el, icon, rich,
     row, spacer, text, text_input,

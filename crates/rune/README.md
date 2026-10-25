@@ -729,6 +729,50 @@ growth-spring progress drives the screen-space handoff; reduced motion uses a
 150 ms crossfade. `settle()` lands it immediately. Neither view code nor handlers
 measure presentation geometry.
 
+### Rich text editing
+
+`TextEdit` holds an attributed rich-text model alongside plain `edit.text`:
+
+- **Inline marks** (`Mark::Bold`, `Italic`, `Underline`, `Strike`, `Code`, `Link(url)`): stored as
+  sorted byte ranges (`MarkRange { start, end, mark }`) on `edit.text`. Insertions and deletions
+  shift and split ranges automatically. Typing inherits the marks of the character before the caret
+  (following AppKit's rules: never extending backwards from the start of a link or code mark's
+  run). `edit.toggle_mark(mark)`, `set_mark`, `remove_mark` and `set_link(Some(url))` apply or
+  remove marks on a selection, or arm a pending typing style when the selection is empty (cleared
+  when the caret moves). `⌘B`, `⌘I` and `⌘U` (`Ctrl` on Windows/Linux) toggle bold, italic and
+  underline. Query `edit.has_mark(&Mark::Bold)`, `edit.active_marks()` and `edit.active_link()` to
+  drive a formatting bar's pressed state.
+- **Paragraph block attributes** (`Block::Paragraph`, `Bullet(level)`, `Numbered(level)`, `Quote`,
+  `Code`): one `Block` per `\n`-delimited paragraph (`edit.blocks()`, `edit.paragraphs()`,
+  `edit.active_block()`, `edit.set_block(block)`, `edit.toggle_block(block)`). Bullet and numbered
+  list markers (`0..=3` nesting levels), quote bars and code-block backgrounds are drawn as
+  decorations (never inserted into `edit.text`), and Parley indents each paragraph's lines by
+  `Block::indent_pt`. By default (overridable via `.on_input_key`):
+  - `Return` in a non-empty list item starts a new item at the same level; `Return` in an empty
+    list item or quote resets the paragraph to `Block::Paragraph`.
+  - `Shift+Return` inserts a soft line break (`edit.soft_breaks()`) that stays inside the current
+    list item or quote without drawing a second marker.
+  - `Backspace` at the start of a list item outdents it (`level > 0`) or converts it to
+    `Block::Paragraph` (`level == 0`).
+  - `Tab` and `Shift+Tab` inside a list item indent or outdent its nesting level instead of moving
+    focus.
+  - Inside `Block::Code`, `Return` inserts a newline (never submits), inline marks do not apply,
+    and a typed or pasted `\t` inserts a literal tab byte that advances by one space (matching core
+    text's tab shaping while preserving exact byte offsets and copy/paste).
+- **Per-frame decorations** (`.spans(spans)` / `.decorations(spans)` on `text_input`, `TextInput`
+  and `TextArea`): paint caller-supplied `rune::Span`s (such as `SyntaxTheme::from_kit(&k).spans(&ranges, offset)`
+  from `rune_kit::syntax::highlight`) over the editor without mutating `TextEdit`. Byte offsets are
+  relative to `edit.text` and shift automatically across any active IME preedit, so syntax and
+  mention highlights hold through IME composition and undo/redo.
+- **HTML paste and export, and data out**: `TextEdit::from_html(html)` and
+  `edit.paste_html(html, plain)` parse a safe HTML subset (`b`/`strong`, `i`/`em`, `u`,
+  `s`/`del`/`strike`, `a[href]`, `code`, `pre`, `ul`/`ol`/`li`, `blockquote`, `p`/`div`/`br`, and
+  `style` attributes for `font-weight`, `font-style`, `text-decoration`; `<script>`/`<style>` and
+  `javascript:`/`data:` URLs are stripped). `edit.to_html()` and `edit.selected_html()` serialize
+  back to HTML alongside plain `edit.text`. Construct or inspect the model directly with
+  `TextEdit::from_parts(text, marks, blocks)`, `edit.marks()`, `edit.blocks()` and
+  `edit.paragraphs()`. Accessibility roles (`textbox`) and plain-text values are unchanged.
+
 ### Selectable text
 
 `text(..).selectable(true)` lets people select and copy read-only text, as SwiftUI's

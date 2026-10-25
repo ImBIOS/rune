@@ -5,6 +5,29 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Attributed rich-text editing (`TextEdit` marks, blocks, decorations and HTML).** `TextEdit`
+  now stores inline [`MarkRange`](crates/rune/src/edit.rs)s (`Mark::Bold`, `Italic`, `Underline`,
+  `Strike`, `Code`, `Link(url)`) and per-paragraph [`Block`](crates/rune/src/edit.rs) attributes
+  (`Paragraph`, `Bullet(level)`, `Numbered(level)`, `Quote`, `Code`) alongside plain `text`,
+  without hidden Markdown characters in the string. Edits shift and split ranges; typing
+  inherits the marks of the character before the caret (except at the start of a link or code
+  mark's run); `toggle_mark` / `set_mark` / `remove_mark` / `set_link` and `⌘B` / `⌘I` / `⌘U`
+  toggle marks on the selection or arm a pending typing style on an empty selection; and
+  `has_mark` / `active_marks` / `active_link` / `active_block` report the active formatting for
+  toolbar pressed states. List markers, quote bars and code-block backgrounds draw as layout
+  decorations; `Return` continues a list or ends an empty list item, `Shift+Return` inserts a
+  soft break (`soft_breaks()`), `Backspace` at the start of a list item outdents or exits the
+  list, `Tab` / `Shift+Tab` change list nesting (`0..=3`), and inside `Block::Code` `Return`
+  inserts a newline, `Tab` inserts `\t` (shaped as one space, matching core text), and inline
+  marks do not apply. `El::spans` / `El::decorations` (and `TextInput::decorations` /
+  `TextArea::decorations`) paint per-frame `rune::Span`s over `text_input` without mutating the
+  model, shifting automatically across active IME preedit so `SyntaxTheme::spans(&ranges,
+  offset)` from `rune_kit::syntax::highlight` can be passed straight in. Undo, redo and IME
+  preserve text, marks, blocks and spans together. `TextEdit::from_html`, `to_html`,
+  `selected_html` and `paste_html(html, plain)` import and export a safe HTML subset (`b`/`strong`,
+  `i`/`em`, `u`, `s`/`del`/`strike`, `a`, `code`, `pre`, `ul`/`ol`/`li`, `blockquote`,
+  `p`/`div`/`br`, and inline `font-weight`/`font-style`/`text-decoration` styles), and
+  `from_parts`, `marks()`, `blocks()` and `paragraphs()` expose the attributed model directly.
 - **Rich clipboard: copy and paste HTML and RTF beside plain text.** New `ClipboardContent`
   (`ClipboardContent::new(text).with_html(..).with_rtf(..)`) and `Tx::copy_rich`, which writes
   every form in one clipboard change; `copy_secret` stays plain text. A field's new

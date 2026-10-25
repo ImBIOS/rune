@@ -311,6 +311,118 @@ impl Span {
     pub fn new(start: usize, end: usize) -> Span {
         Span { start: start as u32, end: end as u32, ..Default::default() }
     }
+
+    pub fn weight(mut self, weight: f32) -> Span {
+        self.weight = Some(weight);
+        self
+    }
+
+    pub fn bold(mut self) -> Span {
+        self.weight = Some(600.0);
+        self
+    }
+
+    pub fn italic(mut self) -> Span {
+        self.italic = true;
+        self
+    }
+
+    pub fn mono(mut self) -> Span {
+        self.mono = true;
+        self
+    }
+
+    pub fn size(mut self, size: f32) -> Span {
+        self.size = Some(size);
+        self
+    }
+
+    pub fn color(mut self, color: Color) -> Span {
+        self.color = Some(color);
+        self
+    }
+
+    pub fn bg(mut self, color: Color, pad: f32) -> Span {
+        self.bg = Some(color);
+        self.bg_pad = pad;
+        self
+    }
+
+    pub fn underline(mut self, color: Color) -> Span {
+        self.underline = Some(color);
+        self
+    }
+}
+
+/// Flattens overlapping [`Span`]s into non-overlapping elementary intervals so that Parley's
+/// single `Brush(Ink)` index per glyph run carries the combined colour, background, underline,
+/// weight, italic, and monospace attributes of all overlapping spans.
+pub(crate) fn flatten_spans(spans: &[Span]) -> Vec<Span> {
+    if spans.len() <= 1
+        || spans
+            .windows(2)
+            .all(|w| w[0].start < w[0].end && w[0].end <= w[1].start)
+    {
+        return spans.iter().filter(|s| s.start < s.end).cloned().collect();
+    }
+    let mut bounds = Vec::with_capacity(spans.len() * 2);
+    for s in spans {
+        if s.start < s.end {
+            bounds.push(s.start);
+            bounds.push(s.end);
+        }
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+    let mut out: Vec<Span> = Vec::with_capacity(bounds.len());
+    for w in bounds.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if a >= b {
+            continue;
+        }
+        let mut merged: Option<Span> = None;
+        for s in spans {
+            if s.start < s.end && s.start <= a && b <= s.end {
+                let m = merged.get_or_insert_with(|| Span::new(a as usize, b as usize));
+                if s.weight.is_some() {
+                    m.weight = s.weight;
+                }
+                m.mono |= s.mono;
+                if s.size.is_some() {
+                    m.size = s.size;
+                }
+                if s.color.is_some() {
+                    m.color = s.color;
+                }
+                if s.bg.is_some() {
+                    m.bg = s.bg;
+                    m.bg_pad = s.bg_pad;
+                }
+                if s.underline.is_some() {
+                    m.underline = s.underline;
+                }
+                m.italic |= s.italic;
+            }
+        }
+        if let Some(m) = merged {
+            if let Some(last) = out.last_mut()
+                && last.end == m.start
+                && last.weight == m.weight
+                && last.mono == m.mono
+                && last.size == m.size
+                && last.color == m.color
+                && last.bg == m.bg
+                && last.bg_pad == m.bg_pad
+                && last.underline == m.underline
+                && last.italic == m.italic
+            {
+                last.end = m.end;
+            } else {
+                out.push(m);
+            }
+        }
+    }
+    out
 }
 
 /// A pressable byte range of a text element: a link, an @mention, a file chip. Attach with
@@ -1077,10 +1189,26 @@ impl TextSystem {
         max_width: Option<f32>,
         align: Alignment,
     ) -> Rc<Layout<Ink>> {
+        self.layout_blocks(text, spans, &[], style, scale, max_width, align)
+    }
+
+    /// [`layout_aligned`](Self::layout_aligned) with per-paragraph [`Block`](crate::Block)
+    /// indentation applied during line breaking.
+    pub(crate) fn layout_blocks(
+        &mut self,
+        text: &str,
+        spans: &[Span],
+        blocks: &[crate::edit::Block],
+        style: TextStyle,
+        scale: f32,
+        max_width: Option<f32>,
+        align: Alignment,
+    ) -> Rc<Layout<Ink>> {
+        let has_indented_blocks = blocks.iter().any(|&b| b != crate::edit::Block::Paragraph);
         let mut key = text_hash(text, spans, style, scale, max_width);
-        if align != Alignment::Start {
+        if align != Alignment::Start || has_indented_blocks {
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            (key, align as u8).hash(&mut h);
+            (key, align as u8, blocks).hash(&mut h);
             key = h.finish();
         }
         let g = self.generation;
@@ -1261,7 +1389,11 @@ impl TextSystem {
                 b.push(StyleProperty::LetterSpacing(*v), range.clone());
             }
             let mut layout: Layout<Ink> = b.build(text);
-            layout.break_all_lines(max_width);
+            if has_indented_blocks {
+                break_lines_with_blocks(&mut layout, blocks, style.size, scale, max_width);
+            } else {
+                layout.break_all_lines(max_width);
+            }
             layout
         };
         let mut layout = build(&mut self.layout_cx, &mut self.font_cx, &[]);
@@ -1515,6 +1647,65 @@ impl TextSystem {
         }
     }
 
+    /// Strikethrough lines for `strikes` (`(start_byte, end_byte, color)`) in device px.
+    pub(crate) fn strike_decorations(
+        &self,
+        layout: &Layout<Ink>,
+        spans: &[Span],
+        strikes: &[(u32, u32, Option<Color>)],
+        default_color: Color,
+        scale: f32,
+        origin: [f32; 2],
+        out: &mut Vec<Deco>,
+    ) {
+        use parley::{Affinity, Cursor, Selection};
+        if strikes.is_empty() {
+            return;
+        }
+        for &(s_start, s_end, sc) in strikes {
+            let (a, b) = (s_start as usize, s_end as usize);
+            if a >= b {
+                continue;
+            }
+            let span_color = sc.or_else(|| {
+                spans
+                    .iter()
+                    .find(|sp| (sp.start as usize) <= a && b <= (sp.end as usize) && sp.color.is_some())
+                    .and_then(|sp| sp.color)
+            });
+            let color = span_color.unwrap_or(default_color);
+            let sel = Selection::new(
+                Cursor::from_byte_index(layout, a, Affinity::Downstream),
+                Cursor::from_byte_index(layout, b, Affinity::Upstream),
+            );
+            for (bb, line_idx) in sel.geometry(layout) {
+                let w = (bb.x1 - bb.x0) as f32;
+                if w <= 0.0 {
+                    continue;
+                }
+                let Some(line) = layout.get(line_idx) else { continue };
+                let m = line.metrics();
+                let mut strike_off = m.line_height * 0.25;
+                let mut h = scale.round().max(1.0);
+                for item in line.items() {
+                    if let PositionedLayoutItem::GlyphRun(gr) = item {
+                        let fm = gr.run().font_metrics();
+                        strike_off = if fm.strikethrough_offset != 0.0 {
+                            fm.strikethrough_offset
+                        } else {
+                            fm.ascent * 0.32
+                        };
+                        h = fm.strikethrough_size.max(scale).round().max(1.0);
+                        break;
+                    }
+                }
+                let x0 = origin[0] + bb.x0 as f32;
+                let y = (origin[1] + m.baseline - strike_off).round();
+                out.push(Deco { rect: [x0, y, w, h], color, radius: 0.0 });
+            }
+        }
+    }
+
     /// The atlas quad for `icon` at `px` device pixels square, top-left at `origin`.
     pub fn icon_quad(&mut self, icon: &'static Icon, px: u32, origin: [f32; 2]) -> Option<GlyphQuad> {
         let key = (icon as *const Icon as usize, px);
@@ -1556,6 +1747,62 @@ pub fn stream_height_lag(l: &Layout<Ink>, width: f32, scale: f32) -> f32 {
     let cap = if l.len() == 1 { 0.52 } else { 0.82 };
     let lag = line.metrics().line_height / scale * cap * (1.0 - last_line_fill(l, width));
     (lag * 64.0).round() / 64.0
+}
+
+/// Breaks lines in `layout` with per-paragraph [`Block`](crate::Block) indentation.
+fn break_lines_with_blocks(
+    layout: &mut Layout<Ink>,
+    blocks: &[crate::edit::Block],
+    font_size: f32,
+    scale: f32,
+    max_width: Option<f32>,
+) {
+    let layout_max = max_width.unwrap_or(f32::MAX);
+    let mut breaker = layout.break_lines();
+    breaker.state_mut().set_layout_max_advance(layout_max);
+    let mut para_idx = 0usize;
+    while !breaker.is_done() {
+        let blk = blocks.get(para_idx).copied().unwrap_or(crate::edit::Block::Paragraph);
+        let indent = (blk.indent_pt(font_size) * scale).round();
+        let right_pad = if blk == crate::edit::Block::Code { indent } else { 0.0 };
+        let line_max = max_width
+            .map_or(f32::MAX, |w| (w - indent - right_pad).max(1.0))
+            .min(layout_max);
+        breaker.state_mut().set_line_x(indent);
+        breaker.state_mut().set_line_max_advance(line_max);
+        match breaker.break_next() {
+            Some(parley::YieldData::LineBreak(data)) => {
+                if data.reason == parley::BreakReason::Explicit {
+                    para_idx += 1;
+                }
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+}
+
+/// Parley 0.12's `Cursor::geometry` omits `line.metrics().inline_min_coord`; add it so carets on
+/// indented paragraphs (`Block::Bullet`, `Block::Numbered`, `Block::Quote`, `Block::Code`) align
+/// with their shaped glyph runs.
+pub(crate) fn cursor_geometry(
+    cursor: &parley::editing::Cursor,
+    layout: &Layout<Ink>,
+    size: f32,
+) -> parley::BoundingBox {
+    let mut bb = cursor.geometry(layout, size);
+    let inline_min = match cursor.visual_clusters(layout) {
+        [Some(left), _] => left.line().metrics().inline_min_coord,
+        [_, Some(right)] => right.line().metrics().inline_min_coord,
+        _ => layout
+            .get(layout.len().saturating_sub(1))
+            .map_or(0.0, |l| l.metrics().inline_min_coord),
+    };
+    if inline_min != 0.0 {
+        bb.x0 += inline_min as f64;
+        bb.x1 += inline_min as f64;
+    }
+    bb
 }
 
 #[cfg(test)]

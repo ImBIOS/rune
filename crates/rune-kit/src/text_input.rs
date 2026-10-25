@@ -1,9 +1,20 @@
 //! TextInput and Textarea (`@opencode/ui` forms/text-input, forms/textarea), and the older
 //! TextField (`components/text-field`).
 
-use rune::{Color, El, Icon, TextEdit, TextStyle, Tx, col, el, icon, row, text, text_input};
+use rune::{Color, El, Icon, RichStyle, Span, TextEdit, TextStyle, Tx, col, el, icon, row, text, text_input};
 
 use crate::{Acts, Kit, State, over, shadows};
+
+fn kit_rich_style(k: &Kit) -> RichStyle {
+    RichStyle {
+        link: k.c.text_accent,
+        code_fg: None,
+        code_bg: k.c.layer_03,
+        code_block_bg: k.c.layer_02,
+        quote_bar: k.c.border_strong,
+        marker: Some(k.c.text_muted),
+    }
+}
 
 /// Shared shell painting: sheen over the base, button elevation, hover overlay, focus/invalid
 /// outline, disabled dimming.
@@ -34,24 +45,38 @@ fn shell(k: &Kit, e: El, sheen: [f32; 2], state: State, invalid: bool, focused: 
 
 /// Edit bindings collected for the inner text field.
 #[derive(Default)]
-struct EditActs(Vec<Box<dyn FnOnce(El) -> El>>);
+struct EditActs {
+    handlers: Vec<Box<dyn FnOnce(El) -> El>>,
+    visual: Vec<Box<dyn FnOnce(El) -> El>>,
+}
 
 impl EditActs {
     fn edit<S: 'static>(&mut self, f: impl for<'a> Fn(&'a mut S) -> &'a mut TextEdit + 'static) {
-        self.0.push(Box::new(move |e: El| e.on_edit(f)));
+        self.handlers.push(Box::new(move |e: El| e.on_edit(f)));
     }
     fn submit<S: 'static>(&mut self, f: impl Fn(&mut S, &mut Tx) + 'static) {
-        self.0.push(Box::new(move |e: El| e.on_submit(f)));
+        self.handlers.push(Box::new(move |e: El| e.on_submit(f)));
     }
     fn key<S: 'static>(&mut self, f: impl Fn(&mut S, &rune::KeyEvent, &mut Tx) -> bool + 'static) {
-        self.0.push(Box::new(move |e: El| e.on_input_key(f)));
+        self.handlers.push(Box::new(move |e: El| e.on_input_key(f)));
     }
     fn change<S: 'static>(&mut self, f: impl Fn(&mut S, &mut Tx) + 'static) {
-        self.0.push(Box::new(move |e: El| e.on_input_change(f)));
+        self.handlers.push(Box::new(move |e: El| e.on_input_change(f)));
     }
-    fn apply(self, mut e: El) -> El {
-        for f in self.0 {
+    fn spans(&mut self, spans: Vec<Span>) {
+        self.visual.push(Box::new(move |e: El| e.spans(spans)));
+    }
+    fn rich_style(&mut self, style: RichStyle) {
+        self.visual.push(Box::new(move |e: El| e.rich_style(style)));
+    }
+    fn apply(self, mut e: El, disabled: bool) -> El {
+        for f in self.visual {
             e = f(e);
+        }
+        if !disabled {
+            for f in self.handlers {
+                e = f(e);
+            }
         }
         e
     }
@@ -78,7 +103,7 @@ impl TextInput {
         self
     }
     pub fn animate_edit_layout(mut self) -> Self {
-        self.edits.0.push(Box::new(El::animate_edit_layout));
+        self.edits.handlers.push(Box::new(El::animate_edit_layout));
         self
     }
     pub fn on_change<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
@@ -157,6 +182,17 @@ impl TextInput {
         self.copy_acts.press_tx(f);
         self
     }
+    pub fn spans(mut self, spans: impl Into<Vec<Span>>) -> Self {
+        self.edits.spans(spans.into());
+        self
+    }
+    pub fn decorations(self, spans: impl Into<Vec<Span>>) -> Self {
+        self.spans(spans)
+    }
+    pub fn rich_style(mut self, style: RichStyle) -> Self {
+        self.edits.rich_style(style);
+        self
+    }
 
     pub fn build(self, k: &Kit) -> El {
         let c = &k.c;
@@ -170,9 +206,10 @@ impl TextInput {
             .grow(1.0)
             .shrink()
             .color(ink)
+            .rich_style(kit_rich_style(k))
             .placeholder(self.placeholder.clone(), hint)
             .caret(ink, k.selection());
-        let field = if disabled { field } else { self.edits.apply(field) };
+        let field = self.edits.apply(field, disabled);
         let mut value = row().key("value").grow(1.0).shrink().gap(6.0).center_y();
         if let Some(i) = self.leading {
             value = value.child(el().key("leading").pl(8.0).center().child(icon(i, 16.0).color(c.icon_muted)));
@@ -297,6 +334,17 @@ impl TextArea {
         self.edits.change(f);
         self
     }
+    pub fn spans(mut self, spans: impl Into<Vec<Span>>) -> Self {
+        self.edits.spans(spans.into());
+        self
+    }
+    pub fn decorations(self, spans: impl Into<Vec<Span>>) -> Self {
+        self.spans(spans)
+    }
+    pub fn rich_style(mut self, style: RichStyle) -> Self {
+        self.edits.rich_style(style);
+        self
+    }
 
     pub fn build(self, k: &Kit) -> El {
         let c = &k.c;
@@ -309,9 +357,10 @@ impl TextArea {
             .key("input")
             .w_full()
             .color(ink)
+            .rich_style(kit_rich_style(k))
             .placeholder(self.placeholder.clone(), hint)
             .caret(ink, k.selection());
-        let field = if disabled { field } else { self.edits.apply(field) };
+        let field = self.edits.apply(field, disabled);
         let line = style.line_px();
         let mut e = col().role("textbox").label(self.placeholder.clone()).padding(8.0);
         e = if let Some((min_rows, max_rows)) = self.grow {
@@ -395,6 +444,17 @@ impl TextField {
         self.edits.edit(f);
         self
     }
+    pub fn spans(mut self, spans: impl Into<Vec<Span>>) -> Self {
+        self.edits.spans(spans.into());
+        self
+    }
+    pub fn decorations(self, spans: impl Into<Vec<Span>>) -> Self {
+        self.spans(spans)
+    }
+    pub fn rich_style(mut self, style: RichStyle) -> Self {
+        self.edits.rich_style(style);
+        self
+    }
 
     pub fn build(self, k: &Kit) -> El {
         let c = &k.c;
@@ -404,10 +464,11 @@ impl TextField {
             .grow(1.0)
             .shrink()
             .color(c.text_strong)
+            .rich_style(kit_rich_style(k))
             .placeholder(self.placeholder.clone(), c.text_weak)
             .caret(c.text_strong, k.selection());
         let field = if self.multiline { field } else { field.single_line() };
-        let field = if self.state == State::Disabled { field } else { self.edits.apply(field) };
+        let field = self.edits.apply(field, self.state == State::Disabled);
         let mut wrapper = row()
             .key("wrapper")
             .w_full()
