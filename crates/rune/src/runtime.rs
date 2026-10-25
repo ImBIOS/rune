@@ -79,6 +79,8 @@ pub(crate) use physical_dispatch::Unhandled;
 mod modifier_keys;
 #[path = "popup_dispatch.rs"]
 mod popup_dispatch;
+#[path = "drop_dispatch.rs"]
+mod drop_dispatch;
 #[path = "scroll_bottom.rs"]
 mod scroll_bottom;
 #[path = "caret.rs"]
@@ -102,6 +104,9 @@ mod line_clamp_tests;
 #[cfg(test)]
 #[path = "aspect_fit_tests.rs"]
 mod aspect_fit_tests;
+#[cfg(test)]
+#[path = "drop_tests.rs"]
+mod drop_tests;
 
 const P_FILL: Prop<Color> = Prop::custom(64, PropClass::Color);
 const P_BORDER: Prop<Color> = Prop::custom(65, PropClass::Color);
@@ -328,6 +333,7 @@ pub(crate) struct Node {
     drag_threshold: Option<f32>,
     on_drag_start: Option<PressFn>,
     on_drag_end: Option<DragEndFn>,
+    drop: Option<Box<crate::el::DropSpec>>,
     motion: Spring,
     opacity_motion: Option<rune_motion::Anim>,
     lead: Option<(Spring, Spring)>,
@@ -394,6 +400,8 @@ enum Action {
     Drag(String, Drag),
     DragStart(String),
     DragEnd(String, crate::DragOutcome),
+    /// A file drag from another app moved, left, or dropped (`drop_dispatch`).
+    Files(drop_dispatch::FileEvent),
     Key { ev: KeyEvent, repeat: bool },
     Ime(Ime),
     Paste(zeroize::Zeroizing<String>, Option<Option<String>>),
@@ -734,6 +742,8 @@ pub struct Runtime<S: 'static> {
     hovered: Option<String>,
     /// Elements with `on_hover_change` that the pointer is inside.
     hover_within: Vec<String>,
+    /// Files dragged over the window from another app (`drop_dispatch`).
+    file_drag: drop_dispatch::FileDrag,
     pub ime_area: Option<[f32; 4]>,
     /// The focused field's caret (path, window rect) the next view sees through `Cx::caret`.
     caret: Option<(String, [f32; 4])>,
@@ -1007,6 +1017,7 @@ impl<S: 'static> Runtime<S> {
             surface_visible: true,
             hovered: None,
             hover_within: Vec::new(),
+            file_drag: Default::default(),
             ime_area: None,
             caret: None,
             caret_watch: false,
@@ -2128,6 +2139,7 @@ impl<S: 'static> Runtime<S> {
                 f(handler_state(&mut self.state), outcome, &mut one);
                 true
             }
+            Action::Files(event) => self.run_files(event, &mut one),
             Action::Key { ev, repeat } => {
                 if self.held_gate(None, Some(&ev.key), repeat) { return false; }
                 self.route_key(&ev, repeat, &mut one)
@@ -5095,7 +5107,7 @@ impl<S: 'static> Runtime<S> {
                 scale_motion: if cover.is_some() { ScaleMotion::Moving } else { scale_motion } };
             let hits_before = self.hits.len();
             if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_double_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some()
-                || n.text.as_ref().is_some_and(|t| t.selectable))
+                || n.text.as_ref().is_some_and(|t| t.selectable) || n.drop.is_some())
                 && !self.subtree_exiting(i)
                 && self.allowed(i) && effective_opacity > 0.001 && visible
             {
@@ -5946,6 +5958,7 @@ fn flatten(
         drag_threshold,
         on_drag_start,
         on_drag_end,
+        drop,
         opacity_motion,
         lead,
         width_leads,
@@ -6023,6 +6036,7 @@ fn flatten(
         drag_threshold,
         on_drag_start,
         on_drag_end,
+        drop,
         motion,
         opacity_motion,
         lead,

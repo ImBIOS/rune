@@ -519,6 +519,15 @@ pub(crate) enum Kind {
     Paste(String),
     Wheel(f32),
     Fling(f32),
+    /// A file drag from another app (`drag_files`, `drop_files`).
+    Files(FileStep),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum FileStep {
+    Hover(Vec<std::path::PathBuf>),
+    Drop(Vec<std::path::PathBuf>),
+    Leave,
 }
 
 pub(crate) fn key_named(name: &str) -> Option<Key> {
@@ -576,6 +585,9 @@ impl Ev {
             Kind::Paste(text) => ScriptEvent::Paste(text.clone()),
             Kind::Wheel(dy) => pointer(PointerAction::Scroll(*dy)),
             Kind::Fling(v) => pointer(PointerAction::Fling(*v)),
+            Kind::Files(FileStep::Hover(paths)) => ScriptEvent::DragFiles { paths: paths.clone(), at: at() },
+            Kind::Files(FileStep::Drop(paths)) => ScriptEvent::DropFiles { paths: paths.clone(), at: at() },
+            Kind::Files(FileStep::Leave) => ScriptEvent::DragFilesLeave,
         };
         TimedEvent { t: self.t, event }
     }
@@ -640,6 +652,7 @@ fn parse_script(list: Value) -> Vec<Ev> {
             out.push(Ev { t, kind: Kind::Shortcut(shortcut), pos: Pos::Rel(0.0, 0.0) });
             continue;
         }
+        if parse_files(&e, t, &mut out) { continue; }
         if e["type"] == "shortcut" {
             let chord = e["chord"].as_str().unwrap_or_else(|| die("a \"shortcut\" event needs a \"chord\", like \"cmd+space\""));
             let chord = chord.parse().unwrap_or_else(|e: crate::ShortcutError| die(&e.to_string()));
@@ -761,6 +774,64 @@ fn parse_script(list: Value) -> Vec<Ev> {
     }
     out.sort_by(|a, b| a.t.total_cmp(&b.t));
     out
+}
+
+/// `{"drag_files": {"paths": […], "at": [x, y]}}` (or `"key": …` for an element's centre) moves a
+/// file drag from another app over the window; `{"drag_files": "leave"}` takes it away.
+/// `{"drop_files": {…, "hover": s}}` drags the files there for `s` seconds (default 0), then
+/// drops them. Whether `e` was one.
+fn parse_files(e: &Value, t: f64, out: &mut Vec<Ev>) -> bool {
+    let (spec, drop) = match (e.get("drag_files"), e.get("drop_files")) {
+        (Some(spec), _) => (spec, false),
+        (None, Some(spec)) => (spec, true),
+        (None, None) => return false,
+    };
+    if !drop && spec == "leave" {
+        out.push(Ev { t, kind: Kind::Files(FileStep::Leave), pos: Pos::Rel(0.0, 0.0) });
+        return true;
+    }
+    let name = if drop { "drop_files" } else { "drag_files" };
+    let paths: Vec<std::path::PathBuf> = spec["paths"].as_array()
+        .unwrap_or_else(|| die(&format!("{name} needs \"paths\": [\"a file\", …]")))
+        .iter().map(|p| p.as_str().unwrap_or_else(|| die(&format!("{name}: paths are strings"))).into()).collect();
+    let pos = match (spec["at"].as_array(), spec["key"].as_str()) {
+        (Some(at), _) if at.len() == 2 && at.iter().all(Value::is_number) =>
+            Pos::Xy(at[0].as_f64().unwrap_or(0.0) as f32, at[1].as_f64().unwrap_or(0.0) as f32),
+        (None, Some(key)) => Pos::Key(key.to_owned()),
+        _ => die(&format!("{name} needs \"at\": [x, y] or \"key\"")),
+    };
+    out.push(Ev { t, kind: Kind::Files(FileStep::Hover(paths.clone())), pos: pos.clone() });
+    if drop {
+        let hover = spec["hover"].as_f64().unwrap_or(0.0).max(0.0);
+        out.push(Ev { t: t + hover, kind: Kind::Files(FileStep::Drop(paths)), pos });
+    }
+    true
+}
+
+/// Feeds a script's file drag step to `rt`, at `at` in window points.
+pub(crate) fn file_input<S: 'static>(rt: &mut Runtime<S>, step: &FileStep, at: (f32, f32)) {
+    match step {
+        FileStep::Hover(paths) => rt.drag_files(paths.clone(), Some(at)),
+        FileStep::Drop(paths) => rt.drop_files(paths.clone(), Some(at)),
+        FileStep::Leave => rt.drag_files_leave(),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn a_file_drop_hovers_then_drops_at_its_point() {
+    let steps: Vec<_> = parse_script(json!([
+        {"drag_files": {"paths": ["a.png"], "key": "zone"}},
+        {"t": 0.5, "drop_files": {"paths": ["a.png", "b.png"], "at": [10, 20], "hover": 0.25}},
+        {"t": 1.0, "drag_files": "leave"},
+    ])).into_iter().map(|e| (e.t, format!("{:?}", e.kind), format!("{:?}", e.pos))).collect();
+    let expected = [
+        (0.0, r#"Files(Hover(["a.png"]))"#, r#"Key("zone")"#),
+        (0.5, r#"Files(Hover(["a.png", "b.png"]))"#, "Xy(10.0, 20.0)"),
+        (0.75, r#"Files(Drop(["a.png", "b.png"]))"#, "Xy(10.0, 20.0)"),
+        (1.0, "Files(Leave)", "Rel(0.0, 0.0)"),
+    ].map(|(t, k, p)| (t, k.to_owned(), p.to_owned()));
+    assert_eq!(steps, expected);
 }
 
 #[cfg(test)]
@@ -1425,6 +1496,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
                 Kind::Paste(s) => rt.paste(s.clone()),
                 Kind::Wheel(dy) => rt.wheel(x, y, *dy),
                 Kind::Fling(v) => rt.fling(x, y, *v),
+                Kind::Files(step) => file_input(&mut rt, step, (x, y)),
             }
             if let Some((ov, _)) = overlay.as_mut() {
                 match &e.kind {

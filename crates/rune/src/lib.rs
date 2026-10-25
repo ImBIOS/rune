@@ -128,6 +128,7 @@ pub mod theme;
 pub mod tok;
 pub mod tooling;
 mod window;
+mod drop_pointer;
 mod window_frame;
 mod frame_clock;
 mod present_time;

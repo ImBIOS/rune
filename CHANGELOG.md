@@ -5,6 +5,16 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::on_drop_files`: drop files in from other apps.** Files dragged from Finder, Explorer
+  or a file manager go to the innermost `on_drop_files` element under the pointer that accepts
+  any of them, in one call with the files it accepts. `.accepts_files(|path| ..)` or
+  `.accepts_extensions(&["png"])` filters them; a target that accepts none passes the drag to
+  the next accepting element around it. `.on_drop_hover(|s, over, tx| ..)` hears the drag
+  reach and leave the target, for a highlight. A drop over no accepting element goes to the
+  root's `on_drop_files`, else it's ignored. winit gives no drag position, so the window
+  samples the system pointer while a drag is over it. macOS, Windows and X11; Wayland and the
+  web report no file drags. Headless scripts use `drag_files` and `drop_files` events, and
+  `headless_run` has `ScriptEvent::DragFiles`, `DropFiles` and `DragFilesLeave`.
 - **Covered and minimized windows don't run their view.** A shown window that was fully
   covered (macOS and X11 report it), minimized, or waiting out a missed frame used to build
   its view and lay it out on every update, wake and due timer. Now it runs updates, `poll`,

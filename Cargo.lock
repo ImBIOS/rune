@@ -957,6 +957,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "drop-files"
+version = "0.0.1"
+dependencies = [
+ "rune",
+]
+
+[[package]]
 name = "either-or-both"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

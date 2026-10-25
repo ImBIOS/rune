@@ -758,6 +758,44 @@ macOS only for now. Elsewhere `drag_out` is ignored and the element keeps its pr
 `on_drag` behaviour. Headless runs record `drag-out <path>` in `--trace` and mark the node
 `dragOut` in `--tree`. `examples/drag-out` drags a file, an app and some text.
 
+### Dropping files in from other apps (`on_drop_files`)
+
+`.on_drop_files(..)` makes an element a drop target for files dragged from Finder, Explorer
+or a file manager. `.on_drop_hover(..)` hears the drag arrive and leave, for a highlight.
+
+```rust
+el().fill(if s.over { Color::WHITE.alpha(0.1) } else { Color::TRANSPARENT })
+    .on_drop_files(|s: &mut App, files, _tx| s.attachments.extend_from_slice(files))
+    .accepts_extensions(&["png", "jpg", "m4a"])
+    .on_drop_hover(|s: &mut App, over, _tx| s.over = over)
+```
+
+- The target is the innermost `on_drop_files` element under the pointer that accepts any of
+  the dragged files (`.accepts_files(|path| ..)`, or `.accepts_extensions(..)`, compared
+  without case). A target that accepts none of them passes the drag to the next accepting
+  element around it.
+- The target gets the files it accepts, all in one call. The rest are left out.
+- Only that target is drop-hovered. It hears `on_drop_hover(true)` when the drag reaches it, and
+  `false` when the drag moves to another target, leaves the window or drops.
+- A drop over no accepting element goes to the root's `on_drop_files`, if it has one, else
+  it's ignored. Put the handler on the root to take drops anywhere in the window.
+- Each window routes drops to its own tree. A covered window still delivers them.
+
+winit 0.30 reports a file drag without its position, and no pointer moves arrive while the
+drag lasts. So the window samples the system pointer when the drag enters, about every 16 ms
+while it's over the window, and when it drops. On macOS that's
+`NSWindow.mouseLocationOutsideOfEventStream`, on Windows `GetCursorPos` and on X11
+`QueryPointer`. Where no sample is possible it uses the last pointer position, else the root.
+macOS, Windows and X11. Wayland reports no file drags in winit 0.30, and the web build has no
+paths to give.
+
+Headless scripts drag and drop files at a point or an element's centre:
+`{"drag_files": {"paths": ["a.png"], "key": "zone"}}` moves a drag there, and
+`{"drag_files": "leave"}` takes it away. `{"drop_files": {"paths": ["a.png"], "at": [120, 80],
+"hover": 0.4}}` drags the files there, holds them for 0.4 s so a strip shows the highlight, then
+drops them. `--trace` records `drop-hover:true:<path>`, `drop-hover:false:<path>` and
+`drop-files:<count>:<path>`.
+
 ### Pop-up and context menus
 
 `tx.popup_menu(menu, anchor, on_pick)` opens a native menu once the handler's frame is done.
@@ -1339,7 +1377,8 @@ $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/d
 
 - **Scripts** are timestamped `move`, `down`, `up`, `tap` (`hold`), `double-click` (`hold`,
   `gap`, default 0.15 s between presses) and `drag` (`dx`, `dy`, `dur`) events, at `x,y` in points or at an element by `key` (or a path suffix such as `slider/knob`).
-  `menu-pick` (with an `id`) and `menu-cancel` answer an open pop-up menu.
+  `menu-pick` (with an `id`) and `menu-cancel` answer an open pop-up menu. `drag_files` and
+  `drop_files` drag files in from another app (see "Dropping files in from other apps").
 - **Keys in scripts**: `{"type": "key", "name": "Enter"}` (with `cmd`, `shift`, `alt`, `ctrl`)
   and `{"type": "type", "text": "hi"}` reach the window even while the app has hidden it:
   headless there is no real window to hide, so `on_key` sees every key it would see in a

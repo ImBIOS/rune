@@ -599,6 +599,21 @@ impl ApplicationHandler<WakeEvent> for Windows {
     }
 }
 
+/// A file drag from another app over the window. winit reports one event per file; the host
+/// gathers them and hands the runtime one drag and one drop (`Host::flush_files`).
+#[derive(Default)]
+struct FileDrop {
+    entered: Vec<std::path::PathBuf>,
+    dropped: Vec<std::path::PathBuf>,
+    left: bool,
+    /// Samples the pointer while the drag is over the window, and where it last was.
+    pointer: Option<crate::drop_pointer::DropPointer>,
+    at: Option<(f32, f32)>,
+}
+
+/// How often a file drag's position is sampled while it's over the window.
+const DROP_SAMPLE: Duration = Duration::from_millis(16);
+
 struct Host<S: 'static> {
     chrome: Chrome,
     options: WindowOptions,
@@ -639,6 +654,7 @@ struct Host<S: 'static> {
     idle: bool,
     mods: ModifiersState,
     control_click: bool,
+    files: FileDrop,
     clipboard: crate::clipboard::Client,
     secure_input: crate::secure_input::SecureInput,
     ime_allowed: bool,
@@ -844,6 +860,7 @@ impl<S: 'static> Host<S> {
             idle: true,
             mods: ModifiersState::empty(),
             control_click: false,
+            files: FileDrop::default(),
             clipboard,
             secure_input: Default::default(),
             ime_allowed: false,
@@ -2794,12 +2811,14 @@ impl<S: 'static> AnyHost for Host<S> {
             .chain(win.and_then(|w| w.first_frame.deadline.map(|(retry, _)| retry)))
             .chain(win.and_then(|w| w.retry))
             .chain(win.filter(|w| !w.visible).and_then(|w| w.hidden_pace.deadline()))
+            .chain(self.files.pointer.as_ref().map(|_| Instant::now() + DROP_SAMPLE))
             .min()
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) -> bool {
         #[cfg(target_os = "macos")]
         self.fn_key();
+        self.flush_files(event_loop);
         self.hidden_input(event_loop);
         // Process queued hide/close requests before completing a pending first reveal.
         self.first_frame_ready(event_loop);
@@ -2863,6 +2882,43 @@ impl<S: 'static> Host<S> {
         if redraw { l.window.request_redraw(); }
     }
 
+    /// Hands the runtime the file drag winit reported since the last pass: the files that
+    /// entered, as one drag, then those dropped, as one drop, each at the sampled pointer; and,
+    /// while the drag is over the window, where it has moved. Runs even while the window is
+    /// covered, as queued input does.
+    fn flush_files(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(l) = &self.win else { return };
+        let f = &mut self.files;
+        let mut queued = false;
+        if !f.entered.is_empty() {
+            let pointer = crate::drop_pointer::DropPointer::new();
+            f.at = pointer.sample(&l.window).or_else(|| self.rt.pointer());
+            f.pointer = Some(pointer);
+            self.rt.drag_files(std::mem::take(&mut f.entered), f.at);
+            queued = true;
+        }
+        if !f.dropped.is_empty() {
+            if let Some(at) = f.pointer.as_ref().and_then(|p| p.sample(&l.window)) { f.at = Some(at); }
+            self.rt.drop_files(std::mem::take(&mut f.dropped), f.at.take());
+            f.pointer = None;
+            queued = true;
+        } else if std::mem::take(&mut f.left) {
+            self.rt.drag_files_leave();
+            f.pointer = None;
+            f.at = None;
+            queued = true;
+        } else if let Some(at) = f.pointer.as_ref().and_then(|p| p.sample(&l.window)) && f.at != Some(at) && !queued {
+            f.at = Some(at);
+            self.rt.drag_files_to(Some(at));
+            queued = true;
+        }
+        if !queued { return; }
+        if l.visible && !l.occluded && !l.minimized() { l.window.request_redraw(); } else {
+            self.covered_frame();
+            self.shell(event_loop);
+        }
+    }
+
     fn handle_user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
         if !self.started { return; }
         match event {
@@ -2920,6 +2976,13 @@ impl<S: 'static> Host<S> {
             }
             WindowEvent::CloseRequested => {
                 self.close(event_loop);
+                return;
+            }
+            WindowEvent::HoveredFile(path) => { self.files.entered.push(path); return; }
+            WindowEvent::DroppedFile(path) => { self.files.dropped.push(path); return; }
+            WindowEvent::HoveredFileCancelled => {
+                self.files.entered.clear();
+                self.files.left = true;
                 return;
             }
             WindowEvent::RedrawRequested => {

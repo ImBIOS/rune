@@ -26,6 +26,7 @@ members = [
     "examples/dev-panel",
     "examples/cursed-settings",
     "examples/drag-out",
+    "examples/drop-files",
     "examples/matched",
     "examples/launcher",
     "examples/glass-card",

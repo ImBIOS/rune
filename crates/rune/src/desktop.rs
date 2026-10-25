@@ -308,6 +308,7 @@ impl<S: 'static> Member for Window<S> {
             Kind::Paste(s) => rt.paste(s.clone()),
             Kind::Wheel(dy) => rt.wheel(x, y, *dy),
             Kind::Fling(v) => rt.fling(x, y, *v),
+            Kind::Files(step) => crate::tooling::file_input(rt, step, (x, y)),
             Kind::Mark(_) | Kind::Menu(_) | Kind::PopupMenu(_) | Kind::Shortcut(_) => {}
         }
     }
@@ -361,6 +362,8 @@ struct Desk {
     /// The window under the pointer, and the one a press captured.
     hover: Option<usize>,
     pressed: Option<usize>,
+    /// The window a script's file drag is over.
+    files: Option<usize>,
     /// Output origin in global points, and points to pixels.
     origin: (f32, f32),
     scale: f32,
@@ -503,6 +506,21 @@ impl Desk {
         }
     }
 
+    /// A script's file drag goes to the window under it, whether or not that window is key; a
+    /// drag that moves off a window leaves it.
+    fn file_input(&mut self, step: &crate::tooling::FileStep, at: (f32, f32)) {
+        use crate::tooling::FileStep;
+        let target = if matches!(step, FileStep::Leave) { self.files } else { self.hit(at) };
+        if let Some(old) = self.files.filter(|&old| Some(old) != target) {
+            self.members[old].input(&Kind::Files(FileStep::Leave), (0.0, 0.0));
+        }
+        self.files = target.filter(|_| matches!(step, FileStep::Hover(_)));
+        if let Some(i) = target {
+            let (ox, oy) = self.origin_pt(i);
+            self.members[i].input(&Kind::Files(step.clone()), (at.0 - ox, at.1 - oy));
+        }
+    }
+
     /// Window `i`'s frame in output points, whether it shows, and whether it has the keyboard
     /// (never while another app is active).
     fn state(&self, i: usize) -> ([f32; 4], bool, bool) {
@@ -555,7 +573,7 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args) {
     });
     let n = members.len();
     let mut desk = Desk {
-        members, z: (0..n).collect(), key: None, active: true, hover: None, pressed: None,
+        members, z: (0..n).collect(), key: None, active: true, hover: None, pressed: None, files: None,
         origin: (primary[0], primary[1]), scale,
     };
     let members = &desk.members;
@@ -659,6 +677,7 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args) {
                     if matches!(e.kind, Kind::Down | Kind::SecondaryDown) { last_down = (x, y); }
                     desk.pointer_input(&e.kind, (x, y));
                 }
+                Kind::Files(step) => desk.file_input(step, (x, y)),
             }
             if let Some((ov, _)) = overlay.as_mut() {
                 match &e.kind {
