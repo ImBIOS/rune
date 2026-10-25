@@ -1133,6 +1133,21 @@ AppKit window level, and `OverlayHandle::fade_in` and `fade_out` fade the window
 `examples/glass-panel` puts it together: a card that flies across a large window, hands off
 to a card-sized window that moves 60 times a second, and fades out.
 
+### Frosted panels
+
+Which blur a frosted panel needs depends on what sits behind it:
+
+- **The desktop or other windows:** `El::system_material` above, in a transparent window. Only
+  the platform can see behind the window.
+- **The app's own content:** no `El` builder blurs what the window drew under an element.
+  `El::blur(σ)` blurs the element's own subtree, not its backdrop. `rune-fx` has the effect:
+  `Fx::lens(LensParams { frost: 1.0, .. })` is Liquid Glass "regular" (a pyramid blur up to
+  σ 18 pt, a saturation lift and grain). It needs a [compositor](#compositor-hook-lighting-and-effects)
+  that copies the target before the panel's mark and calls `FxRenderer::blur_backdrop`;
+  `examples/lab/src/gfx.rs` does both, and the rune-fx README covers the calls.
+- **No blur:** a translucent `fill` over the content is the cheap stand-in, and what
+  `system_material` draws in opaque windows and headless renders.
+
 ## Run
 
 ```sh
