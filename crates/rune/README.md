@@ -1014,7 +1014,10 @@ let clip = rune::Player::audio(note.path);
   `cancel` (deletes a recording in progress). `state()` is `Idle`, `Starting`, `Recording`,
   `Paused`, `Stopped`, `Interrupted(reason)` or `Failed(message)`, plus `elapsed()` (paused
   time excluded) and `level()`. Builders: `.format(RecordFormat::Wav)`, `.sample_rate(hz)`,
-  `.channels(n)`.
+  `.channels(n)`. The format decides the extension (AAC writes `.m4a`, or keeps `.mp4`; WAV
+  writes `.wav`), so `to_file("note.m4a").format(RecordFormat::Wav)` writes `note.wav`;
+  `Recording::path` is always the file written. Dropping the last handle mid-recording stops
+  it and keeps the file.
 - **Levels**: `level()` is a `Level` with `peak_db()` and `rms_db()` in dBFS, and `meter()` /
   `peak_meter()` mapped to 0..1 (-60 dB to 0 dB). RMS rises over 30 ms and falls over 300 ms;
   the peak falls 20 dB a second. Reads take no lock and allocate nothing. `live_level()` is a
@@ -1048,7 +1051,8 @@ let clip = rune::Player::audio(note.path);
   `samples(rate, vec)` and `wav(path)` choose the input; `.permission(p)`, `.answers(p)` and
   `.unplug_after(secs)` exercise denial and interruption. `.install()` sets it for the thread,
   or `Recorder::fake(mic)` for one recorder.
-- **Other platforms**: `start` ends in `Failed("recording isn't supported on this platform")`.
+- **Other platforms** (Linux, Windows, the web): `start` ends in `Failed("recording isn't
+  supported on this platform")`.
 
 ### Edge overlays (`App::overlay`, `overlay.rs`, `layer_shell.rs`)
 

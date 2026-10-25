@@ -164,11 +164,15 @@ pub(super) fn make_recorder(path: &Path, opts: &Options) -> Result<Retained<AnyO
     }
 }
 
+thread_local! {
+    static ON_RECORDER_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 pub(crate) struct Session {
     commands: Sender<Command>,
 }
 
-enum Command {
+pub(super) enum Command {
     Pause,
     Resume,
     Stop(Sender<Result<f64, String>>),
@@ -199,6 +203,27 @@ pub(super) fn stop(session: Session) -> Result<f64, String> {
     done.recv_timeout(REPLY_PATIENCE).unwrap_or_else(|_| Err("the recorder didn't stop".into()))
 }
 
+/// The last handle dropped: stop and finalize the file (an m4a is unplayable until the
+/// recorder writes its index), waiting a bounded time. On the recorder thread itself (the last
+/// handle dropped while it reported) waiting would deadlock; dropping the session disconnects
+/// it instead, and the thread stops the recorder as soon as its report returns.
+pub(super) fn finish(session: Session) {
+    if !ON_RECORDER_THREAD.try_with(|on| on.get()).unwrap_or(true) {
+        let _ = stop(session);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn mark_recorder_thread() {
+    ON_RECORDER_THREAD.set(true);
+}
+
+#[cfg(test)]
+pub(super) fn idle_session() -> (Session, Receiver<Command>) {
+    let (commands, rx) = mpsc::channel();
+    (Session { commands }, rx)
+}
+
 pub(super) fn cancel(session: Session) {
     let (reply, done) = mpsc::channel();
     if session.commands.send(Command::Cancel(reply)).is_ok() {
@@ -226,6 +251,7 @@ fn open(path: &Path, opts: &Options) -> Result<(Retained<AnyObject>, Option<u32>
 }
 
 fn run(weak: Weak<Shared>, attempt: u64, path: PathBuf, opts: Options, commands: Receiver<Command>) {
+    ON_RECORDER_THREAD.set(true);
     let opened = autoreleasepool(|_| open(&path, &opts));
     let (recorder, device) = match opened {
         Ok(opened) => opened,

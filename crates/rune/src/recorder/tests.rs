@@ -189,9 +189,175 @@ fn an_aac_recorder_on_a_fake_microphone_writes_wav_beside_its_path() {
     assert_eq!(note.path, dir.join("note.wav"));
     assert!(note.path.exists());
     assert!(!dir.join("note.m4a").exists());
-    let forced = Recorder::to_file(dir.join("x.wav")).format(RecordFormat::Aac);
-    forced.start();
-    assert_eq!(forced.stop().unwrap().path, dir.join("x.wav"));
+    assert_eq!(rec.path(), dir.join("note.m4a"), "a device would write the m4a");
+}
+
+/// The format picks the extension, so AVAudioRecorder (which picks its container by the
+/// extension) never gets a mismatch, and a fake never writes RIFF into an `.m4a`.
+#[test]
+fn the_format_decides_the_file_extension() {
+    let dir = Scratch::new("extension");
+    FakeMicrophone::silence().install();
+    let path = |rec: Recorder| rec.path().strip_prefix(&dir.0).unwrap().to_path_buf();
+    assert_eq!(path(Recorder::to_file(dir.join("x.wav")).format(RecordFormat::Aac)), PathBuf::from("x.m4a"));
+    assert_eq!(path(Recorder::to_file(dir.join("x.m4a")).format(RecordFormat::Wav)), PathBuf::from("x.wav"));
+    assert_eq!(path(Recorder::to_file(dir.join("x"))), PathBuf::from("x.m4a"));
+    assert_eq!(path(Recorder::to_file(dir.join("x.mp3"))), PathBuf::from("x.m4a"));
+    assert_eq!(path(Recorder::to_file(dir.join("x.MP4"))), PathBuf::from("x.MP4"));
+    assert_eq!(path(Recorder::to_file(dir.join("x.WAV"))), PathBuf::from("x.WAV"));
+
+    let wav = Recorder::to_file(dir.join("note.m4a")).format(RecordFormat::Wav);
+    wav.start();
+    let note = wav.stop().unwrap();
+    assert_eq!(note.path, dir.join("note.wav"));
+    assert_eq!(&std::fs::read(&note.path).unwrap()[..4], b"RIFF");
+    assert!(!dir.join("note.m4a").exists(), "no RIFF bytes behind an .m4a name");
+}
+
+/// Dropping the last handle mid-recording keeps what was captured, whether recording or
+/// paused; a clone keeps the recording going.
+#[test]
+fn dropping_the_last_handle_keeps_the_recording() {
+    let dir = Scratch::new("drop");
+    FakeMicrophone::sine(1000.0, 0.5).install();
+    let mut rt = runtime();
+    let rec = Recorder::to_file(dir.join("a.wav"));
+    rec.start();
+    rt.frame(0.25);
+    let clone = rec.clone();
+    drop(rec);
+    rt.frame(0.25);
+    assert!(clone.is_recording());
+    drop(clone);
+    let (_, samples) = fake::read_wav(&dir.join("a.wav")).unwrap();
+    assert_eq!(samples.len(), 24_000);
+
+    let rec = Recorder::to_file(dir.join("b.wav"));
+    rec.start();
+    rt.frame(0.1);
+    rec.pause();
+    rt.frame(0.5);
+    drop(rec);
+    assert_eq!(fake::read_wav(&dir.join("b.wav")).unwrap().1.len(), 4_800);
+
+    // A cancelled or stopped recorder leaves nothing more to do.
+    let rec = Recorder::to_file(dir.join("c.wav"));
+    rec.start();
+    rt.frame(0.1);
+    rec.cancel();
+    drop(rec);
+    assert!(!dir.join("c.wav").exists());
+}
+
+/// Cancelling a start that hasn't opened anything (still waiting on permission, say) leaves
+/// an earlier recording at the same path alone.
+#[test]
+fn cancelling_a_pending_start_keeps_an_earlier_file() {
+    let dir = Scratch::new("pending");
+    FakeMicrophone::silence().install();
+    let path = dir.join("note.wav");
+    let rec = Recorder::to_file(&path);
+    let mut rt = runtime();
+    rec.start();
+    rt.frame(0.2);
+    rec.stop().unwrap();
+    // A device start waiting on a permission answer: Starting, with no input open.
+    {
+        let mut c = rec.shared.ctl.lock().unwrap();
+        c.attempt += 1;
+        c.set(RecorderState::Starting);
+    }
+    rec.cancel();
+    assert_eq!(rec.state(), RecorderState::Idle);
+    assert!(path.exists(), "the earlier recording stays");
+}
+
+/// 60 frames of 1/60 s sum to just under 1 s; that mustn't drop the last block's level, a
+/// sample, or move an unplug to a later frame.
+#[test]
+fn frame_rate_never_moves_a_sample_level_or_unplug() {
+    let dir = Scratch::new("rate");
+    FakeMicrophone::default().install();
+    let mut rt = runtime();
+    let one = Recorder::to_file(dir.join("one.wav"));
+    one.start();
+    rt.frame(1.0);
+    let (level, note) = (one.level(), one.stop().unwrap());
+
+    let mut rt = runtime();
+    let sixty = Recorder::to_file(dir.join("sixty.wav"));
+    sixty.start();
+    for _ in 0..60 {
+        rt.frame(1.0 / 60.0);
+    }
+    assert_eq!(sixty.level(), level);
+    let other = sixty.stop().unwrap();
+    assert_eq!(other.duration, note.duration);
+    assert_eq!(fake::read_wav(&other.path).unwrap().1.len(), 48_000);
+
+    FakeMicrophone::silence().unplug_after(0.3).install();
+    let mut rt = runtime();
+    let rec = Recorder::to_file(dir.join("unplug.wav"));
+    rec.start();
+    for _ in 0..18 {
+        rt.frame(1.0 / 60.0);
+    }
+    assert!(matches!(rec.state(), RecorderState::Interrupted(_)), "unplugs on the 18th frame: {:?}", rec.state());
+    assert_eq!(rec.stop().unwrap().duration, 0.3);
+}
+
+/// Restarting a recorder doesn't follow it more than once a frame.
+#[test]
+fn a_restarted_recorder_is_followed_once() {
+    let dir = Scratch::new("restart");
+    FakeMicrophone::silence().install();
+    let mut rt = runtime();
+    let rec = Recorder::to_file(dir.join("note.wav"));
+    for _ in 0..3 {
+        rec.start();
+        rt.frame(0.1);
+        rec.stop().unwrap();
+    }
+    let followed = HEADLESS.with_borrow(|h| h.iter().filter(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(&rec.shared))).count());
+    assert_eq!(followed, 1);
+}
+
+#[test]
+fn levels_pack_into_one_word() {
+    for level in [Level::SILENT, Level::new(-6.0, -9.0), Level::new(0.0, -160.0)] {
+        assert_eq!(unpack(pack(level)), level);
+    }
+}
+
+/// A late failure from an earlier attempt leaves the current attempt's session alone.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stale_failure_leaves_the_current_session() {
+    let rec = Recorder::to_file(std::env::temp_dir().join("rune-recorder-stale.m4a"));
+    let (session, _commands) = macos::idle_session();
+    *rec.shared.native.lock().unwrap() = Some((2, session));
+    rec.shared.ctl.lock().unwrap().attempt = 2;
+    rec.shared.failed(1, "late".into());
+    assert!(rec.shared.native.lock().unwrap().is_some());
+    rec.shared.failed(2, "now".into());
+    assert!(rec.shared.native.lock().unwrap().is_none());
+}
+
+/// Dropping the last handle on the recorder thread itself (the last handle went while it
+/// reported) returns at once instead of waiting on itself.
+#[cfg(target_os = "macos")]
+#[test]
+fn finishing_on_the_recorder_thread_doesnt_wait_on_itself() {
+    let (session, commands) = macos::idle_session();
+    let begun = std::time::Instant::now();
+    std::thread::spawn(move || {
+        macos::mark_recorder_thread();
+        macos::finish(session);
+    })
+    .join()
+    .unwrap();
+    assert!(begun.elapsed() < std::time::Duration::from_secs(1));
+    assert!(commands.try_recv().is_err(), "nothing was asked of the thread");
 }
 
 #[test]

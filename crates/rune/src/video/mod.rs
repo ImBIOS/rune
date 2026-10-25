@@ -87,8 +87,9 @@ pub(crate) fn headless_reset() {
     HEADLESS.with_borrow_mut(|h| h.clock = Some(0.0));
 }
 
+/// Never panics, so destructors can ask (`None` while the thread's storage is torn down).
 pub(crate) fn headless_clock() -> Option<f64> {
-    HEADLESS.with_borrow(|h| h.clock)
+    HEADLESS.try_with(|h| h.try_borrow().ok().and_then(|h| h.clock)).ok().flatten()
 }
 
 /// Where media comes from. Strings containing `://` are URLs; anything else is a file path.

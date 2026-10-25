@@ -34,6 +34,10 @@ pub(super) fn stop(session: Session) -> Result<f64, String> {
     match session {}
 }
 
+pub(super) fn finish(session: Session) {
+    match session {}
+}
+
 pub(super) fn cancel(session: Session) {
     match session {}
 }

@@ -6,7 +6,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 ## dev
 
 - **`Recorder`: record the microphone to a file.** `Recorder::to_file("note.m4a")` records AAC
-  (a `.wav` path, or `.format(RecordFormat::Wav)`, records WAV) with `start`, `pause`, `resume`,
+  (a `.wav` path, or `.format(RecordFormat::Wav)`, records WAV; the format decides the
+  file's extension) with `start`, `pause`, `resume`,
   `stop` (returns a `Recording { path, duration }`) and `cancel` (deletes a recording in
   progress). `state()`, `elapsed()` and a smoothed `level()` (peak and RMS in dBFS, `meter()`
   in 0..1) are read without allocating; `live_level()` drives a bound meter that redraws while
