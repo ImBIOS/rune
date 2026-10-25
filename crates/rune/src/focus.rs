@@ -692,6 +692,33 @@ mod tests {
     }
 
     #[test]
+    fn on_key_tells_a_key_nothing_focused_had_from_one_a_control_passed_on() {
+        #[derive(Default)]
+        struct Panes { pane: usize, seen: Vec<Option<String>> }
+        fn view(_: &Panes, _: &mut Cx<Panes>) -> El {
+            col().size(200.0, 200.0).child(button("switch")).child(el().size(30.0, 30.0).focusable(true))
+        }
+        let mut rt = Runtime::new(Panes::default(), view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.on_key = Some(|s, ev, tx| {
+            s.seen.push(tx.focused().map(str::to_owned));
+            // System Settings: plain Down changes the pane only while no control has focus.
+            if ev.key == Key::Down && tx.focused().is_none() { s.pane += 1; return true; }
+            false
+        });
+        rt.frame(0.0);
+        press(&mut rt, Key::Down);
+        assert_eq!(rt.state.pane, 1);
+        press(&mut rt, Key::Tab);
+        assert_eq!(focused(&rt), "switch");
+        press(&mut rt, Key::Down);
+        assert_eq!(rt.state.pane, 1, "Down the focused switch passed on doesn't change the pane");
+        press(&mut rt, Key::Tab);
+        press(&mut rt, Key::Down);
+        // The first Tab reaches on_key before focus moves; the second never does.
+        assert_eq!(rt.state.seen, [None, None, Some("switch".into()), Some("#1".into())]);
+    }
+
+    #[test]
     fn keyboard_focus_scrolls_into_view() {
         fn view(_: &State, _: &mut Cx<State>) -> El {
             col().key("root").size(200.0, 200.0).child(button("before"))

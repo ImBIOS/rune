@@ -18,6 +18,7 @@ use crate::tok::TextStyle;
 pub struct Tx {
     pub(crate) shortcut_activation_token: Option<String>,
     pub(crate) key_repeat: bool,
+    pub(crate) focused: Option<String>,
     pub(crate) instant: bool,
     pub(crate) motion: Option<Spring>,
     pub(crate) color_motion: Option<Spring>,
@@ -61,6 +62,17 @@ impl Tx {
     /// (start recording on Enter, say) can return early on a repeat; arrows and Tab usually
     /// want every repeat.
     pub fn key_repeat(&self) -> bool { self.key_repeat }
+
+    /// In a key handler, the key of the element that had focus when the key arrived, `None`
+    /// when nothing had (and in every other handler). An unkeyed element reads as `#n`, its
+    /// index among its siblings. A window's `on_key` hears
+    /// a key either before anything else (nothing focused) or after the focused control passed
+    /// it on, so `tx.focused().is_none()` picks out the first case: plain arrows can drive the
+    /// window (a settings pane) only while no control has focus, as in System Settings. The
+    /// whole order is under "Key routing" in the rune README.
+    pub fn focused(&self) -> Option<&str> {
+        self.focused.as_deref()
+    }
 
     /// Whether this runtime has an attached motion or tooling trace.
     pub fn tracing(&self) -> bool { self.trace.is_some() }

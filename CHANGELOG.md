@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Tx::focused()` tells `on_key` whether a control has focus.** A window's `on_key` hears a
+  key first while nothing has focus and again after a focused control passes it on, and
+  couldn't tell the two apart. In key handlers `tx.focused()` is now the focused element's key
+  (`#n` for an unkeyed one), or `None` when nothing has focus, so plain arrows can change a
+  settings pane only while no control is focused. The rune README's "Key routing" lists the
+  whole order a key takes.
 - **Mac apps get standard Edit and Window menus; `App::standard_menus()` opts accessory apps in.**
   A regular app whose menu bar is still winit's default now also has Edit (Undo ⌘Z, Redo ⇧⌘Z,
   Cut, Copy, Paste, Select All) and Window (Minimize ⌘M, Close ⌘W); an accessory app gets them

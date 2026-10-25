@@ -2121,6 +2121,7 @@ impl<S: 'static> Runtime<S> {
     /// Offer a logical key that already passed `held_gate` to the app, the focused
     /// input's handler, focus traversal and the focused editor, in that order.
     fn route_key(&mut self, ev: &KeyEvent, repeat: bool, one: &mut Tx) -> bool {
+        one.focused = self.focused_key();
         if matches!(ev.key, crate::Key::Modifier { .. }) { return !repeat && self.route_modifier(ev, one); }
         one.key_repeat = repeat;
         let shown = self.keyboard_focus || self.hover_focus;
@@ -2232,6 +2233,14 @@ impl<S: 'static> Runtime<S> {
     fn focused_input(&self) -> Option<&InputSpec> {
         let path = self.focused.as_deref()?;
         self.node(path).and_then(|n| n.input.as_deref()).or_else(|| self.virtual_inputs.get(path).map(Box::as_ref))
+    }
+
+    /// What [`Tx::focused`] reports: the focused element's key, else its path's last segment
+    /// (a field in a virtual row that scrolled out has no node).
+    fn focused_key(&self) -> Option<String> {
+        let path = self.focused.as_deref()?;
+        Some(self.focused_index().and_then(|i| self.nodes[i].key.clone())
+            .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(path).to_owned()))
     }
 
     /// The focused element's index. Unlike [`Runtime::node`], this finds it while it exits.

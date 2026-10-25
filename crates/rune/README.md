@@ -128,6 +128,18 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   activates non-text controls. `.modal(click_outside, close)` traps Tab, handles Escape, makes the
   background inert and restores the opener. Nested modals restore in stack order. Inspector tree
   flags (`focusable`, `focused`, `focusVisible`, `inert`) are the future platform AX hook.
+- **Key routing**: a key the OS delivers to the window goes to the first of these that takes it.
+  Global shortcuts and native menu key equivalents are handled before the window sees the key.
+  1. Selected text, for its copy keys.
+  2. Nothing focused: the window's `on_key`, with `tx.focused()` `None`.
+  3. The focused field's `on_input_key`.
+  4. Focus navigation: Escape dismisses the open modal, Tab and Shift-Tab move focus, arrows,
+     Home, End and type-select move inside a `focus_group`, Up and Down open a focused popup
+     button (role `combobox`), and Return and Space press the focused control.
+  5. The focused text field's editor.
+  6. The window's `on_key` again, now with `tx.focused()` naming the focused element, for keys
+     the focused control passed on.
+  7. Page Up, Page Down, Home and End scroll the focused (else hovered) scroll view.
 - **Periodic motion**: `.looping(rune_motion::LoopSpec::opacity(..))` or `LoopSpec::rotation(period)`
   (icon quads). Tracks use animation time, preserve phase when retimed and only request frames
   while visible through ancestor clips. Removal uses the existing spring presence fade. Reduced
