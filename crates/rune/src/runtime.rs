@@ -2761,67 +2761,23 @@ impl<S: 'static> Measurement<'_, S> {
             entry.used
         });
         {
-            let text_sys = &mut self.text;
             let _layout_time = crate::frame_profile::Scope::new(crate::frame_profile::Phase::Layout);
-            let nodes_ref = &nodes;
-            let viewport = self.viewport;
-            let fit_height = self.fit_height;
-            let mut compute = |taffy: &mut TaffyTree<usize>| taffy
-                .compute_layout_with_measure(
-                    root_id,
-                    Size {
-                        width: AvailableSpace::Definite(viewport.0),
-                        height: if fit_height { AvailableSpace::MaxContent } else { AvailableSpace::Definite(viewport.1) },
-                    },
-                    |inputs, _id, ctx, style| {
-                        taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |known, avail| {
-                            let Some(&mut i) = ctx else { return Size::ZERO };
-                            let spec = nodes_ref[i].text.as_ref().unwrap();
-                            let w = if spec.wrap {
-                                known.width.or(match avail.width {
-                                    AvailableSpace::Definite(w) => Some(w),
-                                    AvailableSpace::MinContent => Some(0.0),
-                                    AvailableSpace::MaxContent => None,
-                                })
-                            } else {
-                                None
-                            };
-                            if let Some((run, at)) = &spec.advance_in {
-                                let r = text_sys.run_layout(run, spec.style, scale);
-                                if let Some(w) = r.advance(*at, scale) {
-                                    return Size {
-                                        width: known.width.unwrap_or(w),
-                                        height: known.height.unwrap_or(layout_height(&r.layout, spec.style, scale) / scale),
-                                    };
-                                }
-                            }
-                            let l = text_sys.layout_rich(&spec.content, &spec.spans, spec.style, scale, w.map(|w| w * scale));
-                            let mut lw = (l.full_width() / scale).ceil_to(scale);
-                            if (spec.truncate || spec.truncate_fade || spec.max_lines > 0)
-                                && let AvailableSpace::Definite(a) = avail.width
-                            {
-                                lw = lw.min(a);
-                            }
-                            Size {
-                                width: known.width.unwrap_or(lw),
-                                height: known.height.unwrap_or(clamped_height(&l, spec, scale) / scale),
-                            }
-                        })
-                    },
-                )
-                .unwrap();
-            compute(&mut taffy);
+            let room = Size {
+                width: AvailableSpace::Definite(self.viewport.0),
+                height: if self.fit_height { AvailableSpace::MaxContent } else { AvailableSpace::Definite(self.viewport.1) },
+            };
+            compute_layout(&mut taffy, root_id, room, &nodes, &mut self.text, scale);
             // `aspect_fit` elements laid out filling their room; fix each at the largest box
             // at its ratio inside it and lay out again, so siblings and alignment follow.
             let mut refit = false;
-            for n in nodes_ref {
+            for n in &nodes {
                 if let Some(fit) = &n.aspect_fit {
                     let style = fitted(fit.0, &fit.1, taffy.layout(n.taffy).unwrap().size);
                     taffy.set_style(n.taffy, style).unwrap();
                     refit = true;
                 }
             }
-            if refit { compute(&mut taffy); }
+            if refit { compute_layout(&mut taffy, root_id, room, &nodes, &mut self.text, scale); }
         }
         self.stats.layout_nodes = nodes.len();
         #[cfg(debug_assertions)]
@@ -5564,6 +5520,48 @@ fn truncated(text: &mut TextSystem, spec: &TextSpec, scale: f32, max_w: f32) -> 
     }
     let e = cut(lo);
     (make(text, e), e)
+}
+
+/// Lays out the flattened tree in `room`, measuring text leaves. Not generic over the app state,
+/// so Taffy's layout code is instantiated once, not once per `Runtime<S>`.
+fn compute_layout(taffy: &mut TaffyTree<usize>, root: taffy::NodeId, room: Size<AvailableSpace>, nodes: &[Node], text: &mut TextSystem, scale: f32) {
+    taffy
+        .compute_layout_with_measure(root, room, |inputs, _id, ctx, style| {
+            taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, |known, avail| {
+                let Some(&mut i) = ctx else { return Size::ZERO };
+                let spec = nodes[i].text.as_ref().unwrap();
+                let w = if spec.wrap {
+                    known.width.or(match avail.width {
+                        AvailableSpace::Definite(w) => Some(w),
+                        AvailableSpace::MinContent => Some(0.0),
+                        AvailableSpace::MaxContent => None,
+                    })
+                } else {
+                    None
+                };
+                if let Some((run, at)) = &spec.advance_in {
+                    let r = text.run_layout(run, spec.style, scale);
+                    if let Some(w) = r.advance(*at, scale) {
+                        return Size {
+                            width: known.width.unwrap_or(w),
+                            height: known.height.unwrap_or(layout_height(&r.layout, spec.style, scale) / scale),
+                        };
+                    }
+                }
+                let l = text.layout_rich(&spec.content, &spec.spans, spec.style, scale, w.map(|w| w * scale));
+                let mut lw = (l.full_width() / scale).ceil_to(scale);
+                if (spec.truncate || spec.truncate_fade || spec.max_lines > 0)
+                    && let AvailableSpace::Definite(a) = avail.width
+                {
+                    lw = lw.min(a);
+                }
+                Size {
+                    width: known.width.unwrap_or(lw),
+                    height: known.height.unwrap_or(clamped_height(&l, spec, scale) / scale),
+                }
+            })
+        })
+        .unwrap();
 }
 
 /// The height (device px) of `l` as `spec` shows it: its first `max_lines` lines when set.
