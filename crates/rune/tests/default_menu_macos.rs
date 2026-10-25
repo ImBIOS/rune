@@ -102,6 +102,51 @@ fn main() {
         assert_eq!(tops(&root).len(), 3, "adding twice changes nothing");
         assert_eq!(root.itemAtIndex(2).unwrap().submenu().unwrap().numberOfItems(), 2);
 
+        // An app's custom menus take the Mac order around the standard ones, and an item of
+        // its own with a standard equivalent takes it from the standard item, set before or after.
+        let key_of = |root: &NSMenu, menu: &str, title: &str| {
+            let menu = (0..root.numberOfItems()).filter_map(|i| root.itemAtIndex(i)).find(|i| i.title().to_string() == menu).unwrap().submenu().unwrap();
+            (0..menu.numberOfItems()).filter_map(|i| menu.itemAtIndex(i)).find(|i| i.title().to_string() == title).unwrap().keyEquivalent().to_string()
+        };
+        let (file_top, file) = default_macos::add_top(mtm, &root, "File");
+        let (view_top, _) = default_macos::add_top(mtm, &root, "View");
+        let (help_top, _) = default_macos::add_top(mtm, &root, "Help");
+        assert_eq!(&tops(&root)[1..], ["File", "Edit", "View", "Window", "Help"]);
+        let close_tab = NSMenuItem::initWithTitle_action_keyEquivalent(mtm.alloc(), &NSString::from_str("Close Tab"),
+            Some(sel!(runeMenuAction:)), &NSString::from_str("w"));
+        default_macos::adding(&app, || file.addItem(&close_tab));
+        assert_eq!(close_tab.keyEquivalent().to_string(), "w", "AppKit keeps the custom item's ⌘W");
+        assert_eq!(key_of(&root, "Window", "Close"), "", "Close Tab ⌘W wins");
+        assert_eq!(key_of(&root, "Window", "Minimize"), "m");
+        let paste_plain = NSMenuItem::initWithTitle_action_keyEquivalent(mtm.alloc(), &NSString::from_str("Paste Plain"),
+            Some(sel!(runeMenuAction:)), &NSString::from_str("V"));
+        paste_plain.setKeyEquivalentModifierMask(command | Flags::NSEventModifierFlagOption);
+        default_macos::adding(&app, || file.addItem(&paste_plain));
+        assert_eq!(key_of(&root, "Edit", "Paste"), "v", "⌥⇧⌘V isn't ⌘V");
+        file.removeItem(&close_tab);
+        file.removeItem(&paste_plain);
+        for top in [&file_top, &view_top, &help_top] { default_macos::remove_top_if_empty(&root, top); }
+        default_macos::sync_standard(&app);
+        assert_eq!(&tops(&root)[1..], ["Edit", "Window"]);
+        assert_eq!(key_of(&root, "Window", "Close"), "w", "Close gets ⌘W back");
+        // Set before the standard items: the custom item still wins, and its menu, shared
+        // with them, outlives it.
+        app.setMainMenu(None);
+        let root = default_macos::ensure(&app);
+        let (window_top, window) = default_macos::add_top(mtm, &root, "Window");
+        let close_all = NSMenuItem::initWithTitle_action_keyEquivalent(mtm.alloc(), &NSString::from_str("Close All"),
+            Some(sel!(runeMenuAction:)), &NSString::from_str("w"));
+        default_macos::adding(&app, || window.addItem(&close_all));
+        default_macos::add_standard(&app);
+        assert_eq!(&tops(&root)[1..], ["Edit", "Window"]);
+        assert_eq!(close_all.keyEquivalent().to_string(), "w");
+        assert_eq!(key_of(&root, "Window", "Close"), "");
+        window.removeItem(&close_all);
+        default_macos::remove_top_if_empty(&root, &window_top);
+        default_macos::sync_standard(&app);
+        assert_eq!(&tops(&root)[1..], ["Edit", "Window"], "the shared menu stays for the standard items");
+        assert_eq!(plan(&window).into_iter().map(|e| (e.0, e.2)).collect::<Vec<_>>(), [(s("Minimize"), s("m")), (s("Close"), s("w"))]);
+
         // An app's own Edit menu keeps its items; only missing actions join it.
         app.setMainMenu(None);
         let supplied: Retained<NSMenu> = NSMenu::new(mtm);
@@ -137,5 +182,5 @@ fn main() {
         assert_eq!(app.activationPolicy(), NSApplicationActivationPolicy::Accessory);
         app.setMainMenu(None);
     }
-    println!("PASS: default titles/selectors/keys, Services, idempotence, custom and empty menus preserved; standard Edit/Window items, nil targets, no Quit until promoted");
+    println!("PASS: default titles/selectors/keys, Services, idempotence, custom and empty menus preserved; standard Edit/Window items, nil targets, Mac menu order, custom equivalents win, shared menus kept, no Quit until promoted");
 }

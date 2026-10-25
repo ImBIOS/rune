@@ -54,6 +54,33 @@ impl Standard {
     }
 }
 
+/// A key equivalent as AppKit matches it: the key lowercased, a capital counting as Shift.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Equivalent { pub key: String, pub cmd: bool, pub shift: bool, pub alt: bool, pub ctrl: bool }
+
+impl Equivalent {
+    /// `None` for an item without one.
+    pub(crate) fn new(key: &str, cmd: bool, shift: bool, alt: bool, ctrl: bool) -> Option<Self> {
+        if key.is_empty() { return None; }
+        let lower = key.to_lowercase();
+        Some(Self { shift: shift || lower != key, key: lower, cmd, alt, ctrl })
+    }
+}
+
+impl Standard {
+    pub(crate) fn equivalent(&self) -> Equivalent {
+        Equivalent { key: self.key.to_string(), cmd: true, shift: self.shift, alt: false, ctrl: false }
+    }
+}
+
+/// Where a new top-level menu titled `title` goes among `tops` (index 0 the app menu), in the
+/// Mac order: the app menu, File, Edit, the app's other menus, Window, Help. It goes before
+/// the first menu that comes later in that order, else last.
+pub(crate) fn top_index(title: &str, tops: &[String]) -> usize {
+    fn rank(title: &str) -> u8 { match title { "File" => 1, "Edit" => 2, "Window" => 4, "Help" => 5, _ => 3 } }
+    (1..tops.len()).find(|&i| rank(&tops[i]) > rank(title)).unwrap_or(tops.len())
+}
+
 /// What a Rune view does with a standard action the menu sent it: always hand Rune the key,
 /// as when no menu item matched, so text fields, `on_key` and shortcuts see it once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +171,33 @@ mod tests {
         let remapped = KeyDown { alt: true, ..key("c", false) };
         assert_eq!(route(copy, false, Some(&remapped)), key_only(false));
         assert_eq!(route(copy, false, Some(&KeyDown { cmd: false, ..key("c", false) })), key_only(false));
+    }
+
+    #[test]
+    fn new_menus_take_the_mac_order_around_the_standard_ones() {
+        let tops = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let standard = tops(&["App", "Edit", "Window"]);
+        assert_eq!(top_index("File", &standard), 1, "File before Edit");
+        assert_eq!(top_index("View", &standard), 2, "the app's menus between Edit and Window");
+        assert_eq!(top_index("Help", &standard), 3, "Help last");
+        assert_eq!(top_index("Tools", &tops(&["App", "File", "Edit", "View", "Window", "Help"])), 4, "after the app's other menus");
+        // The standard menus joining an app's own bar.
+        assert_eq!(top_index("Edit", &tops(&["App", "File", "View", "Help"])), 2);
+        assert_eq!(top_index("Window", &tops(&["App", "File", "Edit", "View", "Help"])), 4);
+        assert_eq!(top_index("View", &tops(&["App"])), 1);
+        assert_eq!(top_index("File", &[]), 0);
+    }
+
+    #[test]
+    fn equivalents_compare_as_appkit_matches_them() {
+        let close = by_action("performClose:").unwrap().equivalent();
+        assert_eq!(Equivalent::new("w", true, false, false, false), Some(close.clone()));
+        assert_ne!(Equivalent::new("w", true, true, false, false), Some(close.clone()), "⇧⌘W is another key");
+        assert_ne!(Equivalent::new("w", false, false, false, false), Some(close));
+        let redo = by_action("redo:").unwrap().equivalent();
+        assert_eq!(Equivalent::new("Z", true, false, false, false), Some(redo.clone()), "a capital means Shift");
+        assert_eq!(Equivalent::new("z", true, true, false, false), Some(redo));
+        assert_eq!(Equivalent::new("", true, false, false, false), None);
     }
 
     #[test]

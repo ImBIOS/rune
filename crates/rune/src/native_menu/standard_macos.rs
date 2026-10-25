@@ -6,9 +6,9 @@
 use super::{default_macos, standard::{self, KeyDown, Standard, ITEMS}};
 use crate::runtime::Unhandled;
 use std::{cell::Cell, ffi::{c_char, c_void}};
-use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
-use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSView, NSWindow, NSWindowButton};
-use objc2_foundation::{MainThreadMarker, NSPoint, NSProcessInfo, NSString};
+use objc2::{ClassType, msg_send, runtime::{AnyClass, AnyObject, Bool, Sel}};
+use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSPanel, NSView, NSWindow, NSWindowButton};
+use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSPoint, NSProcessInfo, NSString};
 
 thread_local! {
     static INSTALLED: Cell<bool> = const { Cell::new(false) };
@@ -78,16 +78,37 @@ unsafe fn perform(view: &NSView, item: &Standard) {
             standard::Role::Minimize => (Some(NSWindowButton::NSWindowMiniaturizeButton), Some(Unhandled::Minimize)),
             _ => (None, None),
         };
-        let button = window.as_ref().zip(kind).and_then(|(w, kind)| w.standardWindowButton(kind)).is_some_and(|b| b.isEnabled());
+        // A titled panel can show an enabled miniaturize button, but Rune never minimizes one.
+        let panel = window.as_ref().is_some_and(|w| w.isKindOfClass(NSPanel::class()));
+        let button = !panel && window.as_ref().zip(kind).and_then(|(w, kind)| w.standardWindowButton(kind)).is_some_and(|b| b.isEnabled());
         let current = NSApplication::sharedApplication(mtm).currentEvent().filter(|e| e.r#type() == NSEventType::KeyDown);
         let route = standard::route(item, button, current.as_deref().map(key_down).as_ref());
         // winit hands the press to the host synchronously, which takes this; clear it anyway.
         UNHANDLED.with(|u| u.set(then.filter(|_| route.then_button).map(|then| (item.key, then))));
+        commit_composition(view);
         match current.filter(|_| route.current) {
             Some(event) => view.keyDown(&event),
             None => press(view, item, window.as_deref()),
         }
         UNHANDLED.with(|u| u.set(None));
+    }
+}
+
+/// An IME composition (or a dead key's accent) in the view ends before the command, as in an
+/// NSTextView: the input method commits it, so the text lands in the field first; one that
+/// doesn't is dropped. Then the key reaches Rune instead of the input method, which would
+/// otherwise swallow it as part of the composition.
+unsafe fn commit_composition(view: &NSView) {
+    // SAFETY: main thread; the view is a live WinitView, which implements NSTextInputClient.
+    unsafe {
+        let marked: bool = msg_send![view, hasMarkedText];
+        if !marked { return; }
+        // The input method answers with `insertText:`, which winit reports as `Ime::Commit`.
+        let context: *mut AnyObject = msg_send![view, inputContext];
+        if let Some(context) = context.as_ref() { let _: () = msg_send![context, discardMarkedText]; }
+        // Back to winit's ground state whether or not it committed: right after a commit winit
+        // treats the next key as part of it and drops it.
+        let _: () = msg_send![view, unmarkText];
     }
 }
 

@@ -1,7 +1,8 @@
 //! The winit 0.30 app menu for an accessory app becoming a regular app, and the standard
 //! Edit and Window items. Creating a custom Rune menu uses the same root, so either
 //! installation order composes.
-use std::cell::RefCell;
+use std::{cell::RefCell, collections::HashSet};
+use super::standard::Equivalent;
 use objc2::{rc::Retained, runtime::Sel, sel};
 use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
 use objc2_foundation::{MainThreadMarker, NSProcessInfo, NSString};
@@ -87,6 +88,9 @@ pub(crate) fn is_winit_default(app: &NSApplication) -> bool {
     }
 }
 
+/// Tags the items `add_standard` makes.
+const STANDARD: isize = 0x5255_4e45;
+
 /// The standard items, into menus of their titles (made if absent) in the menu bar, or in a
 /// new one whose empty app menu waits for `promote`. An action a menu already has is skipped.
 /// Never adds Quit.
@@ -104,8 +108,86 @@ pub(crate) fn add_standard(app: &NSApplication) {
             let mut flags = NSEventModifierFlags::NSEventModifierFlagCommand;
             if standard.shift { flags |= NSEventModifierFlags::NSEventModifierFlagShift; }
             entry.setKeyEquivalentModifierMask(flags);
+            entry.setTag(STANDARD);
             menu.addItem(&entry);
         }
+    }
+    sync_standard(app);
+}
+
+/// Adds an app's own items in `add`: AppKit drops the key equivalent of an item added while
+/// the menu bar already has it, so the standard items let go of theirs first and take back
+/// only those no other item claims (`sync_standard`).
+pub(crate) fn adding<R>(app: &NSApplication, add: impl FnOnce() -> R) -> R {
+    set_standard_keys(app, |_| false);
+    let added = add();
+    sync_standard(app);
+    added
+}
+
+/// After the menu bar's items change: each standard item keeps its key equivalent unless
+/// another item in the menu bar has the same one, so an app's own item (Close Tab ⌘W) wins
+/// whichever was added first.
+pub(crate) fn sync_standard(app: &NSApplication) {
+    let mut claimed = HashSet::new();
+    // SAFETY: main thread; reading retained menus.
+    if let Some(root) = unsafe { app.mainMenu() } { unsafe { claims(&root, &mut claimed) }; }
+    set_standard_keys(app, |equivalent| !claimed.contains(equivalent));
+}
+
+fn set_standard_keys(app: &NSApplication, keep: impl Fn(&Equivalent) -> bool) {
+    // SAFETY: main thread; setting retained menu items.
+    unsafe {
+        let Some(root) = app.mainMenu() else { return };
+        for menu in (0..root.numberOfItems()).filter_map(|i| root.itemAtIndex(i)?.submenu()) {
+            for entry in (0..menu.numberOfItems()).filter_map(|i| menu.itemAtIndex(i)).filter(|i| i.tag() == STANDARD) {
+                let Some(standard) = entry.action().and_then(|a| super::standard::by_action(a.name())) else { continue };
+                let equivalent = standard.equivalent();
+                entry.setKeyEquivalent(&NSString::from_str(if keep(&equivalent) { &equivalent.key } else { "" }));
+            }
+        }
+    }
+}
+
+/// The key equivalents of every item but the standard ones, submenus included.
+unsafe fn claims(menu: &NSMenu, out: &mut HashSet<Equivalent>) {
+    // SAFETY: as `sync_standard`.
+    unsafe {
+        for entry in (0..menu.numberOfItems()).filter_map(|i| menu.itemAtIndex(i)) {
+            if entry.tag() != STANDARD {
+                let flags = entry.keyEquivalentModifierMask();
+                let has = |f| flags.contains(f);
+                out.extend(Equivalent::new(&entry.keyEquivalent().to_string(),
+                    has(NSEventModifierFlags::NSEventModifierFlagCommand), has(NSEventModifierFlags::NSEventModifierFlagShift),
+                    has(NSEventModifierFlags::NSEventModifierFlagOption), has(NSEventModifierFlags::NSEventModifierFlagControl)));
+            }
+            if let Some(sub) = entry.submenu() { claims(&sub, out); }
+        }
+    }
+}
+
+/// A new top-level menu in the Mac order (`standard::top_index`): File before the standard
+/// Edit, the app's other menus before Window, Help last.
+pub(crate) fn add_top(mtm: MainThreadMarker, root: &NSMenu, title: &str) -> (Retained<NSMenuItem>, Retained<NSMenu>) {
+    // SAFETY: main thread; every object is retained.
+    unsafe {
+        let tops: Vec<String> = (0..root.numberOfItems()).filter_map(|i| root.itemAtIndex(i)).map(|i| i.title().to_string()).collect();
+        let menu = NSMenu::new(mtm);
+        menu.setTitle(&NSString::from_str(title));
+        let entry = NSMenuItem::new(mtm);
+        entry.setTitle(&NSString::from_str(title));
+        entry.setSubmenu(Some(&menu));
+        root.insertItem_atIndex(&entry, super::standard::top_index(title, &tops) as isize);
+        (entry, menu)
+    }
+}
+
+/// Removes a top-level menu its maker no longer uses, unless other items (the standard ones)
+/// still live in it.
+pub(crate) fn remove_top_if_empty(root: &NSMenu, top: &NSMenuItem) {
+    // SAFETY: main thread; both are retained.
+    unsafe {
+        if top.submenu().is_none_or(|m| m.numberOfItems() == 0) && root.indexOfItem(top) >= 0 { root.removeItem(top); }
     }
 }
 
@@ -114,14 +196,7 @@ unsafe fn top(mtm: MainThreadMarker, root: &NSMenu, title: &str) -> Retained<NSM
     unsafe {
         let existing = (0..root.numberOfItems()).filter_map(|i| root.itemAtIndex(i))
             .find(|i| i.title().to_string() == title).and_then(|i| i.submenu());
-        if let Some(menu) = existing { return menu; }
-        let menu = NSMenu::new(mtm);
-        menu.setTitle(&NSString::from_str(title));
-        let entry = NSMenuItem::new(mtm);
-        entry.setTitle(&NSString::from_str(title));
-        entry.setSubmenu(Some(&menu));
-        root.addItem(&entry);
-        menu
+        existing.unwrap_or_else(|| add_top(mtm, root, title).1)
     }
 }
 

@@ -12,8 +12,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   windows (an open panel, an updater) get their editing and close keys. In a Rune window every
   one of these keys still reaches text fields, `on_key` and shortcuts first, once, as before.
   What changes: a ⌘W or ⌘M that nothing takes now closes or minimizes a window with that
-  title-bar button, as clicking it would (`on_close`, `keep_running`). Apps that set their own
-  menu bar are unchanged. Details under "Standard menus" in `src/shortcuts/README.md`.
+  title-bar button, as clicking it would (`on_close`, `keep_running`). A custom `MenuItem` with
+  the same equivalent (Close Tab ⌘W) keeps it, and new custom menus go in the Mac order (File
+  before Edit, Help last). Apps that set their own menu bar are unchanged. Details under
+  "Standard menus" in `src/shortcuts/README.md`.
 - **`Tx::minimize()` and `AppHandle::minimize()` minimize a window** as its minimize button
   would (winit's `set_minimized` off macOS). A close or quit in the same change wins. Hidden
   windows, panels, launchers, overlays, borderless windows and windows without a minimize button

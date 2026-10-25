@@ -65,13 +65,15 @@ fn install_dock_hook(app: &NSApplication) -> Result<(), MenuError> {
 pub(super) struct Native {
     mtm: MainThreadMarker,
     entries: Vec<(Retained<NSMenu>, Retained<NSMenuItem>)>,
+    /// Top-level menus it made, in their menu bars.
+    tops: Vec<(Retained<NSMenu>, Retained<NSMenuItem>)>,
     targets: Vec<Retained<MenuTarget>>,
 }
 impl Native {
     pub(super) fn new() -> Result<Self, MenuError> {
         let mtm = MainThreadMarker::new().ok_or_else(|| MenuError::Backend("menus require the main thread".into()))?;
         if OWNED.with(|owned| owned.replace(true)) { return Err(MenuError::InUse); }
-        Ok(Self { mtm, entries: Vec::new(), targets: Vec::new() })
+        Ok(Self { mtm, entries: Vec::new(), tops: Vec::new(), targets: Vec::new() })
     }
     fn clear(&mut self) {
         for (menu, item) in self.entries.drain(..) {
@@ -79,8 +81,11 @@ impl Native {
             // even if a currently tracking menu keeps the removed item alive.
             unsafe { item.setTarget(None); item.setAction(None); menu.removeItem(&item); }
         }
+        // A menu the standard items joined stays for them.
+        for (root, top) in self.tops.drain(..) { super::default_macos::remove_top_if_empty(&root, &top); }
         self.targets.clear();
         DOCK.with(|slot| *slot.borrow_mut() = None);
+        super::default_macos::sync_standard(&NSApplication::sharedApplication(self.mtm));
     }
     pub(super) fn set(&mut self, descriptions: &[Description], sink: Sink) -> Result<(), MenuError> {
         // SAFETY: self carries a main-thread marker. All menus/items are owned here or
@@ -104,46 +109,41 @@ impl Native {
             (d.location.clone(), item, target)
         }).collect();
         self.clear();
-        let mut app_index = 0;
-        for (location, item, target) in prepared {
-            let menu = if location == Location::Dock {
-                DOCK.with(|slot| slot.borrow_mut().get_or_insert_with(|| NSMenu::new(self.mtm)).clone())
-            } else {
-                let root = super::ensure_default_menu(&app);
-                // An app-supplied empty root is preserved. Reserve its first slot for
-                // the app menu even when a named-menu item appears first in the snapshot.
-                if root.numberOfItems() == 0 { self.add_top(&root, "Application"); }
-                match &location {
-                    Location::App => {
-                        if let Some(first) = (root.numberOfItems() > 0).then(|| root.itemAtIndex(0)).flatten().and_then(|i| i.submenu()) { first }
-                        else { self.add_top(&root, "Application") }
+        super::default_macos::adding(&app, || {
+            let mut app_index = 0;
+            for (location, item, target) in prepared {
+                let menu = if location == Location::Dock {
+                    DOCK.with(|slot| slot.borrow_mut().get_or_insert_with(|| NSMenu::new(self.mtm)).clone())
+                } else {
+                    let root = super::ensure_default_menu(&app);
+                    // An app-supplied empty root is preserved. Reserve its first slot for
+                    // the app menu even when a named-menu item appears first in the snapshot.
+                    if root.numberOfItems() == 0 { self.add_top(&root, "Application"); }
+                    match &location {
+                        Location::App => {
+                            if let Some(first) = (root.numberOfItems() > 0).then(|| root.itemAtIndex(0)).flatten().and_then(|i| i.submenu()) { first }
+                            else { self.add_top(&root, "Application") }
+                        }
+                        Location::Named(title) => {
+                            let existing = (0..root.numberOfItems()).filter_map(|i| root.itemAtIndex(i))
+                                .find(|i| i.title().to_string() == *title).and_then(|i| i.submenu());
+                            existing.unwrap_or_else(|| self.add_top(&root, title))
+                        }
+                        Location::Dock => unreachable!(),
                     }
-                    Location::Named(title) => {
-                        let existing = (0..root.numberOfItems()).filter_map(|i| root.itemAtIndex(i))
-                            .find(|i| i.title().to_string() == *title).and_then(|i| i.submenu());
-                        existing.unwrap_or_else(|| self.add_top(&root, title))
-                    }
-                    Location::Dock => unreachable!(),
-                }
-            };
-            if location == Location::App { menu.insertItem_atIndex(&item, app_index); app_index += 1; }
-            else { menu.addItem(&item); }
-            self.entries.push((menu, item)); self.targets.push(target);
-        }
+                };
+                if location == Location::App { menu.insertItem_atIndex(&item, app_index); app_index += 1; }
+                else { menu.addItem(&item); }
+                self.entries.push((menu, item)); self.targets.push(target);
+            }
+        });
         Ok(())
         }
     }
     fn add_top(&mut self, root: &Retained<NSMenu>, title: &str) -> Retained<NSMenu> {
-        // SAFETY: All values are retained AppKit objects, used on the main thread.
-        unsafe {
-        let menu = NSMenu::new(self.mtm);
-        menu.setTitle(&NSString::from_str(title));
-        let top = NSMenuItem::new(self.mtm);
-        top.setTitle(&NSString::from_str(title)); top.setSubmenu(Some(&menu));
-        root.addItem(&top);
-        self.entries.push((root.clone(), top));
+        let (top, menu) = super::default_macos::add_top(self.mtm, root, title);
+        self.tops.push((root.clone(), top));
         menu
-        }
     }
 }
 impl Drop for Native {

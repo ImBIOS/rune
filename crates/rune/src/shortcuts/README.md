@@ -182,8 +182,12 @@ items without asking, as long as its menu bar is still winit's default when its 
 window starts; an app that set its own menu bar is left alone. Rune never adds Quit:
 an accessory app that later shows its Dock icon gets winit's app menu (with Quit) as
 before. Items go into existing menus of the same title, an item whose action is
-already there is skipped, and custom `MenuItem`s keep working in either order. An
-accessory app's menu bar is hidden, but AppKit still matches its key equivalents.
+already there is skipped, and custom `MenuItem`s keep working in either order. A
+custom item with a standard item's equivalent (Close Tab ⌘W) takes it: the standard
+item shows none until the custom one goes, whichever was set first. New custom menus
+take the Mac order: File before Edit, the app's other menus before Window, Help last.
+Clearing custom items keeps a menu the standard items share. An accessory app's menu
+bar is hidden, but AppKit still matches its key equivalents.
 
 Every item has a nil target, so AppKit sends it to the key window's first responder:
 
@@ -197,10 +201,13 @@ Every item has a nil target, so AppKit sends it to the key window's first respon
   the very event that fired the item, so text fields, `on_key` and shortcuts see exactly
   the `Key::Command` they did without the menu, once. A click on the item sends a
   made-up press and release of its key instead.
+- An IME composition (or a dead key's accent) in the focused field ends first, as in an
+  NSTextView: the input method commits it into the field, then the command acts. One
+  that doesn't commit is dropped, so the key still reaches Rune.
 - ⌘W and ⌘M reach Rune the same way first. If no handler takes them and the window has
   that title-bar button, the window then closes or minimizes as a click on the button
   would: `on_close` and `keep_running` hiding apply. A window without the button
-  (borderless, an overlay panel) only gets the key. An app that binds ⌘W itself keeps it.
+  (borderless, an overlay or nonactivating panel) only gets the key. An app that binds ⌘W itself keeps it.
 
 Without `standard_menus`, an accessory app's keys don't change.
 
