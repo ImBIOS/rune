@@ -1275,7 +1275,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let mut rt = runtime_for(&spec, state, size, Env::new(dark, scale), std::sync::Arc::new(|| {}));
     #[cfg(all(feature = "dev", debug_assertions))]
     if let Some(dev) = dev { crate::dev::launch(&mut rt, &spec, dev, std::sync::Arc::new(|| {})); }
-    rt.set_titlebar_inset(chrome.titlebar_inset());
+    rt.set_titlebar_inset(if app_options.borderless { 0.0 } else { chrome.titlebar_inset() });
     rt.on_focus = on_focus;
     rt.transparent = transparent;
     rt.fit_height = fit_height;

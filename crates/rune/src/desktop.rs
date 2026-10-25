@@ -119,6 +119,8 @@ impl<S: 'static> Window<S> {
         let (open, keep_running, on_close, on_focus) = (app.open, app.keep_running, app.on_close, app.on_focus);
         let native = std::mem::take(&mut app.macos_window);
         let modifier_keys = app.modifier_keys;
+        let tab_visits_controls = app.tab_visits_controls;
+        let titlebar_inset = if options.borderless { 0.0 } else { app.chrome.titlebar_inset() };
         let (spec, state, shared) = app.into_parts(own.scene.as_deref());
         let shortcuts = crate::shortcuts::Guard::attach(&shared, Arc::new(|| {}), true, false);
         let menus = crate::native_menu::Guard::attach(&shared, true);
@@ -127,6 +129,8 @@ impl<S: 'static> Window<S> {
         let mut rt = crate::tooling::runtime_for(&spec, state, size, Env::new(dark, scale), Arc::new(|| {}));
         rt.on_focus = on_focus;
         rt.set_modifier_keys(modifier_keys);
+        rt.set_tab_visits_controls(tab_visits_controls);
+        rt.set_titlebar_inset(titlebar_inset);
         rt.transparent = options.transparent;
         rt.track_marks = comp.is_some();
         if selected && args.tree.is_some() { rt.key_warnings = Some(Vec::new()); }
@@ -1126,6 +1130,33 @@ mod tests {
         let error = fit_backdrop(&huge, (10, 10)).unwrap_err();
         assert!(error.contains("16385x1"), "refused before decoding: {error}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Each window of a headless multi-window run takes its own Tab opt-in and titlebar inset,
+    /// and a borderless window has no traffic lights to inset for.
+    #[test]
+    fn each_window_takes_its_tab_opt_in_and_titlebar_inset() {
+        use crate::{AppSpec, Cx, El, Key, KeyEvent, col, el, row};
+        use crate::WindowSpec;
+        fn view(_: &(), cx: &mut Cx<()>) -> El {
+            col().size(300.0, 100.0)
+                .child(row().child(el().key("inset").size(cx.titlebar_inset().max(1.0), 10.0)))
+                .child(el().key("button").size(30.0, 30.0).focusable(true).role("button"))
+        }
+        let window = |tab: bool, borderless: bool| {
+            let spec = WindowSpec::new("w", AppSpec::new("W", (300.0, 100.0), || (), view)).tab_visits_controls(tab);
+            let spec = WindowSpec { options: crate::WindowOptions { borderless, ..Default::default() }, ..spec };
+            let mut w = Window::new(spec, None, &Args::default(), true, 1.0);
+            w.rt.frame(0.0);
+            w.rt.set_full_keyboard_access(false);
+            w.rt.key(KeyEvent { key: Key::Tab, mods: Default::default() });
+            w.rt.frame(0.1);
+            let focused = w.rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key);
+            (focused, w.rt.presented("inset").unwrap().0[2])
+        };
+        assert_eq!(window(true, false), (Some("button".into()), 67.0));
+        assert_eq!(window(false, false).0, None, "keyboard navigation off skips buttons");
+        assert_eq!(window(true, true).1, 1.0, "borderless: no inset");
     }
 
     #[test]
