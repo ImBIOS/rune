@@ -1162,6 +1162,9 @@ impl El {
         self.virtualize(estimated_row_height)
     }
 
+    /// Identity among siblings. Siblings need unique keys: when two share one, the first keeps
+    /// it, each later one is renamed `key#dup1`, `key#dup2`, ... and Rune prints a warning naming
+    /// both call sites once per key.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());

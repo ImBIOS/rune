@@ -2425,15 +2425,14 @@ impl<S: 'static> Measurement<'_, S> {
                 let key_warnings = &mut *self.key_warnings;
                 let mut build = |i: usize| {
                     let key = &v.keys[i];
-                    let row = (rows.build)(state, i).key(key.clone());
-                    // The view's key check ran before these rows existed.
-                    let check = cfg!(debug_assertions) || key_warnings.is_some();
-                    let warnings = if check { crate::key_diagnostics::warnings_at(&row, &format!("{path}/{key}")) } else { Vec::new() };
-                    if warnings.is_empty() { return row; }
-                    let Some(out) = key_warnings.as_mut() else { panic!("{}", warnings.join("\n")) };
-                    out.extend(warnings);
-                    // Like the view's root, an invalid identity tree doesn't reach Taffy.
-                    crate::el().key(key.clone())
+                    let mut row = (rows.build)(state, i).key(key.clone());
+                    // The view's key repair ran before these rows existed.
+                    let duplicates = crate::key_diagnostics::repair_at(&mut row, &format!("{path}/{key}"));
+                    match key_warnings.as_mut() {
+                        Some(out) => out.extend(duplicates.into_iter().map(|d| d.message)),
+                        None => crate::key_diagnostics::warn_once(&duplicates),
+                    }
+                    row
                 };
                 // A focused field's row is built, unmounted, so its typing still lands.
                 let under = |f: &str| f.strip_prefix(path.as_str()).is_some_and(|rest| rest.starts_with('/'));
@@ -2499,16 +2498,12 @@ impl<S: 'static> Measurement<'_, S> {
 
     /// Checks the view's keys and builds the virtual windows, index-built rows included.
     fn build_tree(&mut self, mut root: El, tx: &Tx, force_all: bool) -> El {
-        if let Some(warnings) = self.key_warnings.as_mut() {
-            *warnings = crate::key_diagnostics::warnings(&root);
-            // Do not hand an invalid identity tree to Taffy. --tree still emits diagnostics.
-            if !warnings.is_empty() { root = crate::el(); }
-        } else {
-            #[cfg(debug_assertions)]
-            {
-                let warnings = crate::key_diagnostics::warnings(&root);
-                debug_assert!(warnings.is_empty(), "{}", warnings.join("\n"));
-            }
+        // Two siblings with one key would share a layout node, which Taffy panics on. Rename the
+        // later ones so every build, debug or release, lays out; --tree still lists them.
+        let duplicates = crate::key_diagnostics::repair(&mut root);
+        match self.key_warnings.as_mut() {
+            Some(warnings) => *warnings = duplicates.into_iter().map(|d| d.message).collect(),
+            None => crate::key_diagnostics::warn_once(&duplicates),
         }
         // Index-built rows build here, so memos inside them share the view's cache.
         self.window_tree(&mut root, "", 0, None, tx.settle, force_all);
@@ -6333,20 +6328,27 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "duplicate sibling key \"card\"")]
-    fn duplicate_sibling_keys_fail_before_layout() {
-        let mut rt = Runtime::new((), duplicate_view, (100.0, 100.0), Env::new(true, 1.0));
+    fn duplicate_sibling_keys_keep_the_first_and_lay_out_without_a_panic() {
+        fn view(s: &u32, _: &mut Cx<u32>) -> El {
+            col().children((0..*s).map(|i| el().key("row:R-94").size(10.0, 10.0 + i as f32)))
+        }
+        let mut rt = Runtime::new(2, view, (100.0, 100.0), Env::new(true, 1.0));
         rt.frame(0.0);
+        let h = |rt: &Runtime<u32>, key: &str| rt.presented(key).map(|(r, _)| r[3]);
+        assert_eq!(h(&rt, "row:R-94"), Some(10.0), "the first keeps the key");
+        assert_eq!(h(&rt, "row:R-94#dup1"), Some(11.0), "the duplicate still draws");
+        rt.update(|s, _| *s = 3);
+        rt.frame(0.1);
+        assert_eq!(h(&rt, "row:R-94#dup2"), Some(12.0));
     }
 
     #[test]
-    fn duplicate_sibling_keys_tooling_reports_without_invalid_layout() {
+    fn duplicate_sibling_keys_tooling_reports_and_lays_out() {
         let mut rt = Runtime::new((), duplicate_view, (100.0, 100.0), Env::new(true, 1.0));
         rt.key_warnings = Some(Vec::new());
         rt.frame(0.0);
         assert_eq!(rt.key_warnings.as_ref().unwrap().len(), 1);
-        assert_eq!(rt.nodes.len(), 1);
+        assert_eq!(rt.nodes.len(), 3);
         assert_eq!(rt.nodes[0].local.w, 100.0);
     }
 

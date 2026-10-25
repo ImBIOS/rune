@@ -369,6 +369,9 @@ mod tests {
         let warnings = rt.key_warnings.as_ref().unwrap();
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("duplicate sibling key \"a\" under \"scroll/rows/r1\""), "{warnings:?}");
+        let mut rt = Runtime::new(4, view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("a#dup1")), "the row lays out with the duplicate renamed");
     }
 
     /// A row holding an `aspect_fit` element measures at its fitted height, so rows below it sit
