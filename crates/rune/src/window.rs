@@ -745,6 +745,7 @@ impl<S: 'static> Host<S> {
         #[cfg(all(feature = "dev", debug_assertions))]
         let dev = app.dev.take();
         let modifier_keys = app.modifier_keys;
+        let tab_visits_controls = app.tab_visits_controls;
         let fit_height = app.fit_content_height;
         let app_stats = app.dev_stats;
         let (mut spec, state, shared) = app.into_parts(args.scene.as_deref());
@@ -768,6 +769,7 @@ impl<S: 'static> Host<S> {
         rt.set_srgb_blend(srgb_blend);
         rt.set_system_reduced_motion(crate::preferences::reduced_motion());
         rt.set_full_keyboard_access(crate::preferences::full_keyboard_access());
+        rt.set_tab_visits_controls(tab_visits_controls);
         rt.trace_channels = args.trace.as_ref().map(|_| Default::default());
         rt.set_live_waker(Arc::new(move || { let _ = live_proxy.send_event(WakeEvent::Live(slot)); }));
         rt.set_live_visible(false);

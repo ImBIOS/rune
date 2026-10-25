@@ -228,6 +228,8 @@ impl<S> WindowSpec<S> {
     pub fn on_focus(mut self, f: fn(&mut S, bool, &mut crate::Tx)) -> Self { self.app = self.app.on_focus(f); self }
     /// Send `Key::Modifier` presses and releases to this window, like `App::modifier_keys`.
     pub fn modifier_keys(mut self) -> Self { self.app = self.app.modifier_keys(); self }
+    /// Tab visits every focusable control in this window, like `App::tab_visits_controls`.
+    pub fn tab_visits_controls(mut self, on: bool) -> Self { self.app = self.app.tab_visits_controls(on); self }
     /// Called on the event thread after the first frame is ready, once per native creation.
     pub fn on_ready(mut self, f: impl FnMut(&crate::WindowHandle) + 'static) -> Self {
         self.app = self.app.on_ready(f); self

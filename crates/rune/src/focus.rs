@@ -196,7 +196,7 @@ impl<S: 'static> Runtime<S> {
         if ev.key == Key::Tab {
             if self.link_tab(ev.mods.shift) { return true; }
             let mut order = self.tab_order();
-            if !self.full_keyboard_access {
+            if !self.full_keyboard_access && !self.tab_visits_controls {
                 order.retain(|&i| self.nodes[i].input.is_some()
                     || self.group(i).is_some_and(|g| LIST_ROLES.contains(&self.nodes[g].role)));
             }
@@ -655,6 +655,11 @@ mod tests {
         press(&mut rt, Key::Tab); assert_eq!(focused(&rt), "field");
         rt.set_full_keyboard_access(true);
         press(&mut rt, Key::Tab); assert_eq!(focused(&rt), "button");
+        rt.set_full_keyboard_access(false);
+        rt.set_tab_visits_controls(true);
+        press(&mut rt, Key::Tab); assert_eq!(focused(&rt), "row0");
+        press(&mut rt, Key::Tab); assert_eq!(focused(&rt), "field");
+        press(&mut rt, Key::Tab); assert_eq!(focused(&rt), "button", "the app's opt-in wins over the system setting");
     }
 
     #[test]

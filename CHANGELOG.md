@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`App::tab_visits_controls(true)` lets Tab reach every control.** By default Tab follows
+  macOS: with Keyboard navigation off it visits only text fields and lists. With this opt-in
+  (also `WindowSpec::tab_visits_controls` and `Runtime::set_tab_visits_controls`) Tab and
+  Shift-Tab visit buttons and every other focusable control whatever the system setting.
 - **`Cx::titlebar_inset()` says where the traffic lights end.** It is the zoom button's
   trailing edge in window points, for a top bar's leading inset, and 0 when no buttons sit over
   the content: in full screen, in a titled window whose content starts below its titlebar, and

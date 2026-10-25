@@ -56,6 +56,7 @@ pub struct App<S: 'static> {
     pub(crate) window_options: crate::WindowOptions,
     pub(crate) fit_content_height: bool,
     pub(crate) modifier_keys: bool,
+    pub(crate) tab_visits_controls: bool,
     pub(crate) srgb_blend: bool,
     pub(crate) dev_stats: Option<fn() -> String>,
     #[cfg(all(feature = "dev", debug_assertions))]
@@ -89,6 +90,7 @@ impl<S: 'static> App<S> {
             window_options: crate::WindowOptions::default(),
             fit_content_height: false,
             modifier_keys: false,
+            tab_visits_controls: false,
             srgb_blend: false,
             dev_stats: None,
         }
@@ -129,6 +131,14 @@ impl<S: 'static> App<S> {
     /// or a Shift tap. Off by default, since handlers written without it may act on any key.
     pub fn modifier_keys(mut self) -> Self {
         self.modifier_keys = true;
+        self
+    }
+
+    /// Tab and Shift-Tab visit every focusable control, buttons included, whatever the system's
+    /// keyboard navigation setting. Off (the default), Tab follows macOS: with Keyboard
+    /// navigation off it visits only text fields and lists.
+    pub fn tab_visits_controls(mut self, on: bool) -> Self {
+        self.tab_visits_controls = on;
         self
     }
 

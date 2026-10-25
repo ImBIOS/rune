@@ -675,6 +675,8 @@ pub struct Runtime<S: 'static> {
     /// Tab visits every control; off, only text fields and lists (macOS Full Keyboard
     /// Access off). Native hosts sample the system setting; headless runtimes default on.
     full_keyboard_access: bool,
+    /// `App::tab_visits_controls`: Tab visits every control whatever `full_keyboard_access` says.
+    tab_visits_controls: bool,
     modal_stack: Vec<(String, Option<String>)>,
     /// Focus when the running commit began, before a new view's focus request applied: what a
     /// modal that opens in this commit returns focus to.
@@ -947,6 +949,7 @@ impl<S: 'static> Runtime<S> {
             held: None,
             modifier_keys: Default::default(),
             full_keyboard_access: true,
+            tab_visits_controls: false,
             modal_stack: Vec::new(),
             focus_before_commit: None,
             modal_index: None,
@@ -1211,6 +1214,11 @@ impl<S: 'static> Runtime<S> {
     /// Keyboard navigation (Full Keyboard Access) off. Native windows follow the system setting.
     pub fn set_full_keyboard_access(&mut self, on: bool) {
         self.full_keyboard_access = on;
+    }
+    /// Tab visits every control whatever [`Runtime::set_full_keyboard_access`] says
+    /// (`App::tab_visits_controls`).
+    pub fn set_tab_visits_controls(&mut self, on: bool) {
+        self.tab_visits_controls = on;
     }
     pub fn set_system_reduced_motion(&mut self, reduced: bool) {
         if self.system_reduced_motion != reduced {
