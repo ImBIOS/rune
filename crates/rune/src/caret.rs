@@ -44,6 +44,7 @@ impl<S: 'static> Runtime<S> {
             if horizontal {
                 st.x.offset = (st.x.offset + delta).clamp(0.0, st.x.max);
                 st.x.v = 0.0;
+                st.x.glide = None;
             } else {
                 st.offset = (st.offset + delta).clamp(0.0, st.max);
                 st.pinned = stick && st.offset >= st.max - 0.5;

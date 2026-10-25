@@ -2,25 +2,20 @@
 //! `Tx::scroll_to_bottom` glides there (a chat's "jump to latest").
 use super::*;
 
-/// The glide's spring. It retargets each frame, so content growing under it extends the trip.
-const GLIDE: Spring = motion::GLIDE;
+/// The glide's spring (`motion::GLIDE`) retargets each frame, so content growing under it
+/// extends the trip.
 /// A glide starts at most this many viewports above the bottom (a longer trip cuts first).
-const GLIDE_REACH: f64 = 2.0;
+pub(super) const GLIDE_REACH: f64 = 2.0;
 /// Within this many points of the bottom a viewport counts as showing it.
 const AT_BOTTOM: f64 = 1.0;
 
-/// Steps a glide toward the current bottom. Returns whether it is still moving.
-pub(super) fn glide(st: &mut ScrollState, v: f32, dt: f32) -> bool {
-    // Sample the displacement, not the absolute offset: f32 loses sub-point precision far down.
-    let (d, v) = GLIDE.sample((st.offset - st.max) as f32, v, 0.0, dt);
-    if d.abs() < 0.5 && v.abs() < 20.0 {
-        st.offset = st.max;
-        st.glide = None;
-        return false;
-    }
-    st.offset = st.max + f64::from(d);
-    st.glide = Some(v);
-    true
+/// Steps a glide toward the current bottom, or the offset `Tx::scroll_to` asked for while the
+/// content reaches it. Returns whether it is still moving.
+pub(super) fn glide(st: &mut ScrollState, dt: f32) -> bool {
+    let to = st.glide_to.map_or(st.max, |to| to.min(st.max));
+    let moving = scroll_offset::glide_axis(&mut st.offset, &mut st.glide, to, dt);
+    if !moving { st.glide_to = None; }
+    moving
 }
 
 impl<S: 'static> Runtime<S> {
@@ -48,6 +43,7 @@ impl<S: 'static> Runtime<S> {
             st.offset = st.max;
             st.pinned = true;
             st.glide = None;
+            st.glide_to = None;
             st.v = 0.0;
         }
         for _ in 0..3 {

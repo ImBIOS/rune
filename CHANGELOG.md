@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Tx::scroll_to(key, x, y)` glides a viewport to an offset.** It runs on the spring
+  `scroll_to_bottom` uses, clamps each axis to the content as the glide runs (virtual rows
+  measure as they mount), ignores axes the viewport doesn't scroll, and a wheel, fling or new
+  request takes over. `scroll_to_instant` and `scroll_to_y` jump; a `stick_bottom` viewport
+  sent to its end follows it again. `scroll_to_x` now also mounts the virtual rows it lands on
+  and stops a glide in progress; otherwise it is unchanged.
+
 - **Canvas input: `on_wheel`, `on_magnify`, other mouse buttons and `on_key_up`.** An element
   can take wheel and trackpad deltas before any scroll view (`El::on_wheel`, with modifiers,
   phase, momentum and precision), trackpad pinches, rotation and smart magnify (`on_magnify`,

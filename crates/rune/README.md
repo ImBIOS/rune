@@ -219,8 +219,9 @@ policy changes are applied in the same mutation phase.
   Without phases, a mouse wheel tick wholly on the other axis picks afresh, so Shift + wheel and
   then the plain wheel each scroll at once. Shift with a mouse wheel scrolls horizontally on
   Windows, Linux and the web; macOS turns the delta itself. `tx.scroll_into_view(key)` scrolls both
-  axes, `.scroll_edge_fade(w)` fades the left and right edges, and `tx.scroll_to_x(key, x)` moves a
-  viewport to an offset. Left and Right arrows don't scroll a viewport (text fields own them), and
+  axes, `.scroll_edge_fade(w)` fades the left and right edges, `tx.scroll_to(key, x, y)` glides a
+  viewport to an offset (clamped, rechecked as virtual rows measure, taken over by the wheel), and
+  `scroll_to_instant`, `scroll_to_x` and `scroll_to_y` jump there. Left and Right arrows don't scroll a viewport (text fields own them), and
   Page Up and Page Down stay vertical; AppKit scrolls an `NSScrollView` with Left and Right only
   when nothing focused takes them. Virtual rows are vertical only. Platforms report wheels through
   `Runtime::wheel_xy` with `wheel_began` and `wheel_ended` around trackpad gestures, or

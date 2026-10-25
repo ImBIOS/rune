@@ -97,9 +97,12 @@ mod help;
 mod scroll_edge;
 #[path = "scroll_x.rs"]
 mod scroll_x;
+#[path = "scroll_offset.rs"]
+mod scroll_offset;
 #[path = "gesture_dispatch.rs"]
 mod gesture_dispatch;
 pub(crate) use scroll_x::{SHIFT_TURNS_WHEEL, wheel_delta};
+pub(crate) use scroll_offset::ScrollRequest;
 #[cfg(test)]
 #[path = "truncate_tests.rs"]
 mod truncate_tests;
@@ -598,8 +601,11 @@ struct ScrollState {
     max: f64,
     direct: bool,
     scrolling: bool,
-    /// Velocity of a glide to the bottom (`Tx::scroll_to_bottom`) while one runs.
+    /// Velocity of a glide to the bottom (`Tx::scroll_to_bottom`) or to `glide_to`
+    /// (`Tx::scroll_to`) while one runs.
     glide: Option<f32>,
+    /// Where a glide goes, when not to the bottom.
+    glide_to: Option<f64>,
     /// At-bottom state last sent to `El::on_at_bottom`.
     at_bottom: Option<bool>,
     /// Whether the last frame drew the content's bottom on the viewport's (see `stuck_offset`).
@@ -614,6 +620,9 @@ struct AxisScroll {
     offset: f64,
     v: f32,
     max: f64,
+    /// Velocity of a glide to `aim` (`Tx::scroll_to`) while one runs.
+    glide: Option<f32>,
+    aim: f64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1875,7 +1884,7 @@ impl<S: 'static> Runtime<S> {
         let scroll_to = std::mem::take(&mut tx.scroll_to);
         let scroll_bottom = std::mem::take(&mut tx.scroll_bottom);
         let scroll_pages = std::mem::take(&mut tx.scroll_pages);
-        let scroll_x = std::mem::take(&mut tx.scroll_x);
+        let scroll_offsets = std::mem::take(&mut tx.scroll_offsets);
         if self.caret_watch && self.caret_moved(None) { self.dirty = true; }
         let read_moved = !self.layout_seen.is_empty() && self.layout_feedback_open() && self.layout_moved(None, None);
         if self.has_pixel_aspect && self.pixel_aspect_changed() { self.relayout = true; }
@@ -1898,7 +1907,7 @@ impl<S: 'static> Runtime<S> {
         for key in scroll_to { self.reveal_row(&key); }
         if !scroll_bottom.is_empty() { self.scroll_to_bottom(scroll_bottom); }
         if !scroll_pages.is_empty() { self.scroll_pages(scroll_pages); }
-        if !scroll_x.is_empty() { self.scroll_to_x(scroll_x); }
+        if !scroll_offsets.is_empty() { self.scroll_to_offsets(scroll_offsets); }
         // Those scrolls moved the caret after the commit a view placed from it saw.
         if self.caret_watch && self.caret_moved(None) { self.commit(&Tx { instant: true, ..Tx::default() }); }
         self.update_interaction();
@@ -3482,6 +3491,7 @@ impl<S: 'static> Runtime<S> {
                     direct: false,
                     scrolling: false,
                     glide: None,
+                    glide_to: None,
                     at_bottom: None,
                     held: false,
                     x: AxisScroll::default(),
@@ -3712,8 +3722,8 @@ impl<S: 'static> Runtime<S> {
                 st.offset = st.max;
                 st.v = 0.0;
                 st.glide = None;
-            } else if let Some(v) = st.glide {
-                moving |= scroll_bottom::glide(st, v, dt);
+            } else if st.glide.is_some() {
+                moving |= scroll_bottom::glide(st, dt);
             } else if st.v.abs() > 1.0 {
                 // Exact for exponential decay, so a long frame carries the same distance as
                 // the short frames it stands for.
@@ -5899,7 +5909,7 @@ fn merge(tx: &mut Tx, one: Tx) {
     tx.scroll_to.extend(one.scroll_to);
     tx.scroll_bottom.extend(one.scroll_bottom);
     tx.scroll_pages.extend(one.scroll_pages);
-    tx.scroll_x.extend(one.scroll_x);
+    tx.scroll_offsets.extend(one.scroll_offsets);
     tx.wakes.extend(one.wakes);
     tx.text_flights.extend(one.text_flights);
     tx.popups.extend(one.popups);

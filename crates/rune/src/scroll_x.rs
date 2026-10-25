@@ -138,6 +138,7 @@ impl<S: 'static> Runtime<S> {
         let before = st.x.offset;
         st.x.offset = (st.x.offset - f64::from(dx)).clamp(0.0, st.x.max);
         st.x.v = 0.0;
+        st.x.glide = None;
         st.direct = true;
         self.events.push(format!("wheel-x {dx:.1}"));
         if st.x.offset != before { self.scroll_cancels_press(id); }
@@ -155,6 +156,7 @@ impl<S: 'static> Runtime<S> {
         let Some(id) = self.scroll_at_axis(x, y, true) else { return };
         if let Some(st) = self.scrolls.get_mut(&id) {
             st.x.v = -vx;
+            st.x.glide = None;
             self.events.push(format!("fling-x {vx:.0}"));
             if vx != 0.0 { self.scroll_cancels_press(id); }
         }
@@ -177,7 +179,9 @@ impl<S: 'static> Runtime<S> {
         let Some(st) = self.scrolls.get_mut(&id) else { return false };
         st.x.max = overflow.max(0.0);
         let mut moving = false;
-        if st.x.v.abs() > 1.0 {
+        if st.x.glide.is_some() {
+            moving = scroll_offset::glide_axis(&mut st.x.offset, &mut st.x.glide, st.x.aim.min(st.x.max), dt);
+        } else if st.x.v.abs() > 1.0 {
             let decay = (-SCROLL_DECAY * dt).exp();
             st.x.offset += f64::from(st.x.v * (1.0 - decay) / SCROLL_DECAY);
             st.x.v *= decay;
@@ -207,26 +211,8 @@ impl<S: 'static> Runtime<S> {
         if offset == st.x.offset { return; }
         st.x.offset = offset;
         st.x.v = 0.0;
+        st.x.glide = None;
         st.direct = true;
-    }
-
-    /// `Tx::scroll_to_x`: moves each keyed horizontal viewport to its offset, clamped.
-    pub(super) fn scroll_to_x(&mut self, requests: Vec<(String, f32)>) {
-        self.step_scroll(0.0);
-        for (key, x) in requests {
-            let Some(mut i) = self.nodes.iter().enumerate()
-                .position(|(i, n)| (n.key.as_deref() == Some(&*key) || n.path == key) && !self.subtree_exiting(i)) else { continue };
-            loop {
-                if self.nodes[i].scroll.is_some() && self.nodes[i].scroll_axes.x() { break; }
-                let Some(p) = self.nodes[i].parent else { break };
-                i = p;
-            }
-            if !self.nodes[i].scroll_axes.x() || self.nodes[i].scroll.is_none() { continue; }
-            let Some(st) = self.scrolls.get_mut(&self.nodes[i].id) else { continue };
-            st.x.offset = f64::from(x).clamp(0.0, st.x.max);
-            st.x.v = 0.0;
-            st.direct = true;
-        }
     }
 }
 

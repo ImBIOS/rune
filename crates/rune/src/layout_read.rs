@@ -94,7 +94,7 @@ impl<S: 'static> Runtime<S> {
     pub(super) fn count_layout_echo(&mut self, feedback: bool, other: bool) {
         if other {
             self.layout_echoes = 0;
-        } else if feedback && !self.scrolls.values().any(|st| st.scrolling || st.glide.is_some()) {
+        } else if feedback && !self.scrolls.values().any(|st| st.scrolling || st.glide.is_some() || st.x.glide.is_some()) {
             self.layout_echoes += 1;
         }
     }
