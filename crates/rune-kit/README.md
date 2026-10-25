@@ -116,15 +116,28 @@ source each time, and earlier blocks stay mounted.
   that off with `table_tabular_figures(false)`. `table(border, header_fill)` sets the outline,
   row rules and header fill; `table_outline(None)`, `table_rules` and `table_header_text` give
   the look of a web table (no outline, a rule under every row, a dimmer header).
-- **Code fences are syntax-coloured** in TypeScript, TSX, JavaScript, JSON, Rust, Swift, CSS,
-  HTML/XML, shell, SQL and YAML (common aliases such as `ts`, `rs`, `sh`, `yml` work). Other
-  languages stay plain. Colour is all that changes, never weight or style, so a fence streaming
-  in draws its newest line plain and colours it in place when the line ends, with nothing
-  moving. Token colours come from `MarkdownStyle` (keyword, string, number, comment, type,
-  function, property, punctuation); override one with `syntax(Syntax::Keyword, color)` or turn
-  colouring off with `syntax_highlight(false)`. Each language is a small hand-written scanner
-  that runs in linear time; a block colours its first 32 KiB (or 8192 coloured runs) and draws
-  the rest plain, and results are cached per source.
+- **Code fences are syntax-coloured** in Rust, JavaScript/JSX, TypeScript/TSX, JSON, Python,
+  Go, Swift, shell, SQL, HTML/XML, CSS and YAML (common aliases such as `ts`, `rs`, `py`,
+  `golang`, `sh`, `yml` work). Other languages, and fences with none, stay plain. Colour is all
+  that changes, never weight or style, so a fence streaming in draws its newest line plain and
+  colours it in place when the line ends, with nothing moving. Token colours come from a
+  `SyntaxTheme` that follows the kit's light or dark theme; override one with
+  `syntax(Syntax::Keyword, color)`, all with `syntax_theme(theme)`, or turn colouring off with
+  `syntax_highlight(false)`. Tabs in code line up at four-column stops and copy as tabs.
+  [Light](../../demo/kit/markdown-code-light.png) and [dark](../../demo/kit/markdown-code-dark.png)
+  stills: the gallery's `rune-markdown--code` scene.
+- **Your own highlighter.** `Markdown::highlight(|lang, code| ...)` replaces the built-in one:
+  it gets the fence's language as written (`None` for none) and returns
+  `Vec<(Range<usize>, Paint)>`, where `Paint` is a token kind (`Syntax::Keyword`, coloured by the
+  theme) or a `Color`. Fall back on `rune_kit::syntax::builtin(lang, code)` for the rest. Output
+  is cached per highlighter, language and code; give a highlighter whose output depends on
+  something it captures a `Highlighter::new(f).key(theme)`.
+- **The same highlighting outside Markdown.** `rune_kit::syntax` doesn't need the `markdown`
+  feature: `syntax::highlight(Some("rust"), code)` returns the cached ranges and
+  `SyntaxTheme::from_kit(&k).spans(&ranges, offset)` turns them into colour-only `Span`s for
+  any rich text, such as code in a composer. Each built-in language is a small hand-written
+  scanner that runs in linear time (under 0.5 ms per thousand lines); a block colours its first
+  32 KiB (or 8192 ranges) and draws the rest plain, so a 10,000-line block never stalls a frame.
 - **```` ```diff ````** (or `patch`) fences tint `+` and `-` lines edge to edge, and dim `@@`
   and file header lines. Set colours with `MarkdownStyle::diff` and `diff_hunk`. Line text
   keeps the body colour unless `diff_text(added, removed)` or `diff_text_tint(0.5)` (toward the

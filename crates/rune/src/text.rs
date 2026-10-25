@@ -1090,6 +1090,15 @@ impl TextSystem {
         }
         self.shaped += 1;
         let _shape_time = crate::frame_profile::Scope::new(crate::frame_profile::Phase::Text);
+        // Parley has no tab stops and fonts draw a tab as a missing glyph (or nothing): shape it
+        // as a space, one byte like the tab, so every byte range still holds.
+        let spaced;
+        let text = if text.contains('\t') {
+            spaced = text.replace('\t', " ");
+            spaced.as_str()
+        } else {
+            text
+        };
         let routes = fallback::routes(text);
         if !text.is_ascii() {
             let (mut scripts, mut symbols) = (0u64, false);
@@ -1579,6 +1588,15 @@ mod tests {
         assert_eq!(han.len(), 4);
         assert!(han.iter().all(|id| *id != 0), "tofu: {han:?}");
         assert_eq!(glyph_ids("Hello"), glyph_ids("Hello"));
+    }
+
+    /// A tab shapes as a space: no missing-glyph box, and the same advance.
+    #[test]
+    fn a_tab_draws_as_a_space() {
+        assert_eq!(glyph_ids("a\tb"), glyph_ids("a b"));
+        let mut ts = TextSystem::default();
+        let mono = TextStyle::new(13.0, 400.0).family(Family::Mono);
+        assert_eq!(ts.measure("\tx", mono, 2.0), ts.measure(" x", mono, 2.0));
     }
 
     /// `Family::SystemMono` shapes with the platform's monospaced font when one is installed, so

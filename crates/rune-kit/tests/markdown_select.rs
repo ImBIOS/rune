@@ -156,3 +156,50 @@ fn inline_code_copies_without_its_padding() {
     assert_eq!(rt.selected_text().as_deref(), Some("Run cargo test now"));
     assert_eq!(find(&rt, "m0/b0").selected.as_deref(), Some("Run cargo test now"));
 }
+
+#[test]
+fn highlighted_code_copies_as_plain_text() {
+    let code = "def f(x):\n    return f\"{x!r}\"  # done";
+    let mut rt = runtime_with(&[&format!("```python\n{code}\n```\n")], true);
+    let clipboard = rune::clipboard::memory();
+    rt.use_clipboard(&clipboard);
+    let g = glyphs(&rt, "m0/b0");
+    for _ in 0..2 {
+        rt.pointer_move(g[1].0, g[1].1);
+        rt.pointer_down(g[1].0, g[1].1);
+        rt.pointer_up(g[1].0, g[1].1);
+        tick(&mut rt);
+    }
+    assert_eq!(rt.selected_text().as_deref(), Some("def"), "a double-click picks the keyword's word");
+    command(&mut rt, 'a');
+    command(&mut rt, 'c');
+    assert_eq!(clipboard.text().as_deref().map(String::as_str), Some(code));
+}
+
+/// A tab draws to the next four-column stop and copies as the tab.
+#[test]
+fn tabs_line_up_and_copy_as_tabs() {
+    // Each tabbed line, then the same line indented with spaces.
+    let code = "\tif x {\n    if x {\n\t\treturn\n        return\n  \tgo\n    go\nab\tc\nab  c";
+    let mut rt = runtime_with(&[&format!("```go\n{code}\n```\n")], true);
+    let clipboard = rune::clipboard::memory();
+    rt.use_clipboard(&clipboard);
+    let mut lines: Vec<Vec<f32>> = Vec::new();
+    let mut y = f32::NAN;
+    for (gx, gy) in glyphs(&rt, "m0/b0") {
+        if y.is_nan() || (gy - y).abs() > 2.0 {
+            lines.push(Vec::new());
+            y = gy;
+        }
+        lines.last_mut().unwrap().push(gx);
+    }
+    assert_eq!(lines.len(), 8);
+    for pair in lines.chunks(2) {
+        assert_eq!(pair[0], pair[1]);
+    }
+    let first = glyphs(&rt, "m0/b0")[0];
+    drag(&mut rt, before(first), first);
+    command(&mut rt, 'a');
+    command(&mut rt, 'c');
+    assert_eq!(clipboard.text().as_deref().map(String::as_str), Some(code));
+}

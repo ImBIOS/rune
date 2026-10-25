@@ -13,11 +13,13 @@
 //! and their content as a separate `El` that the view mounts at the root with [`root`], so it
 //! draws above later siblings and escapes clipping ancestors.
 
+mod budget;
 pub mod css;
 pub mod glyphs;
 pub mod kit;
 mod neutral;
 mod palette;
+pub mod syntax;
 
 mod accordion;
 mod actions;

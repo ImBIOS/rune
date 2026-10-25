@@ -1,6 +1,7 @@
 //! A cache bounded by bytes, not entries. What the last two commits used always stays, so a
 //! screen showing many documents never thrashes; past the budget the least recently used of the
 //! rest go first.
+#![cfg_attr(not(feature = "markdown"), allow(dead_code))]
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -15,7 +16,7 @@ struct Slot<V> {
     commit: u64,
 }
 
-pub(super) struct Budget<K, V> {
+pub(crate) struct Budget<K, V> {
     map: HashMap<K, Slot<V>>,
     bytes: usize,
     limit: usize,
@@ -23,11 +24,11 @@ pub(super) struct Budget<K, V> {
 }
 
 impl<K: Hash + Eq, V> Budget<K, V> {
-    pub(super) fn new(limit: usize) -> Self {
+    pub(crate) fn new(limit: usize) -> Self {
         Budget { map: HashMap::new(), bytes: 0, limit, clock: 0 }
     }
 
-    pub(super) fn get<Q: Hash + Eq + ?Sized>(&mut self, key: &Q) -> Option<&V>
+    pub(crate) fn get<Q: Hash + Eq + ?Sized>(&mut self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
     {
@@ -39,7 +40,7 @@ impl<K: Hash + Eq, V> Budget<K, V> {
     }
 
     /// Looks `key` up without counting it as used.
-    pub(super) fn peek<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<&V>
+    pub(crate) fn peek<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
     {
@@ -47,7 +48,7 @@ impl<K: Hash + Eq, V> Budget<K, V> {
     }
 
     /// Drops `key`, returning whether it was there.
-    pub(super) fn remove<Q: Hash + Eq + ?Sized>(&mut self, key: &Q) -> bool
+    pub(crate) fn remove<Q: Hash + Eq + ?Sized>(&mut self, key: &Q) -> bool
     where
         K: Borrow<Q>,
     {
@@ -57,7 +58,7 @@ impl<K: Hash + Eq, V> Budget<K, V> {
     }
 
     /// Whether `key` was used in the commit running now (never outside one).
-    pub(super) fn used_now<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> bool
+    pub(crate) fn used_now<Q: Hash + Eq + ?Sized>(&self, key: &Q) -> bool
     where
         K: Borrow<Q>,
     {
@@ -67,11 +68,11 @@ impl<K: Hash + Eq, V> Budget<K, V> {
 
     /// Estimated bytes held.
     #[cfg(test)]
-    pub(super) fn bytes(&self) -> usize {
+    pub(crate) fn bytes(&self) -> usize {
         self.bytes
     }
 
-    pub(super) fn insert(&mut self, key: K, value: V, bytes: usize) {
+    pub(crate) fn insert(&mut self, key: K, value: V, bytes: usize) {
         self.clock += 1;
         let slot = Slot { value, bytes, used: self.clock, commit: rune::commit_generation() };
         if let Some(old) = self.map.insert(key, slot) {

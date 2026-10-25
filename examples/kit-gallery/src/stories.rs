@@ -1439,6 +1439,27 @@ fn backoff(n: u32) -> Duration {
 }
 ```
 
+```python
+@dataclass
+class Job:
+    name: str
+    tries: int = 3  # per run
+
+    def label(self) -> str:
+        return f"{self.name} ×{self.tries}" if self.tries > 1 else self.name
+```
+
+```go
+func (s *Server) Serve(ctx context.Context) error {
+	for job := range s.queue {
+		if err := job.Run(ctx); err != nil {
+			return fmt.Errorf("job %q: %w", job.Name, err)
+		}
+	}
+	return nil
+}
+```
+
 ```sh
 # Build, then ship the release.
 FEATURES=markdown cargo build --release && echo "done in $SECONDS s"

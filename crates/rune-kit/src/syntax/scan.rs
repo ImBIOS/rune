@@ -1,50 +1,22 @@
-//! Syntax colours for fenced code: one small scanner per language family (C-like, shell,
-//! markup, CSS, SQL, YAML) walks the bytes once and returns coloured byte ranges. Anything it
-//! doesn't recognise keeps the code block's text colour.
+//! The built-in scanners: one small scanner per language family (C-like, Python, shell,
+//! markup, CSS, SQL, YAML, diff) walks the bytes once and returns coloured byte ranges. Anything
+//! it doesn't recognise stays uncoloured.
 //!
 //! Input is untrusted. Every scanner only moves forward, lookaheads are either bounded or
 //! skip bytes the scanner would visit anyway, and embedded code (template `${}`, JSX `{}`,
-//! `<script>`, `$()`) nests at most [`MAX_DEPTH`] deep, so time is linear in the source.
-//! Colouring stops after [`MAX_SOURCE`] bytes or [`MAX_TOKENS`] ranges; the rest draws plain.
-//! Ranges start and end only on ASCII bytes or the ends of the source, so they fall on
+//! f-string `{}`, `<script>`, `$()`) nests at most [`MAX_DEPTH`] deep, so time is linear in the
+//! source. Colouring stops after [`MAX_SOURCE`] bytes or [`MAX_TOKENS`] ranges; the rest stays
+//! plain. Ranges start and end only on ASCII bytes or the ends of the source, so they fall on
 //! character boundaries.
+//!
+//! Written from scratch against each language's reference for its lexical rules (keywords,
+//! literals, comments); no other highlighter's grammar was used.
 
-use std::cell::RefCell;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::rc::Rc;
-
-use super::budget::Budget;
-
-/// A kind of token in fenced code, each with its own colour (see
-/// [`MarkdownStyle::syntax`](super::MarkdownStyle::syntax)).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Syntax {
-    /// Keywords, and markup tag names.
-    Keyword,
-    /// String, character and regex literals, and YAML's unquoted values.
-    String,
-    /// Numbers, and constants such as `true`, `null` and `ALL_CAPS` names.
-    Number,
-    Comment,
-    /// Type names (capitalised names and built-in types), CSS classes and ids, YAML tags.
-    Type,
-    /// Functions where they are called or defined, macros, and shell commands.
-    Function,
-    /// JSON and YAML keys, CSS properties, markup attributes, and shell and SQL variables.
-    Property,
-    /// Brackets, operators and separators.
-    Punctuation,
-}
-
-impl Syntax {
-    pub(super) const COUNT: usize = 8;
-}
+use super::Syntax;
 
 /// A language family member the scanners know.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(super) enum Lang {
+pub(crate) enum Lang {
     /// JavaScript, with JSX.
     Js,
     Ts,
@@ -52,17 +24,21 @@ pub(super) enum Lang {
     Json,
     Rust,
     Swift,
+    Go,
+    Python,
     Css,
     Shell,
     /// HTML and XML.
     Html,
     Sql,
     Yaml,
+    /// Unified diffs.
+    Diff,
 }
 
 impl Lang {
     /// The language a fence's info word names (case-insensitive), if it is one we colour.
-    pub(super) fn from_name(name: &str) -> Option<Lang> {
+    pub(crate) fn from_name(name: &str) -> Option<Lang> {
         Some(match name.to_ascii_lowercase().as_str() {
             "js" | "javascript" | "jsx" | "mjs" | "cjs" => Lang::Js,
             "ts" | "typescript" | "mts" | "cts" => Lang::Ts,
@@ -70,63 +46,33 @@ impl Lang {
             "json" | "jsonc" | "json5" => Lang::Json,
             "rust" | "rs" => Lang::Rust,
             "swift" => Lang::Swift,
+            "go" | "golang" => Lang::Go,
+            "python" | "py" | "python3" | "py3" | "pyi" => Lang::Python,
             "css" => Lang::Css,
             "bash" | "sh" | "shell" | "zsh" | "shellscript" => Lang::Shell,
             "html" | "htm" | "xhtml" | "xml" | "svg" => Lang::Html,
             "sql" | "postgres" | "postgresql" | "mysql" | "sqlite" => Lang::Sql,
             "yaml" | "yml" => Lang::Yaml,
+            "diff" | "patch" => Lang::Diff,
             _ => return None,
         })
     }
 }
 
 /// Bytes coloured per block; past this (cut at a line end) the code draws plain.
-pub(super) const MAX_SOURCE: usize = 32 * 1024;
+pub(crate) const MAX_SOURCE: usize = 32 * 1024;
 /// Coloured ranges per block; past this the code draws plain.
-pub(super) const MAX_TOKENS: usize = 8192;
+pub(crate) const MAX_TOKENS: usize = 8192;
 /// How deep embedded code nests (a template's `${}`, JSX's `{}`, HTML's `<script>`).
 const MAX_DEPTH: u8 = 3;
 /// The longest a JavaScript regex literal can be, which bounds the lookahead after a `/`.
 const MAX_REGEX: usize = 512;
-/// Estimated bytes of colourings kept beyond those on screen (see [`budget`](super::budget)).
-const CACHE_BYTES: usize = 4 << 20;
 
 /// A coloured byte range of the source.
-pub(super) type Token = (u32, u32, Syntax);
-
-struct Entry {
-    lang: Lang,
-    src: String,
-    tokens: Rc<[Token]>,
-}
-
-thread_local! {
-    static CACHE: RefCell<Budget<u64, Entry>> = RefCell::new(Budget::new(CACHE_BYTES));
-}
-
-/// [`highlight`] memoised by language and source on this thread: every block the last two
-/// commits drew, and others up to a memory budget.
-pub(super) fn cached(lang: Lang, src: &str) -> Rc<[Token]> {
-    let src = &src[..coloured_len(src)];
-    let mut h = DefaultHasher::new();
-    (lang, src).hash(&mut h);
-    let key = h.finish();
-    CACHE.with_borrow_mut(|c| {
-        if let Some(e) = c.get(&key)
-            && e.lang == lang
-            && e.src == src
-        {
-            return e.tokens.clone();
-        }
-        let tokens: Rc<[Token]> = highlight(lang, src).into();
-        let bytes = src.len() + tokens.len() * size_of::<Token>() + 64;
-        c.insert(key, Entry { lang, src: src.to_owned(), tokens: tokens.clone() }, bytes);
-        tokens
-    })
-}
+pub(crate) type Token = (u32, u32, Syntax);
 
 /// How much of `src` gets colour: all of it, or up to the last line end within [`MAX_SOURCE`].
-fn coloured_len(src: &str) -> usize {
+pub(crate) fn coloured_len(src: &str) -> usize {
     if src.len() <= MAX_SOURCE {
         return src.len();
     }
@@ -134,7 +80,7 @@ fn coloured_len(src: &str) -> usize {
 }
 
 /// The coloured ranges of `src`, in order and not overlapping.
-pub(super) fn highlight(lang: Lang, src: &str) -> Vec<Token> {
+pub(crate) fn highlight(lang: Lang, src: &str) -> Vec<Token> {
     let end = coloured_len(src);
     let mut out = Out::default();
     scan(lang, src.as_bytes(), 0, end, &mut out, 0);
@@ -171,7 +117,9 @@ impl Out {
 
 fn scan(lang: Lang, s: &[u8], i: usize, end: usize, out: &mut Out, depth: u8) {
     match lang {
-        Lang::Js | Lang::Ts | Lang::Tsx | Lang::Json | Lang::Rust | Lang::Swift => c_like(s, i, end, lang, out, depth),
+        Lang::Js | Lang::Ts | Lang::Tsx | Lang::Json | Lang::Rust | Lang::Swift | Lang::Go => c_like(s, i, end, lang, out, depth),
+        Lang::Python => python(s, i, end, out, depth),
+        Lang::Diff => diff(s, i, end, out),
         Lang::Css => css(s, i, end, out),
         Lang::Shell => shell(s, i, end, out, depth),
         Lang::Html => markup(s, i, end, out, depth),
@@ -420,7 +368,7 @@ fn is_all_caps(w: &[u8]) -> bool {
 }
 
 // ---------------------------------------------------------------------------------------------
-// C-like: JavaScript, TypeScript, JSX, JSON, Rust, Swift
+// C-like: JavaScript, TypeScript, JSX, JSON, Rust, Swift, Go
 
 const JS_KEYWORDS: &[&str] = &[
     "as", "async", "await", "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do",
@@ -450,6 +398,15 @@ const SWIFT_KEYWORDS: &[&str] = &[
     "required", "rethrows", "return", "self", "Self", "set", "some", "static", "struct", "subscript", "super", "switch",
     "throw", "throws", "try", "typealias", "unowned", "var", "weak", "where", "while", "willSet",
 ];
+const GO_KEYWORDS: &[&str] = &[
+    "break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough", "for", "func", "go", "goto",
+    "if", "import", "interface", "map", "package", "range", "return", "select", "struct", "switch", "type", "var",
+];
+const GO_TYPES: &[&str] = &[
+    "any", "bool", "byte", "comparable", "complex64", "complex128", "error", "float32", "float64", "int", "int8", "int16",
+    "int32", "int64", "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+];
+const GO_CONSTANTS: &[&str] = &["true", "false", "nil", "iota"];
 const BOOLS: &[&str] = &["true", "false"];
 const JSON_CONSTANTS: &[&str] = &["true", "false", "null"];
 const SWIFT_CONSTANTS: &[&str] = &["true", "false", "nil"];
@@ -476,6 +433,7 @@ fn c_like(s: &[u8], mut i: usize, end: usize, lang: Lang, out: &mut Out, depth: 
         Lang::Ts | Lang::Tsx => (JS_KEYWORDS, TS_KEYWORDS, TS_TYPES, JS_CONSTANTS),
         Lang::Rust => (RUST_KEYWORDS, &[], RUST_TYPES, BOOLS),
         Lang::Swift => (SWIFT_KEYWORDS, &[], &[], SWIFT_CONSTANTS),
+        Lang::Go => (GO_KEYWORDS, &[], GO_TYPES, GO_CONSTANTS),
         _ => (&[], &[], &[], JSON_CONSTANTS),
     };
     // Whether the last token ends an expression (a name, literal or closing bracket).
@@ -540,6 +498,11 @@ fn c_like(s: &[u8], mut i: usize, end: usize, lang: Lang, out: &mut Out, depth: 
         } else if b == b'`' && js {
             i = template(s, i, end, lang, out, depth);
             value = true;
+        } else if b == b'`' && lang == Lang::Go {
+            // A raw string: no escapes, any lines, to the next backtick.
+            i = s[i + 1..end].iter().position(|&c| c == b'`').map_or(end, |p| i + p + 2);
+            out.push(start, i, String);
+            value = true;
         } else if b == b'/' && js && !value && let Some(e) = regex_end(s, i, end) {
             i = e;
             out.push(start, i, String);
@@ -563,13 +526,14 @@ fn c_like(s: &[u8], mut i: usize, end: usize, lang: Lang, out: &mut Out, depth: 
         } else if is_ident_start(b) || (b == b'$' && js) {
             i = ident_end(s, i, end, if js { b"$" } else { b"" });
             let w = &s[start..i];
-            let call = {
-                let mut k = i;
-                while k < end && matches!(s[k], b' ' | b'\t') {
-                    k += 1;
-                }
-                at(s, k, end) == b'('
-            };
+            let mut k = i;
+            while k < end && matches!(s[k], b' ' | b'\t') {
+                k += 1;
+            }
+            let call = at(s, k, end) == b'(';
+            // Go capitalises exported names: `Addr string` and `Addr: x` name a field.
+            let go_field =
+                lang == Lang::Go && (is_ident_start(at(s, k, end)) || (at(s, k, end) == b':' && at(s, k + 1, end) != b'='));
             value = true;
             let tok = if lang == Lang::Rust && at(s, i, end) == b'!' && at(s, i + 1, end) != b'=' {
                 i += 1;
@@ -588,11 +552,12 @@ fn c_like(s: &[u8], mut i: usize, end: usize, lang: Lang, out: &mut Out, depth: 
                 Some(Keyword)
             } else if is_word(w, types) || was_next == Next::Type {
                 Some(Type)
-            } else if was_next == Next::Function {
+            } else if was_next == Next::Function || (lang == Lang::Go && call) {
+                // Go capitalises exported functions, so a call is a call before it is a type.
                 Some(Function)
             } else if is_all_caps(w) {
                 Some(Number)
-            } else if w[0].is_ascii_uppercase() {
+            } else if w[0].is_ascii_uppercase() && !go_field {
                 Some(Type)
             } else {
                 call.then_some(Function)
@@ -883,6 +848,225 @@ fn jsx_expression(s: &[u8], j: usize, end: usize, lang: Lang, out: &mut Out, dep
     }
     out.push(close, close + 1, Syntax::Punctuation);
     close + 1
+}
+
+// ---------------------------------------------------------------------------------------------
+// Python
+
+const PY_KEYWORDS: &[&str] = &[
+    "and", "as", "assert", "async", "await", "break", "class", "cls", "continue", "def", "del", "elif", "else", "except",
+    "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise",
+    "return", "self", "try", "while", "with", "yield",
+];
+/// Keywords only at the start of a statement that ends in `:` (`match x:`, `case [a, b]:`).
+const PY_SOFT_KEYWORDS: &[&str] = &["match", "case"];
+const PY_CONSTANTS: &[&str] = &["True", "False", "None", "Ellipsis", "NotImplemented"];
+const PY_TYPES: &[&str] = &[
+    "bool", "bytearray", "bytes", "complex", "dict", "float", "frozenset", "int", "list", "object", "set", "str", "tuple",
+    "type",
+];
+
+fn python(s: &[u8], mut i: usize, end: usize, out: &mut Out, depth: u8) {
+    use Syntax::*;
+    let mut next = Next::Any;
+    let mut after_dot = false;
+    // Before the line's first token (decorators and soft keywords only count there).
+    let mut line_start = depth == 0;
+    while i < end && !out.full {
+        let b = s[i];
+        let start = i;
+        if b == b'\n' {
+            i += 1;
+            line_start = true;
+            continue;
+        }
+        if matches!(b, b' ' | b'\t' | b'\r') {
+            i += 1;
+            continue;
+        }
+        if b == b'#' {
+            i = line_end(s, i, end);
+            out.push(start, i, Comment);
+            continue;
+        }
+        let first = std::mem::replace(&mut line_start, false);
+        let was_dot = std::mem::replace(&mut after_dot, false);
+        let was_next = std::mem::replace(&mut next, Next::Any);
+        if let Some((quote, f)) = py_string_start(s, i, end) {
+            i = py_string(s, i, quote, f, end, out, depth);
+        } else if b.is_ascii_digit() || (b == b'.' && at(s, i + 1, end).is_ascii_digit()) {
+            i = number_end(s, i, end);
+            out.push(start, i, Number);
+        } else if b == b'@' && first && is_ident_start(at(s, i + 1, end)) {
+            i = ident_end(s, i + 1, end, b".");
+            out.push(start, i, Keyword);
+        } else if is_ident_start(b) {
+            i = ident_end(s, i, end, b"");
+            let w = &s[start..i];
+            let mut k = i;
+            while k < end && matches!(s[k], b' ' | b'\t') {
+                k += 1;
+            }
+            let call = at(s, k, end) == b'(';
+            let tok = if was_dot {
+                call.then_some(Function)
+            } else if is_word(w, PY_CONSTANTS) {
+                Some(Number)
+            } else if is_word(w, PY_KEYWORDS) {
+                next = match w {
+                    b"def" => Next::Function,
+                    b"class" => Next::Type,
+                    _ => Next::Any,
+                };
+                Some(Keyword)
+            } else if first && is_word(w, PY_SOFT_KEYWORDS) && soft_keyword(s, i, end) {
+                Some(Keyword)
+            } else if was_next == Next::Type {
+                Some(Type)
+            } else if was_next == Next::Function {
+                Some(Function)
+            } else if is_word(w, PY_TYPES) {
+                Some(Type)
+            } else if is_all_caps(w) {
+                Some(Number)
+            } else if w[0].is_ascii_uppercase() {
+                Some(Type)
+            } else {
+                call.then_some(Function)
+            };
+            if let Some(t) = tok {
+                out.push(start, i, t);
+            }
+        } else {
+            i += 1;
+            after_dot = b == b'.';
+            out.push(start, i, Punctuation);
+        }
+    }
+}
+
+/// Whether a string literal starts at `i`: its quote's index, and whether it is an f-string. Up
+/// to two prefix letters (`r`, `b`, `u`, `f`, `rb`, `fr`, in either case) come before the quote.
+fn py_string_start(s: &[u8], i: usize, end: usize) -> Option<(usize, bool)> {
+    let mut f = false;
+    for k in i..(i + 3).min(end) {
+        match s[k] {
+            b'"' | b'\'' => return Some((k, f)),
+            b'f' | b'F' => f = true,
+            b'r' | b'R' | b'b' | b'B' | b'u' | b'U' => {}
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// A string from `start` (its prefix) whose quote is at `q`: single or triple quoted, an
+/// f-string's `{}` fields coloured as code.
+fn py_string(s: &[u8], start: usize, q: usize, f: bool, end: usize, out: &mut Out, depth: u8) -> usize {
+    let qc = s[q];
+    let triple = at(s, q + 1, end) == qc && at(s, q + 2, end) == qc;
+    let e = if triple {
+        let mut j = q + 3;
+        loop {
+            if j >= end {
+                break end;
+            }
+            if s[j] == b'\\' {
+                j += 2;
+            } else if s[j] == qc && at(s, j + 1, end) == qc && at(s, j + 2, end) == qc {
+                break j + 3;
+            } else {
+                j += 1;
+            }
+        }
+    } else {
+        string_end(s, q, end, qc, false)
+    }
+    .min(end);
+    if !f || depth >= MAX_DEPTH {
+        out.push(start, e, Syntax::String);
+        return e;
+    }
+    let mut seg = start;
+    let mut j = q + if triple { 3 } else { 1 };
+    while j < e && !out.full {
+        match s[j] {
+            b'\\' => j += 2,
+            b'{' if at(s, j + 1, e) == b'{' => j += 2,
+            b'{' => {
+                // The field runs to its matching `}`, stepping over strings in other quotes.
+                let mut k = j + 1;
+                let mut braces = 1u32;
+                while k < e {
+                    match s[k] {
+                        b'{' => braces += 1,
+                        b'}' => {
+                            braces -= 1;
+                            if braces == 0 {
+                                break;
+                            }
+                        }
+                        c @ (b'"' | b'\'') if c != qc => {
+                            k = string_end(s, k, e, c, false);
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    k += 1;
+                }
+                if k >= e {
+                    break;
+                }
+                out.push(seg, j, Syntax::String);
+                out.push(j, j + 1, Syntax::Punctuation);
+                python(s, j + 1, k, out, depth + 1);
+                out.push(k, k + 1, Syntax::Punctuation);
+                j = k + 1;
+                seg = j;
+            }
+            _ => j += 1,
+        }
+    }
+    out.push(seg, e, Syntax::String);
+    e
+}
+
+/// Whether the soft keyword ending at `i` starts a statement: a space follows it and the line
+/// ends with `:` (before any comment).
+fn soft_keyword(s: &[u8], i: usize, end: usize) -> bool {
+    if at(s, i, end) != b' ' {
+        return false;
+    }
+    let le = line_end(s, i, end);
+    let line = &s[i..le];
+    let code = line.iter().position(|&c| c == b'#').map_or(line, |p| &line[..p]);
+    code.trim_ascii_end().ends_with(b":")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Diff
+
+/// Whole lines: added, removed, or a header (`@@`, `diff`, `index`, `---`, `+++`, `\`).
+fn diff(s: &[u8], mut i: usize, end: usize, out: &mut Out) {
+    const HEADERS: &[&[u8]] = &[b"@@", b"diff ", b"index ", b"--- ", b"+++ ", b"\\"];
+    while i < end && !out.full {
+        let le = line_end(s, i, end);
+        let line = &s[i..le];
+        let kind = if HEADERS.iter().any(|h| line.starts_with(h)) {
+            Some(Syntax::Comment)
+        } else {
+            match line.first() {
+                Some(b'+') => Some(Syntax::Inserted),
+                Some(b'-') => Some(Syntax::Deleted),
+                _ => None,
+            }
+        };
+        if let Some(k) = kind {
+            let text_end = if line.ends_with(b"\r") { le - 1 } else { le };
+            out.push(i, text_end, k);
+        }
+        i = le + 1;
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1530,7 +1714,9 @@ mod tests {
 
     #[test]
     fn fence_names_map_to_languages() {
-        for (name, lang) in [("TypeScript", Lang::Ts), ("tsx", Lang::Tsx), ("jsx", Lang::Js), ("bash", Lang::Shell), ("yml", Lang::Yaml), ("rs", Lang::Rust)] {
+        for (name, lang) in [("TypeScript", Lang::Ts), ("tsx", Lang::Tsx), ("jsx", Lang::Js), ("bash", Lang::Shell), ("yml", Lang::Yaml), ("rs", Lang::Rust),
+            ("py", Lang::Python), ("Python3", Lang::Python), ("golang", Lang::Go), ("patch", Lang::Diff)]
+        {
             assert_eq!(Lang::from_name(name), Some(lang));
         }
         assert_eq!(Lang::from_name("brainfuck"), None);
@@ -1646,6 +1832,64 @@ mod tests {
     }
 
     #[test]
+    fn python() {
+        let src = "def f(a, *, b=None):\n    \"\"\"Doc with 'quotes'\n    and lines.\"\"\"\n    return {k: v for k, v in a.items() if v is not None}\n\nclass Config(BaseModel):\n    PORT = 8080\n    path: list[str] = []\n\n@app.route(\"/x\")\nasync def view(req):\n    await req.send(rb'\\x00', 0o17, 1_000.5j)";
+        has(Lang::Python, src, &[
+            ("def", Keyword), ("f", Function), ("None", Number), ("\"\"\"Doc with 'quotes'\n    and lines.\"\"\"", String),
+            ("for", Keyword), ("in", Keyword), ("items", Function), ("is", Keyword), ("not", Keyword), ("class", Keyword),
+            ("Config", Type), ("BaseModel", Type), ("PORT", Number), ("8080", Number), ("list", Type), ("str", Type),
+            ("@app.route", Keyword), ("\"/x\"", String), ("async", Keyword), ("view", Function), ("await", Keyword),
+            ("send", Function), ("rb'\\x00'", String), ("0o17", Number), ("1_000.5j", Number),
+        ]);
+        // `v` and `a` are plain names; `items` without a call after a dot would be too.
+        assert_eq!(kind_of(Lang::Python, src, "v"), None);
+        assert_eq!(kind_of(Lang::Python, "x = a.items", "items"), None);
+    }
+
+    #[test]
+    fn python_f_strings_colour_their_fields() {
+        let src = "f\"{d['k']:>10} {{literal}} {n + 1}\" + F'{x}' + \"{plain}\"";
+        has(Lang::Python, src, &[
+            ("f\"", String), ("'k'", String), (" {{literal}} ", String), ("1", Number), ("F'", String), ("\"{plain}\"", String),
+        ]);
+        assert_eq!(count(Lang::Python, src, "{", Punctuation), 3, "three fields, and {{ is a brace");
+        // A field that never closes leaves the rest of the string a string.
+        has(Lang::Python, "f'{oops' + 1", &[("f'{oops'", String), ("1", Number)]);
+    }
+
+    #[test]
+    fn python_soft_keywords_only_start_statements() {
+        let src = "match command.split():\n    case [\"go\", where]:\n        pass\n    case _:  # anything\n        pass\nmatch = re.match(p, s)\ncase(1)";
+        assert_eq!(count(Lang::Python, src, "match", Keyword), 1);
+        assert_eq!(count(Lang::Python, src, "case", Keyword), 2);
+        has(Lang::Python, src, &[("match", Function), ("case", Function)]);
+    }
+
+    #[test]
+    fn go() {
+        let src = "type Server struct {\n\tAddr string\n\tdone chan error\n}\n\nfunc (s *Server) Run(ctx context.Context) error {\n\tpath := `C:\\dir\\`\n\tgo s.loop()\n\treturn NewError(\"x\", iota, 0x1F)\n}";
+        has(Lang::Go, src, &[
+            ("type", Keyword), ("Server", Type), ("struct", Keyword), ("string", Type), ("chan", Keyword), ("error", Type),
+            ("func", Keyword), ("Run", Function), ("`C:\\dir\\`", String), ("go", Keyword), ("loop", Function),
+            ("return", Keyword), ("NewError", Function), ("iota", Number), ("0x1F", Number),
+        ]);
+        // A raw string's backslash escapes nothing, so the string ends at the next backtick.
+        assert_eq!(kind_of(Lang::Go, src, "go"), Some(Keyword));
+        // Exported fields and composite-literal keys aren't types; `pkg.Name` stays plain.
+        assert_eq!(kind_of(Lang::Go, src, "Addr"), None);
+        assert_eq!(kind_of(Lang::Go, "s := Server{Addr: \":80\"}", "Addr"), None);
+        assert_eq!(kind_of(Lang::Go, "s := Server{Addr: \":80\"}", "Server"), Some(Type));
+        assert_eq!(kind_of(Lang::Go, src, "Context"), None);
+    }
+
+    #[test]
+    fn diff_lines() {
+        let src = "--- a/f\n+++ b/f\r\n@@ -1 +1 @@ fn x\n-a\r\n+b\n same\n+\n";
+        let want = [("--- a/f", Comment), ("+++ b/f", Comment), ("@@ -1 +1 @@ fn x", Comment), ("-a", Deleted), ("+b", Inserted), ("+", Inserted)];
+        assert_eq!(toks(Lang::Diff, src), want.map(|(t, k)| (t.to_owned(), k)));
+    }
+
+    #[test]
     fn json_keys_are_properties() {
         has(Lang::Json, "{\"name\": \"rune\", \"n\": -1.5, \"ok\": true, \"x\": null}", &[
             ("\"name\"", Property), ("\"rune\"", String), ("1.5", Number), ("true", Number), ("null", Number), ("{", Punctuation),
@@ -1728,7 +1972,7 @@ mod tests {
     #[test]
     fn ranges_are_ordered_and_on_char_boundaries() {
         let src = "const café = \"naïve 🎉\"; // ✓\n<p>é</p> `${'ü'}`";
-        for lang in [Lang::Js, Lang::Ts, Lang::Tsx, Lang::Rust, Lang::Swift, Lang::Shell, Lang::Html, Lang::Css, Lang::Sql, Lang::Yaml, Lang::Json] {
+        for lang in [Lang::Js, Lang::Ts, Lang::Tsx, Lang::Rust, Lang::Swift, Lang::Go, Lang::Python, Lang::Shell, Lang::Html, Lang::Css, Lang::Sql, Lang::Yaml, Lang::Json, Lang::Diff] {
             let t = highlight(lang, src);
             assert!(t.windows(2).all(|w| w[0].1 <= w[1].0), "{lang:?}");
             assert!(t.iter().all(|&(a, b, _)| a < b && src.is_char_boundary(a as usize) && src.is_char_boundary(b as usize)));
@@ -1753,15 +1997,20 @@ mod tests {
             "- ".repeat(n / 2),
             "x: |\n".repeat(n / 5),
             "@media{".repeat(n / 7),
+            "f'{".repeat(n / 3),
+            "f\"{'".repeat(n / 4),
+            "\"\"\"".repeat(n / 3),
+            "`".repeat(n),
+            "match x\n".repeat(n / 8),
         ];
         let t0 = std::time::Instant::now();
         for src in &inputs {
-            for lang in [Lang::Js, Lang::Tsx, Lang::Rust, Lang::Swift, Lang::Shell, Lang::Html, Lang::Css, Lang::Sql, Lang::Yaml, Lang::Json] {
+            for lang in [Lang::Js, Lang::Tsx, Lang::Rust, Lang::Swift, Lang::Go, Lang::Python, Lang::Shell, Lang::Html, Lang::Css, Lang::Sql, Lang::Yaml, Lang::Json, Lang::Diff] {
                 let t = highlight(lang, src);
                 assert!(t.len() <= MAX_TOKENS);
             }
         }
-        // 140 scans of ~32 KiB each; linear scanning takes milliseconds even in a debug build.
+        // 247 scans of ~32 KiB each; linear scanning takes milliseconds even in a debug build.
         assert!(t0.elapsed().as_secs_f32() < 5.0, "{:?}", t0.elapsed());
     }
 
@@ -1775,10 +2024,94 @@ mod tests {
         assert_eq!(highlight(Lang::Js, &many).len(), MAX_TOKENS);
     }
 
+    /// One snippet per language and every range the scanner gives it, in order.
+    #[rustfmt::skip]
+    const GOLDENS: &[(Lang, &str, &[(&str, Syntax)])] = &[
+        (Lang::Rust, "fn main() {\n    let v: Vec<u8> = vec![1, 2]; // two\n    println!(\"{}\", v.len());\n}", &[
+            ("fn", Keyword), ("main", Function), ("()", Punctuation), ("{", Punctuation), ("let", Keyword), (":", Punctuation),
+            ("Vec", Type), ("<", Punctuation), ("u8", Type), (">", Punctuation), ("=", Punctuation), ("vec!", Function), ("[", Punctuation),
+            ("1", Number), (",", Punctuation), ("2", Number), ("];", Punctuation), ("// two", Comment), ("println!", Function),
+            ("(", Punctuation), ("\"{}\"", String), (",", Punctuation), (".", Punctuation), ("len", Function), ("());", Punctuation),
+            ("}", Punctuation),
+        ]),
+        (Lang::Js, "const xs = [1, 2].map((x) => x * 2); // double\nconsole.log(`n=${xs.length}`, /a+/g);", &[
+            ("const", Keyword), ("=", Punctuation), ("[", Punctuation), ("1", Number), (",", Punctuation), ("2", Number),
+            ("].", Punctuation), ("map", Function), ("((", Punctuation), (")", Punctuation), ("=>", Punctuation), ("*", Punctuation),
+            ("2", Number), (");", Punctuation), ("// double", Comment), (".", Punctuation), ("log", Function), ("(", Punctuation),
+            ("`n=", String), ("${", Punctuation), (".", Punctuation), ("}", Punctuation), ("`", String), (",", Punctuation),
+            ("/a+/g", String), (");", Punctuation),
+        ]),
+        (Lang::Ts, "interface User { id: number; name?: string }\nexport function greet(u: User): string {\n  return `hi ${u.name ?? \"anon\"}`;\n}", &[
+            ("interface", Keyword), ("User", Type), ("{", Punctuation), (":", Punctuation), ("number", Type), (";", Punctuation),
+            ("?:", Punctuation), ("string", Type), ("}", Punctuation), ("export", Keyword), ("function", Keyword), ("greet", Function),
+            ("(", Punctuation), (":", Punctuation), ("User", Type), ("):", Punctuation), ("string", Type), ("{", Punctuation),
+            ("return", Keyword), ("`hi ", String), ("${", Punctuation), (".", Punctuation), ("??", Punctuation), ("\"anon\"", String),
+            ("}", Punctuation), ("`", String), (";", Punctuation), ("}", Punctuation),
+        ]),
+        (Lang::Python, "@dataclass\nclass Point:\n    x: int = 0  # origin\n    def dist(self, other: \"Point\") -> float:\n        return math.hypot(self.x - other.x, f\"{self.y!r}\")\nprint(None, True, 1e3, r'\\d+', b\"x\")", &[
+            ("@dataclass", Keyword), ("class", Keyword), ("Point", Type), (":", Punctuation), (":", Punctuation), ("int", Type),
+            ("=", Punctuation), ("0", Number), ("# origin", Comment), ("def", Keyword), ("dist", Function), ("(", Punctuation),
+            ("self", Keyword), (",", Punctuation), (":", Punctuation), ("\"Point\"", String), (")", Punctuation), ("->", Punctuation),
+            ("float", Type), (":", Punctuation), ("return", Keyword), (".", Punctuation), ("hypot", Function), ("(", Punctuation),
+            ("self", Keyword), (".", Punctuation), ("-", Punctuation), (".", Punctuation), (",", Punctuation), ("f\"", String),
+            ("{", Punctuation), ("self", Keyword), (".", Punctuation), ("!", Punctuation), ("}", Punctuation), ("\"", String),
+            (")", Punctuation), ("print", Function), ("(", Punctuation), ("None", Number), (",", Punctuation), ("True", Number),
+            (",", Punctuation), ("1e3", Number), (",", Punctuation), ("r'\\d+'", String), (",", Punctuation), ("b\"x\"", String),
+            (")", Punctuation),
+        ]),
+        (Lang::Go, "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfor i := 0; i < 3; i++ {\n\t\tfmt.Println(`raw\\n`, 'x', nil) // done\n\t}\n}", &[
+            ("package", Keyword), ("import", Keyword), ("\"fmt\"", String), ("func", Keyword), ("main", Function), ("()", Punctuation),
+            ("{", Punctuation), ("for", Keyword), (":=", Punctuation), ("0", Number), (";", Punctuation), ("<", Punctuation), ("3", Number),
+            (";", Punctuation), ("++", Punctuation), ("{", Punctuation), (".", Punctuation), ("Println", Function), ("(", Punctuation),
+            ("`raw\\n`", String), (",", Punctuation), ("'x'", String), (",", Punctuation), ("nil", Number), (")", Punctuation),
+            ("// done", Comment), ("}", Punctuation), ("}", Punctuation),
+        ]),
+        (Lang::Swift, "struct Point { var x: Double = 0 }\nlet p = Point(x: 1.5) // origin\nprint(\"\\(p.x)\")", &[
+            ("struct", Keyword), ("Point", Type), ("{", Punctuation), ("var", Keyword), (":", Punctuation), ("Double", Type),
+            ("=", Punctuation), ("0", Number), ("}", Punctuation), ("let", Keyword), ("=", Punctuation), ("Point", Type),
+            ("(", Punctuation), (":", Punctuation), ("1.5", Number), (")", Punctuation), ("// origin", Comment), ("print", Function),
+            ("(", Punctuation), ("\"\\(p.x)\"", String), (")", Punctuation),
+        ]),
+        (Lang::Json, "{\"a\": [1, true, null], \"b\": \"x\\\"y\"}", &[
+            ("{", Punctuation), ("\"a\"", Property), (":", Punctuation), ("[", Punctuation), ("1", Number), (",", Punctuation),
+            ("true", Number), (",", Punctuation), ("null", Number), ("],", Punctuation), ("\"b\"", Property), (":", Punctuation),
+            ("\"x\\\"y\"", String), ("}", Punctuation),
+        ]),
+        (Lang::Shell, "export PATH=\"$HOME/bin:$PATH\"\nfor f in *.txt; do wc -l \"$f\"; done # count", &[
+            ("export", Keyword), ("\"", String), ("$HOME", Property), ("/bin:", String), ("$PATH", Property), ("\"", String),
+            ("for", Keyword), ("in", Keyword), (";", Punctuation), ("do", Keyword), ("wc", Function), ("\"", String), ("$f", Property),
+            ("\"", String), (";", Punctuation), ("done", Keyword), ("# count", Comment),
+        ]),
+        (Lang::Sql, "SELECT name, COUNT(*) FROM users WHERE id = 1 -- one\nGROUP BY name;", &[
+            ("SELECT", Keyword), (",", Punctuation), ("COUNT", Function), ("(*)", Punctuation), ("FROM", Keyword), ("WHERE", Keyword),
+            ("=", Punctuation), ("1", Number), ("-- one", Comment), ("GROUP", Keyword), ("BY", Keyword), (";", Punctuation),
+        ]),
+        (Lang::Html, "<div class=\"a\"><!-- hi --><b>x</b></div>", &[
+            ("<", Punctuation), ("div", Keyword), ("class", Property), ("=", Punctuation), ("\"a\"", String), (">", Punctuation),
+            ("<!-- hi -->", Comment), ("<", Punctuation), ("b", Keyword), (">", Punctuation), ("</", Punctuation), ("b", Keyword),
+            ("></", Punctuation), ("div", Keyword), (">", Punctuation),
+        ]),
+        (Lang::Css, ".btn:hover { color: #fff; padding: 4px 8px; } /* hover */", &[
+            (".btn", Type), (":hover", Keyword), ("{", Punctuation), ("color", Property), (":", Punctuation), ("#fff", Number),
+            (";", Punctuation), ("padding", Property), (":", Punctuation), ("4px", Number), ("8px", Number), (";", Punctuation),
+            ("}", Punctuation), ("/* hover */", Comment),
+        ]),
+        (Lang::Yaml, "name: ci\non: [push]\nenv:\n  DEBUG: true # verbose\n  N: 3", &[
+            ("name", Property), (":", Punctuation), ("ci", String), ("on", Property), (":", Punctuation), ("[", Punctuation),
+            ("push", String), ("]", Punctuation), ("env", Property), (":", Punctuation), ("DEBUG", Property), (":", Punctuation),
+            ("true", Number), ("# verbose", Comment), ("N", Property), (":", Punctuation), ("3", Number),
+        ]),
+        (Lang::Diff, "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n context\n-old\n+new\n\\ No newline at end of file", &[
+            ("diff --git a/x b/x", Comment), ("--- a/x", Comment), ("+++ b/x", Comment), ("@@ -1,2 +1,2 @@", Comment), ("-old", Deleted),
+            ("+new", Inserted), ("\\ No newline at end of file", Comment),
+        ]),
+    ];
+
     #[test]
-    fn the_cache_is_keyed_by_language_and_source() {
-        let a = cached(Lang::Js, "let x = 1");
-        assert!(Rc::ptr_eq(&a, &cached(Lang::Js, "let x = 1")));
-        assert!(!Rc::ptr_eq(&a, &cached(Lang::Sql, "let x = 1")));
+    fn goldens() {
+        for (lang, src, want) in GOLDENS {
+            let want: Vec<(std::string::String, Syntax)> = want.iter().map(|&(t, k)| (t.to_owned(), k)).collect();
+            assert_eq!(toks(*lang, src), want, "{lang:?}");
+        }
     }
 }

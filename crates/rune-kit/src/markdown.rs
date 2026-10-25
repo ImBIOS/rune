@@ -1,8 +1,9 @@
 //! Markdown (pulldown-cmark): headings, paragraphs, emphasis, inline code, code blocks, lists,
 //! block quotes, rules, links, GFM tables, ```` ```diff ```` fences and (with the `mermaid`
-//! feature) ```` ```mermaid ```` diagrams, rendered from a [`MarkdownStyle`]. Fences in ts, tsx,
-//! js, json, rust, swift, css, html, sh, sql and yaml are syntax-coloured (see [`Syntax`]). Partial input while streaming is fine: an
-//! unclosed fence is a code block that keeps growing.
+//! feature) ```` ```mermaid ```` diagrams, rendered from a [`MarkdownStyle`]. Fences in rust,
+//! js, ts, tsx, json, python, go, swift, sh, sql, html, css and yaml are syntax-coloured by
+//! [`crate::syntax`], or by an app's own highlighter ([`Markdown::highlight`]). Partial input
+//! while streaming is fine: an unclosed fence is a code block that keeps growing.
 //!
 //! ```ignore
 //! let view = Markdown::new(&message.text).reveal(0.18).on_link(|s: &mut App, url| s.open(url)).build(&kit);
@@ -37,17 +38,15 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use rune::{Align, Color, El, Link, LinkPaint, Span, TextStyle, col, el, oklch, rich, row, text};
+use rune::{Align, Color, El, Link, LinkPaint, Span, TextStyle, col, el, rich, row, text};
 
 use crate::{Kit, PaletteSeed};
 
-mod budget;
-mod highlight;
 mod table;
 
-use budget::Budget;
-use highlight::Lang;
-pub use highlight::Syntax;
+use crate::budget::Budget;
+use crate::syntax::{Highlighter, SyntaxTheme};
+pub use crate::syntax::Syntax;
 
 /// An inline style run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -120,9 +119,10 @@ struct Cut {
 
 /// What colours a [`Block::Code`], one per block in document order (the order the renderer
 /// meets them). Kept beside the blocks so `Block` keeps its shape.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Source {
-    lang: Option<Lang>,
+    /// The fence's language as written (its info string's first word), if it names one.
+    lang: Option<Rc<str>>,
     /// The code's length, to check this belongs to the block it is matched with.
     len: usize,
     /// How many leading bytes get colour: all of them, or while an unclosed fence streams in,
@@ -130,11 +130,11 @@ struct Source {
     coloured: usize,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum Fence {
-    /// A code block; its language, if it is one [`highlight`] colours, and whether its closing
-    /// fence has arrived.
-    Plain(Option<Lang>, bool),
+    /// A code block; its language as written, if it names one, and whether its closing fence
+    /// has arrived.
+    Plain(Option<Rc<str>>, bool),
     Diff,
     /// A mermaid fence; whether its closing fence has arrived.
     Mermaid(bool),
@@ -176,11 +176,12 @@ impl Builder {
         } else if line_ended {
             text.pop();
         }
-        let block = code_block(text, fence);
+        let block = code_block(text, &fence);
         if let Block::Code(code) = &block {
             let (lang, closed) = match fence {
                 Fence::Plain(lang, closed) => (lang, closed),
-                _ => (None, false),
+                // A mermaid fence still arriving.
+                _ => (Some("mermaid".into()), false),
             };
             let coloured = if closed || line_ended { code.len() } else { code.rfind('\n').unwrap_or(0) };
             self.sources.push(Source { lang, len: code.len(), coloured });
@@ -312,7 +313,7 @@ fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>, Vec<Cut>) {
                             match word.to_ascii_lowercase().as_str() {
                                 "diff" | "patch" => Fence::Diff,
                                 "mermaid" => Fence::Mermaid(fence_closed(&src[range])),
-                                _ => Fence::Plain(Lang::from_name(word), fence_closed(&src[range])),
+                                _ => Fence::Plain((!word.is_empty()).then(|| word.into()), fence_closed(&src[range])),
                             }
                         }
                         CodeBlockKind::Indented => Fence::Plain(None, true),
@@ -428,7 +429,7 @@ fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>, Vec<Cut>) {
     (blocks, b.sources, b.cuts)
 }
 
-fn code_block(text: String, fence: Fence) -> Block {
+fn code_block(text: String, fence: &Fence) -> Block {
     match fence {
         Fence::Plain(..) | Fence::Mermaid(false) => Block::Code(text),
         Fence::Diff => Block::Diff(text),
@@ -600,7 +601,7 @@ fn extend(base: &Parsed, base_len: usize, src: &str) -> Option<Parsed> {
     let (tail, sources, cuts) = parse_doc(&src[cut.at..]);
     let mut blocks = base.doc.0[..cut.blocks].to_vec();
     blocks.extend(tail);
-    let sources: Rc<[Source]> = base.doc.1[..cut.sources].iter().copied().chain(sources).collect();
+    let sources: Rc<[Source]> = base.doc.1[..cut.sources].iter().cloned().chain(sources).collect();
     let cuts = base.cuts[..i]
         .iter()
         .copied()
@@ -646,7 +647,7 @@ pub struct MarkdownStyle {
     diff_remove_text: Color,
     diff_hues: [Color; 2],
     diff_hunk: Color,
-    syntax: [Color; Syntax::COUNT],
+    syntax: SyntaxTheme,
     highlight: bool,
     selection: Color,
     pub(crate) diagram: DiagramPaint,
@@ -674,30 +675,6 @@ pub(crate) struct DiagramPaint {
 fn tint(base: Color, hue: Color, t: f32) -> Color {
     let [a, b] = [base.to_oklab(), hue.to_oklab()];
     Color::from_oklab([0, 1, 2, 3].map(|i| if i == 3 { a[3] } else { a[i] + (b[i] - a[i]) * t }))
-}
-
-/// Muted token colours: the familiar hues (violet keywords, green strings, orange numbers, teal
-/// types, blue functions, rose properties) at one lightness a step from the text's, so contrast
-/// follows the theme. Comments and punctuation are the theme's quieter text greys.
-///
-/// The hues are fixed rather than taken from the theme's status colours: those vary too much
-/// between themes (OpenCode's "info" is magenta) to keep the token kinds apart.
-fn syntax_colours(k: &Kit) -> [Color; Syntax::COUNT] {
-    let c = &k.c;
-    let text_l = c.text_base.to_oklab()[0];
-    let (l, chroma) =
-        if k.dark { ((text_l - 0.16).clamp(0.62, 0.84), 0.1) } else { ((text_l + 0.3).clamp(0.38, 0.52), 0.12) };
-    let paint = |h: f32| oklch(l, chroma, h);
-    let mut s = [c.text_base; Syntax::COUNT];
-    s[Syntax::Keyword as usize] = paint(305.0);
-    s[Syntax::String as usize] = paint(145.0);
-    s[Syntax::Number as usize] = paint(60.0);
-    s[Syntax::Comment as usize] = c.text_muted.mix(c.text_faint, 0.4);
-    s[Syntax::Type as usize] = paint(195.0);
-    s[Syntax::Function as usize] = paint(255.0);
-    s[Syntax::Property as usize] = paint(15.0);
-    s[Syntax::Punctuation as usize] = c.text_muted;
-    s
 }
 
 impl MarkdownStyle {
@@ -736,7 +713,7 @@ impl MarkdownStyle {
             diff_remove_text: c.text_base,
             diff_hues: [c.success.icon, c.danger.icon],
             diff_hunk: c.text_muted,
-            syntax: syntax_colours(k),
+            syntax: SyntaxTheme::from_kit(k),
             highlight: true,
             selection: k.selection(),
             diagram: DiagramPaint {
@@ -910,11 +887,16 @@ impl MarkdownStyle {
     }
     /// The colour of one kind of token in highlighted code blocks.
     pub fn syntax(mut self, kind: Syntax, c: Color) -> Self {
-        self.syntax[kind as usize] = c;
+        self.syntax = self.syntax.with(kind, c);
         self
     }
-    /// Whether fenced code in a known language is coloured (on by default). Off, every code
-    /// block draws in the text colour.
+    /// Every token colour at once (by default [`SyntaxTheme::from_kit`]).
+    pub fn syntax_theme(mut self, theme: SyntaxTheme) -> Self {
+        self.syntax = theme;
+        self
+    }
+    /// Whether code blocks are coloured (on by default): fences in a language the highlighter
+    /// knows (see [`Markdown::highlight`]). Off, every code block draws in the text colour.
     pub fn syntax_highlight(mut self, on: bool) -> Self {
         self.highlight = on;
         self
@@ -969,11 +951,13 @@ pub struct Markdown {
     on_link: Option<LinkWire>,
     selectable: bool,
     scroll_wide: bool,
+    highlighter: Highlighter,
 }
 
 impl Markdown {
     pub fn new(src: impl Into<String>) -> Markdown {
-        Markdown { src: src.into(), style: None, reveal: 0.0, streaming: false, on_link: None, selectable: false, scroll_wide: false }
+        Markdown { src: src.into(), style: None, reveal: 0.0, streaming: false, on_link: None, selectable: false, scroll_wide: false,
+            highlighter: Highlighter::builtin() }
     }
     /// Replaces the kit-derived style in [`Self::build`].
     pub fn style(mut self, style: MarkdownStyle) -> Self {
@@ -1021,6 +1005,28 @@ impl Markdown {
         self
     }
 
+    /// Colours code blocks with `f` instead of the built-in scanners: it gets a fence's language
+    /// as written (its info string's first word; `None` for an indented block or a bare fence)
+    /// and the code, and returns byte ranges of the code with a token kind, which the style's
+    /// [`SyntaxTheme`] colours, or a colour of its own. See [`Highlighter`] for caching, and
+    /// [`syntax::builtin`](crate::syntax::builtin) to fall back on for other languages.
+    ///
+    /// ```ignore
+    /// Markdown::new(src).highlight(|lang, code| match lang {
+    ///     Some("kotlin") => my_kotlin(code),
+    ///     _ => rune_kit::syntax::builtin(lang, code),
+    /// })
+    /// ```
+    pub fn highlight(self, f: impl Fn(Option<&str>, &str) -> Vec<crate::syntax::Highlight> + 'static) -> Self {
+        self.highlighter(Highlighter::new(f))
+    }
+
+    /// Colours code blocks with `h` (by default [`Highlighter::builtin`]).
+    pub fn highlighter(mut self, h: Highlighter) -> Self {
+        self.highlighter = h;
+        self
+    }
+
     pub fn build(mut self, k: &Kit) -> El {
         let style = self.style.take().unwrap_or_else(|| MarkdownStyle::from_kit(k));
         self.render(&style)
@@ -1031,7 +1037,7 @@ impl Markdown {
     pub fn render(self, style: &MarkdownStyle) -> El {
         let (blocks, sources) = doc_cached(&self.src);
         let r = Renderer { s: style.clone(), reveal: self.reveal, streaming: self.streaming, on_link: self.on_link, selectable: self.selectable,
-            scroll_wide: self.scroll_wide, sources, next_source: Cell::new(0) };
+            scroll_wide: self.scroll_wide, highlighter: self.highlighter, sources, next_source: Cell::new(0) };
         r.blocks(&blocks).selection_group(self.selectable)
     }
 }
@@ -1044,6 +1050,7 @@ struct Renderer {
     selectable: bool,
     /// `Markdown::scroll_wide`.
     scroll_wide: bool,
+    highlighter: Highlighter,
     sources: Rc<[Source]>,
     /// The next of `sources`, advanced at each [`Block::Code`] in document order.
     next_source: Cell<usize>,
@@ -1062,6 +1069,40 @@ fn margins(b: &Block) -> (f32, f32) {
         Block::Rule => (32.0, 32.0),
         Block::Table(_) => (12.0, 16.0),
     }
+}
+
+/// Code as rich text with `spans` (byte ranges of `code`). Text layout draws a tab as one space,
+/// so each tab is padded with uncopied spaces to the next four-column stop: lines line up and a
+/// copy still gets the tab.
+fn tabbed(code: &str, mut spans: Vec<Span>) -> El {
+    if !code.contains('\t') {
+        return rich(code.to_owned(), spans);
+    }
+    let mut shown = String::with_capacity(code.len() + code.len() / 8);
+    // (source byte, shown byte, pad, padding so far including this tab's)
+    let mut tabs: Vec<(usize, usize, usize, usize)> = Vec::new();
+    let mut col = 0;
+    for (i, c) in code.char_indices() {
+        if c == '\t' {
+            let pad = 3 - col % 4;
+            let total = tabs.last().map_or(0, |t| t.3) + pad;
+            tabs.push((i, shown.len(), pad, total));
+            shown.push('\t');
+            shown.extend(std::iter::repeat_n(' ', pad));
+            col += pad + 1;
+            continue;
+        }
+        col = if c == '\n' { 0 } else { col + 1 };
+        shown.push(c);
+    }
+    let shift = |b: u32| match tabs.partition_point(|t| (t.0 as u32) < b) {
+        0 => b,
+        n => b + tabs[n - 1].3 as u32,
+    };
+    for sp in &mut spans {
+        (sp.start, sp.end) = (shift(sp.start), shift(sp.end));
+    }
+    tabs.iter().fold(rich(shown, spans), |el, t| el.uncopied(t.1 + 1..t.1 + 1 + t.2))
 }
 
 impl Renderer {
@@ -1132,9 +1173,9 @@ impl Renderer {
         c
     }
 
-    fn code(&self, code: &str, source: Option<Source>) -> El {
+    fn code(&self, code: &str, source: Option<&Source>) -> El {
         let s = &self.s;
-        let body = rich(code.to_owned(), self.syntax_spans(code, source)).font(s.code_block).color(s.text).reveal(self.reveal);
+        let body = tabbed(code, self.syntax_spans(code, source)).font(s.code_block).color(s.text).reveal(self.reveal);
         let frame = col().w_full().radius(6.0).fill(s.code_block_fill).border(0.5, s.code_block_border);
         if self.scroll_wide {
             // The text sizes to its longest line inside the viewport, which scrolls under the
@@ -1147,19 +1188,15 @@ impl Renderer {
 
     /// Colour-only spans, so highlighting never moves a glyph: a block streaming in draws its
     /// newest line plain and colours it in place once the line ends.
-    fn syntax_spans(&self, code: &str, source: Option<Source>) -> Vec<Span> {
-        let Some((lang, coloured)) = source.filter(|_| self.s.highlight).and_then(|src| Some((src.lang?, src.coloured))) else {
+    fn syntax_spans(&self, code: &str, source: Option<&Source>) -> Vec<Span> {
+        let Some(src) = source.filter(|_| self.s.highlight) else { return Vec::new() };
+        let lang = src.lang.as_deref();
+        // The built-in scanners leave other languages plain; skip the cache for those.
+        if self.highlighter.is_builtin() && !lang.is_some_and(crate::syntax::known) {
             return Vec::new();
-        };
-        let Some(prefix) = code.get(..coloured) else { return Vec::new() };
-        highlight::cached(lang, prefix)
-            .iter()
-            .map(|&(a, b, kind)| {
-                let mut sp = Span::new(a as usize, b as usize);
-                sp.color = Some(self.s.syntax[kind as usize]);
-                sp
-            })
-            .collect()
+        }
+        let Some(prefix) = code.get(..src.coloured) else { return Vec::new() };
+        self.s.syntax.spans(&self.highlighter.highlight(lang, prefix), 0)
     }
 
     /// One row per line, so added and removed lines are tinted edge to edge.
@@ -1179,7 +1216,7 @@ impl Renderer {
                 .key(format!("l{n}"))
                 .w_full()
                 .px(12.0)
-                .child(self.select(text(shown.to_owned()).font(s.code_block).color(color).wrap().reveal(self.reveal).w_full()));
+                .child(self.select(tabbed(shown, Vec::new()).font(s.code_block).color(color).wrap().reveal(self.reveal).w_full()));
             if let Some(t) = tint {
                 r = r.fill(t);
             }
@@ -1215,7 +1252,7 @@ impl Renderer {
             Block::Code(code) => {
                 let n = self.next_source.get();
                 self.next_source.set(n + 1);
-                self.code(code, self.sources.get(n).copied().filter(|src| src.len == code.len()))
+                self.code(code, self.sources.get(n).filter(|src| src.len == code.len()))
             }
             Block::Diff(src) => self.diff(src),
             Block::Mermaid(src) => self.mermaid(src),
@@ -1261,6 +1298,11 @@ mod tests {
 
     /// Each code block's syntax spans, in document order, rendered with `style`.
     fn spans(src: &str, style: &MarkdownStyle) -> Vec<(String, Vec<Span>)> {
+        spans_with(src, style, Highlighter::builtin())
+    }
+
+    /// [`spans`] with a highlighter.
+    fn spans_with(src: &str, style: &MarkdownStyle, highlighter: Highlighter) -> Vec<(String, Vec<Span>)> {
         fn codes<'a>(blocks: &'a [Block], out: &mut Vec<&'a str>) {
             for b in blocks {
                 match b {
@@ -1272,7 +1314,8 @@ mod tests {
             }
         }
         let (blocks, sources) = doc_cached(src);
-        let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, selectable: false, scroll_wide: false, sources: sources.clone(), next_source: Cell::new(0) };
+        let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, selectable: false, scroll_wide: false,
+            highlighter, sources: sources.clone(), next_source: Cell::new(0) };
         let mut found = Vec::new();
         codes(&blocks, &mut found);
         assert_eq!(found.len(), sources.len(), "one source per code block");
@@ -1281,7 +1324,7 @@ mod tests {
             .zip(sources.iter())
             .map(|(code, s)| {
                 assert_eq!(s.len, code.len(), "sources line up with blocks in document order");
-                (code.to_owned(), r.syntax_spans(code, Some(*s)))
+                (code.to_owned(), r.syntax_spans(code, Some(s)))
             })
             .collect()
     }
@@ -1297,14 +1340,14 @@ mod tests {
         let got = spans(src, &style);
         assert_eq!(got.len(), 6);
         let (ts, s) = &got[0];
-        assert_eq!(coloured(ts, s, style.syntax[Syntax::Keyword as usize]), ["const"]);
-        assert_eq!(coloured(ts, s, style.syntax[Syntax::Number as usize]), ["1"]);
+        assert_eq!(coloured(ts, s, style.syntax.color(Syntax::Keyword)), ["const"]);
+        assert_eq!(coloured(ts, s, style.syntax.color(Syntax::Number)), ["1"]);
         assert!(s.iter().all(|s| s.color.is_some() && s.weight.is_none() && !s.italic && !s.mono && s.size.is_none() && s.bg.is_none()));
         for (code, s) in &got[1..4] {
             assert!(s.is_empty(), "{code:?} stays plain");
         }
-        assert_eq!(coloured(&got[4].0, &got[4].1, style.syntax[Syntax::Function as usize]), ["f"]);
-        assert_eq!(coloured(&got[5].0, &got[5].1, style.syntax[Syntax::Keyword as usize]), ["select"]);
+        assert_eq!(coloured(&got[4].0, &got[4].1, style.syntax.color(Syntax::Function)), ["f"]);
+        assert_eq!(coloured(&got[5].0, &got[5].1, style.syntax.color(Syntax::Keyword)), ["select"]);
     }
 
     #[test]
@@ -1328,15 +1371,61 @@ mod tests {
     }
 
     #[test]
-    fn default_token_colours_are_distinct_in_both_themes() {
-        for dark in [false, true] {
-            let s = MarkdownStyle::neutral(dark).syntax;
-            for i in 0..s.len() {
-                for j in 0..i {
-                    assert_ne!(s[i], s[j], "dark {dark}: tokens {i} and {j}");
-                }
-            }
+    fn a_highlighter_gets_each_fence_language_as_written() {
+        use crate::syntax::Paint;
+        thread_local!(static SEEN: RefCell<Vec<(Option<String>, String)>> = const { RefCell::new(Vec::new()) });
+        let red = Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+        let h = Highlighter::new(move |lang: Option<&str>, code: &str| {
+            SEEN.with_borrow_mut(|s| s.push((lang.map(str::to_owned), code.to_owned())));
+            vec![(2..3, Paint::Color(red)), (0..1, Paint::Kind(Syntax::Keyword))]
+        });
+        let style = MarkdownStyle::neutral(true);
+        let src = "```Kotlin title=\"a.kt\"\nval x = 1\n```\n\n```\nbare fence\n```\n\n    indented code\n\n```rust,ignore\nfn f() {}\n```\n\n```diff\n+a\n```";
+        let got = spans_with(src, &style, h);
+        let want = [(Some("Kotlin"), "val x = 1"), (None, "bare fence"), (None, "indented code"), (Some("rust"), "fn f() {}")];
+        assert_eq!(SEEN.take(), want.map(|(l, c)| (l.map(str::to_owned), c.to_owned())), "diff fences keep their own look");
+        for (code, s) in &got {
+            assert_eq!(coloured(code, s, style.syntax.color(Syntax::Keyword)), [&code[0..1]]);
+            assert_eq!(coloured(code, s, red), [&code[2..3]]);
         }
+    }
+
+    /// Apps that don't pass a highlighter get exactly the built-in one's colours, and with colour
+    /// off nothing runs.
+    #[test]
+    fn without_a_highlighter_the_output_is_the_builtin_ones() {
+        let style = MarkdownStyle::neutral(false);
+        let src = "```ts\nconst a = 1;\n```\n\n```\nplain\n```\n\n```kotlin\nval x = 1\n```";
+        let got = spans(src, &style);
+        let k = |s| style.syntax.color(s);
+        let ts: Vec<_> = got[0].1.iter().map(|s| (s.start, s.end, s.color.unwrap())).collect();
+        assert_eq!(ts, [(0, 5, k(Syntax::Keyword)), (8, 9, k(Syntax::Punctuation)), (10, 11, k(Syntax::Number)), (11, 12, k(Syntax::Punctuation))]);
+        assert!(got[1].1.is_empty() && got[2].1.is_empty());
+        let h = Highlighter::new(|_, _| panic!("colour is off"));
+        assert!(spans_with(src, &style.clone().syntax_highlight(false), h).iter().all(|(_, s)| s.is_empty()));
+    }
+
+    /// Rebuilding a view highlights nothing: a highlighter runs once per block however many
+    /// commits draw it.
+    #[test]
+    fn rebuilding_a_view_runs_the_highlighter_once_per_block() {
+        thread_local!(static RUNS: Cell<usize> = const { Cell::new(0) });
+        fn view(_: &(), _: &mut rune::Cx<()>) -> El {
+            let style = MarkdownStyle::neutral(true);
+            Markdown::new("```py\nx = 1\n```\n\n```go\nvar y = 2\n```")
+                .highlight(|lang, code| {
+                    RUNS.set(RUNS.get() + 1);
+                    crate::syntax::builtin(lang, code)
+                })
+                .render(&style)
+        }
+        let mut rt = rune::Runtime::new((), view, (400.0, 400.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        for _ in 0..3 {
+            rt.invalidate();
+            rt.frame(1.0 / 60.0);
+        }
+        assert_eq!(RUNS.get(), 2);
     }
 
     /// Colour is the only thing a highlight changes: every glyph lands in the same place, wrapped

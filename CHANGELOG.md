@@ -5,6 +5,23 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Syntax highlighting is shared, swappable and covers Python and Go.** The scanners behind
+  Markdown's coloured fences moved to `rune_kit::syntax`, which builds without the `markdown`
+  feature: `syntax::highlight(lang, code)` returns cached `(Range<usize>, Paint)` ranges and
+  `SyntaxTheme::spans(&ranges, offset)` turns them into colour-only spans for any rich text,
+  such as a composer's code. `Markdown::highlight(|lang, code| ...)` (or `highlighter`) swaps in
+  an app's own highlighter, which gets the fence's language as written, including ones the
+  built-in scanners don't know. New built-in languages: Python, Go and unified diffs (for
+  callers; ```` ```diff ```` fences keep their tinted rows). `Syntax` gains `Inserted` and
+  `Deleted`, and `MarkdownStyle::syntax_theme` sets every token colour at once. Things apps
+  can notice: ```` ```python ```` and ```` ```go ```` fences (and aliases such as `py`,
+  `golang`) are now coloured, so goldens with them move; turn that off with
+  `syntax_highlight(false)`. Other output is unchanged.
+- **Tabs draw as spaces, and line up in Markdown code.** Text layout drew a tab as the font's
+  missing-glyph box (or nothing, depending on the font); it now shapes each tab as one space,
+  so byte ranges, carets and copying are unchanged. Markdown code blocks and diff lines pad
+  each tab with spaces to the next four-column stop; the padding isn't copied, so a copy
+  still gets the tab. Goldens with tabs in text move.
 - **`native-file-dialog` passes `cargo deny`.** On Linux the Open and Save dialogs now call the XDG
   desktop portal's FileChooser directly over zbus 6, which Rune already uses for global shortcuts,
   instead of through rfd's portal backend (ashpd and zbus 5, whose `zvariant`, `zbus_names` and
