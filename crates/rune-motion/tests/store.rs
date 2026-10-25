@@ -304,3 +304,35 @@ fn removing_and_reusing_tracks_is_generational() {
     assert_eq!(s.get(NodeId(2), X), Some(2.0));
     assert_eq!(s.get(NodeId(1), X), None);
 }
+
+#[test]
+fn node_time_scale_holds_slows_and_resumes_in_place() {
+    const M: NodeId = NodeId(8);
+    let mut s = AnimationStore::new();
+    s.set(N, X, 0.0);
+    s.set(M, X, 0.0);
+    s.set_node_time_scale(M, 0.5);
+    s.animate(N, X, 100.0, motion::SETTLE);
+    s.animate(M, X, 100.0, motion::SETTLE.delay(0.1));
+    s.tick_at(0.1);
+    let reference = s.get(N, X).unwrap();
+    assert_eq!(s.get(M, X), Some(0.0), "the delay runs at half speed too");
+    s.tick_at(0.4);
+    assert!((s.get(M, X).unwrap() - reference).abs() < 1e-3);
+    // Stopped: nothing moves and nothing counts as running, pending or not.
+    s.set_node_time_scale(N, 0.0);
+    s.set_node_time_scale(M, 0.0);
+    let held = (s.get(N, X).unwrap(), s.get(M, X).unwrap());
+    s.tick_at(5.0);
+    assert_eq!((s.get(N, X).unwrap(), s.get(M, X).unwrap()), held);
+    assert!(!s.running() && s.active_len() == 2);
+    // Resumed: carries on from the same place on the same curve.
+    s.set_node_time_scale(M, 1.0);
+    s.tick();
+    assert_eq!(s.get(M, X).unwrap(), held.1);
+    assert!(s.running());
+    s.tick_at(5.15);
+    assert!((s.get(M, X).unwrap() - motion::SETTLE.sample(0.0, 0.0, 100.0, 0.25).0).abs() < 1e-3);
+    assert_eq!(s.node_time_scale(N), 0.0);
+    assert_eq!(s.node_time_scale(M), 1.0);
+}

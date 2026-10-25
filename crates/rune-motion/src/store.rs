@@ -120,6 +120,15 @@ impl Fx {
 }
 pub(crate) type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
 
+/// A clock some nodes' tracks run on instead of the store's: it advances by `dt × scale` each
+/// time the store's time moves. Nodes at the same scale share one; `nodes == 0` marks it free.
+#[derive(Clone, Copy)]
+struct SubClock {
+    time: f64,
+    scale: f32,
+    nodes: u32,
+}
+
 /// Optional diagnostics for inherited spatial spring retargets (points per second).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RetargetAudit {
@@ -148,7 +157,16 @@ pub struct AnimationStore {
     t_next_due: Vec<f64>,
     t_slot: Vec<u32>,
     t_meta: Vec<Meta>,
+    /// The track's clock: 0 is the store's own, otherwise an index into `clocks`.
+    t_clock: Vec<u32>,
+    /// On a stopped clock and already sampled where it holds, so `tick` skips it.
+    t_held: Vec<bool>,
     track_free: Vec<u32>,
+
+    /// Index 0 stands for the store's own clock and is never read.
+    clocks: Vec<SubClock>,
+    clock_free: Vec<u32>,
+    node_clock: FxMap<u64, u32>,
 
     active: Vec<u32>,
     touched: Vec<u32>,
@@ -196,7 +214,12 @@ impl AnimationStore {
             t_next_due: Vec::new(),
             t_slot: Vec::new(),
             t_meta: Vec::new(),
+            t_clock: Vec::new(),
+            t_held: Vec::new(),
             track_free: Vec::new(),
+            clocks: Vec::new(),
+            clock_free: Vec::new(),
+            node_clock: FxMap::default(),
             active: Vec::new(),
             touched: Vec::new(),
             set_touched: Vec::new(),
@@ -232,6 +255,8 @@ impl AnimationStore {
         s.t_next_due.reserve(tracks);
         s.t_slot.reserve(tracks);
         s.t_meta.reserve(tracks);
+        s.t_clock.reserve(tracks);
+        s.t_held.reserve(tracks);
         s.active.reserve(tracks);
         s.touched.reserve(tracks);
         s.events.reserve(tracks * 2);
@@ -260,13 +285,142 @@ impl AnimationStore {
 
     /// Sets the frame's target presentation time. Apply this frame's commits after this, then `tick`.
     pub fn set_time(&mut self, t: f64) {
+        let dt = t - self.now;
         self.now = t;
+        for c in self.clocks.iter_mut().skip(1).filter(|c| c.nodes > 0 && c.scale != 0.0) {
+            c.time += dt * c.scale as f64;
+        }
     }
 
     /// `set_time(t)` then `tick()`.
     pub fn tick_at(&mut self, t: f64) {
-        self.now = t;
+        self.set_time(t);
         self.tick();
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Per-node time
+
+    /// Runs every track of `node`, and any it creates later, at `scale` times the store's speed:
+    /// each `set_time` advances them by `dt × scale`. At 0 they hold exactly where they are,
+    /// pending delays included, and [`running`](Self::running) ignores them. Changing the scale
+    /// keeps every running animation at its exact place. 1 is the store's own clock.
+    pub fn set_node_time_scale(&mut self, node: NodeId, scale: f32) {
+        let scale = if scale.is_finite() { scale.max(0.0) } else { 1.0 };
+        let old = self.node_clock.get(&node.0).copied().unwrap_or(0);
+        if self.clock_scale(old) == scale {
+            return;
+        }
+        let new = if scale == 1.0 { 0 } else { self.clock_at(scale) };
+        let delta = self.clock_time(new) - self.clock_time(old);
+        if new == 0 {
+            self.node_clock.remove(&node.0);
+        } else {
+            self.clocks[new as usize].nodes += 1;
+            self.node_clock.insert(node.0, new);
+        }
+        let mut t = self.node_head.get(&node.0).copied().unwrap_or(NONE);
+        while t != NONE {
+            self.rebase(t as usize, delta);
+            self.t_clock[t as usize] = new;
+            self.t_held[t as usize] = false;
+            t = self.t_meta[t as usize].node_next;
+        }
+        self.release_clock(old);
+    }
+
+    /// The scale `node`'s tracks run at relative to the store's (1 unless set).
+    pub fn node_time_scale(&self, node: NodeId) -> f32 {
+        if self.node_clock.is_empty() {
+            return 1.0;
+        }
+        self.clock_scale(self.node_clock.get(&node.0).copied().unwrap_or(0))
+    }
+
+    /// The time `node`'s tracks are sampled at: `now()` unless its time is scaled.
+    pub fn node_time(&self, node: NodeId) -> f64 {
+        if self.node_clock.is_empty() {
+            return self.now;
+        }
+        self.clock_time(self.node_clock.get(&node.0).copied().unwrap_or(0))
+    }
+
+    /// The live clock running at `scale`, or a new one reading `now`.
+    fn clock_at(&mut self, scale: f32) -> u32 {
+        if let Some(c) = self.clocks.iter().skip(1).position(|c| c.nodes > 0 && c.scale == scale) {
+            return c as u32 + 1;
+        }
+        if self.clocks.is_empty() {
+            self.clocks.push(SubClock { time: 0.0, scale: 1.0, nodes: 0 });
+        }
+        let clock = SubClock { time: self.now, scale, nodes: 0 };
+        match self.clock_free.pop() {
+            Some(c) => {
+                self.clocks[c as usize] = clock;
+                c
+            }
+            None => {
+                self.clocks.push(clock);
+                self.clocks.len() as u32 - 1
+            }
+        }
+    }
+
+    fn release_clock(&mut self, c: u32) {
+        if c == 0 {
+            return;
+        }
+        let clock = &mut self.clocks[c as usize];
+        clock.nodes -= 1;
+        if clock.nodes == 0 {
+            self.clock_free.push(c);
+        }
+    }
+
+    fn clock_scale(&self, c: u32) -> f32 {
+        if c == 0 { 1.0 } else { self.clocks[c as usize].scale }
+    }
+
+    fn clock_time(&self, c: u32) -> f64 {
+        if c == 0 { self.now } else { self.clocks[c as usize].time }
+    }
+
+    #[inline]
+    pub(crate) fn time_of(&self, t: usize) -> f64 {
+        self.clock_time(self.t_clock[t])
+    }
+
+    #[inline]
+    fn frozen(&self, t: usize) -> bool {
+        let c = self.t_clock[t];
+        c != 0 && self.clocks[c as usize].scale == 0.0
+    }
+
+    /// Shifts every absolute time of track `t` by `delta`.
+    fn rebase(&mut self, t: usize, delta: f64) {
+        if delta == 0.0 {
+            return;
+        }
+        let l0 = self.t_lane0[t] as usize;
+        for l in l0..l0 + self.t_n[t] as usize {
+            self.l_layer[l].t0 += delta;
+            self.l_layer[l].end += delta;
+            let mut m = self.l_more[l];
+            while m != NONE {
+                let e = &mut self.extra[m as usize];
+                e.layer.t0 += delta;
+                e.layer.end += delta;
+                m = e.next;
+            }
+            let mut p = self.l_pending[l];
+            while p != NONE {
+                self.pending[p as usize].at += delta;
+                p = self.pending[p as usize].next;
+            }
+        }
+        self.t_settle_at[t] += delta;
+        self.t_next_due[t] += delta;
+        self.t_meta[t].logical_at += delta;
     }
 
     /// Device pixels per point; sets settle thresholds below the 1/64 px snap quantum.
@@ -369,7 +523,7 @@ impl AnimationStore {
                 let (lo, hi) = (lanes(&min), lanes(&max));
                 let k = decay.k();
                 let l0 = self.t_lane0[t] as usize;
-                let now = self.now;
+                let now = self.time_of(t);
                 let eps = self.t_meta[t].class.eps(self.pixel_scale);
                 for i in 0..n {
                     let l = l0 + i;
@@ -421,8 +575,9 @@ impl AnimationStore {
         let t = *self.index.get(&(node.0, prop.id.0))? as usize;
         let mut out = [0.0; MAX_LANES];
         let l0 = self.t_lane0[t] as usize;
+        let now = self.time_of(t);
         for (i, slot) in out.iter_mut().enumerate().take(T::LANES) {
-            *slot = self.sample_lane(l0 + i, self.now).0;
+            *slot = self.sample_lane(l0 + i, now).0;
         }
         Some(T::read_lanes(&out[..T::LANES]))
     }
@@ -432,8 +587,9 @@ impl AnimationStore {
         let t = *self.index.get(&(node.0, prop.id.0))? as usize;
         let mut out = [0.0; MAX_LANES];
         let l0 = self.t_lane0[t] as usize;
+        let now = self.time_of(t);
         for (i, slot) in out.iter_mut().enumerate().take(T::LANES) {
-            *slot = self.sample_lane(l0 + i, self.now).1;
+            *slot = self.sample_lane(l0 + i, now).1;
         }
         Some(T::read_lanes(&out[..T::LANES]))
     }
@@ -477,9 +633,20 @@ impl AnimationStore {
         self.contains(id).then(|| self.t_meta[id.index as usize].epoch)
     }
 
-    /// When the track's latest animation logically completes (SwiftUI `.logicallyComplete`).
+    /// When the track's latest animation logically completes (SwiftUI `.logicallyComplete`), in
+    /// the store's time. On a scaled clock it's projected at the clock's current scale; a stopped
+    /// clock never gets there.
     pub fn logical_end(&self, id: TrackId) -> Option<f64> {
-        self.contains(id).then(|| self.t_meta[id.index as usize].logical_at)
+        let t = id.index as usize;
+        self.contains(id).then(|| {
+            let at = self.t_meta[t].logical_at;
+            if self.t_clock[t] == 0 {
+                return at;
+            }
+            let rem = at - self.time_of(t);
+            let scale = self.clocks[self.t_clock[t] as usize].scale as f64;
+            if rem <= 0.0 { self.now + rem } else if scale == 0.0 { f64::INFINITY } else { self.now + rem / scale }
+        })
     }
 
     /// The node and property a track belongs to.
@@ -500,6 +667,9 @@ impl AnimationStore {
 
     /// Removes every track of a node.
     pub fn remove_node(&mut self, node: NodeId) {
+        if let Some(c) = self.node_clock.remove(&node.0) {
+            self.release_clock(c);
+        }
         let mut t = self.node_head.remove(&node.0).unwrap_or(NONE);
         while t != NONE {
             let next = self.t_meta[t as usize].node_next;
@@ -511,9 +681,9 @@ impl AnimationStore {
     /// Live tuning: every lane currently springing on `old` re-springs on `new` from where it is,
     /// at the same target (research 06 §2.6). Smooth because the swap keeps `(x, v)`.
     pub fn retune(&mut self, old: Spring, new: Spring) {
-        let now = self.now;
         for i in 0..self.active.len() {
             let t = self.active[i] as usize;
+            let now = self.time_of(t);
             let (l0, n) = (self.t_lane0[t] as usize, self.t_n[t] as usize);
             let eps = self.t_meta[t].class.eps(self.pixel_scale);
             let mut hit = false;
@@ -540,10 +710,20 @@ impl AnimationStore {
         self.touched.clear();
         self.touched.extend_from_slice(&self.set_touched);
         self.set_touched.clear();
-        let now = self.now;
+        let clocked = !self.node_clock.is_empty();
         let mut i = 0;
         while i < self.active.len() {
             let t = self.active[i] as usize;
+            let now = if clocked { self.time_of(t) } else { self.now };
+            if clocked {
+                let frozen = self.frozen(t);
+                if frozen && self.t_held[t] {
+                    // Nothing moves on a stopped clock, and it was already sampled where it holds.
+                    i += 1;
+                    continue;
+                }
+                self.t_held[t] = frozen;
+            }
             self.touched.push(t as u32);
             if self.t_next_due[t] <= now {
                 self.apply_due(t, now);
@@ -628,8 +808,9 @@ impl AnimationStore {
         }
         let t = id.index as usize;
         let l0 = self.t_lane0[t] as usize;
+        let now = self.time_of(t);
         for i in 0..self.t_n[t] as usize {
-            let (a, b) = self.sample_lane(l0 + i, self.now);
+            let (a, b) = self.sample_lane(l0 + i, now);
             x[i] = a;
             v[i] = b;
         }
@@ -638,6 +819,14 @@ impl AnimationStore {
 
     pub fn active_len(&self) -> usize {
         self.active.len()
+    }
+
+    /// Some track is animating on a clock that moves. Tracks held by a stopped clock don't count.
+    pub fn running(&self) -> bool {
+        if self.node_clock.is_empty() {
+            return !self.active.is_empty();
+        }
+        self.active.iter().any(|&t| !self.frozen(t as usize))
     }
 
     pub fn track_len(&self) -> usize {
@@ -677,6 +866,7 @@ impl AnimationStore {
             self.l_curve[l] = Curve::Instant;
         }
         let head = self.node_head.get(&node.0).copied().unwrap_or(NONE);
+        let clock = if self.node_clock.is_empty() { 0 } else { self.node_clock.get(&node.0).copied().unwrap_or(0) };
         let t = match self.track_free.pop() {
             Some(t) => {
                 let t = t as usize;
@@ -687,6 +877,8 @@ impl AnimationStore {
                 self.t_settle_at[t] = f64::NEG_INFINITY;
                 self.t_next_due[t] = f64::INFINITY;
                 self.t_slot[t] = NONE;
+                self.t_clock[t] = clock;
+                self.t_held[t] = false;
                 t as u32
             }
             None => {
@@ -696,6 +888,8 @@ impl AnimationStore {
                 self.t_settle_at.push(f64::NEG_INFINITY);
                 self.t_next_due.push(f64::INFINITY);
                 self.t_slot.push(NONE);
+                self.t_clock.push(clock);
+                self.t_held.push(false);
                 (self.t_meta.len() - 1) as u32
             }
         };
@@ -766,18 +960,18 @@ impl AnimationStore {
         for (i, &curve) in curves.iter().enumerate() {
             let l = l0 + i;
             if matches!((self.l_curve[l], curve), (Curve::Spring(_), Curve::Spring(_)))
-                && self.l_curve[l] != curve && self.l_layer[l].end > self.now {
-                self.start_lane(l, self.now, self.l_target[l], curve, Blend::Merge, None, eps);
+                && self.l_curve[l] != curve && self.l_layer[l].end > self.time_of(t) {
+                self.start_lane(l, self.time_of(t), self.l_target[l], curve, Blend::Merge, None, eps);
                 duration = duration.max(curve.logical_duration());
                 changed = true;
             }
         }
-        if changed { self.commit_scheduled(t, self.now + duration as f64, self.t_meta[t].token); }
+        if changed { self.commit_scheduled(t, self.time_of(t) + duration as f64, self.t_meta[t].token); }
     }
 
     /// Animates lanes of track `t` toward `targets`. `lane_vel` overrides per-lane start velocity.
     pub(crate) fn animate_raw(&mut self, t: usize, targets: &[f32], mut anim: Anim, lane_vel: Option<&[f32]>) {
-        let now = self.now;
+        let now = self.time_of(t);
         if self.t_next_due[t] <= now {
             self.apply_due(t, now);
         }
@@ -826,7 +1020,7 @@ impl AnimationStore {
             }
         }
         if changed {
-            let end = self.now + anim.delay as f64 + anim.curve.logical_duration() as f64;
+            let end = now + anim.delay as f64 + anim.curve.logical_duration() as f64;
             self.commit_scheduled(t, end, anim.token);
         } else if anim.token != 0 {
             if self.t_slot[t] == NONE {
@@ -1080,6 +1274,7 @@ impl AnimationStore {
         m.token = token;
         m.logical_at = logical_at;
         m.epoch = m.epoch.wrapping_add(1);
+        self.t_held[t] = false;
         self.recompute(t);
         self.activate(t);
     }

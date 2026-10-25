@@ -74,6 +74,14 @@ impl<T: Animatable> Animated<T> {
         }
     }
 
+    /// Moves the animation onto a clock reading `delta` more, at the same place.
+    pub(crate) fn shift(&mut self, delta: f64) {
+        for l in &mut self.layers {
+            l.t0 += delta;
+            l.end += delta;
+        }
+    }
+
     /// Retargets on the curve last used.
     pub fn retarget(&mut self, target: T, now: f64) {
         let curve = self.curve;

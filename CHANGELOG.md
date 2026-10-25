@@ -5,6 +5,16 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::time_scale(k)` runs one subtree's animations at `k` times normal speed.** Springs,
+  transitions (enter, exit, layout), implicit animations, hover and press fades, loops and word
+  reveals inside it advance by `dt × k`; `0.0` freezes them exactly and requests no frames, and
+  changing `k` carries on from the same place. Nested scales multiply, and all of them multiply
+  with `Cx::time_scale`, which still scales the whole window. State keeps updating (a hover is
+  tracked, only its fade waits), an exit in a frozen subtree finishes once it resumes, and
+  scrolling, growth stacks and `Tween` keep the window's clock. Trees that don't use it are
+  unchanged. In `rune-motion`, `AnimationStore::set_node_time_scale` and
+  `Scene::set_time_scale` do the same per node, and `AnimationStore::logical_end` reports
+  store time for a scaled node.
 - **A wrapping tooltip child wraps inside the box.** `Tooltip::child(text(..).wrap())` laid out
   at its one-line width and drew past `TooltipStyle::max_width`; it now shrinks to the box and
   wraps there without `.shrink()`, beside a chip that keeps its width. Wrapping text nested

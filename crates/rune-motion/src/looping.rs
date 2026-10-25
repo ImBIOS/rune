@@ -84,6 +84,11 @@ impl LoopTrack {
         }
         self.amplitude.animate_to(if enabled { 1.0 } else { 0.0 }, Spring::new(0.18, 0.0), now);
     }
+    /// Moves the track onto a clock reading `delta` more, at the same place.
+    pub fn shift(&mut self, delta: f64) {
+        self.epoch += delta;
+        self.amplitude.shift(delta);
+    }
     /// Explicit settle/reduced motion lands finite sequences; periodic loops keep their phase.
     pub fn finish(&mut self) {
         if matches!(self.spec.kind, LoopKind::Sequence(_)) { self.finished = true; }

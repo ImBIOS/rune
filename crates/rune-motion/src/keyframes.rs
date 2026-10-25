@@ -126,7 +126,7 @@ impl AnimationStore {
             return self.id_of(t);
         }
         self.cancel_track_pending(t);
-        let mut at = self.now() + kf.delay as f64;
+        let mut at = self.time_of(t) + kf.delay as f64;
         let mut prev = init;
         let frames = &kf.frames;
         for _ in 0..kf.repeat {

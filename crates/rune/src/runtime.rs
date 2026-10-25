@@ -226,7 +226,9 @@ impl<S> Cx<S> {
     pub fn reduced_motion(&mut self, on: bool) {
         self.reduced_motion = on;
     }
-    /// Scale the animation clock (slow motion below 1).
+    /// Scale the window's animation clock (slow motion below 1, paused at 0). To slow or freeze
+    /// only part of the window, use [`El::time_scale`](crate::El::time_scale), which multiplies
+    /// with this.
     pub fn time_scale(&mut self, scale: f32) {
         self.time_scale = scale.clamp(0.0, 8.0);
     }
@@ -319,6 +321,8 @@ pub(crate) struct Node {
     press_scale: Option<f32>,
     /// `El::scale`: a fixed factor on the element's own scale.
     static_scale: f32,
+    /// `El::time_scale`: this element's own factor; the scene multiplies ancestors' in.
+    time_scale: f32,
     /// The image ratio this picture's layout took, when it sizes one side from its pixels.
     pixel_aspect: Option<f32>,
     /// `El::aspect_fit`: the ratio and the element's own style, which the fitted size replaces.
@@ -690,6 +694,8 @@ pub struct Runtime<S: 'static> {
     static_scales: HashMap<NodeId, (f32, f64, bool)>,
     /// A changed `El::scale` hasn't held still long enough for its text to rasterize.
     static_scale_settling: bool,
+    /// Some node ran on a scaled clock (`El::time_scale`) at the last commit.
+    time_scaled: bool,
     /// Shared host deadline: unscaled wake time and corresponding animation time.
     loop_wake: Option<(f64, f64)>,
     surface_visible: bool,
@@ -958,6 +964,7 @@ impl<S: 'static> Runtime<S> {
             loops_active: false,
             static_scales: HashMap::new(),
             static_scale_settling: false,
+            time_scaled: false,
             loop_wake: None,
             surface_visible: true,
             hovered: None,
@@ -1747,7 +1754,7 @@ impl<S: 'static> Runtime<S> {
             }
         }
         for (id, track) in &self.loops {
-            if let Some([x, y]) = track.offset(self.t, self.reduced_motion)
+            if let Some([x, y]) = track.offset(self.scene.store().node_time(*id), self.reduced_motion)
                 && let Some(n) = self.node_index.get(id).map(|&i| &self.nodes[i])
             {
                 let offset = rune_motion::Vec2::new(x * n.local.w, y * n.local.h);
@@ -2996,6 +3003,11 @@ impl<S: 'static> Runtime<S> {
             self.stacks.insert(cid, stack);
         }
 
+        // Put nodes on their subtree's clock before this commit animates them.
+        let time_scaled = self.time_scaled || nodes.iter().any(|n| n.time_scale != 1.0);
+        let mut time_scales = Vec::new();
+        if time_scaled { self.sync_time_scales(&nodes, &mut time_scales); }
+
         // `El::matched` elements of this tree: (id, index, newly mounted).
         let mut arrivals: Vec<(Rc<str>, usize, bool)> = Vec::new();
         for i in 0..nodes.len() {
@@ -3144,6 +3156,7 @@ impl<S: 'static> Runtime<S> {
                 && spec.reveal >= 0.0
             {
                 let content = &spec.content;
+                let now = if time_scaled { self.scene.store().node_time(id) } else { now };
                 let fade = if self.reduced_motion { 0.15 } else { spec.reveal };
                 let mounted_late = !was_present && !instant && !nodes[i].virtual_mount;
                 let st = self.reveals.entry(id).or_insert_with(|| RevealState {
@@ -3260,6 +3273,11 @@ impl<S: 'static> Runtime<S> {
             nodes.push(old);
         }
 
+        if time_scaled {
+            // Exits keep following their subtree's scale, so a frozen one finishes once it resumes.
+            self.sync_time_scales(&nodes, &mut time_scales);
+            self.time_scaled = time_scales.iter().any(|&k| k != 1.0);
+        }
         self.nodes = nodes;
         self.has_dissolve = self.nodes.iter().any(|n| n.vis.blend == crate::render::Blend::PlusLighter);
         self.has_pixel_aspect = self.nodes.iter().any(|n| n.pixel_aspect.is_some());
@@ -3276,12 +3294,13 @@ impl<S: 'static> Runtime<S> {
         self.loops.retain(|id, _| self.scene.contains(*id));
         self.static_scales.retain(|id, _| self.scene.contains(*id));
         for n in &self.nodes {
+            let t = if time_scaled { self.scene.store().node_time(n.id) } else { self.t };
             if let Some(spec) = n.looping {
-                let track = self.loops.entry(n.id).and_modify(|l| { l.retime(spec, self.t); l.enabled(true, self.t); })
-                    .or_insert_with(|| rune_motion::LoopTrack::new(spec, self.t));
+                let track = self.loops.entry(n.id).and_modify(|l| { l.retime(spec, t); l.enabled(true, t); })
+                    .or_insert_with(|| rune_motion::LoopTrack::new(spec, t));
                 if tx.settle || self.reduced_motion { track.finish(); }
             } else if let Some(l) = self.loops.get_mut(&n.id) {
-                l.enabled(false, self.t);
+                l.enabled(false, t);
             }
         }
         self.layout = taffy;
@@ -3291,6 +3310,26 @@ impl<S: 'static> Runtime<S> {
         self.aspect_snap.clear();
         self.viewport_stepped = false;
         self.settle = false;
+    }
+
+    /// Runs each of `nodes` from `scales.len()` on at its `El::time_scale` times its parent's,
+    /// pushing the products onto `scales`. A node whose clock changes keeps its place: the store
+    /// rebases its tracks, and its reveal words and loop shift by the same amount.
+    fn sync_time_scales(&mut self, nodes: &[Node], scales: &mut Vec<f32>) {
+        for n in &nodes[scales.len()..] {
+            let k = n.time_scale * n.parent.and_then(|p| scales.get(p).copied()).unwrap_or(1.0);
+            scales.push(k);
+            let store = self.scene.store_mut();
+            let before = store.node_time(n.id);
+            store.set_node_time_scale(n.id, k);
+            let shift = store.node_time(n.id) - before;
+            if shift != 0.0 {
+                if let Some(st) = self.reveals.get_mut(&n.id) {
+                    for w in &mut st.words { w.1 += shift; }
+                }
+                if let Some(l) = self.loops.get_mut(&n.id) { l.shift(shift); }
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------------------
@@ -3406,16 +3445,17 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn reveals_active(&mut self) -> bool {
-        let now = self.t;
+        let store = self.scene.store();
         let mut any = false;
-        for st in self.reveals.values_mut() {
+        for (id, st) in self.reveals.iter_mut() {
+            let now = store.node_time(*id);
             let fade = st.fade as f64;
             // Words fully shown leave the list (only from the front, which keeps lookups valid).
             let done = st.words.iter().take_while(|w| now - w.1 >= fade).count();
             if done > 0 && done == st.words.len() {
                 st.words.clear();
             }
-            any |= !st.words.is_empty();
+            any |= !st.words.is_empty() && store.node_time_scale(*id) > 0.0;
         }
         any
     }
@@ -4098,7 +4138,7 @@ impl<S: 'static> Runtime<S> {
             let mut opacity = p.opacity;
             if let Some([rest, hov]) = n.vis.group_opacity { opacity *= rest + (hov - rest) * inherited_group; }
             if fades(n.looping) && let Some(track) = self.loops.get(&n.id) {
-                opacity *= track.sample_at(now, self.clock, self.reduced_motion);
+                opacity *= track.sample_at(self.scene.store().node_time(n.id), self.clock, self.reduced_motion);
             }
             self.dissolve_scratch[parent] |= opacity > 0.0 && opacity < 1.0;
         }
@@ -4186,7 +4226,9 @@ impl<S: 'static> Runtime<S> {
             } else {
                 pinh.group
             };
-            let loop_value = self.loops.get(&n.id).map(|l| l.sample_at(now, self.clock, self.reduced_motion));
+            // Loops and reveals run on the node's clock (`El::time_scale`).
+            let lnow = self.scene.store().node_time(n.id);
+            let loop_value = self.loops.get(&n.id).map(|l| l.sample_at(lnow, self.clock, self.reduced_motion));
             if fades(n.looping) && let Some(v) = loop_value {
                 own *= v;
             }
@@ -4204,7 +4246,7 @@ impl<S: 'static> Runtime<S> {
             let sequence = self.loops.get(&n.id)
                 .filter(|_| matches!(n.looping.map(|l| l.kind), Some(rune_motion::LoopKind::Sequence(_))));
             let own_sc = p.transform.scale.x * press_k * n.static_scale
-                * sequence.and_then(|l| l.pose(now, self.reduced_motion)).map_or(1.0, |p| p.scale);
+                * sequence.and_then(|l| l.pose(lnow, self.reduced_motion)).map_or(1.0, |p| p.scale);
             // An `El::scale` an app drives from a slider or pinch counts as moving until it holds
             // still, then rasterizes at rounded sizes like a live scale.
             let (static_moving, static_dynamic) = if n.static_scale != 1.0 || self.static_scales.contains_key(&n.id) {
@@ -4219,7 +4261,7 @@ impl<S: 'static> Runtime<S> {
             let scale_motion = pinh.scale_motion.max(
                 if store.is_animating(n.id, prop::SCALE) || store.is_animating(n.id, prop::PRESENCE)
                     || (n.press_scale.is_some() && store.is_animating(n.id, P_PRESS_SCALE))
-                    || sequence.is_some_and(|l| !self.reduced_motion && l.active(now)) || static_moving {
+                    || sequence.is_some_and(|l| !self.reduced_motion && l.active(lnow)) || static_moving {
                     ScaleMotion::Moving
                 } else if static_dynamic || n.live.iter().any(|b| b.property == crate::live::Property::Scale) {
                     ScaleMotion::Live
@@ -4311,18 +4353,20 @@ impl<S: 'static> Runtime<S> {
                 && home[3] > clip[1].max(vp[1] - filter_margin) && home[1] < clip[3].min(vp[3] + filter_margin)
                 && let Some(track) = self.loops.get(&n.id)
             {
-                if let Some(dt) = track.frame_interval().filter(|_| track.active(now)) {
+                let node_k = self.scene.store().node_time_scale(n.id) as f64;
+                if let Some(dt) = track.frame_interval().filter(|_| track.active(lnow)) {
                     ambient = Some(ambient.map_or(dt as f32, |a| a.min(dt as f32)));
                     let wake = self.clock + dt;
                     if self.loop_wake.is_none_or(|w| wake < w.0) {
                         self.loop_wake = Some((wake, now + dt * self.time_scale as f64));
                     }
-                } else if self.time_scale > 0.0 {
-                    self.loops_active |= track.active(now);
+                } else if self.time_scale > 0.0 && node_k > 0.0 {
+                    self.loops_active |= track.active(lnow);
                 }
-                if self.time_scale > 0.0 && let Some(start) = track.pending_start(now) {
-                    let wake = self.clock + (start - now) / self.time_scale as f64;
-                    if self.loop_wake.is_none_or(|w| wake < w.0) { self.loop_wake = Some((wake, start)); }
+                if self.time_scale > 0.0 && node_k > 0.0 && let Some(start) = track.pending_start(lnow) {
+                    let window_start = now + (start - lnow) / node_k;
+                    let wake = self.clock + (window_start - now) / self.time_scale as f64;
+                    if self.loop_wake.is_none_or(|w| wake < w.0) { self.loop_wake = Some((wake, window_start)); }
                 }
             }
             let intersect = |a: [f32; 4], b: [f32; 4]| [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
@@ -4871,7 +4915,7 @@ impl<S: 'static> Runtime<S> {
                             gm = glyph_gamma(c, s, srgb);
                         }
                         if let Some(st) = reveal {
-                            let a = Self::reveal_alpha(st, q.byte, now);
+                            let a = Self::reveal_alpha(st, q.byte, self.scene.store().node_time(n.id));
                             if a <= 0.0 {
                                 continue;
                             }
@@ -5035,7 +5079,7 @@ impl<S: 'static> Runtime<S> {
         let store = self.scene.store();
         let animating = |id: NodeId| store.is_animating(id, prop::FRAME) || store.is_animating(id, prop::TRAVEL)
             || store.is_animating(id, prop::PRESENCE) || store.is_animating(id, prop::OFFSET) || store.is_animating(id, prop::SCALE) || store.is_animating(id, P_PRESS_SCALE)
-            || (!self.reduced_motion && self.loops.get(&id).is_some_and(|l| l.active(self.t)));
+            || (!self.reduced_motion && self.loops.get(&id).is_some_and(|l| l.active(store.node_time(id))));
         let mut elements: Vec<_> = self.nodes
             .iter()
             .enumerate()
@@ -5081,7 +5125,7 @@ impl<S: 'static> Runtime<S> {
                     trace_namespace: n.trace_namespace,
                     loop_phase: self.loops.get(&n.id).map(|l| {
                         if self.reduced_motion && !matches!(n.looping.map(|s| s.kind), Some(rune_motion::LoopKind::Sequence(_))) { 0.0 }
-                        else { l.phase(self.t) }
+                        else { l.phase(self.scene.store().node_time(n.id)) }
                     }),
                     focusable: self.can_focus(i),
                     focused: self.focused.as_deref() == Some(&n.path),
@@ -5773,6 +5817,7 @@ fn flatten(
         window_drag,
         press_scale,
         scale: static_scale,
+        time_scale,
         help,
         material,
         aspect_fit,
@@ -5849,6 +5894,7 @@ fn flatten(
         window_drag,
         press_scale,
         static_scale,
+        time_scale,
         pixel_aspect,
         aspect_fit,
         material,
@@ -8165,6 +8211,129 @@ mod tests {
         }
         assert!(!rt.animating);
         assert!(rt.elements().iter().all(|e| e.key.as_deref() != Some("badge")));
+    }
+
+    /// Target opacities of a dot outside every `time_scale` and one inside `outer > inner`,
+    /// plus an exiting badge under `inner`.
+    #[derive(Clone, Copy)]
+    struct Lab { outside: f32, inside: f32, badge: bool, outer: f32, inner: f32 }
+
+    impl Lab {
+        fn at(outer: f32, inner: f32) -> Lab { Lab { outside: 1.0, inside: 1.0, badge: true, outer, inner } }
+        fn runtime(self) -> Runtime<Lab> {
+            fn view(s: &Lab, _: &mut Cx<Lab>) -> El {
+                let dot = |key: &str, o: f32| el().key(key).size(20.0, 20.0).fill(Color::WHITE).opacity(o);
+                let mut inner = col().key("inner").time_scale(s.inner).child(dot("inside", s.inside));
+                if s.badge { inner = inner.child(el().key("badge").size(20.0, 20.0).fill(Color::WHITE).transition(Transition::opacity())); }
+                col().key("root").size(200.0, 200.0)
+                    .child(dot("outside", s.outside))
+                    .child(col().key("outer").time_scale(s.outer).child(inner))
+            }
+            let mut rt = Runtime::new(self, view, (200.0, 200.0), Env::new(true, 1.0));
+            assert!(!rt.frame(0.0));
+            rt
+        }
+    }
+
+    const LAB_DT: f64 = 1.0 / 60.0;
+
+    fn lab_set(rt: &mut Runtime<Lab>, f: impl FnOnce(&mut Lab)) {
+        f(&mut rt.state);
+        rt.dirty = true;
+    }
+
+    fn lab_steps(rt: &mut Runtime<Lab>, n: usize) {
+        for _ in 0..n { rt.frame(LAB_DT); }
+    }
+
+    fn lab_opacity(rt: &Runtime<Lab>, key: &str) -> Option<f32> {
+        rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).map(|e| e.opacity)
+    }
+
+    #[test]
+    fn time_scale_zero_freezes_its_subtree_while_the_rest_moves() {
+        let mut rt = Lab::at(1.0, 0.0).runtime();
+        lab_set(&mut rt, |s| { s.outside = 0.0; s.inside = 0.0; });
+        lab_steps(&mut rt, 12);
+        let outside = lab_opacity(&rt, "outside").unwrap();
+        assert!(outside < 0.9, "outside fades: {outside}");
+        assert_eq!(lab_opacity(&rt, "inside"), Some(1.0), "inside holds exactly");
+    }
+
+    #[test]
+    fn half_time_scale_reaches_the_same_point_at_twice_the_time() {
+        let mut rt = Lab::at(1.0, 0.5).runtime();
+        lab_set(&mut rt, |s| { s.outside = 0.0; s.inside = 0.0; });
+        lab_steps(&mut rt, 10);
+        let reference = lab_opacity(&rt, "outside").unwrap();
+        assert!(reference > 0.05 && reference < 0.95, "mid-flight: {reference}");
+        lab_steps(&mut rt, 10);
+        let inside = lab_opacity(&rt, "inside").unwrap();
+        assert!((inside - reference).abs() < 1e-4, "{inside} at 2t vs {reference} at t");
+    }
+
+    #[test]
+    fn nested_time_scales_multiply() {
+        let mut rt = Lab::at(0.5, 0.5).runtime();
+        lab_set(&mut rt, |s| { s.outside = 0.0; s.inside = 0.0; });
+        lab_steps(&mut rt, 5);
+        let reference = lab_opacity(&rt, "outside").unwrap();
+        assert!(reference > 0.05 && reference < 0.95, "mid-flight: {reference}");
+        lab_steps(&mut rt, 15);
+        let inside = lab_opacity(&rt, "inside").unwrap();
+        assert!((inside - reference).abs() < 1e-4, "{inside} at 4t vs {reference} at t");
+    }
+
+    #[test]
+    fn a_frozen_subtree_with_pending_motion_requests_no_frames() {
+        let mut rt = Lab::at(1.0, 0.0).runtime();
+        lab_set(&mut rt, |s| s.inside = 0.0);
+        for _ in 0..5 {
+            assert!(!rt.frame(LAB_DT), "a frozen fade asks for no frames");
+        }
+        assert!(rt.scene.store().active_len() > 0, "the fade is still pending");
+        assert_eq!(rt.wake_deadline(), None);
+        assert_eq!(lab_opacity(&rt, "inside"), Some(1.0));
+        lab_set(&mut rt, |s| s.inner = 1.0);
+        assert!(rt.frame(LAB_DT), "resuming runs it");
+        assert!(lab_opacity(&rt, "inside").unwrap() < 1.0);
+    }
+
+    #[test]
+    fn resuming_a_frozen_subtree_continues_from_the_same_value() {
+        let mut rt = Lab::at(1.0, 1.0).runtime();
+        lab_set(&mut rt, |s| { s.outside = 0.0; s.inside = 0.0; });
+        lab_steps(&mut rt, 5);
+        let held = lab_opacity(&rt, "inside").unwrap();
+        assert!(held < 1.0);
+        lab_set(&mut rt, |s| s.inner = 0.0);
+        lab_steps(&mut rt, 5);
+        // The dot outside is ten frames in; the frozen one is still five frames in.
+        let reference = lab_opacity(&rt, "outside").unwrap();
+        lab_steps(&mut rt, 5);
+        assert_eq!(lab_opacity(&rt, "inside"), Some(held), "no drift while frozen");
+        lab_set(&mut rt, |s| s.inner = 1.0);
+        rt.frame(0.0);
+        assert_eq!(lab_opacity(&rt, "inside"), Some(held), "resumes from the held value");
+        lab_steps(&mut rt, 5);
+        let inside = lab_opacity(&rt, "inside").unwrap();
+        assert!((inside - reference).abs() < 1e-4, "continues on the same curve: {inside} vs {reference}");
+    }
+
+    #[test]
+    fn an_exit_in_a_frozen_subtree_finishes_after_resuming() {
+        let mut rt = Lab::at(1.0, 0.0).runtime();
+        lab_set(&mut rt, |s| s.badge = false);
+        lab_steps(&mut rt, 120);
+        assert!(!rt.animating);
+        let badge = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("badge")).expect("still exiting");
+        assert!(badge.exiting && badge.opacity == 1.0, "held at the start of its exit: {}", badge.opacity);
+        lab_set(&mut rt, |s| s.inner = 1.0);
+        lab_steps(&mut rt, 3);
+        assert!(lab_opacity(&rt, "badge").is_some_and(|o| o < 1.0), "the exit runs");
+        lab_steps(&mut rt, 120);
+        assert!(!rt.animating);
+        assert_eq!(lab_opacity(&rt, "badge"), None, "and is removed");
     }
 
     #[test]

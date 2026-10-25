@@ -334,6 +334,11 @@ impl Scene {
     pub fn set_time(&mut self, t: f64) {
         self.store.set_time(t);
     }
+    /// Runs the node's animations at `scale` times the scene's speed; see
+    /// [`AnimationStore::set_node_time_scale`].
+    pub fn set_time_scale(&mut self, id: NodeId, scale: f32) {
+        self.store.set_node_time_scale(id, scale);
+    }
     pub fn now(&self) -> f64 {
         self.store.now()
     }
@@ -1001,7 +1006,8 @@ impl Scene {
             }
         }
         self.exited_seen = self.exited.len();
-        let animating = self.store.active_len() > 0 || !self.travelling.is_empty();
+        let animating = self.store.running()
+            || self.travelling.iter().any(|&i| self.store.node_time_scale(self.nodes[i as usize].id) > 0.0);
         if let Some(trace) = self.trace.as_mut() {
             trace.frame(self.store.now(), &self.out, &self.exited, self.store.events(), &self.intents);
             self.intents.clear();

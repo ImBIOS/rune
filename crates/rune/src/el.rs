@@ -714,6 +714,7 @@ pub struct El {
     pub(crate) window_drag: bool,
     pub(crate) press_scale: Option<f32>,
     pub(crate) scale: f32,
+    pub(crate) time_scale: f32,
     pub(crate) help: Option<String>,
     pub(crate) material: Option<crate::SystemMaterial>,
     /// `El::aspect_fit`'s width over height; 0 when unset.
@@ -778,6 +779,7 @@ fn base(dir: FlexDirection) -> El {
         window_drag: false,
         press_scale: None,
         scale: 1.0,
+        time_scale: 1.0,
         help: None,
         material: None,
         aspect_fit: 0.0,
@@ -1732,6 +1734,22 @@ impl El {
     /// `press_scale`. Anything not finite or below zero is `1.0`.
     pub fn scale(mut self, k: f32) -> Self {
         self.scale = if k.is_finite() && k >= 0.0 { k } else { 1.0 };
+        self
+    }
+    /// Run the animations of this element and everything in it at `k` times normal speed:
+    /// springs, transitions (enter, exit, layout), implicit animations, hover and press
+    /// fades, loops and word reveals. `0.0` freezes them exactly where they are, `0.5` is slow
+    /// motion, and changing `k` carries on from the same place. Nested scales multiply, and
+    /// all of them multiply with the window's [`Cx::time_scale`](crate::Cx::time_scale).
+    ///
+    /// Only time slows. State still updates at once: a hover or press is tracked as usual and
+    /// only its fade waits. An element exiting under a frozen subtree stays mid-exit until the
+    /// scale rises, then finishes and is removed. A frozen subtree requests no frames.
+    /// Scrolling, growth stacks and `Tween` keep the window's clock: they follow input and
+    /// layout, and a frozen scroll view would ignore the wheel. Anything not finite or below
+    /// zero is `1.0`.
+    pub fn time_scale(mut self, k: f32) -> Self {
+        self.time_scale = if k.is_finite() && k >= 0.0 { k } else { 1.0 };
         self
     }
     /// Clip children to this box with soft gradient edges (never a hard crop).

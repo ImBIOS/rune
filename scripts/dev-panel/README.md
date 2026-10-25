@@ -136,7 +136,9 @@ so a spring committed after idle never jumps by the idle time. Timer deadlines
 stay logical; `wake_deadline()` converts the remainder back to wall time at the
 current scale, and a paused clock exposes no deadline. Step advances 1/60 s
 while staying paused. `Cx::time_scale` remains an extra animation-only
-multiplier. Scale changes never stretch spring parameters, so poses don't jump.
+multiplier, and `El::time_scale` multiplies in for one subtree only, so a view can
+freeze or slow a specimen while the panel around it keeps normal time. Scale
+changes never stretch spring parameters, so poses don't jump.
 
 Commands first bring motion and timers to their arrival time, then commit with
 zero elapsed time, so an idle interval is never applied to a replayed
