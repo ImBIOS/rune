@@ -11,7 +11,7 @@ mod activation;
 mod app;
 pub mod time;
 #[cfg(target_arch = "wasm32")]
-mod web;
+pub mod web;
 #[cfg(all(feature = "dev", debug_assertions))]
 mod dev_clock;
 #[cfg(all(feature = "dev", debug_assertions))]

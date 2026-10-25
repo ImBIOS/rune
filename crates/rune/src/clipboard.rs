@@ -162,14 +162,30 @@ impl Client {
         }
         self.read_target(rt.paste_target());
     }
+    #[cfg(not(target_arch = "wasm32"))]
     fn read_target(&self, target: Option<String>) {
         let _ = worker().send(Request::Read { target, reply: self.sender.clone(), wake: self.wake.clone() });
+    }
+    #[cfg(target_arch = "wasm32")]
+    fn read_target(&self, target: Option<String>) {
+        // Start the permission-sensitive operation before yielding the input handler.
+        let promise = crate::web::platform::read_clipboard();
+        let (sender, wake) = (self.sender.clone(), self.wake.clone());
+        wasm_bindgen_futures::spawn_local(async move {
+            match wasm_bindgen_futures::JsFuture::from(promise).await {
+                Ok(value) => if let Some(text) = value.as_string() {
+                    if sender.send(Reply { target, text: Zeroizing::new(text) }).is_ok() { wake(); }
+                },
+                Err(_) => web_sys::console::warn_1(&"Clipboard read denied; use the browser's Paste command.".into()),
+            }
+        });
     }
     pub fn receive<S: 'static>(&self, rt: &mut Runtime<S>) -> bool {
         let mut received = self.changed.swap(false, Ordering::SeqCst);
         for reply in self.replies.try_iter() { rt.paste_result(reply.target, reply.text); received = true; }
         received
     }
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn flush<S: 'static>(&self, rt: &mut Runtime<S>) {
         if rt.clipboard.is_some() { return flush_memory(rt); }
         // Nothing to clear before the first write.
@@ -178,6 +194,28 @@ impl Client {
             let worker = worker();
             copy.bind(Route::System(worker.clone()));
             let _ = worker.send(Request::Write(copy, Some(Notify { changed: self.changed.clone(), wake: self.wake.clone() })));
+        }
+        if let Some(target) = rt.paste_request.take() { self.read_target(target); }
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub fn flush<S: 'static>(&self, rt: &mut Runtime<S>) {
+        if rt.clipboard.is_some() { return flush_memory(rt); }
+        rt.clear_secret_request = false;
+        if let Some(copy) = rt.copy_request.take() {
+            if copy.is_secret() {
+                if let Some(slot) = copy.slot() {
+                    slot.set(SecretState::Failed("secret clipboard writes are unsupported on web".into()));
+                    self.changed.store(true, Ordering::SeqCst);
+                    (self.wake)();
+                }
+            } else {
+                let promise = crate::web::platform::write_clipboard(&copy);
+                wasm_bindgen_futures::spawn_local(async move {
+                    if wasm_bindgen_futures::JsFuture::from(promise).await.is_err() {
+                        web_sys::console::warn_1(&"Clipboard write denied by the browser.".into());
+                    }
+                });
+            }
         }
         if let Some(target) = rt.paste_request.take() { self.read_target(target); }
     }

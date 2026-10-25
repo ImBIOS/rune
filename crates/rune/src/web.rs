@@ -5,6 +5,17 @@ use winit::{application::ApplicationHandler, event::WindowEvent, event_loop::{Ac
     platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys, WindowExtWebSys}, window::{Window, WindowId}};
 use crate::{App, Runtime, Env, render::{Gpu, Renderer}, time::Instant};
 mod input;
+pub(crate) mod platform;
+
+thread_local! { static INSETS: std::cell::Cell<[f32; 4]> = const { std::cell::Cell::new([0.0; 4]) }; }
+
+pub(crate) fn safe_area() -> [f32; 4] { INSETS.get() }
+
+/// Open an HTTP(S) or mail link in a new browser tab. Call from a user input handler;
+/// browser popup policy applies. The new page receives no opener or referrer.
+pub fn open_url(url: &str) -> Result<(), String> {
+    platform::open_link(url).map_err(|e| format!("{e:?}"))
+}
 
 #[derive(Clone, Copy)]
 enum Wake { Ready, App }
@@ -45,6 +56,7 @@ struct Running<S: 'static> {
     _menus: crate::native_menu::Guard<S>,
     shortcuts: crate::shortcuts::Guard,
     input: input::Bridge,
+    clipboard: crate::clipboard::Client,
 }
 
 fn error(message: &str) {
@@ -128,7 +140,9 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
             rt.wall_start = Some(now);
             shared.connect(wake.clone());
             let menus = crate::native_menu::Guard::attach(&shared, false);
-            let shortcuts = crate::shortcuts::Guard::attach(&shared, wake, false, false);
+            let shortcuts = crate::shortcuts::Guard::attach(&shared, wake.clone(), false, false);
+            let mut clipboard = crate::clipboard::Client::default();
+            clipboard.connect(wake);
             shared.visible.store(true, Ordering::Release);
             let Some(mut config) = surface.get_default_config(&gpu.adapter, size.width.max(1), size.height.max(1)) else {
                 error("WebGPU canvas has no supported configuration"); event_loop.exit(); return;
@@ -140,11 +154,12 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
             let mut renderer = Renderer::new(&gpu.device, format);
             renderer.set_srgb_blend(srgb_blend);
             let input = input::Bridge::new(&window.canvas().unwrap(), Rc::downgrade(&self.running), window.clone());
-            *self.running.borrow_mut() = Some(Running { gpu, surface, config, renderer, rt, shared, input,
+            *self.running.borrow_mut() = Some(Running { gpu, surface, config, renderer, rt, shared, input, clipboard,
                 clock: crate::frame_clock::FrameClock::new(now), compositor, suspended: false, _menus: menus, shortcuts });
         }
         if let Some(r) = &mut *self.running.borrow_mut() {
             r.shortcuts.drain();
+            r.clipboard.receive(&mut r.rt);
             let requests = r.shared.take();
             if requests.quit { event_loop.exit(); return; }
             if requests.window.is_some() || requests.position.is_some() || requests.place.is_some() {
@@ -171,10 +186,16 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
                 window.request_redraw();
             }
             WindowEvent::ThemeChanged(theme) => { r.rt.set_system_dark(theme == winit::window::Theme::Dark); window.request_redraw(); }
-            WindowEvent::Focused(focused) => { r.rt.window_focus(focused); window.request_redraw(); }
+            // Canvas -> textarea is an internal focus move. Window blur comes from the DOM bridge.
+            WindowEvent::Focused(true) => { r.rt.window_focus(true); window.request_redraw(); }
             WindowEvent::RedrawRequested if !r.suspended => {
                 let now = Instant::now();
                 let (animating, dt) = r.clock.advance(&mut r.rt, now, r.compositor.as_ref().is_some_and(|c| c.animating()));
+                r.clipboard.flush(&mut r.rt);
+                if r.rt.popup_menu().is_some() {
+                    web_sys::console::warn_1(&"Native popup menus are unsupported on web.".into());
+                    r.rt.cancel_popups();
+                }
                 r.sync_input(false);
                 if !r.rt.surfaces.is_empty() {
                     error("native video surfaces are unsupported on web"); event_loop.exit(); return;

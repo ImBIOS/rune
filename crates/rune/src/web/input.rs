@@ -13,6 +13,7 @@ extern "C" {
 pub(super) struct Bridge {
     handle: JsValue,
     _callback: Closure<dyn FnMut(String)>,
+    dispose_viewport: js_sys::Function,
     mods: ModifiersState,
     touch: Option<Touch>,
 }
@@ -36,11 +37,17 @@ impl Bridge {
                 window.request_redraw();
             }
         });
-        Self { handle: mount(canvas, callback.as_ref().unchecked_ref()), _callback: callback,
+        let dispose_viewport = platform::viewport(canvas, callback.as_ref().unchecked_ref());
+        Self { handle: mount(canvas, callback.as_ref().unchecked_ref()), _callback: callback, dispose_viewport,
             mods: ModifiersState::empty(), touch: None }
     }
 }
-impl Drop for Bridge { fn drop(&mut self) { destroy(&self.handle); } }
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        let _ = self.dispose_viewport.call0(&JsValue::NULL);
+        destroy(&self.handle);
+    }
+}
 
 impl<S: 'static> Running<S> {
     pub(super) fn sync_input(&self, activate: bool) {
@@ -53,6 +60,12 @@ impl<S: 'static> Running<S> {
 
     pub(super) fn input_event(&mut self, event: &serde_json::Value) {
         match event["kind"].as_str() {
+            Some("viewport") => {
+                let insets = std::array::from_fn(|i| event["insets"][i].as_f64().unwrap_or(0.0).max(0.0) as f32);
+                if INSETS.replace(insets) != insets { self.rt.invalidate(); }
+            }
+            Some("motion") => self.rt.set_system_reduced_motion(event["reduced"].as_bool().unwrap_or(false)),
+            Some("focus") => self.rt.window_focus(event["focused"].as_bool().unwrap_or(false)),
             Some("edit" | "selection") => self.rt.web_edit(event),
             Some("paste") => self.rt.paste(event["text"].as_str().unwrap_or_default()),
             Some("preedit") => {
@@ -84,6 +97,7 @@ impl<S: 'static> Running<S> {
         }
         // Commit within the DOM event: clipboard, link and soft-keyboard APIs need activation.
         self.rt.frame(0.0);
+        self.clipboard.flush(&mut self.rt);
         self.sync_input(false);
     }
 
@@ -164,6 +178,7 @@ impl<S: 'static> Running<S> {
             _ => return false,
         }
         self.rt.frame(0.0);
+        self.clipboard.flush(&mut self.rt);
         self.sync_input(activate);
         true
     }

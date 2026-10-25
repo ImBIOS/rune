@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Browser clipboard, links and viewport.** Web copies and paste requests use the browser
+  clipboard; secret-copy requests fail explicitly. `web::open_url` opens safe link schemes
+  without an opener. `Cx::safe_area` exposes browser insets, and the canvas tracks the visual
+  viewport when the software keyboard opens. Reduced-motion preferences reach the runtime.
+
 - **Web text and touch input.** A hidden textarea mirrors a sliding UTF-16 context for
   browser composition, predictive replacements, selection and paste. Touch pans use
   momentum and a damped edge return; completed taps focus editors synchronously.

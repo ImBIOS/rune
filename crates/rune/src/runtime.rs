@@ -237,6 +237,14 @@ impl<S> Cx<S> {
     pub fn focus_color(&self) -> Color {
         self.system_accent.focus(self.env.system_dark)
     }
+    /// Browser safe-area insets in points, in top/right/bottom/left order. Zero on native.
+    /// Apply these inside a full-canvas root so backgrounds can extend to the screen edges.
+    pub fn safe_area(&self) -> [f32; 4] {
+        #[cfg(target_arch = "wasm32")]
+        { crate::web::safe_area() }
+        #[cfg(not(target_arch = "wasm32"))]
+        { [0.0; 4] }
+    }
     /// The host's OS accessibility preference, independent of this commit's override.
     pub fn system_reduced_motion(&self) -> bool {
         self.system_reduced_motion
