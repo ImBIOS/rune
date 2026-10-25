@@ -5,6 +5,17 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **rune-fx fills.** `Fx::fill(params)` paints a node's shape, or with `.border(w)` a band inside
+  its edge: liquid metal (chrome, gold, rose gold, gunmetal; also as a tube border), mesh
+  gradient, dither (Bayer 2×2/4×4/8×8, blue noise, white noise; of a ramp, noise, the backdrop or
+  an image), grain gradient (linear, radial, conic), fluted glass, metaballs, swirl, voronoi,
+  waves and halftone. Each has typed params, `Default` and named presets. `fill_styles()` is a
+  catalog for tools: ids, display names, params with ranges and units, presets,
+  `FillParams::get`/`set` by param id and `to_rust()`. Things apps can notice: `Fx` has a new
+  variant, `Fill`, so an exhaustive `match` on `Fx` needs an arm; `FillStyle` and `FillParams`
+  are `#[non_exhaustive]`. `demo/fx/timings.md` was re-measured on an Apple M4 Pro, so its
+  numbers for the older effects moved too.
+
 - **Reopening a Mac app brings its window back.** A click on the Dock icon, or opening the app
   again from Finder, Spotlight or `open` while it runs, now shows and activates a window when
   none shows: a minimized one, else the one Rune hid last (⌘W with `keep_running`, `hide`), else

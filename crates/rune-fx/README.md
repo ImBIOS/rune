@@ -1,7 +1,8 @@
 # rune-fx
 
-Effect layers for Rune: glow, pulses, electricity, fire, motion blur, distortion, and some extras
-(shimmer, sparkles, aurora, grain). Each effect is a WGSL fragment shader on an instanced quad with
+Effect layers for Rune: glow, pulses, electricity, fire, motion blur, distortion, some extras
+(shimmer, sparkles, aurora, grain), and a family of fills (liquid metal, mesh gradient, dither, grain
+gradient, fluted glass, metaballs, swirl, voronoi, waves, halftone). Each effect is a WGSL fragment shader on an instanced quad with
 typed params. Given (time, seed), every frame is deterministic. A layer whose intensity is 0, whose
 one-shot has finished, or that is off screen is never drawn.
 
@@ -23,7 +24,12 @@ Output lands in `demo/fx/` (repo root): `<effect>.png`, `<effect>-strip.png` (8 
 | ![glow](../../demo/fx/glow.png) | ![pulse](../../demo/fx/pulse.png) |
 | ![electric](../../demo/fx/electric.png) | ![fire](../../demo/fx/fire.png) |
 | ![motion](../../demo/fx/motion.png) | ![distort](../../demo/fx/distort.png) |
-| ![extras](../../demo/fx/extras.png) | |
+| ![extras](../../demo/fx/extras.png) | ![liquid metal](../../demo/fx/liquid-metal.png) |
+| ![mesh gradient](../../demo/fx/mesh-gradient.png) | ![dither](../../demo/fx/dither.png) |
+| ![grain gradient](../../demo/fx/grain-gradient.png) | ![fluted glass](../../demo/fx/fluted-glass.png) |
+| ![more fills](../../demo/fx/fills.png) | ![every fill preset](../../demo/fx/fill-presets.png) |
+
+Liquid metal over eight frames (four seconds): ![liquid metal strip](../../demo/fx/liquid-metal-strip.png)
 
 ## API
 
@@ -83,6 +89,36 @@ Time helpers:
   glow shrinks, deepens and dims instead of cutting off (see the neon card in `glow-strip.png`).
 - `MotionSamples::from_track(params, rest_rect, t, scale, |t| Pose)` samples the analytic track
   inside the shutter interval.
+
+### Fills
+
+A fill paints the node's shape (or, with `.border(w)`, a band `w` pt wide inside its edge) and
+goes under the node as its background. Every style is `Fx::fill(params)` with typed params,
+`Default` and named presets:
+
+```rust
+Fx::fill(LiquidMetalParams::gold()).on(Shape::capsule(x, y, 180.0, 52.0)).at(t)          // a gold pill
+Fx::fill(LiquidMetalParams::chrome().border(6.0)).on(card).at(t)                        // a chrome tube border
+Fx::fill(MeshGradientParams { colors: Stops::hex(&[0x1b1f3b, 0xff6f91, 0xffc75f]), ..MeshGradientParams::dusk() }).on(card).at(t)
+Fx::fill(DitherParams { pattern: DitherPattern::Bayer8, pixel: 3.0, ..DitherParams::backdrop() }).on(card).at(t) // over the backdrop
+Fx::fill(GrainGradientParams { kind: GradientKind::Conic, ..GrainGradientParams::sweep() }).on(card).at(t)
+Fx::fill(FlutedGlassParams { rib: 10.0, frost: 0.4, ..FlutedGlassParams::reeded() }).on(card).at(t)
+```
+
+- Shared parts: a shape mask with an optional border band, `intensity`, a colour list (`Stops`, up
+  to six, blended in OKLab) and, for dither and halftone, a tone input (`FillInput`: linear or
+  radial ramp, drifting noise, the backdrop, or an image in a source slot via `.source(1, rect)`).
+- Fills that read the backdrop (fluted glass, dither or halftone of `Backdrop`) go over instead
+  and need a backdrop copy, like distortion. Frosted fluted glass reads the same blur pyramid as a
+  frosted lens: call `fx.blur_backdrop` for the layer.
+- Reduced motion: each fill settles on one fixed pose (drift, flow and grain stop) and
+  `is_animating()` is false.
+- The catalog describes every style for tools: `fill_styles()` lists `StyleInfo { id, name,
+  summary, params, presets, reads_backdrop }`; each `Param` has an id (the Rust field), a display
+  name and a `ParamKind` (number with range, step and unit; count; toggle; choice; colour; colours;
+  point; points). `FillParams::COMMON` holds `border` and `intensity`. `FillParams::get`/`set`
+  read and write any param by id as a `Value`, and `to_rust()` writes the `Fx::fill(...)` call,
+  as a struct literal over the closest preset.
 
 ## Integration contract (for the Rune renderer)
 
@@ -165,6 +201,21 @@ Lengths are in points, times in seconds.
 | **Aurora** `AuroraParams` | – | scale 120, speed .25, intensity .5, feather 40 | 3 curtains from CPU tables, plus noise rays |
 | **Grain** `GrainParams` | static or animated (`fps`) | amount .03, fps 0 | Static by default (no temporal shimmer) |
 
+Fills (`Fx::fill`; every style also takes `border` and `intensity`):
+
+| Fill | Presets | Key params (default) | Notes |
+|---|---|---|---|
+| **Liquid metal** `LiquidMetalParams` | `chrome`, `gold`, `rose`, `gunmetal` | flow .6, scale 100, speed .35, bevel 14, dome .55, angle −.12, iridescence .08, contrast 1 | A studio reflected in polished metal: bright sky falling to a hard horizon over a dark floor, an overhead soft box and two strip lights. The face is domed so the horizon crosses it, the rim rolls off over `bevel`, and a domain-warped height field ripples the normal (calmer toward the rim). Conductor Fresnel (Schlick) goes from the tint to white at grazing angles; lights roll off through a per-channel shoulder. As a border it is a round tube |
+| **Mesh gradient** `MeshGradientParams` | `dusk`, `lagoon`, `orchid`, `graphite` | 3–6 colours, points, drift .12, speed .25, sharpness 1.6, warp .35 | Each colour owns a point that drifts on a slow CPU-side path; inverse-distance weights blend them in OKLab, then the output is dithered against banding |
+| **Dither** `DitherParams` | `bayer`, `handheld`, `grain`, `backdrop` | Bayer 2×2 / 4×4 / 8×8, blue noise (32×32 void-and-cluster tile), white noise; pixel 2, 2–6 colours, bias, contrast | Quantises a tone (ramp, noise, backdrop or image) into the palette in square pixels anchored to the shape |
+| **Grain gradient** `GrainGradientParams` | `ember`, `halo`, `sweep` | linear / radial / conic, amount .4, size .5, mono, fps 12 | Triangular noise scatters the ramp position, so colours stipple into each other, plus brightness grain (mono or per channel). Conic gradients loop |
+| **Fluted glass** `FlutedGlassParams` | `reeded`, `fine`, `frosted`, `wide` | rib 14, angle 0, refraction 9, frost 0, dispersion .15, highlight .5 | Each rib is a cylindrical lens: the strip under it comes back squeezed and flipped, with a per-channel split toward its edges, a sheen and a shaded groove |
+| **Metaballs** `MetaballParams` | `lava`, `mint` | count 6, size .2, speed .4, gloss .5 | Blobs on CPU paths summed as a field; the iso-edge is anti-aliased from the field's slope, with a glossy rim |
+| **Swirl** `SwirlParams` | `ink`, `marble` | scale 140, speed .2, twist .6, warp 1 | A centre twist over twice domain-warped noise, through the colour ramp |
+| **Voronoi** `VoronoiParams` | `cells`, `stained` | scale 36, speed .25, edge 1.5, edge_color, depth .4 | Orbiting cell points, exact seam distance to the bisectors, shaded cells |
+| **Waves** `WaveParams` | `sea`, `dunes` | amplitude .05, frequency 1.6, speed .4, angle 0, softness .006 | Layered bands with two-sine crests; each front band shades the one behind |
+| **Halftone** `HalftoneParams` | `print`, `backdrop` | cell 6, angle 45°, ink, base; input as dither | Round dots on a rotated screen sized by tone; the four nearest dots merge |
+
 ## Costs
 
 From `demo/fx/timings.md`: Apple M5 Max (shared with other jobs). One layer covers a
@@ -196,6 +247,25 @@ evaluations instead of 8) and sparkles halve (stars outside their own radius are
 pyramid adds a half-resolution blur scissored to the lens (in the lab, lens-frost measures
 0.7 ms per whole frame against 0.5–0.6 ms for the clear lens). Every row stays within the old budgets.
 
+Fills were measured on an Apple M4 Pro (headless Metal), where the rows above run about twice as
+long as on the M5 Max (glow soft 0.21 ms, lens 0.37 ms, fire top 1.8 ms; `demo/fx/timings.md` now
+holds that run). Each fill covers a 480×280 pt rounded rect at 2× (544k px):
+
+| fill | reads | noise | backdrop | ms |
+|---|---:|---:|:-:|---:|
+| liquid metal / still (flow 0) / 8 pt border | 0 | 8 / 0 / 8 | | 0.93 / 0.22 / 0.17 |
+| mesh gradient (5 colours) | 10 | 2 | | 0.37 |
+| dither Bayer ramp / blue noise / palette over noise / backdrop | 1 / 2 / 1 / 2 | 0 / 0 / 3 / 0 | backdrop only | 0.15 / 0.15 / 0.45 / 0.16 |
+| grain gradient linear mono / conic colour | 2 | 0 | | 0.18 / 0.26 |
+| fluted glass / + frost | 3 / 6 | 0 | yes | 0.12 / 0.25 |
+| metaballs ×6 / waves (5 bands) | 12 / 5 | 0 | | 0.28 / 0.29 |
+| swirl / voronoi | 2 / 1 | 9 / 0 | | 1.05 / 1.17 |
+| halftone radial / backdrop | 0 / 4 | 0 | backdrop only | 0.31 / 0.34 |
+
+Liquid metal's cost is the flowing surface (eight noise evaluations for the height field and its
+slope); a still slab costs a quarter, and a border pays only for its band. Swirl and voronoi are
+the heaviest per pixel; keep them to cards rather than full screens.
+
 These are worst-case full-region numbers. Real layers hug their node: the gallery's 224 pt card
 with flames and embers covers about 195k px (about 0.4 ms), and a charged 196×50 button border
 about 115k px (about 0.05 ms).
@@ -216,5 +286,7 @@ reserved machine is needed for gating.
 - The frost pyramid needs one `blur_backdrop` call per frosted layer (about 10 per frame fit the
   uniform slots). The clear lens's rim blur is still an 8-tap spiral.
 - Bind groups are rebuilt every `prepare`. They should be cached per (backdrop, source) pair.
+- Fills have no inspector UI of their own: the catalog (`fill_styles()`) is the data a tool needs
+  to build one. Image input for dither and halftone needs the caller to bind the image as a source.
 - No CPU reference renderer or golden tests for the shaders yet; the CPU-table and contract tests
   live in `src/lib.rs`.
