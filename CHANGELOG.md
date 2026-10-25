@@ -40,7 +40,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   a debug build at an assertion and panic inside Taffy in a release build, closing the window.
   Every build now keeps the first sibling's key, renames each later one `key#dup1`, `key#dup2`,
   ... in tree order so it still draws, and prints the warning naming both call sites once per
-  key. Trees without duplicates are unchanged.
+  key. Duplicate row keys in a `virtualize` or `virtual_rows` list, which panicked in every
+  build, are renamed the same way. Trees without duplicates are unchanged, and checking them
+  allocates nothing.
 - **Ogg and WebM audio plays on macOS.** `Player::audio` on an Ogg Vorbis, Ogg Opus or
   WebM/Matroska Opus clip failed at once (AVFoundation can't read them). The new default
   `ogg-audio` feature decodes such a clip in pure Rust (symphonia, opuscule), streaming it to a

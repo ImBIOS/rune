@@ -2454,10 +2454,27 @@ impl<S: 'static> Measurement<'_, S> {
             let anchor = if same {
                 if pinned { None } else { v.first_visible(offset, |_| true) }
             } else {
-                let keys: Vec<_> = match &source {
+                let mut keys: Vec<_> = match &source {
                     Some(rows) => (0..rows.count).map(|i| (rows.key)(state, i).into_owned()).collect(),
                     None => el.children.iter().map(|c| c.key.clone().expect("virtual rows require stable keys")).collect(),
                 };
+                // Rows sharing a key would share a height and a node: rename the later ones, as
+                // the view's siblings are, so the list still lays out.
+                let renamed = crate::key_diagnostics::rename_duplicates(keys.iter_mut());
+                if !renamed.is_empty() {
+                    let duplicates: Vec<_> = renamed.iter().map(|(_, key)| {
+                        let key = key.clone();
+                        let message = format!("duplicate virtual row key {key:?} under {path:?}; give rows unique keys");
+                        crate::key_diagnostics::Duplicate { key, message }
+                    }).collect();
+                    if source.is_none() {
+                        for (i, _) in &renamed { el.children[*i].key = Some(keys[*i].clone()); }
+                    }
+                    match self.key_warnings.as_mut() {
+                        Some(out) => out.extend(duplicates.into_iter().map(|d| d.message)),
+                        None => crate::key_diagnostics::warn_once(&duplicates),
+                    }
+                }
                 v.set_keys(keys, self.commits, (!pinned).then_some(offset))
             };
             v.anchor = anchor;

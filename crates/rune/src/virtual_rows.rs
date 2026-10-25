@@ -374,6 +374,29 @@ mod tests {
         assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("a#dup1")), "the row lays out with the duplicate renamed");
     }
 
+    #[test]
+    fn duplicate_row_keys_are_renamed_instead_of_panicking() {
+        fn view(indexed: &bool, _: &mut Cx<bool>) -> El {
+            let rows = col().key("rows").w_full().growth(GrowthSpec::default());
+            let rows = if *indexed {
+                rows.virtual_rows(3, 40.0, |_: &bool, _| "dup".into(), |_: &bool, _| el().h(20.0))
+            } else {
+                rows.children((0..3).map(|_| el().key("dup").h(20.0))).virtualize(40.0)
+            };
+            col().key("scroll").size(200.0, 200.0).scroll(ScrollSpec { stick_bottom: false }).child(rows)
+        }
+        for indexed in [true, false] {
+            let mut rt = Runtime::new(indexed, view, (200.0, 200.0), Env::new(true, 1.0));
+            rt.key_warnings = Some(Vec::new());
+            rt.frame(0.0);
+            rt.frame(1.0);
+            let keys: Vec<_> = rt.elements().into_iter().filter_map(|e| e.key).filter(|k| k.starts_with("dup")).collect();
+            assert_eq!(keys, ["dup", "dup#dup1", "dup#dup2"], "indexed {indexed}");
+            let warnings = rt.key_warnings.as_ref().unwrap();
+            assert!(warnings.iter().any(|w| w.contains("duplicate virtual row key \"dup\" under \"scroll/rows\"")), "{warnings:?}");
+        }
+    }
+
     /// A row holding an `aspect_fit` element measures at its fitted height, so rows below it sit
     /// where the second layout pass put it.
     #[test]
