@@ -951,6 +951,26 @@ impl Scene {
                 }
             }
         }
+        // An exit nobody can see is over. Presence settles at 1e-5, ~40 frames after the node
+        // fades below one 8-bit step; retire it there so whatever waits on the unmount (focus,
+        // hit-testing, the next layer) doesn't wait on an invisible tail.
+        let mut retire = core::mem::take(&mut self.to_remove);
+        for (t, node, p) in self.store.touched_tracks() {
+            if p != prop::PRESENCE.id {
+                continue;
+            }
+            let Some(&i) = self.index.get(&node.0) else { continue };
+            let n = &self.nodes[i as usize];
+            let Phase::Exiting { generation } = n.phase else { continue };
+            if generation != n.generation || retire.contains(&i) {
+                continue;
+            }
+            let Some(&[presence, ..]) = self.store.values_of(t) else { continue };
+            if n.fx_a[0] + (n.fx_b[0] - n.fx_a[0]) * presence < 1.0 / 255.0 {
+                retire.push(i);
+            }
+        }
+        self.to_remove = retire;
         // Mark what moved; refresh the track cache from the store.
         for (tid, node, p) in self.store.touched_tracks() {
             if let Some(&i) = self.index.get(&node.0) {

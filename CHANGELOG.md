@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Exits unmount once they fade out of sight.** An exiting node used to stay mounted until its
+  presence settled at 1e-5, about 40 frames (~325 ms) after its opacity fell under one 8-bit step.
+  It now unmounts the frame its transition's opacity drops below 1/255. Things apps can notice:
+  `exited`, focus moves, hit-testing and anything waiting on an unmount happen that much sooner;
+  goldens that capture the tail of an exit can differ.
+
 - **A tap's release no longer counts as a drag move.** Letting go where the pointer already was
   used to queue a `Phase::Move` drag event, which instant-commits in most handlers: a slider tap
   sprang the knob toward the tap and then jumped the rest of the way on release. A release now

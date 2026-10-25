@@ -73,7 +73,7 @@ fn blur_replace_enters_and_exits_and_never_unmounts_visible() {
     let exited_at = exited_at.expect("exit finishes");
     // Drawn every frame until it's gone; the final presented frame is fully transparent.
     let final_frame = exit.iter().rev().find(|(t, _)| *t <= exited_at).unwrap().1;
-    assert!(final_frame.opacity <= 1e-3, "unmounted at opacity {}", final_frame.opacity);
+    assert!(final_frame.opacity < 1.0 / 255.0, "unmounted at opacity {}", final_frame.opacity);
     for (_, p) in &exit {
         assert!(p.blur <= 1.5 + 1e-3 && p.transform.scale.x >= 0.9);
         assert!(!p.in_flow, "popLayout: exiting nodes leave flow");
@@ -81,6 +81,21 @@ fn blur_replace_enters_and_exits_and_never_unmounts_visible() {
     assert!(!s.contains(id));
     // Exits run shorter than entrances.
     assert!(exited_at - 2.0 < enter_time, "exit {} vs enter {}", exited_at - 2.0, enter_time);
+}
+
+#[test]
+fn an_exit_unmounts_once_it_fades_out_of_sight() {
+    for transition in [Transition::opacity(), Transition::push(Edge::Bottom), Transition::scale(0.9)] {
+        let mut s = Scene::new();
+        let id = NodeId(4);
+        s.insert(id, spec(0.0, 0.0, 120.0, 40.0).transition(transition), Mount::Initial);
+        s.frame_at(0.0);
+        s.remove(id);
+        let (exit, exited_at) = run(&mut s, 0.0, 1.0, id);
+        let exited_at = exited_at.expect("exit finishes");
+        let unseen = exit.iter().find(|(_, p)| p.opacity < 1.0 / 255.0).expect("fades out").0;
+        assert_eq!(exited_at, unseen, "unmounts the frame it can no longer be seen");
+    }
 }
 
 fn same_look(a: &Presented, b: &Presented) {
@@ -127,7 +142,7 @@ fn a_key_that_returns_mid_exit_revives_without_a_jump() {
         same_look(&before, &after);
         let (seen, gone) = run(&mut s, t, t + 1.0, id);
         assert!(gone.is_some());
-        assert!(seen.last().unwrap().1.opacity <= 1e-3);
+        assert!(seen.last().unwrap().1.opacity < 1.0 / 255.0);
     }
 }
 
@@ -365,7 +380,7 @@ fn scale_stays_above_point_nine_unless_a_small_glyph_opts_in() {
     let (exit, exited_at) = run(&mut s, 0.0, 1.0, id);
     let exited_at = exited_at.expect("exit finishes");
     let last = exit.iter().rev().find(|(t, _)| *t <= exited_at).unwrap().1;
-    assert!(last.transform.scale.x < 0.65 && last.opacity < 1e-3, "{:?}", (last.transform.scale.x, last.opacity));
+    assert!(last.transform.scale.x < 0.65 && last.opacity < 1.0 / 255.0, "{:?}", (last.transform.scale.x, last.opacity));
 }
 
 #[test]
