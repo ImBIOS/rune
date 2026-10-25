@@ -1037,6 +1037,7 @@ fn composer_dock(s: &App, p: &Pal) -> El {
                     .key("prompt")
                     .w_full()
                     .min_h(40.0)
+                    .animate_edit_layout()
                     .placeholder("Ask anything… \"Fix a TODO in the codebase\"", p.faint)
                     .caret(p.text, p.selection)
                     .on_edit(|s: &mut App| &mut s.composer)
