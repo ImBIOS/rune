@@ -4,12 +4,19 @@
 //!
 //! A gesture moves one axis, picked by its first delta, as AppKit's predominant-axis scrolling
 //! does: mostly horizontal goes to the innermost horizontal viewport under the pointer, else to
-//! the innermost vertical one, and a diagonal never moves both.
+//! the innermost vertical one, and a diagonal never moves both. The gesture keeps that axis
+//! wherever the pointer ends up, as AppKit latches a gesture to the view it began on: one that
+//! began outside any horizontal viewport stays vertical when the content scrolls one under the
+//! pointer. Without phases (a mouse wheel), only a pause or a delta wholly on the other axis
+//! ends the lock, so Shift + wheel and then the plain wheel each scroll at once.
 use super::*;
 
 /// Seconds without a delta after which the next one starts a new gesture, where the platform
 /// reports no phases (a mouse wheel, most trackpads off macOS).
 const WHEEL_IDLE: f64 = 0.1;
+/// Seconds without a delta after which a gesture the platform began counts as over, should its
+/// end never come (the window lost the pointer or focus mid-gesture).
+const PHASED_IDLE: f64 = 1.0;
 /// A gesture that begins within this many seconds of one ending is its momentum (AppKit
 /// reports momentum as a phase of its own), so it keeps the axis.
 const MOMENTUM_GAP: f64 = 0.05;
@@ -26,6 +33,9 @@ pub(super) struct WheelLock {
     phased: bool,
     /// When the platform last ended a gesture.
     ended: Option<f64>,
+    /// The gesture is the momentum of one that ended. One that begins as momentum ends is a
+    /// new touch (a finger caught the coasting content), not more momentum.
+    momentum: bool,
 }
 
 /// A wheel event's delta in points, positive moving content right and down. With Shift, a delta
@@ -63,18 +73,21 @@ impl<S: 'static> Runtime<S> {
         if dx == 0.0 && dy == 0.0 { return; }
         let now = self.now_clock();
         let l = &mut self.wheel_lock;
-        let stale = l.ended.is_some_and(|e| now - e > MOMENTUM_GAP) || (!l.phased && l.at.is_none_or(|a| now - a > WHEEL_IDLE));
+        let idle = if l.phased { PHASED_IDLE } else { WHEEL_IDLE };
+        let stale = l.ended.is_some_and(|e| now - e > MOMENTUM_GAP) || l.at.is_none_or(|a| now - a > idle);
         if stale { *l = WheelLock::default(); }
         l.at = Some(now);
         let horizontal = match l.horizontal {
-            Some(h) => h,
-            None => {
+            // Without phases, a delta wholly on the other axis is another wheel turning (Shift
+            // let go, a tilt, a second device), so it picks afresh rather than being dropped.
+            Some(h) if l.phased || if h { dx != 0.0 } else { dy != 0.0 } => h,
+            _ => {
                 let h = dx.abs() > dy.abs() && self.scroll_at_axis(x, y, true).is_some();
                 self.wheel_lock.horizontal = Some(h);
                 h
             }
         };
-        if horizontal { self.wheel_x(x, y, dx); } else if dy != 0.0 { self.wheel(x, y, dy); }
+        if horizontal { if dx != 0.0 { self.wheel_x(x, y, dx); } } else if dy != 0.0 { self.wheel(x, y, dy); }
     }
 
     /// The platform began a trackpad gesture (winit's `TouchPhase::Started` on a wheel event):
@@ -82,15 +95,22 @@ impl<S: 'static> Runtime<S> {
     pub fn wheel_began(&mut self) {
         let now = self.now_clock();
         let l = &mut self.wheel_lock;
-        let momentum = l.horizontal.is_some() && l.ended.is_some_and(|e| now - e <= MOMENTUM_GAP);
+        let momentum = !l.momentum && l.horizontal.is_some() && l.ended.is_some_and(|e| now - e <= MOMENTUM_GAP);
         if !momentum { l.horizontal = None; }
+        l.momentum = momentum;
         l.phased = true;
         l.ended = None;
+        l.at = Some(now);
     }
 
     /// The platform ended a trackpad gesture (`TouchPhase::Ended` or `Cancelled`).
     pub fn wheel_ended(&mut self) {
         self.wheel_lock.ended = Some(self.now_clock());
+    }
+
+    /// The window lost the pointer or focus: a gesture in progress won't report its end here.
+    pub(super) fn wheel_lost(&mut self) {
+        self.wheel_lock = WheelLock::default();
     }
 
     /// Scrolls the innermost horizontal viewport at (x, y) by `dx` points, 1:1.
@@ -161,9 +181,12 @@ impl<S: 'static> Runtime<S> {
             .find(|&p| self.nodes[p].scroll.is_some() && self.nodes[p].scroll_axes.x()) else { return };
         let (row, view) = (&self.nodes[i], &self.nodes[v]);
         let (left, width, viewport) = (f64::from(row.target[0] - view.target[0]), f64::from(row.local.w), f64::from(view.local.w));
-        let margin = f64::from(view.scroll_edges.margin);
-        let Some(st) = self.scrolls.get_mut(&view.id) else { return };
-        let offset = scroll_edge::reveal(st.x.offset, left, width, viewport, margin).clamp(0.0, st.x.max);
+        let (margin, id) = (f64::from(view.scroll_edges.margin), view.id);
+        // A vertical reveal may have just mounted rows (virtual ones) that widened the content.
+        let max = self.scroll_overflow_x(v).max(0.0);
+        let Some(st) = self.scrolls.get_mut(&id) else { return };
+        st.x.max = max;
+        let offset = scroll_edge::reveal(st.x.offset, left, width, viewport, margin).clamp(0.0, max);
         if offset == st.x.offset { return; }
         st.x.offset = offset;
         st.x.v = 0.0;

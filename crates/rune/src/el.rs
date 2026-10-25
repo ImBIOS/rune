@@ -2174,8 +2174,8 @@ impl El {
     ///
     /// The content is laid out at its natural width, unwrapped as SwiftUI's
     /// `ScrollView(.horizontal)` proposes, and at least as wide as the viewport (CSS
-    /// `width: max-content; min-width: 100%`), unless it sets its own width, and never
-    /// shrinks. The viewport takes its parent's width as any element does; its height is the
+    /// `width: max-content; min-width: 100%`), and never shrinks. `w_full` content does the
+    /// same; any other width it sets stays, narrower than the viewport too. The viewport takes its parent's width as any element does; its height is the
     /// content's unless set, and the content fills a set height unless it sets its own.
     ///
     /// The wheel, a trackpad and touch move it like a vertical viewport, with Rune's own

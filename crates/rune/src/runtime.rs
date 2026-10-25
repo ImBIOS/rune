@@ -1331,6 +1331,7 @@ impl<S: 'static> Runtime<S> {
             self.queue.push(Action::WindowFocus(focused));
             if !focused { self.keys_lost(); }
         }
+        if !focused { self.wheel_lost(); }
     }
 
     /// The window gets no more keys: it lost focus or hid, which may never report a blur. The
@@ -3933,6 +3934,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub fn pointer_leave(&mut self) {
+        self.wheel_lost();
         if self.capture.is_none() && self.secondary_capture.is_none() {
             self.pointer = None;
             self.hovered = None;
@@ -5036,11 +5038,13 @@ impl<S: 'static> Runtime<S> {
                     let base = premul(color, o, srgb);
                     for q in &self.glyph_scratch {
                         if self.flights.iter().any(|f| f.lands(&n.path, n.key.as_deref())) { continue; }
-                        let (y0, y1) = if zoom == 1.0 { (q.rect[1], q.rect[1] + q.rect[3]) } else {
-                            let y0 = origin[1] + (q.rect[1] - origin[1]) * zoom;
-                            (y0, y0 + q.rect[3] * zoom)
+                        let [x0, y0] = if zoom == 1.0 { [q.rect[0], q.rect[1]] } else {
+                            std::array::from_fn(|k| origin[k] + (q.rect[k] - origin[k]) * zoom)
                         };
-                        if y0 > clip[3] || y1 < clip[1] {
+                        let (x1, y1) = (x0 + q.rect[2] * zoom, y0 + q.rect[3] * zoom);
+                        // Wholly outside the clip, a glyph draws nothing: a long line in an
+                        // `El::scroll_x` skips the glyphs scrolled out of sight.
+                        if y0 > clip[3] || y1 < clip[1] || x0 > clip[2] || x1 < clip[0] {
                             continue;
                         }
                         let (mut f, mut gm) = (base, gamma);
@@ -5408,14 +5412,18 @@ fn input_caret(n: &Node, r: [f32; 4], scale: f32, s: f32, scrolls: &mut HashMap<
     Some(([cx.round(), cy + h * 0.1, (1.5 * s * scale).round().max(1.0), h * 0.8], [cx / s, cy / s, 2.0 * scale, h / s]))
 }
 
-/// A horizontal scroll viewport's content without a width of its own takes its natural one,
-/// unwrapped, and at least the viewport's (CSS `width: max-content; min-width: 100%`), and
-/// never shrinks. The viewport lays it out as a row, where taffy measures a max-content main
-/// size unwrapped (a column measures its height wrapped at the viewport's width). With
-/// vertical scrolling too it keeps its natural height instead of stretching to the viewport's.
+/// A horizontal scroll viewport's content without a width of its own, or one filling the
+/// viewport (`w_full`), takes its natural one, unwrapped, and at least the viewport's (CSS
+/// `width: max-content; min-width: 100%`). Any other width stays as set, narrower than the
+/// viewport too. The content never shrinks. The viewport lays it out as a row, where taffy
+/// measures a max-content main size unwrapped (a column measures its height wrapped at the
+/// viewport's width). With vertical scrolling too it keeps its natural height instead of
+/// stretching to the viewport's.
 fn unwrapped_width(style: &mut Style, vertical: bool) {
-    if style.size.width.is_auto() { style.size.width = Dimension::max_content(); }
-    if style.min_size.width.is_auto() { style.min_size.width = percent(1.0); }
+    if style.size.width.is_auto() || style.size.width == Dimension::percent(1.0) {
+        style.size.width = Dimension::max_content();
+        if style.min_size.width.is_auto() { style.min_size.width = percent(1.0); }
+    }
     style.flex_shrink = 0.0;
     if vertical && style.align_self.is_none() { style.align_self = Some(AlignSelf::FLEX_START); }
 }

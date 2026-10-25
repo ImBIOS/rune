@@ -206,21 +206,23 @@ policy changes are applied in the same mutation phase.
   follows it again.
   `.scroll_edge_fade(w)` fades a viewport's top and bottom only while content is hidden under
   them (strength = hidden extent / 15 pt), and `.scroll_margin(pts)` stops revealed rows clear of it.
-- **Horizontal scrolling** (`.scroll_x()`, `.scroll_xy()`): a filmstrip, a wide code block or
-  table, a tab strip that overflows. The content (the first child) takes its natural width,
-  unwrapped, and at least the viewport's, unless it sets its own; `.scroll_xy()` also scrolls
-  vertically and needs a bounded height like `.scroll`. Each axis has its own offset, momentum
-  and clamping, and on the web its own rubber band. A wheel or trackpad gesture moves one axis,
-  picked by its first delta and held to its end (momentum included), as AppKit's predominant-axis
-  scrolling does: mostly horizontal goes to the innermost horizontal viewport under the pointer,
-  anything else to the innermost vertical one, so a vertical swipe over a filmstrip scrolls the
-  page around it and a diagonal never moves both. On the web a touch pan does the same from its
-  first 8 pt. Shift with a mouse wheel scrolls horizontally on Windows, Linux and the web; macOS
-  turns the delta itself. `tx.scroll_into_view(key)` scrolls both axes, `.scroll_edge_fade(w)`
-  fades the left and right edges, and `tx.scroll_to_x(key, x)` moves a viewport to an offset.
-  Left and Right arrows don't scroll a viewport (text fields own them), and Page Up and Page Down
-  stay vertical; AppKit scrolls an `NSScrollView` with Left and Right only when nothing focused
-  takes them. Virtual rows are vertical only. Platforms report wheels through
+- **Horizontal scrolling** (`.scroll_x()`, `.scroll_xy()`): a filmstrip, a wide code block or table,
+  a tab strip that overflows. The content (the first child) takes its natural width, unwrapped, and
+  at least the viewport's, unless it sets a width other than `w_full`; `.scroll_xy()` also scrolls
+  vertically and needs a bounded height like `.scroll`. Each axis has its own offset, momentum and
+  clamping, and on the web its own rubber band. A wheel or trackpad gesture moves one axis, picked
+  by its first delta and held to its end (momentum included), as AppKit's predominant-axis scrolling
+  does: mostly horizontal goes to the innermost horizontal viewport under the pointer, anything else
+  to the innermost vertical one, so a vertical swipe over a filmstrip scrolls the page around it and
+  a diagonal never moves both. On the web a touch pan does the same from its first 8 pt. A gesture
+  keeps its axis wherever the pointer ends up, as AppKit latches a gesture to the view it began on.
+  Without phases, a mouse wheel tick wholly on the other axis picks afresh, so Shift + wheel and
+  then the plain wheel each scroll at once. Shift with a mouse wheel scrolls horizontally on
+  Windows, Linux and the web; macOS turns the delta itself. `tx.scroll_into_view(key)` scrolls both
+  axes, `.scroll_edge_fade(w)` fades the left and right edges, and `tx.scroll_to_x(key, x)` moves a
+  viewport to an offset. Left and Right arrows don't scroll a viewport (text fields own them), and
+  Page Up and Page Down stay vertical; AppKit scrolls an `NSScrollView` with Left and Right only
+  when nothing focused takes them. Virtual rows are vertical only. Platforms report wheels through
   `Runtime::wheel_xy` with `wheel_began` and `wheel_ended` around trackpad gestures;
   `Runtime::wheel` stays the vertical path.
 - **Timeline growth** (`.growth(GrowthSpec { spring, edge })`, `growth.rs`): rows of a stack ease

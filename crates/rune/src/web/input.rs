@@ -183,10 +183,8 @@ impl<S: 'static> Running<S> {
                     TouchPhase::Ended | TouchPhase::Cancelled => {
                         if self.input.touch.as_ref().is_none_or(|t| t.id != touch.id) { return false; }
                         let t = self.input.touch.take().unwrap();
-                        if let Some(id) = t.scroll {
-                            let velocity = if t.pan && touch.phase == TouchPhase::Ended && t.at.elapsed().as_millis() < 100 { t.velocity } else { 0.0 };
-                            self.rt.web_touch_end(id, velocity);
-                        }
+                        let velocity = if t.pan && touch.phase == TouchPhase::Ended && t.at.elapsed().as_millis() < 100 { t.velocity } else { 0.0 };
+                        self.rt.web_touch_end(t.scroll, velocity);
                         if !t.pan && touch.phase == TouchPhase::Ended {
                             self.rt.pointer_down(point.0, point.1);
                             self.rt.pointer_up(point.0, point.1);

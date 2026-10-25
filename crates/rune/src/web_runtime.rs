@@ -103,13 +103,34 @@ mod tests {
         assert_eq!(rt.web_touch_pan(150.0, 50.0, true, vertical), (Some(strip), true));
         rt.web_touch_move(strip, -50.0);
         assert_eq!((rt.scrolls[&strip].x.offset, rt.scrolls[&page].offset), (50.0, 0.0));
-        rt.web_touch_end(strip, 0.0);
+        rt.web_touch_end(Some(strip), 0.0);
 
         // A vertical pan over the strip passes through to the page.
         let vertical = rt.web_touch_start(150.0, 50.0);
         assert_eq!(rt.web_touch_pan(150.0, 50.0, false, vertical), (Some(page), false));
         rt.web_touch_move(page, -30.0);
         assert_eq!((rt.scrolls[&strip].x.offset, rt.scrolls[&page].offset), (50.0, 30.0));
+        rt.web_touch_end(Some(page), 0.0);
+
+        // A touch on the strip while it springs back past its left edge holds it there, until a
+        // tap lets it go or a sideways pan carries on from where it was caught.
+        let held = |rt: &Runtime<()>| rt.web_scroll.as_ref().map(|t| (t.id, t.horizontal, t.dragging, t.origin));
+        rt.scrolls.get_mut(&strip).unwrap().x.offset = -20.0;
+        rt.web_scroll = Some(TouchScroll { id: strip, origin: 0.0, dragging: false, horizontal: true });
+        let vertical = rt.web_touch_start(150.0, 50.0);
+        assert_eq!(held(&rt), Some((strip, true, true, -20.0)), "caught, not handed to the page");
+        rt.web_touch_end(vertical, 0.0);
+        assert_eq!(held(&rt), Some((strip, true, false, -20.0)), "a tap lets it go back");
+        let vertical = rt.web_touch_start(150.0, 50.0);
+        assert_eq!(rt.web_touch_pan(150.0, 50.0, true, vertical), (Some(strip), true));
+        rt.web_touch_move(strip, 10.0);
+        assert!(rt.scrolls[&strip].x.offset < -20.0 * 0.55, "still rubber-banding: {}", rt.scrolls[&strip].x.offset);
+        rt.web_touch_end(Some(strip), 0.0);
+
+        // Caught there, a vertical pan lets the strip go and moves the page.
+        rt.web_touch_start(150.0, 50.0);
+        assert_eq!(rt.web_touch_pan(150.0, 50.0, false, vertical), (Some(page), false));
+        assert_eq!(held(&rt).map(|h| (h.0, h.1, h.2)), Some((page, false, true)));
     }
 
     #[test]
@@ -241,14 +262,25 @@ fn byte_at(text: &str, utf16: usize) -> Option<usize> {
 
 impl<S: 'static> Runtime<S> {
     /// A touch went down: it stops the momentum of the viewports under it and holds the
-    /// vertical one until the pan picks its axis (`web_touch_pan`).
+    /// vertical one until the pan picks its axis (`web_touch_pan`). A horizontal one still
+    /// settling from an earlier touch (momentum or its edge return) holds where the finger
+    /// caught it instead.
     pub(crate) fn web_touch_start(&mut self, x: f32, y: f32) -> Option<NodeId> {
-        if let Some(st) = self.scroll_at_axis(x, y, true).and_then(|id| self.scrolls.get_mut(&id)) { st.x.v = 0.0; }
+        let across = self.scroll_at_axis(x, y, true);
+        if let Some(st) = across.and_then(|id| self.scrolls.get_mut(&id)) { st.x.v = 0.0; }
+        let caught = match &mut self.web_scroll {
+            Some(t) if t.horizontal && Some(t.id) == across => {
+                t.dragging = true;
+                t.origin = self.scrolls.get(&t.id).map_or(t.origin, |st| st.x.offset);
+                true
+            }
+            _ => false,
+        };
         let id = self.scroll_at(x, y)?;
         let st = self.scrolls.get_mut(&id)?;
         st.v = 0.0;
         st.glide = None;
-        self.web_scroll = Some(TouchScroll { id, origin: st.offset, dragging: true, horizontal: false });
+        if !caught { self.web_scroll = Some(TouchScroll { id, origin: st.offset, dragging: true, horizontal: false }); }
         Some(id)
     }
 
@@ -256,10 +288,20 @@ impl<S: 'static> Runtime<S> {
     /// horizontal pan takes the innermost horizontal viewport there, and any other pan stays
     /// with the vertical one. Returns the viewport and whether it moves horizontally.
     pub(crate) fn web_touch_pan(&mut self, x: f32, y: f32, horizontal: bool, vertical: Option<NodeId>) -> (Option<NodeId>, bool) {
-        let Some(id) = self.scroll_at_axis(x, y, true).filter(|_| horizontal) else { return (vertical, false) };
-        let Some(st) = self.scrolls.get_mut(&id) else { return (vertical, false) };
-        self.web_scroll = Some(TouchScroll { id, origin: st.x.offset, dragging: true, horizontal: true });
-        (Some(id), true)
+        if let Some(id) = self.scroll_at_axis(x, y, true).filter(|_| horizontal)
+            && let Some(st) = self.scrolls.get(&id)
+        {
+            self.web_scroll = Some(TouchScroll { id, origin: st.x.offset, dragging: true, horizontal: true });
+            return (Some(id), true);
+        }
+        // A horizontal viewport the touch caught lets go, and the vertical one takes the pan.
+        if self.web_scroll.as_ref().is_some_and(|t| t.horizontal) {
+            if let Some(t) = &mut self.web_scroll { t.dragging = false; }
+            if let Some(id) = vertical && let Some(st) = self.scrolls.get(&id) {
+                self.web_scroll = Some(TouchScroll { id, origin: st.offset, dragging: true, horizontal: false });
+            }
+        }
+        (vertical, false)
     }
 
     /// The pan moved `d` points along its axis from where the touch went down.
@@ -278,12 +320,14 @@ impl<S: 'static> Runtime<S> {
         self.scroll_cancels_press(id);
     }
 
-    pub(crate) fn web_touch_end(&mut self, id: NodeId, velocity: f32) {
+    /// The touch lifted from viewport `id` (None when it held none) with `velocity` along its
+    /// axis. Whatever it held lets go, a viewport it caught without panning included.
+    pub(crate) fn web_touch_end(&mut self, id: Option<NodeId>, velocity: f32) {
         let Some(touch) = &mut self.web_scroll else { return };
-        if touch.id != id { return; }
         touch.dragging = false;
+        if Some(touch.id) != id { return; }
         let horizontal = touch.horizontal;
-        if let Some(st) = self.scrolls.get_mut(&id) { *st.axis(horizontal).1 = -velocity.clamp(-8000.0, 8000.0); }
+        if let Some(st) = self.scrolls.get_mut(&touch.id) { *st.axis(horizontal).1 = -velocity.clamp(-8000.0, 8000.0); }
     }
 
     /// Own the touched viewport's panned axis through momentum and its edge return. Other

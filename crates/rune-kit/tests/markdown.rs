@@ -518,3 +518,17 @@ fn scroll_wide_keeps_code_lines_whole_and_scrolls_them_sideways() {
     let end = code(&rt).rect;
     assert!((end[0] + end[2] + 12.0 - 480.0).abs() < 1.0, "the line's end and its padding reach the right edge: {end:?}");
 }
+
+#[test]
+fn scroll_wide_leaves_a_narrow_table_at_its_own_width() {
+    fn wide(src: &String, _: &mut Cx<String>) -> El {
+        col().w_full().child(Markdown::new(src.clone()).scroll_wide(true).build(&Kit::neutral(true)))
+    }
+    let src = "| a | b |\n|---|---|\n| 1 | 2 |\n".to_owned();
+    let plain = laid_out(&src);
+    let mut rt = Runtime::new(src, wide, (480.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let (rule, natural) = (by_key(&rt, "s0").rect, by_key(&plain, "s0").rect);
+    assert!(natural[2] < 200.0, "{natural:?}");
+    assert!((rule[2] - natural[2]).abs() < 0.5, "not stretched across the column: {rule:?} vs {natural:?}");
+}
