@@ -6,7 +6,9 @@ export async function inputSmoke(page, url) {
     assert.equal(await page.title(), 'Input proof');
     assert.equal(await page.locator('pre').count(), 0, 'window requests must not replace the app');
     const snapshot = () => page.evaluate(() => window.__inputProof);
-    const settle = () => page.waitForTimeout(60);
+    // The fixture reports from poll, before that frame drains queued keys. Wait for the
+    // host's next presented frame rather than guessing how long shader startup takes.
+    const settle = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await page.touchscreen.tap(100, 36);
     assert.equal(await page.evaluate(() => document.activeElement.tagName), 'TEXTAREA');
     await page.keyboard.insertText('hello ');
@@ -68,7 +70,7 @@ export async function inputSmoke(page, url) {
     await page.keyboard.insertText('sëcret');
     assert.equal(await password.inputValue(), '', 'the secret must not remain in the DOM');
     await settle();
-    assert.equal((await snapshot()).secretLength, 6);
+    assert.equal((await snapshot()).secretLength, 6, 'secure input reaches the model');
     await password.evaluate(field => field.dispatchEvent(new InputEvent('beforeinput', {
         inputType: 'deleteContentBackward', cancelable: true, bubbles: true,
     })));
@@ -82,7 +84,7 @@ export async function inputSmoke(page, url) {
     assert.equal(await page.evaluate(() => document.activeElement.tagName), 'CANVAS');
     await page.keyboard.press('Meta+k');
     await settle();
-    assert.equal((await snapshot()).shortcuts, 1);
+    assert.equal((await snapshot()).shortcuts, 1, 'canvas shortcuts survive the editor-to-canvas focus handoff');
     await page.keyboard.press('Shift+Tab');
     assert.equal(await page.evaluate(() => document.activeElement.type), 'password');
     await page.keyboard.press('Escape');
@@ -99,7 +101,8 @@ export async function inputSmoke(page, url) {
         const before = window.__inputProof.polls;
         const canvas = document.querySelector('canvas');
         for (let i = 0; i < 20; i++) {
-            canvas.dispatchEvent(new PointerEvent('pointermove', { pointerType: 'mouse', pointerId: 1, clientX: 100 + i, clientY: 500 }));
+            canvas.dispatchEvent(new PointerEvent('pointermove', { pointerType: 'mouse', pointerId: 1,
+                button: -1, buttons: 0, clientX: 100 + i, clientY: 500 }));
             canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: 1, clientX: 100, clientY: 500 }));
         }
         return window.__inputProof.polls - before;

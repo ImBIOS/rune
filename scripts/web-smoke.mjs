@@ -28,8 +28,8 @@ try {
         hasTouch: true, isMobile: true,
         permissions: engine === 'chromium' ? ['clipboard-read', 'clipboard-write'] : [], colorScheme: 'dark' });
     const page = await context.newPage();
-    page.on('pageerror', error => errors.push(error.message));
-    page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+    page.on('pageerror', error => { errors.push(error.message); console.log(error.message); });
+    page.on('console', message => { if (message.type() === 'error') { errors.push(message.text()); console.log(message.text()); } });
     await page.addInitScript(() => {
         // Chromium's device emulation leaves devicePixelContentBoxSize at the host DPR.
         // Exercise winit's Safari fallback (CSS content box × emulated DPR) instead.
@@ -52,6 +52,7 @@ try {
     if (engine === 'webkit' && !await page.evaluate(async () => !!(await navigator.gpu?.requestAdapter()))) {
         console.log(JSON.stringify({ engine, available: false, reason: 'Headless WebKit has no WebGPU adapter' }));
     } else {
+    if (!process.env.WEB_INPUT_ONLY) {
     await page.waitForFunction(() => window.__proof?.submits > 0, { timeout: 30000 });
     await page.waitForTimeout(1000); // Let the initial appearance finish before measuring idle.
     assert.deepEqual(await page.locator('canvas').evaluate(c => [c.width, c.height]), [1170, 2280]);
@@ -135,6 +136,7 @@ try {
     console.log(JSON.stringify({ ok: true, engine, idleSubmits: 0, idleRafs: 0, dpr: 3, sizingPath: 'Safari fallback', checks: ['WebGPU render', 'idle', 'touch focus',
         'touch momentum', 'Unicode input', 'send', 'clipboard copy', 'sliding context', 'predictive replacement',
         'composition', 'selection replacement', 'paste', 'noopener link', 'theme', 'resize'], gpuErrors }));
+    }
     await page.setViewportSize({ width: 390, height: 760 });
     await inputSmoke(page, url);
     assert.deepEqual(await page.evaluate(() => window.__proof.gpuErrors), []);

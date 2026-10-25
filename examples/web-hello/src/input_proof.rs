@@ -39,7 +39,7 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
             .on_submit(|s: &mut State, _| s.submits += 1))
         .child(field(&s.secret).key("secret").single_line().on_edit(|s: &mut State| &mut s.secret)
             .on_submit(|s: &mut State, _| s.submits += 1))
-        .child(el().key("button").w_full().h(48.0).child(text("Button"))
+        .child(el().key("button").focusable(true).w_full().h(48.0).child(text("Button"))
             .on_press(|s: &mut State| s.submits += 1))
 }
 

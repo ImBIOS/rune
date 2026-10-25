@@ -234,7 +234,10 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let running = self.running.borrow();
+        // A synchronous textarea callback can focus the canvas, causing winit to finish
+        // a nested focus turn here. That callback requests a redraw when it releases
+        // Running; compute deadlines in that turn rather than reborrowing it now.
+        let Ok(running) = self.running.try_borrow() else { return };
         let Some(r) = &*running else { return };
         event_loop.set_control_flow(match r.rt.wake_deadline() {
             Some(deadline) if deadline <= r.rt.wall_start.unwrap().elapsed().as_secs_f64() => {
