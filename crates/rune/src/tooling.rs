@@ -1575,21 +1575,23 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let mut sorted = cpu_ms.clone();
     #[cfg(feature = "frame-profile")]
     {
+        const P: usize = crate::frame_profile::PHASES;
         let rows = &profile[usize::from(profile.len() > 1)..];
         let n = rows.len() as f64;
-        let avg = |f: fn(&([f64; 10], f64, f64, u64, u64, u32, bool, Option<f64>)) -> f64| rows.iter().map(f).sum::<f64>() / n;
+        let avg = |f: fn(&([f64; 2 * P], f64, f64, u64, u64, u32, bool, Option<f64>)) -> f64| rows.iter().map(f).sum::<f64>() / n;
         eprintln!("rune-frame-profile {}", json!({
             "view_ms": avg(|r| r.0[0]), "commit_inclusive_ms": avg(|r| r.0[1]),
             "layout_inclusive_ms": avg(|r| r.0[2]), "shape_ms": avg(|r| r.0[3]),
-            "paint_ms": avg(|r| r.0[4]), "update_ms": avg(|r| r.1), "encode_submit_ms": avg(|r| r.2),
+            "paint_ms": avg(|r| r.0[4]), "apply_ms": avg(|r| r.0[5]), "update_ms": avg(|r| r.1), "encode_submit_ms": avg(|r| r.2),
             "allocations": avg(|r| r.3 as f64), "commits": avg(|r| r.4 as f64),
             "shaped": avg(|r| r.5 as f64), "animating_fraction": avg(|r| u8::from(r.6) as f64),
             "thread_cpu_ms": rows[0].7.map(|_| avg(|r| r.7.unwrap())),
-            "view_cpu_ms": rows[0].7.map(|_| avg(|r| r.0[5])),
-            "commit_cpu_ms": rows[0].7.map(|_| avg(|r| r.0[6])),
-            "layout_cpu_ms": rows[0].7.map(|_| avg(|r| r.0[7])),
-            "shape_cpu_ms": rows[0].7.map(|_| avg(|r| r.0[8])),
-            "paint_cpu_ms": rows[0].7.map(|_| avg(|r| r.0[9])),
+            "view_cpu_ms": rows[0].7.map(|_| avg(|r| r.0[P])),
+            "commit_cpu_ms": rows[0].7.map(|_| avg(|r| r.0[P + 1])),
+            "layout_cpu_ms": rows[0].7.map(|_| avg(|r| r.0[P + 2])),
+            "shape_cpu_ms": rows[0].7.map(|_| avg(|r| r.0[P + 3])),
+            "paint_cpu_ms": rows[0].7.map(|_| avg(|r| r.0[P + 4])),
+            "apply_cpu_ms": rows[0].7.map(|_| avg(|r| r.0[P + 5])),
         }));
     }
     let steady: Vec<f64> = cpu_ms.iter().skip(1).copied().collect();

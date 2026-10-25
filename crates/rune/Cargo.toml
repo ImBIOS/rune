@@ -107,6 +107,10 @@ serde = "1"
 [target.'cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))'.dependencies]
 wgpu = { version = "30", default-features = false, features = ["vulkan", "dx12"] }
 
+[[example]]
+name = "tree_swap"
+required-features = ["frame-profile"]
+
 [[test]]
 name = "macos_appearance_kvo"
 harness = false

@@ -2940,6 +2940,7 @@ impl<S: 'static> Runtime<S> {
 
     /// The mutation phase cannot accept an El or an unfinished measurement pass.
     fn apply(&mut self, measured: Measured, tx: &Tx) {
+        let _apply_time = crate::frame_profile::Scope::new(crate::frame_profile::Phase::Apply);
         let Measured { layout: taffy, mut nodes, reduced_motion, time_scale, caret_read, .. } = measured;
         self.caret_watch = caret_read;
         if reduced_motion != self.reduced_motion {

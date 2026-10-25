@@ -1,15 +1,19 @@
 //! Opt-in headless phase timings. No clocks or allocator hooks in ordinary builds.
 //! Commit and Layout include their nested phases; these overlapping times must not be summed.
 #[derive(Clone, Copy)]
-pub(crate) enum Phase { View, Commit, Layout, Text, Paint }
+pub(crate) enum Phase { View, Commit, Layout, Text, Paint, Apply }
+
+/// Phases timed, each with a wall and a CPU column.
+#[cfg_attr(not(feature = "frame-profile"), allow(dead_code))]
+pub const PHASES: usize = 6;
 
 #[cfg(feature = "frame-profile")]
 mod enabled {
-    use super::Phase;
+    use super::{PHASES, Phase};
     use std::{cell::Cell, time::Instant};
 
     thread_local! {
-        static TIMES: Cell<[f64; 10]> = const { Cell::new([0.0; 10]) };
+        static TIMES: Cell<[f64; 2 * PHASES]> = const { Cell::new([0.0; 2 * PHASES]) };
     }
 
     /// CPU consumed by this thread, excluding time the scheduler runs other work.
@@ -49,16 +53,25 @@ mod enabled {
             TIMES.with(|times| {
                 let mut row = times.get();
                 row[self.0 as usize] += self.1.elapsed().as_secs_f64() * 1000.0;
-                if let Some(start) = self.2 { row[self.0 as usize + 5] += cpu_ms().unwrap() - start; }
+                if let Some(start) = self.2 { row[self.0 as usize + PHASES] += cpu_ms().unwrap() - start; }
                 times.set(row);
             });
         }
     }
-    pub(crate) fn take() -> [f64; 10] { TIMES.replace([0.0; 10]) }
+    pub(crate) fn take() -> [f64; 2 * PHASES] { TIMES.replace([0.0; 2 * PHASES]) }
 }
 
 #[cfg(feature = "frame-profile")]
 pub(crate) use enabled::{Scope, cpu_ms, take};
+
+/// Wall then CPU milliseconds per phase (view, commit, layout, text, paint, apply) on this thread
+/// since the last call, for benches that drive a `Runtime` themselves.
+#[cfg(feature = "frame-profile")]
+pub fn take_frame_phases() -> [f64; 2 * PHASES] { take() }
+
+/// This thread's CPU clock in milliseconds.
+#[cfg(feature = "frame-profile")]
+pub fn thread_cpu_ms() -> f64 { cpu_ms().unwrap_or(0.0) }
 
 #[cfg(not(feature = "frame-profile"))]
 pub(crate) struct Scope;

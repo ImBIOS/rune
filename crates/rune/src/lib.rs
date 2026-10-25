@@ -119,6 +119,9 @@ mod virtual_desktop;
 mod desktop;
 mod flight;
 mod frame_profile;
+#[cfg(feature = "frame-profile")]
+#[doc(hidden)]
+pub use frame_profile::{PHASES, take_frame_phases, thread_cpu_ms};
 pub mod file_dialog;
 pub mod text;
 pub mod theme;
