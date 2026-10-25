@@ -95,6 +95,12 @@ impl Chrome {
         let (x, y) = self.traffic_lights.unwrap_or((7.0, 6.0));
         Some(std::array::from_fn(|i| [x + i as f32 * Self::TRAFFIC_PITCH, y, Self::TRAFFIC_LIGHT, Self::TRAFFIC_LIGHT]))
     }
+
+    /// The trailing edge of [`Chrome::traffic_light_rects`]' zoom button, or 0 without them:
+    /// what [`Cx::titlebar_inset`](crate::Cx::titlebar_inset) reports in a headless run.
+    pub fn titlebar_inset(&self) -> f32 {
+        self.traffic_light_rects().map_or(0.0, |r| r[2][0] + r[2][2])
+    }
 }
 
 impl Default for Chrome {
@@ -1268,6 +1274,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let mut rt = runtime_for(&spec, state, size, Env::new(dark, scale), std::sync::Arc::new(|| {}));
     #[cfg(all(feature = "dev", debug_assertions))]
     if let Some(dev) = dev { crate::dev::launch(&mut rt, &spec, dev, std::sync::Arc::new(|| {})); }
+    rt.set_titlebar_inset(chrome.titlebar_inset());
     rt.on_focus = on_focus;
     rt.transparent = transparent;
     rt.fit_height = fit_height;

@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Cx::titlebar_inset()` says where the traffic lights end.** It is the zoom button's
+  trailing edge in window points, for a top bar's leading inset, and 0 when no buttons sit over
+  the content: in full screen, in a titled window whose content starts below its titlebar, and
+  off macOS. macOS windows update it on resize and when full screen starts or ends, and the
+  view re-runs. Headless runs report `Chrome::titlebar_inset()` (67 pt for AppKit's default
+  placement), and `Runtime::set_titlebar_inset` sets it in tests.
 - **A modal whose field opens focused returns focus to what had it.** Opening a `.modal(..)`
   in the same update that set its `text_input`'s `edit.focused` recorded the field as the place
   focus returns to, so closing the modal left nothing focused. It now records what had focus

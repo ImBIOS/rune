@@ -173,6 +173,7 @@ pub fn commit_generation() -> u64 {
 /// Passed to view functions: the environment, plus runtime settings a view may declare.
 pub struct Cx<S> {
     env: Env,
+    titlebar_inset: f32,
     system_reduced_motion: bool,
     reduced_motion: bool,
     time_scale: f32,
@@ -187,7 +188,7 @@ impl<S> Cx<S> {
     #[cfg(feature = "hot")]
     pub(crate) fn retype<T>(&self) -> Cx<T> {
         Cx {
-            env: self.env, system_reduced_motion: self.system_reduced_motion,
+            env: self.env, titlebar_inset: self.titlebar_inset, system_reduced_motion: self.system_reduced_motion,
             reduced_motion: self.reduced_motion, time_scale: self.time_scale,
             caret: self.caret.clone(), caret_read: self.caret_read.clone(),
             layout: self.layout.clone(), layout_reads: self.layout_reads.clone(), _s: PhantomData,
@@ -207,6 +208,15 @@ impl<S> Cx<S> {
     }
     pub fn system_dark(&self) -> bool {
         self.env.system_dark
+    }
+    /// Points from the window's leading edge to the trailing edge of the macOS traffic lights
+    /// drawn over the content, for a top bar's leading inset: 0 when nothing is drawn there (full
+    /// screen, a titled window whose content starts below its titlebar, other platforms). The
+    /// view re-runs when it changes, as entering and leaving full screen do. Headless runs report
+    /// [`Chrome::titlebar_inset`](crate::Chrome::titlebar_inset). A `memo` closure that reads
+    /// it needs it in its version.
+    pub fn titlebar_inset(&self) -> f32 {
+        self.titlebar_inset
     }
     /// The host's OS accessibility preference, independent of this commit's override.
     pub fn system_reduced_motion(&self) -> bool {
@@ -554,6 +564,7 @@ pub struct Runtime<S: 'static> {
     pub t: f64,
     pub reduced_motion: bool,
     system_reduced_motion: bool,
+    titlebar_inset: f32,
     pub time_scale: f32,
     /// Called at the start of every frame with the clock; return true when state changed (new data).
     pub poll: Option<fn(&mut S, f64, &mut Tx) -> bool>,
@@ -856,6 +867,7 @@ impl<S: 'static> Runtime<S> {
             t: 0.0,
             reduced_motion: false,
             system_reduced_motion: false,
+            titlebar_inset: 0.0,
             time_scale: 1.0,
             poll: None,
             clock: 0.0,
@@ -1182,6 +1194,15 @@ impl<S: 'static> Runtime<S> {
     pub fn set_system_dark(&mut self, dark: bool) {
         if dark != self.env.system_dark {
             self.env.system_dark = dark;
+            self.dirty = true;
+        }
+    }
+
+    /// What [`Cx::titlebar_inset`] reports. Native macOS windows set it from AppKit's buttons on
+    /// every resize, full screen included; a change re-runs the view.
+    pub fn set_titlebar_inset(&mut self, points: f32) {
+        if points != self.titlebar_inset {
+            self.titlebar_inset = points;
             self.dirty = true;
         }
     }
@@ -2308,6 +2329,7 @@ struct Measurement<'a, S> {
     viewport: (f32, f32),
     fit_height: bool,
     system_reduced_motion: bool,
+    titlebar_inset: f32,
     reduced_motion: bool,
     time_scale: f32,
     commits: u64,
@@ -2542,6 +2564,7 @@ impl<S: 'static> Measurement<'_, S> {
         let scale = self.env.scale;
         let fresh_cx = |this: &Self| Cx::<S> {
             env: this.env,
+            titlebar_inset: this.titlebar_inset,
             system_reduced_motion: this.system_reduced_motion,
             reduced_motion: this.system_reduced_motion,
             time_scale: this.time_scale,
@@ -2783,6 +2806,7 @@ impl<S: 'static> Runtime<S> {
             viewport: self.viewport,
             fit_height: self.fit_height,
             system_reduced_motion: self.system_reduced_motion,
+            titlebar_inset: self.titlebar_inset,
             reduced_motion: self.reduced_motion,
             time_scale: self.time_scale,
             caret: self.caret.clone(),
@@ -6488,6 +6512,27 @@ mod tests {
         rt.pointer_up(x, y);
         rt.frame(1.0 / 120.0);
         assert_eq!(rt.state.pressed, [5]);
+    }
+
+    #[test]
+    fn a_titlebar_inset_change_rebuilds_the_view() {
+        fn view(_: &(), cx: &mut Cx<()>) -> El {
+            crate::row().size(300.0, 40.0).child(el().key("leading").w(cx.titlebar_inset())).child(el().key("title").size(50.0, 20.0))
+        }
+        let x = |rt: &Runtime<()>| rt.presented("title").unwrap().0[0];
+        let mut rt = Runtime::new((), view, (300.0, 40.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert_eq!(x(&rt), 0.0, "no traffic lights by default");
+        rt.set_titlebar_inset(crate::Chrome::DEFAULT.titlebar_inset());
+        rt.frame(0.1);
+        rt.frame(5.0);
+        assert_eq!(x(&rt), 67.0, "AppKit's default lights end at 7 + 2 × 23 + 14");
+        rt.set_titlebar_inset(0.0);
+        rt.frame(5.1);
+        rt.frame(10.0);
+        assert_eq!(x(&rt), 0.0, "full screen hides them");
+        let titled = crate::Chrome { full_size_content: false, ..crate::Chrome::DEFAULT };
+        assert_eq!(titled.titlebar_inset(), 0.0);
     }
 
     #[test]

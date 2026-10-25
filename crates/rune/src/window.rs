@@ -58,6 +58,9 @@ struct Win {
     alpha: Option<crate::surface_alpha::AlphaSurface>,
     #[cfg(target_os = "macos")]
     help: crate::macos_help::NativeHelp,
+    #[cfg(target_os = "macos")]
+    /// Kept for its observers, which redraw on full screen changes.
+    _full_screen: mac::FullScreenWatch,
     /// Fn presses, which winit doesn't send, while the app wants modifier keys.
     #[cfg(target_os = "macos")]
     fn_key: Option<crate::fn_key::FnKey>,
@@ -1389,6 +1392,63 @@ mod mac {
         }
     }
 
+    /// Redraws the window as it enters and leaves full screen, so the redraw can read the new
+    /// `titlebar_inset`: winit sends no event for either, and its resizes can arrive before
+    /// AppKit updates the style mask.
+    pub struct FullScreenWatch(Vec<objc2::rc::Retained<objc2_foundation::NSObject>>);
+
+    impl FullScreenWatch {
+        pub fn new(window: &Window) -> Self {
+            use objc2::rc::{Retained, Weak};
+            use objc2_foundation::NSObject;
+            let (Some(win), Some(view)) = (ns_window(window), content_view(window)) else { return Self(Vec::new()) };
+            let Some(center) = AnyClass::get("NSNotificationCenter") else { return Self(Vec::new()) };
+            let weak = Weak::from_retained(&view);
+            let block = block2::RcBlock::new(move |_: *mut AnyObject| {
+                if let Some(view) = weak.load() { unsafe { view.setNeedsDisplay(true) }; }
+            });
+            let names = ["NSWindowDidEnterFullScreenNotification", "NSWindowDidExitFullScreenNotification"];
+            // SAFETY: main thread; the block outlives the observers, which `Drop` removes.
+            Self(names.into_iter().filter_map(|name| unsafe {
+                let center: Retained<AnyObject> = objc2::msg_send_id![center, defaultCenter];
+                let name = NSString::from_str(name);
+                let token: Option<Retained<NSObject>> = objc2::msg_send_id![&*center, addObserverForName: &*name, object: &*win,
+                    queue: std::ptr::null::<AnyObject>(), usingBlock: &*block];
+                token
+            }).collect())
+        }
+    }
+
+    impl Drop for FullScreenWatch {
+        fn drop(&mut self) {
+            let Some(center) = AnyClass::get("NSNotificationCenter") else { return };
+            for token in &self.0 {
+                // SAFETY: removes an observer this watch added.
+                unsafe {
+                    let center: objc2::rc::Retained<AnyObject> = objc2::msg_send_id![center, defaultCenter];
+                    let _: () = msg_send![&*center, removeObserver: &**token];
+                }
+            }
+        }
+    }
+
+    /// The zoom button's trailing edge in window points, or 0 when the buttons don't sit over
+    /// the content: full screen, a standard titlebar, or hidden buttons.
+    pub fn titlebar_inset(window: &Window) -> f32 {
+        let Some(win) = ns_window(window) else { return 0.0 };
+        let mask = win.styleMask();
+        if mask.contains(NSWindowStyleMask::FullScreen) || !mask.contains(NSWindowStyleMask::FullSizeContentView) {
+            return 0.0;
+        }
+        let Some(zoom) = win.standardWindowButton(NSWindowButton::NSWindowZoomButton) else { return 0.0 };
+        // SAFETY: AppKit's own button, on the main thread.
+        let r = unsafe {
+            if zoom.isHiddenOrHasHiddenAncestor() { return 0.0; }
+            zoom.convertRect_toView(zoom.bounds(), None)
+        };
+        (r.origin.x + r.size.width) as f32
+    }
+
     pub fn double_click_interval() -> f64 {
         unsafe { NSEvent::doubleClickInterval() }
     }
@@ -1405,12 +1465,20 @@ mod mac {
     }
 }
 
-fn place_chrome(window: &Window, chrome: Chrome) {
+/// Places the traffic lights and returns `Cx::titlebar_inset`.
+fn place_chrome(window: &Window, chrome: Chrome) -> f32 {
     #[cfg(target_os = "macos")]
-    if let Some(p) = chrome.traffic_lights {
-        mac::place_traffic_lights(window, p);
+    {
+        if let Some(p) = chrome.traffic_lights {
+            mac::place_traffic_lights(window, p);
+        }
+        mac::titlebar_inset(window)
     }
-    let _ = (window, chrome);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, chrome);
+        0.0
+    }
 }
 
 fn titlebar_double_click(window: &Window) {
@@ -1646,7 +1714,7 @@ impl<S: 'static> Host<S> {
             crate::macos::set_window_frame(&w.window, rect);
             self.frame_origin = Some([rect[0], rect[1]]);
             if anim.done(now) { self.frame_anim = None; }
-            place_chrome(&w.window, self.chrome);
+            self.rt.set_titlebar_inset(place_chrome(&w.window, self.chrome));
             let size = w.window.inner_size();
             w.resize_surface(&gpu.device, size);
             let scale = w.window.scale_factor() as f32;
@@ -2061,7 +2129,7 @@ impl<S: 'static> Host<S> {
         if uses_drag_regions(chrome, self.options.borderless, false) {
             mac::own_window_dragging(&window);
         }
-        place_chrome(&window, chrome);
+        self.rt.set_titlebar_inset(place_chrome(&window, chrome));
         #[cfg(target_os = "macos")]
         {
             self.rt.double_click_interval = mac::double_click_interval();
@@ -2152,6 +2220,8 @@ impl<S: 'static> Host<S> {
         if self.present_log.is_some() && present.is_none() { eprintln!("rune: trace: this surface reports no present times"); }
         #[cfg(target_os = "macos")]
         let fn_key = if self.rt.modifier_keys() { crate::fn_key::FnKey::new(&window) } else { None };
+        #[cfg(target_os = "macos")]
+        let full_screen = mac::FullScreenWatch::new(&window);
         self.win = Some(Win {
             first_frame: FirstFrame::default(),
             #[cfg(target_os = "macos")]
@@ -2177,6 +2247,8 @@ impl<S: 'static> Host<S> {
             alpha,
             #[cfg(target_os = "macos")]
             help: Default::default(),
+            #[cfg(target_os = "macos")]
+            _full_screen: full_screen,
             #[cfg(target_os = "macos")]
             fn_key,
         });
@@ -2674,6 +2746,8 @@ impl<S: 'static> Host<S> {
                 return;
             }
             WindowEvent::RedrawRequested => {
+                #[cfg(target_os = "macos")]
+                if let Some(l) = &self.win { self.rt.set_titlebar_inset(mac::titlebar_inset(&l.window)); }
                 self.redraw();
                 self.shell(event_loop);
                 return;
@@ -2694,7 +2768,7 @@ impl<S: 'static> Host<S> {
         let chrome = self.chrome;
         match event {
             WindowEvent::Resized(size) => {
-                place_chrome(&l.window, chrome);
+                rt.set_titlebar_inset(place_chrome(&l.window, chrome));
                 rt.set_live_visible(l.visible && !l.occluded && size.width > 0 && size.height > 0 && !l.window.is_minimized().unwrap_or(false));
                 if size.width == 0 || size.height == 0 {
                     self.secure_input.set(false);
@@ -2712,7 +2786,7 @@ impl<S: 'static> Host<S> {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 let size = l.window.inner_size();
                 rt.set_viewport((size.width as f32 / scale_factor as f32, size.height as f32 / scale_factor as f32), scale_factor as f32);
-                place_chrome(&l.window, chrome);
+                rt.set_titlebar_inset(place_chrome(&l.window, chrome));
                 l.window.request_redraw();
             }
             WindowEvent::Occluded(occluded) => {
@@ -2728,7 +2802,7 @@ impl<S: 'static> Host<S> {
                     l.stop_pacing();
                     self.idle = true; return;
                 }
-                place_chrome(&l.window, chrome);
+                rt.set_titlebar_inset(place_chrome(&l.window, chrome));
                 // A window opened while the displays slept has no display link yet.
                 #[cfg(target_os = "macos")]
                 if l.pacing.is_none() { l.pacing = crate::display_link::DisplayLink::new(&l.window, self.frame_wake.clone()); }
@@ -2752,7 +2826,7 @@ impl<S: 'static> Host<S> {
                 rt.set_system_reduced_motion(crate::preferences::reduced_motion());
                 rt.set_full_keyboard_access(crate::preferences::full_keyboard_access());
                 self.secure_input.set(focused && l.visible && !l.occluded && rt.has_secure_focus());
-                place_chrome(&l.window, chrome);
+                rt.set_titlebar_inset(place_chrome(&l.window, chrome));
                 if !focused {
                     rt.cancel_composition();
                     l.window.set_ime_allowed(false);
