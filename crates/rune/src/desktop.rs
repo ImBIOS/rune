@@ -70,6 +70,12 @@ pub(crate) trait Member {
     fn find(&self, key: &str) -> Option<(f32, f32)>;
     fn pointer(&self) -> Option<(f32, f32)>;
     fn shortcut(&self, shortcut: &crate::Shortcut) -> Result<(), crate::ShortcutError>;
+    /// How reopening the app sees it.
+    fn reopen_candidate(&self) -> crate::reopen::Candidate;
+    /// Runs `App::on_reopen`; true when it handled the reopen.
+    fn reopen_hook(&mut self, has_visible_windows: bool) -> bool;
+    /// Shows it in front with the keyboard, as the default reopen.
+    fn reopen(&mut self) -> Changes;
     fn menu(&self, item: &str) -> Result<(), crate::MenuError>;
     fn popup_open(&self) -> bool;
     fn resolve_popup(&mut self, picked: Option<&str>) -> Result<(), crate::PopupMenuError>;
@@ -91,8 +97,15 @@ pub(crate) struct Window<S: 'static> {
     comp: Option<Box<dyn crate::compose::Compositor<S>>>,
     renderer: Option<Renderer>,
     on_close: Option<fn(&mut S, &mut crate::Tx)>,
+    on_reopen: Option<fn(&mut S, bool, &mut crate::Tx) -> bool>,
     keep_running: bool,
     launcher: bool,
+    /// A nonactivating panel, launcher or not: reopening never brings it back.
+    panel: bool,
+    /// The app's own window, not one `App::window` added.
+    main: bool,
+    /// When it last hid, in `reopen::stamp` order.
+    hidden_at: Option<u64>,
     shadow: bool,
     click_through: bool,
     on_top: bool,
@@ -108,7 +121,7 @@ pub(crate) struct Window<S: 'static> {
 }
 
 impl<S: 'static> Window<S> {
-    pub(crate) fn new(spec: WindowSpec<S>, handle: Option<WindowHandle>, args: &Args, selected: bool, scale: f32) -> Self {
+    pub(crate) fn new(spec: WindowSpec<S>, handle: Option<WindowHandle>, args: &Args, selected: bool, main: bool, scale: f32) -> Self {
         let WindowSpec { key, mut app, options, .. } = spec;
         // --size is the whole output here; each window keeps its own size.
         let mut inherited = args.clone();
@@ -116,7 +129,7 @@ impl<S: 'static> Window<S> {
         if !selected { inherited.scene = None; }
         let own = app.resolve_args(inherited);
         let comp = app.compositor.take();
-        let (open, keep_running, on_close, on_focus) = (app.open, app.keep_running, app.on_close, app.on_focus);
+        let (open, keep_running, on_close, on_focus, on_reopen) = (app.open, app.keep_running, app.on_close, app.on_focus, app.on_reopen);
         let native = std::mem::take(&mut app.macos_window);
         let modifier_keys = app.modifier_keys;
         let tab_visits_controls = app.tab_visits_controls;
@@ -139,8 +152,11 @@ impl<S: 'static> Window<S> {
         shared.visible.store(visible, Ordering::Release);
         let decorated = !options.borderless && !options.transparent;
         Window {
-            key, rt, shared, shortcuts, menus, handle, comp, renderer: None, on_close, keep_running,
+            key, rt, shared, shortcuts, menus, handle, comp, renderer: None, on_close, on_reopen, keep_running,
             launcher: native.launcher,
+            panel: native.nonactivating_panel,
+            main,
+            hidden_at: None,
             shadow: native.shadow != Some(false),
             click_through: options.click_through,
             on_top: options.always_on_top,
@@ -188,6 +204,7 @@ impl<S: 'static> Window<S> {
 
     fn hide(&mut self) {
         if !self.visible { return; }
+        self.hidden_at = Some(crate::reopen::stamp());
         self.rt.cancel_popups();
         self.rt.cancel_pointer();
         self.set_visible(false);
@@ -309,7 +326,7 @@ impl<S: 'static> Member for Window<S> {
             Kind::Wheel(dx, dy) => crate::tooling::wheel(rt, (x, y), *dx, *dy),
             Kind::Fling(vx, vy) => crate::tooling::fling(rt, (x, y), *vx, *vy),
             Kind::Files(step) => crate::tooling::file_input(rt, step, (x, y)),
-            Kind::Mark(_) | Kind::Menu(_) | Kind::PopupMenu(_) | Kind::Shortcut(_) => {}
+            Kind::Mark(_) | Kind::Reopen | Kind::Menu(_) | Kind::PopupMenu(_) | Kind::Shortcut(_) => {}
         }
     }
 
@@ -317,6 +334,30 @@ impl<S: 'static> Member for Window<S> {
     fn find(&self, key: &str) -> Option<(f32, f32)> { self.rt.find(key) }
     fn pointer(&self) -> Option<(f32, f32)> { self.rt.pointer() }
     fn shortcut(&self, shortcut: &crate::Shortcut) -> Result<(), crate::ShortcutError> { self.shared.shortcuts.fire(shortcut) }
+
+    fn reopen_candidate(&self) -> crate::reopen::Candidate {
+        crate::reopen::Candidate {
+            reopenable: !self.finished && !self.panel,
+            visible: self.visible,
+            // A headless desktop has no Dock to minimize into.
+            minimized: false,
+            hidden_at: self.hidden_at,
+            main: self.main,
+        }
+    }
+
+    fn reopen_hook(&mut self, has_visible_windows: bool) -> bool {
+        let Some(f) = self.on_reopen.filter(|_| !self.finished) else { return false };
+        let mut handled = false;
+        self.rt.update(|s, tx| handled = f(s, has_visible_windows, tx));
+        handled
+    }
+
+    fn reopen(&mut self) -> Changes {
+        let mut changes = Changes::default();
+        self.request(WindowRequest::Open(None), &mut changes);
+        changes
+    }
     fn menu(&self, item: &str) -> Result<(), crate::MenuError> { crate::native_menu::fire(&self.shared, item) }
     fn popup_open(&self) -> bool { self.rt.popup_menu().is_some() }
     fn resolve_popup(&mut self, picked: Option<&str>) -> Result<(), crate::PopupMenuError> { self.rt.resolve_popup(picked) }
@@ -521,6 +562,21 @@ impl Desk {
         }
     }
 
+    /// The app reopened: every window's `on_reopen` runs, then, unless one handled it or the app
+    /// is an accessory, the default shows a window when none does (`reopen::target`) and
+    /// activates the app with it in front.
+    fn reopen(&mut self, accessory: bool) {
+        let candidates: Vec<_> = self.members.iter().map(|m| m.reopen_candidate()).collect();
+        let has_visible = crate::reopen::has_visible(&candidates);
+        let mut handled = false;
+        for m in &mut self.members { handled |= m.reopen_hook(has_visible); }
+        if handled || accessory { return; }
+        if let Some(i) = crate::reopen::target(&candidates) {
+            let changes = self.members[i].reopen();
+            self.apply(i, changes);
+        }
+    }
+
     /// Window `i`'s frame in output points, whether it shows, and whether it has the keyboard
     /// (never while another app is active).
     fn state(&self, i: usize) -> ([f32; 4], bool, bool) {
@@ -537,7 +593,8 @@ impl Desk {
 
 /// Renders `windows` composited over the `--desktop` backdrop. `selected` is the window
 /// `--scene`, `--tree` and `--trace` describe.
-pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args) {
+/// `accessory` is `RunOptions::accessory`: reopening brings back no window.
+pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, accessory: bool) {
     let launched = Instant::now();
     let backdrop = args.desktop.clone().expect("--desktop");
     if args.list_scenes { die("--list-scenes lists one window's scenes; drop --desktop"); }
@@ -662,6 +719,7 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args) {
             match &e.kind {
                 Kind::Mark(_) => {}
                 Kind::Focus(focused) => desk.focus(desk.key, *focused),
+                Kind::Reopen => desk.reopen(accessory),
                 Kind::Shortcut(shortcut) => fire(&desk, |m| m.shortcut(shortcut)).unwrap_or_else(|e| die(&format!("script shortcut: {e}"))),
                 Kind::Menu(item) => fire(&desk, |m| m.menu(item)).unwrap_or_else(|e| die(&format!("script menu: {e}"))),
                 Kind::PopupMenu(picked) => {
@@ -1167,7 +1225,7 @@ mod tests {
         let window = |tab: bool, borderless: bool| {
             let spec = WindowSpec::new("w", AppSpec::new("W", (300.0, 100.0), || (), view)).tab_visits_controls(tab);
             let spec = WindowSpec { options: crate::WindowOptions { borderless, ..Default::default() }, ..spec };
-            let mut w = Window::new(spec, None, &Args::default(), true, 1.0);
+            let mut w = Window::new(spec, None, &Args::default(), true, true, 1.0);
             w.rt.frame(0.0);
             w.rt.set_full_keyboard_access(false);
             w.rt.key(KeyEvent { key: Key::Tab, mods: Default::default() });

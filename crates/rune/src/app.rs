@@ -48,6 +48,7 @@ pub struct App<S: 'static> {
     pub(crate) keep_running: bool,
     pub(crate) on_close: Option<fn(&mut S, &mut Tx)>,
     pub(crate) on_focus: Option<fn(&mut S, bool, &mut Tx)>,
+    pub(crate) on_reopen: Option<fn(&mut S, bool, &mut Tx) -> bool>,
     pub(crate) shared: Arc<Shared<S>>,
     pub(crate) overlays: Vec<Box<dyn crate::overlay::PendingOverlay>>,
     pub(crate) windows: Vec<crate::AnyWindowSpec>,
@@ -83,6 +84,7 @@ impl<S: 'static> App<S> {
             keep_running: false,
             on_close: None,
             on_focus: None,
+            on_reopen: None,
             shared,
             overlays: Vec::new(),
             windows: Vec::new(),
@@ -260,6 +262,22 @@ impl<S: 'static> App<S> {
     /// Its `Tx::quit` quits.
     pub fn on_close(mut self, f: fn(&mut S, &mut Tx)) -> Self {
         self.on_close = Some(f);
+        self
+    }
+
+    /// macOS: runs on the main thread when the app is reopened while it runs: its Dock icon
+    /// clicked, or opened again from Finder, Spotlight or `open`, also in an accessory app.
+    /// `has_visible_windows` says whether any Rune window that reopening could bring back is on
+    /// screen and not minimized (launcher panels and overlays don't count). Return true when the
+    /// hook handled it, which skips Rune's default; false lets the default run. When no
+    /// such window shows, the default shows and activates a minimized window, else the window Rune
+    /// hid last (closed with `keep_running`, or hidden), else the main window. It never brings
+    /// back a launcher or other nonactivating panel, a window that closed for good, or anything
+    /// in an accessory app. With several windows, every window's hook runs, in window order,
+    /// and any true skips the default. Never called on other platforms. Headless scripts
+    /// deliver it with `{"reopen": true}`.
+    pub fn on_reopen(mut self, f: fn(&mut S, bool, &mut Tx) -> bool) -> Self {
+        self.on_reopen = Some(f);
         self
     }
 

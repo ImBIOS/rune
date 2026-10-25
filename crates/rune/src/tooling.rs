@@ -453,7 +453,7 @@ fn headless_window(windows: Vec<crate::AnyWindowSpec>, displays: &[crate::Displa
         None => die("the app created no windows"),
     };
     if args.desktop.is_some() {
-        crate::desktop::run(windows, index, args);
+        crate::desktop::run(windows, index, args, options.accessory);
         return Ok(());
     }
     let mut window = windows.remove(index);
@@ -503,6 +503,8 @@ pub(crate) enum Kind {
     /// A named time with no input effect.
     Mark(String),
     Focus(bool),
+    /// The app reopened (macOS: its Dock icon clicked).
+    Reopen,
     Menu(String),
     /// Answers the open pop-up menu: an item's id, or `None` to dismiss it.
     PopupMenu(Option<String>),
@@ -584,6 +586,7 @@ impl Ev {
         let event = match &self.kind {
             Kind::Mark(name) => ScriptEvent::Mark(name.clone()),
             Kind::Focus(focused) => ScriptEvent::Focus(*focused),
+            Kind::Reopen => ScriptEvent::Reopen,
             Kind::Menu(item) => ScriptEvent::Menu(item.clone()),
             Kind::PopupMenu(picked) => ScriptEvent::PopupMenu(picked.clone()),
             Kind::Physical(input) => ScriptEvent::Physical(*input),
@@ -645,6 +648,10 @@ fn parse_script(list: Value) -> Vec<Ev> {
         }
         if let Some(item) = e["menu"].as_str() {
             out.push(Ev { t, kind: Kind::Menu(item.into()), pos: Pos::Rel(0.0, 0.0) });
+            continue;
+        }
+        if e["reopen"].as_bool() == Some(true) {
+            out.push(Ev { t, kind: Kind::Reopen, pos: Pos::Rel(0.0, 0.0) });
             continue;
         }
         if let Some(chord) = e["physical"].as_str() {
@@ -1335,6 +1342,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     #[cfg(all(feature = "dev", debug_assertions))]
     let dev = app.dev.take().filter(|_| std::env::var_os("RUNE_DEV_PANEL").is_some());
     let on_focus = app.on_focus;
+    let on_reopen = app.on_reopen;
     let source = read_script(&args);
     let script = source.as_ref().map(load_script).unwrap_or_default();
     let timeline = Timeline::of(&args, &script).unwrap_or_else(|e| die(&e));
@@ -1497,6 +1505,8 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             match &e.kind {
                 Kind::Mark(_) => {}
                 Kind::Focus(focused) => rt.window_focus(*focused),
+                // The one window always shows here.
+                Kind::Reopen => if let Some(f) = on_reopen { rt.update(|s, tx| { f(s, true, tx); }); },
                 Kind::Shortcut(shortcut) => shared.shortcuts.fire(shortcut).unwrap_or_else(|e| die(&format!("script shortcut: {e}"))),
                 Kind::Menu(item) => crate::native_menu::fire(&shared, item).unwrap_or_else(|e| die(&format!("script menu: {e}"))),
                 Kind::PopupMenu(picked) => rt.resolve_popup(picked.as_deref()).unwrap_or_else(|e| die(&format!("script pop-up menu: {e}"))),
@@ -2460,6 +2470,102 @@ mod tests {
         });
         assert_eq!((focus_of(&run, 0.1, "a"), focus_of(&run, 0.1, "hud")), ((true, true), (true, false)));
         assert_eq!(*KEYED.lock().unwrap(), ["a", "a"]);
+    }
+
+    /// The reopen hooks that ran: window, `has_visible_windows`.
+    static REOPENED: std::sync::Mutex<Vec<(&'static str, bool)>> = std::sync::Mutex::new(Vec::new());
+
+    /// A `keep_running` window that closes on any key, and records reopens, handling them when
+    /// `handles`.
+    fn closer(name: &'static str, color: crate::Color, handles: bool, options: crate::ConfiguredWindowOptions) -> crate::AnyWindowSpec {
+        let spec = AppSpec {
+            on_key: Some(|_: &mut Pair, _: &crate::KeyEvent, tx: &mut crate::Tx| { tx.close_window(); true }),
+            ..AppSpec::new("closer", (1.0, 1.0), || Pair { name: "", color: crate::Color::TRANSPARENT, other: None, act: |_, _| {} },
+                |p, _| crate::el().w_full().h_full().fill(p.color))
+        };
+        fn record(p: &mut Pair, visible: bool, _: &mut crate::Tx) -> bool { REOPENED.lock().unwrap().push((p.name, visible)); false }
+        fn handle(p: &mut Pair, visible: bool, tx: &mut crate::Tx) -> bool { record(p, visible, tx); true }
+        let app = crate::App::new(spec).init(move || Pair { name, color, other: None, act: |_, _| {} })
+            .keep_running().on_reopen(if handles { handle } else { record });
+        crate::WindowSpec::from_app(name, app).configured_options(options).boxed()
+    }
+
+    /// Runs `windows` on a headless desktop with `script`, as `desktop_case` does.
+    fn reopen_case(script: &str, accessory: bool, windows: impl FnOnce() -> Vec<crate::AnyWindowSpec> + 'static) -> &'static HeadlessRun {
+        REOPENED.lock().unwrap().clear();
+        let dir = std::env::temp_dir().join(format!("rune-reopen-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let backdrop = dir.join("backdrop.png");
+        ::image::RgbaImage::from_pixel(240, 160, ::image::Rgba([128, 128, 128, 255])).save(&backdrop).unwrap();
+        let (script_path, tree) = (dir.join("script.json"), dir.join("tree.json"));
+        std::fs::write(&script_path, script).unwrap();
+        let args = ["--desktop", backdrop.to_str().unwrap(), "--script", script_path.to_str().unwrap(),
+            "--scale", "2", "--fps", "10", "--tree", tree.to_str().unwrap()];
+        let options = crate::RunOptions { accessory, ..Default::default() };
+        crate::run_windows_with_args(options, args.map(String::from), move |_| windows());
+        std::fs::remove_dir_all(&dir).unwrap();
+        headless_run().unwrap()
+    }
+
+    #[test]
+    fn desktop_reopen_shows_the_window_closed_last_with_the_keyboard() {
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+        // Enter closes `b` (on top, with the keyboard), then `a`; reopening brings back `a`.
+        let script = r#"[{"t": 0.1, "type": "key", "name": "Enter"}, {"t": 0.2, "type": "key", "name": "Enter"},
+            {"t": 0.3, "reopen": true}]"#;
+        let run = reopen_case(script, false, || vec![closer("a", RED, false, left().macos(Default::default())),
+            closer("b", BLUE, false, right().macos(Default::default()))]);
+        assert_eq!((focus_of(run, 0.2, "a"), focus_of(run, 0.2, "b")), ((false, false), (false, false)));
+        assert_eq!((focus_of(run, 0.3, "a"), focus_of(run, 0.3, "b")), ((true, true), (false, false)));
+        assert_eq!(*REOPENED.lock().unwrap(), [("a", false), ("b", false)], "every hook runs, before the default");
+        assert!(run.events().iter().any(|e| matches!(e.event, ScriptEvent::Reopen)));
+    }
+
+    #[test]
+    fn desktop_reopen_with_a_window_showing_changes_nothing() {
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+        let script = r#"[{"t": 0.1, "type": "key", "name": "Enter"}, {"t": 0.2, "reopen": true}]"#;
+        let run = reopen_case(script, false, || vec![closer("a", RED, false, left().macos(Default::default())),
+            closer("b", BLUE, false, right().macos(Default::default()))]);
+        assert_eq!((focus_of(run, 0.2, "a"), focus_of(run, 0.2, "b")), ((true, true), (false, false)));
+        assert_eq!(*REOPENED.lock().unwrap(), [("a", true), ("b", true)]);
+    }
+
+    #[test]
+    fn desktop_reopen_hook_that_handles_it_skips_the_default() {
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+        let script = r#"[{"t": 0.1, "type": "key", "name": "Enter"}, {"t": 0.2, "reopen": true}]"#;
+        let run = reopen_case(script, false, || vec![closer("a", RED, true, left().macos(Default::default()))]);
+        assert_eq!(focus_of(run, 0.2, "a"), (false, false));
+        assert_eq!(*REOPENED.lock().unwrap(), [("a", false)]);
+    }
+
+    #[test]
+    fn desktop_reopen_never_brings_back_a_launcher_or_an_accessory_app_window() {
+        let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+        // The launcher closes last, so a launcher-blind rule would pick it; `a` comes back.
+        let launcher = || {
+            let mut options = crate::WindowOptions::launcher_panel();
+            let (position, physical_size) = (right().position, right().physical_size);
+            options.options = crate::WindowOptions { visible: true, position, physical_size, ..options.options };
+            closer("launcher", BLUE, false, options)
+        };
+        let script = r#"[{"t": 0.1, "type": "tap", "x": 30, "y": 25}, {"t": 0.2, "type": "key", "name": "Enter"},
+            {"t": 0.3, "type": "tap", "x": 95, "y": 35}, {"t": 0.4, "type": "key", "name": "Enter"}, {"t": 0.5, "reopen": true}]"#;
+        let run = reopen_case(script, false, move || vec![closer("a", RED, false, left().macos(Default::default())), launcher()]);
+        assert_eq!((focus_of(run, 0.4, "a"), focus_of(run, 0.4, "launcher")), ((false, false), (false, false)), "both closed");
+        assert_eq!((focus_of(run, 0.5, "a"), focus_of(run, 0.5, "launcher")), ((true, true), (false, false)));
+
+        // A launcher alone stays hidden.
+        let run = reopen_case(r#"[{"t": 0.1, "type": "tap", "x": 95, "y": 35}, {"t": 0.2, "type": "key", "name": "Enter"},
+            {"t": 0.3, "reopen": true}]"#, false, move || vec![launcher()]);
+        assert_eq!(focus_of(run, 0.3, "launcher"), (false, false));
+
+        // An accessory app's hooks run, but nothing comes back.
+        let script = r#"[{"t": 0.1, "type": "key", "name": "Enter"}, {"t": 0.2, "reopen": true}]"#;
+        let run = reopen_case(script, true, || vec![closer("a", RED, false, left().macos(Default::default()))]);
+        assert_eq!(focus_of(run, 0.2, "a"), (false, false));
+        assert_eq!(*REOPENED.lock().unwrap(), [("a", false)]);
     }
 
     #[test]

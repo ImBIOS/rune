@@ -5,6 +5,20 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Reopening a Mac app brings its window back.** A click on the Dock icon, or opening the app
+  again from Finder, Spotlight or `open` while it runs, now shows and activates a window when
+  none shows: a minimized one, else the one Rune hid last (⌘W with `keep_running`, `hide`), else
+  the main window. Before, a window hidden that way stayed hidden, because AppKit only brings back
+  minimized windows and winit's app delegate didn't answer
+  `applicationShouldHandleReopen:hasVisibleWindows:`; Rune now adds that method. Launcher and
+  other nonactivating panels, overlays, windows that closed for good and accessory apps never
+  come back. New `App::on_reopen(|s, has_visible_windows, tx| -> bool)` (and
+  `WindowSpec::on_reopen`) runs first; true skips the default. Other platforms are unchanged.
+  Headless scripts take `{"reopen": true}`. Things apps can notice: a hidden window now comes
+  back on a Dock click. An app that installs its own reopen Apple event handler replaces
+  AppKit's, which is what asks the delegate, so neither the hook nor the default runs; drop the
+  handler and use `on_reopen`.
+
 - **Theme tokens hash.** `Color`, `TextStyle` and rune-kit's `Palette`, `StateColors`, `Type`
   and `Radius` implement `Hash`, so a row can pass the tokens it reads to `memo` as its version
   instead of hashing their `Debug` text. Floats hash by bits, `-0.0` as `0.0` (they compare

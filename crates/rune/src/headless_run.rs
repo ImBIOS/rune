@@ -118,6 +118,8 @@ pub enum ScriptEvent {
     Pointer { action: PointerAction, at: ScriptPoint },
     /// The window gaining (true) or losing focus.
     Focus(bool),
+    /// `{"reopen": true}`: the app reopened, as a click on its macOS Dock icon does.
+    Reopen,
     /// A native menu item fired by name.
     Menu(String),
     /// A pop-up menu's picked item id, or None when the script dismisses it.

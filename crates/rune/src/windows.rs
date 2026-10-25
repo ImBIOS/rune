@@ -227,6 +227,8 @@ impl<S> WindowSpec<S> {
     /// warning when a `Compositor` is set.
     pub fn srgb_blend(mut self, enabled: bool) -> Self { self.app = self.app.srgb_blend(enabled); self }
     pub fn on_focus(mut self, f: fn(&mut S, bool, &mut crate::Tx)) -> Self { self.app = self.app.on_focus(f); self }
+    /// Runs when the app is reopened, like `App::on_reopen`.
+    pub fn on_reopen(mut self, f: fn(&mut S, bool, &mut crate::Tx) -> bool) -> Self { self.app = self.app.on_reopen(f); self }
     /// Send `Key::Modifier` presses and releases to this window, like `App::modifier_keys`.
     pub fn modifier_keys(mut self) -> Self { self.app = self.app.modifier_keys(); self }
     /// Tab visits every focusable control in this window, like `App::tab_visits_controls`.
@@ -317,8 +319,8 @@ impl<S: 'static> ErasedWindow for Erased<S> {
         crate::tooling::headless_configured(app, args, transparent);
     }
     fn desktop(self: Box<Self>, args: &crate::tooling::Args, selected: bool, scale: f32) -> Box<dyn crate::desktop::Member> {
-        let Erased { spec, handle, .. } = *self;
-        Box::new(crate::desktop::Window::new(spec, handle, args, selected, scale))
+        let Erased { spec, handle, secondary } = *self;
+        Box::new(crate::desktop::Window::new(spec, handle, args, selected, !secondary, scale))
     }
     fn start(self: Box<Self>, mut inherited: crate::tooling::Args, cx: crate::window::Start<'_>) -> Option<Box<dyn crate::window::AnyHost>> {
         // A secondary window is not what --scene or --size describe unless --window selects it.

@@ -302,6 +302,9 @@ pub(crate) enum WakeEvent {
     Position(usize, (i32, i32)), Level(usize, bool),
     Place(usize, crate::windows::PlaceRequest),
     Frame(usize, crate::window_frame::FrameRequest),
+    /// The app was reopened (macOS: its Dock icon clicked); for `Windows`, not one host.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Reopen,
 }
 
 /// What `Windows` needs of a host, whatever its state type: an app window or an overlay.
@@ -322,6 +325,12 @@ pub(crate) trait AnyHost {
     fn cancel_menus(&mut self) {}
     /// False for hosts that must not keep the loop running alone (overlays).
     fn keeps_loop(&self) -> bool { true }
+    /// How reopening the app sees it; overlays never come back.
+    fn reopen_candidate(&self) -> crate::reopen::Candidate { Default::default() }
+    /// Runs `App::on_reopen`; true when it handled the reopen.
+    fn reopen_hook(&mut self, _event_loop: &ActiveEventLoop, _has_visible_windows: bool) -> bool { false }
+    /// Shows, restores and activates it as the default reopen.
+    fn reopen(&mut self, _event_loop: &ActiveEventLoop) {}
 }
 
 type Request = Box<dyn FnOnce(usize) -> WakeEvent + Send>;
@@ -488,6 +497,23 @@ impl Windows {
             event_loop.exit();
         }
     }
+
+    /// The app was reopened: every `on_reopen` hook runs, then, unless one handled it or the
+    /// app is an accessory, the default brings back a window when none shows (`reopen::target`).
+    fn reopen(&mut self, event_loop: &ActiveEventLoop) {
+        let candidates: Vec<_> = self.hosts.iter().map(|h| h.as_ref().map(|h| h.reopen_candidate()).unwrap_or_default()).collect();
+        let has_visible = crate::reopen::has_visible(&candidates);
+        let mut handled = false;
+        for host in self.hosts.iter_mut().flatten() {
+            handled |= host.reopen_hook(event_loop, has_visible);
+        }
+        #[cfg(target_os = "macos")]
+        if crate::reopen::accessory() { return; }
+        if handled || event_loop.exiting() { return; }
+        if let Some(Some(host)) = crate::reopen::target(&candidates).and_then(|i| self.hosts.get_mut(i)) {
+            host.reopen(event_loop);
+        }
+    }
 }
 
 /// What a window needs from the shell to start, whatever its state type.
@@ -557,12 +583,22 @@ impl ApplicationHandler<WakeEvent> for Windows {
             overlay.resumed(event_loop);
             self.hosts.push(Some(overlay));
         }
+        #[cfg(target_os = "macos")]
+        {
+            let proxy = self.proxy.clone();
+            crate::reopen::install(move || { let _ = proxy.send_event(WakeEvent::Reopen); });
+        }
         self.cleanup(event_loop);
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
         let slot = match &event {
             WakeEvent::DisplayTick(i) | WakeEvent::App(i) | WakeEvent::Live(i) | WakeEvent::Window(i, _) | WakeEvent::Focus(i)
                 | WakeEvent::Position(i, _) | WakeEvent::Level(i, _) | WakeEvent::Place(i, _) | WakeEvent::Frame(i, _) => *i,
+            WakeEvent::Reopen => {
+                self.reopen(event_loop);
+                self.cleanup(event_loop);
+                return;
+            }
         };
         if let Some(Some(host)) = self.hosts.get_mut(slot) {
             host.user_event(event_loop, event);
@@ -648,6 +684,9 @@ struct Host<S: 'static> {
     args: Args,
     keep_running: bool,
     on_close: Option<fn(&mut S, &mut Tx)>,
+    on_reopen: Option<fn(&mut S, bool, &mut Tx) -> bool>,
+    /// When it last hid, in `reopen::stamp` order.
+    hidden_at: Option<u64>,
     release_gpu: bool,
     open_at_start: bool,
     shared: Arc<Shared<S>>,
@@ -786,6 +825,7 @@ impl<S: 'static> Host<S> {
             let _ = proxy.send_event(WakeEvent::App(slot));
         });
         let (open, keep_running, on_close, release_gpu) = (app.open, app.keep_running, app.on_close, app.release_gpu);
+        let on_reopen = app.on_reopen;
         #[cfg(target_os = "macos")]
         let present_log = args.trace.as_ref().map(|_| Arc::default());
         let mut app = app;
@@ -861,6 +901,8 @@ impl<S: 'static> Host<S> {
             args,
             keep_running,
             on_close,
+            on_reopen,
+            hidden_at: None,
             release_gpu,
             open_at_start: open,
             shared,
@@ -2188,6 +2230,7 @@ impl<S: 'static> Host<S> {
     }
 
     fn hide(&mut self, event_loop: &ActiveEventLoop) {
+        if self.win.as_ref().is_some_and(|w| w.visible) { self.hidden_at = Some(crate::reopen::stamp()); }
         self.rt.minimize_request = false;
         self.land_frame();
         // Before the window can go: a hide need not report a blur. `about_to_wait` delivers it,
@@ -2756,6 +2799,36 @@ impl<S: 'static> AnyHost for Host<S> {
 
     fn cancel_menus(&mut self) { self.popup.cancel(&mut self.rt); }
 
+    fn reopen_candidate(&self) -> crate::reopen::Candidate {
+        let shown = self.win.as_ref().filter(|w| w.visible);
+        let minimized = shown.is_some_and(|w| w.window.is_minimized() == Some(true));
+        crate::reopen::Candidate {
+            reopenable: !self.finished && !self.macos_window.nonactivating_panel,
+            visible: shown.is_some() && !minimized,
+            minimized,
+            hidden_at: self.hidden_at,
+            main: self.keeps_loop,
+        }
+    }
+
+    fn reopen_hook(&mut self, event_loop: &ActiveEventLoop, has_visible_windows: bool) -> bool {
+        let Some(f) = self.on_reopen.filter(|_| self.started && !self.finished) else { return false };
+        let mut handled = false;
+        self.rt.update(|s, tx| handled = f(s, has_visible_windows, tx));
+        self.clipboard.flush(&mut self.rt);
+        self.shell(event_loop);
+        match self.win.as_ref().filter(|w| w.visible) {
+            Some(w) => w.window.request_redraw(),
+            None if self.launcher() => { self.refresh_hidden(); }
+            None => self.rt.schedule_pending_wakes(),
+        }
+        handled
+    }
+
+    fn reopen(&mut self, event_loop: &ActiveEventLoop) {
+        if self.started && !self.finished { self.open(event_loop, None); }
+    }
+
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
         self.meter.turn(matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll), crate::surface_stats::slept(cause));
         if let Some(w) = &mut self.win && let Some((retry, until)) = w.first_frame.deadline && retry <= Instant::now() {
@@ -2974,6 +3047,7 @@ impl<S: 'static> Host<S> {
                 if let Some(w) = self.win.as_ref().filter(|w| w.visible) { w.window.request_redraw(); }
                 self.shell(event_loop);
             }
+            WakeEvent::Reopen => {}
         }
     }
 

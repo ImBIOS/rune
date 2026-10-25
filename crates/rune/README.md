@@ -276,7 +276,8 @@ let app = rune::App::new(spec)
     .release_gpu_when_closed()     // optional: drop the GPU device while closed
     .accessory()                   // macOS: menu-bar app, no Dock icon (h.set_dock_icon(true) shows it)
     .standard_menus()              // macOS: Edit, Minimize ⌘M and Close ⌘W (no Quit); regular apps get them anyway
-    .on_close(|s, tx| ..);         // runs before every close; tx.quit() quits instead
+    .on_close(|s, tx| ..)          // runs before every close; tx.quit() quits instead
+    .on_reopen(|s, has_visible, tx| false); // macOS: Dock icon clicked; true skips the default
     // .window_options(WindowOptions { max_size, resizable, .. }) for this window
 let handle = app.handle();     // AppHandle<S>: Clone + Send + Sync, usable before run
 std::thread::spawn(move || {
@@ -333,6 +334,19 @@ app.run();
   the keys still reach fields and `on_key` first; an untaken ⌘W or ⌘M closes or minimizes as the
   title-bar button would. It never adds Quit. Details in `src/shortcuts/README.md` under native
   menus.
+- Reopening (macOS): a click on the Dock icon, or opening the app again from Finder, Spotlight or
+  `open` while it runs, brings back a window when none shows, as in other Mac apps. Rune shows
+  and activates a minimized window, else the window it hid last (closed with `keep_running`, or
+  `hide`), else the main window. Windows that already show stay as they are. It never brings back
+  a launcher or other nonactivating panel, an overlay, a window that closed for good, or anything
+  in an accessory app (`accessory()`,
+  or `set_dock_icon(false)` at the time). `App::on_reopen(|s, has_visible_windows, tx| -> bool)`
+  runs first, on the main thread with the app's state; returning true skips the default. Every
+  window's hook runs, and `has_visible_windows` counts only windows reopening could bring back.
+  Rune adds `applicationShouldHandleReopen:hasVisibleWindows:` to winit's app delegate, which
+  lacks it. An app that installs its own reopen Apple event handler replaces AppKit's, which is
+  what asks the delegate, so Rune's reopening never runs; use `on_reopen` instead. Other platforms
+  have no reopen, so the hook never runs there. Headless scripts send it with `{"reopen": true}`.
 - Edge overlays (HUDs): see `App::overlay` below.
 
 ### Compact tray-controlled windows
@@ -1403,6 +1417,7 @@ $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/d
 
 - **Scripts** are timestamped `move`, `down`, `up`, `tap` (`hold`), `double-click` (`hold`,
   `gap`, default 0.15 s between presses) and `drag` (`dx`, `dy`, `dur`) events, at `x,y` in points or at an element by `key` (or a path suffix such as `slider/knob`).
+  `{"reopen": true}` reopens the app, as a click on its Dock icon (see "App lifetime").
   `menu-pick` (with an `id`) and `menu-cancel` answer an open pop-up menu. `drag_files` and
   `drop_files` drag files in from another app (see "Dropping files in from other apps").
 - **Keys in scripts**: `{"type": "key", "name": "Enter"}` (with `cmd`, `shift`, `alt`, `ctrl`)
