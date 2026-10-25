@@ -1096,9 +1096,16 @@ impl Renderer {
         if self.selectable { e.selectable(true).selection_color(self.s.selection) } else { e }
     }
 
+    /// `e`, the text of `inl`, with its links and selectable, copying without inline code's padding.
+    fn select_inline(&self, e: El, inl: &Inline) -> El {
+        let e = self.select(self.wire_link(e, inl));
+        if !self.selectable { return e; }
+        inl.spans.iter().filter(|s| matches!(s.2, Style::CodePad)).fold(e, |e, s| e.uncopied(s.0..s.1))
+    }
+
     fn para(&self, inl: &Inline, style: TextStyle, color: Color) -> El {
         let e = rich(inl.text.clone(), self.spans(inl, style.size)).font(style).color(color).reveal(self.reveal).w_full();
-        self.select(self.wire_link(e, inl))
+        self.select_inline(e, inl)
     }
 
     fn blocks(&self, blocks: &[Block]) -> El {

@@ -22,7 +22,11 @@ fn view(s: &S, _: &mut Cx<S>) -> El {
 }
 
 fn runtime(selectable: bool) -> Runtime<S> {
-    let s = S { msgs: vec![FIRST.to_owned(), "Second message".to_owned()], selectable, opened: Vec::new() };
+    runtime_with(&[FIRST, "Second message"], selectable)
+}
+
+fn runtime_with(msgs: &[&str], selectable: bool) -> Runtime<S> {
+    let s = S { msgs: msgs.iter().map(|m| m.to_string()).collect(), selectable, opened: Vec::new() };
     let mut rt = Runtime::new(s, view, (480.0, 800.0), Env::new(true, 2.0));
     rt.frame(0.0);
     rt
@@ -134,4 +138,21 @@ fn without_selectable_nothing_selects() {
     let code = glyphs(&rt, "m0/b2");
     drag(&mut rt, before(para[1]), before(code[2]));
     assert_eq!(rt.selected_text(), None);
+}
+
+#[test]
+fn inline_code_copies_without_its_padding() {
+    let mut rt = runtime_with(&["Run `cargo test` now"], true);
+    let g = glyphs(&rt, "m0/b0");
+    let a = (g[4].0 - 1.0, g[4].1);
+    for _ in 0..2 {
+        rt.pointer_move(a.0, a.1);
+        rt.pointer_down(a.0, a.1);
+        rt.pointer_up(a.0, a.1);
+        tick(&mut rt);
+    }
+    assert_eq!(rt.selected_text().as_deref(), Some("cargo"), "a double-click's word stops at the padding");
+    command(&mut rt, 'a');
+    assert_eq!(rt.selected_text().as_deref(), Some("Run cargo test now"));
+    assert_eq!(find(&rt, "m0/b0").selected.as_deref(), Some("Run cargo test now"));
 }

@@ -5243,7 +5243,7 @@ impl<S: 'static> Runtime<S> {
                     help: n.help.clone(),
                     selected: n.text.as_ref().filter(|t| t.selectable).and_then(|t| {
                         let (a, b) = selectable::range_in(&sel_ranges, i)?;
-                        t.source_slice(a as u32, b as u32).map(str::to_owned)
+                        t.copy_slice(a as u32, b as u32)
                     }),
                     virtual_extent: self.virtuals.contains_key(&n.path) && n.vis.fill.a == 0.0
                         && n.vis.border_width == 0.0 && n.vis.shadows.is_empty() && n.text.is_none() && n.vis.icon.is_none(),

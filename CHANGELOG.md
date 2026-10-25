@@ -12,9 +12,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   newline between blocks, a tab between table cells, no list markers, fences or emphasis
   markers). Links still open on a click. The highlight is the kit's `selection()`, overridden
   with `MarkdownStyle::selection`. Underneath, `El::selection_group(true)` makes any element's
-  selectable texts one selection in tree order. A selected text no longer loses its selection
-  when text is appended after it (a message streaming in); a change inside the selected part
-  still drops it.
+  selectable texts one selection in tree order, and `El::uncopied(range)` marks bytes that draw
+  but aren't copied (Markdown's padding around inline code). A selected text no longer loses
+  its selection when text is appended after it (a message streaming in); a change inside the
+  selected part still drops it, as does its virtual row scrolling out. An elided text
+  (`max_lines`, `truncate`) selects through its ellipsis and copies whole.
 - **`Tx::fly_text` lands on the destination's text, not its box.** The source was measured by
   its laid-out lines but the destination by the whole element, so a destination wider than its
   text (a message body stretched across a column) scaled the flight into a large ghost and a

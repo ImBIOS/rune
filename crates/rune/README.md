@@ -662,7 +662,12 @@ selection; text appended after it (a message streaming in) keeps it.
 page's are: a drag crosses from one into the next in tree order, Shift-click extends into any of
 them, Cmd+A selects them all and Cmd+C joins them with a newline, or a tab between texts side by
 side (table cells). Double- and triple-clicks still take a word or paragraph of one text, and
-non-selectable text inside (a list marker) is left out. Kit's `Markdown::selectable` is one.
+non-selectable text inside (a list marker) is left out. Texts whose boxes overlap vertically (a
+table row's cells) select as a row, and a drag into a gap stops where the pointer is. A group
+inside a group is its own. Kit's `Markdown::selectable` is one. `El::uncopied(range)` marks
+bytes that draw but aren't copied, such as padding characters; a double-click's word stops at
+them. An elided text (`max_lines`, `truncate`) selects through its ellipsis and copies whole,
+and a virtual row scrolling out drops the selection it holds.
 
 Inside a row that handles input, the row keeps it: an unmoved click on the text presses (and
 double-presses) the nearest ancestor with a handler, hover and press paint reach that ancestor,

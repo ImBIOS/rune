@@ -520,6 +520,8 @@ pub struct TextSpec {
     pub(crate) selectable: bool,
     /// See [`El::selection_color`].
     pub(crate) selection: Color,
+    /// See [`El::uncopied`]: byte ranges of `content`, sorted.
+    pub(crate) uncopied: Vec<(u32, u32)>,
 }
 
 impl TextSpec {
@@ -536,6 +538,19 @@ impl TextSpec {
         }
     }
 
+    /// The authored text of `content[start..end]` as copying takes it, without its
+    /// [`El::uncopied`] bytes.
+    pub(crate) fn copy_slice(&self, start: u32, end: u32) -> Option<String> {
+        let mut out = String::new();
+        let mut at = start;
+        for &(a, b) in self.uncopied.iter().filter(|r| r.1 > start && r.0 < end) {
+            if a > at { out.push_str(self.source_slice(at, a)?); }
+            at = at.max(b);
+        }
+        if at < end { out.push_str(self.source_slice(at, end)?); }
+        Some(out)
+    }
+
     /// Replaces `content` (the authored string) with its cased form and moves span and link
     /// ranges onto it.
     pub(crate) fn apply_case(&mut self) {
@@ -546,6 +561,9 @@ impl TextSpec {
         }
         for link in &mut self.links {
             (link.start, link.end) = (source.shown(link.start, false), source.shown(link.end, true));
+        }
+        for r in &mut self.uncopied {
+            *r = (source.shown(r.0, false), source.shown(r.1, true));
         }
         self.content = shown;
         self.source = Some(Box::new(source));
@@ -863,6 +881,7 @@ pub fn text(content: impl Into<String>) -> El {
         source: None,
         selectable: false,
         selection: DEFAULT_SELECTION,
+        uncopied: Vec::new(),
     });
     e
 }
@@ -2039,6 +2058,15 @@ impl El {
     /// isn't selectable (a list marker) is skipped. Outside a group each text is its own.
     pub fn selection_group(mut self, on: bool) -> Self {
         self.selection_group = on;
+        self
+    }
+    /// Bytes of [`El::selectable`] text that draw but aren't copied, such as the spacing
+    /// characters Markdown pads inline code with. A double-click's word stops at them.
+    pub fn uncopied(mut self, range: std::ops::Range<usize>) -> Self {
+        if let Some(t) = &mut self.text && range.start < range.end {
+            let at = t.uncopied.partition_point(|r| (r.0 as usize) < range.start);
+            t.uncopied.insert(at, (range.start as u32, range.end as u32));
+        }
         self
     }
     /// The selection highlight of [`El::selectable`] text or a text field, drawn alike for both.
