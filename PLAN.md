@@ -584,6 +584,11 @@ goldens and committed fixtures are synthetic, never real session content; screen
 picks it blind), the launcher's tray and panel, Scrawl review/Settings. Optional Liquid Glass underlays here (spike S2).
 
 **M5 — Web.** The same app in the browser over WebGPU (docs site demos, knobs, gpu-gallery).
+The first experimental target is implemented: winit 0.30 owns a single canvas, rAF and
+ResizeObserver; GPU initialization is asynchronous, and a sliding textarea supplies text
+services. It runs on the main thread without SharedArrayBuffer. See [WEB.md](WEB.md) and
+`examples/web-hello`. Real-device Safari keyboard verification, accessibility mirroring,
+WebGL fallback and EditContext remain follow-up work.
 
 **M6 — iOS.** iOS shell, `UITextInput`, `RuneView` for embedding in SwiftUI, split-process dev mode; first surface
 embedded in the private iOS client. **M7 — Android.**

@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Build static web apps.** `scripts/web-build.sh` packages a wasm app, JavaScript snippets
+  and an HTML entrypoint for HTTPS hosting. `examples/web-hello` exercises message input,
+  scrolling and clipboard; `WEB.md` covers app integration and browser limits.
+
 - **Browser clipboard, links and viewport.** Web copies and paste requests use the browser
   clipboard; secret-copy requests fail explicitly. `web::open_url` opens safe link schemes
   without an opener. `Cx::safe_area` exposes browser insets, and the canvas tracks the visual
