@@ -2944,6 +2944,7 @@ impl<S: 'static> Runtime<S> {
                 let scroll = self.input_scroll.get(&path).copied().unwrap_or(0.0);
                 self.set_focus(Some(path), false);
                 let e = access(handler_state(&mut self.state));
+                e.set_single_line(single);
                 e.break_history_group();
                 e.clear_pending();
                 if let Some(l) = layout {
@@ -7115,7 +7116,8 @@ impl<S: 'static> Runtime<S> {
                         if e.focused && !departing {
                             let (a, b) = e.range();
                             if a != b && e.preedit.is_none() {
-                                selectable::push_selection(&mut self.instances, layout, e.display_index(a), e.display_index(b),
+                                let (da, db) = e.display_selection_range(a, b);
+                                selectable::push_selection(&mut self.instances, layout, da, db,
                                     origin, tk, premul(inp.selection, o, srgb), s, clip, fade);
                             }
                             caret = input_caret.map(|(caret, _)| caret);
@@ -8932,6 +8934,7 @@ fn flatten(
     let measure = text.as_ref().map(|t| crate::text::text_hash(&t.content, &t.spans, t.style, scale, None) ^ u64::from(t.wrap) ^ (u64::from(t.truncate || t.truncate_fade) << 1)
         ^ ((t.max_lines as u64) << 2)
         ^ (u64::from(input.as_ref().is_some_and(|i| i.edit.is_revealed())) << 3)
+        ^ (u64::from(t.wrap_anywhere) << 4)
         ^ t.advance_in.as_ref().map_or(0, |(run, at)| run.hash.rotate_left(3) ^ (*at as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)));
     nodes.push(Node {
         on_paste,
@@ -10921,7 +10924,7 @@ mod tests {
     #[test]
     fn secure_input_masks_layout_inspector_and_unicode_pointer_indices() {
         fn view(s: &crate::TextEdit, _: &mut Cx<crate::TextEdit>) -> El {
-            crate::text_input(s, crate::TextStyle::new(16.0, 400.0)).secure()
+            crate::text_input(s, crate::TextStyle::new(16.0, 400.0)).single_line().secure()
                 .key("secret").size(200.0, 40.0).on_edit(|s: &mut crate::TextEdit| s)
         }
         let mut edit = crate::TextEdit::new("hé🙂");
@@ -12170,5 +12173,156 @@ mod tests {
         assert_eq!(ns.text.as_ref().unwrap().content, "••••••••");
         let hidden_w = ns.text_layout.as_ref().unwrap().full_width();
         assert_ne!(revealed_w, hidden_w, "toggling revealed re-layouts the text");
+    }
+
+    #[test]
+    fn multiline_secure_input_hides_length_and_lines_wraps_anywhere_and_conceals_on_exit() {
+        use crate::{text_input, TextEdit, TextStyle};
+        struct State {
+            secret: TextEdit,
+            open: bool,
+        }
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let mut root = col().size(240.0, 200.0);
+            if s.open {
+                root = root.child(
+                    text_input(&s.secret, TextStyle::new(14.0, 400.0))
+                        .secure()
+                        .key("secret")
+                        .w(180.0)
+                        .on_edit(|s: &mut State| &mut s.secret),
+                );
+            }
+            root
+        }
+
+        let short_secret = "short-key!";
+        let long_secret = (0..50)
+            .map(|i| format!("FAKEPEMLINE{i:02}AAAAB3NzaC1yc2EAAAADAQABAAABAQDfakebase64payloadblock0123456789ABCDEFGH=="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(long_secret.len() >= 4096);
+
+        let mut short_edit = TextEdit::new(short_secret);
+        short_edit.focused = true;
+        let mut rt_short = Runtime::new(State { secret: short_edit, open: true }, view, (240.0, 200.0), Env::new(true, 1.0));
+        rt_short.frame(0.0);
+
+        let mut long_edit = TextEdit::new(long_secret.clone());
+        long_edit.focused = true;
+        let mut rt_long = Runtime::new(State { secret: long_edit, open: true }, view, (240.0, 200.0), Env::new(true, 1.0));
+        rt_long.frame(0.0);
+
+        let el_short = rt_short.elements().into_iter().find(|e| e.key.as_deref() == Some("secret")).unwrap();
+        let el_long = rt_long.elements().into_iter().find(|e| e.key.as_deref() == Some("secret")).unwrap();
+        assert!(el_short.text.is_none() && el_long.text.is_none());
+        assert_eq!(el_short.rect, el_long.rect, "hidden multi-line rect must not leak content length or line count");
+        assert_eq!(el_short.caret, el_long.caret, "hidden multi-line caret rect must be identical");
+
+        let n_short = rt_short.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+        let n_long = rt_long.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+        assert_eq!(n_short.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
+        assert_eq!(n_long.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
+        let l_short = n_short.text_layout.as_ref().unwrap();
+        let l_long = n_long.text_layout.as_ref().unwrap();
+        assert_eq!(l_short.len(), 1);
+        assert_eq!(l_long.len(), 1);
+        assert_eq!(l_short.full_width(), l_long.full_width());
+        let glyphs_short = rt_short.instances.iter().filter(|i| i.params[1] == KIND_GLYPH).count();
+        let glyphs_long = rt_long.instances.iter().filter(|i| i.params[1] == KIND_GLYPH).count();
+        assert_eq!(glyphs_short, 12);
+        assert_eq!(glyphs_long, 12);
+
+        // Clicking near the left edge of the hidden mask pins the caret to text.len(), never leaking an interior byte index.
+        rt_long.pointer_down(el_long.rect[0] + 4.0, el_long.rect[1] + 4.0);
+        rt_long.pointer_up(el_long.rect[0] + 4.0, el_long.rect[1] + 4.0);
+        rt_long.frame(0.0);
+        assert_eq!(rt_long.state.secret.focus, long_secret.len());
+
+        // Revealing wraps unbroken lines at character boundaries within 180pt width.
+        rt_long.update(|s, _| s.secret.set_revealed(true));
+        rt_long.frame(0.0);
+        let n_rev = rt_long.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+        let l_rev = n_rev.text_layout.as_ref().unwrap();
+        assert!(l_rev.len() > 100, "50 long unbroken lines must wrap into >100 visual lines");
+        assert!(l_rev.full_width() <= 180.5, "wrapped unbroken lines must fit within field width (got {})", l_rev.full_width());
+
+        // Exiting while revealed conceals back to the fixed multi-line mask on the first exit frame.
+        rt_long.update(|s, _| s.open = false);
+        rt_long.frame(0.0);
+        let exiting = rt_long.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).expect("exiting node present");
+        let exit_edit = &exiting.input.as_ref().unwrap().edit;
+        assert!(!exit_edit.is_revealed());
+        assert_eq!(exit_edit.text, crate::edit::MULTILINE_SECURE_MASK);
+        assert_eq!(exiting.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
+        assert_eq!(exiting.text_layout.as_ref().unwrap().len(), 1);
+        assert!(!format!("{:?}", exiting.input).contains("FAKEPEMLINE"));
+        assert!(!format!("{:?}", exiting.text).contains("FAKEPEMLINE"));
+    }
+
+    #[test]
+    fn wrap_anywhere_wraps_unbroken_tokens_keeps_word_breaks_and_lowers_min_content_width() {
+        use crate::{rich, row, text, Span};
+        const LONG_BASE64: &str = "AAAAB3NzaC1yc2EAAAADAQABAAABAQDfakebase64publickeymaterialwithoutspaces0123456789ABCDEF==";
+        const WORDS: &str = "alpha beta gamma delta epsilon zeta eta theta";
+
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            col()
+                .size(400.0, 500.0)
+                // Default .wrap() vs .wrap_anywhere() in a narrow 160pt box.
+                .child(col().w(160.0).child(text(LONG_BASE64).wrap().key("default_wrap")))
+                .child(col().w(160.0).child(text(LONG_BASE64).wrap_anywhere().key("anywhere_wrap")))
+                // In a flex row, wrap_anywhere lowers min-content width so the flex parent can shrink it.
+                .child(row().w(160.0).child(text(LONG_BASE64).wrap_anywhere().key("row_anywhere")))
+                // Normal words with spaces in the same 160pt width.
+                .child(col().w(160.0).child(text(WORDS).wrap().key("words_default")))
+                .child(col().w(160.0).child(text(WORDS).wrap_anywhere().key("words_anywhere")))
+                // Rich text with wrap_anywhere.
+                .child(col().w(160.0).child(rich(LONG_BASE64, vec![Span::new(0, 16).bold()]).wrap_anywhere().key("rich_anywhere")))
+        }
+
+        let mut rt = Runtime::new((), view, (400.0, 500.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+
+        let node = |k: &str| rt.nodes.iter().find(|n| n.key.as_deref() == Some(k)).unwrap();
+        let el = |k: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(k)).unwrap();
+
+        // Default .wrap() does not break inside an unbroken token and keeps its full min-content width.
+        let def_layout = node("default_wrap").text_layout.as_ref().unwrap();
+        assert_eq!(def_layout.len(), 1, "default wrap leaves unbroken base64 on 1 line");
+        assert!(def_layout.full_width() > 400.0, "default wrap keeps full unbroken token width");
+
+        // .wrap_anywhere() wraps inside the 160pt box and shrinks inside a 160pt flex row with no glyph past the right edge.
+        let any_el = el("anywhere_wrap");
+        let any_node = node("anywhere_wrap");
+        let any_layout = any_node.text_layout.as_ref().unwrap();
+        assert!(any_el.rect[2] <= 160.5, "wrap_anywhere fits 160pt box (got {})", any_el.rect[2]);
+        assert!(el("row_anywhere").rect[2] <= 160.5, "wrap_anywhere shrinks inside 160pt flex row (got {})", el("row_anywhere").rect[2]);
+        assert!(any_layout.len() >= 4, "long base64 wraps across multiple lines (got {})", any_layout.len());
+        assert!(any_layout.full_width() <= 160.5, "no line exceeds the 160pt box (got {})", any_layout.full_width());
+        for line in any_layout.lines() {
+            assert!(
+                line.metrics().advance - line.metrics().hanging_advance <= 160.5,
+                "line advance {} exceeds 160pt right edge",
+                line.metrics().advance
+            );
+        }
+
+        // Min-content width (max_width = Some(0.0)) shrinks from the full token width to a single character's width.
+        let min_def = rt.text.layout_for_spec(node("default_wrap").text.as_ref().unwrap(), 1.0, Some(0.0), parley::Alignment::Start);
+        let min_any = rt.text.layout_for_spec(any_node.text.as_ref().unwrap(), 1.0, Some(0.0), parley::Alignment::Start);
+        assert!(min_def.full_width() > 400.0);
+        assert!(min_any.full_width() < 20.0, "wrap_anywhere min-content width is a single grapheme (got {})", min_any.full_width());
+
+        // Normal words that fit on a line still break at spaces identically to .wrap().
+        let w_def = node("words_default").text_layout.as_ref().unwrap();
+        let w_any = node("words_anywhere").text_layout.as_ref().unwrap();
+        let ranges_def: Vec<_> = w_def.lines().map(|l| l.text_range()).collect();
+        let ranges_any: Vec<_> = w_any.lines().map(|l| l.text_range()).collect();
+        assert_eq!(ranges_def, ranges_any, "normal words break at spaces identically under wrap_anywhere");
+
+        // Rich text also supports wrap_anywhere.
+        let rich_layout = node("rich_anywhere").text_layout.as_ref().unwrap();
+        assert!(rich_layout.len() >= 4 && rich_layout.full_width() <= 160.5);
     }
 }

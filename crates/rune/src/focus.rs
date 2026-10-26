@@ -21,6 +21,7 @@ fn sync_input_focus<S: 'static>(input: &mut crate::el::InputSpec, state: &mut S,
     };
     let edit = access(handler_state(state));
     let mut changed = false;
+    edit.set_single_line(input.single_line);
     if input.edit.is_secure() && !edit.is_secure() {
         edit.set_secure(true);
         changed = true;

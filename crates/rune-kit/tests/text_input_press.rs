@@ -531,3 +531,109 @@ fn secure_text_input_revealed_draws_plain_glyphs_and_keeps_secure_protections() 
     let masked_caret = masked_inp.caret.expect("focused masked TextInput caret");
     assert_ne!(masked_caret[0], secret_caret[0], "masked bullet width differs from plain text width");
 }
+
+#[test]
+fn secure_text_area_masks_multiline_secrets_wraps_long_tokens_when_revealed_and_scrolls() {
+    use rune::{Key, KeyEvent, Mods};
+    struct Form {
+        secret: TextEdit,
+        revealed: bool,
+        submitted: usize,
+    }
+    fn view(s: &Form, _: &mut Cx<Form>) -> El {
+        let k = Kit::neutral(true);
+        col().padding(12.0).child(
+            TextArea::new(&s.secret)
+                .secure()
+                .revealed(s.revealed)
+                .placeholder("Paste private key")
+                .max_height(100.0)
+                .on_edit(|s: &mut Form| &mut s.secret)
+                .on_submit(|s: &mut Form, _| s.submitted += 1)
+                .build(&k)
+                .key("area"),
+        )
+    }
+
+    let mut rt = Runtime::new(
+        Form { secret: TextEdit::new(""), revealed: false, submitted: 0 },
+        view,
+        (320.0, 240.0),
+        Env::new(true, 1.0),
+    );
+    rt.frame(0.0);
+
+    let area0 = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("area")).unwrap();
+    let inp0 = rt.elements().into_iter().find(|e| e.path.ends_with("area/scroll/input")).unwrap();
+    assert!(inp0.text.is_none());
+
+    // Focus by clicking the TextArea, paste a multi-line base64 fixture, then press Enter and type.
+    rt.pointer_down(area0.rect[0] + 20.0, area0.rect[1] + 20.0);
+    rt.pointer_up(area0.rect[0] + 20.0, area0.rect[1] + 20.0);
+    rt.frame(0.0);
+    assert!(rt.state.secret.is_secure() && rt.has_secure_focus());
+
+    let line_blob = "AAAAB3NzaC1yc2EAAAADAQABAAABAQDfakebase64keymaterialwithoutspaces0123456789ABCDEF==";
+    let pem = format!(
+        "-----BEGIN FAKE PRIVATE KEY-----\r\n{line_blob}\r\n{line_blob}\r\n{line_blob}"
+    );
+    rt.paste(&pem);
+    rt.frame(0.0);
+    rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    rt.key(KeyEvent { key: Key::Text("-----END FAKE PRIVATE KEY-----".into()), mods: Mods::default() });
+    rt.frame(0.0);
+
+    assert_eq!(rt.state.submitted, 0, "Enter in secure TextArea inserts newline without submitting");
+    assert_eq!(rt.state.secret.text.lines().count(), 5);
+
+    // Hidden mode keeps the fixed height and fixed mask regardless of secret length/line count.
+    let area_hidden = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("area")).unwrap();
+    let inp_hidden = rt.elements().into_iter().find(|e| e.path.ends_with("area/scroll/input")).unwrap();
+    assert_eq!(area_hidden.rect[3], area0.rect[3], "hidden secure TextArea height stays fixed");
+    assert_eq!(inp_hidden.rect[3], inp0.rect[3], "hidden secure input height stays 1 line");
+
+    // Reveal: unbroken base64 lines wrap within the TextArea width, and overflowing lines scroll inside max_height.
+    rt.update(|s, tx| {
+        s.revealed = true;
+        tx.instant();
+    });
+    rt.frame(0.0);
+    let area_rev = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("area")).unwrap();
+    let scroll_rev = rt.elements().into_iter().find(|e| e.path.ends_with("area/scroll")).unwrap();
+    let inp_rev = rt.elements().into_iter().find(|e| e.path.ends_with("area/scroll/input")).unwrap();
+    assert!(area_rev.rect[3] <= 100.5, "TextArea respects max_height (got {})", area_rev.rect[3]);
+    assert!(
+        inp_rev.rect[3] > scroll_rev.rect[3] + 30.0,
+        "wrapped multi-line secret is taller than the scroll viewport ({} vs {})",
+        inp_rev.rect[3],
+        scroll_rev.rect[3]
+    );
+    assert!(
+        inp_rev.rect[2] <= scroll_rev.rect[2] + 0.5,
+        "long unbroken base64 lines wrap without overflowing horizontally ({} vs {})",
+        inp_rev.rect[2],
+        scroll_rev.rect[2]
+    );
+
+    // Typing at the end keeps the caret scrolled into view inside the scroll viewport.
+    rt.key(KeyEvent { key: Key::Text("!".into()), mods: Mods::default() });
+    rt.frame(0.0);
+    let scroll_after = rt.elements().into_iter().find(|e| e.path.ends_with("area/scroll")).unwrap();
+    let inp_after = rt.elements().into_iter().find(|e| e.path.ends_with("area/scroll/input")).unwrap();
+    let caret = inp_after.caret.expect("focused revealed TextArea caret");
+    assert!(
+        caret[1] >= scroll_after.rect[1] - 1.0 && caret[1] + caret[3] <= scroll_after.rect[1] + scroll_after.rect[3] + 1.0,
+        "caret {caret:?} scrolled into viewport {:?}",
+        scroll_after.rect
+    );
+
+    // Hiding again restores the fixed 1-line mask height while preserving the multi-line text.
+    rt.update(|s, tx| {
+        s.revealed = false;
+        tx.instant();
+    });
+    rt.frame(0.0);
+    let inp_rehidden = rt.elements().into_iter().find(|e| e.path.ends_with("area/scroll/input")).unwrap();
+    assert_eq!(inp_rehidden.rect[3], inp0.rect[3]);
+    assert_eq!(rt.state.secret.text.lines().count(), 5);
+}

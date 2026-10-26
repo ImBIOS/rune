@@ -872,6 +872,7 @@ pub struct TextSpec {
     pub(crate) pill_colors: Option<(Color, Option<Color>)>,
     pub(crate) rich_style: crate::edit::RichStyle,
     pub(crate) redacted: bool,
+    pub(crate) wrap_anywhere: bool,
 }
 
 impl std::fmt::Debug for TextSpec {
@@ -1445,6 +1446,7 @@ pub fn text(content: impl Into<String>) -> El {
         pill_colors: None,
         rich_style: crate::edit::RichStyle::default(),
         redacted: false,
+        wrap_anywhere: false,
     });
     e
 }
@@ -1487,13 +1489,18 @@ pub fn canvas(shape: Shape) -> El {
 pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
     // An app may have assigned `edit.text` directly: clamp stale marks, blocks and caret to it.
     let mut edit = edit.clone();
+    edit.set_single_line(false);
     edit.sync_invariants();
     let (content, _) = edit.display();
     let mut e = text(content).font(style);
     e.role = "textbox";
     if let Some(t) = &mut e.text {
         t.wrap = true;
+        t.wrap_anywhere = edit.is_secure();
         t.redacted = edit.is_secure();
+    }
+    if edit.is_secure() {
+        e.style.flex_shrink = 1.0;
     }
     e.input = Some(Box::new(InputSpec {
         animate_layout: false,
@@ -1574,11 +1581,16 @@ impl El {
     pub fn secure(mut self) -> Self {
         if let Some(input) = &mut self.input {
             input.edit.set_secure(true);
+            let single = input.single_line;
             if let Some(text) = &mut self.text {
                 use zeroize::Zeroize;
                 text.content.zeroize();
                 text.content = input.edit.display().0;
                 text.redacted = true;
+                if !single {
+                    text.wrap_anywhere = true;
+                    self.style.flex_shrink = 1.0;
+                }
             }
             self.sync_input_pills();
             self.sync_input_rich();
@@ -2941,6 +2953,20 @@ impl El {
         }
         self
     }
+    /// Wrap text at the element's width, breaking inside a word only when the word alone would
+    /// overflow the line (`overflow-wrap: anywhere`) while breaking normal words at spaces, and
+    /// lowering the text's min-content width so a flex parent can shrink it.
+    pub fn wrap_anywhere(mut self) -> Self {
+        if self.input.as_ref().is_some_and(|i| i.single_line) {
+            return self;
+        }
+        if let Some(t) = &mut self.text {
+            t.wrap = true;
+            t.wrap_anywhere = true;
+            self.style.flex_shrink = 1.0;
+        }
+        self
+    }
     /// Whether this is text that wraps (`.wrap()`), for containers that let such text shrink
     /// to their width.
     pub fn wraps(&self) -> bool {
@@ -2970,6 +2996,7 @@ impl El {
             t.elide = elide;
             t.truncate_fade = false;
             t.wrap = false;
+            t.wrap_anywhere = false;
             t.max_lines = 0;
         }
         self.style.flex_shrink = 1.0;
@@ -3002,6 +3029,7 @@ impl El {
             t.truncate_fade = true;
             t.fade_em = em.max(0.0);
             t.wrap = false;
+            t.wrap_anywhere = false;
             t.max_lines = 0;
         }
         self.style.flex_shrink = 1.0;
@@ -3020,8 +3048,15 @@ impl El {
     pub fn single_line(mut self) -> Self {
         if let Some(i) = &mut self.input {
             i.single_line = true;
+            i.edit.set_single_line(true);
             if let Some(t) = &mut self.text {
                 t.wrap = false;
+                t.wrap_anywhere = false;
+                if i.edit.is_secure() && !i.edit.is_revealed() {
+                    use zeroize::Zeroize;
+                    t.content.zeroize();
+                    t.content = i.edit.display().0;
+                }
             }
         }
         self

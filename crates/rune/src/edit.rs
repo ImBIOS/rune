@@ -213,6 +213,26 @@ impl Default for RichStyle {
 }
 
 
+/// Fixed mask shown by a hidden multi-line secure field when non-empty, hiding both byte length
+/// and line count.
+pub(crate) const MULTILINE_SECURE_MASK: &str = "••••••••••••";
+
+/// Mirrors whether the bound [`text_input`](crate::text_input) has [`El::single_line`](crate::El::single_line).
+/// Before a field mounts, standalone [`TextEdit::secure`] defaults to single-line.
+#[derive(Clone, Copy, Default, Eq)]
+enum LineMode {
+    #[default]
+    Default,
+    Single,
+    Multi,
+}
+
+impl PartialEq for LineMode {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
 #[derive(Clone, Default, PartialEq)]
 pub struct TextEdit {
     /// Use `replace_text` to replace a secret without leaving its old allocation behind.
@@ -235,7 +255,7 @@ pub struct TextEdit {
     secure: bool,
     revealed: bool,
     /// Mirrors the field's `El::single_line()`; the runtime sets it before each edit.
-    single_line: bool,
+    line_mode: LineMode,
     /// Formatting keys and rich paste are on (see [`TextEdit::rich`]).
     rich: bool,
     /// The mark kinds this field keeps, one bit per [`Mark::kind_order`]; `None` keeps all.
@@ -256,20 +276,32 @@ impl std::fmt::Debug for TextEdit {
 /// Hashes everything a field draws: text, selection, IME composition, focus, marks, blocks and
 /// whether it's secure or revealed. Pass the edit itself in a [`memo`](crate::memo) version so
 /// the field redraws as the caret or rich formatting changes. A hidden secure field hashes its
-/// length, not its text.
+/// length (single-line) or non-empty state (multi-line), not its text.
 impl std::hash::Hash for TextEdit {
     fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        if self.secure && !self.revealed { self.text.chars().count().hash(h) } else { self.text.hash(h) }
-        self.anchor.hash(h);
-        self.focus.hash(h);
+        if self.is_hidden_multiline() {
+            (!self.text.is_empty()).hash(h);
+            (self.anchor != self.focus).hash(h);
+        } else if self.secure && !self.revealed {
+            self.text.chars().count().hash(h);
+            self.anchor.hash(h);
+            self.focus.hash(h);
+        } else {
+            self.text.hash(h);
+            self.anchor.hash(h);
+            self.focus.hash(h);
+        }
         self.preedit.hash(h);
         self.focused.hash(h);
         self.marks.hash(h);
-        self.blocks.hash(h);
+        if !self.secure {
+            self.blocks.hash(h);
+        }
         self.soft_breaks.hash(h);
         self.pending.hash(h);
         self.secure.hash(h);
         self.revealed.hash(h);
+        self.is_single_line().hash(h);
     }
 }
 
@@ -520,7 +552,7 @@ impl TextEdit {
             group: ActiveGroup::default(),
             secure: false,
             revealed: false,
-            single_line: false,
+            line_mode: LineMode::Default,
             rich: false,
             allowed_marks: None,
             allowed_blocks: None,
@@ -781,7 +813,7 @@ impl TextEdit {
     pub fn replace_text(&mut self, text: impl Into<String>) {
         let text = text.into();
         self.text.zeroize();
-        let line_count = 1 + count_newlines(text.as_bytes());
+        let line_count = if self.secure { 0 } else { 1 + count_newlines(text.as_bytes()) };
         self.text = text;
         self.anchor = self.text.len();
         self.focus = self.anchor;
@@ -811,28 +843,61 @@ impl TextEdit {
         weak.ptr_eq(&Arc::downgrade(&self.history))
     }
 
+    pub(crate) fn is_single_line(&self) -> bool {
+        match self.line_mode {
+            LineMode::Default => self.secure,
+            LineMode::Single => true,
+            LineMode::Multi => false,
+        }
+    }
+
+    /// Whether this is a multi-line secure field in hidden mode (`secure && !revealed && !single_line`).
+    pub(crate) fn is_hidden_multiline(&self) -> bool {
+        self.secure && !self.revealed && !self.is_single_line()
+    }
+
     /// For a secure field that has started exiting: wipe the secret and keep only its mask, so
     /// the field paints the same dots (no placeholder) through the exit with no plaintext.
     pub(crate) fn conceal(&mut self) {
         if !self.secure { return; }
         self.revealed = false;
-        self.replace_text("•".repeat(self.text.chars().count()));
+        let mask = if self.text.is_empty() {
+            String::new()
+        } else if self.is_single_line() {
+            "•".repeat(self.text.chars().count())
+        } else {
+            MULTILINE_SECURE_MASK.to_owned()
+        };
+        self.replace_text(mask);
     }
 
     /// Map model bytes to the bullet layout's bytes and back. Each Unicode scalar gets one
-    /// bullet, so UTF-8 length never changes caret/selection alignment.
+    /// bullet in single-line mode so UTF-8 length never changes caret/selection alignment;
+    /// hidden multi-line fields pin the visual caret to the end of the fixed mask and map
+    /// pointer hits to the end of the model.
     pub(crate) fn display_index(&self, byte: usize) -> usize {
-        if self.secure && !self.revealed {
+        if self.is_hidden_multiline() {
+            if self.text.is_empty() { 0 } else { MULTILINE_SECURE_MASK.len() }
+        } else if self.secure && !self.revealed {
             self.text[..byte.min(self.text.len())].chars().count() * '•'.len_utf8()
         } else {
             byte.min(self.text.len())
         }
     }
     pub(crate) fn model_index(&self, byte: usize) -> usize {
-        if self.secure && !self.revealed {
+        if self.is_hidden_multiline() {
+            self.text.len()
+        } else if self.secure && !self.revealed {
             self.text.char_indices().nth(byte / '•'.len_utf8()).map_or(self.text.len(), |(i, _)| i)
         } else {
             byte.min(self.text.len())
+        }
+    }
+    pub(crate) fn display_selection_range(&self, a: usize, b: usize) -> (usize, usize) {
+        if self.is_hidden_multiline() {
+            if a == b || self.text.is_empty() { (0, 0) } else { (0, MULTILINE_SECURE_MASK.len()) }
+        } else {
+            (self.display_index(a), self.display_index(b))
         }
     }
 
@@ -1155,7 +1220,9 @@ impl TextEdit {
         self.replace(self.range(), s, false);
     }
 
-    pub(crate) fn set_single_line(&mut self, single_line: bool) { self.single_line = single_line; }
+    pub(crate) fn set_single_line(&mut self, single_line: bool) {
+        self.line_mode = if single_line { LineMode::Single } else { LineMode::Multi };
+    }
 
     /// Line index (`0..line_count`) containing `byte`.
     pub fn line_of_byte(&self, byte: usize) -> usize {
@@ -1195,6 +1262,13 @@ impl TextEdit {
     pub(crate) fn sync_invariants(&mut self) {
         self.anchor = Self::clamp_char_boundary(&self.text, self.anchor);
         self.focus = Self::clamp_char_boundary(&self.text, self.focus);
+        if self.secure {
+            self.marks.clear();
+            self.blocks.clear();
+            self.soft_breaks.clear();
+            self.pending = None;
+            return;
+        }
         let line_count = 1 + count_newlines(self.text.as_bytes());
         if self.blocks.len() < line_count {
             self.blocks.resize(line_count, Block::Paragraph);
@@ -1622,7 +1696,7 @@ impl TextEdit {
     /// Set the [`Block`] attribute for all paragraphs in the current selection, unless the field
     /// doesn't [allow](Self::allow_blocks) it.
     pub fn set_block(&mut self, block: Block) {
-        if self.secure || self.single_line || !self.allows_block(block) {
+        if self.secure || self.is_single_line() || !self.allows_block(block) {
             return;
         }
         let block = block.with_level(block.list_level().unwrap_or(0));
@@ -1646,7 +1720,7 @@ impl TextEdit {
     /// the same block kind as `block`, resets them to [`Block::Paragraph`]; otherwise sets `block`
     /// (preserving list nesting level when switching between bullet and numbered lists).
     pub fn toggle_block(&mut self, block: Block) {
-        if self.secure || self.single_line || !self.allows_block(block) {
+        if self.secure || self.is_single_line() || !self.allows_block(block) {
             return;
         }
         self.sync_invariants();
@@ -1679,7 +1753,7 @@ impl TextEdit {
     /// Increase list nesting level (`Tab`) for list items in the selection, up to [`MAX_LIST_LEVEL`].
     /// Returns `true` if the selection was inside a list item.
     pub fn indent_list(&mut self) -> bool {
-        if self.secure || self.single_line {
+        if self.secure || self.is_single_line() {
             return false;
         }
         self.sync_invariants();
@@ -1703,7 +1777,7 @@ impl TextEdit {
     /// Decrease list nesting level (`Shift+Tab`) for list items in the selection.
     /// Returns `true` if the selection was inside a list item.
     pub fn outdent_list(&mut self) -> bool {
-        if self.secure || self.single_line {
+        if self.secure || self.is_single_line() {
             return false;
         }
         self.sync_invariants();
@@ -1724,14 +1798,28 @@ impl TextEdit {
         true
     }
 
-    /// Text typed, pasted or committed into this field. Secure and single-line fields drop
-    /// control characters, line breaks included (stripped, as `<input type=text>` does);
-    /// multi-line fields only fold CRLF to LF. Sized up front so no partial copy of a secret
-    /// is left behind by a reallocation.
+    /// Text typed, pasted or committed into this field. Single-line fields drop control
+    /// characters, line breaks included (stripped, as `<input type=text>` does); multi-line
+    /// fields fold CRLF to LF (and multi-line secure fields also drop control characters other
+    /// than `\n` and `\t`). Sized up front so no partial copy of a secret is left behind by a
+    /// reallocation.
     fn sanitize(&self, s: &str) -> Zeroizing<String> {
         let mut out = Zeroizing::new(String::with_capacity(s.len()));
-        if self.secure || self.single_line {
+        if self.is_single_line() {
             out.extend(s.chars().filter(|c| !c.is_control() && !matches!(c, '\u{2028}' | '\u{2029}')));
+        } else if self.secure {
+            let mut chars = s.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\r' {
+                    if chars.peek() != Some(&'\n') {
+                        out.push('\n');
+                    }
+                    continue;
+                }
+                if (!c.is_control() || matches!(c, '\n' | '\t')) && !matches!(c, '\u{2028}' | '\u{2029}') {
+                    out.push(c);
+                }
+            }
         } else {
             let mut chars = s.chars().peekable();
             while let Some(c) = chars.next() {
@@ -1948,7 +2036,7 @@ impl TextEdit {
     }
 
     fn insert_newline(&mut self, block_for_new_line: Block, soft: bool) {
-        if self.secure || self.single_line {
+        if self.secure || self.is_single_line() {
             return;
         }
         self.sync_invariants();
@@ -2018,7 +2106,7 @@ impl TextEdit {
         let word = m.alt || (m.ctrl && !cfg!(target_os = "macos"));
         match &ev.key {
             Key::Text(s) => {
-                if s.chars().any(|c| !c.is_control()) {
+                if s.chars().any(|c| !c.is_control() || (!self.is_single_line() && matches!(c, '\n' | '\r' | '\t'))) {
                     let s = self.sanitize(s);
                     if !s.is_empty() { self.replace(self.range(), &s, !s.contains(['\r', '\n'])); }
                 }
@@ -2026,8 +2114,14 @@ impl TextEdit {
             // A composition's Return and Escape are the input method's.
             Key::Enter | Key::Escape if self.preedit.is_some() => {}
             Key::Enter => {
-                if self.secure || self.single_line {
+                if self.is_single_line() {
                     out.submit = true;
+                } else if self.secure {
+                    if m.cmd || m.ctrl {
+                        out.submit = true;
+                    } else {
+                        self.replace(self.range(), "\n", false);
+                    }
                 } else {
                     let (a, b) = self.range();
                     let line_idx = self.line_of_byte(a);
@@ -2072,7 +2166,7 @@ impl TextEdit {
                 }
             }
             Key::Tab => {
-                if !m.cmd && !m.alt && !m.ctrl && !self.secure && !self.single_line {
+                if !m.cmd && !m.alt && !m.ctrl && !self.secure && !self.is_single_line() {
                     if self.active_block() == Block::Code && !m.shift {
                         self.replace(self.range(), "\t", true);
                     } else if m.shift {
@@ -2113,7 +2207,13 @@ impl TextEdit {
                             Block::Paragraph => unreachable!(),
                         }
                     } else if a > 0 {
-                        let from = if m.cmd { self.text[..a].rfind('\n').map_or(0, |i| i + 1) } else if word { self.prev_word(a) } else { prev_char(&self.text, a) };
+                        let from = if m.cmd {
+                            if self.secure && !self.revealed { 0 } else { self.text[..a].rfind('\n').map_or(0, |i| i + 1) }
+                        } else if word {
+                            self.prev_word(a)
+                        } else {
+                            prev_char(&self.text, a)
+                        };
                         self.replace((from, a), "", false);
                     }
                 }
@@ -2145,7 +2245,7 @@ impl TextEdit {
             Key::Up | Key::Down => {
                 let down = ev.key == Key::Down;
                 let n = self.text.len();
-                let i = if m.cmd {
+                let i = if m.cmd || (self.secure && !self.revealed) {
                     if down { n } else { 0 }
                 } else if let Some(l) = layout {
                     match crate::text::move_line(l, self.display_index(self.focus), down) {
@@ -2159,8 +2259,8 @@ impl TextEdit {
                     n
                 } else {
                     0
-                };
-                let i = i.min(n);
+                }
+                .min(n);
                 if m.shift {
                     self.focus = i;
                     self.snap_to_pills();
@@ -2199,7 +2299,7 @@ impl TextEdit {
     fn at_end_of_trailing_block(&self) -> bool {
         let n = self.text.len();
         !self.secure
-            && !self.single_line
+            && !self.is_single_line()
             && self.preedit.is_none()
             && (self.anchor, self.focus) == (n, n)
             && matches!(self.blocks.last(), Some(Block::Code | Block::Quote))
@@ -2218,6 +2318,9 @@ impl TextEdit {
     }
 
     fn line_edge(&self, layout: Option<&Layout<Ink>>, end: bool) -> usize {
+        if self.secure && !self.revealed {
+            return if end { self.text.len() } else { 0 };
+        }
         if let Some(l) = layout {
             return self.model_index(crate::text::line_edge(l, self.display_index(self.focus), end));
         }
@@ -2286,7 +2389,7 @@ impl TextEdit {
         }
         self.sync_invariants();
         // A code block takes the plain text, whose whitespace HTML would have collapsed.
-        if !self.single_line {
+        if !self.is_single_line() {
             let (a, _) = self.range();
             if self.blocks.get(self.line_of_byte(a)) == Some(&Block::Code) {
                 return self.paste(if plain.is_empty() { frag.text.as_str() } else { plain });
@@ -2296,7 +2399,7 @@ impl TextEdit {
         let before = self.snapshot();
         let (a, b) = self.range();
 
-        if self.single_line {
+        if self.is_single_line() {
             // Single-line field: strip line breaks from `frag.text` while keeping inline marks.
             let mut clean = String::with_capacity(frag.text.len());
             let mut byte_map = vec![0usize; frag.text.len() + 1];
@@ -2594,7 +2697,15 @@ impl TextEdit {
     /// byte range of the preedit within it.
     pub fn display(&self) -> (String, Option<(usize, usize)>) {
         if self.secure {
-            let text = if self.revealed { self.text.clone() } else { "•".repeat(self.text.chars().count()) };
+            let text = if self.revealed {
+                self.text.clone()
+            } else if self.is_single_line() {
+                "•".repeat(self.text.chars().count())
+            } else if self.text.is_empty() {
+                String::new()
+            } else {
+                MULTILINE_SECURE_MASK.to_owned()
+            };
             return (text, None);
         }
         match &self.preedit {
@@ -2747,6 +2858,62 @@ mod tests {
         assert!(exiting.is_secure() && !exiting.is_revealed());
         assert_eq!(exiting.text, "•••••••");
         assert_eq!(exiting.display().0, "•••••••");
+    }
+
+    #[test]
+    fn multiline_secure_edit_inserts_newlines_keeps_pasted_lines_and_masks_to_fixed_length() {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let hash = |e: &TextEdit| {
+            let mut h = DefaultHasher::new();
+            e.hash(&mut h);
+            h.finish()
+        };
+
+        let mut e = TextEdit::new("").secure();
+        e.set_single_line(false);
+        assert!(!e.is_single_line() && e.is_hidden_multiline());
+        assert_eq!(e.display().0, "");
+        assert_eq!(e.display_index(0), 0);
+
+        e.paste("-----BEGIN FAKE KEY-----\r\nAAAAB3NzaC1yc2E\tline2");
+        assert_eq!(e.text, "-----BEGIN FAKE KEY-----\nAAAAB3NzaC1yc2E\tline2");
+        assert!(!e.key(&k(Key::Enter), None).submit, "plain Enter in multi-line secure field inserts a newline");
+        e.key(&k(Key::Text("-----END FAKE KEY-----".into())), None);
+        assert_eq!(
+            e.text,
+            "-----BEGIN FAKE KEY-----\nAAAAB3NzaC1yc2E\tline2\n-----END FAKE KEY-----"
+        );
+        assert!(
+            e.key(&KeyEvent { key: Key::Enter, mods: Mods { cmd: true, ..Mods::default() } }, None).submit,
+            "Cmd+Enter still submits a multi-line secure field"
+        );
+
+        let mut short = TextEdit::new("ten-bytes!").secure();
+        short.set_single_line(false);
+        let long_secret = (0..50)
+            .map(|i| format!("FAKEKEYLINE{i:02}AAAAB3NzaC1yc2EAAAADAQABAAABAQDfakebase64payloadblock0123456789ABCDEFGH=="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(long_secret.len() >= 4096);
+        let mut long = TextEdit::new(long_secret).secure();
+        long.set_single_line(false);
+
+        assert_eq!(short.display().0, MULTILINE_SECURE_MASK);
+        assert_eq!(long.display().0, MULTILINE_SECURE_MASK);
+        assert_eq!(hash(&short), hash(&long), "hidden multi-line hash must not leak length or line count");
+        for offset in [0, 3, 10, 500, long.text.len()] {
+            assert_eq!(long.display_index(offset), MULTILINE_SECURE_MASK.len());
+            assert_eq!(long.model_index(offset), long.text.len());
+        }
+        assert_eq!(long.display_selection_range(5, 5), (0, 0));
+        assert_eq!(long.display_selection_range(2, 100), (0, MULTILINE_SECURE_MASK.len()));
+
+        // Concealing a multi-line secure field (hidden or revealed) leaves only the fixed mask.
+        let mut exiting_revealed = long.clone().revealed(true);
+        exiting_revealed.conceal();
+        assert!(exiting_revealed.is_secure() && !exiting_revealed.is_revealed());
+        assert_eq!(exiting_revealed.text, MULTILINE_SECURE_MASK);
+        assert_eq!(exiting_revealed.display().0, MULTILINE_SECURE_MASK);
     }
 
     /// Arrows and backspace treat a ZWJ family, a flag and a skin-toned hand as one character.

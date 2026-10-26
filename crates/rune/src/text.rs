@@ -1771,7 +1771,7 @@ impl TextSystem {
         max_width: Option<f32>,
         align: Alignment,
     ) -> Rc<Layout<Ink>> {
-        self.layout_blocks_inner(text, spans, blocks, pills, style, scale, max_width, align, true)
+        self.layout_blocks_inner(text, spans, blocks, pills, style, scale, max_width, align, false, true)
     }
 
     /// Secure display runs must not enter the shared layout cache or leave character
@@ -1785,10 +1785,10 @@ impl TextSystem {
         align: Alignment,
     ) -> Rc<Layout<Ink>> {
         if !spec.redacted {
-            return self.layout_blocks(&spec.content, &spec.spans, &spec.blocks, &spec.pills, spec.style, scale, max_width, align);
+            return self.layout_blocks_inner(&spec.content, &spec.spans, &spec.blocks, &spec.pills, spec.style, scale, max_width, align, spec.wrap_anywhere, true);
         }
         let shared = std::mem::replace(&mut self.layout_cx, LayoutContext::new());
-        let layout = self.layout_blocks_inner(&spec.content, &spec.spans, &spec.blocks, &spec.pills, spec.style, scale, max_width, align, false);
+        let layout = self.layout_blocks_inner(&spec.content, &spec.spans, &spec.blocks, &spec.pills, spec.style, scale, max_width, align, spec.wrap_anywhere, false);
         self.layout_cx = shared;
         layout
     }
@@ -1804,6 +1804,7 @@ impl TextSystem {
         scale: f32,
         max_width: Option<f32>,
         align: Alignment,
+        wrap_anywhere: bool,
         cache: bool,
     ) -> Rc<Layout<Ink>> {
         let has_indented_blocks = blocks.iter().any(|&b| b != crate::edit::Block::Paragraph);
@@ -1822,9 +1823,9 @@ impl TextSystem {
             })
             .collect();
         let mut key = text_hash(text, spans, style, scale, max_width);
-        if align != Alignment::Start || has_indented_blocks || !pills.is_empty() {
+        if align != Alignment::Start || has_indented_blocks || !pills.is_empty() || wrap_anywhere {
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            (key, align as u8, blocks, &pills).hash(&mut h);
+            (key, align as u8, wrap_anywhere, blocks, &pills).hash(&mut h);
             key = h.finish();
         }
         let g = self.generation;
@@ -1980,6 +1981,9 @@ impl TextSystem {
                 b.push_default(parley::FontVariations::List(std::borrow::Cow::Owned(settings)));
             }
             b.push_default(LineHeight::Absolute(style.line_px()));
+            if wrap_anywhere {
+                b.push_default(StyleProperty::OverflowWrap(parley::OverflowWrap::Anywhere));
+            }
             if base_spacing != 0.0 {
                 b.push_default(StyleProperty::LetterSpacing(base_spacing));
             }

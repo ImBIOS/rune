@@ -354,6 +354,15 @@ pub struct TextArea {
 }
 
 impl TextArea {
+    pub fn secure(mut self) -> Self {
+        self.edit.set_secure(true);
+        self
+    }
+    pub fn revealed(mut self, revealed: bool) -> Self {
+        self.edit.set_revealed(revealed);
+        self.edits.revealed(revealed);
+        self
+    }
     pub fn new(edit: &TextEdit) -> TextArea {
         TextArea {
             edit: edit.clone(),
@@ -394,6 +403,11 @@ impl TextArea {
     }
     pub fn animate_edit_layout(mut self) -> Self {
         self.edits.handlers.push(Box::new(El::animate_edit_layout));
+        self
+    }
+    /// See [`El::wrap_anywhere`](rune::El::wrap_anywhere).
+    pub fn wrap_anywhere(mut self) -> Self {
+        self.edits.handlers.push(Box::new(El::wrap_anywhere));
         self
     }
     pub fn invalid(mut self, i: bool) -> Self {
@@ -476,6 +490,17 @@ impl TextArea {
                 Some(h) => viewport.max_h(h.min(max_rows as f32 * line).max(line)),
                 None => viewport,
             })
+        } else if let Some(h) = self.max_height {
+            let min_inner = (self.rows as f32 * line).max(80.0 - 16.0);
+            let viewport = col()
+                .key("scroll")
+                .w_full()
+                .shrink()
+                .min_h(min_inner)
+                .max_h((h - 16.0).max(line))
+                .scroll(rune::ScrollSpec { stick_bottom: false })
+                .child(field.animate_edit_layout());
+            e.min_h((self.rows as f32 * line + 16.0).max(80.0)).child(viewport)
         } else {
             // A <textarea rows=3>: rows of its line height plus padding, at least 80.
             e.min_h((self.rows as f32 * line + 16.0).max(80.0)).child(field)
