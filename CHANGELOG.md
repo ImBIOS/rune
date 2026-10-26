@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`rune::extra_args()` works before `run`.** It used to return nothing until `run` had
+  parsed the command line, so an app choosing what its window opens from its own flags had to
+  call `tooling::Args::parse()` first. Called earlier, it now reads Rune's flags from the
+  process's arguments as `run` does (`--help` and malformed flags included); the first read
+  still wins, so with `App::args` read it after `run` starts.
+
 - **A field that appears on a layout-read re-run takes the focus it asks for.** When a view
   builds a `TextEdit { focused: true, .. }` field only once `Cx::layout` returns a rect (an
   inline editor placed over a node), the field appears on the commit's re-run, which skipped

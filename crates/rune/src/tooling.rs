@@ -125,8 +125,13 @@ pub(crate) fn app_id() -> Option<&'static str> {
     APP_ID.get().copied()
 }
 
-/// Command-line arguments Rune didn't recognise, in order, for the app to interpret.
+/// Command-line arguments Rune didn't recognise, in order, for the app to interpret. Ready
+/// before any window: called before `run` (to pick the file a window opens, say), it reads
+/// Rune's flags from the process's arguments as `run` will, `--help` and a malformed flag
+/// included. The first read wins, so an app that passes `App::args` reads this after `run`
+/// starts.
 pub fn extra_args() -> &'static [String] {
+    if EXTRA.get().is_none() { Args::parse(); }
     EXTRA.get().map_or(&[], |v| v.as_slice())
 }
 

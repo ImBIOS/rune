@@ -296,7 +296,8 @@ policy changes are applied in the same mutation phase.
   select all, copy, cut and paste, undo, and IME preedit through winit (see [Text fields](#text-fields)). `.on_edit(..)` binds the `TextEdit` in app
   state and `.on_submit(..)` runs on Enter.
 - **App hooks**: `AppSpec::setup` (once, with a `Waker` for background threads), `poll(state, clock,
-  tx)` before every frame, `on_key`, and `extra_args()` for the app's own flags.
+  tx)` before every frame, `on_key`, and `extra_args()` for the app's own flags, ready before
+  `run` (to choose the file a window opens).
   `tx.wake_after(Duration::from_millis(250))` schedules a poll on the unscaled app clock,
   even when poll returns false. Equal deadlines coalesce; the shell sleeps until the earliest
   deadline without a timer thread. Every deadline due by a frame collapses into that frame's
