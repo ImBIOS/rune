@@ -202,8 +202,10 @@ impl<S: 'static> Runtime<S> {
             };
             if !within(focused, scope) { return None; }
             let anchor = nodes.iter().find(|n| n.key.as_deref() == Some(key))?;
-            (0..nodes.len()).find(|&j| within(&nodes[j].path, &anchor.path) && shown(j)
-                && (nodes[j].focus.enabled || nodes[j].input.as_ref().is_some_and(|i| i.access.is_some())))
+            let candidates = (0..nodes.len()).filter(|&j| within(&nodes[j].path, &anchor.path) && shown(j)
+                && (nodes[j].focus.enabled || nodes[j].input.as_ref().is_some_and(|i| i.access.is_some())));
+            candidates.clone().find(|&j| nodes[j].focus.selected)
+                .or_else(|| candidates.into_iter().next())
                 .map(|j| nodes[j].path.clone())
         });
         let input_focused = self.focused.as_deref().is_some_and(|p| {

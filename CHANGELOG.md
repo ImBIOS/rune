@@ -5,6 +5,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Two-line `SidebarRow`s default to `TWO_LINE_ROW_HEIGHT` (40 pt) when `subtitle` is set** and
+  return focus to the selected row when inline rename ends.
 - **Hiding a pane or overlay keeps focus where it was outside that subtree.** `El::focus_return`
   restores its trigger only when the focused control was inside the removed subtree (or pane);
   hiding the sidebar with `⇧⌘B` while typing in a main-pane field keeps focus in the field

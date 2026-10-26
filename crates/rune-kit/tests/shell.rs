@@ -15,6 +15,7 @@ struct S {
     inspector: PaneState,
     picked: usize,
     collapsed: bool,
+    two_lines: bool,
     rows: Option<usize>,
     renaming: Option<usize>,
     edit: TextEdit,
@@ -28,6 +29,7 @@ fn state() -> S {
         inspector: PaneState::new(220.0).collapsed(),
         picked: 1,
         collapsed: false,
+        two_lines: false,
         rows: None,
         renaming: None,
         edit: TextEdit::default(),
@@ -39,6 +41,9 @@ fn state() -> S {
 fn row(s: &S, i: usize, k: &Kit) -> El {
     let label = NAMES.get(i).map_or_else(|| format!("Row {i}"), |n| n.to_string());
     let mut r = SidebarRow::new(label).selected(s.picked == i).on_select(move |s: &mut S, _| s.picked = i);
+    if s.two_lines {
+        r = r.subtitle(format!("user{i}@example.com"));
+    }
     if s.renaming == Some(i) {
         r = r.renaming(
             &s.edit,
@@ -498,4 +503,36 @@ fn a_rename_field_keeps_letters_and_arrows_that_would_type_select_a_row() {
     }
     assert_eq!(rt.state.edit.text, "Del", "Delta's first letter goes to the field");
     assert_eq!((rt.state.picked, focused(&rt).as_deref()), (1, Some("rename")), "no row was type-selected");
+}
+
+#[test]
+fn two_line_rows_keep_focus_keyboard_navigation_and_accessible_labels() {
+    let mut rt = runtime(S { two_lines: true, ..state() });
+    let focused = |rt: &Runtime<S>| rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key);
+    let r2 = find(&rt, "row2");
+    assert_eq!((r2.role, r2.label.as_deref(), r2.rect[3]), ("listitem", Some("Charlie"), 40.0));
+
+    press(&mut rt, Key::Tab);
+    assert_eq!(focused(&rt).as_deref(), Some("row1"), "Tab lands on the selected two-line row");
+    press(&mut rt, Key::Down);
+    assert_eq!((focused(&rt).as_deref(), rt.state.picked), (Some("row2"), 2));
+    press(&mut rt, Key::Home);
+    assert_eq!((focused(&rt).as_deref(), rt.state.picked), (Some("row0"), 0));
+    press(&mut rt, Key::Text("d".into()));
+    assert_eq!((focused(&rt).as_deref(), rt.state.picked), (Some("row3"), 3), "type-select matches the title label");
+    rt.state.picked = 0;
+    press(&mut rt, Key::Enter);
+    assert_eq!(rt.state.picked, 3, "Return selects the focused two-line row");
+
+    // Ending an inline rename on a two-line row returns focus to the selected row.
+    rt.update(|s, _| {
+        s.picked = 1;
+        s.renaming = Some(1);
+        s.edit = TextEdit::new("Bravo");
+        s.edit.focused = true;
+    });
+    rt.frame(1.0 / 60.0);
+    assert_eq!(focused(&rt).as_deref(), Some("rename"));
+    press(&mut rt, Key::Escape);
+    assert_eq!(focused(&rt).as_deref(), Some("row1"), "ending rename returns focus to the selected row");
 }

@@ -13,6 +13,9 @@ type Themed = Box<dyn FnOnce(&Kit) -> El>;
 
 /// A sidebar row's height (AppKit's medium source-list row).
 pub const ROW_HEIGHT: f32 = 28.0;
+/// A two-line sidebar row's default height when [`SidebarRow::subtitle`] is set without
+/// [`SidebarRow::height`].
+pub const TWO_LINE_ROW_HEIGHT: f32 = 40.0;
 /// Each level of [`SidebarRow::depth`] indents this far.
 pub const INDENT: f32 = 16.0;
 /// Rows sit this far in from the sidebar's sides.
@@ -334,7 +337,7 @@ pub struct SidebarRow {
     close: Option<Apply>,
     selected: bool,
     depth: u8,
-    height: f32,
+    height: Option<f32>,
     rename: Option<(TextEdit, Apply)>,
     reorder: Option<Reordering>,
     acts: Vec<Apply>,
@@ -354,7 +357,7 @@ impl SidebarRow {
             close: None,
             selected: false,
             depth: 0,
-            height: ROW_HEIGHT,
+            height: None,
             rename: None,
             reorder: None,
             acts: Vec::new(),
@@ -374,9 +377,9 @@ impl SidebarRow {
         self.subtitle = Some(s.into());
         self
     }
-    /// The row's height (default [`ROW_HEIGHT`]).
+    /// The row's height (default [`ROW_HEIGHT`], or [`TWO_LINE_ROW_HEIGHT`] with a subtitle).
     pub fn height(mut self, points: f32) -> Self {
-        self.height = points.max(1.0);
+        self.height = Some(points.max(1.0));
         self
     }
     /// Faint trailing text: a time ("2m"), a count, a shortcut.
@@ -486,11 +489,12 @@ impl SidebarRow {
         let renaming = self.rename.is_some();
         let (ink, glyph) = if self.selected { (c.text_base, c.icon_base) } else { (c.text_muted, c.icon_muted) };
         let two_lines = self.subtitle.is_some();
+        let height = self.height.unwrap_or(if two_lines { TWO_LINE_ROW_HEIGHT } else { ROW_HEIGHT });
         let font = if two_lines { k.ty.ui_compact } else { k.ty.ui };
         let mut r = row()
             .label(self.label.clone())
             .w_full()
-            .h(self.height)
+            .h(height)
             .pl(INSET + self.depth as f32 * INDENT)
             .pr(INSET)
             .gap(6.0)
