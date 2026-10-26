@@ -990,12 +990,14 @@ impl Markdown {
     }
     /// Called with a link's destination when it is clicked, or pressed with Enter or Space
     /// while focused. With a handler, links show a hand and a solid underline under the
-    /// pointer and are Tab stops; without one they are styled text only.
+    /// pointer and are Tab stops; without one they are styled text only. Shares its slot with
+    /// [`Self::on_link_tx`] (the later call wins).
     pub fn on_link<S: 'static>(self, f: impl Fn(&mut S, &str) + 'static) -> Self {
         self.on_link_tx(move |s: &mut S, url, _| f(s, url))
     }
     /// [`Self::on_link`] with the [`Tx`] of the press, for a handler that opens a screen, scrolls
-    /// or copies in the same commit (an app's own `scheme:id` links, say).
+    /// or copies in the same commit (an app's own `scheme:id` links, say). Replaces any earlier
+    /// `on_link` or `on_link_tx` handler (the later call wins).
     pub fn on_link_tx<S: 'static>(mut self, f: impl Fn(&mut S, &str, &mut Tx) + 'static) -> Self {
         let f = Rc::new(f);
         self.on_link = Some(Rc::new(move |e: El| {
@@ -1007,8 +1009,9 @@ impl Markdown {
     /// A look for some links by destination. `f` returns `None` for the default look
     /// ([`MarkdownStyle::link`] with its underline, and an accent underline on hover), or
     /// `Some((resting, hover))`: the [`Span`] drawn over the link's text (colour, weight,
-    /// `bg` with its padding, underline; its range is ignored) and the [`LinkPaint`] over it
-    /// while hovered. Applies with or without a handler.
+    /// `bg` with its padding, underline; its range is ignored, and emphasis, strong and inline
+    /// code inside the link keep their styles over it) and the [`LinkPaint`] over it while
+    /// hovered. Applies with or without a handler.
     pub fn link_style(mut self, f: impl Fn(&str) -> Option<(Span, LinkPaint)> + 'static) -> Self {
         self.link_look = Some(Rc::new(f));
         self
@@ -1134,39 +1137,57 @@ fn tabbed(code: &str, mut spans: Vec<Span>, style: TextStyle) -> El {
 }
 
 impl Renderer {
+    fn link_span(&self, a: usize, b: usize, inl: &Inline) -> Span {
+        let s = &self.s;
+        let url = inl.links.iter().find(|l| (l.0, l.1) == (a, b)).map(|l| l.2.as_str());
+        if let Some((own, _)) = self.link_look.as_ref().and_then(|look| url.and_then(|u| look(u))) {
+            Span { start: a as u32, end: b as u32, ..own }
+        } else {
+            Span { color: Some(s.accent), underline: Some(s.link_underline), ..Span::new(a, b) }
+        }
+    }
+
     fn spans(&self, inl: &Inline, base: f32) -> Vec<Span> {
         let s = &self.s;
-        inl.spans
-            .iter()
-            .map(|&(a, b, st)| {
-                let mut sp = Span::new(a, b);
-                if let (Style::Link, Some(look)) = (st, &self.link_look) {
-                    let url = inl.links.iter().find(|l| (l.0, l.1) == (a, b)).map(|l| l.2.as_str());
-                    if let Some((own, _)) = url.and_then(|u| look(u)) {
-                        return Span { start: sp.start, end: sp.end, ..own };
-                    }
-                }
-                match st {
-                    Style::Code => {
-                        sp.mono = true;
-                        sp.weight = Some(s.inline_code_weight);
-                        sp.size = Some(base * s.inline_code_scale);
+        let links: Vec<Span> = if inl.links.is_empty() {
+            Vec::new()
+        } else {
+            inl.spans.iter().filter(|s| matches!(s.2, Style::Link)).map(|&(a, b, _)| self.link_span(a, b, inl)).collect()
+        };
+        let mut next_link = 0;
+        let mut out = Vec::with_capacity(inl.spans.len());
+        for &(a, b, st) in &inl.spans {
+            if matches!(st, Style::Link) {
+                let sp = links[next_link].clone();
+                next_link += 1;
+                let at = out.iter().position(|p: &Span| p.start < sp.end && sp.start < p.end).unwrap_or(out.len());
+                out.insert(at, sp);
+                continue;
+            }
+            let in_link = links.iter().find(|l| l.start <= a as u32 && b as u32 <= l.end);
+            let mut sp = Span::new(a, b);
+            match st {
+                Style::Code => {
+                    let link_base = in_link.and_then(|l| l.size).unwrap_or(base);
+                    sp.mono = true;
+                    sp.weight = Some(s.inline_code_weight);
+                    sp.size = Some(link_base * s.inline_code_scale);
+                    if in_link.is_none_or(|l| l.bg.is_none()) {
                         sp.bg = Some(s.code_bg);
                     }
-                    Style::CodePad => sp.bg = Some(s.code_bg),
-                    Style::Strong => sp.weight = Some(s.strong_weight),
-                    Style::Em => {
-                        sp.color = Some(s.text);
-                        sp.italic = true;
-                    }
-                    Style::Link => {
-                        sp.color = Some(s.accent);
-                        sp.underline = Some(s.link_underline);
+                }
+                Style::CodePad => {
+                    if in_link.is_none_or(|l| l.bg.is_none()) {
+                        sp.bg = Some(s.code_bg);
                     }
                 }
-                sp
-            })
-            .collect()
+                Style::Strong => sp.weight = Some(s.strong_weight),
+                Style::Em => sp.italic = true,
+                Style::Link => unreachable!(),
+            }
+            out.push(sp);
+        }
+        out
     }
 
     /// The single place a link press is connected: each of `inl.links` becomes a pressable
@@ -1585,5 +1606,24 @@ mod tests {
         doc_cached("[x]\n\nsome text\n\n[x]: https://example.com");
         assert_eq!(parses().0 - before.0, 2);
         assert_eq!(parse_cached("[x]\n\nsome text\n\n[x]: https://example.com")[0], parse("[x]\n\nsome text\n\n[x]: https://example.com")[0]);
+    }
+
+    #[test]
+    fn link_spans_come_before_inner_inline_styles_so_bold_em_and_code_keep_theirs() {
+        let style = MarkdownStyle::neutral(true);
+        let bg = Color { r: 1.0, g: 0.0, b: 0.5, a: 1.0 };
+        let look: LinkLook = Rc::new(move |url| {
+            url.starts_with("session:").then(|| (Span::new(0, 0).color(Color::WHITE).weight(500.0).bg(bg, 3.0), LinkPaint::new()))
+        });
+        let (blocks, sources) = doc_cached("[**bold** *em* `code` plain](session:1)");
+        let Block::Para(inl) = &blocks[0] else { panic!() };
+        let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, link_look: Some(look), selectable: false,
+            scroll_wide: false, highlighter: Highlighter::builtin(), sources, next_source: Cell::new(0) };
+        let spans = r.spans(inl, style.body.size);
+        // The link span is first so `flatten_spans` applies inner Strong/Em/Code over it.
+        assert_eq!((spans[0].start, spans[0].end, spans[0].color, spans[0].weight, spans[0].bg, spans[0].bg_pad), (0, inl.text.len() as u32, Some(Color::WHITE), Some(500.0), Some(bg), 3.0));
+        assert!(spans.iter().any(|s| &inl.text[s.start as usize..s.end as usize] == "bold" && s.weight == Some(style.strong_weight)));
+        assert!(spans.iter().any(|s| &inl.text[s.start as usize..s.end as usize] == "em" && s.italic && s.color.is_none()));
+        assert!(spans.iter().any(|s| &inl.text[s.start as usize..s.end as usize] == "code" && s.mono && s.size == Some(style.body.size * style.inline_code_scale) && s.bg.is_none()));
     }
 }

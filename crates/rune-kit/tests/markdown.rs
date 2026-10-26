@@ -658,12 +658,20 @@ fn chip_rt(tx_mode: bool) -> Runtime<Chips> {
     rt
 }
 
-fn has_fill(rt: &Runtime<Chips>, hex: &str) -> bool {
+fn fill_rects<S>(rt: &Runtime<S>, hex: &str) -> Vec<[f32; 4]> {
     let want = rune::color::hex(hex).unwrap().premul(1.0);
-    rt.instances.iter().any(|i| i.fill.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-3))
+    rt.instances
+        .iter()
+        .filter(|i| i.params[1] == rune::render::KIND_RECT && i.fill.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-3))
+        .map(|i| i.rect)
+        .collect()
 }
 
-fn centre(rt: &Runtime<Chips>, key: &str) -> (f32, f32) {
+fn has_fill(rt: &Runtime<Chips>, hex: &str) -> bool {
+    !fill_rects(rt, hex).is_empty()
+}
+
+fn centre<S>(rt: &Runtime<S>, key: &str) -> (f32, f32) {
     let e = rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("no {key}"));
     (e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0)
 }
@@ -687,20 +695,129 @@ fn on_link_tx_reaches_the_tx_and_on_link_still_works() {
     rt.frame(1.0 / 60.0);
     assert_eq!(rt.state.opened, ["session:abc"]);
     assert!(rt.copy_request.is_none());
+
+    // Setting both on_link and on_link_tx keeps whichever was called last.
+    fn tx_last(_: &Vec<String>, _: &mut Cx<Vec<String>>) -> El {
+        Markdown::new("[go](session:1)")
+            .on_link(|s: &mut Vec<String>, _| s.push("plain".into()))
+            .on_link_tx(|s: &mut Vec<String>, url, tx| {
+                s.push(format!("tx:{url}"));
+                tx.copy(url);
+            })
+            .build(&Kit::neutral(true))
+    }
+    fn plain_last(_: &Vec<String>, _: &mut Cx<Vec<String>>) -> El {
+        Markdown::new("[go](session:1)")
+            .on_link_tx(|s: &mut Vec<String>, _, tx| {
+                s.push("tx".into());
+                tx.copy("tx");
+            })
+            .on_link(|s: &mut Vec<String>, url| s.push(format!("plain:{url}")))
+            .build(&Kit::neutral(true))
+    }
+    let mut rt = Runtime::new(Vec::new(), tx_last, (200.0, 100.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let (x, y) = centre(&rt, "session:1");
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state, ["tx:session:1"]);
+    assert_eq!(rt.copy_request.as_deref(), Some("session:1"));
+
+    let mut rt = Runtime::new(Vec::new(), plain_last, (200.0, 100.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let (x, y) = centre(&rt, "session:1");
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state, ["plain:session:1"]);
+    assert!(rt.copy_request.is_none());
 }
 
 #[test]
-fn link_style_looks_only_at_the_urls_it_names() {
+fn link_style_looks_only_at_the_urls_it_names_and_hover_matches_its_padded_rect() {
     let mut rt = chip_rt(false);
-    assert!(has_fill(&rt, CHIP_BG), "the session link's own background");
+    let resting = fill_rects(&rt, CHIP_BG);
+    assert_eq!(resting.len(), 1, "one resting chip rect: {resting:?}");
+    let chip_el = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("session:abc")).unwrap();
+    assert_eq!((chip_el.role, chip_el.label.as_deref()), ("link", Some("Title")));
+    assert!((resting[0][2] - (chip_el.rect[2] + 6.0)).abs() < 1.5, "bg_pad 3 widens both sides: {:?} vs {:?}", resting[0], chip_el.rect);
+
     // The https link stays at the default look: hovering it paints no chip hover colour.
     let (x, y) = centre(&rt, "https://a.dev");
     rt.pointer_move(x, y);
     rt.frame(1.0 / 60.0);
     assert!(!has_fill(&rt, CHIP_HOVER));
-    // Hovering the chip paints its hover.
+
+    // Hovering the chip replaces the resting fill with the hover fill on the exact same rect.
     let (x, y) = centre(&rt, "session:abc");
     rt.pointer_move(x, y);
     rt.frame(1.0 / 60.0);
-    assert!(has_fill(&rt, CHIP_HOVER), "hover paint");
+    assert_eq!(fill_rects(&rt, CHIP_HOVER), resting, "hover bg keeps the resting pad and height");
+    assert!(!has_fill(&rt, CHIP_BG), "resting bg does not bleed under hover bg");
+}
+
+#[test]
+fn styled_links_keep_inner_styles_select_copy_and_stream_across_chunks() {
+    fn view(src: &String, _: &mut Cx<String>) -> El {
+        let bg = rune::color::hex(CHIP_BG).unwrap();
+        let hover = rune::color::hex(CHIP_HOVER).unwrap();
+        col().w(160.0).child(
+            Markdown::new(src.clone())
+                .reveal(0.2)
+                .selectable(true)
+                .link_style(move |url| {
+                    url.starts_with("session:").then(|| {
+                        (rune::Span::new(0, 0).color(Color::WHITE).weight(500.0).bg(bg, 3.0), LinkPaint::new().bg(hover))
+                    })
+                })
+                .on_link(|_: &mut String, _| {})
+                .build(&Kit::neutral(true)),
+        )
+    }
+
+    // 1. Streaming a link split across chunks: once `)` arrives, the link gets its chip style.
+    let mut rt = Runtime::new("Start [First **bold** `code`](ses".to_owned(), view, (160.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    assert!(fill_rects(&rt, CHIP_BG).is_empty(), "unclosed link syntax is still plain text");
+
+    rt.state = "Start [First **bold** `code`](session:one)".to_owned();
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+    assert_eq!(fill_rects(&rt, CHIP_BG).len(), 1, "completed link gets one merged chip rect");
+
+    // 2. Appending a second styled link fades its glyphs in through word reveal and wraps cleanly.
+    rt.state = "Start [First **bold** `code`](session:one) and *[Second](session:two)* on the next line.".to_owned();
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+    let chips = fill_rects(&rt, CHIP_BG);
+    assert_eq!(chips.len(), 2, "inner bold and code runs share one merged chip rect per link: {chips:?}");
+    assert!(chips[0][1] + chips[0][3] < chips[1][1], "chips on adjacent lines do not overlap: {chips:?}");
+    // Mid-reveal the newly arrived second link's glyphs are fading in (0 < alpha < 1).
+    let fading = rt.instances.iter().any(|i| i.params[1] == rune::render::KIND_GLYPH && i.fill[3] > 0.01 && i.fill[3] < 0.99);
+    assert!(fading, "reveal fades in styled link glyphs");
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+    }
+    // After the reveal lands, all glyphs inside both styled links draw at full WHITE alpha 1.
+    let white_glyphs = rt
+        .instances
+        .iter()
+        .filter(|i| i.params[1] == rune::render::KIND_GLYPH && (i.fill[0] - 1.0).abs() < 1e-3 && (i.fill[1] - 1.0).abs() < 1e-3 && (i.fill[2] - 1.0).abs() < 1e-3 && (i.fill[3] - 1.0).abs() < 1e-3)
+        .count();
+    assert!(white_glyphs >= "FirstboldcodeSecond".len(), "both links' glyphs keep WHITE (even inside *em*): {white_glyphs}");
+
+    // Selecting and copying gets the link text without markdown syntax or inline-code padding.
+    rt.pointer_move(2.0, 6.0);
+    rt.pointer_down(2.0, 6.0);
+    rt.pointer_up(2.0, 6.0);
+    rt.frame(1.0 / 60.0);
+    let cmd = rune::Mods { cmd: true, ..Default::default() };
+    rt.key(rune::KeyEvent { key: rune::Key::Command('a'), mods: cmd });
+    rt.frame(1.0 / 60.0);
+    rt.key(rune::KeyEvent { key: rune::Key::Command('c'), mods: cmd });
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.copy_request.as_deref(), Some("Start First bold code and Second on the next line."));
 }

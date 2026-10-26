@@ -6,9 +6,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 ## dev
 
 - **`Markdown::on_link_tx` and `Markdown::link_style`.** `on_link_tx(|s, url, tx| ..)` is `on_link`
-  with the press's `Tx` (`on_link` is unchanged). `link_style(|url| -> Option<(Span, LinkPaint)>)`
-  gives chosen links their own resting `Span` (colour, weight, `bg` with padding, underline) and
-  hover paint; `None` keeps the default look, so nothing moves unless an app opts in.
+  with the press's `Tx` (`on_link` is unchanged; the two share one slot so the later call wins).
+  `link_style(|url| -> Option<(Span, LinkPaint)>)` gives chosen links their own resting `Span`
+  (colour, weight, `bg` with padding, underline; emphasis, strong and inline code inside a link
+  keep their styles over it) and hover paint, whose `bg` takes the resting span's `bg_pad` and
+  height; `None` keeps the default look, so nothing moves unless an app opts in. Touching runs of a
+  padded `Span::bg` now merge into one rounded rect.
 
 - **`PopupList::padding` and `PopupList::row_radius`.** The popover's padding and each row's
   corner radius were fixed at 4 points; both builders keep 4 as the default, so nothing moves.

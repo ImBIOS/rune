@@ -37,29 +37,64 @@ fn boxes(layout: &Layout<Ink>, len: usize, start: u32, end: u32) -> Vec<(parley:
     crate::text::range_boxes(layout, a, b, false)
 }
 
-/// The link paints to draw this frame, by byte range.
-pub(super) struct LinkFx(Vec<(u32, u32, LinkPaint)>);
+/// The link paints to draw this frame, by byte range, with the resting span's `bg_pad`.
+pub(super) struct LinkFx(Vec<(u32, u32, LinkPaint, f32)>);
 
 impl LinkFx {
     pub(super) fn is_empty(&self) -> bool { self.0.is_empty() }
 
     pub(super) fn glyph_color(&self, byte: u32) -> Option<Color> {
-        self.0.iter().find(|(a, b, p)| byte >= *a && byte < *b && p.color.is_some()).and_then(|(_, _, p)| p.color)
+        self.0.iter().find(|(a, b, p, _)| byte >= *a && byte < *b && p.color.is_some()).and_then(|(_, _, p, _)| p.color)
     }
 
     /// Backgrounds and underlines (device px, layout top-left at `origin`).
     pub(super) fn decos(&self, layout: &Layout<Ink>, len: usize, s: f32, origin: [f32; 2], out: &mut Vec<Deco>) {
-        for &(a, b, p) in &self.0 {
+        for &(a, b, p, bg_pad) in &self.0 {
             for (bb, line) in boxes(layout, len, a, b) {
                 let (x0, w) = (origin[0] + bb.x0 as f32, (bb.x1 - bb.x0) as f32);
                 if let Some(c) = p.bg {
-                    let pad = 2.0 * s;
-                    let (y0, y1) = ((origin[1] + bb.y0 as f32).round(), (origin[1] + bb.y1 as f32).round());
-                    out.push(Deco { rect: [x0 - pad, y0, w + 2.0 * pad, y1 - y0], color: c, radius: 4.0 * s });
+                    let pad = bg_pad * s;
+                    let (mut y0, mut y1) = ((origin[1] + bb.y0 as f32).round(), (origin[1] + bb.y1 as f32).round());
+                    if let Some(l) = layout.get(line) {
+                        let base = origin[1] + l.metrics().baseline;
+                        let (mut asc, mut desc) = (0.0f32, 0.0f32);
+                        for run in l.runs() {
+                            let r = run.text_range();
+                            if r.start < b as usize && (a as usize) < r.end {
+                                let fm = run.font_metrics();
+                                (asc, desc) = (asc.max(fm.ascent), desc.max(fm.descent.abs()));
+                            }
+                        }
+                        if asc > 0.0 || desc > 0.0 {
+                            y0 = (base - asc - 1.0 * s).round();
+                            y1 = (base + desc + 1.0 * s).round();
+                        }
+                    }
+                    let rect = [x0 - pad, y0, w + 2.0 * pad, y1 - y0];
+                    if let Some(d) = out.iter_mut().find(|d| {
+                        d.radius > 0.0
+                            && (d.rect[0] - rect[0]).abs() < 1.5
+                            && (d.rect[2] - rect[2]).abs() < 1.5
+                            && d.rect[1] < y1
+                            && y0 < d.rect[1] + d.rect[3]
+                    }) {
+                        d.color = c;
+                    } else {
+                        out.push(Deco { rect, color: c, radius: 4.0 * s });
+                    }
                 }
                 if let (Some(c), Some(l)) = (p.underline, layout.get(line)) {
                     let y = (origin[1] + l.metrics().baseline + 2.0 * s).round();
-                    out.push(Deco { rect: [x0, y, w, s.max(1.0)], color: c, radius: 0.0 });
+                    if let Some(d) = out.iter_mut().find(|d| {
+                        d.radius == 0.0
+                            && (d.rect[0] - x0).abs() < 1.5
+                            && (d.rect[2] - w).abs() < 1.5
+                            && (d.rect[1] - y).abs() < 1.5
+                    }) {
+                        d.color = c;
+                    } else {
+                        out.push(Deco { rect: [x0, y, w, s.max(1.0)], color: c, radius: 0.0 });
+                    }
                 }
             }
         }
@@ -135,12 +170,13 @@ impl<S: 'static> Runtime<S> {
             } else if focused == Some(k) {
                 let p = l.focused.unwrap_or(l.hover);
                 if p.is_empty() {
-                    let ink = spec.spans.iter().find(|sp| sp.start <= l.start && sp.end > l.start).and_then(|sp| sp.color);
+                    let ink = spec.spans.iter().filter(|sp| sp.start <= l.start && sp.end > l.start).find_map(|sp| sp.color);
                     LinkPaint::new().underline(ink.unwrap_or(spec.color))
                 } else { p }
             } else { continue };
             let (a, b) = drawn(&self.nodes[i], l.start, l.end);
-            fx.push((a, b, paint));
+            let pad = spec.spans.iter().find(|sp| sp.start < l.end && sp.end > l.start && sp.bg.is_some()).map_or(2.0, |sp| sp.bg_pad);
+            fx.push((a, b, paint, pad));
         }
         LinkFx(fx)
     }

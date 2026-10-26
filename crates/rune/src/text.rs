@@ -2263,7 +2263,7 @@ impl TextSystem {
                             if d.color == bg
                                 && d.rect[1] < bot
                                 && top < d.rect[1] + d.rect[3]
-                                && (d.rect[0] + d.rect[2] - rect[0]).abs() < 1.0 =>
+                                && (d.rect[0] + d.rect[2] - rect[0] - 2.0 * pad).abs() < 1.0 =>
                         {
                             if rect[2] > d.rect[2] {
                                 (d.rect[1], d.rect[3]) = (rect[1], rect[3]);

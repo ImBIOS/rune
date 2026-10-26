@@ -117,6 +117,16 @@ impl Renderer {
         let settled = if t.open && self.streaming { t.rows.len().saturating_sub(1) } else { t.rows.len() };
         let rows = &t.rows[..settled];
         let cap = self.s.table_min_column;
+        let link_styles: Vec<_> = if let Some(look) = &self.link_look {
+            t.head
+                .iter()
+                .chain(rows.iter().flatten())
+                .flat_map(|inl| &inl.links)
+                .map(|(_, _, url)| look(url).map(|(sp, _)| (sp.weight.map(f32::to_bits), sp.size.map(f32::to_bits), sp.mono, sp.italic)))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let key = hash_of((
             n,
             &t.head,
@@ -128,6 +138,7 @@ impl Renderer {
             self.s.inline_code_weight.to_bits(),
             self.s.table_pad.map(f32::to_bits),
             self.s.table_flush_left,
+            link_styles,
         ));
         if let Some(hit) = WIDTHS.with_borrow_mut(|c| c.get(&key).cloned()) {
             return hit;

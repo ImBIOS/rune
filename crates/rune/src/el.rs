@@ -1334,7 +1334,11 @@ pub fn text(content: impl Into<String>) -> El {
 pub fn rich(content: impl Into<String>, spans: Vec<Span>) -> El {
     let mut e = text(content);
     if let Some(t) = &mut e.text {
-        t.spans = spans;
+        t.spans = if spans.len() <= 1 || spans.windows(2).all(|w| w[0].start < w[0].end && w[0].end <= w[1].start) {
+            spans
+        } else {
+            crate::text::flatten_spans(&spans)
+        };
         t.wrap = true;
     }
     e
