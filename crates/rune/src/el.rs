@@ -3023,7 +3023,9 @@ impl El {
     /// siblings keep their places, and hit tests follow the shift. A change springs on the
     /// element's layout spring (or [`Self::offset_motion`]); under Reduce Motion, and in an
     /// instant transaction, it lands at once. A reordered row slides aside this way while a
-    /// dragged one passes it, even in a growth or virtual list whose rows lay out instantly.
+    /// dragged one passes it. When a commit both changes the offset and moves the element in a
+    /// growth or virtual list (whose rows lay out at once), the offset starts from where the
+    /// element was drawn, so a dropped row that clears its offset slides into its new place.
     /// Not for an element with a `live_offset` or a sliding loop, which own the same shift.
     pub fn offset(mut self, x: f32, y: f32) -> Self {
         let ok = |v: f32| if v.is_finite() { v } else { 0.0 };

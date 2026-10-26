@@ -104,3 +104,70 @@ fn hover_change_hears_an_element_that_appears_under_a_still_pointer() {
     }
     assert_eq!(rt.state.hover, [true], "the pointer is inside without moving");
 }
+
+mod reorder {
+    use std::borrow::Cow;
+
+    use rune::{Cx, El, Env, GrowthSpec, Runtime, ScrollSpec, Spring, col, el};
+
+    struct S {
+        order: Vec<usize>,
+        shift: Vec<f32>,
+        list: u8,
+    }
+
+    fn row(s: &S, slot: usize) -> El {
+        el().key(format!("r{}", s.order[slot])).w_full().h(40.0).motion(Spring::new(0.3, 0.0)).offset(0.0, s.shift[slot])
+    }
+
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        let list = col().key("list").w_full();
+        let list = match s.list {
+            0 => list.children((0..s.order.len()).map(|i| row(s, i))),
+            1 => list.growth(GrowthSpec::default()).children((0..s.order.len()).map(|i| row(s, i))),
+            _ => list.growth(GrowthSpec::default()).virtual_rows(
+                s.order.len(),
+                40.0,
+                |s: &S, i| Cow::Owned(format!("r{}", s.order[i])),
+                |s: &S, i| row(s, i),
+            ),
+        };
+        col().w_full().h_full().child(col().w_full().h_full().scroll(ScrollSpec { stick_bottom: false }).child(list))
+    }
+
+    fn y(rt: &Runtime<S>, k: &str) -> f32 {
+        rt.elements().into_iter().find(|e| e.key.as_deref() == Some(k)).unwrap().rect[1]
+    }
+
+    /// Drag `r0` 50 points down past `r1`, which steps up, then drop it in slot 1.
+    fn drop_reordered(list: u8) {
+        let mut rt = Runtime::new(S { order: vec![0, 1, 2, 3], shift: vec![0.0; 4], list }, view, (200.0, 400.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.update(|s, tx| {
+            tx.instant();
+            s.shift = vec![50.0, -40.0, 0.0, 0.0];
+        });
+        rt.frame(1.0 / 60.0);
+        assert_eq!((y(&rt, "r0"), y(&rt, "r1")), (50.0, 0.0));
+        rt.update(|s, _| {
+            s.order = vec![1, 0, 2, 3];
+            s.shift = vec![0.0; 4];
+        });
+        let mut last = 50.0;
+        for _ in 0..90 {
+            rt.frame(1.0 / 60.0);
+            let (r0, r1) = (y(&rt, "r0"), y(&rt, "r1"));
+            assert!(r0 <= last + 0.01 && r0 >= 39.99, "list {list}: r0 slides from 50 to 40, at {r0}");
+            assert!(r1.abs() < 0.01, "list {list}: r1 stays where it was drawn, at {r1}");
+            last = r0;
+        }
+        assert!((last - 40.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_reordered_row_that_drops_its_offset_slides_from_where_it_was_drawn() {
+        drop_reordered(0);
+        drop_reordered(1);
+        drop_reordered(2);
+    }
+}

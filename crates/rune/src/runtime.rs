@@ -3933,6 +3933,8 @@ impl<S: 'static> Runtime<S> {
                 let mount = if instant || nodes[i].virtual_mount || quiet_row { Mount::Initial } else { Mount::Animated };
                 self.scene.insert(id, spec, mount);
             }
+            // How far a growth or virtual row's place jumps in this commit (drawn minus new).
+            let mut row_jump = 0.0;
             if was_present {
                 // As in SwiftUI, a node leaves with the transition of its last render.
                 if !was_exiting {
@@ -3953,6 +3955,7 @@ impl<S: 'static> Runtime<S> {
                     // Growth and virtual windows own a row's vertical place; its horizontal place
                     // still springs, or a re-centred column jumps against its moving parent. So
                     // do `animate_layout` contents inside the row.
+                    if let Some(drawn) = self.scene.get(id, prop::FRAME) { row_jump = drawn.y - scene_rect.y; }
                     let mut la = LayoutAnim::axes(spring_l, Anim::INSTANT);
                     if tx.motion.is_none() && nodes[i].width_leads {
                         la = la.width_leads();
@@ -4001,6 +4004,12 @@ impl<S: 'static> Runtime<S> {
                 if instant || !was_present || was_exiting || self.reduced_motion {
                     self.scene.set(id, prop::OFFSET, to);
                 } else if self.scene.store().target(id, prop::OFFSET) != Some(to) {
+                    if row_jump != 0.0 {
+                        // The row starts from where it was drawn: a reordered row that drops its
+                        // offset slides into its new place.
+                        let now = self.scene.get(id, prop::OFFSET).unwrap_or(rune_motion::Vec2::ZERO);
+                        self.scene.set(id, prop::OFFSET, rune_motion::Vec2::new(now.x, now.y + row_jump));
+                    }
                     match nodes[i].vis.offset_motion {
                         Some(anim) => self.scene.animate(id, prop::OFFSET, to, anim),
                         None => self.scene.animate(id, prop::OFFSET, to, spring_l),
