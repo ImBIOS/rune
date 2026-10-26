@@ -678,7 +678,7 @@ const MAX_STEADY_PAGES: usize = 2;
 /// Hard ceiling on total glyph atlas pages if a single frame or unframed loop overflows.
 const MAX_OVERFLOW_PAGES: usize = 8;
 /// CPU byte budget for cached RGBA colour glyphs (`color_pixels`) before frame-boundary eviction.
-const COLOR_GLYPH_BUDGET: usize = 4 * 1024 * 1024;
+const COLOR_GLYPH_BUDGET: usize = 16 * 1024 * 1024;
 
 pub struct AtlasPage {
     pub data: Vec<u8>,
@@ -737,6 +737,8 @@ enum Rasterized {
 #[derive(Clone, Copy, Debug)]
 pub struct GlyphQuad {
     pub rect: [f32; 4],
+    /// Atlas origin with the page packed into y (`page * ATLAS_SIZE + y`).
+    /// Use [`Self::atlas_page`] and [`Self::atlas_uv`] when sampling an atlas page directly.
     pub uv: [f32; 2],
     pub ink: u16,
     pub byte: u32,
@@ -745,10 +747,21 @@ pub struct GlyphQuad {
     pub color: u32,
 }
 
+impl GlyphQuad {
+    /// Alpha atlas page. Placements remain valid until the next frame begins.
+    pub fn atlas_page(&self) -> usize { self.uv[1] as usize / ATLAS_SIZE as usize }
+
+    /// Pixel origin within [`Self::atlas_page`], without the packed page index.
+    pub fn atlas_uv(&self) -> [f32; 2] {
+        [self.uv[0], self.uv[1] - (self.atlas_page() * ATLAS_SIZE as usize) as f32]
+    }
+}
+
 /// A colour glyph's RGBA image (`GlyphQuad::color`) and its placement around the pen (device px).
 #[derive(Clone, Copy)]
 struct ColorGlyph {
     index: u32,
+    used: bool,
     left: i32,
     top: i32,
     w: u32,
@@ -806,6 +819,11 @@ impl Atlas {
     /// Number of allocated 2048×2048 shelf pages (at least 1).
     pub fn page_count(&self) -> usize {
         1 + self.pages.len()
+    }
+
+    /// Alpha texels for a page returned by [`GlyphQuad::atlas_page`].
+    pub fn page_data(&self, page: usize) -> Option<&[u8]> {
+        if page == 0 { Some(&self.data) } else { self.pages.get(page - 1).map(|p| p.data.as_slice()) }
     }
 
     /// Number of shelf page resets since the atlas was created.
@@ -897,8 +915,8 @@ impl Atlas {
 
     fn evict_page(&mut self, page: usize) {
         let p16 = page as u16;
-        self.map.retain(|_, v| v.is_some_and(|g| g.page != p16));
-        self.icons.retain(|_, v| v.is_some_and(|g| g.page != p16));
+        self.map.retain(|_, v| v.is_none_or(|g| g.page != p16));
+        self.icons.retain(|_, v| v.is_none_or(|g| g.page != p16));
         self.clock += 1;
         self.resets += 1;
         if page == 0 {
@@ -1022,15 +1040,10 @@ impl Atlas {
             self.pages.push(page);
             return Some((self.pages.len(), x, y));
         }
-        // Unframed caller exceeded MAX_OVERFLOW_PAGES: evict the oldest page overall.
-        let oldest = (0..total).min_by_key(|&p| self.page_age(p)).unwrap_or(0);
-        self.evict_page(oldest);
-        let (x, y) = if oldest == 0 {
-            self.alloc_page0(w, h).unwrap()
-        } else {
-            self.pages[oldest - 1].alloc(w, h).unwrap()
-        };
-        Some((oldest, x, y))
+        // Every page is referenced by this frame (or pinned by a text flight). Never
+        // overwrite emitted quads to satisfy a later request. Failure is not cached,
+        // so the request can succeed after a subsequent frame frees capacity.
+        None
     }
 
     fn put(&mut self, w: u32, h: u32, src: &[u8], left: i32, top: i32) -> Option<AtlasGlyph> {
@@ -1639,13 +1652,32 @@ impl TextSystem {
         &self.color_pixels[color as usize - 1]
     }
 
-    pub(crate) fn begin_frame(&mut self, pinned_mask: u32) {
+    /// Begins a new batch of glyph placements, reclaiming unused atlas storage.
+    /// Previously emitted quads must no longer be sampled after this call. Runtime
+    /// calls this automatically; direct text/renderer users call it before shaping.
+    pub fn begin_frame(&mut self) {
+        self.begin_frame_pinned(0);
+    }
+
+    pub(crate) fn begin_frame_pinned(&mut self, pinned_mask: u32) {
         self.atlas.begin_frame(pinned_mask);
         if self.color_bytes > COLOR_GLYPH_BUDGET {
-            self.color_glyphs.clear();
-            self.color_pixels.clear();
-            self.color_bytes = 0;
+            let before = self.color_glyphs.len();
+            self.color_glyphs.retain(|_, c| c.used);
+            if self.color_glyphs.len() != before {
+                // Only retire scales unused in the last frame. Clearing active emoji
+                // would rerasterize the entire visible working set every frame once
+                // that working set alone exceeds the soft budget.
+                let old = std::mem::take(&mut self.color_pixels);
+                self.color_bytes = 0;
+                for c in self.color_glyphs.values_mut() {
+                    self.color_pixels.push(old[c.index as usize - 1].clone());
+                    c.index = self.color_pixels.len() as u32;
+                    self.color_bytes += c.w as usize * c.h as usize * 4;
+                }
+            }
         }
+        for c in self.color_glyphs.values_mut() { c.used = false; }
     }
 
     /// Keeps layouts used in the last two commits, and older ones, most recently used first,
@@ -2148,7 +2180,8 @@ impl TextSystem {
             None => {
                 // Colour glyphs sit on whole pixels and ignore emboldening and obliques.
                 let color_key = GlyphKey { subpx: 0, dilation: 0, skew: 0, ..key };
-                if let Some(c) = self.color_glyphs.get(&color_key) {
+                if let Some(c) = self.color_glyphs.get_mut(&color_key) {
+                    c.used = true;
                     out.push(c.quad(gx, gy, ink, byte));
                     return;
                 }
@@ -2166,7 +2199,7 @@ impl TextSystem {
                     self.color_bytes = self.color_bytes.saturating_add((at.width as usize) * (at.height as usize) * 4);
                     self.color_pixels.push(pixels);
                     let index = self.color_pixels.len() as u32;
-                    let c = ColorGlyph { index, left: at.left, top: at.top, w: at.width, h: at.height };
+                    let c = ColorGlyph { index, used: true, left: at.left, top: at.top, w: at.width, h: at.height };
                     self.color_glyphs.insert(color_key, c);
                     out.push(c.quad(gx, gy, ink, byte));
                     return;
@@ -3590,6 +3623,65 @@ mod quality_tests {
     }
 
     #[test]
+    fn atlas_capacity_never_overwrites_current_or_pinned_placements() {
+        let mut atlas = Atlas::new();
+        let side = ATLAS_SIZE - 2;
+        let bitmap = vec![137; (side * side) as usize];
+        for page in 0..MAX_OVERFLOW_PAGES {
+            let g = atlas.put(side, side, &bitmap, 0, 0).unwrap();
+            assert_eq!(g.page as usize, page);
+        }
+        assert!(atlas.put(side, side, &bitmap, 0, 0).is_none());
+        assert_eq!(atlas.resets(), 0, "capacity must not invalidate emitted quads");
+        // Simulate the next frame retaining all eight pages in text flights.
+        atlas.begin_frame((1 << MAX_OVERFLOW_PAGES) - 1);
+        assert!(atlas.put(side, side, &bitmap, 0, 0).is_none());
+        assert_eq!(atlas.resets(), 0, "pinned pages cannot be recycled either");
+        for page in 0..MAX_OVERFLOW_PAGES {
+            assert_eq!(atlas.page_data(page).unwrap()[ATLAS_SIZE as usize + 1], 137);
+        }
+        atlas.begin_frame(0);
+        assert!(atlas.put(side, side, &bitmap, 0, 0).is_some(), "failure is retryable next frame");
+    }
+
+    #[test]
+    fn atlas_eviction_preserves_cached_empty_outlines() {
+        let mut atlas = Atlas::new();
+        let key = GlyphKey { font: 0, index: 0, glyph: 0, size: 0, coords: 0, subpx: 0, dilation: 0, skew: 0 };
+        atlas.map.insert(key, None);
+        atlas.icons.insert((0, 0), None);
+        atlas.evict_page(0);
+        assert!(atlas.map.contains_key(&key));
+        assert!(atlas.icons.contains_key(&(0, 0)));
+    }
+
+    #[test]
+    fn colour_budget_retires_unused_scales_without_flushing_active_images() {
+        let mut text = TextSystem::default();
+        let key = GlyphKey { font: 0, index: 0, glyph: 0, size: 0, coords: 0, subpx: 0, dilation: 0, skew: 0 };
+        let pixels = crate::pixels::Pixels::new();
+        pixels.set(1, 1, vec![255; 4]);
+        text.color_pixels = vec![pixels.clone(), pixels];
+        let active = ColorGlyph { index: 2, used: true, left: 0, top: 0, w: 4096, h: 4096 };
+        text.color_glyphs.insert(key, ColorGlyph { index: 1, used: false, ..active });
+        let active_key = GlyphKey { glyph: 1, ..key };
+        text.color_glyphs.insert(active_key, active);
+        text.color_bytes = COLOR_GLYPH_BUDGET + 1;
+        text.begin_frame();
+        assert!(!text.color_glyphs.contains_key(&key));
+        assert_eq!(text.color_pixels.len(), 1);
+        assert_eq!(text.color_glyphs[&active_key].index, 1);
+        assert_eq!(text.color_glyph(1).rgba(), &[255; 4]);
+        // An over-budget visible working set is reused, not flushed every frame.
+        text.color_glyphs.get_mut(&active_key).unwrap().used = true;
+        text.begin_frame();
+        assert_eq!(text.color_glyphs.len(), 1);
+        text.begin_frame();
+        assert!(text.color_glyphs.is_empty(), "unused working set can be retired");
+        assert_eq!(text.color_bytes, 0);
+    }
+
+    #[test]
     fn four_hundred_scales_never_exhaust_the_atlas_or_poison_glyphs() {
         const ICON: Icon = Icon {
             name: "box",
@@ -3604,7 +3696,7 @@ mod quality_tests {
         let sample = "The quick brown fox jumps over the lazy dog 0123456789";
         let mut quads = Vec::new();
         for i in 0..400 {
-            text.begin_frame(0);
+            text.begin_frame();
             quads.clear();
             let size = 18.0 + (i as f32) * 0.45;
             text.glyphs(sample, TextStyle::new(size, 400.0), 2.0, [0.0, 0.0], &mut quads);
@@ -3617,7 +3709,7 @@ mod quality_tests {
         assert!(text.atlas.page_count() <= MAX_STEADY_PAGES, "steady single-page frames stay within 2 pages");
 
         // Fresh string at scale 1.0 after 400 scales must have every glyph present and non-empty.
-        text.begin_frame(0);
+        text.begin_frame();
         let fresh = "Sphinx of black quartz, judge my vow! 9876543210";
         quads.clear();
         text.glyphs(fresh, TextStyle::new(16.0, 400.0), 1.0, [0.0, 0.0], &mut quads);
@@ -3647,7 +3739,7 @@ mod quality_tests {
             body: r#"<rect x="1" y="1" width="14" height="14" fill="currentColor"/>"#,
         };
         let mut text = TextSystem::default();
-        text.begin_frame(0);
+        text.begin_frame();
         let mut placed = Vec::new();
         // 32 icons around 400×400 px each (~5.1M texels) exceed one 2048×2048 page (4.19M texels) in a single frame.
         for i in 0..32u32 {

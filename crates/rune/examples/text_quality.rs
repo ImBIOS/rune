@@ -188,8 +188,8 @@ fn main() {
                     radii: [0.0; 4],
                     fill: fg.premul(1.0),
                     border: [0.0; 4],
-                    params: [0.0, 2.0, 0.0, gamma],
-                    uv: [q.uv[0], q.uv[1], 0.0, 0.0],
+                    params: [0.0, 2.0, q.atlas_page() as f32, gamma],
+                    uv: [q.atlas_uv()[0], q.atlas_uv()[1], 0.0, 0.0],
                     clip: NO_CLIP,
                     fade: [0; 4],
                 })
@@ -218,6 +218,8 @@ fn main() {
             p[3] = 255;
         }
         for q in &quads {
+            let uv = q.atlas_uv();
+            let data = text.atlas.page_data(q.atlas_page()).unwrap();
             for y in 0..q.rect[3] as u32 {
                 for x in 0..q.rect[2] as u32 {
                     let dx = q.rect[0] as u32 + x;
@@ -225,8 +227,8 @@ fn main() {
                     if dx >= w || dy >= h {
                         continue;
                     }
-                    let v = text.atlas.data
-                        [((q.uv[1] as u32 + y) * ATLAS_SIZE + q.uv[0] as u32 + x) as usize];
+                    let v = data
+                        [((uv[1] as u32 + y) * ATLAS_SIZE + uv[0] as u32 + x) as usize];
                     let p = ((dy * w + dx) * 4) as usize;
                     for c in 0..3 {
                         raw[p + c] = v;
@@ -274,8 +276,8 @@ fn main() {
                     radii: [0.0; 4],
                     fill: [1.0; 4],
                     border: [0.0; 4],
-                    params: [0.0, 2.0, 0.0, 1.0],
-                    uv: [q.uv[0], q.uv[1], 0.0, 0.0],
+                    params: [0.0, 2.0, q.atlas_page() as f32, 1.0],
+                    uv: [q.atlas_uv()[0], q.atlas_uv()[1], 0.0, 0.0],
                     clip: NO_CLIP,
                     fade: [0; 4],
                 });

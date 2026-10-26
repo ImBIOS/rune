@@ -5,11 +5,18 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Atlas capacity preserves glyphs already drawn in the frame, including text flights.**
+  At the eight-page R8 limit, requests fail without overwriting live placements and retry in
+  later frames. Empty outlines stay cached across eviction. The 16 MiB colour cache retires
+  unused scales rather than flushing visible emoji; a visible working set may exceed that soft
+  budget. Direct text users can call `TextSystem::begin_frame` and decode packed atlas origins
+  with `GlyphQuad::atlas_page`, `GlyphQuad::atlas_uv` and `Atlas::page_data`.
+
 - **Glyph, icon and colour-glyph atlases never exhaust or permanently drop glyphs across long zoom sessions.**
   `Atlas` now separates genuinely empty glyphs (such as space, cached as `Some(None)`) from
   unplaced glyphs (`Rasterized::Unplaced`, never cached), recycles 2048×2048 R8 shelf pages via a
   two-page steady ping-pong pool with 1 px zeroed borders around each placed glyph (no 4 MiB buffer
-  zeroing on reset and no mid-frame eviction), spills to on-demand overflow pages when a single
+   zeroing on reset and no eviction of this frame's placements), spills to on-demand overflow pages when a single
   frame exceeds one page and reclaims idle overflow pages on subsequent frames, and bounds the
   colour-glyph RGBA cache (`COLOR_GLYPH_BUDGET`, 16 MiB). While `live_scale` is actively changing,
   text and icons step through logarithmic $2^{1/4}$ scale buckets at a stable origin and
