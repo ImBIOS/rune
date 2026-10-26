@@ -1,17 +1,26 @@
-//! An app shell from rune-kit's `shell` components: sessions in collapsible sections in a
-//! resizable sidebar, a main pane under a toolbar, and an inspector. ⇧⌘B shows and hides the
-//! sidebar, ⌥⌘I the inspector; drag a pane's inner edge to resize it, double-click a session
-//! to rename it. `-- virtual` swaps the sections for 5,000 sessions in a virtualised list.
+//! An app shell from rune-kit's `shell` components, set up like a desktop agent-chat app: a
+//! framed main pane with the toolbar inside it, a padded sidebar of two-line session rows with
+//! a status slot that turns into a close button under the pointer, and an inspector. Drag a
+//! session to reorder it (Escape puts it back), double-click one to rename it. ⇧⌘B shows and
+//! hides the sidebar; with it closed, rest the pointer at the window's left edge or on the
+//! toggle to peek, and click to keep it. ⌥⌘I shows the inspector, and a pane's inner edge
+//! resizes it. `-- virtual` swaps the sessions for 5,000 in a virtualised list.
 //!
 //! `cargo run -p rune-kit --example shell` opens the window. The stills in `demo/kit/` are
 //! `-- --snap demo/kit/shell-light.png --theme light --size 1040x640` (and `dark`).
 use std::borrow::Cow;
-use std::collections::HashSet;
 
-use rune::{AppSpec, Chrome, Cx, El, Icon, KeyEvent, TextEdit, Tx, col, text};
-use rune_kit::shell::{self, PaneState, Sidebar, SidebarHeader, SidebarRow, SidebarSection, SplitView, Toolbar};
-use rune_kit::{IconButton, IconButtonVariant, Kit};
+use rune::{AppSpec, Chrome, Cx, El, Icon, KeyEvent, Spring, TextEdit, Tx, col, oklch, row, text};
+use rune_kit::shell::{
+    self, PaneMotion, PaneState, Reorder, RowStatus, Sidebar, SidebarPeek, SidebarRow, SidebarToggle, SplitView, Toolbar,
+};
+use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit};
 
+static HOME: Icon = Icon {
+    name: "shell-home",
+    view: 16.0,
+    body: r#"<path d="M3 7L8 3L13 7V12.5H9.5V9.5H6.5V12.5H3Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" fill="none"/>"#,
+};
 static PLUS: Icon = Icon {
     name: "shell-plus",
     view: 16.0,
@@ -27,108 +36,115 @@ static SLIDERS: Icon = Icon {
     view: 16.0,
     body: r#"<path d="M3 5H13M3 11H13" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="6" cy="5" r="1.6" fill="currentColor"/><circle cx="10.5" cy="11" r="1.6" fill="currentColor"/>"#,
 };
-static BRANCH: Icon = Icon {
-    name: "shell-branch",
-    view: 16.0,
-    body: r#"<circle cx="5" cy="4" r="1.5" stroke="currentColor" fill="none"/><circle cx="5" cy="12" r="1.5" stroke="currentColor" fill="none"/><circle cx="11" cy="6" r="1.5" stroke="currentColor" fill="none"/><path d="M5 5.5V10.5M11 7.5C11 9.5 5 8.5 5 10.5" stroke="currentColor" fill="none"/>"#,
-};
+
+/// The rows' height, and the points between them.
+const ROW: f32 = 45.0;
+const GAP: f32 = 4.0;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Status {
+    Idle,
+    Busy,
+    Attention,
+    Unread,
+}
 
 struct Session {
     id: String,
     title: String,
-    section: &'static str,
-    time: &'static str,
-    depth: u8,
-    unread: u32,
+    project: usize,
+    status: Status,
 }
 
-/// A row of the virtualised list: a section's header or a session.
-enum Flat {
-    Header(&'static str),
-    Session(usize),
-}
+const PROJECTS: [(&str, f32); 4] = [("rune", 250.0), ("site", 150.0), ("motion", 30.0), ("notes", 320.0)];
 
 struct App {
-    flat: Vec<Flat>,
     sidebar: PaneState,
     inspector: PaneState,
     sessions: Vec<Session>,
+    reorder: Reorder,
     selected: String,
-    collapsed: HashSet<&'static str>,
     renaming: Option<String>,
     rename: TextEdit,
     virtualised: bool,
 }
 
-const SECTIONS: [&str; 4] = ["Pinned", "Today", "Yesterday", "Last week"];
-
 fn init() -> App {
-    let s = |id: &str, title: &str, section, time, depth, unread| Session { id: id.into(), title: title.into(), section, time, depth, unread };
+    let s = |id: &str, title: &str, project, status| Session { id: id.into(), title: title.into(), project, status };
     let mut sessions = vec![
-        s("s1", "Release checklist", "Pinned", "", 0, 0),
-        s("s2", "Design review notes", "Pinned", "", 0, 2),
-        s("s3", "Fix scroll jank in the list", "Today", "4m", 0, 0),
-        s("s4", "Profile the frame loop", "Today", "12m", 1, 0),
-        s("s5", "Port the settings pane", "Today", "1h", 0, 5),
-        s("s6", "Sidebar resize behaviour", "Today", "2h", 0, 0),
-        s("s7", "Theme tokens for dark mode", "Yesterday", "Tue", 0, 0),
-        s("s8", "Draft the changelog", "Yesterday", "Tue", 0, 0),
-        s("s9", "Window restoration bug", "Last week", "Oct 18", 0, 0),
-        s("s10", "Keyboard navigation audit", "Last week", "Oct 17", 0, 0),
-        s("s11", "Snapshot test flakes", "Last week", "Oct 16", 0, 0),
+        s("s1", "Fix scroll jank in the list", 0, Status::Busy),
+        s("s2", "Profile the frame loop", 0, Status::Attention),
+        s("s3", "Port the settings pane", 1, Status::Unread),
+        s("s4", "Sidebar resize behaviour", 0, Status::Idle),
+        s("s5", "Theme tokens for dark mode", 1, Status::Idle),
+        s("s6", "Spring presets for sheets", 2, Status::Unread),
+        s("s7", "Draft the changelog", 3, Status::Idle),
+        s("s8", "Window restoration bug", 0, Status::Idle),
+        s("s9", "Keyboard navigation audit", 1, Status::Idle),
     ];
     let virtualised = rune::extra_args().iter().any(|a| a == "virtual");
     if virtualised {
-        sessions = (0..5000)
-            .map(|i| s(&format!("v{i}"), &format!("Session {}", 5000 - i), SECTIONS[(i / 1250).min(3)], "", 0, 0))
-            .collect();
-    }
-    let mut flat = Vec::new();
-    for (i, x) in sessions.iter().enumerate() {
-        if i == 0 || sessions[i - 1].section != x.section {
-            flat.push(Flat::Header(x.section));
-        }
-        flat.push(Flat::Session(i));
+        sessions = (0..5000).map(|i| s(&format!("v{i}"), &format!("Session {}", 5000 - i), i % 4, Status::Idle)).collect();
     }
     App {
-        flat,
-        sidebar: PaneState::new(260.0).range(180.0, 420.0),
-        inspector: PaneState::new(280.0).range(220.0, 420.0),
-        selected: sessions[2.min(sessions.len() - 1)].id.clone(),
+        sidebar: PaneState::new(276.0).range(136.0, 640.0),
+        inspector: PaneState::new(280.0).range(220.0, 420.0).collapsed(),
+        selected: sessions[0].id.clone(),
         sessions,
-        collapsed: HashSet::from(["Last week"]),
+        // Virtualised rows take no gap between them: the pitch is the row's height.
+        reorder: Reorder::new().gap(if virtualised { 0.0 } else { GAP }),
         renaming: None,
         rename: TextEdit::new(""),
         virtualised,
     }
 }
 
-fn select(id: String) -> impl Fn(&mut App, &mut Tx) {
-    move |s: &mut App, _| s.selected = id.clone()
+fn avatar(name: &str, hue: f32, k: &Kit) -> El {
+    let initial = name.chars().next().unwrap_or(' ').to_ascii_uppercase().to_string();
+    row()
+        .size(16.0, 16.0)
+        .radius(4.0)
+        .center()
+        .fill(oklch(0.62, 0.12, hue))
+        .child(text(initial).font(k.ty.small_medium).color(rune::Color::WHITE))
 }
 
 fn session_row(s: &App, i: usize, k: &Kit) -> El {
     let session = &s.sessions[i];
+    let (project, hue) = PROJECTS[session.project];
     let id = session.id.clone();
     let mut r = SidebarRow::new(session.title.clone())
+        .height(ROW)
+        .avatar(avatar(project, hue, k))
+        .subtitle(project)
         .selected(s.selected == session.id)
-        .depth(session.depth)
-        .on_select(select(id.clone()))
-        .on_double_click(move |s: &mut App, _| {
-            let title = s.sessions.iter().find(|x| x.id == id).map(|x| x.title.clone()).unwrap_or_default();
-            s.rename = TextEdit::new(title);
-            s.rename.anchor = 0;
-            s.rename.focused = true;
-            s.renaming = Some(id.clone());
+        .on_select({
+            let id = id.clone();
+            move |s: &mut App, _| s.selected = id.clone()
+        })
+        .on_close({
+            let id = id.clone();
+            move |s: &mut App, _| s.sessions.retain(|x| x.id != id)
+        })
+        .on_double_click({
+            let id = id.clone();
+            move |s: &mut App, _| {
+                let title = s.sessions.iter().find(|x| x.id == id).map(|x| x.title.clone()).unwrap_or_default();
+                s.rename = TextEdit::new(title);
+                s.rename.anchor = 0;
+                s.rename.focused = true;
+                s.renaming = Some(id.clone());
+            }
+        })
+        .reorder(&s.reorder, i, s.sessions.len(), |s: &mut App| &mut s.reorder, |s: &mut App, from, to| {
+            let x = s.sessions.remove(from);
+            s.sessions.insert(to, x);
         });
-    if session.depth > 0 {
-        r = r.icon(&BRANCH);
-    }
-    if !session.time.is_empty() {
-        r = r.detail(session.time);
-    }
-    if session.unread > 0 {
-        r = r.badge(session.unread.to_string());
+    match session.status {
+        Status::Busy => r = r.status(RowStatus::Busy),
+        Status::Attention => r = r.status(RowStatus::Attention),
+        Status::Unread => r = r.status(RowStatus::Unread),
+        Status::Idle => {}
     }
     if s.renaming.as_deref() == Some(session.id.as_str()) {
         r = r.renaming(
@@ -147,44 +163,24 @@ fn session_row(s: &App, i: usize, k: &Kit) -> El {
 }
 
 fn sidebar(s: &App, k: &Kit) -> El {
-    let mut sb = Sidebar::new()
+    let sb = Sidebar::new()
         .label("Sessions")
-        .header(SidebarRow::new("New session").icon(&PLUS).detail("⌘N").build(k).key("new"))
-        .header(SidebarRow::new("Search").icon(&SEARCH).detail("⌘K").build(k).key("search"))
-        .footer(SidebarRow::new("Settings").icon(&SLIDERS).build(k).key("settings"));
+        .inset(0.0)
+        .header_gap(4.0)
+        .header_padding(0.0, 16.0)
+        .row_gap(GAP)
+        .header(SidebarRow::new("Home").icon(&HOME).height(32.0).build(k).key("home"))
+        .header(SidebarRow::new("Search").icon(&SEARCH).detail("⌘K").height(32.0).build(k).key("search"))
+        .header(SidebarRow::new("New session").icon(&PLUS).detail("⌘N").height(32.0).build(k).key("new"))
+        .footer(SidebarRow::new("Settings").icon(&SLIDERS).height(32.0).build(k).key("settings"));
     if s.virtualised {
         let kit = k.clone();
         return sb
-            .virtual_rows(
-                s.flat.len(),
-                |s: &App, i| match s.flat[i] {
-                    Flat::Header(name) => Cow::Borrowed(name),
-                    Flat::Session(j) => Cow::Borrowed(s.sessions[j].id.as_str()),
-                },
-                move |s: &App, i| match s.flat[i] {
-                    Flat::Header(name) => SidebarHeader::new(name).build(&kit),
-                    Flat::Session(j) => session_row(s, j, &kit),
-                },
-            )
+            .row_height(ROW)
+            .virtual_rows(s.sessions.len(), |s: &App, i| Cow::Borrowed(s.sessions[i].id.as_str()), move |s: &App, i| session_row(s, i, &kit))
             .build(k);
     }
-    for name in SECTIONS {
-        let rows: Vec<El> = (0..s.sessions.len()).filter(|&i| s.sessions[i].section == name).map(|i| session_row(s, i, k)).collect();
-        let mut section = SidebarSection::new(name)
-            .count(rows.len())
-            .collapsed(s.collapsed.contains(name))
-            .on_toggle(move |s: &mut App, _| {
-                if !s.collapsed.remove(name) {
-                    s.collapsed.insert(name);
-                }
-            })
-            .rows(rows);
-        if name == "Pinned" {
-            section = section.action(IconButton::new(&PLUS).control_size(rune_kit::ControlSize::Mini).variant(IconButtonVariant::GhostMuted).label("Pin a session").build(k));
-        }
-        sb = sb.section(section);
-    }
-    sb.build(k)
+    (0..s.sessions.len()).fold(sb, |sb, i| sb.child(session_row(s, i, k))).build(k)
 }
 
 fn view(s: &App, cx: &mut Cx<App>) -> El {
@@ -223,12 +219,31 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
             .build(&k)
             .key("inspector-toggle"),
     );
+    let unread = s.sessions.iter().any(|x| x.status == Status::Unread);
     SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar(s, &k))
         .inspector(&s.inspector, |s: &mut App| &mut s.inspector, inspector)
         .toolbar(toolbar)
         .titlebar_inset(cx.titlebar_inset())
+        .frame_inset(8.0)
+        .toolbar_in_panel()
+        .sidebar_padding(18.0, 10.0)
+        .sidebar_toggle(SidebarToggle::new().size(ControlSize::Large).past_lights(16.0).edge(18.0).gap(4.0).in_header().unread(unread))
+        .pane_motion(PaneMotion::new().spring(Spring::new(0.3, 0.0)).scale_with_width(480.0, 0.15, 0.3).fade_tail(0.15))
+        .sidebar_peek(
+            SidebarPeek::new()
+                .edge(16.0, ms(40))
+                .toggle_delay(ms(80))
+                .below(56.0)
+                .hold(15.0, ms(100))
+                .spring(Spring::new(0.18, 0.0)),
+        )
+        .reduced_motion(cx.is_reduced_motion())
         .build(&k)
+}
+
+fn ms(n: u64) -> std::time::Duration {
+    std::time::Duration::from_millis(n)
 }
 
 fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
@@ -244,7 +259,7 @@ fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
 }
 
 fn main() {
-    // The traffic lights centred in the 48 point title bar band.
-    let chrome = Chrome { full_size_content: true, traffic_lights: Some((16.0, 17.0)), drag_regions: true };
+    // The traffic lights centred on the toolbar, 8 points down in the framed pane: 32 points.
+    let chrome = Chrome { full_size_content: true, traffic_lights: Some((16.0, 25.0)), drag_regions: true };
     rune::App::new(AppSpec { on_key: Some(on_key), ..AppSpec::new("Shell", (1040.0, 640.0), init, view) }).chrome(chrome).run();
 }

@@ -1,0 +1,8 @@
+{
+  "events": [
+    { "t": 0.3, "type": "drag", "key": "s2", "dy": 120, "dur": 0.6 },
+    { "t": 1.6, "type": "drag", "key": "s1", "dy": 160, "dur": 0.8 },
+    { "t": 2.1, "type": "key", "name": "Escape" },
+    { "t": 3.2, "type": "move", "x": 700, "y": 400 }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "events": [
+    { "t": 0.3, "type": "move", "key": "sidebar-grip" },
+    { "t": 0.6, "type": "drag", "key": "sidebar-grip", "dx": 140, "dur": 0.5 },
+    { "t": 1.5, "type": "drag", "key": "sidebar-grip", "dx": -320, "dur": 0.6 },
+    { "t": 2.5, "type": "double-click", "key": "sidebar-grip" },
+    { "t": 3.3, "type": "move", "x": 700, "y": 400 }
+  ]
+}
