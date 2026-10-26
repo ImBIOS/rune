@@ -5,6 +5,16 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Precompiled Metal uber shader on macOS (`crates/rune/src/uber.metallib`).** `Gpu` now enables
+  `wgpu::Features::PASSTHROUGH_SHADERS` when the adapter supports it, and `Renderer::new` loads a
+  committed 33 KB precompiled Metal library (`-std=macos-metal2.3 -mmacosx-version-min=11.0
+  -fpreserve-invariance -O2`) via `Device::create_shader_module_passthrough`, skipping WGSL
+  parsing, validation, Naga MSL translation, and Metal's front-end `newLibraryWithSource` compile
+  on every launch (`232 ms → 85 ms` for `Renderer::new` on a cold Metal shader cache, and
+  `3.4 ms → 0.6 ms` warm). Falls back to the WGSL path when `PASSTHROUGH_SHADERS` is absent,
+  `RUNE_DISABLE_METALLIB=1` is set, the WGSL digest mismatches, or the library fails to load; app
+  builds do not require Xcode (`scripts/precompile-metal-shaders.sh` regenerates the `.metallib`
+  when `shader.wgsl` or `clip.wgsl` changes).
 - **macOS: live window resizes no longer stretch the last frame.** While the user drags a window
   edge, Rune draws each new size inside AppKit's resize and presents it in the same Core Animation
   transaction (`presentsWithTransaction` for the drag, back to its own present on the first frame

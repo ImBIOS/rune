@@ -9,6 +9,8 @@ use crate::text::{ATLAS_SIZE, Atlas};
 mod layers;
 #[path = "layer_blur.rs"]
 pub(crate) mod layer_blur;
+#[path = "metallib.rs"]
+mod metallib;
 pub use layers::LayerStats;
 
 pub const KIND_RECT: f32 = 0.0;
@@ -493,7 +495,8 @@ impl Gpu {
             apply_limit_buckets: false,
         }))
         .map_err(|error| format!("no GPU adapter: {error}"))?;
-        let required_features = adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wanted);
+        let required_features = adapter.features()
+            & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::PASSTHROUGH_SHADERS | wanted);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("rune"),
             required_features,
@@ -579,13 +582,15 @@ impl Renderer {
     }
 
     fn create(device: &wgpu::Device, format: wgpu::TextureFormat, properties: Option<(&[crate::gpu_springs::Node], &[u32])>) -> Renderer {
-        let source = if properties.is_some() {
-            format!("{CLIP_WGSL}\n{}\n{}", include_str!("shader.wgsl"), crate::gpu_springs::SHADER)
-        } else { format!("{CLIP_WGSL}\n{}", include_str!("shader.wgsl")) };
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("uber"),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
-        });
+        let shader = if properties.is_some() {
+            let source = format!("{CLIP_WGSL}\n{}\n{}", include_str!("shader.wgsl"), crate::gpu_springs::SHADER);
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("uber"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            })
+        } else {
+            metallib::uber_shader(device)
+        };
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
             entries: &[
@@ -685,10 +690,6 @@ impl Renderer {
         vertex_entry: &str,
         blend: Blend,
     ) -> wgpu::RenderPipeline {
-        let attrs = wgpu::vertex_attr_array![
-            0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
-            4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Uint32x4
-        ];
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("uber"),
             layout: Some(layout),
@@ -699,7 +700,7 @@ impl Renderer {
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Instance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &attrs,
+                    attributes: &metallib::UBER_VERTEX_ATTRS,
                 })],
             },
             primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },

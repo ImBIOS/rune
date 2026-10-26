@@ -1,0 +1,579 @@
+//! Precompiled Metal library (`.metallib`) for Rune's uber shader on macOS.
+//!
+//! `wgpu` 30's Metal backend otherwise translates `shader.wgsl` through Naga to MSL and calls
+//! `[MTLDevice newLibraryWithSource:options:error:]` on the XPC `MTLCompilerService` during
+//! `Renderer::new`. Loading precompiled AIR bytecode via `Device::create_shader_module_passthrough`
+//! skips WGSL parsing, validation, MSL codegen, and the Metal front-end compile on every launch.
+//!
+//! Other shaders stay on WGSL:
+//! - `Renderer::with_springs`, `rune-fx`, and `rune-light` bind runtime-sized `var<storage>`
+//!   arrays (`_mslBufferSizes`), and `wgpu-hal` 30's `ShaderModuleSource::Passthrough` leaves
+//!   `CompiledShader::sized_bindings` empty.
+//! - `layer_blur` specializes WGSL `override` constants (`MODE`, `ADDITIVE`) per pipeline, which
+//!   `ShaderModuleSource::Passthrough` does not evaluate.
+//! - iOS (`target_os = "ios"`) uses a distinct `MTLB` platform tag (`ios` vs `ios-simulator` vs
+//!   `macos`) and stays on WGSL for now.
+//!
+//! Note on `MTLBinaryArchive`: `wgpu-hal` 30's Metal `PipelineCache` implementation is a no-op, so
+//! precompiling `.metallib` eliminates front-end MSL->AIR compilation while the final AIR->GPU ISA
+//! step in `newRenderPipelineStateWithDescriptor` remains cached by the macOS Metal shader cache.
+//! Supporting `MTLBinaryArchive` without forking `wgpu` would require `wgpu-hal` to wire
+//! `MTLRenderPipelineDescriptor.binaryArchives` through `RenderPipelineDescriptor::cache`.
+
+include!("uber_metallib_hash.rs");
+
+#[cfg(any(test, target_os = "macos"))]
+const UBER_METALLIB: &[u8] = include_bytes!("uber.metallib");
+
+pub(super) const UBER_VERTEX_ATTRS: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
+    0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
+    4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Uint32x4
+];
+
+#[cfg(all(test, target_os = "macos"))]
+pub(super) const METAL_COMPILE_FLAGS: &str =
+    "-std=macos-metal2.3 -mmacosx-version-min=11.0 -fpreserve-invariance -Wno-unused-const-variable -O2";
+
+#[cfg(target_os = "macos")]
+std::thread_local! {
+    static FORCE_METALLIB: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static METALLIB_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(super) fn uber_wgsl() -> String {
+    format!("{}\n{}", super::CLIP_WGSL, include_str!("shader.wgsl"))
+}
+
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn uber_wgsl_hash(wgsl: &str) -> blake3::Hash {
+    blake3::hash(wgsl.as_bytes())
+}
+
+fn wgsl_shader(device: &wgpu::Device, wgsl: &str) -> wgpu::ShaderModule {
+    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("uber"),
+        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+    })
+}
+
+pub(super) fn uber_shader(device: &wgpu::Device) -> wgpu::ShaderModule {
+    let wgsl = uber_wgsl();
+    #[cfg(target_os = "macos")]
+    if metallib_enabled()
+        && let Some(shader) = try_uber_metallib(device, &wgsl, UBER_METALLIB, UBER_WGSL_BLAKE3)
+    {
+        METALLIB_LOADS.with(|n| n.set(n.get() + 1));
+        return shader;
+    }
+    wgsl_shader(device, &wgsl)
+}
+
+#[cfg(target_os = "macos")]
+fn metallib_enabled() -> bool {
+    if let Some(forced) = FORCE_METALLIB.with(std::cell::Cell::get) {
+        return forced;
+    }
+    !matches!(
+        std::env::var("RUNE_DISABLE_METALLIB").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes")
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn try_uber_metallib(
+    device: &wgpu::Device,
+    wgsl: &str,
+    metallib: &[u8],
+    expected_wgsl_hash: &str,
+) -> Option<wgpu::ShaderModule> {
+    if !device.features().contains(wgpu::Features::PASSTHROUGH_SHADERS) {
+        return None;
+    }
+    if !metallib.starts_with(b"MTLB") {
+        return None;
+    }
+    if uber_wgsl_hash(wgsl).to_hex().as_str() != expected_wgsl_hash {
+        return None;
+    }
+    let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let internal_scope = device.push_error_scope(wgpu::ErrorFilter::Internal);
+    // SAFETY: `metallib` is compiled from the Naga MSL for `uber_wgsl()` with matching entry
+    // points (`vs`, `fs`), resource bindings, and vertex-pulling layout (`UBER_VERTEX_ATTRS`).
+    let shader = unsafe {
+        device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
+            label: Some("uber"),
+            entry_points: std::borrow::Cow::Borrowed(&[
+                wgpu::PassthroughShaderEntryPoint {
+                    name: std::borrow::Cow::Borrowed("vs"),
+                    workgroup_size: (0, 0, 0),
+                },
+                wgpu::PassthroughShaderEntryPoint {
+                    name: std::borrow::Cow::Borrowed("fs"),
+                    workgroup_size: (0, 0, 0),
+                },
+            ]),
+            metallib: Some(std::borrow::Cow::Borrowed(metallib)),
+            ..Default::default()
+        })
+    };
+    let internal_err = pollster::block_on(internal_scope.pop());
+    let validation_err = pollster::block_on(validation_scope.pop());
+    if internal_err.is_some() || validation_err.is_some() {
+        return None;
+    }
+    Some(shader)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+pub(super) fn with_metallib_enabled<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    struct Guard(Option<bool>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            FORCE_METALLIB.with(|c| c.set(self.0));
+        }
+    }
+    let prev = FORCE_METALLIB.with(|c| c.replace(Some(enabled)));
+    let _guard = Guard(prev);
+    f()
+}
+
+/// Translates `uber_wgsl()` to MSL for the `vs` and `fs` entry points with the exact resource
+/// bindings, vertex-pulling transform (`buffer(30)`), and runtime check policies that `wgpu-hal`
+/// uses on Metal for `Renderer::new`.
+#[cfg(all(test, target_os = "macos"))]
+fn uber_msl(wgsl_src: &str, attrs: &[wgpu::VertexAttribute], stride: u32) -> (String, String) {
+    use wgpu::naga::{
+        self,
+        back::{msl, pipeline_constants::process_overrides},
+        front::wgsl,
+        proc::{BoundsCheckPolicies, BoundsCheckPolicy},
+        valid::{Capabilities, SubgroupOperationSet, ValidationFlags, Validator},
+    };
+
+    let module = wgsl::parse_str(wgsl_src).expect("parse uber WGSL");
+    let info = Validator::new(
+        ValidationFlags::all(),
+        Capabilities::default() | Capabilities::SHADER_FLOAT16_IN_FLOAT32,
+    )
+    .subgroup_stages(naga::valid::ShaderStages::all())
+    .subgroup_operations(SubgroupOperationSet::all())
+    .validate(&module)
+    .expect("validate uber WGSL");
+
+    let mut vs_resources = msl::EntryPointResources::default();
+    vs_resources.resources.insert(
+        naga::ResourceBinding { group: 0, binding: 0 },
+        msl::BindTarget { buffer: Some(0), ..Default::default() },
+    );
+    vs_resources.resources.insert(
+        naga::ResourceBinding { group: 0, binding: 3 },
+        msl::BindTarget { buffer: Some(1), ..Default::default() },
+    );
+    vs_resources.sizes_buffer = Some(2);
+
+    let mut fs_resources = msl::EntryPointResources::default();
+    fs_resources.resources.insert(
+        naga::ResourceBinding { group: 0, binding: 0 },
+        msl::BindTarget { buffer: Some(0), ..Default::default() },
+    );
+    fs_resources.resources.insert(
+        naga::ResourceBinding { group: 0, binding: 1 },
+        msl::BindTarget { texture: Some(0), ..Default::default() },
+    );
+    fs_resources.resources.insert(
+        naga::ResourceBinding { group: 0, binding: 2 },
+        msl::BindTarget { texture: Some(1), ..Default::default() },
+    );
+    fs_resources.resources.insert(
+        naga::ResourceBinding { group: 0, binding: 3 },
+        msl::BindTarget { buffer: Some(1), ..Default::default() },
+    );
+
+    let attributes = attrs
+        .iter()
+        .map(|attr| msl::AttributeMapping {
+            shader_location: attr.shader_location,
+            offset: attr.offset as u32,
+            format: attr.format,
+        })
+        .collect();
+    let vbm = msl::VertexBufferMapping {
+        id: 30,
+        stride,
+        step_mode: msl::VertexBufferStepMode::ByInstance,
+        attributes,
+    };
+
+    let limits = wgpu::Limits::default();
+    let translate = |stage: naga::ShaderStage,
+                     ep: &str,
+                     resources: msl::EntryPointResources,
+                     vertex_buffer_mappings: Vec<msl::VertexBufferMapping>| {
+        let (ep_module, ep_info) =
+            process_overrides(&module, &info, Some((stage, ep)), &Default::default())
+                .expect("process overrides");
+        let options = msl::Options {
+            lang_version: (2, 3),
+            inline_samplers: Default::default(),
+            spirv_cross_compatibility: false,
+            fake_missing_bindings: false,
+            per_entry_point_map: msl::EntryPointResourceMap::from([(ep.to_owned(), resources)]),
+            bounds_check_policies: BoundsCheckPolicies {
+                index: BoundsCheckPolicy::Restrict,
+                buffer: BoundsCheckPolicy::Restrict,
+                image_load: BoundsCheckPolicy::Restrict,
+                binding_array: BoundsCheckPolicy::Unchecked,
+            },
+            zero_initialize_workgroup_memory: true,
+            force_loop_bounding: true,
+            task_dispatch_limits: Some(naga::back::TaskDispatchLimits {
+                max_mesh_workgroups_per_dim: limits.max_mesh_workgroups_per_dimension,
+                max_mesh_workgroups_total: limits.max_mesh_workgroup_total_count,
+            }),
+            mesh_shader_primitive_indices_clamp: true,
+            emit_int_div_checks: true,
+            ray_query_initialization_tracking: true,
+        };
+        let pipeline_options = msl::PipelineOptions {
+            entry_point: Some((stage, ep.to_owned())),
+            allow_and_force_point_size: false,
+            vertex_pulling_transform: true,
+            vertex_buffer_mappings,
+            binding_array_length_map: Default::default(),
+        };
+        let (msl, translation_info) =
+            msl::write_string(&ep_module, &ep_info, &options, &pipeline_options)
+                .expect("translate uber WGSL to MSL");
+        assert_eq!(
+            translation_info.entry_point_names[0].as_deref(),
+            Ok(ep),
+            "MSL entry point name must match WGSL entry point"
+        );
+        msl
+    };
+
+    let vs_msl = translate(naga::ShaderStage::Vertex, "vs", vs_resources, vec![vbm]);
+    let fs_msl = translate(naga::ShaderStage::Fragment, "fs", fs_resources, Vec::new());
+    (vs_msl, fs_msl)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn uber_msl_hash(vs_msl: &str, fs_msl: &str) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(METAL_COMPILE_FLAGS.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(vs_msl.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(fs_msl.as_bytes());
+    hasher.finalize()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        let mut h = 0xcbf29ce484222325u64;
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+
+    /// Called by `scripts/precompile-metal-shaders.sh` (`--ignored --exact --nocapture`) to emit
+    /// the Naga-translated MSL and BLAKE3 digests for the current `shader.wgsl` + `clip.wgsl`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn dump_uber_msl() {
+        let wgsl = uber_wgsl();
+        let wgsl_hash = uber_wgsl_hash(&wgsl);
+        let (vs_msl, fs_msl) =
+            uber_msl(&wgsl, &UBER_VERTEX_ATTRS, std::mem::size_of::<super::super::Instance>() as u32);
+        let msl_hash = uber_msl_hash(&vs_msl, &fs_msl);
+        println!("---BEGIN_WGSL_BLAKE3---\n{}\n---END_WGSL_BLAKE3---", wgsl_hash.to_hex());
+        println!("---BEGIN_MSL_BLAKE3---\n{}\n---END_MSL_BLAKE3---", msl_hash.to_hex());
+        println!("---BEGIN_METAL_FLAGS---\n{METAL_COMPILE_FLAGS}\n---END_METAL_FLAGS---");
+        println!("---BEGIN_VS_MSL---\n{vs_msl}---END_VS_MSL---");
+        println!("---BEGIN_FS_MSL---\n{fs_msl}---END_FS_MSL---");
+    }
+
+    #[test]
+    fn precompiled_uber_metallib_is_fresh() {
+        let wgsl = uber_wgsl();
+        assert_eq!(
+            uber_wgsl_hash(&wgsl).to_hex().as_str(),
+            UBER_WGSL_BLAKE3,
+            "crates/rune/src/uber.metallib is stale after WGSL changes; run scripts/precompile-metal-shaders.sh"
+        );
+        assert!(
+            UBER_METALLIB.starts_with(b"MTLB") && UBER_METALLIB.len() > 1024,
+            "uber.metallib must be a valid Metal library binary"
+        );
+        assert_eq!(
+            fnv1a64(UBER_METALLIB),
+            UBER_METALLIB_FNV64,
+            "crates/rune/src/uber.metallib does not match recorded hash; run scripts/precompile-metal-shaders.sh"
+        );
+
+        #[cfg(target_os = "macos")]
+        {
+            let stride = std::mem::size_of::<super::super::Instance>() as u32;
+            let (vs_msl, fs_msl) = uber_msl(&wgsl, &UBER_VERTEX_ATTRS, stride);
+            assert_eq!(
+                uber_msl_hash(&vs_msl, &fs_msl).to_hex().as_str(),
+                UBER_MSL_BLAKE3,
+                "Naga MSL output or options changed; run scripts/precompile-metal-shaders.sh"
+            );
+
+            // Perturbing WGSL or vertex layout must change the hash so staleness cannot hide.
+            let mut altered_wgsl = wgsl.clone();
+            altered_wgsl.push_str("\n// perturbed\n");
+            assert_ne!(uber_wgsl_hash(&altered_wgsl).to_hex().as_str(), UBER_WGSL_BLAKE3);
+
+            let (vs_stride_changed, _) = uber_msl(&wgsl, &UBER_VERTEX_ATTRS, stride + 16);
+            assert_ne!(
+                uber_msl_hash(&vs_stride_changed, &fs_msl).to_hex().as_str(),
+                UBER_MSL_BLAKE3
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn uber_shader_loads_precompiled_metallib_and_falls_back_cleanly() {
+        use super::super::{Gpu, OFFSCREEN_FORMAT, Renderer};
+
+        let gpu = Gpu::headless();
+        assert!(
+            gpu.device.features().contains(wgpu::Features::PASSTHROUGH_SHADERS),
+            "Metal device must enable PASSTHROUGH_SHADERS"
+        );
+
+        let before = METALLIB_LOADS.with(std::cell::Cell::get);
+        let _r_on = with_metallib_enabled(true, || Renderer::new(&gpu.device, OFFSCREEN_FORMAT));
+        let after_on = METALLIB_LOADS.with(std::cell::Cell::get);
+        assert_eq!(after_on, before + 1, "Renderer::new must load precompiled uber.metallib on macOS");
+
+        let _r_off = with_metallib_enabled(false, || Renderer::new(&gpu.device, OFFSCREEN_FORMAT));
+        let after_off = METALLIB_LOADS.with(std::cell::Cell::get);
+        assert_eq!(after_off, after_on, "disabled metallib must fall back to WGSL");
+
+        let wgsl = uber_wgsl();
+        assert!(
+            try_uber_metallib(&gpu.device, &wgsl, UBER_METALLIB, "stale-hash").is_none(),
+            "hash mismatch must fall back"
+        );
+        assert!(
+            try_uber_metallib(&gpu.device, &wgsl, b"not-mtlb", UBER_WGSL_BLAKE3).is_none(),
+            "missing MTLB magic must fall back"
+        );
+        assert!(
+            try_uber_metallib(&gpu.device, &wgsl, b"MTLBcorrupt-payload", UBER_WGSL_BLAKE3).is_none(),
+            "corrupt metallib payload must be caught by validation scope and fall back"
+        );
+
+        // Device created without PASSTHROUGH_SHADERS must fall back cleanly to WGSL.
+        let (no_pt_device, _no_pt_queue) = pollster::block_on(gpu.adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("no-passthrough"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                experimental_features: Default::default(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: Default::default(),
+            },
+        ))
+        .expect("device without passthrough");
+        assert!(
+            try_uber_metallib(&no_pt_device, &wgsl, UBER_METALLIB, UBER_WGSL_BLAKE3).is_none(),
+            "device without PASSTHROUGH_SHADERS must fall back"
+        );
+        let _r_fallback = Renderer::new(&no_pt_device, OFFSCREEN_FORMAT);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metallib_and_wgsl_render_identical_pixels() {
+        use super::super::{
+            Blend, Gpu, Instance, KIND_GLYPH, KIND_GRADIENT, KIND_IMAGE, KIND_INSET, KIND_RECT,
+            KIND_SEGMENT, KIND_SHADOW, KIND_TRIANGLE, LayerSpec, NO_CLIP, OFFSCREEN_FORMAT,
+            Offscreen, Renderer, pack_fade,
+        };
+        use crate::{
+            pixels::ImageAtlas,
+            text::{ATLAS_SIZE, TextSystem},
+        };
+        use bytemuck::Zeroable;
+
+        let gpu = Gpu::headless();
+        let (width, height) = (160u32, 120u32);
+
+        let render_scene = |use_metallib: bool, format: wgpu::TextureFormat, srgb_blend: bool| {
+            with_metallib_enabled(use_metallib, || {
+                let mut renderer = Renderer::new(&gpu.device, format);
+                renderer.set_srgb_blend(srgb_blend);
+
+                let mut text = TextSystem::default();
+                for y in 0..16u32 {
+                    for x in 0..16u32 {
+                        text.atlas.data[(y * ATLAS_SIZE + x) as usize] =
+                            ((x * 15 + y * 9) & 0xff) as u8;
+                    }
+                }
+                text.atlas.dirty = Some((0, 16));
+
+                let mut images = ImageAtlas::default();
+                let px = crate::pixels::Pixels::new();
+                px.set(
+                    4,
+                    4,
+                    (0..16)
+                        .flat_map(|i| [200u8, (i * 12) as u8, 90, 255])
+                        .collect(),
+                );
+                let placed = images.place(&px, [24.0, 24.0]).expect("place test pixels");
+                renderer.upload_images(&gpu.device, &gpu.queue, &mut images);
+
+                let mut instances = vec![
+                    // Rounded rect with border
+                    Instance {
+                        rect: [8.0, 8.0, 44.0, 32.0],
+                        radii: [8.0, 8.0, 8.0, 8.0],
+                        fill: [0.2, 0.45, 0.85, 1.0],
+                        border: [0.9, 0.95, 1.0, 1.0],
+                        params: [2.0, KIND_RECT, 0.0, 0.0],
+                        clip: NO_CLIP,
+                        ..Instance::zeroed()
+                    },
+                    // Continuous-corner rect (negative radii) with edge fade
+                    Instance {
+                        rect: [60.0, 8.0, 44.0, 32.0],
+                        radii: [-10.0; 4],
+                        fill: [0.85, 0.3, 0.4, 0.9],
+                        params: [0.0, KIND_RECT, 0.0, 0.0],
+                        clip: [58.0, 6.0, 106.0, 42.0],
+                        fade: pack_fade([6.0, 6.0, 6.0, 6.0], [58.0, 6.0, 106.0, 42.0], [58.0, 6.0, 106.0, 42.0]),
+                        ..Instance::zeroed()
+                    },
+                    // Drop shadow + inset shadow
+                    Instance {
+                        rect: [112.0, 10.0, 36.0, 28.0],
+                        radii: [6.0; 4],
+                        fill: [0.0, 0.0, 0.0, 0.55],
+                        params: [0.0, KIND_SHADOW, 6.0, 0.0],
+                        clip: NO_CLIP,
+                        ..Instance::zeroed()
+                    },
+                    Instance {
+                        rect: [112.0, 10.0, 36.0, 28.0],
+                        radii: [6.0; 4],
+                        fill: [0.1, 0.1, 0.15, 0.5],
+                        params: [2.0, KIND_INSET, 4.0, 0.0],
+                        uv: [1.0, 2.0, 0.0, 0.0],
+                        clip: NO_CLIP,
+                        ..Instance::zeroed()
+                    },
+                    // Vertical gradient
+                    Instance {
+                        rect: [8.0, 48.0, 44.0, 30.0],
+                        radii: [6.0; 4],
+                        fill: [0.15, 0.7, 0.55, 1.0],
+                        border: [0.8, 0.8, 0.2, 1.0],
+                        params: [1.5, KIND_GRADIENT, 0.0, 0.0],
+                        uv: [0.05, 0.2, 0.35, 1.0],
+                        clip: NO_CLIP,
+                        ..Instance::zeroed()
+                    },
+                    // Stroke segment (round caps) + triangle
+                    Instance {
+                        rect: [56.0, 48.0, 48.0, 30.0],
+                        radii: [60.0, 52.0, 100.0, 74.0],
+                        fill: [0.95, 0.6, 0.2, 1.0],
+                        params: [2.5, KIND_SEGMENT, 1.0, 0.0],
+                        clip: NO_CLIP,
+                        ..Instance::zeroed()
+                    },
+                    Instance {
+                        rect: [108.0, 48.0, 44.0, 30.0],
+                        radii: [112.0, 74.0, 130.0, 50.0],
+                        fill: [0.6, 0.35, 0.9, 0.95],
+                        params: [7.0, KIND_TRIANGLE, 0.0, 0.0],
+                        uv: [148.0, 74.0, 0.0, 0.0],
+                        clip: NO_CLIP,
+                        ..Instance::zeroed()
+                    },
+                    // Glyph + image
+                    Instance {
+                        rect: [12.0, 86.0, 16.0, 16.0],
+                        fill: [1.0, 1.0, 1.0, 1.0],
+                        params: [0.0, KIND_GLYPH, 0.0, 1.45],
+                        uv: [0.0, 0.0, 16.0, 16.0],
+                        clip: NO_CLIP,
+                        ..Instance::zeroed()
+                    },
+                    Instance {
+                        rect: [36.0, 84.0, 24.0, 24.0],
+                        radii: [4.0; 4],
+                        fill: [0.0, 0.0, 0.0, 0.9],
+                        params: [placed.page as f32, KIND_IMAGE, 0.0, 0.0],
+                        uv: placed.rect.map(|v| v as f32),
+                        clip: NO_CLIP,
+                        ..Instance::zeroed()
+                    },
+                ];
+
+                // Isolated layer with PlusLighter blend and rounded clip
+                instances.push(Instance::begin_layer(
+                    [70.0, 82.0, 76.0, 30.0],
+                    [70.0, 82.0, 146.0, 112.0],
+                    LayerSpec {
+                        opacity: 0.8,
+                        blend: Blend::PlusLighter,
+                        blur: 0.0,
+                        clip_radius: 6.0,
+                    },
+                ));
+                instances.push(Instance {
+                    rect: [74.0, 86.0, 40.0, 22.0],
+                    radii: [5.0; 4],
+                    fill: [0.3, 0.5, 0.7, 0.85],
+                    params: [0.0, KIND_RECT, 0.0, 0.0],
+                    clip: NO_CLIP,
+                    ..Instance::zeroed()
+                });
+                instances.push(Instance {
+                    rect: [96.0, 86.0, 40.0, 22.0],
+                    radii: [5.0; 4],
+                    fill: [0.7, 0.3, 0.4, 0.85],
+                    params: [0.0, KIND_RECT, 0.0, 0.0],
+                    clip: NO_CLIP,
+                    ..Instance::zeroed()
+                });
+                instances.push(Instance::end_layer());
+
+                renderer.prepare(&gpu.device, &gpu.queue, &mut text.atlas, &instances, (width, height));
+                let target = Offscreen::with_format(&gpu.device, width, height, format);
+                let mut encoder = gpu.device.create_command_encoder(&Default::default());
+                renderer.draw(&mut encoder, &target.view, [0.08, 0.09, 0.12, 1.0]);
+                target.copy(&mut encoder);
+                renderer.submit(&gpu.queue, encoder);
+                target.read(&gpu.device)
+            })
+        };
+
+        for (format, srgb_blend) in [
+            (OFFSCREEN_FORMAT, false),
+            (wgpu::TextureFormat::Bgra8UnormSrgb, false),
+            (wgpu::TextureFormat::Rgba8Unorm, true),
+        ] {
+            let metallib_pixels = render_scene(true, format, srgb_blend);
+            let wgsl_pixels = render_scene(false, format, srgb_blend);
+            assert_eq!(
+                metallib_pixels, wgsl_pixels,
+                "metallib and WGSL pixel output differed for format={format:?} srgb_blend={srgb_blend}"
+            );
+        }
+    }
+}
