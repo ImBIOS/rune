@@ -412,3 +412,16 @@ fn sidebar_and_main_pane_move_in_lockstep_during_disclosure() {
         );
     }
 }
+
+#[test]
+fn a_wider_range_keeps_the_width_new_was_given() {
+    let p = PaneState::new(640.0).range(360.0, 960.0);
+    assert_eq!((p.width(), p.default_width()), (640.0, 640.0));
+    let mut p = PaneState::new(640.0).range(360.0, 960.0).with_width(700.0);
+    assert_eq!((p.width(), p.default_width()), (700.0, 640.0));
+    p.reset_width();
+    assert_eq!(p.width(), 640.0);
+    let p = PaneState::new(900.0).range(360.0, 600.0);
+    assert_eq!((p.width(), p.default_width()), (600.0, 600.0));
+    assert_eq!(PaneState::new(640.0).width(), PaneState::MAX);
+}

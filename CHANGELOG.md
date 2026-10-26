@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A pane's width survives a wider range.** `PaneState::new(640.0).range(360.0, 960.0)` is 640
+  wide and double-click resets to 640; before, `new` clamped to the stock 160–480 first, so it
+  was 480.
 - **One undo step for grouped edits, and per-pill styles.** `TextEdit::undo_group(|e| ..)` makes
   every edit inside one undo step (picking a mention: `replace_with_pill` then `insert(" ")`);
   groups nest, an empty one records nothing, and typing coalescing and IME are unchanged outside

@@ -19,6 +19,8 @@ pub struct PaneState {
     max: f32,
     resizing: bool,
     peek: Peek,
+    /// The width and default as asked, before clamping, so a later `range` can widen to them.
+    asked: [f32; 2],
 }
 
 /// Where a closed sidebar's peek stands. Kept after it ends, so the view knows which way the
@@ -42,14 +44,16 @@ impl PaneState {
 
     /// An open pane `width` points wide, which double-clicking its edge also returns to.
     pub fn new(width: f32) -> PaneState {
-        let mut p = PaneState { width, open: true, default: width, min: Self::MIN, max: Self::MAX, resizing: false, peek: Peek::None };
+        let mut p = PaneState { width, open: true, default: width, min: Self::MIN, max: Self::MAX, resizing: false, peek: Peek::None, asked: [width; 2] };
         p.clamp();
         p
     }
-    /// Its width range. The width and the default clamp into it.
+    /// Its width range. The width and the default clamp into it, from the values given to
+    /// [`Self::new`] and [`Self::with_width`], so `new(640.0).range(360.0, 960.0)` is 640.
     pub fn range(mut self, min: f32, max: f32) -> Self {
         self.min = min.max(1.0);
         self.max = max.max(self.min);
+        [self.width, self.default] = self.asked;
         self.clamp();
         self
     }
@@ -60,6 +64,9 @@ impl PaneState {
     }
     /// A saved width, clamped and rounded (the width it starts with; the default stays).
     pub fn with_width(mut self, width: f32) -> Self {
+        if width.is_finite() {
+            self.asked[0] = width;
+        }
         self.set_width(width);
         self
     }
