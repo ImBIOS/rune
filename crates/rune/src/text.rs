@@ -4237,21 +4237,25 @@ mod rewrap_tests {
     /// line, glyph and box where laying it out from scratch at that width does.
     #[test]
     fn a_new_width_rebreaks_without_shaping_and_matches_a_fresh_layout() {
-        let (mut ts, mut fresh) = (TextSystem::default(), TextSystem::default());
+        let mut ts = TextSystem::default();
         let widths = [Some(1200.0), Some(601.0), Some(433.5), Some(210.0), Some(80.0), Some(0.0), None, Some(900.0)];
         for c in cases() {
             lay(&mut ts, &c, Some(1800.0));
-            let (shaped, rebroken) = (ts.shaped, ts.rebroken);
             for width in widths {
+                let (shaped, rebroken) = (ts.shaped, ts.rebroken);
                 let l = lay(&mut ts, &c, width);
-                fresh.layouts.clear();
-                fresh.shapes.clear();
-                let f = lay(&mut fresh, &c, width);
-                assert_eq!(geometry(&l), geometry(&f), "{} at {width:?}", c.name);
+                assert_eq!((ts.shaped, ts.rebroken), (shaped, rebroken + 1), "{} at {width:?}: re-broken, not shaped", c.name);
+                // The same text shaped from scratch at this width, with the same fonts loaded.
+                let cached = (std::mem::take(&mut ts.layouts), std::mem::take(&mut ts.shapes));
+                let f = lay(&mut ts, &c, width);
+                assert_eq!(ts.shaped, shaped + 1);
+                (ts.layouts, ts.shapes) = cached;
+                let (a, b) = (geometry(&l), geometry(&f));
+                let first = a.iter().zip(&b).position(|(x, y)| x != y);
+                assert!(a == b, "{} at {width:?}: row {first:?} of {}: {:?} vs {:?}", c.name, a.len(),
+                    first.map(|i| &a[i]), first.map(|i| &b[i]));
             }
             assert!(lay(&mut ts, &c, Some(210.0)).len() > 1, "{} wraps", c.name);
-            assert_eq!(ts.shaped, shaped, "{}: a width change reshapes nothing", c.name);
-            assert_eq!(ts.rebroken - rebroken, widths.len() as u32, "{}", c.name);
         }
     }
 
