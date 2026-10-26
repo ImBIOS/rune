@@ -891,13 +891,15 @@ fn reasoning(p: &Pal, key: &str, body: &str, secs: Option<i64>, open: bool, fade
             .h(28.0)
             .gap(6.0)
             .center_y()
+            // "Thinking" crossfades to "Thought for Ns" while the chevron slides over.
+            .animate_layout()
             .on_press(move |s: &mut App| {
                 if !s.expanded.remove(&k) {
                     s.expanded.insert(k.clone());
                 }
             })
             .child(icon(&ic::BRAIN, 16.0).color(p.icon_muted))
-            .child(text(label).font(UI).color(p.muted))
+            .child(text(label).key(if secs.is_some() { "thought" } else { "thinking" }).font(UI).color(p.muted))
             .child(icon(chevron(open), 14.0).color(p.icon_faint)),
     );
     if open {

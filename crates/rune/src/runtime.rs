@@ -337,6 +337,17 @@ pub(crate) fn caret_of(caret: &Option<(String, [f32; 4])>, key: &str) -> Option<
     path.split('/').any(|seg| seg == key).then_some(*rect)
 }
 
+/// A node's place under a growth stack's row. The row's height carries vertical motion there.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RowLayout {
+    /// Not inside a growth row.
+    Free,
+    /// Inside one: layout snaps.
+    Snaps,
+    /// Inside one under `El::animate_layout`: x and width spring, y and height snap.
+    Horizontal,
+}
+
 pub(crate) struct Node {
     on_paste: Option<crate::el::PasteFn>,
     on_window_focus: Option<crate::el::WindowFocusFn>,
@@ -407,8 +418,8 @@ pub(crate) struct Node {
     /// `El::aspect_fit`: the ratio and the element's own style, which the fitted size replaces.
     aspect_fit: Option<Box<(f32, Style)>>,
     material: Option<crate::SystemMaterial>,
-    /// Inside a growth row: layout snaps (the row's height carries the motion).
-    in_row: bool,
+    /// Where it sits relative to a growth row, which carries its contents' motion.
+    in_row: RowLayout,
     virtual_mount: bool,
     pub parent: Option<usize>,
     taffy: taffy::NodeId,
@@ -3216,7 +3227,7 @@ impl<S: 'static> Measurement<'_, S> {
         // Root constraints are part of the retained style, not a dirty write after flattening.
         // A window that fits its content lays the root out at its natural height.
         root.style.size = Size { width: length(self.viewport.0), height: if self.fit_height { auto() } else { length(self.viewport.1) } };
-        let root_id = flatten(root, None, "", 0, motion::DEFAULT, false, true, &mut taffy, &mut nodes, &mut self.layout_entries, scale);
+        let root_id = flatten(root, None, "", 0, motion::DEFAULT, RowLayout::Free, true, &mut taffy, &mut nodes, &mut self.layout_entries, scale);
         self.layout_entries.retain(|_, entry| {
             if !entry.used { taffy.remove(entry.id).unwrap(); }
             entry.used
@@ -3527,6 +3538,7 @@ impl<S: 'static> Runtime<S> {
         let unseen = self.unseen_before_and_after(&nodes);
         // `El::matched` elements of this tree: (id, index, newly mounted).
         let mut arrivals: Vec<(Rc<str>, usize, bool)> = Vec::new();
+        let mut mounted = vec![false; nodes.len()];
         for i in 0..nodes.len() {
             let id = nodes[i].id;
             let parent_id = nodes[i].parent.map(|p| nodes[p].id);
@@ -3534,7 +3546,7 @@ impl<S: 'static> Runtime<S> {
             let spring_c = tx.color_motion.unwrap_or(nodes[i].motion);
             // Text leads its background so theme crossfades never dip through zero contrast.
             let spring_tc = Spring::new((spring_c.duration * 0.5).max(0.1), spring_c.bounce);
-            let row_like = nodes[i].in_row || nodes[i].parent.is_some_and(|p| nodes[p].growth.is_some());
+            let row_like = nodes[i].in_row == RowLayout::Snaps || nodes[i].parent.is_some_and(|p| nodes[p].growth.is_some());
             let layout_instant = instant || row_like || tx.relayout || self.virtuals.contains_key(&nodes[i].path)
                 || self.aspect_snap.contains(&id);
             let mut scene_rect = nodes[i].local;
@@ -3564,8 +3576,11 @@ impl<S: 'static> Runtime<S> {
                 if let Some(pid) = parent_id {
                     spec = spec.parent(pid);
                 }
-                // Growth carries a row's entrance; an explicit transition adds to it.
-                let quiet_row = row_like && nodes[i].transition.is_none() && !was_exiting && !self.reduced_motion;
+                // Growth carries a row's entrance; an explicit transition adds to it. Under
+                // `animate_layout`, contents new to a row already in place enter on their own.
+                mounted[i] = !was_present;
+                let rides_row = row_like || (nodes[i].in_row == RowLayout::Horizontal && nodes[i].parent.is_some_and(|p| mounted[p]));
+                let quiet_row = rides_row && nodes[i].transition.is_none() && !was_exiting && !self.reduced_motion;
                 let mount = if instant || nodes[i].virtual_mount || quiet_row { Mount::Initial } else { Mount::Animated };
                 self.scene.insert(id, spec, mount);
             }
@@ -3574,7 +3589,8 @@ impl<S: 'static> Runtime<S> {
                 if !was_exiting {
                     self.scene.set_transition(id, nodes[i].transition.unwrap_or_else(Transition::opacity));
                 }
-                let stack_row = nodes[i].parent.is_some_and(|p| nodes[p].growth.is_some()) || self.virtuals.contains_key(&nodes[i].path);
+                let stack_row = nodes[i].parent.is_some_and(|p| nodes[p].growth.is_some()) || self.virtuals.contains_key(&nodes[i].path)
+                    || (nodes[i].in_row == RowLayout::Horizontal && !self.aspect_snap.contains(&id));
                 // A window's own resize step moves content at rest with the window; motion
                 // already running retargets on its spring.
                 let follows_window = tx.window_step && !self.flying.iter().any(|f| f.0 == id)
@@ -3586,7 +3602,8 @@ impl<S: 'static> Runtime<S> {
                     LayoutAnim::INSTANT
                 } else if stack_row && !instant && !tx.relayout && !follows_window {
                     // Growth and virtual windows own a row's vertical place; its horizontal place
-                    // still springs, or a re-centred column jumps against its moving parent.
+                    // still springs, or a re-centred column jumps against its moving parent. So
+                    // do `animate_layout` contents inside the row.
                     LayoutAnim::axes(spring_l, Anim::INSTANT)
                 } else if layout_instant || follows_window {
                     LayoutAnim::INSTANT
@@ -7194,7 +7211,7 @@ fn flatten(
     parent_path: &str,
     index: usize,
     motion: Spring,
-    in_row: bool,
+    in_row: RowLayout,
     // The parent lays its children out in a row (its main axis is horizontal).
     parent_row: bool,
     taffy: &mut TaffyTree<usize>,
@@ -7209,6 +7226,8 @@ fn flatten(
     let motion = own_motion.unwrap_or(motion);
     let me = nodes.len();
     let parent_is_stack = parent.is_some_and(|p| nodes[p].growth.is_some());
+    let animate_layout = el.animate_layout;
+    let in_row = if animate_layout && in_row == RowLayout::Snaps { RowLayout::Horizontal } else { in_row };
     let virtual_mount = el.virtual_mount;
     #[cfg(debug_assertions)]
     let scroll_source = el.scroll_source;
@@ -7366,7 +7385,10 @@ fn flatten(
         #[cfg(debug_assertions)]
         scroll_source,
     });
-    let child_in_row = in_row || parent_is_stack;
+    let child_in_row = match in_row {
+        RowLayout::Free if parent_is_stack => if animate_layout { RowLayout::Horizontal } else { RowLayout::Snaps },
+        r => r,
+    };
     let mut children = children;
     if scroll.is_some() && scroll_axes.x() && let Some(content) = children.first_mut() {
         style.flex_direction = FlexDirection::Row;
@@ -10032,6 +10054,61 @@ mod tests {
     }
 
     #[test]
+    fn animate_layout_springs_a_growth_row_s_contents() {
+        use crate::el::GrowthSpec;
+        fn view(s: &(f32, bool), _cx: &mut Cx<(f32, bool)>) -> El {
+            let mut trigger = crate::row().key("trigger").h(28.0)
+                .child(el().key("label").size(s.0, 16.0))
+                .child(el().key("chevron").size(14.0, 14.0));
+            if s.1 { trigger = trigger.animate_layout(); }
+            col().key("stack").w_full().growth(GrowthSpec::default())
+                .child(col().key("r0").w_full().child(trigger))
+        }
+        let chevron_x = |rt: &Runtime<(f32, bool)>| rt.elements().into_iter()
+            .find(|e| e.key.as_deref() == Some("chevron")).unwrap().rect[0];
+        for animate in [false, true] {
+            let mut rt = Runtime::new((53.0, animate), view, (300.0, 100.0), Env::new(true, 2.0));
+            rt.frame(0.0);
+            assert_eq!(chevron_x(&rt), 53.0);
+            rt.update(|s, _| s.0 = 88.0);
+            rt.frame(1.0 / 120.0);
+            let x = chevron_x(&rt);
+            if animate {
+                assert!(x > 53.0 && x < 60.0, "springs from where it was: {x}");
+                for _ in 0..120 { rt.frame(1.0 / 120.0); }
+                assert_eq!(chevron_x(&rt), 88.0);
+            } else {
+                assert_eq!(x, 88.0, "a growth row's contents snap by default");
+            }
+        }
+    }
+
+    #[test]
+    fn animate_layout_in_a_growth_row_leaves_vertical_to_growth() {
+        use crate::el::GrowthSpec;
+        // (label width, space above the header, a second row)
+        fn view(s: &(f32, f32, bool), _cx: &mut Cx<(f32, f32, bool)>) -> El {
+            let head = |k: &str, w: f32| crate::row().key(k).h(28.0).animate_layout()
+                .child(el().key(format!("{k}-names")).size(w, 16.0))
+                .child(el().key(format!("{k}-chevron")).size(14.0, 14.0));
+            let mut stack = col().key("stack").w_full().growth(GrowthSpec::default())
+                .child(col().key("r0").w_full().child(el().key("above").w_full().h(s.1)).child(head("h0", s.0)));
+            if s.2 { stack = stack.child(col().key("r1").w_full().child(head("h1", 40.0))); }
+            stack
+        }
+        let find = |rt: &Runtime<(f32, f32, bool)>, key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap();
+        let mut rt = Runtime::new((31.5, 0.0, false), view, (300.0, 200.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        rt.update(|s, _| *s = (92.0, 20.0, true));
+        rt.frame(1.0 / 120.0);
+        let (chevron, names) = (find(&rt, "h0-chevron").rect, find(&rt, "h0-names").rect);
+        assert!(chevron[0] > 31.5 && chevron[0] < 40.0, "x springs: {chevron:?}");
+        assert!(names[2] > 31.5 && names[2] < 40.0, "width springs: {names:?}");
+        assert_eq!(chevron[1], 20.0, "y lands at once; the row's growth carries it");
+        assert_eq!(find(&rt, "h1-names").opacity, 1.0, "a new row's contents ride its growth");
+    }
+
+    #[test]
     fn layout_out_of_sight_before_and_after_moves_at_once() {
         fn view(wide: &bool, _cx: &mut Cx<bool>) -> El {
             let rows = (0..40).map(|i| el().key(format!("r{i}")).w(if *wide { 200.0 } else { 100.0 }).h(40.0).fill(Color::WHITE));
@@ -10046,6 +10123,61 @@ mod tests {
         let width = |rt: &Runtime<bool>, key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap().rect[2];
         assert!(width(&rt, "r0") > 190.0, "a row in sight springs: {}", width(&rt, "r0"));
         assert_eq!(width(&rt, "r30"), 100.0, "a row out of sight before and after lands at once");
+    }
+
+    #[test]
+    fn animate_layout_lets_a_growth_row_s_new_contents_fade_in() {
+        use crate::el::GrowthSpec;
+        fn view(s: &(bool, bool), _cx: &mut Cx<(bool, bool)>) -> El {
+            let trigger = crate::row().key("trigger").h(28.0).animate_layout()
+                .child(el().key(if s.0 { "after" } else { "before" }).size(if s.0 { 88.0 } else { 53.0 }, 16.0));
+            let mut stack = col().key("stack").w_full().growth(GrowthSpec::default());
+            if s.1 { stack = stack.virtualize(40.0); }
+            col().w_full().h_full().child(col().key("scroll").w_full().h(100.0).scroll(ScrollSpec { stick_bottom: true })
+                .child(stack.child(col().key("r0").w_full().child(col().key("part").child(trigger)))))
+        }
+        let opacity = |rt: &Runtime<(bool, bool)>, key: &str| rt.elements().into_iter()
+            .find(|e| e.key.as_deref() == Some(key)).map(|e| e.opacity);
+        for virtualized in [false, true] {
+            let mut rt = Runtime::new((false, virtualized), view, (300.0, 100.0), Env::new(true, 2.0));
+            rt.frame(0.0);
+            for _ in 0..30 { rt.frame(1.0 / 120.0); }
+            rt.update(|s, _| s.0 = true);
+            rt.frame(1.0 / 120.0);
+            let (before, after) = (opacity(&rt, "before").unwrap_or(0.0), opacity(&rt, "after").unwrap());
+            assert!(before > 0.5 && after < 0.5, "virtualized {virtualized}: crossfades, {before} out and {after} in");
+        }
+    }
+
+    #[test]
+    fn explicit_transitions_play_inside_a_growth_row() {
+        use crate::el::GrowthSpec;
+        fn view(s: &(bool, bool), _cx: &mut Cx<(bool, bool)>) -> El {
+            let mut trigger = crate::row().key("trigger").h(28.0).child(el().key("label").size(53.0, 16.0));
+            if s.0 {
+                trigger = trigger.child(el().key("badge").size(16.0, 16.0)
+                    .transition(Transition::offset(0.0, 8.0).combined(Transition::opacity())));
+            }
+            if s.1 { trigger = trigger.animate_layout(); }
+            col().key("stack").w_full().growth(GrowthSpec::default())
+                .child(col().key("r0").w_full().child(trigger))
+        }
+        let badge = |rt: &Runtime<(bool, bool)>| rt.elements().into_iter()
+            .find(|e| e.key.as_deref() == Some("badge")).map(|e| (e.opacity, e.exiting));
+        for animate in [false, true] {
+            let mut rt = Runtime::new((false, animate), view, (300.0, 100.0), Env::new(true, 2.0));
+            rt.frame(0.0);
+            for _ in 0..30 { rt.frame(1.0 / 120.0); }
+            rt.update(|s, _| s.0 = true);
+            rt.frame(1.0 / 120.0);
+            let (op, _) = badge(&rt).unwrap();
+            assert!(op < 0.5, "animate_layout {animate}: it enters on its transition: {op}");
+            for _ in 0..120 { rt.frame(1.0 / 120.0); }
+            rt.update(|s, _| s.0 = false);
+            rt.frame(1.0 / 120.0);
+            let (op, exiting) = badge(&rt).expect("it plays its exit");
+            assert!(exiting && op > 0.5, "animate_layout {animate}: it exits on its transition: {op}");
+        }
     }
 
     /// The app clears its password as the card leaves; the exiting copy of the field must

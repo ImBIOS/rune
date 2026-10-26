@@ -326,6 +326,28 @@ fn children_ride_their_parent_in_and_out() {
 }
 
 #[test]
+fn a_child_mounted_after_its_parent_visibly_arrives_enters_on_its_own() {
+    let mut s = Scene::new();
+    let (p, c) = (NodeId(42), NodeId(43));
+    s.insert(NodeId(1), spec(0.0, 0.0, 1.0, 1.0), Mount::Initial);
+    s.frame_at(0.0);
+    s.insert(p, spec(0.0, 0.0, 100.0, 100.0), Mount::Animated);
+    let mut t = 0.0;
+    loop {
+        t += 1.0 / HZ;
+        let out = s.frame_at(t);
+        if find(out.changed, p).is_some_and(|pp| pp.opacity >= 1.0 - 1.0 / 255.0) { break; }
+        assert!(t < 2.0, "the parent arrives");
+    }
+    assert_eq!(s.phase(p), Some(Phase::Entering), "its presence is still settling");
+    s.set_time(t + 1.0 / HZ);
+    s.insert(c, spec(10.0, 10.0, 20.0, 20.0).parent(p), Mount::Animated);
+    let cp = find(s.frame().changed, c).unwrap();
+    assert_eq!(cp.phase, Phase::Entering, "fades in instead of popping in on a finished entrance");
+    assert!(cp.opacity < 0.5, "{}", cp.opacity);
+}
+
+#[test]
 fn flags_mark_intent_for_motion_lint() {
     let mut s = Scene::new();
     let id = NodeId(50);

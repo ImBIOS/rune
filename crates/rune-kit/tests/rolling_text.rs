@@ -234,7 +234,6 @@ fn reduced_motion_crossfades_in_place() {
     assert_eq!(r, rest, "no travel under reduced motion");
     assert!(o > 0.0 && o < 1.0, "the old digit fades: {o}");
 }
-
 #[test]
 fn the_label_reads_as_text_in_lookups() {
     let mut rt = runtime("lookup", "Import 3 items", false, false);
@@ -251,4 +250,68 @@ fn the_label_reads_as_text_in_lookups() {
     rt.frame(0.0);
     let save = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("save")).unwrap();
     assert_eq!((save.label.as_deref(), save.text), (Some("Save"), None));
+}
+
+#[test]
+fn inside_a_growth_row_its_width_springs_under_animate_layout() {
+    fn view(s: &(String, bool), _cx: &mut Cx<(String, bool)>) -> El {
+        let k = Kit::neutral(true);
+        let mut row = rune::row().key("trigger").h(28.0)
+            .child(RollingText::new("count", s.0.clone()).font(k.ty.body).build(&k))
+            .child(rune::el().key("chevron").size(14.0, 14.0));
+        if s.1 { row = row.animate_layout(); }
+        rune::col().w_full().growth(rune::GrowthSpec::default()).child(rune::col().key("r0").w_full().child(row))
+    }
+    let chevron_x = |rt: &Runtime<(String, bool)>| rt.elements().into_iter()
+        .find(|e| e.key.as_deref() == Some("chevron")).unwrap().rect[0];
+    for animate in [false, true] {
+        let mut rt = Runtime::new(("Used 1 tool".to_string(), animate), view, (400.0, 100.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        let from = chevron_x(&rt);
+        rt.update(|s, _| s.0 = "Used 12 tools".into());
+        let mut xs = Vec::new();
+        for _ in 0..120 {
+            rt.frame(1.0 / 120.0);
+            xs.push(chevron_x(&rt));
+        }
+        let to = *xs.last().unwrap();
+        assert!(to > from + 10.0, "the label widens: {from} → {to}");
+        let step = xs.windows(2).map(|w| (w[1] - w[0]).abs()).fold((xs[0] - from).abs(), f32::max);
+        if animate {
+            assert!(step < (to - from) / 4.0, "the width springs: a {step}pt step of {}", to - from);
+        } else {
+            assert!(step > (to - from) * 0.9, "a growth row's contents snap by default: {step}pt");
+        }
+    }
+}
+
+/// A count that mounts with a fade and changes while its presence is still settling (a tool
+/// group's head swapping in, then a second tool joining a moment later) rolls its new digit in.
+#[test]
+fn a_digit_changing_soon_after_the_label_fades_in_rolls_in() {
+    fn view(s: &(String, bool, bool), _cx: &mut Cx<(String, bool, bool)>) -> El {
+        let k = Kit::neutral(true);
+        let mut row = rune::row().key("trigger").h(28.0);
+        if s.1 {
+            row = row.child(RollingText::new("count", s.0.clone()).font(k.ty.body).build(&k));
+        }
+        row = row.child(rune::el().key("chevron").size(14.0, 14.0));
+        if !s.2 { return rune::col().w_full().child(row); }
+        rune::col().w_full().growth(rune::GrowthSpec::default())
+            .child(rune::col().key("r0").w_full().child(row.animate_layout()))
+    }
+    for growth in [false, true] {
+        let mut rt = Runtime::new(("Used 1".to_string(), false, growth), view, (400.0, 100.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        rt.update(|s, _| s.1 = true);
+        for _ in 0..60 { rt.frame(1.0 / 120.0); }
+        let (_, label) = rt.presented("count").unwrap();
+        assert!(label > 0.99, "the label has faded in: {label}");
+        rt.update(|s, _| s.0 = "Used 2".into());
+        rt.frame(1.0 / 120.0);
+        let two = rt.elements().into_iter()
+            .find(|e| !e.inert && e.text.as_deref() == Some("2") && e.key.as_deref().is_some_and(|k| k.starts_with("count.")))
+            .unwrap();
+        assert!(two.opacity < 0.5, "growth {growth}: the new digit rolls in rather than appearing: op {}", two.opacity);
+    }
 }

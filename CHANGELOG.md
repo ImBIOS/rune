@@ -5,6 +5,21 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::animate_layout()` springs a growth row's horizontal layout.** Inside a growth-stack row
+  everything snaps while the row's height carries the motion, so a label changing width in place
+  (`"Thinking"` → `"Thought for 3s"`, `"Used 1 tool"` → `"Used 2 tools"`) jumped its neighbours.
+  Under `.animate_layout()` a row's contents spring x and width on their own layout spring, and
+  children the element gains while the row is already in place fade in; y and height stay with
+  growth. Nothing changes without the call.
+
+- **A child mounted after its parent visibly arrives enters on its own.** A child inserted under
+  a parent still entering used to ride the parent's entrance. The parent's presence runs on for
+  ~0.7 s after it reaches full opacity, so a child mounted in that tail popped in at full opacity.
+  It now rides only while the parent is visibly entering (presence under 1 - 1/255) or exiting.
+  Things apps can notice: content swapped into a freshly mounted parent plays its own
+  transition (a `RollingText` digit changing soon after the label fades in rolls in instead of
+  appearing in place), and goldens that capture it can differ.
+
 - **Layout nobody can see moves at once.** A node that drew nowhere in sight in the last build
   (outside the window, or clipped away by a scroll or clip) and lands out of sight again now
   takes its new frame, radius and opacity at once instead of springing there. Toggling a sidebar

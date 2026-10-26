@@ -3234,9 +3234,10 @@
       "focusable": false,
       "focused": false,
       "inert": false,
+      "key": "thought",
       "loopPhase": null,
       "opacity": 1.0,
-      "path": "window/panel/session/scroll-ses_fx0001aaaaaaaaaaaaaaaaaa/timeline/r-msg_001a162c33250002fixture00-0/#0/trigger/#1",
+      "path": "window/panel/session/scroll-ses_fx0001aaaaaaaaaaaaaaaaaa/timeline/r-msg_001a162c33250002fixture00-0/#0/trigger/thought",
       "rect": [
         444.0,
         -522.0,

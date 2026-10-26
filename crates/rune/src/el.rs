@@ -957,6 +957,7 @@ pub struct El {
     pub(crate) opacity_motion: Option<Anim>,
     pub(crate) lead: Option<(Spring, Spring)>,
     pub(crate) width_leads: bool,
+    pub(crate) animate_layout: bool,
     pub(crate) transition: Option<Transition>,
     pub(crate) matched: Option<Rc<str>>,
     pub(crate) scroll: Option<ScrollSpec>,
@@ -1033,6 +1034,7 @@ fn base(dir: FlexDirection) -> El {
         opacity_motion: None,
         lead: None,
         width_leads: false,
+        animate_layout: false,
         transition: None,
         matched: None,
         scroll: None,
@@ -2714,6 +2716,14 @@ impl El {
     /// The X axis springs faster (`0.78×` duration) when this element resizes or travels.
     pub fn width_leads(mut self) -> Self {
         self.width_leads = true;
+        self
+    }
+    /// Spring this subtree's horizontal layout (x and width) inside a growth-stack row, and
+    /// fade in children it gains while the row is in place. A row's contents otherwise snap
+    /// while the row's height carries the motion, so a label that changes width in place jumps
+    /// its neighbours. Vertical place stays with the row's growth.
+    pub fn animate_layout(mut self) -> Self {
+        self.animate_layout = true;
         self
     }
     /// How this element enters and exits when mounted or removed after the first frame

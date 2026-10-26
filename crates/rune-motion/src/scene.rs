@@ -424,7 +424,13 @@ impl Scene {
             Some(p) => self.slot(p).unwrap_or_else(|| panic!("insert {id:?}: parent {p:?} isn't in the scene")) as u32,
             None => NONE,
         };
-        let rides_parent = parent != NONE && self.nodes[parent as usize].phase != Phase::Present;
+        // A parent's presence tail runs on for ~0.7 s after it has visibly arrived; a child
+        // mounted in that tail enters on its own instead of popping in on the finished entrance.
+        let rides_parent = parent != NONE && match self.nodes[parent as usize].phase {
+            Phase::Present => false,
+            Phase::Entering => self.presence_now(parent as usize) < 1.0 - 1.0 / 255.0,
+            Phase::Exiting { .. } => true,
+        };
         let animate = mount == Mount::Animated && !rides_parent;
         let ins = spec.transition.insertion.kit_rules(false);
         let node = Node {
