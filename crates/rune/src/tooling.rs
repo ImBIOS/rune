@@ -716,11 +716,17 @@ pub(crate) fn desktop(args: &Args, script: Option<&Value>) -> crate::virtual_des
     crate::virtual_desktop::VirtualDesktop::from_script_sized(script, scale, size).unwrap_or_else(|e| die(&e))
 }
 
-/// `{"text": …, "html": …, "rtf": …}`, each optional, as another app's clipboard would hold.
+/// `{"text": …, "html": …, "rtf": …, "png": "path/to/image.png"}`, each optional, as another
+/// app's clipboard would hold.
 fn paste_content(e: &Value) -> crate::ClipboardContent {
     let mut content = crate::ClipboardContent::new(e["text"].as_str().unwrap_or(""));
     if let Some(html) = e["html"].as_str() { content = content.with_html(html); }
     if let Some(rtf) = e["rtf"].as_str() { content = content.with_rtf(rtf); }
+    if let Some(path) = e["png"].as_str() {
+        let bytes = std::fs::read(path).unwrap_or_else(|err| die(&format!("paste png {path}: {err}")));
+        let image = crate::ClipboardImage::from_png(bytes).unwrap_or_else(|| die(&format!("paste png {path}: not a PNG, or over clipboard::MAX_IMAGE_BYTES")));
+        content = content.with_image(image);
+    }
     content
 }
 
@@ -1044,11 +1050,14 @@ fn script_events_answer_a_pop_up_menu() {
 
 #[cfg(test)]
 #[test]
-fn a_script_paste_can_carry_html_and_rtf() {
+fn a_script_paste_can_carry_html_rtf_and_an_image() {
+    let png = std::env::temp_dir().join(format!("rune-script-paste-{}.png", std::process::id()));
+    std::fs::write(&png, crate::drag_out::encode_png(1, 2, &[9; 8]).unwrap()).unwrap();
     let script = parse_script(json!([
         {"type": "paste", "text": "plain"},
         {"paste": "short"},
         {"paste": {"text": "Hi", "html": "<b>Hi</b><img src=x onerror=y>", "rtf": "{\\rtf1 Hi}"}},
+        {"paste": {"png": png.to_str().unwrap()}},
     ]));
     let public: Vec<_> = script.iter().map(|e| format!("{:?}", e.public().event)).collect();
     assert_eq!(public[..2], [r#"Paste("plain")"#, r#"Paste("short")"#]);
@@ -1062,8 +1071,12 @@ fn a_script_paste_can_carry_html_and_rtf() {
         rt.paste_content(content);
     }
     rt.frame(0.0);
-    let texts: Vec<_> = rt.state.iter().map(|c| (c.text(), c.html(), c.rtf())).collect();
-    assert_eq!(texts, [("plain", None, None), ("short", None, None), ("Hi", Some(r#"<b>Hi</b><img src="x">"#), Some("{\\rtf1 Hi}"))]);
+    let _ = std::fs::remove_file(&png);
+    let texts: Vec<_> = rt.state.iter().map(|c| (c.text(), c.html(), c.rtf(), c.image().map(crate::ClipboardImage::size))).collect();
+    assert_eq!(texts, [
+        ("plain", None, None, None), ("short", None, None, None),
+        ("Hi", Some(r#"<b>Hi</b><img src="x">"#), Some("{\\rtf1 Hi}"), None), ("", None, None, Some((1, 2))),
+    ]);
 }
 
 #[cfg(test)]

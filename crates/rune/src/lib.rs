@@ -140,7 +140,7 @@ pub mod clipboard;
 mod preferences;
 mod accent;
 pub use accent::{SystemAccent, system_accent};
-pub use clipboard::{ClipboardContent, ClipboardWrite, SecretCopy, SecretState};
+pub use clipboard::{ClipboardContent, ClipboardImage, ClipboardWrite, SecretCopy, SecretState};
 pub mod drag_out;
 pub use drag_out::{DragImage, DragItem, DragOperation, DragOutcome};
 pub mod windows;

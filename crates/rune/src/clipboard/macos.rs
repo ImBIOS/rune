@@ -1,17 +1,19 @@
 //! The macOS pasteboard's rich forms. Every form is written after one `clearContents`, so the
 //! change count moves once; RTF from apps that offer nothing richer (TextEdit, Notes, Pages)
 //! is converted to HTML. Runs on the clipboard worker: AppKit's RTF reader and HTML writer
-//! don't need the main thread (its HTML *reader* does, and isn't used).
+//! don't need the main thread (its HTML *reader* does, and isn't used). A TIFF image (what
+//! most Mac apps copy) is converted to PNG there too, by `NSBitmapImageRep`.
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
 use objc2::ClassType;
 use objc2_app_kit::{
-    NSAttributedStringDocumentFormats, NSCharacterEncodingDocumentAttribute, NSDocumentTypeDocumentAttribute, NSHTMLTextDocumentType,
-    NSPasteboard, NSPasteboardTypeHTML, NSPasteboardTypeRTF, NSPasteboardTypeString,
+    NSAttributedStringDocumentFormats, NSBitmapImageFileType, NSBitmapImageRep, NSCharacterEncodingDocumentAttribute,
+    NSDocumentTypeDocumentAttribute, NSHTMLTextDocumentType, NSPasteboard, NSPasteboardTypeHTML, NSPasteboardTypePNG,
+    NSPasteboardTypeRTF, NSPasteboardTypeString, NSPasteboardTypeTIFF,
 };
 use objc2_foundation::{NSAttributedString, NSCopying, NSData, NSDictionary, NSNumber, NSRange, NSString, NSUTF8StringEncoding};
 use zeroize::Zeroizing;
-use super::ClipboardContent;
+use super::{ClipboardContent, ClipboardImage, MAX_IMAGE_BYTES};
 use super::html::MAX_RICH_BYTES;
 
 /// Refuse to hand AppKit's RTF parser multi-megabyte blobs (e.g. embedded images).
@@ -34,20 +36,46 @@ pub(super) fn write(pb: &NSPasteboard, content: &ClipboardContent) -> Result<(),
     })
 }
 
-/// Plain text, HTML and RTF, with HTML made from the RTF when the pasteboard has no HTML.
-pub(super) fn read(pb: &NSPasteboard) -> Option<ClipboardContent> {
+/// Plain text, HTML and RTF, with HTML made from the RTF when the pasteboard has no HTML, and
+/// with `image`, the pasteboard's PNG, or its TIFF as PNG.
+pub(super) fn read(pb: &NSPasteboard, image: bool) -> Option<ClipboardContent> {
     autoreleasepool(|_| unsafe {
         let text = pb.stringForType(NSPasteboardTypeString).map(|s| Zeroizing::new(s.to_string()));
         let html = pb.stringForType(NSPasteboardTypeHTML).map(|s| s.to_string()).filter(|h| !h.is_empty() && h.len() <= MAX_RICH_BYTES);
         let rtf = pb.dataForType(NSPasteboardTypeRTF)
             .filter(|d| !d.is_empty() && d.len() <= MAX_RICH_BYTES)
             .map(|d| Zeroizing::new(d.bytes().to_vec()));
-        if text.is_none() && html.is_none() && rtf.is_none() { return None; }
+        let image = if image { read_image(pb) } else { None };
+        if text.is_none() && html.is_none() && rtf.is_none() && image.is_none() { return None; }
         let html = html.or_else(|| rtf.as_deref().and_then(|rtf| rtf_to_html(rtf)));
         let mut content = ClipboardContent::from(text.unwrap_or_default());
         if let Some(html) = html { content = content.with_html(html); }
         if let Some(rtf) = rtf { content = content.with_rtf(String::from_utf8_lossy(&rtf)); }
+        if let Some(image) = image { content = content.with_image(image); }
         Some(content)
+    })
+}
+
+/// The pasteboard's PNG as is, else its TIFF converted.
+fn read_image(pb: &NSPasteboard) -> Option<ClipboardImage> {
+    let fits = |d: &Retained<NSData>| !d.is_empty() && d.len() <= MAX_IMAGE_BYTES;
+    unsafe {
+        if let Some(png) = pb.dataForType(NSPasteboardTypePNG).filter(fits).and_then(|d| ClipboardImage::from_png(d.bytes())) {
+            return Some(png);
+        }
+        // TIFF is uncompressed more often than not: allow it more room than the PNG it becomes.
+        let tiff = pb.dataForType(NSPasteboardTypeTIFF).filter(|d| !d.is_empty() && d.len() <= 8 * MAX_IMAGE_BYTES)?;
+        tiff_to_png(tiff.bytes())
+    }
+}
+
+/// PNG for TIFF bytes (the first image of a multi-page TIFF), through `NSBitmapImageRep`.
+pub(super) fn tiff_to_png(tiff: &[u8]) -> Option<ClipboardImage> {
+    autoreleasepool(|_| unsafe {
+        let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(tiff))?;
+        let png = rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())?;
+        if png.len() > MAX_IMAGE_BYTES { return None; }
+        ClipboardImage::from_png(png.bytes())
     })
 }
 
@@ -105,7 +133,7 @@ mod tests {
         let content = ClipboardContent::new("Hi there").with_html("<b>Hi</b> there").with_rtf(RTF);
         write(&pb, &content).unwrap();
         assert_eq!(unsafe { pb.changeCount() }, before + 1);
-        let back = read(&pb).unwrap();
+        let back = read(&pb, true).unwrap();
         assert_eq!(back.text(), "Hi there");
         assert!(back.html().unwrap().ends_with("<b>Hi</b> there"));
         assert_eq!(back.rtf(), Some(RTF));
@@ -114,9 +142,42 @@ mod tests {
             pb.clearContents();
             pb.setData_forType(Some(&NSData::with_bytes(RTF.as_bytes())), NSPasteboardTypeRTF);
         }
-        let rtf_only = read(&pb).unwrap();
+        let rtf_only = read(&pb, true).unwrap();
         assert_eq!(rtf_only.text(), "Hello bold and italic café", "the pasteboard derives text from RTF");
         assert!(rtf_only.html().unwrap().contains("bold"));
+
+        let tiff = tiff_of(&png_2x3());
+        unsafe {
+            pb.clearContents();
+            pb.setData_forType(Some(&NSData::with_bytes(&tiff)), NSPasteboardTypeTIFF);
+        }
+        assert_eq!(read(&pb, true).unwrap().image().map(ClipboardImage::size), Some((2, 3)), "a TIFF image pastes as PNG");
+        assert!(read(&pb, false).is_none(), "an image is read only when asked for");
+        unsafe {
+            pb.clearContents();
+            pb.setString_forType(&NSString::from_str("shot.png"), NSPasteboardTypeString);
+            pb.setData_forType(Some(&NSData::with_bytes(&png_2x3())), NSPasteboardTypePNG);
+        }
+        let both = read(&pb, true).unwrap();
+        assert_eq!((both.text(), both.image().map(|i| i.png().to_vec())), ("shot.png", Some(png_2x3())), "PNG passes through as is");
         let _: () = unsafe { objc2::msg_send![&pb, releaseGlobally] };
+    }
+
+    fn png_2x3() -> Vec<u8> {
+        let rgba: Vec<u8> = (0..6u8).flat_map(|i| [i * 40, 255 - i * 40, 128, 255]).collect();
+        crate::drag_out::encode_png(2, 3, &rgba).unwrap()
+    }
+
+    fn tiff_of(png: &[u8]) -> Vec<u8> {
+        unsafe { NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(png)).unwrap().TIFFRepresentation().unwrap().bytes().to_vec() }
+    }
+
+    #[test]
+    fn tiff_becomes_png_off_the_main_thread() {
+        let (send, recv) = std::sync::mpsc::channel();
+        std::thread::spawn(move || { let _ = send.send(tiff_to_png(&tiff_of(&png_2x3())).map(|i| (i.size(), i.png().starts_with(b"\x89PNG")))); });
+        let converted = recv.recv_timeout(std::time::Duration::from_secs(20)).expect("conversion finished");
+        assert_eq!(converted, Some(((2, 3), true)));
+        assert!(tiff_to_png(b"not a tiff").is_none());
     }
 }

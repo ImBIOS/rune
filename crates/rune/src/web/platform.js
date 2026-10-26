@@ -9,23 +9,30 @@ export async function writeClipboard(text, html) {
     })]);
 }
 
-// `{ text, html }`, either undefined when the clipboard lacks it; `html` only when `rich`.
-// `read()` starts before the first await, inside the input handler; where it fails, plain
-// `readText()` is the fallback.
-export async function readClipboard(rich) {
+// `{ text, html, png }`, each undefined when the clipboard lacks it; `html` only when `rich`,
+// and `png` (a Uint8Array of at most `maxImage` bytes) only when `image`. `read()` starts
+// before the first await, inside the input handler; where it fails, plain `readText()` is the
+// fallback.
+export async function readClipboard(rich, image, maxImage) {
     const clipboard = navigator.clipboard;
     if (!clipboard) throw new Error('Clipboard requires HTTPS.');
     if (rich && clipboard.read) {
         try {
-            let text, html;
+            let text, html, png;
             for (const item of await clipboard.read()) {
                 if (text === undefined && item.types.includes('text/plain')) text = await (await item.getType('text/plain')).text();
                 if (html === undefined && item.types.includes('text/html')) html = await (await item.getType('text/html')).text();
+                if (image && png === undefined && item.types.includes('image/png')) png = await pngBytes(await item.getType('image/png'), maxImage);
             }
-            return { text, html };
+            return { text, html, png };
         } catch {}
     }
     return { text: await clipboard.readText() };
+}
+
+// A PNG blob's bytes, or undefined when it's larger than `max`.
+export async function pngBytes(blob, max) {
+    return blob && blob.size <= max ? new Uint8Array(await blob.arrayBuffer()) : undefined;
 }
 
 export function openLink(url) {

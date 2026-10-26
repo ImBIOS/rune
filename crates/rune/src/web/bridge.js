@@ -87,7 +87,9 @@ export function mount(canvas, callback) {
         listen(field, 'paste', event => {
             event.preventDefault();
             const data = event.clipboardData;
-            send({ kind: 'paste', text: data?.getData('text/plain') ?? '', html: field === textarea ? data?.getData('text/html') ?? '' : '' });
+            // The file must be taken during the event; Rust reads its bytes only for a hook.
+            h.image = field === textarea ? [...(data?.items ?? [])].find(i => i.kind === 'file' && i.type === 'image/png')?.getAsFile() ?? undefined : undefined;
+            send({ kind: 'paste', text: data?.getData('text/plain') ?? '', html: field === textarea ? data?.getData('text/html') ?? '' : '', image: !!h.image });
         });
         listen(field, 'beforeinput', event => {
             if (event.inputType === 'insertLineBreak' || event.inputType === 'insertParagraph') {
@@ -163,6 +165,13 @@ export function activate(h) {
     const field = h.key ? h.field : h.canvas;
     if (h.key) field.inputMode = 'text';
     if (document.activeElement !== field) field.focus({ preventScroll: true });
+}
+
+// The PNG the last paste carried, as a Uint8Array of at most `max` bytes, read once.
+export async function pastedImage(h, max) {
+    const file = h.image;
+    h.image = undefined;
+    return file && file.size <= max ? new Uint8Array(await file.arrayBuffer()) : undefined;
 }
 
 export function destroy(h) {

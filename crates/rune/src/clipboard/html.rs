@@ -347,8 +347,9 @@ fn decode_entities(s: &str) -> String {
 
 /// Packs an HTML fragment into a Windows `CF_HTML` (`HTML Format`) payload whose header
 /// offsets (`StartHTML`, `EndHTML`, `StartFragment`, `EndFragment`) are UTF-8 byte offsets
-/// from the start of the payload, including the header.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+/// from the start of the payload, including the header. arboard writes Windows copies itself;
+/// this builds payloads for [`unpack_cf_html`]'s tests.
+#[cfg(test)]
 pub(crate) fn pack_cf_html(fragment: &str) -> String {
     const PREFIX: &str = "<html>\r\n<body>\r\n<!--StartFragment-->";
     const SUFFIX: &str = "<!--EndFragment-->\r\n</body>\r\n</html>";

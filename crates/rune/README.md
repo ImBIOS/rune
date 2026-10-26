@@ -878,24 +878,41 @@ HTML without a hook (see Rich text editing below). Plain fields without a hook a
 handlers behave exactly as before, and a clipboard with HTML but no plain text
 reaches only the rich hooks. Reads run on the clipboard worker, never the event thread.
 
+Hooks also hear a pasted image (a screenshot, an image copied from a browser or an editor):
+`content.image()` is a `ClipboardImage` holding PNG bytes (`png()`) and the pixel size
+(`size()`), whatever form the clipboard held it in. Rune fetches it only for a target with a
+hook (`on_input_paste`, `on_paste_content`, `read_clipboard`), so pasting text into other fields
+never decodes one, and leaves out images over `clipboard::MAX_IMAGE_BYTES` (32 MiB as PNG).
+An image alone, with no text, reaches only hooks. Copies don't write images yet.
+
+```rust
+text_input(&s.prompt, style).on_edit(|s: &mut S| &mut s.prompt).on_input_paste(|s: &mut S, content, _| {
+    let Some(image) = content.image() else { return false };
+    let id = s.attachments.add(image.png().to_vec());
+    s.prompt.insert_pill(format!("image:{id}"), "Image");
+    true
+})
+```
+
 Clipboard HTML is another app's untrusted input. Rune runs it through `sanitize_html` before
 any hook sees it: scripts, event handlers, frames, embeds, `javascript:` and other non-web
 URLs, comments and CSS that loads anything are removed; text, tags, `class`,
 inline styles and inert `<style>` stay. Treat the result as markup to parse into a model, not
 to hand a web view as is. RTF is passed through untouched.
 
-| Platform | Copy | Paste |
-| --- | --- | --- |
-| macOS | text, `public.html`, `public.rtf` in one pasteboard change | HTML; else RTF converted to HTML (TextEdit, Notes, Pages); else text |
-| Windows | text and CF_HTML (`HTML Format`); no RTF | CF_HTML fragment, else text |
-| Linux (X11, Wayland data-control) | text and `text/html`; no RTF | `text/html`, else text |
-| Web | `text/plain` and `text/html` through the async Clipboard API; no RTF | `text/html` from the paste event or `navigator.clipboard.read()`, else text |
+| Platform | Copy | Paste | Pasted image |
+| --- | --- | --- | --- |
+| macOS | text, `public.html`, `public.rtf` in one pasteboard change | HTML; else RTF converted to HTML (TextEdit, Notes, Pages); else text | `public.png` as is, else `public.tiff` converted to PNG |
+| Windows | text and CF_HTML (`HTML Format`); no RTF | CF_HTML fragment, else text | `PNG`, else `CF_DIBV5`, through arboard, encoded as PNG |
+| Linux (X11, Wayland data-control) | text and `text/html`; no RTF | `text/html`, else text | `image/png` through arboard, decoded and encoded again |
+| Web | `text/plain` and `text/html` through the async Clipboard API; no RTF | `text/html` from the paste event or `navigator.clipboard.read()`, else text | `image/png` from the paste event's files or `navigator.clipboard.read()` |
 
 On macOS the RTF conversion uses `NSAttributedString` on the worker; AppKit's RTF reader and
 HTML writer don't need the main thread. In tests, `clipboard::memory()` keeps every form:
 `set_content(ClipboardContent::new("Hi").with_html("<b>Hi</b>"))` stands in for another app's
 copy and `content()` shows what Rune wrote. `Runtime::paste_content` and the script step
-`{"paste": {"text": "Hi", "html": "<b>Hi</b>", "rtf": "…"}}` (or `{"paste": "Hi"}`) paste
+`{"paste": {"text": "Hi", "html": "<b>Hi</b>", "rtf": "…", "png": "shot.png"}}` (or
+`{"paste": "Hi"}`; `png` is a file path) paste
 several forms through the same routing, sanitised as a real paste is.
 
 `tx.fly_text("prompt", "sent-text")` hands a visible plain-text field to a newly

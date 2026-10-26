@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Pasted images reach paste hooks.** `ClipboardContent::image()` holds a pasted image as a
+  `ClipboardImage` (PNG bytes via `png()`, pixel `size()`), with `with_image` to build one
+  and `clipboard::MAX_IMAGE_BYTES` (32 MiB as PNG) as the cap. Only targets with a hook fetch
+  it: a field's `on_input_paste`, the root's `on_paste_content` and `Tx::read_clipboard`; plain
+  and hookless rich fields read the clipboard as before. macOS reads `public.png`, else
+  converts `public.tiff`; Windows (`PNG`, else `CF_DIBV5`) and Linux (`image/png`) read through
+  arboard's `image-data` feature, now on for those targets; the web reads `image/png` from the
+  paste event or `navigator.clipboard.read()`. An image-only clipboard now reaches hooks
+  instead of nothing. Copies don't write images. Script `paste` steps take `"png": "path"`.
 - **Atomic inline pills in rich text (`Mark::Pill(id)`); `Mark` is `#[non_exhaustive]`.** A
   pill is a mention, file or attachment run whose label is the text under the mark. The caret
   steps over it in one move, a selection reaching into it grows to cover it, `Backspace` /

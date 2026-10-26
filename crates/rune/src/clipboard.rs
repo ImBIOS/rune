@@ -41,19 +41,26 @@ pub struct ClipboardContent {
     text: Zeroizing<String>,
     html: Option<Zeroizing<String>>,
     rtf: Option<Zeroizing<String>>,
+    image: Option<ClipboardImage>,
 }
 impl ClipboardContent {
     /// Plain text, the form every app can paste.
-    pub fn new(text: impl Into<String>) -> Self { Self { text: Zeroizing::new(text.into()), html: None, rtf: None } }
+    pub fn new(text: impl Into<String>) -> Self { Self { text: Zeroizing::new(text.into()), html: None, rtf: None, image: None } }
     /// Adds an HTML form (a fragment or a document), for apps that paste formatted text.
     pub fn with_html(mut self, html: impl Into<String>) -> Self { self.html = Some(Zeroizing::new(html.into())); self }
     /// Adds an RTF form, for apps that read RTF but not HTML.
     pub fn with_rtf(mut self, rtf: impl Into<String>) -> Self { self.rtf = Some(Zeroizing::new(rtf.into())); self }
+    /// Adds an image, as a paste of a screenshot or a copied image would carry. Rune's copies
+    /// don't write images yet: this is for pastes and the memory clipboard.
+    pub fn with_image(mut self, image: ClipboardImage) -> Self { self.image = Some(image); self }
     pub fn text(&self) -> &str { &self.text }
     pub fn html(&self) -> Option<&str> { self.html.as_deref().map(String::as_str) }
     pub fn rtf(&self) -> Option<&str> { self.rtf.as_deref().map(String::as_str) }
-    /// HTML or RTF beside the text.
-    pub fn is_rich(&self) -> bool { self.html.is_some() || self.rtf.is_some() }
+    /// The image on the clipboard, as PNG. Only pastes to a hook carry one: a field's
+    /// `on_input_paste`, a root `on_paste_content` or `Tx::read_clipboard`.
+    pub fn image(&self) -> Option<&ClipboardImage> { self.image.as_ref() }
+    /// HTML, RTF or an image beside the text.
+    pub fn is_rich(&self) -> bool { self.html.is_some() || self.rtf.is_some() || self.image.is_some() }
     /// No text and no other form.
     pub fn is_empty(&self) -> bool { self.text.is_empty() && !self.is_rich() }
     /// Content from another app: its HTML sanitised.
@@ -61,6 +68,7 @@ impl ClipboardContent {
         if let Some(html) = &mut self.html { *html = Zeroizing::new(sanitize_html(html)); }
         self
     }
+    fn without_image(mut self) -> Self { self.image = None; self }
     /// Plain consumers (a field without an `on_input_paste`, a text `on_paste`) take it: it
     /// has text, or nothing else. Rich-only content (an HTML clipboard with no plain text)
     /// reaches only rich hooks, as before it reached no one.
@@ -73,7 +81,7 @@ impl From<&str> for ClipboardContent {
     fn from(text: &str) -> Self { Self::new(text) }
 }
 impl From<Zeroizing<String>> for ClipboardContent {
-    fn from(text: Zeroizing<String>) -> Self { Self { text, html: None, rtf: None } }
+    fn from(text: Zeroizing<String>) -> Self { Self { text, html: None, rtf: None, image: None } }
 }
 impl std::fmt::Debug for ClipboardContent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -81,7 +89,51 @@ impl std::fmt::Debug for ClipboardContent {
             .field("text", &self.text.len())
             .field("html", &self.html.as_ref().map(|h| h.len()))
             .field("rtf", &self.rtf.as_ref().map(|r| r.len()))
+            .field("image", &self.image)
             .finish()
+    }
+}
+
+/// The largest image a paste carries, as PNG. A bigger one is left out, and the paste
+/// carries the clipboard's other forms.
+pub const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+
+/// A pasted image as PNG bytes, whatever form the clipboard held it in (TIFF on macOS, a DIB
+/// on Windows). Cheap to clone. Debug output shows only its size.
+///
+/// ```
+/// # use rune::clipboard::{ClipboardContent, ClipboardImage};
+/// # let png = [&b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"[..], &[0, 0, 0, 2, 0, 0, 0, 3]].concat();
+/// let image = ClipboardImage::from_png(png).unwrap();
+/// assert_eq!(image.size(), (2, 3));
+/// let content = ClipboardContent::new("").with_image(image);
+/// assert!(content.image().is_some_and(|i| i.png().starts_with(b"\x89PNG")));
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+pub struct ClipboardImage { png: Arc<[u8]>, size: (u32, u32) }
+impl ClipboardImage {
+    /// PNG bytes, or `None` when they don't start with a PNG header or pass
+    /// [`MAX_IMAGE_BYTES`].
+    pub fn from_png(png: impl Into<Arc<[u8]>>) -> Option<Self> {
+        let png = png.into();
+        if png.len() > MAX_IMAGE_BYTES || png.len() < 24 || &png[..8] != b"\x89PNG\r\n\x1a\n" || &png[12..16] != b"IHDR" { return None; }
+        let be = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+        let size = (be(16), be(20));
+        Some(Self { png, size })
+    }
+    /// Encodes 8-bit RGBA pixels, row by row, as PNG.
+    #[cfg_attr(any(target_os = "macos", target_arch = "wasm32"), allow(dead_code))]
+    pub(crate) fn from_rgba(width: u32, height: u32, rgba: &[u8]) -> Option<Self> {
+        Self::from_png(crate::drag_out::encode_png(width, height, rgba)?)
+    }
+    /// The PNG file's bytes, ready to save, upload or decode.
+    pub fn png(&self) -> &[u8] { &self.png }
+    /// Width and height in pixels, from the PNG header.
+    pub fn size(&self) -> (u32, u32) { self.size }
+}
+impl std::fmt::Debug for ClipboardImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClipboardImage").field("size", &self.size).field("bytes", &self.png.len()).finish()
     }
 }
 
@@ -203,11 +255,22 @@ impl Route {
 /// Why the clipboard is read.
 #[derive(Clone, Debug, PartialEq)]
 enum Purpose {
-    /// Cmd/Ctrl-V or `Tx::request_paste`, for this focused field or (`None`) the app, and
-    /// whether that target has a hook for HTML and RTF. A plain one reads only the text.
-    Paste(Option<String>, bool),
+    /// Cmd/Ctrl-V or `Tx::request_paste`, for this focused field or (`None`) the app, and the
+    /// forms that target takes.
+    Paste(Option<String>, Forms),
     /// `Tx::read_clipboard`'s callback with this id. It always hears back, empty or not.
     Read(u64),
+}
+
+/// The forms a paste target takes, so a read fetches no more than it needs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Forms {
+    /// A plain field or a plain `on_paste`.
+    Text,
+    /// A rich [`TextEdit`](crate::TextEdit) with no hook: text, HTML and RTF.
+    Rich,
+    /// A hook (`on_input_paste`, `on_paste_content`): every form, images too.
+    All,
 }
 struct Reply { purpose: Purpose, content: ClipboardContent }
 #[derive(Clone)]
@@ -224,14 +287,19 @@ enum Request {
 }
 impl Purpose {
     fn paste<S: 'static>(rt: &Runtime<S>, target: Option<String>) -> Self {
-        let rich = rt.paste_wants_rich(target.as_deref());
-        Purpose::Paste(target, rich)
+        let forms = rt.paste_forms(target.as_deref());
+        Purpose::Paste(target, forms)
     }
-    fn rich(&self) -> bool { !matches!(self, Purpose::Paste(_, false)) }
+    fn forms(&self) -> Forms {
+        match self { Purpose::Paste(_, forms) => *forms, Purpose::Read(_) => Forms::All }
+    }
     /// Reads what this purpose needs from `cb` and what to send back: a paste skips an empty
     /// clipboard.
     fn answer<B: Backend>(self, cb: &mut B) -> Option<Reply> {
-        let content = if self.rich() { cb.content() } else { cb.text().map(ClipboardContent::from) };
+        let content = match self.forms() {
+            Forms::Text => cb.text().map(ClipboardContent::from),
+            forms => cb.content(forms == Forms::All),
+        };
         self.reply(content)
     }
     fn reply(self, content: Option<ClipboardContent>) -> Option<Reply> {
@@ -273,7 +341,8 @@ impl Client {
     #[cfg(target_arch = "wasm32")]
     fn read_for(&self, purpose: Purpose) {
         // Start the permission-sensitive operation before yielding the input handler.
-        let promise = crate::web::platform::read_clipboard(purpose.rich());
+        let forms = purpose.forms();
+        let promise = crate::web::platform::read_clipboard(forms != Forms::Text, forms == Forms::All, MAX_IMAGE_BYTES as u32);
         let (sender, wake) = (self.sender.clone(), self.wake.clone());
         wasm_bindgen_futures::spawn_local(async move {
             let content = match wasm_bindgen_futures::JsFuture::from(promise).await {
@@ -281,9 +350,12 @@ impl Client {
                     let field = |name: &str| js_sys::Reflect::get(&value, &name.into()).ok().and_then(|v| v.as_string());
                     let html = field("html").filter(|h| !h.is_empty());
                     let text = field("text");
-                    (text.is_some() || html.is_some()).then(|| {
-                        let content = ClipboardContent::new(text.unwrap_or_default());
-                        match html { Some(html) => content.with_html(html), None => content }
+                    let image = web_png(js_sys::Reflect::get(&value, &"png".into()).ok());
+                    (text.is_some() || html.is_some() || image.is_some()).then(|| {
+                        let mut content = ClipboardContent::new(text.unwrap_or_default());
+                        if let Some(html) = html { content = content.with_html(html); }
+                        if let Some(image) = image { content = content.with_image(image); }
+                        content
                     })
                 }
                 Err(_) => {
@@ -292,6 +364,21 @@ impl Client {
                 }
             };
             if let Some(reply) = purpose.reply(content) && sender.send(reply).is_ok() { wake(); }
+        });
+    }
+    /// A DOM paste into the focused field: the text and HTML come with the event, and when it
+    /// carried an image, `png` reads its bytes, only if the target takes images.
+    #[cfg(target_arch = "wasm32")]
+    pub fn paste_event<S: 'static>(&self, rt: &mut Runtime<S>, content: ClipboardContent, png: Option<impl FnOnce() -> js_sys::Promise>) {
+        let purpose = Purpose::paste(rt, rt.paste_target());
+        let content = if purpose.forms() == Forms::Text { ClipboardContent::new(content.text()) } else { content };
+        let Some(png) = png.filter(|_| purpose.forms() == Forms::All) else { return rt.paste_content(content) };
+        let promise = png();
+        let (sender, wake) = (self.sender.clone(), self.wake.clone());
+        wasm_bindgen_futures::spawn_local(async move {
+            let image = web_png(wasm_bindgen_futures::JsFuture::from(promise).await.ok());
+            let content = match image { Some(image) => content.with_image(image), None => content };
+            if let Some(reply) = purpose.reply(Some(content)) && sender.send(reply).is_ok() { wake(); }
         });
     }
     pub fn receive<S: 'static>(&self, rt: &mut Runtime<S>) -> bool {
@@ -336,6 +423,15 @@ impl Client {
         if let Some(target) = rt.paste_request.take() { self.read_for(Purpose::paste(rt, target)); }
         for id in std::mem::take(&mut rt.read_requests) { self.read_for(Purpose::Read(id)); }
     }
+}
+
+/// A `Uint8Array` of PNG bytes from the browser.
+#[cfg(target_arch = "wasm32")]
+fn web_png(value: Option<wasm_bindgen::JsValue>) -> Option<ClipboardImage> {
+    use wasm_bindgen::JsCast;
+    let bytes = value?.dyn_into::<js_sys::Uint8Array>().ok()?;
+    if bytes.length() as usize > MAX_IMAGE_BYTES { return None; }
+    ClipboardImage::from_png(bytes.to_vec())
 }
 
 fn deliver<S: 'static>(rt: &mut Runtime<S>, reply: Reply) {
@@ -419,7 +515,9 @@ impl Backend for Board {
     fn text(&mut self) -> Option<Zeroizing<String>> {
         self.content.as_ref().filter(|c| c.has_plain()).map(|c| c.text.clone())
     }
-    fn content(&mut self) -> Option<ClipboardContent> { self.content.clone() }
+    fn content(&mut self, image: bool) -> Option<ClipboardContent> {
+        self.content.clone().map(|c| if image { c } else { c.without_image() })
+    }
     fn revision(&self) -> Option<u64> { Some(self.revision) }
     fn clear(&mut self) { self.content = None; self.revision += 1; }
 }
@@ -467,8 +565,9 @@ pub(crate) fn shutdown() {
 trait Backend {
     fn write(&mut self, copy: &ClipboardWrite) -> Result<(), String>;
     fn text(&mut self) -> Option<Zeroizing<String>>;
-    /// Every form a paste can use, unsanitised.
-    fn content(&mut self) -> Option<ClipboardContent> { self.text().map(ClipboardContent::from) }
+    /// Every form a paste can use, unsanitised, and the image only when asked: decoding one
+    /// can take a while.
+    fn content(&mut self, _image: bool) -> Option<ClipboardContent> { self.text().map(ClipboardContent::from) }
     fn revision(&self) -> Option<u64>;
     fn clear(&mut self);
 }
@@ -477,20 +576,28 @@ impl Backend for arboard::Clipboard {
     fn write(&mut self, copy: &ClipboardWrite) -> Result<(), String> { write(self, copy) }
     fn text(&mut self) -> Option<Zeroizing<String>> { self.get_text().ok().map(Zeroizing::new) }
     #[cfg(target_os = "macos")]
-    fn content(&mut self) -> Option<ClipboardContent> {
-        macos::read(&*unsafe { objc2_app_kit::NSPasteboard::generalPasteboard() })
+    fn content(&mut self, image: bool) -> Option<ClipboardContent> {
+        macos::read(&*unsafe { objc2_app_kit::NSPasteboard::generalPasteboard() }, image)
     }
-    /// Text and HTML; RTF isn't read here.
+    /// Text, HTML and an image; RTF isn't read here. Windows and Linux images come through
+    /// arboard as pixels (Windows `PNG` or `CF_DIBV5`, Linux `image/png`), encoded as PNG again.
     #[cfg(not(target_os = "macos"))]
-    fn content(&mut self) -> Option<ClipboardContent> {
+    fn content(&mut self, image: bool) -> Option<ClipboardContent> {
         let text = self.text();
         #[cfg(target_os = "windows")]
         let html = windows_read_html().or_else(|| self.get().html().ok()).filter(|h| !h.is_empty() && h.len() <= html::MAX_RICH_BYTES);
         #[cfg(not(target_os = "windows"))]
         let html = self.get().html().ok().filter(|h| !h.is_empty() && h.len() <= html::MAX_RICH_BYTES);
-        if text.is_none() && html.is_none() { return None; }
-        let content = ClipboardContent::from(text.unwrap_or_default());
-        Some(match html { Some(html) => content.with_html(html), None => content })
+        #[cfg(any(target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")))))]
+        let image = image.then(|| self.get_image().ok()).flatten()
+            .and_then(|i| ClipboardImage::from_rgba(i.width as u32, i.height as u32, &i.bytes));
+        #[cfg(not(any(target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android"))))))]
+        let image: Option<ClipboardImage> = { let _ = image; None };
+        if text.is_none() && html.is_none() && image.is_none() { return None; }
+        let mut content = ClipboardContent::from(text.unwrap_or_default());
+        if let Some(html) = html { content = content.with_html(html); }
+        if let Some(image) = image { content = content.with_image(image); }
+        Some(content)
     }
     fn revision(&self) -> Option<u64> { revision() }
     fn clear(&mut self) { let _ = arboard::Clipboard::clear(self); }
@@ -737,7 +844,7 @@ mod tests {
             let worker = Worker::spawn(move || Some(Fake { state: shared.clone(), dropped: None }));
             worker.sender.send(Request::Write(ClipboardWrite::secret("fixture".into(), LONG).0, None)).unwrap();
             let (reply, received) = mpsc::channel();
-            worker.sender.send(Request::Read { purpose: Purpose::Paste(None, false), reply, wake: Arc::new(|| {}) }).unwrap();
+            worker.sender.send(Request::Read { purpose: Purpose::Paste(None, Forms::Text), reply, wake: Arc::new(|| {}) }).unwrap();
             received.recv_timeout(Duration::from_secs(1)).unwrap(); // Write and revision recorded.
             if let Some(text) = replacement {
                 let mut s = state.lock().unwrap(); s.text = text.into(); s.revision += 1;
@@ -899,9 +1006,9 @@ mod tests {
         let answer = replies.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!((answer.purpose, answer.content.text()), (Purpose::Read(7), "<script>"), "plain text is never rewritten");
         worker.stop();
-        assert!(Purpose::Paste(None, true).reply(None).is_none());
+        assert!(Purpose::Paste(None, Forms::Rich).reply(None).is_none());
         let mut board = Board { content: Some(ClipboardContent::new("t").with_html("<b>t</b>")), ..Board::default() };
-        let plain = Purpose::Paste(None, false).answer(&mut board).unwrap().content;
+        let plain = Purpose::Paste(None, Forms::Text).answer(&mut board).unwrap().content;
         assert!(!plain.is_rich() && plain.text() == "t", "a plain target reads only the text, as before");
         let read = Purpose::Read(1).reply(Some(ClipboardContent::new("").with_html("<p onclick=x>t</p>"))).unwrap();
         assert_eq!(read.content.html(), Some("<p>t</p>"));

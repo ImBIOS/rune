@@ -9,6 +9,8 @@ extern "C" {
     fn sync(handle: &JsValue, key: &str, text: &str, base: usize, anchor: u32, focus: u32, secure: bool);
     fn activate(handle: &JsValue);
     fn destroy(handle: &JsValue);
+    #[wasm_bindgen(js_name = pastedImage)]
+    fn pasted_image(handle: &JsValue, max: u32) -> js_sys::Promise;
 }
 
 pub(super) struct Bridge {
@@ -79,12 +81,11 @@ impl<S: 'static> Running<S> {
             Some("edit" | "selection" | "preedit") => self.rt.web_edit(event),
             Some("sync") => self.input.mirror.key.clear(), // Composition's final sync was deferred by the DOM.
             Some("paste") => {
-                let rich = self.rt.paste_wants_rich(self.rt.paste_target().as_deref());
-                let content = crate::ClipboardContent::new(event["text"].as_str().unwrap_or_default());
-                self.rt.paste_content(match event["html"].as_str().filter(|html| rich && !html.is_empty()) {
-                    Some(html) => content.with_html(html),
-                    None => content,
-                });
+                let mut content = crate::ClipboardContent::new(event["text"].as_str().unwrap_or_default());
+                if let Some(html) = event["html"].as_str().filter(|html| !html.is_empty()) { content = content.with_html(html); }
+                let handle = &self.input.handle;
+                let image = (event["image"].as_bool() == Some(true)).then_some(|| pasted_image(handle, crate::clipboard::MAX_IMAGE_BYTES as u32));
+                self.clipboard.paste_event(&mut self.rt, content, image);
             }
             Some("secure") => {
                 if let serde_json::Value::String(text) = event["text"].take() {

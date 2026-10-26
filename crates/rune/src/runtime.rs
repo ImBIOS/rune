@@ -4834,14 +4834,20 @@ impl<S: 'static> Runtime<S> {
     pub(crate) fn paste_target(&self) -> Option<String> {
         self.focused_input().filter(|i| i.access.is_some()).and(self.focused.clone())
     }
-    /// The paste target hears HTML and RTF: a field with `on_input_paste` or a rich
-    /// [`TextEdit`](crate::TextEdit), or a root `on_paste_content` handler. Anything else
-    /// (including a plain field or a plain `on_paste`) reads only the clipboard's text.
-    pub(crate) fn paste_wants_rich(&self, target: Option<&str>) -> bool {
+    /// What the paste target hears: every form, images too, for a field with
+    /// `on_input_paste` or a root `on_paste_content` handler; text, HTML and RTF for a rich
+    /// [`TextEdit`](crate::TextEdit); only the clipboard's text for anything else (including a
+    /// plain field or a plain `on_paste`).
+    pub(crate) fn paste_forms(&self, target: Option<&str>) -> crate::clipboard::Forms {
+        use crate::clipboard::Forms;
         match target {
-            Some(path) => self.node(path).and_then(|n| n.input.as_deref()).or_else(|| self.virtual_inputs.get(path).map(Box::as_ref))
-                .is_some_and(|input| input.paste.is_some() || (input.edit.is_rich() && !input.edit.is_secure())),
-            None => self.app_paste_handler().is_some_and(|p| p.rich),
+            Some(path) => match self.node(path).and_then(|n| n.input.as_deref()).or_else(|| self.virtual_inputs.get(path).map(Box::as_ref)) {
+                Some(input) if input.paste.is_some() => Forms::All,
+                Some(input) if input.edit.is_rich() && !input.edit.is_secure() => Forms::Rich,
+                _ => Forms::Text,
+            },
+            None if self.app_paste_handler().is_some_and(|p| p.rich) => Forms::All,
+            None => Forms::Text,
         }
     }
     pub(crate) fn paste_result(&mut self, target: Option<String>, content: crate::ClipboardContent) {
@@ -9708,6 +9714,7 @@ mod tests {
     #[test]
     fn rich_pastes_reach_paste_hooks_and_plain_fields_keep_pasting_text() {
         use crate::ClipboardContent;
+        use crate::clipboard::Forms;
         #[derive(Default)]
         struct State { plain: crate::TextEdit, rich: crate::TextEdit, take: bool, hook: Vec<Option<String>>, changes: u32, window: Vec<ClipboardContent> }
         fn view(s: &State, _: &mut Cx<State>) -> El {
@@ -9735,12 +9742,12 @@ mod tests {
         assert_eq!((window.text(), window.html()), ("Hello", Some("<b>Hello</b>")), "the window hears every form, sanitised");
 
         rt.update(|s, _| s.plain.focused = true); rt.frame(0.0);
-        assert!(!rt.paste_wants_rich(rt.paste_target().as_deref()));
+        assert_eq!(rt.paste_forms(rt.paste_target().as_deref()), Forms::Text);
         paste(&mut rt);
         assert_eq!(rt.state.plain.text, "Hello", "a field without a hook pastes the text, as before");
 
         rt.update(|s, _| { s.plain.focused = false; s.rich.focused = true; }); rt.frame(0.0);
-        assert!(rt.paste_wants_rich(rt.paste_target().as_deref()));
+        assert_eq!(rt.paste_forms(rt.paste_target().as_deref()), Forms::All);
         paste(&mut rt);
         assert_eq!((rt.state.rich.text.as_str(), rt.state.changes), ("Hello", 1), "a declining hook leaves the paste to the editor");
         rt.update(|s, _| { s.take = true; s.rich.text.clear(); s.rich.anchor = 0; s.rich.focus = 0; }); rt.frame(0.0);
@@ -9754,17 +9761,82 @@ mod tests {
         paste(&mut rt);
         assert_eq!((rt.state.rich.text.as_str(), rt.state.hook.last().cloned().flatten().as_deref()), ("[rich]", Some("<i>only</i>")));
         assert!(rt.state.window.is_empty(), "a focused field's paste never falls through to the window");
-        assert!(rt.paste_wants_rich(None));
+        assert_eq!(rt.paste_forms(None), Forms::All);
 
         let mut plain_root = Runtime::new(Vec::<String>::new(), |_: &Vec<String>, _: &mut Cx<Vec<String>>| {
             col().size(200.0, 100.0).on_paste(|s: &mut Vec<String>, text, _| s.push(text.to_owned()))
         }, (200.0, 100.0), Env::new(true, 1.0));
         plain_root.use_clipboard(&m);
         plain_root.frame(0.0);
-        assert!(!plain_root.paste_wants_rich(None), "a plain root on_paste never requests HTML or RTF");
+        assert_eq!(plain_root.paste_forms(None), Forms::Text, "a plain root on_paste never requests HTML or RTF");
         plain_root.update(|_, tx| tx.request_paste());
         plain_root.frame(0.0);
         assert!(plain_root.state.is_empty(), "an HTML-only clipboard never triggers a plain root on_paste");
+    }
+
+    #[test]
+    fn pasted_images_reach_hooks_only() {
+        use crate::{ClipboardContent, ClipboardImage};
+        use crate::clipboard::Forms;
+        #[derive(Default)]
+        struct State { plain: crate::TextEdit, rich: crate::TextEdit, hooked: crate::TextEdit, hook: Vec<ClipboardContent>, window: Vec<ClipboardContent>, reads: Vec<ClipboardContent> }
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let style = crate::TextStyle::new(16.0, 400.0);
+            col().size(200.0, 150.0)
+                .on_paste_content(|s: &mut State, content, _| s.window.push(content.clone()))
+                .child(crate::text_input(&s.plain, style).key("plain").size(200.0, 40.0).on_edit(|s: &mut State| &mut s.plain))
+                .child(crate::text_input(&s.rich, style).key("rich").size(200.0, 40.0).on_edit(|s: &mut State| &mut s.rich))
+                .child(crate::text_input(&s.hooked, style).key("hooked").size(200.0, 40.0).on_edit(|s: &mut State| &mut s.hooked)
+                    .on_input_paste(|s: &mut State, content, _| {
+                        s.hook.push(content.clone());
+                        let Some(image) = content.image() else { return false };
+                        let (w, h) = image.size();
+                        s.hooked.insert_pill(format!("image:{}", image.png().len()), &format!("{w}×{h}"));
+                        true
+                    }))
+        }
+        let rgba: Vec<u8> = (0..12u8).flat_map(|i| [i * 20, 0, 255 - i * 20, 255]).collect();
+        let image = ClipboardImage::from_rgba(4, 3, &rgba).unwrap();
+        assert_eq!(image.size(), (4, 3));
+        assert!(ClipboardImage::from_png(&b"GIF89a"[..]).is_none());
+        let m = crate::clipboard::memory();
+        let mut rt = Runtime::new(State { rich: crate::TextEdit::new("").rich(), hooked: crate::TextEdit::new("").rich(), ..State::default() }, view, (200.0, 150.0), Env::new(true, 1.0));
+        rt.use_clipboard(&m);
+        rt.frame(0.0);
+        let paste = |rt: &mut Runtime<State>| { rt.update(|_, tx| tx.request_paste()); rt.frame(0.0); };
+        let focus = |rt: &mut Runtime<State>, which: fn(&mut State) -> &mut crate::TextEdit| {
+            rt.update(move |s, _| { s.plain.focused = false; s.rich.focused = false; s.hooked.focused = false; which(s).focused = true; });
+            rt.frame(0.0);
+        };
+
+        // A screenshot: an image and no text.
+        m.set_content(ClipboardContent::new("").with_image(image.clone()));
+        paste(&mut rt);
+        assert_eq!(rt.state.window.pop().and_then(|c| c.image().cloned()).as_ref(), Some(&image), "the root's on_paste_content gets the image");
+        focus(&mut rt, |s| &mut s.plain);
+        paste(&mut rt);
+        focus(&mut rt, |s| &mut s.rich);
+        assert_eq!(rt.paste_forms(rt.paste_target().as_deref()), Forms::Rich, "a rich field with no hook never fetches the image");
+        paste(&mut rt);
+        assert_eq!((rt.state.plain.text.as_str(), rt.state.rich.text.as_str()), ("", ""), "an image alone pastes nothing into a field without a hook");
+        focus(&mut rt, |s| &mut s.hooked);
+        assert_eq!(rt.paste_forms(rt.paste_target().as_deref()), Forms::All);
+        paste(&mut rt);
+        assert_eq!(rt.state.hooked.text, "4×3");
+        assert_eq!(rt.state.hooked.pills().map(|(_, id)| id.to_owned()).collect::<Vec<_>>(), [format!("image:{}", image.png().len())]);
+        assert!(rt.state.window.is_empty(), "a focused field's paste never reaches the root");
+
+        // Text beside an image: a declining hook leaves the text to the editor.
+        m.set_content(ClipboardContent::new(" caption"));
+        paste(&mut rt);
+        assert_eq!(rt.state.hooked.text, "4×3 caption");
+        assert!(rt.state.hook.last().is_some_and(|c| c.image().is_none()));
+
+        m.set_content(ClipboardContent::new("alt").with_image(image.clone()));
+        rt.update(|_, tx| tx.read_clipboard(|s: &mut State, content, _| s.reads.push(content.clone())));
+        rt.frame(0.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state.reads.iter().map(|c| (c.text(), c.image().map(ClipboardImage::size))).collect::<Vec<_>>(), [("alt", Some((4, 3)))]);
     }
 
     #[test]
