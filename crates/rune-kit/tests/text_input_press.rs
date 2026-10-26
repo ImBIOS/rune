@@ -312,27 +312,79 @@ fn any_unfocusable_element_can_keep_an_outside_field_focused_and_still_press() {
 
 #[test]
 fn a_plain_field_draws_no_box_but_still_focuses_on_a_press_anywhere_and_types() {
-    struct P { boxed: TextEdit, plain: TextEdit, actions: usize }
+    struct P {
+        boxed: TextEdit,
+        plain: TextEdit,
+        invalid: TextEdit,
+        disabled: TextEdit,
+        actions: usize,
+    }
     fn view(s: &P, _: &mut Cx<P>) -> El {
         let k = Kit::neutral(true);
+        let style_24 = rune::TextStyle::new(17.0, 400.0).lh(24.0);
         col().gap(8.0)
-            .child(TextInput::new(&s.boxed).leading_icon(k.glyph.search).on_edit(|s: &mut P| &mut s.boxed).build(&k).key("boxed"))
             .child(
-                TextInput::new(&s.plain)
+                TextInput::new(&s.boxed)
+                    .leading_icon(k.glyph.search)
+                    .on_edit(|s: &mut P| &mut s.boxed)
+                    .build(&k)
+                    .key("boxed"),
+            )
+            .child(
+                row().key("outer-box").role("textbox").w_full().px(12.0).child(
+                    TextInput::new(&s.plain)
+                        .plain()
+                        .placeholder("Type a command")
+                        .leading_icon(k.glyph.search)
+                        .leading_icon_size(18.0)
+                        .text_style(style_24)
+                        .height(56.0)
+                        .width(None)
+                        .clear_button()
+                        .on_edit(|s: &mut P| &mut s.plain)
+                        .on_action(|s: &mut P, _| s.actions += 1)
+                        .build(&k)
+                        .key("plain"),
+                ),
+            )
+            .child(
+                TextInput::new(&s.invalid)
+                    .plain()
+                    .placeholder("Bad")
+                    .invalid(true)
+                    .state(rune_kit::State::Hover)
+                    .on_edit(|s: &mut P| &mut s.invalid)
+                    .build(&k)
+                    .key("invalid"),
+            )
+            .child(
+                TextInput::new(&s.disabled)
                     .plain()
                     .leading_icon(k.glyph.search)
                     .clear_button()
-                    .on_edit(|s: &mut P| &mut s.plain)
-                    .on_action(|s: &mut P, _| s.actions += 1)
+                    .disabled(true)
+                    .on_edit(|s: &mut P| &mut s.disabled)
+                    .on_action(|s: &mut P, _| s.actions += 10)
                     .build(&k)
-                    .key("plain"),
+                    .key("disabled"),
             )
     }
     let mut rt = Runtime::new(
-        P { boxed: TextEdit::new("a"), plain: TextEdit::new("hi"), actions: 0 },
-        view, (400.0, 120.0), Env::new(true, 1.0));
+        P {
+            boxed: TextEdit::new("a"),
+            plain: TextEdit::new(""),
+            invalid: TextEdit::new("err"),
+            disabled: TextEdit::new("off"),
+            actions: 0,
+        },
+        view,
+        (400.0, 260.0),
+        Env::new(true, 1.0),
+    );
     rt.frame(0.0);
+    let k = Kit::neutral(true);
     let info = |rt: &Runtime<P>, key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap();
+    let by_path = |rt: &Runtime<P>, path: &str| rt.elements().into_iter().find(|e| e.path.ends_with(path)).unwrap();
     let ink = |rt: &Runtime<P>, key: &str| {
         let r = info(rt, key).rect;
         rt.instances.iter().filter(|i| {
@@ -340,26 +392,72 @@ fn a_plain_field_draws_no_box_but_still_focuses_on_a_press_anywhere_and_types() 
             cx >= r[0] && cx <= r[0] + r[2] && cy >= r[1] && cy <= r[1] + r[3] && i.rect[2] >= r[2] - 0.5
         }).count()
     };
-    assert_eq!(info(&rt, "plain").fill.a, 0.0, "no fill");
+    let plain = info(&rt, "plain");
+    assert_eq!((plain.role, plain.label.as_deref()), ("textbox", Some("Type a command")), "a11y role and label unchanged");
+    assert_eq!(plain.fill.a, 0.0, "no fill");
     assert!(info(&rt, "boxed").fill.a > 0.0);
     assert_eq!(ink(&rt, "plain"), 0, "unfocused plain draws no box, shadow or border");
+    assert_eq!(ink(&rt, "invalid"), 0, "hovered + invalid plain draws no box, hover tint or outline");
     assert!(ink(&rt, "boxed") > 0);
+    assert_eq!(by_path(&rt, "invalid/value/input").text_color, Some(k.c.danger.fg), "invalid plain shows as red text");
+    let dis_inp = by_path(&rt, "disabled/value/input").rect;
+    let dis_glyph = rt.instances.iter().find(|i| {
+        i.params[1] == rune::render::KIND_GLYPH && i.rect[0] >= dis_inp[0] && i.rect[0] < dis_inp[0] + dis_inp[2] && i.rect[1] >= dis_inp[1] && i.rect[1] < dis_inp[1] + dis_inp[3]
+    }).expect("disabled glyph");
+    assert!((dis_glyph.fill[3] - 0.5).abs() < 0.01, "disabled plain dims to 0.5: {:?}", dis_glyph.fill);
 
-    let b = info(&rt, "plain").rect;
-    // Press the box's far-left padding corner, not the editor.
+    // In the 56 pt plain launcher header, leading icon (18 pt), input (24 pt), placeholder glyphs and clear button (28 pt) are all vertically centred.
+    let b = plain.rect;
+    let b_cy = b[1] + b[3] * 0.5;
+    let lead = by_path(&rt, "plain/value/leading").rect;
+    let inp = by_path(&rt, "plain/value/input").rect;
+    let clear = by_path(&rt, "plain/action").rect;
+    assert_eq!((b[3], lead[2], lead[3], inp[3], clear[3]), (56.0, 26.0, 18.0, 24.0, 28.0));
+    assert!((clear[0] + clear[2] - (b[0] + b[2])).abs() < 0.01, "clear button reaches the right edge");
+    for (name, r) in [("leading", lead), ("input", inp), ("clear", clear)] {
+        assert!(((r[1] + r[3] * 0.5) - b_cy).abs() < 0.01, "{name} vertically centred in 56 pt plain box: {r:?} vs {b:?}");
+    }
+    let placeholder_glyphs: Vec<_> = rt.instances.iter().filter(|i| {
+        i.params[1] == rune::render::KIND_GLYPH && i.rect[0] >= inp[0] && i.rect[0] < inp[0] + inp[2] && i.rect[1] >= b[1] && i.rect[1] < b[1] + b[3]
+    }).collect();
+    assert!(!placeholder_glyphs.is_empty(), "empty plain field paints placeholder glyphs");
+    let (py0, py1) = placeholder_glyphs.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), g| (lo.min(g.rect[1]), hi.max(g.rect[1] + g.rect[3])));
+    assert!((((py0 + py1) * 0.5) - b_cy).abs() < 4.0, "placeholder glyphs sit centred in the 56 pt box: {py0}..{py1} vs {b_cy}");
+
+    // Moving the pointer over the plain field draws no hover box.
+    rt.pointer_move(b[0] + 50.0, b_cy);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(ink(&rt, "plain"), 0, "pointer hover over plain draws no tint");
+
+    // Pressing the outer role("textbox") container's padding routes focus to the plain field inside it.
+    let outer = info(&rt, "outer-box").rect;
+    rt.pointer_down(outer[0] + 2.0, b_cy);
+    rt.pointer_up(outer[0] + 2.0, b_cy);
+    rt.frame(1.0 / 60.0);
+    assert!(rt.state.plain.focused, "outer role(\"textbox\") padding focuses the plain field");
+    assert_eq!(ink(&rt, "plain"), 0, "focused plain draws no outline");
+    let caret = by_path(&rt, "plain/value/input").caret.expect("focused plain caret");
+    let ime = rt.ime_area.expect("focused plain IME area");
+    assert_eq!(caret[3], 24.0);
+    assert!(((caret[1] + caret[3] * 0.5) - b_cy).abs() < 0.01, "caret vertically centred: {caret:?}");
+    assert!((ime[0] - caret[0]).abs() < 0.01 && (ime[1] - caret[1]).abs() < 0.01 && (ime[3] - 24.0).abs() < 0.01, "IME rect matches caret: {ime:?} vs {caret:?}");
+
+    // Typing and pressing inside the plain field's own padding and clear button work as in the boxed field.
+    rt.key(rune::KeyEvent { key: rune::Key::Text("hi".into()), mods: rune::Mods::default() });
+    rt.frame(0.0);
+    assert_eq!(rt.state.plain.text, "hi");
     rt.pointer_down(b[0] + 1.0, b[1] + b[3] - 1.0);
     rt.pointer_up(b[0] + 1.0, b[1] + b[3] - 1.0);
     rt.frame(1.0 / 60.0);
-    assert!(rt.state.plain.focused, "a press anywhere in the box focuses");
-    assert_eq!(ink(&rt, "plain"), 0, "focused plain draws no outline");
+    assert!(rt.state.plain.focused && rt.state.plain.range() == (0, 0), "plain padding keeps focus and moves caret to start");
     rt.key(rune::KeyEvent { key: rune::Key::Text("x".into()), mods: rune::Mods::default() });
     rt.frame(0.0);
     assert_eq!(rt.state.plain.text, "xhi", "typing reaches the field");
-    let clear = info(&rt, "action");
-    rt.pointer_down(clear.rect[0] + 2.0, clear.rect[1] + 2.0);
-    rt.pointer_up(clear.rect[0] + 2.0, clear.rect[1] + 2.0);
+    rt.pointer_down(clear[0] + 2.0, clear[1] + 2.0);
+    rt.pointer_up(clear[0] + 2.0, clear[1] + 2.0);
     rt.frame(1.0 / 60.0);
     assert_eq!(rt.state.actions, 1, "on_action still fires");
+    assert!(rt.state.plain.focused, "clear button inside plain field does not blur it");
 }
 
 #[test]

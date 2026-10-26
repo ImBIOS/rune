@@ -268,7 +268,7 @@ impl TextInput {
     pub fn build(self, k: &Kit) -> El {
         let c = &k.c;
         let disabled = self.state == State::Disabled;
-        let red = self.invalid && !disabled && k.invalid_text;
+        let red = self.invalid && !disabled && (k.invalid_text || self.plain);
         let ink = if red { c.danger.fg } else { c.text_base };
         let hint = if red { c.danger.fg } else { c.text_faint };
         let style = self.style.unwrap_or(k.ty.ui_compact);

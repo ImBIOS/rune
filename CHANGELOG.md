@@ -6,10 +6,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 ## dev
 
 - **`TextInput::plain` and `TextInput::leading_icon_size`.** `plain()` draws the field with no
-  fill, sheen, shadow, border, hover tint or focus outline, for sitting in a header; text,
-  caret, icon, trailing slot, copy/clear buttons, press-anywhere focus and `on_action` work as
-  before, and the horizontal padding is unchanged. `leading_icon_size(points)` sets the icon's
-  side (default 16, so nothing moves); the icon stays centred and the text start follows.
+  fill, sheen, shadow, border, hover tint or focus outline, for sitting in a header (focus shows
+  as the caret and selection, invalid as red text, and disabled dims to 0.5); text, caret, icon,
+  trailing slot, copy/clear buttons, press-anywhere focus and `on_action` work as before, and the
+  horizontal padding is unchanged. `leading_icon_size(points)` sets the icon's side (default 16,
+  so nothing moves); the icon stays centred and the text start follows.
 - **Pose and picking reads.** `ElementInfo::moving` (and so a settle loop built on it) now also
   counts shadow colour and geometry springs and icon turns; rotation and scale already counted.
   `Runtime::presented_pose(key)` returns a `Pose` with the presented rotation, effective scale,
