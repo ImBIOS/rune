@@ -160,6 +160,22 @@ fn a_window_move_never_turns_off_transactions_materials_need() {
 }
 
 #[test]
+fn a_live_resize_keeps_transactions_on_until_it_ends() {
+    let mut flag = PresentFlag::default();
+    assert_eq!(flag.live(true), Some(true));
+    // Frames during the drag land no window animation, which would turn the flag off.
+    assert_eq!(flag.moving(false), None);
+    assert_eq!(flag.materials(false), None);
+    assert_eq!(flag.live(true), None);
+    // The drag ends: later frames present on their own again.
+    assert_eq!(flag.live(false), Some(false));
+    // Materials keep it on past the drag.
+    assert_eq!(flag.materials(true), Some(true));
+    assert_eq!(flag.live(true), None);
+    assert_eq!(flag.live(false), None);
+}
+
+#[test]
 fn materials_past_the_limit_draw_their_fallback() {
     fn many(_: &u8, _: &mut Cx<u8>) -> El {
         el().size(200.0, 120.0).children((0..MAX_NATIVE_MATERIALS + 1).map(|k| {

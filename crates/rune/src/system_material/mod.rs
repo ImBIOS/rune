@@ -73,13 +73,14 @@ pub(crate) fn assign(views: &[(SystemMaterial, Option<NodeId>)], draws: &[(Syste
     out
 }
 
-/// The Metal layer's `presentsWithTransaction`, which both native materials and a moving
-/// window frame need. One owner, so neither turns it off under the other.
+/// The Metal layer's `presentsWithTransaction`, which native materials, a moving window frame
+/// and a live resize all need. One owner, so none turns it off under another.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PresentFlag {
     moving: bool,
     materials: bool,
+    live: bool,
     written: bool,
 }
 
@@ -97,8 +98,14 @@ impl PresentFlag {
         self.write()
     }
 
+    /// The user started or stopped dragging the window's edge. The value to write, when it changed.
+    pub(crate) fn live(&mut self, on: bool) -> Option<bool> {
+        self.live = on;
+        self.write()
+    }
+
     fn write(&mut self) -> Option<bool> {
-        let on = self.moving || self.materials;
+        let on = self.moving || self.materials || self.live;
         (on != self.written).then(|| { self.written = on; on })
     }
 }

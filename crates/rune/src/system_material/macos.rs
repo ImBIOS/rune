@@ -81,6 +81,12 @@ impl Materials {
         if let Some(on) = self.flag.moving(on) { crate::macos::present_with_transaction(surface, on); }
     }
 
+    /// The user started or stopped dragging the window's edge: each frame of the drag presents
+    /// in the transaction that resizes the window.
+    pub(crate) fn set_live(&mut self, surface: &wgpu::Surface<'_>, on: bool) {
+        if let Some(on) = self.flag.live(on) { crate::macos::present_with_transaction(surface, on); }
+    }
+
     /// After a build: switches native views on when a transparent window's frame found material
     /// elements, and off when it found none. True when it switched them on, so the caller
     /// drops this frame's drawable, builds again natively and acquires another: wgpu reads

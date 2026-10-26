@@ -291,6 +291,16 @@ impl Win {
         self.materials.set_moving(&self.surface, on);
     }
 
+    /// Whether the user is dragging the window's edge, which presents every frame in the
+    /// transaction that resizes the window until they let go. Before the drawable is acquired:
+    /// wgpu reads `presentsWithTransaction` then.
+    #[cfg(target_os = "macos")]
+    fn track_live_resize(&mut self) -> bool {
+        let live = crate::macos::in_live_resize(&self.window);
+        self.materials.set_live(&self.surface, live);
+        live
+    }
+
     fn focus(&self) {
         #[cfg(target_os = "macos")]
         if let Some(panel) = &self.panel { panel.request_keys(); return; }
@@ -2507,6 +2517,8 @@ impl<S: 'static> Host<S> {
         rebuild_renderer(&gpu.device, renderer, target_format, &mut self.rt);
         *format = target_format;
         surface.configure(&gpu.device, &config);
+        #[cfg(target_os = "macos")]
+        crate::macos::pin_contents_top_left(&surface);
         // Metal's PostMultiplied mode only makes CAMetalLayer non-opaque; Core Animation
         // still composites premultiplied pixels. Other backends follow wgpu's straight-alpha contract.
         let alpha = (self.options.transparent && config.alpha_mode == wgpu::CompositeAlphaMode::PostMultiplied
@@ -2637,7 +2649,11 @@ impl<S: 'static> Host<S> {
         }
     }
 
-    fn redraw(&mut self) {
+    fn redraw(&mut self) { self.draw(false) }
+
+    /// Draws a frame. `resizing` draws one for a size the user just dragged the window to, at
+    /// once: AppKit shows the new size when the event returns, with or without it.
+    fn draw(&mut self, resizing: bool) {
         let launcher = self.launcher();
         let (Some(l), Some(_)) = (self.win.as_mut(), self.gpu.as_ref()) else { return };
         let hidden = launcher && !l.visible;
@@ -2646,7 +2662,7 @@ impl<S: 'static> Host<S> {
         }
         // A missed frame's retry, or the timer pacing unpaced motion: input waits for it, and
         // `new_events` runs due timers meanwhile.
-        if l.backing_off(Instant::now()) { return; }
+        if !resizing && l.backing_off(Instant::now()) { return; }
         // Starting the display link for a window that isn't on screen would wait for a tick that
         // sleeping displays never send, and a running link holds back its timers (`wake_deadline`).
         #[cfg(target_os = "macos")]
@@ -2658,7 +2674,7 @@ impl<S: 'static> Host<S> {
         #[cfg(target_os = "macos")]
         let _prewarm = if hidden { l.panel.as_ref().map(|p| p.prewarm()) } else { None };
         #[cfg(target_os = "macos")]
-        let target = if hidden { None } else if let Some(pacing) = &mut l.pacing {
+        let target = if hidden || resizing { None } else if let Some(pacing) = &mut l.pacing {
             let Some(target) = pacing.next_frame() else { return };
             Some(target)
         } else { None };
@@ -2671,6 +2687,8 @@ impl<S: 'static> Host<S> {
         // The frame moves before the drawable is acquired, so it has the new size.
         if !hidden { self.step_frame(target.unwrap_or_else(Instant::now)); }
         let (Some(l), Some((gpu, renderer, format))) = (self.win.as_mut(), self.gpu.as_mut()) else { return };
+        #[cfg(target_os = "macos")]
+        if !hidden { l.track_live_resize(); }
         // Acquire before latching live values so a drawable wait cannot age the input.
         l.retry = None;
         if renderer.srgb_blend() != self.rt.srgb_blend() {
@@ -3240,6 +3258,14 @@ impl<S: 'static> Host<S> {
                 }
                 let asked = self.frame_jump.take().is_some_and(|(w, h)| (w - viewport.0).abs() < 1.0 && (h - viewport.1).abs() < 1.0);
                 if asked { rt.step_viewport(viewport, scale) } else { rt.set_viewport(viewport, scale) }
+                // The user is dragging the edge. AppKit commits the new size when this returns,
+                // and a frame drawn later would leave the old one stretched to it until then.
+                #[cfg(target_os = "macos")]
+                if l.track_live_resize() {
+                    self.draw(true);
+                    self.shell(event_loop);
+                    return;
+                }
                 l.window.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {

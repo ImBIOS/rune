@@ -150,6 +150,40 @@ pub(crate) fn present_with_transaction(surface: &wgpu::Surface, on: bool) {
     }
 }
 
+/// Whether the user is dragging the window's edge.
+pub(crate) fn in_live_resize(window: &winit::window::Window) -> bool {
+    // SAFETY: a property read on the main thread.
+    ns_window(window).is_some_and(|window| unsafe { msg_send![&*window, inLiveResize] })
+}
+
+#[link(name = "QuartzCore", kind = "framework")]
+unsafe extern "C" {
+    static kCAGravityTopLeft: &'static objc2::runtime::AnyObject;
+    static kCAGravityBottomLeft: &'static objc2::runtime::AnyObject;
+}
+
+/// The gravity that keeps a layer's contents at the window's top left. Core Animation names its
+/// gravities for unflipped contents; under a flipped view (winit's is) "bottom" is the top.
+fn top_left_gravity(contents_flipped: bool) -> &'static objc2::runtime::AnyObject {
+    // SAFETY: QuartzCore's constant strings.
+    unsafe { if contents_flipped { kCAGravityBottomLeft } else { kCAGravityTopLeft } }
+}
+
+/// Pins the Metal layer's contents to the window's top left at their own size. A drawable that
+/// doesn't match the layer yet (a frame that isn't drawn in time for a resize) is clipped or
+/// leaves a strip, rather than stretched to the new size and snapped back a frame later.
+pub(crate) fn pin_contents_top_left(surface: &wgpu::Surface) {
+    use objc2::runtime::{AnyObject, Bool};
+    // SAFETY: a live CAMetalLayer, on the main thread, under wgpu's lock.
+    unsafe {
+        let Some(hal) = surface.as_hal::<wgpu::hal::api::Metal>() else { return };
+        let layer = hal.render_layer().lock();
+        let layer = &*std::ptr::from_ref(&**layer).cast::<AnyObject>();
+        let flipped: Bool = msg_send![layer, contentsAreFlipped];
+        let _: () = msg_send![layer, setContentsGravity: top_left_gravity(flipped.as_bool())];
+    }
+}
+
 pub(crate) fn display_bounds(id: u32) -> [f64; 4] {
     let r = unsafe { CGDisplayBounds(id) };
     [r.origin.x, r.origin.y, r.size.width, r.size.height]
@@ -893,6 +927,31 @@ impl Drop for Panel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A late drawable stays at the window's top left at its own size, rather than stretching
+    /// to a resized window: under winit's flipped view, and under an unflipped one.
+    #[test]
+    fn a_metal_layer_pins_its_contents_to_the_window_top_left() {
+        use objc2::runtime::{AnyClass, AnyObject, Bool};
+        for flipped in [true, false] {
+            // SAFETY: new layers, used on this thread only.
+            let (parent, layer): (Retained<AnyObject>, Retained<AnyObject>) = unsafe {
+                (msg_send_id![AnyClass::get("CALayer").unwrap(), new], msg_send_id![AnyClass::get("CAMetalLayer").expect("QuartzCore"), new])
+            };
+            unsafe {
+                let _: () = msg_send![&*parent, setGeometryFlipped: Bool::new(flipped)];
+                let _: () = msg_send![&*parent, addSublayer: &*layer];
+            }
+            let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(Retained::as_ptr(&layer) as *mut std::ffi::c_void);
+            // SAFETY: the layer outlives the surface.
+            let surface = unsafe { crate::render::Gpu::instance().create_surface_unsafe(target) }.expect("a Metal layer surface");
+            pin_contents_top_left(&surface);
+            let gravity: Retained<objc2_foundation::NSString> = unsafe { msg_send_id![&*layer, contentsGravity] };
+            assert_eq!(gravity.to_string(), if flipped { "bottomLeft" } else { "topLeft" }, "flipped: {flipped}");
+            drop(surface);
+        }
+    }
+
     #[test]
     fn overlay_handlerless_hit_releases_native_ownership_in_every_input_mode() {
         fn view(_: &(), _: &mut crate::Cx<()>) -> crate::El {

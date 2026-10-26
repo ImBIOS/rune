@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **macOS: live window resizes no longer stretch the last frame.** While the user drags a window
+  edge, Rune draws each new size inside AppKit's resize and presents it in the same Core Animation
+  transaction (`presentsWithTransaction` for the drag, back to its own present on the first frame
+  after). Before, the old drawable was stretched to the new size until the next display tick, so
+  text widened with the window and snapped back. The Metal layer's contents gravity is now the
+  window's top left rather than `resize`, so a frame that does arrive late keeps its scale and
+  stays pinned to the top left instead of stretching. A slow frame now holds up the drag rather than
+  showing stretched. `cargo run --release -p rune --example live_resize_check` checks this
+  against a real window. Other platforms are unchanged.
 - **`El::wrap_anywhere` and `rune_kit::TextArea::wrap_anywhere` (`overflow-wrap: anywhere`).**
   `text(..)`, `rich(..)`, `text_input(..)` and `TextArea` now offer `.wrap_anywhere()`, which wraps
   at normal word boundaries when words fit and breaks inside an unbroken token (such as a base64
