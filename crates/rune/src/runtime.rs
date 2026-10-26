@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use parley::Layout;
-use parley::editing::{Cursor, Selection};
+use parley::editing::Cursor;
 use parley::layout::Affinity;
 use rune_motion::{
     Anim, Corners, LayoutAnim, Mount, NodeId, NodeSpec, Phase as PresencePhase, Prop, PropClass, Rect as MRect, Scene,
@@ -994,9 +994,9 @@ pub struct Runtime<S: 'static> {
     pub(crate) read_requests: Vec<u64>,
     /// Their callbacks, until the clipboard answers.
     clipboard_reads: Vec<(u64, crate::el::ReadFn)>,
-    /// The plain text of this app's last copy that held pills: a paste of the same text keeps
-    /// its pills, and HTML from anywhere else pastes them as plain labels.
-    pill_copy: Option<zeroize::Zeroizing<String>>,
+    /// The plain text and pill ranges of this runtime's last copy that held pills, for web
+    /// clipboard pastes where the OS worker does not own the pasteboard.
+    pill_copy: Option<(zeroize::Zeroizing<String>, Vec<(std::ops::Range<usize>, String)>)>,
     next_clipboard_read: u64,
     pub(crate) clear_secret_request: bool,
     /// `Runtime::use_clipboard`: a test clipboard that replaces the OS one.
@@ -1732,8 +1732,23 @@ impl<S: 'static> Runtime<S> {
         if std::mem::take(&mut tx.clear_secret) {
             if self.copy_request.as_ref().is_some_and(crate::ClipboardWrite::is_secret) { self.copy_request = None; }
             self.clear_secret_request = true;
+            self.pill_copy = None;
         }
-        if let Some(copy) = tx.copy.take() { self.copy_request = Some(copy); }
+        if let Some(copy) = tx.copy.take() {
+            self.pill_copy = (!copy.is_secret())
+                .then(|| copy.content().html())
+                .flatten()
+                .filter(|h| h.contains("<span data-pill="))
+                .map(|h| {
+                    let frag = crate::TextEdit::from_html(h);
+                    (
+                        zeroize::Zeroizing::new(copy.content().text().to_owned()),
+                        frag.pills().map(|(r, id)| (r, id.to_owned())).collect::<Vec<_>>(),
+                    )
+                })
+                .filter(|(_, pills)| !pills.is_empty());
+            self.copy_request = Some(copy);
+        }
         if std::mem::take(&mut tx.paste) { self.paste_request = Some(self.paste_target()); }
         for read in tx.clipboard_reads.drain(..).filter_map(|read| read.take()) {
             self.next_clipboard_read += 1;
@@ -2588,7 +2603,18 @@ impl<S: 'static> Runtime<S> {
             Action::Paste(content, target) => {
                 if target.is_some_and(|target| target != self.paste_target()) { return false; }
                 let hook = self.focused_input().and_then(|i| i.paste.clone());
-                let own_pills = self.pill_copy.as_deref().is_some_and(|t| t.as_str() == content.text());
+                let own_pills = if cfg!(not(target_arch = "wasm32")) || self.clipboard.is_some() {
+                    content.has_own_pills()
+                } else {
+                    self.pill_copy.as_ref().is_some_and(|(t, pills)| {
+                        t.as_str() == content.text()
+                            && content.html().is_some_and(|h| {
+                                let frag = crate::TextEdit::from_html(h);
+                                frag.pills().count() == pills.len()
+                                    && frag.pills().zip(pills).all(|((r1, id1), (r2, id2))| r1 == *r2 && id1 == id2)
+                            })
+                    })
+                };
                 let into_field = |state: &mut dyn Any, access: &crate::el::EditFn, tx: &mut Tx| {
                     if hook.is_some_and(|hook| hook(state, &content, tx)) { return EditOutcome::default(); }
                     let edit = access(state);
@@ -2626,7 +2652,7 @@ impl<S: 'static> Runtime<S> {
                 e.clear_pending();
                 if let Some(l) = layout {
                     let x = x + scroll;
-                    let i = e.model_index(Cursor::from_point(&l, x * s, y * s).index());
+                    let i = e.model_index(crate::text::cursor_from_point(&l, x * s, y * s).index());
                     // A click on a pill puts the caret at its nearer edge.
                     e.set_caret(i);
                 }
@@ -2774,8 +2800,6 @@ impl<S: 'static> Runtime<S> {
             if let Some(html) = html
                 && let Some(text) = one.copy.as_ref().filter(|w| !w.is_secret()).map(|w| w.content().text().to_owned())
             {
-                // Text never serializes to a `<span`, so only a pill writes this.
-                self.pill_copy = html.contains("<span data-pill=").then(|| zeroize::Zeroizing::new(text.clone()));
                 one.copy_rich(crate::ClipboardContent::new(text).with_html(html));
             }
             if handled { return true; }
@@ -6146,11 +6170,7 @@ impl<S: 'static> Runtime<S> {
                             if let Some((_, _)) = &e.preedit
                                 && let (_, Some((pa, pb))) = e.display()
                             {
-                                let sel = Selection::new(
-                                    Cursor::from_byte_index(layout, pa, Affinity::Downstream),
-                                    Cursor::from_byte_index(layout, pb, Affinity::Upstream),
-                                );
-                                for (bb, _) in sel.geometry(layout) {
+                                for (bb, _) in crate::text::range_boxes(layout, pa, pb, false) {
                                     self.instances.push(rect_inst(
                                         [origin[0] + bb.x0 as f32 * tk, origin[1] + bb.y1 as f32 * tk - s, (bb.x1 - bb.x0) as f32 * tk, s],
                                         premul(color, o, srgb),

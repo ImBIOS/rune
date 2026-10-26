@@ -36,16 +36,23 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> { m.lock().unwrap_or_else(|e| e.in
 /// ([`sanitize_html`]), and on macOS holds RTF converted to HTML when the source offered only
 /// RTF. It's still untrusted input from another app: parse it into your model, don't render it
 /// in a web view as is. `rtf` is passed through untouched.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 pub struct ClipboardContent {
     text: Zeroizing<String>,
     html: Option<Zeroizing<String>>,
     rtf: Option<Zeroizing<String>>,
     image: Option<ClipboardImage>,
+    own_pills: bool,
 }
+impl PartialEq for ClipboardContent {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text && self.html == other.html && self.rtf == other.rtf && self.image == other.image
+    }
+}
+impl Eq for ClipboardContent {}
 impl ClipboardContent {
     /// Plain text, the form every app can paste.
-    pub fn new(text: impl Into<String>) -> Self { Self { text: Zeroizing::new(text.into()), html: None, rtf: None, image: None } }
+    pub fn new(text: impl Into<String>) -> Self { Self { text: Zeroizing::new(text.into()), html: None, rtf: None, image: None, own_pills: false } }
     /// Adds an HTML form (a fragment or a document), for apps that paste formatted text.
     pub fn with_html(mut self, html: impl Into<String>) -> Self { self.html = Some(Zeroizing::new(html.into())); self }
     /// Adds an RTF form, for apps that read RTF but not HTML.
@@ -68,6 +75,7 @@ impl ClipboardContent {
         if let Some(html) = &mut self.html { *html = Zeroizing::new(sanitize_html(html)); }
         self
     }
+    pub(crate) fn has_own_pills(&self) -> bool { self.own_pills }
     fn without_image(mut self) -> Self { self.image = None; self }
     /// Plain consumers (a field without an `on_input_paste`, a text `on_paste`) take it: it
     /// has text, or nothing else. Rich-only content (an HTML clipboard with no plain text)
@@ -81,7 +89,7 @@ impl From<&str> for ClipboardContent {
     fn from(text: &str) -> Self { Self::new(text) }
 }
 impl From<Zeroizing<String>> for ClipboardContent {
-    fn from(text: Zeroizing<String>) -> Self { Self { text, html: None, rtf: None, image: None } }
+    fn from(text: Zeroizing<String>) -> Self { Self { text, html: None, rtf: None, image: None, own_pills: false } }
 }
 impl std::fmt::Debug for ClipboardContent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -97,6 +105,12 @@ impl std::fmt::Debug for ClipboardContent {
 /// The largest image a paste carries, as PNG. A bigger one is left out, and the paste
 /// carries the clipboard's other forms.
 pub const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+/// The most pixels a pasted image may have (64 MP, e.g. an 8K screenshot: 256 MiB of RGBA).
+pub(crate) const MAX_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
+
+pub(crate) fn valid_image_size(width: u32, height: u32) -> bool {
+    width > 0 && height > 0 && u64::from(width) * u64::from(height) <= MAX_IMAGE_PIXELS
+}
 
 /// A pasted image as PNG bytes, whatever form the clipboard held it in (TIFF on macOS, a DIB
 /// on Windows). Cheap to clone. Debug output shows only its size.
@@ -119,11 +133,13 @@ impl ClipboardImage {
         if png.len() > MAX_IMAGE_BYTES || png.len() < 24 || &png[..8] != b"\x89PNG\r\n\x1a\n" || &png[12..16] != b"IHDR" { return None; }
         let be = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
         let size = (be(16), be(20));
+        if !valid_image_size(size.0, size.1) { return None; }
         Some(Self { png, size })
     }
     /// Encodes 8-bit RGBA pixels, row by row, as PNG.
     #[cfg_attr(any(target_os = "macos", target_arch = "wasm32"), allow(dead_code))]
     pub(crate) fn from_rgba(width: u32, height: u32, rgba: &[u8]) -> Option<Self> {
+        if !valid_image_size(width, height) { return None; }
         Self::from_png(crate::drag_out::encode_png(width, height, rgba)?)
     }
     /// The PNG file's bytes, ready to save, upload or decode.
@@ -492,7 +508,7 @@ impl MemoryClipboard {
     /// Makes later writes fail with `error`, or succeed again with `None`.
     pub fn fail_writes(&self, error: Option<&str>) { lock(&self.0).board.fail = error.map(Into::into); }
     fn tick(&self) { self.ticked(|_, _| ()) }
-    fn answer(&self, purpose: Purpose) -> Option<Reply> { self.ticked(|_, board| purpose.answer(board)) }
+    fn answer(&self, purpose: Purpose) -> Option<Reply> { self.ticked(|core, board| core.answer(board, purpose)) }
     fn handle(&self, request: Request) { self.ticked(|core, board| core.handle(board, request)) }
     /// Lets a held secret expire or notice a change first, as the OS worker does per request.
     fn ticked<R>(&self, f: impl FnOnce(&mut Core, &mut Board) -> R) -> R {
@@ -590,7 +606,7 @@ impl Backend for arboard::Clipboard {
         let html = self.get().html().ok().filter(|h| !h.is_empty() && h.len() <= html::MAX_RICH_BYTES);
         #[cfg(any(target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android")))))]
         let image = image.then(|| self.get_image().ok()).flatten()
-            .and_then(|i| ClipboardImage::from_rgba(i.width as u32, i.height as u32, &i.bytes));
+            .and_then(|i| u32::try_from(i.width).ok().zip(u32::try_from(i.height).ok()).and_then(|(w, h)| ClipboardImage::from_rgba(w, h, &i.bytes)));
         #[cfg(not(any(target_os = "windows", all(unix, not(any(target_os = "ios", target_os = "android"))))))]
         let image: Option<ClipboardImage> = { let _ = image; None };
         if text.is_none() && html.is_none() && image.is_none() { return None; }
@@ -677,9 +693,16 @@ struct Held {
     print: u64,
 }
 
+/// The pill copy Rune wrote last, while the clipboard still holds that exact write.
+struct OwnPills {
+    revision: Option<u64>,
+    text_print: u64,
+    pills: Vec<(std::ops::Range<usize>, String)>,
+}
+
 /// The clipboard owner's bookkeeping, shared by the OS worker and the memory clipboard.
 #[derive(Default)]
-struct Core { keys: RandomState, held: Option<Held> }
+struct Core { keys: RandomState, held: Option<Held>, own_pills: Option<OwnPills> }
 impl Core {
     fn next_check(&self) -> Option<Instant> {
         let held = self.held.as_ref()?;
@@ -692,10 +715,30 @@ impl Core {
             Request::Write(copy, notify) => self.write(cb, copy, notify),
             Request::Clear(which) => self.clear(cb, which.as_ref()),
             Request::Read { purpose, reply, wake } => {
-                if let Some(answer) = purpose.answer(cb) && reply.send(answer).is_ok() { wake(); }
+                if let Some(answer) = self.answer(cb, purpose) && reply.send(answer).is_ok() { wake(); }
             }
             Request::Shutdown => {}
         }
+    }
+
+    fn answer<B: Backend>(&mut self, cb: &mut B, purpose: Purpose) -> Option<Reply> {
+        let mut reply = purpose.answer(cb)?;
+        if let Some(own) = &self.own_pills {
+            let rev_ok = match (own.revision, cb.revision()) {
+                (Some(a), Some(b)) => a == b,
+                (None, None) => true,
+                _ => false,
+            };
+            let html_ok = reply.content.html().is_some_and(|h| {
+                let frag = crate::TextEdit::from_html(h);
+                frag.pills().count() == own.pills.len()
+                    && frag.pills().zip(&own.pills).all(|((r1, id1), (r2, id2))| r1 == *r2 && id1 == id2)
+            });
+            if rev_ok && self.keys.hash_one(reply.content.text()) == own.text_print && html_ok {
+                reply.content.own_pills = true;
+            }
+        }
+        Some(reply)
     }
 
     fn write<B: Backend>(&mut self, cb: &mut B, copy: ClipboardWrite, notify: Option<Notify>) {
@@ -709,13 +752,29 @@ impl Core {
             return;
         }
         self.release(SecretState::Replaced);
+        let rev = cb.revision();
+        self.own_pills = copy
+            .clear_after
+            .is_none()
+            .then(|| copy.content.html())
+            .flatten()
+            .filter(|h| h.contains("<span data-pill="))
+            .map(|h| {
+                let frag = crate::TextEdit::from_html(h);
+                OwnPills {
+                    revision: rev,
+                    text_print: self.keys.hash_one(copy.content.text()),
+                    pills: frag.pills().map(|(r, id)| (r, id.to_owned())).collect(),
+                }
+            })
+            .filter(|o| !o.pills.is_empty());
         if let Some(delay) = copy.clear_after {
             if let Some(s) = &slot { s.set(SecretState::Holding); }
             self.held = Some(Held {
                 slot: slot.clone(),
                 notify: notify.clone(),
                 deadline: Instant::now().checked_add(delay),
-                revision: cb.revision(),
+                revision: rev,
                 print: self.keys.hash_one(copy.content.text()),
             });
             if let Some(n) = &notify { n.send(); }
@@ -739,6 +798,7 @@ impl Core {
         if which.is_some_and(|w| !held.slot.as_ref().is_some_and(|s| Arc::ptr_eq(s, w))) { return; }
         if self.unchanged(cb) {
             cb.clear();
+            self.own_pills = None;
             self.release(SecretState::Cleared);
         } else {
             self.release(SecretState::Replaced);
@@ -747,6 +807,12 @@ impl Core {
 
     /// Expire the held secret, or let it go if the clipboard changed under it.
     fn tick<B: Backend>(&mut self, cb: &mut B) {
+        if let Some(own) = &self.own_pills
+            && let Some(rev) = own.revision
+            && cb.revision() != Some(rev)
+        {
+            self.own_pills = None;
+        }
         let Some(held) = &self.held else { return };
         if held.deadline.is_some_and(|d| Instant::now() >= d) { return self.clear(cb, None); }
         let changed = match held.revision {

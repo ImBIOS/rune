@@ -34,9 +34,7 @@ fn layout_len(n: &Node, spec: &TextSpec) -> usize {
 /// Line boxes of bytes `start..end` in layout device px, with each box's line index.
 fn boxes(layout: &Layout<Ink>, len: usize, start: u32, end: u32) -> Vec<(parley::BoundingBox, usize)> {
     let (a, b) = ((start as usize).min(len), (end as usize).min(len));
-    if a >= b { return Vec::new(); }
-    Selection::new(Cursor::from_byte_index(layout, a, Affinity::Downstream), Cursor::from_byte_index(layout, b, Affinity::Upstream))
-        .geometry(layout)
+    crate::text::range_boxes(layout, a, b, false)
 }
 
 /// The link paints to draw this frame, by byte range.

@@ -98,11 +98,7 @@ fn extend(origin: (usize, usize), at: (usize, usize)) -> (usize, usize) {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_selection(out: &mut Vec<Instance>, layout: &Layout<Ink>, a: usize, b: usize, origin: [f32; 2], k: f32,
     fill: [f32; 4], s: f32, clip: [f32; 4], fade: [f32; 4]) {
-    let sel = Selection::new(
-        Cursor::from_byte_index(layout, a, Affinity::Downstream),
-        Cursor::from_byte_index(layout, b, Affinity::Upstream),
-    );
-    for (bb, _) in sel.geometry(layout) {
+    for (bb, _) in crate::text::range_boxes(layout, a, b, true) {
         out.push(rect_inst(
             [origin[0] + bb.x0 as f32 * k, origin[1] + bb.y0 as f32 * k, (bb.x1 - bb.x0) as f32 * k, (bb.y1 - bb.y0) as f32 * k],
             fill, 2.0 * s * k, clip, fade,
@@ -306,7 +302,7 @@ impl<S: 'static> Runtime<S> {
         let z = self.drawn_scale.get(i).copied().unwrap_or(1.0).max(1e-4);
         let [ox, oy] = links::origin(n, spec, layout, self.drawn_box(i), s, z);
         let px = s / z;
-        let at = Cursor::from_point(layout, (x - ox) * px, (y - oy) * px).index();
+        let at = crate::text::cursor_from_point(layout, (x - ox) * px, (y - oy) * px).index();
         Some(n.elided.map_or(at, |e| e.content(at)).min(spec.content.len()))
     }
 

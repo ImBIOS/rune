@@ -16,7 +16,8 @@ pub(crate) struct Mirror {
 
 /// Read at most 512 UTF-16 units on each side, without scanning the document prefix.
 fn context_window(edit: &crate::TextEdit) -> (usize, &str, u32, u32) {
-    let (a, b) = (edit.anchor.min(edit.focus), edit.anchor.max(edit.focus));
+    let (a, b) = edit.range();
+    let (raw_anchor, raw_focus) = if edit.anchor <= edit.focus { (a, b) } else { (b, a) };
     let mut start = a;
     let mut units = 0;
     for (i, ch) in edit.text[..a].char_indices().rev() {
@@ -31,8 +32,8 @@ fn context_window(edit: &crate::TextEdit) -> (usize, &str, u32, u32) {
         units += ch.len_utf16();
         end += ch.len_utf8();
     }
-    let anchor = edit.text[start..edit.anchor].encode_utf16().count() as u32;
-    let focus = edit.text[start..edit.focus].encode_utf16().count() as u32;
+    let anchor = edit.text[start..raw_anchor].encode_utf16().count() as u32;
+    let focus = edit.text[start..raw_focus].encode_utf16().count() as u32;
     (start, &edit.text[start..end], anchor, focus)
 }
 
@@ -436,14 +437,17 @@ impl<S: 'static> Runtime<S> {
                 let Some((a, b)) = byte_at(expected, start).zip(byte_at(expected, end)) else { return EditOutcome::default() };
                 if a > b { return EditOutcome::default(); }
                 edit.ime(&Ime::Preedit(String::new(), None));
-                edit.anchor = base + a; edit.focus = base + b;
+                let raw = (base + a, base + b);
+                edit.anchor = raw.0; edit.focus = raw.1;
                 edit.snap_to_pills();
+                let snapped = (edit.anchor, edit.focus) != raw;
                 let text = event["text"].as_str().unwrap_or_default();
                 if event["kind"] == "preedit" {
                     edit.ime(&Ime::Preedit(text.to_owned(), Some((text.len(), text.len()))));
                     return EditOutcome::default();
                 }
                 edit.insert(text);
+                if snapped { return EditOutcome::default(); }
             }
             if let Some((anchor, focus)) = number("anchor").zip(number("focus"))
                 && let Some((a, f)) = byte_at(&edit.text[base..], anchor).zip(byte_at(&edit.text[base..], focus)) {

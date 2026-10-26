@@ -7,8 +7,6 @@
 //! is never part of `text` until committed; inline `marks` are non-empty char-boundary byte
 //! ranges sorted by start; `blocks` has one entry per `\n`-separated line of `text`.
 
-use parley::editing::Selection;
-use parley::layout::Affinity;
 use parley::Layout;
 use std::collections::VecDeque;
 use std::ops::Range;
@@ -471,30 +469,6 @@ fn next_char(s: &str, i: usize) -> usize {
     s[i..].graphemes(true).next().map_or(i, |g| i + g.len())
 }
 
-fn prev_word(s: &str, i: usize) -> usize {
-    let b = s.as_bytes();
-    let mut j = i;
-    while j > 0 && b[j - 1].is_ascii_whitespace() {
-        j -= 1;
-    }
-    while j > 0 && !b[j - 1].is_ascii_whitespace() {
-        j = prev_char(s, j);
-    }
-    j
-}
-
-fn next_word(s: &str, i: usize) -> usize {
-    let b = s.as_bytes();
-    let mut j = i;
-    while j < b.len() && b[j].is_ascii_whitespace() {
-        j += 1;
-    }
-    while j < b.len() && !b[j].is_ascii_whitespace() {
-        j = next_char(s, j);
-    }
-    j
-}
-
 impl TextEdit {
     pub fn new(text: impl Into<String>) -> TextEdit {
         let text = text.into();
@@ -924,7 +898,62 @@ impl TextEdit {
 
     /// The [`Mark::Pill`]s in `self.text`, in order, with their byte ranges and ids.
     pub fn pills(&self) -> impl Iterator<Item = (Range<usize>, &str)> + '_ {
-        self.marks.iter().filter_map(|m| Some((m.range(), m.mark.pill_id()?)))
+        let t = &self.text;
+        self.marks.iter().filter_map(move |m| {
+            let id = m.mark.pill_id()?;
+            (m.start < m.end && m.end <= t.len() && t.is_char_boundary(m.start) && t.is_char_boundary(m.end) && !t.as_bytes()[m.start..m.end].contains(&b'\n'))
+                .then(|| (m.range(), id))
+        })
+    }
+
+    fn prev_word(&self, i: usize) -> usize {
+        let s = &self.text;
+        let b = s.as_bytes();
+        let mut j = i.min(b.len());
+        if let Some(m) = self.marks.iter().find(|m| m.mark.is_pill() && m.start < j && j <= m.end) {
+            return m.start;
+        }
+        while j > 0 && b[j - 1].is_ascii_whitespace() {
+            if let Some(m) = self.marks.iter().find(|m| m.mark.is_pill() && m.start < j && j <= m.end) {
+                return m.start;
+            }
+            j -= 1;
+        }
+        if let Some(m) = self.marks.iter().find(|m| m.mark.is_pill() && m.start < j && j <= m.end) {
+            return m.start;
+        }
+        while j > 0 && !b[j - 1].is_ascii_whitespace() {
+            if self.marks.iter().any(|m| m.mark.is_pill() && m.end == j) {
+                break;
+            }
+            j = prev_char(s, j);
+        }
+        j
+    }
+
+    fn next_word(&self, i: usize) -> usize {
+        let s = &self.text;
+        let b = s.as_bytes();
+        let mut j = i.min(b.len());
+        if let Some(m) = self.marks.iter().find(|m| m.mark.is_pill() && m.start <= j && j < m.end) {
+            return m.end;
+        }
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            if let Some(m) = self.marks.iter().find(|m| m.mark.is_pill() && m.start <= j && j < m.end) {
+                return m.end;
+            }
+            j += 1;
+        }
+        if let Some(m) = self.marks.iter().find(|m| m.mark.is_pill() && m.start <= j && j < m.end) {
+            return m.end;
+        }
+        while j < b.len() && !b[j].is_ascii_whitespace() {
+            if self.marks.iter().any(|m| m.mark.is_pill() && m.start == j) {
+                break;
+            }
+            j = next_char(s, j);
+        }
+        j
     }
 
     /// Replace the selection with `label` as one [`Mark::Pill`] carrying `id`, and put the
@@ -1331,6 +1360,9 @@ impl TextEdit {
         self.sync_invariants();
         let (a, b) = self.range();
         if a == b {
+            if mark.is_pill() {
+                return;
+            }
             let line_idx = self.line_of_byte(a);
             if self.blocks.get(line_idx) == Some(&Block::Code) {
                 return;
@@ -1363,6 +1395,9 @@ impl TextEdit {
         self.sync_invariants();
         let (a, b) = self.range();
         if a == b {
+            if mark.is_pill() {
+                return;
+            }
             let line_idx = self.line_of_byte(a);
             if self.blocks.get(line_idx) == Some(&Block::Code) {
                 return;
@@ -1378,6 +1413,9 @@ impl TextEdit {
         }
         self.break_history_group();
         let before = self.snapshot();
+        if mark.is_pill() {
+            self.marks.retain(|m| !m.mark.is_pill() || m.end <= a || m.start >= b);
+        }
         self.marks.push(MarkRange { start: a, end: b, mark });
         self.pending = None;
         self.normalize_marks();
@@ -1750,7 +1788,10 @@ impl TextEdit {
         // Backspace or Delete next to a pill, or a selection into one, takes it whole.
         let (a, b) = self.cover_pills(a, b);
         if !typing { self.break_history_group(); }
-        if &self.text[a..b] == s && self.pending.is_none() {
+        if &self.text[a..b] == s
+            && self.pending.is_none()
+            && !self.marks.iter().any(|m| m.mark.is_pill() && m.start < b && a < m.end)
+        {
             self.anchor = a + s.len();
             self.focus = self.anchor;
             self.preedit = None;
@@ -1950,8 +1991,7 @@ impl TextEdit {
                             Block::Paragraph => unreachable!(),
                         }
                     } else if a > 0 {
-                        let t = &self.text;
-                        let from = if m.cmd { t[..a].rfind('\n').map_or(0, |i| i + 1) } else if word { prev_word(t, a) } else { prev_char(t, a) };
+                        let from = if m.cmd { self.text[..a].rfind('\n').map_or(0, |i| i + 1) } else if word { self.prev_word(a) } else { prev_char(&self.text, a) };
                         self.replace((from, a), "", false);
                     }
                 }
@@ -1961,21 +2001,18 @@ impl TextEdit {
                 if a != b {
                     self.insert("");
                 } else if a < self.text.len() {
-                    let t = &self.text;
-                    let to = if word { next_word(t, a) } else { next_char(t, a) };
+                    let to = if word { self.next_word(a) } else { next_char(&self.text, a) };
                     self.replace((a, to), "", false);
                 }
             }
             Key::Left => {
-                let t = &self.text;
-                let i = if m.cmd { self.line_edge(layout, false) } else if word { prev_word(t, self.focus) } else { prev_char(t, self.focus) };
+                let i = if m.cmd { self.line_edge(layout, false) } else if word { self.prev_word(self.focus) } else { prev_char(&self.text, self.focus) };
                 self.move_h(i, m.shift);
             }
             Key::Right if !m.shift && !m.cmd && !m.alt && !m.ctrl && self.at_end_of_trailing_block() => self.leave_trailing_block(),
             Key::Down if !m.shift && !m.cmd && !m.alt && !m.ctrl && self.at_end_of_trailing_block() => self.leave_trailing_block(),
             Key::Right => {
-                let t = &self.text;
-                let i = if m.cmd { self.line_edge(layout, true) } else if word { next_word(t, self.focus) } else { next_char(t, self.focus) };
+                let i = if m.cmd { self.line_edge(layout, true) } else if word { self.next_word(self.focus) } else { next_char(&self.text, self.focus) };
                 self.move_h(i, m.shift);
             }
             Key::Home => self.set(0, m.shift),
@@ -1989,16 +2026,26 @@ impl TextEdit {
                 let i = if m.cmd {
                     if down { n } else { 0 }
                 } else if let Some(l) = layout {
-                    let sel = Selection::from_byte_index(l, self.display_index(self.focus), Affinity::Downstream);
-                    let moved = if down { sel.next_line(l, false) } else { sel.previous_line(l, false) };
-                    let j = self.model_index(moved.focus().index());
-                    if j == self.focus { if down { n } else { 0 } } else { j }
+                    match crate::text::move_line(l, self.display_index(self.focus), down) {
+                        Some(j) => {
+                            let j = self.model_index(j);
+                            if j == self.focus { if down { n } else { 0 } } else { j }
+                        }
+                        None => n,
+                    }
                 } else if down {
                     n
                 } else {
                     0
                 };
-                self.set(i.min(n), m.shift);
+                let i = i.min(n);
+                if m.shift {
+                    self.focus = i;
+                    self.snap_to_pills();
+                    self.pending = None;
+                } else {
+                    self.set_caret(i);
+                }
             }
             Key::Command(c) => match c {
                 'z' if m.shift => self.redo(),
@@ -2050,9 +2097,7 @@ impl TextEdit {
 
     fn line_edge(&self, layout: Option<&Layout<Ink>>, end: bool) -> usize {
         if let Some(l) = layout {
-            let sel = Selection::from_byte_index(l, self.display_index(self.focus), Affinity::Downstream);
-            let s = if end { sel.line_end(l, false) } else { sel.line_start(l, false) };
-            return self.model_index(s.focus().index());
+            return self.model_index(crate::text::line_edge(l, self.display_index(self.focus), end));
         }
         if end {
             self.text[self.focus..].find('\n').map_or(self.text.len(), |i| self.focus + i)
@@ -2215,9 +2260,8 @@ impl TextEdit {
         if self.secure || start >= end {
             return Vec::new();
         }
-        let len = self.text.len();
-        let s = start.min(len);
-        let e = end.min(len);
+        let s = Self::clamp_char_boundary(&self.text, start);
+        let e = Self::clamp_char_boundary(&self.text, end);
         if s >= e {
             return Vec::new();
         }
@@ -3961,12 +4005,119 @@ mod tests {
         paste_into(&mut rt, |s| &mut s.b);
         assert_eq!(pills_of(&rt.state.b), [(2..10, "agent:x".to_owned())], "its own copy pastes the pill back");
 
-        // The same HTML from outside (another app's copy) pastes plain labels, unless a hook keeps them.
+        // The same HTML from outside (another app's copy) pastes plain labels, even with identical plain text, unless a hook keeps them.
+        m.set_content(ClipboardContent::new("a @x-agent b").with_html("a <span data-pill=\"agent:x\">@x-agent</span> b"));
+        rt.update(|s, _| s.b.set_selection(0, s.b.text.len()));
+        paste_into(&mut rt, |s| &mut s.b);
+        assert_eq!((rt.state.b.text.as_str(), rt.state.b.pills().count()), ("a @x-agent b", 0));
         m.set_content(ClipboardContent::new("x @x-agent").with_html("x <span data-pill=\"agent:x\">@x-agent</span>"));
         rt.update(|s, _| s.b.set_selection(0, s.b.text.len()));
         paste_into(&mut rt, |s| &mut s.b);
         assert_eq!((rt.state.b.text.as_str(), rt.state.b.pills().count()), ("x @x-agent", 0));
         paste_into(&mut rt, |s| &mut s.hooked);
         assert_eq!(pills_of(&rt.state.hooked), [(2..10, "agent:x".to_owned())]);
+    }
+
+    #[test]
+    fn pill_edge_cases_words_lines_bidi_and_direct_text_mutation() {
+        // Touching pills, punctuation after a pill, and spaces inside a pill label.
+        let mut e = TextEdit::new("").rich();
+        e.insert_pill("u:1", "@maya");
+        e.insert_pill("u:2", "@noah");
+        e.insert(", ");
+        e.insert_pill("u:3", "@Maya Lin");
+        assert_eq!(e.text, "@maya@noah, @Maya Lin");
+        let alt_left = KeyEvent { key: Key::Left, mods: Mods { alt: true, ..Mods::default() } };
+        let alt_right = KeyEvent { key: Key::Right, mods: Mods { alt: true, ..Mods::default() } };
+        let alt_bs = KeyEvent { key: Key::Backspace, mods: Mods { alt: true, ..Mods::default() } };
+        e.key(&alt_left, None);
+        assert_eq!(e.range(), (12, 12), "steps over @Maya Lin as one word");
+        e.key(&alt_left, None);
+        assert_eq!(e.range(), (10, 10), "stops between @noah and comma");
+        e.key(&alt_left, None);
+        assert_eq!(e.range(), (5, 5), "steps over @noah without eating @maya");
+        e.key(&alt_left, None);
+        assert_eq!(e.range(), (0, 0), "steps over @maya");
+        e.key(&alt_right, None);
+        assert_eq!(e.range(), (5, 5));
+        e.key(&alt_right, None);
+        assert_eq!(e.range(), (10, 10));
+        e.key(&alt_bs, None);
+        assert_eq!((e.text.as_str(), pills_of(&e)), ("@maya, @Maya Lin", vec![(0..5, "u:1".to_owned()), (7..16, "u:3".to_owned())]));
+
+        // Vertical movement and line_edge across wrapped lines ending or starting with pills.
+        let mut ts = crate::text::TextSystem::default();
+        let style = crate::tok::TextStyle::new(14.0, 400.0);
+        let mut w = TextEdit::new("hello world ").rich();
+        w.set_caret(w.text.len());
+        w.insert_pill("p:1", "@first-pill");
+        w.insert(" ");
+        w.insert_pill("p:2", "@second-pill");
+        w.insert(" tail");
+        let chips: Vec<crate::text::PillChip> = w
+            .display_pills()
+            .into_iter()
+            .map(|(start, end, _)| crate::text::PillChip { start, end, icon: None })
+            .collect();
+        let layout = ts.layout_blocks(&w.text, &[], w.blocks(), &chips, style, 2.0, Some(220.0), parley::Alignment::Start);
+        assert!(layout.len() >= 3, "wrapped into {} lines", layout.len());
+        // Caret at end of line 0 ("hello world "), press Down onto the pill line: snaps to a pill edge on line 1, never jumps to EOF.
+        w.set_caret(11);
+        w.key(&k(Key::Down), Some(&layout));
+        assert!(w.focus < w.text.len(), "Down onto a pill line stays on that line: {}", w.focus);
+        assert!(w.pill_around(w.focus).is_none(), "caret never lands inside a pill: {}", w.focus);
+        // Shift+Down across a pill line covers the pill whole.
+        w.set_caret(0);
+        w.key(&KeyEvent { key: Key::Down, mods: Mods { shift: true, ..Mods::default() } }, Some(&layout));
+        assert!(w.pill_around(w.focus).is_none());
+
+        // IME preedit right after a pill does not bleed its underline box into the pill's chip.
+        let mut ime_e = with_pill();
+        ime_e.set_caret(10);
+        ime_e.ime(&Ime::Preedit("に".into(), None));
+        let (disp, pre) = ime_e.display();
+        let (pa, pb) = pre.unwrap();
+        let p_chips: Vec<crate::text::PillChip> = ime_e
+            .display_pills()
+            .into_iter()
+            .map(|(start, end, _)| crate::text::PillChip { start, end, icon: None })
+            .collect();
+        let ime_layout = ts.layout_blocks(&disp, &[], &[Block::Paragraph], &p_chips, style, 2.0, None, parley::Alignment::Start);
+        let (mut decos, mut icons) = (Vec::new(), Vec::new());
+        crate::text::pill_chips(&ime_layout, &p_chips, 14.0, 2.0, [0.0, 0.0], Color::BLACK, &mut decos, &mut icons);
+        let boxes = crate::text::range_boxes(&ime_layout, pa, pb, false);
+        assert_eq!(boxes.len(), 1);
+        assert!(boxes[0].0.x0 as f32 >= decos[0].rect[0] + decos[0].rect[2] - 0.5, "preedit box {:?} overlaps chip {:?}", boxes[0].0, decos[0].rect);
+
+        // RTL pill and mixed RTL+LTR pill chips have positive width.
+        for (txt, start, end) in [("דוד", 0u32, 6u32), ("שלום@maya", 8, 13), ("@e\u{0301}", 0, 4)] {
+            let pc = [crate::text::PillChip { start, end, icon: None }];
+            let l = ts.layout_blocks(txt, &[], &[Block::Paragraph], &pc, style, 2.0, None, parley::Alignment::Start);
+            let (mut d, mut ic) = (Vec::new(), Vec::new());
+            crate::text::pill_chips(&l, &pc, 14.0, 2.0, [0.0, 0.0], Color::BLACK, &mut d, &mut ic);
+            assert_eq!(d.len(), 1, "{txt:?}");
+            assert!(d[0].rect[2] > 8.0, "chip for {txt:?} has width {}", d[0].rect[2]);
+        }
+
+        // Direct text assignment on a field holding pills never panics or exposes invalid pill ranges.
+        let mut direct = with_pill();
+        direct.text = "é".into();
+        assert_eq!(direct.pills().count(), 0);
+        assert!(direct.display_pills().is_empty());
+        direct.set_caret(99);
+        assert_eq!(direct.range(), (2, 2));
+
+        // Mark::Pill at collapsed caret does not arm pending; set_mark replaces an existing pill; plain insert strips a pill.
+        let mut m = with_pill();
+        m.set_caret(0);
+        m.toggle_mark(Mark::Pill("x".into()));
+        m.set_mark(Mark::Pill("x".into()));
+        assert!(m.pending.is_none());
+        m.set_selection(2, 10);
+        m.set_mark(Mark::Pill("agent:y".into()));
+        assert_eq!(pills_of(&m), [(2..10, "agent:y".to_owned())]);
+        m.set_selection(2, 10);
+        m.insert("@x-agent");
+        assert_eq!((m.text.as_str(), m.pills().count()), ("a @x-agent b", 0));
     }
 }

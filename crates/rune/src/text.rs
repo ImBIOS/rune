@@ -421,21 +421,44 @@ pub(crate) fn pill_chips(
             .collect();
         for lead in boxes.iter().filter(|b| b.id & 1 == 0) {
             let Some(pill) = pills.get(((lead.id & !PILL_BOX) >> 1) as usize) else { continue };
-            let x0 = lead.x + pm.margin * scale;
-            let x1 = boxes
-                .iter()
-                .find(|b| b.id == lead.id | 1)
-                .map_or(m.inline_min_coord + m.offset + m.advance - m.hanging_advance, |t| t.x + t.width - pm.margin * scale);
-            let (mut asc, mut desc) = (0.0f32, 0.0f32);
+            let trail = boxes.iter().find(|b| b.id == lead.id | 1);
+            let (mut asc, mut desc, mut gr_x0, mut gr_x1) = (0.0f32, 0.0f32, f32::INFINITY, f32::NEG_INFINITY);
             for item in line.items() {
                 if let PositionedLayoutItem::GlyphRun(gr) = item {
                     let r = gr.run().text_range();
                     if r.start < pill.end as usize && (pill.start as usize) < r.end {
                         let fm = gr.run().font_metrics();
                         (asc, desc) = (asc.max(fm.ascent), desc.max(fm.descent.abs()));
+                        gr_x0 = gr_x0.min(gr.offset());
+                        gr_x1 = gr_x1.max(gr.offset() + gr.advance());
                     }
                 }
             }
+            let margin = pm.margin * scale;
+            let pad = pm.pad * scale;
+            let rtl_lead = gr_x0 <= gr_x1 && (lead.x - gr_x1).abs() < 1.0;
+            let x0 = if gr_x0 <= gr_x1 {
+                if rtl_lead {
+                    gr_x0 - pad
+                } else {
+                    (gr_x0 - (lead.width - margin)).max(lead.x + margin)
+                }
+            } else {
+                lead.x + margin
+            };
+            let x1 = if gr_x0 <= gr_x1 {
+                if let Some(t) = trail.filter(|t| (t.x - gr_x1).abs() < 1.0) {
+                    t.x + t.width - margin
+                } else if rtl_lead {
+                    lead.x + lead.width - margin
+                } else if trail.is_none() {
+                    m.inline_min_coord + m.offset + m.advance - m.hanging_advance
+                } else {
+                    gr_x1 + pad
+                }
+            } else {
+                trail.map_or(m.inline_min_coord + m.offset + m.advance - m.hanging_advance, |t| t.x + t.width - margin)
+            };
             if asc == 0.0 {
                 (asc, desc) = (size * scale * 0.95, size * scale * 0.25);
             }
@@ -446,7 +469,8 @@ pub(crate) fn pill_chips(
             out.push(Deco { rect, color: bg, radius: (5.0 * scale).min(rect[3] * 0.5) });
             if let Some(icon) = pill.icon {
                 let px = (pm.icon * scale).round().max(1.0);
-                icons.push((icon, px as u32, [rect[0] + pm.pad * scale, ((top + bot - px) * 0.5).round()]));
+                let ix = if rtl_lead { rect[0] + rect[2] - pm.pad * scale - px } else { rect[0] + pm.pad * scale };
+                icons.push((icon, px as u32, [ix, ((top + bot - px) * 0.5).round()]));
             }
         }
     }
@@ -1367,7 +1391,9 @@ impl TextSystem {
                 let r = (p.start as usize).min(text.len())..(p.end as usize).min(text.len());
                 (i, r, (pm.lead(p.icon.is_some()) * scale).round() as u32, (pm.trail() * scale).round() as u32)
             })
-            .filter(|(_, r, ..)| !r.is_empty() && text.is_char_boundary(r.start) && text.is_char_boundary(r.end))
+            .filter(|(_, r, ..)| {
+                !r.is_empty() && text.is_char_boundary(r.start) && text.is_char_boundary(r.end) && !text.as_bytes()[r.clone()].contains(&b'\n')
+            })
             .collect();
         let mut key = text_hash(text, spans, style, scale, max_width);
         if align != Alignment::Start || has_indented_blocks || !pills.is_empty() {
@@ -1384,6 +1410,7 @@ impl TextSystem {
         let _shape_time = crate::frame_profile::Scope::new(crate::frame_profile::Phase::Text);
         let mono_style = matches!(style.family, Family::Mono | Family::SystemMono);
         let tabs = if text.contains('\t') { mono_tab_stops(text, spans, mono_style) } else { Vec::new() };
+        let widen = if tabs.is_empty() { Vec::new() } else { self.mono_tab_widening(&tabs, spans, style, scale) };
         // Parley has no tab stops and fonts draw a tab as a missing glyph (or nothing): shape it
         // as a space, one byte like the tab, so every byte range still holds. Monospace tabs
         // then widen to the next 4-column stop through word spacing.
@@ -1497,7 +1524,7 @@ impl TextSystem {
         let span_range = |s: &Span| (s.start as usize).min(text.len())..(s.end as usize).min(text.len());
         // `exact` overrides the predicted spacing with each run's own, by byte range.
         // Code never takes ligatures (`->` stays two characters); later features override earlier.
-        let off = [b"liga", b"clig", b"calt"].map(|tag| parley::FontFeature::new(parley::setting::Tag::new(tag), 0));
+        let off = [b"liga", b"clig", b"calt", b"dlig"].map(|tag| parley::FontFeature::new(parley::setting::Tag::new(tag), 0));
         let unligated: Vec<parley::FontFeature> = features.iter().chain(&off).copied().collect();
         type Spacings = [(std::ops::Range<usize>, f32)];
         let build = |lcx: &mut LayoutContext<Ink>, fcx: &mut FontContext, exact: &Spacings, widen: &Spacings| {
@@ -1588,7 +1615,7 @@ impl TextSystem {
             }
             layout
         };
-        let mut layout = build(&mut self.layout_cx, &mut self.font_cx, &[], &[]);
+        let mut layout = build(&mut self.layout_cx, &mut self.font_cx, &[], &widen);
         // The spacing each run got, against the spacing its own font needs.
         let given = |at: usize| {
             spans.iter().zip(&span_spacing).rev().find_map(|(s, v)| v.filter(|_| span_range(s).contains(&at))).unwrap_or(base_spacing)
@@ -1611,28 +1638,61 @@ impl TextSystem {
                 }
             }
         }
-        if !mismatch {
-            exact.clear();
-        } else {
-            layout = build(&mut self.layout_cx, &mut self.font_cx, &exact, &[]);
-        }
-        if !tabs.is_empty() {
-            // A tab shaped as a space is one column wide; word spacing adds the rest of its stop.
-            let widen: Vec<_> = tabs
-                .iter()
-                .filter_map(|&(at, columns)| {
-                    let column = parley::Cluster::from_byte_index(&layout, at)?.advance();
-                    (column > 0.0 && columns > 1).then(|| (at..at + 1, (columns - 1) as f32 * column / scale))
-                })
-                .collect();
-            if !widen.is_empty() {
-                layout = build(&mut self.layout_cx, &mut self.font_cx, &exact, &widen);
-            }
+        if mismatch {
+            layout = build(&mut self.layout_cx, &mut self.font_cx, &exact, &widen);
         }
         layout.align(align, AlignmentOptions::default());
         let l = Rc::new(layout);
         self.layouts.insert(key, (l.clone(), g, text.len() as u32));
         l
+    }
+
+    fn mono_tab_widening(
+        &mut self,
+        tabs: &[(usize, u32)],
+        spans: &[Span],
+        style: TextStyle,
+        scale: f32,
+    ) -> Vec<(std::ops::Range<usize>, f32)> {
+        let mono_style = matches!(style.family, Family::Mono | Family::SystemMono);
+        let default_family = if mono_style { style.family } else { Family::Mono };
+        let mut last_probe: Option<((u32, u32, bool), f32)> = None;
+        let mut widen: Vec<(std::ops::Range<usize>, f32)> = Vec::new();
+        for &(at, columns) in tabs {
+            if columns <= 1 {
+                continue;
+            }
+            let (mut sz, mut wt, mut it) = (style.size, style.weight, style.italic);
+            for s in spans {
+                if (s.start as usize) <= at && at < s.end as usize {
+                    if let Some(v) = s.size { sz = v; }
+                    if let Some(v) = s.weight { wt = v; }
+                    if s.italic { it = true; }
+                }
+            }
+            let probe_key = (sz.to_bits(), wt.to_bits(), it);
+            let col_pt = match last_probe {
+                Some((k, v)) if k == probe_key => v,
+                _ => {
+                    let probe = TextStyle { family: default_family, size: sz, weight: wt, italic: it, ..style };
+                    let shaped = self.shaped;
+                    let l = self.layout_rich(" ", &[], probe, scale, None);
+                    self.shaped = shaped;
+                    let adv = parley::Cluster::from_byte_index(&l, 0).map_or(0.0, |c| c.advance() / scale);
+                    last_probe = Some((probe_key, adv));
+                    adv
+                }
+            };
+            if col_pt <= 0.0 {
+                continue;
+            }
+            let add = (columns - 1) as f32 * col_pt;
+            match widen.last_mut() {
+                Some((r, last_add)) if r.end == at && (*last_add - add).abs() < 1e-4 => r.end = at + 1,
+                _ => widen.push((at..at + 1, add)),
+            }
+        }
+        widen
     }
 
     /// Size in points, rounded up to whole device pixels so layout stays on the pixel grid.
@@ -1865,7 +1925,6 @@ impl TextSystem {
         origin: [f32; 2],
         out: &mut Vec<Deco>,
     ) {
-        use parley::{Affinity, Cursor, Selection};
         if strikes.is_empty() {
             return;
         }
@@ -1881,11 +1940,7 @@ impl TextSystem {
                     .and_then(|sp| sp.color)
             });
             let color = span_color.unwrap_or(default_color);
-            let sel = Selection::new(
-                Cursor::from_byte_index(layout, a, Affinity::Downstream),
-                Cursor::from_byte_index(layout, b, Affinity::Upstream),
-            );
-            for (bb, line_idx) in sel.geometry(layout) {
+            for (bb, line_idx) in range_boxes(layout, a, b, false) {
                 let w = (bb.x1 - bb.x0) as f32;
                 if w <= 0.0 {
                     continue;
@@ -1956,7 +2011,6 @@ pub fn stream_height_lag(l: &Layout<Ink>, width: f32, scale: f32) -> f32 {
     (lag * 64.0).round() / 64.0
 }
 
-/// Breaks lines in `layout` with per-paragraph [`Block`](crate::Block) indentation.
 /// Breaks `layout` into lines, each paragraph indented by its block. A pill's chip that would
 /// end a line apart from its label, or run past the line's end, moves to the next line.
 fn break_lines_with_blocks(
@@ -1967,36 +2021,35 @@ fn break_lines_with_blocks(
     max_width: Option<f32>,
 ) {
     let pills = layout.inline_boxes().filter(|b| b.id & PILL_BOX != 0).count() / 2;
-    // Line index, and the room it gets instead: less to break before a chip, or more to keep
-    // a chip with its label. Each pill needs at most one of each.
-    let mut caps: Vec<(usize, f32)> = Vec::new();
-    loop {
-        let maxes = break_lines_capped(layout, blocks, font_size, scale, max_width, &caps);
-        if max_width.is_none() || caps.len() >= 2 * pills {
+    // `(para_idx, line_in_para)` and the room it gets instead: less to break before a chip, or
+    // more to keep a chip with its label. Paragraphs break independently at `\n`, so one pass
+    // can adjust the first misplaced pill in every paragraph at once.
+    let mut caps: Vec<((usize, usize), f32)> = Vec::new();
+    let mut lines_meta = Vec::new();
+    for _ in 0..=2 * pills {
+        break_lines_capped(layout, blocks, font_size, scale, max_width, &caps, &mut lines_meta);
+        if max_width.is_none() || pills == 0 || !collect_misplaced_pills(layout, &lines_meta, &mut caps) {
             return;
-        }
-        match misplaced_pill(layout, &maxes) {
-            Some(cap) if !caps.contains(&cap) => caps.push(cap),
-            _ => return,
         }
     }
 }
 
-/// [`break_lines_with_blocks`] once, with `caps` setting the room on given lines (the last
-/// for a line wins). Returns each line's room without them.
+/// [`break_lines_with_blocks`] once, with `caps` setting the room on given `(para_idx, line_in_para)`
+/// lines (the last for a line wins). Fills `out` with `((para_idx, line_in_para), uncapped_room)`.
 fn break_lines_capped(
     layout: &mut Layout<Ink>,
     blocks: &[crate::edit::Block],
     font_size: f32,
     scale: f32,
     max_width: Option<f32>,
-    caps: &[(usize, f32)],
-) -> Vec<f32> {
+    caps: &[((usize, usize), f32)],
+    out: &mut Vec<((usize, usize), f32)>,
+) {
+    out.clear();
     let layout_max = max_width.unwrap_or(f32::MAX);
     let mut breaker = layout.break_lines();
     breaker.state_mut().set_layout_max_advance(layout_max);
-    let mut para_idx = 0usize;
-    let mut maxes = Vec::new();
+    let (mut para_idx, mut line_in_para) = (0usize, 0usize);
     while !breaker.is_done() {
         let blk = blocks.get(para_idx).copied().unwrap_or(crate::edit::Block::Paragraph);
         let indent = (blk.indent_pt(font_size) * scale).round();
@@ -2004,9 +2057,9 @@ fn break_lines_capped(
         let line_max = max_width
             .map_or(f32::MAX, |w| (w - indent - right_pad).max(1.0))
             .min(layout_max);
-        let line = maxes.len();
-        maxes.push(line_max);
-        let capped = caps.iter().rfind(|c| c.0 == line).map_or(line_max, |c| c.1);
+        let key = (para_idx, line_in_para);
+        out.push((key, line_max));
+        let capped = caps.iter().rfind(|c| c.0 == key).map_or(line_max, |c| c.1);
         breaker.state_mut().set_line_x(indent);
         // Parley wants no line wider than the layout: a widened line widens it while it breaks.
         breaker.state_mut().set_layout_max_advance(layout_max.max(capped));
@@ -2015,6 +2068,9 @@ fn break_lines_capped(
             Some(parley::YieldData::LineBreak(data)) => {
                 if data.reason == parley::BreakReason::Explicit {
                     para_idx += 1;
+                    line_in_para = 0;
+                } else {
+                    line_in_para += 1;
                 }
             }
             Some(_) => {}
@@ -2022,26 +2078,33 @@ fn break_lines_capped(
         }
     }
     breaker.state_mut().set_layout_max_advance(layout_max);
-    maxes
 }
 
-/// The first pill whose chip ends a line without its label, or runs past the line's room in
-/// `maxes`, as the line and the room that fixes it: less, to break the line before the chip
-/// (pills that touch move together, as Parley never breaks between them), or more, when the
-/// chip already starts the line.
-fn misplaced_pill(layout: &Layout<Ink>, maxes: &[f32]) -> Option<(usize, f32)> {
+/// Appends the first misplaced pill per paragraph to `caps`, returning whether any was added.
+fn collect_misplaced_pills(
+    layout: &Layout<Ink>,
+    lines_meta: &[((usize, usize), f32)],
+    caps: &mut Vec<((usize, usize), f32)>,
+) -> bool {
+    let before = caps.len();
+    let mut skip_para = None;
+    let mut boxes: Vec<parley::PositionedInlineBox> = Vec::new();
     for (li, line) in layout.lines().enumerate() {
+        let Some(&(key, room)) = lines_meta.get(li) else { break };
+        if skip_para == Some(key.0) {
+            continue;
+        }
+        boxes.clear();
+        boxes.extend(line.items().filter_map(|it| match it {
+            PositionedLayoutItem::InlineBox(b) if b.id & PILL_BOX != 0 => Some(b),
+            _ => None,
+        }));
+        if boxes.is_empty() {
+            continue;
+        }
         let m = line.metrics();
         // Device px from the start of the line's content, as the breaker counts.
         let at = |x: f32| x - m.inline_min_coord - m.offset;
-        let boxes: Vec<parley::PositionedInlineBox> = line
-            .items()
-            .filter_map(|it| match it {
-                PositionedLayoutItem::InlineBox(b) if b.id & PILL_BOX != 0 => Some(b),
-                _ => None,
-            })
-            .collect();
-        let room = maxes.get(li).copied().unwrap_or(f32::MAX);
         for (k, lead) in boxes.iter().enumerate().filter(|(_, b)| b.id & 1 == 0) {
             let trail = boxes.iter().find(|b| b.id == lead.id | 1);
             if trail.is_some_and(|t| at(t.x) + t.width <= room + 0.5) {
@@ -2049,30 +2112,38 @@ fn misplaced_pill(layout: &Layout<Ink>, maxes: &[f32]) -> Option<(usize, f32)> {
             }
             // A chip starting a line whose label went on to the next: widen this line to hold
             // the whole pill, which then overflows it as any word too long for a line does.
-            if trail.is_none() && at(lead.x) < 0.5 {
-                let next = layout.get(li + 1)?;
-                let nm = next.metrics();
-                let t = next.items().find_map(|it| match it {
-                    PositionedLayoutItem::InlineBox(b) if b.id == lead.id | 1 => Some(b),
-                    _ => None,
-                })?;
-                return Some((li, lead.width + t.x - nm.inline_min_coord - nm.offset + t.width + 1.0));
-            }
-            let mut first = k;
-            while first >= 2
-                && boxes[first - 1].id & 1 == 1
-                && (boxes[first - 1].x + boxes[first - 1].width - boxes[first].x).abs() < 0.5
-                && boxes[first - 2].id == boxes[first - 1].id & !1
-            {
-                first -= 2;
-            }
-            let x = at(boxes[first].x);
-            if x >= 0.5 {
-                return Some((li, x + boxes[first].width * 0.5));
+            let fix = if trail.is_none() && at(lead.x) < 0.5 {
+                layout.get(li + 1).and_then(|next| {
+                    let nm = next.metrics();
+                    let t = next.items().find_map(|it| match it {
+                        PositionedLayoutItem::InlineBox(b) if b.id == lead.id | 1 => Some(b),
+                        _ => None,
+                    })?;
+                    Some(m.advance + t.x - nm.inline_min_coord - nm.offset + t.width + 1.0)
+                })
+            } else {
+                let mut first = k;
+                while first >= 2
+                    && boxes[first - 1].id & 1 == 1
+                    && (boxes[first - 1].x + boxes[first - 1].width - boxes[first].x).abs() < 0.5
+                    && boxes[first - 2].id == boxes[first - 1].id & !1
+                {
+                    first -= 2;
+                }
+                let x = at(boxes[first].x);
+                (x >= 0.5).then(|| x + boxes[first].width * 0.5)
+            };
+            if let Some(w) = fix {
+                let cap = (key, w);
+                if !caps.contains(&cap) {
+                    caps.push(cap);
+                    skip_para = Some(key.0);
+                    break;
+                }
             }
         }
     }
-    None
+    caps.len() > before
 }
 
 /// Parley 0.12's `Cursor::geometry` omits `line.metrics().inline_min_coord`; add it so carets on
@@ -2084,13 +2155,34 @@ pub(crate) fn cursor_geometry(
     size: f32,
 ) -> parley::BoundingBox {
     let mut bb = cursor.geometry(layout, size);
-    let inline_min = match cursor.visual_clusters(layout) {
+    let mut inline_min = match cursor.visual_clusters(layout) {
         [Some(left), _] => left.line().metrics().inline_min_coord,
         [_, Some(right)] => right.line().metrics().inline_min_coord,
         _ => layout
             .get(layout.len().saturating_sub(1))
             .map_or(0.0, |l| l.metrics().inline_min_coord),
     };
+    // Parley's `Cluster::is_end_of_line` is false when a line ends with a pill's trailing box,
+    // which leaves a Downstream cursor after a wrapped pill on the previous line.
+    if let [Some(left), Some(right)] = cursor.visual_clusters(layout) {
+        let (ll, rl) = (left.line(), right.line());
+        let (lm, rm) = (ll.metrics(), rl.metrics());
+        if lm.block_min_coord != rm.block_min_coord {
+            let on_right = ll.break_reason() == parley::BreakReason::Explicit
+                || (!left.is_rtl() && cursor.affinity() == parley::layout::Affinity::Downstream)
+                || (left.is_rtl() && cursor.affinity() == parley::layout::Affinity::Upstream);
+            if on_right {
+                let x = right.visual_offset().unwrap_or_default();
+                bb = parley::BoundingBox::new(
+                    x as f64,
+                    rm.block_min_coord.min(rm.content_block_min_coord) as f64,
+                    (x + size) as f64,
+                    rm.block_max_coord.max(rm.content_block_max_coord) as f64,
+                );
+                inline_min = rm.inline_min_coord;
+            }
+        }
+    }
     if inline_min != 0.0 {
         bb.x0 += inline_min as f64;
         bb.x1 += inline_min as f64;
@@ -2123,7 +2215,249 @@ fn pill_edge(layout: &Layout<Ink>, at: usize, y: f32) -> Option<f32> {
             _ => None,
         })
         .collect();
-    boxes.iter().find(|b| b.id & 1 == 1).map(|t| t.x + t.width).or_else(|| boxes.first().map(|l| l.x))
+    if let Some(t) = boxes.iter().find(|b| b.id & 1 == 1) {
+        return Some(t.x + t.width);
+    }
+    let lead = boxes.first()?;
+    // If bidi reordering moved `lead` away from the pill's glyph run, step left from the run.
+    let start_byte = layout.inline_boxes().find(|b| b.id == lead.id)?.index;
+    let gr_x0 = line.items().find_map(|it| match it {
+        PositionedLayoutItem::GlyphRun(gr) if gr.run().text_range().contains(&start_byte) => Some(gr.offset()),
+        _ => None,
+    });
+    if let Some(gx) = gr_x0.filter(|&gx| (lead.x + lead.width - gx).abs() >= 1.0) {
+        return Some(gx - lead.width);
+    }
+    Some(lead.x)
+}
+
+fn line_for_offset(layout: &Layout<Ink>, offset: f32) -> Option<(usize, parley::Line<'_, Ink>)> {
+    if offset < 0.0 {
+        return Some((0, layout.get(0)?));
+    }
+    for (i, line) in layout.lines().enumerate() {
+        let m = line.metrics();
+        if (m.block_min_coord..m.block_max_coord).contains(&offset) {
+            return Some((i, line));
+        }
+    }
+    None
+}
+
+/// Hit-tests `(x, y)` (layout device px) to a [`parley::editing::Cursor`], accounting for line
+/// indentation and pill inline boxes (where Parley's `Cluster::from_point` falls through to the
+/// end of the document when a line starts or ends with an inline box, or folds a trailing box's
+/// width into the following cluster).
+pub(crate) fn cursor_from_point(layout: &Layout<Ink>, x: f32, y: f32) -> parley::editing::Cursor {
+    use parley::{BreakReason, editing::Cursor, layout::Affinity};
+    if layout.inline_boxes().next().is_none() && layout.lines().all(|l| l.metrics().inline_min_coord == 0.0) {
+        return Cursor::from_point(layout, x, y);
+    }
+    if layout.len() == 0 {
+        return Cursor::from_byte_index(layout, 0, Affinity::Downstream);
+    }
+    let first = layout.get(0).unwrap();
+    let fm = first.metrics();
+    if y <= fm.block_min_coord && x <= fm.inline_min_coord + fm.offset {
+        return Cursor::from_byte_index(layout, 0, Affinity::Downstream);
+    }
+    let last_idx = layout.len() - 1;
+    let last = layout.get(last_idx).unwrap();
+    let lm = last.metrics();
+    if y >= lm.block_max_coord && x >= lm.inline_min_coord + lm.offset + lm.advance {
+        return Cursor::from_byte_index(layout, last.text_range().end, Affinity::Upstream);
+    }
+    let line = if y <= fm.block_min_coord {
+        first
+    } else if y >= lm.block_max_coord {
+        last
+    } else {
+        line_for_offset(layout, y).map_or(last, |(_, l)| l)
+    };
+    let m = line.metrics();
+    let r = line.text_range();
+    if x <= m.inline_min_coord + m.offset {
+        return Cursor::from_byte_index(layout, r.start, Affinity::Downstream);
+    }
+    for item in line.items() {
+        if let PositionedLayoutItem::InlineBox(b) = item
+            && b.id & PILL_BOX != 0
+            && x >= b.x
+            && x <= b.x + b.width
+            && let Some(ib) = layout.inline_boxes().find(|ib| ib.id == b.id)
+        {
+            let aff = if b.id & 1 == 0 { Affinity::Downstream } else { Affinity::Upstream };
+            return Cursor::from_byte_index(layout, ib.index, aff);
+        }
+    }
+    for run in line.runs() {
+        let mut cx = m.inline_min_coord + run.visual_clusters().next().and_then(|c| c.visual_offset()).unwrap_or(m.offset);
+        for cl in run.visual_clusters() {
+            let adv = cl.advance();
+            if x <= cx + adv {
+                let leading = x - cx <= adv * 0.5;
+                let (idx, aff) = if cl.is_rtl() {
+                    if leading {
+                        (cl.text_range().end, Affinity::Upstream)
+                    } else {
+                        (cl.text_range().start, Affinity::Downstream)
+                    }
+                } else if leading || cl.is_hard_line_break() {
+                    (cl.text_range().start, Affinity::Downstream)
+                } else {
+                    (cl.text_range().end, Affinity::Upstream)
+                };
+                return Cursor::from_byte_index(layout, idx, aff);
+            }
+            cx += adv;
+        }
+    }
+    if line.break_reason() == BreakReason::Explicit && r.end > r.start {
+        if let Some(cl) = parley::Cluster::from_byte_index(layout, r.end - 1) {
+            return Cursor::from_byte_index(layout, cl.text_range().start, Affinity::Downstream);
+        }
+    }
+    Cursor::from_byte_index(layout, r.end, Affinity::Upstream)
+}
+
+/// Start (`!end`) or end (`end`) byte of the visual line containing `byte`.
+pub(crate) fn line_edge(layout: &Layout<Ink>, byte: usize, end: bool) -> usize {
+    use parley::{BreakReason, editing::Cursor, layout::Affinity};
+    let cur = Cursor::from_byte_index(layout, byte, Affinity::Downstream);
+    let bb = cursor_geometry(&cur, layout, 0.0);
+    let y = ((bb.y0 + bb.y1) * 0.5) as f32;
+    let Some((_, line)) = line_for_offset(layout, y).or_else(|| {
+        let last = layout.len().checked_sub(1)?;
+        Some((last, layout.get(last)?))
+    }) else {
+        return byte;
+    };
+    let r = line.text_range();
+    if !end {
+        return r.start;
+    }
+    if line.break_reason() == BreakReason::Explicit && r.end > r.start {
+        parley::Cluster::from_byte_index(layout, r.end - 1).map_or(r.end - 1, |c| c.text_range().start)
+    } else {
+        r.end
+    }
+}
+
+/// Byte index on the previous (`!down`) or next (`down`) visual line at `byte`'s x coordinate,
+/// or `None` when already on the last line moving down.
+pub(crate) fn move_line(layout: &Layout<Ink>, byte: usize, down: bool) -> Option<usize> {
+    use parley::{editing::Cursor, layout::Affinity};
+    if layout.len() == 0 {
+        return None;
+    }
+    let cur = Cursor::from_byte_index(layout, byte, Affinity::Downstream);
+    let bb = cursor_geometry(&cur, layout, 0.0);
+    let y = ((bb.y0 + bb.y1) * 0.5) as f32;
+    let limit = layout.len() - 1;
+    let idx = line_for_offset(layout, y).map_or(limit, |(ix, _)| ix);
+    if !down && idx == 0 {
+        return Some(0);
+    }
+    if down && idx >= limit {
+        return None;
+    }
+    let line = layout.get(if down { idx + 1 } else { idx - 1 })?;
+    let m = line.metrics();
+    Some(cursor_from_point(layout, bb.x0 as f32, (m.block_min_coord + m.block_max_coord) * 0.5).index())
+}
+
+/// Line boxes (`(BoundingBox, line_idx)`) covering bytes `a..b` of `layout`. When `pill_boxes`
+/// is true, a selected pill's leading and trailing chip boxes are included in the highlight;
+/// when false (underlines, strikethroughs, link hit boxes), inline boxes are excluded so they
+/// never bleed into a neighbouring cluster's box.
+pub(crate) fn range_boxes(
+    layout: &Layout<Ink>,
+    a: usize,
+    b: usize,
+    pill_boxes: bool,
+) -> Vec<(parley::BoundingBox, usize)> {
+    use parley::{BreakReason, editing::Cursor, editing::Selection, layout::Affinity};
+    if a >= b {
+        return Vec::new();
+    }
+    if layout.inline_boxes().next().is_none() {
+        return Selection::new(
+            Cursor::from_byte_index(layout, a, Affinity::Downstream),
+            Cursor::from_byte_index(layout, b, Affinity::Upstream),
+        )
+        .geometry(layout);
+    }
+    let range = a..b;
+    let mut rects = Vec::new();
+    for (line_ix, line) in layout.lines().enumerate() {
+        let lr = line.text_range();
+        if lr.end <= a || lr.start >= b {
+            continue;
+        }
+        let m = line.metrics();
+        let line_min = m.block_min_coord.min(m.content_block_min_coord) as f64;
+        let line_max = m.block_max_coord.max(m.content_block_max_coord) as f64;
+        let newline_ws = if line.break_reason() == BreakReason::Explicit
+            && lr.end > lr.start
+            && range.contains(&(lr.end - 1))
+        {
+            parley::Cluster::from_byte_index(layout, lr.end - 1).map_or(0.0, |c| {
+                let run = c.run();
+                let fm = run.font_metrics();
+                (fm.ascent as f64 + fm.descent as f64) * 0.25
+            })
+        } else {
+            0.0
+        };
+        let mut intervals: Vec<(f64, f64)> = Vec::new();
+        for run in line.runs() {
+            let mut cx = (m.inline_min_coord + run.visual_clusters().next().and_then(|c| c.visual_offset()).unwrap_or(m.offset)) as f64;
+            for cl in run.visual_clusters() {
+                let adv = cl.advance() as f64;
+                if range.contains(&cl.text_range().start) && adv > 0.0 {
+                    intervals.push((cx, cx + adv));
+                }
+                cx += adv;
+            }
+        }
+        if pill_boxes {
+            for item in line.items() {
+                if let PositionedLayoutItem::InlineBox(ib) = item
+                    && ib.id & PILL_BOX != 0
+                    && ib.width > 0.0
+                    && layout.inline_boxes().find(|b| b.id == ib.id).is_some_and(|b| {
+                        if ib.id & 1 == 0 {
+                            range.contains(&b.index)
+                        } else {
+                            b.index > 0 && range.contains(&(b.index - 1))
+                        }
+                    })
+                {
+                    intervals.push((ib.x as f64, (ib.x + ib.width) as f64));
+                }
+            }
+        }
+        intervals.sort_by(|p, q| p.0.total_cmp(&q.0));
+        let mut merged: Vec<(f64, f64)> = Vec::new();
+        for (x0, x1) in intervals {
+            match merged.last_mut() {
+                Some(last) if x0 <= last.1 + 0.5 => last.1 = last.1.max(x1),
+                _ => merged.push((x0, x1)),
+            }
+        }
+        if let Some(last) = merged.last_mut() {
+            last.1 += newline_ws;
+        } else if newline_ws > 0.0 {
+            let x0 = (m.inline_min_coord + m.offset + m.advance) as f64;
+            merged.push((x0, x0 + newline_ws));
+        }
+        for (x0, x1) in merged {
+            if x1 > x0 {
+                rects.push((parley::BoundingBox::new(x0, line_min, x1, line_max), line_ix));
+            }
+        }
+    }
+    rects
 }
 
 #[cfg(test)]
@@ -2219,6 +2553,11 @@ mod tests {
         assert_eq!(ids(&mut ts, "a->b", &[Span::new(0, 4).mono()], sans), apart);
         // Under `trak` correction too, which turns optional ligatures back on for prose.
         assert_eq!(ids(&mut ts, "a->b", &[Span::new(0, 4).mono().size(20.0)], sans), apart);
+        // Prose around an inline mono span keeps its ligatures.
+        let prose_arrow = ids(&mut ts, "a->b", &[], sans);
+        let mixed = ids(&mut ts, "a->ba->ba->b", &[Span::new(4, 8).mono()], sans);
+        let expected: Vec<u32> = [prose_arrow.as_slice(), apart.as_slice(), prose_arrow.as_slice()].concat();
+        assert_eq!(mixed, expected);
     }
 
     /// `Family::SystemMono` shapes with the platform's monospaced font when one is installed, so

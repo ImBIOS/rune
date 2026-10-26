@@ -89,7 +89,12 @@ export function mount(canvas, callback) {
             const data = event.clipboardData;
             // The file must be taken during the event; Rust reads its bytes only for a hook.
             h.image = field === textarea ? [...(data?.items ?? [])].find(i => i.kind === 'file' && i.type === 'image/png')?.getAsFile() ?? undefined : undefined;
-            send({ kind: 'paste', text: data?.getData('text/plain') ?? '', html: field === textarea ? data?.getData('text/html') ?? '' : '', image: !!h.image });
+            try {
+                send({ kind: 'paste', text: data?.getData('text/plain') ?? '', html: field === textarea ? data?.getData('text/html') ?? '' : '', image: !!h.image });
+            } finally {
+                if (h.syncing) queueMicrotask(() => { h.image = undefined; });
+                else h.image = undefined;
+            }
         });
         listen(field, 'beforeinput', event => {
             if (event.inputType === 'insertLineBreak' || event.inputType === 'insertParagraph') {
@@ -176,6 +181,7 @@ export async function pastedImage(h, max) {
 
 export function destroy(h) {
     h.disposed = true;
+    h.image = undefined;
     for (const remove of h.listeners) remove();
     h.password.value = ''; h.textarea.value = '';
     h.password.remove(); h.textarea.remove();
