@@ -104,7 +104,7 @@ pub static ARROW_RIGHT: Icon = Icon {
 pub static SPARKLE: Icon = Icon {
     name: "kit-sparkle",
     view: 16.0,
-    body: r#"<path d="M8 2Q9.5 6.5 14 8Q9.5 9.5 8 14Q6.5 9.5 2 8Q6.5 6.5 8 2Z" stroke="currentColor" stroke-linejoin="round"/>"#,
+    body: r#"<path d="M8 1.5Q10 6 14.5 8Q10 10 8 14.5Q6 10 1.5 8Q6 6 8 1.5Z" stroke="currentColor" stroke-linejoin="round"/>"#,
 };
 
 const PAGE: &str = r#"<path d="M3.5 1.5H9.5L12.5 4.5V14.5H3.5V1.5Z" stroke="currentColor" stroke-linejoin="round"/><path d="M9.5 1.5V4.5H12.5" stroke="currentColor" stroke-linejoin="round"/>"#;
