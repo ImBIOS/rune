@@ -346,6 +346,37 @@ mod tests {
     use crate::{col, el};
 
     #[test]
+    fn gaps_surround_a_virtual_window_without_a_trailing_gap() {
+        let mut v = VirtualList::default();
+        v.set_estimate(20.0);
+        v.set_gap(7.0);
+        v.set_keys((0..100).map(|i| format!("r{i}")).collect(), 0, None);
+        v.viewport = 40.0;
+        assert_eq!(v.prefix(100), 2693.0);
+        assert_eq!(v.prefix(50), 1350.0);
+        assert_eq!(v.row_end(50), 1343.0);
+        // In a gap the next row is the first visible row, not the one above it.
+        assert_eq!(v.first_visible(21.0, |_| true), Some(("r1".into(), 27.0)));
+        v.select(1350.0, false, None);
+        let n = v.range.len();
+        let mounted = n as f32 * 20.0 + n.saturating_sub(1) as f32 * 7.0;
+        assert_eq!(v.before + mounted + v.after, 2693.0);
+        assert_eq!(v.before, v.range.start as f32 * 27.0);
+        v.set_height("r0", 35.0);
+        assert_eq!(v.prefix(50), 1365.0, "measured heights replace only the estimate, not the gap");
+        v.set_gap(3.0);
+        assert_eq!(v.prefix(100), 2312.0, "a changed gap invalidates prefix sums");
+        v.set_keys(Vec::new(), 1, None);
+        assert_eq!(v.prefix(0), 0.0);
+    }
+
+    #[test]
+    fn growth_gap_uses_the_vertical_axis_only() {
+        assert_eq!(gap_y(&col().gaps(7.0, 19.0).style), 7.0);
+        assert_eq!(gap_y(&crate::row().gaps(7.0, 19.0).style), 0.0);
+    }
+
+    #[test]
     fn an_absolute_child_is_bounded_only_when_pinned_top_and_bottom() {
         let children = [
             el().pin(Some(0.0), Some(10.0), Some(0.0), Some(20.0)),

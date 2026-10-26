@@ -181,6 +181,56 @@ mod tests {
     }
 
     #[test]
+    fn growth_gap_is_painted_and_included_in_scroll_extent() {
+        // Cover both a plain growth column and a virtual window. Fixed row heights make
+        // the expected painted spacing independent of text shaping and estimates.
+        for virtualized in [false, true] {
+            let mut rt = Runtime::new(virtualized, |virtualized: &bool, _: &mut Cx<bool>| {
+                let mut rows = col().key("rows").w_full().gaps(7.0, 19.0)
+                    .growth(GrowthSpec::default())
+                    .children((0..100).map(|i| crate::el().key(format!("r{i}")).h(20.0).w_full()));
+                if *virtualized { rows = rows.virtualize(20.0); }
+                col().w_full().h_full().scroll(ScrollSpec { stick_bottom: false }).child(rows)
+            }, (300.0, 120.0), Env::new(true, 1.0));
+            rt.frame(0.0);
+            let elements = rt.elements();
+            let a = elements.iter().find(|e| e.key.as_deref() == Some("r0")).unwrap();
+            let b = elements.iter().find(|e| e.key.as_deref() == Some("r1")).unwrap();
+            assert_eq!(b.rect[1] - a.rect[1] - a.rect[3], 7.0, "virtualized={virtualized}");
+            assert!((rt.scrolls.values().next().unwrap().max - 2573.0).abs() < 0.01);
+            rt.update(|_, tx| tx.scroll_into_view("r99"));
+            rt.frame(0.0);
+            let end = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r99")).unwrap();
+            assert!((end.rect[1] + end.rect[3] - 120.0).abs() < 0.01, "last row lands at bottom: {:?}", end.rect);
+            let commits = rt.stats.commits;
+            rt.frame(0.0);
+            assert_eq!(rt.stats.commits, commits, "an idle frame does not recommit");
+        }
+    }
+
+    #[test]
+    fn offscreen_focus_is_deterministic_and_does_not_resurrect_after_blur_or_removal() {
+        let mut blocks = make_blocks(240, Some(180));
+        blocks[190].focused = true;
+        let mut rt = Runtime::new(blocks, blocks_view, (640.0, 500.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        assert!(rt.state[180].focused, "the first offscreen path wins simultaneous requests");
+        assert!(!rt.state[190].focused);
+        rt.update(|s, _| s[180].focused = false);
+        rt.frame(0.0);
+        assert!(rt.focused.is_none(), "explicitly blurred offscreen input stays blurred");
+        rt.update(|s, _| s[190].focused = true);
+        rt.frame(0.0);
+        assert!(rt.state[190].focused);
+        rt.update(|s, _| { s.truncate(100); });
+        rt.frame(0.0);
+        assert!(rt.focused.is_none(), "deleted offscreen input loses focus");
+        rt.update(|s, tx| { s.extend(make_blocks(140, None)); tx.scroll_into_view("b190"); });
+        rt.frame(0.0);
+        assert!(!rt.state[190].focused, "reusing a deleted path must not restore focus");
+    }
+
+    #[test]
     fn virtual_growth_stack_scroll_into_view_keeps_focus_and_aligns_caret() {
         // Focus an initially offscreen far block before the first frame, then reveal and type.
         let mut rt = Runtime::new(make_blocks(240, Some(150)), blocks_view, (640.0, 500.0), Env::new(true, 2.0));

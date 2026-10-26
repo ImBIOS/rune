@@ -224,24 +224,27 @@ impl<S: 'static> Runtime<S> {
                 old.input.as_ref().is_some_and(|i| i.edit.focused && (old.path == path || i.edit.same_model(edit)))
             }) || (input_focused && self.unmounted_focused.iter().any(|w| edit.matches_history(w)))
         };
-        let mut virtual_req: Vec<_> = self.virtual_inputs.iter()
+        let virtual_req = || self.virtual_inputs.iter()
             .filter(|(_, i)| i.edit.focused)
-            .map(|(p, i)| (p.as_str(), &i.edit))
-            .collect();
-        virtual_req.sort_unstable_by_key(|&(p, _)| p);
+            .map(|(p, i)| (p.as_str(), &i.edit));
         // A newly requested text field wins; a focused control otherwise retains focus. Nothing
         // inside an `El::inert` subtree takes or keeps it.
         let requested = (0..nodes.len())
             .filter(|&j| shown(j) && nodes[j].input.as_ref().is_some_and(|i| i.edit.focused))
-            .map(|j| (nodes[j].path.as_str(), &nodes[j].input.as_ref().unwrap().edit))
-            .chain(virtual_req);
-        let next = requested.clone().find(|&(p, edit)| self.focused.as_deref() != Some(p) && !was_focused(edit, p))
+            .map(|j| (nodes[j].path.as_str(), &nodes[j].input.as_ref().unwrap().edit));
+        // Hash iteration must not decide between simultaneous offscreen requests. Select
+        // only the winning path rather than allocating and sorting every focused field.
+        let newly_requested = |p: &str, edit: &crate::edit::TextEdit| {
+            self.focused.as_deref() != Some(p) && !was_focused(edit, p)
+        };
+        let next = requested.clone().find(|&(p, edit)| newly_requested(p, edit))
+            .or_else(|| virtual_req().filter(|&(p, edit)| newly_requested(p, edit)).min_by_key(|&(p, _)| p))
             .map(|(p, _)| p.to_owned())
             .or(restore)
             .or_else(|| self.focused.clone().filter(|p| (0..nodes.len()).any(|j| &nodes[j].path == p && shown(j)
                 && (nodes[j].focus.enabled || nodes[j].input.as_ref().is_some_and(|i| i.edit.focused)))
                 || self.virtual_inputs.get(p).is_some_and(|i| i.edit.focused)))
-            .or_else(|| requested.into_iter().next().map(|(p, _)| p.to_owned()));
+            .or_else(|| requested.into_iter().next().or_else(|| virtual_req().min_by_key(|&(p, _)| p)).map(|(p, _)| p.to_owned()));
         // State may have deleted a row. Only the new view's accessors are valid now.
         // Use the same focus path as input events, then restore the old presentation
         // tree so apply can retain its exit visuals.
