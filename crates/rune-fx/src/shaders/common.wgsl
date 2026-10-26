@@ -227,7 +227,7 @@ fn ctx(i: Inst, px: vec2f) -> Ctx {
     c.p = px / c.scale;
     c.half = i.rect.zw * 0.5;
     c.c = i.rect.xy + c.half;
-    c.q = c.p - c.c;
+    c.q = (px - c.c * c.scale) / c.scale;
     c.r = i.shape.x;
     c.aa = 1.0 / c.scale;
     c.d = sd_rrect(c.q, c.half, c.r);

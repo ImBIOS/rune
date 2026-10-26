@@ -814,9 +814,10 @@ impl FillParams {
     /// Pack into `i` (kind is `KIND_FILL`); `None` when the fill draws nothing.
     pub(crate) fn pack(&self, i: &mut InstRaw, rm: bool, time: f32) -> Option<Rect> {
         let r = rect_of(i);
-        if !(self.intensity > 0.0) || !(self.border >= 0.0) || !(r.w > 0.0) || !(r.h > 0.0) {
+        if !(self.intensity > 0.0) || !(self.border.is_finite() && self.border >= 0.0) || !(r.w > 0.0) || !(r.h > 0.0) {
             return None;
         }
+        let fin = |x: f32, d: f32| if x.is_finite() { x } else { d };
         // Looping styles settle on one pose under reduced motion, and fold large times to keep f32 precision.
         i.t[0] = if rm { CALM_T } else { cpu::fold_t(time) };
         i.t[2] = self.style.index() as f32;
@@ -825,8 +826,8 @@ impl FillParams {
             FillStyle::LiquidMetal(p) => {
                 i.c0 = p.tint.v4();
                 i.c1 = p.light.v4();
-                i.p0 = [p.flow, p.scale.max(1.0), p.speed, p.bevel.max(0.0)];
-                i.p1 = [p.dome, p.angle, p.iridescence, p.contrast];
+                i.p0 = [fin(p.flow, 0.0).max(0.0), fin(p.scale, 100.0).max(1.0), fin(p.speed, 0.0), fin(p.bevel, 0.0).max(0.0)];
+                i.p1 = [fin(p.dome, 0.0), fin(p.angle, 0.0), fin(p.iridescence, 0.0).max(0.0), fin(p.contrast, 1.0).max(0.1)];
                 i.p2 = [(p.anchor == FillAnchor::Element) as u32 as f32, 0.0, 0.0, 0.0];
             }
             FillStyle::MeshGradient(p) => {
@@ -881,7 +882,7 @@ impl FillParams {
             }
             FillStyle::Plastic(p) => {
                 i.c0 = p.color.v4();
-                i.p0 = [p.roughness, p.dome, p.bevel.max(0.0), p.angle];
+                i.p0 = [fin(p.roughness, 0.15).clamp(0.0, 1.0), fin(p.dome, 0.0), fin(p.bevel, 0.0).max(0.0), fin(p.angle, 0.0)];
             }
         }
         Some(r.inflate(1.0))
@@ -966,6 +967,8 @@ mod tests {
             assert!(Fx::fill(p.fill().intensity(0.0)).on(card()).pack().is_none(), "{} {}", s.id, p.id);
             assert!(Fx::fill(p.fill().intensity(f32::NAN)).on(card()).pack().is_none(), "{} {}", s.id, p.id);
             assert!(Fx::fill(p.fill().border(-1.0)).on(card()).pack().is_none());
+            assert!(Fx::fill(p.fill().border(f32::NAN)).on(card()).pack().is_none());
+            assert!(Fx::fill(p.fill().border(f32::INFINITY)).on(card()).pack().is_none());
             assert!(Fx::fill(p.fill()).on(Shape::rounded(10.0, 10.0, 0.0, 40.0, 0.0)).pack().is_none(), "{} {}: zero width", s.id, p.id);
             assert!(Fx::fill(p.fill()).on(Shape::rounded(10.0, 10.0, 40.0, 0.0, 0.0)).pack().is_none(), "{} {}: zero height", s.id, p.id);
             assert!(Fx::fill(p.fill()).on(card()).pack().is_some());
@@ -1058,6 +1061,22 @@ mod tests {
             assert!(!FillParams::from(p).animates());
             assert!(!Fx::fill(p).on(card()).at(2.0).is_animating());
             assert_eq!(Fx::fill(p).cost(), FxCost { passes: 1, samples: 0, alu: 0, backdrop: false, source: false });
+        }
+        let non_finite_plastic = PlasticParams { roughness: f32::NAN, dome: f32::INFINITY, bevel: f32::NEG_INFINITY, angle: f32::NAN, ..PlasticParams::glossy() };
+        let non_finite_metal = LiquidMetalParams {
+            flow: f32::NAN,
+            scale: f32::NAN,
+            speed: f32::INFINITY,
+            bevel: f32::NAN,
+            dome: f32::NEG_INFINITY,
+            angle: f32::NAN,
+            iridescence: f32::INFINITY,
+            contrast: f32::NAN,
+            ..LiquidMetalParams::chrome()
+        };
+        for fx in [Fx::fill(non_finite_plastic), Fx::fill(non_finite_metal)] {
+            let (i, _) = packed(&fx.on(card()).at(1.0)).unwrap();
+            assert!(i.p0.iter().chain(&i.p1).chain(&i.p2).all(|v| v.is_finite()), "{i:?}");
         }
     }
 

@@ -207,20 +207,38 @@ fn gpu_fills_are_finite_at_extremes_degenerate_params_and_large_time() {
         }
     }
 
-    // Degenerate cases: conic centre on an exact pixel centre, zero-radius metaballs, extreme mesh sharpness, zero-size source rect.
+    // Degenerate cases: conic centre on an exact pixel centre, zero-radius metaballs, extreme mesh sharpness, zero-size source rect,
+    // slab extremes (roughness 0/1, dome ±1, bevel and border larger than half the shape, tiny shapes, non-finite fields).
     let pixel_center = Shape::rounded(0.5, 0.5, 20.0, 20.0, 0.0);
     draw(Fx::fill(GrainGradientParams { kind: GradientKind::Conic, center: [0.5, 0.5], ..GrainGradientParams::sweep() }).on(pixel_center).at(1.0));
     draw(Fx::fill(MetaballParams { size: 0.0, ..MetaballParams::lava() }).on(shape).at(1.0));
     draw(Fx::fill(MeshGradientParams { sharpness: 50.0, ..MeshGradientParams::dusk() }).on(shape).at(1.0));
     draw(Fx::fill(DitherParams { input: FillInput::Image, ..DitherParams::bayer() }).on(shape).source(0, Rect::new(0.0, 0.0, 0.0, 0.0)).at(1.0));
+    for tiny in [Shape::rounded(2.0, 2.0, 4.0, 4.0, 2.0), Shape::rounded(2.5, 2.5, 1.0, 1.0, 0.5)] {
+        draw(Fx::fill(PlasticParams { roughness: 0.0, dome: 1.0, bevel: 48.0, ..PlasticParams::glossy() }).on(tiny));
+        draw(Fx::fill(PlasticParams { roughness: 1.0, dome: -1.0, bevel: 48.0, ..PlasticParams::dished() }.border(20.0)).on(tiny));
+        draw(Fx::fill(LiquidMetalParams { bevel: 48.0, dome: -1.0, anchor: FillAnchor::Element, ..LiquidMetalParams::chrome() }).on(tiny).at(1.0));
+    }
+    draw(Fx::fill(PlasticParams { roughness: f32::NAN, dome: f32::INFINITY, bevel: f32::NAN, angle: f32::NEG_INFINITY, ..PlasticParams::glossy() }).on(shape));
+    draw(Fx::fill(LiquidMetalParams { flow: f32::NAN, scale: f32::NAN, bevel: f32::INFINITY, dome: f32::NAN, contrast: f32::NAN, ..LiquidMetalParams::chrome() }).on(shape).at(1.0));
 }
 
 /// Draws `layers` at `scale` into a transparent `w`×`h` Rgba16Float target with no dither, and
 /// reads it back as premultiplied linear RGBA (or sRGB-encoded with `srgb`).
 fn render(w: u32, h: u32, scale: f32, srgb: bool, layers: &[FxLayer]) -> Vec<[f32; 4]> {
-    let Gpu { device, queue, .. } = Gpu::headless();
+    render_at(w, h, scale, srgb, [0.0, 0.0], layers)
+}
+
+fn render_at(w: u32, h: u32, scale: f32, srgb: bool, origin: [f32; 2], layers: &[FxLayer]) -> Vec<[f32; 4]> {
+    static CTX: std::sync::Mutex<Option<(Gpu, FxRenderer)>> = std::sync::Mutex::new(None);
     let fmt = wgpu::TextureFormat::Rgba16Float;
-    let mut fx = FxRenderer::new(&device, fmt, FxOptions { dither: false });
+    let mut guard = CTX.lock().unwrap();
+    let (gpu, fx) = guard.get_or_insert_with(|| {
+        let gpu = Gpu::headless();
+        let fx = FxRenderer::new(&gpu.device, fmt, FxOptions { dither: false });
+        (gpu, fx)
+    });
+    let (device, queue) = (&gpu.device, &gpu.queue);
     fx.set_srgb_blend(srgb);
     assert_eq!(w * 8 % 256, 0, "row alignment");
     let target = device.create_texture(&wgpu::TextureDescriptor {
@@ -235,7 +253,9 @@ fn render(w: u32, h: u32, scale: f32, srgb: bool, layers: &[FxLayer]) -> Vec<[f3
     });
     let view = target.create_view(&Default::default());
     let readback = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (w * 8 * h) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
-    let stats = fx.prepare(&device, &queue, &FxFrame { viewport: [w, h], scale, layers, backdrop: None, sources: &[] });
+    let vw = w + origin[0].ceil() as u32;
+    let vh = h + origin[1].ceil() as u32;
+    let stats = fx.prepare(&device, &queue, &FxFrame { viewport: [vw, vh], scale, layers, backdrop: None, sources: &[] });
     assert_eq!(stats.drawn as usize, layers.len());
     let mut enc = device.create_command_encoder(&Default::default());
     {
@@ -253,7 +273,7 @@ fn render(w: u32, h: u32, scale: f32, srgb: bool, layers: &[FxLayer]) -> Vec<[f3
             multiview_mask: None,
         });
         for k in 0..layers.len() {
-            fx.draw_layer(&mut pass, k);
+            fx.draw_layer_in(&mut pass, fmt, origin, k);
         }
     }
     enc.copy_texture_to_buffer(
@@ -296,7 +316,7 @@ fn key() -> Shape {
 fn plastic_never_paints_past_its_coverage() {
     let (w, h, s) = KEY;
     for srgb in [false, true] {
-        for roughness in [0.05, 0.45, 1.0] {
+        for roughness in [0.0, 0.05, 0.45, 1.0] {
             for (color, intensity) in [(rgb(0xffffff), 1.0), (rgb(0xffd60a), 1.0), (rgb(0xd7263d), 0.5), (rgb(0x202226), 1.0)] {
                 let p = PlasticParams { color, roughness, ..PlasticParams::glossy() };
                 for layer in [Fx::fill(p.intensity(intensity)).on(key()), Fx::fill(p.border(6.0)).on(key())] {
@@ -306,6 +326,15 @@ fn plastic_never_paints_past_its_coverage() {
                     let centre = img[(h / 2 * w + w / 2) as usize];
                     assert!(layer_is_border(&layer) || (centre[3] - intensity).abs() < 2e-3, "centre alpha {centre:?}");
                 }
+            }
+        }
+        // Extreme dome (±1), bevel wider than half the shape, and a tiny 4 pt shape.
+        for dome in [-1.0, 1.0] {
+            let p = PlasticParams { color: rgb(0xffd60a), roughness: 0.0, dome, bevel: 40.0, angle: 0.8 };
+            for sh in [key(), Shape::rounded(4.0, 4.0, 4.0, 4.0, 1.5)] {
+                let img = render(w, h, s, srgb, &[Fx::fill(p).on(sh)]);
+                let worst = img.iter().map(|p| p[0].max(p[1]).max(p[2]) - p[3]).fold(f32::MIN, f32::max);
+                assert!(worst <= 2e-3, "srgb {srgb} dome {dome}: rgb exceeds alpha by {worst}");
             }
         }
     }
@@ -348,8 +377,8 @@ fn plastic_highlight_follows_roughness_and_light() {
 /// pixel for pixel, at any time (including folded large times); window-anchored does not.
 #[test]
 fn element_anchored_metal_keys_are_identical() {
-    let keys = |anchor: FillAnchor, t: f32| -> Vec<FxLayer> {
-        (0..8).map(|k| Fx::fill(LiquidMetalParams::chrome().anchor(anchor)).on(Shape::rounded(4.0 + k as f32 * 28.0, 4.0, 24.0, 24.0, 5.0)).at(t)).collect()
+    let keys_at = |anchor: FillAnchor, t: f32, ox: f32, oy: f32| -> Vec<FxLayer> {
+        (0..8).map(|k| Fx::fill(LiquidMetalParams::chrome().anchor(anchor)).on(Shape::rounded(ox + k as f32 * 28.0, oy, 24.0, 24.0, 5.0)).at(t)).collect()
     };
     let (w, h) = (512u32, 64u32);
     // Each key's quad is its rect plus 1 pt: 26 pt = 52 px from (3 + 28k) pt.
@@ -358,13 +387,50 @@ fn element_anchored_metal_keys_are_identical() {
         (6..58).flat_map(|y| (x0..x0 + 52).map(move |x| (x, y))).map(|(x, y)| img[(y * w + x) as usize].map(f32::to_bits)).collect()
     };
     for t in [1.3, 1e5 + 0.37] {
-        let img = render(w, h, 2.0, false, &keys(FillAnchor::Element, t));
+        let img = render(w, h, 2.0, false, &keys_at(FillAnchor::Element, t, 4.0, 4.0));
         let first = tile(&img, 0);
         assert!(first.iter().any(|p| f32::from_bits(p[3]) > 0.99), "the key is drawn");
         for k in 1..8 {
             assert!(tile(&img, k) == first, "t = {t}: key {k} differs from key 0");
         }
-        let world = render(w, h, 2.0, false, &keys(FillAnchor::World, t));
+        let world = render(w, h, 2.0, false, &keys_at(FillAnchor::World, t, 4.0, 4.0));
         assert!((1..8).any(|k| tile(&world, k) != tile(&world, 0)), "t = {t}: window-anchored keys should differ");
+    }
+
+    // Sub-pixel / live_offset positions, isolated-layer viewport shift, and non-power-of-two scale (1.5×).
+    let subpx = render(w, h, 2.0, false, &keys_at(FillAnchor::Element, 1.3, 4.25, 4.375));
+    let subpx_tile = |img: &[[f32; 4]], k: u32| -> Vec<[u32; 4]> {
+        let x0 = 6 + 56 * k;
+        (6..59).flat_map(|y| (x0..x0 + 53).map(move |x| (x, y))).map(|(x, y)| img[(y * w + x) as usize].map(f32::to_bits)).collect()
+    };
+    let sub0 = subpx_tile(&subpx, 0);
+    for k in 1..8 {
+        assert!(subpx_tile(&subpx, k) == sub0, "fractional offset: key {k} differs from key 0");
+    }
+
+    let in_layer = render_at(w, h, 2.0, false, [16.0, 12.0], &keys_at(FillAnchor::Element, 1.3, 12.25, 10.375));
+    for k in 0..8 {
+        assert!(subpx_tile(&in_layer, k) == sub0, "in-layer origin shift: key {k} differs from direct draw");
+    }
+
+    let scale15 = render(w, h, 1.5, false, &keys_at(FillAnchor::Element, 1.3, 4.0, 4.0));
+    let tile15 = |img: &[[f32; 4]], k: u32| -> Vec<[u32; 4]> {
+        let x0 = 4 + 42 * k;
+        (4..44).flat_map(|y| (x0..x0 + 40).map(move |x| (x, y))).map(|(x, y)| img[(y * w + x) as usize].map(f32::to_bits)).collect()
+    };
+    let s15_0 = tile15(&scale15, 0);
+    for k in 1..8 {
+        assert!(tile15(&scale15, k) == s15_0, "scale 1.5: key {k} differs from key 0");
+    }
+
+    // Time folding at 512 s and 1024 s turns smoothly without a frame jump.
+    for fold in [512.0f32, 1024.0] {
+        let dt = 1.0 / 64.0;
+        let before = render(128, 64, 2.0, false, &[Fx::fill(LiquidMetalParams::chrome()).on(Shape::rounded(4.0, 4.0, 24.0, 24.0, 5.0)).at(fold - dt)]);
+        let at_fold = render(128, 64, 2.0, false, &[Fx::fill(LiquidMetalParams::chrome()).on(Shape::rounded(4.0, 4.0, 24.0, 24.0, 5.0)).at(fold)]);
+        let after = render(128, 64, 2.0, false, &[Fx::fill(LiquidMetalParams::chrome()).on(Shape::rounded(4.0, 4.0, 24.0, 24.0, 5.0)).at(fold + dt)]);
+        assert_eq!(before, after, "triangle wave is symmetric across {fold}");
+        let step = before.iter().zip(&at_fold).flat_map(|(a, b)| (0..4).map(move |c| (a[c] - b[c]).abs())).fold(0.0f32, f32::max);
+        assert!(step < 0.2, "no frame jump at {fold}: max step {step}");
     }
 }
