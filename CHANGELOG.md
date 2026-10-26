@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`IconButton::help` and `IconButton::shortcut` (plus `Button` and `SidebarToggle`).**
+  `IconButton::help("Lock").shortcut("⌘L")` (or `.shortcut("cmd+l")`) sets `El::help("Lock  ⌘L")`
+  and supplies the accessible label when `IconButton::label` is unset. `Button` supports the same
+  `.help` and `.shortcut` builders, and `SplitView`'s sidebar toggle shows `"Hide sidebar  ⇧⌘B"` /
+  `"Show sidebar  ⇧⌘B"` (configurable with `SidebarToggle::shortcut`).
 - **`rune_kit::shell::Page` for full-window screens in a `SplitView` window.** `Page::new(content)
   .title(..).leading(..).trailing(..).titlebar_inset(..).frame_inset(..).toolbar_in_panel()
   .build(&kit)` reuses `SplitView`'s toolbar band, traffic-light clearance, window-drag region

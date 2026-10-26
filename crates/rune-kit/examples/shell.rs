@@ -242,7 +242,8 @@ fn settings_page(dark: bool, inset: f32) -> El {
         .key("back");
     let lock = IconButton::new(&glyphs::LOCK)
         .variant(IconButtonVariant::GhostMuted)
-        .label("Lock")
+        .help("Lock")
+        .shortcut("⌘L")
         .build(&k)
         .key("lock");
     Page::new(body)

@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use rune::runtime::ElementInfo;
 use rune::{Chrome, Cx, El, Env, Key, KeyEvent, Mods, Runtime, TextEdit, TitlebarAction, col, el};
 use rune_kit::shell::{Page, PaneState, Sidebar, SidebarRow, SidebarSection, SplitView, Toolbar, is_sidebar_toggle};
-use rune_kit::Kit;
+use rune_kit::{Button, IconButton, Kit, glyphs};
 
 const NAMES: [&str; 4] = ["Alpha", "Bravo", "Charlie", "Delta"];
 
@@ -604,4 +604,55 @@ fn page_matches_split_views_toolbar_and_frame_pixel_for_pixel() {
     rt.pointer_up(lx, ly);
     rt.frame(1.0 / 60.0);
     assert_eq!(rt.state.backs, 1);
+}
+
+#[test]
+fn icon_button_and_sidebar_toggle_show_help_and_shortcut_tooltips() {
+    struct H {
+        sidebar: PaneState,
+    }
+    fn help_view(s: &H, _: &mut Cx<H>) -> El {
+        let k = Kit::neutral(true);
+        let lock = IconButton::new(&glyphs::LOCK)
+            .help("Lock")
+            .shortcut("⌘L")
+            .build(&k)
+            .key("lock");
+        let parsed = IconButton::new(&glyphs::COPY)
+            .label("Copy")
+            .shortcut("cmd+c")
+            .build(&k)
+            .key("copy");
+        let save = Button::new("Save")
+            .shortcut("⌘S")
+            .build(&k)
+            .key("save");
+        SplitView::new(col().w_full().h_full())
+            .sidebar(&s.sidebar, |s: &mut H| &mut s.sidebar, col())
+            .toolbar(Toolbar::new().trailing(lock).trailing(parsed).trailing(save))
+            .build(&k)
+    }
+    let mut rt = Runtime::new(
+        H { sidebar: PaneState::new(240.0) },
+        help_view,
+        (800.0, 480.0),
+        Env::new(true, 2.0),
+    );
+    rt.frame(0.0);
+    let info = |rt: &Runtime<H>, key: &str| {
+        rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap()
+    };
+    assert_eq!(info(&rt, "lock").label.as_deref(), Some("Lock"), "help supplies accessible label when label is unset");
+    assert_eq!(info(&rt, "lock").help.as_deref(), Some("Lock  ⌘L"));
+    let expected_copy = if cfg!(target_os = "macos") { "Copy  ⌘C" } else { "Copy  Super+C" };
+    assert_eq!(info(&rt, "copy").help.as_deref(), Some(expected_copy));
+    assert_eq!(info(&rt, "save").help.as_deref(), Some("Save  ⌘S"));
+    let expected_toggle = if cfg!(target_os = "macos") { "Hide sidebar  ⇧⌘B" } else { "Hide sidebar  Ctrl+Shift+B" };
+    assert_eq!(info(&rt, "sidebar-toggle").help.as_deref(), Some(expected_toggle));
+
+    let (x, y) = rt.find("lock").unwrap();
+    rt.pointer_move(x, y);
+    rt.frame(1.0 / 60.0);
+    rt.frame(rt.help_delay + 0.05);
+    assert_eq!(rt.help_tooltip().map(|(t, _)| t), Some("Lock  ⌘L"));
 }

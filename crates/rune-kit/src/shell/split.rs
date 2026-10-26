@@ -37,13 +37,24 @@ pub struct SidebarToggle {
     gap: f32,
     in_header: bool,
     unread: bool,
+    shortcut: Option<&'static str>,
 }
+
+const DEFAULT_TOGGLE_SHORTCUT: &str = if cfg!(target_os = "macos") { "⇧⌘B" } else { "Ctrl+Shift+B" };
 
 impl SidebarToggle {
     /// A 24 point button 8 points past the traffic lights (12 from the window's edge when there
     /// are none), 8 points before the toolbar's first item while the sidebar is closed.
     pub fn new() -> SidebarToggle {
-        SidebarToggle { size: ControlSize::Regular, past_lights: 8.0, edge: 12.0, gap: 8.0, in_header: false, unread: false }
+        SidebarToggle {
+            size: ControlSize::Regular,
+            past_lights: 8.0,
+            edge: 12.0,
+            gap: 8.0,
+            in_header: false,
+            unread: false,
+            shortcut: Some(DEFAULT_TOGGLE_SHORTCUT),
+        }
     }
     /// The button's size: 16, 20, 24, 28 or 36 points.
     pub fn size(mut self, s: ControlSize) -> Self {
@@ -76,6 +87,12 @@ impl SidebarToggle {
     /// Marks the button with a dot while the sidebar is closed (unread activity in it).
     pub fn unread(mut self, unread: bool) -> Self {
         self.unread = unread;
+        self
+    }
+    /// The shortcut hint shown in the toggle button's tooltip (`"⇧⌘B"` on macOS,
+    /// `"Ctrl+Shift+B"` elsewhere by default; pass `""` to omit).
+    pub fn shortcut(mut self, shortcut: &'static str) -> Self {
+        self.shortcut = (!shortcut.is_empty()).then_some(shortcut);
         self
     }
 
@@ -267,12 +284,16 @@ impl SplitView {
             }
             let hover = p.hover.take();
             if let Some(tg) = p.toggle.take().filter(|_| toggle) {
+                let label = if open { "Hide sidebar" } else { "Show sidebar" };
                 let mut button = IconButton::new(&super::SIDEBAR)
                     .variant(IconButtonVariant::GhostMuted)
                     .control_size(t.size)
-                    .label(if open { "Hide sidebar" } else { "Show sidebar" })
-                    .build(k)
-                    .expanded(open);
+                    .label(label)
+                    .help(label);
+                if let Some(sc) = t.shortcut {
+                    button = button.shortcut(sc);
+                }
+                let mut button = button.build(k).expanded(open);
                 if t.unread {
                     // A tween ends where it says; a spring's exit would run on unseen for a while.
                     let dot = el().key("sidebar-toggle-unread").size(7.0, 7.0).radius(3.5).fill(c.bg_accent);

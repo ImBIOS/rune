@@ -172,6 +172,26 @@ enum Label {
     Custom(Box<dyn FnOnce(TextStyle, Color) -> El>),
 }
 
+fn format_shortcut(s: &str) -> String {
+    let s = s.trim();
+    if let Ok(sc) = s.parse::<rune::Shortcut>() {
+        sc.keycaps().join(if cfg!(target_os = "macos") { "" } else { "+" })
+    } else {
+        s.to_owned()
+    }
+}
+
+fn compose_help(help: Option<&str>, label: Option<&str>, shortcut: Option<&str>) -> Option<String> {
+    let sc = shortcut.map(format_shortcut).filter(|s| !s.is_empty());
+    match (help, label, sc) {
+        (Some(h), _, Some(s)) if !h.is_empty() => Some(format!("{h}  {s}")),
+        (None, Some(l), Some(s)) if !l.is_empty() => Some(format!("{l}  {s}")),
+        (_, _, Some(s)) => Some(s),
+        (Some(h), _, None) if !h.is_empty() => Some(h.to_owned()),
+        _ => None,
+    }
+}
+
 /// A text button: `Button::new("Save").variant(ButtonVariant::Contrast).build(&kit)`.
 pub struct Button {
     label: String,
@@ -181,6 +201,8 @@ pub struct Button {
     icon: Option<&'static Icon>,
     state: State,
     expanded: bool,
+    help: Option<String>,
+    shortcut: Option<String>,
     acts: Acts,
 }
 
@@ -194,6 +216,8 @@ impl Button {
             icon: None,
             state: State::Rest,
             expanded: false,
+            help: None,
+            shortcut: None,
             acts: Acts::default(),
         }
     }
@@ -253,6 +277,18 @@ impl Button {
         self.expanded = on;
         self
     }
+    /// Tooltip text shown after the hover delay (`El::help`).
+    pub fn help(mut self, text: impl Into<String>) -> Self {
+        self.help = Some(text.into());
+        self
+    }
+    /// A shortcut hint appended to the button's tooltip (e.g. `"Lock  ⌘L"`), formatted like
+    /// [`MenuItem::shortcut`](crate::MenuItem::shortcut). Accepts display strings (`"⌘L"`) or
+    /// accelerator strings (`"cmd+l"`).
+    pub fn shortcut(mut self, s: impl Into<String>) -> Self {
+        self.shortcut = Some(s.into());
+        self
+    }
     pub fn on_press<S: 'static>(mut self, f: impl Fn(&mut S) + 'static) -> Self {
         self.acts.press(f);
         self
@@ -297,7 +333,11 @@ impl Button {
         let disabled_alpha = s.disabled_opacity;
         let interactive = self.variant != ButtonVariant::Loading;
         let enabled = self.state != State::Disabled && interactive;
+        let tip = compose_help(self.help.as_deref(), Some(&self.label), self.shortcut.as_deref());
         let mut e = row().role("button").label(self.label.clone()).h(h).px(px).gap(gap).center().radius(radius);
+        if let Some(t) = tip {
+            e = e.help(t);
+        }
         e = paint(k, e, s, self.state, interactive);
         if let Some(i) = self.icon {
             let mut ic = icon(i, icon_size).key("icon").color(icon_c);
@@ -335,6 +375,8 @@ pub struct IconButton {
     state: State,
     expanded: bool,
     label: Option<String>,
+    help: Option<String>,
+    shortcut: Option<String>,
     acts: Acts,
 }
 
@@ -347,6 +389,8 @@ impl IconButton {
             state: State::Rest,
             expanded: false,
             label: None,
+            help: None,
+            shortcut: None,
             acts: Acts::default(),
         }
     }
@@ -382,6 +426,19 @@ impl IconButton {
     /// Accessible name (the web's `aria-label`).
     pub fn label(mut self, l: impl Into<String>) -> Self {
         self.label = Some(l.into());
+        self
+    }
+    /// Tooltip text shown after the hover delay (`El::help`). Also supplies the accessible
+    /// label when [`Self::label`] was not set.
+    pub fn help(mut self, text: impl Into<String>) -> Self {
+        self.help = Some(text.into());
+        self
+    }
+    /// A shortcut hint appended to the button's tooltip (e.g. `"Lock  ⌘L"`), formatted like
+    /// [`MenuItem::shortcut`](crate::MenuItem::shortcut). Accepts display strings (`"⌘L"`) or
+    /// accelerator strings (`"cmd+l"`).
+    pub fn shortcut(mut self, s: impl Into<String>) -> Self {
+        self.shortcut = Some(s.into());
         self
     }
     pub fn on_press<S: 'static>(mut self, f: impl Fn(&mut S) + 'static) -> Self {
@@ -433,9 +490,13 @@ impl IconButton {
         let ink = s.icon;
         let disabled_alpha = s.disabled_opacity;
         let enabled = self.state != State::Disabled;
+        let tip = compose_help(self.help.as_deref(), self.label.as_deref(), self.shortcut.as_deref());
         let mut e = row().role("button").size(side, side).center().radius(radius);
-        if let Some(l) = self.label {
+        if let Some(l) = self.label.or(self.help) {
             e = e.label(l);
+        }
+        if let Some(t) = tip {
+            e = e.help(t);
         }
         e = paint(k, e, s, self.state, true).child(icon(self.icon, glyph).key("icon").color(ink));
         if self.state == State::Disabled { e = e.dim(disabled_alpha); }
