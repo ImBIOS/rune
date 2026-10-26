@@ -5,16 +5,16 @@ use super::*;
 
 impl<S: 'static> Runtime<S> {
     /// Node `i`'s caret line `[x, y, w, h]` in window points at its laid-out place, after
-    /// scrolling, if it is a focused text field.
+    /// scrolling and sticky shifts, if it is a focused text field.
     pub(super) fn caret_rect(&self, nodes: &[Node], i: usize) -> Option<[f32; 4]> {
         let n = &nodes[i];
         let (inp, spec, layout) = (n.input.as_ref()?, n.text.as_ref()?, n.text_layout.as_ref()?);
         if !inp.edit.focused { return None; }
         let s = self.env.scale;
-        let [sx, sy] = scroll_offsets(&self.scrolls, nodes, i).fold([0.0; 2], |a, o| [a[0] + o[0], a[1] + o[1]]);
-        let y = n.target[1] - sy;
+        let t = sticky::anchored_target(nodes, &self.scrolls, i);
+        let y = t[1];
         let tw = layout.full_width().ceil() / s;
-        let (x0, x1) = (n.target[0] + n.inset[0] - sx, n.target[2] - n.inset[2] - sx);
+        let (x0, x1) = (t[0] + n.inset[0], t[2] - n.inset[2]);
         let mut x = text_x(spec, x0, x1, tw);
         if inp.single_line {
             let prev = self.input_scroll.get(&n.path).copied().unwrap_or(0.0);

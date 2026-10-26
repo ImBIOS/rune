@@ -267,6 +267,14 @@ impl Look {
         }
     }
 
+    fn gutter_fill(&self, kind: LineKind, selected: bool) -> Color {
+        match (selected, self.tints(kind)) {
+            (true, _) => self.selected_gutter,
+            (false, Some(t)) => t.gutter,
+            (false, None) => self.bg,
+        }
+    }
+
     /// One line-number column for numbers of `digits` digits.
     fn number_w(&self, digits: u32) -> f32 {
         (digits as f32 * self.adv + 16.0).ceil()
@@ -433,12 +441,12 @@ impl<S: 'static> View<S> {
         };
         let hover_side = if c.kind == LineKind::Removed { Side::Old } else { Side::New };
         // The marker, numbers and "+" hold to the viewport's left edge while the code scrolls
-        // sideways under them, on the row's own opaque fill.
+        // sideways under them, on the gutter's own opaque fill.
         let mut gutter = row()
             .key("gutter")
             .self_stretch()
             .items_stretch()
-            .fill(fill)
+            .fill(l.gutter_fill(c.kind, selected))
             .child(self.bar(c.kind))
             .child(self.number(st, i, f, c.old, Side::Old, c.kind, selected, digits).key("no"))
             .child(self.number(st, i, f, c.new, Side::New, c.kind, selected, digits).key("nn"));
@@ -514,24 +522,28 @@ impl<S: 'static> View<S> {
     #[allow(clippy::too_many_arguments)]
     fn number(&self, st: &DiffState, i: usize, f: usize, n: Option<u32>, side: Side, kind: LineKind, selected: bool, digits: u32) -> El {
         let l = &self.look;
-        let tints = l.tints(kind);
-        let fill = match (selected, tints) {
-            (true, _) => l.selected_gutter,
-            (false, Some(t)) => t.gutter,
-            (false, None) => l.bg,
-        };
-        let mut c = row().w(l.number_w(digits)).min_h(LINE_H).self_stretch().px(8.0).justify_end().items_start().fill(fill);
-        let Some(n) = n else { return c };
-        let color = if selected { l.text } else { tints.map_or(l.faint, |t| t.number) };
-        c = c.child(text(n.to_string()).font(l.font).color(color));
-        let (get, on_select, unified) = (self.d.get_mut.clone(), self.d.on_select.clone(), st.mode() == DiffMode::Unified);
+        let unified = st.mode() == DiffMode::Unified;
+        let mut c = row().w(l.number_w(digits)).min_h(LINE_H).self_stretch().px(8.0).justify_end().items_start();
+        if !unified {
+            c = c.fill(l.gutter_fill(kind, selected));
+        }
+        if let Some(n) = n {
+            let color = if selected { l.text } else { l.tints(kind).map_or(l.faint, |t| t.number) };
+            c = c.child(text(n.to_string()).font(l.font).color(color));
+        }
+        let at = n.map(|n| LineRef::new(side, n)).or_else(|| {
+            let other = if side == Side::Old { Side::New } else { Side::Old };
+            unified.then(|| st.row_line(st.rows[i], other).map(|n| LineRef::new(other, n))).flatten()
+        });
+        let Some(at) = at else { return c };
+        let (get, on_select) = (self.d.get_mut.clone(), self.d.on_select.clone());
         let row_at = i as u32;
         c.cursor(Cursor::Pointer).on_drag(move |s: &mut S, d: &mut Drag, tx| {
             let st = get(s);
             match d.phase {
-                Phase::Down => st.press_line(f, LineRef::new(side, n)),
+                Phase::Down => st.press_line(f, at),
                 Phase::Move => {
-                    let Some(r) = st.row_from(row_at, d.start_y.clamp(0.0, LINE_H) + d.dy) else { return };
+                    let Some(r) = st.row_from(row_at, d.y) else { return };
                     let r = st.rows[r as usize];
                     if r.file() != f {
                         return;

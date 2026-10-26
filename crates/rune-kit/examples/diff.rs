@@ -140,7 +140,8 @@ const OLD_TS: &str = "export async function fetchWithRetry(url: string, tries = 
 }
 ";
 
-const NEW_TS: &str = "export async function fetchWithRetry(url: string, tries = 3, signal?: AbortSignal): Promise<Response> {
+const NEW_TS: &str =
+    "export async function fetchWithRetry(url: string, tries = 3, signal?: AbortSignal): Promise<Response> {
 \tlet last: Response | undefined
 \tfor (let i = 0; i < tries; i++) {
 \t\tlast = await fetch(url, { signal })
@@ -210,11 +211,17 @@ fn init() -> Review {
 fn view(s: &Review, cx: &mut Cx<Review>) -> El {
     let k = Kit::neutral(cx.system_dark());
     let split = s.diff.mode() == DiffMode::Split;
-    let modes = SegmentedControl::new(&["Unified", "Split"], Some(split as usize)).width(Some(160.0)).on_pick(|s: &mut Review, i, tx: &mut Tx| {
-        tx.motion(rune::tok::motion::SNAPPY);
-        s.diff.set_mode(if i == 1 { DiffMode::Split } else { DiffMode::Unified });
-    });
+    let modes = SegmentedControl::new(&["Unified", "Split"], Some(split as usize)).width(Some(160.0)).on_pick(
+        |s: &mut Review, i, tx: &mut Tx| {
+            tx.motion(rune::tok::motion::SNAPPY);
+            s.diff.set_mode(if i == 1 { DiffMode::Split } else { DiffMode::Unified });
+        },
+    );
     let (adds, dels) = s.diff.files().iter().fold((0, 0), |(a, d), f| (a + f.additions(), d + f.deletions()));
+    let files = match s.diff.files().len() {
+        1 => "1 file".to_owned(),
+        n => format!("{n} files"),
+    };
     let bar = row()
         .key("bar")
         .w_full()
@@ -224,7 +231,7 @@ fn view(s: &Review, cx: &mut Cx<Review>) -> El {
         .items_center()
         .fill(k.c.layer_01)
         .child(text("Add jitter to retry backoff").font(k.ty.ui_medium).color(k.c.text_base))
-        .child(text(format!("{} files  +{adds} −{dels}", s.diff.files().len())).font(k.ty.ui).color(k.c.text_muted))
+        .child(text(format!("{files}  +{adds} −{dels}")).font(k.ty.ui).color(k.c.text_muted))
         .child(row().grow(1.0))
         .child(modes.build(&k));
     let kc = k.clone();
@@ -246,9 +253,20 @@ fn comment(k: &Kit, _: &Review, a: &Annotation) -> El {
         .radius(8.0)
         .fill(k.c.layer_01)
         .border(1.0, k.c.border_weak)
-        .child(row().gap(8.0).items_center().child(text("Reviewer").font(k.ty.ui_medium).color(k.c.text_base)).child(text(format!("on line {}", a.at.line)).font(k.ty.ui).color(k.c.text_faint)))
+        .child(
+            row()
+                .gap(8.0)
+                .items_center()
+                .child(text("Reviewer").font(k.ty.ui_medium).color(k.c.text_base))
+                .child(text(format!("on line {}", a.at.line)).font(k.ty.ui).color(k.c.text_faint)),
+        )
         .child(text(body).font(k.ty.body).color(k.c.text_base).wrap())
-        .child(row().gap(8.0).child(Button::new("Reply").variant(ButtonVariant::Ghost).build(k)).child(Button::new("Resolve").variant(ButtonVariant::Ghost).build(k)));
+        .child(
+            row()
+                .gap(8.0)
+                .child(Button::new("Reply").variant(ButtonVariant::Ghost).build(k))
+                .child(Button::new("Resolve").variant(ButtonVariant::Ghost).build(k)),
+        );
     col().w_full().px(12.0).py(8.0).fill(k.c.bg_base).child(card)
 }
 
@@ -257,9 +275,16 @@ fn on_key(s: &mut Review, ev: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 fn main() {
-    let spec = AppSpec { scenes: &[
+    let spec = AppSpec {
+        scenes: &[
             ("split", |s: &mut Review| s.diff.set_mode(DiffMode::Split)),
-            ("scrolled", |s: &mut Review| s.diff = DiffState::new(vec![FileDiff::from_texts("src/net/backoff.rs", LONG_OLD, LONG_NEW)])),
-        ], on_key: Some(on_key), families: ("Inter", "ui-monospace, Inter"), ..AppSpec::new("Diff", (900.0, 620.0), init, view) };
+            ("scrolled", |s: &mut Review| {
+                s.diff = DiffState::new(vec![FileDiff::from_texts("src/net/backoff.rs", LONG_OLD, LONG_NEW)])
+            }),
+        ],
+        on_key: Some(on_key),
+        families: ("Inter", "ui-monospace, Inter"),
+        ..AppSpec::new("Diff", (900.0, 620.0), init, view)
+    };
     App::new(spec).modifier_keys().run();
 }

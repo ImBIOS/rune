@@ -505,9 +505,30 @@ fn unified_gutters_stay_at_the_left_edge_while_code_scrolls_sideways() {
     let e = |k: &str| rt.elements().into_iter().find(|e| e.path.ends_with(k) && !e.exiting).unwrap();
     assert!(e("df0.o6/gutter").stuck > 100.0);
 
-    // Pressing the numbers still selects the line after the sideways scroll.
-    press(&mut rt, "df0.o6/gutter/no");
+    // Pressing either number column (including the blank new-side column on a removed row)
+    // selects the line after the sideways scroll without selecting scrolled code underneath.
+    press(&mut rt, "df0.o6/gutter/nn");
     assert_eq!(rt.state.diff.selection(), Some(LineRange::line(0, LineRef::new(Side::Old, 6))));
+    assert!(rt.selected_text().is_none(), "gutter press does not select code under the gutter");
+
+    // Dragging down the stuck gutter while the view scrolls vertically selects across the scroll.
+    let start = find(&rt, "df0.o4/gutter/no");
+    let x = start.rect[0] + start.rect[2] / 2.0;
+    let y0 = start.rect[1] + 10.0;
+    rt.pointer_down(x, y0);
+    tick(&mut rt);
+    rt.wheel(300.0, 200.0, -80.0);
+    settle(&mut rt);
+    let end = find(&rt, "df0.o10/gutter/no");
+    let y1 = end.rect[1] + 10.0;
+    rt.pointer_move(x, y1);
+    tick(&mut rt);
+    rt.pointer_up(x, y1);
+    tick(&mut rt);
+    assert_eq!(
+        rt.state.diff.selection(),
+        Some(LineRange { file: 0, start: LineRef::new(Side::Old, 4), end: LineRef::new(Side::Old, 10) }),
+    );
 }
 
 #[test]
@@ -546,10 +567,15 @@ fn focused_annotation_input_keeps_navigation_and_escape_keys() {
         let k = Kit::neutral(true);
         let diff = DiffView::new(|s: &ComposeApp| &s.diff, |s: &mut ComposeApp| &mut s.diff)
             .annotation(|s: &ComposeApp, a: &Annotation| {
-                text_input(&s.comment, TextStyle::new(13.0, 400.0))
-                    .key(format!("input-{}", a.id))
-                    .size(300.0, 28.0)
-                    .on_edit(|s: &mut ComposeApp| &mut s.comment)
+                col()
+                    .w_full()
+                    .child(
+                        text_input(&s.comment, TextStyle::new(13.0, 400.0))
+                            .key(format!("input-{}", a.id))
+                            .size(300.0, 28.0)
+                            .on_edit(|s: &mut ComposeApp| &mut s.comment),
+                    )
+                    .child(el().key(format!("pop-{}", a.id)).size(80.0, 20.0).anchored(format!("input-{}", a.id), rune::Side::Bottom, rune::Align::Start, 4.0))
             })
             .build(s, &k);
         col().w_full().h_full().child(diff)
@@ -558,26 +584,71 @@ fn focused_annotation_input_keeps_navigation_and_escape_keys() {
         s.diff.key(ev, tx)
     }
 
+    let long = "x".repeat(400);
     let (old, new) = numbered(60, 10);
+    let old = old.replace("let value_9 = compute(9);", &long);
+    let new = new.replace("let value_9 = compute(9);", &long);
     let files = (0..2).map(|i| FileDiff::from_texts(format!("f{i}.rs"), &old, &new)).collect();
     let mut diff = DiffState::new(files);
     diff.set_annotations(vec![Annotation::new(0, LineRef::new(Side::New, 10), "c1")]);
     let sel = LineRange::line(0, LineRef::new(Side::New, 10));
     diff.set_selection(Some(sel));
-    let mut rt = Runtime::new(ComposeApp { diff, comment: TextEdit::default() }, compose_view, (800.0, 600.0), Env::new(true, 2.0));
+    let mut rt = Runtime::new(ComposeApp { diff, comment: TextEdit::default() }, compose_view, (600.0, 600.0), Env::new(true, 2.0));
     rt.on_key = Some(compose_key);
     rt.frame(0.0);
     for _ in 0..30 {
         rt.frame(1.0 / 60.0);
     }
-    // Focus the annotation's comment box.
-    rt.update(|s, _| s.comment.focused = true);
+    // Scroll sideways and slightly down: the pinned annotation card, its text input, caret and
+    // anchored popover stay in the viewport, and typing does not yank the horizontal scroll back.
+    rt.wheel_xy(300.0, 200.0, -250.0, -40.0);
+    for _ in 0..60 {
+        rt.frame(1.0 / 60.0);
+    }
+    let find_el = |rt: &Runtime<ComposeApp>, end: &str| {
+        let suffix = format!("/{end}");
+        rt.elements().into_iter().find(|e| e.path.ends_with(&suffix) && !e.exiting).unwrap()
+    };
+    let code_x = find_el(&rt, "df0.n10/line/code").rect[0];
+    assert!(code_x < -100.0, "code scrolled sideways: {code_x}");
+    let inp = find_el(&rt, "input-c1");
+    assert!((inp.rect[0]).abs() < 0.5, "input stays pinned at left edge: {:?}", inp.rect);
+    let pop = find_el(&rt, "pop-c1");
+    assert!(
+        (pop.rect[0] - inp.rect[0].max(8.0)).abs() < 0.5 && (pop.rect[1] - (inp.rect[1] + inp.rect[3] + 4.0)).abs() < 0.5,
+        "popover follows pinned input: {:?} vs {:?}",
+        pop.rect,
+        inp.rect
+    );
+
+    // Click the comment box after scrolling sideways to focus it.
+    rt.pointer_down(inp.rect[0] + 10.0, inp.rect[1] + 10.0);
+    rt.pointer_up(inp.rect[0] + 10.0, inp.rect[1] + 10.0);
     rt.frame(1.0 / 60.0);
+    assert!(rt.state.comment.focused);
     for ch in ["]", "[", "j", "k"] {
         rt.key(KeyEvent { key: Key::Text(ch.into()), mods: Mods::default() });
         rt.frame(1.0 / 60.0);
     }
     assert_eq!(rt.state.comment.text, "][jk", "keys type into the focused comment box");
+    let inp = find_el(&rt, "input-c1");
+    let caret = inp.caret.expect("focused input reports caret");
+    assert!(
+        caret[0] >= inp.rect[0] && caret[0] < inp.rect[0] + inp.rect[2],
+        "caret sits inside pinned input: {caret:?} in {:?}",
+        inp.rect
+    );
+    assert!(
+        (find_el(&rt, "df0.n10/line/code").rect[0] - code_x).abs() < 1.0,
+        "typing in pinned input did not reset horizontal scroll"
+    );
+    let pop = find_el(&rt, "pop-c1");
+    assert!(
+        (pop.rect[0] - inp.rect[0].max(8.0)).abs() < 0.5 && (pop.rect[1] - (inp.rect[1] + inp.rect[3] + 4.0)).abs() < 0.5,
+        "popover stays anchored after commit while scrolled: {:?} vs {:?}",
+        pop.rect,
+        inp.rect
+    );
     assert_eq!(rt.state.diff.visible_file(), 0, "did not jump files");
     assert_eq!(rt.state.diff.selection(), Some(sel), "selection intact");
 

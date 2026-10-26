@@ -5524,8 +5524,8 @@ impl<S: 'static> Runtime<S> {
                 let target = if d != [0.0; 4] { [d[0], d[1], d[0] + d[2], d[1] + d[3]] }
                     else { sticky::anchored_target(&self.nodes, &self.scrolls, j) };
                 let (ax, ay) = anchor_position(a, target, (p.rect.w, p.rect.h), self.viewport);
-                pinh.dx += ax - n.target[0];
-                pinh.dy += ay - n.target[1];
+                pinh.dx = ax - n.target[0];
+                pinh.dy = ay - n.target[1];
             }
             if self.has_sticky && let Some((edge, inset)) = n.sticky.as_ref().and_then(|s| Some((s.edge?, s.inset))) {
                 // Worked out from this frame's offsets, which the viewport above already applied.
