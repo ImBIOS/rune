@@ -21,7 +21,7 @@ use crate::text::{Ink, Link, Span};
 mod html;
 
 /// Maximum nesting level (`0..=MAX_LIST_LEVEL`) for [`Block::Bullet`] and [`Block::Numbered`].
-pub const MAX_LIST_LEVEL: u8 = 5;
+pub const MAX_LIST_LEVEL: u8 = 3;
 
 /// An inline formatting mark stored alongside [`TextEdit::text`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -148,7 +148,8 @@ impl Block {
 
 /// A paragraph slice of [`TextEdit`], returned by [`TextEdit::paragraphs`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Paragraph {
+#[non_exhaustive]
+pub struct ParagraphInfo {
     pub index: usize,
     pub range: Range<usize>,
     pub block: Block,
@@ -200,6 +201,8 @@ pub struct TextEdit {
     secure: bool,
     /// Mirrors the field's `El::single_line()`; the runtime sets it before each edit.
     single_line: bool,
+    /// Formatting keys and rich paste are on (see [`TextEdit::rich`]).
+    rich: bool,
 }
 
 impl std::fmt::Debug for TextEdit {
@@ -458,7 +461,7 @@ impl TextEdit {
     pub fn new(text: impl Into<String>) -> TextEdit {
         let text = text.into();
         let n = text.len();
-        let line_count = 1 + text.bytes().filter(|&b| b == b'\n').count();
+        let line_count = 1 + count_newlines(text.as_bytes());
         TextEdit {
             text,
             anchor: n,
@@ -472,6 +475,7 @@ impl TextEdit {
             history: Arc::default(),
             secure: false,
             single_line: false,
+            rich: false,
         }
     }
 
@@ -479,11 +483,40 @@ impl TextEdit {
     /// Caret starts at the end of `text`. Ranges are clamped to char boundaries and canonicalized,
     /// and `blocks` is padded or truncated to match the number of `\n`-separated lines in `text`.
     pub fn from_parts(text: impl Into<String>, marks: Vec<MarkRange>, blocks: Vec<Block>) -> TextEdit {
-        let mut edit = Self::new(text);
+        let mut edit = Self::new(text).rich();
         edit.marks = marks;
         edit.blocks = blocks;
+        edit.clamp_list_levels();
         edit.sync_invariants();
         edit
+    }
+
+    fn clamp_list_levels(&mut self) {
+        for b in &mut self.blocks {
+            *b = b.with_level(b.list_level().unwrap_or(0));
+        }
+    }
+
+    /// Rich editing: `⌘B` / `⌘I` / `⌘U` toggle marks, `Shift+Return` inserts a soft break and
+    /// [`paste_html`](Self::paste_html) keeps formatting. Off by default, so a plain field leaves
+    /// those keys to the app and pastes plain text. [`from_html`](Self::from_html) and
+    /// [`from_parts`](Self::from_parts) turn it on. The mark and block methods work either way.
+    pub fn rich(mut self) -> Self {
+        self.rich = true;
+        self
+    }
+
+    pub fn set_rich(&mut self, rich: bool) {
+        self.rich = rich;
+    }
+
+    pub fn is_rich(&self) -> bool {
+        self.rich
+    }
+
+    /// No marks, pending style or non-paragraph blocks: draws exactly as plain text.
+    pub(crate) fn is_plain(&self) -> bool {
+        self.marks.is_empty() && self.pending.is_none() && self.blocks.iter().all(|&b| b == Block::Paragraph)
     }
 
     /// Parse an HTML fragment (`<b>`, `<strong>`, `<i>`, `<em>`, `<u>`, `<s>`, `<del>`, `<strike>`,
@@ -491,12 +524,21 @@ impl TextEdit {
     /// and inline `style` for `font-weight`, `font-style`, `text-decoration`) into a [`TextEdit`].
     /// Unknown tags keep their text and strip the wrapper; `<script>` and `<style>` are dropped.
     pub fn from_html(html_str: &str) -> TextEdit {
-        html::parse_html(html_str)
+        html::parse_html(html_str).rich()
     }
 
     /// Serialize the entire document's text, inline marks, and paragraph blocks to safe HTML.
     pub fn to_html(&self) -> String {
-        html::serialize_html(self, 0..self.text.len())
+        let e = self.synced();
+        html::serialize_html(&e, 0..e.text.len())
+    }
+
+    /// `self` with marks, blocks and caret fitted to `text`, which an app may have assigned
+    /// directly.
+    fn synced(&self) -> TextEdit {
+        let mut e = self.clone();
+        e.sync_invariants();
+        e
     }
 
     /// Serialize the current selection (`self.range()`) to HTML, or `""` when the selection is empty.
@@ -505,7 +547,7 @@ impl TextEdit {
         if a == b || self.secure {
             return String::new();
         }
-        html::serialize_html(self, a..b)
+        html::serialize_html(&self.synced(), a..b)
     }
 
     /// Inline [`MarkRange`]s on `self.text`, sorted by start byte.
@@ -531,6 +573,7 @@ impl TextEdit {
     /// Replace the per-line [`Block`] list on `self.text`.
     pub fn set_blocks(&mut self, blocks: Vec<Block>) {
         self.blocks = blocks;
+        self.clamp_list_levels();
         self.sync_invariants();
     }
 
@@ -540,7 +583,7 @@ impl TextEdit {
     }
 
     /// Iterate the `\n`-delimited paragraphs of `self.text` with their byte range and [`Block`].
-    pub fn paragraphs(&self) -> Vec<Paragraph> {
+    pub fn paragraphs(&self) -> Vec<ParagraphInfo> {
         let mut out = Vec::new();
         let mut line_start = 0;
         let mut idx = 0;
@@ -548,14 +591,14 @@ impl TextEdit {
             if b == b'\n' {
                 let block = self.blocks.get(idx).copied().unwrap_or(Block::Paragraph);
                 let soft_break = self.soft_breaks.binary_search(&(idx as u32)).is_ok();
-                out.push(Paragraph { index: idx, range: line_start..i, block, soft_break });
+                out.push(ParagraphInfo { index: idx, range: line_start..i, block, soft_break });
                 line_start = i + 1;
                 idx += 1;
             }
         }
         let block = self.blocks.get(idx).copied().unwrap_or(Block::Paragraph);
         let soft_break = self.soft_breaks.binary_search(&(idx as u32)).is_ok();
-        out.push(Paragraph { index: idx, range: line_start..self.text.len(), block, soft_break });
+        out.push(ParagraphInfo { index: idx, range: line_start..self.text.len(), block, soft_break });
         out
     }
 
@@ -589,7 +632,7 @@ impl TextEdit {
     pub fn replace_text(&mut self, text: impl Into<String>) {
         let text = text.into();
         self.text.zeroize();
-        let line_count = 1 + text.bytes().filter(|&b| b == b'\n').count();
+        let line_count = 1 + count_newlines(text.as_bytes());
         self.text = text;
         self.anchor = self.text.len();
         self.focus = self.anchor;
@@ -711,9 +754,11 @@ impl TextEdit {
         Arc::make_mut(&mut self.history).undo.push_back(change);
     }
 
+    /// The selection as ordered byte offsets, clamped to character boundaries of `text` (an app
+    /// may have replaced `text` without moving the caret).
     pub fn range(&self) -> (usize, usize) {
-        let len = self.text.len();
-        (self.anchor.min(self.focus).min(len), self.anchor.max(self.focus).min(len))
+        let t = &self.text;
+        (Self::clamp_char_boundary(t, self.anchor.min(self.focus)), Self::clamp_char_boundary(t, self.anchor.max(self.focus)))
     }
 
     /// Move the caret to `byte` (clamped to a character boundary of `self.text`) and collapse the
@@ -745,7 +790,7 @@ impl TextEdit {
     /// Line index (`0..line_count`) containing `byte`.
     pub fn line_of_byte(&self, byte: usize) -> usize {
         let clamped = byte.min(self.text.len());
-        self.text.as_bytes()[..clamped].iter().filter(|&&b| b == b'\n').count()
+        count_newlines(&self.text.as_bytes()[..clamped])
     }
 
     /// Byte range (`start..end`, excluding `\n`) of 0-based `line_idx`.
@@ -778,7 +823,9 @@ impl TextEdit {
 
     /// Synchronize `blocks`, `soft_breaks`, and `marks` with `self.text`.
     pub(crate) fn sync_invariants(&mut self) {
-        let line_count = 1 + self.text.bytes().filter(|&b| b == b'\n').count();
+        self.anchor = Self::clamp_char_boundary(&self.text, self.anchor);
+        self.focus = Self::clamp_char_boundary(&self.text, self.focus);
+        let line_count = 1 + count_newlines(self.text.as_bytes());
         if self.blocks.len() < line_count {
             self.blocks.resize(line_count, Block::Paragraph);
         } else if self.blocks.len() > line_count {
@@ -823,9 +870,25 @@ impl TextEdit {
             if self.blocks.get(idx) == Some(&Block::Code) {
                 code_ranges.push(line_start..len);
             }
-            for cr in code_ranges {
-                self.strip_all_marks_in_range(cr.start, cr.end);
+            // One pass: cut each mark around the (sorted, disjoint) code ranges it overlaps.
+            let mut out = Vec::with_capacity(self.marks.len());
+            for m in self.marks.drain(..) {
+                let mut start = m.start;
+                let first = code_ranges.partition_point(|cr| cr.end <= start);
+                for cr in &code_ranges[first..] {
+                    if cr.start >= m.end {
+                        break;
+                    }
+                    if start < cr.start {
+                        out.push(MarkRange { start, end: cr.start, mark: m.mark.clone() });
+                    }
+                    start = start.max(cr.end);
+                }
+                if start < m.end {
+                    out.push(MarkRange { start, end: m.end, mark: m.mark });
+                }
             }
+            self.marks = out;
         }
 
         // Merge overlapping or adjacent ranges of the same mark kind.
@@ -844,7 +907,13 @@ impl TextEdit {
             }
             if kind_idx == 5 {
                 // `Mark::Link`: resolve overlaps so later links overwrite earlier ones, then merge adjacent equal URLs.
+                let mut bounds: Vec<(usize, usize)> = list.iter().map(|m| (m.start, m.end)).collect();
+                bounds.sort_unstable();
+                let overlapping = bounds.windows(2).any(|w| w[1].0 < w[0].1);
                 let mut resolved: Vec<MarkRange> = Vec::new();
+                if !overlapping {
+                    resolved = std::mem::take(&mut list);
+                }
                 for link in list {
                     let mut next_resolved = Vec::with_capacity(resolved.len() + 1);
                     for old in resolved {
@@ -904,30 +973,13 @@ impl TextEdit {
         self.marks = merged;
     }
 
-    fn strip_all_marks_in_range(&mut self, start: usize, end: usize) {
-        if start >= end {
-            return;
-        }
-        let mut out = Vec::with_capacity(self.marks.len());
-        for m in self.marks.drain(..) {
-            if m.end <= start || m.start >= end {
-                out.push(m);
-            } else {
-                if m.start < start {
-                    out.push(MarkRange { start: m.start, end: start, mark: m.mark.clone() });
-                }
-                if m.end > end {
-                    out.push(MarkRange { start: end, end: m.end, mark: m.mark });
-                }
-            }
-        }
-        self.marks = out;
-    }
-
     /// Marks inherited from the character before `pos` according to AppKit rules:
     /// typing inside (`m.start < pos < m.end`) or at the trailing edge (`m.start < pos == m.end`)
     /// of a mark inherits it; typing at the start of a mark (`pos == m.start`) does not extend it.
     fn inherited_marks_at(&self, pos: usize) -> Vec<Mark> {
+        if self.marks.is_empty() {
+            return Vec::new();
+        }
         let line_idx = self.line_of_byte(pos);
         if self.blocks.get(line_idx) == Some(&Block::Code) {
             return Vec::new();
@@ -1165,6 +1217,7 @@ impl TextEdit {
         if self.secure || self.single_line {
             return;
         }
+        let block = block.with_level(block.list_level().unwrap_or(0));
         self.sync_invariants();
         self.break_history_group();
         let before = self.snapshot();
@@ -1290,9 +1343,27 @@ impl TextEdit {
         new_line_block: Option<Block>,
         mark_new_lines_soft: bool,
     ) {
-        self.sync_invariants();
+        // Callers sync first; a second whole-text pass here would show on every keystroke.
         let del_len = b - a;
         let ins_len = s.len();
+        if self.marks.is_empty()
+            && inserted_marks.is_empty()
+            && self.soft_breaks.is_empty()
+            && !mark_new_lines_soft
+            && new_line_block.is_none_or(|b| b == Block::Paragraph)
+            && self.blocks.iter().all(|&b| b == Block::Paragraph)
+        {
+            // Plain text: no per-line passes, so a keystroke in a long plain field costs what
+            // it did before blocks and marks existed.
+            let removed = count_newlines(&self.text.as_bytes()[a..b]);
+            let added = count_newlines(s.as_bytes());
+            self.text.replace_range(a..b, s);
+            self.blocks.resize(self.blocks.len() + added - removed, Block::Paragraph);
+            self.anchor = a + ins_len;
+            self.focus = self.anchor;
+            self.preedit = None;
+            return;
+        }
         let line_a = self.line_of_byte(a);
         let line_b = self.line_of_byte(b);
         let line_a_range = self.line_range(line_a);
@@ -1319,7 +1390,7 @@ impl TextEdit {
         };
 
         let removed_lines = line_b - line_a;
-        let added_lines = s.bytes().filter(|&ch| ch == b'\n').count();
+        let added_lines = count_newlines(s.as_bytes());
         let next_line_blk = new_line_block.unwrap_or(match merged_block {
             Block::Code => Block::Code,
             _ => Block::Paragraph,
@@ -1543,10 +1614,10 @@ impl TextEdit {
                     let line_idx = self.line_of_byte(a);
                     let blk = self.blocks.get(line_idx).copied().unwrap_or(Block::Paragraph);
                     let line_range = self.line_range(line_idx);
-                    if m.shift {
+                    if m.shift && self.rich {
                         // Shift+Return: soft line break keeping the current paragraph's block.
                         self.insert_newline(blk, true);
-                    } else if m.alt {
+                    } else if m.shift || m.alt {
                         self.insert_newline(blk, false);
                     } else {
                         match blk {
@@ -1674,9 +1745,9 @@ impl TextEdit {
                     self.focus = self.text.len();
                     self.pending = None;
                 }
-                'b' if !m.shift && !m.alt && !self.secure => self.toggle_mark(Mark::Bold),
-                'i' if !m.shift && !m.alt && !self.secure => self.toggle_mark(Mark::Italic),
-                'u' if !m.shift && !m.alt && !self.secure => self.toggle_mark(Mark::Underline),
+                'b' if !m.shift && !m.alt && self.rich && !self.secure => self.toggle_mark(Mark::Bold),
+                'i' if !m.shift && !m.alt && self.rich && !self.secure => self.toggle_mark(Mark::Italic),
+                'u' if !m.shift && !m.alt && self.rich && !self.secure => self.toggle_mark(Mark::Underline),
                 'c' if !self.secure => out.copy = Some(self.selected().to_owned()),
                 'x' if !self.secure => {
                     out.copy = Some(self.selected().to_owned());
@@ -1726,19 +1797,30 @@ impl TextEdit {
     }
 
     /// Paste rich HTML (`html`) with plain-text fallback (`plain`) into `self` at the current
-    /// selection, recorded as a single undo step. Does not touch the OS clipboard.
+    /// selection, recorded as a single undo step. Does not touch the OS clipboard. A plain field,
+    /// or HTML with no marks or blocks this model keeps, pastes `plain` instead.
     pub fn paste_html(&mut self, html_str: &str, plain: &str) -> EditOutcome {
-        if self.secure {
-            return self.paste(plain);
-        }
-        if html_str.trim().is_empty() {
+        if self.secure || html_str.trim().is_empty() {
             return self.paste(plain);
         }
         let frag = Self::from_html(html_str);
-        if frag.text.is_empty() && !plain.is_empty() {
+        // HTML that only colours or lays out text (a code editor's copy) would collapse the
+        // plain text's whitespace for nothing.
+        let unformatted = frag.marks.is_empty() && frag.blocks.iter().all(|&b| b == Block::Paragraph);
+        if !plain.is_empty() && (frag.text.is_empty() || unformatted) {
             return self.paste(plain);
         }
+        if !self.rich {
+            return self.paste(if plain.is_empty() { frag.text.as_str() } else { plain });
+        }
         self.sync_invariants();
+        // A code block takes the plain text, whose whitespace HTML would have collapsed.
+        if !self.single_line {
+            let (a, _) = self.range();
+            if self.blocks.get(self.line_of_byte(a)) == Some(&Block::Code) {
+                return self.paste(if plain.is_empty() { frag.text.as_str() } else { plain });
+            }
+        }
         self.break_history_group();
         let before = self.snapshot();
         let (a, b) = self.range();
@@ -1986,7 +2068,7 @@ impl TextEdit {
     }
 
     fn display_blocks(&self, disp_text: &str) -> Vec<Block> {
-        let line_count = 1 + disp_text.bytes().filter(|&b| b == b'\n').count();
+        let line_count = 1 + count_newlines(disp_text.as_bytes());
         if self.blocks.is_empty() {
             return vec![Block::Paragraph; line_count];
         }
@@ -2022,6 +2104,12 @@ impl TextEdit {
             None => (self.text.clone(), None),
         }
     }
+}
+
+/// `\n` bytes in `s`. Counts into `u8` lanes so it vectorizes: `filter().count()` widens every
+/// byte to `usize` and runs several times slower on a long field.
+fn count_newlines(s: &[u8]) -> usize {
+    s.chunks(255).map(|c| c.iter().fold(0u8, |n, &b| n + (b == b'\n') as u8) as usize).sum()
 }
 
 #[cfg(test)]
@@ -2368,7 +2456,7 @@ mod tests {
 
     #[test]
     fn pending_typing_style_and_command_shortcuts() {
-        let mut e = TextEdit::new("");
+        let mut e = TextEdit::new("").rich();
         // Empty selection: Cmd+B sets pending Bold, Cmd+I sets pending Italic.
         e.key(&KeyEvent { key: Key::Command('b'), mods: Mods { cmd: true, ..Mods::default() } }, None);
         e.key(&KeyEvent { key: Key::Command('i'), mods: Mods { cmd: true, ..Mods::default() } }, None);
@@ -2455,7 +2543,7 @@ mod tests {
 
     #[test]
     fn block_attributes_lists_quotes_code_and_keys() {
-        let mut e = TextEdit::new("first");
+        let mut e = TextEdit::new("first").rich();
         e.set_block(Block::Bullet(0));
         assert_eq!(e.current_block(), Block::Bullet(0));
 
@@ -2601,7 +2689,7 @@ mod tests {
         assert_eq!(round.soft_breaks(), e.soft_breaks());
 
         // paste_html into an existing editor splices text, marks, and blocks cleanly.
-        let mut dest = TextEdit::new("prefix  suffix");
+        let mut dest = TextEdit::new("prefix  suffix").rich();
         dest.set(7, false);
         dest.paste_html("<b>rich</b> <i>paste</i>", "rich paste");
         assert_eq!(dest.text, "prefix rich paste suffix");
@@ -2718,5 +2806,477 @@ mod tests {
         rt.key(KeyEvent { key: Key::Tab, mods: Mods { shift: true, ..Mods::default() } });
         rt.frame(0.0);
         assert_eq!(rt.state.edit.blocks()[0], Block::Bullet(0));
+    }
+
+    fn cmd(c: char) -> KeyEvent {
+        KeyEvent { key: Key::Command(c), mods: Mods { cmd: true, ..Mods::default() } }
+    }
+
+    /// The text under each range of `mark`.
+    fn marked<'a>(e: &'a TextEdit, mark: &Mark) -> Vec<&'a str> {
+        e.marks().iter().filter(|m| m.mark == *mark).map(|m| &e.text[m.start..m.end]).collect()
+    }
+
+    /// What every edit path must leave behind.
+    fn assert_invariants(e: &TextEdit, ctx: &str) {
+        let t = &e.text;
+        let lines = 1 + t.bytes().filter(|&b| b == b'\n').count();
+        assert_eq!(e.blocks().len(), lines, "{ctx}: one block per line");
+        assert!(e.blocks().iter().all(|b| b.list_level().is_none_or(|l| l <= MAX_LIST_LEVEL)), "{ctx}: list levels");
+        assert!(e.soft_breaks().windows(2).all(|w| w[0] < w[1]), "{ctx}: soft breaks sorted");
+        assert!(e.soft_breaks().iter().all(|&i| i > 0 && (i as usize) < lines), "{ctx}: soft breaks in range");
+        assert!(t.is_char_boundary(e.anchor) && t.is_char_boundary(e.focus), "{ctx}: caret on a char boundary");
+        let ms = e.marks();
+        assert!(ms.windows(2).all(|w| w[0].start <= w[1].start), "{ctx}: marks sorted");
+        for m in ms {
+            assert!(m.start < m.end && m.end <= t.len(), "{ctx}: mark {m:?} in range");
+            assert!(t.is_char_boundary(m.start) && t.is_char_boundary(m.end), "{ctx}: mark {m:?} on char boundaries");
+            for line in e.line_of_byte(m.start)..=e.line_of_byte(m.end - 1) {
+                assert_ne!(e.blocks()[line], Block::Code, "{ctx}: mark {m:?} reaches code line {line}");
+            }
+        }
+        for (i, a) in ms.iter().enumerate() {
+            for b in &ms[i + 1..] {
+                if a.mark.same_kind(&b.mark) {
+                    assert!(b.start >= a.end, "{ctx}: same-kind marks {a:?} {b:?} overlap");
+                    assert!(!(b.start == a.end && a.mark == b.mark), "{ctx}: equal marks {a:?} {b:?} not merged");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn plain_edit_leaves_rich_keys_alone_and_pastes_plain_text() {
+        let shift_enter = KeyEvent { key: Key::Enter, mods: Mods { shift: true, ..Mods::default() } };
+        let mut e = TextEdit::new("hello");
+        e.set_selection(0, 5);
+        e.key(&cmd('b'), None);
+        e.key(&cmd('i'), None);
+        assert!(e.marks().is_empty() && e.is_plain());
+        e.set(5, false);
+        e.key(&shift_enter, None);
+        assert_eq!((e.text.as_str(), e.soft_breaks()), ("hello\n", &[][..]));
+        e.paste_html("<b>x</b><ul><li>y</li></ul>", "x\ny");
+        assert_eq!(e.text, "hello\nx\ny");
+        assert!(e.is_plain(), "a plain field pastes the plain text");
+
+        let mut r = TextEdit::new("hello").rich();
+        r.set_selection(0, 5);
+        r.key(&cmd('b'), None);
+        assert_eq!(marked(&r, &Mark::Bold), ["hello"]);
+        r.set(5, false);
+        r.key(&shift_enter, None);
+        assert_eq!(r.soft_breaks(), &[1]);
+        assert!(TextEdit::from_html("<b>a</b>").is_rich() && TextEdit::from_parts("a", vec![], vec![]).is_rich());
+    }
+
+    #[test]
+    fn plain_field_leaves_format_chords_to_the_app() {
+        use crate::{text_input, Cx, El, Env, Runtime, TextStyle};
+        struct Form { f: TextEdit, keys: Vec<Key> }
+        fn view(s: &Form, _: &mut Cx<Form>) -> El {
+            text_input(&s.f, TextStyle::new(14.0, 400.0)).key("f").size(200.0, 40.0).on_edit(|s: &mut Form| &mut s.f)
+        }
+        let mut f = TextEdit::new("hello");
+        f.focused = true;
+        f.set_selection(0, 5);
+        let mut rt = Runtime::new(Form { f, keys: vec![] }, view, (200.0, 40.0), Env::new(true, 1.0));
+        rt.on_key = Some(|s, ev, _| { s.keys.push(ev.key.clone()); true });
+        rt.frame(0.0);
+        for c in ['b', 'i', 'u'] { rt.key(cmd(c)); rt.frame(0.0); }
+        assert_eq!(rt.state.keys, [Key::Command('b'), Key::Command('i'), Key::Command('u')]);
+        assert!(rt.state.f.marks().is_empty());
+        // A field with no formatting lays out as plain text: no spans, blocks or soft breaks.
+        let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("f")).unwrap();
+        let t = n.text.as_ref().unwrap();
+        assert!(t.spans.is_empty() && t.blocks.is_empty() && t.soft_breaks.is_empty() && t.strikes.is_empty());
+    }
+
+    #[test]
+    fn direct_text_assignment_never_panics() {
+        use crate::{text_input, Cx, El, Env, Runtime, TextStyle};
+        let fresh = || {
+            let mut e = TextEdit::from_html("<ul><li><b>bold</b> <a href=\"https://a.b\">item</a></li></ul><pre><code>a\nb</code></pre><p>x<br>y</p>");
+            e.set(e.text.len(), false);
+            e
+        };
+        // The app shrinks `text` under marks, blocks, soft breaks and a caret that sit past its
+        // end or inside a character.
+        let stale = |e: &mut TextEdit| {
+            e.text = "é🦀".into();
+            e.anchor = 1;
+            e.focus = 3;
+        };
+        let mut e = fresh();
+        stale(&mut e);
+        let _ = (e.selected(), e.display(), e.paragraphs(), e.active_block(), e.active_marks(), e.has_mark(&Mark::Bold));
+        let _ = (e.to_html(), e.selected_html());
+        e.key(&k(Key::Left), None);
+        assert_invariants(&e, "after Left");
+        for ev in [k(Key::Text("z".into())), k(Key::Backspace), k(Key::Enter), cmd('b'), k(Key::Tab)] {
+            let mut e = fresh();
+            stale(&mut e);
+            e.key(&ev, None);
+            assert_invariants(&e, &format!("after {ev:?}"));
+        }
+        let mut e = fresh();
+        stale(&mut e);
+        e.ime(&Ime::Preedit("に".into(), None));
+        e.ime(&Ime::Commit("日".into()));
+        assert_invariants(&e, "after IME");
+        let mut e = fresh();
+        stale(&mut e);
+        e.paste_html("<i>p</i>", "p");
+        assert_invariants(&e, "after paste_html");
+        let mut e = fresh();
+        stale(&mut e);
+        e.toggle_mark(Mark::Italic);
+        e.set_block(Block::Quote);
+        assert_invariants(&e, "after toggle_mark and set_block");
+
+        struct App { e: TextEdit }
+        fn view(s: &App, _: &mut Cx<App>) -> El {
+            text_input(&s.e, TextStyle::new(14.0, 400.0)).key("e").size(200.0, 120.0).on_edit(|s: &mut App| &mut s.e)
+        }
+        let mut e = fresh();
+        e.focused = true;
+        let mut rt = Runtime::new(App { e }, view, (200.0, 120.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.update(|s, _| stale(&mut s.e));
+        rt.frame(0.0);
+        rt.ime(Ime::Preedit("あ".into(), None));
+        rt.frame(0.0);
+        rt.key(k(Key::Right));
+        rt.ime(Ime::Commit("あ".into()));
+        rt.frame(0.0);
+        assert_invariants(&rt.state.e, "runtime");
+    }
+
+    #[test]
+    fn count_newlines_matches_a_plain_count() {
+        for len in [0, 1, 254, 255, 256, 600, 70_000] {
+            let t: Vec<u8> = (0..len).map(|i| if i % 3 == 0 || i > 1000 { b'\n' } else { b'x' }).collect();
+            assert_eq!(count_newlines(&t), t.iter().filter(|&&b| b == b'\n').count(), "{len}");
+        }
+    }
+
+    #[test]
+    fn list_levels_stop_at_max_list_level() {
+        let mut e = TextEdit::new("a").rich();
+        e.set_block(Block::Bullet(0));
+        for _ in 0..10 { e.key(&k(Key::Tab), None); }
+        assert_eq!(e.blocks(), &[Block::Bullet(MAX_LIST_LEVEL)]);
+        e.set_block(Block::Numbered(9));
+        assert_eq!(e.blocks(), &[Block::Numbered(MAX_LIST_LEVEL)]);
+        assert_eq!(TextEdit::from_parts("a", vec![], vec![Block::Bullet(200)]).blocks(), &[Block::Bullet(MAX_LIST_LEVEL)]);
+        let deep = TextEdit::from_html(&format!("{}a", "<ul><li>".repeat(8)));
+        assert_eq!(deep.blocks().last(), Some(&Block::Bullet(MAX_LIST_LEVEL)));
+    }
+
+    #[test]
+    fn paste_html_without_formatting_keeps_the_plain_whitespace() {
+        // VS Code's copy: colour spans in a `white-space: pre` div.
+        let html = concat!(
+            "<meta charset='utf-8'><div style=\"color: #d4d4d4;white-space: pre;\">",
+            "<div><span style=\"color: #569cd6;\">fn</span><span>&nbsp;a()&nbsp;{</span></div>",
+            "<div><span>&nbsp; &nbsp; b</span></div><div><span>}</span></div></div>",
+        );
+        let mut e = TextEdit::new("").rich();
+        e.paste_html(html, "fn a() {\n    b\n}");
+        assert_eq!(e.text, "fn a() {\n    b\n}");
+        let mut e = TextEdit::new("").rich();
+        e.paste_html("<p>a  <b>b</b></p>", "a  b");
+        assert_eq!((e.text.as_str(), marked(&e, &Mark::Bold)), ("a b", vec!["b"]), "formatted HTML still wins");
+    }
+
+    #[test]
+    fn paste_html_into_a_code_block_keeps_the_plain_whitespace() {
+        let mut e = TextEdit::new("").rich();
+        e.set_block(Block::Code);
+        e.paste_html("<p>fn  a()</p><p>b</p>", "fn  a() {\n\tb\n}");
+        assert_eq!(e.text, "fn  a() {\n\tb\n}");
+        assert_eq!(e.blocks(), &[Block::Code; 3]);
+        assert!(e.marks().is_empty());
+    }
+
+    #[test]
+    fn flatten_spans_matches_the_naive_merge_and_later_spans_win() {
+        use crate::text::{flatten_spans, Span};
+        use crate::Color;
+        fn naive(spans: &[Span]) -> Vec<Span> {
+            let mut bounds: Vec<u32> = spans.iter().filter(|s| s.start < s.end).flat_map(|s| [s.start, s.end]).collect();
+            bounds.sort_unstable();
+            bounds.dedup();
+            let mut out: Vec<Span> = Vec::new();
+            for w in bounds.windows(2) {
+                let mut m: Option<Span> = None;
+                for s in spans.iter().filter(|s| s.start < s.end && s.start <= w[0] && w[1] <= s.end) {
+                    let m = m.get_or_insert_with(|| Span::new(w[0] as usize, w[1] as usize));
+                    if s.weight.is_some() { m.weight = s.weight; }
+                    if s.color.is_some() { m.color = s.color; }
+                    if s.bg.is_some() { m.bg = s.bg; m.bg_pad = s.bg_pad; }
+                    if s.underline.is_some() { m.underline = s.underline; }
+                    if s.size.is_some() { m.size = s.size; }
+                    m.mono |= s.mono;
+                    m.italic |= s.italic;
+                }
+                if let Some(m) = m {
+                    match out.last_mut() {
+                        Some(last) if last.end == m.start && Span { start: m.start, end: m.end, ..last.clone() } == m => last.end = m.end,
+                        _ => out.push(m),
+                    }
+                }
+            }
+            out
+        }
+        let red = Color::WHITE;
+        let blue = Color::BLACK;
+        assert_eq!(
+            flatten_spans(&[Span::new(2, 5).color(blue), Span::new(0, 10).color(red)]),
+            [Span::new(0, 10).color(red)],
+            "a later span wins even where it starts first"
+        );
+        assert_eq!(
+            flatten_spans(&[Span::new(0, 10).color(red), Span::new(2, 5).color(blue).bold()]),
+            [Span::new(0, 2).color(red), Span::new(2, 5).color(blue).bold(), Span::new(5, 10).color(red)]
+        );
+        let mut seed = 7u64;
+        let mut next = |n: u64| { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); (seed >> 33) % n };
+        for _ in 0..300 {
+            let spans: Vec<Span> = (0..next(12)).map(|_| {
+                let a = next(40) as usize;
+                let mut s = Span::new(a, a + next(15) as usize);
+                match next(5) {
+                    0 => s = s.color(if next(2) == 0 { red } else { blue }),
+                    1 => s = s.bold(),
+                    2 => s = s.italic(),
+                    3 => s = s.bg(red, next(3) as f32),
+                    _ => s = s.mono().underline(blue),
+                }
+                s
+            }).collect();
+            assert_eq!(flatten_spans(&spans), naive(&spans), "{spans:?}");
+        }
+    }
+
+    #[test]
+    fn html_parsing_is_linear_on_hostile_input() {
+        let n = 200_000;
+        let cases = [
+            "<b>".repeat(n) + "x",
+            "<script>".to_owned() + &"</script".repeat(n),
+            "<p>".to_owned() + &"&".repeat(n * 4),
+            "<div><span>".repeat(n / 2) + &"</div>".repeat(n / 2),
+            "</b>".repeat(n),
+            "<ul><li>".repeat(n / 2) + "x",
+            "a<br>".repeat(n),
+            "<a href=\"".to_owned() + &"&#x6a;".repeat(n) + "\">x</a>",
+        ];
+        for html in &cases {
+            let t = std::time::Instant::now();
+            let e = TextEdit::from_html(html);
+            assert_invariants(&e, &html[..20]);
+            let _ = e.to_html();
+            // Debug builds parse these in well under a second; a quadratic path takes minutes.
+            assert!(t.elapsed().as_secs() < 10, "{} took {:?}", &html[..20], t.elapsed());
+        }
+    }
+
+    #[test]
+    fn html_links_keep_only_safe_schemes() {
+        for bad in [
+            "javascript:alert(1)", "JaVaScRiPt:alert(1)", " javascript:x", "java\tscript:x", "java\nscript:x",
+            "java&#x09;script:x", "&#106;avascript:x", "javascript&#58;x", "javascript&colon;x", "java&Tab;script:x",
+            "jav&#x0A;ascript:x", "\u{1}javascript:x", "vbscript:x", "data:text/html,x", "file:///etc/passwd",
+            "blob:https://a.b/x", "x-app-scheme:do",
+        ] {
+            let e = TextEdit::from_html(&format!("<a href=\"{bad}\">x</a><a href='{bad}'>y</a>"));
+            assert!(e.marks().iter().all(|m| !matches!(m.mark, Mark::Link(_))), "{bad:?} kept: {:?}", e.marks());
+            assert_eq!(e.text, "xy");
+        }
+        for (good, url) in [
+            ("https://a.b/c?d=1&amp;e=2", "https://a.b/c?d=1&e=2"),
+            ("HTTP://A.B", "HTTP://A.B"),
+            ("mailto:a@b.c", "mailto:a@b.c"),
+            ("tel:+1555", "tel:+1555"),
+            ("/relative/path", "/relative/path"),
+            ("#frag", "#frag"),
+        ] {
+            let e = TextEdit::from_html(&format!("<a href=\"{good}\">x</a>"));
+            assert_eq!(e.marks(), &[MarkRange::new(0..1, Mark::Link(url.into()))], "{good}");
+        }
+        let e = TextEdit::from_html("a&#0;b&#x1;c<pre>d&#0;\te</pre>");
+        assert_eq!(e.text, "abc\nd\te", "entities never decode to control characters");
+    }
+
+    #[test]
+    fn html_from_browsers_notes_slack_and_docs_round_trips() {
+        let round_trip = |e: &TextEdit, ctx: &str| {
+            let back = TextEdit::from_html(&e.to_html());
+            assert_eq!(
+                (&back.text, back.marks(), back.blocks(), back.soft_breaks()),
+                (&e.text, e.marks(), e.blocks(), e.soft_breaks()),
+                "{ctx} round trip"
+            );
+            assert_invariants(e, ctx);
+        };
+
+        let chrome = TextEdit::from_html(concat!(
+            "<meta charset='utf-8'><span style=\"color: rgb(0, 0, 0); font-family: Arial; font-weight: 700;\">Hello</span>",
+            "<span style=\"color: rgb(0, 0, 0);\"> world</span>",
+        ));
+        assert_eq!(chrome.text, "Hello world");
+        assert_eq!(marked(&chrome, &Mark::Bold), ["Hello"]);
+        round_trip(&chrome, "browser");
+
+        let notes = TextEdit::from_html(concat!(
+            "<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01//EN\">\n<html>\n<head>\n",
+            "<meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\">\n",
+            "<style type=\"text/css\">\np.p1 {margin: 0.0px 0.0px 0.0px 0.0px}\n</style>\n</head>\n<body>\n",
+            "<p class=\"p1\"><b>Bold</b> text</p>\n<p class=\"p1\"><br></p>\n",
+            "<ul class=\"ul1\">\n<li class=\"li1\">item one</li>\n<li class=\"li1\"><i>item two</i></li>\n</ul>\n",
+            "</body>\n</html>\n",
+        ));
+        assert_eq!(notes.text, "Bold text\n\nitem one\nitem two");
+        assert_eq!(notes.blocks(), &[Block::Paragraph, Block::Paragraph, Block::Bullet(0), Block::Bullet(0)]);
+        assert_eq!((marked(&notes, &Mark::Bold), marked(&notes, &Mark::Italic)), (vec!["Bold"], vec!["item two"]));
+        round_trip(&notes, "notes");
+
+        let slack = TextEdit::from_html(concat!(
+            "<meta charset='utf-8'><b data-stringify-type=\"bold\" style=\"color: rgb(29, 28, 29);\">bold</b>",
+            "<span style=\"color: rgb(29, 28, 29);\"> and </span><i data-stringify-type=\"italic\">it</i><span> </span>",
+            "<code data-stringify-type=\"code\" class=\"c-mrkdwn__code\">x()</code><br style=\"color: rgb(29, 28, 29);\">",
+            "<a target=\"_blank\" class=\"c-link\" data-stringify-link=\"https://a.b/c?d=1&amp;e=2\" ",
+            "href=\"https://a.b/c?d=1&amp;e=2\" rel=\"noopener noreferrer\">link</a>",
+        ));
+        assert_eq!(slack.text, "bold and it x()\nlink");
+        assert_eq!(slack.soft_breaks(), &[1]);
+        assert_eq!(marked(&slack, &Mark::Code), ["x()"]);
+        assert_eq!(marked(&slack, &Mark::Link("https://a.b/c?d=1&e=2".into())), ["link"]);
+        round_trip(&slack, "slack");
+
+        let docs = TextEdit::from_html(concat!(
+            "<meta charset=\"utf-8\"><b style=\"font-weight:normal;\" id=\"docs-internal-guid-1\">",
+            "<p dir=\"ltr\" style=\"line-height:1.38;margin-top:0pt;\"><span style=\"font-size:11pt;font-weight:700;\">Bold</span>",
+            "<span style=\"font-size:11pt;font-weight:400;\"> plain</span></p>",
+            "<ul style=\"margin-top:0;\"><li dir=\"ltr\" style=\"list-style-type:disc;\"><p dir=\"ltr\" role=\"presentation\">",
+            "<span style=\"font-style:italic;\">item</span></p></li></ul></b>",
+        ));
+        assert_eq!(docs.text, "Bold plain\nitem");
+        assert_eq!(docs.blocks(), &[Block::Paragraph, Block::Bullet(0)]);
+        assert_eq!((marked(&docs, &Mark::Bold), marked(&docs, &Mark::Italic)), (vec!["Bold"], vec!["item"]));
+        round_trip(&docs, "google docs");
+
+        let loose = TextEdit::from_html("<p>A</p>B<p>C<br></p>");
+        assert_eq!(loose.text, "A\nB\nC", "loose text gets its own line; a trailing <br> draws nothing");
+        round_trip(&loose, "loose");
+    }
+
+    #[test]
+    fn random_edits_keep_ranges_blocks_and_soft_breaks_consistent() {
+        const PIECES: [&str; 10] = ["a", "b ", "é", "🦀", "e\u{301}", "👩\u{200d}👩\u{200d}👧", "日本", "\n", "\t", " "];
+        for seed in 0..40u64 {
+            let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+            let mut next = |n: u64| { state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); (state >> 33) % n };
+            let mut e = TextEdit::from_html("<p>start <b>bold</b></p><ul><li>item</li></ul>");
+            let (mut clip, mut clip_html) = (String::new(), String::new());
+            for step in 0..300 {
+                let op = next(22);
+                let mods = Mods { shift: next(3) == 0, alt: next(4) == 0, ..Mods::default() };
+                match op {
+                    0..=3 => { let p = PIECES[next(PIECES.len() as u64) as usize]; e.key(&k(Key::Text(p.into())), None); }
+                    4 => { e.key(&KeyEvent { key: Key::Enter, mods }, None); }
+                    5 => { e.key(&KeyEvent { key: Key::Backspace, mods }, None); }
+                    6 => { e.key(&KeyEvent { key: Key::Delete, mods }, None); }
+                    7 => { e.key(&KeyEvent { key: if next(2) == 0 { Key::Left } else { Key::Right }, mods }, None); }
+                    8 => { e.key(&KeyEvent { key: if next(2) == 0 { Key::Home } else { Key::End }, mods }, None); }
+                    9 => { e.key(&KeyEvent { key: Key::Tab, mods: Mods { shift: mods.shift, ..Mods::default() } }, None); }
+                    10 => { e.key(&cmd(['b', 'i', 'u'][next(3) as usize]), None); }
+                    11 => e.toggle_mark([Mark::Code, Mark::Strike, Mark::Link(format!("https://e.x/{}", next(3)))][next(3) as usize].clone()),
+                    12 => {
+                        let l = next(6) as u8;
+                        e.set_block([Block::Paragraph, Block::Bullet(l), Block::Numbered(l), Block::Quote, Block::Code][next(5) as usize]);
+                    }
+                    13 => undo(&mut e, next(2) == 0),
+                    14 => {
+                        clip_html = e.selected_html();
+                        if let Some(c) = e.key(&cmd(if next(2) == 0 { 'x' } else { 'c' }), None).copy { clip = c; }
+                    }
+                    15 => { e.paste(&clip.clone()); }
+                    16 => { e.paste_html(&clip_html.clone(), &clip.clone()); }
+                    17 => {
+                        let p = PIECES[next(6) as usize];
+                        e.ime(&Ime::Preedit(p.into(), None));
+                        if next(2) == 0 { e.ime(&Ime::Commit(p.into())); }
+                    }
+                    18 => { let a = next(e.text.len() as u64 + 2) as usize; let f = next(e.text.len() as u64 + 2) as usize; e.set_selection(a, f); }
+                    19 => {
+                        // An app writes `text` and the caret directly, then the user types.
+                        if next(2) == 0 { let cut = next(e.text.len() as u64 + 1) as usize; let cut = TextEdit::clamp_char_boundary(&e.text, cut); e.text.truncate(cut); }
+                        else { e.text.push_str(PIECES[next(PIECES.len() as u64) as usize]); }
+                        e.anchor = next(e.text.len() as u64 + 3) as usize;
+                        e.focus = e.anchor;
+                        e.key(&k(Key::Text("z".into())), None);
+                    }
+                    20 => { e.key(&cmd('a'), None); }
+                    _ => { e.key(&KeyEvent { key: if next(2) == 0 { Key::Up } else { Key::Down }, mods }, None); }
+                }
+                assert_invariants(&e, &format!("seed {seed} step {step} op {op} text {:?}", e.text));
+                let _ = (e.to_html(), e.display(), e.paragraphs());
+            }
+        }
+    }
+
+    #[test]
+    fn copy_from_one_rich_field_pastes_marks_and_blocks_into_another() {
+        use crate::{Cx, El, Env, Runtime, TextStyle, col, text_input};
+        struct App { a: TextEdit, b: TextEdit, plain: TextEdit }
+        fn view(s: &App, _: &mut Cx<App>) -> El {
+            let st = TextStyle::new(14.0, 400.0);
+            col().size(320.0, 360.0)
+                .child(text_input(&s.a, st).key("a").size(300.0, 140.0).on_edit(|s: &mut App| &mut s.a))
+                .child(text_input(&s.b, st).key("b").size(300.0, 140.0).on_edit(|s: &mut App| &mut s.b))
+                .child(text_input(&s.plain, st).key("plain").size(300.0, 40.0).on_edit(|s: &mut App| &mut s.plain))
+        }
+        let mut a = TextEdit::from_html(
+            "<p>Hello <b>bold</b> <a href=\"https://example.com\">link</a></p><ul><li>one</li><li><i>two</i></li></ul><blockquote>q</blockquote>",
+        );
+        a.focused = true;
+        a.set_selection(0, a.text.len());
+        let m = crate::clipboard::memory();
+        let mut rt = Runtime::new(App { a, b: TextEdit::new("").rich(), plain: TextEdit::new("") }, view, (320.0, 360.0), Env::new(true, 1.0));
+        rt.use_clipboard(&m);
+        rt.frame(0.0);
+        rt.key(cmd('c'));
+        rt.frame(0.0);
+        let copied = m.content().unwrap();
+        assert_eq!(copied.text(), rt.state.a.text);
+        assert!(copied.html().is_some_and(|h| h.contains("<strong>bold</strong>") && h.contains("<ul>")), "{copied:?}");
+
+        rt.update(|s, _| { s.a.focused = false; s.b.focused = true; });
+        rt.frame(0.0);
+        rt.update(|_, tx| tx.request_paste());
+        rt.frame(0.0);
+        let (a, b) = (&rt.state.a, &rt.state.b);
+        assert_eq!((&b.text, b.marks(), b.blocks()), (&a.text, a.marks(), a.blocks()));
+
+        // Cut carries the formatting it removes.
+        rt.update(|s, _| s.b.set_selection(6, 10));
+        rt.key(cmd('x'));
+        rt.frame(0.0);
+        assert_eq!(rt.state.b.text, format!("Hello  link{}", &rt.state.a.text[15..]));
+        assert!(m.content().unwrap().html().is_some_and(|h| h.contains("<strong>bold</strong>")));
+
+        // A plain field pastes the text only and copies no HTML.
+        rt.update(|s, _| { s.b.focused = false; s.plain.focused = true; });
+        rt.frame(0.0);
+        rt.update(|_, tx| tx.request_paste());
+        rt.frame(0.0);
+        assert_eq!(rt.state.plain.text, "bold");
+        assert!(rt.state.plain.is_plain());
+        rt.update(|s, _| s.plain.set_selection(0, 4));
+        rt.key(cmd('c'));
+        rt.frame(0.0);
+        assert_eq!(m.content().unwrap().html(), None);
     }
 }

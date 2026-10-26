@@ -2243,8 +2243,15 @@ impl<S: 'static> Runtime<S> {
                 if target.is_some_and(|target| target != self.paste_target()) { return false; }
                 let hook = self.focused_input().and_then(|i| i.paste.clone());
                 let into_field = |state: &mut dyn Any, access: &crate::el::EditFn, tx: &mut Tx| {
-                    if hook.is_some_and(|hook| hook(state, &content, tx)) || !content.has_plain() { return EditOutcome::default(); }
-                    access(state).paste(content.text())
+                    if hook.is_some_and(|hook| hook(state, &content, tx)) { return EditOutcome::default(); }
+                    let edit = access(state);
+                    // A rich field keeps the paste's formatting. The HTML was sanitised when it
+                    // was read, and `from_html` keeps only its own safe subset anyway.
+                    if let Some(html) = content.html() && edit.is_rich() && !edit.is_secure() {
+                        return edit.paste_html(html, content.text());
+                    }
+                    if !content.has_plain() { return EditOutcome::default(); }
+                    edit.paste(content.text())
                 };
                 if self.with_focused_state(into_field, &mut one) {
                     self.events.push("paste field".into());
@@ -2330,12 +2337,32 @@ impl<S: 'static> Runtime<S> {
         if self.focus_key(ev, shown, one) { return true; }
         let input_handles = match &ev.key {
             crate::edit::Key::Function(_) | crate::edit::Key::Tab | crate::edit::Key::PageUp | crate::edit::Key::PageDown => false,
-            crate::edit::Key::Command(c) => matches!(c, 'a' | 'c' | 'x' | 'z' | 'b' | 'i' | 'u'),
+            crate::edit::Key::Command(c) => {
+                matches!(c, 'a' | 'c' | 'x' | 'z')
+                    || (matches!(c, 'b' | 'i' | 'u')
+                        && !ev.mods.shift
+                        && !ev.mods.alt
+                        && self.focused_input().is_some_and(|i| i.edit.is_rich() && !i.edit.is_secure()))
+            }
             _ => !ev.is_command_chord() || ev.control_binding().is_some(),
         };
         if input_handles {
             let layout = self.focused_layout();
-            if self.with_focused(|e| e.key(ev, layout.as_deref()), one) { return true; }
+            // A rich field copies its selection's formatting too, read before a cut removes it.
+            let mut html = None;
+            let copies = matches!(ev.key, crate::edit::Key::Command('c' | 'x'));
+            let handled = self.with_focused(|e| {
+                if copies && e.is_rich() && !e.is_secure() {
+                    html = Some(e.selected_html()).filter(|h| !h.is_empty());
+                }
+                e.key(ev, layout.as_deref())
+            }, one);
+            if let Some(html) = html
+                && let Some(text) = one.copy.as_ref().filter(|w| !w.is_secret()).map(|w| w.content().text().to_owned())
+            {
+                one.copy_rich(crate::ClipboardContent::new(text).with_html(html));
+            }
+            if handled { return true; }
         }
         if !app_first && let Some(f) = self.on_key && app_call!(f, &mut self.state, ev, one) {
             self.events.push(format!("key {:?}", ev.key));
@@ -4180,13 +4207,13 @@ impl<S: 'static> Runtime<S> {
     pub(crate) fn paste_target(&self) -> Option<String> {
         self.focused_input().filter(|i| i.access.is_some()).and(self.focused.clone())
     }
-    /// The paste target hears HTML and RTF: a field with `on_input_paste`, or a root
-    /// `on_paste_content` handler. Anything else (including a plain `on_paste`) reads only the
-    /// clipboard's text.
+    /// The paste target hears HTML and RTF: a field with `on_input_paste` or a rich
+    /// [`TextEdit`](crate::TextEdit), or a root `on_paste_content` handler. Anything else
+    /// (including a plain field or a plain `on_paste`) reads only the clipboard's text.
     pub(crate) fn paste_wants_rich(&self, target: Option<&str>) -> bool {
         match target {
             Some(path) => self.node(path).and_then(|n| n.input.as_deref()).or_else(|| self.virtual_inputs.get(path).map(Box::as_ref))
-                .is_some_and(|input| input.paste.is_some()),
+                .is_some_and(|input| input.paste.is_some() || (input.edit.is_rich() && !input.edit.is_secure())),
             None => self.app_paste_handler().is_some_and(|p| p.rich),
         }
     }

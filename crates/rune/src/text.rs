@@ -317,6 +317,7 @@ impl Span {
         self
     }
 
+    /// Weight 600.
     pub fn bold(mut self) -> Span {
         self.weight = Some(600.0);
         self
@@ -342,6 +343,7 @@ impl Span {
         self
     }
 
+    /// A rounded `color` background padded by `pad` points, as inline code draws.
     pub fn bg(mut self, color: Color, pad: f32) -> Span {
         self.bg = Some(color);
         self.bg_pad = pad;
@@ -366,43 +368,53 @@ pub(crate) fn flatten_spans(spans: &[Span]) -> Vec<Span> {
         return spans.iter().filter(|s| s.start < s.end).cloned().collect();
     }
     let mut bounds = Vec::with_capacity(spans.len() * 2);
-    for s in spans {
+    let mut order: Vec<usize> = Vec::with_capacity(spans.len());
+    for (i, s) in spans.iter().enumerate() {
         if s.start < s.end {
             bounds.push(s.start);
             bounds.push(s.end);
+            order.push(i);
         }
     }
     bounds.sort_unstable();
     bounds.dedup();
+    order.sort_by_key(|&i| spans[i].start);
+    // Sweep the elementary intervals, keeping the spans that cover the current one in input
+    // order so later spans still win, without rescanning every span per interval.
+    let mut active: Vec<usize> = Vec::new();
+    let mut next = 0;
     let mut out: Vec<Span> = Vec::with_capacity(bounds.len());
     for w in bounds.windows(2) {
         let (a, b) = (w[0], w[1]);
-        if a >= b {
-            continue;
+        active.retain(|&i| spans[i].end > a);
+        while next < order.len() && spans[order[next]].start <= a {
+            let i = order[next];
+            let at = active.partition_point(|&j| j < i);
+            active.insert(at, i);
+            next += 1;
         }
         let mut merged: Option<Span> = None;
-        for s in spans {
-            if s.start < s.end && s.start <= a && b <= s.end {
-                let m = merged.get_or_insert_with(|| Span::new(a as usize, b as usize));
-                if s.weight.is_some() {
-                    m.weight = s.weight;
-                }
-                m.mono |= s.mono;
-                if s.size.is_some() {
-                    m.size = s.size;
-                }
-                if s.color.is_some() {
-                    m.color = s.color;
-                }
-                if s.bg.is_some() {
-                    m.bg = s.bg;
-                    m.bg_pad = s.bg_pad;
-                }
-                if s.underline.is_some() {
-                    m.underline = s.underline;
-                }
-                m.italic |= s.italic;
+        for &i in &active {
+            let s = &spans[i];
+            let m = merged.get_or_insert_with(|| Span::new(a as usize, b as usize));
+            if s.weight.is_some() {
+                m.weight = s.weight;
             }
+            m.mono |= s.mono;
+            if s.size.is_some() {
+                m.size = s.size;
+            }
+            if s.color.is_some() {
+                m.color = s.color;
+            }
+            if s.bg.is_some() {
+                m.bg = s.bg;
+                m.bg_pad = s.bg_pad;
+            }
+            if s.underline.is_some() {
+                m.underline = s.underline;
+            }
+            m.italic |= s.italic;
         }
         if let Some(m) = merged {
             if let Some(last) = out.last_mut()

@@ -1017,7 +1017,7 @@ pub fn text(content: impl Into<String>) -> El {
 pub fn rich(content: impl Into<String>, spans: Vec<Span>) -> El {
     let mut e = text(content);
     if let Some(t) = &mut e.text {
-        t.spans = crate::text::flatten_spans(&spans);
+        t.spans = spans;
         t.wrap = true;
     }
     e
@@ -1040,6 +1040,9 @@ pub fn canvas(shape: Shape) -> El {
 
 /// A text field showing `edit`; route edits back with `.on_edit(|s| &mut s.field)`.
 pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
+    // An app may have assigned `edit.text` directly: clamp stale marks, blocks and caret to it.
+    let mut edit = edit.clone();
+    edit.sync_invariants();
     let (content, _) = edit.display();
     let mut e = text(content).font(style);
     e.role = "textbox";
@@ -1048,7 +1051,7 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
     }
     e.input = Some(Box::new(InputSpec {
         animate_layout: false,
-        edit: edit.clone(),
+        edit,
         placeholder: String::new(),
         placeholder_color: Color::WHITE.alpha(0.4),
         caret: Color::WHITE,
@@ -2117,6 +2120,15 @@ impl El {
     }
     pub(crate) fn sync_input_rich(&mut self) {
         let (Some(inp), Some(t)) = (&self.input, &mut self.text) else { return };
+        t.rich_style = inp.rich_style;
+        if inp.edit.is_plain() && inp.decorations.is_empty() {
+            // A plain field lays out and draws exactly as before rich editing existed.
+            t.spans.clear();
+            t.strikes.clear();
+            t.blocks.clear();
+            t.soft_breaks.clear();
+            return;
+        }
         let (mut base_spans, strikes, rich_links, blocks) =
             inp.edit.rich_display_specs(t.style, inp.rich_style);
         for d in &inp.decorations {
@@ -2137,7 +2149,6 @@ impl El {
         t.strikes = strikes;
         t.blocks = blocks;
         t.soft_breaks = inp.edit.soft_breaks.clone();
-        t.rich_style = inp.rich_style;
         // Replace links generated from `Mark::Link` while keeping any explicit `.link(...)` calls.
         t.links = rich_links;
     }

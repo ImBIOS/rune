@@ -25,21 +25,28 @@ struct ActiveMark {
     start: usize,
 }
 
-/// Safe URL check for `<a href="...">`: rejects executable or script schemes.
+/// Safe URL check for `<a href="...">`: allows `http:`, `https:`, `mailto:` and `tel:`, and
+/// scheme-less URLs. Browsers drop ASCII tabs and newlines anywhere in a URL and leading
+/// controls and spaces, so `java\tscript:` is checked as `javascript:`; anything else with a
+/// scheme (`javascript:`, `data:`, `file:`, app-specific schemes) is rejected.
 fn is_safe_href(url: &str) -> bool {
-    let trimmed = url.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let lower: String = trimmed
+    let cleaned: String = url
         .chars()
         .filter(|c| !c.is_control() && !c.is_whitespace())
-        .take(24)
+        .take(64)
         .map(|c| c.to_ascii_lowercase())
         .collect();
-    !lower.starts_with("javascript:")
-        && !lower.starts_with("vbscript:")
-        && !lower.starts_with("data:")
+    if cleaned.is_empty() {
+        return false;
+    }
+    let scheme_len = cleaned
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+        .unwrap_or(cleaned.len());
+    if !cleaned[scheme_len..].starts_with(':') {
+        // No scheme: a relative path, `www.example.com` or `#fragment`.
+        return true;
+    }
+    matches!(&cleaned[..scheme_len], "http" | "https" | "mailto" | "tel")
 }
 
 /// Decodes HTML entities (`&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`, `&nbsp;`, `&#123;`, `&#x1F600;`).
@@ -52,12 +59,15 @@ pub(crate) fn decode_entities(input: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         rest = &rest[amp + 1..];
-        let Some(semi) = rest.find(';') else {
+        // Entities are short: look for `;` in the next 33 bytes only, so a run of bare `&`s
+        // stays linear.
+        let window = &rest.as_bytes()[..rest.len().min(33)];
+        let Some(semi) = window.iter().position(|&b| b == b';') else {
             out.push('&');
             continue;
         };
         let entity = &rest[..semi];
-        if entity.is_empty() || entity.len() > 32 || entity.contains(char::is_whitespace) {
+        if entity.is_empty() || entity.contains(char::is_whitespace) {
             out.push('&');
             continue;
         }
@@ -82,6 +92,10 @@ pub(crate) fn decode_entities(input: &str) -> String {
                 "ldquo" => Some('“'),
                 "rdquo" => Some('”'),
                 "bull" => Some('•'),
+                // Browsers decode these in an `href` too, so `javascript&colon;` is still a scheme.
+                "colon" => Some(':'),
+                "Tab" => Some('\t'),
+                "NewLine" => Some('\n'),
                 _ => None,
             }
         };
@@ -207,6 +221,8 @@ fn parse_style_marks(style: &str, add: &mut Vec<Mark>, remove: &mut Vec<Mark>) {
     }
 }
 
+const MAX_DEPTH: usize = 512;
+
 struct TagFrame {
     tag: String,
     added_marks: Vec<Mark>,
@@ -220,6 +236,8 @@ pub(crate) fn parse_html(html: &str) -> TextEdit {
     let mut soft_breaks: Vec<u32> = Vec::new();
 
     let mut stack: Vec<TagFrame> = Vec::new();
+    // Open frames per tag name, so a stray closing tag never scans the whole stack.
+    let mut open_tags: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut active_marks: Vec<ActiveMark> = Vec::new();
     let mut list_stack: Vec<ListKind> = Vec::new();
     let mut in_pre: usize = 0;
@@ -296,6 +314,26 @@ pub(crate) fn parse_html(html: &str) -> TextEdit {
         *line_has_content = false;
     };
 
+    let push_br = |text: &mut String,
+                   blocks: &mut Vec<Block>,
+                   soft_breaks: &mut Vec<u32>,
+                   active: &mut [ActiveMark],
+                   marks: &mut Vec<MarkRange>,
+                   in_pre: usize| {
+        flush_active_marks(active, marks, text.len(), in_pre);
+        let blk = blocks.last().copied().unwrap_or(Block::Paragraph);
+        text.push('\n');
+        blocks.push(blk);
+        if in_pre == 0 {
+            soft_breaks.push((blocks.len() - 1) as u32);
+        }
+        for a in active.iter_mut() {
+            a.start = text.len();
+        }
+    };
+    // A `<br>` (text and block counts where it fell) waiting to see whether text follows it.
+    let mut deferred_br: Option<(usize, usize)> = None;
+
     let mut i = 0;
     let bytes = html.as_bytes();
     while i < bytes.len() {
@@ -331,13 +369,17 @@ pub(crate) fn parse_html(html: &str) -> TextEdit {
                 continue;
             }
             let is_closing = raw_tag.starts_with('/');
-            let self_closing = raw_tag.ends_with('/');
             let body = raw_tag.trim_start_matches('/').trim_end_matches('/').trim();
             let tag_end = body
                 .find(|c: char| c.is_whitespace() || c == '/')
                 .unwrap_or(body.len());
             let tag = body[..tag_end].to_ascii_lowercase();
             let attrs = &body[tag_end..];
+            let self_closing = raw_tag.ends_with('/')
+                || matches!(
+                    tag.as_str(),
+                    "area" | "base" | "col" | "embed" | "hr" | "img" | "input" | "link" | "meta" | "source" | "track" | "wbr"
+                );
 
             if !is_closing && matches!(tag.as_str(), "script" | "style" | "head") {
                 if !self_closing {
@@ -351,10 +393,9 @@ pub(crate) fn parse_html(html: &str) -> TextEdit {
                             && html.is_char_boundary(search + pat.len())
                             && html[search..search + pat.len()].eq_ignore_ascii_case(&pat)
                         {
-                            if let Some(gt) = html[search + pat.len()..].find('>') {
-                                found = Some(search + pat.len() + gt + 1);
-                                break;
-                            }
+                            // No `>` after this means none after any later match either.
+                            found = html[search + pat.len()..].find('>').map(|gt| search + pat.len() + gt + 1);
+                            break;
                         }
                         search += 1;
                     }
@@ -364,21 +405,29 @@ pub(crate) fn parse_html(html: &str) -> TextEdit {
             }
 
             if !is_closing && tag == "br" {
-                let pos = text.len();
-                flush_active_marks(&mut active_marks, &mut marks, pos, in_pre);
-                let blk = blocks.last().copied().unwrap_or(Block::Paragraph);
-                text.push('\n');
-                blocks.push(blk);
-                if in_pre == 0 {
-                    soft_breaks.push((blocks.len() - 1) as u32);
+                if deferred_br == Some((text.len(), blocks.len())) {
+                    push_br(&mut text, &mut blocks, &mut soft_breaks, &mut active_marks, &mut marks, in_pre);
+                    line_has_block = true;
+                    line_open = true;
                 }
-                let new_pos = text.len();
-                for a in &mut active_marks {
-                    a.start = new_pos;
+                deferred_br = None;
+                if in_pre > 0 {
+                    push_br(&mut text, &mut blocks, &mut soft_breaks, &mut active_marks, &mut marks, in_pre);
+                    line_has_content = false;
+                } else {
+                    // A `<br>` only breaks the line when something follows it in the same block,
+                    // as browsers draw it: `<p>A<br></p>` is one line, `<p><br></p>` one blank line.
+                    deferred_br = Some((text.len(), blocks.len()));
+                    line_has_block = true;
+                    line_open = true;
+                    line_has_content = true;
                 }
-                line_has_block = true;
-                line_open = true;
-                line_has_content = false;
+                continue;
+            }
+
+            // Deeper nesting than any real document keeps its text but not its tags, so a flood of
+            // opening tags can't grow the stack without bound.
+            if !is_closing && !self_closing && stack.len() >= MAX_DEPTH {
                 continue;
             }
 
@@ -386,17 +435,17 @@ pub(crate) fn parse_html(html: &str) -> TextEdit {
                 match tag.as_str() {
                     "ul" => {
                         list_stack.push(ListKind::Bullet);
-                        if !line_has_content {
-                            line_open = true;
-                        } else {
+                        // The first item takes a line still waiting for content (`<li><ul>`), but
+                        // never a finished one, even if it was blank (`<p></p><ul>`).
+                        if line_has_content {
                             line_open = false;
                         }
                     }
                     "ol" => {
                         list_stack.push(ListKind::Numbered);
-                        if !line_has_content {
-                            line_open = true;
-                        } else {
+                        // The first item takes a line still waiting for content (`<li><ul>`), but
+                        // never a finished one, even if it was blank (`<p></p><ul>`).
+                        if line_has_content {
                             line_open = false;
                         }
                     }
@@ -480,6 +529,9 @@ pub(crate) fn parse_html(html: &str) -> TextEdit {
                 }
                 if let Some(style) = extract_attr(attrs, "style") {
                     parse_style_marks(&style, &mut to_add, &mut to_suppress);
+                    // The element's own style wins over its tag: Google Docs wraps a whole
+                    // paste in `<b style="font-weight:normal">`.
+                    to_add.retain(|m| !to_suppress.iter().any(|r| r.same_kind(m)));
                 }
 
                 let pos = text.len();
@@ -524,14 +576,19 @@ pub(crate) fn parse_html(html: &str) -> TextEdit {
                 }
 
                 if !self_closing {
+                    *open_tags.entry(tag.clone()).or_default() += 1;
                     stack.push(frame);
                 }
             } else {
                 // Closing tag
                 let pos = text.len();
-                if let Some(frame_idx) = stack.iter().rposition(|f| f.tag == tag) {
+                let open = open_tags.get(&tag).is_some_and(|&n| n > 0);
+                if let Some(frame_idx) = open.then(|| stack.iter().rposition(|f| f.tag == tag)).flatten() {
                     while stack.len() > frame_idx {
                         let frame = stack.pop().unwrap();
+                        if let Some(n) = open_tags.get_mut(&frame.tag) {
+                            *n -= 1;
+                        }
                         for m in frame.added_marks.into_iter().rev() {
                             if let Some(idx) = active_marks.iter().rposition(|a| a.mark == m) {
                                 let ended = active_marks.remove(idx);
@@ -604,7 +661,7 @@ pub(crate) fn parse_html(html: &str) -> TextEdit {
                         line_has_block = true;
                         line_open = false;
                         line_has_content = false;
-                    } else {
+                    } else if c == '\t' || !c.is_control() {
                         text.push(c);
                         line_has_block = true;
                         line_open = false;
@@ -613,8 +670,7 @@ pub(crate) fn parse_html(html: &str) -> TextEdit {
                 }
             } else {
                 // Outside `<pre>`: ignore pure inter-block whitespace if we're between closed blocks and a `<` follows
-                if !line_open && decoded.chars().all(char::is_whitespace) && i < bytes.len() && (!line_has_block || line_has_content) {
-                    // Wait: if we just closed `<p>foo</p>\n  <p>bar</p>`, `line_open` is false and `decoded` is `\n  `.
+                if !line_open && decoded.chars().all(char::is_whitespace) && (!line_has_block || line_has_content) {
                     continue;
                 }
                 if line_open && !line_has_content && decoded.chars().all(char::is_whitespace) && i < bytes.len() && html[i..].starts_with('<') {
@@ -634,26 +690,39 @@ pub(crate) fn parse_html(html: &str) -> TextEdit {
                 }
                 if !line_open && !decoded.is_empty() && (!line_has_block || line_has_content) {
                     let blk = current_default_block(&list_stack, in_pre, in_quote, in_li);
-                    if line_has_block {
-                        // Loose text after a closed block tag (e.g. `<p>A</p>B`)
-                        // Wait: if `active_marks` is non-empty, we are inside an inline tag like `<b>A</b> B`!
-                        // Only start a new paragraph if we're NOT inside an inline tag and the previous block closed.
-                        if stack.iter().all(|f| matches!(f.tag.as_str(), "ul" | "ol" | "li" | "blockquote" | "body" | "html")) {
-                            let pos = text.len();
-                            let line_start = text.rfind('\n').map_or(0, |k| k + 1);
-                            if pos > line_start && !line_has_content {
-                                // shouldn't happen
-                            }
+                    if !line_has_block {
+                        if let Some(last) = blocks.last_mut() {
+                            *last = blk;
                         }
-                    } else if let Some(last) = blocks.last_mut() {
-                        *last = blk;
                         line_has_block = true;
                         line_open = true;
+                    } else if !decoded.chars().all(char::is_whitespace) {
+                        // Loose text after a closed block (`<p>A</p>B`) starts its own line.
+                        start_new_paragraph(
+                            &mut text,
+                            &mut blocks,
+                            &mut active_marks,
+                            &mut marks,
+                            &mut line_has_block,
+                            &mut line_open,
+                            &mut line_has_content,
+                            blk,
+                            in_pre,
+                        );
                     }
                 }
                 // Collapse ASCII whitespace runs (newlines/tabs/spaces) to single spaces in HTML flow
-                let line_start = text.rfind('\n').map_or(0, |k| k + 1);
-                let mut prev_space = text.len() == line_start || text.ends_with(' ');
+                if decoded.chars().all(char::is_whitespace) {
+                    if deferred_br == Some((text.len(), blocks.len())) {
+                        continue;
+                    }
+                } else {
+                    if deferred_br == Some((text.len(), blocks.len())) {
+                        push_br(&mut text, &mut blocks, &mut soft_breaks, &mut active_marks, &mut marks, in_pre);
+                    }
+                    deferred_br = None;
+                }
+                let mut prev_space = text.is_empty() || text.ends_with('\n') || text.ends_with(' ');
                 for ch in decoded.chars() {
                     if ch == '\u{00a0}' {
                         text.push('\u{00a0}');
@@ -669,7 +738,7 @@ pub(crate) fn parse_html(html: &str) -> TextEdit {
                             line_open = true;
                             line_has_content = true;
                         }
-                    } else {
+                    } else if !ch.is_control() {
                         text.push(ch);
                         prev_space = false;
                         line_has_block = true;
@@ -842,16 +911,22 @@ fn serialize_inline(edit: &TextEdit, range: Range<usize>, out: &mut String) {
     bounds.sort_unstable();
     bounds.dedup();
 
+    // `overlapping` is sorted by start (as `marks()` is): sweep it instead of rescanning.
+    let mut covering: Vec<&MarkRange> = Vec::new();
+    let mut next = 0;
     for w in bounds.windows(2) {
         let (a, b) = (w[0], w[1]);
         if a >= b {
             continue;
         }
-        let mut active: Vec<&Mark> = overlapping
-            .iter()
-            .filter(|m| m.start <= a && b <= m.end)
-            .map(|m| &m.mark)
-            .collect();
+        covering.retain(|m| m.end > a);
+        while next < overlapping.len() && overlapping[next].start <= a {
+            if overlapping[next].end > a {
+                covering.push(overlapping[next]);
+            }
+            next += 1;
+        }
+        let mut active: Vec<&Mark> = covering.iter().map(|m| &m.mark).collect();
         // Canonical nesting order: Link, Bold, Italic, Underline, Strike, Code
         active.sort_by_key(|m| match m {
             Mark::Link(_) => 0u8,
