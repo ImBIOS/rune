@@ -1633,10 +1633,17 @@ impl<S: 'static> Runtime<S> {
         if self.window_focused != Some(focused) {
             self.window_focused = Some(focused);
             if let Some(f) = self.on_focus { self.update(|s, tx| f(s, focused, tx)); }
+            // Deliver the cancelled Up before FocusLost can commit a view that removes its
+            // grip (or the focus callback clears the app's drag state).
+            if !focused { self.cancel_pointer(); }
             self.queue.push(Action::WindowFocus(focused));
             if !focused {
                 self.keys_lost();
-                if self.cancel_drag() { self.leave_after_release(); }
+                // Losing the window ends hover, rather than waiting out an exit grace.
+                self.hover_pending.clear();
+                for path in std::mem::take(&mut self.hover_shown) {
+                    self.queue.push(Action::HoverChange(path, false));
+                }
             }
         }
         if !focused { self.wheel_lost(); }
@@ -2706,6 +2713,13 @@ impl<S: 'static> Runtime<S> {
             }
         };
         let live_only = std::mem::take(&mut one.live_only);
+        if live_only && live_label.is_some() {
+            // A handler that asks for no commit cannot change another handler's animation.
+            one.instant = false;
+            one.settle = false;
+            one.motion = None;
+            one.color_motion = None;
+        }
         merge(tx, one);
         if ran && live_only && let Some(label) = live_label {
             return self.skip_view(label);
@@ -3381,7 +3395,13 @@ impl<S: 'static> Measurement<'_, S> {
                         None => crate::key_diagnostics::warn_once(&duplicates),
                     }
                 }
-                v.set_keys(keys, self.commits, (!pinned).then_some(offset))
+                // Offset-driven reorder already keeps each row where it was drawn. Anchoring
+                // to the formerly first row as it changes slots would scroll the entire list
+                // a second time. Inserts/removals still preserve the reader's anchor.
+                let reorder = keys.len() == v.keys.len() && keys.iter().all(|key| v.has(key))
+                    && self.nodes.iter().any(|n| n.vis.offset != [0.0; 2]
+                        && n.parent.is_some_and(|p| self.nodes[p].path == path));
+                v.set_keys(keys, self.commits, (!pinned && !reorder).then_some(offset))
             };
             v.anchor = anchor;
             let delta = v.anchor_delta();
@@ -4899,7 +4919,8 @@ impl<S: 'static> Runtime<S> {
             let shown = self.hover_shown.contains(&path);
             // A held button, or a press until the pointer next moves, never starts the wait
             // to report an enter.
-            let want = self.hover_within.contains(&path) && (shown || self.capture.is_none() && !self.hover_paused);
+            let want = self.window_focused != Some(false) && self.hover_within.contains(&path)
+                && (shown || self.capture.is_none() && !self.hover_paused);
             let pending = self.hover_pending.iter().position(|p| p.0 == path);
             if want == shown {
                 if let Some(i) = pending { self.hover_pending.remove(i); }
@@ -5287,7 +5308,7 @@ impl<S: 'static> Runtime<S> {
         self.seen.clear();
         self.seen.resize(n_nodes, false);
         self.stuck.clear();
-        self.sticky_frame.clear();
+            self.sticky_frame.clear();
         if self.has_sticky {
             self.stuck.resize(n_nodes, 0.0);
             self.sticky_frame.resize(n_nodes, sticky::UNBOUNDED);
@@ -5407,7 +5428,8 @@ impl<S: 'static> Runtime<S> {
                 }
                 if let Some(p) = n.parent {
                     self.cache_paint_scratch[p] = self.cache_paint_scratch[p].wrapping_add(self.cache_paint_scratch[i]);
-                    self.cache_live_scratch[p] |= self.cache_live_scratch[i];
+                    // A lifted descendant draws outside this raster; don't elide its inputs.
+                    self.cache_live_scratch[p] |= self.cache_live_scratch[i] || n.vis.raise;
                     self.cache_check_scratch[p] |= self.cache_check_scratch[i] || !n.live.is_empty();
                 }
             }
@@ -5514,6 +5536,30 @@ impl<S: 'static> Runtime<S> {
             if raised {
                 // Out of its ancestors' layers: their opacity applies directly instead.
                 pinh.paint_opacity = pinh.opacity;
+                pinh.paint_clip = pinh.clip;
+                pinh.paint_fade = pinh.fade;
+                pinh.paint_fade_origin = pinh.fade_origin;
+                pinh.in_cache = false;
+                pinh.skip_paint = false;
+                // Rounded clips consumed by an ancestor's isolation layer must be reapplied
+                // outside that layer too. Reopen only the masks, not its opacity or blur group.
+                pinh.rounded = None;
+                let mut parent = node_parent;
+                while let Some(p) = parent {
+                    let ancestor = &self.nodes[p];
+                    if let Some(radius) = ancestor.vis.clip_radius {
+                        let [x, y, w, h] = self.drawn[p].map(|v| v * s);
+                        let radius = (radius * self.inh_scratch[p].scale * s).min(w.min(h) * 0.5);
+                        let radius = if ancestor.vis.continuous_corners { -radius } else { radius };
+                        let start = self.instances.len();
+                        let mut marker = Instance::begin_layer([x, y, w, h], pinh.clip,
+                            crate::render::LayerSpec { clip_radius: radius, ..Default::default() });
+                        marker.round_clip(radius);
+                        self.instances.push(marker);
+                        layers.push((p, start, self.surfaces.len()));
+                    }
+                    parent = ancestor.parent;
+                }
             }
             if lift {
                 // Keep the destination's clips (consumed ones included) and offsets. Drop its
@@ -9534,6 +9580,26 @@ mod tests {
         rt.pointer_up(40.0, 10.0);
         rt.frame(0.0);
         assert_eq!(rt.state.iter().filter(|d| d.0 == Phase::Up).count(), 1, "the release after it does nothing");
+    }
+
+    #[test]
+    fn native_escape_with_a_logical_fallback_cancels_the_drag() {
+        fn view(_: &Vec<bool>, _: &mut Cx<Vec<bool>>) -> El {
+            el().size(100.0, 100.0).on_drag(|s: &mut Vec<bool>, d, _| {
+                if d.phase == Phase::Up { s.push(d.cancelled()); }
+            })
+        }
+        let mut rt = Runtime::new(Vec::new(), view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.pointer_down(10.0, 10.0);
+        rt.frame(0.0);
+        rt.physical_key_input(crate::PhysicalInput::Key { key: crate::PhysicalKeyCode::Escape,
+            mods: crate::Mods::default(), pressed: true, repeat: false }, KeyEvent { key: crate::Key::Escape, mods: crate::Mods::default() });
+        rt.frame(0.0);
+        assert_eq!(rt.state, [true]);
+        rt.pointer_up(10.0, 10.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state, [true]);
     }
 
     #[derive(Default)]

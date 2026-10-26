@@ -148,6 +148,7 @@ pub struct DiffState {
     by_line: HashMap<(u32, Side, u32), Vec<u32>>,
     selection: Option<LineRange>,
     selecting: bool,
+    selection_at_press: Option<LineRange>,
     /// The press was on the one selected line: it clears the selection unless it drags.
     unselect: bool,
     shift: bool,
@@ -203,6 +204,7 @@ impl DiffState {
             by_line: HashMap::new(),
             selection: None,
             selecting: false,
+            selection_at_press: None,
             unselect: false,
             shift: false,
             copy_side: Side::New,
@@ -420,6 +422,7 @@ impl DiffState {
     /// A press on line `at`'s number: a new selection, or with Shift held one extended to it.
     /// Pressing the one selected line clears it on release, unless the press drags.
     pub(crate) fn press_line(&mut self, file: usize, at: LineRef) {
+        self.selection_at_press = self.selection;
         let sel = match self.selection {
             Some(s) if self.shift && s.file == file => LineRange { end: at, ..s },
             _ => LineRange::line(file, at),
@@ -439,11 +442,20 @@ impl DiffState {
 
     /// The press on the line numbers ended: the selection it leaves.
     pub(crate) fn release_line(&mut self) -> Option<LineRange> {
+        self.selection_at_press = None;
         if std::mem::take(&mut self.unselect) {
             self.selection = None;
         }
         self.selecting = false;
         self.selection
+    }
+
+    pub(crate) fn cancel_line(&mut self) {
+        if self.selecting {
+            self.selection = self.selection_at_press.take();
+        }
+        self.selecting = false;
+        self.unselect = false;
     }
 
     pub(crate) fn copy_side(&self) -> Side {
@@ -963,6 +975,19 @@ mod tests {
         s.press_line(0, one.start);
         s.drag_to(0, LineRef::new(Side::New, 2));
         assert_eq!(s.release_line(), Some(LineRange { end: LineRef::new(Side::New, 2), ..one }));
+    }
+
+    #[test]
+    fn cancelling_a_gutter_drag_restores_the_selection_before_the_press() {
+        let mut s = sample();
+        for original in [None, Some(LineRange::line(0, LineRef::new(Side::Old, 2)))] {
+            s.set_selection(original);
+            s.press_line(0, LineRef::new(Side::New, 1));
+            s.drag_to(0, LineRef::new(Side::New, 3));
+            s.cancel_line();
+            assert_eq!(s.selection(), original);
+            assert!(!s.selecting && !s.unselect);
+        }
     }
 
     #[test]

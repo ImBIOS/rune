@@ -170,6 +170,23 @@ mod reorder {
         drop_reordered(1);
         drop_reordered(2);
     }
+
+    #[test]
+    fn a_drop_mid_spring_in_five_thousand_virtual_rows_preserves_the_drawn_position() {
+        let mut rt = Runtime::new(S { order: (0..5000).collect(), shift: vec![0.0; 5000], list: 2 }, view, (200.0, 400.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.update(|s, _| { s.shift[0] = 85.0; s.shift[1] = -40.0; s.shift[2] = -40.0; });
+        rt.frame(1.0 / 120.0);
+        rt.frame(1.0 / 120.0);
+        let before: Vec<_> = ["r0", "r1", "r2"].map(|k| y(&rt, k)).into();
+        rt.update(|s, _| { s.order.remove(0); s.order.insert(2, 0); s.shift.fill(0.0); });
+        rt.frame(0.0);
+        for (i, key) in ["r0", "r1", "r2"].iter().enumerate() {
+            assert!((y(&rt, key) - before[i]).abs() < 0.1, "{key} jumped on drop: {} -> {}", before[i], y(&rt, key));
+        }
+        for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        assert_eq!([y(&rt, "r0"), y(&rt, "r1"), y(&rt, "r2")], [80.0, 0.0, 40.0]);
+    }
 }
 
 mod drag_animated {
@@ -210,6 +227,29 @@ mod drag_animated {
         assert_eq!(moved_after_a_drag(false), 40.0, "direct manipulation");
         let y = moved_after_a_drag(true);
         assert!(y > 0.0 && y < 40.0, "on its spring: {y}");
+    }
+
+    #[test]
+    fn a_live_only_drag_cannot_make_another_handlers_commit_instant() {
+        fn live_view(s: &S, _: &mut Cx<S>) -> El {
+            col().w_full().h_full()
+                .child(el().size(100.0, 40.0).on_drag(|_: &mut S, d, tx| {
+                    if d.phase == Phase::Move { tx.live_only(); }
+                }))
+                .child(el().key("other").size(100.0, 40.0).offset(0.0, s.shift).motion(Spring::new(0.3, 0.0)))
+        }
+        let mut rt = Runtime::new(S { animated: false, shift: 0.0 }, live_view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.check_live_only(false);
+        rt.on_key = Some(|s, _, tx| { s.shift = 40.0; tx.motion(Spring::new(0.6, 0.0)); true });
+        rt.frame(0.0);
+        rt.pointer_down(20.0, 20.0);
+        rt.frame(0.0);
+        rt.pointer_move(20.0, 30.0);
+        rt.key(rune::KeyEvent { key: rune::Key::Enter, mods: rune::Mods::default() });
+        rt.frame(1.0 / 60.0);
+        let shift = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("other")).unwrap().rect[1] - 40.0;
+        assert!(shift > 0.0 && shift < 10.0, "the key's spring must survive a live-only Move: {shift}");
+        assert_eq!(rt.live_only_events(), 1);
     }
 }
 

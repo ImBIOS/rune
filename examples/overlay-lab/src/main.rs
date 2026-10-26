@@ -14,11 +14,12 @@ struct State {
     expanded: bool,
     hovered: String,
     selection: Option<[f32; 4]>,
+    selection_at_press: Option<[f32; 4]>,
     pointer: rune::Live<[f32; 2]>,
     handles: Arc<Mutex<Handles>>,
 }
 fn init() -> State {
-    State { underlay: false, hit_only: false, clicks: 0, picker: false, expanded: false, hovered: String::new(), selection: None, pointer: rune::Live::new([160.0, 100.0]), handles: Arc::default() }
+    State { underlay: false, hit_only: false, clicks: 0, picker: false, expanded: false, hovered: String::new(), selection: None, selection_at_press: None, pointer: rune::Live::new([160.0, 100.0]), handles: Arc::default() }
 }
 fn show_picker(s: &mut State) {
     let handles = s.handles.lock().unwrap();
@@ -53,6 +54,8 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
             .on_pointer_move(|s: &mut State, p| { s.pointer.set([p.x, p.y]); })
             .on_drag(|s: &mut State, drag, tx| {
                 tx.instant();
+                if drag.phase == Phase::Down { s.selection_at_press = s.selection; }
+                if drag.cancelled() { s.selection = s.selection_at_press.take(); return; }
                 let (x, y) = (drag.x.min(drag.start_x), drag.y.min(drag.start_y));
                 s.selection = Some([x, y, (drag.x - drag.start_x).abs(), (drag.y - drag.start_y).abs()]);
                 if drag.phase == Phase::Up { eprintln!("overlay-lab selection {:?}", s.selection); }

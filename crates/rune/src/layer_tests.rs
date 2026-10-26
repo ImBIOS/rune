@@ -11,6 +11,26 @@ fn group(bounds: [f32; 4], opacity: f32, color: [f32; 4]) -> Vec<Instance> {
         Instance::end_layer()]
 }
 
+#[test]
+fn raised_children_of_cached_clipped_groups_stay_visible_and_clipped() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        el().size(32.0, 32.0).child(el().size(16.0, 16.0).clip_rounded(8.0).cache().opacity(0.5)
+            .child(el().size(24.0, 24.0).raise().fill(Color::WHITE)))
+    }
+    let gpu = Gpu::headless();
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let target = Offscreen::new(&gpu.device, 32, 32);
+    let mut rt = Runtime::new((), view, (32.0, 32.0), Env::new(true, 1.0));
+    for _ in 0..3 {
+        rt.frame(0.0);
+        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (32, 32));
+        let out = pixels(&gpu, &renderer, &target);
+        near(&out[(8 * 32 + 8) * 4..(8 * 32 + 9) * 4], rgba([0.5; 4]));
+        near(&out[(8 * 32 + 20) * 4..(8 * 32 + 21) * 4], [0; 4]);
+        near(&out[0..4], [0; 4]);
+    }
+}
+
 pub(super) fn pixels(gpu: &Gpu, renderer: &Renderer, target: &Offscreen) -> Vec<u8> {
     let mut enc = gpu.device.create_command_encoder(&Default::default());
     renderer.draw(&mut enc, &target.view, [0.0; 4]);

@@ -382,6 +382,10 @@ impl Tx {
     /// Animate this change even where the runtime would apply it at once, as it does a drag's
     /// moves: the rows a dragged row passes step aside on their springs, while the dragged row
     /// follows the pointer exactly with `El::offset_motion(Anim::INSTANT)`.
+    /// This clears only this handler's instant flag; another handler's `instant()` in the
+    /// same frame still wins. It neither requests a commit after `live_only()` nor overrides
+    /// `settle()`. `motion()` still chooses the layout spring. The last call to `instant()`
+    /// or `animated()` in this handler wins.
     pub fn animated(&mut self) {
         self.instant = false;
     }
@@ -3129,6 +3133,10 @@ impl El {
         self.on_double_press = Some(Rc::new(move |s, tx| f(downcast::<S>(s), tx)));
         self
     }
+    /// Receives Down, Move, then Up. Up also ends a cancelled gesture: always check
+    /// [`Drag::cancelled`] before committing a drop or notifying an application callback.
+    /// Save the original value on Down (in state, or [`Drag::data`]) and restore it on cancel.
+    /// Move commits are instant unless the handler calls [`Tx::animated`].
     pub fn on_drag<S: 'static>(mut self, f: impl Fn(&mut S, &mut Drag, &mut Tx) + 'static) -> Self {
         self.on_drag = Some(Rc::new(move |s, d, tx| f(downcast::<S>(s), d, tx)));
         self

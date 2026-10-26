@@ -165,6 +165,25 @@ fn a_header_click_sorts_and_shows_the_direction() {
 }
 
 #[test]
+fn cancelling_a_column_resize_restores_the_original_width_policy() {
+    for initial in [None, Some(110.0)] {
+        let mut rt = runtime(App::new(20, false));
+        if let Some(w) = initial { rt.update(|s, _| s.table.set_column_width("size", w)); rt.frame(0.0); }
+        let handle = find(&rt, |e| e.label.as_deref() == Some("Resize Size")).remove(0).rect;
+        let (x, y) = (handle[0] + handle[2] / 2.0, handle[1] + handle[3] / 2.0);
+        rt.pointer_down(x, y);
+        rt.pointer_move(x + 40.0, y);
+        rt.frame(0.0);
+        assert_ne!(rt.state.table.column_width("size"), initial);
+        press(&mut rt, Key::Escape);
+        assert_eq!(rt.state.table.column_width("size"), initial);
+        rt.pointer_up(x + 40.0, y);
+        rt.frame(0.0);
+        assert_eq!(rt.state.table.column_width("size"), initial);
+    }
+}
+
+#[test]
 fn keys_move_the_selection_and_return_opens() {
     let mut rt = runtime(App::new(200, false));
     press(&mut rt, Key::Tab);

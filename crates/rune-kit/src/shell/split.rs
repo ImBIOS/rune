@@ -382,15 +382,21 @@ fn pane<S: 'static>(state: PaneState, access: fn(&mut S) -> &mut PaneState, cont
             let p = access(s);
             match d.phase {
                 Phase::Down => {
-                    d.data = p.width();
+                    d.data = if p.is_open() { p.width() } else { -p.width() };
                     p.set_resizing(true);
                 }
                 Phase::Move => {
                     tx.instant();
                     p.set_resizing(true);
-                    p.drag_to(d.data + sign * d.dx);
+                    p.drag_to(d.data.abs() + sign * d.dx);
                 }
-                Phase::Up => p.set_resizing(false),
+                Phase::Up => {
+                    if d.cancelled() {
+                        p.set_width(d.data.abs());
+                        p.set_open(d.data > 0.0);
+                    }
+                    p.set_resizing(false);
+                }
             }
         })
         .on_double_press(move |s: &mut S| access(s).reset_width())

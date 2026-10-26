@@ -462,6 +462,27 @@ fn unified_file_headers_span_the_viewport_while_code_scrolls_sideways() {
 }
 
 #[test]
+fn cancelling_a_gutter_drag_restores_selection_without_notifying_a_drop() {
+    let (old, new) = numbered(20, 5);
+    let mut rt = runtime(DiffState::new(vec![FileDiff::from_texts("a.rs", &old, &new)]), (800.0, 900.0));
+    press(&mut rt, "df0.c3/nn");
+    let original = rt.state.diff.selection();
+    let calls = rt.state.selections.len();
+    let a = find(&rt, "df0.c4/nn");
+    let (x, y) = (a.rect[0] + a.rect[2] / 2.0, a.rect[1] + 10.0);
+    rt.pointer_down(x, y);
+    rt.pointer_move(x, y + 40.0);
+    tick(&mut rt);
+    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    tick(&mut rt);
+    assert_eq!(rt.state.diff.selection(), original);
+    assert_eq!(rt.state.selections.len(), calls);
+    rt.pointer_up(x, y + 40.0);
+    tick(&mut rt);
+    assert_eq!(rt.state.selections.len(), calls);
+}
+
+#[test]
 fn rows_read_as_their_change_and_keys_move_between_files() {
     let (old, new) = numbered(200, 50);
     let files = (0..3).map(|i| FileDiff::from_texts(format!("f{i}.rs"), &old, &new)).collect();

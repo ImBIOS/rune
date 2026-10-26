@@ -18,7 +18,13 @@ impl<S: 'static> Runtime<S> {
     /// A modifier key still gets its `Key::Modifier` when modifier keys are on.
     pub fn physical_input(&mut self, event: PhysicalInput) {
         self.observe_mods(&event);
+        if self.cancel_drag_key(&event) { return; }
         self.queue.push(Action::Physical(event, None));
+    }
+
+    fn cancel_drag_key(&mut self, event: &PhysicalInput) -> bool {
+        matches!(event, PhysicalInput::Key { key: PhysicalKeyCode::Escape, pressed: true, .. })
+            && self.cancel_drag()
     }
     /// Shift held now decides whether the next press extends a text selection, ahead of the
     /// queue the press itself skips. A key press hides a tooltip.
@@ -42,6 +48,7 @@ impl<S: 'static> Runtime<S> {
     }
     /// `physical_with_fallback`, and `unhandled` happens when no handler takes the logical key.
     pub(crate) fn physical_then(&mut self, event: PhysicalInput, key: Option<KeyEvent>, unhandled: Option<Unhandled>) -> bool {
+        if self.cancel_drag_key(&event) { return true; }
         if key.is_none() && matches!(event, PhysicalInput::Modifiers(_) | PhysicalInput::Key { pressed: false, .. }) {
             return self.physical_observation(event);
         }

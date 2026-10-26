@@ -536,6 +536,10 @@ impl<S: 'static> View<S> {
                     }
                 }
                 Phase::Up => {
+                    if d.cancelled() {
+                        st.cancel_line();
+                        return;
+                    }
                     let sel = st.release_line();
                     if let Some(cb) = &on_select {
                         cb(s, sel, tx);

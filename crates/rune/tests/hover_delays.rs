@@ -78,3 +78,31 @@ fn a_press_cancels_the_wait_and_the_next_move_starts_it_again() {
     rt.frame(0.02);
     assert_eq!(rt.state, [true]);
 }
+
+#[test]
+fn blur_cancels_pending_enters_and_ends_shown_hover_without_a_grace() {
+    let mut rt = app();
+    rt.window_focus(true);
+    rt.pointer_move(8.0, 50.0);
+    rt.frame(0.02);
+    rt.window_focus(false);
+    rt.frame(0.2);
+    assert!(rt.state.is_empty(), "a pending enter cannot open in a blurred window");
+    rt.window_focus(true);
+    rt.pointer_move(8.0, 50.0);
+    rt.frame(0.05);
+    assert_eq!(rt.state, [true]);
+    rt.window_focus(false);
+    rt.frame(0.0);
+    assert_eq!(rt.state, [true, false], "blur ends even a hover with exit grace");
+}
+
+#[test]
+fn leaving_the_window_cancels_a_pending_enter() {
+    let mut rt = app();
+    rt.pointer_move(8.0, 50.0);
+    rt.frame(0.02);
+    rt.pointer_leave();
+    rt.frame(0.2);
+    assert!(rt.state.is_empty());
+}

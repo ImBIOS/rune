@@ -336,7 +336,10 @@ fn resize_handle(s: &App, p: &Pal, w: f32) -> El {
                     let from = s.sidebar_drag.unwrap_or(s.sidebar_w);
                     s.sidebar_w = (from + d.dx).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
                 }
-                Phase::Up => s.sidebar_drag = None,
+                Phase::Up => {
+                    if d.cancelled() && let Some(w) = s.sidebar_drag { s.sidebar_w = w; }
+                    s.sidebar_drag = None;
+                }
             }
         })
         .child(

@@ -619,18 +619,18 @@ fn slider(k: &Kit, v: f32) -> El {
                     let knob = kd / 2.0 + s.p.brightness * travel;
                     match d.phase {
                         Phase::Down => {
-                            if (d.x - knob).abs() <= kd / 2.0 + 3.0 {
-                                d.data = d.x - knob;
-                            } else {
-                                d.data = 0.0;
+                            d.data = s.p.brightness;
+                            if (d.x - knob).abs() > kd / 2.0 + 3.0 {
                                 s.p.brightness = to_value(d.x);
                             }
                         }
                         Phase::Move => {
-                            s.p.brightness = to_value(d.x - d.data);
+                            let knob = kd / 2.0 + d.data * travel;
+                            let grab = if (d.start_x - knob).abs() <= kd / 2.0 + 3.0 { d.start_x - knob } else { 0.0 };
+                            s.p.brightness = to_value(d.x - grab);
                             tx.instant();
                         }
-                        Phase::Up => {}
+                        Phase::Up => { if d.cancelled() { s.p.brightness = d.data; } }
                     }
                 })
                 .child(el().key("track").size(w, bar).absolute(0.0, (h - bar) / 2.0).radius(bar / 2.0).fill(c.layer_04))

@@ -57,6 +57,20 @@ fn losing_window_focus_cancels_a_held_drag() {
 }
 
 #[test]
+fn physical_escape_cancels_a_held_drag_too() {
+    let mut rt = held();
+    rt.physical_input(rune::PhysicalInput::Key {
+        key: rune::PhysicalKeyCode::Escape, mods: Mods::default(), pressed: true, repeat: false,
+    });
+    rt.frame(0.0);
+    assert_eq!(rt.state.drags.last(), Some(&(Phase::Up, true, 30.0)));
+    assert!(rt.state.keys.is_empty());
+    rt.pointer_up(40.0, 10.0);
+    rt.frame(0.0);
+    assert_eq!(rt.state.drags.iter().filter(|d| d.0 == Phase::Up).count(), 1);
+}
+
+#[test]
 fn a_release_ends_uncancelled_and_escape_without_a_drag_passes_through() {
     let mut rt = held();
     rt.pointer_up(40.0, 10.0);

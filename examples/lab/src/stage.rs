@@ -252,6 +252,18 @@ pub fn on_stage(s: &mut Lab, d: &mut Drag, tx: &mut Tx) {
             _ => {}
         },
         Phase::Up => {
+            if d.cancelled() {
+                let start = [d.start_x - (d.w - CW) * 0.5, d.start_y - (d.h - CH) * 0.5];
+                match s.grab {
+                    Some(Grab::Lamp(o)) => s.lamp = [start[0] - o[0], start[1] - o[1]],
+                    Some(Grab::Lens(o)) => s.lens = [start[0] - o[0], start[1] - o[1]],
+                    Some(Grab::Card(o)) => { s.card.set(Vec2::new(start[0] - o[0], start[1] - o[1])); s.card_vt.reset(); }
+                    Some(Grab::Key(i)) => s.keys[i].animate_to(0.0, Spring::new(0.25, 0.0), now),
+                    _ => {}
+                }
+                s.grab = None;
+                return;
+            }
             match s.grab {
                 Some(Grab::Key(i)) => s.keys[i].animate_to(0.0, Spring::new(0.25, 0.0), now),
                 Some(Grab::Card(_)) => {

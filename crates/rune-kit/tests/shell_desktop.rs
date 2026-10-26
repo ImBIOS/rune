@@ -412,3 +412,32 @@ fn the_hidden_peek_surface_takes_a_new_width_at_once() {
     assert_eq!(surface.opacity, 0.0);
     assert!((surface.rect[2] - 400.0).abs() < 0.5, "unseen, it doesn't animate: {}", surface.rect[2]);
 }
+
+#[test]
+fn cancelling_a_resize_restores_the_width_and_open_state_without_peeking() {
+    for blur in [false, true] {
+        let mut rt = runtime(state());
+        settle(&mut rt);
+        let (x, y) = rt.find("sidebar-grip").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_move(12.0, y);
+        rt.frame(0.1);
+        assert!(!rt.state.sidebar.is_peeking(), "a held resize never peeks");
+        if blur { rt.window_focus(false); } else { rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() }); }
+        rt.frame(0.0);
+        assert_eq!(rt.state.sidebar.width(), 276.0);
+        assert!(rt.state.sidebar.is_open(), "blur={blur}");
+        assert!(!rt.state.sidebar.is_resizing());
+    }
+}
+
+#[test]
+fn a_pending_peek_does_not_open_after_blur() {
+    let mut rt = runtime(closed());
+    settle(&mut rt);
+    rt.pointer_move(12.0, 300.0);
+    rt.frame(0.02);
+    rt.window_focus(false);
+    rt.frame(0.2);
+    assert!(!rt.state.sidebar.is_peeking());
+}

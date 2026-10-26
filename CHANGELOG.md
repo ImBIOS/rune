@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- Drag cancellation reaches native Escape and restores pane widths, column widths, sliders
+  and gutter selections. Delayed hover ends on window blur; raised content keeps ancestor
+  clips outside cached groups. Dropping offset-reordered virtual rows no longer scrolls the
+  list a second time, and live-only drags cannot make another handler's changes instant.
+
 - **`rune_kit::shell`: what a desktop agent-chat app's sidebar needs.** All additive; an app
   that sets none of these draws as before, except that the sidebar's toggle no longer holds a
   pressed fill while the sidebar is open (it reports `expanded` for accessibility instead).

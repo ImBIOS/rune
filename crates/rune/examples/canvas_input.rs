@@ -49,7 +49,8 @@ impl Canvas {
     }
     fn drag_pan(&mut self, d: &Drag) {
         if d.phase == Phase::Down { self.pan_at_press = self.pan; }
-        self.set_camera([self.pan_at_press[0] + d.dx, self.pan_at_press[1] + d.dy], self.zoom);
+        let pan = if d.cancelled() { self.pan_at_press } else { [self.pan_at_press[0] + d.dx, self.pan_at_press[1] + d.dy] };
+        self.set_camera(pan, self.zoom);
     }
 }
 

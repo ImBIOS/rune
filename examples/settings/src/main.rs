@@ -42,6 +42,23 @@ fn speed_of(v: f32) -> f32 {
     2f32.powf(v * 2.0 - 1.0)
 }
 
+#[test]
+fn cancelling_the_speed_slider_restores_its_value_before_a_track_press() {
+    let mut rt = rune::Runtime::new(Settings::default(), view, (620.0, 520.0), rune::Env::new(true, 1.0));
+    rt.frame(0.0);
+    let (x, y) = rt.find("slider").unwrap();
+    rt.pointer_down(x + 60.0, y);
+    rt.pointer_move(x + 70.0, y);
+    rt.frame(1.0 / 60.0);
+    assert!(rt.state.speed > 0.5);
+    rt.key(rune::KeyEvent { key: rune::Key::Escape, mods: rune::Mods::default() });
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.speed, 0.5);
+    rt.pointer_up(x + 70.0, y);
+    rt.frame(0.0);
+    assert_eq!(rt.state.speed, 0.5);
+}
+
 /// Everything a component needs to paint itself.
 #[derive(Clone, Copy)]
 struct Paint {
@@ -272,21 +289,20 @@ fn speed_control(p: Paint, v: f32) -> El {
                 .motion(motion::SNAPPY)
                 .on_drag(move |s: &mut Settings, d: &mut Drag, tx| match d.phase {
                     Phase::Down => {
+                        d.data = s.speed;
                         let knob = k / 2.0 + v * travel;
-                        if (d.x - knob).abs() <= k / 2.0 + 2.0 {
-                            // Grabbed the knob: remember where, don't move it.
-                            d.data = d.x - knob;
-                        } else {
+                        if (d.x - knob).abs() > k / 2.0 + 2.0 {
                             // Clicked the track: the knob animates there.
-                            d.data = 0.0;
                             s.speed = to_value(d.x);
                         }
                     }
                     Phase::Move => {
-                        s.speed = to_value(d.x - d.data);
+                        let knob = k / 2.0 + d.data * travel;
+                        let grab = if (d.start_x - knob).abs() <= k / 2.0 + 2.0 { d.start_x - knob } else { 0.0 };
+                        s.speed = to_value(d.x - grab);
                         tx.instant();
                     }
-                    Phase::Up => {}
+                    Phase::Up => { if d.cancelled() { s.speed = d.data; } }
                 })
                 .child(
                     el().key("track")

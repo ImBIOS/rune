@@ -192,6 +192,7 @@ pub struct TableState {
     widths: HashMap<String, f32>,
     /// Each column's laid-out width, for starting a drag.
     laid_out: HashMap<String, f32>,
+    resize_start: Option<Option<f32>>,
     selected: HashSet<String>,
     cursor: Option<String>,
     /// Where the cursor's row was last seen, to find it again without a scan.
@@ -217,6 +218,7 @@ impl TableState {
             sort: None,
             widths: HashMap::new(),
             laid_out: HashMap::new(),
+            resize_start: None,
             selected: HashSet::new(),
             cursor: None,
             cursor_hint: std::cell::Cell::new(0),
@@ -768,10 +770,20 @@ fn resize_handle<S: 'static>(c: TableColumn, get_mut: fn(&mut S) -> &mut TableSt
         .on_drag(move |s: &mut S, d: &mut Drag, _tx: &mut Tx| {
             let st = get_mut(s);
             match d.phase {
-                Phase::Down => d.data = st.column_width(&id).or_else(|| st.laid_out.get(&id).copied()).unwrap_or(c.min),
+                Phase::Down => {
+                    st.resize_start = Some(st.column_width(&id));
+                    d.data = st.column_width(&id).or_else(|| st.laid_out.get(&id).copied()).unwrap_or(c.min);
+                }
                 Phase::Move | Phase::Up => {
-                    let w = c.clamp(d.data + d.dx);
-                    st.set_column_width(id.clone(), w);
+                    if d.cancelled() {
+                        match st.resize_start.take().flatten() {
+                            Some(w) => st.set_column_width(id.clone(), w),
+                            None => st.reset_column_width(&id),
+                        }
+                    } else {
+                        st.set_column_width(id.clone(), c.clamp(d.data + d.dx));
+                        if d.phase == Phase::Up { st.resize_start = None; }
+                    }
                 }
             }
         })
