@@ -518,6 +518,57 @@ pub(crate) unsafe fn layer_occluded(layer: &objc2_video::runtime::AnyObject) -> 
 
 const OCCLUSION_VISIBLE: usize = 1 << 1;
 
+objc2_video::define_class!(
+    /// The window `PresumeShown` puts in front of a layer: always on screen.
+    #[unsafe(super(objc2_video::runtime::NSObject))]
+    #[name = "RuneShownWindow"]
+    struct ShownWindow;
+
+    impl ShownWindow {
+        #[unsafe(method(window))]
+        fn window(&self) -> *const Self { self }
+
+        #[unsafe(method(occlusionState))]
+        fn occlusion_state(&self) -> usize { OCCLUSION_VISIBLE }
+    }
+);
+
+/// While alive, a surface's window reads as on screen to wgpu's occlusion check and
+/// `surface_occluded`: the layer's delegate, the first up the tree, is a stand-in that is its own
+/// visible window. For a window's first frame, drawn while AppKit orders the window in and before
+/// the window server reports it visible. A new layer's drawables are all free, so `nextDrawable`
+/// can't stall the way it does for a covered window with frames still queued.
+pub(crate) struct PresumeShown {
+    layer: objc2_video::rc::Retained<objc2_video::runtime::AnyObject>,
+    previous: Option<objc2_video::rc::Retained<objc2_video::runtime::AnyObject>>,
+    _stand_in: objc2_video::rc::Retained<ShownWindow>,
+}
+
+impl PresumeShown {
+    /// `None` off Metal.
+    pub(crate) fn new(surface: &wgpu::Surface<'_>) -> Option<PresumeShown> {
+        use objc2_video::{ClassType, msg_send, rc::Retained, runtime::AnyObject};
+        // SAFETY: the layer is retained here and the lock released, so wgpu can take it to acquire.
+        let layer = unsafe { surface.as_hal::<wgpu::hal::api::Metal>() }?.render_layer().lock().clone();
+        // SAFETY: a CAMetalLayer is an object; only messages every CALayer answers are sent to it.
+        let layer: Retained<AnyObject> = unsafe { Retained::cast_unchecked(layer) };
+        // SAFETY: CALayer delegate reads and writes on the main thread (window creation).
+        unsafe {
+            let previous: Option<Retained<AnyObject>> = msg_send![&*layer, delegate];
+            let stand_in: Retained<ShownWindow> = msg_send![ShownWindow::class(), new];
+            let _: () = msg_send![&*layer, setDelegate: &*stand_in];
+            Some(PresumeShown { layer, previous, _stand_in: stand_in })
+        }
+    }
+}
+
+impl Drop for PresumeShown {
+    fn drop(&mut self) {
+        // SAFETY: as in `new`; restores the delegate the layer had.
+        unsafe { let _: () = objc2_video::msg_send![&*self.layer, setDelegate: self.previous.as_deref()]; }
+    }
+}
+
 fn occlusion_hidden(window: &NSWindow) -> bool {
     // SAFETY: a property read on the main thread.
     let state: usize = unsafe { msg_send![window, occlusionState] };

@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A window comes on screen with its first frame on macOS.** A visible window (not a panel or a
+  hidden launcher) now draws its first frame while it's being created, before the window server
+  reports it on screen, instead of opening empty and drawing on a later display-link tick. The
+  first view build and layout now run inside window creation, right after the window-created
+  callbacks. Content reached the screen about 30 ms sooner at launch on an idle Mac, and about
+  150 ms sooner on a busy one, where the window server is slow to report a new window visible.
 - **`rune::prewarm_gpu()`: the GPU device and render pipeline start on a thread before the first
   window.** On macOS, Rune's run functions now make the device and compile the uber pipeline on a
   thread while AppKit starts, and the first window or overlay opened at launch picks them up

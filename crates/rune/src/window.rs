@@ -67,6 +67,10 @@ struct Win {
     /// Fn presses, which winit doesn't send, while the app wants modifier keys.
     #[cfg(target_os = "macos")]
     fn_key: Option<crate::fn_key::FnKey>,
+    /// Drawing the first frame during window creation (`Host::try_create`), before AppKit
+    /// reports the window on screen or a display link ticks.
+    #[cfg(target_os = "macos")]
+    prime: bool,
 }
 
 impl Win {
@@ -1222,6 +1226,53 @@ mod occluded_surface {
         gpu.queue.present(frame);
         meter.presented();
         assert_eq!((meter.totals().presents, meter.totals().failed()), (1, 0));
+    }
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[name = "RuneFakeCoveredView"]
+        struct CoveredView;
+
+        impl CoveredView {
+            #[unsafe(method(window))]
+            fn window(&self) -> *const Self { self }
+
+            #[unsafe(method(occlusionState))]
+            fn occlusion_state(&self) -> usize { 0 }
+        }
+    );
+
+    /// A window's first frame draws before the window server reports the window on screen:
+    /// `PresumeShown` gets it a drawable from wgpu, and puts the layer's own delegate back.
+    #[test]
+    fn a_presumed_shown_surface_gets_its_first_drawable_while_reported_covered() {
+        let view: Retained<CoveredView> = unsafe { msg_send![CoveredView::class(), new] };
+        let layer: Retained<AnyObject> = unsafe { msg_send![AnyClass::get(c"CAMetalLayer").expect("QuartzCore"), new] };
+        let _: () = unsafe { msg_send![&*layer, setDelegate: &*view] };
+        let instance = Gpu::instance();
+        let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(Retained::as_ptr(&layer) as *mut std::ffi::c_void);
+        let surface = unsafe { instance.create_surface_unsafe(target) }.expect("a Metal layer surface");
+        let gpu = match Gpu::try_new(instance, Some(&surface)) {
+            Ok(gpu) => gpu,
+            Err(error) => return eprintln!("skipped: {error}"),
+        };
+        let Some((config, _)) = surface_config(&surface, &gpu.adapter, (64, 64), false) else {
+            return eprintln!("skipped: the adapter can't present to a Metal layer");
+        };
+        surface.configure(&gpu.device, &config);
+        let mut meter = SurfaceMeter::new("first", Arc::default());
+        assert!(acquire(&surface, &gpu.device, &config, 1, &mut meter).is_err(), "a covered window gets no drawable");
+
+        let shown = crate::macos::PresumeShown::new(&surface).expect("a Metal surface");
+        assert!(!crate::macos::surface_occluded(&surface));
+        let frame = acquire(&surface, &gpu.device, &config, 1, &mut meter).expect("the first frame's drawable");
+        drop(frame);
+        drop(shown);
+
+        let delegate: *const AnyObject = unsafe { msg_send![&*layer, delegate] };
+        assert!(std::ptr::eq(delegate, Retained::as_ptr(&view).cast()), "the layer's delegate is back");
+        assert!(crate::macos::surface_occluded(&surface));
+        assert_eq!(meter.totals().failed(), 0, "wgpu was never asked while covered");
     }
 }
 
@@ -2584,6 +2635,8 @@ impl<S: 'static> Host<S> {
             full_screen,
             #[cfg(target_os = "macos")]
             fn_key,
+            #[cfg(target_os = "macos")]
+            prime: false,
         });
         if launcher { self.win.as_mut().unwrap().first_frame.prepare(); }
         self.apply_placement(event_loop);
@@ -2592,6 +2645,17 @@ impl<S: 'static> Host<S> {
         if visible && let Some(w) = &self.win && w.panel.is_some() { w.show(focus); }
         if let Some(created) = self.on_created.take() { created(self.native_handle.clone()); }
         if let Some(on_window) = self.on_window.as_mut() { on_window(&self.native_handle); }
+        // The first frame, now, so the window comes on screen with it instead of empty for a
+        // frame or two. AppKit has ordered the window in, but it reaches the screen with this
+        // turn's Core Animation commit, so nothing reports it visible yet.
+        #[cfg(target_os = "macos")]
+        if visible && let Some(w) = self.win.as_mut() && w.panel.is_none()
+            && let Some(shown) = crate::macos::PresumeShown::new(&w.surface) {
+            w.prime = true;
+            self.redraw();
+            drop(shown);
+            if let Some(w) = self.win.as_mut() { w.prime = false; }
+        }
         Ok(())
     }
 
@@ -2673,7 +2737,7 @@ impl<S: 'static> Host<S> {
         // Starting the display link for a window that isn't on screen would wait for a tick that
         // sleeping displays never send, and a running link holds back its timers (`wake_deadline`).
         #[cfg(target_os = "macos")]
-        if !hidden && l.natively_occluded() {
+        if !hidden && !l.prime && l.natively_occluded() {
             self.meter.skipped();
             self.missed_frame(Missed::Occluded, false);
             return;
@@ -2681,7 +2745,7 @@ impl<S: 'static> Host<S> {
         #[cfg(target_os = "macos")]
         let _prewarm = if hidden { l.panel.as_ref().map(|p| p.prewarm()) } else { None };
         #[cfg(target_os = "macos")]
-        let target = if hidden || resizing { None } else if let Some(pacing) = &mut l.pacing {
+        let target = if hidden || resizing || l.prime { None } else if let Some(pacing) = &mut l.pacing {
             let Some(target) = pacing.next_frame() else { return };
             Some(target)
         } else { None };
