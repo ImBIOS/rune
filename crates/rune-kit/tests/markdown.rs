@@ -532,3 +532,95 @@ fn scroll_wide_leaves_a_narrow_table_at_its_own_width() {
     assert!(natural[2] < 200.0, "{natural:?}");
     assert!((rule[2] - natural[2]).abs() < 0.5, "not stretched across the column: {rule:?} vs {natural:?}");
 }
+
+/// The ink extent `[left, right]` of the glyphs drawn inside `cell`, at scale 1.
+fn ink(rt: &Runtime<String>, cell: &rune::runtime::ElementInfo) -> [f32; 2] {
+    let r = cell.rect;
+    let glyphs = rt.instances.iter().filter(|i| i.params[1] == rune::render::KIND_GLYPH).filter(|i| {
+        let (x, y) = (i.rect[0] + i.rect[2] / 2.0, i.rect[1] + i.rect[3] / 2.0);
+        x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]
+    });
+    glyphs.fold([f32::MAX, f32::MIN], |[l, rr], i| [l.min(i.rect[0]), rr.max(i.rect[0] + i.rect[2])])
+}
+
+/// Cell `c{j}` of the row keyed `row` (`th`, `r0`, ...).
+fn cell(rt: &Runtime<String>, row: &str, j: usize) -> rune::runtime::ElementInfo {
+    let all = rt.elements();
+    let r = all.iter().position(|e| e.key.as_deref() == Some(row)).unwrap_or_else(|| panic!("no {row}"));
+    let key = format!("c{j}");
+    all.iter().find(|e| e.parent == Some(r) && e.key.as_deref() == Some(key.as_str())).cloned().unwrap_or_else(|| panic!("no {row}/{key}"))
+}
+
+#[test]
+fn cells_sit_where_their_column_aligns_them() {
+    let rt = laid_out("| Left column heading | Centred column heading | Right column heading |\n|:--|:-:|--:|\n| a | b | c |\n");
+    for row in ["th", "r0"] {
+        let [left, centre, right] = [0, 1, 2].map(|j| cell(&rt, row, j));
+        let ([l0, _], [c0, c1], [_, r1]) = (ink(&rt, &left), ink(&rt, &centre), ink(&rt, &right));
+        assert!((l0 - (left.rect[0] + 10.0)).abs() < 2.0, "{row}: start-aligned text starts at the padding, {l0} in {:?}", left.rect);
+        let (before, after) = (c0 - centre.rect[0], centre.rect[0] + centre.rect[2] - c1);
+        assert!((before - after).abs() < 2.0, "{row}: centred, {before} either side {after}");
+        assert!((right.rect[0] + right.rect[2] - 10.0 - r1).abs() < 2.0, "{row}: end-aligned text ends at the padding, {r1} in {:?}", right.rect);
+    }
+}
+
+const LONG_CELL: &str = "| Term | Meaning |\n|---|---|\n| cache | a sentence much too long for one line of a narrow column, so it wraps inside its cell |\n| hit | yes |\n";
+
+#[test]
+fn a_long_cell_wraps_inside_its_column_and_its_row_grows_to_fit() {
+    fn narrow(src: &String, _: &mut Cx<String>) -> El {
+        col().w_full().child(col().w(300.0).child(Markdown::new(src.clone()).build(&Kit::neutral(true))))
+    }
+    let mut rt = Runtime::new(LONG_CELL.to_owned(), narrow, (480.0, 600.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let all = rt.elements();
+    let text = |t: &str| all.iter().find(|e| e.text.as_deref().is_some_and(|x| x.starts_with(t))).unwrap_or_else(|| panic!("no {t}")).rect;
+    let (term, long, hit) = (text("cache"), text("a sentence"), text("hit"));
+    assert!(long[3] > 2.5 * term[3], "the long cell wraps onto several lines: {long:?} vs {term:?}");
+    assert!(long[0] + long[2] <= 300.0, "and stays inside the table: {long:?}");
+    assert_eq!(term[1], long[1], "cells in a row share their top");
+    let (r0, r1) = (by_key(&rt, "r0").rect, by_key(&rt, "r1").rect);
+    assert!(r0[3] >= long[3] + 12.0 - 0.5, "the row holds the wrapped text and its padding: {r0:?}");
+    assert!(hit[1] > long[1] + long[3] && r1[1] >= r0[1] + r0[3], "the next row starts below it");
+    let [_, ink_right] = ink(&rt, &cell(&rt, "r0", 1));
+    assert!(ink_right <= 300.0, "no glyph past the frame: {ink_right}");
+}
+
+#[test]
+fn scroll_wide_keeps_a_wide_tables_cells_on_one_line_and_scrolls_it_sideways() {
+    fn wide(src: &String, _: &mut Cx<String>) -> El {
+        col().w_full().child(col().w(300.0).child(Markdown::new(src.clone()).scroll_wide(true).build(&Kit::neutral(true))))
+    }
+    let mut rt = Runtime::new(LONG_CELL.to_owned(), wide, (480.0, 600.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let text = |rt: &Runtime<String>, t: &str| rt.elements().into_iter().find(|e| e.text.as_deref().is_some_and(|x| x.starts_with(t))).unwrap().rect;
+    let (term, long) = (text(&rt, "cache"), text(&rt, "a sentence"));
+    assert_eq!(long[3], term[3], "one line: {long:?}");
+    assert!(long[0] + long[2] > 400.0, "wider than the column: {long:?}");
+    let all = rt.elements();
+    let th = all.iter().position(|e| e.key.as_deref() == Some("th")).unwrap();
+    let frame = all[th].parent.unwrap();
+    let viewport = all[all[frame].parent.unwrap()].rect;
+    assert_eq!(viewport[2], 300.0, "the viewport keeps to the column");
+    rt.wheel_xy(150.0, long[1] + 4.0, -120.0, 0.0);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(text(&rt, "a sentence")[0], long[0] - 120.0, "the table scrolls sideways");
+}
+
+#[test]
+fn table_like_draws_markdown_tables_with_the_data_tables_metrics() {
+    fn shared(src: &String, _: &mut Cx<String>) -> El {
+        let k = Kit::neutral(true);
+        col().w_full().child(Markdown::new(src.clone()).render(&MarkdownStyle::from_kit(&k).table_like(&rune_kit::TableStyle::from_kit(&k))))
+    }
+    let k = Kit::neutral(true);
+    let t = rune_kit::TableStyle::from_kit(&k);
+    let mut rt = Runtime::new("| Name | Size |\n|---|--:|\n| a | 1 |\n".to_owned(), shared, (480.0, 400.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let row = by_key(&rt, "r0").rect[3];
+    assert!((row - t.row_height).abs() <= 0.5, "a one-line row is the data table's row height: {row}");
+    assert_eq!(by_key(&rt, "s0").fill, t.rule);
+    let header = rt.elements().into_iter().find(|e| e.text.as_deref() == Some("Name")).unwrap();
+    assert_eq!(header.text_color, Some(t.header_text));
+    assert_eq!(header.rect[0] - cell(&rt, "th", 0).rect[0], t.cell_pad);
+}

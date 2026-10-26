@@ -75,6 +75,50 @@ pub static TRIANGLE_RIGHT: Icon = Icon {
 pub static DASH: Icon =
     Icon { name: "kit-dash", view: 20.0, body: r#"<rect x="5" y="9.5" width="10" height="1" fill="currentColor"/>"# };
 
+const PAGE: &str = r#"<path d="M3.5 1.5H9.5L12.5 4.5V14.5H3.5V1.5Z" stroke="currentColor" stroke-linejoin="round"/><path d="M9.5 1.5V4.5H12.5" stroke="currentColor" stroke-linejoin="round"/>"#;
+
+/// A closed folder (file trees).
+pub static FOLDER: Icon = Icon {
+    name: "kit-folder",
+    view: 16.0,
+    body: r#"<path d="M1.5 3.5H6L7.5 5H14.5V13.5H1.5V3.5Z" stroke="currentColor" stroke-linejoin="round"/>"#,
+};
+/// An open folder.
+pub static FOLDER_OPEN: Icon = Icon {
+    name: "kit-folder-open",
+    view: 16.0,
+    body: r#"<path d="M1.5 13.5V3.5H6L7.5 5H13.5V7.5" stroke="currentColor" stroke-linejoin="round"/><path d="M1.5 13.5L3.5 7.5H15L13 13.5H1.5Z" stroke="currentColor" stroke-linejoin="round"/>"#,
+};
+/// A plain file.
+pub static FILE: Icon = Icon { name: "kit-file", view: 16.0, body: PAGE };
+/// A source file.
+pub static FILE_CODE: Icon = Icon {
+    name: "kit-file-code",
+    view: 16.0,
+    body: concat!(
+        r#"<path d="M3.5 1.5H9.5L12.5 4.5V14.5H3.5V1.5Z" stroke="currentColor" stroke-linejoin="round"/><path d="M9.5 1.5V4.5H12.5" stroke="currentColor" stroke-linejoin="round"/>"#,
+        r#"<path d="M7 8L5.5 9.75L7 11.5M9 8L10.5 9.75L9 11.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"#
+    ),
+};
+/// A text, data or config file.
+pub static FILE_TEXT: Icon = Icon {
+    name: "kit-file-text",
+    view: 16.0,
+    body: concat!(
+        r#"<path d="M3.5 1.5H9.5L12.5 4.5V14.5H3.5V1.5Z" stroke="currentColor" stroke-linejoin="round"/><path d="M9.5 1.5V4.5H12.5" stroke="currentColor" stroke-linejoin="round"/>"#,
+        r#"<path d="M5.5 8.5H10.5M5.5 10.5H10.5M5.5 12.5H8.5" stroke="currentColor"/>"#
+    ),
+};
+/// An image file.
+pub static FILE_IMAGE: Icon = Icon {
+    name: "kit-file-image",
+    view: 16.0,
+    body: concat!(
+        r#"<path d="M3.5 1.5H9.5L12.5 4.5V14.5H3.5V1.5Z" stroke="currentColor" stroke-linejoin="round"/><path d="M9.5 1.5V4.5H12.5" stroke="currentColor" stroke-linejoin="round"/>"#,
+        r#"<circle cx="6.5" cy="7.5" r="1" fill="currentColor"/><path d="M3.5 12.5L6.5 9.5L8 11L9.5 9.5L12.5 12.5" stroke="currentColor" stroke-linejoin="round"/>"#
+    ),
+};
+
 pub const DEFAULT: Glyphs = Glyphs {
     check: &CHECK,
     check_small: &CHECK_SMALL,

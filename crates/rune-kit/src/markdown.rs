@@ -860,6 +860,17 @@ impl MarkdownStyle {
         self.table_flush_left = on;
         self
     }
+    /// Tables that read like a data [`Table`](crate::Table) beside them: its cell font, cell
+    /// padding (sized so a one-line row is the data table's row height), rules and muted header
+    /// text. The outline, when there is one, takes the rule colour.
+    pub fn table_like(mut self, t: &crate::TableStyle) -> Self {
+        self.table_font = Some(t.font);
+        self.table_pad = [t.cell_pad, ((t.row_height - t.font.line_height) / 2.0).max(0.0)];
+        self.table_rule = t.rule;
+        self.table_head_text = t.header_text;
+        self.table_outline = self.table_outline.map(|_| t.rule);
+        self
+    }
     /// The tints behind a diff's added and removed lines (full width).
     pub fn diff(mut self, added: Color, removed: Color) -> Self {
         self.diff_add = added;

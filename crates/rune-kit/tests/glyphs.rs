@@ -7,7 +7,7 @@ use rune::Icon;
 use rune::text::icon_coverage;
 use rune_kit::glyphs;
 
-const ALL: [&Icon; 15] = [
+const ALL: [&Icon; 21] = [
     &glyphs::CHECK,
     &glyphs::CHECK_SMALL,
     &glyphs::CHEVRON_DOWN,
@@ -23,6 +23,12 @@ const ALL: [&Icon; 15] = [
     &glyphs::EYE,
     &glyphs::EYE_OFF,
     &glyphs::DASH,
+    &glyphs::FOLDER,
+    &glyphs::FOLDER_OPEN,
+    &glyphs::FILE,
+    &glyphs::FILE_CODE,
+    &glyphs::FILE_TEXT,
+    &glyphs::FILE_IMAGE,
 ];
 
 /// Glyph sizes in points (Deadbolt's 16–20 pt plus a large one) at 1× and 2×.

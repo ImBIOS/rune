@@ -5,6 +5,23 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Tree and Table in rune-kit, and the core pieces they need.** `Tree` draws an app-owned
+  `TreeModel` (`FileTree` builds one from paths, folders first, single-child folders as one
+  row) with indent guides, springing chevrons, icons, change counts, type-ahead, filtering
+  and `reveal`. `Table` draws app-owned rows with fixed, flex and min/max columns, drag
+  resizing, a sticky header that shows the app's sort, zebra rows, cell builders and
+  tooltips for cut-short text. Both are virtualised (50,000 nodes and 100,000 rows scroll
+  under 4 ms a frame at p95) and keyboard driven, with tree and grid roles. New core API:
+  `El::on_key` (a control that takes its keys before focus navigation, is a Tab stop and
+  takes focus from a click inside it), `El::level` and `El::expanded` (outline rows),
+  `El::icon_rotation` (a glyph's turn, sprung), `El::help_when_truncated`, `Tx::mods` (the
+  modifiers held for a press), `Tx::scroll_into_view_in(scope, key)` (reveal a row of the
+  list inside one element only), new `ElementInfo` fields `level`, `expanded` and
+  `item_selected`, file and folder glyphs in `rune_kit::glyphs`, and
+  `MarkdownStyle::table_like(&TableStyle)`. Things apps can notice: the `--tree` JSON gains
+  `level`, `expanded` and `itemSelected` on rows that set them, so tree goldens with selected
+  list or menu rows move; Tab now also stops at `on_key` controls when Full Keyboard Access
+  is off. Nothing else changes for existing apps.
 - **rune-kit has an app shell.** `rune_kit::shell` adds `SplitView` (a resizable, collapsible
   sidebar, the main pane under a toolbar, an optional inspector, and a 48 point title bar band
   that drags the window and clears the traffic lights), `Toolbar`, `Sidebar` with

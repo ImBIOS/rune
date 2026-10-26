@@ -45,8 +45,10 @@ mod segmented;
 mod select;
 pub mod shell;
 mod switch;
+mod table;
 mod text_input;
 mod toast;
+mod tree;
 
 pub use accordion::{Accordion, AccordionItem};
 #[allow(deprecated)]
@@ -76,8 +78,10 @@ pub use segmented::SegmentedControl;
 pub use select::{Select, SelectAppearance};
 pub use shell::{PaneState, Sidebar, SidebarHeader, SidebarRow, SidebarSection, SplitView, Toolbar};
 pub use switch::Switch;
+pub use table::{Cell, SortDir, Table, TableColumn, TableState, TableStyle};
 pub use text_input::{TextArea, TextField, TextInput};
 pub use toast::{Toast, ToastRegion};
+pub use tree::{FileNode, FileTree, Tree, TreeItem, TreeKey, TreeModel, TreeRow, TreeStyle, file_icon, natural_cmp};
 
 use rune::{Color, El, Shadow, Tx};
 

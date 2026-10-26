@@ -154,6 +154,42 @@ scroll and focus group with `Sidebar`, each row with a `SidebarRow` keyed by the
 the width field and resize handlers with a `PaneState` given to `SplitView::sidebar`. Drop the
 app's own titlebar spacer and drag region: the split view draws both.
 
+## Tree and Table
+
+Both are virtualised, so only the rows on screen are built, and both are one focusable control
+whose keys act on a cursor kept in app state: a row scrolled out of view still moves with the
+arrows. Selection fills, rules and type come from the kit, and they follow reduced motion.
+
+**Tree** draws a `TreeModel<T>` the app keeps in its state. `FileTree::new().build(paths)` turns
+`(path, data)` pairs into one: folders before files, names in natural order (`icon2` before
+`icon10`), and a chain of single-child folders shown as one row (`docs/guide/intro`).
+`Tree::new(get, get_mut, label).row(|node, row| TreeItem::file(node, row).changes(12, 3))`
+builds it. Each row has an indent guide, a chevron that springs open, an icon, the label and
+trailing content (`changes`, `dot`, `badge` or any `trailing` element). Up and Down move,
+Right opens or steps in, Left closes or climbs, Home, End and Page Up and Down jump, Return and Space toggle a
+folder or open a file (`on_open`), and typing a name jumps to it. `multi_select(true)` adds
+Shift and Cmd. `filter(|n| ..)` keeps the folders that lead to a match open. `reveal(id, tx)`
+opens, selects and scrolls to a row, so a tree can follow an editor or a diff. Rows report
+`treeitem` with their level, open state and selection. 50,000 files scroll at 0.4 ms a frame
+(p50) and 4 ms when rows mount (p95); building the model takes about 35 ms
+(`cargo test --profile perf -p rune-kit --test tree -- --ignored --nocapture`).
+[Light](../../demo/kit/tree-light.png) and [dark](../../demo/kit/tree-dark.png) stills:
+`cargo run -p rune-kit --example tree`.
+
+**Table** reads the app's rows through `Table::new(get, get_mut, len, row_id)` and keeps
+selection, sort and column widths in a `TableState`. `TableColumn::new(id, title)` takes a
+`width` or `flex` weight, `min` and `max`, an `align`, and `sortable()`. The header stays put
+over the rows, and a drag on a header edge resizes a column within its bounds (a double-click
+resets it). A header click calls `on_sort(column, direction)` and the app sorts; the header
+shows the direction. Cells come from `cell(|s, i, column| Cell::text(..))`; text cut short
+shows its whole text as a tooltip. `zebra(true)` stripes rows. The keys are the arrows, Page
+Up and Down, Home, End, Return (`on_open`), and in a multi-select table Shift and Cmd-A. Roles
+are `grid`, `row`, `columnheader` and `gridcell`. 100,000 rows scroll at 0.4 ms a frame (p50)
+and 3.4 ms when rows mount (p95) (`--test table`).
+[Light](../../demo/kit/table-light.png) and [dark](../../demo/kit/table-dark.png) stills:
+`cargo run -p rune-kit --example table`. `MarkdownStyle::table_like(&TableStyle::from_kit(k))`
+draws Markdown tables with the same font, padding and rules.
+
 ## Markdown
 
 Feature `markdown`: `Markdown::new(src).build(&kit)`, or without a kit
@@ -164,8 +200,9 @@ source each time, and earlier blocks stay mounted.
 - **Tables** keep their header row, per-column alignment and inline formatting. Columns start
   at their content's width, so a table with room never wraps a cell, and shrink in proportion
   to their text when the table doesn't fit; text wraps inside a column down to its longest
-  word (at most `table_min_column`, 120 points), then the cell clips. There is no horizontal
-  scroll. While a row is still arriving (`Markdown::streaming(true)`) it doesn't resize the
+  word (at most `table_min_column`, 120 points), then the cell clips. With
+  `Markdown::scroll_wide(true)` columns keep their full width and a wide table scrolls sideways
+  instead. While a row is still arriving (`Markdown::streaming(true)`) it doesn't resize the
   columns, and a header line alone already shows as a table. Cells set figures at one width (`tnum`) so numbers line up; turn
   that off with `table_tabular_figures(false)`. `table(border, header_fill)` sets the outline,
   row rules and header fill; `table_outline(None)`, `table_rules` and `table_header_text` give
