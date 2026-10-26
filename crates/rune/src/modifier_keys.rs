@@ -184,7 +184,7 @@ impl<S: 'static> Runtime<S> {
             self.events.push(format!("key {:?}", ev.key));
             return true;
         }
-        false
+        matches!(ev.key, Key::Modifier { pressed: false, .. }) && self.route_key_up(ev, one)
     }
 }
 

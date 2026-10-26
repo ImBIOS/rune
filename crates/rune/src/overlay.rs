@@ -1375,8 +1375,13 @@ impl<T: 'static> Overlay<T> {
                         if down { self.rt.pointer_down(x, y); } else { self.rt.pointer_up(x, y); }
                     },
                     Input::Key(key) => self.rt.key(key),
+                    Input::KeyUp(key) => {
+                        self.dirty |= self.rt.key_up(key);
+                        continue;
+                    }
                     Input::Physical(event, fallback) => {
-                        self.dirty |= self.rt.physical_with_fallback(event, fallback);
+                        let keep = matches!(event, crate::PhysicalInput::Key { pressed: true, .. }) || self.rt.wants_key_up();
+                        self.dirty |= self.rt.physical_with_fallback(event, fallback.filter(|_| keep));
                         continue;
                     }
                 }

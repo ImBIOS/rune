@@ -1,7 +1,7 @@
 //! Canvas input: `on_wheel` ahead of scroll views, pinch, rotation and smart magnify in the
 //! handler's own points, the middle button pressing and dragging elements that opt in, and key
 //! releases.
-use rune::{Cx, El, Env, GesturePhase, Key, KeyEvent, MagnifyEvent, Mods, Phase, PointerButton, RotateEvent, Runtime, ScrollSpec, WheelEvent, col, el};
+use rune::{Cx, El, Env, GesturePhase, Ime, Key, KeyEvent, MagnifyEvent, Mods, Phase, PointerButton, RotateEvent, Runtime, ScrollSpec, TextEdit, TextStyle, WheelEvent, col, el, text_input};
 
 #[derive(Default)]
 struct S {
@@ -15,12 +15,14 @@ struct S {
     drags: Vec<(Phase, PointerButton, f32, f32)>,
     presses: Vec<PointerButton>,
     plain_drags: usize,
-    ups: Vec<(&'static str, Key)>,
+    plain_presses: usize,
+    ups: Vec<(&'static str, Key, Mods)>,
     space: bool,
+    edit: TextEdit,
 }
 
 /// A 300 pt page that scrolls, holding a 200 pt canvas at (50, 50) and 600 pt of rows below.
-fn view(_: &S, _: &mut Cx<S>) -> El {
+fn view(s: &S, _: &mut Cx<S>) -> El {
     let canvas = el().key("canvas").w(200.0).h(200.0).ml(50.0).mt(50.0)
         .on_wheel(|s: &mut S, e, _| {
             s.wheels.push(e);
@@ -30,16 +32,20 @@ fn view(_: &S, _: &mut Cx<S>) -> El {
         .on_magnify(|s: &mut S, e, _| { s.zoom.push((e.delta, e.x, e.y)); true })
         .on_rotate(|s: &mut S, e, _| { s.turns.push(e.degrees); true })
         .on_smart_magnify(|s: &mut S, x, y, _| { s.smart.push((x, y)); true })
-        .pointer_buttons([PointerButton::Middle])
+        .pointer_buttons([PointerButton::Middle, PointerButton::Back, PointerButton::Forward])
         .on_drag(|s: &mut S, d, tx| s.drags.push((d.phase, tx.button(), d.dx, d.dy)))
         .on_press_tx(|s: &mut S, tx| s.presses.push(tx.button()))
         .child(el().key("shape").w(40.0).h(40.0).focusable(true)
-            .on_key_up(|s: &mut S, e, _| { s.ups.push(("shape", e.key.clone())); false }));
-    let plain = el().key("plain").w(100.0).h(40.0).on_drag(|s: &mut S, _, _| s.plain_drags += 1);
+            .on_key_up(|s: &mut S, e, _| { s.ups.push(("shape", e.key.clone(), e.mods)); false }))
+        .child(text_input(&s.edit, TextStyle::new(14.0, 400.0)).single_line().key("field").w(100.0).h(32.0)
+            .on_edit(|s: &mut S| &mut s.edit));
+    let plain = el().key("plain").w(100.0).h(40.0)
+        .on_drag(|s: &mut S, _, _| s.plain_drags += 1)
+        .on_press(|s: &mut S| s.plain_presses += 1);
     let rows = (0..15).fold(col().w_full().child(canvas).child(plain), |c, i| c.child(el().key(format!("row{i}")).w_full().h(40.0)));
     col().w_full().h_full()
         .on_key_up(|s: &mut S, e, _| {
-            s.ups.push(("root", e.key.clone()));
+            s.ups.push(("root", e.key.clone(), e.mods));
             let space = e.key == Key::Text(" ".into());
             if space { s.space = false; }
             space
@@ -96,6 +102,10 @@ fn a_declined_delta_scrolls_and_the_gesture_stays_a_scroll() {
     rt.wheel_xy(150.0, 150.0, 0.0, -10.0);
     rt.frame(1.0 / 60.0);
     assert_eq!((rt.state.wheels.len(), y_of(&rt, "canvas")), (1, 10.0));
+    // Without phases, a delta wholly on the other axis (Shift + wheel) starts a new gesture.
+    rt.wheel_xy(150.0, 150.0, -15.0, 0.0);
+    rt.frame(1.0 / 60.0);
+    assert_eq!((rt.state.wheels.len(), rt.state.pan.0), (2, -15.0));
 }
 
 #[test]
@@ -153,13 +163,25 @@ fn the_middle_button_drags_only_elements_that_take_it() {
     rt.frame(1.0 / 60.0);
     assert_eq!(rt.state.presses, [PointerButton::Middle, PointerButton::Primary]);
 
-    // An element that didn't opt in never hears the middle button.
+    // An element that didn't opt in never hears the middle, back or forward buttons.
     let (x, y) = rt.find("plain").unwrap();
-    rt.button_down(x, y, PointerButton::Middle);
-    rt.pointer_move(x + 20.0, y);
-    rt.button_up(x + 20.0, y, PointerButton::Middle);
+    for button in [PointerButton::Middle, PointerButton::Back, PointerButton::Forward] {
+        rt.button_down(x, y, button);
+        rt.pointer_move(x + 20.0, y);
+        rt.button_up(x + 20.0, y, button);
+        rt.button_down(x, y, button);
+        rt.button_up(x, y, button);
+    }
     rt.frame(1.0 / 60.0);
-    assert_eq!(rt.state.plain_drags, 0);
+    assert_eq!((rt.state.plain_drags, rt.state.plain_presses), (0, 0));
+
+    // Back and forward buttons press elements that opted in.
+    for button in [PointerButton::Back, PointerButton::Forward] {
+        rt.button_down(150.0, 150.0, button);
+        rt.button_up(150.0, 150.0, button);
+    }
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.presses, [PointerButton::Middle, PointerButton::Primary, PointerButton::Back, PointerButton::Forward]);
 }
 
 #[test]
@@ -169,7 +191,7 @@ fn a_key_release_goes_to_the_focused_element_then_up_to_the_root() {
     rt.state.space = true;
     assert!(rt.key_up(space.clone()));
     rt.frame(1.0 / 60.0);
-    assert_eq!(rt.state.ups, [("root", Key::Text(" ".into()))], "with nothing focused, the root hears it");
+    assert_eq!(rt.state.ups, [("root", Key::Text(" ".into()), Mods::default())], "with nothing focused, the root hears it");
     assert!(!rt.state.space);
 
     let (x, y) = rt.find("shape").unwrap();
@@ -177,9 +199,35 @@ fn a_key_release_goes_to_the_focused_element_then_up_to_the_root() {
     rt.pointer_up(x, y);
     rt.frame(1.0 / 60.0);
     rt.state.ups.clear();
-    rt.key_up(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    let shift = Mods { shift: true, ..Mods::default() };
+    rt.key_up(KeyEvent { key: Key::Escape, mods: shift });
     rt.frame(1.0 / 60.0);
-    assert_eq!(rt.state.ups, [("shape", Key::Escape), ("root", Key::Escape)], "the focused element first, then its ancestors");
+    assert_eq!(rt.state.ups, [("shape", Key::Escape, shift), ("root", Key::Escape, shift)], "the focused element first, then its ancestors");
+
+    // A key pressed while `shape` had focus still delivers its release to `shape` after a
+    // canvas click blurs `shape`.
+    rt.state.ups.clear();
+    rt.key(space.clone());
+    rt.pointer_down(150.0, 150.0);
+    rt.pointer_up(150.0, 150.0);
+    rt.key_up(space.clone());
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.ups, [("shape", Key::Text(" ".into()), Mods::default()), ("root", Key::Text(" ".into()), Mods::default())]);
+
+    // IME composition (and the Enter or Escape release that ends it) never leaks to `on_key_up`.
+    let (fx, fy) = rt.find("field").unwrap();
+    rt.pointer_down(fx, fy);
+    rt.pointer_up(fx, fy);
+    rt.frame(1.0 / 60.0);
+    rt.state.ups.clear();
+    rt.ime(Ime::Preedit("ni".into(), Some((2, 2))));
+    rt.key_up(KeyEvent { key: Key::Text("i".into()), mods: Mods::default() });
+    rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    rt.ime(Ime::Commit("你".into()));
+    rt.key_up(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    rt.frame(1.0 / 60.0);
+    assert!(rt.state.ups.is_empty(), "IME key releases must not leak: {:?}", rt.state.ups);
+    assert_eq!(rt.state.edit.text, "你");
 }
 
 #[test]

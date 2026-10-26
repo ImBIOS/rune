@@ -157,7 +157,7 @@ impl<S: 'static> Running<S> {
                 let mut logical = (pressed || self.rt.wants_key_up()).then(|| crate::window::map_key(&event.logical_key, self.input.mods)).flatten();
                 if let Some(key) = &mut logical {
                     key.mods = modifiers(self.input.mods);
-                    if key.mods.cmd && let crate::Key::Text(text) = &key.key && text.chars().count() == 1 {
+                    if key.mods.cmd && let crate::Key::Text(text) = &key.key && text != " " && text.chars().count() == 1 {
                         key.key = crate::Key::Command(text.chars().next().unwrap().to_ascii_lowercase());
                     }
                 }

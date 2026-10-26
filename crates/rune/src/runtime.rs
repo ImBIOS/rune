@@ -441,7 +441,7 @@ enum Action {
     KeyUp(KeyEvent),
     /// A wheel delta at window point (x, y) for the `on_wheel` handlers at the pointer,
     /// innermost first (`gesture_dispatch.rs`).
-    Wheel(Vec<String>, crate::WheelEvent),
+    Wheel(u64, Vec<String>, crate::WheelEvent),
     Gesture(Vec<String>, gesture_dispatch::Gesture),
     Ime(Ime),
     Paste(crate::ClipboardContent, Option<Option<String>>),
@@ -759,6 +759,14 @@ pub struct Runtime<S: 'static> {
     has_dissolve: bool,
     /// Some picture sizes a side from its image's ratio (`pixel_aspect`).
     has_pixel_aspect: bool,
+    has_drawn_layout: bool,
+    has_key_up: bool,
+    /// The focus where the held non-IME key(s) went down, so a release after focus moves
+    /// still reaches that element first.
+    key_focus: Option<String>,
+    keys_held: u32,
+    ime_keys_down: u32,
+    ime_eat_key_up: bool,
     /// Pictures whose image changed shape since the last commit, which lays them out at once.
     aspect_snap: Vec<NodeId>,
     /// Drawn rect per node (points, root space), for tools and hit tests.
@@ -1071,6 +1079,12 @@ impl<S: 'static> Runtime<S> {
             dissolve_scratch: Vec::new(),
             has_dissolve: false,
             has_pixel_aspect: false,
+            has_drawn_layout: false,
+            has_key_up: false,
+            key_focus: None,
+            keys_held: 0,
+            ime_keys_down: 0,
+            ime_eat_key_up: false,
             aspect_snap: Vec::new(),
             drawn: Vec::new(),
             drawn_scale: Vec::new(),
@@ -1428,7 +1442,7 @@ impl<S: 'static> Runtime<S> {
 
     /// Keyboard input, a focus change or a file drag step is queued for the next frame.
     pub(crate) fn keys_queued(&self) -> bool {
-        self.queue.iter().any(|a| matches!(a, Action::Physical(..) | Action::Key { .. } | Action::WindowFocus(_) | Action::Files(_)))
+        self.queue.iter().any(|a| matches!(a, Action::Physical(..) | Action::Key { .. } | Action::KeyUp(_) | Action::WindowFocus(_) | Action::Files(_)))
     }
 
     /// The last committed frame is out of date: state changed (an update, poll or handler), or
@@ -1793,7 +1807,7 @@ impl<S: 'static> Runtime<S> {
     /// sooner than a frame interval after the last poll. None when the step's own poll at
     /// `target` takes everything due.
     fn timer_step(&self, target: f64) -> Option<f64> {
-        let deadline = self.logical_wake_deadline().filter(|deadline| *deadline > self.clock)?;
+        let deadline = self.logical_wake_deadline()?;
         let at = deadline.max(self.clock + crate::window::TIMER_FRAME.as_secs_f64());
         (at < target).then_some(at)
     }
@@ -1859,7 +1873,7 @@ impl<S: 'static> Runtime<S> {
             // the previous field. The same boundary covers an earlier handler, and lets a
             // file drag find only what is mounted and reachable now (a covered window builds
             // nothing until this).
-            if (ran || self.dirty) && matches!(&action, Action::Key { .. } | Action::Physical(..) | Action::Ime(_) | Action::Paste(..) | Action::Files(_)) {
+            if (ran || self.dirty) && matches!(&action, Action::Key { .. } | Action::KeyUp(_) | Action::Physical(..) | Action::Ime(_) | Action::Paste(..) | Action::Files(_)) {
                 for (source, target) in std::mem::take(&mut tx.text_flights) {
                     self.capture_text_flight(source, target);
                 }
@@ -2279,12 +2293,18 @@ impl<S: 'static> Runtime<S> {
             Action::Files(event) => self.run_files(event, &mut one),
             Action::Key { ev, repeat } => {
                 if self.held_gate(None, Some(&ev.key), repeat) { return false; }
+                if ! matches!(ev.key, crate::Key::Modifier { .. }) { self.note_key_down(repeat); }
                 self.route_key(&ev, repeat, &mut one)
             }
             Action::KeyUp(ev) => self.route_key_up(&ev, &mut one),
-            Action::Wheel(chain, ev) => self.run_wheel(chain, ev, &mut one),
+            Action::Wheel(gesture, chain, ev) => self.run_wheel(gesture, chain, ev, &mut one),
             Action::Gesture(chain, gesture) => self.run_gesture(chain, gesture, &mut one),
-            Action::Ime(ev) => self.with_focused(|e| e.ime(&ev), &mut one),
+            Action::Ime(ev) => {
+                let active = self.composing() || matches!(&ev, Ime::Preedit(s, _) | Ime::Commit(s) if !s.is_empty());
+                let ran = self.with_focused(|e| e.ime(&ev), &mut one);
+                if ran && active { self.ime_eat_key_up = true; }
+                ran
+            }
             Action::Paste(content, target) => {
                 if target.is_some_and(|target| target != self.paste_target()) { return false; }
                 let hook = self.focused_input().and_then(|i| i.paste.clone());
@@ -3594,6 +3614,8 @@ impl<S: 'static> Runtime<S> {
         self.nodes = nodes;
         self.has_dissolve = self.nodes.iter().any(|n| n.vis.blend == crate::render::Blend::PlusLighter);
         self.has_pixel_aspect = self.nodes.iter().any(|n| n.pixel_aspect.is_some());
+        self.has_drawn_layout = self.nodes.iter().any(|n| n.on_drawn_layout.is_some());
+        self.has_key_up = self.nodes.iter().any(|n| n.focus.key_up.is_some());
         // A flight that left the tree stays lifted and covered while it exits, so it doesn't pop.
         self.flying.retain(|(id, _)| self.node_index.contains_key(id));
         if self.nodes.len() > present_len || !self.flying.is_empty() { self.update_layer_paint_order(); }
@@ -3970,6 +3992,10 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub fn pointer_down(&mut self, x: f32, y: f32) {
+        if self.capture.is_some() && self.capture_button != crate::PointerButton::Primary {
+            self.pointer = Some((x, y));
+            return;
+        }
         self.drop_drag_out_request();
         self.pointer = Some((x, y));
         self.keyboard_focus = false;
@@ -4093,6 +4119,14 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub fn pointer_up(&mut self, x: f32, y: f32) {
+        if self.capture.is_some() && self.capture_button != crate::PointerButton::Primary {
+            self.pointer = Some((x, y));
+            return;
+        }
+        self.release_capture(x, y);
+    }
+
+    pub(super) fn release_capture(&mut self, x: f32, y: f32) {
         // Hosts release at the last position they saw, which a leave doesn't move.
         let left = self.left_in_capture;
         self.release(x, y);
@@ -7191,6 +7225,25 @@ mod tests {
             }
             assert!(rt.wake_deadlines.len() <= 32, "delay {delay}: {} deadlines pending", rt.wake_deadlines.len());
         }
+    }
+
+    #[test]
+    fn a_zero_wake_does_not_hide_a_later_wake_in_a_coarse_frame() {
+        use std::time::Duration;
+        fn poll(s: &mut Vec<f64>, now: f64, tx: &mut Tx) -> bool {
+            s.push((now * 1000.0).round() / 1000.0);
+            if s.len() == 1 {
+                tx.wake_after(Duration::ZERO);
+                tx.wake_after(Duration::from_millis(50));
+            }
+            false
+        }
+        fn view(_: &Vec<f64>, _: &mut Cx<Vec<f64>>) -> El { el() }
+        let mut rt = Runtime::new(Vec::new(), view, (100.0, 100.0), Env::new(true, 1.0));
+        rt.poll = Some(poll);
+        rt.frame(0.0);
+        rt.frame(0.1);
+        assert_eq!(rt.state, [0.0, 0.017, 0.05, 0.1]);
     }
 
     #[test]

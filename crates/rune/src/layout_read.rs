@@ -49,6 +49,14 @@ impl<S: 'static> Runtime<S> {
         [t[0] - dx, t[1] - dy, t[2] - t[0], t[3] - t[1]]
     }
 
+    /// Node `i`'s unscrolled layout rect, scaled by its own and its ancestors' static `El::scale`.
+    fn static_layout(&self, i: usize) -> [f32; 4] {
+        let t = self.nodes[i].target;
+        let k = std::iter::successors(Some(i), |&p| self.nodes[p].parent)
+            .fold(1.0_f32, |k, p| k * self.nodes[p].static_scale);
+        [t[0] * k, t[1] * k, (t[2] - t[0]) * k, (t[3] - t[1]) * k]
+    }
+
     fn layout_of(&self, nodes: &[Node], key: &str) -> Option<[f32; 4]> {
         let i = nodes.iter().position(|n| crate::flight::selects(key, &n.path, n.key.as_deref()))?;
         Some(self.laid_out(nodes, i))
@@ -92,9 +100,10 @@ impl<S: 'static> Runtime<S> {
     /// Counts a frame's commit toward [`ECHOES`]: `feedback` when layout reads or `on_layout`
     /// caused it, `other` when anything else did.
     pub(super) fn count_layout_echo(&mut self, feedback: bool, other: bool) {
-        if other {
+        let scrolling = self.scrolls.values().any(|st| st.scrolling || st.direct || st.glide.is_some() || st.x.glide.is_some());
+        if other || scrolling {
             self.layout_echoes = 0;
-        } else if feedback && !self.scrolls.values().any(|st| st.scrolling || st.glide.is_some() || st.x.glide.is_some()) {
+        } else if feedback {
             self.layout_echoes += 1;
         }
     }
@@ -123,7 +132,7 @@ impl<S: 'static> Runtime<S> {
     /// layout feedback and falls quiet with the rest of it; one it doesn't (a live value) always
     /// reports, as scrolling reopens feedback. True when it queued any.
     pub(super) fn report_drawn(&mut self) -> bool {
-        if self.drawn_fired.is_empty() && self.nodes.iter().all(|n| n.on_drawn_layout.is_none()) { return false; }
+        if !self.has_drawn_layout && self.drawn_fired.is_empty() { return false; }
         let mut queued = false;
         let quiet = !self.layout_feedback_open();
         let last = std::mem::take(&mut self.drawn_fired);
@@ -137,7 +146,7 @@ impl<S: 'static> Runtime<S> {
                 if let Some(old) = last.get(&id) { fired.insert(id, *old); }
                 continue;
             }
-            let laid = self.laid_out(&self.nodes, i);
+            let laid = self.static_layout(i);
             let old = last.get(&id).copied();
             if !moved(old.map(|o| o.0), Some(drawn)) {
                 fired.insert(id, old.unwrap_or((drawn, laid)));

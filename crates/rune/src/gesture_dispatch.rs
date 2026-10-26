@@ -25,43 +25,53 @@ impl<S: 'static> Runtime<S> {
         let moved = ev.dx != 0.0 || ev.dy != 0.0;
         if moved {
             self.dismiss_help();
-            self.wheel_delta_arrived();
+            self.wheel_delta_arrived(ev.dx, ev.dy);
         }
         if moved || ev.phase != GesturePhase::Moved {
             let ev = WheelEvent { momentum: self.wheel_lock.momentum, ..ev };
-            if !self.offer_wheel(ev) { self.wheel_scroll(ev.x, ev.y, ev.dx, ev.dy); }
+            let gesture = self.wheel_lock.gesture;
+            if !self.offer_wheel(gesture, ev) { self.wheel_scroll_for(gesture, ev.x, ev.y, ev.dx, ev.dy); }
         }
         if ev.phase == GesturePhase::Ended { self.wheel_ended(); }
     }
 
     /// Queues `ev` for the `on_wheel` handlers it may go to; false leaves it to scrolling now.
-    fn offer_wheel(&mut self, ev: WheelEvent) -> bool {
+    fn offer_wheel(&mut self, gesture: u64, ev: WheelEvent) -> bool {
         let lock = &self.wheel_lock;
+        let same_gesture = lock.run_gesture == gesture;
         // A delta queued this frame may yet be taken: later ones wait their turn behind it.
-        let pending = self.queue.iter().any(|a| matches!(a, Action::Wheel(..)));
-        if lock.handler.is_none() && lock.horizontal.is_some() && !pending { return false; }
-        let chain = if lock.handler.is_some() { Vec::new() } else { self.gesture_chain(ev.x, ev.y, |g| g.wheel.is_some(), true) };
-        if chain.is_empty() && lock.handler.is_none() && !pending { return false; }
-        self.queue.push(Action::Wheel(chain, ev));
+        let pending = self.queue.iter().any(|a| matches!(a, Action::Wheel(g, ..) if *g == gesture));
+        if same_gesture && lock.handler.is_none() && lock.horizontal.is_some() && !pending { return false; }
+        let chain = if same_gesture && lock.handler.is_some() { Vec::new() } else { self.gesture_chain(ev.x, ev.y, |g| g.wheel.is_some(), true) };
+        if chain.is_empty() && !(same_gesture && lock.handler.is_some()) && !pending { return false; }
+        self.queue.push(Action::Wheel(gesture, chain, ev));
         true
     }
 
     /// A queued wheel delta: the handler holding the gesture hears it, else each handler
     /// under the pointer until one takes it, else it scrolls.
-    pub(super) fn run_wheel(&mut self, chain: Vec<String>, ev: WheelEvent, tx: &mut Tx) -> bool {
+    pub(super) fn run_wheel(&mut self, gesture: u64, chain: Vec<String>, ev: WheelEvent, tx: &mut Tx) -> bool {
+        self.wheel_lock.sync_gesture(gesture);
+        let mut taken = None;
         if let Some(path) = self.wheel_lock.handler.clone() {
-            if let Some(taken) = self.call_wheel(&path, ev, tx) { return taken; }
-            self.wheel_lock.handler = None;
+            taken = self.call_wheel(&path, ev, tx);
+            if taken.is_none() { self.wheel_lock.handler = None; }
         } else if self.wheel_lock.horizontal.is_none() {
             for path in chain {
                 if self.call_wheel(&path, ev, tx) == Some(true) {
                     self.wheel_lock.handler = Some(path);
-                    return true;
+                    taken = Some(true);
+                    break;
                 }
             }
         }
-        self.wheel_scroll(ev.x, ev.y, ev.dx, ev.dy);
-        false
+        if taken.is_none() {
+            self.wheel_scroll_for(gesture, ev.x, ev.y, ev.dx, ev.dy);
+        }
+        if self.wheel_lock.gesture != gesture && !self.queue.iter().any(|a| matches!(a, Action::Wheel(g, ..) if *g == gesture)) {
+            self.wheel_lock.sync_gesture(self.wheel_lock.gesture);
+        }
+        taken.unwrap_or(false)
     }
 
     /// Element `path`'s `on_wheel` on `ev`, in its own points; None when it's gone.
@@ -184,6 +194,7 @@ impl<S: 'static> Runtime<S> {
         if n.on_drag.is_some() { self.queue.push(Action::Drag(path.clone(), d, button)); }
         self.drag_out_armed = false;
         self.double_armed = false;
+        self.last_press = None;
         self.press_at = (x, y);
         self.press_down_t = self.now_clock();
         self.press_moved = false;
@@ -198,7 +209,7 @@ impl<S: 'static> Runtime<S> {
         match button {
             PointerButton::Primary => self.pointer_up(x, y),
             PointerButton::Secondary => self.secondary_up(x, y),
-            _ if self.capture.is_some() && self.capture_button == button => self.pointer_up(x, y),
+            _ if self.capture.is_some() && self.capture_button == button => self.release_capture(x, y),
             _ => {}
         }
     }
@@ -208,6 +219,7 @@ impl<S: 'static> Runtime<S> {
     /// `physical_then` instead, so the focused `on_physical_input` hears it first.
     pub fn key_up(&mut self, ev: KeyEvent) -> bool {
         if !self.wants_key_up() { return false; }
+        if self.queue.is_empty() && !self.dirty && self.eat_ime_key_up() { return false; }
         self.queue.push(Action::KeyUp(ev));
         true
     }
@@ -219,25 +231,81 @@ impl<S: 'static> Runtime<S> {
 
     /// Some element hears key releases, so a host maps them to logical keys.
     pub(crate) fn wants_key_up(&self) -> bool {
-        self.nodes.iter().any(|n| n.focus.key_up.is_some())
+        self.has_key_up || !self.queue.is_empty() || self.dirty
+    }
+
+    /// Records a key press for [`Self::route_key_up`]: whether it belongs to an open IME
+    /// composition, or which focused element should still hear its release if focus moves.
+    pub(super) fn note_key_down(&mut self, repeat: bool) {
+        if self.composing() {
+            if !repeat { self.ime_keys_down += 1; }
+            self.ime_eat_key_up = true;
+        } else if !repeat {
+            self.ime_keys_down = 0;
+            self.ime_eat_key_up = false;
+            self.key_focus = self.focused.clone();
+            self.keys_held += 1;
+        }
+    }
+
+    /// Suppresses key releases that belong to an IME composition (while preedit is open, or
+    /// the release of the key that confirmed or cancelled it).
+    pub(super) fn eat_ime_key_up(&mut self) -> bool {
+        if self.composing() {
+            self.ime_keys_down = self.ime_keys_down.saturating_sub(1);
+            return true;
+        }
+        if self.ime_keys_down > 0 {
+            self.ime_keys_down -= 1;
+            if self.ime_keys_down == 0 { self.ime_eat_key_up = false; }
+            return true;
+        }
+        std::mem::take(&mut self.ime_eat_key_up)
     }
 
     /// A key release goes to the focused element and up through its ancestors, else to the
-    /// root or the open modal.
+    /// root or the open modal. If focus moved since the key went down, the element that had
+    /// focus on the press (and its ancestors) hears the release first.
     pub(super) fn route_key_up(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        if self.eat_ime_key_up() { return false; }
         tx.focused = self.focused_key();
+        let pressed = self.key_focus.as_deref().and_then(|p| self.nodes.iter().enumerate().position(|(i, n)| n.path == p && !self.subtree_exiting(i)));
         let focused = self.focused.as_deref().and_then(|p| self.nodes.iter().enumerate().position(|(i, n)| n.path == p && !self.subtree_exiting(i)));
-        let start = focused.or_else(|| self.active_modal()).or((!self.nodes.is_empty()).then_some(0));
-        let mut at = start;
-        while let Some(i) = at {
-            if !self.allowed(i) { break; }
+        if self.keys_held > 0 {
+            self.keys_held -= 1;
+            if self.keys_held == 0 { self.key_focus = None; }
+        } else {
+            self.key_focus = None;
+        }
+        let mut chain = Vec::new();
+        for start in [pressed, focused].into_iter().flatten() {
+            let mut at = Some(start);
+            while let Some(i) = at {
+                if !self.allowed(i) { break; }
+                if !chain.contains(&i) { chain.push(i); }
+                at = self.nodes[i].parent;
+            }
+        }
+        if chain.is_empty()
+            && let Some(i) = self.active_modal().or((!self.nodes.is_empty()).then_some(0))
+            && self.allowed(i)
+        {
+            chain.push(i);
+        } else if pressed.is_some() && focused.is_some() && pressed != focused {
+            // Keep shared ancestors (such as the root) after both focused elements.
+            let mut shared = Vec::new();
+            let mut at = focused;
+            while let Some(i) = at {
+                shared.push(i);
+                at = self.nodes[i].parent;
+            }
+            chain.sort_by_key(|i| shared.iter().position(|s| s == i).map_or(0, |p| p + 1));
+        }
+        for i in chain {
             if let Some(f) = self.nodes[i].focus.key_up.clone() && f(handler_state(&mut self.state), ev, tx) {
                 self.events.push(format!("key-up {:?}", ev.key));
                 return true;
             }
-            // With nothing focused only the root (or modal) hears it.
-            if focused.is_none() { break; }
-            at = self.nodes[i].parent;
         }
         false
     }

@@ -12,19 +12,22 @@ struct S {
     drags: Vec<(f32, f32)>,
     /// The node grows by 20 pt each time it reports its drawn width: layout feedback that must fall quiet.
     chase: bool,
+    chase_scale: bool,
     width: f32,
+    scale: f32,
 }
 
 fn new() -> S {
-    S { pan: Live::new([0.0, 0.0]), zoom: Live::new(1.0), drawn: Vec::new(), laid: Vec::new(), pressed: Vec::new(), drags: Vec::new(), chase: false, width: 20.0 }
+    S { pan: Live::new([0.0, 0.0]), zoom: Live::new(1.0), drawn: Vec::new(), laid: Vec::new(), pressed: Vec::new(), drags: Vec::new(), chase: false, chase_scale: false, width: 20.0, scale: 1.0 }
 }
 
 /// A 200 pt world under the camera, with a node at (100, 100) and one at (20, 20).
 fn view(s: &S, _: &mut Cx<S>) -> El {
-    let node = el().key("node").pin(Some(100.0), Some(100.0), None, None).size(s.width, 20.0)
+    let node = el().key("node").pin(Some(100.0), Some(100.0), None, None).size(s.width, 20.0).scale(s.scale)
         .on_drawn_layout(|s: &mut S, r| {
             s.drawn.push(r);
             if s.chase { s.width = 20.0 + r[2]; }
+            if s.chase_scale { s.scale += 0.25; }
         })
         .on_layout(|s: &mut S, r| s.laid.push(r))
         .on_press(|s: &mut S| s.pressed.push("node"))
@@ -113,6 +116,15 @@ fn a_handler_that_moves_its_own_element_falls_quiet() {
     let mut frames = 0;
     while (rt.frame(1.0 / 60.0) || rt.has_pending_input()) && frames < 2_000 { frames += 1; }
     assert!(frames < 2_000, "layout feedback stops");
+    assert!(rt.state.drawn.len() <= 8, "a few reports, then quiet: {:?}", rt.state.drawn);
+
+    let mut rt = app();
+    rt.set_system_reduced_motion(true);
+    rt.update(|s, _| s.chase_scale = true);
+    rt.state.pan.set([5.0, 0.0]);
+    let mut frames = 0;
+    while (rt.frame(1.0 / 60.0) || rt.has_pending_input()) && frames < 2_000 { frames += 1; }
+    assert!(frames < 2_000, "static scale feedback stops too");
     assert!(rt.state.drawn.len() <= 8, "a few reports, then quiet: {:?}", rt.state.drawn);
 }
 

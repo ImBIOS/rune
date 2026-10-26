@@ -377,6 +377,7 @@ impl<S: 'static> Runtime<S> {
         let Some(base) = number("base") else { return };
         let Some(expected) = event["expected"].as_str() else { return };
         let mut tx = self.transaction();
+        let composing_before = self.composing();
         let changed = self.with_focused(|edit| {
             // Browser edits belong to the snapshot from which its context was mirrored.
             if !edit.text.get(base..).is_some_and(|s| s.starts_with(expected)) { return EditOutcome::default(); }
@@ -399,6 +400,7 @@ impl<S: 'static> Runtime<S> {
             }
             EditOutcome::default()
         }, &mut tx);
+        if composing_before || event["kind"] == "preedit" { self.ime_eat_key_up = true; }
         if changed { self.dirty = true; }
         merge(&mut self.pending, tx);
     }

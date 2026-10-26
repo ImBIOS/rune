@@ -82,14 +82,28 @@ impl<S: 'static> Runtime<S> {
         })
     }
     pub(super) fn dispatch_physical(&mut self, event: PhysicalInput, fallback: Option<Fallback>, tx: &mut Tx) -> bool {
+        use crate::PhysicalKeyCode as Code;
+        let is_mod = |c: Code| matches!(c, Code::ShiftLeft | Code::ShiftRight | Code::ControlLeft
+            | Code::ControlRight | Code::AltLeft | Code::AltRight | Code::SuperLeft | Code::SuperRight
+            | Code::CapsLock | Code::Fn);
         match event {
             PhysicalInput::Key { key, pressed: true, repeat, .. } => {
                 if self.held_gate(Some(key), fallback.as_ref().map(|f| &f.key.key), repeat) { return false; }
+                if !is_mod(key) { self.note_key_down(repeat); }
             }
             PhysicalInput::Key { key, pressed: false, .. } => {
                 if self.held.as_ref().is_some_and(|h| h.physical == Some(key)) { self.held = None; }
+                if fallback.is_none() && !is_mod(key) && self.composing() {
+                    self.ime_keys_down = self.ime_keys_down.saturating_sub(1);
+                }
             }
-            PhysicalInput::FocusLost | PhysicalInput::Modifiers(_) => {}
+            PhysicalInput::FocusLost => {
+                self.key_focus = None;
+                self.keys_held = 0;
+                self.ime_keys_down = 0;
+                self.ime_eat_key_up = false;
+            }
+            PhysicalInput::Modifiers(_) => {}
         }
         let repeat = matches!(event, PhysicalInput::Key { repeat: true, .. });
         let consumed = self.offer_physical(&event, tx);

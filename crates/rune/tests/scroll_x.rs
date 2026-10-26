@@ -110,15 +110,15 @@ fn a_gesture_locks_to_its_first_axis_in_nested_viewports() {
     assert_eq!((x_of(&rt, "tile0"), y_of(&rt, "head")), (tile, head - 21.0));
 
     // Mostly horizontal: the strip scrolls and the page stays, through the gesture's momentum
-    // (a phase that begins as the touch ends).
+    // (a phase that begins as the touch ends), even once the pointer leaves the strip.
     new_gesture(&mut rt);
     rt.wheel_began();
     let strip_at = y_of(&rt, "tile0") + 50.0;
     rt.wheel_xy(150.0, strip_at, -20.0, -3.0);
-    rt.wheel_xy(150.0, strip_at, -1.0, -30.0);
+    rt.wheel_xy(150.0, 280.0, -1.0, -30.0);
     rt.wheel_ended();
     rt.wheel_began();
-    rt.wheel_xy(150.0, strip_at, -10.0, -10.0);
+    rt.wheel_xy(150.0, 280.0, -10.0, -10.0);
     rt.wheel_ended();
     rt.frame(1.0 / 60.0);
     assert_eq!((x_of(&rt, "tile0"), y_of(&rt, "head")), (tile - 31.0, head - 21.0));

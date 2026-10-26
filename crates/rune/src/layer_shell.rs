@@ -22,7 +22,7 @@ use crate::overlay::{Placement, ScreenEdge};
 use crate::{OverlayInput, OverlayOptions, OverlayPlacement};
 
 pub(crate) enum Input {
-    Move(f32, f32), Leave, Button(bool), Key(crate::KeyEvent),
+    Move(f32, f32), Leave, Button(bool), Key(crate::KeyEvent), KeyUp(crate::KeyEvent),
     Physical(crate::PhysicalInput, Option<crate::KeyEvent>),
 }
 
@@ -116,10 +116,12 @@ impl Dispatch<WlKeyboard, ()> for State {
                 use winit::platform::scancode::PhysicalKeyExtScancode;
                 if let Some(xkb) = &state.xkb {
                     let pressed = pressed == wl_keyboard::KeyState::Pressed;
-                    let fallback = pressed.then(|| key_event(xkb, key)).flatten();
+                    let fallback = key_event(xkb, key);
                     if let winit::keyboard::PhysicalKey::Code(key) = crate::PhysicalKeyCode::from_scancode(key) {
                         state.input.push(Input::Physical(crate::PhysicalInput::Key { key, mods: key_mods(xkb), pressed, repeat: false }, fallback));
-                    } else if let Some(key) = fallback { state.input.push(Input::Key(key)); }
+                    } else if let Some(key) = fallback {
+                        state.input.push(if pressed { Input::Key(key) } else { Input::KeyUp(key) });
+                    }
                 }
             }
             _ => {}
