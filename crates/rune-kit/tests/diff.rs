@@ -169,6 +169,7 @@ struct App {
     selections: Vec<Option<LineRange>>,
     comments: Vec<LineRange>,
     visible: Vec<usize>,
+    actions: Vec<usize>,
 }
 
 const NOTE_H: f32 = 90.0;
@@ -177,6 +178,7 @@ fn view(s: &App, _: &mut Cx<App>) -> El {
     let k = Kit::neutral(true);
     let diff = DiffView::new(|s: &App| &s.diff, |s: &mut App| &mut s.diff)
         .annotation(|_: &App, a: &Annotation| el().key(format!("note-{}", a.id)).w_full().h(NOTE_H))
+        .header_actions(|_: &App, f| el().key("act").size(28.0, 20.0).on_press(move |s: &mut App| s.actions.push(f)))
         .on_select(|s: &mut App, sel, _| s.selections.push(sel))
         .on_comment(|s: &mut App, lines, _| s.comments.push(lines))
         .on_visible_file(|s: &mut App, f| s.visible.push(f))
@@ -189,7 +191,7 @@ fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 fn runtime(diff: DiffState, size: (f32, f32)) -> Runtime<App> {
-    let app = App { diff, selections: Vec::new(), comments: Vec::new(), visible: Vec::new() };
+    let app = App { diff, selections: Vec::new(), comments: Vec::new(), visible: Vec::new(), actions: Vec::new() };
     let mut rt = Runtime::new(app, view, size, Env::new(true, 2.0));
     rt.on_key = Some(on_key);
     rt.frame(0.0);
@@ -411,31 +413,52 @@ fn unified_file_headers_span_the_viewport_while_code_scrolls_sideways() {
     let files = (0..2).map(|i| FileDiff::from_texts(format!("dir/f{i}.rs"), &old, &new)).collect();
     let mut d = DiffState::new(files);
     d.set_mode(DiffMode::Unified);
-    let mut rt = runtime(d, (600.0, 400.0));
-    let inside = |rt: &Runtime<App>, end: &str| {
+    let app = App { diff: d, selections: Vec::new(), comments: Vec::new(), visible: Vec::new(), actions: Vec::new() };
+    let mut rt = Runtime::new(app, view, (600.0, 400.0), Env::new(true, 2.0));
+    rt.on_key = Some(on_key);
+    // Frame 0 already settles the viewport width in the same commit, with no one-frame lag.
+    rt.frame(0.0);
+    let inside = |rt: &Runtime<App>, w: f32, end: &str| {
         let r = find(rt, end).rect;
-        assert!(r[0] >= -0.5 && r[0] + r[2] <= 600.5 && r[2] > 0.0, "{end} within the viewport: {r:?}");
+        assert!(r[0] >= -0.5 && r[0] + r[2] <= w + 0.5 && r[2] > 0.0, "{end} within {w}: {r:?}");
     };
-    let check = |rt: &Runtime<App>| {
-        inside(rt, "df0/inner/adds");
-        inside(rt, "df0/inner/dels");
+    let check = |rt: &Runtime<App>, w: f32| {
+        inside(rt, w, "df0/inner/adds");
+        inside(rt, w, "df0/inner/dels");
+        inside(rt, w, "df0/inner/actions");
         let h = find(rt, "df0");
-        assert!(h.rect[0].abs() < 0.5 && (h.rect[2] - 600.0).abs() < 0.5, "header spans the viewport: {:?}", h.rect);
+        assert!(h.rect[0].abs() < 0.5 && (h.rect[2] - w).abs() < 0.5, "header spans {w}: {:?}", h.rect);
     };
-    check(&rt);
+    check(&rt, 600.0);
+    settle(&mut rt);
     for dx in [-250.0, -250.0] {
         rt.wheel_xy(300.0, 200.0, dx, 0.0);
         settle(&mut rt);
-        check(&rt);
+        check(&rt, 600.0);
     }
     let code = find(&rt, "df0.c2/code").rect;
     assert!(code[0] < -100.0, "the code did scroll: {code:?}");
+
+    // Header actions on the shifted in-list header remain clickable after scrolling sideways.
+    press(&mut rt, "df0/inner/actions");
+    assert_eq!(rt.state.actions, vec![0]);
+
+    // Window resizes update the header width on the resize frame itself (not a frame later).
+    for w in [800.0, 450.0, 600.0] {
+        rt.set_viewport((w, 400.0), 2.0);
+        rt.frame(0.0);
+        check(&rt, w);
+    }
+    press(&mut rt, "df0/inner/actions");
+    assert_eq!(rt.state.actions, vec![0, 0]);
 
     rt.wheel(300.0, 200.0, -150.0);
     settle(&mut rt);
     let sticky = find(&rt, "sticky");
     assert!(sticky.rect[0].abs() < 0.5 && (sticky.rect[2] - 600.0).abs() < 0.5, "sticky spans the viewport: {:?}", sticky.rect);
-    inside(&rt, "sticky/inner/adds");
+    inside(&rt, 600.0, "sticky/inner/adds");
+    press(&mut rt, "sticky/inner/actions");
+    assert_eq!(rt.state.actions, vec![0, 0, 0]);
 }
 
 #[test]
@@ -533,7 +556,7 @@ fn diff_50k_time() {
     let start = Instant::now();
     let state = DiffState::new(vec![file]);
     let rows_ms = start.elapsed().as_secs_f64() * 1e3;
-    let app = App { diff: state, selections: Vec::new(), comments: Vec::new(), visible: Vec::new() };
+    let app = App { diff: state, selections: Vec::new(), comments: Vec::new(), visible: Vec::new(), actions: Vec::new() };
     let start = Instant::now();
     let mut rt = Runtime::new(app, view, (1200.0, 900.0), Env::new(true, 2.0));
     rt.frame(0.0);
@@ -542,7 +565,7 @@ fn diff_50k_time() {
     // A commit costs the same as a short diff's: the rows in view, not the length.
     {
         let (old, new) = numbered(300, 7);
-        let app = App { diff: DiffState::new(vec![FileDiff::from_texts("small.rs", &old, &new)]), selections: Vec::new(), comments: Vec::new(), visible: Vec::new() };
+        let app = App { diff: DiffState::new(vec![FileDiff::from_texts("small.rs", &old, &new)]), selections: Vec::new(), comments: Vec::new(), visible: Vec::new(), actions: Vec::new() };
         let mut small = Runtime::new(app, view, (1200.0, 900.0), Env::new(true, 2.0));
         for _ in 0..30 {
             small.frame(1.0 / 120.0);

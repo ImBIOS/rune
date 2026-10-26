@@ -231,6 +231,22 @@ pub(crate) fn read_layout(key: &str, rect: Option<[f32; 4]>) {
     record(|| Read::Layout(key.to_owned(), rect));
 }
 
+/// [`Cx::layout`](crate::Cx::layout) for a component that builds inside a view without taking
+/// [`Cx`](crate::Cx); `None` outside a view build.
+pub fn layout(key: &str) -> Option<[f32; 4]> {
+    SCOPES.with_borrow_mut(|scopes| {
+        let s = scopes.last_mut()?;
+        let rect = s.seen.layout.get(key).copied().flatten();
+        if !s.replayed.layout.iter().any(|k| k == key) {
+            s.replayed.layout.push(key.to_owned());
+        }
+        if !s.reads.is_empty() {
+            s.note(&[Read::Layout(key.to_owned(), rect)]);
+        }
+        rect
+    })
+}
+
 fn record(read: impl FnOnce() -> Read) {
     SCOPES.with_borrow_mut(|scopes| {
         if let Some(s) = scopes.last_mut()

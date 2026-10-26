@@ -124,6 +124,9 @@ impl<S: 'static> DiffView<S> {
         let look = Look::new(k);
         let wrap = st.wraps();
         let key = self.key.clone();
+        if !wrap && let Some(r) = rune::memo::layout(&format!("{key}/scroll")) {
+            st.set_viewport(r);
+        }
         let v = Rc::new(View { look, d: self });
         let count = st.rows.len();
         let mut list = col().key("rows").w_full().growth(GrowthSpec::default()).selection_group(true).role("list").label("Diff");
@@ -144,10 +147,9 @@ impl<S: 'static> DiffView<S> {
                 }
                 sticky_changed
             });
-        let viewport = v.d.get_mut.clone();
         let scroll = col().key("scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false });
         let scroll = if wrap { scroll } else { scroll.scroll_xy() };
-        let scroll = scroll.on_layout(move |s: &mut S, r| viewport(s).set_viewport(r)).child(list);
+        let scroll = scroll.child(list);
         let mut root = col().key(key).w_full().grow(1.0).min_h(0.0).fill(v.look.bg).child(scroll);
         if let Some(f) = st.sticky() {
             root = root.child(v.file_header(s, st, f, true).key("sticky").absolute(0.0, 0.0).w_full());

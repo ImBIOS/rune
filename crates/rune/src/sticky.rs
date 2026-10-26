@@ -1,6 +1,6 @@
-//! `El::sticky_top` and `El::sticky_bottom`: elements held to an edge of their scroll viewport
-//! while their parent is in view (CSS `position: sticky`), and `Tx::keep_on_screen`, which holds
-//! an element where it shows across a commit.
+//! `El::sticky_top`, `El::sticky_bottom` and `El::sticky_left`: elements held to an edge of
+//! their scroll viewport while their parent is in view (CSS `position: sticky`), and
+//! `Tx::keep_on_screen`, which holds an element where it shows across a commit.
 //!
 //! The shift is worked out in the paint pass from the offsets that frame applies, so a stuck
 //! header never trails a scroll. Layout is untouched: only drawing, hit testing and what tools
@@ -26,36 +26,92 @@ pub(super) struct Keep {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{col, el};
+    use crate::{Align, Live, Side, col, el, row};
 
     #[test]
     fn sticky_left_holds_a_header_to_the_viewport_while_content_scrolls_sideways() {
-        fn view(_: &(), _: &mut Cx<()>) -> El {
-            col().key("scroll").size(300.0, 200.0).scroll(ScrollSpec { stick_bottom: false }).scroll_xy()
-                .child(col().key("content").min_w(1000.0)
-                    .child(el().key("header").w(300.0).h(30.0).fill(Color::WHITE).sticky_left(0.0))
-                    .child(el().w_full().h(600.0)))
+        struct S {
+            pressed: usize,
+            offset: Live<[f32; 2]>,
         }
-        let mut rt = Runtime::new((), view, (300.0, 200.0), Env::default());
+        fn view(s: &S, _: &mut Cx<S>) -> El {
+            col().size(300.0, 200.0)
+                .child(col().key("scroll").size(300.0, 200.0).scroll(ScrollSpec { stick_bottom: false }).scroll_xy()
+                    .child(col().key("content").min_w(1000.0)
+                        .child(row().key("header").w(300.0).h(30.0).justify_end().items_center().fill(Color::WHITE).sticky_left(0.0)
+                            .live_offset(&s.offset)
+                            .child(el().key("action").size(40.0, 20.0).focusable(true).help("Run action").on_press(|s: &mut S| s.pressed += 1)))
+                        .child(el().w_full().h(600.0))))
+                .child(el().key("pop").size(50.0, 20.0).anchored("action", Side::Bottom, Align::End, 0.0))
+        }
+        let mut rt = Runtime::new(S { pressed: 0, offset: Live::new([0.0, 0.0]) }, view, (300.0, 200.0), Env::default());
         rt.frame(0.0);
         rt.wheel_xy(100.0, 100.0, -250.0, 0.0);
         for _ in 0..60 { rt.frame(1.0 / 60.0); }
-        let h = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("header")).unwrap();
+        let els = rt.elements();
+        let h = els.iter().find(|e| e.key.as_deref() == Some("header")).unwrap();
         assert_eq!(h.rect[0], 0.0);
         assert_eq!(h.stuck, 250.0);
+
+        // A control at the trailing end of the shifted header is clickable, focusable and anchors
+        // overlays and tooltips at its shifted viewport coordinates.
+        let action = els.iter().find(|e| e.key.as_deref() == Some("action")).unwrap();
+        assert_eq!(action.rect, [260.0, 5.0, 40.0, 20.0]);
+        let pop = els.iter().find(|e| e.key.as_deref() == Some("pop")).unwrap();
+        assert_eq!(pop.rect[0], 242.0, "anchored overlay follows sticky_left shift (kept 8pt inside viewport)");
+
+        rt.pointer_move(280.0, 15.0);
+        rt.frame(0.0);
+        rt.frame(rt.help_delay);
+        assert!(rt.help_tooltip().is_some(), "tooltip shows on shifted sticky_left child");
+        rt.pointer_down(280.0, 15.0);
+        rt.pointer_up(280.0, 15.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state.pressed, 1, "shifted header action takes press after sideways scroll");
+
+        // `live_offset` on a sticky_left element translates from the stuck position rather than
+        // being clamped away by the sticky edge.
+        rt.state.offset.set([-12.0, 4.0]);
+        rt.frame(0.0);
+        let h = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("header")).unwrap();
+        assert_eq!((h.rect[0], h.rect[1], h.stuck), (-12.0, 4.0, 250.0));
+    }
+
+    #[test]
+    fn sticky_left_inside_nested_scrollers_moves_vertically_and_stops_at_parent_right() {
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            col().key("vscroll").size(300.0, 200.0).scroll(ScrollSpec { stick_bottom: false })
+                .child(col().w_full()
+                    .child(el().w_full().h(50.0))
+                    .child(col().key("hscroll").w(300.0).h(100.0).scroll(ScrollSpec { stick_bottom: false }).scroll_x()
+                        .child(row().key("band").w(500.0).h(40.0).pr(20.0)
+                            .child(el().key("pin").w(100.0).h(40.0).sticky_left(10.0))))
+                    .child(el().w_full().h(400.0)))
+        }
+        let mut rt = Runtime::new((), view, (300.0, 200.0), Env::default());
+        rt.frame(0.0);
+        // Scroll horizontally inside `hscroll` and vertically in `vscroll`.
+        rt.wheel_xy(150.0, 80.0, -120.0, 0.0);
+        rt.wheel(150.0, 80.0, -30.0);
+        for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        let pin = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("pin")).unwrap();
+        assert_eq!(pin.rect[0], 10.0, "held at inset from horizontal viewport's left");
+        assert_eq!(pin.rect[1], 20.0, "scrolled vertically with its outer row");
+        assert_eq!(pin.stuck, 130.0);
     }
 
     #[test]
     fn cached_section_with_sticky_descendant_stays_live_on_scroll() {
         fn view(_: &(), _: &mut Cx<()>) -> El {
-            col().key("scroll").size(300.0, 200.0).scroll(ScrollSpec { stick_bottom: false })
+            col().key("scroll").size(300.0, 200.0).scroll(ScrollSpec { stick_bottom: false }).scroll_xy()
                 .child(col().key("cached").w_full().cache()
                     .child(el().key("header").w_full().h(30.0).fill(Color::WHITE).sticky_top(0.0))
+                    .child(el().key("left").w(300.0).h(30.0).fill(Color::WHITE).sticky_left(0.0))
                     .child(el().w_full().h(600.0)))
         }
         let mut rt = Runtime::new((), view, (300.0, 200.0), Env::default());
         rt.frame(0.0);
-        rt.wheel(100.0, 100.0, -100.0);
+        rt.wheel_xy(100.0, 100.0, -80.0, -100.0);
         rt.frame(0.0);
         let cached = rt.nodes.iter().position(|n| n.key.as_deref() == Some("cached")).unwrap();
         assert!(rt.cache_live_scratch[cached], "sticky contents must not reuse a frozen raster");
@@ -89,34 +145,60 @@ pub(super) fn anchored_target(nodes: &[Node], scrolls: &HashMap<NodeId, ScrollSt
         t[1] -= oy;
         t[3] -= oy;
     }
-    let dy = target_shift(nodes, scrolls, j);
+    let [dx, dy] = target_shift(nodes, scrolls, j);
+    t[0] += dx;
+    t[2] += dx;
     t[1] += dy;
     t[3] += dy;
     t
 }
 
-/// Total sticky shift on node `j` and its ancestors from `nodes`'s laid-out rects and `scrolls`.
-fn target_shift(nodes: &[Node], scrolls: &HashMap<NodeId, ScrollState>, j: usize) -> f32 {
-    let mut total = 0.0;
+/// Total sticky shift `[dx, dy]` on node `j` and its ancestors from `nodes`'s laid-out rects and
+/// `scrolls`.
+fn target_shift(nodes: &[Node], scrolls: &HashMap<NodeId, ScrollState>, j: usize) -> [f32; 2] {
+    let mut total = [0.0; 2];
     for a in std::iter::successors(Some(j), |&p| nodes[p].parent) {
         let Some((edge, inset)) = nodes[a].sticky.as_ref().and_then(|s| Some((s.edge?, s.inset))) else { continue };
-        if edge == StickyEdge::Left { continue }
         let Some(p) = nodes[a].parent else { continue };
-        let Some(s) = std::iter::successors(Some(p), |&u| nodes[u].parent)
-            .find(|&u| nodes[u].scroll.is_some() && nodes[u].scroll_axes.y()) else { continue };
-        let oy: f32 = std::iter::successors(Some(p), |&u| nodes[u].parent)
-            .take_while(|&u| u != s)
-            .chain(std::iter::once(s))
-            .filter_map(|u| scrolls.get(&nodes[u].id).map(|st| st.offset as f32))
-            .sum();
-        let st_y = nodes[s].target[1];
-        let band_h = nodes[s].target[3] - st_y;
-        let box_top = nodes[p].target[1] - st_y - oy + nodes[p].inset[1];
-        let box_bottom = nodes[p].target[3] - st_y - oy - nodes[p].inset[3];
-        let top = nodes[a].target[1] - st_y - oy;
-        let bottom = nodes[a].target[3] - st_y - oy;
-        let frame = [0.0, band_h, box_top, box_bottom, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY];
-        total += shift(edge, inset, [top, bottom, 0.0, 0.0], frame);
+        if edge == StickyEdge::Left {
+            let Some(s) = std::iter::successors(Some(p), |&u| nodes[u].parent)
+                .find(|&u| nodes[u].scroll.is_some() && nodes[u].scroll_axes.x()) else { continue };
+            let ox: f32 = std::iter::successors(Some(p), |&u| nodes[u].parent)
+                .take_while(|&u| u != s)
+                .chain(std::iter::once(s))
+                .filter_map(|u| scrolls.get(&nodes[u].id).map(|st| st.x.offset as f32))
+                .sum();
+            let st_x = nodes[s].target[0];
+            let band_w = nodes[s].target[2] - st_x;
+            let (box_left, box_right) = if p == s {
+                (f32::NEG_INFINITY, f32::INFINITY)
+            } else {
+                (nodes[p].target[0] - st_x - ox + nodes[p].inset[0], nodes[p].target[2] - st_x - ox - nodes[p].inset[2])
+            };
+            let left = nodes[a].target[0] - st_x - ox;
+            let right = nodes[a].target[2] - st_x - ox;
+            let frame = [f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, 0.0, band_w, box_left, box_right];
+            total[0] += shift(edge, inset, [0.0, 0.0, left, right], frame);
+        } else {
+            let Some(s) = std::iter::successors(Some(p), |&u| nodes[u].parent)
+                .find(|&u| nodes[u].scroll.is_some() && nodes[u].scroll_axes.y()) else { continue };
+            let oy: f32 = std::iter::successors(Some(p), |&u| nodes[u].parent)
+                .take_while(|&u| u != s)
+                .chain(std::iter::once(s))
+                .filter_map(|u| scrolls.get(&nodes[u].id).map(|st| st.offset as f32))
+                .sum();
+            let st_y = nodes[s].target[1];
+            let band_h = nodes[s].target[3] - st_y;
+            let (box_top, box_bottom) = if p == s {
+                (f32::NEG_INFINITY, f32::INFINITY)
+            } else {
+                (nodes[p].target[1] - st_y - oy + nodes[p].inset[1], nodes[p].target[3] - st_y - oy - nodes[p].inset[3])
+            };
+            let top = nodes[a].target[1] - st_y - oy;
+            let bottom = nodes[a].target[3] - st_y - oy;
+            let frame = [0.0, band_h, box_top, box_bottom, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY];
+            total[1] += shift(edge, inset, [top, bottom, 0.0, 0.0], frame);
+        }
     }
     total
 }

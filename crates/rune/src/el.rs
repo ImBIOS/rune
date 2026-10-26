@@ -537,11 +537,12 @@ pub struct ScrollSpec {
     pub stick_bottom: bool,
 }
 
-/// Which viewport edge an [`El::sticky_top`] or [`El::sticky_bottom`] element holds to.
+/// Which viewport edge an [`El::sticky_top`], [`El::sticky_bottom`] or [`El::sticky_left`]
+/// element holds to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StickyEdge { Top, Bottom, Left }
 
-/// `El::sticky_top`, `El::sticky_bottom` and `El::stuck_shadow`.
+/// `El::sticky_top`, `El::sticky_bottom`, `El::sticky_left` and `El::stuck_shadow`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Sticky {
     pub edge: Option<StickyEdge>,
@@ -2903,7 +2904,8 @@ impl El {
     /// viewport around it ([`El::scroll_x`] or [`El::scroll_xy`]) while its parent is in view:
     /// [`El::sticky_top`] on the other axis. Give it the viewport's width (not the scrolling
     /// content's) so it spans what shows: a row header whose end controls stay in view while
-    /// the code under it scrolls sideways. Its parent's right edge pushes it out. Without a
+    /// the code under it scrolls sideways (horizontal scrolling starts at the left edge, so
+    /// there is no `sticky_right`). Its parent's right edge pushes it out. Without a
     /// horizontal scroll ancestor this is a no-op. [`ElementInfo::stuck`](crate::runtime::ElementInfo)
     /// reads the shift to the right.
     pub fn sticky_left(mut self, inset: f32) -> Self {
@@ -2912,9 +2914,9 @@ impl El {
         s.inset = if inset.is_finite() { inset } else { 0.0 };
         self
     }
-    /// A shadow drawn only while this [`El::sticky_top`] or [`El::sticky_bottom`] element is
-    /// stuck, fading in over its first 8 points of shift, so it follows the scroll exactly: an
-    /// elevation under a stuck header, or a hairline divider with
+    /// A shadow drawn only while this [`El::sticky_top`], [`El::sticky_bottom`] or
+    /// [`El::sticky_left`] element is stuck, fading in over its first 8 points of shift, so it
+    /// follows the scroll exactly: an elevation under a stuck header, or a hairline divider with
     /// `Shadow { y: 0.5, color, ..Default::default() }` under an opaque one. Several stack.
     pub fn stuck_shadow(mut self, shadow: Shadow) -> Self {
         self.sticky.get_or_insert_with(Default::default).shadows.push(shadow);

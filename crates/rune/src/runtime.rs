@@ -581,9 +581,9 @@ pub struct ElementInfo {
     pub expanded: Option<bool>,
     /// A selected item of a list, tree, table or group ([`El::focus_selected`]).
     pub item_selected: bool,
-    /// How far [`El::sticky_top`] or [`El::sticky_bottom`] moved it from where scrolling put
-    /// it this frame, in points: down for a stuck header, up for a stuck footer, 0 when it isn't
-    /// stuck. `rect` already includes it.
+    /// How far [`El::sticky_top`], [`El::sticky_bottom`] or [`El::sticky_left`] moved it from
+    /// where scrolling put it this frame, in points: down for a stuck header, up for a stuck
+    /// footer, right for a stuck left element, 0 when it isn't stuck. `rect` already includes it.
     pub stuck: f32,
 }
 
@@ -5364,8 +5364,11 @@ impl<S: 'static> Runtime<S> {
             }
             if self.has_sticky && let Some((edge, inset)) = n.sticky.as_ref().and_then(|s| Some((s.edge?, s.inset))) {
                 // Worked out from this frame's offsets, which the viewport above already applied.
+                // Exclude this node's own `prop::OFFSET` (`live_offset`) so it translates from the
+                // stuck place rather than being clamped away by the sticky edge.
                 let frame = n.parent.map_or(sticky::UNBOUNDED, |pr| self.sticky_frame[pr]);
-                let (top, left) = (p.rect.y + pinh.dy, p.rect.x + pinh.dx);
+                let own_off = self.scene.get(n.id, prop::OFFSET).unwrap_or(rune_motion::Vec2::ZERO);
+                let (top, left) = (p.rect.y - own_off.y + pinh.dy, p.rect.x - own_off.x + pinh.dx);
                 let h = if self.row_h[i] >= 0.0 { self.row_h[i] } else { p.rect.h };
                 let shift = sticky::shift(edge, inset, [top, top + h, left, left + p.rect.w], frame);
                 self.stuck[i] = shift;
@@ -5467,15 +5470,21 @@ impl<S: 'static> Runtime<S> {
             }
             if self.has_sticky {
                 let up = n.parent.map_or(sticky::UNBOUNDED, |pr| self.sticky_frame[pr]);
-                self.sticky_frame[i] = match n.scroll {
-                    // Content scrolls without end inside a viewport; scrolling ones are the band.
-                    Some(_) => {
-                        let v = if n.scroll_axes.y() { [raw_edges[1], raw_edges[3]] } else { [up[0], up[1]] };
-                        let x = if n.scroll_axes.x() { [raw_edges[0], raw_edges[2]] } else { [up[4], up[5]] };
-                        [v[0], v[1], f32::NEG_INFINITY, f32::INFINITY, x[0], x[1], f32::NEG_INFINITY, f32::INFINITY]
-                    }
-                    None => [up[0], up[1], raw_edges[1] + n.inset[1], raw_edges[3] - n.inset[3], up[4], up[5], raw_edges[0] + n.inset[0], raw_edges[2] - n.inset[2]],
+                // Content scrolls without end on a viewport's scrolling axes; non-scrolling axes
+                // bound sticky children to this node's content box.
+                let sc_y = n.scroll.is_some() && n.scroll_axes.y();
+                let sc_x = n.scroll.is_some() && n.scroll_axes.x();
+                let v = if sc_y {
+                    [raw_edges[1], raw_edges[3], f32::NEG_INFINITY, f32::INFINITY]
+                } else {
+                    [up[0], up[1], raw_edges[1] + n.inset[1], raw_edges[3] - n.inset[3]]
                 };
+                let x = if sc_x {
+                    [raw_edges[0], raw_edges[2], f32::NEG_INFINITY, f32::INFINITY]
+                } else {
+                    [up[4], up[5], raw_edges[0] + n.inset[0], raw_edges[2] - n.inset[2]]
+                };
+                self.sticky_frame[i] = [v[0], v[1], v[2], v[3], x[0], x[1], x[2], x[3]];
             }
             // A product of 1 (0.5 inside 2.0) can still move the box.
             let mut rect_pt = if (sc - 1.0).abs() > 1e-5 || anchor != anchor_to {

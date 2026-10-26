@@ -173,7 +173,7 @@ pub struct DiffState {
     /// Changes with `keys`, unique across states so a swapped-in state never matches.
     pub(crate) keys_rev: u64,
     visible_rows: std::ops::Range<usize>,
-    view_w: f32,
+    view_w: std::cell::Cell<f32>,
     visible: usize,
     /// The visible file last reported to the app.
     reported: Option<usize>,
@@ -221,7 +221,7 @@ impl DiffState {
             rev: 0,
             keys_rev: 0,
             visible_rows: 0..0,
-            view_w: 0.0,
+            view_w: std::cell::Cell::new(0.0),
             visible: 0,
             reported: None,
             nav: None,
@@ -587,12 +587,12 @@ impl DiffState {
     }
 
     /// The scroll viewport's rect.
-    pub(crate) fn set_viewport(&mut self, r: [f32; 4]) {
-        self.view_w = r[2];
+    pub(crate) fn set_viewport(&self, r: [f32; 4]) {
+        self.view_w.set(r[2]);
     }
 
     pub(crate) fn view_width(&self) -> f32 {
-        self.view_w
+        self.view_w.get()
     }
 
     /// The virtual list's visible row range changed to `rows`: returns `(reported_file, sticky_changed)`.
