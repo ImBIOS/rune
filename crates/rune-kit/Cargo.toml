@@ -16,10 +16,16 @@ pulldown-cmark = { version = "0.13", default-features = false, optional = true }
 markdown = ["dep:pulldown-cmark"]
 # Native ```mermaid diagrams in `Markdown` (flowcharts and sequence diagrams), and `mermaid`.
 mermaid = ["markdown"]
+# Phase timings for the headless benches (`markdown_resize`).
+frame-profile = ["rune/frame-profile"]
 
 [[example]]
 name = "scroll_x"
 required-features = ["markdown"]
+
+[[example]]
+name = "markdown_resize"
+required-features = ["markdown", "frame-profile"]
 
 [dev-dependencies]
 # Reference rasteriser for the built-in glyphs (tests/glyphs.rs).
