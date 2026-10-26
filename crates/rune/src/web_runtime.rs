@@ -437,6 +437,7 @@ impl<S: 'static> Runtime<S> {
                 if a > b { return EditOutcome::default(); }
                 edit.ime(&Ime::Preedit(String::new(), None));
                 edit.anchor = base + a; edit.focus = base + b;
+                edit.snap_to_pills();
                 let text = event["text"].as_str().unwrap_or_default();
                 if event["kind"] == "preedit" {
                     edit.ime(&Ime::Preedit(text.to_owned(), Some((text.len(), text.len()))));
@@ -447,6 +448,7 @@ impl<S: 'static> Runtime<S> {
             if let Some((anchor, focus)) = number("anchor").zip(number("focus"))
                 && let Some((a, f)) = byte_at(&edit.text[base..], anchor).zip(byte_at(&edit.text[base..], focus)) {
                 edit.anchor = base + a; edit.focus = base + f;
+                edit.snap_to_pills();
             }
             EditOutcome::default()
         }, &mut tx);

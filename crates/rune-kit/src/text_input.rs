@@ -69,6 +69,12 @@ impl EditActs {
     fn rich_style(&mut self, style: RichStyle) {
         self.visual.push(Box::new(move |e: El| e.rich_style(style)));
     }
+    fn pill_icon(&mut self, icon: fn(&str) -> Option<&'static Icon>) {
+        self.visual.push(Box::new(move |e: El| e.pill_icon(icon)));
+    }
+    fn pill_colors(&mut self, bg: Color, fg: Option<Color>) {
+        self.visual.push(Box::new(move |e: El| e.pill_colors(bg, fg)));
+    }
     fn apply(self, mut e: El, disabled: bool) -> El {
         for f in self.visual {
             e = f(e);
@@ -191,6 +197,16 @@ impl TextInput {
     }
     pub fn rich_style(mut self, style: RichStyle) -> Self {
         self.edits.rich_style(style);
+        self
+    }
+    /// See [`El::pill_icon`](rune::El::pill_icon).
+    pub fn pill_icon(mut self, icon: fn(&str) -> Option<&'static Icon>) -> Self {
+        self.edits.pill_icon(icon);
+        self
+    }
+    /// See [`El::pill_colors`](rune::El::pill_colors).
+    pub fn pill_colors(mut self, bg: Color, fg: Option<Color>) -> Self {
+        self.edits.pill_colors(bg, fg);
         self
     }
 
@@ -345,6 +361,16 @@ impl TextArea {
         self.edits.rich_style(style);
         self
     }
+    /// See [`El::pill_icon`](rune::El::pill_icon).
+    pub fn pill_icon(mut self, icon: fn(&str) -> Option<&'static Icon>) -> Self {
+        self.edits.pill_icon(icon);
+        self
+    }
+    /// See [`El::pill_colors`](rune::El::pill_colors).
+    pub fn pill_colors(mut self, bg: Color, fg: Option<Color>) -> Self {
+        self.edits.pill_colors(bg, fg);
+        self
+    }
 
     pub fn build(self, k: &Kit) -> El {
         let c = &k.c;
@@ -453,6 +479,16 @@ impl TextField {
     }
     pub fn rich_style(mut self, style: RichStyle) -> Self {
         self.edits.rich_style(style);
+        self
+    }
+    /// See [`El::pill_icon`](rune::El::pill_icon).
+    pub fn pill_icon(mut self, icon: fn(&str) -> Option<&'static Icon>) -> Self {
+        self.edits.pill_icon(icon);
+        self
+    }
+    /// See [`El::pill_colors`](rune::El::pill_colors).
+    pub fn pill_colors(mut self, bg: Color, fg: Option<Color>) -> Self {
+        self.edits.pill_colors(bg, fg);
         self
     }
 

@@ -1,10 +1,11 @@
-//! Rich-text composer with an inline and block formatting bar and per-frame syntax decorations.
+//! Rich-text composer with an inline and block formatting bar, `@` mention pills, and per-frame
+//! syntax decorations.
 //!
 //! Run headless to capture the demo still:
 //! `cargo run -p rune-kit --example rich_editor -- --snap demo/kit/rich-editor.png`
 
 use rune::tok::type_;
-use rune::{AppSpec, Block, Cx, El, Mark, Span, TextEdit, col, el, row, text};
+use rune::{AppSpec, Block, Cx, El, Icon, Mark, Span, TextEdit, col, el, row, text};
 use rune_kit::syntax::{SyntaxTheme, highlight};
 use rune_kit::{Button, ButtonVariant, ControlSize, Divider, Kit, TextArea};
 
@@ -17,7 +18,9 @@ impl Default for State {
         let html = concat!(
             "<p>Ship the <b>attributed</b> composer with <i>inline marks</i>, ",
             "<u>underline</u>, <del>legacy markdown</del>, <code>Span</code> ",
-            "decorations, and <a href=\"https://opencode.ai\">opencode.ai</a>.</p>",
+            "decorations, and <a href=\"https://opencode.ai\">opencode.ai</a>. Ask ",
+            "<span data-pill=\"agent:review\">@review</span> to check ",
+            "<span data-pill=\"file:crates/rune/src/edit.rs\">edit.rs</span>.</p>",
             "<ul>",
             "<li>Byte-range marks shift and split on edits",
             "<ul><li>Nested list items indent with <code>Tab</code></li></ul>",
@@ -36,6 +39,29 @@ impl Default for State {
         edit.set_caret(19);
         Self { edit }
     }
+}
+
+static FILE: Icon = Icon {
+    name: "rich-editor-file",
+    view: 16.0,
+    body: r#"<path d="M4 2.5H9.5L12.5 5.5V13.5H4V2.5Z M9.5 2.5V5.5H12.5" stroke="currentColor" stroke-linejoin="round"/>"#,
+};
+static AGENT: Icon = Icon {
+    name: "rich-editor-agent",
+    view: 16.0,
+    body: r#"<path d="M8 8C9.38 8 10.5 6.88 10.5 5.5C10.5 4.12 9.38 3 8 3C6.62 3 5.5 4.12 5.5 5.5C5.5 6.88 6.62 8 8 8Z M3 13.5C3 11.29 5.24 9.5 8 9.5C10.76 9.5 13 11.29 13 13.5" stroke="currentColor" stroke-linecap="round"/>"#,
+};
+
+/// A mention pill's icon by its id.
+fn pill_icon(id: &str) -> Option<&'static Icon> {
+    if id.starts_with("file:") { Some(&FILE) } else if id.starts_with("agent:") { Some(&AGENT) } else { None }
+}
+
+/// Turn the `@query` typed before the caret into a file pill, or insert one at the caret.
+fn mention(edit: &mut TextEdit) {
+    let (a, b) = edit.range();
+    let query = edit.text[..a].rfind('@').filter(|&i| a == b && !edit.text[i..a].contains(char::is_whitespace));
+    edit.replace_with_pill(query.unwrap_or(a)..b, "file:crates/rune/src/text.rs", "text.rs");
 }
 
 /// Syntax-highlight every `Block::Code` paragraph run using `rune_kit::syntax::highlight`.
@@ -105,6 +131,7 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
             let next = if s.edit.active_link().is_some() { None } else { Some("https://opencode.ai") };
             s.edit.set_link(next);
         }))
+        .child(bar_btn(&k, "mention", "@", false, |s| mention(&mut s.edit)))
         .child(el().w(4.0))
         .child(bar_btn(&k, "bullet", "• List", matches!(blk, Block::Bullet(_)), |s| {
             s.edit.toggle_block(Block::Bullet(0));
@@ -133,6 +160,7 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
                 .width(None)
                 .rows(11)
                 .decorations(spans)
+                .pill_icon(pill_icon)
                 .on_edit(|s: &mut State| &mut s.edit)
                 .build(&k),
         );

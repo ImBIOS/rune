@@ -994,6 +994,9 @@ pub struct Runtime<S: 'static> {
     pub(crate) read_requests: Vec<u64>,
     /// Their callbacks, until the clipboard answers.
     clipboard_reads: Vec<(u64, crate::el::ReadFn)>,
+    /// The plain text of this app's last copy that held pills: a paste of the same text keeps
+    /// its pills, and HTML from anywhere else pastes them as plain labels.
+    pill_copy: Option<zeroize::Zeroizing<String>>,
     next_clipboard_read: u64,
     pub(crate) clear_secret_request: bool,
     /// `Runtime::use_clipboard`: a test clipboard that replaces the OS one.
@@ -1307,6 +1310,7 @@ impl<S: 'static> Runtime<S> {
             paste_request: None,
             read_requests: Vec::new(),
             clipboard_reads: Vec::new(),
+            pill_copy: None,
             next_clipboard_read: 0,
             clear_secret_request: false,
             clipboard: None,
@@ -2584,13 +2588,14 @@ impl<S: 'static> Runtime<S> {
             Action::Paste(content, target) => {
                 if target.is_some_and(|target| target != self.paste_target()) { return false; }
                 let hook = self.focused_input().and_then(|i| i.paste.clone());
+                let own_pills = self.pill_copy.as_deref().is_some_and(|t| t.as_str() == content.text());
                 let into_field = |state: &mut dyn Any, access: &crate::el::EditFn, tx: &mut Tx| {
                     if hook.is_some_and(|hook| hook(state, &content, tx)) { return EditOutcome::default(); }
                     let edit = access(state);
                     // A rich field keeps the paste's formatting. The HTML was sanitised when it
                     // was read, and `from_html` keeps only its own safe subset anyway.
                     if let Some(html) = content.html() && edit.is_rich() && !edit.is_secure() {
-                        return edit.paste_html(html, content.text());
+                        return if own_pills { edit.paste_html_with_pills(html, content.text()) } else { edit.paste_html(html, content.text()) };
                     }
                     if !content.has_plain() { return EditOutcome::default(); }
                     edit.paste(content.text())
@@ -2622,8 +2627,8 @@ impl<S: 'static> Runtime<S> {
                 if let Some(l) = layout {
                     let x = x + scroll;
                     let i = e.model_index(Cursor::from_point(&l, x * s, y * s).index());
-                    e.anchor = i;
-                    e.focus = i;
+                    // A click on a pill puts the caret at its nearer edge.
+                    e.set_caret(i);
                 }
                 one.instant = true;
                 true
@@ -2769,6 +2774,8 @@ impl<S: 'static> Runtime<S> {
             if let Some(html) = html
                 && let Some(text) = one.copy.as_ref().filter(|w| !w.is_secret()).map(|w| w.content().text().to_owned())
             {
+                // Text never serializes to a `<span`, so only a pill writes this.
+                self.pill_copy = html.contains("<span data-pill=").then(|| zeroize::Zeroizing::new(text.clone()));
                 one.copy_rich(crate::ClipboardContent::new(text).with_html(html));
             }
             if handled { return true; }
@@ -2834,7 +2841,7 @@ impl<S: 'static> Runtime<S> {
         let n = self.node(&path)?;
         let (spec, w) = (n.text.clone()?, n.target[2] - n.target[0] - n.inset[0] - n.inset[2]);
         let text = zeroize::Zeroizing::new(n.input.as_ref()?.edit.display().0);
-        Some(self.text.layout_blocks(&text, &spec.spans, &spec.blocks, spec.style, s, spec.wrap.then_some(w * s), line_alignment(&spec)))
+        Some(self.text.layout_blocks(&text, &spec.spans, &spec.blocks, &spec.pills, spec.style, s, spec.wrap.then_some(w * s), line_alignment(&spec)))
     }
 
     fn with_focused(&mut self, f: impl FnOnce(&mut crate::edit::TextEdit) -> EditOutcome, tx: &mut Tx) -> bool {
@@ -3558,7 +3565,7 @@ impl<S: 'static> Measurement<'_, S> {
             } else if let Some(spec) = &nodes[i].text {
                 let w = (l.size.width - ins[0] - ins[2]).max(0.0);
                 let wrap = spec.wrap.then_some(w * scale);
-                let mut layout = self.text.layout_blocks(&spec.content, &spec.spans, &spec.blocks, spec.style, scale, wrap, line_alignment(spec));
+                let mut layout = self.text.layout_blocks(&spec.content, &spec.spans, &spec.blocks, &spec.pills, spec.style, scale, wrap, line_alignment(spec));
                 let mut elided = None;
                 if spec.truncate && layout.full_width() > w * scale + 0.5 {
                     let (cut, e) = truncated(&mut self.text, spec, scale, w * scale);
@@ -6152,6 +6159,9 @@ impl<S: 'static> Runtime<S> {
                     // Span backgrounds (inline code), strikethroughs, a selection over them, then glyphs.
                     let link_fx = self.link_fx(i);
                     self.deco_scratch.clear();
+                    let mut pill_icons = Vec::new();
+                    let pill_bg = spec.pill_colors.map_or(spec.rich_style.link.alpha(0.2), |(bg, _)| bg);
+                    crate::text::pill_chips(layout, &spec.pills, spec.style.size, s, origin, pill_bg, &mut self.deco_scratch, &mut pill_icons);
                     match n.elided.filter(|_| !spec.spans.is_empty()) {
                         Some(e) => self.text.decorations(layout, &e.spans(&spec.spans), s, origin, &mut self.deco_scratch),
                         None => self.text.decorations(layout, &spec.spans, s, origin, &mut self.deco_scratch),
@@ -6170,6 +6180,13 @@ impl<S: 'static> Runtime<S> {
                     for d in &self.deco_scratch {
                         let c = premul(d.color, o, srgb);
                         self.instances.push(rect_inst(d.rect, c, d.radius, clip, fade));
+                    }
+                    let pill_fg = spec.pill_colors.and_then(|(_, fg)| fg).unwrap_or(color);
+                    for (icon, px, at) in pill_icons {
+                        let at = if tk == 1.0 { at } else { std::array::from_fn(|k| origin[k] + (at[k] - origin[k]) * tk) };
+                        if let Some(q) = self.text.icon_quad(icon, px, at) {
+                            self.instances.push(glyph(&q, premul(pill_fg, o, srgb), glyph_gamma(pill_fg, s, srgb), clip, fade));
+                        }
                     }
                     if spec.selectable && let Some((a, b)) = selectable::range_in(&sel_ranges, i) {
                         let (a, b) = n.elided.map_or((a, b), |e| e.range(a, b));
@@ -7269,7 +7286,7 @@ fn compute_layout(taffy: &mut TaffyTree<usize>, root: taffy::NodeId, room: Size<
                         };
                     }
                 }
-                let l = text.layout_blocks(&spec.content, &spec.spans, &spec.blocks, spec.style, scale, w.map(|w| w * scale), parley::Alignment::Start);
+                let l = text.layout_blocks(&spec.content, &spec.spans, &spec.blocks, &spec.pills, spec.style, scale, w.map(|w| w * scale), parley::Alignment::Start);
                 let mut lw = (l.full_width() / scale).ceil_to(scale);
                 if (spec.truncate || spec.truncate_fade || spec.max_lines > 0)
                     && let AvailableSpace::Definite(a) = avail.width

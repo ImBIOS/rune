@@ -3,7 +3,8 @@
 //! Supported elements:
 //! - Inline: `<b>`, `<strong>`, `<i>`, `<em>`, `<u>`, `<ins>`, `<s>`, `<del>`, `<strike>`,
 //!   `<a href="...">`, `<code>`, and CSS `style` attributes (`font-weight`, `font-style`,
-//!   `text-decoration`, `text-decoration-line`).
+//!   `text-decoration`, `text-decoration-line`), and `<span data-pill="id">` for
+//!   [`Mark::Pill`].
 //! - Block: `<p>`, `<div>`, `<br>`, `<ul>`, `<ol>`, `<li>`, `<blockquote>`, `<pre>`.
 //! - Stripped with content: `<script>`, `<style>`, `<head>`.
 //! - Unknown tags drop their wrapper and keep their text. Nothing is executed, and dangerous
@@ -525,6 +526,11 @@ pub(crate) fn parse_html(html: &str) -> TextEdit {
                             to_add.push(Mark::Link(href.trim().to_owned()));
                         }
                     }
+                    "span" => {
+                        if let Some(id) = extract_attr(attrs, "data-pill") {
+                            to_add.push(Mark::Pill(id));
+                        }
+                    }
                     _ => {}
                 }
                 if let Some(style) = extract_attr(attrs, "style") {
@@ -889,15 +895,33 @@ pub(crate) fn serialize_html(edit: &TextEdit, range: Range<usize>) -> String {
     out
 }
 
-/// Serializes inline marks within `range` (a single line/paragraph slice) to HTML.
+/// Serializes inline marks within `range` (a single line/paragraph slice) to HTML. A pill
+/// wholly inside `range` is one `<span data-pill>` around its label's own marks, so marks
+/// that cross its edges never split it; a pill cut by `range` is plain text.
 fn serialize_inline(edit: &TextEdit, range: Range<usize>, out: &mut String) {
+    let mut at = range.start;
+    for m in edit.marks().iter().filter(|m| range.start <= m.start && m.end <= range.end) {
+        let Some(id) = m.mark.pill_id() else { continue };
+        serialize_marks(edit, at..m.start, out);
+        out.push_str("<span data-pill=\"");
+        escape_html(id, out);
+        out.push_str("\">");
+        serialize_marks(edit, m.range(), out);
+        out.push_str("</span>");
+        at = m.end;
+    }
+    serialize_marks(edit, at..range.end, out);
+}
+
+/// Serializes the inline marks other than pills within `range`.
+fn serialize_marks(edit: &TextEdit, range: Range<usize>, out: &mut String) {
     if range.is_empty() {
         return;
     }
     let overlapping: Vec<&MarkRange> = edit
         .marks()
         .iter()
-        .filter(|m| m.start < range.end && m.end > range.start)
+        .filter(|m| m.start < range.end && m.end > range.start && !m.mark.is_pill())
         .collect();
     if overlapping.is_empty() {
         escape_html(&edit.text[range], out);
@@ -935,6 +959,7 @@ fn serialize_inline(edit: &TextEdit, range: Range<usize>, out: &mut String) {
             Mark::Underline => 3,
             Mark::Strike => 4,
             Mark::Code => 5,
+            Mark::Pill(_) => 6,
         });
         for m in &active {
             match m {
@@ -948,6 +973,7 @@ fn serialize_inline(edit: &TextEdit, range: Range<usize>, out: &mut String) {
                     escape_html(url, out);
                     out.push_str("\">");
                 }
+                Mark::Pill(_) => {}
             }
         }
         escape_html(&edit.text[a..b], out);
@@ -959,6 +985,7 @@ fn serialize_inline(edit: &TextEdit, range: Range<usize>, out: &mut String) {
                 Mark::Strike => out.push_str("</s>"),
                 Mark::Code => out.push_str("</code>"),
                 Mark::Link(_) => out.push_str("</a>"),
+                Mark::Pill(_) => {}
             }
         }
     }

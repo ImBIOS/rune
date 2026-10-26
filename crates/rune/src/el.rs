@@ -577,6 +577,7 @@ pub struct InputSpec {
     pub single_line: bool,
     pub(crate) decorations: Vec<Span>,
     pub(crate) rich_style: crate::edit::RichStyle,
+    pub(crate) pill_icon: Option<PillIconFn>,
     pub(crate) access: Option<EditFn>,
     pub(crate) submit: Option<PressFn>,
     pub(crate) key: Option<InputKeyFn>,
@@ -778,6 +779,10 @@ pub struct TextSpec {
     /// Line indices (`> 0`) created by `Shift+Return` (`<br>`).
     pub(crate) soft_breaks: Vec<u32>,
     /// Visual palette for rich block and inline decorations.
+    /// [`Mark::Pill`](crate::Mark::Pill) chips in `content`, sorted.
+    pub(crate) pills: Vec<crate::text::PillChip>,
+    /// See [`El::pill_colors`].
+    pub(crate) pill_colors: Option<(Color, Option<Color>)>,
     pub(crate) rich_style: crate::edit::RichStyle,
 }
 
@@ -968,6 +973,8 @@ pub(crate) struct PasteFn {
     pub(crate) rich: bool,
     pub(crate) call: InputPasteFn,
 }
+/// A pill's leading icon by its id; see [`El::pill_icon`].
+pub(crate) type PillIconFn = fn(&str) -> Option<&'static crate::Icon>;
 pub(crate) type InputPasteFn = Rc<dyn Fn(&mut dyn Any, &crate::ClipboardContent, &mut Tx) -> bool>;
 pub(crate) type ReadFn = Box<dyn FnOnce(&mut dyn Any, &crate::ClipboardContent, &mut Tx)>;
 
@@ -1221,6 +1228,8 @@ pub fn text(content: impl Into<String>) -> El {
         strikes: Vec::new(),
         blocks: Vec::new(),
         soft_breaks: Vec::new(),
+        pills: Vec::new(),
+        pill_colors: None,
         rich_style: crate::edit::RichStyle::default(),
     });
     e
@@ -1272,6 +1281,7 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
         single_line: false,
         decorations: Vec::new(),
         rich_style: crate::edit::RichStyle::default(),
+        pill_icon: None,
         access: None,
         submit: None,
         key: None,
@@ -2453,6 +2463,31 @@ impl El {
         }
         self
     }
+    /// The leading icon for each [`Mark::Pill`](crate::Mark::Pill) chip in a [`text_input`],
+    /// by the pill's id (`None`: no icon). The icon takes the label's colour.
+    ///
+    /// ```ignore
+    /// text_input(s.draft.clone(), body).pill_icon(|id| id.starts_with("file:").then_some(&FILE))
+    /// ```
+    /// The chip colour of each [`Mark::Pill`](crate::Mark::Pill) in a [`text_input`], and its
+    /// label and icon colour (`None`: the text's). The chip defaults to the rich style's link
+    /// colour at 20% opacity.
+    pub fn pill_colors(mut self, bg: Color, fg: Option<Color>) -> Self {
+        if let Some(t) = &mut self.text {
+            t.pill_colors = Some((bg, fg));
+        }
+        if self.input.is_some() {
+            self.sync_input_rich();
+        }
+        self
+    }
+    pub fn pill_icon(mut self, icon: fn(&str) -> Option<&'static crate::Icon>) -> Self {
+        if let Some(inp) = &mut self.input {
+            inp.pill_icon = Some(icon);
+            self.sync_input_rich();
+        }
+        self
+    }
     pub(crate) fn sync_input_rich(&mut self) {
         let (Some(inp), Some(t)) = (&self.input, &mut self.text) else { return };
         t.rich_style = inp.rich_style;
@@ -2462,8 +2497,15 @@ impl El {
             t.strikes.clear();
             t.blocks.clear();
             t.soft_breaks.clear();
+            t.pills.clear();
             return;
         }
+        t.pills = inp
+            .edit
+            .display_pills()
+            .into_iter()
+            .map(|(start, end, id)| crate::text::PillChip { start, end, icon: inp.pill_icon.and_then(|f| f(id)) })
+            .collect();
         let (mut base_spans, strikes, rich_links, blocks) =
             inp.edit.rich_display_specs(t.style, inp.rich_style);
         for d in &inp.decorations {
@@ -2473,6 +2515,9 @@ impl El {
                 sp.end = de;
                 base_spans.push(sp);
             }
+        }
+        if let Some(fg) = t.pill_colors.and_then(|(_, fg)| fg) {
+            base_spans.extend(t.pills.iter().map(|p| Span { start: p.start, end: p.end, color: Some(fg), ..Span::default() }));
         }
         let mut flat = crate::text::flatten_spans(&base_spans);
         for s in &mut flat {

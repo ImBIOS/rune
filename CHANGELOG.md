@@ -5,6 +5,19 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Atomic inline pills in rich text (`Mark::Pill(id)`); `Mark` is `#[non_exhaustive]`.** A
+  pill is a mention, file or attachment run whose label is the text under the mark. The caret
+  steps over it in one move, a selection reaching into it grows to cover it, `Backspace` /
+  `Delete` (and word deletes) remove it whole, typing and IME composition never land inside it,
+  and undo restores it with its id. Typing never inherits a pill and an edit that cuts into one
+  leaves plain text. Apps make pills with `TextEdit::insert_pill(id, label)` or
+  `replace_with_pill(range, id, label)` (swap a typed `@query`, one undo step) and list them with
+  `pills()`. The field draws each as a rounded chip that never splits across lines,
+  `El::pill_colors(bg, fg)` (default: the link colour at 20%) and `El::pill_icon(|id| ..)` (also
+  on `TextInput`, `TextArea` and `TextField`) style it. Copy writes the label as plain text and
+  `<span data-pill="id">label</span>` as HTML; a paste of the app's own last copy restores the
+  pill (`paste_html_with_pills`), while other HTML never makes one (`paste_html` drops it).
+  Exhaustive `match`es on `Mark` need a wildcard arm.
 - **Monospace text has no ligatures, and its tabs reach 4-column stops.** Mono rich spans
   (`Span::mono`, so `Mark::Code` and `Block::Code` in a rich `TextEdit`, and Markdown inline
   code) and `Family::Mono`/`Family::SystemMono` styles turn off `liga`, `clig` and `calt`:

@@ -356,6 +356,102 @@ impl Span {
     }
 }
 
+/// An atomic pill drawn as a chip: byte range `start..end` of the content, and its leading icon.
+#[derive(Clone, Debug)]
+pub(crate) struct PillChip {
+    pub start: u32,
+    pub end: u32,
+    pub icon: Option<&'static Icon>,
+}
+
+/// A pill chip's horizontal geometry in points for text of `size` points: the room before its
+/// label (outer margin, padding, then any icon and its gap) and after it (padding, margin).
+pub(crate) struct PillMetrics {
+    pub margin: f32,
+    pub pad: f32,
+    pub icon: f32,
+    pub icon_gap: f32,
+}
+
+impl PillMetrics {
+    pub fn new(size: f32) -> Self {
+        Self { margin: (size * 0.12).max(1.5), pad: (size * 0.36).max(3.0), icon: (size * 0.95).round(), icon_gap: (size * 0.22).max(2.0) }
+    }
+
+    /// Room before the label, inside the chip and out.
+    pub fn lead(&self, icon: bool) -> f32 {
+        self.margin + self.pad + if icon { self.icon + self.icon_gap } else { 0.0 }
+    }
+
+    pub fn trail(&self) -> f32 {
+        self.pad + self.margin
+    }
+}
+
+/// Tags the inline boxes around pill labels: the rest of the id is the pill's index shifted
+/// left once, with the low bit set on the box after the label.
+const PILL_BOX: u64 = 1 << 62;
+
+/// The chip behind each pill in `layout` (device px, at `origin`), and each leading icon with
+/// its size in px and top-left corner. A pill whose label overflows its line draws its chip to
+/// the line's end.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pill_chips(
+    layout: &Layout<Ink>,
+    pills: &[PillChip],
+    size: f32,
+    scale: f32,
+    origin: [f32; 2],
+    bg: Color,
+    out: &mut Vec<Deco>,
+    icons: &mut Vec<(&'static Icon, u32, [f32; 2])>,
+) {
+    if pills.is_empty() {
+        return;
+    }
+    let pm = PillMetrics::new(size);
+    for line in layout.lines() {
+        let m = line.metrics();
+        let boxes: Vec<parley::PositionedInlineBox> = line
+            .items()
+            .filter_map(|it| match it {
+                PositionedLayoutItem::InlineBox(b) if b.id & PILL_BOX != 0 => Some(b),
+                _ => None,
+            })
+            .collect();
+        for lead in boxes.iter().filter(|b| b.id & 1 == 0) {
+            let Some(pill) = pills.get(((lead.id & !PILL_BOX) >> 1) as usize) else { continue };
+            let x0 = lead.x + pm.margin * scale;
+            let x1 = boxes
+                .iter()
+                .find(|b| b.id == lead.id | 1)
+                .map_or(m.inline_min_coord + m.offset + m.advance - m.hanging_advance, |t| t.x + t.width - pm.margin * scale);
+            let (mut asc, mut desc) = (0.0f32, 0.0f32);
+            for item in line.items() {
+                if let PositionedLayoutItem::GlyphRun(gr) = item {
+                    let r = gr.run().text_range();
+                    if r.start < pill.end as usize && (pill.start as usize) < r.end {
+                        let fm = gr.run().font_metrics();
+                        (asc, desc) = (asc.max(fm.ascent), desc.max(fm.descent.abs()));
+                    }
+                }
+            }
+            if asc == 0.0 {
+                (asc, desc) = (size * scale * 0.95, size * scale * 0.25);
+            }
+            let base = origin[1] + m.baseline;
+            let top = (base - asc - 1.0 * scale).round();
+            let bot = (base + desc + 1.0 * scale).round();
+            let rect = [(origin[0] + x0).round(), top, (x1 - x0).max(0.0).round(), bot - top];
+            out.push(Deco { rect, color: bg, radius: (5.0 * scale).min(rect[3] * 0.5) });
+            if let Some(icon) = pill.icon {
+                let px = (pm.icon * scale).round().max(1.0);
+                icons.push((icon, px as u32, [rect[0] + pm.pad * scale, ((top + bot - px) * 0.5).round()]));
+            }
+        }
+    }
+}
+
 /// Flattens overlapping [`Span`]s into non-overlapping elementary intervals so that Parley's
 /// single `Brush(Ink)` index per glyph run carries the combined colour, background, underline,
 /// weight, italic, and monospace attributes of all overlapping spans.
@@ -1242,26 +1338,41 @@ impl TextSystem {
         max_width: Option<f32>,
         align: Alignment,
     ) -> Rc<Layout<Ink>> {
-        self.layout_blocks(text, spans, &[], style, scale, max_width, align)
+        self.layout_blocks(text, spans, &[], &[], style, scale, max_width, align)
     }
 
     /// [`layout_aligned`](Self::layout_aligned) with per-paragraph [`Block`](crate::Block)
-    /// indentation applied during line breaking.
+    /// indentation applied during line breaking, and room around each pill's label for its
+    /// chip. A pill never wraps inside; one that starts a line starts its chip at the line's start.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn layout_blocks(
         &mut self,
         text: &str,
         spans: &[Span],
         blocks: &[crate::edit::Block],
+        pills: &[PillChip],
         style: TextStyle,
         scale: f32,
         max_width: Option<f32>,
         align: Alignment,
     ) -> Rc<Layout<Ink>> {
         let has_indented_blocks = blocks.iter().any(|&b| b != crate::edit::Block::Paragraph);
+        // Each pill's label range, and the room before and after it in device px; boxes keep
+        // the pill's index in their id, so ranges that fail the checks keep no chip.
+        let pm = PillMetrics::new(style.size);
+        let pills: Vec<(usize, std::ops::Range<usize>, u32, u32)> = pills
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let r = (p.start as usize).min(text.len())..(p.end as usize).min(text.len());
+                (i, r, (pm.lead(p.icon.is_some()) * scale).round() as u32, (pm.trail() * scale).round() as u32)
+            })
+            .filter(|(_, r, ..)| !r.is_empty() && text.is_char_boundary(r.start) && text.is_char_boundary(r.end))
+            .collect();
         let mut key = text_hash(text, spans, style, scale, max_width);
-        if align != Alignment::Start || has_indented_blocks {
+        if align != Alignment::Start || has_indented_blocks || !pills.is_empty() {
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            (key, align as u8, blocks).hash(&mut h);
+            (key, align as u8, blocks, &pills).hash(&mut h);
             key = h.finish();
         }
         let g = self.generation;
@@ -1454,8 +1565,23 @@ impl TextSystem {
             for (range, v) in widen {
                 b.push(StyleProperty::WordSpacing(*v), range.clone());
             }
+            // A pill's label never wraps; boxes before and after it make room for its chip.
+            for (i, r, lead, trail) in &pills {
+                b.push(StyleProperty::TextWrapMode(parley::TextWrapMode::NoWrap), r.clone());
+                for (side, index, width) in [(0, r.start, *lead), (1, r.end, *trail)] {
+                    b.push_inline_box(parley::InlineBox {
+                        id: PILL_BOX | (*i as u64) << 1 | side,
+                        kind: parley::InlineBoxKind::InFlow,
+                        index,
+                        width: width as f32,
+                        height: 0.0,
+                        baseline: None,
+                        vertical_align: parley::VerticalAlign::BASELINE,
+                    });
+                }
+            }
             let mut layout: Layout<Ink> = b.build(text);
-            if has_indented_blocks {
+            if has_indented_blocks || !pills.is_empty() {
                 break_lines_with_blocks(&mut layout, blocks, style.size, scale, max_width);
             } else {
                 layout.break_all_lines(max_width);
@@ -1831,6 +1957,8 @@ pub fn stream_height_lag(l: &Layout<Ink>, width: f32, scale: f32) -> f32 {
 }
 
 /// Breaks lines in `layout` with per-paragraph [`Block`](crate::Block) indentation.
+/// Breaks `layout` into lines, each paragraph indented by its block. A pill's chip that would
+/// end a line apart from its label, or run past the line's end, moves to the next line.
 fn break_lines_with_blocks(
     layout: &mut Layout<Ink>,
     blocks: &[crate::edit::Block],
@@ -1838,10 +1966,37 @@ fn break_lines_with_blocks(
     scale: f32,
     max_width: Option<f32>,
 ) {
+    let pills = layout.inline_boxes().filter(|b| b.id & PILL_BOX != 0).count() / 2;
+    // Line index, and the room it gets instead: less to break before a chip, or more to keep
+    // a chip with its label. Each pill needs at most one of each.
+    let mut caps: Vec<(usize, f32)> = Vec::new();
+    loop {
+        let maxes = break_lines_capped(layout, blocks, font_size, scale, max_width, &caps);
+        if max_width.is_none() || caps.len() >= 2 * pills {
+            return;
+        }
+        match misplaced_pill(layout, &maxes) {
+            Some(cap) if !caps.contains(&cap) => caps.push(cap),
+            _ => return,
+        }
+    }
+}
+
+/// [`break_lines_with_blocks`] once, with `caps` setting the room on given lines (the last
+/// for a line wins). Returns each line's room without them.
+fn break_lines_capped(
+    layout: &mut Layout<Ink>,
+    blocks: &[crate::edit::Block],
+    font_size: f32,
+    scale: f32,
+    max_width: Option<f32>,
+    caps: &[(usize, f32)],
+) -> Vec<f32> {
     let layout_max = max_width.unwrap_or(f32::MAX);
     let mut breaker = layout.break_lines();
     breaker.state_mut().set_layout_max_advance(layout_max);
     let mut para_idx = 0usize;
+    let mut maxes = Vec::new();
     while !breaker.is_done() {
         let blk = blocks.get(para_idx).copied().unwrap_or(crate::edit::Block::Paragraph);
         let indent = (blk.indent_pt(font_size) * scale).round();
@@ -1849,8 +2004,13 @@ fn break_lines_with_blocks(
         let line_max = max_width
             .map_or(f32::MAX, |w| (w - indent - right_pad).max(1.0))
             .min(layout_max);
+        let line = maxes.len();
+        maxes.push(line_max);
+        let capped = caps.iter().rfind(|c| c.0 == line).map_or(line_max, |c| c.1);
         breaker.state_mut().set_line_x(indent);
-        breaker.state_mut().set_line_max_advance(line_max);
+        // Parley wants no line wider than the layout: a widened line widens it while it breaks.
+        breaker.state_mut().set_layout_max_advance(layout_max.max(capped));
+        breaker.state_mut().set_line_max_advance(capped);
         match breaker.break_next() {
             Some(parley::YieldData::LineBreak(data)) => {
                 if data.reason == parley::BreakReason::Explicit {
@@ -1861,6 +2021,58 @@ fn break_lines_with_blocks(
             None => break,
         }
     }
+    breaker.state_mut().set_layout_max_advance(layout_max);
+    maxes
+}
+
+/// The first pill whose chip ends a line without its label, or runs past the line's room in
+/// `maxes`, as the line and the room that fixes it: less, to break the line before the chip
+/// (pills that touch move together, as Parley never breaks between them), or more, when the
+/// chip already starts the line.
+fn misplaced_pill(layout: &Layout<Ink>, maxes: &[f32]) -> Option<(usize, f32)> {
+    for (li, line) in layout.lines().enumerate() {
+        let m = line.metrics();
+        // Device px from the start of the line's content, as the breaker counts.
+        let at = |x: f32| x - m.inline_min_coord - m.offset;
+        let boxes: Vec<parley::PositionedInlineBox> = line
+            .items()
+            .filter_map(|it| match it {
+                PositionedLayoutItem::InlineBox(b) if b.id & PILL_BOX != 0 => Some(b),
+                _ => None,
+            })
+            .collect();
+        let room = maxes.get(li).copied().unwrap_or(f32::MAX);
+        for (k, lead) in boxes.iter().enumerate().filter(|(_, b)| b.id & 1 == 0) {
+            let trail = boxes.iter().find(|b| b.id == lead.id | 1);
+            if trail.is_some_and(|t| at(t.x) + t.width <= room + 0.5) {
+                continue;
+            }
+            // A chip starting a line whose label went on to the next: widen this line to hold
+            // the whole pill, which then overflows it as any word too long for a line does.
+            if trail.is_none() && at(lead.x) < 0.5 {
+                let next = layout.get(li + 1)?;
+                let nm = next.metrics();
+                let t = next.items().find_map(|it| match it {
+                    PositionedLayoutItem::InlineBox(b) if b.id == lead.id | 1 => Some(b),
+                    _ => None,
+                })?;
+                return Some((li, lead.width + t.x - nm.inline_min_coord - nm.offset + t.width + 1.0));
+            }
+            let mut first = k;
+            while first >= 2
+                && boxes[first - 1].id & 1 == 1
+                && (boxes[first - 1].x + boxes[first - 1].width - boxes[first].x).abs() < 0.5
+                && boxes[first - 2].id == boxes[first - 1].id & !1
+            {
+                first -= 2;
+            }
+            let x = at(boxes[first].x);
+            if x >= 0.5 {
+                return Some((li, x + boxes[first].width * 0.5));
+            }
+        }
+    }
+    None
 }
 
 /// Parley 0.12's `Cursor::geometry` omits `line.metrics().inline_min_coord`; add it so carets on
@@ -1883,7 +2095,35 @@ pub(crate) fn cursor_geometry(
         bb.x0 += inline_min as f64;
         bb.x1 += inline_min as f64;
     }
+    // Parley puts a caret at a pill's edge against its label, inside the chip: move it outside.
+    let at = cursor.index();
+    if let Some(x) = pill_edge(layout, at, ((bb.y0 + bb.y1) * 0.5) as f32) {
+        let w = bb.x1 - bb.x0;
+        bb.x0 = x as f64;
+        bb.x1 = bb.x0 + w;
+    }
     bb
+}
+
+/// The x just outside the pill chip whose label starts or ends at byte `at`, on the line at
+/// height `y`: after the chip of a pill ending there, else before one starting there.
+fn pill_edge(layout: &Layout<Ink>, at: usize, y: f32) -> Option<f32> {
+    let ids: Vec<u64> = layout.inline_boxes().filter(|b| b.index == at && b.id & PILL_BOX != 0).map(|b| b.id).collect();
+    if ids.is_empty() {
+        return None;
+    }
+    let line = layout.lines().find(|l| {
+        let m = l.metrics();
+        m.block_min_coord <= y && y <= m.block_max_coord
+    })?;
+    let boxes: Vec<parley::PositionedInlineBox> = line
+        .items()
+        .filter_map(|it| match it {
+            PositionedLayoutItem::InlineBox(b) if ids.contains(&b.id) => Some(b),
+            _ => None,
+        })
+        .collect();
+    boxes.iter().find(|b| b.id & 1 == 1).map(|t| t.x + t.width).or_else(|| boxes.first().map(|l| l.x))
 }
 
 #[cfg(test)]
@@ -2452,6 +2692,94 @@ mod quality_tests {
         text.decorations(&code_only, std::slice::from_ref(&code), 2.0, [0.0, 0.0], &mut alone);
         assert_eq!((decos[0].rect[1], decos[0].rect[3]), (alone[0].rect[1], alone[0].rect[3]), "the code's height");
         assert!(decos[0].rect[2] > alone[0].rect[2], "padding widens it");
+    }
+
+    /// A pill's chip has room of its own: its label never wraps inside, no other glyph or chip
+    /// overlaps it at any width, its icon fits inside it, and a caret at its edge sits outside.
+    #[test]
+    fn pill_chips_keep_room_and_never_overlap_at_wraps() {
+        static DOT: Icon = Icon { name: "dot", view: 24.0, body: "<circle cx=\"12\" cy=\"12\" r=\"8\"/>" };
+        let mut text = TextSystem::default();
+        let style = TextStyle::new(14.0, 400.0);
+        let content = "ask @code-reviewer about @src/main.rs and @notes today please";
+        let pills: Vec<PillChip> = ["@code-reviewer", "@src/main.rs", "@notes"]
+            .iter()
+            .enumerate()
+            .map(|(k, label)| {
+                let start = content.find(label).unwrap() as u32;
+                PillChip { start, end: start + label.len() as u32, icon: (k == 1).then_some(&DOT) }
+            })
+            .collect();
+        let scale = 2.0;
+        let bare = text.layout_blocks(content, &[], &[], &[], style, scale, None, Alignment::Start);
+        let one = text.layout_blocks(content, &[], &[], &pills, style, scale, None, Alignment::Start);
+        let pm = PillMetrics::new(14.0);
+        let room = (pm.lead(false) + pm.lead(true) + pm.lead(false) + 3.0 * pm.trail()) * scale;
+        assert!((one.full_width() - bare.full_width() - room).abs() < 4.0, "{} vs {}", one.full_width(), bare.full_width());
+
+        let glyph_boxes = |layout: &Layout<Ink>| {
+            let mut out = Vec::new();
+            for (li, line) in layout.lines().enumerate() {
+                for item in line.items() {
+                    let PositionedLayoutItem::GlyphRun(gr) = item else { continue };
+                    let mut x = gr.offset();
+                    for cluster in gr.run().visual_clusters() {
+                        let w = cluster.advance();
+                        out.push((li, cluster.text_range(), x, x + w));
+                        x += w;
+                    }
+                }
+            }
+            out
+        };
+        for width in (60..=420).step_by(9) {
+            let max = width as f32 * scale;
+            let layout = text.layout_blocks(content, &[], &[], &pills, style, scale, Some(max), Alignment::Start);
+            let (mut chips, mut icons) = (Vec::new(), Vec::new());
+            pill_chips(&layout, &pills, 14.0, scale, [0.0, 0.0], Color::BLACK, &mut chips, &mut icons);
+            assert_eq!(chips.len(), 3, "each pill draws one chip at width {width}");
+            assert_eq!(icons.len(), 1);
+            let (_, px, at) = icons[0];
+            let chip = chips[1].rect;
+            assert!(at[0] >= chip[0] && at[0] + px as f32 <= chip[0] + chip[2] + 0.5, "icon inside its chip at width {width}");
+            let line_of = |byte: usize| layout.lines().position(|l| l.text_range().contains(&byte)).unwrap();
+            for p in &pills {
+                assert_eq!(line_of(p.start as usize), line_of(p.end as usize - 1), "no wrap inside a pill at width {width}");
+            }
+            for (k, c) in chips.iter().enumerate() {
+                let r = c.rect;
+                let fits = r[0] + r[2] <= max + 0.5 || r[0] <= pm.margin * scale + 0.5;
+                assert!(fits, "chip {k} {r:?} overflows {max} at width {width}");
+                for (j, d) in chips.iter().enumerate().filter(|&(j, _)| j != k) {
+                    let same_row = (r[1] - d.rect[1]).abs() < 1.0;
+                    assert!(!same_row || r[0] + r[2] <= d.rect[0] + 0.5 || d.rect[0] + d.rect[2] <= r[0] + 0.5, "chips {k} and {j} overlap at width {width}");
+                }
+            }
+            for (li, range, x0, x1) in glyph_boxes(&layout) {
+                for (p, c) in pills.iter().zip(&chips) {
+                    let inside = (p.start as usize) <= range.start && range.end <= p.end as usize;
+                    let row = line_of(p.start as usize) == li;
+                    let ws = content[range.clone()].trim().is_empty();
+                    if row && !inside && !ws {
+                        assert!(x1 <= c.rect[0] + 0.5 || c.rect[0] + c.rect[2] <= x0 + 0.5, "glyph {:?} overlaps a chip at width {width}", &content[range.clone()]);
+                    }
+                    if inside {
+                        assert!(x0 >= c.rect[0] && x1 <= c.rect[0] + c.rect[2] + 0.5, "label {:?} {x0}..{x1} inside its chip {:?} at width {width}: {:?}", &content[range.clone()], c.rect, layout.lines().map(|l| l.text_range()).collect::<Vec<_>>());
+                    }
+                }
+            }
+            for (p, c) in pills.iter().zip(&chips) {
+                for (at, before) in [(p.start as usize, true), (p.end as usize, false)] {
+                    let cur = parley::editing::Cursor::from_byte_index(&layout, at, parley::Affinity::Downstream);
+                    let x = cursor_geometry(&cur, &layout, 1.0).x0 as f32;
+                    let line = line_of(at.min(content.len() - 1));
+                    if line == line_of(p.start as usize) {
+                        let outside = if before { x <= c.rect[0] + 0.5 } else { x >= c.rect[0] + c.rect[2] - 0.5 };
+                        assert!(outside, "caret at {at} ({x}) inside chip {:?} at width {width}", c.rect);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

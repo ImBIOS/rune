@@ -23,7 +23,9 @@ mod html;
 /// Maximum nesting level (`0..=MAX_LIST_LEVEL`) for [`Block::Bullet`] and [`Block::Numbered`].
 pub const MAX_LIST_LEVEL: u8 = 3;
 
-/// An inline formatting mark stored alongside [`TextEdit::text`].
+/// An inline formatting mark stored alongside [`TextEdit::text`]. More marks may come, so a
+/// `match` needs a `_` arm.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Mark {
     Bold,
@@ -32,6 +34,12 @@ pub enum Mark {
     Strike,
     Code,
     Link(String),
+    /// An atomic inline object (an `@file` or `@agent` mention, an attachment) carrying the
+    /// app's id; its text is the label. The caret steps over it, deleting takes it whole, a
+    /// selection that touches it covers it, and typing never extends it. A field draws it as a
+    /// chip ([`El::pill_colors`](crate::El::pill_colors), [`El::pill_icon`](crate::El::pill_icon)). Insert one with
+    /// [`TextEdit::insert_pill`].
+    Pill(String),
 }
 
 impl Mark {
@@ -43,7 +51,8 @@ impl Mark {
             | (Mark::Underline, Mark::Underline)
             | (Mark::Strike, Mark::Strike)
             | (Mark::Code, Mark::Code)
-            | (Mark::Link(_), Mark::Link(_)) => true,
+            | (Mark::Link(_), Mark::Link(_))
+            | (Mark::Pill(_), Mark::Pill(_)) => true,
             _ => false,
         }
     }
@@ -56,6 +65,18 @@ impl Mark {
         }
     }
 
+    /// The app's id when `self` is [`Mark::Pill`].
+    pub fn pill_id(&self) -> Option<&str> {
+        match self {
+            Mark::Pill(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_pill(&self) -> bool {
+        matches!(self, Mark::Pill(_))
+    }
+
     pub(crate) fn kind_order(&self) -> u8 {
         match self {
             Mark::Bold => 0,
@@ -64,6 +85,7 @@ impl Mark {
             Mark::Strike => 3,
             Mark::Code => 4,
             Mark::Link(_) => 5,
+            Mark::Pill(_) => 6,
         }
     }
 }
@@ -191,6 +213,7 @@ impl Default for RichStyle {
         }
     }
 }
+
 
 #[derive(Clone, Default, PartialEq)]
 pub struct TextEdit {
@@ -883,15 +906,93 @@ impl TextEdit {
     /// selection, clearing any pending typing style.
     pub fn set_caret(&mut self, byte: usize) {
         let b = Self::clamp_char_boundary(&self.text, byte);
-        self.set(b, false);
+        self.anchor = b;
+        self.focus = b;
+        self.snap_to_pills();
+        self.pending = None;
     }
 
     /// Set the selection `anchor` and `focus` byte indices (clamped to character boundaries of
-    /// `self.text`), clearing any pending typing style.
+    /// `self.text`), clearing any pending typing style. A selection that ends inside a
+    /// [`Mark::Pill`] grows to cover it.
     pub fn set_selection(&mut self, anchor: usize, focus: usize) {
         self.anchor = Self::clamp_char_boundary(&self.text, anchor);
         self.focus = Self::clamp_char_boundary(&self.text, focus);
+        self.snap_to_pills();
         self.pending = None;
+    }
+
+    /// The [`Mark::Pill`]s in `self.text`, in order, with their byte ranges and ids.
+    pub fn pills(&self) -> impl Iterator<Item = (Range<usize>, &str)> + '_ {
+        self.marks.iter().filter_map(|m| Some((m.range(), m.mark.pill_id()?)))
+    }
+
+    /// Replace the selection with `label` as one [`Mark::Pill`] carrying `id`, and put the
+    /// caret after it: one undo step. Line breaks in `label` become spaces.
+    pub fn insert_pill(&mut self, id: impl Into<String>, label: &str) {
+        let (a, b) = self.range();
+        self.replace_with_pill(a..b, id, label);
+    }
+
+    /// Replace byte range `range` with `label` as one [`Mark::Pill`] carrying `id` (an `@query`
+    /// the user typed, say), and put the caret after it: one undo step. The range grows to
+    /// cover any pill it cuts into. Line breaks in `label` become spaces; an empty label or a
+    /// secure field inserts nothing.
+    pub fn replace_with_pill(&mut self, range: Range<usize>, id: impl Into<String>, label: &str) {
+        let label: String = label.chars().map(|c| if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') { ' ' } else { c }).collect();
+        if self.secure || label.is_empty() {
+            return;
+        }
+        self.sync_invariants();
+        self.break_history_group();
+        let before = self.snapshot();
+        let a = Self::clamp_char_boundary(&self.text, range.start.min(range.end));
+        let b = Self::clamp_char_boundary(&self.text, range.end.max(range.start));
+        let (a, b) = self.cover_pills(a, b);
+        self.pending = None;
+        self.apply_text_and_attr_replace((a, b), &label, &[], None, false);
+        // Code blocks keep no inline marks: there the label stays plain text.
+        self.marks.push(MarkRange { start: a, end: a + label.len(), mark: Mark::Pill(id.into()) });
+        self.normalize_marks();
+        self.record_change(before, false);
+    }
+
+    /// The pill strictly containing byte `i` (`start < i < end`).
+    fn pill_around(&self, i: usize) -> Option<(usize, usize)> {
+        self.marks.iter().find(|m| m.mark.is_pill() && m.start < i && i < m.end).map(|m| (m.start, m.end))
+    }
+
+    /// `i` moved out of any pill it lands inside, to its end when `forward`, else its start.
+    fn out_of_pill(&self, i: usize, forward: bool) -> usize {
+        self.pill_around(i).map_or(i, |(s, e)| if forward { e } else { s })
+    }
+
+    /// `a..b` grown to cover any pill either end cuts into; an empty range inside one moves
+    /// to its end.
+    fn cover_pills(&self, a: usize, b: usize) -> (usize, usize) {
+        if a == b {
+            let i = self.out_of_pill(a, true);
+            return (i, i);
+        }
+        (self.out_of_pill(a, false), self.out_of_pill(b, true))
+    }
+
+    /// Keeps the caret off a pill's inside: a caret goes to the nearer edge, a selection grows
+    /// to cover the pill.
+    pub(crate) fn snap_to_pills(&mut self) {
+        if !self.marks.iter().any(|m| m.mark.is_pill()) {
+            return;
+        }
+        if self.anchor == self.focus {
+            if let Some((s, e)) = self.pill_around(self.focus) {
+                let to = if self.focus - s < e - self.focus { s } else { e };
+                (self.anchor, self.focus) = (to, to);
+            }
+        } else {
+            let forward = self.focus > self.anchor;
+            self.anchor = self.out_of_pill(self.anchor, !forward);
+            self.focus = self.out_of_pill(self.focus, forward);
+        }
     }
 
     pub fn selected(&self) -> &str {
@@ -959,6 +1060,8 @@ impl TextEdit {
         self.soft_breaks.sort_unstable();
         self.soft_breaks.dedup();
         self.soft_breaks.retain(|&idx| idx > 0 && (idx as usize) < line_count);
+        self.normalize_marks();
+        self.snap_to_pills();
         let anchor_line = self.line_of_byte(self.anchor);
         if let Some((armed, ref mut marks)) = self.pending {
             if armed != (self.anchor, self.focus) || self.blocks.get(anchor_line) == Some(&Block::Code) {
@@ -967,7 +1070,6 @@ impl TextEdit {
                 marks.retain(|m| bits & 1 << m.kind_order() != 0);
             }
         }
-        self.normalize_marks();
     }
 
     fn normalize_marks(&mut self) {
@@ -1024,7 +1126,7 @@ impl TextEdit {
 
         // Merge overlapping or adjacent ranges of the same mark kind.
         // For `Mark::Link`, later entries win over earlier overlapping links.
-        let mut by_kind: [Vec<MarkRange>; 6] = Default::default();
+        let mut by_kind: [Vec<MarkRange>; 7] = Default::default();
         for m in self.marks.drain(..) {
             if m.start < m.end {
                 by_kind[m.mark.kind_order() as usize].push(m);
@@ -1036,7 +1138,18 @@ impl TextEdit {
             if list.is_empty() {
                 continue;
             }
-            if kind_idx == 5 {
+            if kind_idx == 6 {
+                // `Mark::Pill`: whole objects on one line that never merge; the first of two
+                // overlapping pills wins.
+                list.sort_by_key(|m| (m.start, m.end));
+                let mut end = 0;
+                for m in list {
+                    if m.start >= end && !self.text.as_bytes()[m.start..m.end].contains(&b'\n') {
+                        end = m.end;
+                        merged.push(m);
+                    }
+                }
+            } else if kind_idx == 5 {
                 // `Mark::Link`: resolve overlaps so later links overwrite earlier ones, then merge adjacent equal URLs.
                 let mut bounds: Vec<(usize, usize)> = list.iter().map(|m| (m.start, m.end)).collect();
                 bounds.sort_unstable();
@@ -1121,7 +1234,7 @@ impl TextEdit {
         }
         let mut out = Vec::new();
         for m in &self.marks {
-            if m.start < pos && pos <= m.end && !out.iter().any(|existing: &Mark| existing.same_kind(&m.mark)) {
+            if m.start < pos && pos <= m.end && !m.mark.is_pill() && !out.iter().any(|existing: &Mark| existing.same_kind(&m.mark)) {
                 out.push(m.mark.clone());
             }
         }
@@ -1291,6 +1404,8 @@ impl TextEdit {
         for m in self.marks.drain(..) {
             if !m.mark.same_kind(mark) || m.end <= a || m.start >= b {
                 out.push(m);
+            } else if m.mark.is_pill() {
+                // A pill goes whole: its label stays as plain text.
             } else {
                 if m.start < a {
                     out.push(MarkRange { start: m.start, end: a, mark: m.mark.clone() });
@@ -1575,6 +1690,8 @@ impl TextEdit {
                     end: m.end - del_len + ins_len,
                     mark: m.mark,
                 });
+            } else if m.mark.is_pill() {
+                // An edit that cuts into a pill leaves its remains as plain text.
             } else {
                 // `m` overlaps `a..b` (or touches inside it).
                 if m.start < a {
@@ -1594,7 +1711,8 @@ impl TextEdit {
             }
         }
         if ins_len > 0 {
-            for im in inserted_marks {
+            // Typed or replacing text never becomes a pill.
+            for im in inserted_marks.iter().filter(|m| !m.is_pill()) {
                 // Avoid wrapping a pure newline at the trailing edge of a mark unless inside the mark.
                 if s == "\n" {
                     let was_inside = updated_marks.iter().any(|m| m.mark == *im && m.start >= a + ins_len);
@@ -1629,6 +1747,8 @@ impl TextEdit {
             return;
         }
         self.sync_invariants();
+        // Backspace or Delete next to a pill, or a selection into one, takes it whole.
+        let (a, b) = self.cover_pills(a, b);
         if !typing { self.break_history_group(); }
         if &self.text[a..b] == s && self.pending.is_none() {
             self.anchor = a + s.len();
@@ -1684,10 +1804,13 @@ impl TextEdit {
     }
 
     fn set(&mut self, i: usize, extend: bool) {
+        // A caret moving into a pill steps over it, the way it was going.
+        let i = self.out_of_pill(i, i > self.focus);
         self.focus = i;
         if !extend {
             self.anchor = i;
         }
+        self.snap_to_pills();
         self.pending = None;
     }
 
@@ -1963,12 +2086,27 @@ impl TextEdit {
 
     /// Paste rich HTML (`html`) with plain-text fallback (`plain`) into `self` at the current
     /// selection, recorded as a single undo step. Does not touch the OS clipboard. A plain field,
-    /// or HTML with no marks or blocks this model keeps, pastes `plain` instead.
+    /// or HTML with no marks or blocks this model keeps, pastes `plain` instead. Pills
+    /// (`<span data-pill="id">`) paste as their plain labels: a field restores them only from
+    /// its app's own copies, and an app's paste hook can with
+    /// [`paste_html_with_pills`](Self::paste_html_with_pills).
     pub fn paste_html(&mut self, html_str: &str, plain: &str) -> EditOutcome {
+        self.paste_rich(html_str, plain, false)
+    }
+
+    /// [`paste_html`](Self::paste_html), keeping the HTML's [`Mark::Pill`]s.
+    pub fn paste_html_with_pills(&mut self, html_str: &str, plain: &str) -> EditOutcome {
+        self.paste_rich(html_str, plain, true)
+    }
+
+    fn paste_rich(&mut self, html_str: &str, plain: &str, pills: bool) -> EditOutcome {
         if self.secure || html_str.trim().is_empty() {
             return self.paste(plain);
         }
-        let frag = Self::from_html(html_str);
+        let mut frag = Self::from_html(html_str);
+        if !pills {
+            frag.marks.retain(|m| !m.mark.is_pill());
+        }
         // HTML that only colours or lays out text (a code editor's copy) would collapse the
         // plain text's whitespace for nothing.
         let frag = self.keep_allowed(frag);
@@ -2177,6 +2315,8 @@ impl TextEdit {
                     });
                     links.push(Link::new(r_start as usize..r_end as usize, url.clone()));
                 }
+                // The chip and its colours come from `display_pills`.
+                Mark::Pill(_) => {}
             }
         };
 
@@ -2194,8 +2334,8 @@ impl TextEdit {
             let (a, _) = self.range();
             let ps = a as u32;
             let pe = (a + p.len()) as u32;
-            for m in self.active_marks() {
-                push_mark_span(ps, pe, &m, &mut spans, &mut strikes, &mut links);
+            for m in self.active_marks().iter().filter(|m| !m.is_pill()) {
+                push_mark_span(ps, pe, m, &mut spans, &mut strikes, &mut links);
             }
         }
 
@@ -2231,6 +2371,23 @@ impl TextEdit {
         }
 
         (spans, strikes, links, display_blocks)
+    }
+
+    /// Each [`Mark::Pill`]'s byte range in `self.display().0`, with its id.
+    pub(crate) fn display_pills(&self) -> Vec<(u32, u32, &str)> {
+        if self.secure {
+            return Vec::new();
+        }
+        self.marks
+            .iter()
+            .filter_map(|m| {
+                let id = m.mark.pill_id()?;
+                match self.map_range_to_display(m.start, m.end)[..] {
+                    [(s, e)] if (e - s) as usize == m.end - m.start => Some((s, e, id)),
+                    _ => None,
+                }
+            })
+            .collect()
     }
 
     fn display_blocks(&self, disp_text: &str) -> Vec<Block> {
@@ -3622,5 +3779,194 @@ mod tests {
         rt.key(cmd('c'));
         rt.frame(0.0);
         assert_eq!(m.content().unwrap().html(), None);
+    }
+
+    /// `"a @x-agent b"` with the label a pill carrying `agent:x`, the caret after it.
+    fn with_pill() -> TextEdit {
+        let mut e = TextEdit::new("a  b").rich();
+        e.set_caret(2);
+        e.insert_pill("agent:x", "@x-agent");
+        e
+    }
+
+    fn pills_of(e: &TextEdit) -> Vec<(Range<usize>, String)> {
+        e.pills().map(|(r, id)| (r, id.to_owned())).collect()
+    }
+
+    #[test]
+    fn a_pill_replaces_a_typed_query_and_lists_with_its_id() {
+        let mut e = TextEdit::new("").rich();
+        e.insert("see @ma");
+        let at = e.text.find('@').unwrap();
+        e.replace_with_pill(at..e.text.len(), "file:src/main.rs", "@main.rs\n");
+        assert_eq!(e.text, "see @main.rs ", "line breaks in a label become spaces");
+        assert_eq!(pills_of(&e), [(4..13, "file:src/main.rs".to_owned())]);
+        assert_eq!(e.range(), (13, 13));
+        e.key(&k(Key::Text("x".into())), None);
+        assert_eq!(pills_of(&e), [(4..13, "file:src/main.rs".to_owned())], "typing after a pill never extends it");
+        e.set_caret(4);
+        e.key(&k(Key::Text("y".into())), None);
+        assert_eq!((e.text.as_str(), pills_of(&e)), ("see y@main.rs x", vec![(5..14, "file:src/main.rs".to_owned())]));
+        let mut secure = TextEdit::new("").secure();
+        secure.insert_pill("a", "@a");
+        assert_eq!((secure.text.as_str(), secure.pills().count()), ("", 0));
+    }
+
+    #[test]
+    fn the_caret_steps_over_a_pill_in_one_move() {
+        let mut e = with_pill();
+        assert_eq!((e.text.as_str(), e.range()), ("a @x-agent b", (10, 10)));
+        e.key(&k(Key::Left), None);
+        assert_eq!(e.range(), (2, 2));
+        e.key(&k(Key::Left), None);
+        assert_eq!(e.range(), (1, 1));
+        e.key(&k(Key::Right), None);
+        e.key(&k(Key::Right), None);
+        assert_eq!(e.range(), (10, 10));
+        e.set_caret(2);
+        e.key(&KeyEvent { key: Key::Right, mods: Mods { alt: true, ..Mods::default() } }, None);
+        assert_eq!(e.range(), (10, 10), "a word move that stops inside the label steps over it");
+        e.set_caret(2);
+        e.key(&KeyEvent { key: Key::Right, mods: Mods { shift: true, ..Mods::default() } }, None);
+        assert_eq!((e.anchor, e.focus), (2, 10), "Shift+Right selects the whole pill");
+        e.set_caret(5);
+        assert_eq!(e.range(), (2, 2), "a click inside goes to the nearer edge");
+        e.set_caret(8);
+        assert_eq!(e.range(), (10, 10));
+        // A caret written straight into a pill moves out before the next edit.
+        e.anchor = 6;
+        e.focus = 6;
+        e.insert("Z");
+        assert_eq!((e.text.as_str(), pills_of(&e)), ("a @x-agentZ b", vec![(2..10, "agent:x".to_owned())]));
+    }
+
+    #[test]
+    fn backspace_and_delete_take_a_pill_whole_and_undo_restores_its_id() {
+        let mut e = with_pill();
+        e.key(&k(Key::Backspace), None);
+        assert_eq!((e.text.as_str(), e.range(), e.pills().count()), ("a  b", (2, 2), 0));
+        undo(&mut e, false);
+        assert_eq!((e.text.as_str(), pills_of(&e)), ("a @x-agent b", vec![(2..10, "agent:x".to_owned())]));
+        e.set_caret(2);
+        e.key(&k(Key::Delete), None);
+        assert_eq!((e.text.as_str(), e.pills().count()), ("a  b", 0));
+        undo(&mut e, false);
+        e.set_caret(11);
+        e.key(&k(Key::Backspace), None);
+        assert_eq!((e.text.as_str(), pills_of(&e)), ("a @x-agentb", vec![(2..10, "agent:x".to_owned())]));
+        e.set_caret(10);
+        e.key(&KeyEvent { key: Key::Backspace, mods: Mods { alt: true, ..Mods::default() } }, None);
+        assert_eq!((e.text.as_str(), e.pills().count()), ("a b", 0), "a word delete into a pill takes it whole");
+        undo(&mut e, false);
+        undo(&mut e, true);
+        undo(&mut e, false);
+        assert_eq!(pills_of(&e), [(2..10, "agent:x".to_owned())]);
+    }
+
+    #[test]
+    fn a_selection_into_a_pill_covers_it() {
+        let mut e = with_pill();
+        e.set_selection(0, 5);
+        assert_eq!((e.anchor, e.focus), (0, 10));
+        e.set_selection(7, 12);
+        assert_eq!((e.anchor, e.focus), (2, 12));
+        e.set_selection(11, 4);
+        assert_eq!((e.anchor, e.focus), (11, 2));
+        e.set_selection(0, 5);
+        e.insert("z");
+        assert_eq!((e.text.as_str(), e.pills().count()), ("z b", 0));
+        // Formatting a pill restyles its label and keeps it whole.
+        let mut e = with_pill();
+        e.set_selection(0, 6);
+        e.toggle_mark(Mark::Bold);
+        assert_eq!(pills_of(&e), [(2..10, "agent:x".to_owned())]);
+        assert!(e.marks().iter().any(|m| m.mark == Mark::Bold && m.range() == (0..10)));
+    }
+
+    #[test]
+    fn a_composition_never_splits_a_pill() {
+        let mut e = with_pill();
+        e.anchor = 4;
+        e.focus = 4;
+        e.ime(&Ime::Preedit("に".into(), None));
+        let (shown, pre) = e.display();
+        let (pa, _) = pre.unwrap();
+        assert!(pa <= 2 || pa >= 10, "preedit at {pa} in {shown:?}");
+        assert_eq!(e.display_pills().len(), 1);
+        e.ime(&Ime::Commit("日本".into()));
+        assert_eq!(pills_of(&e).len(), 1);
+        assert_eq!(&e.text[pills_of(&e)[0].0.clone()], "@x-agent");
+        assert!(e.text == "a 日本@x-agent b" || e.text == "a @x-agent日本 b", "{}", e.text);
+    }
+
+    #[test]
+    fn pills_round_trip_through_html_and_outside_html_makes_none() {
+        let mut e = with_pill();
+        e.set_selection(0, 5);
+        e.toggle_mark(Mark::Italic);
+        e.set_selection(0, e.text.len());
+        let html = e.selected_html();
+        assert!(html.contains("<span data-pill=\"agent:x\">"), "{html}");
+        assert_eq!(e.selected(), "a @x-agent b", "the plain copy is the label");
+        let mut other = TextEdit::new("").rich();
+        other.paste_html_with_pills(&html, e.selected());
+        assert_eq!((other.text.as_str(), pills_of(&other)), ("a @x-agent b", vec![(2..10, "agent:x".to_owned())]));
+        let mut outside = TextEdit::new("").rich();
+        outside.paste_html(&html, e.selected());
+        assert_eq!((outside.text.as_str(), outside.pills().count()), ("a @x-agent b", 0));
+        assert!(outside.marks().iter().any(|m| m.mark == Mark::Italic), "the rest of the formatting stays");
+        // A pill split by a mark's edge still serializes as one span.
+        let one = TextEdit::from_html("<p><span data-pill=\"f&quot;1\">@f<b>il</b>e</span></p>");
+        assert_eq!(pills_of(&one), [(0..5, "f\"1".to_owned())]);
+        assert!(one.to_html().contains("<span data-pill=\"f&quot;1\">@f<strong>il</strong>e</span>"), "{}", one.to_html());
+        // A pill can't span lines.
+        let broken = TextEdit::from_parts("a\nb c", vec![MarkRange::new(0..3, Mark::Pill("x".into())), MarkRange::new(4..5, Mark::Pill("c".into()))], Vec::new());
+        assert_eq!(pills_of(&broken), [(4..5, "c".to_owned())]);
+    }
+
+    #[test]
+    fn a_pill_copied_from_one_rich_field_pastes_whole_into_another() {
+        use crate::{ClipboardContent, Cx, El, Env, Runtime, TextStyle, col, text_input};
+        struct App { a: TextEdit, b: TextEdit, hooked: TextEdit }
+        fn view(s: &App, _: &mut Cx<App>) -> El {
+            let st = TextStyle::new(14.0, 400.0);
+            col().size(320.0, 360.0)
+                .child(text_input(&s.a, st).key("a").size(300.0, 100.0).on_edit(|s: &mut App| &mut s.a))
+                .child(text_input(&s.b, st).key("b").size(300.0, 100.0).on_edit(|s: &mut App| &mut s.b))
+                .child(text_input(&s.hooked, st).key("hooked").size(300.0, 100.0).on_edit(|s: &mut App| &mut s.hooked)
+                    .on_input_paste(|s: &mut App, content, _| {
+                        let Some(html) = content.html() else { return false };
+                        s.hooked.paste_html_with_pills(html, content.text());
+                        true
+                    }))
+        }
+        let mut a = with_pill();
+        a.focused = true;
+        a.set_selection(0, a.text.len());
+        let m = crate::clipboard::memory();
+        let mut rt = Runtime::new(App { a, b: TextEdit::new("").rich(), hooked: TextEdit::new("").rich() }, view, (320.0, 360.0), Env::new(true, 1.0));
+        rt.use_clipboard(&m);
+        rt.frame(0.0);
+        rt.key(cmd('c'));
+        rt.frame(0.0);
+        let copied = m.content().unwrap();
+        assert_eq!(copied.text(), "a @x-agent b");
+        assert!(copied.html().is_some_and(|h| h.contains("<span data-pill=\"agent:x\">@x-agent</span>")), "{copied:?}");
+        let paste_into = |rt: &mut Runtime<App>, which: fn(&mut App) -> &mut TextEdit| {
+            rt.update(move |s, _| { s.a.focused = false; s.b.focused = false; s.hooked.focused = false; which(s).focused = true; });
+            rt.frame(0.0);
+            rt.update(|_, tx| tx.request_paste());
+            rt.frame(0.0);
+        };
+        paste_into(&mut rt, |s| &mut s.b);
+        assert_eq!(pills_of(&rt.state.b), [(2..10, "agent:x".to_owned())], "its own copy pastes the pill back");
+
+        // The same HTML from outside (another app's copy) pastes plain labels, unless a hook keeps them.
+        m.set_content(ClipboardContent::new("x @x-agent").with_html("x <span data-pill=\"agent:x\">@x-agent</span>"));
+        rt.update(|s, _| s.b.set_selection(0, s.b.text.len()));
+        paste_into(&mut rt, |s| &mut s.b);
+        assert_eq!((rt.state.b.text.as_str(), rt.state.b.pills().count()), ("x @x-agent", 0));
+        paste_into(&mut rt, |s| &mut s.hooked);
+        assert_eq!(pills_of(&rt.state.hooked), [(2..10, "agent:x".to_owned())]);
     }
 }

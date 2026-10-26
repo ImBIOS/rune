@@ -943,6 +943,26 @@ newline on `Shift+Return` and pastes plain text. The mark and block methods work
     (one byte, so offsets and copy/paste keep the tab).
   - Code blocks and `Mark::Code` runs draw in the mono slot (name a monospaced family in
     `AppSpec::families`; the default is Inter) without ligatures.
+- **Inline pills** (`Mark::Pill(id)`, for `@file`, `@agent` or attachment mentions): an atomic
+  run whose label is the text under the mark and whose id is the app's. The caret steps over a
+  pill in one move, a selection that reaches into one grows to cover it, `Backspace`/`Delete`
+  remove it whole, typing and IME composition never land inside it, and undo restores it with
+  its id. Pills are only made by the app: `edit.insert_pill(id, label)` at the caret, or
+  `edit.replace_with_pill(range, id, label)` to swap a typed `@query` for one (one undo step).
+  `edit.pills()` lists `(range, id)` for each. The field draws each pill as a rounded chip
+  (`.pill_colors(bg, fg)`, default a tint of the link colour) with an optional leading icon
+  (`.pill_icon(|id| ...)`), and a chip never splits across lines. Copy writes the label as
+  plain text and `<span data-pill="id">label</span>` as HTML; pasting that into a rich field
+  of the same app restores the pill, while HTML from elsewhere never makes one (an
+  `on_input_paste` hook can call `insert_pill` itself).
+
+  ```rust
+  // `@que` typed before the caret becomes a file pill.
+  let (caret, _) = edit.range();
+  if let Some(at) = edit.text[..caret].rfind('@') {
+      edit.replace_with_pill(at..caret, "file:src/main.rs", "main.rs");
+  }
+  ```
 - **Per-frame decorations** (`.spans(spans)` / `.decorations(spans)` on `text_input`, `TextInput`
   and `TextArea`): paint caller-supplied `rune::Span`s (such as `SyntaxTheme::from_kit(&k).spans(&ranges, offset)`
   from `rune_kit::syntax::highlight`) over the editor without mutating `TextEdit`. Byte offsets are

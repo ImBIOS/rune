@@ -88,8 +88,9 @@ scene; there is no matching combobox Storybook story to diff.
 `TextInput::on_key` intercepts a focused field's keys before editing; `on_change` runs after
 text changes and receives a `Tx`, for filtering and exact debounce wakes. `TextInput`, `TextArea`
 and `TextField` also accept `.decorations(spans)` (or `.spans(spans)`) and `.rich_style(style)` for
-attributed `TextEdit` marks, paragraph blocks and per-frame syntax highlights (build the edit
-with `TextEdit::rich()` for formatting keys and rich paste; see
+attributed `TextEdit` marks, paragraph blocks and per-frame syntax highlights, and
+`.pill_icon(f)` / `.pill_colors(bg, fg)` for `@` mention pills (build the edit with
+`TextEdit::rich()` for formatting keys and rich paste; see
 [`examples/rich_editor.rs`](examples/rich_editor.rs)):
 
 ![rich editor](../../demo/kit/rich-editor.png)
