@@ -366,6 +366,35 @@ fn target_shift(nodes: &[Node], scrolls: &HashMap<NodeId, ScrollState>, j: usize
 }
 
 impl<S: 'static> Runtime<S> {
+    /// Replay just one inherited fade edge without the nearest viewport's content-aware
+    /// fade. Explicit clips inside it and fades outside it still apply. Recursion follows
+    /// parents already painted this frame and needs no scratch allocation.
+    pub(super) fn sticky_fade(&self, i: usize, viewport: usize, slot: usize, paint: bool) -> (f32, f32) {
+        if i == viewport {
+            let up = self.nodes[i].parent.map_or(Inh::default(), |p| self.inh_scratch[p]);
+            return if paint { (up.paint_fade[slot], up.paint_fade_origin[slot]) }
+                else { (up.fade[slot], up.fade_origin[slot]) };
+        }
+        let n = &self.nodes[i];
+        let (width, origin) = self.sticky_fade(n.parent.unwrap(), viewport, slot, paint);
+        let mut widths = [0.0; 4];
+        let mut origins = NO_CLIP;
+        widths[slot] = width;
+        origins[slot] = origin;
+        let r = self.drawn[i].map(|v| v * self.env.scale);
+        let r = [r[0], r[1], r[0] + r[2], r[1] + r[3]];
+        if let Some(clip) = n.vis.clip {
+            inherit_fade(&mut widths, &mut origins, r, clip.map(|v| v * self.inh_scratch[i].scale * self.env.scale));
+        }
+        if self.row_mask[i] >= 0.0 {
+            inherit_fade(&mut widths, &mut origins, r, [0.0, 0.0, 0.0, self.row_mask[i] * self.env.scale]);
+        }
+        // An isolation layer already consumed the parent's paint fade. Its descendants
+        // must not apply that same fade a second time.
+        if paint && self.inh_scratch[i].paint_fade[slot] == 0.0 { return (0.0, NO_CLIP[slot]); }
+        (widths[slot], origins[slot])
+    }
+
     /// The nearest vertical scroll viewport around node `i`.
     pub(super) fn viewport_of(&self, i: usize) -> Option<usize> {
         std::iter::successors(self.nodes[i].parent, |&p| self.nodes[p].parent)

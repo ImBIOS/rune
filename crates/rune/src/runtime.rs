@@ -5928,7 +5928,25 @@ impl<S: 'static> Runtime<S> {
                 // Worked out from this frame's offsets, which the viewport above already applied.
                 // Exclude this node's own `prop::OFFSET` (`live_offset`) so it translates from the
                 // stuck place rather than being clamped away by the sticky edge.
-                let frame = n.parent.map_or(sticky::UNBOUNDED, |pr| self.sticky_frame[pr]);
+                let mut frame = n.parent.map_or(sticky::UNBOUNDED, |pr| self.sticky_frame[pr]);
+                let mut ancestor = n.parent;
+                let mut viewport = None;
+                while let Some(a) = ancestor {
+                    let nd = &self.nodes[a];
+                    let horizontal = edge == crate::el::StickyEdge::Left;
+                    if nd.scroll.is_some() && if horizontal { nd.scroll_axes.x() } else { nd.scroll_axes.y() } {
+                        viewport = Some(a);
+                        break;
+                    }
+                    // A section nested inside a growth row must stop at that row's presented
+                    // bottom, not its descendants' final layout height. Only sticky nodes
+                    // need this ancestor walk; ordinary painting keeps its existing fast path.
+                    if !horizontal && self.row_h[a] >= 0.0 {
+                        frame[2] = frame[2].max(self.sticky_frame[a][2]);
+                        frame[3] = frame[3].min(self.sticky_frame[a][3]);
+                    }
+                    ancestor = nd.parent;
+                }
                 let own_off = self.scene.get(n.id, prop::OFFSET).unwrap_or(rune_motion::Vec2::ZERO);
                 let (top, left) = (p.rect.y - own_off.y + pinh.dy, p.rect.x - own_off.x + pinh.dx);
                 let h = if self.row_h[i] >= 0.0 { self.row_h[i] } else { p.rect.h };
@@ -5937,14 +5955,18 @@ impl<S: 'static> Runtime<S> {
                 if edge == crate::el::StickyEdge::Left { pinh.dx += shift } else { pinh.dy += shift }
                 // A sticky element stays crisp against the viewport edge it sticks to while rows
                 // scrolling under its fill fade out.
-                let (band, slot) = match edge {
-                    crate::el::StickyEdge::Left => (frame[4], 0),
-                    crate::el::StickyEdge::Top => (frame[0], 1),
-                    crate::el::StickyEdge::Bottom => (frame[1], 3),
+                let slot = match edge {
+                    crate::el::StickyEdge::Left => 0,
+                    crate::el::StickyEdge::Top => 1,
+                    crate::el::StickyEdge::Bottom => 3,
                 };
-                if band.is_finite() {
-                    pinh.fade[slot] = 0.0;
-                    pinh.paint_fade[slot] = 0.0;
+                if let Some(viewport) = viewport.filter(|&v| self.nodes[v].scroll_edges.fade > 0.0) {
+                    let (width, origin) = self.sticky_fade(n.parent.unwrap(), viewport, slot, false);
+                    pinh.fade[slot] = width;
+                    pinh.fade_origin[slot] = origin;
+                    let (width, origin) = self.sticky_fade(n.parent.unwrap(), viewport, slot, true);
+                    pinh.paint_fade[slot] = width;
+                    pinh.paint_fade_origin[slot] = origin;
                 }
             }
             if raised {
@@ -6105,7 +6127,7 @@ impl<S: 'static> Runtime<S> {
                 let v = if sc_y {
                     [raw_edges[1], raw_edges[3], f32::NEG_INFINITY, f32::INFINITY]
                 } else {
-                    [up[0], up[1], (raw_edges[1] + n.inset[1]).max(up[2]), (raw_edges[3] - n.inset[3]).min(up[3])]
+                    [up[0], up[1], raw_edges[1] + n.inset[1], raw_edges[3] - n.inset[3]]
                 };
                 let x = if sc_x {
                     [raw_edges[0], raw_edges[2], f32::NEG_INFINITY, f32::INFINITY]

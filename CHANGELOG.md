@@ -9,6 +9,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   and `El::sticky_left` no longer inherit their scroll viewport's edge fade on the edge they stick
   to, so a stuck header's fill and text stay crisp and occlude rows scrolling under them, and
   sections nested inside a `memo` growth row bound their sticky children to the animated row height.
+  The exemption also applies before the header sticks, without an opacity jump at the threshold;
+  explicit `clip_fade` masks and fades from outer viewports still apply.
 - **Two-line `SidebarRow`s read as a title over a caption; select-only rows; launcher fields.**
   **Output change** for rows with `.subtitle(..)`: the name is now medium weight (13 / 16) and the
   subtitle the kit's `caption` (11 / 16) in `text_faint`, where both were 13 / 16 and the subtitle

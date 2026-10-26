@@ -3018,8 +3018,9 @@ impl El {
     /// viewport ([`El::scroll_x`]) the left and right edges fade the same way instead, and on
     /// [`El::scroll_xy`] all four. Sticky elements ([`El::sticky_top`], [`El::sticky_bottom`],
     /// [`El::sticky_left`]) are not faded on the edge they stick to, so a header's fill stays
-    /// opaque while rows scrolling under it fade. Pair with [`El::scroll_margin`] so rows
-    /// brought into view stop clear of the fade.
+    /// opaque while rows scrolling under it fade. This also applies before the element sticks;
+    /// explicit [`El::clip_fade`] masks and outer viewports' fades still apply. Pair with
+    /// [`El::scroll_margin`] so rows brought into view stop clear of the fade.
     pub fn scroll_edge_fade(mut self, width: f32) -> Self {
         self.scroll_edges.fade = width.max(0.0);
         self
