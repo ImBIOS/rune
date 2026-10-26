@@ -622,6 +622,25 @@ pub struct Picked {
     key: Option<String>,
 }
 
+/// Options for [`Runtime::element_at_with`] and its siblings. Fields are private, so options can
+/// be added without breaking callers; `Pick::default()` is [`Runtime::element_at`]'s behaviour.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pick {
+    transparent: bool,
+}
+
+impl Pick {
+    pub fn new() -> Self { Self::default() }
+
+    /// Also find elements whose own or inherited opacity is 0, as a design canvas does to
+    /// select an invisible layer. Exiting elements are skipped either way, and so are hidden
+    /// or unmounted ones.
+    pub fn transparent(mut self, on: bool) -> Self {
+        self.transparent = on;
+        self
+    }
+}
+
 impl Picked {
     /// Its path in the element tree (as [`ElementInfo::path`]).
     pub fn path(&self) -> &str { &self.path }
@@ -7711,19 +7730,25 @@ impl<S: 'static> Runtime<S> {
     /// (including a turned ancestor's clip), in paint order (so `El::raise`, sticky and flying
     /// elements count). Unlike a press, it also finds elements with no handlers, and it ignores
     /// `El::inert` and modals, so a press can land on a different element than this returns.
-    /// Elements that are exiting or fully transparent are skipped. `El::hit`, which marks native
+    /// Elements that are exiting or fully transparent are skipped (see [`Runtime::element_at_with`] to include transparent ones). `El::hit`, which marks native
     /// overlay input, makes no difference, and overlay panels outside the window are not
     /// considered. An element is not cut by its own clip, only by its ancestors'. This is box
     /// geometry, not pixel/alpha picking: a box with no fill remains pickable (as an invisible
     /// input area does), and rounded corners and soft clip fades do not trim its hit box.
     /// Running handlers can use [`Tx::element_at`] without holding a `Runtime`.
     pub fn element_at(&self, x: f32, y: f32) -> Option<Picked> {
-        self.element_at_within(None, x, y)
+        self.element_at_with(x, y, Pick::default())
+    }
+
+    /// [`Runtime::element_at`] with options: [`Pick::transparent`] also finds fully
+    /// transparent elements (exiting ones stay skipped).
+    pub fn element_at_with(&self, x: f32, y: f32, pick: Pick) -> Option<Picked> {
+        self.element_at_within(None, x, y, pick)
     }
 
     fn run_pick_reads(&mut self, tx: &mut Tx) {
         for read in std::mem::take(&mut tx.pick_reads) {
-            let picked = self.element_at_within(read.within.as_deref(), read.x, read.y);
+            let picked = self.element_at_within(read.within.as_deref(), read.x, read.y, read.pick);
             if let Some(f) = read.take() {
                 f(&mut self.state, picked, tx);
                 self.dirty = true;
@@ -7736,10 +7761,15 @@ impl<S: 'static> Runtime<S> {
     /// [`Runtime::element_at`] restricted to an element and its descendants, ignoring other
     /// subtrees. `within` accepts a key or key path as [`Cx::layout`] does.
     pub fn element_at_in(&self, within: &str, x: f32, y: f32) -> Option<Picked> {
-        self.element_at_within(Some(within), x, y)
+        self.element_at_in_with(within, x, y, Pick::default())
     }
 
-    fn element_at_within(&self, within: Option<&str>, x: f32, y: f32) -> Option<Picked> {
+    /// [`Runtime::element_at_in`] with options, as [`Runtime::element_at_with`].
+    pub fn element_at_in_with(&self, within: &str, x: f32, y: f32, pick: Pick) -> Option<Picked> {
+        self.element_at_within(Some(within), x, y, pick)
+    }
+
+    fn element_at_within(&self, within: Option<&str>, x: f32, y: f32, pick: Pick) -> Option<Picked> {
         let scope = match within {
             Some(key) => Some(self.nodes.iter().position(|n| crate::flight::selects(key, &n.path, n.key.as_deref()))?),
             None => None,
@@ -7749,7 +7779,7 @@ impl<S: 'static> Runtime<S> {
         let count = if self.layer_paint_order.is_empty() { n } else { self.layer_paint_order.len() };
         (0..count).rev().map(at).find(|&i| {
             scope.is_none_or(|scope| std::iter::successors(Some(i), |&p| self.nodes[p].parent).any(|p| p == scope))
-                && self.pickable(i, x, y)
+                && self.pickable(i, x, y, pick)
         }).map(|i| Picked {
             path: self.nodes[i].path.clone(),
             key: self.nodes[i].key.clone(),
@@ -7761,12 +7791,17 @@ impl<S: 'static> Runtime<S> {
     /// False when there is no such element, it is exiting or fully transparent. Same geometry
     /// as [`Runtime::element_at`].
     pub fn contains(&self, key: &str, x: f32, y: f32) -> bool {
-        self.nodes.iter().position(|n| crate::flight::selects(key, &n.path, n.key.as_deref())).is_some_and(|i| self.pickable(i, x, y))
+        self.contains_with(key, x, y, Pick::default())
     }
 
-    fn pickable(&self, i: usize, x: f32, y: f32) -> bool {
+    /// [`Runtime::contains`] with options, as [`Runtime::element_at_with`].
+    pub fn contains_with(&self, key: &str, x: f32, y: f32, pick: Pick) -> bool {
+        self.nodes.iter().position(|n| crate::flight::selects(key, &n.path, n.key.as_deref())).is_some_and(|i| self.pickable(i, x, y, pick))
+    }
+
+    fn pickable(&self, i: usize, x: f32, y: f32, pick: Pick) -> bool {
         self.drawn.get(i).is_some()
-            && self.inh_scratch.get(i).is_some_and(|h| h.opacity > 0.0)
+            && self.inh_scratch.get(i).is_some_and(|h| pick.transparent || h.opacity > 0.0)
             && !self.subtree_exiting(i)
             && self.node_contains(i, x, y)
     }

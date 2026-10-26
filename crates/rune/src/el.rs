@@ -82,21 +82,31 @@ impl Tx {
     /// No picking data is copied or maintained when this is unused. Queries made by `f`
     /// itself wait until the next frame.
     pub fn element_at<S: 'static>(&mut self, x: f32, y: f32, f: impl FnOnce(&mut S, Option<crate::Picked>, &mut Tx) + 'static) {
-        self.pick_read(None, x, y, f);
+        self.pick_read(None, x, y, crate::Pick::default(), f);
+    }
+
+    /// [`Tx::element_at`] with options ([`Pick`](crate::Pick)).
+    pub fn element_at_with<S: 'static>(&mut self, x: f32, y: f32, pick: crate::Pick, f: impl FnOnce(&mut S, Option<crate::Picked>, &mut Tx) + 'static) {
+        self.pick_read(None, x, y, pick, f);
     }
 
     /// [`Tx::element_at`] restricted to `within` and its descendants. The scope accepts a
     /// key or key path like [`Cx::layout`](crate::Cx::layout); other drawn subtrees do not
     /// occlude this query. A missing scope returns `None`.
     pub fn element_at_in<S: 'static>(&mut self, within: impl Into<String>, x: f32, y: f32, f: impl FnOnce(&mut S, Option<crate::Picked>, &mut Tx) + 'static) {
-        self.pick_read(Some(within.into()), x, y, f);
+        self.pick_read(Some(within.into()), x, y, crate::Pick::default(), f);
     }
 
-    fn pick_read<S: 'static>(&mut self, within: Option<String>, x: f32, y: f32, f: impl FnOnce(&mut S, Option<crate::Picked>, &mut Tx) + 'static) {
+    /// [`Tx::element_at_in`] with options ([`Pick`](crate::Pick)).
+    pub fn element_at_in_with<S: 'static>(&mut self, within: impl Into<String>, x: f32, y: f32, pick: crate::Pick, f: impl FnOnce(&mut S, Option<crate::Picked>, &mut Tx) + 'static) {
+        self.pick_read(Some(within.into()), x, y, pick, f);
+    }
+
+    fn pick_read<S: 'static>(&mut self, within: Option<String>, x: f32, y: f32, pick: crate::Pick, f: impl FnOnce(&mut S, Option<crate::Picked>, &mut Tx) + 'static) {
         let f: PickFn = Box::new(move |s, picked, tx| {
             f(s.downcast_mut::<S>().expect("element_at registered for a different state type than the app's"), picked, tx);
         });
-        self.pick_reads.push(PickRead { within, x, y, f: Rc::new(std::cell::Cell::new(Some(f))) });
+        self.pick_reads.push(PickRead { within, x, y, pick, f: Rc::new(std::cell::Cell::new(Some(f))) });
     }
 
     /// Whether the key a key handler is seeing is the OS auto-repeat of a held key: true for
@@ -1100,6 +1110,7 @@ pub(crate) struct PickRead {
     pub within: Option<String>,
     pub x: f32,
     pub y: f32,
+    pub pick: crate::Pick,
     f: Rc<std::cell::Cell<Option<PickFn>>>,
 }
 impl PickRead {

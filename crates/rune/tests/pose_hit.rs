@@ -264,3 +264,58 @@ fn sticky_and_anchored_elements_pick_in_paint_order_after_scrolling() {
         assert_eq!(rt.state.0, [expected]);
     }
 }
+
+#[test]
+fn pick_transparent_finds_opacity_zero_elements_but_not_exiting_ones() {
+    #[derive(Default)]
+    struct S { plain: Option<String>, with: Option<String>, gone: bool }
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        el().w_full().h_full().child(
+            col().key("canvas").w_full().h_full().items_start()
+                .child(el().key("clear").size(50.0, 50.0).opacity(0.0))
+                .child(el().key("parent").size(50.0, 50.0).opacity(0.0)
+                    .child(el().key("kid").size(20.0, 20.0)))
+                .children((!s.gone).then(|| el().key("leaver").size(50.0, 50.0).fill(Color::WHITE)
+                    .transition(rune::Transition::opacity()))),
+        )
+    }
+    let mut rt = Runtime::new(S::default(), view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let on = rune::Pick::new().transparent(true);
+    let key = |p: Option<rune::Picked>| p.and_then(|p| p.key().map(str::to_owned));
+    // `clear` is at y 0..50, `parent` (and `kid`) at 50..100.
+    assert_ne!(key(rt.element_at(10.0, 10.0)).as_deref(), Some("clear"));
+    assert_eq!(key(rt.element_at_with(10.0, 10.0, rune::Pick::default())).as_deref(), key(rt.element_at(10.0, 10.0)).as_deref());
+    assert_eq!(key(rt.element_at_with(10.0, 10.0, on)).as_deref(), Some("clear"));
+    assert_eq!(key(rt.element_at_in_with("canvas", 10.0, 10.0, on)).as_deref(), Some("clear"));
+    assert_ne!(key(rt.element_at_in("canvas", 10.0, 10.0)).as_deref(), Some("clear"));
+    assert!(!rt.contains("clear", 10.0, 10.0));
+    assert!(rt.contains_with("clear", 10.0, 10.0, on));
+    // A child of an opacity-0 parent inherits 0.
+    assert_ne!(key(rt.element_at(10.0, 60.0)).as_deref(), Some("kid"));
+    assert_eq!(key(rt.element_at_with(10.0, 60.0, on)).as_deref(), Some("kid"));
+    assert!(rt.contains_with("kid", 10.0, 60.0, on) && !rt.contains("kid", 10.0, 60.0));
+
+    // The Tx path.
+    fn read(s: &mut S, with: bool, tx: &mut rune::Tx) {
+        let on = rune::Pick::new().transparent(with);
+        let f = move |s: &mut S, p: Option<rune::Picked>, _: &mut rune::Tx| {
+            let k = p.and_then(|p| p.key().map(str::to_owned));
+            if with { s.with = k } else { s.plain = k }
+        };
+        let _ = s;
+        tx.element_at_in_with("canvas", 10.0, 10.0, on, f);
+    }
+    rt.update(|s, tx| { read(s, false, tx); read(s, true, tx); });
+    rt.frame(0.0);
+    assert_ne!(rt.state.plain.as_deref(), Some("clear"));
+    assert_eq!(rt.state.with.as_deref(), Some("clear"));
+
+    // An exiting element is skipped even with the option.
+    let (x, y) = (10.0, 110.0);
+    assert_eq!(key(rt.element_at_with(x, y, on)).as_deref(), Some("leaver"));
+    rt.update(|s, _| s.gone = true);
+    rt.frame(1.0 / 60.0);
+    assert_ne!(key(rt.element_at_with(x, y, on)).as_deref(), Some("leaver"));
+    assert!(!rt.contains_with("leaver", x, y, on));
+}

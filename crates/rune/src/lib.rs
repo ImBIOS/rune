@@ -168,7 +168,7 @@ pub use rune_motion::{
     Anim, AnimExt, Beat, Blend, Clock, CubicBezier, Curve, Decay, Easing, Edge, Effect, LayoutAnim, LoopKind, LoopSpec, NodeId,
     Phase as PresencePhase, Presented, Reveal, Sequence, Spring, SpringPair, StepPosition, Transition, Travel, Vec2, Velocity,
 };
-pub use runtime::{Cx, ElementInfo, Env, Picked, Pose, Runtime, TitlebarAction, Waker, commit_generation};
+pub use runtime::{Cx, ElementInfo, Env, Pick, Picked, Pose, Runtime, TitlebarAction, Waker, commit_generation};
 pub use shape::{LineCap, Path, Shape};
 pub use native_surface::{NativeSurface, SurfaceFit};
 pub use system_material::{MAX_NATIVE_MATERIALS, SystemMaterial};

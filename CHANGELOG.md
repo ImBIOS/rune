@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Pick`: pick fully transparent elements.** `Runtime::element_at_with`, `element_at_in_with`,
+  `contains_with` and `Tx::element_at_with` / `element_at_in_with` take a `Pick` (private fields,
+  builder methods); `Pick::new().transparent(true)` also finds elements whose own or inherited
+  opacity is 0, so a design canvas can select an invisible layer. Exiting elements stay skipped.
+  The existing methods use `Pick::default()` and behave as before.
 - **GFM task list checkboxes in `Markdown`.** `- [ ] todo` and `- [x] done` items now parse with
   `pulldown_cmark::Options::ENABLE_TASKLISTS` and render as `Checkbox`-styled `"checkbox"` rows
   instead of `"•"` bullets, with `label` set to the item's text and checked state on
