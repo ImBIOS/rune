@@ -7,22 +7,24 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 - **GFM task list checkboxes in `Markdown`.** `- [ ] todo` and `- [x] done` items now parse with
   `pulldown_cmark::Options::ENABLE_TASKLISTS` and render as `Checkbox`-styled `"checkbox"` rows
-  instead of `"•"` bullets, with `label` set to the item's text and checked state on both the
-  checkbox control and `ElementInfo::item_selected` (`Checkbox` now sets `focus_selected` too).
-  `Markdown::on_task(|s, block_key, item, checked| ..)` and
-  `Markdown::on_task_tx(|s, block_key, item, checked, tx| ..)` fire on pointer press or `Space`
-  with the top-level block's key (`block_keys` or `b{index}`), the 0-based item index within that
-  block, and the new checked state (`!checked`). Task rows are read-only when no `on_task` handler
+  instead of `"•"` bullets, with `label` set to the item's text and checked state on
+  `ElementInfo::item_selected`. Existing `Checkbox` output is unchanged.
+  `Markdown::on_task(|s, block_key, marker_offset, checked| ..)` and
+  `Markdown::on_task_tx(|s, block_key, marker_offset, checked, tx| ..)` fire on pointer press,
+  or focused `Space` with the top-level block's key (`block_keys` or `b{index}`), the
+  source byte offset of `[` in the task marker (including nested items), and the new checked
+  state. Task rows are read-only and outside Tab order when no `on_task` handler
   is set or when `Markdown::tasks_read_only()` is called. **Output change:** markdown lists using
   `- [ ]` / `- [x]` task syntax now mount checkbox controls instead of bullet text.
 
-- **`Markdown::block_keys`.** Top-level blocks can now take caller-supplied keys in document order
+- **`Markdown::block_keys`.** Top-level blocks can now take caller-supplied `(source_byte_offset, key)` pairs
   instead of `b0`, `b1`, … (nested blocks inside a list item or block quote keep `b{index}` under
   their parent block's key), so inserting, removing, reordering or editing blocks above others
   keeps unchanged blocks' keys and springs their layout while inserted and removed blocks play
-  their enter and exit transitions. When fewer keys are supplied than parsed blocks, or an entry is
-  empty or repeats an earlier key, that block falls back to the next unused `b{index}` key; extra
-  keys are ignored. Without `block_keys`, keys stay `b0`, `b1`, … as before.
+  their enter and exit transitions. Offsets identify the start of each block's first source line,
+  including indentation; callers update offsets after edits while keeping IDs stable. Unmatched
+  offsets are ignored, so different parser boundaries do not shift later IDs. Missing, empty or
+  repeated IDs fall back to an unused `b{index}`. Without `block_keys`, index keys stay unchanged.
 
 - **`TextInput::plain` and `TextInput::leading_icon_size`.** `plain()` draws the field with no
   fill, sheen, shadow, border, hover tint or focus outline, for sitting in a header (focus shows

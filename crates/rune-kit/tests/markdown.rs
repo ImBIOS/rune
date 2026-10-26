@@ -822,11 +822,16 @@ fn styled_links_keep_inner_styles_select_copy_and_stream_across_chunks() {
     assert_eq!(rt.copy_request.as_deref(), Some("Start First bold code and Second on the next line."));
 }
 
+// These fixtures intentionally have only blank-line-separated top-level blocks.
+fn fixture_keys<'a>(src: &str, keys: &'a [&'static str]) -> Vec<(usize, &'a str)> {
+    std::iter::once(0).chain(src.match_indices("\n\n").map(|(at, _)| at + 2)).zip(keys.iter().copied()).collect()
+}
+
 #[test]
 fn caller_block_keys_insert_remove_edit_and_retarget_mid_flight() {
     type DocState = (String, Vec<&'static str>);
     fn view((src, keys): &DocState, _: &mut Cx<DocState>) -> El {
-        col().w(320.0).child(Markdown::new(src.clone()).block_keys(keys.iter().copied()).build(&Kit::neutral(true)))
+        col().w(320.0).child(Markdown::new(src.clone()).block_keys(fixture_keys(src, keys)).build(&Kit::neutral(true)))
     }
 
     let mut rt = Runtime::new(("Alpha\n\nBeta".to_owned(), vec!["p-a", "p-b"]), view, (320.0, 400.0), Env::new(true, 1.0));
@@ -882,6 +887,8 @@ fn caller_block_keys_insert_remove_edit_and_retarget_mid_flight() {
     let h_mid = by_key(&rt, "p-intro").rect[3];
     let y_mid = by_key(&rt, "p-b").rect[1];
     assert!(h_mid > h0 && y_mid > y0, "height and sibling y are mid-spring: {h_mid} > {h0}, {y_mid} > {y0}");
+    assert!(h_mid < by_key(&rt, "p-intro").target[3] && y_mid < by_key(&rt, "p-b").target[1],
+        "editing animates toward the larger height and sibling position, not straight to them");
 
     rt.state = ("Intro line one  \nline two  \nline three  \nline four  \nline five\n\nBeta".to_owned(), vec!["p-intro", "p-b"]);
     rt.invalidate();
@@ -897,7 +904,7 @@ fn caller_block_keys_insert_remove_edit_and_retarget_mid_flight() {
 fn block_keys_fallback_nested_and_selectable() {
     fn view(keys: &Vec<&'static str>, _: &mut Cx<Vec<&'static str>>) -> El {
         let src = "# Heading\n\n> Quoted one\n>\n> Quoted two\n\nParagraph three";
-        col().w(320.0).child(Markdown::new(src).block_keys(keys.iter().copied()).selectable(true).reveal(0.15).build(&Kit::neutral(true)))
+        col().w(320.0).child(Markdown::new(src).block_keys(fixture_keys(src, keys)).selectable(true).reveal(0.15).build(&Kit::neutral(true)))
     }
 
     // Fewer keys, empty key and duplicate key fall back to unused b{i} keys without panicking;
@@ -929,6 +936,84 @@ fn block_keys_fallback_nested_and_selectable() {
     assert_eq!(rt.copy_request.as_deref(), Some("Heading\nQuoted one\nQuoted two\nParagraph three"));
 }
 
+#[test]
+fn source_keys_do_not_shift_when_parsers_disagree() {
+    fn view(src: &String, _: &mut Cx<String>) -> El {
+        // The caller splits a loose list into two blocks and keeps an HTML block that the
+        // renderer omits. Neither boundary must steal the later paragraph's durable ID.
+        let keys = [(0, "list"), (src.find("- second").unwrap(), "second-item"),
+            (src.find("<div>").unwrap(), "html"), (src.find("After").unwrap(), "after")];
+        col().w(320.0).child(Markdown::new(src.clone()).block_keys(keys).reveal(0.15)
+            .selectable(true).streaming(true).build(&Kit::neutral(true)))
+    }
+    let mut rt = Runtime::new("- first\n\n- second\n\n<div>ignored</div>\n\nAfter".to_owned(), view,
+        (320.0, 400.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    assert_eq!(by_key(&rt, "after").text.as_deref(), Some("After"));
+    assert!(rt.elements().iter().all(|e| !matches!(e.key.as_deref(), Some("second-item" | "html"))));
+    // Appending a partial block takes the incremental parse path; absolute offsets stay valid.
+    rt.state.push_str(" grows\n\npartial");
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+    assert_eq!(by_key(&rt, "after").text.as_deref(), Some("After grows"));
+    assert!(by_key(&rt, "after").revealing, "appended words reveal under the retained key");
+    assert_eq!(by_key(&rt, "b2").text.as_deref(), Some("partial"));
+}
+
+#[test]
+fn nested_tasks_report_exact_source_marker_offsets_and_tab_skips_read_only() {
+    let src = "Préface\n\n- plain\n  - [ ] nested\n- [x] outer\n\nTail\n\n- [ ] last\n";
+    let mut rt = Runtime::new(TaskDoc { src: src.into(), handled: true, ..Default::default() },
+        task_view, (320.0, 400.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    // Space without focus does nothing. Tab walks document order, including nested tasks.
+    rt.key(rune::KeyEvent { key: rune::Key::Text(" ".into()), mods: Default::default() });
+    rt.frame(1.0 / 60.0);
+    assert!(rt.state.toggled.is_empty());
+    for (n, (marker, key, checked)) in [("[ ] nested", "b1", true), ("[x] outer", "b1", false), ("[ ] last", "b3", true)].into_iter().enumerate() {
+        rt.key(rune::KeyEvent { key: rune::Key::Tab, mods: Default::default() });
+        rt.frame(1.0 / 60.0);
+        rt.key(rune::KeyEvent { key: rune::Key::Text(" ".into()), mods: Default::default() });
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.toggled.len(), n + 1);
+        assert_eq!(rt.state.toggled[n], (key.to_owned(), src.find(marker).unwrap(), checked));
+    }
+    rt.state.read_only = true;
+    rt.state.toggled.clear();
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+    for _ in 0..4 {
+        rt.key(rune::KeyEvent { key: rune::Key::Tab, mods: Default::default() });
+        rt.key(rune::KeyEvent { key: rune::Key::Text(" ".into()), mods: Default::default() });
+        rt.frame(1.0 / 60.0);
+    }
+    assert!(rt.state.toggled.is_empty());
+    assert!(rt.elements().iter().filter(|e| e.role == "checkbox").all(|e| !e.focusable));
+}
+
+#[test]
+fn task_controls_match_checkbox_paint_in_both_themes() {
+    fn view(&(dark, checked): &(bool, bool), _: &mut Cx<(bool, bool)>) -> El {
+        let kit = Kit::neutral(dark);
+        col().w(320.0)
+            .child(rune_kit::Checkbox::new(checked).label("Task").build(&kit).key("standard"))
+            .child(Markdown::new(if checked { "- [x] Task" } else { "- [ ] Task" }).build(&kit).key("markdown"))
+    }
+    for dark in [false, true] {
+        for checked in [false, true] {
+            let mut rt = Runtime::new((dark, checked), view, (320.0, 160.0), Env::new(dark, 1.0));
+            rt.frame(0.0);
+            let controls: Vec<_> = rt.elements().into_iter().filter(|e| e.key.as_deref() == Some("control")).collect();
+            assert_eq!(controls.len(), 2);
+            assert_eq!((controls[0].fill, controls[0].radius, controls[0].rect[2..].to_vec()),
+                (controls[1].fill, controls[1].radius, controls[1].rect[2..].to_vec()));
+            let marks: Vec<_> = rt.elements().into_iter().filter(|e| e.key.as_deref() == Some("mark")).collect();
+            assert_eq!((marks[0].opacity, marks[0].text_color, marks[0].rect[2..].to_vec()),
+                (marks[1].opacity, marks[1].text_color, marks[1].rect[2..].to_vec()));
+        }
+    }
+}
+
 #[derive(Default)]
 struct TaskDoc {
     src: String,
@@ -941,7 +1026,7 @@ struct TaskDoc {
 fn task_view(s: &TaskDoc, _: &mut Cx<TaskDoc>) -> El {
     let mut md = Markdown::new(s.src.clone());
     if !s.keys.is_empty() {
-        md = md.block_keys(s.keys.iter().copied());
+        md = md.block_keys(fixture_keys(&s.src, &s.keys));
     }
     if s.handled {
         md = md.on_task_tx(|s: &mut TaskDoc, key, item, checked, tx| {
@@ -990,19 +1075,23 @@ fn task_lists_render_checkboxes_press_space_and_respect_read_only() {
         rt.frame(1.0 / 60.0);
     };
 
-    // Pressing the first unchecked row passes (block_key, 0, true); pressing the second checked row passes (block_key, 1, false).
+    // Each callback identifies the source marker, not an index among tasks or list items.
     click(&mut rt, boxes[0].rect);
-    assert_eq!(rt.state.toggled, [("checklist".to_owned(), 0, true)]);
-    assert_eq!(rt.copy_request.as_deref(), Some("checklist:0:true"));
+    assert_eq!(rt.state.toggled, [("checklist".to_owned(), 9, true)]);
+    assert_eq!(rt.copy_request.as_deref(), Some("checklist:9:true"));
 
     click(&mut rt, boxes[1].rect);
-    assert_eq!(rt.state.toggled, [("checklist".to_owned(), 0, true), ("checklist".to_owned(), 1, false)]);
-    assert_eq!(rt.copy_request.as_deref(), Some("checklist:1:false"));
+    assert_eq!(rt.state.toggled, [("checklist".to_owned(), 9, true), ("checklist".to_owned(), 17, false)]);
+    assert_eq!(rt.copy_request.as_deref(), Some("checklist:17:false"));
 
     // Space on the focused task checkbox toggles it through the same handler.
     rt.key(rune::KeyEvent { key: rune::Key::Text(" ".into()), mods: Default::default() });
     rt.frame(1.0 / 60.0);
-    assert_eq!(rt.state.toggled.last(), Some(&("checklist".to_owned(), 1, false)));
+    assert_eq!(rt.state.toggled.last(), Some(&("checklist".to_owned(), 17, false)));
+    assert_eq!(rt.state.toggled.len(), 3, "Space fires once on the focused checkbox");
+    rt.key(rune::KeyEvent { key: rune::Key::Enter, mods: Default::default() });
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.toggled.len(), 3, "checkboxes toggle with Space, not Enter");
 
     // Without caller block_keys, on_task receives the default b{index} key.
     rt.state.keys.clear();
@@ -1010,7 +1099,7 @@ fn task_lists_render_checkboxes_press_space_and_respect_read_only() {
     rt.invalidate();
     rt.frame(1.0 / 60.0);
     click(&mut rt, boxes[0].rect);
-    assert_eq!(rt.state.toggled, [("b1".to_owned(), 0, true)]);
+    assert_eq!(rt.state.toggled, [("b1".to_owned(), 9, true)]);
 
     // `.tasks_read_only()` and missing `on_task` keep role/label/checked state but ignore presses and Space.
     for (handled, read_only) in [(true, true), (false, false)] {

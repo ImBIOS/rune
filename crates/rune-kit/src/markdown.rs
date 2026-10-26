@@ -107,7 +107,9 @@ struct Builder {
     last_root_para: Option<Range<usize>>,
     sources: Vec<Source>,
     /// One entry per [`Tag::Item`] in document order (`Some(checked)` for GFM task items).
-    tasks: Vec<Option<bool>>,
+    tasks: Vec<Option<(bool, usize)>>,
+    block_starts: Vec<usize>,
+    root_start: usize,
     cuts: Vec<Cut>,
 }
 
@@ -168,6 +170,9 @@ enum InlineKind {
 
 impl Builder {
     fn push(&mut self, b: Block) {
+        if self.stack.len() == 1 {
+            self.block_starts.push(self.root_start);
+        }
         self.stack.last_mut().unwrap().1.push(b);
     }
 
@@ -267,7 +272,7 @@ pub fn parse(src: &str) -> Vec<Block> {
     parse_doc(src).0
 }
 
-fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>, Vec<Option<bool>>, Vec<Cut>) {
+fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>, Vec<Option<(bool, usize)>>, Vec<Cut>, Vec<usize>) {
     let mut b = Builder {
         stack: vec![(Container::Root, Vec::new())],
         inline: None,
@@ -275,6 +280,8 @@ fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>, Vec<Option<bool>>, Vec<Cut>
         last_root_para: None,
         sources: Vec::new(),
         tasks: Vec::new(),
+        block_starts: Vec::new(),
+        root_start: 0,
         cuts: Vec::new(),
     };
     let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
@@ -288,6 +295,7 @@ fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>, Vec<Option<bool>>, Vec<Cut>
         if starts_block && b.stack.len() == 1 && b.code.is_none() {
             b.flush_inline();
             let at = src[..range.start].rfind('\n').map_or(0, |i| i + 1);
+            b.root_start = at;
             b.cuts.push(Cut { at, blocks: b.stack[0].1.len(), sources: b.sources.len(), tasks: b.tasks.len() });
         }
         match ev {
@@ -416,7 +424,7 @@ fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>, Vec<Option<bool>>, Vec<Cut>
                     Container::Item(idx) => Some(*idx),
                     _ => None,
                 }) {
-                    b.tasks[idx] = Some(checked);
+                    b.tasks[idx] = Some((checked, range.start));
                 }
             }
             Event::Rule => {
@@ -441,7 +449,7 @@ fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>, Vec<Option<bool>>, Vec<Cut>
     {
         *blocks.last_mut().unwrap() = Block::Table(t);
     }
-    (blocks, b.sources, b.tasks, b.cuts)
+    (blocks, b.sources, b.tasks, b.cuts, b.block_starts)
 }
 
 fn code_block(text: String, fence: &Fence) -> Block {
@@ -541,7 +549,7 @@ fn end_run(inl: &mut Inline, o: Open) {
 /// Estimated bytes of parsed documents kept beyond those on screen (see [`budget`]).
 const CACHE_BYTES: usize = 16 << 20;
 
-type Doc = (Rc<Vec<Block>>, Rc<[Source]>, Rc<[Option<bool>]>);
+type Doc = (Rc<Vec<Block>>, Rc<[Source]>, Rc<[Option<(bool, usize)>]>, Rc<[usize]>);
 
 #[derive(Clone)]
 struct Parsed {
@@ -580,8 +588,8 @@ fn doc_cached(src: &str) -> Doc {
         let parsed = grown.as_ref().and_then(|last| extend(c.docs.peek(&**last)?, last.len(), src)).unwrap_or_else(|| {
             #[cfg(test)]
             PARSES.with(|p| p.set((p.get().0 + 1, p.get().1)));
-            let (blocks, sources, tasks, cuts) = parse_doc(src);
-            Parsed { doc: (Rc::new(blocks), sources.into(), tasks.into()), cuts: cuts.into() }
+            let (blocks, sources, tasks, cuts, starts) = parse_doc(src);
+            Parsed { doc: (Rc::new(blocks), sources.into(), tasks.into(), starts.into()), cuts: cuts.into() }
         });
         // A stream's earlier string is dead once it grows, unless something drew it this
         // commit; left in, a long stream would fill the budget with its prefixes.
@@ -613,11 +621,13 @@ fn extend(base: &Parsed, base_len: usize, src: &str) -> Option<Parsed> {
     }
     #[cfg(test)]
     PARSES.with(|p| p.set((p.get().0, p.get().1 + 1)));
-    let (tail, sources, tasks, cuts) = parse_doc(&src[cut.at..]);
+    let (tail, sources, tasks, cuts, starts) = parse_doc(&src[cut.at..]);
     let mut blocks = base.doc.0[..cut.blocks].to_vec();
     blocks.extend(tail);
     let sources: Rc<[Source]> = base.doc.1[..cut.sources].iter().cloned().chain(sources).collect();
-    let tasks: Rc<[Option<bool>]> = base.doc.2[..cut.tasks].iter().copied().chain(tasks).collect();
+    let tasks = base.doc.2[..cut.tasks].iter().copied()
+        .chain(tasks.into_iter().map(|t| t.map(|(checked, at)| (checked, at + cut.at)))).collect();
+    let starts = base.doc.3[..cut.blocks].iter().copied().chain(starts.into_iter().map(|at| at + cut.at)).collect();
     let cuts = base.cuts[..i]
         .iter()
         .copied()
@@ -628,7 +638,7 @@ fn extend(base: &Parsed, base_len: usize, src: &str) -> Option<Parsed> {
             tasks: c.tasks + cut.tasks,
         }))
         .collect();
-    Some(Parsed { doc: (Rc::new(blocks), sources, tasks), cuts })
+    Some(Parsed { doc: (Rc::new(blocks), sources, tasks, starts), cuts })
 }
 
 /// How markdown looks. [`MarkdownStyle::from_kit`] takes every colour and font from the kit's
@@ -1006,7 +1016,7 @@ type TaskWire = Rc<dyn Fn(El, Rc<str>, usize, bool) -> El>;
 pub struct Markdown {
     src: String,
     style: Option<MarkdownStyle>,
-    block_keys: Vec<String>,
+    block_keys: Vec<(usize, String)>,
     reveal: f32,
     streaming: bool,
     on_link: Option<LinkWire>,
@@ -1023,19 +1033,20 @@ impl Markdown {
         Markdown { src: src.into(), style: None, block_keys: Vec::new(), reveal: 0.0, streaming: false, on_link: None, link_look: None,
             on_task: None, tasks_read_only: false, selectable: false, scroll_wide: false, highlighter: Highlighter::builtin() }
     }
-    /// Stable keys for top-level blocks in document order, instead of `b0`, `b1`, … (nested
-    /// blocks inside a list item or block quote keep `b{index}` under their parent block's key).
-    /// When a block is inserted, removed or reordered, blocks whose keys stay the same keep their
-    /// identity and spring to their new place, while inserted and removed blocks play their enter
-    /// and exit transitions. When `keys` has fewer entries than the parsed document has top-level
-    /// blocks, or an entry is empty or repeats an earlier key, that block falls back to the next
-    /// unused `b{index}` key; extra keys past the last top-level block are ignored.
+    /// Stable keys as `(source_byte_offset, key)` pairs. The offset is the start of the first
+    /// source line of a rendered top-level block (including any indentation), not its ordinal.
+    /// Recompute offsets against the current source after edits; keep the IDs themselves stable.
+    /// Unmatched offsets are ignored: differing parser boundaries cannot shift later IDs.
+    /// Missing, empty or duplicate IDs fall back to an unused `b{index}`. For duplicate offsets,
+    /// the first pair wins. Nested blocks keep index keys beneath their top-level parent's key.
+    /// Retained blocks spring to new positions and sizes; additions enter and removals stay
+    /// mounted during their exit transition.
     pub fn block_keys<I, K>(mut self, keys: I) -> Self
     where
-        I: IntoIterator<Item = K>,
+        I: IntoIterator<Item = (usize, K)>,
         K: Into<String>,
     {
-        self.block_keys = keys.into_iter().map(Into::into).collect();
+        self.block_keys = keys.into_iter().map(|(at, key)| (at, key.into())).collect();
         self
     }
     /// Replaces the kit-derived style in [`Self::build`].
@@ -1083,10 +1094,12 @@ impl Markdown {
         self
     }
     /// Called when a GFM task list item (`- [ ]` or `- [x]`) is clicked, or pressed with Space
-    /// while focused: `(state, block_key, item_index, checked)`, where `block_key` is the
-    /// top-level block's key ([`Self::block_keys`], or `b{index}`), `item_index` is the item's
-    /// 0-based index within that top-level block in document order, and `checked` is the new
-    /// state (`!checked`). Without a handler, or with [`Self::tasks_read_only`], task checkboxes
+    /// while focused: `(state, block_key, marker_offset, checked)`. Enter does not toggle.
+    /// `block_key` is the top-level block's key ([`Self::block_keys`], or `b{index}`),
+    /// `marker_offset` is the byte offset of `[` in the source's `[ ]`/`[x]` marker, including
+    /// nested items, and `checked` is the new state. The offset refers to the source used to
+    /// build this view, so the caller can replace `source[offset + 1..offset + 2]`.
+    /// Without a handler, or with [`Self::tasks_read_only`], task checkboxes
     /// are read-only. Shares its slot with [`Self::on_task_tx`] (the later call wins).
     pub fn on_task<S: 'static>(self, f: impl Fn(&mut S, &str, usize, bool) + 'static) -> Self {
         self.on_task_tx(move |s: &mut S, key, item, checked, _| f(s, key, item, checked))
@@ -1155,12 +1168,16 @@ impl Markdown {
     /// Builds with `style`, for apps without a [`Kit`] (see [`MarkdownStyle::neutral`] and
     /// [`MarkdownStyle::from_seed`]).
     pub fn render(self, style: &MarkdownStyle) -> El {
-        let (blocks, sources, tasks) = doc_cached(&self.src);
+        let (blocks, sources, tasks, starts) = doc_cached(&self.src);
+        let keys = if self.block_keys.is_empty() { Vec::new() } else {
+            starts.iter().map(|at| self.block_keys.iter().find(|(offset, _)| offset == at)
+                .map_or_else(String::new, |(_, key)| key.clone())).collect::<Vec<_>>()
+        };
         let r = Renderer { s: style.clone(), reveal: self.reveal, streaming: self.streaming, on_link: self.on_link, link_look: self.link_look,
             on_task: self.on_task, tasks_read_only: self.tasks_read_only, selectable: self.selectable, scroll_wide: self.scroll_wide,
             highlighter: self.highlighter, sources, next_source: Cell::new(0), tasks, next_task: Cell::new(0),
-            current_block_key: RefCell::new("b0".into()), block_item_index: Cell::new(0) };
-        r.blocks(&blocks, &self.block_keys, true).selection_group(self.selectable)
+            current_block_key: RefCell::new("b0".into()) };
+        r.blocks(&blocks, &keys, true).selection_group(self.selectable)
     }
 }
 
@@ -1179,11 +1196,10 @@ struct Renderer {
     sources: Rc<[Source]>,
     /// The next of `sources`, advanced at each [`Block::Code`] in document order.
     next_source: Cell<usize>,
-    tasks: Rc<[Option<bool>]>,
+    tasks: Rc<[Option<(bool, usize)>]>,
     /// The next of `tasks`, advanced at each list item in document order.
     next_task: Cell<usize>,
     current_block_key: RefCell<Rc<str>>,
-    block_item_index: Cell<usize>,
 }
 
 fn block_key(i: usize, keys: &[String], used: &mut Vec<String>) -> String {
@@ -1345,7 +1361,6 @@ impl Renderer {
             let key = if keys.is_empty() { format!("b{i}") } else { block_key(i, keys, &mut used) };
             if top_level {
                 self.current_block_key.replace(key.clone().into());
-                self.block_item_index.set(0);
             }
             c = c.child(self.block(b).key(key).mt(top));
             prev_mb = mb;
@@ -1480,12 +1495,10 @@ impl Renderer {
             Block::List { start, items } => {
                 let mut c = col().w_full().gap(4.0);
                 for (k, item) in items.iter().enumerate() {
-                    let item_idx = self.block_item_index.get();
-                    self.block_item_index.set(item_idx + 1);
                     let task_idx = self.next_task.get();
                     self.next_task.set(task_idx + 1);
-                    if let Some(checked) = self.tasks.get(task_idx).copied().flatten() {
-                        c = c.child(self.task_item(k, item, item_idx, checked));
+                    if let Some((checked, marker_offset)) = self.tasks.get(task_idx).copied().flatten() {
+                        c = c.child(self.task_item(k, item, marker_offset, checked));
                         continue;
                     }
                     let marker = match start {
@@ -1559,10 +1572,10 @@ mod tests {
                 }
             }
         }
-        let (blocks, sources, tasks) = doc_cached(src);
+        let (blocks, sources, tasks, _) = doc_cached(src);
         let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, link_look: None, on_task: None,
             tasks_read_only: false, selectable: false, scroll_wide: false, highlighter, sources: sources.clone(),
-            next_source: Cell::new(0), tasks, next_task: Cell::new(0), current_block_key: RefCell::new("b0".into()), block_item_index: Cell::new(0) };
+            next_source: Cell::new(0), tasks, next_task: Cell::new(0), current_block_key: RefCell::new("b0".into()) };
         let mut found = Vec::new();
         codes(&blocks, &mut found);
         assert_eq!(found.len(), sources.len(), "one source per code block");
@@ -1740,16 +1753,18 @@ mod tests {
         let docs = [
             "# Title\n\nFirst para with **bold** and `code`.\nSetext\n---\n\n- one\n- two\n\n  more of two\n\n- [ ] todo\n- [x] done\n\n1. a\n2. b\n\nAfter the list.\n\n> quoted\n> lines\n\n```rust\nfn main() {}\n```\n\n    indented code\n\n***\n\n| a | b |\n|:-|-:|\n| 1 | 2 |\n\ntail text <span>html</span>\n\n<div>\nblock\n</div>\n\nlast *words*",
             "para one\n\npara two\n```ts\nconst a = 1\n```\n- item\nlazy line\n\n| x | y |\n| - | - |\nend",
+            "---\ntitle: Example\n---\n\nPréface\n\n- plain\n  - [ ] nested\n    - [x] deeper\n- [ ] sibling\n\n<div>hidden</div>\n\nAfter\n\n- [x] final task\n\npartial",
         ];
         for doc in docs {
             let before = parses();
             for end in (1..=doc.len()).filter(|&i| doc.is_char_boundary(i)) {
                 let src = &doc[..end];
-                let (blocks, sources, tasks) = doc_cached(src);
-                let (want, want_sources, want_tasks, want_cuts) = parse_doc(src);
+                let (blocks, sources, tasks, starts) = doc_cached(src);
+                let (want, want_sources, want_tasks, want_cuts, want_starts) = parse_doc(src);
                 assert_eq!(*blocks, want, "blocks of {src:?}");
                 assert_eq!(&*sources, &want_sources[..], "sources of {src:?}");
                 assert_eq!(&*tasks, &want_tasks[..], "tasks of {src:?}");
+                assert_eq!(&*starts, &want_starts[..], "block starts of {src:?}");
                 let cuts = CACHE.with_borrow(|c| c.docs.peek(src).unwrap().cuts.clone());
                 assert_eq!(&*cuts, &want_cuts[..], "cuts of {src:?}");
             }
@@ -1807,11 +1822,11 @@ mod tests {
         let look: LinkLook = Rc::new(move |url| {
             url.starts_with("session:").then(|| (Span::new(0, 0).color(Color::WHITE).weight(500.0).bg(bg, 3.0), LinkPaint::new()))
         });
-        let (blocks, sources, tasks) = doc_cached("[**bold** *em* `code` plain](session:1)");
+        let (blocks, sources, tasks, _) = doc_cached("[**bold** *em* `code` plain](session:1)");
         let Block::Para(inl) = &blocks[0] else { panic!() };
         let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, link_look: Some(look), on_task: None,
             tasks_read_only: false, selectable: false, scroll_wide: false, highlighter: Highlighter::builtin(), sources,
-            next_source: Cell::new(0), tasks, next_task: Cell::new(0), current_block_key: RefCell::new("b0".into()), block_item_index: Cell::new(0) };
+            next_source: Cell::new(0), tasks, next_task: Cell::new(0), current_block_key: RefCell::new("b0".into()) };
         let spans = r.spans(inl, style.body.size);
         // The link span is first so `flatten_spans` applies inner Strong/Em/Code over it.
         assert_eq!((spans[0].start, spans[0].end, spans[0].color, spans[0].weight, spans[0].bg, spans[0].bg_pad), (0, inl.text.len() as u32, Some(Color::WHITE), Some(500.0), Some(bg), 3.0));
