@@ -17,8 +17,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   height springs at the same time, the two springs moved rows past their slots: a `PopupList`
   above its field, filtered to one row and then given more rows while the removed ones still
   collapsed, raised its last row 4 points past its slot before it sank back. **Output change:**
-  those rows now land at full height and ride the popover's edge one way. Rows already growing
-  under the reveal keep growing.
+  in a reader's virtual list (unpinned or `stick_bottom: false`), those rows now land at full
+  height and ride the popover's edge one way. Rows already growing under the reveal, and
+  `stick_bottom` timelines whose reveal is at the tail, keep growing on their spring.
 
 - **`SidebarRow::subtitle_color(Color)`.** A two-line row's subtitle colour, in place of the
   default `text_faint`.

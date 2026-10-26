@@ -1104,16 +1104,20 @@ fn sticky_header_taller_than_a_new_growth_row_keeps_its_natural_size() {
 struct RevealThenInsert {
     rows: usize,
     expanded: bool,
+    stick_bottom: bool,
 }
 
 fn reveal_then_insert_view(s: &RevealThenInsert, _: &mut Cx<RevealThenInsert>) -> El {
     let mut stack = col().key("stack").w_full().growth(GrowthSpec::default()).virtualize(40.0);
+    if s.stick_bottom {
+        stack = stack.child(el().key("lead").w_full().h(320.0));
+    }
     for i in 0..s.rows {
         let h = if i == 1 && s.expanded { 120.0 } else { 40.0 };
-        stack = stack.child(el().key(format!("r{i}")).w_full().h(h));
+        stack = stack.child(el().key(format!("r{i}")).w_full().h(h).streaming(s.stick_bottom && i + 1 == s.rows));
     }
     col().w_full().h_full().child(
-        col().key("scroll").w(300.0).h(400.0).scroll(ScrollSpec { stick_bottom: false }).child(stack),
+        col().key("scroll").w(300.0).h(400.0).scroll(ScrollSpec { stick_bottom: s.stick_bottom }).child(stack),
     )
 }
 
@@ -1122,7 +1126,7 @@ fn rows_entering_while_a_reveal_follows_its_row_land_at_full_height() {
     // A reveal outlives its commit while the viewport's springs run. A later commit's new rows
     // land at full height, as they do in a reader's virtual list with no reveal, while the row
     // the reveal follows keeps growing.
-    let mut rt = Runtime::new(RevealThenInsert { rows: 3, expanded: false }, reveal_then_insert_view, (300.0, 400.0), Env::new(true, 1.0));
+    let mut rt = Runtime::new(RevealThenInsert { rows: 3, expanded: false, stick_bottom: false }, reveal_then_insert_view, (300.0, 400.0), Env::new(true, 1.0));
     rt.frame(0.0);
     rt.update(|s, tx| {
         s.expanded = true;
@@ -1140,4 +1144,30 @@ fn rows_entering_while_a_reveal_follows_its_row_land_at_full_height() {
     let r3 = find(&rt, "r3").rect;
     assert!((r3[3] - 40.0).abs() < 0.05, "the new row lands at full height: {r3:?}");
     assert!((r3[1] - (80.0 + r1)).abs() < 0.05, "below the growing row: {r3:?}");
+
+    // A `stick_bottom` timeline whose reveal is at the tail stays pinned across a later commit:
+    // a new row appended while an earlier row still grows springs from zero and carries the end.
+    let mut rt = Runtime::new(RevealThenInsert { rows: 3, expanded: false, stick_bottom: true }, reveal_then_insert_view, (300.0, 400.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|s, tx| {
+        s.expanded = true;
+        tx.scroll_into_view("r2");
+    });
+    for _ in 0..6 {
+        rt.frame(1.0 / 120.0);
+    }
+    let growing = find(&rt, "r1").rect[3];
+    assert!(growing > 40.5 && growing < 119.5, "r1 grows: {growing}");
+    rt.update(|s, _| s.rows = 4);
+    rt.frame(1.0 / 120.0);
+    let r1 = find(&rt, "r1").rect[3];
+    let r3 = find(&rt, "r3").rect;
+    assert!(r1 > growing && r1 < 119.5, "r1 keeps growing: {growing} -> {r1}");
+    assert!(r3[3] > 0.1 && r3[3] < 20.0, "new tail row grows from zero on its spring: {r3:?}");
+    assert!((r3[1] + r3[3] - 400.0).abs() < 0.5, "the timeline follows the new tail row: {r3:?}");
+    for _ in 0..120 {
+        rt.frame(1.0 / 120.0);
+    }
+    let r3 = find(&rt, "r3").rect;
+    assert!((r3[3] - 40.0).abs() < 0.05 && (r3[1] + r3[3] - 400.0).abs() < 0.5, "settled at the bottom: {r3:?}");
 }

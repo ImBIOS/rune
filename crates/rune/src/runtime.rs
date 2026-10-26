@@ -3957,6 +3957,13 @@ impl<S: 'static> Runtime<S> {
         COMMITS.set(COMMITS.get() + 1);
         self.last_commit_clock = self.clock;
         self.memo_since = self.memo.next_pass();
+        for r in &self.scroll_reveals {
+            if r.at_end && let Some(&id) = self.path_ids.get(&r.viewport)
+                && let Some(scroll) = self.scrolls.get_mut(&id)
+            {
+                scroll.pinned = true;
+            }
+        }
         let mut measured = self.measure(tx);
         self.focus_before_commit = self.focused.clone();
         // Settle layout reads first so a field that mounts once a rect is known is in `nodes`.
@@ -4143,7 +4150,11 @@ impl<S: 'static> Runtime<S> {
             }
             let ctop = nodes[c].target[1];
             let width = nodes[c].local.w;
-            if first || !existed || tx.settle || self.reduced_motion || (reading && !revealing) {
+            let revealing_moving = revealing && rows.iter().any(|&j| {
+                let id = nodes[j].id;
+                self.grows.get(&id).is_some_and(|g| g.moving()) || stack.pending_heights.contains_key(&id)
+            });
+            if first || !existed || tx.settle || self.reduced_motion || (reading && !revealing_moving) {
                 stack.width_hold_until = 0.0;
                 stack.width_shrink_until = 0.0;
                 stack.pending_heights.clear();
@@ -4161,7 +4172,9 @@ impl<S: 'static> Runtime<S> {
                 stack.closing.remove(&id);
                 stack.tops.insert(id, nodes[j].target[1] - ctop);
                 let streaming = nodes[j].streaming;
-                if streaming && existed && !tx.settle && !first && !self.reduced_motion && !(reading && !revealing) {
+                let g_moving = self.grows.get(&id).is_some_and(|g| g.moving()) || stack.pending_heights.contains_key(&id);
+                let row_reading = reading && !(revealing && g_moving);
+                if streaming && existed && !tx.settle && !first && !self.reduced_motion && !row_reading {
                     // Measure the final wrapped text before mutating the growth track. Targets
                     // retain full layout height; only the presented stack extent lags the fill.
                     let mut end = j + 1;
@@ -4179,7 +4192,7 @@ impl<S: 'static> Runtime<S> {
                 });
                 g.streaming = streaming;
                 let snap_change = instant && !streaming && (h - g.target).abs() > 1e-4;
-                if tx.settle || !existed || first || self.reduced_motion || snap_change || (reading && !(revealing && g.moving())) {
+                if tx.settle || !existed || first || self.reduced_motion || snap_change || row_reading {
                     *g = GrowTrack { streaming, ..GrowTrack::settled(h) };
                     stack.pending_heights.remove(&id);
                 } else {
@@ -4194,6 +4207,15 @@ impl<S: 'static> Runtime<S> {
                         g.retarget(t);
                     }
                 }
+            }
+            if let Some(&last) = rows.last()
+                && !self.scene.contains(nodes[last].id)
+                && let Some(s) = std::iter::successors(nodes[c].parent, |&p| nodes[p].parent)
+                    .find(|&p| nodes[p].scroll.is_some() && nodes[p].scroll_axes.y())
+                && let Some(r) = self.scroll_reveals.iter_mut().find(|r| r.viewport == nodes[s].path && r.at_end)
+            {
+                r.scope = None;
+                r.key = nodes[last].path.clone();
             }
             stack.growing = !stack.pending_heights.is_empty()
                 || order.iter().any(|r| self.grows.get(r).is_some_and(|g| g.target > g.h + 1.0 / 128.0));
@@ -5463,6 +5485,7 @@ impl<S: 'static> Runtime<S> {
             }
             let s = self.viewport_of(i)?;
             let parent = &self.nodes[s];
+            let (laid_top, laid_h) = (row.target[1] - parent.target[1], row.local.h);
             let (top, height) = std::iter::successors(Some(i), |&p| self.nodes[p].parent)
                 .take_while(|&p| p != s)
                 .find_map(|r| {
@@ -5484,8 +5507,9 @@ impl<S: 'static> Runtime<S> {
                         Some((r_top + in_row, row.local.h))
                     }
                 })
-                .unwrap_or((row.target[1] - parent.target[1], row.local.h));
-            Some((parent.path.clone(), f64::from(top), f64::from(height), f64::from(parent.local.h)))
+                .unwrap_or((laid_top, laid_h));
+            let laid_end = self.scroll_content(s).map_or(0.0, |c| self.nodes[c].target[3] - parent.target[1]);
+            Some((parent.path.clone(), f64::from(top), f64::from(height), f64::from(parent.local.h), f64::from(laid_top), f64::from(laid_h), f64::from(laid_end)))
         }).or_else(|| {
             self.nodes.iter().filter(|n| in_scope(&n.path, scope)).filter_map(|n| {
                 let v = self.virtuals.get(&n.path)?;
@@ -5497,25 +5521,22 @@ impl<S: 'static> Runtime<S> {
                     })
                 })?;
                 let row_key = &v.keys[index];
-                Some((v.scroll_path.clone(), f64::from(v.pad_top + v.prefix(index)), f64::from(v.height(row_key)), f64::from(v.viewport)))
+                let top = f64::from(v.pad_top + v.prefix(index));
+                let height = f64::from(v.height(row_key));
+                let end = f64::from(v.pad_top + v.prefix(v.keys.len()) + v.pad_bottom);
+                Some((v.scroll_path.clone(), top, height, f64::from(v.viewport), top, height, end))
             }).next()
         });
-        let Some((path, top, height, viewport)) = geometry else { return false };
+        let Some((path, top, height, viewport, laid_top, laid_h, laid_end)) = geometry else { return false };
         // Stuck headers cover the viewport's top: land the row below them.
         let Some(cover) = self.stuck_cover(&path, key) else { return false };
         let (top, height) = (top - cover, height + cover);
+        let (laid_top, laid_h) = (laid_top - cover, laid_h + cover);
         let margin = self.node(&path).map_or(0.0, |n| f64::from(n.scroll_edges.margin));
         let Some(&id) = self.path_ids.get(&path) else { return false };
         let Some(&s_idx) = self.node_index.get(&id) else { return false };
+        let stick = self.nodes[s_idx].scroll.is_some_and(|s| s.stick_bottom);
         let max = self.scroll_overflow(s_idx).max(0.0);
-        if first && self.scrolls.contains_key(&id) {
-            self.scroll_reveals.retain(|r| r.viewport != path);
-            self.scroll_reveals.push(sticky::Reveal {
-                scope: scope.map(str::to_owned),
-                key: key.to_owned(),
-                viewport: path.clone(),
-            });
-        }
         let Some(scroll) = self.scrolls.get_mut(&id) else { return false };
         scroll.max = max;
         if first {
@@ -5524,6 +5545,20 @@ impl<S: 'static> Runtime<S> {
             scroll.glide_to = None;
         }
         let offset = scroll_edge::reveal(scroll.offset, top, height, viewport, margin).clamp(0.0, scroll.max);
+        let laid_max = (laid_end - viewport).max(0.0);
+        let laid_to = scroll_edge::reveal(scroll.offset, laid_top, laid_h, viewport, margin).clamp(0.0, laid_max);
+        let at_end = stick && (scroll.pinned || offset >= scroll.max - 0.5) && laid_to >= laid_max - 0.5;
+        if first {
+            self.scroll_reveals.retain(|r| r.viewport != path);
+            self.scroll_reveals.push(sticky::Reveal {
+                scope: scope.map(str::to_owned),
+                key: key.to_owned(),
+                viewport: path.clone(),
+                at_end,
+            });
+        } else if let Some(r) = self.scroll_reveals.iter_mut().find(|r| r.viewport == path) {
+            r.at_end |= at_end;
+        }
         if (offset - scroll.offset).abs() < 0.5 {
             if first { scroll.pinned = false; }
             return false;
@@ -5541,7 +5576,10 @@ impl<S: 'static> Runtime<S> {
             // they make.
             if let Some(i) = self.nodes.iter().position(|n| n.id == id) {
                 let max = self.scroll_overflow(i).max(0.0);
-                if let Some(scroll) = self.scrolls.get_mut(&id) { scroll.max = max; }
+                if let Some(scroll) = self.scrolls.get_mut(&id) {
+                    scroll.max = max;
+                    scroll.pinned = false;
+                }
             }
         }
         window

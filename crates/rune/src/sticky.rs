@@ -28,6 +28,8 @@ pub(super) struct Reveal {
     pub scope: Option<String>,
     pub key: String,
     pub viewport: String,
+    /// Whether this reveal lands at the bottom of a `stick_bottom` viewport.
+    pub at_end: bool,
 }
 
 #[cfg(test)]
