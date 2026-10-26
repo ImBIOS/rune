@@ -5935,6 +5935,17 @@ impl<S: 'static> Runtime<S> {
                 let shift = sticky::shift(edge, inset, [top, top + h, left, left + p.rect.w], frame);
                 self.stuck[i] = shift;
                 if edge == crate::el::StickyEdge::Left { pinh.dx += shift } else { pinh.dy += shift }
+                // A sticky element stays crisp against the viewport edge it sticks to while rows
+                // scrolling under its fill fade out.
+                let (band, slot) = match edge {
+                    crate::el::StickyEdge::Left => (frame[4], 0),
+                    crate::el::StickyEdge::Top => (frame[0], 1),
+                    crate::el::StickyEdge::Bottom => (frame[1], 3),
+                };
+                if band.is_finite() {
+                    pinh.fade[slot] = 0.0;
+                    pinh.paint_fade[slot] = 0.0;
+                }
             }
             if raised {
                 // Out of its ancestors' layers: their opacity applies directly instead.
@@ -6094,7 +6105,7 @@ impl<S: 'static> Runtime<S> {
                 let v = if sc_y {
                     [raw_edges[1], raw_edges[3], f32::NEG_INFINITY, f32::INFINITY]
                 } else {
-                    [up[0], up[1], raw_edges[1] + n.inset[1], raw_edges[3] - n.inset[3]]
+                    [up[0], up[1], (raw_edges[1] + n.inset[1]).max(up[2]), (raw_edges[3] - n.inset[3]).min(up[3])]
                 };
                 let x = if sc_x {
                     [raw_edges[0], raw_edges[2], f32::NEG_INFINITY, f32::INFINITY]

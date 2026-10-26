@@ -3016,8 +3016,10 @@ impl El {
     /// points, so a viewport at its top (or bottom, or stuck to it) shows that edge hard. Replaces
     /// any top/bottom [`El::clip_fade`] widths; left/right ones still apply. On a horizontal
     /// viewport ([`El::scroll_x`]) the left and right edges fade the same way instead, and on
-    /// [`El::scroll_xy`] all four. Pair with [`El::scroll_margin`] so rows brought into view
-    /// stop clear of the fade.
+    /// [`El::scroll_xy`] all four. Sticky elements ([`El::sticky_top`], [`El::sticky_bottom`],
+    /// [`El::sticky_left`]) are not faded on the edge they stick to, so a header's fill stays
+    /// opaque while rows scrolling under it fade. Pair with [`El::scroll_margin`] so rows
+    /// brought into view stop clear of the fade.
     pub fn scroll_edge_fade(mut self, width: f32) -> Self {
         self.scroll_edges.fade = width.max(0.0);
         self
@@ -3088,8 +3090,10 @@ impl El {
     /// scroll. Layout doesn't move; drawing, hit testing, the focus ring, children,
     /// [`El::on_drawn_layout`] and [`ElementInfo::rect`](crate::runtime::ElementInfo) follow the
     /// drawn place, and [`ElementInfo::stuck`](crate::runtime::ElementInfo) reads the shift. It
-    /// draws, and hit tests, above its later siblings. Give it a fill, so rows don't show
-    /// through, and see [`El::stuck_shadow`] for a shadow or divider while it's stuck.
+    /// draws, and hit tests, above its later siblings, and [`El::scroll_edge_fade`] skips the
+    /// edge it sticks to so its fill and text stay opaque while rows scrolling under it fade.
+    /// Give it a fill, so rows don't show through, and see [`El::stuck_shadow`] for a shadow or
+    /// divider while it's stuck.
     ///
     /// In [`El::virtual_rows`] a header sticks inside its own row: make each section one row
     /// (its header and its items) so the header shows whenever any of the section does. A

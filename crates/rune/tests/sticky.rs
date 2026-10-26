@@ -1,9 +1,10 @@
 //! Headless tests for `El::sticky_top`, `El::sticky_bottom`, `El::stuck_shadow`,
 //! `ElementInfo::stuck`, and `Tx::keep_on_screen`.
+use rune::render::{Gpu, OFFSCREEN_FORMAT, Offscreen, Renderer};
 use rune::runtime::ElementInfo;
 use rune::{
-    Align, Color, Cx, El, Env, GrowthSpec, Runtime, ScrollSpec, Shadow, Side, Tx, col, el, oklch,
-    text,
+    Align, Color, Cx, El, Env, GrowthSpec, Runtime, ScrollSpec, Shadow, Side, Tx, col, el, memo,
+    oklch, row, text,
 };
 
 fn find<S: 'static>(rt: &Runtime<S>, key: &str) -> ElementInfo {
@@ -706,4 +707,197 @@ fn keep_on_screen_keeps_growth_springing_and_snaps_when_instant() {
             }
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct OccludeState {
+    memoized: bool,
+    open: bool,
+}
+
+fn occlude_view(s: &OccludeState, _: &mut Cx<OccludeState>) -> El {
+    let build_group = |open: bool| {
+        let mut head = row()
+            .key("head")
+            .w_full()
+            .h(24.0)
+            .animate_layout()
+            .child(text("Used 3 tools").color(Color::WHITE));
+        if open {
+            head = head
+                .sticky_top(0.0)
+                .fill(Color { r: 0.86, g: 0.2, b: 0.2, a: 1.0 })
+                .stuck_shadow(Shadow {
+                    y: 8.0,
+                    blur: 8.0,
+                    color: Color::BLACK,
+                    ..Default::default()
+                });
+        }
+        let mut g = col().key("group").w_full().pb(12.0).child(head);
+        if open {
+            let mut items = col().key("items").w_full().pt(4.0);
+            for j in 0..16 {
+                // Bright green rows that scroll directly under the red stuck header.
+                items = items.child(
+                    el().key(format!("item-{j}"))
+                        .w_full()
+                        .h(22.0)
+                        .fill(Color { r: 0.0, g: 0.94, b: 0.16, a: 1.0 }),
+                );
+            }
+            g = g.child(items);
+        }
+        g
+    };
+    let open = s.open;
+    let memoized = s.memoized;
+    let stack = col()
+        .key("timeline")
+        .w_full()
+        .growth(GrowthSpec::default())
+        .virtual_rows(
+            4,
+            72.0,
+            |_: &OccludeState, i| format!("row-{i}").into(),
+            move |_: &OccludeState, i| {
+                if i != 1 {
+                    return el().key(format!("spacer-{i}")).w_full().h(60.0);
+                }
+                if memoized {
+                    memo("row-1", open, move || {
+                        col()
+                            .w_full()
+                            .max_w(200.0)
+                            .streaming(false)
+                            .child(build_group(open))
+                    })
+                } else {
+                    col()
+                        .w_full()
+                        .max_w(200.0)
+                        .streaming(false)
+                        .child(build_group(open))
+                }
+            },
+        );
+    col()
+        .w_full()
+        .h_full()
+        .fill(Color { r: 0.12, g: 0.125, b: 0.14, a: 1.0 })
+        .child(
+            col()
+                .key("scroll")
+                .w(200.0)
+                .h(200.0)
+                .scroll(ScrollSpec { stick_bottom: false })
+                .scroll_edge_fade(16.0)
+                .child(stack),
+        )
+}
+
+#[test]
+fn sticky_header_stays_opaque_and_occludes_scrolled_rows_under_edge_fade_and_memo() {
+    let scale = 2.0;
+    let gpu = Gpu::headless();
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let size = ((200.0 * scale) as u32, (200.0 * scale) as u32);
+    let target = Offscreen::new(&gpu.device, size.0, size.1);
+    let mut render_pixels = |memoized: bool| -> Vec<u8> {
+        let mut rt = Runtime::new(
+            OccludeState { memoized, open: false },
+            occlude_view,
+            (200.0, 200.0),
+            Env::new(true, scale),
+        );
+        rt.frame(0.0);
+        // Expand the group (matching a chat timeline's collapsible tool group inside `memo`)
+        // and settle the growth animation.
+        rt.update(|s, _| s.open = true);
+        for _ in 0..120 {
+            rt.frame(1.0 / 60.0);
+        }
+        // Scroll 135 pt so `head` sticks at y=0..24 and bright green items sit at y=-3..19
+        // directly behind the top edge-fade band (y=0..16).
+        rt.update(|_, tx| tx.scroll_to_instant("scroll", 0.0, 135.0));
+        for _ in 0..120 {
+            rt.frame(1.0 / 60.0);
+        }
+        let head = find(&rt, "head");
+        assert_eq!(head.rect, [0.0, 0.0, 200.0, 24.0]);
+        assert!((head.stuck - 75.0).abs() < 0.5, "stuck shift: {}", head.stuck);
+
+        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, size);
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        renderer.draw(&mut encoder, &target.view, [0.0; 4]);
+        target.copy(&mut encoder);
+        gpu.queue.submit([encoder.finish()]);
+        target.read(&gpu.device)
+    };
+
+    let plain = render_pixels(false);
+    let memoed = render_pixels(true);
+    let px = |buf: &[u8], x_pt: f32, y_pt: f32| -> [u8; 4] {
+        let x = (x_pt * scale) as usize;
+        let y = (y_pt * scale) as usize;
+        let idx = (y * size.0 as usize + x) * 4;
+        [buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3]]
+    };
+
+    for (label, buf) in [("plain", &plain), ("memo", &memoed)] {
+        // Sample at x=160pt (to the right of the header's "Used 3 tools" text).
+        let top_row = px(buf, 160.0, 1.5);
+        let mid_row = px(buf, 160.0, 8.0);
+        let bot_row = px(buf, 160.0, 20.0);
+        // Problem 2: the top pixels of the stuck header (y = 1..2) must not be faded by
+        // `scroll_edge_fade(16.0)`; they match the unfaded bottom of the header.
+        assert_eq!(
+            top_row, bot_row,
+            "{label}: top of stuck header at y=1.5pt was faded ({top_row:?} vs {bot_row:?})"
+        );
+        assert_eq!(mid_row, bot_row, "{label}: middle of stuck header at y=8pt ({mid_row:?} vs {bot_row:?})");
+        // Problem 1: the bright green scrolled-under row must not bleed through the red header fill
+        // (whose g and b channels are equal).
+        assert!(
+            top_row[0] > 200 && top_row[1] == top_row[2] && top_row[3] == 255,
+            "{label}: scrolled green row bled through stuck header: {top_row:?}"
+        );
+        // `stuck_shadow` darkens the row immediately below the 24pt header (y=26pt vs y=38pt).
+        let under_shadow = px(buf, 160.0, 26.0);
+        let clear_of_shadow = px(buf, 160.0, 38.0);
+        assert!(
+            under_shadow[1] < clear_of_shadow[1].saturating_sub(25),
+            "{label}: stuck_shadow did not darken below header ({under_shadow:?} vs {clear_of_shadow:?})"
+        );
+    }
+    // Problem 3: wrapping the row in `memo` produces identical pixels for the stuck header and shadow.
+    assert_eq!(plain, memoed, "memoized sticky header pixels differ from unmemoized row");
+}
+
+#[test]
+fn sticky_header_inside_memo_growth_row_respects_animated_row_height() {
+    let mut rt = Runtime::new(
+        OccludeState { memoized: true, open: true },
+        occlude_view,
+        (200.0, 200.0),
+        Env::new(true, 1.0),
+    );
+    rt.frame(0.0);
+    // Scroll to 380pt so the bottom of the expanded group pushes the header near the top.
+    rt.update(|_, tx| tx.scroll_to_instant("scroll", 0.0, 380.0));
+    rt.frame(0.0);
+    // Collapse the group inside `memo`; on the first animation frame the outer `memo` wrapper row's
+    // growth height `g.h` is shrinking, and the nested group's sticky bound must follow it.
+    rt.update(|s, _| s.open = false);
+    rt.frame(1.0 / 120.0);
+    rt.update(|s, _| s.open = true);
+    rt.frame(1.0 / 120.0);
+    let wrapper = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("row-1")).unwrap();
+    let head = find(&rt, "head");
+    assert!(
+        head.rect[1] + head.rect[3] <= wrapper.rect[1] + wrapper.rect[3] + 0.5,
+        "sticky header bottom ({:?}) exceeded animated memo row bottom ({:?})",
+        head.rect,
+        wrapper.rect
+    );
 }
