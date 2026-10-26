@@ -426,6 +426,20 @@ fn only_backdrop_slots_split_the_pass_and_receive_a_backdrop_view() {
     );
 }
 
+#[test]
+fn inert_backdrop_slots_draw_but_hidden_and_offscreen_subtrees_do_not() {
+    let seen = Arc::default();
+    let _ = snap("backdrop-visibility", |_, _| background()
+        .child(el().inert().absolute(8.0, 8.0).size(24.0, 24.0)
+            .child(effect(1).effect_backdrop(true).size(24.0, 24.0)))
+        .child(el().absolute(200.0, 200.0).size(24.0, 24.0)
+            .child(effect(2).effect_backdrop(true).size(24.0, 24.0)))
+        .child(el().opacity(0.0).absolute(40.0, 8.0).size(24.0, 24.0)
+            .child(effect(3).effect_backdrop(true).size(24.0, 24.0))),
+        false, BackdropProbe(Arc::clone(&seen)));
+    assert_eq!(*seen.lock().unwrap(), vec![(1, "backdrop", true, false), (1, "draw", true, false)]);
+}
+
 struct CacheSlotProbe {
     frame_no: u32,
     flat: Flat,

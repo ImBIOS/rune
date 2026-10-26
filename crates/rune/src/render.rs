@@ -759,6 +759,10 @@ impl Renderer {
         self.format = format;
         self.srgb_blend = !format.is_srgb();
         if self.layer_stats().targets > 0 { self.add_layer_format(device, format); }
+        let [vw, vh] = self.target_frame(None).1;
+        if !self.backdrops.is_empty() && vw > 0 && vh > 0 {
+            self.ensure_backdrop(device, format, (vw, vh));
+        }
         if let Some(s) = &mut self.surfaces {
             s.set_srgb_blend(self.srgb_blend);
             s.add_format(device, format);
@@ -867,6 +871,9 @@ impl Renderer {
     /// `EffectSite::backdrop` and run `EffectPhase::Backdrop(encoder)` before re-opening with
     /// `LoadOp::Load`. Call `encode_layers_with` / `encode_layers_with_backdrop` before drawing
     /// the first range.
+    /// `view` must be a single-sample, full-size, mip-zero 2D target; backdrop slots require
+    /// its texture to have `COPY_SRC` usage. These owned passes have no depth/stencil or resolve
+    /// attachment. Use `draw_range_with` for a caller-owned pass instead (no backdrop copies).
     pub fn draw_target_range_with(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1201,3 +1208,7 @@ pub fn write_png(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) -
     w.write_image_data(rgba).map_err(std::io::Error::other)?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "render_backdrop_tests.rs"]
+mod backdrop_tests;

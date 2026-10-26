@@ -40,6 +40,7 @@ fn dat1(base: u32, i: u32) -> f32 { return data[base + (i >> 2u)][i & 3u]; }
 @group(1) @binding(2) var samp: sampler;
 // The backdrop's blur pyramid result (frosted glass only; see FxRenderer::blur_backdrop).
 @group(1) @binding(3) var blurred: texture_2d<f32>;
+@group(1) @binding(4) var<uniform> backdrop_encoding: vec4f;
 // ---------- colour ----------
 fn to_srgb(c: vec3f) -> vec3f {
     let lo = c * 12.92;
@@ -56,7 +57,7 @@ fn to_lin(c: vec3f) -> vec3f {
 // linear premultiplied light on sample so glass, lens, distort and backdrop dither/halftone shade
 // in linear light before `fs` encodes once for the target.
 fn bd_lin(c: vec4f) -> vec4f {
-    if (g.srgb > 0.5) {
+    if (backdrop_encoding.x > 0.5) {
         let a = max(c.a, 0.0);
         let straight = select(vec3f(0.0), c.rgb / a, a > 1e-6);
         return vec4f(to_lin(straight) * a, a);

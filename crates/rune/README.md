@@ -1532,7 +1532,7 @@ and its goldens are unchanged. `examples/lab` uses it to composite `rune-light` 
   One compositor serves any number of formats: build pipelines per `EffectSite::format`.
 - `render::CLIP_WGSL` is Rune's own clip maths as WGSL (`clip_alpha(p, clip, fade)` with `p` in
   window pixels, plus `sd_rounded`). Prepend it to a compositor shader and pass the slot's `clip`
-  and `fade` words (`rune-fx` does this via `FxLayer::clip(i.clip, i.fade)`), so the effect is cut
+  and `fade` words (`rune-fx` does this via `FxSlot::clip(i.clip, i.fade)` in `prepare_with_slots`), so the effect is cut
   by the same rectangle, feathers and circular or continuous
   rounded corners as the primitives around it. A compositor that skips this still gets the hard
   clip rectangle from the scissor. A rounded clip on an isolated layer applies to the completed

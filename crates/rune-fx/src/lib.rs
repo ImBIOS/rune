@@ -948,7 +948,7 @@ pub struct Source {
     pub rect: Rect,
 }
 
-/// Default unclipped rectangle for [`FxLayer::clip`], matching `rune::render::NO_CLIP`.
+/// Default unclipped rectangle for [`FxSlot::clip`], matching `rune::render::NO_CLIP`.
 pub const NO_CLIP: [f32; 4] = [-1e6, -1e6, 1e6, 1e6];
 
 #[derive(Clone, Copy, Debug)]
@@ -962,12 +962,35 @@ pub struct FxLayer {
     pub source: Option<Source>,
     /// 0..1, scales the layer's whole output (a retiring one-shot fades out with it).
     pub opacity: f32,
-    /// Device pixels per point for this layer; `0.0` (the default) uses `FxFrame::scale`.
-    pub scale: f32,
-    /// Window device-pixel clip rectangle `[x0, y0, x1, y1]`; defaults to [`NO_CLIP`].
-    pub clip: [f32; 4],
-    /// Packed soft-edge and rounded-clip words (`rune::render::Instance::fade`); defaults to `[0; 4]`.
-    pub fade: [u32; 4],
+}
+
+/// Per-layer placement in a Rune effect slot. Passed separately to
+/// [`FxRenderer::prepare_with_slots`] so existing `FxLayer` and `FxFrame` literals stay valid.
+#[derive(Clone, Copy, Debug)]
+pub struct FxSlot {
+    pub(crate) scale: f32,
+    pub(crate) clip: [f32; 4],
+    pub(crate) fade: [u32; 4],
+    pub(crate) backdrop_srgb: Option<bool>,
+}
+
+impl Default for FxSlot {
+    fn default() -> Self { Self { scale: 0.0, clip: NO_CLIP, fade: [0; 4], backdrop_srgb: None } }
+}
+
+impl FxSlot {
+    /// Whether backdrop samples need software sRGB decoding. Default: `FxFrame::backdrop`
+    /// samples are linear; per-slot copies use the frame's blend encoding. Set false for an
+    /// `*Srgb` view (which hardware decodes) or a linear `Rgba16Float` input, even in sRGB mode.
+    pub fn backdrop_srgb(mut self, on: bool) -> Self { self.backdrop_srgb = Some(on); self }
+    /// Device pixels per point (`EffectSite::scale`); zero uses `FxFrame::scale`.
+    pub fn scale(mut self, scale: f32) -> Self { self.scale = scale; self }
+    /// Window device-pixel clip and packed soft-edge / rounded-clip words.
+    pub fn clip(mut self, clip: [f32; 4], fade: [u32; 4]) -> Self {
+        self.clip = clip;
+        self.fade = fade;
+        self
+    }
 }
 
 impl Fx {
@@ -996,7 +1019,7 @@ impl Fx {
             Fx::Electric(_) => Place::Over,
             _ => Place::Over,
         };
-        FxLayer { fx: self, shape, place, time: 0.0, seed: 1, reduced_motion: false, source: None, opacity: 1.0, scale: 0.0, clip: NO_CLIP, fade: [0; 4] }
+        FxLayer { fx: self, shape, place, time: 0.0, seed: 1, reduced_motion: false, source: None, opacity: 1.0 }
     }
 
     pub fn needs_backdrop(&self) -> bool {
@@ -1066,16 +1089,6 @@ impl FxLayer {
     pub fn reduced(mut self, on: bool) -> Self { self.reduced_motion = on; self }
     pub fn source(mut self, slot: u32, rect: Rect) -> Self { self.source = Some(Source { slot, rect }); self }
     pub fn opacity(mut self, k: f32) -> Self { self.opacity = k; self }
-    /// Device pixels per point for this layer (`EffectSite::scale` or `instance.params[3]`);
-    /// `0.0` (the default) uses `FxFrame::scale`.
-    pub fn scale(mut self, scale: f32) -> Self { self.scale = scale; self }
-    /// Clip the layer to a window device-pixel rectangle and packed soft-edge / rounded-clip words
-    /// (`instance.clip, instance.fade` from a Rune `EffectSite`).
-    pub fn clip(mut self, clip: [f32; 4], fade: [u32; 4]) -> Self {
-        self.clip = clip;
-        self.fade = fade;
-        self
-    }
 
     /// Whether this layer still changes over time (the frame loop may stop ticking when false).
     pub fn is_animating(&self) -> bool {
@@ -1164,8 +1177,8 @@ impl FxLayer {
             aux: [0.0; 4],
             aux2: self.source.map(|s| s.rect.xywh()).unwrap_or([0.0, 0.0, 1.0, 1.0]),
             xf: [0.0; 4],
-            clip: self.clip,
-            fade: self.fade,
+            clip: NO_CLIP,
+            fade: [0; 4],
         };
         let rm = self.reduced_motion;
         let looped_t = if rm { CALM_T } else { self.time };

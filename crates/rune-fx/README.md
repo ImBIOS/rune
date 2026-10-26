@@ -56,11 +56,14 @@ fx.draw_layer(&mut pass, 0);              // or fx.draw_all(&mut pass, &layers, 
 ```
 
 `FxLayer` builders: `.at(time)`, `.seed(n)`, `.over()` / `.under()`, `.reduced(bool)`,
-`.source(slot, rect)`, `.scale(k)` (device pixels per point at a zoomed effect slot,
-`EffectSite::scale`), `.clip(clip, fade)` (Rune's `Instance::clip` and `fade`, evaluated via
-`CLIP_WGSL` in the fragment shader), `.opacity(k)` (also the pub field `opacity`, so struct
+`.source(slot, rect)`, `.opacity(k)` (also the pub field `opacity`, so struct
 literals need it).
 `layer.is_animating()` tells the frame loop whether to keep ticking.
+
+For Rune effect slots, use `prepare_with_slots(device, queue, frame, slots)` with one
+`FxSlot::default().scale(site.scale).clip(i.clip, i.fade)` per layer. Missing entries default
+to the frame scale and no clip. Keeping this metadata separate preserves existing `FxLayer`
+and `FxFrame` struct literals.
 
 One-shots overlap: `OneShots<T>::new(cap)` keeps a bounded pool. `trigger(t, data)` starts a new
 instance beside the live ones, and `live(t, life)` yields each `(shot, opacity)`. Draw one layer per
@@ -157,16 +160,20 @@ Fx::fill(FlutedGlassParams { rib: 10.0, frost: 0.4, ..FlutedGlassParams::reeded(
   another one, and `draw_layer_in(pass, format, origin, layer)` draws into a pass of that format
   whose top-left pixel is at `origin` in window pixels (a Rune effect slot's `EffectSite`: the
   frame target, or an isolated layer's `Rgba16Float` target, where the layer's opacity, blur and
-  clip then apply). Effects are still shaded in window coordinates; pass `FxLayer::scale(site.scale)`
+  clip then apply). Effects are still shaded in window coordinates; pass `FxSlot::scale(site.scale)`
   so a zoomed slot (`scale` / `live_scale`) converts its device-pixel rect and lengths with its own
-  device-px-per-pt factor, and `FxLayer::clip(i.clip, i.fade)` so a slot outside an isolated layer
+  device-px-per-pt factor, and `FxSlot::clip(i.clip, i.fade)` in `prepare_with_slots` so a slot outside an isolated layer
   is cut by rounded container corners and soft scroll-edge feathers (`CLIP_WGSL`).
 - `set_srgb_blend(frame.srgb_blend())` matches a gamma-blended Rune frame: the premultiplied output
-  is sRGB-encoded for the non-sRGB target, and `backdrop` / `blurred` samples are decoded from
-  sRGB-encoded premultiplied light before shading. Pass a backdrop view of the pass's own format
+  is sRGB-encoded for the non-sRGB target. When prepared without `FxFrame::backdrop`, per-slot
+  `backdrop` / `blurred` samples default to that same encoding and are decoded before shading.
+  Pass a backdrop view of the pass's own format
   (`EffectSite::backdrop`: non-sRGB on the frame target, `Rgba16Float` inside an isolated layer);
   glass, lenses, distortion and backdrop dither/halftone then shade in linear light without
-  double-encoding on either target.
+  double-encoding on either target. Explicit `FxFrame::backdrop` inputs retain the linear-samples
+  default. `FxSlot::backdrop_srgb(bool)` overrides either convention: use `false` for an `*Srgb`
+  view (hardware already decodes it) or a linear `Rgba16Float` view, and `true` for encoded
+  premultiplied samples, independently of the frame's output blend mode.
 
 **Cost and culling**
 - `prepare` does all culling: idle layers (intensity 0, a fully cooled glow, a one-shot outside its

@@ -3,6 +3,7 @@
 //! into the caller's render pass (target must not be the backdrop texture).
 
 use crate::*;
+use wgpu::util::DeviceExt;
 
 const CLIP: &str = include_str!("../../rune/src/clip.wgsl");
 const COMMON: &str = include_str!("shaders/common.wgsl");
@@ -24,11 +25,11 @@ pub struct FxFrame<'a> {
     pub scale: f32,
     pub layers: &'a [FxLayer],
     /// The target's content beneath the layers (for distortion and glass). Must not be the render
-    /// target. Pass a view with the target pass's own format (as `EffectSite::backdrop` does:
-    /// `*Srgb` or `Rgba16Float` in linear frames, non-sRGB or `Rgba16Float` in `srgb_blend`
-    /// frames); when `set_srgb_blend(true)` is active, `rune-fx` decodes the sRGB-encoded
-    /// premultiplied backdrop in the shader so both 8-bit targets and `Rgba16Float` isolated
-    /// layers shade in linear light without double-encoding.
+    /// target. Samples are linear by default (including hardware-decoded `*Srgb` views).
+    /// For sRGB-encoded premultiplied samples, use `prepare_with_slots` with
+    /// `FxSlot::backdrop_srgb(true)`. A frame prepared with `None` instead defaults per-slot
+    /// copies (`set_layer_backdrop` / `blur_backdrop`) to the frame's blend encoding, matching
+    /// `EffectSite::backdrop`, including `Rgba16Float` isolated layers.
     pub backdrop: Option<&'a wgpu::TextureView>,
     /// Source textures layers refer to by `Source::slot` (mask pyramids, node layers).
     pub sources: &'a [&'a wgpu::TextureView],
@@ -61,6 +62,7 @@ struct Prepared {
     /// Frosted lens: blur sigma in device px (0 = no backdrop blur).
     blur_px: f32,
     needs_backdrop: bool,
+    backdrop_srgb: bool,
 }
 
 /// Backdrop blur pyramid: half-resolution mip chains for the dual-filter down and up passes.
@@ -133,6 +135,7 @@ pub struct FxRenderer {
     srgb: Option<bool>,
     bgl0: wgpu::BindGroupLayout,
     bgl1: wgpu::BindGroupLayout,
+    backdrop_encoding: [wgpu::Buffer; 2],
     bg0: Option<wgpu::BindGroup>,
     globals: wgpu::Buffer,
     insts: wgpu::Buffer,
@@ -198,6 +201,7 @@ impl FxRenderer {
                 entry(1, fr, tex),
                 entry(2, fr, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)),
                 entry(3, fr, tex),
+                entry(4, fr, wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: wgpu::BufferSize::new(16) }),
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -205,6 +209,11 @@ impl FxRenderer {
             bind_group_layouts: &[Some(&bgl0), Some(&bgl1)],
             immediate_size: 0,
         });
+        let backdrop_encoding = [0.0f32, 1.0].map(|encoded| device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("fx backdrop encoding"),
+            contents: bytemuck::cast_slice(&[encoded, 0.0, 0.0, 0.0]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        }));
         let modules: Vec<wgpu::ShaderModule> = SOURCES
             .iter()
             .map(|(name, src)| device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -339,6 +348,7 @@ impl FxRenderer {
             srgb: None,
             bgl0,
             bgl1,
+            backdrop_encoding,
             bg0: None,
             globals,
             insts: Self::buffer(device, "fx insts", inst_cap * INST_SIZE),
@@ -404,10 +414,9 @@ impl FxRenderer {
     }
 
     /// Match the frame's blend mode (`rune::Frame::srgb_blend`): when true, the premultiplied
-    /// output is sRGB-encoded for a non-sRGB target, and `backdrop` / `blurred` samples are
-    /// decoded from sRGB-encoded premultiplied light before shading, so glass, lenses and
-    /// backdrop fills look the same in both modes on the frame target and inside `Rgba16Float`
-    /// isolated layers alike. Pass a backdrop view of the pass's own format (`EffectSite::backdrop`).
+    /// output is sRGB-encoded for a non-sRGB target. Per-slot copies default to that same
+    /// encoding when prepared without `FxFrame::backdrop`; explicit frame inputs retain their
+    /// linear-samples contract. `FxSlot::backdrop_srgb` overrides either convention.
     /// Takes effect at the next `prepare`.
     pub fn set_srgb_blend(&mut self, on: bool) {
         self.srgb = Some(on);
@@ -439,6 +448,12 @@ impl FxRenderer {
 
     /// Cull, pack and upload. Layer `i` of `frame.layers` can then be drawn with `draw_layer(pass, i)`.
     pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &FxFrame) -> FxStats {
+        self.prepare_with_slots(device, queue, frame, &[])
+    }
+
+    /// Like `prepare`, with device scale and clipping for each layer's effect slot.
+    /// Entries correspond to `frame.layers`; missing entries use `FxSlot::default()`.
+    pub fn prepare_with_slots(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &FxFrame, slots: &[FxSlot]) -> FxStats {
         if let Some(srgb) = self.srgb {
             let target = if srgb { self.format.remove_srgb_suffix() } else { self.format.add_srgb_suffix() };
             self.set_format(device, target);
@@ -464,18 +479,19 @@ impl FxRenderer {
             sims.begin_frame();
         }
         // Bind groups keyed by (needs backdrop, source slot, blurred backdrop, fire sim grid) so equal layers share one.
-        let mut keys: Vec<(bool, Option<u32>, bool, Option<usize>)> = Vec::new();
-        for layer in frame.layers {
+        let mut keys: Vec<(bool, Option<u32>, bool, Option<usize>, bool)> = Vec::new();
+        for (index, layer) in frame.layers.iter().enumerate() {
+            let slot = slots.get(index).copied().unwrap_or_default();
             let Some((kind, mut inst, b)) = layer.pack() else {
                 stats.culled_idle += 1;
                 self.prepared.push(None);
                 continue;
             };
-            let s = if layer.scale > 0.0 { layer.scale } else { frame.scale };
-            let x0 = (b.x * s).floor().max(layer.clip[0].floor()).max(0.0);
-            let y0 = (b.y * s).floor().max(layer.clip[1].floor()).max(0.0);
-            let x1 = ((b.x + b.w) * s).ceil().min(layer.clip[2].ceil()).min(vw);
-            let y1 = ((b.y + b.h) * s).ceil().min(layer.clip[3].ceil()).min(vh);
+            let s = if slot.scale > 0.0 { slot.scale } else { frame.scale };
+            let x0 = (b.x * s).floor().max(slot.clip[0].floor()).max(0.0);
+            let y0 = (b.y * s).floor().max(slot.clip[1].floor()).max(0.0);
+            let x1 = ((b.x + b.w) * s).ceil().min(slot.clip[2].ceil()).min(vw);
+            let y1 = ((b.y + b.h) * s).ceil().min(slot.clip[3].ceil()).min(vh);
             if x1 <= x0 || y1 <= y0 {
                 stats.culled_offscreen += 1;
                 self.prepared.push(None);
@@ -494,6 +510,8 @@ impl FxRenderer {
                 _ => None,
             };
             inst.bounds = [x0, y0, x1, y1];
+            inst.clip = slot.clip;
+            inst.fade = slot.fade;
             inst.shape[1] = s;
             let needs_bd = layer.fx.needs_backdrop();
             stats.needs_backdrop |= needs_bd;
@@ -502,7 +520,7 @@ impl FxRenderer {
                 Fx::Fill(FillParams { style: FillStyle::FlutedGlass(p), .. }) => (p.frost.clamp(0.0, 1.0) * LENS_FROST_SIGMA * s).max(0.0),
                 _ => 0.0,
             };
-            let key = (needs_bd && frame.backdrop.is_some(), layer.source.map(|s| s.slot), blur_px > 0.0 && frame.backdrop.is_some(), grid);
+            let key = (needs_bd && frame.backdrop.is_some(), layer.source.map(|s| s.slot), blur_px > 0.0 && frame.backdrop.is_some(), grid, slot.backdrop_srgb.unwrap_or(false));
             let bind = match keys.iter().position(|k| *k == key) {
                 Some(p) => p,
                 None => {
@@ -520,6 +538,7 @@ impl FxRenderer {
                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src) },
                             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(blurred) },
+                            wgpu::BindGroupEntry { binding: 4, resource: self.backdrop_encoding[usize::from(key.4)].as_entire_binding() },
                         ],
                     }));
                     keys.push(key);
@@ -528,7 +547,8 @@ impl FxRenderer {
             };
             stats.drawn += 1;
             stats.pixels += ((x1 - x0) * (y1 - y0)) as u64;
-            self.prepared.push(Some(Prepared { kind, instance: self.scratch.len() as u32, bind, bounds: [x0, y0, x1, y1], blur_px, needs_backdrop: needs_bd }));
+            self.prepared.push(Some(Prepared { kind, instance: self.scratch.len() as u32, bind, bounds: [x0, y0, x1, y1], blur_px, needs_backdrop: needs_bd,
+                backdrop_srgb: slot.backdrop_srgb.unwrap_or(frame.backdrop.is_none() && self.srgb.unwrap_or(false)) }));
             self.scratch.push(inst);
         }
         let mut regrow = self.bg0.is_none();
@@ -624,6 +644,8 @@ impl FxRenderer {
 
     /// Bind a per-slot `backdrop` (`EffectSite::backdrop`) to `layer`. `blur_backdrop` calls this
     /// automatically, so call it directly only when drawing a backdrop layer without `blur_backdrop`.
+    /// Uses the encoding chosen at `prepare` (`FxSlot::backdrop_srgb`); when prepared without
+    /// a frame backdrop, the default expects `EffectSite::backdrop` in the pass's own format.
     pub fn set_layer_backdrop(&mut self, device: &wgpu::Device, backdrop: &wgpu::TextureView, layer: usize) {
         let Some(Some(p)) = self.prepared.get(layer).copied() else { return };
         if !p.needs_backdrop { return; }
@@ -641,6 +663,7 @@ impl FxRenderer {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.dummy) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(blurred) },
+                wgpu::BindGroupEntry { binding: 4, resource: self.backdrop_encoding[usize::from(p.backdrop_srgb)].as_entire_binding() },
             ],
         }));
         self.prepared[layer].as_mut().unwrap().bind = bind;
@@ -649,7 +672,7 @@ impl FxRenderer {
     /// Bind `backdrop` to `layer` and blur it for frosted glass (`LensParams::frost` or
     /// `FlutedGlassParams::frost` above 0), scissored to the layer.
     ///
-    /// Call it after copying the backdrop for layer `layer` (for instance from the `EffectPrep`
+    /// Call it after copying the backdrop for layer `layer` (for instance from the `EffectPhase::Backdrop`
     /// callback of `Renderer::draw_with_backdrop` / `Renderer::encode_layers_with_backdrop` with
     /// `EffectSite::backdrop`) and before drawing that layer, outside any render pass. Returns
     /// false (after still binding `backdrop` when the layer reads it) for non-frosted layers; a

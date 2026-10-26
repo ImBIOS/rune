@@ -36,12 +36,13 @@ impl Compositor<()> for Dusk {
                 let k = i.params[3];
                 let [x, y, w, h] = i.rect.map(|v| v / k);
                 let r = i.radii.iter().fold(0.0f32, |a, v| a.max(v.abs())) / k;
-                (self.effect)(*m).on(Shape::rounded(x, y, w, h, r)).scale(k).clip(i.clip, i.fade).at(1.0)
+                (self.effect)(*m).on(Shape::rounded(x, y, w, h, r)).at(1.0)
             }).collect();
         let fx = self.fx.get_or_insert_with(|| FxRenderer::new(device, f.format, FxOptions::default()));
         fx.set_srgb_blend(f.srgb_blend());
         fx.add_format(device, wgpu::TextureFormat::Rgba16Float);
-        fx.prepare(device, queue, &FxFrame { viewport: [size.0, size.1], scale: 1.0, layers: &layers, backdrop: None, sources: &[] });
+        let placements: Vec<_> = slots.iter().map(|(_, i, _)| FxSlot::default().scale(i.params[3]).clip(i.clip, i.fade)).collect();
+        fx.prepare_with_slots(device, queue, &FxFrame { viewport: [size.0, size.1], scale: 1.0, layers: &layers, backdrop: None, sources: &[] }, &placements);
         let clear = f.rt.clear_color();
         f.ui.prepare(device, queue, &mut f.rt.text.atlas, &f.rt.instances, size);
         let formats = &self.formats;
@@ -321,6 +322,63 @@ fn layered_glass_scene(_: &(), _: &mut Cx<()>) -> El {
             .child(el().absolute(0.0, 0.0).size(32.0, 64.0).fill(hex("#00e5ff").unwrap()))
             .child(effect(1).effect_backdrop(true).absolute(0.0, 0.0).size(64.0, 64.0)),
     )
+}
+
+fn moved_nested_scene(slot: bool) -> El {
+    let mut card = el().size(72.0, 72.0).opacity(0.6)
+        .live_offset(&rune::Live::new([-4.25, -3.75]))
+        .fill(hex("#804020").unwrap())
+        .child(el().absolute(24.0, 0.0).size(8.0, 72.0).fill(hex("#00e5ff").unwrap()));
+    if slot { card = card.child(effect(1).effect_backdrop(true).absolute(0.0, 0.0).size(72.0, 72.0)); }
+    background().child(el().absolute(8.25, 8.75).size(72.0, 72.0).scale(1.125).opacity(0.8)
+        .scroll(rune::ScrollSpec { stick_bottom: true })
+        .child(el().size(72.0, 140.0).child(card.absolute(0.0, 68.0))))
+}
+
+#[test]
+fn backdrop_origin_tracks_fractional_scale_scroll_live_offset_and_nested_layers() {
+    for srgb in [false, true] {
+        let (w, base) = snap_with("moved-base", |_, _| moved_nested_scene(false), srgb, Arc::default(), 2,
+            || Fx::distort(DistortParams::chroma_split([1e-6, 0.0])));
+        let (_, slot) = snap_with("moved-slot", |_, _| moved_nested_scene(true), srgb, Arc::default(), 2,
+            || Fx::distort(DistortParams::chroma_split([1e-6, 0.0])));
+        // An effectively zero offset (nonzero to avoid idle culling) reproduces the contents before the
+        // two layer opacities composite, including the stripe's window-space position.
+        for y in [40, 72, 104] {
+            for x in [24, 48, 56, 64, 88, 120] {
+                let got = px(&slot, w, x, y);
+                let want = px(&base, w, x, y);
+                assert!(got.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 3),
+                    "srgb={srgb} ({x},{y}): {got:?} != {want:?}");
+            }
+        }
+    }
+}
+
+fn edge_scene(slot: bool) -> El {
+    let mut card = el().absolute(-8.25, -9.75).size(112.0, 112.0).opacity(0.6).blur(3.0).scale(1.125)
+        .fill(hex("#804020").unwrap())
+        .child(el().absolute(40.0, 0.0).size(8.0, 112.0).fill(hex("#00e5ff").unwrap()));
+    if slot { card = card.child(effect(1).effect_backdrop(true).absolute(0.0, 0.0).size(112.0, 112.0)); }
+    background().child(card)
+}
+
+#[test]
+fn negative_layer_origins_copy_the_visible_region_at_all_window_edges() {
+    for srgb in [false, true] {
+        let (w, base) = snap_with("edge-base", |_, _| edge_scene(false), srgb, Arc::default(), 2,
+            || Fx::distort(DistortParams::chroma_split([1e-6, 0.0])));
+        let (_, slot) = snap_with("edge-slot", |_, _| edge_scene(true), srgb, Arc::default(), 2,
+            || Fx::distort(DistortParams::chroma_split([1e-6, 0.0])));
+        for y in [0, 1, 4, 64, 187, 190, 191] {
+            for x in [0, 1, 4, 64, 187, 190, 191] {
+                let got = px(&slot, w, x, y);
+                let want = px(&base, w, x, y);
+                assert!(got.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 3),
+                    "srgb={srgb} ({x},{y}): {got:?} != {want:?}");
+            }
+        }
+    }
 }
 
 #[test]

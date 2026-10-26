@@ -3,6 +3,12 @@ use rune_fx::*;
 
 #[test]
 fn external_struct_update_and_emitted_rust_compile() {
+    let _literal = FxLayer {
+        fx: Fx::distort(DistortParams::chroma_split([0.0; 2])),
+        shape: Shape::rounded(0.0, 0.0, 16.0, 16.0, 0.0),
+        place: Place::Over, time: 0.0, seed: 1, reduced_motion: false,
+        source: None, opacity: 1.0,
+    };
     let card = Shape::rounded(10.0, 10.0, 120.0, 80.0, 12.0);
     let layers = [
         Fx::fill(LiquidMetalParams { flow: 0.9, scale: 80.0, ..LiquidMetalParams::rose() }.border(4.0).intensity(0.8)),
@@ -21,6 +27,62 @@ fn external_struct_update_and_emitted_rust_compile() {
         assert!(!p.to_rust().is_empty());
         let layer = fx.on(card).at(1.0);
         assert_eq!(layer.place, if p.needs_backdrop() { Place::Over } else { Place::Under });
+    }
+}
+
+#[test]
+fn linear_backdrop_views_are_not_double_decoded_in_srgb_frames() {
+    use rune::render::Offscreen;
+    let Gpu { device, queue, .. } = Gpu::headless();
+    let mut fx = FxRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm, FxOptions::default());
+    fx.set_srgb_blend(true);
+    let layers = [Fx::distort(DistortParams::chroma_split([1e-6, 0.0]))
+        .on(Shape::rounded(0.0, 0.0, 32.0, 32.0, 0.0))];
+    for format in [wgpu::TextureFormat::Rgba8UnormSrgb, wgpu::TextureFormat::Rgba16Float] {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: 32, height: 32, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format, usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        // Direct frame input retains the old linear-samples contract; a hook can also
+        // override the pass-copy convention for its own linear or hardware-decoded view.
+        for per_slot in [false, true] {
+            let target = Offscreen::with_format(&device, 32, 32, wgpu::TextureFormat::Rgba8Unorm);
+            let frame = FxFrame { viewport: [32, 32], scale: 1.0, layers: &layers,
+                backdrop: (!per_slot).then_some(&view), sources: &[] };
+            let slots = if per_slot { vec![FxSlot::default().backdrop_srgb(false)] } else { vec![] };
+            assert_eq!(fx.prepare_with_slots(&device, &queue, &frame, &slots).drawn, 1);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view, depth_slice: None, resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.25, g: 0.125, b: 0.0625, a: 1.0 }), store: wgpu::StoreOp::Store },
+                    })], ..Default::default()
+                });
+            }
+            fx.blur_backdrop(&device, &queue, &mut encoder, &view, 0);
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &target.view, depth_slice: None, resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    })], ..Default::default()
+                });
+                fx.draw_layer(&mut pass, 0);
+            }
+            target.copy(&mut encoder);
+            queue.submit([encoder.finish()]);
+            let pixels = target.read(&device);
+            let at = (16 * 32 + 16) * 4;
+            let expected = [0.25, 0.125, 0.0625].map(|c| (rune::color::srgb_encode(c) * 255.0).round() as u8);
+            for (got, want) in pixels[at..at + 3].iter().zip(expected) {
+                assert!(got.abs_diff(want) <= 2, "{format:?} per_slot={per_slot}: {got} != {want}");
+            }
+        }
     }
 }
 

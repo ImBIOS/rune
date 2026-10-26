@@ -9,8 +9,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   `KIND_EFFECT` (`instance.params[3]`) and `EffectSite::scale` now carry the device pixels per point
   at the slot (`sc * s`, combining the window's Retina factor with inherited `scale`, `press_scale`,
   `live_scale` and scale transitions, where `params[3]` previously held only `s`).
-  `rune_fx::FxLayer::scale(f32)` overrides `FxFrame::scale` for that layer so a border, glow reach
-  or rib width on a zoomed canvas stays in the element's points, and `FxLayer::clip(clip, fade)`
+  `rune_fx::FxSlot::scale(f32)` overrides `FxFrame::scale` for that layer so a border, glow reach
+  or rib width on a zoomed canvas stays in the element's points, and `FxSlot::clip(clip, fade)`
   applies `rune::render::CLIP_WGSL` (`clip_alpha`) in `rune-fx`'s fragment shader and tightens the
   quad to `clip` so a slot outside an isolated layer gets the same rounded container corners and
   scroll-edge feathers as Rune's own primitives. `El::effect_backdrop(true)` marks a slot that reads
@@ -25,7 +25,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   `FxRenderer::set_srgb_blend(true)` is active, `rune-fx` decodes sRGB-encoded premultiplied
   backdrop and blurred-backdrop samples to linear light before shading, so glass, lenses, distortion
   and backdrop dither or halftone are no longer double-encoded on non-sRGB frame targets or inside
-  `Rgba16Float` isolated layers when given `EffectSite::backdrop`.
+  `Rgba16Float` isolated layers when given `EffectSite::backdrop`. Pass slot metadata separately
+  to `FxRenderer::prepare_with_slots`; `FxLayer` and `FxFrame` struct literals remain unchanged.
+  Explicit `FxFrame::backdrop` inputs still provide linear samples by default, including
+  hardware-decoded `*Srgb` views; `FxSlot::backdrop_srgb(bool)` overrides the input encoding
+  independently of output blending. Backdrop textures follow live target-format switches and
+  resize without reallocating when the format and viewport are unchanged.
 
 - **Sticky elements in scroll views: `El::sticky_top`, `El::sticky_bottom`, `El::stuck_shadow` and `Tx::keep_on_screen`.**
   An element inside a vertical scroll viewport can pin to the viewport's top or bottom edge
