@@ -23,7 +23,12 @@ pub struct FxFrame<'a> {
     /// Device px per pt.
     pub scale: f32,
     pub layers: &'a [FxLayer],
-    /// The target's content beneath the layers (for distortion). Must not be the render target.
+    /// The target's content beneath the layers (for distortion and glass). Must not be the render
+    /// target. Pass a view with the target pass's own format (as `EffectSite::backdrop` does:
+    /// `*Srgb` or `Rgba16Float` in linear frames, non-sRGB or `Rgba16Float` in `srgb_blend`
+    /// frames); when `set_srgb_blend(true)` is active, `rune-fx` decodes the sRGB-encoded
+    /// premultiplied backdrop in the shader so both 8-bit targets and `Rgba16Float` isolated
+    /// layers shade in linear light without double-encoding.
     pub backdrop: Option<&'a wgpu::TextureView>,
     /// Source textures layers refer to by `Source::slot` (mask pyramids, node layers).
     pub sources: &'a [&'a wgpu::TextureView],
@@ -399,8 +404,10 @@ impl FxRenderer {
     }
 
     /// Match the frame's blend mode (`rune::Frame::srgb_blend`): when true, the premultiplied
-    /// output is sRGB-encoded for a non-sRGB target, as Rune's own pass is, so an effect looks
-    /// the same in both modes apart from the blend's own linear-versus-gamma difference.
+    /// output is sRGB-encoded for a non-sRGB target, and `backdrop` / `blurred` samples are
+    /// decoded from sRGB-encoded premultiplied light before shading, so glass, lenses and
+    /// backdrop fills look the same in both modes on the frame target and inside `Rgba16Float`
+    /// isolated layers alike. Pass a backdrop view of the pass's own format (`EffectSite::backdrop`).
     /// Takes effect at the next `prepare`.
     pub fn set_srgb_blend(&mut self, on: bool) {
         self.srgb = Some(on);

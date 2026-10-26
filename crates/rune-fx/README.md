@@ -56,7 +56,10 @@ fx.draw_layer(&mut pass, 0);              // or fx.draw_all(&mut pass, &layers, 
 ```
 
 `FxLayer` builders: `.at(time)`, `.seed(n)`, `.over()` / `.under()`, `.reduced(bool)`,
-`.source(slot, rect)`, `.opacity(k)` (also the pub field `opacity`, so struct literals need it).
+`.source(slot, rect)`, `.scale(k)` (device pixels per point at a zoomed effect slot,
+`EffectSite::scale`), `.clip(clip, fade)` (Rune's `Instance::clip` and `fade`, evaluated via
+`CLIP_WGSL` in the fragment shader), `.opacity(k)` (also the pub field `opacity`, so struct
+literals need it).
 `layer.is_animating()` tells the frame loop whether to keep ticking.
 
 One-shots overlap: `OneShots<T>::new(cap)` keeps a bounded pool. `trigger(t, data)` starts a new
@@ -75,10 +78,15 @@ settles one pose and then steps nothing. Flames are blackbody light (1000–2700
 per-channel shoulder; `FireParams::smoke` sets how much smoke the cooling flame leaves, and smoke
 covers what is behind it, lit warm from below. The lab's fire scene costs 0.8–0.9 ms GPU per frame at 2×.
 
-Frosted glass (`LensParams::frost > 0`) reads a blurred backdrop. After copying the backdrop, call
-`fx.blur_backdrop(&device, &queue, &mut encoder, &backdrop_view, layer)` for each frosted layer. It
-runs a half-resolution dual-filter pyramid scissored to the layer. Without it the lens falls back
-to an 8-tap spiral blur.
+Frosted glass (`LensParams::frost > 0` or `FlutedGlassParams::frost > 0`) reads a blurred backdrop.
+After copying the backdrop (or in `EffectPhase::Backdrop(encoder)` at a Rune
+`El::effect_backdrop(true)` slot), call
+`fx.blur_backdrop(&device, &queue, &mut encoder, &backdrop_view, layer)` for that layer (or
+`fx.set_layer_backdrop(&device, &backdrop_view, layer)` for an unblurred backdrop reader when
+`FxFrame::backdrop` is `None`). `blur_backdrop` runs a half-resolution dual-filter pyramid scissored
+to the layer and binds both `backdrop_view` and the blurred output on that layer; if the layer has
+`frost == 0`, it binds `backdrop_view` without running the pyramid. Without `blur_backdrop` a lens
+falls back to an 8-tap spiral blur.
 `Fx::cost()` returns the static cost declaration. `FxStats` reports draws, idle and off-screen
 culls, covered pixels, and whether any drawn layer needs a backdrop.
 
@@ -149,10 +157,16 @@ Fx::fill(FlutedGlassParams { rib: 10.0, frost: 0.4, ..FlutedGlassParams::reeded(
   another one, and `draw_layer_in(pass, format, origin, layer)` draws into a pass of that format
   whose top-left pixel is at `origin` in window pixels (a Rune effect slot's `EffectSite`: the
   frame target, or an isolated layer's `Rgba16Float` target, where the layer's opacity, blur and
-  clip then apply). Effects are still shaded in window coordinates.
+  clip then apply). Effects are still shaded in window coordinates; pass `FxLayer::scale(site.scale)`
+  so a zoomed slot (`scale` / `live_scale`) converts its device-pixel rect and lengths with its own
+  device-px-per-pt factor, and `FxLayer::clip(i.clip, i.fade)` so a slot outside an isolated layer
+  is cut by rounded container corners and soft scroll-edge feathers (`CLIP_WGSL`).
 - `set_srgb_blend(frame.srgb_blend())` matches a gamma-blended Rune frame: the premultiplied output
-  is sRGB-encoded for the non-sRGB target. An opaque effect then looks the same in both modes; a
-  translucent one differs only as the linear-versus-gamma blend itself does.
+  is sRGB-encoded for the non-sRGB target, and `backdrop` / `blurred` samples are decoded from
+  sRGB-encoded premultiplied light before shading. Pass a backdrop view of the pass's own format
+  (`EffectSite::backdrop`: non-sRGB on the frame target, `Rgba16Float` inside an isolated layer);
+  glass, lenses, distortion and backdrop dither/halftone then shade in linear light without
+  double-encoding on either target.
 
 **Cost and culling**
 - `prepare` does all culling: idle layers (intensity 0, a fully cooled glow, a one-shot outside its
@@ -286,8 +300,10 @@ reserved machine is needed for gating.
 
 - **Glow from mask** needs the caller to render the mask into `MaskPyramid::levels[0]` and call
   `build_mips`. Rune should cache the pyramid per text run.
-- **Backdrop** is one texture for the whole frame. Overlapping distortions need a fresh copy between
-  them (the gallery does this). A real compositor should copy only the scissored union rect.
+- **Backdrop** slots (`El::effect_backdrop(true)`) split the pass in `Renderer::draw_with_backdrop`
+  and copy the target up to each slot into a pooled viewport-sized backdrop texture (`EffectSite::backdrop`),
+  which `blur_backdrop` / `set_layer_backdrop` binds for that layer. A future optimisation could copy
+  only the scissored reach of the slot rather than the full target.
 - **Motion blur** composites a cached node layer. Rune needs to render the moving subtree into that
   layer, and should skip the effect at rest.
 - **Fire** is the heaviest per pixel (8 noise evaluations). Half-resolution evaluation with a

@@ -339,6 +339,78 @@ fn backdrop_slot_in_an_isolated_layer_reads_and_blurs_that_layers_target() {
     assert!(faded_left[2] > 100 && faded_left[2] < 220, "isolated layer composites at 0.5 opacity: {faded_left:?}");
 }
 
+fn midtone_glass_scene(_: &(), _: &mut Cx<()>) -> El {
+    background()
+        .child(el().absolute(8.0, 8.0).size(80.0, 80.0).fill(hex("#804020").unwrap()))
+        .child(effect(1).effect_backdrop(true).absolute(16.0, 16.0).size(20.0, 64.0))
+        .child(effect(2).effect_backdrop(true).absolute(36.0, 16.0).size(20.0, 64.0))
+        .child(effect(3).effect_backdrop(true).absolute(56.0, 16.0).size(24.0, 64.0))
+}
+
+fn midtone_layered_glass_scene(_: &(), _: &mut Cx<()>) -> El {
+    background().child(
+        el().absolute(8.0, 8.0).size(80.0, 80.0).opacity(0.85)
+            .child(el().absolute(0.0, 0.0).size(80.0, 80.0).fill(hex("#804020").unwrap()))
+            .child(effect(1).effect_backdrop(true).absolute(8.0, 8.0).size(20.0, 64.0))
+            .child(effect(2).effect_backdrop(true).absolute(28.0, 8.0).size(20.0, 64.0))
+            .child(effect(3).effect_backdrop(true).absolute(48.0, 8.0).size(24.0, 64.0)),
+    )
+}
+
+fn identity_glass_and_dither_fx(mark: u32) -> Fx {
+    match mark {
+        1 => Fx::fill(FlutedGlassParams { refraction: 0.0, frost: 0.0, dispersion: 0.0, highlight: 0.0, tint_amount: 0.0, ..FlutedGlassParams::reeded() }),
+        2 => Fx::fill(FlutedGlassParams { refraction: 0.0, frost: 0.6, dispersion: 0.0, highlight: 0.0, tint_amount: 0.0, ..FlutedGlassParams::reeded() }),
+        _ => Fx::fill(DitherParams::backdrop()),
+    }
+}
+
+#[test]
+fn srgb_blend_decodes_backdrop_without_double_encoding_on_frame_and_layer_targets() {
+    let (w, lin) = snap_by_mark("srgb-bd-lin", midtone_glass_scene, false, Arc::default(), identity_glass_and_dither_fx);
+    let (_, gam) = snap_by_mark("srgb-bd-gam", midtone_glass_scene, true, Arc::default(), identity_glass_and_dither_fx);
+    // At (24, 48), inside clear glass over #804020 (128, 64, 32), neither mode washes out to
+    // double-encoded sRGB (~188, 137, 99): both stay at the #804020 midtone.
+    let p_clear_lin = px(&lin, w, 24, 48);
+    let p_clear_gam = px(&gam, w, 24, 48);
+    assert!(p_clear_lin[0].abs_diff(128) <= 3 && p_clear_lin[1].abs_diff(64) <= 3 && p_clear_lin[2].abs_diff(32) <= 3, "linear clear glass preserves #804020: {p_clear_lin:?}");
+    assert!(p_clear_gam[0].abs_diff(128) <= 3 && p_clear_gam[1].abs_diff(64) <= 3 && p_clear_gam[2].abs_diff(32) <= 3, "srgb_blend clear glass is not double-encoded: {p_clear_gam:?}");
+
+    // At (46, 48), inside frosted glass (which samples the blur pyramid `bdb`), `srgb_blend`
+    // matches linear within 3 LSB instead of washing out by ~60 LSB.
+    let p_frost_lin = px(&lin, w, 46, 48);
+    let p_frost_gam = px(&gam, w, 46, 48);
+    for c in 0..3 {
+        assert!(p_frost_lin[c].abs_diff(p_frost_gam[c]) <= 3, "frosted glass matches across blend modes: lin {p_frost_lin:?} vs gam {p_frost_gam:?}");
+    }
+
+    // Across the backdrop-dithered strip (x = 60..76, y = 24..72), perceptual tone input matches
+    // between linear and srgb_blend frames.
+    let dither_diff: u32 = (24..72)
+        .flat_map(|y| (60..76).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            let (a, b) = (px(&lin, w, x, y), px(&gam, w, x, y));
+            a[0].abs_diff(b[0]) as u32 + a[1].abs_diff(b[1]) as u32 + a[2].abs_diff(b[2]) as u32
+        })
+        .max()
+        .unwrap();
+    assert!(dither_diff <= 6, "backdrop dither tone matches between linear and srgb_blend (max channel sum diff {dither_diff})");
+
+    // Inside an Rgba16Float isolated layer in srgb_blend mode, the backdrop is also sRGB-encoded
+    // premultiplied and must not be double-encoded before the layer composites.
+    let (w, layer_gam) = snap_by_mark("srgb-bd-layer", midtone_layered_glass_scene, true, Arc::default(), identity_glass_and_dither_fx);
+    let outside_slot = px(&layer_gam, w, 12, 12);
+    let inside_clear_glass = px(&layer_gam, w, 24, 48);
+    let inside_frost_glass = px(&layer_gam, w, 46, 48);
+    for c in 0..3 {
+        assert!(
+            inside_clear_glass[c].abs_diff(outside_slot[c]) <= 3,
+            "Rgba16Float layer clear glass in srgb_blend matches surrounding layer fill ({inside_clear_glass:?} vs {outside_slot:?})"
+        );
+    }
+    assert!(inside_frost_glass[0] < 135 && inside_frost_glass[1] < 70, "Rgba16Float layer frosted glass is not washed out: {inside_frost_glass:?}");
+}
+
 /// Writes `demo/fx/in-layer.png`: a fill in a faded, rounded, clipped card, linear blend on the
 /// left and gamma blend on the right. `cargo test -p rune-fx --test in_layer -- --ignored`.
 #[test]

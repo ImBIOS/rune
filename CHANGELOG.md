@@ -5,6 +5,28 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Effect slots (`El::effect`) at a zoom scale, under rounded clips, with per-slot backdrops (`El::effect_backdrop`), and in `srgb_blend` frames.**
+  `KIND_EFFECT` (`instance.params[3]`) and `EffectSite::scale` now carry the device pixels per point
+  at the slot (`sc * s`, combining the window's Retina factor with inherited `scale`, `press_scale`,
+  `live_scale` and scale transitions, where `params[3]` previously held only `s`).
+  `rune_fx::FxLayer::scale(f32)` overrides `FxFrame::scale` for that layer so a border, glow reach
+  or rib width on a zoomed canvas stays in the element's points, and `FxLayer::clip(clip, fade)`
+  applies `rune::render::CLIP_WGSL` (`clip_alpha`) in `rune-fx`'s fragment shader and tightens the
+  quad to `clip` so a slot outside an isolated layer gets the same rounded container corners and
+  scroll-edge feathers as Rune's own primitives. `El::effect_backdrop(true)` marks a slot that reads
+  what was drawn before it (`instance.params[0] = 1.0`): `Renderer::draw_with`,
+  `Renderer::draw_with_backdrop`, `Renderer::draw_target_range_with` and
+  `Renderer::encode_layers_with` / `Renderer::encode_layers_with_backdrop` keep a single render pass
+  across ordinary slots and split the pass only at backdrop slots, copying the target into a pooled
+  viewport-sized backdrop texture, calling `EffectPhase::Backdrop(encoder)` while the pass is closed
+  (for `FxRenderer::blur_backdrop` or `FxRenderer::set_layer_backdrop`), and re-opening the pass with
+  `LoadOp::Load` and `EffectSite::backdrop` set (for a slot inside an isolated layer, copying that
+  layer's `Rgba16Float` target at `origin` in window coordinates). When
+  `FxRenderer::set_srgb_blend(true)` is active, `rune-fx` decodes sRGB-encoded premultiplied
+  backdrop and blurred-backdrop samples to linear light before shading, so glass, lenses, distortion
+  and backdrop dither or halftone are no longer double-encoded on non-sRGB frame targets or inside
+  `Rgba16Float` isolated layers when given `EffectSite::backdrop`.
+
 - **Sticky elements in scroll views: `El::sticky_top`, `El::sticky_bottom`, `El::stuck_shadow` and `Tx::keep_on_screen`.**
   An element inside a vertical scroll viewport can pin to the viewport's top or bottom edge
   plus an inset while its parent stays in view (`El::sticky_top(inset)`,
@@ -248,6 +270,7 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   `SidebarSection`, `SidebarHeader` and `SidebarRow` (keyboard selection, type-select, nesting,
   badges, inline rename, virtualised rows), the app-owned `PaneState` and
   `shell::is_sidebar_toggle`. New API only; existing output is unchanged.
+
 - **Rects under live transforms: `El::on_drawn_layout`, and `Drag` points in the element's
   own points.** `on_drawn_layout` reports an element's rect as drawn (after scrolling and its
   ancestors' `live_offset`, `live_scale`, `live_rect` and `scale`), on every frame a live value

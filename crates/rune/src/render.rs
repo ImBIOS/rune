@@ -121,8 +121,11 @@ pub struct EffectSite<'a> {
     /// Viewport-sized copy of the pass's target up to this slot when the slot asked for a
     /// backdrop (`El::effect_backdrop(true)`, `instance.params[0] != 0.0`) and the pass was run
     /// with a command encoder (`Renderer::draw_with`, `Renderer::draw_with_backdrop`,
-    /// `Renderer::draw_target_range_with`, or `Renderer::encode_layers_with`). Inside an isolated
-    /// layer (`in_layer: true`), holds that layer's offscreen target copied at `origin` in window
+    /// `Renderer::draw_target_range_with`, or `Renderer::encode_layers_with`). Has the same
+    /// `format` as the pass (`*Srgb` / `Rgba16Float` in linear frames, non-sRGB / `Rgba16Float`
+    /// holding sRGB-encoded premultiplied values when `srgb_blend` is true; pass it directly to
+    /// `FxRenderer::blur_backdrop` or `FxRenderer::set_layer_backdrop`). Inside an isolated layer
+    /// (`in_layer: true`), holds that layer's offscreen target copied at `origin` in window
     /// coordinates.
     pub backdrop: Option<&'a wgpu::TextureView>,
 }

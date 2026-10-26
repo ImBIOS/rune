@@ -1511,19 +1511,29 @@ and its goldens are unchanged. `examples/lab` uses it to composite `rune-light` 
   inside whatever isolated layer encloses it. A faded slot (its own or an ancestor's opacity, or
   `dim`) always gets a layer, so its opacity applies to whatever the compositor paints there.
   `El::effect_bleed(pt)` grows that layer's bounds for a glow's reach, and keeps a slot whose rect
-  is just out of view but whose glow isn't.
+  is just out of view but whose glow isn't. `El::effect_backdrop(true)` marks a slot that reads what
+  was drawn before it (`instance.params[0] = 1.0`).
+  `Renderer::draw_with`, `Renderer::draw_with_backdrop`, `Renderer::draw_target_range_with`,
   `Renderer::draw_range_with(pass, format, range, hook)` and
-  `Renderer::encode_layers_with(encoder, hook)` call `hook(pass, &EffectSite)` at each slot in painter
-  order, so a compositor paints its pass exactly there: in the frame target for a slot outside any
-  layer, in the layer's offscreen target (`Rgba16Float`) for one inside, where the layer's opacity,
-  blur, dissolve and clip then apply to it. `EffectSite` gives the slot's instance, the pass's
-  format, the window position of its top-left pixel (`origin`, subtract it from window
-  coordinates) and its size. The hook runs with the scissor on the slot's clip rectangle, and the
+  `Renderer::encode_layers_with(encoder, hook)` / `Renderer::encode_layers_with_backdrop` call the
+  hook at each slot in painter order, so a compositor paints its pass exactly there: in the frame
+  target for a slot outside any layer, in the layer's offscreen target (`Rgba16Float`) for one
+  inside, where the layer's opacity, blur, dissolve and clip then apply to it. Ordinary slots stay
+  in the open render pass; only a slot with `effect_backdrop(true)` ends the pass, copies the
+  target up to that point into a pooled viewport-sized backdrop texture (`EffectSite::backdrop`, in
+  the pass's own `format`, with an isolated layer's target placed at `origin` in window
+  coordinates), calls `EffectPhase::Backdrop(encoder)` while the pass is closed (e.g. for
+  `FxRenderer::blur_backdrop`), and re-opens the pass with `LoadOp::Load`. `EffectSite` gives the
+  slot's instance, `scale` (`instance.params[3]`, device pixels per point at the slot including
+  Retina scale and any `scale` / `live_scale`), the pass's format, the window position of its
+  top-left pixel (`origin`, subtract it from window coordinates), its size, `in_layer`,
+  `srgb_blend`, and `backdrop`. The hook runs with the scissor on the slot's clip rectangle, and the
   viewport and scissor are reset to the full target after it.
   One compositor serves any number of formats: build pipelines per `EffectSite::format`.
 - `render::CLIP_WGSL` is Rune's own clip maths as WGSL (`clip_alpha(p, clip, fade)` with `p` in
   window pixels, plus `sd_rounded`). Prepend it to a compositor shader and pass the slot's `clip`
-  and `fade` words, so the effect is cut by the same rectangle, feathers and circular or continuous
+  and `fade` words (`rune-fx` does this via `FxLayer::clip(i.clip, i.fade)`), so the effect is cut
+  by the same rectangle, feathers and circular or continuous
   rounded corners as the primitives around it. A compositor that skips this still gets the hard
   clip rectangle from the scissor. A rounded clip on an isolated layer applies to the completed
   layer instead, so nothing extra is needed there.
@@ -1681,9 +1691,10 @@ Which blur a frosted panel needs depends on what sits behind it:
 - **The app's own content:** no `El` builder blurs what the window drew under an element.
   `El::blur(σ)` blurs the element's own subtree, not its backdrop. `rune-fx` has the effect:
   `Fx::lens(LensParams { frost: 1.0, .. })` is Liquid Glass "regular" (a pyramid blur up to
-  σ 18 pt, a saturation lift and grain). It needs a [compositor](#compositor-hook-lighting-and-effects)
-  that copies the target before the panel's mark and calls `FxRenderer::blur_backdrop`;
-  `examples/lab/src/gfx.rs` does both, and the rune-fx README covers the calls.
+  σ 18 pt, a saturation lift and grain). Put `.effect_backdrop(true)` on its effect slot and draw
+  through `Renderer::draw_with_backdrop`, calling `FxRenderer::blur_backdrop` on
+  `EffectPhase::Backdrop(encoder)` with `site.backdrop`; `examples/lab/src/gfx.rs` and the rune-fx
+  README cover the calls.
 - **No blur:** a translucent `fill` over the content is the cheap stand-in, and what
   `system_material` draws in opaque windows and headless renders.
 

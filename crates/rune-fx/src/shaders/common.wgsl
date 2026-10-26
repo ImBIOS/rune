@@ -40,12 +40,35 @@ fn dat1(base: u32, i: u32) -> f32 { return data[base + (i >> 2u)][i & 3u]; }
 @group(1) @binding(2) var samp: sampler;
 // The backdrop's blur pyramid result (frosted glass only; see FxRenderer::blur_backdrop).
 @group(1) @binding(3) var blurred: texture_2d<f32>;
+// ---------- colour ----------
+fn to_srgb(c: vec3f) -> vec3f {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3f(0.0)), vec3f(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3f(0.0031308));
+}
+fn to_lin(c: vec3f) -> vec3f {
+    let lo = c / 12.92;
+    let hi = pow((max(c, vec3f(0.0)) + 0.055) / 1.055, vec3f(2.4));
+    return select(hi, lo, c <= vec3f(0.04045));
+}
+// In an sRGB-blended frame (`g.srgb > 0.5`), both a non-sRGB frame target and an `Rgba16Float`
+// isolated layer hold sRGB-encoded premultiplied values (`to_srgb(straight) * a, a`). Decode to
+// linear premultiplied light on sample so glass, lens, distort and backdrop dither/halftone shade
+// in linear light before `fs` encodes once for the target.
+fn bd_lin(c: vec4f) -> vec4f {
+    if (g.srgb > 0.5) {
+        let a = max(c.a, 0.0);
+        let straight = select(vec3f(0.0), c.rgb / a, a > 1e-6);
+        return vec4f(to_lin(straight) * a, a);
+    }
+    return c;
+}
 // The backdrop at p (pt), sharp and blurred.
 fn bd(p: vec2f, scale: f32) -> vec4f {
-    return textureSampleLevel(backdrop, samp, p * scale / g.viewport, 0.0);
+    return bd_lin(textureSampleLevel(backdrop, samp, p * scale / g.viewport, 0.0));
 }
 fn bdb(p: vec2f, scale: f32) -> vec3f {
-    return textureSampleLevel(blurred, samp, p * scale / g.viewport, 0.0).rgb;
+    return bd_lin(textureSampleLevel(blurred, samp, p * scale / g.viewport, 0.0)).rgb;
 }
 
 struct VOut {
@@ -245,18 +268,6 @@ fn segdist(p: vec2f, a: vec2f, b: vec2f) -> vec2f {
     let ab = b - a;
     let h = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
     return vec2f(length(p - a - ab * h), h);
-}
-
-// ---------- colour ----------
-fn to_srgb(c: vec3f) -> vec3f {
-    let lo = c * 12.92;
-    let hi = 1.055 * pow(max(c, vec3f(0.0)), vec3f(1.0 / 2.4)) - 0.055;
-    return select(hi, lo, c <= vec3f(0.0031308));
-}
-fn to_lin(c: vec3f) -> vec3f {
-    let lo = c / 12.92;
-    let hi = pow((max(c, vec3f(0.0)) + 0.055) / 1.055, vec3f(2.4));
-    return select(hi, lo, c <= vec3f(0.04045));
 }
 
 // Final write: clamp, optional TPDF dither (applied in sRGB space, only where there is signal).
