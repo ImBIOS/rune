@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::inert()` makes a subtree draw and lay out without taking input.** Presses, hovers,
+  cursors, scrolls, drops and tooltips go to whatever is under it, as with HTML's `inert`; nothing
+  inside takes or keeps focus, and `ElementInfo::inert` is true for it. `on_layout` and
+  `Cx::layout` still see its rects. An editor can draw a document over its canvas without a
+  transparent shield to catch presses.
+
 - **`Tx::blur()` drops keyboard focus from a handler**, as a click on empty space does: the
   focused field's `TextEdit::focused` turns false through `on_edit` and keys reach the window's
   `on_key` again. An app no longer needs to clear `focused` in its model to hand keys back.

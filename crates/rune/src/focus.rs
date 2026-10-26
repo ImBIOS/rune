@@ -57,8 +57,9 @@ impl<S: 'static> Runtime<S> {
             if !changed { break; }
         }
     }
+    /// Input may reach node `i`: it's outside any `El::inert` subtree and not behind a modal.
     pub(super) fn allowed(&self, i: usize) -> bool {
-        self.active_modal().is_none() || self.modal_members.get(i).copied().unwrap_or(false)
+        !self.nodes.get(i).is_some_and(|n| n.inert) && (self.active_modal().is_none() || self.modal_members.get(i).copied().unwrap_or(false))
     }
     pub(super) fn can_focus(&self, i: usize) -> bool {
         let n = &self.nodes[i];
@@ -173,18 +174,19 @@ impl<S: 'static> Runtime<S> {
             if self.subtree_exiting(i) || nodes.iter().any(|n| n.path == old.path) { return None; }
             let anchor = nodes.iter().find(|n| n.key.as_deref() == Some(key))?;
             let prefix = format!("{}/", anchor.path);
-            nodes.iter().find(|n| (n.path == anchor.path || n.path.starts_with(&prefix))
+            nodes.iter().find(|n| (n.path == anchor.path || n.path.starts_with(&prefix)) && !n.inert
                 && (n.focus.enabled || n.input.as_ref().is_some_and(|i| i.access.is_some()))
                 && n.vis.opacity > 0.0 && n.local.w > 0.0 && n.local.h > 0.0)
                 .map(|n| n.path.clone())
         });
-        // A newly requested text field wins; a focused control otherwise retains focus.
-        let requested = nodes.iter().filter(|n| n.input.as_ref().is_some_and(|i| i.edit.focused));
+        // A newly requested text field wins; a focused control otherwise retains focus. Nothing
+        // inside an `El::inert` subtree takes or keeps it.
+        let requested = nodes.iter().filter(|n| !n.inert && n.input.as_ref().is_some_and(|i| i.edit.focused));
         let next = requested.clone().find(|n| self.focused.as_deref() != Some(&n.path)
             && !self.nodes.iter().any(|old| old.path == n.path && old.input.as_ref().is_some_and(|i| i.edit.focused)))
             .map(|n| n.path.clone())
             .or(restore)
-            .or_else(|| self.focused.clone().filter(|p| nodes.iter().any(|n| &n.path == p
+            .or_else(|| self.focused.clone().filter(|p| nodes.iter().any(|n| &n.path == p && !n.inert
                 && (n.focus.enabled || n.input.as_ref().is_some_and(|i| i.edit.focused)))
                 || self.virtual_inputs.get(p).is_some_and(|i| i.edit.focused)))
             .or_else(|| requested.into_iter().next().map(|n| n.path.clone()));

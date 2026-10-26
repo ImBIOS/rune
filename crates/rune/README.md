@@ -96,6 +96,9 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   `.on_secondary_press(|s: &mut App, point, tx| ..)` receives window-point coordinates on
   right-click (also control-click on macOS), without invoking primary actions. Scripts accept
   `secondary-down`, `secondary-up`, and `secondary-click`.
+- **Inert subtrees**: `.inert()` draws and lays out an element and everything inside it, but
+  presses, hovers, cursors, scrolls, drops and tooltips go to whatever is under it, nothing inside
+  takes focus, and `ElementInfo::inert` reports it (a document drawn under an editor's canvas).
 - **Double press**: `.on_double_press(|s: &mut S| ..)` (or `_tx`) runs when a second press on
   the element lands within the double-click interval of the first and within 4 pt of it, and
   releases inside. `on_press` still runs for every press, the first one right away, so a row

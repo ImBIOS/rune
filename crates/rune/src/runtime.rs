@@ -395,6 +395,8 @@ pub(crate) struct Node {
     /// `El::selection_group`.
     selection_group: bool,
     a11y: crate::el::A11y,
+    /// Inside an `El::inert` subtree (this element or an ancestor).
+    pub(crate) inert: bool,
     press_scale: Option<f32>,
     /// `El::scale`: a fixed factor on the element's own scale.
     static_scale: f32,
@@ -7159,8 +7161,10 @@ fn flatten(
         aspect_fit,
         selection_group,
         a11y,
+        inert,
         ..
     } = el;
+    let inert = inert || parent.is_some_and(|p| nodes[p].inert);
     if let Some(t) = &text && t.live.is_some() {
         assert!(input.is_none() && !t.wrap && t.spans.is_empty() && t.reveal < 0.0 && !t.truncate,
             "live_text requires plain single-line text; use truncate_fade for overflow");
@@ -7236,6 +7240,7 @@ fn flatten(
         window_drag,
         selection_group,
         a11y,
+        inert,
         press_scale,
         static_scale,
         time_scale,

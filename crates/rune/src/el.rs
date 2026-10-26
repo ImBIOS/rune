@@ -982,6 +982,7 @@ pub struct El {
     pub(crate) selection_group: bool,
     /// `El::level` and `El::expanded`.
     pub(crate) a11y: A11y,
+    pub(crate) inert: bool,
 }
 
 fn base(dir: FlexDirection) -> El {
@@ -1053,6 +1054,7 @@ fn base(dir: FlexDirection) -> El {
         aspect_fit: 0.0,
         selection_group: false,
         a11y: A11y::default(),
+        inert: false,
     }
 }
 
@@ -2462,6 +2464,17 @@ impl El {
     /// isn't selectable (a list marker) is skipped. Outside a group each text is its own.
     pub fn selection_group(mut self, on: bool) -> Self {
         self.selection_group = on;
+        self
+    }
+    /// Draws and lays out, but the pointer and keyboard pass through this element and
+    /// everything inside it, as with HTML's `inert`: a press, hover, scroll, drop or tooltip
+    /// goes to whatever is under it (an ancestor or an element drawn below), along with that
+    /// element's cursor. Handlers inside never run from input, nothing inside takes focus (Tab
+    /// skips it, a field asking for focus doesn't get it, and focus already inside drops), and
+    /// accessibility reports it inert. `on_layout` and `Cx::layout` still see its rects. For a
+    /// document drawn under an editor that takes its presses itself.
+    pub fn inert(mut self) -> Self {
+        self.inert = true;
         self
     }
     /// Bytes of [`El::selectable`] text that draw but aren't copied, such as the spacing
