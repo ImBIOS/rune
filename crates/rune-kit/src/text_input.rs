@@ -98,6 +98,7 @@ pub struct TextInput {
     large: bool,
     width: Option<f32>,
     leading: Option<&'static Icon>,
+    trailing: Option<El>,
     copy: bool,
     clear: bool,
     invalid: bool,
@@ -130,6 +131,7 @@ impl TextInput {
             large: false,
             width: Some(280.0),
             leading: None,
+            trailing: None,
             copy: false,
             clear: false,
             invalid: false,
@@ -154,6 +156,11 @@ impl TextInput {
     }
     pub fn leading_icon(mut self, i: &'static Icon) -> Self {
         self.leading = Some(i);
+        self
+    }
+    /// Trailing accessory element (e.g. a badge, hint, or reveal/copy buttons).
+    pub fn trailing(mut self, e: El) -> Self {
+        self.trailing = Some(e);
         self
     }
     pub fn copy_button(mut self) -> Self {
@@ -252,6 +259,9 @@ impl TextInput {
             Some(w) => e.w(w),
             None => e.w_full(),
         };
+        if let Some(t) = self.trailing {
+            e = e.child(row().key("trailing").self_center().center_y().child(t));
+        }
         if (self.copy && !self.edit.is_secure()) || self.clear {
             let (glyph, side, radius) =
                 if self.clear { (k.glyph.clear, 28.0, k.radius.md) } else { (k.glyph.copy, 20.0, k.radius.sm) };
@@ -429,9 +439,11 @@ pub struct TextField {
     ghost: bool,
     multiline: bool,
     copyable: bool,
+    trailing: Option<El>,
     error: Option<String>,
     state: State,
     edits: EditActs,
+    copy_acts: Acts,
 }
 
 impl TextField {
@@ -444,9 +456,11 @@ impl TextField {
             ghost: false,
             multiline: false,
             copyable: false,
+            trailing: None,
             error: None,
             state: State::Rest,
             edits: EditActs::default(),
+            copy_acts: Acts::default(),
         }
     }
     pub fn placeholder(mut self, p: impl Into<String>) -> Self {
@@ -467,6 +481,16 @@ impl TextField {
     }
     pub fn copyable(mut self) -> Self {
         self.copyable = true;
+        self
+    }
+    /// Trailing accessory element inside the field's box.
+    pub fn trailing(mut self, e: El) -> Self {
+        self.trailing = Some(e);
+        self
+    }
+    /// The trailing copy button's press.
+    pub fn on_action<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        self.copy_acts.press_tx(f);
         self
     }
     pub fn error(mut self, e: impl Into<String>) -> Self {
@@ -536,16 +560,23 @@ impl TextField {
                 if self.error.is_some() { (c.danger.bg, c.danger.border) } else { (Color::TRANSPARENT, c.border_weak) };
             wrapper = wrapper.radius(k.radius.md).fill(fill).border(1.0, border);
         }
+        if let Some(t) = self.trailing {
+            wrapper = wrapper.child(row().key("trailing").self_center().center_y().child(t));
+        }
         if self.copyable {
-            wrapper = wrapper.pr(4.0).child(
-                row()
-                    .key("copy")
-                    .size(24.0, 24.0)
-                    .center()
-                    .radius(k.radius.md)
-                    .hover(c.hover)
-                    .child(icon(k.glyph.copy, 16.0).color(c.std_icon)),
-            );
+            let mut b = row()
+                .key("copy")
+                .role("button")
+                .label("Copy")
+                .size(24.0, 24.0)
+                .center()
+                .radius(k.radius.md)
+                .hover(c.hover)
+                .child(icon(k.glyph.copy, 16.0).color(c.std_icon));
+            if self.state != State::Disabled {
+                b = self.copy_acts.apply(b.press(crate::press_over(c.hover, c.pressed)), true);
+            }
+            wrapper = wrapper.pr(4.0).child(b);
         }
         let mut root = col().role("textbox").label(self.label.clone()).gap(8.0).w_full();
         if !self.hide_label {

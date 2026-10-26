@@ -2703,6 +2703,7 @@ impl<S: 'static> Runtime<S> {
             Action::FileDialog(id, result) => self.run_file_dialog(id, result, &mut one),
             Action::Focus(path, x, y) => {
                 let Some(access) = self.node(&path).and_then(|n| n.input.as_ref()?.access.clone()) else { return false };
+                let single = self.node(&path).and_then(|n| n.input.as_ref()).is_some_and(|i| i.single_line);
                 let layout = self.node(&path).and_then(|n| n.text_layout.clone());
                 let s = self.env.scale;
                 let scroll = self.input_scroll.get(&path).copied().unwrap_or(0.0);
@@ -2712,7 +2713,9 @@ impl<S: 'static> Runtime<S> {
                 e.clear_pending();
                 if let Some(l) = layout {
                     let x = x + scroll;
-                    let i = e.model_index(crate::text::cursor_from_point(&l, x * s, y * s).index());
+                    let h = (l.height() - 1e-3).max(0.0);
+                    let ys = if single || x < 0.0 { (y * s).clamp(0.0, h) } else { (y * s).max(0.0) };
+                    let i = e.model_index(crate::text::cursor_from_point(&l, x * s, ys).index());
                     // A click on a pill puts the caret at its nearer edge.
                     e.set_caret(i);
                 }
@@ -4507,6 +4510,19 @@ impl<S: 'static> Runtime<S> {
     // ---------------------------------------------------------------------------------------
     // Input: queued, handled at the next frame.
 
+    /// The `text_input` inside a `"textbox"` container (`TextInput`, `TextArea`, `TextField`),
+    /// or `i` itself when `i` is an `input`.
+    fn textbox_input(&self, i: usize) -> Option<usize> {
+        if self.nodes[i].input.is_some() { return Some(i); }
+        if self.nodes[i].role != "textbox" { return None; }
+        (0..self.nodes.len()).find(|&j| {
+            self.nodes[j].input.is_some()
+                && !self.subtree_exiting(j)
+                && self.allowed(j)
+                && std::iter::successors(self.nodes[j].parent, |&p| self.nodes[p].parent).any(|p| p == i)
+        })
+    }
+
     /// The topmost element under (x, y) that takes primary input, selectable text included.
     fn top_target(&self, x: f32, y: f32) -> Option<usize> {
         self.hits.iter().rev().find_map(|&(id, r)| {
@@ -4515,7 +4531,8 @@ impl<S: 'static> Runtime<S> {
             let n = &self.nodes[i];
             // A secondary-only child must not obscure primary input or background blur.
             (!self.subtree_exiting(i) && self.allowed(i) && (n.on_press.is_some() || n.on_double_press.is_some() || n.on_hover.is_some()
-                || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some()
+                || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || self.textbox_input(i).is_some()
+                || (n.role == "button" && n.vis.hover.a > 0.0) || n.window_drag || n.focus.enabled || n.modal.is_some()
                 || self.is_selectable(i))).then_some(i)
         })
     }
@@ -4740,7 +4757,7 @@ impl<S: 'static> Runtime<S> {
         let pending = self.last_press.take();
         let now = self.now_clock();
         let n = &self.nodes[ti];
-        if n.window_drag && n.on_press.is_none() && n.on_double_press.is_none() && n.on_drag.is_none() && n.drag_out.is_none() && n.input.is_none() {
+        if n.window_drag && n.on_press.is_none() && n.on_double_press.is_none() && n.on_drag.is_none() && n.drag_out.is_none() && self.textbox_input(ti).is_none() {
             let double = self.last_drag_press.is_some_and(|(t, px, py)| {
                 now - t <= self.double_click_interval && (x - px).abs() <= CLICK_SLOP && (y - py).abs() <= CLICK_SLOP
             });
@@ -4758,11 +4775,12 @@ impl<S: 'static> Runtime<S> {
         self.press_down_t = now;
         self.press_moved = false;
         self.press_cancelled = false;
-        let r = self.drawn.get(ti).copied().unwrap_or([n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]]);
-        if n.input.is_some() {
+        if let Some(ji) = self.textbox_input(ti) {
+            let jn = &self.nodes[ji];
+            let r = self.drawn.get(ji).copied().unwrap_or([jn.target[0], jn.target[1], jn.target[2] - jn.target[0], jn.target[3] - jn.target[1]]);
             // Its text drew scaled with its box: map the press back to the rest layout.
-            let k = self.drawn_scale.get(ti).copied().unwrap_or(1.0).max(1e-4);
-            self.queue.push(Action::Focus(n.path.clone(), (x - r[0]) / k - n.inset[0], (y - r[1]) / k - n.inset[1]));
+            let k = self.drawn_scale.get(ji).copied().unwrap_or(1.0).max(1e-4);
+            self.queue.push(Action::Focus(jn.path.clone(), (x - r[0]) / k - jn.inset[0], (y - r[1]) / k - jn.inset[1]));
             return;
         }
         // Clicking a link leaves focus where it is (a composer keeps typing). Selectable text
@@ -4772,11 +4790,12 @@ impl<S: 'static> Runtime<S> {
         let keyed = (!n.focus.enabled && !self.is_selectable(ti)).then(|| std::iter::successors(n.parent, |&p| self.nodes[p].parent)
             .take_while(|&p| self.allowed(p))
             .find(|&p| self.nodes[p].focus.key.is_some() && self.can_focus(p))).flatten();
+        let in_textbox = std::iter::successors(n.parent, |&p| self.nodes[p].parent).any(|p| self.textbox_input(p).is_some());
         if !on_link && n.focus.enabled && !self.is_selectable(ti) {
             self.queue.push(Action::FocusControl(n.path.clone()));
         } else if !on_link && let Some(p) = keyed {
             self.queue.push(Action::FocusControl(self.nodes[p].path.clone()));
-        } else if !on_link && self.focused.is_some() {
+        } else if !on_link && !in_textbox && self.focused.is_some() {
             self.queue.push(Action::Blur);
         }
         let r = n.target;
@@ -5033,7 +5052,7 @@ impl<S: 'static> Runtime<S> {
         let Some(mut i) = target else {
             return crate::el::Cursor::Default;
         };
-        if self.nodes[i].cursor.is_none() && self.nodes[i].input.is_some() {
+        if self.nodes[i].cursor.is_none() && self.textbox_input(i).is_some() {
             return crate::el::Cursor::Text;
         }
         if self.is_selectable(i) && !self.text_sel.dragging && self.link_at(i, x, y).is_some() {
@@ -6724,7 +6743,7 @@ impl<S: 'static> Runtime<S> {
                 scale_motion: if cover.is_some() { ScaleMotion::Moving } else { scale_motion },
                 in_cache, skip_paint };
             let hits_before = self.hits.len();
-            if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_double_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some()
+            if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_double_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.role == "textbox" || (n.role == "button" && n.vis.hover.a > 0.0) || n.window_drag || n.focus.enabled || n.modal.is_some()
                 || n.text.as_ref().is_some_and(|t| t.selectable) || n.gestures.as_ref().is_some_and(|g| g.takes_gestures()))
                 && !self.subtree_exiting(i)
                 && self.allowed(i) && effective_opacity > 0.001 && visible

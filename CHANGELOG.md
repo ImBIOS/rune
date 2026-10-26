@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Pressing any part of a `TextInput`, `TextField` or `TextArea` focuses it.** Clicking the
+  leading icon, padding or a non-button trailing area focuses the inner editor and places the
+  caret at the nearest end without blurring an already-focused field or starting a window drag
+  in a titlebar; trailing buttons keep their own presses. `TextInput::trailing`,
+  `TextField::trailing` and `TextField::on_action` attach trailing accessories and copy handlers.
 - **`Dialog::fit`.** A dialog sized to its header and body instead of the standard 368 point
   height, for confirmations whose buttons otherwise sit far below one line of text.
 - **A field inside a list row keeps its keys.** With focus in a text field inside a focus group
