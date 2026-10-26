@@ -26,7 +26,7 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   on `TextInput`, `TextArea` and `TextField`) style it. Copy writes the label as plain text and
   `<span data-pill="id">label</span>` as HTML; a paste of the app's own last copy restores the
   pill (`paste_html_with_pills`), while other HTML never makes one (`paste_html` drops it).
-  Exhaustive `match`es on `Mark` need a wildcard arm.
+  `TextEdit::allow_marks` always allows pills. Exhaustive `match`es on `Mark` need a wildcard arm.
 - **Monospace text has no ligatures, and its tabs reach 4-column stops.** Mono rich spans
   (`Span::mono`, so `Mark::Code` and `Block::Code` in a rich `TextEdit`, and Markdown inline
   code) and `Family::Mono`/`Family::SystemMono` styles turn off `liga`, `clig` and `calt`:

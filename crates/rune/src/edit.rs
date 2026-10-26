@@ -533,13 +533,15 @@ impl TextEdit {
     /// to the app's key handlers, `toggle_mark` and `set_mark` ignore it, and paste drops it.
     /// Kinds match by [`Mark::same_kind`], so any [`Mark::Link`] allows links. The field never
     /// holds a disallowed mark: marks it already has, or that `set_marks` adds, are dropped.
-    /// Every kind is allowed by default.
+    /// Every kind is allowed by default, and [`Mark::Pill`] always is: pills are the app's own
+    /// tokens, not formatting.
     ///
     /// ```ignore
     /// TextEdit::new("").rich().allow_marks([Mark::Bold, Mark::Italic, Mark::Strike, Mark::Code, Mark::Link(String::new())])
     /// ```
     pub fn allow_marks(mut self, marks: impl IntoIterator<Item = Mark>) -> Self {
-        self.allowed_marks = Some(marks.into_iter().fold(0, |bits, m| bits | 1 << m.kind_order()));
+        let pill = 1 << Mark::Pill(String::new()).kind_order();
+        self.allowed_marks = Some(marks.into_iter().fold(pill, |bits, m| bits | 1 << m.kind_order()));
         self.sync_invariants();
         self
     }
@@ -3531,6 +3533,14 @@ mod tests {
         assert!(pre.marks().is_empty() && pre.blocks() == &[Block::Paragraph], "undo filters snapshot");
         undo(&mut pre, true);
         assert!(pre.marks().is_empty() && pre.blocks() == &[Block::Paragraph], "redo filters snapshot");
+
+        // Pills are the app's tokens, kept whatever the allow-list says.
+        let mut p = TextEdit::new("hi @maya").rich().allow_marks([Mark::Bold]);
+        assert!(p.allows_mark(&Mark::Pill(String::new())));
+        p.replace_with_pill(3..8, "user:maya", "@maya");
+        assert_eq!(p.pills().count(), 1, "replace_with_pill works under an allow-list");
+        let p = p.allow_marks(Vec::<Mark>::new());
+        assert_eq!(p.pills().count(), 1, "an allow-list set later keeps existing pills");
 
         let mut e = TextEdit::new("").rich().allow_marks([Mark::Bold]).allow_blocks([Block::Quote]);
         e.paste_html("<ul><li><b>b</b> <i>i</i> <u>u</u></li></ul><blockquote>q</blockquote><pre>c</pre>", "");
