@@ -379,6 +379,12 @@ impl Tx {
     pub fn instant(&mut self) {
         self.instant = true;
     }
+    /// Animate this change even where the runtime would apply it at once, as it does a drag's
+    /// moves: the rows a dragged row passes step aside on their springs, while the dragged row
+    /// follows the pointer exactly with `El::offset_motion(Anim::INSTANT)`.
+    pub fn animated(&mut self) {
+        self.instant = false;
+    }
     /// Animate this change's layout with `spring` instead of each element's own.
     pub fn motion(&mut self, spring: Spring) {
         self.motion = Some(spring);

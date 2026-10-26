@@ -3991,7 +3991,10 @@ impl<S: 'static> Runtime<S> {
                 if nodes[i].live.iter().any(|b| b.property == crate::live::Property::Opacity) {
                     // The live source owns this property, including across unrelated commits.
                 } else if !quiet && let Some(anim) = nodes[i].opacity_motion {
-                    self.scene.animate(id, prop::OPACITY, nodes[i].vis.opacity, anim);
+                    // Only a new target: an anim with its own velocity would restart each commit.
+                    if self.scene.store().target(id, prop::OPACITY) != Some(nodes[i].vis.opacity) {
+                        self.scene.animate(id, prop::OPACITY, nodes[i].vis.opacity, anim);
+                    }
                 } else {
                     self.set_or_anim(id, prop::OPACITY, nodes[i].vis.opacity, spring_l, quiet);
                 }

@@ -171,3 +171,44 @@ mod reorder {
         drop_reordered(2);
     }
 }
+
+mod drag_animated {
+    use rune::{Cx, Drag, El, Env, Phase, Runtime, Spring, Tx, col, el};
+
+    struct S {
+        animated: bool,
+        shift: f32,
+    }
+
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        let handle = el().key("handle").size(100.0, 40.0).on_drag(|s: &mut S, d: &mut Drag, tx: &mut Tx| {
+            if d.phase == Phase::Move {
+                if s.animated {
+                    tx.animated();
+                }
+                s.shift = 40.0;
+            }
+        });
+        let other = el().key("other").size(100.0, 40.0).motion(Spring::new(0.3, 0.0)).offset(0.0, s.shift);
+        col().w_full().h_full().child(handle).child(other)
+    }
+
+    fn moved_after_a_drag(animated: bool) -> f32 {
+        let mut rt = Runtime::new(S { animated, shift: 0.0 }, view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.pointer_move(50.0, 20.0);
+        rt.pointer_down(50.0, 20.0);
+        rt.pointer_move(50.0, 60.0);
+        rt.frame(1.0 / 60.0);
+        rt.frame(1.0 / 60.0);
+        rt.pointer_up(50.0, 60.0);
+        rt.elements().into_iter().find(|e| e.key.as_deref() == Some("other")).unwrap().rect[1] - 40.0
+    }
+
+    #[test]
+    fn a_drag_move_lands_at_once_unless_the_handler_animates_it() {
+        assert_eq!(moved_after_a_drag(false), 40.0, "direct manipulation");
+        let y = moved_after_a_drag(true);
+        assert!(y > 0.0 && y < 40.0, "on its spring: {y}");
+    }
+}
