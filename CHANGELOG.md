@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Combobox filtering springs the popup and fades rows.** Typing in a `Combobox` search used to
+  resize the list in one frame and pop rows in and out. The search field now animates its edit
+  layout, the viewport's height springs, rows fade, and the empty state stays mounted and
+  fades in at 0 height. Things apps can notice: the popover's tree gains a keyed `list` column
+  with the `viewport` and an `empty` element in it, and goldens taken mid-filter can differ.
+
 - **`El::animate_layout()` springs a growth row's horizontal layout.** Inside a growth-stack row
   everything snaps while the row's height carries the motion, so a label changing width in place
   (`"Thinking"` → `"Thought for 3s"`, `"Used 1 tool"` → `"Used 2 tools"`) jumped its neighbours.

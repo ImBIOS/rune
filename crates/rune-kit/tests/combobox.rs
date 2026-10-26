@@ -158,3 +158,25 @@ fn repeats_after_an_ime_composition_neither_choose_nor_close() {
         assert_eq!(rt.state.chooses, 0);
     }
 }
+
+#[test]
+fn filtering_springs_the_popup_height_and_fades_rows() {
+    let mut rt = runtime();
+    for _ in 0..60 { rt.frame(1.0 / 60.0); }
+    let find = |rt: &Runtime<State>, key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key));
+    let open = find(&rt, "models-content").unwrap().rect[3];
+    key(&mut rt, Key::Text("199".into()), Mods::default());
+    rt.frame(1.0 / 60.0);
+    let gone = find(&rt, "models-option-item-0").expect("a filtered-out row fades out");
+    assert!(gone.opacity > 0.0 && gone.opacity < 1.0, "row opacity {}", gone.opacity);
+    key(&mut rt, Key::Text("zz".into()), Mods::default());
+    let mut last = find(&rt, "models-content").unwrap().rect[3];
+    for _ in 0..120 {
+        rt.frame(1.0 / 120.0);
+        let h = find(&rt, "models-content").unwrap().rect[3];
+        assert!((h - last).abs() < 20.0, "the popup's height jumped {last} → {h}");
+        last = h;
+    }
+    assert!(last < open - 100.0, "it settles to the empty state: {open} → {last}");
+    assert_eq!(find(&rt, "empty").unwrap().opacity, 1.0);
+}

@@ -2,7 +2,7 @@
 //! @opencode/ui's use-filtered-list: looping arrows, Ctrl-N/P, composition-safe Enter,
 //! and editor modifiers left to the text field. Fuzzy scores are Rune's own ordering.
 use std::rc::Rc;
-use rune::{El, GrowthSpec, Key, ScrollSpec, TextEdit, Tx, col, el, icon, row, text};
+use rune::{El, GrowthSpec, Key, ScrollSpec, TextEdit, Transition, Tx, col, el, icon, row, text};
 use crate::{Kit, Placement, Popover, Select, SelectAppearance, TextInput};
 
 #[derive(Clone, Debug)]
@@ -138,6 +138,7 @@ impl<S: 'static> Combobox<S> {
         let change_options = self.options.clone();
         let change_key = self.key.clone();
         let field = TextInput::new(&self.state.search).width(None).placeholder(self.search_placeholder)
+            .animate_edit_layout()
             .on_edit(move |s: &mut S| &mut access(s).search)
             .on_change(move |s: &mut S, tx| {
                 let state = change_access(s);
@@ -194,7 +195,7 @@ impl<S: 'static> Combobox<S> {
             let hover_access = self.access.clone();
             let hover_id = id.clone();
             let mut item = row().key(format!("{}-option-{}", self.key, id)).role("option").label(&option.label)
-                .w_full().h(28.0).px(8.0).gap(8.0).center_y().radius(4.0)
+                .w_full().h(28.0).px(8.0).gap(8.0).center_y().radius(4.0).transition(Transition::opacity())
                 .fill(if active == Some(i) { k.c.hover } else { rune::Color::TRANSPARENT })
                 .child(text(&option.label).font(k.ty.ui_compact).color(k.c.text_base).grow(1.0).shrink().truncate())
                 .child(icon(k.glyph.check_small, 14.0).color(k.c.icon_base)
@@ -210,12 +211,14 @@ impl<S: 'static> Combobox<S> {
             }
             rows = rows.child(item);
         }
-        let list = if choices.is_empty() {
-            el().h(28.0).center_y().child(text(self.empty).font(k.ty.ui_compact).color(k.c.text_weak))
-        } else {
-            col().key("viewport").role("listbox").w_full().h((choices.len() as f32 * 28.0).min(192.0))
-                .scroll(ScrollSpec { stick_bottom: false }).clip_soft(0.0).child(rows)
-        };
+        // The viewport and the empty state both stay mounted, so the popover's height springs
+        // between them as the search edits it instead of swapping one box for the other.
+        let empty = choices.is_empty();
+        let list = col().key("list").w_full()
+            .child(col().key("viewport").role("listbox").w_full().h((choices.len() as f32 * 28.0).min(192.0))
+                .scroll(ScrollSpec { stick_bottom: false }).clip_soft(0.0).child(rows))
+            .child(el().key("empty").h(if empty { 28.0 } else { 0.0 }).center_y().clip_soft(0.0).opacity(if empty { 1.0 } else { 0.0 })
+                .child(text(self.empty).font(k.ty.ui_compact).color(k.c.text_weak)));
         popover.child(col().w(self.width).gap(8.0).child(field).child(list)).build(k, layer)
     }
 }
