@@ -426,6 +426,14 @@ pub(crate) struct Node {
     scroll_source: Option<&'static std::panic::Location<'static>>,
 }
 
+impl Node {
+    /// Whether `selector` names this node, as `Cx::layout` reads it: its key, its full path, or
+    /// a key path such as `msg-42/body` (see `flight::selects`).
+    pub(crate) fn named(&self, selector: &str) -> bool {
+        self.path == selector || crate::flight::selects(selector, &self.path, self.key.as_deref())
+    }
+}
+
 enum Action {
     WindowFocus(bool),
     Physical(crate::PhysicalInput, Option<physical_dispatch::Fallback>),
@@ -4505,7 +4513,7 @@ impl<S: 'static> Runtime<S> {
             Some((v.scroll_path.clone(), f64::from(v.pad_top + v.prefix(index)), f64::from(v.height(key)), f64::from(v.viewport)))
         }).or_else(|| {
             let (i, row) = self.nodes.iter().enumerate().find(|(_, n)| {
-                (n.key.as_deref() == Some(key) || n.path == key) && n.parent.is_none_or(|p| in_scope(&self.nodes[p].path, scope))
+                n.named(key) && n.parent.is_none_or(|p| in_scope(&self.nodes[p].path, scope))
             })?;
             let mut ancestor = self.nodes[i].parent;
             while let Some(p) = ancestor {

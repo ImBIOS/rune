@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **The `Tx` scroll requests take key paths**, as `Cx::layout` and `Tx::fly_text` do:
+  `scroll_into_view`, `scroll_to_bottom`, `scroll_page`, `scroll_to_x` and
+  `Runtime::scroll_at_bottom` accept `"list/label"` (leading keys are the element's nearest keyed
+  ancestors) as well as a key or full path. A bare key still names the first element with it.
+
 - **`rune::extra_args()` works before `run`.** It used to return nothing until `run` had
   parsed the command line, so an app choosing what its window opens from its own flags had to
   call `tooling::Args::parse()` first. Called earlier, it now reads Rune's flags from the

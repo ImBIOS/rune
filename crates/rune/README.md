@@ -96,6 +96,12 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   `.on_secondary_press(|s: &mut App, point, tx| ..)` receives window-point coordinates on
   right-click (also control-click on macOS), without invoking primary actions. Scripts accept
   `secondary-down`, `secondary-up`, and `secondary-click`.
+- **Naming elements**: `Cx::layout`, `Tx::fly_text` and the `Tx` scroll requests
+  (`scroll_into_view`, `scroll_to_bottom`, `scroll_page`, `scroll_to_x`) take a key, which
+  matches the first element with it in tree order, or a key path such as `"inspector/label"`
+  whose leading keys are the element's nearest keyed ancestors. Keys are one namespace, and
+  rune-kit keys its parts (`label`, `value`, `icon`, `control`, …), so scope an app's own keys
+  with a path or a prefix.
 - **Inert subtrees**: `.inert()` draws and lays out an element and everything inside it, but
   presses, hovers, cursors, scrolls, drops and tooltips go to whatever is under it, nothing inside
   takes focus, and `ElementInfo::inert` reports it (a document drawn under an editor's canvas).

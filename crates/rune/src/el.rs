@@ -118,6 +118,11 @@ impl Tx {
     /// Reveal a keyed row, including a currently unrealized virtual row. It scrolls the nearest
     /// vertical viewport around the row and, through [`El::scroll_x`] or [`El::scroll_xy`], the
     /// nearest horizontal one, each just far enough.
+    ///
+    /// `key` names an element as [`Cx::layout`](crate::Cx::layout) does, here and in the other
+    /// scroll requests: a key (the first element with it), a full path, or a key path such as
+    /// `"inspector/label"` whose leading keys are the element's nearest keyed ancestors, which
+    /// tells apart an app's `label` from a component's.
     pub fn scroll_into_view(&mut self, key: impl Into<String>) {
         self.scroll_to.push((None, key.into()));
     }

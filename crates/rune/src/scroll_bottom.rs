@@ -19,10 +19,10 @@ pub(super) fn glide(st: &mut ScrollState, dt: f32) -> bool {
 }
 
 impl<S: 'static> Runtime<S> {
-    /// The scroll viewport keyed (or pathed) `key`, or the nearest one containing it.
+    /// The scroll viewport `key` names (`Node::named`), or the nearest one containing it.
     fn scroll_viewport(&self, key: &str) -> Option<usize> {
         let mut i = self.nodes.iter().enumerate()
-            .position(|(i, n)| (n.key.as_deref() == Some(key) || n.path == key) && !self.subtree_exiting(i))?;
+            .position(|(i, n)| n.named(key) && !self.subtree_exiting(i))?;
         loop {
             if self.nodes[i].scroll.is_some() && self.nodes[i].scroll_axes.y() { return Some(i); }
             i = self.nodes[i].parent?;

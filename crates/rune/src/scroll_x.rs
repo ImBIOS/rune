@@ -257,7 +257,7 @@ impl<S: 'static> Runtime<S> {
     /// just far enough to show it, leaving its `El::scroll_margin`.
     pub(super) fn reveal_row_x(&mut self, scope: Option<&str>, key: &str) {
         let Some(i) = self.nodes.iter().position(|n| {
-            (n.key.as_deref() == Some(key) || n.path == key) && n.parent.is_none_or(|p| super::in_scope(&self.nodes[p].path, scope))
+            n.named(key) && n.parent.is_none_or(|p| super::in_scope(&self.nodes[p].path, scope))
         }) else { return };
         let Some(v) = std::iter::successors(self.nodes[i].parent, |&p| self.nodes[p].parent)
             .find(|&p| self.nodes[p].scroll.is_some() && self.nodes[p].scroll_axes.x()) else { return };
