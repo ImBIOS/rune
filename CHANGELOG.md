@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A field inside a list row keeps its keys.** With focus in a text field inside a focus group
+  (an inline rename in a sidebar row), letters, arrows, Home and End go to the field; before, a
+  letter matching another row's first letter type-selected that row and took focus from the field.
 - **Growth keeps springing under `Tx::scroll_into_view` and `Tx::keep_on_screen`.** Expanding
   or collapsing a row in a growth stack and calling `tx.scroll_into_view` or `tx.keep_on_screen`
   in the same handler no longer settles the row's growth in one frame, including in virtual

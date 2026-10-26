@@ -425,3 +425,24 @@ fn a_wider_range_keeps_the_width_new_was_given() {
     assert_eq!((p.width(), p.default_width()), (600.0, 600.0));
     assert_eq!(PaneState::new(640.0).width(), PaneState::MAX);
 }
+
+#[test]
+fn a_rename_field_keeps_letters_and_arrows_that_would_type_select_a_row() {
+    let mut rt = runtime(state());
+    let focused = |rt: &Runtime<S>| rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key);
+    rt.update(|s, _| {
+        s.renaming = Some(1);
+        s.edit = TextEdit::new("Bravo");
+        s.edit.anchor = 0;
+        s.edit.focused = true;
+    });
+    rt.frame(1.0 / 60.0);
+    for key in ["D", "e", "l"] {
+        press(&mut rt, Key::Text(key.into()));
+    }
+    for key in [Key::Down, Key::Up, Key::Home, Key::End] {
+        press(&mut rt, key);
+    }
+    assert_eq!(rt.state.edit.text, "Del", "Delta's first letter goes to the field");
+    assert_eq!((rt.state.picked, focused(&rt).as_deref()), (1, Some("rename")), "no row was type-selected");
+}

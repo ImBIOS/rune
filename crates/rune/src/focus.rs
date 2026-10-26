@@ -305,7 +305,8 @@ impl<S: 'static> Runtime<S> {
                 return true;
             }
         }
-        if let Some(g) = self.group(i) {
+        // A focused field inside a list row (an inline rename) keeps its letters and arrows.
+        if self.nodes[i].input.is_none() && let Some(g) = self.group(i) {
             let vertical = VERTICAL_ROLES.contains(&self.nodes[g].role);
             let backward = matches!(ev.key, Key::Up) || (!vertical && ev.key == Key::Left);
             let forward = matches!(ev.key, Key::Down) || (!vertical && ev.key == Key::Right);
