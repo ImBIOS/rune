@@ -3,9 +3,10 @@
 
 use std::borrow::Cow;
 
-use rune::{Anim, El, GrowthSpec, Icon, Key, ScrollSpec, TextEdit, Tx, col, el, icon, row, text, text_input};
+use rune::{Anim, Drag, El, GrowthSpec, Icon, Key, Phase, ScrollSpec, TextEdit, Tx, col, el, icon, row, text, text_input};
 
-use crate::Kit;
+use super::reorder::Reorder;
+use crate::{ControlSize, IconButton, IconButtonVariant, Kit, Spinner};
 
 type Apply = Box<dyn FnOnce(El) -> El>;
 type Themed = Box<dyn FnOnce(&Kit) -> El>;
@@ -19,7 +20,7 @@ const INSET: f32 = 8.0;
 
 enum Body {
     Items(Vec<Themed>),
-    Virtual(Apply),
+    Virtual(Box<dyn FnOnce(El, f32) -> El>),
 }
 
 /// A sidebar's content: header, a scrolling list of sections and rows, and footer.
@@ -32,11 +33,53 @@ pub struct Sidebar {
     header: Vec<El>,
     body: Body,
     footer: Vec<El>,
+    inset: f32,
+    header_gap: f32,
+    header_pad: [f32; 2],
+    row_gap: f32,
+    row_height: f32,
 }
 
 impl Sidebar {
     pub fn new() -> Sidebar {
-        Sidebar { label: "Sidebar".into(), header: Vec::new(), body: Body::Items(Vec::new()), footer: Vec::new() }
+        Sidebar {
+            label: "Sidebar".into(),
+            header: Vec::new(),
+            body: Body::Items(Vec::new()),
+            footer: Vec::new(),
+            inset: INSET,
+            header_gap: 2.0,
+            header_pad: [0.0, INSET],
+            row_gap: 0.0,
+            row_height: ROW_HEIGHT,
+        }
+    }
+    /// Points between the sidebar's sides and its rows, header and footer (default 8).
+    pub fn inset(mut self, points: f32) -> Self {
+        self.inset = points.max(0.0);
+        self
+    }
+    /// Points between the header's items (default 2).
+    pub fn header_gap(mut self, points: f32) -> Self {
+        self.header_gap = points.max(0.0);
+        self
+    }
+    /// Points above the header and between it and the list (default 0 and 8).
+    pub fn header_padding(mut self, top: f32, bottom: f32) -> Self {
+        self.header_pad = [top.max(0.0), bottom.max(0.0)];
+        self
+    }
+    /// Points between the list's items (default 0). Virtualised rows don't take it: give them
+    /// the space in their height.
+    pub fn row_gap(mut self, points: f32) -> Self {
+        self.row_gap = points.max(0.0);
+        self
+    }
+    /// The height of [`Self::virtual_rows`]' rows (default [`ROW_HEIGHT`]). Give the rows the
+    /// same height with [`SidebarRow::height`].
+    pub fn row_height(mut self, points: f32) -> Self {
+        self.row_height = points.max(1.0);
+        self
     }
     /// The list's accessible name.
     pub fn label(mut self, l: impl Into<String>) -> Self {
@@ -70,7 +113,7 @@ impl Sidebar {
         key: impl for<'a> Fn(&'a S, usize) -> Cow<'a, str> + 'static,
         build: impl Fn(&S, usize) -> El + 'static,
     ) -> Self {
-        self.body = Body::Virtual(Box::new(move |e: El| e.virtual_rows(count, ROW_HEIGHT, key, build)));
+        self.body = Body::Virtual(Box::new(move |e: El, height: f32| e.virtual_rows(count, height, key, build)));
         self
     }
 
@@ -83,14 +126,16 @@ impl Sidebar {
     }
 
     pub fn build(self, k: &Kit) -> El {
-        let list = col().key("sidebar-list").role("list").label(self.label).focus_group().focus_follows().w_full().px(INSET);
+        let inset = self.inset;
+        let list = col().key("sidebar-list").role("list").label(self.label).focus_group().focus_follows().w_full().px(inset);
         let list = match self.body {
-            Body::Items(items) => list.pb(INSET).children(items.into_iter().map(|f| f(k))),
-            Body::Virtual(rows) => rows(list.growth(GrowthSpec::default())),
+            Body::Items(items) => list.pb(INSET).gap(self.row_gap).children(items.into_iter().map(|f| f(k))),
+            Body::Virtual(rows) => rows(list.growth(GrowthSpec::default()), self.row_height),
         };
         let mut root = col().key("sidebar").w_full().h_full().min_h(0.0);
         if !self.header.is_empty() {
-            root = root.child(col().key("sidebar-header").w_full().px(INSET).pb(INSET).gap(2.0).children(self.header));
+            let [top, bottom] = self.header_pad;
+            root = root.child(col().key("sidebar-header").w_full().px(inset).pt(top).pb(bottom).gap(self.header_gap).children(self.header));
         }
         root = root.child(
             col()
@@ -103,7 +148,7 @@ impl Sidebar {
                 .child(list),
         );
         if !self.footer.is_empty() {
-            root = root.child(col().key("sidebar-footer").w_full().px(INSET).py(INSET).gap(2.0).children(self.footer));
+            root = root.child(col().key("sidebar-footer").w_full().px(inset).py(INSET).gap(self.header_gap).children(self.footer));
         }
         root
     }
@@ -189,12 +234,7 @@ impl SidebarHeader {
         match self.toggle {
             // Pointer only: in the list's focus group the arrows step through rows, and with
             // selection following focus they would toggle the section as they passed.
-            Some(toggle) => toggle(header)
-                .role("button")
-                .hover(c.hover)
-                .press(c.pressed)
-                .hover_motion(Anim::INSTANT, Anim::INSTANT)
-                .focusable(false),
+            Some(toggle) => k.interactive(toggle(header)).role("button").hover_motion(Anim::INSTANT, Anim::INSTANT).focusable(false),
             None => header.role("heading"),
         }
     }
@@ -255,18 +295,48 @@ impl SidebarSection {
     }
 }
 
+/// What a [`SidebarRow`]'s status slot shows.
+pub enum RowStatus {
+    /// Working: a small spinner.
+    Busy,
+    /// Waiting on the user: a dot in the warning colour.
+    Attention,
+    /// Something new: a 7 point dot in the accent colour.
+    Unread,
+    /// Any element, centred in the slot.
+    Other(El),
+}
+
+/// A row that drags to a new place in its list: the list's drag, the row's index, and the
+/// handlers that update the drag and make the move on a drop.
+struct Reordering {
+    state: Reorder,
+    index: usize,
+    bind: Box<dyn FnOnce(El) -> El>,
+}
+
 /// A selectable sidebar row: icon, label, then a trailing detail (a time), badge or element.
 /// `SidebarRow::new("Inbox").icon(&INBOX).badge("3").selected(sel).on_select(..).build(&kit)`.
 /// Key the built row by its item's id.
+///
+/// A taller row takes a second, muted line, an avatar and a status slot that turns into a
+/// close button under the pointer: `SidebarRow::new(title).height(45.0).avatar(..)
+/// .subtitle(project).status(RowStatus::Busy).on_close(..)`.
 pub struct SidebarRow {
     label: String,
     icon: Option<&'static Icon>,
+    avatar: Option<El>,
+    subtitle: Option<String>,
     detail: Option<String>,
     badge: Option<String>,
     trailing: Option<El>,
+    status: Option<RowStatus>,
+    close: Option<Apply>,
     selected: bool,
     depth: u8,
+    height: f32,
     rename: Option<(TextEdit, Apply)>,
+    reorder: Option<Reordering>,
     acts: Vec<Apply>,
 }
 
@@ -275,17 +345,38 @@ impl SidebarRow {
         SidebarRow {
             label: label.into(),
             icon: None,
+            avatar: None,
+            subtitle: None,
             detail: None,
             badge: None,
             trailing: None,
+            status: None,
+            close: None,
             selected: false,
             depth: 0,
+            height: ROW_HEIGHT,
             rename: None,
+            reorder: None,
             acts: Vec::new(),
         }
     }
     pub fn icon(mut self, i: &'static Icon) -> Self {
         self.icon = Some(i);
+        self
+    }
+    /// A 16 point leading element in place of the icon: a project's avatar, an initial.
+    pub fn avatar(mut self, e: El) -> Self {
+        self.avatar = Some(e);
+        self
+    }
+    /// A second line in muted text, under the label (give the row the height for it).
+    pub fn subtitle(mut self, s: impl Into<String>) -> Self {
+        self.subtitle = Some(s.into());
+        self
+    }
+    /// The row's height (default [`ROW_HEIGHT`]).
+    pub fn height(mut self, points: f32) -> Self {
+        self.height = points.max(1.0);
         self
     }
     /// Faint trailing text: a time ("2m"), a count, a shortcut.
@@ -301,6 +392,17 @@ impl SidebarRow {
     /// Any trailing element (a status dot, a menu button), after the detail and badge.
     pub fn trailing(mut self, e: El) -> Self {
         self.trailing = Some(e);
+        self
+    }
+    /// A 20 point slot at the row's end, after everything else.
+    pub fn status(mut self, s: RowStatus) -> Self {
+        self.status = Some(s);
+        self
+    }
+    /// A close button in the status slot, in place of the status while the pointer is on the
+    /// row. It swaps at once, with no fade.
+    pub fn on_close<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        self.close = Some(Box::new(move |e: El| e.on_press_tx(f)));
         self
     }
     pub fn selected(mut self, s: bool) -> Self {
@@ -320,6 +422,40 @@ impl SidebarRow {
     /// Called on a double click (rename, open in a new window).
     pub fn on_double_click<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
         self.acts.push(Box::new(move |e: El| e.on_double_press_tx(f)));
+        self
+    }
+    /// Drags the row to a new place among the list's `count` rows, of which it is row `index`.
+    /// It lifts above its neighbours and follows the pointer, and they step aside on springs.
+    /// A drop calls `drop(s, from, to)` to move the item; Escape, or the window losing focus,
+    /// puts it back. `access` finds the [`Reorder`] in the app's state. A press that doesn't
+    /// move is still a select.
+    pub fn reorder<S: 'static>(
+        mut self,
+        state: &Reorder,
+        index: usize,
+        count: usize,
+        access: fn(&mut S) -> &mut Reorder,
+        drop: impl Fn(&mut S, usize, usize) + 'static,
+    ) -> Self {
+        let bind = Box::new(move |e: El| {
+            e.on_drag(move |s: &mut S, d: &mut Drag, tx: &mut Tx| {
+                let r = access(s);
+                match d.phase {
+                    Phase::Down => {}
+                    Phase::Move => {
+                        // The rows it passes spring aside; it follows the pointer exactly.
+                        tx.animated();
+                        r.follow(index, count, d.dy, d.h);
+                    }
+                    Phase::Up => {
+                        if let Some((from, to)) = r.end(d.cancelled()) {
+                            drop(s, from, to);
+                        }
+                    }
+                }
+            })
+        });
+        self.reorder = Some(Reordering { state: *state, index, bind });
         self
     }
     /// Edits the label in place, in the field bound to `edit` (`access` finds it in the app's
@@ -349,10 +485,12 @@ impl SidebarRow {
         let c = &k.c;
         let renaming = self.rename.is_some();
         let (ink, glyph) = if self.selected { (c.text_base, c.icon_base) } else { (c.text_muted, c.icon_muted) };
+        let two_lines = self.subtitle.is_some();
+        let font = if two_lines { k.ty.ui_compact } else { k.ty.ui };
         let mut r = row()
             .label(self.label.clone())
             .w_full()
-            .h(ROW_HEIGHT)
+            .h(self.height)
             .pl(INSET + self.depth as f32 * INDENT)
             .pr(INSET)
             .gap(6.0)
@@ -360,20 +498,22 @@ impl SidebarRow {
             .radius(k.radius.md)
             .motion(k.motion.control)
             .hover_group()
-            .hover(c.hover)
-            .press(c.pressed)
             .hover_motion(Anim::INSTANT, Anim::INSTANT)
             .focusable(!renaming)
             .focus_selected(self.selected && !renaming);
+        r = k.interactive(r);
         if self.selected {
             r = r.fill(c.pressed);
         }
-        if let Some(i) = self.icon {
-            r = r.child(icon(i, 16.0).key("icon").color(glyph));
-        }
-        r = match self.rename {
-            Some((edit, bind)) => r.child(bind(
-                text_input(&edit, k.ty.ui)
+        let lead = match (self.avatar, self.icon) {
+            (Some(a), _) => Some(row().key("avatar").size(16.0, 16.0).center().child(a)),
+            (None, Some(i)) => Some(icon(i, 16.0).key("icon").color(glyph)),
+            _ => None,
+        };
+        let has_lead = lead.is_some();
+        let label = match self.rename {
+            Some((edit, bind)) => bind(
+                text_input(&edit, font)
                     .single_line()
                     .key("rename")
                     .focus_selected(true)
@@ -382,8 +522,18 @@ impl SidebarRow {
                     .shrink()
                     .color(c.text_base)
                     .caret(c.text_base, k.selection()),
-            )),
-            None => r.child(text(self.label).key("label").font(k.ty.ui).color(ink).truncate().grow(1.0).shrink()),
+            ),
+            None => text(self.label).key("label").font(font).color(ink).truncate().grow(1.0).shrink(),
+        };
+        r = match self.subtitle {
+            // Two lines: the lead and the label, then the subtitle under the label.
+            Some(sub) => {
+                let first = row().key("line1").w_full().gap(6.0).center_y().children(lead).child(label);
+                let second = text(sub).key("subtitle").font(font).color(c.text_muted).truncate().w_full();
+                let second = row().key("line2").w_full().pl(if has_lead { 16.0 + 6.0 } else { 0.0 }).child(second);
+                r.child(col().key("lines").grow(1.0).shrink().min_w(0.0).child(first).child(second))
+            }
+            None => r.children(lead).child(label),
         };
         if let Some(d) = self.detail {
             r = r.child(text(d).key("detail").font(k.ty.small).color(c.text_faint));
@@ -403,8 +553,38 @@ impl SidebarRow {
         if let Some(t) = self.trailing {
             r = r.child(t);
         }
+        if self.status.is_some() || self.close.is_some() {
+            let dot = |color| el().size(7.0, 7.0).radius(3.5).fill(color);
+            let status = self.status.map(|s| match s {
+                RowStatus::Busy => Spinner::new().size(12.0).color(c.icon_muted).build(k),
+                RowStatus::Attention => dot(c.warning.icon),
+                RowStatus::Unread => dot(c.bg_accent),
+                RowStatus::Other(e) => e,
+            });
+            let mut slot = row().key("status").size(20.0, 20.0).center();
+            if let Some(st) = status {
+                let st = row().key("status-mark").size(20.0, 20.0).center().child(st);
+                slot = slot.child(if self.close.is_some() { st.group_opacity(1.0, 0.0) } else { st });
+            }
+            if let Some(bind) = self.close {
+                let close = IconButton::new(k.glyph.close).control_size(ControlSize::Small).variant(IconButtonVariant::GhostMuted).label("Close").build(k);
+                // Pointer only, like the row's other hover controls: the list's arrows step rows.
+                slot = slot.child(bind(close).key("close").absolute(0.0, 0.0).group_opacity(0.0, 1.0).focusable(false));
+            }
+            r = r.child(slot);
+        }
         for a in self.acts {
             r = a(r);
+        }
+        if let Some(re) = self.reorder {
+            let lifted = re.state.dragging() == Some(re.index);
+            r = r.offset(0.0, re.state.shift(re.index));
+            if lifted {
+                // Follows the pointer exactly; the rest of the list springs around it.
+                // Opaque, on the window's deep background, so the rows it passes don't show through.
+                r = k.elevate(r.raise().offset_motion(Anim::INSTANT).fill(crate::over(c.pressed, c.bg_deep)), &k.elevation.raised);
+            }
+            r = (re.bind)(r);
         }
         // After the handlers, which would make it a button.
         r.role("listitem")

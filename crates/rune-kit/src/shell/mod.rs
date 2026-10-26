@@ -1,17 +1,20 @@
-//! A desktop app's shell: [`SplitView`] (sidebar, main pane, inspector, title bar band),
-//! [`Toolbar`], [`Sidebar`] with [`SidebarSection`], [`SidebarHeader`] and [`SidebarRow`], and
-//! the app-owned [`PaneState`] behind each resizable pane.
+//! A desktop app's shell: [`SplitView`] (sidebar, main pane, inspector, title bar band) with
+//! its [`SidebarToggle`], [`PaneMotion`] and [`SidebarPeek`] settings, [`Toolbar`], [`Sidebar`]
+//! with [`SidebarSection`], [`SidebarHeader`] and [`SidebarRow`], and the app-owned
+//! [`PaneState`] behind each resizable pane and [`Reorder`] behind a list's drag to reorder.
 //!
 //! The module uses only rune's and rune-kit's public API.
 
 mod pane;
+mod reorder;
 mod sidebar;
 mod split;
 mod toolbar;
 
-pub use pane::{PaneState, is_sidebar_toggle};
-pub use sidebar::{INDENT, ROW_HEIGHT, Sidebar, SidebarHeader, SidebarRow, SidebarSection};
-pub use split::SplitView;
+pub use pane::{PaneMotion, PaneState, SidebarPeek, is_sidebar_toggle};
+pub use reorder::Reorder;
+pub use sidebar::{INDENT, ROW_HEIGHT, RowStatus, Sidebar, SidebarHeader, SidebarRow, SidebarSection};
+pub use split::{SidebarToggle, SplitView};
 pub use toolbar::{TOOLBAR_HEIGHT, Toolbar};
 
 use rune::Icon;
