@@ -175,6 +175,44 @@ fn a_live_resize_keeps_transactions_on_until_it_ends() {
     assert_eq!(flag.live(false), None);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn live_resize_end_notification_turns_off_transactions_unless_materials_or_move_need_them() {
+    use objc2_video::{msg_send, rc::Retained, runtime::{AnyClass, AnyObject, Bool}};
+    use std::{cell::Cell, rc::Rc};
+    let (window, layer): (Retained<AnyObject>, Retained<AnyObject>) = unsafe {
+        (msg_send![AnyClass::get(c"NSObject").unwrap(), new], msg_send![AnyClass::get(c"CAMetalLayer").expect("QuartzCore"), new])
+    };
+    let flag = Rc::new(Cell::new(PresentFlag::default()));
+    let token = macos::watch_live_end(&window, &layer, flag.clone()).expect("observer");
+    let sync = || -> bool { unsafe { let b: Bool = msg_send![&*layer, presentsWithTransaction]; b.as_bool() } };
+    let post_end = || unsafe {
+        let center: Retained<AnyObject> = msg_send![AnyClass::get(c"NSNotificationCenter").unwrap(), defaultCenter];
+        let name = objc2_foundation_video::NSString::from_str("NSWindowDidEndLiveResizeNotification");
+        let _: () = msg_send![&*center, postNotificationName: &*name, object: &*window];
+    };
+    let mut f = flag.get();
+    assert_eq!(f.live(true), Some(true));
+    flag.set(f);
+    unsafe { let _: () = msg_send![&*layer, setPresentsWithTransaction: Bool::YES]; }
+    assert!(sync());
+    post_end();
+    assert!(!sync(), "NSWindowDidEndLiveResizeNotification turns off transactions when idle");
+
+    // When materials also need transactions, ending live resize keeps the layer synced until materials stop.
+    let mut f = flag.get();
+    assert_eq!(f.materials(true), Some(true));
+    assert_eq!(f.live(true), None);
+    flag.set(f);
+    unsafe { let _: () = msg_send![&*layer, setPresentsWithTransaction: Bool::YES]; }
+    post_end();
+    assert!(sync(), "materials keep transactions on after live resize ends");
+    let mut f = flag.get();
+    assert_eq!(f.materials(false), Some(false));
+    flag.set(f);
+    macos::unwatch_live_end(&token);
+}
+
 #[test]
 fn materials_past_the_limit_draw_their_fallback() {
     fn many(_: &u8, _: &mut Cx<u8>) -> El {

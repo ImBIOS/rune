@@ -291,14 +291,11 @@ impl Win {
         self.materials.set_moving(&self.surface, on);
     }
 
-    /// Whether the user is dragging the window's edge, which presents every frame in the
-    /// transaction that resizes the window until they let go. Before the drawable is acquired:
-    /// wgpu reads `presentsWithTransaction` then.
+    /// Presents the frame in the transaction that resizes the window while the user drags its
+    /// edge. Before the drawable is acquired: wgpu reads `presentsWithTransaction` then.
     #[cfg(target_os = "macos")]
-    fn track_live_resize(&mut self) -> bool {
-        let live = crate::macos::in_live_resize(&self.window);
-        self.materials.set_live(&self.surface, live);
-        live
+    fn set_live_resize(&mut self, on: bool) {
+        self.materials.set_live(&self.window, &self.surface, on);
     }
 
     fn focus(&self) {
@@ -2011,7 +2008,9 @@ impl<S: 'static> Host<S> {
             let scale = w.window.scale_factor() as f32;
             self.rt.step_viewport((size.width as f32 / scale, size.height as f32 / scale), scale);
             // In this frame's layout, not the next one when `Moved` arrives.
-            self.sync_origin();
+            if let Some(origin) = screen_origin(&w.window) {
+                self.rt.set_window_origin(origin);
+            }
         }
     }
 
@@ -2021,6 +2020,7 @@ impl<S: 'static> Host<S> {
         #[cfg(target_os = "macos")]
         if let Some(w) = &mut self.win {
             w.present_with_transaction(false);
+            w.set_live_resize(false);
             if let Some(anim) = anim { crate::macos::set_window_frame(&w.window, anim.to); }
         }
         #[cfg(target_os = "macos")]
@@ -2618,6 +2618,8 @@ impl<S: 'static> Host<S> {
             // again on `retry`.
             l.occluded = true;
             l.occluded_wait = (wait * 2).min(OCCLUDED_MAX);
+            #[cfg(target_os = "macos")]
+            l.set_live_resize(false);
             self.rt.set_live_visible(false);
             self.secure_input.set(false);
             self.idle = true;
@@ -2684,11 +2686,16 @@ impl<S: 'static> Host<S> {
         #[cfg(not(target_os = "macos"))]
         let target: Option<Instant> = None;
         if !hidden { self.meter.redraw(l.paced_for_stats()); }
-        // The frame moves before the drawable is acquired, so it has the new size.
-        if !hidden { self.step_frame(target.unwrap_or_else(Instant::now)); }
+        #[cfg(target_os = "macos")]
+        let live_resize = !hidden && (resizing || crate::macos::in_live_resize(&l.window));
+        #[cfg(not(target_os = "macos"))]
+        let live_resize = resizing;
+        // The frame moves before the drawable is acquired, so it has the new size; never while
+        // the user holds the window's edge in a live resize.
+        if !hidden && !live_resize { self.step_frame(target.unwrap_or_else(Instant::now)); }
         let (Some(l), Some((gpu, renderer, format))) = (self.win.as_mut(), self.gpu.as_mut()) else { return };
         #[cfg(target_os = "macos")]
-        if !hidden { l.track_live_resize(); }
+        l.set_live_resize(resizing && live_resize);
         // Acquire before latching live values so a drawable wait cannot age the input.
         l.retry = None;
         if renderer.srgb_blend() != self.rt.srgb_blend() {
@@ -2870,7 +2877,7 @@ impl<S: 'static> Host<S> {
             // Without a running display link, macOS hands out drawables faster than the
             // display shows them, so a timer paces the next frame instead of the loop.
             #[cfg(target_os = "macos")]
-            if !l.paced() { l.retry = Some(now + TIMER_FRAME); }
+            if !l.pacing.as_mut().is_some_and(|p| p.start()) { l.retry = Some(now + TIMER_FRAME); }
             #[cfg(not(target_os = "macos"))]
             l.window.request_redraw();
             self.meter.set_pacing(l.pacing_state(true));
@@ -2880,9 +2887,9 @@ impl<S: 'static> Host<S> {
         }
         // A frame change this frame's commit asked for starts with the layout springs it
         // started, which have shown a step unless they held for the window; the next frame
-        // moves it.
+        // moves it. While the user drags the edge, it waits until they let go.
         #[cfg(target_os = "macos")]
-        if !hidden && self.rt.window_frame.is_some() {
+        if !hidden && !live_resize && self.rt.window_frame.is_some() {
             let shown = if std::mem::take(&mut self.rt.fit_held) { 0.0 } else { crate::frame_clock::RESUME_STEP };
             self.take_frame_request(self.frame_secs(frame_time) - shown, true);
         }
@@ -3182,7 +3189,7 @@ impl<S: 'static> Host<S> {
             return;
         }
         #[cfg(target_os = "macos")]
-        if matches!(event, WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Occluded(_))
+        if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Occluded(_))
             && let Some(w) = &mut self.win && let Some(pacing) = &mut w.pacing {
             pacing.update_display(&w.window);
         }
@@ -3230,12 +3237,26 @@ impl<S: 'static> Host<S> {
             _ => false,
         };
         if stops { self.land_frame(); }
-        if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }) { self.sync_origin(); }
+        if matches!(event, WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. }) { self.sync_origin(); }
         let (Some(l), Some((gpu, ..))) = (self.win.as_mut(), self.gpu.as_ref()) else { return };
         let rt = &mut self.rt;
         let scale = l.window.scale_factor() as f32;
         let chrome = self.chrome;
         match event {
+            WindowEvent::Moved(_) => {
+                // winit queues `ScaleFactorChanged` in `kCFRunLoopDefaultMode`, which waits
+                // until a window drag ends; resize the surface now when a drag crosses displays
+                // so top-left gravity never shows the old scale's drawable at half or double size.
+                if (scale - rt.env.scale).abs() > f32::EPSILON {
+                    let size = l.window.inner_size();
+                    if size.width > 0 && size.height > 0 {
+                        l.resize_surface(&gpu.device, size);
+                        rt.set_viewport((size.width as f32 / scale, size.height as f32 / scale), scale);
+                        rt.set_titlebar_inset(place_chrome(&l.window, chrome));
+                        l.window.request_redraw();
+                    }
+                }
+            }
             WindowEvent::Resized(size) => {
                 rt.set_titlebar_inset(place_chrome(&l.window, chrome));
                 let was_live = rt.live_visible();
@@ -3249,11 +3270,12 @@ impl<S: 'static> Host<S> {
                     l.stop_pacing();
                     self.idle = true; return;
                 }
+                let origin_moved = screen_origin(&l.window).is_some_and(|o| rt.set_window_origin(o));
                 // A frame Rune moved itself has its drawable and viewport already.
                 let resized = l.resize_surface(&gpu.device, size);
                 let viewport = (size.width as f32 / scale, size.height as f32 / scale);
                 if !resized && viewport == rt.viewport && scale == rt.env.scale {
-                    if restored { l.window.request_redraw(); }
+                    if restored || origin_moved { l.window.request_redraw(); }
                     return;
                 }
                 let asked = self.frame_jump.take().is_some_and(|(w, h)| (w - viewport.0).abs() < 1.0 && (h - viewport.1).abs() < 1.0);
@@ -3261,7 +3283,8 @@ impl<S: 'static> Host<S> {
                 // The user is dragging the edge. AppKit commits the new size when this returns,
                 // and a frame drawn later would leave the old one stretched to it until then.
                 #[cfg(target_os = "macos")]
-                if l.track_live_resize() {
+                if crate::macos::in_live_resize(&l.window) {
+                    if self.frame_anim.take().is_some() { l.present_with_transaction(false); }
                     self.draw(true);
                     self.shell(event_loop);
                     return;
@@ -3269,10 +3292,17 @@ impl<S: 'static> Host<S> {
                 l.window.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                let scale = scale_factor as f32;
                 let size = l.window.inner_size();
-                rt.set_viewport((size.width as f32 / scale_factor as f32, size.height as f32 / scale_factor as f32), scale_factor as f32);
-                rt.set_titlebar_inset(place_chrome(&l.window, chrome));
-                l.window.request_redraw();
+                if size.width > 0 && size.height > 0 {
+                    let resized = l.resize_surface(&gpu.device, size);
+                    let viewport = (size.width as f32 / scale, size.height as f32 / scale);
+                    if resized || viewport != rt.viewport || scale != rt.env.scale {
+                        rt.set_viewport(viewport, scale);
+                        rt.set_titlebar_inset(place_chrome(&l.window, chrome));
+                        l.window.request_redraw();
+                    }
+                }
             }
             WindowEvent::Occluded(occluded) => {
                 // Alpha-zero launcher panels remain renderable on explicit invalidation.

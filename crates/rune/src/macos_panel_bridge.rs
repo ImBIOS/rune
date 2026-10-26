@@ -79,6 +79,7 @@ forward!(invalidate_cursor_rects, false, (view: *mut AnyObject) -> (), invalidat
 // gets these forwards; overlay placement continues to manage both native frames itself.
 forward!(frame, true, () -> NSRect, frame);
 forward!(key, true, () -> Bool, isKeyWindow);
+forward!(live_resize, true, () -> Bool, inLiveResize);
 /// The title also stays on the source, where winit's `title()` reads it back.
 extern "C" fn set_title(window: &AnyObject, _: Sel, title: *mut AnyObject) {
     unsafe {
@@ -236,7 +237,7 @@ pub(crate) fn take_reattached(panel: &NSPanel) -> bool {
 #[doc(hidden)]
 pub fn reattach_count() -> usize { REATTACHED.load(Ordering::Relaxed) }
 
-fn window_forwards() -> [(Sel, *const c_void); 14] {
+fn window_forwards() -> [(Sel, *const c_void); 15] {
     [
         (sel!(contentView), content_view as *const c_void),
         (sel!(isVisible), visible as *const c_void),
@@ -246,6 +247,7 @@ fn window_forwards() -> [(Sel, *const c_void); 14] {
         (sel!(invalidateCursorRectsForView:), invalidate_cursor_rects as *const c_void),
         (sel!(frame), frame as *const c_void),
         (sel!(isKeyWindow), key as *const c_void),
+        (sel!(inLiveResize), live_resize as *const c_void),
         (sel!(setFrame:display:), set_frame as *const c_void),
         (sel!(setFrameOrigin:), set_origin as *const c_void),
         (sel!(setContentSize:), set_size as *const c_void),
@@ -304,6 +306,7 @@ mod tests {
     extern "C" fn got_size(_: *mut AnyObject, _: Sel, size: NSSize) { received(format!("size {} {}", size.width, size.height)); }
     extern "C" fn got_level(_: *mut AnyObject, _: Sel, level: isize) { received(format!("level {level}")); }
     extern "C" fn got_hit(_: *mut AnyObject, _: Sel, ignore: Bool) { received(format!("ignore {}", ignore.as_bool())); }
+    extern "C" fn got_live_resize(_: *mut AnyObject, _: Sel) -> Bool { Bool::YES }
 
     /// The trampolines on this architecture: each hands its own arguments and the sender's
     /// return address to the Rust side. A wrong register would read garbage as the caller and
@@ -320,6 +323,7 @@ mod tests {
             panel_class.add_method(sel!(setContentSize:), got_size as extern "C" fn(*mut AnyObject, Sel, NSSize));
             panel_class.add_method(sel!(setLevel:), got_level as extern "C" fn(*mut AnyObject, Sel, isize));
             panel_class.add_method(sel!(setIgnoresMouseEvents:), got_hit as extern "C" fn(*mut AnyObject, Sel, Bool));
+            panel_class.add_method(sel!(inLiveResize), got_live_resize as extern "C" fn(*mut AnyObject, Sel) -> Bool);
         }
         let panel_class = panel_class.register();
         // A real NSWindow needs the window server, so the source is only allocated. All leak.
@@ -339,6 +343,8 @@ mod tests {
             let _: () = msg_send![invocation, getReturnValue: &mut foreign as *mut *mut AnyObject as *mut c_void];
             assert!(foreign.is_null(), "a framework's call gets the window's own, empty content");
 
+            let live: Bool = msg_send![window, inLiveResize];
+            assert!(live.as_bool(), "ordinary panel forwards inLiveResize");
             let _: () = msg_send![window, setFrame: NSRect::new(NSPoint::new(1.5, 2.5), NSSize::new(300.0, 200.0)), display: Bool::YES];
             let _: () = msg_send![window, setFrameOrigin: NSPoint::new(7.0, 8.0)];
             let _: () = msg_send![window, setContentSize: NSSize::new(40.0, 50.0)];

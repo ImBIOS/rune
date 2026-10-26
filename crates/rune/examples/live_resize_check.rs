@@ -318,7 +318,12 @@ mod mac {
             // The top edge, the bottom one pinned.
             drag(number, |start, now, d| CGPoint { x: start[2] / 2.0, y: start[1] + start[3] + 2.0 + d - now[1] });
             log(Ev::Mark("after"));
-            on_main(&handle, |s, _| s.n += 1);
+            on_main(&handle, |s, _| {
+                let (_, _, layer) = window().expect("Rune's window and its Metal layer");
+                let sync: Bool = unsafe { msg_send![&*layer, presentsWithTransaction] };
+                check("ending the drag clears presentsWithTransaction while idle", !sync.as_bool(), format!("presentsWithTransaction: {}", sync.as_bool()));
+                s.n += 1;
+            });
             std::thread::sleep(Duration::from_millis(300));
             // Rune's own animated resize, out and back.
             log(Ev::Mark("animated"));

@@ -14,7 +14,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_video::rc::Retained;
 use objc2_video::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2_video::{msg_send, sel};
-use std::ptr::NonNull;
+use std::{cell::Cell, ptr::NonNull, rc::Rc};
 
 /// The host view: flipped, so frames come straight from Rune's top-left points, and never hit,
 /// so clicks fall through to winit's view behind it in the hit-test order.
@@ -63,28 +63,43 @@ pub(crate) struct Materials {
     view: Option<Retained<AnyObject>>,
     host: Option<Retained<AnyObject>>,
     metal: Option<Retained<AnyObject>>,
-    flag: PresentFlag,
+    flag: Rc<Cell<PresentFlag>>,
+    live_end: Option<Retained<AnyObject>>,
     slots: Vec<Slot>,
 }
 
 impl Materials {
     pub(crate) fn new() -> Self {
-        Materials { mode: Mode::from_env(), active: false, view: None, host: None, metal: None, flag: PresentFlag::default(), slots: Vec::new() }
+        Materials { mode: Mode::from_env(), active: false, view: None, host: None, metal: None, flag: Rc::default(), live_end: None, slots: Vec::new() }
     }
 
     /// Whether this frame's elements should leave their interior to native views.
     pub(crate) fn native(&self) -> bool { self.active }
 
+    fn update_flag(&self, f: impl FnOnce(&mut PresentFlag) -> Option<bool>) -> Option<bool> {
+        let mut flag = self.flag.get();
+        let out = f(&mut flag);
+        self.flag.set(flag);
+        out
+    }
+
     /// A window frame animation started or stopped: it presents with transactions while it
     /// moves, and native materials keep them on after it lands.
     pub(crate) fn set_moving(&mut self, surface: &wgpu::Surface<'_>, on: bool) {
-        if let Some(on) = self.flag.moving(on) { crate::macos::present_with_transaction(surface, on); }
+        if let Some(on) = self.update_flag(|f| f.moving(on)) { crate::macos::present_with_transaction(surface, on); }
     }
 
     /// The user started or stopped dragging the window's edge: each frame of the drag presents
-    /// in the transaction that resizes the window.
-    pub(crate) fn set_live(&mut self, surface: &wgpu::Surface<'_>, on: bool) {
-        if let Some(on) = self.flag.live(on) { crate::macos::present_with_transaction(surface, on); }
+    /// in the transaction that resizes the window, and `NSWindowDidEndLiveResizeNotification`
+    /// turns it off as soon as they let go even if the window is idle afterwards.
+    pub(crate) fn set_live(&mut self, window: &winit::window::Window, surface: &wgpu::Surface<'_>, on: bool) {
+        if on && self.live_end.is_none()
+            && let (Some(win), Some(metal)) = (crate::macos::ns_window(window), metal_layer(surface))
+        {
+            let win = unsafe { &*objc2::rc::Retained::as_ptr(&win).cast::<AnyObject>() };
+            self.live_end = watch_live_end(win, &metal, self.flag.clone());
+        }
+        if let Some(on) = self.update_flag(|f| f.live(on)) { crate::macos::present_with_transaction(surface, on); }
     }
 
     /// After a build: switches native views on when a transparent window's frame found material
@@ -95,7 +110,7 @@ impl Materials {
         if self.active && !found {
             // `present` hides the views in this frame's transaction; they stay for the next activation.
             self.active = false;
-            if let Some(on) = self.flag.materials(false) { crate::macos::present_with_transaction(surface, on); }
+            if let Some(on) = self.update_flag(|f| f.materials(false)) { crate::macos::present_with_transaction(surface, on); }
             return false;
         }
         if self.active || !found || !transparent || self.mode == Mode::Off { return false; }
@@ -103,7 +118,7 @@ impl Materials {
         // SAFETY: winit's content view outlives this retain, which only adds a reference.
         let Some(view) = (unsafe { Retained::retain(objc2::rc::Retained::as_ptr(&view).cast::<AnyObject>().cast_mut()) }) else { return false };
         let Some(metal) = metal_layer(surface) else { return false };
-        if self.mode != Mode::Unsynced && let Some(on) = self.flag.materials(true) {
+        if self.mode != Mode::Unsynced && let Some(on) = self.update_flag(|f| f.materials(true)) {
             crate::macos::present_with_transaction(surface, on);
         }
         self.view = Some(view);
@@ -245,10 +260,45 @@ impl Materials {
 
 impl Drop for Materials {
     fn drop(&mut self) {
+        if let Some(token) = &self.live_end {
+            unwatch_live_end(token);
+        }
         if let Some(host) = &self.host {
             // SAFETY: removes the host this struct added; drop runs on the main thread with the window.
             unsafe { let _: () = msg_send![&**host, removeFromSuperview]; }
         }
+    }
+}
+
+/// Turns `presentsWithTransaction` off when AppKit ends the user's live resize: winit sends
+/// no event for `windowDidEndLiveResize:`, so an idle window draws no frame after mouse-up.
+pub(super) fn watch_live_end(window: &AnyObject, layer: &Retained<AnyObject>, flag: Rc<Cell<PresentFlag>>) -> Option<Retained<AnyObject>> {
+    let center = AnyClass::get(c"NSNotificationCenter")?;
+    let weak = objc2_video::rc::Weak::from_retained(layer);
+    let block = block2_metal::RcBlock::new(move |_: *mut AnyObject| {
+        let mut f = flag.get();
+        let change = f.live(false);
+        flag.set(f);
+        if let (Some(on), Some(layer)) = (change, weak.load()) {
+            // SAFETY: a live CAMetalLayer on the main thread.
+            unsafe { let _: () = msg_send![&*layer, setPresentsWithTransaction: Bool::new(on)]; }
+        }
+    });
+    let name = objc2_foundation_video::NSString::from_str("NSWindowDidEndLiveResizeNotification");
+    // SAFETY: main thread; `Materials::drop` removes the returned observer token.
+    unsafe {
+        let center: Retained<AnyObject> = msg_send![center, defaultCenter];
+        msg_send![&*center, addObserverForName: &*name, object: window,
+            queue: std::ptr::null::<AnyObject>(), usingBlock: &*block]
+    }
+}
+
+pub(super) fn unwatch_live_end(token: &AnyObject) {
+    let Some(center) = AnyClass::get(c"NSNotificationCenter") else { return };
+    // SAFETY: removes an observer `watch_live_end` added on the main thread.
+    unsafe {
+        let center: Retained<AnyObject> = msg_send![center, defaultCenter];
+        let _: () = msg_send![&*center, removeObserver: token];
     }
 }
 

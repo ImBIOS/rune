@@ -143,16 +143,22 @@ impl DisplayLink {
         self.capped = low_power_caps(self.display);
     }
 
-    /// Claims one display opportunity and returns its target presentation time. Consume
-    /// before rendering so a tick arriving during rendering can queue the next opportunity.
-    pub(crate) fn next_frame(&mut self) -> Option<Instant> {
+    /// Starts the link if it was stopped; false if Core Video refused to start it.
+    pub(crate) fn start(&mut self) -> bool {
         if !self.running {
             let status = self.link.start();
-            if status != 0 { eprintln!("display link start failed: {status}"); return Some(Instant::now()); }
+            if status != 0 { eprintln!("display link start failed: {status}"); return false; }
             self.running = true;
             // Power state can change while idle; each burst rechecks it.
             self.capped = low_power_caps(self.display);
         }
+        true
+    }
+
+    /// Claims one display opportunity and returns its target presentation time. Consume
+    /// before rendering so a tick arriving during rendering can queue the next opportunity.
+    pub(crate) fn next_frame(&mut self) -> Option<Instant> {
+        if !self.start() { return Some(Instant::now()); }
         let host_target = self.callback.target.swap(0, Ordering::Acquire);
         if host_target == 0 { return None; }
         let now = Instant::now();

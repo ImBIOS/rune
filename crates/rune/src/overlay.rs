@@ -858,6 +858,8 @@ impl<T: 'static> Overlay<T> {
         let (mut config, translucent) = crate::window::surface_config(&surface, &gpu.adapter, (w, h), self.rt.srgb_blend())?;
         config.alpha_mode = translucent.unwrap_or(config.alpha_mode);
         surface.configure(&gpu.device, &config);
+        #[cfg(target_os = "macos")]
+        crate::macos::pin_contents_top_left(&surface);
         let target_format = if self.rt.srgb_blend() { config.format.remove_srgb_suffix() } else { config.format };
         if let Some((renderer, format)) = &mut self.renderer {
             crate::window::rebuild_renderer(&gpu.device, renderer, target_format, &mut self.rt);
