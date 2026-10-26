@@ -20,7 +20,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   across ordinary slots and split the pass only at backdrop slots, copying the target into a pooled
   viewport-sized backdrop texture, calling `EffectPhase::Backdrop(encoder)` while the pass is closed
   (for `FxRenderer::blur_backdrop` or `FxRenderer::set_layer_backdrop`), and re-opening the pass with
-  `LoadOp::Load` and `EffectSite::backdrop` set (for a slot inside an isolated layer, copying that
+  `LoadOp::Load` and `EffectSite::backdrop` set (a target without `COPY_SRC` can't be copied, so
+  the slot draws in the open pass with `backdrop == None`; for a slot inside an isolated layer, copying that
   layer's `Rgba16Float` target at `origin` in window coordinates). When
   `FxRenderer::set_srgb_blend(true)` is active, `rune-fx` decodes sRGB-encoded premultiplied
   backdrop and blurred-backdrop samples to linear light before shading, so glass, lenses, distortion

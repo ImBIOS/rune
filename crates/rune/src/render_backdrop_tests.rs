@@ -74,3 +74,37 @@ fn split_resets_the_hook_viewport_and_scissor_for_later_primitives() {
         assert_eq!(&pixels[at..at + 4], &color);
     }
 }
+
+#[test]
+fn backdrop_slot_degrades_when_the_target_cannot_be_copied() {
+    let gpu = Gpu::headless();
+    let (device, queue) = (&gpu.device, &gpu.queue);
+    let mut renderer = Renderer::new(device, OFFSCREEN_FORMAT);
+    let mut text = crate::text::TextSystem::new(&[], ("Inter", "Inter"));
+    let mut slot = rect([0.0, 0.0, 16.0, 16.0], [0.0, 0.0, 0.0, 1.0]);
+    slot.params = [1.0, KIND_EFFECT, 0.0, 1.0];
+    slot.clip = [0.0, 0.0, 16.0, 16.0];
+    renderer.prepare(device, queue, &mut text.atlas, &[slot], (32, 32));
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("no copy src"),
+        size: wgpu::Extent3d { width: 32, height: 32, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: OFFSCREEN_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let mut draws = 0;
+    renderer.draw_with(&mut encoder, &view, [0.0; 4], &mut |_, site| {
+        assert!(site.backdrop.is_none());
+        draws += 1;
+    });
+    queue.submit([encoder.finish()]);
+    let error = pollster::block_on(scope.pop());
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(draws, 1);
+}

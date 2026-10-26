@@ -2319,6 +2319,7 @@ impl El {
     /// Request a backdrop copy up to this effect slot (`EffectSite::backdrop`) when drawn with
     /// `Renderer::draw_with`, `Renderer::draw_with_backdrop`, or `Renderer::encode_layers_with`.
     /// Ordinary slots (`false`, the default) stay inside the open render pass with no copy.
+    /// A target without `COPY_SRC` usage can't be copied: the slot draws in the open pass with `backdrop == None`.
     pub fn effect_backdrop(mut self, on: bool) -> Self {
         let bleed = self.vis.effect.map_or(0.0, |(b, _)| b);
         self.vis.effect = Some((bleed, on));

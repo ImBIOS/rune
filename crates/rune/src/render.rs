@@ -190,6 +190,7 @@ impl<'a, 'p> ActivePass<'a, 'p> {
         hook: &mut EffectBackdropHook<'_>,
     ) -> Option<&'r wgpu::TextureView> {
         let (encoder, view) = self.encoder.as_mut()?;
+        if !view.texture().usage().contains(wgpu::TextureUsages::COPY_SRC) { return None; }
         let bd = renderer.backdrops.iter().find(|b| b.format == format)?;
         drop(self.inner.take());
         let (vw, vh) = (bd.texture.width(), bd.texture.height());
