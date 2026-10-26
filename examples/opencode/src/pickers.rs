@@ -338,6 +338,22 @@ mod tests {
     }
 
     #[test]
+    fn the_empty_state_waits_for_the_rows_to_go() {
+        let mut rt = runtime();
+        tap(&mut rt, "model");
+        for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        rt.key(KeyEvent { key: Key::Text("missing".into()), mods: Default::default() });
+        let find = |rt: &Runtime<App>, key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key));
+        for _ in 0..90 {
+            rt.frame(1.0 / 120.0);
+            let row = find(&rt, "option-openai:gpt-6-astra").unwrap();
+            let empty = find(&rt, "picker-empty").map_or(0.0, |e| e.opacity);
+            assert!(row.opacity < 0.05 || empty < 0.05, "the empty state lands on a row: {} over {}", empty, row.opacity);
+        }
+        assert_eq!(find(&rt, "picker-empty").unwrap().opacity, 1.0);
+    }
+
+    #[test]
     fn interrupted_reopen_uses_one_layout_curve() {
         let mut rt = runtime();
         tap(&mut rt, "model");

@@ -1136,9 +1136,17 @@ fn picker(s: &App, p: &Pal) -> El {
         list = list.child(option);
         if shown { height += 28.0; }
     }
-    if items.is_empty() {
-        list = list.child(text("No models found").font(UI).color(p.faint).h(48.0).px(10.0).pt(16.0));
-        height = 48.0;
+    if kind == Kind::Model {
+        // Mounted while there are matches too, so it rides up under the collapsing rows and
+        // fades in once they're gone instead of landing on top of them.
+        use rune::AnimExt;
+        let empty = items.is_empty();
+        list = list.child(col().key("picker-empty").h(if empty { 48.0 } else { 0.0 })
+            .opacity(if empty { 1.0 } else { 0.0 })
+            .opacity_motion(rune::Curve::ease_in_out(0.15).delay(if empty { 0.15 } else { 0.0 }))
+            .clip_fade(0.0, 6.0, 0.0, 6.0)
+            .child(text("No models found").font(UI).color(p.faint).h(48.0).px(10.0).pt(16.0)));
+        if empty { height = 48.0; }
     }
     menu.child(col().key("picker-scroll").w_full().h(height.min(220.0))
         .scroll(ScrollSpec { stick_bottom: false }).clip_fade(0.0, 8.0, 0.0, 8.0).child(list))
