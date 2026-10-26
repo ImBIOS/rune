@@ -1,6 +1,6 @@
 #![cfg(feature = "markdown")]
 
-use rune::{Cx, El, Env, Runtime, col};
+use rune::{Color, Cx, El, Env, LinkPaint, Runtime, col};
 use rune_kit::markdown::{Block, Style, parse, parse_cached};
 use rune_kit::{Kit, Markdown, MarkdownStyle};
 use std::rc::Rc;
@@ -623,4 +623,84 @@ fn table_like_draws_markdown_tables_with_the_data_tables_metrics() {
     let header = rt.elements().into_iter().find(|e| e.text.as_deref() == Some("Name")).unwrap();
     assert_eq!(header.text_color, Some(t.header_text));
     assert_eq!(header.rect[0] - cell(&rt, "th", 0).rect[0], t.cell_pad);
+}
+
+struct Chips {
+    src: String,
+    tx_mode: bool,
+    opened: Vec<String>,
+}
+
+const CHIP_BG: &str = "#ff0055";
+const CHIP_HOVER: &str = "#00ff55";
+
+fn chips(s: &Chips, _: &mut Cx<Chips>) -> El {
+    let bg = rune::color::hex(CHIP_BG).unwrap();
+    let hover = rune::color::hex(CHIP_HOVER).unwrap();
+    let md = Markdown::new(s.src.clone()).link_style(move |url| {
+        url.starts_with("session:").then(|| (rune::Span { color: Some(Color::WHITE), ..rune::Span::new(0, 0) }.bg(bg, 3.0), LinkPaint::new().bg(hover)))
+    });
+    let md = if s.tx_mode {
+        md.on_link_tx(|s: &mut Chips, url, tx| {
+            s.opened.push(url.to_owned());
+            tx.copy(url);
+        })
+    } else {
+        md.on_link(|s: &mut Chips, url| s.opened.push(url.to_owned()))
+    };
+    col().w_full().padding(10.0).child(md.build(&Kit::neutral(true)))
+}
+
+fn chip_rt(tx_mode: bool) -> Runtime<Chips> {
+    let src = "Open [Title](session:abc) or [web](https://a.dev).".to_owned();
+    let mut rt = Runtime::new(Chips { src, tx_mode, opened: Vec::new() }, chips, (480.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt
+}
+
+fn has_fill(rt: &Runtime<Chips>, hex: &str) -> bool {
+    let want = rune::color::hex(hex).unwrap().premul(1.0);
+    rt.instances.iter().any(|i| i.fill.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-3))
+}
+
+fn centre(rt: &Runtime<Chips>, key: &str) -> (f32, f32) {
+    let e = rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("no {key}"));
+    (e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0)
+}
+
+#[test]
+fn on_link_tx_reaches_the_tx_and_on_link_still_works() {
+    let mut rt = chip_rt(true);
+    let (x, y) = centre(&rt, "https://a.dev");
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.opened, ["https://a.dev"]);
+    assert_eq!(rt.copy_request.as_deref(), Some("https://a.dev"));
+
+    let mut rt = chip_rt(false);
+    let (x, y) = centre(&rt, "session:abc");
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.opened, ["session:abc"]);
+    assert!(rt.copy_request.is_none());
+}
+
+#[test]
+fn link_style_looks_only_at_the_urls_it_names() {
+    let mut rt = chip_rt(false);
+    assert!(has_fill(&rt, CHIP_BG), "the session link's own background");
+    // The https link stays at the default look: hovering it paints no chip hover colour.
+    let (x, y) = centre(&rt, "https://a.dev");
+    rt.pointer_move(x, y);
+    rt.frame(1.0 / 60.0);
+    assert!(!has_fill(&rt, CHIP_HOVER));
+    // Hovering the chip paints its hover.
+    let (x, y) = centre(&rt, "session:abc");
+    rt.pointer_move(x, y);
+    rt.frame(1.0 / 60.0);
+    assert!(has_fill(&rt, CHIP_HOVER), "hover paint");
 }

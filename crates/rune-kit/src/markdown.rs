@@ -38,7 +38,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use rune::{Align, Color, El, Family, Link, LinkPaint, Span, TextStyle, col, el, rich, row, text};
+use rune::{Align, Color, El, Family, Link, LinkPaint, Span, TextStyle, Tx, col, el, rich, row, text};
 
 use crate::{Kit, PaletteSeed};
 
@@ -952,6 +952,7 @@ impl MarkdownStyle {
 }
 
 type LinkWire = Rc<dyn Fn(El) -> El>;
+type LinkLook = Rc<dyn Fn(&str) -> Option<(Span, LinkPaint)>>;
 
 /// Markdown source as an element. See the module docs for cost and keys.
 pub struct Markdown {
@@ -960,6 +961,7 @@ pub struct Markdown {
     reveal: f32,
     streaming: bool,
     on_link: Option<LinkWire>,
+    link_look: Option<LinkLook>,
     selectable: bool,
     scroll_wide: bool,
     highlighter: Highlighter,
@@ -967,8 +969,8 @@ pub struct Markdown {
 
 impl Markdown {
     pub fn new(src: impl Into<String>) -> Markdown {
-        Markdown { src: src.into(), style: None, reveal: 0.0, streaming: false, on_link: None, selectable: false, scroll_wide: false,
-            highlighter: Highlighter::builtin() }
+        Markdown { src: src.into(), style: None, reveal: 0.0, streaming: false, on_link: None, link_look: None,
+            selectable: false, scroll_wide: false, highlighter: Highlighter::builtin() }
     }
     /// Replaces the kit-derived style in [`Self::build`].
     pub fn style(mut self, style: MarkdownStyle) -> Self {
@@ -989,15 +991,28 @@ impl Markdown {
     /// Called with a link's destination when it is clicked, or pressed with Enter or Space
     /// while focused. With a handler, links show a hand and a solid underline under the
     /// pointer and are Tab stops; without one they are styled text only.
-    pub fn on_link<S: 'static>(mut self, f: impl Fn(&mut S, &str) + 'static) -> Self {
+    pub fn on_link<S: 'static>(self, f: impl Fn(&mut S, &str) + 'static) -> Self {
+        self.on_link_tx(move |s: &mut S, url, _| f(s, url))
+    }
+    /// [`Self::on_link`] with the [`Tx`] of the press, for a handler that opens a screen, scrolls
+    /// or copies in the same commit (an app's own `scheme:id` links, say).
+    pub fn on_link_tx<S: 'static>(mut self, f: impl Fn(&mut S, &str, &mut Tx) + 'static) -> Self {
         let f = Rc::new(f);
         self.on_link = Some(Rc::new(move |e: El| {
             let f = f.clone();
-            e.on_link(move |s: &mut S, url, _| f(s, url))
+            e.on_link(move |s: &mut S, url, tx| f(s, url, tx))
         }));
         self
     }
-
+    /// A look for some links by destination. `f` returns `None` for the default look
+    /// ([`MarkdownStyle::link`] with its underline, and an accent underline on hover), or
+    /// `Some((resting, hover))`: the [`Span`] drawn over the link's text (colour, weight,
+    /// `bg` with its padding, underline; its range is ignored) and the [`LinkPaint`] over it
+    /// while hovered. Applies with or without a handler.
+    pub fn link_style(mut self, f: impl Fn(&str) -> Option<(Span, LinkPaint)> + 'static) -> Self {
+        self.link_look = Some(Rc::new(f));
+        self
+    }
     /// Lets people select and copy the text (see [`El::selectable`]) as one selection across
     /// paragraphs, headings, list items, quotes, code blocks and table cells
     /// ([`El::selection_group`]): Cmd+A selects the whole block, and Cmd+C copies the text as
@@ -1047,7 +1062,7 @@ impl Markdown {
     /// [`MarkdownStyle::from_seed`]).
     pub fn render(self, style: &MarkdownStyle) -> El {
         let (blocks, sources) = doc_cached(&self.src);
-        let r = Renderer { s: style.clone(), reveal: self.reveal, streaming: self.streaming, on_link: self.on_link, selectable: self.selectable,
+        let r = Renderer { s: style.clone(), reveal: self.reveal, streaming: self.streaming, on_link: self.on_link, link_look: self.link_look, selectable: self.selectable,
             scroll_wide: self.scroll_wide, highlighter: self.highlighter, sources, next_source: Cell::new(0) };
         r.blocks(&blocks).selection_group(self.selectable)
     }
@@ -1058,6 +1073,7 @@ struct Renderer {
     reveal: f32,
     streaming: bool,
     on_link: Option<LinkWire>,
+    link_look: Option<LinkLook>,
     selectable: bool,
     /// `Markdown::scroll_wide`.
     scroll_wide: bool,
@@ -1124,6 +1140,12 @@ impl Renderer {
             .iter()
             .map(|&(a, b, st)| {
                 let mut sp = Span::new(a, b);
+                if let (Style::Link, Some(look)) = (st, &self.link_look) {
+                    let url = inl.links.iter().find(|l| (l.0, l.1) == (a, b)).map(|l| l.2.as_str());
+                    if let Some((own, _)) = url.and_then(|u| look(u)) {
+                        return Span { start: sp.start, end: sp.end, ..own };
+                    }
+                }
                 match st {
                     Style::Code => {
                         sp.mono = true;
@@ -1151,8 +1173,9 @@ impl Renderer {
     /// span of `e` (the text element holding it) reporting its destination.
     fn wire_link(&self, e: El, inl: &Inline) -> El {
         let Some(on_link) = self.on_link.as_ref().filter(|_| !inl.links.is_empty()) else { return e };
-        let hover = LinkPaint::new().underline(self.s.accent);
-        let e = inl.links.iter().fold(e, |e, (a, b, url)| e.link(Link::new(*a..*b, url.clone()).hover(hover)));
+        let default = LinkPaint::new().underline(self.s.accent);
+        let hover = |url: &str| self.link_look.as_ref().and_then(|f| f(url)).map_or(default, |l| l.1);
+        let e = inl.links.iter().fold(e, |e, (a, b, url)| e.link(Link::new(*a..*b, url.clone()).hover(hover(url))));
         on_link(e)
     }
 
@@ -1326,7 +1349,7 @@ mod tests {
             }
         }
         let (blocks, sources) = doc_cached(src);
-        let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, selectable: false, scroll_wide: false,
+        let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, link_look: None, selectable: false, scroll_wide: false,
             highlighter, sources: sources.clone(), next_source: Cell::new(0) };
         let mut found = Vec::new();
         codes(&blocks, &mut found);

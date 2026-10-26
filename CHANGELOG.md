@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Markdown::on_link_tx` and `Markdown::link_style`.** `on_link_tx(|s, url, tx| ..)` is `on_link`
+  with the press's `Tx` (`on_link` is unchanged). `link_style(|url| -> Option<(Span, LinkPaint)>)`
+  gives chosen links their own resting `Span` (colour, weight, `bg` with padding, underline) and
+  hover paint; `None` keeps the default look, so nothing moves unless an app opts in.
+
 - **`PopupList::padding` and `PopupList::row_radius`.** The popover's padding and each row's
   corner radius were fixed at 4 points; both builders keep 4 as the default, so nothing moves.
   `PopupList::items` now documents that a commit calling `tx.instant()` swaps the rows and the
