@@ -38,3 +38,26 @@ fn select_portal_inside_dialog_accepts_an_option_outside_the_panel() {
     assert_eq!(rt.state.value, "Second");
     assert!(rt.state.dialog && !rt.state.select);
 }
+
+#[test]
+fn a_fit_dialog_is_as_tall_as_its_content() {
+    fn view(fit: &bool, _: &mut Cx<bool>) -> El {
+        let k = Kit::neutral(true);
+        let mut layer = Vec::new();
+        let buttons = row().key("buttons").w_full().padding(16.0).justify_end().child(rune::el().size(80.0, 28.0));
+        let d = Dialog::new("delete", "Delete session").description("Delete session \"x\"?").width(400.0)
+            .open(true).on_close(|_: &mut bool| {}).child(buttons);
+        if *fit { d.fit() } else { d }.build(&k, &mut layer);
+        root(rune::el().w_full().h_full(), layer)
+    }
+    let rect = |fit: bool, key: &str| {
+        let mut rt = Runtime::new(fit, view, (1000.0, 800.0), Env::new(true, 1.0));
+        for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap().rect
+    };
+    assert_eq!(rect(false, "delete-dialog")[3], 368.0, "the standard height");
+    let (panel, buttons) = (rect(true, "delete-dialog"), rect(true, "buttons"));
+    // 16 + title 20 + 4 + description 20 + 16, then the 60 point button row.
+    assert_eq!(panel[3], 76.0 + 60.0);
+    assert_eq!(buttons[1] + buttons[3], panel[1] + panel[3], "the buttons sit at the bottom edge");
+}

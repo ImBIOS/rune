@@ -5,6 +5,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Dialog::fit`.** A dialog sized to its header and body instead of the standard 368 point
+  height, for confirmations whose buttons otherwise sit far below one line of text.
 - **A field inside a list row keeps its keys.** With focus in a text field inside a focus group
   (an inline rename in a sidebar row), letters, arrows, Home and End go to the field; before, a
   letter matching another row's first letter type-selected that row and took focus from the field.

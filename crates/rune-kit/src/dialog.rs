@@ -10,18 +10,23 @@ pub struct Dialog {
     open: bool,
     outside: bool,
     width: f32,
+    fit: bool,
     close: Option<Box<dyn FnOnce(El) -> El>>,
     button: Option<Box<dyn FnOnce(El) -> El>>,
 }
 impl Dialog {
     pub fn new(key: impl Into<String>, title: impl Into<String>) -> Self {
         Self { key: key.into(), title: title.into(), description: None, body: Vec::new(), open: false,
-            outside: true, width: 480.0, close: None, button: None }
+            outside: true, width: 480.0, fit: false, close: None, button: None }
     }
     pub fn open(mut self, open: bool) -> Self { self.open = open; self }
     pub fn description(mut self, description: impl Into<String>) -> Self { self.description = Some(description.into()); self }
     pub fn child(mut self, body: El) -> Self { self.body.push(body); self }
     pub fn width(mut self, width: f32) -> Self { self.width = width; self }
+    /// Sizes the panel to its header and body instead of the standard 368 point height, for
+    /// short dialogs such as a confirmation. Content taller than the window isn't scrolled, so
+    /// put a scroll view in the body if it can grow.
+    pub fn fit(mut self) -> Self { self.fit = true; self }
     pub fn click_outside(mut self, close: bool) -> Self { self.outside = close; self }
     pub fn on_close<S: 'static>(mut self, f: impl Fn(&mut S) + Clone + 'static) -> Self {
         let button = f.clone();
@@ -43,10 +48,12 @@ impl Dialog {
         if let Some(description) = self.description {
             title = title.child(text(description).font(k.ty.ui.lh(20.0)).color(k.c.text_muted));
         }
-        let panel = shadows(k, col().key(format!("{}-dialog", self.key)).role("dialog").label(self.title.clone())
-            .w_full().max_w(self.width).h(368.0).radius(6.0).fill(k.c.layer_01)
+        let body = col().key("body").w_full().children(self.body);
+        let (panel, body) = if self.fit { (col(), body) } else { (col().h(368.0), body.grow(1.0)) };
+        let panel = shadows(k, panel.key(format!("{}-dialog", self.key)).role("dialog").label(self.title.clone())
+            .w_full().max_w(self.width).radius(6.0).fill(k.c.layer_01)
             .child(row().key("header").w_full().padding(16.0).items_start().child(title).child(dismiss))
-            .child(col().key("body").w_full().grow(1.0).children(self.body))
+            .child(body)
             .motion(k.motion.overlay), &k.elevation.overlay);
         let panel = close(panel).modal_click_outside(self.outside);
         layer.push(el().key(format!("{}-scrim", self.key)).absolute(0.0, 0.0).w_full().h_full()
