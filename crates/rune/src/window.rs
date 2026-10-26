@@ -607,6 +607,8 @@ impl ApplicationHandler<WakeEvent> for Windows {
             let proxy = self.proxy.clone();
             crate::reopen::install(move || proxy.send_event(WakeEvent::Reopen).is_ok());
         }
+        // A window opened at launch took it; a GPU kept for a later one would sit idle until then.
+        crate::render::discard_prewarm();
         self.cleanup(event_loop);
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
@@ -802,6 +804,8 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) -> Result<(), S
     if !window_server_session() {
         return Err("event loop: no window server session (no one is logged in to this Mac)".into());
     }
+    // While AppKit starts up.
+    crate::render::prewarm_gpu();
     #[allow(unused_mut)]
     let mut builder = EventLoop::<WakeEvent>::with_user_event();
     #[cfg(target_os = "macos")]
@@ -2474,6 +2478,7 @@ impl<S: 'static> Host<S> {
             // A tooltip control's initial delay is the double-click time.
             self.rt.help_delay = self.rt.double_click_interval;
         }
+        let mut prewarmed = None;
         let (gpu, surface) = match self.gpu.take() {
             Some((gpu, renderer, format)) => {
                 let surface = gpu.instance.create_surface(window.clone());
@@ -2486,10 +2491,10 @@ impl<S: 'static> Host<S> {
                     let surface = gpu.instance.create_surface(window.clone()).map_err(|e| e.to_string())?;
                     (gpu, surface)
                 } else {
-                    let instance = Gpu::instance();
-                    let surface = instance.create_surface(window.clone()).map_err(|e| e.to_string())?;
                     let features = self.comp.as_ref().map_or(wgpu::Features::empty(), |c| c.features());
-                    let gpu = Arc::new(Gpu::try_with_features(instance, Some(&surface), features)?);
+                    let (gpu, surface, renderer) = Gpu::for_surface(features, |instance| instance.create_surface(window.clone()).map_err(|e| e.to_string()))?;
+                    prewarmed = renderer;
+                    let gpu = Arc::new(gpu);
                     *self.gpu_pool.borrow_mut() = Arc::downgrade(&gpu);
                     (gpu, surface)
                 };
@@ -2509,7 +2514,7 @@ impl<S: 'static> Host<S> {
         }
         let target_format = if self.rt.srgb_blend() { config.format.remove_srgb_suffix() } else { config.format };
         if let Some(gpu) = gpu {
-            let mut renderer = Renderer::new(&gpu.device, target_format);
+            let mut renderer = prewarmed.unwrap_or_else(|| Renderer::new(&gpu.device, target_format));
             renderer.set_srgb_blend(self.rt.srgb_blend());
             self.gpu = Some((gpu, renderer, target_format));
         }

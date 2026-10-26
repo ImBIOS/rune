@@ -838,6 +838,7 @@ impl<T: 'static> Overlay<T> {
         let pooled = self.gpu.clone().or_else(|| self.gpu_pool.borrow().upgrade().filter(|gpu| {
             gpu.device.features().contains(features & gpu.adapter.features())
         }));
+        let mut prewarmed = None;
         let surface = match pooled {
             Some(gpu) => {
                 let surface = make(&gpu.instance)?;
@@ -845,9 +846,9 @@ impl<T: 'static> Overlay<T> {
                 surface
             }
             None => {
-                let instance = Gpu::instance();
-                let surface = make(&instance)?;
-                let gpu = Arc::new(Gpu::try_with_features(instance, Some(&surface), features).ok()?);
+                let (gpu, surface, renderer) = Gpu::for_surface(features, |instance| make(instance).ok_or_else(String::new)).ok()?;
+                prewarmed = renderer;
+                let gpu = Arc::new(gpu);
                 *self.gpu_pool.borrow_mut() = Arc::downgrade(&gpu);
                 self.gpu = Some(gpu);
                 surface
@@ -865,8 +866,8 @@ impl<T: 'static> Overlay<T> {
             crate::window::rebuild_renderer(&gpu.device, renderer, target_format, &mut self.rt);
             *format = target_format;
         } else {
-            let mut renderer = Renderer::new(&gpu.device, target_format);
-            renderer.set_srgb_blend(self.rt.srgb_blend());
+            let mut renderer = prewarmed.unwrap_or_else(|| Renderer::new(&gpu.device, target_format));
+            crate::window::rebuild_renderer(&gpu.device, &mut renderer, target_format, &mut self.rt);
             self.renderer = Some((renderer, target_format));
             self.rt.text.atlas.invalidate();
             self.rt.images.invalidate();

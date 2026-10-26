@@ -442,6 +442,7 @@ pub(crate) fn window_args(args: Option<Vec<String>>, process: impl FnOnce() -> A
 
 fn run_window_factory(options: crate::RunOptions, args: Args, factory: Factory) -> Result<(), String> {
     if args.headless() {
+        crate::render::discard_prewarm();
         let displays = desktop(&args, read_script(&args).as_ref()).displays();
         headless_window(factory(&displays), &displays, args, options)
     } else {

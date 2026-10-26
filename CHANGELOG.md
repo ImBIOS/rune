@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`rune::prewarm_gpu()`: the GPU device and render pipeline start on a thread before the first
+  window.** On macOS, Rune's run functions now make the device and compile the uber pipeline on a
+  thread while AppKit starts, and the first window or overlay opened at launch picks them up
+  (waiting if the thread is still working) instead of making them after the window exists. Call
+  `rune::prewarm_gpu()` first thing in `main` to start it sooner. A window whose compositor wants
+  features the prewarmed device lacks gets a new device as before; with no window at launch the
+  result is dropped. On a first launch after an install or update, when Metal compiles the
+  shaders, a window's content arrived about 135 ms sooner. Elsewhere it does nothing.
 - **`Gpu::instance()` no longer enables wgpu's indirect-call validation.** Rune issues no indirect
   draws or dispatches, and the validation pipeline wgpu builds for every device cost about 40 ms
   on a Mac's first launch after an install or update. Indirect draws a `Compositor` records on

@@ -530,6 +530,101 @@ impl Gpu {
         descriptor.flags.remove(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL);
         wgpu::Instance::new(descriptor)
     }
+
+    /// The GPU for a window's first surface, which `surface` makes from the instance:
+    /// `prewarm_gpu`'s device, with the renderer it made, when its adapter presents to that
+    /// surface and has `wanted`'s features; otherwise a new device on the same instance, so the
+    /// window never gets a second surface.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn for_surface<'w>(wanted: wgpu::Features, surface: impl FnOnce(&wgpu::Instance) -> Result<wgpu::Surface<'w>, String>)
+        -> Result<(Gpu, wgpu::Surface<'w>, Option<Renderer>), String> {
+        Self::for_surface_from(prewarm::take(), wanted, surface)
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn for_surface_from<'w>(early: Option<(Gpu, Renderer)>, wanted: wgpu::Features,
+        surface: impl FnOnce(&wgpu::Instance) -> Result<wgpu::Surface<'w>, String>) -> Result<(Gpu, wgpu::Surface<'w>, Option<Renderer>), String> {
+        let Some((early, renderer)) = early else {
+            let instance = Self::instance();
+            let surface = surface(&instance)?;
+            return Ok((Self::try_with_features(instance, Some(&surface), wanted)?, surface, None));
+        };
+        let surface = surface(&early.instance)?;
+        if early.adapter.is_surface_supported(&surface) && early.device.features().contains(wanted & early.adapter.features()) {
+            return Ok((early, surface, Some(renderer)));
+        }
+        let instance = early.instance.clone();
+        drop((renderer, early));
+        Ok((Self::try_with_features(instance, Some(&surface), wanted)?, surface, None))
+    }
+}
+
+/// Starts the GPU device and Rune's render pipeline on a thread, so they're ready when the first
+/// window opens instead of being made after AppKit starts, which is most of a first launch after
+/// an install or update (when Metal compiles the shaders). Call it first thing in `main`; Rune's
+/// run functions call it too, but only once they start the event loop.
+///
+/// A window or overlay opened at launch picks the result up, waiting for the thread if it's still working;
+/// if none opens, it's dropped. Calling again does nothing. Only on macOS, where any Metal adapter
+/// presents to any window; elsewhere the window's surface decides the adapter, and this does
+/// nothing.
+pub fn prewarm_gpu() {
+    prewarm::start();
+}
+
+/// Drops what `prewarm_gpu` made if no window took it.
+pub(crate) fn discard_prewarm() {
+    prewarm::discard();
+}
+
+#[cfg(target_os = "macos")]
+mod prewarm {
+    use super::{Gpu, Renderer};
+    use std::sync::{Mutex, atomic::{AtomicBool, Ordering}};
+    use std::thread::JoinHandle;
+
+    /// A Mac window's surface format (`surface_config`) unless the app blends in sRGB space, so
+    /// the window renders with the pipeline compiled here.
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+
+    struct Prewarmed(Gpu, Renderer);
+    // SAFETY: wgpu's objects are `Send`. The one part of a `Renderer` that isn't, the native
+    // surface renderer with its CoreVideo texture cache, is made on first use: a new renderer
+    // has none (asserted where it's made).
+    unsafe impl Send for Prewarmed {}
+
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    static THREAD: Mutex<Option<JoinHandle<Option<Prewarmed>>>> = Mutex::new(None);
+
+    pub(super) fn start() {
+        if STARTED.swap(true, Ordering::AcqRel) { return; }
+        let thread = std::thread::Builder::new().name("rune-gpu-prewarm".into()).spawn(|| {
+            objc2::rc::autoreleasepool(|_| {
+                let gpu = Gpu::try_new(Gpu::instance(), None).ok()?;
+                let renderer = Renderer::new(&gpu.device, FORMAT);
+                assert!(renderer.surfaces.is_none(), "a new renderer has no native surface renderer");
+                Some(Prewarmed(gpu, renderer))
+            })
+        });
+        if let Ok(thread) = thread { *THREAD.lock().unwrap_or_else(|e| e.into_inner()) = Some(thread); }
+    }
+
+    pub(super) fn take() -> Option<(Gpu, Renderer)> {
+        let thread = THREAD.lock().unwrap_or_else(|e| e.into_inner()).take()?;
+        thread.join().ok().flatten().map(|Prewarmed(gpu, renderer)| (gpu, renderer))
+    }
+
+    /// The thread, if still working, drops its result when it finishes.
+    pub(super) fn discard() {
+        drop(THREAD.lock().unwrap_or_else(|e| e.into_inner()).take());
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod prewarm {
+    pub(super) fn start() {}
+    pub(super) fn take() -> Option<(super::Gpu, super::Renderer)> { None }
+    pub(super) fn discard() {}
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1291,3 +1386,60 @@ pub fn write_png(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) -
 #[cfg(test)]
 #[path = "render_backdrop_tests.rs"]
 mod backdrop_tests;
+
+/// `prewarm_gpu` and how a window picks it up, on a bare Metal layer (no window server needed).
+#[cfg(all(test, target_os = "macos"))]
+mod prewarm_tests {
+    use super::{Gpu, Renderer};
+    use objc2_video::{rc::Retained, runtime::{AnyClass, AnyObject}, msg_send};
+
+    fn layer() -> Retained<AnyObject> {
+        unsafe { msg_send![AnyClass::get(c"CAMetalLayer").expect("QuartzCore"), new] }
+    }
+
+    fn surface<'w>(instance: &wgpu::Instance, layer: &Retained<AnyObject>) -> Result<wgpu::Surface<'w>, String> {
+        let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(Retained::as_ptr(layer) as *mut std::ffi::c_void);
+        // SAFETY: the layer outlives the surface in each test.
+        unsafe { instance.create_surface_unsafe(target) }.map_err(|e| e.to_string())
+    }
+
+    /// The window gets the thread's device and its compiled pipeline, once, in the Mac window format.
+    #[test]
+    fn a_window_takes_the_prewarmed_gpu_and_renderer_once() {
+        crate::prewarm_gpu();
+        crate::prewarm_gpu();
+        let layer = layer();
+        let (gpu, _surface, renderer) = match Gpu::for_surface(wgpu::Features::empty(), |i| surface(i, &layer)) {
+            Ok(taken) => taken,
+            Err(error) => return eprintln!("skipped: {error}"),
+        };
+        let Some(renderer) = renderer else { return eprintln!("skipped: no GPU for the prewarm thread") };
+        assert_eq!(renderer.format, wgpu::TextureFormat::Bgra8UnormSrgb);
+        drop((renderer, gpu));
+        let (_, _surface, again) = Gpu::for_surface(wgpu::Features::empty(), |i| surface(i, &layer)).expect("a second GPU");
+        assert!(again.is_none(), "the prewarmed GPU goes to one window");
+    }
+
+    /// A prewarmed device without a feature the window wants (and the adapter has) is replaced on
+    /// the same instance, with the surface made once: a second surface would add a second layer.
+    #[test]
+    fn a_prewarmed_gpu_missing_wanted_features_is_redone_on_its_instance() {
+        let Ok(early) = Gpu::try_new(Gpu::instance(), None) else { return eprintln!("skipped: no GPU") };
+        let plain = wgpu::Features::FLOAT32_FILTERABLE | wgpu::Features::DEPTH32FLOAT_STENCIL8 | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
+        let missing = (early.adapter.features() - early.device.features()) & plain;
+        let Some(wanted) = missing.iter().next() else { return eprintln!("skipped: the adapter has none of the test's features") };
+        let renderer = Renderer::new(&early.device, wgpu::TextureFormat::Bgra8UnormSrgb);
+        let layer = layer();
+        let mut made = 0;
+        let (gpu, _surface, renderer) = Gpu::for_surface_from(Some((early, renderer)), wanted, |i| { made += 1; surface(i, &layer) })
+            .expect("a GPU with the wanted feature");
+        assert_eq!(made, 1);
+        assert!(renderer.is_none(), "the prewarmed renderer belongs to the dropped device");
+        assert!(gpu.device.features().contains(wanted));
+
+        let Ok(early) = Gpu::try_new(Gpu::instance(), None) else { return };
+        let renderer = Renderer::new(&early.device, wgpu::TextureFormat::Bgra8UnormSrgb);
+        let (_, _surface, kept) = Gpu::for_surface_from(Some((early, renderer)), wgpu::Features::empty(), |i| surface(i, &layer)).expect("a GPU");
+        assert!(kept.is_some(), "a suitable prewarmed device keeps its renderer");
+    }
+}

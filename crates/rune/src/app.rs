@@ -351,6 +351,7 @@ impl<S: 'static> App<S> {
             None => Args::parse(),
         };
         if args.headless() {
+            crate::render::discard_prewarm();
             crate::tooling::try_headless(self, args)
         } else {
             crate::window::run(self, args)

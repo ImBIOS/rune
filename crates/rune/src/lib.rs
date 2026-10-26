@@ -103,6 +103,7 @@ pub mod image;
 #[cfg(feature = "hot")]
 pub mod hot;
 pub mod render;
+pub use render::prewarm_gpu;
 mod record;
 mod headless_run;
 mod keycaps;
