@@ -604,7 +604,7 @@ struct Inh {
     paint_clip: [f32; 4],
     paint_fade: [f32; 4],
     paint_fade_origin: [f32; 4],
-    rounded: Option<([f32; 4], f32)>,
+    rounded: Option<([f32; 4], [f32; 4])>,
     /// Ancestors' scales, composed: a point `x` (points, with `dx`/`dy` applied) draws at
     /// `anchor_to + (x - anchor) * scale`. The anchors differ when scales nest.
     scale: f32,
@@ -5828,9 +5828,23 @@ impl<S: 'static> Runtime<S> {
             }
             let intersect = |a: [f32; 4], b: [f32; 4]| [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
             // A negative clip radius rounds with continuous corners (`render::corner_extent`).
-            let mut own_round = n.vis.clip_radius.map(|radius| {
-                let radius = (radius * sc * s).min(w.min(h) * 0.5);
-                (r, if n.vis.continuous_corners { -radius } else { radius })
+            let mut own_round = n.vis.clip_corners.or_else(|| {
+                n.vis.clip_radius.map(|radius| {
+                    if n.vis.radius != [0.0; 4]
+                        && (n.vis.radius != [n.vis.radius[0]; 4] || radius == 0.0 || n.vis.radius == [radius; 4])
+                    {
+                        p.radius.0
+                    } else {
+                        [radius; 4]
+                    }
+                })
+            }).map(|radii| {
+                let half = w.min(h) * 0.5;
+                let radii = radii.map(|radius| {
+                    let r = (radius.max(0.0) * sc * s).min(half);
+                    if n.vis.continuous_corners && r > 0.0 { -r } else { r }
+                });
+                (r, radii)
             });
             let mut hit_clip = intersect(pinh.clip, clip);
             if let Some((rect, _)) = own_round { hit_clip = intersect(hit_clip, rect); }
@@ -5840,12 +5854,13 @@ impl<S: 'static> Runtime<S> {
             // Its hard edges already exclude everything the rounded mask would remove.
             for (idx, round) in [&mut rounded, &mut own_round].into_iter().enumerate() {
                 if open_cache && idx == 1 { continue; }
-                if let Some((mask, radius)) = *round {
-                    let radius = crate::render::corner_extent(radius);
+                if let Some((mask, radii)) = *round {
+                    let e = radii.map(crate::render::corner_extent);
+                    let (left, right, top, bottom) = (e[0].max(e[3]), e[1].max(e[2]), e[0].max(e[1]), e[2].max(e[3]));
                     let cut = intersect(clip, mask);
                     if cut[2] <= cut[0] || cut[3] <= cut[1]
-                        || (cut[0] >= mask[0] + radius && cut[2] <= mask[2] - radius)
-                        || (cut[1] >= mask[1] + radius && cut[3] <= mask[3] - radius) {
+                        || (cut[0] >= mask[0] + left && cut[2] <= mask[2] - right)
+                        || (cut[1] >= mask[1] + top && cut[3] <= mask[3] - bottom) {
                         clip = cut;
                         *round = None;
                     }
@@ -5864,11 +5879,10 @@ impl<S: 'static> Runtime<S> {
             // Two rounded rectangles cannot generally be represented by one rounded rectangle.
             // Consume the ancestor on an outer composite, retaining both original corner centres.
             if !skip_paint && rounded.is_some() && own_round.is_some() && rounded != own_round {
-                let (mask, radius) = rounded.take().unwrap();
-                let mut marker = Instance::begin_layer([r[0], r[1], w, h], mask,
-                    crate::render::LayerSpec { clip_radius: radius, ..Default::default() });
+                let (mask, radii) = rounded.take().unwrap();
+                let mut marker = Instance::begin_layer([r[0], r[1], w, h], mask, Default::default());
                 marker.fade = crate::render::pack_fade(fade, fade_origin, mask);
-                marker.round_clip(radius);
+                marker.round_clip_corners(radii);
                 layers.push((i, self.instances.len(), self.surfaces.len()));
                 self.instances.push(marker);
                 clip = NO_CLIP; fade = [0.0; 4]; fade_origin = NO_CLIP;
@@ -5888,9 +5902,9 @@ impl<S: 'static> Runtime<S> {
                 let mut marker = Instance::begin_layer([r[0], r[1], w, h], clip,
                     crate::render::LayerSpec { opacity: own * pinh.paint_opacity,
                         blend: if dissolve { crate::render::Blend::PlusLighter } else { crate::render::Blend::SourceOver },
-                        blur: p.blur * sc * s, clip_radius: rounded.map_or(0.0, |(_, radius)| radius) });
+                        blur: p.blur * sc * s, clip_radius: 0.0 });
                 marker.fade = crate::render::pack_fade(fade, fade_origin, clip);
-                if let Some((_, radius)) = rounded { marker.round_clip(radius); }
+                if let Some((_, radii)) = rounded { marker.round_clip_corners(radii); }
                 self.instances.push(marker);
                 // Clip the completed layer, never its inputs (including off-wall blur taps).
                 clip = NO_CLIP; fade = [0.0; 4]; fade_origin = NO_CLIP; rounded = None;
@@ -6571,9 +6585,10 @@ impl<S: 'static> Runtime<S> {
                     }
                 }
             }
-            if let Some((_, radius)) = rounded {
-                for instance in &mut self.instances[primitive_start..] { instance.round_clip(radius); }
-                for surface in &mut self.surfaces[surface_start..] { surface.fade[3] = radius.to_bits(); }
+            if let Some((_, radii)) = rounded {
+                for instance in &mut self.instances[primitive_start..] { instance.round_clip_corners(radii); }
+                let packed = crate::render::pack_clip_radii(clip, radii);
+                for surface in &mut self.surfaces[surface_start..] { surface.fade[3] = packed; }
             }
             // A faded effect slot's layer carries its clip; the slot and the layer's end don't.
             if let Some(at) = faded_slot {

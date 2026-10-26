@@ -343,7 +343,7 @@ impl Renderer {
             }
             let l = &self.layers.plan[index];
             if cache_target.is_none() && l.opacity == 1.0 && l.blend == Blend::SourceOver && !additive_parent
-                && l.blur == 0.0 && l.clip_radius == 0.0 && l.clip == NO_CLIP {
+                && l.blur == 0.0 && l.fade[3] == 0 && l.clip == NO_CLIP {
                 self.layers.targets[index] = None;
                 continue;
             }

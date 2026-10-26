@@ -87,26 +87,39 @@ fn ramp(d: f32, width: f32) -> f32 {
         clip *= a;
     }
     var mask = 1.0;
-    let clip_radius = bitcast<f32>(u.fade.w);
-    if clip_radius > 0.0 {
+    if u.fade.w != 0u {
         let h = (u.clip.zw-u.clip.xy)*0.5;
-        let r = min(clip_radius, min(h.x,h.y));
-        let q = abs(p-u.clip.xy-h)-h+r;
-        let d = min(max(q.x,q.y),0.0)+length(max(q,vec2<f32>(0.0)))-r;
-        mask = clamp(0.5-d,0.0,1.0);
-    } else if clip_radius < 0.0 {
-        // Continuous corners, as `sd_continuous` in shader.wgsl.
-        let h = (u.clip.zw-u.clip.xy)*0.5;
-        let e = 1.52866483 * min(-clip_radius, min(h.x,h.y));
-        let q = h - abs(p-u.clip.xy-h);
-        let v = vec2<f32>(e) - q;
-        var d = max(-q.x, -q.y);
-        if v.x > 0.0 && v.y > 0.0 {
-            let w = atan2(v.y, v.x) * (4.0 / 3.14159265) - 1.0;
-            let w2 = w * w;
-            d = length(v) - e * (1.14602295 + w2 * (-0.37573161 + w2 * (0.30796609 - 0.07724354 * w2)));
+        let rel = p-u.clip.xy-h;
+        var clip_radius = bitcast<f32>(u.fade.w);
+        if (u.fade.w & 0x60000000u) == 0x60000000u {
+            let step = select(0.5, 2.0, (u.fade.w & 0x10000000u) != 0u);
+            let sgn = select(1.0, -1.0, (u.fade.w & 0x80000000u) != 0u);
+            var q_shift = 0u;
+            if rel.x > 0.0 {
+                q_shift = select(7u, 14u, rel.y > 0.0);
+            } else {
+                q_shift = select(0u, 21u, rel.y > 0.0);
+            }
+            clip_radius = f32((u.fade.w >> q_shift) & 0x7fu) * step * sgn;
         }
-        mask = clamp(0.5-d,0.0,1.0);
+        if clip_radius > 0.0 {
+            let r = min(clip_radius, min(h.x,h.y));
+            let q = abs(rel)-h+r;
+            let d = min(max(q.x,q.y),0.0)+length(max(q,vec2<f32>(0.0)))-r;
+            mask = clamp(0.5-d,0.0,1.0);
+        } else if clip_radius < 0.0 {
+            // Continuous corners, as `sd_continuous` in shader.wgsl.
+            let e = 1.52866483 * min(-clip_radius, min(h.x,h.y));
+            let q = h - abs(rel);
+            let v = vec2<f32>(e) - q;
+            var d = max(-q.x, -q.y);
+            if v.x > 0.0 && v.y > 0.0 {
+                let w = atan2(v.y, v.x) * (4.0 / 3.14159265) - 1.0;
+                let w2 = w * w;
+                d = length(v) - e * (1.14602295 + w2 * (-0.37573161 + w2 * (0.30796609 - 0.07724354 * w2)));
+            }
+            mask = clamp(0.5-d,0.0,1.0);
+        }
     }
     return col * (clamp(0.5-distance,0.0,1.0)*clip*mask*u.color.w);
 }

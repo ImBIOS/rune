@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Per-corner and continuous-corner rounded clipping (`El::clip_rounded`, `El::clip_corners`).**
+  `El::clip_rounded` now follows the element's own per-corner radii (`El::corners`) and corner
+  curve (`El::continuous_corners`) with no extra call, and `El::clip_corners([tl, tr, br, bl])`
+  overrides the four clip corner radii directly. Mixed corner radii pack into `Instance::fade[3]`
+  while uniform radii keep their exact IEEE-754 `f32` representation across the direct path,
+  isolated layers, native video surfaces, `CLIP_WGSL`, and `rune-ref`.
+
 - **`SparkleParams::count` cap raised from 32 to 64.** `rune-fx` sparkles now pack and evaluate up
   to 64 four-point stars per layer (`p.count.min(64)`, 128 `vec4f` entries in the pre-allocated
   4096-entry table buffer) so wide banners can keep star density without splitting across layers.

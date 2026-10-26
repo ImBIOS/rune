@@ -295,3 +295,151 @@ fn rounded_clip_single_line_input_keeps_the_original_mask() {
         } }
     }
 }
+
+#[test]
+fn per_corner_continuous_card_clips_image_child_and_nested_layers() {
+    let gpu = Gpu::headless();
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let target = Offscreen::new(&gpu.device, 128, 96);
+
+    let card_img = crate::pixels::Pixels::new();
+    let mut card_rgba = Vec::with_capacity(80 * 56 * 4);
+    for y in 0..56u32 {
+        for x in 0..80u32 {
+            card_rgba.extend_from_slice(&[
+                (36 + x * 2) as u8,
+                (64 + y * 3) as u8,
+                (210 - x * 2) as u8,
+                255,
+            ]);
+        }
+    }
+    card_img.set(80, 56, card_rgba);
+
+    // Overflowing 96x72 child image: identical to `card_img` inside the 80x56 card (offset by 8,8),
+    // with an opaque bleed ring outside that the card's clip must remove completely.
+    let child_img = crate::pixels::Pixels::new();
+    let mut child_rgba = Vec::with_capacity(96 * 72 * 4);
+    for y in 0..72i32 {
+        for x in 0..96i32 {
+            if (8..88).contains(&x) && (8..64).contains(&y) {
+                let (cx, cy) = ((x - 8) as u32, (y - 8) as u32);
+                child_rgba.extend_from_slice(&[
+                    (36 + cx * 2) as u8,
+                    (64 + cy * 3) as u8,
+                    (210 - cx * 2) as u8,
+                    255,
+                ]);
+            } else {
+                child_rgba.extend_from_slice(&[255, 60, 120, 255]);
+            }
+        }
+    }
+    child_img.set(96, 72, child_rgba);
+
+    // 1. Continuous-corner card with mixed radii (`[14, 14, 0, 0]` top banner and `[18, 6, 14, 4]`
+    //    all four distinct): `clip_rounded` follows the element's own `corners` + `continuous_corners`
+    //    with no extra call, clipping an overflowing `El::pixels` child to its own edge.
+    for corners in [[14.0, 14.0, 0.0, 0.0], [18.0, 6.0, 14.0, 4.0]] {
+        type State = (crate::pixels::Pixels, crate::pixels::Pixels, [f32; 4], u8);
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let (card_img, child_img, corners, mode) = (&s.0, &s.1, s.2, s.3);
+            match mode {
+                // Reference: 80x56 image drawn directly on the continuous-corner card inside its
+                // hard bounds.
+                0 => el().child(
+                    el().size(80.0, 56.0)
+                        .absolute(24.0, 20.0)
+                        .clip_soft(0.0)
+                        .child(
+                            el().size(80.0, 56.0)
+                                .corners(corners)
+                                .continuous_corners()
+                                .pixels(card_img),
+                        ),
+                ),
+                // Direct clip path: card with `corners` + `continuous_corners` + `clip_rounded`
+                // clipping an overflowing 96x72 child image to its own edge.
+                1 => el().child(
+                    el().size(80.0, 56.0)
+                        .absolute(24.0, 20.0)
+                        .corners(corners)
+                        .continuous_corners()
+                        .clip_rounded(corners[0])
+                        .child(el().size(96.0, 72.0).absolute(-8.0, -8.0).pixels(child_img)),
+                ),
+                // Explicit `clip_corners` on an isolated layer (`opacity(0.9999)` forces a layer).
+                _ => el().child(
+                    el().size(80.0, 56.0)
+                        .absolute(24.0, 20.0)
+                        .continuous_corners()
+                        .clip_corners(corners)
+                        .opacity(0.9999)
+                        .child(el().size(96.0, 72.0).absolute(-8.0, -8.0).pixels(child_img)),
+                ),
+            }
+        }
+
+        let mut outs = Vec::new();
+        for mode in 0..3u8 {
+            let mut rt = Runtime::new(
+                (card_img.clone(), child_img.clone(), corners, mode),
+                view,
+                (128.0, 96.0),
+                Env::new(true, 1.0),
+            );
+            rt.frame(0.0);
+            renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (128, 96));
+            if mode == 1 {
+                assert_eq!(renderer.layer_stats().extra_passes, 0, "mixed continuous clip stays on the direct path");
+            } else if mode == 2 {
+                assert_eq!(renderer.layer_stats().extra_passes, 1, "isolated layer path exercised");
+            }
+            outs.push(pixels(&gpu, &renderer, &target));
+        }
+        // Check that top-left is rounded away while bottom-right is sharp when corners[2] == 0.0.
+        if corners[2] == 0.0 {
+            let tl_alpha = outs[1][(20 * 128 + 24) * 4 + 3];
+            let br_alpha = outs[1][((20 + 55) * 128 + (24 + 79)) * 4 + 3];
+            assert_eq!(tl_alpha, 0, "top-left continuous corner is clipped");
+            assert_eq!(br_alpha, 255, "bottom-right zero-radius corner stays sharp");
+        }
+        for mode in [1usize, 2] {
+            for (idx, (&got, &want)) in outs[mode].iter().zip(&outs[0]).enumerate() {
+                assert!(
+                    got.abs_diff(want) <= 1,
+                    "corners={corners:?} mode={mode} byte {idx}: got {got} vs want {want}"
+                );
+            }
+        }
+    }
+
+    // 2. Nested mixed-corner clips fall back to an outer layer and intersect both masks.
+    fn nested(img: &crate::pixels::Pixels, _: &mut Cx<crate::pixels::Pixels>) -> El {
+        el().child(
+            el().size(80.0, 56.0)
+                .absolute(24.0, 20.0)
+                .corners([16.0, 16.0, 0.0, 0.0])
+                .continuous_corners()
+                .clip_rounded(16.0)
+                .child(
+                    el().size(80.0, 56.0)
+                        .corners([0.0, 0.0, 16.0, 16.0])
+                        .continuous_corners()
+                        .clip_rounded(16.0)
+                        .child(el().size(80.0, 56.0).pixels(img)),
+                ),
+        )
+    }
+    let mut rt = Runtime::new(card_img, nested, (128.0, 96.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
+    renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (128, 96));
+    assert_eq!(renderer.layer_stats().extra_passes, 1, "nested distinct per-corner clips open one outer layer");
+    let out = pixels(&gpu, &renderer, &target);
+    for (x, y) in [(24, 20), (103, 20), (103, 75), (24, 75)] {
+        assert_eq!(out[(y * 128 + x) * 4 + 3], 0, "all four corners are clipped by the nested intersection at ({x},{y})");
+    }
+    assert_eq!(out[(48 * 128 + 64) * 4 + 3], 255, "interior remains opaque");
+}

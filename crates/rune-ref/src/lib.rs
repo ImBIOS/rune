@@ -21,7 +21,7 @@ pub struct Primitive {
     pub rect: [f32; 4],
     pub radii: [f32; 4],
     pub fill: [f32; 4],
-    /// Border paint; for a layer (kind 8), `[signed_clip_radius, 0, 0, 0]`.
+    /// Border paint; for a layer (kind 8), signed per-corner clip radii `[tl, tr, br, bl]`.
     pub border: [f32; 4],
     pub params: [f32; 4],
     pub uv: [f32; 4],
@@ -115,7 +115,11 @@ impl Scene {
                 || (p.params[0] < 0.0 && p.params[1] != 2.0)
                 || p.params[2] < 0.0
                 || !color(&p.fill)
-                || (if p.params[1] == 8.0 { p.border[1..] != [0.0; 3] } else { !color(&p.border) })
+                || (if p.params[1] == 8.0 {
+                    p.border.iter().any(|&v| v < 0.0) && p.border.iter().any(|&v| v > 0.0)
+                } else {
+                    !color(&p.border)
+                })
                 || (p.params[1] == 4.0 && !color(&p.uv))
                 || (p.params[1] == 10.0 && (p.uv[0] <= 0.0 || p.uv[1] <= 0.0))
                 || (p.params[1] == 11.0 && (p.uv[2] < 0.0 || p.uv[3] < 0.0 || (p.uv[2] > 0.0) != (p.uv[3] > 0.0)))
@@ -195,7 +199,7 @@ impl Frame {
                         close += 1;
                     }
                 }
-                if p.params[3] == 0.0 && p.fill[3] == 1.0 && p.params[0] == 0.0 && p.params[2] == 0.0 && p.clip == NO_CLIP && p.border[0] == 0.0 {
+                if p.params[3] == 0.0 && p.fill[3] == 1.0 && p.params[0] == 0.0 && p.params[2] == 0.0 && p.clip == NO_CLIP && p.border == [0.0; 4] {
                     Self::render_range(width, height, rgba, owners.as_deref_mut(), scene, cursor + 1, close);
                 } else if p.fill[3] > 0.0 {
                     let mut layer_rgba = vec![0u8; (width * height * 4) as usize];

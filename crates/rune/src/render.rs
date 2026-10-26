@@ -325,13 +325,58 @@ pub fn unpack_fade(fade: [u32; 4]) -> ([f32; 4], [f32; 4]) {
 
 pub const NO_CLIP: [f32; 4] = [-1e6, -1e6, 1e6, 1e6];
 
+/// Pack per-corner signed clip radii `[tl, tr, br, bl]` (negative = continuous corners)
+/// into `Instance::fade[3]`, clamping each corner to half the shorter `clip` side.
+/// Uniform corners stay an exact IEEE-754 `f32`; mixed corners use the `0x6000_0000`
+/// high-exponent tag (`|r| >= 2^65` in IEEE-754) with 4 × 7-bit magnitudes.
+pub fn pack_clip_radii(clip: [f32; 4], radii: [f32; 4]) -> u32 {
+    let half = ((clip[2] - clip[0]).min(clip[3] - clip[1]) * 0.5).max(0.0);
+    let clamped = radii.map(|radius| {
+        let r = radius.abs().min(half);
+        if radius < 0.0 && r > 0.0 { -r } else { r }
+    });
+    if clamped[0] == clamped[1] && clamped[1] == clamped[2] && clamped[2] == clamped[3] {
+        return if clamped[0] == 0.0 { 0 } else { clamped[0].to_bits() };
+    }
+    let continuous = clamped.iter().any(|&r| r < 0.0);
+    let max_r = clamped.iter().fold(0.0f32, |m, r| m.max(r.abs()));
+    let coarse = max_r > 63.5;
+    let inv_step = if coarse { 0.5 } else { 2.0 };
+    let mut bits = 0x6000_0000u32
+        | if continuous { 0x8000_0000 } else { 0 }
+        | if coarse { 0x1000_0000 } else { 0 };
+    for (idx, r) in clamped.into_iter().enumerate() {
+        let q = (r.abs() * inv_step).round().clamp(0.0, 127.0) as u32;
+        bits |= q << (idx * 7);
+    }
+    bits
+}
+
+/// Decode `Instance::fade[3]` into four signed corner radii `[tl, tr, br, bl]`.
+pub fn unpack_clip_radii(w: u32) -> [f32; 4] {
+    if w == 0 {
+        return [0.0; 4];
+    }
+    if (w & 0x6000_0000) != 0x6000_0000 {
+        return [f32::from_bits(w); 4];
+    }
+    let step = if (w & 0x1000_0000) != 0 { 2.0 } else { 0.5 };
+    let sign = if (w & 0x8000_0000) != 0 { -1.0 } else { 1.0 };
+    std::array::from_fn(|idx| {
+        let q = (w >> (idx * 7)) & 0x7f;
+        if q == 0 { 0.0 } else { q as f32 * step * sign }
+    })
+}
+
 impl Instance {
     /// Rounded clipping shares the packed fade ABI across primitives and layer composites.
     /// A negative radius keeps its sign: continuous corners (`corner_extent`).
     pub(crate) fn round_clip(&mut self, radius: f32) {
-        let half = ((self.clip[2] - self.clip[0]).min(self.clip[3] - self.clip[1]) * 0.5).max(0.0);
-        let r = radius.abs().min(half);
-        self.fade[3] = if radius < 0.0 { -r } else { r }.to_bits();
+        self.round_clip_corners([radius; 4]);
+    }
+
+    pub(crate) fn round_clip_corners(&mut self, radii: [f32; 4]) {
+        self.fade[3] = pack_clip_radii(self.clip, radii);
     }
 
     /// Begin an isolated scope. `bounds` is a device-pixel [x,y,w,h] content bound, including

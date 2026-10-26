@@ -15,8 +15,8 @@ impl Primitive {
             rect: p.rect,
             radii: p.radii,
             fill: p.fill,
-            // A layer has no border paint; preserve its signed rounded-clip radius here.
-            border: if p.params[1] == 8.0 { [f32::from_bits(p.fade[3]), 0.0, 0.0, 0.0] } else { p.border },
+            // A layer has no border paint; preserve its signed per-corner rounded-clip radii here.
+            border: if p.params[1] == 8.0 { rune::render::unpack_clip_radii(p.fade[3]) } else { p.border },
             params: p.params,
             uv: p.uv,
             clip: p.clip,
@@ -38,7 +38,9 @@ impl From<&Primitive> for Instance {
             clip: p.clip,
             fade: rune::render::pack_fade(p.fade, p.fade_origin.unwrap_or(p.clip), p.clip),
         };
-        if p.params[1] == 8.0 { instance.fade[3] = p.border[0].to_bits(); }
+        if p.params[1] == 8.0 {
+            instance.fade[3] = rune::render::pack_clip_radii(p.clip, p.border);
+        }
         instance
     }
 }

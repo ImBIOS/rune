@@ -40,6 +40,21 @@ fn ramp(d: f32, fade: f32) -> f32 {
     return x * x * (3.0 - 2.0 * x);
 }
 
+fn unpack_clip_radii(w: u32) -> vec4<f32> {
+    if (w == 0u) { return vec4<f32>(0.0); }
+    if ((w & 0x60000000u) != 0x60000000u) {
+        return vec4<f32>(bitcast<f32>(w));
+    }
+    let step = select(0.5, 2.0, (w & 0x10000000u) != 0u);
+    let sgn = select(1.0, -1.0, (w & 0x80000000u) != 0u);
+    return vec4<f32>(
+        f32(w & 0x7fu),
+        f32((w >> 7u) & 0x7fu),
+        f32((w >> 14u) & 0x7fu),
+        f32((w >> 21u) & 0x7fu),
+    ) * (step * sgn);
+}
+
 fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
     let f = vec4<f32>(unpack2x16float(packed.x), unpack2x16float(packed.y));
     let offset = unpack4x8unorm(packed.z);
@@ -55,10 +70,9 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
         }
         alpha *= a;
     }
-    let radius = bitcast<f32>(packed.w);
-    if radius != 0.0 {
+    if packed.w != 0u {
         let half = (c.zw - c.xy) * 0.5;
-        alpha *= clamp(0.5 - sd_rounded(p - c.xy - half, half, vec4(radius)), 0.0, 1.0);
+        alpha *= clamp(0.5 - sd_rounded(p - c.xy - half, half, unpack_clip_radii(packed.w)), 0.0, 1.0);
     }
     return alpha;
 }

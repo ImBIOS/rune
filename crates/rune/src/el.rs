@@ -914,6 +914,8 @@ pub struct Visual {
     pub clip: Option<[f32; 4]>,
     /// Rounded clip of this element and its subtree, applied after subtree filters.
     pub clip_radius: Option<f32>,
+    /// Per-corner clip radii override (`[tl, tr, br, bl]`, in points).
+    pub(crate) clip_corners: Option<[f32; 4]>,
     pub icon: Option<(&'static Icon, Color)>,
     /// Vertical linear gradient (top, bottom) painted over the fill, under hover/press overlays.
     pub gradient: Option<[Color; 2]>,
@@ -975,6 +977,7 @@ impl Default for Visual {
             press: Color::TRANSPARENT,
             clip: None,
             clip_radius: None,
+            clip_corners: None,
             icon: None,
             gradient: None,
             radial: None,
@@ -2464,12 +2467,23 @@ impl El {
         self.vis.clip = Some([fade; 4]);
         self
     }
-    /// Clip this element and its descendants to its presented rounded rectangle. Radius is in
-    /// points, capped at half the shorter edge. Filters run before this mask. Nested masks
-    /// intersect without moving either rectangle's corners; complex intersections use a layer.
-    /// Hit testing uses the rectangular clip bounds, including visually clipped corner areas.
+    /// Clip this element and its descendants to its presented rounded rectangle. Follows
+    /// [`El::corners`] and [`El::continuous_corners`] when set on this element; otherwise rounds
+    /// all four corners by `radius` points (capped at half the shorter edge). Filters run before
+    /// this mask. Nested masks intersect without moving either rectangle's corners; complex
+    /// intersections use a layer. Hit testing uses the rectangular clip bounds, including visually
+    /// clipped corner areas.
     pub fn clip_rounded(mut self, radius: f32) -> Self {
         self.vis.clip_radius = Some(radius.max(0.0));
+        self
+    }
+    /// Clip this element and its descendants to its presented rectangle with per-corner radii
+    /// `[top_left, top_right, bottom_right, bottom_left]` in points, capped at half the shorter
+    /// edge and following [`El::continuous_corners`].
+    pub fn clip_corners(mut self, radii: [f32; 4]) -> Self {
+        let clamped = radii.map(|r| r.max(0.0));
+        self.vis.clip_corners = Some(clamped);
+        self.vis.clip_radius = Some(clamped.into_iter().fold(0.0, f32::max));
         self
     }
     /// Soft clip with a fade width per side (left, top, right, bottom).

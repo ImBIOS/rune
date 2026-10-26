@@ -394,9 +394,17 @@ fn cpu_gpu_cached_rounded_clip() {
     paint.clip = rune_ref::NO_CLIP;
     paint.fade = [0.0; 4];
     paint.fade_origin = None;
-    scene.primitives = vec![Primitive::from_instance(&begin, 1, "rounded".into()), paint,
+    scene.primitives = vec![Primitive::from_instance(&begin, 1, "rounded".into()), paint.clone(),
         Primitive::from_instance(&Instance::end_layer(), 3, "end".into())];
     assert_eq!(f32::from_bits(Instance::from(&scene.primitives[0]).fade[3]), 8.0,
         "replay capture must preserve the rounded clip, not compare two square layers");
-    check(&mut GpuRenderer::default(), &scene, 2).expect("rounded layer survives replay capture");
+    let mut gpu = GpuRenderer::default();
+    check(&mut gpu, &scene, 2).expect("rounded layer survives replay capture");
+
+    let mut mixed = Instance::begin_layer([0.0, 0.0, 24.0, 24.0], [0.0, 0.0, 24.0, 24.0], LayerSpec::default());
+    mixed.fade[3] = rune::render::pack_clip_radii(mixed.clip, [-10.0, -10.0, 0.0, -4.0]);
+    scene.primitives = vec![Primitive::from_instance(&mixed, 1, "mixed-continuous".into()), paint,
+        Primitive::from_instance(&Instance::end_layer(), 3, "end".into())];
+    assert_eq!(scene.primitives[0].border, [-10.0, -10.0, 0.0, -4.0]);
+    check(&mut gpu, &scene, 2).expect("mixed continuous-corner layer matches CPU oracle");
 }
