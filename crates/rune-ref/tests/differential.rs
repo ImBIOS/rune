@@ -377,6 +377,44 @@ fn cpu_gpu_cached_subtrees() {
     for (a, b) in gpu_uncached.iter().zip(&gpu_cached) {
         assert!(a.abs_diff(*b) <= 1, "cached vs uncached GPU mismatch: {a} vs {b}");
     }
+
+    // A scrolled multi-line text culls offscreen lines by band and clips overhanging ink at the
+    // viewport edges identically on CPU and GPU.
+    fn scrolled(_: &(), _: &mut Cx<()>) -> El {
+        let lines = (0..40).map(|i| format!("Line {i:02} rune")).collect::<Vec<_>>().join("\n");
+        col()
+            .size(64.0, 64.0)
+            .padding(6.0)
+            .fill(Color { r: 0.06, g: 0.08, b: 0.12, a: 1.0 })
+            .child(
+                col()
+                    .w_full()
+                    .h(52.0)
+                    .scroll(rune::ScrollSpec { stick_bottom: false })
+                    .child(text(lines).font(rune::TextStyle::new(11.0, 400.0).lh(14.0)).color(Color::WHITE)),
+            )
+    }
+    let mut rt = Runtime::new((), scrolled, (64.0, 64.0), Env { scale: 1.0, system_dark: true });
+    rt.frame(0.0);
+    rt.wheel(32.0, 32.0, -145.0);
+    rt.frame(1.0 / 60.0);
+    let scrolled_scene = Scene {
+        width: 64,
+        height: 64,
+        clear: [0.025, 0.04, 0.06, 1.0],
+        primitives: rt
+            .instances
+            .iter()
+            .enumerate()
+            .map(|(idx, inst)| Primitive::from_instance(inst, idx as u32 + 1, format!("scroll/{idx}")))
+            .collect(),
+        atlas: rune_ref::Atlas {
+            width: rune::text::ATLAS_SIZE,
+            height: rune::text::ATLAS_SIZE,
+            data: rt.text.atlas.data.clone(),
+        },
+    };
+    check(&mut gpu, &scrolled_scene, 2).expect("scrolled multi-line text CPU vs GPU");
 }
 
 #[test]

@@ -132,6 +132,7 @@ building, diffing and laying out every field each commit, about 2.2 ms at 1,600 
   focus to the neighbouring block; Backspace at a block's start merges it into the one above;
   Return splits it; a selection across blocks and an undo spanning blocks need an app-level
   model.
-- Handle Return. In a multi-line `text_input`, plain Return submits (to `on_submit`, or the
-  default button when there is none); Shift+Return and Option+Return type a newline. An editor
+- Handle Return. In a multi-line `text_input`, plain Return in a paragraph submits (to
+  `on_submit`, or the default button when there is none), while Shift+Return and Option+Return
+  type a newline (as does plain Return inside a rich list, quote or code block). An editor
   gives each field an `on_submit` that splits the block or inserts `"\n"`.

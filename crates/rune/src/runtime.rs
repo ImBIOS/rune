@@ -7157,10 +7157,11 @@ impl<S: 'static> Runtime<S> {
                         self.text.glyphs_in(r, *at, s, [r_origin[0] - x, r_origin[1]], &mut self.glyph_scratch);
                         tk
                     } else {
-                        // Only the lines the clip shows, with an em either side for ink past
+                        // Only the lines the clip shows, with two ems either side for ink past
                         // the line box; the per-glyph test below still decides what draws.
                         let band = if tk > 1e-4 {
-                            let pad = 2.0 * spec.style.size * s;
+                            let em = spec.spans.iter().filter_map(|sp| sp.size).fold(spec.style.size.max(spec.style.line_px()), f32::max);
+                            let pad = 2.0 * em * s + 2.0 / raster.max(1e-4);
                             (clip[1] - origin[1]) / tk - pad..(clip[3] - origin[1]) / tk + pad
                         } else {
                             f32::NEG_INFINITY..f32::INFINITY
@@ -11876,18 +11877,19 @@ mod tests {
     }
 
     /// A long text in a scroll view walks only the lines its clip shows: the glyphs of lines
-    /// far below aren't rasterized until scrolled to.
+    /// far below aren't rasterized until scrolled to, while a tall span whose line box sits
+    /// more than two base ems below the clip still paints the ascenders that reach inside.
     #[test]
     fn a_long_scrolled_text_paints_only_its_visible_lines() {
-        use crate::{text_input, TextEdit, TextStyle};
+        use crate::{text, text_input, Span, TextEdit, TextStyle};
         struct Note { edit: TextEdit }
         fn view(s: &Note, _: &mut Cx<Note>) -> El {
             col().w_full().h_full().child(col().key("viewport").w_full().h(200.0).scroll(ScrollSpec { stick_bottom: false })
                 .child(text_input(&s.edit, TextStyle::new(14.0, 400.0).lh(20.0)).key("note").w_full().on_edit(|s: &mut Note| &mut s.edit)))
         }
-        let mut text = "plain lowercase words only\n".repeat(500);
-        text += "QUIZ JOKE VEX";
-        let mut rt = Runtime::new(Note { edit: TextEdit::new(text) }, view, (300.0, 300.0), Env::new(true, 2.0));
+        let mut content = "plain lowercase words only\n".repeat(500);
+        content += "QUIZ JOKE VEX";
+        let mut rt = Runtime::new(Note { edit: TextEdit::new(content) }, view, (300.0, 300.0), Env::new(true, 2.0));
         rt.frame(0.0);
         let top = rt.text.atlas.glyph_entries();
         let glyphs = rt.stats.glyphs;
@@ -11895,6 +11897,18 @@ mod tests {
         rt.wheel(150.0, 100.0, -1e5);
         rt.frame(1.0 / 60.0);
         assert!(rt.text.atlas.glyph_entries() > top, "the capitals on the last line rasterize only once shown");
+
+        // Line 6 sits at y = 72..84 pt, 22 pt (> 2 * 10 pt) below the 50 pt clip, but its 120 pt
+        // span's ascender reaches up into the clip and must still paint.
+        fn span_view(_: &(), _: &mut Cx<()>) -> El {
+            let s = "a\n".repeat(6) + "T";
+            col().w_full().h_full().child(col().w_full().h(50.0).scroll(ScrollSpec { stick_bottom: false })
+                .child(text(&s).font(TextStyle::new(10.0, 400.0).lh(12.0)).spans(vec![Span::new(12, 13).size(120.0)])))
+        }
+        let mut rt = Runtime::new((), span_view, (200.0, 200.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        assert_eq!(rt.stats.glyphs, 5, "4 visible 'a' lines plus the overhanging 'T' glyph");
+        assert_eq!(rt.text.atlas.glyph_entries(), 2, "'a' and overhanging 'T' both rasterized");
     }
 
     /// The app clears its password as the card leaves; the exiting copy of the field must

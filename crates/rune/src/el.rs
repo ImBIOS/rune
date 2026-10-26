@@ -1431,6 +1431,11 @@ pub fn canvas(shape: Shape) -> El {
 }
 
 /// A text field showing `edit`; route edits back with `.on_edit(|s| &mut s.field)`.
+///
+/// Multi-line by default (see [`El::single_line`]). Plain Return in a paragraph submits (calling
+/// [`El::on_submit`], or pressing the [`El::default_button`] when none is set) while Shift+Return
+/// and Option+Return insert a line break; a document editor that wants plain Return to break
+/// paragraphs attaches `.on_submit(|s, _| s.field.insert("\n"))`.
 pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
     // An app may have assigned `edit.text` directly: clamp stale marks, blocks and caret to it.
     let mut edit = edit.clone();
@@ -3031,6 +3036,10 @@ impl El {
         }
         self
     }
+    /// Called when Return submits this text field. In a multi-line field (the default),
+    /// Shift+Return and Option+Return insert a newline (as does plain Return inside a list, quote
+    /// or code block), while plain Return in a paragraph calls `on_submit` — or presses the
+    /// [`El::default_button`] when the field has none.
     pub fn on_submit<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
         if let Some(i) = &mut self.input {
             i.submit = Some(Rc::new(move |s, tx| f(downcast::<S>(s), tx)));

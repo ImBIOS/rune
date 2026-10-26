@@ -2160,10 +2160,13 @@ impl TextSystem {
     ) {
         let mut table = std::mem::take(&mut self.cluster_scratch);
         let mut coords = std::mem::take(&mut self.coords_scratch);
-        let (mut lo, mut hi) = (0, layout.len());
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if layout.get(mid).is_some_and(|l| l.metrics().block_max_coord < band.start) { lo = mid + 1 } else { hi = mid }
+        let mut lo = 0;
+        if band.start > 0.0 {
+            let mut hi = layout.len();
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                if layout.get(mid).is_some_and(|l| l.metrics().block_max_coord < band.start) { lo = mid + 1 } else { hi = mid }
+            }
         }
         let lines = (lo..layout.len()).map_while(|i| layout.get(i).filter(|l| l.metrics().block_min_coord <= band.end));
         for line in lines {
