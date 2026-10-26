@@ -170,7 +170,7 @@ impl<S: 'static> Runtime<S> {
             .find_map(|i| {
                 let drop = self.nodes[i].drop.as_ref()?;
                 let (files, rejected) = drop.split(paths);
-                (!files.is_empty() || drop.claims_rejects()).then_some(Target { i, files, rejected })
+                (!files.is_empty() || (!rejected.is_empty() && drop.claims_rejects())).then_some(Target { i, files, rejected })
             })
     }
 

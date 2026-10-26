@@ -179,10 +179,11 @@ impl Pending {
 
 impl Tx {
     /// Show an Open dialog once this handler's frame is done. `on_answer` runs, as an action on
-    /// a later frame, with the chosen file, `Ok(None)` when the user cancels, or an error when
-    /// no dialog could show: a second dialog asked for while one is open, the web, or a build
-    /// without the `native-file-dialog` feature. Asked for while the window is hidden, it shows
-    /// when the window does. The window keeps drawing and handling events while the dialog is
+    /// a later frame, with the chosen file, `Ok(None)` when the user cancels (or the window
+    /// hides or closes), or an error when no dialog could show: a second dialog asked for while
+    /// one is open, a window that stays hidden, an overlay, the web, or a build without the
+    /// `native-file-dialog` feature. Asked for in the same turn that shows a hidden window, it
+    /// shows with the window. The window keeps drawing and handling events while the dialog is
     /// up: it's a sheet on macOS, owned by the window on Windows, and the desktop portal's
     /// chooser on Linux.
     ///
@@ -218,6 +219,8 @@ impl Tx {
 /// options and the window's handle, never the app's state or the runtime.
 pub(crate) struct Presenter {
     showing: Option<(u64, Pin<Box<dyn Future<Output = FileDialogResult>>>)>,
+    #[cfg(all(feature = "native-file-dialog", target_os = "macos"))]
+    sheet_parent: Option<objc2::rc::Retained<objc2_app_kit::NSWindow>>,
     wake: std::task::Waker,
 }
 
@@ -228,7 +231,14 @@ impl std::task::Wake for Wake {
 }
 
 impl Presenter {
-    pub(crate) fn new(wake: Waker) -> Self { Self { showing: None, wake: Arc::new(Wake(wake)).into() } }
+    pub(crate) fn new(wake: Waker) -> Self {
+        Self {
+            showing: None,
+            #[cfg(all(feature = "native-file-dialog", target_os = "macos"))]
+            sheet_parent: None,
+            wake: Arc::new(Wake(wake)).into(),
+        }
+    }
 
     /// Queues the answer of a dialog that closed. True when one did.
     pub(crate) fn answer<S: 'static>(&mut self, rt: &mut crate::Runtime<S>) -> bool {
@@ -236,6 +246,10 @@ impl Presenter {
         let Poll::Ready(result) = future.as_mut().poll(&mut Context::from_waker(&self.wake)) else { return false };
         let id = *id;
         self.showing = None;
+        #[cfg(all(feature = "native-file-dialog", target_os = "macos"))]
+        {
+            self.sheet_parent = None;
+        }
         rt.answer_file_dialog(id, result);
         true
     }
@@ -246,9 +260,37 @@ impl Presenter {
     pub(crate) fn open<S: 'static>(&mut self, rt: &mut crate::Runtime<S>, window: Option<&winit::window::Window>) -> bool {
         let Some(window) = window.filter(|_| self.showing.is_none()) else { return false };
         let Some((id, kind, options)) = rt.take_file_dialog() else { return false };
+        #[cfg(all(feature = "native-file-dialog", target_os = "macos"))]
+        {
+            self.sheet_parent = crate::macos::ns_window(window);
+        }
         self.showing = Some((id, show_over(kind, options, window)));
         self.answer(rt)
     }
+
+    /// The window is going away (hidden, closed or quitting): any attached sheet is ended and
+    /// the open or waiting dialog is answered `Ok(None)` while its state is alive.
+    pub(crate) fn cancel<S: 'static>(&mut self, rt: &mut crate::Runtime<S>) {
+        self.stop();
+        rt.cancel_file_dialogs();
+    }
+
+    fn stop(&mut self) {
+        self.showing = None;
+        #[cfg(all(feature = "native-file-dialog", target_os = "macos"))]
+        if let Some(window) = self.sheet_parent.take() {
+            // SAFETY: the host's (main) thread; `window` is a live `Retained<NSWindow>`.
+            unsafe {
+                if let Some(sheet) = window.attachedSheet() {
+                    window.endSheet(&sheet);
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Presenter {
+    fn drop(&mut self) { self.stop(); }
 }
 
 fn show_over(kind: FileDialogKind, options: FileDialogOptions, window: &winit::window::Window) -> Pin<Box<dyn Future<Output = FileDialogResult>>> {
@@ -361,5 +403,46 @@ mod tests {
         rt.refuse_file_dialog("unsupported");
         rt.frame(4.0 / 60.0);
         assert_eq!(rt.state.answers[1], Err("unsupported".to_owned()), "a host without dialogs refuses it");
+    }
+
+    #[test]
+    fn an_overlay_refuses_file_dialogs() {
+        let mut rt = Runtime::new(Import::default(), import, (200.0, 100.0), Env::new(true, 1.0));
+        rt.native_overlay = true;
+        rt.frame(0.0);
+        press(&mut rt);
+        assert!(rt.file_dialog().is_none(), "overlays never leave a dialog pending");
+        assert!(rt.keys_queued(), "hidden_input delivers the refusal without waiting for a show");
+        rt.frame(2.0 / 60.0);
+        assert_eq!(rt.state.answers, [Err("overlays cannot open file dialogs".to_owned())]);
+    }
+
+    #[test]
+    fn closing_or_hiding_cancels_open_and_queued_file_dialogs() {
+        let mut rt = Runtime::new(Import::default(), import, (200.0, 100.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.update(|_, tx| {
+            tx.open_file(FileDialogOptions::default(), |s: &mut Import, result, tx| {
+                s.answers.push(result.map_err(|e| e.0));
+                tx.save_file(FileDialogOptions::default(), |s: &mut Import, follow, _| {
+                    s.answers.push(follow.map_err(|e| e.0));
+                });
+            });
+            tx.save_file(FileDialogOptions::default(), |s: &mut Import, result, _| {
+                s.answers.push(result.map_err(|e| e.0));
+            });
+        });
+        assert!(rt.file_dialog().is_some());
+        rt.cancel_file_dialogs();
+        assert!(rt.file_dialog().is_none());
+        assert_eq!(
+            rt.state.answers,
+            [
+                Err("a file dialog is already open".to_owned()),
+                Ok(None),
+                Ok(None),
+            ],
+            "queued answers, the open dialog, and a dialog asked for in its callback all settle before the host drops"
+        );
     }
 }

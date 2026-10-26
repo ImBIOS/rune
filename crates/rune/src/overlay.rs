@@ -1107,7 +1107,7 @@ impl<T: 'static> Overlay<T> {
             // A pop-up they asked for may be answered at once, running its callback: a change.
             let stale = self.rt.needs_commit();
             self.open_popup();
-            if stale || !self.rt.needs_commit() {
+            if (stale || !self.rt.needs_commit()) && !self.rt.has_pending_input() {
                 self.rt.schedule_pending_wakes();
                 return;
             }
@@ -1136,6 +1136,7 @@ impl<T: 'static> Overlay<T> {
         let polls_only = !handlers && if self.drawing() { self.visible && self.is_occluded() } else { !self.retained() || !self.hidden_pace.ready(now) };
         if !polls_only { return self.commit_at(now); }
         self.rt.poll_hidden();
+        if self.rt.has_pending_input() { return self.commit_at(now); }
         self.rt.shell_request = None;
         self.rt.ignore_minimize("an overlay");
         self.rt.window_frame = None;

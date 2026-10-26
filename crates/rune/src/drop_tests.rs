@@ -270,4 +270,12 @@ fn a_target_that_hears_rejected_drops_stops_them_and_shows_its_own_hover() {
     rt.drag_files(files(&["c.txt"]), Some((50.0, 50.0)));
     rt.frame(7.0 / 60.0);
     assert_eq!(rt.state.hover[2..], [("exports", true), ("exports", false), ("exports-rejected", true)], "the same target swaps hovers");
+
+    rt.drag_files_leave();
+    rt.frame(8.0 / 60.0);
+    rt.state.hover.clear();
+    rt.drag_files(Vec::new(), Some((50.0, 50.0)));
+    rt.drop_files(Vec::new(), Some((50.0, 50.0)));
+    rt.frame(9.0 / 60.0);
+    assert!(rt.state.hover.is_empty() && rt.drop_rejected_hovered().is_none(), "an empty drag claims no rejected hover");
 }

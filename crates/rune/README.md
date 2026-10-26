@@ -920,7 +920,9 @@ Or ask from a handler, with no executor or waker to wire up:
   answer runs the callback on a later frame, as `tx.read_clipboard` does. `tx.save_file` is
   the same for a Save dialog.
 - One dialog at a time: asked for while one is open, the callback gets an error at once and
-  the open dialog stays. Asked for while the window is hidden, it shows when the window does.
+  the open dialog stays. Asked for in the same turn that shows a hidden window, it shows with
+  the window; asked for on a window that stays hidden, or on an overlay, the callback gets an
+  error. Hiding or closing the window cancels an open dialog with `Ok(None)`.
 - Without the `native-file-dialog` feature, and on the web, the callback gets an error.
 - Headless runs (`--tree`, scripts, tests) keep it open as `fileDialog` in `--tree` (kind,
   title, filters, directory, fileName) until `{"type": "file-dialog", "path": "/exports/a.json"}`

@@ -300,7 +300,9 @@ impl Button {
         let mut e = row().role("button").label(self.label.clone()).h(h).px(px).gap(gap).center().radius(radius);
         e = paint(k, e, s, self.state, interactive);
         if let Some(i) = self.icon {
-            e = e.child(icon(i, icon_size).key("icon").color(icon_c));
+            let mut ic = icon(i, icon_size).key("icon").color(icon_c);
+            if matches!(self.look, Label::Rolling(_)) { ic = ic.width_leads(); }
+            e = e.child(ic);
         }
         e = match self.look {
             Label::Text => e.child(text(self.label).key("label").font(font).color(ink)),

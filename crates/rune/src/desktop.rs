@@ -208,6 +208,7 @@ impl<S: 'static> Window<S> {
         if !self.visible { return; }
         self.hidden_at = Some(crate::reopen::stamp());
         self.rt.cancel_popups();
+        self.rt.cancel_file_dialogs();
         self.rt.cancel_pointer();
         self.set_visible(false);
     }
@@ -216,7 +217,11 @@ impl<S: 'static> Window<S> {
         if !(self.visible || !self.keep_running) { return; }
         if let Some(f) = self.on_close { self.rt.update(f); }
         self.hide();
-        if !self.keep_running { self.finished = true; }
+        if !self.keep_running {
+            self.rt.cancel_popups();
+            self.rt.cancel_file_dialogs();
+            self.finished = true;
+        }
     }
 
     fn place(&mut self, desktop: &VirtualDesktop, request: &crate::windows::PlaceRequest, t: f64) {
@@ -298,7 +303,12 @@ impl<S: 'static> Member for Window<S> {
                 Some(Shell::Close) => self.close(),
                 Some(Shell::Quit) | None => {}
             }
-            if self.visible { self.rt.open_popup_headless(); } else { self.rt.cancel_popups(); }
+            if self.visible {
+                self.rt.open_popup_headless();
+            } else {
+                self.rt.cancel_popups();
+                self.rt.refuse_file_dialog("cannot open a file dialog while the window is hidden");
+            }
             if self.rt.shell_request.is_none() { break; }
         }
         changes

@@ -22,6 +22,11 @@ impl<S: 'static> Runtime<S> {
         self.next_file_dialog += 1;
         let id = self.next_file_dialog;
         self.file_dialog_answers.push((id, request.on_answer));
+        if self.native_overlay {
+            self.trace_event("file-dialog:overlay");
+            self.queue.push(Action::FileDialog(id, Err(FileDialogError("overlays cannot open file dialogs".into()))));
+            return;
+        }
         if self.file_dialog.is_some() {
             self.trace_event("file-dialog:busy");
             self.queue.push(Action::FileDialog(id, Err(FileDialogError("a file dialog is already open".into()))));
@@ -45,11 +50,46 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// Answers a dialog this host can't show with `why`.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub(crate) fn refuse_file_dialog(&mut self, why: &str) {
         if let Some((id, ..)) = self.take_file_dialog() {
             self.answer_file_dialog(id, Err(FileDialogError(why.into())));
         }
+    }
+
+    pub(super) fn run_file_dialog(&mut self, id: u64, result: FileDialogResult, one: &mut Tx) -> bool {
+        let Some(i) = self.file_dialog_answers.iter().position(|(dialog, _)| *dialog == id) else { return false };
+        let (_, f) = self.file_dialog_answers.remove(i);
+        self.trace_event(format_args!(
+            "file-dialog:answer:{}",
+            if result.as_ref().is_ok_and(Option::is_some) { "path" } else if result.is_ok() { "cancel" } else { "error" }
+        ));
+        f(handler_state(&mut self.state), result, one);
+        true
+    }
+
+    /// Answers the open or waiting dialog with `Ok(None)`, and runs any queued file dialog
+    /// callbacks now while the window's state is still alive. A callback that asks for another
+    /// dialog is answered too, up to a bound against one that always asks again.
+    pub(crate) fn cancel_file_dialogs(&mut self) {
+        for _ in 0..64 {
+            if let Some(d) = self.file_dialog.take() {
+                self.queue.push(Action::FileDialog(d.id, Ok(None)));
+            }
+            let Some(pos) = self.queue.iter().position(|a| matches!(a, Action::FileDialog(..))) else { return };
+            let Action::FileDialog(id, result) = self.queue.remove(pos) else { unreachable!() };
+            let mut one = self.transaction();
+            self.run_file_dialog(id, result, &mut one);
+            self.latch_requests(&mut one);
+            merge(&mut self.pending, one);
+            self.dirty = true;
+        }
+        eprintln!(
+            "rune: file dialog callbacks kept asking for dialogs while their window went away; dropping {}",
+            self.file_dialog_answers.len()
+        );
+        self.file_dialog = None;
+        self.file_dialog_answers.clear();
+        self.queue.retain(|a| !matches!(a, Action::FileDialog(..)));
     }
 
     pub(crate) fn file_dialog_json(&self) -> Option<serde_json::Value> {

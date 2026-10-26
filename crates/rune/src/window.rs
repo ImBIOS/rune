@@ -1840,7 +1840,10 @@ impl<S: 'static> Host<S> {
         *self.shared.window_error.lock().unwrap() = None;
         if !std::mem::replace(&mut w.first_frame.notified, true)
             && let Some(ready) = self.on_ready.as_mut() { ready(&self.native_handle); }
-        if reveal { self.reveal_launcher(event_loop); }
+        if reveal {
+            self.reveal_launcher(event_loop);
+            self.shell(event_loop);
+        }
         self.publish();
     }
 
@@ -2104,6 +2107,7 @@ impl<S: 'static> Host<S> {
         if requests.quit {
             // A tracking menu holds the event loop until it ends.
             self.popup.cancel(&mut self.rt);
+            self.file_dialog.cancel(&mut self.rt);
             event_loop.exit();
             return;
         }
@@ -2120,8 +2124,8 @@ impl<S: 'static> Host<S> {
         // After the show it may follow; `focus` and `minimize` are last-wins (`AppHandle`).
         self.rt.minimize_request |= requests.minimize;
         self.shell(event_loop);
-        // A pop-up a quiet update asked for may have been answered at once, running its callback.
-        let answered = quiet && !stale_before && self.rt.needs_commit();
+        // A pop-up or file dialog a quiet update asked for may have been answered at once.
+        let answered = quiet && ((!stale_before && self.rt.needs_commit()) || self.rt.has_pending_input());
         if quiet { self.clipboard.flush(&mut self.rt); }
         let (changed, quiet) = (changed || answered, quiet && !answered);
         #[cfg(all(feature = "dev", debug_assertions))]
@@ -2198,6 +2202,7 @@ impl<S: 'static> Host<S> {
             match self.rt.shell_request.take() {
                 Some(Shell::Quit) => {
                     self.popup.cancel(&mut self.rt);
+                    self.file_dialog.cancel(&mut self.rt);
                     event_loop.exit();
                 }
                 Some(Shell::Close) => self.close(event_loop),
@@ -2206,6 +2211,7 @@ impl<S: 'static> Host<S> {
             }
             if self.finished || event_loop.exiting() {
                 self.popup.cancel(&mut self.rt);
+                self.file_dialog.cancel(&mut self.rt);
                 return;
             }
             let shown = self.win.as_ref().filter(|w| w.visible);
@@ -2235,11 +2241,13 @@ impl<S: 'static> Host<S> {
         if let Some(trace) = &mut self.trace { trace.settle_presents(crate::present_time::SETTLE); }
         if self.rt.shell_request.take() == Some(Shell::Quit) {
             self.popup.cancel(&mut self.rt);
+            self.file_dialog.cancel(&mut self.rt);
             event_loop.exit();
             return;
         }
         if !self.keep_running {
             self.popup.cancel(&mut self.rt);
+            self.file_dialog.cancel(&mut self.rt);
             self.rt.cancel_pointer();
             self.files = FileDrop::default();
             if let Some(w) = &mut self.win { w.apply_cursor(&self.rt, false); w.hide(); }
@@ -2275,6 +2283,7 @@ impl<S: 'static> Host<S> {
         if let Some(w) = &self.win { w.window.set_ime_allowed(false); }
         self.rt.set_live_visible(false);
         self.popup.cancel(&mut self.rt);
+        self.file_dialog.cancel(&mut self.rt);
         self.rt.cancel_pointer();
         self.files = FileDrop::default();
         if let Some(w) = &mut self.win { w.apply_cursor(&self.rt, false); }
@@ -2829,9 +2838,13 @@ impl<S: 'static> AnyHost for Host<S> {
         self.finished = true;
         self.close_hook();
         self.popup.cancel(&mut self.rt);
+        self.file_dialog.cancel(&mut self.rt);
     }
 
-    fn cancel_menus(&mut self) { self.popup.cancel(&mut self.rt); }
+    fn cancel_menus(&mut self) {
+        self.popup.cancel(&mut self.rt);
+        self.file_dialog.cancel(&mut self.rt);
+    }
 
     fn reopen_candidate(&self) -> crate::reopen::Candidate {
         let shown = self.win.as_ref().filter(|w| w.visible);
@@ -2865,6 +2878,7 @@ impl<S: 'static> AnyHost for Host<S> {
     fn reopen(&mut self, event_loop: &ActiveEventLoop) {
         if !self.started || self.finished { return; }
         self.open(event_loop, None);
+        self.shell(event_loop);
         // winit's focus does nothing while the window is still deminiaturizing.
         #[cfg(target_os = "macos")]
         if let Some(w) = self.win.as_ref().filter(|w| w.visible) { crate::reopen::front(&w.window); }
@@ -2878,6 +2892,7 @@ impl<S: 'static> AnyHost for Host<S> {
                 let notified = w.first_frame.notified;
                 if w.first_frame.expire() {
                     self.show_cached();
+                    self.shell(event_loop);
                     if let Some(w) = &self.win { w.window.request_redraw(); }
                     self.publish();
                 } else if !notified {
@@ -2953,9 +2968,12 @@ impl<S: 'static> AnyHost for Host<S> {
         #[cfg(target_os = "macos")]
         self.fn_key();
         self.flush_files(event_loop);
-        self.hidden_input(event_loop);
         // Process queued hide/close requests before completing a pending first reveal.
         self.first_frame_ready(event_loop);
+        if !self.win.as_ref().is_some_and(|w| w.visible || w.first_frame.reveal) {
+            self.rt.refuse_file_dialog("cannot open a file dialog while the window is hidden");
+        }
+        self.hidden_input(event_loop);
         false
     }
 
@@ -3078,7 +3096,10 @@ impl<S: 'static> Host<S> {
                     w.window.request_redraw();
                 }
             }
-            WakeEvent::Window(_, request) => self.window_request(event_loop, request),
+            WakeEvent::Window(_, request) => {
+                self.window_request(event_loop, request);
+                self.shell(event_loop);
+            }
             WakeEvent::Focus(_) => self.focus(event_loop),
             WakeEvent::Position(_, position) => self.set_position(event_loop, position),
             WakeEvent::Place(_, place) => self.place(event_loop, place),

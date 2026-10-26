@@ -1529,9 +1529,10 @@ impl<S: 'static> Runtime<S> {
         self.physical_input(crate::PhysicalInput::FocusLost);
     }
 
-    /// Keyboard input, a focus change or a file drag step is queued for the next frame.
+    /// Keyboard input, a focus change, a file drag step or a file dialog answer is queued for the
+    /// next frame.
     pub(crate) fn keys_queued(&self) -> bool {
-        self.queue.iter().any(|a| matches!(a, Action::Physical(..) | Action::Key { .. } | Action::KeyUp(_) | Action::WindowFocus(_) | Action::Files(_)))
+        self.queue.iter().any(|a| matches!(a, Action::Physical(..) | Action::Key { .. } | Action::KeyUp(_) | Action::WindowFocus(_) | Action::Files(_) | Action::FileDialog(..)))
     }
 
     /// The last committed frame is out of date: state changed (an update, poll or handler), or
@@ -2433,13 +2434,7 @@ impl<S: 'static> Runtime<S> {
                 f(handler_state(&mut self.state), &content, &mut one);
                 true
             }
-            Action::FileDialog(id, result) => {
-                let Some(i) = self.file_dialog_answers.iter().position(|(dialog, _)| *dialog == id) else { return false };
-                let (_, f) = self.file_dialog_answers.remove(i);
-                self.trace_event(format_args!("file-dialog:answer:{}", if result.as_ref().is_ok_and(Option::is_some) { "path" } else if result.is_ok() { "cancel" } else { "error" }));
-                f(handler_state(&mut self.state), result, &mut one);
-                true
-            }
+            Action::FileDialog(id, result) => self.run_file_dialog(id, result, &mut one),
             Action::Focus(path, x, y) => {
                 let Some(access) = self.node(&path).and_then(|n| n.input.as_ref()?.access.clone()) else { return false };
                 let layout = self.node(&path).and_then(|n| n.text_layout.clone());

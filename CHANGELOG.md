@@ -6,13 +6,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 ## dev
 
 - **`Tx::open_file` and `Tx::save_file`: file dialogs from a handler.** The callback gets
-  `FileDialogResult` (`Ok(Some(path))`, `Ok(None)` on cancel, or an error) on a later frame,
-  like `tx.read_clipboard`; the window shows the dialog without blocking its event loop (a
-  sheet on macOS via rfd, the window-owned dialog on Windows, the desktop portal over zbus on
-  Linux) and needs the `native-file-dialog` feature. One dialog at a time: a second request
-  while one is open gets an error. Headless runs show it as `fileDialog` in `--tree` until a
-  `file-dialog` (with a `path`) or `file-dialog-cancel` script step answers it, and
-  `headless_run`'s `ScriptEvent` has a new `FileDialog` variant (the enum is
+  `FileDialogResult` (`Ok(Some(path))`, `Ok(None)` on cancel or when the window hides or
+  closes, or an error) on a later frame, like `tx.read_clipboard`; the window shows the dialog
+  without blocking its event loop (a sheet on macOS via rfd, the window-owned dialog on
+  Windows, the desktop portal over zbus on Linux) and needs the `native-file-dialog` feature.
+  One dialog at a time: a second request while one is open, or a request on a window that
+  stays hidden or on an overlay, gets an error. Headless runs show it as `fileDialog` in
+  `--tree` until a `file-dialog` (with a `path`) or `file-dialog-cancel` script step answers
+  it, and `headless_run`'s `ScriptEvent` has a new `FileDialog` variant (the enum is
   `#[non_exhaustive]`). Tests use `Runtime::file_dialog()` and `resolve_file_dialog`.
 
 - **Rejected file drops: `El::on_drop_rejected` and `El::on_drop_rejected_hover`.** A drop

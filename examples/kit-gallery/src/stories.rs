@@ -1297,13 +1297,19 @@ fn rolling_text_basic(s: &G, k: &Kit, _: &mut Vec<El>) -> El {
     col()
         .gap(14.0)
         .child(
-            Button::new("Roll")
-                .on_press(|s: &mut G| {
-                    let n: u32 = s.picked("roll", "0").parse().unwrap_or(0);
-                    s.pick.insert("roll".into(), (n + 1).to_string());
-                })
-                .build(k)
-                .key("roll"),
+            row()
+                .gap(8.0)
+                .child(
+                    Button::new("Roll")
+                        .on_press(|s: &mut G| {
+                            let n: u32 = s.picked("roll", "0").parse().unwrap_or(0);
+                            s.pick.insert("roll".into(), (n + 1).to_string());
+                        })
+                        .build(k)
+                        .key("roll"),
+                )
+                .child(Button::new(label.clone()).rolling("roll-button").build(k).key("rolling-button"))
+                .child(Button::new("Cancel").build(k).key("cancel")),
         )
         .child(line("Sans", RollingText::new("roll-sans", label.clone()).font(k.ty.body).build(k)))
         .child(line("Mono", RollingText::new("roll-mono", label.clone()).font(k.ty.mono).build(k)))
