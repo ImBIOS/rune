@@ -176,6 +176,9 @@ impl<S: 'static> Runtime<S> {
                 let id = self.nodes[p].id;
                 store.is_animating(id, prop::FRAME) || store.is_animating(id, prop::TRAVEL) || store.is_animating(id, prop::PRESENCE)
                     || store.is_animating(id, prop::OFFSET) || store.is_animating(id, prop::SCALE) || store.is_animating(id, P_PRESS_SCALE)
+                    || self.grows.get(&id).is_some_and(|g| g.moving())
+                    || self.stacks.get(&id).is_some_and(|s| s.moving)
+                    || self.scrolls.get(&id).is_some_and(|s| s.slack.height() > 0.0 || s.glide.is_some())
             })
     }
 

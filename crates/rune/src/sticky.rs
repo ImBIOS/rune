@@ -228,7 +228,8 @@ impl<S: 'static> Runtime<S> {
                 && n.path.as_bytes().get(k.viewport.len()) == Some(&b'/'));
             within && (self.scene.store().is_animating(n.id, prop::FRAME)
                 || self.scene.store().is_animating(n.id, prop::TRAVEL)
-                || self.grows.get(&n.id).is_some_and(|g| g.moving()))
+                || self.grows.get(&n.id).is_some_and(|g| g.moving())
+                || self.scrolls.get(&n.id).is_some_and(|st| st.slack.moving()))
         }));
         self.keeps = keeps;
     }

@@ -110,11 +110,13 @@ pub struct GrowTrack {
     /// Presented feather height (points).
     pub mask: f32,
     pub streaming: bool,
+    /// Commit spring duration floor (`Tx::motion`), so a slower transaction (`REFLOW`) slows the row too.
+    pub(crate) duration: f32,
 }
 
 impl GrowTrack {
     pub fn settled(h: f32) -> GrowTrack {
-        GrowTrack { h, v: 0.0, target: h, age: 0.0, mask: 0.0, streaming: false }
+        GrowTrack { h, v: 0.0, target: h, age: 0.0, mask: 0.0, streaming: false, duration: 0.0 }
     }
 
     pub fn moving(&self) -> bool {
@@ -133,7 +135,7 @@ impl GrowTrack {
     /// Advance one fixed substep.
     pub fn step(&mut self, spring: Spring, edge: &StreamEdge, carrying_tail: bool) {
         let dt = SUBSTEP;
-        let spring = spring.with_duration(spring.duration * edge.duration.max(0.05));
+        let spring = spring.with_duration(spring.duration.max(self.duration) * edge.duration.max(0.05));
         let rem = self.target - self.h;
         if rem.abs() <= 1.0 / 128.0 && self.v.abs() < 0.5 {
             self.h = self.target;

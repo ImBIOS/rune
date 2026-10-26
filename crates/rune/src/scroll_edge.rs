@@ -37,7 +37,7 @@ impl<S: 'static> Runtime<S> {
         let width = n.scroll_edges.fade;
         let Some(st) = self.scrolls.get(&n.id).filter(|_| width > 0.0 && n.scroll.is_some()) else { return (own, r) };
         let stuck = self.stuck_offset(i, bottom);
-        let offset = stuck.unwrap_or(st.offset);
+        let offset = stuck.unwrap_or(st.offset) + f64::from(st.slack.height());
         let below = if stuck.is_some() { 0.0 } else { st.max - offset };
         let mut origin = r;
         let (y, x) = (n.scroll_axes.y(), n.scroll_axes.x());

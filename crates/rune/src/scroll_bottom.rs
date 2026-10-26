@@ -21,6 +21,7 @@ pub(super) struct Slack {
     /// `h` is the slack in points, stepped toward 0 once closing.
     track: GrowTrack,
     closing: bool,
+    stepped: bool,
     acc: f32,
     /// The viewport's presented top and bottom last frame.
     edges: Option<[f32; 2]>,
@@ -32,6 +33,8 @@ pub(super) struct Slack {
 
 impl Slack {
     pub(super) fn height(&self) -> f32 { self.track.h }
+
+    pub(super) fn moving(&self) -> bool { self.track.h > 0.0 || self.stepped }
 
     /// No slack, in a window of this size.
     pub(super) fn landed(window: (f32, f32)) -> Slack { Slack { window, ..Slack::default() } }
@@ -163,29 +166,40 @@ impl<S: 'static> Runtime<S> {
     /// Steps stick-to-bottom viewport `i`'s `Slack` after its offset. Returns whether any is left.
     pub(super) fn step_slack(&mut self, i: usize, dt: f32) -> bool {
         let id = self.nodes[i].id;
-        let stack = self.scroll_content(i).and_then(|c| {
-            let spec = self.nodes[c].growth?;
-            Some((spec, self.stacks.get_mut(&self.nodes[c].id)?))
-        });
+        if self.scrolls.get(&id).is_some_and(|st| !st.pinned && !st.slack.moving()) {
+            if let Some(st) = self.scrolls.get_mut(&id) { st.slack.edges = None; }
+            return false;
+        }
+        let Some(c) = self.scroll_content(i) else { return false };
+        let stack = self.nodes[c].growth.and_then(|spec| Some((spec, self.stacks.get_mut(&self.nodes[c].id)?)));
         let view = self.scene.presented(id).map(|p| p.rect.edges());
         let (Some((spec, stack)), Some(view), false) = (stack, view, self.reduced_motion) else {
             if let Some(st) = self.scrolls.get_mut(&id) { st.slack = Slack::landed(st.slack.window); }
             return false;
         };
         let grown = std::mem::take(&mut stack.grown);
-        let growing = !stack.pending_heights.is_empty()
-            || stack.order.iter().any(|r| self.grows.get(r).is_some_and(|g| g.target > g.h + 1.0 / 128.0));
+        let growing = stack.growing;
+        let pad = (stack.pad_bottom - self.nodes[c].inset[3]).max(0.0);
+        let short = self.nodes[i].target[3] - (self.nodes[c].target[3] - pad);
+        let top_c = self.scene.presented(self.nodes[c].id).map_or(view[1], |p| p.rect.edges()[1]);
+        let limit = top_c + (self.nodes[c].target[3] - self.nodes[c].target[1] - pad);
         let now = self.t;
         let Some(st) = self.scrolls.get_mut(&id) else { return false };
         let s = &mut st.slack;
+        let h0 = s.track.h;
         let [top, bottom] = [view[1], view[3]];
-        if growing { s.grew_at = now; }
+        if growing {
+            s.grew_at = now;
+            s.closing = false;
+            s.track.v = 0.0;
+        }
         if st.pinned {
             // Growth fills the slack first. Room the bottom edge gains while the rows sit on it
             // joins it, unless the whole viewport moved down with it.
             let mut h = s.track.h - grown;
             if let Some([top0, bottom0]) = s.edges && st.held {
-                h += (bottom - bottom0) - (top - top0).max(0.0);
+                let (b0, b1) = if short > 0.5 { (bottom0.min(limit), bottom.min(limit)) } else { (bottom0, bottom) };
+                h += (b1 - b0) - (top - top0).max(0.0);
             }
             s.track.h = h.max(0.0);
         }
@@ -196,15 +210,19 @@ impl<S: 'static> Runtime<S> {
         } else if !s.closing && !growing && now - s.grew_at >= SLACK_WAIT {
             s.closing = true;
             s.acc = 0.0;
+            s.track.age = 0.0;
+            s.track.v = 0.0;
         }
-        if !s.closing { return s.track.h > 0.0; }
-        s.acc += dt;
-        while s.acc >= SUBSTEP {
-            s.track.step(spec.spring, &spec.edge, false);
-            s.acc -= SUBSTEP;
+        if s.closing {
+            s.acc += dt;
+            while s.acc >= SUBSTEP {
+                s.track.step(spec.spring, &spec.edge, false);
+                s.acc -= SUBSTEP;
+            }
+            if !s.track.moving() { s.track = GrowTrack::default(); s.closing = false; }
         }
-        if !s.track.moving() { s.track = GrowTrack::default(); s.closing = false; }
-        s.track.h > 0.0
+        s.stepped = (s.track.h - h0).abs() > 1e-5;
+        s.moving()
     }
 
     /// Queues `on_at_bottom` for viewports whose at-bottom state changed this frame.
@@ -236,7 +254,7 @@ mod tests {
 
     // One state type for every test here: each type monomorphises a whole `Runtime<S>`.
     #[derive(Default)]
-    struct Chat { rows: usize, reports: Vec<bool>, instant: bool, reduced: bool, virtualized: bool, loose: bool, tall_tail: bool, composer: Option<crate::TextEdit>, sends: bool }
+    struct Chat { rows: usize, reports: Vec<bool>, instant: bool, reduced: bool, virtualized: bool, loose: bool, tall_tail: bool, composer: Option<crate::TextEdit>, sends: bool, track_drawn: bool, drawn: Vec<f32> }
 
     fn view(s: &Chat, cx: &mut Cx<Chat>) -> El {
         cx.reduced_motion(s.reduced);
@@ -244,7 +262,11 @@ mod tests {
         if s.virtualized { stack = stack.virtualize(60.0); }
         for i in 0..s.rows {
             let h = if s.tall_tail && i + 10 >= s.rows { 150.0 } else { 40.0 + (i % 3) as f32 * 10.0 };
-            stack = stack.child(el().key(format!("r{i}")).w_full().h(h));
+            let mut row = el().key(format!("r{i}")).w_full().h(h);
+            if i == 0 && s.track_drawn {
+                row = row.on_drawn_layout(|s: &mut Chat, r| s.drawn.push(r[1]));
+            }
+            stack = stack.child(row);
         }
         let root = col().w_full().h_full()
             .child(col().key("scroll").w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: !s.loose })
@@ -743,5 +765,88 @@ mod tests {
         assert!(ys[ys.len() - 1] - ys[0] > 30.0, "{ys:?}");
         assert!(bottom_gap(&rt).abs() < 0.05, "{}", bottom_gap(&rt));
         assert!(!rt.animating);
+    }
+
+    /// An app's own `REFLOW` override on send slows the new row with the composer, so rows
+    /// neither overshoot upward on a short draft nor dip before rising on a tall one.
+    #[test]
+    fn a_send_on_reflow_motion_never_dips() {
+        let mut rt = sending(3);
+        let before = rects(&rt)["r38"][1];
+        rt.update(|s, tx| {
+            tx.motion(motion::REFLOW);
+            s.composer.as_mut().unwrap().clear();
+            s.rows += 1;
+        });
+        let mut ys = vec![before];
+        while ys.len() < 400 && (ys.len() < 3 || rt.animating) {
+            rt.frame(1.0 / 120.0);
+            ys.push(rects(&rt)["r38"][1]);
+        }
+        assert!(ys.windows(2).all(|w| w[1] <= w[0] + 0.01), "3-line reflow send moved down: {ys:?}");
+        assert!(slack_gap(&rt).abs() < 0.05, "{}", slack_gap(&rt));
+
+        let mut rt = sending(7);
+        let before = rects(&rt)["r38"][1];
+        rt.update(|s, tx| {
+            tx.motion(motion::REFLOW);
+            s.composer.as_mut().unwrap().clear();
+            s.rows += 1;
+        });
+        let mut ys = vec![before];
+        while ys.len() < 400 && (ys.len() < 3 || rt.animating) {
+            rt.frame(1.0 / 120.0);
+            ys.push(rects(&rt)["r38"][1]);
+        }
+        assert!(reversals(&ys) <= 1, "7-line reflow send reversed more than once: {ys:?}");
+        assert!(slack_gap(&rt).abs() < 0.05, "{}", slack_gap(&rt));
+    }
+
+    /// Split frames (`catch_up` before the commit, `dt` after) pair the full frame's growth with
+    /// the full frame's edge step, keep `ElementInfo::moving` on while slack closes, and deliver
+    /// the resting `on_drawn_layout` rect once slack reaches zero.
+    #[test]
+    fn split_frames_and_drawn_layout_follow_slack_to_rest() {
+        let mut edit = crate::TextEdit::new(&vec!["line"; 7].join("\n"));
+        edit.focused = true;
+        let mut rt = chat(Chat { rows: 6, composer: Some(edit), sends: true, track_drawn: true, ..Default::default() });
+        rt.state.drawn.clear();
+        let y0 = rects(&rt)["r0"][1];
+        enter(&mut rt);
+        let mut ys = vec![y0];
+        let mut frames = 0;
+        while frames < 360 && (frames < 2 || rt.animating) {
+            rt.frame_split(0.5 / 120.0, 0.5 / 120.0);
+            frames += 1;
+            let r0 = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r0")).unwrap();
+            if rt.animating && (r0.rect[1] - *ys.last().unwrap()).abs() > 0.01 {
+                assert!(r0.moving, "r0 moved at frame {frames} with moving=false");
+            }
+            ys.push(r0.rect[1]);
+        }
+        assert!(reversals(&ys) <= 1, "{ys:?}");
+        assert!(slack_gap(&rt).abs() < 0.05, "{}", slack_gap(&rt));
+        assert!((*rt.state.drawn.last().unwrap() - *ys.last().unwrap()).abs() < 0.05, "drawn_layout settled on final y");
+    }
+
+    /// Top-aligned rows that already fit, or cross from overflowing into fitting as the composer
+    /// shrinks, never get pushed above the top of the viewport (`r0.y > 0` from negative offset).
+    #[test]
+    fn top_aligned_rows_do_not_rise_above_the_top_when_the_composer_shrinks() {
+        for rows in [2, 5] {
+            let mut edit = crate::TextEdit::new(&vec!["line"; 7].join("\n"));
+            edit.focused = true;
+            let mut rt = chat(Chat { rows, composer: Some(edit), sends: true, ..Default::default() });
+            let mut ys = vec![rects(&rt)["r0"][1]];
+            rt.update(|s, _| s.composer.as_mut().unwrap().clear());
+            for _ in 0..240 {
+                rt.frame(1.0 / 120.0);
+                let y = rects(&rt)["r0"][1];
+                assert!(y <= 0.05, "rows={rows}: r0 had a gap above it at the top of the viewport: {y}");
+                ys.push(y);
+            }
+            assert!(ys.windows(2).all(|w| w[1] >= w[0] - 0.01), "rows={rows}: r0 moved up: {ys:?}");
+            assert!((*ys.last().unwrap()).abs() < 0.05, "rows={rows}: r0 rests at the top: {:?}", ys.last());
+        }
     }
 }

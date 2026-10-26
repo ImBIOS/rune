@@ -750,8 +750,12 @@ struct Stack {
     width_hold_until: f64,
     width_shrink_until: f64,
     pending_heights: HashMap<NodeId, f32>,
-    /// How far its rows grew (positive steps only) in the last `step_growth`.
+    /// How far its rows grew (positive steps only) this frame.
     grown: f32,
+    /// Whether any row in the stack still has height left to grow.
+    pub(crate) growing: bool,
+    /// Whether any row in the stack is still animating.
+    pub(crate) moving: bool,
 }
 
 struct LayoutEntry {
@@ -919,6 +923,8 @@ pub struct Runtime<S: 'static> {
     row_h: Vec<f32>,
     row_mask: Vec<f32>,
     grow_acc: f32,
+    caught_up: f32,
+    slack_dt: f32,
     focused: Option<String>,
     keyboard_focus: bool,
     /// The pointer focused a `focus_highlight` row, so its highlight shows without a key.
@@ -1271,6 +1277,8 @@ impl<S: 'static> Runtime<S> {
             row_h: Vec::new(),
             row_mask: Vec::new(),
             grow_acc: 0.0,
+            caught_up: 0.0,
+            slack_dt: 0.0,
             focused: None,
             keyboard_focus: false,
             hover_focus: false,
@@ -2210,12 +2218,14 @@ impl<S: 'static> Runtime<S> {
         let step = dt * self.time_scale as f64;
         self.t += step;
         self.scene.set_time(self.t);
+        self.caught_up += step as f32;
         self.step_growth(step as f32);
         self.step_scroll(step as f32);
     }
 
     fn step_motion(&mut self, dt: f64) -> bool {
         let step = dt * self.time_scale as f64;
+        self.slack_dt = std::mem::take(&mut self.caught_up) + step as f32;
         self.last_dt = step;
         self.t += step;
         self.scene.set_time(self.t);
@@ -2253,6 +2263,7 @@ impl<S: 'static> Runtime<S> {
         let mut source = |on: bool, bit: u16| { if on { sources |= bit; } on };
         animating |= source(self.step_growth(step as f32), AnimSource::GROWTH);
         animating |= source(self.step_scroll(step as f32), AnimSource::SCROLL);
+        for stack in self.stacks.values_mut() { stack.grown = 0.0; }
         animating |= source(self.reveals_active(), AnimSource::REVEAL);
         animating |= self.build();
         // Compensate drawn motion, leaving unrelated layout and growth springs alone.
@@ -3113,8 +3124,8 @@ impl<S: 'static> Runtime<S> {
                     } else { 0.0 };
                     let ox0 = st.x.offset as f32;
                     let ox1 = ox0.clamp(0.0, max_x);
-                    let oy0 = st.offset as f32;
-                    let oy1 = if st.pinned && sp.stick_bottom { max_y } else { oy0.clamp(0.0, max_y) };
+                    let oy0 = st.offset as f32 + st.slack.height();
+                    let oy1 = if st.pinned && sp.stick_bottom { max_y + st.slack.height() } else { oy0.clamp(0.0, max_y + st.slack.height()) };
                     (
                         [shift_min[0] + ox0.min(ox1), shift_min[1] + oy0.min(oy1)],
                         [shift_max[0] + ox0.max(ox1), shift_max[1] + oy0.max(oy1)],
@@ -3815,8 +3826,9 @@ impl<S: 'static> Runtime<S> {
                         h = (h - crate::text::stream_height_lag(l, width, scale)).max(0.0);
                     }
                 }
+                let duration = tx.motion.map_or(0.0, |m| m.duration * 1.15);
                 let g = self.grows.entry(id).or_insert_with(|| {
-                    if existed && !instant && !nodes[j].virtual_mount { GrowTrack { streaming, ..GrowTrack::settled(0.0) } } else { GrowTrack::settled(h) }
+                    if existed && !instant && !nodes[j].virtual_mount { GrowTrack { streaming, duration, ..GrowTrack::settled(0.0) } } else { GrowTrack::settled(h) }
                 });
                 g.streaming = streaming;
                 if tx.settle || !existed || first || self.reduced_motion || reading {
@@ -3829,10 +3841,15 @@ impl<S: 'static> Runtime<S> {
                         stack.pending_heights.insert(id, t);
                     } else {
                         stack.pending_heights.remove(&id);
+                        if (t - g.target).abs() > 1e-4 { g.duration = duration; }
                         g.retarget(t);
                     }
                 }
             }
+            stack.growing = !stack.pending_heights.is_empty()
+                || order.iter().any(|r| self.grows.get(r).is_some_and(|g| g.target > g.h + 1.0 / 128.0));
+            stack.moving = stack.growing
+                || order.iter().any(|r| self.grows.get(r).is_some_and(|g| g.moving()));
             stack.order = order;
             self.stacks.insert(cid, stack);
         }
@@ -4231,7 +4248,8 @@ impl<S: 'static> Runtime<S> {
             let Some(&ci) = self.node_index.get(cid) else { continue };
             let Some(spec) = self.nodes[ci].growth else { continue };
             let n_rows = stack.order.len();
-            stack.grown = 0.0;
+            let mut st_growing = !stack.pending_heights.is_empty();
+            let mut st_moving = st_growing;
             for (k, id) in stack.order.iter().enumerate() {
                 let Some(g) = self.grows.get_mut(id) else { continue };
                 let h0 = g.h;
@@ -4256,7 +4274,8 @@ impl<S: 'static> Runtime<S> {
                     g.step(spec.spring, &spec.edge, carrying);
                 }
                 stack.grown += (g.h - h0).max(0.0);
-                moving |= g.moving();
+                st_growing |= g.target > g.h + 1.0 / 128.0;
+                st_moving |= g.moving() || (g.h - h0).abs() > 1e-5;
             }
             stack.order.retain(|id| {
                 let keep = !stack.closing.contains_key(id) || self.grows.get(id).is_some_and(|g| g.h > 0.01 || g.target > 0.0);
@@ -4266,10 +4285,12 @@ impl<S: 'static> Runtime<S> {
                 keep
             });
             stack.closing.retain(|id, _| stack.order.contains(id));
+            stack.growing = st_growing;
+            stack.moving = st_moving;
             // Keep the shared clock awake through the hold. No timer thread or remeasurement.
-            moving |= !stack.pending_heights.is_empty();
+            moving |= st_moving;
         }
-        moving || (steps == 0 && self.grows.values().any(|g| g.moving()))
+        moving
     }
 
     /// Presented content extent of node `c` if it is a growth stack (points).
@@ -4293,6 +4314,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn step_scroll(&mut self, dt: f32) -> bool {
+        let slack_dt = std::mem::take(&mut self.slack_dt);
         let mut moving = false;
         for i in 0..self.nodes.len() {
             let Some(sp) = self.nodes[i].scroll else { continue };
@@ -4334,7 +4356,7 @@ impl<S: 'static> Runtime<S> {
             if sp.stick_bottom && st.offset >= st.max - 0.5 && st.v.abs() <= 1.0 {
                 st.pinned = true;
             }
-            if sp.stick_bottom && axes.y() && dt > 0.0 { moving |= self.step_slack(i, dt); }
+            if sp.stick_bottom && axes.y() && slack_dt > 0.0 { moving |= self.step_slack(i, slack_dt); }
         }
         moving
     }
@@ -5219,6 +5241,7 @@ impl<S: 'static> Runtime<S> {
                     || n.sticky.as_ref().is_some_and(|s| s.edge.is_some())
                     || (!self.reduced_motion && self.loops.get(&n.id).is_some_and(|l| l.active(store.node_time(n.id))))
                     || self.grows.get(&n.id).is_some_and(|g| g.moving())
+                    || self.scrolls.get(&n.id).is_some_and(|st| st.slack.height() > 0.0)
                     || self.reveals.get(&n.id).is_some_and(|r| !r.words.is_empty())
                     || self.subtree_exiting(i)
                     || (!self.flights.is_empty() && self.flights.iter().any(|f| f.departs(&n.path, n.key.as_deref()) || f.lands(&n.path, n.key.as_deref())))
@@ -5329,7 +5352,7 @@ impl<S: 'static> Runtime<S> {
             let Some(p) = self.scene.presented(n.id) else { continue };
             let mut pinh = n.parent.map_or(Inh::default(), |pr| self.inh_scratch[pr]);
             pinh.dy += self.row_dy[i];
-            if self.has_sticky && let Some(a) = &n.above
+            if let Some(a) = &n.above
                 && let Some(j) = self.nodes[..i].iter().position(|n| n.key.as_ref() == Some(&a.key))
             {
                 let d = self.drawn[j];
@@ -6698,7 +6721,9 @@ impl<S: 'static> Runtime<S> {
                 let mut a = n.parent;
                 while let Some(pi) = a {
                     let parent = &self.nodes[pi];
-                    moving |= animating(parent.id);
+                    moving |= animating(parent.id)
+                        || self.stacks.get(&parent.id).is_some_and(|s| s.moving)
+                        || self.scrolls.get(&parent.id).is_some_and(|s| s.slack.moving() || s.glide.is_some());
                     live_intent |= intent(parent);
                     scrolling |= self.scrolls.get(&parent.id).is_some_and(|s| s.scrolling);
                     in_growing_row |= self.grows.get(&parent.id).is_some_and(|g| g.moving());
