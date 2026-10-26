@@ -28,7 +28,7 @@ Output lands in `demo/fx/` (repo root): `<effect>.png`, `<effect>-strip.png` (8 
 | ![mesh gradient](../../demo/fx/mesh-gradient.png) | ![dither](../../demo/fx/dither.png) |
 | ![grain gradient](../../demo/fx/grain-gradient.png) | ![fluted glass](../../demo/fx/fluted-glass.png) |
 | ![more fills](../../demo/fx/fills.png) | ![every fill preset](../../demo/fx/fill-presets.png) |
-| ![plastic keys, glossy and matte, and liquid metal keys anchored to the window or to each key](../../demo/fx/plastic.png) | |
+| ![plastic keys, glossy and matte, and liquid metal keys anchored to the window or to each key](../../demo/fx/plastic.png) | ![blend modes over cream paper](../../demo/fx/blend.png) |
 
 Liquid metal over eight frames (four seconds): ![liquid metal strip](../../demo/fx/liquid-metal-strip.png)
 
@@ -167,6 +167,14 @@ Fx::fill(FlutedGlassParams { rib: 10.0, frost: 0.4, ..FlutedGlassParams::reeded(
   so a zoomed slot (`scale` / `live_scale`) converts its device-pixel rect and lengths with its own
   device-px-per-pt factor, and `FxSlot::clip(i.clip, i.fade)` in `prepare_with_slots` so a slot outside an isolated layer
   is cut by rounded container corners and soft scroll-edge feathers (`CLIP_WGSL`).
+- `FxSlot::blend(FxBlend)` selects how a slot composites onto the target beneath it:
+  `FxBlend::Normal` (default premultiplied source-over with additive light), `FxBlend::Multiply`,
+  `FxBlend::Screen`, `FxBlend::Overlay`, or `FxBlend::SoftLight`. `Multiply` and `Screen` use
+  fixed-function `wgpu::BlendState` (zero backdrop reads); `Overlay` and `SoftLight` sample the
+  backdrop (`FxFrame::backdrop` or `EffectSite::backdrop` via `set_layer_backdrop` /
+  `blur_backdrop`, setting `FxStats::needs_backdrop`) and fall back to `Normal` when no backdrop
+  is bound. Separable formulas run in the frame's working colour space (linear light by default, or
+  sRGB when `set_srgb_blend(true)` is active).
 - `set_srgb_blend(frame.srgb_blend())` matches a gamma-blended Rune frame: the premultiplied output
   is sRGB-encoded for the non-sRGB target. When prepared without `FxFrame::backdrop`, per-slot
   `backdrop` / `blurred` samples default to that same encoding and are decoded before shading.

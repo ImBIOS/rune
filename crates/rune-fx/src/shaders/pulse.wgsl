@@ -60,7 +60,7 @@ fn shade(in: VOut) -> vec4f {
     let reach = i.p0.z;
     let width = i.p0.w;
     let inten = i.p1.x;
-    let occl = i.p2.w;
+    let occl = select(1.0, i.p2.w, effective_blend_mode(i) == 0u);
     let outside = smoothstep(-c.aa, c.aa, c.d);
     var e = 0.0;     // emitted energy (tint)
     var hotv = 0.0;  // white-hot share

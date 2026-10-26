@@ -159,7 +159,8 @@ fn shade(in: VOut) -> vec4f {
             fb += 6u;
         }
     }
+    let occl = select(1.0, i.p2.w, effective_blend_mode(i) == 0u);
     let rgb = (i.c1.rgb * core * 1.3 + i.c0.rgb * halo * 0.75 + fork_hot) * inten;
-    let a = (core * 0.7 + halo * i.p2.w + lum(fork_hot) * 0.5) * inten;
+    let a = (core * 0.7 + halo * occl + lum(fork_hot) * 0.5) * inten;
     return finish(vec4f(rgb, a), in.px);
 }

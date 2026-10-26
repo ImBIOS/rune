@@ -31,7 +31,7 @@ fn shade(in: VOut) -> vec4f {
     var radius = i.p0.x;
     var intensity = i.p0.y;
     let inner = i.p0.z;
-    let occl = i.p0.w;
+    let occl = select(1.0, i.p0.w, effective_blend_mode(i) == 0u);
     let heat = i.p1.z;
     let hot = i.p1.w;
 

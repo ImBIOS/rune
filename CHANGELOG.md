@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Blend modes for `rune-fx` effect and fill slots (`FxBlend`, `FxSlot::blend`).** `FxSlot::blend`
+  accepts `FxBlend::{Normal, Multiply, Screen, Overlay, SoftLight}` so warm glows and shader fills
+  can composite over light backgrounds (such as `#FAF7F2` cream paper) without washing out to
+  white. `Multiply` and `Screen` use fixed-function `wgpu::BlendState` with zero backdrop reads;
+  `Overlay` and `SoftLight` sample the backdrop (`FxFrame::backdrop` or `EffectSite::backdrop` via
+  `set_layer_backdrop` / `blur_backdrop`) and fall back to `Normal` when no backdrop is available.
+  Separable formulas run in the frame's working colour space (linear light by default, or sRGB when
+  `FxRenderer::set_srgb_blend(true)` matches `Tx::set_srgb_blend`).
+
 - **rune-kit diff: the gutter stays put while code scrolls sideways.** In unified mode with
   long lines, the line numbers and the +/− marker scrolled out of view with the code. Each row's
   marker, both number columns and the comment "+" now sit in one `gutter` element held to the

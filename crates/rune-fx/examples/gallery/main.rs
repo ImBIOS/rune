@@ -41,6 +41,7 @@ struct B<'a> {
     src: Vec<UiInst>,
     src_rect: Option<Rect>,
     layers: Vec<FxLayer>,
+    slots: Vec<FxSlot>,
     ops: Vec<Op>,
     target: Target,
     t: f32,
@@ -51,7 +52,7 @@ const SRC_PAD: f32 = 4.0;
 
 impl<'a> B<'a> {
     fn new(atlas: &'a mut TextAtlas, t: f32, reduced: bool) -> B<'a> {
-        B { atlas, ui: vec![], mask: vec![], src: vec![], src_rect: None, layers: vec![], ops: vec![], target: Target::Main, t, reduced }
+        B { atlas, ui: vec![], mask: vec![], src: vec![], src_rect: None, layers: vec![], slots: vec![], ops: vec![], target: Target::Main, t, reduced }
     }
     fn push(&mut self, mut u: UiInst) {
         match self.target {
@@ -124,9 +125,13 @@ impl<'a> B<'a> {
         self.text(cx - w * 0.5, cy + size * 0.36, s, size, weight, c);
     }
     fn fx(&mut self, l: FxLayer) {
+        self.fx_with(l, FxSlot::default());
+    }
+    fn fx_with(&mut self, l: FxLayer, slot: FxSlot) {
         let l = l.at(if l.time == 0.0 { self.t } else { l.time }).reduced(self.reduced);
         self.ops.push(Op::Fx(self.layers.len()));
         self.layers.push(l);
+        self.slots.push(slot);
     }
     fn backdrop(&mut self) {
         self.ops.push(Op::Backdrop);
@@ -597,6 +602,62 @@ fn scene(name: &str, b: &mut B) {
                 b.text(x, y + 67.0, p.name, 9.0, 2, col(0xb4b9c4, 1.0));
             }
         }
+        "blend" => {
+            // Cream paper (#FAF7F2) backdrop for an onboarding hero and shader fills.
+            b.rect(Rect::new(0.0, 0.0, W, H), 0.0, col(0xfaf7f2, 1.0), col(0xf3ede3, 1.0), [0.0; 4], 0.0);
+            let tw = b.text(24.0, 34.0, "Blend", 15.0, 2, col(0x1f1c18, 1.0));
+            b.text(24.0 + tw + 8.0, 34.0, "warm glow & shader fill over #FAF7F2 cream paper", 12.0, 0, col(0x6e6559, 1.0));
+
+            let modes = [
+                ("Normal", FxBlend::Normal),
+                ("Multiply", FxBlend::Multiply),
+                ("Screen", FxBlend::Screen),
+                ("Overlay", FxBlend::Overlay),
+                ("SoftLight", FxBlend::SoftLight),
+            ];
+            for (idx, (label, _) ) in modes.iter().enumerate() {
+                let x = 24.0 + idx as f32 * 120.0;
+                // Subtle warm card rules on the cream paper so blend interaction with midtones is visible.
+                let well = Rect::new(x, 54.0, 112.0, 132.0);
+                b.rect(well, 12.0, col(0xfaf7f2, 1.0), col(0xf4efe6, 1.0), col(0x2b241c, 0.10), 1.0 / S);
+                for r in 0..3 {
+                    let ry = 140.0 + r as f32 * 12.0;
+                    b.rect(Rect::new(x + 16.0, ry, 80.0 - (r as f32 * 14.0), 4.0), 2.0, col(0xd8cfc2, 1.0), col(0xd8cfc2, 1.0), [0.0; 4], 0.0);
+                }
+
+                // Lower row: warm ruled paper card beneath a shader fill.
+                let card = Rect::new(x, 212.0, 112.0, 108.0);
+                b.rect(card, 12.0, col(0xf6f0e6, 1.0), col(0xebe2d3, 1.0), col(0x2b241c, 0.12), 1.0 / S);
+                b.rect(Rect::new(x + 12.0, 228.0, 56.0, 22.0), 6.0, col(0xd48b45, 0.35), col(0xb85d22, 0.35), [0.0; 4], 0.0);
+                b.text(x + 16.0, 274.0, "Paper", 13.0, 2, col(0x3a3128, 0.85));
+                for r in 0..2 {
+                    let ry = 286.0 + r as f32 * 11.0;
+                    b.rect(Rect::new(x + 16.0, ry, 76.0 - (r as f32 * 18.0), 4.0), 2.0, col(0x9c8e7b, 0.55), col(0x9c8e7b, 0.55), [0.0; 4], 0.0);
+                }
+                b.text_c(x + 56.0, 336.0, label, 11.0, 2, col(0x3f372e, 1.0));
+            }
+            b.backdrop();
+            for (idx, (_, mode)) in modes.iter().enumerate() {
+                let x = 24.0 + idx as f32 * 120.0;
+                let pill = Rect::new(x + 22.0, 92.0, 68.0, 32.0);
+                let glow = Fx::glow(GlowParams {
+                    color: rgb(0xc85a14),
+                    core: rgb(0xe88c28),
+                    radius: 22.0,
+                    intensity: 1.15,
+                    inner: 0.65,
+                    hot: 0.45,
+                    ..Default::default()
+                })
+                .on(Shape::capsule(pill.x, pill.y, pill.w, pill.h));
+                b.fx_with(glow, FxSlot::default().blend(*mode));
+                b.button(pill, "Hero", 0x2c2520, 0x1e1915, 0xfaf7f2);
+
+                let fill_shape = Shape::rounded(x + 8.0, 220.0, 96.0, 92.0, 10.0);
+                let fill = Fx::fill(GrainGradientParams::ember()).on(fill_shape).opacity(0.82);
+                b.fx_with(fill, FxSlot::default().blend(*mode));
+            }
+        }
         _ => panic!("unknown effect {name}"),
     }
 }
@@ -715,7 +776,7 @@ impl Ctx {
     fn render(&mut self, name: &str, t: f32, reduced: bool) -> Vec<u8> {
         let mut b = B::new(&mut self.atlas, t, reduced);
         scene(name, &mut b);
-        let B { ui, mask, src, src_rect, layers, ops, .. } = b;
+        let B { ui, mask, src, src_rect, layers, slots, ops, .. } = b;
         let mut all = ui;
         let mask_r = all.len()..all.len() + mask.len();
         all.extend_from_slice(&mask);
@@ -735,7 +796,7 @@ impl Ctx {
             sources.push(v);
         }
         let frame = FxFrame { viewport: [self.w, self.h], scale: S, layers: &layers, backdrop: Some(&self.backdrop_view), sources: &sources };
-        self.fx.prepare(&self.device, &self.queue, &frame);
+        self.fx.prepare_with_slots(&self.device, &self.queue, &frame, &slots);
 
         let mut enc = self.device.create_command_encoder(&Default::default());
         if !mask.is_empty() {
@@ -973,7 +1034,8 @@ fn timings() -> String {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
-    let effect = get("--effect");
+    let effect = get("--effect").or_else(|| get("--still"));
+    let still_only = args.iter().any(|a| a == "--still");
     let dir = get("--out").map_or_else(|| PathBuf::from("demo/fx"), PathBuf::from);
     if args.iter().any(|a| a == "--timings") {
         let t = timings();
@@ -995,6 +1057,14 @@ fn main() {
             write_png(&Path::new(&dir).join(format!("{name}_{i:04}.png")), ctx.w, ctx.h, &px).unwrap();
         }
         eprintln!("wrote {n} frames to {dir}");
+        return;
+    }
+    if still_only {
+        let name = effect.as_deref().unwrap_or("blend");
+        std::fs::create_dir_all(&dir).unwrap();
+        let px = ctx.render(name, still_time(name), false);
+        write_png(&dir.join(format!("{name}.png")), ctx.w, ctx.h, &px).unwrap();
+        eprintln!("wrote {name}.png");
         return;
     }
     let list: Vec<&str> = match &effect {

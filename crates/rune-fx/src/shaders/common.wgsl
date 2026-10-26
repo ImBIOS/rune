@@ -97,6 +97,30 @@ fn pixel(in: VOut) -> vec2f {
     return in.pos.xy + round((in.px - in.pos.xy) * 256.0) / 256.0;
 }
 
+fn effective_blend_mode(i: Inst) -> u32 {
+    let m = (u32(i.t.w) >> 1u) & 7u;
+    if ((m == 3u || m == 4u) && backdrop_encoding.y < 0.5) {
+        return 0u;
+    }
+    return m;
+}
+fn blend_overlay_ch(b: f32, s: f32) -> f32 {
+    return select(1.0 - 2.0 * (1.0 - b) * (1.0 - s), 2.0 * b * s, b <= 0.5);
+}
+fn blend_overlay(b: vec3f, s: vec3f) -> vec3f {
+    return vec3f(blend_overlay_ch(b.r, s.r), blend_overlay_ch(b.g, s.g), blend_overlay_ch(b.b, s.b));
+}
+fn blend_soft_light_ch(b: f32, s: f32) -> f32 {
+    if (s <= 0.5) {
+        return b - (1.0 - 2.0 * s) * b * (1.0 - b);
+    }
+    let d = select(sqrt(max(b, 0.0)), ((16.0 * b - 12.0) * b + 4.0) * b, b <= 0.25);
+    return b + (2.0 * s - 1.0) * (d - b);
+}
+fn blend_soft_light(b: vec3f, s: vec3f) -> vec3f {
+    return vec3f(blend_soft_light_ch(b.r, s.r), blend_soft_light_ch(b.g, s.g), blend_soft_light_ch(b.b, s.b));
+}
+
 // Every effect module defines `shade`; the layer's opacity (shape.z) scales its premultiplied
 // output, so a retiring one-shot fades instead of cutting.
 @fragment
@@ -105,15 +129,32 @@ fn fs(in: VOut) -> @location(0) vec4f {
     let ca = clip_alpha(in.px, i.clip, i.fade);
     if (ca <= 0.0) { return vec4f(0.0); }
     let c = shade(in) * i.shape.z;
-    if (g.srgb > 0.5) {
-        // Premultiplied light may exceed alpha: a covering colour (up to alpha) plus added light.
-        // Encode the straight covering colour times alpha, and the added light as over black, so
-        // light doesn't dim as a glow's occlusion takes its alpha from zero to a little.
-        let cover = min(max(c.rgb, vec3f(0.0)), vec3f(c.a));
-        let straight = select(vec3f(0.0), cover / c.a, c.a > 1e-6);
-        return vec4f(to_srgb(straight) * c.a + to_srgb(max(c.rgb, vec3f(0.0)) - cover), c.a) * ca;
+    let mode = effective_blend_mode(i);
+    if (mode == 0u) {
+        if (g.srgb > 0.5) {
+            // Premultiplied light may exceed alpha: a covering colour (up to alpha) plus added light.
+            // Encode the straight covering colour times alpha, and the added light as over black, so
+            // light doesn't dim as a glow's occlusion takes its alpha from zero to a little.
+            let cover = min(max(c.rgb, vec3f(0.0)), vec3f(c.a));
+            let straight = select(vec3f(0.0), cover / c.a, c.a > 1e-6);
+            return vec4f(to_srgb(straight) * c.a + to_srgb(max(c.rgb, vec3f(0.0)) - cover), c.a) * ca;
+        }
+        return c * ca;
     }
-    return c * ca;
+    let m = max(c.a, max(c.r, max(c.g, c.b)));
+    let as_ = clamp(m * ca, 0.0, 1.0);
+    if (as_ <= 0.0) { return vec4f(0.0); }
+    let cs_lin = select(vec3f(0.0), clamp(c.rgb / m, vec3f(0.0), vec3f(1.0)), m > 1e-6);
+    let cs = select(cs_lin, to_srgb(cs_lin), g.srgb > 0.5);
+    if (mode == 1u || mode == 2u) {
+        return vec4f(cs * as_, as_);
+    }
+    let b_lin = bd(in.px, 1.0);
+    let ab = clamp(b_lin.a, 0.0, 1.0);
+    let cb_lin = select(vec3f(0.0), clamp(b_lin.rgb / ab, vec3f(0.0), vec3f(1.0)), ab > 1e-6);
+    let cb = select(cb_lin, to_srgb(cb_lin), g.srgb > 0.5);
+    let blended = select(blend_soft_light(cb, cs), blend_overlay(cb, cs), mode == 3u);
+    return vec4f(mix(cs, blended, ab) * as_, as_);
 }
 
 const TAU: f32 = 6.2831853;

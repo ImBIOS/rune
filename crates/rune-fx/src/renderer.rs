@@ -63,6 +63,7 @@ struct Prepared {
     blur_px: f32,
     needs_backdrop: bool,
     backdrop_srgb: bool,
+    blend: FxBlend,
 }
 
 /// Backdrop blur pyramid: half-resolution mip chains for the dual-filter down and up passes.
@@ -126,16 +127,16 @@ impl BlurPyramid {
 }
 
 pub struct FxRenderer {
-    pipelines: Vec<wgpu::RenderPipeline>,
+    pipelines: Vec<[wgpu::RenderPipeline; 3]>,
     format: wgpu::TextureFormat,
     layout: wgpu::PipelineLayout,
     modules: Vec<wgpu::ShaderModule>,
-    /// Pipelines for other target formats (`add_format`), one per effect family.
-    extra: Vec<(wgpu::TextureFormat, Vec<wgpu::RenderPipeline>)>,
+    /// Pipelines for other target formats (`add_format`), one triple per effect family.
+    extra: Vec<(wgpu::TextureFormat, Vec<[wgpu::RenderPipeline; 3]>)>,
     srgb: Option<bool>,
     bgl0: wgpu::BindGroupLayout,
     bgl1: wgpu::BindGroupLayout,
-    backdrop_encoding: [wgpu::Buffer; 2],
+    backdrop_encoding: [wgpu::Buffer; 4],
     bg0: Option<wgpu::BindGroup>,
     globals: wgpu::Buffer,
     insts: wgpu::Buffer,
@@ -209,11 +210,13 @@ impl FxRenderer {
             bind_group_layouts: &[Some(&bgl0), Some(&bgl1)],
             immediate_size: 0,
         });
-        let backdrop_encoding = [0.0f32, 1.0].map(|encoded| device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("fx backdrop encoding"),
-            contents: bytemuck::cast_slice(&[encoded, 0.0, 0.0, 0.0]),
-            usage: wgpu::BufferUsages::UNIFORM,
-        }));
+        let backdrop_encoding = [(0.0f32, 0.0f32), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].map(|(encoded, present)| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fx backdrop encoding"),
+                contents: bytemuck::cast_slice(&[encoded, present, 0.0, 0.0]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            })
+        });
         let modules: Vec<wgpu::ShaderModule> = SOURCES
             .iter()
             .map(|(name, src)| device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -375,30 +378,51 @@ impl FxRenderer {
         }
     }
 
-    fn pipelines(device: &wgpu::Device, layout: &wgpu::PipelineLayout, modules: &[wgpu::ShaderModule], format: wgpu::TextureFormat) -> Vec<wgpu::RenderPipeline> {
+    fn pipelines(device: &wgpu::Device, layout: &wgpu::PipelineLayout, modules: &[wgpu::ShaderModule], format: wgpu::TextureFormat) -> Vec<[wgpu::RenderPipeline; 3]> {
+        let blends = [
+            wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+            wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Dst,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent::OVER,
+            },
+            wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrc,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent::OVER,
+            },
+        ];
         modules
             .iter()
             .zip(SOURCES)
             .map(|(module, (name, _))| {
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(name),
-                    layout: Some(layout),
-                    vertex: wgpu::VertexState { module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
-                    primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
-                    depth_stencil: None,
-                    multisample: Default::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module,
-                        entry_point: Some("fs"),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format,
-                            blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    multiview_mask: None,
-                    cache: None,
+                blends.map(|blend| {
+                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some(name),
+                        layout: Some(layout),
+                        vertex: wgpu::VertexState { module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+                        primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
+                        depth_stencil: None,
+                        multisample: Default::default(),
+                        fragment: Some(wgpu::FragmentState {
+                            module,
+                            entry_point: Some("fs"),
+                            compilation_options: Default::default(),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format,
+                                blend: Some(blend),
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                        }),
+                        multiview_mask: None,
+                        cache: None,
+                    })
                 })
             })
             .collect()
@@ -513,7 +537,8 @@ impl FxRenderer {
             inst.clip = slot.clip;
             inst.fade = slot.fade;
             inst.shape[1] = s;
-            let needs_bd = layer.fx.needs_backdrop();
+            inst.t[3] = ((inst.t[3] as u32) | (slot.blend.code() << 1)) as f32;
+            let needs_bd = layer.fx.needs_backdrop() || slot.blend.needs_backdrop();
             stats.needs_backdrop |= needs_bd;
             let blur_px = match layer.fx {
                 Fx::Distort(DistortParams::Lens(p)) => (p.frost.clamp(0.0, 1.0) * LENS_FROST_SIGMA * s).max(0.0),
@@ -530,6 +555,7 @@ impl FxRenderer {
                         _ => key.1.and_then(|slot| frame.sources.get(slot as usize).copied()).unwrap_or(&self.dummy),
                     };
                     let blurred = if key.2 { self.blur.as_ref().map_or(&self.dummy, |b| &b.result) } else { &self.dummy };
+                    let enc_idx = (usize::from(key.0) << 1) | usize::from(key.4);
                     self.binds.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("fx1"),
                         layout: &self.bgl1,
@@ -538,7 +564,7 @@ impl FxRenderer {
                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src) },
                             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(blurred) },
-                            wgpu::BindGroupEntry { binding: 4, resource: self.backdrop_encoding[usize::from(key.4)].as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 4, resource: self.backdrop_encoding[enc_idx].as_entire_binding() },
                         ],
                     }));
                     keys.push(key);
@@ -548,7 +574,7 @@ impl FxRenderer {
             stats.drawn += 1;
             stats.pixels += ((x1 - x0) * (y1 - y0)) as u64;
             self.prepared.push(Some(Prepared { kind, instance: self.scratch.len() as u32, bind, bounds: [x0, y0, x1, y1], blur_px, needs_backdrop: needs_bd,
-                backdrop_srgb: slot.backdrop_srgb.unwrap_or(frame.backdrop.is_none() && self.srgb.unwrap_or(false)) }));
+                backdrop_srgb: slot.backdrop_srgb.unwrap_or(frame.backdrop.is_none() && self.srgb.unwrap_or(false)), blend: slot.blend }));
             self.scratch.push(inst);
         }
         let mut regrow = self.bg0.is_none();
@@ -624,7 +650,12 @@ impl FxRenderer {
         if shifted {
             pass.set_viewport(-origin[0], -origin[1], self.viewport[0] as f32, self.viewport[1] as f32, 0.0, 1.0);
         }
-        pass.set_pipeline(&pipelines[p.kind]);
+        let blend_idx = match p.blend {
+            FxBlend::Multiply => 1,
+            FxBlend::Screen => 2,
+            FxBlend::Normal | FxBlend::Overlay | FxBlend::SoftLight => 0,
+        };
+        pass.set_pipeline(&pipelines[p.kind][blend_idx]);
         pass.set_bind_group(0, self.bg0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, &self.binds[p.bind], &[]);
         pass.draw(0..4, p.instance..p.instance + 1);
@@ -663,7 +694,7 @@ impl FxRenderer {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.dummy) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(blurred) },
-                wgpu::BindGroupEntry { binding: 4, resource: self.backdrop_encoding[usize::from(p.backdrop_srgb)].as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: self.backdrop_encoding[2 | usize::from(p.backdrop_srgb)].as_entire_binding() },
             ],
         }));
         self.prepared[layer].as_mut().unwrap().bind = bind;

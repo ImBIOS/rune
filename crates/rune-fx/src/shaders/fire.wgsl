@@ -59,7 +59,8 @@ fn flames(c: Ctx, i: Inst) -> vec4f {
     // A little of the fire's light on the edge it sits on.
     let bg = i.p2.z * 0.22 * exp(-max(c.d, 0.0) / max(hl * 0.12, 1.0)) * smoothstep(-1.0, 0.5, c.d) * span;
     emis += i.c1.rgb * bg;
-    return vec4f(emis, body * i.p2.w + smoke);
+    let occl = select(1.0, i.p2.w, effective_blend_mode(i) == 0u);
+    return vec4f(emis, body * occl + smoke);
 }
 
 // Blackbody colour (linear) for a flame temperature in kelvin (Tanner Helland's fit, 1000-4000 K).

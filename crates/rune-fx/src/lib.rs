@@ -964,18 +964,71 @@ pub struct FxLayer {
     pub opacity: f32,
 }
 
+/// How an effect layer composites onto the target beneath it (`FxSlot::blend`).
+///
+/// `Normal` uses premultiplied source-over (allowing additive light where `rgb > a`).
+/// `Multiply`, `Screen`, `Overlay`, and `SoftLight` evaluate the W3C Compositing and Blending
+/// separable formulas in the frame's working colour space: linear light by default, or sRGB
+/// when `FxRenderer::set_srgb_blend(true)` matches `rune::Tx::set_srgb_blend`.
+///
+/// `Multiply` and `Screen` use fixed-function `wgpu::BlendState` with zero backdrop reads.
+/// `Overlay` and `SoftLight` sample the backdrop (`FxFrame::backdrop` or `EffectSite::backdrop`
+/// via `set_layer_backdrop` / `blur_backdrop`) and fall back to `Normal` when no backdrop is
+/// available (for example, on a target without `COPY_SRC`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum FxBlend {
+    #[default]
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    SoftLight,
+}
+
+impl FxBlend {
+    /// True when the blend mode samples the backdrop texture in the fragment shader.
+    pub const fn needs_backdrop(self) -> bool {
+        matches!(self, Self::Overlay | Self::SoftLight)
+    }
+
+    /// Additional per-pixel cost of this blend mode on top of the effect's own `Fx::cost`.
+    pub const fn cost(self) -> FxCost {
+        match self {
+            Self::Normal | Self::Multiply | Self::Screen => {
+                FxCost { passes: 0, samples: 0, alu: 0, backdrop: false, source: false }
+            }
+            Self::Overlay | Self::SoftLight => {
+                FxCost { passes: 0, samples: 1, alu: 1, backdrop: true, source: false }
+            }
+        }
+    }
+
+    pub(crate) const fn code(self) -> u32 {
+        match self {
+            Self::Normal => 0,
+            Self::Multiply => 1,
+            Self::Screen => 2,
+            Self::Overlay => 3,
+            Self::SoftLight => 4,
+        }
+    }
+}
+
 /// Per-layer placement in a Rune effect slot. Passed separately to
 /// [`FxRenderer::prepare_with_slots`] so existing `FxLayer` and `FxFrame` literals stay valid.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FxSlot {
     pub(crate) scale: f32,
     pub(crate) clip: [f32; 4],
     pub(crate) fade: [u32; 4],
     pub(crate) backdrop_srgb: Option<bool>,
+    pub(crate) blend: FxBlend,
 }
 
 impl Default for FxSlot {
-    fn default() -> Self { Self { scale: 0.0, clip: NO_CLIP, fade: [0; 4], backdrop_srgb: None } }
+    fn default() -> Self {
+        Self { scale: 0.0, clip: NO_CLIP, fade: [0; 4], backdrop_srgb: None, blend: FxBlend::Normal }
+    }
 }
 
 impl FxSlot {
@@ -989,6 +1042,11 @@ impl FxSlot {
     pub fn clip(mut self, clip: [f32; 4], fade: [u32; 4]) -> Self {
         self.clip = clip;
         self.fade = fade;
+        self
+    }
+    /// Blend mode for compositing this layer onto the target beneath it.
+    pub fn blend(mut self, blend: FxBlend) -> Self {
+        self.blend = blend;
         self
     }
 }

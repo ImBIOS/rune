@@ -93,7 +93,7 @@ fn shade(in: VOut) -> vec4f {
             let hem = smoothstep(yk + 0.16, yk - 0.02, uy) * 0.5 + 0.5;
             col += cols[k] * band * rays * hem;
         }
-        let a = lum(col) * 0.4;
+        let a = select(min(max(col.r, max(col.g, col.b)), 1.0), lum(col) * 0.4, effective_blend_mode(i) == 0u);
         return finish(vec4f(col * i.p0.z * m, a * i.p0.z * m), in.px);
     }
     // Grain.

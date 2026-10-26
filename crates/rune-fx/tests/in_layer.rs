@@ -501,6 +501,156 @@ fn plastic_matches_across_blend_modes() {
     }
 }
 
+#[test]
+fn fx_blend_modes_over_cream_paper_and_fallback_without_backdrop() {
+    use rune::render::{Gpu, Offscreen};
+
+    let gpu = Gpu::headless();
+    let (w, h) = (96u32, 96u32);
+    let warm_glow = || {
+        Fx::glow(GlowParams {
+            color: rgb(0xc85a14),
+            core: rgb(0xe88c28),
+            radius: 10.0,
+            reach: 2.5,
+            intensity: 1.15,
+            inner: 0.8,
+            hot: 0.35,
+            ..Default::default()
+        })
+        .on(Shape::rounded(32.0, 32.0, 32.0, 32.0, 10.0))
+        .at(0.5)
+    };
+
+    for srgb in [false, true] {
+        let format = if srgb {
+            wgpu::TextureFormat::Rgba8Unorm
+        } else {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        };
+        let mut fx = FxRenderer::new(&gpu.device, format, FxOptions::default());
+        fx.set_srgb_blend(srgb);
+
+        // Cream paper (#FAF7F2) in the target's clear encoding.
+        let cream_srgb = [0xfa as f32 / 255.0, 0xf7 as f32 / 255.0, 0xf2 as f32 / 255.0];
+        let cream_lin = cream_srgb.map(srgb_decode);
+        let clear = if srgb {
+            wgpu::Color { r: cream_srgb[0] as f64, g: cream_srgb[1] as f64, b: cream_srgb[2] as f64, a: 1.0 }
+        } else {
+            wgpu::Color { r: cream_lin[0] as f64, g: cream_lin[1] as f64, b: cream_lin[2] as f64, a: 1.0 }
+        };
+
+        let backdrop_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cream backdrop"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let backdrop_view = backdrop_tex.create_view(&Default::default());
+        {
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            let _ = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &backdrop_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            gpu.queue.submit([enc.finish()]);
+        }
+
+        let render_mode = |fx: &mut FxRenderer, mode: FxBlend, with_backdrop: bool| -> Vec<u8> {
+            let target = Offscreen::with_format(&gpu.device, w, h, format);
+            let layers = [warm_glow()];
+            let slots = [FxSlot::default().blend(mode).backdrop_srgb(srgb)];
+            let stats = fx.prepare_with_slots(
+                &gpu.device,
+                &gpu.queue,
+                &FxFrame {
+                    viewport: [w, h],
+                    scale: 1.0,
+                    layers: &layers,
+                    backdrop: with_backdrop.then_some(&backdrop_view),
+                    sources: &[],
+                },
+                &slots,
+            );
+            assert_eq!(stats.needs_backdrop, mode.needs_backdrop());
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: None,
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &target.view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                fx.draw_layer(&mut pass, 0);
+            }
+            target.copy(&mut enc);
+            gpu.queue.submit([enc.finish()]);
+            target.read(&gpu.device)
+        };
+
+        let normal = render_mode(&mut fx, FxBlend::Normal, true);
+        let multiply = render_mode(&mut fx, FxBlend::Multiply, true);
+        let screen = render_mode(&mut fx, FxBlend::Screen, true);
+        let overlay = render_mode(&mut fx, FxBlend::Overlay, true);
+        let soft_light = render_mode(&mut fx, FxBlend::SoftLight, true);
+
+        // Outside the glow, all modes leave #FAF7F2 cream paper untouched.
+        for out in [&normal, &multiply, &screen, &overlay, &soft_light] {
+            let corner = px(out, w, 2, 2);
+            assert!(
+                corner[0].abs_diff(0xfa) <= 1 && corner[1].abs_diff(0xf7) <= 1 && corner[2].abs_diff(0xf2) <= 1,
+                "srgb={srgb} untouched cream paper at (2,2): {corner:?}"
+            );
+        }
+
+        // At the warm glow rim (32, 48): Normal washes out toward white on cream paper, whereas
+        // Multiply and SoftLight deepen the blue/green channels to a warm amber tone.
+        let rim_norm = px(&normal, w, 32, 48);
+        let rim_mul = px(&multiply, w, 32, 48);
+        let rim_scr = px(&screen, w, 32, 48);
+        let rim_ovl = px(&overlay, w, 32, 48);
+        let rim_soft = px(&soft_light, w, 32, 48);
+        assert!(
+            rim_mul[2] + 40 < rim_norm[2] && rim_mul[1] + 20 < rim_norm[1] && rim_mul[0] > rim_mul[1] && rim_mul[1] > rim_mul[2],
+            "srgb={srgb} Multiply deepens cream paper into warm amber ({rim_mul:?}) vs Normal ({rim_norm:?})"
+        );
+        assert!(
+            rim_scr[0] >= 0xfa && rim_scr[1] >= rim_mul[1] && rim_scr[2] >= rim_mul[2],
+            "srgb={srgb} Screen lifts above Multiply: screen={rim_scr:?}, mul={rim_mul:?}"
+        );
+        assert_ne!(rim_ovl, rim_norm, "srgb={srgb} Overlay differs from Normal on cream paper");
+        assert_ne!(rim_soft, rim_norm, "srgb={srgb} SoftLight differs from Normal on cream paper");
+        assert_ne!(rim_ovl, rim_soft, "srgb={srgb} Overlay and SoftLight are distinct");
+
+        // Without a bound backdrop (e.g. a target lacking COPY_SRC), Overlay and SoftLight
+        // degrade cleanly to Normal.
+        let overlay_no_bd = render_mode(&mut fx, FxBlend::Overlay, false);
+        let soft_no_bd = render_mode(&mut fx, FxBlend::SoftLight, false);
+        assert_eq!(overlay_no_bd, normal, "srgb={srgb} Overlay without backdrop falls back to Normal");
+        assert_eq!(soft_no_bd, normal, "srgb={srgb} SoftLight without backdrop falls back to Normal");
+    }
+}
+
 /// Writes `demo/fx/in-layer.png`: a fill in a faded, rounded, clipped card, linear blend on the
 /// left and gamma blend on the right. `cargo test -p rune-fx --test in_layer -- --ignored`.
 #[test]
