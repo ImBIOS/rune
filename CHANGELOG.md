@@ -5,6 +5,21 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`PopupList::padding` and `PopupList::row_radius`.** The popover's padding and each row's
+  corner radius were fixed at 4 points; both builders keep 4 as the default, so nothing moves.
+  `PopupList::items` now documents that a commit calling `tx.instant()` swaps the rows and the
+  popover's height at once.
+
+- **Rows entering a virtual growth stack while a reveal runs land at full height.** A
+  `scroll_into_view` (or a `reveal_selected` list's own reveal) outlives its commit while the
+  viewport's springs run. Until now any later commit in that window grew its new rows from
+  zero instead of landing them, as a reader's virtual list does otherwise. Inside a popover whose
+  height springs at the same time, the two springs moved rows past their slots: a `PopupList`
+  above its field, filtered to one row and then given more rows while the removed ones still
+  collapsed, raised its last row 4 points past its slot before it sank back. **Output change:**
+  those rows now land at full height and ride the popover's edge one way. Rows already growing
+  under the reveal keep growing.
+
 - **`SidebarRow::subtitle_color(Color)`.** A two-line row's subtitle colour, in place of the
   default `text_faint`.
 - **Sticky elements stay opaque under `El::scroll_edge_fade`.** `El::sticky_top`, `El::sticky_bottom`

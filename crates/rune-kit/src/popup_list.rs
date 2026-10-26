@@ -98,6 +98,8 @@ pub struct PopupList<S> {
     gutter: f32,
     width: f32,
     max_height: f32,
+    padding: f32,
+    row_radius: f32,
     items: Vec<PopupItem>,
     active: Option<usize>,
     empty: String,
@@ -118,6 +120,8 @@ impl<S: 'static> PopupList<S> {
             gutter: 4.0,
             width: 260.0,
             max_height: 240.0,
+            padding: 4.0,
+            row_radius: 4.0,
             items: Vec::new(),
             active: None,
             empty: "No results".into(),
@@ -173,6 +177,19 @@ impl<S: 'static> PopupList<S> {
         self.max_height = max_height;
         self
     }
+    /// Space between the popover's edge and its rows, in points (default 4).
+    pub fn padding(mut self, padding: f32) -> Self {
+        self.padding = padding;
+        self
+    }
+    /// Corner radius of each row's highlight, in points (default 4).
+    pub fn row_radius(mut self, radius: f32) -> Self {
+        self.row_radius = radius;
+        self
+    }
+    /// The rows. A change springs the popover to its new height while removed rows fade and
+    /// collapse. To swap the rows and the height at once, as a filter that follows each
+    /// keystroke may want, make the change in a commit that calls [`Tx::instant`].
     pub fn items(mut self, items: impl IntoIterator<Item = impl Into<PopupItem>>) -> Self {
         self.items = items.into_iter().map(Into::into).collect();
         self
@@ -222,7 +239,7 @@ impl<S: 'static> PopupList<S> {
                 .px(8.0)
                 .gap(8.0)
                 .center_y()
-                .radius(4.0)
+                .radius(self.row_radius)
                 .transition(Transition::opacity())
                 .fill(if is_active { k.c.hover } else { Color::TRANSPARENT });
             if let Some(leading) = &option.leading {
@@ -298,12 +315,13 @@ impl<S: 'static> PopupList<S> {
         let align = self.align;
         let gutter = self.gutter;
         let width = self.width;
+        let padding = self.padding;
         let list = self.build_list(k);
         let content = col()
             .key(key)
             .preserve_focus_on_press(true)
             .w(width)
-            .padding(4.0)
+            .padding(padding)
             .on_press(|_: &mut S| {})
             .child(list);
         layer.push(anchor_at(k, raised(k, content, k.radius.md), &anchor, side, align, gutter));

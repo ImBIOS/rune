@@ -4088,11 +4088,14 @@ impl<S: 'static> Runtime<S> {
             let cid = nodes[c].id;
             // A reader away from the tail is anchored using measured row heights. Land those
             // heights with the anchor correction, unless `keep_on_screen` or `scroll_into_view`
-            // is driving this viewport across the commit.
+            // is driving this viewport across the commit. A reveal left from an earlier commit
+            // keeps only rows already growing on their spring: new rows land, or under a parent
+            // whose size springs too, the two springs carry them past their slots.
+            let revealing = self.virtuals.get(&nodes[c].path)
+                .is_some_and(|v| self.scroll_reveals.iter().any(|r| r.viewport == v.scroll_path));
             let reading = self.virtuals.get(&nodes[c].path)
                 .filter(|v| {
                     !self.keeps.iter().any(|k| k.viewport == v.scroll_path)
-                        && !self.scroll_reveals.iter().any(|r| r.viewport == v.scroll_path)
                         && !tx.scroll_to.iter().any(|(scope, key)| {
                             nodes.iter().enumerate().find(|(_, n)| n.named(key)
                                 && n.parent.is_none_or(|p| in_scope(&nodes[p].path, scope.as_deref())))
@@ -4140,7 +4143,7 @@ impl<S: 'static> Runtime<S> {
             }
             let ctop = nodes[c].target[1];
             let width = nodes[c].local.w;
-            if first || !existed || tx.settle || self.reduced_motion || reading {
+            if first || !existed || tx.settle || self.reduced_motion || (reading && !revealing) {
                 stack.width_hold_until = 0.0;
                 stack.width_shrink_until = 0.0;
                 stack.pending_heights.clear();
@@ -4158,7 +4161,7 @@ impl<S: 'static> Runtime<S> {
                 stack.closing.remove(&id);
                 stack.tops.insert(id, nodes[j].target[1] - ctop);
                 let streaming = nodes[j].streaming;
-                if streaming && existed && !tx.settle && !first && !self.reduced_motion && !reading {
+                if streaming && existed && !tx.settle && !first && !self.reduced_motion && !(reading && !revealing) {
                     // Measure the final wrapped text before mutating the growth track. Targets
                     // retain full layout height; only the presented stack extent lags the fill.
                     let mut end = j + 1;
@@ -4176,7 +4179,7 @@ impl<S: 'static> Runtime<S> {
                 });
                 g.streaming = streaming;
                 let snap_change = instant && !streaming && (h - g.target).abs() > 1e-4;
-                if tx.settle || !existed || first || self.reduced_motion || snap_change || reading {
+                if tx.settle || !existed || first || self.reduced_motion || snap_change || (reading && !(revealing && g.moving())) {
                     *g = GrowTrack { streaming, ..GrowTrack::settled(h) };
                     stack.pending_heights.remove(&id);
                 } else {
