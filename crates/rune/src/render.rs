@@ -40,12 +40,14 @@ pub const KIND_DASHED: f32 = 10.0;
 /// (`params.x`) to `border` at `t1` (`params.w`), with `+ 2.0` marking an open interior stop edge.
 pub const KIND_RADIAL: f32 = 11.0;
 /// An effect slot (`El::effect`). It rasterizes no pixels but keeps its place in the painter
-/// stream, so `Renderer::draw_range_with` can hand the compositor the pass at exactly this point,
-/// inside the enclosing isolated layer if there is one. `rect` is the element, `clip`/`fade`
-/// (and the rounded-clip radius in `fade[3]`) its clip, `params.z` the bleed past `rect` in device
-/// pixels and `params.w` the slot's scale in device pixels per point (`Env::scale` times any
-/// element or ancestor `scale` / `live_scale`). `fill[3]` is always 1: a faded slot is drawn in
-/// an isolated layer that applies its opacity. `Runtime::marks` carries its `El::effect` tag.
+/// stream, so `Renderer::draw_range_with` or `Renderer::draw_with` can hand the compositor the pass
+/// at exactly this point, inside the enclosing isolated layer if there is one. `rect` is the
+/// element, `clip`/`fade` (and the rounded-clip radius in `fade[3]`) its clip, `params.x` `1.0`
+/// when the slot requests a backdrop copy (`El::effect_backdrop(true)`), `params.z` the bleed past
+/// `rect` in device pixels and `params.w` the slot's scale in device pixels per point (`Env::scale`
+/// times any element or ancestor `scale` / `live_scale`). `fill[3]` is always 1: a faded slot is
+/// drawn in an isolated layer that applies its opacity. `Runtime::marks` carries its `El::effect`
+/// tag.
 pub const KIND_EFFECT: f32 = 12.0;
 
 /// How a scope combines its contents. The completed scope still uses source-over on its parent
@@ -116,6 +118,13 @@ pub struct EffectSite<'a> {
     pub in_layer: bool,
     /// Whether colours are sRGB-encoded for blending (`Renderer::srgb_blend`).
     pub srgb_blend: bool,
+    /// Viewport-sized copy of the pass's target up to this slot when the slot asked for a
+    /// backdrop (`El::effect_backdrop(true)`, `instance.params[0] != 0.0`) and the pass was run
+    /// with a command encoder (`Renderer::draw_with`, `Renderer::draw_with_backdrop`,
+    /// `Renderer::draw_target_range_with`, or `Renderer::encode_layers_with`). Inside an isolated
+    /// layer (`in_layer: true`), holds that layer's offscreen target copied at `origin` in window
+    /// coordinates.
+    pub backdrop: Option<&'a wgpu::TextureView>,
 }
 
 /// Called at each effect slot, with the pass open and everything painted before the slot already
@@ -123,6 +132,152 @@ pub struct EffectSite<'a> {
 /// skipped). Soft edges and rounded corners on a slot outside a layer are the hook's to apply
 /// (`CLIP_WGSL`). It may record draws; the viewport and scissor are reset to the full target after.
 pub type EffectHook<'h> = dyn FnMut(&mut wgpu::RenderPass<'_>, &EffectSite<'_>) + 'h;
+
+/// Phase of an effect slot callback in `Renderer::draw_with_backdrop`,
+/// `Renderer::encode_layers_with_backdrop`, and `Renderer::draw_target_range_with`.
+pub enum EffectPhase<'a, 'p> {
+    /// Outside the render pass, right after the target up to a backdrop slot
+    /// (`El::effect_backdrop(true)`) was copied into `site.backdrop` and before the pass re-opens
+    /// with `LoadOp::Load` (e.g. for `FxRenderer::blur_backdrop`).
+    Backdrop(&'a mut wgpu::CommandEncoder),
+    /// Inside the open render pass at the slot's painter position, with the scissor set to the
+    /// slot's clip rectangle.
+    Draw(&'a mut wgpu::RenderPass<'p>),
+}
+
+/// Called at each effect slot: first with `EffectPhase::Backdrop(encoder)` while the pass is
+/// closed if the slot requested a backdrop (`El::effect_backdrop(true)`), then with
+/// `EffectPhase::Draw(pass)` inside the open pass.
+pub type EffectBackdropHook<'h> = dyn FnMut(EffectPhase<'_, '_>, &EffectSite<'_>) + 'h;
+
+struct Backdrop {
+    format: wgpu::TextureFormat,
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+enum PassInner<'a, 'p> {
+    Borrowed(&'a mut wgpu::RenderPass<'p>),
+    Owned(wgpu::RenderPass<'p>),
+}
+
+pub(super) struct ActivePass<'a, 'p> {
+    inner: Option<PassInner<'a, 'p>>,
+    encoder: Option<(&'a mut wgpu::CommandEncoder, &'a wgpu::TextureView)>,
+}
+
+impl<'a, 'p> ActivePass<'a, 'p> {
+    pub(super) fn owned(
+        pass: wgpu::RenderPass<'static>,
+        encoder: &'a mut wgpu::CommandEncoder,
+        view: &'a wgpu::TextureView,
+    ) -> Self {
+        ActivePass { inner: Some(PassInner::Owned(pass)), encoder: Some((encoder, view)) }
+    }
+
+    fn split_for_backdrop<'r>(
+        &mut self,
+        renderer: &'r Renderer,
+        at: u32,
+        instance: &Instance,
+        format: wgpu::TextureFormat,
+        origin: [f32; 2],
+        size: [u32; 2],
+        in_layer: bool,
+        hook: &mut EffectBackdropHook<'_>,
+    ) -> Option<&'r wgpu::TextureView> {
+        let (encoder, view) = self.encoder.as_mut()?;
+        let bd = renderer.backdrops.iter().find(|b| b.format == format)?;
+        drop(self.inner.take());
+        let (vw, vh) = (bd.texture.width(), bd.texture.height());
+        if in_layer {
+            let _clear = (*encoder).begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("backdrop clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &bd.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        let src_x = (-origin[0]).max(0.0) as u32;
+        let src_y = (-origin[1]).max(0.0) as u32;
+        let dst_x = origin[0].max(0.0) as u32;
+        let dst_y = origin[1].max(0.0) as u32;
+        let src_tex = view.texture();
+        let copy_w = size[0].min(src_tex.width()).saturating_sub(src_x).min(vw.saturating_sub(dst_x));
+        let copy_h = size[1].min(src_tex.height()).saturating_sub(src_y).min(vh.saturating_sub(dst_y));
+        if copy_w > 0 && copy_h > 0 {
+            (*encoder).copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: src_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: src_x, y: src_y, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &bd.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: dst_x, y: dst_y, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d { width: copy_w, height: copy_h, depth_or_array_layers: 1 },
+            );
+        }
+        let site = EffectSite {
+            index: at,
+            instance,
+            scale: instance.params[3],
+            format,
+            origin,
+            size,
+            in_layer,
+            srgb_blend: renderer.srgb_blend,
+            backdrop: Some(&bd.view),
+        };
+        hook(EffectPhase::Backdrop(*encoder), &site);
+        let mut next = (*encoder).begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(if in_layer { "isolated group" } else { "frame" }),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: *view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        }).forget_lifetime();
+        next.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
+        self.inner = Some(PassInner::Owned(next));
+        Some(&bd.view)
+    }
+}
+
+impl<'p> std::ops::Deref for ActivePass<'_, 'p> {
+    type Target = wgpu::RenderPass<'p>;
+    fn deref(&self) -> &Self::Target {
+        match self.inner.as_ref().expect("active pass") {
+            PassInner::Borrowed(p) => p,
+            PassInner::Owned(p) => p,
+        }
+    }
+}
+
+impl<'p> std::ops::DerefMut for ActivePass<'_, 'p> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self.inner.as_mut().expect("active pass") {
+            PassInner::Borrowed(p) => p,
+            PassInner::Owned(p) => p,
+        }
+    }
+}
 
 /// One instance, in device pixels.
 #[repr(C)]
@@ -330,6 +485,8 @@ pub struct Renderer {
     srgb_blend: bool,
     /// Effect slots of the uploaded instances, by index.
     effects: Vec<(u32, Instance)>,
+    /// Pooled viewport-sized backdrop copies, allocated only when a slot sets `effect_backdrop`.
+    backdrops: Vec<Backdrop>,
 }
 
 impl Renderer {
@@ -444,6 +601,7 @@ impl Renderer {
             layers: Default::default(),
             srgb_blend: false,
             effects: Vec::new(),
+            backdrops: Vec::new(),
         }
     }
 
@@ -578,6 +736,10 @@ impl Renderer {
             self.extra.push((format, p));
         }
         if self.layer_stats().targets > 0 { self.add_layer_format(device, format); }
+        let [vw, vh] = self.target_frame(None).1;
+        if !self.backdrops.is_empty() && vw > 0 && vh > 0 {
+            self.ensure_backdrop(device, format, (vw, vh));
+        }
         if let Some(s) = &mut self.surfaces { s.add_format(device, format); }
     }
 
@@ -597,6 +759,31 @@ impl Renderer {
         if let Some(s) = &mut self.surfaces {
             s.set_srgb_blend(self.srgb_blend);
             s.add_format(device, format);
+        }
+    }
+
+    fn ensure_backdrop(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat, (width, height): (u32, u32)) {
+        let (width, height) = (width.max(1), height.max(1));
+        if let Some(b) = self.backdrops.iter().find(|b| b.format == format)
+            && b.texture.width() == width && b.texture.height() == height
+        {
+            return;
+        }
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("effect backdrop"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        if let Some(b) = self.backdrops.iter_mut().find(|b| b.format == format) {
+            *b = Backdrop { format, texture, view };
+        } else {
+            self.backdrops.push(Backdrop { format, texture, view });
         }
     }
 
@@ -627,20 +814,86 @@ impl Renderer {
     pub fn draw_range(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat, range: std::ops::Range<u32>) {
         if range.is_empty() && range.end != self.count { return; }
         self.validate_layer_range(&range);
-        self.draw_layer_range(pass, format, range, None, &mut |_, _| {});
+        let mut active = ActivePass { inner: Some(PassInner::Borrowed(pass)), encoder: None };
+        self.draw_layer_range(&mut active, format, range, None, &mut |_, _| {});
     }
 
     /// `draw_range` that stops at each effect slot (`El::effect`) in `range` and calls `hook`
     /// there, in painter order. Effects inside an isolated layer are reached through
     /// `encode_layers_with`, which draws that layer's pass; scopes nest as in `draw_range`.
+    /// Because `pass` is already open, `EffectSite::backdrop` is `None`; use `draw_with`,
+    /// `draw_with_backdrop`, or `draw_target_range_with` when slots request a backdrop copy.
     pub fn draw_range_with(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat, range: std::ops::Range<u32>, hook: &mut EffectHook<'_>) {
         if range.is_empty() && range.end != self.count { return; }
         self.validate_layer_range(&range);
-        self.draw_layer_range(pass, format, range, None, hook);
+        let mut active = ActivePass { inner: Some(PassInner::Borrowed(pass)), encoder: None };
+        self.draw_layer_range(&mut active, format, range, None, &mut |phase, site| {
+            if let EffectPhase::Draw(pass) = phase { hook(pass, site); }
+        });
+    }
+
+    /// Encodes isolated layers and draws the frame into `view` (cleared to `clear`), calling
+    /// `hook` at each effect slot (`El::effect`) in painter order. At slots with
+    /// `El::effect_backdrop(true)`, ends the current pass, copies the target up to that slot into
+    /// a pooled backdrop texture, re-opens the pass with `LoadOp::Load`, and hands the backdrop
+    /// view in `EffectSite::backdrop`.
+    pub fn draw_with(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, clear: [f32; 4], hook: &mut EffectHook<'_>) {
+        self.draw_with_backdrop(encoder, view, clear, &mut |phase, site| {
+            if let EffectPhase::Draw(pass) = phase { hook(pass, site); }
+        });
+    }
+
+    /// Like `draw_with`, also calling `hook(EffectPhase::Backdrop(encoder), site)` while the
+    /// render pass is closed at each backdrop slot (`El::effect_backdrop(true)`) so the compositor
+    /// can blur or pre-process `site.backdrop` (e.g. `FxRenderer::blur_backdrop`) before the pass
+    /// re-opens for `EffectPhase::Draw(pass)`.
+    pub fn draw_with_backdrop(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        clear: [f32; 4],
+        hook: &mut EffectBackdropHook<'_>,
+    ) {
+        self.encode_layers_with_backdrop(encoder, hook);
+        let clear = wgpu::Color { r: clear[0] as f64, g: clear[1] as f64, b: clear[2] as f64, a: clear[3] as f64 };
+        self.draw_target_range_with(encoder, view, self.format, wgpu::LoadOp::Clear(clear), 0..self.count, hook);
+    }
+
+    /// Draws `range` into `view` (opening the pass with `load`), splitting the pass on `encoder`
+    /// only at backdrop slots (`El::effect_backdrop(true)`) in `range` to copy `view` into
+    /// `EffectSite::backdrop` and run `EffectPhase::Backdrop(encoder)` before re-opening with
+    /// `LoadOp::Load`. Call `encode_layers_with` / `encode_layers_with_backdrop` before drawing
+    /// the first range.
+    pub fn draw_target_range_with(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        load: wgpu::LoadOp<wgpu::Color>,
+        range: std::ops::Range<u32>,
+        hook: &mut EffectBackdropHook<'_>,
+    ) {
+        if range.is_empty() && range.end != self.count { return; }
+        self.validate_layer_range(&range);
+        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("frame"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        }).forget_lifetime();
+        let mut active = ActivePass::owned(pass, encoder, view);
+        self.draw_layer_range(&mut active, format, range, None, hook);
     }
 
     /// `draw_instances`, split after each effect slot in `range` so `hook` runs at its place.
-    fn draw_with_effects(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat, range: std::ops::Range<u32>, target: Option<usize>, hook: &mut EffectHook<'_>) {
+    fn draw_with_effects(&self, pass: &mut ActivePass<'_, '_>, format: wgpu::TextureFormat, range: std::ops::Range<u32>, target: Option<usize>, hook: &mut EffectBackdropHook<'_>) {
         let first = self.effects.partition_point(|(at, _)| *at < range.start);
         let mut cursor = range.start;
         for (at, instance) in self.effects[first..].iter().take_while(|(at, _)| *at < range.end) {
@@ -654,8 +907,13 @@ impl Renderer {
             let (x0, y0) = (edge(c[0].floor(), origin[0], size[0]), edge(c[1].floor(), origin[1], size[1]));
             let (x1, y1) = (edge(c[2].ceil(), origin[0], size[0]), edge(c[3].ceil(), origin[1], size[1]));
             if x1 <= x0 || y1 <= y0 { continue; }
+            let backdrop = if instance.params[0] != 0.0 {
+                pass.split_for_backdrop(self, *at, instance, format, origin, size, target.is_some(), hook)
+            } else {
+                None
+            };
             pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
-            hook(pass, &EffectSite { index: *at, instance, scale: instance.params[3], format, origin, size, in_layer: target.is_some(), srgb_blend: self.srgb_blend });
+            hook(EffectPhase::Draw(pass), &EffectSite { index: *at, instance, scale: instance.params[3], format, origin, size, in_layer: target.is_some(), srgb_blend: self.srgb_blend, backdrop });
             pass.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
             pass.set_scissor_rect(0, 0, size[0], size[1]);
         }
@@ -734,6 +992,15 @@ impl Renderer {
         if start < self.count { self.image_batches.push((start..self.count, page)); }
         self.prepare_layers(device, queue, if has_layers { instances } else { &[] }, viewport);
         self.sync_resident_caches(&mut atlas.resident_caches);
+        if self.effects.iter().any(|(_, i)| i.params[0] != 0.0) {
+            self.ensure_backdrop(device, self.format, viewport);
+            for index in 0..self.extra.len() {
+                self.ensure_backdrop(device, self.extra[index].0, viewport);
+            }
+            if self.layers.targets.iter().any(Option::is_some) {
+                self.ensure_backdrop(device, layers::FORMAT, viewport);
+            }
+        }
     }
 
     pub fn prepare_surfaces(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, draws: &[crate::native_surface::SurfaceDraw], viewport: (u32,u32)) {

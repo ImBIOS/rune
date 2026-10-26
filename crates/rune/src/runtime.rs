@@ -5365,7 +5365,7 @@ impl<S: 'static> Runtime<S> {
             let press_anchor = centre_to;
             let blur = pinh.blur + p.blur * sc;
             // An effect slot's bleed can reach into view from a rect outside it.
-            let filter_margin = blur * s * 3.0 + n.vis.effect.map_or(0.0, |bleed| bleed * sc * s);
+            let filter_margin = blur * s * 3.0 + n.vis.effect.map_or(0.0, |(bleed, _)| bleed * sc * s);
 
             let mut raw_edges = p.rect.edges();
             raw_edges[0] += pinh.dx;
@@ -5970,13 +5970,13 @@ impl<S: 'static> Runtime<S> {
                         fade: crate::render::pack_fade(fade, clip, clip),
                     });
                 }
-                if let Some(bleed) = n.vis.effect {
+                if let Some((bleed, backdrop)) = n.vis.effect {
                     let slot = Instance {
                         rect: [r[0], r[1], w, h],
                         radii,
                         fill: [0.0, 0.0, 0.0, 1.0],
                         border: [0.0; 4],
-                        params: [0.0, KIND_EFFECT, bleed * k_px, k_px],
+                        params: [if backdrop { 1.0 } else { 0.0 }, KIND_EFFECT, bleed * k_px, k_px],
                         uv: [0.0; 4],
                         clip,
                         fade: crate::render::pack_fade(fade, clip, clip),

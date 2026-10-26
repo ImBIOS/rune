@@ -899,8 +899,8 @@ pub struct Visual {
     pub pixels_fit: Option<crate::SurfaceFit>,
     /// App-defined tag a compositor reads per instance (`Runtime::marks`); 0 inherits the parent's.
     pub mark: u32,
-    /// An effect slot (`El::effect`): the bleed past the rect, in points, a compositor may paint.
-    pub(crate) effect: Option<f32>,
+    /// An effect slot (`El::effect`): `(bleed_pt, needs_backdrop)`.
+    pub(crate) effect: Option<(f32, bool)>,
     /// Tracks hover for its descendants' `group_*` styles even without a hover colour. Any
     /// element with a hover colour is a group too.
     pub hover_group: bool,
@@ -2306,13 +2306,22 @@ impl El {
     /// pass there. See `Renderer::draw_range_with`.
     pub fn effect(mut self, mark: u32) -> Self {
         self.vis.mark = mark;
-        self.vis.effect.get_or_insert(0.0);
+        self.vis.effect.get_or_insert((0.0, false));
         self
     }
     /// Points past the rect an effect slot may paint (a glow's reach). Grows the bounds of an
     /// enclosing isolated layer; the clip still applies.
     pub fn effect_bleed(mut self, pt: f32) -> Self {
-        self.vis.effect = Some(pt.max(0.0));
+        let bd = self.vis.effect.map_or(false, |(_, bd)| bd);
+        self.vis.effect = Some((pt.max(0.0), bd));
+        self
+    }
+    /// Request a backdrop copy up to this effect slot (`EffectSite::backdrop`) when drawn with
+    /// `Renderer::draw_with`, `Renderer::draw_with_backdrop`, or `Renderer::encode_layers_with`.
+    /// Ordinary slots (`false`, the default) stay inside the open render pass with no copy.
+    pub fn effect_backdrop(mut self, on: bool) -> Self {
+        let bleed = self.vis.effect.map_or(0.0, |(b, _)| b);
+        self.vis.effect = Some((bleed, on));
         self
     }
     /// Overlay drawn over the fill while hovered.

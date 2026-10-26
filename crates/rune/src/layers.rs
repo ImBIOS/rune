@@ -357,7 +357,7 @@ impl Renderer {
                 let texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("isolated group"), size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
                     mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
-                    format: FORMAT, usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                    format: FORMAT, usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
                     view_formats: &[],
                 });
                 let view = texture.create_view(&Default::default());
@@ -488,8 +488,18 @@ impl Renderer {
     /// `encode_layers` that calls `hook` at each effect slot inside an isolated layer, in painter
     /// order within that layer's pass. The layer's opacity, blur, dissolve and clip then apply to
     /// whatever the hook drew when the layer composites. Slots outside any layer are reached by
-    /// `draw_range_with`.
+    /// `draw_range_with` or `draw_with`.
     pub fn encode_layers_with(&self, encoder: &mut wgpu::CommandEncoder, hook: &mut EffectHook<'_>) {
+        self.encode_layers_timed(encoder, None, &mut |phase, site| {
+            if let EffectPhase::Draw(pass) = phase { hook(pass, site); }
+        });
+    }
+
+    /// `encode_layers_with` that also calls `hook(EffectPhase::Backdrop(encoder), site)` outside
+    /// the render pass at each backdrop slot (`El::effect_backdrop(true)`) inside an isolated
+    /// layer, right after copying the layer's target up to that slot into `EffectSite::backdrop`
+    /// and before re-opening the layer's pass for `EffectPhase::Draw(pass)`.
+    pub fn encode_layers_with_backdrop(&self, encoder: &mut wgpu::CommandEncoder, hook: &mut EffectBackdropHook<'_>) {
         self.encode_layers_timed(encoder, None, hook);
     }
 
@@ -504,7 +514,7 @@ impl Renderer {
         }
     }
 
-    pub(super) fn encode_layers_timed(&self, encoder: &mut wgpu::CommandEncoder, timestamps: Option<&wgpu::RenderPassTimestampWrites<'_>>, hook: &mut EffectHook<'_>) {
+    pub(super) fn encode_layers_timed(&self, encoder: &mut wgpu::CommandEncoder, timestamps: Option<&wgpu::RenderPassTimestampWrites<'_>>, hook: &mut EffectBackdropHook<'_>) {
         let mut first = true;
         for (index, l) in self.layers.plan.iter().enumerate().rev() {
             if !l.needs_render { continue; }
@@ -520,18 +530,19 @@ impl Renderer {
                     end_of_pass_write_index: None,
                 }) } else { None },
                 occlusion_query_set: None, multiview_mask: None,
-            });
+            }).forget_lifetime();
             first = false;
             pass.set_viewport(0.0, 0.0, l.bounds[2], l.bounds[3], 0.0, 1.0);
-            self.draw_layer_range(&mut pass, FORMAT, l.begin + 1..l.end, Some(index), hook);
-            drop(pass);
+            let mut active = ActivePass::owned(pass, encoder, &target.view);
+            self.draw_layer_range(&mut active, FORMAT, l.begin + 1..l.end, Some(index), hook);
+            drop(active);
             if let Some(blur) = &target.blur {
                 self.layers.blur.as_ref().unwrap().encode(encoder, blur, &target.view);
             }
         }
     }
 
-    pub(super) fn draw_layer_range(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat, range: Range<u32>, target: Option<usize>, hook: &mut EffectHook<'_>) {
+    pub(super) fn draw_layer_range(&self, pass: &mut ActivePass<'_, '_>, format: wgpu::TextureFormat, range: Range<u32>, target: Option<usize>, hook: &mut EffectBackdropHook<'_>) {
         let mut cursor = range.start;
         for (index, l) in self.layers.plan.iter().enumerate() {
             if l.begin < cursor || l.begin >= range.end { continue; }
@@ -574,7 +585,7 @@ impl Renderer {
         }
     }
 
-    fn draw_plain(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat, range: Range<u32>, target: Option<usize>, include_end: bool, hook: &mut EffectHook<'_>) {
+    fn draw_plain(&self, pass: &mut ActivePass<'_, '_>, format: wgpu::TextureFormat, range: Range<u32>, target: Option<usize>, include_end: bool, hook: &mut EffectBackdropHook<'_>) {
         let mut cursor = range.start;
         if let Some(s) = &self.surfaces {
             for index in 0..s.len() {

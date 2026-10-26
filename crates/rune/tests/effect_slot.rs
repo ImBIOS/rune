@@ -378,3 +378,120 @@ fn slot_reports_device_pixels_per_point_without_bleed() {
     let got = seen.lock().unwrap().clone();
     assert_eq!(got, vec![(1, 2.0, 0.0), (2, 6.0, 0.0)]);
 }
+
+struct BackdropProbe(Arc<Mutex<Vec<(u32, &'static str, bool, bool)>>>);
+
+impl Compositor<()> for BackdropProbe {
+    fn render(&mut self, f: &mut Frame<'_, ()>) {
+        let (device, queue, size) = (f.device, f.queue, f.size);
+        let clear = f.rt.clear_color();
+        let marks = f.rt.marks.clone();
+        f.ui.prepare(device, queue, &mut f.rt.text.atlas, &f.rt.instances, size);
+        let log = &self.0;
+        f.ui.draw_with_backdrop(f.encoder, f.target, clear, &mut |phase, s| {
+            let phase_name = match phase {
+                rune::render::EffectPhase::Backdrop(_) => "backdrop",
+                rune::render::EffectPhase::Draw(_) => "draw",
+            };
+            log.lock().unwrap().push((marks[s.index as usize], phase_name, s.backdrop.is_some(), s.in_layer));
+        });
+    }
+}
+
+fn mixed_backdrop_slots(_: &(), _: &mut Cx<()>) -> El {
+    background()
+        .child(effect(1).absolute(8.0, 8.0).size(16.0, 16.0))
+        .child(effect(2).effect_backdrop(true).absolute(32.0, 8.0).size(16.0, 16.0))
+        .child(
+            el().absolute(8.0, 40.0).size(48.0, 32.0).opacity(0.5)
+                .child(el().size(16.0, 16.0).fill(hex("#00ff00").unwrap()))
+                .child(effect(3).effect_backdrop(true).size(16.0, 16.0)),
+        )
+}
+
+#[test]
+fn only_backdrop_slots_split_the_pass_and_receive_a_backdrop_view() {
+    let seen = Arc::default();
+    let _ = snap("backdrop-probe", mixed_backdrop_slots, false, BackdropProbe(Arc::clone(&seen)));
+    let got = seen.lock().unwrap().clone();
+    assert_eq!(
+        got,
+        vec![
+            (3, "backdrop", true, true),
+            (3, "draw", true, true),
+            (1, "draw", false, false),
+            (2, "backdrop", true, false),
+            (2, "draw", true, false),
+        ],
+    );
+}
+
+struct CacheSlotProbe {
+    frame_no: u32,
+    flat: Flat,
+    log: Arc<Mutex<Vec<(u32, usize, bool, bool)>>>,
+}
+
+impl Compositor<()> for CacheSlotProbe {
+    fn render(&mut self, f: &mut Frame<'_, ()>) {
+        self.frame_no += 1;
+        let frame_no = self.frame_no;
+        let (device, queue, size) = (f.device, f.queue, f.size);
+        let clear = f.rt.clear_color();
+        f.ui.prepare(device, queue, &mut f.rt.text.atlas, &f.rt.instances, size);
+        let stats = f.ui.layer_stats();
+        let flat = &mut self.flat;
+        let log = &self.log;
+        f.ui.draw_with_backdrop(f.encoder, f.target, clear, &mut |phase, s| {
+            if let rune::render::EffectPhase::Draw(pass) = phase {
+                log.lock().unwrap().push((frame_no, stats.targets, s.backdrop.is_some(), s.in_layer));
+                // Frame 1 leaves the slot unpainted; frame 2 paints solid red, proving the
+                // `.cache()` subtree was not frozen on frame 1's raster.
+                if frame_no >= 2 {
+                    flat.draw(device, queue, pass, s);
+                }
+            }
+        });
+    }
+    fn animating(&self) -> bool {
+        self.frame_no < 2
+    }
+}
+
+fn cached_subtree_with_effect(_: &(), _: &mut Cx<()>) -> El {
+    background().child(
+        el().key("cached-card").cache().absolute(16.0, 16.0).size(64.0, 64.0)
+            .fill(hex("#282828").unwrap())
+            .child(effect(1).effect_backdrop(true).absolute(8.0, 8.0).size(48.0, 48.0)),
+    )
+}
+
+#[test]
+fn effect_slot_in_cached_subtree_draws_live_and_never_caches() {
+    let dir = std::env::temp_dir().join(format!("rune-effect-slot-cache-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = Arc::default();
+    App::new(AppSpec::new("slot-in-cache", (96.0, 96.0), || (), cached_subtree_with_effect))
+        .compositor(CacheSlotProbe { frame_no: 0, flat: Flat::new(Arc::default()), log: Arc::clone(&log) })
+        .args([
+            "--frames".to_string(),
+            "2".to_string(),
+            "--out".to_string(),
+            dir.to_str().unwrap().to_string(),
+            "--scale".to_string(),
+            "1".to_string(),
+        ])
+        .run();
+    let frame2 = dir.join("frame_0001.png");
+    let mut reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&frame2).unwrap())).read_info().unwrap();
+    let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut buf).unwrap();
+    buf.truncate(info.buffer_size());
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let got = log.lock().unwrap().clone();
+    assert_eq!(got, vec![(1, 0, true, false), (2, 0, true, false)], "cached subtree with effect slot stays live with 0 cache targets");
+    // Frame 2 must show the red paint from frame 2, not frame 1's unpainted #282828.
+    let center = px(&buf, info.width, 40, 40);
+    assert!(center[0] > 240 && center[1] < 15 && center[2] < 15, "frame 2 drew live red at (40, 40): {center:?}");
+}

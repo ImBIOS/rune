@@ -46,6 +46,7 @@ pub struct FxOptions {
     pub dither: bool,
 }
 
+#[derive(Clone, Copy)]
 struct Prepared {
     kind: usize,
     instance: u32,
@@ -54,6 +55,7 @@ struct Prepared {
     bounds: [f32; 4],
     /// Frosted lens: blur sigma in device px (0 = no backdrop blur).
     blur_px: f32,
+    needs_backdrop: bool,
 }
 
 /// Backdrop blur pyramid: half-resolution mip chains for the dual-filter down and up passes.
@@ -448,7 +450,7 @@ impl FxRenderer {
             Fx::Fill(FillParams { style: FillStyle::FlutedGlass(p), .. }) => p.frost > 0.0,
             _ => false,
         };
-        if frame.backdrop.is_some() && frame.layers.iter().any(wants_blur) && self.blur.as_ref().is_none_or(|b| b.size != frame.viewport) {
+        if frame.layers.iter().any(wants_blur) && self.blur.as_ref().is_none_or(|b| b.size != frame.viewport) {
             self.blur = Some(BlurPyramid::new(device, frame.viewport, &self.blur_bgl, &self.dummy, &self.sampler, &self.blur_uniforms));
         }
         if let Some(sims) = self.sims.as_mut() {
@@ -489,11 +491,11 @@ impl FxRenderer {
             let needs_bd = layer.fx.needs_backdrop();
             stats.needs_backdrop |= needs_bd;
             let blur_px = match layer.fx {
-                Fx::Distort(DistortParams::Lens(p)) if frame.backdrop.is_some() => (p.frost.clamp(0.0, 1.0) * LENS_FROST_SIGMA * s).max(0.0),
-                Fx::Fill(FillParams { style: FillStyle::FlutedGlass(p), .. }) if frame.backdrop.is_some() => (p.frost.clamp(0.0, 1.0) * LENS_FROST_SIGMA * s).max(0.0),
+                Fx::Distort(DistortParams::Lens(p)) => (p.frost.clamp(0.0, 1.0) * LENS_FROST_SIGMA * s).max(0.0),
+                Fx::Fill(FillParams { style: FillStyle::FlutedGlass(p), .. }) => (p.frost.clamp(0.0, 1.0) * LENS_FROST_SIGMA * s).max(0.0),
                 _ => 0.0,
             };
-            let key = (needs_bd && frame.backdrop.is_some(), layer.source.map(|s| s.slot), blur_px > 0.0, grid);
+            let key = (needs_bd && frame.backdrop.is_some(), layer.source.map(|s| s.slot), blur_px > 0.0 && frame.backdrop.is_some(), grid);
             let bind = match keys.iter().position(|k| *k == key) {
                 Some(p) => p,
                 None => {
@@ -519,7 +521,7 @@ impl FxRenderer {
             };
             stats.drawn += 1;
             stats.pixels += ((x1 - x0) * (y1 - y0)) as u64;
-            self.prepared.push(Some(Prepared { kind, instance: self.scratch.len() as u32, bind, bounds: [x0, y0, x1, y1], blur_px }));
+            self.prepared.push(Some(Prepared { kind, instance: self.scratch.len() as u32, bind, bounds: [x0, y0, x1, y1], blur_px, needs_backdrop: needs_bd }));
             self.scratch.push(inst);
         }
         let mut regrow = self.bg0.is_none();
@@ -613,13 +615,40 @@ impl FxRenderer {
         }
     }
 
-    /// Blur the backdrop for frosted glass (`LensParams::frost` or `FlutedGlassParams::frost`
-    /// above 0), scissored to the layer.
+    /// Bind a per-slot `backdrop` (`EffectSite::backdrop`) to `layer`. `blur_backdrop` calls this
+    /// automatically, so call it directly only when drawing a backdrop layer without `blur_backdrop`.
+    pub fn set_layer_backdrop(&mut self, device: &wgpu::Device, backdrop: &wgpu::TextureView, layer: usize) {
+        let Some(Some(p)) = self.prepared.get(layer).copied() else { return };
+        if !p.needs_backdrop { return; }
+        let blurred = if p.blur_px > 0.0 {
+            self.blur.as_ref().map_or(&self.dummy, |b| &b.result)
+        } else {
+            &self.dummy
+        };
+        let bind = self.binds.len();
+        self.binds.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fx1"),
+            layout: &self.bgl1,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(backdrop) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.dummy) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(blurred) },
+            ],
+        }));
+        self.prepared[layer].as_mut().unwrap().bind = bind;
+    }
+
+    /// Bind `backdrop` to `layer` and blur it for frosted glass (`LensParams::frost` or
+    /// `FlutedGlassParams::frost` above 0), scissored to the layer.
     ///
-    /// Call it after copying the backdrop for layer `layer` and before drawing that layer, outside
-    /// any render pass. Returns false (and does nothing) for other layers; a frosted lens drawn
-    /// without it falls back to a small in-shader blur.
+    /// Call it after copying the backdrop for layer `layer` (for instance from the `EffectPrep`
+    /// callback of `Renderer::draw_with_backdrop` / `Renderer::encode_layers_with_backdrop` with
+    /// `EffectSite::backdrop`) and before drawing that layer, outside any render pass. Returns
+    /// false (after still binding `backdrop` when the layer reads it) for non-frosted layers; a
+    /// frosted lens drawn without it falls back to a small in-shader blur.
     pub fn blur_backdrop(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, backdrop: &wgpu::TextureView, layer: usize) -> bool {
+        self.set_layer_backdrop(device, backdrop, layer);
         let Some(Some(p)) = self.prepared.get(layer) else { return false };
         let (Some(pyr), true) = (self.blur.as_ref(), p.blur_px > 0.0) else { return false };
         let mips = pyr.down.len();

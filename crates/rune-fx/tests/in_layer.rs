@@ -5,14 +5,14 @@ use std::sync::{Arc, Mutex};
 
 use rune::color::{hex, srgb_decode, srgb_encode};
 use rune::compose::{Compositor, Frame};
-use rune::render::{EffectSite, KIND_EFFECT};
+use rune::render::{EffectPhase, EffectSite, KIND_EFFECT};
 use rune::{App, AppSpec, Cx, El, effect, el};
 use rune_fx::*;
 
 struct Dusk {
     fx: Option<FxRenderer>,
     formats: Arc<Mutex<Vec<wgpu::TextureFormat>>>,
-    effect: fn() -> Fx,
+    effect: fn(u32) -> Fx,
 }
 
 fn dusk() -> Fx {
@@ -26,49 +26,40 @@ fn glow(occlusion: f32) -> Fx {
 impl Compositor<()> for Dusk {
     fn render(&mut self, f: &mut Frame<'_, ()>) {
         let (device, queue, size) = (f.device, f.queue, f.size);
-        let slots: Vec<(u32, rune::render::Instance)> = f.rt.instances.iter().enumerate()
-            .filter(|(_, i)| i.params[1] == KIND_EFFECT).map(|(n, i)| (n as u32, *i)).collect();
+        let marks = &f.rt.marks;
+        let slots: Vec<(u32, rune::render::Instance, u32)> = f.rt.instances.iter().enumerate()
+            .filter(|(_, i)| i.params[1] == KIND_EFFECT)
+            .map(|(n, i)| (n as u32, *i, marks.get(n).copied().unwrap_or(1)))
+            .collect();
         let layers: Vec<FxLayer> = slots.iter()
-            .map(|(_, i)| {
+            .map(|(_, i, m)| {
                 let k = i.params[3];
                 let [x, y, w, h] = i.rect.map(|v| v / k);
                 let r = i.radii.iter().fold(0.0f32, |a, v| a.max(v.abs())) / k;
-                (self.effect)().on(Shape::rounded(x, y, w, h, r)).scale(k).clip(i.clip, i.fade).at(1.0)
+                (self.effect)(*m).on(Shape::rounded(x, y, w, h, r)).scale(k).clip(i.clip, i.fade).at(1.0)
             }).collect();
         let fx = self.fx.get_or_insert_with(|| FxRenderer::new(device, f.format, FxOptions::default()));
         fx.set_srgb_blend(f.srgb_blend());
         fx.add_format(device, wgpu::TextureFormat::Rgba16Float);
         fx.prepare(device, queue, &FxFrame { viewport: [size.0, size.1], scale: 1.0, layers: &layers, backdrop: None, sources: &[] });
         let clear = f.rt.clear_color();
-        let count = f.rt.instances.len() as u32;
         f.ui.prepare(device, queue, &mut f.rt.text.atlas, &f.rt.instances, size);
         let formats = &self.formats;
-        let mut hook = |pass: &mut wgpu::RenderPass<'_>, s: &EffectSite<'_>| {
-            let mut seen = formats.lock().unwrap();
-            if !seen.contains(&s.format) { seen.push(s.format); }
-            if let Some(k) = slots.iter().position(|(at, _)| *at == s.index) {
-                assert_eq!(s.scale, slots[k].1.params[3]);
-                fx.draw_layer_in(pass, s.format, s.origin, k);
+        f.ui.draw_with_backdrop(f.encoder, f.target, clear, &mut |phase, s: &EffectSite<'_>| match phase {
+            EffectPhase::Backdrop(enc) => {
+                if let (Some(bd), Some(k)) = (s.backdrop, slots.iter().position(|(at, _, _)| *at == s.index)) {
+                    fx.blur_backdrop(device, queue, enc, bd, k);
+                }
             }
-        };
-        f.ui.encode_layers_with(f.encoder, &mut hook);
-        let mut pass = f.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("frame"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: f.target,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color { r: clear[0] as f64, g: clear[1] as f64, b: clear[2] as f64, a: clear[3] as f64 }),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
+            EffectPhase::Draw(pass) => {
+                let mut seen = formats.lock().unwrap();
+                if !seen.contains(&s.format) { seen.push(s.format); }
+                if let Some(k) = slots.iter().position(|(at, _, _)| *at == s.index) {
+                    assert_eq!(s.scale, slots[k].1.params[3]);
+                    fx.draw_layer_in(pass, s.format, s.origin, k);
+                }
+            }
         });
-        f.ui.draw_range_with(&mut pass, f.format, 0..count, &mut hook);
     }
 }
 
@@ -84,8 +75,10 @@ fn snap_with(name: &'static str, view: fn(&(), &mut Cx<()>) -> El, srgb: bool, f
     let dir = std::env::temp_dir().join(format!("rune-fx-layer-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("snap.png");
+    thread_local! { static EFFECT: std::cell::Cell<fn() -> Fx> = const { std::cell::Cell::new(dusk) }; }
+    EFFECT.set(effect);
     App::new(AppSpec::new(name, (96.0, 96.0), || (), view))
-        .compositor(Dusk { fx: None, formats, effect })
+        .compositor(Dusk { fx: None, formats, effect: |_| EFFECT.get()() })
         .srgb_blend(srgb)
         .args(["--snap".to_string(), path.to_str().unwrap().to_string(), "--scale".to_string(), scale.to_string()])
         .run();
@@ -263,6 +256,87 @@ fn fill_under_a_rounded_scroll_container_clips_without_a_layer() {
         assert!(mid_fade.iter().zip(full).any(|(m, f)| *m < f.saturating_sub(15)), "srgb {srgb} soft edge fades toward background: {mid_fade:?} vs {full:?}");
         assert!(mid_fade.iter().any(|&c| c > 40), "srgb {srgb} soft edge is not hard-cut at y = 72: {mid_fade:?}");
     }
+}
+
+fn snap_by_mark(name: &'static str, view: fn(&(), &mut Cx<()>) -> El, srgb: bool, formats: Arc<Mutex<Vec<wgpu::TextureFormat>>>, effect: fn(u32) -> Fx) -> (u32, Vec<u8>) {
+    let dir = std::env::temp_dir().join(format!("rune-fx-layer-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("snap.png");
+    App::new(AppSpec::new(name, (96.0, 96.0), || (), view))
+        .compositor(Dusk { fx: None, formats, effect })
+        .srgb_blend(srgb)
+        .args(["--snap".to_string(), path.to_str().unwrap().to_string(), "--scale".to_string(), "1".to_string()])
+        .run();
+    let mut reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap())).read_info().unwrap();
+    let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut buf).unwrap();
+    buf.truncate(info.buffer_size());
+    std::fs::remove_dir_all(&dir).unwrap();
+    (info.width, buf)
+}
+
+fn single_glass_scene(_: &(), _: &mut Cx<()>) -> El {
+    background()
+        .child(el().absolute(0.0, 0.0).size(48.0, 96.0).fill(hex("#00e5ff").unwrap()))
+        .child(effect(1).effect_backdrop(true).absolute(16.0, 16.0).size(64.0, 64.0))
+}
+
+fn stacked_glass_scene(_: &(), _: &mut Cx<()>) -> El {
+    background()
+        .child(el().absolute(0.0, 0.0).size(48.0, 96.0).fill(hex("#00e5ff").unwrap()))
+        .child(effect(1).effect_backdrop(true).absolute(16.0, 16.0).size(64.0, 64.0))
+        .child(el().absolute(40.0, 32.0).size(16.0, 32.0).fill(hex("#ff2040").unwrap()))
+        .child(effect(2).effect_backdrop(true).absolute(24.0, 24.0).size(56.0, 48.0))
+        .child(el().absolute(68.0, 60.0).size(10.0, 10.0).fill(hex("#00ff00").unwrap()))
+}
+
+fn frosted_glass_fx(mark: u32) -> Fx {
+    match mark {
+        1 => Fx::lens(LensParams { frost: 0.85, depth: 0.0, magnification: 1.0, shadow: 0.0, rim: 0.0, ..Default::default() }),
+        _ => Fx::fill(FlutedGlassParams { frost: 0.85, refraction: 0.0, dispersion: 0.0, highlight: 0.0, ..FlutedGlassParams::frosted() }),
+    }
+}
+
+#[test]
+fn backdrop_slots_blur_background_and_stack_glass_over_glass_in_painter_order() {
+    let (w, one) = snap_by_mark("one-glass", single_glass_scene, false, Arc::default(), frosted_glass_fx);
+    // At (54, 48), just to the right of the x=48 cyan stripe, frosted glass 1 blurs cyan into the dark half.
+    let p_one = px(&one, w, 54, 48);
+    assert!(p_one[1] > 60 && p_one[2] > 70, "glass 1 blurs cyan across the x=48 edge: {p_one:?}");
+
+    let (_, stacked) = snap_by_mark("stacked-glass", stacked_glass_scene, false, Arc::default(), frosted_glass_fx);
+    // At (60, 48), to the right of the red bar (x=40..56) drawn between glass 1 and glass 2,
+    // glass 2 blurs both glass 1's cyan and the intermediate red bar, raising the red channel over `one`.
+    let p_two = px(&stacked, w, 60, 48);
+    let p_one_60 = px(&one, w, 60, 48);
+    assert!(p_two[0] > p_one_60[0] + 15, "glass 2 sees the intermediate red bar and glass 1: {p_two:?} vs {p_one_60:?}");
+    // The green badge at (72, 64) is drawn after glass 2, so it stays sharp green on top.
+    let badge = px(&stacked, w, 72, 64);
+    assert!(badge[0] < 10 && badge[1] > 245 && badge[2] < 10, "later content stays sharp on top of glass 2: {badge:?}");
+}
+
+fn layered_glass_scene(_: &(), _: &mut Cx<()>) -> El {
+    background().child(
+        el().absolute(16.0, 16.0).size(64.0, 64.0).opacity(0.5)
+            .child(el().absolute(0.0, 0.0).size(32.0, 64.0).fill(hex("#00e5ff").unwrap()))
+            .child(effect(1).effect_backdrop(true).absolute(0.0, 0.0).size(64.0, 64.0)),
+    )
+}
+
+#[test]
+fn backdrop_slot_in_an_isolated_layer_reads_and_blurs_that_layers_target() {
+    let formats = Arc::default();
+    let (w, img) = snap_by_mark("layer-glass", layered_glass_scene, false, Arc::clone(&formats), frosted_glass_fx);
+    let seen = formats.lock().unwrap().clone();
+    assert!(seen.contains(&wgpu::TextureFormat::Rgba16Float), "isolated layer uses Rgba16Float: {seen:?}");
+    // Inside the isolated layer, the cyan stripe covers x = 16..48. At (52, 48) (right half of the
+    // layer, where nothing was drawn before the slot), the frosted lens blurs the layer's cyan stripe
+    // into the right half, and the layer composites at 0.5 opacity over #202020.
+    let blurred_right = px(&img, w, 52, 48);
+    assert!(blurred_right[1] > 45 && blurred_right[2] > 50, "layer backdrop slot blurs the layer's stripe: {blurred_right:?}");
+    // Inside the cyan stripe at (24, 48), the 0.5-opacity layer is dimmer than full #00e5ff.
+    let faded_left = px(&img, w, 24, 48);
+    assert!(faded_left[2] > 100 && faded_left[2] < 220, "isolated layer composites at 0.5 opacity: {faded_left:?}");
 }
 
 /// Writes `demo/fx/in-layer.png`: a fill in a faded, rounded, clipped card, linear blend on the

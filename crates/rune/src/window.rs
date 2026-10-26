@@ -1432,6 +1432,7 @@ pub(crate) fn surface_config(surface: &wgpu::Surface, adapter: &wgpu::Adapter, (
     } else {
         srgb
     };
+    config.usage |= caps.usages & wgpu::TextureUsages::COPY_SRC;
     config.present_mode = wgpu::PresentMode::AutoVsync;
     config.desired_maximum_frame_latency = 2;
     let translucent = [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::PostMultiplied, wgpu::CompositeAlphaMode::Inherit]
