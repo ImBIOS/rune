@@ -2368,7 +2368,73 @@
    }
   },
   {
-   "t": 2.25,
+   "t": 2.2,
+   "type": "session.tool.input.started",
+   "data": {
+    "id": "call_reply_read",
+    "name": "read"
+   }
+  },
+  {
+   "t": 2.3,
+   "type": "session.tool.called",
+   "data": {
+    "id": "call_reply_read",
+    "input": {
+     "filePath": "src/net/reconnect.ts"
+    },
+    "executed": true
+   }
+  },
+  {
+   "t": 2.7,
+   "type": "session.tool.success",
+   "data": {
+    "id": "call_reply_read",
+    "content": [
+     {
+      "type": "text",
+      "text": "\u2026"
+     }
+    ],
+    "executed": true
+   }
+  },
+  {
+   "t": 2.9,
+   "type": "session.tool.input.started",
+   "data": {
+    "id": "call_reply_grep",
+    "name": "grep"
+   }
+  },
+  {
+   "t": 3.0,
+   "type": "session.tool.called",
+   "data": {
+    "id": "call_reply_grep",
+    "input": {
+     "pattern": "jitter"
+    },
+    "executed": true
+   }
+  },
+  {
+   "t": 3.4,
+   "type": "session.tool.success",
+   "data": {
+    "id": "call_reply_grep",
+    "content": [
+     {
+      "type": "text",
+      "text": "\u2026"
+     }
+    ],
+    "executed": true
+   }
+  },
+  {
+   "t": 3.6,
    "type": "session.step.ended",
    "data": {
     "finish": "stop",
@@ -2376,7 +2442,7 @@
    }
   },
   {
-   "t": 2.3,
+   "t": 3.65,
    "type": "session.execution.succeeded",
    "data": {}
   }

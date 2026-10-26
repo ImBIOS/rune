@@ -368,6 +368,9 @@ impl App {
                     let mut d = e["data"].clone();
                     d["sessionID"] = id.clone().into();
                     d["assistantMessageID"] = reply.clone().into();
+                    if let Some(call) = d["id"].as_str() {
+                        d["id"] = format!("{call}-{:04}", self.sends).into();
+                    }
                     if e["type"] == "session.step.started" {
                         d["agent"] = selection.agent.clone().into();
                         d["model"] = serde_json::json!({"id": selection.model.id, "providerID": selection.model.provider, "variant": selection.model.variant});

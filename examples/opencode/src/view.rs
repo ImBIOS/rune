@@ -845,15 +845,17 @@ fn tool_group(p: &Pal, key: &str, tools: &[(&str, &str, &str, &ToolStatus)], ope
         .role("button")
         .h(28.0)
         .center_y()
+        // A tool joining or finishing crossfades the words while the chevron slides over.
+        .animate_layout()
         .on_press(move |s: &mut App| {
             if !s.expanded.remove(&k) {
                 s.expanded.insert(k.clone());
             }
         })
-        .child(text(if running { "Using " } else { "Used " }).font(UI).color(p.muted))
-        .child(text(n.to_string()).font(UI).color(p.text))
-        .child(text(if n == 1 { " tool" } else { " tools" }).font(UI).color(p.muted))
-        .child(icon(chevron(open), 14.0).color(p.icon_faint).ml(2.0));
+        .child(text(if running { "Using " } else { "Used " }).key(if running { "using" } else { "used" }).font(UI).color(p.muted))
+        .child(text(n.to_string()).key(format!("n{n}")).font(UI).color(p.text))
+        .child(text(if n == 1 { " tool" } else { " tools" }).key(if n == 1 { "tool" } else { "tools" }).font(UI).color(p.muted))
+        .child(icon(chevron(open), 14.0).key("chevron").color(p.icon_faint).ml(2.0));
     let mut c = col().w_full().pb(12.0).child(trigger);
     if open {
         let mut list = col().key("tools").gap(0.0).pl(4.0);
@@ -1175,4 +1177,39 @@ fn status_bar(s: &App, p: &Pal, info: Option<&SessionInfo>) -> El {
 fn home_dir() -> String {
     static H: OnceLock<String> = OnceLock::new();
     H.get_or_init(|| std::env::var("HOME").unwrap_or_else(|_| "\u{0}".into())).clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use rune::{Env, Runtime, TextEdit};
+
+    use crate::App;
+
+    #[test]
+    fn a_tool_joining_the_group_slides_its_chevron() {
+        let mut app = App::empty();
+        app.load_fixture(crate::FIXTURE);
+        crate::open_scene(&mut app);
+        app.finish_stream();
+        let mut rt = Runtime::new(app, super::app, (1280.0, 820.0), Env::new(true, 1.0));
+        rt.poll = Some(crate::poll);
+        rt.frame(0.0);
+        rt.update(|s, tx| {
+            s.composer = TextEdit::new("Can you also check the reconnect jitter?");
+            s.send(tx);
+        });
+        // The reply reads a file, then greps: "Using 1 tool", "Used 1 tool", "Using 2 tools", "Used 2 tools".
+        let chevron = |rt: &Runtime<App>| rt.elements().into_iter()
+            .find(|e| !e.exiting && e.path.contains("g-call_reply_read-0001/") && e.key.as_deref() == Some("chevron"))
+            .map(|e| e.rect[0]);
+        let mut xs = Vec::new();
+        for _ in 0..(4.5 * 120.0) as usize {
+            rt.frame(1.0 / 120.0);
+            xs.extend(chevron(&rt));
+        }
+        let (lo, hi) = xs.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &x| (lo.min(x), hi.max(x)));
+        assert!(hi - lo > 4.0, "the header changes width: {lo}..{hi}");
+        let step = xs.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+        assert!(step < 2.0, "the chevron moves at most {step} pt in a frame");
+    }
 }

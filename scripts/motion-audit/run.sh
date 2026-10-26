@@ -33,6 +33,7 @@ run oc-resize         3.4 $OC --scene session --script examples/opencode/scripts
 run oc-scroll         3.6 $OC --scene session --script examples/opencode/scripts/scroll.json
 run oc-send           4.0 $OC --scene session --script examples/opencode/scripts/send.json
 run oc-send-overlap   3.0 $OC --scene session --script examples/opencode/scripts/send-overlap.json
+run oc-tool-group     6.0 $OC --scene session --script examples/opencode/scripts/send.json
 run oc-undo-redo      5.0 $OC --scene session --script examples/opencode/scripts/undo-redo.json
 run oc-pickers        8.0 $OC --scene session --script examples/opencode/scripts/pickers.json
 run todo-add-remove   4.4 $B/todo --script $S/todo-add-remove.json
