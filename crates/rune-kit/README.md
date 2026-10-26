@@ -198,6 +198,13 @@ SidebarRow::new(&x.title).height(45.0).avatar(avatar(x)).subtitle(&x.project)
 
 ![The closed sidebar peeking over the content](../../demo/kit/shell-peek.png)
 
+For full-window screens in the same window (a settings page or lock screen), `shell::Page`
+shares `SplitView`'s toolbar height, traffic-light clearance, window-drag band and framed
+content card so switching screens matches pixel for pixel:
+`Page::new(content).title("Settings").leading(back).trailing(lock).titlebar_inset(cx.titlebar_inset()).build(&kit)`.
+
+![A full-window shell Page, light and dark](../../demo/kit/shell-page.png)
+
 To move a hand-built sidebar over, keep its rows' data and selection, replace the column, its
 scroll and focus group with `Sidebar`, each row with a `SidebarRow` keyed by the item's id, and
 the width field and resize handlers with a `PaneState` given to `SplitView::sidebar`. Drop the

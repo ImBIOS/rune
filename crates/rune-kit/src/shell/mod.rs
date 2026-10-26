@@ -14,7 +14,7 @@ mod toolbar;
 pub use pane::{PaneMotion, PaneState, SidebarPeek, is_sidebar_toggle};
 pub use reorder::Reorder;
 pub use sidebar::{INDENT, ROW_HEIGHT, RowStatus, Sidebar, SidebarHeader, SidebarRow, SidebarSection};
-pub use split::{SidebarToggle, SplitView};
+pub use split::{Page, SidebarToggle, SplitView};
 pub use toolbar::{TOOLBAR_HEIGHT, Toolbar};
 
 use rune::Icon;

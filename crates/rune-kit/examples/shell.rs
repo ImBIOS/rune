@@ -12,9 +12,9 @@ use std::borrow::Cow;
 
 use rune::{AppSpec, Chrome, Cx, El, Icon, KeyEvent, Spring, TextEdit, Tx, col, oklch, row, text};
 use rune_kit::shell::{
-    self, PaneMotion, PaneState, Reorder, RowStatus, Sidebar, SidebarPeek, SidebarRow, SidebarToggle, SplitView, Toolbar,
+    self, Page, PaneMotion, PaneState, Reorder, RowStatus, Sidebar, SidebarPeek, SidebarRow, SidebarToggle, SplitView, Toolbar,
 };
-use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit};
+use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Switch, glyphs};
 
 static HOME: Icon = Icon {
     name: "shell-home",
@@ -67,6 +67,8 @@ struct App {
     renaming: Option<String>,
     rename: TextEdit,
     virtualised: bool,
+    page: bool,
+    page_pair: bool,
 }
 
 fn init() -> App {
@@ -82,7 +84,10 @@ fn init() -> App {
         s("s8", "Window restoration bug", 0, Status::Idle),
         s("s9", "Keyboard navigation audit", 1, Status::Idle),
     ];
-    let virtualised = rune::extra_args().iter().any(|a| a == "virtual");
+    let args = rune::extra_args();
+    let virtualised = args.iter().any(|a| a == "virtual");
+    let page = args.iter().any(|a| a == "page");
+    let page_pair = args.iter().any(|a| a == "page-pair");
     if virtualised {
         sessions = (0..5000).map(|i| s(&format!("v{i}"), &format!("Session {}", 5000 - i), i % 4, Status::Idle)).collect();
     }
@@ -96,6 +101,8 @@ fn init() -> App {
         renaming: None,
         rename: TextEdit::new(""),
         virtualised,
+        page,
+        page_pair,
     }
 }
 
@@ -172,7 +179,14 @@ fn sidebar(s: &App, k: &Kit) -> El {
         .header(SidebarRow::new("Home").icon(&HOME).height(32.0).build(k).key("home"))
         .header(SidebarRow::new("Search").icon(&SEARCH).detail("⌘K").height(32.0).build(k).key("search"))
         .header(SidebarRow::new("New session").icon(&PLUS).detail("⌘N").height(32.0).build(k).key("new"))
-        .footer(SidebarRow::new("Settings").icon(&SLIDERS).height(32.0).build(k).key("settings"));
+        .footer(
+            SidebarRow::new("Settings")
+                .icon(&SLIDERS)
+                .height(32.0)
+                .on_select(|s: &mut App, _| s.page = true)
+                .build(k)
+                .key("settings"),
+        );
     if s.virtualised {
         let kit = k.clone();
         return sb
@@ -183,7 +197,75 @@ fn sidebar(s: &App, k: &Kit) -> El {
     (0..s.sessions.len()).fold(sb, |sb, i| sb.child(session_row(s, i, k))).build(k)
 }
 
+fn settings_page(dark: bool, inset: f32) -> El {
+    let k = Kit::neutral(dark);
+    let c = &k.c;
+    let setting = |title: &str, desc: &str, on: bool| {
+        row()
+            .w_full()
+            .py(12.0)
+            .px(16.0)
+            .radius(k.radius.md)
+            .fill(c.layer_01)
+            .border(1.0, c.border_weak)
+            .center_y()
+            .justify_between()
+            .child(
+                col()
+                    .gap(2.0)
+                    .child(text(title.to_owned()).font(k.ty.ui_medium).color(c.text_base))
+                    .child(text(desc.to_owned()).font(k.ty.small).color(c.text_muted)),
+            )
+            .child(Switch::new(on).build(&k))
+    };
+    let body = col()
+        .key("settings-body")
+        .w_full()
+        .h_full()
+        .padding(24.0)
+        .items_center()
+        .child(
+            col()
+                .w_full()
+                .max_w(520.0)
+                .gap(12.0)
+                .child(text("Workspace Settings").font(k.ty.body_medium).color(c.text_base))
+                .child(setting("Unlock with Touch ID", "Prompt for biometrics when returning after idle", true))
+                .child(setting("Clear clipboard automatically", "Remove copied secrets after 30 seconds", true))
+                .child(setting("Show sidebar unread badges", "Highlight active background tasks in the toggle", false)),
+        );
+    let back = Button::new("Back")
+        .variant(ButtonVariant::Ghost)
+        .control_size(ControlSize::Regular)
+        .on_press(|s: &mut App| s.page = false)
+        .build(&k)
+        .key("back");
+    let lock = IconButton::new(&glyphs::LOCK)
+        .variant(IconButtonVariant::GhostMuted)
+        .label("Lock")
+        .build(&k)
+        .key("lock");
+    Page::new(body)
+        .title("Settings")
+        .leading(back)
+        .trailing(lock)
+        .titlebar_inset(inset)
+        .frame_inset(8.0)
+        .toolbar_in_panel()
+        .build(&k)
+}
+
 fn view(s: &App, cx: &mut Cx<App>) -> El {
+    if s.page_pair {
+        return row()
+            .w_full()
+            .h_full()
+            .child(col().grow(1.0).h_full().child(settings_page(false, 74.0)))
+            .child(col().grow(1.0).h_full().child(settings_page(true, 74.0)));
+    }
+    if s.page {
+        return settings_page(cx.system_dark(), cx.titlebar_inset());
+    }
     let k = Kit::neutral(cx.system_dark());
     let c = &k.c;
     let title = s.sessions.iter().find(|x| x.id == s.selected).map_or("", |x| x.title.as_str());

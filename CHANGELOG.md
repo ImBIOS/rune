@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`rune_kit::shell::Page` for full-window screens in a `SplitView` window.** `Page::new(content)
+  .title(..).leading(..).trailing(..).titlebar_inset(..).frame_inset(..).toolbar_in_panel()
+  .build(&kit)` reuses `SplitView`'s toolbar band, traffic-light clearance, window-drag region
+  and framed content card so switching between `SplitView` and `Page` matches pixel for pixel.
+  `demo/kit/shell-page.png` shows it in light and dark.
 - **Two-line `SidebarRow`s default to `TWO_LINE_ROW_HEIGHT` (40 pt) when `subtitle` is set** and
   return focus to the selected row when inline rename ends.
 - **Hiding a pane or overlay keeps focus where it was outside that subtree.** `El::focus_return`

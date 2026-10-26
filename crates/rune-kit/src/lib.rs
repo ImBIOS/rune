@@ -77,7 +77,7 @@ pub use radio::{RadioGroup, RadioItem};
 pub use rolling_text::RollingText;
 pub use segmented::SegmentedControl;
 pub use select::{Select, SelectAppearance};
-pub use shell::{PaneState, Sidebar, SidebarHeader, SidebarRow, SidebarSection, SplitView, Toolbar};
+pub use shell::{Page, PaneState, Sidebar, SidebarHeader, SidebarRow, SidebarSection, SplitView, Toolbar};
 pub use switch::Switch;
 pub use table::{Cell, SortDir, Table, TableColumn, TableState, TableStyle};
 pub use text_input::{TextArea, TextField, TextInput};

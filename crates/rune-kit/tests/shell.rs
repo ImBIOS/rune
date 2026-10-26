@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 use rune::runtime::ElementInfo;
 use rune::{Chrome, Cx, El, Env, Key, KeyEvent, Mods, Runtime, TextEdit, TitlebarAction, col, el};
-use rune_kit::shell::{PaneState, Sidebar, SidebarRow, SidebarSection, SplitView, Toolbar, is_sidebar_toggle};
+use rune_kit::shell::{Page, PaneState, Sidebar, SidebarRow, SidebarSection, SplitView, Toolbar, is_sidebar_toggle};
 use rune_kit::Kit;
 
 const NAMES: [&str; 4] = ["Alpha", "Bravo", "Charlie", "Delta"];
@@ -535,4 +535,73 @@ fn two_line_rows_keep_focus_keyboard_navigation_and_accessible_labels() {
     assert_eq!(focused(&rt).as_deref(), Some("rename"));
     press(&mut rt, Key::Escape);
     assert_eq!(focused(&rt).as_deref(), Some("row1"), "ending rename returns focus to the selected row");
+}
+
+#[test]
+fn page_matches_split_views_toolbar_and_frame_pixel_for_pixel() {
+    struct P {
+        page: bool,
+        sidebar: PaneState,
+        backs: usize,
+    }
+    fn page_view(s: &P, cx: &mut Cx<P>) -> El {
+        let k = Kit::neutral(true);
+        let lead = el().key("lead").size(24.0, 24.0).role("button").focusable(true).on_press(|s: &mut P| s.backs += 1);
+        let trail = el().key("trail").size(24.0, 24.0).role("button").focusable(true);
+        let body = col().key("content").w_full().h_full();
+        if s.page {
+            Page::new(body)
+                .title("Settings")
+                .leading(lead)
+                .trailing(trail)
+                .titlebar_inset(cx.titlebar_inset())
+                .frame_inset(8.0)
+                .build(&k)
+        } else {
+            SplitView::new(body)
+                .sidebar(&s.sidebar, |s: &mut P| &mut s.sidebar, col())
+                .hide_sidebar_toggle()
+                .toolbar(Toolbar::new().title("Settings").leading(lead).trailing(trail))
+                .titlebar_inset(cx.titlebar_inset())
+                .frame_inset(8.0)
+                .build(&k)
+        }
+    }
+    let inset = Chrome::DEFAULT.titlebar_inset();
+    let mut rt = Runtime::new(
+        P { page: false, sidebar: PaneState::new(240.0).collapsed(), backs: 0 },
+        page_view,
+        (960.0, 600.0),
+        Env::new(true, 2.0),
+    );
+    rt.set_titlebar_inset(inset);
+    rt.frame(0.0);
+    let rect_in = |rt: &Runtime<P>, key: &str| {
+        rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap().rect
+    };
+    let split_toolbar = rect_in(&rt, "toolbar");
+    let split_lead = rect_in(&rt, "lead");
+    let split_title = rect_in(&rt, "title");
+    let split_trail = rect_in(&rt, "trail");
+    let split_pane = rect_in(&rt, "main-pane");
+
+    rt.update(|s, _| s.page = true);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rect_in(&rt, "toolbar"), split_toolbar, "toolbar rect matches SplitView");
+    assert_eq!(rect_in(&rt, "lead"), split_lead, "leading control past traffic lights matches SplitView");
+    assert_eq!(rect_in(&rt, "title"), split_title, "title rect matches SplitView");
+    assert_eq!(rect_in(&rt, "trail"), split_trail, "trailing control rect matches SplitView");
+    assert_eq!(rect_in(&rt, "main-pane"), split_pane, "framed main-pane rect matches SplitView");
+
+    // Titlebar drags the window; leading button keeps its press.
+    let (tx, ty) = rt.find("title").unwrap();
+    rt.pointer_down(tx, ty);
+    assert_eq!(rt.take_titlebar_action(), Some(TitlebarAction::Drag));
+    rt.pointer_up(tx, ty);
+    let (lx, ly) = rt.find("lead").unwrap();
+    rt.pointer_down(lx, ly);
+    assert!(rt.take_titlebar_action().is_none());
+    rt.pointer_up(lx, ly);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.backs, 1);
 }
