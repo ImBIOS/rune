@@ -26,6 +26,8 @@ struct Inst {
     aux: vec4f,
     aux2: vec4f,   // source rect pt (x, y, w, h): what the bound source texture covers
     xf: vec4f,     // CPU table: first vec4, counts... (per effect)
+    clip: vec4f,   // window device-px clip rect (x0, y0, x1, y1)
+    fade: vec4u,   // packed soft-edge and rounded-clip words (CLIP_WGSL)
 }
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -68,16 +70,19 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
 // output, so a retiring one-shot fades instead of cutting.
 @fragment
 fn fs(in: VOut) -> @location(0) vec4f {
-    let c = shade(in) * insts[in.id].shape.z;
+    let i = insts[in.id];
+    let ca = clip_alpha(in.px, i.clip, i.fade);
+    if (ca <= 0.0) { return vec4f(0.0); }
+    let c = shade(in) * i.shape.z;
     if (g.srgb > 0.5) {
         // Premultiplied light may exceed alpha: a covering colour (up to alpha) plus added light.
         // Encode the straight covering colour times alpha, and the added light as over black, so
         // light doesn't dim as a glow's occlusion takes its alpha from zero to a little.
         let cover = min(max(c.rgb, vec3f(0.0)), vec3f(c.a));
         let straight = select(vec3f(0.0), cover / c.a, c.a > 1e-6);
-        return vec4f(to_srgb(straight) * c.a + to_srgb(max(c.rgb, vec3f(0.0)) - cover), c.a);
+        return vec4f(to_srgb(straight) * c.a + to_srgb(max(c.rgb, vec3f(0.0)) - cover), c.a) * ca;
     }
-    return c;
+    return c * ca;
 }
 
 const TAU: f32 = 6.2831853;

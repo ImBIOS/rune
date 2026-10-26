@@ -8,7 +8,7 @@
 // p3 (swirl, _, _, _)
 
 // Temperature to colour: smoke-dark -> deep red -> orange -> yellow -> white-yellow core.
-fn ramp(T: f32, c0: vec3f, c1: vec3f, c2: vec3f) -> vec3f {
+fn fire_ramp(T: f32, c0: vec3f, c1: vec3f, c2: vec3f) -> vec3f {
     var col = mix(vec3f(0.012, 0.009, 0.008), c0, smoothstep(0.04, 0.22, T));
     col = mix(col, c1, smoothstep(0.2, 0.5, T));
     col = mix(col, c2, smoothstep(0.45, 0.78, T));
@@ -51,7 +51,7 @@ fn flames(c: Ctx, i: Inst) -> vec4f {
     // Hottest low down and inside a plume; the tips cool to red.
     // Only the dense heart of a plume near the base reaches the white-yellow core.
     let T = clamp(dens * (0.95 - 0.5 * yh), 0.0, 1.1);
-    let col = ramp(T, i.c0.rgb, i.c1.rgb, i.c2.rgb);
+    let col = fire_ramp(T, i.c0.rgb, i.c1.rgb, i.c2.rgb);
     let e = body * (0.3 + 0.75 * T * T);
     var emis = col * e;
     // Smoke: a faint dark veil just past the tips (only visible over lighter content).

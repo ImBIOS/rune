@@ -33,7 +33,7 @@ impl Compositor<()> for Dusk {
                 let k = i.params[3];
                 let [x, y, w, h] = i.rect.map(|v| v / k);
                 let r = i.radii.iter().fold(0.0f32, |a, v| a.max(v.abs())) / k;
-                (self.effect)().on(Shape::rounded(x, y, w, h, r)).scale(k).at(1.0)
+                (self.effect)().on(Shape::rounded(x, y, w, h, r)).scale(k).clip(i.clip, i.fade).at(1.0)
             }).collect();
         let fx = self.fx.get_or_insert_with(|| FxRenderer::new(device, f.format, FxOptions::default()));
         fx.set_srgb_blend(f.srgb_blend());
@@ -230,6 +230,39 @@ fn slot_scale_scales_effect_lengths_and_radii_without_bleed() {
     assert!(px(&zoomed, w, 48, 48).iter().all(|&c| c.abs_diff(32) <= 2), "centre is hollow");
     let worst = zoomed.iter().zip(&direct).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
     assert!(worst <= 3, "zoomed slot and 2x direct ring differ by {worst}");
+}
+
+fn rounded_scroll(_: &(), _: &mut Cx<()>) -> El {
+    background().child(
+        el().scroll(rune::ScrollSpec { stick_bottom: false }).size(64.0, 64.0).absolute(16.0, 16.0)
+            .clip_rounded(24.0).clip_fade(0.0, 0.0, 0.0, 16.0)
+            .child(el().size(64.0, 96.0).child(effect(1).size(64.0, 64.0))),
+    )
+}
+
+#[test]
+fn fill_under_a_rounded_scroll_container_clips_without_a_layer() {
+    for srgb in [false, true] {
+        let formats = Arc::default();
+        let (w, plain_img) = snap("scroll-plain", plain, srgb, Arc::default());
+        let (_, clipped) = snap("scroll-clipped", rounded_scroll, srgb, Arc::clone(&formats));
+        let seen = formats.lock().unwrap().clone();
+        assert!(!seen.contains(&wgpu::TextureFormat::Rgba16Float), "must not allocate an isolated layer: {seen:?}");
+        // Rounded top-left corner at (17, 17) is outside the 24px radius and cut to the #202020 background.
+        let corner = px(&clipped, w, 17, 17);
+        assert!(corner.iter().all(|c| c.abs_diff(32) <= 2), "srgb {srgb} corner is clipped away: {corner:?}");
+        // Straight top edge (48, 17) and centre (48, 48) match the unclipped fill.
+        for (x, y) in [(48, 17), (48, 48)] {
+            let got = px(&clipped, w, x, y);
+            let want = px(&plain_img, w, x, y);
+            assert!(got.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 2), "srgb {srgb} at ({x}, {y}): got {got:?}, want {want:?}");
+        }
+        // Soft bottom edge (y = 64..80, 16px fade): at y = 72 coverage is ~0.5, between background and fill.
+        let mid_fade = px(&clipped, w, 48, 72);
+        let full = px(&plain_img, w, 48, 72);
+        assert!(mid_fade.iter().zip(full).any(|(m, f)| *m < f.saturating_sub(15)), "srgb {srgb} soft edge fades toward background: {mid_fade:?} vs {full:?}");
+        assert!(mid_fade.iter().any(|&c| c > 40), "srgb {srgb} soft edge is not hard-cut at y = 72: {mid_fade:?}");
+    }
 }
 
 /// Writes `demo/fx/in-layer.png`: a fill in a faded, rounded, clipped card, linear blend on the

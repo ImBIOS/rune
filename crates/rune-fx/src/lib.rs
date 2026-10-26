@@ -948,6 +948,9 @@ pub struct Source {
     pub rect: Rect,
 }
 
+/// Default unclipped rectangle for [`FxLayer::clip`], matching `rune::render::NO_CLIP`.
+pub const NO_CLIP: [f32; 4] = [-1e6, -1e6, 1e6, 1e6];
+
 #[derive(Clone, Copy, Debug)]
 pub struct FxLayer {
     pub fx: Fx,
@@ -961,6 +964,10 @@ pub struct FxLayer {
     pub opacity: f32,
     /// Device pixels per point for this layer; `0.0` (the default) uses `FxFrame::scale`.
     pub scale: f32,
+    /// Window device-pixel clip rectangle `[x0, y0, x1, y1]`; defaults to [`NO_CLIP`].
+    pub clip: [f32; 4],
+    /// Packed soft-edge and rounded-clip words (`rune::render::Instance::fade`); defaults to `[0; 4]`.
+    pub fade: [u32; 4],
 }
 
 impl Fx {
@@ -989,7 +996,7 @@ impl Fx {
             Fx::Electric(_) => Place::Over,
             _ => Place::Over,
         };
-        FxLayer { fx: self, shape, place, time: 0.0, seed: 1, reduced_motion: false, source: None, opacity: 1.0, scale: 0.0 }
+        FxLayer { fx: self, shape, place, time: 0.0, seed: 1, reduced_motion: false, source: None, opacity: 1.0, scale: 0.0, clip: NO_CLIP, fade: [0; 4] }
     }
 
     pub fn needs_backdrop(&self) -> bool {
@@ -1062,6 +1069,13 @@ impl FxLayer {
     /// Device pixels per point for this layer (`EffectSite::scale` or `instance.params[3]`);
     /// `0.0` (the default) uses `FxFrame::scale`.
     pub fn scale(mut self, scale: f32) -> Self { self.scale = scale; self }
+    /// Clip the layer to a window device-pixel rectangle and packed soft-edge / rounded-clip words
+    /// (`instance.clip, instance.fade` from a Rune `EffectSite`).
+    pub fn clip(mut self, clip: [f32; 4], fade: [u32; 4]) -> Self {
+        self.clip = clip;
+        self.fade = fade;
+        self
+    }
 
     /// Whether this layer still changes over time (the frame loop may stop ticking when false).
     pub fn is_animating(&self) -> bool {
@@ -1106,6 +1120,8 @@ pub(crate) struct InstRaw {
     pub aux: [f32; 4],
     pub aux2: [f32; 4],
     pub xf: [f32; 4],
+    pub clip: [f32; 4],
+    pub fade: [u32; 4],
 }
 
 pub(crate) const KIND_GLOW: usize = 0;
@@ -1148,6 +1164,8 @@ impl FxLayer {
             aux: [0.0; 4],
             aux2: self.source.map(|s| s.rect.xywh()).unwrap_or([0.0, 0.0, 1.0, 1.0]),
             xf: [0.0; 4],
+            clip: self.clip,
+            fade: self.fade,
         };
         let rm = self.reduced_motion;
         let looped_t = if rm { CALM_T } else { self.time };

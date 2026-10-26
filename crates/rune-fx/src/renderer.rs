@@ -4,6 +4,7 @@
 
 use crate::*;
 
+const CLIP: &str = include_str!("../../rune/src/clip.wgsl");
 const COMMON: &str = include_str!("shaders/common.wgsl");
 const SOURCES: [(&str, &str); KINDS] = [
     ("glow", include_str!("shaders/glow.wgsl")),
@@ -201,7 +202,7 @@ impl FxRenderer {
             .iter()
             .map(|(name, src)| device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(name),
-                source: wgpu::ShaderSource::Wgsl(format!("{COMMON}\n{src}").into()),
+                source: wgpu::ShaderSource::Wgsl(format!("{CLIP}\n{COMMON}\n{src}").into()),
             }))
             .collect();
         let pipelines = Self::pipelines(device, &layout, &modules, format);
@@ -462,10 +463,10 @@ impl FxRenderer {
                 continue;
             };
             let s = if layer.scale > 0.0 { layer.scale } else { frame.scale };
-            let x0 = (b.x * s).floor().max(0.0);
-            let y0 = (b.y * s).floor().max(0.0);
-            let x1 = ((b.x + b.w) * s).ceil().min(vw);
-            let y1 = ((b.y + b.h) * s).ceil().min(vh);
+            let x0 = (b.x * s).floor().max(layer.clip[0].floor()).max(0.0);
+            let y0 = (b.y * s).floor().max(layer.clip[1].floor()).max(0.0);
+            let x1 = ((b.x + b.w) * s).ceil().min(layer.clip[2].ceil()).min(vw);
+            let y1 = ((b.y + b.h) * s).ceil().min(layer.clip[3].ceil()).min(vh);
             if x1 <= x0 || y1 <= y0 {
                 stats.culled_offscreen += 1;
                 self.prepared.push(None);

@@ -48,7 +48,7 @@ fn oklab_to_lin(c: vec3f) -> vec3f {
 }
 
 // The colour list as an even ramp over x in 0..1, blended in OKLab.
-fn ramp(f0: u32, n: u32, x: f32) -> vec3f {
+fn palette_ramp(f0: u32, n: u32, x: f32) -> vec3f {
     if (n <= 1u) { return stop_lin(f0, 0u); }
     let fx = clamp(x, 0.0, 1.0) * f32(n - 1u);
     let k = min(u32(fx), n - 2u);
@@ -327,7 +327,7 @@ fn grain_gradient(i: Inst, c: Ctx, m: f32, px: vec2f) -> vec4f {
     let h = pcg(gc.x + pcg(gc.y + pcg(frame + c.seed * 977u)));
     // Triangular noise scatters the ramp position: colours stipple into each other.
     let nx = u01(h) + u01(h + 1u) - 1.0;
-    var col = ramp(f0, n, x + nx * amount * 0.2);
+    var col = palette_ramp(f0, n, x + nx * amount * 0.2);
     if (kind == 2) {
         col = ramp_loop(f0, n, x + nx * amount * 0.2);
     }
@@ -387,7 +387,7 @@ fn swirl(i: Inst, c: Ctx, m: f32, px: vec2f) -> vec4f {
     let q = rot2(c.q, i.p0.z * TAU * exp(-rr * rr * 0.8)) / sc;
     let w1 = vec2f(fbm3(q + vec2f(t * 0.1, 0.0), c.seed), fbm3(q + vec2f(5.2, 1.3 - t * 0.08), c.seed + 3u));
     let v = fbm3(q + w1 * i.p0.w * 1.5 + vec2f(0.0, t * 0.05), c.seed + 7u);
-    return paint(ramp(f0, n, 0.5 + 0.75 * v), m, i, px);
+    return paint(palette_ramp(f0, n, 0.5 + 0.75 * v), m, i, px);
 }
 
 fn voronoi(i: Inst, c: Ctx, m: f32, px: vec2f) -> vec4f {
