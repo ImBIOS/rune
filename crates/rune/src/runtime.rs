@@ -948,6 +948,7 @@ struct Stack {
     tops: HashMap<NodeId, f32>,
     pad_top: f32,
     pad_bottom: f32,
+    gap: f32,
     width: f32,
     /// Measure at the landing width immediately; defer height targets until it is stable.
     width_hold_until: f64,
@@ -2357,20 +2358,29 @@ impl<S: 'static> Runtime<S> {
             // the previous field. The same boundary covers an earlier handler, and lets a
             // file drag find only what is mounted and reachable now (a covered window builds
             // nothing until this).
-            if (ran || self.dirty) && matches!(&action, Action::Key { .. } | Action::KeyUp(_) | Action::Physical(..) | Action::Ime(_) | Action::Paste(..) | Action::Files(_)) {
-                for (source, target) in std::mem::take(&mut tx.text_flights) {
-                    self.capture_text_flight(source, target);
+            if (ran || self.dirty || !tx.scroll_to.is_empty()) && matches!(&action, Action::Key { .. } | Action::KeyUp(_) | Action::Physical(..) | Action::Ime(_) | Action::Paste(..) | Action::Files(_)) {
+                if ran || self.dirty {
+                    for (source, target) in std::mem::take(&mut tx.text_flights) {
+                        self.capture_text_flight(source, target);
+                    }
+                    if self.settle { tx.settle(); }
+                    self.settled |= tx.settle;
+                    #[cfg(debug_assertions)]
+                    let check = self.live_check.take().filter(|_| !ran_other && !self.dirty && !ran_layout);
+                    self.capture_keeps(&mut tx);
+                    self.commit(&tx);
+                    #[cfg(debug_assertions)]
+                    { self.compare_live_check(check); ran_other = false; }
+                    self.apply_keeps();
+                    ran = false;
                 }
-                if self.settle { tx.settle(); }
-                self.settled |= tx.settle;
-                #[cfg(debug_assertions)]
-                let check = self.live_check.take().filter(|_| !ran_other && !self.dirty && !ran_layout);
-                self.capture_keeps(&mut tx);
-                self.commit(&tx);
-                #[cfg(debug_assertions)]
-                { self.compare_live_check(check); ran_other = false; }
-                self.apply_keeps();
-                ran = false;
+                if !tx.scroll_to.is_empty() {
+                    self.keeps.clear();
+                    self.scroll_reveals.clear();
+                    for (scope, key) in std::mem::take(&mut tx.scroll_to) {
+                        self.reveal_row(scope.as_deref(), &key);
+                    }
+                }
             }
             if matches!(action, Action::Layout(..) | Action::ScreenLayout(..) | Action::DrawnLayout(_, _, false) | Action::VisibleRows(..)) {
                 ran_layout |= self.run_action(action, &mut tx);
@@ -3706,6 +3716,7 @@ impl<S: 'static> Measurement<'_, S> {
             if !self.retry { v.viewport = height; }
             v.pad_top = padding(el.style.padding.top);
             v.pad_bottom = padding(el.style.padding.bottom);
+            v.set_gap(crate::virtual_list::gap_y(&el.style));
             let source = el.virtual_rows.take();
             let state = handler_state_ref(self.state);
             if source.is_some() {
@@ -3845,13 +3856,14 @@ impl<S: 'static> Measurement<'_, S> {
             // Rows that shrank or went leave the offset past the end until scrolling clamps it;
             // what shows then is the end.
             let offset = offset.min(v.max_offset());
-            let mounted_height = v.prefix(v.range.end) - v.before;
+            let end = v.row_end(v.range.end);
+            let mounted_height = (end - v.before).max(0.0);
             // Never present a blank caused by an estimate. Expand and measure again first.
             retry |= if pinned {
                 v.range.start > 0 && mounted_height < v.viewport
             } else {
                 (v.range.start > 0 && offset < v.pad_top + v.before)
-                    || (v.range.end < v.keys.len() && offset + v.viewport > v.pad_top + v.prefix(v.range.end))
+                    || (v.range.end < v.keys.len() && offset + v.viewport > v.pad_top + end)
             };
         }
         retry
@@ -4061,16 +4073,23 @@ impl<S: 'static> Runtime<S> {
         if self.virtuals.is_empty() { return; }
         let focused = self.focused.as_deref().and_then(|f| self.nodes.iter().position(|n| n.path == f));
         for (path, v) in self.virtuals.iter_mut() {
-            let under = self.focused.as_deref().and_then(|f| f.strip_prefix(path.as_str())).is_some_and(|rest| rest.starts_with('/'));
-            if !under { v.focused_row = None; continue; }
-            // Offscreen, the row keeps the key it had.
-            let Some(mut i) = focused else { continue };
-            while let Some(p) = self.nodes[i].parent {
-                if self.nodes[p].path == *path {
-                    v.focused_row = self.nodes[i].key.clone();
-                    break;
+            let Some(rest) = self.focused.as_deref().and_then(|f| f.strip_prefix(path.as_str())).and_then(|r| r.strip_prefix('/')) else {
+                v.focused_row = None;
+                continue;
+            };
+            if let Some(mut i) = focused {
+                while let Some(p) = self.nodes[i].parent {
+                    if self.nodes[p].path == *path {
+                        v.focused_row = self.nodes[i].key.clone();
+                        break;
+                    }
+                    i = p;
                 }
-                i = p;
+            } else {
+                let matches = |k: &str| rest == k || rest.strip_prefix(k).is_some_and(|t| t.starts_with('/'));
+                if !v.focused_row.as_deref().is_some_and(matches) {
+                    v.focused_row = v.keys.iter().find(|k| matches(k)).cloned();
+                }
             }
         }
     }
@@ -4235,6 +4254,7 @@ impl<S: 'static> Runtime<S> {
             }
             stack.width = width;
             stack.pending_heights.retain(|id, _| new_set.contains(id));
+            stack.gap = crate::virtual_list::gap_y(taffy.style(nodes[c].taffy).unwrap());
             stack.pad_top = rows.first().map_or(0.0, |&j| nodes[j].target[1] - ctop);
             stack.pad_bottom = rows.last().map_or(nodes[c].target[3] - ctop, |&j| nodes[c].target[3] - nodes[j].target[3]);
             for &j in &rows {
@@ -4815,8 +4835,10 @@ impl<S: 'static> Runtime<S> {
         let n = &self.nodes[c];
         n.growth?;
         let stack = self.stacks.get(&n.id)?;
-        let rows: f64 = stack.order.iter().filter_map(|id| self.grows.get(id)).map(|g| f64::from(g.h)).sum();
-        Some(f64::from(stack.pad_top) + rows + f64::from(stack.pad_bottom))
+        let mut count = 0usize;
+        let rows: f64 = stack.order.iter().filter_map(|id| self.grows.get(id)).map(|g| { count += 1; f64::from(g.h) }).sum();
+        let gaps = f64::from(stack.gap) * count.saturating_sub(1) as f64;
+        Some(f64::from(stack.pad_top) + rows + gaps + f64::from(stack.pad_bottom))
     }
 
     /// How far scroll viewport `i`'s content reaches past its bottom, negative while it fits.
@@ -5575,11 +5597,12 @@ impl<S: 'static> Runtime<S> {
                     self.nodes[c].growth?;
                     let stack = self.stacks.get(&self.nodes[c].id)?;
                     let rid = self.nodes[r].id;
+                    let mut count = 0usize;
                     let before_r: f32 = stack.order.iter()
                         .take_while(|&&id| id != rid)
                         .filter_map(|id| self.grows.get(id))
-                        .map(|g| g.h)
-                        .sum();
+                        .map(|g| { count += 1; g.h })
+                        .sum::<f32>() + stack.gap * count as f32;
                     let r_top = (self.nodes[c].target[1] - parent.target[1]) + stack.pad_top + before_r;
                     let r_h = self.grows.get(&rid).map_or(self.nodes[r].local.h, |g| g.h);
                     if i == r {
@@ -5965,8 +5988,11 @@ impl<S: 'static> Runtime<S> {
             let Some(spec) = self.nodes[ci].growth else { continue };
             let origin = self.virtuals.get(&self.nodes[ci].path).map_or(0.0, |v| v.before);
             let mut y = stack.pad_top - origin;
+            let mut first_row = true;
             for id in &stack.order {
                 let Some(g) = self.grows.get(id) else { continue };
+                if !first_row { y += stack.gap; }
+                first_row = false;
                 let top_rel = stack.tops.get(id).copied().unwrap_or(0.0) - origin;
                 let cur = y;
                 if let Some(&ri) = self.node_index.get(id) {

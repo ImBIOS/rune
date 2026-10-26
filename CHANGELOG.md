@@ -5,6 +5,16 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Caret geometry and focus in virtualized growth stacks with a vertical gap.** `VirtualList`
+  and `Stack` now include a column container's vertical flex `gap` (`style.gap.height`) in row
+  prefix sums, `before`/`after` padding, `stack_extent`, `reveal_row_once` and painted `row_dy`,
+  and `caret_rect` includes any active ancestor growth-row shift (`stack_row_dy`). Previously a
+  growth stack with `.gap(g)` shifted each mounted row `k` up by `k * g` when painting while
+  leaving `caret_rect` at the unshifted layout target and clamping `scroll.max` short by
+  `(mounted - 1) * g`. `sync_requested_focus` now also considers newly focused fields in
+  offscreen virtual rows (`virtual_inputs`) instead of clearing their `focused` flag before
+  `scroll_into_view` mounts them, and `follow_caret` re-commits when its scroll shift crosses a
+  virtual window edge.
 - **A `dissolve` parent no longer isolates for a child too faint to paint.** The dissolve pass
   counted any child above opacity 0; it now uses the same 0.001 threshold as painting, so a child
   faded to near zero no longer forces its parent into an offscreen layer.

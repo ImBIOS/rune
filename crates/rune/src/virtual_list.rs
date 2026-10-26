@@ -48,6 +48,7 @@ pub(crate) struct VirtualList {
     pub viewport: f32,
     pub pad_top: f32,
     pub pad_bottom: f32,
+    gap: f32,
     pub anchor: Option<(String, f32)>,
     /// The `El::virtual_rows_version` that `keys` came with.
     pub keys_version: Option<u64>,
@@ -63,6 +64,17 @@ pub(crate) fn height_bound(style: &Style, avail: f32) -> f32 {
     let h = style.size.height.into_option().unwrap_or(avail);
     let h = length(style.max_size.height).map_or(h, |m| h.min(m));
     length(style.min_size.height).map_or(h, |m| h.max(m))
+}
+
+/// A column flex container's vertical gap in points; zero for non-column containers.
+pub(crate) fn gap_y(style: &Style) -> f32 {
+    let column = style.display == Display::Flex && style.flex_wrap == FlexWrap::NoWrap
+        && matches!(style.flex_direction, FlexDirection::Column | FlexDirection::ColumnReverse);
+    if !column { return 0.0; }
+    match style.gap.height.expand() {
+        taffy::style::ExpandedLengthPercentage::Length(x) => x,
+        _ => 0.0,
+    }
 }
 
 /// The most each child of an element whose bound is `bound` can be tall: what padding leaves
@@ -193,6 +205,13 @@ impl VirtualList {
         }
     }
 
+    pub fn set_gap(&mut self, gap: f32) {
+        if gap != self.gap {
+            self.gap = gap;
+            self.sums_stale.set(true);
+        }
+    }
+
     pub fn set_height(&mut self, key: &str, height: f32) {
         let Some(row) = self.rows.get_mut(key) else { return };
         row.height = Some(height);
@@ -210,7 +229,7 @@ impl VirtualList {
             sums.push(0.0);
             let mut y = 0.0;
             for h in &self.row_heights {
-                y += h;
+                y += h + self.gap;
                 sums.push(y);
             }
         }
@@ -218,13 +237,19 @@ impl VirtualList {
     }
 
     pub fn prefix(&self, end: usize) -> f32 {
-        self.sums()[end]
+        let sums = self.sums();
+        if end == 0 || end < self.keys.len() { sums[end] } else { sums[end] - self.gap }
+    }
+
+    /// The bottom of the first `end` rows (without the gap after row `end - 1`).
+    pub fn row_end(&self, end: usize) -> f32 {
+        if end == 0 { 0.0 } else { self.sums()[end] - self.gap }
     }
 
     /// The first row still visible at `offset`, among those `keep` accepts, and its top.
     pub fn first_visible(&self, offset: f32, keep: impl Fn(&str) -> bool) -> Option<(String, f32)> {
         let sums = self.sums();
-        let first = sums[1..].partition_point(|&s| self.pad_top + s <= offset);
+        let first = sums[1..].partition_point(|&s| self.pad_top + s - self.gap <= offset);
         (first..self.keys.len())
             .find(|&i| keep(&self.keys[i]))
             .map(|i| (self.keys[i].clone(), self.pad_top + sums[i]))
@@ -242,7 +267,7 @@ impl VirtualList {
         }
         let offset = if pinned { self.max_offset() } else { offset.clamp(0.0, self.max_offset()) };
         let sums = self.sums();
-        let start = sums[1..].partition_point(|&s| self.pad_top + s <= offset);
+        let start = sums[1..].partition_point(|&s| self.pad_top + s - self.gap <= offset);
         let end = sums[..self.keys.len()].partition_point(|&s| self.pad_top + s < offset + self.viewport).max(start);
         start..end
     }
@@ -258,12 +283,12 @@ impl VirtualList {
         let (mut start, mut end) = {
             let sums = self.sums();
             // Rows ending at or above `lo` go; rows starting below `hi` stay.
-            let start = sums[1..].partition_point(|&s| self.pad_top + s <= lo);
+            let start = sums[1..].partition_point(|&s| self.pad_top + s - self.gap <= lo);
             let end = sums[..self.keys.len()].partition_point(|&s| self.pad_top + s < hi);
             if let Some(shown) = budget.filter(|_| !pinned) {
                 let mounted = |k: &str| shown.contains(k);
                 // The viewport's own rows always mount; the overscan takes new rows up to a budget.
-                let first = sums[1..].partition_point(|&s| self.pad_top + s <= offset).max(start);
+                let first = sums[1..].partition_point(|&s| self.pad_top + s - self.gap <= offset).max(start);
                 let last = sums[..self.keys.len()].partition_point(|&s| self.pad_top + s < offset + self.viewport).max(first);
                 let budget = self.viewport * INDEXED_BUDGET;
                 let mut spent = 0.0;
@@ -272,7 +297,7 @@ impl VirtualList {
                     let i = from - 1;
                     if !mounted(&self.keys[i]) {
                         if spent >= budget { break; }
-                        spent += self.row_heights[i];
+                        spent += self.row_heights[i] + self.gap;
                     }
                     from = i;
                 }
@@ -281,7 +306,7 @@ impl VirtualList {
                 while to < end {
                     if !mounted(&self.keys[to]) {
                         if spent >= budget { break; }
-                        spent += self.row_heights[to];
+                        spent += self.row_heights[to] + self.gap;
                     }
                     to += 1;
                 }
@@ -295,7 +320,7 @@ impl VirtualList {
         end = end.max(start);
         self.range = start..end;
         self.before = self.prefix(start);
-        self.after = total - self.prefix(end);
+        self.after = if start < end { total - self.row_end(end) } else { total - self.before };
     }
 
     pub fn anchor_delta(&self) -> f32 {
@@ -309,7 +334,7 @@ impl VirtualList {
         if pinned { return self.range.end != self.keys.len(); }
         let edge = self.viewport * if self.indexed { INDEXED_EDGE } else { 0.5 };
         let top = self.pad_top + self.before;
-        let bottom = self.pad_top + self.prefix(self.range.end);
+        let bottom = self.pad_top + self.row_end(self.range.end);
         (self.range.start > 0 && offset < top + edge)
             || (self.range.end < self.keys.len() && offset + self.viewport > bottom - edge)
     }
