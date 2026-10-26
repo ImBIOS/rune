@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **An anchored box keeps its aligned edge while it resizes.** An `El::anchored` box whose size
+  springs (a pill over a composer whose label grows, a popover that shrinks) now keeps the edge
+  facing its anchor `gap` points away, and the edge its `Align` names on the anchor: `Align::End`
+  its end, `Align::Center` its centre, `Align::Start` its start, on every side. Before, its
+  position also sprang from where it last sat, so an End-aligned box growing by 77 points first
+  swung its end edge 76 points past the anchor and back, and a `Side::Top` popover shrinking from
+  180 to 57 points jumped its top far above its new place and sprang back down. A box whose anchor moves or resizes
+  now follows the anchor's drawn edge frame by frame instead of trailing it on its own spring.
 - **`rune_theme_opencode::brand(dark)`.** The opencode theme's brand colour (ember step 9) as a
   typed function, so apps no longer look the token up by name.
 - **Textbox padding never chooses arbitrarily between multiple editors.** Only a single

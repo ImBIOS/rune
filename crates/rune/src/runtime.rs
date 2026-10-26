@@ -125,6 +125,9 @@ mod on_key_tests;
 #[cfg(test)]
 #[path = "live_only_tests.rs"]
 mod live_only_tests;
+#[cfg(test)]
+#[path = "anchored_grow_tests.rs"]
+mod anchored_grow_tests;
 
 /// Seconds after a commit before debug builds check a `Tx::live_only` event (`skip_view`).
 #[cfg(debug_assertions)]
@@ -5626,8 +5629,15 @@ impl<S: 'static> Runtime<S> {
                 let target = if d != [0.0; 4] { [d[0], d[1], d[0] + d[2], d[1] + d[3]] }
                     else { sticky::anchored_target(&self.nodes, &self.scrolls, j) };
                 let (ax, ay) = anchor_position(a, target, (p.rect.w, p.rect.h), self.viewport);
-                pinh.dx = ax - n.target[0];
-                pinh.dy = ay - n.target[1];
+                // Placed from the presented size and anchor, so drop the frame's own position
+                // spring: with it, an End-aligned box growing in width would start from its old
+                // x and its end edge would swing out and back.
+                let lag = self.scene.get(n.id, prop::FRAME).map_or([0.0; 2], |f| {
+                    let t = self.scene.store().target(n.id, prop::FRAME).unwrap_or(f);
+                    [f.x - t.x, f.y - t.y]
+                });
+                pinh.dx = ax - n.target[0] - lag[0];
+                pinh.dy = ay - n.target[1] - lag[1];
             }
             if self.has_sticky && let Some((edge, inset)) = n.sticky.as_ref().and_then(|s| Some((s.edge?, s.inset))) {
                 // Worked out from this frame's offsets, which the viewport above already applied.
