@@ -1,5 +1,6 @@
 //! The small built-in glyphs components draw (check marks, chevrons, close). Geometric
 //! shapes, not an icon catalog; a theme may replace any of them through `Kit::glyph`.
+//! `MIC`, `KEYBOARD`, `CURSOR_TEXT`, `ARROW_RIGHT` and `SPARKLE` have no `Glyphs` slot: draw them with `icon(&glyphs::MIC, 16.0)`.
 
 use rune::Icon;
 
@@ -74,6 +75,37 @@ pub static TRIANGLE_RIGHT: Icon = Icon {
 };
 pub static DASH: Icon =
     Icon { name: "kit-dash", view: 20.0, body: r#"<rect x="5" y="9.5" width="10" height="1" fill="currentColor"/>"# };
+
+/// A microphone. Not a `Glyphs` slot: `icon(&glyphs::MIC, 16.0)`.
+pub static MIC: Icon = Icon {
+    name: "kit-mic",
+    view: 16.0,
+    body: r#"<rect x="5.5" y="1.5" width="5" height="8" rx="2.5" stroke="currentColor"/><path d="M3.5 7V7.5A4.5 4.5 0 0 0 12.5 7.5V7M8 12V14.5M5.5 14.5H10.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+/// A keyboard. Not a `Glyphs` slot: `icon(&glyphs::KEYBOARD, 16.0)`.
+pub static KEYBOARD: Icon = Icon {
+    name: "kit-keyboard",
+    view: 16.0,
+    body: r#"<rect x="1.5" y="3.5" width="13" height="9" rx="1.5" stroke="currentColor"/><path d="M4.5 6.5H5.5M7.5 6.5H8.5M10.5 6.5H11.5M5.5 9.5H10.5" stroke="currentColor" stroke-linecap="round"/>"#,
+};
+/// The text I-beam cursor. Not a `Glyphs` slot: `icon(&glyphs::CURSOR_TEXT, 16.0)`.
+pub static CURSOR_TEXT: Icon = Icon {
+    name: "kit-cursor-text",
+    view: 16.0,
+    body: r#"<path d="M5.5 2.5H10.5M8 2.5V13.5M5.5 13.5H10.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+/// An arrow pointing right. Not a `Glyphs` slot: `icon(&glyphs::ARROW_RIGHT, 16.0)`.
+pub static ARROW_RIGHT: Icon = Icon {
+    name: "kit-arrow-right",
+    view: 16.0,
+    body: r#"<path d="M2.5 8H13.5M9 3.5L13.5 8L9 12.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+/// A four-point sparkle. Not a `Glyphs` slot: `icon(&glyphs::SPARKLE, 16.0)`.
+pub static SPARKLE: Icon = Icon {
+    name: "kit-sparkle",
+    view: 16.0,
+    body: r#"<path d="M8 2Q9.5 6.5 14 8Q9.5 9.5 8 14Q6.5 9.5 2 8Q6.5 6.5 8 2Z" stroke="currentColor" stroke-linejoin="round"/>"#,
+};
 
 const PAGE: &str = r#"<path d="M3.5 1.5H9.5L12.5 4.5V14.5H3.5V1.5Z" stroke="currentColor" stroke-linejoin="round"/><path d="M9.5 1.5V4.5H12.5" stroke="currentColor" stroke-linejoin="round"/>"#;
 

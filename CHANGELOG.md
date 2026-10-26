@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Five more built-in glyphs.** `rune_kit::glyphs` gains `MIC`, `KEYBOARD`, `CURSOR_TEXT`,
+  `ARROW_RIGHT` and `SPARKLE`, drawn like the rest of the set (16-unit view, 1-unit stroke). They
+  are plain statics, not `Glyphs` slots, so no theme or app literal changes: draw them with
+  `icon(&glyphs::MIC, 16.0)`. `demo/kit/glyphs.png` shows the whole set, light and dark
+  (`cargo run -p rune-kit --example glyphs`).
+
 - **Atlas capacity preserves glyphs already drawn in the frame, including text flights.**
   At the eight-page R8 limit, requests fail without overwriting live placements and retry in
   later frames. Empty outlines stay cached across eviction. The 16 MiB colour cache retires

@@ -7,7 +7,7 @@ use rune::Icon;
 use rune::text::icon_coverage;
 use rune_kit::glyphs;
 
-const ALL: [&Icon; 21] = [
+const ALL: [&Icon; 26] = [
     &glyphs::CHECK,
     &glyphs::CHECK_SMALL,
     &glyphs::CHEVRON_DOWN,
@@ -29,6 +29,11 @@ const ALL: [&Icon; 21] = [
     &glyphs::FILE_CODE,
     &glyphs::FILE_TEXT,
     &glyphs::FILE_IMAGE,
+    &glyphs::MIC,
+    &glyphs::KEYBOARD,
+    &glyphs::CURSOR_TEXT,
+    &glyphs::ARROW_RIGHT,
+    &glyphs::SPARKLE,
 ];
 
 /// Glyph sizes in points (Deadbolt's 16–20 pt plus a large one) at 1× and 2×.
@@ -144,4 +149,12 @@ fn write_sheet(path: &std::path::Path, rows: &[Row]) {
         }
     }
     pm.save_png(path).unwrap();
+}
+
+#[test]
+fn extra_glyphs_rasterize_with_ink() {
+    for icon in [&glyphs::MIC, &glyphs::KEYBOARD, &glyphs::CURSOR_TEXT, &glyphs::ARROW_RIGHT, &glyphs::SPARKLE] {
+        let ink: u32 = icon_coverage(icon, 32).iter().map(|&a| a as u32).sum();
+        assert!(ink > 2000, "{} has no ink", icon.name);
+    }
 }
