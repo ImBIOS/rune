@@ -165,3 +165,34 @@ fn on_layout_feedback_settles() {
     assert_eq!(rt.state.rects[reports], [0.0, 0.0, 200.0, 10.0], "{:?}", rt.state.rects);
     assert!(rt.state.rects.len() > reports + 1, "{:?}", rt.state.rects);
 }
+
+#[derive(Default)]
+struct Editor {
+    editing: bool,
+    field: rune::TextEdit,
+}
+
+/// An inline editor placed over a node by reading its rect, so it first appears on the
+/// commit's re-run, never on its first measure.
+fn editor_view(s: &Editor, cx: &mut Cx<Editor>) -> El {
+    let mut root = col().w_full().h_full().padding(10.0).child(el().key("node").size(120.0, 30.0));
+    if s.editing && let Some([x, y, w, _]) = cx.layout("node") {
+        root = root.child(rune::text_input(&s.field, rune::tok::TextStyle::new(14.0, 400.0))
+            .key("editor").absolute(x, y).w(w).on_edit(|s: &mut Editor| &mut s.field));
+    }
+    root
+}
+
+#[test]
+fn a_field_that_appears_on_the_re_run_takes_the_focus_it_asks_for() {
+    let mut rt = Runtime::new(Editor::default(), editor_view, (300.0, 200.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    rt.update(|s, _| { s.editing = true; s.field.focused = true; });
+    rt.frame(1.0 / 120.0);
+    let editor = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("editor")).expect("placed in this commit");
+    assert_eq!(editor.target[..2], [10.0, 10.0]);
+    assert!(editor.focused, "focused in the commit that placed it");
+    rt.key(rune::KeyEvent { key: rune::Key::Text("a".into()), mods: Default::default() });
+    rt.frame(1.0 / 120.0);
+    assert_eq!(rt.state.field.text, "a", "typing reaches it");
+}

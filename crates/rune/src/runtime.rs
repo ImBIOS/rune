@@ -3262,7 +3262,13 @@ impl<S: 'static> Runtime<S> {
             self.layout = measured.layout;
             measured = self.measure(&tx);
         }
-        let measured = self.settle_layout_reads(measured, &tx);
+        let (mut measured, rerun) = self.settle_layout_reads(measured, &tx);
+        // A field that asks for focus may appear only once the view can read a rect.
+        if rerun && self.sync_requested_focus(&mut measured.nodes) {
+            self.layout = measured.layout;
+            let remeasured = self.measure(tx);
+            measured = self.settle_layout_reads(remeasured, tx).0;
+        }
         self.apply(measured, tx);
         self.memo.keep_since(self.memo_since);
         self.track_focused_rows();

@@ -77,19 +77,20 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// Re-measures `measured` while a layout read moved, at most [`PASSES`] times, then leaves
-    /// the reads matching the final layout so a view that can't settle doesn't loop.
-    pub(super) fn settle_layout_reads(&mut self, mut measured: Measured, tx: &Tx) -> Measured {
+    /// the reads matching the final layout so a view that can't settle doesn't loop. Returns
+    /// whether it re-measured, so the view's last run may have built elements the first didn't.
+    pub(super) fn settle_layout_reads(&mut self, mut measured: Measured, tx: &Tx) -> (Measured, bool) {
         if measured.layout_reads.is_empty() {
             self.layout_seen.clear();
-            return measured;
+            return (measured, false);
         }
-        for _ in 0..PASSES {
-            if !self.layout_moved(Some(&measured.layout_reads), Some(&measured.nodes)) { return measured; }
+        for pass in 0..PASSES {
+            if !self.layout_moved(Some(&measured.layout_reads), Some(&measured.nodes)) { return (measured, pass > 0); }
             self.layout = measured.layout;
             measured = self.measure(tx);
         }
         self.layout_moved(Some(&measured.layout_reads), Some(&measured.nodes));
-        measured
+        (measured, true)
     }
 
     /// Whether layout feedback may still cause a commit (see the module docs).

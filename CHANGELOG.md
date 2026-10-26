@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A field that appears on a layout-read re-run takes the focus it asks for.** When a view
+  builds a `TextEdit { focused: true, .. }` field only once `Cx::layout` returns a rect (an
+  inline editor placed over a node), the field appears on the commit's re-run, which skipped
+  the focus sync, so it stayed unfocused until some later commit. The commit now syncs focus
+  again after the re-run.
+
 - **`El::inert()` makes a subtree draw and lay out without taking input.** Presses, hovers,
   cursors, scrolls, drops and tooltips go to whatever is under it, as with HTML's `inert`; nothing
   inside takes or keeps focus, and `ElementInfo::inert` is true for it. `on_layout` and

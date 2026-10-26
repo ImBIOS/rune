@@ -711,6 +711,8 @@ starts a new countdown.
 let the runtime clear it when another field takes focus; do not force it on every view rebuild.
 A handler drops focus with `Tx::blur()` (Enter in an inspector field handing keys back to
 the window, say); the field's `focused` turns false through its `on_edit` accessor.
+A field the view builds only once it can read a rect (`Cx::layout`, on the commit's re-run)
+still takes the focus it asks for in that commit.
 
 Text fields support Cmd/Ctrl-Z and Cmd/Ctrl-Shift-Z. Consecutive typing is one undo
 group; selection changes, navigation, paste, cut and IME commits separate groups.
