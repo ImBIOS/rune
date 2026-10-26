@@ -94,7 +94,8 @@ impl<S: 'static> Runtime<S> {
     /// The link of node `i` under window point (x, y).
     pub(super) fn link_at(&self, i: usize, x: f32, y: f32) -> Option<usize> {
         if self.nodes[i].text.as_ref().is_none_or(|t| t.links.is_empty()) { return None; }
-        self.link_boxes(i, self.drawn_box(i)).into_iter()
+        let (rect, x, y) = self.unturned_box_and_point(i, x, y);
+        self.link_boxes(i, rect).into_iter()
             .find(|(_, r)| contains(*r, x, y)).map(|(k, _)| k)
     }
 

@@ -151,9 +151,9 @@ impl<S: 'static> Runtime<S> {
             Some((x, y)) if !self.in_viewport(x, y) => return None,
             Some((x, y)) => {
                 let hit = self.hits.iter().enumerate().rev()
-                    .find_map(|(k, (id, r))| contains(*r, x, y).then(|| ok(id)).flatten().map(|i| (k, i)));
+                    .find_map(|(k, &(id, r))| self.hit_contains(id, r, x, y).then(|| ok(&id)).flatten().map(|i| (k, i)));
                 let zone = self.file_drag.hits.iter().rev()
-                    .find_map(|(id, r, seq)| contains(*r, x, y).then(|| ok(id)).flatten().map(|i| (*seq, i)));
+                    .find_map(|&(id, r, seq)| self.hit_contains(id, r, x, y).then(|| ok(&id)).flatten().map(|i| (seq, i)));
                 // Whichever was drawn last is on top: a hit drawn after a zone started covers it.
                 let top = match (hit, zone) {
                     (Some((k, h)), Some((seq, z))) => Some(if k >= seq { h } else { z }),

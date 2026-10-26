@@ -137,10 +137,10 @@ impl<S: 'static> Runtime<S> {
     /// from the topmost hit, and from a scroll view there inside it. With `stop_at_scroll`, the
     /// walk ends at the first scroll view, which scrolls what its handlers leave.
     fn gesture_chain(&self, x: f32, y: f32, has: impl Fn(&CanvasInput) -> bool, stop_at_scroll: bool) -> Vec<String> {
-        let hit = self.hits.iter().rev().find(|&&(_, r)| contains(r, x, y)).and_then(|(id, _)| self.node_index.get(id).copied());
+        let hit = self.hits.iter().rev().find(|&&(id, r)| self.hit_contains(id, r, x, y)).and_then(|(id, _)| self.node_index.get(id).copied());
         // A scroll view without handlers of its own isn't a hit: one inside the hit wins.
         let scroll = (0..self.nodes.len()).rev().find(|&i| self.nodes[i].scroll.is_some() && !self.subtree_exiting(i)
-            && self.allowed(i) && contains(self.drawn_edges(i), x, y));
+            && self.allowed(i) && self.node_contains(i, x, y));
         let inside = |s: usize, h: usize| std::iter::successors(self.nodes[s].parent, |&p| self.nodes[p].parent).any(|p| p == h);
         let start = match (hit, scroll) {
             (Some(h), Some(s)) if inside(s, h) => Some(s),
@@ -178,7 +178,7 @@ impl<S: 'static> Runtime<S> {
         if self.capture.is_some() { return; }
         self.pointer = Some((x, y));
         self.dismiss_help();
-        let hit = self.hits.iter().rev().find(|&&(_, r)| contains(r, x, y)).and_then(|(id, _)| self.node_index.get(id).copied());
+        let hit = self.hits.iter().rev().find(|&&(id, r)| self.hit_contains(id, r, x, y)).and_then(|(id, _)| self.node_index.get(id).copied());
         let target = std::iter::successors(hit, |&i| self.nodes[i].parent)
             .take_while(|&i| !self.subtree_exiting(i) && self.allowed(i))
             .find(|&i| {

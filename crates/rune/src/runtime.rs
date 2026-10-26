@@ -653,18 +653,29 @@ struct Inh {
 /// A 2×3 affine in device pixels, `[a, b, c, d, tx, ty]`: `(x, y)` lands at
 /// `(a·x + b·y + tx, c·x + d·y + ty)`. The composed `El::rotate` layers above a node.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Turn([f32; 6]);
+struct Turn {
+    mat: [f32; 6],
+    rect: [f32; 4],
+    angle: f32,
+    pivot: [f32; 2],
+    outer_clip: [f32; 4],
+}
 
 /// The composed turn for a node under `Inh::turn` index `inherited` turning `own` radians about
 /// `pivot`: pushed onto `turns` when it turns itself. Off the paint loop's common path.
 #[cold]
 #[inline(never)]
-fn compose_turn(turns: &mut Vec<Turn>, inherited: u32, own: Option<f32>, pivot: [f32; 2]) -> (Option<Turn>, u32) {
+fn compose_turn(
+    turns: &mut Vec<Turn>,
+    inherited: u32,
+    own: Option<f32>,
+    (rect, pivot, outer_clip): ([f32; 4], [f32; 2], [f32; 4]),
+) -> (Option<Turn>, u32) {
     let above = inherited.checked_sub(1).map(|k| turns[k as usize]);
     match own {
         None => (above, inherited),
         Some(a) => {
-            let own = Turn::about(a, pivot);
+            let own = Turn::about(a, pivot, rect, outer_clip);
             let t = above.map_or(own, |t| t.after(own));
             turns.push(t);
             (Some(t), turns.len() as u32)
@@ -698,29 +709,60 @@ fn open_turned_layer(instances: &mut Vec<Instance>, layers: &mut Vec<(usize, usi
     (*clip, *fade, *fade_origin, *rounded) = (NO_CLIP, [0.0; 4], NO_CLIP, None);
 }
 
+fn screen_clip_of(parent: Option<usize>, inh: &[Inh], turns: &[Turn]) -> [f32; 4] {
+    let Some(pi) = parent else { return NO_CLIP };
+    let Some(h) = inh.get(pi) else { return NO_CLIP };
+    if let Some(&t) = h.turn.checked_sub(1).and_then(|k| turns.get(k as usize)) {
+        let ic = if h.clip == NO_CLIP { NO_CLIP } else { t.bbox(h.clip) };
+        let oc = t.outer_clip;
+        [oc[0].max(ic[0]), oc[1].max(ic[1]), oc[2].min(ic[2]), oc[3].min(ic[3])]
+    } else {
+        h.clip
+    }
+}
+
 impl Turn {
     /// `angle` radians clockwise about `p`.
-    fn about(angle: f32, p: [f32; 2]) -> Turn {
+    fn about(angle: f32, p: [f32; 2], rect: [f32; 4], outer_clip: [f32; 4]) -> Turn {
         let (sn, c) = angle.sin_cos();
-        Turn([c, -sn, sn, c, p[0] - c * p[0] + sn * p[1], p[1] - sn * p[0] - c * p[1]])
+        Turn {
+            mat: [c, -sn, sn, c, p[0] - c * p[0] + sn * p[1], p[1] - sn * p[0] - c * p[1]],
+            rect,
+            angle,
+            pivot: p,
+            outer_clip,
+        }
     }
 
     /// `inner`, then `self`.
     fn after(self, inner: Turn) -> Turn {
-        let [a, b, c, d, x, y] = self.0;
-        let [e, f, g, h, u, v] = inner.0;
-        Turn([a * e + b * g, a * f + b * h, c * e + d * g, c * f + d * h, a * u + b * v + x, c * u + d * v + y])
+        let [a, b, c, d, x, y] = self.mat;
+        let [e, f, g, h, u, v] = inner.mat;
+        let ic = if inner.outer_clip == NO_CLIP { NO_CLIP } else { self.bbox(inner.outer_clip) };
+        let oc = self.outer_clip;
+        Turn {
+            mat: [a * e + b * g, a * f + b * h, c * e + d * g, c * f + d * h, a * u + b * v + x, c * u + d * v + y],
+            outer_clip: [oc[0].max(ic[0]), oc[1].max(ic[1]), oc[2].min(ic[2]), oc[3].min(ic[3])],
+            ..inner
+        }
     }
 
     /// The upright bounding box of edges `r` once turned.
     fn bbox(self, r: [f32; 4]) -> [f32; 4] {
-        let [a, b, c, d, x, y] = self.0;
+        let [a, b, c, d, x, y] = self.mat;
         let mut out = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
         for (px, py) in [(r[0], r[1]), (r[2], r[1]), (r[0], r[3]), (r[2], r[3])] {
             let (qx, qy) = (a * px + b * py + x, c * px + d * py + y);
             out = [out[0].min(qx), out[1].min(qy), out[2].max(qx), out[3].max(qy)];
         }
         out
+    }
+
+    /// Unturns a screen-space point `q` back into the layer's upright device pixels.
+    fn unturn(self, [qx, qy]: [f32; 2]) -> [f32; 2] {
+        let [a, b, c, d, tx, ty] = self.mat;
+        let (dx, dy) = (qx - tx, qy - ty);
+        [a * dx + c * dy, b * dx + d * dy]
     }
 }
 
@@ -947,6 +989,9 @@ pub struct Runtime<S: 'static> {
     inh_scratch: Vec<Inh>,
     /// The composed turns `Inh::turn` points into, rebuilt each paint.
     turn_scratch: Vec<Turn>,
+    /// For nodes inside a turned layer: `(unturned_rect_pt, unturned_clip_px)`. Empty unless a
+    /// node turns.
+    unturned_drawn: Vec<([f32; 4], [f32; 4])>,
     /// Only nonempty when retained exit nodes or matched flights make storage order differ
     /// from paint order.
     layer_paint_order: Vec<usize>,
@@ -1341,6 +1386,7 @@ impl<S: 'static> Runtime<S> {
             deco_scratch: Vec::new(),
             inh_scratch: Vec::new(),
             turn_scratch: Vec::new(),
+            unturned_drawn: Vec::new(),
             layer_paint_order: Vec::new(),
             matched: Vec::new(),
             flying: Vec::new(),
@@ -2552,7 +2598,7 @@ impl<S: 'static> Runtime<S> {
         if spec.content.is_empty() { return; }
         let scale = self.env.scale;
         let (rect, origin) = text_extent(n, spec, layout, *r, scale);
-        let clip = n.parent.and_then(|p| self.inh_scratch.get(p)).map_or(NO_CLIP, |h| h.clip).map(|v| v / scale);
+        let clip = self.screen_clip_of_parent(n.parent).map(|v| v / scale);
         let clip = [rect.x.max(clip[0]).max(0.0), rect.y.max(clip[1]).max(0.0),
             (rect.x + rect.w).min(clip[2]).min(self.viewport.0), (rect.y + rect.h).min(clip[3]).min(self.viewport.1)];
         if rect.w <= 0.0 || clip[2] <= clip[0] || clip[3] <= clip[1] { return; }
@@ -2595,7 +2641,7 @@ impl<S: 'static> Runtime<S> {
             f.presented = MRect::new(edges[0], edges[1], edges[2] - edges[0], edges[3] - edges[1]);
             let p = f.progress(now, reduced);
             let (source_alpha, target_alpha) = f.alphas(target, now, reduced);
-            let actual_clip = n.parent.and_then(|p| self.inh_scratch.get(p)).map_or(NO_CLIP, |h| h.clip).map(|v| v / s);
+            let actual_clip = screen_clip_of(n.parent, &self.inh_scratch, &self.turn_scratch).map(|v| v / s);
             let actual_clip = [actual_clip[0].max(0.0), actual_clip[1].max(0.0), actual_clip[2].min(viewport[2]), actual_clip[3].min(viewport[3])];
             let current = f.presented;
             let zoom = current.w / f.source.w;
@@ -3161,15 +3207,98 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// Window point (x, y) in node `i`'s own layout points: from its top-left as drawn, divided
-    /// by the scale it draws at, so it follows scrolling, `live_offset`, `live_scale` and
-    /// `El::scale`. From its layout box before it draws.
+    /// by the scale it draws at, so it follows scrolling, `live_offset`, `live_scale`,
+    /// `El::scale` and `El::rotate`. From its layout box before it draws.
     pub(crate) fn to_local(&self, i: usize, x: f32, y: f32) -> [f32; 2] {
         let Some(d) = self.drawn.get(i) else {
             let t = self.nodes[i].target;
             return [x - t[0], y - t[1]];
         };
         let k = self.drawn_scale.get(i).copied().unwrap_or(1.0).max(1e-4);
-        [(x - d[0]) / k, (y - d[1]) / k]
+        if self.turn_scratch.is_empty() {
+            return [(x - d[0]) / k, (y - d[1]) / k];
+        }
+        let (b, ux, uy) = self.unturned_box_and_point(i, x, y);
+        [(ux - b[0]) / k, (uy - b[1]) / k]
+    }
+
+    /// Node `i`'s unturned border box (points, x0 y0 x1 y1) and window point (x, y) unturned into
+    /// that layer's points.
+    pub(super) fn unturned_box_and_point(&self, i: usize, x: f32, y: f32) -> ([f32; 4], f32, f32) {
+        if let Some(t) = self.inh_scratch.get(i).and_then(|h| h.turn.checked_sub(1)).and_then(|k| self.turn_scratch.get(k as usize))
+            && let Some(&(b, _)) = self.unturned_drawn.get(i)
+        {
+            let s = self.env.scale;
+            let [ux, uy] = t.unturn([x * s, y * s]).map(|v| v / s);
+            return (b, ux, uy);
+        }
+        (self.drawn_box(i), x, y)
+    }
+
+    #[inline]
+    pub(super) fn hit_contains(&self, id: NodeId, r: [f32; 4], x: f32, y: f32) -> bool {
+        if self.turn_scratch.is_empty() {
+            return contains(r, x, y);
+        }
+        self.hit_contains_turned(id, r, x, y)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn hit_contains_turned(&self, id: NodeId, r: [f32; 4], x: f32, y: f32) -> bool {
+        let Some(&i) = self.node_index.get(&id) else { return contains(r, x, y) };
+        let Some(&t) = self.inh_scratch.get(i).and_then(|h| h.turn.checked_sub(1)).and_then(|k| self.turn_scratch.get(k as usize)) else {
+            return contains(r, x, y);
+        };
+        let s = self.env.scale;
+        if !contains(t.outer_clip.map(|v| v / s), x, y) {
+            return false;
+        }
+        let [ux, uy] = t.unturn([x * s, y * s]).map(|v| v / s);
+        contains(r, ux, uy)
+    }
+
+    pub(super) fn hit_screen_rect(&self, id: NodeId, r: [f32; 4]) -> [f32; 4] {
+        if self.turn_scratch.is_empty() {
+            return r;
+        }
+        let Some(&i) = self.node_index.get(&id) else { return r };
+        let Some(&t) = self.inh_scratch.get(i).and_then(|h| h.turn.checked_sub(1)).and_then(|k| self.turn_scratch.get(k as usize)) else {
+            return r;
+        };
+        let s = self.env.scale;
+        let b = t.bbox(r.map(|v| v * s)).map(|v| v / s);
+        let c = t.outer_clip.map(|v| v / s);
+        [b[0].max(c[0]), b[1].max(c[1]), b[2].min(c[2]), b[3].min(c[3])]
+    }
+
+    fn node_contains(&self, i: usize, x: f32, y: f32) -> bool {
+        if !self.turn_scratch.is_empty()
+            && let Some(turn_k) = self.inh_scratch.get(i).map(|h| h.turn).filter(|&k| k != 0)
+            && let Some(&t) = self.turn_scratch.get(turn_k as usize - 1)
+            && let Some(&(b, _)) = self.unturned_drawn.get(i)
+        {
+            let s = self.env.scale;
+            if !contains(t.outer_clip.map(|v| v / s), x, y) {
+                return false;
+            }
+            let lc = self.nodes[i].parent
+                .filter(|&p| self.inh_scratch.get(p).is_some_and(|h| h.turn == turn_k))
+                .and_then(|p| self.unturned_drawn.get(p))
+                .map_or(NO_CLIP, |u| u.1)
+                .map(|v| v / s);
+            let shown = [b[0].max(lc[0]), b[1].max(lc[1]), b[2].min(lc[2]), b[3].min(lc[3])];
+            let [ux, uy] = t.unturn([x * s, y * s]).map(|v| v / s);
+            return contains(shown, ux, uy);
+        }
+        let r = self.drawn_edges(i);
+        let c = self.nodes[i].parent.and_then(|p| self.inh_scratch.get(p)).map_or(NO_CLIP, |h| h.clip).map(|v| v / self.env.scale);
+        let shown = [r[0].max(c[0]), r[1].max(c[1]), r[2].min(c[2]), r[3].min(c[3])];
+        contains(shown, x, y)
+    }
+
+    fn screen_clip_of_parent(&self, parent: Option<usize>) -> [f32; 4] {
+        screen_clip_of(parent, &self.inh_scratch, &self.turn_scratch)
     }
 
     fn subtree_exiting(&self, mut i: usize) -> bool {
@@ -4281,8 +4410,14 @@ impl<S: 'static> Runtime<S> {
             for (k, sh) in vis.shadows.iter().take(P_SHADOWS.len()).enumerate() {
                 self.set_or_anim(id, P_SHADOWS[k], sh.color, spring_c, instant);
                 let geo = rune_motion::Rect { x: sh.x, y: sh.y, w: sh.blur, h: sh.spread };
-                if self.scene.store().target(id, P_SHADOW_GEO[k]) != Some(geo) {
-                    self.set_or_anim(id, P_SHADOW_GEO[k], geo, spring_l, instant);
+                self.set_or_anim(id, P_SHADOW_GEO[k], geo, spring_l, instant);
+            }
+            for k in vis.shadows.len()..P_SHADOWS.len() {
+                if self.scene.store().has(id, P_SHADOWS[k]) {
+                    self.scene.store_mut().remove(id, P_SHADOWS[k]);
+                    self.scene.store_mut().remove(id, P_SHADOW_GEO[k]);
+                } else {
+                    break;
                 }
             }
             if let Some(g) = vis.gradient {
@@ -4689,7 +4824,7 @@ impl<S: 'static> Runtime<S> {
     /// The topmost element under (x, y) that takes primary input, selectable text included.
     fn top_target(&self, x: f32, y: f32) -> Option<usize> {
         self.hits.iter().rev().find_map(|&(id, r)| {
-            if !contains(r, x, y) { return None; }
+            if !self.hit_contains(id, r, x, y) { return None; }
             let i = *self.node_index.get(&id)?;
             let n = &self.nodes[i];
             // A secondary-only child must not obscure primary input or background blur.
@@ -4735,7 +4870,7 @@ impl<S: 'static> Runtime<S> {
         self.pointer = Some((x, y));
         if self.in_viewport(x, y) { self.left_in_capture = false; }
         for &(id, rect) in &self.hits {
-            if contains(rect, x, y)
+            if self.hit_contains(id, rect, x, y)
                 && let Some(&i) = self.node_index.get(&id)
                 && self.nodes[i].on_pointer_move.is_some()
             {
@@ -4756,7 +4891,7 @@ impl<S: 'static> Runtime<S> {
         // unscrolled layout rect, kept only for elements that were never drawn.
         let mut hits = self.hits.iter().filter(|(hit, _)| *hit == id).peekable();
         self.capture_inside = !self.press_cancelled && if self.native_overlay || hits.peek().is_some() {
-            hits.any(|(_, r)| contains(*r, x, y))
+            hits.any(|&(id, r)| self.hit_contains(id, r, x, y))
         } else { contains(r, x, y) };
         if has_drag && drag_move {
             let (dx, dy) = (x - self.press_at.0, y - self.press_at.1);
@@ -4771,8 +4906,7 @@ impl<S: 'static> Runtime<S> {
         if self.pointer == Some((x, y)) { return false; }
         let visual_changed = self.nodes.iter().enumerate().any(|(i, n)| {
             if n.vis.hover.a <= 0.0 && n.vis.press.a <= 0.0 && n.press_scale.is_none() { return false; }
-            let r = self.drawn_edges(i);
-            let inside = |p: Option<(f32, f32)>| p.is_some_and(|(x, y)| contains(r, x, y));
+            let inside = |p: Option<(f32, f32)>| p.is_some_and(|(x, y)| self.node_contains(i, x, y));
             inside(self.pointer) != inside(Some((x, y)))
         });
         // Reaching or leaving a help element starts or ends its tooltip's wait.
@@ -4834,7 +4968,7 @@ impl<S: 'static> Runtime<S> {
         let Some(item) = f(handler_state_ref(&self.state)).filter(|item| !item.is_empty()) else { return false };
         let n = &self.nodes[i];
         let r = self.drawn.get(i).copied().unwrap_or([n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]]);
-        let clip = n.parent.and_then(|pi| self.inh_scratch.get(pi)).map_or(NO_CLIP, |h| h.clip).map(|v| v / self.env.scale);
+        let clip = self.screen_clip_of_parent(n.parent).map(|v| v / self.env.scale);
         let (x0, y0) = (r[0].max(clip[0]), r[1].max(clip[1]));
         let rect = [x0, y0, ((r[0] + r[2]).min(clip[2]) - x0).max(0.0), ((r[1] + r[3]).min(clip[3]) - y0).max(0.0)];
         self.events.push(format!("drag-out {path}"));
@@ -4939,11 +5073,10 @@ impl<S: 'static> Runtime<S> {
         self.press_moved = false;
         self.press_cancelled = false;
         if let Some(ji) = self.textbox_input(ti) {
+            // Its text drew scaled or rotated with its box: map the press back to the rest layout.
+            let [lx, ly] = self.to_local(ji, x, y);
             let jn = &self.nodes[ji];
-            let r = self.drawn.get(ji).copied().unwrap_or([jn.target[0], jn.target[1], jn.target[2] - jn.target[0], jn.target[3] - jn.target[1]]);
-            // Its text drew scaled with its box: map the press back to the rest layout.
-            let k = self.drawn_scale.get(ji).copied().unwrap_or(1.0).max(1e-4);
-            self.queue.push(Action::Focus(jn.path.clone(), (x - r[0]) / k - jn.inset[0], (y - r[1]) / k - jn.inset[1]));
+            self.queue.push(Action::Focus(jn.path.clone(), lx - jn.inset[0], ly - jn.inset[1]));
             return;
         }
         // Clicking a link leaves focus where it is (a composer keeps typing). Selectable text
@@ -4993,7 +5126,7 @@ impl<S: 'static> Runtime<S> {
     /// The nearest element with `on_secondary_press` at (x, y), else the selectable text there
     /// (its Copy menu): an app's context menu on a row wins over its text's.
     fn secondary_target(&self, x: f32, y: f32) -> Option<&str> {
-        let id = self.hits.iter().rev().find(|&&(_, r)| contains(r, x, y))?.0;
+        let id = self.hits.iter().rev().find(|&&(id, r)| self.hit_contains(id, r, x, y))?.0;
         let mut index = *self.node_index.get(&id)?;
         let mut text = None;
         loop {
@@ -5103,7 +5236,7 @@ impl<S: 'static> Runtime<S> {
         if let Some((x, y)) = self.pointer {
             for &(id, r) in &self.hits {
                 if let Some(n) = self.node_index.get(&id).map(|&i| &self.nodes[i])
-                    && n.on_hover_change.is_some() && contains(r, x, y) && !inside.contains(&n.path)
+                    && n.on_hover_change.is_some() && self.hit_contains(id, r, x, y) && !inside.contains(&n.path)
                 {
                     inside.push(n.path.clone());
                 }
@@ -5423,10 +5556,7 @@ impl<S: 'static> Runtime<S> {
             .enumerate()
             .rev()
             .filter(|(i, n)| n.scroll.is_some() && n.scroll_axes.has(horizontal) && !self.subtree_exiting(*i) && self.allowed(*i))
-            .find(|(i, _)| {
-                let r = self.drawn.get(*i).copied().unwrap_or([0.0; 4]);
-                contains([r[0], r[1], r[0] + r[2], r[1] + r[3]], x, y)
-            })
+            .find(|(i, _)| self.node_contains(*i, x, y))
             .map(|(_, n)| n.id)
     }
 
@@ -5493,11 +5623,7 @@ impl<S: 'static> Runtime<S> {
             if self.is_exiting(n.id) || (!tracks_hover && n.vis.press.a <= 0.0 && n.press_scale.is_none()) {
                 continue;
             }
-            let r = self.drawn_edges(i);
-            // A group inside a clipped region (a scrolled list) only hovers where it shows.
-            let c = n.parent.and_then(|p| self.inh_scratch.get(p)).map_or(NO_CLIP, |h| h.clip).map(|v| v / self.env.scale);
-            let shown = [r[0].max(c[0]), r[1].max(c[1]), r[2].min(c[2]), r[3].min(c[3])];
-            let inside = self.pointer.is_some_and(|(x, y)| contains(shown, x, y));
+            let inside = self.pointer.is_some_and(|(x, y)| self.node_contains(i, x, y));
             // A group stays hovered while one of its descendants holds the press.
             let within = |p: &str| p == n.path || (p.len() > n.path.len() && p.starts_with(&n.path) && p.as_bytes()[n.path.len()] == b'/');
             let capture_inside = if self.secondary_capture.is_some() { inside } else { self.capture_inside };
@@ -5566,6 +5692,7 @@ impl<S: 'static> Runtime<S> {
         let n_nodes = self.nodes.len();
         self.inh_scratch.clear();
         self.turn_scratch.clear();
+        self.unturned_drawn.clear();
         self.inh_scratch.resize(n_nodes, Inh::default());
         self.drawn.clear();
         self.drawn.resize(n_nodes, [0.0; 4]);
@@ -5741,7 +5868,7 @@ impl<S: 'static> Runtime<S> {
             let n = &self.nodes[pair[0]];
             self.nodes[pair[1]].parent == Some(pair[0]) && ((self.has_dissolve && self.dissolve_scratch[pair[0]]) || n.vis.cache || n.vis.clip_radius.is_some() || n.vis.group_opacity.is_some()
                 || fades(n.looping)
-                || self.scene.presented(n.id).is_some_and(|p| (p.opacity > 0.0 && p.opacity < 1.0) || p.blur > 0.0))
+                || self.scene.presented(n.id).is_some_and(|p| (p.opacity > 0.0 && p.opacity < 1.0) || p.blur > 0.0 || p.transform.rotate.abs() > 1e-6))
         });
         let default_ring = self.default_ring_owner();
         let mut active_cache: Option<ActiveCache> = None;
@@ -5817,14 +5944,28 @@ impl<S: 'static> Runtime<S> {
                 pinh.paint_fade_origin = pinh.fade_origin;
                 pinh.in_cache = false;
                 pinh.skip_paint = false;
-                // Rounded clips consumed by an ancestor's isolation layer must be reapplied
-                // outside that layer too. Reopen only the masks, not its opacity or blur group.
+                // Rounded clips and turns consumed by an ancestor's layer must be reapplied
+                // outside that layer too. Reopen only the masks and turns, not opacity or blur.
                 pinh.rounded = None;
+                let mut chain = Vec::new();
                 let mut parent = node_parent;
                 while let Some(p) = parent {
+                    chain.push(p);
+                    parent = self.nodes[p].parent;
+                }
+                for &p in chain.iter().rev() {
                     let ancestor = &self.nodes[p];
+                    let k = self.inh_scratch[p].turn;
+                    if k != 0 && ancestor.parent.map_or(0, |pp| self.inh_scratch[pp].turn) != k {
+                        let t = self.turn_scratch[k as usize - 1];
+                        let start = self.instances.len();
+                        let marker = Instance::begin_layer(t.rect, t.outer_clip, Default::default()).turned(t.angle, t.pivot);
+                        self.instances.push(marker);
+                        layers.push((p, start, self.surfaces.len()));
+                    }
                     if let Some(radius) = ancestor.vis.clip_radius {
-                        let [x, y, w, h] = self.drawn[p].map(|v| v * s);
+                        let [x, y, w, h] = self.unturned_drawn.get(p).filter(|_| k != 0)
+                            .map_or_else(|| self.drawn[p].map(|v| v * s), |&(b, _)| [b[0] * s, b[1] * s, (b[2] - b[0]) * s, (b[3] - b[1]) * s]);
                         let radii = ancestor.vis.clip_corners.unwrap_or_else(|| {
                             if ancestor.vis.radius != [0.0; 4] {
                                 self.scene.presented(ancestor.id).map_or(ancestor.vis.radius, |p| p.radius.0)
@@ -5839,7 +5980,6 @@ impl<S: 'static> Runtime<S> {
                         self.instances.push(marker);
                         layers.push((p, start, self.surfaces.len()));
                     }
-                    parent = ancestor.parent;
                 }
             }
             if lift {
@@ -5847,7 +5987,10 @@ impl<S: 'static> Runtime<S> {
                 // ancestors' opacity, scale and blur: an entering parent's fade or scale would
                 // otherwise hide the flight or jump it off the rect it was seen at. Inside another
                 // flight, also drop that flight's cover offset and clip.
-                let [clip, fade, fade_origin] = pinh.outer.unwrap_or([pinh.clip, pinh.fade, pinh.fade_origin]);
+                let [clip, fade, fade_origin] = pinh.outer.unwrap_or_else(|| {
+                    let clip = if pinh.turn != 0 { self.screen_clip_of_parent(n.parent) } else { pinh.clip };
+                    [clip, pinh.fade, pinh.fade_origin]
+                });
                 pinh = Inh { opacity: 1.0, paint_opacity: 1.0, clip, fade, fade_origin, paint_clip: clip, paint_fade: fade,
                     paint_fade_origin: fade_origin, rounded: None, scale: 1.0, anchor: [0.0; 2], anchor_to: [0.0; 2], blur: 0.0,
                     dx: pinh.dx - pinh.cover[0], dy: pinh.dy - pinh.cover[1], cover: [0.0; 2], outer: None,
@@ -5988,15 +6131,30 @@ impl<S: 'static> Runtime<S> {
             } else { None };
             let r = rect_pt.map(snap_px);
             let (w, h) = ((r[2] - r[0]).max(0.0), (r[3] - r[1]).max(0.0));
+            let intersect = |a: [f32; 4], b: [f32; 4]| [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
             // `El::rotate`: this subtree draws into a layer turned about its origin.
+            // The layer takes the clips from above; the node's own clips apply inside, upright.
             let own_turn = p.transform.rotate;
             let own_turn = (own_turn != 0.0 && own_turn.is_finite() && own_turn.abs() > 1e-6 && !lift).then_some(own_turn);
             let turn_pivot = [centre_to[0] * s, centre_to[1] * s];
             let (node_turn, turn_index) = if pinh.turn == 0 && own_turn.is_none() {
                 (None, 0)
             } else {
-                compose_turn(&mut self.turn_scratch, pinh.turn, own_turn, turn_pivot)
+                let mut outer_clip = intersect(pinh.clip, clip);
+                if let Some((mask, _)) = rounded { outer_clip = intersect(outer_clip, mask); }
+                compose_turn(&mut self.turn_scratch, pinh.turn, own_turn, ([r[0], r[1], w, h], turn_pivot, outer_clip))
             };
+            if let Some(angle) = own_turn {
+                if !pinh.skip_paint {
+                    open_turned_layer(&mut self.instances, &mut layers, (i, self.surfaces.len()), [r[0], r[1], w, h],
+                        (angle, turn_pivot), (&mut clip, &mut fade, &mut fade_origin, &mut rounded));
+                } else {
+                    (clip, fade, fade_origin, rounded) = (NO_CLIP, [0.0; 4], NO_CLIP, None);
+                }
+                pinh.clip = NO_CLIP;
+                pinh.fade = [0.0; 4];
+                pinh.fade_origin = NO_CLIP;
+            }
             // Where the node shows on screen, upright: the turned box's bounds.
             let mut screen_r = [r[0], r[1], r[0] + w, r[1] + h];
             if let Some(t) = node_turn { screen_r = t.bbox(screen_r); }
@@ -6015,15 +6173,25 @@ impl<S: 'static> Runtime<S> {
                 ];
                 inherit_fade(&mut fade, &mut fade_origin, [r[0] + ins[0], r[1] + ins[1], r[2] - ins[2], r[3] - ins[3]], fea);
             }
-            let vis_clip = if pinh.in_cache {
-                [pinh.clip[0].max(clip[0]), pinh.clip[1].max(clip[1]), pinh.clip[2].min(clip[2]), pinh.clip[3].min(clip[3])]
-            } else {
-                clip
+            let m = filter_margin + 2.0;
+            let visible = match node_turn {
+                None => {
+                    let vis_clip = if pinh.in_cache { intersect(pinh.clip, clip) } else { clip };
+                    screen_r[2] >= vis_clip[0].max(vp[0]) - m
+                        && screen_r[0] <= vis_clip[2].min(vp[2]) + m
+                        && screen_r[3] >= vis_clip[1].max(vp[1]) - m
+                        && screen_r[1] <= vis_clip[3].min(vp[3]) + m
+                }
+                Some(t) => {
+                    let lc = intersect(pinh.clip, clip);
+                    let oc = t.outer_clip;
+                    r[2] >= lc[0] - m && r[0] <= lc[2] + m && r[3] >= lc[1] - m && r[1] <= lc[3] + m
+                        && screen_r[2] >= oc[0].max(vp[0]) - m
+                        && screen_r[0] <= oc[2].min(vp[2]) + m
+                        && screen_r[3] >= oc[1].max(vp[1]) - m
+                        && screen_r[1] <= oc[3].min(vp[3]) + m
+                }
             };
-            let visible = screen_r[2] >= vis_clip[0].max(vp[0]) - filter_margin - 2.0
-                && screen_r[0] <= vis_clip[2].min(vp[2]) + filter_margin + 2.0
-                && screen_r[3] >= vis_clip[1].max(vp[1]) - filter_margin - 2.0
-                && screen_r[1] <= vis_clip[3].min(vp[3]) + filter_margin + 2.0;
             self.seen[i] = visible;
             let text_tint = |c: Color| match n.vis.group_color {
                 Some(g) if pinh.group > 0.0 => c.mix(g, pinh.group),
@@ -6039,9 +6207,21 @@ impl<S: 'static> Runtime<S> {
                 _ => r,
             };
             // A loop at its brightest under one 8-bit step can't be seen: let it sleep.
+            let loop_vis = match node_turn {
+                None => home[2] > clip[0].max(vp[0] - filter_margin) && home[0] < clip[2].min(vp[2] + filter_margin)
+                    && home[3] > clip[1].max(vp[1] - filter_margin) && home[1] < clip[3].min(vp[3] + filter_margin),
+                Some(t) => {
+                    let lc = intersect(pinh.clip, clip);
+                    let sh = t.bbox(home);
+                    let oc = t.outer_clip;
+                    home[2] > lc[0] - filter_margin && home[0] < lc[2] + filter_margin
+                        && home[3] > lc[1] - filter_margin && home[1] < lc[3] + filter_margin
+                        && sh[2] > oc[0].max(vp[0] - filter_margin) && sh[0] < oc[2].min(vp[2] + filter_margin)
+                        && sh[3] > oc[1].max(vp[1] - filter_margin) && sh[1] < oc[3].min(vp[3] + filter_margin)
+                }
+            };
             if self.surface_visible && base_opacity >= 1.0 / 255.0 && !self.reduced_motion
-                && home[2] > clip[0].max(vp[0] - filter_margin) && home[0] < clip[2].min(vp[2] + filter_margin)
-                && home[3] > clip[1].max(vp[1] - filter_margin) && home[1] < clip[3].min(vp[3] + filter_margin)
+                && loop_vis
                 && let Some(track) = self.loops.get(&n.id)
             {
                 let node_k = self.scene.store().node_time_scale(n.id) as f64;
@@ -6106,10 +6286,21 @@ impl<S: 'static> Runtime<S> {
                     });
                     [r[0] - sh, r[1] - sh, r[2] + sh, r[3] + sh]
                 };
-                let cache_vis = est_bounds[2] >= clip[0].max(vp[0]) - filter_margin - 2.0
-                    && est_bounds[0] <= clip[2].min(vp[2]) + filter_margin + 2.0
-                    && est_bounds[3] >= clip[1].max(vp[1]) - filter_margin - 2.0
-                    && est_bounds[1] <= clip[3].min(vp[3]) + filter_margin + 2.0;
+                let cache_vis = match node_turn {
+                    None => est_bounds[2] >= clip[0].max(vp[0]) - m
+                        && est_bounds[0] <= clip[2].min(vp[2]) + m
+                        && est_bounds[3] >= clip[1].max(vp[1]) - m
+                        && est_bounds[1] <= clip[3].min(vp[3]) + m,
+                    Some(t) => {
+                        let lc = intersect(pinh.clip, clip);
+                        let sb = t.bbox(est_bounds);
+                        let oc = t.outer_clip;
+                        est_bounds[2] >= lc[0] - m && est_bounds[0] <= lc[2] + m
+                            && est_bounds[3] >= lc[1] - m && est_bounds[1] <= lc[3] + m
+                            && sb[2] >= oc[0].max(vp[0]) - m && sb[0] <= oc[2].min(vp[2]) + m
+                            && sb[3] >= oc[1].max(vp[1]) - m && sb[1] <= oc[3].min(vp[3]) + m
+                    }
+                };
                 if !cache_vis {
                     skip_paint = true;
                 } else {
@@ -6120,7 +6311,6 @@ impl<S: 'static> Runtime<S> {
                     }
                 }
             }
-            let intersect = |a: [f32; 4], b: [f32; 4]| [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
             // A negative clip radius rounds with continuous corners (`render::corner_extent`).
             let mut own_round = n.vis.clip_corners.or_else(|| {
                 n.vis.clip_radius.map(|radius| {
@@ -6157,12 +6347,6 @@ impl<S: 'static> Runtime<S> {
                         *round = None;
                     }
                 }
-            }
-            // A turned subtree draws upright into its own layer, which turns as it composites.
-            // The layer takes the clips from above; the node's own clips apply inside, upright.
-            if !skip_paint && let Some(angle) = own_turn {
-                open_turned_layer(&mut self.instances, &mut layers, (i, self.surfaces.len()), [r[0], r[1], w, h],
-                    (angle, turn_pivot), (&mut clip, &mut fade, &mut fade_origin, &mut rounded));
             }
             // The packed ABI carries one clip rectangle. Preserve a rectangular cut through
             // a rounded corner on a separate outer scope, never recenter the rounded mask.
@@ -6940,15 +7124,20 @@ impl<S: 'static> Runtime<S> {
                 outer = Some([pinh.clip, pinh.fade, pinh.fade_origin]);
             }
             inherit_fade(&mut hit_fade, &mut hit_origin, fade_origin, fade);
+            let full_clip = intersect(hit_clip, clip);
+            if node_turn.is_some() {
+                if self.unturned_drawn.is_empty() {
+                    self.unturned_drawn.resize(n_nodes, ([0.0; 4], NO_CLIP));
+                }
+                self.unturned_drawn[i] = (r.map(|v| v / s), full_clip);
+            }
             self.inh_scratch[i] = Inh { opacity: effective_opacity, paint_opacity: o,
-                clip: intersect(hit_clip, clip), fade: hit_fade, fade_origin: hit_origin,
+                clip: full_clip, fade: hit_fade, fade_origin: hit_origin,
                 paint_clip: clip, paint_fade: fade, paint_fade_origin: fade_origin, rounded, scale, anchor, anchor_to, blur, dy, dx,
                 cover: cover_offset, outer, mark, group,
                 scale_motion: if cover.is_some() { ScaleMotion::Moving } else { scale_motion },
                 in_cache, skip_paint, turn: turn_index };
             let hits_before = self.hits.len();
-            // A turned node hits where it shows: its turned box's upright bounds, in points.
-            let turned = |pt: [f32; 4]| match node_turn { None => pt, Some(t) => t.bbox(pt.map(|v| v * s)).map(|v| v / s) };
             if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_double_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.role == "textbox" || n.window_drag || n.focus.enabled || n.modal.is_some()
                 || n.text.as_ref().is_some_and(|t| t.selectable) || n.gestures.as_ref().is_some_and(|g| g.takes_gestures()))
                 && !self.subtree_exiting(i)
@@ -6960,7 +7149,6 @@ impl<S: 'static> Runtime<S> {
                     [ax + (rect_pt[0] - ax) / press_k, ay + (rect_pt[1] - ay) / press_k,
                         ax + (rect_pt[2] - ax) / press_k, ay + (rect_pt[3] - ay) / press_k]
                 } else { rect_pt };
-                let rect_pt = turned(rect_pt);
                 let cr = [
                     rect_pt[0].max(c[0] / s),
                     rect_pt[1].max(c[1] / s),
@@ -6971,18 +7159,16 @@ impl<S: 'static> Runtime<S> {
                 if !self.push_link_hits(i, rect_pt, rect) { self.hits.push((self.nodes[i].id, rect)); }
                 let n = &self.nodes[i];
                 if n.vis.hit && effective_opacity > 0.0 && rect[2] > rect[0] && rect[3] > rect[1] {
-                    self.overlay_hits.push(rect);
+                    self.overlay_hits.push(self.hit_screen_rect(n.id, rect));
                 }
             }
             if self.nodes[i].help.is_some() && (!self.nodes[i].help_cut || self.nodes[i].elided.is_some()) && !self.subtree_exiting(i) && self.allowed(i) && effective_opacity > 0.001 && visible {
                 let c = if self.nodes[i].parent.is_some() { pinh.clip } else { NO_CLIP };
-                let rect_pt = turned(rect_pt);
                 let r = [rect_pt[0].max(c[0] / s), rect_pt[1].max(c[1] / s), rect_pt[2].min(c[2] / s), rect_pt[3].min(c[3] / s)];
                 self.push_help_hit(i, r, hits_before);
             }
             if self.nodes[i].drop.is_some() && !self.subtree_exiting(i) && self.allowed(i) && effective_opacity > 0.001 && visible {
                 let c = if self.nodes[i].parent.is_some() { pinh.clip } else { NO_CLIP };
-                let rect_pt = turned(rect_pt);
                 let r = [rect_pt[0].max(c[0] / s), rect_pt[1].max(c[1] / s), rect_pt[2].min(c[2] / s), rect_pt[3].min(c[3] / s)];
                 self.push_drop_hit(i, r, hits_before);
             }
@@ -7080,15 +7266,30 @@ impl<S: 'static> Runtime<S> {
             h.write_u8(0);
         }
         let q = |v: f32| (v * 64.0).round() as i64;
+        let mut turn_stack: Vec<Option<Turn>> = Vec::new();
         for inst in &self.instances[start + 1..] {
-            if inst.params[1] != crate::render::KIND_LAYER_END {
-                let (c0, c1, c2, c3) = if inst.params[1] == crate::render::KIND_LAYER {
+            if inst.params[1] == crate::render::KIND_LAYER_END {
+                turn_stack.pop();
+            } else {
+                let active_turn = turn_stack.last().copied().flatten();
+                let (mut c0, mut c1, mut c2, mut c3) = if inst.params[1] == crate::render::KIND_LAYER {
+                    let next = if inst.border[1] != 0.0 {
+                        let own = Turn::about(inst.border[1], [inst.border[2], inst.border[3]], inst.rect, NO_CLIP);
+                        Some(active_turn.map_or(own, |t| t.after(own)))
+                    } else {
+                        active_turn
+                    };
+                    turn_stack.push(next);
                     let g = (3.0 * crate::render::layer_blur::sigma(inst.params[2])).ceil();
+                    let mut r = [inst.rect[0] - g, inst.rect[1] - g, inst.rect[0] + inst.rect[2] + g, inst.rect[1] + inst.rect[3] + g];
+                    if inst.border[1] != 0.0 {
+                        r = Turn::about(inst.border[1], [inst.border[2], inst.border[3]], inst.rect, NO_CLIP).bbox(r);
+                    }
                     (
-                        (inst.rect[0] - g).max(inst.clip[0]),
-                        (inst.rect[1] - g).max(inst.clip[1]),
-                        (inst.rect[0] + inst.rect[2] + g).min(inst.clip[2]),
-                        (inst.rect[1] + inst.rect[3] + g).min(inst.clip[3]),
+                        r[0].max(inst.clip[0]),
+                        r[1].max(inst.clip[1]),
+                        r[2].min(inst.clip[2]),
+                        r[3].min(inst.clip[3]),
                     )
                 } else {
                     let mut rect = inst.rect;
@@ -7113,6 +7314,9 @@ impl<S: 'static> Runtime<S> {
                     )
                 };
                 if c2 > c0 && c3 > c1 {
+                    if let Some(t) = active_turn {
+                        [c0, c1, c2, c3] = t.bbox([c0, c1, c2, c3]);
+                    }
                     bounds[0] = bounds[0].min(c0);
                     bounds[1] = bounds[1].min(c1);
                     bounds[2] = bounds[2].max(c2);
@@ -7243,7 +7447,7 @@ impl<S: 'static> Runtime<S> {
                     [c.x + (drawn[0] - d.x) * zx, c.y + (drawn[1] - d.y) * zy, drawn[2] * zx, drawn[3] * zy]
                 });
                 let s = self.env.scale;
-                let clip = flight.map_or_else(|| n.parent.and_then(|pi| self.inh_scratch.get(pi)).map_or(NO_CLIP, |h| h.clip),
+                let clip = flight.map_or_else(|| self.screen_clip_of_parent(n.parent),
                     |f| f.clip.map(|v| v * s));
                 let (x0, y0) = (rect[0].max(clip[0] / s), rect[1].max(clip[1] / s));
                 let (x1, y1) = ((rect[0] + rect[2]).min(clip[2] / s), (rect[1] + rect[3]).min(clip[3] / s));

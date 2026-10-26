@@ -59,12 +59,16 @@ impl<S: 'static> Runtime<S> {
         [t[0] - dx, t[1] - dy, t[2] - t[0], t[3] - t[1]]
     }
 
-    /// Node `i`'s unscrolled layout rect, scaled by its own and its ancestors' static `El::scale`.
+    /// Node `i`'s unscrolled layout rect, under its own and its ancestors' static `El::scale`,
+    /// `El::origin` and `El::rotate`.
     fn static_layout(&self, i: usize) -> [f32; 4] {
         let t = self.nodes[i].target;
-        let k = std::iter::successors(Some(i), |&p| self.nodes[p].parent)
-            .fold(1.0_f32, |k, p| k * self.nodes[p].static_scale);
-        [t[0] * k, t[1] * k, (t[2] - t[0]) * k, (t[3] - t[1]) * k]
+        let (k, turn) = std::iter::successors(Some(i), |&p| self.nodes[p].parent)
+            .fold((1.0_f32, 0.0_f32), |(k, a), p| {
+                let [ox, oy] = self.nodes[p].vis.origin.unwrap_or([0.5, 0.5]);
+                (k * self.nodes[p].static_scale, a + self.nodes[p].vis.rotate + (ox - 0.5) + (oy - 0.5))
+            });
+        [t[0] * k + turn, t[1] * k + turn, (t[2] - t[0]) * k, (t[3] - t[1]) * k]
     }
 
     fn layout_of(&self, nodes: &[Node], key: &str) -> Option<[f32; 4]> {
@@ -195,6 +199,7 @@ impl<S: 'static> Runtime<S> {
                 let id = self.nodes[p].id;
                 store.is_animating(id, prop::FRAME) || store.is_animating(id, prop::TRAVEL) || store.is_animating(id, prop::PRESENCE)
                     || store.is_animating(id, prop::OFFSET) || store.is_animating(id, prop::SCALE) || store.is_animating(id, P_PRESS_SCALE)
+                    || store.is_animating(id, P_SCALE) || store.is_animating(id, prop::ROTATION)
                     || self.grows.get(&id).is_some_and(|g| g.moving())
                     || self.stacks.get(&id).is_some_and(|s| s.moving)
                     || self.scrolls.get(&id).is_some_and(|s| s.slack.height() > 0.0 || s.glide.is_some())

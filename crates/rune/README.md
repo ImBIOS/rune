@@ -128,18 +128,23 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   its content's touches: the element springs back and the release doesn't press. Elements without
   it pay nothing, and Reduce Motion turns it off. rune-kit's `Button` and `IconButton` don't use
   it: they follow `@opencode/ui` and AppKit, whose buttons don't scale.
-- **Scale**: `.scale(0.5)` draws an element and everything in it at half size about its centre,
-  like SwiftUI's `scaleEffect`. Layout keeps the unscaled size, so siblings don't move, and hit
-  testing follows the drawn rect. It multiplies with `press_scale`, `live_scale` and scale
-  transitions, and nested scales compose: a scaled child scales about its centre where its
-  scaled parent draws it. Under all of them, text, icons and images scale with their box (link
-  hit boxes and a text field's caret follow). Text under a still scale rasterizes at the scaled size, so it stays
-  crisp. While a scale springs, text samples its rest-size glyphs, filtered, and turns crisp when
-  the spring settles. That way a spring doesn't rasterize a glyph at every frame's size. Text
-  under an actively moving `live_scale` rasterizes at logarithmic $2^{1/4}$ scale buckets and
-  re-rasterizes crisp at the exact resting scale once it holds still for 0.1 s; a changing
-  `scale` samples rest-size glyphs while moving and re-rasterizes crisp at the resting scale
-  after 0.1 s. A matched flight's own label keeps its rest size so it doesn't pop when it lands.
+- **Scale, rotation and origin**: `.scale(0.5)` draws an element and everything in it at half size
+  about its `.origin(x, y)` (default centre `(0.5, 0.5)`), like SwiftUI's `scaleEffect`. Changes
+  spring on the element's layout spring or `.scale_motion(anim)` (landing at once on mount, in an
+  instant transaction and under Reduce Motion). `.rotate(radians)` turns the element and its
+  subtree clockwise about the same origin on the layout spring or `.rotate_motion(anim)`, drawing
+  into a layer whose composite turns; hit testing follows the turned box while reported rects use
+  its upright bounds. Layout keeps the unscaled upright size, so siblings don't move. `scale`
+  multiplies with `press_scale`, `live_scale` and scale transitions (`origin` applies to all of
+  them; `offset` ignores it), and nested scales and turns compose. Under all of them, text, icons
+  and images transform with their box (link hit boxes and a text field's caret follow). Text under
+  a still scale rasterizes at the scaled size, so it stays crisp. While a scale springs, text
+  samples its rest-size glyphs, filtered, and turns crisp when the spring settles. That way a
+  spring doesn't rasterize a glyph at every frame's size. Text under an actively moving
+  `live_scale` rasterizes at logarithmic $2^{1/4}$ scale buckets and re-rasterizes crisp at the
+  exact resting scale once it holds still for 0.1 s; a changing `scale` samples rest-size glyphs
+  while moving and re-rasterizes crisp at the resting scale after 0.1 s. A matched flight's own
+  label keeps its rest size so it doesn't pop when it lands.
 - **Cached subtrees** (`.cache()`, `.cache_key(u64)`): rasterizes a settled subtree once into an
   offscreen `Rgba16Float` layer texture (reusing the isolated-layer compositor in `layers.rs`) and
   composites that single quad on subsequent frames without re-emitting or re-drawing its

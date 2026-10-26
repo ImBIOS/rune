@@ -2499,8 +2499,8 @@ impl El {
     /// A change springs on the element's layout spring (or [`Self::rotate_motion`]); under
     /// Reduce Motion, and in an instant transaction, it lands at once. While turned, the
     /// subtree draws into its own layer, and a native surface inside it (a video, a web view)
-    /// stays upright. Hit testing and the reported rect use the turned box's upright bounding
-    /// box. Anything not finite is `0.0`.
+    /// stays upright. Hit testing follows the turned box; the reported rect uses its upright
+    /// bounding box. Anything not finite is `0.0`.
     pub fn rotate(mut self, radians: f32) -> Self {
         self.vis.rotate = if radians.is_finite() { radians } else { 0.0 };
         self

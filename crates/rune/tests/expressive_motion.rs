@@ -257,3 +257,137 @@ fn rotate_and_scale_share_the_origin() {
     // Half size about its top-left (50, 50), then a quarter turn clockwise about the same point.
     assert!(r.iter().zip([40.0, 50.0, 10.0, 50.0]).all(|(a, b)| (a - b).abs() < 0.01), "{r:?}");
 }
+
+#[test]
+fn rotated_hit_test_uses_turned_box_not_upright_bounds() {
+    fn view(_: &Vec<&'static str>, _: &mut Cx<Vec<&'static str>>) -> El {
+        col().w_full().h_full().items_start().padding(50.0)
+            .on_press(|s: &mut Vec<&'static str>| s.push("bg"))
+            .child(
+                // Centre at (100, 60), 100x20 turned 45° clockwise.
+                // Upright bbox is ~[57.6, 17.6]..[142.4, 102.4], but (130, 30) is in the empty top-right corner.
+                el().key("bar").size(100.0, 20.0).fill(Color::WHITE)
+                    .rotate(std::f32::consts::FRAC_PI_4)
+                    .on_press(|s: &mut Vec<&'static str>| s.push("bar")),
+            )
+    }
+    let mut rt = Runtime::new(Vec::new(), view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    // (130, 30) is well inside the upright bbox [57.6..142.4, 17.6..102.4], but 42 pt off the 45° diagonal.
+    rt.pointer_move(130.0, 30.0);
+    rt.pointer_down(130.0, 30.0);
+    rt.pointer_up(130.0, 30.0);
+    rt.frame(0.0);
+    assert_eq!(rt.state, ["bg"], "empty corner of upright bbox must not steal presses from behind");
+
+    // (120, 80) lies right along the +45° diagonal from (100, 60).
+    rt.pointer_move(120.0, 80.0);
+    rt.pointer_down(120.0, 80.0);
+    rt.pointer_up(120.0, 80.0);
+    rt.frame(0.0);
+    assert_eq!(rt.state, ["bg", "bar"]);
+}
+
+#[test]
+fn clip_inside_rotated_element_and_rotated_element_inside_rounded_clip() {
+    fn view(_: &Vec<&'static str>, _: &mut Cx<Vec<&'static str>>) -> El {
+        col().w_full().h_full().items_start().padding(50.0).gap(20.0)
+            .child(
+                // Rotated 90° clockwise about its centre (80, 70): upright 60x40 becomes screen [60..100, 40..100].
+                // Child is 120x40 (sticks out 60pt past the right edge of the 60x40 clip, which turns to y = 100..160).
+                el().key("rot_clip").size(60.0, 40.0).clip_soft(0.0).rotate(std::f32::consts::FRAC_PI_2).child(
+                    el().key("inner").size(120.0, 40.0).fill(Color::WHITE)
+                        .on_press(|s: &mut Vec<&'static str>| s.push("inner")),
+                ),
+            )
+            .child(
+                el().key("outer_round").size(80.0, 40.0).radius(12.0).clip_rounded(12.0).child(
+                    el().key("turned_in_round").size(80.0, 20.0).fill(Color::WHITE).rotate(0.4),
+                ),
+            )
+    }
+    let mut rt = Runtime::new(Vec::new(), view, (240.0, 240.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    // Inside the rotated clip (80, 80): hits `inner`.
+    rt.pointer_move(80.0, 80.0);
+    rt.pointer_down(80.0, 80.0);
+    rt.pointer_up(80.0, 80.0);
+    rt.frame(0.0);
+    assert_eq!(rt.state, ["inner"]);
+
+    // In the protruding part of `inner` clipped away by `rot_clip` (80, 120): must not hit.
+    rt.pointer_move(80.0, 120.0);
+    rt.pointer_down(80.0, 120.0);
+    rt.pointer_up(80.0, 120.0);
+    rt.frame(0.0);
+    assert_eq!(rt.state, ["inner"], "protruding part of child is clipped by rotated parent");
+
+    // The turned layer inside `outer_round` carries both the turn (`border[1] != 0`) and the packed rounded clip (`fade[3] != 0`).
+    let turned_layer = rt.instances.iter()
+        .find(|q| q.params[1] == rune::render::KIND_LAYER && (q.border[1] - 0.4).abs() < 1e-4)
+        .expect("turned layer inside rounded clip");
+    assert_ne!(turned_layer.fade[3], 0, "turned layer composite preserves ancestor per-corner rounded clip");
+}
+
+#[test]
+fn shadow_list_length_changes_and_instant_transactions_settle_cleanly() {
+    fn view(mode: &u8, _: &mut Cx<u8>) -> El {
+        let s1 = rune::Shadow { x: 0.0, y: if *mode == 1 { 2.0 } else { 10.0 }, blur: 12.0, spread: 0.0, color: Color::BLACK.alpha(0.3), inset: false };
+        let s2 = rune::Shadow { x: 0.0, y: if *mode == 3 { 4.0 } else { 24.0 }, blur: 20.0, spread: 2.0, color: Color::BLACK.alpha(0.2), inset: false };
+        let mut e = el().key("a").size(100.0, 40.0).fill(Color::WHITE).motion(Spring::new(0.3, 0.0)).box_shadow(s1);
+        if *mode == 0 || *mode == 3 {
+            e = e.box_shadow(s2);
+        }
+        col().w_full().h_full().items_start().padding(50.0).child(e)
+    }
+    let mut rt = Runtime::new(0u8, view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    // Start springing shadow 1 and remove shadow 2 at the same time.
+    rt.update(|m, _| *m = 1);
+    rt.frame(1.0 / 60.0);
+    // Snap mid-spring with `tx.instant()` to the same target (`mode = 1`).
+    rt.update(|_, tx| tx.instant());
+    assert!(!rt.frame(1.0 / 60.0), "instant transaction settles in-flight shadow geometry immediately");
+
+    // Re-adding a second shadow (`mode = 3`) mounts at its new geometry (y = 4, spread = 2 -> rect y = 50 + 4 - 2 = 52)
+    // instead of springing from the old removed second shadow (y = 24).
+    rt.update(|m, _| *m = 3);
+    rt.frame(1.0 / 60.0);
+    let shadows: Vec<_> = rt.instances.iter().filter(|q| q.params[1] == rune::render::KIND_SHADOW).collect();
+    assert_eq!(shadows.len(), 2);
+    assert_eq!(shadows[1].rect, [48.0, 52.0, 104.0, 44.0], "re-added second shadow mounts at its own geometry");
+}
+
+#[test]
+fn press_scale_and_exiting_child_inside_rotated_element_stay_turned() {
+    fn view(show_child: &bool, _: &mut Cx<bool>) -> El {
+        let mut bar = el().key("bar").size(100.0, 20.0).fill(Color::WHITE)
+            .origin(0.0, 0.0)
+            .rotate(std::f32::consts::FRAC_PI_2)
+            .press_scale(0.5)
+            .on_press(|_: &mut bool| {});
+        if *show_child {
+            bar = bar.child(el().key("chip").size(20.0, 10.0).fill(Color::BLACK).transition(rune::Transition::opacity()));
+        }
+        col().w_full().h_full().items_start().padding(50.0).child(bar)
+    }
+    let mut rt = Runtime::new(true, view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    assert!(rect(&rt, "bar").iter().zip([30.0, 50.0, 20.0, 100.0]).all(|(a, b)| (a - b).abs() < 0.01));
+
+    // Press the rotated bar at (40, 80): `press_scale(0.5)` about origin (0, 0) = (50, 50)
+    // shrinks the rotated bar to [40.0, 50.0, 10.0, 50.0] without its top-right pivot drifting.
+    rt.pointer_move(40.0, 80.0);
+    rt.pointer_down(40.0, 80.0);
+    settle(&mut rt);
+    let pressed_r = rect(&rt, "bar");
+    assert!(pressed_r.iter().zip([40.0, 50.0, 10.0, 50.0]).all(|(a, b)| (a - b).abs() < 0.01), "{pressed_r:?}");
+    rt.pointer_up(40.0, 80.0);
+    settle(&mut rt);
+
+    // Remove `chip`: while exiting, it must still draw inside `bar`'s turned layer.
+    rt.update(|s, _| *s = false);
+    rt.frame(1.0 / 60.0);
+    let end_idx = rt.instances.iter().position(|q| q.params[1] == rune::render::KIND_LAYER_END).expect("turned layer end");
+    assert_eq!(end_idx, rt.instances.len() - 1, "exiting child paints before the turned layer closes");
+}

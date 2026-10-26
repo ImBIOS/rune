@@ -78,10 +78,10 @@ impl<S: 'static> Runtime<S> {
     /// The help element under (x, y): the topmost one, unless something interactive drawn over
     /// it (not inside it) is there too.
     fn help_at(&self, x: f32, y: f32) -> Option<usize> {
-        let &(id, _, seq) = self.help.hits.iter().rev().find(|(_, r, _)| contains(*r, x, y))?;
+        let &(id, _, seq) = self.help.hits.iter().rev().find(|&&(id, r, _)| self.hit_contains(id, r, x, y))?;
         let h = *self.node_index.get(&id)?;
         if self.subtree_exiting(h) || !self.allowed(h) { return None; }
-        let over = self.hits.iter().enumerate().rev().find(|(_, (_, r))| contains(*r, x, y));
+        let over = self.hits.iter().enumerate().rev().find(|&(_, &(id, r))| self.hit_contains(id, r, x, y));
         if let Some((k, (top, _))) = over
             && k > seq
             && let Some(&t) = self.node_index.get(top)
@@ -103,8 +103,9 @@ impl<S: 'static> Runtime<S> {
     /// The parts of help element `h`'s rect `r` that nothing interactive drawn over it (not
     /// inside it), from hit `seq` on, covers.
     fn unoccluded(&self, h: usize, r: [f32; 4], seq: usize) -> Vec<[f32; 4]> {
-        let mut parts = vec![r];
+        let mut parts = vec![self.hit_screen_rect(self.nodes[h].id, r)];
         for &(id, o) in &self.hits[seq.min(self.hits.len())..] {
+            let o = self.hit_screen_rect(id, o);
             if !parts.iter().any(|p| overlaps(*p, o)) { continue; }
             let Some(&t) = self.node_index.get(&id) else { continue };
             if std::iter::successors(Some(t), |&p| self.nodes[p].parent).any(|p| p == h) { continue; }
