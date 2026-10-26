@@ -76,3 +76,56 @@ fn switching_blend_mode_redraws() {
     rt.frame(1.0 / 60.0);
     assert_eq!(rt.stats.commits, commits, "the same mode is no change");
 }
+
+#[test]
+fn a_handler_switches_blend_mode_live() {
+    let mut rt = hovered(false);
+    rt.update(|_, tx| tx.set_srgb_blend(true));
+    assert!(rt.srgb_blend());
+    rt.frame(1.0 / 60.0);
+    assert_eq!(tinted(&rt), over(Color::WHITE.alpha(0.5).premul_srgb(1.0), RED.premul_srgb(1.0)));
+    rt.update(|_, tx| { tx.set_srgb_blend(true); tx.set_srgb_blend(false); });
+    assert!(!rt.srgb_blend(), "the last request wins");
+}
+
+/// A headless run follows a switch made by a handler: the renderer, its target and the
+/// compositor's `Frame` change format on the frame that switches.
+#[test]
+fn a_headless_run_follows_a_live_switch() {
+    use rune::compose::{Compositor, Frame};
+    use rune::{App, AppSpec};
+    use std::sync::Mutex;
+
+    static SEEN: Mutex<Vec<(bool, wgpu::TextureFormat)>> = Mutex::new(Vec::new());
+    struct Watch;
+    impl Compositor<()> for Watch {
+        fn render(&mut self, f: &mut Frame<'_, ()>) {
+            SEEN.lock().unwrap().push((f.srgb_blend(), f.format));
+            f.draw_ui();
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("rune-srgb-live-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (script, png) = (dir.join("script.json"), dir.join("snap.png"));
+    std::fs::write(&script, r#"[{"t": 0.1, "type": "click", "x": 20, "y": 20}]"#).unwrap();
+    let view = |_: &(), _: &mut Cx<()>| {
+        el().size(40.0, 40.0).fill(RED)
+            .child(el().size(40.0, 40.0).fill(Color::WHITE.alpha(0.5)))
+            .on_press_tx(|_: &mut (), tx| tx.set_srgb_blend(true))
+    };
+    App::new(AppSpec::new("srgb-live", (40.0, 40.0), || (), view)).compositor(Watch)
+        .args(["--snap", png.to_str().unwrap(), "--scale", "1", "--script", script.to_str().unwrap(), "--at", "0.5"].map(String::from))
+        .run();
+    let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&png).unwrap()));
+    let mut reader = decoder.read_info().unwrap();
+    let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
+    reader.next_frame(&mut buf).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    let at = (20 * 40 + 20) * 4;
+    let px = &buf[at..at + 4];
+    // Half white over red reads 128 blended in sRGB, 188 in linear light.
+    assert!(px[1].abs_diff(128) <= 1 && px[0] == 255, "gamma-blended after the switch, got {px:?}");
+    let seen = SEEN.lock().unwrap();
+    assert_eq!(seen.first(), Some(&(false, OFFSCREEN_FORMAT)), "starts linear");
+    assert_eq!(seen.last(), Some(&(true, OFFSCREEN_FORMAT.remove_srgb_suffix())), "ends gamma-space");
+}

@@ -205,6 +205,15 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
                 if !r.rt.surfaces.is_empty() {
                     error("native video surfaces are unsupported on web"); event_loop.exit(); return;
                 }
+                if r.renderer.srgb_blend() != r.rt.srgb_blend() {
+                    // `Tx::set_srgb_blend`: the canvas keeps its format and views it the other way.
+                    let format = if r.rt.srgb_blend() { r.config.format.remove_srgb_suffix() } else { r.config.format.add_srgb_suffix() };
+                    if format != r.config.format && !r.config.view_formats.contains(&format) {
+                        r.config.view_formats.push(format);
+                        r.surface.configure(&r.gpu.device, &r.config);
+                    }
+                    crate::window::rebuild_renderer(&r.gpu.device, &mut r.renderer, format, &mut r.rt);
+                }
                 let frame = match r.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(frame) | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
                     _ => { error("WebGPU canvas acquisition failed"); event_loop.exit(); return; }

@@ -50,6 +50,7 @@ pub struct Tx {
     pub(crate) button: crate::PointerButton,
     /// Modifier keys held as the handler runs.
     pub(crate) mods: crate::Mods,
+    pub(crate) srgb_blend: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -283,6 +284,16 @@ impl Tx {
     /// Wayland and headless runs ignore it.
     pub fn center_window(&mut self) {
         self.frame_request(crate::window_frame::FrameRequest { center: true, ..Default::default() });
+    }
+
+    /// Switch this window between linear and sRGB (gamma-space) blending from the next frame,
+    /// as if it had launched with `App::srgb_blend(enabled)`: a canvas can follow the document
+    /// it shows. The window reconfigures its surface and rebuilds its renderer's pipelines once,
+    /// on the frame that switches; asking for the mode it already has costs nothing. A
+    /// `Compositor` sees the new `Frame::format` and `Frame::srgb_blend` on that frame.
+    /// Windows, overlays, the web canvas and headless runs all follow.
+    pub fn set_srgb_blend(&mut self, enabled: bool) {
+        self.srgb_blend = Some(enabled);
     }
 
     fn frame_request(&mut self, request: crate::window_frame::FrameRequest) {

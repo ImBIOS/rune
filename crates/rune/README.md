@@ -82,6 +82,9 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
     A runtime the app draws itself (`Runtime::with_text`, a headless snapshot) opts in with
     `Runtime::set_srgb_blend(true)`, then draws with `Renderer::set_srgb_blend(true)` into a
     non-sRGB target cleared to `clear_color()`; hover and press tints follow the mode.
+    A handler switches a running window with `Tx::set_srgb_blend(bool)`: the frame that switches
+    reconfigures the surface and rebuilds the renderer once (the web canvas keeps its format and
+    changes its view).
   - The Retina scale is applied throughout.
 - **Text** (`text.rs`): Parley 0.12 lays out embedded Inter 4.1 (OFL, `assets/`). swash 0.2
   rasterises unhinted, centered, .1-point-emboldened outlines into a 2048² R8 atlas with four

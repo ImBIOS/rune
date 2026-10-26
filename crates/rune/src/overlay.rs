@@ -1428,7 +1428,7 @@ impl<T: 'static> Overlay<T> {
         // Input waits for the retry too; `wake_due` runs due timers meanwhile.
         if !prewarm && self.backing_off(Instant::now()) { return false; }
         if !prewarm { self.retry = None; }
-        let (Some(live), Some((renderer, _)), Some(gpu)) = (self.live.as_mut(), self.renderer.as_mut(), self.gpu.as_ref()) else {
+        let (Some(live), Some((renderer, renderer_format)), Some(gpu)) = (self.live.as_mut(), self.renderer.as_mut(), self.gpu.as_ref()) else {
             return false;
         };
         #[cfg(target_os = "macos")]
@@ -1483,6 +1483,26 @@ impl<T: 'static> Overlay<T> {
                 }
             } else { frame }
         };
+        // A handler switched blending (`Tx::set_srgb_blend`): this drawable has the old format.
+        let frame = if renderer.srgb_blend() != self.rt.srgb_blend() {
+            drop(frame);
+            let Some(target) = crate::window::reblend(&live.surface, &gpu.adapter, &gpu.device, &mut live.config, renderer, &mut self.rt) else { return false };
+            *renderer_format = target;
+            if live.alpha.is_some() {
+                live.alpha = Some(crate::surface_alpha::AlphaSurface::new(&gpu.device, target, (live.config.width, live.config.height)));
+            }
+            match crate::window::acquire(&live.surface, &gpu.device, &live.config, if prewarm { 2 } else { 1 }, &mut self.meter) {
+                Ok(frame) => frame,
+                Err(missed) => {
+                    if !prewarm {
+                        #[cfg(target_os = "macos")]
+                        if missed == crate::window::Missed::Occluded { self.set_occluded(true); }
+                        self.missed(missed, paced, true);
+                    }
+                    return false;
+                }
+            }
+        } else { frame };
         let update_ms = if self.compositor.is_some() { now.elapsed().as_secs_f64() * 1000.0 } else { 0.0 };
         self.rt.shell_request = None;
         self.rt.ignore_minimize("an overlay");

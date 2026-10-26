@@ -1439,6 +1439,34 @@ pub(crate) fn surface_config(surface: &wgpu::Surface, adapter: &wgpu::Adapter, (
     Some((config, translucent))
 }
 
+/// Follows a blend switch (`Tx::set_srgb_blend`) on a configured surface: reconfigures it for
+/// `rt`'s mode at its size and alpha mode, and rebuilds `renderer` when its target format
+/// changes. Returns the new target format, or `None` when the surface can't be configured.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) fn reblend<S: 'static>(surface: &wgpu::Surface, adapter: &wgpu::Adapter, device: &wgpu::Device,
+    config: &mut wgpu::SurfaceConfiguration, renderer: &mut Renderer, rt: &mut Runtime<S>) -> Option<wgpu::TextureFormat> {
+    let srgb = rt.srgb_blend();
+    let (next, _) = surface_config(surface, adapter, (config.width, config.height), srgb)?;
+    if (config.format, &config.view_formats) != (next.format, &next.view_formats) {
+        (config.format, config.view_formats) = (next.format, next.view_formats);
+        surface.configure(device, config);
+    }
+    let target = if srgb { config.format.remove_srgb_suffix() } else { config.format };
+    rebuild_renderer(device, renderer, target, rt);
+    Some(target)
+}
+
+/// Rebuilds `renderer` for `target` when it was built for another format, and sets its blend
+/// mode to `rt`'s. A new renderer has no atlas or image textures, so they upload again.
+pub(crate) fn rebuild_renderer<S: 'static>(device: &wgpu::Device, renderer: &mut Renderer, target: wgpu::TextureFormat, rt: &mut Runtime<S>) {
+    if renderer.format() != target {
+        *renderer = Renderer::new(device, target);
+        rt.text.atlas.invalidate();
+        rt.images.invalidate();
+    }
+    renderer.set_srgb_blend(rt.srgb_blend());
+}
+
 pub(crate) fn is_wayland(event_loop: &ActiveEventLoop) -> bool {
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
     return winit::platform::wayland::ActiveEventLoopExtWayland::is_wayland(event_loop);
@@ -2479,14 +2507,8 @@ impl<S: 'static> Host<S> {
             self.gpu = Some((gpu, renderer, target_format));
         }
         let (gpu, renderer, format) = self.gpu.as_mut().unwrap();
-        if *format != target_format {
-            *renderer = Renderer::new(&gpu.device, target_format);
-            renderer.set_srgb_blend(self.rt.srgb_blend());
-            *format = target_format;
-            self.rt.text.atlas.invalidate();
-            self.rt.images.invalidate();
-        }
-        renderer.set_srgb_blend(self.rt.srgb_blend());
+        rebuild_renderer(&gpu.device, renderer, target_format, &mut self.rt);
+        *format = target_format;
         surface.configure(&gpu.device, &config);
         // Metal's PostMultiplied mode only makes CAMetalLayer non-opaque; Core Animation
         // still composites premultiplied pixels. Other backends follow wgpu's straight-alpha contract.
@@ -2651,7 +2673,7 @@ impl<S: 'static> Host<S> {
         if !hidden { self.meter.redraw(l.paced_for_stats()); }
         // The frame moves before the drawable is acquired, so it has the new size.
         if !hidden { self.step_frame(target.unwrap_or_else(Instant::now)); }
-        let (Some(l), Some((gpu, renderer, _))) = (self.win.as_mut(), self.gpu.as_mut()) else { return };
+        let (Some(l), Some((gpu, renderer, format))) = (self.win.as_mut(), self.gpu.as_mut()) else { return };
         // Acquire before latching live values so a drawable wait cannot age the input.
         l.retry = None;
         let frame = match acquire(&l.surface, &gpu.device, &l.config, 1, &mut self.meter) {
@@ -2706,6 +2728,20 @@ impl<S: 'static> Host<S> {
             match acquire(&l.surface, &gpu.device, &l.config, 1, &mut self.meter) {
                 Ok(frame) => frame,
                 // Retrying at once is what spins while occluded; wait like any missed frame.
+                Err(_) if hidden => { l.retry = l.first_frame.missed(Instant::now(), &mut l.hidden_wait); return; }
+                Err(missed) => return self.missed_frame(missed, true),
+            }
+        } else { frame };
+        // A handler switched blending (`Tx::set_srgb_blend`): this drawable has the old format.
+        let frame = if renderer.srgb_blend() != rt.srgb_blend() {
+            drop(frame);
+            let Some(target) = reblend(&l.surface, &gpu.adapter, &gpu.device, &mut l.config, renderer, rt) else { return };
+            *format = target;
+            if l.alpha.is_some() {
+                l.alpha = Some(crate::surface_alpha::AlphaSurface::new(&gpu.device, target, (l.config.width, l.config.height)));
+            }
+            match acquire(&l.surface, &gpu.device, &l.config, 1, &mut self.meter) {
+                Ok(frame) => frame,
                 Err(_) if hidden => { l.retry = l.first_frame.missed(Instant::now(), &mut l.hidden_wait); return; }
                 Err(missed) => return self.missed_frame(missed, true),
             }

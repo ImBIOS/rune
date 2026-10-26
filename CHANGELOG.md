@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Tx::set_srgb_blend(bool)` switches blending live.** A handler moves its window (or
+  overlay, web canvas or headless run) between linear and sRGB blending from the next frame, as
+  if it had launched with `App::srgb_blend`. The frame that switches reconfigures the surface and
+  rebuilds the renderer's pipelines once, and the glyph atlas and images upload again; asking
+  for the mode the window already has costs nothing. A `Compositor` sees the new `Frame::format`
+  on that frame.
+
 - **`Runtime::set_srgb_blend` is public.** A runtime the app draws itself (built with
   `Runtime::with_text` for a headless snapshot, say) can blend in sRGB as an
   `App::srgb_blend(true)` window does, hover and press tints included, without re-encoding the

@@ -315,7 +315,7 @@ fn headless<S: 'static>(spec: &AppSpec<S>, state: S, args: Args, srgb_blend: boo
     let mut renderer = Renderer::new(&gpu.device, target_format);
     renderer.set_srgb_blend(srgb_blend);
     let (w, h) = ((size.0 * scale).round() as u32, (size.1 * scale).round() as u32);
-    let target = Offscreen::with_format(&gpu.device, w, h, target_format);
+    let mut target = Offscreen::with_format(&gpu.device, w, h, target_format);
     let png = args.snap_on_patch.as_ref().unwrap();
     let mut first = true;
     let mut paused = false;
@@ -355,6 +355,11 @@ fn headless<S: 'static>(spec: &AppSpec<S>, state: S, args: Args, srgb_blend: boo
         }
         let generation = rt.hot.as_ref().unwrap().seen;
         if first || requested || before != generation {
+            if renderer.srgb_blend() != rt.srgb_blend() {
+                let format = if rt.srgb_blend() { OFFSCREEN_FORMAT.remove_srgb_suffix() } else { OFFSCREEN_FORMAT };
+                crate::window::rebuild_renderer(&gpu.device, &mut renderer, format, &mut rt);
+                target = Offscreen::with_format(&gpu.device, w, h, format);
+            }
             renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
             renderer.prepare_surfaces(&gpu.device, &gpu.queue, &rt.surfaces, (w, h));
             renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (w, h));
