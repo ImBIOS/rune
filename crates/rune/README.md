@@ -79,6 +79,9 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
     dark canvases can opt into `.srgb_blend(true)` on `App`, `WindowSpec` or `ConfiguredOverlay`,
     which encodes premultiplied colours in sRGB (`Color::premul_srgb`) and renders into a non-sRGB
     target view (`format.remove_srgb_suffix()`). With a `Compositor`, `Frame::srgb_blend()` and `Frame::format` tell it which encoding and view its own passes must match.
+    A runtime the app draws itself (`Runtime::with_text`, a headless snapshot) opts in with
+    `Runtime::set_srgb_blend(true)`, then draws with `Renderer::set_srgb_blend(true)` into a
+    non-sRGB target cleared to `clear_color()`; hover and press tints follow the mode.
   - The Retina scale is applied throughout.
 - **Text** (`text.rs`): Parley 0.12 lays out embedded Inter 4.1 (OFL, `assets/`). swash 0.2
   rasterises unhinted, centered, .1-point-emboldened outlines into a 2048² R8 atlas with four

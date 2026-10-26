@@ -6265,9 +6265,16 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// Enable or disable gamma-space (sRGB) blending for translucent fills, shadows, blurs,
-    /// images and video.
-    pub(crate) fn set_srgb_blend(&mut self, enabled: bool) {
-        self.srgb_blend = enabled;
+    /// images and video, as `App::srgb_blend` does for a window. Every colour the next frame
+    /// builds, hover and press tints included, is premultiplied in sRGB encoding
+    /// (`Color::premul_srgb`). A runtime drawn by the app itself (`Runtime::with_text`, a
+    /// headless snapshot) then draws with `Renderer::set_srgb_blend(true)` into a non-sRGB
+    /// target (`format.remove_srgb_suffix()`), cleared to `clear_color()`.
+    pub fn set_srgb_blend(&mut self, enabled: bool) {
+        if self.srgb_blend != enabled {
+            self.srgb_blend = enabled;
+            self.dirty = true;
+        }
     }
 
     pub fn srgb_blend(&self) -> bool {

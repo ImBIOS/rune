@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Runtime::set_srgb_blend` is public.** A runtime the app draws itself (built with
+  `Runtime::with_text` for a headless snapshot, say) can blend in sRGB as an
+  `App::srgb_blend(true)` window does, hover and press tints included, without re-encoding the
+  draw list. Changing the mode now asks for a frame. Nothing changes for apps that don't call it.
+
 - **`Tx::open_file` and `Tx::save_file`: file dialogs from a handler.** The callback gets
   `FileDialogResult` (`Ok(Some(path))`, `Ok(None)` on cancel or when the window hides or
   closes, or an error) on a later frame, like `tx.read_clipboard`; the window shows the dialog
