@@ -1,0 +1,18 @@
+{
+ "events": [
+  {
+   "t": 0.3,
+   "type": "tap",
+   "key": "prompt"
+  },
+  {
+   "t": 0.5,
+   "paste": "Notes on the reconnect:\n- the jitter\n- the backoff cap\n- the retry budget\n- the idle timeout\n- the heartbeat\n- the queue limit\n- the error copy\n- the offline banner\nand a test for each."
+  },
+  {
+   "t": 1.5,
+   "type": "key",
+   "name": "Enter"
+  }
+ ]
+}

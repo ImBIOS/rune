@@ -710,6 +710,8 @@ struct ScrollState {
     at_bottom: Option<bool>,
     /// Whether the last frame drew the content's bottom on the viewport's (see `stuck_offset`).
     held: bool,
+    /// Room freed under a pinned growth stack, held under its last row (see `step_slack`).
+    slack: scroll_bottom::Slack,
     /// The horizontal axis of `El::scroll_x` and `El::scroll_xy`; all zero on a vertical one.
     x: AxisScroll,
 }
@@ -748,6 +750,8 @@ struct Stack {
     width_hold_until: f64,
     width_shrink_until: f64,
     pending_heights: HashMap<NodeId, f32>,
+    /// How far its rows grew (positive steps only) in the last `step_growth`.
+    grown: f32,
 }
 
 struct LayoutEntry {
@@ -4065,12 +4069,15 @@ impl<S: 'static> Runtime<S> {
                     glide_to: None,
                     at_bottom: None,
                     held: false,
+                    slack: Default::default(),
                     x: AxisScroll::default(),
                 });
                 if tx.settle && sp.stick_bottom {
                     e.pinned = true;
                     e.v = 0.0;
                 }
+                // A window resize or a settle lands the slack: the rows go straight to the bottom.
+                if tx.settle || e.slack.window != self.viewport { e.slack = scroll_bottom::Slack::landed(self.viewport); }
             }
         }
 
@@ -4224,8 +4231,10 @@ impl<S: 'static> Runtime<S> {
             let Some(&ci) = self.node_index.get(cid) else { continue };
             let Some(spec) = self.nodes[ci].growth else { continue };
             let n_rows = stack.order.len();
+            stack.grown = 0.0;
             for (k, id) in stack.order.iter().enumerate() {
                 let Some(g) = self.grows.get_mut(id) else { continue };
+                let h0 = g.h;
                 if let Some(&at) = stack.closing.get(id)
                     && now >= at
                 {
@@ -4246,6 +4255,7 @@ impl<S: 'static> Runtime<S> {
                     }
                     g.step(spec.spring, &spec.edge, carrying);
                 }
+                stack.grown += (g.h - h0).max(0.0);
                 moving |= g.moving();
             }
             stack.order.retain(|id| {
@@ -4324,6 +4334,7 @@ impl<S: 'static> Runtime<S> {
             if sp.stick_bottom && st.offset >= st.max - 0.5 && st.v.abs() <= 1.0 {
                 st.pinned = true;
             }
+            if sp.stick_bottom && axes.y() && dt > 0.0 { moving |= self.step_slack(i, dt); }
         }
         moving
     }
@@ -5178,6 +5189,7 @@ impl<S: 'static> Runtime<S> {
                 sh.write_u64(st.offset.to_bits());
                 sh.write_u64(st.x.offset.to_bits());
                 sh.write_u32(st.held as u32);
+                sh.write_u32(st.slack.height().to_bits());
                 scroll_mix = scroll_mix.wrapping_add(sh.finish());
             }
             for (path, &off) in &self.input_scroll {
@@ -6359,7 +6371,7 @@ impl<S: 'static> Runtime<S> {
                 let origin = self.virtuals.values().find(|v| v.scroll_path == n.path).map_or(0.0, |v| f64::from(v.before));
                 let offset = self.stuck_offset(i, p.rect.edges()[3]).unwrap_or(st.offset);
                 let held = self.bottom_offset(i, p.rect.edges()[3]).is_some_and(|b| (offset - b).abs() < 0.5);
-                dy -= grid((offset - origin) as f32, s);
+                dy -= grid((offset - origin) as f32 + st.slack.height(), s);
                 if let Some(st) = self.scrolls.get_mut(&self.nodes[i].id) { st.held = held; }
             }
             let (mut scale, mut anchor, mut anchor_to, mut dx) = (sc, anchor, anchor_to, pinh.dx);

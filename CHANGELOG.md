@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Pinned growth stacks hold freed room as slack.** A `stick_bottom` viewport whose content
+  is a growth stack no longer carries its rows down when it gains room at its bottom while
+  pinned (a composer shrinking on send, a row removed at the bottom). The room is held under
+  the last row, rows growing in fill it first, and the rest closes on the stack's spring
+  about 120 ms after the rows stop growing, so a send only moves the rows up. A window resize,
+  `tx.settle` and reduced motion land it at once; scroll offsets and `on_at_bottom` are
+  unchanged. A pinned timeline's frames move during a send in an existing app.
+
 - **Five more built-in glyphs.** `rune_kit::glyphs` gains `MIC`, `KEYBOARD`, `CURSOR_TEXT`,
   `ARROW_RIGHT` and `SPARKLE`, drawn like the rest of the set (16-unit view, 1-unit stroke). They
   are plain statics, not `Glyphs` slots, so no theme or app literal changes: draw them with

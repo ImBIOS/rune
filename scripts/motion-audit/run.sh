@@ -32,6 +32,7 @@ run oc-new-session    5.2 $OC --scene session --script $S/opencode-new-session.j
 run oc-resize         3.4 $OC --scene session --script examples/opencode/scripts/resize.json
 run oc-scroll         3.6 $OC --scene session --script examples/opencode/scripts/scroll.json
 run oc-send           4.0 $OC --scene session --script examples/opencode/scripts/send.json
+run oc-send-lines   3.5 $OC --scene session --script $S/opencode-send-lines.json
 run oc-send-overlap   3.0 $OC --scene session --script examples/opencode/scripts/send-overlap.json
 run oc-tool-group     6.0 $OC --scene session --script examples/opencode/scripts/send.json
 run oc-undo-redo      5.0 $OC --scene session --script examples/opencode/scripts/undo-redo.json

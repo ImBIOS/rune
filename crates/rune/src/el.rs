@@ -530,7 +530,10 @@ pub(crate) struct ModalSpec {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScrollSpec {
     /// Follow the end: while scrolled to the bottom, growth keeps the bottom in view, and a new
-    /// viewport opens at the bottom on its first frame.
+    /// viewport opens at the bottom on its first frame. When the content is a growth stack, room
+    /// the viewport gains at its bottom (a composer shrinking under it) is held under the last
+    /// row and closes on the stack's spring once its rows stop growing, so a send only moves
+    /// the rows up.
     pub stick_bottom: bool,
 }
 
