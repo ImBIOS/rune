@@ -2150,7 +2150,10 @@ impl<S: 'static> Runtime<S> {
         { self.live_check = None; }
         tx.keep_on_screen.clear();
         let follow = std::mem::take(&mut self.caret_follow);
-        if !scroll_to.is_empty() || follow { self.step_scroll(0.0); }
+        if !scroll_to.is_empty() || !scroll_bottom.is_empty() || !scroll_pages.is_empty() || !scroll_offsets.is_empty() || follow {
+            self.keeps.clear();
+            self.step_scroll(0.0);
+        }
         if follow { self.follow_caret(); }
         for (scope, key) in scroll_to { self.reveal_row(scope.as_deref(), &key); }
         if !scroll_bottom.is_empty() { self.scroll_to_bottom(scroll_bottom); }
@@ -2227,11 +2230,17 @@ impl<S: 'static> Runtime<S> {
         let mut source = |on: bool, bit: u16| { if on { sources |= bit; } on };
         animating |= source(self.step_growth(step as f32), AnimSource::GROWTH);
         animating |= source(self.step_scroll(step as f32), AnimSource::SCROLL);
+        animating |= source(self.reveals_active(), AnimSource::REVEAL);
+        animating |= self.build();
+        // Compensate drawn motion, leaving unrelated layout and growth springs alone.
+        for _ in 0..3 {
+            if !self.follow_keeps() { break; }
+            animating |= self.build();
+        }
+        self.finish_keeps();
         self.report_at_bottom();
         animating |= self.report_visible_rows();
         self.report_layout();
-        animating |= source(self.reveals_active(), AnimSource::REVEAL);
-        animating |= self.build();
         // A report waits for the next frame: draw one to deliver it.
         animating |= self.report_drawn();
         self.images.end_frame();
@@ -2808,6 +2817,7 @@ impl<S: 'static> Runtime<S> {
     /// height. The hand moved it: any fling or glide stops, and a `stick_bottom` view that
     /// lands on its end follows it again.
     fn page_to(&mut self, i: usize, to: impl FnOnce(f64, f64, f64) -> f64) -> bool {
+        self.keeps.clear();
         let (id, page, stick) = (self.nodes[i].id, f64::from(self.nodes[i].local.h * 0.9), self.nodes[i].scroll.is_some_and(|s| s.stick_bottom));
         let Some(st) = self.scrolls.get_mut(&id) else { return false };
         st.offset = to(st.offset, st.max, page).clamp(0.0, st.max);
@@ -3702,7 +3712,7 @@ impl<S: 'static> Runtime<S> {
             let cid = nodes[c].id;
             // A reader away from the tail is anchored using measured row heights. Land those
             // heights with the anchor correction; delayed growth would move the reading position.
-            let reading = sticky::kept_in(&self.keeps, &nodes[c].path) || self.virtuals.get(&nodes[c].path)
+            let reading = self.virtuals.get(&nodes[c].path)
                 .and_then(|v| self.path_ids.get(&v.scroll_path))
                 .and_then(|id| self.scrolls.get(id)).is_some_and(|s| !s.pinned);
             let rows: Vec<usize> = (c + 1..nodes.len()).filter(|&j| nodes[j].parent == Some(c)).collect();
@@ -3855,8 +3865,7 @@ impl<S: 'static> Runtime<S> {
                     self.scene.set_transition(id, nodes[i].transition.unwrap_or_else(Transition::opacity));
                 }
                 let stack_row = nodes[i].parent.is_some_and(|p| nodes[p].growth.is_some()) || self.virtuals.contains_key(&nodes[i].path)
-                    || (nodes[i].in_row == RowLayout::Horizontal && !self.aspect_snap.contains(&id))
-                    || sticky::kept_in(&self.keeps, &nodes[i].path);
+                    || (nodes[i].in_row == RowLayout::Horizontal && !self.aspect_snap.contains(&id));
                 // A window's own resize step moves content at rest with the window; motion
                 // already running retargets on its spring.
                 let follows_window = tx.window_step && !self.flying.iter().any(|f| f.0 == id)
@@ -4934,6 +4943,7 @@ impl<S: 'static> Runtime<S> {
     /// Wheel or trackpad delta in points (positive `dy` moves content down, like a browser's
     /// negative deltaY). Applied 1:1: the platform supplies its own momentum phases.
     pub fn wheel(&mut self, x: f32, y: f32, dy: f32) {
+        self.keeps.clear();
         self.dismiss_help();
         let Some(id) = self.scroll_at(x, y) else { return };
         let stick = self.node_index.get(&id).and_then(|&i| self.nodes[i].scroll).is_some_and(|s| s.stick_bottom);
@@ -4952,6 +4962,7 @@ impl<S: 'static> Runtime<S> {
     /// Releases a scroll with `velocity` (points per second, positive moves content down);
     /// the runtime decays it (for platforms without OS momentum and headless scripts).
     pub fn fling(&mut self, x: f32, y: f32, velocity: f32) {
+        self.keeps.clear();
         self.dismiss_help();
         let Some(id) = self.scroll_at(x, y) else { return };
         if let Some(st) = self.scrolls.get_mut(&id) {
@@ -5146,6 +5157,8 @@ impl<S: 'static> Runtime<S> {
                 if !self.cache_inside_scratch[i] { continue; }
                 let n = &self.nodes[i];
                 let live = store.is_node_animating(n.id)
+                    // Sticky descendants move within a raster without motion tracks.
+                    || n.sticky.as_ref().is_some_and(|s| s.edge.is_some())
                     || (!self.reduced_motion && self.loops.get(&n.id).is_some_and(|l| l.active(store.node_time(n.id))))
                     || self.grows.get(&n.id).is_some_and(|g| g.moving())
                     || self.reveals.get(&n.id).is_some_and(|r| !r.words.is_empty())
@@ -5261,7 +5274,9 @@ impl<S: 'static> Runtime<S> {
             if self.has_sticky && let Some(a) = &n.above
                 && let Some(j) = self.nodes[..i].iter().position(|n| n.key.as_ref() == Some(&a.key))
             {
-                let target = sticky::anchored_target(&self.nodes, &self.scrolls, j);
+                let d = self.drawn[j];
+                let target = if d != [0.0; 4] { [d[0], d[1], d[0] + d[2], d[1] + d[3]] }
+                    else { sticky::anchored_target(&self.nodes, &self.scrolls, j) };
                 let (ax, ay) = anchor_position(a, target, (p.rect.w, p.rect.h), self.viewport);
                 pinh.dx += ax - n.target[0];
                 pinh.dy += ay - n.target[1];

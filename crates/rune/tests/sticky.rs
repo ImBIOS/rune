@@ -283,6 +283,7 @@ fn virtual_rows_keep_stuck_header_on_screen_across_collapse_and_expand() {
         let h1 = find(&rt, "hdr-1");
         assert!((h1.rect[1] - 0.0).abs() < 0.5, "frame {step}: hdr-1 stayed at y=0 after collapse: {:?}", h1.rect);
     }
+    for _ in 0..120 { rt.frame(1.0 / 120.0); }
     assert_eq!(find(&rt, "hdr-2").rect[1], 32.0, "sec-2 sits immediately below collapsed sec-1");
 
     // Click hdr-1 again to expand sec-1: hdr-1 stays at y=0 while its body opens below it.
@@ -386,6 +387,8 @@ fn stick_bottom_growth_reveal_and_anchored_overlay_work_with_sticky_headers() {
     rt.pointer_up(100.0, 15.0);
     rt.frame(1.0 / 120.0);
 
+    // The collapse now keeps its spring; let the end clamp land before appending.
+    for _ in 0..120 { rt.frame(1.0 / 120.0); }
     // Because collapsing brought the scroll offset to `max` (10.0), `stick_bottom` is re-pinned:
     // appending new growth rows keeps the bottom in view!
     rt.update(|s, _| s.extra_rows = 2);
@@ -435,4 +438,105 @@ fn scroll_into_view_lands_row_clear_of_stuck_header() {
     rt.frame(1.0 / 120.0);
     assert_eq!(find(&rt, "hdr").rect[1], 0.0);
     assert_eq!(find(&rt, "r1").rect[1], 40.0, "r1 lands clear of the 40pt stuck header");
+}
+
+#[test]
+fn keep_follows_drawn_motion_without_snapping_other_rows_and_scroll_cancels_it() {
+    fn view(s: &bool, _: &mut Cx<bool>) -> El {
+        col().key("scroll").size(300.0, 200.0).scroll(ScrollSpec { stick_bottom: false })
+            .child(col().key("stack").w_full().growth(GrowthSpec::default())
+                .child(el().key("before").w_full().h(if *s { 120.0 } else { 240.0 }))
+                .child(el().key("kept").w_full().h(30.0))
+                .child(el().key("other").w_full().h(if *s { 220.0 } else { 120.0 }))
+                .child(el().w_full().h(600.0)))
+    }
+    let mut rt = Runtime::new(false, view, (300.0, 200.0), Env::default());
+    rt.frame(0.0);
+    rt.update(|_, tx| tx.scroll_to_instant("scroll", 0.0, 220.0));
+    rt.frame(0.0);
+    let y = find(&rt, "kept").rect[1];
+    rt.update(|s, tx| { *s = true; tx.keep_on_screen("stack/kept"); });
+    rt.frame(1.0 / 120.0);
+    let h = find(&rt, "other").rect[3];
+    assert!(h > 120.0 && h < 220.0, "unrelated growth keeps its spring: {h}");
+    for _ in 0..12 {
+        rt.frame(1.0 / 120.0);
+        assert!((find(&rt, "kept").rect[1] - y).abs() < 0.05);
+    }
+    rt.wheel(100.0, 100.0, -20.0);
+    rt.frame(1.0 / 120.0);
+    assert!(find(&rt, "kept").rect[1] < y - 19.0, "wheel wins over the keep");
+    rt.update(|s, tx| {
+        *s = false;
+        tx.keep_on_screen("stack/kept");
+        tx.scroll_to_instant("scroll", 0.0, 50.0);
+    });
+    rt.frame(1.0 / 120.0);
+    assert_eq!(find(&rt, "before").rect[1], -50.0, "explicit scroll in the same handler wins");
+}
+
+#[test]
+fn live_viewport_and_ancestor_transforms_keep_header_and_overlay_together() {
+    struct S { offset: rune::Live<[f32; 2]>, scale: rune::Live<f32> }
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        col().w_full().h_full()
+            .child(col().key("ancestor").size(300.0, 200.0).live_offset(&s.offset).live_scale(&s.scale)
+                .child(col().key("scroll").size(300.0, 200.0).live_offset(&s.offset).live_scale(&s.scale).scroll(ScrollSpec { stick_bottom: false })
+                    .child(col().w_full()
+                        .child(el().key("hdr").w_full().h(30.0).sticky_top(8.0))
+                        .child(el().w_full().h(600.0)))))
+            .child(el().key("tip").size(60.0, 20.0).anchored("hdr", Side::Bottom, Align::Start, 4.0))
+    }
+    let mut rt = Runtime::new(S { offset: rune::Live::new([0.0, 0.0]), scale: rune::Live::new(1.0) }, view, (500.0, 400.0), Env::default());
+    rt.frame(0.0);
+    rt.wheel(100.0, 100.0, -100.0);
+    rt.frame(0.0);
+    rt.state.offset.set([30.0, 40.0]);
+    rt.state.scale.set(0.8);
+    rt.frame(1.0 / 120.0);
+    let (h, v, tip) = (find(&rt, "hdr"), find(&rt, "scroll"), find(&rt, "tip"));
+    assert!((h.rect[1] - v.rect[1] - 8.0 * 0.8 * 0.8).abs() < 0.05, "{h:?} {v:?}");
+    assert!((tip.rect[1] - h.rect[1] - h.rect[3] - 4.0).abs() < 0.05, "overlay tracks drawn header: {:?} {:?}", tip.rect, h.rect);
+}
+
+#[test]
+fn inert_sticky_passes_input_and_focus_through_and_tooltips_follow_drawn_rect() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        col().key("scroll").size(300.0, 200.0).scroll(ScrollSpec { stick_bottom: false })
+            .child(col().w_full()
+                .child(el().key("hdr").w_full().h(30.0).sticky_top(0.0).help("header").focusable(true))
+                .child(el().key("inert").absolute(0.0, 0.0).size(300.0, 30.0).sticky_top(0.0).inert().focusable(true))
+                .child(el().w_full().h(600.0)))
+    }
+    let mut rt = Runtime::new((), view, (300.0, 200.0), Env::default());
+    rt.frame(0.0);
+    rt.wheel(100.0, 100.0, -100.0);
+    rt.frame(0.0);
+    rt.set_full_keyboard_access(true);
+    rt.key(rune::KeyEvent { key: rune::Key::Tab, mods: rune::Mods::default() });
+    rt.frame(0.0);
+    assert!(find(&rt, "hdr").focused);
+    assert!(!find(&rt, "inert").focused);
+    rt.pointer_move(100.0, 15.0);
+    rt.frame(0.0);
+    rt.frame(0.6);
+    assert_eq!(rt.help_tooltip().map(|t| t.0), Some("header"));
+    let tip = rt.help_tooltip().unwrap().1;
+    assert!((tip[1] - find(&rt, "hdr").rect[3] - 6.0).abs() < 0.05, "tooltip follows stuck header: {tip:?}");
+}
+
+#[test]
+fn sticky_without_vertical_viewport_is_a_no_op() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        col().size(300.0, 200.0).scroll_x()
+            .child(col().w(600.0)
+                .child(el().key("top").size(50.0, 30.0).sticky_top(20.0))
+                .child(el().key("bottom").size(50.0, 30.0).sticky_bottom(20.0)))
+    }
+    let mut rt = Runtime::new((), view, (300.0, 200.0), Env::default());
+    rt.frame(0.0);
+    rt.wheel_xy(100.0, 100.0, -50.0, 0.0);
+    rt.frame(0.0);
+    assert_eq!(find(&rt, "top").stuck, 0.0);
+    assert_eq!(find(&rt, "bottom").stuck, 0.0);
 }

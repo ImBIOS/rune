@@ -195,7 +195,9 @@ impl Tx {
     /// instead of jumping up with the content, and one that expands stays put as its rows open
     /// below it. Its top edge is what holds, measured where the last frame drew it, stuck shift
     /// included; the offset is clamped to the content, and a `stick_bottom` viewport that lands
-    /// on its end follows it again. Instant. A scroll asked for in the same handler wins.
+    /// on its end follows it again. Scroll compensation follows the drawn element while
+    /// layout and growth springs run; other rows keep animating. A scroll asked for in the
+    /// same handler, or subsequent wheel input, wins.
     pub fn keep_on_screen(&mut self, key: impl Into<String>) {
         self.keep_on_screen.push(key.into());
     }
@@ -2821,7 +2823,10 @@ impl El {
     /// through, and see [`El::stuck_shadow`] for a shadow or divider while it's stuck.
     ///
     /// In [`El::virtual_rows`] a header sticks inside its own row: make each section one row
-    /// (its header and its items) so the header shows whenever any of the section does.
+    /// (its header and its items) so the header shows whenever any of the section does. A
+    /// header in a separate virtual row disappears when that row is unmounted. Without a
+    /// vertical scroll ancestor this is a no-op (a horizontal-only viewport is skipped).
+    /// Cached subtrees containing sticky elements draw live rather than baking their shifts.
     pub fn sticky_top(mut self, inset: f32) -> Self {
         let s = self.sticky.get_or_insert_with(Default::default);
         s.edge = Some(StickyEdge::Top);

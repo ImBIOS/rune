@@ -98,6 +98,7 @@ impl<S: 'static> Runtime<S> {
     /// is over, and this delta starts the next. Without phases, a delta wholly on the other
     /// axis (Shift let go, a tilt, a second wheel) also starts a new gesture.
     pub(super) fn wheel_delta_arrived(&mut self, dx: f32, dy: f32) {
+        self.keeps.clear();
         let now = self.now_clock();
         let queued = self.queue.iter().any(|a| matches!(a, Action::Wheel(..)));
         let l = &mut self.wheel_lock;

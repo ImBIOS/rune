@@ -16,7 +16,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   `El::stuck_shadow(Shadow)` adds shadows that fade in over the first 8 pt of stuck offset.
   `Tx::keep_on_screen(key)` holds a keyed element at its drawn vertical position across a
   commit that collapses or expands content inside its scroll viewport (including `virtual_rows`),
-  snapping vertical layout and growth springs inside that viewport for that commit.
+   compensating the scroll offset each frame while layout and growth springs keep running.
+   A cached subtree containing sticky content draws live, and anchored overlays follow live
+   transforms on sticky targets. Horizontal-only scroll ancestors are skipped; virtual headers
+   must share a row with their section to remain mounted while that section is visible.
   `Tx::scroll_into_view` clears headers already stuck at the target edge, and `El::anchored`
   follows a sticky target's drawn rect. New API only; existing output is unchanged.
 

@@ -23,6 +23,32 @@ pub(super) struct Keep {
     pub virtual_row: Option<(String, String, f32)>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{col, el};
+
+    #[test]
+    fn cached_section_with_sticky_descendant_stays_live_on_scroll() {
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            col().key("scroll").size(300.0, 200.0).scroll(ScrollSpec { stick_bottom: false })
+                .child(col().key("cached").w_full().cache()
+                    .child(el().key("header").w_full().h(30.0).fill(Color::WHITE).sticky_top(0.0))
+                    .child(el().w_full().h(600.0)))
+        }
+        let mut rt = Runtime::new((), view, (300.0, 200.0), Env::default());
+        rt.frame(0.0);
+        rt.wheel(100.0, 100.0, -100.0);
+        rt.frame(0.0);
+        let cached = rt.nodes.iter().position(|n| n.key.as_deref() == Some("cached")).unwrap();
+        assert!(rt.cache_live_scratch[cached], "sticky contents must not reuse a frozen raster");
+        assert!(!rt.node_caches.contains_key(&rt.nodes[cached].id));
+        let h = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("header")).unwrap();
+        assert_eq!(h.rect[1], 0.0);
+        assert_eq!(h.stuck, 100.0);
+    }
+}
+
 /// How far a sticky box with edges `top` and `bottom` moves from where scrolling put it.
 /// `frame` holds its viewport's top and bottom, then its parent's content box top and bottom.
 pub(super) fn shift(edge: StickyEdge, inset: f32, top: f32, bottom: f32, frame: [f32; 4]) -> f32 {
@@ -32,13 +58,6 @@ pub(super) fn shift(edge: StickyEdge, inset: f32, top: f32, bottom: f32, frame: 
         StickyEdge::Bottom => (band_bottom - inset - bottom).max(box_top - top).min(0.0),
     };
     if d.is_finite() { d } else { 0.0 }
-}
-
-/// Whether `path` is inside a viewport `keeps` is holding across this commit.
-pub(super) fn kept_in(keeps: &[Keep], path: &str) -> bool {
-    keeps.iter().any(|k| {
-        path.starts_with(k.viewport.as_str()) && path.as_bytes().get(k.viewport.len()) == Some(&b'/')
-    })
 }
 
 /// Target rect of node `j` after its scroll viewports' offsets and any sticky shift on `j` or
@@ -98,10 +117,11 @@ impl<S: 'static> Runtime<S> {
         for key in keys {
             let found = (0..self.nodes.len()).find(|&i| {
                 let n = &self.nodes[i];
-                (n.key.as_deref() == Some(key.as_str()) || n.path == key) && !self.subtree_exiting(i)
+                n.named(&key) && !self.subtree_exiting(i)
             });
             let Some(i) = found else { continue };
             let Some(s) = self.viewport_of(i) else { continue };
+            self.keeps.retain(|k| k.viewport != self.nodes[s].path);
             let virtual_row = std::iter::successors(Some(i), |&p| self.nodes[p].parent)
                 .take_while(|&p| p != s)
                 .find_map(|r| {
@@ -134,7 +154,8 @@ impl<S: 'static> Runtime<S> {
                 let Some(s) = self.nodes.iter().position(|n| n.path == k.viewport && n.scroll.is_some() && n.scroll_axes.y()) else { continue };
                 let laid = if let Some(i) = self.nodes.iter().position(|n| n.path == k.path) {
                     if self.viewport_of(i) != Some(s) { continue; }
-                    f64::from(self.laid_top(i, s))
+                    // Mounted anchors follow drawn geometry after the motion step.
+                    continue;
                 } else if let Some((v_path, row_key, in_row)) = &k.virtual_row
                     && let Some(v) = self.virtuals.get(v_path)
                     && let Some(idx) = v.index_of(row_key)
@@ -159,30 +180,57 @@ impl<S: 'static> Runtime<S> {
             if !moved || !self.virtual_window_changed() { break; }
             self.commit(&Tx::default());
         }
+        self.keeps = keeps;
     }
 
-    /// Node `i`'s unstuck top relative to its viewport `s` in content coordinates, from this
-    /// commit's layout and any growth rows' presented heights.
-    fn laid_top(&self, i: usize, s: usize) -> f32 {
-        let growth: f32 = std::iter::successors(Some(i), |&p| self.nodes[p].parent)
-            .take_while(|&p| p != s)
-            .map(|r| self.growth_dy(r))
-            .sum();
-        self.nodes[i].target[1] - self.nodes[s].target[1] + growth
-    }
-
-    /// How far growth row `r` presents from its laid-out top, as the paint pass works it out.
-    fn growth_dy(&self, r: usize) -> f32 {
-        let Some(c) = self.nodes[r].parent.filter(|&c| self.nodes[c].growth.is_some()) else { return 0.0 };
-        let Some(stack) = self.stacks.get(&self.nodes[c].id) else { return 0.0 };
-        let id = self.nodes[r].id;
-        let mut y = stack.pad_top;
-        for row in &stack.order {
-            let Some(g) = self.grows.get(row) else { continue };
-            if *row == id { return y - stack.tops.get(row).copied().unwrap_or(0.0); }
-            y += g.h;
+    /// Compensate this frame's drawn displacement, in viewport coordinates. Sticky
+    /// clamping may absorb part of a correction; the caller permits a bounded repaint.
+    pub(super) fn follow_keeps(&mut self) -> bool {
+        let mut moved = false;
+        for k in &self.keeps {
+            let Some(i) = self.nodes.iter().enumerate().position(|(i, n)| n.path == k.path && !self.subtree_exiting(i)) else { continue };
+            let Some(s) = self.viewport_of(i).filter(|&s| self.nodes[s].path == k.viewport) else { continue };
+            let scale = self.drawn_scale[s];
+            if scale <= 1e-4 { continue; }
+            let delta = (self.drawn[i][1] - self.drawn[s][1] - k.was) / scale;
+            if delta.abs() < 1.0 / 64.0 { continue; }
+            let stick = self.nodes[s].scroll.is_some_and(|s| s.stick_bottom);
+            let Some(st) = self.scrolls.get_mut(&self.nodes[s].id) else { continue };
+            let to = (st.offset + f64::from(delta)).clamp(0.0, st.max);
+            if (to - st.offset).abs() < 1e-5 { continue; }
+            st.offset = to;
+            st.v = 0.0;
+            st.glide = None;
+            st.glide_to = None;
+            st.pinned = stick && to >= st.max - 0.5;
+            st.direct = true;
+            moved = true;
         }
-        0.0
+        // Once the content end prevents holding the anchor, let stick-bottom own the
+        // viewport again, including growth committed while the collapse is still settling.
+        let mut keeps = std::mem::take(&mut self.keeps);
+        keeps.retain(|k| {
+            let Some(i) = self.nodes.iter().position(|n| n.path == k.path) else { return true };
+            let Some(s) = self.viewport_of(i) else { return false };
+            !(self.scrolls.get(&self.nodes[s].id).is_some_and(|st| st.pinned)
+                && self.drawn[i][1] - self.drawn[s][1] > k.was + 0.5)
+        });
+        self.keeps = keeps;
+        moved
+    }
+
+    /// Colour, hover or decorative motion must not extend the anchor's lifetime.
+    pub(super) fn finish_keeps(&mut self) {
+        if self.keeps.is_empty() { return; }
+        let mut keeps = std::mem::take(&mut self.keeps);
+        keeps.retain(|k| self.nodes.iter().any(|n| {
+            let within = n.path == k.viewport || (n.path.starts_with(&k.viewport)
+                && n.path.as_bytes().get(k.viewport.len()) == Some(&b'/'));
+            within && (self.scene.store().is_animating(n.id, prop::FRAME)
+                || self.scene.store().is_animating(n.id, prop::TRAVEL)
+                || self.grows.get(&n.id).is_some_and(|g| g.moving()))
+        }));
+        self.keeps = keeps;
     }
 
     /// What a reveal of row `key` in viewport `path` must leave to stuck headers: `None` when

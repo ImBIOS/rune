@@ -258,9 +258,13 @@ policy changes are applied in the same mutation phase.
   drawn rect. `.stuck_shadow(Shadow)` appends shadows (such as a 1 pt hairline divider and a soft
   drop shadow) whose alpha scales linearly over the first 8 pt of `stuck.abs()`. When clicking a
   stuck header collapses or expands its section, `tx.keep_on_screen(key)` adjusts the enclosing
-  scroll viewport's offset after the commit so the header stays under the pointer, remounting
-  virtual rows if needed and snapping vertical layout and growth tracks in that viewport for that
-  commit. `tx.scroll_into_view(key)` clears headers stuck at the edge it reveals to, and
+  scroll viewport's offset each frame so the header stays under the pointer while layout and
+  growth springs run, remounting virtual rows if needed. Explicit scroll requests and subsequent
+  wheel input win. In `virtual_rows`, put the header and its section in the same row: a header in
+  a separate row disappears when that row is unmounted. Horizontal-only ancestors are skipped;
+  without a vertical scroll ancestor sticky positioning is a no-op. Cached subtrees containing
+  sticky content draw live rather than reusing a raster at a stale offset.
+  `tx.scroll_into_view(key)` clears headers stuck at the edge it reveals to, and
   `El::anchored(key, ..)` follows a sticky target's drawn rect. See
   `cargo run -p rune --example sticky` ([still](../../demo/sticky-headers.png)).
 - **Horizontal scrolling** (`.scroll_x()`, `.scroll_xy()`): a filmstrip, a wide code block or table,
