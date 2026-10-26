@@ -628,7 +628,9 @@ rune::App::new(spec).fit_content_height().run();
   `.hover_motion(enter, exit)` sets its curves (for example a delayed reveal). Descendants read the
   nearest group with `.group_opacity(rest, hovered)` and `.group_color(c)`. A group stays hovered
   while one of its descendants holds the press, and only counts the part of it that shows inside a
-  clipping parent.
+  clipping parent. `.hover_motion_within(enter, exit)` sets the default curves for every hover
+  track below it without its own `.hover_motion` (the nearest ancestor wins), which reaches kit
+  controls' inner elements; put it on the view root (`rune_kit::root` carries it to popup layers).
 - **Loops** (`.cycle(Cycle { period, phase, stops, still, fps })`): an opacity loop sampled from the
   clock through `El::looping`, with one loop engine in rune-motion,
   so every loop with the same period stays in phase. Reduced motion holds `still`. While only loops

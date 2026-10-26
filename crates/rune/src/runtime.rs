@@ -5760,6 +5760,14 @@ impl<S: 'static> Runtime<S> {
         }
     }
 
+    /// A hover track's own curves, else the nearest `hover_motion_within` above it.
+    fn hover_curves(&self, i: usize) -> Option<(Anim, Anim)> {
+        let v = &self.nodes[i].vis;
+        v.hover_motion.or_else(|| {
+            std::iter::successors(Some(i), |&p| self.nodes[p].parent).find_map(|p| self.nodes[p].vis.hover_within)
+        })
+    }
+
     fn update_interaction(&mut self) -> bool {
         let mut changed = false;
         let captured = self.capture.as_ref().map(|(p, _)| p.as_str()).or(self.secondary_capture.as_deref());
@@ -5783,7 +5791,7 @@ impl<S: 'static> Runtime<S> {
             let id = n.id;
             // Like a native sidebar or menu: the highlight lands with the pointer and
             // fades briefly as it leaves.
-            let hover_anim = match n.vis.hover_motion {
+            let hover_anim = match self.hover_curves(i) {
                 Some((enter, exit)) => if hovered { enter } else { exit },
                 None if hovered => Anim::INSTANT,
                 None => rune_motion::Curve::tween(0.1, rune_motion::Easing::EASE_OUT).into(),
@@ -7670,9 +7678,8 @@ impl<S: 'static> Runtime<S> {
                 let up = |from: Option<usize>| std::iter::successors(from, |&pi| self.nodes[pi].parent);
                 if let Some(gi) = up(Some(i)).find(|&j| self.nodes[j].vis.group_opacity.is_some()) {
                     let group = up(self.nodes[gi].parent)
-                        .map(|pi| &self.nodes[pi].vis)
-                        .find(|v| v.hover.a > 0.0 || v.hover_group);
-                    if group.and_then(|v| v.hover_motion).is_some_and(|(e, x)| [e, x].iter().any(|a| matches!(a.curve, rune_motion::Curve::Instant))) {
+                        .find(|&pi| self.nodes[pi].vis.hover.a > 0.0 || self.nodes[pi].vis.hover_group);
+                    if group.and_then(|pi| self.hover_curves(pi)).is_some_and(|(e, x)| [e, x].iter().any(|a| matches!(a.curve, rune_motion::Curve::Instant))) {
                         live_intent |= 4 | 16;
                     }
                 }

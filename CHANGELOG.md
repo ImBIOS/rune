@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::hover_motion_within(enter, exit)`: a subtree default for hover curves.** Every hover track
+  below it (and the element itself) without its own `.hover_motion(..)` uses the nearest
+  ancestor's pair instead of the core default (instant in, 0.1 s ease-out out), so
+  `.hover_motion_within(Anim::INSTANT, Anim::INSTANT)` on the view root makes kit controls'
+  inner hovers (`SegmentedControl` segments, `Switch` track, ...) switch at once. Hover groups
+  read it too. `rune_kit::root` carries the base's pair to the popups it layers beside it.
+  Without it nothing changes.
 - **Caret geometry and focus in virtualized growth stacks with a vertical gap.** `VirtualList`
   and `Stack` now include a column container's vertical flex `gap` (`style.gap.height`) in row
   prefix sums, `before`/`after` padding, `stack_extent`, `reveal_row_once` and painted `row_dy`,
