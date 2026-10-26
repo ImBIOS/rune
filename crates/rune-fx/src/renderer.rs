@@ -122,7 +122,7 @@ pub struct FxRenderer {
     modules: Vec<wgpu::ShaderModule>,
     /// Pipelines for other target formats (`add_format`), one per effect family.
     extra: Vec<(wgpu::TextureFormat, Vec<wgpu::RenderPipeline>)>,
-    srgb: bool,
+    srgb: Option<bool>,
     bgl0: wgpu::BindGroupLayout,
     bgl1: wgpu::BindGroupLayout,
     bg0: Option<wgpu::BindGroup>,
@@ -328,7 +328,7 @@ impl FxRenderer {
             layout,
             modules,
             extra: Vec::new(),
-            srgb: false,
+            srgb: None,
             bgl0,
             bgl1,
             bg0: None,
@@ -400,7 +400,22 @@ impl FxRenderer {
     /// the same in both modes apart from the blend's own linear-versus-gamma difference.
     /// Takes effect at the next `prepare`.
     pub fn set_srgb_blend(&mut self, on: bool) {
-        self.srgb = on;
+        self.srgb = Some(on);
+    }
+
+    fn set_format(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
+        if format == self.format {
+            return;
+        }
+        if let Some((f, p)) = self.extra.iter_mut().find(|(f, _)| *f == format) {
+            std::mem::swap(&mut self.pipelines, p);
+            *f = self.format;
+        } else {
+            let p = Self::pipelines(device, &self.layout, &self.modules, format);
+            let old = std::mem::replace(&mut self.pipelines, p);
+            self.extra.push((self.format, old));
+        }
+        self.format = format;
     }
 
     fn buffer(device: &wgpu::Device, label: &str, size: usize) -> wgpu::Buffer {
@@ -414,6 +429,10 @@ impl FxRenderer {
 
     /// Cull, pack and upload. Layer `i` of `frame.layers` can then be drawn with `draw_layer(pass, i)`.
     pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &FxFrame) -> FxStats {
+        if let Some(srgb) = self.srgb {
+            let target = if srgb { self.format.remove_srgb_suffix() } else { self.format.add_srgb_suffix() };
+            self.set_format(device, target);
+        }
         let mut stats = FxStats::default();
         self.scratch.clear();
         self.scratch_xf.clear();
@@ -530,7 +549,7 @@ impl FxRenderer {
         if !self.scratch_xf.is_empty() {
             queue.write_buffer(&self.xforms, 0, bytemuck::cast_slice(&self.scratch_xf));
         }
-        let g = [vw, vh, if self.opts.dither { 1.0 } else { 0.0 }, if self.srgb { 1.0 } else { 0.0 }];
+        let g = [vw, vh, if self.opts.dither { 1.0 } else { 0.0 }, if self.srgb.unwrap_or(false) { 1.0 } else { 0.0 }];
         queue.write_buffer(&self.globals, 0, bytemuck::cast_slice(&g));
         stats
     }

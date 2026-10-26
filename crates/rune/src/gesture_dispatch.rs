@@ -159,9 +159,9 @@ impl<S: 'static> Runtime<S> {
         chain
     }
 
-    /// Element `path` (not exiting) and the handler `pick` takes from its canvas input.
+    /// Element `path` (not exiting or inert) and the handler `pick` takes from its canvas input.
     fn gesture_handler<F>(&self, path: &str, pick: impl Fn(&CanvasInput) -> Option<F>) -> Option<(usize, F)> {
-        let i = self.nodes.iter().enumerate().position(|(i, n)| n.path == path && !self.subtree_exiting(i))?;
+        let i = self.nodes.iter().enumerate().position(|(i, n)| n.path == path && !self.subtree_exiting(i) && self.allowed(i))?;
         Some((i, pick(self.nodes[i].gestures.as_deref()?)?))
     }
 
@@ -224,9 +224,9 @@ impl<S: 'static> Runtime<S> {
         true
     }
 
-    /// Some element has an `on_wheel` handler.
+    /// Some reachable element has an `on_wheel` handler.
     pub(crate) fn hears_wheel(&self) -> bool {
-        self.nodes.iter().any(|n| n.gestures.as_ref().is_some_and(|g| g.wheel.is_some()))
+        self.nodes.iter().enumerate().any(|(i, n)| n.gestures.as_ref().is_some_and(|g| g.wheel.is_some()) && self.allowed(i))
     }
 
     /// Some element hears key releases, so a host maps them to logical keys.

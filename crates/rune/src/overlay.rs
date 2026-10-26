@@ -859,14 +859,15 @@ impl<T: 'static> Overlay<T> {
         config.alpha_mode = translucent.unwrap_or(config.alpha_mode);
         surface.configure(&gpu.device, &config);
         let target_format = if self.rt.srgb_blend() { config.format.remove_srgb_suffix() } else { config.format };
-        if self.renderer.as_ref().is_none_or(|(_, f)| *f != target_format) {
+        if let Some((renderer, format)) = &mut self.renderer {
+            crate::window::rebuild_renderer(&gpu.device, renderer, target_format, &mut self.rt);
+            *format = target_format;
+        } else {
             let mut renderer = Renderer::new(&gpu.device, target_format);
             renderer.set_srgb_blend(self.rt.srgb_blend());
             self.renderer = Some((renderer, target_format));
             self.rt.text.atlas.invalidate();
             self.rt.images.invalidate();
-        } else if let Some((renderer, _)) = &mut self.renderer {
-            renderer.set_srgb_blend(self.rt.srgb_blend());
         }
         // Core Animation composites premultiplied pixels even in wgpu's PostMultiplied mode;
         // other straight-alpha surfaces get the conversion pass.
@@ -1442,6 +1443,13 @@ impl<T: 'static> Overlay<T> {
         let paced = false;
         // The present queue's vsync paces redraws where no display link does.
         if !prewarm { self.meter.redraw(paced || !cfg!(target_os = "macos")); }
+        if renderer.srgb_blend() != self.rt.srgb_blend() {
+            let Some(target) = crate::window::reblend(&live.surface, &gpu.adapter, &gpu.device, &mut live.config, renderer, &mut self.rt) else { return false };
+            *renderer_format = target;
+            if live.alpha.is_some() {
+                live.alpha = Some(crate::surface_alpha::AlphaSurface::new(&gpu.device, target, (live.config.width, live.config.height)));
+            }
+        }
         let frame = match crate::window::acquire(&live.surface, &gpu.device, &live.config, if prewarm { 2 } else { 1 }, &mut self.meter) {
             Ok(frame) => frame,
             Err(missed) => {

@@ -129,3 +129,43 @@ fn a_headless_run_follows_a_live_switch() {
     assert_eq!(seen.first(), Some(&(false, OFFSCREEN_FORMAT)), "starts linear");
     assert_eq!(seen.last(), Some(&(true, OFFSCREEN_FORMAT.remove_srgb_suffix())), "ends gamma-space");
 }
+
+#[test]
+fn switching_format_keeps_the_glyph_atlas_and_extra_pipelines() {
+    let gpu = Gpu::headless();
+    let text = TextSystem::new(&[], ("Inter", "Inter"));
+    let view = |_: &(), _: &mut Cx<()>| {
+        el().size(80.0, 40.0).fill(RED)
+            .child(rune::text("hello"))
+    };
+    let mut rt = Runtime::with_text((), view, (80.0, 40.0), Env::new(true, 1.0), text);
+    rt.frame(0.0);
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    renderer.add_format(&gpu.device, wgpu::TextureFormat::Rgba16Float);
+    renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (80, 40));
+    assert!(rt.text.atlas.dirty.is_none(), "initial prepare drained the atlas");
+
+    rt.set_srgb_blend(true);
+    rt.frame(1.0 / 60.0);
+    let non_srgb = OFFSCREEN_FORMAT.remove_srgb_suffix();
+    renderer.set_format(&gpu.device, non_srgb);
+    renderer.set_srgb_blend(true);
+    assert_eq!(renderer.format(), non_srgb);
+    assert!(rt.text.atlas.dirty.is_none(), "switching blend format keeps the uploaded glyph atlas");
+
+    let layer = Offscreen::with_format(&gpu.device, 80, 40, wgpu::TextureFormat::Rgba16Float);
+    renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (80, 40));
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: None,
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &layer.view, depth_slice: None, resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+        });
+        renderer.draw_range(&mut pass, wgpu::TextureFormat::Rgba16Float, 0..rt.instances.len() as u32);
+    }
+    renderer.submit(&gpu.queue, encoder);
+}

@@ -196,3 +196,45 @@ fn a_field_that_appears_on_the_re_run_takes_the_focus_it_asks_for() {
     rt.frame(1.0 / 120.0);
     assert_eq!(rt.state.field.text, "a", "typing reaches it");
 }
+
+#[test]
+fn a_focused_field_remounting_after_a_layout_read_does_not_steal_newer_focus() {
+    #[derive(Default)]
+    struct Two {
+        step: u8,
+        first: rune::TextEdit,
+        second: rune::TextEdit,
+    }
+
+    fn two_view(s: &Two, cx: &mut Cx<Two>) -> El {
+        let mut root = col().w_full().h_full()
+            .child(el().key("anchor").size(100.0, 20.0))
+            .child(rune::text_input(&s.second, rune::tok::TextStyle::new(14.0, 400.0))
+                .key("second").w(100.0).on_edit(|s: &mut Two| &mut s.second));
+        if s.step == 0 {
+            root = root.child(el().key("early").child(
+                rune::text_input(&s.first, rune::tok::TextStyle::new(14.0, 400.0))
+                    .key("first").w(100.0).on_edit(|s: &mut Two| &mut s.first),
+            ));
+        } else if s.step == 2 && cx.layout("anchor").is_some() {
+            root = root.child(el().key("late").child(
+                rune::text_input(&s.first, rune::tok::TextStyle::new(14.0, 400.0))
+                    .key("first").w(100.0).on_edit(|s: &mut Two| &mut s.first),
+            ));
+        }
+        root
+    }
+
+    let mut rt = Runtime::new(Two::default(), two_view, (300.0, 200.0), Env::new(true, 2.0));
+    rt.update(|s, _| s.first.focused = true);
+    rt.frame(0.0);
+    // Unmount `first` while it still has `first.focused = true`, and focus `second`.
+    rt.update(|s, _| { s.step = 1; s.second.focused = true; });
+    rt.frame(1.0 / 60.0);
+    // Remount `first` under a new path on a layout-read re-run: `second` keeps focus.
+    rt.update(|s, _| s.step = 2);
+    rt.frame(1.0 / 60.0);
+    let focused: Vec<_> = rt.elements().into_iter().filter(|e| e.focused).filter_map(|e| e.key).collect();
+    assert_eq!(focused, ["second"], "remounted field must not steal focus from the newer field");
+    assert!(rt.state.second.focused && !rt.state.first.focused);
+}

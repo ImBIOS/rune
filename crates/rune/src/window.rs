@@ -1456,14 +1456,10 @@ pub(crate) fn reblend<S: 'static>(surface: &wgpu::Surface, adapter: &wgpu::Adapt
     Some(target)
 }
 
-/// Rebuilds `renderer` for `target` when it was built for another format, and sets its blend
-/// mode to `rt`'s. A new renderer has no atlas or image textures, so they upload again.
+/// Switches `renderer` to `target` when its format changed, keeping its atlases, layer targets
+/// and extra pipelines, and sets its blend mode to `rt`'s.
 pub(crate) fn rebuild_renderer<S: 'static>(device: &wgpu::Device, renderer: &mut Renderer, target: wgpu::TextureFormat, rt: &mut Runtime<S>) {
-    if renderer.format() != target {
-        *renderer = Renderer::new(device, target);
-        rt.text.atlas.invalidate();
-        rt.images.invalidate();
-    }
+    renderer.set_format(device, target);
     renderer.set_srgb_blend(rt.srgb_blend());
 }
 
@@ -2676,6 +2672,13 @@ impl<S: 'static> Host<S> {
         let (Some(l), Some((gpu, renderer, format))) = (self.win.as_mut(), self.gpu.as_mut()) else { return };
         // Acquire before latching live values so a drawable wait cannot age the input.
         l.retry = None;
+        if renderer.srgb_blend() != self.rt.srgb_blend() {
+            let Some(target) = reblend(&l.surface, &gpu.adapter, &gpu.device, &mut l.config, renderer, &mut self.rt) else { return };
+            *format = target;
+            if l.alpha.is_some() {
+                l.alpha = Some(crate::surface_alpha::AlphaSurface::new(&gpu.device, target, (l.config.width, l.config.height)));
+            }
+        }
         let frame = match acquire(&l.surface, &gpu.device, &l.config, 1, &mut self.meter) {
             Ok(frame) => frame,
             Err(_) if hidden => { l.retry = l.first_frame.missed(Instant::now(), &mut l.hidden_wait); return; }
@@ -2689,7 +2692,7 @@ impl<S: 'static> Host<S> {
             if l.pacing.is_none() { l.pacing = crate::display_link::DisplayLink::new(&l.window, self.frame_wake.clone()); }
         }
         #[cfg(target_os = "macos")]
-        let drawable = l.present.as_ref().and(self.present_log.as_ref()).and_then(|log| log.acquired());
+        let mut drawable = l.present.as_ref().and(self.present_log.as_ref()).and_then(|log| log.acquired());
         #[cfg(not(target_os = "macos"))]
         let drawable = None;
         let now = Instant::now();
@@ -2725,12 +2728,14 @@ impl<S: 'static> Host<S> {
             drop(frame);
             rt.native_materials = true;
             animating |= rt.frame(0.0);
-            match acquire(&l.surface, &gpu.device, &l.config, 1, &mut self.meter) {
+            let frame = match acquire(&l.surface, &gpu.device, &l.config, 1, &mut self.meter) {
                 Ok(frame) => frame,
                 // Retrying at once is what spins while occluded; wait like any missed frame.
                 Err(_) if hidden => { l.retry = l.first_frame.missed(Instant::now(), &mut l.hidden_wait); return; }
                 Err(missed) => return self.missed_frame(missed, true),
-            }
+            };
+            drawable = l.present.as_ref().and(self.present_log.as_ref()).and_then(|log| log.acquired());
+            frame
         } else { frame };
         // A handler switched blending (`Tx::set_srgb_blend`): this drawable has the old format.
         let frame = if renderer.srgb_blend() != rt.srgb_blend() {
@@ -2740,11 +2745,14 @@ impl<S: 'static> Host<S> {
             if l.alpha.is_some() {
                 l.alpha = Some(crate::surface_alpha::AlphaSurface::new(&gpu.device, target, (l.config.width, l.config.height)));
             }
-            match acquire(&l.surface, &gpu.device, &l.config, 1, &mut self.meter) {
+            let frame = match acquire(&l.surface, &gpu.device, &l.config, 1, &mut self.meter) {
                 Ok(frame) => frame,
                 Err(_) if hidden => { l.retry = l.first_frame.missed(Instant::now(), &mut l.hidden_wait); return; }
                 Err(missed) => return self.missed_frame(missed, true),
-            }
+            };
+            #[cfg(target_os = "macos")]
+            { drawable = l.present.as_ref().and(self.present_log.as_ref()).and_then(|log| log.acquired()); }
+            frame
         } else { frame };
         l.occluded_wait = OCCLUDED_RETRY;
         l.hidden_wait = TIMEOUT_RETRY;

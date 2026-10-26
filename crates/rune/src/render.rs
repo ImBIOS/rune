@@ -577,6 +577,25 @@ impl Renderer {
         if let Some(s) = &mut self.surfaces { s.add_format(device, format); }
     }
 
+    /// Switches the frame pass's target format (`!format.is_srgb()` turns `srgb_blend` on),
+    /// keeping the glyph and image atlases, offscreen layer targets and `extra` pipelines.
+    pub fn set_format(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
+        if self.format == format { return; }
+        let next = match self.extra.iter().position(|(f, _)| *f == format) {
+            Some(i) => self.extra.swap_remove(i).1,
+            None => Self::pipeline(device, &self.layout, &self.shader, format, self.vertex_entry, Blend::SourceOver),
+        };
+        let old = std::mem::replace(&mut self.pipeline, next);
+        self.extra.push((self.format, old));
+        self.format = format;
+        self.srgb_blend = !format.is_srgb();
+        if self.layer_stats().targets > 0 { self.add_layer_format(device, format); }
+        if let Some(s) = &mut self.surfaces {
+            s.set_srgb_blend(self.srgb_blend);
+            s.add_format(device, format);
+        }
+    }
+
     /// Uploads several instance lists back to back (one buffer, one glyph upload) and returns
     /// each list's instance range for `draw_range`. A compositor's version of `prepare`.
     pub fn prepare_lists(

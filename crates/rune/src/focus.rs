@@ -169,6 +169,16 @@ impl<S: 'static> Runtime<S> {
         changed
     }
     pub(super) fn sync_requested_focus(&mut self, nodes: &mut Vec<Node>) -> bool {
+        for old in &self.nodes {
+            if let Some(input) = &old.input
+                && input.edit.focused
+                && !nodes.iter().any(|n| n.path == old.path || n.input.as_ref().is_some_and(|i| i.edit.same_model(&input.edit)))
+                && !self.virtual_inputs.values().any(|i| i.edit.same_model(&input.edit))
+                && !self.unmounted_focused.iter().any(|w| input.edit.matches_history(w))
+            {
+                self.unmounted_focused.push(input.edit.weak_history());
+            }
+        }
         let restore = self.nodes.iter().enumerate().rev().find_map(|(i, old)| {
             let key = old.focus.return_to.as_deref()?;
             if self.subtree_exiting(i) || nodes.iter().any(|n| n.path == old.path) { return None; }
@@ -179,11 +189,20 @@ impl<S: 'static> Runtime<S> {
                 && n.vis.opacity > 0.0 && n.local.w > 0.0 && n.local.h > 0.0)
                 .map(|n| n.path.clone())
         });
+        let input_focused = self.focused.as_deref().is_some_and(|p| {
+            nodes.iter().any(|n| n.path == p && !n.inert && n.input.as_ref().is_some_and(|i| i.edit.focused))
+                || self.virtual_inputs.get(p).is_some_and(|i| i.edit.focused)
+        });
+        let was_focused = |n: &Node| {
+            let Some(input) = &n.input else { return false };
+            self.nodes.iter().any(|old| {
+                old.input.as_ref().is_some_and(|i| i.edit.focused && (old.path == n.path || i.edit.same_model(&input.edit)))
+            }) || (input_focused && self.unmounted_focused.iter().any(|w| input.edit.matches_history(w)))
+        };
         // A newly requested text field wins; a focused control otherwise retains focus. Nothing
         // inside an `El::inert` subtree takes or keeps it.
         let requested = nodes.iter().filter(|n| !n.inert && n.input.as_ref().is_some_and(|i| i.edit.focused));
-        let next = requested.clone().find(|n| self.focused.as_deref() != Some(&n.path)
-            && !self.nodes.iter().any(|old| old.path == n.path && old.input.as_ref().is_some_and(|i| i.edit.focused)))
+        let next = requested.clone().find(|n| self.focused.as_deref() != Some(&n.path) && !was_focused(n))
             .map(|n| n.path.clone())
             .or(restore)
             .or_else(|| self.focused.clone().filter(|p| nodes.iter().any(|n| &n.path == p && !n.inert
@@ -196,6 +215,11 @@ impl<S: 'static> Runtime<S> {
         std::mem::swap(&mut self.nodes, nodes);
         let changed = self.set_focus(next, self.keyboard_focus);
         std::mem::swap(&mut self.nodes, nodes);
+        self.unmounted_focused.retain(|w| {
+            w.strong_count() > 0
+                && !nodes.iter().any(|n| n.input.as_ref().is_some_and(|i| i.edit.matches_history(w)))
+                && !self.virtual_inputs.values().any(|i| i.edit.matches_history(w))
+        });
         changed
     }
     fn tab_order(&self) -> Vec<usize> {

@@ -87,7 +87,7 @@ impl<S: 'static> Runtime<S> {
     /// horizontally (`x`) or vertically (`y`).
     fn scroll_viewport_on(&self, key: &str, x: bool, y: bool) -> Option<usize> {
         let i = self.nodes.iter().enumerate()
-            .position(|(i, n)| (n.key.as_deref() == Some(key) || n.path == key) && !self.subtree_exiting(i))?;
+            .position(|(i, n)| n.named(key) && !self.subtree_exiting(i))?;
         std::iter::successors(Some(i), |&p| self.nodes[p].parent).find(|&p| {
             let n = &self.nodes[p];
             n.scroll.is_some() && ((x && n.scroll_axes.x()) || (y && n.scroll_axes.y()))

@@ -269,7 +269,7 @@ impl Change {
 
 // Rendering clones TextEdit. Share immutable history so a view never copies the undo stack.
 #[derive(Clone, Debug, Default, PartialEq)]
-struct History {
+pub(crate) struct History {
     undo: VecDeque<Change>,
     redo: Vec<Change>,
     bytes: usize,
@@ -646,6 +646,18 @@ impl TextEdit {
 
     #[cfg(test)]
     pub(crate) fn has_history(&self) -> bool { !self.history.undo.is_empty() || !self.history.redo.is_empty() }
+
+    pub(crate) fn same_model(&self, other: &TextEdit) -> bool {
+        Arc::ptr_eq(&self.history, &other.history)
+    }
+
+    pub(crate) fn weak_history(&self) -> std::sync::Weak<History> {
+        Arc::downgrade(&self.history)
+    }
+
+    pub(crate) fn matches_history(&self, weak: &std::sync::Weak<History>) -> bool {
+        weak.ptr_eq(&Arc::downgrade(&self.history))
+    }
 
     /// For a secure field that has started exiting: wipe the secret and keep only its mask, so
     /// the field paints the same dots (no placeholder) through the exit with no plaintext.

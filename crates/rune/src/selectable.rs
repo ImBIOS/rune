@@ -141,7 +141,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn live(&self, path: &str) -> Option<usize> {
-        (0..self.nodes.len()).find(|&i| self.nodes[i].path == path && !self.subtree_exiting(i))
+        (0..self.nodes.len()).find(|&i| self.nodes[i].path == path && !self.subtree_exiting(i) && self.allowed(i))
     }
 
     fn content_of(&self, i: usize) -> &str {
@@ -159,7 +159,7 @@ impl<S: 'static> Runtime<S> {
 
     /// Node `j` is a selectable text of group `g` (not of a group inside it).
     fn member(&self, j: usize, g: usize) -> bool {
-        self.is_selectable(j) && self.group_of(j) == Some(g) && !self.subtree_exiting(j)
+        self.is_selectable(j) && self.group_of(j) == Some(g) && !self.subtree_exiting(j) && self.allowed(j)
     }
 
     /// Group `g`'s selectable texts, in tree order.

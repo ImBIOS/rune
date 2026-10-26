@@ -896,6 +896,9 @@ pub struct Runtime<S: 'static> {
     /// Focus when the running commit began, before a new view's focus request applied: what a
     /// modal that opens in this commit returns focus to.
     focus_before_commit: Option<String>,
+    /// Focused text fields that unmounted without being blurred: while another field holds focus,
+    /// remounting one with its old `focused = true` flag does not steal focus back.
+    unmounted_focused: Vec<std::sync::Weak<crate::edit::History>>,
     modal_index: Option<usize>,
     modal_members: Vec<bool>,
     loops: HashMap<NodeId, rune_motion::LoopTrack>,
@@ -1210,6 +1213,7 @@ impl<S: 'static> Runtime<S> {
             tab_visits_controls: false,
             modal_stack: Vec::new(),
             focus_before_commit: None,
+            unmounted_focused: Vec::new(),
             modal_index: None,
             modal_members: Vec::new(),
             loops: HashMap::new(),
@@ -2874,11 +2878,12 @@ struct Measured {
     layout_reads: Vec<String>,
 }
 
-fn collect_virtual_inputs(el: &El, parent: &str, index: usize, inputs: &mut HashMap<String, Box<InputSpec>>) {
+fn collect_virtual_inputs(el: &El, parent: &str, index: usize, inert: bool, inputs: &mut HashMap<String, Box<InputSpec>>) {
     // Most offscreen rows hold no focused field; find that out before building any paths.
     if !crate::memo::has_focused_input(el) {
         return;
     }
+    let inert = inert || el.inert;
     let input = el.input.as_ref().filter(|i| i.edit.focused && i.access.is_some());
     // A memo's shared children are skipped whole when none is a focused field.
     let skip = el.memo_children.as_ref().filter(|m| !m.focused_input).map_or(0, |m| m.children.len());
@@ -2888,10 +2893,12 @@ fn collect_virtual_inputs(el: &El, parent: &str, index: usize, inputs: &mut Hash
     let segment = el.key.clone().unwrap_or_else(|| format!("#{index}"));
     let path = format!("{parent}/{segment}");
     if let Some(input) = input {
-        inputs.insert(path.clone(), input.clone());
+        let mut input = input.clone();
+        if inert { input.edit.focused = false; }
+        inputs.insert(path.clone(), input);
     }
     for (i, child) in el.all_children().enumerate().skip(skip) {
-        collect_virtual_inputs(child, &path, i, inputs);
+        collect_virtual_inputs(child, &path, i, inert, inputs);
     }
 }
 
@@ -2925,8 +2932,9 @@ impl<S: 'static> Measurement<'_, S> {
     /// `bound` is the most `el` can be tall (see [`crate::virtual_list::height_bound`]); `scroll`
     /// is the scroll viewport `el` is the content of, whether it sticks to the bottom, and its bound.
     #[allow(clippy::too_many_arguments)]
-    fn window_tree(&mut self, el: &mut El, parent: &str, index: usize, scroll: Option<(&str, bool, f32)>, settle: bool, force_all: bool, bound: f32) {
+    fn window_tree(&mut self, el: &mut El, parent: &str, index: usize, scroll: Option<(&str, bool, f32)>, settle: bool, force_all: bool, bound: f32, inert: bool) {
         el.expand_memo();
+        let inert = inert || el.inert;
         let bound = crate::virtual_list::height_bound(&el.style, bound);
         let path = node_path(parent, el.key.as_deref(), index);
         if let Some(estimate) = el.virtual_estimate {
@@ -3025,7 +3033,7 @@ impl<S: 'static> Measurement<'_, S> {
                 let focused = v.focused_row.as_deref().filter(|_| self.focused.is_some_and(under))
                     .and_then(|key| v.index_of(key)).filter(|i| !v.range.contains(i));
                 if let Some(i) = focused {
-                    collect_virtual_inputs(&build(i), &path, i, self.virtual_inputs);
+                    collect_virtual_inputs(&build(i), &path, i, inert, self.virtual_inputs);
                 }
                 el.children = v.range.clone().map(|i| {
                     let mut row = build(i);
@@ -3035,7 +3043,7 @@ impl<S: 'static> Measurement<'_, S> {
             } else {
                 el.children = std::mem::take(&mut el.children).into_iter().enumerate().filter_map(|(i, mut child)| {
                     if !v.range.contains(&i) {
-                        collect_virtual_inputs(&child, &path, i, self.virtual_inputs);
+                        collect_virtual_inputs(&child, &path, i, inert, self.virtual_inputs);
                         return None;
                     }
                     child.virtual_mount = v.born(i) < self.commits;
@@ -3047,7 +3055,7 @@ impl<S: 'static> Measurement<'_, S> {
         let scroll = el.scroll.map(|s| (path.as_str(), s.stick_bottom, bound));
         for (i, child) in el.children.iter_mut().enumerate() {
             let bound = bounds.of(child);
-            self.window_tree(child, &path, i, scroll, settle, force_all, bound);
+            self.window_tree(child, &path, i, scroll, settle, force_all, bound, inert);
         }
     }
 
@@ -3096,7 +3104,7 @@ impl<S: 'static> Measurement<'_, S> {
         // Index-built rows build here, so memos inside them share the view's cache. A window that
         // fits its content lays its root out at its natural height, which nothing bounds.
         let bound = if self.fit_height { f32::INFINITY } else { self.viewport.1 };
-        self.window_tree(&mut root, "", 0, None, tx.settle, force_all, bound);
+        self.window_tree(&mut root, "", 0, None, tx.settle, force_all, bound, false);
         root
     }
 
@@ -3262,20 +3270,17 @@ impl<S: 'static> Runtime<S> {
         self.memo_since = self.memo.next_pass();
         let mut measured = self.measure(tx);
         self.focus_before_commit = self.focused.clone();
+        // Settle layout reads first so a field that mounts once a rect is known is in `nodes`.
+        measured = self.settle_layout_reads(measured, tx);
         if self.sync_requested_focus(&mut measured.nodes) {
             self.layout = measured.layout;
             measured = self.measure(tx);
+            measured = self.settle_layout_reads(measured, tx);
         }
         if measured.caret_read && self.caret_moved(Some(&measured.nodes)) {
             self.layout = measured.layout;
-            measured = self.measure(&tx);
-        }
-        let (mut measured, rerun) = self.settle_layout_reads(measured, &tx);
-        // A field that asks for focus may appear only once the view can read a rect.
-        if rerun && self.sync_requested_focus(&mut measured.nodes) {
-            self.layout = measured.layout;
-            let remeasured = self.measure(tx);
-            measured = self.settle_layout_reads(remeasured, tx).0;
+            measured = self.measure(tx);
+            measured = self.settle_layout_reads(measured, tx);
         }
         self.apply(measured, tx);
         self.memo.keep_since(self.memo_since);
@@ -4362,7 +4367,9 @@ impl<S: 'static> Runtime<S> {
         // A held press stays inside what it started in until it releases.
         if self.capture.is_some() {
             for path in &self.hover_within {
-                if !inside.contains(path) { inside.push(path.clone()); }
+                if !inside.contains(path) && self.nodes.iter().enumerate().any(|(i, n)| n.path == *path && self.allowed(i)) {
+                    inside.push(path.clone());
+                }
             }
         }
         for path in &self.hover_within {
@@ -4407,7 +4414,7 @@ impl<S: 'static> Runtime<S> {
         // Selectable text shows its I-beam even where its presses go to a row around it.
         let target = match &self.capture {
             Some(_) if self.text_sel.dragging => self.selection_holder(),
-            Some((p, _)) => (0..self.nodes.len()).find(|&i| self.nodes[i].path == *p && !self.subtree_exiting(i)),
+            Some((p, _)) => (0..self.nodes.len()).find(|&i| self.nodes[i].path == *p && !self.subtree_exiting(i) && self.allowed(i)),
             None => self.selectable_at(x, y).or_else(|| self.primary_target(x, y)),
         };
         let Some(mut i) = target else {
@@ -4508,10 +4515,18 @@ impl<S: 'static> Runtime<S> {
     /// One placement of [`Self::reveal_row`]: whether it committed. After the first, it moves
     /// only when the row would land somewhere else.
     fn reveal_row_once(&mut self, scope: Option<&str>, key: &str, first: bool) -> bool {
-        let geometry = self.virtuals.iter().filter(|(path, _)| in_scope(path, scope)).find_map(|(_, v)| {
-            let index = v.index_of(key)?;
-            Some((v.scroll_path.clone(), f64::from(v.pad_top + v.prefix(index)), f64::from(v.height(key)), f64::from(v.viewport)))
-        }).or_else(|| {
+        let geometry = self.nodes.iter().filter(|n| in_scope(&n.path, scope)).filter_map(|n| {
+            let v = self.virtuals.get(&n.path)?;
+            let index = v.index_of(key).or_else(|| {
+                key.rmatch_indices('/').find_map(|(at, _)| {
+                    let (scope, row_key) = (&key[..at], &key[at + 1..]);
+                    let mut keyed = n.path.rsplit('/').filter(|seg| !seg.starts_with('#'));
+                    scope.rsplit('/').all(|seg| keyed.next() == Some(seg)).then(|| v.index_of(row_key))?
+                })
+            })?;
+            let row_key = &v.keys[index];
+            Some((v.scroll_path.clone(), f64::from(v.pad_top + v.prefix(index)), f64::from(v.height(row_key)), f64::from(v.viewport)))
+        }).next().or_else(|| {
             let (i, row) = self.nodes.iter().enumerate().find(|(_, n)| {
                 n.named(key) && n.parent.is_none_or(|p| in_scope(&self.nodes[p].path, scope))
             })?;
@@ -4636,10 +4651,11 @@ impl<S: 'static> Runtime<S> {
             let within = |p: &str| p == n.path || (p.len() > n.path.len() && p.starts_with(&n.path) && p.as_bytes()[n.path.len()] == b'/');
             let capture_inside = if self.secondary_capture.is_some() { inside } else { self.capture_inside };
             let held = captured == Some(n.path.as_str()) && capture_inside;
+            let allowed = self.allowed(i);
             // A held press stays hovered while it's inside, though a press scale shrank the
             // drawn rect away from the pointer.
-            let hovered = (inside || held) && tracks_hover && captured.is_none_or(within);
-            let pressed = held && n.vis.press.a > 0.0;
+            let hovered = allowed && (inside || held) && tracks_hover && captured.is_none_or(within);
+            let pressed = allowed && held && n.vis.press.a > 0.0;
             let press_scale = n.press_scale;
             let id = n.id;
             // Like a native sidebar or menu: the highlight lands with the pointer and
@@ -4653,7 +4669,7 @@ impl<S: 'static> Runtime<S> {
             self.scene.animate(id, P_PRESS, pressed as u8 as f32, if pressed { motion::INSTANT } else { motion::SNAPPY });
             if let Some(k) = press_scale {
                 // Down follows the hand; the release springs back with a little life.
-                let down = held && !self.reduced_motion;
+                let down = allowed && held && !self.reduced_motion;
                 self.scene.animate(id, P_PRESS_SCALE, if down { k } else { 1.0 }, if down { motion::INSTANT } else { motion::POP });
             }
         }
@@ -5915,7 +5931,7 @@ impl<S: 'static> Runtime<S> {
                     self.overlay_hits.push(rect);
                 }
             }
-            if self.nodes[i].help.is_some() && (!self.nodes[i].help_cut || self.nodes[i].elided.is_some()) && !self.subtree_exiting(i) && effective_opacity > 0.001 && visible {
+            if self.nodes[i].help.is_some() && (!self.nodes[i].help_cut || self.nodes[i].elided.is_some()) && !self.subtree_exiting(i) && self.allowed(i) && effective_opacity > 0.001 && visible {
                 let c = if self.nodes[i].parent.is_some() { pinh.clip } else { NO_CLIP };
                 let r = [rect_pt[0].max(c[0] / s), rect_pt[1].max(c[1] / s), rect_pt[2].min(c[2] / s), rect_pt[3].min(c[3] / s)];
                 self.push_help_hit(i, r, hits_before);

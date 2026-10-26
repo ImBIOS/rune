@@ -81,8 +81,8 @@ pub(crate) trait Member {
     fn resolve_popup(&mut self, picked: Option<&str>) -> Result<(), crate::PopupMenuError>;
     fn file_dialog_open(&self) -> bool;
     fn resolve_file_dialog(&mut self, path: Option<std::path::PathBuf>) -> Result<(), crate::FileDialogError>;
-    /// Draws its frame into `view`, `px` device pixels.
-    fn render(&mut self, gpu: &Gpu, view: &wgpu::TextureView, px: (u32, u32), dt: f64, update_ms: f64);
+    /// Draws its frame into `slot`, `px` device pixels.
+    fn render(&mut self, gpu: &Gpu, slot: &Slot, px: (u32, u32), dt: f64, update_ms: f64);
     fn backdrop_dark(&self) -> Option<bool>;
     fn tree(&self, t: f64) -> Value;
     fn trace(&mut self, trace: &mut Trace, t_ms: f64, cpu_ms: f64);
@@ -135,6 +135,7 @@ impl<S: 'static> Window<S> {
         let native = std::mem::take(&mut app.macos_window);
         let modifier_keys = app.modifier_keys;
         let tab_visits_controls = app.tab_visits_controls;
+        let srgb_blend = app.srgb_blend;
         let titlebar_inset = if options.borderless { 0.0 } else { app.chrome.titlebar_inset() };
         let (spec, state, shared) = app.into_parts(own.scene.as_deref());
         let shortcuts = crate::shortcuts::Guard::attach(&shared, Arc::new(|| {}), true, false);
@@ -145,6 +146,7 @@ impl<S: 'static> Window<S> {
         rt.on_focus = on_focus;
         rt.set_modifier_keys(modifier_keys);
         rt.set_tab_visits_controls(tab_visits_controls);
+        rt.set_srgb_blend(srgb_blend);
         rt.set_titlebar_inset(titlebar_inset);
         rt.transparent = options.transparent;
         rt.track_marks = comp.is_some();
@@ -377,14 +379,26 @@ impl<S: 'static> Member for Window<S> {
     fn file_dialog_open(&self) -> bool { self.rt.file_dialog().is_some() }
     fn resolve_file_dialog(&mut self, path: Option<std::path::PathBuf>) -> Result<(), crate::FileDialogError> { self.rt.resolve_file_dialog(path) }
 
-    fn render(&mut self, gpu: &Gpu, view: &wgpu::TextureView, px: (u32, u32), dt: f64, update_ms: f64) {
-        let renderer = self.renderer.get_or_insert_with(|| Renderer::new(&gpu.device, OFFSCREEN_FORMAT));
+    fn render(&mut self, gpu: &Gpu, slot: &Slot, px: (u32, u32), dt: f64, update_ms: f64) {
+        let format = if self.rt.srgb_blend() { OFFSCREEN_FORMAT.remove_srgb_suffix() } else { OFFSCREEN_FORMAT };
+        let view = if self.rt.srgb_blend() { &slot.srgb_blend_view } else { &slot.view };
+        let renderer = match &mut self.renderer {
+            Some(renderer) => {
+                crate::window::rebuild_renderer(&gpu.device, renderer, format, &mut self.rt);
+                renderer
+            }
+            None => {
+                let mut renderer = Renderer::new(&gpu.device, format);
+                renderer.set_srgb_blend(self.rt.srgb_blend());
+                self.renderer.insert(renderer)
+            }
+        };
         renderer.upload_images(&gpu.device, &gpu.queue, &mut self.rt.images);
         renderer.prepare_surfaces(&gpu.device, &gpu.queue, &self.rt.surfaces, px);
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         if let Some(c) = self.comp.as_mut() {
             let mut f = crate::compose::Frame {
-                device: &gpu.device, queue: &gpu.queue, encoder: &mut enc, target: view, format: OFFSCREEN_FORMAT,
+                device: &gpu.device, queue: &gpu.queue, encoder: &mut enc, target: view, format,
                 size: px, dt, update_ms, rt: &mut self.rt, ui: renderer,
             };
             c.render(&mut f);
@@ -794,7 +808,7 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
             }
             if slots[i].as_ref().is_none_or(|s| s.px != px) { slots[i] = Some(Slot::new(&gpu.device, &comp, px, scale)); }
             let slot = slots[i].as_ref().unwrap();
-            m.render(&gpu, &slot.view, px, step, update_ms);
+            m.render(&gpu, slot, px, step, update_ms);
             let (ox, oy) = desk.origin_px(i);
             let (sigma, offset, opacity) = if key == Some(i) { KEY_SHADOW } else { SHADOW };
             slot.write(&gpu.queue, Uniform {
@@ -1103,9 +1117,10 @@ impl Composite {
 }
 
 /// One window's texture, its shadow masks and what binds them.
-struct Slot {
+pub(crate) struct Slot {
     px: (u32, u32),
     view: wgpu::TextureView,
+    srgb_blend_view: wgpu::TextureView,
     _texture: wgpu::Texture,
     /// Ping-pong masks: texture, view, and a bind group that reads it.
     masks: [(wgpu::Texture, wgpu::TextureView, wgpu::BindGroup); 2],
@@ -1118,7 +1133,18 @@ struct Slot {
 impl Slot {
     fn new(device: &wgpu::Device, comp: &Composite, px: (u32, u32), scale: f32) -> Slot {
         let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
-        let (texture, view) = new_texture(device, "desktop window", px, OFFSCREEN_FORMAT, usage);
+        let non_srgb = OFFSCREEN_FORMAT.remove_srgb_suffix();
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("desktop window"),
+            size: wgpu::Extent3d { width: px.0.max(1), height: px.1.max(1), depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: OFFSCREEN_FORMAT, usage, view_formats: &[non_srgb],
+        });
+        let view = texture.create_view(&Default::default());
+        let srgb_blend_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(non_srgb),
+            ..Default::default()
+        });
         // Room for the key window's blur, whole mask texels on each side.
         let pad = ((KEY_SHADOW.0 * scale * 3.0) / DOWN as f32).ceil() as u32 * DOWN;
         let mask = ((px.0 + 2 * pad).div_ceil(DOWN), (px.1 + 2 * pad).div_ceil(DOWN));
@@ -1129,7 +1155,7 @@ impl Slot {
             (t, v, b)
         });
         let window = bind(device, &comp.layout, &uniform, &view, &comp.sampler);
-        Slot { px, view, _texture: texture, masks, mask, pad, uniform, window }
+        Slot { px, view, srgb_blend_view, _texture: texture, masks, mask, pad, uniform, window }
     }
 
     fn write(&self, queue: &wgpu::Queue, uniform: Uniform) {

@@ -41,3 +41,33 @@ fn scroll_to_bottom_takes_a_key_path() {
     assert!(label_y(&rt, 1) < 200.0);
     assert_eq!(label_y(&rt, 0), 900.0);
 }
+
+#[test]
+fn scroll_to_offset_takes_a_key_path() {
+    let rt = settled(|tx| tx.scroll_to_instant("b/label", 0.0, 400.0));
+    assert_eq!(label_y(&rt, 1), 500.0, "list b scrolled to 400");
+    assert_eq!(label_y(&rt, 0), 900.0, "list a didn't move");
+}
+
+#[test]
+fn scroll_into_view_reaches_an_offscreen_virtual_row_by_key_path() {
+    use rune::GrowthSpec;
+
+    fn vlist(key: &str) -> El {
+        col().w(100.0).h(100.0).scroll(ScrollSpec { stick_bottom: false }).child(
+            col().key(key).w_full().growth(GrowthSpec::default())
+                .virtual_rows(40, 20.0, |_: &(), i| format!("r{i}").into(), |_, _| el().w_full().h(20.0)),
+        )
+    }
+
+    fn vview(_: &(), _: &mut Cx<()>) -> El {
+        row().w_full().h_full().child(vlist("a")).child(vlist("b"))
+    }
+
+    let mut rt = Runtime::new((), vview, (200.0, 100.0), Env::default());
+    rt.frame(0.0);
+    rt.update(|_, tx| tx.scroll_into_view("b/r35"));
+    for _ in 0..60 { rt.frame(1.0 / 60.0); }
+    assert!(rt.elements().iter().any(|e| e.path.ends_with("b/r35")), "list b realized row r35");
+    assert!(!rt.elements().iter().any(|e| e.path.ends_with("a/r35")), "list a stayed at the top");
+}

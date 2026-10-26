@@ -1755,8 +1755,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             if alpha.is_some() { alpha = Some(crate::surface_alpha::AlphaSurface::new(&gpu.device, target_format, (wp, hp))); }
             if let Some((ov, ui)) = overlay.as_mut() {
                 ov.set_srgb_blend(rt.srgb_blend());
-                *ui = Renderer::new(&gpu.device, target_format);
-                ui.set_srgb_blend(rt.srgb_blend());
+                ui.set_format(&gpu.device, target_format);
             }
         }
         renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);

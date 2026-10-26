@@ -109,3 +109,63 @@ fn nothing_inside_takes_or_keeps_focus() {
     assert!(!info(&rt, "field").focused);
     assert!(!rt.state.field.focused);
 }
+
+#[test]
+fn canvas_gestures_help_selection_and_held_hover_respect_inert() {
+    use rune::{MagnifyEvent, PointerButton, WheelEvent, col, text};
+
+    #[derive(Default)]
+    struct Canvas {
+        inert: bool,
+        wheels: Vec<&'static str>,
+        pinches: Vec<&'static str>,
+        middle: Vec<&'static str>,
+    }
+
+    fn canvas_view(s: &Canvas, _: &mut Cx<Canvas>) -> El {
+        let doc = col().key("doc").absolute(0.0, 0.0).size(100.0, 100.0)
+            .hover(Color::WHITE.alpha(0.2))
+            .press(Color::WHITE.alpha(0.4))
+            .press_scale(0.95)
+            .help("Document tooltip")
+            .pointer_buttons([PointerButton::Middle])
+            .on_press(|s: &mut Canvas| s.middle.push("doc"))
+            .on_wheel(|s: &mut Canvas, _, _| { s.wheels.push("doc"); true })
+            .on_magnify(|s: &mut Canvas, _, _| { s.pinches.push("doc"); true })
+            .child(text("selectable copy").key("copy").selectable(true));
+        el().key("canvas").size(200.0, 200.0)
+            .pointer_buttons([PointerButton::Middle])
+            .on_press(|s: &mut Canvas| s.middle.push("canvas"))
+            .on_wheel(|s: &mut Canvas, _, _| { s.wheels.push("canvas"); true })
+            .on_magnify(|s: &mut Canvas, _, _| { s.pinches.push("canvas"); true })
+            .child(if s.inert { doc.inert() } else { doc })
+    }
+
+    let mut rt = Runtime::new(Canvas { inert: true, ..Canvas::default() }, canvas_view, (200.0, 200.0), Env::default());
+    rt.frame(0.0);
+    rt.wheel_event(WheelEvent::new(0.0, -10.0).at(20.0, 20.0));
+    rt.magnify_event(MagnifyEvent::new(0.1).at(20.0, 20.0));
+    rt.button_down(20.0, 20.0, PointerButton::Middle);
+    rt.button_up(20.0, 20.0, PointerButton::Middle);
+    rt.pointer_move(20.0, 20.0);
+    rt.frame(1.0);
+    assert_eq!(rt.state.wheels, ["canvas"], "on_wheel passes through inert");
+    assert_eq!(rt.state.pinches, ["canvas"], "on_magnify passes through inert");
+    assert_eq!(rt.state.middle, ["canvas"], "middle-button press passes through inert");
+    assert!(rt.help_tooltip().is_none(), "inert element shows no tooltip");
+
+    // Turning inert while hovered/pressed/selected drops the visual hover, press and selection.
+    let mut rt = Runtime::new(Canvas::default(), canvas_view, (200.0, 200.0), Env::default());
+    rt.frame(0.0);
+    rt.pointer_move(10.0, 5.0);
+    rt.pointer_down(10.0, 5.0);
+    rt.pointer_up(10.0, 5.0);
+    rt.pointer_down(10.0, 5.0);
+    rt.frame(1.0 / 60.0);
+    let doc = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("doc")).unwrap();
+    assert!(doc.hover > 0.0 && doc.press > 0.0);
+    rt.update(|s, _| s.inert = true);
+    for _ in 0..30 { rt.frame(1.0 / 60.0); }
+    let doc = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("doc")).unwrap();
+    assert_eq!((doc.hover, doc.press), (0.0, 0.0), "turning inert clears hover and press tracks");
+}

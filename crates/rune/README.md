@@ -97,7 +97,8 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   right-click (also control-click on macOS), without invoking primary actions. Scripts accept
   `secondary-down`, `secondary-up`, and `secondary-click`.
 - **Naming elements**: `Cx::layout`, `Tx::fly_text` and the `Tx` scroll requests
-  (`scroll_into_view`, `scroll_to_bottom`, `scroll_page`, `scroll_to_x`) take a key, which
+  (`scroll_into_view`, `scroll_to_bottom`, `scroll_page`, `scroll_to`, `scroll_to_instant`,
+  `scroll_to_x`, `scroll_to_y`) take a key, which
   matches the first element with it in tree order, or a key path such as `"inspector/label"`
   whose leading keys are the element's nearest keyed ancestors. Keys are one namespace, and
   rune-kit keys its parts (`label`, `value`, `icon`, `control`, …), so scope an app's own keys
