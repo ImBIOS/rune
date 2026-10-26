@@ -375,12 +375,12 @@ fn press(rt: &mut Runtime<App>, end: &str) {
 fn line_numbers_select_lines_and_the_plus_comments_on_them() {
     let (old, new) = numbered(20, 5);
     let mut rt = runtime(DiffState::new(vec![FileDiff::from_texts("a.rs", &old, &new)]), (800.0, 900.0));
-    press(&mut rt, "df0.c3/nn");
+    press(&mut rt, "df0.c3/gutter/nn");
     let three = LineRange::line(0, LineRef::new(Side::New, 3));
     assert_eq!(rt.state.diff.selection(), Some(three));
     assert_eq!(rt.state.selections, [Some(three)]);
     // Dragging down the numbers.
-    let (a, b) = (find(&rt, "df0.c3/nn"), find(&rt, "df0.n5/nn"));
+    let (a, b) = (find(&rt, "df0.c3/gutter/nn"), find(&rt, "df0.n5/gutter/nn"));
     let x = a.rect[0] + a.rect[2] / 2.0;
     let (y0, y1) = (a.rect[1] + 10.0, b.rect[1] + 10.0);
     rt.pointer_down(x, y0);
@@ -395,9 +395,9 @@ fn line_numbers_select_lines_and_the_plus_comments_on_them() {
     assert_eq!(rt.state.diff.selection(), Some(range));
     assert_eq!(rt.state.selections.last(), Some(&Some(range)));
     // The "+" on a selected line comments on the selection; on another line, on that line.
-    press(&mut rt, "df0.c4/plus");
+    press(&mut rt, "df0.c4/gutter/plus");
     assert_eq!(rt.state.comments, [range]);
-    press(&mut rt, "df0.c9/plus");
+    press(&mut rt, "df0.c9/gutter/plus");
     assert_eq!(rt.state.comments[1], LineRange::line(0, LineRef::new(Side::New, 9)));
     // Escape clears the selection.
     rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
@@ -465,10 +465,10 @@ fn unified_file_headers_span_the_viewport_while_code_scrolls_sideways() {
 fn cancelling_a_gutter_drag_restores_selection_without_notifying_a_drop() {
     let (old, new) = numbered(20, 5);
     let mut rt = runtime(DiffState::new(vec![FileDiff::from_texts("a.rs", &old, &new)]), (800.0, 900.0));
-    press(&mut rt, "df0.c3/nn");
+    press(&mut rt, "df0.c3/gutter/nn");
     let original = rt.state.diff.selection();
     let calls = rt.state.selections.len();
-    let a = find(&rt, "df0.c4/nn");
+    let a = find(&rt, "df0.c4/gutter/nn");
     let (x, y) = (a.rect[0] + a.rect[2] / 2.0, a.rect[1] + 10.0);
     rt.pointer_down(x, y);
     rt.pointer_move(x, y + 40.0);
@@ -480,6 +480,34 @@ fn cancelling_a_gutter_drag_restores_selection_without_notifying_a_drop() {
     rt.pointer_up(x, y + 40.0);
     tick(&mut rt);
     assert_eq!(rt.state.selections.len(), calls);
+}
+
+#[test]
+fn unified_gutters_stay_at_the_left_edge_while_code_scrolls_sideways() {
+    let long = "x".repeat(400);
+    let text = |n: &str| (0..30).map(|i| if i == 1 { format!("{long}\n") } else { format!("let v{i} = {}{n};\n", i % 2) }).collect::<String>();
+    let mut d = DiffState::new(vec![FileDiff::from_texts("a.rs", &text(""), &text("+1"))]);
+    d.set_mode(DiffMode::Unified);
+    let mut rt = runtime(d, (600.0, 400.0));
+    let before = find(&rt, "df0.o6/code").rect;
+    for _ in 0..2 {
+        rt.wheel_xy(300.0, 200.0, -250.0, 0.0);
+        settle(&mut rt);
+    }
+    let code = find(&rt, "df0.o6/code").rect;
+    assert!(code[0] < before[0] - 100.0, "the code scrolled: {before:?} -> {code:?}");
+    for end in ["df0.o6/gutter", "df0.o6/gutter/no", "df0.o6/gutter/nn"] {
+        let r = find(&rt, end).rect;
+        assert!(r[0] >= -0.5 && r[0] <= 100.0, "{end} stays in view: {r:?}");
+    }
+    let g = find(&rt, "df0.o6/gutter").rect;
+    assert!(g[0].abs() < 0.5, "gutter at the left edge: {g:?}");
+    let e = |k: &str| rt.elements().into_iter().find(|e| e.path.ends_with(k) && !e.exiting).unwrap();
+    assert!(e("df0.o6/gutter").stuck > 100.0);
+
+    // Pressing the numbers still selects the line after the sideways scroll.
+    press(&mut rt, "df0.o6/gutter/no");
+    assert_eq!(rt.state.diff.selection(), Some(LineRange::line(0, LineRef::new(Side::Old, 6))));
 }
 
 #[test]

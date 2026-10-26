@@ -4,7 +4,9 @@
 //! `cargo run -p rune-kit --example diff` opens the window; `j`/`k` move between hunks, `]`/`[`
 //! between files. The stills in `demo/kit/` are
 //! `-- --snap diff-unified-dark.png --size 900x620 --theme dark` and the same with
-//! `--scene split` and `--theme light`.
+//! `--scene split` and `--theme light`. `diff-unified-scrolled.png` is
+//! `-- --scene scrolled --script crates/rune-kit/examples/diff_scrolled.json --snap diff-unified-scrolled.png --at mark:end --size 900x620 --theme dark`:
+//! long lines scrolled sideways, with the line numbers held at the left edge.
 use rune::{App, AppSpec, Cx, El, KeyEvent, Tx, col, row, text};
 use rune_kit::diff::{Annotation, DiffMode, DiffState, DiffView, FileDiff, LineRange, LineRef, Side, parse};
 use rune_kit::{Button, ButtonVariant, Kit, SegmentedControl};
@@ -162,6 +164,32 @@ index 0000000..4b825dc
 Binary files /dev/null and b/assets/retry-curve.png differ
 ";
 
+const LONG_OLD: &str = "pub fn describe(&self) -> String {
+    format!(\"retry {} times starting at {:?}, doubling up to {:?}\", self.limit, self.base, self.max)
+}
+
+pub fn jitter_for(&self, attempt: u32) -> Duration {
+    self.base * 2u32.pow(attempt)
+}
+
+pub fn clamp(&self, wait: Duration) -> Duration {
+    wait.min(self.max)
+}
+";
+const LONG_NEW: &str = "pub fn describe(&self) -> String {
+    format!(\"retry {} times starting at {:?}, doubling up to {:?}, with {:.0}% jitter so clients that failed together spread out when they retry\", self.limit, self.base, self.max, self.jitter * 100.0)
+}
+
+pub fn jitter_for(&self, attempt: u32) -> Duration {
+    let wait = self.base * 2u32.pow(attempt);
+    wait.mul_f64(1.0 + self.jitter * (self.rng.next_f64() - 0.5) * 2.0).min(self.max + self.max.mul_f64(self.jitter))
+}
+
+pub fn clamp(&self, wait: Duration) -> Duration {
+    wait.min(self.max)
+}
+";
+
 struct Review {
     diff: DiffState,
     composing: Option<LineRange>,
@@ -229,6 +257,9 @@ fn on_key(s: &mut Review, ev: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 fn main() {
-    let spec = AppSpec { scenes: &[("split", |s: &mut Review| s.diff.set_mode(DiffMode::Split))], on_key: Some(on_key), families: ("Inter", "ui-monospace, Inter"), ..AppSpec::new("Diff", (900.0, 620.0), init, view) };
+    let spec = AppSpec { scenes: &[
+            ("split", |s: &mut Review| s.diff.set_mode(DiffMode::Split)),
+            ("scrolled", |s: &mut Review| s.diff = DiffState::new(vec![FileDiff::from_texts("src/net/backoff.rs", LONG_OLD, LONG_NEW)])),
+        ], on_key: Some(on_key), families: ("Inter", "ui-monospace, Inter"), ..AppSpec::new("Diff", (900.0, 620.0), init, view) };
     App::new(spec).modifier_keys().run();
 }

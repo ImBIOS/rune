@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **rune-kit diff: the gutter stays put while code scrolls sideways.** In unified mode with
+  long lines, the line numbers and the +/− marker scrolled out of view with the code. Each row's
+  marker, both number columns and the comment "+" now sit in one `gutter` element held to the
+  viewport's left edge with `sticky_left`, on the row's own opaque fill (added, removed,
+  selected), so code passes under it. Elements in a row now have the path
+  `<row>/gutter/{nn,no,plus}` and the marker is `<row>/gutter/bar`. Annotation cards, folded-gap
+  rows and file-note rows hold their content to the left edge the way file headers do. Split
+  wraps and does not scroll sideways, so it is unchanged.
+
 - **A pane's width survives a wider range.** `PaneState::new(640.0).range(360.0, 960.0)` is 640
   wide and double-click resets to 640; before, `new` clamped to the stock 160–480 first, so it
   was 480.

@@ -394,7 +394,7 @@ impl<S: 'static> View<S> {
             DiffMode::Unified => {
                 let mut c = col().key("notes").w_full();
                 if let Some(w) = self.view_w(st, false) {
-                    c = c.max_w(w);
+                    c = c.w(w).sticky_left(0.0);
                 }
                 // An unchanged line's annotations from either side, once.
                 let mut seen = std::collections::HashSet::new();
@@ -432,7 +432,26 @@ impl<S: 'static> View<S> {
             LineKind::Removed => st.copy_side() == Side::Old,
         };
         let hover_side = if c.kind == LineKind::Removed { Side::Old } else { Side::New };
-        let mut r = row()
+        // The marker, numbers and "+" hold to the viewport's left edge while the code scrolls
+        // sideways under them, on the row's own opaque fill.
+        let mut gutter = row()
+            .key("gutter")
+            .self_stretch()
+            .items_stretch()
+            .fill(fill)
+            .child(self.bar(c.kind))
+            .child(self.number(st, i, f, c.old, Side::Old, c.kind, selected, digits).key("no"))
+            .child(self.number(st, i, f, c.new, Side::New, c.kind, selected, digits).key("nn"));
+        if self.d.on_comment.is_some() {
+            let at = c.new.map(|n| LineRef::new(Side::New, n)).or(c.old.map(|n| LineRef::new(Side::Old, n)));
+            if let Some(at) = at {
+                gutter = gutter.child(self.plus(f, at).absolute(BAR + 2.0 * l.number_w(digits) - 10.0, 2.0));
+            }
+        }
+        if !st.wraps() {
+            gutter = gutter.sticky_left(0.0);
+        }
+        row()
             .w_full()
             .min_h(LINE_H)
             .items_start()
@@ -441,17 +460,8 @@ impl<S: 'static> View<S> {
             .hover_group()
             .role("listitem")
             .label(c.label())
-            .child(self.bar(c.kind))
-            .child(self.number(st, i, f, c.old, Side::Old, c.kind, selected, digits).key("no"))
-            .child(self.number(st, i, f, c.new, Side::New, c.kind, selected, digits).key("nn"))
-            .child(self.code(st, f, &c, copy, hover_side, &st.keys[i]).key("code"));
-        if self.d.on_comment.is_some() {
-            let at = c.new.map(|n| LineRef::new(Side::New, n)).or(c.old.map(|n| LineRef::new(Side::Old, n)));
-            if let Some(at) = at {
-                r = r.child(self.plus(f, at).absolute(BAR + 2.0 * l.number_w(digits) - 10.0, 2.0));
-            }
-        }
-        r
+            .child(gutter)
+            .child(self.code(st, f, &c, copy, hover_side, &st.keys[i]).key("code"))
     }
 
     fn split<'a>(&self, st: &'a DiffState, i: usize, f: usize, old: Option<Cell<'a>>, new: Option<Cell<'a>>) -> El {
@@ -648,7 +658,7 @@ impl<S: 'static> View<S> {
         let buttons = row().key("expand").w(self.gutter_w(st, f)).h(GAP_H).center().gap(2.0).children(buttons);
         let mut inner = row().key("inner").h(GAP_H).items_center().gap(12.0).child(buttons);
         if let Some(w) = self.view_w(st, false) {
-            inner = inner.max_w(w);
+            inner = inner.max_w(w).sticky_left(0.0);
         }
         if hidden > 0 {
             let count = text(if hidden == 1 { "1 unchanged line".to_owned() } else { format!("{hidden} unchanged lines") }).font(l.small).color(l.muted).key("count");
@@ -687,7 +697,7 @@ impl<S: 'static> View<S> {
         };
         let mut inner = row().key("inner").h(NOTE_H).items_center().pl(self.gutter_w(st, f) + CODE_PAD.0).child(text(msg).font(l.small).color(l.muted));
         if let Some(w) = self.view_w(st, false) {
-            inner = inner.max_w(w);
+            inner = inner.max_w(w).sticky_left(0.0);
         }
         row().w_full().h(NOTE_H).fill(l.bg).role("note").label(msg).child(inner)
     }
