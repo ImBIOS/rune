@@ -118,6 +118,10 @@ required-features = ["frame-profile"]
 name = "cache_pan_zoom"
 required-features = ["frame-profile"]
 
+[[example]]
+name = "pinch_bench"
+required-features = ["frame-profile"]
+
 [[test]]
 name = "macos_appearance_kvo"
 harness = false

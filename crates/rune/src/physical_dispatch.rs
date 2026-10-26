@@ -58,8 +58,14 @@ impl<S: 'static> Runtime<S> {
         }
         let mut tx = Tx::default();
         let consumed = self.dispatch_physical(event, None, &mut tx);
+        let live_only = std::mem::take(&mut tx.live_only);
         merge(&mut self.pending, tx);
-        self.dirty |= consumed;
+        if consumed && live_only {
+            self.live_only_skips += 1;
+            self.live_dirty = true;
+        } else {
+            self.dirty |= consumed;
+        }
         consumed
     }
     /// Remember an activation key's first press and the focus it landed on; true drops a
@@ -106,14 +112,16 @@ impl<S: 'static> Runtime<S> {
             PhysicalInput::Modifiers(_) => {}
         }
         let repeat = matches!(event, PhysicalInput::Key { repeat: true, .. });
-        let consumed = self.offer_physical(&event, tx);
-        let modifier = self.modifier_dispatch(&event, consumed, tx);
-        if consumed { return true; }
-        modifier | match fallback {
+        // Live-only when every handler that took the event said so (`Tx::live_only`).
+        let mut live = None;
+        let consumed = self.offer_physical(&event, tx, &mut live);
+        let modifier = self.modifier_dispatch(&event, consumed, tx, &mut live);
+        let ran = consumed || modifier | match fallback {
             // A release's logical key, for `on_key_up`.
             Some(Fallback { key, .. }) if matches!(event, PhysicalInput::Key { pressed: false, .. }) => {
                 let mut one = self.transaction();
                 let ran = self.route_key_up(&key, &mut one);
+                fold_live(&mut live, ran, &one);
                 merge(tx, one);
                 ran
             }
@@ -132,19 +140,23 @@ impl<S: 'static> Runtime<S> {
                         Some(Unhandled::Minimize) => one.minimize(),
                         None => {}
                     }
+                    fold_live(&mut live, ran || unhandled.is_some(), &one);
                     merge(tx, one);
                     ran || unhandled.is_some()
                 }
             }
             None => false,
-        }
+        };
+        tx.live_only = ran && live == Some(true);
+        ran
     }
     /// The focused element's `on_physical_input` handler; true if it consumed `event`.
-    fn offer_physical(&mut self, event: &PhysicalInput, tx: &mut Tx) -> bool {
+    fn offer_physical(&mut self, event: &PhysicalInput, tx: &mut Tx, live: &mut Option<bool>) -> bool {
         let Some(handler) = self.focused.as_deref().and_then(|p| self.node(p))
             .and_then(|n| n.focus.physical.clone()) else { return false };
         let mut one = Tx { key_repeat: matches!(event, PhysicalInput::Key { repeat: true, .. }), ..Tx::default() };
-        let consumed = handler(handler_state(&mut self.state), event, &mut one);
+        let consumed = Tx::took(handler(handler_state(&mut self.state), event, &mut one), &mut one);
+        fold_live(live, consumed, &one);
         merge(tx, one);
         consumed
     }
@@ -152,7 +164,7 @@ impl<S: 'static> Runtime<S> {
     /// modifier keys stay held.
     pub(super) fn physical_focus_lost(&mut self) -> bool {
         let mut tx = Tx::default();
-        let changed = self.offer_physical(&PhysicalInput::FocusLost, &mut tx);
+        let changed = self.offer_physical(&PhysicalInput::FocusLost, &mut tx, &mut None);
         merge(&mut self.pending, tx);
         changed
     }

@@ -78,7 +78,7 @@ impl<S: 'static> Runtime<S> {
     fn call_wheel(&mut self, path: &str, ev: WheelEvent, tx: &mut Tx) -> Option<bool> {
         let (i, f) = self.gesture_handler(path, |g| g.wheel.clone())?;
         let [x, y] = self.to_local(i, ev.x, ev.y);
-        Some(f(handler_state(&mut self.state), WheelEvent { x, y, ..ev }, tx))
+        Some(Tx::took(f(handler_state(&mut self.state), WheelEvent { x, y, ..ev }, tx), tx))
     }
 
     /// A trackpad pinch at window point (`ev.x`, `ev.y`) for the [`El::on_magnify`] handlers
@@ -117,15 +117,15 @@ impl<S: 'static> Runtime<S> {
             let taken = match gesture {
                 Gesture::Magnify(ev) => self.gesture_handler(&path, |g| g.magnify.clone()).map(|(i, f)| {
                     let [x, y] = self.to_local(i, ev.x, ev.y);
-                    f(handler_state(&mut self.state), MagnifyEvent { x, y, ..ev }, tx)
+                    Tx::took(f(handler_state(&mut self.state), MagnifyEvent { x, y, ..ev }, tx), tx)
                 }),
                 Gesture::Rotate(ev) => self.gesture_handler(&path, |g| g.rotate.clone()).map(|(i, f)| {
                     let [x, y] = self.to_local(i, ev.x, ev.y);
-                    f(handler_state(&mut self.state), RotateEvent { x, y, ..ev }, tx)
+                    Tx::took(f(handler_state(&mut self.state), RotateEvent { x, y, ..ev }, tx), tx)
                 }),
                 Gesture::SmartMagnify(x, y) => self.gesture_handler(&path, |g| g.smart_magnify.clone()).map(|(i, f)| {
                     let [x, y] = self.to_local(i, x, y);
-                    f(handler_state(&mut self.state), x, y, tx)
+                    Tx::took(f(handler_state(&mut self.state), x, y, tx), tx)
                 }),
             };
             if taken == Some(true) { return true; }
@@ -302,7 +302,7 @@ impl<S: 'static> Runtime<S> {
             chain.sort_by_key(|i| shared.iter().position(|s| s == i).map_or(0, |p| p + 1));
         }
         for i in chain {
-            if let Some(f) = self.nodes[i].focus.key_up.clone() && f(handler_state(&mut self.state), ev, tx) {
+            if let Some(f) = self.nodes[i].focus.key_up.clone() && Tx::took(f(handler_state(&mut self.state), ev, tx), tx) {
                 self.events.push(format!("key-up {:?}", ev.key));
                 return true;
             }

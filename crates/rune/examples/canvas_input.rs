@@ -8,6 +8,8 @@
 //! - "Focus" centres the selected node and glides its row in the layers list into view
 //!   (`Tx::scroll_to`).
 //! - A toolbar would float over the selection: `on_drawn_layout` reports where it shows.
+//! - The handlers that only move the camera say `Tx::live_only`, so their events don't re-run
+//!   the view.
 //!
 //! cargo run -p rune --example canvas_input
 use rune::{Color, Cx, Drag, El, Env, Key, KeyEvent, Live, MagnifyEvent, Mods, Phase, PointerButton, Runtime, ScrollSpec, Tx, WheelEvent, col, el, row};
@@ -64,20 +66,24 @@ fn view(s: &Canvas, _: &mut Cx<Canvas>) -> El {
         w.child(if i == s.selected { node.on_drawn_layout(|s: &mut Canvas, r| s.toolbar = Some(r)) } else { node })
     });
     let canvas = el().key("canvas").size(CANVAS, CANVAS).clip_soft(0.0).child(nodes)
-        .on_wheel(|s: &mut Canvas, e: WheelEvent, _| {
+        // The camera is all these handlers change, and the view reads none of it: they say
+        // `live_only`, and a pan or pinch draws without re-running the view.
+        .on_wheel(|s: &mut Canvas, e: WheelEvent, tx| {
             s.set_camera([s.pan[0] + e.dx, s.pan[1] + e.dy], s.zoom);
+            tx.live_only();
             true
         })
-        .on_magnify(|s: &mut Canvas, e: MagnifyEvent, _| {
+        .on_magnify(|s: &mut Canvas, e: MagnifyEvent, tx| {
             // Keep the world point under the pointer where it is.
             let (q, p, c) = ([e.x, e.y], s.world([e.x, e.y]), CANVAS / 2.0);
             let zoom = (s.zoom * (1.0 + e.delta)).clamp(0.1, 8.0);
             s.set_camera([q[0] - c - (p[0] - c) * zoom, q[1] - c - (p[1] - c) * zoom], zoom);
+            tx.live_only();
             true
         })
         .pointer_buttons([PointerButton::Middle])
         .on_drag(|s: &mut Canvas, d: &mut Drag, tx: &mut Tx| {
-            if tx.button() == PointerButton::Middle || s.space { s.drag_pan(d); }
+            if tx.button() == PointerButton::Middle || s.space { s.drag_pan(d); tx.live_only(); }
         });
     let focus = el().key("focus").h(ROW).w_full().fill(Color::WHITE.alpha(0.1))
         .on_press_tx(|s: &mut Canvas, tx| {

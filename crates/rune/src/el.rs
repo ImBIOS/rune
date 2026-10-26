@@ -52,6 +52,8 @@ pub struct Tx {
     pub(crate) mods: crate::Mods,
     pub(crate) srgb_blend: Option<bool>,
     pub(crate) blur: bool,
+    /// `Tx::live_only`: this handler changed nothing the view reads.
+    pub(crate) live_only: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -315,6 +317,36 @@ impl Tx {
         self.window_frame = Some(self.window_frame.unwrap_or_default().merge(request));
     }
 
+    /// This handler changed only [`Live`](crate::Live) values (a canvas camera's
+    /// `live_offset` and `live_scale`), or nothing else the view reads, so its event doesn't
+    /// re-run the view or lay it out. The frame still draws the new live values, hit tests
+    /// against where they put elements, and reports [`El::on_drawn_layout`]. Whatever else the
+    /// handler asked of its `Tx` (a scroll, a copy, `wake_after`) still happens. It works in
+    /// every input handler with a `Tx` and in [`El::on_drawn_layout_tx`]. A handler that
+    /// declines its event (returns false) takes it back, and an event several handlers take is
+    /// live-only only if each says so. It's the handler form of
+    /// [`Runtime::update_if`](crate::Runtime::update_if) returning false.
+    ///
+    /// ```ignore
+    /// .on_magnify(|s: &mut Canvas, e, tx| {
+    ///     s.camera.zoom_about(e.x, e.y, 1.0 + e.delta); // sets Live values only
+    ///     tx.live_only();
+    ///     true
+    /// })
+    /// ```
+    ///
+    /// Changing state the view reads and calling this leaves the screen stale until the next
+    /// commit. Debug builds look for that: a live-only event a quarter second or more after
+    /// the last commit still re-runs the view, and if the elements, layout, text or colours
+    /// it builds differ from what's on screen, Rune prints the handler that said `live_only`.
+    pub fn live_only(&mut self) {
+        self.live_only = true;
+    }
+    /// A handler that declined its event (`taken` false) takes back its `live_only`.
+    pub(crate) fn took(taken: bool, tx: &mut Tx) -> bool {
+        if !taken { tx.live_only = false; }
+        taken
+    }
     /// Apply this change with no animation (direct manipulation).
     pub fn instant(&mut self) {
         self.instant = true;
@@ -362,7 +394,6 @@ pub struct Drag {
 }
 
 pub(crate) type PressFn = Rc<dyn Fn(&mut dyn Any, &mut Tx)>;
-pub(crate) type SecondaryFn = Rc<dyn Fn(&mut dyn Any, PointerPress, &mut Tx)>;
 pub(crate) type InputKeyFn = Rc<dyn Fn(&mut dyn Any, &crate::KeyEvent, &mut Tx) -> bool>;
 pub(crate) type StepFn = Rc<dyn Fn(&mut dyn Any, i32, &mut Tx)>;
 pub(crate) type StepLimitFn = Rc<dyn Fn(&mut dyn Any, bool, &mut Tx)>;
@@ -373,6 +404,30 @@ pub struct PointerPress {
     pub x: f32,
     pub y: f32,
 }
+
+/// Where the pointer is, for [`El::on_pointer_move_local`] and
+/// [`El::on_secondary_press_local`]: `x` and `y` in the element's own layout points, as
+/// [`Drag`] and [`crate::WheelEvent`] give them (from its top-left as drawn, divided by any
+/// scale it draws at, so they hold on a zoomed canvas), and the same point in window points
+/// for a context menu's anchor.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PointerEvent {
+    pub x: f32,
+    pub y: f32,
+    pub window_x: f32,
+    pub window_y: f32,
+}
+
+impl PointerEvent {
+    /// The point in window points, as `on_pointer_move` and `on_secondary_press` give it: a
+    /// popup or context menu's anchor.
+    pub fn window(&self) -> PointerPress {
+        PointerPress { x: self.window_x, y: self.window_y }
+    }
+}
+
+pub(crate) type PointerFn = Rc<dyn Fn(&mut dyn Any, PointerEvent, &mut Tx)>;
 pub(crate) type DragFn = Rc<dyn Fn(&mut dyn Any, &mut Drag, &mut Tx)>;
 pub(crate) type DragOutFn = Rc<dyn Fn(&dyn Any) -> Option<crate::DragItem>>;
 pub(crate) type DragEndFn = Rc<dyn Fn(&mut dyn Any, crate::DragOutcome, &mut Tx)>;
@@ -912,6 +967,7 @@ impl ScrollAxes {
 
 pub(crate) type AtBottomFn = Rc<dyn Fn(&mut dyn Any, bool)>;
 pub(crate) type LayoutFn = Rc<dyn Fn(&mut dyn Any, [f32; 4])>;
+pub(crate) type DrawnLayoutFn = Rc<dyn Fn(&mut dyn Any, [f32; 4], &mut Tx)>;
 pub(crate) type WindowFocusFn = Rc<dyn Fn(&mut dyn Any, bool, &mut Tx)>;
 
 #[derive(Clone)]
@@ -940,10 +996,10 @@ pub struct El {
     pub(crate) memo_children: Option<Rc<crate::memo::Shared>>,
     pub(crate) on_press: Option<PressFn>,
     pub(crate) on_double_press: Option<PressFn>,
-    pub(crate) on_secondary_press: Option<SecondaryFn>,
+    pub(crate) on_secondary_press: Option<PointerFn>,
     pub(crate) on_hover: Option<PressFn>,
     pub(crate) on_hover_change: Option<WindowFocusFn>,
-    pub(crate) on_pointer_move: Option<SecondaryFn>,
+    pub(crate) on_pointer_move: Option<PointerFn>,
     /// `on_wheel`, `on_magnify` and the other canvas handlers (`canvas_input.rs`).
     pub(crate) gestures: Option<Box<crate::canvas_input::CanvasInput>>,
     pub(crate) above: Option<Anchor>,
@@ -965,7 +1021,7 @@ pub struct El {
     pub(crate) on_at_bottom: Option<AtBottomFn>,
     pub(crate) on_layout: Option<LayoutFn>,
     pub(crate) on_screen_layout: Option<LayoutFn>,
-    pub(crate) on_drawn_layout: Option<LayoutFn>,
+    pub(crate) on_drawn_layout: Option<DrawnLayoutFn>,
     pub(crate) scroll_edges: ScrollEdges,
     pub(crate) growth: Option<GrowthSpec>,
     pub(crate) virtual_estimate: Option<f32>,
@@ -1333,11 +1389,26 @@ impl El {
         self.focus.key = Some(Rc::new(move |s, key, tx| f(downcast::<S>(s), key, tx)));
         self
     }
-    /// Secondary release inside the captured element (right-click or macOS control-click).
+    /// Secondary release inside the captured element (right-click or macOS control-click), at a
+    /// point in window points: a context menu's anchor. [`El::on_secondary_press_local`] gives
+    /// the element's own points as well.
     pub fn on_secondary_press<S: 'static>(mut self, f: impl Fn(&mut S, PointerPress, &mut Tx) + 'static) -> Self {
         self.on_secondary_press = Some(Rc::new(move |s, p, tx| {
-            f(s.downcast_mut::<S>().expect("secondary press state type"), p, tx);
+            f(s.downcast_mut::<S>().expect("secondary press state type"), p.window(), tx);
         }));
+        self
+    }
+    /// [`El::on_secondary_press`] with the point in this element's own layout points too, as
+    /// [`Drag`] gives them, so a canvas finds what was right-clicked at any zoom. Open the menu
+    /// at [`PointerEvent::window`].
+    ///
+    /// ```ignore
+    /// .on_secondary_press_local(|s: &mut Canvas, p, tx| {
+    ///     s.menu = Some((s.shape_at(p.x, p.y), p.window()));
+    /// })
+    /// ```
+    pub fn on_secondary_press_local<S: 'static>(mut self, f: impl Fn(&mut S, PointerEvent, &mut Tx) + 'static) -> Self {
+        self.on_secondary_press = Some(Rc::new(move |s, p, tx| f(downcast::<S>(s), p, tx)));
         self
     }
 
@@ -1920,9 +1991,25 @@ impl El {
         self
     }
 
-    /// Observe movement in window-local points without making a native overlay input region.
+    /// Observe the pointer moving over this element, in window points, without making a native
+    /// overlay input region. [`El::on_pointer_move_local`] gives the element's own points.
     pub fn on_pointer_move<S: 'static>(mut self, f: impl Fn(&mut S, PointerPress) + 'static) -> Self {
-        self.on_pointer_move = Some(Rc::new(move |s, p, _| f(downcast::<S>(s), p)));
+        self.on_pointer_move = Some(Rc::new(move |s, p, _| f(downcast::<S>(s), p.window())));
+        self
+    }
+    /// [`El::on_pointer_move`] with the point in this element's own layout points as well as
+    /// the window's (see [`PointerEvent`]), and a [`Tx`]: a canvas tracks the pointer in its own
+    /// coordinates at any zoom, and a handler that only moves a [`Live`](crate::Live) value
+    /// (a crosshair) says so with [`Tx::live_only`].
+    ///
+    /// ```ignore
+    /// .on_pointer_move_local(|s: &mut Canvas, p, tx| {
+    ///     s.crosshair.set([p.x, p.y]);
+    ///     tx.live_only();
+    /// })
+    /// ```
+    pub fn on_pointer_move_local<S: 'static>(mut self, f: impl Fn(&mut S, PointerEvent, &mut Tx) + 'static) -> Self {
+        self.on_pointer_move = Some(Rc::new(move |s, p, tx| f(downcast::<S>(s), p, tx)));
         self
     }
 
@@ -2629,9 +2716,24 @@ impl El {
     /// spring moving it, its own or an ancestor's, reports where it comes to rest, as
     /// `on_layout` does. Its handler runs on the next frame. Keep it to the few elements
     /// something follows (a selection a toolbar floats over), not every node on a canvas: each
-    /// report is a state change, so the view runs again.
+    /// report is a state change, so the view runs again, unless the handler says
+    /// [`Tx::live_only`] (see [`El::on_drawn_layout_tx`]).
     pub fn on_drawn_layout<S: 'static>(mut self, f: impl Fn(&mut S, [f32; 4]) + 'static) -> Self {
-        self.on_drawn_layout = Some(Rc::new(move |s, r| f(downcast::<S>(s), r)));
+        self.on_drawn_layout = Some(Rc::new(move |s, r, _| f(downcast::<S>(s), r)));
+        self
+    }
+    /// [`El::on_drawn_layout`] with a [`Tx`]. A toolbar that floats over a selection by its own
+    /// [`El::live_offset`] follows a camera pan with no view re-run at all: the handler sets
+    /// the toolbar's live offset and says [`Tx::live_only`].
+    ///
+    /// ```ignore
+    /// .on_drawn_layout_tx(|s: &mut Canvas, [x, y, w, _], tx| {
+    ///     s.toolbar_at.set([x + w / 2.0 - TOOLBAR_W / 2.0, y - TOOLBAR_H - 8.0]);
+    ///     tx.live_only();
+    /// })
+    /// ```
+    pub fn on_drawn_layout_tx<S: 'static>(mut self, f: impl Fn(&mut S, [f32; 4], &mut Tx) + 'static) -> Self {
+        self.on_drawn_layout = Some(Rc::new(move |s, r, tx| f(downcast::<S>(s), r, tx)));
         self
     }
     /// Make this column a growth stack (see [`GrowthSpec`]). Required alongside

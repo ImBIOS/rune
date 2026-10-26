@@ -5,6 +5,27 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Tx::live_only`: an event that moves only live values doesn't re-run the view.** A handler
+  that changed nothing the view reads (a canvas camera's `live_offset` and `live_scale`) calls
+  `tx.live_only()`, and its event skips the view, diff and layout while the frame still draws
+  the live values, hit tests where they put elements and reports `on_drawn_layout`. It works in
+  every handler with a `Tx`: wheel, pinch, rotation, drag, pointer move, keys, key releases,
+  physical input, presses and hover. A handler that declines its event takes it back, and an
+  event several handlers take is live-only only if each says so. Debug builds check a
+  live-only event a quarter second or more after the last commit by re-running the view
+  anyway, and print the handler when what it builds differs (`Runtime::check_live_only(false)`
+  turns that off; `Runtime::live_only_events` counts the skips). On a 2,000-card canvas a
+  120-frame pinch went from one view run and 13.7 ms of CPU per frame to none and 2.0 ms
+  (`examples/pinch_bench.rs`). Nothing changes for a handler that doesn't call it.
+
+- **Element-local points for pointer moves and secondary presses.**
+  `El::on_pointer_move_local` and `El::on_secondary_press_local` give a `PointerEvent`: `x` and
+  `y` in the element's own layout points, as `Drag` and `WheelEvent` give them, and
+  `window_x`, `window_y` and `window()` in window points for a menu's anchor;
+  `on_pointer_move_local` also gets a `Tx`. `El::on_drawn_layout_tx` is `on_drawn_layout`
+  with a `Tx`. `on_pointer_move`, `on_secondary_press` and `on_drawn_layout` report what they
+  did. The crate README has a table of each handler's coordinate space.
+
 - **Combobox filtering springs the popup and fades rows.** Typing in a `Combobox` search used to
   resize the list in one frame and pop rows in and out. The search field now animates its edit
   layout, the viewport's height springs, rows fade, and the empty state stays mounted and

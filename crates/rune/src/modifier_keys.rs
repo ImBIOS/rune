@@ -158,11 +158,13 @@ impl<S: 'static> Runtime<S> {
 
     /// After the focused physical handler saw `event` (and `consumed` it or not): route the
     /// modifier keys it presses and releases. True if a handler took one.
-    pub(super) fn modifier_dispatch(&mut self, event: &PhysicalInput, consumed: bool, tx: &mut Tx) -> bool {
+    pub(super) fn modifier_dispatch(&mut self, event: &PhysicalInput, consumed: bool, tx: &mut Tx, live: &mut Option<bool>) -> bool {
         let mut ran = false;
         for ev in self.modifier_keys.apply(event, consumed, ALTGR_CLEARS_FLAGS) {
             let mut one = self.transaction();
-            ran |= self.route_modifier(&ev, &mut one);
+            let took = self.route_modifier(&ev, &mut one);
+            fold_live(live, took, &one);
+            ran |= took;
             merge(tx, one);
         }
         ran
@@ -174,13 +176,13 @@ impl<S: 'static> Runtime<S> {
         if !self.modifier_keys.enabled { return false; }
         one.key_repeat = false;
         let app_first = self.focused.is_none();
-        if app_first && let Some(f) = self.on_key && app_call!(f, &mut self.state, ev, one) { return true; }
+        if app_first && let Some(f) = self.on_key && Tx::took(app_call!(f, &mut self.state, ev, one), one) { return true; }
         if let Some(f) = self.focused_input().and_then(|input| input.key.clone())
-            && f(handler_state(&mut self.state), ev, one)
+            && Tx::took(f(handler_state(&mut self.state), ev, one), one)
         {
             return true;
         }
-        if !app_first && let Some(f) = self.on_key && app_call!(f, &mut self.state, ev, one) {
+        if !app_first && let Some(f) = self.on_key && Tx::took(app_call!(f, &mut self.state, ev, one), one) {
             self.events.push(format!("key {:?}", ev.key));
             return true;
         }

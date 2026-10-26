@@ -24,7 +24,7 @@ use taffy::TraversePartialTree;
 
 use crate::color::{Color, over, srgb_encode};
 use crate::edit::{EditOutcome, Ime, KeyEvent};
-use crate::el::{Align, Drag, DragEndFn, DragFn, DragOutFn, El, GrowthSpec, InputSpec, Phase, PointerPress, PressFn, SecondaryFn, ScrollSpec, Shell, TextSpec, Tx, Visual};
+use crate::el::{Align, Drag, DragEndFn, DragFn, DragOutFn, El, GrowthSpec, InputSpec, Phase, PointerEvent, PointerFn, PressFn, ScrollSpec, Shell, TextSpec, Tx, Visual};
 use crate::growth::{GrowTrack, SUBSTEP};
 // Half-open, like overlays, NSPointInRect and PtInRect: a shared edge belongs to one side.
 use crate::overlay_options::contains;
@@ -120,6 +120,13 @@ mod drop_tests;
 #[cfg(test)]
 #[path = "on_key_tests.rs"]
 mod on_key_tests;
+#[cfg(test)]
+#[path = "live_only_tests.rs"]
+mod live_only_tests;
+
+/// Seconds after a commit before debug builds check a `Tx::live_only` event (`skip_view`).
+#[cfg(debug_assertions)]
+const LIVE_ONLY_CHECK: f64 = 0.25;
 
 const P_FILL: Prop<Color> = Prop::custom(64, PropClass::Color);
 const P_BORDER: Prop<Color> = Prop::custom(65, PropClass::Color);
@@ -372,10 +379,10 @@ pub(crate) struct Node {
     live_text_seen: Option<u128>,
     on_press: Option<PressFn>,
     on_double_press: Option<PressFn>,
-    on_secondary_press: Option<SecondaryFn>,
+    on_secondary_press: Option<PointerFn>,
     on_hover: Option<PressFn>,
     on_hover_change: Option<crate::el::WindowFocusFn>,
-    on_pointer_move: Option<SecondaryFn>,
+    on_pointer_move: Option<PointerFn>,
     gestures: Option<Box<crate::canvas_input::CanvasInput>>,
     above: Option<crate::el::Anchor>,
     on_drag: Option<DragFn>,
@@ -396,7 +403,7 @@ pub(crate) struct Node {
     on_at_bottom: Option<crate::el::AtBottomFn>,
     on_layout: Option<crate::el::LayoutFn>,
     on_screen_layout: Option<crate::el::LayoutFn>,
-    on_drawn_layout: Option<crate::el::LayoutFn>,
+    on_drawn_layout: Option<crate::el::DrawnLayoutFn>,
     scroll_edges: crate::el::ScrollEdges,
     growth: Option<GrowthSpec>,
     streaming: bool,
@@ -452,7 +459,7 @@ enum Action {
     /// The pointer entered a `focus_highlight` row (`Some`) or left every such row.
     HoverFocus(Option<String>),
     Dismiss(String),
-    PointerMove(String, PointerPress),
+    PointerMove(String, PointerEvent),
     Hover(String),
     HoverChange(String, bool),
     AtBottom(String, bool),
@@ -463,7 +470,7 @@ enum Action {
     Press(String, crate::PointerButton),
     DoublePress(String),
     Link(String, usize),
-    SecondaryPress(String, PointerPress),
+    SecondaryPress(String, PointerEvent),
     Drag(String, Drag, crate::PointerButton),
     DragStart(String),
     DragEnd(String, crate::DragOutcome),
@@ -1017,6 +1024,22 @@ pub struct Runtime<S: 'static> {
     keys_lost: bool,
     live_subscriptions: Vec<Arc<crate::live::Subscription>>,
     live_dirty: bool,
+    /// Events whose handler said `Tx::live_only`, and so didn't commit.
+    live_only_skips: u64,
+    /// The clock at the last commit.
+    last_commit_clock: f64,
+    /// Debug builds check `Tx::live_only` events (`skip_view`).
+    #[cfg(debug_assertions)]
+    live_only_check: bool,
+    /// The live-only event this frame's commit checks: its handler, and what the view had built.
+    #[cfg(debug_assertions)]
+    live_check: Option<(String, u64)>,
+    /// Live-only events checked (and so committed) so far.
+    #[cfg(debug_assertions)]
+    live_checks: u64,
+    /// Stale-view warnings printed for `Tx::live_only` handlers, each once.
+    #[cfg(debug_assertions)]
+    pub(crate) live_only_warnings: Vec<String>,
     /// When the frame being built will present; videos pull the picture for it.
     pub(crate) frame_target: Option<crate::time::Instant>,
     /// A drawn video is playing or seeking: keep drawing frames.
@@ -1293,6 +1316,16 @@ impl<S: 'static> Runtime<S> {
             on_focus: None,
             live_subscriptions: Vec::new(),
             live_dirty: false,
+            live_only_skips: 0,
+            last_commit_clock: f64::NEG_INFINITY,
+            #[cfg(debug_assertions)]
+            live_only_check: true,
+            #[cfg(debug_assertions)]
+            live_check: None,
+            #[cfg(debug_assertions)]
+            live_checks: 0,
+            #[cfg(debug_assertions)]
+            live_only_warnings: Vec::new(),
             key_warnings: None,
             ambient: None,
             press_at: (0.0, 0.0),
@@ -1637,6 +1670,22 @@ impl<S: 'static> Runtime<S> {
         merge(&mut self.pending, one);
         self.dirty |= changed;
         stale
+    }
+
+    /// Events whose handler called [`Tx::live_only`] and so didn't re-run the view, since the
+    /// runtime started.
+    pub fn live_only_events(&self) -> u64 {
+        self.live_only_skips
+    }
+
+    /// Whether debug builds check `Tx::live_only` handlers (on by default): a live-only event
+    /// a quarter second or more after the last commit still commits, and Rune warns when the
+    /// view built something else. A test counting commits turns it off. Release builds never
+    /// check.
+    pub fn check_live_only(&mut self, on: bool) {
+        #[cfg(debug_assertions)]
+        { self.live_only_check = on; }
+        let _ = on;
     }
 
     /// Takes a `Tx::minimize` that `what` can't carry out, saying so in debug builds.
@@ -1995,6 +2044,10 @@ impl<S: 'static> Runtime<S> {
         let ended: Vec<_> = self.drag_ends.borrow_mut().drain(..).collect();
         let queue = order_drag_ends(std::mem::take(&mut self.queue), ended, &mut self.drags_open);
         let queue = self.hold_files(queue, ran || self.dirty);
+        // Something besides a checked live-only event wants this frame's commit, so a change
+        // it makes isn't the live-only handler's.
+        #[cfg(debug_assertions)]
+        let mut ran_other = ran;
         for action in queue {
             // State may have requested focus on a newly mounted field. Resolve the
             // new tree before routing this frame's text, not after it has gone to
@@ -2007,13 +2060,22 @@ impl<S: 'static> Runtime<S> {
                 }
                 if self.settle { tx.settle(); }
                 self.settled |= tx.settle;
+                #[cfg(debug_assertions)]
+                let check = self.live_check.take().filter(|_| !ran_other && !self.dirty);
                 self.commit(&tx);
+                #[cfg(debug_assertions)]
+                { self.compare_live_check(check); ran_other = false; }
                 ran = false;
             }
             if matches!(action, Action::Layout(..) | Action::ScreenLayout(..) | Action::DrawnLayout(_, _, false)) {
                 ran_layout |= self.run_action(action, &mut tx);
             } else {
-                ran |= self.run_action(action, &mut tx);
+                #[cfg(debug_assertions)]
+                let checks = self.live_checks;
+                let r = self.run_action(action, &mut tx);
+                #[cfg(debug_assertions)]
+                { ran_other |= r && checks == self.live_checks; }
+                ran |= r;
             }
         }
         self.latch_requests(&mut tx);
@@ -2036,7 +2098,8 @@ impl<S: 'static> Runtime<S> {
         if self.caret_watch && self.caret_moved(None) { self.dirty = true; }
         let read_moved = !self.layout_seen.is_empty() && self.layout_feedback_open() && self.layout_moved(None, None);
         if self.has_pixel_aspect && self.pixel_aspect_changed() { self.relayout = true; }
-        let other = ran || self.dirty || self.relayout || self.settle || self.virtual_window_changed();
+        let besides = self.dirty || self.relayout || self.settle || self.virtual_window_changed();
+        let other = ran || besides;
         self.count_layout_echo(ran_layout || read_moved, other);
         if other || ran_layout || read_moved {
             if self.relayout && !ran && !self.dirty {
@@ -2048,8 +2111,14 @@ impl<S: 'static> Runtime<S> {
             }
             self.settled = tx.settle;
             self.state_unchanged = !ran && !self.dirty && !ran_layout && !self.settle && self.commits > 0;
+            #[cfg(debug_assertions)]
+            let check = self.live_check.take().filter(|_| !ran_other && !besides && !ran_layout && !read_moved);
             self.commit(&tx);
+            #[cfg(debug_assertions)]
+            self.compare_live_check(check);
         }
+        #[cfg(debug_assertions)]
+        { self.live_check = None; }
         let follow = std::mem::take(&mut self.caret_follow);
         if !scroll_to.is_empty() || follow { self.step_scroll(0.0); }
         if follow { self.follow_caret(); }
@@ -2314,6 +2383,14 @@ impl<S: 'static> Runtime<S> {
 
     fn run_action(&mut self, action: Action, tx: &mut Tx) -> bool {
         let mut one = self.transaction();
+        // Debug builds name the element too, for the stale-view warning.
+        #[cfg(debug_assertions)]
+        let live_label = live_only_handler(&action).map(|h| match action_path(&action) {
+            Some(path) => format!("{h} on {path:?}"),
+            None => h.to_owned(),
+        });
+        #[cfg(not(debug_assertions))]
+        let live_label = live_only_handler(&action);
         let ran = match action {
             Action::WindowFocus(focused) => {
                 if !focused { self.held = None; }
@@ -2324,7 +2401,9 @@ impl<S: 'static> Runtime<S> {
             Action::Physical(event, fallback) => {
                 // The window lost key focus (an internal focus move also notifies handlers).
                 if matches!(event, crate::PhysicalInput::FocusLost) { self.held = None; }
-                return self.dispatch_physical(event, fallback, tx);
+                let ran = self.dispatch_physical(event, fallback, tx);
+                let live_only = std::mem::take(&mut tx.live_only);
+                return if ran && live_only { self.skip_view("a key handler") } else { ran };
             }
             Action::FocusControl(path) => {
                 self.set_focus(Some(path), false);
@@ -2367,7 +2446,7 @@ impl<S: 'static> Runtime<S> {
             }
             Action::DrawnLayout(path, rect, _) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_drawn_layout.clone()) else { return false };
-                f(handler_state(&mut self.state), rect);
+                f(handler_state(&mut self.state), rect, &mut one);
                 true
             }
             Action::Hover(path) => {
@@ -2494,8 +2573,71 @@ impl<S: 'static> Runtime<S> {
                 true
             }
         };
+        let live_only = std::mem::take(&mut one.live_only);
         merge(tx, one);
+        if ran && live_only && let Some(label) = live_label {
+            return self.skip_view(label);
+        }
         ran
+    }
+
+    /// An event whose handler called `Tx::live_only`: false, so it doesn't commit, while this
+    /// frame still latches the live values it set. Debug builds check one such event a quarter
+    /// second after the last commit by committing anyway (true) and comparing what it built.
+    fn skip_view(&mut self, label: impl std::fmt::Display) -> bool {
+        #[cfg(debug_assertions)]
+        if self.live_only_check && self.clock - self.last_commit_clock >= LIVE_ONLY_CHECK {
+            if self.live_check.is_none() { self.live_check = Some((label.to_string(), self.view_fingerprint())); }
+            self.live_checks += 1;
+            self.live_dirty = true;
+            return true;
+        }
+        let _ = label;
+        self.live_only_skips += 1;
+        self.live_dirty = true;
+        false
+    }
+
+    /// What the last commit built: each element's path, layout, colours and text. Live values
+    /// are left out, since a commit rebuilds them from the view and the next latch sets them.
+    #[cfg(debug_assertions)]
+    fn view_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        let floats = |h: &mut std::hash::DefaultHasher, xs: &[f32]| for x in xs { x.to_bits().hash(h) };
+        self.nodes.len().hash(&mut h);
+        for n in &self.nodes {
+            n.path.hash(&mut h);
+            floats(&mut h, &n.target);
+            let v = &n.vis;
+            if !n.live.iter().any(|b| b.property == crate::live::Property::Fill) {
+                floats(&mut h, &[v.fill.r, v.fill.g, v.fill.b, v.fill.a]);
+            }
+            floats(&mut h, &[v.border.r, v.border.g, v.border.b, v.border.a, v.border_width, v.opacity]);
+            floats(&mut h, &v.radius);
+            if let Some(t) = &n.text {
+                if t.live.is_none() { t.content.hash(&mut h); }
+                floats(&mut h, &[t.color.r, t.color.g, t.color.b, t.color.a, t.style.size, t.style.weight]);
+            }
+        }
+        h.finish()
+    }
+
+    /// After the commit a live-only check forced: warn when the view built something else, as
+    /// it does when the handler changed state the view reads.
+    #[cfg(debug_assertions)]
+    fn compare_live_check(&mut self, check: Option<(String, u64)>) {
+        let Some((handler, before)) = check else { return };
+        if self.view_fingerprint() == before { return; }
+        let warning = format!(
+            "rune: {handler} called Tx::live_only, but the view built something else after it: the handler changed \
+             state the view reads, which stays stale on screen until another event commits. Set only Live values in a \
+             live-only handler, or don't call live_only there."
+        );
+        if !self.live_only_warnings.contains(&warning) {
+            eprintln!("{warning}");
+            self.live_only_warnings.push(warning);
+        }
     }
 
     /// Offer a logical key that already passed `held_gate` to the app, the focused
@@ -2516,9 +2658,9 @@ impl<S: 'static> Runtime<S> {
         if matches!(ev.key, crate::Key::Enter | crate::Key::Escape) && self.composing() { return true; }
         if self.element_key(ev, one) { return true; }
         if self.default_button_key(ev, one) { return true; }
-        if app_first && let Some(f) = self.on_key && app_call!(f, &mut self.state, ev, one) { return true; }
+        if app_first && let Some(f) = self.on_key && Tx::took(app_call!(f, &mut self.state, ev, one), one) { return true; }
         if let Some(f) = self.focused_input().and_then(|input| input.key.clone())
-            && f(handler_state(&mut self.state), ev, one)
+            && Tx::took(f(handler_state(&mut self.state), ev, one), one)
         {
             return true;
         }
@@ -2568,7 +2710,7 @@ impl<S: 'static> Runtime<S> {
             }
             if handled { return true; }
         }
-        if !app_first && let Some(f) = self.on_key && app_call!(f, &mut self.state, ev, one) {
+        if !app_first && let Some(f) = self.on_key && Tx::took(app_call!(f, &mut self.state, ev, one), one) {
             self.events.push(format!("key {:?}", ev.key));
             return true;
         }
@@ -2721,6 +2863,12 @@ impl<S: 'static> Runtime<S> {
     /// it draws.
     fn drawn_edges(&self, i: usize) -> [f32; 4] {
         self.drawn.get(i).map_or(self.nodes[i].target, |d| [d[0], d[1], d[0] + d[2], d[1] + d[3]])
+    }
+
+    /// Window point (x, y) as node `i`'s handlers see it.
+    fn pointer_event(&self, i: usize, x: f32, y: f32) -> PointerEvent {
+        let [lx, ly] = self.to_local(i, x, y);
+        PointerEvent { x: lx, y: ly, window_x: x, window_y: y }
     }
 
     /// Window point (x, y) in node `i`'s own layout points: from its top-left as drawn, divided
@@ -3346,6 +3494,7 @@ impl<S: 'static> Runtime<S> {
     fn commit(&mut self, tx: &Tx) {
         let _commit_time = crate::frame_profile::Scope::new(crate::frame_profile::Phase::Commit);
         COMMITS.set(COMMITS.get() + 1);
+        self.last_commit_clock = self.clock;
         self.memo_since = self.memo.next_pass();
         let mut measured = self.measure(tx);
         self.focus_before_commit = self.focused.clone();
@@ -4131,10 +4280,11 @@ impl<S: 'static> Runtime<S> {
         if self.in_viewport(x, y) { self.left_in_capture = false; }
         for &(id, rect) in &self.hits {
             if contains(rect, x, y)
-                && let Some(n) = self.node_index.get(&id).map(|&i| &self.nodes[i])
-                && n.on_pointer_move.is_some()
+                && let Some(&i) = self.node_index.get(&id)
+                && self.nodes[i].on_pointer_move.is_some()
             {
-                self.queue.push(Action::PointerMove(n.path.clone(), PointerPress { x, y }));
+                let point = self.pointer_event(i, x, y);
+                self.queue.push(Action::PointerMove(self.nodes[i].path.clone(), point));
             }
         }
         self.refresh_hover(x, y);
@@ -4385,7 +4535,9 @@ impl<S: 'static> Runtime<S> {
             && self.secondary_target(x, y) == Some(path.as_str())
             && !self.selection_menu(&path, x, y)
         {
-            self.queue.push(Action::SecondaryPress(path, PointerPress { x, y }));
+            let i = self.nodes.iter().position(|n| n.path == path);
+            let point = i.map_or(PointerEvent { x, y, window_x: x, window_y: y }, |i| self.pointer_event(i, x, y));
+            self.queue.push(Action::SecondaryPress(path, point));
         }
         self.leave_after_release();
     }
@@ -6694,6 +6846,49 @@ fn fades(looping: Option<rune_motion::LoopSpec>) -> bool {
     matches!(looping.map(|l| l.kind), Some(rune_motion::LoopKind::Opacity { .. } | rune_motion::LoopKind::OpacityCycle(_) | rune_motion::LoopKind::Sequence(_)))
 }
 
+/// The handler an event goes to, when its `Tx::live_only` can keep the event from committing.
+/// Events Rune does its own work for (focus, editing, pastes, file drops) always commit.
+fn live_only_handler(action: &Action) -> Option<&'static str> {
+    Some(match action {
+        Action::WindowFocus(_) => "on_window_focus",
+        Action::DrawnLayout(..) => "on_drawn_layout_tx",
+        Action::PointerMove(..) => "on_pointer_move_local",
+        Action::Hover(_) => "on_hover",
+        Action::HoverChange(..) => "on_hover_change",
+        Action::Press(..) => "on_press",
+        Action::DoublePress(_) => "on_double_press",
+        Action::Link(..) => "on_link",
+        Action::SecondaryPress(..) => "on_secondary_press",
+        Action::Drag(..) => "on_drag",
+        Action::DragStart(_) => "on_drag_start",
+        Action::DragEnd(..) => "on_drag_end",
+        Action::Key { .. } => "on_key",
+        Action::KeyUp(_) => "on_key_up",
+        Action::Wheel(..) => "on_wheel",
+        Action::Gesture(_, gesture_dispatch::Gesture::Magnify(_)) => "on_magnify",
+        Action::Gesture(_, gesture_dispatch::Gesture::Rotate(_)) => "on_rotate",
+        Action::Gesture(_, gesture_dispatch::Gesture::SmartMagnify(..)) => "on_smart_magnify",
+        _ => return None,
+    })
+}
+
+/// Folds one handler's `Tx::live_only` into its event's: live-only when every handler that
+/// took the event said so.
+pub(crate) fn fold_live(live: &mut Option<bool>, took: bool, one: &Tx) {
+    if took { *live = Some(live.unwrap_or(true) && one.live_only); }
+}
+
+#[cfg(debug_assertions)]
+fn action_path(action: &Action) -> Option<&str> {
+    match action {
+        Action::PointerMove(path, _) | Action::DrawnLayout(path, ..) | Action::Hover(path) | Action::HoverChange(path, _) | Action::Press(path, _) | Action::DoublePress(path)
+        | Action::Link(path, _) | Action::SecondaryPress(path, _) | Action::Drag(path, ..) | Action::DragStart(path)
+        | Action::DragEnd(path, _) => Some(path),
+        Action::Wheel(_, chain, _) | Action::Gesture(chain, _) => chain.first().map(String::as_str),
+        _ => None,
+    }
+}
+
 fn merge(tx: &mut Tx, one: Tx) {
     tx.paste |= one.paste;
     tx.clipboard_reads.extend(one.clipboard_reads);
@@ -7476,6 +7671,7 @@ fn flatten(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PointerPress;
     use crate::el::{col, el};
 
     thread_local! {
