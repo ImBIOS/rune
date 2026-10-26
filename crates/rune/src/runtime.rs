@@ -850,6 +850,8 @@ pub struct Runtime<S: 'static> {
     drawn: Vec<[f32; 4]>,
     /// The scale each node's text drew at (its own and its ancestors'), for text hit tests.
     drawn_scale: Vec<f32>,
+    /// Per node: it drew inside its clip and the window in the last build.
+    seen: Vec<bool>,
     scrolls: HashMap<NodeId, ScrollState>,
     /// The axis the current wheel or trackpad gesture scrolls (`scroll_x.rs`).
     wheel_lock: scroll_x::WheelLock,
@@ -1185,6 +1187,7 @@ impl<S: 'static> Runtime<S> {
             aspect_snap: Vec::new(),
             drawn: Vec::new(),
             drawn_scale: Vec::new(),
+            seen: Vec::new(),
             scrolls: HashMap::new(),
             wheel_lock: Default::default(),
             #[cfg(any(test, target_arch = "wasm32"))]
@@ -2800,6 +2803,43 @@ impl<S: 'static> Runtime<S> {
         }
     }
 
+    /// Per node of the new tree `nodes`: neither it nor anything under it drew in the last
+    /// build, and none of it lands in sight in this layout (in the window, inside its clips).
+    /// Empty when nothing qualifies.
+    fn unseen_before_and_after(&self, nodes: &[Node]) -> Vec<bool> {
+        if !self.built || self.seen.len() != self.nodes.len() { return Vec::new(); }
+        let mut seen = self.seen.clone();
+        mark_ancestors(&self.nodes, &mut seen);
+        let before: HashSet<NodeId> = self.nodes.iter().zip(&seen).filter(|(_, s)| !**s).map(|(n, _)| n.id).collect();
+        if before.is_empty() { return Vec::new(); }
+        // Room for shadows and blur, which draw past a node's rect.
+        const MARGIN: f32 = 32.0;
+        let window = [0.0, 0.0, self.viewport.0, self.viewport.1];
+        // Per node: the clip and scroll offset its children are under, in points.
+        let mut inner = vec![(window, [0.0f32; 2]); nodes.len()];
+        let mut after = vec![false; nodes.len()];
+        for (i, n) in nodes.iter().enumerate() {
+            let (clip, shift) = match n.parent {
+                Some(p) if n.above.is_none() && p < i => inner[p],
+                Some(_) if n.above.is_none() => { after[i] = true; (window, [0.0; 2]) }
+                _ => (window, [0.0; 2]),
+            };
+            let t = n.target;
+            let r = [t[0] - shift[0], t[1] - shift[1], t[2] - shift[0], t[3] - shift[1]];
+            after[i] |= r[2] >= clip[0] - MARGIN && r[0] <= clip[2] + MARGIN && r[3] >= clip[1] - MARGIN && r[1] <= clip[3] + MARGIN;
+            let clip = if n.vis.clip.is_some() || n.scroll.is_some() {
+                [clip[0].max(r[0]), clip[1].max(r[1]), clip[2].min(r[2]), clip[3].min(r[3])]
+            } else { clip };
+            let shift = match self.scrolls.get(&n.id) {
+                Some(st) if n.scroll.is_some() => [shift[0] + st.x.offset as f32, shift[1] + st.offset as f32],
+                _ => shift,
+            };
+            inner[i] = (clip, shift);
+        }
+        mark_ancestors(nodes, &mut after);
+        nodes.iter().zip(&after).map(|(n, a)| !a && before.contains(&n.id)).collect()
+    }
+
     fn color(&self, id: NodeId, prop: Prop<Color>, rest: Color) -> Color {
         if self.scene.store().is_animating(id, prop) { self.scene.get(id, prop).unwrap_or(rest) } else { rest }
     }
@@ -3484,6 +3524,7 @@ impl<S: 'static> Runtime<S> {
         let mut time_scales = Vec::new();
         if time_scaled { self.sync_time_scales(&nodes, &mut time_scales, false); }
 
+        let unseen = self.unseen_before_and_after(&nodes);
         // `El::matched` elements of this tree: (id, index, newly mounted).
         let mut arrivals: Vec<(Rc<str>, usize, bool)> = Vec::new();
         for i in 0..nodes.len() {
@@ -3538,7 +3579,12 @@ impl<S: 'static> Runtime<S> {
                 // already running retargets on its spring.
                 let follows_window = tx.window_step && !self.flying.iter().any(|f| f.0 == id)
                     && !self.scene.store().is_animating(id, prop::FRAME);
-                let layout_anim = if stack_row && !instant && !tx.relayout && !follows_window {
+                // Out of sight before and after: nobody would see it move.
+                let out_of_sight = unseen.get(i).copied().unwrap_or(false) && nodes[i].matched.is_none()
+                    && !self.flying.iter().any(|f| f.0 == id);
+                let layout_anim = if out_of_sight {
+                    LayoutAnim::INSTANT
+                } else if stack_row && !instant && !tx.relayout && !follows_window {
                     // Growth and virtual windows own a row's vertical place; its horizontal place
                     // still springs, or a re-centred column jumps against its moving parent.
                     LayoutAnim::axes(spring_l, Anim::INSTANT)
@@ -3567,13 +3613,14 @@ impl<S: 'static> Runtime<S> {
                 } else if !nodes[i].live.iter().any(|b| b.property == crate::live::Property::Rect) {
                     self.scene.set_frame(id, scene_rect, layout_anim);
                 }
-                self.set_or_anim(id, prop::RADIUS, Corners(nodes[i].vis.radius), spring_l, instant);
+                let quiet = instant || out_of_sight;
+                self.set_or_anim(id, prop::RADIUS, Corners(nodes[i].vis.radius), spring_l, quiet);
                 if nodes[i].live.iter().any(|b| b.property == crate::live::Property::Opacity) {
                     // The live source owns this property, including across unrelated commits.
-                } else if !instant && let Some(anim) = nodes[i].opacity_motion {
+                } else if !quiet && let Some(anim) = nodes[i].opacity_motion {
                     self.scene.animate(id, prop::OPACITY, nodes[i].vis.opacity, anim);
                 } else {
-                    self.set_or_anim(id, prop::OPACITY, nodes[i].vis.opacity, spring_l, instant);
+                    self.set_or_anim(id, prop::OPACITY, nodes[i].vis.opacity, spring_l, quiet);
                 }
             }
             let vis = &nodes[i].vis;
@@ -4713,6 +4760,8 @@ impl<S: 'static> Runtime<S> {
         self.drawn.resize(n_nodes, [0.0; 4]);
         self.drawn_scale.clear();
         self.drawn_scale.resize(n_nodes, 1.0);
+        self.seen.clear();
+        self.seen.resize(n_nodes, false);
         let sel_ranges = self.selection_ranges();
         self.ime_area = None;
         let now = self.t;
@@ -5042,6 +5091,7 @@ impl<S: 'static> Runtime<S> {
                 && r[0] <= vis_clip[2].min(vp[2]) + filter_margin + 2.0
                 && r[3] >= vis_clip[1].max(vp[1]) - filter_margin - 2.0
                 && r[1] <= vis_clip[3].min(vp[3]) + filter_margin + 2.0;
+            self.seen[i] = visible;
             let text_tint = |c: Color| match n.vis.group_color {
                 Some(g) if pinh.group > 0.0 => c.mix(g, pinh.group),
                 _ => c,
@@ -6572,6 +6622,19 @@ fn unwrapped_width(style: &mut Style, vertical: bool) {
 fn scroll_offsets<'a>(scrolls: &'a HashMap<NodeId, ScrollState>, nodes: &'a [Node], i: usize) -> impl Iterator<Item = [f32; 2]> + 'a {
     std::iter::successors(nodes[i].parent, |&p| nodes[p].parent)
         .filter_map(|p| scrolls.get(&nodes[p].id).map(|st| [st.x.offset as f32, st.offset as f32]))
+}
+
+/// Marks every ancestor of a marked node.
+fn mark_ancestors(nodes: &[Node], marked: &mut [bool]) {
+    for i in 0..nodes.len() {
+        if !marked[i] { continue; }
+        let mut p = nodes[i].parent;
+        while let Some(j) = p {
+            if marked[j] { break; }
+            marked[j] = true;
+            p = nodes[j].parent;
+        }
+    }
 }
 
 /// Whether `looping`'s sampled value multiplies the element's opacity.
@@ -9966,6 +10029,23 @@ mod tests {
         assert!(!rt.animating);
         let r10 = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r10")).unwrap();
         assert!((r10.rect[1] + r10.rect[3] - 300.0).abs() < 0.05, "{:?}", r10.rect);
+    }
+
+    #[test]
+    fn layout_out_of_sight_before_and_after_moves_at_once() {
+        fn view(wide: &bool, _cx: &mut Cx<bool>) -> El {
+            let rows = (0..40).map(|i| el().key(format!("r{i}")).w(if *wide { 200.0 } else { 100.0 }).h(40.0).fill(Color::WHITE));
+            col().w_full().h_full().child(col().key("scroll").w_full().h(100.0)
+                .scroll(ScrollSpec { stick_bottom: false }).child(col().children(rows)))
+        }
+        let mut rt = Runtime::new(true, view, (300.0, 300.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        rt.frame(1.0 / 120.0);
+        rt.update(|s, _| *s = false);
+        rt.frame(1.0 / 120.0);
+        let width = |rt: &Runtime<bool>, key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap().rect[2];
+        assert!(width(&rt, "r0") > 190.0, "a row in sight springs: {}", width(&rt, "r0"));
+        assert_eq!(width(&rt, "r30"), 100.0, "a row out of sight before and after lands at once");
     }
 
     /// The app clears its password as the card leaves; the exiting copy of the field must

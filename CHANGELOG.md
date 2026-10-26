@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Layout nobody can see moves at once.** A node that drew nowhere in sight in the last build
+  (outside the window, or clipped away by a scroll or clip) and lands out of sight again now
+  takes its new frame, radius and opacity at once instead of springing there. Toggling a sidebar
+  over a long timeline used to animate ~290 off-screen rows; the first frame's CPU drops by about
+  a fifth. Things apps can notice: `is_animating` and settle events skip those nodes, and a
+  node scrolled into view mid-change starts from its new place rather than mid-spring. Shared
+  (`matched`) and flying elements still animate.
+
 - **Loops sleep below one 8-bit step of opacity.** A loop (`.cycle`, `.looping`) whose brightest
   frame would draw under 1/255 opacity no longer wakes the app; the cut-off was 0.001. Things
   apps can notice: a loop under a group or parent faded to between 0.001 and 0.004 stops
