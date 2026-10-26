@@ -2217,6 +2217,7 @@ impl<S: 'static> Runtime<S> {
             for r in &mut scroll_offsets { r.animated = false; }
         }
         let follow = std::mem::take(&mut self.caret_follow);
+        let destination = !scroll_bottom.is_empty() || !scroll_pages.is_empty() || !scroll_offsets.is_empty();
         if !scroll_to.is_empty() || !scroll_bottom.is_empty() || !scroll_pages.is_empty() || !scroll_offsets.is_empty() || follow {
             self.keeps.clear();
             self.scroll_reveals.clear();
@@ -2229,6 +2230,8 @@ impl<S: 'static> Runtime<S> {
         if !scroll_bottom.is_empty() { self.scroll_to_bottom(scroll_bottom); }
         if !scroll_pages.is_empty() { self.scroll_pages(scroll_pages); }
         if !scroll_offsets.is_empty() { self.scroll_to_offsets(scroll_offsets); }
+        // Explicit destinations processed after a reveal win for its entire lifetime.
+        if destination { self.scroll_reveals.clear(); }
         // Those scrolls moved the caret after the commit a view placed from it saw.
         if self.caret_watch && self.caret_moved(None) { self.commit(&Tx { instant: true, ..Tx::default() }); }
         self.update_interaction();
@@ -2919,6 +2922,7 @@ impl<S: 'static> Runtime<S> {
     /// lands on its end follows it again.
     fn page_to(&mut self, i: usize, to: impl FnOnce(f64, f64, f64) -> f64) -> bool {
         self.keeps.clear();
+        self.scroll_reveals.clear();
         let (id, page, stick) = (self.nodes[i].id, f64::from(self.nodes[i].local.h * 0.9), self.nodes[i].scroll.is_some_and(|s| s.stick_bottom));
         let Some(st) = self.scrolls.get_mut(&id) else { return false };
         st.offset = to(st.offset, st.max, page).clamp(0.0, st.max);
@@ -3825,7 +3829,13 @@ impl<S: 'static> Runtime<S> {
                     !self.keeps.iter().any(|k| k.viewport == v.scroll_path)
                         && !self.scroll_reveals.iter().any(|r| r.viewport == v.scroll_path)
                         && !tx.scroll_to.iter().any(|(scope, key)| {
-                            nodes.iter().any(|n| n.named(key) && n.parent.is_none_or(|p| in_scope(&nodes[p].path, scope.as_deref())))
+                            nodes.iter().enumerate().find(|(_, n)| n.named(key)
+                                && n.parent.is_none_or(|p| in_scope(&nodes[p].path, scope.as_deref())))
+                                .is_some_and(|(i, _)| {
+                                    std::iter::successors(nodes[i].parent, |&p| nodes[p].parent)
+                                        .find(|&p| nodes[p].scroll.is_some() && nodes[p].scroll_axes.y())
+                                        .is_some_and(|p| nodes[p].path == v.scroll_path)
+                                })
                         })
                 })
                 .and_then(|v| self.path_ids.get(&v.scroll_path))
@@ -3901,7 +3911,7 @@ impl<S: 'static> Runtime<S> {
                 });
                 g.streaming = streaming;
                 let snap_change = instant && !streaming && (h - g.target).abs() > 1e-4;
-                if tx.settle || !existed || first || self.reduced_motion || snap_change || (reading && !g.moving()) {
+                if tx.settle || !existed || first || self.reduced_motion || snap_change || reading {
                     *g = GrowTrack { streaming, ..GrowTrack::settled(h) };
                     stack.pending_heights.remove(&id);
                 } else {
@@ -4429,10 +4439,10 @@ impl<S: 'static> Runtime<S> {
                 moving |= active;
                 continue;
             }
-            let growing = self.scroll_content(i).and_then(|c| self.stacks.get(&self.nodes[c].id)).is_some_and(|s| s.growing);
-            let held = growing && {
+            let held = (!self.keeps.is_empty() || !self.scroll_reveals.is_empty()) && {
                 let path = &self.nodes[i].path;
-                self.keeps.iter().any(|k| k.viewport == *path) || self.scroll_reveals.iter().any(|r| r.viewport == *path)
+                (self.keeps.iter().any(|k| k.viewport == *path) || self.scroll_reveals.iter().any(|r| r.viewport == *path))
+                    && self.scroll_content(i).and_then(|c| self.stacks.get(&self.nodes[c].id)).is_some_and(|s| s.growing)
             };
             let Some(st) = self.scrolls.get_mut(&id) else { continue };
             st.scrolling = st.direct || st.v.abs() > 1.0 || st.x.v.abs() > 1.0;
@@ -5187,6 +5197,11 @@ impl<S: 'static> Runtime<S> {
         }
         let Some(scroll) = self.scrolls.get_mut(&id) else { return false };
         scroll.max = max;
+        if first {
+            scroll.v = 0.0;
+            scroll.glide = None;
+            scroll.glide_to = None;
+        }
         let offset = scroll_edge::reveal(scroll.offset, top, height, viewport, margin).clamp(0.0, scroll.max);
         if (offset - scroll.offset).abs() < 0.5 {
             if first { scroll.pinned = false; }
@@ -5196,6 +5211,7 @@ impl<S: 'static> Runtime<S> {
         scroll.pinned = false;
         scroll.v = 0.0;
         scroll.glide = None;
+        scroll.glide_to = None;
         scroll.direct = true;
         let window = self.virtual_window_changed();
         if window {

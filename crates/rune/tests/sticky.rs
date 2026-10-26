@@ -678,7 +678,7 @@ fn run_reveal_growth(init: RevealGrowth) {
         assert!((find(&rt, k).rect[1] - was).abs() < 0.5, "kept {k} stayed at {was}: {:?}", find(&rt, k).rect);
     } else {
         assert!(
-            r3[1] >= -0.05 && (r3[1] + r3.iter().skip(3).next().copied().unwrap_or(0.0) - 200.0).abs() < 0.5,
+            r3[1] >= -0.05 && (r3[1] + r3[3] - 200.0).abs() < 0.5,
             "final scroll reveals grown r3: {r3:?}"
         );
     }

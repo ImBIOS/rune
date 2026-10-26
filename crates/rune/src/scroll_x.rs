@@ -99,6 +99,7 @@ impl<S: 'static> Runtime<S> {
     /// axis (Shift let go, a tilt, a second wheel) also starts a new gesture.
     pub(super) fn wheel_delta_arrived(&mut self, dx: f32, dy: f32) {
         self.keeps.clear();
+        self.scroll_reveals.clear();
         let now = self.now_clock();
         let queued = self.queue.iter().any(|a| matches!(a, Action::Wheel(..)));
         let l = &mut self.wheel_lock;

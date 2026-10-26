@@ -131,7 +131,8 @@ impl Tx {
 
     /// Reveal a keyed row, including a currently unrealized virtual row. It scrolls the nearest
     /// vertical viewport around the row and, through [`El::scroll_x`] or [`El::scroll_xy`], the
-    /// nearest horizontal one, each just far enough.
+    /// nearest horizontal one, each just far enough. The vertical reveal follows the presented
+    /// row while layout or growth moves it; wheel input, a fling or another scroll request wins.
     ///
     /// `key` names an element as [`Cx::layout`](crate::Cx::layout) does, here and in the other
     /// scroll requests: a key (the first element with it), a full path, or a key path such as
@@ -375,7 +376,10 @@ impl Tx {
         if !taken { tx.live_only = false; }
         taken
     }
-    /// Apply this change with no animation (direct manipulation).
+    /// Apply this change with no animation (direct manipulation). Changed non-streaming row
+    /// heights and scroll requests in this commit also land immediately, including requests
+    /// made with `scroll_to` or `scroll_to_bottom`. An already-running scroll glide is not
+    /// settled unless this commit replaces it; use [`Tx::settle`] to land running tracks.
     pub fn instant(&mut self) {
         self.instant = true;
     }

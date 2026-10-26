@@ -11,8 +11,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   growth stacks. `Tx::scroll_into_view` now measures mounted rows from their presented growth
   box and follows the target row frame by frame while the viewport's growth or layout springs
   run, unpinning a `stick_bottom` viewport when needed until another scroll gesture or request
-  takes over. Commits marked with `tx.instant()` still settle changed row heights and scroll
-  requests in one frame.
+  takes over. Reveals leave other viewports' reading anchors alone, stop when their target
+  disappears, and yield to wheel, fling, paging or explicit scroll destinations. Commits marked
+  with `tx.instant()` settle changed non-streaming row heights and that commit's scroll requests
+  in one frame, including requests made with the animated scroll methods; existing glides stay
+  running unless replaced.
 
 - **Per-corner and continuous-corner rounded clipping (`El::clip_rounded`, `El::clip_corners`).**
   `El::clip_rounded` now follows the element's own per-corner radii (`El::corners`) and corner
