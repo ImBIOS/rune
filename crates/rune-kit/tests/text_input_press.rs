@@ -479,3 +479,55 @@ fn the_leading_icon_size_scales_the_icon_and_moves_the_text() {
     let (a, b) = (at("a"), at("b"));
     assert!(((ib[1] + ib[3] * 0.5) - (b[1] + b[3] * 0.5)).abs() < 0.01 && ((ia[1] + ia[3] * 0.5) - (a[1] + a[3] * 0.5)).abs() < 0.01);
 }
+
+#[test]
+fn secure_text_input_revealed_draws_plain_glyphs_and_keeps_secure_protections() {
+    struct Form {
+        plain: TextEdit,
+        secret: TextEdit,
+        revealed: bool,
+    }
+    fn view(s: &Form, _: &mut Cx<Form>) -> El {
+        let k = Kit::neutral(true);
+        col().gap(8.0)
+            .child(TextInput::new(&s.plain).on_edit(|s: &mut Form| &mut s.plain).build(&k).key("plain"))
+            .child(
+                TextInput::new(&s.secret)
+                    .secure()
+                    .revealed(s.revealed)
+                    .copy_button()
+                    .on_edit(|s: &mut Form| &mut s.secret)
+                    .build(&k)
+                    .key("secret"),
+            )
+    }
+    let mut plain = TextEdit::new("hé🙂 world");
+    plain.set_caret(3);
+    let mut secret = TextEdit::new("hé🙂 world");
+    secret.set_caret(3);
+    secret.focused = true;
+    let mut rt = Runtime::new(Form { plain, secret, revealed: true }, view, (320.0, 120.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+
+    assert!(rt.state.secret.is_secure() && rt.state.secret.is_revealed());
+    assert!(rt.has_secure_focus());
+    assert!(rt.find("action").is_none(), "plain copy button stays suppressed on secure TextInput");
+    let secret_inp = rt.elements().into_iter().find(|e| e.path.ends_with("secret/value/input")).unwrap();
+    assert!(secret_inp.text.is_none(), "accessibility text remains None on revealed secure TextInput");
+    let secret_caret = secret_inp.caret.expect("focused revealed TextInput caret");
+
+    // Caret x offset inside the revealed secure TextInput matches the plain TextInput at the same byte.
+    rt.update(|s, _| { s.secret.focused = false; s.plain.focused = true; });
+    rt.frame(0.0);
+    let plain_inp = rt.elements().into_iter().find(|e| e.path.ends_with("plain/value/input")).unwrap();
+    let plain_caret = plain_inp.caret.expect("focused plain TextInput caret");
+    assert!(((secret_caret[0] - secret_inp.rect[0]) - (plain_caret[0] - plain_inp.rect[0])).abs() < 0.01);
+
+    // Toggling revealed off masks the field and moves the caret to the 2-bullet position for "hé".
+    rt.update(|s, _| { s.plain.focused = false; s.secret.focused = true; s.revealed = false; });
+    rt.frame(0.0);
+    assert!(rt.state.secret.is_secure() && !rt.state.secret.is_revealed());
+    let masked_inp = rt.elements().into_iter().find(|e| e.path.ends_with("secret/value/input")).unwrap();
+    let masked_caret = masked_inp.caret.expect("focused masked TextInput caret");
+    assert_ne!(masked_caret[0], secret_caret[0], "masked bullet width differs from plain text width");
+}

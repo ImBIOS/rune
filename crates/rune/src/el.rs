@@ -644,6 +644,7 @@ pub struct InputSpec {
     pub selection: Color,
     /// One unwrapped line that scrolls sideways to keep the caret visible, like `<input>`.
     pub single_line: bool,
+    pub(crate) revealed_override: Option<bool>,
     pub(crate) decorations: Vec<Span>,
     pub(crate) rich_style: crate::edit::RichStyle,
     pub(crate) pill_icon: Option<PillIconFn>,
@@ -653,6 +654,20 @@ pub struct InputSpec {
     pub(crate) key: Option<InputKeyFn>,
     pub(crate) change: Option<PressFn>,
     pub(crate) paste: Option<InputPasteFn>,
+}
+
+impl std::fmt::Debug for InputSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InputSpec")
+            .field("animate_layout", &self.animate_layout)
+            .field("edit", &self.edit)
+            .field("placeholder", &self.placeholder)
+            .field("placeholder_color", &self.placeholder_color)
+            .field("caret", &self.caret)
+            .field("selection", &self.selection)
+            .field("single_line", &self.single_line)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A CSS-style box shadow. Outer shadows draw behind the element; `inset` ones draw inside its
@@ -802,7 +817,7 @@ pub struct Anchor {
     pub gap: f32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct TextSpec {
     pub content: String,
     pub style: TextStyle,
@@ -856,6 +871,35 @@ pub struct TextSpec {
     /// See [`El::pill_colors`].
     pub(crate) pill_colors: Option<(Color, Option<Color>)>,
     pub(crate) rich_style: crate::edit::RichStyle,
+    pub(crate) redacted: bool,
+}
+
+impl std::fmt::Debug for TextSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TextSpec")
+            .field("content", &if self.redacted { "[redacted]" } else { &self.content })
+            .field("style", &self.style)
+            .field("color", &self.color)
+            .field("align", &self.align)
+            .field("spans", &self.spans)
+            .field("wrap", &self.wrap)
+            .field("reveal", &self.reveal)
+            .field("truncate", &self.truncate)
+            .field("max_lines", &self.max_lines)
+            .field("truncate_fade", &self.truncate_fade)
+            .field("justify", &self.justify)
+            .field("selectable", &self.selectable)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for TextSpec {
+    fn drop(&mut self) {
+        if self.redacted {
+            use zeroize::Zeroize;
+            self.content.zeroize();
+        }
+    }
 }
 
 impl TextSpec {
@@ -1397,6 +1441,7 @@ pub fn text(content: impl Into<String>) -> El {
         pills: Vec::new(),
         pill_colors: None,
         rich_style: crate::edit::RichStyle::default(),
+        redacted: false,
     });
     e
 }
@@ -1445,6 +1490,7 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
     e.role = "textbox";
     if let Some(t) = &mut e.text {
         t.wrap = true;
+        t.redacted = edit.is_secure();
     }
     e.input = Some(Box::new(InputSpec {
         animate_layout: false,
@@ -1454,6 +1500,7 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
         caret: Color::WHITE,
         selection: DEFAULT_SELECTION,
         single_line: false,
+        revealed_override: None,
         decorations: Vec::new(),
         rich_style: crate::edit::RichStyle::default(),
         pill_icon: None,
@@ -1528,7 +1575,29 @@ impl El {
                 use zeroize::Zeroize;
                 text.content.zeroize();
                 text.content = input.edit.display().0;
+                text.redacted = true;
             }
+            self.sync_input_pills();
+            self.sync_input_rich();
+        }
+        self
+    }
+
+    /// Show the plain characters of a [`secure`](Self::secure) text input while keeping all
+    /// other secure protections (no undo, copy, cut, IME or accessibility text, redacted
+    /// [`Debug`], and zeroized buffers). Prefer [`TextEdit::revealed`] or
+    /// [`TextEdit::set_revealed`] when the model owns the state.
+    pub fn revealed(mut self, revealed: bool) -> Self {
+        if let Some(input) = &mut self.input {
+            input.edit.set_revealed(revealed);
+            input.revealed_override = Some(revealed);
+            if let Some(text) = &mut self.text {
+                use zeroize::Zeroize;
+                text.content.zeroize();
+                text.content = input.edit.display().0;
+            }
+            self.sync_input_pills();
+            self.sync_input_rich();
         }
         self
     }

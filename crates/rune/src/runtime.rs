@@ -4646,12 +4646,23 @@ impl<S: 'static> Runtime<S> {
             // Exit visuals outlive their model. Never call an accessor captured by
             // a deleted row while normalizing a later focus change.
             if let Some(input) = &mut old.input {
+                let was_revealed = input.edit.is_secure() && input.edit.is_revealed();
                 input.access = None;
                 input.key = None;
                 input.change = None;
                 input.edit.focused = false;
                 input.edit.clear_preedit();
                 input.edit.conceal();
+                if was_revealed && let Some(spec) = &mut old.text {
+                    use zeroize::Zeroize;
+                    spec.content.zeroize();
+                    spec.content = input.edit.display().0;
+                    let scale = self.env.scale;
+                    let w = (old.local.w - old.inset[0] - old.inset[2]).max(0.0);
+                    let wrap = spec.wrap.then_some(w * scale);
+                    old.text_layout = Some(self.text.layout_blocks(&spec.content, &spec.spans, &spec.blocks, &spec.pills, spec.style, scale, wrap, line_alignment(spec)));
+                    old.elided = None;
+                }
             }
             self.node_index.insert(old.id, nodes.len());
             nodes.push(old);
@@ -8880,6 +8891,7 @@ fn flatten(
     let measured = text.is_some();
     let measure = text.as_ref().map(|t| crate::text::text_hash(&t.content, &t.spans, t.style, scale, None) ^ u64::from(t.wrap) ^ (u64::from(t.truncate || t.truncate_fade) << 1)
         ^ ((t.max_lines as u64) << 2)
+        ^ (u64::from(input.as_ref().is_some_and(|i| i.edit.is_revealed())) << 3)
         ^ t.advance_in.as_ref().map_or(0, |(run, at)| run.hash.rotate_left(3) ^ (*at as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)));
     nodes.push(Node {
         on_paste,
@@ -11940,5 +11952,119 @@ mod tests {
         // Exit blur adds balanced layer markers; compare the actual dots, not scope records.
         assert_eq!(rt.instances.iter().filter(|i| i.params[1] == KIND_GLYPH).count(), painted, "the same dots, no placeholder");
         assert!(!format!("{:?}", rt.elements()).contains("hunter2"));
+
+        // A revealed secure field must also conceal to bullets on the very first exit frame,
+        // leaving no plaintext in `input.edit`, `text.content`, `text_layout`, or `Debug`.
+        let mut rt = Runtime::new(
+            Card { pw: TextEdit::new("hunter2").secure().revealed(true), open: true },
+            view,
+            (200.0, 100.0),
+            Env::new(true, 2.0),
+        );
+        rt.frame(0.0);
+        let n_open = rt.nodes.iter().find(|n| n.key.as_deref() == Some("pw")).unwrap();
+        assert_eq!(n_open.text.as_ref().unwrap().content, "hunter2");
+        assert!(!format!("{:?}", n_open.input).contains("hunter2"));
+        assert!(!format!("{:?}", n_open.text).contains("hunter2"));
+        rt.update(|s, _| { s.pw.clear(); s.open = false; });
+        assert!(rt.frame(1.0 / 60.0));
+        let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("pw")).expect("exiting field stays drawn");
+        assert!(rt.is_exiting(n.id));
+        let edit = &n.input.as_ref().unwrap().edit;
+        assert!(!edit.is_revealed(), "conceal resets revealed on exit");
+        assert_eq!(edit.text, "•".repeat(7), "only the mask remains");
+        assert_eq!(n.text.as_ref().unwrap().content, "•".repeat(7));
+        assert_eq!(rt.instances.iter().filter(|i| i.params[1] == KIND_GLYPH).count(), painted, "exiting revealed field paints bullets");
+        assert!(!format!("{:?}", rt.elements()).contains("hunter2"));
+        assert!(!format!("{:?}", n.input).contains("hunter2"));
+        assert!(!format!("{:?}", n.text).contains("hunter2"));
+    }
+
+    #[test]
+    fn revealed_secure_input_matches_plain_layout_and_keeps_protections() {
+        use crate::{text_input, TextEdit, TextStyle};
+        struct Form {
+            plain: TextEdit,
+            secret: TextEdit,
+        }
+        fn view(s: &Form, _: &mut Cx<Form>) -> El {
+            let style = TextStyle::new(16.0, 400.0);
+            col().size(240.0, 100.0)
+                .child(text_input(&s.plain, style).single_line().key("plain").size(200.0, 40.0).on_edit(|s: &mut Form| &mut s.plain))
+                .child(text_input(&s.secret, style).single_line().key("secret").size(200.0, 40.0).on_edit(|s: &mut Form| &mut s.secret))
+        }
+        let mut plain = TextEdit::new("hé🙂 world");
+        plain.set_selection(1, 7);
+        let mut secret = TextEdit::new("hé🙂 world").secure().revealed(true);
+        secret.set_selection(1, 7);
+        secret.focused = true;
+        let mut rt = Runtime::new(Form { plain, secret }, view, (240.0, 100.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+
+        assert!(rt.state.secret.is_secure() && rt.state.secret.is_revealed());
+        assert!(rt.has_secure_focus());
+        assert!(rt.ime_area.is_none());
+        let els = rt.elements();
+        let plain_el = els.iter().find(|e| e.key.as_deref() == Some("plain")).unwrap();
+        let secret_el = els.iter().find(|e| e.key.as_deref() == Some("secret")).unwrap();
+        assert_eq!(plain_el.text.as_deref(), Some("hé🙂 world"));
+        assert!(secret_el.text.is_none(), "accessibility text remains None when revealed");
+
+        let np = rt.nodes.iter().find(|n| n.key.as_deref() == Some("plain")).unwrap();
+        let ns = rt.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+        assert_eq!(ns.text.as_ref().unwrap().content, "hé🙂 world");
+        assert!(!format!("{:?}", ns.input).contains("hé🙂"));
+        assert!(!format!("{:?}", ns.text).contains("hé🙂"));
+        let lp = np.text_layout.as_ref().unwrap().clone();
+        let ls = ns.text_layout.as_ref().unwrap().clone();
+        assert_eq!(lp.full_width(), ls.full_width(), "revealed layout width matches plain text");
+        let secret_caret = secret_el.caret.expect("focused revealed field has caret");
+        let secret_sel: Vec<[f32; 4]> = rt.instances.iter()
+            .filter(|i| i.params[1] == KIND_RECT && i.rect[1] >= secret_el.rect[1] && i.rect[1] < secret_el.rect[1] + secret_el.rect[3])
+            .map(|i| [i.rect[0] - secret_el.rect[0], i.rect[1] - secret_el.rect[1], i.rect[2], i.rect[3]])
+            .collect();
+        assert!(!secret_sel.is_empty());
+
+        // Focus the plain field with the same selection and verify caret and selection rects match.
+        rt.update(|s, _| { s.secret.focused = false; s.plain.focused = true; });
+        rt.frame(0.0);
+        let plain_el = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("plain")).unwrap();
+        let plain_caret = plain_el.caret.expect("focused plain field has caret");
+        assert_eq!([plain_caret[0] - plain_el.rect[0], plain_caret[1] - plain_el.rect[1], plain_caret[2], plain_caret[3]],
+            [secret_caret[0] - secret_el.rect[0], secret_caret[1] - secret_el.rect[1], secret_caret[2], secret_caret[3]]);
+        let plain_sel: Vec<[f32; 4]> = rt.instances.iter()
+            .filter(|i| i.params[1] == KIND_RECT && i.rect[1] >= plain_el.rect[1] && i.rect[1] < plain_el.rect[1] + plain_el.rect[3])
+            .map(|i| [i.rect[0] - plain_el.rect[0], i.rect[1] - plain_el.rect[1], i.rect[2], i.rect[3]])
+            .collect();
+        assert_eq!(plain_sel, secret_sel);
+
+        // Refocus secret field: copy, cut, undo and IME must do nothing, and toggling revealed re-measures.
+        rt.update(|s, _| { s.plain.focused = false; s.secret.focused = true; });
+        rt.frame(0.0);
+        for ch in ['c', 'x'] {
+            rt.key(KeyEvent { key: crate::Key::Command(ch), mods: crate::Mods { cmd: true, ..Default::default() } });
+            rt.frame(0.0);
+            assert!(rt.copy_request.is_none(), "⌘{} on revealed field must never write to clipboard", ch.to_uppercase());
+            assert_eq!(rt.state.secret.text, "hé🙂 world");
+        }
+        rt.ime(Ime::Preedit("comp".into(), Some((0, 4))));
+        rt.ime(Ime::Commit("commit".into()));
+        rt.frame(0.0);
+        assert_eq!(rt.state.secret.text, "hé🙂 world");
+        rt.key(KeyEvent { key: crate::Key::Text("X".into()), mods: Default::default() });
+        rt.frame(0.0);
+        assert_eq!(rt.state.secret.text, "hX world");
+        rt.key(KeyEvent { key: crate::Key::Command('z'), mods: crate::Mods { cmd: true, ..Default::default() } });
+        rt.frame(0.0);
+        assert_eq!(rt.state.secret.text, "hX world", "no undo on revealed field");
+
+        let revealed_w = rt.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap().text_layout.as_ref().unwrap().full_width();
+        rt.update(|s, _| { s.secret.set_selection(1, 4); s.secret.set_revealed(false); });
+        rt.frame(0.0);
+        assert_eq!(rt.state.secret.range(), (1, 4), "toggling revealed keeps selection");
+        let ns = rt.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+        assert_eq!(ns.text.as_ref().unwrap().content, "••••••••");
+        let hidden_w = ns.text_layout.as_ref().unwrap().full_width();
+        assert_ne!(revealed_w, hidden_w, "toggling revealed re-layouts the text");
     }
 }

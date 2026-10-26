@@ -233,6 +233,7 @@ pub struct TextEdit {
     /// Set inside [`TextEdit::undo_group`]: edits record nothing until the outermost group ends.
     group: ActiveGroup,
     secure: bool,
+    revealed: bool,
     /// Mirrors the field's `El::single_line()`; the runtime sets it before each edit.
     single_line: bool,
     /// Formatting keys and rich paste are on (see [`TextEdit::rich`]).
@@ -248,16 +249,17 @@ impl std::fmt::Debug for TextEdit {
         f.debug_struct("TextEdit").field("text", &if self.secure { "[redacted]" } else { &self.text })
             .field("anchor", &self.anchor).field("focus", &self.focus).field("focused", &self.focused)
             .field("marks", &self.marks).field("blocks", &self.blocks)
-            .field("secure", &self.secure).finish_non_exhaustive()
+            .field("secure", &self.secure).field("revealed", &self.revealed).finish_non_exhaustive()
     }
 }
 
 /// Hashes everything a field draws: text, selection, IME composition, focus, marks, blocks and
-/// whether it's secure. Pass the edit itself in a [`memo`](crate::memo) version so the field
-/// redraws as the caret or rich formatting changes. A secure field hashes its length, not its text.
+/// whether it's secure or revealed. Pass the edit itself in a [`memo`](crate::memo) version so
+/// the field redraws as the caret or rich formatting changes. A hidden secure field hashes its
+/// length, not its text.
 impl std::hash::Hash for TextEdit {
     fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        if self.secure { self.text.chars().count().hash(h) } else { self.text.hash(h) }
+        if self.secure && !self.revealed { self.text.chars().count().hash(h) } else { self.text.hash(h) }
         self.anchor.hash(h);
         self.focus.hash(h);
         self.preedit.hash(h);
@@ -267,6 +269,7 @@ impl std::hash::Hash for TextEdit {
         self.soft_breaks.hash(h);
         self.pending.hash(h);
         self.secure.hash(h);
+        self.revealed.hash(h);
     }
 }
 
@@ -516,6 +519,7 @@ impl TextEdit {
             history: Arc::default(),
             group: ActiveGroup::default(),
             secure: false,
+            revealed: false,
             single_line: false,
             rich: false,
             allowed_marks: None,
@@ -754,6 +758,15 @@ impl TextEdit {
         }
     }
 
+    /// Show the plain characters of a [`secure`](Self::secure) field while keeping all other
+    /// secure protections: no undo, copy, cut, IME or accessibility text, redacted [`Debug`],
+    /// and zeroized buffers.
+    pub fn revealed(mut self, revealed: bool) -> Self { self.set_revealed(revealed); self }
+
+    pub fn is_revealed(&self) -> bool { self.revealed }
+
+    pub fn set_revealed(&mut self, revealed: bool) { self.revealed = revealed; }
+
     pub(crate) fn clear_preedit(&mut self) {
         if let Some((mut text, _)) = self.preedit.take() { text.zeroize(); }
     }
@@ -800,18 +813,25 @@ impl TextEdit {
     /// the field paints the same dots (no placeholder) through the exit with no plaintext.
     pub(crate) fn conceal(&mut self) {
         if !self.secure { return; }
+        self.revealed = false;
         self.replace_text("•".repeat(self.text.chars().count()));
     }
 
     /// Map model bytes to the bullet layout's bytes and back. Each Unicode scalar gets one
     /// bullet, so UTF-8 length never changes caret/selection alignment.
     pub(crate) fn display_index(&self, byte: usize) -> usize {
-        if self.secure { self.text[..byte.min(self.text.len())].chars().count() * '•'.len_utf8() } else { byte }
+        if self.secure && !self.revealed {
+            self.text[..byte.min(self.text.len())].chars().count() * '•'.len_utf8()
+        } else {
+            byte.min(self.text.len())
+        }
     }
     pub(crate) fn model_index(&self, byte: usize) -> usize {
-        if self.secure {
+        if self.secure && !self.revealed {
             self.text.char_indices().nth(byte / '•'.len_utf8()).map_or(self.text.len(), |(i, _)| i)
-        } else { byte.min(self.text.len()) }
+        } else {
+            byte.min(self.text.len())
+        }
     }
 
     /// Clears the draft and its history after submission, preserving keyboard focus.
@@ -1001,6 +1021,9 @@ impl TextEdit {
     }
 
     fn prev_word(&self, i: usize) -> usize {
+        if self.secure && !self.revealed {
+            return 0;
+        }
         let s = &self.text;
         let b = s.as_bytes();
         let mut j = i.min(b.len());
@@ -1026,6 +1049,9 @@ impl TextEdit {
     }
 
     fn next_word(&self, i: usize) -> usize {
+        if self.secure && !self.revealed {
+            return self.text.len();
+        }
         let s = &self.text;
         let b = s.as_bytes();
         let mut j = i.min(b.len());
@@ -2351,7 +2377,7 @@ impl TextEdit {
     /// Map a model byte range `start..end` (in `self.text`) onto `self.display().0` byte ranges,
     /// shifting or splitting around any active IME `preedit` splice.
     pub(crate) fn map_range_to_display(&self, start: usize, end: usize) -> Vec<(u32, u32)> {
-        if self.secure || start >= end {
+        if (self.secure && !self.revealed) || start >= end {
             return Vec::new();
         }
         let s = Self::clamp_char_boundary(&self.text, start);
@@ -2565,7 +2591,10 @@ impl TextEdit {
     /// The text to lay out: committed text with any preedit spliced in at the caret, and the
     /// byte range of the preedit within it.
     pub fn display(&self) -> (String, Option<(usize, usize)>) {
-        if self.secure { return ("•".repeat(self.text.chars().count()), None); }
+        if self.secure {
+            let text = if self.revealed { self.text.clone() } else { "•".repeat(self.text.chars().count()) };
+            return (text, None);
+        }
         match &self.preedit {
             Some((p, _)) => {
                 let (a, b) = self.range();
@@ -2642,6 +2671,80 @@ mod tests {
         assert!(!format!("{e:?}").contains("h界x"));
         e.clear();
         assert!(e.is_secure());
+    }
+
+    #[test]
+    fn secure_revealed_uses_plain_display_and_words_while_keeping_protections() {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let hash = |e: &TextEdit| {
+            let mut h = DefaultHasher::new();
+            e.hash(&mut h);
+            h.finish()
+        };
+        let mut e = TextEdit::new("hé🙂 world").secure();
+        let hidden_hash = hash(&e);
+        assert!(!e.is_revealed());
+        assert_eq!(e.display().0, "•••••••••");
+        // Hidden secure fields treat the masked string as a single word.
+        let alt_left = KeyEvent { key: Key::Left, mods: Mods { alt: true, ..Mods::default() } };
+        let alt_right = KeyEvent { key: Key::Right, mods: Mods { alt: true, ..Mods::default() } };
+        e.set_caret(e.text.len());
+        e.key(&alt_left, None);
+        assert_eq!(e.focus, 0);
+        e.key(&alt_right, None);
+        assert_eq!(e.focus, e.text.len());
+
+        e.set_selection(1, 7);
+        e.set_revealed(true);
+        assert!(e.is_secure() && e.is_revealed());
+        assert_ne!(hash(&e), hidden_hash, "Hash for TextEdit must include revealed");
+        assert_eq!((e.anchor, e.focus), (1, 7), "toggling revealed preserves selection");
+        assert_eq!(e.display(), ("hé🙂 world".into(), None));
+        for idx in [0, 1, 3, 7, 8, 13] {
+            assert_eq!(e.display_index(idx), idx);
+            assert_eq!(e.model_index(idx), idx);
+        }
+        // Revealed secure fields step over words normally.
+        e.set_caret(e.text.len());
+        e.key(&alt_left, None);
+        assert_eq!(e.focus, 8);
+        e.key(&alt_left, None);
+        assert_eq!(e.focus, 0);
+        e.key(&alt_right, None);
+        assert_eq!(e.focus, 7);
+
+        // Copy, cut, undo, redo and IME remain blocked when revealed.
+        e.set_selection(1, 7);
+        for command in ['c', 'x', 'z'] {
+            assert!(e.key(&k(Key::Command(command)), None).copy.is_none());
+            assert_eq!(e.text, "hé🙂 world");
+        }
+        e.key(&k(Key::Text("!".into())), None);
+        assert_eq!(e.text, "h! world");
+        assert!(!e.has_history());
+        undo(&mut e, false);
+        e.undo();
+        e.redo();
+        assert_eq!(e.text, "h! world");
+        e.ime(&Ime::Preedit("comp".into(), Some((0, 4))));
+        e.ime(&Ime::Commit("commit".into()));
+        assert!(e.preedit.is_none());
+        assert_eq!(e.text, "h! world");
+        let dbg = format!("{e:?}");
+        assert!(!dbg.contains("h! world") && !dbg.contains("world") && dbg.contains("[redacted]"));
+
+        // Toggling revealed off again preserves text and selection.
+        e.set_selection(2, 8);
+        e.set_revealed(false);
+        assert_eq!((&*e.text, e.anchor, e.focus), ("h! world", 2, 8));
+        assert_eq!(e.display().0, "••••••••");
+
+        // Conceal wipes a revealed field to bullets and clears revealed.
+        let mut exiting = TextEdit::new("hunter2").secure().revealed(true);
+        exiting.conceal();
+        assert!(exiting.is_secure() && !exiting.is_revealed());
+        assert_eq!(exiting.text, "•••••••");
+        assert_eq!(exiting.display().0, "•••••••");
     }
 
     /// Arrows and backspace treat a ZWJ family, a flag and a skin-toned hand as one character.

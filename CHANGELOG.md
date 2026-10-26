@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Secure `TextEdit` and `TextInput` reveal toggle (`revealed`, `set_revealed`, `is_revealed`).**
+  A `.secure()` field can now show its real characters with `TextEdit::revealed(true)` /
+  `set_revealed(true)`, `El::revealed(true)` or `rune_kit::TextInput::revealed(true)` (as in a
+  password manager's show/hide button) while keeping every other secure protection: no undo or redo
+  history, no `⌘C` or `⌘X` clipboard writes, no IME composition (`has_secure_focus()` stays `true`),
+  `ElementInfo::text` remains `None`, `Debug` on `TextEdit`, `InputSpec` and `TextSpec` stays
+  `[redacted]`, model and rendered text buffers zeroize on replace and drop, and an exiting field
+  conceals back to bullets on its first exit frame. Word movement (`⌥←` / `⌥→`) treats a hidden
+  secure field as a single masked word and steps over words normally while revealed.
 - **`El::span_ring`, `El::span_rings`, `LinkPaint::ring`, and `Markdown::link_ring`.** Draws an
   inset border ring `(color, width)` inside a span's rounded `Span::bg` rect (`4 pt` corner radius),
   so link chips remain visible when their fill is close to the page background.

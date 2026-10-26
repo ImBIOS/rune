@@ -25,6 +25,12 @@ fn sync_input_focus<S: 'static>(input: &mut crate::el::InputSpec, state: &mut S,
         edit.set_secure(true);
         changed = true;
     }
+    if let Some(revealed) = input.revealed_override
+        && edit.is_revealed() != revealed
+    {
+        edit.set_revealed(revealed);
+        changed = true;
+    }
     if edit.focused != focused || (!focused && edit.preedit.is_some()) {
         edit.focused = focused;
         if !focused { edit.clear_preedit(); }

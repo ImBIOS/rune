@@ -78,6 +78,9 @@ impl EditActs {
     fn pill_colors(&mut self, bg: Color, fg: Option<Color>) {
         self.visual.push(Box::new(move |e: El| e.pill_colors(bg, fg)));
     }
+    fn revealed(&mut self, revealed: bool) {
+        self.visual.push(Box::new(move |e: El| e.revealed(revealed)));
+    }
     fn apply(self, mut e: El, disabled: bool) -> El {
         for f in self.visual {
             e = f(e);
@@ -114,6 +117,11 @@ pub struct TextInput {
 impl TextInput {
     pub fn secure(mut self) -> Self {
         self.edit.set_secure(true);
+        self
+    }
+    pub fn revealed(mut self, revealed: bool) -> Self {
+        self.edit.set_revealed(revealed);
+        self.edits.revealed(revealed);
         self
     }
     pub fn animate_edit_layout(mut self) -> Self {
