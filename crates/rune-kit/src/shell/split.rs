@@ -270,9 +270,9 @@ impl SplitView {
                 let mut button = IconButton::new(&super::SIDEBAR)
                     .variant(IconButtonVariant::GhostMuted)
                     .control_size(t.size)
-                    .expanded(open)
                     .label(if open { "Hide sidebar" } else { "Show sidebar" })
-                    .build(k);
+                    .build(k)
+                    .expanded(open);
                 if t.unread {
                     // A tween ends where it says; a spring's exit would run on unseen for a while.
                     let dot = el().key("sidebar-toggle-unread").size(7.0, 7.0).radius(3.5).fill(c.bg_accent);

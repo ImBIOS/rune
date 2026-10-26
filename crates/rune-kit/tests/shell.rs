@@ -249,6 +249,9 @@ fn roles_and_labels_describe_the_shell() {
     assert_eq!(role("sidebar-toggle"), Some(("button", Some("Hide sidebar".into()))));
     let fill = |key: &str| all.iter().find(|e| e.key.as_deref() == Some(key)).unwrap().fill.a;
     assert!(fill("row1") > 0.0 && fill("row0") == 0.0, "the selected row is filled");
+    let toggle = all.iter().find(|e| e.key.as_deref() == Some("sidebar-toggle")).unwrap();
+    assert_eq!(toggle.expanded, Some(true), "the toggle reports the open sidebar");
+    assert_eq!(fill("sidebar-toggle"), 0.0, "without holding a pressed fill");
 
     let (x, y) = rt.find("section-header").unwrap();
     rt.pointer_down(x, y);
