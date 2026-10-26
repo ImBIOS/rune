@@ -965,9 +965,13 @@ pub struct Visual {
     /// `El::raise`: paints and takes input above the rest of the window.
     pub(crate) raise: bool,
     /// The curve `El::scale` changes on.
-    pub(crate) scale_motion: Option<Anim>,
+    pub(crate) scale_motion: Option<Box<Anim>>,
     /// `El::origin`: the unit point scale and rotation pivot about; `None` is the centre.
     pub(crate) origin: Option<[f32; 2]>,
+    /// `El::rotate`, in radians clockwise.
+    pub(crate) rotate: f32,
+    /// The curve `El::rotate` changes on.
+    pub(crate) rotate_motion: Option<Box<Anim>>,
 }
 
 impl Default for Visual {
@@ -1015,6 +1019,8 @@ impl Default for Visual {
             raise: false,
             scale_motion: None,
             origin: None,
+            rotate: 0.0,
+            rotate_motion: None,
         }
     }
 }
@@ -2484,7 +2490,24 @@ impl El {
     }
     /// The curve [`Self::scale`] changes on.
     pub fn scale_motion(mut self, anim: impl Into<Anim>) -> Self {
-        self.vis.scale_motion = Some(anim.into());
+        self.vis.scale_motion = Some(Box::new(anim.into()));
+        self
+    }
+    /// Draw this element and everything in it turned `radians` clockwise about its
+    /// [`origin`](Self::origin), like SwiftUI's `rotationEffect`: fills, borders, shadows,
+    /// text, icons and images all turn. Layout keeps the upright box, so siblings don't move.
+    /// A change springs on the element's layout spring (or [`Self::rotate_motion`]); under
+    /// Reduce Motion, and in an instant transaction, it lands at once. While turned, the
+    /// subtree draws into its own layer, and a native surface inside it (a video, a web view)
+    /// stays upright. Hit testing and the reported rect use the turned box's upright bounding
+    /// box. Anything not finite is `0.0`.
+    pub fn rotate(mut self, radians: f32) -> Self {
+        self.vis.rotate = if radians.is_finite() { radians } else { 0.0 };
+        self
+    }
+    /// The curve [`Self::rotate`] changes on.
+    pub fn rotate_motion(mut self, anim: impl Into<Anim>) -> Self {
+        self.vis.rotate_motion = Some(Box::new(anim.into()));
         self
     }
     /// The point this element scales and rotates about, in units of its own size: `(0.5, 0.5)`

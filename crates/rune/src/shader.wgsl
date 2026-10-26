@@ -78,6 +78,13 @@ fn base_vs(i: In) -> Out {
         let s = sin(i.params.x);
         screen = center + vec2<f32>(c * q.x - s * q.y, s * q.x + c * q.y);
     }
+    // A turned layer composite (`Instance::turned`): border.y radians about border.zw.
+    if (kind > 7.5 && kind < 8.5 && i.border.y != 0.0) {
+        let q = p - i.border.zw;
+        let c = cos(i.border.y);
+        let s = sin(i.border.y);
+        screen = i.border.zw + vec2<f32>(c * q.x - s * q.y, s * q.x + c * q.y);
+    }
     var o: Out;
     let size_px = select(g.viewport, projection.zw, projection.z > 0.0);
     let local = screen - projection.xy;
@@ -290,15 +297,36 @@ fn dash_cov(s: f32, total: f32, d: vec3<f32>) -> f32 {
     return clamp(dash * 0.5 - abs(m) + 0.5, 0.0, 1.0);
 }
 
+// A texel of a layer `size` pixels across; transparent outside it.
+fn layer_texel(t: vec2<i32>, size: vec2<f32>) -> vec4<f32> {
+    if (any(t < vec2<i32>(0)) || any(t >= vec2<i32>(size))) { return vec4<f32>(0.0); }
+    return textureLoad(images, t, 0);
+}
+
 @fragment
 fn fs(i: Out) -> @location(0) vec4<f32> {
     if (i.params.y == 8.0) {
         // Filters consume unmasked source pixels. Decode the same packed clip as primitives
         // only here, on the completed layer, including the radius in word 3.
-        let p = i.pos.xy + projection.xy - i.rect.xy;
-        if (any(p < vec2<f32>(0.0)) || any(p >= i.rect.zw)) { discard; }
+        let screen = i.pos.xy + projection.xy;
+        var p = screen - i.rect.xy;
         var color: vec4<f32>;
-        if (i.uv.z > 0.0) {
+        if (i.border.y != 0.0) {
+            // Turned: sample the upright contents where this pixel turns back to, bilinearly,
+            // with nothing outside the layer.
+            let q = screen - i.border.zw;
+            let c = cos(i.border.y);
+            let s = sin(i.border.y);
+            p = i.border.zw + vec2<f32>(c * q.x + s * q.y, c * q.y - s * q.x) - i.rect.xy;
+            let local = p - vec2<f32>(0.5);
+            let base = floor(local);
+            let f = local - base;
+            let t0 = vec2<i32>(base);
+            color = mix(mix(layer_texel(t0, i.rect.zw), layer_texel(t0 + vec2<i32>(1, 0), i.rect.zw), f.x),
+                        mix(layer_texel(t0 + vec2<i32>(0, 1), i.rect.zw), layer_texel(t0 + vec2<i32>(1, 1), i.rect.zw), f.x), f.y);
+        } else if (any(p < vec2<f32>(0.0)) || any(p >= i.rect.zw)) {
+            discard;
+        } else if (i.uv.z > 0.0) {
             let local = p * i.uv.zw / i.rect.zw - vec2<f32>(0.5);
             let hi = vec2<i32>(i.uv.zw) - vec2<i32>(1);
             let base = floor(local);

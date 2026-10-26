@@ -11,7 +11,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   now sees it animate. `El::origin(x, y)` sets the unit point that `scale`, `live_scale`,
   `press_scale` and a transition's scale pivot about (default centre); `offset` ignores it.
   The first four shadows' x, y, blur and spread now spring on the layout spring, as their
-  colour already did, instead of snapping.
+  colour already did, instead of snapping. `El::rotate(radians)` turns an element and
+  everything in it clockwise about its origin, springing like `scale` (or on
+  `El::rotate_motion`). A turned subtree draws into a layer whose composite turns; hit testing
+  and the reported rect use the turned box's upright bounds, and a turned subtree never caches.
+  Layer records carry the turn in `border[1..4]` (`Instance::turned`), which rune-ref now
+  renders.
 
 - **`PopupList` and `PopupItem`.** `Combobox`'s virtualised popup listbox is now a standalone
   `rune_kit` component (`PopupList::new(key, anchor)` with `PopupItem::new(id, label)` rows) for

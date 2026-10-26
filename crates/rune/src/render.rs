@@ -393,6 +393,14 @@ impl Instance {
         instance
     }
 
+    /// Turn this scope's composite `angle` radians clockwise about `pivot` (device pixels).
+    /// The contents draw upright; the layer's clip applies after the turn. Layer records keep
+    /// it in `border[1..4]` as `[angle, pivot.x, pivot.y]`.
+    pub fn turned(mut self, angle: f32, pivot: [f32; 2]) -> Self {
+        self.border = [0.0, angle, pivot[0], pivot[1]];
+        self
+    }
+
     pub fn end_layer() -> Self {
         Self { params: [0.0, KIND_LAYER_END, 0.0, 0.0], ..Self::zeroed() }
     }
@@ -430,7 +438,7 @@ pub(crate) fn end_layer(instances: &mut Vec<Instance>, surfaces: &mut [crate::na
     let transfer_clip = scope.fade[3] == 0 && unmasked;
     // A lone effect slot keeps a faded scope: the compositor's paint can't take the opacity.
     let faded_effect = primitives == 1 && instances[start + 1].params[1] == KIND_EFFECT && scope.fill[3] != 1.0;
-    if !faded_effect && primitives + videos <= 1 && scope.params[0] == 0.0 && scope.params[2] == 0.0 && scope.params[3] == 0.0
+    if !faded_effect && primitives + videos <= 1 && (primitives + videos == 0 || scope.border[1] == 0.0) && scope.params[0] == 0.0 && scope.params[2] == 0.0 && scope.params[3] == 0.0
         && (transfer_clip || (scope.clip == NO_CLIP && scope.fade == [0; 4])) {
         let opacity = scope.fill[3];
         if primitives == 1 {

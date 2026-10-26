@@ -645,6 +645,83 @@ struct Inh {
     in_cache: bool,
     /// Inside an elided or off-screen `El::cache` scope: skip primitive emission.
     skip_paint: bool,
+    /// Ancestors' `El::rotate` layers, composed, as an index into `turn_scratch` plus one
+    /// (0: none): where this subtree's device pixels land. An index keeps `Inh` small.
+    turn: u32,
+}
+
+/// A 2×3 affine in device pixels, `[a, b, c, d, tx, ty]`: `(x, y)` lands at
+/// `(a·x + b·y + tx, c·x + d·y + ty)`. The composed `El::rotate` layers above a node.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Turn([f32; 6]);
+
+/// The composed turn for a node under `Inh::turn` index `inherited` turning `own` radians about
+/// `pivot`: pushed onto `turns` when it turns itself. Off the paint loop's common path.
+#[cold]
+#[inline(never)]
+fn compose_turn(turns: &mut Vec<Turn>, inherited: u32, own: Option<f32>, pivot: [f32; 2]) -> (Option<Turn>, u32) {
+    let above = inherited.checked_sub(1).map(|k| turns[k as usize]);
+    match own {
+        None => (above, inherited),
+        Some(a) => {
+            let own = Turn::about(a, pivot);
+            let t = above.map_or(own, |t| t.after(own));
+            turns.push(t);
+            (Some(t), turns.len() as u32)
+        }
+    }
+}
+
+/// Open the layer a turned node draws into, upright, at `rect` (x, y, w, h in device pixels).
+/// The layer takes the clips from above, so the node's own clips start fresh inside it; a
+/// rectangular cut through the inherited rounded mask gets an outer scope of its own.
+#[cold]
+#[inline(never)]
+fn open_turned_layer(instances: &mut Vec<Instance>, layers: &mut Vec<(usize, usize, usize)>, (i, surfaces): (usize, usize),
+    rect: [f32; 4], (angle, pivot): (f32, [f32; 2]),
+    (clip, fade, fade_origin, rounded): (&mut [f32; 4], &mut [f32; 4], &mut [f32; 4], &mut Option<([f32; 4], [f32; 4])>))
+{
+    let intersect = |a: [f32; 4], b: [f32; 4]| [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
+    if let Some((mask, _)) = *rounded && intersect(*clip, mask) != mask {
+        let mut marker = Instance::begin_layer(rect, *clip, Default::default());
+        marker.fade = crate::render::pack_fade(*fade, *fade_origin, *clip);
+        layers.push((i, instances.len(), surfaces));
+        instances.push(marker);
+        (*clip, *fade, *fade_origin) = (NO_CLIP, [0.0; 4], NO_CLIP);
+    }
+    if let Some((mask, _)) = *rounded { *clip = intersect(*clip, mask); }
+    let mut marker = Instance::begin_layer(rect, *clip, Default::default()).turned(angle, pivot);
+    marker.fade = crate::render::pack_fade(*fade, *fade_origin, *clip);
+    if let Some((_, radii)) = *rounded { marker.round_clip_corners(radii); }
+    layers.push((i, instances.len(), surfaces));
+    instances.push(marker);
+    (*clip, *fade, *fade_origin, *rounded) = (NO_CLIP, [0.0; 4], NO_CLIP, None);
+}
+
+impl Turn {
+    /// `angle` radians clockwise about `p`.
+    fn about(angle: f32, p: [f32; 2]) -> Turn {
+        let (sn, c) = angle.sin_cos();
+        Turn([c, -sn, sn, c, p[0] - c * p[0] + sn * p[1], p[1] - sn * p[0] - c * p[1]])
+    }
+
+    /// `inner`, then `self`.
+    fn after(self, inner: Turn) -> Turn {
+        let [a, b, c, d, x, y] = self.0;
+        let [e, f, g, h, u, v] = inner.0;
+        Turn([a * e + b * g, a * f + b * h, c * e + d * g, c * f + d * h, a * u + b * v + x, c * u + d * v + y])
+    }
+
+    /// The upright bounding box of edges `r` once turned.
+    fn bbox(self, r: [f32; 4]) -> [f32; 4] {
+        let [a, b, c, d, x, y] = self.0;
+        let mut out = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+        for (px, py) in [(r[0], r[1]), (r[2], r[1]), (r[0], r[3]), (r[2], r[3])] {
+            let (qx, qy) = (a * px + b * py + x, c * px + d * py + y);
+            out = [out[0].min(qx), out[1].min(qy), out[2].max(qx), out[3].max(qy)];
+        }
+        out
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -711,7 +788,7 @@ impl Default for Inh {
         Inh { opacity: 1.0, paint_opacity: 1.0, clip: NO_CLIP, fade: [0.0; 4], fade_origin: NO_CLIP,
             paint_clip: NO_CLIP, paint_fade: [0.0; 4], paint_fade_origin: NO_CLIP, rounded: None,
             scale: 1.0, anchor: [0.0; 2], anchor_to: [0.0; 2], blur: 0.0, dy: 0.0, dx: 0.0, cover: [0.0; 2], outer: None, mark: 0, group: 0.0,
-            scale_motion: ScaleMotion::Still, in_cache: false, skip_paint: false }
+            scale_motion: ScaleMotion::Still, in_cache: false, skip_paint: false, turn: 0 }
     }
 }
 
@@ -868,6 +945,8 @@ pub struct Runtime<S: 'static> {
     glyph_scratch: Vec<GlyphQuad>,
     deco_scratch: Vec<Deco>,
     inh_scratch: Vec<Inh>,
+    /// The composed turns `Inh::turn` points into, rebuilt each paint.
+    turn_scratch: Vec<Turn>,
     /// Only nonempty when retained exit nodes or matched flights make storage order differ
     /// from paint order.
     layer_paint_order: Vec<usize>,
@@ -1261,6 +1340,7 @@ impl<S: 'static> Runtime<S> {
             glyph_scratch: Vec::new(),
             deco_scratch: Vec::new(),
             inh_scratch: Vec::new(),
+            turn_scratch: Vec::new(),
             layer_paint_order: Vec::new(),
             matched: Vec::new(),
             flying: Vec::new(),
@@ -4143,9 +4223,21 @@ impl<S: 'static> Runtime<S> {
                     self.scene.set(id, P_SCALE, k);
                 } else if self.scene.store().target(id, P_SCALE) != Some(k) {
                     if !self.scene.store().has(id, P_SCALE) { self.scene.set(id, P_SCALE, 1.0); }
-                    match nodes[i].vis.scale_motion {
+                    match nodes[i].vis.scale_motion.as_deref().copied() {
                         Some(anim) => self.scene.animate(id, P_SCALE, k, anim),
                         None => self.scene.animate(id, P_SCALE, k, spring_l),
+                    }
+                }
+            }
+            let turn = nodes[i].vis.rotate;
+            if turn != 0.0 || self.scene.store().has(id, prop::ROTATION) {
+                if instant || !was_present || was_exiting || self.reduced_motion {
+                    self.scene.set(id, prop::ROTATION, turn);
+                } else if self.scene.store().target(id, prop::ROTATION) != Some(turn) {
+                    if !self.scene.store().has(id, prop::ROTATION) { self.scene.set(id, prop::ROTATION, 0.0); }
+                    match nodes[i].vis.rotate_motion.as_deref().copied() {
+                        Some(anim) => self.scene.animate(id, prop::ROTATION, turn, anim),
+                        None => self.scene.animate(id, prop::ROTATION, turn, spring_l),
                     }
                 }
             }
@@ -5473,6 +5565,7 @@ impl<S: 'static> Runtime<S> {
         self.overlay_hits.clear();
         let n_nodes = self.nodes.len();
         self.inh_scratch.clear();
+        self.turn_scratch.clear();
         self.inh_scratch.resize(n_nodes, Inh::default());
         self.drawn.clear();
         self.drawn.resize(n_nodes, [0.0; 4]);
@@ -5758,7 +5851,7 @@ impl<S: 'static> Runtime<S> {
                 pinh = Inh { opacity: 1.0, paint_opacity: 1.0, clip, fade, fade_origin, paint_clip: clip, paint_fade: fade,
                     paint_fade_origin: fade_origin, rounded: None, scale: 1.0, anchor: [0.0; 2], anchor_to: [0.0; 2], blur: 0.0,
                     dx: pinh.dx - pinh.cover[0], dy: pinh.dy - pinh.cover[1], cover: [0.0; 2], outer: None,
-                    scale_motion: ScaleMotion::Still, in_cache: false, skip_paint: false, ..pinh };
+                    scale_motion: ScaleMotion::Still, in_cache: false, skip_paint: false, turn: 0, ..pinh };
             }
             let mark = if n.vis.mark != 0 { n.vis.mark } else { pinh.mark };
             let mut own = p.opacity;
@@ -5895,7 +5988,19 @@ impl<S: 'static> Runtime<S> {
             } else { None };
             let r = rect_pt.map(snap_px);
             let (w, h) = ((r[2] - r[0]).max(0.0), (r[3] - r[1]).max(0.0));
-            self.drawn[i] = [r[0] / s, r[1] / s, w / s, h / s];
+            // `El::rotate`: this subtree draws into a layer turned about its origin.
+            let own_turn = p.transform.rotate;
+            let own_turn = (own_turn != 0.0 && own_turn.is_finite() && own_turn.abs() > 1e-6 && !lift).then_some(own_turn);
+            let turn_pivot = [centre_to[0] * s, centre_to[1] * s];
+            let (node_turn, turn_index) = if pinh.turn == 0 && own_turn.is_none() {
+                (None, 0)
+            } else {
+                compose_turn(&mut self.turn_scratch, pinh.turn, own_turn, turn_pivot)
+            };
+            // Where the node shows on screen, upright: the turned box's bounds.
+            let mut screen_r = [r[0], r[1], r[0] + w, r[1] + h];
+            if let Some(t) = node_turn { screen_r = t.bbox(screen_r); }
+            self.drawn[i] = [screen_r[0] / s, screen_r[1] / s, (screen_r[2] - screen_r[0]) / s, (screen_r[3] - screen_r[1]) / s];
             if cover.is_none() { self.drawn_scale[i] = sc; }
             let radii = p.radius.0.map(|v| v * sc * s);
 
@@ -5915,10 +6020,10 @@ impl<S: 'static> Runtime<S> {
             } else {
                 clip
             };
-            let visible = r[2] >= vis_clip[0].max(vp[0]) - filter_margin - 2.0
-                && r[0] <= vis_clip[2].min(vp[2]) + filter_margin + 2.0
-                && r[3] >= vis_clip[1].max(vp[1]) - filter_margin - 2.0
-                && r[1] <= vis_clip[3].min(vp[3]) + filter_margin + 2.0;
+            let visible = screen_r[2] >= vis_clip[0].max(vp[0]) - filter_margin - 2.0
+                && screen_r[0] <= vis_clip[2].min(vp[2]) + filter_margin + 2.0
+                && screen_r[3] >= vis_clip[1].max(vp[1]) - filter_margin - 2.0
+                && screen_r[1] <= vis_clip[3].min(vp[3]) + filter_margin + 2.0;
             self.seen[i] = visible;
             let text_tint = |c: Color| match n.vis.group_color {
                 Some(g) if pinh.group > 0.0 => c.mix(g, pinh.group),
@@ -5982,7 +6087,7 @@ impl<S: 'static> Runtime<S> {
                 }
             }
             if n.vis.cache && active_cache.is_none() && !lift && !skip_paint && !self.cache_live_scratch[i]
-                && !committed_scale_moving
+                && !committed_scale_moving && own_turn.is_none()
                 && effective_opacity > 0.001 && w > 0.0 && h > 0.0
             {
                 let eff_scale = sc * s;
@@ -6052,6 +6157,12 @@ impl<S: 'static> Runtime<S> {
                         *round = None;
                     }
                 }
+            }
+            // A turned subtree draws upright into its own layer, which turns as it composites.
+            // The layer takes the clips from above; the node's own clips apply inside, upright.
+            if !skip_paint && let Some(angle) = own_turn {
+                open_turned_layer(&mut self.instances, &mut layers, (i, self.surfaces.len()), [r[0], r[1], w, h],
+                    (angle, turn_pivot), (&mut clip, &mut fade, &mut fade_origin, &mut rounded));
             }
             // The packed ABI carries one clip rectangle. Preserve a rectangular cut through
             // a rounded corner on a separate outer scope, never recenter the rounded mask.
@@ -6834,8 +6945,10 @@ impl<S: 'static> Runtime<S> {
                 paint_clip: clip, paint_fade: fade, paint_fade_origin: fade_origin, rounded, scale, anchor, anchor_to, blur, dy, dx,
                 cover: cover_offset, outer, mark, group,
                 scale_motion: if cover.is_some() { ScaleMotion::Moving } else { scale_motion },
-                in_cache, skip_paint };
+                in_cache, skip_paint, turn: turn_index };
             let hits_before = self.hits.len();
+            // A turned node hits where it shows: its turned box's upright bounds, in points.
+            let turned = |pt: [f32; 4]| match node_turn { None => pt, Some(t) => t.bbox(pt.map(|v| v * s)).map(|v| v / s) };
             if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_double_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.role == "textbox" || n.window_drag || n.focus.enabled || n.modal.is_some()
                 || n.text.as_ref().is_some_and(|t| t.selectable) || n.gestures.as_ref().is_some_and(|g| g.takes_gestures()))
                 && !self.subtree_exiting(i)
@@ -6847,6 +6960,7 @@ impl<S: 'static> Runtime<S> {
                     [ax + (rect_pt[0] - ax) / press_k, ay + (rect_pt[1] - ay) / press_k,
                         ax + (rect_pt[2] - ax) / press_k, ay + (rect_pt[3] - ay) / press_k]
                 } else { rect_pt };
+                let rect_pt = turned(rect_pt);
                 let cr = [
                     rect_pt[0].max(c[0] / s),
                     rect_pt[1].max(c[1] / s),
@@ -6862,11 +6976,13 @@ impl<S: 'static> Runtime<S> {
             }
             if self.nodes[i].help.is_some() && (!self.nodes[i].help_cut || self.nodes[i].elided.is_some()) && !self.subtree_exiting(i) && self.allowed(i) && effective_opacity > 0.001 && visible {
                 let c = if self.nodes[i].parent.is_some() { pinh.clip } else { NO_CLIP };
+                let rect_pt = turned(rect_pt);
                 let r = [rect_pt[0].max(c[0] / s), rect_pt[1].max(c[1] / s), rect_pt[2].min(c[2] / s), rect_pt[3].min(c[3] / s)];
                 self.push_help_hit(i, r, hits_before);
             }
             if self.nodes[i].drop.is_some() && !self.subtree_exiting(i) && self.allowed(i) && effective_opacity > 0.001 && visible {
                 let c = if self.nodes[i].parent.is_some() { pinh.clip } else { NO_CLIP };
+                let rect_pt = turned(rect_pt);
                 let r = [rect_pt[0].max(c[0] / s), rect_pt[1].max(c[1] / s), rect_pt[2].min(c[2] / s), rect_pt[3].min(c[3] / s)];
                 self.push_drop_hit(i, r, hits_before);
             }

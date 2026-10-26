@@ -30,6 +30,10 @@ pub struct Primitive {
     pub fade: [f32; 4],
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fade_origin: Option<[f32; 4]>,
+    /// For a layer (kind 8), `[turn, pivot_x, pivot_y]`: the composite turns `turn` radians
+    /// clockwise about the pivot (device pixels).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<[f32; 3]>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -121,6 +125,12 @@ impl Scene {
                 } else {
                     !color(&p.border)
                 })
+                || p.turn.is_some_and(|t| {
+                    p.params[1] != 8.0
+                        || p.params[3] == 1.0
+                        || t[0] == 0.0
+                        || t.iter().any(|v| !v.is_finite() || v.abs() > 1e6)
+                })
                 || (p.params[1] == 4.0 && !color(&p.uv))
                 || (p.params[1] == 10.0 && (p.uv[0] <= 0.0 || p.uv[1] <= 0.0))
                 || (p.params[1] == 11.0 && (p.uv[2] < 0.0 || p.uv[3] < 0.0 || (p.uv[2] > 0.0) != (p.uv[3] > 0.0)))
@@ -200,16 +210,23 @@ impl Frame {
                         close += 1;
                     }
                 }
-                if p.params[3] == 0.0 && p.fill[3] == 1.0 && p.params[0] == 0.0 && p.params[2] == 0.0 && p.clip == NO_CLIP && p.border == [0.0; 4] {
+                if p.params[3] == 0.0 && p.fill[3] == 1.0 && p.params[0] == 0.0 && p.params[2] == 0.0 && p.clip == NO_CLIP && p.border == [0.0; 4]
+                    && p.turn.is_none()
+                {
                     Self::render_range(width, height, rgba, owners.as_deref_mut(), scene, cursor + 1, close);
                 } else if p.fill[3] > 0.0 {
                     let mut layer_rgba = vec![0u8; (width * height * 4) as usize];
                     let mut layer_owners = owners.as_ref().map(|o| vec![None; o.len()]);
                     Self::render_range(width, height, &mut layer_rgba, layer_owners.as_deref_mut(), scene, cursor + 1, close);
-                    let x0 = libm::floorf(p.rect[0]).max(0.0) as u32;
-                    let y0 = libm::floorf(p.rect[1]).max(0.0) as u32;
-                    let x1 = (libm::ceilf(p.rect[0] + p.rect[2]).max(0.0) as u32).min(width);
-                    let y1 = (libm::ceilf(p.rect[1] + p.rect[3]).max(0.0) as u32).min(height);
+                    let turn = p.turn.filter(|t| t[0] != 0.0).map(|[a, px, py]| (libm::sinf(a), libm::cosf(a), [px, py]));
+                    // A turned layer can reach anywhere; its contents fill the frame-sized buffer.
+                    let (x0, y0, x1, y1) = if turn.is_some() {
+                        (0, 0, width, height)
+                    } else {
+                        (libm::floorf(p.rect[0]).max(0.0) as u32, libm::floorf(p.rect[1]).max(0.0) as u32,
+                            (libm::ceilf(p.rect[0] + p.rect[2]).max(0.0) as u32).min(width),
+                            (libm::ceilf(p.rect[1] + p.rect[3]).max(0.0) as u32).min(height))
+                    };
                     let alpha = p.fill[3].clamp(0.0, 1.0);
                     for y in y0..y1 {
                         for x in x0..x1 {
@@ -218,7 +235,29 @@ impl Frame {
                                 continue;
                             }
                             let at = (y * width + x) as usize;
-                            let src = decode(layer_rgba[at * 4..at * 4 + 4].try_into().unwrap());
+                            let src = match turn {
+                                Some((sn, cs, pivot)) => {
+                                    let (qx, qy) = (x as f32 + 0.5 - pivot[0], y as f32 + 0.5 - pivot[1]);
+                                    let (ux, uy) = (pivot[0] + cs * qx + sn * qy - 0.5, pivot[1] + cs * qy - sn * qx - 0.5);
+                                    let (bx, by) = (libm::floorf(ux), libm::floorf(uy));
+                                    let (fx, fy) = (ux - bx, uy - by);
+                                    let texel = |tx: f32, ty: f32| -> [f32; 4] {
+                                        if tx < 0.0 || ty < 0.0 || tx >= width as f32 || ty >= height as f32 {
+                                            return [0.0; 4];
+                                        }
+                                        let at = (ty as u32 * width + tx as u32) as usize;
+                                        decode(layer_rgba[at * 4..at * 4 + 4].try_into().unwrap())
+                                    };
+                                    let (a, b) = (texel(bx, by), texel(bx + 1.0, by));
+                                    let (c, d) = (texel(bx, by + 1.0), texel(bx + 1.0, by + 1.0));
+                                    std::array::from_fn(|k| {
+                                        let top = a[k] * (1.0 - fx) + b[k] * fx;
+                                        let bottom = c[k] * (1.0 - fx) + d[k] * fx;
+                                        top * (1.0 - fy) + bottom * fy
+                                    })
+                                }
+                                None => decode(layer_rgba[at * 4..at * 4 + 4].try_into().unwrap()),
+                            };
                             let col = src.map(|c| c * cov);
                             if col[3] <= 0.0 {
                                 continue;

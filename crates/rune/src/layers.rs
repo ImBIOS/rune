@@ -74,6 +74,25 @@ struct Layer {
     support: f32,
     cache: Option<(u64, u64)>,
     needs_render: bool,
+    /// `Instance::turned`: the composite turns `angle` radians about `pivot`.
+    turn: Option<(f32, [f32; 2])>,
+    /// Turned, or inside a turned layer: the window, clips and filter limits above don't line
+    /// up with this layer's pixels, so `frame` bounds it instead.
+    free: bool,
+    /// For a free layer, the edges of its contents that can reach the window.
+    frame: [f32; 4],
+}
+
+/// The upright bounds of edges `r` turned `angle` radians clockwise about `p`.
+fn turned_bounds(r: [f32; 4], angle: f32, p: [f32; 2]) -> [f32; 4] {
+    let (sn, c) = angle.sin_cos();
+    let mut out = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+    for (x, y) in [(r[0], r[1]), (r[2], r[1]), (r[0], r[3]), (r[2], r[3])] {
+        let (dx, dy) = (x - p[0], y - p[1]);
+        let (qx, qy) = (p[0] + c * dx - sn * dy, p[1] + sn * dx + c * dy);
+        out = [out[0].min(qx), out[1].min(qy), out[2].max(qx), out[3].max(qy)];
+    }
+    out
 }
 
 pub(super) struct Target {
@@ -197,6 +216,24 @@ impl Renderer {
                 });
                 let blur = layer_blur::sigma(i.params[2]);
                 let cache = (i.params[3] == 1.0).then(|| (unpack_u64_f32(i.radii), unpack_u64_f32(i.uv)));
+                let turn = (i.border[1] != 0.0).then_some((i.border[1], [i.border[2], i.border[3]]));
+                let parent_free = parent.is_some_and(|p| self.layers.plan[p].free);
+                let free = turn.is_some() || parent_free;
+                let frame = if free {
+                    let outer = match parent {
+                        Some(p) if parent_free => self.layers.plan[p].frame,
+                        _ => {
+                            let support = parent.map_or(0.0, |p| self.layers.plan[p].support);
+                            [-support, -support, viewport.0 as f32 + support, viewport.1 as f32 + support]
+                        }
+                    };
+                    let shown = [outer[0].max(i.clip[0]), outer[1].max(i.clip[1]), outer[2].min(i.clip[2]), outer[3].min(i.clip[3])];
+                    match turn {
+                        Some((angle, pivot)) if shown[2] > shown[0] && shown[3] > shown[1] => turned_bounds(shown, -angle, pivot),
+                        _ => shown,
+                    }
+                } else { [0.0; 4] };
+                let limit = if parent_free { NO_CLIP } else { limit };
                 self.layers.stack.push(self.layers.plan.len());
                 self.layers.plan.push(Layer {
                     begin: index as u32, end: 0, parent,
@@ -211,6 +248,9 @@ impl Renderer {
                     support: parent.map_or(0.0, |p| self.layers.plan[p].support) + (3.0 * blur).ceil(),
                     cache,
                     needs_render: true,
+                    turn,
+                    free,
+                    frame,
                 });
             } else if i.params[1] == KIND_LAYER_END {
                 let at = self.layers.stack.pop().expect("unbalanced layer end");
@@ -219,10 +259,15 @@ impl Renderer {
                 let grow = (3.0 * l.blur).ceil();
                 // Retain off-viewport sources that can contribute through this or an ancestor's
                 // filter. Clipping to the destination viewport before filtering loses those taps.
-                let vis = [(l.bounds[0] - grow).max(l.clip[0].max(l.limit[0]) - grow).max(-l.support).floor(),
-                    (l.bounds[1] - grow).max(l.clip[1].max(l.limit[1]) - grow).max(-l.support).floor(),
-                    (l.bounds[2] + grow).min(l.clip[2].min(l.limit[2]) + grow).min(viewport.0 as f32 + l.support).ceil(),
-                    (l.bounds[3] + grow).min(l.clip[3].min(l.limit[3]) + grow).min(viewport.1 as f32 + l.support).ceil()];
+                let vis = if l.free {
+                    [(l.bounds[0] - grow).max(l.frame[0] - grow).floor(), (l.bounds[1] - grow).max(l.frame[1] - grow).floor(),
+                        (l.bounds[2] + grow).min(l.frame[2] + grow).ceil(), (l.bounds[3] + grow).min(l.frame[3] + grow).ceil()]
+                } else {
+                    [(l.bounds[0] - grow).max(l.clip[0].max(l.limit[0]) - grow).max(-l.support).floor(),
+                        (l.bounds[1] - grow).max(l.clip[1].max(l.limit[1]) - grow).max(-l.support).floor(),
+                        (l.bounds[2] + grow).min(l.clip[2].min(l.limit[2]) + grow).min(viewport.0 as f32 + l.support).ceil(),
+                        (l.bounds[3] + grow).min(l.clip[3].min(l.limit[3]) + grow).min(viewport.1 as f32 + l.support).ceil()]
+                };
                 l.vis = vis;
                 if l.cache.is_some() {
                     if vis[2] <= vis[0] || vis[3] <= vis[1] {
@@ -233,7 +278,10 @@ impl Renderer {
                 } else {
                     l.bounds = vis;
                 }
-                let bounds = l.bounds;
+                let bounds = match l.turn {
+                    Some((angle, pivot)) if l.bounds[2] > l.bounds[0] && l.bounds[3] > l.bounds[1] => turned_bounds(l.bounds, angle, pivot),
+                    _ => l.bounds,
+                };
                 if let Some(parent) = l.parent.filter(|&p| self.layers.plan[p].cache.is_none()) {
                     union(&mut self.layers.plan[parent].bounds, bounds);
                 }
@@ -341,7 +389,7 @@ impl Renderer {
             }
             let l = &self.layers.plan[index];
             if cache_target.is_none() && l.opacity == 1.0 && l.blend == Blend::SourceOver && !additive_parent
-                && l.blur == 0.0 && l.fade[3] == 0 && l.clip == NO_CLIP {
+                && l.blur == 0.0 && l.fade[3] == 0 && l.clip == NO_CLIP && l.turn.is_none() {
                 self.layers.targets[index] = None;
                 continue;
             }
@@ -393,6 +441,7 @@ impl Renderer {
             let l = &self.layers.plan[index];
             let mut quad = Instance::begin_layer(bounds, l.clip, LayerSpec {
                 opacity: l.opacity, blend: l.blend, ..Default::default() });
+            if let Some((angle, pivot)) = l.turn { quad = quad.turned(angle, pivot); }
             quad.fade = l.fade;
             queue.write_buffer(&t.quad, 0, bytemuck::bytes_of(&quad));
         }

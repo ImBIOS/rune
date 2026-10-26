@@ -183,6 +183,7 @@ fn layer(kind: f32, blur: f32) -> rune_ref::Primitive {
         clip: NO_CLIP,
         fade: [0.0; 4],
         fade_origin: None,
+        turn: None,
     }
 }
 
@@ -196,6 +197,12 @@ fn validate_rejects_layers_it_cannot_render() {
     let mut malformed = layer(8.0, 0.0);
     malformed.params[3] = 2.0;
     assert!(with(vec![malformed, layer(9.0, 0.0)]).validate().is_err(), "invalid cache flag");
+    let mut turned = layer(8.0, 0.0);
+    turned.turn = Some([0.4, 4.0, 4.0]);
+    with(vec![turned.clone(), layer(9.0, 0.0)]).validate().unwrap();
+    // A turned subtree never opens a cache, so a turned cache record is malformed.
+    turned.params[3] = 1.0;
+    assert!(with(vec![turned, layer(9.0, 0.0)]).validate().is_err(), "turned cache");
     // The CPU compositor has no layer blur, so a blurred layer would render unblurred.
     assert!(with(vec![layer(8.0, 2.0), layer(9.0, 0.0)]).validate().is_err(), "blurred layer");
     // Each nested scope holds a full-frame buffer while it renders, so nesting is bounded.

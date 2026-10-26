@@ -15,13 +15,15 @@ impl Primitive {
             rect: p.rect,
             radii: p.radii,
             fill: p.fill,
-            // A layer has no border paint; preserve its signed per-corner rounded-clip radii here.
+            // A layer has no border paint; preserve its signed per-corner rounded-clip radii here,
+            // and its turn in `turn`.
             border: if p.params[1] == 8.0 { rune::render::unpack_clip_radii(p.fade[3]) } else { p.border },
             params: p.params,
             uv: p.uv,
             clip: p.clip,
             fade,
             fade_origin: Some(std::array::from_fn(|e| p.clip[e] + offset[e] * fade[e] * if e < 2 { -1.0 } else { 1.0 })),
+            turn: (p.params[1] == 8.0 && p.border[1] != 0.0).then_some([p.border[1], p.border[2], p.border[3]]),
         }
     }
 }
@@ -32,7 +34,12 @@ impl From<&Primitive> for Instance {
             rect: p.rect,
             radii: p.radii,
             fill: p.fill,
-            border: p.border,
+            border: if p.params[1] == 8.0 {
+                let [a, x, y] = p.turn.unwrap_or([0.0; 3]);
+                [0.0, a, x, y]
+            } else {
+                p.border
+            },
             params: p.params,
             uv: p.uv,
             clip: p.clip,
@@ -133,6 +140,7 @@ pub fn text_run(scene: &mut Scene, seed: u64) {
             clip: crate::NO_CLIP,
             fade: [0.0; 4],
             fade_origin: None,
+            turn: None,
         });
     }
     scene.atlas = crate::Atlas {

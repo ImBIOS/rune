@@ -136,6 +136,7 @@ fn rotated_glyphs() {
                     clip,
                     fade,
                     fade_origin: None,
+                    turn: None,
                 });
                 if let Err(e) = check(&mut gpu, &scene, 2) {
                     save(&format!("rotated-{n}-{}-clip-{c}", uv[2]), &scene);
@@ -290,6 +291,7 @@ fn cpu_gpu_radial() {
         clip: rune_ref::NO_CLIP,
         fade: [0.0; 4],
         fade_origin: None,
+        turn: None,
     };
     let outer = Primitive {
         node: 2,
@@ -407,4 +409,58 @@ fn cpu_gpu_cached_rounded_clip() {
         Primitive::from_instance(&Instance::end_layer(), 3, "end".into())];
     assert_eq!(scene.primitives[0].border, [-10.0, -10.0, 0.0, -4.0]);
     check(&mut gpu, &scene, 2).expect("mixed continuous-corner layer matches CPU oracle");
+}
+
+#[test]
+fn cpu_gpu_turned_layers() {
+    use rune::{Color, Cx, El, Env, Runtime, col, el, text};
+    let mut gpu = GpuRenderer::default();
+    // A card with text, a border, a shadow and a child, turned; one nested in another, and
+    // one under a clip, so the layer's clip applies after the turn.
+    fn view(angle: &f32, _: &mut Cx<f32>) -> El {
+        let card = |a: f32| col()
+            .size(30.0, 22.0)
+            .padding(3.0)
+            .fill(Color { r: 0.18, g: 0.24, b: 0.36, a: 1.0 })
+            .radius(5.0)
+            .border(1.0, Color { r: 0.45, g: 0.62, b: 0.88, a: 1.0 })
+            .shadow(2.0, 4.0, Color::BLACK.alpha(0.4))
+            .child(text("Ru").color(Color::WHITE))
+            .rotate(a);
+        col()
+            .size(64.0, 64.0)
+            .padding(4.0)
+            .gap(2.0)
+            .fill(Color { r: 0.06, g: 0.08, b: 0.12, a: 1.0 })
+            .child(card(*angle).origin(0.5, 1.0))
+            .child(el().size(56.0, 30.0).clip_rounded(4.0).child(card(-*angle).child(
+                el().size(8.0, 8.0).fill(Color { r: 0.85, g: 0.32, b: 0.28, a: 0.85 }).rotate(*angle * 2.0),
+            )))
+    }
+    for (n, angle) in [0.3f32, -1.1, std::f32::consts::FRAC_PI_2, 2.6].into_iter().enumerate() {
+        let mut rt = Runtime::new(angle, view, (64.0, 64.0), Env { scale: 1.0, system_dark: true });
+        rt.frame(0.0);
+        let primitives: Vec<Primitive> = rt
+            .instances
+            .iter()
+            .enumerate()
+            .map(|(idx, inst)| Primitive::from_instance(inst, idx as u32 + 1, format!("turned/{idx}")))
+            .collect();
+        assert!(primitives.iter().any(|p| p.params[1] == 8.0 && p.turn.is_some_and(|t| t[0] == angle)), "a turned layer");
+        let scene = Scene {
+            width: 64,
+            height: 64,
+            clear: [0.025, 0.04, 0.06, 1.0],
+            primitives,
+            atlas: rune_ref::Atlas {
+                width: rune::text::ATLAS_SIZE,
+                height: rune::text::ATLAS_SIZE,
+                data: rt.text.atlas.data.clone(),
+            },
+        };
+        if let Err(e) = check(&mut gpu, &scene, 2) {
+            save(&format!("turned-{n}"), &scene);
+            panic!("{e}");
+        }
+    }
 }

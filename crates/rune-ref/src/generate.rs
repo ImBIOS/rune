@@ -49,6 +49,7 @@ pub fn scene(records: &[[u8; 32]]) -> Scene {
             clip: NO_CLIP,
             fade: [0.0; 4],
             fade_origin: None,
+            turn: None,
         };
         if b[16] & 1 != 0 {
             p.clip = [

@@ -193,3 +193,67 @@ fn shadow_geometry_springs_with_the_element() {
     rt.frame(1.0 / 60.0);
     assert_eq!(shadow(&rt).0, [50.0, 52.0, 100.0, 40.0], "lands at once under Reduce Motion");
 }
+
+#[test]
+fn rotate_springs_turns_the_subtree_in_a_layer_and_hits_where_it_shows() {
+    fn view(turned: &bool, _: &mut Cx<bool>) -> El {
+        col().w_full().h_full().items_start().padding(50.0).child(
+            el().key("bar").size(100.0, 20.0).fill(Color::WHITE).motion(Spring::new(0.3, 0.0))
+                .rotate(if *turned { std::f32::consts::FRAC_PI_2 } else { 0.0 })
+                .on_press(|s: &mut bool| *s = !*s)
+                .child(el().key("dot").size(10.0, 10.0).fill(Color::BLACK)),
+        )
+    }
+    fn turn(rt: &Runtime<bool>) -> Option<f32> {
+        rt.instances.iter().find(|q| q.params[1] == rune::render::KIND_LAYER).map(|q| q.border[1])
+    }
+    let mut rt = Runtime::new(false, view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    assert_eq!(turn(&rt), None, "no layer while upright");
+    // A press on its right end turns it a quarter, about its centre (100, 60).
+    rt.pointer_move(145.0, 60.0);
+    rt.pointer_down(145.0, 60.0);
+    rt.pointer_up(145.0, 60.0);
+    rt.frame(1.0 / 60.0);
+    let mid = turn(&rt).expect("a turned layer");
+    assert!(mid > 0.0 && mid < std::f32::consts::FRAC_PI_2, "mid-spring: {mid}");
+    settle(&mut rt);
+    assert!((turn(&rt).unwrap() - std::f32::consts::FRAC_PI_2).abs() < 1e-4);
+    let r = rect(&rt, "bar");
+    assert!(r.iter().zip([90.0, 10.0, 20.0, 100.0]).all(|(a, b)| (a - b).abs() < 0.01), "upright bounds of the turned bar: {r:?}");
+    let d = rect(&rt, "dot");
+    assert!(d.iter().zip([100.0, 10.0, 10.0, 10.0]).all(|(a, b)| (a - b).abs() < 0.01), "the child turns with it: {d:?}");
+    // Its right end no longer shows there; its new top end does.
+    rt.pointer_move(145.0, 60.0);
+    rt.pointer_down(145.0, 60.0);
+    rt.pointer_up(145.0, 60.0);
+    rt.frame(0.0);
+    assert!(rt.state, "missed the old right end");
+    rt.pointer_move(100.0, 15.0);
+    rt.pointer_down(100.0, 15.0);
+    rt.pointer_up(100.0, 15.0);
+    rt.frame(0.0);
+    assert!(!rt.state, "hit the turned top end");
+
+    let mut rt = Runtime::new(false, view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.set_system_reduced_motion(true);
+    rt.update(|s, _| *s = true);
+    rt.frame(1.0 / 60.0);
+    assert!((turn(&rt).unwrap() - std::f32::consts::FRAC_PI_2).abs() < 1e-4, "lands at once under Reduce Motion");
+}
+
+#[test]
+fn rotate_and_scale_share_the_origin() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        col().w_full().h_full().items_start().padding(50.0).child(
+            el().key("a").size(100.0, 20.0).fill(Color::WHITE).origin(0.0, 0.0)
+                .rotate(std::f32::consts::FRAC_PI_2).scale(0.5),
+        )
+    }
+    let mut rt = Runtime::new((), view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let r = rect(&rt, "a");
+    // Half size about its top-left (50, 50), then a quarter turn clockwise about the same point.
+    assert!(r.iter().zip([40.0, 50.0, 10.0, 50.0]).all(|(a, b)| (a - b).abs() < 0.01), "{r:?}");
+}
