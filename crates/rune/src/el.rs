@@ -2738,13 +2738,14 @@ impl El {
         self.vis.hover_motion = Some((enter.into(), exit.into()));
         self
     }
-    /// Default hover curves for this element and everything below it: any hover track (a
-    /// `hover` colour, `hover_group` or press style) without its own [`Self::hover_motion`] uses
-    /// the nearest ancestor's pair, so kit controls whose inner elements you can't reach follow
-    /// it too. Set it on the root of the view (or on what you pass to `rune_kit::root`, which
-    /// carries it to the popups it layers beside the view). Without any, hover lands at once and
-    /// fades out over 0.1 s. Rows highlighted by `focus_highlight` (menu items, select options)
-    /// are never faded.
+    /// Default hover curves for this element and everything below it: any hover track (an
+    /// element with [`Self::hover`] or [`Self::hover_group`]) without its own
+    /// [`Self::hover_motion`] uses the nearest ancestor's pair, and [`Self::anchored`] overlays
+    /// inherit from their anchor, so kit controls whose inner elements you can't reach follow it
+    /// too. Set it on the root of the view (or on what you pass to `rune_kit::root`, which
+    /// carries it to the overlays it layers beside the view). Without any, hover lands at once
+    /// and fades out over 0.1 s. Rows highlighted by `focus_highlight` (menu items, select
+    /// options) are never faded.
     pub fn hover_motion_within(mut self, enter: impl Into<Anim>, exit: impl Into<Anim>) -> Self {
         self.vis.hover_within = Some((enter.into(), exit.into()));
         self
