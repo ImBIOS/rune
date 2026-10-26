@@ -40,6 +40,7 @@ mod menu;
 #[cfg(feature = "mermaid")]
 pub mod mermaid;
 mod overlay;
+mod popup_list;
 mod radio;
 mod rolling_text;
 mod segmented;
@@ -73,6 +74,7 @@ pub use list::{List, ListItem};
 pub use markdown::{Markdown, MarkdownStyle};
 pub use menu::{Menu, MenuEntry, MenuItem, context_menu};
 pub use overlay::{HoverCard, Placement, Popover, Tooltip, TooltipAppearance, TooltipStyle, body_text, overlay_text, scrim};
+pub use popup_list::{PopupItem, PopupList};
 pub use radio::{RadioGroup, RadioItem};
 pub use rolling_text::RollingText;
 pub use segmented::SegmentedControl;

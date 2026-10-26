@@ -43,17 +43,21 @@ impl Placement {
     /// The point content grows from (the trigger side), for the 0.96 scale-in.
     fn origin(self) -> Vec2 {
         let (side, align) = self.split();
-        let along = match align {
-            Align::Start => 0.0,
-            Align::Center => 0.5,
-            Align::End => 1.0,
-        };
-        match side {
-            Side::Top => Vec2::new(along, 1.0),
-            Side::Bottom => Vec2::new(along, 0.0),
-            Side::Left => Vec2::new(1.0, along),
-            Side::Right => Vec2::new(0.0, along),
-        }
+        anchor_origin(side, align)
+    }
+}
+
+fn anchor_origin(side: Side, align: Align) -> Vec2 {
+    let along = match align {
+        Align::Start => 0.0,
+        Align::Center => 0.5,
+        Align::End => 1.0,
+    };
+    match side {
+        Side::Top => Vec2::new(along, 1.0),
+        Side::Bottom => Vec2::new(along, 0.0),
+        Side::Left => Vec2::new(1.0, along),
+        Side::Right => Vec2::new(0.0, along),
     }
 }
 
@@ -61,6 +65,13 @@ impl Placement {
 /// fade plus 0.96 scale from the trigger side.
 pub(crate) fn anchor(k: &Kit, content: El, anchor: &str, placement: Placement, gap: f32) -> El {
     anchor_with(k.motion.overlay, content, anchor, placement, gap)
+}
+
+pub(crate) fn anchor_at(k: &Kit, content: El, anchor: &str, side: Side, align: Align, gap: f32) -> El {
+    content
+        .anchored(anchor, side, align, gap)
+        .transition(Transition::scale_anchor(0.96, anchor_origin(side, align)))
+        .motion(k.motion.overlay)
 }
 
 fn anchor_with(motion: Spring, content: El, anchor: &str, placement: Placement, gap: f32) -> El {
@@ -91,7 +102,7 @@ pub fn scrim<S: 'static>(key: impl Into<String>, close: impl Fn(&mut S) + 'stati
 }
 
 /// The older raised surface (popover, hover card): raised fill, half-strength border, md shadow.
-fn raised(k: &Kit, e: El, radius: f32) -> El {
+pub(crate) fn raised(k: &Kit, e: El, radius: f32) -> El {
     shadows(k, e.radius(radius).fill(k.c.surface_raised).border(1.0, k.alpha(k.c.std_border, 0.5)), &k.elevation.md)
 }
 

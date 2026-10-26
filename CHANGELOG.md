@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`PopupList` and `PopupItem`.** `Combobox`'s virtualised popup listbox is now a standalone
+  `rune_kit` component (`PopupList::new(key, anchor)` with `PopupItem::new(id, label)` rows) for
+  anchored popovers filtered by an outside field, such as a chat composer's `@`-mention and
+  `/`-command popovers. Each `PopupItem` takes an optional `.description(..)`, `.leading(el)`,
+  `.trailing(el)` and `.disabled(true)`. `PopupList` takes no keyboard focus and pressing inside
+  it leaves the outside field focused, while `on_active` and `on_choose` report pointer hover and
+  selection and changes to `.active(..)` keep the active row scrolled into view and labelled on
+  the `listbox`. `Combobox` now builds its list through `PopupList`.
 - **`LoopSpec::easing` for slides.** `LoopSpec::slide(..).easing(Easing::LINEAR)` sweeps at a
   constant speed, for a shimmer; slides stay ease-in-out by default, and reduced motion still
   holds the midpoint. The curve rides in a new `LoopKind::SlideEased { from, to, easing }` variant,

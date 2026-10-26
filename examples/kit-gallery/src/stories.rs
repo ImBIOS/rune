@@ -16,6 +16,10 @@ macro_rules! stories {
             s.story = $id;
             s.combo = ComboboxState::default();
             if $id == "rune-combobox--searchable" { s.combo.open = true; s.combo.search.focused = true; }
+            if $id == "rune-popup-list--composer" {
+                s.edits[7] = TextEdit::new("/");
+                s.edits[7].focused = true;
+            }
             s.open = OPENED.iter().find(|(id, _)| *id == $id).map(|(_, k)| (*k).to_owned());
         }),)*];
     };
@@ -26,6 +30,7 @@ macro_rules! stories {
 const OPENED: &[(&str, &str)] = &[
     ("ui-dialog--basic", "dialog"),
     ("rune-dialog--fit", "dialog-fit"),
+    ("rune-popup-list--composer", "popup-list"),
     ("ui-menu--basic", "menu"),
     ("ui-menu--rich", "menu"),
     ("ui-menu--with-checkbox", "menu"),
@@ -160,6 +165,52 @@ stories! {
     "rune-text--selectable-help" => text_selectable_help,
     "rune-text--truncate-middle" => text_truncate_middle,
     "rune-dialog--fit" => dialog_fit,
+    "rune-popup-list--composer" => popup_list_composer,
+}
+
+fn popup_list_composer(s: &G, k: &Kit, layer: &mut Vec<El>) -> El {
+    let entries = [
+        ("review", "/review", "Review branch changes", &glyphs::SPARKLE, "⏎", false),
+        ("compact", "/compact", "Summarize the conversation", &glyphs::FILE_TEXT, "⌘K", false),
+        ("search", "/search", "Search workspace files", k.glyph.search, "⌘P", false),
+        ("share", "/share", "Create a read-only link", k.glyph.lock, "", true),
+    ];
+    let q = s.edits[7].text.trim_start_matches('/').to_lowercase();
+    let filtered: Vec<_> = entries.into_iter().filter(|(_, label, desc, ..)| {
+        q.is_empty() || label.to_lowercase().contains(&q) || desc.to_lowercase().contains(&q)
+    }).collect();
+    let count = filtered.len();
+    let active = s.pick.get("popup-list").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0).min(count.saturating_sub(1));
+    let items = filtered.into_iter().map(|(id, label, desc, glyph, hint, disabled)| {
+        let mut item = PopupItem::new(id, label)
+            .description(desc)
+            .leading(rune::icon(glyph, 14.0).color(k.c.icon_muted))
+            .disabled(disabled);
+        if !hint.is_empty() {
+            item = item.trailing(text(hint).font(k.ty.small_medium).color(k.c.text_faint));
+        }
+        item
+    });
+    PopupList::new("popup-list", "composer")
+        .open(is_open(s, "popup-list"))
+        .width(320.0)
+        .items(items)
+        .active((count > 0).then_some(active))
+        .on_active(|s: &mut G, i| { s.pick.insert("popup-list".into(), i.to_string()); })
+        .on_choose(|s: &mut G, id, _| {
+            s.edits[7] = TextEdit::new(format!("/{id} "));
+            s.edits[7].focused = true;
+            s.open = None;
+        })
+        .build(k, layer);
+    TextInput::new(&s.edits[7])
+        .width(Some(320.0))
+        .placeholder("Type / for commands or @ to mention…")
+        .animate_edit_layout()
+        .on_edit(|s: &mut G| &mut s.edits[7])
+        .on_change(|s: &mut G, _| { s.open = Some("popup-list".into()); s.pick.insert("popup-list".into(), "0".into()); })
+        .build(k)
+        .key("composer")
 }
 
 fn combobox_searchable(s: &G, k: &Kit, layer: &mut Vec<El>) -> El {

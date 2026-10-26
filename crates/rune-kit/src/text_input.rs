@@ -338,6 +338,10 @@ impl TextArea {
         self.max_height = Some(h);
         self
     }
+    pub fn animate_edit_layout(mut self) -> Self {
+        self.edits.handlers.push(Box::new(El::animate_edit_layout));
+        self
+    }
     pub fn invalid(mut self, i: bool) -> Self {
         self.invalid = i;
         self

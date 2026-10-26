@@ -2147,7 +2147,9 @@ impl<S: 'static> Runtime<S> {
         // it makes isn't the live-only handler's.
         #[cfg(debug_assertions)]
         let mut ran_other = ran;
+        let mut pointer_hover = false;
         for action in queue {
+            pointer_hover |= matches!(action, Action::Hover(_));
             // State may have requested focus on a newly mounted field. Resolve the
             // new tree before routing this frame's text, not after it has gone to
             // the previous field. The same boundary covers an earlier handler, and lets a
@@ -2219,7 +2221,12 @@ impl<S: 'static> Runtime<S> {
         #[cfg(debug_assertions)]
         { self.live_check = None; }
         tx.keep_on_screen.clear();
-        let scroll_to = std::mem::take(&mut tx.scroll_to);
+        let mut scroll_to = std::mem::take(&mut tx.scroll_to);
+        for v in self.virtuals.values_mut() {
+            if let Some(key) = v.reveal_selected.take() && !pointer_hover {
+                scroll_to.push((None, key));
+            }
+        }
         let mut scroll_bottom = std::mem::take(&mut tx.scroll_bottom);
         let scroll_pages = std::mem::take(&mut tx.scroll_pages);
         let mut scroll_offsets = std::mem::take(&mut tx.scroll_offsets);
@@ -3484,6 +3491,13 @@ impl<S: 'static> Measurement<'_, S> {
                     row
                 }).collect();
             } else {
+                if !self.retry {
+                    let selected = el.children.iter().find(|c| c.focus.selected).and_then(|c| c.key.clone());
+                    if selected != v.selected_row {
+                        v.reveal_selected = selected.clone();
+                        v.selected_row = selected;
+                    }
+                }
                 el.children = std::mem::take(&mut el.children).into_iter().enumerate().filter_map(|(i, mut child)| {
                     if !v.range.contains(&i) {
                         collect_virtual_inputs(&child, &path, i, inert, self.virtual_inputs);
@@ -4803,11 +4817,20 @@ impl<S: 'static> Runtime<S> {
             .take_while(|&p| self.allowed(p))
             .find(|&p| self.nodes[p].focus.key.is_some() && self.can_focus(p))).flatten();
         let in_textbox = std::iter::successors(n.parent, |&p| self.nodes[p].parent).any(|p| self.textbox_input(p).is_some());
+        // A popup listbox whose keyboard belongs to an outside field keeps that field focused
+        // when one of its options or its surface is pressed.
+        let is_popup_listbox = |i: usize| self.nodes[i].role == "listbox" && !self.nodes[i].focus.group && !self.nodes[i].focus.enabled;
+        let popup_list = !n.focus.enabled && (std::iter::successors(Some(ti), |&p| self.nodes[p].parent)
+            .take_while(|&p| self.allowed(p))
+            .any(is_popup_listbox)
+            || (n.above.is_some() && (ti + 1..self.nodes.len())
+                .take_while(|&j| self.nodes[j].path.starts_with(&n.path))
+                .any(is_popup_listbox)));
         if !on_link && n.focus.enabled && !self.is_selectable(ti) {
             self.queue.push(Action::FocusControl(n.path.clone()));
         } else if !on_link && let Some(p) = keyed {
             self.queue.push(Action::FocusControl(self.nodes[p].path.clone()));
-        } else if !on_link && !in_textbox && self.focused.is_some() {
+        } else if !on_link && !in_textbox && !popup_list && self.focused.is_some() {
             self.queue.push(Action::Blur);
         }
         let r = n.target;

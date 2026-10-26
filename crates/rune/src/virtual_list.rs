@@ -41,6 +41,9 @@ pub(crate) struct VirtualList {
     pub shown: HashSet<String>,
     /// The row holding the focused element, kept while that row is scrolled out.
     pub focused_row: Option<String>,
+    /// The row marked `focus_selected(true)` on the last commit; a change reveals it.
+    pub selected_row: Option<String>,
+    pub reveal_selected: Option<String>,
     pub scroll_path: String,
     pub viewport: f32,
     pub pad_top: f32,

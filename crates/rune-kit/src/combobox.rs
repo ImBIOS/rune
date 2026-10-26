@@ -2,8 +2,8 @@
 //! @opencode/ui's use-filtered-list: looping arrows, Ctrl-N/P, composition-safe Enter,
 //! and editor modifiers left to the text field. Fuzzy scores are Rune's own ordering.
 use std::rc::Rc;
-use rune::{El, GrowthSpec, Key, ScrollSpec, TextEdit, Transition, Tx, col, el, icon, row, text};
-use crate::{Kit, Placement, Popover, Select, SelectAppearance, TextInput};
+use rune::{El, Key, TextEdit, Tx, col, icon};
+use crate::{Kit, Placement, Popover, PopupItem, PopupList, Select, SelectAppearance, TextInput};
 
 #[derive(Clone, Debug)]
 pub struct ComboboxOption {
@@ -186,39 +186,38 @@ impl<S: 'static> Combobox<S> {
                 }
                 true
             }).build(k).key("search");
-        let mut rows = col().key("rows").w_full().growth(GrowthSpec::default()).virtualize(28.0);
-        for i in choices.iter().copied() {
+        let active_pos = active.and_then(|orig| choices.iter().position(|&c| c == orig));
+        let items: Vec<_> = choices.iter().map(|&i| {
             let option = &self.options[i];
-            let id = option.id.clone();
-            let access = self.access.clone();
-            let choose = self.choose.clone();
-            let hover_access = self.access.clone();
-            let hover_id = id.clone();
-            let mut item = row().key(format!("{}-option-{}", self.key, id)).role("option").label(&option.label)
-                .w_full().h(28.0).px(8.0).gap(8.0).center_y().radius(4.0).transition(Transition::opacity())
-                .fill(if active == Some(i) { k.c.hover } else { rune::Color::TRANSPARENT })
-                .child(text(&option.label).font(k.ty.ui_compact).color(k.c.text_base).grow(1.0).shrink().truncate())
-                .child(icon(k.glyph.check_small, 14.0).color(k.c.icon_base)
-                    .opacity(if self.current.as_deref() == Some(id.as_str()) { 1.0 } else { 0.0 }));
-            if option.disabled { item = item.dim(0.5); } else {
-                item = item.on_hover(move |s: &mut S| {
+            PopupItem::from(option).trailing(
+                icon(k.glyph.check_small, 14.0)
+                    .color(k.c.icon_base)
+                    .opacity(if self.current.as_deref() == Some(option.id.as_str()) { 1.0 } else { 0.0 }),
+            )
+        }).collect();
+        let hover_access = self.access.clone();
+        let hover_options = self.options.clone();
+        let hover_choices = choices;
+        let choose_access = self.access;
+        let choose = self.choose;
+        let list = PopupList::new(&self.key, "")
+            .items(items)
+            .active(active_pos)
+            .empty_message(self.empty)
+            .on_active(move |s: &mut S, i| {
+                if let Some(&orig) = hover_choices.get(i) {
                     let state = hover_access(s);
-                    state.active = Some(hover_id.clone()); state.query = state.search.text.clone();
-                }).on_press_tx(move |s: &mut S, tx| {
-                    access(s).close();
-                    if let Some(choose) = &choose { choose(s, &id, tx); }
-                });
-            }
-            rows = rows.child(item);
-        }
-        // The viewport and the empty state both stay mounted, so the popover's height springs
-        // between them as the search edits it instead of swapping one box for the other.
-        let empty = choices.is_empty();
-        let list = col().key("list").w_full()
-            .child(col().key("viewport").role("listbox").w_full().h((choices.len() as f32 * 28.0).min(192.0))
-                .scroll(ScrollSpec { stick_bottom: false }).clip_soft(0.0).child(rows))
-            .child(el().key("empty").h(if empty { 28.0 } else { 0.0 }).center_y().clip_soft(0.0).opacity(if empty { 1.0 } else { 0.0 })
-                .child(text(self.empty).font(k.ty.ui_compact).color(k.c.text_weak)));
+                    state.active = Some(hover_options[orig].id.clone());
+                    state.query = state.search.text.clone();
+                }
+            })
+            .on_choose(move |s: &mut S, id, tx| {
+                choose_access(s).close();
+                if let Some(choose) = &choose {
+                    choose(s, id, tx);
+                }
+            })
+            .build_list(k);
         popover.child(col().w(self.width).gap(8.0).child(field).child(list)).build(k, layer)
     }
 }
