@@ -254,9 +254,18 @@ impl<T> TreeModel<T> {
             Some(f) => f.closed[i] = !open,
             None => self.nodes[i].open = open,
         }
-        // A cursor inside a closing folder moves up to it.
-        if !open && let Some(c) = self.cursor && self.is_under(c, i) {
-            self.cursor = Some(i);
+        // A cursor or anchor inside a closing folder moves up to it.
+        if !open {
+            if let Some(c) = self.cursor && self.is_under(c, i) {
+                if !self.multi && self.nodes[c].selected {
+                    self.select_only(i);
+                } else {
+                    self.cursor = Some(i);
+                }
+            }
+            if let Some(a) = self.anchor && self.is_under(a, i) {
+                self.anchor = Some(i);
+            }
         }
         self.dirty();
     }
@@ -296,8 +305,22 @@ impl<T> TreeModel<T> {
     /// Opens every folder above `id`, so its row shows.
     pub fn expand_to(&mut self, id: &str) {
         let Some(&i) = self.index.get(id) else { return };
+        if let Some(f) = &mut self.filter {
+            if f.shown[i] == Shown::Hidden {
+                f.shown[i] = Shown::Match;
+            }
+            let mut p = self.nodes[i].parent;
+            while let Some(j) = p {
+                if f.shown[j] == Shown::Hidden {
+                    f.shown[j] = Shown::Path;
+                }
+                p = self.nodes[j].parent;
+            }
+            self.dirty();
+        }
         let mut p = self.nodes[i].parent;
         while let Some(j) = p {
+            self.nodes[j].open = true;
             self.set_open(j, true);
             p = self.nodes[j].parent;
         }
@@ -425,18 +448,21 @@ impl<T> TreeModel<T> {
                 }
             }
         }
-        // Folders before their matches above: a folder's own match was overwritten by nothing,
-        // but a Path mark may sit on a node that matched later in index order. Re-mark matches.
-        for i in 0..n {
-            if keep(&self.nodes[i].data) {
-                shown[i] = Shown::Match;
-            }
-        }
         self.filter = Some(Filter { shown, closed: vec![false; n] });
-        if let Some(c) = self.cursor && self.rows().row_of[c] == usize::MAX {
+        self.dirty();
+        let (hide_cursor, hide_anchor) = {
+            let vis = self.rows();
+            (
+                self.cursor.is_some_and(|c| vis.row_of[c] == usize::MAX),
+                self.anchor.is_some_and(|a| vis.row_of[a] == usize::MAX),
+            )
+        };
+        if hide_cursor {
             self.cursor = None;
         }
-        self.dirty();
+        if hide_anchor {
+            self.anchor = self.cursor;
+        }
     }
     pub fn clear_filter(&mut self) {
         if self.filter.take().is_some() {
@@ -808,8 +834,9 @@ impl TreeItem {
             .and_then(|q| find_ci(&self.label, q))
             .map(|(a, b)| vec![Span { color: Some(c.text_base), weight: Some(650.0), bg: Some(k.alpha(c.text_accent, 0.22)), bg_pad: 1.0, ..Span::new(a, b) }])
             .unwrap_or_default();
+        let full = self.label.clone();
         let label = if spans.is_empty() { text(self.label) } else { rich(self.label, spans) };
-        e = e.child(label.key("label").font(font).color(color).grow(1.0).shrink().min_w(0.0).truncate());
+        e = e.child(label.key("label").font(font).color(color).grow(1.0).shrink().min_w(0.0).truncate().help_when_truncated(full));
         if let Some((add, del)) = self.changes {
             let mut counts = row().key("changes").gap(4.0).center_y();
             let f = k.ty.text_xsmall.features("'tnum' 1");
@@ -975,12 +1002,15 @@ impl<S: 'static, T: 'static> Tree<S, T> {
                 m.row_height = style.row_height;
             })
             .child(rows);
-        col()
+        let mut root = col()
             .key(tree_key)
             .role("tree")
-            .label(name.unwrap_or_default())
             .focusable(true)
-            .w_full()
+            .w_full();
+        if let Some(n) = name {
+            root = root.label(n);
+        }
+        root
             .on_key(move |s: &mut S, ev: &KeyEvent, tx: &mut Tx| {
                 let m = get_mut(s);
                 let before = m.cursor;

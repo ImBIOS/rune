@@ -199,6 +199,28 @@ fn closing_a_folder_brings_the_cursor_up_to_it() {
     m.select("src/ui/tree/row.rs");
     m.set_expanded("src", false);
     assert_eq!(m.cursor(), Some("src"));
+    assert_eq!(m.selected().collect::<Vec<_>>(), ["src"], "single-select moves the selection up to the closed folder");
+
+    let mut m = files(REPO).multi_select(true);
+    m.expand_all();
+    m.select("src/ui/tree/row.rs");
+    m.set_expanded("src", false);
+    let mut tx = rune::Tx::default();
+    m.handle_key(&KeyEvent { key: Key::Down, mods: Mods { shift: true, ..Mods::default() } }, label, &mut tx);
+    assert_eq!(m.selected().collect::<Vec<_>>(), ["src", "Cargo.toml"], "Shift+Down extends from the closed folder");
+}
+
+#[test]
+fn filtering_clears_a_hidden_cursor_and_reveal_shows_a_filtered_row() {
+    let mut m = files(REPO);
+    m.expand_all();
+    m.select("README.md");
+    assert_eq!(m.visible_len(), 13);
+    m.filter(|n| n.name.contains("row"));
+    assert_eq!(m.cursor(), None, "a cursor hidden by a filter is cleared even after rows were cached");
+    let mut tx = rune::Tx::default();
+    assert!(m.reveal("README.md", &mut tx));
+    assert!(m.visible_row("README.md").is_some(), "reveal makes a filtered-out node visible");
 }
 
 #[test]

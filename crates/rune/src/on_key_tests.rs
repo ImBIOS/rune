@@ -172,7 +172,53 @@ fn icon_rotation_springs_and_jumps_under_reduced_motion() {
             rt.frame(f as f64 / 60.0);
         }
         assert!(turn(&rt).abs() < 1e-3, "it settles open");
+
+        // Mounting open (`0.0`) and then closing (`-FRAC_PI_2`) must also spring from 0.0.
+        let mut rt = Runtime::new(S { open: true }, view, (100.0, 100.0), Env::new(true, 1.0));
+        rt.set_system_reduced_motion(reduced);
+        rt.frame(0.0);
+        assert!(turn(&rt).abs() < 1e-4, "an open chevron starts at 0");
+        rt.update(|s, _| s.open = false);
+        rt.frame(1.0 / 60.0);
+        rt.frame(2.0 / 60.0);
+        let mid = turn(&rt);
+        if reduced {
+            assert!((mid - quarter).abs() < 1e-4, "reduced motion lands closed at once: {mid}");
+        } else {
+            assert!(mid < -0.05 && mid > quarter + 0.05, "two frames in, closing is on its way: {mid}");
+        }
     }
+}
+
+#[test]
+fn a_modal_stops_keys_from_bubbling_to_an_ancestors_on_key() {
+    #[derive(Default)]
+    struct S {
+        outer_keys: u32,
+    }
+    fn view(_: &S, _: &mut Cx<S>) -> El {
+        col()
+            .size(200.0, 200.0)
+            .on_key(|s: &mut S, _: &KeyEvent, _: &mut Tx| {
+                s.outer_keys += 1;
+                true
+            })
+            .child(
+                col()
+                    .key("dialog")
+                    .modal(true, |_: &mut S| {})
+                    .size(100.0, 100.0)
+                    .child(el().key("inside").focusable(true).size(50.0, 20.0)),
+            )
+    }
+    let mut rt = Runtime::new(S::default(), view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+    rt.frame(0.0);
+    assert_eq!(focused(&rt).as_deref(), Some("inside"));
+    rt.key(KeyEvent { key: Key::Down, mods: Mods::default() });
+    rt.frame(0.0);
+    assert_eq!(rt.state.outer_keys, 0, "an on_key ancestor outside the modal must not see keys inside it");
 }
 
 #[test]
@@ -209,9 +255,11 @@ fn a_truncation_tooltip_shows_only_while_the_text_is_cut() {
     rt.set_native_help(true);
     rt.frame(0.0);
     assert_eq!(rt.help_regions().len(), 1, "cut short, the cell offers its whole text");
+    assert_eq!(rt.elements().into_iter().find(|e| e.key.as_deref() == Some("cell")).unwrap().help.as_deref(), Some("A rather long file name.rs"));
     rt.update(|s, _| s.w = 380.0);
     rt.frame(0.0);
     assert!(rt.help_regions().is_empty(), "the whole text shows, so no tooltip");
+    assert_eq!(rt.elements().into_iter().find(|e| e.key.as_deref() == Some("cell")).unwrap().help, None);
 }
 
 /// Two lists keyed alike, side by side, each in its own scope.

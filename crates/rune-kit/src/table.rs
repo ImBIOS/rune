@@ -197,6 +197,8 @@ pub struct TableState {
     /// Where the cursor's row was last seen, to find it again without a scan.
     cursor_hint: std::cell::Cell<usize>,
     anchor: Option<String>,
+    /// Where the anchor's row was last seen, to extend selections without a scan.
+    anchor_hint: std::cell::Cell<usize>,
     viewport: f32,
     row_height: f32,
 }
@@ -219,6 +221,7 @@ impl TableState {
             cursor: None,
             cursor_hint: std::cell::Cell::new(0),
             anchor: None,
+            anchor_hint: std::cell::Cell::new(0),
             viewport: 0.0,
             row_height: 28.0,
         }
@@ -298,28 +301,33 @@ impl TableState {
         self.select(id);
     }
 
-    fn find(&self, id: &str, len: usize, id_at: &IdAt<'_>) -> Option<usize> {
-        let hint = self.cursor_hint.get();
-        if hint < len && id_at(hint) == id {
-            return Some(hint);
+    fn find_at(id: &str, hint: &std::cell::Cell<usize>, len: usize, id_at: &IdAt<'_>) -> Option<usize> {
+        let h = hint.get();
+        if h < len && id_at(h) == id {
+            return Some(h);
         }
         let i = (0..len).find(|&i| id_at(i) == id)?;
-        self.cursor_hint.set(i);
+        hint.set(i);
         Some(i)
     }
 
     /// The cursor's row index among `len` rows.
     fn cursor_row(&self, len: usize, id_at: &IdAt<'_>) -> Option<usize> {
-        self.find(self.cursor.as_deref()?, len, id_at)
+        Self::find_at(self.cursor.as_deref()?, &self.cursor_hint, len, id_at)
+    }
+
+    fn anchor_row(&self, len: usize, id_at: &IdAt<'_>) -> Option<usize> {
+        Self::find_at(self.anchor.as_deref()?, &self.anchor_hint, len, id_at)
     }
 
     /// A click on row `i` with `mods`, as [`Table`] handles it.
     fn click(&mut self, i: usize, len: usize, mods: rune::Mods, id_at: &IdAt<'_>) {
         let id = id_at(i).into_owned();
-        self.cursor_hint.set(i);
         if self.multi && mods.shift {
             return self.extend(i, len, id_at);
         }
+        self.cursor_hint.set(i);
+        self.anchor_hint.set(i);
         if self.multi && mods.cmd {
             if !self.selected.remove(&id) {
                 self.selected.insert(id.clone());
@@ -333,7 +341,11 @@ impl TableState {
 
     /// Selects from the anchor to row `i`.
     fn extend(&mut self, i: usize, len: usize, id_at: &IdAt<'_>) {
-        let anchor = self.anchor.as_deref().and_then(|a| self.find(a, len, id_at)).unwrap_or(i);
+        let anchor = self.anchor_row(len, id_at).unwrap_or_else(|| {
+            self.anchor = Some(id_at(i).into_owned());
+            self.anchor_hint.set(i);
+            i
+        });
         let (a, b) = (anchor.min(i), anchor.max(i));
         self.selected = (a..=b).map(|j| id_at(j).into_owned()).collect();
         self.cursor = Some(id_at(i).into_owned());
@@ -370,21 +382,31 @@ impl TableState {
                 };
             }
             Key::Escape if self.multi && self.selected.len() > 1 => {
-                if let Some(c) = self.cursor.clone() {
-                    self.select(c);
+                if let Some(r) = at {
+                    self.cursor_hint.set(r);
+                    self.anchor_hint.set(r);
+                    self.select(id_at(r).into_owned());
+                } else {
+                    self.clear_selection();
                 }
                 return KeyOutcome::Handled;
             }
             _ => return KeyOutcome::Ignored,
         };
+        let before = self.cursor.clone();
         if m.shift && self.multi {
             self.extend(target, len, id_at);
         } else {
             self.cursor_hint.set(target);
+            self.anchor_hint.set(target);
             self.select(id_at(target).into_owned());
         }
         tx.scroll_into_view_in(self.key.clone(), id_at(target).into_owned());
-        KeyOutcome::Moved
+        if self.cursor != before {
+            KeyOutcome::Moved
+        } else {
+            KeyOutcome::Handled
+        }
     }
 }
 
@@ -518,6 +540,7 @@ impl<S: 'static> Table<S> {
         let sz = sizes.clone();
         let sel = on_select.clone();
         let open = on_open.clone();
+        let focus = k.c.border_focus;
         let build_row = move |s: &S, i: usize| -> El {
             let st = get(s);
             let id = row_id(s, i);
@@ -536,6 +559,9 @@ impl<S: 'static> Table<S> {
             } else {
                 r.hover(style.stripe.mix(style.selected, 0.5))
             };
+            if st.multi && st.cursor.as_deref() == Some(id.as_ref()) {
+                r = r.outline(1.0, -1.0, focus);
+            }
             for (j, c) in cols.iter().enumerate() {
                 let content = cell.as_ref().map_or_else(|| Cell::text(""), |f| f(s, i, &c.id));
                 r = r.child(cell_el(c, sz[j], content, &style).key(c.id.clone()));
@@ -583,13 +609,16 @@ impl<S: 'static> Table<S> {
                 st.row_height = style.row_height;
             })
             .child(rows);
-        col()
+        let mut root = col()
             .key(state.key.clone())
             .role("grid")
-            .label(name.unwrap_or_default())
             .focusable(true)
             .w_full()
-            .clip_soft(0.0)
+            .clip_soft(0.0);
+        if let Some(n) = name {
+            root = root.label(n);
+        }
+        root
             .on_key(move |s: &mut S, ev: &KeyEvent, tx: &mut Tx| {
                 let n = len(s);
                 let mut st = std::mem::take(get_mut(s));

@@ -801,6 +801,8 @@ pub struct Runtime<S: 'static> {
     memo_since: u64,
     /// Frames in a row an index-built list has asked for to fill its overscan.
     virtual_fill: u32,
+    /// True when the commit in flight is for scroll/layout only (`self.state` wasn't mutated).
+    state_unchanged: bool,
     pub(crate) virtual_culled: HashSet<String>,
     /// Fresh view accessors for focused text fields omitted by virtualization.
     virtual_inputs: HashMap<String, Box<InputSpec>>,
@@ -1115,6 +1117,7 @@ impl<S: 'static> Runtime<S> {
             virtual_culled: HashSet::new(),
             memo_since: 0,
             virtual_fill: 0,
+            state_unchanged: false,
             virtual_inputs: HashMap::new(),
             reveals: HashMap::new(),
             flights: Vec::new(),
@@ -1937,6 +1940,7 @@ impl<S: 'static> Runtime<S> {
                 tx.settle = true;
             }
             self.settled = tx.settle;
+            self.state_unchanged = !ran && !self.dirty && !ran_layout && !self.settle && self.commits > 0;
             self.commit(&tx);
         }
         let follow = std::mem::take(&mut self.caret_follow);
@@ -2570,8 +2574,9 @@ impl<S: 'static> Runtime<S> {
     /// focused text field's keys stay its own.
     fn element_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         let Some(i) = self.focused_index() else { return false };
-        if self.focused_input().is_some() { return false; }
+        if !self.can_focus(i) || self.focused_input().is_some() { return false; }
         let handlers: Vec<_> = std::iter::successors(Some(i), |&j| self.nodes[j].parent)
+            .take_while(|&j| self.allowed(j) && !self.subtree_exiting(j))
             .filter_map(|j| self.nodes[j].focus.key.clone())
             .collect();
         handlers.into_iter().any(|f| f(handler_state(&mut self.state), ev, tx))
@@ -2751,6 +2756,8 @@ struct Measurement<'a, S> {
     key_warnings: &'a mut Option<Vec<String>>,
     /// The focused element's path, so an index-built row holding it is still built.
     focused: Option<&'a str>,
+    /// True when `self.state` was not mutated since the previous commit.
+    state_unchanged: bool,
     /// Whether this pass measures again because estimates left part of a viewport blank.
     retry: bool,
     caret: Option<(String, [f32; 4])>,
@@ -2852,7 +2859,7 @@ impl<S: 'static> Measurement<'_, S> {
             }
             v.indexed = source.is_some();
             let same = match &source {
-                Some(rows) => rows.count == v.keys.len() && (0..rows.count).all(|i| (rows.key)(state, i) == v.keys[i]),
+                Some(rows) => rows.count == v.keys.len() && (self.state_unchanged || (0..rows.count).all(|i| (rows.key)(state, i) == v.keys[i])),
                 None => v.same_keys(el.children.iter().map(|c| c.key.as_deref())),
             };
             // Most commits keep the same rows; only a change pays for sets of every key.
@@ -3225,6 +3232,7 @@ impl<S: 'static> Runtime<S> {
             stats: &mut self.stats,
             key_warnings: &mut self.key_warnings,
             focused: self.focused.as_deref(),
+            state_unchanged: std::mem::take(&mut self.state_unchanged),
             retry: false,
         }.finish(tx)
     }
@@ -3486,7 +3494,10 @@ impl<S: 'static> Runtime<S> {
                 self.set_or_anim(id, P_TEXT, c, spring_tc, instant);
             }
             if nodes[i].vis.icon.is_some() && (nodes[i].vis.icon_turn != 0.0 || self.scene.store().has(id, P_ICON_TURN)) {
-                self.set_or_anim(id, P_ICON_TURN, nodes[i].vis.icon_turn, spring_l, instant);
+                if was_present && !self.scene.store().has(id, P_ICON_TURN) {
+                    self.scene.set(id, P_ICON_TURN, 0.0);
+                }
+                self.set_or_anim(id, P_ICON_TURN, nodes[i].vis.icon_turn, spring_l, instant || !was_present);
             }
             if vis.hover.a > 0.0 || self.scene.store().has(id, P_HOVER_C) {
                 self.set_or_anim(id, P_HOVER_C, vis.hover, spring_c, instant);
@@ -4087,8 +4098,9 @@ impl<S: 'static> Runtime<S> {
         // off its links isn't a control: the press blurs, as a click on plain content does.
         // Inside a control that owns its keyboard (`El::on_key`), a click on any part of it
         // focuses it, as a click on a table view's row focuses the table.
-        let keyed = (!n.focus.enabled).then(|| std::iter::successors(n.parent, |&p| self.nodes[p].parent)
-            .find(|&p| self.nodes[p].focus.enabled && self.nodes[p].focus.key.is_some())).flatten();
+        let keyed = (!n.focus.enabled && !self.is_selectable(ti)).then(|| std::iter::successors(n.parent, |&p| self.nodes[p].parent)
+            .take_while(|&p| self.allowed(p))
+            .find(|&p| self.nodes[p].focus.key.is_some() && self.can_focus(p))).flatten();
         if !on_link && n.focus.enabled && !self.is_selectable(ti) {
             self.queue.push(Action::FocusControl(n.path.clone()));
         } else if !on_link && let Some(p) = keyed {
@@ -5686,7 +5698,7 @@ impl<S: 'static> Runtime<S> {
                     live_intent,
                     caret: self.caret_rect(&self.nodes, i),
                     drag_out: n.drag_out.is_some(),
-                    help: n.help.clone(),
+                    help: n.help.as_ref().filter(|_| !n.help_cut || n.elided.is_some()).cloned(),
                     selected: n.text.as_ref().filter(|t| t.selectable).and_then(|t| {
                         let (a, b) = selectable::range_in(&sel_ranges, i)?;
                         t.copy_slice(a as u32, b as u32)

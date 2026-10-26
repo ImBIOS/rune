@@ -226,7 +226,10 @@ fn roles_and_cut_short_text_offer_their_whole_text() {
     let mut app = App::new(5, false);
     app.files[1].name = "short.rs".into();
     let mut rt = runtime(app);
-    rt.update(|s, _| s.table.select("f0"));
+    rt.update(|s, _| {
+        s.table.set_column_width("name", 120.0);
+        s.table.select("f0");
+    });
     rt.frame(0.0);
     let all = rt.elements();
     let grid = all.iter().find(|e| e.role == "grid").unwrap();
@@ -236,7 +239,21 @@ fn roles_and_cut_short_text_offer_their_whole_text() {
     assert!(all.iter().filter(|e| e.role == "gridcell").count() >= 15);
     let help: Vec<_> = all.iter().filter_map(|e| e.help.as_deref()).collect();
     assert!(help.contains(&"file 0 with a name long enough to cut short.rs"));
-    // Whether a tooltip shows also depends on the cut; `help_when_truncated` covers that.
+    assert!(!help.contains(&"short.rs"), "text that fits offers no truncation tooltip");
+}
+
+#[test]
+fn shrinking_rows_under_a_selection_stays_consistent() {
+    let mut rt = runtime(App::new(20, true));
+    press(&mut rt, Key::Tab);
+    press(&mut rt, Key::End);
+    assert_eq!(rt.state.table.cursor(), Some("f19"));
+    rt.update(|s, _| s.files.truncate(5));
+    rt.frame(0.0);
+    press(&mut rt, Key::Down);
+    assert_eq!(rt.state.table.cursor(), Some("f0"), "a removed cursor starts at the top on Down");
+    press_with(&mut rt, Key::End, Mods { shift: true, ..Mods::default() });
+    assert_eq!(rt.state.table.selected_len(), 5);
 }
 
 // Benchmark ---------------------------------------------------------------------------------
