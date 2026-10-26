@@ -3991,8 +3991,10 @@ impl<S: 'static> Runtime<S> {
                 if nodes[i].live.iter().any(|b| b.property == crate::live::Property::Opacity) {
                     // The live source owns this property, including across unrelated commits.
                 } else if !quiet && let Some(anim) = nodes[i].opacity_motion {
-                    // Only a new target: an anim with its own velocity would restart each commit.
-                    if self.scene.store().target(id, prop::OPACITY) != Some(nodes[i].vis.opacity) {
+                    // Only a new target: an anim with its own velocity would restart each commit,
+                    // and would run on an element that mounted where it rests.
+                    let rest = self.scene.store().target(id, prop::OPACITY).or_else(|| self.scene.get(id, prop::OPACITY));
+                    if rest != Some(nodes[i].vis.opacity) {
                         self.scene.animate(id, prop::OPACITY, nodes[i].vis.opacity, anim);
                     }
                 } else {
@@ -6803,6 +6805,24 @@ impl<S: 'static> Runtime<S> {
 
     // ---------------------------------------------------------------------------------------
     // Inspection
+
+    /// Elements that draw nothing and hold nothing: no paint of their own, no text, no field,
+    /// no focus, no children. Hit and hover zones, spacers. A trace flags them: nobody can see
+    /// them come, go or move.
+    pub(crate) fn blank_leaves(&self) -> HashSet<&str> {
+        let mut parents = vec![false; self.nodes.len()];
+        for n in &self.nodes {
+            if let Some(p) = n.parent { parents[p] = true; }
+        }
+        self.nodes.iter().enumerate().filter(|&(i, n)| {
+            let v = &n.vis;
+            !parents[i] && n.text.is_none() && n.input.is_none() && !n.focus.enabled && n.material.is_none()
+                && v.fill.a == 0.0 && (v.border_width == 0.0 || v.border.a == 0.0 && v.border_bottom.is_none_or(|c| c.a == 0.0))
+                && v.shadows.is_empty() && v.surface.is_none() && v.icon.is_none() && v.gradient.is_none() && v.radial.is_none()
+                && v.outline.is_none() && v.shape.is_none() && v.pixels.is_none() && v.effect.is_none()
+                && v.hover.a == 0.0 && v.press.a == 0.0
+        }).map(|(_, n)| n.path.as_str()).collect()
+    }
 
     /// Video elements' playback state by element path, for `--tree`.
     pub(crate) fn videos(&self) -> HashMap<String, crate::video::Snapshot> {

@@ -212,3 +212,41 @@ mod drag_animated {
         assert!(y > 0.0 && y < 40.0, "on its spring: {y}");
     }
 }
+
+mod double_press_on_a_drag {
+    use rune::{Cx, Drag, El, Env, Phase, Runtime, Spring, Tx, col, el};
+
+    #[derive(Default)]
+    struct S {
+        wide: bool,
+    }
+
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        let grip = el()
+            .key("grip")
+            .size(100.0, 40.0)
+            .on_drag(|_: &mut S, d: &mut Drag, tx: &mut Tx| {
+                if d.phase == Phase::Move {
+                    tx.instant();
+                }
+            })
+            .on_double_press(|s: &mut S| s.wide = true);
+        let pane = el().key("pane").h(40.0).w(if s.wide { 200.0 } else { 100.0 }).motion(Spring::new(0.3, 0.0));
+        col().w_full().h_full().child(grip).child(pane)
+    }
+
+    #[test]
+    fn a_double_click_on_a_draggable_element_animates_what_it_changes() {
+        let mut rt = Runtime::new(S::default(), view, (300.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.pointer_move(50.0, 20.0);
+        for _ in 0..2 {
+            rt.pointer_down(50.0, 20.0);
+            rt.pointer_up(50.0, 20.0);
+        }
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.wide, "double pressed");
+        let w = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("pane")).unwrap().rect[2];
+        assert!(w > 100.0 && w < 200.0, "on its spring, not at once: {w}");
+    }
+}

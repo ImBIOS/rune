@@ -28,5 +28,14 @@ tracks it sampled (`tk`: `[element id or path, property, active]`; inactive mean
 | `overshoot`, `jiggle` | passes its target, or reverses direction more than once |
 | `latency`, `hitch` | input with no motion for several frames; a frame over budget |
 
+A motion that hides what it moves (a fade to 0, a collapse, a slide out) runs on for a few
+frames below what anyone can see, down to its settle threshold. Up to 250 ms of that tail,
+ending as its track settles, isn't `invisible-work`. A loop (a spinner) runs for as long as
+it's shown, so frames animating only loops aren't `idle-frames` or `never-settles`.
+
+Elements that draw nothing and hold nothing (hit and hover zones, spacers) carry the trace's
+blank flag (64). Nobody can see them come, go or move, so they don't pop, jump or count as
+drawn.
+
 `track.py` prints one element's frames (rect, opacity, flags, sampled tracks) to confirm a
 finding. Add scenarios as script JSON under `scenarios/` and a `run` line in `run.sh`.

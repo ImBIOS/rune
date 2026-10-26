@@ -93,6 +93,8 @@ pub mod flags {
     pub const CLIPPED: u32 = 8;
     pub const FILTERED: u32 = 16;
     pub const OCCLUDED: u32 = 32;
+    /// Draws nothing and holds nothing: a hit or hover zone, a spacer.
+    pub const BLANK: u32 = 64;
 }
 
 /// motion-lint intent classes (motion-lint's `Intent`): in flags at `<< 8` (own) and `<< 16`

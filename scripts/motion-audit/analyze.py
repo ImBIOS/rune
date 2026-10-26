@@ -32,6 +32,8 @@ VISIBLE_OPACITY = 0.01
 POP_OPACITY = 0.5
 JUMP_PT = 12.0
 MIN_AREA = 1.0
+BLANK = 64  # flags: draws nothing and holds nothing (a hit or hover zone, a spacer)
+SETTLE_TAIL_MS = 250.0  # a motion's own sub-visible tail after it hides what it moves
 
 
 def short(name, parts=3):
@@ -107,6 +109,7 @@ def analyze(path):
     alive = set()
     findings = []
     touched_invisible = defaultdict(list)  # (name, prop) -> frames
+    sampled = defaultdict(set)  # (id, prop) -> frames its track ran
     touched_untraced = defaultdict(int)
     idle = []
     animating = []
@@ -131,7 +134,7 @@ def analyze(path):
             e.op = row[5]
             e.flags = row[7]
             e.vis = row[8:12] if len(row) >= 12 else None
-            e.ever_drawn |= area(e.rect) >= MIN_AREA
+            e.ever_drawn |= area(e.rect) >= MIN_AREA and not e.flags & BLANK
             if id not in alive:
                 alive.add(id)
                 e.born = k
@@ -142,7 +145,7 @@ def analyze(path):
             if id in alive:
                 alive.discard(id)
                 e = els[id]
-                deaths[k].append((id, e.rect, e.op, seen(e, W, H)))
+                deaths[k].append((id, e.rect, e.op, seen(e, W, H) and not e.flags & BLANK))
         for id in alive:
             e = els[id]
             vp = visible_part(e, W, H)
@@ -158,14 +161,17 @@ def analyze(path):
             if not ev.startswith(("settled", "completed")):
                 inputs.append((k, ev))
         tracks = fr.get("tk", [])
-        if anim and not changed and k > 0 and not any(a for _, _, a in tracks):
-            idle.append((k, tuple(q.get("why", []))))
+        why = tuple(q.get("why", []))
+        # A loop's curve flattens at its turns, where a frame moves it less than the trace shows.
+        if anim and not changed and k > 0 and not any(a for _, _, a in tracks) and why != ("loop",):
+            idle.append((k, why))
         for who, prop, active in tracks:
             if not active:
                 continue  # set without animating: no motion this frame
             if isinstance(who, str):
                 touched_untraced[(short(who), prop)] += 1
                 continue
+            sampled[(who, prop)].add(k)
             e = els.get(who)
             if e is None or who not in alive:
                 touched_untraced[(f"#{who}", prop)] += 1
@@ -176,7 +182,6 @@ def analyze(path):
     n = len(frames)
 
     # invisible work: report the outermost element of a subtree that went unseen together
-    keys = {(id, prop): ks for (name, prop, id), ks in touched_invisible.items()}
     def covered(id, prop, ks):
         p = els[id].parent
         while p is not None:
@@ -185,6 +190,20 @@ def analyze(path):
                     return True
             p = els[p].parent if p in els else None
         return False
+    def tail(id, prop, a, b):
+        # The motion that just hid the element (a fade to 0, a collapse, a slide out), running
+        # out its last sub-visible stretch to its settle threshold, then stopping.
+        before = [st for st in els[id].hist if st[0] == a - 1]
+        was_seen = bool(before) and before[0][5] > VISIBLE_OPACITY and before[0][7] * before[0][3] * before[0][4] >= MIN_AREA
+        return was_seen and b + 1 not in sampled[(id, prop)] and (b - a + 1) * dt_ms <= SETTLE_TAIL_MS
+    for key, ks in list(touched_invisible.items()):
+        (name, prop, id) = key
+        rest = [k for a, b in runs(ks) if not tail(id, prop, a, b) for k in range(a, b + 1)]
+        if rest:
+            touched_invisible[key] = rest
+        else:
+            del touched_invisible[key]
+    keys = {(id, prop): ks for (name, prop, id), ks in touched_invisible.items()}
     for (name, prop, id), ks in touched_invisible.items():
         if covered(id, prop, ks):
             continue
@@ -221,7 +240,11 @@ def analyze(path):
                                  at=fmt_runs(rs), detail=f"{len(ks)} frames animating ({'+'.join(why) or '?'}) with no traced change"))
     last_input = max((k for k, _ in inputs), default=0)
     tail = [k for k in range(n) if animating[k]]
-    if animating and animating[-1] and (n - 1 - last_input) * dt_ms > 1000:
+    # A loop (a spinner) runs for as long as it's shown: only other motion fails to settle.
+    quiet = int(500 / dt_ms)
+    only_loops = frames[-1].get("quality", {}).get("why", []) == ["loop"] and not any(
+        a for fr in frames[-quiet:] for _, _, a in fr.get("tk", []))
+    if animating and animating[-1] and (n - 1 - last_input) * dt_ms > 1000 and not only_loops:
         q = frames[-1].get("quality", {})
         start = n - 1
         while start > 0 and animating[start - 1]:
@@ -247,7 +270,7 @@ def analyze(path):
             if not h:
                 continue
             k0, x, y, w, hh, op, flags, frac, ons = h[0]
-            if op < POP_OPACITY or frac == 0 or not ons or w * hh < 4:
+            if op < POP_OPACITY or frac == 0 or not ons or w * hh < 4 or flags & BLANK:
                 continue
             grows = len(h) > 1 and (abs(h[1][3] - w) > 0.5 or abs(h[1][4] - hh) > 0.5 or abs(h[1][5] - op) > 0.01)
             intent = flags >> 8
@@ -288,7 +311,7 @@ def analyze(path):
                 if abs(step) < JUMP_PT:
                     continue
                 st, prev = h[i], h[i - 1]
-                if pressing[k] or st[6] & 4:
+                if pressing[k] or st[6] & (4 | BLANK):
                     continue
                 # A move nobody sees on either side isn't a jump: a loop wrapping while it's
                 # transparent or clipped away (a shimmer's sheen going back to its start).
@@ -323,7 +346,7 @@ def analyze(path):
                     if all(h[j][5] <= 0.05 or not h[j][8] for j in seg):
                         seg = []
                         continue
-                    if any(pressing[h[j][0]] or h[j][6] & 4 for j in seg):
+                    if any(pressing[h[j][0]] or h[j][6] & (4 | BLANK) for j in seg):
                         seg = []
                         continue
                     rest = vals[-1]

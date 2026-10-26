@@ -1234,6 +1234,7 @@ impl Trace {
         // window rebases. Record the actual row surfaces, not that bookkeeping rectangle.
         let all = self.all;
         let traced = |e: &crate::runtime::ElementInfo| (all || e.key.is_some() || e.trace_name.is_some()) && !e.virtual_extent;
+        let blank = rt.blank_leaves();
         for e in els.iter().filter(|e| traced(e)) {
             let id = self.id(&e.path);
             let name = e.trace_name.unwrap_or(&e.path);
@@ -1278,6 +1279,7 @@ impl Trace {
             let flags = if e.moving || e.in_growing_row { F::ANIMATED } else { 0 }
                 | if e.scrolling { F::SCROLLING } else { 0 }
                 | if clipped { F::CLIPPED } else { 0 }
+                | if blank.contains(e.path.as_str()) { F::BLANK } else { 0 }
                 | intent << 8;
             let q = [
                 (f64::from(x) * 100.0).round() as i64,

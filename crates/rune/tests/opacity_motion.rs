@@ -31,3 +31,23 @@ fn an_unrelated_commit_doesnt_restart_a_fade() {
     }
     assert!(last < 0.05, "it finished: {last}");
 }
+
+fn hidden(s: &S, _: &mut Cx<S>) -> El {
+    let mut fade = Anim::new(Curve::Spring(Spring::new(0.3, 0.0)));
+    fade.velocity = Velocity::Uniform(-2.0);
+    let e = el().key("e").size(50.0, 50.0).fill(rune::Color::BLACK).opacity(0.0).opacity_motion(fade);
+    col().w_full().h_full().label(format!("tick {}", s.tick)).child(e)
+}
+
+#[test]
+fn a_hidden_element_stays_still_across_commits() {
+    let mut rt = Runtime::new(S { shown: false, tick: 0 }, hidden, (100.0, 100.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    for _ in 0..60 {
+        rt.frame(1.0 / 60.0);
+    }
+    rt.update(|s, _| s.tick = 1);
+    for i in 0..3 {
+        assert!(!rt.frame(1.0 / 60.0), "frame {i}: nothing to animate");
+    }
+}
