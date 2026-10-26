@@ -542,7 +542,7 @@ pub(crate) fn sparkles(p: &SparkleParams, rect: Rect, t: f32, seed: u32, reduced
     let first = data.len() as f32;
     let mut count = 0;
     let (cx, cy, hw, hh) = (rect.x + rect.w * 0.5, rect.y + rect.h * 0.5, rect.w * 0.5, rect.h * 0.5);
-    for k in 0..p.count.min(32) {
+    for k in 0..p.count.min(64) {
         let h0 = hu(seed.wrapping_add(313), k * 11 + 1);
         // (instance hash, age within its life, life)
         let (hk, age, life) = match p.burst {

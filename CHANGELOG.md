@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`SparkleParams::count` cap raised from 32 to 64.** `rune-fx` sparkles now pack and evaluate up
+  to 64 four-point stars per layer (`p.count.min(64)`, 128 `vec4f` entries in the pre-allocated
+  4096-entry table buffer) so wide banners can keep star density without splitting across layers.
+
 - **Blend modes for `rune-fx` effect and fill slots (`FxBlend`, `FxSlot::blend`).** `FxSlot::blend`
   accepts `FxBlend::{Normal, Multiply, Screen, Overlay, SoftLight}` so warm glows and shader fills
   can composite over light backgrounds (such as `#FAF7F2` cream paper) without washing out to

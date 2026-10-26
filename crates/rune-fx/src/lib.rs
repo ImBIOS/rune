@@ -1121,7 +1121,7 @@ impl Fx {
             }
             Fx::MotionBlur(_, s) => FxCost { passes: 1, samples: s.count, alu: 0, backdrop: false, source: true },
             Fx::Shimmer(p) => FxCost { source: p.use_mask, ..c(p.use_mask as u32, 0) },
-            Fx::Sparkles(p) => c(p.count.min(32) * 2, 0),
+            Fx::Sparkles(p) => c(p.count.min(64) * 2, 0),
             Fx::Aurora(_) => c(12, 3),
             Fx::Grain(_) => c(0, 0),
             Fx::Fill(p) => p.cost(),
@@ -1446,7 +1446,7 @@ impl FxLayer {
                 }
                 i.t[2] = 1.0;
                 i.c0 = p.color.v4();
-                i.p0 = [p.count.min(32) as f32, p.life, p.size, p.intensity];
+                i.p0 = [p.count.min(64) as f32, p.life, p.size, p.intensity];
                 i.p1 = [p.margin, 0.0, 0.0, 0.0];
                 (KIND_EXTRAS, r.inflate(p.margin + p.size * cpu::SPARKLE_MAX_SCALE + 2.0))
             }
@@ -1579,6 +1579,15 @@ mod tests {
         let mut data = Vec::new();
         let (_, n) = cpu::sparkles(&p, card().rect, 2.0 + p.burst_life() + 0.01, 1, false, &mut data);
         assert_eq!(n, 0.0, "every burst star is gone by burst_life()");
+
+        let dense = SparkleParams { count: 64, burst: Some(0.0), life: 2.0, ..Default::default() };
+        let (_, inst, _) = Fx::sparkles(dense).on(card()).at(0.3).pack().unwrap();
+        assert_eq!(inst.p0[0], 64.0);
+        assert_eq!(Fx::sparkles(SparkleParams { count: 100, ..dense }).cost().samples, 128);
+        data.clear();
+        let (_, n64) = cpu::sparkles(&dense, card().rect, 0.3, 1, false, &mut data);
+        assert_eq!(n64, 64.0, "all 64 burst stars are emitted within the cap");
+        assert_eq!(data.len(), 128, "two vec4f entries per star");
     }
 
     #[test]
