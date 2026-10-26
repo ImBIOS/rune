@@ -287,8 +287,12 @@ def analyze(path):
                 step = d[i - 1]
                 if abs(step) < JUMP_PT:
                     continue
-                st = h[i]
-                if st[5] <= 0.05 or st[7] == 0 or not st[8] or pressing[k] or st[6] & 4:
+                st, prev = h[i], h[i - 1]
+                if pressing[k] or st[6] & 4:
+                    continue
+                # A move nobody sees on either side isn't a jump: a loop wrapping while it's
+                # transparent or clipped away (a shimmer's sheen going back to its start).
+                if any(s[5] <= 0.05 or s[7] == 0 or not s[8] for s in (prev, st)):
                     continue
                 intent = st[6] >> 8
                 if intent & (1 if label in "xy" else 2):

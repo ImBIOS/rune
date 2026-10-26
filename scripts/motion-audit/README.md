@@ -8,6 +8,7 @@ motion that never settles, and work spent on things nobody can see.
 scripts/motion-audit/run.sh                        # record all scenarios into target/motion-audit
 python3 scripts/motion-audit/analyze.py target/motion-audit/*.jsonl [--quiet] [--json out.json]
 python3 scripts/motion-audit/track.py target/motion-audit/oc-send.jsonl composer/editor 80 120
+python3 scripts/motion-audit/test_analyze.py        # analyze.py on synthetic traces
 ```
 
 `run.sh` records each scenario headless at 120 fps on the virtual clock with
@@ -23,7 +24,7 @@ tracks it sampled (`tk`: `[element id or path, property, active]`; inactive mean
 | `idle-frames`, `never-settles` | frames that animate with no visible change; motion still running at the end |
 | `pop-in`, `pop-out` | an element appears or disappears at full opacity and size with no transition |
 | `appear-then-jump` | mounts in one place, then moves there in a frame |
-| `jump`, `step`, `sibling-jump` | a one-frame change in position or size, on its own or next to something animating |
+| `jump`, `step`, `sibling-jump` | a one-frame change in position or size, on its own or next to something animating, seen on both frames (a loop wrapping while transparent or clipped is not one) |
 | `overshoot`, `jiggle` | passes its target, or reverses direction more than once |
 | `latency`, `hitch` | input with no motion for several frames; a frame over budget |
 
