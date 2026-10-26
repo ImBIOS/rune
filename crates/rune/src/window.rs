@@ -1724,12 +1724,19 @@ impl<S: 'static> Host<S> {
                     // Bare activation: a reopen with nothing to open.
                     self.reopen_hook(event_loop, true);
                 } else if let Some(on_open) = self.on_open {
-                    let token = token.clone();
                     self.shared.queue_update(Box::new(move |s, tx| {
                         on_open(s, &uris, tx);
-                        let _ = token;
                         true
                     }));
+                    // The forwarded token is consumed by showing: queue an Open behind the
+                    // update so the window comes up activated, as a relaunch would.
+                    // (The token itself rides the forwarded env into `try_create`.)
+                    if let Some(token) = token.filter(|t| !t.is_empty()) {
+                        // SAFETY: set before any spawn in this handler turn; the event thread
+                        // owns the env here as `reset_activation_token_env` does at startup.
+                        unsafe { std::env::set_var("XDG_ACTIVATION_TOKEN", token) };
+                    }
+                    self.shared.queue_window(WindowRequest::Open(None));
                 }
             }
         }

@@ -724,6 +724,15 @@ impl<S> Shared<S> {
         self.requests.lock().unwrap().updates.push(f);
     }
 
+    /// Queues a window/show/focus request the next `take` applies, as `AppHandle` does.
+    pub fn queue_window(&self, window: WindowRequest) {
+        let mut requests = self.requests.lock().unwrap();
+        requests.window = Some(window);
+        requests.minimize = false;
+        drop(requests);
+        self.wake();
+    }
+
     /// A request a `--desktop` run applies to the window (dock and quit aside) waits for `take`.
     pub(crate) fn window_pending(&self) -> bool {
         let r = self.requests.lock().unwrap();
