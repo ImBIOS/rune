@@ -5976,7 +5976,7 @@ impl<S: 'static> Runtime<S> {
                         radii,
                         fill: [0.0, 0.0, 0.0, 1.0],
                         border: [0.0; 4],
-                        params: [0.0, KIND_EFFECT, bleed * k_px, s],
+                        params: [0.0, KIND_EFFECT, bleed * k_px, k_px],
                         uv: [0.0; 4],
                         clip,
                         fade: crate::render::pack_fade(fade, clip, clip),

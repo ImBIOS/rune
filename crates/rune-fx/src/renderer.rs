@@ -440,7 +440,6 @@ impl FxRenderer {
         self.binds.clear();
         let vw = frame.viewport[0] as f32;
         let vh = frame.viewport[1] as f32;
-        let s = frame.scale;
         self.viewport = frame.viewport;
         self.blur_slot = 0;
         let wants_blur = |l: &FxLayer| match l.fx {
@@ -462,6 +461,7 @@ impl FxRenderer {
                 self.prepared.push(None);
                 continue;
             };
+            let s = if layer.scale > 0.0 { layer.scale } else { frame.scale };
             let x0 = (b.x * s).floor().max(0.0);
             let y0 = (b.y * s).floor().max(0.0);
             let x1 = ((b.x + b.w) * s).ceil().min(vw);

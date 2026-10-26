@@ -26,10 +26,15 @@ fn glow(occlusion: f32) -> Fx {
 impl Compositor<()> for Dusk {
     fn render(&mut self, f: &mut Frame<'_, ()>) {
         let (device, queue, size) = (f.device, f.queue, f.size);
-        let slots: Vec<(u32, [f32; 4])> = f.rt.instances.iter().enumerate()
-            .filter(|(_, i)| i.params[1] == KIND_EFFECT).map(|(n, i)| (n as u32, i.rect)).collect();
+        let slots: Vec<(u32, rune::render::Instance)> = f.rt.instances.iter().enumerate()
+            .filter(|(_, i)| i.params[1] == KIND_EFFECT).map(|(n, i)| (n as u32, *i)).collect();
         let layers: Vec<FxLayer> = slots.iter()
-            .map(|(_, r)| (self.effect)().on(Shape::rounded(r[0], r[1], r[2], r[3], 0.0)).at(1.0)).collect();
+            .map(|(_, i)| {
+                let k = i.params[3];
+                let [x, y, w, h] = i.rect.map(|v| v / k);
+                let r = i.radii.iter().fold(0.0f32, |a, v| a.max(v.abs())) / k;
+                (self.effect)().on(Shape::rounded(x, y, w, h, r)).scale(k).at(1.0)
+            }).collect();
         let fx = self.fx.get_or_insert_with(|| FxRenderer::new(device, f.format, FxOptions::default()));
         fx.set_srgb_blend(f.srgb_blend());
         fx.add_format(device, wgpu::TextureFormat::Rgba16Float);
@@ -42,6 +47,7 @@ impl Compositor<()> for Dusk {
             let mut seen = formats.lock().unwrap();
             if !seen.contains(&s.format) { seen.push(s.format); }
             if let Some(k) = slots.iter().position(|(at, _)| *at == s.index) {
+                assert_eq!(s.scale, slots[k].1.params[3]);
                 fx.draw_layer_in(pass, s.format, s.origin, k);
             }
         };
@@ -199,6 +205,31 @@ fn grain_is_symmetric_in_both_blend_modes() {
             assert!(raw.abs() <= 1.0, "srgb {srgb}: mean shifts by {raw:.2}/255");
         }
     }
+}
+
+fn zoomed_slot(_: &(), _: &mut Cx<()>) -> El {
+    background().child(
+        el().absolute(32.0, 32.0).size(32.0, 32.0).live_scale(&rune::Live::new(2.0))
+            .child(effect(1).size(32.0, 32.0).radius(8.0)),
+    )
+}
+
+fn unzoomed_double(_: &(), _: &mut Cx<()>) -> El {
+    background().child(effect(1).absolute(16.0, 16.0).size(64.0, 64.0).radius(16.0))
+}
+
+#[test]
+fn slot_scale_scales_effect_lengths_and_radii_without_bleed() {
+    let ring6 = || Fx::fill(FillParams::from(MeshGradientParams::dusk()).border(6.0));
+    let ring12 = || Fx::fill(FillParams::from(MeshGradientParams::dusk()).border(12.0));
+    let (w, zoomed) = snap_with("zoomed-ring", zoomed_slot, false, Arc::default(), 1, ring6);
+    let (_, direct) = snap_with("direct-ring", unzoomed_double, false, Arc::default(), 1, ring12);
+    // The 6pt border at 2x live_scale is 12px wide (x = 16..28); x = 22 is inside the ring,
+    // x = 48 is the hollow centre.
+    assert!(px(&zoomed, w, 22, 48).iter().any(|&c| c > 45), "ring is lit at 12px width");
+    assert!(px(&zoomed, w, 48, 48).iter().all(|&c| c.abs_diff(32) <= 2), "centre is hollow");
+    let worst = zoomed.iter().zip(&direct).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+    assert!(worst <= 3, "zoomed slot and 2x direct ring differ by {worst}");
 }
 
 /// Writes `demo/fx/in-layer.png`: a fill in a faded, rounded, clipped card, linear blend on the

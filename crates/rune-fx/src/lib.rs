@@ -959,6 +959,8 @@ pub struct FxLayer {
     pub source: Option<Source>,
     /// 0..1, scales the layer's whole output (a retiring one-shot fades out with it).
     pub opacity: f32,
+    /// Device pixels per point for this layer; `0.0` (the default) uses `FxFrame::scale`.
+    pub scale: f32,
 }
 
 impl Fx {
@@ -987,7 +989,7 @@ impl Fx {
             Fx::Electric(_) => Place::Over,
             _ => Place::Over,
         };
-        FxLayer { fx: self, shape, place, time: 0.0, seed: 1, reduced_motion: false, source: None, opacity: 1.0 }
+        FxLayer { fx: self, shape, place, time: 0.0, seed: 1, reduced_motion: false, source: None, opacity: 1.0, scale: 0.0 }
     }
 
     pub fn needs_backdrop(&self) -> bool {
@@ -1057,6 +1059,9 @@ impl FxLayer {
     pub fn reduced(mut self, on: bool) -> Self { self.reduced_motion = on; self }
     pub fn source(mut self, slot: u32, rect: Rect) -> Self { self.source = Some(Source { slot, rect }); self }
     pub fn opacity(mut self, k: f32) -> Self { self.opacity = k; self }
+    /// Device pixels per point for this layer (`EffectSite::scale` or `instance.params[3]`);
+    /// `0.0` (the default) uses `FxFrame::scale`.
+    pub fn scale(mut self, scale: f32) -> Self { self.scale = scale; self }
 
     /// Whether this layer still changes over time (the frame loop may stop ticking when false).
     pub fn is_animating(&self) -> bool {

@@ -43,8 +43,9 @@ pub const KIND_RADIAL: f32 = 11.0;
 /// stream, so `Renderer::draw_range_with` can hand the compositor the pass at exactly this point,
 /// inside the enclosing isolated layer if there is one. `rect` is the element, `clip`/`fade`
 /// (and the rounded-clip radius in `fade[3]`) its clip, `params.z` the bleed past `rect` in device
-/// pixels and `params.w` the display scale. `fill[3]` is always 1: a faded slot is drawn in an
-/// isolated layer that applies its opacity. `Runtime::marks` carries its `El::effect` tag.
+/// pixels and `params.w` the slot's scale in device pixels per point (`Env::scale` times any
+/// element or ancestor `scale` / `live_scale`). `fill[3]` is always 1: a faded slot is drawn in
+/// an isolated layer that applies its opacity. `Runtime::marks` carries its `El::effect` tag.
 pub const KIND_EFFECT: f32 = 12.0;
 
 /// How a scope combines its contents. The completed scope still uses source-over on its parent
@@ -101,6 +102,9 @@ pub struct EffectSite<'a> {
     pub index: u32,
     /// The slot's record (`KIND_EFFECT`): rect, radii, clip and fade.
     pub instance: &'a Instance,
+    /// Device pixels per point at this slot (`instance.params[3]`: `Env::scale` times any
+    /// element or ancestor `scale` / `live_scale`).
+    pub scale: f32,
     /// Format of the pass being recorded.
     pub format: wgpu::TextureFormat,
     /// Window device-pixel position of this pass's top-left pixel: zero in the frame target,
@@ -651,7 +655,7 @@ impl Renderer {
             let (x1, y1) = (edge(c[2].ceil(), origin[0], size[0]), edge(c[3].ceil(), origin[1], size[1]));
             if x1 <= x0 || y1 <= y0 { continue; }
             pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
-            hook(pass, &EffectSite { index: *at, instance, format, origin, size, in_layer: target.is_some(), srgb_blend: self.srgb_blend });
+            hook(pass, &EffectSite { index: *at, instance, scale: instance.params[3], format, origin, size, in_layer: target.is_some(), srgb_blend: self.srgb_blend });
             pass.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
             pass.set_scissor_rect(0, 0, size[0], size[1]);
         }

@@ -87,6 +87,7 @@ impl Flat {
         }
         let i = s.instance;
         assert_eq!(i.fill[3], 1.0, "a slot's opacity is Rune's to apply");
+        assert_eq!(s.scale, i.params[3], "EffectSite::scale matches the slot's params[3]");
         let bleed = i.params[2];
         let mut data = [0.0f32; 24];
         data[0..4].copy_from_slice(&[i.rect[0] - bleed, i.rect[1] - bleed, i.rect[2] + 2.0 * bleed, i.rect[3] + 2.0 * bleed]);
@@ -316,4 +317,64 @@ fn an_unpainted_effect_slot_draws_nothing() {
     for (x, y) in [(16, 16), (48, 48), (79, 79)] {
         assert_eq!(px(&rgba, w, x, y), grey, "({x}, {y})");
     }
+}
+
+struct ScaleProbe(Arc<Mutex<Vec<(u32, f32, f32)>>>);
+
+impl Compositor<()> for ScaleProbe {
+    fn render(&mut self, f: &mut Frame<'_, ()>) {
+        let (device, queue, size) = (f.device, f.queue, f.size);
+        let clear = f.rt.clear_color();
+        let count = f.rt.instances.len() as u32;
+        let marks = f.rt.marks.clone();
+        f.ui.prepare(device, queue, &mut f.rt.text.atlas, &f.rt.instances, size);
+        let log = &self.0;
+        let mut hook = |_: &mut wgpu::RenderPass<'_>, s: &EffectSite<'_>| {
+            assert_eq!(s.scale, s.instance.params[3]);
+            log.lock().unwrap().push((marks[s.index as usize], s.scale, s.instance.params[2]));
+        };
+        f.ui.encode_layers_with(f.encoder, &mut hook);
+        let mut pass = f.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("frame"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: f.target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: clear[0] as f64, g: clear[1] as f64, b: clear[2] as f64, a: clear[3] as f64 }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        f.ui.draw_range_with(&mut pass, f.format, 0..count, &mut hook);
+    }
+}
+
+fn scaled_slots(_: &(), _: &mut Cx<()>) -> El {
+    background()
+        .child(effect(1).absolute(8.0, 8.0).size(16.0, 16.0))
+        .child(
+            el().absolute(32.0, 32.0).size(32.0, 32.0).scale(1.5).child(
+                el().size(16.0, 16.0).live_scale(&rune::Live::new(2.0)).child(effect(2).size(16.0, 16.0)),
+            ),
+        )
+}
+
+#[test]
+fn slot_reports_device_pixels_per_point_without_bleed() {
+    let seen = Arc::default();
+    let dir = std::env::temp_dir().join(format!("rune-effect-slot-scale-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("snap.png");
+    App::new(AppSpec::new("slot-scale", (96.0, 96.0), || (), scaled_slots))
+        .compositor(ScaleProbe(Arc::clone(&seen)))
+        .args(["--snap".to_string(), path.to_str().unwrap().to_string(), "--scale".to_string(), "2".to_string()])
+        .run();
+    std::fs::remove_dir_all(&dir).unwrap();
+    let got = seen.lock().unwrap().clone();
+    assert_eq!(got, vec![(1, 2.0, 0.0), (2, 6.0, 0.0)]);
 }
