@@ -881,7 +881,7 @@ pub struct Runtime<S: 'static> {
     /// Per node, what its children stick within: the nearest vertical viewport's top and
     /// bottom, then the node's own content box top and bottom (unscaled points), while
     /// `has_sticky`.
-    sticky_frame: Vec<[f32; 4]>,
+    sticky_frame: Vec<[f32; 8]>,
     /// `Tx::keep_on_screen` across the commit underway.
     keeps: Vec<sticky::Keep>,
     /// The focus where the held non-IME key(s) went down, so a release after focus moves
@@ -5365,11 +5365,11 @@ impl<S: 'static> Runtime<S> {
             if self.has_sticky && let Some((edge, inset)) = n.sticky.as_ref().and_then(|s| Some((s.edge?, s.inset))) {
                 // Worked out from this frame's offsets, which the viewport above already applied.
                 let frame = n.parent.map_or(sticky::UNBOUNDED, |pr| self.sticky_frame[pr]);
-                let top = p.rect.y + pinh.dy;
+                let (top, left) = (p.rect.y + pinh.dy, p.rect.x + pinh.dx);
                 let h = if self.row_h[i] >= 0.0 { self.row_h[i] } else { p.rect.h };
-                let shift = sticky::shift(edge, inset, top, top + h, frame);
+                let shift = sticky::shift(edge, inset, [top, top + h, left, left + p.rect.w], frame);
                 self.stuck[i] = shift;
-                pinh.dy += shift;
+                if edge == crate::el::StickyEdge::Left { pinh.dx += shift } else { pinh.dy += shift }
             }
             if lift {
                 // Keep the destination's clips (consumed ones included) and offsets. Drop its
@@ -5468,10 +5468,13 @@ impl<S: 'static> Runtime<S> {
             if self.has_sticky {
                 let up = n.parent.map_or(sticky::UNBOUNDED, |pr| self.sticky_frame[pr]);
                 self.sticky_frame[i] = match n.scroll {
-                    // Content scrolls without end inside a viewport; vertical ones are the band.
-                    Some(_) if n.scroll_axes.y() => [raw_edges[1], raw_edges[3], f32::NEG_INFINITY, f32::INFINITY],
-                    Some(_) => [up[0], up[1], f32::NEG_INFINITY, f32::INFINITY],
-                    None => [up[0], up[1], raw_edges[1] + n.inset[1], raw_edges[3] - n.inset[3]],
+                    // Content scrolls without end inside a viewport; scrolling ones are the band.
+                    Some(_) => {
+                        let v = if n.scroll_axes.y() { [raw_edges[1], raw_edges[3]] } else { [up[0], up[1]] };
+                        let x = if n.scroll_axes.x() { [raw_edges[0], raw_edges[2]] } else { [up[4], up[5]] };
+                        [v[0], v[1], f32::NEG_INFINITY, f32::INFINITY, x[0], x[1], f32::NEG_INFINITY, f32::INFINITY]
+                    }
+                    None => [up[0], up[1], raw_edges[1] + n.inset[1], raw_edges[3] - n.inset[3], up[4], up[5], raw_edges[0] + n.inset[0], raw_edges[2] - n.inset[2]],
                 };
             }
             // A product of 1 (0.5 inside 2.0) can still move the box.

@@ -9,7 +9,7 @@ use super::*;
 use crate::el::StickyEdge;
 
 /// No viewport band and no parent box: nothing to stick within.
-pub(super) const UNBOUNDED: [f32; 4] = [f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY];
+pub(super) const UNBOUNDED: [f32; 8] = [f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY];
 
 /// Points of shift over which `El::stuck_shadow` fades in.
 pub(super) const SHADOW_RAMP: f32 = 8.0;
@@ -27,6 +27,23 @@ pub(super) struct Keep {
 mod tests {
     use super::*;
     use crate::{col, el};
+
+    #[test]
+    fn sticky_left_holds_a_header_to_the_viewport_while_content_scrolls_sideways() {
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            col().key("scroll").size(300.0, 200.0).scroll(ScrollSpec { stick_bottom: false }).scroll_xy()
+                .child(col().key("content").min_w(1000.0)
+                    .child(el().key("header").w(300.0).h(30.0).fill(Color::WHITE).sticky_left(0.0))
+                    .child(el().w_full().h(600.0)))
+        }
+        let mut rt = Runtime::new((), view, (300.0, 200.0), Env::default());
+        rt.frame(0.0);
+        rt.wheel_xy(100.0, 100.0, -250.0, 0.0);
+        for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        let h = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("header")).unwrap();
+        assert_eq!(h.rect[0], 0.0);
+        assert_eq!(h.stuck, 250.0);
+    }
 
     #[test]
     fn cached_section_with_sticky_descendant_stays_live_on_scroll() {
@@ -49,11 +66,13 @@ mod tests {
     }
 }
 
-/// How far a sticky box with edges `top` and `bottom` moves from where scrolling put it.
-/// `frame` holds its viewport's top and bottom, then its parent's content box top and bottom.
-pub(super) fn shift(edge: StickyEdge, inset: f32, top: f32, bottom: f32, frame: [f32; 4]) -> f32 {
-    let [band_top, band_bottom, box_top, box_bottom] = frame;
+/// How far a sticky box with edges `top`, `bottom`, `left` and `right` moves from where
+/// scrolling put it, along the edge's axis. `frame` holds its viewport's top and bottom, then
+/// its parent's content box top and bottom, then the same four for the horizontal axis.
+pub(super) fn shift(edge: StickyEdge, inset: f32, [top, bottom, left, right]: [f32; 4], frame: [f32; 8]) -> f32 {
+    let [band_top, band_bottom, box_top, box_bottom, band_left, _, _, box_right] = frame;
     let d = match edge {
+        StickyEdge::Left => (band_left + inset - left).min(box_right - right).max(0.0),
         StickyEdge::Top => (band_top + inset - top).min(box_bottom - bottom).max(0.0),
         StickyEdge::Bottom => (band_bottom - inset - bottom).max(box_top - top).min(0.0),
     };
@@ -81,6 +100,7 @@ fn target_shift(nodes: &[Node], scrolls: &HashMap<NodeId, ScrollState>, j: usize
     let mut total = 0.0;
     for a in std::iter::successors(Some(j), |&p| nodes[p].parent) {
         let Some((edge, inset)) = nodes[a].sticky.as_ref().and_then(|s| Some((s.edge?, s.inset))) else { continue };
+        if edge == StickyEdge::Left { continue }
         let Some(p) = nodes[a].parent else { continue };
         let Some(s) = std::iter::successors(Some(p), |&u| nodes[u].parent)
             .find(|&u| nodes[u].scroll.is_some() && nodes[u].scroll_axes.y()) else { continue };
@@ -95,7 +115,8 @@ fn target_shift(nodes: &[Node], scrolls: &HashMap<NodeId, ScrollState>, j: usize
         let box_bottom = nodes[p].target[3] - st_y - oy - nodes[p].inset[3];
         let top = nodes[a].target[1] - st_y - oy;
         let bottom = nodes[a].target[3] - st_y - oy;
-        total += shift(edge, inset, top, bottom, [0.0, band_h, box_top, box_bottom]);
+        let frame = [0.0, band_h, box_top, box_bottom, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY];
+        total += shift(edge, inset, [top, bottom, 0.0, 0.0], frame);
     }
     total
 }
@@ -242,13 +263,13 @@ impl<S: 'static> Runtime<S> {
         let Some(s) = self.nodes.iter().position(|n| n.path == path) else { return Some(0.0) };
         let view = self.drawn[s];
         let row = self.nodes.iter().position(|n| n.key.as_deref() == Some(key) || n.path == key);
-        let holder = row.and_then(|r| std::iter::successors(Some(r), |&p| self.nodes[p].parent).take_while(|&p| p != s).find(|&p| self.stuck[p] != 0.0));
+        let holder = row.and_then(|r| std::iter::successors(Some(r), |&p| self.nodes[p].parent).take_while(|&p| p != s).find(|&p| self.stuck[p] != 0.0 && self.nodes[p].sticky.as_ref().is_none_or(|s| s.edge != Some(StickyEdge::Left))));
         if let (Some(r), Some(_)) = (row, holder) {
             let d = self.drawn[r];
             if d[1] >= view[1] - 0.5 && d[1] + d[3] <= view[1] + view[3] + 0.5 { return None; }
         }
         let cover = (0..self.nodes.len())
-            .filter(|&j| self.stuck[j] > 0.0 && Some(j) != holder && self.viewport_of(j) == Some(s))
+            .filter(|&j| self.stuck[j] > 0.0 && self.nodes[j].sticky.as_ref().is_none_or(|s| s.edge != Some(StickyEdge::Left)) && Some(j) != holder && self.viewport_of(j) == Some(s))
             .map(|j| self.drawn[j][1] + self.drawn[j][3] - view[1])
             .fold(0.0f32, f32::max);
         Some(f64::from(cover))

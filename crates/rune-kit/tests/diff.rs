@@ -404,6 +404,41 @@ fn line_numbers_select_lines_and_the_plus_comments_on_them() {
 }
 
 #[test]
+fn unified_file_headers_span_the_viewport_while_code_scrolls_sideways() {
+    let long = "x".repeat(400);
+    let text = |n: &str| (0..60).map(|i| if i == 1 { format!("{long}\n") } else { format!("let v{i} = {}{n};\n", i % 2) }).collect::<String>();
+    let (old, new) = (text(""), text("+1"));
+    let files = (0..2).map(|i| FileDiff::from_texts(format!("dir/f{i}.rs"), &old, &new)).collect();
+    let mut d = DiffState::new(files);
+    d.set_mode(DiffMode::Unified);
+    let mut rt = runtime(d, (600.0, 400.0));
+    let inside = |rt: &Runtime<App>, end: &str| {
+        let r = find(rt, end).rect;
+        assert!(r[0] >= -0.5 && r[0] + r[2] <= 600.5 && r[2] > 0.0, "{end} within the viewport: {r:?}");
+    };
+    let check = |rt: &Runtime<App>| {
+        inside(rt, "df0/inner/adds");
+        inside(rt, "df0/inner/dels");
+        let h = find(rt, "df0");
+        assert!(h.rect[0].abs() < 0.5 && (h.rect[2] - 600.0).abs() < 0.5, "header spans the viewport: {:?}", h.rect);
+    };
+    check(&rt);
+    for dx in [-250.0, -250.0] {
+        rt.wheel_xy(300.0, 200.0, dx, 0.0);
+        settle(&mut rt);
+        check(&rt);
+    }
+    let code = find(&rt, "df0.c2/code").rect;
+    assert!(code[0] < -100.0, "the code did scroll: {code:?}");
+
+    rt.wheel(300.0, 200.0, -150.0);
+    settle(&mut rt);
+    let sticky = find(&rt, "sticky");
+    assert!(sticky.rect[0].abs() < 0.5 && (sticky.rect[2] - 600.0).abs() < 0.5, "sticky spans the viewport: {:?}", sticky.rect);
+    inside(&rt, "sticky/inner/adds");
+}
+
+#[test]
 fn rows_read_as_their_change_and_keys_move_between_files() {
     let (old, new) = numbered(200, 50);
     let files = (0..3).map(|i| FileDiff::from_texts(format!("f{i}.rs"), &old, &new)).collect();

@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **rune-kit diff: file headers span the viewport in unified mode; new `El::sticky_left`.**
+  When a line was wider than the view, the in-list file headers were as wide as the longest
+  line, so the `+N −N` counts and `header_actions` sat past the right edge and scrolled away.
+  Headers are now exactly the viewport wide and held to its left edge while the code scrolls
+  sideways, with a long path truncating before the counts. `El::sticky_left(inset)` is
+  `sticky_top` on the horizontal axis: it holds an element to the left edge of its nearest
+  `scroll_x`/`scroll_xy` viewport while its parent is in view (`ElementInfo::stuck` reads the
+  shift).
+
 - **Pinned growth stacks hold freed room as slack.** A `stick_bottom` viewport whose content
   is a growth stack no longer carries its rows down when it gains room at its bottom while
   pinned (a composer shrinking on send, a row removed at the bottom). The room is held under

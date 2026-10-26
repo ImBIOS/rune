@@ -725,9 +725,6 @@ impl<S: 'static> View<S> {
             FileStatus::Modified => None,
         };
         let mut inner = row().key("inner").w_full().grow(1.0).px(10.0).gap(8.0).items_center().child(toggle).child(name);
-        if let Some(w) = self.view_w(st, false) {
-            inner = inner.max_w(w);
-        }
         if let Some((word, color)) = status {
             inner = inner.child(text(word).font(l.small).color(color).key("status"));
         }
@@ -754,6 +751,11 @@ impl<S: 'static> View<S> {
         label.push_str(&format!(", {adds} added, {dels} removed"));
         let line = |key: &'static str, c: Color| col().key(key).w_full().h(1.0).fill(c);
         let mut h = col().w_full().h(HEADER_H).fill(l.header_bg).role("heading").label(label);
+        // In the list, as wide as the view and held to its left edge while the code scrolls
+        // sideways, so the counts and actions stay in sight.
+        if let (false, Some(w)) = (sticky, self.view_w(st, false)) {
+            h = h.w(w).sticky_left(0.0);
+        }
         h = h.child(line("top", if f > 0 && !sticky { l.border } else { l.header_bg }));
         h.child(inner).child(line("bottom", l.border))
     }
