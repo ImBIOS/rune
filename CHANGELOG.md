@@ -5,6 +5,47 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`rune_kit::shell`: what a desktop agent-chat app's sidebar needs.** All additive; an app
+  that sets none of these draws as before, except that the sidebar's toggle no longer holds a
+  pressed fill while the sidebar is open (it reports `expanded` for accessibility instead).
+  - `SplitView::frame_inset` (default 8), `toolbar_in_panel`, `sidebar_padding(start, end)`,
+    `slide_sidebar_contents` and `sidebar_header` frame the window.
+  - `SplitView::pane_motion(PaneMotion)`: both panes move on one spring, optionally scaled by
+    the square root of the width (`scale_with_width`), with the contents fading over the last
+    part of the travel (`fade_tail`).
+  - `SplitView::sidebar_peek(SidebarPeek)`: resting on the leading edge or on the toggle
+    slides the closed sidebar over the content as a floating surface; leaving closes it and a
+    click docks it.
+  - `SidebarToggle`: the toggle's size, place past the traffic lights, `in_header` (at the end
+    of the sidebar's title row while open, travelling on the sidebar's spring) and an `unread`
+    dot that fades while closed.
+  - `SplitView::reduced_motion(cx.is_reduced_motion())` swaps slides for fades.
+  - `Sidebar::header_gap`, `header_padding`, `row_gap` and `inset`.
+  - `SidebarRow::avatar`, `subtitle`, `height`, `status(RowStatus)` (busy, attention, unread or
+    any element in a 20 point slot), `on_close` (a close button that takes the slot's place
+    under the pointer) and `reorder` with `shell::Reorder` (drag to a new place, Escape or
+    losing focus puts it back).
+  - `cargo run -p rune-kit --example shell` is set up with these.
+
+- **`Kit::interactive`, `interactive_with` and `elevate` are public**, so an app's own
+  elements take the kit's hover and press look and its elevation shadows. Additive.
+
+- **Core: `El::offset`, `El::raise`, `El::hover_delays`, cancelled drags, `Tx::animated`.**
+  - `El::offset(x, y)` shifts an element and its subtree without moving it in layout, with
+    hits following it, on its layout spring or `offset_motion`.
+  - `El::raise()` paints an element and takes its input above everything else, keeping its
+    layout, focus and accessibility order.
+  - `El::hover_delays(enter, leave)` makes `on_hover_change` wait for the pointer to rest.
+  - A held drag that ends without a drop (Escape, the window losing focus, the pointer taken
+    away) now hears `Phase::Up` with `Drag::cancelled()` true instead of losing its capture
+    silently.
+  - `Tx::animated()` lets a drag's move animate what it changes.
+  - `Cx::is_reduced_motion()` reads Reduce Motion for builders, and `ElementInfo` is exported
+    at the crate root.
+  - Behaviour change: an `opacity_motion` element only animates on a new target (one that
+    mounts at its resting opacity, or re-commits the same target, stays still).
+  - Motion traces flag elements that draw and hold nothing (`flags::BLANK`, 64).
+
 - **rune-kit diff: file headers span the viewport in unified mode; new `El::sticky_left`.**
   When a line was wider than the view, the in-list file headers were as wide as the longest
   line, so the `+N −N` counts and `header_actions` sat past the right edge and scrolled away.

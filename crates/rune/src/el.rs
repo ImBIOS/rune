@@ -2144,7 +2144,7 @@ impl El {
     /// Delay [`Self::on_hover_change`]: `true` arrives once the pointer has rested inside for
     /// `enter`, and `false` once it has stayed out for `leave`. A pass shorter than the delay
     /// reports nothing, and a held button never starts the wait (a press during it cancels it;
-    /// the wait starts again from the release). A sidebar that peeks open when the pointer
+    /// the wait starts again when the pointer next moves). A sidebar that peeks open when the pointer
     /// rests at the window's edge uses `hover_delays(40 ms, 0)`.
     pub fn hover_delays(mut self, enter: std::time::Duration, leave: std::time::Duration) -> Self {
         self.hover_delay = [enter.as_secs_f32(), leave.as_secs_f32()];
