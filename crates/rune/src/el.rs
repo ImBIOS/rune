@@ -934,6 +934,11 @@ pub struct Visual {
     pub(crate) cache: bool,
     /// Optional app-supplied key mixed into the cached subtree's signature (`El::cache_key`).
     pub(crate) cache_key: Option<u64>,
+    /// `El::offset`: a visual shift in points, and the curve it moves on.
+    pub(crate) offset: [f32; 2],
+    pub(crate) offset_motion: Option<Anim>,
+    /// `El::raise`: paints and takes input above the rest of the window.
+    pub(crate) raise: bool,
 }
 
 impl Default for Visual {
@@ -975,6 +980,9 @@ impl Default for Visual {
             icon_turn: 0.0,
             cache: false,
             cache_key: None,
+            offset: [0.0; 2],
+            offset_motion: None,
+            raise: false,
         }
     }
 }
@@ -3009,6 +3017,32 @@ impl El {
     /// Presence uses the transition's own enter/exit springs.
     pub fn motion(mut self, s: Spring) -> Self {
         self.motion = Some(s);
+        self
+    }
+    /// Shift this element and its subtree by `(x, y)` points without moving it in layout:
+    /// siblings keep their places, and hit tests follow the shift. A change springs on the
+    /// element's layout spring (or [`Self::offset_motion`]); under Reduce Motion, and in an
+    /// instant transaction, it lands at once. A reordered row slides aside this way while a
+    /// dragged one passes it, even in a growth or virtual list whose rows lay out instantly.
+    /// Not for an element with a `live_offset` or a sliding loop, which own the same shift.
+    pub fn offset(mut self, x: f32, y: f32) -> Self {
+        let ok = |v: f32| if v.is_finite() { v } else { 0.0 };
+        self.vis.offset = [ok(x), ok(y)];
+        self
+    }
+    /// The curve [`Self::offset`] changes on.
+    pub fn offset_motion(mut self, anim: impl Into<Anim>) -> Self {
+        self.vis.offset_motion = Some(anim.into());
+        self
+    }
+    /// Paint this element and its subtree above everything else in the window, and give it
+    /// pointer input first, as if it came last in the tree. Its layout, focus order and
+    /// accessibility order stay where it is, and its ancestors' clips, offsets and opacity
+    /// still apply, though an ancestor that composites its children as a group (a partial
+    /// opacity, a blur) no longer groups it. Raised elements stack in tree order. A floating
+    /// sidebar sliding over the content beside it, or a dragged row over its neighbours.
+    pub fn raise(mut self) -> Self {
+        self.vis.raise = true;
         self
     }
     /// Override this element's opacity curve, including an optional entrance delay.

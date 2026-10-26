@@ -890,6 +890,8 @@ pub struct Runtime<S: 'static> {
     sticky_frame: Vec<[f32; 8]>,
     /// `Tx::keep_on_screen` across the commit underway.
     keeps: Vec<sticky::Keep>,
+    /// Some element is `El::raise`d: paint order isn't tree order.
+    has_raise: bool,
     /// The focus where the held non-IME key(s) went down, so a release after focus moves
     /// still reaches that element first.
     key_focus: Option<String>,
@@ -1261,6 +1263,7 @@ impl<S: 'static> Runtime<S> {
             stuck: Vec::new(),
             sticky_frame: Vec::new(),
             keeps: Vec::new(),
+            has_raise: false,
             key_focus: None,
             keys_held: 0,
             ime_keys_down: 0,
@@ -2346,7 +2349,8 @@ impl<S: 'static> Runtime<S> {
         self.virtuals.retain(|path, _| self.nodes.iter().any(|n| n.path == *path));
         self.refresh_modal_index();
         self.flying.retain(|(id, _)| self.node_index.contains_key(id));
-        if !self.layer_paint_order.is_empty() || !self.flying.is_empty() { self.update_layer_paint_order(); }
+        self.has_raise = self.nodes.iter().any(|n| n.vis.raise);
+        if !self.layer_paint_order.is_empty() || !self.flying.is_empty() || self.has_raise { self.update_layer_paint_order(); }
         // A removed element's live sources (a `Pixels` stream) stop waking this window.
         if !self.live_subscriptions.is_empty() {
             let dirty = self.live_dirty;
@@ -2382,7 +2386,9 @@ impl<S: 'static> Runtime<S> {
             }
         }
         let mut lifted: Vec<usize> = self.flying.iter().filter_map(|(id, _)| self.node_index.get(id).copied()).collect();
+        if self.has_raise { lifted.extend((0..n).filter(|&i| self.nodes[i].vis.raise)); }
         lifted.sort_unstable();
+        lifted.dedup();
         self.layer_paint_order.clear();
         for top in std::iter::once(None).chain(lifted.iter().map(|&r| Some(r))) {
             let mut i = top.unwrap_or(first[0]);
@@ -3987,6 +3993,20 @@ impl<S: 'static> Runtime<S> {
                     self.set_or_anim(id, prop::OPACITY, nodes[i].vis.opacity, spring_l, quiet);
                 }
             }
+            let shift = nodes[i].vis.offset;
+            if nodes[i].looping.is_none() && !nodes[i].live.iter().any(|b| b.property == crate::live::Property::Offset)
+                && (shift != [0.0; 2] || self.scene.store().has(id, prop::OFFSET))
+            {
+                let to = rune_motion::Vec2::new(shift[0], shift[1]);
+                if instant || !was_present || was_exiting || self.reduced_motion {
+                    self.scene.set(id, prop::OFFSET, to);
+                } else if self.scene.store().target(id, prop::OFFSET) != Some(to) {
+                    match nodes[i].vis.offset_motion {
+                        Some(anim) => self.scene.animate(id, prop::OFFSET, to, anim),
+                        None => self.scene.animate(id, prop::OFFSET, to, spring_l),
+                    }
+                }
+            }
             let vis = &nodes[i].vis;
             if !nodes[i].live.iter().any(|b| b.property == crate::live::Property::Blur)
                 && (vis.blur != 0.0 || self.scene.store().has(id, prop::BLUR))
@@ -4192,9 +4212,10 @@ impl<S: 'static> Runtime<S> {
         self.has_drawn_layout = self.nodes.iter().any(|n| n.on_drawn_layout.is_some());
         self.has_key_up = self.nodes.iter().any(|n| n.focus.key_up.is_some());
         self.has_sticky = self.nodes.iter().any(|n| n.sticky.as_ref().is_some_and(|s| s.edge.is_some()));
+        self.has_raise = self.nodes.iter().any(|n| n.vis.raise);
         // A flight that left the tree stays lifted and covered while it exits, so it doesn't pop.
         self.flying.retain(|(id, _)| self.node_index.contains_key(id));
-        if self.nodes.len() > present_len || !self.flying.is_empty() || self.has_sticky { self.update_layer_paint_order(); }
+        if self.nodes.len() > present_len || !self.flying.is_empty() || self.has_sticky || self.has_raise { self.update_layer_paint_order(); }
         else { self.layer_paint_order.clear(); }
         self.built = false;
         self.virtuals.retain(|path, _| self.nodes.iter().any(|n| n.path == *path));
@@ -5407,7 +5428,7 @@ impl<S: 'static> Runtime<S> {
         // only when isolation requires it; the ordinary painter stream stays byte-identical.
         // Matched flights paint last (see `update_layer_paint_order`).
         let flying = !self.flying.is_empty();
-        let tree_order = ((flying || self.has_sticky) && !self.layer_paint_order.is_empty()) || self.layer_paint_order.windows(2).any(|pair| {
+        let tree_order = ((flying || self.has_sticky || self.has_raise) && !self.layer_paint_order.is_empty()) || self.layer_paint_order.windows(2).any(|pair| {
             let n = &self.nodes[pair[0]];
             self.nodes[pair[1]].parent == Some(pair[0]) && ((self.has_dissolve && self.dissolve_scratch[pair[0]]) || n.vis.cache || n.vis.clip_radius.is_some() || n.vis.group_opacity.is_some()
                 || fades(n.looping)
@@ -5421,7 +5442,8 @@ impl<S: 'static> Runtime<S> {
             let node_parent = self.nodes[i].parent;
             // A flight paints outside every ancestor's layer, above the whole window.
             let lift = flying && self.flying.iter().any(|f| f.0 == node_id);
-            if lift {
+            let raised = self.nodes[i].vis.raise && !lift;
+            if lift || raised {
                 while let Some((_, start, surface_start)) = layers.pop() {
                     if active_cache.is_some_and(|ac| ac.instance_start == start) {
                         let ac = active_cache.take().unwrap();
@@ -5468,6 +5490,10 @@ impl<S: 'static> Runtime<S> {
                 let shift = sticky::shift(edge, inset, [top, top + h, left, left + p.rect.w], frame);
                 self.stuck[i] = shift;
                 if edge == crate::el::StickyEdge::Left { pinh.dx += shift } else { pinh.dy += shift }
+            }
+            if raised {
+                // Out of its ancestors' layers: their opacity applies directly instead.
+                pinh.paint_opacity = pinh.opacity;
             }
             if lift {
                 // Keep the destination's clips (consumed ones included) and offsets. Drop its
