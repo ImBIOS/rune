@@ -1,7 +1,7 @@
 //! A window's split layout: a resizable, collapsible sidebar, the main pane under a toolbar,
 //! and an optional inspector, with the title bar region cleared for the traffic lights.
 
-use rune::{Anim, AnimExt, Color, Cursor, Drag, El, Phase, Spring, Tx, col, el, row};
+use rune::{Anim, Color, Curve, Cursor, Drag, Easing, El, Phase, Spring, SpringPair, Transition, Tx, col, el, row};
 
 use super::pane::PaneState;
 use super::toolbar::{TOOLBAR_HEIGHT, Toolbar};
@@ -21,6 +21,7 @@ struct Pane {
     content: El,
     handlers: Vec<Apply>,
     toggle: Option<Apply>,
+    clear: Option<Apply>,
 }
 
 /// The app shell: `SplitView::new(main).sidebar(..).toolbar(..).inspector(..)
@@ -31,8 +32,8 @@ struct Pane {
 /// window, its leading end clears the traffic lights (pass [`Cx::titlebar_inset`], 0 in full
 /// screen), and the sidebar's toggle button sits just past them. Panes resize from their
 /// inner edge (double-click resets the width, dragging below half the minimum collapses) and
-/// open and close on the kit's disclosure spring, faster for narrow panes. Under Reduce Motion
-/// they snap. Widths and open states live in the app's [`PaneState`]s.
+/// open and close on the kit's disclosure spring. Under Reduce Motion they snap. Widths and
+/// open states live in the app's [`PaneState`]s.
 ///
 /// The band's middle is 24 points down: place the traffic lights there with
 /// `Chrome { traffic_lights: Some((16.0, 17.0)), .. }`.
@@ -88,7 +89,11 @@ impl SplitView {
         let past_toggle = if toggle { lights + TOGGLE + GUTTER } else { lights };
 
         let mut overlay = None;
+        let mut clears = Vec::new();
         let sidebar = self.sidebar.map(|mut p| {
+            if let Some(c) = p.clear.take() {
+                clears.push(c);
+            }
             if let Some(t) = p.toggle.take().filter(|_| toggle) {
                 let button = IconButton::new(&super::SIDEBAR)
                     .variant(IconButtonVariant::GhostMuted)
@@ -103,7 +108,8 @@ impl SplitView {
             .toolbar
             .unwrap_or_default()
             .padding(if sidebar_open { 12.0 } else { past_toggle })
-            .build(k);
+            .build(k)
+            .motion(k.motion.disclosure);
         let card = col()
             .key("main-pane")
             .grow(1.0)
@@ -118,18 +124,24 @@ impl SplitView {
             .clip_rounded(k.radius.lg)
             .motion(k.motion.disclosure)
             .child(self.main.grow(1.0).min_h(0.0));
-        let mut below = row().key("main-row").w_full().grow(1.0).min_h(0.0).child(card);
-        if let Some(p) = self.inspector {
+        let mut below = row().key("main-row").w_full().grow(1.0).min_h(0.0).motion(k.motion.disclosure).child(card);
+        if let Some(mut p) = self.inspector {
+            if let Some(c) = p.clear.take() {
+                clears.push(c);
+            }
             below = below.child(dock(k, "inspector-pane", p, false, None));
         }
-        let main = col().key("main-column").grow(1.0).min_w(0.0).h_full().child(toolbar).child(below);
-        let mut split = row().key("split").w_full().h_full();
+        let main = col().key("main-column").grow(1.0).min_w(0.0).h_full().motion(k.motion.disclosure).child(toolbar).child(below);
+        let mut split = row().key("split").w_full().h_full().motion(k.motion.disclosure);
         if let Some(s) = sidebar {
             split = split.child(s);
         }
         let mut root = el().key("shell").w_full().h_full().fill(c.bg_deep).child(split.child(main));
         if let Some(o) = overlay {
             root = root.child(o);
+        }
+        for clear in clears {
+            root = clear(root);
         }
         root
     }
@@ -147,6 +159,7 @@ fn pane<S: 'static>(state: PaneState, access: fn(&mut S) -> &mut PaneState, cont
                 }
                 Phase::Move => {
                     tx.instant();
+                    p.set_resizing(true);
                     p.drag_to(d.data + sign * d.dx);
                 }
                 Phase::Up => p.set_resizing(false),
@@ -156,26 +169,49 @@ fn pane<S: 'static>(state: PaneState, access: fn(&mut S) -> &mut PaneState, cont
     });
     let toggle: Option<Apply> =
         toggle.then(|| Box::new(move |e: El| e.on_press(move |s: &mut S| access(s).toggle())) as Apply);
-    Pane { state, content, handlers: vec![drag], toggle }
+    // If a drag's release is lost (window blur, pointer cancel), clear `resizing` on blur or the
+    // next uncaptured pointer move. During a live drag, `Action::Drag(Phase::Move)` runs right
+    // after `Action::PointerMove` in the same frame and keeps `resizing` set.
+    let clear = state.is_resizing().then(|| {
+        Box::new(move |e: El| {
+            e.on_window_focus(move |s: &mut S, focused, _| {
+                if !focused {
+                    access(s).set_resizing(false);
+                }
+            })
+            .on_pointer_move(move |s: &mut S, _| access(s).set_resizing(false))
+        }) as Apply
+    });
+    Pane { state, content, handlers: vec![drag], toggle, clear }
 }
 
 /// The pane's slot: its width springs between 0 and the pane's width while the content keeps
-/// its full width, clipped, pinned to the outer edge. The content fades out late in a close
+/// its full width, clipped, pinned to the leading edge. The content fades out late in a close
 /// and back in early in an open.
 fn dock(k: &Kit, key: &str, p: Pane, leading: bool, band: Option<El>) -> El {
     let s = p.state;
-    let spring = pane_spring(k.motion.disclosure, s.width());
-    let fade: Anim = if s.is_open() { Spring::new(spring.duration * 0.5, 0.0).into() } else { k.motion.control.delay(spring.duration * 0.6) };
+    let spring = k.motion.disclosure;
+    let instant_transition = Transition::identity().springs(SpringPair::new(Spring::new(0.001, 0.0), Spring::new(0.001, 0.0)));
+    let fade: Anim = if s.is_open() {
+        Curve::tween(spring.duration * 0.5, Easing::EASE_OUT).into()
+    } else {
+        Curve::tween(spring.duration * 0.35, Easing::EASE_IN).into()
+    };
     let body = col()
         .key("pane-content")
         .w(s.width())
         .h_full()
+        .pin(Some(0.0), Some(0.0), None, Some(0.0))
         .opacity(if s.is_open() { 1.0 } else { 0.0 })
         .opacity_motion(fade)
         .children(band)
         .child(col().key("pane-body").w_full().grow(1.0).min_h(0.0).child(p.content.w_full().h_full()));
-    let body = if leading { body.pin(Some(0.0), Some(0.0), None, Some(0.0)) } else { body.pin(None, Some(0.0), Some(0.0), Some(0.0)) };
     let mut slot = el().key(key).w(s.shown_width()).h_full().clip_soft(0.0).motion(spring).child(body);
+    if s.is_open() {
+        slot = slot
+            .child(el().key("pane-open-main").size(0.0, 0.0).transition(instant_transition).focus_return("main-column"))
+            .child(el().key("pane-open").size(0.0, 0.0).transition(instant_transition).focus_return("sidebar-toggle"));
+    }
     if s.is_open() || s.is_resizing() {
         let mut grip = el()
             .key(if leading { "sidebar-grip" } else { "inspector-grip" })
@@ -183,7 +219,9 @@ fn dock(k: &Kit, key: &str, p: Pane, leading: bool, band: Option<El>) -> El {
             .label(if leading { "Resize sidebar" } else { "Resize inspector" })
             .w(GRIP)
             .cursor(Cursor::ResizeColumn)
-            .fill(Color::TRANSPARENT);
+            .fill(Color::TRANSPARENT)
+            .opacity(0.02)
+            .transition(instant_transition);
         grip = if leading { grip.pin(None, Some(0.0), Some(0.0), Some(0.0)) } else { grip.pin(Some(0.0), Some(0.0), None, Some(0.0)) };
         for h in p.handlers {
             grip = h(grip);
@@ -191,11 +229,4 @@ fn dock(k: &Kit, key: &str, p: Pane, leading: bool, band: Option<El>) -> El {
         slot = slot.child(grip);
     }
     slot
-}
-
-/// `base` scaled for a pane `width` wide: √(width / 480) of its duration, at least 0.15 s
-/// (or `base`'s own, if shorter), so narrow panes don't drift.
-fn pane_spring(base: Spring, width: f32) -> Spring {
-    let floor = base.duration.min(0.15);
-    Spring::new((base.duration * (width / 480.0).max(0.0).sqrt()).clamp(floor, base.duration), base.bounce)
 }

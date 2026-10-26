@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-use rune::{El, GrowthSpec, Icon, Key, ScrollSpec, TextEdit, Tx, col, el, icon, row, text, text_input};
+use rune::{Anim, El, GrowthSpec, Icon, Key, ScrollSpec, TextEdit, Tx, col, el, icon, row, text, text_input};
 
 use crate::Kit;
 
@@ -189,7 +189,12 @@ impl SidebarHeader {
         match self.toggle {
             // Pointer only: in the list's focus group the arrows step through rows, and with
             // selection following focus they would toggle the section as they passed.
-            Some(toggle) => toggle(header).role("button").hover(c.hover).focusable(false),
+            Some(toggle) => toggle(header)
+                .role("button")
+                .hover(c.hover)
+                .press(c.pressed)
+                .hover_motion(Anim::INSTANT, Anim::INSTANT)
+                .focusable(false),
             None => header.role("heading"),
         }
     }
@@ -342,6 +347,7 @@ impl SidebarRow {
 
     pub fn build(self, k: &Kit) -> El {
         let c = &k.c;
+        let renaming = self.rename.is_some();
         let (ink, glyph) = if self.selected { (c.text_base, c.icon_base) } else { (c.text_muted, c.icon_muted) };
         let mut r = row()
             .label(self.label.clone())
@@ -353,9 +359,12 @@ impl SidebarRow {
             .center_y()
             .radius(k.radius.md)
             .motion(k.motion.control)
+            .hover_group()
             .hover(c.hover)
-            .focusable(true)
-            .focus_selected(self.selected);
+            .press(c.pressed)
+            .hover_motion(Anim::INSTANT, Anim::INSTANT)
+            .focusable(!renaming)
+            .focus_selected(self.selected && !renaming);
         if self.selected {
             r = r.fill(c.pressed);
         }
@@ -367,6 +376,8 @@ impl SidebarRow {
                 text_input(&edit, k.ty.ui)
                     .single_line()
                     .key("rename")
+                    .focus_selected(true)
+                    .focus_return("sidebar-list")
                     .grow(1.0)
                     .shrink()
                     .color(c.text_base)

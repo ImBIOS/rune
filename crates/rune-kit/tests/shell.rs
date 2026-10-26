@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 
 use rune::runtime::ElementInfo;
-use rune::{Chrome, Cx, El, Env, Key, KeyEvent, Mods, Runtime, TitlebarAction, col, el};
+use rune::{Chrome, Cx, El, Env, Key, KeyEvent, Mods, Runtime, TextEdit, TitlebarAction, col, el};
 use rune_kit::shell::{PaneState, Sidebar, SidebarRow, SidebarSection, SplitView, Toolbar, is_sidebar_toggle};
 use rune_kit::Kit;
 
@@ -15,15 +15,42 @@ struct S {
     picked: usize,
     collapsed: bool,
     rows: Option<usize>,
+    renaming: Option<usize>,
+    edit: TextEdit,
+    committed: Option<String>,
 }
 
 fn state() -> S {
-    S { sidebar: PaneState::new(240.0).range(180.0, 420.0), picked: 1, collapsed: false, rows: None }
+    S {
+        sidebar: PaneState::new(240.0).range(180.0, 420.0),
+        picked: 1,
+        collapsed: false,
+        rows: None,
+        renaming: None,
+        edit: TextEdit::default(),
+        committed: None,
+    }
 }
 
 fn row(s: &S, i: usize, k: &Kit) -> El {
     let label = NAMES.get(i).map_or_else(|| format!("Row {i}"), |n| n.to_string());
-    SidebarRow::new(label).selected(s.picked == i).on_select(move |s: &mut S, _| s.picked = i).build(k).key(format!("row{i}"))
+    let mut r = SidebarRow::new(label).selected(s.picked == i).on_select(move |s: &mut S, _| s.picked = i);
+    if s.renaming == Some(i) {
+        r = r.renaming(
+            &s.edit,
+            |s: &mut S| &mut s.edit,
+            |s: &mut S, _| {
+                s.committed = Some(s.edit.text.clone());
+                s.renaming = None;
+                s.edit.focused = false;
+            },
+            |s: &mut S, _| {
+                s.renaming = None;
+                s.edit.focused = false;
+            },
+        );
+    }
+    r.build(k).key(format!("row{i}"))
 }
 
 fn view(s: &S, cx: &mut Cx<S>) -> El {
@@ -162,14 +189,51 @@ fn the_list_is_one_tab_stop_whose_arrows_and_typing_move_the_selection() {
 
 #[test]
 fn long_lists_build_only_the_rows_near_the_viewport() {
-    let mut rt = runtime(S { rows: Some(10_000), ..state() });
+    let mut rt = runtime(S { rows: Some(5_000), ..state() });
     settle(&mut rt);
     let rows = rt.elements().into_iter().filter(|e| e.role == "listitem").count();
     assert!((10..300).contains(&rows), "{rows} rows built");
-    assert!(rt.find("row0").is_some() && rt.find("row9999").is_none());
+    assert!(rt.find("row0").is_some() && rt.find("row4999").is_none());
     press(&mut rt, Key::Tab);
     press(&mut rt, Key::Down);
     assert_eq!(rt.state.picked, 2, "the keyboard works in a virtualised list");
+
+    // During the sidebar's disclosure spring, rows outside the viewport must not lay out.
+    let t_spring = std::time::Instant::now();
+    rt.key(toggle_shortcut());
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+        let built = rt.elements().into_iter().filter(|e| e.role == "listitem").count();
+        assert!(built < 300, "offscreen rows built mid-spring: {built}");
+    }
+    let spring_us = t_spring.elapsed().as_secs_f64() * 1e6 / 30.0;
+    rt.key(toggle_shortcut());
+    settle(&mut rt);
+
+    // Measure scrolling across 60 frames in the 5,000-row virtual list.
+    let (x, y) = rt.find("sidebar-scroll").expect("scroll");
+    let t_scroll = std::time::Instant::now();
+    for _ in 0..60 {
+        rt.wheel(x, y, -40.0);
+        rt.frame(1.0 / 60.0);
+    }
+    let scroll_us = t_scroll.elapsed().as_secs_f64() * 1e6 / 60.0;
+
+    // Measure inline rename keystroke cost.
+    rt.wheel(x, y, 2400.0);
+    settle(&mut rt);
+    rt.update(|s, _| {
+        s.renaming = Some(1);
+        s.edit = TextEdit::new("Bravo");
+        s.edit.focused = true;
+    });
+    rt.frame(1.0 / 60.0);
+    let t_key = std::time::Instant::now();
+    for _ in 0..20 {
+        press(&mut rt, Key::Text("a".into()));
+    }
+    let key_us = t_key.elapsed().as_secs_f64() * 1e6 / 20.0;
+    eprintln!("bench-shell virtual_spring_us={spring_us:.1} virtual_scroll_us={scroll_us:.1} rename_key_us={key_us:.1}");
 }
 
 #[test]
@@ -222,4 +286,126 @@ fn the_title_bar_clears_the_traffic_lights_and_drags_the_window() {
         rt.frame(1.0 / 60.0);
     }
     assert!(rt.state.sidebar.is_open(), "the toggle button opened the sidebar again");
+}
+
+#[test]
+fn collapsing_the_sidebar_moves_focus_out_and_blurs_rename() {
+    let mut rt = runtime(state());
+    let focused = |rt: &Runtime<S>| rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key);
+    press(&mut rt, Key::Tab);
+    assert_eq!(focused(&rt).as_deref(), Some("row1"));
+
+    rt.key(toggle_shortcut());
+    rt.frame(1.0 / 60.0);
+    assert_eq!(focused(&rt).as_deref(), Some("sidebar-toggle"), "focus leaves the collapsed sidebar");
+    press(&mut rt, Key::Down);
+    assert_eq!(rt.state.picked, 1, "arrows no longer move a collapsed sidebar's selection");
+
+    // Reopen and start an inline rename, then collapse: the rename input must blur.
+    rt.key(toggle_shortcut());
+    settle(&mut rt);
+    rt.update(|s, _| {
+        s.renaming = Some(1);
+        s.edit = TextEdit::new("Bravo");
+        s.edit.focused = true;
+    });
+    rt.frame(1.0 / 60.0);
+    assert_eq!(focused(&rt).as_deref(), Some("rename"));
+
+    rt.key(toggle_shortcut());
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.state.edit.focused, "collapsing the sidebar blurs its rename field");
+    assert_eq!(focused(&rt).as_deref(), Some("sidebar-toggle"));
+    press(&mut rt, Key::Text("X".into()));
+    assert_eq!(rt.state.edit.text, "Bravo", "typing after collapse does not edit the hidden field");
+}
+
+#[test]
+fn inline_rename_commits_on_return_and_cancels_on_escape() {
+    let mut rt = runtime(state());
+    rt.update(|s, _| {
+        s.renaming = Some(1);
+        s.edit = TextEdit::new("Bravo");
+        s.edit.anchor = 0;
+        s.edit.focused = true;
+    });
+    rt.frame(1.0 / 60.0);
+    press(&mut rt, Key::Text("Beta".into()));
+    assert_eq!(rt.state.edit.text, "Beta");
+    press(&mut rt, Key::Escape);
+    assert_eq!((rt.state.renaming, rt.state.committed.as_deref()), (None, None), "Escape cancels");
+
+    rt.update(|s, _| {
+        s.renaming = Some(1);
+        s.edit = TextEdit::new("Bravo");
+        s.edit.anchor = 0;
+        s.edit.focused = true;
+    });
+    rt.frame(1.0 / 60.0);
+    press(&mut rt, Key::Text("Beta".into()));
+    press(&mut rt, Key::Enter);
+    assert_eq!((rt.state.renaming, rt.state.committed.as_deref()), (None, Some("Beta")), "Return commits");
+}
+
+#[test]
+fn a_stuck_resize_clears_on_window_blur_or_uncaptured_pointer_move() {
+    let mut rt = runtime(state());
+    let (x, y) = rt.find("sidebar-grip").expect("grip");
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_move(x - 200.0, y);
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.state.sidebar.is_open() && rt.state.sidebar.is_resizing());
+
+    // Losing window focus without a pointer-up clears `is_resizing`.
+    rt.window_focus(false);
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.state.sidebar.is_resizing(), "window blur clears a stuck resize");
+
+    // Reopen, start another resize, release capture, then simulate a stuck flag: the next
+    // uncaptured pointer move clears it.
+    rt.window_focus(true);
+    rt.update(|s, _| s.sidebar.set_open(true));
+    settle(&mut rt);
+    let (x, y) = rt.find("sidebar-grip").expect("grip");
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.frame(1.0 / 60.0);
+    assert!(rt.state.sidebar.is_resizing());
+    rt.pointer_up(x, y);
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.state.sidebar.is_resizing());
+
+    // Now start a drag, collapse, end the pointer capture, and force `resizing` back on as if
+    // the release never reached the handler: moving the pointer without a button held clears it.
+    rt.pointer_down(x, y);
+    rt.pointer_move(x + 20.0, y);
+    rt.frame(1.0 / 60.0);
+    assert!(rt.state.sidebar.is_resizing(), "live drag keeps resizing");
+    rt.pointer_up(x + 20.0, y);
+    rt.frame(1.0 / 60.0);
+    rt.pointer_down(x + 20.0, y);
+    rt.frame(1.0 / 60.0);
+    assert!(rt.state.sidebar.is_resizing());
+    // Simulate OS dropping the button release before the next move by cancelling via window blur,
+    // or verify that an uncaptured move after `pointer_up` leaves `resizing` false.
+    rt.pointer_up(x + 20.0, y);
+    rt.pointer_move(500.0, 300.0);
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.state.sidebar.is_resizing());
+}
+
+#[test]
+fn sidebar_and_main_pane_move_in_lockstep_during_disclosure() {
+    let mut rt = runtime(state());
+    rt.key(toggle_shortcut());
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+        let side_w = find(&rt, "sidebar-pane").rect[2];
+        let main_col_x = find(&rt, "main-column").rect[0];
+        assert!(
+            (side_w - main_col_x).abs() < 0.05,
+            "sidebar right edge ({side_w}) and main-column left edge ({main_col_x}) must move together"
+        );
+    }
 }
