@@ -980,6 +980,7 @@ impl ScrollAxes {
 }
 
 pub(crate) type AtBottomFn = Rc<dyn Fn(&mut dyn Any, bool)>;
+pub(crate) type VisibleRowsFn = Rc<dyn Fn(&mut dyn Any, std::ops::Range<usize>) -> bool>;
 pub(crate) type LayoutFn = Rc<dyn Fn(&mut dyn Any, [f32; 4])>;
 pub(crate) type DrawnLayoutFn = Rc<dyn Fn(&mut dyn Any, [f32; 4], &mut Tx)>;
 pub(crate) type WindowFocusFn = Rc<dyn Fn(&mut dyn Any, bool, &mut Tx)>;
@@ -1033,6 +1034,7 @@ pub struct El {
     pub(crate) scroll: Option<ScrollSpec>,
     pub(crate) scroll_axes: ScrollAxes,
     pub(crate) on_at_bottom: Option<AtBottomFn>,
+    pub(crate) on_visible_rows: Option<VisibleRowsFn>,
     pub(crate) on_layout: Option<LayoutFn>,
     pub(crate) on_screen_layout: Option<LayoutFn>,
     pub(crate) on_drawn_layout: Option<DrawnLayoutFn>,
@@ -1112,6 +1114,7 @@ fn base(dir: FlexDirection) -> El {
         scroll: None,
         scroll_axes: ScrollAxes::Y,
         on_at_bottom: None,
+        on_visible_rows: None,
         on_layout: None,
         on_screen_layout: None,
         on_drawn_layout: None,
@@ -1642,9 +1645,25 @@ impl El {
     /// Tells [`El::virtual_rows`] its keys are those of the last commit that gave the same
     /// `version`, so layout skips calling `key` for every row to find out. A list of tens of
     /// thousands of rows then commits in time independent of its length. Change `version`
-    /// whenever any row's key changes; with a stale version the rows keep their old keys.
+    /// whenever rows are reordered, replaced or any row's key changes while the row count stays
+    /// the same (a change in `count` is always detected without a bump); with a stale version on
+    /// an in-place change the rows keep their old keys.
     pub fn virtual_rows_version(mut self, version: impl std::hash::Hash) -> Self {
         self.virtual_rows_version = Some(crate::memo::hash_of(&version));
+        self
+    }
+
+    /// On a virtual list ([`El::virtualize`] or [`El::virtual_rows`]), called with the index
+    /// range `start..end` of rows currently visible in its scroll viewport: once after its
+    /// first layout, then whenever that range or the rows change. Return `true` when `f`
+    /// changed state the view reads (so the view runs again), or `false` when it only updated
+    /// bookkeeping (so scrolling through rows that don't change the view's output doesn't
+    /// re-run the view).
+    pub fn on_visible_rows<S: 'static>(
+        mut self,
+        f: impl Fn(&mut S, std::ops::Range<usize>) -> bool + 'static,
+    ) -> Self {
+        self.on_visible_rows = Some(Rc::new(move |s, r| f(downcast::<S>(s), r)));
         self
     }
 

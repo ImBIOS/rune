@@ -48,6 +48,8 @@ pub(crate) struct VirtualList {
     pub anchor: Option<(String, f32)>,
     /// The `El::virtual_rows_version` that `keys` came with.
     pub keys_version: Option<u64>,
+    /// The visible row range last sent to `El::on_visible_rows`.
+    pub reported_visible: Option<Range<usize>>,
 }
 
 /// The most an element can be tall before layout, so a list's first showing, which has no
@@ -176,6 +178,7 @@ impl VirtualList {
         self.keys = keys;
         self.row_heights = heights;
         self.sums_stale.set(true);
+        self.reported_visible = None;
         anchor
     }
 
@@ -227,6 +230,18 @@ impl VirtualList {
     /// The furthest the rows can scroll: their extent less the viewport.
     pub fn max_offset(&self) -> f32 {
         (self.pad_top + self.prefix(self.keys.len()) + self.pad_bottom - self.viewport).max(0.0)
+    }
+
+    /// The row index range intersecting the scroll viewport (`offset .. offset + viewport`).
+    pub fn visible_range(&self, offset: f32, pinned: bool) -> Range<usize> {
+        if self.keys.is_empty() {
+            return 0..0;
+        }
+        let offset = if pinned { self.max_offset() } else { offset.clamp(0.0, self.max_offset()) };
+        let sums = self.sums();
+        let start = sums[1..].partition_point(|&s| self.pad_top + s <= offset);
+        let end = sums[..self.keys.len()].partition_point(|&s| self.pad_top + s < offset + self.viewport).max(start);
+        start..end
     }
 
     /// Picks the rows to mount for `offset`, clamped to the rows' extent. With `budget` (the

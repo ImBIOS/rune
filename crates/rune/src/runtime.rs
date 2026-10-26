@@ -401,6 +401,7 @@ pub(crate) struct Node {
     scroll: Option<ScrollSpec>,
     scroll_axes: crate::el::ScrollAxes,
     on_at_bottom: Option<crate::el::AtBottomFn>,
+    on_visible_rows: Option<crate::el::VisibleRowsFn>,
     on_layout: Option<crate::el::LayoutFn>,
     on_screen_layout: Option<crate::el::LayoutFn>,
     on_drawn_layout: Option<crate::el::DrawnLayoutFn>,
@@ -463,6 +464,7 @@ enum Action {
     Hover(String),
     HoverChange(String, bool),
     AtBottom(String, bool),
+    VisibleRows(String, std::ops::Range<usize>),
     Layout(String, [f32; 4]),
     ScreenLayout(String, [f32; 4]),
     /// `El::on_drawn_layout`; true when only a live value, scroll or animation moved it.
@@ -2039,6 +2041,7 @@ impl<S: 'static> Runtime<S> {
             self.commit(&Tx::default());
         }
         let mut ran_layout = false;
+        self.report_visible_rows();
         // Hosts take a drag-out inside the move that asked for it; by now nothing will.
         self.drop_drag_out_request();
         let ended: Vec<_> = self.drag_ends.borrow_mut().drain(..).collect();
@@ -2067,7 +2070,7 @@ impl<S: 'static> Runtime<S> {
                 { self.compare_live_check(check); ran_other = false; }
                 ran = false;
             }
-            if matches!(action, Action::Layout(..) | Action::ScreenLayout(..) | Action::DrawnLayout(_, _, false)) {
+            if matches!(action, Action::Layout(..) | Action::ScreenLayout(..) | Action::DrawnLayout(_, _, false) | Action::VisibleRows(..)) {
                 ran_layout |= self.run_action(action, &mut tx);
             } else {
                 #[cfg(debug_assertions)]
@@ -2198,6 +2201,7 @@ impl<S: 'static> Runtime<S> {
         animating |= source(self.step_growth(step as f32), AnimSource::GROWTH);
         animating |= source(self.step_scroll(step as f32), AnimSource::SCROLL);
         self.report_at_bottom();
+        animating |= self.report_visible_rows();
         self.report_layout();
         animating |= source(self.reveals_active(), AnimSource::REVEAL);
         animating |= self.build();
@@ -2433,6 +2437,10 @@ impl<S: 'static> Runtime<S> {
                 let Some(f) = self.node(&path).and_then(|n| n.on_at_bottom.clone()) else { return false };
                 f(handler_state(&mut self.state), at);
                 true
+            }
+            Action::VisibleRows(path, range) => {
+                let Some(f) = self.node(&path).and_then(|n| n.on_visible_rows.clone()) else { return false };
+                f(handler_state(&mut self.state), range)
             }
             Action::Layout(path, rect) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_layout.clone()) else { return false };
@@ -3042,6 +3050,28 @@ impl<S: 'static> Runtime<S> {
         self.virtuals.iter().any(|(path, v)| self.wants_window(path, v))
     }
 
+    fn report_visible_rows(&mut self) -> bool {
+        if self.virtuals.is_empty() { return false; }
+        let mut queued = false;
+        for i in 0..self.nodes.len() {
+            if self.nodes[i].on_visible_rows.is_none() || self.subtree_exiting(i) { continue; }
+            let path = &self.nodes[i].path;
+            let Some(v) = self.virtuals.get_mut(path) else { continue };
+            let (offset, pinned) = self.path_ids.get(&v.scroll_path)
+                .and_then(|id| self.scrolls.get(id))
+                .map_or((0.0, false), |s| (s.offset as f32, s.pinned));
+            let range = v.visible_range(offset, pinned);
+            if v.reported_visible.as_ref() != Some(&range) {
+                v.reported_visible = Some(range.clone());
+                let p = path.clone();
+                self.queue.retain(|a| !matches!(a, Action::VisibleRows(q, _) if *q == p));
+                self.queue.push(Action::VisibleRows(p, range));
+                queued = true;
+            }
+        }
+        queued
+    }
+
     fn wants_window(&self, path: &str, v: &crate::virtual_list::VirtualList) -> bool {
         let Some(&i) = self.path_ids.get(path).and_then(|id| self.node_index.get(id)) else { return false };
         if self.subtree_exiting(i) { return false; }
@@ -3594,10 +3624,20 @@ impl<S: 'static> Runtime<S> {
         let scale = self.env.scale;
         // Culling is not a model removal. Retire offscreen scene/growth state immediately;
         // re-entering historical rows mount settled and don't replay streaming words.
-        for path in &self.virtual_culled {
-            if let Some(id) = self.path_ids.get(path) {
-                self.scene.unmount(*id);
-                self.grows.remove(id);
+        if !self.virtual_culled.is_empty() {
+            let mut culled = vec![false; self.nodes.len()];
+            for (i, n) in self.nodes.iter().enumerate() {
+                if self.virtual_culled.contains(&n.path) || n.parent.is_some_and(|p| culled[p]) {
+                    culled[i] = true;
+                    self.scene.unmount(n.id);
+                    self.grows.remove(&n.id);
+                }
+            }
+            for path in &self.virtual_culled {
+                if let Some(id) = self.path_ids.get(path) {
+                    self.scene.unmount(*id);
+                    self.grows.remove(id);
+                }
             }
         }
         for v in self.virtuals.values_mut() {
@@ -7515,6 +7555,7 @@ fn flatten(
         scroll,
         scroll_axes,
         on_at_bottom,
+        on_visible_rows,
         on_layout,
         on_screen_layout,
         on_drawn_layout,
@@ -7601,6 +7642,7 @@ fn flatten(
         scroll,
         scroll_axes,
         on_at_bottom,
+        on_visible_rows,
         on_layout,
         on_screen_layout,
         on_drawn_layout,

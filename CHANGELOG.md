@@ -10,10 +10,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   word changes, syntax colours, folded unchanged ranges, sticky file headers, app widgets
   under lines (annotations), line selection from the gutter and one-side copy, on a virtual
   list that keeps a 50,000-line diff at frame rate. See the rune-kit README. Additive.
-- **`El::virtual_rows_version(v)`** lets a `virtual_rows` list skip calling its key closure
-  for every row each commit: while `v` stays the same, layout keeps the last keys. A list of tens of
-  thousands of rows then commits in time independent of its length. Lists without it behave
-  as before.
+
+- **`El::virtual_rows_version(v)` and `El::on_visible_rows(f)`.** `virtual_rows_version` lets a
+  `virtual_rows` list skip calling its key closure for every row each commit: while `v` and the
+  row count stay the same, layout keeps the last keys. `on_visible_rows` reports the index range
+  of rows intersecting the scroll viewport whenever it changes, committing only when the handler
+  returns `true`, so a sticky header or file tree can follow the reading position without per-row
+  `on_layout` commits on every scroll frame. Culled virtual rows now also unmount their whole
+  subtree from the scene immediately. Lists without these behave as before.
+
 - **Rich fields: soft breaks on rebuilt drafts, leaving code blocks, allow-lists, physical keys.**
   `TextEdit::with_soft_breaks` and `set_soft_breaks` restore the soft breaks `from_parts`
   can't take, and `TextEdit::clear_history` drops the undo and redo stacks while keeping the

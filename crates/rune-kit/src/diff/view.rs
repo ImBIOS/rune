@@ -54,6 +54,7 @@ type GetMut<S> = Rc<dyn Fn(&mut S) -> &mut DiffState>;
 ///     .on_visible_file(|s: &mut App, f| s.tree.reveal(f))
 ///     .build(s, &k)
 /// ```
+#[allow(clippy::type_complexity)]
 pub struct DiffView<S> {
     get: Get<S>,
     get_mut: GetMut<S>,
@@ -130,7 +131,19 @@ impl<S: 'static> DiffView<S> {
             list = list.min_w(v.content_width(st).max(st.view_width()));
         }
         let build = v.clone();
-        let list = list.virtual_rows(count, LINE_H, keys(v.d.get.clone()), move |s: &S, i| build.row(s, i)).virtual_rows_version(st.keys_rev);
+        let vis_mut = v.d.get_mut.clone();
+        let on_file = v.d.on_visible_file.clone();
+        let list = list
+            .virtual_rows(count, LINE_H, keys(v.d.get.clone()), move |s: &S, i| build.row(s, i))
+            .virtual_rows_version(st.keys_rev)
+            .on_visible_rows(move |s: &mut S, rows| {
+                let (reported, sticky_changed) = vis_mut(s).set_visible_rows(rows);
+                if let (Some(f), Some(cb)) = (reported, &on_file) {
+                    cb(s, f);
+                    return true;
+                }
+                sticky_changed
+            });
         let viewport = v.d.get_mut.clone();
         let scroll = col().key("scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false });
         let scroll = if wrap { scroll } else { scroll.scroll_xy() };
@@ -314,28 +327,17 @@ impl<S: 'static> View<S> {
     fn row(&self, s: &S, i: usize) -> El {
         let st = (self.d.get)(s);
         let r = st.rows[i];
-        let key = st.keys[i].clone();
-        let el = match r {
+        let key = st.keys[i].as_str();
+        match r {
             Row::File(f) => self.file_header(s, st, f as usize, false),
-            Row::Note(f) => memo(key.clone(), (self.look.version, st.rev, st.view_width().to_bits()), || self.note(st, f as usize)),
-            Row::Gap { f, gap } => memo(key.clone(), (self.look.version, st.rev, st.view_width().to_bits()), || self.gap(st, f as usize, gap as usize)),
-            _ if self.d.annotation.is_some() && self.annotated(st, r) => self.line(s, st, i),
+            Row::Note(f) => memo(key, (self.look.version, st.rev, st.view_width().to_bits()), || self.note(st, f as usize)),
+            Row::Gap { f, gap } => memo(key, (self.look.version, st.rev, st.view_width().to_bits()), || self.gap(st, f as usize, gap as usize)),
+            _ if !st.annotations().is_empty() && self.d.annotation.is_some() && self.annotated(st, r) => self.line(s, st, i),
             _ => {
                 let version = (self.look.version, st.rev, st.row_selected(i, None), st.copy_side(), st.selection().map(|s| s.start.side));
-                memo(key.clone(), version, || self.line(s, st, i))
+                memo(key, version, || self.line(s, st, i))
             }
-        };
-        let (anchor, visible, at) = (self.d.get_mut.clone(), self.d.on_visible_file.clone(), i as u32);
-        el.on_layout(move |s: &mut S, rect| {
-            let st = anchor(s);
-            // A report queued before the rows changed belongs to a row that has moved.
-            if st.keys.get(at as usize) != Some(&key) {
-                return;
-            }
-            if let (Some(f), Some(cb)) = (st.anchor(at, rect), &visible) {
-                cb(s, f);
-            }
-        })
+        }
     }
 
     fn annotated(&self, st: &DiffState, r: Row) -> bool {
@@ -517,8 +519,7 @@ impl<S: 'static> View<S> {
             match d.phase {
                 Phase::Down => st.press_line(f, LineRef::new(side, n)),
                 Phase::Move => {
-                    let Some((y, h)) = st.row_rect(row_at) else { return };
-                    let Some(r) = st.row_under(y + d.start_y.clamp(0.0, h) + d.dy) else { return };
+                    let Some(r) = st.row_from(row_at, d.start_y.clamp(0.0, LINE_H) + d.dy) else { return };
                     let r = st.rows[r as usize];
                     if r.file() != f {
                         return;
@@ -573,11 +574,10 @@ impl<S: 'static> View<S> {
     fn code(&self, st: &DiffState, f: usize, c: &Cell<'_>, copy: bool, side: Side, row_key: &str) -> El {
         let l = &self.look;
         let (src, n) = c.source();
-        let syntax: Vec<(Range<usize>, Color)> = l
-            .syntax
-            .spans(&st.highlights(f, src, n), 0)
+        let syntax: Vec<(Range<usize>, Color)> = st
+            .highlights(f, src, n)
             .into_iter()
-            .filter_map(|sp| Some((sp.start as usize..sp.end as usize, sp.color?)))
+            .map(|(r, p)| (r, l.syntax.paint(p)))
             .collect();
         let word = l.tints(c.kind).map(|t| t.word);
         let spans = layer(c.text.len(), &syntax, word.map_or(&[][..], |_| c.changes), word);
@@ -838,6 +838,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::single_range_in_vec_init)]
     fn word_backgrounds_cut_syntax_colours() {
         let red = Color::WHITE;
         let green = Color::BLACK;

@@ -5,7 +5,7 @@
 use std::fmt::Write;
 
 use rune::runtime::ElementInfo;
-use rune::{Cx, El, Env, Key, KeyEvent, Mods, Runtime, Tx, col, el};
+use rune::{Cx, El, Env, Key, KeyEvent, Mods, Runtime, TextEdit, TextStyle, Tx, col, el, text_input};
 use rune_kit::Kit;
 use rune_kit::diff::{Annotation, DiffMode, DiffState, DiffView, Expand, FileDiff, LineKind, LineRange, LineRef, Side, parse};
 
@@ -319,6 +319,44 @@ fn copying_lines_takes_one_side_without_numbers_or_markers() {
     rt.key(KeyEvent { key: Key::Command('c'), mods: Mods { cmd: true, ..Mods::default() } });
     tick(&mut rt);
     assert_eq!(clipboard.text().as_deref().map(String::as_str), Some("\tlet a = 1;\n\tlet b = 3;\n\ta + b"));
+
+    // Split mode: dragging over the old (left) column vs new (right) column copies only that side, with tabs.
+    let mut split_diff = tabbed();
+    split_diff.set_mode(DiffMode::Split);
+    let mut rt = runtime(split_diff, (800.0, 400.0));
+    rt.use_clipboard(&clipboard);
+    for (cell_start, cell_end, expected) in [
+        ("df0.c2/old/code/text", "df0.c4/old/code/text", "\tlet a = 1;\n\tlet b = 2;\n\ta + b"),
+        ("df0.c2/new/code/text", "df0.c4/new/code/text", "\tlet a = 1;\n\tlet b = 3;\n\ta + b"),
+    ] {
+        let (from, to) = (find(&rt, cell_start), find(&rt, cell_end));
+        let (x0, y0) = (from.rect[0] + 1.0, from.rect[1] + 10.0);
+        let (x1, y1) = (to.rect[0] + 200.0, to.rect[1] + 10.0);
+        rt.pointer_move(x0, y0);
+        tick(&mut rt);
+        rt.pointer_down(x0, y0);
+        tick(&mut rt);
+        for i in 1..=8 {
+            let t = i as f32 / 8.0;
+            rt.pointer_move(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
+            tick(&mut rt);
+        }
+        rt.pointer_up(x1, y1);
+        tick(&mut rt);
+        assert_eq!(rt.selected_text().as_deref(), Some(expected));
+    }
+
+    // Selecting across a hunk boundary and folded gap omits the gap label and line numbers.
+    let old: String = (1..=30).map(|i| format!("\tline {i}\n")).collect();
+    let new = old.replace("\tline 2\n", "\tline two\n").replace("\tline 29\n", "\tline twenty-nine\n");
+    let mut across = DiffState::new(vec![FileDiff::from_texts("gap.rs", &old, &new)]);
+    assert_eq!(across.files()[0].hunks.len(), 2);
+    across.set_selection(Some(LineRange { file: 0, start: LineRef::new(Side::New, 1), end: LineRef::new(Side::New, 30) }));
+    let copied = across.selected_text().unwrap();
+    assert!(!copied.contains("unchanged"), "no gap label in copied text: {copied}");
+    assert!(!copied.contains("@@"), "no hunk header in copied text: {copied}");
+    assert!(copied.starts_with("\tline 1\n\tline two\n\tline 3\n"));
+    assert!(copied.ends_with("\n\tline twenty-nine\n\tline 30"));
 }
 
 fn press(rt: &mut Runtime<App>, end: &str) {
@@ -389,6 +427,63 @@ fn rows_read_as_their_change_and_keys_move_between_files() {
     settle(&mut rt);
     assert_eq!(rt.state.diff.visible_file(), 0);
     assert_eq!(rt.state.visible.last(), Some(&0));
+}
+
+#[test]
+fn focused_annotation_input_keeps_navigation_and_escape_keys() {
+    struct ComposeApp {
+        diff: DiffState,
+        comment: TextEdit,
+    }
+    fn compose_view(s: &ComposeApp, _: &mut Cx<ComposeApp>) -> El {
+        let k = Kit::neutral(true);
+        let diff = DiffView::new(|s: &ComposeApp| &s.diff, |s: &mut ComposeApp| &mut s.diff)
+            .annotation(|s: &ComposeApp, a: &Annotation| {
+                text_input(&s.comment, TextStyle::new(13.0, 400.0))
+                    .key(format!("input-{}", a.id))
+                    .size(300.0, 28.0)
+                    .on_edit(|s: &mut ComposeApp| &mut s.comment)
+            })
+            .build(s, &k);
+        col().w_full().h_full().child(diff)
+    }
+    fn compose_key(s: &mut ComposeApp, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        s.diff.key(ev, tx)
+    }
+
+    let (old, new) = numbered(60, 10);
+    let files = (0..2).map(|i| FileDiff::from_texts(format!("f{i}.rs"), &old, &new)).collect();
+    let mut diff = DiffState::new(files);
+    diff.set_annotations(vec![Annotation::new(0, LineRef::new(Side::New, 10), "c1")]);
+    let sel = LineRange::line(0, LineRef::new(Side::New, 10));
+    diff.set_selection(Some(sel));
+    let mut rt = Runtime::new(ComposeApp { diff, comment: TextEdit::default() }, compose_view, (800.0, 600.0), Env::new(true, 2.0));
+    rt.on_key = Some(compose_key);
+    rt.frame(0.0);
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+    }
+    // Focus the annotation's comment box.
+    rt.update(|s, _| s.comment.focused = true);
+    rt.frame(1.0 / 60.0);
+    for ch in ["]", "[", "j", "k"] {
+        rt.key(KeyEvent { key: Key::Text(ch.into()), mods: Mods::default() });
+        rt.frame(1.0 / 60.0);
+    }
+    assert_eq!(rt.state.comment.text, "][jk", "keys type into the focused comment box");
+    assert_eq!(rt.state.diff.visible_file(), 0, "did not jump files");
+    assert_eq!(rt.state.diff.selection(), Some(sel), "selection intact");
+
+    // Escape blurs the comment box first without clearing the diff's line selection.
+    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.state.comment.focused, "Escape blurred the comment box");
+    assert_eq!(rt.state.diff.selection(), Some(sel), "Escape did not steal the diff's selection while blurring the field");
+
+    // Now that the comment box is blurred, Escape clears the diff's selection.
+    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.diff.selection(), None);
 }
 
 /// `cargo test -p rune-kit --profile perf --test diff diff_50k_time -- --ignored --nocapture`

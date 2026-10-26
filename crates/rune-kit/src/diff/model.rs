@@ -79,12 +79,12 @@ impl Hunk {
             Side::Old => (self.old_start, self.old_count),
             Side::New => (self.new_start, self.new_count),
         };
-        if count == 0 { start + 1 } else { start.max(1) }
+        if count == 0 { start.saturating_add(1) } else { start.max(1) }
     }
 
     /// One past the last line number the hunk covers on `side`.
     pub(crate) fn end(&self, side: Side) -> u32 {
-        self.first(side) + if side == Side::Old { self.old_count } else { self.new_count }
+        self.first(side).saturating_add(if side == Side::Old { self.old_count } else { self.new_count })
     }
 
     /// The header line as a patch writes it, `@@ -1,4 +1,5 @@ section`.
@@ -206,6 +206,10 @@ impl FileDiff {
             (Some(a), Some(b)) if a != b => FileStatus::Renamed,
             _ => FileStatus::Modified,
         };
+        if old.contains('\0') || new.contains('\0') {
+            f.binary = true;
+            return f;
+        }
         let (a, b) = (Rc::new(Source::new(old)), Rc::new(Source::new(new)));
         f.hunks = hunks(&a, &b);
         f.old_text = Some(a);
@@ -301,10 +305,13 @@ impl FileDiff {
                     i = i.max(del + 1);
                     continue;
                 }
-                for k in 0..(add - del).min(i - add) {
-                    let (a, b) = myers::words(&h.lines[del + k].text, &h.lines[add + k].text);
-                    h.lines[del + k].changes = a;
-                    h.lines[add + k].changes = b;
+                let pairs = (add - del).min(i - add);
+                if pairs <= 128 {
+                    for k in 0..pairs {
+                        let (a, b) = myers::words(&h.lines[del + k].text, &h.lines[add + k].text);
+                        h.lines[del + k].changes = a;
+                        h.lines[add + k].changes = b;
+                    }
                 }
             }
         }
@@ -541,14 +548,17 @@ fn header_line(f: &mut FileDiff, l: &str) {
 /// The two paths of a `diff --git a/x b/y` line. With unquoted paths containing spaces the
 /// split is ambiguous; the `---`/`+++` or rename lines that follow correct it.
 fn git_paths(rest: &str) -> (Option<String>, Option<String>) {
-    if rest.starts_with('"') {
-        if let Some((a, b)) = split_quoted(rest) {
-            return (Some(strip_prefix(&a)), Some(strip_prefix(&b)));
-        }
+    if rest.starts_with('"')
+        && let Some((a, b)) = split_quoted(rest)
+    {
+        return (Some(strip_prefix(&a)), Some(strip_prefix(&b)));
     }
     // Equal paths split in the middle; otherwise at the first " b/".
     let half = rest.len() / 2;
-    if rest.len() % 2 == 1 && rest.as_bytes().get(half) == Some(&b' ') && rest[..half].get(2..) == rest[half + 1..].get(2..) {
+    if rest.len() % 2 == 1
+        && rest.as_bytes().get(half) == Some(&b' ')
+        && rest[..half].strip_prefix("a/").zip(rest[half + 1..].strip_prefix("b/")).is_some_and(|(a, b)| a == b)
+    {
         return (Some(strip_prefix(&rest[..half])), Some(strip_prefix(&rest[half + 1..])));
     }
     match rest.find(" b/") {
@@ -674,25 +684,30 @@ fn hunk_body(mut h: Hunk, lines: &[&str], mut i: usize) -> (Hunk, usize) {
             LineKind::Context if old_left > 0 && new_left > 0 => {
                 old_left -= 1;
                 new_left -= 1;
-                old += 1;
-                new += 1;
-                Line::new(kind, Some(old - 1), Some(new - 1), text)
+                let (o, n) = (old, new);
+                old = old.saturating_add(1);
+                new = new.saturating_add(1);
+                Line::new(kind, Some(o), Some(n), text)
             }
             LineKind::Context => break,
             LineKind::Removed => {
                 old_left -= 1;
-                old += 1;
-                Line::new(kind, Some(old - 1), None, text)
+                let o = old;
+                old = old.saturating_add(1);
+                Line::new(kind, Some(o), None, text)
             }
             LineKind::Added => {
                 new_left -= 1;
-                new += 1;
-                Line::new(kind, None, Some(new - 1), text)
+                let n = new;
+                new = new.saturating_add(1);
+                Line::new(kind, None, Some(n), text)
             }
         };
         h.lines.push(line);
         i += 1;
     }
+    h.old_count -= old_left;
+    h.new_count -= new_left;
     (h, i)
 }
 
@@ -721,7 +736,74 @@ mod tests {
         let f = FileDiff::from_texts("a", "one\ntwo", "one\ntwo\n");
         let l: Vec<(LineKind, &str, bool)> = f.hunks[0].lines.iter().map(|l| (l.kind, l.text.as_str(), l.no_newline)).collect();
         assert_eq!(l, vec![(LineKind::Context, "one", false), (LineKind::Removed, "two", true), (LineKind::Added, "two", false)]);
+        let both_missing = FileDiff::from_texts("a", "one\ntwo", "one\nthree");
+        let l2: Vec<(LineKind, &str, bool)> = both_missing.hunks[0].lines.iter().map(|l| (l.kind, l.text.as_str(), l.no_newline)).collect();
+        assert_eq!(l2, vec![(LineKind::Context, "one", false), (LineKind::Removed, "two", true), (LineKind::Added, "three", true)]);
         assert!(FileDiff::from_texts("a", "same\n", "same\n").hunks.is_empty());
+        assert!(FileDiff::from_texts("a", "same", "same").hunks.is_empty());
+        // CRLF normalizes line endings while preserving changes.
+        assert!(FileDiff::from_texts("a", "one\r\ntwo\r\n", "one\ntwo\n").hunks.is_empty());
+        let crlf = FileDiff::from_texts("a", "one\r\ntwo\r\n", "one\r\nthree\r\n");
+        assert_eq!(crlf.hunks[0].lines[1].text, "two");
+        assert_eq!(crlf.hunks[0].lines[2].text, "three");
+        // NUL bytes mark a binary file.
+        let bin = FileDiff::from_texts("img.bin", "a\0b", "c\0d");
+        assert!(bin.binary && bin.hunks.is_empty());
+    }
+
+    #[test]
+    fn hostile_and_fuzzed_patches_never_panic_or_blow_up() {
+        let cases = [
+            "",
+            "diff --git\n--- \n+++ \n@@ -4294967295,4294967295 +4294967295,4294967295 @@\n-a\n+b\n\\ No newline",
+            "diff --git \"a/unclosed b/unclosed\n--- \"a/\\777\\x\n+++ b/\n@@ -0,0 +0,0 @@\n",
+            "diff --git 🚀 a/x 🚀 b/y\n@@ -1,999999 +1,999999 @@\n+truncated",
+            "--- a/f\n+++ b/f\n@@ -10,2 +10,2 @@\n ctx\n-old\n+new\n@@ -2,1 +2,1 @@\n-out_of_order\n+ok\n",
+        ];
+        for patch in cases {
+            let files = parse(patch);
+            let _ = crate::diff::DiffState::new(files);
+        }
+
+        // Fuzz-style random line soup of headers, hunks, escapes and markers.
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed as usize) % n
+        };
+        let fragments = [
+            "diff --git a/f.rs b/f.rs\n",
+            "diff --git \"a/sp ace\\303\\251\" \"b/sp ace\\n\"\n",
+            "--- a/f.rs\n",
+            "+++ b/f.rs\n",
+            "--- /dev/null\n",
+            "+++ /dev/null\n",
+            "@@ -1,3 +1,3 @@ fn f()\n",
+            "@@ -0,0 +1,5 @@\n",
+            "@@ -4294967295,10 +0,4294967295 @@\n",
+            "@@ malformed @@\n",
+            " context line\n",
+            "-removed line\n",
+            "+added line\n",
+            "\\ No newline at end of file\n",
+            "rename from \"a/\\123\"\n",
+            "similarity index 999%\n",
+            "Binary files a/x and b/x differ\n",
+            "\r\n",
+        ];
+        for _ in 0..300 {
+            let len = 1 + next(24);
+            let patch: String = (0..len).map(|_| fragments[next(fragments.len())]).collect();
+            let files = parse(&patch);
+            let mut state = crate::diff::DiffState::new(files);
+            state.set_mode(crate::diff::DiffMode::Split);
+            for f in 0..state.files().len() {
+                let _ = state.side_line(f, Side::Old, 1);
+                let _ = state.side_line(f, Side::New, 1);
+            }
+        }
     }
 
     #[test]

@@ -137,15 +137,6 @@ pub(crate) struct Chunk {
 
 const CHUNK: u32 = 128;
 
-/// Where a built row was last laid out (window points): what the reading position and the
-/// visible file are worked out from.
-#[derive(Clone, Copy, Debug)]
-struct Anchor {
-    row: u32,
-    y: f32,
-    h: f32,
-}
-
 /// A diff and everything about how it is shown: the app keeps one in its state and
 /// [`DiffView`](super::DiffView) draws it.
 pub struct DiffState {
@@ -181,8 +172,7 @@ pub struct DiffState {
     pub(crate) rev: u64,
     /// Changes with `keys`, unique across states so a swapped-in state never matches.
     pub(crate) keys_rev: u64,
-    anchors: Vec<Anchor>,
-    view_top: f32,
+    visible_rows: std::ops::Range<usize>,
     view_w: f32,
     visible: usize,
     /// The visible file last reported to the app.
@@ -230,8 +220,7 @@ impl DiffState {
             hunk_rows: Vec::new(),
             rev: 0,
             keys_rev: 0,
-            anchors: Vec::new(),
-            view_top: 0.0,
+            visible_rows: 0..0,
             view_w: 0.0,
             visible: 0,
             reported: None,
@@ -265,7 +254,7 @@ impl DiffState {
         self.chunks.borrow_mut().clear();
         self.visible = 0;
         self.reported = None;
-        self.anchors.clear();
+        self.visible_rows = 0..0;
         self.index_annotations();
         self.rebuild();
     }
@@ -540,7 +529,7 @@ impl DiffState {
     /// The row under the sticky header: where navigation last put it, unless the list has
     /// scrolled away since.
     fn position(&self) -> u32 {
-        let top = self.row_at(self.view_top + HEADER_H);
+        let top = self.row_below_header();
         match (self.nav, top) {
             (Some(n), Some(t)) if t.abs_diff(n) <= 3 => n,
             (_, Some(t)) => t,
@@ -549,10 +538,19 @@ impl DiffState {
         }
     }
 
-    /// The built row at window height `y`, or the nearest one below it.
-    fn row_at(&self, y: f32) -> Option<u32> {
-        let above = self.anchors.iter().filter(|a| a.y <= y + 0.5).max_by(|a, b| a.y.total_cmp(&b.y));
-        above.or_else(|| self.anchors.iter().min_by(|a, b| a.y.total_cmp(&b.y))).map(|a| a.row)
+    fn row_below_header(&self) -> Option<u32> {
+        if self.visible_rows.is_empty() {
+            return None;
+        }
+        let mut r = self.visible_rows.start;
+        if self.sticky().is_some() {
+            let mut room = 0.0;
+            while r + 1 < self.rows.len() && room < HEADER_H {
+                room += self.estimate(r);
+                r += 1;
+            }
+        }
+        Some(r as u32)
     }
 
     /// Handle a key for the diff: `j`/`k` next and previous hunk, `]`/`[` next and previous
@@ -590,7 +588,6 @@ impl DiffState {
 
     /// The scroll viewport's rect.
     pub(crate) fn set_viewport(&mut self, r: [f32; 4]) {
-        self.view_top = r[1];
         self.view_w = r[2];
     }
 
@@ -598,49 +595,47 @@ impl DiffState {
         self.view_w
     }
 
-    /// Row `row` was laid out at `rect` (window points): returns the visible file when it
-    /// differs from the one last returned. Rows report when they're built or move, never when
-    /// they leave the list, so an anchor a new report overlaps is a row that left.
-    pub(crate) fn anchor(&mut self, row: u32, rect: [f32; 4]) -> Option<usize> {
-        let (y, h) = (rect[1], rect[3].max(1.0));
-        self.anchors.retain(|a| a.row != row && (a.y + a.h <= y + 0.5 || a.y >= y + h - 0.5));
-        self.anchors.push(Anchor { row, y, h });
-        let file = match self.anchors.iter().filter(|a| a.y <= self.view_top + 0.5).max_by(|a, b| a.y.total_cmp(&b.y)) {
-            Some(a) => Some(self.rows[a.row as usize].file()),
-            None => self.anchors.iter().min_by(|a, b| a.y.total_cmp(&b.y)).map(|a| match self.rows[a.row as usize] {
-                Row::File(f) => (f as usize).saturating_sub(1),
-                r => r.file(),
-            }),
-        };
-        if let Some(f) = file {
-            self.visible = f;
+    /// The virtual list's visible row range changed to `rows`: returns `(reported_file, sticky_changed)`.
+    pub(crate) fn set_visible_rows(&mut self, rows: std::ops::Range<usize>) -> (Option<usize>, bool) {
+        let before_sticky = self.sticky();
+        self.visible_rows = rows;
+        if let Some(&r) = self.rows.get(self.visible_rows.start) {
+            self.visible = r.file();
         }
-        (self.reported != Some(self.visible)).then(|| {
+        let reported = (!self.files.is_empty() && self.reported != Some(self.visible)).then(|| {
             self.reported = Some(self.visible);
             self.visible
-        })
+        });
+        (reported, self.sticky() != before_sticky)
     }
 
-    /// Where row `r` was last laid out, `[y, h]`, if it's built.
-    pub(crate) fn row_rect(&self, r: u32) -> Option<(f32, f32)> {
-        self.anchors.iter().find(|a| a.row == r).map(|a| (a.y, a.h))
+    /// The row reached by moving `y` points vertically from the top of row `from`.
+    pub(crate) fn row_from(&self, from: u32, mut y: f32) -> Option<u32> {
+        let mut r = usize::try_from(from).ok()?.min(self.rows.len().checked_sub(1)?);
+        while y < 0.0 && r > 0 {
+            r -= 1;
+            y += self.estimate(r);
+        }
+        while r + 1 < self.rows.len() {
+            let h = self.estimate(r);
+            if y < h {
+                break;
+            }
+            y -= h;
+            r += 1;
+        }
+        Some(r as u32)
     }
 
-    /// The row whose last layout holds window height `y`.
-    pub(crate) fn row_under(&self, y: f32) -> Option<u32> {
-        self.anchors.iter().find(|a| y >= a.y && y < a.y + a.h).map(|a| a.row)
-    }
-
-    /// The visible file's header has scrolled above the viewport's top (or out of the list),
-    /// so a copy of it sticks there.
+    /// The visible file's header has scrolled above the viewport's top, so a copy of it sticks
+    /// there.
     pub(crate) fn sticky(&self) -> Option<usize> {
-        if self.files.is_empty() || self.anchors.is_empty() {
+        if self.files.is_empty() || self.visible_rows.is_empty() {
             return None;
         }
         let f = self.visible;
-        let header = *self.file_rows.get(f)?;
-        let shown = self.anchors.iter().any(|a| a.row == header && a.y >= self.view_top - 0.5);
-        (!shown).then_some(f)
+        let header = *self.file_rows.get(f)? as usize;
+        (self.visible_rows.start > header).then_some(f)
     }
 
     /// Scroll so row `r` is at the top: to the end first, so the reveal comes from below.
@@ -667,9 +662,6 @@ impl DiffState {
     }
 
     fn estimate(&self, r: usize) -> f32 {
-        if let Some((_, h)) = self.row_rect(r as u32) {
-            return h;
-        }
         match self.rows[r] {
             Row::File(_) => HEADER_H,
             Row::Note(_) => NOTE_H,
@@ -689,7 +681,7 @@ impl DiffState {
         }
         let g = self.gaps[f][h];
         let off = n.checked_sub(if side == Side::Old { g.old } else { g.new })?;
-        file.context_line(g.old + off, g.new + off)
+        file.context_line(g.old.saturating_add(off), g.new.saturating_add(off))
     }
 
     /// Colour-only highlights of line `n` of `side` of file `f`, relative to the line.
@@ -698,7 +690,7 @@ impl DiffState {
         if self.highlighter.is_builtin() && !lang.is_some_and(crate::syntax::known) {
             return Vec::new();
         }
-        let c = (n - 1) / CHUNK;
+        let c = n.saturating_sub(1) / CHUNK;
         let key = (f as u32, side, c);
         let chunk = self.chunks.borrow().get(&key).cloned();
         let chunk = chunk.unwrap_or_else(|| {
@@ -719,7 +711,7 @@ impl DiffState {
             cache.insert(key, chunk.clone());
             chunk
         });
-        let k = ((n - 1) % CHUNK) as usize;
+        let k = (n.saturating_sub(1) % CHUNK) as usize;
         let (a, b) = (chunk.starts[k] as usize, chunk.starts[k + 1] as usize - 1);
         let first = chunk.hl.partition_point(|(r, _)| r.end <= a);
         chunk.hl[first..]
@@ -806,14 +798,15 @@ impl DiffState {
         }
         self.row_of.clear();
         let keys: Vec<String> = rows.iter().map(|&r| self.key_of(r)).collect();
-        // Built rows that keep their key don't report again unless they move: carry them over.
-        if !self.anchors.is_empty() {
-            let index: HashMap<&str, u32> = keys.iter().enumerate().map(|(i, k)| (k.as_str(), i as u32)).collect();
-            let old = std::mem::take(&mut self.anchors);
-            self.anchors = old
-                .into_iter()
-                .filter_map(|a| Some(Anchor { row: *index.get(self.keys.get(a.row as usize)?.as_str())?, ..a }))
-                .collect();
+        if !self.visible_rows.is_empty() {
+            if let Some(top) = self.keys.get(self.visible_rows.start)
+                && let Some(start) = keys.iter().position(|k| k == top)
+            {
+                let len = self.visible_rows.len();
+                self.visible_rows = start..(start + len).min(rows.len());
+            } else {
+                self.visible_rows = 0..0;
+            }
         }
         self.keys = keys;
         static KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -992,32 +985,20 @@ mod tests {
         let files = (0..3).map(|i| FileDiff::from_texts(format!("f{i}"), "a\n", "b\n")).collect();
         let mut s = DiffState::new(files);
         assert_eq!(s.rows.len(), 9);
-        s.set_viewport([0.0, 100.0, 400.0, 300.0]);
-        let at = |y: f32, h: f32| [0.0, y, 400.0, h];
-        let mut y = 100.0;
-        for r in 0..9 {
-            let h = if r % 3 == 0 { HEADER_H } else { LINE_H };
-            // The first report gives the app the first visible file.
-            assert_eq!(s.anchor(r, at(y, h)), (r == 0).then_some(0));
-            y += h;
-        }
+        assert_eq!(s.set_visible_rows(0..6), (Some(0), false));
         assert_eq!(s.sticky(), None);
-        // Scrolled 70pt: file 1's header is above the top.
-        let mut y = 30.0 - 84.0;
-        for r in 0..9 {
-            let h = if r % 3 == 0 { HEADER_H } else { LINE_H };
-            let changed = s.anchor(r, at(y, h));
-            if r == 3 {
-                assert_eq!(changed, Some(1));
-            }
-            y += h;
-        }
+        // Scrolled past file 0's header: file 0 sticks at the top.
+        assert_eq!(s.set_visible_rows(1..7), (None, true));
+        assert_eq!((s.visible_file(), s.sticky()), (0, Some(0)));
+        // At file 1's header: file 1 is visible, its own header row is at the top.
+        assert_eq!(s.set_visible_rows(3..9), (Some(1), true));
+        assert_eq!((s.visible_file(), s.sticky()), (1, None));
+        // Past file 1's header: file 1 sticks.
+        assert_eq!(s.set_visible_rows(4..9), (None, true));
         assert_eq!((s.visible_file(), s.sticky()), (1, Some(1)));
-        // A jump: rows 7 and 8 alone are built, where rows 1 and 2 were. They replace them.
-        s.anchor(7, at(100.0, LINE_H));
-        s.anchor(8, at(120.0, LINE_H));
-        assert_eq!(s.row_at(110.0), Some(7));
-        assert_eq!(s.visible_file(), 2);
-        assert_eq!(s.row_under(125.0), Some(8));
+        // A jump into file 2's lines.
+        assert_eq!(s.set_visible_rows(7..9), (Some(2), true));
+        assert_eq!((s.visible_file(), s.sticky()), (2, Some(2)));
+        assert_eq!(s.row_from(7, 25.0), Some(8));
     }
 }

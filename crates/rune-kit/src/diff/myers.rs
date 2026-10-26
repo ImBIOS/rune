@@ -111,7 +111,8 @@ fn middle_snake<T: Eq>(a: &[T], ra: Range<usize>, b: &[T], rb: Range<usize>, v: 
             let i = v.i(d);
             v.f[i] = x;
             if odd && bmin <= d && d <= bmax && v.b[i] <= x {
-                return Some((x as usize, y as usize));
+                let (x, y) = (x.clamp(xoff, xlim), y.clamp(yoff, ylim));
+                return ((x, y) != (xlim, ylim) && (x, y) != (xoff, yoff)).then_some((x as usize, y as usize));
             }
             d -= 2;
         }
@@ -141,7 +142,8 @@ fn middle_snake<T: Eq>(a: &[T], ra: Range<usize>, b: &[T], rb: Range<usize>, v: 
             let i = v.i(d);
             v.b[i] = x;
             if !odd && fmin <= d && d <= fmax && x <= v.f[i] {
-                return Some((x as usize, y as usize));
+                let (x, y) = (x.clamp(xoff, xlim), y.clamp(yoff, ylim));
+                return ((x, y) != (xlim, ylim) && (x, y) != (xoff, yoff)).then_some((x as usize, y as usize));
             }
             d -= 2;
         }
@@ -149,8 +151,8 @@ fn middle_snake<T: Eq>(a: &[T], ra: Range<usize>, b: &[T], rb: Range<usize>, v: 
     // Too costly to finish: split where the forward search got furthest, as xdiff does, so a
     // long file with many scattered edits still diffs line by line in bounded time.
     let (x, d) = (fmin..=fmax).step_by(2).map(|d| (v.f[v.i(d)], d)).max_by_key(|&(x, d)| 2 * x - d)?;
-    let y = x - d;
-    ((x, y) != (xlim, ylim) && x + y > xoff + yoff).then_some((x as usize, y as usize))
+    let (x, y) = (x.clamp(xoff, xlim), (x - d).clamp(yoff, ylim));
+    ((x, y) != (xlim, ylim) && (x, y) != (xoff, yoff)).then_some((x as usize, y as usize))
 }
 
 /// The runs of an edit script from each side's changed flags. Deletions come before the
@@ -319,6 +321,48 @@ mod tests {
         let (rebuilt, same) = apply(&a, &b, &ops);
         assert_eq!(rebuilt, b);
         assert_eq!(same, 30_000 - 4_286, "only the changed lines differ");
+    }
+
+    #[test]
+    fn adversarial_inputs_stay_within_bounds_and_rebuild_the_new_side() {
+        // All equal.
+        let eq: Vec<u32> = (0..2_500).collect();
+        assert_eq!(diff(&eq, &eq), vec![Op::Equal { old: 0, new: 0, len: 2_500 }]);
+
+        // All different, both below and past MAX_D.
+        for n in [50usize, 2_000] {
+            let a: Vec<u32> = (0..n as u32).collect();
+            let b: Vec<u32> = (n as u32..2 * n as u32).collect();
+            let ops = diff(&a, &b);
+            let (rebuilt, same) = apply(&a, &b, &ops);
+            assert_eq!(rebuilt, b);
+            assert_eq!(same, 0);
+        }
+
+        // Short side matching inside a much longer side (both within and past MAX_D).
+        let short: Vec<u32> = (1..=5).collect();
+        for len in [20u32, 2_500] {
+            let long: Vec<u32> = (0..len).collect();
+            let ops = diff(&short, &long);
+            let (rebuilt, same) = apply(&short, &long, &ops);
+            assert_eq!(rebuilt, long);
+            assert_eq!(same, 5);
+
+            let ops_rev = diff(&long, &short);
+            let (rebuilt_rev, same_rev) = apply(&long, &short, &ops_rev);
+            assert_eq!(rebuilt_rev, short);
+            assert_eq!(same_rev, 5);
+        }
+
+        // Repeated identical blocks (classic Myers pathology).
+        let mut a: Vec<u32> = (0..400).flat_map(|_| [1, 2, 3, 4]).collect();
+        let mut b = a.clone();
+        a.splice(800..804, [9, 9]);
+        b.splice(400..400, [1, 2, 3, 4, 8, 8]);
+        let ops = diff(&a, &b);
+        let (rebuilt, same) = apply(&a, &b, &ops);
+        assert_eq!(rebuilt, b);
+        assert!(same >= 1_596);
     }
 
     #[test]

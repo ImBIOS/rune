@@ -620,12 +620,12 @@ mod tests {
     #[test]
     fn a_version_skips_checking_every_key_until_it_changes() {
         thread_local! { static KEYS: Cell<usize> = const { Cell::new(0) }; }
-        // (tick, version, key prefix)
-        type S = (u32, u32, &'static str);
+        // (tick, version, key prefix, count)
+        type S = (u32, u32, &'static str, usize);
         fn view(s: &S, _: &mut Cx<S>) -> El {
             col().key("scroll").w_full().h_full().scroll(ScrollSpec { stick_bottom: false }).child(
                 col().key("rows").w_full().growth(GrowthSpec::default())
-                    .virtual_rows(10_000, 20.0,
+                    .virtual_rows(s.3, 20.0,
                         |s: &S, i| {
                             KEYS.set(KEYS.get() + 1);
                             format!("{}{i}", s.2).into()
@@ -633,7 +633,7 @@ mod tests {
                         |s: &S, i| text(format!("{} {i}", s.0)).h(20.0))
                     .virtual_rows_version(s.1))
         }
-        let mut rt = Runtime::new((0, 0, "a"), view, (300.0, 400.0), Env::default());
+        let mut rt = Runtime::new((0, 0, "a", 10_000), view, (300.0, 400.0), Env::default());
         rt.frame(0.0);
         KEYS.set(0);
         rt.state.0 += 1;
@@ -646,6 +646,70 @@ mod tests {
         rt.invalidate();
         rt.frame(1.0 / 60.0);
         assert!(rt.find("b0").is_some() && rt.find("a0").is_none(), "a new version takes the new keys");
+        // Changing the row count refreshes keys even if the caller forgot to bump `version`.
+        rt.state.2 = "c";
+        rt.state.3 = 10_001;
+        rt.invalidate();
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("c0").is_some() && rt.find("b0").is_none(), "a count change refreshes keys without a version bump");
+    }
+
+    #[test]
+    fn visible_rows_reports_range_without_committing_when_unchanged() {
+        // (visible range, commit on change)
+        type S = (std::ops::Range<usize>, bool);
+        fn view(_: &S, _: &mut Cx<S>) -> El {
+            col().key("scroll").w_full().h_full().scroll(ScrollSpec { stick_bottom: false }).child(
+                col().key("rows").w_full().growth(GrowthSpec::default())
+                    .virtual_rows(1_000, 20.0,
+                        |_: &S, i| format!("r{i}").into(),
+                        |_: &S, i| text(format!("row {i}")).h(20.0))
+                    .virtual_rows_version(0u32)
+                    .on_visible_rows(|s: &mut S, r| {
+                        s.0 = r;
+                        s.1
+                    }))
+        }
+        let mut rt = Runtime::new((0..0, false), view, (300.0, 200.0), Env::default());
+        for _ in 0..6 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert_eq!(rt.state.0, 0..10);
+        let commits = rt.stats.commits;
+        // Scrolling within the mounted overscan updates the visible range without re-running the view.
+        rt.wheel(150.0, 100.0, -40.0);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.0, 2..12);
+        assert_eq!(rt.stats.commits, commits, "returning false from on_visible_rows skips a commit");
+        // Returning true triggers a commit when the visible range changes.
+        rt.state.1 = true;
+        rt.wheel(150.0, 100.0, -40.0);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.0, 4..14);
+        assert_eq!(rt.stats.commits, commits + 1, "returning true commits");
+    }
+
+    #[test]
+    fn culled_rows_unmount_their_whole_subtree_immediately() {
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            col().key("scroll").w_full().h_full().scroll(ScrollSpec { stick_bottom: false }).child(
+                col().key("rows").w_full().growth(GrowthSpec::default())
+                    .virtual_rows(500, 20.0,
+                        |_: &(), i| format!("r{i}").into(),
+                        |_: &(), i| col().h(20.0).child(col().key("cell").child(text(format!("row {i}")).key("txt")))))
+        }
+        let mut rt = Runtime::new((), view, (300.0, 200.0), Env::default());
+        for _ in 0..6 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert!(rt.nodes.iter().any(|n| n.path.ends_with("/r0/cell/txt")));
+        // Scroll far enough down that row 0 leaves the mounted overscan window.
+        rt.wheel(150.0, 100.0, -2_000.0);
+        rt.frame(1.0 / 60.0);
+        assert!(
+            !rt.nodes.iter().any(|n| n.path.contains("/r0/")),
+            "culled row descendants are unmounted immediately, not left orphaned in nodes"
+        );
     }
 
     #[test]
