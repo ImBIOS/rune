@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`rune_kit::diff`: a diff view for code review.** `diff::parse` reads `git diff` output and
+  `FileDiff::from_texts` diffs two texts; `DiffView` draws a `DiffState` unified or split, with
+  word changes, syntax colours, folded unchanged ranges, sticky file headers, app widgets
+  under lines (annotations), line selection from the gutter and one-side copy, on a virtual
+  list that keeps a 50,000-line diff at frame rate. See the rune-kit README. Additive.
+- **`El::virtual_rows_version(v)`** lets a `virtual_rows` list skip calling its key closure
+  for every row each commit: while `v` stays the same, layout keeps the last keys. A list of tens of
+  thousands of rows then commits in time independent of its length. Lists without it behave
+  as before.
 - **Rich fields: soft breaks on rebuilt drafts, leaving code blocks, allow-lists, physical keys.**
   `TextEdit::with_soft_breaks` and `set_soft_breaks` restore the soft breaks `from_parts`
   can't take, and `TextEdit::clear_history` drops the undo and redo stacks while keeping the

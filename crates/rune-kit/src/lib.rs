@@ -15,6 +15,7 @@
 
 mod budget;
 pub mod css;
+pub mod diff;
 pub mod glyphs;
 pub mod kit;
 mod neutral;
