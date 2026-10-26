@@ -79,8 +79,9 @@ impl<S: 'static> Running<S> {
             Some("edit" | "selection" | "preedit") => self.rt.web_edit(event),
             Some("sync") => self.input.mirror.key.clear(), // Composition's final sync was deferred by the DOM.
             Some("paste") => {
+                let rich = self.rt.paste_wants_rich(self.rt.paste_target().as_deref());
                 let content = crate::ClipboardContent::new(event["text"].as_str().unwrap_or_default());
-                self.rt.paste_content(match event["html"].as_str().filter(|html| !html.is_empty()) {
+                self.rt.paste_content(match event["html"].as_str().filter(|html| rich && !html.is_empty()) {
                     Some(html) => content.with_html(html),
                     None => content,
                 });

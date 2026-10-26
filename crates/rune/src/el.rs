@@ -762,8 +762,13 @@ impl Default for Visual {
     }
 }
 
-/// A root paste handler; false when it doesn't take this content (rich-only, for a text handler).
-pub(crate) type PasteFn = Rc<dyn Fn(&mut dyn Any, &crate::ClipboardContent, &mut Tx) -> bool>;
+/// A root paste handler; `rich` is true only for [`El::on_paste_content`], so a plain
+/// [`El::on_paste`] never asks the OS clipboard for HTML or RTF.
+#[derive(Clone)]
+pub(crate) struct PasteFn {
+    pub(crate) rich: bool,
+    pub(crate) call: InputPasteFn,
+}
 pub(crate) type InputPasteFn = Rc<dyn Fn(&mut dyn Any, &crate::ClipboardContent, &mut Tx) -> bool>;
 pub(crate) type ReadFn = Box<dyn FnOnce(&mut dyn Any, &crate::ClipboardContent, &mut Tx)>;
 
@@ -1077,15 +1082,21 @@ impl El {
     /// Native clipboard reads are asynchronous. Script `paste` uses the same handler.
     /// It hears the plain text; [`El::on_paste_content`] hears every form.
     pub fn on_paste<S: 'static>(mut self, f: impl Fn(&mut S, &str, &mut Tx) + 'static) -> Self {
-        self.on_paste = Some(Rc::new(move |s, content, tx| {
-            content.has_plain() && { f(s.downcast_mut::<S>().unwrap(), content.text(), tx); true }
-        }));
+        self.on_paste = Some(PasteFn {
+            rich: false,
+            call: Rc::new(move |s, content, tx| {
+                content.has_plain() && { f(s.downcast_mut::<S>().unwrap(), content.text(), tx); true }
+            }),
+        });
         self
     }
     /// [`El::on_paste`] with everything the clipboard held: plain text and, when the source
     /// offered them, sanitised HTML and RTF. Replaces an `on_paste` on the same element.
     pub fn on_paste_content<S: 'static>(mut self, f: impl Fn(&mut S, &crate::ClipboardContent, &mut Tx) + 'static) -> Self {
-        self.on_paste = Some(Rc::new(move |s, content, tx| { f(s.downcast_mut::<S>().unwrap(), content, tx); true }));
+        self.on_paste = Some(PasteFn {
+            rich: true,
+            call: Rc::new(move |s, content, tx| { f(s.downcast_mut::<S>().unwrap(), content, tx); true }),
+        });
         self
     }
     /// Mask a text input before layout; disable undo, copy, cut and IME composition.

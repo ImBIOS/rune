@@ -12,6 +12,10 @@ use objc2_app_kit::{
 use objc2_foundation::{NSAttributedString, NSCopying, NSData, NSDictionary, NSNumber, NSRange, NSString, NSUTF8StringEncoding};
 use zeroize::Zeroizing;
 use super::ClipboardContent;
+use super::html::MAX_RICH_BYTES;
+
+/// Refuse to hand AppKit's RTF parser multi-megabyte blobs (e.g. embedded images).
+const MAX_RTF_CONVERT_BYTES: usize = 1024 * 1024;
 
 /// Replaces the pasteboard's contents with plain text and whichever of HTML and RTF `content`
 /// carries.
@@ -34,8 +38,10 @@ pub(super) fn write(pb: &NSPasteboard, content: &ClipboardContent) -> Result<(),
 pub(super) fn read(pb: &NSPasteboard) -> Option<ClipboardContent> {
     autoreleasepool(|_| unsafe {
         let text = pb.stringForType(NSPasteboardTypeString).map(|s| Zeroizing::new(s.to_string()));
-        let html = pb.stringForType(NSPasteboardTypeHTML).map(|s| s.to_string());
-        let rtf = pb.dataForType(NSPasteboardTypeRTF).map(|d| Zeroizing::new(d.bytes().to_vec()));
+        let html = pb.stringForType(NSPasteboardTypeHTML).map(|s| s.to_string()).filter(|h| !h.is_empty() && h.len() <= MAX_RICH_BYTES);
+        let rtf = pb.dataForType(NSPasteboardTypeRTF)
+            .filter(|d| !d.is_empty() && d.len() <= MAX_RICH_BYTES)
+            .map(|d| Zeroizing::new(d.bytes().to_vec()));
         if text.is_none() && html.is_none() && rtf.is_none() { return None; }
         let html = html.or_else(|| rtf.as_deref().and_then(|rtf| rtf_to_html(rtf)));
         let mut content = ClipboardContent::from(text.unwrap_or_default());
@@ -47,19 +53,22 @@ pub(super) fn read(pb: &NSPasteboard) -> Option<ClipboardContent> {
 
 /// A UTF-8 HTML document for RTF, through `NSAttributedString`.
 pub(super) fn rtf_to_html(rtf: &[u8]) -> Option<String> {
+    if rtf.is_empty() || rtf.len() > MAX_RTF_CONVERT_BYTES { return None; }
     autoreleasepool(|_| unsafe {
         let string = NSAttributedString::initWithRTF_documentAttributes(NSAttributedString::alloc(), &NSData::with_bytes(rtf), None)?;
         let html_type: Retained<AnyObject> = Retained::cast(NSHTMLTextDocumentType.copy());
         let utf8: Retained<AnyObject> = Retained::cast(NSNumber::new_usize(NSUTF8StringEncoding));
         let attributes = NSDictionary::from_id_slice(&[NSDocumentTypeDocumentAttribute, NSCharacterEncodingDocumentAttribute], &[html_type, utf8]);
         let data = string.dataFromRange_documentAttributes_error(NSRange::new(0, string.length()), &attributes).ok()?;
+        if data.len() > MAX_RICH_BYTES { return None; }
         String::from_utf8(data.bytes().to_vec()).ok()
     })
 }
 
 /// Browsers read pasteboard HTML without a charset as Latin-1; say it's UTF-8.
 fn declare_utf8(html: &str) -> std::borrow::Cow<'_, str> {
-    if html.get(..1024).unwrap_or(html).to_ascii_lowercase().contains("charset") { return html.into(); }
+    let head = &html.as_bytes()[..html.len().min(1024)];
+    if head.windows(7).any(|w| w.eq_ignore_ascii_case(b"charset")) { return html.into(); }
     format!("<meta charset=\"utf-8\">{html}").into()
 }
 
@@ -82,6 +91,8 @@ mod tests {
         assert!(text.contains("Hello") && text.contains("bold") && text.contains("café"), "{text}");
         assert!(html.contains("font-weight: bold") || html.contains("<b>"), "{html}");
         assert!(rtf_to_html(b"not rtf").is_none());
+        assert!(rtf_to_html(&[]).is_none());
+        assert!(rtf_to_html(&vec![b'a'; MAX_RTF_CONVERT_BYTES + 1]).is_none(), "oversized RTF is refused before AppKit");
     }
 
     /// A private pasteboard, never the user's. Skipped where there is no pasteboard server (a

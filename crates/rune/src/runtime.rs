@@ -2249,7 +2249,7 @@ impl<S: 'static> Runtime<S> {
                 if self.with_focused_state(into_field, &mut one) {
                     self.events.push("paste field".into());
                     true
-                } else if let Some(f) = self.app_paste_handler() && f(handler_state(&mut self.state), &content, &mut one) {
+                } else if let Some(f) = self.app_paste_handler() && (f.call)(handler_state(&mut self.state), &content, &mut one) {
                     self.events.push("paste window".into());
                     true
                 } else { false }
@@ -4163,13 +4163,14 @@ impl<S: 'static> Runtime<S> {
     pub(crate) fn paste_target(&self) -> Option<String> {
         self.focused_input().filter(|i| i.access.is_some()).and(self.focused.clone())
     }
-    /// The paste target hears HTML and RTF: a field with `on_input_paste`, or the window's
-    /// paste handler. Anything else reads only the clipboard's text.
+    /// The paste target hears HTML and RTF: a field with `on_input_paste`, or a root
+    /// `on_paste_content` handler. Anything else (including a plain `on_paste`) reads only the
+    /// clipboard's text.
     pub(crate) fn paste_wants_rich(&self, target: Option<&str>) -> bool {
         match target {
             Some(path) => self.node(path).and_then(|n| n.input.as_deref()).or_else(|| self.virtual_inputs.get(path).map(Box::as_ref))
                 .is_some_and(|input| input.paste.is_some()),
-            None => self.app_paste_handler().is_some(),
+            None => self.app_paste_handler().is_some_and(|p| p.rich),
         }
     }
     pub(crate) fn paste_result(&mut self, target: Option<String>, content: crate::ClipboardContent) {
@@ -8204,10 +8205,12 @@ mod tests {
         assert_eq!((window.text(), window.html()), ("Hello", Some("<b>Hello</b>")), "the window hears every form, sanitised");
 
         rt.update(|s, _| s.plain.focused = true); rt.frame(0.0);
+        assert!(!rt.paste_wants_rich(rt.paste_target().as_deref()));
         paste(&mut rt);
         assert_eq!(rt.state.plain.text, "Hello", "a field without a hook pastes the text, as before");
 
         rt.update(|s, _| { s.plain.focused = false; s.rich.focused = true; }); rt.frame(0.0);
+        assert!(rt.paste_wants_rich(rt.paste_target().as_deref()));
         paste(&mut rt);
         assert_eq!((rt.state.rich.text.as_str(), rt.state.changes), ("Hello", 1), "a declining hook leaves the paste to the editor");
         rt.update(|s, _| { s.take = true; s.rich.text.clear(); s.rich.anchor = 0; s.rich.focus = 0; }); rt.frame(0.0);
@@ -8221,6 +8224,17 @@ mod tests {
         paste(&mut rt);
         assert_eq!((rt.state.rich.text.as_str(), rt.state.hook.last().cloned().flatten().as_deref()), ("[rich]", Some("<i>only</i>")));
         assert!(rt.state.window.is_empty(), "a focused field's paste never falls through to the window");
+        assert!(rt.paste_wants_rich(None));
+
+        let mut plain_root = Runtime::new(Vec::<String>::new(), |_: &Vec<String>, _: &mut Cx<Vec<String>>| {
+            col().size(200.0, 100.0).on_paste(|s: &mut Vec<String>, text, _| s.push(text.to_owned()))
+        }, (200.0, 100.0), Env::new(true, 1.0));
+        plain_root.use_clipboard(&m);
+        plain_root.frame(0.0);
+        assert!(!plain_root.paste_wants_rich(None), "a plain root on_paste never requests HTML or RTF");
+        plain_root.update(|_, tx| tx.request_paste());
+        plain_root.frame(0.0);
+        assert!(plain_root.state.is_empty(), "an HTML-only clipboard never triggers a plain root on_paste");
     }
 
     #[test]

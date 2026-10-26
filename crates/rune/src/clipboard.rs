@@ -379,7 +379,7 @@ pub fn memory() -> MemoryClipboard {
     MemoryClipboard(Arc::new(Mutex::new(Memory { core: Core::default(), board: Board::default() })))
 }
 impl MemoryClipboard {
-    pub fn text(&self) -> Option<Zeroizing<String>> { self.content().map(|c| c.text) }
+    pub fn text(&self) -> Option<Zeroizing<String>> { self.content().filter(ClipboardContent::has_plain).map(|c| c.text) }
     /// Every form on the clipboard, as written: pastes from it are sanitised, this isn't.
     pub fn content(&self) -> Option<ClipboardContent> { self.ticked(|_, board| board.content.clone()) }
     /// Changes the clipboard as another app would.
@@ -416,7 +416,9 @@ impl Backend for Board {
         self.revision += 1;
         Ok(())
     }
-    fn text(&mut self) -> Option<Zeroizing<String>> { self.content.as_ref().map(|c| c.text.clone()) }
+    fn text(&mut self) -> Option<Zeroizing<String>> {
+        self.content.as_ref().filter(|c| c.has_plain()).map(|c| c.text.clone())
+    }
     fn content(&mut self) -> Option<ClipboardContent> { self.content.clone() }
     fn revision(&self) -> Option<u64> { Some(self.revision) }
     fn clear(&mut self) { self.content = None; self.revision += 1; }
@@ -482,7 +484,10 @@ impl Backend for arboard::Clipboard {
     #[cfg(not(target_os = "macos"))]
     fn content(&mut self) -> Option<ClipboardContent> {
         let text = self.text();
-        let html = self.get().html().ok().filter(|h| !h.is_empty());
+        #[cfg(target_os = "windows")]
+        let html = windows_read_html().or_else(|| self.get().html().ok()).filter(|h| !h.is_empty() && h.len() <= html::MAX_RICH_BYTES);
+        #[cfg(not(target_os = "windows"))]
+        let html = self.get().html().ok().filter(|h| !h.is_empty() && h.len() <= html::MAX_RICH_BYTES);
         if text.is_none() && html.is_none() { return None; }
         let content = ClipboardContent::from(text.unwrap_or_default());
         Some(match html { Some(html) => content.with_html(html), None => content })
@@ -653,6 +658,41 @@ fn revision() -> Option<u64> {
     // Linux's portable clipboard API has no generation counter; compare the current text.
     #[allow(unreachable_code)]
     None
+}
+
+/// Reads Windows `CF_HTML` (`HTML Format`) directly so `-1` offsets and `<!--StartFragment-->`
+/// markers from other apps work instead of failing `clipboard-win`'s unsigned offset parser.
+#[cfg(target_os = "windows")]
+fn windows_read_html() -> Option<String> {
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW,
+    };
+    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    const NAME: &[u16] = &[b'H' as u16, b'T' as u16, b'M' as u16, b'L' as u16, b' ' as u16, b'F' as u16, b'o' as u16, b'r' as u16, b'm' as u16, b'a' as u16, b't' as u16, 0];
+    unsafe {
+        let format = RegisterClipboardFormatW(NAME.as_ptr());
+        if format == 0 || IsClipboardFormatAvailable(format) == 0 { return None; }
+        let mut opened = false;
+        for _ in 0..5 {
+            if OpenClipboard(core::ptr::null_mut()) != 0 { opened = true; break; }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if !opened { return None; }
+        let handle = GetClipboardData(format);
+        let out = if !handle.is_null() {
+            let size = GlobalSize(handle);
+            let ptr = GlobalLock(handle) as *const u8;
+            let res = (!ptr.is_null() && size > 0 && size <= html::MAX_RICH_BYTES * 2)
+                .then(|| html::unpack_cf_html(core::slice::from_raw_parts(ptr, size)))
+                .flatten();
+            if !ptr.is_null() { let _ = GlobalUnlock(handle); }
+            res
+        } else {
+            None
+        };
+        let _ = CloseClipboard();
+        out
+    }
 }
 
 #[cfg(test)]
