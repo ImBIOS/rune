@@ -168,6 +168,18 @@ fn a_wrapped_word_fills_the_last_line() {
     let (shown, _, lines, _) = drawn(&rt);
     assert!(shown.starts_with("See\nline_") || shown.starts_with("See line_"), "{shown}");
     assert!(lines <= 2 && widths(&rt).0 <= 200.25, "{shown}");
+
+    // With `wrap_anywhere`, an unbroken token wraps across lines 1..n and cuts at the end of line n.
+    fn anywhere(_: &(), _: &mut Cx<()>) -> El {
+        col().w_full().child(crate::text(TOKEN).key("t").font(style()).wrap_anywhere().max_lines(2))
+    }
+    let mut rt = Runtime::new((), anywhere, (200.0, 400.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("t")).unwrap();
+    let e = n.elided.expect("the token wraps past two lines at 200 pt");
+    let l = n.text_layout.as_ref().unwrap();
+    assert_eq!(l.len(), 2, "wraps onto two lines before cutting");
+    assert!(e.head > 40 && l.full_width() <= 400.5, "both lines fill the 200 pt box: head={}, width={}", e.head, l.full_width());
 }
 
 /// A field's caret and selection index its own text, so it takes no cut.

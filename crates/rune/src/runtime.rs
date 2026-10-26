@@ -8555,7 +8555,7 @@ fn clamped(text: &mut TextSystem, spec: &TextSpec, scale: f32, max_w: f32, full:
     };
     let make = |text: &mut TextSystem, e: Elision| {
         let s = [&content[..e.head], Elision::ELLIPSIS].concat();
-        text.layout_aligned(&s, &e.spans(&spec.spans), spec.style, scale, Some(max_w), line_alignment(spec))
+        text.layout_blocks_inner(&s, &e.spans(&spec.spans), &spec.blocks, &[], spec.style, scale, Some(max_w), line_alignment(spec), spec.wrap_anywhere, !spec.redacted)
     };
     let fits = |l: &Layout<Ink>| l.len() <= lines && last_line_width(l, lines) <= max_w + 0.5;
     let (mut lo, mut hi) = (0usize, bounds.len() - 1);

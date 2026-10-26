@@ -205,7 +205,10 @@ fn load_files(collection: &mut Collection, loaded: &mut LoadedFiles, paths: impl
         let ids = loaded.entry(path).or_insert_with_key(|path| {
             let before: Vec<FamilyId> = collection.family_ids().collect();
             collection.load_fonts_from_paths([path]);
-            collection.family_ids().filter(|id| !before.contains(id)).collect()
+            let mut added: Vec<FamilyId> = collection.family_ids().filter(|id| !before.contains(id)).collect();
+            // `family_ids` iterates a hash map; `FamilyId`s increase in the collection file's face order.
+            added.sort_unstable();
+            added
         });
         for id in ids.iter() {
             if !families.contains(id) {
@@ -1619,7 +1622,9 @@ impl TextSystem {
             }
         }
         for data in list {
-            registered.extend(collection.register_fonts(Blob::new(Arc::new(*data)), None).into_iter().map(|(id, _)| id));
+            let mut added: Vec<FamilyId> = collection.register_fonts(Blob::new(Arc::new(*data)), None).into_iter().map(|(id, _)| id).collect();
+            added.sort_unstable();
+            registered.extend(added);
         }
         let mut font_files = LoadedFiles::new();
         register_cjk_fallbacks(&mut collection, &mut font_files, &registered, families);
@@ -1804,7 +1809,7 @@ impl TextSystem {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn layout_blocks_inner(
+    pub(crate) fn layout_blocks_inner(
         &mut self,
         text: &str,
         spans: &[Span],
@@ -2188,8 +2193,15 @@ impl TextSystem {
     pub(crate) fn layout_live(&mut self, text: &str, style: TextStyle, scale: f32) -> Rc<Layout<Ink>> {
         let key = text_hash(text, &[], style, scale, None);
         let cached = self.layouts.contains_key(&key);
+        let prev_shape = self.shapes.get(&key).copied();
         let layout = self.layout_rich(text, &[], style, scale, None);
-        if !cached { self.layouts.remove(&key); }
+        if !cached {
+            self.layouts.remove(&key);
+            match prev_shape {
+                Some(prev) => { self.shapes.insert(key, prev); }
+                None => { self.shapes.remove(&key); }
+            }
+        }
         layout
     }
 
@@ -4188,10 +4200,11 @@ mod rewrap_tests {
         pills: Vec<PillChip>,
         style: TextStyle,
         align: Alignment,
+        wrap_anywhere: bool,
     }
 
     fn case(name: &'static str, text: &str, style: TextStyle) -> Case {
-        Case { name, text: text.into(), spans: Vec::new(), blocks: Vec::new(), pills: Vec::new(), style, align: Alignment::Start }
+        Case { name, text: text.into(), spans: Vec::new(), blocks: Vec::new(), pills: Vec::new(), style, align: Alignment::Start, wrap_anywhere: false }
     }
 
     fn cases() -> Vec<Case> {
@@ -4217,6 +4230,7 @@ mod rewrap_tests {
             .collect();
         vec![
             Case { spans: spans.clone(), ..case("spans", rich, body) },
+            Case { spans: spans.clone(), wrap_anywhere: true, ..case("wrap anywhere", rich, body) },
             Case { spans: spans.clone(), align: Alignment::Center, ..case("centred", rich, body) },
             Case { spans: spans.clone(), align: Alignment::End, ..case("end", rich, body) },
             Case { spans, align: Alignment::Justify, ..case("justified", rich, body) },
@@ -4230,32 +4244,41 @@ mod rewrap_tests {
     }
 
     fn lay(ts: &mut TextSystem, c: &Case, width: Option<f32>) -> Rc<Layout<Ink>> {
-        ts.layout_blocks(&c.text, &c.spans, &c.blocks, &c.pills, c.style, 2.0, width, c.align)
+        ts.layout_blocks_inner(&c.text, &c.spans, &c.blocks, &c.pills, c.style, 2.0, width, c.align, c.wrap_anywhere, true)
     }
 
     /// A text shaped once is re-broken, not reshaped, at every other width, and lands every
     /// line, glyph and box where laying it out from scratch at that width does.
     #[test]
     fn a_new_width_rebreaks_without_shaping_and_matches_a_fresh_layout() {
-        let mut ts = TextSystem::default();
+        let (mut ts, mut fresh) = (TextSystem::default(), TextSystem::default());
         let widths = [Some(1200.0), Some(601.0), Some(433.5), Some(210.0), Some(80.0), Some(0.0), None, Some(900.0)];
         for c in cases() {
-            lay(&mut ts, &c, Some(1800.0));
+            let wide = lay(&mut ts, &c, Some(1800.0));
+            let wide_geom = geometry(&wide);
             for width in widths {
                 let (shaped, rebroken) = (ts.shaped, ts.rebroken);
                 let l = lay(&mut ts, &c, width);
                 assert_eq!((ts.shaped, ts.rebroken), (shaped, rebroken + 1), "{} at {width:?}: re-broken, not shaped", c.name);
-                // The same text shaped from scratch at this width, with the same fonts loaded.
+                assert_eq!(geometry(&wide), wide_geom, "{}: re-breaking a new width must not mutate an earlier layout in place", c.name);
+                // The same text shaped from scratch at this width, both in `ts` and in a separate TextSystem.
                 let cached = (std::mem::take(&mut ts.layouts), std::mem::take(&mut ts.shapes));
                 let f = lay(&mut ts, &c, width);
                 assert_eq!(ts.shaped, shaped + 1);
                 (ts.layouts, ts.shapes) = cached;
-                let (a, b) = (geometry(&l), geometry(&f));
+                fresh.layouts.clear();
+                fresh.shapes.clear();
+                let f_other = lay(&mut fresh, &c, width);
+                let (a, b, b_other) = (geometry(&l), geometry(&f), geometry(&f_other));
                 let first = a.iter().zip(&b).position(|(x, y)| x != y);
                 assert!(a == b, "{} at {width:?}: row {first:?} of {}: {:?} vs {:?}", c.name, a.len(),
                     first.map(|i| &a[i]), first.map(|i| &b[i]));
+                assert!(a == b_other, "{} at {width:?}: fresh TextSystem chose different fallback fonts", c.name);
             }
+            // An earlier width from the same commit is still in `layouts` and hits without re-breaking.
+            let (shaped, rebroken) = (ts.shaped, ts.rebroken);
             assert!(lay(&mut ts, &c, Some(210.0)).len() > 1, "{} wraps", c.name);
+            assert_eq!((ts.shaped, ts.rebroken), (shaped, rebroken), "{}: cached width hits without re-breaking", c.name);
         }
     }
 
@@ -4275,6 +4298,8 @@ mod rewrap_tests {
         assert_eq!(shapes(&mut ts, &|ts| { ts.layout_rich(text, &[], TextStyle::new(15.0, 600.0), 2.0, Some(300.0)); }), 1);
         assert_eq!(shapes(&mut ts, &|ts| { ts.layout_rich(text, &[Span::new(0, 1).bold()], style, 2.0, Some(300.0)); }), 1);
         assert_eq!(shapes(&mut ts, &|ts| { ts.layout_rich(text, &[], style, 3.0, Some(300.0)); }), 1);
+        assert_eq!(shapes(&mut ts, &|ts| { ts.layout_blocks_inner(text, &[], &[], &[], style, 2.0, Some(300.0), Alignment::Start, true, true); }), 1);
+        assert_eq!(shapes(&mut ts, &|ts| { ts.layout_blocks_inner(text, &[], &[], &[], style, 2.0, Some(200.0), Alignment::Start, true, true); }), 0);
     }
 
     /// The re-break index follows the layouts cache: it survives commits while a width of the

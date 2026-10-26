@@ -55,7 +55,7 @@ justification are stored per line, so nothing from an earlier width carries over
 ## What changed
 
 The cache key splits in two. A *shape key* hashes what shaping reads: text, spans, style,
-scale and pills. The *layout key* adds the width, alignment and block indents. Beside the
+scale, `wrap_anywhere` and pills. The *layout key* adds the width, alignment and block indents. Beside the
 layout cache, an index maps each shape key to the layout key of the latest layout of that
 shaping. A miss on the layout key whose shape key has a cached layout clones that layout
 (a flat copy of its glyph and run arrays) and breaks and aligns the copy at the new width,
@@ -70,7 +70,7 @@ about 2 µs for a paragraph against about 30 µs to shape it.
   layout with the same lines and glyph positions as one built from scratch at that width. The
   test `a_new_width_rebreaks_without_shaping_and_matches_a_fresh_layout` checks this bit for
   bit across eight widths (zero and unbounded included) for spans of every kind, all four
-  alignments, right-to-left and justified right-to-left text, CJK, emoji and math fallbacks,
+  alignments, `wrap_anywhere`, right-to-left and justified right-to-left text, CJK, emoji and math fallbacks,
   monospace tabs, indented blocks and pills, and that none of it shapes.
 - Measuring: Taffy measures a wrapped text at its definite width only (`w_full` texts in a
   column are stretched, so min- and max-content aren't asked for), and the final pass asks for
