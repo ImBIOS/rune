@@ -45,3 +45,24 @@ fn a_wide_destination_lands_on_its_text_at_rest_scale() {
     for _ in 0..120 { rt.frame(1.0 / 120.0); }
     assert!(flight(&rt).is_none(), "the flight lands and ends");
 }
+
+#[test]
+fn the_destination_lands_on_its_own_box() {
+    let mut draft = TextEdit::new(MESSAGE);
+    draft.focused = true;
+    let mut rt = Runtime::new(State { draft, sent: false }, view, (800.0, 300.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
+    let body = |rt: &Runtime<State>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("body")).unwrap().rect;
+    let mut last = None;
+    for _ in 0..150 {
+        rt.frame(1.0 / 120.0);
+        let r = body(&rt);
+        if let Some(l) = last {
+            let l: [f32; 4] = l;
+            assert!((r[2] - l[2]).abs() < 2.0 && (r[0] - l[0]).abs() < 2.0, "the body's frame jumped: {l:?} → {r:?}");
+        }
+        last = Some(r);
+    }
+    assert_eq!(last.unwrap()[2], 600.0, "at rest it is its box");
+}

@@ -6171,8 +6171,15 @@ impl<S: 'static> Runtime<S> {
                 let exiting = self.subtree_exiting(i);
                 let flight = self.flights.iter().find(|f| f.lands(&n.path, n.key.as_deref()));
                 let mut moving = flight.is_some() || animating(n.id) || self.grows.get(&n.id).is_some_and(|g| g.moving());
-                let rect = flight.map_or_else(|| self.drawn.get(i).copied().unwrap_or([p.rect.x, p.rect.y, p.rect.w, p.rect.h]),
-                    |f| [f.presented.x, f.presented.y, f.presented.w, f.presented.h]);
+                let drawn = self.drawn.get(i).copied().unwrap_or([p.rect.x, p.rect.y, p.rect.w, p.rect.h]);
+                // A flight carries the destination's laid-out text, which can be narrower than
+                // its box. Report the box carried along with it, so the element lands on its own
+                // frame instead of jumping out to it when the flight ends.
+                let rect = flight.map_or(drawn, |f| {
+                    let (d, c) = (f.destination, f.presented);
+                    let (zx, zy) = (c.w / d.w.max(1e-3), c.h / d.h.max(1e-3));
+                    [c.x + (drawn[0] - d.x) * zx, c.y + (drawn[1] - d.y) * zy, drawn[2] * zx, drawn[3] * zy]
+                });
                 let s = self.env.scale;
                 let clip = flight.map_or_else(|| n.parent.and_then(|pi| self.inh_scratch.get(pi)).map_or(NO_CLIP, |h| h.clip),
                     |f| f.clip.map(|v| v * s));
