@@ -5858,7 +5858,7 @@ impl<S: 'static> Runtime<S> {
             if fades(n.looping) && let Some(track) = self.loops.get(&n.id) {
                 opacity *= track.sample_at(self.scene.store().node_time(n.id), self.clock, self.reduced_motion);
             }
-            self.dissolve_scratch[parent] |= opacity > 0.0 && opacity < 1.0;
+            self.dissolve_scratch[parent] |= opacity > 0.001 && opacity < 1.0;
         }
 
         self.cache_live_scratch.clear();
@@ -9052,6 +9052,19 @@ mod tests {
             assert_eq!(rt.dissolve_scratch.is_empty(), !enabled);
             if enabled { assert!(rt.dissolve_scratch[0]); }
         }
+    }
+
+    #[test]
+    fn a_child_too_faint_to_paint_does_not_isolate_its_dissolve_parent() {
+        fn view(opacity: &f32, _: &mut Cx<f32>) -> El {
+            el().size(64.0, 32.0).dissolve().child(el().size(32.0, 32.0).opacity(*opacity).fill(Color::WHITE))
+        }
+        let mut rt = Runtime::new(0.0005, view, (64.0, 32.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert!(!rt.dissolve_scratch[0]);
+        rt.state = 0.5; rt.invalidate();
+        for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        assert!(rt.dissolve_scratch[0]);
     }
 
     #[test]

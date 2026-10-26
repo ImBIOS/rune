@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A `dissolve` parent no longer isolates for a child too faint to paint.** The dissolve pass
+  counted any child above opacity 0; it now uses the same 0.001 threshold as painting, so a child
+  faded to near zero no longer forces its parent into an offscreen layer.
 - **Secure `TextEdit` and `TextInput` reveal toggle (`revealed`, `set_revealed`, `is_revealed`).**
   A `.secure()` field can now show its real characters with `TextEdit::revealed(true)` /
   `set_revealed(true)`, `El::revealed(true)` or `rune_kit::TextInput::revealed(true)` (as in a
