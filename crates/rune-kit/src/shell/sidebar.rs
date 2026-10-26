@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-use rune::{Anim, Drag, El, GrowthSpec, Icon, Key, Phase, ScrollSpec, TextEdit, Tx, col, el, icon, row, text, text_input};
+use rune::{Anim, Drag, El, GrowthSpec, Icon, Key, Phase, ScrollSpec, TextEdit, TextStyle, Tx, col, el, icon, row, text, text_input};
 
 use super::reorder::Reorder;
 use crate::{ControlSize, IconButton, IconButtonVariant, Kit, Spinner};
@@ -338,6 +338,9 @@ pub struct SidebarRow {
     selected: bool,
     depth: u8,
     height: Option<f32>,
+    title_style: Option<TextStyle>,
+    subtitle_style: Option<TextStyle>,
+    select_only: bool,
     rename: Option<(TextEdit, Apply)>,
     reorder: Option<Reordering>,
     acts: Vec<Apply>,
@@ -358,6 +361,9 @@ impl SidebarRow {
             selected: false,
             depth: 0,
             height: None,
+            title_style: None,
+            subtitle_style: None,
+            select_only: false,
             rename: None,
             reorder: None,
             acts: Vec::new(),
@@ -372,9 +378,32 @@ impl SidebarRow {
         self.avatar = Some(e);
         self
     }
-    /// A second line in muted text, under the label (give the row the height for it).
+    /// A second line under the label, smaller and fainter than it (11 point `caption` in
+    /// `text_faint`, under a medium-weight 13 point label). The row's accessible name is then
+    /// "Label, Subtitle". Give the row the height for it (default [`TWO_LINE_ROW_HEIGHT`]).
     pub fn subtitle(mut self, s: impl Into<String>) -> Self {
         self.subtitle = Some(s.into());
+        self
+    }
+    /// The label's type, in place of the default (13 point; medium weight with a subtitle).
+    /// It also sets the inline rename field's type.
+    pub fn title_style(mut self, style: TextStyle) -> Self {
+        self.title_style = Some(style);
+        self
+    }
+    /// The subtitle's type, in place of the default (the kit's `caption`).
+    pub fn subtitle_style(mut self, style: TextStyle) -> Self {
+        self.subtitle_style = Some(style);
+        self
+    }
+    /// A row that shows the selection but never takes focus: for a list driven from outside,
+    /// such as one a search field filters and steers with its own keys. The row is out of the
+    /// Tab order, Tab and Space don't act on it, and pressing it selects it (`on_select`)
+    /// while a focused field stays focused (`El::preserve_focus_on_press`). The selected row
+    /// is still exposed as selected to assistive tech. Equivalent to
+    /// `.focusable(false).focus_selected(..)` on the built row, plus the focus-preserving press.
+    pub fn select_only(mut self) -> Self {
+        self.select_only = true;
         self
     }
     /// The row's height (default [`ROW_HEIGHT`], or [`TWO_LINE_ROW_HEIGHT`] with a subtitle).
@@ -490,9 +519,19 @@ impl SidebarRow {
         let (ink, glyph) = if self.selected { (c.text_base, c.icon_base) } else { (c.text_muted, c.icon_muted) };
         let two_lines = self.subtitle.is_some();
         let height = self.height.unwrap_or(if two_lines { TWO_LINE_ROW_HEIGHT } else { ROW_HEIGHT });
-        let font = if two_lines { k.ty.ui_compact } else { k.ty.ui };
+        let font = self.title_style.unwrap_or(if two_lines {
+            TextStyle { weight: 500.0, ..k.ty.ui_compact }
+        } else {
+            k.ty.ui
+        });
+        let sub_font = self.subtitle_style.unwrap_or_else(|| k.ty.caption());
+        let name = match &self.subtitle {
+            Some(sub) => format!("{}, {sub}", self.label),
+            None => self.label.clone(),
+        };
+        let focusable = !renaming && !self.select_only;
         let mut r = row()
-            .label(self.label.clone())
+            .label(name)
             .w_full()
             .h(height)
             .pl(INSET + self.depth as f32 * INDENT)
@@ -503,8 +542,11 @@ impl SidebarRow {
             .motion(k.motion.control)
             .hover_group()
             .hover_motion(Anim::INSTANT, Anim::INSTANT)
-            .focusable(!renaming)
+            .focusable(focusable)
             .focus_selected(self.selected && !renaming);
+        if self.select_only {
+            r = r.preserve_focus_on_press(true);
+        }
         r = k.interactive(r);
         if self.selected {
             r = r.fill(c.pressed);
@@ -533,7 +575,7 @@ impl SidebarRow {
             // Two lines: the lead and the label, then the subtitle under the label.
             Some(sub) => {
                 let first = row().key("line1").w_full().gap(6.0).center_y().children(lead).child(label);
-                let second = text(sub).key("subtitle").font(font).color(c.text_muted).truncate().w_full();
+                let second = text(sub).key("subtitle").font(sub_font).color(c.text_faint).truncate().w_full();
                 let second = row().key("line2").w_full().pl(if has_lead { 16.0 + 6.0 } else { 0.0 }).child(second);
                 r.child(col().key("lines").grow(1.0).shrink().min_w(0.0).child(first).child(second))
             }

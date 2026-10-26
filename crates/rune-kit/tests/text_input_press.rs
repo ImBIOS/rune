@@ -195,3 +195,57 @@ fn pressing_any_part_of_a_field_focuses_without_blurring_or_dragging() {
     assert!(rt.state.area.focused, "TextArea leading padding keeps focus");
     assert_eq!(rt.state.area.range(), (0, 0), "TextArea leading padding places caret at start");
 }
+
+#[test]
+fn a_launcher_size_style_scales_the_box_and_the_caret() {
+    fn view(s: &TextEdit, _: &mut Cx<TextEdit>) -> El {
+        let k = Kit::neutral(true);
+        col()
+            .child(TextInput::new(s).on_edit(|s: &mut TextEdit| s).build(&k).key("plain"))
+            .child(
+                TextInput::new(s).placeholder("Search")
+                    .text_style(rune::TextStyle::new(17.0, 400.0).lh(24.0))
+                    .on_edit(|s: &mut TextEdit| s)
+                    .build(&k)
+                    .key("big"),
+            )
+            .child(TextInput::new(s).height(56.0).build(&k).key("tall"))
+    }
+    let mut rt = Runtime::new(TextEdit::new("hi"), view, (400.0, 300.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let h = |rt: &Runtime<TextEdit>, key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap().rect[3];
+    assert_eq!((h(&rt, "plain"), h(&rt, "big"), h(&rt, "tall")), (28.0, 36.0, 56.0));
+    let line = |rt: &Runtime<TextEdit>| rt.elements().into_iter().filter(|e| e.key.as_deref() == Some("input")).map(|e| e.rect[3]).collect::<Vec<_>>();
+    assert_eq!(line(&rt), [16.0, 24.0, 16.0], "the editor's line follows the style");
+    let (x, y) = rt.find("big").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(1.0 / 60.0);
+    assert!(rt.state.focused);
+}
+
+#[test]
+fn any_unfocusable_element_can_keep_an_outside_field_focused_and_still_press() {
+    struct P { field: TextEdit, pressed: usize }
+    fn view(s: &P, _: &mut Cx<P>) -> El {
+        col().gap(8.0)
+            .child(TextInput::new(&s.field).on_edit(|s: &mut P| &mut s.field).build(&Kit::neutral(true)).key("field"))
+            .child(row().key("plain").size(100.0, 30.0).on_press(|s: &mut P| s.pressed += 1))
+            .child(row().key("keeper").size(100.0, 30.0).preserve_focus_on_press(true).on_press(|s: &mut P| s.pressed += 10))
+    }
+    let mut field = TextEdit::new("x");
+    field.focused = true;
+    let mut rt = Runtime::new(P { field, pressed: 0 }, view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let (x, y) = rt.find("keeper").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.pressed, 10, "the press still reaches on_press");
+    assert!(rt.state.field.focused, "the field keeps focus");
+    let (x, y) = rt.find("plain").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.state.field.focused, "without the flag a press blurs, as before");
+}

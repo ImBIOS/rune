@@ -5,6 +5,21 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Two-line `SidebarRow`s read as a title over a caption; select-only rows; launcher fields.**
+  **Output change** for rows with `.subtitle(..)`: the name is now medium weight (13 / 16) and the
+  subtitle the kit's `caption` (11 / 16) in `text_faint`, where both were 13 / 16 and the subtitle
+  was `text_muted`; both lines still fit the 40 pt default. The row's accessible name is now
+  "Name, Subtitle" (it was the name alone). `SidebarRow::title_style(..)` and `subtitle_style(..)`
+  override the two types. `SidebarRow::select_only()` makes a row that shows the selection but
+  never takes focus: out of Tab order, a press selects it and leaves an outside field focused.
+  `El::preserve_focus_on_press(true)` is documented as working on any element (the press still
+  reaches `on_press`; scrolling still cancels it). `TextInput::text_style(TextStyle)` sets the
+  field's type (caret, placeholder and selection follow; the box grows to fit) and
+  `TextInput::height(..)` its height, for a launcher-size field. A press anywhere on a container
+  with `role("textbox")` focuses its one reachable editor: a supported pattern, now documented on
+  `El::role`. `rune_theme_opencode::ember(dark, step)` (1 to 12, else panics) and
+  `scale(name, dark, step)` give typed colour-scale steps; `brand(dark)` is `ember(dark, 9)`.
+
 - **`Toolbar`'s leading slot gives way.** The leading slot now shrinks (`shrink().min_w(0)`),
   so a long leading title marked `.truncate().shrink().min_w(0.0)` truncates instead of pushing
   the trailing slot past the band's end. Toolbars whose contents fit are unchanged.

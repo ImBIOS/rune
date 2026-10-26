@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 
 use rune::runtime::ElementInfo;
-use rune::{Chrome, Cx, El, Env, Key, KeyEvent, Mods, Runtime, TextEdit, TitlebarAction, col, el};
+use rune::{TextStyle, Chrome, Cx, El, Env, Key, KeyEvent, Mods, Runtime, TextEdit, TitlebarAction, col, el};
 use rune_kit::shell::{Page, PaneState, Sidebar, SidebarRow, SidebarSection, SplitView, Toolbar, is_sidebar_toggle};
 use rune_kit::{Button, IconButton, Kit, glyphs};
 
@@ -547,7 +547,7 @@ fn two_line_rows_keep_focus_keyboard_navigation_and_accessible_labels() {
     let mut rt = runtime(S { two_lines: true, ..state() });
     let focused = |rt: &Runtime<S>| rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key);
     let r2 = find(&rt, "row2");
-    assert_eq!((r2.role, r2.label.as_deref(), r2.rect[3]), ("listitem", Some("Charlie"), 40.0));
+    assert_eq!((r2.role, r2.label.as_deref(), r2.rect[3]), ("listitem", Some("Charlie, user2@example.com"), 40.0));
 
     press(&mut rt, Key::Tab);
     assert_eq!(focused(&rt).as_deref(), Some("row1"), "Tab lands on the selected two-line row");
@@ -710,4 +710,99 @@ fn a_long_leading_title_truncates_and_keeps_the_trailing_slot_on_the_band() {
     let (long, trail) = (rect("long"), rect("trail"));
     assert!(trail[0] + trail[2] <= 400.0 + 0.5, "trailing slot pushed off the band: {trail:?}");
     assert!(long[0] + long[2] <= trail[0] + 0.5, "leading title overlaps the trailing slot: {long:?} {trail:?}");
+}
+
+/// One row alone: 0 plain, 1 two-line, 2 two-line and selected, 3 two-line with custom types.
+fn lone_row(variant: u8) -> Runtime<u8> {
+    fn view(v: &u8, _: &mut Cx<u8>) -> El {
+        let r = match v {
+            0 => SidebarRow::new("Name"),
+            1 => SidebarRow::new("Name").subtitle("Detail"),
+            2 => SidebarRow::new("Name").subtitle("Detail").selected(true),
+            _ => SidebarRow::new("Name")
+                .subtitle("Detail")
+                .title_style(TextStyle::new(15.0, 600.0).lh(22.0))
+                .subtitle_style(TextStyle::new(10.0, 400.0).lh(12.0)),
+        };
+        col().w(240.0).child(r.build(&Kit::neutral(true)).key("r"))
+    }
+    let mut rt = Runtime::new(variant, view, (240.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt
+}
+
+fn info(rt: &Runtime<u8>, key: &str) -> ElementInfo {
+    rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("no {key}"))
+}
+
+#[test]
+fn a_two_line_row_has_a_stronger_first_line_and_fits_in_40_points() {
+    let k = Kit::neutral(true);
+    for (variant, selected) in [(1, false), (2, true)] {
+        let rt = lone_row(variant);
+        let (row, name, sub) = (info(&rt, "r"), info(&rt, "label"), info(&rt, "subtitle"));
+        assert_eq!(row.rect[3], 40.0);
+        assert_eq!(name.text_color, Some(if selected { k.c.text_base } else { k.c.text_muted }));
+        assert_eq!(sub.text_color, Some(k.c.text_faint), "the subtitle is the faintest ink");
+        assert!(name.rect[1] + name.rect[3] <= sub.rect[1] + 0.01, "the lines don't overlap");
+        assert!(sub.rect[1] + sub.rect[3] <= row.rect[1] + row.rect[3], "both lines fit the default height");
+        assert_eq!((name.rect[3], sub.rect[3]), (k.ty.ui_compact.line_px(), k.ty.caption().line_px()));
+    }
+    let rt = lone_row(3);
+    assert_eq!((info(&rt, "label").rect[3], info(&rt, "subtitle").rect[3]), (22.0, 12.0));
+}
+
+#[test]
+fn a_two_line_row_reads_name_then_subtitle() {
+    let rt = lone_row(1);
+    assert_eq!(info(&rt, "r").label.as_deref(), Some("Name, Detail"));
+    let rt = lone_row(0);
+    assert_eq!(info(&rt, "r").label.as_deref(), Some("Name"));
+}
+
+struct Pick {
+    field: TextEdit,
+    picked: usize,
+    presses: usize,
+}
+
+#[test]
+fn select_only_rows_skip_tab_and_keep_an_outside_field_focused() {
+    fn view(s: &Pick, _: &mut Cx<Pick>) -> El {
+        let k = Kit::neutral(true);
+        col().w(240.0).gap(8.0)
+            .child(rune_kit::TextInput::new(&s.field).on_edit(|s: &mut Pick| &mut s.field).build(&k).key("field"))
+            .child(Sidebar::new().label("Results").child(
+                col().children((0..3).map(|i| {
+                    SidebarRow::new(format!("Row {i}"))
+                        .select_only()
+                        .selected(s.picked == i)
+                        .on_select(move |s: &mut Pick, _| { s.picked = i; s.presses += 1; })
+                        .build(&k)
+                        .key(format!("row{i}"))
+                })),
+            ).build(&k))
+    }
+    let mut rt = Runtime::new(Pick { field: TextEdit::default(), picked: 1, presses: 0 }, view, (240.0, 300.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let row = |rt: &Runtime<Pick>, i: usize| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(&format!("row{i}"))).unwrap();
+    assert!((0..3).all(|i| !row(&rt, i).focusable), "rows take no focus");
+    assert!(row(&rt, 1).item_selected && !row(&rt, 0).item_selected, "the selection is still exposed");
+
+    rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+    rt.frame(1.0 / 60.0);
+    let focused: Vec<_> = rt.elements().into_iter().filter(|e| e.focused).filter_map(|e| e.key).collect();
+    assert_eq!(focused, ["input"], "Tab lands on the field and no row");
+    rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+    rt.frame(1.0 / 60.0);
+    assert!(rt.elements().iter().all(|e| e.key.as_deref().is_none_or(|k| !k.starts_with("row")) || !e.focused));
+
+    let r = row(&rt, 2);
+    let (x, y) = (r.rect[0] + 20.0, r.rect[1] + r.rect[3] * 0.5);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(1.0 / 60.0);
+    assert_eq!((rt.state.picked, rt.state.presses), (2, 1), "the press selects");
+    assert!(rt.state.field.focused || rt.elements().iter().any(|e| e.focused && e.key.as_deref() == Some("input")),
+        "the field keeps focus through the press");
 }

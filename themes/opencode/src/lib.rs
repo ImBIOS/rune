@@ -39,7 +39,21 @@ pub fn theme(dark: bool) -> &'static Theme {
 /// The brand's hot colour for one appearance: ember step 9, for marks like a logo or a
 /// highlight that should read as the brand rather than the interactive accent.
 pub fn brand(dark: bool) -> Color {
-    theme(dark).color(if dark { "ember-dark-9" } else { "ember-light-9" })
+    ember(dark, 9)
+}
+
+/// One step of the ember scale for one appearance, the same colour as the token
+/// `ember-dark-<step>` or `ember-light-<step>`. `step` is 1 to 12; anything else panics.
+pub fn ember(dark: bool, step: u8) -> Color {
+    scale("ember", dark, step)
+}
+
+/// One step (1 to 12, else panics) of a named colour scale, such as `"ember"`, `"blue"` or
+/// `"smoke"`: the token `<name>-dark-<step>` or `<name>-light-<step>`. Panics if the theme
+/// has no such token.
+pub fn scale(name: &str, dark: bool, step: u8) -> Color {
+    assert!((1..=12).contains(&step), "colour scale steps run 1 to 12, got {step}");
+    theme(dark).color(&format!("{name}-{}-{step}", if dark { "dark" } else { "light" }))
 }
 
 /// The theme without sRGB re-solving: translucent tokens keep their authored alpha.
@@ -230,5 +244,23 @@ mod tests {
             let b = super::brand(dark);
             assert!(b.a > 0.99 && b.r > b.g && b.r > b.b, "ember is opaque and warm: {b:?}");
         }
+    }
+
+    #[test]
+    fn ember_steps_match_the_token_strings() {
+        for dark in [false, true] {
+            let mode = if dark { "dark" } else { "light" };
+            for step in 1..=12u8 {
+                assert_eq!(super::ember(dark, step), super::theme(dark).color(&format!("ember-{mode}-{step}")));
+            }
+            assert_eq!(super::brand(dark), super::ember(dark, 9));
+            assert_eq!(super::scale("blue", dark, 5), super::theme(dark).color(&format!("blue-{mode}-5")));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "1 to 12")]
+    fn ember_rejects_step_zero() {
+        super::ember(true, 0);
     }
 }

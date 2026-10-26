@@ -96,6 +96,8 @@ pub struct TextInput {
     edit: TextEdit,
     placeholder: String,
     large: bool,
+    style: Option<TextStyle>,
+    height: Option<f32>,
     width: Option<f32>,
     leading: Option<&'static Icon>,
     trailing: Option<El>,
@@ -129,6 +131,8 @@ impl TextInput {
             edit: edit.clone(),
             placeholder: String::new(),
             large: false,
+            style: None,
+            height: None,
             width: Some(280.0),
             leading: None,
             trailing: None,
@@ -147,6 +151,20 @@ impl TextInput {
     /// `appearance="large"`: 32 points tall.
     pub fn large(mut self) -> Self {
         self.large = true;
+        self
+    }
+    /// The text's type, in place of `ui_compact` (13 / 16): typed text, placeholder, caret and
+    /// selection all follow it. Unless [`Self::height`] sets one, the box grows to fit, to the
+    /// style's line height plus 12 points if that's taller than 28 (32 with [`Self::large`]),
+    /// e.g. `.text_style(TextStyle::new(17.0, 400.0).lh(24.0)).height(56.0)` for a launcher field.
+    pub fn text_style(mut self, style: TextStyle) -> Self {
+        self.style = Some(style);
+        self
+    }
+    /// The box's height in points, in place of 28 (32 with [`Self::large`]) or the fit to
+    /// [`Self::text_style`].
+    pub fn height(mut self, points: f32) -> Self {
+        self.height = Some(points.max(1.0));
         self
     }
     /// Width in points (default 280); `None` fills the parent.
@@ -231,7 +249,10 @@ impl TextInput {
         let red = self.invalid && !disabled && k.invalid_text;
         let ink = if red { c.danger.fg } else { c.text_base };
         let hint = if red { c.danger.fg } else { c.text_faint };
-        let field = text_input(&self.edit, k.ty.ui_compact)
+        let style = self.style.unwrap_or(k.ty.ui_compact);
+        let base: f32 = if self.large { 32.0 } else { 28.0 };
+        let height = self.height.unwrap_or(if self.style.is_some() { base.max(style.line_px() + 12.0) } else { base });
+        let field = text_input(&self.edit, style)
             .single_line()
             .key("input")
             .grow(1.0)
@@ -251,7 +272,7 @@ impl TextInput {
         let mut e = row()
             .role("textbox")
             .label(self.placeholder.clone())
-            .h(if self.large { 32.0 } else { 28.0 })
+            .h(height)
             .pr(8.0)
             .gap(8.0)
             .child(value);

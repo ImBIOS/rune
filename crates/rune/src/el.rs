@@ -1628,8 +1628,10 @@ impl El {
         self.focus.reveal_selected = enabled;
         self
     }
-    /// Presses on this element or its unfocusable descendants keep the current field
-    /// focused. Focusable controls still take focus normally. Useful for suggestion popups.
+    /// A press on this element or its unfocusable descendants leaves the current field
+    /// focused instead of blurring it. Works on any element, not only popups: a list row, a
+    /// button, a toolbar. The press still reaches `on_press` and the other handlers, and a
+    /// scroll still cancels it as usual. Focusable descendants still take focus normally.
     pub fn preserve_focus_on_press(mut self, enabled: bool) -> Self {
         self.focus.preserve_on_press = enabled;
         self
@@ -1826,6 +1828,11 @@ impl El {
         { self.key_source = Some(std::panic::Location::caller()); }
         self
     }
+    /// The element's accessible role. `"textbox"` on a container also makes a press anywhere
+    /// on it (padding, a leading icon, a trailing label) focus its one reachable text editor and
+    /// place the caret at the nearer end, without blurring a focused field or dragging the
+    /// window; buttons and other controls inside keep their own presses. With zero or more
+    /// than one reachable editor inside, the container does nothing special.
     pub fn role(mut self, role: &'static str) -> Self {
         self.role = role;
         self
