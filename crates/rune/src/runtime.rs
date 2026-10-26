@@ -575,6 +575,43 @@ struct Inh {
     group: f32,
     /// How `scale` is changing, which decides how text rasterizes under it.
     scale_motion: ScaleMotion,
+    /// Inside an active `El::cache` scope: do not cull children against the window viewport.
+    in_cache: bool,
+    /// Inside an elided or off-screen `El::cache` scope: skip primitive emission.
+    skip_paint: bool,
+}
+
+#[derive(Clone, Debug)]
+struct NodeCache {
+    signature: u64,
+    raster_scale: f32,
+    seen_scale: f32,
+    scale_changed_at: f64,
+    env_scale: f32,
+    content_hash: u64,
+    was_live: bool,
+    rel_bounds: [f32; 4],
+    glyphs: usize,
+    commit_gen: u64,
+    paint_state_hash: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ActiveCache {
+    node_index: usize,
+    node_id: NodeId,
+    instance_start: usize,
+    origin: [f32; 2],
+    size: [f32; 2],
+    cur_scale: f32,
+    raster_scale: f32,
+    seen_scale: f32,
+    scale_changed_at: f64,
+    env_scale: f32,
+    content_hash: u64,
+    glyph_start: usize,
+    cached_glyphs: usize,
+    elided: bool,
 }
 
 /// How a subtree's scale is changing. Text under a still scale rasterizes at its scaled size.
@@ -607,7 +644,7 @@ impl Default for Inh {
         Inh { opacity: 1.0, paint_opacity: 1.0, clip: NO_CLIP, fade: [0.0; 4], fade_origin: NO_CLIP,
             paint_clip: NO_CLIP, paint_fade: [0.0; 4], paint_fade_origin: NO_CLIP, rounded: None,
             scale: 1.0, anchor: [0.0; 2], anchor_to: [0.0; 2], blur: 0.0, dy: 0.0, dx: 0.0, cover: [0.0; 2], outer: None, mark: 0, group: 0.0,
-            scale_motion: ScaleMotion::Still }
+            scale_motion: ScaleMotion::Still, in_cache: false, skip_paint: false }
     }
 }
 
@@ -772,6 +809,13 @@ pub struct Runtime<S: 'static> {
     input_scroll: HashMap<String, f32>,
     dissolve_scratch: Vec<bool>,
     has_dissolve: bool,
+    cache_live_scratch: Vec<bool>,
+    cache_check_scratch: Vec<bool>,
+    cache_content_scratch: Vec<u64>,
+    node_caches: HashMap<NodeId, NodeCache>,
+    has_cache: bool,
+    commit_gen: u64,
+    last_dt: f64,
     /// Some picture sizes a side from its image's ratio (`pixel_aspect`).
     has_pixel_aspect: bool,
     has_drawn_layout: bool,
@@ -1097,6 +1141,13 @@ impl<S: 'static> Runtime<S> {
             input_scroll: HashMap::new(),
             dissolve_scratch: Vec::new(),
             has_dissolve: false,
+            cache_live_scratch: Vec::new(),
+            cache_check_scratch: Vec::new(),
+            cache_content_scratch: Vec::new(),
+            node_caches: HashMap::new(),
+            has_cache: false,
+            commit_gen: 0,
+            last_dt: 0.0,
             has_pixel_aspect: false,
             has_drawn_layout: false,
             has_key_up: false,
@@ -1984,6 +2035,7 @@ impl<S: 'static> Runtime<S> {
 
     fn step_motion(&mut self, dt: f64) -> bool {
         let step = dt * self.time_scale as f64;
+        self.last_dt = step;
         self.t += step;
         self.scene.set_time(self.t);
         if self.scene.tracing() {
@@ -2054,6 +2106,7 @@ impl<S: 'static> Runtime<S> {
     fn prune_exited(&mut self) {
         let old = std::mem::take(&mut self.nodes);
         self.has_dissolve = false;
+        self.has_cache = false;
         let mut remap = vec![None; old.len()];
         self.node_index.clear();
         for (old_idx, mut n) in old.into_iter().enumerate() {
@@ -2061,6 +2114,10 @@ impl<S: 'static> Runtime<S> {
                 self.reveals.remove(&n.id);
                 self.scrolls.remove(&n.id);
                 self.loops.remove(&n.id);
+                if !self.node_caches.is_empty() {
+                    self.node_caches.remove(&n.id);
+                    self.text.atlas.resident_caches.remove(&n.id.0);
+                }
                 continue;
             }
             n.parent = n.parent.and_then(|p| remap[p]);
@@ -2068,6 +2125,7 @@ impl<S: 'static> Runtime<S> {
             remap[old_idx] = Some(idx);
             self.node_index.insert(n.id, idx);
             self.has_dissolve |= n.vis.blend == crate::render::Blend::PlusLighter;
+            self.has_cache |= n.vis.cache;
             self.nodes.push(n);
         }
         self.virtuals.retain(|path, _| self.nodes.iter().any(|n| n.path == *path));
@@ -3656,7 +3714,16 @@ impl<S: 'static> Runtime<S> {
             self.time_scaled = time_scales.iter().any(|&k| k != 1.0);
         }
         self.nodes = nodes;
+        self.commit_gen = self.commit_gen.wrapping_add(1);
         self.has_dissolve = self.nodes.iter().any(|n| n.vis.blend == crate::render::Blend::PlusLighter);
+        self.has_cache = self.nodes.iter().any(|n| n.vis.cache);
+        if !self.has_cache {
+            if !self.node_caches.is_empty() { self.node_caches.clear(); }
+            if !self.text.atlas.resident_caches.is_empty() { self.text.atlas.resident_caches.clear(); }
+        } else if !self.node_caches.is_empty() {
+            self.node_caches.retain(|id, _| self.scene.contains(*id));
+            self.text.atlas.resident_caches.retain(|id, _| self.scene.contains(NodeId(*id)));
+        }
         self.has_pixel_aspect = self.nodes.iter().any(|n| n.pixel_aspect.is_some());
         self.has_drawn_layout = self.nodes.iter().any(|n| n.on_drawn_layout.is_some());
         self.has_key_up = self.nodes.iter().any(|n| n.focus.key_up.is_some());
@@ -4611,6 +4678,98 @@ impl<S: 'static> Runtime<S> {
             self.dissolve_scratch[parent] |= opacity > 0.0 && opacity < 1.0;
         }
 
+        self.cache_live_scratch.clear();
+        self.cache_check_scratch.clear();
+        self.cache_content_scratch.clear();
+        let mut paint_state_hash = 0u64;
+        if self.has_cache {
+            use std::hash::{Hash, Hasher};
+            let mut h = rune_motion::Fx::default();
+            self.hovered.hash(&mut h);
+            self.hover_within.hash(&mut h);
+            self.focused.hash(&mut h);
+            self.keyboard_focus.hash(&mut h);
+            self.hover_focus.hash(&mut h);
+            self.srgb_blend.hash(&mut h);
+            h.write_u32(s.to_bits());
+            sel_ranges.hash(&mut h);
+            let mut scroll_mix = 0u64;
+            for (&id, st) in &self.scrolls {
+                let mut sh = rune_motion::Fx::default();
+                sh.write_u64(id.0);
+                sh.write_u64(st.offset.to_bits());
+                sh.write_u64(st.x.offset.to_bits());
+                sh.write_u32(st.held as u32);
+                scroll_mix = scroll_mix.wrapping_add(sh.finish());
+            }
+            for (path, &off) in &self.input_scroll {
+                let mut sh = rune_motion::Fx::default();
+                path.hash(&mut sh);
+                sh.write_u32(off.to_bits());
+                scroll_mix = scroll_mix.wrapping_add(sh.finish());
+            }
+            h.write_u64(scroll_mix);
+            paint_state_hash = h.finish();
+
+            self.cache_live_scratch.resize(n_nodes, false);
+            self.cache_check_scratch.resize(n_nodes, false);
+            self.cache_content_scratch.resize(n_nodes, 0);
+            let store = self.scene.store();
+            for i in (0..n_nodes).rev() {
+                let n = &self.nodes[i];
+                let live = store.is_node_animating(n.id)
+                    || (!self.reduced_motion && self.loops.get(&n.id).is_some_and(|l| l.active(store.node_time(n.id))))
+                    || self.grows.get(&n.id).is_some_and(|g| g.moving())
+                    || self.reveals.get(&n.id).is_some_and(|r| !r.words.is_empty())
+                    || self.subtree_exiting(i)
+                    || (!self.flights.is_empty() && self.flights.iter().any(|f| f.departs(&n.path, n.key.as_deref()) || f.lands(&n.path, n.key.as_deref())))
+                    || n.vis.effect.is_some()
+                    || n.vis.surface.is_some()
+                    || (n.material.is_some() && self.native_materials)
+                    || n.input.as_ref().is_some_and(|inp| inp.edit.focused)
+                    || n.text.as_ref().is_some_and(|t| t.advance_in.is_some());
+                let check = n.vis.pixels.is_some()
+                    || n.text.as_ref().is_some_and(|t| t.live.is_some())
+                    || n.live.iter().any(|b| !n.vis.cache || !matches!(b.property, crate::live::Property::Offset | crate::live::Property::Scale));
+                self.cache_live_scratch[i] |= live;
+                self.cache_check_scratch[i] |= check;
+                let mut ch = rune_motion::Fx::default();
+                ch.write_u64(self.cache_content_scratch[i]);
+                ch.write_u64(n.id.0);
+                ch.write_u32(n.local.w.to_bits());
+                ch.write_u32(n.local.h.to_bits());
+                for c in [n.vis.fill, n.vis.border, n.vis.hover] {
+                    ch.write_u32(c.r.to_bits());
+                    ch.write_u32(c.g.to_bits());
+                    ch.write_u32(c.b.to_bits());
+                    ch.write_u32(c.a.to_bits());
+                }
+                ch.write_u32(n.vis.border_width.to_bits());
+                ch.write_u32(n.vis.opacity.to_bits());
+                if let Some(k) = n.vis.cache_key {
+                    ch.write_u8(1);
+                    ch.write_u64(k);
+                }
+                if let Some(t) = &n.text {
+                    t.content.hash(&mut ch);
+                    t.style.hash(&mut ch);
+                    ch.write_u32(t.color.r.to_bits());
+                    ch.write_u32(t.color.g.to_bits());
+                    ch.write_u32(t.color.b.to_bits());
+                    ch.write_u32(t.color.a.to_bits());
+                }
+                let node_ch = ch.finish();
+                self.cache_content_scratch[i] = node_ch;
+                if let Some(p) = n.parent {
+                    self.cache_live_scratch[p] |= self.cache_live_scratch[i];
+                    self.cache_check_scratch[p] |= self.cache_check_scratch[i] || !n.live.is_empty();
+                    self.cache_content_scratch[p] = self.cache_content_scratch[p]
+                        .wrapping_mul(0x517cc1b727220a95)
+                        .wrapping_add(node_ch);
+                }
+            }
+        }
+
         // Growth rows: presented top offset, height and bottom feather mask per node index.
         self.row_dy.clear();
         self.row_dy.resize(n_nodes, 0.0);
@@ -4648,28 +4807,41 @@ impl<S: 'static> Runtime<S> {
         let flying = !self.flying.is_empty();
         let tree_order = (flying && !self.layer_paint_order.is_empty()) || self.layer_paint_order.windows(2).any(|pair| {
             let n = &self.nodes[pair[0]];
-            self.nodes[pair[1]].parent == Some(pair[0]) && ((self.has_dissolve && self.dissolve_scratch[pair[0]]) || n.vis.clip_radius.is_some() || n.vis.group_opacity.is_some()
+            self.nodes[pair[1]].parent == Some(pair[0]) && ((self.has_dissolve && self.dissolve_scratch[pair[0]]) || n.vis.cache || n.vis.clip_radius.is_some() || n.vis.group_opacity.is_some()
                 || fades(n.looping)
                 || self.scene.presented(n.id).is_some_and(|p| (p.opacity > 0.0 && p.opacity < 1.0) || p.blur > 0.0))
         });
         let default_ring = self.default_ring_owner();
+        let mut active_cache: Option<ActiveCache> = None;
         for paint_index in 0..n_nodes {
             let i = if tree_order { self.layer_paint_order[paint_index] } else { paint_index };
-            let n = &self.nodes[i];
+            let node_id = self.nodes[i].id;
+            let node_parent = self.nodes[i].parent;
             // A flight paints outside every ancestor's layer, above the whole window.
-            let lift = flying && self.flying.iter().any(|f| f.0 == n.id);
+            let lift = flying && self.flying.iter().any(|f| f.0 == node_id);
             if lift {
                 while let Some((_, start, surface_start)) = layers.pop() {
-                    crate::render::end_layer(&mut self.instances, &mut self.surfaces, &mut self.marks, start, surface_start);
+                    if active_cache.is_some_and(|ac| ac.instance_start == start) {
+                        let ac = active_cache.take().unwrap();
+                        self.close_cached_layer(ac, start, surface_start, paint_state_hash, &mut glyph_count);
+                    } else {
+                        crate::render::end_layer(&mut self.instances, &mut self.surfaces, &mut self.marks, start, surface_start);
+                    }
                 }
             }
             while let Some(&(ancestor, start, surface_start)) = layers.last() {
-                let mut parent = n.parent;
+                let mut parent = node_parent;
                 while parent.is_some_and(|p| p != ancestor) { parent = self.nodes[parent.unwrap()].parent; }
                 if parent == Some(ancestor) { break; }
-                crate::render::end_layer(&mut self.instances, &mut self.surfaces, &mut self.marks, start, surface_start);
+                if active_cache.is_some_and(|ac| ac.instance_start == start) {
+                    let ac = active_cache.take().unwrap();
+                    self.close_cached_layer(ac, start, surface_start, paint_state_hash, &mut glyph_count);
+                } else {
+                    crate::render::end_layer(&mut self.instances, &mut self.surfaces, &mut self.marks, start, surface_start);
+                }
                 layers.pop();
             }
+            let n = &self.nodes[i];
             let Some(p) = self.scene.presented(n.id) else { continue };
             let mut pinh = n.parent.map_or(Inh::default(), |pr| self.inh_scratch[pr]);
             pinh.dy += self.row_dy[i];
@@ -4682,7 +4854,7 @@ impl<S: 'static> Runtime<S> {
                 pinh = Inh { opacity: 1.0, paint_opacity: 1.0, clip, fade, fade_origin, paint_clip: clip, paint_fade: fade,
                     paint_fade_origin: fade_origin, rounded: None, scale: 1.0, anchor: [0.0; 2], anchor_to: [0.0; 2], blur: 0.0,
                     dx: pinh.dx - pinh.cover[0], dy: pinh.dy - pinh.cover[1], cover: [0.0; 2], outer: None,
-                    scale_motion: ScaleMotion::Still, ..pinh };
+                    scale_motion: ScaleMotion::Still, in_cache: false, skip_paint: false, ..pinh };
             }
             let mark = if n.vis.mark != 0 { n.vis.mark } else { pinh.mark };
             let mut own = p.opacity;
@@ -4801,10 +4973,15 @@ impl<S: 'static> Runtime<S> {
                 ];
                 inherit_fade(&mut fade, &mut fade_origin, [r[0] + ins[0], r[1] + ins[1], r[2] - ins[2], r[3] - ins[3]], fea);
             }
-            let visible = r[2] >= clip[0].max(vp[0]) - filter_margin - 2.0
-                && r[0] <= clip[2].min(vp[2]) + filter_margin + 2.0
-                && r[3] >= clip[1].max(vp[1]) - filter_margin - 2.0
-                && r[1] <= clip[3].min(vp[3]) + filter_margin + 2.0;
+            let vis_clip = if pinh.in_cache {
+                [pinh.clip[0].max(clip[0]), pinh.clip[1].max(clip[1]), pinh.clip[2].min(clip[2]), pinh.clip[3].min(clip[3])]
+            } else {
+                clip
+            };
+            let visible = r[2] >= vis_clip[0].max(vp[0]) - filter_margin - 2.0
+                && r[0] <= vis_clip[2].min(vp[2]) + filter_margin + 2.0
+                && r[3] >= vis_clip[1].max(vp[1]) - filter_margin - 2.0
+                && r[1] <= vis_clip[3].min(vp[3]) + filter_margin + 2.0;
             let text_tint = |c: Color| match n.vis.group_color {
                 Some(g) if pinh.group > 0.0 => c.mix(g, pinh.group),
                 _ => c,
@@ -4839,6 +5016,46 @@ impl<S: 'static> Runtime<S> {
                     if self.loop_wake.is_none_or(|w| wake < w.0) { self.loop_wake = Some((wake, window_start)); }
                 }
             }
+            if n.vis.cache && self.cache_live_scratch[i] {
+                if let Some(entry) = self.node_caches.get_mut(&n.id) {
+                    entry.was_live = true;
+                }
+            }
+            let mut skip_paint = pinh.skip_paint;
+            let mut in_cache = pinh.in_cache;
+            let mut open_cache = false;
+            if n.vis.cache && active_cache.is_none() && !lift && !skip_paint && !self.cache_live_scratch[i]
+                && effective_opacity > 0.001 && w > 0.0 && h > 0.0
+            {
+                let eff_scale = sc * s;
+                let est_bounds = if let Some(entry) = self.node_caches.get(&n.id) {
+                    let k = eff_scale / entry.raster_scale.max(1e-4);
+                    [
+                        r[0] + entry.rel_bounds[0] * k,
+                        r[1] + entry.rel_bounds[1] * k,
+                        r[0] + entry.rel_bounds[2] * k,
+                        r[1] + entry.rel_bounds[3] * k,
+                    ]
+                } else {
+                    let sh = n.vis.shadows.iter().fold(0.0f32, |m, sh| {
+                        m.max((sh.x.abs() + sh.y.abs() + sh.spread.max(0.0) + sh.blur * 3.0) * eff_scale)
+                    });
+                    [r[0] - sh, r[1] - sh, r[2] + sh, r[3] + sh]
+                };
+                let cache_vis = est_bounds[2] >= clip[0].max(vp[0]) - filter_margin - 2.0
+                    && est_bounds[0] <= clip[2].min(vp[2]) + filter_margin + 2.0
+                    && est_bounds[3] >= clip[1].max(vp[1]) - filter_margin - 2.0
+                    && est_bounds[1] <= clip[3].min(vp[3]) + filter_margin + 2.0;
+                if !cache_vis {
+                    skip_paint = true;
+                } else {
+                    let est_w = (est_bounds[2] - est_bounds[0]).ceil();
+                    let est_h = (est_bounds[3] - est_bounds[1]).ceil();
+                    if est_w <= 4096.0 && est_h <= 4096.0 {
+                        open_cache = true;
+                    }
+                }
+            }
             let intersect = |a: [f32; 4], b: [f32; 4]| [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
             // A negative clip radius rounds with continuous corners (`render::corner_extent`).
             let mut own_round = n.vis.clip_radius.map(|radius| {
@@ -4851,7 +5068,8 @@ impl<S: 'static> Runtime<S> {
             inherit_fade(&mut hit_fade, &mut hit_origin, fade_origin, fade);
             // A rectangle wholly in either central strip misses all four corner squares.
             // Its hard edges already exclude everything the rounded mask would remove.
-            for round in [&mut rounded, &mut own_round] {
+            for (idx, round) in [&mut rounded, &mut own_round].into_iter().enumerate() {
+                if open_cache && idx == 1 { continue; }
                 if let Some((mask, radius)) = *round {
                     let radius = crate::render::corner_extent(radius);
                     let cut = intersect(clip, mask);
@@ -4865,7 +5083,7 @@ impl<S: 'static> Runtime<S> {
             }
             // The packed ABI carries one clip rectangle. Preserve a rectangular cut through
             // a rounded corner on a separate outer scope, never recenter the rounded mask.
-            if let Some((mask, _)) = rounded.or(own_round)
+            if !skip_paint && let Some((mask, _)) = rounded.or(own_round)
                 && intersect(clip, mask) != mask {
                 let mut marker = Instance::begin_layer([r[0], r[1], w, h], clip, Default::default());
                 marker.fade = crate::render::pack_fade(fade, fade_origin, clip);
@@ -4875,7 +5093,7 @@ impl<S: 'static> Runtime<S> {
             }
             // Two rounded rectangles cannot generally be represented by one rounded rectangle.
             // Consume the ancestor on an outer composite, retaining both original corner centres.
-            if rounded.is_some() && own_round.is_some() && rounded != own_round {
+            if !skip_paint && rounded.is_some() && own_round.is_some() && rounded != own_round {
                 let (mask, radius) = rounded.take().unwrap();
                 let mut marker = Instance::begin_layer([r[0], r[1], w, h], mask,
                     crate::render::LayerSpec { clip_radius: radius, ..Default::default() });
@@ -4891,11 +5109,12 @@ impl<S: 'static> Runtime<S> {
             }
             // Live/truncated text adds a glyph-only rectangle below. Consume the inherited
             // rounded mask first so the text clip cannot move its corner centres.
-            isolate |= rounded.is_some() && (n.text.as_ref().is_some_and(|t| t.truncate_fade || t.live.is_some())
-                || n.input.as_ref().is_some_and(|i| i.single_line));
+            isolate |= open_cache || (rounded.is_some() && (n.text.as_ref().is_some_and(|t| t.truncate_fade || t.live.is_some())
+                || n.input.as_ref().is_some_and(|i| i.single_line)));
             let o = if isolate { 1.0 } else { (own * pinh.paint_opacity).clamp(0.0, 1.0) };
-            if isolate {
-                layers.push((i, self.instances.len(), self.surfaces.len()));
+            if !skip_paint && isolate {
+                let start_idx = self.instances.len();
+                layers.push((i, start_idx, self.surfaces.len()));
                 let mut marker = Instance::begin_layer([r[0], r[1], w, h], clip,
                     crate::render::LayerSpec { opacity: own * pinh.paint_opacity,
                         blend: if dissolve { crate::render::Blend::PlusLighter } else { crate::render::Blend::SourceOver },
@@ -4905,11 +5124,64 @@ impl<S: 'static> Runtime<S> {
                 self.instances.push(marker);
                 // Clip the completed layer, never its inputs (including off-wall blur taps).
                 clip = NO_CLIP; fade = [0.0; 4]; fade_origin = NO_CLIP; rounded = None;
+                if open_cache {
+                    in_cache = true;
+                    let eff_scale = sc * s;
+                    let (raster_scale, seen_scale, scale_changed_at, elided, cached_glyphs) =
+                        if let Some(entry) = self.node_caches.get(&n.id) {
+                            let is_resident = self.text.atlas.resident_caches.get(&n.id.0) == Some(&entry.signature);
+                            let env_same = (s - entry.env_scale).abs() <= 1e-4 && !self.settled;
+                            let (seen_scale, scale_changed_at) = if !env_same {
+                                (eff_scale, f64::NEG_INFINITY)
+                            } else if (eff_scale - entry.seen_scale).abs() > 1e-4 {
+                                (eff_scale, now)
+                            } else {
+                                (entry.seen_scale, entry.scale_changed_at)
+                            };
+                            let scale_diff = (eff_scale - entry.raster_scale).abs() > 1e-4;
+                            let scale_settling = scale_diff && env_same && is_resident && !entry.was_live
+                                && (now - scale_changed_at < STATIC_SCALE_SETTLE || scale_motion == ScaleMotion::Moving);
+                            self.static_scale_settling |= scale_settling;
+                            let content_same = if scale_settling {
+                                self.cache_content_scratch[i] == entry.content_hash
+                            } else {
+                                self.commit_gen == entry.commit_gen && !scale_diff
+                            };
+                            let can_elide = is_resident
+                                && !entry.was_live
+                                && content_same
+                                && paint_state_hash == entry.paint_state_hash
+                                && !self.cache_check_scratch[i];
+                            let raster_scale = if can_elide && scale_settling { entry.raster_scale } else { eff_scale };
+                            (raster_scale, seen_scale, scale_changed_at, can_elide, entry.glyphs)
+                        } else {
+                            (eff_scale, eff_scale, f64::NEG_INFINITY, false, 0)
+                        };
+                    if elided {
+                        skip_paint = true;
+                    }
+                    active_cache = Some(ActiveCache {
+                        node_index: i,
+                        node_id: n.id,
+                        instance_start: start_idx,
+                        origin: [r[0], r[1]],
+                        size: [w, h],
+                        cur_scale: eff_scale,
+                        raster_scale,
+                        seen_scale,
+                        scale_changed_at,
+                        env_scale: s,
+                        content_hash: self.cache_content_scratch[i],
+                        glyph_start: glyph_count,
+                        cached_glyphs,
+                        elided,
+                    });
+                }
             }
             let primitive_start = self.instances.len();
             let surface_start = self.surfaces.len();
             // Include native surface geometry, which lives beside the primitive stream.
-            if n.vis.surface.is_some() {
+            if !skip_paint && n.vis.surface.is_some() {
                 for &(_, at, _) in &layers {
                     let b = &mut self.instances[at].rect;
                     let hi = [(b[0] + b[2]).max(r[2].min(clip[2])), (b[1] + b[3]).max(r[3].min(clip[3]))];
@@ -4928,7 +5200,15 @@ impl<S: 'static> Runtime<S> {
                 .and_then(|_| input_caret(n, r, sc, s, &mut self.input_scroll));
             if let Some((_, area)) = input_caret
                 && n.input.as_ref().is_some_and(|input| !input.edit.is_secure()) { self.ime_area = Some(area); }
-            if effective_opacity > 0.001 && o > 0.001 && visible {
+            let paint_visible = if in_cache {
+                r[2] >= clip[0] - filter_margin - 2.0
+                    && r[0] <= clip[2] + filter_margin + 2.0
+                    && r[3] >= clip[1] - filter_margin - 2.0
+                    && r[1] <= clip[3] + filter_margin + 2.0
+            } else {
+                visible
+            };
+            if !skip_paint && effective_opacity > 0.001 && o > 0.001 && paint_visible {
                 // Disabled styling is distributed to each authored paint leaf at build time.
                 // Keep this local to emission: it neither propagates to children nor opens scopes.
                 let o = o * n.vis.paint_alpha;
@@ -5522,6 +5802,10 @@ impl<S: 'static> Runtime<S> {
             if n.scroll_axes.x() && let Some(st) = self.scrolls.get(&n.id) {
                 dx -= grid(st.x.offset as f32, s);
             }
+            if open_cache && sc > 1e-4 {
+                dx += (r[0] / s - rect_pt[0]) / sc;
+                dy += (r[1] / s - rect_pt[1]) / sc;
+            }
             let (mut cover_offset, mut outer) = (pinh.cover, pinh.outer);
             if let Some((k, c)) = cover {
                 // Children ride this node's presented origin at their rest layout. Scale them by
@@ -5540,7 +5824,8 @@ impl<S: 'static> Runtime<S> {
                 clip: intersect(hit_clip, clip), fade: hit_fade, fade_origin: hit_origin,
                 paint_clip: clip, paint_fade: fade, paint_fade_origin: fade_origin, rounded, scale, anchor, anchor_to, blur, dy, dx,
                 cover: cover_offset, outer, mark, group,
-                scale_motion: if cover.is_some() { ScaleMotion::Moving } else { scale_motion } };
+                scale_motion: if cover.is_some() { ScaleMotion::Moving } else { scale_motion },
+                in_cache, skip_paint };
             let hits_before = self.hits.len();
             if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_double_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.window_drag || n.focus.enabled || n.modal.is_some()
                 || n.text.as_ref().is_some_and(|t| t.selectable) || n.gestures.as_ref().is_some_and(|g| g.takes_gestures()))
@@ -5578,7 +5863,12 @@ impl<S: 'static> Runtime<S> {
             }
         }
         while let Some((_, start, surface_start)) = layers.pop() {
-            crate::render::end_layer(&mut self.instances, &mut self.surfaces, &mut self.marks, start, surface_start);
+            if active_cache.is_some_and(|ac| ac.instance_start == start) {
+                let ac = active_cache.take().unwrap();
+                self.close_cached_layer(ac, start, surface_start, paint_state_hash, &mut glyph_count);
+            } else {
+                crate::render::end_layer(&mut self.instances, &mut self.surfaces, &mut self.marks, start, surface_start);
+            }
         }
         self.update_help();
         self.layer_scratch = layers;
@@ -5595,6 +5885,170 @@ impl<S: 'static> Runtime<S> {
         // A moving chip can enter a stationary pointer. Re-evaluate against this frame's
         // geometry without inventing pointer-move or drag events on animation frames.
         if self.native_overlay && let Some((x, y)) = self.pointer { self.refresh_hover(x, y); }
+    }
+
+    fn close_cached_layer(
+        &mut self,
+        ac: ActiveCache,
+        start: usize,
+        surface_start: usize,
+        paint_state_hash: u64,
+        glyph_count: &mut usize,
+    ) {
+        use std::hash::Hasher;
+        let layer_grow = (3.0 * crate::render::layer_blur::sigma(self.instances[start].params[2])).ceil();
+        if ac.elided {
+            let entry = self.node_caches.get_mut(&ac.node_id).expect("elided cache entry");
+            entry.seen_scale = ac.seen_scale;
+            entry.scale_changed_at = ac.scale_changed_at;
+            let k = if (ac.cur_scale - entry.raster_scale).abs() <= 1e-4 {
+                1.0
+            } else {
+                ac.cur_scale / entry.raster_scale.max(1e-4)
+            };
+            let b0 = (ac.origin[0] + entry.rel_bounds[0] * k).floor();
+            let b1 = (ac.origin[1] + entry.rel_bounds[1] * k).floor();
+            let b2 = (ac.origin[0] + entry.rel_bounds[2] * k).ceil();
+            let b3 = (ac.origin[1] + entry.rel_bounds[3] * k).ceil();
+            let sig = entry.signature;
+            let marker = &mut self.instances[start];
+            marker.rect = [b0, b1, (b2 - b0).max(0.0), (b3 - b1).max(0.0)];
+            marker.params[3] = 1.0;
+            marker.radii = crate::render::pack_u64_f32(ac.node_id.0);
+            marker.uv = crate::render::pack_u64_f32(sig);
+            self.instances.push(Instance::end_layer());
+            if self.track_marks {
+                let mark = self.marks.get(start).copied().unwrap_or(0);
+                self.marks.resize(self.instances.len(), mark);
+            }
+            *glyph_count += ac.cached_glyphs;
+            return;
+        }
+
+        if self.instances.len() == start + 1 && self.surfaces.len() == surface_start {
+            self.instances.pop();
+            if self.track_marks {
+                self.marks.truncate(self.instances.len());
+            }
+            self.node_caches.remove(&ac.node_id);
+            self.text.atlas.resident_caches.remove(&ac.node_id.0);
+            return;
+        }
+
+        let mut bounds = [ac.origin[0], ac.origin[1], ac.origin[0] + ac.size[0], ac.origin[1] + ac.size[1]];
+        let mut h = rune_motion::Fx::default();
+        h.write_u64(ac.node_id.0);
+        h.write_u32(ac.raster_scale.to_bits());
+        h.write_u32(ac.size[0].to_bits());
+        h.write_u32(ac.size[1].to_bits());
+        if let Some(key) = self.nodes[ac.node_index].vis.cache_key {
+            h.write_u8(1);
+            h.write_u64(key);
+        } else {
+            h.write_u8(0);
+        }
+        let q = |v: f32| (v * 64.0).round() as i64;
+        for inst in &self.instances[start + 1..] {
+            if inst.params[1] != crate::render::KIND_LAYER_END {
+                let (c0, c1, c2, c3) = if inst.params[1] == crate::render::KIND_LAYER {
+                    let g = (3.0 * crate::render::layer_blur::sigma(inst.params[2])).ceil();
+                    (
+                        (inst.rect[0] - g).max(inst.clip[0]),
+                        (inst.rect[1] - g).max(inst.clip[1]),
+                        (inst.rect[0] + inst.rect[2] + g).min(inst.clip[2]),
+                        (inst.rect[1] + inst.rect[3] + g).min(inst.clip[3]),
+                    )
+                } else {
+                    let mut rect = inst.rect;
+                    if inst.params[1] == KIND_GLYPH && inst.params[0] != 0.0 {
+                        let (sin, cos) = inst.params[0].sin_cos();
+                        let width = cos.abs() * rect[2] + sin.abs() * rect[3];
+                        let height = sin.abs() * rect[2] + cos.abs() * rect[3];
+                        rect = [rect[0] + (rect[2] - width) * 0.5, rect[1] + (rect[3] - height) * 0.5, width, height];
+                    }
+                    let grow = match inst.params[1] {
+                        KIND_GLYPH => 0.0,
+                        KIND_SHADOW => inst.params[2] * 3.0 + 1.0,
+                        KIND_EFFECT => inst.params[2] + 1.0,
+                        KIND_RECT | KIND_GRADIENT | KIND_DASHED | KIND_RADIAL => 1.0 + inst.params[2] * 2.0,
+                        _ => 1.0,
+                    };
+                    (
+                        (rect[0] - grow).max(inst.clip[0]),
+                        (rect[1] - grow).max(inst.clip[1]),
+                        (rect[0] + rect[2] + grow).min(inst.clip[2]),
+                        (rect[1] + rect[3] + grow).min(inst.clip[3]),
+                    )
+                };
+                if c2 > c0 && c3 > c1 {
+                    bounds[0] = bounds[0].min(c0);
+                    bounds[1] = bounds[1].min(c1);
+                    bounds[2] = bounds[2].max(c2);
+                    bounds[3] = bounds[3].max(c3);
+                }
+            }
+            h.write_i64(q(inst.rect[0] - ac.origin[0]));
+            h.write_i64(q(inst.rect[1] - ac.origin[1]));
+            h.write_i64(q(inst.rect[2]));
+            h.write_i64(q(inst.rect[3]));
+            for r in inst.radii { h.write_u32(r.to_bits()); }
+            for f in inst.fill { h.write_u32(f.to_bits()); }
+            for b in inst.border { h.write_u32(b.to_bits()); }
+            for p in inst.params { h.write_u32(p.to_bits()); }
+            for u in inst.uv { h.write_u32(u.to_bits()); }
+            for k in 0..4 {
+                let cv = inst.clip[k];
+                if cv.abs() < 1e6 {
+                    h.write_i64(q(cv - ac.origin[k & 1]));
+                } else {
+                    h.write_u32(cv.to_bits());
+                }
+            }
+            for fd in inst.fade { h.write_u32(fd); }
+        }
+        let b0 = (bounds[0] - layer_grow).floor();
+        let b1 = (bounds[1] - layer_grow).floor();
+        let b2 = (bounds[2] + layer_grow).ceil();
+        let b3 = (bounds[3] + layer_grow).ceil();
+        let bw = (b2 - b0).max(0.0);
+        let bh = (b3 - b1).max(0.0);
+        if bw > 4096.0 || bh > 4096.0 {
+            self.node_caches.remove(&ac.node_id);
+            self.text.atlas.resident_caches.remove(&ac.node_id.0);
+            crate::render::end_layer(&mut self.instances, &mut self.surfaces, &mut self.marks, start, surface_start);
+            return;
+        }
+        let mut sig = h.finish();
+        if sig == 0 { sig = 1; }
+        let rel_bounds = [b0 - ac.origin[0], b1 - ac.origin[1], b2 - ac.origin[0], b3 - ac.origin[1]];
+        let glyphs = *glyph_count - ac.glyph_start;
+        let is_resident = self.text.atlas.resident_caches.get(&ac.node_id.0) == Some(&sig);
+        self.node_caches.insert(ac.node_id, NodeCache {
+            signature: sig,
+            raster_scale: ac.raster_scale,
+            seen_scale: ac.seen_scale,
+            scale_changed_at: ac.scale_changed_at,
+            env_scale: ac.env_scale,
+            content_hash: ac.content_hash,
+            was_live: false,
+            rel_bounds,
+            glyphs,
+            commit_gen: self.commit_gen,
+            paint_state_hash,
+        });
+        if is_resident && self.surfaces.len() == surface_start {
+            self.instances.truncate(start + 1);
+        }
+        let marker = &mut self.instances[start];
+        marker.rect = [b0, b1, bw, bh];
+        marker.params[3] = 1.0;
+        marker.radii = crate::render::pack_u64_f32(ac.node_id.0);
+        marker.uv = crate::render::pack_u64_f32(sig);
+        self.instances.push(Instance::end_layer());
+        if self.track_marks {
+            let mark = self.marks.get(start).copied().unwrap_or(0);
+            self.marks.resize(self.instances.len(), mark);
+        }
     }
 
     // ---------------------------------------------------------------------------------------

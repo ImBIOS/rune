@@ -781,6 +781,10 @@ pub struct Visual {
     pub group_color: Option<Color>,
     /// `El::icon_rotation`: the icon's turn in radians, clockwise.
     pub(crate) icon_turn: f32,
+    /// Rasterize this subtree once into an offscreen texture when settled (`El::cache`).
+    pub(crate) cache: bool,
+    /// Optional app-supplied key mixed into the cached subtree's signature (`El::cache_key`).
+    pub(crate) cache_key: Option<u64>,
 }
 
 impl Default for Visual {
@@ -820,6 +824,8 @@ impl Default for Visual {
             group_opacity: None,
             group_color: None,
             icon_turn: 0.0,
+            cache: false,
+            cache_key: None,
         }
     }
 }
@@ -2071,6 +2077,21 @@ impl El {
     /// opaque states therefore use source-over at rest; this API is for replacing states.
     pub fn dissolve(mut self) -> Self {
         self.vis.blend = crate::render::Blend::PlusLighter;
+        self
+    }
+    /// Rasterize this subtree once into an offscreen texture when settled and composite that
+    /// texture until the subtree's draw output changes, including while an ancestor's
+    /// [`live_offset`](Self::live_offset) or [`live_scale`](Self::live_scale) moves it. While a
+    /// spring, transition, or effect slot inside the subtree is active, it draws live and
+    /// re-caches once settled.
+    pub fn cache(mut self) -> Self {
+        self.vis.cache = true;
+        self
+    }
+    /// Cache this subtree like [`Self::cache`], also mixing `key` into its invalidation signature.
+    pub fn cache_key(mut self, key: u64) -> Self {
+        self.vis.cache = true;
+        self.vis.cache_key = Some(key);
         self
     }
     /// Tags this element's instances (and its descendants', until one sets its own) for a

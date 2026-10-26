@@ -2,8 +2,8 @@
 //! resolution; the final reconstruction returns to the layer so composite bindings stay stable.
 use bytemuck::{Pod, Zeroable};
 
-pub(super) const MAX_SIGMA: f32 = 64.0;
-pub(super) fn sigma(value: f32) -> f32 { value.max(0.0).min(MAX_SIGMA) }
+pub(crate) const MAX_SIGMA: f32 = 64.0;
+pub(crate) fn sigma(value: f32) -> f32 { value.max(0.0).min(MAX_SIGMA) }
 const TAPS: usize = 128; // centre + ceil(3 * MAX_SIGMA / 2) pairs; padded for Pod arrays
 
 #[repr(C)]

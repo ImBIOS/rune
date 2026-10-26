@@ -276,10 +276,15 @@ pub(crate) fn fragment(i: &Primitive, atlas: &Atlas, screen: [f32; 2]) -> [f32; 
         }
         _ => panic!("unsupported primitive kind"),
     }
+    let clip = clip_coverage(i, screen);
+    col.map(|c| c * clip)
+}
+
+pub(crate) fn clip_coverage(i: &Primitive, screen: [f32; 2]) -> f32 {
     let origin = i.fade_origin.unwrap_or(i.clip);
     let p = screen;
     let hard = [p[0] - i.clip[0], p[1] - i.clip[1], i.clip[2] - p[0], i.clip[3] - p[1]];
-    let clip: f32 = (0..4).map(|edge| {
+    (0..4).map(|edge| {
         let width = half::f16::from_f32(i.fade[edge].clamp(0.0, 65504.0)).to_f32();
         let distance = if edge < 2 { i.clip[edge] - origin[edge] } else { origin[edge] - i.clip[edge] };
         let offset = if i.fade[edge] > 0.0 { (distance / i.fade[edge]).clamp(0.0, 1.0) } else { 0.0 };
@@ -287,8 +292,7 @@ pub(crate) fn fragment(i: &Primitive, atlas: &Atlas, screen: [f32; 2]) -> [f32; 
         if offset >= 1.0 { ramp(hard[edge], 0.0) }
         else if offset > 0.0 { ramp(hard[edge], 0.0).min(ramp(hard[edge] + offset * width, width)) }
         else { ramp(hard[edge], width) }
-    }).product();
-    col.map(|c| c * clip)
+    }).product()
 }
 
 #[cfg(test)]

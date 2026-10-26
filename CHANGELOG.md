@@ -5,6 +5,20 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::cache()` rasterizes settled subtrees once and composites them across pan and zoom.**
+  Calling `.cache()` on an `El` (with an optional `.cache_key(u64)`) rasterizes the settled
+  subtree into an `Rgba16Float` layer target (`layers.rs`) and elides its child instances on
+  subsequent frames, compositing a single quad while an ancestor's `live_offset` or `live_scale`
+  moves or scales it. Invalidation is automatic from the subtree's relative draw output (state,
+  hover, focus, text, layout, theme and scale). Subtrees that are actively animating or contain a
+  compositor `El::effect` slot, `NativeSurface`, native `SystemMaterial` or focused text input
+  draw live without offscreen thrash and re-cache once settled. Changing ancestor scales composite
+  the existing cached texture with bilinear filtering and re-rasterize at the new device-pixel
+  resolution after `0.12 s` at rest. Cached textures are capped at `4096×4096` px under an LRU
+  byte budget (`Renderer::set_cache_budget`, default 64 MiB). Hit testing, accessibility,
+  `elements()` and `on_layout` are unchanged, and apps that don't call `.cache()` pay no extra
+  passes or allocations.
+
 - **Grain is symmetric.** `Fx::grain` returned its light half as added light with zero coverage,
   so with `srgb_blend` on each +0.02 of grain became about +40/255 on the framebuffer while the
   dark half only dimmed by 2%: white snow over everything. The light half is now premultiplied

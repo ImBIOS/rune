@@ -75,19 +75,28 @@ impl Scene {
         if !color(&self.clear) {
             return Err("clear must be premultiplied linear RGBA".into());
         }
+        let mut layer_depth = 0usize;
         for p in &self.primitives {
+            if p.params[1] == 8.0 {
+                layer_depth += 1;
+            } else if p.params[1] == 9.0 {
+                if layer_depth == 0 {
+                    return Err(format!("unbalanced layer end {} ({})", p.node, p.source));
+                }
+                layer_depth -= 1;
+            }
             if [
                 p.rect, p.radii, p.fill, p.border, p.params, p.uv, p.clip, p.fade, p.fade_origin.unwrap_or(p.clip),
             ]
             .iter()
             .flatten()
             .any(|v| !v.is_finite() || v.abs() > 1e6)
-                // An effect slot (kind 12) draws nothing and may be empty.
-                || (p.params[1] != 12.0 && (p.rect[2] <= 0.0 || p.rect[3] <= 0.0))
+                // An effect slot (kind 12) or layer end (kind 9) draws nothing and may be empty.
+                || (!matches!(p.params[1] as u32, 9 | 12) && (p.rect[2] <= 0.0 || p.rect[3] <= 0.0))
                 || p.rect[2] < 0.0
                 || p.rect[3] < 0.0
                 || p.radii.iter().chain(p.fade.iter()).any(|v| *v < 0.0)
-                || !(0..=4).chain([10, 11, 12]).any(|k| p.params[1] == k as f32)
+                || !(0..=4).chain([8, 9, 10, 11, 12]).any(|k| p.params[1] == k as f32)
                 // A glyph's params[0] is a signed turn; negative is counter-clockwise.
                 || (p.params[0] < 0.0 && p.params[1] != 2.0)
                 || p.params[2] < 0.0
@@ -100,6 +109,9 @@ impl Scene {
             {
                 return Err(format!("invalid primitive {} ({})", p.node, p.source));
             }
+        }
+        if layer_depth != 0 {
+            return Err("unclosed layer scope".into());
         }
         Ok(())
     }
@@ -124,7 +136,7 @@ impl Frame {
         }
     }
 
-    /// No allocations after Frame construction. Scene must pass validate().
+    /// No allocations after Frame construction unless isolated/cached layers are present. Scene must pass validate().
     pub fn render(&mut self, scene: &Scene) {
         assert_eq!((self.width, self.height), (scene.width, scene.height));
         let clear = encode(scene.clear);
@@ -134,22 +146,100 @@ impl Frame {
         if let Some(ids) = &mut self.owners {
             ids.fill(None);
         }
-        for (index, p) in scene.primitives.iter().enumerate() {
-            for y in 0..self.height {
-                for x in 0..self.width {
+        Self::render_range(
+            self.width,
+            self.height,
+            &mut self.rgba,
+            self.owners.as_deref_mut(),
+            scene,
+            0,
+            scene.primitives.len(),
+        );
+    }
+
+    fn render_range(
+        width: u32,
+        height: u32,
+        rgba: &mut [u8],
+        mut owners: Option<&mut [Option<usize>]>,
+        scene: &Scene,
+        mut cursor: usize,
+        end: usize,
+    ) {
+        while cursor < end {
+            let p = &scene.primitives[cursor];
+            if p.params[1] == 8.0 {
+                let mut depth = 1usize;
+                let mut close = cursor + 1;
+                while close < end && depth > 0 {
+                    if scene.primitives[close].params[1] == 8.0 {
+                        depth += 1;
+                    } else if scene.primitives[close].params[1] == 9.0 {
+                        depth -= 1;
+                    }
+                    if depth > 0 {
+                        close += 1;
+                    }
+                }
+                if p.params[3] == 0.0 && p.fill[3] == 1.0 && p.params[0] == 0.0 && p.params[2] == 0.0 && p.clip == NO_CLIP {
+                    Self::render_range(width, height, rgba, owners.as_deref_mut(), scene, cursor + 1, close);
+                } else if p.fill[3] > 0.0 {
+                    let mut layer_rgba = vec![0u8; (width * height * 4) as usize];
+                    let mut layer_owners = owners.as_ref().map(|o| vec![None; o.len()]);
+                    Self::render_range(width, height, &mut layer_rgba, layer_owners.as_deref_mut(), scene, cursor + 1, close);
+                    let x0 = libm::floorf(p.rect[0]).max(0.0) as u32;
+                    let y0 = libm::floorf(p.rect[1]).max(0.0) as u32;
+                    let x1 = (libm::ceilf(p.rect[0] + p.rect[2]).max(0.0) as u32).min(width);
+                    let y1 = (libm::ceilf(p.rect[1] + p.rect[3]).max(0.0) as u32).min(height);
+                    let alpha = p.fill[3].clamp(0.0, 1.0);
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            let cov = alpha * shader::clip_coverage(p, [x as f32 + 0.5, y as f32 + 0.5]);
+                            if cov <= 0.0 {
+                                continue;
+                            }
+                            let at = (y * width + x) as usize;
+                            let src = decode(layer_rgba[at * 4..at * 4 + 4].try_into().unwrap());
+                            let col = src.map(|c| c * cov);
+                            if col[3] <= 0.0 {
+                                continue;
+                            }
+                            let dst = decode(rgba[at * 4..at * 4 + 4].try_into().unwrap());
+                            let out = if p.params[0] == 1.0 {
+                                std::array::from_fn(|c| col[c] + dst[c])
+                            } else {
+                                std::array::from_fn(|c| col[c] + dst[c] * (1.0 - col[3]))
+                            };
+                            rgba[at * 4..at * 4 + 4].copy_from_slice(&encode(out));
+                            if let (Some(ids), Some(l_ids)) = (owners.as_deref_mut(), layer_owners.as_ref()) {
+                                ids[at] = l_ids[at].or(Some(cursor));
+                            }
+                        }
+                    }
+                }
+                cursor = close + 1;
+                continue;
+            }
+            if p.params[1] == 9.0 {
+                cursor += 1;
+                continue;
+            }
+            for y in 0..height {
+                for x in 0..width {
                     let col = shader::fragment(p, &scene.atlas, [x as f32 + 0.5, y as f32 + 0.5]);
                     if col[3] <= 0.0 {
                         continue;
                     }
-                    let at = (y * self.width + x) as usize;
-                    let dst = decode(self.rgba[at * 4..at * 4 + 4].try_into().unwrap());
+                    let at = (y * width + x) as usize;
+                    let dst = decode(rgba[at * 4..at * 4 + 4].try_into().unwrap());
                     let out = std::array::from_fn(|c| col[c] + dst[c] * (1.0 - col[3]));
-                    self.rgba[at * 4..at * 4 + 4].copy_from_slice(&encode(out));
-                    if let Some(ids) = &mut self.owners {
-                        ids[at] = Some(index);
+                    rgba[at * 4..at * 4 + 4].copy_from_slice(&encode(out));
+                    if let Some(ids) = owners.as_deref_mut() {
+                        ids[at] = Some(cursor);
                     }
                 }
             }
+            cursor += 1;
         }
     }
 

@@ -309,3 +309,70 @@ fn cpu_gpu_radial() {
     }
     eprintln!("METRIC channel_max_radial={max}");
 }
+
+#[test]
+fn cpu_gpu_cached_subtrees() {
+    use rune::{Color, Cx, El, Env, Runtime, col, el, text};
+    let mut gpu = GpuRenderer::default();
+    let build_scene = |cached: bool| {
+        fn view(cached: &bool, _: &mut Cx<bool>) -> El {
+            let mut card = col()
+                .size(48.0, 44.0)
+                .padding(4.0)
+                .gap(3.0)
+                .fill(Color { r: 0.18, g: 0.24, b: 0.36, a: 1.0 })
+                .radius(8.0)
+                .border(1.0, Color { r: 0.45, g: 0.62, b: 0.88, a: 1.0 })
+                .child(text("Rune").color(Color::WHITE))
+                .child(
+                    el().size(36.0, 12.0)
+                        .fill(Color { r: 0.85, g: 0.32, b: 0.28, a: 0.85 })
+                        .radius(4.0),
+                );
+            if *cached {
+                card = card.cache();
+            }
+            col()
+                .size(64.0, 64.0)
+                .padding(8.0)
+                .fill(Color { r: 0.06, g: 0.08, b: 0.12, a: 1.0 })
+                .child(card)
+        }
+        let mut rt = Runtime::new(cached, view, (64.0, 64.0), Env { scale: 1.0, system_dark: true });
+        rt.frame(0.0);
+        let primitives = rt
+            .instances
+            .iter()
+            .enumerate()
+            .map(|(idx, inst)| Primitive::from_instance(inst, idx as u32 + 1, format!("cache/{idx}")))
+            .collect();
+        Scene {
+            width: 64,
+            height: 64,
+            clear: [0.025, 0.04, 0.06, 1.0],
+            primitives,
+            atlas: rune_ref::Atlas {
+                width: rune::text::ATLAS_SIZE,
+                height: rune::text::ATLAS_SIZE,
+                data: rt.text.atlas.data.clone(),
+            },
+        }
+    };
+    let uncached = build_scene(false);
+    let cached = build_scene(true);
+    assert!(
+        cached.primitives.iter().any(|p| p.params[1] == 8.0 && p.params[3] == 1.0),
+        "cached scene must emit KIND_LAYER with cache marker"
+    );
+    check(&mut gpu, &uncached, 2).expect("uncached CPU vs GPU");
+    check(&mut gpu, &cached, 2).expect("cached CPU vs GPU");
+    let gpu_uncached = gpu.render(&uncached);
+    let gpu_cached = gpu.render(&cached);
+    let mut cpu_uncached = Frame::new(64, 64, true);
+    cpu_uncached.render(&uncached);
+    let diff = compare(&cached, &cpu_uncached, &gpu_cached, 2);
+    assert_eq!(diff.outlier_pixels, 0, "cached GPU vs uncached CPU: {diff:?}");
+    for (a, b) in gpu_uncached.iter().zip(&gpu_cached) {
+        assert!(a.abs_diff(*b) <= 1, "cached vs uncached GPU mismatch: {a} vs {b}");
+    }
+}

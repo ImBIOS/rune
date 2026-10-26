@@ -118,6 +118,22 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   under `live_scale`, or under a `scale` an app changes (a zoom slider), rasterizes at the scale
   rounded to 1/32, and a changing `scale` samples rest-size glyphs until it holds still for
   0.1 s. A matched flight's own label keeps its rest size so it doesn't pop when it lands.
+- **Cached subtrees** (`.cache()`, `.cache_key(u64)`): rasterizes a settled subtree once into an
+  offscreen `Rgba16Float` layer texture (reusing the isolated-layer compositor in `layers.rs`) and
+  composites that single quad on subsequent frames without re-emitting or re-drawing its
+  descendants, including while an ancestor's `live_offset` or `live_scale` moves or scales it.
+  - **Invalidation:** derived automatically from the subtree's relative draw output (primitives,
+    text, layout, hover/focus/selection, theme and scale) with an optional `.cache_key(u64)` hint.
+  - **Live fallback:** while any node inside the subtree animates (springs, transitions, loops,
+    growth, word reveals, flights) or hosts a live compositor `El::effect` slot, `NativeSurface`,
+    native `SystemMaterial` or focused text input, the subtree bypasses the cache and draws live,
+    then re-caches once settled.
+  - **Scale and budget:** while an ancestor scale (`live_scale`, `El::scale`, or scale spring) is
+    changing, the existing cached texture is composited with clamped bilinear filtering and
+    re-rasterized at the new device-pixel resolution once the scale holds still for `0.12 s`.
+    Textures are capped at `4096×4096` device pixels and managed under a configurable LRU byte
+    budget (`Renderer::set_cache_budget`, `layers::DEFAULT_CACHE_BUDGET` = 64 MiB). Hit testing,
+    accessibility, `elements()` and `on_layout` are unchanged.
 - **Focus and modals**: `.focusable(true)`, `.tab_index(n)` (positive overrides, 0 document order,
   negative pointer-only), `.focus_group()` for arrow-key roving (Up/Down only, plus type-select,
   for roles `menu`, `listbox`, `list` and `tree`; Left/Right too for other groups such as

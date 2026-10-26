@@ -614,6 +614,18 @@ impl AnimationStore {
         self.index.get(&(node.0, prop.id.0)).is_some_and(|&t| self.t_slot[t as usize] != NONE)
     }
 
+    /// True when any property track on `node` is currently active.
+    pub fn is_node_animating(&self, node: NodeId) -> bool {
+        let mut t = self.node_head.get(&node.0).copied().unwrap_or(NONE);
+        while t != NONE {
+            if self.t_slot[t as usize] != NONE {
+                return true;
+            }
+            t = self.t_meta[t as usize].node_next;
+        }
+        false
+    }
+
     pub fn track_id<T>(&self, node: NodeId, prop: Prop<T>) -> Option<TrackId> {
         self.index.get(&(node.0, prop.id.0)).map(|&t| self.id_of(t as usize))
     }

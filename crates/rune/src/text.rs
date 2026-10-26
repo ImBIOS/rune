@@ -593,6 +593,8 @@ pub struct Atlas {
     pub data: Vec<u8>,
     /// Rows `[y0, y1)` changed since the last upload.
     pub dirty: Option<(u32, u32)>,
+    /// `(node_id, signature)` of `El::cache` targets currently resident in the GPU renderer.
+    pub(crate) resident_caches: HashMap<u64, u64>,
     shelf_x: u32,
     shelf_y: u32,
     shelf_h: u32,
@@ -604,6 +606,7 @@ impl Atlas {
     /// Marks every row for upload (a new texture, e.g. after the window's format changed).
     pub fn invalidate(&mut self) {
         self.dirty = Some((0, ATLAS_SIZE));
+        self.resident_caches.clear();
     }
 
     /// Rasterized glyph entries, for tests that bound the atlas.
@@ -614,6 +617,7 @@ impl Atlas {
         Atlas {
             data: vec![0; (ATLAS_SIZE * ATLAS_SIZE) as usize],
             dirty: None,
+            resident_caches: HashMap::new(),
             shelf_x: 1,
             shelf_y: 1,
             shelf_h: 0,

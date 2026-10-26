@@ -8,7 +8,7 @@ use crate::text::{ATLAS_SIZE, Atlas};
 #[path = "layers.rs"]
 mod layers;
 #[path = "layer_blur.rs"]
-mod layer_blur;
+pub(crate) mod layer_blur;
 pub use layers::LayerStats;
 
 pub const KIND_RECT: f32 = 0.0;
@@ -186,6 +186,24 @@ impl Instance {
     }
 }
 
+/// Pack a 64-bit integer into four exact non-negative 16-bit integer floats (`0.0..=65535.0`).
+pub(crate) fn pack_u64_f32(v: u64) -> [f32; 4] {
+    [
+        (v & 0xFFFF) as f32,
+        ((v >> 16) & 0xFFFF) as f32,
+        ((v >> 32) & 0xFFFF) as f32,
+        ((v >> 48) & 0xFFFF) as f32,
+    ]
+}
+
+/// Unpack a 64-bit integer from [`pack_u64_f32`].
+pub(crate) fn unpack_u64_f32(a: [f32; 4]) -> u64 {
+    (a[0] as u64 & 0xFFFF)
+        | ((a[1] as u64 & 0xFFFF) << 16)
+        | ((a[2] as u64 & 0xFFFF) << 32)
+        | ((a[3] as u64 & 0xFFFF) << 48)
+}
+
 /// Close a runtime scope, folding empty/single-draw groups back into the direct path. Only the
 /// last one or two records move, so video insertions before this scope keep their indices.
 pub(crate) fn end_layer(instances: &mut Vec<Instance>, surfaces: &mut [crate::native_surface::SurfaceDraw], marks: &mut Vec<u32>, start: usize, surface_start: usize) {
@@ -200,7 +218,7 @@ pub(crate) fn end_layer(instances: &mut Vec<Instance>, surfaces: &mut [crate::na
     let transfer_clip = scope.fade[3] == 0 && unmasked;
     // A lone effect slot keeps a faded scope: the compositor's paint can't take the opacity.
     let faded_effect = primitives == 1 && instances[start + 1].params[1] == KIND_EFFECT && scope.fill[3] != 1.0;
-    if !faded_effect && primitives + videos <= 1 && scope.params[0] == 0.0 && scope.params[2] == 0.0
+    if !faded_effect && primitives + videos <= 1 && scope.params[0] == 0.0 && scope.params[2] == 0.0 && scope.params[3] == 0.0
         && (transfer_clip || (scope.clip == NO_CLIP && scope.fade == [0; 4])) {
         let opacity = scope.fill[3];
         if primitives == 1 {
@@ -692,6 +710,7 @@ impl Renderer {
         }
         if start < self.count { self.image_batches.push((start..self.count, page)); }
         self.prepare_layers(device, queue, if has_layers { instances } else { &[] }, viewport);
+        self.sync_resident_caches(&mut atlas.resident_caches);
     }
 
     pub fn prepare_surfaces(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, draws: &[crate::native_surface::SurfaceDraw], viewport: (u32,u32)) {

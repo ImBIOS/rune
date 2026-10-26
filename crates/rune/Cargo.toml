@@ -114,6 +114,10 @@ wgpu = { version = "30", default-features = false, features = ["vulkan", "dx12"]
 name = "tree_swap"
 required-features = ["frame-profile"]
 
+[[example]]
+name = "cache_pan_zoom"
+required-features = ["frame-profile"]
+
 [[test]]
 name = "macos_appearance_kvo"
 harness = false

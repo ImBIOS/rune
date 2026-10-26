@@ -6,6 +6,10 @@ use std::ops::Range;
 // Linear premultiplied intermediates preserve HDR colours and avoid accumulating 8-bit
 // quantization through nested layers. The destination format is applied only at composition.
 pub(super) const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// Default offscreen texture budget for [`El::cache`](crate::El::cache) subtrees (64 MiB).
+pub const DEFAULT_CACHE_BUDGET: u64 = 64 * 1024 * 1024;
+/// Maximum width or height of a cached subtree's offscreen texture in device pixels.
+const MAX_CACHE_DIM: u32 = 4096;
 
 #[cfg(test)]
 #[path = "layer_tests.rs"]
@@ -20,10 +24,10 @@ mod rounded_clip_tests;
 #[path = "continuous_corner_tests.rs"]
 mod continuous_corner_tests;
 
-#[derive(Default)]
 pub(super) struct Layers {
     plan: Vec<Layer>,
     pub targets: Vec<Option<Target>>,
+    retained: Vec<Target>,
     stack: Vec<usize>,
     pipelines: Vec<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
     pub additive: Option<(wgpu::RenderPipeline, wgpu::RenderPipeline)>,
@@ -31,6 +35,27 @@ pub(super) struct Layers {
     viewport: (u32, u32),
     image_generation: u64,
     allocations: u64,
+    cache_budget: u64,
+    frame_stamp: u64,
+}
+
+impl Default for Layers {
+    fn default() -> Self {
+        Self {
+            plan: Vec::new(),
+            targets: Vec::new(),
+            retained: Vec::new(),
+            stack: Vec::new(),
+            pipelines: Vec::new(),
+            additive: None,
+            blur: None,
+            viewport: (0, 0),
+            image_generation: 0,
+            allocations: 0,
+            cache_budget: DEFAULT_CACHE_BUDGET,
+            frame_stamp: 0,
+        }
+    }
 }
 
 struct Layer {
@@ -46,6 +71,8 @@ struct Layer {
     blur: f32,
     support: f32,
     clip_radius: f32,
+    cache: Option<(u64, u64)>,
+    needs_render: bool,
 }
 
 pub(super) struct Target {
@@ -60,6 +87,10 @@ pub(super) struct Target {
     pub images: Vec<Option<wgpu::BindGroup>>,
     image_generation: u64,
     blur: Option<layer_blur::Scratch>,
+    cache_node: Option<u64>,
+    cache_sig: u64,
+    last_used: u64,
+    content_size: [f32; 2],
 }
 
 /// Resource/pass counters for diagnostics. The ordinary path creates no layer resources.
@@ -78,30 +109,82 @@ fn union(a: &mut [f32; 4], b: [f32; 4]) {
 }
 
 impl Renderer {
-    pub fn layer_stats(&self) -> LayerStats {
-        let mut stats = LayerStats { allocations: self.layers.allocations, ..Default::default() };
-        for t in self.layers.targets.iter().flatten() {
-            stats.targets += 1;
-            stats.bytes += u64::from(t.texture.width()) * u64::from(t.texture.height())
-                * u64::from(FORMAT.block_copy_size(None).unwrap());
-            if let Some(blur) = &t.blur {
-                stats.bytes += blur.bytes();
-                stats.extra_passes += blur.passes();
+    fn target_bytes(t: &Target) -> u64 {
+        let mut bytes = u64::from(t.texture.width()) * u64::from(t.texture.height())
+            * u64::from(FORMAT.block_copy_size(None).unwrap());
+        if let Some(blur) = &t.blur {
+            bytes += blur.bytes();
+        }
+        bytes
+    }
+
+    /// Maximum bytes of offscreen textures retained for [`El::cache`](crate::El::cache) subtrees
+    /// before least-recently-used entries are evicted. Defaults to 64 MiB.
+    pub fn set_cache_budget(&mut self, bytes: u64) {
+        self.layers.cache_budget = bytes;
+        let mut retained_bytes: u64 = self.layers.retained.iter().map(Self::target_bytes).sum();
+        while !self.layers.retained.is_empty() && retained_bytes > bytes {
+            let oldest = self.layers.retained.iter().enumerate().min_by_key(|(_, t)| t.last_used).unwrap().0;
+            retained_bytes -= Self::target_bytes(&self.layers.retained[oldest]);
+            self.layers.retained.swap_remove(oldest);
+        }
+    }
+
+    /// Current [`El::cache`](crate::El::cache) texture memory budget in bytes.
+    pub fn cache_budget(&self) -> u64 {
+        self.layers.cache_budget
+    }
+
+    pub(super) fn sync_resident_caches(&self, out: &mut std::collections::HashMap<u64, u64>) {
+        if !out.is_empty() {
+            out.clear();
+        }
+        for t in self.layers.targets.iter().flatten().chain(self.layers.retained.iter()) {
+            if let Some(node) = t.cache_node {
+                out.insert(node, t.cache_sig);
             }
         }
-        stats.extra_passes += stats.targets;
+    }
+
+    pub fn layer_stats(&self) -> LayerStats {
+        let mut stats = LayerStats { allocations: self.layers.allocations, ..Default::default() };
+        for (index, t) in self.layers.targets.iter().enumerate() {
+            let Some(t) = t else { continue };
+            stats.targets += 1;
+            stats.bytes += Self::target_bytes(t);
+            if let Some(blur) = &t.blur {
+                stats.extra_passes += blur.passes();
+            }
+            if self.layers.plan.get(index).is_none_or(|l| l.needs_render) {
+                stats.extra_passes += 1;
+            }
+        }
+        for t in &self.layers.retained {
+            stats.targets += 1;
+            stats.bytes += Self::target_bytes(t);
+        }
         stats
     }
 
     pub(super) fn prepare_layers(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, instances: &[Instance], viewport: (u32, u32)) {
         self.layers.viewport = viewport;
         let had_layers = !self.layers.plan.is_empty();
+        for slot in &mut self.layers.targets {
+            if slot.as_ref().is_some_and(|t| t.cache_node.is_some()) {
+                self.layers.retained.push(slot.take().unwrap());
+            }
+        }
         self.layers.plan.clear();
         self.layers.stack.clear();
         for (index, i) in instances.iter().enumerate() {
             if i.params[1] == KIND_LAYER {
                 let parent = self.layers.stack.last().copied();
-                let hidden = parent.is_some_and(|p| self.layers.plan[p].opacity == 0.0);
+                let parent_cached_hit = parent.is_some_and(|p| {
+                    self.layers.plan[p].cache.is_some_and(|(n, s)| {
+                        self.layers.retained.iter().any(|t| t.cache_node == Some(n) && t.cache_sig == s)
+                    })
+                });
+                let hidden = parent.is_some_and(|p| self.layers.plan[p].opacity == 0.0) || parent_cached_hit;
                 // Bound storage by the ancestor's required input, including filter support.
                 // Keep the actual clip separate so rounded corners never move.
                 let limit = parent.map_or(NO_CLIP, |p| {
@@ -111,6 +194,7 @@ impl Renderer {
                         p.clip[2].min(p.limit[2]) + grow, p.clip[3].min(p.limit[3]) + grow]
                 });
                 let blur = layer_blur::sigma(i.params[2]);
+                let cache = (i.params[3] == 1.0).then(|| (unpack_u64_f32(i.radii), unpack_u64_f32(i.uv)));
                 self.layers.stack.push(self.layers.plan.len());
                 self.layers.plan.push(Layer {
                     begin: index as u32, end: 0, parent,
@@ -123,6 +207,8 @@ impl Renderer {
                     blend: if i.params[0] == 1.0 { Blend::PlusLighter } else { Blend::SourceOver },
                     blur,
                     support: parent.map_or(0.0, |p| self.layers.plan[p].support) + (3.0 * blur).ceil(),
+                    cache,
+                    needs_render: true,
                 });
             } else if i.params[1] == KIND_LAYER_END {
                 let at = self.layers.stack.pop().expect("unbalanced layer end");
@@ -131,13 +217,25 @@ impl Renderer {
                 let grow = (3.0 * l.blur).ceil();
                 // Retain off-viewport sources that can contribute through this or an ancestor's
                 // filter. Clipping to the destination viewport before filtering loses those taps.
-                l.bounds = [(l.bounds[0] - grow).max(l.clip[0].max(l.limit[0]) - grow).max(-l.support).floor(),
+                let vis = [(l.bounds[0] - grow).max(l.clip[0].max(l.limit[0]) - grow).max(-l.support).floor(),
                     (l.bounds[1] - grow).max(l.clip[1].max(l.limit[1]) - grow).max(-l.support).floor(),
                     (l.bounds[2] + grow).min(l.clip[2].min(l.limit[2]) + grow).min(viewport.0 as f32 + l.support).ceil(),
                     (l.bounds[3] + grow).min(l.clip[3].min(l.limit[3]) + grow).min(viewport.1 as f32 + l.support).ceil()];
+                if l.cache.is_some() {
+                    if vis[2] <= vis[0] || vis[3] <= vis[1] {
+                        l.opacity = 0.0;
+                    }
+                    l.bounds = [l.bounds[0].floor(), l.bounds[1].floor(),
+                        l.bounds[2].ceil(), l.bounds[3].ceil()];
+                } else {
+                    l.bounds = vis;
+                }
                 let bounds = l.bounds;
-                if let Some(parent) = l.parent { union(&mut self.layers.plan[parent].bounds, bounds); }
+                if let Some(parent) = l.parent.filter(|&p| self.layers.plan[p].cache.is_none()) {
+                    union(&mut self.layers.plan[parent].bounds, bounds);
+                }
             } else if let Some(&at) = self.layers.stack.last() {
+                if self.layers.plan[at].cache.is_some() { continue; }
                 let mut rect = i.rect;
                 if i.params[1] == KIND_GLYPH && i.params[0] != 0.0 {
                     let (sin, cos) = i.params[0].sin_cos();
@@ -161,20 +259,83 @@ impl Renderer {
         }
         assert!(self.layers.stack.is_empty(), "unclosed layer scope");
         self.layers.targets.resize_with(self.layers.plan.len(), || None);
+        if !self.layers.plan.is_empty() || !self.layers.retained.is_empty() {
+            self.layers.frame_stamp += 1;
+        }
+        let stamp = self.layers.frame_stamp;
+        let max_dim = device.limits().max_texture_dimension_2d.min(MAX_CACHE_DIM);
+        let bpp = u64::from(FORMAT.block_copy_size(None).unwrap());
+        let mut active_cache_bytes = 0u64;
+
+        // First claim resident cache hits so existing on-screen caches never thrash under a tight budget.
         for index in 0..self.layers.plan.len() {
-            let additive_parent = self.layers.plan[index].parent.is_some_and(|p| self.layers.plan[p].blend == Blend::PlusLighter);
             let l = &mut self.layers.plan[index];
             l.bounds[2] = (l.bounds[2] - l.bounds[0]).max(0.0);
             l.bounds[3] = (l.bounds[3] - l.bounds[1]).max(0.0);
             if l.bounds[2] == 0.0 || l.bounds[3] == 0.0 { l.opacity = 0.0; }
-            if l.opacity == 0.0 || (l.opacity == 1.0 && l.blend == Blend::SourceOver && !additive_parent
-                && l.blur == 0.0 && l.clip_radius == 0.0 && l.clip == NO_CLIP) {
+            let Some((node_id, sig)) = l.cache.filter(|_| l.opacity > 0.0) else { continue };
+            let Some(pos) = self.layers.retained.iter().position(|t| t.cache_node == Some(node_id) && t.cache_sig == sig) else { continue };
+            let t_bytes = Self::target_bytes(&self.layers.retained[pos]);
+            let over_budget = active_cache_bytes + t_bytes > self.layers.cache_budget;
+            if over_budget && l.begin + 1 < l.end { continue; }
+            let mut t = self.layers.retained.swap_remove(pos);
+            if over_budget {
+                t.cache_node = None;
+            } else {
+                t.last_used = stamp;
+                active_cache_bytes += t_bytes;
+            }
+            l.needs_render = false;
+            let mut quad = Instance::begin_layer(l.bounds, l.clip, LayerSpec {
+                opacity: l.opacity, blend: l.blend, clip_radius: l.clip_radius, ..Default::default() });
+            quad.fade = l.fade;
+            if (t.content_size[0] - l.bounds[2]).abs() > 0.5 || (t.content_size[1] - l.bounds[3]).abs() > 0.5 {
+                quad.uv = [0.0, 0.0, t.content_size[0], t.content_size[1]];
+            }
+            queue.write_buffer(&t.quad, 0, bytemuck::bytes_of(&quad));
+            self.layers.targets[index] = Some(t);
+        }
+
+        for index in 0..self.layers.plan.len() {
+            if !self.layers.plan[index].needs_render { continue; }
+            let additive_parent = self.layers.plan[index].parent.is_some_and(|p| self.layers.plan[p].blend == Blend::PlusLighter);
+            let l = &mut self.layers.plan[index];
+            if l.opacity == 0.0 {
                 self.layers.targets[index] = None;
                 continue;
             }
             let bounds = l.bounds;
             let (width, height) = (bounds[2] as u32, bounds[3] as u32);
             let bucket = (width.div_ceil(64) * 64, height.div_ceil(64) * 64);
+            let mut cache_target = None;
+            if let Some((node_id, sig)) = l.cache {
+                let needed_bytes = u64::from(bucket.0) * u64::from(bucket.1) * bpp;
+                if bucket.0 <= max_dim && bucket.1 <= max_dim && active_cache_bytes + needed_bytes <= self.layers.cache_budget {
+                    active_cache_bytes += needed_bytes;
+                    cache_target = Some((node_id, sig));
+                    if let Some(pos) = self.layers.retained.iter().position(|t| t.cache_node == Some(node_id)) {
+                        self.layers.targets[index] = Some(self.layers.retained.swap_remove(pos));
+                    } else {
+                        let mut retained_bytes: u64 = self.layers.retained.iter().map(Self::target_bytes).sum();
+                        while !self.layers.retained.is_empty() && active_cache_bytes + retained_bytes > self.layers.cache_budget {
+                            let oldest = self.layers.retained.iter().enumerate().min_by_key(|(_, t)| t.last_used).unwrap().0;
+                            retained_bytes -= Self::target_bytes(&self.layers.retained[oldest]);
+                            self.layers.retained.swap_remove(oldest);
+                        }
+                    }
+                } else {
+                    if let Some(pos) = self.layers.retained.iter().position(|t| t.cache_node == Some(node_id)) {
+                        self.layers.retained.swap_remove(pos);
+                    }
+                    l.cache = None;
+                }
+            }
+            let l = &self.layers.plan[index];
+            if cache_target.is_none() && l.opacity == 1.0 && l.blend == Blend::SourceOver && !additive_parent
+                && l.blur == 0.0 && l.clip_radius == 0.0 && l.clip == NO_CLIP {
+                self.layers.targets[index] = None;
+                continue;
+            }
             if self.layers.targets[index].as_ref().is_none_or(|t| {
                 let size = (t.texture.width(), t.texture.height());
                 // The minimum bucket is unavoidable for tiny controls. Do not recreate that
@@ -198,12 +359,17 @@ impl Renderer {
                 let composite = Self::bind_group(device, &self.bind_layout, &self.globals, &self.atlas, &texture, None);
                 self.layers.targets[index] = Some(Target { texture, view, projection,
                     identity: self.layers.allocations + 1, composite_parent: None,
-                    quad: Self::instance_buffer(device, 1), base, composite, images: Vec::new(), image_generation: u64::MAX, blur: None });
+                    quad: Self::instance_buffer(device, 1), base, composite, images: Vec::new(), image_generation: u64::MAX, blur: None,
+                    cache_node: None, cache_sig: 0, last_used: 0, content_size: [0.0; 2] });
                 self.layers.allocations += 1;
             }
             let sigma = self.layers.plan[index].blur;
             if sigma > 0.0 && self.layers.blur.is_none() { self.layers.blur = Some(layer_blur::Pipeline::new(device)); }
             let t = self.layers.targets[index].as_mut().unwrap();
+            t.cache_node = cache_target.map(|(n, _)| n);
+            t.cache_sig = cache_target.map_or(0, |(_, s)| s);
+            t.last_used = stamp;
+            t.content_size = [bounds[2], bounds[3]];
             if sigma > 0.0 {
                 if t.blur.is_none() {
                     t.blur = Some(self.layers.blur.as_ref().unwrap().scratch(device, &t.texture));
@@ -220,6 +386,14 @@ impl Renderer {
                 opacity: l.opacity, blend: l.blend, clip_radius: l.clip_radius, ..Default::default() });
             quad.fade = l.fade;
             queue.write_buffer(&t.quad, 0, bytemuck::bytes_of(&quad));
+        }
+        if !self.layers.retained.is_empty() {
+            let mut retained_bytes: u64 = self.layers.retained.iter().map(Self::target_bytes).sum();
+            while !self.layers.retained.is_empty() && active_cache_bytes + retained_bytes > self.layers.cache_budget {
+                let oldest = self.layers.retained.iter().enumerate().min_by_key(|(_, t)| t.last_used).unwrap().0;
+                retained_bytes -= Self::target_bytes(&self.layers.retained[oldest]);
+                self.layers.retained.swap_remove(oldest);
+            }
         }
         // Rebind child composites to their nearest materialized parent (opaque scopes flatten).
         for index in 0..self.layers.plan.len() {
@@ -323,6 +497,7 @@ impl Renderer {
     pub(super) fn encode_layers_timed(&self, encoder: &mut wgpu::CommandEncoder, timestamps: Option<&wgpu::RenderPassTimestampWrites<'_>>, hook: &mut EffectHook<'_>) {
         let mut first = true;
         for (index, l) in self.layers.plan.iter().enumerate().rev() {
+            if !l.needs_render { continue; }
             let Some(target) = &self.layers.targets[index] else { continue };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("isolated group"),
@@ -362,7 +537,19 @@ impl Renderer {
                 pass.set_vertex_buffer(0, t.quad.slice(..));
                 pass.draw(0..4, 0..1);
             } else if l.opacity == 1.0 {
-                self.draw_layer_range(pass, format, l.begin + 1..l.end, target, hook);
+                if l.clip != NO_CLIP {
+                    let (origin, size) = self.target_frame(target);
+                    let edge = |v: f32, o: f32, max: u32| (v - o).clamp(0.0, max as f32) as u32;
+                    let (x0, y0) = (edge(l.clip[0].floor(), origin[0], size[0]), edge(l.clip[1].floor(), origin[1], size[1]));
+                    let (x1, y1) = (edge(l.clip[2].ceil(), origin[0], size[0]), edge(l.clip[3].ceil(), origin[1], size[1]));
+                    if x1 > x0 && y1 > y0 {
+                        pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                        self.draw_layer_range(pass, format, l.begin + 1..l.end, target, hook);
+                        pass.set_scissor_rect(0, 0, size[0], size[1]);
+                    }
+                } else {
+                    self.draw_layer_range(pass, format, l.begin + 1..l.end, target, hook);
+                }
             }
             cursor = l.end + 1;
         }

@@ -297,7 +297,19 @@ fn fs(i: Out) -> @location(0) vec4<f32> {
         // only here, on the completed layer, including the radius in word 3.
         let p = i.pos.xy + projection.xy - i.rect.xy;
         if (any(p < vec2<f32>(0.0)) || any(p >= i.rect.zw)) { discard; }
-        let color = textureLoad(images, vec2<i32>(floor(p)), 0);
+        var color: vec4<f32>;
+        if (i.uv.z > 0.0) {
+            let local = p * i.uv.zw / i.rect.zw - vec2<f32>(0.5);
+            let hi = vec2<i32>(i.uv.zw) - vec2<i32>(1);
+            let base = floor(local);
+            let f = local - base;
+            let t0 = clamp(vec2<i32>(base), vec2<i32>(0), hi);
+            let t1 = clamp(vec2<i32>(base) + vec2<i32>(1, 1), vec2<i32>(0), hi);
+            color = mix(mix(textureLoad(images, t0, 0), textureLoad(images, vec2<i32>(t1.x, t0.y), 0), f.x),
+                        mix(textureLoad(images, vec2<i32>(t0.x, t1.y), 0), textureLoad(images, t1, 0), f.x), f.y);
+        } else {
+            color = textureLoad(images, vec2<i32>(floor(p)), 0);
+        }
         // Float intermediates accumulate One/One without saturation. Clamp before applying
         // this scope's opacity so nesting preserves plus-lighter's bounded coverage.
         return select(color, clamp(color, vec4(0.0), vec4(1.0)), i.params.x == 1.0) * i.fill.a
