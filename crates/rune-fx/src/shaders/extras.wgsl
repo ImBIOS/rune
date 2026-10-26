@@ -104,6 +104,6 @@ fn shade(in: VOut) -> vec4f {
     let ip = vec2u(in.px);
     let n = u01(ip.x + pcg(ip.y + pcg(frame + c.seed))) + u01(ip.y * 7919u + pcg(ip.x + 17u + frame)) - 1.0;
     let a = i.p0.x * m;
-    if (n >= 0.0) { return vec4f(vec3f(n * a), 0.0); }
+    if (n >= 0.0) { return vec4f(vec3f(n * a), n * a); }
     return vec4f(0.0, 0.0, 0.0, -n * a);
 }

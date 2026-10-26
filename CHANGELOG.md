@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Grain is symmetric.** `Fx::grain` returned its light half as added light with zero coverage,
+  so with `srgb_blend` on each +0.02 of grain became about +40/255 on the framebuffer while the
+  dark half only dimmed by 2%: white snow over everything. The light half is now premultiplied
+  white (`vec4f(n * a)`), so grain moves a pixel toward white or black by the same fraction in
+  either blend mode and the mean stays put. Linear blend shifts a little too: its light half is
+  weaker than the old additive one, most at bright destinations.
+
 - **Tree and Table in rune-kit, and the core pieces they need.** `Tree` draws an app-owned
   `TreeModel` (`FileTree` builds one from paths, folders first, single-child folders as one
   row) with indent guides, springing chevrons, icons, change counts, type-ahead, filtering

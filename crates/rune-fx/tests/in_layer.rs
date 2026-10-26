@@ -163,6 +163,44 @@ fn faint_occlusion_keeps_the_glow_lit_in_gamma_blend() {
     assert!(lit >= 3, "the glow should light the samples");
 }
 
+fn grain_on_grey(_: &(), _: &mut Cx<()>) -> El {
+    el().size(96.0, 96.0).fill(hex("#808080").unwrap()).child(effect(1).absolute(0.0, 0.0).size(96.0, 96.0))
+}
+
+/// Grain is texture: over mid-grey it must lighten and darken by the same amount, and leave the
+/// mean where it was, in either blend mode.
+#[test]
+fn grain_is_symmetric_in_both_blend_modes() {
+    for srgb in [false, true] {
+        let (w, img) = snap_with("grain", grain_on_grey, srgb, Arc::default(), 1, || {
+            Fx::grain(GrainParams { amount: 0.06, ..Default::default() })
+        });
+        let (_, base) = snap_with("grain-base", grain_on_grey, srgb, Arc::default(), 1, || {
+            Fx::grain(GrainParams { amount: 0.0, ..Default::default() })
+        });
+        // Blending happens in linear light when `srgb` is off, so compare in the space the
+        // frame blends in; the grain moves each pixel toward white or black by the same fraction.
+        let space = |v: u8| if srgb { v as f64 / 255.0 } else { srgb_decode(v as f32 / 255.0) as f64 };
+        let (mut up, mut down, mut raw, mut n) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for y in 0..96 {
+            for x in 0..w.min(96) {
+                let (v, b) = (px(&img, w, x, y)[0], px(&base, w, x, y)[0]);
+                let (vs, bs) = (space(v), space(b));
+                if vs > bs { up += (vs - bs) / (1.0 - bs) } else { down += (bs - vs) / bs }
+                raw += v as f64 - b as f64;
+                n += 1.0;
+            }
+        }
+        let (up, down, raw) = (up / n, down / n, raw / n);
+        eprintln!("srgb {srgb}: mean fraction toward white {up:.4}, toward black {down:.4}, mean shift {raw:.3}/255");
+        assert!(up > 0.005 && down > 0.005, "srgb {srgb}: grain should show, up {up} down {down}");
+        assert!((up - down).abs() <= 0.1 * (up + down) / 2.0, "srgb {srgb}: toward white {up}, toward black {down}");
+        if srgb {
+            assert!(raw.abs() <= 1.0, "srgb {srgb}: mean shifts by {raw:.2}/255");
+        }
+    }
+}
+
 /// Writes `demo/fx/in-layer.png`: a fill in a faded, rounded, clipped card, linear blend on the
 /// left and gamma blend on the right. `cargo test -p rune-fx --test in_layer -- --ignored`.
 #[test]
