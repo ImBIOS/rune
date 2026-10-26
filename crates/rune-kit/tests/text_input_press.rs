@@ -309,3 +309,75 @@ fn any_unfocusable_element_can_keep_an_outside_field_focused_and_still_press() {
     rt.frame(1.0 / 60.0);
     assert!(!rt.state.field.focused, "without the flag a press blurs, as before");
 }
+
+#[test]
+fn a_plain_field_draws_no_box_but_still_focuses_on_a_press_anywhere_and_types() {
+    struct P { boxed: TextEdit, plain: TextEdit, actions: usize }
+    fn view(s: &P, _: &mut Cx<P>) -> El {
+        let k = Kit::neutral(true);
+        col().gap(8.0)
+            .child(TextInput::new(&s.boxed).leading_icon(k.glyph.search).on_edit(|s: &mut P| &mut s.boxed).build(&k).key("boxed"))
+            .child(
+                TextInput::new(&s.plain)
+                    .plain()
+                    .leading_icon(k.glyph.search)
+                    .clear_button()
+                    .on_edit(|s: &mut P| &mut s.plain)
+                    .on_action(|s: &mut P, _| s.actions += 1)
+                    .build(&k)
+                    .key("plain"),
+            )
+    }
+    let mut rt = Runtime::new(
+        P { boxed: TextEdit::new("a"), plain: TextEdit::new("hi"), actions: 0 },
+        view, (400.0, 120.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let info = |rt: &Runtime<P>, key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap();
+    let ink = |rt: &Runtime<P>, key: &str| {
+        let r = info(rt, key).rect;
+        rt.instances.iter().filter(|i| {
+            let (cx, cy) = (i.rect[0] + i.rect[2] * 0.5, i.rect[1] + i.rect[3] * 0.5);
+            cx >= r[0] && cx <= r[0] + r[2] && cy >= r[1] && cy <= r[1] + r[3] && i.rect[2] >= r[2] - 0.5
+        }).count()
+    };
+    assert_eq!(info(&rt, "plain").fill.a, 0.0, "no fill");
+    assert!(info(&rt, "boxed").fill.a > 0.0);
+    assert_eq!(ink(&rt, "plain"), 0, "unfocused plain draws no box, shadow or border");
+    assert!(ink(&rt, "boxed") > 0);
+
+    let b = info(&rt, "plain").rect;
+    // Press the box's far-left padding corner, not the editor.
+    rt.pointer_down(b[0] + 1.0, b[1] + b[3] - 1.0);
+    rt.pointer_up(b[0] + 1.0, b[1] + b[3] - 1.0);
+    rt.frame(1.0 / 60.0);
+    assert!(rt.state.plain.focused, "a press anywhere in the box focuses");
+    assert_eq!(ink(&rt, "plain"), 0, "focused plain draws no outline");
+    rt.key(rune::KeyEvent { key: rune::Key::Text("x".into()), mods: rune::Mods::default() });
+    rt.frame(0.0);
+    assert_eq!(rt.state.plain.text, "xhi", "typing reaches the field");
+    let clear = info(&rt, "action");
+    rt.pointer_down(clear.rect[0] + 2.0, clear.rect[1] + 2.0);
+    rt.pointer_up(clear.rect[0] + 2.0, clear.rect[1] + 2.0);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.actions, 1, "on_action still fires");
+}
+
+#[test]
+fn the_leading_icon_size_scales_the_icon_and_moves_the_text() {
+    struct P { a: TextEdit, b: TextEdit }
+    fn view(s: &P, _: &mut Cx<P>) -> El {
+        let k = Kit::neutral(true);
+        col()
+            .child(TextInput::new(&s.a).leading_icon(k.glyph.search).height(56.0).build(&k).key("a"))
+            .child(TextInput::new(&s.b).leading_icon(k.glyph.search).leading_icon_size(24.0).height(56.0).build(&k).key("b"))
+    }
+    let mut rt = Runtime::new(P { a: TextEdit::new("x"), b: TextEdit::new("x") }, view, (400.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let at = |path: &str| rt.elements().into_iter().find(|e| e.path.ends_with(path)).unwrap().rect;
+    let (ia, ib) = (at("a/value/leading"), at("b/value/leading"));
+    let (ta, tb) = (at("a/value/input"), at("b/value/input"));
+    assert_eq!((ia[2] - 8.0, ib[2] - 8.0), (16.0, 24.0), "icon box is pad plus the icon");
+    assert_eq!(tb[0] - ta[0], 8.0, "the text starts 8 points later");
+    let (a, b) = (at("a"), at("b"));
+    assert!(((ib[1] + ib[3] * 0.5) - (b[1] + b[3] * 0.5)).abs() < 0.01 && ((ia[1] + ia[3] * 0.5) - (a[1] + a[3] * 0.5)).abs() < 0.01);
+}

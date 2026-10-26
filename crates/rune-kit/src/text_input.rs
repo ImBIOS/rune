@@ -100,6 +100,8 @@ pub struct TextInput {
     height: Option<f32>,
     width: Option<f32>,
     leading: Option<&'static Icon>,
+    leading_size: f32,
+    plain: bool,
     trailing: Option<El>,
     copy: bool,
     clear: bool,
@@ -135,6 +137,8 @@ impl TextInput {
             height: None,
             width: Some(280.0),
             leading: None,
+            leading_size: 16.0,
+            plain: false,
             trailing: None,
             copy: false,
             clear: false,
@@ -174,6 +178,24 @@ impl TextInput {
     }
     pub fn leading_icon(mut self, i: &'static Icon) -> Self {
         self.leading = Some(i);
+        self
+    }
+    /// The leading icon's side in points (default 16). The icon stays vertically centred in the
+    /// box and the text's start moves with it.
+    pub fn leading_icon_size(mut self, points: f32) -> Self {
+        self.leading_size = points.max(1.0);
+        self
+    }
+    /// A borderless field for sitting inside something else, such as a header: no fill, sheen,
+    /// shadow, border, hover tint or focus outline, so the surrounding view is the context.
+    /// Focus shows only as the caret and selection, and an invalid field only as red text.
+    /// Everything else works as in the boxed field, including press-anywhere focus, the
+    /// leading icon, trailing slot, copy and clear buttons, and the same inner padding (8 points
+    /// before the leading icon or 2 before the text, 8 after the trailing end; the clear button
+    /// reaches the right edge). Width and height still apply; use `.width(None)` to fill the
+    /// parent. A disabled plain field is dimmed.
+    pub fn plain(mut self) -> Self {
+        self.plain = true;
         self
     }
     /// Trailing accessory element (e.g. a badge, hint, or reveal/copy buttons).
@@ -264,7 +286,7 @@ impl TextInput {
         let field = self.edits.apply(field, disabled);
         let mut value = row().key("value").grow(1.0).shrink().gap(6.0).center_y();
         if let Some(i) = self.leading {
-            value = value.child(el().key("leading").pl(8.0).center().child(icon(i, 16.0).color(c.icon_muted)));
+            value = value.child(el().key("leading").pl(8.0).center().child(icon(i, self.leading_size).color(c.icon_muted)));
         } else {
             value = value.child(el().w(2.0));
         }
@@ -302,6 +324,9 @@ impl TextInput {
                 b = self.copy_acts.apply(b.hit().hover(c.hover).press(crate::press_over(c.hover, c.pressed)), true);
             }
             e = e.child(b);
+        }
+        if self.plain {
+            return if disabled { e.dim(0.5) } else { e };
         }
         shell(k, e, [0.06, 0.02], self.state, self.invalid && !disabled, self.edit.focused && !disabled)
     }
