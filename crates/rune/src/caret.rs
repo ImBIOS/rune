@@ -11,7 +11,7 @@ impl<S: 'static> Runtime<S> {
         let (inp, spec, layout) = (n.input.as_ref()?, n.text.as_ref()?, n.text_layout.as_ref()?);
         if !inp.edit.focused { return None; }
         let s = self.env.scale;
-        let t = sticky::anchored_target(nodes, &self.scrolls, i);
+        let t = sticky::anchored_target(nodes, &self.scrolls, i, self.viewport);
         let y = t[1];
         let tw = layout.full_width().ceil() / s;
         let (x0, x1) = (t[0] + n.inset[0], t[2] - n.inset[2]);
@@ -32,7 +32,8 @@ impl<S: 'static> Runtime<S> {
         let Some(i) = self.focused_index() else { return };
         let Some(r) = self.caret_rect(&self.nodes, i) else { return };
         for horizontal in [false, true] {
-            let Some(v) = std::iter::successors(self.nodes[i].parent, |&p| self.nodes[p].parent)
+            let Some(v) = std::iter::successors(Some(i), |&p| self.nodes[p].parent.filter(|_| self.nodes[p].above.is_none()))
+                .skip(1)
                 .find(|&p| self.nodes[p].scroll.is_some() && self.nodes[p].scroll_axes.has(horizontal)) else { continue };
             let a = usize::from(!horizontal);
             let start = scroll_offsets(&self.scrolls, &self.nodes, v).fold(self.nodes[v].target[a], |p, o| p - o[a]);

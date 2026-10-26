@@ -384,6 +384,11 @@ impl Scene {
     pub fn presented(&self, id: NodeId) -> Option<Presented> {
         self.slot(id).and_then(|i| self.nodes[i].last)
     }
+    /// Root-space layout rect this frame (without this node's own offset or presence offset),
+    /// snapped to the same 1/64 device-px grid as [`Presented::rect`].
+    pub fn world(&self, id: NodeId) -> Option<Rect> {
+        self.slot(id).map(|i| snap_rect(self.nodes[i].world, self.store.pixel_scale()))
+    }
     pub fn len(&self) -> usize {
         self.index.len()
     }

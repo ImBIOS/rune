@@ -3662,7 +3662,7 @@ impl<S: 'static> Measurement<'_, S> {
                 && let Some(j) = nodes[..i].iter().position(|n| n.key.as_ref() == Some(&a.key))
             {
                 // Anchors inside scroll viewports sit where they are scrolled (and stuck) to.
-                let target = sticky::anchored_target(&nodes, self.scrolls, j);
+                let target = sticky::anchored_target(&nodes, self.scrolls, j, self.viewport);
                 (x, y) = anchor_position(a, target, (l.size.width, l.size.height), self.viewport);
                 nodes[i].local.x = x - px;
                 nodes[i].local.y = y - py;
@@ -5505,8 +5505,9 @@ impl<S: 'static> Runtime<S> {
                 if !self.cache_inside_scratch[i] { continue; }
                 let n = &self.nodes[i];
                 let live = store.is_node_animating(n.id)
-                    // Sticky descendants move within a raster without motion tracks.
+                    // Sticky and anchored descendants move within a raster without motion tracks.
                     || n.sticky.as_ref().is_some_and(|s| s.edge.is_some())
+                    || n.above.is_some()
                     || (!self.reduced_motion && self.loops.get(&n.id).is_some_and(|l| l.active(store.node_time(n.id))))
                     || self.grows.get(&n.id).is_some_and(|g| g.moving())
                     || self.scrolls.get(&n.id).is_some_and(|st| st.slack.height() > 0.0)
@@ -5627,17 +5628,19 @@ impl<S: 'static> Runtime<S> {
             {
                 let d = self.drawn[j];
                 let target = if d != [0.0; 4] { [d[0], d[1], d[0] + d[2], d[1] + d[3]] }
-                    else { sticky::anchored_target(&self.nodes, &self.scrolls, j) };
+                    else { sticky::anchored_target(&self.nodes, &self.scrolls, j, self.viewport) };
                 let (ax, ay) = anchor_position(a, target, (p.rect.w, p.rect.h), self.viewport);
-                // Placed from the presented size and anchor, so drop the frame's own position
-                // spring: with it, an End-aligned box growing in width would start from its old
-                // x and its end edge would swing out and back.
-                let lag = self.scene.get(n.id, prop::FRAME).map_or([0.0; 2], |f| {
-                    let t = self.scene.store().target(n.id, prop::FRAME).unwrap_or(f);
-                    [f.x - t.x, f.y - t.y]
-                });
-                pinh.dx = ax - n.target[0] - lag[0];
-                pinh.dy = ay - n.target[1] - lag[1];
+                // Placed from the presented size and anchor, so drop the scene's own layout
+                // position (this node's `prop::FRAME` x/y and its ancestors' origins) while
+                // keeping this node's own `prop::OFFSET` and transition offset: with the frame
+                // position spring left in, an End-aligned box growing in width would start from
+                // its old x and its end edge would swing out and back.
+                let w = self.scene.world(n.id).unwrap_or(p.rect);
+                pinh.dx = ax - w.x;
+                pinh.dy = ay - w.y;
+                pinh.scale = 1.0;
+                pinh.anchor = [0.0; 2];
+                pinh.anchor_to = [0.0; 2];
             }
             if self.has_sticky && let Some((edge, inset)) = n.sticky.as_ref().and_then(|s| Some((s.edge?, s.inset))) {
                 // Worked out from this frame's offsets, which the viewport above already applied.
@@ -7072,7 +7075,16 @@ impl<S: 'static> Runtime<S> {
                         live_intent |= 4 | 16;
                     }
                 }
-                let mut a = n.parent;
+                let step_up = |k: usize| {
+                    if let Some(a) = &self.nodes[k].above
+                        && let Some(j) = self.nodes[..k].iter().position(|n| n.key.as_ref() == Some(&a.key))
+                    {
+                        Some(j)
+                    } else {
+                        self.nodes[k].parent
+                    }
+                };
+                let mut a = step_up(i);
                 while let Some(pi) = a {
                     let parent = &self.nodes[pi];
                     moving |= animating(parent.id)
@@ -7081,7 +7093,7 @@ impl<S: 'static> Runtime<S> {
                     live_intent |= intent(parent);
                     scrolling |= self.scrolls.get(&parent.id).is_some_and(|s| s.scrolling);
                     in_growing_row |= self.grows.get(&parent.id).is_some_and(|g| g.moving());
-                    a = parent.parent;
+                    a = step_up(pi);
                 }
                 Some(ElementInfo {
                     trace_name: n.trace_name,
@@ -7444,7 +7456,8 @@ fn unwrapped_width(style: &mut Style, vertical: bool) {
 
 /// The (x, y) scroll offsets of node `i`'s scroll viewports, innermost first.
 fn scroll_offsets<'a>(scrolls: &'a HashMap<NodeId, ScrollState>, nodes: &'a [Node], i: usize) -> impl Iterator<Item = [f32; 2]> + 'a {
-    std::iter::successors(nodes[i].parent, |&p| nodes[p].parent)
+    std::iter::successors(Some(i), |&p| nodes[p].parent.filter(|_| nodes[p].above.is_none()))
+        .skip(1)
         .filter_map(|p| scrolls.get(&nodes[p].id).map(|st| [st.x.offset as f32, st.offset as f32]))
 }
 
@@ -8089,7 +8102,13 @@ fn flatten(
     let me = nodes.len();
     let parent_is_stack = parent.is_some_and(|p| nodes[p].growth.is_some());
     let animate_layout = el.animate_layout;
-    let in_row = if animate_layout && in_row == RowLayout::Snaps { RowLayout::Horizontal } else { in_row };
+    let in_row = if el.above.is_some() && (animate_layout || in_row == RowLayout::Horizontal) {
+        RowLayout::Free
+    } else if animate_layout && in_row == RowLayout::Snaps {
+        RowLayout::Horizontal
+    } else {
+        in_row
+    };
     let virtual_mount = el.virtual_mount;
     #[cfg(debug_assertions)]
     let scroll_source = el.scroll_source;
@@ -10475,36 +10494,44 @@ mod tests {
 
     #[test]
     fn slides_sweep_through_their_clip_and_sleep_when_hidden_or_reduced() {
-        fn view(s: &(bool, bool), cx: &mut Cx<(bool, bool)>) -> El {
+        type S = (bool, bool, Option<rune_motion::Easing>);
+        fn view(s: &S, cx: &mut Cx<S>) -> El {
             cx.reduced_motion(s.1);
             let mut track = crate::row().key("track").size(100.0, 8.0).clip_soft(0.0);
             if s.0 {
-                track = track.child(el().key("bar").w_frac(0.25).h_full().fill(Color::WHITE)
-                    .looping(rune_motion::LoopSpec::slide(1.0, [-1.0, 0.0], [4.0, 0.0])));
+                let mut spec = rune_motion::LoopSpec::slide(1.0, [-1.0, 0.0], [4.0, 0.0]);
+                if let Some(e) = s.2 { spec = spec.easing(e); }
+                track = track.child(el().key("bar").w_frac(0.25).h_full().fill(Color::WHITE).looping(spec));
             }
             col().size(100.0, 100.0).child(track)
         }
-        let bar = |rt: &Runtime<(bool, bool)>| {
+        let bar = |rt: &Runtime<S>| {
             rt.elements().into_iter().find(|e| e.key.as_deref() == Some("bar")).map(|e| e.rect[0])
         };
-        let mut rt = Runtime::new((true, false), view, (100.0, 100.0), Env::new(true, 2.0));
-        assert!(rt.frame(0.0), "a slide starting outside its clip must still run");
-        assert_eq!(bar(&rt), Some(-25.0));
-        let mut xs = Vec::new();
-        for _ in 0..128 { assert!(rt.frame(1.0 / 128.0)); xs.push(bar(&rt).unwrap()); }
-        assert!((xs[63] - 37.5).abs() < 0.01, "halfway through the period is the sweep's midpoint: {}", xs[63]);
-        assert!(xs[..127].windows(2).all(|w| w[1] >= w[0]));
-        assert_eq!(xs[127], -25.0, "the sweep wraps");
-        rt.state.0 = false; rt.invalidate();
-        for _ in 0..240 { rt.frame(1.0 / 120.0); }
-        assert!(!rt.animating);
-        let mut rt = Runtime::new((true, true), view, (100.0, 100.0), Env::new(true, 2.0));
-        assert!(!rt.frame(0.0));
-        assert_eq!(bar(&rt), Some(37.5), "reduced motion holds the midpoint");
-        let mut rt = Runtime::new((true, false), view, (100.0, 100.0), Env::new(true, 2.0));
-        rt.frame(0.0);
-        rt.set_live_visible(false);
-        assert!(!rt.frame(1.0 / 120.0));
+        for easing in [None, Some(rune_motion::Easing::LINEAR)] {
+            let mut rt = Runtime::new((true, false, easing), view, (100.0, 100.0), Env::new(true, 2.0));
+            assert!(rt.frame(0.0), "a slide starting outside its clip must still run");
+            assert_eq!(bar(&rt), Some(-25.0));
+            let mut xs = Vec::new();
+            for _ in 0..128 { assert!(rt.frame(1.0 / 128.0)); xs.push(bar(&rt).unwrap()); }
+            assert!((xs[63] - 37.5).abs() < 0.01, "halfway through the period is the sweep's midpoint: {}", xs[63]);
+            assert!(xs[..127].windows(2).all(|w| w[1] >= w[0]));
+            if easing == Some(rune_motion::Easing::LINEAR) {
+                let step = 125.0 / 128.0;
+                assert!(xs[..126].windows(2).all(|w| (w[1] - w[0] - step).abs() < 0.05));
+            }
+            assert_eq!(xs[127], -25.0, "the sweep wraps");
+            rt.state.0 = false; rt.invalidate();
+            for _ in 0..240 { rt.frame(1.0 / 120.0); }
+            assert!(!rt.animating);
+            let mut rt = Runtime::new((true, true, easing), view, (100.0, 100.0), Env::new(true, 2.0));
+            assert!(!rt.frame(0.0));
+            assert_eq!(bar(&rt), Some(37.5), "reduced motion holds the midpoint");
+            let mut rt = Runtime::new((true, false, easing), view, (100.0, 100.0), Env::new(true, 2.0));
+            rt.frame(0.0);
+            rt.set_live_visible(false);
+            assert!(!rt.frame(1.0 / 120.0));
+        }
     }
 
     #[test]

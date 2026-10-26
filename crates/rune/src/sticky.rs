@@ -289,7 +289,7 @@ pub(super) fn shift(edge: StickyEdge, inset: f32, [top, bottom, left, right]: [f
 
 /// Target rect of node `j` after its scroll viewports' offsets and any sticky shift on `j` or
 /// its ancestors, for `El::anchored`.
-pub(super) fn anchored_target(nodes: &[Node], scrolls: &HashMap<NodeId, ScrollState>, j: usize) -> [f32; 4] {
+pub(super) fn anchored_target(nodes: &[Node], scrolls: &HashMap<NodeId, ScrollState>, j: usize, viewport: (f32, f32)) -> [f32; 4] {
     let mut t = nodes[j].target;
     for [ox, oy] in scroll_offsets(scrolls, nodes, j) {
         t[0] -= ox;
@@ -297,7 +297,17 @@ pub(super) fn anchored_target(nodes: &[Node], scrolls: &HashMap<NodeId, ScrollSt
         t[1] -= oy;
         t[3] -= oy;
     }
-    let [dx, dy] = target_shift(nodes, scrolls, j);
+    let [mut dx, mut dy] = target_shift(nodes, scrolls, j);
+    if let Some(anc) = std::iter::successors(Some(j), |&p| nodes[p].parent).find(|&p| nodes[p].above.is_some())
+        && let Some(a) = &nodes[anc].above
+        && let Some(k) = nodes[..anc].iter().position(|n| n.key.as_ref() == Some(&a.key))
+    {
+        let at = anchored_target(nodes, scrolls, k, viewport);
+        let (w, h) = (nodes[anc].target[2] - nodes[anc].target[0], nodes[anc].target[3] - nodes[anc].target[1]);
+        let (ax, ay) = super::anchor_position(a, at, (w, h), viewport);
+        dx += ax - nodes[anc].target[0];
+        dy += ay - nodes[anc].target[1];
+    }
     t[0] += dx;
     t[2] += dx;
     t[1] += dy;
@@ -309,7 +319,7 @@ pub(super) fn anchored_target(nodes: &[Node], scrolls: &HashMap<NodeId, ScrollSt
 /// `scrolls`.
 fn target_shift(nodes: &[Node], scrolls: &HashMap<NodeId, ScrollState>, j: usize) -> [f32; 2] {
     let mut total = [0.0; 2];
-    for a in std::iter::successors(Some(j), |&p| nodes[p].parent) {
+    for a in std::iter::successors(Some(j), |&p| nodes[p].parent.filter(|_| nodes[p].above.is_none())) {
         let Some((edge, inset)) = nodes[a].sticky.as_ref().and_then(|s| Some((s.edge?, s.inset))) else { continue };
         let Some(p) = nodes[a].parent else { continue };
         if edge == StickyEdge::Left {

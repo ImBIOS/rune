@@ -37,14 +37,24 @@ impl<S: 'static> Runtime<S> {
     fn laid_out(&self, nodes: &[Node], i: usize) -> [f32; 4] {
         let t = nodes[i].target;
         let (mut dx, mut dy) = (0.0, 0.0);
-        let mut up = nodes[i].parent;
+        let mut up = nodes[i].parent.filter(|_| nodes[i].above.is_none());
         while let Some(p) = up {
             if let Some(st) = self.scrolls.get(&nodes[p].id) {
                 let origin = self.virtuals.values().find(|v| v.scroll_path == nodes[p].path).map_or(0.0, |v| v.before);
                 dy += st.offset as f32 - origin;
                 dx += st.x.offset as f32;
             }
-            up = nodes[p].parent;
+            up = nodes[p].parent.filter(|_| nodes[p].above.is_none());
+        }
+        if let Some(anc) = std::iter::successors(Some(i), |&p| nodes[p].parent).find(|&p| nodes[p].above.is_some())
+            && let Some(a) = &nodes[anc].above
+            && let Some(k) = nodes[..anc].iter().position(|n| n.key.as_ref() == Some(&a.key))
+        {
+            let at = sticky::anchored_target(nodes, &self.scrolls, k, self.viewport);
+            let (w, h) = (nodes[anc].target[2] - nodes[anc].target[0], nodes[anc].target[3] - nodes[anc].target[1]);
+            let (ax, ay) = anchor_position(a, at, (w, h), self.viewport);
+            dx -= ax - nodes[anc].target[0];
+            dy -= ay - nodes[anc].target[1];
         }
         [t[0] - dx, t[1] - dy, t[2] - t[0], t[3] - t[1]]
     }
@@ -167,12 +177,21 @@ impl<S: 'static> Runtime<S> {
         queued
     }
 
-    /// Whether a spring is moving node `i`'s drawn rect: its own, or an ancestor's.
+    /// Whether a spring is moving node `i`'s drawn rect: its own, its anchor's, or an ancestor's.
     fn rect_springing(&self, i: usize) -> bool {
         let store = self.scene.store();
         let n = &self.nodes[i];
+        let step = |p: usize| {
+            if let Some(a) = &self.nodes[p].above
+                && let Some(j) = self.nodes[..p].iter().position(|n| n.key.as_ref() == Some(&a.key))
+            {
+                Some(j)
+            } else {
+                self.nodes[p].parent
+            }
+        };
         self.flights.iter().any(|f| f.lands(&n.path, n.key.as_deref()))
-            || std::iter::successors(Some(i), |&p| self.nodes[p].parent).any(|p| {
+            || std::iter::successors(Some(i), |&p| step(p)).any(|p| {
                 let id = self.nodes[p].id;
                 store.is_animating(id, prop::FRAME) || store.is_animating(id, prop::TRAVEL) || store.is_animating(id, prop::PRESENCE)
                     || store.is_animating(id, prop::OFFSET) || store.is_animating(id, prop::SCALE) || store.is_animating(id, P_PRESS_SCALE)
