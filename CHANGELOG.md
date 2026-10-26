@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Gpu::instance()` no longer enables wgpu's indirect-call validation.** Rune issues no indirect
+  draws or dispatches, and the validation pipeline wgpu builds for every device cost about 40 ms
+  on a Mac's first launch after an install or update. Indirect draws a `Compositor` records on
+  Rune's device still run; wgpu no longer validates their argument buffers.
 - **Rows inserted in the same commit as a `scroll_into_view` land at full height again.** In a
   reader's virtual growth stack (unpinned, or `stick_bottom: false`), a commit that inserts
   rows and calls `tx.scroll_into_view` grew the new rows from zero since growth started springing

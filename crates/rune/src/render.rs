@@ -520,9 +520,15 @@ impl Gpu {
         Self::new(Self::instance(), None)
     }
 
+    /// Without `VALIDATION_INDIRECT_CALL`: Rune issues no indirect draws or dispatches, and the
+    /// validation pipeline wgpu would build for them costs every device a shader compile (about
+    /// 40 ms on a Mac's first launch after an install or update). Indirect draws a compositor
+    /// records on Rune's device still work; wgpu just doesn't check their argument buffers.
     pub fn instance() -> wgpu::Instance {
         let _serial = GPU_INIT.lock().unwrap_or_else(|e| e.into_inner());
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle())
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.flags.remove(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL);
+        wgpu::Instance::new(descriptor)
     }
 }
 
