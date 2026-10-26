@@ -5,6 +5,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`SidebarRow::subtitle_color(Color)`.** A two-line row's subtitle colour, in place of the
+  default `text_faint`.
 - **Sticky elements stay opaque under `El::scroll_edge_fade`.** `El::sticky_top`, `El::sticky_bottom`
   and `El::sticky_left` no longer inherit their scroll viewport's edge fade on the edge they stick
   to, so a stuck header's fill and text stay crisp and occlude rows scrolling under them, and

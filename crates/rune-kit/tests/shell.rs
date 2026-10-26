@@ -712,13 +712,16 @@ fn a_long_leading_title_truncates_and_keeps_the_trailing_slot_on_the_band() {
     assert!(long[0] + long[2] <= trail[0] + 0.5, "leading title overlaps the trailing slot: {long:?} {trail:?}");
 }
 
-/// One row alone: 0 plain, 1 two-line, 2 two-line and selected, 3 two-line with custom types.
+/// One row alone: 0 plain, 1 two-line, 2 two-line and selected, 3 two-line with custom types,
+/// 4 two-line with a muted subtitle.
 fn lone_row(variant: u8) -> Runtime<u8> {
     fn view(v: &u8, _: &mut Cx<u8>) -> El {
+        let k = Kit::neutral(true);
         let r = match v {
             0 => SidebarRow::new("Name"),
             1 => SidebarRow::new("Name").subtitle("Detail"),
             2 => SidebarRow::new("Name").subtitle("Detail").selected(true),
+            4 => SidebarRow::new("Name").subtitle("Detail").subtitle_color(k.c.text_muted),
             _ => SidebarRow::new("Name")
                 .subtitle("Detail")
                 .title_style(TextStyle::new(15.0, 600.0).lh(22.0))
@@ -750,6 +753,12 @@ fn a_two_line_row_has_a_stronger_first_line_and_fits_in_40_points() {
     }
     let rt = lone_row(3);
     assert_eq!((info(&rt, "label").rect[3], info(&rt, "subtitle").rect[3]), (22.0, 12.0));
+}
+
+#[test]
+fn a_two_line_rows_subtitle_takes_its_own_colour() {
+    let k = Kit::neutral(true);
+    assert_eq!(info(&lone_row(4), "subtitle").text_color, Some(k.c.text_muted));
 }
 
 #[test]

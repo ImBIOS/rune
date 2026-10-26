@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-use rune::{Anim, Drag, El, GrowthSpec, Icon, Key, Phase, ScrollSpec, TextEdit, TextStyle, Tx, col, el, icon, row, text, text_input};
+use rune::{Anim, Color, Drag, El, GrowthSpec, Icon, Key, Phase, ScrollSpec, TextEdit, TextStyle, Tx, col, el, icon, row, text, text_input};
 
 use super::reorder::Reorder;
 use crate::{ControlSize, IconButton, IconButtonVariant, Kit, Spinner};
@@ -340,6 +340,7 @@ pub struct SidebarRow {
     height: Option<f32>,
     title_style: Option<TextStyle>,
     subtitle_style: Option<TextStyle>,
+    subtitle_color: Option<Color>,
     select_only: bool,
     rename: Option<(TextEdit, Apply)>,
     reorder: Option<Reordering>,
@@ -363,6 +364,7 @@ impl SidebarRow {
             height: None,
             title_style: None,
             subtitle_style: None,
+            subtitle_color: None,
             select_only: false,
             rename: None,
             reorder: None,
@@ -394,6 +396,11 @@ impl SidebarRow {
     /// The subtitle's type, in place of the default (the kit's `caption`).
     pub fn subtitle_style(mut self, style: TextStyle) -> Self {
         self.subtitle_style = Some(style);
+        self
+    }
+    /// The subtitle's colour, in place of the default (`text_faint`).
+    pub fn subtitle_color(mut self, color: Color) -> Self {
+        self.subtitle_color = Some(color);
         self
     }
     /// A row that shows the selection but never takes focus: for a list driven from outside,
@@ -577,7 +584,7 @@ impl SidebarRow {
             // Two lines: the lead and the label, then the subtitle under the label.
             Some(sub) => {
                 let first = row().key("line1").w_full().gap(6.0).center_y().children(lead).child(label);
-                let second = text(sub).key("subtitle").font(sub_font).color(c.text_faint).truncate().w_full();
+                let second = text(sub).key("subtitle").font(sub_font).color(self.subtitle_color.unwrap_or(c.text_faint)).truncate().w_full();
                 let second = row().key("line2").w_full().pl(if has_lead { 16.0 + 6.0 } else { 0.0 }).child(second);
                 r.child(col().key("lines").grow(1.0).shrink().min_w(0.0).child(first).child(second))
             }
