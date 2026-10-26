@@ -15,5 +15,6 @@ wgpu = { version = "30", default-features = false, features = ["vulkan", "dx12"]
 
 [dev-dependencies]
 rune = { path = "../rune" }
+rune-ref = { path = "../rune-ref" }
 ab_glyph = "0.2.32"
 png = "0.18"

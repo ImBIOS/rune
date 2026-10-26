@@ -4,6 +4,7 @@
 //! after each source-over operation, including clear. See research/24.
 
 pub mod generate;
+pub mod blend;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 mod shader;

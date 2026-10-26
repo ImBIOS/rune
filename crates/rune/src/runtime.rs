@@ -5555,12 +5555,17 @@ impl<S: 'static> Runtime<S> {
                     let ancestor = &self.nodes[p];
                     if let Some(radius) = ancestor.vis.clip_radius {
                         let [x, y, w, h] = self.drawn[p].map(|v| v * s);
-                        let radius = (radius * self.inh_scratch[p].scale * s).min(w.min(h) * 0.5);
-                        let radius = if ancestor.vis.continuous_corners { -radius } else { radius };
+                        let radii = ancestor.vis.clip_corners.unwrap_or_else(|| {
+                            if ancestor.vis.radius != [0.0; 4] {
+                                self.scene.presented(ancestor.id).map_or(ancestor.vis.radius, |p| p.radius.0)
+                            } else { [radius; 4] }
+                        }).map(|radius| {
+                            let radius = (radius.max(0.0) * self.inh_scratch[p].scale * s).min(w.min(h) * 0.5);
+                            if ancestor.vis.continuous_corners { -radius } else { radius }
+                        });
                         let start = self.instances.len();
-                        let mut marker = Instance::begin_layer([x, y, w, h], pinh.clip,
-                            crate::render::LayerSpec { clip_radius: radius, ..Default::default() });
-                        marker.round_clip(radius);
+                        let mut marker = Instance::begin_layer([x, y, w, h], [x, y, x + w, y + h], Default::default());
+                        marker.round_clip_corners(radii);
                         self.instances.push(marker);
                         layers.push((p, start, self.surfaces.len()));
                     }
@@ -5830,9 +5835,7 @@ impl<S: 'static> Runtime<S> {
             // A negative clip radius rounds with continuous corners (`render::corner_extent`).
             let mut own_round = n.vis.clip_corners.or_else(|| {
                 n.vis.clip_radius.map(|radius| {
-                    if n.vis.radius != [0.0; 4]
-                        && (n.vis.radius != [n.vis.radius[0]; 4] || radius == 0.0 || n.vis.radius == [radius; 4])
-                    {
+                    if n.vis.radius != [0.0; 4] {
                         p.radius.0
                     } else {
                         [radius; 4]

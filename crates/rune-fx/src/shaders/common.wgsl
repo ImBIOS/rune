@@ -99,7 +99,7 @@ fn pixel(in: VOut) -> vec2f {
 
 fn effective_blend_mode(i: Inst) -> u32 {
     let m = (u32(i.t.w) >> 1u) & 7u;
-    if ((m == 3u || m == 4u) && backdrop_encoding.y < 0.5) {
+    if ((m == 1u || m == 3u || m == 4u) && backdrop_encoding.y < 0.5) {
         return 0u;
     }
     return m;
@@ -146,14 +146,16 @@ fn fs(in: VOut) -> @location(0) vec4f {
     if (as_ <= 0.0) { return vec4f(0.0); }
     let cs_lin = select(vec3f(0.0), clamp(c.rgb / m, vec3f(0.0), vec3f(1.0)), m > 1e-6);
     let cs = select(cs_lin, to_srgb(cs_lin), g.srgb > 0.5);
-    if (mode == 1u || mode == 2u) {
+    if (mode == 2u) {
         return vec4f(cs * as_, as_);
     }
     let b_lin = bd(in.px, 1.0);
     let ab = clamp(b_lin.a, 0.0, 1.0);
     let cb_lin = select(vec3f(0.0), clamp(b_lin.rgb / ab, vec3f(0.0), vec3f(1.0)), ab > 1e-6);
     let cb = select(cb_lin, to_srgb(cb_lin), g.srgb > 0.5);
-    let blended = select(blend_soft_light(cb, cs), blend_overlay(cb, cs), mode == 3u);
+    var blended = cb * cs;
+    if (mode == 3u) { blended = blend_overlay(cb, cs); }
+    if (mode == 4u) { blended = blend_soft_light(cb, cs); }
     return vec4f(mix(cs, blended, ab) * as_, as_);
 }
 

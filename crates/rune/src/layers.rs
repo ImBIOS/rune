@@ -72,7 +72,6 @@ struct Layer {
     blend: Blend,
     blur: f32,
     support: f32,
-    clip_radius: f32,
     cache: Option<(u64, u64)>,
     needs_render: bool,
 }
@@ -206,7 +205,6 @@ impl Renderer {
                     clip: i.clip,
                     limit,
                     fade: i.fade,
-                    clip_radius: f32::from_bits(i.fade[3]),
                     opacity: if hidden { 0.0 } else { i.fill[3].clamp(0.0, 1.0) },
                     blend: if i.params[0] == 1.0 { Blend::PlusLighter } else { Blend::SourceOver },
                     blur,
@@ -292,7 +290,7 @@ impl Renderer {
             }
             l.needs_render = false;
             let mut quad = Instance::begin_layer(l.bounds, l.clip, LayerSpec {
-                opacity: l.opacity, blend: l.blend, clip_radius: l.clip_radius, ..Default::default() });
+                opacity: l.opacity, blend: l.blend, ..Default::default() });
             quad.fade = l.fade;
             if (t.content_size[0] - l.bounds[2]).abs() > 0.5 || (t.content_size[1] - l.bounds[3]).abs() > 0.5 {
                 quad.uv = [0.0, 0.0, t.content_size[0], t.content_size[1]];
@@ -394,7 +392,7 @@ impl Renderer {
             queue.write_buffer(&t.projection, 0, bytemuck::cast_slice(&bounds));
             let l = &self.layers.plan[index];
             let mut quad = Instance::begin_layer(bounds, l.clip, LayerSpec {
-                opacity: l.opacity, blend: l.blend, clip_radius: l.clip_radius, ..Default::default() });
+                opacity: l.opacity, blend: l.blend, ..Default::default() });
             quad.fade = l.fade;
             queue.write_buffer(&t.quad, 0, bytemuck::bytes_of(&quad));
         }

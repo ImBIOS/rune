@@ -169,12 +169,13 @@ Fx::fill(FlutedGlassParams { rib: 10.0, frost: 0.4, ..FlutedGlassParams::reeded(
   is cut by rounded container corners and soft scroll-edge feathers (`CLIP_WGSL`).
 - `FxSlot::blend(FxBlend)` selects how a slot composites onto the target beneath it:
   `FxBlend::Normal` (default premultiplied source-over with additive light), `FxBlend::Multiply`,
-  `FxBlend::Screen`, `FxBlend::Overlay`, or `FxBlend::SoftLight`. `Multiply` and `Screen` use
-  fixed-function `wgpu::BlendState` (zero backdrop reads); `Overlay` and `SoftLight` sample the
+  `FxBlend::Screen`, `FxBlend::Overlay`, or `FxBlend::SoftLight`. `Screen` uses
+  fixed-function `wgpu::BlendState` (zero backdrop reads); `Multiply`, `Overlay` and `SoftLight` sample the
   backdrop (`FxFrame::backdrop` or `EffectSite::backdrop` via `set_layer_backdrop` /
   `blur_backdrop`, setting `FxStats::needs_backdrop`) and fall back to `Normal` when no backdrop
   is bound. Separable formulas run in the frame's working colour space (linear light by default, or
-  sRGB when `set_srgb_blend(true)` is active).
+  sRGB when `set_srgb_blend(true)` is active). Overlay and SoftLight have little contrast near
+  white by definition; use Multiply for a strong coloured halo on light surfaces.
 - `set_srgb_blend(frame.srgb_blend())` matches a gamma-blended Rune frame: the premultiplied output
   is sRGB-encoded for the non-sRGB target. When prepared without `FxFrame::backdrop`, per-slot
   `backdrop` / `blurred` samples default to that same encoding and are decoded before shading.

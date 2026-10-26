@@ -971,8 +971,8 @@ pub struct FxLayer {
 /// separable formulas in the frame's working colour space: linear light by default, or sRGB
 /// when `FxRenderer::set_srgb_blend(true)` matches `rune::Tx::set_srgb_blend`.
 ///
-/// `Multiply` and `Screen` use fixed-function `wgpu::BlendState` with zero backdrop reads.
-/// `Overlay` and `SoftLight` sample the backdrop (`FxFrame::backdrop` or `EffectSite::backdrop`
+/// `Screen` uses fixed-function `wgpu::BlendState` with zero backdrop reads.
+/// `Multiply`, `Overlay` and `SoftLight` sample the backdrop (`FxFrame::backdrop` or `EffectSite::backdrop`
 /// via `set_layer_backdrop` / `blur_backdrop`) and fall back to `Normal` when no backdrop is
 /// available (for example, on a target without `COPY_SRC`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -988,16 +988,16 @@ pub enum FxBlend {
 impl FxBlend {
     /// True when the blend mode samples the backdrop texture in the fragment shader.
     pub const fn needs_backdrop(self) -> bool {
-        matches!(self, Self::Overlay | Self::SoftLight)
+        matches!(self, Self::Multiply | Self::Overlay | Self::SoftLight)
     }
 
     /// Additional per-pixel cost of this blend mode on top of the effect's own `Fx::cost`.
     pub const fn cost(self) -> FxCost {
         match self {
-            Self::Normal | Self::Multiply | Self::Screen => {
+            Self::Normal | Self::Screen => {
                 FxCost { passes: 0, samples: 0, alu: 0, backdrop: false, source: false }
             }
-            Self::Overlay | Self::SoftLight => {
+            Self::Multiply | Self::Overlay | Self::SoftLight => {
                 FxCost { passes: 0, samples: 1, alu: 1, backdrop: true, source: false }
             }
         }
@@ -1510,6 +1510,21 @@ impl FxLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparkle_cap_and_tables_reach_64_without_regrowing() {
+        let p = SparkleParams { count: 100, burst: Some(0.0), life: 10.0, ..Default::default() };
+        let layer = Fx::sparkles(p).on(card()).at(1.0);
+        let (_, packed, _) = layer.pack().unwrap();
+        assert_eq!(packed.p0[0], 64.0);
+        assert_eq!(layer.fx.cost().samples, 128);
+        let mut table = Vec::with_capacity(128);
+        let capacity = table.capacity();
+        let (_, count) = cpu::sparkles(&p, card().rect, 1.0, 1, false, &mut table);
+        assert!(count > 32.0 && count <= 64.0);
+        assert_eq!(table.len(), count as usize * 2);
+        assert_eq!(table.capacity(), capacity);
+    }
 
     fn card() -> Shape {
         Shape::rounded(100.0, 100.0, 200.0, 120.0, 16.0)

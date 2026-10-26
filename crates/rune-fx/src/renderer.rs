@@ -127,12 +127,12 @@ impl BlurPyramid {
 }
 
 pub struct FxRenderer {
-    pipelines: Vec<[wgpu::RenderPipeline; 3]>,
+    pipelines: Vec<[wgpu::RenderPipeline; 2]>,
     format: wgpu::TextureFormat,
     layout: wgpu::PipelineLayout,
     modules: Vec<wgpu::ShaderModule>,
-    /// Pipelines for other target formats (`add_format`), one triple per effect family.
-    extra: Vec<(wgpu::TextureFormat, Vec<[wgpu::RenderPipeline; 3]>)>,
+    /// Pipelines for other target formats (`add_format`), one pair per effect family.
+    extra: Vec<(wgpu::TextureFormat, Vec<[wgpu::RenderPipeline; 2]>)>,
     srgb: Option<bool>,
     bgl0: wgpu::BindGroupLayout,
     bgl1: wgpu::BindGroupLayout,
@@ -378,17 +378,9 @@ impl FxRenderer {
         }
     }
 
-    fn pipelines(device: &wgpu::Device, layout: &wgpu::PipelineLayout, modules: &[wgpu::ShaderModule], format: wgpu::TextureFormat) -> Vec<[wgpu::RenderPipeline; 3]> {
+    fn pipelines(device: &wgpu::Device, layout: &wgpu::PipelineLayout, modules: &[wgpu::ShaderModule], format: wgpu::TextureFormat) -> Vec<[wgpu::RenderPipeline; 2]> {
         let blends = [
             wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-            wgpu::BlendState {
-                color: wgpu::BlendComponent {
-                    src_factor: wgpu::BlendFactor::Dst,
-                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                    operation: wgpu::BlendOperation::Add,
-                },
-                alpha: wgpu::BlendComponent::OVER,
-            },
             wgpu::BlendState {
                 color: wgpu::BlendComponent {
                     src_factor: wgpu::BlendFactor::One,
@@ -651,9 +643,8 @@ impl FxRenderer {
             pass.set_viewport(-origin[0], -origin[1], self.viewport[0] as f32, self.viewport[1] as f32, 0.0, 1.0);
         }
         let blend_idx = match p.blend {
-            FxBlend::Multiply => 1,
-            FxBlend::Screen => 2,
-            FxBlend::Normal | FxBlend::Overlay | FxBlend::SoftLight => 0,
+            FxBlend::Screen => 1,
+            FxBlend::Normal | FxBlend::Multiply | FxBlend::Overlay | FxBlend::SoftLight => 0,
         };
         pass.set_pipeline(&pipelines[p.kind][blend_idx]);
         pass.set_bind_group(0, self.bg0.as_ref().unwrap(), &[]);

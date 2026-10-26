@@ -642,10 +642,12 @@ fn fx_blend_modes_over_cream_paper_and_fallback_without_backdrop() {
         assert_ne!(rim_soft, rim_norm, "srgb={srgb} SoftLight differs from Normal on cream paper");
         assert_ne!(rim_ovl, rim_soft, "srgb={srgb} Overlay and SoftLight are distinct");
 
-        // Without a bound backdrop (e.g. a target lacking COPY_SRC), Overlay and SoftLight
+        // Without a bound backdrop (e.g. a target lacking COPY_SRC), sampled modes
         // degrade cleanly to Normal.
         let overlay_no_bd = render_mode(&mut fx, FxBlend::Overlay, false);
         let soft_no_bd = render_mode(&mut fx, FxBlend::SoftLight, false);
+        let multiply_no_bd = render_mode(&mut fx, FxBlend::Multiply, false);
+        assert_eq!(multiply_no_bd, normal, "srgb={srgb} Multiply without backdrop falls back to Normal");
         assert_eq!(overlay_no_bd, normal, "srgb={srgb} Overlay without backdrop falls back to Normal");
         assert_eq!(soft_no_bd, normal, "srgb={srgb} SoftLight without backdrop falls back to Normal");
     }

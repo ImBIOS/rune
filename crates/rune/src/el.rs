@@ -2474,12 +2474,14 @@ impl El {
     /// intersections use a layer. Hit testing uses the rectangular clip bounds, including visually
     /// clipped corner areas.
     pub fn clip_rounded(mut self, radius: f32) -> Self {
+        self.vis.clip_corners = None;
         self.vis.clip_radius = Some(radius.max(0.0));
         self
     }
     /// Clip this element and its descendants to its presented rectangle with per-corner radii
     /// `[top_left, top_right, bottom_right, bottom_left]` in points, capped at half the shorter
-    /// edge and following [`El::continuous_corners`].
+    /// edge and following [`El::continuous_corners`]. Unlike [`El::clip_rounded`], ignores the
+    /// element's paint radii. Hit testing still uses the rectangular clip bounds.
     pub fn clip_corners(mut self, radii: [f32; 4]) -> Self {
         let clamped = radii.map(|r| r.max(0.0));
         self.vis.clip_corners = Some(clamped);

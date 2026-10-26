@@ -299,7 +299,8 @@ pub struct Instance {
     /// Attribute 7 is Uint32x4; the instance ABI stays 128 bytes (8 × vec4).
     /// [0] = pack2x16float(left, top), [1] = pack2x16float(right, bottom) widths.
     /// [2] = pack4x8unorm(clamp(inward origin→clip distance / width, 0, 1)), LTRB.
-    /// [3] = f32 clip-radius bits; the rounded rectangle is `clip`.
+    /// [3] = signed uniform f32 clip-radius bits or tagged mixed radii (`pack_clip_radii`).
+    /// The rounded rectangle is `clip`; fade widths never occupy this word.
     /// Layer records may leave all four words zero. See `pack_fade`.
     pub fade: [u32; 4],
 }
@@ -329,10 +330,13 @@ pub const NO_CLIP: [f32; 4] = [-1e6, -1e6, 1e6, 1e6];
 /// into `Instance::fade[3]`, clamping each corner to half the shorter `clip` side.
 /// Uniform corners stay an exact IEEE-754 `f32`; mixed corners use the `0x6000_0000`
 /// high-exponent tag (`|r| >= 2^65` in IEEE-754) with 4 × 7-bit magnitudes.
+/// Mixed radii round to 0.5 px through 63.5 px, otherwise 2 px, saturating at 254 px.
+/// All nonzero radii must have the same sign (one curve style per clip). Uniform radii
+/// saturate just below the tag's exponent range, far beyond device-pixel coordinates.
 pub fn pack_clip_radii(clip: [f32; 4], radii: [f32; 4]) -> u32 {
     let half = ((clip[2] - clip[0]).min(clip[3] - clip[1]) * 0.5).max(0.0);
     let clamped = radii.map(|radius| {
-        let r = radius.abs().min(half);
+        let r = radius.abs().min(half).min(f32::from_bits(0x5fff_ffff));
         if radius < 0.0 && r > 0.0 { -r } else { r }
     });
     if clamped[0] == clamped[1] && clamped[1] == clamped[2] && clamped[2] == clamped[3] {

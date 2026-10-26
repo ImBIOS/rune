@@ -2,6 +2,100 @@ use super::*;
 use super::tests::pixels;
 use crate::{Color, Cx, El, Env, Live, Runtime, el};
 
+#[test]
+fn packed_clip_radii_boundaries_and_fade_lanes_do_not_collide() {
+    let rect = [0.0, 0.0, 2000.0, 2000.0];
+    for (radii, want) in [
+        ([0.0, 0.24, 12.26, 63.5], [0.0, 0.0, 12.5, 63.5]),
+        ([0.0, 63.6, 127.0, 254.0], [0.0, 64.0, 128.0, 254.0]),
+        ([0.0, 256.0, 500.0, 2000.0], [0.0, 254.0, 254.0, 254.0]),
+        ([-1.0, -12.5, 0.0, -63.5], [-1.0, -12.5, 0.0, -63.5]),
+    ] {
+        assert_eq!(unpack_clip_radii(pack_clip_radii(rect, radii)), want);
+    }
+    for r in [0.0, 0.125, 63.75, 254.5, 999.0, -999.0] {
+        assert_eq!(unpack_clip_radii(pack_clip_radii(rect, [r; 4])), [r; 4]);
+    }
+    for r in [1e30, -1e30, f32::INFINITY] {
+        let word = pack_clip_radii([0.0, 0.0, 1e35, 1e35], [r; 4]);
+        assert_ne!(word & 0x6000_0000, 0x6000_0000, "uniform radius cannot become a tag");
+        assert!(unpack_clip_radii(word).iter().all(|v| v.is_finite() && v.abs() > 1e18));
+    }
+    let fade = pack_fade([65504.0; 4], rect, rect);
+    assert_eq!(fade[3], 0, "even maximal fade widths never occupy the radius word");
+}
+
+#[test]
+fn rounded_clip_follows_paint_radii_unless_explicitly_overridden() {
+    fn view(mode: &u8, _: &mut Cx<u8>) -> El {
+        let card = el().size(80.0, 40.0).corners([12.0; 4]).clip_rounded(4.0);
+        let card = match mode {
+            1 => card.clip_corners([4.0; 4]),
+            2 => card.clip_corners([4.0; 4]).clip_rounded(8.0),
+            _ => card,
+        };
+        card.child(el().size(80.0, 40.0).fill(Color::WHITE))
+    }
+    for (mode, want) in [(0, 12.0), (1, 4.0), (2, 12.0)] {
+        let mut rt = Runtime::new(mode, view, (80.0, 40.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert!(rt.instances.iter().any(|i| unpack_clip_radii(i.fade[3]) == [want; 4]));
+    }
+}
+
+#[test]
+fn per_corner_video_clip_matches_the_primitive_mask() {
+    use crate::native_surface::{ByteFrame, ColorInfo, Format, NativeSurface, SurfaceFit};
+    type State = (NativeSurface, bool, bool);
+    fn view(s: &State, _: &mut Cx<State>) -> El {
+        let mut card = el().size(48.0, 32.0).absolute(8.0, 8.0).corners([12.0, 4.0, 0.0, 8.0]);
+        if s.2 { card = card.continuous_corners(); }
+        if s.1 {
+            card.clip_rounded(2.0).child(el().size(64.0, 48.0).absolute(-8.0, -8.0).native_surface(&s.0, SurfaceFit::Fill))
+        } else {
+            card.clip_soft(0.0).fill(Color::WHITE)
+        }
+    }
+    let surface = NativeSurface::new();
+    surface.push_bytes(ByteFrame { width: 1, height: 1, format: Format::Bgra, color: ColorInfo::default(),
+        planes: [vec![255; 4], vec![]] }, 1).unwrap();
+    let gpu = Gpu::headless();
+    // Compare mask coverage directly, without sRGB amplification of near-zero AA residuals.
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut renderer = Renderer::new(&gpu.device, format);
+    let target = Offscreen::with_format(&gpu.device, 64, 48, format);
+    for continuous in [false, true] {
+        let mut outs = Vec::new();
+        for video in [false, true] {
+            let mut rt = Runtime::new((surface.clone(), video, continuous), view, (64.0, 48.0), Env::new(true, 1.0));
+            rt.frame(0.0);
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (64, 48));
+            renderer.prepare_surfaces(&gpu.device, &gpu.queue, &rt.surfaces, (64, 48));
+            outs.push(pixels(&gpu, &renderer, &target));
+        }
+        for (byte, (a, b)) in outs[0].iter().zip(&outs[1]).enumerate() {
+            assert!(a.abs_diff(*b) <= 1, "continuous={continuous} byte={byte} primitive={a} video={b}");
+        }
+    }
+}
+
+#[test]
+fn raised_children_keep_the_ancestors_per_corner_clip() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        el().child(el().size(48.0, 32.0).absolute(8.0, 8.0)
+            .corners([12.0, 4.0, 0.0, 8.0]).continuous_corners().clip_rounded(2.0).opacity(0.8)
+            .child(el().size(64.0, 48.0).absolute(-8.0, -8.0).fill(Color::WHITE).raise()))
+    }
+    let mut rt = Runtime::new((), view, (64.0, 48.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let masks: Vec<_> = rt.instances.iter().filter(|i| i.params[1] == KIND_LAYER && i.fade[3] != 0).collect();
+    assert!(!masks.is_empty());
+    for mask in masks {
+        assert_eq!(mask.clip, [8.0, 8.0, 56.0, 40.0]);
+        assert_eq!(unpack_clip_radii(mask.fade[3]), [-12.0, -4.0, 0.0, -8.0]);
+    }
+}
+
 // Circle-corner coverage oracle, independent of the shader's rounded-box distance expression.
 fn mask(x: f32, y: f32, rect: [f32; 4], radius: f32) -> f32 {
     let cx = x.clamp(rect[0] + radius, rect[2] - radius);
