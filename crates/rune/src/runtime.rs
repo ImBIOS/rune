@@ -1942,7 +1942,7 @@ impl<S: 'static> Runtime<S> {
         let follow = std::mem::take(&mut self.caret_follow);
         if !scroll_to.is_empty() || follow { self.step_scroll(0.0); }
         if follow { self.follow_caret(); }
-        for key in scroll_to { self.reveal_row(&key); }
+        for (scope, key) in scroll_to { self.reveal_row(scope.as_deref(), &key); }
         if !scroll_bottom.is_empty() { self.scroll_to_bottom(scroll_bottom); }
         if !scroll_pages.is_empty() { self.scroll_pages(scroll_pages); }
         if !scroll_offsets.is_empty() { self.scroll_to_offsets(scroll_offsets); }
@@ -4372,23 +4372,25 @@ impl<S: 'static> Runtime<S> {
     /// Scrolls so row `key` shows. A virtual row placed by estimates may measure differently
     /// once mounted, along with the rows around it, so this places it again from what the
     /// commit measured until it stays put.
-    fn reveal_row(&mut self, key: &str) {
-        if self.reveal_row_once(key, true) {
+    fn reveal_row(&mut self, scope: Option<&str>, key: &str) {
+        if self.reveal_row_once(scope, key, true) {
             for _ in 0..8 {
-                if !self.reveal_row_once(key, false) { break; }
+                if !self.reveal_row_once(scope, key, false) { break; }
             }
         }
-        self.reveal_row_x(key);
+        self.reveal_row_x(scope, key);
     }
 
     /// One placement of [`Self::reveal_row`]: whether it committed. After the first, it moves
     /// only when the row would land somewhere else.
-    fn reveal_row_once(&mut self, key: &str, first: bool) -> bool {
-        let geometry = self.virtuals.iter().find_map(|(_, v)| {
+    fn reveal_row_once(&mut self, scope: Option<&str>, key: &str, first: bool) -> bool {
+        let geometry = self.virtuals.iter().filter(|(path, _)| in_scope(path, scope)).find_map(|(_, v)| {
             let index = v.index_of(key)?;
             Some((v.scroll_path.clone(), f64::from(v.pad_top + v.prefix(index)), f64::from(v.height(key)), f64::from(v.viewport)))
         }).or_else(|| {
-            let (i, row) = self.nodes.iter().enumerate().find(|(_, n)| n.key.as_deref() == Some(key) || n.path == key)?;
+            let (i, row) = self.nodes.iter().enumerate().find(|(_, n)| {
+                (n.key.as_deref() == Some(key) || n.path == key) && n.parent.is_none_or(|p| in_scope(&self.nodes[p].path, scope))
+            })?;
             let mut ancestor = self.nodes[i].parent;
             while let Some(p) = ancestor {
                 let parent = &self.nodes[p];
@@ -6533,6 +6535,11 @@ fn pixel_ratio(pixels: &crate::Pixels) -> f32 {
 
 // Build the owned path directly, without cloning a key or formatting an index into a
 // temporary segment first. Measurement and flattening must use the same identity rule.
+/// Whether `path` lies inside an element keyed `scope` (always, without one).
+pub(crate) fn in_scope(path: &str, scope: Option<&str>) -> bool {
+    scope.is_none_or(|s| path.split('/').any(|seg| seg == s))
+}
+
 fn node_path(parent: &str, key: Option<&str>, index: usize) -> String {
     match (parent.is_empty(), key) {
         (true, Some(key)) => key.to_owned(),

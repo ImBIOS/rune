@@ -213,3 +213,34 @@ fn a_truncation_tooltip_shows_only_while_the_text_is_cut() {
     rt.frame(0.0);
     assert!(rt.help_regions().is_empty(), "the whole text shows, so no tooltip");
 }
+
+/// Two lists keyed alike, side by side, each in its own scope.
+fn twins(_: &(), _: &mut Cx<()>) -> El {
+    let list = |scope: &str| {
+        col().key(scope.to_owned()).w(100.0).h(200.0).child(
+            col().key("viewport").w_full().h_full().scroll(crate::ScrollSpec { stick_bottom: false }).child(
+                col().key("rows").w_full().growth(crate::GrowthSpec::default()).virtual_rows(1000, 20.0,
+                    |_: &(), i| std::borrow::Cow::Owned(format!("r{i}")),
+                    |_: &(), _| el().w_full().h(20.0)),
+            ),
+        )
+    };
+    row().child(list("a")).child(list("b"))
+}
+
+#[test]
+fn scroll_into_view_in_reveals_only_inside_its_scope() {
+    let mut rt = Runtime::new((), twins, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let offset = |rt: &Runtime<()>, scope: &str| {
+        let id = rt.path_ids[&format!("#0/{scope}/viewport")];
+        rt.scrolls[&id].offset
+    };
+    rt.update(|_, tx| tx.scroll_into_view_in("b", "r500"));
+    rt.frame(0.0);
+    assert_eq!(offset(&rt, "a"), 0.0, "the other list keeps still");
+    assert!(offset(&rt, "b") > 9000.0, "{}", offset(&rt, "b"));
+    rt.update(|_, tx| tx.scroll_into_view_in("a", "r900"));
+    rt.frame(0.0);
+    assert!(offset(&rt, "a") > 17_000.0 && offset(&rt, "b") < 10_100.0, "{} {}", offset(&rt, "a"), offset(&rt, "b"));
+}

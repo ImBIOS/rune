@@ -31,7 +31,8 @@ pub struct Tx {
     pub(crate) clipboard_reads: Vec<ClipboardRead>,
     pub(crate) clear_secret: bool,
     pub(crate) text_flights: Vec<(String, String)>,
-    pub(crate) scroll_to: Vec<String>,
+    /// Rows to reveal: (scope, key).
+    pub(crate) scroll_to: Vec<(Option<String>, String)>,
     /// Scroll viewports to send to their bottom: (key, animated).
     pub(crate) scroll_bottom: Vec<(String, bool)>,
     /// Scroll viewports to page: (key, pages).
@@ -115,7 +116,13 @@ impl Tx {
     /// vertical viewport around the row and, through [`El::scroll_x`] or [`El::scroll_xy`], the
     /// nearest horizontal one, each just far enough.
     pub fn scroll_into_view(&mut self, key: impl Into<String>) {
-        self.scroll_to.push(key.into());
+        self.scroll_to.push((None, key.into()));
+    }
+    /// [`Tx::scroll_into_view`] for row `key` inside the element keyed `scope` only, so lists
+    /// that key their rows alike (a file tree and a diff, both by path) don't reveal each
+    /// other's rows.
+    pub fn scroll_into_view_in(&mut self, scope: impl Into<String>, key: impl Into<String>) {
+        self.scroll_to.push((Some(scope.into()), key.into()));
     }
     /// Glide the scroll viewport keyed `key` (or the one containing it) to its bottom, as a
     /// "jump to latest" button does. A `stick_bottom` viewport follows the end again once it
