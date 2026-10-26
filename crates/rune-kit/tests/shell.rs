@@ -20,6 +20,7 @@ struct S {
     renaming: Option<usize>,
     edit: TextEdit,
     main_edit: TextEdit,
+    toolbar_edit: TextEdit,
     committed: Option<String>,
 }
 
@@ -34,6 +35,7 @@ fn state() -> S {
         renaming: None,
         edit: TextEdit::default(),
         main_edit: TextEdit::default(),
+        toolbar_edit: TextEdit::default(),
         committed: None,
     }
 }
@@ -91,7 +93,10 @@ fn view(s: &S, cx: &mut Cx<S>) -> El {
     SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut S| &mut s.sidebar, sidebar.build(&k))
         .inspector(&s.inspector, |s: &mut S| &mut s.inspector, inspector)
-        .toolbar(Toolbar::new().leading(el().key("lead").size(20.0, 20.0)).title("Title"))
+        .toolbar(Toolbar::new().leading(el().key("lead").size(20.0, 20.0)).title("Title").trailing(
+            rune_kit::TextInput::new(&s.toolbar_edit).width(Some(160.0))
+                .on_edit(|s: &mut S| &mut s.toolbar_edit).build(&k).key("toolbar-search"),
+        ))
         .titlebar_inset(cx.titlebar_inset())
         .build(&k)
 }
@@ -344,6 +349,23 @@ fn collapsing_the_sidebar_moves_focus_out_and_blurs_rename() {
 }
 
 #[test]
+fn hiding_the_sidebar_keeps_focus_in_a_toolbar_search() {
+    let mut rt = runtime(state());
+    let (x, y) = rt.find("toolbar-search").expect("toolbar search");
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.0);
+    assert!(rt.state.toolbar_edit.focused);
+    rt.key(toggle_shortcut());
+    rt.frame(0.0);
+    assert!(!rt.state.sidebar.is_open());
+    assert!(rt.state.toolbar_edit.focused, "the sentinel belongs to the sidebar, not the whole shell");
+    press(&mut rt, Key::Text("search".into()));
+    assert_eq!(rt.state.toolbar_edit.text, "search");
+    assert!(rt.take_titlebar_action().is_none());
+}
+
+#[test]
 fn hiding_the_sidebar_keeps_focus_in_a_main_pane_text_field() {
     let mut rt = runtime(state());
     let focused = |rt: &Runtime<S>| rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key);
@@ -503,6 +525,21 @@ fn a_rename_field_keeps_letters_and_arrows_that_would_type_select_a_row() {
     }
     assert_eq!(rt.state.edit.text, "Del", "Delta's first letter goes to the field");
     assert_eq!((rt.state.picked, focused(&rt).as_deref()), (1, Some("rename")), "no row was type-selected");
+}
+
+#[test]
+fn an_explicit_two_line_row_height_wins_in_either_builder_order() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        let k = Kit::neutral(true);
+        col().w(240.0)
+            .child(SidebarRow::new("First").height(45.0).subtitle("Detail").build(&k).key("first"))
+            .child(SidebarRow::new("Second").subtitle("Detail").height(45.0).build(&k).key("second"))
+    }
+    let mut rt = Runtime::new((), view, (240.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    for key in ["first", "second"] {
+        assert_eq!(rt.elements().iter().find(|e| e.key.as_deref() == Some(key)).unwrap().rect[3], 45.0);
+    }
 }
 
 #[test]

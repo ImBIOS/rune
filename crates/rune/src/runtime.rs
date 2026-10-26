@@ -1807,9 +1807,13 @@ impl<S: 'static> Runtime<S> {
             self.request_file_dialog(request);
         }
         if let Some(srgb) = tx.srgb_blend.take() { self.set_srgb_blend(srgb); }
-        if std::mem::take(&mut tx.blur) && self.focused.is_some() {
-            self.set_focus(None, self.keyboard_focus);
-            self.dirty = true;
+        if std::mem::take(&mut tx.blur) {
+            if self.focused.is_some() {
+                self.set_focus(None, self.keyboard_focus);
+                self.dirty = true;
+            }
+            // An explicit blur is not the temporary pointer-down blur of a scrim.
+            self.last_focused = None;
         }
         if let Some(mut request) = tx.window_frame.take() {
             request.spring = (request.animate && !tx.instant && !self.reduced_motion).then(|| tx.motion.unwrap_or(motion::DEFAULT));
@@ -4514,17 +4518,18 @@ impl<S: 'static> Runtime<S> {
     // ---------------------------------------------------------------------------------------
     // Input: queued, handled at the next frame.
 
-    /// The `text_input` inside a `"textbox"` container (`TextInput`, `TextArea`, `TextField`),
-    /// or `i` itself when `i` is an `input`.
+    /// The single reachable editor in a textbox. Only resolve descendants on presses;
+    /// hover hit testing and cursor updates use the container's role directly.
     fn textbox_input(&self, i: usize) -> Option<usize> {
-        if self.nodes[i].input.is_some() { return Some(i); }
+        if self.nodes[i].input.is_some() { return self.can_focus(i).then_some(i); }
         if self.nodes[i].role != "textbox" { return None; }
-        (0..self.nodes.len()).find(|&j| {
+        let mut inputs = (0..self.nodes.len()).filter(|&j| {
             self.nodes[j].input.is_some()
-                && !self.subtree_exiting(j)
-                && self.allowed(j)
+                && self.can_focus(j)
                 && std::iter::successors(self.nodes[j].parent, |&p| self.nodes[p].parent).any(|p| p == i)
-        })
+        });
+        let first = inputs.next()?;
+        inputs.next().is_none().then_some(first)
     }
 
     /// The topmost element under (x, y) that takes primary input, selectable text included.
@@ -4535,8 +4540,8 @@ impl<S: 'static> Runtime<S> {
             let n = &self.nodes[i];
             // A secondary-only child must not obscure primary input or background blur.
             (!self.subtree_exiting(i) && self.allowed(i) && (n.on_press.is_some() || n.on_double_press.is_some() || n.on_hover.is_some()
-                || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || self.textbox_input(i).is_some()
-                || (n.role == "button" && n.vis.hover.a > 0.0) || n.window_drag || n.focus.enabled || n.modal.is_some()
+                || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.role == "textbox"
+                || (n.role == "button" && n.vis.hit) || n.window_drag || n.focus.enabled || n.modal.is_some()
                 || self.is_selectable(i))).then_some(i)
         })
     }
@@ -5056,7 +5061,7 @@ impl<S: 'static> Runtime<S> {
         let Some(mut i) = target else {
             return crate::el::Cursor::Default;
         };
-        if self.nodes[i].cursor.is_none() && self.textbox_input(i).is_some() {
+        if self.nodes[i].cursor.is_none() && (self.nodes[i].input.is_some() || self.nodes[i].role == "textbox") {
             return crate::el::Cursor::Text;
         }
         if self.is_selectable(i) && !self.text_sel.dragging && self.link_at(i, x, y).is_some() {
@@ -6747,7 +6752,7 @@ impl<S: 'static> Runtime<S> {
                 scale_motion: if cover.is_some() { ScaleMotion::Moving } else { scale_motion },
                 in_cache, skip_paint };
             let hits_before = self.hits.len();
-            if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_double_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.role == "textbox" || (n.role == "button" && n.vis.hover.a > 0.0) || n.window_drag || n.focus.enabled || n.modal.is_some()
+            if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_double_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.role == "textbox" || n.window_drag || n.focus.enabled || n.modal.is_some()
                 || n.text.as_ref().is_some_and(|t| t.selectable) || n.gestures.as_ref().is_some_and(|g| g.takes_gestures()))
                 && !self.subtree_exiting(i)
                 && self.allowed(i) && effective_opacity > 0.001 && visible

@@ -278,7 +278,7 @@ impl TextInput {
                 b = b.mr(-8.0);
             }
             if !disabled {
-                b = self.copy_acts.apply(b.hover(c.hover).press(crate::press_over(c.hover, c.pressed)), true);
+                b = self.copy_acts.apply(b.hit().hover(c.hover).press(crate::press_over(c.hover, c.pressed)), true);
             }
             e = e.child(b);
         }
@@ -574,7 +574,7 @@ impl TextField {
                 .hover(c.hover)
                 .child(icon(k.glyph.copy, 16.0).color(c.std_icon));
             if self.state != State::Disabled {
-                b = self.copy_acts.apply(b.press(crate::press_over(c.hover, c.pressed)), true);
+                b = self.copy_acts.apply(b.hit().hover(c.hover).press(crate::press_over(c.hover, c.pressed)), true);
             }
             wrapper = wrapper.pr(4.0).child(b);
         }

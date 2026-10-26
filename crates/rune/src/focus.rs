@@ -195,10 +195,11 @@ impl<S: 'static> Runtime<S> {
             if self.subtree_exiting(i) || nodes.iter().any(|n| n.path == old.path) { return None; }
             let focused = self.focused.as_deref().or(self.last_focused.as_deref())?;
             let has_children = self.nodes.iter().any(|m| m.parent == Some(i));
-            let scope = if has_children || old.focus.enabled || old.input.is_some() {
-                old.path.as_str()
-            } else {
+            let scope = if !has_children && !old.focus.enabled && old.input.is_none()
+                && old.local.w == 0.0 && old.local.h == 0.0 {
                 self.nodes.get(old.parent?)?.path.as_str()
+            } else {
+                old.path.as_str()
             };
             if !within(focused, scope) { return None; }
             let anchor = nodes.iter().find(|n| n.key.as_deref() == Some(key))?;
@@ -667,6 +668,47 @@ mod tests {
         rt.frame(0.0);
         assert_eq!(focused(&rt), "search", "the handler's focus request outside the modal wins over the opener");
         assert!(rt.state.search.focused);
+    }
+
+    #[test]
+    fn a_sized_focus_return_leaf_does_not_claim_its_siblings() {
+        fn view(open: &bool, _: &mut Cx<bool>) -> El {
+            col().size(300.0, 300.0).child(button("opener")).child(button("sibling"))
+                .children(open.then(|| el().key("marker").size(10.0, 10.0).focus_return("opener")))
+        }
+        let mut rt = Runtime::new(true, view, (300.0, 300.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let (x, y) = rt.find("sibling").unwrap();
+        rt.pointer_down(x, y); rt.pointer_up(x, y); rt.frame(0.0);
+        assert_eq!(focused(&rt), "sibling");
+        rt.update(|open, _| *open = false); rt.frame(0.0);
+        assert_eq!(focused(&rt), "sibling", "only zero-size sentinels use their parent's scope");
+    }
+
+    #[test]
+    fn scrim_return_survives_pointer_down_blur_but_not_explicit_blur() {
+        struct Popup { open: bool, field: crate::TextEdit }
+        fn view(s: &Popup, _: &mut Cx<Popup>) -> El {
+            col().size(300.0, 300.0).child(button("opener"))
+                .children(s.open.then(|| col().key("popup").focus_return("opener")
+                    .child(crate::text_input(&s.field, crate::TextStyle::new(14.0, 400.0))
+                        .key("field").size(100.0, 30.0).on_edit(|s: &mut Popup| &mut s.field))))
+                .child(el().key("scrim").size(100.0, 30.0).on_press(|s: &mut Popup| s.open = false))
+        }
+        for explicit in [false, true] {
+            let mut field = crate::TextEdit::new("text"); field.focused = true;
+            let mut rt = Runtime::new(Popup { open: true, field }, view, (300.0, 300.0), Env::new(true, 1.0));
+            rt.frame(0.0);
+            assert_eq!(focused(&rt), "field");
+            let (x, y) = rt.find("scrim").unwrap();
+            rt.pointer_down(x, y); rt.frame(0.0);
+            assert!(rt.focused.is_none(), "pointer-down blurs before pointer-up closes");
+            if explicit { rt.update(|_, tx| tx.blur()); rt.frame(0.0); }
+            rt.pointer_up(x, y); rt.frame(0.0);
+            assert!(!rt.state.open);
+            assert_eq!(rt.focused.is_some(), !explicit);
+            if !explicit { assert_eq!(focused(&rt), "opener"); }
+        }
     }
 
     /// One state for the key routing tests: each state type builds a whole `Runtime<S>`.

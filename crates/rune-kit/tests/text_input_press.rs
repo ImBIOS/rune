@@ -15,6 +15,65 @@ struct S {
     copied: usize,
 }
 
+#[test]
+fn textbox_padding_requires_exactly_one_reachable_editor() {
+    struct Pair { first: TextEdit, second: TextEdit, hide_second: bool }
+    fn view(s: &Pair, _: &mut Cx<Pair>) -> El {
+        row().role("textbox").key("box").size(400.0, 60.0).padding(10.0)
+            .child(rune::text_input(&s.first, rune::TextStyle::new(13.0, 400.0))
+                .key("first").size(120.0, 30.0).on_edit(|s: &mut Pair| &mut s.first))
+            .child(col().opacity(if s.hide_second { 0.0 } else { 1.0 }).child(
+                rune::text_input(&s.second, rune::TextStyle::new(13.0, 400.0))
+                    .key("second").size(120.0, 30.0).on_edit(|s: &mut Pair| &mut s.second)))
+    }
+    let mut rt = Runtime::new(Pair { first: TextEdit::new("one"), second: TextEdit::new("two"), hide_second: false },
+        view, (440.0, 100.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.pointer_down(2.0, 2.0);
+    rt.pointer_up(2.0, 2.0);
+    rt.frame(0.0);
+    assert!(!rt.state.first.focused && !rt.state.second.focused, "padding cannot choose between two editors");
+    rt.update(|s, tx| { s.hide_second = true; tx.instant(); });
+    rt.frame(0.0);
+    rt.pointer_down(2.0, 2.0);
+    rt.pointer_up(2.0, 2.0);
+    rt.frame(0.0);
+    assert!(rt.state.first.focused && !rt.state.second.focused, "hidden ancestors exclude an editor");
+}
+
+#[test]
+fn a_copy_button_without_a_handler_still_keeps_its_press() {
+    fn view(s: &TextEdit, _: &mut Cx<TextEdit>) -> El {
+        TextInput::new(s).copy_button().on_edit(|s: &mut TextEdit| s).build(&Kit::neutral(true))
+    }
+    let mut edit = TextEdit::new("text");
+    edit.focused = true;
+    edit.set_caret(1);
+    let mut rt = Runtime::new(edit, view, (400.0, 100.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let (x, y) = rt.find("action").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.0);
+    assert!(rt.state.focused);
+    assert_eq!(rt.state.range(), (1, 1), "the button press must not place the input's caret");
+}
+
+#[test]
+fn padding_focus_reaches_an_editor_inside_an_auto_grow_scroll() {
+    fn view(s: &TextEdit, _: &mut Cx<TextEdit>) -> El {
+        TextArea::new(s).auto_grow(2, 2).on_edit(|s: &mut TextEdit| s)
+            .build(&Kit::neutral(true)).key("area")
+    }
+    let mut rt = Runtime::new(TextEdit::new("one\ntwo\nthree\nfour"), view, (400.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.pointer_down(2.0, 2.0);
+    rt.pointer_up(2.0, 2.0);
+    rt.frame(0.0);
+    assert!(rt.state.focused);
+    assert_eq!(rt.state.range(), (0, 0));
+}
+
 fn state() -> S {
     S {
         input: TextEdit::new("hunter2"),

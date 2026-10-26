@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Textbox padding never chooses arbitrarily between multiple editors.** Only a single
+  reachable editor takes a container press; hidden editors are excluded. Trailing copy/clear
+  buttons keep their hit targets even without handlers, and descendant resolution runs only
+  on presses, not hover. Explicit `Tx::blur()` also cancels pending scrim focus restoration;
+  only zero-size `focus_return` sentinel leaves use their parent's scope.
 - **`IconButton::help` and `IconButton::shortcut` (plus `Button` and `SidebarToggle`).**
   `IconButton::help("Lock").shortcut("⌘L")` (or `.shortcut("cmd+l")`) sets `El::help("Lock  ⌘L")`
   and supplies the accessible label when `IconButton::label` is unset. `Button` supports the same
@@ -16,7 +21,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   and framed content card so switching between `SplitView` and `Page` matches pixel for pixel.
   `demo/kit/shell-page.png` shows it in light and dark.
 - **Two-line `SidebarRow`s default to `TWO_LINE_ROW_HEIGHT` (40 pt) when `subtitle` is set** and
-  return focus to the selected row when inline rename ends.
+  return focus to the selected row when inline rename ends. Previously these rows defaulted
+  to 28 pt; explicit `.height(..)` values are unchanged.
 - **Hiding a pane or overlay keeps focus where it was outside that subtree.** `El::focus_return`
   restores its trigger only when the focused control was inside the removed subtree (or pane);
   hiding the sidebar with `⇧⌘B` while typing in a main-pane field keeps focus in the field
