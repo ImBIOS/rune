@@ -645,9 +645,10 @@ impl Pose {
     pub fn rotation(&self) -> f32 { self.rotation }
     /// Effective uniform scale, ancestors included (as [`ElementInfo::scale`]).
     pub fn scale(&self) -> f32 { self.scale }
-    /// The element's shadows (`El::shadow`) with the geometry and colour springs have reached.
+    /// The element's shadows (`El::box_shadow`) at their current sprung geometry and colour.
     pub fn shadows(&self) -> &[crate::el::Shadow] { &self.shadows }
-    /// A spring is still moving its rect, scale, rotation or shadows, or an ancestor's.
+    /// A spring or decorative loop still moves its rect, scale, rotation, icon turn or shadows,
+    /// or an ancestor's. An active repeating loop does not settle.
     pub fn moving(&self) -> bool { self.moving }
 }
 
@@ -1958,6 +1959,7 @@ impl<S: 'static> Runtime<S> {
     /// and `on_close` reach the clipboard without a frame, and applies clipboard requests to a
     /// memory clipboard at once. A secret clear drops an earlier secret copy not yet written.
     fn latch_requests(&mut self, tx: &mut Tx) {
+        self.run_pick_reads(tx);
         self.shell_request = self.shell_request.max(tx.shell.take());
         self.minimize_request |= std::mem::take(&mut tx.minimize);
         if std::mem::take(&mut tx.clear_secret) {
@@ -2361,6 +2363,7 @@ impl<S: 'static> Runtime<S> {
                 { ran_other |= r && checks == self.live_checks; }
                 ran |= r;
             }
+            self.run_pick_reads(&mut tx);
         }
         self.latch_requests(&mut tx);
         // A handler asked for a menu: the hover it takes ends in this commit, not a frame later.
@@ -7710,37 +7713,70 @@ impl<S: 'static> Runtime<S> {
     /// `El::inert` and modals, so a press can land on a different element than this returns.
     /// Elements that are exiting or fully transparent are skipped. `El::hit`, which marks native
     /// overlay input, makes no difference, and overlay panels outside the window are not
-    /// considered. An element is not cut by its own clip, only by its ancestors'.
+    /// considered. An element is not cut by its own clip, only by its ancestors'. This is box
+    /// geometry, not pixel/alpha picking: a box with no fill remains pickable (as an invisible
+    /// input area does), and rounded corners and soft clip fades do not trim its hit box.
+    /// Running handlers can use [`Tx::element_at`] without holding a `Runtime`.
     pub fn element_at(&self, x: f32, y: f32) -> Option<Picked> {
+        self.element_at_within(None, x, y)
+    }
+
+    fn run_pick_reads(&mut self, tx: &mut Tx) {
+        for read in std::mem::take(&mut tx.pick_reads) {
+            let picked = self.element_at_within(read.within.as_deref(), read.x, read.y);
+            if let Some(f) = read.take() {
+                f(&mut self.state, picked, tx);
+                self.dirty = true;
+            }
+        }
+        // A callback may ask again, but cannot keep this dispatch running indefinitely.
+        self.pending.pick_reads.append(&mut tx.pick_reads);
+    }
+
+    /// [`Runtime::element_at`] restricted to an element and its descendants, ignoring other
+    /// subtrees. `within` accepts a key or key path as [`Cx::layout`] does.
+    pub fn element_at_in(&self, within: &str, x: f32, y: f32) -> Option<Picked> {
+        self.element_at_within(Some(within), x, y)
+    }
+
+    fn element_at_within(&self, within: Option<&str>, x: f32, y: f32) -> Option<Picked> {
+        let scope = match within {
+            Some(key) => Some(self.nodes.iter().position(|n| crate::flight::selects(key, &n.path, n.key.as_deref()))?),
+            None => None,
+        };
         let n = self.nodes.len();
         let at = |k: usize| if self.layer_paint_order.is_empty() { k } else { self.layer_paint_order[k] };
         let count = if self.layer_paint_order.is_empty() { n } else { self.layer_paint_order.len() };
-        (0..count).rev().map(at).find(|&i| self.pickable(i, x, y)).map(|i| Picked {
+        (0..count).rev().map(at).find(|&i| {
+            scope.is_none_or(|scope| std::iter::successors(Some(i), |&p| self.nodes[p].parent).any(|p| p == scope))
+                && self.pickable(i, x, y)
+        }).map(|i| Picked {
             path: self.nodes[i].path.clone(),
             key: self.nodes[i].key.clone(),
         })
     }
 
-    /// Whether window point (`x`, `y`), in points, is inside the drawn, clipped and turned shape
+    /// Whether window point (`x`, `y`), in points, is inside the drawn, clipped and turned box
     /// of the element keyed `key`, whatever is drawn above it and whether or not it has handlers.
     /// False when there is no such element, it is exiting or fully transparent. Same geometry
     /// as [`Runtime::element_at`].
     pub fn contains(&self, key: &str, x: f32, y: f32) -> bool {
-        self.nodes.iter().position(|n| n.key.as_deref() == Some(key)).is_some_and(|i| self.pickable(i, x, y))
+        self.nodes.iter().position(|n| crate::flight::selects(key, &n.path, n.key.as_deref())).is_some_and(|i| self.pickable(i, x, y))
     }
 
     fn pickable(&self, i: usize, x: f32, y: f32) -> bool {
         self.drawn.get(i).is_some()
-            && self.inh_scratch.get(i).is_some_and(|h| h.opacity > 0.001)
+            && self.inh_scratch.get(i).is_some_and(|h| h.opacity > 0.0)
             && !self.subtree_exiting(i)
             && self.node_contains(i, x, y)
     }
 
     /// The presented rotation, scale and shadows of the element keyed `key`, exiting or not, as
     /// of the last frame, and whether any spring still moves them. It reads the springs on
-    /// demand: nothing runs per frame for it.
+    /// demand: nothing runs per frame for it. This is a driver/headless read: running view
+    /// functions and handlers do not hold a `Runtime`.
     pub fn presented_pose(&self, key: &str) -> Option<Pose> {
-        let i = self.nodes.iter().position(|n| n.key.as_deref() == Some(key))?;
+        let i = self.nodes.iter().position(|n| crate::flight::selects(key, &n.path, n.key.as_deref()))?;
         let n = &self.nodes[i];
         let store = self.scene.store();
         let shadows = n.vis.shadows.iter().enumerate().map(|(k, sh)| {
@@ -7750,9 +7786,17 @@ impl<S: 'static> Runtime<S> {
                 None => sh,
             }
         }).collect();
-        let step = |p: usize| self.nodes[p].parent;
+        let step = |p: usize| {
+            self.nodes[p].above.as_ref()
+                .and_then(|a| self.nodes[..p].iter().position(|n| n.key.as_ref() == Some(&a.key)))
+                .or(self.nodes[p].parent)
+        };
         let moving = self.rect_springing(i)
-            || std::iter::successors(Some(i), |&p| step(p)).any(|p| paint_pose_springing(store, self.nodes[p].id));
+            || std::iter::successors(Some(i), |&p| step(p)).any(|p| {
+                let id = self.nodes[p].id;
+                paint_pose_springing(store, id)
+                    || (!self.reduced_motion && self.loops.get(&id).is_some_and(|l| l.active(store.node_time(id))))
+            });
         Some(Pose {
             rotation: self.scene.get(n.id, prop::ROTATION).unwrap_or(n.vis.rotate),
             scale: self.inh_scratch.get(i)?.scale,
@@ -8090,6 +8134,7 @@ fn action_path(action: &Action) -> Option<&str> {
 }
 
 fn merge(tx: &mut Tx, one: Tx) {
+    tx.pick_reads.extend(one.pick_reads);
     tx.paste |= one.paste;
     tx.clipboard_reads.extend(one.clipboard_reads);
     if let Some(one) = one.trace {

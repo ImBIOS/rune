@@ -1,5 +1,5 @@
 //! `Runtime::presented_pose` and the moving flag cover shadow and rotation springs;
-//! `Runtime::element_at` and `contains` answer where a press would land.
+//! Picking shares press geometry, but also finds elements without handlers.
 use rune::{Color, Cx, El, Env, Runtime, Shadow, Spring, col, el};
 use std::f32::consts::FRAC_PI_4;
 
@@ -110,5 +110,157 @@ fn element_at_follows_the_turned_box_and_agrees_with_presses() {
         rt.pointer_up(x, y);
         rt.frame(0.0);
         assert_eq!(rt.state.0 == ["bar"], picked_bar, "({x}, {y}): press {:?}", rt.state.0);
+    }
+}
+
+#[test]
+fn a_canvas_handler_picks_its_last_presented_children_before_rebuilding() {
+    #[derive(Default)]
+    struct Canvas { point: (f32, f32), picked: Option<String>, hide: bool }
+    fn view(s: &Canvas, _: &mut Cx<Canvas>) -> El {
+        el().w_full().h_full()
+            .child(col().key("canvas").w_full().h_full().items_start().padding(50.0)
+                .on_pointer_move_local(|s: &mut Canvas, p, _| s.point = (p.window_x, p.window_y))
+                .on_press_tx(|s: &mut Canvas, tx| {
+                    s.hide = true;
+                    tx.element_at_in("canvas", s.point.0, s.point.1, |s: &mut Canvas, p, tx| {
+                        s.picked = p.and_then(|p| p.key().map(str::to_owned));
+                        tx.instant();
+                    });
+                })
+                .children((!s.hide).then(|| el().key("bar").size(100.0, 20.0).rotate(FRAC_PI_4))))
+            // This paints last, but has no input handlers. Scoped picking ignores it.
+            .child(el().key("overlay").w_full().h_full().absolute(0.0, 0.0))
+    }
+    let mut rt = Runtime::new(Canvas::default(), view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    assert_eq!(rt.element_at(120.0, 80.0).unwrap().key(), Some("overlay"));
+    assert!(rt.element_at_in("absent", 120.0, 80.0).is_none());
+    rt.pointer_move(120.0, 80.0);
+    rt.frame(0.0);
+    rt.pointer_down(120.0, 80.0);
+    rt.pointer_up(120.0, 80.0);
+    rt.frame(0.0);
+    assert_eq!(rt.state.picked.as_deref(), Some("bar"));
+    assert!(!rt.contains("canvas/bar", 120.0, 80.0));
+}
+
+#[test]
+fn picking_uses_raise_cache_scale_origin_offset_and_ancestor_clip() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        el().w_full().h_full()
+            .child(col().key("clip").size(100.0, 100.0).items_start().clip_rounded(0.0)
+                .child(el().key("raised").size(80.0, 40.0).scale(2.0).origin(0.0, 0.0)
+                    .offset(20.0, 20.0).raise().cache()))
+            .child(el().key("later").size(100.0, 100.0).absolute(0.0, 0.0))
+            .child(el().key("hidden").w_full().h_full().opacity(0.0).absolute(0.0, 0.0))
+    }
+    let mut rt = Runtime::new((), view, (300.0, 300.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    assert_eq!(rt.element_at(90.0, 50.0).unwrap().key(), Some("raised"));
+    assert!(!rt.contains("raised", 110.0, 50.0), "ancestor clip cuts the scaled child");
+    assert!(!rt.contains("hidden", 50.0, 50.0));
+    assert!(rt.contains("raised", 30.0, 30.0), "no fill is still pickable geometry");
+}
+
+#[test]
+fn a_shadow_colour_only_step_settles() {
+    fn view(on: &bool, _: &mut Cx<bool>) -> El {
+        el().key("a").size(40.0, 40.0).motion(Spring::new(0.3, 0.0))
+            .box_shadow(Shadow { color: if *on { Color::WHITE } else { Color::BLACK }, ..sh(2.0) })
+    }
+    let mut rt = Runtime::new(false, view, (100.0, 100.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|s, _| *s = true);
+    rt.frame(1.0 / 60.0);
+    assert!(moving(&rt, "a"));
+    assert_ne!(rt.presented_pose("a").unwrap().shadows()[0].color, Color::WHITE);
+    settle(&mut rt);
+    assert!(!moving(&rt, "a"));
+    assert!(!rt.presented_pose("a").unwrap().moving());
+}
+
+#[test]
+fn an_icon_turn_only_step_settles() {
+    fn view(on: &bool, _: &mut Cx<bool>) -> El {
+        static DOT: rune::Icon = rune::Icon { name: "dot", view: 24.0, body: "<circle cx=\"12\" cy=\"12\" r=\"8\"/>" };
+        rune::icon(&DOT, 40.0).key("a").motion(Spring::new(0.3, 0.0))
+            .icon_rotation(if *on { 1.0 } else { 0.0 })
+    }
+    let mut rt = Runtime::new(false, view, (100.0, 100.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|s, _| *s = true);
+    rt.frame(1.0 / 60.0);
+    assert!(moving(&rt, "a"));
+    assert!(rt.presented_pose("a").unwrap().moving());
+    settle(&mut rt);
+    assert!(!moving(&rt, "a"));
+    assert!(!rt.presented_pose("a").unwrap().moving());
+}
+
+#[test]
+fn pose_and_element_moving_agree_for_loops_and_an_anchors_shadow() {
+    fn view(on: &bool, _: &mut Cx<bool>) -> El {
+        col().w_full().h_full()
+            .child(el().key("anchor").size(40.0, 40.0).motion(Spring::new(0.3, 0.0))
+                .box_shadow(sh(if *on { 12.0 } else { 2.0 })))
+            .child(el().key("popup").size(20.0, 20.0).above("anchor", 0.0))
+            .child(el().key("loop").size(20.0, 20.0).looping(rune::LoopSpec::rotation(1.0)))
+    }
+    let mut rt = Runtime::new(false, view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|s, _| *s = true);
+    rt.frame(1.0 / 60.0);
+    assert!(moving(&rt, "popup"));
+    assert!(rt.presented_pose("popup").unwrap().moving());
+    settle(&mut rt);
+    assert!(!moving(&rt, "popup"));
+    assert!(!rt.presented_pose("popup").unwrap().moving());
+    assert!(moving(&rt, "loop"));
+    assert!(rt.presented_pose("loop").unwrap().moving());
+}
+
+#[test]
+fn a_turned_ancestor_clips_its_child_in_layer_coordinates() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        col().w_full().h_full().padding(50.0).items_start().child(
+            el().key("clip").size(100.0, 100.0).rotate(FRAC_PI_4).clip_rounded(0.0)
+                .child(el().key("child").size(200.0, 100.0).absolute(0.0, 0.0)),
+        )
+    }
+    let mut rt = Runtime::new((), view, (300.0, 300.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    assert!(rt.contains("child", 100.0, 100.0));
+    assert!(!rt.contains("child", 149.5, 149.5), "inside child but outside the turned parent clip");
+    assert_eq!(rt.element_at(100.0, 100.0).unwrap().key(), Some("child"));
+    assert_ne!(rt.element_at(149.5, 149.5).unwrap().key(), Some("child"));
+}
+
+#[test]
+fn sticky_and_anchored_elements_pick_in_paint_order_after_scrolling() {
+    fn view(_: &Hits, _: &mut Cx<Hits>) -> El {
+        col().w_full().h_full().child(
+            col().key("scroll").size(100.0, 100.0).scroll(rune::ScrollSpec { stick_bottom: false })
+                .child(col().w_full().h(300.0)
+                    .child(el().key("header").w_full().h(30.0).sticky_top(0.0)
+                        .on_press(|s: &mut Hits| s.0.push("header")))
+                    .child(el().key("row").w_full().h(270.0)
+                        .on_press(|s: &mut Hits| s.0.push("row")))
+                    .child(el().key("popup").size(60.0, 20.0)
+                        .anchored("header", rune::Side::Bottom, rune::Align::Start, 0.0)
+                        .on_press(|s: &mut Hits| s.0.push("popup")))),
+        )
+    }
+    let mut rt = Runtime::new(Hits::default(), view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|_, tx| tx.scroll_to_y("scroll", 20.0));
+    rt.frame(0.0);
+    for (y, expected) in [(15.0, "header"), (35.0, "popup"), (65.0, "row")] {
+        assert_eq!(rt.element_at(20.0, y).unwrap().key(), Some(expected));
+        rt.state.0.clear();
+        rt.pointer_down(20.0, y);
+        rt.pointer_up(20.0, y);
+        rt.frame(0.0);
+        assert_eq!(rt.state.0, [expected]);
     }
 }

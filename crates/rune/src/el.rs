@@ -30,6 +30,7 @@ pub struct Tx {
     pub(crate) copy: Option<crate::ClipboardWrite>,
     pub(crate) paste: bool,
     pub(crate) clipboard_reads: Vec<ClipboardRead>,
+    pub(crate) pick_reads: Vec<PickRead>,
     pub(crate) clear_secret: bool,
     pub(crate) text_flights: Vec<(String, String)>,
     /// Rows to reveal: (scope, key).
@@ -75,6 +76,29 @@ pub enum Shell {
 }
 
 impl Tx {
+    /// Pick from the last presented frame, with the geometry and visibility rules of
+    /// [`Runtime::element_at`](crate::Runtime::element_at). Runs `f` after this handler,
+    /// before its view commit. Pass `PointerEvent::window_x` and `window_y`, not local points.
+    /// No picking data is copied or maintained when this is unused. Queries made by `f`
+    /// itself wait until the next frame.
+    pub fn element_at<S: 'static>(&mut self, x: f32, y: f32, f: impl FnOnce(&mut S, Option<crate::Picked>, &mut Tx) + 'static) {
+        self.pick_read(None, x, y, f);
+    }
+
+    /// [`Tx::element_at`] restricted to `within` and its descendants. The scope accepts a
+    /// key or key path like [`Cx::layout`](crate::Cx::layout); other drawn subtrees do not
+    /// occlude this query. A missing scope returns `None`.
+    pub fn element_at_in<S: 'static>(&mut self, within: impl Into<String>, x: f32, y: f32, f: impl FnOnce(&mut S, Option<crate::Picked>, &mut Tx) + 'static) {
+        self.pick_read(Some(within.into()), x, y, f);
+    }
+
+    fn pick_read<S: 'static>(&mut self, within: Option<String>, x: f32, y: f32, f: impl FnOnce(&mut S, Option<crate::Picked>, &mut Tx) + 'static) {
+        let f: PickFn = Box::new(move |s, picked, tx| {
+            f(s.downcast_mut::<S>().expect("element_at registered for a different state type than the app's"), picked, tx);
+        });
+        self.pick_reads.push(PickRead { within, x, y, f: Rc::new(std::cell::Cell::new(Some(f))) });
+    }
+
     /// Whether the key a key handler is seeing is the OS auto-repeat of a held key: true for
     /// each repeat, false for the first press and outside key handlers. One-shot actions
     /// (start recording on Enter, say) can return early on a repeat; arrows and Tab usually
@@ -112,7 +136,7 @@ impl Tx {
     /// Work only a frame carries out that changes its pixels without a model change: a scroll
     /// or a text flight. A `wake_after` only schedules.
     pub(crate) fn frame_work(&self) -> bool {
-        !self.scroll_to.is_empty() || !self.scroll_bottom.is_empty() || !self.scroll_pages.is_empty() || !self.scroll_offsets.is_empty()
+        !self.pick_reads.is_empty() || !self.scroll_to.is_empty() || !self.scroll_bottom.is_empty() || !self.scroll_pages.is_empty() || !self.scroll_offsets.is_empty()
             || !self.keep_on_screen.is_empty() || !self.text_flights.is_empty()
     }
 
@@ -1069,6 +1093,21 @@ impl PillStyle {
 }
 pub(crate) type InputPasteFn = Rc<dyn Fn(&mut dyn Any, &crate::ClipboardContent, &mut Tx) -> bool>;
 pub(crate) type ReadFn = Box<dyn FnOnce(&mut dyn Any, &crate::ClipboardContent, &mut Tx)>;
+type PickFn = Box<dyn FnOnce(&mut dyn Any, Option<crate::Picked>, &mut Tx)>;
+
+#[derive(Clone)]
+pub(crate) struct PickRead {
+    pub within: Option<String>,
+    pub x: f32,
+    pub y: f32,
+    f: Rc<std::cell::Cell<Option<PickFn>>>,
+}
+impl PickRead {
+    pub fn take(&self) -> Option<PickFn> { self.f.take() }
+}
+impl std::fmt::Debug for PickRead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("PickRead") }
+}
 
 /// A `Tx::read_clipboard` callback. `Tx` is `Clone`; clones share it and the runtime takes it once.
 #[derive(Clone)]

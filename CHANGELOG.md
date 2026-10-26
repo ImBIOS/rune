@@ -12,7 +12,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   the topmost drawn element at a window point (`Picked`, with `path()` and `key()`), through
   rotate, scale, origin, offset, scrolling, ancestors' clips and paint order, handlers or not;
   `Runtime::contains(key, x, y)` tests one element. Both are made for drivers holding the
-  `Runtime`; a handler already gets turned, scaled local coordinates in its `PointerEvent`.
+  `Runtime`; a running canvas can use `Tx::element_at(x, y, callback)` or
+  `Tx::element_at_in(scope, x, y, callback)` with a pointer event's window coordinates.
+  The callback runs before the handler's view commit; scoped picking ignores other subtrees.
+  Invisible geometry with nonzero element opacity remains pickable, even without a fill.
+  Decorative loops still report moving, so bounded settle waits should exclude looping elements.
 
 - **`Markdown::on_link_tx` and `Markdown::link_style`.** `on_link_tx(|s, url, tx| ..)` is `on_link`
   with the press's `Tx` (`on_link` is unchanged; the two share one slot so the later call wins).
