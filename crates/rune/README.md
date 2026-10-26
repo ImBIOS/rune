@@ -126,11 +126,12 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
     text, layout, hover/focus/selection, theme and scale) with an optional `.cache_key(u64)` hint.
   - **Live fallback:** while any node inside the subtree animates (springs, transitions, loops,
     growth, word reveals, flights) or hosts a live compositor `El::effect` slot, `NativeSurface`,
-    native `SystemMaterial` or focused text input, the subtree bypasses the cache and draws live,
+    native `SystemMaterial`, image pixels or focused text input, the subtree bypasses the cache and draws live,
     then re-caches once settled.
-  - **Scale and budget:** while an ancestor scale (`live_scale`, `El::scale`, or scale spring) is
-    changing, the existing cached texture is composited with clamped bilinear filtering and
-    re-rasterized at the new device-pixel resolution once the scale holds still for `0.12 s`.
+  - **Scale and budget:** while an ancestor's live scale or scale spring is changing without view
+    commits, the existing cached texture is composited with clamped bilinear filtering and
+    re-rasterized at the new device-pixel resolution once the scale holds still for 0.1 s.
+    Scale changes through view commits draw live until settled: a commit may also change content.
     Textures are capped at `4096×4096` device pixels and managed under a configurable LRU byte
     budget (`Renderer::set_cache_budget`, `layers::DEFAULT_CACHE_BUDGET` = 64 MiB). Hit testing,
     accessibility, `elements()` and `on_layout` are unchanged.

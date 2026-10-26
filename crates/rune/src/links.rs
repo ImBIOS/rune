@@ -113,7 +113,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// Which of node `i`'s links are hovered, pressed and keyboard-focused.
-    fn link_states(&self, i: usize) -> (Option<usize>, Option<usize>, Option<usize>) {
+    pub(super) fn link_states(&self, i: usize) -> (Option<usize>, Option<usize>, Option<usize>) {
         let path = &self.nodes[i].path;
         let hovered = self.pointer.filter(|_| self.hovered.as_deref() == Some(path))
             .and_then(|(x, y)| self.link_at(i, x, y));

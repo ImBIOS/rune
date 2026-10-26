@@ -280,6 +280,15 @@ pub(crate) fn fragment(i: &Primitive, atlas: &Atlas, screen: [f32; 2]) -> [f32; 
     col.map(|c| c * clip)
 }
 
+pub(crate) fn layer_clip_coverage(i: &Primitive, screen: [f32; 2]) -> f32 {
+    let clip = clip_coverage(i, screen);
+    let radius = i.border[0];
+    if radius == 0.0 { return clip; }
+    let half = [(i.clip[2] - i.clip[0]) * 0.5, (i.clip[3] - i.clip[1]) * 0.5];
+    let p = [screen[0] - i.clip[0] - half[0], screen[1] - i.clip[1] - half[1]];
+    clip * clamp(0.5 - sd(p, half, [radius; 4]))
+}
+
 pub(crate) fn clip_coverage(i: &Primitive, screen: [f32; 2]) -> f32 {
     let origin = i.fade_origin.unwrap_or(i.clip);
     let p = screen;

@@ -169,3 +169,36 @@ fn glyph_rotation_turns_clockwise_and_clips_on_screen() {
     let clipped = glyph(FRAC_PI_2, [28.0, NO_CLIP[1], NO_CLIP[2], NO_CLIP[3]]);
     assert!(lit(&clipped, 34, 21) && !lit(&clipped, 21, 34));
 }
+
+fn layer(kind: f32, blur: f32) -> rune_ref::Primitive {
+    rune_ref::Primitive {
+        node: 1,
+        source: "layer".into(),
+        rect: if kind == 9.0 { [0.0; 4] } else { [0.0, 0.0, 8.0, 8.0] },
+        radii: [0.0; 4],
+        fill: [0.0, 0.0, 0.0, if kind == 9.0 { 0.0 } else { 1.0 }],
+        border: [0.0; 4],
+        params: [0.0, kind, blur, 0.0],
+        uv: [0.0; 4],
+        clip: NO_CLIP,
+        fade: [0.0; 4],
+        fade_origin: None,
+    }
+}
+
+#[test]
+fn validate_rejects_layers_it_cannot_render() {
+    let base = generate::scene(&[]);
+    let with = |primitives: Vec<rune_ref::Primitive>| Scene { primitives, ..base.clone() };
+    with(vec![layer(8.0, 0.0), layer(9.0, 0.0)]).validate().unwrap();
+    assert!(with(vec![layer(9.0, 0.0)]).validate().is_err(), "unbalanced end");
+    assert!(with(vec![layer(8.0, 0.0)]).validate().is_err(), "unclosed scope");
+    let mut malformed = layer(8.0, 0.0);
+    malformed.params[3] = 2.0;
+    assert!(with(vec![malformed, layer(9.0, 0.0)]).validate().is_err(), "invalid cache flag");
+    // The CPU compositor has no layer blur, so a blurred layer would render unblurred.
+    assert!(with(vec![layer(8.0, 2.0), layer(9.0, 0.0)]).validate().is_err(), "blurred layer");
+    // Each nested scope holds a full-frame buffer while it renders, so nesting is bounded.
+    let deep: Vec<_> = (0..1000).map(|_| layer(8.0, 0.0)).chain((0..1000).map(|_| layer(9.0, 0.0))).collect();
+    assert!(with(deep).validate().is_err(), "unbounded nesting");
+}

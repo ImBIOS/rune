@@ -793,3 +793,290 @@ fn cache_lru_eviction_under_small_budget_evicts_oldest_and_recaches_cleanly() {
     let out = pixels(&gpu, &renderer, &target);
     near(&out[(16 * 32 + 16) * 4..(16 * 32 + 17) * 4], rgba([0.0, 1.0, 0.0, 1.0]));
 }
+
+/// Drives a cached and an uncached runtime through the same steps (`frames` frames each, 1/60 s
+/// apart); the cached one must draw the same pixels after every frame. Returns the cached
+/// renderer's stats per frame.
+fn same_as_uncached<T: Clone + 'static>(state: T, view: fn(&(bool, T), &mut Cx<(bool, T)>) -> El, size: (u32, u32),
+    steps: &[(&str, usize, &dyn Fn(&mut Runtime<(bool, T)>))]) -> Vec<(String, LayerStats)> {
+    let gpu = Gpu::headless();
+    let target = Offscreen::new(&gpu.device, size.0, size.1);
+    let env = Env { scale: 1.0, system_dark: true };
+    let viewport = (size.0 as f32, size.1 as f32);
+    let mut runs: Vec<_> = [false, true].map(|cached| {
+        (Runtime::new((cached, state.clone()), view, viewport, env), Renderer::new(&gpu.device, OFFSCREEN_FORMAT))
+    }).into();
+    let mut stats = Vec::new();
+    let initial: &dyn Fn(&mut Runtime<(bool, T)>) = &|_| {};
+    for (name, frames, step) in [("rest", 2, initial)].into_iter().chain(steps.iter().copied()) {
+        let mut out = Vec::new();
+        for (rt, _) in &mut runs { step(rt); }
+        for f in 0..frames {
+            for (rt, renderer) in &mut runs {
+                rt.frame(1.0 / 60.0);
+                renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, size);
+                out.push(pixels(&gpu, renderer, &target));
+            }
+            let (want, got) = (&out[out.len() - 2], &out[out.len() - 1]);
+            let max_diff = got.iter().zip(want).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+            assert!(max_diff <= 1, "{name} frame {f}: cached differs from uncached (max_diff={max_diff})");
+            stats.push((format!("{name}/{f}"), runs[1].1.layer_stats()));
+        }
+    }
+    assert!(runs[1].0.instances.iter().any(|i| i.params[1] == KIND_LAYER && i.params[3] == 1.0), "the subtree stays cached");
+    stats
+}
+
+#[test]
+fn cache_follows_press_paint_that_lands_without_a_view_run() {
+    fn view(s: &(bool, ()), _: &mut Cx<(bool, ())>) -> El {
+        let mut card = el().size(24.0, 24.0).child(
+            el().size(24.0, 24.0)
+                .fill(Color { r: 0.8, g: 0.1, b: 0.2, a: 1.0 })
+                .press(Color { r: 0.1, g: 0.2, b: 0.9, a: 1.0 })
+                .on_press(|_: &mut (bool, ())| {}),
+        );
+        if s.0 { card = card.cache(); }
+        el().size(32.0, 32.0).child(card)
+    }
+    let stats = same_as_uncached((), view, (32, 32), &[
+        ("hover", 2, &|rt| rt.pointer_move(12.0, 12.0)),
+        ("down", 2, &|rt| rt.pointer_down(12.0, 12.0)),
+        ("up", 40, &|rt| rt.pointer_up(12.0, 12.0)),
+    ]);
+    assert_eq!(stats.last().unwrap().1.extra_passes, 0, "the released card hits its cache again");
+}
+
+#[test]
+fn cache_follows_link_hover_moving_between_links_of_one_text() {
+    fn view(s: &(bool, ()), _: &mut Cx<(bool, ())>) -> El {
+        let green = crate::LinkPaint::new().bg(Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 });
+        let label = crate::text("MMMM MMMM")
+            .font(crate::TextStyle::new(16.0, 400.0))
+            .color(Color::WHITE)
+            .link(crate::Link::new(0..4, "a").hover(green))
+            .link(crate::Link::new(5..9, "b").hover(green))
+            .on_link(|_: &mut (bool, ()), _, _| {});
+        let mut card = el().size(150.0, 24.0).child(label);
+        if s.0 { card = card.cache(); }
+        el().size(160.0, 32.0).child(card)
+    }
+    same_as_uncached((), view, (160, 32), &[
+        ("first link", 2, &|rt| rt.pointer_move(16.0, 10.0)),
+        ("second link", 2, &|rt| rt.pointer_move(90.0, 10.0)),
+    ]);
+}
+
+#[test]
+fn cache_follows_an_outside_hover_group_fading_its_descendants() {
+    fn view(s: &(bool, ()), _: &mut Cx<(bool, ())>) -> El {
+        let mut card = el().size(24.0, 24.0).fill(Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 }).child(
+            el().size(16.0, 16.0).fill(Color::WHITE).group_opacity(0.2, 1.0),
+        );
+        if s.0 { card = card.cache(); }
+        el().size(64.0, 32.0).child(crate::row().size(64.0, 32.0).hover_group().child(card))
+    }
+    same_as_uncached((), view, (64, 32), &[
+        ("enter", 3, &|rt| rt.pointer_move(48.0, 16.0)),
+        ("leave", 12, &|rt| rt.pointer_move(200.0, 200.0)),
+    ]);
+}
+
+#[test]
+fn cache_redraws_a_same_length_text_change() {
+    fn view(s: &(bool, bool), _: &mut Cx<(bool, bool)>) -> El {
+        let mut card = el().size(60.0, 24.0).child(crate::text(if s.1 { "BBBB" } else { "AAAA" }).color(Color::WHITE));
+        if s.0 { card = card.cache(); }
+        el().size(64.0, 32.0).child(card)
+    }
+    let stats = same_as_uncached(false, view, (64, 32), &[
+        ("swap", 40, &|rt| { rt.state.1 = true; rt.invalidate(); }),
+    ]);
+    let passes: Vec<_> = stats.iter().map(|(_, s)| s.extra_passes).collect();
+    assert_eq!(passes[..2], [1, 0]);
+    assert_eq!(passes[2..].iter().sum::<usize>(), 1, "the new text rasterizes once: {passes:?}");
+    assert_eq!(passes.last(), Some(&0));
+}
+
+#[test]
+fn cache_invalidates_the_cached_roots_blur() {
+    fn view(s: &(bool, bool), _: &mut Cx<(bool, bool)>) -> El {
+        let mut card = el().size(24.0, 24.0).absolute(16.0, 16.0)
+            .blur(if s.1 { 3.0 } else { 0.0 }).blur_motion(crate::Anim::INSTANT)
+            .child(el().size(16.0, 16.0).fill(Color::WHITE));
+        if s.0 { card = card.cache(); }
+        el().size(64.0, 64.0).child(card)
+    }
+    same_as_uncached(false, view, (64, 64), &[
+        ("blur", 3, &|rt| { rt.state.1 = true; rt.invalidate(); }),
+    ]);
+}
+
+#[test]
+fn clicks_land_inside_a_cached_card_after_a_pan() {
+    type S = (u32, Live<[f32; 2]>);
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        el().size(96.0, 64.0).child(
+            el().size(96.0, 64.0).live_offset(&s.1).child(
+                el().size(32.0, 32.0).cache().fill(Color::WHITE).child(
+                    el().key("button").size(16.0, 16.0).fill(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 })
+                        .on_press(|s: &mut S| s.0 += 1),
+                ),
+            ),
+        )
+    }
+    let gpu = Gpu::headless();
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let pan = Live::new([0.0, 0.0]);
+    let mut rt = Runtime::new((0, pan.clone()), view, (96.0, 64.0), Env { scale: 1.0, system_dark: true });
+    for _ in 0..2 {
+        rt.frame(1.0 / 60.0);
+        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (96, 64));
+    }
+    pan.set([50.0, 30.0]);
+    rt.frame(1.0 / 60.0);
+    renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (96, 64));
+    assert_eq!(rt.instances.len(), 2, "the panned card is elided to its cached quad");
+    for (x, y) in [(8.0, 8.0), (58.0, 38.0)] {
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (96, 64));
+    }
+    assert_eq!(rt.state.0, 1, "only the click on the button's panned position presses it");
+    let b = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("button")).expect("button listed");
+    assert_eq!([b.rect[0], b.rect[1]], [50.0, 30.0], "elements() reports the panned rect");
+}
+
+#[test]
+fn cache_updates_same_size_image_pixels_after_the_first_raster() {
+    fn view(image: &crate::Pixels, _: &mut Cx<crate::Pixels>) -> El {
+        el().size(32.0, 32.0).child(el().size(24.0, 24.0).cache().pixels(image))
+    }
+    let gpu = Gpu::headless();
+    let target = Offscreen::new(&gpu.device, 32, 32);
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let image = crate::Pixels::new();
+    let mut rt = Runtime::new(image.clone(), view, (32.0, 32.0), Env::new(true, 1.0));
+    for color in [[255, 0, 0, 255], [0, 255, 0, 255]] {
+        image.set(2, 2, color.repeat(4));
+        rt.frame(1.0 / 60.0);
+        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (32, 32));
+        renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
+        let out = pixels(&gpu, &renderer, &target);
+        assert_eq!(&out[(12 * 32 + 12) * 4..][..4], &color, "same-size image publication must change the output");
+    }
+}
+
+#[test]
+fn cache_does_not_hide_a_radius_change_during_scale_settling() {
+    type S = (bool, Live<f32>);
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        el().size(100.0, 100.0).live_scale(&s.1).child(
+            el().size(32.0, 32.0).cache().child(
+                el().size(32.0, 32.0).motion(crate::tok::motion::INSTANT).fill(Color::WHITE).radius(if s.0 { 16.0 } else { 0.0 }),
+            ),
+        )
+    }
+    let gpu = Gpu::headless();
+    let target = Offscreen::new(&gpu.device, 100, 100);
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let scale = Live::new(1.0);
+    let mut rt = Runtime::new((false, scale.clone()), view, (100.0, 100.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (100, 100));
+    let _ = pixels(&gpu, &renderer, &target);
+    scale.set(1.01);
+    rt.state.0 = true;
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+    renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (100, 100));
+    let out = pixels(&gpu, &renderer, &target);
+    assert!(out[3] < 32, "the newly rounded corner must not show the stale square (alpha={})", out[3]);
+}
+
+#[test]
+fn slow_pinch_composites_until_the_scale_holds_still() {
+    fn view(scale: &Live<f32>, _: &mut Cx<Live<f32>>) -> El {
+        el().size(200.0, 200.0).padding(60.0).live_scale(scale).child(
+            el().size(48.0, 48.0).cache().fill(Color { r: 0.2, g: 0.5, b: 0.9, a: 1.0 })
+                .child(el().size(24.0, 24.0).fill(Color::WHITE)),
+        )
+    }
+    let gpu = Gpu::headless();
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let scale = Live::new(1.0);
+    let mut rt = Runtime::new(scale.clone(), view, (200.0, 200.0), Env { scale: 1.0, system_dark: true });
+    rt.frame(0.0);
+    renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (200, 200));
+    assert_eq!(renderer.layer_stats().extra_passes, 1);
+    for step in 1..=60 {
+        scale.set(1.0 + step as f32 * 0.01);
+        rt.frame(1.0 / 60.0);
+        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (200, 200));
+        assert_eq!(renderer.layer_stats().extra_passes, 0, "pinch step {step} composites the old texture");
+    }
+    rt.frame(0.15);
+    renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (200, 200));
+    assert_eq!(renderer.layer_stats().extra_passes, 1, "one raster once the pinch rests");
+}
+
+#[test]
+fn over_budget_cache_falls_back_to_a_viewport_sized_target() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        el().size(32.0, 32.0).child(
+            el().size(300.0, 300.0).cache().clip_rounded(8.0).fill(Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 })
+                .child(el().size(20.0, 20.0).fill(Color::WHITE)),
+        )
+    }
+    let gpu = Gpu::headless();
+    let target = Offscreen::new(&gpu.device, 32, 32);
+    let mut want = None;
+    // In budget it caches a 320 px bucket; the fallback draws the same group through the 32 px it shows.
+    for budget in [DEFAULT_CACHE_BUDGET, 64 * 64 * 8] {
+        let mut rt = Runtime::new((), view, (32.0, 32.0), Env { scale: 1.0, system_dark: true });
+        let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+        renderer.set_cache_budget(budget);
+        let mut out = Vec::new();
+        for _ in 0..3 {
+            rt.frame(1.0 / 60.0);
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (32, 32));
+            out = pixels(&gpu, &renderer, &target);
+        }
+        match &want {
+            None => want = Some(out),
+            Some(w) => {
+                assert!(renderer.layer_stats().bytes <= 64 * 64 * 8, "over-budget fallback stays viewport-sized: {:?}", renderer.layer_stats());
+                assert!(out.iter().zip(w).all(|(a, b)| a.abs_diff(*b) <= 1), "fallback draws like the cache");
+            }
+        }
+    }
+}
+
+#[test]
+fn scale_commits_draw_live_without_repeated_cache_passes() {
+    fn view(scale: &f32, _: &mut Cx<f32>) -> El {
+        el().size(200.0, 200.0).scale(*scale).child(
+            el().size(48.0, 48.0).cache().fill(Color::WHITE),
+        )
+    }
+    let gpu = Gpu::headless();
+    let target = Offscreen::new(&gpu.device, 200, 200);
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let mut rt = Runtime::new(1.0, view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (200, 200));
+    let _ = pixels(&gpu, &renderer, &target);
+    for step in 1..=30 {
+        rt.state = 1.0 + step as f32 * 0.01;
+        rt.invalidate();
+        rt.frame(1.0 / 60.0);
+        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (200, 200));
+        assert_eq!(renderer.layer_stats().extra_passes, 0, "scale commit {step} must not rasterize another cache");
+        let _ = pixels(&gpu, &renderer, &target);
+    }
+    rt.frame(0.15);
+    renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (200, 200));
+    assert_eq!(renderer.layer_stats().extra_passes, 1, "cache once the committed scale settles");
+}

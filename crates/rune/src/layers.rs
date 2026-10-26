@@ -63,6 +63,8 @@ struct Layer {
     end: u32,
     parent: Option<usize>,
     bounds: [f32; 4], // edges while planning, xywh after preparation
+    /// The part of `bounds` that can show (edges), which a cache that doesn't fit falls back to.
+    vis: [f32; 4],
     clip: [f32; 4],
     limit: [f32; 4], // ancestor output needed by their filters; never a replacement rounded clip
     fade: [u32; 4],
@@ -199,6 +201,7 @@ impl Renderer {
                 self.layers.plan.push(Layer {
                     begin: index as u32, end: 0, parent,
                     bounds: [i.rect[0], i.rect[1], i.rect[0] + i.rect[2], i.rect[1] + i.rect[3]],
+                    vis: [0.0; 4],
                     clip: i.clip,
                     limit,
                     fade: i.fade,
@@ -221,6 +224,7 @@ impl Renderer {
                     (l.bounds[1] - grow).max(l.clip[1].max(l.limit[1]) - grow).max(-l.support).floor(),
                     (l.bounds[2] + grow).min(l.clip[2].min(l.limit[2]) + grow).min(viewport.0 as f32 + l.support).ceil(),
                     (l.bounds[3] + grow).min(l.clip[3].min(l.limit[3]) + grow).min(viewport.1 as f32 + l.support).ceil()];
+                l.vis = vis;
                 if l.cache.is_some() {
                     if vis[2] <= vis[0] || vis[3] <= vis[1] {
                         l.opacity = 0.0;
@@ -304,9 +308,9 @@ impl Renderer {
                 self.layers.targets[index] = None;
                 continue;
             }
-            let bounds = l.bounds;
-            let (width, height) = (bounds[2] as u32, bounds[3] as u32);
-            let bucket = (width.div_ceil(64) * 64, height.div_ceil(64) * 64);
+            let mut bounds = l.bounds;
+            let (mut width, mut height) = (bounds[2] as u32, bounds[3] as u32);
+            let mut bucket = (width.div_ceil(64) * 64, height.div_ceil(64) * 64);
             let mut cache_target = None;
             if let Some((node_id, sig)) = l.cache {
                 let needed_bytes = u64::from(bucket.0) * u64::from(bucket.1) * bpp;
@@ -328,6 +332,12 @@ impl Renderer {
                         self.layers.retained.swap_remove(pos);
                     }
                     l.cache = None;
+                    // Drawn like an uncached group, it only needs the part that shows.
+                    let v = l.vis;
+                    bounds = [v[0], v[1], (v[2] - v[0]).max(0.0), (v[3] - v[1]).max(0.0)];
+                    l.bounds = bounds;
+                    (width, height) = (bounds[2] as u32, bounds[3] as u32);
+                    bucket = (width.div_ceil(64) * 64, height.div_ceil(64) * 64);
                 }
             }
             let l = &self.layers.plan[index];

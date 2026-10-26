@@ -588,7 +588,6 @@ struct NodeCache {
     seen_scale: f32,
     scale_changed_at: f64,
     env_scale: f32,
-    content_hash: u64,
     was_live: bool,
     rel_bounds: [f32; 4],
     glyphs: usize,
@@ -608,7 +607,9 @@ struct ActiveCache {
     seen_scale: f32,
     scale_changed_at: f64,
     env_scale: f32,
-    content_hash: u64,
+    /// Everything outside commits that paints the subtree: hover, press, links, an outside
+    /// hover group and the window-wide state in `build`'s paint hash.
+    paint_hash: u64,
     glyph_start: usize,
     cached_glyphs: usize,
     elided: bool,
@@ -811,7 +812,8 @@ pub struct Runtime<S: 'static> {
     has_dissolve: bool,
     cache_live_scratch: Vec<bool>,
     cache_check_scratch: Vec<bool>,
-    cache_content_scratch: Vec<u64>,
+    cache_paint_scratch: Vec<u64>,
+    cache_inside_scratch: Vec<bool>,
     node_caches: HashMap<NodeId, NodeCache>,
     has_cache: bool,
     commit_gen: u64,
@@ -1143,7 +1145,8 @@ impl<S: 'static> Runtime<S> {
             has_dissolve: false,
             cache_live_scratch: Vec::new(),
             cache_check_scratch: Vec::new(),
-            cache_content_scratch: Vec::new(),
+            cache_paint_scratch: Vec::new(),
+            cache_inside_scratch: Vec::new(),
             node_caches: HashMap::new(),
             has_cache: false,
             commit_gen: 0,
@@ -4680,7 +4683,8 @@ impl<S: 'static> Runtime<S> {
 
         self.cache_live_scratch.clear();
         self.cache_check_scratch.clear();
-        self.cache_content_scratch.clear();
+        self.cache_paint_scratch.clear();
+        self.cache_inside_scratch.clear();
         let mut paint_state_hash = 0u64;
         if self.has_cache {
             use std::hash::{Hash, Hasher};
@@ -4713,9 +4717,16 @@ impl<S: 'static> Runtime<S> {
 
             self.cache_live_scratch.resize(n_nodes, false);
             self.cache_check_scratch.resize(n_nodes, false);
-            self.cache_content_scratch.resize(n_nodes, 0);
+            self.cache_paint_scratch.resize(n_nodes, 0);
+            // Only cached subtrees read these, so skip everything outside them.
+            self.cache_inside_scratch.resize(n_nodes, false);
+            for i in 0..n_nodes {
+                let n = &self.nodes[i];
+                self.cache_inside_scratch[i] = n.vis.cache || n.parent.is_some_and(|p| self.cache_inside_scratch[p]);
+            }
             let store = self.scene.store();
             for i in (0..n_nodes).rev() {
+                if !self.cache_inside_scratch[i] { continue; }
                 let n = &self.nodes[i];
                 let live = store.is_node_animating(n.id)
                     || (!self.reduced_motion && self.loops.get(&n.id).is_some_and(|l| l.active(store.node_time(n.id))))
@@ -4724,48 +4735,33 @@ impl<S: 'static> Runtime<S> {
                     || self.subtree_exiting(i)
                     || (!self.flights.is_empty() && self.flights.iter().any(|f| f.departs(&n.path, n.key.as_deref()) || f.lands(&n.path, n.key.as_deref())))
                     || n.vis.effect.is_some()
+                    // A publication can replace texels without moving the atlas slot, so
+                    // identical image primitives do not imply identical raster contents.
+                    || n.vis.pixels.is_some()
                     || n.vis.surface.is_some()
                     || (n.material.is_some() && self.native_materials)
                     || n.input.as_ref().is_some_and(|inp| inp.edit.focused)
                     || n.text.as_ref().is_some_and(|t| t.advance_in.is_some());
-                let check = n.vis.pixels.is_some()
-                    || n.text.as_ref().is_some_and(|t| t.live.is_some())
+                let check = n.text.as_ref().is_some_and(|t| t.live.is_some())
                     || n.live.iter().any(|b| !n.vis.cache || !matches!(b.property, crate::live::Property::Offset | crate::live::Property::Scale));
                 self.cache_live_scratch[i] |= live;
                 self.cache_check_scratch[i] |= check;
-                let mut ch = rune_motion::Fx::default();
-                ch.write_u64(self.cache_content_scratch[i]);
-                ch.write_u64(n.id.0);
-                ch.write_u32(n.local.w.to_bits());
-                ch.write_u32(n.local.h.to_bits());
-                for c in [n.vis.fill, n.vis.border, n.vis.hover] {
-                    ch.write_u32(c.r.to_bits());
-                    ch.write_u32(c.g.to_bits());
-                    ch.write_u32(c.b.to_bits());
-                    ch.write_u32(c.a.to_bits());
+                // Hover, press and link paint land without a commit (an instant track or a
+                // pointer move inside one text), so hash what this frame samples.
+                let links = n.text.as_ref().is_some_and(|t| !t.links.is_empty());
+                if n.vis.hover.a > 0.0 || n.vis.hover_group || n.vis.press.a > 0.0 || n.press_scale.is_some() || links {
+                    let mut ph = rune_motion::Fx::default();
+                    ph.write_u64(n.id.0);
+                    for prop in [P_HOVER, P_PRESS, P_PRESS_SCALE] {
+                        ph.write_u32(self.scene.get(n.id, prop).unwrap_or(0.0).to_bits());
+                    }
+                    if links { self.link_states(i).hash(&mut ph); }
+                    self.cache_paint_scratch[i] = self.cache_paint_scratch[i].wrapping_add(ph.finish());
                 }
-                ch.write_u32(n.vis.border_width.to_bits());
-                ch.write_u32(n.vis.opacity.to_bits());
-                if let Some(k) = n.vis.cache_key {
-                    ch.write_u8(1);
-                    ch.write_u64(k);
-                }
-                if let Some(t) = &n.text {
-                    t.content.hash(&mut ch);
-                    t.style.hash(&mut ch);
-                    ch.write_u32(t.color.r.to_bits());
-                    ch.write_u32(t.color.g.to_bits());
-                    ch.write_u32(t.color.b.to_bits());
-                    ch.write_u32(t.color.a.to_bits());
-                }
-                let node_ch = ch.finish();
-                self.cache_content_scratch[i] = node_ch;
                 if let Some(p) = n.parent {
+                    self.cache_paint_scratch[p] = self.cache_paint_scratch[p].wrapping_add(self.cache_paint_scratch[i]);
                     self.cache_live_scratch[p] |= self.cache_live_scratch[i];
                     self.cache_check_scratch[p] |= self.cache_check_scratch[i] || !n.live.is_empty();
-                    self.cache_content_scratch[p] = self.cache_content_scratch[p]
-                        .wrapping_mul(0x517cc1b727220a95)
-                        .wrapping_add(node_ch);
                 }
             }
         }
@@ -4823,7 +4819,7 @@ impl<S: 'static> Runtime<S> {
                 while let Some((_, start, surface_start)) = layers.pop() {
                     if active_cache.is_some_and(|ac| ac.instance_start == start) {
                         let ac = active_cache.take().unwrap();
-                        self.close_cached_layer(ac, start, surface_start, paint_state_hash, &mut glyph_count);
+                        self.close_cached_layer(ac, start, surface_start, &mut glyph_count);
                     } else {
                         crate::render::end_layer(&mut self.instances, &mut self.surfaces, &mut self.marks, start, surface_start);
                     }
@@ -4835,7 +4831,7 @@ impl<S: 'static> Runtime<S> {
                 if parent == Some(ancestor) { break; }
                 if active_cache.is_some_and(|ac| ac.instance_start == start) {
                     let ac = active_cache.take().unwrap();
-                    self.close_cached_layer(ac, start, surface_start, paint_state_hash, &mut glyph_count);
+                    self.close_cached_layer(ac, start, surface_start, &mut glyph_count);
                 } else {
                     crate::render::end_layer(&mut self.instances, &mut self.surfaces, &mut self.marks, start, surface_start);
                 }
@@ -5024,7 +5020,26 @@ impl<S: 'static> Runtime<S> {
             let mut skip_paint = pinh.skip_paint;
             let mut in_cache = pinh.in_cache;
             let mut open_cache = false;
+            // A scale changed by view commits may accompany arbitrary content edits. Draw
+            // live until it rests instead of trusting a partial content hash or allocating a
+            // new raster on each commit. Live-only transforms still composite the old raster.
+            let mut committed_scale_moving = false;
+            if n.vis.cache && let Some(entry) = self.node_caches.get_mut(&n.id)
+                && entry.commit_gen != self.commit_gen
+                && (sc * s - entry.raster_scale).abs() > 1e-4
+            {
+                if (sc * s - entry.seen_scale).abs() > 1e-4 {
+                    entry.seen_scale = sc * s;
+                    entry.scale_changed_at = now;
+                }
+                committed_scale_moving = now - entry.scale_changed_at < STATIC_SCALE_SETTLE;
+                if committed_scale_moving {
+                    entry.was_live = true;
+                    self.static_scale_settling = true;
+                }
+            }
             if n.vis.cache && active_cache.is_none() && !lift && !skip_paint && !self.cache_live_scratch[i]
+                && !committed_scale_moving
                 && effective_opacity > 0.001 && w > 0.0 && h > 0.0
             {
                 let eff_scale = sc * s;
@@ -5127,6 +5142,14 @@ impl<S: 'static> Runtime<S> {
                 if open_cache {
                     in_cache = true;
                     let eff_scale = sc * s;
+                    let paint_hash = {
+                        use std::hash::Hasher;
+                        let mut h = rune_motion::Fx::default();
+                        h.write_u64(paint_state_hash);
+                        h.write_u64(self.cache_paint_scratch[i]);
+                        h.write_u32(pinh.group.to_bits());
+                        h.finish()
+                    };
                     let (raster_scale, seen_scale, scale_changed_at, elided, cached_glyphs) =
                         if let Some(entry) = self.node_caches.get(&n.id) {
                             let is_resident = self.text.atlas.resident_caches.get(&n.id.0) == Some(&entry.signature);
@@ -5139,18 +5162,17 @@ impl<S: 'static> Runtime<S> {
                                 (entry.seen_scale, entry.scale_changed_at)
                             };
                             let scale_diff = (eff_scale - entry.raster_scale).abs() > 1e-4;
-                            let scale_settling = scale_diff && env_same && is_resident && !entry.was_live
+                            let same_commit = self.commit_gen == entry.commit_gen;
+                            let scale_settling = same_commit && scale_diff && env_same && is_resident && !entry.was_live
                                 && (now - scale_changed_at < STATIC_SCALE_SETTLE || scale_motion == ScaleMotion::Moving);
                             self.static_scale_settling |= scale_settling;
-                            let content_same = if scale_settling {
-                                self.cache_content_scratch[i] == entry.content_hash
-                            } else {
-                                self.commit_gen == entry.commit_gen && !scale_diff
-                            };
+                            // A commit can change any paint property. Never use a partial
+                            // model hash to skip checking the actual emitted draw output.
+                            let content_same = same_commit && (!scale_diff || scale_settling);
                             let can_elide = is_resident
                                 && !entry.was_live
                                 && content_same
-                                && paint_state_hash == entry.paint_state_hash
+                                && paint_hash == entry.paint_state_hash
                                 && !self.cache_check_scratch[i];
                             let raster_scale = if can_elide && scale_settling { entry.raster_scale } else { eff_scale };
                             (raster_scale, seen_scale, scale_changed_at, can_elide, entry.glyphs)
@@ -5171,7 +5193,7 @@ impl<S: 'static> Runtime<S> {
                         seen_scale,
                         scale_changed_at,
                         env_scale: s,
-                        content_hash: self.cache_content_scratch[i],
+                        paint_hash,
                         glyph_start: glyph_count,
                         cached_glyphs,
                         elided,
@@ -5865,7 +5887,7 @@ impl<S: 'static> Runtime<S> {
         while let Some((_, start, surface_start)) = layers.pop() {
             if active_cache.is_some_and(|ac| ac.instance_start == start) {
                 let ac = active_cache.take().unwrap();
-                self.close_cached_layer(ac, start, surface_start, paint_state_hash, &mut glyph_count);
+                self.close_cached_layer(ac, start, surface_start, &mut glyph_count);
             } else {
                 crate::render::end_layer(&mut self.instances, &mut self.surfaces, &mut self.marks, start, surface_start);
             }
@@ -5892,7 +5914,6 @@ impl<S: 'static> Runtime<S> {
         ac: ActiveCache,
         start: usize,
         surface_start: usize,
-        paint_state_hash: u64,
         glyph_count: &mut usize,
     ) {
         use std::hash::Hasher;
@@ -5938,6 +5959,9 @@ impl<S: 'static> Runtime<S> {
         let mut bounds = [ac.origin[0], ac.origin[1], ac.origin[0] + ac.size[0], ac.origin[1] + ac.size[1]];
         let mut h = rune_motion::Fx::default();
         h.write_u64(ac.node_id.0);
+        // Blur is baked into the target, unlike opacity and clipping on the composite.
+        h.write_u32(self.instances[start].params[2].to_bits());
+        h.write_u8(self.srgb_blend as u8);
         h.write_u32(ac.raster_scale.to_bits());
         h.write_u32(ac.size[0].to_bits());
         h.write_u32(ac.size[1].to_bits());
@@ -6029,12 +6053,11 @@ impl<S: 'static> Runtime<S> {
             seen_scale: ac.seen_scale,
             scale_changed_at: ac.scale_changed_at,
             env_scale: ac.env_scale,
-            content_hash: ac.content_hash,
             was_live: false,
             rel_bounds,
             glyphs,
             commit_gen: self.commit_gen,
-            paint_state_hash,
+            paint_state_hash: ac.paint_hash,
         });
         if is_resident && self.surfaces.len() == surface_start {
             self.instances.truncate(start + 1);

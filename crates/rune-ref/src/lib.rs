@@ -21,6 +21,7 @@ pub struct Primitive {
     pub rect: [f32; 4],
     pub radii: [f32; 4],
     pub fill: [f32; 4],
+    /// Border paint; for a layer (kind 8), `[signed_clip_radius, 0, 0, 0]`.
     pub border: [f32; 4],
     pub params: [f32; 4],
     pub uv: [f32; 4],
@@ -53,6 +54,9 @@ pub struct Scene {
     pub primitives: Vec<Primitive>,
     pub atlas: Atlas,
 }
+/// The deepest nesting of layer scopes `validate` accepts.
+const MAX_LAYER_DEPTH: usize = 16;
+
 impl Scene {
     /// Reject malformed replay files before CPU allocation or GPU upload.
     pub fn validate(&self) -> Result<(), String> {
@@ -78,6 +82,16 @@ impl Scene {
         let mut layer_depth = 0usize;
         for p in &self.primitives {
             if p.params[1] == 8.0 {
+                // Each open scope holds a full-frame buffer, and the compositor has no layer blur.
+                if layer_depth == MAX_LAYER_DEPTH || p.params[2] != 0.0 {
+                    return Err(format!("unsupported layer {} ({})", p.node, p.source));
+                }
+                if !matches!(p.params[0], 0.0 | 1.0) || !matches!(p.params[3], 0.0 | 1.0)
+                    || (p.params[3] == 1.0 && p.radii.iter().chain(p.uv.iter())
+                        .any(|v| !v.is_finite() || !(0.0..=65535.0).contains(v) || v.fract() != 0.0))
+                {
+                    return Err(format!("invalid layer {} ({})", p.node, p.source));
+                }
                 layer_depth += 1;
             } else if p.params[1] == 9.0 {
                 if layer_depth == 0 {
@@ -101,7 +115,7 @@ impl Scene {
                 || (p.params[0] < 0.0 && p.params[1] != 2.0)
                 || p.params[2] < 0.0
                 || !color(&p.fill)
-                || !color(&p.border)
+                || (if p.params[1] == 8.0 { p.border[1..] != [0.0; 3] } else { !color(&p.border) })
                 || (p.params[1] == 4.0 && !color(&p.uv))
                 || (p.params[1] == 10.0 && (p.uv[0] <= 0.0 || p.uv[1] <= 0.0))
                 || (p.params[1] == 11.0 && (p.uv[2] < 0.0 || p.uv[3] < 0.0 || (p.uv[2] > 0.0) != (p.uv[3] > 0.0)))
@@ -181,7 +195,7 @@ impl Frame {
                         close += 1;
                     }
                 }
-                if p.params[3] == 0.0 && p.fill[3] == 1.0 && p.params[0] == 0.0 && p.params[2] == 0.0 && p.clip == NO_CLIP {
+                if p.params[3] == 0.0 && p.fill[3] == 1.0 && p.params[0] == 0.0 && p.params[2] == 0.0 && p.clip == NO_CLIP && p.border[0] == 0.0 {
                     Self::render_range(width, height, rgba, owners.as_deref_mut(), scene, cursor + 1, close);
                 } else if p.fill[3] > 0.0 {
                     let mut layer_rgba = vec![0u8; (width * height * 4) as usize];
@@ -194,7 +208,7 @@ impl Frame {
                     let alpha = p.fill[3].clamp(0.0, 1.0);
                     for y in y0..y1 {
                         for x in x0..x1 {
-                            let cov = alpha * shader::clip_coverage(p, [x as f32 + 0.5, y as f32 + 0.5]);
+                            let cov = alpha * shader::layer_clip_coverage(p, [x as f32 + 0.5, y as f32 + 0.5]);
                             if cov <= 0.0 {
                                 continue;
                             }

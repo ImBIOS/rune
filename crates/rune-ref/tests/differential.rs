@@ -376,3 +376,27 @@ fn cpu_gpu_cached_subtrees() {
         assert!(a.abs_diff(*b) <= 1, "cached vs uncached GPU mismatch: {a} vs {b}");
     }
 }
+
+#[test]
+fn cpu_gpu_cached_rounded_clip() {
+    use rune::render::{Instance, LayerSpec};
+    let mut scene = generate::scene(&[]);
+    scene.width = 32;
+    scene.height = 32;
+    let begin = Instance::begin_layer([0.0, 0.0, 24.0, 24.0], [0.0, 0.0, 24.0, 24.0],
+        LayerSpec { clip_radius: 8.0, ..Default::default() });
+    let mut paint = generate::scene(&[[255; 32]]).primitives.into_iter().next().unwrap();
+    paint.rect = [0.0, 0.0, 24.0, 24.0];
+    paint.radii = [0.0; 4];
+    paint.fill = [1.0; 4];
+    paint.border = [0.0; 4];
+    paint.params = [0.0; 4];
+    paint.clip = rune_ref::NO_CLIP;
+    paint.fade = [0.0; 4];
+    paint.fade_origin = None;
+    scene.primitives = vec![Primitive::from_instance(&begin, 1, "rounded".into()), paint,
+        Primitive::from_instance(&Instance::end_layer(), 3, "end".into())];
+    assert_eq!(f32::from_bits(Instance::from(&scene.primitives[0]).fade[3]), 8.0,
+        "replay capture must preserve the rounded clip, not compare two square layers");
+    check(&mut GpuRenderer::default(), &scene, 2).expect("rounded layer survives replay capture");
+}

@@ -14,10 +14,17 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   compositor `El::effect` slot, `NativeSurface`, native `SystemMaterial` or focused text input
   draw live without offscreen thrash and re-cache once settled. Changing ancestor scales composite
   the existing cached texture with bilinear filtering and re-rasterize at the new device-pixel
-  resolution after `0.12 s` at rest. Cached textures are capped at `4096×4096` px under an LRU
+  resolution after `0.1 s` at rest. Cached textures are capped at `4096×4096` px under an LRU
   byte budget (`Renderer::set_cache_budget`, default 64 MiB). Hit testing, accessibility,
   `elements()` and `on_layout` are unchanged, and apps that don't call `.cache()` pay no extra
   passes or allocations.
+
+  Review fixes: image-backed subtrees draw live so same-size publications cannot leave stale
+  texels. Link paint, press paint, outside hover groups and the cache root's blur invalidate
+  correctly. View commits always check emitted output; committed scale changes draw live until
+  settled instead of trusting a partial model hash. Over-budget fallbacks allocate only the
+  visible area when isolation is still needed. Reference replays preserve rounded layer clips,
+  reject unsupported layer blur, malformed cache tags and excessive nesting.
 
 - **Grain is symmetric.** `Fx::grain` returned its light half as added light with zero coverage,
   so with `srgb_blend` on each +0.02 of grain became about +40/255 on the framebuffer while the
