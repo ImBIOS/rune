@@ -978,6 +978,8 @@ pub struct Runtime<S: 'static> {
     hover_shown: Vec<String>,
     /// Delayed hover changes waiting out their delay: path, inside, due on the clock.
     hover_pending: Vec<(String, bool, f64)>,
+    /// A press stopped the waits to report an enter; the pointer's next move restarts them.
+    hover_paused: bool,
     /// Files dragged over the window from another app (`drop_dispatch`).
     file_drag: drop_dispatch::FileDrag,
     pub ime_area: Option<[f32; 4]>,
@@ -1316,6 +1318,7 @@ impl<S: 'static> Runtime<S> {
             hover_within: Vec::new(),
             hover_shown: Vec::new(),
             hover_pending: Vec::new(),
+            hover_paused: false,
             file_drag: Default::default(),
             ime_area: None,
             caret: None,
@@ -4487,6 +4490,7 @@ impl<S: 'static> Runtime<S> {
     /// point the drag last saw has nothing new to report, and its instant transaction would
     /// cut short whatever the press started (a tapped slider's knob mid-spring).
     fn move_pointer(&mut self, x: f32, y: f32, drag_move: bool) {
+        if self.pointer != Some((x, y)) { self.hover_paused = false; }
         self.pointer = Some((x, y));
         if self.in_viewport(x, y) { self.left_in_capture = false; }
         for &(id, rect) in &self.hits {
@@ -4649,6 +4653,7 @@ impl<S: 'static> Runtime<S> {
         self.dismiss_help();
         // A press cancels the waits to report an enter; the next move after it starts them again.
         self.hover_pending.retain(|p| !p.1);
+        self.hover_paused = true;
         let target = self.primary_target(x, y);
         if let Some(i) = self.active_modal()
             && target.is_none_or(|t| !self.allowed(t))
@@ -4892,8 +4897,9 @@ impl<S: 'static> Runtime<S> {
                 continue;
             };
             let shown = self.hover_shown.contains(&path);
-            // A held button never starts the wait to report an enter.
-            let want = self.hover_within.contains(&path) && (shown || self.capture.is_none());
+            // A held button, or a press until the pointer next moves, never starts the wait
+            // to report an enter.
+            let want = self.hover_within.contains(&path) && (shown || self.capture.is_none() && !self.hover_paused);
             let pending = self.hover_pending.iter().position(|p| p.0 == path);
             if want == shown {
                 if let Some(i) = pending { self.hover_pending.remove(i); }
