@@ -5,6 +5,17 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **GFM task list checkboxes in `Markdown`.** `- [ ] todo` and `- [x] done` items now parse with
+  `pulldown_cmark::Options::ENABLE_TASKLISTS` and render as `Checkbox`-styled `"checkbox"` rows
+  instead of `"•"` bullets, with `label` set to the item's text and checked state on both the
+  checkbox control and `ElementInfo::item_selected` (`Checkbox` now sets `focus_selected` too).
+  `Markdown::on_task(|s, block_key, item, checked| ..)` and
+  `Markdown::on_task_tx(|s, block_key, item, checked, tx| ..)` fire on pointer press or `Space`
+  with the top-level block's key (`block_keys` or `b{index}`), the 0-based item index within that
+  block, and the new checked state (`!checked`). Task rows are read-only when no `on_task` handler
+  is set or when `Markdown::tasks_read_only()` is called. **Output change:** markdown lists using
+  `- [ ]` / `- [x]` task syntax now mount checkbox controls instead of bullet text.
+
 - **`Markdown::block_keys`.** Top-level blocks can now take caller-supplied keys in document order
   instead of `b0`, `b1`, … (nested blocks inside a list item or block quote keep `b{index}` under
   their parent block's key), so inserting, removing, reordering or editing blocks above others

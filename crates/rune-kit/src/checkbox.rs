@@ -107,6 +107,6 @@ impl Checkbox {
             }
             root = root.child(content);
         }
-        self.acts.apply(root.focusable(self.state != State::Disabled), self.state != State::Disabled)
+        self.acts.apply(root.focusable(self.state != State::Disabled).focus_selected(on), self.state != State::Disabled)
     }
 }

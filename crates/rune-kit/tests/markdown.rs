@@ -928,3 +928,104 @@ fn block_keys_fallback_nested_and_selectable() {
     rt.frame(1.0 / 60.0);
     assert_eq!(rt.copy_request.as_deref(), Some("Heading\nQuoted one\nQuoted two\nParagraph three"));
 }
+
+#[derive(Default)]
+struct TaskDoc {
+    src: String,
+    keys: Vec<&'static str>,
+    handled: bool,
+    read_only: bool,
+    toggled: Vec<(String, usize, bool)>,
+}
+
+fn task_view(s: &TaskDoc, _: &mut Cx<TaskDoc>) -> El {
+    let mut md = Markdown::new(s.src.clone());
+    if !s.keys.is_empty() {
+        md = md.block_keys(s.keys.iter().copied());
+    }
+    if s.handled {
+        md = md.on_task_tx(|s: &mut TaskDoc, key, item, checked, tx| {
+            s.toggled.push((key.to_owned(), item, checked));
+            tx.copy(format!("{key}:{item}:{checked}"));
+        });
+    }
+    if s.read_only {
+        md = md.tasks_read_only();
+    }
+    col().w(320.0).child(md.build(&Kit::neutral(true)))
+}
+
+#[test]
+fn task_lists_render_checkboxes_press_space_and_respect_read_only() {
+    let k = Kit::neutral(true);
+    let mut rt = Runtime::new(
+        TaskDoc {
+            src: "Notes\n\n- [ ] a\n- [x] b\n".to_owned(),
+            keys: vec!["intro", "checklist"],
+            handled: true,
+            read_only: false,
+            toggled: Vec::new(),
+        },
+        task_view,
+        (320.0, 300.0),
+        Env::new(true, 1.0),
+    );
+    rt.frame(0.0);
+
+    let boxes: Vec<_> = rt.elements().into_iter().filter(|e| e.role == "checkbox").collect();
+    assert_eq!(boxes.len(), 2, "two checkbox elements: {boxes:?}");
+    assert_eq!((boxes[0].label.as_deref(), boxes[0].item_selected, boxes[0].focusable), (Some("a"), false, true));
+    assert_eq!((boxes[1].label.as_deref(), boxes[1].item_selected, boxes[1].focusable), (Some("b"), true, true));
+
+    let marks: Vec<_> = rt.elements().into_iter().filter(|e| e.key.as_deref() == Some("mark")).collect();
+    assert_eq!((marks[0].opacity, marks[1].opacity), (0.0, 1.0));
+    let controls: Vec<_> = rt.elements().into_iter().filter(|e| e.key.as_deref() == Some("control")).collect();
+    assert_eq!((controls[0].fill, controls[1].fill), (Color::TRANSPARENT, k.c.surface_weak));
+
+    let click = |rt: &mut Runtime<TaskDoc>, r: [f32; 4]| {
+        let (x, y) = (r[0] + 12.0, r[1] + r[3] * 0.5);
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+    };
+
+    // Pressing the first unchecked row passes (block_key, 0, true); pressing the second checked row passes (block_key, 1, false).
+    click(&mut rt, boxes[0].rect);
+    assert_eq!(rt.state.toggled, [("checklist".to_owned(), 0, true)]);
+    assert_eq!(rt.copy_request.as_deref(), Some("checklist:0:true"));
+
+    click(&mut rt, boxes[1].rect);
+    assert_eq!(rt.state.toggled, [("checklist".to_owned(), 0, true), ("checklist".to_owned(), 1, false)]);
+    assert_eq!(rt.copy_request.as_deref(), Some("checklist:1:false"));
+
+    // Space on the focused task checkbox toggles it through the same handler.
+    rt.key(rune::KeyEvent { key: rune::Key::Text(" ".into()), mods: Default::default() });
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.toggled.last(), Some(&("checklist".to_owned(), 1, false)));
+
+    // Without caller block_keys, on_task receives the default b{index} key.
+    rt.state.keys.clear();
+    rt.state.toggled.clear();
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+    click(&mut rt, boxes[0].rect);
+    assert_eq!(rt.state.toggled, [("b1".to_owned(), 0, true)]);
+
+    // `.tasks_read_only()` and missing `on_task` keep role/label/checked state but ignore presses and Space.
+    for (handled, read_only) in [(true, true), (false, false)] {
+        rt.state.handled = handled;
+        rt.state.read_only = read_only;
+        rt.state.toggled.clear();
+        rt.invalidate();
+        rt.frame(1.0 / 60.0);
+        let ro_boxes: Vec<_> = rt.elements().into_iter().filter(|e| !e.exiting && e.role == "checkbox").collect();
+        assert_eq!(ro_boxes.len(), 2);
+        assert!(!ro_boxes[0].focusable && !ro_boxes[1].focusable);
+        assert_eq!((ro_boxes[0].item_selected, ro_boxes[1].item_selected), (false, true));
+        click(&mut rt, ro_boxes[0].rect);
+        rt.key(rune::KeyEvent { key: rune::Key::Text(" ".into()), mods: Default::default() });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.toggled.is_empty(), "read-only tasks must not fire: handled={handled} read_only={read_only}");
+    }
+}
