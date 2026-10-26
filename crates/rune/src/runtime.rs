@@ -101,6 +101,8 @@ mod scroll_edge;
 mod scroll_x;
 #[path = "scroll_offset.rs"]
 mod scroll_offset;
+#[path = "sticky.rs"]
+mod sticky;
 #[path = "gesture_dispatch.rs"]
 mod gesture_dispatch;
 pub(crate) use scroll_x::{SHIFT_TURNS_WHEEL, wheel_delta};
@@ -405,6 +407,8 @@ pub(crate) struct Node {
     on_layout: Option<crate::el::LayoutFn>,
     on_screen_layout: Option<crate::el::LayoutFn>,
     on_drawn_layout: Option<crate::el::DrawnLayoutFn>,
+    /// `El::sticky_top`, `El::sticky_bottom` and `El::stuck_shadow`.
+    sticky: Option<Box<crate::el::Sticky>>,
     scroll_edges: crate::el::ScrollEdges,
     growth: Option<GrowthSpec>,
     streaming: bool,
@@ -577,6 +581,10 @@ pub struct ElementInfo {
     pub expanded: Option<bool>,
     /// A selected item of a list, tree, table or group ([`El::focus_selected`]).
     pub item_selected: bool,
+    /// How far [`El::sticky_top`] or [`El::sticky_bottom`] moved it from where scrolling put
+    /// it this frame, in points: down for a stuck header, up for a stuck footer, 0 when it isn't
+    /// stuck. `rect` already includes it.
+    pub stuck: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -858,6 +866,16 @@ pub struct Runtime<S: 'static> {
     has_pixel_aspect: bool,
     has_drawn_layout: bool,
     has_key_up: bool,
+    /// Some element is `El::sticky_top` or `El::sticky_bottom` (see `sticky.rs`).
+    has_sticky: bool,
+    /// Each node's sticky shift this frame (points), while `has_sticky`.
+    stuck: Vec<f32>,
+    /// Per node, what its children stick within: the nearest vertical viewport's top and
+    /// bottom, then the node's own content box top and bottom (unscaled points), while
+    /// `has_sticky`.
+    sticky_frame: Vec<[f32; 4]>,
+    /// `Tx::keep_on_screen` across the commit underway.
+    keeps: Vec<sticky::Keep>,
     /// The focus where the held non-IME key(s) went down, so a release after focus moves
     /// still reaches that element first.
     key_focus: Option<String>,
@@ -1216,6 +1234,10 @@ impl<S: 'static> Runtime<S> {
             has_pixel_aspect: false,
             has_drawn_layout: false,
             has_key_up: false,
+            has_sticky: false,
+            stuck: Vec::new(),
+            sticky_frame: Vec::new(),
+            keeps: Vec::new(),
             key_focus: None,
             keys_held: 0,
             ime_keys_down: 0,
@@ -2065,9 +2087,11 @@ impl<S: 'static> Runtime<S> {
                 self.settled |= tx.settle;
                 #[cfg(debug_assertions)]
                 let check = self.live_check.take().filter(|_| !ran_other && !self.dirty && !ran_layout);
+                self.capture_keeps(&mut tx);
                 self.commit(&tx);
                 #[cfg(debug_assertions)]
                 { self.compare_live_check(check); ran_other = false; }
+                self.apply_keeps();
                 ran = false;
             }
             if matches!(action, Action::Layout(..) | Action::ScreenLayout(..) | Action::DrawnLayout(_, _, false) | Action::VisibleRows(..)) {
@@ -2116,12 +2140,15 @@ impl<S: 'static> Runtime<S> {
             self.state_unchanged = !ran && !self.dirty && !ran_layout && !self.settle && self.commits > 0;
             #[cfg(debug_assertions)]
             let check = self.live_check.take().filter(|_| !ran_other && !besides && !ran_layout && !read_moved);
+            self.capture_keeps(&mut tx);
             self.commit(&tx);
             #[cfg(debug_assertions)]
             self.compare_live_check(check);
+            self.apply_keeps();
         }
         #[cfg(debug_assertions)]
         { self.live_check = None; }
+        tx.keep_on_screen.clear();
         let follow = std::mem::take(&mut self.caret_follow);
         if !scroll_to.is_empty() || follow { self.step_scroll(0.0); }
         if follow { self.follow_caret(); }
@@ -2269,14 +2296,31 @@ impl<S: 'static> Runtime<S> {
         }
     }
 
-    /// Subtree (preorder) paint order, then each flying element's subtree on top.
+    /// Subtree (preorder) paint order, then each flying element's subtree on top. A sticky
+    /// element paints after its normal siblings (and before overlay siblings), so it covers the
+    /// rows it's stuck over.
     fn update_layer_paint_order(&mut self) {
         let n = self.nodes.len();
         let mut first = vec![n; n + 1];
         let mut next = vec![n; n];
-        for i in (0..n).rev() {
-            let parent = self.nodes[i].parent.map_or(0, |p| p + 1);
-            next[i] = first[parent]; first[parent] = i;
+        let rank = |i: usize| {
+            let nd = &self.nodes[i];
+            if nd.above.is_some() || nd.modal.is_some() { 2 }
+            else if nd.sticky.as_ref().is_some_and(|s| s.edge.is_some()) { 1 }
+            else { 0 }
+        };
+        if self.has_sticky {
+            for r in (0..=2).rev() {
+                for i in (0..n).rev().filter(|&i| rank(i) == r) {
+                    let parent = self.nodes[i].parent.map_or(0, |p| p + 1);
+                    next[i] = first[parent]; first[parent] = i;
+                }
+            }
+        } else {
+            for i in (0..n).rev() {
+                let parent = self.nodes[i].parent.map_or(0, |p| p + 1);
+                next[i] = first[parent]; first[parent] = i;
+            }
         }
         let mut lifted: Vec<usize> = self.flying.iter().filter_map(|(id, _)| self.node_index.get(id).copied()).collect();
         lifted.sort_unstable();
@@ -3482,14 +3526,8 @@ impl<S: 'static> Measurement<'_, S> {
             if let Some(a) = &nodes[i].above
                 && let Some(j) = nodes[..i].iter().position(|n| n.key.as_ref() == Some(&a.key))
             {
-                // Anchors inside scroll viewports sit where they are scrolled to.
-                let mut target = nodes[j].target;
-                for [ox, oy] in scroll_offsets(self.scrolls, &nodes, j) {
-                    target[0] -= ox;
-                    target[2] -= ox;
-                    target[1] -= oy;
-                    target[3] -= oy;
-                }
+                // Anchors inside scroll viewports sit where they are scrolled (and stuck) to.
+                let target = sticky::anchored_target(&nodes, self.scrolls, j);
                 (x, y) = anchor_position(a, target, (l.size.width, l.size.height), self.viewport);
                 nodes[i].local.x = x - px;
                 nodes[i].local.y = y - py;
@@ -3664,7 +3702,7 @@ impl<S: 'static> Runtime<S> {
             let cid = nodes[c].id;
             // A reader away from the tail is anchored using measured row heights. Land those
             // heights with the anchor correction; delayed growth would move the reading position.
-            let reading = self.virtuals.get(&nodes[c].path)
+            let reading = sticky::kept_in(&self.keeps, &nodes[c].path) || self.virtuals.get(&nodes[c].path)
                 .and_then(|v| self.path_ids.get(&v.scroll_path))
                 .and_then(|id| self.scrolls.get(id)).is_some_and(|s| !s.pinned);
             let rows: Vec<usize> = (c + 1..nodes.len()).filter(|&j| nodes[j].parent == Some(c)).collect();
@@ -3817,7 +3855,8 @@ impl<S: 'static> Runtime<S> {
                     self.scene.set_transition(id, nodes[i].transition.unwrap_or_else(Transition::opacity));
                 }
                 let stack_row = nodes[i].parent.is_some_and(|p| nodes[p].growth.is_some()) || self.virtuals.contains_key(&nodes[i].path)
-                    || (nodes[i].in_row == RowLayout::Horizontal && !self.aspect_snap.contains(&id));
+                    || (nodes[i].in_row == RowLayout::Horizontal && !self.aspect_snap.contains(&id))
+                    || sticky::kept_in(&self.keeps, &nodes[i].path);
                 // A window's own resize step moves content at rest with the window; motion
                 // already running retargets on its spring.
                 let follows_window = tx.window_step && !self.flying.iter().any(|f| f.0 == id)
@@ -4072,9 +4111,10 @@ impl<S: 'static> Runtime<S> {
         self.has_pixel_aspect = self.nodes.iter().any(|n| n.pixel_aspect.is_some());
         self.has_drawn_layout = self.nodes.iter().any(|n| n.on_drawn_layout.is_some());
         self.has_key_up = self.nodes.iter().any(|n| n.focus.key_up.is_some());
+        self.has_sticky = self.nodes.iter().any(|n| n.sticky.as_ref().is_some_and(|s| s.edge.is_some()));
         // A flight that left the tree stays lifted and covered while it exits, so it doesn't pop.
         self.flying.retain(|(id, _)| self.node_index.contains_key(id));
-        if self.nodes.len() > present_len || !self.flying.is_empty() { self.update_layer_paint_order(); }
+        if self.nodes.len() > present_len || !self.flying.is_empty() || self.has_sticky { self.update_layer_paint_order(); }
         else { self.layer_paint_order.clear(); }
         self.built = false;
         self.virtuals.retain(|path, _| self.nodes.iter().any(|n| n.path == *path));
@@ -4846,6 +4886,9 @@ impl<S: 'static> Runtime<S> {
             None
         });
         let Some((path, top, height, viewport)) = geometry else { return false };
+        // Stuck headers cover the viewport's top: land the row below them.
+        let Some(cover) = self.stuck_cover(&path, key) else { return false };
+        let (top, height) = (top - cover, height + cover);
         let margin = self.node(&path).map_or(0.0, |n| f64::from(n.scroll_edges.margin));
         let Some(&id) = self.path_ids.get(&path) else { return false };
         let Some(scroll) = self.scrolls.get_mut(&id) else { return false };
@@ -5017,6 +5060,12 @@ impl<S: 'static> Runtime<S> {
         self.drawn_scale.resize(n_nodes, 1.0);
         self.seen.clear();
         self.seen.resize(n_nodes, false);
+        self.stuck.clear();
+        self.sticky_frame.clear();
+        if self.has_sticky {
+            self.stuck.resize(n_nodes, 0.0);
+            self.sticky_frame.resize(n_nodes, sticky::UNBOUNDED);
+        }
         let sel_ranges = self.selection_ranges();
         self.ime_area = None;
         let now = self.t;
@@ -5169,7 +5218,7 @@ impl<S: 'static> Runtime<S> {
         // only when isolation requires it; the ordinary painter stream stays byte-identical.
         // Matched flights paint last (see `update_layer_paint_order`).
         let flying = !self.flying.is_empty();
-        let tree_order = (flying && !self.layer_paint_order.is_empty()) || self.layer_paint_order.windows(2).any(|pair| {
+        let tree_order = ((flying || self.has_sticky) && !self.layer_paint_order.is_empty()) || self.layer_paint_order.windows(2).any(|pair| {
             let n = &self.nodes[pair[0]];
             self.nodes[pair[1]].parent == Some(pair[0]) && ((self.has_dissolve && self.dissolve_scratch[pair[0]]) || n.vis.cache || n.vis.clip_radius.is_some() || n.vis.group_opacity.is_some()
                 || fades(n.looping)
@@ -5209,6 +5258,23 @@ impl<S: 'static> Runtime<S> {
             let Some(p) = self.scene.presented(n.id) else { continue };
             let mut pinh = n.parent.map_or(Inh::default(), |pr| self.inh_scratch[pr]);
             pinh.dy += self.row_dy[i];
+            if self.has_sticky && let Some(a) = &n.above
+                && let Some(j) = self.nodes[..i].iter().position(|n| n.key.as_ref() == Some(&a.key))
+            {
+                let target = sticky::anchored_target(&self.nodes, &self.scrolls, j);
+                let (ax, ay) = anchor_position(a, target, (p.rect.w, p.rect.h), self.viewport);
+                pinh.dx += ax - n.target[0];
+                pinh.dy += ay - n.target[1];
+            }
+            if self.has_sticky && let Some((edge, inset)) = n.sticky.as_ref().and_then(|s| Some((s.edge?, s.inset))) {
+                // Worked out from this frame's offsets, which the viewport above already applied.
+                let frame = n.parent.map_or(sticky::UNBOUNDED, |pr| self.sticky_frame[pr]);
+                let top = p.rect.y + pinh.dy;
+                let h = if self.row_h[i] >= 0.0 { self.row_h[i] } else { p.rect.h };
+                let shift = sticky::shift(edge, inset, top, top + h, frame);
+                self.stuck[i] = shift;
+                pinh.dy += shift;
+            }
             if lift {
                 // Keep the destination's clips (consumed ones included) and offsets. Drop its
                 // ancestors' opacity, scale and blur: an entering parent's fade or scale would
@@ -5293,6 +5359,15 @@ impl<S: 'static> Runtime<S> {
             raw_edges[3] += pinh.dy;
             if self.row_h[i] >= 0.0 {
                 raw_edges[3] = raw_edges[1] + self.row_h[i];
+            }
+            if self.has_sticky {
+                let up = n.parent.map_or(sticky::UNBOUNDED, |pr| self.sticky_frame[pr]);
+                self.sticky_frame[i] = match n.scroll {
+                    // Content scrolls without end inside a viewport; vertical ones are the band.
+                    Some(_) if n.scroll_axes.y() => [raw_edges[1], raw_edges[3], f32::NEG_INFINITY, f32::INFINITY],
+                    Some(_) => [up[0], up[1], f32::NEG_INFINITY, f32::INFINITY],
+                    None => [up[0], up[1], raw_edges[1] + n.inset[1], raw_edges[3] - n.inset[3]],
+                };
             }
             // A product of 1 (0.5 inside 2.0) can still move the box.
             let mut rect_pt = if (sc - 1.0).abs() > 1e-5 || anchor != anchor_to {
@@ -5622,8 +5697,14 @@ impl<S: 'static> Runtime<S> {
                     }
                     _ => None,
                 };
-                for (k, sh) in n.vis.shadows.iter().enumerate() {
-                    let c = if k < P_SHADOWS.len() { self.color(n.id, P_SHADOWS[k], sh.color) } else { sh.color };
+                let stuck_k = if self.has_sticky { (self.stuck[i].abs() / sticky::SHADOW_RAMP).min(1.0) } else { 0.0 };
+                let stuck_shadows: (f32, &[crate::el::Shadow]) = match &n.sticky {
+                    Some(s) if stuck_k > 0.0 => (stuck_k, &s.shadows),
+                    _ => (0.0, &[]),
+                };
+                for (k, sh) in n.vis.shadows.iter().chain(stuck_shadows.1).enumerate() {
+                    let c = if k >= n.vis.shadows.len() { sh.color.alpha(sh.color.a * stuck_shadows.0) }
+                        else if k < P_SHADOWS.len() { self.color(n.id, P_SHADOWS[k], sh.color) } else { sh.color };
                     if c.a <= 0.0 || sh.inset {
                         continue;
                     }
@@ -5854,11 +5935,12 @@ impl<S: 'static> Runtime<S> {
                     });
                 }
                 self.instances.extend(dashed);
-                for (k, sh) in n.vis.shadows.iter().enumerate() {
+                for (k, sh) in n.vis.shadows.iter().chain(stuck_shadows.1).enumerate() {
                     if !sh.inset {
                         continue;
                     }
-                    let c = if k < P_SHADOWS.len() { self.color(n.id, P_SHADOWS[k], sh.color) } else { sh.color };
+                    let c = if k >= n.vis.shadows.len() { sh.color.alpha(sh.color.a * stuck_shadows.0) }
+                        else if k < P_SHADOWS.len() { self.color(n.id, P_SHADOWS[k], sh.color) } else { sh.color };
                     if c.a <= 0.0 {
                         continue;
                     }
@@ -6569,6 +6651,7 @@ impl<S: 'static> Runtime<S> {
                     level: n.a11y.level,
                     expanded: n.a11y.expanded,
                     item_selected: n.focus.selected,
+                    stuck: self.stuck.get(i).copied().unwrap_or(0.0),
                     virtual_extent: self.virtuals.contains_key(&n.path) && n.vis.fill.a == 0.0
                         && n.vis.border_width == 0.0 && n.vis.shadows.is_empty() && n.text.is_none() && n.vis.icon.is_none(),
                 })
@@ -6591,7 +6674,7 @@ impl<S: 'static> Runtime<S> {
                 visible: [r.x.max(c[0]), r.y.max(c[1]), (r.edges()[2].min(c[2]) - r.x.max(c[0])).max(0.0),
                     (r.edges()[3].min(c[3]) - r.y.max(c[1])).max(0.0)],
                 revealing: true, in_growing_row: false, scrolling: false, virtual_extent: false, live_intent: 0, caret: None, drag_out: false,
-                help: None, selected: None, level: None, expanded: None, item_selected: false,
+                help: None, selected: None, level: None, expanded: None, item_selected: false, stuck: 0.0,
             });
         }
         self.link_elements(&mut elements);
@@ -6957,6 +7040,7 @@ fn merge(tx: &mut Tx, one: Tx) {
     tx.scroll_bottom.extend(one.scroll_bottom);
     tx.scroll_pages.extend(one.scroll_pages);
     tx.scroll_offsets.extend(one.scroll_offsets);
+    tx.keep_on_screen.extend(one.keep_on_screen);
     tx.wakes.extend(one.wakes);
     tx.text_flights.extend(one.text_flights);
     tx.popups.extend(one.popups);
@@ -7559,6 +7643,7 @@ fn flatten(
         on_layout,
         on_screen_layout,
         on_drawn_layout,
+        sticky,
         scroll_edges,
         growth,
         streaming,
@@ -7646,6 +7731,7 @@ fn flatten(
         on_layout,
         on_screen_layout,
         on_drawn_layout,
+        sticky,
         scroll_edges,
         growth,
         streaming,

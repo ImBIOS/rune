@@ -5,6 +5,21 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Sticky elements in scroll views: `El::sticky_top`, `El::sticky_bottom`, `El::stuck_shadow` and `Tx::keep_on_screen`.**
+  An element inside a vertical scroll viewport can pin to the viewport's top or bottom edge
+  plus an inset while its parent stays in view (`El::sticky_top(inset)`,
+  `El::sticky_bottom(inset)`), and is pushed out by its parent's content box (inside the
+  parent's padding) as the parent leaves. Sticky children paint and hit-test above later
+  normal siblings of their parent (and below `above` and `modal` overlays), move in the same
+  frame as the scroll offset without a second layout pass, and expose their stuck displacement
+  on `ElementInfo::stuck` (`--tree` JSON `stuck` when non-zero) and through `El::on_drawn_layout`.
+  `El::stuck_shadow(Shadow)` adds shadows that fade in over the first 8 pt of stuck offset.
+  `Tx::keep_on_screen(key)` holds a keyed element at its drawn vertical position across a
+  commit that collapses or expands content inside its scroll viewport (including `virtual_rows`),
+  snapping vertical layout and growth springs inside that viewport for that commit.
+  `Tx::scroll_into_view` clears headers already stuck at the target edge, and `El::anchored`
+  follows a sticky target's drawn rect. New API only; existing output is unchanged.
+
 - **`rune_kit::diff`: a diff view for code review.** `diff::parse` reads `git diff` output and
   `FileDiff::from_texts` diffs two texts; `DiffView` draws a `DiffState` unified or split, with
   word changes, syntax colours, folded unchanged ranges, sticky file headers, app widgets

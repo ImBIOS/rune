@@ -40,6 +40,8 @@ pub struct Tx {
     pub(crate) scroll_pages: Vec<(String, i32)>,
     /// Scroll viewports to move to offsets (`Tx::scroll_to` and kin).
     pub(crate) scroll_offsets: Vec<crate::runtime::ScrollRequest>,
+    /// Elements to hold where they show across this commit (`Tx::keep_on_screen`).
+    pub(crate) keep_on_screen: Vec<String>,
     pub(crate) wakes: Vec<std::time::Duration>,
     pub(crate) shell: Option<Shell>,
     pub(crate) minimize: bool,
@@ -111,7 +113,7 @@ impl Tx {
     /// or a text flight. A `wake_after` only schedules.
     pub(crate) fn frame_work(&self) -> bool {
         !self.scroll_to.is_empty() || !self.scroll_bottom.is_empty() || !self.scroll_pages.is_empty() || !self.scroll_offsets.is_empty()
-            || !self.text_flights.is_empty()
+            || !self.keep_on_screen.is_empty() || !self.text_flights.is_empty()
     }
 
     /// An app marker on the next frame, e.g. `tx.trace_event(format_args!("lab:{step:?}"))`.
@@ -186,6 +188,16 @@ impl Tx {
     /// [`Tx::scroll_to`] without the glide.
     pub fn scroll_to_instant(&mut self, key: impl Into<String>, x: f32, y: f32) {
         self.scroll_offsets.push(crate::runtime::ScrollRequest { key: key.into(), x: Some(x), y: Some(y), animated: false });
+    }
+    /// Keep the element keyed `key` (or at that path) where it shows on screen across the
+    /// commit this handler causes, by moving the nearest vertical scroll viewport around it. A
+    /// stuck [`El::sticky_top`] header that collapses its section stays under the pointer
+    /// instead of jumping up with the content, and one that expands stays put as its rows open
+    /// below it. Its top edge is what holds, measured where the last frame drew it, stuck shift
+    /// included; the offset is clamped to the content, and a `stick_bottom` viewport that lands
+    /// on its end follows it again. Instant. A scroll asked for in the same handler wins.
+    pub fn keep_on_screen(&mut self, key: impl Into<String>) {
+        self.keep_on_screen.push(key.into());
     }
     /// Wake the app's poll hook after an unscaled duration. Every deadline due by a frame
     /// collapses into that frame's one poll, so asking on every poll never adds polls.
@@ -518,6 +530,18 @@ pub struct ScrollSpec {
     /// Follow the end: while scrolled to the bottom, growth keeps the bottom in view, and a new
     /// viewport opens at the bottom on its first frame.
     pub stick_bottom: bool,
+}
+
+/// Which viewport edge an [`El::sticky_top`] or [`El::sticky_bottom`] element holds to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StickyEdge { Top, Bottom }
+
+/// `El::sticky_top`, `El::sticky_bottom` and `El::stuck_shadow`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Sticky {
+    pub edge: Option<StickyEdge>,
+    pub inset: f32,
+    pub shadows: Vec<Shadow>,
 }
 
 /// A growth stack (the session timeline): children are rows whose heights ease on `spring`
@@ -1038,6 +1062,7 @@ pub struct El {
     pub(crate) on_layout: Option<LayoutFn>,
     pub(crate) on_screen_layout: Option<LayoutFn>,
     pub(crate) on_drawn_layout: Option<DrawnLayoutFn>,
+    pub(crate) sticky: Option<Box<Sticky>>,
     pub(crate) scroll_edges: ScrollEdges,
     pub(crate) growth: Option<GrowthSpec>,
     pub(crate) virtual_estimate: Option<f32>,
@@ -1118,6 +1143,7 @@ fn base(dir: FlexDirection) -> El {
         on_layout: None,
         on_screen_layout: None,
         on_drawn_layout: None,
+        sticky: None,
         scroll_edges: ScrollEdges::default(),
         growth: None,
         virtual_estimate: None,
@@ -2779,6 +2805,43 @@ impl El {
     /// ```
     pub fn on_drawn_layout_tx<S: 'static>(mut self, f: impl Fn(&mut S, [f32; 4], &mut Tx) + 'static) -> Self {
         self.on_drawn_layout = Some(Rc::new(move |s, r, tx| f(downcast::<S>(s), r, tx)));
+        self
+    }
+    /// Hold this element `inset` points below the top of the nearest vertical scroll viewport
+    /// around it while its parent is in view, as CSS `position: sticky; top: inset` does: a
+    /// section header that stays put while its section scrolls under it. Its parent's bottom
+    /// edge (inside its padding) pushes it up and out, so the next section's header takes over.
+    /// It never moves above where scrolling puts it.
+    ///
+    /// The shift is worked out each frame from that frame's scroll offset, so it never lags a
+    /// scroll. Layout doesn't move; drawing, hit testing, the focus ring, children,
+    /// [`El::on_drawn_layout`] and [`ElementInfo::rect`](crate::runtime::ElementInfo) follow the
+    /// drawn place, and [`ElementInfo::stuck`](crate::runtime::ElementInfo) reads the shift. It
+    /// draws, and hit tests, above its later siblings. Give it a fill, so rows don't show
+    /// through, and see [`El::stuck_shadow`] for a shadow or divider while it's stuck.
+    ///
+    /// In [`El::virtual_rows`] a header sticks inside its own row: make each section one row
+    /// (its header and its items) so the header shows whenever any of the section does.
+    pub fn sticky_top(mut self, inset: f32) -> Self {
+        let s = self.sticky.get_or_insert_with(Default::default);
+        s.edge = Some(StickyEdge::Top);
+        s.inset = if inset.is_finite() { inset } else { 0.0 };
+        self
+    }
+    /// [`El::sticky_top`] against the viewport's bottom edge: held `inset` points above it while
+    /// its parent is in view, and pushed down by its parent's top edge (a section footer).
+    pub fn sticky_bottom(mut self, inset: f32) -> Self {
+        let s = self.sticky.get_or_insert_with(Default::default);
+        s.edge = Some(StickyEdge::Bottom);
+        s.inset = if inset.is_finite() { inset } else { 0.0 };
+        self
+    }
+    /// A shadow drawn only while this [`El::sticky_top`] or [`El::sticky_bottom`] element is
+    /// stuck, fading in over its first 8 points of shift, so it follows the scroll exactly: an
+    /// elevation under a stuck header, or a hairline divider with
+    /// `Shadow { y: 0.5, color, ..Default::default() }` under an opaque one. Several stack.
+    pub fn stuck_shadow(mut self, shadow: Shadow) -> Self {
+        self.sticky.get_or_insert_with(Default::default).shadows.push(shadow);
         self
     }
     /// Make this column a growth stack (see [`GrowthSpec`]). Required alongside

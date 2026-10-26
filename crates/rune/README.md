@@ -247,6 +247,22 @@ policy changes are applied in the same mutation phase.
   follows it again.
   `.scroll_edge_fade(w)` fades a viewport's top and bottom only while content is hidden under
   them (strength = hidden extent / 15 pt), and `.scroll_margin(pts)` stops revealed rows clear of it.
+- **Sticky headers and bars** (`.sticky_top(inset)`, `.sticky_bottom(inset)`, `.stuck_shadow(shadow)`,
+  `tx.keep_on_screen(key)`, `sticky.rs`): an element inside a vertical scroll viewport pins to the
+  nearest scroll viewport's top or bottom edge (offset inward by `inset`) while its parent stays in
+  view, and is pushed out by its parent's content box (inside the parent's padding) as the parent
+  scrolls away, as CSS `position: sticky` does. Sticky children draw and hit-test above later normal
+  siblings of their parent and below `.above()` / `.modal()` overlays, move in the same frame as the
+  scroll offset without re-running Taffy, and report their vertical stuck displacement on
+  `ElementInfo::stuck` (`stuck` in `--tree` JSON when non-zero) and in `.on_drawn_layout(|s, r|)`'s
+  drawn rect. `.stuck_shadow(Shadow)` appends shadows (such as a 1 pt hairline divider and a soft
+  drop shadow) whose alpha scales linearly over the first 8 pt of `stuck.abs()`. When clicking a
+  stuck header collapses or expands its section, `tx.keep_on_screen(key)` adjusts the enclosing
+  scroll viewport's offset after the commit so the header stays under the pointer, remounting
+  virtual rows if needed and snapping vertical layout and growth tracks in that viewport for that
+  commit. `tx.scroll_into_view(key)` clears headers stuck at the edge it reveals to, and
+  `El::anchored(key, ..)` follows a sticky target's drawn rect. See
+  `cargo run -p rune --example sticky` ([still](../../demo/sticky-headers.png)).
 - **Horizontal scrolling** (`.scroll_x()`, `.scroll_xy()`): a filmstrip, a wide code block or table,
   a tab strip that overflows. The content (the first child) takes its natural width, unwrapped, and
   at least the viewport's, unless it sets a width other than `w_full`; `.scroll_xy()` also scrolls

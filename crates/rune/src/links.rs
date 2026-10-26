@@ -251,6 +251,7 @@ impl<S: 'static> Runtime<S> {
                 let (x1, y1) = (r[2].min(v[0] + v[2]), r[3].min(v[1] + v[3]));
                 let words = spec.source_slice(l.start, l.end).map(str::to_owned);
                 elements.push(ElementInfo {
+                    stuck: 0.0,
                     path: format!("{}#link-{k}", n.path),
                     key: Some(l.id.clone()),
                     role: l.role,
