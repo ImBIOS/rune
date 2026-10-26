@@ -16,7 +16,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   `El::rotate_motion`). A turned subtree draws into a layer whose composite turns; hit testing
   and the reported rect use the turned box's upright bounds, and a turned subtree never caches.
   Layer records carry the turn in `border[1..4]` (`Instance::turned`), which rune-ref now
-  renders.
+  renders. `demo/motion/press.png` shows a keycap at rest and pressed (the `expressive_press`
+  example).
 
 - **`PopupList` and `PopupItem`.** `Combobox`'s virtualised popup listbox is now a standalone
   `rune_kit` component (`PopupList::new(key, anchor)` with `PopupItem::new(id, label)` rows) for
