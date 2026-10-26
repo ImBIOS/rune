@@ -12,22 +12,26 @@ const NAMES: [&str; 4] = ["Alpha", "Bravo", "Charlie", "Delta"];
 
 struct S {
     sidebar: PaneState,
+    inspector: PaneState,
     picked: usize,
     collapsed: bool,
     rows: Option<usize>,
     renaming: Option<usize>,
     edit: TextEdit,
+    main_edit: TextEdit,
     committed: Option<String>,
 }
 
 fn state() -> S {
     S {
         sidebar: PaneState::new(240.0).range(180.0, 420.0),
+        inspector: PaneState::new(220.0).collapsed(),
         picked: 1,
         collapsed: false,
         rows: None,
         renaming: None,
         edit: TextEdit::default(),
+        main_edit: TextEdit::default(),
         committed: None,
     }
 }
@@ -69,8 +73,19 @@ fn view(s: &S, cx: &mut Cx<S>) -> El {
                 .rows((0..NAMES.len()).map(|i| row(s, i, &k))),
         ),
     };
-    SplitView::new(col().key("body"))
+    let main = col().key("body").child(
+        rune_kit::TextInput::new(&s.main_edit)
+            .placeholder("Main field")
+            .on_edit(|s: &mut S| &mut s.main_edit)
+            .build(&k)
+            .key("main-field"),
+    );
+    let inspector = col()
+        .key("inspector-body")
+        .child(el().key("inspector-btn").size(24.0, 24.0).role("button").focusable(true));
+    SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut S| &mut s.sidebar, sidebar.build(&k))
+        .inspector(&s.inspector, |s: &mut S| &mut s.inspector, inspector)
         .toolbar(Toolbar::new().leading(el().key("lead").size(20.0, 20.0)).title("Title"))
         .titlebar_inset(cx.titlebar_inset())
         .build(&k)
@@ -321,6 +336,44 @@ fn collapsing_the_sidebar_moves_focus_out_and_blurs_rename() {
     assert_eq!(focused(&rt).as_deref(), Some("sidebar-toggle"));
     press(&mut rt, Key::Text("X".into()));
     assert_eq!(rt.state.edit.text, "Bravo", "typing after collapse does not edit the hidden field");
+}
+
+#[test]
+fn hiding_the_sidebar_keeps_focus_in_a_main_pane_text_field() {
+    let mut rt = runtime(state());
+    let focused = |rt: &Runtime<S>| rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key);
+    let (x, y) = rt.find("main-field").expect("main field");
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(1.0 / 60.0);
+    assert!(rt.state.main_edit.focused);
+    assert_eq!(focused(&rt).as_deref(), Some("input"));
+
+    rt.key(toggle_shortcut());
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.state.sidebar.is_open(), "shortcut closes the sidebar");
+    assert!(rt.state.main_edit.focused, "focus never leaves the main text field");
+    assert_eq!(focused(&rt).as_deref(), Some("input"));
+
+    for ch in ["a", " ", "b"] {
+        press(&mut rt, Key::Text(ch.into()));
+    }
+    assert_eq!(rt.state.main_edit.text, "a b");
+    assert!(!rt.state.sidebar.is_open(), "Space typed into the field does not reopen the sidebar");
+    assert!(rt.state.main_edit.focused);
+
+    // Closing the inspector while focus is inside it returns focus to the main pane, while
+    // closing it with focus already in main keeps focus in main.
+    rt.update(|s, _| s.inspector.set_open(true));
+    settle(&mut rt);
+    let (ix, iy) = rt.find("inspector-btn").expect("inspector button");
+    rt.pointer_down(ix, iy);
+    rt.pointer_up(ix, iy);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(focused(&rt).as_deref(), Some("inspector-btn"));
+    rt.update(|s, _| s.inspector.set_open(false));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(focused(&rt).as_deref(), Some("input"), "closing a focused inspector returns focus to main");
 }
 
 #[test]

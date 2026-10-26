@@ -165,6 +165,9 @@ impl<S: 'static> Runtime<S> {
             changed |= sync_input_focus(input, &mut self.state, path.as_deref() == Some(p.as_str()));
         }
         self.focused = path;
+        if self.focused.is_some() {
+            self.last_focused = self.focused.clone();
+        }
         self.keyboard_focus = keyboard;
         changed
     }
@@ -179,15 +182,29 @@ impl<S: 'static> Runtime<S> {
                 self.unmounted_focused.push(input.edit.weak_history());
             }
         }
+        let within = |path: &str, root: &str| {
+            path == root || (path.len() > root.len() && path.starts_with(root) && path.as_bytes()[root.len()] == b'/')
+        };
+        let shown = |idx: usize| {
+            let n = &nodes[idx];
+            !n.inert && n.vis.opacity > 0.0 && n.local.w > 0.0 && n.local.h > 0.0
+                && std::iter::successors(n.parent, |&p| nodes[p].parent).all(|p| nodes[p].vis.opacity > 0.0)
+        };
         let restore = self.nodes.iter().enumerate().rev().find_map(|(i, old)| {
             let key = old.focus.return_to.as_deref()?;
             if self.subtree_exiting(i) || nodes.iter().any(|n| n.path == old.path) { return None; }
+            let focused = self.focused.as_deref().or(self.last_focused.as_deref())?;
+            let has_children = self.nodes.iter().any(|m| m.parent == Some(i));
+            let scope = if has_children || old.focus.enabled || old.input.is_some() {
+                old.path.as_str()
+            } else {
+                self.nodes.get(old.parent?)?.path.as_str()
+            };
+            if !within(focused, scope) { return None; }
             let anchor = nodes.iter().find(|n| n.key.as_deref() == Some(key))?;
-            let prefix = format!("{}/", anchor.path);
-            nodes.iter().find(|n| (n.path == anchor.path || n.path.starts_with(&prefix)) && !n.inert
-                && (n.focus.enabled || n.input.as_ref().is_some_and(|i| i.access.is_some()))
-                && n.vis.opacity > 0.0 && n.local.w > 0.0 && n.local.h > 0.0)
-                .map(|n| n.path.clone())
+            (0..nodes.len()).find(|&j| within(&nodes[j].path, &anchor.path) && shown(j)
+                && (nodes[j].focus.enabled || nodes[j].input.as_ref().is_some_and(|i| i.access.is_some())))
+                .map(|j| nodes[j].path.clone())
         });
         let input_focused = self.focused.as_deref().is_some_and(|p| {
             nodes.iter().any(|n| n.path == p && !n.inert && n.input.as_ref().is_some_and(|i| i.edit.focused))
@@ -201,20 +218,23 @@ impl<S: 'static> Runtime<S> {
         };
         // A newly requested text field wins; a focused control otherwise retains focus. Nothing
         // inside an `El::inert` subtree takes or keeps it.
-        let requested = nodes.iter().filter(|n| !n.inert && n.input.as_ref().is_some_and(|i| i.edit.focused));
-        let next = requested.clone().find(|n| self.focused.as_deref() != Some(&n.path) && !was_focused(n))
-            .map(|n| n.path.clone())
+        let requested = (0..nodes.len()).filter(|&j| shown(j) && nodes[j].input.as_ref().is_some_and(|i| i.edit.focused));
+        let next = requested.clone().find(|&j| self.focused.as_deref() != Some(&nodes[j].path) && !was_focused(&nodes[j]))
+            .map(|j| nodes[j].path.clone())
             .or(restore)
-            .or_else(|| self.focused.clone().filter(|p| nodes.iter().any(|n| &n.path == p && !n.inert
-                && (n.focus.enabled || n.input.as_ref().is_some_and(|i| i.edit.focused)))
+            .or_else(|| self.focused.clone().filter(|p| (0..nodes.len()).any(|j| &nodes[j].path == p && shown(j)
+                && (nodes[j].focus.enabled || nodes[j].input.as_ref().is_some_and(|i| i.edit.focused)))
                 || self.virtual_inputs.get(p).is_some_and(|i| i.edit.focused)))
-            .or_else(|| requested.into_iter().next().map(|n| n.path.clone()));
+            .or_else(|| requested.into_iter().next().map(|j| nodes[j].path.clone()));
         // State may have deleted a row. Only the new view's accessors are valid now.
         // Use the same focus path as input events, then restore the old presentation
         // tree so apply can retain its exit visuals.
         std::mem::swap(&mut self.nodes, nodes);
         let changed = self.set_focus(next, self.keyboard_focus);
         std::mem::swap(&mut self.nodes, nodes);
+        if self.capture.is_none() {
+            self.last_focused = self.focused.clone();
+        }
         self.unmounted_focused.retain(|w| {
             w.strong_count() > 0
                 && !nodes.iter().any(|n| n.input.as_ref().is_some_and(|i| i.edit.matches_history(w)))

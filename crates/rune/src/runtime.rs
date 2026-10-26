@@ -956,6 +956,9 @@ pub struct Runtime<S: 'static> {
     /// Focus when the running commit began, before a new view's focus request applied: what a
     /// modal that opens in this commit returns focus to.
     focus_before_commit: Option<String>,
+    /// Focus before the current gesture/commit blurred it, so a scrim press that blurs on
+    /// pointer-down and closes its overlay on pointer-up still honours `focus_return`.
+    last_focused: Option<String>,
     /// Focused text fields that unmounted without being blurred: while another field holds focus,
     /// remounting one with its old `focused = true` flag does not steal focus back.
     unmounted_focused: Vec<std::sync::Weak<crate::edit::History>>,
@@ -1307,6 +1310,7 @@ impl<S: 'static> Runtime<S> {
             tab_visits_controls: false,
             modal_stack: Vec::new(),
             focus_before_commit: None,
+            last_focused: None,
             unmounted_focused: Vec::new(),
             modal_index: None,
             modal_members: Vec::new(),

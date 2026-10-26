@@ -526,9 +526,15 @@ fn dock(d: &Dock, key: &str, p: Pane, leading: bool, content: Contents) -> El {
     }
     if open {
         let instant = instant_transition();
-        slot = slot
-            .child(el().key("pane-open-main").size(0.0, 0.0).transition(instant).focus_return("main-column"))
-            .child(el().key("pane-open").size(0.0, 0.0).transition(instant).focus_return("sidebar-toggle"));
+        if leading {
+            slot = slot
+                .child(el().key("pane-open-main").size(0.0, 0.0).transition(instant).focus_return("main-column"))
+                .child(el().key("pane-open").size(0.0, 0.0).transition(instant).focus_return("sidebar-toggle"));
+        } else {
+            slot = slot
+                .child(el().key("pane-open").size(0.0, 0.0).transition(instant).focus_return("sidebar-toggle"))
+                .child(el().key("pane-open-main").size(0.0, 0.0).transition(instant).focus_return("main-pane"));
+        }
     }
     if open || s.is_resizing() {
         let mut grip = el()

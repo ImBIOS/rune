@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Hiding a pane or overlay keeps focus where it was outside that subtree.** `El::focus_return`
+  restores its trigger only when the focused control was inside the removed subtree (or pane);
+  hiding the sidebar with `⇧⌘B` while typing in a main-pane field keeps focus in the field
+  instead of moving it to the sidebar toggle, and closing a focused inspector returns focus to
+  the main pane first.
 - **Pressing any part of a `TextInput`, `TextField` or `TextArea` focuses it.** Clicking the
   leading icon, padding or a non-button trailing area focuses the inner editor and places the
   caret at the nearest end without blurring an already-focused field or starting a window drag
