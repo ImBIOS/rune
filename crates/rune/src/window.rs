@@ -705,6 +705,7 @@ struct Host<S: 'static> {
     shortcuts: crate::shortcuts::Guard,
     menus: crate::native_menu::Guard<S>,
     popup: crate::popup_menu::Presenter,
+    file_dialog: crate::file_dialog::Presenter,
     rt: Runtime<S>,
     /// Before `win` and `gpu`: fields drop in order, and the trace waits for the window's last
     /// present times.
@@ -891,6 +892,7 @@ impl<S: 'static> Host<S> {
         clipboard.connect(waker.clone());
         shared.connect(waker.clone());
         let popup = crate::popup_menu::Presenter::new(waker.clone());
+        let file_dialog = crate::file_dialog::Presenter::new(waker.clone());
         let shortcuts = crate::shortcuts::Guard::attach(&shared, waker, false, wayland);
         let menus = crate::native_menu::Guard::attach(&shared, false);
         Host {
@@ -916,6 +918,7 @@ impl<S: 'static> Host<S> {
             shortcuts,
             menus,
             popup,
+            file_dialog,
             rt,
             win: None,
             gpu: None,
@@ -2082,7 +2085,7 @@ impl<S: 'static> Host<S> {
         let shown = self.win.as_ref().is_some_and(|w| w.visible);
         let stale_before = self.rt.needs_commit();
         let clipboard = self.clipboard.receive(&mut self.rt);
-        let answered = self.popup.answer(&mut self.rt);
+        let answered = self.popup.answer(&mut self.rt) | self.file_dialog.answer(&mut self.rt);
         self.shortcuts.drain();
         let mut requests = self.shared.take();
         self.menus.drain();
@@ -2214,6 +2217,7 @@ impl<S: 'static> Host<S> {
             let shown = self.win.as_ref().filter(|w| w.visible);
             let window = shown.map(|w| &w.window);
             if self.popup.open(&mut self.rt, window, paints) && let Some(w) = window { w.request_redraw(); }
+            if self.file_dialog.open(&mut self.rt, window.map(|w| &**w)) && let Some(w) = window { w.request_redraw(); }
             // A callback that ran (a menu that couldn't open) may have asked to close, quit or
             // minimize.
             if self.rt.shell_request.is_none() && !self.rt.minimize_request { return; }

@@ -162,7 +162,7 @@ pub use growth::{GROWTH, StreamEdge, edge};
 pub use live::{Live, LiveText, Tween};
 pub use memo::memo;
 pub use pixels::Pixels;
-pub use file_dialog::{FileDialogError, FileDialogKind, FileDialogOptions, FileDialogs, ScriptedFileDialog};
+pub use file_dialog::{FileDialogError, FileDialogKind, FileDialogOptions, FileDialogResult, FileDialogs, ScriptedFileDialog};
 pub use image::{Image, ImageCache, ImageError, ImageId};
 pub use rune_motion::{
     Anim, AnimExt, Beat, Blend, Clock, CubicBezier, Curve, Decay, Easing, Edge, Effect, LayoutAnim, LoopKind, LoopSpec, NodeId,

@@ -79,6 +79,8 @@ pub(crate) use physical_dispatch::Unhandled;
 mod modifier_keys;
 #[path = "popup_dispatch.rs"]
 mod popup_dispatch;
+#[path = "file_dialog_dispatch.rs"]
+mod file_dialog_dispatch;
 #[path = "drop_dispatch.rs"]
 mod drop_dispatch;
 #[path = "scroll_bottom.rs"]
@@ -456,6 +458,8 @@ enum Action {
     Paste(crate::ClipboardContent, Option<Option<String>>),
     /// A `Tx::read_clipboard` callback's id and what the clipboard held.
     ClipboardRead(u64, crate::ClipboardContent),
+    /// A `Tx::open_file` or `Tx::save_file` callback's id and the dialog's answer.
+    FileDialog(u64, crate::file_dialog::FileDialogResult),
     Focus(String, f32, f32),
     Blur,
 }
@@ -949,6 +953,11 @@ pub struct Runtime<S: 'static> {
     pub(crate) popups: std::collections::VecDeque<crate::popup_menu::Request>,
     /// The first of `popups` is showing.
     pub(crate) popup_open: bool,
+    /// The file dialog asked for (`Tx::open_file`, `Tx::save_file`) and not yet answered.
+    pub(crate) file_dialog: Option<crate::file_dialog::Pending>,
+    /// File dialog callbacks, by id, until their answer runs.
+    file_dialog_answers: Vec<(u64, crate::file_dialog::AnswerFn)>,
+    next_file_dialog: u64,
     /// A frame change for the window (`Tx::resize_window`), with its spring resolved.
     pub(crate) window_frame: Option<crate::window_frame::FrameRequest>,
     /// The window's height follows the root's natural height (`App::fit_content_height`).
@@ -1229,6 +1238,9 @@ impl<S: 'static> Runtime<S> {
             shell_request: None,
             minimize_request: false,
             popups: Default::default(),
+            file_dialog: None,
+            file_dialog_answers: Vec::new(),
+            next_file_dialog: 0,
             window_frame: None,
             fit_height: false,
             fit_asked: None,
@@ -1622,6 +1634,9 @@ impl<S: 'static> Runtime<S> {
             self.read_requests.push(self.next_clipboard_read);
         }
         self.popups.extend(tx.popups.drain(..).filter_map(|call| call.take()));
+        for request in tx.file_dialogs.drain(..).filter_map(|call| call.take()) {
+            self.request_file_dialog(request);
+        }
         if let Some(mut request) = tx.window_frame.take() {
             request.spring = (request.animate && !tx.instant && !self.reduced_motion).then(|| tx.motion.unwrap_or(motion::DEFAULT));
             self.window_frame = Some(self.window_frame.unwrap_or_default().merge(request));
@@ -2416,6 +2431,13 @@ impl<S: 'static> Runtime<S> {
                 let Some(i) = self.clipboard_reads.iter().position(|(read, _)| *read == id) else { return false };
                 let (_, f) = self.clipboard_reads.remove(i);
                 f(handler_state(&mut self.state), &content, &mut one);
+                true
+            }
+            Action::FileDialog(id, result) => {
+                let Some(i) = self.file_dialog_answers.iter().position(|(dialog, _)| *dialog == id) else { return false };
+                let (_, f) = self.file_dialog_answers.remove(i);
+                self.trace_event(format_args!("file-dialog:answer:{}", if result.as_ref().is_ok_and(Option::is_some) { "path" } else if result.is_ok() { "cancel" } else { "error" }));
+                f(handler_state(&mut self.state), result, &mut one);
                 true
             }
             Action::Focus(path, x, y) => {
@@ -6517,6 +6539,7 @@ fn merge(tx: &mut Tx, one: Tx) {
     tx.wakes.extend(one.wakes);
     tx.text_flights.extend(one.text_flights);
     tx.popups.extend(one.popups);
+    tx.file_dialogs.extend(one.file_dialogs);
     if let Some(request) = one.window_frame { tx.window_frame = Some(tx.window_frame.unwrap_or_default().merge(request)); }
     if one.clear_secret && tx.copy.as_ref().is_some_and(crate::ClipboardWrite::is_secret) { tx.copy = None; }
     tx.clear_secret |= one.clear_secret;

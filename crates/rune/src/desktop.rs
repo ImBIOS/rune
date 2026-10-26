@@ -79,6 +79,8 @@ pub(crate) trait Member {
     fn menu(&self, item: &str) -> Result<(), crate::MenuError>;
     fn popup_open(&self) -> bool;
     fn resolve_popup(&mut self, picked: Option<&str>) -> Result<(), crate::PopupMenuError>;
+    fn file_dialog_open(&self) -> bool;
+    fn resolve_file_dialog(&mut self, path: Option<std::path::PathBuf>) -> Result<(), crate::FileDialogError>;
     /// Draws its frame into `view`, `px` device pixels.
     fn render(&mut self, gpu: &Gpu, view: &wgpu::TextureView, px: (u32, u32), dt: f64, update_ms: f64);
     fn backdrop_dark(&self) -> Option<bool>;
@@ -326,7 +328,7 @@ impl<S: 'static> Member for Window<S> {
             Kind::Wheel(dx, dy) => crate::tooling::wheel(rt, (x, y), *dx, *dy),
             Kind::Fling(vx, vy) => crate::tooling::fling(rt, (x, y), *vx, *vy),
             Kind::Files(step) => crate::tooling::file_input(rt, step, (x, y)),
-            Kind::Mark(_) | Kind::Reopen | Kind::Menu(_) | Kind::PopupMenu(_) | Kind::Shortcut(_) => {}
+            Kind::Mark(_) | Kind::Reopen | Kind::Menu(_) | Kind::PopupMenu(_) | Kind::FileDialog(_) | Kind::Shortcut(_) => {}
             kind => { crate::tooling::canvas_input(rt, kind, (x, y)); }
         }
     }
@@ -362,6 +364,8 @@ impl<S: 'static> Member for Window<S> {
     fn menu(&self, item: &str) -> Result<(), crate::MenuError> { crate::native_menu::fire(&self.shared, item) }
     fn popup_open(&self) -> bool { self.rt.popup_menu().is_some() }
     fn resolve_popup(&mut self, picked: Option<&str>) -> Result<(), crate::PopupMenuError> { self.rt.resolve_popup(picked) }
+    fn file_dialog_open(&self) -> bool { self.rt.file_dialog().is_some() }
+    fn resolve_file_dialog(&mut self, path: Option<std::path::PathBuf>) -> Result<(), crate::FileDialogError> { self.rt.resolve_file_dialog(path) }
 
     fn render(&mut self, gpu: &Gpu, view: &wgpu::TextureView, px: (u32, u32), dt: f64, update_ms: f64) {
         let renderer = self.renderer.get_or_insert_with(|| Renderer::new(&gpu.device, OFFSCREEN_FORMAT));
@@ -729,6 +733,11 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
                     let open = desk.key.into_iter().chain(desk.z.iter().rev().copied()).find(|&i| desk.members[i].popup_open());
                     let i = open.or(desk.key).unwrap_or(selected);
                     desk.members[i].resolve_popup(picked.as_deref()).unwrap_or_else(|e| die(&format!("script pop-up menu: {e}")));
+                }
+                Kind::FileDialog(path) => {
+                    let open = desk.key.into_iter().chain(desk.z.iter().rev().copied()).find(|&i| desk.members[i].file_dialog_open());
+                    let i = open.or(desk.key).unwrap_or(selected);
+                    desk.members[i].resolve_file_dialog(path.clone()).unwrap_or_else(|e| die(&format!("script file dialog: {e}")));
                 }
                 // While another app is active, as after a click on the backdrop, keys go to it.
                 Kind::Key(..) | Kind::KeyUp(_) | Kind::Physical(_) | Kind::Paste(_) => {

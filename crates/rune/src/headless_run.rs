@@ -128,6 +128,9 @@ pub enum ScriptEvent {
     Menu(String),
     /// A pop-up menu's picked item id, or None when the script dismisses it.
     PopupMenu(Option<String>),
+    /// `{"type": "file-dialog", "path": …}`: the file chosen in the open file dialog, or None
+    /// for `{"type": "file-dialog-cancel"}`.
+    FileDialog(Option<std::path::PathBuf>),
     /// `{"drag_files": …}`: a file drag from another app moved over the window.
     DragFiles { paths: Vec<std::path::PathBuf>, at: ScriptPoint },
     /// `{"drop_files": …}`: files dropped on the window.

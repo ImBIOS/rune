@@ -902,6 +902,31 @@ Headless fixtures inject `FileDialogs::scripted([ScriptedFileDialog { kind:
 FileDialogKind::Open, path: Some("/fixture/recording.wav".into()) }])`. Requests resolve
 without a window; wrong request order or exhausted fixtures return an error.
 
+Or ask from a handler, with no executor or waker to wire up:
+
+```rust
+.on_press_tx(|_: &mut App, tx: &mut Tx| {
+    let options = FileDialogOptions { title: "Import".into(), ..Default::default() }.filter("Export", &["json"]);
+    tx.open_file(options, |s: &mut App, result, _tx| match result {
+        Ok(Some(path)) => s.import(path),
+        Ok(None) => {}                          // cancelled
+        Err(e) => s.error = Some(e.to_string()),
+    });
+})
+```
+
+- The window shows the dialog once the handler's frame is done (a sheet on macOS, owned by
+  the window on Windows, the portal's chooser on Linux) and keeps drawing while it's up. The
+  answer runs the callback on a later frame, as `tx.read_clipboard` does. `tx.save_file` is
+  the same for a Save dialog.
+- One dialog at a time: asked for while one is open, the callback gets an error at once and
+  the open dialog stays. Asked for while the window is hidden, it shows when the window does.
+- Without the `native-file-dialog` feature, and on the web, the callback gets an error.
+- Headless runs (`--tree`, scripts, tests) keep it open as `fileDialog` in `--tree` (kind,
+  title, filters, directory, fileName) until `{"type": "file-dialog", "path": "/exports/a.json"}`
+  or `{"type": "file-dialog-cancel"}` answers it. Tests read it with `Runtime::file_dialog()`
+  and answer with `Runtime::resolve_file_dialog(Some(path))` or `(None)`.
+
 ### Dragging out to other apps (`drag_out`)
 
 `.drag_out(..)` makes an element a system drag source: drag it into Finder, Mail or System
@@ -1584,7 +1609,8 @@ $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/d
 - **Scripts** are timestamped `move`, `down`, `up`, `tap` (`hold`), `double-click` (`hold`,
   `gap`, default 0.15 s between presses) and `drag` (`dx`, `dy`, `dur`) events, at `x,y` in points or at an element by `key` (or a path suffix such as `slider/knob`).
   `{"reopen": true}` reopens the app, as a click on its Dock icon (see "App lifetime").
-  `menu-pick` (with an `id`) and `menu-cancel` answer an open pop-up menu. `drag_files` and
+  `menu-pick` (with an `id`) and `menu-cancel` answer an open pop-up menu, `file-dialog` (with
+  a `path`) and `file-dialog-cancel` an open file dialog (see "File dialogs"). `drag_files` and
   `drop_files` drag files in from another app (see "Dropping files in from other apps").
 - **Keys in scripts**: `{"type": "key", "name": "Enter"}` (with `cmd`, `shift`, `alt`, `ctrl`)
   and `{"type": "type", "text": "hi"}` reach the window even while the app has hidden it:

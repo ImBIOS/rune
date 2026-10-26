@@ -200,6 +200,7 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
                     web_sys::console::warn_1(&"Native popup menus are unsupported on web.".into());
                     r.rt.cancel_popups();
                 }
+                r.rt.refuse_file_dialog("native file dialogs are unsupported on web");
                 r.sync_input(false);
                 if !r.rt.surfaces.is_empty() {
                     error("native video surfaces are unsupported on web"); event_loop.exit(); return;

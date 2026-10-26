@@ -331,7 +331,8 @@ const HELP: &str = "usage: <app> [window]
                         marks a time; {\"type\":\"shortcut\",\"chord\":\"cmd+space\"} presses a chord
                         through its registered global shortcut handler, never on_key;
                         an object adds \"displays\" and \"pointer\" for place() (rune-placed, --tree)
-                        menu-pick with an \"id\" and menu-cancel answer a pop-up menu
+                        menu-pick with an \"id\" and menu-cancel answer a pop-up menu;
+                        file-dialog with a \"path\" and file-dialog-cancel a file dialog
   --frames N --fps 60 --start S --out DIR     dump N frames from S seconds
   --video out.mp4       stream frames into ffmpeg (.mp4 H.264, .mov ProRes 4444, .webm VP9);
                         --frames N or --duration SECONDS|auto long (default auto: to the
@@ -513,6 +514,8 @@ pub(crate) enum Kind {
     Menu(String),
     /// Answers the open pop-up menu: an item's id, or `None` to dismiss it.
     PopupMenu(Option<String>),
+    /// Answers the open file dialog: the chosen path, or `None` to cancel it.
+    FileDialog(Option<std::path::PathBuf>),
     Physical(crate::PhysicalInput),
     /// A registered global shortcut, delivered only to its handler.
     Shortcut(crate::Shortcut),
@@ -645,6 +648,7 @@ impl Ev {
             Kind::Reopen => ScriptEvent::Reopen,
             Kind::Menu(item) => ScriptEvent::Menu(item.clone()),
             Kind::PopupMenu(picked) => ScriptEvent::PopupMenu(picked.clone()),
+            Kind::FileDialog(path) => ScriptEvent::FileDialog(path.clone()),
             Kind::Physical(input) => ScriptEvent::Physical(*input),
             Kind::Shortcut(chord) => ScriptEvent::Shortcut(chord.clone()),
             Kind::Move => pointer(PointerAction::Move),
@@ -900,6 +904,11 @@ fn parse_script(list: Value) -> Vec<Ev> {
                 out.push(Ev { t, kind: Kind::PopupMenu(Some(id.into())), pos: Pos::Rel(0.0, 0.0) });
             }
             "menu-cancel" => out.push(Ev { t, kind: Kind::PopupMenu(None), pos: Pos::Rel(0.0, 0.0) }),
+            "file-dialog" => {
+                let path = e["path"].as_str().unwrap_or_else(|| die("file-dialog needs a \"path\" (file-dialog-cancel cancels)"));
+                out.push(Ev { t, kind: Kind::FileDialog(Some(path.into())), pos: Pos::Rel(0.0, 0.0) });
+            }
+            "file-dialog-cancel" => out.push(Ev { t, kind: Kind::FileDialog(None), pos: Pos::Rel(0.0, 0.0) }),
             "mark" => {
                 let name = e["name"].as_str().filter(|n| !n.is_empty()).unwrap_or_else(|| die("a mark needs a \"name\""));
                 out.push(Ev { t, kind: Kind::Mark(name.to_owned()), pos });
@@ -981,6 +990,19 @@ fn a_physical_chord_releases_its_modifiers_after_the_key() {
     let expected = [key(Space, mods, true), key(Space, mods, false), PhysicalInput::Modifiers(Mods::default()),
         key(F5, Mods::default(), true), key(F5, Mods::default(), false)];
     assert_eq!(format!("{kinds:?}"), format!("{expected:?}"));
+}
+
+#[cfg(test)]
+#[test]
+fn script_events_answer_a_file_dialog() {
+    let kinds: Vec<_> = parse_script(json!([{"t": 0.1, "type": "file-dialog", "path": "/exports/a.json"}, {"t": 0.2, "type": "file-dialog-cancel"}]))
+        .into_iter().map(|e| {
+            let ScriptEvent::FileDialog(public) = e.public().event else { panic!("public event lost the dialog answer") };
+            let Kind::FileDialog(path) = e.kind else { panic!("parsed as another event") };
+            assert_eq!(public, path);
+            path
+        }).collect();
+    assert_eq!(kinds, [Some("/exports/a.json".into()), None]);
 }
 
 #[cfg(test)]
@@ -1393,6 +1415,7 @@ pub(crate) fn tree_json<S>(rt: &Runtime<S>, real_t: f64) -> Value {
         "warnings": rt.key_warnings.as_deref().unwrap_or_default(),
     });
     if let Some(menu) = rt.popup_json() { tree["popupMenu"] = menu; }
+    if let Some(dialog) = rt.file_dialog_json() { tree["fileDialog"] = dialog; }
     if let Some((text, rect)) = rt.help_tooltip() { tree["tooltip"] = json!({ "text": text, "rect": rect.map(r2) }); }
     tree
 }
@@ -1663,6 +1686,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
                 Kind::Shortcut(shortcut) => shared.shortcuts.fire(shortcut).unwrap_or_else(|e| die(&format!("script shortcut: {e}"))),
                 Kind::Menu(item) => crate::native_menu::fire(&shared, item).unwrap_or_else(|e| die(&format!("script menu: {e}"))),
                 Kind::PopupMenu(picked) => rt.resolve_popup(picked.as_deref()).unwrap_or_else(|e| die(&format!("script pop-up menu: {e}"))),
+                Kind::FileDialog(path) => rt.resolve_file_dialog(path.clone()).unwrap_or_else(|e| die(&format!("script file dialog: {e}"))),
                 Kind::Move => rt.pointer_move(x, y),
                 Kind::Down => {
                     last_down = (x, y);
