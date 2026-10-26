@@ -273,9 +273,11 @@ impl SplitView {
                     .expanded(open)
                     .label(if open { "Hide sidebar" } else { "Show sidebar" })
                     .build(k);
-                if t.unread && !open {
+                if t.unread {
+                    // A tween ends where it says; a spring's exit would run on unseen for a while.
                     let dot = el().key("sidebar-toggle-unread").size(7.0, 7.0).radius(3.5).fill(c.bg_accent);
-                    button = button.child(dot.absolute(side - 5.0, -2.0));
+                    let fade = Curve::tween(DOT_FADE, Easing::EASE_IN_OUT);
+                    button = button.child(dot.absolute(side - 5.0, -2.0).opacity(if open { 0.0 } else { 1.0 }).opacity_motion(fade));
                 }
                 let x = if open && t.in_header { s.width() - self.padding[1] - side } else { lights };
                 let mut b = tg(button).key("sidebar-toggle").absolute(x, top + (TOOLBAR_HEIGHT - side) / 2.0).motion(spring);
@@ -422,8 +424,11 @@ fn pane<S: 'static>(state: PaneState, access: fn(&mut S) -> &mut PaneState, cont
     Pane { state, content, handlers: vec![drag], toggle, clear, hover }
 }
 
+const INSTANT_SPRING: Spring = Spring { duration: 0.001, bounce: 0.0 };
+const DOT_FADE: f32 = 0.15;
+
 fn instant_transition() -> Transition {
-    Transition::identity().springs(SpringPair::new(Spring::new(0.001, 0.0), Spring::new(0.001, 0.0)))
+    Transition::identity().springs(SpringPair::new(INSTANT_SPRING, INSTANT_SPRING))
 }
 
 /// What the panes share.
@@ -498,7 +503,9 @@ fn dock(d: &Dock, key: &str, p: Pane, leading: bool, content: Contents) -> El {
             .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
             .fill(k.c.bg_deep)
             .opacity(if shown { 1.0 } else { 0.0 })
-            .opacity_motion(surface_motion);
+            .opacity_motion(surface_motion)
+            // Its size only changes while it's hidden (a resize of the open pane).
+            .motion(INSTANT_SPRING);
         body = body.offset(x, 0.0).offset_motion(slide).child(k.elevate(surface, &k.elevation.floating));
     }
     if floating {

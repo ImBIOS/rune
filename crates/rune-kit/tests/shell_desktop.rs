@@ -64,7 +64,7 @@ fn view(s: &S, cx: &mut Cx<S>) -> El {
         .frame_inset(8.0)
         .toolbar_in_panel()
         .sidebar_padding(18.0, 10.0)
-        .sidebar_toggle(SidebarToggle::new().size(ControlSize::Large).past_lights(16.0).edge(18.0).gap(4.0).in_header())
+        .sidebar_toggle(SidebarToggle::new().size(ControlSize::Large).past_lights(16.0).edge(18.0).gap(4.0).in_header().unread(true))
         .pane_motion(PaneMotion::new().spring(Spring::new(0.3, 0.0)).scale_with_width(480.0, 0.15, 0.3).fade_tail(0.15))
         .sidebar_peek(SidebarPeek::new().edge(16.0, ms(40)).toggle_delay(ms(80)).below(56.0).hold(15.0, ms(100)).spring(Spring::new(0.18, 0.0)))
         .reduced_motion(s.reduced)
@@ -381,4 +381,34 @@ fn dragging_a_row_lifts_it_reflows_the_others_and_escape_puts_it_back() {
     }
     assert_eq!(last, r2);
     assert_eq!(rt.state.picked, 0, "a drag isn't a select");
+}
+
+#[test]
+fn the_unread_dot_fades_on_a_tween_that_ends_with_it() {
+    let mut rt = runtime(closed());
+    settle(&mut rt);
+    assert_eq!(find(&rt, "sidebar-toggle-unread").opacity, 1.0, "shown while the sidebar is closed");
+    rt.update(|s, _| s.sidebar.set_open(true));
+    for _ in 0..19 {
+        rt.frame(1.0 / 120.0);
+    }
+    let dot = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("sidebar-toggle-unread"));
+    assert!(dot.as_ref().is_none_or(|d| d.opacity == 0.0), "gone at 0.16 s, while the pane still moves: {dot:?}");
+    rt.update(|s, _| s.sidebar.set_open(false));
+    settle(&mut rt);
+    assert_eq!(find(&rt, "sidebar-toggle-unread").opacity, 1.0, "and back");
+}
+
+#[test]
+fn the_hidden_peek_surface_takes_a_new_width_at_once() {
+    let mut rt = runtime(state());
+    settle(&mut rt);
+    rt.update(|s, _| s.sidebar.set_width(400.0));
+    rt.frame(1.0 / 120.0);
+    rt.frame(1.0 / 120.0);
+    let content = inside(&rt, "sidebar-pane", "pane-content").rect[2];
+    assert!(content < 399.0, "the contents spring to the new width: {content}");
+    let surface = find(&rt, "pane-surface");
+    assert_eq!(surface.opacity, 0.0);
+    assert!((surface.rect[2] - 400.0).abs() < 0.5, "unseen, it doesn't animate: {}", surface.rect[2]);
 }
