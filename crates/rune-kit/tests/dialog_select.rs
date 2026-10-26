@@ -59,5 +59,6 @@ fn a_fit_dialog_is_as_tall_as_its_content() {
     let (panel, buttons) = (rect(true, "delete-dialog"), rect(true, "buttons"));
     // 16 + title 20 + 4 + description 20 + 16, then the 60 point button row.
     assert_eq!(panel[3], 76.0 + 60.0);
+    assert_eq!((panel[0], panel[1]), ((1000.0 - 400.0) / 2.0, (800.0 - panel[3]) / 2.0), "centred in the layer");
     assert_eq!(buttons[1] + buttons[3], panel[1] + panel[3], "the buttons sit at the bottom edge");
 }

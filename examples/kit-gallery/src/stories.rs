@@ -25,6 +25,7 @@ macro_rules! stories {
 /// their scene starts with that overlay open.
 const OPENED: &[(&str, &str)] = &[
     ("ui-dialog--basic", "dialog"),
+    ("rune-dialog--fit", "dialog-fit"),
     ("ui-menu--basic", "menu"),
     ("ui-menu--rich", "menu"),
     ("ui-menu--with-checkbox", "menu"),
@@ -158,6 +159,7 @@ stories! {
     "rune-markdown--code" => markdown_code,
     "rune-text--selectable-help" => text_selectable_help,
     "rune-text--truncate-middle" => text_truncate_middle,
+    "rune-dialog--fit" => dialog_fit,
 }
 
 fn combobox_searchable(s: &G, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -172,6 +174,15 @@ fn dialog_basic(s: &G, k: &Kit, layer: &mut Vec<El>) -> El {
     Dialog::new("dialog", "Dialog").description("Description").open(is_open(s, "dialog"))
         .on_close(close).child(body_text(k, "Dialog body content.")).build(k, layer);
     Button::new("Open dialog").on_press(toggle("dialog")).build(k).key("opener")
+}
+
+fn dialog_fit(s: &G, k: &Kit, layer: &mut Vec<El>) -> El {
+    let actions = row().w_full().padding(16.0).gap(8.0).justify_end()
+        .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(close).build(k))
+        .child(Button::new("Delete").on_press(close).build(k));
+    Dialog::new("dialog-fit", "Delete item?").description("This cannot be undone.").width(400.0).fit()
+        .open(is_open(s, "dialog-fit")).on_close(close).child(actions).build(k, layer);
+    Button::new("Open confirmation").on_press(toggle("dialog-fit")).build(k).key("opener")
 }
 
 fn motion_focus_modal(s: &G, k: &Kit, layer: &mut Vec<El>) -> El {
