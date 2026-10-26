@@ -5,6 +5,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`rune_theme_opencode::brand(dark)`.** The opencode theme's brand colour (ember step 9) as a
+  typed function, so apps no longer look the token up by name.
 - **Textbox padding never chooses arbitrarily between multiple editors.** Only a single
   reachable editor takes a container press; hidden editors are excluded. Trailing copy/clear
   buttons keep their hit targets even without handlers, and descendant resolution runs only

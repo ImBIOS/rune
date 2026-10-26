@@ -36,6 +36,12 @@ pub fn theme(dark: bool) -> &'static Theme {
     if dark { DARK.get_or_init(load) } else { LIGHT.get_or_init(load) }
 }
 
+/// The brand's hot colour for one appearance: ember step 9, for marks like a logo or a
+/// highlight that should read as the brand rather than the interactive accent.
+pub fn brand(dark: bool) -> Color {
+    theme(dark).color(if dark { "ember-dark-9" } else { "ember-light-9" })
+}
+
 /// The theme without sRGB re-solving: translucent tokens keep their authored alpha.
 fn raw_theme(dark: bool) -> &'static Theme {
     static DARK: OnceLock<Theme> = OnceLock::new();
@@ -221,6 +227,8 @@ mod tests {
             let k = super::kit(dark);
             assert!(!k.elevation.button_neutral.is_empty());
             assert_eq!(k.dark, dark);
+            let b = super::brand(dark);
+            assert!(b.a > 0.99 && b.r > b.g && b.r > b.b, "ember is opaque and warm: {b:?}");
         }
     }
 }
