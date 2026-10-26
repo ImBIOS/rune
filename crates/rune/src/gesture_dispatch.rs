@@ -271,6 +271,8 @@ impl<S: 'static> Runtime<S> {
         tx.focused = self.focused_key();
         let pressed = self.key_focus.as_deref().and_then(|p| self.nodes.iter().enumerate().position(|(i, n)| n.path == p && !self.subtree_exiting(i)));
         let focused = self.focused.as_deref().and_then(|p| self.nodes.iter().enumerate().position(|(i, n)| n.path == p && !self.subtree_exiting(i)));
+        let secure = [pressed, focused].into_iter().flatten()
+            .any(|i| self.nodes[i].input.as_ref().is_some_and(|input| input.edit.is_secure()));
         if self.keys_held > 0 {
             self.keys_held -= 1;
             if self.keys_held == 0 { self.key_focus = None; }
@@ -303,7 +305,7 @@ impl<S: 'static> Runtime<S> {
         }
         for i in chain {
             if let Some(f) = self.nodes[i].focus.key_up.clone() && Tx::took(f(handler_state(&mut self.state), ev, tx), tx) {
-                self.events.push(format!("key-up {:?}", ev.key));
+                self.events.push(if secure { "key-up [redacted]".into() } else { format!("key-up {:?}", ev.key) });
                 return true;
             }
         }

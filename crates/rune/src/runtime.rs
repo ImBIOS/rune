@@ -3169,9 +3169,12 @@ impl<S: 'static> Runtime<S> {
         let path = self.focused.clone()?;
         let s = self.env.scale;
         let n = self.node(&path)?;
-        let (spec, w) = (n.text.clone()?, n.target[2] - n.target[0] - n.inset[0] - n.inset[2]);
-        let text = zeroize::Zeroizing::new(n.input.as_ref()?.edit.display().0);
-        Some(self.text.layout_blocks(&text, &spec.spans, &spec.blocks, &spec.pills, spec.style, s, spec.wrap.then_some(w * s), line_alignment(&spec)))
+        let (mut spec, w) = (n.text.clone()?, n.target[2] - n.target[0] - n.inset[0] - n.inset[2]);
+        let text = n.input.as_ref()?.edit.display().0;
+        use zeroize::Zeroize;
+        spec.content.zeroize();
+        spec.content = text;
+        Some(self.text.layout_for_spec(&spec, s, spec.wrap.then_some(w * s), line_alignment(&spec)))
     }
 
     fn with_focused(&mut self, f: impl FnOnce(&mut crate::edit::TextEdit) -> EditOutcome, tx: &mut Tx) -> bool {
@@ -4002,7 +4005,7 @@ impl<S: 'static> Measurement<'_, S> {
             } else if let Some(spec) = &nodes[i].text {
                 let w = (l.size.width - ins[0] - ins[2]).max(0.0);
                 let wrap = spec.wrap.then_some(w * scale);
-                let mut layout = self.text.layout_blocks(&spec.content, &spec.spans, &spec.blocks, &spec.pills, spec.style, scale, wrap, line_alignment(spec));
+                let mut layout = self.text.layout_for_spec(spec, scale, wrap, line_alignment(spec));
                 let mut elided = None;
                 if spec.truncate && layout.full_width() > w * scale + 0.5 {
                     let (cut, e) = truncated(&mut self.text, spec, scale, w * scale);
@@ -4660,7 +4663,7 @@ impl<S: 'static> Runtime<S> {
                     let scale = self.env.scale;
                     let w = (old.local.w - old.inset[0] - old.inset[2]).max(0.0);
                     let wrap = spec.wrap.then_some(w * scale);
-                    old.text_layout = Some(self.text.layout_blocks(&spec.content, &spec.spans, &spec.blocks, &spec.pills, spec.style, scale, wrap, line_alignment(spec)));
+                    old.text_layout = Some(self.text.layout_for_spec(spec, scale, wrap, line_alignment(spec)));
                     old.elided = None;
                 }
             }
@@ -5922,7 +5925,8 @@ impl<S: 'static> Runtime<S> {
                     || n.vis.pixels.is_some()
                     || n.vis.surface.is_some()
                     || (n.material.is_some() && self.native_materials)
-                    || n.input.as_ref().is_some_and(|inp| inp.edit.focused)
+                    // Never retain a raster of a secret, even when the field is unfocused.
+                    || n.input.as_ref().is_some_and(|inp| inp.edit.focused || inp.edit.is_secure())
                     || n.text.as_ref().is_some_and(|t| t.advance_in.is_some());
                 let check = n.text.as_ref().is_some_and(|t| t.live.is_some())
                     || n.live.iter().any(|b| !n.vis.cache || !matches!(b.property, crate::live::Property::Offset | crate::live::Property::Scale));
@@ -8444,7 +8448,7 @@ fn compute_layout(taffy: &mut TaffyTree<usize>, root: taffy::NodeId, room: Size<
                         };
                     }
                 }
-                let l = text.layout_blocks(&spec.content, &spec.spans, &spec.blocks, &spec.pills, spec.style, scale, w.map(|w| w * scale), parley::Alignment::Start);
+                let l = text.layout_for_spec(spec, scale, w.map(|w| w * scale), parley::Alignment::Start);
                 let mut lw = (l.full_width() / scale).ceil_to(scale);
                 if (spec.truncate || spec.truncate_fade || spec.max_lines > 0)
                     && let AvailableSpace::Definite(a) = avail.width
@@ -11978,6 +11982,57 @@ mod tests {
         assert!(!format!("{:?}", rt.elements()).contains("hunter2"));
         assert!(!format!("{:?}", n.input).contains("hunter2"));
         assert!(!format!("{:?}", n.text).contains("hunter2"));
+    }
+
+    #[test]
+    fn secure_revealed_display_does_not_survive_in_layout_or_raster_caches() {
+        use crate::{text_input, TextEdit, TextStyle};
+        fn view(s: &TextEdit, _: &mut Cx<TextEdit>) -> El {
+            col().key("cache").cache().size(240.0, 100.0).child(
+                text_input(s, TextStyle::new(16.0, 400.0)).key("secret")
+                    .single_line().size(220.0, 40.0).selectable(true)
+                    .text_case(crate::TextCase::Uppercase)
+                    .on_edit(|s: &mut TextEdit| s),
+            )
+        }
+        let mut rt = Runtime::new(TextEdit::new("sensitive fixture").secure().revealed(true), view,
+            (240.0, 100.0), Env::new(true, 1.0));
+        let cached = rt.text.cached_layout_count();
+        rt.frame(0.0);
+        let i = rt.nodes.iter().position(|n| n.key.as_deref() == Some("secret")).unwrap();
+        let n = &rt.nodes[i];
+        assert!(!rt.is_selectable(i), "selectable cannot opt secure input into text selection");
+        assert_eq!(n.text.as_ref().unwrap().content, "sensitive fixture");
+        assert!(n.text.as_ref().unwrap().source.is_none(), "case conversion is ignored on inputs");
+        assert_eq!(Rc::strong_count(n.text_layout.as_ref().unwrap()), 1, "only the node owns the shaped run");
+        assert_eq!(rt.text.cached_layout_count(), cached, "measurement and paint leave no cached run");
+        assert!(rt.node_caches.is_empty(), "an unfocused secret also disables ancestor raster caches");
+        assert!(rt.text.atlas.resident_caches.is_empty());
+        let path = n.path.clone();
+        assert!(!rt.selection_menu(&path, 10.0, 10.0), "no context-menu copy");
+        rt.set_focus(Some(path), true);
+        rt.frame(0.0);
+        let layout = rt.focused_layout().unwrap();
+        assert_eq!(Rc::strong_count(&layout), 1, "input hit testing also bypasses the layout cache");
+        drop(layout);
+        let mut tx = Tx::default();
+        // Application key-up hooks may observe their own events, but Rune must not keep
+        // typed secrets in the dev/event log when such a hook handles the release.
+        let root = rt.nodes.iter().position(|n| n.key.as_deref() == Some("cache")).unwrap();
+        rt.nodes[root].focus.key_up = Some(Rc::new(|_, _, _| true));
+        rt.events.clear();
+        assert!(rt.route_key_up(&KeyEvent { key: crate::Key::Text("private fixture".into()), mods: Default::default() }, &mut tx));
+        assert!(rt.events.iter().any(|e| e == "key-up [redacted]"));
+        assert!(!format!("{:?}", rt.events).contains("private fixture"));
+        rt.update(|s, _| s.set_revealed(false));
+        rt.frame(0.0);
+        assert_eq!(rt.text.cached_layout_count(), cached);
+        rt.update(|s, _| s.clear());
+        rt.frame(0.0);
+        let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+        assert!(rt.state.text.is_empty() && n.input.as_ref().unwrap().edit.text.is_empty());
+        assert!(n.text.as_ref().unwrap().content.is_empty(), "clearing without exit wipes the display");
+        assert_eq!(rt.text.cached_layout_count(), cached);
     }
 
     #[test]

@@ -13,7 +13,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   `ElementInfo::text` remains `None`, `Debug` on `TextEdit`, `InputSpec` and `TextSpec` stays
   `[redacted]`, model and rendered text buffers zeroize on replace and drop, and an exiting field
   conceals back to bullets on its first exit frame. Word movement (`⌥←` / `⌥→`) treats a hidden
-  secure field as a single masked word and steps over words normally while revealed.
+  secure field as a single masked word and steps over words normally while revealed. Secure
+  runs bypass the shared layout cache and use a disposable shaping context; secure fields also
+  disable ancestor subtree raster caches even when unfocused. Third-party shaping scratch is
+  released, not guaranteed zeroized. Handled key releases in secure fields are redacted in
+  the runtime event log too.
 - **`El::span_ring`, `El::span_rings`, `LinkPaint::ring`, and `Markdown::link_ring`.** Draws an
   inset border ring `(color, width)` inside a span's rounded `Span::bg` rect (`4 pt` corner radius),
   so link chips remain visible when their fill is close to the page background.

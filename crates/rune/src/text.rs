@@ -1595,6 +1595,9 @@ fn mono_tab_stops(text: &str, spans: &[Span], mono_style: bool) -> Vec<(usize, u
 }
 
 impl TextSystem {
+    #[cfg(test)]
+    pub(crate) fn cached_layout_count(&self) -> usize { self.layouts.len() }
+
     /// `fonts` replaces the built-in Inter faces when non-empty on native. Web keeps its
     /// bundled sans and mono fallbacks, since there are no system fonts to discover.
     /// `families` names the sans and mono slots; others are selectable with `Family::Named`.
@@ -1768,6 +1771,41 @@ impl TextSystem {
         max_width: Option<f32>,
         align: Alignment,
     ) -> Rc<Layout<Ink>> {
+        self.layout_blocks_inner(text, spans, blocks, pills, style, scale, max_width, align, true)
+    }
+
+    /// Secure display runs must not enter the shared layout cache or leave character
+    /// scratch in the reusable shaping context. Layouts contain glyphs and byte ranges,
+    /// not source strings; only the mounted node owns a secure run's layout.
+    pub(crate) fn layout_for_spec(
+        &mut self,
+        spec: &crate::el::TextSpec,
+        scale: f32,
+        max_width: Option<f32>,
+        align: Alignment,
+    ) -> Rc<Layout<Ink>> {
+        if !spec.redacted {
+            return self.layout_blocks(&spec.content, &spec.spans, &spec.blocks, &spec.pills, spec.style, scale, max_width, align);
+        }
+        let shared = std::mem::replace(&mut self.layout_cx, LayoutContext::new());
+        let layout = self.layout_blocks_inner(&spec.content, &spec.spans, &spec.blocks, &spec.pills, spec.style, scale, max_width, align, false);
+        self.layout_cx = shared;
+        layout
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn layout_blocks_inner(
+        &mut self,
+        text: &str,
+        spans: &[Span],
+        blocks: &[crate::edit::Block],
+        pills: &[PillChip],
+        style: TextStyle,
+        scale: f32,
+        max_width: Option<f32>,
+        align: Alignment,
+        cache: bool,
+    ) -> Rc<Layout<Ink>> {
         let has_indented_blocks = blocks.iter().any(|&b| b != crate::edit::Block::Paragraph);
         // Each pill's label range, and the room before and after it in device px; boxes keep
         // the pill's index in their id, so ranges that fail the checks keep no chip.
@@ -1790,7 +1828,7 @@ impl TextSystem {
             key = h.finish();
         }
         let g = self.generation;
-        if let Some((l, used, _)) = self.layouts.get_mut(&key) {
+        if cache && let Some((l, used, _)) = self.layouts.get_mut(&key) {
             *used = g;
             return l.clone();
         }
@@ -1804,7 +1842,7 @@ impl TextSystem {
         // then widen to the next 4-column stop through word spacing.
         let spaced;
         let text = if text.contains('\t') {
-            spaced = text.replace('\t', " ");
+            spaced = zeroize::Zeroizing::new(text.replace('\t', " "));
             spaced.as_str()
         } else {
             text
@@ -2031,7 +2069,7 @@ impl TextSystem {
         }
         layout.align(align, AlignmentOptions::default());
         let l = Rc::new(layout);
-        self.layouts.insert(key, (l.clone(), g, text.len() as u32));
+        if cache { self.layouts.insert(key, (l.clone(), g, text.len() as u32)); }
         l
     }
 

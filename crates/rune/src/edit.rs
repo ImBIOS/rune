@@ -761,6 +761,8 @@ impl TextEdit {
     /// Show the plain characters of a [`secure`](Self::secure) field while keeping all other
     /// secure protections: no undo, copy, cut, IME or accessibility text, redacted [`Debug`],
     /// and zeroized buffers.
+    /// Rune-owned source buffers are wiped; third-party shaping scratch used while revealed
+    /// is released after shaping but is not guaranteed zeroized.
     pub fn revealed(mut self, revealed: bool) -> Self { self.set_revealed(revealed); self }
 
     pub fn is_revealed(&self) -> bool { self.revealed }

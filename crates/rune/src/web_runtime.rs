@@ -185,6 +185,10 @@ mod tests {
         assert_eq!((mirror.base, mirror.anchor, mirror.focus), (0, 0, 0));
         edit.insert("secret");
         assert!(!mirror.update("other", Some(&edit)), "secret edits don't mirror to the DOM");
+        edit.set_revealed(true);
+        assert!(!mirror.update("other", Some(&edit)), "revealing changes only the GPU display, not DOM text services");
+        assert!(mirror.secure && mirror.text.is_empty());
+        assert_eq!((mirror.base, mirror.anchor, mirror.focus), (0, 0, 0));
         assert!(mirror.update("", None));
         assert!(!mirror.update("", None));
     }
