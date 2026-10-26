@@ -117,6 +117,17 @@ pub enum GradientKind {
 
 choices!(GradientKind { Linear = "linear" "Linear", Radial = "radial" "Radial", Conic = "conic" "Conic" });
 
+/// Where a fill's pattern is pinned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FillAnchor {
+    /// To the window: neighbouring shapes show neighbouring parts of one surface.
+    World,
+    /// To the shape: every shape of the same size, seed and time looks the same.
+    Element,
+}
+
+choices!(FillAnchor { World = "world" "World", Element = "element" "Element" });
+
 // ---------------------------------------------------------------- styles
 
 /// Polished metal reflecting a studio: a soft overhead key light, a strip light, a bright sky
@@ -144,6 +155,10 @@ pub struct LiquidMetalParams {
     pub iridescence: f32,
     /// 1 = studio as lit; higher deepens the floor and sharpens the lights.
     pub contrast: f32,
+    /// Where the ripples are pinned: `World` (default) flows one surface across neighbouring
+    /// shapes; `Element` gives every shape of the same size its own identical copy, so a row of
+    /// keys matches.
+    pub anchor: FillAnchor,
 }
 
 impl Default for LiquidMetalParams {
@@ -165,7 +180,13 @@ impl LiquidMetalParams {
             angle: -0.12,
             iridescence: 0.08,
             contrast: 1.0,
+            anchor: FillAnchor::World,
         }
+    }
+    /// `LiquidMetalParams::chrome().anchor(FillAnchor::Element)`.
+    pub fn anchor(mut self, anchor: FillAnchor) -> Self {
+        self.anchor = anchor;
+        self
     }
     pub fn gold() -> Self {
         LiquidMetalParams { tint: rgb(0xf3c56b), light: rgb(0xfff4dc), iridescence: 0.0, ..Self::chrome() }
@@ -189,6 +210,51 @@ params!(LiquidMetalParams {
     angle: "Angle" => num(-3.14159, 3.14159, 0.01, Unit::Radians),
     iridescence: "Iridescence" => num(0.0, 1.0, 0.01, Unit::Fraction),
     contrast: "Contrast" => num(0.5, 2.0, 0.01, Unit::None),
+    anchor: "Anchor" => ParamKind::Choice(FillAnchor::CHOICES),
+});
+
+/// Moulded plastic under one soft light: a diffuse base in `color`, a specular highlight that is
+/// small and bright when glossy and broad and faint when matte, the dome's curvature shading, a
+/// rim rolled over `bevel` that catches the light, and a faint reflection at grazing angles. The
+/// face's flat centre shows `color`. Uses liquid metal's dome and bevel; it never animates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlasticParams {
+    pub color: Rgb,
+    /// 0 polished, 1 matte: the highlight's size and softness.
+    pub roughness: f32,
+    /// How curved the face is: positive bulges, negative is dished like a keycap's top.
+    pub dome: f32,
+    /// Width of the rolled rim, pt.
+    pub bevel: f32,
+    /// Where the light comes from, radians around the view axis: 0 from above, negative from the left.
+    pub angle: f32,
+}
+
+impl Default for PlasticParams {
+    fn default() -> Self {
+        PlasticParams::glossy()
+    }
+}
+
+impl PlasticParams {
+    pub fn glossy() -> Self {
+        PlasticParams { color: rgb(0xece8de), roughness: 0.15, dome: 0.35, bevel: 6.0, angle: -0.5 }
+    }
+    pub fn matte() -> Self {
+        PlasticParams { color: rgb(0x2e3036), roughness: 0.8, ..Self::glossy() }
+    }
+    /// A matte face dished like a keycap's top.
+    pub fn dished() -> Self {
+        PlasticParams { color: rgb(0xd8d2c4), roughness: 0.7, dome: -0.45, ..Self::glossy() }
+    }
+}
+
+params!(PlasticParams {
+    color: "Colour" => ParamKind::Color,
+    roughness: "Roughness" => num(0.05, 1.0, 0.01, Unit::Fraction),
+    dome: "Dome" => num(-1.0, 1.0, 0.01, Unit::None),
+    bevel: "Bevel" => num(0.0, 48.0, 0.5, Unit::Pt),
+    angle: "Light angle" => num(-3.14159, 3.14159, 0.01, Unit::Radians),
 });
 
 /// Colours pinned to points that drift slowly, blended smoothly in OKLab.
@@ -651,6 +717,7 @@ styles!(
     Voronoi(VoronoiParams) = 7,
     Waves(WaveParams) = 8,
     Halftone(HalftoneParams) = 9,
+    Plastic(PlasticParams) = 10,
 );
 
 /// A fill: the style plus what every style shares. Build it with `FillParams::new`, `From` a
@@ -709,6 +776,7 @@ impl FillParams {
             FillStyle::Voronoi(p) => p.speed > 0.0,
             FillStyle::Waves(p) => p.speed > 0.0 && p.amplitude > 0.0,
             FillStyle::Halftone(p) => p.input.animates() && p.speed > 0.0,
+            FillStyle::Plastic(_) => false,
         }
     }
 
@@ -738,6 +806,7 @@ impl FillParams {
                 let (s, a) = input(p.input);
                 (s * 4, a * 4)
             }
+            FillStyle::Plastic(_) => (0, 0),
         };
         FxCost { passes: 1, samples, alu, backdrop: self.needs_backdrop(), source: self.needs_source() }
     }
@@ -758,6 +827,7 @@ impl FillParams {
                 i.c1 = p.light.v4();
                 i.p0 = [p.flow, p.scale.max(1.0), p.speed, p.bevel.max(0.0)];
                 i.p1 = [p.dome, p.angle, p.iridescence, p.contrast];
+                i.p2 = [(p.anchor == FillAnchor::Element) as u32 as f32, 0.0, 0.0, 0.0];
             }
             FillStyle::MeshGradient(p) => {
                 i.p0 = [p.drift, p.speed, p.sharpness.clamp(0.1, 8.0), p.warp];
@@ -808,6 +878,10 @@ impl FillParams {
                 i.p0 = [0.0, p.input.code(), p.cell.max(1.0), p.ramp_angle];
                 i.p1 = [p.scale.max(1.0), p.speed, p.bias, p.contrast];
                 i.p2 = [p.angle, 0.0, 0.0, 0.0];
+            }
+            FillStyle::Plastic(p) => {
+                i.c0 = p.color.v4();
+                i.p0 = [p.roughness, p.dome, p.bevel.max(0.0), p.angle];
             }
         }
         Some(r.inflate(1.0))
@@ -966,6 +1040,25 @@ mod tests {
         }
         assert!(Fx::fill(DitherParams::backdrop()).needs_backdrop());
         assert!(!Fx::fill(DitherParams::bayer()).needs_backdrop());
+    }
+
+    #[test]
+    fn element_anchor_only_moves_the_anchor_slot() {
+        assert_eq!(LiquidMetalParams::default().anchor, FillAnchor::World);
+        let world = packed(&Fx::fill(LiquidMetalParams::gold()).on(card()).at(3.0)).unwrap().0;
+        let element = packed(&Fx::fill(LiquidMetalParams::gold().anchor(FillAnchor::Element)).on(card()).at(3.0)).unwrap().0;
+        assert_eq!(world.p2, [0.0; 4]);
+        assert_eq!(element.p2, [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(bits(&InstRaw { p2: [0.0; 4], ..element }), bits(&world));
+    }
+
+    #[test]
+    fn plastic_holds_still() {
+        for p in [PlasticParams::glossy(), PlasticParams::matte(), PlasticParams::dished()] {
+            assert!(!FillParams::from(p).animates());
+            assert!(!Fx::fill(p).on(card()).at(2.0).is_animating());
+            assert_eq!(Fx::fill(p).cost(), FxCost { passes: 1, samples: 0, alu: 0, backdrop: false, source: false });
+        }
     }
 
     #[test]

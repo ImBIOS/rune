@@ -5,6 +5,18 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Plastic fill, and liquid metal pinned per shape.** `Fx::fill(PlasticParams { .. })` paints
+  moulded plastic under one soft light: `color`, `roughness` (polished to matte), `dome`
+  (negative dishes the face like a keycap), `bevel` and light `angle`, with presets `glossy`,
+  `matte` and `dished`. It keeps rgb within alpha, so it blends the same with `srgb_blend` on or
+  off, and it never animates. It shares liquid metal's dome and rim code, and the catalog lists it
+  (`fill_styles()`), so `fill-presets.png` gains its presets. `LiquidMetalParams` has a new
+  `anchor: FillAnchor` field (`World`, the default, or `Element`, also settable with
+  `.anchor(FillAnchor::Element)`): with `Element` the ripples are pinned to each shape's centre,
+  so shapes of the same size, seed and time are pixel-identical. A full `LiquidMetalParams { .. }`
+  literal without `..preset` must now set `anchor`. Fills now shade at the exact pixel centre
+  instead of the interpolated one, which moves output by far less than one 8-bit step.
+
 - **Pasted images reach paste hooks.** `ClipboardContent::image()` holds a pasted image as a
   `ClipboardImage` (PNG bytes via `png()`, pixel `size()`), with `with_image` to build one
   and `clipboard::MAX_IMAGE_BYTES` (32 MiB as PNG) as the cap. Only targets with a hook fetch

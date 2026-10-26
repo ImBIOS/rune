@@ -21,6 +21,9 @@ fn external_struct_update_and_emitted_rust_compile() {
         Fx::fill(VoronoiParams { scale: 24.0, edge: 2.0, ..VoronoiParams::stained() }),
         Fx::fill(WaveParams { amplitude: 0.06, softness: 0.01, ..WaveParams::dunes() }),
         Fx::fill(HalftoneParams { input: FillInput::Linear, cell: 5.0, ..HalftoneParams::print() }),
+        Fx::fill(PlasticParams { roughness: 0.6, dome: -0.4, ..PlasticParams::glossy() }.border(5.0)),
+        Fx::fill(LiquidMetalParams::chrome().anchor(FillAnchor::Element)),
+        Fx::fill(LiquidMetalParams { anchor: FillAnchor::Element, ..LiquidMetalParams::gold() }),
     ];
     for fx in layers {
         let Fx::Fill(p) = fx else { unreachable!() };
@@ -210,4 +213,158 @@ fn gpu_fills_are_finite_at_extremes_degenerate_params_and_large_time() {
     draw(Fx::fill(MetaballParams { size: 0.0, ..MetaballParams::lava() }).on(shape).at(1.0));
     draw(Fx::fill(MeshGradientParams { sharpness: 50.0, ..MeshGradientParams::dusk() }).on(shape).at(1.0));
     draw(Fx::fill(DitherParams { input: FillInput::Image, ..DitherParams::bayer() }).on(shape).source(0, Rect::new(0.0, 0.0, 0.0, 0.0)).at(1.0));
+}
+
+/// Draws `layers` at `scale` into a transparent `w`×`h` Rgba16Float target with no dither, and
+/// reads it back as premultiplied linear RGBA (or sRGB-encoded with `srgb`).
+fn render(w: u32, h: u32, scale: f32, srgb: bool, layers: &[FxLayer]) -> Vec<[f32; 4]> {
+    let Gpu { device, queue, .. } = Gpu::headless();
+    let fmt = wgpu::TextureFormat::Rgba16Float;
+    let mut fx = FxRenderer::new(&device, fmt, FxOptions { dither: false });
+    fx.set_srgb_blend(srgb);
+    assert_eq!(w * 8 % 256, 0, "row alignment");
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: fmt,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    let readback = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (w * 8 * h) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+    let stats = fx.prepare(&device, &queue, &FxFrame { viewport: [w, h], scale, layers, backdrop: None, sources: &[] });
+    assert_eq!(stats.drawn as usize, layers.len());
+    let mut enc = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: None,
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        for k in 0..layers.len() {
+            fx.draw_layer(&mut pass, k);
+        }
+    }
+    enc.copy_texture_to_buffer(
+        target.as_image_copy(),
+        wgpu::TexelCopyBufferInfo { buffer: &readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 8), rows_per_image: Some(h) } },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    queue.submit([enc.finish()]);
+    let slice = readback.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let words: Vec<u16> = bytemuck::cast_slice(&slice.get_mapped_range().unwrap()).to_vec();
+    words.chunks(4).map(|p| std::array::from_fn(|c| f16(p[c]))).collect()
+}
+
+fn f16(h: u16) -> f32 {
+    let (s, e, m) = ((h >> 15) as u32, ((h >> 10) & 0x1f) as i32, (h & 0x3ff) as f32);
+    let v = match e {
+        0 => m * 2f32.powi(-24),
+        31 => f32::INFINITY,
+        _ => (1.0 + m / 1024.0) * 2f32.powi(e - 15),
+    };
+    if s == 1 { -v } else { v }
+}
+
+fn lum(p: [f32; 4]) -> f32 {
+    0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]
+}
+
+/// A 56 pt key at 2× in a 128×128 px target.
+const KEY: (u32, u32, f32) = (128, 128, 2.0);
+
+fn key() -> Shape {
+    Shape::rounded(4.0, 4.0, 56.0, 56.0, 8.0)
+}
+
+/// Plastic's colour is coverage: the highlight lightens toward white inside the shape's alpha and
+/// never adds light past it, at any roughness, intensity or blend mode.
+#[test]
+fn plastic_never_paints_past_its_coverage() {
+    let (w, h, s) = KEY;
+    for srgb in [false, true] {
+        for roughness in [0.05, 0.45, 1.0] {
+            for (color, intensity) in [(rgb(0xffffff), 1.0), (rgb(0xffd60a), 1.0), (rgb(0xd7263d), 0.5), (rgb(0x202226), 1.0)] {
+                let p = PlasticParams { color, roughness, ..PlasticParams::glossy() };
+                for layer in [Fx::fill(p.intensity(intensity)).on(key()), Fx::fill(p.border(6.0)).on(key())] {
+                    let img = render(w, h, s, srgb, &[layer]);
+                    let worst = img.iter().map(|p| p[0].max(p[1]).max(p[2]) - p[3]).fold(f32::MIN, f32::max);
+                    assert!(worst <= 2e-3, "srgb {srgb} roughness {roughness} {color:?} x{intensity}: rgb exceeds alpha by {worst}");
+                    let centre = img[(h / 2 * w + w / 2) as usize];
+                    assert!(layer_is_border(&layer) || (centre[3] - intensity).abs() < 2e-3, "centre alpha {centre:?}");
+                }
+            }
+        }
+    }
+}
+
+fn layer_is_border(l: &FxLayer) -> bool {
+    matches!(l.fx, Fx::Fill(p) if p.border > 0.0)
+}
+
+/// The flat centre shows the chosen colour (a satin or matte highlight lays a faint sheen over it); glossy plastic has a brighter, tighter highlight than
+/// matte; the rim facing the light is lighter than the rim facing away.
+#[test]
+fn plastic_highlight_follows_roughness_and_light() {
+    let (w, h, s) = KEY;
+    let base = rgb(0x3d6fd6);
+    let mut peaks = Vec::new();
+    for roughness in [0.05, 0.45, 1.0] {
+        let img = render(w, h, s, false, &[Fx::fill(PlasticParams { color: base, roughness, ..PlasticParams::glossy() }).on(key())]);
+        let at = |x: u32, y: u32| img[(y * w + x) as usize];
+        let centre = at(w / 2, h / 2);
+        // The colour, under at most a faint sheen from a broad highlight.
+        for c in 0..3 {
+            let lift = centre[c] - base.0[c];
+            assert!((-0.01..0.07).contains(&lift), "roughness {roughness}: centre {centre:?} vs {base:?}");
+        }
+        let face: Vec<f32> = img.iter().filter(|p| p[3] > 0.999).map(|p| lum(*p) - lum(centre)).collect();
+        let peak = face.iter().copied().fold(0.0f32, f32::max);
+        let spread = face.iter().filter(|v| **v > 0.5 * peak).count();
+        // Light from above and a little left: the top rim is lit, the bottom rim is in shade.
+        let (lit, shade) = (lum(at(64, 14)), lum(at(64, 114)));
+        eprintln!("roughness {roughness}: peak +{peak:.3}, {spread} px above half peak, rims {lit:.3} / {shade:.3}");
+        assert!(lit > shade * 1.3, "roughness {roughness}: lit rim {lit} vs shaded rim {shade}");
+        peaks.push((peak, spread));
+    }
+    assert!(peaks[0].0 > peaks[1].0 && peaks[1].0 > peaks[2].0, "gloss is brighter: {peaks:?}");
+    assert!(peaks[0].1 < peaks[2].1, "gloss is tighter: {peaks:?}");
+}
+
+/// Eight 24 pt keys in a row at 2×: element-anchored liquid metal paints every key the same,
+/// pixel for pixel, at any time (including folded large times); window-anchored does not.
+#[test]
+fn element_anchored_metal_keys_are_identical() {
+    let keys = |anchor: FillAnchor, t: f32| -> Vec<FxLayer> {
+        (0..8).map(|k| Fx::fill(LiquidMetalParams::chrome().anchor(anchor)).on(Shape::rounded(4.0 + k as f32 * 28.0, 4.0, 24.0, 24.0, 5.0)).at(t)).collect()
+    };
+    let (w, h) = (512u32, 64u32);
+    // Each key's quad is its rect plus 1 pt: 26 pt = 52 px from (3 + 28k) pt.
+    let tile = |img: &[[f32; 4]], k: u32| -> Vec<[u32; 4]> {
+        let x0 = 6 + 56 * k;
+        (6..58).flat_map(|y| (x0..x0 + 52).map(move |x| (x, y))).map(|(x, y)| img[(y * w + x) as usize].map(f32::to_bits)).collect()
+    };
+    for t in [1.3, 1e5 + 0.37] {
+        let img = render(w, h, 2.0, false, &keys(FillAnchor::Element, t));
+        let first = tile(&img, 0);
+        assert!(first.iter().any(|p| f32::from_bits(p[3]) > 0.99), "the key is drawn");
+        for k in 1..8 {
+            assert!(tile(&img, k) == first, "t = {t}: key {k} differs from key 0");
+        }
+        let world = render(w, h, 2.0, false, &keys(FillAnchor::World, t));
+        assert!((1..8).any(|k| tile(&world, k) != tile(&world, 0)), "t = {t}: window-anchored keys should differ");
+    }
 }

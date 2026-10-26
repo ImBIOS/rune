@@ -17,7 +17,7 @@ const W: f32 = 640.0;
 const H: f32 = 360.0;
 const S: f32 = 2.0;
 const FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-const EFFECTS: [&str; 14] = ["glow", "pulse", "electric", "fire", "motion", "distort", "extras", "liquid-metal", "mesh-gradient", "dither", "grain-gradient", "fluted-glass", "fills", "fill-presets"];
+const EFFECTS: [&str; 15] = ["glow", "pulse", "electric", "fire", "motion", "distort", "extras", "liquid-metal", "plastic", "mesh-gradient", "dither", "grain-gradient", "fluted-glass", "fills", "fill-presets"];
 
 // ------------------------------------------------------------------ scene builder
 
@@ -482,6 +482,30 @@ fn scene(name: &str, b: &mut B) {
             b.fx(Fx::fill(LiquidMetalParams::rose().border(5.0)).on(Shape::capsule(cap.x, cap.y, cap.w, cap.h)));
             b.text_c(cap.center().x, cap.center().y, "Rose border", 14.0, 2, col(0xf2d4c8, 1.0));
         }
+        "plastic" => {
+            b.background("Plastic", "glossy · matte and dished · liquid metal keys pinned to the window or to each key");
+            let colors = [0xece8de, 0x2e3036, 0xd7263d, 0xf46036, 0xffd60a, 0x2a9d8f, 0x3d6fd6, 0x7b5cd6];
+            let labels = ["Esc", "Q", "W", "E", "R", "T", "Y", "U"];
+            let rows = [(52.0, PlasticParams { roughness: 0.12, ..PlasticParams::glossy() }, "Glossy: roughness .12, dome .35"), (138.0, PlasticParams { roughness: 0.8, dome: -0.4, ..PlasticParams::glossy() }, "Matte, dished: roughness .8, dome −.4")];
+            for (y, p, caption) in rows {
+                for (k, (c, label)) in colors.into_iter().zip(labels).enumerate() {
+                    let r = Rect::new(54.0 + k as f32 * 68.0, y, 56.0, 56.0);
+                    b.shadow(Rect::new(r.x, r.y + 5.0, r.w, r.h), 10.0, 6.0, [0.0, 0.0, 0.0, 0.55]);
+                    b.fx(Fx::fill(PlasticParams { color: rgb(c), ..p }).on(Shape::rounded(r.x, r.y, r.w, r.h, 10.0)));
+                    let ink = if rgb(c).0.iter().sum::<f32>() > 1.2 { col(0x26272b, 0.85) } else { col(0xf4f4f6, 0.9) };
+                    b.text_c(r.center().x, r.center().y, label, 13.0, 2, ink);
+                }
+                b.caption(54.0, y + 74.0, caption);
+            }
+            for (y, anchor, caption) in [(232.0, FillAnchor::World, "Liquid metal on 24 pt keys, anchor: world (default)"), (290.0, FillAnchor::Element, "Liquid metal on 24 pt keys, anchor: element")] {
+                for k in 0..18 {
+                    let r = Rect::new(53.0 + k as f32 * 30.0, y, 24.0, 24.0);
+                    b.shadow(Rect::new(r.x, r.y + 3.0, r.w, r.h), 5.0, 4.0, [0.0, 0.0, 0.0, 0.55]);
+                    b.fx(Fx::fill(LiquidMetalParams::chrome().anchor(anchor)).on(Shape::rounded(r.x, r.y, r.w, r.h, 5.0)));
+                }
+                b.caption(54.0, y + 42.0, caption);
+            }
+        }
         "mesh-gradient" => {
             b.background("Mesh gradient", "dusk · lagoon · orchid · graphite: drifting points, blended in OKLab");
             b.fx(Fx::fill(MeshGradientParams::dusk()).on(Shape::rounded(32.0, 58.0, 300.0, 272.0, 28.0)));
@@ -780,7 +804,7 @@ fn strip_times(name: &str) -> (f32, f32) {
         "pulse" => (0.0, 1.4),
         "distort" => (0.0, 0.9),
         // Fills move slowly: eight frames over four seconds.
-        "liquid-metal" | "mesh-gradient" | "dither" | "grain-gradient" | "fluted-glass" | "fills" | "fill-presets" => (0.0, 4.0),
+        "liquid-metal" | "plastic" | "mesh-gradient" | "dither" | "grain-gradient" | "fluted-glass" | "fills" | "fill-presets" => (0.0, 4.0),
         _ => (1.0, 1.0),
     }
 }
@@ -793,7 +817,7 @@ fn still_time(name: &str) -> f32 {
         "fire" => 2.0,
         "motion" => 0.1,
         "distort" => 0.3,
-        "liquid-metal" | "mesh-gradient" | "dither" | "grain-gradient" | "fluted-glass" | "fills" | "fill-presets" => 1.2,
+        "liquid-metal" | "plastic" | "mesh-gradient" | "dither" | "grain-gradient" | "fluted-glass" | "fills" | "fill-presets" => 1.2,
         _ => 0.55,
     }
 }
@@ -854,6 +878,10 @@ fn timing_layers() -> Vec<(&'static str, FxLayer)> {
         ("fill liquid metal", Fx::fill(LiquidMetalParams::chrome()).on(sh)),
         ("fill liquid metal, still", Fx::fill(LiquidMetalParams { flow: 0.0, ..LiquidMetalParams::chrome() }).on(sh)),
         ("fill liquid metal border 8", Fx::fill(LiquidMetalParams::gold().border(8.0)).on(sh)),
+        ("fill liquid metal, element anchor", Fx::fill(LiquidMetalParams::chrome().anchor(FillAnchor::Element)).on(sh)),
+        ("fill plastic glossy", Fx::fill(PlasticParams::glossy()).on(sh)),
+        ("fill plastic matte", Fx::fill(PlasticParams::matte()).on(sh)),
+        ("fill plastic border 8", Fx::fill(PlasticParams::glossy().border(8.0)).on(sh)),
         ("fill mesh gradient (5 colours)", Fx::fill(MeshGradientParams::dusk()).on(sh)),
         ("fill dither bayer (ramp)", Fx::fill(DitherParams::bayer()).on(sh)),
         ("fill dither blue noise (radial)", Fx::fill(DitherParams::grain()).on(sh)),

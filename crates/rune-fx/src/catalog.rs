@@ -485,6 +485,15 @@ pub(crate) static FILL_STYLES: &[StyleInfo] = &[
         presets: presets!(Halftone(HalftoneParams) { "print" "Print" => print, "backdrop" "Backdrop" => backdrop }),
         reads_backdrop: true,
     },
+    StyleInfo {
+        id: "plastic",
+        name: "Plastic",
+        summary: "Moulded plastic under a soft light: glossy to matte, domed or dished, with a rolled rim.",
+        rust: "PlasticParams",
+        params: PlasticParams::PARAMS,
+        presets: presets!(Plastic(PlasticParams) { "glossy" "Glossy" => glossy, "matte" "Matte" => matte, "dished" "Dished" => dished }),
+        reads_backdrop: false,
+    },
 ];
 
 #[cfg(test)]
@@ -526,6 +535,7 @@ mod tests {
             VoronoiParams::default().into(),
             WaveParams::default().into(),
             HalftoneParams::default().into(),
+            PlasticParams::default().into(),
         ];
         assert_eq!(d.len(), fill_styles().len());
         for (s, d) in fill_styles().iter().zip(d) {

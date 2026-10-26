@@ -469,6 +469,38 @@ fn srgb_blend_decodes_backdrop_without_double_encoding_on_frame_and_layer_target
     assert!(inside_frost_glass[0] < 135 && inside_frost_glass[1] < 70, "Rgba16Float layer frosted glass is not washed out: {inside_frost_glass:?}");
 }
 
+fn plastic(roughness: f32) -> Fx {
+    Fx::fill(PlasticParams { color: rgb(0xffd60a), roughness, ..PlasticParams::glossy() })
+}
+
+/// Plastic is opaque coverage with its highlight inside it, so it looks the same in either blend
+/// mode, and faded it blends like any other fill, at every roughness.
+#[test]
+fn plastic_matches_across_blend_modes() {
+    let looks: [(f32, fn() -> Fx); 3] = [(0.05, || plastic(0.05)), (0.45, || plastic(0.45)), (1.0, || plastic(1.0))];
+    for (roughness, look) in looks {
+        let (w, linear) = snap_with("plastic-lin", plain, false, Arc::default(), 1, look);
+        let (_, gamma) = snap_with("plastic-gam", plain, true, Arc::default(), 1, look);
+        let worst = linear.iter().zip(&gamma).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+        assert!(worst <= 3, "roughness {roughness}: modes differ by {worst}");
+        for srgb in [false, true] {
+            let opaque = if srgb { &gamma } else { &linear };
+            let (_, faded) = snap_with("plastic-faded", faded_rounded, srgb, Arc::default(), 1, look);
+            let bg = 32.0 / 255.0;
+            for (x, y) in [(40, 40), (30, 22), (60, 30), (48, 66)] {
+                let fill = px(opaque, w, x, y);
+                let want: [u8; 3] = std::array::from_fn(|c| {
+                    let f = fill[c] as f32 / 255.0;
+                    let v = if srgb { 0.5 * f + 0.5 * bg } else { srgb_encode(0.5 * srgb_decode(f) + 0.5 * srgb_decode(bg)) };
+                    (v * 255.0).round() as u8
+                });
+                let got = px(&faded, w, x, y);
+                assert!(got.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 4), "roughness {roughness} srgb {srgb} at ({x}, {y}): got {got:?}, want {want:?}");
+            }
+        }
+    }
+}
+
 /// Writes `demo/fx/in-layer.png`: a fill in a faded, rounded, clipped card, linear blend on the
 /// left and gamma blend on the right. `cargo test -p rune-fx --test in_layer -- --ignored`.
 #[test]

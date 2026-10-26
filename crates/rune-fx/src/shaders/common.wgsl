@@ -90,6 +90,13 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
     return o;
 }
 
+// The fragment's pixel centre in px, exactly: the interpolated `px` drifts by a few ulps that
+// differ between quads, so two equal shapes at different places would shade a little apart. The
+// draw origin is recovered from it to 1/256 px.
+fn pixel(in: VOut) -> vec2f {
+    return in.pos.xy + round((in.px - in.pos.xy) * 256.0) / 256.0;
+}
+
 // Every effect module defines `shade`; the layer's opacity (shape.z) scales its premultiplied
 // output, so a retiring one-shot fades instead of cutting.
 @fragment

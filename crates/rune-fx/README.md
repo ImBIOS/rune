@@ -2,7 +2,7 @@
 
 Effect layers for Rune: glow, pulses, electricity, fire, motion blur, distortion, some extras
 (shimmer, sparkles, aurora, grain), and a family of fills (liquid metal, mesh gradient, dither, grain
-gradient, fluted glass, metaballs, swirl, voronoi, waves, halftone). Each effect is a WGSL fragment shader on an instanced quad with
+gradient, fluted glass, metaballs, swirl, voronoi, waves, halftone, plastic). Each effect is a WGSL fragment shader on an instanced quad with
 typed params. Given (time, seed), every frame is deterministic. A layer whose intensity is 0, whose
 one-shot has finished, or that is off screen is never drawn.
 
@@ -28,6 +28,7 @@ Output lands in `demo/fx/` (repo root): `<effect>.png`, `<effect>-strip.png` (8 
 | ![mesh gradient](../../demo/fx/mesh-gradient.png) | ![dither](../../demo/fx/dither.png) |
 | ![grain gradient](../../demo/fx/grain-gradient.png) | ![fluted glass](../../demo/fx/fluted-glass.png) |
 | ![more fills](../../demo/fx/fills.png) | ![every fill preset](../../demo/fx/fill-presets.png) |
+| ![plastic keys, glossy and matte, and liquid metal keys anchored to the window or to each key](../../demo/fx/plastic.png) | |
 
 Liquid metal over eight frames (four seconds): ![liquid metal strip](../../demo/fx/liquid-metal-strip.png)
 
@@ -110,6 +111,8 @@ goes under the node as its background. Every style is `Fx::fill(params)` with ty
 ```rust
 Fx::fill(LiquidMetalParams::gold()).on(Shape::capsule(x, y, 180.0, 52.0)).at(t)          // a gold pill
 Fx::fill(LiquidMetalParams::chrome().border(6.0)).on(card).at(t)                        // a chrome tube border
+Fx::fill(LiquidMetalParams::chrome().anchor(FillAnchor::Element)).on(key).at(t)          // every key ripples alike
+Fx::fill(PlasticParams { color: rgb(0xd7263d), roughness: 0.7, dome: -0.4, ..PlasticParams::glossy() }).on(key) // a matte dished keycap
 Fx::fill(MeshGradientParams { colors: Stops::hex(&[0x1b1f3b, 0xff6f91, 0xffc75f]), ..MeshGradientParams::dusk() }).on(card).at(t)
 Fx::fill(DitherParams { pattern: DitherPattern::Bayer8, pixel: 3.0, ..DitherParams::backdrop() }).on(card).at(t) // over the backdrop
 Fx::fill(GrainGradientParams { kind: GradientKind::Conic, ..GrainGradientParams::sweep() }).on(card).at(t)
@@ -236,7 +239,7 @@ Fills (`Fx::fill`; every style also takes `border` and `intensity`):
 
 | Fill | Presets | Key params (default) | Notes |
 |---|---|---|---|
-| **Liquid metal** `LiquidMetalParams` | `chrome`, `gold`, `rose`, `gunmetal` | flow .6, scale 100, speed .35, bevel 14, dome .55, angle −.12, iridescence .08, contrast 1 | A studio reflected in polished metal: bright sky falling to a hard horizon over a dark floor, an overhead soft box and two strip lights. The face is domed so the horizon crosses it, the rim rolls off over `bevel`, and a domain-warped height field ripples the normal (calmer toward the rim). Conductor Fresnel (Schlick) goes from the tint to white at grazing angles; lights roll off through a per-channel shoulder. As a border it is a round tube |
+| **Liquid metal** `LiquidMetalParams` | `chrome`, `gold`, `rose`, `gunmetal` | flow .6, scale 100, speed .35, bevel 14, dome .55, angle −.12, iridescence .08, contrast 1 | A studio reflected in polished metal: bright sky falling to a hard horizon over a dark floor, an overhead soft box and two strip lights. The face is domed so the horizon crosses it, the rim rolls off over `bevel`, and a domain-warped height field ripples the normal (calmer toward the rim). Conductor Fresnel (Schlick) goes from the tint to white at grazing angles; lights roll off through a per-channel shoulder. As a border it is a round tube. `anchor` pins the ripples to the window (`World`, the default: neighbouring shapes show neighbouring parts of one surface) or to each shape's centre (`Element`: shapes of the same size, seed and time are pixel-identical, so a row of keys matches) |
 | **Mesh gradient** `MeshGradientParams` | `dusk`, `lagoon`, `orchid`, `graphite` | 3–6 colours, points, drift .12, speed .25, sharpness 1.6, warp .35 | Each colour owns a point that drifts on a slow CPU-side path; inverse-distance weights blend them in OKLab, then the output is dithered against banding |
 | **Dither** `DitherParams` | `bayer`, `handheld`, `grain`, `backdrop` | Bayer 2×2 / 4×4 / 8×8, blue noise (32×32 void-and-cluster tile), white noise; pixel 2, 2–6 colours, bias, contrast | Quantises a tone (ramp, noise, backdrop or image) into the palette in square pixels anchored to the shape |
 | **Grain gradient** `GrainGradientParams` | `ember`, `halo`, `sweep` | linear / radial / conic, amount .4, size .5, mono, fps 12 | Triangular noise scatters the ramp position, so colours stipple into each other, plus brightness grain (mono or per channel). Conic gradients loop |
@@ -246,6 +249,7 @@ Fills (`Fx::fill`; every style also takes `border` and `intensity`):
 | **Voronoi** `VoronoiParams` | `cells`, `stained` | scale 36, speed .25, edge 1.5, edge_color, depth .4 | Orbiting cell points, exact seam distance to the bisectors, shaded cells |
 | **Waves** `WaveParams` | `sea`, `dunes` | amplitude .05, frequency 1.6, speed .4, angle 0, softness .006 | Layered bands with two-sine crests; each front band shades the one behind |
 | **Halftone** `HalftoneParams` | `print`, `backdrop` | cell 6, angle 45°, ink, base; input as dither | Round dots on a rotated screen sized by tone; the four nearest dots merge |
+| **Plastic** `PlasticParams` | `glossy`, `matte`, `dished` | colour, roughness .15, dome .35, bevel 6, angle −.5 | Moulded plastic under one soft light from `angle` (50° up), with liquid metal's dome and rolled rim. Diffuse shading (ambient plus Lambert) keeps `color` on a flat face, darkens slopes facing away and lightens toward white facing the light; a GGX highlight is small and bright when glossy, broad and faint when matte; Schlick Fresnel (f0 .04) adds a faint sky at grazing angles. Highlight and Fresnel fill the room left above the base, so rgb never exceeds alpha and it blends the same with `srgb_blend` on or off. Negative `dome` dishes the face like a keycap. Never animates |
 
 ## Costs
 
@@ -285,6 +289,8 @@ holds that run). Each fill covers a 480×280 pt rounded rect at 2× (544k px):
 | fill | reads | noise | backdrop | ms |
 |---|---:|---:|:-:|---:|
 | liquid metal / still (flow 0) / 8 pt border | 0 | 8 / 0 / 8 | | 0.93 / 0.22 / 0.17 |
+| liquid metal, element anchor | 0 | 8 | | 0.94 (world in the same run: 0.95) |
+| plastic glossy / matte / 8 pt border | 0 | 0 | | 0.15 / 0.15 / 0.06 |
 | mesh gradient (5 colours) | 10 | 2 | | 0.37 |
 | dither Bayer ramp / blue noise / palette over noise / backdrop | 1 / 2 / 1 / 2 | 0 / 0 / 3 / 0 | backdrop only | 0.15 / 0.15 / 0.45 / 0.16 |
 | grain gradient linear mono / conic colour | 2 | 0 | | 0.18 / 0.26 |
@@ -294,7 +300,8 @@ holds that run). Each fill covers a 480×280 pt rounded rect at 2× (544k px):
 | halftone radial / backdrop | 0 / 4 | 0 | backdrop only | 0.31 / 0.34 |
 
 Liquid metal's cost is the flowing surface (eight noise evaluations for the height field and its
-slope); a still slab costs a quarter, and a border pays only for its band. Swirl and voronoi are
+slope); a still slab costs a quarter, and a border pays only for its band. The element anchor
+costs nothing extra. Plastic is a still slab with a highlight: about a sixth of flowing liquid metal. Swirl and voronoi are
 the heaviest per pixel; keep them to cards rather than full screens.
 
 These are worst-case full-region numbers. Real layers hug their node: the gallery's 224 pt card

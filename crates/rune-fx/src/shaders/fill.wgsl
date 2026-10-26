@@ -3,6 +3,7 @@
 // linear rgb (w: mesh point x), data[xf.x + 2k + 1] is OKLab (w: mesh point y); xf.y stops.
 // variant:
 // 0 liquid metal  c0 tint  c1 light  p0 (flow, scale pt, speed, bevel pt)  p1 (dome, angle, iridescence, contrast)
+//                 p2 (anchor: 0 window, 1 shape, _, _, _)
 // 1 mesh          p0 (drift, speed, sharpness, warp)  (points are animated on the CPU)
 // 2 dither        p0 (pattern, input, pixel pt, ramp angle)  p1 (noise scale pt, speed, bias, contrast)
 //                 xf.zw blue-noise tile (offset, side)
@@ -14,6 +15,7 @@
 // 7 voronoi       c0 seam  p0 (cell pt, speed, seam pt, depth)
 // 8 waves         p0 (amplitude, frequency, speed, angle)  p1 (softness, _, _, _)
 // 9 halftone      c0 ink  c1 base  p0 (_, input, pitch pt, ramp angle)  p1 as dither  p2 (screen angle, _, _, _)
+// 10 plastic      c0 colour  p0 (roughness, dome, bevel pt, light angle)
 
 // Shape coverage: the whole shape, or (border > 0) a band of that width inside the edge.
 fn fill_mask(c: Ctx, border: f32) -> f32 {
@@ -104,6 +106,30 @@ fn bayer(cell: vec2u, bits: u32) -> f32 {
     return (f32(v) + 0.5) / f32(1u << (2u * bits));
 }
 
+// ---------- lit slabs (liquid metal, plastic) ----------
+// Slope of a slab's surface normal as (x, y) plus how far onto the rim it is (0..1). With a border
+// the band is a round tube; otherwise the edge rolls off in a quarter round over `bevel` pt and
+// the face is domed (negative `dome` dishes it).
+fn slab_tilt(c: Ctx, border: f32, bevel: f32, dome: f32) -> vec3f {
+    let depth = -c.d;
+    let gv = sd_grad(c);
+    var tilt = vec2f(0.0);
+    var rim = 0.0;
+    if (border > 0.0) {
+        let x = clamp((depth - border * 0.5) / max(border * 0.5, 1e-3), -0.97, 0.97);
+        tilt = -gv * x / sqrt(1.0 - x * x);
+        rim = abs(x);
+    } else {
+        let bev = max(bevel, 0.5);
+        let x = clamp(1.0 - depth / bev, 0.0, 0.92);
+        tilt = gv * x / sqrt(1.0 - x * x);
+        rim = x;
+    }
+    let qn = c.q / max(c.half, vec2f(1.0));
+    tilt += vec2f(qn.x * 0.55, qn.y) * dome * select(0.8, 0.25, border > 0.0);
+    return vec3f(tilt, rim);
+}
+
 // ---------- liquid metal ----------
 // Height of the flowing surface (in units of `scale`), domain-warped so ripples curl and pool.
 fn flow_h(u: vec2f, w: vec2f, t: f32, seed: u32) -> f32 {
@@ -142,34 +168,18 @@ fn shoulder(c: vec3f) -> vec3f {
 }
 
 fn liquid_metal(i: Inst, c: Ctx, m: f32, px: vec2f) -> vec4f {
-    let border = i.aux.x;
-    let depth = -c.d;
-    let gv = sd_grad(c);
     let flow = i.p0.x;
     let sc = max(i.p0.y, 1.0);
     let t = c.t * i.p0.z;
     // Tilt of the surface normal (where it leans, as a slope): rim or tube + dome + liquid ripples.
-    var tilt = vec2f(0.0);
-    var rim = 0.0;
-    if (border > 0.0) {
-        // A round tube along the edge.
-        let x = clamp((depth - border * 0.5) / max(border * 0.5, 1e-3), -0.97, 0.97);
-        tilt = -gv * x / sqrt(1.0 - x * x);
-        rim = abs(x);
-    } else {
-        // Quarter-round roll-off over the bevel, then the domed face.
-        let bev = max(i.p0.w, 0.5);
-        let x = clamp(1.0 - depth / bev, 0.0, 0.92);
-        tilt = gv * x / sqrt(1.0 - x * x);
-        rim = x;
-    }
-    let dome = i.p1.x;
-    let qn = c.q / max(c.half, vec2f(1.0));
-    tilt += vec2f(qn.x * 0.55, qn.y) * dome * select(0.8, 0.25, border > 0.0);
+    let slab = slab_tilt(c, i.aux.x, i.p0.w, i.p1.x);
+    var tilt = slab.xy;
+    let rim = slab.z;
     var hgt = 0.0;
     var bend = 0.0;
     if (flow > 0.0) {
-        let u = c.p / sc;
+        // Pinned to the window, or to the shape's centre so equal shapes ripple alike.
+        let u = select(c.p, c.q, i.p2.x > 0.5) / sc;
         let wv = vec2f(gnoise(u * 0.6 + vec2f(t * 0.05, 1.7), c.seed + 7u), gnoise(u * 0.6 + vec2f(4.3, -t * 0.06), c.seed + 11u)) * 0.9;
         let e = 0.04;
         hgt = flow_h(u, wv, t, c.seed);
@@ -200,6 +210,37 @@ fn liquid_metal(i: Inst, c: Ctx, m: f32, px: vec2f) -> vec4f {
         f *= mix(vec3f(1.0), 0.55 + 0.9 * film, k);
     }
     let col = shoulder(f * env);
+    return paint(col, m, i, px);
+}
+
+// ---------- plastic ----------
+// A dielectric under one soft light from `angle` (50° up), seen head on. The diffuse base keeps the
+// colour on a flat face, darkens away from the light and lightens toward white facing it. The
+// highlight is a GGX lobe widened by the light's size (so a polished face shows a soft spot, not a
+// pinpoint) and the grazing-angle reflection is a faint sky. Both fill the headroom left above the
+// base, so the colour never exceeds coverage and the fill blends alike in either blend mode.
+fn plastic(i: Inst, c: Ctx, m: f32, px: vec2f) -> vec4f {
+    let slab = slab_tilt(c, i.aux.x, i.p0.z, i.p0.y);
+    let n = normalize(vec3f(slab.xy, 1.0));
+    let l = vec3f(rot2(vec2f(0.0, -1.0), i.p0.w) * 0.6428, 0.766);
+    let nl = dot(n, l);
+    let base = clamp(i.c0.rgb, vec3f(0.0), vec3f(1.0));
+    // 0.4 ambient + 0.6 direct on a flat face (n.l = 0.766).
+    let shade = 0.4 + 0.7833 * max(nl, 0.0);
+    var col = mix(base * min(shade, 1.0), vec3f(1.0), clamp((shade - 1.0) * 0.6, 0.0, 1.0));
+    let rough = clamp(i.p0.x, 0.02, 1.0);
+    let a = min(rough * rough + 0.1, 1.0);
+    let a2 = a * a;
+    let h = normalize(l + vec3f(0.0, 0.0, 1.0));
+    let nh = max(dot(n, h), 0.0);
+    let dd = nh * nh * (a2 - 1.0) + 1.0;
+    let ndf = a2 / (PI * dd * dd);
+    let fh = 1.0 - h.z;
+    let spec = ndf * (0.04 + 0.96 * fh * fh * fh * fh * fh) * max(nl, 0.0) * 2.5;
+    let fz = 1.0 - clamp(n.z, 0.0, 1.0);
+    let sky = 0.55 + 0.45 * smoothstep(-0.5, 0.5, -n.y);
+    let edge = 0.96 * fz * fz * fz * fz * fz * sky * (1.0 - 0.5 * rough);
+    col += (vec3f(1.0) - col) * knee(spec + edge);
     return paint(col, m, i, px);
 }
 
@@ -491,19 +532,21 @@ fn halftone(i: Inst, c: Ctx, m: f32, px: vec2f) -> vec4f {
 
 fn shade(in: VOut) -> vec4f {
     let i = insts[in.id];
-    let c = ctx(i, in.px);
+    let px = pixel(in);
+    let c = ctx(i, px);
     let m = fill_mask(c, i.aux.x);
     if (m <= 0.0) { return vec4f(0.0); }
     switch c.variant {
-        case 0: { return liquid_metal(i, c, m, in.px); }
-        case 1: { return mesh_gradient(i, c, m, in.px); }
+        case 0: { return liquid_metal(i, c, m, px); }
+        case 1: { return mesh_gradient(i, c, m, px); }
         case 2: { return dither(i, c, m); }
-        case 3: { return grain_gradient(i, c, m, in.px); }
-        case 4: { return fluted(i, c, m, in.px); }
-        case 5: { return metaballs(i, c, m, in.px); }
-        case 6: { return swirl(i, c, m, in.px); }
-        case 7: { return voronoi(i, c, m, in.px); }
-        case 8: { return waves(i, c, m, in.px); }
-        default: { return halftone(i, c, m, in.px); }
+        case 3: { return grain_gradient(i, c, m, px); }
+        case 4: { return fluted(i, c, m, px); }
+        case 5: { return metaballs(i, c, m, px); }
+        case 6: { return swirl(i, c, m, px); }
+        case 7: { return voronoi(i, c, m, px); }
+        case 8: { return waves(i, c, m, px); }
+        case 9: { return halftone(i, c, m, px); }
+        default: { return plastic(i, c, m, px); }
     }
 }
