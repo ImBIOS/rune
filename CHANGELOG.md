@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Rejected file drops: `El::on_drop_rejected` and `El::on_drop_rejected_hover`.** A drop
+  target with either stops a file drag carrying none of the files it accepts, instead of
+  passing it to the target around it: `on_drop_rejected_hover(true/false)` follows that drag
+  (for a "can't drop here" state) and `on_drop_rejected` gets its files on drop. On a mixed
+  drop it gets the files `on_drop_files` didn't. `Runtime::drop_rejected_hovered()` reads the
+  state. Every host routes drops through the runtime (macOS, Windows, X11 windows, the
+  multi-window desktop and headless `drag_files`/`drop_files` steps), so all get it. Targets
+  without them behave as before.
+
 - **A `RollingText` reads as text in lookups.** Its row now reports the whole label as its
   `ElementInfo::text`, so `--tree` JSON and tests that find an element by its text find it,
   as they find a plain `text`. Its glyphs still list one grapheme each. Any element of role

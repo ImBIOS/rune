@@ -943,6 +943,12 @@ el().fill(if s.over { Color::WHITE.alpha(0.1) } else { Color::TRANSPARENT })
   without case). A target that accepts none of them passes the drag to the next accepting
   element around it.
 - The target gets the files it accepts, all in one call. The rest are left out.
+- To say why a drop was refused, add `.on_drop_rejected(|s, files, tx| ..)`: the target then
+  stops a drag carrying none of the files it accepts instead of passing it on, and gets those
+  files there; on a mixed drop it gets the ones `on_drop_files` didn't. Draw the "can't drop
+  here" state from `.on_drop_rejected_hover(|s, over, tx| ..)`, which works like
+  `on_drop_hover` (either one makes the target stop the drag). `Runtime::drop_rejected_hovered()`
+  reads it in tests.
 - Only that target is drop-hovered. It hears `on_drop_hover(true)` when the drag reaches it, and
   `false` when the drag moves to another target, leaves the window or drops, or when the
   target goes away under the drag.

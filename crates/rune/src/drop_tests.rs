@@ -210,3 +210,64 @@ fn a_covered_window_still_takes_a_drop() {
     assert_eq!(dropped(&rt), [("inner", vec!["a.png"])]);
     assert_eq!(rt.state.hover, [("inner", true), ("inner", false)]);
 }
+
+#[derive(Default)]
+struct Picky {
+    dropped: Vec<(&'static str, Vec<String>)>,
+    rejected: Vec<Vec<String>>,
+    hover: Vec<(&'static str, bool)>,
+}
+
+fn names(files: &[PathBuf]) -> Vec<String> { files.iter().map(|f| f.display().to_string()).collect() }
+
+/// A zone that takes only exports, and says why it refuses anything else, inside one that takes
+/// anything.
+fn picky(_: &Picky, _: &mut Cx<Picky>) -> El {
+    let exports = el().key("exports").size(100.0, 100.0)
+        .on_drop_files(|s: &mut Picky, files, _| s.dropped.push(("exports", names(files))))
+        .accepts_extensions(&["json"])
+        .on_drop_hover(|s: &mut Picky, over, _| s.hover.push(("exports", over)))
+        .on_drop_rejected(|s: &mut Picky, files, _| s.rejected.push(names(files)))
+        .on_drop_rejected_hover(|s: &mut Picky, over, _| s.hover.push(("exports-rejected", over)));
+    col().w_full().h_full().child(
+        el().key("outer").size(200.0, 200.0)
+            .on_drop_files(|s: &mut Picky, files, _| s.dropped.push(("outer", names(files))))
+            .on_drop_hover(|s: &mut Picky, over, _| s.hover.push(("outer", over)))
+            .child(exports),
+    )
+}
+
+#[test]
+fn a_target_that_hears_rejected_drops_stops_them_and_shows_its_own_hover() {
+    let mut rt = Runtime::new(Picky::default(), picky, (400.0, 300.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.drag_files(files(&["notes.txt"]), Some((50.0, 50.0)));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.hover, [("exports-rejected", true)], "not the outer zone's hover");
+    assert_eq!((rt.drop_rejected_hovered().as_deref(), rt.drop_hovered()), (Some("exports"), None));
+    rt.drag_files_to(Some((150.0, 150.0)));
+    rt.frame(2.0 / 60.0);
+    assert_eq!(rt.state.hover[1..], [("exports-rejected", false), ("outer", true)]);
+    assert_eq!((rt.drop_rejected_hovered(), rt.drop_hovered().as_deref()), (None, Some("outer")));
+    rt.drag_files_to(Some((50.0, 50.0)));
+    rt.drop_files(files(&["notes.txt"]), Some((50.0, 50.0)));
+    rt.frame(3.0 / 60.0);
+    assert_eq!(rt.state.hover[3..], [("outer", false), ("exports-rejected", true), ("exports-rejected", false)], "dropping ends it");
+    assert_eq!((rt.state.rejected.as_slice(), rt.state.dropped.as_slice()), (&[vec!["notes.txt".to_owned()]][..], &[][..]));
+
+    rt.state.hover.clear();
+    rt.drag_files(files(&["a.json", "b.txt"]), Some((50.0, 50.0)));
+    rt.frame(4.0 / 60.0);
+    assert_eq!(rt.state.hover, [("exports", true)], "a drag carrying an export is accepted");
+    rt.drop_files(files(&["a.json", "b.txt"]), Some((50.0, 50.0)));
+    rt.frame(5.0 / 60.0);
+    assert_eq!(rt.state.dropped, [("exports", vec!["a.json".to_owned()])]);
+    assert_eq!(rt.state.rejected[1..], [vec!["b.txt".to_owned()]], "and the rest are rejected");
+
+    rt.drag_files(files(&["a.json"]), Some((50.0, 50.0)));
+    rt.frame(6.0 / 60.0);
+    rt.drag_files_leave();
+    rt.drag_files(files(&["c.txt"]), Some((50.0, 50.0)));
+    rt.frame(7.0 / 60.0);
+    assert_eq!(rt.state.hover[2..], [("exports", true), ("exports", false), ("exports-rejected", true)], "the same target swaps hovers");
+}

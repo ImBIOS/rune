@@ -351,20 +351,29 @@ pub(crate) type DragOutFn = Rc<dyn Fn(&dyn Any) -> Option<crate::DragItem>>;
 pub(crate) type DragEndFn = Rc<dyn Fn(&mut dyn Any, crate::DragOutcome, &mut Tx)>;
 pub(crate) type DropFilesFn = Rc<dyn Fn(&mut dyn Any, &[std::path::PathBuf], &mut Tx)>;
 
-/// [`El::on_drop_files`], [`El::accepts_files`] and [`El::on_drop_hover`].
+/// [`El::on_drop_files`], [`El::accepts_files`], [`El::on_drop_hover`], [`El::on_drop_rejected`]
+/// and [`El::on_drop_rejected_hover`].
 #[derive(Clone, Default)]
 pub(crate) struct DropSpec {
     pub on_drop: Option<DropFilesFn>,
     pub accepts: Option<Rc<dyn Fn(&std::path::Path) -> bool>>,
     pub on_hover: Option<DropHoverFn>,
+    pub on_reject: Option<DropFilesFn>,
+    pub on_reject_hover: Option<DropHoverFn>,
 }
 pub(crate) type DropHoverFn = Rc<dyn Fn(&mut dyn Any, bool, &mut Tx)>;
 
 impl DropSpec {
-    /// The files of `paths` this element takes, when it's a drop target.
-    pub(crate) fn take(&self, paths: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
-        if self.on_drop.is_none() { return Vec::new(); }
-        paths.iter().filter(|p| self.accepts.as_ref().is_none_or(|f| f(p))).cloned().collect()
+    /// The files of `paths` this element takes, when it's a drop target, and the rest.
+    pub(crate) fn split(&self, paths: &[std::path::PathBuf]) -> (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>) {
+        if self.on_drop.is_none() { return (Vec::new(), paths.to_vec()); }
+        paths.iter().cloned().partition(|p| self.accepts.as_ref().is_none_or(|f| f(p)))
+    }
+    /// It stops a drag it takes none of, rather than passing it to the target around it.
+    pub(crate) fn claims_rejects(&self) -> bool { self.on_reject.is_some() || self.on_reject_hover.is_some() }
+    /// Its hover callback for a drag it takes (`accepted`) or rejects.
+    pub(crate) fn hover_fn(&self, accepted: bool) -> Option<DropHoverFn> {
+        if accepted { self.on_hover.clone() } else { self.on_reject_hover.clone() }
     }
 }
 pub(crate) type EditFn = Rc<dyn for<'a> Fn(&'a mut dyn Any) -> &'a mut TextEdit>;
@@ -2823,6 +2832,32 @@ impl El {
     /// highlight from it.
     pub fn on_drop_hover<S: 'static>(mut self, f: impl Fn(&mut S, bool, &mut Tx) + 'static) -> Self {
         self.drop.get_or_insert_default().on_hover = Some(Rc::new(move |s, over, tx| f(downcast::<S>(s), over, tx)));
+        self
+    }
+    /// Hear the files dropped on this element that it doesn't accept ([`El::accepts_files`]),
+    /// to say why ("that isn't an export"). With this, or [`El::on_drop_rejected_hover`], the
+    /// element stops a drag carrying none of the files it takes instead of passing it to the
+    /// target around it, and a drop of only those files comes here. On a drop of some files it
+    /// takes and some it doesn't, [`El::on_drop_files`] gets the first and this the rest.
+    ///
+    /// ```
+    /// # use rune::el::el;
+    /// # struct App { error: Option<String>, wrong: bool }
+    /// el().on_drop_files(|s: &mut App, _, _| s.error = None)
+    ///     .accepts_extensions(&["json"])
+    ///     .on_drop_rejected(|s: &mut App, files, _| s.error = Some(format!("{} isn't an export", files[0].display())))
+    ///     .on_drop_rejected_hover(|s: &mut App, over, _| s.wrong = over);
+    /// ```
+    pub fn on_drop_rejected<S: 'static>(mut self, f: impl Fn(&mut S, &[std::path::PathBuf], &mut Tx) + 'static) -> Self {
+        self.drop.get_or_insert_default().on_reject = Some(Rc::new(move |s, files, tx| f(downcast::<S>(s), files, tx)));
+        self
+    }
+    /// [`El::on_drop_hover`] for a drag this element stops but takes none of (see
+    /// [`El::on_drop_rejected`]): `true` when the drag reaches it, `false` when it moves off,
+    /// leaves the window or drops, or when the element goes away under it. Draw a "can't drop
+    /// here" state from it.
+    pub fn on_drop_rejected_hover<S: 'static>(mut self, f: impl Fn(&mut S, bool, &mut Tx) + 'static) -> Self {
+        self.drop.get_or_insert_default().on_reject_hover = Some(Rc::new(move |s, over, tx| f(downcast::<S>(s), over, tx)));
         self
     }
 }
