@@ -5804,7 +5804,11 @@ impl<S: 'static> Runtime<S> {
             // Scale about this node's centre where its ancestors' scales put it, so a scaled child
             // of a scaled parent stays in place.
             let sc = pinh.scale * own_sc;
-            let centre = [p.anchor.x + pinh.dx, p.anchor.y + pinh.dy];
+            let pivot = match n.vis.origin {
+                Some([ox, oy]) => [p.rect.x + ox * p.rect.w, p.rect.y + oy * p.rect.h],
+                None => [p.anchor.x, p.anchor.y],
+            };
+            let centre = [pivot[0] + pinh.dx, pivot[1] + pinh.dy];
             let centre_to = [pinh.anchor_to[0] + (centre[0] - pinh.anchor[0]) * pinh.scale,
                 pinh.anchor_to[1] + (centre[1] - pinh.anchor[1]) * pinh.scale];
             let (anchor, anchor_to) = if (own_sc - 1.0).abs() > 1e-5 { (centre, centre_to) } else { (pinh.anchor, pinh.anchor_to) };

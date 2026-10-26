@@ -966,6 +966,8 @@ pub struct Visual {
     pub(crate) raise: bool,
     /// The curve `El::scale` changes on.
     pub(crate) scale_motion: Option<Anim>,
+    /// `El::origin`: the unit point scale and rotation pivot about; `None` is the centre.
+    pub(crate) origin: Option<[f32; 2]>,
 }
 
 impl Default for Visual {
@@ -1012,6 +1014,7 @@ impl Default for Visual {
             offset_motion: None,
             raise: false,
             scale_motion: None,
+            origin: None,
         }
     }
 }
@@ -2479,6 +2482,16 @@ impl El {
     /// The curve [`Self::scale`] changes on.
     pub fn scale_motion(mut self, anim: impl Into<Anim>) -> Self {
         self.vis.scale_motion = Some(anim.into());
+        self
+    }
+    /// The point this element scales and rotates about, in units of its own size: `(0.5, 0.5)`
+    /// (the default) is its centre, `(0.5, 1.0)` the middle of its bottom edge, which stays put
+    /// while a keycap sinks. Like SwiftUI's `anchor:`. [`Self::scale`], [`Self::rotate`],
+    /// `live_scale`, `press_scale` and a transition's scale all pivot here once it's set;
+    /// [`Self::offset`] ignores it. Values outside 0..1 pivot outside the element; anything not
+    /// finite is the centre.
+    pub fn origin(mut self, x: f32, y: f32) -> Self {
+        self.vis.origin = (x.is_finite() && y.is_finite() && (x, y) != (0.5, 0.5)).then_some([x, y]);
         self
     }
     /// Run the animations of this element and everything in it at `k` times normal speed:

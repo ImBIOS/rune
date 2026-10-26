@@ -8,7 +8,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 - **Expressive press motion.** `El::scale` now springs between values on the element's layout
   spring, or on `El::scale_motion(anim)`, instead of snapping; it lands at once under Reduce
   Motion, in an instant transaction and on mount. An app that changed `scale` between frames
-  now sees it animate.
+  now sees it animate. `El::origin(x, y)` sets the unit point that `scale`, `live_scale`,
+  `press_scale` and a transition's scale pivot about (default centre); `offset` ignores it.
 
 - **`PopupList` and `PopupItem`.** `Combobox`'s virtualised popup listbox is now a standalone
   `rune_kit` component (`PopupList::new(key, anchor)` with `PopupItem::new(id, label)` rows) for

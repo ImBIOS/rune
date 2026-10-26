@@ -102,3 +102,56 @@ fn a_sprung_scale_multiplies_with_live_scale_and_press_scale() {
     settle(&mut rt);
     assert_eq!(rect(&rt, "a")[2], 200.0);
 }
+
+#[test]
+fn an_origin_at_the_bottom_edge_keeps_it_fixed_while_the_scale_springs() {
+    struct M {
+        k: f32,
+        live: rune::Live<f32>,
+    }
+    fn view(m: &M, _: &mut Cx<M>) -> El {
+        col().w_full().h_full().items_start().padding(50.0).child(
+            el().key("a").size(100.0, 40.0).fill(Color::WHITE).motion(Spring::new(0.3, 0.0))
+                .origin(0.5, 1.0).scale(m.k).live_scale(&m.live).press_scale(0.5).on_press(|_: &mut M| {}),
+        )
+    }
+    let live = rune::Live::new(1.0f32);
+    let mut rt = Runtime::new(M { k: 1.0, live: live.clone() }, view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|m, _| m.k = 0.5);
+    for f in 0..60 {
+        rt.frame(1.0 / 60.0);
+        let r = rect(&rt, "a");
+        assert!((r[1] + r[3] - 90.0).abs() < 0.01, "frame {f}: bottom edge moved: {r:?}");
+        assert!((r[0] + r[2] / 2.0 - 100.0).abs() < 0.01, "frame {f}: stays centred across: {r:?}");
+    }
+    assert_eq!(rect(&rt, "a"), [75.0, 70.0, 50.0, 20.0]);
+
+    // `live_scale` and `press_scale` pivot there too.
+    live.set(2.0);
+    rt.frame(0.0);
+    assert_eq!(rect(&rt, "a"), [50.0, 50.0, 100.0, 40.0]);
+    rt.pointer_move(100.0, 70.0);
+    rt.pointer_down(100.0, 70.0);
+    settle(&mut rt);
+    assert_eq!(rect(&rt, "a"), [75.0, 70.0, 50.0, 20.0]);
+}
+
+#[test]
+fn a_transition_scales_about_the_origin() {
+    fn view(show: &bool, _: &mut Cx<bool>) -> El {
+        let mut root = col().w_full().h_full().items_start().padding(50.0);
+        if *show {
+            root = root.child(el().key("a").size(100.0, 40.0).fill(Color::WHITE).origin(0.0, 0.0)
+                .transition(rune::Transition::scale(0.5)));
+        }
+        root
+    }
+    let mut rt = Runtime::new(false, view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|s, _| *s = true);
+    rt.frame(1.0 / 60.0);
+    let r = rect(&rt, "a");
+    assert!(r[2] < 100.0, "entering: {r:?}");
+    assert_eq!([r[0], r[1]], [50.0, 50.0], "grows from its top-left corner");
+}
