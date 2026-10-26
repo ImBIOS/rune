@@ -5856,7 +5856,7 @@ impl<S: 'static> Runtime<S> {
 
             // A slide may sweep wholly outside its clip; judge visibility at its resting place.
             let home = match n.looping.map(|l| l.kind) {
-                Some(rune_motion::LoopKind::Slide { .. }) => {
+                Some(rune_motion::LoopKind::Slide { .. } | rune_motion::LoopKind::SlideEased { .. }) => {
                     let o = self.scene.get(n.id, prop::OFFSET).unwrap_or(rune_motion::Vec2::ZERO);
                     [r[0] - o.x * s, r[1] - o.y * s, r[2] - o.x * s, r[3] - o.y * s]
                 }

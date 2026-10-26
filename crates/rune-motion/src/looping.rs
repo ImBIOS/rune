@@ -12,6 +12,8 @@ pub enum LoopKind {
     /// An eased one-way sweep that wraps, in fractions of the node's own size (an
     /// indeterminate progress segment). Descendants and hit tests follow it.
     Slide { from: [f32; 2], to: [f32; 2] },
+    /// A `Slide` swept along `easing` instead of ease-in-out ([`LoopSpec::easing`]).
+    SlideEased { from: [f32; 2], to: [f32; 2], easing: Easing },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -37,6 +39,14 @@ impl LoopSpec {
     /// Reduced motion holds the sweep's midpoint; removal cools it back to no offset.
     pub const fn slide(period: f64, from: [f32; 2], to: [f32; 2]) -> Self {
         Self { period, delay: 0.0, kind: LoopKind::Slide { from, to } }
+    }
+    /// The curve a slide sweeps along each period, ease-in-out by default; `Easing::LINEAR`
+    /// sweeps at a constant speed (a shimmer). Only slides take a curve; other kinds keep theirs.
+    pub const fn easing(mut self, easing: Easing) -> Self {
+        if let LoopKind::Slide { from, to } | LoopKind::SlideEased { from, to, .. } = self.kind {
+            self.kind = LoopKind::SlideEased { from, to, easing };
+        }
+        self
     }
 }
 
@@ -120,7 +130,7 @@ impl LoopTrack {
             LoopKind::Sequence(_) => self.pose(now, reduced).unwrap().opacity,
             LoopKind::OpacityCycle(c) => if reduced { c.still } else { c.sample(wall) },
             LoopKind::Rotation => phase * core::f32::consts::TAU,
-            LoopKind::Slide { .. } => 1.0,
+            LoopKind::Slide { .. } | LoopKind::SlideEased { .. } => 1.0,
             LoopKind::Opacity { low, high } => {
                 let triangle = if phase < 0.5 { phase * 2.0 } else { (1.0 - phase) * 2.0 };
                 low + (high - low) * Easing::EASE_IN_OUT.eval(triangle) * self.amplitude.sample(now)
@@ -129,8 +139,12 @@ impl LoopTrack {
     }
     /// A `Slide`'s offset in fractions of the node's own size.
     pub fn offset(&self, now: f64, reduced: bool) -> Option<[f32; 2]> {
-        let LoopKind::Slide { from, to } = self.spec.kind else { return None };
-        let t = if reduced { 0.5 } else { Easing::EASE_IN_OUT.eval(self.phase(now) as f32) };
+        let (from, to, easing) = match self.spec.kind {
+            LoopKind::Slide { from, to } => (from, to, Easing::EASE_IN_OUT),
+            LoopKind::SlideEased { from, to, easing } => (from, to, easing),
+            _ => return None,
+        };
+        let t = if reduced { 0.5 } else { easing.eval(self.phase(now) as f32) };
         let a = self.amplitude.sample(now);
         Some([0, 1].map(|i| (from[i] + (to[i] - from[i]) * t) * a))
     }
@@ -216,6 +230,29 @@ mod tests {
         assert!(t.active(1.01));
         assert!(!t.active(10.0));
         assert_eq!(t.offset(10.0, false), Some([0.0, 0.0]));
+    }
+    #[test]
+    fn a_linear_slide_sweeps_at_a_constant_speed_and_holds_its_midpoint_reduced() {
+        let spec = LoopSpec::slide(2.0, [-1.0, 0.0], [3.0, 0.0]).easing(Easing::LINEAR);
+        let t = LoopTrack::new(spec, 0.0);
+        // 240 frames at 120 Hz: one period, each frame the same step forward.
+        let xs: Vec<f32> = (0..240).map(|i| t.offset(i as f64 / 120.0, false).unwrap()[0]).collect();
+        assert_eq!(xs[0], -1.0);
+        for pair in xs.windows(2) {
+            assert!((pair[1] - pair[0] - 4.0 / 240.0).abs() < 1e-4, "step {} -> {}", pair[0], pair[1]);
+        }
+        assert_eq!(t.offset(2.0, false), Some([-1.0, 0.0]), "wraps after a period");
+        assert_eq!(t.offset(0.37, true), Some([1.0, 0.0]), "reduced motion holds the midpoint");
+        assert_eq!(t.sample(0.37, false), 1.0);
+        // The default stays ease-in-out, and naming it is the same spec.
+        let eased = LoopSpec::slide(2.0, [-1.0, 0.0], [3.0, 0.0]);
+        assert_eq!(eased.easing(Easing::LINEAR).easing(Easing::EASE_IN_OUT).kind,
+            LoopKind::SlideEased { from: [-1.0, 0.0], to: [3.0, 0.0], easing: Easing::EASE_IN_OUT });
+        let e = LoopTrack::new(eased, 0.0);
+        let steps: Vec<f32> = (0..121).map(|i| e.offset(i as f64 / 120.0, false).unwrap()[0]).collect::<Vec<_>>()
+            .windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(steps[60] > steps[0] * 4.0, "ease-in-out starts slow");
+        assert_eq!(LoopSpec::rotation(1.0).easing(Easing::LINEAR), LoopSpec::rotation(1.0), "only slides take a curve");
     }
     #[test]
     fn cooling_keeps_phase_and_settles() {

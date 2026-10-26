@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`LoopSpec::easing` for slides.** `LoopSpec::slide(..).easing(Easing::LINEAR)` sweeps at a
+  constant speed, for a shimmer; slides stay ease-in-out by default, and reduced motion still
+  holds the midpoint. The curve rides in a new `LoopKind::SlideEased { from, to, easing }` variant,
+  so `LoopSpec` and `LoopKind::Slide` keep their fields and literals still build. **Build break
+  only for exhaustive matches:** a `match` over `LoopKind` with no `_` arm needs a `SlideEased`
+  arm, and code that tests for `LoopKind::Slide { .. }` to find slides should test for both.
 - **An anchored box keeps its aligned edge while it resizes.** An `El::anchored` box whose size
   springs (a pill over a composer whose label grows, a popover that shrinks) now keeps the edge
   facing its anchor `gap` points away, and the edge its `Align` names on the anchor: `Align::End`
