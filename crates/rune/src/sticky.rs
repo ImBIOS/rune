@@ -23,6 +23,13 @@ pub(super) struct Keep {
     pub virtual_row: Option<(String, String, f32)>,
 }
 
+/// One `Tx::scroll_into_view` request that follows its target while the viewport's subtree moves.
+pub(super) struct Reveal {
+    pub scope: Option<String>,
+    pub key: String,
+    pub viewport: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +232,7 @@ impl<S: 'static> Runtime<S> {
             let Some(i) = found else { continue };
             let Some(s) = self.viewport_of(i) else { continue };
             self.keeps.retain(|k| k.viewport != self.nodes[s].path);
+            self.scroll_reveals.retain(|r| r.viewport != self.nodes[s].path);
             let virtual_row = std::iter::successors(Some(i), |&p| self.nodes[p].parent)
                 .take_while(|&p| p != s)
                 .find_map(|r| {
@@ -257,6 +265,11 @@ impl<S: 'static> Runtime<S> {
                 let Some(s) = self.nodes.iter().position(|n| n.path == k.viewport && n.scroll.is_some() && n.scroll_axes.y()) else { continue };
                 let laid = if let Some(i) = self.nodes.iter().position(|n| n.path == k.path) {
                     if self.viewport_of(i) != Some(s) { continue; }
+                    if self.scroll_content(s).and_then(|c| self.stacks.get(&self.nodes[c].id)).is_some_and(|st| st.growing)
+                        && let Some(st) = self.scrolls.get_mut(&self.nodes[s].id)
+                    {
+                        st.pinned = false;
+                    }
                     // Mounted anchors follow drawn geometry after the motion step.
                     continue;
                 } else if let Some((v_path, row_key, in_row)) = &k.virtual_row
@@ -305,7 +318,39 @@ impl<S: 'static> Runtime<S> {
             st.v = 0.0;
             st.glide = None;
             st.glide_to = None;
-            st.pinned = stick && to >= st.max - 0.5;
+            st.pinned = stick && delta >= 0.0 && to >= st.max - 0.5;
+            st.direct = true;
+            moved = true;
+        }
+        for r in &self.scroll_reveals {
+            let Some(i) = (0..self.nodes.len()).find(|&i| {
+                let n = &self.nodes[i];
+                n.named(&r.key) && !self.subtree_exiting(i)
+                    && n.parent.is_none_or(|p| super::in_scope(&self.nodes[p].path, r.scope.as_deref()))
+            }) else { continue };
+            let Some(s) = self.viewport_of(i).filter(|&s| self.nodes[s].path == r.viewport) else { continue };
+            let scale = self.drawn_scale[s];
+            if scale <= 1e-4 { continue; }
+            let Some(cover) = self.stuck_cover(&r.viewport, &r.key) else { continue };
+            let cover = cover / f64::from(scale);
+            let rel_top = f64::from((self.drawn[i][1] - self.drawn[s][1]) / scale) - cover;
+            let height = f64::from(self.drawn[i][3] / scale) + cover;
+            let viewport = f64::from(self.drawn[s][3] / scale);
+            let margin = f64::from(self.nodes[s].scroll_edges.margin);
+            let stick = self.nodes[s].scroll.is_some_and(|s| s.stick_bottom);
+            let growing = self.scroll_content(s).and_then(|c| self.stacks.get(&self.nodes[c].id)).is_some_and(|st| st.growing);
+            let Some(st) = self.scrolls.get_mut(&self.nodes[s].id) else { continue };
+            let top = st.offset + rel_top;
+            let to = scroll_edge::reveal(st.offset, top, height, viewport, margin).clamp(0.0, st.max);
+            if (to - st.offset).abs() < 1.0 / 64.0 {
+                if growing { st.pinned = false; }
+                continue;
+            }
+            st.offset = to;
+            st.v = 0.0;
+            st.glide = None;
+            st.glide_to = None;
+            st.pinned = stick && !growing && to >= st.max - 0.5;
             st.direct = true;
             moved = true;
         }
@@ -324,17 +369,21 @@ impl<S: 'static> Runtime<S> {
 
     /// Colour, hover or decorative motion must not extend the anchor's lifetime.
     pub(super) fn finish_keeps(&mut self) {
-        if self.keeps.is_empty() { return; }
+        if self.keeps.is_empty() && self.scroll_reveals.is_empty() { return; }
         let mut keeps = std::mem::take(&mut self.keeps);
-        keeps.retain(|k| self.nodes.iter().any(|n| {
-            let within = n.path == k.viewport || (n.path.starts_with(&k.viewport)
-                && n.path.as_bytes().get(k.viewport.len()) == Some(&b'/'));
+        let mut reveals = std::mem::take(&mut self.scroll_reveals);
+        let animating = |viewport: &str| self.nodes.iter().any(|n| {
+            let within = n.path == viewport || (n.path.starts_with(viewport)
+                && n.path.as_bytes().get(viewport.len()) == Some(&b'/'));
             within && (self.scene.store().is_animating(n.id, prop::FRAME)
                 || self.scene.store().is_animating(n.id, prop::TRAVEL)
                 || self.grows.get(&n.id).is_some_and(|g| g.moving())
                 || self.scrolls.get(&n.id).is_some_and(|st| st.slack.moving()))
-        }));
+        });
+        keeps.retain(|k| animating(&k.viewport));
+        reveals.retain(|r| animating(&r.viewport));
         self.keeps = keeps;
+        self.scroll_reveals = reveals;
     }
 
     /// What a reveal of row `key` in viewport `path` must leave to stuck headers: `None` when

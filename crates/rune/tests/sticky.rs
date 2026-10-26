@@ -540,3 +540,170 @@ fn sticky_without_vertical_viewport_is_a_no_op() {
     assert_eq!(find(&rt, "top").stuck, 0.0);
     assert_eq!(find(&rt, "bottom").stuck, 0.0);
 }
+
+#[derive(Clone, Copy, Debug)]
+struct RevealGrowth {
+    expanded: bool,
+    stick_bottom: bool,
+    virtualized: bool,
+    keep: Option<&'static str>,
+    instant: bool,
+}
+
+fn reveal_growth_view(s: &RevealGrowth, _: &mut Cx<RevealGrowth>) -> El {
+    let build_row = |s: &RevealGrowth, i: usize| -> El {
+        let key = format!("r{i}");
+        let h = if i == 3 {
+            if s.expanded { 130.0 } else { 37.0 }
+        } else if i < 3 {
+            80.0
+        } else {
+            35.0
+        };
+        let mut row = el().key(key).w_full().h(h);
+        if i == 3 {
+            row = row.on_press_tx(|s: &mut RevealGrowth, tx: &mut Tx| {
+                s.expanded = true;
+                if s.instant {
+                    tx.instant();
+                }
+                if let Some(target) = s.keep {
+                    tx.keep_on_screen(target);
+                } else {
+                    tx.scroll_into_view("r3");
+                }
+            });
+        }
+        row
+    };
+    let mut stack = col().key("stack").w_full().growth(GrowthSpec::default());
+    if s.virtualized {
+        stack = stack.virtual_rows(
+            6,
+            60.0,
+            |_: &RevealGrowth, i| format!("r{i}").into(),
+            move |s: &RevealGrowth, i| build_row(s, i),
+        );
+    } else {
+        for i in 0..6 {
+            stack = stack.child(build_row(s, i));
+        }
+    }
+    col().w_full().h_full().child(
+        col()
+            .key("scroll")
+            .w(300.0)
+            .h(200.0)
+            .scroll(ScrollSpec { stick_bottom: s.stick_bottom })
+            .child(stack),
+    )
+}
+
+fn run_reveal_growth(init: RevealGrowth) {
+    let mut rt = Runtime::new(init, reveal_growth_view, (300.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    if !init.stick_bottom {
+        rt.update(|_, tx| tx.scroll_to_instant("scroll", 0.0, 120.0));
+        rt.frame(0.0);
+    }
+    let kept_was = init.keep.map(|k| find(&rt, k).rect[1]);
+    let snapshot = |rt: &Runtime<RevealGrowth>| -> Vec<(String, [f32; 4])> {
+        (0..6)
+            .filter_map(|i| {
+                let key = format!("r{i}");
+                rt.elements().into_iter().find(|e| e.key.as_deref() == Some(&key)).map(|e| (key, e.rect))
+            })
+            .collect()
+    };
+    let mut prev = snapshot(&rt);
+    let r3 = find(&rt, "r3").rect;
+    let press_y = r3[1] + r3[3] * 0.5;
+    rt.pointer_down(150.0, press_y);
+    rt.pointer_up(150.0, press_y);
+
+    if init.instant {
+        rt.frame(1.0 / 120.0);
+        let r3 = find(&rt, "r3").rect;
+        assert!((r3[3] - 130.0).abs() < 0.05, "instant snaps growth in one frame: {init:?} {r3:?}");
+        if let (Some(k), Some(was)) = (init.keep, kept_was) {
+            assert!((find(&rt, k).rect[1] - was).abs() < 0.05, "instant keep lands in one frame: {init:?}");
+        } else {
+            assert!(r3[1] >= -0.05 && (r3[1] + r3[3] - 200.0).abs() < 0.05, "instant reveal lands in one frame: {init:?} {r3:?}");
+        }
+        assert!(!rt.animating, "instant leaves nothing animating: {init:?}");
+        return;
+    }
+
+    let mut max_move = 0.0f32;
+    let mut growth_frames = 0usize;
+    for step in 1..=120 {
+        rt.frame(1.0 / 120.0);
+        let cur = snapshot(&rt);
+        for (key, rect) in &cur {
+            if let Some((_, old)) = prev.iter().find(|(k, _)| k == key) {
+                let dy_top = (rect[1] - old[1]).abs();
+                let dy_bot = ((rect[1] + rect[3]) - (old[1] + old[3])).abs();
+                let dh = (rect[3] - old[3]).abs();
+                let m = dy_top.max(dy_bot).max(dh);
+                max_move = max_move.max(m);
+                assert!(
+                    m <= 12.0,
+                    "frame {step} ({:?}): {key} moved {m:.2}pt in one frame ({old:?} -> {rect:?})",
+                    (init.stick_bottom, init.virtualized, init.keep)
+                );
+            }
+        }
+        if let (Some(k), Some(was)) = (init.keep, kept_was) {
+            let y = find(&rt, k).rect[1];
+            assert!(
+                (y - was).abs() < 0.5,
+                "frame {step} ({:?}): kept {k} moved from {was:.2} to {y:.2}",
+                (init.stick_bottom, init.virtualized, init.keep)
+            );
+        }
+        if (find(&rt, "r3").rect[3] - 130.0).abs() >= 0.5 {
+            growth_frames = step;
+        }
+        prev = cur;
+    }
+    let duration = growth_frames as f32 / 120.0;
+    assert!(
+        (0.20..=0.50).contains(&duration),
+        "growth took {duration:.3}s ({growth_frames} frames, max step {max_move:.2}pt) for {:?}",
+        (init.stick_bottom, init.virtualized, init.keep)
+    );
+    let r3 = find(&rt, "r3").rect;
+    assert!((r3[3] - 130.0).abs() < 0.05, "r3 settled at 130pt: {r3:?}");
+    if let (Some(k), Some(was)) = (init.keep, kept_was) {
+        assert!((find(&rt, k).rect[1] - was).abs() < 0.5, "kept {k} stayed at {was}: {:?}", find(&rt, k).rect);
+    } else {
+        assert!(
+            r3[1] >= -0.05 && (r3[1] + r3.iter().skip(3).next().copied().unwrap_or(0.0) - 200.0).abs() < 0.5,
+            "final scroll reveals grown r3: {r3:?}"
+        );
+    }
+}
+
+#[test]
+fn scroll_into_view_keeps_growth_springing_and_snaps_when_instant() {
+    for stick_bottom in [false, true] {
+        for virtualized in [false, true] {
+            for instant in [false, true] {
+                run_reveal_growth(RevealGrowth { expanded: false, stick_bottom, virtualized, keep: None, instant });
+            }
+        }
+    }
+}
+
+#[test]
+fn keep_on_screen_keeps_growth_springing_and_snaps_when_instant() {
+    for stick_bottom in [false, true] {
+        for virtualized in [false, true] {
+            for keep in [Some("r4"), Some("r3")] {
+                for instant in [false, true] {
+                    run_reveal_growth(RevealGrowth { expanded: false, stick_bottom, virtualized, keep, instant });
+                }
+            }
+        }
+    }
+}

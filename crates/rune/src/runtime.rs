@@ -890,6 +890,8 @@ pub struct Runtime<S: 'static> {
     sticky_frame: Vec<[f32; 8]>,
     /// `Tx::keep_on_screen` across the commit underway.
     keeps: Vec<sticky::Keep>,
+    /// `Tx::scroll_into_view` requests that follow their target while growth/layout springs run.
+    scroll_reveals: Vec<sticky::Reveal>,
     /// Some element is `El::raise`d: paint order isn't tree order.
     has_raise: bool,
     /// The focus where the held non-IME key(s) went down, so a release after focus moves
@@ -1265,6 +1267,7 @@ impl<S: 'static> Runtime<S> {
             stuck: Vec::new(),
             sticky_frame: Vec::new(),
             keeps: Vec::new(),
+            scroll_reveals: Vec::new(),
             has_raise: false,
             key_focus: None,
             keys_held: 0,
@@ -2178,10 +2181,6 @@ impl<S: 'static> Runtime<S> {
         for (source, target) in std::mem::take(&mut tx.text_flights) {
             self.capture_text_flight(source, target);
         }
-        let scroll_to = std::mem::take(&mut tx.scroll_to);
-        let scroll_bottom = std::mem::take(&mut tx.scroll_bottom);
-        let scroll_pages = std::mem::take(&mut tx.scroll_pages);
-        let scroll_offsets = std::mem::take(&mut tx.scroll_offsets);
         if self.caret_watch && self.caret_moved(None) { self.dirty = true; }
         let read_moved = !self.layout_seen.is_empty() && self.layout_feedback_open() && self.layout_moved(None, None);
         if self.has_pixel_aspect && self.pixel_aspect_changed() { self.relayout = true; }
@@ -2209,13 +2208,24 @@ impl<S: 'static> Runtime<S> {
         #[cfg(debug_assertions)]
         { self.live_check = None; }
         tx.keep_on_screen.clear();
+        let scroll_to = std::mem::take(&mut tx.scroll_to);
+        let mut scroll_bottom = std::mem::take(&mut tx.scroll_bottom);
+        let scroll_pages = std::mem::take(&mut tx.scroll_pages);
+        let mut scroll_offsets = std::mem::take(&mut tx.scroll_offsets);
+        if tx.instant {
+            for (_, animated) in &mut scroll_bottom { *animated = false; }
+            for r in &mut scroll_offsets { r.animated = false; }
+        }
         let follow = std::mem::take(&mut self.caret_follow);
         if !scroll_to.is_empty() || !scroll_bottom.is_empty() || !scroll_pages.is_empty() || !scroll_offsets.is_empty() || follow {
             self.keeps.clear();
+            self.scroll_reveals.clear();
+        }
+        for (scope, key) in scroll_to { self.reveal_row(scope.as_deref(), &key); }
+        if !scroll_bottom.is_empty() || !scroll_pages.is_empty() || !scroll_offsets.is_empty() || follow {
             self.step_scroll(0.0);
         }
         if follow { self.follow_caret(); }
-        for (scope, key) in scroll_to { self.reveal_row(scope.as_deref(), &key); }
         if !scroll_bottom.is_empty() { self.scroll_to_bottom(scroll_bottom); }
         if !scroll_pages.is_empty() { self.scroll_pages(scroll_pages); }
         if !scroll_offsets.is_empty() { self.scroll_to_offsets(scroll_offsets); }
@@ -3808,8 +3818,16 @@ impl<S: 'static> Runtime<S> {
             let Some(_spec) = nodes[c].growth else { continue };
             let cid = nodes[c].id;
             // A reader away from the tail is anchored using measured row heights. Land those
-            // heights with the anchor correction; delayed growth would move the reading position.
+            // heights with the anchor correction, unless `keep_on_screen` or `scroll_into_view`
+            // is driving this viewport across the commit.
             let reading = self.virtuals.get(&nodes[c].path)
+                .filter(|v| {
+                    !self.keeps.iter().any(|k| k.viewport == v.scroll_path)
+                        && !self.scroll_reveals.iter().any(|r| r.viewport == v.scroll_path)
+                        && !tx.scroll_to.iter().any(|(scope, key)| {
+                            nodes.iter().any(|n| n.named(key) && n.parent.is_none_or(|p| in_scope(&nodes[p].path, scope.as_deref())))
+                        })
+                })
                 .and_then(|v| self.path_ids.get(&v.scroll_path))
                 .and_then(|id| self.scrolls.get(id)).is_some_and(|s| !s.pinned);
             let rows: Vec<usize> = (c + 1..nodes.len()).filter(|&j| nodes[j].parent == Some(c)).collect();
@@ -3882,8 +3900,10 @@ impl<S: 'static> Runtime<S> {
                     if existed && !instant && !nodes[j].virtual_mount { GrowTrack { streaming, duration, ..GrowTrack::settled(0.0) } } else { GrowTrack::settled(h) }
                 });
                 g.streaming = streaming;
-                if tx.settle || !existed || first || self.reduced_motion || reading {
+                let snap_change = instant && !streaming && (h - g.target).abs() > 1e-4;
+                if tx.settle || !existed || first || self.reduced_motion || snap_change || (reading && !g.moving()) {
                     *g = GrowTrack { streaming, ..GrowTrack::settled(h) };
+                    stack.pending_heights.remove(&id);
                 } else {
                     // Only a width/scale rewrap may shrink an active streaming row, including
                     // when fresh text arrives in the same frame as the resize.
@@ -4409,6 +4429,11 @@ impl<S: 'static> Runtime<S> {
                 moving |= active;
                 continue;
             }
+            let growing = self.scroll_content(i).and_then(|c| self.stacks.get(&self.nodes[c].id)).is_some_and(|s| s.growing);
+            let held = growing && {
+                let path = &self.nodes[i].path;
+                self.keeps.iter().any(|k| k.viewport == *path) || self.scroll_reveals.iter().any(|r| r.viewport == *path)
+            };
             let Some(st) = self.scrolls.get_mut(&id) else { continue };
             st.scrolling = st.direct || st.v.abs() > 1.0 || st.x.v.abs() > 1.0;
             st.direct = false;
@@ -4433,7 +4458,7 @@ impl<S: 'static> Runtime<S> {
                 st.v = 0.0;
             }
             st.offset = st.offset.clamp(0.0, st.max);
-            if sp.stick_bottom && st.offset >= st.max - 0.5 && st.v.abs() <= 1.0 {
+            if sp.stick_bottom && !held && st.offset >= st.max - 0.5 && st.v.abs() <= 1.0 {
                 st.pinned = true;
             }
             if sp.stick_bottom && axes.y() && slack_dt > 0.0 { moving |= self.step_slack(i, slack_dt); }
@@ -5101,31 +5126,48 @@ impl<S: 'static> Runtime<S> {
     /// One placement of [`Self::reveal_row`]: whether it committed. After the first, it moves
     /// only when the row would land somewhere else.
     fn reveal_row_once(&mut self, scope: Option<&str>, key: &str, first: bool) -> bool {
-        let geometry = self.nodes.iter().filter(|n| in_scope(&n.path, scope)).filter_map(|n| {
-            let v = self.virtuals.get(&n.path)?;
-            let index = v.index_of(key).or_else(|| {
-                key.rmatch_indices('/').find_map(|(at, _)| {
-                    let (scope, row_key) = (&key[..at], &key[at + 1..]);
-                    let mut keyed = n.path.rsplit('/').filter(|seg| !seg.starts_with('#'));
-                    scope.rsplit('/').all(|seg| keyed.next() == Some(seg)).then(|| v.index_of(row_key))?
-                })
-            })?;
-            let row_key = &v.keys[index];
-            Some((v.scroll_path.clone(), f64::from(v.pad_top + v.prefix(index)), f64::from(v.height(row_key)), f64::from(v.viewport)))
-        }).next().or_else(|| {
-            let (i, row) = self.nodes.iter().enumerate().find(|(_, n)| {
-                n.named(key) && n.parent.is_none_or(|p| in_scope(&self.nodes[p].path, scope))
-            })?;
-            let mut ancestor = self.nodes[i].parent;
-            while let Some(p) = ancestor {
-                let parent = &self.nodes[p];
-                if parent.scroll.is_some() && parent.scroll_axes.y() {
-                    return Some((parent.path.clone(), f64::from(row.target[1] - parent.target[1]),
-                        f64::from(row.local.h), f64::from(parent.local.h)));
-                }
-                ancestor = parent.parent;
+        let geometry = self.nodes.iter().enumerate().find_map(|(i, row)| {
+            if !row.named(key) || self.subtree_exiting(i) || !row.parent.is_none_or(|p| in_scope(&self.nodes[p].path, scope)) {
+                return None;
             }
-            None
+            let s = self.viewport_of(i)?;
+            let parent = &self.nodes[s];
+            let (top, height) = std::iter::successors(Some(i), |&p| self.nodes[p].parent)
+                .take_while(|&p| p != s)
+                .find_map(|r| {
+                    let c = self.nodes[r].parent?;
+                    self.nodes[c].growth?;
+                    let stack = self.stacks.get(&self.nodes[c].id)?;
+                    let rid = self.nodes[r].id;
+                    let before_r: f32 = stack.order.iter()
+                        .take_while(|&&id| id != rid)
+                        .filter_map(|id| self.grows.get(id))
+                        .map(|g| g.h)
+                        .sum();
+                    let r_top = (self.nodes[c].target[1] - parent.target[1]) + stack.pad_top + before_r;
+                    let r_h = self.grows.get(&rid).map_or(self.nodes[r].local.h, |g| g.h);
+                    if i == r {
+                        Some((r_top, r_h))
+                    } else {
+                        let in_row = row.target[1] - self.nodes[r].target[1];
+                        Some((r_top + in_row, row.local.h))
+                    }
+                })
+                .unwrap_or((row.target[1] - parent.target[1], row.local.h));
+            Some((parent.path.clone(), f64::from(top), f64::from(height), f64::from(parent.local.h)))
+        }).or_else(|| {
+            self.nodes.iter().filter(|n| in_scope(&n.path, scope)).filter_map(|n| {
+                let v = self.virtuals.get(&n.path)?;
+                let index = v.index_of(key).or_else(|| {
+                    key.rmatch_indices('/').find_map(|(at, _)| {
+                        let (scope, row_key) = (&key[..at], &key[at + 1..]);
+                        let mut keyed = n.path.rsplit('/').filter(|seg| !seg.starts_with('#'));
+                        scope.rsplit('/').all(|seg| keyed.next() == Some(seg)).then(|| v.index_of(row_key))?
+                    })
+                })?;
+                let row_key = &v.keys[index];
+                Some((v.scroll_path.clone(), f64::from(v.pad_top + v.prefix(index)), f64::from(v.height(row_key)), f64::from(v.viewport)))
+            }).next()
         });
         let Some((path, top, height, viewport)) = geometry else { return false };
         // Stuck headers cover the viewport's top: land the row below them.
@@ -5133,9 +5175,23 @@ impl<S: 'static> Runtime<S> {
         let (top, height) = (top - cover, height + cover);
         let margin = self.node(&path).map_or(0.0, |n| f64::from(n.scroll_edges.margin));
         let Some(&id) = self.path_ids.get(&path) else { return false };
+        let Some(&s_idx) = self.node_index.get(&id) else { return false };
+        let max = self.scroll_overflow(s_idx).max(0.0);
+        if first && self.scrolls.contains_key(&id) {
+            self.scroll_reveals.retain(|r| r.viewport != path);
+            self.scroll_reveals.push(sticky::Reveal {
+                scope: scope.map(str::to_owned),
+                key: key.to_owned(),
+                viewport: path.clone(),
+            });
+        }
         let Some(scroll) = self.scrolls.get_mut(&id) else { return false };
+        scroll.max = max;
         let offset = scroll_edge::reveal(scroll.offset, top, height, viewport, margin).clamp(0.0, scroll.max);
-        if !first && (offset - scroll.offset).abs() < 0.5 { return false; }
+        if (offset - scroll.offset).abs() < 0.5 {
+            if first { scroll.pinned = false; }
+            return false;
+        }
         scroll.offset = offset;
         scroll.pinned = false;
         scroll.v = 0.0;
@@ -5177,6 +5233,7 @@ impl<S: 'static> Runtime<S> {
     /// negative deltaY). Applied 1:1: the platform supplies its own momentum phases.
     pub fn wheel(&mut self, x: f32, y: f32, dy: f32) {
         self.keeps.clear();
+        self.scroll_reveals.clear();
         self.dismiss_help();
         let Some(id) = self.scroll_at(x, y) else { return };
         let stick = self.node_index.get(&id).and_then(|&i| self.nodes[i].scroll).is_some_and(|s| s.stick_bottom);
@@ -5196,6 +5253,7 @@ impl<S: 'static> Runtime<S> {
     /// the runtime decays it (for platforms without OS momentum and headless scripts).
     pub fn fling(&mut self, x: f32, y: f32, velocity: f32) {
         self.keeps.clear();
+        self.scroll_reveals.clear();
         self.dismiss_help();
         let Some(id) = self.scroll_at(x, y) else { return };
         if let Some(st) = self.scrolls.get_mut(&id) {

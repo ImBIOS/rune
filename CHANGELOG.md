@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Growth keeps springing under `Tx::scroll_into_view` and `Tx::keep_on_screen`.** Expanding
+  or collapsing a row in a growth stack and calling `tx.scroll_into_view` or `tx.keep_on_screen`
+  in the same handler no longer settles the row's growth in one frame, including in virtual
+  growth stacks. `Tx::scroll_into_view` now measures mounted rows from their presented growth
+  box and follows the target row frame by frame while the viewport's growth or layout springs
+  run, unpinning a `stick_bottom` viewport when needed until another scroll gesture or request
+  takes over. Commits marked with `tx.instant()` still settle changed row heights and scroll
+  requests in one frame.
+
 - **Per-corner and continuous-corner rounded clipping (`El::clip_rounded`, `El::clip_corners`).**
   `El::clip_rounded` now follows the element's own per-corner radii (`El::corners`) and corner
   curve (`El::continuous_corners`) with no extra call, and `El::clip_corners([tl, tr, br, bl])`
