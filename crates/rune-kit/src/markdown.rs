@@ -16,10 +16,10 @@
 //! animation, a transcript of any length) parses nothing. A growing stream parses only from the
 //! start of its last top-level block each time it grows.
 //!
-//! **Keys.** Top-level blocks are keyed `b{index}`, list items `i{index}` and their blocks by
-//! the same rule inside the item. Appending to a stream only ever changes the last block or
-//! adds blocks after it, so earlier blocks keep their keys and never remount. Give the
-//! `Markdown` root its own key when more than one is on screen.
+//! **Keys.** Top-level blocks are keyed `b{index}` (or by [`Markdown::block_keys`]), list items
+//! `i{index}` and their blocks by `b{index}` inside the item. Appending to a stream only ever
+//! changes the last block or adds blocks after it, so earlier blocks keep their keys and never
+//! remount. Give the `Markdown` root its own key when more than one is on screen.
 //!
 //! **Tables** size each column to its content. A table that doesn't fit shrinks its columns in
 //! proportion to their content (wrapping cell text), down to each column's longest word capped at
@@ -958,6 +958,7 @@ type LinkLook = Rc<dyn Fn(&str) -> Option<(Span, LinkPaint)>>;
 pub struct Markdown {
     src: String,
     style: Option<MarkdownStyle>,
+    block_keys: Vec<String>,
     reveal: f32,
     streaming: bool,
     on_link: Option<LinkWire>,
@@ -969,8 +970,23 @@ pub struct Markdown {
 
 impl Markdown {
     pub fn new(src: impl Into<String>) -> Markdown {
-        Markdown { src: src.into(), style: None, reveal: 0.0, streaming: false, on_link: None, link_look: None,
+        Markdown { src: src.into(), style: None, block_keys: Vec::new(), reveal: 0.0, streaming: false, on_link: None, link_look: None,
             selectable: false, scroll_wide: false, highlighter: Highlighter::builtin() }
+    }
+    /// Stable keys for top-level blocks in document order, instead of `b0`, `b1`, … (nested
+    /// blocks inside a list item or block quote keep `b{index}` under their parent block's key).
+    /// When a block is inserted, removed or reordered, blocks whose keys stay the same keep their
+    /// identity and spring to their new place, while inserted and removed blocks play their enter
+    /// and exit transitions. When `keys` has fewer entries than the parsed document has top-level
+    /// blocks, or an entry is empty or repeats an earlier key, that block falls back to the next
+    /// unused `b{index}` key; extra keys past the last top-level block are ignored.
+    pub fn block_keys<I, K>(mut self, keys: I) -> Self
+    where
+        I: IntoIterator<Item = K>,
+        K: Into<String>,
+    {
+        self.block_keys = keys.into_iter().map(Into::into).collect();
+        self
     }
     /// Replaces the kit-derived style in [`Self::build`].
     pub fn style(mut self, style: MarkdownStyle) -> Self {
@@ -1067,7 +1083,7 @@ impl Markdown {
         let (blocks, sources) = doc_cached(&self.src);
         let r = Renderer { s: style.clone(), reveal: self.reveal, streaming: self.streaming, on_link: self.on_link, link_look: self.link_look, selectable: self.selectable,
             scroll_wide: self.scroll_wide, highlighter: self.highlighter, sources, next_source: Cell::new(0) };
-        r.blocks(&blocks).selection_group(self.selectable)
+        r.blocks(&blocks, &self.block_keys).selection_group(self.selectable)
     }
 }
 
@@ -1084,6 +1100,24 @@ struct Renderer {
     sources: Rc<[Source]>,
     /// The next of `sources`, advanced at each [`Block::Code`] in document order.
     next_source: Cell<usize>,
+}
+
+fn block_key(i: usize, keys: &[String], used: &mut Vec<String>) -> String {
+    if let Some(k) = keys.get(i).filter(|k| !k.is_empty() && !used.iter().any(|u| u == *k)) {
+        used.push(k.clone());
+        return k.clone();
+    }
+    let taken = |cand: &str, used: &[String]| {
+        used.iter().any(|u| u == cand) || keys.get(i + 1..).is_some_and(|rest| rest.iter().any(|k| k == cand))
+    };
+    let mut cand = format!("b{i}");
+    let mut n = 0usize;
+    while taken(&cand, used) {
+        cand = format!("b{n}");
+        n += 1;
+    }
+    used.push(cand.clone());
+    cand
 }
 
 /// (margin-top, margin-bottom) per block, collapsed like CSS margins.
@@ -1217,13 +1251,15 @@ impl Renderer {
         self.select_inline(e, inl)
     }
 
-    fn blocks(&self, blocks: &[Block]) -> El {
+    fn blocks(&self, blocks: &[Block], keys: &[String]) -> El {
         let mut c = col().w_full();
         let mut prev_mb = 0.0f32;
+        let mut used: Vec<String> = Vec::new();
         for (i, b) in blocks.iter().enumerate() {
             let (mt, mb) = margins(b);
             let top = if i == 0 { 0.0 } else { mt.max(prev_mb) };
-            c = c.child(self.block(b).key(format!("b{i}")).mt(top));
+            let key = if keys.is_empty() { format!("b{i}") } else { block_key(i, keys, &mut used) };
+            c = c.child(self.block(b).key(key).mt(top));
             prev_mb = mb;
         }
         c
@@ -1327,7 +1363,7 @@ impl Renderer {
                             .child(
                                 text(marker).font(s.body).color(s.muted).w(32.0).align(Align::Center).reveal(self.reveal),
                             )
-                            .child(self.blocks(item).grow(1.0).shrink()),
+                            .child(self.blocks(item, &[]).grow(1.0).shrink()),
                     );
                 }
                 c
@@ -1335,7 +1371,7 @@ impl Renderer {
             Block::Quote(inner) => row()
                 .w_full()
                 .child(el().w(2.0).h_full().radius(1.0).fill(s.quote_rule))
-                .child(self.blocks(inner).grow(1.0).shrink().pl(12.0)),
+                .child(self.blocks(inner, &[]).grow(1.0).shrink().pl(12.0)),
             Block::Rule => el().w_full().h(0.5).fill(s.rule),
         }
     }

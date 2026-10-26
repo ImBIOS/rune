@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Markdown::block_keys`.** Top-level blocks can now take caller-supplied keys in document order
+  instead of `b0`, `b1`, … (nested blocks inside a list item or block quote keep `b{index}` under
+  their parent block's key), so inserting, removing, reordering or editing blocks above others
+  keeps unchanged blocks' keys and springs their layout while inserted and removed blocks play
+  their enter and exit transitions. When fewer keys are supplied than parsed blocks, or an entry is
+  empty or repeats an earlier key, that block falls back to the next unused `b{index}` key; extra
+  keys are ignored. Without `block_keys`, keys stay `b0`, `b1`, … as before.
+
 - **`TextInput::plain` and `TextInput::leading_icon_size`.** `plain()` draws the field with no
   fill, sheen, shadow, border, hover tint or focus outline, for sitting in a header (focus shows
   as the caret and selection, invalid as red text, and disabled dims to 0.5); text, caret, icon,

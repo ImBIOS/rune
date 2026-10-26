@@ -15,7 +15,7 @@ fn laid_out(src: &str) -> Runtime<String> {
     rt
 }
 
-fn by_key(rt: &Runtime<String>, key: &str) -> rune::runtime::ElementInfo {
+fn by_key<S>(rt: &Runtime<S>, key: &str) -> rune::runtime::ElementInfo {
     rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("no {key}"))
 }
 
@@ -820,4 +820,111 @@ fn styled_links_keep_inner_styles_select_copy_and_stream_across_chunks() {
     rt.key(rune::KeyEvent { key: rune::Key::Command('c'), mods: cmd });
     rt.frame(1.0 / 60.0);
     assert_eq!(rt.copy_request.as_deref(), Some("Start First bold code and Second on the next line."));
+}
+
+#[test]
+fn caller_block_keys_insert_remove_edit_and_retarget_mid_flight() {
+    type DocState = (String, Vec<&'static str>);
+    fn view((src, keys): &DocState, _: &mut Cx<DocState>) -> El {
+        col().w(320.0).child(Markdown::new(src.clone()).block_keys(keys.iter().copied()).build(&Kit::neutral(true)))
+    }
+
+    let mut rt = Runtime::new(("Alpha\n\nBeta".to_owned(), vec!["p-a", "p-b"]), view, (320.0, 400.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let y_a0 = by_key(&rt, "p-a").rect[1];
+    let y_b0 = by_key(&rt, "p-b").rect[1];
+    assert_eq!(y_a0, 0.0);
+    assert!(y_b0 > 20.0);
+
+    // 1. Insert a block at the top: old blocks keep their keys and spring down; new block fades in.
+    rt.state = ("Intro\n\nAlpha\n\nBeta".to_owned(), vec!["p-intro", "p-a", "p-b"]);
+    rt.invalidate();
+    rt.frame(0.0);
+    rt.frame(1.0 / 60.0);
+    let intro = by_key(&rt, "p-intro");
+    let a_mid = by_key(&rt, "p-a");
+    let b_mid = by_key(&rt, "p-b");
+    assert!(intro.opacity > 0.0 && intro.opacity < 1.0, "inserted block enters on its fade: {}", intro.opacity);
+    assert!(a_mid.moving && a_mid.rect[1] > y_a0 && a_mid.rect[1] < y_b0, "p-a springs from old y to new y: {a_mid:?}");
+    assert!(b_mid.moving && b_mid.rect[1] > y_b0, "p-b springs down with p-a: {b_mid:?}");
+    for _ in 0..60 {
+        rt.frame(1.0 / 60.0);
+    }
+    let y_a_landed = by_key(&rt, "p-a").rect[1];
+    let y_b_landed = by_key(&rt, "p-b").rect[1];
+    assert!((by_key(&rt, "p-intro").opacity - 1.0).abs() < 1e-3);
+    assert!((y_a_landed - y_b0).abs() < 0.5 && y_b_landed > y_a_landed);
+
+    // 2. Remove the middle block: it stays mounted while exiting and the trailing sibling springs up.
+    rt.state = ("Intro\n\nBeta".to_owned(), vec!["p-intro", "p-b"]);
+    rt.invalidate();
+    rt.frame(0.0);
+    rt.frame(1.0 / 60.0);
+    let a_exit = by_key(&rt, "p-a");
+    let b_reflow = by_key(&rt, "p-b");
+    assert!(a_exit.exiting && a_exit.opacity > 0.0 && a_exit.opacity < 1.0, "removed block stays mounted while exiting: {a_exit:?}");
+    assert!(b_reflow.moving && b_reflow.rect[1] < y_b_landed && b_reflow.rect[1] > y_a_landed, "p-b springs up: {b_reflow:?}");
+    for _ in 0..60 {
+        rt.frame(1.0 / 60.0);
+    }
+    assert!(rt.elements().iter().all(|e| e.key.as_deref() != Some("p-a")), "exited block unmounts after transition");
+    assert!((by_key(&rt, "p-b").rect[1] - y_a_landed).abs() < 0.5);
+
+    // 3. Edit a block in place and retarget mid-flight: height and sibling y continue smoothly without jumping.
+    let h0 = by_key(&rt, "p-intro").rect[3];
+    let y0 = by_key(&rt, "p-b").rect[1];
+    rt.state = ("Intro line one  \nline two  \nline three\n\nBeta".to_owned(), vec!["p-intro", "p-b"]);
+    rt.invalidate();
+    rt.frame(0.0);
+    for _ in 0..3 {
+        rt.frame(1.0 / 60.0);
+    }
+    let h_mid = by_key(&rt, "p-intro").rect[3];
+    let y_mid = by_key(&rt, "p-b").rect[1];
+    assert!(h_mid > h0 && y_mid > y0, "height and sibling y are mid-spring: {h_mid} > {h0}, {y_mid} > {y0}");
+
+    rt.state = ("Intro line one  \nline two  \nline three  \nline four  \nline five\n\nBeta".to_owned(), vec!["p-intro", "p-b"]);
+    rt.invalidate();
+    rt.frame(0.0);
+    let h_retarget = by_key(&rt, "p-intro").rect[3];
+    let y_retarget = by_key(&rt, "p-b").rect[1];
+    assert!((h_retarget - h_mid).abs() < 0.5 && (y_retarget - y_mid).abs() < 0.5, "retarget commit does not jump: {h_retarget} vs {h_mid}, {y_retarget} vs {y_mid}");
+    rt.frame(1.0 / 60.0);
+    assert!(by_key(&rt, "p-intro").rect[3] > h_retarget && by_key(&rt, "p-b").rect[1] > y_retarget);
+}
+
+#[test]
+fn block_keys_fallback_nested_and_selectable() {
+    fn view(keys: &Vec<&'static str>, _: &mut Cx<Vec<&'static str>>) -> El {
+        let src = "# Heading\n\n> Quoted one\n>\n> Quoted two\n\nParagraph three";
+        col().w(320.0).child(Markdown::new(src).block_keys(keys.iter().copied()).selectable(true).reveal(0.15).build(&Kit::neutral(true)))
+    }
+
+    // Fewer keys, empty key and duplicate key fall back to unused b{i} keys without panicking;
+    // nested blocks inside the quote keep their own b0, b1 keys under the quote's caller key.
+    let mut rt = Runtime::new(vec!["sec-head", "sec-quote"], view, (320.0, 400.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let paths: Vec<_> = rt.elements().into_iter().map(|e| e.path).collect();
+    assert!(paths.iter().any(|p| p.ends_with("/sec-head")), "{paths:?}");
+    assert!(paths.iter().any(|p| p.contains("/sec-quote/") && p.ends_with("/b0")) && paths.iter().any(|p| p.contains("/sec-quote/") && p.ends_with("/b1")), "{paths:?}");
+    assert!(paths.iter().any(|p| p.ends_with("/b2")), "missing 3rd key falls back to b2: {paths:?}");
+
+    // Extra keys, empty keys and duplicates never collide or panic.
+    rt.state = vec!["", "dup", "dup", "extra-1", "extra-2"];
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+    let top_keys: Vec<_> = rt.elements().into_iter().filter(|e| !e.exiting && e.path.matches('/').count() == 2).filter_map(|e| e.key).collect();
+    assert_eq!(top_keys, ["b0", "dup", "b2"]);
+
+    // Selection across caller-keyed blocks copies the whole document in order.
+    rt.pointer_move(4.0, 6.0);
+    rt.pointer_down(4.0, 6.0);
+    rt.pointer_up(4.0, 6.0);
+    rt.frame(1.0 / 60.0);
+    let cmd = rune::Mods { cmd: true, ..Default::default() };
+    rt.key(rune::KeyEvent { key: rune::Key::Command('a'), mods: cmd });
+    rt.frame(1.0 / 60.0);
+    rt.key(rune::KeyEvent { key: rune::Key::Command('c'), mods: cmd });
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.copy_request.as_deref(), Some("Heading\nQuoted one\nQuoted two\nParagraph three"));
 }
