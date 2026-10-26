@@ -234,3 +234,21 @@ fn reduced_motion_crossfades_in_place() {
     assert_eq!(r, rest, "no travel under reduced motion");
     assert!(o > 0.0 && o < 1.0, "the old digit fades: {o}");
 }
+
+#[test]
+fn the_label_reads_as_text_in_lookups() {
+    let mut rt = runtime("lookup", "Import 3 items", false, false);
+    let by_text = |rt: &Runtime<S>, text: &str| rt.elements().into_iter().find(|e| e.text.as_deref() == Some(text)).and_then(|e| e.key);
+    assert_eq!(by_text(&rt, "Import 3 items").as_deref(), Some("lookup"));
+    retext(&mut rt, "Importing…");
+    rt.frame(0.0);
+    assert_eq!(by_text(&rt, "Importing…").as_deref(), Some("lookup"));
+    assert_eq!(by_text(&rt, "Import 3 items"), None);
+
+    // A labelled element that isn't text still has none.
+    fn button(_: &(), _: &mut Cx<()>) -> El { rune_kit::Button::new("Save").build(&Kit::neutral(true)).key("save") }
+    let mut rt = Runtime::new((), button, (200.0, 60.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    let save = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("save")).unwrap();
+    assert_eq!((save.label.as_deref(), save.text), (Some("Save"), None));
+}

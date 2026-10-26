@@ -5,6 +5,12 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **A `RollingText` reads as text in lookups.** Its row now reports the whole label as its
+  `ElementInfo::text`, so `--tree` JSON and tests that find an element by its text find it,
+  as they find a plain `text`. Its glyphs still list one grapheme each. Any element of role
+  `"text"` with a label and no text of its own does the same; Rune and rune-kit build no other,
+  so trees of apps without a `RollingText` are unchanged.
+
 - **rune-kit: `Button::rolling(key)` and `Button::label_with(..)`.** `rolling` draws the label
   as a `RollingText`, in the button's font and ink, so "Import 3 items" → "Importing…" rolls
   only the changed characters; the button's edges spring on the label's curve

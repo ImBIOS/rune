@@ -499,6 +499,8 @@ pub struct ElementInfo {
     pub key: Option<String>,
     pub role: &'static str,
     pub label: Option<String>,
+    /// What a text element shows (none for a secure field). An element of role `"text"` drawn
+    /// from several texts, such as rune-kit's `RollingText`, gives its label.
     pub text: Option<String>,
     pub rect: [f32; 4],
     pub target: [f32; 4],
@@ -6154,7 +6156,11 @@ impl<S: 'static> Runtime<S> {
                     key: n.key.clone(),
                     role: n.role,
                     label: n.label.clone(),
-                    text: n.text.as_ref().filter(|_| !n.input.as_ref().is_some_and(|i| i.edit.is_secure())).map(|t| t.source_text().to_owned()),
+                    text: match &n.text {
+                        Some(t) => (!n.input.as_ref().is_some_and(|i| i.edit.is_secure())).then(|| t.source_text().to_owned()),
+                        // A text built from several (a rolling label's glyphs) reads as its label.
+                        None => n.label.clone().filter(|_| n.role == "text"),
+                    },
                     rect,
                     target: [n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]],
                     opacity: flight.map_or_else(|| self.inh_scratch.get(i).map_or(p.opacity, |h| h.opacity), |f| f.target_alpha),

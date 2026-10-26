@@ -109,6 +109,8 @@ Progress, ProgressCircle, SegmentedControl.
 `Button::new(label).rolling("import-label")` rolls the label's changed characters
 (`RollingText`) and springs the button's width with it; `.label_with(|font, ink| ..)` draws any
 label element in the button's font and ink. The text stays the button's accessible label.
+A `RollingText` reads as its whole label wherever text is looked up: its row's `text` in
+`--tree` and `ElementInfo::text`, so tests find it by text as they find a plain `text`.
 
 ## App shell
 
