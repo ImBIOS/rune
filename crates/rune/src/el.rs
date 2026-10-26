@@ -376,10 +376,16 @@ impl Tx {
         if !taken { tx.live_only = false; }
         taken
     }
-    /// Apply this change with no animation (direct manipulation). Changed non-streaming row
-    /// heights and scroll requests in this commit also land immediately, including requests
-    /// made with `scroll_to` or `scroll_to_bottom`. An already-running scroll glide is not
-    /// settled unless this commit replaces it; use [`Tx::settle`] to land running tracks.
+    /// Apply this change with no animation (direct manipulation): layout snaps, and any
+    /// newly mounted or removed elements enter or unmount at once without playing their
+    /// [`El::transition`] fade. Typing in a text field, focusing an input on pointer-down
+    /// and drag moves set `instant` automatically; `AppSpec::on_key`, `El::on_key`, `on_submit`
+    /// and `on_press` commits animate by default unless the handler calls `instant()` or
+    /// [`Self::settle`].
+    /// Changed non-streaming row heights and scroll requests in this commit also land
+    /// immediately, including requests made with `scroll_to` or `scroll_to_bottom`.
+    /// An already-running scroll glide is not settled unless this commit replaces it;
+    /// use [`Tx::settle`] to land running tracks.
     pub fn instant(&mut self) {
         self.instant = true;
     }
@@ -3175,9 +3181,15 @@ impl El {
         self
     }
     /// How this element enters and exits when mounted or removed after the first frame
-    /// (default: a fade). Rows inserted into a growth stack only grow open unless they set one,
-    /// so `.transition(Transition::offset(0.0, 8.0).combined(Transition::opacity()))` on a row
-    /// also slides and fades it in. Rows a virtual list remounts on scroll never replay it.
+    /// (default: [`Transition::opacity()`] — a 0.2 s enter and 0.15 s exit fade). Because
+    /// every element has this default fade, removing an element in an animated commit
+    /// (`AppSpec::on_key`, `El::on_key`, `on_submit`, `on_press`) fades it out over 0.15 s,
+    /// whereas commits that set [`Tx::instant`] or [`Tx::settle`] (such as typing in a
+    /// focused input or clicking into a text field) unmount removed elements in the same
+    /// frame. Call `tx.instant()` or `tx.settle()` in the handler when a key or button
+    /// action should unmount elements at once. Rows inserted into a growth stack only grow
+    /// open unless they set one, so `.transition(Transition::offset(0.0, 8.0).combined(Transition::opacity()))`
+    /// on a row also slides and fades it in. Rows a virtual list remounts on scroll never replay it.
     pub fn transition(mut self, t: Transition) -> Self {
         self.transition = Some(t);
         self

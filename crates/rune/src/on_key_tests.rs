@@ -292,3 +292,51 @@ fn scroll_into_view_in_reveals_only_inside_its_scope() {
     rt.frame(0.0);
     assert!(offset(&rt, "a") > 17_000.0 && offset(&rt, "b") < 10_100.0, "{} {}", offset(&rt, "a"), offset(&rt, "b"));
 }
+
+#[test]
+fn key_handler_removals_fade_by_default_and_unmount_at_once_with_tx_instant() {
+    struct S {
+        shown: bool,
+        instant: bool,
+    }
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        let mut root = col().size(200.0, 100.0).focusable(true).on_key(|s: &mut S, ev, tx| {
+            if ev.key == Key::Escape {
+                s.shown = false;
+                if s.instant {
+                    tx.instant();
+                }
+                return true;
+            }
+            false
+        });
+        if s.shown {
+            root = root.child(el().key("banner").size(80.0, 24.0));
+        }
+        root
+    }
+
+    // Default key-handler commit: the removed element fades out over its default opacity transition.
+    let mut rt = Runtime::new(S { shown: true, instant: false }, view, (200.0, 100.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+    rt.frame(1.0 / 60.0);
+    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    assert!(rt.frame(1.0 / 60.0), "default removal animates the exit fade");
+    assert!(
+        rt.elements().iter().any(|e| e.key.as_deref() == Some("banner")),
+        "banner stays mounted in the scene while fading out"
+    );
+
+    // With `tx.instant()` in the key handler, the removed element unmounts in the same frame.
+    let mut rt = Runtime::new(S { shown: true, instant: true }, view, (200.0, 100.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+    rt.frame(1.0 / 60.0);
+    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    assert!(!rt.frame(1.0 / 60.0), "tx.instant() unmounts with no exit fade");
+    assert!(
+        !rt.elements().iter().any(|e| e.key.as_deref() == Some("banner")),
+        "banner is gone in the commit frame"
+    );
+}
