@@ -263,7 +263,7 @@ impl Drop for Guard {
     }
 }
 
-fn hash_of(v: &impl Hash) -> u64 {
+pub(crate) fn hash_of(v: &impl Hash) -> u64 {
     let mut h = DefaultHasher::new();
     v.hash(&mut h);
     h.finish()

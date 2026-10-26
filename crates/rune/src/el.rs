@@ -1041,6 +1041,8 @@ pub struct El {
     pub(crate) virtual_estimate: Option<f32>,
     /// Rows `El::virtual_rows` builds at layout time, in place of `children`.
     pub(crate) virtual_rows: Option<Rc<crate::virtual_rows::RowSource>>,
+    /// [`El::virtual_rows_version`], hashed.
+    pub(crate) virtual_rows_version: Option<u64>,
     pub(crate) virtual_mount: bool,
     pub(crate) streaming: bool,
     pub(crate) input: Option<Box<InputSpec>>,
@@ -1117,6 +1119,7 @@ fn base(dir: FlexDirection) -> El {
         growth: None,
         virtual_estimate: None,
         virtual_rows: None,
+        virtual_rows_version: None,
         virtual_mount: false,
         streaming: false,
         input: None,
@@ -1634,6 +1637,15 @@ impl El {
     ) -> Self {
         self.virtual_rows = Some(Rc::new(crate::virtual_rows::RowSource::new(count, key, build)));
         self.virtualize(estimated_row_height)
+    }
+
+    /// Tells [`El::virtual_rows`] its keys are those of the last commit that gave the same
+    /// `version`, so layout skips calling `key` for every row to find out. A list of tens of
+    /// thousands of rows then commits in time independent of its length. Change `version`
+    /// whenever any row's key changes; with a stale version the rows keep their old keys.
+    pub fn virtual_rows_version(mut self, version: impl std::hash::Hash) -> Self {
+        self.virtual_rows_version = Some(crate::memo::hash_of(&version));
+        self
     }
 
     /// Identity among siblings. Siblings need unique keys: when two share one, the first keeps

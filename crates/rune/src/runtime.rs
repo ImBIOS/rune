@@ -3194,10 +3194,13 @@ impl<S: 'static> Measurement<'_, S> {
                 assert!(el.children.is_empty(), "`.virtual_rows(..)` at {path:?} builds its own rows; it takes no children");
             }
             v.indexed = source.is_some();
+            let version = el.virtual_rows_version.filter(|_| source.is_some());
             let same = match &source {
-                Some(rows) => rows.count == v.keys.len() && (self.state_unchanged || (0..rows.count).all(|i| (rows.key)(state, i) == v.keys[i])),
+                Some(rows) => rows.count == v.keys.len()
+                    && (self.state_unchanged || (version.is_some() && version == v.keys_version) || (0..rows.count).all(|i| (rows.key)(state, i) == v.keys[i])),
                 None => v.same_keys(el.children.iter().map(|c| c.key.as_deref())),
             };
+            v.keys_version = version;
             // Most commits keep the same rows; only a change pays for sets of every key.
             let anchor = if same {
                 if pinned { None } else { v.first_visible(offset, |_| true) }

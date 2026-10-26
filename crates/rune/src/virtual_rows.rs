@@ -618,6 +618,37 @@ mod tests {
     }
 
     #[test]
+    fn a_version_skips_checking_every_key_until_it_changes() {
+        thread_local! { static KEYS: Cell<usize> = const { Cell::new(0) }; }
+        // (tick, version, key prefix)
+        type S = (u32, u32, &'static str);
+        fn view(s: &S, _: &mut Cx<S>) -> El {
+            col().key("scroll").w_full().h_full().scroll(ScrollSpec { stick_bottom: false }).child(
+                col().key("rows").w_full().growth(GrowthSpec::default())
+                    .virtual_rows(10_000, 20.0,
+                        |s: &S, i| {
+                            KEYS.set(KEYS.get() + 1);
+                            format!("{}{i}", s.2).into()
+                        },
+                        |s: &S, i| text(format!("{} {i}", s.0)).h(20.0))
+                    .virtual_rows_version(s.1))
+        }
+        let mut rt = Runtime::new((0, 0, "a"), view, (300.0, 400.0), Env::default());
+        rt.frame(0.0);
+        KEYS.set(0);
+        rt.state.0 += 1;
+        rt.invalidate();
+        rt.frame(1.0 / 60.0);
+        assert!(KEYS.get() < 1000, "the same version checks no keys: {}", KEYS.get());
+        assert!(rt.find("a0").is_some());
+        rt.state.2 = "b";
+        rt.state.1 += 1;
+        rt.invalidate();
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("b0").is_some() && rt.find("a0").is_none(), "a new version takes the new keys");
+    }
+
+    #[test]
     fn memo_rows_build_once_while_they_stay_in_the_window() {
         thread_local! { static BUILDS: Cell<usize> = const { Cell::new(0) }; }
         fn view(s: &(u32, u32), _: &mut Cx<(u32, u32)>) -> El {

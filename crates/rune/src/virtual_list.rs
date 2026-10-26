@@ -46,6 +46,8 @@ pub(crate) struct VirtualList {
     pub pad_top: f32,
     pub pad_bottom: f32,
     pub anchor: Option<(String, f32)>,
+    /// The `El::virtual_rows_version` that `keys` came with.
+    pub keys_version: Option<u64>,
 }
 
 /// The most an element can be tall before layout, so a list's first showing, which has no
