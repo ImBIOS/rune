@@ -106,6 +106,10 @@ context menus via `.at(x, y)`), Tooltip (compact, standard, large), HoverCard, T
 ToastRegion, Card, List, Accordion, Collapsible, Badge, Divider, Keybind, Spinner, Loader,
 Progress, ProgressCircle, SegmentedControl.
 
+`Button::new(label).rolling("import-label")` rolls the label's changed characters
+(`RollingText`) and springs the button's width with it; `.label_with(|font, ink| ..)` draws any
+label element in the button's font and ink. The text stays the button's accessible label.
+
 ## App shell
 
 `rune_kit::shell` is a desktop window's frame: a resizable, collapsible sidebar, the main pane

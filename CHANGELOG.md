@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **rune-kit: `Button::rolling(key)` and `Button::label_with(..)`.** `rolling` draws the label
+  as a `RollingText`, in the button's font and ink, so "Import 3 items" → "Importing…" rolls
+  only the changed characters; the button's edges spring on the label's curve
+  (`RollingText::SPRING`, width leading), so its padding holds while the width animates. That
+  spring also carries the button's colour changes. `label_with(|font, ink| ..)` draws any
+  label element in the button's font and ink. Either way the text given to `Button::new` stays
+  the accessible label. Buttons without them are unchanged.
+
 - **`El::cache()` rasterizes settled subtrees once and composites them across pan and zoom.**
   Calling `.cache()` on an `El` (with an optional `.cache_key(u64)`) rasterizes the settled
   subtree into an `Rgba16Float` layer target (`layers.rs`) and elides its child instances on

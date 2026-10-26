@@ -2,7 +2,7 @@
 
 use rune::{Color, El, Icon, TextStyle, Tx, icon, row, text};
 
-use crate::{Acts, ControlSize, Kit, State, over, press_over, shadows};
+use crate::{Acts, ControlSize, Kit, RollingText, State, over, press_over, shadows};
 
 /// The older button sizes. A `Button` is 24, 28 or 32 points tall and an `IconButton` 20, 24
 /// or 28. For a `Button`, `Small` is `ControlSize::Regular`, `Normal` is `ControlSize::Large`
@@ -165,9 +165,17 @@ fn push_metrics(k: &Kit, size: ControlSize) -> (f32, f32, f32, f32) {
     }
 }
 
+/// What a [`Button`] draws for its label.
+enum Label {
+    Text,
+    Rolling(String),
+    Custom(Box<dyn FnOnce(TextStyle, Color) -> El>),
+}
+
 /// A text button: `Button::new("Save").variant(ButtonVariant::Contrast).build(&kit)`.
 pub struct Button {
     label: String,
+    look: Label,
     variant: ButtonVariant,
     size: Size,
     icon: Option<&'static Icon>,
@@ -180,6 +188,7 @@ impl Button {
     pub fn new(label: impl Into<String>) -> Button {
         Button {
             label: label.into(),
+            look: Label::Text,
             variant: ButtonVariant::Neutral,
             size: Size::Control(ControlSize::Regular),
             icon: None,
@@ -205,6 +214,28 @@ impl Button {
     }
     pub fn icon(mut self, i: &'static Icon) -> Self {
         self.icon = Some(i);
+        self
+    }
+    /// Draw the label as a [`RollingText`](crate::RollingText) keyed `key`: when the text
+    /// changes ("Import 3 items" → "Importing…") only the changed characters roll, and the
+    /// button's width springs with the label on its spring. `key` must be unique in the window
+    /// and stay the same between builds. The accessible label is still the text.
+    pub fn rolling(mut self, key: impl Into<String>) -> Self {
+        self.look = Label::Rolling(key.into());
+        self
+    }
+    /// Draw the label with `f`, given the font and ink colour the button would set its text
+    /// in: a label with styled spans, a count, or any element. The text given to
+    /// [`Button::new`] stays the accessible label.
+    ///
+    /// ```ignore
+    /// Button::new("Import 3 items")
+    ///     .label_with(|font, ink| row().gap(4.0).child(text("Import").font(font).color(ink))
+    ///         .child(Badge::new("3").build(&k)))
+    ///     .build(&k)
+    /// ```
+    pub fn label_with(mut self, f: impl FnOnce(TextStyle, Color) -> El + 'static) -> Self {
+        self.look = Label::Custom(Box::new(f));
         self
     }
     pub fn state(mut self, s: State) -> Self {
@@ -271,7 +302,14 @@ impl Button {
         if let Some(i) = self.icon {
             e = e.child(icon(i, icon_size).key("icon").color(icon_c));
         }
-        e = e.child(text(self.label).key("label").font(font).color(ink));
+        e = match self.look {
+            Label::Text => e.child(text(self.label).key("label").font(font).color(ink)),
+            // The button's edges spring on the label's own curve, so the padding holds while
+            // the label grows or shrinks.
+            Label::Rolling(key) => e.motion(RollingText::SPRING).width_leads()
+                .child(RollingText::new(key, self.label).font(font).color(ink).build(k)),
+            Label::Custom(f) => e.child(f(font, ink)),
+        };
         if self.state == State::Disabled { e = e.dim(disabled_alpha); }
         self.acts.apply(e, enabled)
     }
