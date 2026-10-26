@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Monospace text has no ligatures, and its tabs reach 4-column stops.** Mono rich spans
+  (`Span::mono`, so `Mark::Code` and `Block::Code` in a rich `TextEdit`, and Markdown inline
+  code) and `Family::Mono`/`Family::SystemMono` styles turn off `liga`, `clig` and `calt`:
+  Inter in the mono slot drew `->` as an arrow. A tab in monospace text now advances to the
+  next 4-column stop (counted from the line or the mono span's start) instead of one space;
+  it stays one byte. Markdown code no longer pads tabs with uncopied spaces when its style is
+  mono, since layout does it. Goldens with tabs or `->`-style pairs in mono text move. Code in
+  a rich editor uses the mono slot, which is Inter unless `AppSpec::families` names a
+  monospaced family; the `rich_editor` example now embeds IBM Plex Mono.
 - **Effect slots (`El::effect`) at a zoom scale, under rounded clips, with per-slot backdrops (`El::effect_backdrop`), and in `srgb_blend` frames.**
   `KIND_EFFECT` (`instance.params[3]`) and `EffectSite::scale` now carry the device pixels per point
   at the slot (`sc * s`, combining the window's Retina factor with inherited `scale`, `press_scale`,

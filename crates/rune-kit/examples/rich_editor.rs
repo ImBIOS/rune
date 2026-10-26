@@ -25,9 +25,9 @@ impl Default for State {
             "</ul>",
             "<ol><li>Paste safe HTML or plain text</li><li>Export marks and blocks</li></ol>",
             "<blockquote>Formatting lives alongside the string, never inside it.</blockquote>",
-            "<pre><code>fn highlight_code(lang: &amp;str, src: &amp;str, offset: usize) -&gt; usize {\n",
+            "<pre><code>fn count(lang: &amp;str, src: &amp;str) -&gt; usize {\n",
             "\tlet spans = highlight(Some(lang), src);\n",
-            "\toffset + spans.len()\n",
+            "\tspans.len()\n",
             "}</code></pre>",
         );
         let mut edit = TextEdit::from_html(html);
@@ -148,5 +148,15 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
 }
 
 fn main() {
-    rune::run(AppSpec::new("Rich editor", (560.0, 380.0), State::default, view));
+    // Code marks and code blocks draw in the mono slot.
+    rune::run(AppSpec {
+        fonts: &[
+            include_bytes!("../../rune/assets/Inter-Regular.ttf"),
+            include_bytes!("../../rune/assets/Inter-Medium.ttf"),
+            include_bytes!("../../rune/assets/Inter-SemiBold.ttf"),
+            include_bytes!("../../rune/assets/IBMPlexMono-Regular.ttf"),
+        ],
+        families: ("Inter", "IBM Plex Mono"),
+        ..AppSpec::new("Rich editor", (560.0, 380.0), State::default, view)
+    });
 }

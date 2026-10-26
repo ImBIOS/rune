@@ -1078,6 +1078,43 @@ fn variations(style: TextStyle, size: f32) -> Vec<parley::FontVariation> {
     settings
 }
 
+/// The byte of each tab in monospace text (mono spans, or all of it in a mono style) with the
+/// columns it fills to reach the next 4-column stop. Columns count from the start of the line
+/// or of the monospace run, whichever is later.
+fn mono_tab_stops(text: &str, spans: &[Span], mono_style: bool) -> Vec<(usize, u32)> {
+    let mut regions: Vec<(usize, usize)> = if mono_style {
+        vec![(0, text.len())]
+    } else {
+        let mut r: Vec<_> = spans.iter().filter(|s| s.mono && s.start < s.end).map(|s| (s.start as usize, (s.end as usize).min(text.len()))).collect();
+        r.sort_unstable();
+        r
+    };
+    regions.dedup_by(|next, prev| {
+        let joined = next.0 <= prev.1;
+        if joined {
+            prev.1 = prev.1.max(next.1);
+        }
+        joined
+    });
+    let mut out = Vec::new();
+    for (start, end) in regions {
+        let Some(run) = text.get(start..end) else { continue };
+        let mut column = 0u32;
+        for (i, ch) in run.char_indices() {
+            match ch {
+                '\n' => column = 0,
+                '\t' => {
+                    let fill = 4 - column % 4;
+                    out.push((start + i, fill));
+                    column += fill;
+                }
+                _ => column += 1,
+            }
+        }
+    }
+    out
+}
+
 impl TextSystem {
     /// `fonts` replaces the built-in Inter faces when non-empty on native. Web keeps its
     /// bundled sans and mono fallbacks, since there are no system fonts to discover.
@@ -1234,8 +1271,11 @@ impl TextSystem {
         }
         self.shaped += 1;
         let _shape_time = crate::frame_profile::Scope::new(crate::frame_profile::Phase::Text);
+        let mono_style = matches!(style.family, Family::Mono | Family::SystemMono);
+        let tabs = if text.contains('\t') { mono_tab_stops(text, spans, mono_style) } else { Vec::new() };
         // Parley has no tab stops and fonts draw a tab as a missing glyph (or nothing): shape it
-        // as a space, one byte like the tab, so every byte range still holds.
+        // as a space, one byte like the tab, so every byte range still holds. Monospace tabs
+        // then widen to the next 4-column stop through word spacing.
         let spaced;
         let text = if text.contains('\t') {
             spaced = text.replace('\t', " ");
@@ -1345,7 +1385,11 @@ impl TextSystem {
         }
         let span_range = |s: &Span| (s.start as usize).min(text.len())..(s.end as usize).min(text.len());
         // `exact` overrides the predicted spacing with each run's own, by byte range.
-        let build = |lcx: &mut LayoutContext<Ink>, fcx: &mut FontContext, exact: &[(std::ops::Range<usize>, f32)]| {
+        // Code never takes ligatures (`->` stays two characters); later features override earlier.
+        let off = [b"liga", b"clig", b"calt"].map(|tag| parley::FontFeature::new(parley::setting::Tag::new(tag), 0));
+        let unligated: Vec<parley::FontFeature> = features.iter().chain(&off).copied().collect();
+        type Spacings = [(std::ops::Range<usize>, f32)];
+        let build = |lcx: &mut LayoutContext<Ink>, fcx: &mut FontContext, exact: &Spacings, widen: &Spacings| {
             let mut b = lcx.ranged_builder(fcx, text, scale, true);
             b.push_default(FontFamily::from(sans.as_slice()));
             b.push_default(StyleProperty::FontSize(style.size));
@@ -1356,7 +1400,9 @@ impl TextSystem {
             // Parley turns optional ligatures off under letter spacing; Core Text's tracking
             // keeps them, so spacing that only corrects `trak` turns them back on.
             let corrected = base_spacing != 0.0 || span_spacing.iter().flatten().chain(exact.iter().map(|e| &e.1)).any(|&v| v != 0.0);
-            if style.tracking == 0.0 && corrected {
+            if mono_style {
+                b.push_default(StyleProperty::FontFeatures(unligated.as_slice().into()));
+            } else if style.tracking == 0.0 && corrected {
                 let ligatures = [b"liga", b"clig"].map(|tag| parley::FontFeature::new(parley::setting::Tag::new(tag), 1));
                 let list = ligatures.iter().chain(&features).copied().collect();
                 b.push_default(StyleProperty::FontFeatures(parley::FontFeatures::List(std::borrow::Cow::Owned(list))));
@@ -1381,6 +1427,7 @@ impl TextSystem {
                 b.push(StyleProperty::Brush(Ink(i as u16 + 1)), r.clone());
                 if s.mono {
                     b.push(FontFamily::from(mono.as_slice()), r.clone());
+                    b.push(StyleProperty::FontFeatures(unligated.as_slice().into()), r.clone());
                 }
                 if let Some(w) = s.weight {
                     b.push(StyleProperty::FontWeight(FontWeight::new(w)), r.clone());
@@ -1404,6 +1451,9 @@ impl TextSystem {
             for (range, v) in exact {
                 b.push(StyleProperty::LetterSpacing(*v), range.clone());
             }
+            for (range, v) in widen {
+                b.push(StyleProperty::WordSpacing(*v), range.clone());
+            }
             let mut layout: Layout<Ink> = b.build(text);
             if has_indented_blocks {
                 break_lines_with_blocks(&mut layout, blocks, style.size, scale, max_width);
@@ -1412,7 +1462,7 @@ impl TextSystem {
             }
             layout
         };
-        let mut layout = build(&mut self.layout_cx, &mut self.font_cx, &[]);
+        let mut layout = build(&mut self.layout_cx, &mut self.font_cx, &[], &[]);
         // The spacing each run got, against the spacing its own font needs.
         let given = |at: usize| {
             spans.iter().zip(&span_spacing).rev().find_map(|(s, v)| v.filter(|_| span_range(s).contains(&at))).unwrap_or(base_spacing)
@@ -1435,8 +1485,23 @@ impl TextSystem {
                 }
             }
         }
-        if mismatch {
-            layout = build(&mut self.layout_cx, &mut self.font_cx, &exact);
+        if !mismatch {
+            exact.clear();
+        } else {
+            layout = build(&mut self.layout_cx, &mut self.font_cx, &exact, &[]);
+        }
+        if !tabs.is_empty() {
+            // A tab shaped as a space is one column wide; word spacing adds the rest of its stop.
+            let widen: Vec<_> = tabs
+                .iter()
+                .filter_map(|&(at, columns)| {
+                    let column = parley::Cluster::from_byte_index(&layout, at)?.advance();
+                    (column > 0.0 && columns > 1).then(|| (at..at + 1, (columns - 1) as f32 * column / scale))
+                })
+                .collect();
+            if !widen.is_empty() {
+                layout = build(&mut self.layout_cx, &mut self.font_cx, &exact, &widen);
+            }
         }
         layout.align(align, AlignmentOptions::default());
         let l = Rc::new(layout);
@@ -1858,8 +1923,62 @@ mod tests {
     fn a_tab_draws_as_a_space() {
         assert_eq!(glyph_ids("a\tb"), glyph_ids("a b"));
         let mut ts = TextSystem::default();
+        let sans = TextStyle::new(13.0, 400.0);
+        assert_eq!(ts.measure("\tx", sans, 2.0), ts.measure(" x", sans, 2.0));
+    }
+
+    /// In monospace text (a mono style or mono spans) a tab reaches the next 4-column stop,
+    /// counted from the line or the mono run, and stays one byte.
+    #[test]
+    fn mono_tabs_fill_to_four_column_stops() {
+        let mut ts = TextSystem::default();
         let mono = TextStyle::new(13.0, 400.0).family(Family::Mono);
-        assert_eq!(ts.measure("\tx", mono, 2.0), ts.measure(" x", mono, 2.0));
+        let width = |ts: &mut TextSystem, text: &str, spans: &[Span], style: TextStyle| ts.layout_rich(text, spans, style, 2.0, None).full_width();
+        for (tabbed, spaced) in [("\tx", "    x"), ("ab\tx", "ab  x"), ("abc\tx", "abc x"), ("abcd\tx", "abcd    x"), ("\t\tx", "        x"), ("  \tx", "    x")] {
+            let (a, b) = (width(&mut ts, tabbed, &[], mono), width(&mut ts, spaced, &[], mono));
+            assert!((a - b).abs() < 0.01, "{tabbed:?}: {a} vs {spaced:?}: {b}");
+        }
+        // A mono span counts from its own start, and from each line in it.
+        let sans = TextStyle::new(13.0, 400.0);
+        let span = |text: &str, from: usize| [Span::new(from, text.len()).mono()];
+        let (tabbed, spaced) = ("Run a\tb", "Run a   b");
+        let (a, b) = (width(&mut ts, tabbed, &span(tabbed, 4), sans), width(&mut ts, spaced, &span(spaced, 4), sans));
+        assert!((a - b).abs() < 0.01, "{a} vs {b}");
+        let layout = ts.layout_rich("x\n\ty", &span("x\n\ty", 0), sans, 2.0, None);
+        let y = parley::Cluster::from_byte_index(&layout, 3).unwrap();
+        let spaced = ts.layout_rich("x\n    y", &span("x\n    y", 0), sans, 2.0, None);
+        let y_spaced = parley::Cluster::from_byte_index(&spaced, 6).unwrap();
+        let x = |c: &parley::Cluster<'_, Ink>| c.visual_offset().unwrap_or_default();
+        assert!((x(&y) - x(&y_spaced)).abs() < 0.01, "{} vs {}", x(&y), x(&y_spaced));
+        // Proportional text keeps a tab one space wide.
+        assert_eq!(ts.measure("\tx", sans, 2.0), ts.measure(" x", sans, 2.0));
+    }
+
+    /// Monospace text never takes ligatures or contextual alternates: Inter draws `->` as an
+    /// arrow in prose, but code keeps both characters.
+    #[test]
+    fn mono_text_has_no_ligatures() {
+        let mut ts = TextSystem::default();
+        let ids = |ts: &mut TextSystem, text: &str, spans: &[Span], style: TextStyle| -> Vec<u32> {
+            let layout = ts.layout_rich(text, spans, style, 2.0, None);
+            layout
+                .lines()
+                .flat_map(|line| line.items())
+                .filter_map(|item| match item {
+                    PositionedLayoutItem::GlyphRun(run) => Some(run.glyphs().map(|g| g.id).collect::<Vec<_>>()),
+                    _ => None,
+                })
+                .flatten()
+                .collect()
+        };
+        let sans = TextStyle::new(13.0, 400.0);
+        let mono = sans.family(Family::Mono);
+        let apart: Vec<u32> = ["a", "-", ">", "b"].iter().flat_map(|c| ids(&mut ts, c, &[], mono)).collect();
+        assert_ne!(ids(&mut ts, "a->b", &[], sans), apart, "fixture: Inter's arrow in prose");
+        assert_eq!(ids(&mut ts, "a->b", &[], mono), apart);
+        assert_eq!(ids(&mut ts, "a->b", &[Span::new(0, 4).mono()], sans), apart);
+        // Under `trak` correction too, which turns optional ligatures back on for prose.
+        assert_eq!(ids(&mut ts, "a->b", &[Span::new(0, 4).mono().size(20.0)], sans), apart);
     }
 
     /// `Family::SystemMono` shapes with the platform's monospaced font when one is installed, so

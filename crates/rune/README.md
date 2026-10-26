@@ -731,6 +731,11 @@ fallbacks. `Family::Sans`, `Family::Mono`, and `.mono()` keep their existing mea
 mono rich spans still use the mono slot. Named styles remain `Copy` and const-friendly
 and the family name participates in the layout cache key.
 
+Monospace text (mono rich spans, `Family::Mono` and `Family::SystemMono`) turns off `liga`,
+`clig` and `calt`, so `->` and `!=` stay two characters, and a tab in it advances to the next
+4-column stop, counted from the line or the mono span's start. A tab stays one byte, so byte
+ranges, carets and copies are unchanged; elsewhere a tab is one space wide.
+
 `.family(Family::SystemMono)` uses the platform's monospaced UI font without bundling it:
 SF Mono on macOS (the face AppKit's `monospacedSystemFont` returns, matched to within
 0.05 pt per glyph at 8 to 34 pt), Cascadia Mono, then Consolas, on Windows, and whatever
@@ -934,8 +939,10 @@ newline on `Shift+Return` and pastes plain text. The mark and block methods work
   - `Tab` and `Shift+Tab` inside a list item indent or outdent its nesting level instead of moving
     focus.
   - Inside `Block::Code`, `Return` elsewhere inserts a newline (never submits), inline marks do not apply,
-    and a typed or pasted `\t` inserts a literal tab byte that advances by one space (matching core
-    text's tab shaping while preserving exact byte offsets and copy/paste).
+    and a typed or pasted `\t` inserts a literal tab byte that advances to the next 4-column stop
+    (one byte, so offsets and copy/paste keep the tab).
+  - Code blocks and `Mark::Code` runs draw in the mono slot (name a monospaced family in
+    `AppSpec::families`; the default is Inter) without ligatures.
 - **Per-frame decorations** (`.spans(spans)` / `.decorations(spans)` on `text_input`, `TextInput`
   and `TextArea`): paint caller-supplied `rune::Span`s (such as `SyntaxTheme::from_kit(&k).spans(&ranges, offset)`
   from `rune_kit::syntax::highlight`) over the editor without mutating `TextEdit`. Byte offsets are

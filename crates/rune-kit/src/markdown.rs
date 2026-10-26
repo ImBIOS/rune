@@ -38,7 +38,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use rune::{Align, Color, El, Link, LinkPaint, Span, TextStyle, col, el, rich, row, text};
+use rune::{Align, Color, El, Family, Link, LinkPaint, Span, TextStyle, col, el, rich, row, text};
 
 use crate::{Kit, PaletteSeed};
 
@@ -1082,11 +1082,12 @@ fn margins(b: &Block) -> (f32, f32) {
     }
 }
 
-/// Code as rich text with `spans` (byte ranges of `code`). Text layout draws a tab as one space,
-/// so each tab is padded with uncopied spaces to the next four-column stop: lines line up and a
-/// copy still gets the tab.
-fn tabbed(code: &str, mut spans: Vec<Span>) -> El {
-    if !code.contains('\t') {
+/// Code as rich text with `spans` (byte ranges of `code`). Text layout widens tabs in a
+/// monospace `style` to four-column stops itself; in any other family it draws a tab as one
+/// space, so each tab is padded with uncopied spaces to the next stop: lines line up and a copy
+/// still gets the tab.
+fn tabbed(code: &str, mut spans: Vec<Span>, style: TextStyle) -> El {
+    if !code.contains('\t') || matches!(style.family, Family::Mono | Family::SystemMono) {
         return rich(code.to_owned(), spans);
     }
     let mut shown = String::with_capacity(code.len() + code.len() / 8);
@@ -1186,7 +1187,7 @@ impl Renderer {
 
     fn code(&self, code: &str, source: Option<&Source>) -> El {
         let s = &self.s;
-        let body = tabbed(code, self.syntax_spans(code, source)).font(s.code_block).color(s.text).reveal(self.reveal);
+        let body = tabbed(code, self.syntax_spans(code, source), s.code_block).font(s.code_block).color(s.text).reveal(self.reveal);
         let frame = col().w_full().radius(6.0).fill(s.code_block_fill).border(0.5, s.code_block_border);
         if self.scroll_wide {
             // The text sizes to its longest line inside the viewport, which scrolls under the
@@ -1227,7 +1228,7 @@ impl Renderer {
                 .key(format!("l{n}"))
                 .w_full()
                 .px(12.0)
-                .child(self.select(tabbed(shown, Vec::new()).font(s.code_block).color(color).wrap().reveal(self.reveal).w_full()));
+                .child(self.select(tabbed(shown, Vec::new(), s.code_block).font(s.code_block).color(color).wrap().reveal(self.reveal).w_full()));
             if let Some(t) = tint {
                 r = r.fill(t);
             }
