@@ -35,8 +35,8 @@ pub enum Mark {
     /// An atomic inline object (an `@file` or `@agent` mention, an attachment) carrying the
     /// app's id; its text is the label. The caret steps over it, deleting takes it whole, a
     /// selection that touches it covers it, and typing never extends it. A field draws it as a
-    /// chip ([`El::pill_colors`](crate::El::pill_colors), [`El::pill_icon`](crate::El::pill_icon)). Insert one with
-    /// [`TextEdit::insert_pill`].
+    /// chip ([`El::pill_style`](crate::El::pill_style), [`El::pill_colors`](crate::El::pill_colors),
+    /// [`El::pill_icon`](crate::El::pill_icon)). Insert one with [`TextEdit::insert_pill`].
     Pill(String),
 }
 
@@ -231,7 +231,7 @@ pub struct TextEdit {
     pending: Option<((usize, usize), Vec<Mark>)>,
     history: Arc<History>,
     /// Set inside [`TextEdit::undo_group`]: edits record nothing until the outermost group ends.
-    group: Option<(u32, Snapshot)>,
+    group: ActiveGroup,
     secure: bool,
     /// Mirrors the field's `El::single_line()`; the runtime sets it before each edit.
     single_line: bool,
@@ -290,6 +290,32 @@ struct Snapshot {
     soft_breaks: Vec<u32>,
 }
 
+impl Snapshot {
+    fn same_doc(&self, other: &Self) -> bool {
+        self.text == other.text
+            && self.marks == other.marks
+            && self.blocks == other.blocks
+            && self.soft_breaks == other.soft_breaks
+    }
+}
+
+/// Active [`TextEdit::undo_group`] baseline (`Some(None)` on a secure field). Never cloned or
+/// compared so cloning or comparing a [`TextEdit`] mid-group stays clean.
+#[derive(Default)]
+struct ActiveGroup(Option<Option<Snapshot>>);
+
+impl Clone for ActiveGroup {
+    fn clone(&self) -> Self {
+        Self(None)
+    }
+}
+
+impl PartialEq for ActiveGroup {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct Change {
     before: Snapshot,
@@ -302,6 +328,7 @@ impl Change {
             + self.after.text.len()
             + (self.before.marks.len() + self.after.marks.len()) * std::mem::size_of::<MarkRange>()
             + (self.before.blocks.len() + self.after.blocks.len()) * std::mem::size_of::<Block>()
+            + (self.before.soft_breaks.len() + self.after.soft_breaks.len()) * std::mem::size_of::<u32>()
     }
 }
 
@@ -487,7 +514,7 @@ impl TextEdit {
             soft_breaks: Vec::new(),
             pending: None,
             history: Arc::default(),
-            group: None,
+            group: ActiveGroup::default(),
             secure: false,
             single_line: false,
             rich: false,
@@ -713,11 +740,17 @@ impl TextEdit {
         self.secure = secure;
         if secure {
             self.history = Arc::default();
+            if self.group.0.is_some() {
+                self.group.0 = Some(None);
+            }
             self.marks.clear();
             self.blocks.clear();
             self.soft_breaks.clear();
             self.pending = None;
             self.clear_preedit();
+        } else if self.group.0 == Some(None) {
+            self.sync_invariants();
+            self.group.0 = Some(Some(self.snapshot_now()));
         }
     }
 
@@ -743,6 +776,9 @@ impl TextEdit {
         self.pending = None;
         self.clear_preedit();
         self.history = Arc::default();
+        if self.group.0.is_some() {
+            self.group.0 = Some((!self.secure).then(|| self.snapshot_now()));
+        }
     }
 
     #[cfg(test)]
@@ -787,6 +823,10 @@ impl TextEdit {
     /// (after loading a sent message back into a composer to edit it, say).
     pub fn clear_history(&mut self) {
         self.history = Arc::default();
+        if self.group.0.is_some() {
+            self.sync_invariants();
+            self.group.0 = Some((!self.secure).then(|| self.snapshot_now()));
+        }
     }
 
     /// End a typing group on a pointer selection or focus change.
@@ -794,7 +834,7 @@ impl TextEdit {
         if self.history.typing { Arc::make_mut(&mut self.history).typing = false; }
     }
 
-    fn snapshot(&self) -> Snapshot {
+    fn snapshot_now(&self) -> Snapshot {
         Snapshot {
             text: Arc::new(Zeroizing::new(self.text.clone())),
             anchor: self.anchor,
@@ -803,6 +843,10 @@ impl TextEdit {
             blocks: self.blocks.clone(),
             soft_breaks: self.soft_breaks.clone(),
         }
+    }
+
+    fn snapshot(&self) -> Option<Snapshot> {
+        (!self.secure && self.group.0.is_none()).then(|| self.snapshot_now())
     }
 
     fn restore(&mut self, s: &Snapshot) {
@@ -818,12 +862,12 @@ impl TextEdit {
         self.sync_invariants();
     }
 
-    fn record_change(&mut self, before: Snapshot, typing: bool) {
-        if self.group.is_some() {
+    fn record_change(&mut self, before: Option<Snapshot>, typing: bool) {
+        let Some(before) = before.filter(|_| !self.secure && self.group.0.is_none()) else {
             return;
-        }
-        let after = self.snapshot();
-        if before == after {
+        };
+        let after = self.snapshot_now();
+        if before.same_doc(&after) {
             return;
         }
         let h = Arc::make_mut(&mut self.history);
@@ -873,25 +917,31 @@ impl TextEdit {
     /// assert_eq!(e.text, "hi @ag");
     /// ```
     pub fn undo_group<R>(&mut self, f: impl FnOnce(&mut TextEdit) -> R) -> R {
-        if let Some((depth, _)) = &mut self.group {
-            *depth += 1;
-            let r = f(self);
-            if let Some((depth, _)) = &mut self.group { *depth -= 1; }
-            return r;
+        if self.group.0.is_some() {
+            return f(self);
         }
+        self.sync_invariants();
         self.break_history_group();
-        self.group = Some((0, self.snapshot()));
-        let r = f(self);
-        if let Some((_, before)) = self.group.take() {
-            self.break_history_group();
-            if !self.secure { self.record_change(before, false); }
+        self.group.0 = Some((!self.secure).then(|| self.snapshot_now()));
+        struct Reset<'a>(&'a mut TextEdit);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.group.0 = None;
+            }
         }
+        let g = Reset(self);
+        let r = f(g.0);
+        let before = g.0.group.0.take().flatten();
+        drop(g);
+        self.sync_invariants();
+        self.break_history_group();
+        self.record_change(before, false);
         r
     }
 
     /// Undo one typing group or discrete edit. Active IME composition is cancelled first.
     pub fn undo(&mut self) {
-        if self.secure || self.group.is_some() { return; }
+        if self.secure || self.group.0.is_some() { return; }
         self.break_history_group();
         if self.preedit.is_some() { self.clear_preedit(); return; }
         let h = Arc::make_mut(&mut self.history);
@@ -903,7 +953,7 @@ impl TextEdit {
     }
 
     pub fn redo(&mut self) {
-        if self.secure || self.group.is_some() { return; }
+        if self.secure || self.group.0.is_some() { return; }
         self.break_history_group();
         if self.preedit.is_some() { self.clear_preedit(); return; }
         let h = Arc::make_mut(&mut self.history);
@@ -2466,6 +2516,19 @@ impl TextEdit {
         if self.secure {
             return Vec::new();
         }
+        if self.preedit.is_none() {
+            let t = &self.text;
+            return self
+                .marks
+                .iter()
+                .filter_map(|m| {
+                    let id = m.mark.pill_id()?;
+                    let s = Self::clamp_char_boundary(t, m.start);
+                    let e = Self::clamp_char_boundary(t, m.end);
+                    (s < e && e - s == m.end - m.start).then_some((s as u32, e as u32, id))
+                })
+                .collect();
+        }
         self.marks
             .iter()
             .filter_map(|m| {
@@ -3959,17 +4022,107 @@ mod tests {
         let mut e = TextEdit::default();
         e.key(&k(Key::Text("a".into())), None);
         e.key(&k(Key::Text("b".into())), None);
+        assert_eq!(e.history.undo.len(), 1, "typing coalesces before a group");
         e.undo_group(|_| {});
-        e.undo_group(|e| e.set_caret(2));
-        assert_eq!(e.history.undo.len(), 1, "typing coalesces and empty groups add no step");
+        e.undo_group(|e| e.set_caret(0));
+        e.undo_group(|e| e.set_selection(0, 2));
+        e.undo_group(|e| {
+            e.set_caret(2);
+            e.insert("x");
+            e.key(&k(Key::Backspace), None);
+        });
+        assert_eq!(e.history.undo.len(), 1, "empty, caret-only and cancelling groups add no step");
         e.key(&k(Key::Text("c".into())), None);
         e.undo_group(|e| { e.insert("X"); e.insert("Y"); });
         e.key(&k(Key::Text("d".into())), None);
-        let steps = e.history.undo.len();
+        assert_eq!(e.history.undo.len(), 4, "typing run breaks before and after a group");
         undo(&mut e, false);
+        assert_eq!(e.text, "abcXY");
+        // An empty or caret-only group preserves the redo stack.
+        e.undo_group(|e| e.set_caret(0));
+        assert_eq!(e.history.redo.len(), 1);
         undo(&mut e, false);
-        assert_eq!(e.history.undo.len(), steps - 2, "typing after a group is its own step");
         assert_eq!(e.text, "abc");
+    }
+
+    #[test]
+    fn undo_group_is_unwind_safe_and_interacts_with_clear_history_paste_and_soft_breaks() {
+        let mut e = TextEdit::new("base").rich();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            e.undo_group(|e| {
+                e.insert("!");
+                panic!("boom");
+            });
+        }));
+        assert!(e.group.0.is_none(), "unwinding clears the active group");
+        e.insert("?");
+        assert_eq!(e.history.undo.len(), 1, "edits after a caught panic record again");
+        e.undo();
+        assert_eq!(e.text, "base!");
+
+        // Caught panic in a nested group leaves the outer group intact.
+        e.clear_history();
+        e.undo_group(|e| {
+            e.insert("1");
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                e.undo_group(|e| {
+                    e.insert("2");
+                    panic!("nested boom");
+                });
+            }));
+            e.insert("3");
+        });
+        assert_eq!((e.text.as_str(), e.history.undo.len()), ("base!123", 1));
+        e.undo();
+        assert_eq!(e.text, "base!");
+
+        // Cloning or comparing inside a group does not leak the active group into the clone.
+        let mut cloned = None;
+        e.undo_group(|e| {
+            assert_eq!(*e, e.clone());
+            let c = e.clone();
+            cloned = Some(c);
+        });
+        let mut cloned = cloned.unwrap();
+        cloned.insert("ok");
+        assert_eq!(cloned.history.undo.len(), 1);
+        cloned.undo();
+        assert_eq!(cloned.text, "base!");
+
+        // clear_history and clear inside a group drop prior edits in the group.
+        e.undo_group(|e| {
+            e.insert("drop");
+            e.clear_history();
+        });
+        assert!(!e.has_history());
+        e.undo_group(|e| {
+            e.insert("-keep");
+            e.clear_history();
+            e.insert("-after");
+        });
+        assert_eq!(e.history.undo.len(), 1);
+        e.undo();
+        assert_eq!(e.text, "base!drop-keep");
+        e.undo_group(|e| e.clear());
+        assert_eq!((e.text.as_str(), e.has_history()), ("", false));
+
+        // Paste, soft breaks and many edits inside one group count as one step against HISTORY_STEPS.
+        e.undo_group(|e| {
+            e.paste_html("<p><b>one</b></p>", "one");
+            e.insert("\ntwo");
+            e.set_soft_breaks(vec![1]);
+        });
+        assert_eq!((e.text.as_str(), e.soft_breaks(), e.history.undo.len()), ("one\ntwo", &[1][..], 1));
+        e.undo();
+        assert_eq!((e.text.as_str(), e.soft_breaks(), e.marks().len()), ("", &[][..], 0));
+        e.redo();
+        assert_eq!((e.text.as_str(), e.soft_breaks(), e.marks().len()), ("one\ntwo", &[1][..], 1));
+        e.undo_group(|e| {
+            for _ in 0..200 {
+                e.insert("x");
+            }
+        });
+        assert_eq!(e.history.undo.len(), 2, "200 edits in one group do not evict prior steps");
     }
 
     #[test]

@@ -1021,18 +1021,21 @@ pub struct PillStyle {
 }
 
 impl PillStyle {
+    pub const fn new() -> Self {
+        Self { bg: None, fg: None, icon: None }
+    }
     /// The chip's colour.
-    pub fn bg(mut self, bg: Color) -> Self {
+    pub const fn bg(mut self, bg: Color) -> Self {
         self.bg = Some(bg);
         self
     }
     /// The label and icon colour.
-    pub fn fg(mut self, fg: Color) -> Self {
+    pub const fn fg(mut self, fg: Color) -> Self {
         self.fg = Some(fg);
         self
     }
     /// The leading icon, in the label's colour.
-    pub fn icon(mut self, icon: &'static crate::Icon) -> Self {
+    pub const fn icon(mut self, icon: &'static crate::Icon) -> Self {
         self.icon = Some(icon);
         self
     }
@@ -1354,6 +1357,7 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
         change: None,
         paste: None,
     }));
+    e.sync_input_pills();
     e.sync_input_rich();
     e
 }
@@ -2563,6 +2567,7 @@ impl El {
     pub fn pill_icon(mut self, icon: impl Fn(&str) -> Option<&'static crate::Icon> + 'static) -> Self {
         if let Some(inp) = &mut self.input {
             inp.pill_icon = Some(Rc::new(icon));
+            self.sync_input_pills();
             self.sync_input_rich();
         }
         self
@@ -2582,9 +2587,27 @@ impl El {
     pub fn pill_style(mut self, style: impl Fn(&str) -> PillStyle + 'static) -> Self {
         if let Some(inp) = &mut self.input {
             inp.pill_style = Some(Rc::new(style));
+            self.sync_input_pills();
             self.sync_input_rich();
         }
         self
+    }
+    fn sync_input_pills(&mut self) {
+        let (Some(inp), Some(t)) = (&self.input, &mut self.text) else { return };
+        if inp.edit.is_plain() {
+            t.pills.clear();
+            return;
+        }
+        t.pills = inp
+            .edit
+            .display_pills()
+            .into_iter()
+            .map(|(start, end, id)| {
+                let st = inp.pill_style.as_ref().map(|f| f(id)).unwrap_or_default();
+                let icon = st.icon.or_else(|| inp.pill_icon.as_ref().and_then(|f| f(id)));
+                crate::text::PillChip { start, end, icon, bg: st.bg, fg: st.fg }
+            })
+            .collect();
     }
     pub(crate) fn sync_input_rich(&mut self) {
         let (Some(inp), Some(t)) = (&self.input, &mut self.text) else { return };
@@ -2598,17 +2621,6 @@ impl El {
             t.pills.clear();
             return;
         }
-        t.pills = inp
-            .edit
-            .display_pills()
-            .into_iter()
-            .map(|(start, end, id)| {
-                let st = inp.pill_style.as_ref().map(|f| f(id)).unwrap_or_default();
-                let icon = st.icon.or_else(|| inp.pill_icon.as_ref().and_then(|f| f(id)));
-                let (bg, fg) = (st.bg, st.fg.or(t.pill_colors.and_then(|(_, fg)| fg)));
-                crate::text::PillChip { start, end, icon, bg, fg }
-            })
-            .collect();
         let (mut base_spans, strikes, rich_links, blocks) =
             inp.edit.rich_display_specs(t.style, inp.rich_style);
         for d in &inp.decorations {
@@ -2619,7 +2631,10 @@ impl El {
                 base_spans.push(sp);
             }
         }
-        base_spans.extend(t.pills.iter().filter_map(|p| Some(Span { start: p.start, end: p.end, color: Some(p.fg?), ..Span::default() })));
+        let pill_fg = t.pill_colors.and_then(|(_, fg)| fg);
+        base_spans.extend(t.pills.iter().filter_map(|p| {
+            Some(Span { start: p.start, end: p.end, color: Some(p.fg.or(pill_fg)?), ..Span::default() })
+        }));
         let mut flat = crate::text::flatten_spans(&base_spans);
         for s in &mut flat {
             if s.underline == Some(Color::TRANSPARENT) {

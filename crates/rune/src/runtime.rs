@@ -2765,6 +2765,12 @@ impl<S: 'static> Runtime<S> {
             if let Some(t) = &n.text {
                 if t.live.is_none() { t.content.hash(&mut h); }
                 floats(&mut h, &[t.color.r, t.color.g, t.color.b, t.color.a, t.style.size, t.style.weight]);
+                for p in &t.pills {
+                    (p.start, p.end, p.icon.map(|i| i.name)).hash(&mut h);
+                    for c in [p.bg, p.fg].into_iter().flatten() {
+                        floats(&mut h, &[c.r, c.g, c.b, c.a]);
+                    }
+                }
             }
         }
         h.finish()

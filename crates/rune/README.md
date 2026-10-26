@@ -969,10 +969,11 @@ newline on `Shift+Return` and pastes plain text. The mark and block methods work
   pill in one move, a selection that reaches into one grows to cover it, `Backspace`/`Delete`
   remove it whole, typing and IME composition never land inside it, and undo restores it with
   its id. Pills are only made by the app: `edit.insert_pill(id, label)` at the caret, or
-  `edit.replace_with_pill(range, id, label)` to swap a typed `@query` for one (one undo step).
+  `edit.replace_with_pill(range, id, label)` to swap a typed `@query` for one (one undo step;
+  wrap multi-part edits like `replace_with_pill` + `insert(" ")` in `edit.undo_group(|e| ..)`).
   `edit.pills()` lists `(range, id)` for each. The field draws each pill as a rounded chip
-  (`.pill_colors(bg, fg)`, default a tint of the link colour) with an optional leading icon
-  (`.pill_icon(|id| ...)`), and a chip never splits across lines. Copy writes the label as
+  (`.pill_style(|id| PillStyle::default().bg(..).fg(..).icon(..))`, or `.pill_colors(bg, fg)`
+  and `.pill_icon(|id| ...)`), and a chip never splits across lines. Copy writes the label as
   plain text and `<span data-pill="id">label</span>` as HTML; pasting that into a rich field
   of the same app restores the pill, while HTML from elsewhere never makes one (an
   `on_input_paste` hook can call `insert_pill` itself).

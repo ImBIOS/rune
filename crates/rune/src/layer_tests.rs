@@ -1312,16 +1312,31 @@ fn live_scale_zoom_sweep_buckets_during_motion_and_settles_crisp() {
 
 #[test]
 fn pill_styles_follow_captured_state_through_a_cached_subtree() {
-    use crate::{PillStyle, TextEdit, TextStyle};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use crate::{PillStyle, Span, TextEdit, TextStyle};
     static A: crate::Icon = crate::Icon { name: "a", view: 8.0, body: "<rect width=\"8\" height=\"8\"/>" };
     static B: crate::Icon = crate::Icon { name: "b", view: 8.0, body: "<circle cx=\"4\" cy=\"4\" r=\"4\"/>" };
-    type S = (TextEdit, bool);
+    type S = (TextEdit, bool, Rc<Cell<usize>>);
     fn view(s: &S, _: &mut Cx<S>) -> El {
         let swap = s.1;
-        let field = crate::text_input(&s.0, TextStyle::new(14.0, 400.0)).size(200.0, 30.0).pill_style(move |id| {
-            let first = (id == "p:1") != swap;
-            if first { PillStyle::default().bg(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }).icon(&A) } else { PillStyle::default().bg(Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 }).icon(&B) }
-        });
+        let calls = s.2.clone();
+        let field = crate::text_input(&s.0, TextStyle::new(14.0, 400.0))
+            .size(200.0, 30.0)
+            .pill_icon(move |_| Some(&B))
+            .pill_style(move |id| {
+                calls.set(calls.get() + 1);
+                let first = (id == "p:1") != swap;
+                if first {
+                    PillStyle::new().bg(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }).icon(&A)
+                } else {
+                    // Leave icon unset so it falls back to `pill_icon` (&B).
+                    PillStyle::default().bg(Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 })
+                }
+            })
+            .pill_colors(Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 }, Some(Color::WHITE))
+            .color(Color::WHITE)
+            .decorations([Span::new(0, 1)]);
         el().size(200.0, 40.0).child(el().size(190.0, 30.0).child(field).cache())
     }
     let mut edit = TextEdit::new(" ").rich();
@@ -1329,28 +1344,39 @@ fn pill_styles_follow_captured_state_through_a_cached_subtree() {
     edit.insert_pill("p:1", "one");
     edit.insert("  ");
     edit.insert_pill("p:2", "two");
-    let mut rt = Runtime::new((edit, false), view, (200.0, 40.0), Env { scale: 1.0, system_dark: true });
+    let calls = Rc::new(Cell::new(0));
+    let mut rt = Runtime::new((edit, false, calls.clone()), view, (200.0, 40.0), Env { scale: 1.0, system_dark: true });
     let gpu = Gpu::headless();
     let target = Offscreen::new(&gpu.device, 200, 40);
     let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
-    let mut order = |rt: &mut Runtime<S>| {
-        let mut out = Vec::new();
-        for _ in 0..4 {
-            rt.frame(1.0 / 60.0);
-            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (200, 40));
-            out = pixels(&gpu, &renderer, &target);
-        }
+    let mut step = |rt: &mut Runtime<S>| {
+        rt.frame(1.0 / 60.0);
+        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (200, 40));
+        (pixels(&gpu, &renderer, &target), renderer.layer_stats().extra_passes)
+    };
+    let chips = |out: &[u8]| {
         let first = |hit: &dyn Fn(&[u8]) -> bool| (0..200).find(|&x| (0..40).any(|y| hit(&out[(y * 200 + x) * 4..][..4])));
         let (red, blue) = (first(&|p| p[0] > 120 && p[2] < 60), first(&|p| p[2] > 120 && p[0] < 60));
         (red.expect("red chip"), blue.expect("blue chip"))
     };
-    let (red, blue) = order(&mut rt);
+    let (out, passes) = step(&mut rt);
+    assert_eq!(calls.get(), 2, "pill_style runs once per pill on build despite later builder calls");
+    assert_eq!(passes, 1, "initial frame rasterizes the cached subtree");
+    let (red, blue) = chips(&out);
     assert!(red < blue, "p:1 draws red then p:2 blue: {red} {blue}");
+    assert_eq!(step(&mut rt).1, 0, "steady frame hits the cached layer");
+    rt.invalidate();
+    assert_eq!(step(&mut rt).1, 0, "rebuilding with unchanged pill styles keeps the cached layer");
     let icons = |rt: &Runtime<S>| rt.nodes.iter().find_map(|n| n.text.as_ref().filter(|t| !t.pills.is_empty())).unwrap().pills.iter().map(|p| p.icon.unwrap().name).collect::<Vec<_>>();
     assert_eq!(icons(&rt), ["a", "b"]);
+    calls.set(0);
     rt.state.1 = true;
     rt.invalidate();
-    let (red, blue) = order(&mut rt);
+    let (out, passes) = step(&mut rt);
+    assert_eq!(calls.get(), 2, "pill_style runs once per pill when rebuilt");
+    assert_eq!(passes, 1, "changed pill styles invalidate the cached layer");
+    let (red, blue) = chips(&out);
     assert!(blue < red, "after the captured state flips the cached chips restyle: {red} {blue}");
     assert_eq!(icons(&rt), ["b", "a"]);
+    assert_eq!(step(&mut rt).1, 0, "next frame hits the newly cached layer");
 }
