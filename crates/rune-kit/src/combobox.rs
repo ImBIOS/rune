@@ -189,7 +189,7 @@ impl<S: 'static> Combobox<S> {
         let active_pos = active.and_then(|orig| choices.iter().position(|&c| c == orig));
         let items: Vec<_> = choices.iter().map(|&i| {
             let option = &self.options[i];
-            PopupItem::from(option).trailing(
+            PopupItem::new(&option.id, &option.label).disabled(option.disabled).trailing(
                 icon(k.glyph.check_small, 14.0)
                     .color(k.c.icon_base)
                     .opacity(if self.current.as_deref() == Some(option.id.as_str()) { 1.0 } else { 0.0 }),
@@ -201,6 +201,7 @@ impl<S: 'static> Combobox<S> {
         let choose_access = self.access;
         let choose = self.choose;
         let list = PopupList::new(&self.key, "")
+            .max_height(192.0)
             .items(items)
             .active(active_pos)
             .empty_message(self.empty)

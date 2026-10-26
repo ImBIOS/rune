@@ -531,6 +531,8 @@ pub(crate) struct FocusSpec {
     pub order: i32,
     pub group: bool,
     pub selected: bool,
+    pub reveal_selected: bool,
+    pub preserve_on_press: bool,
     pub ring: Option<Outline>,
     /// `no_focus_ring`: no default ring on this control, and none from this element.
     pub ring_off: bool,
@@ -1604,6 +1606,20 @@ impl El {
     }
     pub fn focus_selected(mut self, selected: bool) -> Self {
         self.focus.selected = selected;
+        self
+    }
+    /// On a virtualized stack, reveal its selected row when the selected key changes,
+    /// even while another control owns keyboard focus. Frames dispatching `on_hover`
+    /// do not scroll, so hover-driven selection does not move the row under the pointer.
+    /// Off by default; useful for suggestions controlled by an outside text field.
+    pub fn reveal_selected(mut self, enabled: bool) -> Self {
+        self.focus.reveal_selected = enabled;
+        self
+    }
+    /// Presses on this element or its unfocusable descendants keep the current field
+    /// focused. Focusable controls still take focus normally. Useful for suggestion popups.
+    pub fn preserve_focus_on_press(mut self, enabled: bool) -> Self {
+        self.focus.preserve_on_press = enabled;
         self
     }
     /// On a focus group: arrow keys and type-select also press the item they focus, so

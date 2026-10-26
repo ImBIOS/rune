@@ -2222,8 +2222,12 @@ impl<S: 'static> Runtime<S> {
         { self.live_check = None; }
         tx.keep_on_screen.clear();
         let mut scroll_to = std::mem::take(&mut tx.scroll_to);
-        for v in self.virtuals.values_mut() {
+        for (path, v) in &mut self.virtuals {
             if let Some(key) = v.reveal_selected.take() && !pointer_hover {
+                // Use the keyed ancestor path so identical row keys in other lists do not
+                // intercept the reveal, including when this row is still virtual.
+                let scope = path.split('/').filter(|seg| !seg.starts_with('#')).collect::<Vec<_>>().join("/");
+                let key = if scope.is_empty() { key } else { format!("{scope}/{key}") };
                 scroll_to.push((None, key));
             }
         }
@@ -3491,7 +3495,7 @@ impl<S: 'static> Measurement<'_, S> {
                     row
                 }).collect();
             } else {
-                if !self.retry {
+                if !self.retry && el.focus.reveal_selected {
                     let selected = el.children.iter().find(|c| c.focus.selected).and_then(|c| c.key.clone());
                     if selected != v.selected_row {
                         v.reveal_selected = selected.clone();
@@ -4817,20 +4821,14 @@ impl<S: 'static> Runtime<S> {
             .take_while(|&p| self.allowed(p))
             .find(|&p| self.nodes[p].focus.key.is_some() && self.can_focus(p))).flatten();
         let in_textbox = std::iter::successors(n.parent, |&p| self.nodes[p].parent).any(|p| self.textbox_input(p).is_some());
-        // A popup listbox whose keyboard belongs to an outside field keeps that field focused
-        // when one of its options or its surface is pressed.
-        let is_popup_listbox = |i: usize| self.nodes[i].role == "listbox" && !self.nodes[i].focus.group && !self.nodes[i].focus.enabled;
-        let popup_list = !n.focus.enabled && (std::iter::successors(Some(ti), |&p| self.nodes[p].parent)
+        let preserve_focus = std::iter::successors(Some(ti), |&p| self.nodes[p].parent)
             .take_while(|&p| self.allowed(p))
-            .any(is_popup_listbox)
-            || (n.above.is_some() && (ti + 1..self.nodes.len())
-                .take_while(|&j| self.nodes[j].path.starts_with(&n.path))
-                .any(is_popup_listbox)));
+            .any(|p| self.nodes[p].focus.preserve_on_press);
         if !on_link && n.focus.enabled && !self.is_selectable(ti) {
             self.queue.push(Action::FocusControl(n.path.clone()));
         } else if !on_link && let Some(p) = keyed {
             self.queue.push(Action::FocusControl(self.nodes[p].path.clone()));
-        } else if !on_link && !in_textbox && !popup_list && self.focused.is_some() {
+        } else if !on_link && !in_textbox && !preserve_focus && self.focused.is_some() {
             self.queue.push(Action::Blur);
         }
         let r = n.target;

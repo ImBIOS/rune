@@ -113,11 +113,11 @@ impl<S: 'static> PopupList<S> {
             key: key.into(),
             anchor: anchor.into(),
             open: true,
-            side: Side::Bottom,
+            side: Side::Top,
             align: Align::Start,
             gutter: 4.0,
-            width: 280.0,
-            max_height: 192.0,
+            width: 260.0,
+            max_height: 240.0,
             items: Vec::new(),
             active: None,
             empty: "No results".into(),
@@ -208,7 +208,7 @@ impl<S: 'static> PopupList<S> {
 
     pub(crate) fn build_list(self, k: &Kit) -> El {
         let active = self.active.filter(|&i| self.items.get(i).is_some_and(|item| !item.disabled));
-        let mut rows = col().key("rows").w_full().growth(GrowthSpec::default()).virtualize(28.0);
+        let mut rows = col().key("rows").w_full().growth(GrowthSpec::default()).virtualize(28.0).reveal_selected(true);
         for (i, option) in self.items.iter().enumerate() {
             let id = option.id.clone();
             let is_active = active == Some(i);
@@ -265,11 +265,12 @@ impl<S: 'static> PopupList<S> {
             .scroll(ScrollSpec { stick_bottom: false })
             .clip_soft(0.0)
             .child(rows);
-        if let Some(label) = active.and_then(|i| self.items.get(i)).map(|item| item.label.as_str()).or(self.label.as_deref()) {
+        if let Some(label) = self.label.as_deref() {
             viewport = viewport.label(label);
         }
         col()
             .key("list")
+            .preserve_focus_on_press(true)
             .w_full()
             .child(viewport)
             .child(
@@ -300,6 +301,7 @@ impl<S: 'static> PopupList<S> {
         let list = self.build_list(k);
         let content = col()
             .key(key)
+            .preserve_focus_on_press(true)
             .w(width)
             .padding(4.0)
             .on_press(|_: &mut S| {})

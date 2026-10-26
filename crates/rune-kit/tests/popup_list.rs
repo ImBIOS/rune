@@ -50,6 +50,7 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
         .items(items)
         .active(s.active)
         .empty_message("No matching commands")
+        .label("Commands")
         .on_active(|s: &mut State, i| {
             s.active = Some(i);
             s.hovered.push(i);
@@ -142,7 +143,7 @@ fn active_index_scrolls_into_view_and_updates_listbox_accessibility() {
     let find = |rt: &Runtime<State>, key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key));
     let listbox = find(&rt, "viewport").unwrap();
     assert_eq!(listbox.role, "listbox");
-    assert_eq!(listbox.label.as_deref(), Some("/command-00"));
+    assert_eq!(listbox.label.as_deref(), Some("Commands"));
     let first = find(&rt, "commands-option-cmd-0").unwrap();
     assert_eq!(first.role, "option");
     assert!(first.item_selected);
@@ -155,7 +156,7 @@ fn active_index_scrolls_into_view_and_updates_listbox_accessibility() {
     assert!(last.visible[3] > 0.0, "last row visible rect {:?}", last.visible);
     assert!(last.item_selected);
     let listbox = find(&rt, "viewport").unwrap();
-    assert_eq!(listbox.label.as_deref(), Some("/command-39"));
+    assert_eq!(listbox.label.as_deref(), Some("Commands"));
 }
 
 #[test]
@@ -179,7 +180,7 @@ fn hover_fires_on_active_click_fires_on_choose_and_outside_text_edit_keeps_focus
     assert_eq!(rt.state.active, Some(2));
     assert_eq!(
         rt.elements().into_iter().find(|e| e.key.as_deref() == Some("viewport")).unwrap().label.as_deref(),
-        Some("/command-02")
+        Some("Commands")
     );
 
     // Clicking disabled option 1 neither chooses nor blurs the outside TextEdit.
@@ -199,4 +200,63 @@ fn hover_fires_on_active_click_fires_on_choose_and_outside_text_edit_keeps_focus
     rt.key(KeyEvent { key: Key::Text("view".into()), mods: Mods::default() });
     rt.frame(0.0);
     assert_eq!(rt.state.composer.text, "/review");
+}
+
+#[test]
+fn hover_changes_do_not_scroll_now_or_on_the_next_frame() {
+    let mut rt = runtime(40);
+    for _ in 0..60 { rt.frame(1.0 / 60.0); }
+    let row = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("commands-option-cmd-8")).unwrap();
+    let (x, y) = (row.visible[0] + 10.0, row.visible[1] + 2.0);
+    let before = row.rect;
+    rt.pointer_move(x, y);
+    rt.frame(0.0);
+    assert_eq!(rt.state.active, Some(8));
+    for _ in 0..3 { rt.frame(1.0 / 60.0); }
+    let after = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("commands-option-cmd-8")).unwrap().rect;
+    assert_eq!(before, after, "hovering a partly clipped row must not reveal it");
+    assert_eq!(rt.state.hovered, [8]);
+}
+
+#[test]
+fn pressing_popup_padding_or_empty_state_keeps_the_composer_focused() {
+    for count in [0, 3] {
+        let mut rt = runtime(count);
+        for _ in 0..60 { rt.frame(1.0 / 60.0); }
+        let popup = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("commands-content")).unwrap().rect;
+        let (x, y) = (popup[0] + 1.0, popup[1] + 1.0);
+        rt.pointer_down(x, y); rt.pointer_up(x, y); rt.frame(0.0);
+        assert!(rt.state.composer.focused, "padding, count {count}");
+        if count == 0 {
+            let (x, y) = rt.find("empty").unwrap();
+            rt.pointer_down(x, y); rt.pointer_up(x, y); rt.frame(0.0);
+            assert!(rt.state.composer.focused, "empty state");
+        }
+    }
+}
+
+#[test]
+fn ordinary_listbox_selection_does_not_reveal_and_press_still_blurs() {
+    fn ordinary(s: &State, _: &mut Cx<State>) -> El {
+        let k = Kit::neutral(true);
+        col().child(TextInput::new(&s.composer).on_edit(|s: &mut State| &mut s.composer).build(&k))
+            .child(col().key("ordinary-list").role("listbox").h(100.0)
+                .scroll(rune::ScrollSpec { stick_bottom: false })
+                .child(col().growth(rune::GrowthSpec::default()).virtualize(28.0).children((0..40).map(|i| {
+                    rune::el().key(format!("row-{i}")).role("option").h(28.0)
+                        .focus_selected(s.active == Some(i)).on_press(|_: &mut State| {})
+                }))))
+    }
+    let mut s = State::default();
+    s.composer.focused = true;
+    s.active = Some(39);
+    let mut rt = Runtime::new(s, ordinary, (480.0, 480.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let first = |rt: &Runtime<State>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("row-0")).unwrap();
+    assert!(first(&rt).visible[3] > 0.0, "restoring selection must not scroll");
+    rt.update(|s, _| s.active = Some(38)); rt.frame(0.0);
+    assert!(first(&rt).visible[3] > 0.0, "programmatic selection must not scroll");
+    let (x, y) = rt.find("row-0").unwrap();
+    rt.pointer_down(x, y); rt.pointer_up(x, y); rt.frame(0.0);
+    assert!(!rt.state.composer.focused, "ordinary listbox presses still blur the field");
 }
