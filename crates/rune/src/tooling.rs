@@ -531,6 +531,8 @@ pub(crate) enum Kind {
     SecondaryUp,
     /// The key and whether it is an auto-repeat.
     Key(KeyEvent, bool),
+    /// A key press with its physical code (`{"type": "key", "code": …}`), as a native host sends it.
+    PhysicalKey(crate::PhysicalInput, KeyEvent),
     Paste(crate::ClipboardContent),
     /// A wheel delta (dx, dy) in points.
     Wheel(f32, f32),
@@ -570,6 +572,7 @@ pub(crate) fn canvas_input<S: 'static>(rt: &mut Runtime<S>, kind: &Kind, (x, y):
         Kind::ButtonDown(b) => rt.button_down(x, y, *b),
         Kind::ButtonUp(b) => rt.button_up(x, y, *b),
         Kind::KeyUp(k) => { rt.key_up(k.clone()); }
+        Kind::PhysicalKey(event, k) => rt.physical_key_input(*event, k.clone()),
         _ => return false,
     }
     true
@@ -662,6 +665,9 @@ impl Ev {
             Kind::SecondaryDown => pointer(PointerAction::SecondaryDown),
             Kind::SecondaryUp => pointer(PointerAction::SecondaryUp),
             Kind::Key(key, repeat) => ScriptEvent::Key { key: key.clone(), repeat: *repeat },
+            Kind::PhysicalKey(event, key) => ScriptEvent::Key {
+                key: key.clone(), repeat: matches!(event, crate::PhysicalInput::Key { repeat: true, .. }),
+            },
             Kind::Paste(content) if content.is_rich() => ScriptEvent::PasteContent(content.clone()),
             Kind::Paste(content) => ScriptEvent::Paste(content.text().to_owned()),
             Kind::Wheel(0.0, dy) => pointer(PointerAction::Scroll(*dy)),
@@ -855,6 +861,15 @@ fn parse_script(list: Value) -> Vec<Ev> {
                     key_named(name).unwrap_or_else(|| die(&format!("unknown key {name}")))
                 };
                 let repeat = e["repeat"].as_bool().unwrap_or(false);
+                // `"code"` names the physical key behind a press (`"7"` for `⌘⇧7`), for handlers
+                // that read `Tx::physical_key`; the key comes back up straight after.
+                if let Some(code) = e["code"].as_str().filter(|_| ty == "key") {
+                    let code = code.parse::<crate::Shortcut>().unwrap_or_else(|e| die(&e.to_string())).physical_key();
+                    let press = |pressed| crate::PhysicalInput::Key { key: code, mods, pressed, repeat: repeat && pressed };
+                    out.push(Ev { t, kind: Kind::PhysicalKey(press(true), KeyEvent { key, mods }), pos: Pos::Rel(0.0, 0.0) });
+                    out.push(Ev { t, kind: Kind::Physical(press(false)), pos: Pos::Rel(0.0, 0.0) });
+                    continue;
+                }
                 let kind = if ty == "key-up" { Kind::KeyUp(KeyEvent { key, mods }) } else { Kind::Key(KeyEvent { key, mods }, repeat) };
                 out.push(Ev { t, kind, pos: Pos::Rel(0.0, 0.0) });
             }
@@ -1045,6 +1060,27 @@ fn a_script_paste_can_carry_html_and_rtf() {
     rt.frame(0.0);
     let texts: Vec<_> = rt.state.iter().map(|c| (c.text(), c.html(), c.rtf())).collect();
     assert_eq!(texts, [("plain", None, None), ("short", None, None), ("Hi", Some(r#"<b>Hi</b><img src="x">"#), Some("{\\rtf1 Hi}"))]);
+}
+
+#[cfg(test)]
+#[test]
+fn a_script_key_with_a_code_reaches_handlers_with_its_physical_key() {
+    let script = parse_script(json!([
+        {"type": "key", "name": "&", "cmd": true, "shift": true, "code": "7"},
+        {"t": 0.1, "type": "key", "name": "&", "cmd": true, "shift": true},
+    ]));
+    type Seen = Vec<(Key, Option<crate::PhysicalKeyCode>)>;
+    let mut rt = Runtime::new(Seen::new(), |_: &Seen, _: &mut crate::Cx<Seen>| crate::el(), (100.0, 100.0), Env::default());
+    rt.on_key = Some(|s, ev, tx| { s.push((ev.key.clone(), tx.physical_key())); true });
+    for event in script {
+        match event.kind {
+            Kind::Key(k, _) => rt.key(k),
+            Kind::Physical(input) => rt.physical_input(input),
+            kind => assert!(canvas_input(&mut rt, &kind, (0.0, 0.0)), "unexpected {kind:?}"),
+        }
+        rt.frame(0.0);
+    }
+    assert_eq!(rt.state, [(Key::Command('&'), Some(crate::PhysicalKeyCode::Digit7)), (Key::Command('&'), None)]);
 }
 
 #[cfg(test)]
@@ -1714,7 +1750,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             }
             if let Some((ov, _)) = overlay.as_mut() {
                 match &e.kind {
-                    Kind::Key(key, _) => ov.key(e.t, key),
+                    Kind::Key(key, _) | Kind::PhysicalKey(_, key) => ov.key(e.t, key),
                     Kind::Shortcut(chord) => ov.chord(e.t, chord),
                     &Kind::Physical(crate::PhysicalInput::Key { key, mods, pressed: true, .. }) => {
                         if let Ok(chord) = crate::Shortcut::from_physical_key(key, mods) { ov.chord(e.t, &chord) }

@@ -134,6 +134,17 @@ impl Block {
         )
     }
 
+    /// This block's kind as one bit, for [`TextEdit::allow_blocks`].
+    fn kind_bit(self) -> u8 {
+        1 << match self {
+            Block::Paragraph => 0,
+            Block::Bullet(_) => 1,
+            Block::Numbered(_) => 2,
+            Block::Quote => 3,
+            Block::Code => 4,
+        }
+    }
+
     /// Left indentation in points (before scale) for this block type.
     pub(crate) fn indent_pt(self, font_size: f32) -> f32 {
         let unit = (font_size * 1.45).round().max(18.0);
@@ -203,6 +214,10 @@ pub struct TextEdit {
     single_line: bool,
     /// Formatting keys and rich paste are on (see [`TextEdit::rich`]).
     rich: bool,
+    /// The mark kinds this field keeps, one bit per [`Mark::kind_order`]; `None` keeps all.
+    allowed_marks: Option<u16>,
+    /// The block kinds this field keeps ([`Block::kind_bit`]); `None` keeps all.
+    allowed_blocks: Option<u8>,
 }
 
 impl std::fmt::Debug for TextEdit {
@@ -476,6 +491,8 @@ impl TextEdit {
             secure: false,
             single_line: false,
             rich: false,
+            allowed_marks: None,
+            allowed_blocks: None,
         }
     }
 
@@ -512,6 +529,66 @@ impl TextEdit {
 
     pub fn is_rich(&self) -> bool {
         self.rich
+    }
+
+    /// Keep only these kinds of inline mark, for a field whose storage can't hold the rest (an
+    /// app that saves Markdown has no underline). A disallowed mark's shortcut (`⌘U`) goes on
+    /// to the app's key handlers, `toggle_mark` and `set_mark` ignore it, and paste drops it.
+    /// Kinds match by [`Mark::same_kind`], so any [`Mark::Link`] allows links. The field never
+    /// holds a disallowed mark: marks it already has, or that `set_marks` adds, are dropped.
+    /// Every kind is allowed by default.
+    ///
+    /// ```ignore
+    /// TextEdit::new("").rich().allow_marks([Mark::Bold, Mark::Italic, Mark::Strike, Mark::Code, Mark::Link(String::new())])
+    /// ```
+    pub fn allow_marks(mut self, marks: impl IntoIterator<Item = Mark>) -> Self {
+        self.allowed_marks = Some(marks.into_iter().fold(0, |bits, m| bits | 1 << m.kind_order()));
+        self.sync_invariants();
+        self
+    }
+
+    /// Keep only these kinds of paragraph block, as [`allow_marks`](Self::allow_marks) does for
+    /// marks: `toggle_block` and `set_block` ignore the rest and pasted ones become paragraphs.
+    /// [`Block::Paragraph`] is always allowed, and list levels don't matter (`Block::Bullet(0)`
+    /// allows every bullet).
+    pub fn allow_blocks(mut self, blocks: impl IntoIterator<Item = Block>) -> Self {
+        self.allowed_blocks = Some(blocks.into_iter().fold(Block::Paragraph.kind_bit(), |bits, b| bits | b.kind_bit()));
+        self.sync_invariants();
+        self
+    }
+
+    /// Whether this field keeps marks of `mark`'s kind (see [`allow_marks`](Self::allow_marks)),
+    /// to hide a formatting bar's button for one it doesn't.
+    pub fn allows_mark(&self, mark: &Mark) -> bool {
+        self.allowed_marks.is_none_or(|bits| bits & 1 << mark.kind_order() != 0)
+    }
+
+    /// Whether this field keeps blocks of `block`'s kind (see [`allow_blocks`](Self::allow_blocks)).
+    pub fn allows_block(&self, block: Block) -> bool {
+        self.allowed_blocks.is_none_or(|bits| bits & block.kind_bit() != 0)
+    }
+
+    /// The mark a rich field's `⌘B`, `⌘I` or `⌘U` toggles, if this field takes that chord.
+    pub(crate) fn format_chord(&self, ev: &KeyEvent) -> Option<Mark> {
+        let Key::Command(c) = ev.key else { return None };
+        if ev.mods.shift || ev.mods.alt || !self.rich || self.secure {
+            return None;
+        }
+        let mark = match c {
+            'b' => Mark::Bold,
+            'i' => Mark::Italic,
+            'u' => Mark::Underline,
+            _ => return None,
+        };
+        self.allows_mark(&mark).then_some(mark)
+    }
+
+    /// `frag` without the marks and blocks this field doesn't allow.
+    fn keep_allowed(&self, mut frag: TextEdit) -> TextEdit {
+        frag.allowed_marks = self.allowed_marks;
+        frag.allowed_blocks = self.allowed_blocks;
+        frag.sync_invariants();
+        frag
     }
 
     /// No marks, pending style or non-paragraph blocks: draws exactly as plain text.
@@ -580,6 +657,27 @@ impl TextEdit {
     /// Line indices (`> 0`) created by `Shift+Return` (`<br>`) rather than a hard paragraph break.
     pub fn soft_breaks(&self) -> &[u32] {
         &self.soft_breaks
+    }
+
+    /// `self` with soft breaks before lines `lines` (indices into `\n`-delimited lines, as
+    /// [`soft_breaks`](Self::soft_breaks) returns them): each of those lines continues the
+    /// paragraph, list item or quote above it, as `Shift+Return` makes, so a draft rebuilt with
+    /// [`from_parts`](Self::from_parts) keeps them. Line 0 and lines past the end are dropped.
+    ///
+    /// ```ignore
+    /// // "one" then "two" on a new line of the same bullet.
+    /// TextEdit::from_parts("one\ntwo", vec![], vec![Block::Bullet(0); 2]).with_soft_breaks(vec![1])
+    /// ```
+    pub fn with_soft_breaks(mut self, lines: Vec<u32>) -> Self {
+        self.set_soft_breaks(lines);
+        self
+    }
+
+    /// Replace the soft breaks (see [`with_soft_breaks`](Self::with_soft_breaks)). Like
+    /// `set_marks` and `set_blocks`, this isn't an undo step.
+    pub fn set_soft_breaks(&mut self, lines: Vec<u32>) {
+        self.soft_breaks = lines;
+        self.sync_invariants();
     }
 
     /// Iterate the `\n`-delimited paragraphs of `self.text` with their byte range and [`Block`].
@@ -843,6 +941,13 @@ impl TextEdit {
         } else if self.blocks.len() > line_count {
             self.blocks.truncate(line_count);
         }
+        if let Some(bits) = self.allowed_blocks {
+            for b in &mut self.blocks {
+                if bits & b.kind_bit() == 0 {
+                    *b = Block::Paragraph;
+                }
+            }
+        }
         self.soft_breaks.sort_unstable();
         self.soft_breaks.dedup();
         self.soft_breaks.retain(|&idx| idx > 0 && (idx as usize) < line_count);
@@ -855,6 +960,9 @@ impl TextEdit {
     }
 
     fn normalize_marks(&mut self) {
+        if let Some(bits) = self.allowed_marks {
+            self.marks.retain(|m| bits & 1 << m.mark.kind_order() != 0);
+        }
         if self.marks.is_empty() {
             return;
         }
@@ -1090,9 +1198,10 @@ impl TextEdit {
     }
 
     /// Toggle `mark` on the selection, or in the pending typing style when the selection is empty.
-    /// Inside a [`Block::Code`] paragraph, inline marks do not apply.
+    /// Inside a [`Block::Code`] paragraph, inline marks do not apply, nor does a mark the field
+    /// doesn't [allow](Self::allow_marks).
     pub fn toggle_mark(&mut self, mark: Mark) {
-        if self.secure {
+        if self.secure || !self.allows_mark(&mark) {
             return;
         }
         self.sync_invariants();
@@ -1124,7 +1233,7 @@ impl TextEdit {
 
     /// Apply `mark` to the current selection (or add it to pending typing style when empty).
     pub fn set_mark(&mut self, mark: Mark) {
-        if self.secure {
+        if self.secure || !self.allows_mark(&mark) {
             return;
         }
         self.sync_invariants();
@@ -1224,9 +1333,10 @@ impl TextEdit {
         (first..=last).any(|i| self.blocks.get(i).copied().unwrap_or(Block::Paragraph).is_list())
     }
 
-    /// Set the [`Block`] attribute for all paragraphs in the current selection.
+    /// Set the [`Block`] attribute for all paragraphs in the current selection, unless the field
+    /// doesn't [allow](Self::allow_blocks) it.
     pub fn set_block(&mut self, block: Block) {
-        if self.secure || self.single_line {
+        if self.secure || self.single_line || !self.allows_block(block) {
             return;
         }
         let block = block.with_level(block.list_level().unwrap_or(0));
@@ -1250,7 +1360,7 @@ impl TextEdit {
     /// the same block kind as `block`, resets them to [`Block::Paragraph`]; otherwise sets `block`
     /// (preserving list nesting level when switching between bullet and numbered lists).
     pub fn toggle_block(&mut self, block: Block) {
-        if self.secure || self.single_line {
+        if self.secure || self.single_line || !self.allows_block(block) {
             return;
         }
         self.sync_invariants();
@@ -1634,8 +1744,13 @@ impl TextEdit {
                     } else {
                         match blk {
                             Block::Code => {
-                                // Inside a code block, Return always inserts a newline.
-                                self.insert_newline(Block::Code, false);
+                                // Return on a blank last line leaves the block, as on an empty
+                                // list item; anywhere else it inserts a newline.
+                                if a == b && line_range.is_empty() && self.blocks.get(line_idx + 1) != Some(&Block::Code) {
+                                    self.set_block(Block::Paragraph);
+                                } else {
+                                    self.insert_newline(Block::Code, false);
+                                }
                             }
                             Block::Bullet(_) | Block::Numbered(_) => {
                                 // Return in an empty list item ends the list; otherwise continues it.
@@ -1722,6 +1837,8 @@ impl TextEdit {
                 let i = if m.cmd { self.line_edge(layout, false) } else if word { prev_word(t, self.focus) } else { prev_char(t, self.focus) };
                 self.move_h(i, m.shift);
             }
+            Key::Right if !m.shift && !m.cmd && self.at_end_of_trailing_block() => self.leave_trailing_block(),
+            Key::Down if !m.shift && !m.cmd && self.at_end_of_trailing_block() => self.leave_trailing_block(),
             Key::Right => {
                 let t = &self.text;
                 let i = if m.cmd { self.line_edge(layout, true) } else if word { next_word(t, self.focus) } else { next_char(t, self.focus) };
@@ -1757,9 +1874,11 @@ impl TextEdit {
                     self.focus = self.text.len();
                     self.pending = None;
                 }
-                'b' if !m.shift && !m.alt && self.rich && !self.secure => self.toggle_mark(Mark::Bold),
-                'i' if !m.shift && !m.alt && self.rich && !self.secure => self.toggle_mark(Mark::Italic),
-                'u' if !m.shift && !m.alt && self.rich && !self.secure => self.toggle_mark(Mark::Underline),
+                'b' | 'i' | 'u' => {
+                    if let Some(mark) = self.format_chord(ev) {
+                        self.toggle_mark(mark);
+                    }
+                }
                 'c' if !self.secure => out.copy = Some(self.selected().to_owned()),
                 'x' if !self.secure => {
                     out.copy = Some(self.selected().to_owned());
@@ -1770,6 +1889,29 @@ impl TextEdit {
             Key::Function(_) | Key::Modifier { .. } => {}
         }
         out
+    }
+
+    /// The caret is at the end of the text, in a code block or quote there that it can't move
+    /// out of by itself.
+    fn at_end_of_trailing_block(&self) -> bool {
+        let n = self.text.len();
+        !self.secure
+            && !self.single_line
+            && self.preedit.is_none()
+            && (self.anchor, self.focus) == (n, n)
+            && matches!(self.blocks.last(), Some(Block::Code | Block::Quote))
+    }
+
+    /// Adds an empty paragraph after a trailing code block or quote and puts the caret in it:
+    /// one undo step.
+    fn leave_trailing_block(&mut self) {
+        self.sync_invariants();
+        self.break_history_group();
+        let before = self.snapshot();
+        let n = self.text.len();
+        self.pending = None;
+        self.apply_text_and_attr_replace((n, n), "\n", &[], Some(Block::Paragraph), false);
+        self.record_change(before, false);
     }
 
     fn line_edge(&self, layout: Option<&Layout<Ink>>, end: bool) -> usize {
@@ -1818,6 +1960,7 @@ impl TextEdit {
         let frag = Self::from_html(html_str);
         // HTML that only colours or lays out text (a code editor's copy) would collapse the
         // plain text's whitespace for nothing.
+        let frag = self.keep_allowed(frag);
         let unformatted = frag.marks.is_empty() && frag.blocks.iter().all(|&b| b == Block::Paragraph);
         if !plain.is_empty() && (frag.text.is_empty() || unformatted) {
             return self.paste(plain);
@@ -3009,6 +3152,114 @@ mod tests {
         assert_eq!(e.text, "fn  a() {\n\tb\n}");
         assert_eq!(e.blocks(), &[Block::Code; 3]);
         assert!(e.marks().is_empty());
+    }
+
+    #[test]
+    fn soft_breaks_can_be_set_on_a_rebuilt_draft() {
+        let mut e = TextEdit::from_parts("one\ntwo\nthree", vec![], vec![Block::Bullet(0); 3]).with_soft_breaks(vec![5, 1, 0, 1]);
+        assert_eq!(e.soft_breaks(), &[1], "line 0, duplicates and lines past the end are dropped");
+        assert_eq!(e.to_html().matches("<li>").count(), 2, "\"two\" continues the first bullet");
+        assert_invariants(&e, "with_soft_breaks");
+        e.set_soft_breaks(vec![2]);
+        assert_eq!(e.soft_breaks(), &[2]);
+        let round = TextEdit::from_parts(e.text.clone(), e.marks().to_vec(), e.blocks().to_vec()).with_soft_breaks(e.soft_breaks().to_vec());
+        assert_eq!(round.to_html(), e.to_html());
+    }
+
+    #[test]
+    fn return_on_a_blank_last_line_leaves_a_code_block_in_one_undo_step() {
+        let mut e = TextEdit::new("").rich();
+        e.set_block(Block::Code);
+        e.key(&k(Key::Text("let x = 1;".into())), None);
+        e.key(&k(Key::Enter), None);
+        assert_eq!((e.text.as_str(), e.blocks()), ("let x = 1;\n", &[Block::Code; 2][..]));
+        let out = e.key(&k(Key::Enter), None);
+        assert!(!out.submit);
+        assert_eq!((e.text.as_str(), e.blocks()), ("let x = 1;\n", &[Block::Code, Block::Paragraph][..]), "the blank line left the block");
+        assert_eq!((e.anchor, e.focus), (11, 11));
+        e.key(&k(Key::Text("after".into())), None);
+        assert_eq!(e.blocks(), &[Block::Code, Block::Paragraph]);
+        assert_invariants(&e, "left code");
+        undo(&mut e, false);
+        undo(&mut e, false);
+        assert_eq!((e.text.as_str(), e.blocks()), ("let x = 1;\n", &[Block::Code; 2][..]), "leaving is one undo step");
+
+        // A blank line with more code below it is the code's own.
+        let mut e = TextEdit::from_parts("a\n\nb", vec![], vec![Block::Code; 3]);
+        e.anchor = 2;
+        e.focus = 2;
+        e.key(&k(Key::Enter), None);
+        assert_eq!((e.text.as_str(), e.blocks()), ("a\n\n\nb", &[Block::Code; 4][..]));
+        // So is a non-blank last line, and a blank line under a selection.
+        let mut e = TextEdit::from_parts("a\n", vec![], vec![Block::Code; 2]);
+        e.anchor = 0;
+        e.focus = 2;
+        e.key(&k(Key::Enter), None);
+        assert_eq!((e.text.as_str(), e.blocks()), ("\n", &[Block::Code; 2][..]));
+    }
+
+    #[test]
+    fn down_or_right_at_the_end_of_a_trailing_code_block_or_quote_adds_a_paragraph() {
+        for (block, key) in [(Block::Code, Key::Down), (Block::Code, Key::Right), (Block::Quote, Key::Down), (Block::Quote, Key::Right)] {
+            let mut e = TextEdit::from_parts("x\ny", vec![], vec![block; 2]);
+            let ctx = format!("{block:?} {key:?}");
+            e.anchor = 1;
+            e.focus = 1;
+            e.key(&k(key.clone()), None);
+            assert_eq!(e.text, "x\ny", "{ctx}: not at the end, the caret just moves");
+            e.anchor = 3;
+            e.focus = 3;
+            e.key(&k(key.clone()), None);
+            assert_eq!((e.text.as_str(), e.blocks()), ("x\ny\n", &[block, block, Block::Paragraph][..]), "{ctx}");
+            assert_eq!((e.anchor, e.focus), (4, 4), "{ctx}");
+            assert_invariants(&e, &ctx);
+            e.key(&k(key.clone()), None);
+            assert_eq!(e.text, "x\ny\n", "{ctx}: a paragraph at the end stays put");
+            undo(&mut e, false);
+            assert_eq!((e.text.as_str(), e.blocks()), ("x\ny", &[block; 2][..]), "{ctx}: one undo step");
+        }
+        // Shift extends the selection instead.
+        let mut e = TextEdit::from_parts("x", vec![], vec![Block::Code]);
+        e.key(&KeyEvent { key: Key::Down, mods: Mods { shift: true, ..Mods::default() } }, None);
+        assert_eq!(e.text, "x");
+    }
+
+    #[test]
+    fn a_field_keeps_only_the_marks_and_blocks_it_allows() {
+        let mut e = TextEdit::from_parts("ab", vec![MarkRange { start: 0, end: 1, mark: Mark::Underline }], vec![Block::Paragraph])
+            .allow_marks([Mark::Bold, Mark::Strike, Mark::Code, Mark::Link(String::new())])
+            .allow_blocks([Block::Bullet(0), Block::Quote]);
+        assert!(e.marks().is_empty(), "marks it held are dropped");
+        assert!(e.allows_mark(&Mark::Link("https://example.com".into())) && !e.allows_mark(&Mark::Italic));
+        assert!(e.allows_block(Block::Bullet(3)) && e.allows_block(Block::Paragraph) && !e.allows_block(Block::Code));
+        e.anchor = 0;
+        e.focus = 2;
+        assert_eq!(e.format_chord(&cmd('u')), None, "⌘U is the app's");
+        e.key(&cmd('u'), None);
+        e.key(&cmd('i'), None);
+        e.toggle_mark(Mark::Italic);
+        e.set_mark(Mark::Underline);
+        assert!(e.marks().is_empty());
+        e.key(&cmd('b'), None);
+        assert_eq!(marked(&e, &Mark::Bold), ["ab"]);
+        e.toggle_block(Block::Code);
+        e.set_block(Block::Numbered(0));
+        assert_eq!(e.blocks(), &[Block::Paragraph]);
+        e.toggle_block(Block::Bullet(0));
+        assert_eq!(e.blocks(), &[Block::Bullet(0)]);
+        e.set_marks(vec![MarkRange { start: 0, end: 2, mark: Mark::Italic }]);
+        assert!(e.marks().is_empty(), "set_marks can't add one either");
+
+        let mut e = TextEdit::new("").rich().allow_marks([Mark::Bold]).allow_blocks([Block::Quote]);
+        e.paste_html("<ul><li><b>b</b> <i>i</i> <u>u</u></li></ul><blockquote>q</blockquote><pre>c</pre>", "");
+        assert_eq!(e.text, "b i u\nq\nc");
+        assert_eq!(e.marks().iter().map(|m| &m.mark).collect::<Vec<_>>(), [&Mark::Bold]);
+        assert_eq!(e.blocks(), &[Block::Paragraph, Block::Quote, Block::Paragraph]);
+        assert_invariants(&e, "filtered paste");
+        // HTML whose only formatting the field drops pastes as plain text, keeping its spacing.
+        let mut e = TextEdit::new("").rich().allow_marks([Mark::Bold]);
+        e.paste_html("<p><i>a  b</i></p>", "a  b");
+        assert_eq!(e.text, "a  b");
     }
 
     #[test]

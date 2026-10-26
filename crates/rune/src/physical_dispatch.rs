@@ -30,6 +30,12 @@ impl<S: 'static> Runtime<S> {
             PhysicalInput::Key { mods, .. } => self.held_mods = *mods,
         }
     }
+    /// Queue a key press with its physical code and logical key, as a native host sends them
+    /// (a script's `{"type": "key", "code": …}`).
+    pub(crate) fn physical_key_input(&mut self, event: PhysicalInput, key: KeyEvent) {
+        self.observe_mods(&event);
+        self.physical_with_fallback(event, Some(key));
+    }
     /// Return whether the native host needs to request a frame for this event.
     pub(crate) fn physical_with_fallback(&mut self, event: PhysicalInput, key: Option<KeyEvent>) -> bool {
         self.physical_then(event, key, None)
@@ -112,6 +118,7 @@ impl<S: 'static> Runtime<S> {
             PhysicalInput::Modifiers(_) => {}
         }
         let repeat = matches!(event, PhysicalInput::Key { repeat: true, .. });
+        let code = match event { PhysicalInput::Key { key, .. } => Some(key), _ => None };
         // Live-only when every handler that took the event said so (`Tx::live_only`).
         let mut live = None;
         let consumed = self.offer_physical(&event, tx, &mut live);
@@ -120,6 +127,7 @@ impl<S: 'static> Runtime<S> {
             // A release's logical key, for `on_key_up`.
             Some(Fallback { key, .. }) if matches!(event, PhysicalInput::Key { pressed: false, .. }) => {
                 let mut one = self.transaction();
+                one.physical_key = code;
                 let ran = self.route_key_up(&key, &mut one);
                 fold_live(&mut live, ran, &one);
                 merge(tx, one);
@@ -133,6 +141,7 @@ impl<S: 'static> Runtime<S> {
                     false
                 } else {
                     let mut one = self.transaction();
+                    one.physical_key = code;
                     let ran = self.route_key(&key, repeat, &mut one);
                     let unhandled = unhandled.filter(|_| !ran && !repeat);
                     match unhandled {
@@ -408,6 +417,55 @@ mod tests {
         rt.frame(0.0);
         let s = Key::Text("s".into());
         assert_eq!(rt.state.app, [(s.clone(), false), (s.clone(), true), (s, false)]);
+    }
+
+    #[test]
+    fn key_handlers_see_the_physical_key_whatever_the_layout_types() {
+        #[derive(Default)]
+        struct Codes { edit: TextEdit, input: Vec<Option<PhysicalKeyCode>>, app: Vec<(Key, Option<PhysicalKeyCode>)> }
+        let view = |s: &Codes, _: &mut Cx<Codes>| col().size(300.0, 200.0)
+            .child(text_input(&s.edit, TextStyle::new(14.0, 400.0)).key("field").size(200.0, 32.0)
+                .on_edit(|s: &mut Codes| &mut s.edit)
+                .on_input_key(|s: &mut Codes, _, tx| { s.input.push(tx.physical_key()); false }));
+        let mut rt = Runtime::new(Codes::default(), view, (300.0, 200.0), Env::new(true, 1.0));
+        rt.on_key = Some(|s, ev, tx| { s.app.push((ev.key.clone(), tx.physical_key())); true });
+        rt.frame(0.0);
+        click(&mut rt, "field");
+        rt.frame(0.0);
+        // ⌘⇧7 on a German layout types '/', on a US one '&'; both are the 7 key.
+        let mods = Mods { cmd: true, shift: true, ..Mods::default() };
+        for c in ['/', '&'] {
+            rt.physical_with_fallback(PhysicalInput::Key { key: PhysicalKeyCode::Digit7, mods, pressed: true, repeat: false },
+                Some(KeyEvent { key: Key::Command(c), mods }));
+            rt.physical_with_fallback(PhysicalInput::Key { key: PhysicalKeyCode::Digit7, mods, pressed: false, repeat: false }, None);
+            rt.frame(0.0);
+        }
+        let seven = Some(PhysicalKeyCode::Digit7);
+        assert_eq!(rt.state.input, [seven, seven]);
+        assert_eq!(rt.state.app, [(Key::Command('/'), seven), (Key::Command('&'), seven)]);
+        // A logical key with no physical origin has none.
+        rt.key(KeyEvent { key: Key::Command('&'), mods });
+        rt.frame(0.0);
+        assert_eq!(rt.state.app.last(), Some(&(Key::Command('&'), None)));
+    }
+
+    #[test]
+    fn a_format_chord_the_field_does_not_allow_goes_to_the_app() {
+        #[derive(Default)]
+        struct Rich { edit: TextEdit, app: Vec<Key> }
+        let view = |s: &Rich, _: &mut Cx<Rich>| col().size(300.0, 200.0)
+            .child(text_input(&s.edit, TextStyle::new(14.0, 400.0)).key("field").size(200.0, 32.0).on_edit(|s: &mut Rich| &mut s.edit));
+        let edit = TextEdit::new("ab").rich().allow_marks([crate::Mark::Bold]);
+        let mut rt = Runtime::new(Rich { edit, app: Vec::new() }, view, (300.0, 200.0), Env::new(true, 1.0));
+        rt.on_key = Some(|s, ev, _| { s.app.push(ev.key.clone()); true });
+        rt.frame(0.0);
+        click(&mut rt, "field");
+        rt.frame(0.0);
+        let cmd = |c| KeyEvent { key: Key::Command(c), mods: Mods { cmd: true, ..Mods::default() } };
+        for c in ['a', 'u', 'b'] { rt.key(cmd(c)); }
+        rt.frame(0.0);
+        assert_eq!(rt.state.app, [Key::Command('u')]);
+        assert!(rt.state.edit.marks().iter().all(|m| m.mark == crate::Mark::Bold) && !rt.state.edit.marks().is_empty());
     }
 
     fn release<S: 'static>(rt: &mut Runtime<S>, physical: PhysicalKeyCode) {

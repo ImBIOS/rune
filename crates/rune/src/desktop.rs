@@ -764,7 +764,7 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
                     desk.members[i].resolve_file_dialog(path.clone()).unwrap_or_else(|e| die(&format!("script file dialog: {e}")));
                 }
                 // While another app is active, as after a click on the backdrop, keys go to it.
-                Kind::Key(..) | Kind::KeyUp(_) | Kind::Physical(_) | Kind::Paste(_) => {
+                Kind::Key(..) | Kind::KeyUp(_) | Kind::Physical(_) | Kind::PhysicalKey(..) | Kind::Paste(_) => {
                     if let Some(i) = desk.key.filter(|_| desk.active) { desk.members[i].input(&e.kind, (x, y)); }
                 }
                 Kind::Files(step) => desk.file_input(step, (x, y)),
@@ -776,7 +776,7 @@ pub(crate) fn run(windows: Vec<AnyWindowSpec>, selected: usize, args: Args, acce
             }
             if let Some((ov, _)) = overlay.as_mut() {
                 match &e.kind {
-                    Kind::Key(key, _) => ov.key(e.t, key),
+                    Kind::Key(key, _) | Kind::PhysicalKey(_, key) => ov.key(e.t, key),
                     Kind::Shortcut(chord) => ov.chord(e.t, chord),
                     &Kind::Physical(crate::PhysicalInput::Key { key, mods, pressed: true, .. }) => {
                         if let Ok(chord) = crate::Shortcut::from_physical_key(key, mods) { ov.chord(e.t, &chord) }

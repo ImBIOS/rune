@@ -2686,10 +2686,7 @@ impl<S: 'static> Runtime<S> {
             crate::edit::Key::Function(_) | crate::edit::Key::Tab | crate::edit::Key::PageUp | crate::edit::Key::PageDown => false,
             crate::edit::Key::Command(c) => {
                 matches!(c, 'a' | 'c' | 'x' | 'z')
-                    || (matches!(c, 'b' | 'i' | 'u')
-                        && !ev.mods.shift
-                        && !ev.mods.alt
-                        && self.focused_input().is_some_and(|i| i.edit.is_rich() && !i.edit.is_secure()))
+                    || (matches!(c, 'b' | 'i' | 'u') && self.focused_input().is_some_and(|i| i.edit.format_chord(ev).is_some()))
             }
             _ => !ev.is_command_chord() || ev.control_binding().is_some(),
         };

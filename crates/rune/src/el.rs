@@ -18,6 +18,7 @@ use crate::tok::TextStyle;
 pub struct Tx {
     pub(crate) shortcut_activation_token: Option<String>,
     pub(crate) key_repeat: bool,
+    pub(crate) physical_key: Option<crate::PhysicalKeyCode>,
     pub(crate) focused: Option<String>,
     pub(crate) instant: bool,
     pub(crate) motion: Option<Spring>,
@@ -77,6 +78,15 @@ impl Tx {
     /// (start recording on Enter, say) can return early on a repeat; arrows and Tab usually
     /// want every repeat.
     pub fn key_repeat(&self) -> bool { self.key_repeat }
+
+    /// In a key handler, the physical key behind the logical key it's seeing: where the key
+    /// sits, whatever the keyboard layout and Shift make it type. `KeyEvent` carries the
+    /// character, which moves between layouts once Shift is held (`⌘⇧7` arrives as
+    /// `Key::Command('&')` on a US layout and `Key::Command('/')` on a German one), so a shifted
+    /// shortcut matches this instead: `tx.physical_key() == Some(PhysicalKeyCode::Digit7)`.
+    /// `None` for a key with no physical origin (`Runtime::key`, a script's `"key"` without a
+    /// `"code"`) and outside key handlers.
+    pub fn physical_key(&self) -> Option<crate::PhysicalKeyCode> { self.physical_key }
 
     /// The modifier keys held as this handler runs, so a click can tell Shift-click (extend a
     /// list's selection) and Cmd-click (toggle a row) from a plain one. A key handler reads

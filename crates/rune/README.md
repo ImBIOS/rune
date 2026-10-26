@@ -199,6 +199,12 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   | A link in text | Opens the link |
 
   A field's `on_input_key` sees Return before any of these.
+
+  A handler's `KeyEvent` carries the character the key types, and with Shift held that moves
+  between keyboard layouts: `⌘⇧7` arrives as `Key::Command('&')` on a US layout and
+  `Key::Command('/')` on a German one. `tx.physical_key()` names the key itself
+  (`Some(PhysicalKeyCode::Digit7)` on both), so match shifted shortcuts on it. It is `None` for a
+  key with no physical origin: `Runtime::key`, or a script `"key"` without a `"code"`.
 - **Periodic motion**: `.looping(rune_motion::LoopSpec::opacity(..))` or `LoopSpec::rotation(period)`
   (icon quads). Tracks use animation time, preserve phase when retimed and only request frames
   while visible through ancestor clips. Removal uses the existing spring presence fade. Reduced
@@ -897,14 +903,17 @@ newline on `Shift+Return` and pastes plain text. The mark and block methods work
   decorations (never inserted into `edit.text`), and Parley indents each paragraph's lines by
   `Block::indent_pt`. By default (overridable via `.on_input_key`):
   - `Return` in a non-empty list item starts a new item at the same level; `Return` in an empty
-    list item or quote resets the paragraph to `Block::Paragraph`.
+    list item or quote, or on a blank last line of a code block, resets the paragraph to
+    `Block::Paragraph`, leaving the list, quote or code block.
+  - `Down` or `Right` at the very end of a field that ends in a code block or quote adds an
+    empty paragraph after it, so the caret can always get out.
   - In a rich field, `Shift+Return` inserts a soft line break (`edit.soft_breaks()`) that stays inside the current
     list item or quote without drawing a second marker.
   - `Backspace` at the start of a list item outdents it (`level > 0`) or converts it to
     `Block::Paragraph` (`level == 0`).
   - `Tab` and `Shift+Tab` inside a list item indent or outdent its nesting level instead of moving
     focus.
-  - Inside `Block::Code`, `Return` inserts a newline (never submits), inline marks do not apply,
+  - Inside `Block::Code`, `Return` elsewhere inserts a newline (never submits), inline marks do not apply,
     and a typed or pasted `\t` inserts a literal tab byte that advances by one space (matching core
     text's tab shaping while preserving exact byte offsets and copy/paste).
 - **Per-frame decorations** (`.spans(spans)` / `.decorations(spans)` on `text_input`, `TextInput`
@@ -923,7 +932,16 @@ newline on `Shift+Return` and pastes plain text. The mark and block methods work
   write `selected_html()` beside the text, and paste goes through `paste_html` unless an
   `on_input_paste` hook takes it. Construct or inspect the model directly with
   `TextEdit::from_parts(text, marks, blocks)`, `edit.marks()`, `edit.blocks()` and
-  `edit.paragraphs()`. Accessibility roles (`textbox`) and plain-text values are unchanged.
+  `edit.paragraphs()`, adding soft breaks with `.with_soft_breaks(edit.soft_breaks().to_vec())`
+  (or `set_soft_breaks`). Accessibility roles (`textbox`) and plain-text values are unchanged.
+- **Allowed formatting**: `.allow_marks([Mark::Bold, Mark::Italic, ..])` and
+  `.allow_blocks([Block::Bullet(0), ..])` keep a field to what its app can store (Markdown has no
+  underline, say). The field never holds the rest: its shortcut (`⌘U`) goes on to the app's key
+  handlers, `toggle_mark`, `set_mark`, `toggle_block` and `set_block` skip it, paste drops it
+  (a pasted disallowed block becomes a paragraph), and marks or blocks the field already had
+  are removed. Kinds match whatever they carry (any `Mark::Link` allows links, any
+  `Block::Bullet` level allows bullets); `Block::Paragraph` is always allowed.
+  `edit.allows_mark(&mark)` and `allows_block(block)` tell a formatting bar which buttons to show.
 
 ### Selectable text
 
@@ -1724,7 +1742,9 @@ $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/d
   `KeyEvent::mods`. `" "` gives `Key::Command(' ')`, where a window sends Cmd-Space as
   `Key::Text(" ")` with `mods.cmd`, the only `Text` that carries `cmd`;
   `KeyEvent::is_command(' ')` matches both.
-  `{"physical": "cmd+k"}` reaches only `on_physical_input` handlers. `{"type": "key-up",
+  `"code": "7"` (any key name `{"physical": …}` takes) adds the physical key behind a press,
+  as a window sends it, for handlers that read `tx.physical_key()`; the key is released right
+  after. `{"physical": "cmd+k"}` reaches only `on_physical_input` handlers. `{"type": "key-up",
   "name": " "}` releases a key for `on_key_up`.
 - **Canvas input in scripts**: `{"type": "wheel", "dx": 0, "dy": -40}` is one wheel delta (with
   `cmd` and the other modifiers, `"phase": "began" | "moved" | "ended"` and `"precise"`, true
