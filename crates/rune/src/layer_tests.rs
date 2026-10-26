@@ -1121,7 +1121,7 @@ fn over_budget_cache_falls_back_to_a_viewport_sized_target() {
 #[test]
 fn scale_commits_draw_live_without_repeated_cache_passes() {
     fn view(scale: &f32, _: &mut Cx<f32>) -> El {
-        el().size(200.0, 200.0).scale(*scale).child(
+        el().size(200.0, 200.0).scale(*scale).scale_motion(rune_motion::Curve::Instant).child(
             el().size(48.0, 48.0).cache().fill(Color::WHITE),
         )
     }

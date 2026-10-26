@@ -180,12 +180,15 @@ fn prop_name(id: u16) -> &'static str {
         79 => "press-scale",
         80..=87 => "radial-color",
         88 => "icon-turn",
+        89 => "scale",
         _ => "custom",
     }
 }
 
 /// `El::icon_rotation`'s presented turn, in radians.
 const P_ICON_TURN: Prop<f32> = Prop::custom(88, PropClass::Rotation);
+/// `El::scale`'s presented factor. `prop::SCALE` belongs to `live_scale`; they multiply.
+const P_SCALE: Prop<f32> = Prop::custom(89, PropClass::Scale);
 /// Seconds a changed `El::scale` holds still before its text rasterizes at that size.
 const STATIC_SCALE_SETTLE: f64 = 0.1;
 /// How far (points, per axis) a click may travel and still pair into a double click.
@@ -430,8 +433,10 @@ pub(crate) struct Node {
     /// Inside an `El::inert` subtree (this element or an ancestor).
     pub(crate) inert: bool,
     press_scale: Option<f32>,
-    /// `El::scale`: a fixed factor on the element's own scale.
+    /// `El::scale`: a factor on the element's own scale, springing on `P_SCALE`.
     static_scale: f32,
+    /// `P_SCALE` has a track: paint reads the sprung factor.
+    scale_track: bool,
     /// `El::time_scale`: this element's own factor; the scene multiplies ancestors' in.
     time_scale: f32,
     /// The image ratio this picture's layout took, when it sizes one side from its pixels.
@@ -4112,6 +4117,19 @@ impl<S: 'static> Runtime<S> {
                     }
                 }
             }
+            let k = nodes[i].static_scale;
+            nodes[i].scale_track = k != 1.0 || self.scene.store().has(id, P_SCALE);
+            if nodes[i].scale_track {
+                if instant || !was_present || was_exiting || self.reduced_motion {
+                    self.scene.set(id, P_SCALE, k);
+                } else if self.scene.store().target(id, P_SCALE) != Some(k) {
+                    if !self.scene.store().has(id, P_SCALE) { self.scene.set(id, P_SCALE, 1.0); }
+                    match nodes[i].vis.scale_motion {
+                        Some(anim) => self.scene.animate(id, P_SCALE, k, anim),
+                        None => self.scene.animate(id, P_SCALE, k, spring_l),
+                    }
+                }
+            }
             let vis = &nodes[i].vis;
             if !nodes[i].live.iter().any(|b| b.property == crate::live::Property::Blur)
                 && (vis.blur != 0.0 || self.scene.store().has(id, prop::BLUR))
@@ -5749,12 +5767,13 @@ impl<S: 'static> Runtime<S> {
             let press_k = if n.press_scale.is_some() { self.scene.get(n.id, P_PRESS_SCALE).unwrap_or(1.0) } else { 1.0 };
             let sequence = self.loops.get(&n.id)
                 .filter(|_| matches!(n.looping.map(|l| l.kind), Some(rune_motion::LoopKind::Sequence(_))));
-            let own_sc = p.transform.scale.x * press_k * n.static_scale
+            let static_k = if n.scale_track { self.scene.get(n.id, P_SCALE).unwrap_or(n.static_scale) } else { n.static_scale };
+            let own_sc = p.transform.scale.x * press_k * static_k
                 * sequence.and_then(|l| l.pose(lnow, self.reduced_motion)).map_or(1.0, |p| p.scale);
             // An `El::scale` or `El::live_scale` an app drives from a slider, wheel or pinch
             // counts as moving until it holds still, then rasterizes crisp at its resting scale.
             let has_live_scale = n.live.iter().any(|b| b.property == crate::live::Property::Scale);
-            let tracked_scale = if has_live_scale { n.static_scale * p.transform.scale.x } else { n.static_scale };
+            let tracked_scale = if has_live_scale { static_k * p.transform.scale.x } else { static_k };
             let scale_settling = if tracked_scale != 1.0 || has_live_scale || self.static_scales.contains_key(&n.id) {
                 let t = self.t;
                 let seen = self.static_scales.entry(n.id).or_insert((tracked_scale, f64::NEG_INFINITY, false));
@@ -5772,6 +5791,7 @@ impl<S: 'static> Runtime<S> {
             let store = self.scene.store();
             let scale_animating = store.is_animating(n.id, prop::SCALE) || store.is_animating(n.id, prop::PRESENCE)
                 || (n.press_scale.is_some() && store.is_animating(n.id, P_PRESS_SCALE))
+                || (n.scale_track && store.is_animating(n.id, P_SCALE))
                 || sequence.is_some_and(|l| !self.reduced_motion && l.active(lnow));
             let scale_motion = pinh.scale_motion.max(
                 if !has_live_scale && (scale_animating || scale_settling) {
@@ -7056,6 +7076,7 @@ impl<S: 'static> Runtime<S> {
         let store = self.scene.store();
         let animating = |id: NodeId| store.is_animating(id, prop::FRAME) || store.is_animating(id, prop::TRAVEL)
             || store.is_animating(id, prop::PRESENCE) || store.is_animating(id, prop::OFFSET) || store.is_animating(id, prop::SCALE) || store.is_animating(id, P_PRESS_SCALE)
+            || store.is_animating(id, P_SCALE) || store.is_animating(id, prop::ROTATION)
             || (!self.reduced_motion && self.loops.get(&id).is_some_and(|l| l.active(store.node_time(id))));
         let sel_ranges = self.selection_ranges();
         let mut elements: Vec<_> = self.nodes
@@ -8277,6 +8298,7 @@ fn flatten(
         inert,
         press_scale,
         static_scale,
+        scale_track: false,
         time_scale,
         pixel_aspect,
         aspect_fit,
@@ -9275,7 +9297,8 @@ mod tests {
         struct State { k: f32 }
         fn view(s: &State, _: &mut Cx<State>) -> El {
             col().size(300.0, 200.0)
-                .child(el().key("card").size(200.0, 80.0).scale(s.k).child(crate::el::text("Hamburgefonstiv")))
+                .child(el().key("card").size(200.0, 80.0).scale(s.k).scale_motion(rune_motion::Curve::Instant)
+                    .child(crate::el::text("Hamburgefonstiv")))
         }
         let crisp = |rt: &Runtime<State>| rt.instances.iter().filter(|q| q.params[1] == KIND_GLYPH).all(|q| q.uv[2] == 0.0);
         let mut rt = Runtime::new(State { k: 1.0 }, view, (300.0, 200.0), Env::new(true, 2.0));

@@ -964,6 +964,8 @@ pub struct Visual {
     pub(crate) offset_motion: Option<Anim>,
     /// `El::raise`: paints and takes input above the rest of the window.
     pub(crate) raise: bool,
+    /// The curve `El::scale` changes on.
+    pub(crate) scale_motion: Option<Anim>,
 }
 
 impl Default for Visual {
@@ -1009,6 +1011,7 @@ impl Default for Visual {
             offset: [0.0; 2],
             offset_motion: None,
             raise: false,
+            scale_motion: None,
         }
     }
 }
@@ -2464,11 +2467,18 @@ impl El {
     }
     /// Draw this element and everything in it `k` times its size about its centre, like
     /// SwiftUI's `scaleEffect`: fills, borders, text, icons and images all scale, and text
-    /// rasterizes at the scaled size. Layout keeps the unscaled size, so siblings don't move;
-    /// hit testing follows the scaled rect. Multiplies with transitions, `live_scale` and
-    /// `press_scale`. Anything not finite or below zero is `1.0`.
+    /// rasterizes at the scaled size once it rests. Layout keeps the unscaled size, so siblings
+    /// don't move; hit testing follows the scaled rect. A change springs on the element's layout
+    /// spring (or [`Self::scale_motion`]); under Reduce Motion, and in an instant transaction, it
+    /// lands at once. Multiplies with transitions, `live_scale` and `press_scale`. Anything not
+    /// finite or below zero is `1.0`.
     pub fn scale(mut self, k: f32) -> Self {
         self.scale = if k.is_finite() && k >= 0.0 { k } else { 1.0 };
+        self
+    }
+    /// The curve [`Self::scale`] changes on.
+    pub fn scale_motion(mut self, anim: impl Into<Anim>) -> Self {
+        self.vis.scale_motion = Some(anim.into());
         self
     }
     /// Run the animations of this element and everything in it at `k` times normal speed:
