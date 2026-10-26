@@ -357,6 +357,17 @@ differ from what's on screen, Rune prints the handler. `rt.check_live_only(false
 check off for a test that counts commits; `rt.live_only_events()` counts the events that
 skipped the view.
 
+The debug check compares committed targets, not animated pixels or caret paint, and ignores
+retained exits. It is a heuristic: a view that reads a clock or external state can differ
+without a handler changing it; disable the check for such a view. Release builds compile it
+out. Other model changes in the same frame still commit normally. Editing, paste and file-drop
+actions always commit Rune's own changes, even if a callback calls `live_only`.
+
+Virtual rows select their mounted window from the scroll offset and viewport height, not
+from an independently transformed content stack. Transform the scroll viewport together
+with its rows; use scrolling, rather than `live_offset` on the virtual stack alone, to move
+which rows are visible.
+
 On 2,000 cards (about 6,000 elements) at 2×, a 120-frame pinch with a toolbar following the
 selection, on Apple silicon (`--profile perf`, `cargo run --profile perf -p rune --example
 pinch_bench --features frame-profile`; thread CPU per frame, median of 7 runs):
@@ -373,7 +384,7 @@ top-left, which is what popups and context menus anchor to.
 
 | Handler | Point it gives | Space |
 | --- | --- | --- |
-| `on_drag` | `Drag::x`, `y`, `start_x`, `start_y`, `w`, `h` | local |
+| `on_drag` | `Drag::x`, `y`; `start_x`, `start_y`, `w`, `h` captured at press | local |
 | `on_drag` | `Drag::dx`, `dy` (travel since the press) | window |
 | `on_wheel` | `WheelEvent::x`, `y` (`dx`, `dy` are the scroll in points) | local |
 | `on_magnify`, `on_rotate` | `MagnifyEvent::x`, `y`, `RotateEvent::x`, `y` | local |

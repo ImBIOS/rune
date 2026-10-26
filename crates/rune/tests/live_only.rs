@@ -229,3 +229,72 @@ fn pointer_move_local_can_be_live_only() {
     let c = rect(&rt, "crosshair");
     assert!(near(c, [130.0, 90.0, 1.0, 1.0]), "the crosshair drew where the pointer is: {c:?}");
 }
+
+#[test]
+fn live_transform_refreshes_hover_under_a_stationary_pointer() {
+    struct Hover { pan: Live<[f32; 2]>, changes: Vec<bool>, enters: usize }
+    fn view(s: &Hover, _: &mut Cx<Hover>) -> El {
+        el().child(el().key("moving").size(40.0, 40.0).live_offset(&s.pan)
+            .on_hover(|s: &mut Hover| s.enters += 1)
+            .on_hover_change(|s: &mut Hover, inside, _| s.changes.push(inside)))
+    }
+    let mut rt = Runtime::new(Hover { pan: Live::new([100.0, 0.0]), changes: Vec::new(), enters: 0 }, view,
+        (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.pointer_move(20.0, 20.0); rt.frame(0.0);
+    rt.state.pan.set([0.0, 0.0]);
+    assert!(rt.frame(0.0), "hover reports need another frame even for an immediate live transform");
+    rt.frame(0.0);
+    assert_eq!(rt.state.changes, [true]);
+    assert_eq!(rt.state.enters, 1);
+    rt.state.pan.set([100.0, 0.0]);
+    assert!(rt.frame(0.0)); rt.frame(0.0);
+    assert_eq!(rt.state.changes, [true, false]);
+}
+
+#[test]
+fn nested_live_and_static_scales_keep_local_points_per_runtime() {
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        el().child(el().size(300.0, 300.0).scale(2.0).live_offset(&s.cam_pan)
+            .child(el().key("inner").pin(Some(60.0), Some(60.0), None, None).size(100.0, 100.0)
+                .live_scale(&s.cam_zoom).on_pointer_move_local(|s: &mut S, p, _| s.moves.push(p))
+                .on_secondary_press_local(|s: &mut S, p, _| s.menus.push(p))))
+    }
+    for scale in [1.0, 2.0] {
+        let state = S::new(false);
+        state.cam_pan.set([30.0, 20.0]); state.cam_zoom.set(0.5);
+        let mut rt = Runtime::new(state, view, (500.0, 500.0), Env::new(true, scale));
+        rt.frame(0.0);
+        let r = rect(&rt, "inner");
+        // Nested scales multiply to one, but both anchors still move the origin.
+        let (x, y) = (r[0] + 25.0, r[1] + 35.0);
+        rt.pointer_move(x, y); rt.secondary_down(x, y); rt.secondary_up(x, y); rt.frame(0.0);
+        for p in [rt.state.moves[0], rt.state.menus[0]] {
+            assert!((p.x - 25.0).abs() < 0.01 && (p.y - 35.0).abs() < 0.01, "{p:?}");
+            assert_eq!((p.window_x, p.window_y), (x, y));
+        }
+    }
+}
+
+#[test]
+fn live_only_drag_keeps_capture_outside_the_moving_element() {
+    struct Held { pan: Live<[f32; 2]>, phases: Vec<Phase> }
+    fn view(s: &Held, _: &mut Cx<Held>) -> El {
+        el().child(el().size(40.0, 40.0).live_offset(&s.pan).on_drag(|s: &mut Held, d, tx| {
+            s.phases.push(d.phase);
+            if d.phase == Phase::Move { s.pan.set([d.dx, d.dy]); }
+            tx.live_only();
+        }))
+    }
+    let mut rt = Runtime::new(Held { pan: Live::new([0.0, 0.0]), phases: Vec::new() }, view,
+        (200.0, 200.0), Env::new(true, 1.0));
+    rt.check_live_only(false); rt.frame(0.0);
+    let before = rt.stats.commits;
+    rt.pointer_down(20.0, 20.0); rt.frame(0.0);
+    rt.pointer_move(300.0, 300.0); rt.frame(0.0);
+    assert!(rt.pressing());
+    rt.pointer_up(350.0, 350.0); rt.frame(0.0);
+    assert!(!rt.pressing());
+    assert_eq!(rt.state.phases, [Phase::Down, Phase::Move, Phase::Move, Phase::Up]);
+    assert_eq!(rt.stats.commits, before);
+}

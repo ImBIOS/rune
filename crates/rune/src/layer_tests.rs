@@ -970,6 +970,50 @@ fn cache_updates_same_size_image_pixels_after_the_first_raster() {
 }
 
 #[test]
+fn cached_card_stays_elided_during_sixty_live_only_wheel_frames() {
+    type S = (u32, Live<[f32; 2]>);
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        el().size(160.0, 100.0)
+            .on_wheel(|s: &mut S, e, tx| {
+                let p = s.1.get(); s.1.set([p[0] + e.dx, p[1] + e.dy]);
+                tx.live_only(); true
+            })
+            .child(el().size(160.0, 100.0).live_offset(&s.1)
+                .child(el().size(32.0, 32.0).cache().fill(Color::WHITE)
+                    .child(el().key("button").size(16.0, 16.0)
+                        .fill(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 })
+                        .on_press(|s: &mut S| s.0 += 1))))
+    }
+    let gpu = Gpu::headless();
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let target = Offscreen::new(&gpu.device, 160, 100);
+    let mut rt = Runtime::new((0, Live::new([0.0, 0.0])), view, (160.0, 100.0), Env::new(true, 1.0));
+    rt.check_live_only(false);
+    for _ in 0..3 {
+        rt.frame(1.0 / 60.0);
+        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (160, 100));
+        pixels(&gpu, &renderer, &target);
+    }
+    let commits = rt.stats.commits;
+    for frame in 0..60 {
+        rt.wheel_event(crate::WheelEvent::new(1.0, 0.5).at(120.0, 80.0));
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.stats.commits, commits, "frame {frame} must not rebuild the view");
+        assert_eq!(rt.instances.len(), 2, "frame {frame}: child emission stays elided");
+        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (160, 100));
+        let out = pixels(&gpu, &renderer, &target);
+        if frame == 59 {
+            near(&out[(38 * 160 + 68) * 4..(38 * 160 + 69) * 4], [255, 0, 0, 255]);
+            near(&out[(8 * 160 + 8) * 4..(8 * 160 + 9) * 4], [0; 4]);
+        }
+    }
+    let b = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("button")).unwrap();
+    assert_eq!([b.rect[0], b.rect[1]], [60.0, 30.0]);
+    rt.pointer_down(68.0, 38.0); rt.pointer_up(68.0, 38.0); rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.0, 1, "the click hits the cached child's moved position");
+}
+
+#[test]
 fn cache_does_not_hide_a_radius_change_during_scale_settling() {
     type S = (bool, Live<f32>);
     fn view(s: &S, _: &mut Cx<S>) -> El {

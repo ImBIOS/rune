@@ -2061,7 +2061,7 @@ impl<S: 'static> Runtime<S> {
                 if self.settle { tx.settle(); }
                 self.settled |= tx.settle;
                 #[cfg(debug_assertions)]
-                let check = self.live_check.take().filter(|_| !ran_other && !self.dirty);
+                let check = self.live_check.take().filter(|_| !ran_other && !self.dirty && !ran_layout);
                 self.commit(&tx);
                 #[cfg(debug_assertions)]
                 { self.compare_live_check(check); ran_other = false; }
@@ -2200,7 +2200,7 @@ impl<S: 'static> Runtime<S> {
         self.report_at_bottom();
         self.report_layout();
         animating |= source(self.reveals_active(), AnimSource::REVEAL);
-        self.build();
+        animating |= self.build();
         // A report waits for the next frame: draw one to deliver it.
         animating |= self.report_drawn();
         self.images.end_frame();
@@ -2605,8 +2605,9 @@ impl<S: 'static> Runtime<S> {
         use std::hash::{Hash, Hasher};
         let mut h = std::hash::DefaultHasher::new();
         let floats = |h: &mut std::hash::DefaultHasher, xs: &[f32]| for x in xs { x.to_bits().hash(h) };
-        self.nodes.len().hash(&mut h);
         for n in &self.nodes {
+            // Retained exits can disappear between commits without a model change.
+            if self.is_exiting(n.id) { continue; }
             n.path.hash(&mut h);
             floats(&mut h, &n.target);
             let v = &n.vis;
@@ -2630,9 +2631,9 @@ impl<S: 'static> Runtime<S> {
         let Some((handler, before)) = check else { return };
         if self.view_fingerprint() == before { return; }
         let warning = format!(
-            "rune: {handler} called Tx::live_only, but the view built something else after it: the handler changed \
-             state the view reads, which stays stale on screen until another event commits. Set only Live values in a \
-             live-only handler, or don't call live_only there."
+            "rune: {handler} called Tx::live_only, but the view built something else after it. The handler may have changed \
+             state the view reads, which stays stale until another event commits. Set only Live values in a \
+             live-only handler; for a time-dependent view, disable this heuristic with check_live_only(false)."
         );
         if !self.live_only_warnings.contains(&warning) {
             eprintln!("{warning}");
@@ -2836,7 +2837,7 @@ impl<S: 'static> Runtime<S> {
             .take_while(|&j| self.allowed(j) && !self.subtree_exiting(j))
             .filter_map(|j| self.nodes[j].focus.key.clone())
             .collect();
-        handlers.into_iter().any(|f| f(handler_state(&mut self.state), ev, tx))
+        handlers.into_iter().any(|f| Tx::took(f(handler_state(&mut self.state), ev, tx), tx))
     }
 
     fn focused_input(&self) -> Option<&InputSpec> {
@@ -4891,7 +4892,8 @@ impl<S: 'static> Runtime<S> {
         }
     }
 
-    fn update_interaction(&mut self) {
+    fn update_interaction(&mut self) -> bool {
+        let mut changed = false;
         let captured = self.capture.as_ref().map(|(p, _)| p.as_str()).or(self.secondary_capture.as_deref());
         for i in 0..self.nodes.len() {
             let n = &self.nodes[i];
@@ -4922,6 +4924,8 @@ impl<S: 'static> Runtime<S> {
                 None if hovered => Anim::INSTANT,
                 None => rune_motion::Curve::tween(0.1, rune_motion::Easing::EASE_OUT).into(),
             };
+            changed |= self.scene.store().target(id, P_HOVER).unwrap_or(0.0) != hovered as u8 as f32;
+            changed |= self.scene.store().target(id, P_PRESS).unwrap_or(0.0) != pressed as u8 as f32;
             self.scene.animate(id, P_HOVER, hovered as u8 as f32, hover_anim);
             self.scene.animate(id, P_PRESS, pressed as u8 as f32, if pressed { motion::INSTANT } else { motion::SNAPPY });
             if let Some(k) = press_scale {
@@ -4930,12 +4934,13 @@ impl<S: 'static> Runtime<S> {
                 self.scene.animate(id, P_PRESS_SCALE, if down { k } else { 1.0 }, if down { motion::INSTANT } else { motion::POP });
             }
         }
+        changed
     }
 
     // ---------------------------------------------------------------------------------------
     // Frame build: Scene Presented → instances
 
-    fn build(&mut self) {
+    fn build(&mut self) -> bool {
         let _paint_time = crate::frame_profile::Scope::new(crate::frame_profile::Phase::Paint);
         let s = self.env.scale;
         let snap_px = |v: f32| grid(v, s) * s;
@@ -6225,7 +6230,12 @@ impl<S: 'static> Runtime<S> {
         self.ambient = ambient;
         // A moving chip can enter a stationary pointer. Re-evaluate against this frame's
         // geometry without inventing pointer-move or drag events on animation frames.
-        if self.native_overlay && let Some((x, y)) = self.pointer { self.refresh_hover(x, y); }
+        let queued = self.queue.len();
+        if let Some((x, y)) = self.pointer { self.refresh_hover(x, y); }
+        // A live transform can change hover paint with no handler and no running spring.
+        // Retarget from the new geometry and schedule the frame that samples that paint.
+        let interaction = self.pointer.is_some() && self.update_interaction();
+        self.queue.len() > queued || interaction
     }
 
     fn close_cached_layer(

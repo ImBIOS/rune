@@ -127,3 +127,124 @@ fn the_check_ignores_a_change_another_event_made_in_the_same_frame() {
     assert_eq!((rt.state.count, rt.live_checks), (1, 1));
     assert!(rt.live_only_warnings.is_empty(), "{:?}", rt.live_only_warnings);
 }
+
+#[test]
+fn declined_element_key_does_not_hide_an_ancestor_change() {
+    fn view(s: &u32, _: &mut Cx<u32>) -> El {
+        el().on_key(|s: &mut u32, _, _| { *s += 1; true })
+            .child(el().key("field").size(40.0, 40.0).focusable(true)
+                .on_key(|_: &mut u32, _, tx| { tx.live_only(); false }))
+            .child(text(s.to_string()).key("count"))
+    }
+    let mut rt = Runtime::new(0, view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.check_live_only(false);
+    rt.frame(0.0);
+    let (x, y) = rt.find("field").unwrap();
+    rt.pointer_down(x, y); rt.pointer_up(x, y); rt.frame(0.0);
+    let before = rt.stats.commits;
+    rt.key(KeyEvent { key: Key::Right, mods: Mods::default() });
+    rt.frame(0.0);
+    assert_eq!(rt.state, 1);
+    assert_eq!(rt.stats.commits, before + 1);
+}
+
+#[test]
+fn live_only_does_not_cancel_poll_update_or_later_event_commits() {
+    for source in 0..3 {
+        let mut rt = app(false);
+        rt.check_live_only(false);
+        if source == 0 { rt.poll = Some(|s, _, _| { s.count += 1; true }); }
+        if source == 1 { rt.update(|s, _| s.count += 1); }
+        rt.key_up(KeyEvent { key: Key::Right, mods: Mods::default() });
+        if source == 2 {
+            let (x, y) = rt.find("camera").unwrap();
+            rt.pointer_down(x, y); rt.pointer_up(x, y);
+        }
+        let before = rt.stats.commits;
+        rt.frame(0.0);
+        assert_eq!(rt.state.count, 1);
+        assert!(rt.stats.commits > before);
+        assert_eq!(rt.nodes.iter().find(|n| n.key.as_deref() == Some("count")).unwrap().text.as_ref().unwrap().content, "1");
+    }
+}
+
+#[test]
+fn debug_check_does_not_blame_live_only_for_layout_feedback_before_a_key() {
+    let mut rt = app(false);
+    rt.frame(0.5);
+    // A layout callback changed view state, then a checked event, then another key
+    // forces the queue's mid-frame commit rather than the final commit.
+    rt.nodes[0].on_layout = Some(Rc::new(|s, _| s.downcast_mut::<S>().unwrap().count += 1));
+    rt.queue.push(Action::Layout(rt.nodes[0].path.clone(), [0.0; 4]));
+    rt.key_up(KeyEvent { key: Key::Right, mods: Mods::default() });
+    rt.key(KeyEvent { key: Key::Left, mods: Mods::default() });
+    rt.frame(0.0);
+    assert!(rt.live_only_warnings.is_empty(), "{:?}", rt.live_only_warnings);
+}
+
+#[test]
+fn retained_exit_pruning_does_not_change_the_view_fingerprint() {
+    let mut rt = app(false);
+    let before = rt.view_fingerprint();
+    let id = rt.nodes.last().unwrap().id;
+    rt.scene.remove(id);
+    let exiting = rt.view_fingerprint();
+    assert_ne!(before, exiting);
+    rt.scene.set_time(10.0); rt.scene.frame(); rt.prune_exited();
+    assert_eq!(exiting, rt.view_fingerprint());
+}
+
+#[test]
+fn live_only_keeps_clipboard_scroll_and_wake_requests() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        el().child(el().key("scroll").size(100.0, 100.0).scroll(crate::ScrollSpec { stick_bottom: false })
+            .child(el().size(100.0, 1000.0)))
+    }
+    let mut rt = Runtime::new((), view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.check_live_only(false);
+    rt.on_key = Some(|_, _, tx| {
+        tx.live_only(); tx.copy("copied"); tx.scroll_to_y("scroll", 300.0);
+        tx.wake_after(std::time::Duration::from_secs(1)); true
+    });
+    rt.frame(0.0);
+    let before = rt.stats.commits;
+    rt.key(KeyEvent { key: Key::Right, mods: Mods::default() }); rt.frame(0.0);
+    assert_eq!(rt.stats.commits, before);
+    assert_eq!(rt.copy_request.as_ref().unwrap().content().text(), "copied");
+    let id = rt.nodes.iter().find(|n| n.key.as_deref() == Some("scroll")).unwrap().id;
+    assert_eq!(rt.scrolls[&id].offset, 300.0);
+    assert_eq!(rt.wake_deadline(), Some(1.0));
+}
+
+#[test]
+fn local_points_follow_scroll_offsets_in_windows_and_overlays() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        el().child(el().key("scroll").size(200.0, 200.0).scale(1.5).scroll(crate::ScrollSpec { stick_bottom: false })
+            .child(el().size(200.0, 1000.0).child(el().key("target").size(50.0, 50.0))))
+    }
+    for overlay in [false, true] {
+        let mut rt = Runtime::new((), view, (400.0, 400.0), Env::new(true, 2.0));
+        rt.native_overlay = overlay;
+        rt.frame(0.0);
+        rt.update(|_, tx| tx.scroll_to_y("scroll", 100.0)); rt.frame(0.0);
+        let i = rt.nodes.iter().position(|n| n.key.as_deref() == Some("target")).unwrap();
+        let r = rt.drawn[i];
+        let p = rt.pointer_event(i, r[0] + 15.0, r[1] + 30.0);
+        assert_eq!((p.x, p.y), (10.0, 20.0));
+        assert_eq!((p.window_x, p.window_y), (r[0] + 15.0, r[1] + 30.0));
+    }
+}
+
+#[test]
+fn live_transform_refreshes_hover_paint_without_a_handler() {
+    fn view(s: &Live<[f32; 2]>, _: &mut Cx<Live<[f32; 2]>>) -> El {
+        el().child(el().key("moving").size(40.0, 40.0).live_offset(s).hover(Color::WHITE))
+    }
+    let mut rt = Runtime::new(Live::new([100.0, 0.0]), view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0); rt.pointer_move(20.0, 20.0); rt.frame(0.0);
+    rt.state.set([0.0, 0.0]);
+    assert!(rt.frame(0.0), "changed hover paint must schedule its sample frame");
+    let id = rt.nodes.iter().find(|n| n.key.as_deref() == Some("moving")).unwrap().id;
+    rt.frame(1.0 / 120.0);
+    assert_eq!(rt.scene.get(id, P_HOVER), Some(1.0));
+}

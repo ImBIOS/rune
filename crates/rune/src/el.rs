@@ -322,7 +322,8 @@ impl Tx {
     /// re-run the view or lay it out. The frame still draws the new live values, hit tests
     /// against where they put elements, and reports [`El::on_drawn_layout`]. Whatever else the
     /// handler asked of its `Tx` (a scroll, a copy, `wake_after`) still happens. It works in
-    /// every input handler with a `Tx` and in [`El::on_drawn_layout_tx`]. A handler that
+    /// pointer, gesture, key, press and hover handlers and in [`El::on_drawn_layout_tx`].
+    /// Editing, paste and file-drop actions still commit Rune's own changes. A handler that
     /// declines its event (returns false) takes it back, and an event several handlers take is
     /// live-only only if each says so. It's the handler form of
     /// [`Runtime::update_if`](crate::Runtime::update_if) returning false.
@@ -339,6 +340,9 @@ impl Tx {
     /// commit. Debug builds look for that: a live-only event a quarter second or more after
     /// the last commit still re-runs the view, and if the elements, layout, text or colours
     /// it builds differ from what's on screen, Rune prints the handler that said `live_only`.
+    /// This is a heuristic, not a state-mutation check: a view that reads a clock or other
+    /// external state can also differ. Use [`Runtime::check_live_only`](crate::Runtime::check_live_only)
+    /// to turn it off for such a view. It does no checking in release builds.
     pub fn live_only(&mut self) {
         self.live_only = true;
     }

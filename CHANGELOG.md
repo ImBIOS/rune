@@ -5,11 +5,16 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Live-only review fixes.** A declined element key handler no longer suppresses an
+  ancestor's commit. Moving geometry refreshes hover handlers under a stationary pointer in
+  ordinary windows as well as overlays, and schedules their delivery. Debug spot checks
+  ignore retained exits and unrelated layout feedback before a mid-frame commit.
+
 - **`Tx::live_only`: an event that moves only live values doesn't re-run the view.** A handler
   that changed nothing the view reads (a canvas camera's `live_offset` and `live_scale`) calls
   `tx.live_only()`, and its event skips the view, diff and layout while the frame still draws
   the live values, hit tests where they put elements and reports `on_drawn_layout`. It works in
-  every handler with a `Tx`: wheel, pinch, rotation, drag, pointer move, keys, key releases,
+  pointer and key handlers with a `Tx`: wheel, pinch, rotation, drag, pointer move, keys, key releases,
   physical input, presses and hover. A handler that declines its event takes it back, and an
   event several handlers take is live-only only if each says so. Debug builds check a
   live-only event a quarter second or more after the last commit by re-running the view
