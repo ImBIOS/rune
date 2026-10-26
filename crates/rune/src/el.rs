@@ -419,6 +419,15 @@ pub struct Drag {
     pub dy: f32,
     /// Scratch kept across one gesture's phases (e.g. a grab offset).
     pub data: f32,
+    pub(crate) cancelled: bool,
+}
+
+impl Drag {
+    /// On `Phase::Up`: the gesture ended without a drop (Escape, the window lost focus, or the
+    /// pointer was taken away). Put back whatever the drag moved.
+    pub fn cancelled(&self) -> bool {
+        self.cancelled
+    }
 }
 
 pub(crate) type PressFn = Rc<dyn Fn(&mut dyn Any, &mut Tx)>;
@@ -1051,6 +1060,8 @@ pub struct El {
     pub(crate) on_secondary_press: Option<PointerFn>,
     pub(crate) on_hover: Option<PressFn>,
     pub(crate) on_hover_change: Option<WindowFocusFn>,
+    /// Seconds the pointer must stay inside, then outside, before `on_hover_change` hears it.
+    pub(crate) hover_delay: [f32; 2],
     pub(crate) on_pointer_move: Option<PointerFn>,
     /// `on_wheel`, `on_magnify` and the other canvas handlers (`canvas_input.rs`).
     pub(crate) gestures: Option<Box<crate::canvas_input::CanvasInput>>,
@@ -1133,6 +1144,7 @@ fn base(dir: FlexDirection) -> El {
         on_secondary_press: None,
         on_hover: None,
         on_hover_change: None,
+        hover_delay: [0.0; 2],
         on_pointer_move: None,
         gestures: None,
         above: None,
@@ -2112,6 +2124,16 @@ impl El {
     /// pointer inside until it releases.
     pub fn on_hover_change<S: 'static>(mut self, f: impl Fn(&mut S, bool, &mut Tx) + 'static) -> Self {
         self.on_hover_change = Some(Rc::new(move |s, inside, tx| f(downcast::<S>(s), inside, tx)));
+        self
+    }
+
+    /// Delay [`Self::on_hover_change`]: `true` arrives once the pointer has rested inside for
+    /// `enter`, and `false` once it has stayed out for `leave`. A pass shorter than the delay
+    /// reports nothing, and a held button never starts the wait (a press during it cancels it;
+    /// the wait starts again from the release). A sidebar that peeks open when the pointer
+    /// rests at the window's edge uses `hover_delays(40 ms, 0)`.
+    pub fn hover_delays(mut self, enter: std::time::Duration, leave: std::time::Duration) -> Self {
+        self.hover_delay = [enter.as_secs_f32(), leave.as_secs_f32()];
         self
     }
 

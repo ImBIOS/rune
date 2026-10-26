@@ -301,6 +301,11 @@ impl<S> Cx<S> {
     pub fn system_reduced_motion(&self) -> bool {
         self.system_reduced_motion
     }
+    /// Whether this commit reduces motion: the host preference, or the view's override from
+    /// [`Self::reduced_motion`]. Pass it to builders that pick a different motion under it.
+    pub fn is_reduced_motion(&self) -> bool {
+        self.reduced_motion
+    }
     /// Override the host preference for this commit: travel jumps, opacity/colour briefly fade.
     pub fn reduced_motion(&mut self, on: bool) {
         self.reduced_motion = on;
@@ -384,6 +389,7 @@ pub(crate) struct Node {
     on_secondary_press: Option<PointerFn>,
     on_hover: Option<PressFn>,
     on_hover_change: Option<crate::el::WindowFocusFn>,
+    hover_delay: [f32; 2],
     on_pointer_move: Option<PointerFn>,
     gestures: Option<Box<crate::canvas_input::CanvasInput>>,
     above: Option<crate::el::Anchor>,
@@ -966,6 +972,10 @@ pub struct Runtime<S: 'static> {
     hovered: Option<String>,
     /// Elements with `on_hover_change` that the pointer is inside.
     hover_within: Vec<String>,
+    /// Elements with `hover_delays` whose `on_hover_change` last heard `true`.
+    hover_shown: Vec<String>,
+    /// Delayed hover changes waiting out their delay: path, inside, due on the clock.
+    hover_pending: Vec<(String, bool, f64)>,
     /// Files dragged over the window from another app (`drop_dispatch`).
     file_drag: drop_dispatch::FileDrag,
     pub ime_area: Option<[f32; 4]>,
@@ -1301,6 +1311,8 @@ impl<S: 'static> Runtime<S> {
             surface_visible: true,
             hovered: None,
             hover_within: Vec::new(),
+            hover_shown: Vec::new(),
+            hover_pending: Vec::new(),
             file_drag: Default::default(),
             ime_area: None,
             caret: None,
@@ -1616,7 +1628,10 @@ impl<S: 'static> Runtime<S> {
             self.window_focused = Some(focused);
             if let Some(f) = self.on_focus { self.update(|s, tx| f(s, focused, tx)); }
             self.queue.push(Action::WindowFocus(focused));
-            if !focused { self.keys_lost(); }
+            if !focused {
+                self.keys_lost();
+                if self.cancel_drag() { self.leave_after_release(); }
+            }
         }
         if !focused { self.wheel_lost(); }
     }
@@ -2082,6 +2097,7 @@ impl<S: 'static> Runtime<S> {
         if catch_up > 0.0 { self.catch_up_motion(catch_up); }
         let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
         self.wake_deadlines.drain(..due);
+        self.fire_hover_delays();
         if let Some(poll) = self.poll {
             let mut one = self.transaction();
             // Scheduling does not imply a model change.
@@ -4497,6 +4513,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub(crate) fn cancel_pointer(&mut self) {
+        self.cancel_drag();
         self.drop_drag_out_request();
         self.drag_out_armed = false;
         self.text_sel.dragging = false;
@@ -4505,6 +4522,26 @@ impl<S: 'static> Runtime<S> {
         self.capture_inside = false;
         self.pointer_leave();
         self.drag_files_leave();
+    }
+
+    /// End a held drag without a drop: its handler hears `Phase::Up` with [`Drag::cancelled`]
+    /// and the release that follows does nothing. False when no drag is held.
+    fn cancel_drag(&mut self) -> bool {
+        let Some((path, d)) = &self.capture else { return false };
+        let Some(i) = self.nodes.iter().enumerate().position(|(i, n)| &n.path == path && !self.subtree_exiting(i)) else { return false };
+        if self.nodes[i].on_drag.is_none() || self.drags_out(&self.nodes[i]) { return false; }
+        let (x, y) = self.pointer.unwrap_or(self.press_at);
+        let [lx, ly] = self.to_local(i, x, y);
+        let (dx, dy) = (x - self.press_at.0, y - self.press_at.1);
+        let (path, d) = (path.clone(), Drag { phase: Phase::Up, x: lx, y: ly, dx, dy, cancelled: true, ..*d });
+        let button = std::mem::take(&mut self.capture_button);
+        self.queue.push(Action::Drag(path, d, button));
+        self.capture = None;
+        self.capture_inside = false;
+        self.double_armed = false;
+        self.drag_out_armed = false;
+        self.text_sel.dragging = false;
+        true
     }
 
     /// The held press crossed the drag threshold on a `drag_out` element: ask the host for an
@@ -4575,6 +4612,8 @@ impl<S: 'static> Runtime<S> {
         self.pointer = Some((x, y));
         self.keyboard_focus = false;
         self.dismiss_help();
+        // A press cancels the waits to report an enter; the next move after it starts them again.
+        self.hover_pending.retain(|p| !p.1);
         let target = self.primary_target(x, y);
         if let Some(i) = self.active_modal()
             && target.is_none_or(|t| !self.allowed(t))
@@ -4652,6 +4691,7 @@ impl<S: 'static> Runtime<S> {
             dx: 0.0,
             dy: 0.0,
             data: 0.0,
+            cancelled: false,
         };
         let path = n.path.clone();
         self.drag_out_armed = self.drags_out(n);
@@ -4768,7 +4808,9 @@ impl<S: 'static> Runtime<S> {
 
     /// Queue `on_hover_change` for elements the pointer entered or left.
     fn refresh_hover_within(&mut self) {
-        if self.hover_within.is_empty() && !self.hits.iter().any(|(id, _)| self.node_index.get(id).is_some_and(|&i| self.nodes[i].on_hover_change.is_some())) {
+        if self.hover_within.is_empty() && self.hover_shown.is_empty() && self.hover_pending.is_empty()
+            && !self.hits.iter().any(|(id, _)| self.node_index.get(id).is_some_and(|&i| self.nodes[i].on_hover_change.is_some()))
+        {
             return;
         }
         let mut inside: Vec<String> = Vec::new();
@@ -4789,13 +4831,64 @@ impl<S: 'static> Runtime<S> {
                 }
             }
         }
+        let delayed = |this: &Self, path: &str| this.node(path).map(|n| n.hover_delay).filter(|d| *d != [0.0; 2]);
         for path in &self.hover_within {
-            if !inside.contains(path) { self.queue.push(Action::HoverChange(path.clone(), false)); }
+            if !inside.contains(path) && delayed(self, path).is_none() { self.queue.push(Action::HoverChange(path.clone(), false)); }
         }
         for path in &inside {
-            if !self.hover_within.contains(path) { self.queue.push(Action::HoverChange(path.clone(), true)); }
+            if !self.hover_within.contains(path) && delayed(self, path).is_none() { self.queue.push(Action::HoverChange(path.clone(), true)); }
         }
         self.hover_within = inside;
+        self.settle_hover_delays();
+    }
+
+    /// Starts or drops the waits of `hover_delays` elements whose inside changed.
+    fn settle_hover_delays(&mut self) {
+        let mut paths: Vec<String> = self.hover_shown.clone();
+        paths.extend(self.hover_pending.iter().map(|p| p.0.clone()));
+        paths.extend(self.hover_within.iter().filter(|p| self.node(p).is_some_and(|n| n.hover_delay != [0.0; 2])).cloned());
+        paths.sort();
+        paths.dedup();
+        let now = self.wall_clock().unwrap_or(self.clock);
+        for path in paths {
+            let Some(delay) = self.node(&path).map(|n| n.hover_delay) else {
+                self.hover_shown.retain(|p| *p != path);
+                self.hover_pending.retain(|p| p.0 != path);
+                continue;
+            };
+            let shown = self.hover_shown.contains(&path);
+            // A held button never starts the wait to report an enter.
+            let want = self.hover_within.contains(&path) && (shown || self.capture.is_none());
+            let pending = self.hover_pending.iter().position(|p| p.0 == path);
+            if want == shown {
+                if let Some(i) = pending { self.hover_pending.remove(i); }
+                continue;
+            }
+            if pending.is_some_and(|i| self.hover_pending[i].1 == want) { continue; }
+            if let Some(i) = pending { self.hover_pending.remove(i); }
+            let d = delay[if want { 0 } else { 1 }] as f64;
+            if d <= 0.0 {
+                self.report_hover(path, want);
+            } else {
+                self.hover_pending.push((path, want, now + d));
+                self.schedule_wakes_from(now, [std::time::Duration::from_secs_f64(d)]);
+            }
+        }
+    }
+
+    fn report_hover(&mut self, path: String, inside: bool) {
+        self.hover_shown.retain(|p| *p != path);
+        if inside { self.hover_shown.push(path.clone()); }
+        self.queue.push(Action::HoverChange(path, inside));
+    }
+
+    /// Reports the delayed hover changes due by this frame.
+    fn fire_hover_delays(&mut self) {
+        if self.hover_pending.is_empty() { return; }
+        let clock = self.clock + 1e-6;
+        let (due, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.hover_pending).into_iter().partition(|p| p.2 <= clock);
+        self.hover_pending = rest;
+        for (path, inside, _) in due { self.report_hover(path, inside); }
     }
 
     /// A press on an element is held (the hand drives whatever follows it).
@@ -4854,6 +4947,8 @@ impl<S: 'static> Runtime<S> {
 
     pub fn key(&mut self, ev: KeyEvent) {
         self.dismiss_help();
+        // Escape during a drag cancels it and goes no further.
+        if ev.key == crate::Key::Escape && self.cancel_drag() { return; }
         self.queue.push(Action::Key { ev, repeat: false });
     }
 
@@ -7772,6 +7867,7 @@ fn flatten(
         on_secondary_press,
         on_hover,
         on_hover_change,
+        hover_delay,
         on_pointer_move,
         gestures,
         above,
@@ -7859,6 +7955,7 @@ fn flatten(
         on_secondary_press,
         on_hover,
         on_hover_change,
+        hover_delay,
         on_pointer_move,
         gestures,
         above,
@@ -9355,6 +9452,24 @@ mod tests {
         rt.frame(0.0);
         assert_eq!(rt.state.last(), Some(&(35.0, 4.0)), "travel is measured on screen, not in the moving window");
         assert!(rt.state.contains(&(30.0, 4.0)));
+    }
+
+    #[test]
+    fn taking_the_pointer_away_ends_a_held_drag_cancelled() {
+        type State = Vec<(Phase, bool)>;
+        fn view(_: &State, _: &mut Cx<State>) -> El {
+            el().key("pill").size(100.0, 40.0).on_drag(|s: &mut State, d, _| s.push((d.phase, d.cancelled())))
+        }
+        let mut rt = Runtime::new(Vec::new(), view, (200.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.pointer_down(10.0, 10.0);
+        rt.pointer_move(40.0, 10.0);
+        rt.cancel_pointer();
+        rt.frame(0.0);
+        assert_eq!(rt.state.last(), Some(&(Phase::Up, true)));
+        rt.pointer_up(40.0, 10.0);
+        rt.frame(0.0);
+        assert_eq!(rt.state.iter().filter(|d| d.0 == Phase::Up).count(), 1, "the release after it does nothing");
     }
 
     #[derive(Default)]
