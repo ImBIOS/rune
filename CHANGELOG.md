@@ -10,6 +10,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   Motion, in an instant transaction and on mount. An app that changed `scale` between frames
   now sees it animate. `El::origin(x, y)` sets the unit point that `scale`, `live_scale`,
   `press_scale` and a transition's scale pivot about (default centre); `offset` ignores it.
+  The first four shadows' x, y, blur and spread now spring on the layout spring, as their
+  colour already did, instead of snapping.
 
 - **`PopupList` and `PopupItem`.** `Combobox`'s virtualised popup listbox is now a standalone
   `rune_kit` component (`PopupList::new(key, anchor)` with `PopupItem::new(id, label)` rows) for

@@ -2288,13 +2288,16 @@ impl El {
         self
     }
     /// An outer drop shadow offset by `(0, y)` with CSS `blur` radius (`blur = 2σ`; pass
-    /// `2.0 * r` to match `CALayer.shadowRadius`).
+    /// `2.0 * r` to match `CALayer.shadowRadius`). Springs like [`Self::box_shadow`].
     pub fn shadow(mut self, y: f32, blur: f32, color: Color) -> Self {
         self.vis.shadows.push(Shadow { y, blur, color, ..Shadow::default() });
         self
     }
     /// A full box shadow (offset, spread, inset), e.g. one layer of a CSS elevation token.
-    /// `s.blur` follows CSS (`blur = 2σ`, twice `CALayer.shadowRadius`).
+    /// `s.blur` follows CSS (`blur = 2σ`, twice `CALayer.shadowRadius`). The first four
+    /// shadows spring: a change to one's offset, blur or spread moves on the element's layout
+    /// spring and its colour on the colour spring, so a pressed card's shadow tightens as it
+    /// sinks. Under Reduce Motion, and in an instant transaction, the geometry lands at once.
     pub fn box_shadow(mut self, s: Shadow) -> Self {
         self.vis.shadows.push(s);
         self

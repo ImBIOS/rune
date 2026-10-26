@@ -155,3 +155,41 @@ fn a_transition_scales_about_the_origin() {
     assert!(r[2] < 100.0, "entering: {r:?}");
     assert_eq!([r[0], r[1]], [50.0, 50.0], "grows from its top-left corner");
 }
+
+#[test]
+fn shadow_geometry_springs_with_the_element() {
+    fn view(pressed: &bool, _: &mut Cx<bool>) -> El {
+        let sh = if *pressed {
+            rune::Shadow { x: 0.0, y: 2.0, blur: 4.0, spread: 0.0, color: Color::BLACK.alpha(0.3), inset: false }
+        } else {
+            rune::Shadow { x: 4.0, y: 10.0, blur: 20.0, spread: 2.0, color: Color::BLACK.alpha(0.3), inset: false }
+        };
+        col().w_full().h_full().items_start().padding(50.0).child(
+            el().key("a").size(100.0, 40.0).fill(Color::WHITE).motion(Spring::new(0.3, 0.0)).box_shadow(sh),
+        )
+    }
+    fn shadow(rt: &Runtime<bool>) -> ([f32; 4], f32) {
+        let q = rt.instances.iter().find(|q| q.params[1] == rune::render::KIND_SHADOW).expect("a shadow");
+        (q.rect, q.params[2])
+    }
+    let mut rt = Runtime::new(false, view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let (rest, rest_sigma) = shadow(&rt);
+    assert_eq!(rest, [52.0, 58.0, 104.0, 44.0], "x 4, y 10, spread 2");
+    rt.update(|s, _| *s = true);
+    rt.frame(1.0 / 60.0);
+    let (mid, mid_sigma) = shadow(&rt);
+    assert!(mid[1] > 52.0 && mid[1] < 58.0, "y between: {mid:?}");
+    assert!(mid[0] > 50.0 && mid[0] < 52.0, "x between: {mid:?}");
+    assert!(mid[2] > 100.0 && mid[2] < 104.0, "spread between: {mid:?}");
+    assert!(mid_sigma < rest_sigma && mid_sigma > 2.0, "blur between: {mid_sigma}");
+    settle(&mut rt);
+    assert_eq!(shadow(&rt), ([50.0, 52.0, 100.0, 40.0], 2.0));
+
+    let mut rt = Runtime::new(false, view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.set_system_reduced_motion(true);
+    rt.update(|s, _| *s = true);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(shadow(&rt).0, [50.0, 52.0, 100.0, 40.0], "lands at once under Reduce Motion");
+}

@@ -181,6 +181,7 @@ fn prop_name(id: u16) -> &'static str {
         80..=87 => "radial-color",
         88 => "icon-turn",
         89 => "scale",
+        90..=93 => "shadow",
         _ => "custom",
     }
 }
@@ -189,6 +190,13 @@ fn prop_name(id: u16) -> &'static str {
 const P_ICON_TURN: Prop<f32> = Prop::custom(88, PropClass::Rotation);
 /// `El::scale`'s presented factor. `prop::SCALE` belongs to `live_scale`; they multiply.
 const P_SCALE: Prop<f32> = Prop::custom(89, PropClass::Scale);
+/// The first four shadows' geometry: x, y, blur and spread in a rect's lanes.
+const P_SHADOW_GEO: [Prop<rune_motion::Rect>; 4] = [
+    Prop::custom(90, PropClass::Shape),
+    Prop::custom(91, PropClass::Shape),
+    Prop::custom(92, PropClass::Shape),
+    Prop::custom(93, PropClass::Shape),
+];
 /// Seconds a changed `El::scale` holds still before its text rasterizes at that size.
 const STATIC_SCALE_SETTLE: f64 = 0.1;
 /// How far (points, per axis) a click may travel and still pair into a double click.
@@ -3232,6 +3240,17 @@ impl<S: 'static> Runtime<S> {
         if self.scene.store().is_animating(id, prop) { self.scene.get(id, prop).unwrap_or(rest) } else { rest }
     }
 
+    /// Shadow `k` of node `id` with its geometry where its spring has it.
+    fn shadow_at(&self, id: NodeId, k: usize, sh: &crate::el::Shadow) -> crate::el::Shadow {
+        match P_SHADOW_GEO.get(k) {
+            Some(&prop) if self.scene.store().active_len() > 0 && self.scene.store().is_animating(id, prop) => match self.scene.get(id, prop) {
+                Some(g) => crate::el::Shadow { x: g.x, y: g.y, blur: g.w.max(0.0), spread: g.h, ..*sh },
+                None => *sh,
+            },
+            _ => *sh,
+        }
+    }
+
     // ---------------------------------------------------------------------------------------
     // Commit: view → nodes → layout → Scene retarget
 
@@ -4169,6 +4188,10 @@ impl<S: 'static> Runtime<S> {
             }
             for (k, sh) in vis.shadows.iter().take(P_SHADOWS.len()).enumerate() {
                 self.set_or_anim(id, P_SHADOWS[k], sh.color, spring_c, instant);
+                let geo = rune_motion::Rect { x: sh.x, y: sh.y, w: sh.blur, h: sh.spread };
+                if self.scene.store().target(id, P_SHADOW_GEO[k]) != Some(geo) {
+                    self.set_or_anim(id, P_SHADOW_GEO[k], geo, spring_l, instant);
+                }
             }
             if let Some(g) = vis.gradient {
                 self.set_or_anim(id, P_GRADIENT[0], g[0], spring_c, instant);
@@ -5972,7 +5995,8 @@ impl<S: 'static> Runtime<S> {
                         r[1] + entry.rel_bounds[3] * k,
                     ]
                 } else {
-                    let sh = n.vis.shadows.iter().fold(0.0f32, |m, sh| {
+                    let sh = n.vis.shadows.iter().enumerate().fold(0.0f32, |m, (k, sh)| {
+                        let sh = self.shadow_at(n.id, k, sh);
                         m.max((sh.x.abs() + sh.y.abs() + sh.spread.max(0.0) + sh.blur * 3.0) * eff_scale)
                     });
                     [r[0] - sh, r[1] - sh, r[2] + sh, r[3] + sh]
@@ -6195,6 +6219,7 @@ impl<S: 'static> Runtime<S> {
                     if c.a <= 0.0 || sh.inset {
                         continue;
                     }
+                    let sh = &if k < n.vis.shadows.len() { self.shadow_at(n.id, k, sh) } else { *sh };
                     let sp = sh.spread * k_px;
                     let rect = [r[0] + sh.x * k_px - sp, r[1] + sh.y * k_px - sp, w + 2.0 * sp, h + 2.0 * sp];
                     let sradii = radii.map(|v| if v > 0.0 { (v + sp).max(0.0) } else { 0.0 });
@@ -6431,6 +6456,7 @@ impl<S: 'static> Runtime<S> {
                     if c.a <= 0.0 {
                         continue;
                     }
+                    let sh = &if k < n.vis.shadows.len() { self.shadow_at(n.id, k, sh) } else { *sh };
                     self.instances.push(Instance {
                         rect: [r[0], r[1], w, h],
                         radii,
