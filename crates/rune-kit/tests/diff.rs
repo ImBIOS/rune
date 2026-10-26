@@ -193,7 +193,7 @@ fn runtime(diff: DiffState, size: (f32, f32)) -> Runtime<App> {
     let mut rt = Runtime::new(app, view, size, Env::new(true, 2.0));
     rt.on_key = Some(on_key);
     rt.frame(0.0);
-    tick(&mut rt);
+    settle(&mut rt);
     rt
 }
 
@@ -260,7 +260,7 @@ fn a_long_diff_builds_only_the_rows_in_view_and_measures_tall_ones() {
     d.set_annotations((1..=40).map(|i| Annotation::new(0, LineRef::new(Side::New, i * 99), format!("n{i}"))).collect());
     let mut rt = runtime(d, (800.0, 600.0));
     let built = rows(&rt).len();
-    assert!(built < 80, "{built} rows built for a 600pt view of 5300");
+    assert!(built < 100, "{built} rows built for a 600pt view of 5300: the view and two below");
     // To the end: the last line sits at the bottom of the view, under every tall row above.
     for _ in 0..40 {
         rt.wheel(400.0, 300.0, -100_000.0);

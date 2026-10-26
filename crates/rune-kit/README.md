@@ -300,8 +300,9 @@ DiffView::new(|s: &App| &s.diff, |s: &mut App| &mut s.diff)
 - **Beside a file tree**: `scroll_to_file(i, tx)` and `scroll_to_line` scroll to it, and
   `on_visible_file` reports the file at the top as the list scrolls.
 - **Long diffs** are a virtual list built by index, so a commit costs the rows in view, not
-  the length: a 50,000-line diff opens in about 60 ms (diffing included) and commits in about
-  the same time as a 300-line one.
+  the length: two 50,000-line texts diff in about 40 ms, the first frame takes about 20 ms,
+  and a commit takes as long as a 300-line diff's. `cargo test -p rune-kit --profile perf
+  --test diff diff_50k_time -- --ignored --nocapture` measures it.
 
 `cargo run -p rune-kit --example diff` shows a five-file review with a comment and a folded
 range; stills: [unified](../../demo/kit/diff-unified-light.png) and
