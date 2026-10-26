@@ -664,12 +664,73 @@ struct GlyphKey {
 
 #[derive(Clone, Copy)]
 struct AtlasGlyph {
+    page: u16,
     x: u32,
     y: u32,
     w: u32,
     h: u32,
     left: i32,
     top: i32,
+}
+
+/// Steady-state shelf pages (page 0 + one secondary page for ping-pong eviction).
+const MAX_STEADY_PAGES: usize = 2;
+/// Hard ceiling on total glyph atlas pages if a single frame or unframed loop overflows.
+const MAX_OVERFLOW_PAGES: usize = 8;
+/// CPU byte budget for cached RGBA colour glyphs (`color_pixels`) before frame-boundary eviction.
+const COLOR_GLYPH_BUDGET: usize = 4 * 1024 * 1024;
+
+pub struct AtlasPage {
+    pub data: Vec<u8>,
+    /// Rows `[y0, y1)` changed since the last upload.
+    pub dirty: Option<(u32, u32)>,
+    shelf_x: u32,
+    shelf_y: u32,
+    shelf_h: u32,
+    shown: bool,
+    touched: bool,
+    full: bool,
+    age: u64,
+    live_texels: u32,
+}
+
+impl AtlasPage {
+    fn new(age: u64) -> Self {
+        AtlasPage {
+            data: vec![0; (ATLAS_SIZE * ATLAS_SIZE) as usize],
+            dirty: None,
+            shelf_x: 1,
+            shelf_y: 1,
+            shelf_h: 0,
+            shown: false,
+            touched: false,
+            full: false,
+            age,
+            live_texels: 0,
+        }
+    }
+
+    fn alloc(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+        if self.shelf_x + w + 1 > ATLAS_SIZE {
+            self.shelf_y += self.shelf_h + 1;
+            self.shelf_x = 1;
+            self.shelf_h = 0;
+        }
+        if self.shelf_y + h + 1 > ATLAS_SIZE {
+            self.full = true;
+            return None;
+        }
+        let pos = (self.shelf_x, self.shelf_y);
+        self.shelf_x += w + 1;
+        self.shelf_h = self.shelf_h.max(h);
+        Some(pos)
+    }
+}
+
+enum Rasterized {
+    Empty,
+    Placed(AtlasGlyph),
+    Unplaced,
 }
 
 /// One glyph to draw: device-pixel rect, atlas origin, brush and source byte (for reveals).
@@ -715,9 +776,19 @@ pub struct Atlas {
     pub dirty: Option<(u32, u32)>,
     /// `(node_id, signature)` of `El::cache` targets currently resident in the GPU renderer.
     pub(crate) resident_caches: HashMap<u64, u64>,
+    /// Secondary and overflow shelf pages (`page >= 1` lives at `pages[page - 1]`).
+    pub(crate) pages: Vec<AtlasPage>,
+    pub(crate) resets: u64,
+    pub(crate) rasterized: u64,
     shelf_x: u32,
     shelf_y: u32,
     shelf_h: u32,
+    shown: bool,
+    touched: bool,
+    full: bool,
+    age: u64,
+    live_texels: u32,
+    clock: u64,
     map: GlyphMap<Option<AtlasGlyph>>,
     icons: HashMap<(usize, u32), Option<AtlasGlyph>>,
 }
@@ -726,7 +797,25 @@ impl Atlas {
     /// Marks every row for upload (a new texture, e.g. after the window's format changed).
     pub fn invalidate(&mut self) {
         self.dirty = Some((0, ATLAS_SIZE));
+        for page in &mut self.pages {
+            page.dirty = Some((0, ATLAS_SIZE));
+        }
         self.resident_caches.clear();
+    }
+
+    /// Number of allocated 2048×2048 shelf pages (at least 1).
+    pub fn page_count(&self) -> usize {
+        1 + self.pages.len()
+    }
+
+    /// Number of shelf page resets since the atlas was created.
+    pub fn resets(&self) -> u64 {
+        self.resets
+    }
+
+    /// Number of glyphs and icons placed into the atlas since creation.
+    pub fn rasterized(&self) -> u64 {
+        self.rasterized
     }
 
     /// Rasterized glyph entries, for tests that bound the atlas.
@@ -738,21 +827,31 @@ impl Atlas {
             data: vec![0; (ATLAS_SIZE * ATLAS_SIZE) as usize],
             dirty: None,
             resident_caches: HashMap::new(),
+            pages: Vec::new(),
+            resets: 0,
+            rasterized: 0,
             shelf_x: 1,
             shelf_y: 1,
             shelf_h: 0,
+            shown: false,
+            touched: false,
+            full: false,
+            age: 1,
+            live_texels: 0,
+            clock: 1,
             map: GlyphMap::default(),
             icons: HashMap::new(),
         }
     }
 
-    fn alloc(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+    fn alloc_page0(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
         if self.shelf_x + w + 1 > ATLAS_SIZE {
             self.shelf_y += self.shelf_h + 1;
             self.shelf_x = 1;
             self.shelf_h = 0;
         }
         if self.shelf_y + h + 1 > ATLAS_SIZE {
+            self.full = true;
             return None;
         }
         let pos = (self.shelf_x, self.shelf_y);
@@ -761,37 +860,235 @@ impl Atlas {
         Some(pos)
     }
 
+    fn touch(&mut self, page: u16, texels: u32) {
+        if page == 0 {
+            self.touched = true;
+            self.live_texels = self.live_texels.saturating_add(texels);
+        } else if let Some(p) = self.pages.get_mut(page as usize - 1) {
+            p.touched = true;
+            p.live_texels = p.live_texels.saturating_add(texels);
+        }
+    }
+
+    fn page_age(&self, page: usize) -> u64 {
+        if page == 0 { self.age } else { self.pages[page - 1].age }
+    }
+
+    fn page_full(&self, page: usize) -> bool {
+        if page == 0 { self.full } else { self.pages[page - 1].full }
+    }
+
+    fn page_touched(&self, page: usize) -> bool {
+        if page == 0 { self.touched } else { self.pages[page - 1].touched }
+    }
+
+    fn page_shown(&self, page: usize) -> bool {
+        if page == 0 { self.shown } else { self.pages[page - 1].shown }
+    }
+
+    fn page_non_empty(&self, page: usize) -> bool {
+        if page == 0 {
+            self.shelf_x > 1 || self.shelf_y > 1 || self.shelf_h > 0
+        } else {
+            let p = &self.pages[page - 1];
+            p.shelf_x > 1 || p.shelf_y > 1 || p.shelf_h > 0
+        }
+    }
+
+    fn evict_page(&mut self, page: usize) {
+        let p16 = page as u16;
+        self.map.retain(|_, v| v.is_some_and(|g| g.page != p16));
+        self.icons.retain(|_, v| v.is_some_and(|g| g.page != p16));
+        self.clock += 1;
+        self.resets += 1;
+        if page == 0 {
+            self.shelf_x = 1;
+            self.shelf_y = 1;
+            self.shelf_h = 0;
+            self.dirty = None;
+            self.shown = false;
+            self.touched = false;
+            self.full = false;
+            self.age = self.clock;
+            self.live_texels = 0;
+        } else if let Some(p) = self.pages.get_mut(page - 1) {
+            p.shelf_x = 1;
+            p.shelf_y = 1;
+            p.shelf_h = 0;
+            p.dirty = None;
+            p.shown = false;
+            p.touched = false;
+            p.full = false;
+            p.age = self.clock;
+            p.live_texels = 0;
+        }
+    }
+
+    pub(crate) fn begin_frame(&mut self, pinned_mask: u32) {
+        let total_live = self.live_texels as u64
+            + self.pages.iter().map(|p| p.live_texels as u64).sum::<u64>();
+        let half_page = (ATLAS_SIZE * ATLAS_SIZE / 2) as u64;
+        let needed = ((total_live / half_page) as usize + MAX_STEADY_PAGES)
+            .clamp(MAX_STEADY_PAGES, MAX_OVERFLOW_PAGES);
+        let total = self.page_count();
+        let full_count = (0..total).filter(|&p| self.page_full(p)).count();
+        if full_count >= needed || total > needed {
+            let keep = needed.min(total);
+            if let Some(oldest) = (0..keep)
+                .filter(|&p| self.page_full(p) && (pinned_mask & (1u32 << p.min(31))) == 0)
+                .min_by_key(|&p| self.page_age(p))
+            {
+                self.evict_page(oldest);
+            }
+            for p in keep..total {
+                if (pinned_mask & (1u32 << p.min(31))) == 0 && self.page_non_empty(p) {
+                    self.evict_page(p);
+                }
+            }
+            while self.page_count() > needed {
+                let last = self.page_count() - 1;
+                if (pinned_mask & (1u32 << last.min(31))) != 0 || self.page_non_empty(last) {
+                    break;
+                }
+                self.pages.pop();
+            }
+        }
+        self.shown = std::mem::take(&mut self.touched);
+        self.live_texels = 0;
+        for p in &mut self.pages {
+            p.shown = std::mem::take(&mut p.touched);
+            p.live_texels = 0;
+        }
+        for p in 0..self.page_count() {
+            if (pinned_mask & (1u32 << p.min(31))) != 0 {
+                self.touch(p as u16, 0);
+            }
+        }
+    }
+
+    fn alloc(&mut self, w: u32, h: u32) -> Option<(usize, u32, u32)> {
+        if w == 0 || h == 0 || w + 2 > ATLAS_SIZE || h + 2 > ATLAS_SIZE {
+            return None;
+        }
+        if !self.full && let Some((x, y)) = self.alloc_page0(w, h) {
+            return Some((0, x, y));
+        }
+        for (i, page) in self.pages.iter_mut().enumerate() {
+            if !page.full && let Some((x, y)) = page.alloc(w, h) {
+                return Some((i + 1, x, y));
+            }
+        }
+        // Try shelf tails on full pages for small glyphs before opening or resetting a page.
+        if let Some((x, y)) = self.alloc_page0(w, h) {
+            return Some((0, x, y));
+        }
+        for (i, page) in self.pages.iter_mut().enumerate() {
+            if let Some((x, y)) = page.alloc(w, h) {
+                return Some((i + 1, x, y));
+            }
+        }
+        let total = self.page_count();
+        // Recycle an idle page (untouched in both the last frame and this frame so far).
+        if let Some(p) = (0..total)
+            .filter(|&p| !self.page_touched(p) && !self.page_shown(p) && self.page_non_empty(p))
+            .min_by_key(|&p| self.page_age(p))
+        {
+            self.evict_page(p);
+            let (x, y) = if p == 0 {
+                self.alloc_page0(w, h).unwrap()
+            } else {
+                self.pages[p - 1].alloc(w, h).unwrap()
+            };
+            return Some((p, x, y));
+        }
+        // Once we have the steady-state page pair, recycle the oldest page not touched this frame.
+        if total >= MAX_STEADY_PAGES
+            && let Some(p) = (0..total)
+                .filter(|&p| !self.page_touched(p) && self.page_non_empty(p))
+                .min_by_key(|&p| self.page_age(p))
+        {
+            self.evict_page(p);
+            let (x, y) = if p == 0 {
+                self.alloc_page0(w, h).unwrap()
+            } else {
+                self.pages[p - 1].alloc(w, h).unwrap()
+            };
+            return Some((p, x, y));
+        }
+        if total < MAX_OVERFLOW_PAGES {
+            self.clock += 1;
+            let mut page = AtlasPage::new(self.clock);
+            let (x, y) = page.alloc(w, h).unwrap();
+            self.pages.push(page);
+            return Some((self.pages.len(), x, y));
+        }
+        // Unframed caller exceeded MAX_OVERFLOW_PAGES: evict the oldest page overall.
+        let oldest = (0..total).min_by_key(|&p| self.page_age(p)).unwrap_or(0);
+        self.evict_page(oldest);
+        let (x, y) = if oldest == 0 {
+            self.alloc_page0(w, h).unwrap()
+        } else {
+            self.pages[oldest - 1].alloc(w, h).unwrap()
+        };
+        Some((oldest, x, y))
+    }
+
     fn put(&mut self, w: u32, h: u32, src: &[u8], left: i32, top: i32) -> Option<AtlasGlyph> {
-        let (ax, ay) = self.alloc(w, h)?;
+        let (page, ax, ay) = self.alloc(w, h)?;
+        let (data, dirty) = if page == 0 {
+            (&mut self.data, &mut self.dirty)
+        } else {
+            let p = &mut self.pages[page - 1];
+            (&mut p.data, &mut p.dirty)
+        };
+        // Zero the 1px border around `[ax..ax+w, ay..ay+h]` so bilinear filtering never samples
+        // stale texels from a previous generation without zeroing the whole 4 MB page on reset.
+        let x0 = (ax - 1) as usize;
+        let x1 = (ax + w + 1) as usize;
+        let top_row = (ay - 1) as usize * ATLAS_SIZE as usize;
+        data[top_row + x0..top_row + x1].fill(0);
         for row in 0..h {
             let s = &src[(row * w) as usize..((row + 1) * w) as usize];
-            let dst = ((ay + row) * ATLAS_SIZE + ax) as usize;
-            self.data[dst..dst + w as usize].copy_from_slice(s);
+            let line = (ay + row) as usize * ATLAS_SIZE as usize;
+            data[line + x0] = 0;
+            data[line + ax as usize..line + (ax + w) as usize].copy_from_slice(s);
+            data[line + (ax + w) as usize] = 0;
         }
-        let d = self.dirty.get_or_insert((ay, ay + h));
-        *d = (d.0.min(ay), d.1.max(ay + h));
-        Some(AtlasGlyph { x: ax, y: ay, w, h, left, top })
+        let bot_row = (ay + h) as usize * ATLAS_SIZE as usize;
+        data[bot_row + x0..bot_row + x1].fill(0);
+        let (y0, y1) = (ay - 1, ay + h + 1);
+        let d = dirty.get_or_insert((y0, y1));
+        *d = (d.0.min(y0), d.1.max(y1));
+        self.rasterized += 1;
+        self.touch(page as u16, w * h);
+        Some(AtlasGlyph { page: page as u16, x: ax, y: ay, w, h, left, top })
     }
 }
 
 /// Lean of a synthetic oblique, in degrees, for faces with no italic.
 const SYNTHETIC_OBLIQUE: u8 = 12;
 
-fn rasterize(scaler: &mut swash::scale::Scaler<'_>, atlas: &mut Atlas, glyph: u16, subpx: u8, dilation: f32, skew: u8) -> Option<AtlasGlyph> {
+fn rasterize(scaler: &mut swash::scale::Scaler<'_>, atlas: &mut Atlas, glyph: u16, subpx: u8, dilation: f32, skew: u8) -> Rasterized {
     // Outlines are y-up here, so a positive x-skew leans the tops right.
     let lean = (skew != 0).then(|| Transform::skew(swash::zeno::Angle::from_degrees(skew as f32), swash::zeno::Angle::ZERO));
-    let image = Render::new(&[Source::Outline])
+    let Some(image) = Render::new(&[Source::Outline])
         .format(Format::Alpha)
         .transform(lean)
         // Swash expands toward +x/+y; offset back to preserve the outline's centre.
         .embolden(dilation)
         .offset(Vector::new(subpx as f32 / SUBPIXEL_STEPS - dilation, -dilation))
-        .render(scaler, glyph)?;
+        .render(scaler, glyph)
+    else {
+        return Rasterized::Empty;
+    };
     let (w, h) = (image.placement.width, image.placement.height);
     if w == 0 || h == 0 || !image.data.iter().any(|&coverage| coverage != 0) {
-        return None;
+        return Rasterized::Empty;
     }
-    atlas.put(w, h, &image.data, image.placement.left, image.placement.top)
+    match atlas.put(w, h, &image.data, image.placement.left, image.placement.top) {
+        Some(g) => Rasterized::Placed(g),
+        None => Rasterized::Unplaced,
+    }
 }
 
 /// The colour image of `glyph` (COLR layers or an embedded bitmap scaled to size), or None
@@ -887,8 +1184,18 @@ fn element_path(el: &str) -> Option<String> {
     })
 }
 
-fn rasterize_icon(icon: &Icon, px: u32, atlas: &mut Atlas) -> Option<AtlasGlyph> {
-    atlas.put(px, px, &icon_coverage(icon, px), 0, 0)
+fn rasterize_icon(icon: &Icon, px: u32, atlas: &mut Atlas) -> Rasterized {
+    if px == 0 {
+        return Rasterized::Empty;
+    }
+    let cov = icon_coverage(icon, px);
+    if !cov.iter().any(|&c| c != 0) {
+        return Rasterized::Empty;
+    }
+    match atlas.put(px, px, &cov, 0, 0) {
+        Some(g) => Rasterized::Placed(g),
+        None => Rasterized::Unplaced,
+    }
 }
 
 /// `icon`'s coverage at `px` × `px` device pixels, row-major, as the glyph atlas stores it.
@@ -1005,6 +1312,7 @@ pub struct TextSystem {
     pub atlas: Atlas,
     color_glyphs: GlyphMap<ColorGlyph>,
     color_pixels: Vec<crate::pixels::Pixels>,
+    color_bytes: usize,
     /// Layouts built since the last commit (shaping work counter for perf gates).
     pub shaped: u32,
     /// Reused across lines and frames when mapping reveal glyphs back to source bytes.
@@ -1278,6 +1586,7 @@ impl TextSystem {
             atlas: Atlas::new(),
             color_glyphs: GlyphMap::default(),
             color_pixels: Vec::new(),
+            color_bytes: 0,
             shaped: 0,
             cluster_scratch: Vec::new(),
             coords_scratch: Vec::new(),
@@ -1328,6 +1637,15 @@ impl TextSystem {
     /// The RGBA image of a colour glyph quad (`GlyphQuad::color`, nonzero).
     pub fn color_glyph(&self, color: u32) -> &crate::pixels::Pixels {
         &self.color_pixels[color as usize - 1]
+    }
+
+    pub(crate) fn begin_frame(&mut self, pinned_mask: u32) {
+        self.atlas.begin_frame(pinned_mask);
+        if self.color_bytes > COLOR_GLYPH_BUDGET {
+            self.color_glyphs.clear();
+            self.color_pixels.clear();
+            self.color_bytes = 0;
+        }
     }
 
     /// Keeps layouts used in the last two commits, and older ones, most recently used first,
@@ -1821,7 +2139,12 @@ impl TextSystem {
             skew,
         };
         let entry = match self.atlas.map.get(&key) {
-            Some(&e) => e,
+            Some(&e) => {
+                if let Some(a) = e {
+                    self.atlas.touch(a.page, a.w * a.h);
+                }
+                e
+            }
             None => {
                 // Colour glyphs sit on whole pixels and ignore emboldening and obliques.
                 let color_key = GlyphKey { subpx: 0, dilation: 0, skew: 0, ..key };
@@ -1840,6 +2163,7 @@ impl TextSystem {
                     .normalized_coords(coords.iter().copied())
                     .build();
                 if let Some((pixels, at)) = rasterize_color(&mut scaler, glyph as u16) {
+                    self.color_bytes = self.color_bytes.saturating_add((at.width as usize) * (at.height as usize) * 4);
                     self.color_pixels.push(pixels);
                     let index = self.color_pixels.len() as u32;
                     let c = ColorGlyph { index, left: at.left, top: at.top, w: at.width, h: at.height };
@@ -1847,15 +2171,23 @@ impl TextSystem {
                     out.push(c.quad(gx, gy, ink, byte));
                     return;
                 }
-                let e = rasterize(&mut scaler, &mut self.atlas, glyph as u16, subpx, dilation, skew);
-                self.atlas.map.insert(key, e);
-                e
+                match rasterize(&mut scaler, &mut self.atlas, glyph as u16, subpx, dilation, skew) {
+                    Rasterized::Placed(g) => {
+                        self.atlas.map.insert(key, Some(g));
+                        Some(g)
+                    }
+                    Rasterized::Empty => {
+                        self.atlas.map.insert(key, None);
+                        None
+                    }
+                    Rasterized::Unplaced => None,
+                }
             }
         };
         if let Some(a) = entry {
             out.push(GlyphQuad {
                 rect: [fx + a.left as f32, gy.round() - a.top as f32, a.w as f32, a.h as f32],
-                uv: [a.x as f32, a.y as f32],
+                uv: [a.x as f32, (a.page as u32 * ATLAS_SIZE + a.y) as f32],
                 ink,
                 byte,
                 color: 0,
@@ -1972,16 +2304,27 @@ impl TextSystem {
     pub fn icon_quad(&mut self, icon: &'static Icon, px: u32, origin: [f32; 2]) -> Option<GlyphQuad> {
         let key = (icon as *const Icon as usize, px);
         let entry = match self.atlas.icons.get(&key) {
-            Some(&e) => e,
-            None => {
-                let e = rasterize_icon(icon, px, &mut self.atlas);
-                self.atlas.icons.insert(key, e);
+            Some(&e) => {
+                if let Some(a) = e {
+                    self.atlas.touch(a.page, a.w * a.h);
+                }
                 e
             }
+            None => match rasterize_icon(icon, px, &mut self.atlas) {
+                Rasterized::Placed(g) => {
+                    self.atlas.icons.insert(key, Some(g));
+                    Some(g)
+                }
+                Rasterized::Empty => {
+                    self.atlas.icons.insert(key, None);
+                    None
+                }
+                Rasterized::Unplaced => None,
+            },
         };
         entry.map(|a| GlyphQuad {
             rect: [origin[0].round(), origin[1].round(), a.w as f32, a.h as f32],
-            uv: [a.x as f32, a.y as f32],
+            uv: [a.x as f32, (a.page as u32 * ATLAS_SIZE + a.y) as f32],
             ink: 0,
             byte: 0,
             color: 0,
@@ -3244,5 +3587,82 @@ mod quality_tests {
         text.glyphs_for_layout(&small, 2.0, [0.0, 0.0], false, &mut a);
         text.glyphs_for_layout(&large, 1.0, [0.0, 0.0], false, &mut b);
         assert_ne!(a[0].uv, b[0].uv, "same pixel size, different nominal-size dilation");
+    }
+
+    #[test]
+    fn four_hundred_scales_never_exhaust_the_atlas_or_poison_glyphs() {
+        const ICON: Icon = Icon {
+            name: "box",
+            view: 16.0,
+            body: r#"<rect x="2" y="2" width="12" height="12" fill="currentColor"/>"#,
+        };
+        let mut text = TextSystem::default();
+        // Unplaceable request must not poison the icon cache with `Some(None)`.
+        assert!(text.icon_quad(&ICON, ATLAS_SIZE, [0.0, 0.0]).is_none());
+        assert!(!text.atlas.icons.contains_key(&(&ICON as *const Icon as usize, ATLAS_SIZE)));
+
+        let sample = "The quick brown fox jumps over the lazy dog 0123456789";
+        let mut quads = Vec::new();
+        for i in 0..400 {
+            text.begin_frame(0);
+            quads.clear();
+            let size = 18.0 + (i as f32) * 0.45;
+            text.glyphs(sample, TextStyle::new(size, 400.0), 2.0, [0.0, 0.0], &mut quads);
+            let expected = sample.chars().filter(|c| !c.is_whitespace()).count();
+            assert_eq!(quads.len(), expected, "missing glyph at step {i} (size={size})");
+            let icon_px = 24 + (i % 96) as u32;
+            assert!(text.icon_quad(&ICON, icon_px, [0.0, 0.0]).is_some(), "missing icon at step {i}");
+        }
+        assert!(text.atlas.resets() >= 4, "400 scales must cycle the atlas multiple times (resets={})", text.atlas.resets());
+        assert!(text.atlas.page_count() <= MAX_STEADY_PAGES, "steady single-page frames stay within 2 pages");
+
+        // Fresh string at scale 1.0 after 400 scales must have every glyph present and non-empty.
+        text.begin_frame(0);
+        let fresh = "Sphinx of black quartz, judge my vow! 9876543210";
+        quads.clear();
+        text.glyphs(fresh, TextStyle::new(16.0, 400.0), 1.0, [0.0, 0.0], &mut quads);
+        let expected_fresh = fresh.chars().filter(|c| !c.is_whitespace()).count();
+        assert_eq!(quads.len(), expected_fresh, "every glyph in the fresh string at scale 1 must be present");
+        for (idx, q) in quads.iter().enumerate() {
+            let page = (q.uv[1] as u32 / ATLAS_SIZE) as usize;
+            let (ax, ay) = (q.uv[0] as u32, q.uv[1] as u32 % ATLAS_SIZE);
+            let (w, h) = (q.rect[2] as u32, q.rect[3] as u32);
+            let buf = if page == 0 { &text.atlas.data } else { &text.atlas.pages[page - 1].data };
+            let mut sum = 0u64;
+            for row in 0..h {
+                let start = ((ay + row) * ATLAS_SIZE + ax) as usize;
+                sum += buf[start..start + w as usize].iter().map(|&b| b as u64).sum::<u64>();
+            }
+            assert!(sum > 0, "fresh glyph {idx} must have nonzero coverage in page {page}");
+        }
+        // Whitespace is still cached as `Some(None)` so spaces don't re-enter swash every frame.
+        assert!(text.atlas.map.values().any(|v| v.is_none()), "empty space glyph is cached as None");
+    }
+
+    #[test]
+    fn single_frame_exceeding_one_page_places_every_glyph_across_overflow_pages() {
+        const ICON: Icon = Icon {
+            name: "box",
+            view: 16.0,
+            body: r#"<rect x="1" y="1" width="14" height="14" fill="currentColor"/>"#,
+        };
+        let mut text = TextSystem::default();
+        text.begin_frame(0);
+        let mut placed = Vec::new();
+        // 32 icons around 400×400 px each (~5.1M texels) exceed one 2048×2048 page (4.19M texels) in a single frame.
+        for i in 0..32u32 {
+            let px = 380 + i;
+            let q = text.icon_quad(&ICON, px, [0.0, 0.0]).expect("overflow page must accommodate single-frame burst");
+            placed.push((px, q));
+        }
+        assert!(text.atlas.page_count() >= 2, "single frame exceeding 4M texels must spill to a second page");
+        assert_eq!(text.atlas.resets(), 0, "must not evict a page already touched in the current frame");
+        for (px, q) in &placed {
+            let page = (q.uv[1] as u32 / ATLAS_SIZE) as usize;
+            let (ax, ay) = (q.uv[0] as u32, q.uv[1] as u32 % ATLAS_SIZE);
+            let buf = if page == 0 { &text.atlas.data } else { &text.atlas.pages[page - 1].data };
+            let mid = ((ay + px / 2) * ATLAS_SIZE + ax + px / 2) as usize;
+            assert_eq!(buf[mid], 255, "glyph at {px}px on page {page} must retain its coverage");
+        }
     }
 }

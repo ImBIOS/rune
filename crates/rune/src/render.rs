@@ -464,6 +464,14 @@ impl Gpu {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BatchBind {
+    /// Glyph atlas page 0 with image atlas page `usize`.
+    Image(usize),
+    /// Secondary glyph atlas page `usize` (index in `atlas_pages`, i.e. glyph page - 1).
+    Glyph(usize),
+}
+
 pub struct Renderer {
     surfaces: Option<crate::native_surface::SurfaceRenderer>,
     pipeline: wgpu::RenderPipeline,
@@ -477,9 +485,11 @@ pub struct Renderer {
     bind_layout: wgpu::BindGroupLayout,
     globals: wgpu::Buffer,
     atlas: wgpu::Texture,
+    /// Secondary glyph atlas pages (`1..`).
+    atlas_pages: Vec<(wgpu::Texture, wgpu::BindGroup)>,
     /// Stable image pages; the initial bind group uses a 1×1 stand-in.
     images: Vec<Option<(wgpu::Texture, wgpu::BindGroup)>>,
-    image_batches: Vec<(std::ops::Range<u32>, usize)>,
+    image_batches: Vec<(std::ops::Range<u32>, BatchBind)>,
     instances: wgpu::Buffer,
     capacity: usize,
     count: u32,
@@ -595,6 +605,7 @@ impl Renderer {
             bind_layout: bgl,
             globals,
             atlas,
+            atlas_pages: Vec::new(),
             images: Vec::new(),
             image_batches: Vec::new(),
             instances,
@@ -946,11 +957,23 @@ impl Renderer {
         if let Some(properties) = &self.springs { pass.set_bind_group(1, &properties.group, &[]); }
         pass.set_vertex_buffer(0, self.instances.slice(..));
         let start = self.image_batches.partition_point(|(batch, _)| batch.end <= range.start);
-        for (batch, page) in self.image_batches[start..].iter().take_while(|(batch, _)| batch.start < range.end) {
-            let bind = if let Some(index) = target {
-                let t = self.layers.targets[index].as_ref().unwrap();
-                t.images.get(*page).and_then(Option::as_ref).unwrap_or(&t.base)
-            } else { self.images.get(*page).and_then(Option::as_ref).map_or(&self.bind_group, |(_, bind)| bind) };
+        for (batch, bind_kind) in self.image_batches[start..].iter().take_while(|(batch, _)| batch.start < range.end) {
+            let bind = match (*bind_kind, target) {
+                (BatchBind::Image(page), Some(index)) => {
+                    let t = self.layers.targets[index].as_ref().unwrap();
+                    t.images.get(page).and_then(Option::as_ref).unwrap_or(&t.base)
+                }
+                (BatchBind::Image(page), None) => {
+                    self.images.get(page).and_then(Option::as_ref).map_or(&self.bind_group, |(_, bind)| bind)
+                }
+                (BatchBind::Glyph(page), Some(index)) => {
+                    let t = self.layers.targets[index].as_ref().unwrap();
+                    t.glyphs.get(page).unwrap_or(&t.base)
+                }
+                (BatchBind::Glyph(page), None) => {
+                    self.atlas_pages.get(page).map_or(&self.bind_group, |(_, bind)| bind)
+                }
+            };
             pass.set_bind_group(0, bind, &[]);
             pass.draw(0..4, batch.start.max(range.start)..batch.end.min(range.end));
         }
@@ -976,6 +999,20 @@ impl Renderer {
     ) {
         if self.springs.is_some() { assert_eq!(instances.len(), self.spring_instances); }
         if let Some(rows) = atlas.dirty.take() { Self::write_rows(queue, &self.atlas, &atlas.data, rows); }
+        let mut atlas_changed = self.atlas_pages.len() > atlas.pages.len();
+        self.atlas_pages.truncate(atlas.pages.len());
+        for (index, page) in atlas.pages.iter_mut().enumerate() {
+            if index >= self.atlas_pages.len() {
+                let texture = Self::texture(device, "glyph atlas", wgpu::TextureFormat::R8Unorm, ATLAS_SIZE, ATLAS_SIZE);
+                let bind = Self::bind_group(device, &self.bind_layout, &self.globals, &texture, &texture, None);
+                self.atlas_pages.push((texture, bind));
+                atlas_changed = true;
+            }
+            if let Some(rows) = page.dirty.take() {
+                Self::write_rows(queue, &self.atlas_pages[index].0, &page.data, rows);
+            }
+        }
+        if atlas_changed { self.images_changed(); }
         if instances.len() > self.capacity {
             self.capacity = instances.len().next_power_of_two();
             self.instances = Self::instance_buffer(device, self.capacity);
@@ -988,19 +1025,34 @@ impl Renderer {
         queue.write_buffer(&self.globals, 16, bytemuck::cast_slice(&flags));
         self.count = instances.len() as u32;
         self.image_batches.clear();
-        let (mut start, mut page) = (0, 0);
+        let (mut start, mut bind) = (0, BatchBind::Image(0));
         let mut has_layers = false;
         self.effects.clear();
         for (i, instance) in instances.iter().enumerate() {
             has_layers |= instance.params[1] == KIND_LAYER;
             if instance.params[1] == KIND_EFFECT { self.effects.push((i as u32, *instance)); }
-            if instance.params[1] == KIND_IMAGE && instance.params[0] as usize != page {
-                if start < i as u32 { self.image_batches.push((start..i as u32, page)); }
+            let next_bind = if instance.params[1] == KIND_IMAGE {
+                Some(BatchBind::Image(instance.params[0] as usize))
+            } else if instance.params[1] == KIND_GLYPH {
+                let g = instance.params[2] as usize;
+                if g == 0 {
+                    match bind {
+                        BatchBind::Image(_) => None,
+                        BatchBind::Glyph(_) => Some(BatchBind::Image(0)),
+                    }
+                } else {
+                    Some(BatchBind::Glyph(g - 1))
+                }
+            } else {
+                None
+            };
+            if let Some(next) = next_bind && next != bind {
+                if start < i as u32 { self.image_batches.push((start..i as u32, bind)); }
                 start = i as u32;
-                page = instance.params[0] as usize;
+                bind = next;
             }
         }
-        if start < self.count { self.image_batches.push((start..self.count, page)); }
+        if start < self.count { self.image_batches.push((start..self.count, bind)); }
         self.prepare_layers(device, queue, if has_layers { instances } else { &[] }, viewport);
         self.sync_resident_caches(&mut atlas.resident_caches);
         if self.effects.iter().any(|(_, i)| i.params[0] != 0.0) {

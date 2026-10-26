@@ -87,8 +87,11 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
     changes its view).
   - The Retina scale is applied throughout.
 - **Text** (`text.rs`): Parley 0.12 lays out embedded Inter 4.1 (OFL, `assets/`). swash 0.2
-  rasterises unhinted, centered, .1-point-emboldened outlines into a 2048² R8 atlas with four
-  horizontal subpixel positions and pixel-snapped baselines. Colors share the same atlas masks.
+  rasterises unhinted, centered, .1-point-emboldened outlines into a 2048² R8 shelf atlas with four
+  horizontal subpixel positions, a 1 px zeroed border per glyph, and pixel-snapped baselines. The
+  atlas recycles a two-page steady ping-pong pool across frames without zeroing 4 MiB buffers,
+  spills to overflow pages when a single frame exceeds one page, and never caches an allocation
+  failure as an empty glyph. Colors share the same atlas masks.
   The [CoreText comparison and phase sweep](../../research/23-text-quality.md) measure weight,
   structural similarity and motion brightness variation at 1×/2×.
 - **Input**: hit-testing on presented rects, pointer capture, hover and press overlays, press on
@@ -133,9 +136,10 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   hit boxes and a text field's caret follow). Text under a still scale rasterizes at the scaled size, so it stays
   crisp. While a scale springs, text samples its rest-size glyphs, filtered, and turns crisp when
   the spring settles. That way a spring doesn't rasterize a glyph at every frame's size. Text
-  under `live_scale`, or under a `scale` an app changes (a zoom slider), rasterizes at the scale
-  rounded to 1/32, and a changing `scale` samples rest-size glyphs until it holds still for
-  0.1 s. A matched flight's own label keeps its rest size so it doesn't pop when it lands.
+  under an actively moving `live_scale` rasterizes at logarithmic $2^{1/4}$ scale buckets and
+  re-rasterizes crisp at the exact resting scale once it holds still for 0.1 s; a changing
+  `scale` samples rest-size glyphs while moving and re-rasterizes crisp at the resting scale
+  after 0.1 s. A matched flight's own label keeps its rest size so it doesn't pop when it lands.
 - **Cached subtrees** (`.cache()`, `.cache_key(u64)`): rasterizes a settled subtree once into an
   offscreen `Rgba16Float` layer texture (reusing the isolated-layer compositor in `layers.rs`) and
   composites that single quad on subsequent frames without re-emitting or re-drawing its

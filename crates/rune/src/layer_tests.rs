@@ -1124,3 +1124,168 @@ fn scale_commits_draw_live_without_repeated_cache_passes() {
     renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (200, 200));
     assert_eq!(renderer.layer_stats().extra_passes, 1, "cache once the committed scale settles");
 }
+
+#[test]
+fn glyph_atlas_survives_four_hundred_scales_and_renders_fresh_and_cached_text() {
+    struct State {
+        font_size: f32,
+        banner: &'static str,
+        card_text: &'static str,
+    }
+    fn view(s: &State, _: &mut Cx<State>) -> El {
+        crate::col()
+            .size(360.0, 120.0)
+            .gap(8.0)
+            .child(
+                crate::text(s.banner)
+                    .font(crate::TextStyle::new(s.font_size, 400.0))
+                    .color(Color::WHITE),
+            )
+            .child(
+                el().size(320.0, 40.0)
+                    .cache()
+                    .child(crate::text(s.card_text).font(crate::TextStyle::new(16.0, 500.0)).color(Color::WHITE)),
+            )
+    }
+    let gpu = Gpu::headless();
+    let target = Offscreen::new(&gpu.device, 360, 120);
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let mut rt = Runtime::new(
+        State {
+            font_size: 16.0,
+            banner: "The quick brown fox jumps over the lazy dog 0123456789",
+            card_text: "CACHED SUBTREE ALPHA",
+        },
+        view,
+        (360.0, 120.0),
+        Env::new(true, 1.0),
+    );
+    rt.frame(0.0);
+    renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (360, 120));
+    let _ = pixels(&gpu, &renderer, &target);
+
+    for i in 0..400 {
+        rt.state.font_size = 18.0 + (i as f32) * 0.45;
+        rt.invalidate();
+        rt.frame(1.0 / 60.0);
+    }
+    assert!(rt.text.atlas.resets() >= 2, "400 scales must cycle the glyph atlas (resets={})", rt.text.atlas.resets());
+
+    // Now draw a fresh string at scale 1 (font_size 18.0) and a fresh cached card string.
+    rt.state.font_size = 18.0;
+    rt.state.banner = "Sphinx of black quartz, judge my vow!";
+    rt.state.card_text = "CACHED SUBTREE OMEGA";
+    rt.invalidate();
+    rt.frame(1.0);
+    renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (360, 120));
+    let out = pixels(&gpu, &renderer, &target);
+
+    let glyphs: Vec<_> = rt.instances.iter().filter(|q| q.params[1] == KIND_GLYPH).collect();
+    let expected = rt.state.banner.chars().filter(|c| !c.is_whitespace()).count()
+        + rt.state.card_text.chars().filter(|c| !c.is_whitespace()).count();
+    assert_eq!(glyphs.len(), expected, "every glyph in both fresh and cached text must be emitted");
+    for (idx, g) in glyphs.iter().enumerate() {
+        let x0 = (g.rect[0].floor().max(0.0) as u32).min(360);
+        let y0 = (g.rect[1].floor().max(0.0) as u32).min(120);
+        let x1 = ((g.rect[0] + g.rect[2]).ceil().max(0.0) as u32).min(360);
+        let y1 = ((g.rect[1] + g.rect[3]).ceil().max(0.0) as u32).min(120);
+        let mut lit = 0u32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let p = &out[((y * 360 + x) * 4) as usize..][..4];
+                if p[0] > 16 || p[1] > 16 || p[2] > 16 {
+                    lit += 1;
+                }
+            }
+        }
+        assert!(lit > 0, "glyph {idx} at {:?} (page {}) rendered zero ink pixels", g.rect, g.params[2]);
+    }
+}
+
+#[test]
+fn single_frame_spanning_multiple_glyph_atlas_pages_draws_all_pages() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        let mut root = el().size(512.0, 512.0);
+        // 24 overlapping lines of large text inside the viewport overflow page 0 into page 1+.
+        for i in 0..24 {
+            root = root.child(
+                crate::text("ABCDEFGHIJKLMN")
+                    .absolute(4.0, (i * 8) as f32)
+                    .font(crate::TextStyle::new(150.0 + i as f32 * 2.0, 700.0))
+                    .color(Color::WHITE),
+            );
+        }
+        root
+    }
+    let gpu = Gpu::headless();
+    let target = Offscreen::new(&gpu.device, 512, 512);
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let mut rt = Runtime::new((), view, (512.0, 512.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    assert!(rt.text.atlas.page_count() >= 2, "single frame must allocate >= 2 pages (got {})", rt.text.atlas.page_count());
+    assert_eq!(rt.text.atlas.resets(), 0, "single frame must not reset a live page mid-frame");
+    assert!(rt.instances.iter().any(|i| i.params[1] == KIND_GLYPH && i.params[2] == 0.0), "has page 0 glyphs");
+    assert!(rt.instances.iter().any(|i| i.params[1] == KIND_GLYPH && i.params[2] >= 1.0), "has page 1+ glyphs");
+
+    renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (512, 512));
+    let out = pixels(&gpu, &renderer, &target);
+    for page in [0.0f32, 1.0f32] {
+        let g = rt
+            .instances
+            .iter()
+            .find(|i| i.params[1] == KIND_GLYPH && i.params[2] == page && i.rect[0] >= 0.0 && i.rect[1] >= 0.0 && i.rect[0] + i.rect[2] <= 512.0 && i.rect[1] + i.rect[3] <= 512.0)
+            .unwrap_or_else(|| panic!("expected in-viewport glyph on page {page}"));
+        let (x0, y0) = (g.rect[0].floor() as u32, g.rect[1].floor() as u32);
+        let (x1, y1) = ((g.rect[0] + g.rect[2]).ceil() as u32, (g.rect[1] + g.rect[3]).ceil() as u32);
+        let mut lit = 0u32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if out[((y * 512 + x) * 4) as usize] > 16 {
+                    lit += 1;
+                }
+            }
+        }
+        assert!(lit > 0, "glyph on page {page} at {:?} must render visible pixels", g.rect);
+    }
+}
+
+#[test]
+fn live_scale_zoom_sweep_buckets_during_motion_and_settles_crisp() {
+    fn view(zoom: &Live<f32>, _: &mut Cx<Live<f32>>) -> El {
+        el().size(300.0, 120.0)
+            .live_scale(zoom)
+            .child(crate::text("Hamburgefonstiv").font(crate::TextStyle::new(14.0, 400.0)).color(Color::WHITE))
+    }
+    let zoom = Live::new(1.0);
+    let mut rt = Runtime::new(zoom.clone(), view, (300.0, 120.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    let per_size = rt.text.atlas.rasterized();
+    assert!(per_size >= 10);
+
+    // 10 s zoom sweep at 120 Hz (1,200 frames) across [0.25, 4.0] (4 octaves = 17 quarter-octave buckets).
+    for frame in 1..=1200 {
+        let u = frame as f32 / 1200.0;
+        let k = 0.25 * 16.0f32.powf(u);
+        zoom.set(k);
+        rt.frame(1.0 / 120.0);
+    }
+    let sweep_rasterized = rt.text.atlas.rasterized();
+    let distinct_sizes = sweep_rasterized / per_size;
+    assert!(
+        distinct_sizes <= 18,
+        "10s zoom sweep across [0.25, 4.0] must rasterize at most 17 bucketed sizes (got {distinct_sizes}, total={sweep_rasterized})"
+    );
+
+    // Stop at an off-bucket scale (1.13) and let it settle: must re-rasterize crisp at 1.13 and stop animating.
+    zoom.set(1.13);
+    rt.frame(1.0 / 120.0);
+    assert!(rt.instances.iter().filter(|q| q.params[1] == KIND_GLYPH).any(|q| q.uv[2] > 0.0), "filtered while moving");
+    for _ in 0..20 {
+        rt.frame(1.0 / 120.0);
+    }
+    assert!(
+        rt.instances.iter().filter(|q| q.params[1] == KIND_GLYPH).all(|q| q.uv[2] == 0.0),
+        "crisp 1:1 glyphs once live_scale settles at 1.13"
+    );
+    assert!(!rt.frame(1.0 / 120.0), "nothing keeps animating after live_scale settles");
+}

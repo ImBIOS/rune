@@ -660,13 +660,13 @@ struct ActiveCache {
 }
 
 /// How a subtree's scale is changing. Text under a still scale rasterizes at its scaled size.
-/// Under a moving one it samples its rest-size glyphs, so a spring doesn't rasterize every glyph
-/// at every frame's size into the glyph atlas, which never evicts.
+/// Under a live zoom gesture it steps through logarithmic $2^{1/4}$ buckets and lands on the
+/// exact resting scale once still; under a short spring it samples its rest-size glyphs.
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 enum ScaleMotion {
     #[default]
     Still,
-    /// Bound to a live value, which an app may publish every frame: rasterize at rounded sizes.
+    /// Bound to a live scale that is actively changing: rasterize at $2^{1/4}$ octave buckets.
     Live,
     Moving,
 }
@@ -676,7 +676,7 @@ impl ScaleMotion {
     fn raster(self, sc: f32) -> f32 {
         let k = match self {
             ScaleMotion::Still => sc,
-            ScaleMotion::Live => (sc * 32.0).round() / 32.0,
+            ScaleMotion::Live => 2.0f32.powf((sc.max(1e-4).log2() * 4.0).round() * 0.25),
             ScaleMotion::Moving => 1.0,
         };
         // A tiny or huge raster isn't worth its atlas space; sample the rest size instead.
@@ -2262,11 +2262,11 @@ impl<S: 'static> Runtime<S> {
         self.report_layout();
         // A report waits for the next frame: draw one to deliver it.
         animating |= self.report_drawn();
-        self.images.end_frame();
         animating |= source(self.loops_active, AnimSource::LOOP);
         animating |= source(self.static_scale_settling, AnimSource::SCALE_SETTLE);
         animating |= source(self.videos_active, AnimSource::VIDEO);
         animating |= source(self.draw_text_flights(), AnimSource::TEXT_FLIGHT);
+        self.images.end_frame();
         if self.track_marks {
             self.marks.resize(self.instances.len(), 0);
         }
@@ -5082,6 +5082,15 @@ impl<S: 'static> Runtime<S> {
         let s = self.env.scale;
         let snap_px = |v: f32| grid(v, s) * s;
         self.instances.clear();
+        let mut pinned_pages = 0u32;
+        for f in &self.flights {
+            for q in &f.glyphs {
+                if q.params[1] == KIND_GLYPH {
+                    pinned_pages |= 1u32 << (q.params[2] as u32).min(31);
+                }
+            }
+        }
+        self.text.begin_frame(pinned_pages);
         self.marks.clear();
         self.surfaces.clear();
         self.materials.clear();
@@ -5370,23 +5379,32 @@ impl<S: 'static> Runtime<S> {
                 .filter(|_| matches!(n.looping.map(|l| l.kind), Some(rune_motion::LoopKind::Sequence(_))));
             let own_sc = p.transform.scale.x * press_k * n.static_scale
                 * sequence.and_then(|l| l.pose(lnow, self.reduced_motion)).map_or(1.0, |p| p.scale);
-            // An `El::scale` an app drives from a slider or pinch counts as moving until it holds
-            // still, then rasterizes at rounded sizes like a live scale.
-            let (static_moving, static_dynamic) = if n.static_scale != 1.0 || self.static_scales.contains_key(&n.id) {
+            // An `El::scale` or `El::live_scale` an app drives from a slider, wheel or pinch
+            // counts as moving until it holds still, then rasterizes crisp at its resting scale.
+            let has_live_scale = n.live.iter().any(|b| b.property == crate::live::Property::Scale);
+            let tracked_scale = if has_live_scale { n.static_scale * p.transform.scale.x } else { n.static_scale };
+            let scale_settling = if tracked_scale != 1.0 || has_live_scale || self.static_scales.contains_key(&n.id) {
                 let t = self.t;
-                let seen = self.static_scales.entry(n.id).or_insert((n.static_scale, f64::NEG_INFINITY, false));
-                if seen.0 != n.static_scale { *seen = (n.static_scale, t, true); }
+                let seen = self.static_scales.entry(n.id).or_insert((tracked_scale, f64::NEG_INFINITY, false));
+                if self.settled {
+                    *seen = (tracked_scale, f64::NEG_INFINITY, seen.2);
+                } else if (seen.0 - tracked_scale).abs() > 1e-5 {
+                    *seen = (tracked_scale, t, true);
+                }
                 let moving = t - seen.1 < STATIC_SCALE_SETTLE;
-                self.static_scale_settling |= moving;
-                (moving, seen.2)
-            } else { (false, false) };
+                if !has_live_scale {
+                    self.static_scale_settling |= moving;
+                }
+                moving
+            } else { false };
             let store = self.scene.store();
+            let scale_animating = store.is_animating(n.id, prop::SCALE) || store.is_animating(n.id, prop::PRESENCE)
+                || (n.press_scale.is_some() && store.is_animating(n.id, P_PRESS_SCALE))
+                || sequence.is_some_and(|l| !self.reduced_motion && l.active(lnow));
             let scale_motion = pinh.scale_motion.max(
-                if store.is_animating(n.id, prop::SCALE) || store.is_animating(n.id, prop::PRESENCE)
-                    || (n.press_scale.is_some() && store.is_animating(n.id, P_PRESS_SCALE))
-                    || sequence.is_some_and(|l| !self.reduced_motion && l.active(lnow)) || static_moving {
+                if !has_live_scale && (scale_animating || scale_settling) {
                     ScaleMotion::Moving
-                } else if static_dynamic || n.live.iter().any(|b| b.property == crate::live::Property::Scale) {
+                } else if has_live_scale && (scale_settling || scale_animating) {
                     ScaleMotion::Live
                 } else {
                     ScaleMotion::Still
@@ -6083,15 +6101,24 @@ impl<S: 'static> Runtime<S> {
                     let turn = looped + if self.scene.store().has(n.id, P_ICON_TURN) {
                         self.scene.get(n.id, P_ICON_TURN).unwrap_or(n.vis.icon_turn)
                     } else { n.vis.icon_turn };
-                    let px = (w.min(h)).round().max(1.0) as u32;
+                    let tk = if cover.is_some() { 1.0 } else { sc };
+                    let raster = if cover.is_some() { 1.0 } else { scale_motion.raster(sc) };
+                    if cover.is_none() && scale_motion == ScaleMotion::Live {
+                        self.static_scale_settling = true;
+                    }
+                    let zoom = tk / raster.max(1e-4);
+                    let drawn_px = w.min(h).round().max(1.0);
+                    let px = (w.min(h) / zoom.max(1e-4)).round().max(1.0) as u32;
                     if let Some(q) = self.text.icon_quad(ic, px, [r[0], r[1]]) {
+                        let (uv, page) = glyph_uv_page(q.uv);
+                        let span = if (px as f32 - drawn_px).abs() > 0.5 { px as f32 } else { 0.0 };
                         self.instances.push(Instance {
-                            rect: q.rect,
+                            rect: [q.rect[0], q.rect[1], drawn_px, drawn_px],
                             radii: [0.0; 4],
                             fill: premul(color, o, srgb),
                             border: [0.0; 4],
-                            params: [turn, KIND_GLYPH, 0.0, 1.0],
-                            uv: [q.uv[0], q.uv[1], 0.0, 0.0],
+                            params: [turn, KIND_GLYPH, page, 1.0],
+                            uv: [uv[0], uv[1], span, span],
                             clip,
                             fade: crate::render::pack_fade(fade, clip, clip),
                         });
@@ -6110,6 +6137,9 @@ impl<S: 'static> Runtime<S> {
                     // `raster` and draws filtered by the rest, `tk / raster`.
                     let tk = if cover.is_some() { 1.0 } else { sc };
                     let raster = if cover.is_some() { 1.0 } else { scale_motion.raster(sc) };
+                    if cover.is_none() && scale_motion == ScaleMotion::Live {
+                        self.static_scale_settling = true;
+                    }
                     let ins = n.inset.map(|v| v * zk * s);
                     let (x0, x1) = (zr[0] + ins[0], zr[2] - ins[2]);
                     let mut origin = [text_x(spec, x0, x1, (layout.full_width() * tk).ceil()), zr[1] + ins[1]];
@@ -6151,13 +6181,14 @@ impl<S: 'static> Runtime<S> {
                         if e.text.is_empty() && e.preedit.is_none() && !inp.placeholder.is_empty() && !departing {
                             let pl_indent = spec.blocks.first().map_or(0.0, |b| (b.indent_pt(spec.style.size) * s).round() * tk);
                             let pl_origin = [origin[0] + pl_indent, origin[1]];
+                            let pl_r_origin = if scale_motion == ScaleMotion::Still { pl_origin } else { [0.0, 0.0] };
                             let pl = self.text.layout_rich(&inp.placeholder, &[], spec.style, s, Some((w - pl_indent).max(1.0) / tk.max(1e-4)));
                             self.glyph_scratch.clear();
-                            self.text.glyphs_for_layout_scaled(&pl, s, pl_origin, raster, false, &mut self.glyph_scratch);
+                            self.text.glyphs_for_layout_scaled(&pl, s, pl_r_origin, raster, false, &mut self.glyph_scratch);
                             let pc = premul(inp.placeholder_color, o, srgb);
                             for q in &self.glyph_scratch {
                                 self.instances.extend(glyph_or_image(q, &self.text, &mut self.images, pc, glyph_gamma(inp.placeholder_color, s, srgb), clip, fade)
-                                    .map(|g| zoom_glyph(g, pl_origin, tk / raster)));
+                                    .map(|g| zoom_glyph(g, pl_origin, pl_r_origin, tk / raster)));
                             }
                         }
                         if e.focused && !departing {
@@ -6220,22 +6251,23 @@ impl<S: 'static> Runtime<S> {
                     }
                     let reveal = self.reveals.get(&n.id).filter(|st| !st.words.is_empty() && spec.advance_in.is_none());
                     self.glyph_scratch.clear();
+                    let r_origin = if scale_motion == ScaleMotion::Still { origin } else { [0.0, 0.0] };
                     // A cell of a longer run draws its slice of the run's glyphs, shaped in context.
                     let zoom = if let (Some(r), Some((_, at))) = (&n.run_layout, &spec.advance_in)
                         && let Some(x) = r.x(*at)
                     {
-                        self.text.glyphs_in(r, *at, s, [origin[0] - x, origin[1]], &mut self.glyph_scratch);
+                        self.text.glyphs_in(r, *at, s, [r_origin[0] - x, r_origin[1]], &mut self.glyph_scratch);
                         tk
                     } else {
-                        self.text.glyphs_for_layout_scaled(layout, s, origin, raster, reveal.is_some() || !link_fx.is_empty(), &mut self.glyph_scratch);
+                        self.text.glyphs_for_layout_scaled(layout, s, r_origin, raster, reveal.is_some() || !link_fx.is_empty(), &mut self.glyph_scratch);
                         tk / raster
                     };
                     let gamma = glyph_gamma(color, s, srgb);
                     let base = premul(color, o, srgb);
                     for q in &self.glyph_scratch {
                         if self.flights.iter().any(|f| f.lands(&n.path, n.key.as_deref())) { continue; }
-                        let [x0, y0] = if zoom == 1.0 { [q.rect[0], q.rect[1]] } else {
-                            std::array::from_fn(|k| origin[k] + (q.rect[k] - origin[k]) * zoom)
+                        let [x0, y0] = if zoom == 1.0 && origin == r_origin { [q.rect[0], q.rect[1]] } else {
+                            std::array::from_fn(|k| origin[k] + (q.rect[k] - r_origin[k]) * zoom)
                         };
                         let (x1, y1) = (x0 + q.rect[2] * zoom, y0 + q.rect[3] * zoom);
                         // Wholly outside the clip, a glyph draws nothing: a long line in an
@@ -6262,7 +6294,7 @@ impl<S: 'static> Runtime<S> {
                             f = f.map(|v| v * a);
                         }
                         self.instances.extend(glyph_or_image(q, &self.text, &mut self.images, f, gm, clip, fade)
-                            .map(|g| zoom_glyph(g, origin, zoom)));
+                            .map(|g| zoom_glyph(g, origin, r_origin, zoom)));
                         glyph_count += 1;
                     }
                     if let (Some(c), Some(inp)) = (caret, &n.input) {
@@ -6976,7 +7008,7 @@ fn emit_block_decorations(
                     for q in &*glyph_scratch {
                         instances.extend(
                             glyph_or_image(q, text_sys, images, mc, m_gamma, clip, fade)
-                                .map(|g| zoom_glyph(g, m_origin, tk / raster)),
+                                .map(|g| zoom_glyph(g, m_origin, m_origin, tk / raster)),
                         );
                     }
                 }
@@ -7396,21 +7428,32 @@ fn scale_about(rect: [f32; 4], origin: [f32; 2], k: f32) -> [f32; 4] {
 
 /// A glyph instance drawn `k` times its rasterized size about `origin`. An alpha glyph keeps
 /// its atlas footprint in `uv.zw`, so the shader samples it filtered.
-fn zoom_glyph(mut g: Instance, origin: [f32; 2], k: f32) -> Instance {
-    if k == 1.0 { return g; }
+fn zoom_glyph(mut g: Instance, origin: [f32; 2], r_origin: [f32; 2], k: f32) -> Instance {
+    if k == 1.0 && origin == r_origin { return g; }
     if g.params[1] == KIND_GLYPH && g.uv[2] == 0.0 { (g.uv[2], g.uv[3]) = (g.rect[2], g.rect[3]); }
-    g.rect = scale_about(g.rect, origin, k);
+    g.rect = [
+        origin[0] + (g.rect[0] - r_origin[0]) * k,
+        origin[1] + (g.rect[1] - r_origin[1]) * k,
+        g.rect[2] * k,
+        g.rect[3] * k,
+    ];
     g
 }
 
+fn glyph_uv_page(uv: [f32; 2]) -> ([f32; 2], f32) {
+    let page = (uv[1] as u32) / crate::text::ATLAS_SIZE;
+    ([uv[0], uv[1] - (page * crate::text::ATLAS_SIZE) as f32], page as f32)
+}
+
 fn glyph(q: &GlyphQuad, fill: [f32; 4], gamma: f32, clip: [f32; 4], fade: [f32; 4]) -> Instance {
+    let (uv, page) = glyph_uv_page(q.uv);
     Instance {
         rect: q.rect,
         radii: [0.0; 4],
         fill,
         border: [0.0; 4],
-        params: [0.0, KIND_GLYPH, 0.0, gamma],
-        uv: [q.uv[0], q.uv[1], 0.0, 0.0],
+        params: [0.0, KIND_GLYPH, page, gamma],
+        uv: [uv[0], uv[1], 0.0, 0.0],
         clip,
         fade: crate::render::pack_fade(fade, clip, clip),
     }

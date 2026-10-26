@@ -87,6 +87,7 @@ pub(super) struct Target {
     composite: wgpu::BindGroup,
     pub base: wgpu::BindGroup,
     pub images: Vec<Option<wgpu::BindGroup>>,
+    pub glyphs: Vec<wgpu::BindGroup>,
     image_generation: u64,
     blur: Option<layer_blur::Scratch>,
     cache_node: Option<u64>,
@@ -369,7 +370,7 @@ impl Renderer {
                 let composite = Self::bind_group(device, &self.bind_layout, &self.globals, &self.atlas, &texture, None);
                 self.layers.targets[index] = Some(Target { texture, view, projection,
                     identity: self.layers.allocations + 1, composite_parent: None,
-                    quad: Self::instance_buffer(device, 1), base, composite, images: Vec::new(), image_generation: u64::MAX, blur: None,
+                    quad: Self::instance_buffer(device, 1), base, composite, images: Vec::new(), glyphs: Vec::new(), image_generation: u64::MAX, blur: None,
                     cache_node: None, cache_sig: 0, last_used: 0, content_size: [0.0; 2] });
                 self.layers.allocations += 1;
             }
@@ -461,6 +462,9 @@ impl Renderer {
             t.images.clear();
             t.images.extend(self.images.iter().map(|page| page.as_ref().map(|(texture, _)|
                 Self::bind_group(device, &self.bind_layout, &self.globals, &self.atlas, texture, Some(&t.projection)))));
+            t.glyphs.clear();
+            t.glyphs.extend(self.atlas_pages.iter().map(|(texture, _)|
+                Self::bind_group(device, &self.bind_layout, &self.globals, texture, texture, Some(&t.projection))));
             t.image_generation = self.layers.image_generation;
         }
     }

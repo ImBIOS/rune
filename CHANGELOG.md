@@ -5,6 +5,16 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Glyph, icon and colour-glyph atlases never exhaust or permanently drop glyphs across long zoom sessions.**
+  `Atlas` now separates genuinely empty glyphs (such as space, cached as `Some(None)`) from
+  unplaced glyphs (`Rasterized::Unplaced`, never cached), recycles 2048×2048 R8 shelf pages via a
+  two-page steady ping-pong pool with 1 px zeroed borders around each placed glyph (no 4 MiB buffer
+  zeroing on reset and no mid-frame eviction), spills to on-demand overflow pages when a single
+  frame exceeds one page and reclaims idle overflow pages on subsequent frames, and bounds the
+  colour-glyph RGBA cache (`COLOR_GLYPH_BUDGET`, 16 MiB). While `live_scale` is actively changing,
+  text and icons step through logarithmic $2^{1/4}$ scale buckets at a stable origin and
+  re-rasterize crisp 1:1 device-pixel glyphs once the scale holds still for `0.1 s`.
+
 - **Plastic fill, and liquid metal pinned per shape.** `Fx::fill(PlasticParams { .. })` paints
   moulded plastic under one soft light: `color`, `roughness` (polished to matte), `dome`
   (negative dishes the face like a keycap), `bevel` and light `angle`, with presets `glossy`,
