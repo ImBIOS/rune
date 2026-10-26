@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Pose and picking reads.** `ElementInfo::moving` (and so a settle loop built on it) now also
+  counts shadow colour and geometry springs and icon turns; rotation and scale already counted.
+  `Runtime::presented_pose(key)` returns a `Pose` with the presented rotation, effective scale,
+  shadows (geometry and colour as sprung) and a moving flag. `Runtime::element_at(x, y)` returns
+  the topmost drawn element at a window point (`Picked`, with `path()` and `key()`), through
+  rotate, scale, origin, offset, scrolling, ancestors' clips and paint order, handlers or not;
+  `Runtime::contains(key, x, y)` tests one element. Both are made for drivers holding the
+  `Runtime`; a handler already gets turned, scaled local coordinates in its `PointerEvent`.
+
 - **`Markdown::on_link_tx` and `Markdown::link_style`.** `on_link_tx(|s, url, tx| ..)` is `on_link`
   with the press's `Tx` (`on_link` is unchanged; the two share one slot so the later call wins).
   `link_style(|url| -> Option<(Span, LinkPaint)>)` gives chosen links their own resting `Span`

@@ -197,6 +197,12 @@ const P_SHADOW_GEO: [Prop<rune_motion::Rect>; 4] = [
     Prop::custom(92, PropClass::Shape),
     Prop::custom(93, PropClass::Shape),
 ];
+/// Whether a shadow colour or geometry spring, or an icon's turn, is moving node `id`.
+fn paint_pose_springing(store: &rune_motion::AnimationStore, id: NodeId) -> bool {
+    store.is_animating(id, P_ICON_TURN)
+        || P_SHADOWS.iter().any(|&p| store.is_animating(id, p))
+        || P_SHADOW_GEO.iter().any(|&p| store.is_animating(id, p))
+}
 /// Seconds a changed `El::scale` holds still before its text rasterizes at that size.
 const STATIC_SCALE_SETTLE: f64 = 0.1;
 /// How far (points, per axis) a click may travel and still pair into a double click.
@@ -607,6 +613,42 @@ pub struct ElementInfo {
     /// where scrolling put it this frame, in points: down for a stuck header, up for a stuck
     /// footer, right for a stuck left element, 0 when it isn't stuck. `rect` already includes it.
     pub stuck: f32,
+}
+
+/// An element [`Runtime::element_at`] found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Picked {
+    path: String,
+    key: Option<String>,
+}
+
+impl Picked {
+    /// Its path in the element tree (as [`ElementInfo::path`]).
+    pub fn path(&self) -> &str { &self.path }
+    /// Its key ([`El::key`]), if it has one.
+    pub fn key(&self) -> Option<&str> { self.key.as_deref() }
+}
+
+/// What an element presents beyond its rect and opacity, as of the last frame
+/// ([`Runtime::presented_pose`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pose {
+    rotation: f32,
+    scale: f32,
+    shadows: Vec<crate::el::Shadow>,
+    moving: bool,
+}
+
+impl Pose {
+    /// The element's own presented `El::rotate`, in radians clockwise. Ancestors' turns are not
+    /// included.
+    pub fn rotation(&self) -> f32 { self.rotation }
+    /// Effective uniform scale, ancestors included (as [`ElementInfo::scale`]).
+    pub fn scale(&self) -> f32 { self.scale }
+    /// The element's shadows (`El::shadow`) with the geometry and colour springs have reached.
+    pub fn shadows(&self) -> &[crate::el::Shadow] { &self.shadows }
+    /// A spring is still moving its rect, scale, rotation or shadows, or an ancestor's.
+    pub fn moving(&self) -> bool { self.moving }
 }
 
 #[derive(Clone, Copy)]
@@ -7500,7 +7542,7 @@ impl<S: 'static> Runtime<S> {
         let store = self.scene.store();
         let animating = |id: NodeId| store.is_animating(id, prop::FRAME) || store.is_animating(id, prop::TRAVEL)
             || store.is_animating(id, prop::PRESENCE) || store.is_animating(id, prop::OFFSET) || store.is_animating(id, prop::SCALE) || store.is_animating(id, P_PRESS_SCALE)
-            || store.is_animating(id, P_SCALE) || store.is_animating(id, prop::ROTATION)
+            || store.is_animating(id, P_SCALE) || store.is_animating(id, prop::ROTATION) || paint_pose_springing(store, id)
             || (!self.reduced_motion && self.loops.get(&id).is_some_and(|l| l.active(store.node_time(id))));
         let sel_ranges = self.selection_ranges();
         let mut elements: Vec<_> = self.nodes
@@ -7658,6 +7700,65 @@ impl<S: 'static> Runtime<S> {
     pub fn presented(&self, key: &str) -> Option<([f32; 4], f32)> {
         let i = self.nodes.iter().position(|n| n.key.as_deref() == Some(key))?;
         Some((*self.drawn.get(i)?, self.inh_scratch.get(i)?.opacity))
+    }
+
+    /// The topmost element drawn at window point (`x`, `y`) in points, as of the last frame: the
+    /// point is tested against each element's drawn box the way a press is, through `El::rotate`,
+    /// `El::scale`, `El::origin`, offsets and scrolling, and inside its ancestors' clips
+    /// (including a turned ancestor's clip), in paint order (so `El::raise`, sticky and flying
+    /// elements count). Unlike a press, it also finds elements with no handlers, and it ignores
+    /// `El::inert` and modals, so a press can land on a different element than this returns.
+    /// Elements that are exiting or fully transparent are skipped. `El::hit`, which marks native
+    /// overlay input, makes no difference, and overlay panels outside the window are not
+    /// considered. An element is not cut by its own clip, only by its ancestors'.
+    pub fn element_at(&self, x: f32, y: f32) -> Option<Picked> {
+        let n = self.nodes.len();
+        let at = |k: usize| if self.layer_paint_order.is_empty() { k } else { self.layer_paint_order[k] };
+        let count = if self.layer_paint_order.is_empty() { n } else { self.layer_paint_order.len() };
+        (0..count).rev().map(at).find(|&i| self.pickable(i, x, y)).map(|i| Picked {
+            path: self.nodes[i].path.clone(),
+            key: self.nodes[i].key.clone(),
+        })
+    }
+
+    /// Whether window point (`x`, `y`), in points, is inside the drawn, clipped and turned shape
+    /// of the element keyed `key`, whatever is drawn above it and whether or not it has handlers.
+    /// False when there is no such element, it is exiting or fully transparent. Same geometry
+    /// as [`Runtime::element_at`].
+    pub fn contains(&self, key: &str, x: f32, y: f32) -> bool {
+        self.nodes.iter().position(|n| n.key.as_deref() == Some(key)).is_some_and(|i| self.pickable(i, x, y))
+    }
+
+    fn pickable(&self, i: usize, x: f32, y: f32) -> bool {
+        self.drawn.get(i).is_some()
+            && self.inh_scratch.get(i).is_some_and(|h| h.opacity > 0.001)
+            && !self.subtree_exiting(i)
+            && self.node_contains(i, x, y)
+    }
+
+    /// The presented rotation, scale and shadows of the element keyed `key`, exiting or not, as
+    /// of the last frame, and whether any spring still moves them. It reads the springs on
+    /// demand: nothing runs per frame for it.
+    pub fn presented_pose(&self, key: &str) -> Option<Pose> {
+        let i = self.nodes.iter().position(|n| n.key.as_deref() == Some(key))?;
+        let n = &self.nodes[i];
+        let store = self.scene.store();
+        let shadows = n.vis.shadows.iter().enumerate().map(|(k, sh)| {
+            let sh = self.shadow_at(n.id, k, sh);
+            match P_SHADOWS.get(k) {
+                Some(&p) => crate::el::Shadow { color: self.color(n.id, p, sh.color), ..sh },
+                None => sh,
+            }
+        }).collect();
+        let step = |p: usize| self.nodes[p].parent;
+        let moving = self.rect_springing(i)
+            || std::iter::successors(Some(i), |&p| step(p)).any(|p| paint_pose_springing(store, self.nodes[p].id));
+        Some(Pose {
+            rotation: self.scene.get(n.id, prop::ROTATION).unwrap_or(n.vis.rotate),
+            scale: self.inh_scratch.get(i)?.scale,
+            shadows,
+            moving,
+        })
     }
 
     /// Whether the root's own fill is dark, when it has an opaque one (headless `--keys` caps

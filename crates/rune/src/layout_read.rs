@@ -182,7 +182,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// Whether a spring is moving node `i`'s drawn rect: its own, its anchor's, or an ancestor's.
-    fn rect_springing(&self, i: usize) -> bool {
+    pub(super) fn rect_springing(&self, i: usize) -> bool {
         let store = self.scene.store();
         let n = &self.nodes[i];
         let step = |p: usize| {
