@@ -84,7 +84,9 @@ impl Toolbar {
             );
         }
         band = band
-            .child(row().key("leading").gap(4.0).center_y().children(self.leading))
+            // The leading slot gives way first, so a long title truncates instead of pushing the
+            // trailing controls off the band.
+            .child(row().key("leading").gap(4.0).center_y().shrink().min_w(0.0).children(self.leading))
             .child(row().key("spacer").grow(1.0))
             .child(row().key("trailing").gap(4.0).center_y().children(self.trailing));
         if let Some(m) = self.material {

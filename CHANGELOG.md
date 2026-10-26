@@ -5,6 +5,9 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Toolbar`'s leading slot gives way.** The leading slot now shrinks (`shrink().min_w(0)`),
+  so a long leading title marked `.truncate().shrink().min_w(0.0)` truncates instead of pushing
+  the trailing slot past the band's end. Toolbars whose contents fit are unchanged.
 - **Expressive press motion.** `El::scale` now springs between values on the element's layout
   spring, or on `El::scale_motion(anim)`, instead of snapping; it lands at once under Reduce
   Motion, in an instant transaction and on mount. **Output change:** an app that changed `scale`

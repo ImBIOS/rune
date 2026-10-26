@@ -693,3 +693,21 @@ fn icon_button_and_sidebar_toggle_show_help_and_shortcut_tooltips() {
     rt.frame(rt.help_delay + 0.05);
     assert_eq!(rt.help_tooltip().map(|(t, _)| t), Some("Lock  ⌘L"));
 }
+
+#[test]
+fn a_long_leading_title_truncates_and_keeps_the_trailing_slot_on_the_band() {
+    struct T;
+    fn toolbar_view(_: &T, _: &mut Cx<T>) -> El {
+        let k = Kit::neutral(true);
+        Toolbar::new()
+            .leading(rune::text("a".repeat(400)).key("long").truncate().shrink().min_w(0.0))
+            .trailing(el().key("trail").size(24.0, 24.0))
+            .build(&k)
+    }
+    let mut rt = Runtime::new(T, toolbar_view, (400.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let rect = |key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap().rect;
+    let (long, trail) = (rect("long"), rect("trail"));
+    assert!(trail[0] + trail[2] <= 400.0 + 0.5, "trailing slot pushed off the band: {trail:?}");
+    assert!(long[0] + long[2] <= trail[0] + 0.5, "leading title overlaps the trailing slot: {long:?} {trail:?}");
+}
