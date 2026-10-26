@@ -1118,3 +1118,59 @@ fn task_lists_render_checkboxes_press_space_and_respect_read_only() {
         assert!(rt.state.toggled.is_empty(), "read-only tasks must not fire: handled={handled} read_only={read_only}");
     }
 }
+
+#[test]
+fn link_ring_frames_chosen_links_merges_inner_runs_and_stays_on_hover() {
+    const CHIP_RING: &str = "#3b82f6";
+
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        let bg = rune::color::hex(CHIP_BG).unwrap();
+        let hover = rune::color::hex(CHIP_HOVER).unwrap();
+        let ring = rune::color::hex(CHIP_RING).unwrap();
+        Markdown::new("See [Session **bold** `code`](session:abc) and [Docs](https://a.dev).")
+            .link_style(move |url| {
+                url.starts_with("session:").then(|| {
+                    (rune::Span::new(0, 0).color(Color::WHITE).weight(500.0).bg(bg, 3.0), LinkPaint::new().bg(hover))
+                })
+            })
+            .link_ring(move |url| url.starts_with("session:").then_some((ring, 1.0)))
+            .on_link(|_: &mut (), _| {})
+            .build(&Kit::neutral(true))
+    }
+
+    let mut rt = Runtime::new((), view, (320.0, 100.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let want_ring = rune::color::hex(CHIP_RING).unwrap().premul(1.0);
+    let ringed: Vec<_> = rt
+        .instances
+        .iter()
+        .filter(|i| i.params[1] == rune::render::KIND_RECT && i.params[0] > 0.0)
+        .copied()
+        .collect();
+    assert_eq!(ringed.len(), 1, "only the session: link gets a ring, merged across plain/bold/code runs: {ringed:?}");
+    assert_eq!((ringed[0].radii, ringed[0].params[0], ringed[0].border), ([4.0; 4], 1.0, want_ring));
+    assert_eq!(fill_rects(&rt, CHIP_BG), [ringed[0].rect]);
+
+    // Hovering the https link adds no ring and leaves the session chip's ring alone.
+    let (hx, hy) = centre(&rt, "https://a.dev");
+    rt.pointer_move(hx, hy);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(
+        rt.instances.iter().filter(|i| i.params[1] == rune::render::KIND_RECT && i.params[0] > 0.0).count(),
+        1
+    );
+
+    // Hovering the session link swaps its fill to CHIP_HOVER and keeps the ring.
+    let (sx, sy) = centre(&rt, "session:abc");
+    rt.pointer_move(sx, sy);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(fill_rects(&rt, CHIP_HOVER), [ringed[0].rect]);
+    let hovered: Vec<_> = rt
+        .instances
+        .iter()
+        .filter(|i| i.params[1] == rune::render::KIND_RECT && i.params[0] > 0.0)
+        .copied()
+        .collect();
+    assert_eq!(hovered.len(), 1);
+    assert_eq!((hovered[0].rect, hovered[0].params[0], hovered[0].border), (ringed[0].rect, 1.0, want_ring));
+}

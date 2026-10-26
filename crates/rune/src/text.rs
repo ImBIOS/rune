@@ -405,7 +405,7 @@ pub(crate) fn pill_chips(
     scale: f32,
     origin: [f32; 2],
     bg: Color,
-    out: &mut Vec<Deco>,
+    out: &mut Vec<PaintedDeco>,
     icons: &mut Vec<(&'static Icon, u32, [f32; 2], Option<Color>)>,
 ) {
     if pills.is_empty() {
@@ -468,7 +468,7 @@ pub(crate) fn pill_chips(
             let top = (base - asc - 1.0 * scale).round();
             let bot = (base + desc + 1.0 * scale).round();
             let rect = [(origin[0] + x0).round(), top, (x1 - x0).max(0.0).round(), bot - top];
-            out.push(Deco { rect, color: pill.bg.unwrap_or(bg), radius: (5.0 * scale).min(rect[3] * 0.5) });
+            out.push(PaintedDeco::new(Deco { rect, color: pill.bg.unwrap_or(bg), radius: (5.0 * scale).min(rect[3] * 0.5) }, None, 0));
             if let Some(icon) = pill.icon {
                 let px = (pm.icon * scale).round().max(1.0);
                 let ix = if rtl_lead { rect[0] + rect[2] - pm.pad * scale - px } else { rect[0] + pm.pad * scale };
@@ -622,6 +622,7 @@ impl Link {
 pub struct LinkPaint {
     pub(crate) color: Option<Color>,
     pub(crate) bg: Option<Color>,
+    pub(crate) ring: Option<(Color, f32)>,
     pub(crate) underline: Option<Color>,
 }
 
@@ -639,12 +640,17 @@ impl LinkPaint {
         self.bg = Some(c);
         self
     }
+    /// An inset `c` border ring `width` points wide inside the rounded background on each line.
+    pub fn ring(mut self, c: Color, width: f32) -> Self {
+        self.ring = (width > 0.0 && width.is_finite()).then_some((c, width));
+        self
+    }
     pub fn underline(mut self, c: Color) -> Self {
         self.underline = Some(c);
         self
     }
     pub(crate) fn is_empty(&self) -> bool {
-        self.color.is_none() && self.bg.is_none() && self.underline.is_none()
+        self.color.is_none() && self.bg.is_none() && self.ring.is_none() && self.underline.is_none()
     }
 }
 
@@ -783,6 +789,36 @@ pub struct Deco {
     pub rect: [f32; 4],
     pub color: Color,
     pub radius: f32,
+}
+
+/// Internal paint metadata: keep the public `Deco` literal unchanged.
+pub(crate) struct PaintedDeco {
+    pub deco: Deco,
+    pub ring: Option<(Color, f32)>,
+    pub byte: u32,
+}
+
+impl std::ops::Deref for PaintedDeco {
+    type Target = Deco;
+    fn deref(&self) -> &Deco { &self.deco }
+}
+impl std::ops::DerefMut for PaintedDeco {
+    fn deref_mut(&mut self) -> &mut Deco { &mut self.deco }
+}
+
+trait Decoration {
+    fn new(deco: Deco, ring: Option<(Color, f32)>, byte: u32) -> Self;
+    fn paint(&mut self) -> (&mut Deco, Option<(Color, f32)>);
+    fn extend_to(&mut self, _byte: u32) {}
+}
+impl Decoration for Deco {
+    fn new(deco: Deco, _: Option<(Color, f32)>, _: u32) -> Self { deco }
+    fn paint(&mut self) -> (&mut Deco, Option<(Color, f32)>) { (self, None) }
+}
+impl Decoration for PaintedDeco {
+    fn new(deco: Deco, ring: Option<(Color, f32)>, byte: u32) -> Self { Self { deco, ring, byte } }
+    fn paint(&mut self) -> (&mut Deco, Option<(Color, f32)>) { (&mut self.deco, self.ring) }
+    fn extend_to(&mut self, byte: u32) { self.byte = self.byte.max(byte); }
 }
 
 pub struct Atlas {
@@ -2233,9 +2269,31 @@ impl TextSystem {
     /// Backgrounds and underlines for `spans` (device px, layout top-left at `origin`). Touching
     /// runs with the same background merge into one rounded rect.
     pub fn decorations(&self, layout: &Layout<Ink>, spans: &[Span], scale: f32, origin: [f32; 2], out: &mut Vec<Deco>) {
+        self.decorations_into(layout, spans, &[], scale, origin, out);
+    }
+
+    /// [`Self::decorations`], plus inset border `rings` (`(start_byte, end_byte, color, width_pt)`).
+    pub(crate) fn decorations_with_rings(
+        &self,
+        layout: &Layout<Ink>,
+        spans: &[Span],
+        rings: &[(u32, u32, Color, f32)],
+        scale: f32,
+        origin: [f32; 2],
+        out: &mut Vec<PaintedDeco>,
+    ) {
+        self.decorations_into(layout, spans, rings, scale, origin, out);
+    }
+
+    fn decorations_into<D: Decoration>(
+        &self, layout: &Layout<Ink>, spans: &[Span], rings: &[(u32, u32, Color, f32)],
+        scale: f32, origin: [f32; 2], out: &mut Vec<D>,
+    ) {
         if spans.iter().all(|s| s.bg.is_none() && s.underline.is_none()) {
             return;
         }
+        let radius = 4.0 * scale;
+        let mut last_bg = None;
         for line in layout.lines() {
             let m = line.metrics();
             for item in line.items() {
@@ -2248,6 +2306,11 @@ impl TextSystem {
                 let x0 = origin[0] + gr.offset();
                 let w = gr.advance();
                 if let Some(bg) = s.bg {
+                    let ring = rings
+                        .iter()
+                        .rev()
+                        .find(|&&(ra, rb, _, rw)| rw > 0.0 && ra < s.end && s.start < rb)
+                        .map(|&(_, _, c, rw)| (c, rw * scale));
                     let pad = s.bg_pad * scale;
                     let fm = gr.run().font_metrics();
                     let (asc, desc) = (fm.ascent, fm.descent);
@@ -2255,27 +2318,35 @@ impl TextSystem {
                     let top = (base - asc - 1.0 * scale).round();
                     let bot = (base + desc.abs() + 1.0 * scale).round();
                     let rect = [x0 - pad, top, w + 2.0 * pad, bot - top];
-                    // Touching runs with the same background on one line (a span split by style, or
-                    // inline code and its padding spaces in the body font) share one rect, as tall as
-                    // its widest run, so a thin run in another font doesn't poke out as a sliver.
-                    match out.last_mut() {
-                        Some(d)
-                            if d.color == bg
-                                && d.rect[1] < bot
-                                && top < d.rect[1] + d.rect[3]
-                                && (d.rect[0] + d.rect[2] - rect[0] - 2.0 * pad).abs() < 1.0 =>
-                        {
-                            if rect[2] > d.rect[2] {
-                                (d.rect[1], d.rect[3]) = (rect[1], rect[3]);
-                            }
-                            d.rect[2] = rect[0] + rect[2] - d.rect[0];
+                    // Touching runs with the same background and ring on one line (a span split by
+                    // style, or inline code and its padding spaces in the body font) share one rect,
+                    // as tall as its widest run, so a thin run in another font doesn't poke out as a sliver.
+                    let byte = (gr.run().text_range().end as u32).min(s.end).saturating_sub(1);
+                    let previous = if rings.is_empty() { out.len().checked_sub(1) } else { last_bg };
+                    let merge = previous.is_some_and(|i| {
+                        let (d, old_ring) = out[i].paint();
+                        d.color == bg && old_ring == ring
+                            && (d.radius - radius).abs() < 1e-3
+                            && d.rect[1] < bot
+                            && top < d.rect[1] + d.rect[3]
+                            && (d.rect[0] + d.rect[2] - rect[0] - 2.0 * pad).abs() < 1.0
+                    });
+                    if merge {
+                        let painted = &mut out[previous.unwrap()];
+                        let (d, _) = painted.paint();
+                        if rect[2] > d.rect[2] {
+                            (d.rect[1], d.rect[3]) = (rect[1], rect[3]);
                         }
-                        _ => out.push(Deco { rect, color: bg, radius: 4.0 * scale }),
+                        d.rect[2] = rect[0] + rect[2] - d.rect[0];
+                        painted.extend_to(byte);
+                    } else {
+                        last_bg = Some(out.len());
+                        out.push(D::new(Deco { rect, color: bg, radius }, ring, byte));
                     }
                 }
                 if let Some(uc) = s.underline {
                     let y = (origin[1] + m.baseline + 2.0 * scale).round();
-                    out.push(Deco { rect: [x0, y, w, scale.max(1.0)], color: uc, radius: 0.0 });
+                    out.push(D::new(Deco { rect: [x0, y, w, scale.max(1.0)], color: uc, radius: 0.0 }, None, 0));
                 }
             }
         }
@@ -2290,7 +2361,7 @@ impl TextSystem {
         default_color: Color,
         scale: f32,
         origin: [f32; 2],
-        out: &mut Vec<Deco>,
+        out: &mut Vec<PaintedDeco>,
     ) {
         if strikes.is_empty() {
             return;
@@ -2330,7 +2401,7 @@ impl TextSystem {
                 }
                 let x0 = origin[0] + bb.x0 as f32;
                 let y = (origin[1] + m.baseline - strike_off).round();
-                out.push(Deco { rect: [x0, y, w, h], color, radius: 0.0 });
+                out.push(PaintedDeco::new(Deco { rect: [x0, y, w, h], color, radius: 0.0 }, None, 0));
             }
         }
     }
@@ -3757,6 +3828,220 @@ mod quality_tests {
             let buf = if page == 0 { &text.atlas.data } else { &text.atlas.pages[page - 1].data };
             let mid = ((ay + px / 2) * ATLAS_SIZE + ax + px / 2) as usize;
             assert_eq!(buf[mid], 255, "glyph at {px}px on page {page} must retain its coverage");
+        }
+    }
+
+    #[test]
+    fn span_ring_subranges_case_elision_and_cache_changes() {
+        use crate::{Cx, El, Env, Link, LinkPaint, Runtime, TextCase, col, rich};
+        use crate::render::KIND_RECT;
+
+        fn view(color: &Color, _: &mut Cx<Color>) -> El {
+            col().child(rich("aa Straße zz", vec![Span::new(0, 13).bg(Color::WHITE, 3.0)])
+                .span_ring(3, 10, *color, 1.0).text_case(TextCase::Uppercase)
+                .link(Link::new(0..13, "whole").hover(LinkPaint::new().bg(Color::BLACK)))
+                .on_link(|_: &mut Color, _, _| {}))
+        }
+        let mut rt = Runtime::new(Color::BLACK, view, (300.0, 80.0), Env::new(false, 1.0));
+        rt.frame(0.0);
+        let ring = *rt.instances.iter().find(|i| i.params[1] == KIND_RECT && i.params[0] == 1.0).unwrap();
+        let rects: Vec<_> = rt.instances.iter().filter(|i| i.params[1] == KIND_RECT).collect();
+        assert_eq!(rects.len(), 3, "ring boundaries split one background into three pieces");
+        assert!(ring.rect[0] > rects[0].rect[0] && ring.rect[2] < rects.iter().map(|i| i.rect[2]).sum());
+        let bounds = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("whole")).unwrap().rect;
+        rt.pointer_move(bounds[0] + 2.0, bounds[1] + 2.0);
+        rt.frame(0.01);
+        let hovered: Vec<_> = rt.instances.iter().filter(|i| i.params[1] == KIND_RECT).collect();
+        assert_eq!(hovered.len(), 3, "hover recolors split backgrounds in place");
+        assert_eq!(hovered.iter().filter(|i| i.params[0] == 1.0).count(), 1, "hover does not extend the ring outside its range");
+        assert_eq!(hovered.iter().find(|i| i.params[0] == 1.0).unwrap().rect, ring.rect);
+        assert!(hovered.iter().all(|i| i.fill == Color::BLACK.premul(1.0)));
+        rt.pointer_move(299.0, 79.0);
+        rt.state = Color::WHITE;
+        rt.invalidate();
+        rt.settle_all();
+        rt.frame(0.0);
+        let changed = rt.instances.iter().find(|i| i.params[1] == KIND_RECT && i.params[0] == 1.0).unwrap();
+        assert_eq!(changed.border, Color::WHITE.premul(1.0), "ring color invalidates cached paint");
+        assert_eq!(changed.rect, ring.rect);
+
+        let mut cased = rich("İ xy", vec![Span::new(0, 5).bg(Color::WHITE, 2.0)])
+            .span_ring(3, 5, Color::BLACK, 1.0).text_case(TextCase::Lowercase).text.unwrap();
+        cased.apply_case();
+        assert_eq!(cased.content, "i\u{307} xy");
+        assert_eq!((cased.rings[0].0, cased.rings[0].1), (4, 6));
+        assert_eq!((cased.spans[1].start, cased.spans[1].end), (4, 6));
+
+        fn truncated(_: &(), _: &mut Cx<()>) -> El {
+            col().w(60.0).child(rich("prefix middle suffix", vec![Span::new(14, 20).bg(Color::WHITE, 2.0)])
+                .w(60.0).truncate_head().span_ring(14, 20, Color::BLACK, 1.0))
+        }
+        let mut cut = Runtime::new((), truncated, (60.0, 40.0), Env::new(false, 1.0));
+        cut.frame(0.0);
+        let rings: Vec<_> = cut.instances.iter().filter(|i| i.params[1] == KIND_RECT && i.params[0] == 1.0).collect();
+        assert_eq!(rings.len(), 1, "head truncation remaps the suffix ring");
+        assert!(rings[0].rect[0] >= 0.0 && rings[0].rect[2] <= 64.0);
+    }
+
+    #[test]
+    fn span_ring_without_background_is_empty_and_reveal_fades_the_chip() {
+        use crate::{Cx, El, Env, Runtime, col, rich, text};
+        use crate::render::KIND_RECT;
+        fn plain(_: &(), _: &mut Cx<()>) -> El { text("plain").span_ring(0, 5, Color::BLACK, 1.0) }
+        let mut plain = Runtime::new((), plain, (100.0, 40.0), Env::new(false, 1.0));
+        plain.frame(0.0);
+        assert!(!plain.instances.iter().any(|i| i.params[1] == KIND_RECT && i.params[0] > 0.0));
+
+        fn view(s: &String, _: &mut Cx<String>) -> El {
+            col().key("root").streaming(true).child(rich(s, vec![Span::new(0, s.len()).bg(Color::WHITE, 3.0)])
+                .key("body").span_ring(0, s.len(), Color::BLACK, 1.0).reveal(0.2))
+        }
+        let mut rt = Runtime::new("one".to_string(), view, (300.0, 80.0), Env::new(false, 1.0));
+        rt.frame(0.0);
+        rt.state.push_str(" two");
+        rt.invalidate();
+        rt.frame(0.01);
+        let initial = rt.instances.iter().find(|i| i.params[1] == KIND_RECT && i.params[0] == 1.0).unwrap().border[3];
+        assert!(initial < 0.2, "new chip is not opaque before its final word: {initial}");
+        rt.frame(0.11);
+        let middle = rt.instances.iter().find(|i| i.params[1] == KIND_RECT && i.params[0] == 1.0).unwrap();
+        assert!(middle.border[3] > initial && middle.border[3] < 1.0);
+        assert_eq!(middle.border[3], middle.fill[3]);
+        rt.frame(1.0);
+        assert_eq!(rt.instances.iter().find(|i| i.params[1] == KIND_RECT && i.params[0] == 1.0).unwrap().border[3], 1.0);
+    }
+
+    #[test]
+    fn span_ring_draws_inset_border_on_light_page_merges_runs_wraps_and_stays_on_hover() {
+        use crate::render::{Gpu, KIND_RECT, OFFSCREEN_FORMAT, Offscreen, Renderer};
+        use crate::{Cx, El, Env, Link, LinkPaint, Runtime, col, rich};
+
+        const PAGE: Color = Color { r: 0.96, g: 0.96, b: 0.97, a: 1.0 };
+        const FILL: Color = Color { r: 0.95, g: 0.95, b: 0.96, a: 1.0 };
+        const HOVER: Color = Color { r: 0.88, g: 0.90, b: 0.96, a: 1.0 };
+        const RING: Color = Color { r: 0.12, g: 0.38, b: 0.88, a: 1.0 };
+
+        fn view(alpha: &f32, _: &mut Cx<f32>) -> El {
+            let content = " Try  bold code  now";
+            let (a, b) = (1, content.find(" now").unwrap());
+            let bold_a = content.find("bold").unwrap();
+            let code_a = content.find("code").unwrap();
+            let spans = vec![
+                Span::new(a, b).bg(FILL, 6.0),
+                Span::new(bold_a, bold_a + 4).bold(),
+                Span::new(code_a, code_a + 4).mono(),
+            ];
+            col()
+                .size(200.0, 44.0)
+                .fill(PAGE)
+                .padding(8.0)
+                .child(
+                    rich(content, spans)
+                        .font(TextStyle::new(14.0, 400.0))
+                        .color(Color::BLACK)
+                        .opacity(*alpha)
+                        .span_ring(a, b, RING, 1.0)
+                        .link(Link::new(a..b, "chip").hover(LinkPaint::new().bg(HOVER)))
+                        .on_link(|_: &mut f32, _, _| {}),
+                )
+        }
+
+        let mut rt = Runtime::new(1.0f32, view, (200.0, 44.0), Env::new(false, 2.0));
+        rt.frame(0.0);
+        let chips: Vec<_> = rt.instances.iter().filter(|i| i.params[1] == KIND_RECT && i.params[0] > 0.0).copied().collect();
+        assert_eq!(chips.len(), 1, "plain, bold and mono runs merge into one ringed chip: {chips:?}");
+        let chip = chips[0];
+        assert_eq!((chip.radii, chip.params[0]), ([8.0; 4], 2.0), "4 pt radius and 1 pt ring at 2x");
+        assert_eq!((chip.fill, chip.border), (FILL.premul(1.0), RING.premul(1.0)));
+
+        // Offscreen GPU readback in a light theme where fill ≈ page colour: the ring is visible
+        // at the inset edge while the interior shows the fill.
+        let gpu = Gpu::headless();
+        let size = (400u32, 88u32);
+        let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+        let target = Offscreen::new(&gpu.device, size.0, size.1);
+        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, size);
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        renderer.draw(&mut encoder, &target.view, [0.0; 4]);
+        target.copy(&mut encoder);
+        gpu.queue.submit([encoder.finish()]);
+        let out = target.read(&gpu.device);
+        let px = |x: usize, y: usize| -> [u8; 4] { out[(y * size.0 as usize + x) * 4..][..4].try_into().unwrap() };
+
+        let [x0, y0, w, h] = chip.rect.map(|v| v as usize);
+        let mid_x = x0 + w / 2;
+        let mid_y = y0 + h / 2;
+        let outside = px(mid_x, y0 - 2);
+        let top_ring = px(mid_x, y0 + 1);
+        let bot_ring = px(mid_x, y0 + h - 2);
+        let left_ring = px(x0 + 1, mid_y);
+        // Inside the left padding (past the 2 px ring, before the first glyph): fill ≈ page, not ring.
+        let inside_fill = px(x0 + 5, mid_y);
+        assert!(outside[0] > 235 && outside[2] > 235 && (outside[0] as i32 - outside[2] as i32).abs() <= 5, "page outside: {outside:?}");
+        for (edge, p) in [("top", top_ring), ("bottom", bot_ring), ("left", left_ring)] {
+            assert!(
+                (p[0] as i32 - 97).abs() <= 2 && (p[1] as i32 - 166).abs() <= 2 && (p[2] as i32 - 241).abs() <= 2 && p[3] == 255,
+                "{edge} inset ring pixel is ring-coloured: {p:?}"
+            );
+        }
+        assert!(inside_fill[0] > 230 && inside_fill[2] > 230 && (inside_fill[2] as i32 - inside_fill[0] as i32) < 10, "interior pixel is fill, not ring: {inside_fill:?}");
+        // Outside the 8 px rounded corner radius, the corner pixel stays on the page background.
+        let corner_out = px(x0, y0);
+        assert!(corner_out[0] > 235 && (corner_out[0] as i32 - corner_out[2] as i32).abs() <= 5, "rounded corner cuts outside pixel: {corner_out:?}");
+
+        // A partial-range ring at fractional scale keeps its right edge even though the
+        // following unringed background overlaps it by bg_pad.
+        fn partial(_: &(), _: &mut Cx<()>) -> El {
+            col().fill(PAGE).padding(8.0).child(
+                rich("aa ring zz", vec![Span::new(0, 10).bg(FILL, 6.0)])
+                    .span_ring(3, 7, RING, 1.0),
+            )
+        }
+        let mut partial_rt = Runtime::new((), partial, (200.0, 44.0), Env::new(false, 1.5));
+        partial_rt.frame(0.0);
+        let partial_chip = partial_rt.instances.iter().find(|i| i.params[1] == KIND_RECT && i.params[0] > 0.0).unwrap();
+        renderer.prepare(&gpu.device, &gpu.queue, &mut partial_rt.text.atlas, &partial_rt.instances, size);
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        renderer.draw(&mut encoder, &target.view, [0.0; 4]);
+        target.copy(&mut encoder);
+        gpu.queue.submit([encoder.finish()]);
+        let partial_out = target.read(&gpu.device);
+        let x = (partial_chip.rect[0] + partial_chip.rect[2] - 1.0) as usize;
+        let y = (partial_chip.rect[1] + partial_chip.rect[3] * 0.5) as usize;
+        let edge = &partial_out[(y * size.0 as usize + x) * 4..][..4];
+        assert!(edge[2] as i32 - edge[0] as i32 > 50, "fractional right ring survives adjacent fill: {edge:?}");
+
+        // Hover replaces the fill with HOVER while keeping the resting ring on the same rect.
+        let link_el = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("chip")).unwrap();
+        rt.pointer_move(link_el.rect[0] + 4.0, link_el.rect[1] + 4.0);
+        rt.frame(1.0 / 60.0);
+        let hovered = rt.instances.iter().find(|i| i.params[1] == KIND_RECT && i.params[0] > 0.0).unwrap();
+        assert_eq!((hovered.rect, hovered.fill, hovered.border, hovered.params[0]), (chip.rect, HOVER.premul(1.0), RING.premul(1.0), 2.0));
+
+        // Fading the text element scales both the fill and the ring border alpha.
+        rt.pointer_move(0.0, 0.0);
+        rt.state = 0.5;
+        rt.invalidate();
+        rt.settle_all();
+        rt.frame(0.0);
+        let faded = rt.instances.iter().find(|i| i.params[1] == KIND_RECT && i.params[0] > 0.0).unwrap();
+        assert!((faded.fill[3] - FILL.premul(0.5)[3]).abs() < 1e-3 && (faded.border[3] - RING.premul(0.5)[3]).abs() < 1e-3);
+
+        // Fractional scale (1.5x) and wrapping across lines: each wrapped line gets its own ringed chip.
+        fn wrapped(_: &(), _: &mut Cx<()>) -> El {
+            let s = "one long ringed link that wraps across lines";
+            col().w(90.0).child(
+                rich(s, vec![Span::new(4, s.len() - 13).bg(FILL, 3.0)])
+                    .font(TextStyle::new(14.0, 400.0))
+                    .span_rings([(4, s.len() - 13, RING, 1.0)]),
+            )
+        }
+        let mut wrap_rt = Runtime::new((), wrapped, (90.0, 120.0), Env::new(false, 1.5));
+        wrap_rt.frame(0.0);
+        let lines: Vec<_> = wrap_rt.instances.iter().filter(|i| i.params[1] == KIND_RECT && i.params[0] > 0.0).collect();
+        assert!(lines.len() >= 2, "wrapped span splits into one ringed rect per line: {lines:?}");
+        for d in &lines {
+            assert_eq!((d.radii, d.params[0], d.border), ([6.0; 4], 1.5, RING.premul(1.0)));
         }
     }
 }

@@ -31,7 +31,7 @@ use crate::overlay_options::contains;
 use crate::flight::{TextFlight, transformed};
 use crate::render::{Instance, KIND_DASHED, KIND_EFFECT, KIND_GLYPH, KIND_GRADIENT, KIND_IMAGE, KIND_INSET, KIND_RADIAL, KIND_RECT, KIND_SEGMENT, KIND_SHADOW, KIND_TRIANGLE, NO_CLIP};
 use crate::shape::{LineCap, Op, Shape};
-use crate::text::{Deco, GlyphQuad, Ink, TextSystem, layout_height};
+use crate::text::{Deco, PaintedDeco, GlyphQuad, Ink, TextSystem, layout_height};
 use crate::tok::motion;
 
 #[inline(always)]
@@ -1047,7 +1047,7 @@ pub struct Runtime<S: 'static> {
     hits: Vec<(NodeId, [f32; 4])>,
     overlay_hits: Vec<[f32; 4]>,
     glyph_scratch: Vec<GlyphQuad>,
-    deco_scratch: Vec<Deco>,
+    deco_scratch: Vec<PaintedDeco>,
     inh_scratch: Vec<Inh>,
     /// The composed turns `Inh::turn` points into, rebuilt each paint.
     turn_scratch: Vec<Turn>,
@@ -3011,6 +3011,10 @@ impl<S: 'static> Runtime<S> {
                     for c in [p.bg, p.fg].into_iter().flatten() {
                         floats(&mut h, &[c.r, c.g, c.b, c.a]);
                     }
+                }
+                for &(a, b, c, w) in &t.rings {
+                    (a, b).hash(&mut h);
+                    floats(&mut h, &[c.r, c.g, c.b, c.a, w]);
                 }
             }
         }
@@ -7091,28 +7095,46 @@ impl<S: 'static> Runtime<S> {
                     }
                     // Span backgrounds (inline code), strikethroughs, a selection over them, then glyphs.
                     let link_fx = self.link_fx(i);
+                    let reveal = self.reveals.get(&n.id).filter(|st| !st.words.is_empty() && spec.advance_in.is_none());
                     self.deco_scratch.clear();
                     let mut pill_icons = Vec::new();
                     let pill_bg = spec.pill_colors.map_or(spec.rich_style.link.alpha(0.2), |(bg, _)| bg);
                     crate::text::pill_chips(layout, &spec.pills, spec.style.size, s, origin, pill_bg, &mut self.deco_scratch, &mut pill_icons);
-                    match n.elided.filter(|_| !spec.spans.is_empty()) {
-                        Some(e) => self.text.decorations(layout, &e.spans(&spec.spans), s, origin, &mut self.deco_scratch),
-                        None => self.text.decorations(layout, &spec.spans, s, origin, &mut self.deco_scratch),
+                    match n.elided.filter(|_| !spec.spans.is_empty() || !spec.rings.is_empty()) {
+                        Some(e) => self.text.decorations_with_rings(layout, &e.spans(&spec.spans), &e.rings(&spec.rings), s, origin, &mut self.deco_scratch),
+                        None => self.text.decorations_with_rings(layout, &spec.spans, &spec.rings, s, origin, &mut self.deco_scratch),
                     }
                     if !spec.strikes.is_empty() {
                         self.text.strike_decorations(layout, &spec.spans, &spec.strikes, color, s, origin, &mut self.deco_scratch);
                     }
                     let drawn_len = n.elided.map_or(spec.content.len(), |e| e.drawn_len(spec.content.len()));
                     link_fx.decos(layout, drawn_len, s, origin, &mut self.deco_scratch);
+                    if !spec.rings.is_empty() {
+                        // Adjacent backgrounds overlap by bg_pad. Paint ringed chips after
+                        // plain fills so a neighboring fill cannot erase an inset edge;
+                        // keep underlines above both. No sorting on the ringless path.
+                        self.deco_scratch.sort_by_key(|d| if d.radius == 0.0 { 2 } else { u8::from(d.ring.is_some()) });
+                    }
                     if tk != 1.0 {
                         for d in &mut self.deco_scratch {
                             d.rect = scale_about(d.rect, origin, tk);
                             d.radius *= tk;
+                            if let Some((_, rw)) = &mut d.ring {
+                                *rw *= tk;
+                            }
                         }
                     }
                     for d in &self.deco_scratch {
-                        let c = premul(d.color, o, srgb);
-                        self.instances.push(rect_inst(d.rect, c, d.radius, clip, fade));
+                        let alpha = if d.ring.is_some() {
+                            reveal.map_or(1.0, |st| Self::reveal_alpha(st, d.byte, self.scene.store().node_time(n.id)))
+                        } else { 1.0 };
+                        let c = premul(d.color, o * alpha, srgb);
+                        let mut inst = rect_inst(d.rect, c, d.radius, clip, fade);
+                        if let Some((rc, rw)) = d.ring {
+                            inst.border = premul(rc, o * alpha, srgb);
+                            inst.params[0] = rw;
+                        }
+                        self.instances.push(inst);
                     }
                     let pill_fg = spec.pill_colors.and_then(|(_, fg)| fg).unwrap_or(color);
                     for (icon, px, at, fg) in pill_icons {
@@ -7126,7 +7148,6 @@ impl<S: 'static> Runtime<S> {
                         let (a, b) = n.elided.map_or((a, b), |e| e.range(a, b));
                         selectable::push_selection(&mut self.instances, layout, a, b, origin, tk, premul(spec.selection, o, srgb), s, clip, fade);
                     }
-                    let reveal = self.reveals.get(&n.id).filter(|st| !st.words.is_empty() && spec.advance_in.is_none());
                     self.glyph_scratch.clear();
                     let r_origin = if scale_motion == ScaleMotion::Still { origin } else { [0.0, 0.0] };
                     // A cell of a longer run draws its slice of the run's glyphs, shaped in context.
@@ -8332,6 +8353,14 @@ impl Elision {
         spans.iter().map(|sp| {
             let (start, end) = self.mark(sp.start as usize, sp.end as usize, false);
             crate::text::Span { start: start as u32, end: end as u32, ..sp.clone() }
+        }).collect()
+    }
+
+    /// `rings` moved onto the drawn string.
+    fn rings(self, rings: &[(u32, u32, Color, f32)]) -> Vec<(u32, u32, Color, f32)> {
+        rings.iter().filter_map(|&(a, b, c, w)| {
+            let (start, end) = self.mark(a as usize, b as usize, false);
+            (start < end).then_some((start as u32, end as u32, c, w))
         }).collect()
     }
 }

@@ -38,21 +38,21 @@ fn boxes(layout: &Layout<Ink>, len: usize, start: u32, end: u32) -> Vec<(parley:
 }
 
 /// The link paints to draw this frame, by byte range, with the resting span's `bg_pad`.
-pub(super) struct LinkFx(Vec<(u32, u32, LinkPaint, f32)>);
+pub(super) struct LinkFx(Vec<(u32, u32, LinkPaint, f32, bool)>);
 
 impl LinkFx {
     pub(super) fn is_empty(&self) -> bool { self.0.is_empty() }
 
     pub(super) fn glyph_color(&self, byte: u32) -> Option<Color> {
-        self.0.iter().find(|(a, b, p, _)| byte >= *a && byte < *b && p.color.is_some()).and_then(|(_, _, p, _)| p.color)
+        self.0.iter().find(|(a, b, p, _, _)| byte >= *a && byte < *b && p.color.is_some()).and_then(|(_, _, p, _, _)| p.color)
     }
 
     /// Backgrounds and underlines (device px, layout top-left at `origin`).
-    pub(super) fn decos(&self, layout: &Layout<Ink>, len: usize, s: f32, origin: [f32; 2], out: &mut Vec<Deco>) {
-        for &(a, b, p, bg_pad) in &self.0 {
+    pub(super) fn decos(&self, layout: &Layout<Ink>, len: usize, s: f32, origin: [f32; 2], out: &mut Vec<PaintedDeco>) {
+        for &(a, b, p, bg_pad, has_rings) in &self.0 {
             for (bb, line) in boxes(layout, len, a, b) {
                 let (x0, w) = (origin[0] + bb.x0 as f32, (bb.x1 - bb.x0) as f32);
-                if let Some(c) = p.bg {
+                if p.bg.is_some() || p.ring.is_some() {
                     let pad = bg_pad * s;
                     let (mut y0, mut y1) = ((origin[1] + bb.y0 as f32).round(), (origin[1] + bb.y1 as f32).round());
                     if let Some(l) = layout.get(line) {
@@ -71,16 +71,37 @@ impl LinkFx {
                         }
                     }
                     let rect = [x0 - pad, y0, w + 2.0 * pad, y1 - y0];
-                    if let Some(d) = out.iter_mut().find(|d| {
+                    let ring = p.ring.map(|(c, rw)| (c, rw * s));
+                    // A ring can split an otherwise uniform link background. Recolor those
+                    // pieces in place, but don't mistake an isolated inline-code background
+                    // for the whole link's hover background.
+                    let contained = |d: &&PaintedDeco| {
+                        d.radius > 0.0 && d.rect[0] >= rect[0] - 1.5
+                            && d.rect[0] + d.rect[2] <= rect[0] + rect[2] + 1.5
+                            && d.rect[1] < y1 && y0 < d.rect[1] + d.rect[3]
+                    };
+                    let split = has_rings && out.iter().filter(contained).any(|d| d.ring.is_some())
+                        && out.iter().filter(contained).any(|d| (d.rect[0] - rect[0]).abs() < 1.5)
+                        && out.iter().filter(contained).any(|d| (d.rect[0] + d.rect[2] - rect[0] - rect[2]).abs() < 1.5);
+                    let mut matched = false;
+                    for d in out.iter_mut().filter(|d| {
                         d.radius > 0.0
-                            && (d.rect[0] - rect[0]).abs() < 1.5
-                            && (d.rect[2] - rect[2]).abs() < 1.5
+                            && d.rect[0] >= rect[0] - 1.5
+                            && d.rect[0] + d.rect[2] <= rect[0] + rect[2] + 1.5
+                            && (split || ((d.rect[0] - rect[0]).abs() < 1.5 && (d.rect[2] - rect[2]).abs() < 1.5))
                             && d.rect[1] < y1
                             && y0 < d.rect[1] + d.rect[3]
                     }) {
-                        d.color = c;
-                    } else {
-                        out.push(Deco { rect, color: c, radius: 4.0 * s });
+                        matched = true;
+                        if let Some(c) = p.bg {
+                            d.color = c;
+                        }
+                        if ring.is_some() {
+                            d.ring = ring;
+                        }
+                    }
+                    if !matched {
+                        out.push(PaintedDeco { deco: Deco { rect, color: p.bg.unwrap_or(Color::TRANSPARENT), radius: 4.0 * s }, ring, byte: b.saturating_sub(1) });
                     }
                 }
                 if let (Some(c), Some(l)) = (p.underline, layout.get(line)) {
@@ -93,7 +114,7 @@ impl LinkFx {
                     }) {
                         d.color = c;
                     } else {
-                        out.push(Deco { rect: [x0, y, w, s.max(1.0)], color: c, radius: 0.0 });
+                        out.push(PaintedDeco { deco: Deco { rect: [x0, y, w, s.max(1.0)], color: c, radius: 0.0 }, ring: None, byte: 0 });
                     }
                 }
             }
@@ -176,7 +197,7 @@ impl<S: 'static> Runtime<S> {
             } else { continue };
             let (a, b) = drawn(&self.nodes[i], l.start, l.end);
             let pad = spec.spans.iter().find(|sp| sp.start < l.end && sp.end > l.start && sp.bg.is_some()).map_or(2.0, |sp| sp.bg_pad);
-            fx.push((a, b, paint, pad));
+            fx.push((a, b, paint, pad, !spec.rings.is_empty()));
         }
         LinkFx(fx)
     }

@@ -842,6 +842,8 @@ pub struct TextSpec {
     pub(crate) selection: Color,
     /// See [`El::uncopied`]: byte ranges of `content`, sorted.
     pub(crate) uncopied: Vec<(u32, u32)>,
+    /// Inset border rings `(start, end, color, width)` on rounded span backgrounds.
+    pub(crate) rings: Vec<(u32, u32, Color, f32)>,
     /// Strikethrough byte ranges `(start, end, color)` of `content`.
     pub(crate) strikes: Vec<(u32, u32, Option<Color>)>,
     /// Per-paragraph [`Block`](crate::Block) attributes for `content`.
@@ -886,6 +888,21 @@ impl TextSpec {
     /// Replaces `content` (the authored string) with its cased form and moves span and link
     /// ranges onto it.
     pub(crate) fn apply_case(&mut self) {
+        // Ring boundaries need distinct brushes even when the surrounding styles match.
+        // Do this once before shaping, not once per glyph run at paint time.
+        if !self.rings.is_empty() {
+            let mut spans = Vec::new();
+            for span in &self.spans {
+                let mut bounds = vec![span.start, span.end];
+                for &(a, b, _, _) in &self.rings {
+                    bounds.extend([a, b].into_iter().filter(|&p| span.start < p && p < span.end));
+                }
+                bounds.sort_unstable();
+                bounds.dedup();
+                spans.extend(bounds.windows(2).map(|w| Span { start: w[0], end: w[1], ..span.clone() }));
+            }
+            self.spans = spans;
+        }
         let Some(case) = self.case else { return };
         let (shown, source) = crate::text::CaseSource::new(case, std::mem::take(&mut self.content));
         for span in &mut self.spans {
@@ -896,6 +913,9 @@ impl TextSpec {
         }
         for r in &mut self.uncopied {
             *r = (source.shown(r.0, false), source.shown(r.1, true));
+        }
+        for r in &mut self.rings {
+            (r.0, r.1) = (source.shown(r.0, false), source.shown(r.1, true));
         }
         self.content = shown;
         self.source = Some(Box::new(source));
@@ -1370,6 +1390,7 @@ pub fn text(content: impl Into<String>) -> El {
         selectable: false,
         selection: DEFAULT_SELECTION,
         uncopied: Vec::new(),
+        rings: Vec::new(),
         strikes: Vec::new(),
         blocks: Vec::new(),
         soft_breaks: Vec::new(),
@@ -2683,6 +2704,26 @@ impl El {
     /// (for example `SyntaxTheme::from_kit(&kit).spans(&highlights, code_offset)`).
     pub fn decorations(self, spans: impl Into<Vec<Span>>) -> Self {
         self.spans(spans)
+    }
+    /// An inset `color` border ring `width` points wide inside the rounded [`Span::bg`] of bytes
+    /// `start..end`. Touching runs of the range on one line share one ring; wrapped lines each
+    /// get their own. No background means no ring. Later overlapping rings win.
+    /// Ranges refer to authored UTF-8 bytes and follow text case and truncation. For static
+    /// text only: editable text does not rebase these ranges after edits. Rebuild ranges when
+    /// replacing the content. During streaming reveal a ringed chip fades with its last word
+    /// on each line; selection is painted over the chip and below the glyphs.
+    pub fn span_ring(mut self, start: usize, end: usize, color: Color, width: f32) -> Self {
+        if let Some(t) = &mut self.text && start < end && width > 0.0 && width.is_finite() {
+            t.rings.push((start as u32, end as u32, color, width));
+        }
+        self
+    }
+    /// Inset border rings `(start, end, color, width)` for multiple byte ranges (see [`El::span_ring`]).
+    pub fn span_rings(mut self, rings: impl IntoIterator<Item = (usize, usize, Color, f32)>) -> Self {
+        for (start, end, color, width) in rings {
+            self = self.span_ring(start, end, color, width);
+        }
+        self
     }
     /// Set the visual palette for rich inline marks (`code`, `link`) and paragraph blocks
     /// (`quote`, `code block`, list markers) on a [`text_input`].

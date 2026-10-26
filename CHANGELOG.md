@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::span_ring`, `El::span_rings`, `LinkPaint::ring`, and `Markdown::link_ring`.** Draws an
+  inset border ring `(color, width)` inside a span's rounded `Span::bg` rect (`4 pt` corner radius),
+  so link chips remain visible when their fill is close to the page background.
+  Touching runs inside one ringed range merge into one rect per line, wrapped lines each get their
+  own ring, and the resting ring stays on hover unless `LinkPaint::ring` overrides it. Leaves `Span`
+  and `RichStyle` struct literals unchanged. Rings require a background, follow case conversion
+  and truncation, and fade with the last revealed word on each line. Ranges are static, not
+  rebased by text input edits. The public `Deco` literal is unchanged too.
+
 - **`Pick`: pick fully transparent elements.** `Runtime::element_at_with`, `element_at_in_with`,
   `contains_with` and `Tx::element_at_with` / `element_at_in_with` take a `Pick` (private fields,
   builder methods); `Pick::new().transparent(true)` also finds elements whose own or inherited

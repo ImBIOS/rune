@@ -1011,6 +1011,7 @@ impl MarkdownStyle {
 type LinkWire = Rc<dyn Fn(El) -> El>;
 type LinkLook = Rc<dyn Fn(&str) -> Option<(Span, LinkPaint)>>;
 type TaskWire = Rc<dyn Fn(El, Rc<str>, usize, bool) -> El>;
+type LinkRing = Rc<dyn Fn(&str) -> Option<(Color, f32)>>;
 
 /// Markdown source as an element. See the module docs for cost and keys.
 pub struct Markdown {
@@ -1023,6 +1024,7 @@ pub struct Markdown {
     link_look: Option<LinkLook>,
     on_task: Option<TaskWire>,
     tasks_read_only: bool,
+    link_ring: Option<LinkRing>,
     selectable: bool,
     scroll_wide: bool,
     highlighter: Highlighter,
@@ -1030,7 +1032,7 @@ pub struct Markdown {
 
 impl Markdown {
     pub fn new(src: impl Into<String>) -> Markdown {
-        Markdown { src: src.into(), style: None, block_keys: Vec::new(), reveal: 0.0, streaming: false, on_link: None, link_look: None,
+        Markdown { src: src.into(), style: None, block_keys: Vec::new(), reveal: 0.0, streaming: false, on_link: None, link_look: None, link_ring: None,
             on_task: None, tasks_read_only: false, selectable: false, scroll_wide: false, highlighter: Highlighter::builtin() }
     }
     /// Stable keys as `(source_byte_offset, key)` pairs. The offset is the start of the first
@@ -1120,6 +1122,14 @@ impl Markdown {
         self.tasks_read_only = true;
         self
     }
+    /// An inset border ring `(color, width_pt)` inside the rounded [`Span::bg`] of chosen links
+    /// by destination (`None`: no ring). Stays on hover unless the link's hover [`LinkPaint`]
+    /// sets its own [`LinkPaint::ring`]. Applies with or without a handler.
+    /// Links without a background draw no resting ring; use [`Self::link_style`] to set one.
+    pub fn link_ring(mut self, f: impl Fn(&str) -> Option<(Color, f32)> + 'static) -> Self {
+        self.link_ring = Some(Rc::new(f));
+        self
+    }
     /// Lets people select and copy the text (see [`El::selectable`]) as one selection across
     /// paragraphs, headings, list items, quotes, code blocks and table cells
     /// ([`El::selection_group`]): Cmd+A selects the whole block, and Cmd+C copies the text as
@@ -1173,7 +1183,7 @@ impl Markdown {
             starts.iter().map(|at| self.block_keys.iter().find(|(offset, _)| offset == at)
                 .map_or_else(String::new, |(_, key)| key.clone())).collect::<Vec<_>>()
         };
-        let r = Renderer { s: style.clone(), reveal: self.reveal, streaming: self.streaming, on_link: self.on_link, link_look: self.link_look,
+        let r = Renderer { s: style.clone(), reveal: self.reveal, streaming: self.streaming, on_link: self.on_link, link_look: self.link_look, link_ring: self.link_ring,
             on_task: self.on_task, tasks_read_only: self.tasks_read_only, selectable: self.selectable, scroll_wide: self.scroll_wide,
             highlighter: self.highlighter, sources, next_source: Cell::new(0), tasks, next_task: Cell::new(0),
             current_block_key: RefCell::new("b0".into()) };
@@ -1189,6 +1199,7 @@ struct Renderer {
     link_look: Option<LinkLook>,
     on_task: Option<TaskWire>,
     tasks_read_only: bool,
+    link_ring: Option<LinkRing>,
     selectable: bool,
     /// `Markdown::scroll_wide`.
     scroll_wide: bool,
@@ -1326,7 +1337,14 @@ impl Renderer {
 
     /// The single place a link press is connected: each of `inl.links` becomes a pressable
     /// span of `e` (the text element holding it) reporting its destination.
-    fn wire_link(&self, e: El, inl: &Inline) -> El {
+    fn wire_link(&self, mut e: El, inl: &Inline) -> El {
+        if let Some(ring) = self.link_ring.as_ref().filter(|_| !inl.links.is_empty()) {
+            for (a, b, url) in &inl.links {
+                if let Some((color, width)) = ring(url) {
+                    e = e.span_ring(*a, *b, color, width);
+                }
+            }
+        }
         let Some(on_link) = self.on_link.as_ref().filter(|_| !inl.links.is_empty()) else { return e };
         let default = LinkPaint::new().underline(self.s.accent);
         let hover = |url: &str| self.link_look.as_ref().and_then(|f| f(url)).map_or(default, |l| l.1);
@@ -1573,7 +1591,7 @@ mod tests {
             }
         }
         let (blocks, sources, tasks, _) = doc_cached(src);
-        let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, link_look: None, on_task: None,
+        let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, link_look: None, link_ring: None, on_task: None,
             tasks_read_only: false, selectable: false, scroll_wide: false, highlighter, sources: sources.clone(),
             next_source: Cell::new(0), tasks, next_task: Cell::new(0), current_block_key: RefCell::new("b0".into()) };
         let mut found = Vec::new();
@@ -1824,7 +1842,7 @@ mod tests {
         });
         let (blocks, sources, tasks, _) = doc_cached("[**bold** *em* `code` plain](session:1)");
         let Block::Para(inl) = &blocks[0] else { panic!() };
-        let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, link_look: Some(look), on_task: None,
+        let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, link_look: Some(look), link_ring: None, on_task: None,
             tasks_read_only: false, selectable: false, scroll_wide: false, highlighter: Highlighter::builtin(), sources,
             next_source: Cell::new(0), tasks, next_task: Cell::new(0), current_block_key: RefCell::new("b0".into()) };
         let spans = r.spans(inl, style.body.size);
