@@ -126,6 +126,10 @@ required-features = ["frame-profile"]
 name = "pinch_bench"
 required-features = ["frame-profile"]
 
+[[example]]
+name = "long_note"
+required-features = ["frame-profile"]
+
 [[test]]
 name = "macos_appearance_kvo"
 harness = false

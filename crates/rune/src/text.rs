@@ -2141,9 +2141,32 @@ impl TextSystem {
         bytes: bool,
         out: &mut Vec<GlyphQuad>,
     ) {
+        self.glyphs_in_band(layout, scale, origin, k, bytes, f32::NEG_INFINITY..f32::INFINITY, out);
+    }
+
+    /// [`Self::glyphs_for_layout_scaled`] for only the lines whose box meets `band`, a span of
+    /// the layout's own y (device px, before `k`). Lines are found by binary search, so a long
+    /// text in a scroll view costs its visible lines, not all of them.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn glyphs_in_band(
+        &mut self,
+        layout: &Layout<Ink>,
+        scale: f32,
+        origin: [f32; 2],
+        k: f32,
+        bytes: bool,
+        band: std::ops::Range<f32>,
+        out: &mut Vec<GlyphQuad>,
+    ) {
         let mut table = std::mem::take(&mut self.cluster_scratch);
         let mut coords = std::mem::take(&mut self.coords_scratch);
-        for line in layout.lines() {
+        let (mut lo, mut hi) = (0, layout.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if layout.get(mid).is_some_and(|l| l.metrics().block_max_coord < band.start) { lo = mid + 1 } else { hi = mid }
+        }
+        let lines = (lo..layout.len()).map_while(|i| layout.get(i).filter(|l| l.metrics().block_min_coord <= band.end));
+        for line in lines {
             if bytes {
                 table.clear();
                 let mut x = line.metrics().offset;

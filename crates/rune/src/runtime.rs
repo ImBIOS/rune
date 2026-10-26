@@ -7157,7 +7157,15 @@ impl<S: 'static> Runtime<S> {
                         self.text.glyphs_in(r, *at, s, [r_origin[0] - x, r_origin[1]], &mut self.glyph_scratch);
                         tk
                     } else {
-                        self.text.glyphs_for_layout_scaled(layout, s, r_origin, raster, reveal.is_some() || !link_fx.is_empty(), &mut self.glyph_scratch);
+                        // Only the lines the clip shows, with an em either side for ink past
+                        // the line box; the per-glyph test below still decides what draws.
+                        let band = if tk > 1e-4 {
+                            let pad = 2.0 * spec.style.size * s;
+                            (clip[1] - origin[1]) / tk - pad..(clip[3] - origin[1]) / tk + pad
+                        } else {
+                            f32::NEG_INFINITY..f32::INFINITY
+                        };
+                        self.text.glyphs_in_band(layout, s, r_origin, raster, reveal.is_some() || !link_fx.is_empty(), band, &mut self.glyph_scratch);
                         tk / raster
                     };
                     let gamma = glyph_gamma(color, s, srgb);
@@ -11865,6 +11873,28 @@ mod tests {
             let (op, exiting) = badge(&rt).expect("it plays its exit");
             assert!(exiting && op > 0.5, "animate_layout {animate}: it exits on its transition: {op}");
         }
+    }
+
+    /// A long text in a scroll view walks only the lines its clip shows: the glyphs of lines
+    /// far below aren't rasterized until scrolled to.
+    #[test]
+    fn a_long_scrolled_text_paints_only_its_visible_lines() {
+        use crate::{text_input, TextEdit, TextStyle};
+        struct Note { edit: TextEdit }
+        fn view(s: &Note, _: &mut Cx<Note>) -> El {
+            col().w_full().h_full().child(col().key("viewport").w_full().h(200.0).scroll(ScrollSpec { stick_bottom: false })
+                .child(text_input(&s.edit, TextStyle::new(14.0, 400.0).lh(20.0)).key("note").w_full().on_edit(|s: &mut Note| &mut s.edit)))
+        }
+        let mut text = "plain lowercase words only\n".repeat(500);
+        text += "QUIZ JOKE VEX";
+        let mut rt = Runtime::new(Note { edit: TextEdit::new(text) }, view, (300.0, 300.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        let top = rt.text.atlas.glyph_entries();
+        let glyphs = rt.stats.glyphs;
+        assert!(glyphs > 0 && glyphs < 400, "about ten visible lines painted: {glyphs}");
+        rt.wheel(150.0, 100.0, -1e5);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.text.atlas.glyph_entries() > top, "the capitals on the last line rasterize only once shown");
     }
 
     /// The app clears its password as the card leaves; the exiting copy of the field must
