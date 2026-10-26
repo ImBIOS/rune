@@ -2,7 +2,7 @@
 //! appearance (see `rune-theme-opencode` for the OpenCode theme, or [`Kit::neutral`]).
 //! Components never name raw colours, sizes or fonts outside these fields.
 
-use rune::{Color, Icon, Shadow, Spring, TextStyle};
+use rune::{Color, El, Icon, Shadow, Spring, TextStyle};
 
 /// Colours for one status role (success, warning, danger, info).
 #[derive(Clone, Copy, Debug, Hash)]
@@ -227,6 +227,25 @@ pub struct Kit {
 }
 
 impl Kit {
+    /// Gives `e` the kit's hover and press look: `c.hover` under the pointer, and `c.pressed`
+    /// in its place while held, as the kit's own rows and buttons show them. `e` still needs a
+    /// handler (or `.hit()`) to be hit.
+    pub fn interactive(&self, e: El) -> El {
+        self.interactive_with(e, self.c.hover, self.c.pressed)
+    }
+
+    /// [`Self::interactive`] with other overlays, e.g. `c.contrast_hover` and
+    /// `c.contrast_pressed` on a contrast fill. `pressed` replaces `hover` while held rather
+    /// than stacking on it.
+    pub fn interactive_with(&self, e: El, hover: Color, pressed: Color) -> El {
+        e.hover(hover).press(crate::press_over(hover, pressed))
+    }
+
+    /// Paints elevation layers on `e` as box shadows, e.g. `k.elevate(e, &k.elevation.floating)`.
+    pub fn elevate(&self, e: El, layers: &[Shadow]) -> El {
+        crate::shadows(self, e, layers)
+    }
+
     /// `c` at opacity `a`, re-solved so linear-light blending gives the browser's sRGB result.
     pub fn alpha(&self, c: Color, a: f32) -> Color {
         let ca = c.alpha(a);
