@@ -126,6 +126,11 @@ impl RollingText {
             } else {
                 self.spring
             };
+            let tr = if g.entered {
+                Transition::push(self.from)
+            } else {
+                Transition::asymmetric(Transition::identity(), Transition::push(self.from))
+            };
             e = e.child(
                 text(g.cluster)
                     .key(format!("{}.{}", self.key, g.id))
@@ -133,7 +138,7 @@ impl RollingText {
                     .advance_in(&run, at)
                     .color(color)
                     .motion(spring)
-                    .transition(Transition::push(self.from)),
+                    .transition(tr),
             );
         }
         e

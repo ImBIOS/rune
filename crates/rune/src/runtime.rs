@@ -2815,37 +2815,65 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// Per node of the new tree `nodes`: neither it nor anything under it drew in the last
-    /// build, and none of it lands in sight in this layout (in the window, inside its clips).
-    /// Empty when nothing qualifies.
+    /// build, and none of its swept path lands in sight in this layout (in the window, inside
+    /// its clips). Empty when nothing qualifies.
     fn unseen_before_and_after(&self, nodes: &[Node]) -> Vec<bool> {
         if !self.built || self.seen.len() != self.nodes.len() { return Vec::new(); }
         let mut seen = self.seen.clone();
         mark_ancestors(&self.nodes, &mut seen);
         let before: HashSet<NodeId> = self.nodes.iter().zip(&seen).filter(|(_, s)| !**s).map(|(n, _)| n.id).collect();
         if before.is_empty() { return Vec::new(); }
+        let old_drawn: HashMap<NodeId, [f32; 4]> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, old)| old.target[2] > old.target[0] || old.target[3] > old.target[1])
+            .map(|(old_i, old)| (old.id, self.drawn_edges(old_i)))
+            .collect();
         // Room for shadows and blur, which draw past a node's rect.
         const MARGIN: f32 = 32.0;
         let window = [0.0, 0.0, self.viewport.0, self.viewport.1];
-        // Per node: the clip and scroll offset its children are under, in points.
-        let mut inner = vec![(window, [0.0f32; 2]); nodes.len()];
+        // Per node: the swept clip and scroll-offset range its children are under, in points.
+        let mut inner = vec![(window, [0.0f32; 2], [0.0f32; 2]); nodes.len()];
         let mut after = vec![false; nodes.len()];
         for (i, n) in nodes.iter().enumerate() {
-            let (clip, shift) = match n.parent {
+            let (clip, shift_min, shift_max) = match n.parent {
                 Some(p) if n.above.is_none() && p < i => inner[p],
-                Some(_) if n.above.is_none() => { after[i] = true; (window, [0.0; 2]) }
-                _ => (window, [0.0; 2]),
+                Some(_) if n.above.is_none() => { after[i] = true; (window, [0.0; 2], [0.0; 2]) }
+                _ => (window, [0.0; 2], [0.0; 2]),
             };
             let t = n.target;
-            let r = [t[0] - shift[0], t[1] - shift[1], t[2] - shift[0], t[3] - shift[1]];
-            after[i] |= r[2] >= clip[0] - MARGIN && r[0] <= clip[2] + MARGIN && r[3] >= clip[1] - MARGIN && r[1] <= clip[3] + MARGIN;
-            let clip = if n.vis.clip.is_some() || n.scroll.is_some() {
-                [clip[0].max(r[0]), clip[1].max(r[1]), clip[2].min(r[2]), clip[3].min(r[3])]
-            } else { clip };
-            let shift = match self.scrolls.get(&n.id) {
-                Some(st) if n.scroll.is_some() => [shift[0] + st.x.offset as f32, shift[1] + st.offset as f32],
-                _ => shift,
+            let r = [t[0] - shift_max[0], t[1] - shift_max[1], t[2] - shift_min[0], t[3] - shift_min[1]];
+            let swept = match old_drawn.get(&n.id) {
+                Some(&b) => [b[0].min(r[0]), b[1].min(r[1]), b[2].max(r[2]), b[3].max(r[3])],
+                None => r,
             };
-            inner[i] = (clip, shift);
+            after[i] |= swept[2] >= clip[0] - MARGIN && swept[0] <= clip[2] + MARGIN
+                && swept[3] >= clip[1] - MARGIN && swept[1] <= clip[3] + MARGIN;
+            let clip = if n.vis.clip.is_some() || n.scroll.is_some() {
+                [clip[0].max(swept[0]), clip[1].max(swept[1]), clip[2].min(swept[2]), clip[3].min(swept[3])]
+            } else { clip };
+            let (shift_min, shift_max) = match (self.scrolls.get(&n.id), n.scroll) {
+                (Some(st), Some(sp)) => {
+                    let content = (i + 1..nodes.len()).find(|&j| nodes[j].parent == Some(i));
+                    let max_x = if n.scroll_axes.x() {
+                        content.map_or(0.0, |c| (nodes[c].target[2] - n.target[2]).max(0.0))
+                    } else { 0.0 };
+                    let max_y = if n.scroll_axes.y() {
+                        content.map_or(0.0, |c| (nodes[c].target[3] - n.target[3]).max(0.0))
+                    } else { 0.0 };
+                    let ox0 = st.x.offset as f32;
+                    let ox1 = ox0.clamp(0.0, max_x);
+                    let oy0 = st.offset as f32;
+                    let oy1 = if st.pinned && sp.stick_bottom { max_y } else { oy0.clamp(0.0, max_y) };
+                    (
+                        [shift_min[0] + ox0.min(ox1), shift_min[1] + oy0.min(oy1)],
+                        [shift_max[0] + ox0.max(ox1), shift_max[1] + oy0.max(oy1)],
+                    )
+                }
+                _ => (shift_min, shift_max),
+            };
+            inner[i] = (clip, shift_min, shift_max);
         }
         mark_ancestors(nodes, &mut after);
         nodes.iter().zip(&after).map(|(n, a)| !a && before.contains(&n.id)).collect()
@@ -3580,7 +3608,10 @@ impl<S: 'static> Runtime<S> {
                 // `animate_layout`, contents new to a row already in place enter on their own.
                 mounted[i] = !was_present;
                 let rides_row = row_like || (nodes[i].in_row == RowLayout::Horizontal && nodes[i].parent.is_some_and(|p| mounted[p]));
-                let quiet_row = rides_row && nodes[i].transition.is_none() && !was_exiting && !self.reduced_motion;
+                let quiet_row = rides_row
+                    && nodes[i].transition.is_none_or(|t| t.insertion == rune_motion::Effect::IDENTITY)
+                    && !was_exiting
+                    && !self.reduced_motion;
                 let mount = if instant || nodes[i].virtual_mount || quiet_row { Mount::Initial } else { Mount::Animated };
                 self.scene.insert(id, spec, mount);
             }
@@ -3604,7 +3635,11 @@ impl<S: 'static> Runtime<S> {
                     // Growth and virtual windows own a row's vertical place; its horizontal place
                     // still springs, or a re-centred column jumps against its moving parent. So
                     // do `animate_layout` contents inside the row.
-                    LayoutAnim::axes(spring_l, Anim::INSTANT)
+                    let mut la = LayoutAnim::axes(spring_l, Anim::INSTANT);
+                    if tx.motion.is_none() && nodes[i].width_leads {
+                        la = la.width_leads();
+                    }
+                    la
                 } else if layout_instant || follows_window {
                     LayoutAnim::INSTANT
                 } else {
@@ -10058,7 +10093,7 @@ mod tests {
         use crate::el::GrowthSpec;
         fn view(s: &(f32, bool), _cx: &mut Cx<(f32, bool)>) -> El {
             let mut trigger = crate::row().key("trigger").h(28.0)
-                .child(el().key("label").size(s.0, 16.0))
+                .child(el().key("label").size(s.0, 16.0).width_leads())
                 .child(el().key("chevron").size(14.0, 14.0));
             if s.1 { trigger = trigger.animate_layout(); }
             col().key("stack").w_full().growth(GrowthSpec::default())
@@ -10066,15 +10101,18 @@ mod tests {
         }
         let chevron_x = |rt: &Runtime<(f32, bool)>| rt.elements().into_iter()
             .find(|e| e.key.as_deref() == Some("chevron")).unwrap().rect[0];
+        let label_w = |rt: &Runtime<(f32, bool)>| rt.elements().into_iter()
+            .find(|e| e.key.as_deref() == Some("label")).unwrap().rect[2];
         for animate in [false, true] {
             let mut rt = Runtime::new((53.0, animate), view, (300.0, 100.0), Env::new(true, 2.0));
             rt.frame(0.0);
             assert_eq!(chevron_x(&rt), 53.0);
             rt.update(|s, _| s.0 = 88.0);
             rt.frame(1.0 / 120.0);
-            let x = chevron_x(&rt);
+            let (x, w) = (chevron_x(&rt), label_w(&rt));
             if animate {
                 assert!(x > 53.0 && x < 60.0, "springs from where it was: {x}");
+                assert!(w > x, "width_leads still leads inside a growth row: {w} vs {x}");
                 for _ in 0..120 { rt.frame(1.0 / 120.0); }
                 assert_eq!(chevron_x(&rt), 88.0);
             } else {
@@ -10112,17 +10150,23 @@ mod tests {
     fn layout_out_of_sight_before_and_after_moves_at_once() {
         fn view(wide: &bool, _cx: &mut Cx<bool>) -> El {
             let rows = (0..40).map(|i| el().key(format!("r{i}")).w(if *wide { 200.0 } else { 100.0 }).h(40.0).fill(Color::WHITE));
-            col().w_full().h_full().child(col().key("scroll").w_full().h(100.0)
-                .scroll(ScrollSpec { stick_bottom: false }).child(col().children(rows)))
+            col().w_full().h_full()
+                .child(col().key("scroll").w_full().h(100.0)
+                    .scroll(ScrollSpec { stick_bottom: false }).child(col().children(rows)))
+                .child(el().key("crosser").absolute(if *wide { -80.0 } else { 380.0 }, 20.0).size(20.0, 20.0).fill(Color::WHITE))
+                .child(col().key("drawer").w_full().h(if *wide { 100.0 } else { 0.0 }).clip_soft(0.0)
+                    .child(el().key("inside-closing").absolute(10.0, if *wide { 180.0 } else { 20.0 }).size(40.0, 20.0).fill(Color::WHITE)))
         }
         let mut rt = Runtime::new(true, view, (300.0, 300.0), Env::new(true, 2.0));
         rt.frame(0.0);
         rt.frame(1.0 / 120.0);
         rt.update(|s, _| *s = false);
         rt.frame(1.0 / 120.0);
-        let width = |rt: &Runtime<bool>, key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap().rect[2];
-        assert!(width(&rt, "r0") > 190.0, "a row in sight springs: {}", width(&rt, "r0"));
-        assert_eq!(width(&rt, "r30"), 100.0, "a row out of sight before and after lands at once");
+        let rect = |rt: &Runtime<bool>, key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap().rect;
+        assert!(rect(&rt, "r0")[2] > 190.0, "a row in sight springs: {}", rect(&rt, "r0")[2]);
+        assert_eq!(rect(&rt, "r30")[2], 100.0, "a row out of sight before and after lands at once");
+        assert!(rect(&rt, "crosser")[0] < 0.0, "an element sweeping across the window animates: {:?}", rect(&rt, "crosser"));
+        assert!(rect(&rt, "inside-closing")[1] > 150.0, "an element entering a still-closing clip animates: {:?}", rect(&rt, "inside-closing"));
     }
 
     #[test]
