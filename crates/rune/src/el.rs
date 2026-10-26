@@ -51,6 +51,7 @@ pub struct Tx {
     /// Modifier keys held as the handler runs.
     pub(crate) mods: crate::Mods,
     pub(crate) srgb_blend: Option<bool>,
+    pub(crate) blur: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -284,6 +285,15 @@ impl Tx {
     /// Wayland and headless runs ignore it.
     pub fn center_window(&mut self) {
         self.frame_request(crate::window_frame::FrameRequest { center: true, ..Default::default() });
+    }
+
+    /// Drop keyboard focus, as a click on empty space does: after this handler, nothing is
+    /// focused, the focused field's `TextEdit::focused` turns false (through its `on_edit`
+    /// accessor) and keys go to the window's `on_key` again. A field focused only by setting
+    /// `focused` in the model without `on_edit` takes focus back on the next frame unless the
+    /// model clears it too. Does nothing when nothing has focus.
+    pub fn blur(&mut self) {
+        self.blur = true;
     }
 
     /// Switch this window between linear and sRGB (gamma-space) blending from the next frame,

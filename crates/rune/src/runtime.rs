@@ -1603,7 +1603,8 @@ impl<S: 'static> Runtime<S> {
     pub fn update_if(&mut self, f: impl FnOnce(&mut S, &mut Tx) -> bool) -> bool {
         let mut one = self.transaction();
         let changed = f(&mut self.state, &mut one);
-        let stale = changed || one.frame_work() || one.window_frame.is_some() || one.srgb_blend.is_some_and(|b| b != self.srgb_blend);
+        let stale = changed || one.frame_work() || one.window_frame.is_some() || one.srgb_blend.is_some_and(|b| b != self.srgb_blend)
+            || (one.blur && self.focused.is_some());
         self.latch_requests(&mut one);
         merge(&mut self.pending, one);
         self.dirty |= changed;
@@ -1639,6 +1640,10 @@ impl<S: 'static> Runtime<S> {
             self.request_file_dialog(request);
         }
         if let Some(srgb) = tx.srgb_blend.take() { self.set_srgb_blend(srgb); }
+        if std::mem::take(&mut tx.blur) && self.focused.is_some() {
+            self.set_focus(None, self.keyboard_focus);
+            self.dirty = true;
+        }
         if let Some(mut request) = tx.window_frame.take() {
             request.spring = (request.animate && !tx.instant && !self.reduced_motion).then(|| tx.motion.unwrap_or(motion::DEFAULT));
             self.window_frame = Some(self.window_frame.unwrap_or_default().merge(request));
@@ -1690,9 +1695,9 @@ impl<S: 'static> Runtime<S> {
         let changed = app_call!(poll, &mut self.state, self.clock, &mut one);
         self.dirty |= changed;
         self.schedule_wakes(one.wakes.drain(..));
-        let blend = one.srgb_blend.is_some_and(|b| b != self.srgb_blend);
+        let asks_frame = one.srgb_blend.is_some_and(|b| b != self.srgb_blend) || (one.blur && self.focused.is_some());
         self.latch_requests(&mut one);
-        let stale = changed || one.frame_work() || patched || blend;
+        let stale = changed || one.frame_work() || patched || asks_frame;
         merge(&mut self.pending, one);
         stale
     }
@@ -6551,6 +6556,7 @@ fn merge(tx: &mut Tx, one: Tx) {
     tx.shell = tx.shell.max(one.shell);
     tx.minimize |= one.minimize;
     tx.srgb_blend = one.srgb_blend.or(tx.srgb_blend);
+    tx.blur |= one.blur;
     tx.instant |= one.instant;
     tx.settle |= one.settle;
     tx.motion = one.motion.or(tx.motion);

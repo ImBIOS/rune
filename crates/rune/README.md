@@ -706,6 +706,8 @@ starts a new countdown.
 
 `TextEdit::focused` is maintained by the runtime. Set it once to request focus, then
 let the runtime clear it when another field takes focus; do not force it on every view rebuild.
+A handler drops focus with `Tx::blur()` (Enter in an inspector field handing keys back to
+the window, say); the field's `focused` turns false through its `on_edit` accessor.
 
 Text fields support Cmd/Ctrl-Z and Cmd/Ctrl-Shift-Z. Consecutive typing is one undo
 group; selection changes, navigation, paste, cut and IME commits separate groups.

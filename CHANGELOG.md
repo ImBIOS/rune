@@ -5,6 +5,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Tx::blur()` drops keyboard focus from a handler**, as a click on empty space does: the
+  focused field's `TextEdit::focused` turns false through `on_edit` and keys reach the window's
+  `on_key` again. An app no longer needs to clear `focused` in its model to hand keys back.
+
 - **`Tx::set_srgb_blend(bool)` switches blending live.** A handler moves its window (or
   overlay, web canvas or headless run) between linear and sRGB blending from the next frame, as
   if it had launched with `App::srgb_blend`. The frame that switches reconfigures the surface and
