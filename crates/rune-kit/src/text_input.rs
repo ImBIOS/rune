@@ -354,10 +354,16 @@ pub struct TextArea {
 }
 
 impl TextArea {
+    /// Protect the model like a password field. Hidden non-empty values use a fixed one-line
+    /// mask. Clicks and unshifted navigation move to the end; shifted navigation selects all.
+    /// Typing/paste append, or replace the whole value if selected; Backspace deletes at the
+    /// end. Reveal to edit an interior position. Enter inserts a newline; Cmd/Ctrl+Enter submits.
     pub fn secure(mut self) -> Self {
         self.edit.set_secure(true);
         self
     }
+    /// Show the text without enabling undo, copy, cut, IME or accessibility text.
+    /// Toggling preserves the model selection until a hidden edit or navigation occurs.
     pub fn revealed(mut self, revealed: bool) -> Self {
         self.edit.set_revealed(revealed);
         self.edits.revealed(revealed);
@@ -396,7 +402,8 @@ impl TextArea {
         self.grow = Some((min, max_rows.max(min)));
         self
     }
-    /// With [`TextArea::auto_grow`], also stop growing at this many points of text.
+    /// Cap the field's height and scroll overflowing text. With [`TextArea::auto_grow`],
+    /// also stop growing at this many points of text.
     pub fn max_height(mut self, h: f32) -> Self {
         self.max_height = Some(h);
         self
@@ -407,7 +414,7 @@ impl TextArea {
     }
     /// See [`El::wrap_anywhere`](rune::El::wrap_anywhere).
     pub fn wrap_anywhere(mut self) -> Self {
-        self.edits.handlers.push(Box::new(El::wrap_anywhere));
+        self.edits.visual.push(Box::new(El::wrap_anywhere));
         self
     }
     pub fn invalid(mut self, i: bool) -> Self {
@@ -491,16 +498,17 @@ impl TextArea {
                 None => viewport,
             })
         } else if let Some(h) = self.max_height {
-            let min_inner = (self.rows as f32 * line).max(80.0 - 16.0);
+            let max_inner = (h - 16.0).max(line);
+            let min_inner = (self.rows as f32 * line).max(80.0 - 16.0).min(max_inner);
             let viewport = col()
                 .key("scroll")
                 .w_full()
                 .shrink()
                 .min_h(min_inner)
-                .max_h((h - 16.0).max(line))
+                .max_h(max_inner)
                 .scroll(rune::ScrollSpec { stick_bottom: false })
                 .child(field.animate_edit_layout());
-            e.min_h((self.rows as f32 * line + 16.0).max(80.0)).child(viewport)
+            e.min_h(min_inner + 16.0).child(viewport)
         } else {
             // A <textarea rows=3>: rows of its line height plus padding, at least 80.
             e.min_h((self.rows as f32 * line + 16.0).max(80.0)).child(field)

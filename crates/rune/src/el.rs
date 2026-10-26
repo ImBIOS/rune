@@ -1499,9 +1499,6 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
         t.wrap_anywhere = edit.is_secure();
         t.redacted = edit.is_secure();
     }
-    if edit.is_secure() {
-        e.style.flex_shrink = 1.0;
-    }
     e.input = Some(Box::new(InputSpec {
         animate_layout: false,
         edit,
@@ -1589,7 +1586,6 @@ impl El {
                 text.redacted = true;
                 if !single {
                     text.wrap_anywhere = true;
-                    self.style.flex_shrink = 1.0;
                 }
             }
             self.sync_input_pills();
@@ -2955,7 +2951,8 @@ impl El {
     }
     /// Wrap text at the element's width, breaking inside a word only when the word alone would
     /// overflow the line (`overflow-wrap: anywhere`) while breaking normal words at spaces, and
-    /// lowering the text's min-content width so a flex parent can shrink it.
+    /// lowering the text's min-content width. Does not change flex shrinking; use
+    /// [`El::shrink`] to allow a flex row to narrow the element.
     pub fn wrap_anywhere(mut self) -> Self {
         if self.input.as_ref().is_some_and(|i| i.single_line) {
             return self;
@@ -2963,7 +2960,6 @@ impl El {
         if let Some(t) = &mut self.text {
             t.wrap = true;
             t.wrap_anywhere = true;
-            self.style.flex_shrink = 1.0;
         }
         self
     }

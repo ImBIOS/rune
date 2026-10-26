@@ -851,14 +851,26 @@ snapshots and retains at most 128 edits / 1 MiB of text (oversized edits drop hi
 Call `TextEdit::clear()` after submission to clear history while retaining focus;
 call `break_history_group()` when setting a selection from custom pointer handling.
 
-Use `TextEdit::new("").secure()` or `text_input(&edit, style).secure()` for passwords;
-kit's `TextInput::secure()` passes it through. Each Unicode scalar displays as one
-bullet, with model-byte selection and caret positions mapped to those bullets.
+Use `TextEdit::new("").secure()` with `text_input(&edit, style).single_line()` for
+passwords, or mark the element `.single_line().secure()`; kit's `TextInput::secure()`
+passes it through. Each Unicode scalar displays as one bullet, with model-byte
+selection and caret positions mapped to those bullets.
 Secure fields have no undo, copy, cut, IME composition, or inspector text. macOS
 Secure Event Input is held only while their native window is focused and visible.
 Model buffers and history wipe on drop; secure edits wipe replaced allocations.
 Use `replace_text(..)` or `clear()` for programmatic replacement. Direct assignment
 to the public `text: String` field bypasses replacement wiping.
+
+For secure notes or keys, use `rune_kit::TextArea::new(&edit).secure()` or a multi-line
+`text_input(&edit, style).secure()`. Enter inserts a newline; Cmd/Ctrl+Enter submits,
+and paste preserves newlines. Hidden non-empty values show twelve bullets on one
+line regardless of length. Navigation moves to the end (Shift selects all); typing
+and paste append, or replace the whole value if selected, and Backspace deletes
+at the end. `.revealed(true)` permits interior edits while retaining all secure
+protections. Toggling alone preserves selection; hiding snaps geometry and resets
+ancestor scrolling. `TextArea::max_height(..)` or `auto_grow(..)` bounds revealed
+content. Revealed secure lines wrap long tokens automatically; other text can opt
+in with `El::wrap_anywhere()` (add `.shrink()` for flex-row shrinking).
 
 `tx.copy_secret(text, Duration::from_secs(30))` writes with the platform's clipboard
 history-exclusion marker and expires on Rune's shared clipboard worker. Expiry

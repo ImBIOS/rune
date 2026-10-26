@@ -219,18 +219,12 @@ pub(crate) const MULTILINE_SECURE_MASK: &str = "••••••••••�
 
 /// Mirrors whether the bound [`text_input`](crate::text_input) has [`El::single_line`](crate::El::single_line).
 /// Before a field mounts, standalone [`TextEdit::secure`] defaults to single-line.
-#[derive(Clone, Copy, Default, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum LineMode {
     #[default]
     Default,
     Single,
     Multi,
-}
-
-impl PartialEq for LineMode {
-    fn eq(&self, _: &Self) -> bool {
-        true
-    }
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -898,6 +892,16 @@ impl TextEdit {
             if a == b || self.text.is_empty() { (0, 0) } else { (0, MULTILINE_SECURE_MASK.len()) }
         } else {
             (self.display_index(a), self.display_index(b))
+        }
+    }
+
+    // A fixed mask has no visible interior positions. Preserve the revealed selection until
+    // an edit occurs, then treat it as either the whole secret or an insertion at its end.
+    fn normalize_hidden_selection(&mut self) {
+        if self.is_hidden_multiline() {
+            let selected = self.anchor != self.focus;
+            self.focus = self.text.len();
+            self.anchor = if selected { 0 } else { self.focus };
         }
     }
 
@@ -2084,6 +2088,12 @@ impl TextEdit {
         if matches!(ev.key, Key::Modifier { .. }) { return out; }
         self.sync_invariants();
         let m = ev.mods;
+        self.normalize_hidden_selection();
+        if self.is_hidden_multiline() && matches!(ev.key, Key::Left | Key::Right | Key::Up | Key::Down | Key::Home | Key::End) {
+            self.focus = self.text.len();
+            self.anchor = if m.shift { 0 } else { self.focus };
+            return out;
+        }
         if let Some(c) = ev.control_binding() {
             let (key, line) = match c {
                 'a' => (Key::Left, true), 'e' => (Key::Right, true), 'b' => (Key::Left, false),
@@ -2349,6 +2359,7 @@ impl TextEdit {
     }
 
     pub fn paste(&mut self, s: &str) -> EditOutcome {
+        self.normalize_hidden_selection();
         let s = self.sanitize(s);
         self.insert(&s);
         EditOutcome::default()
@@ -2858,6 +2869,38 @@ mod tests {
         assert!(exiting.is_secure() && !exiting.is_revealed());
         assert_eq!(exiting.text, "•••••••");
         assert_eq!(exiting.display().0, "•••••••");
+    }
+
+    #[test]
+    fn hidden_multiline_navigation_and_edits_have_no_invisible_interior() {
+        let mut e = TextEdit::new("first\nlast").secure();
+        e.set_single_line(false);
+        for key in [Key::Left, Key::Right, Key::Up, Key::Down, Key::Home, Key::End] {
+            e.set_caret(2);
+            e.key(&k(key.clone()), None);
+            assert_eq!(e.range(), (e.text.len(), e.text.len()));
+            e.key(&KeyEvent { key, mods: Mods { shift: true, ..Mods::default() } }, None);
+            assert_eq!(e.range(), (0, e.text.len()));
+        }
+        e.set_caret(2);
+        e.key(&k(Key::Text("!".into())), None);
+        assert_eq!(e.text, "first\nlast!");
+        e.set_caret(2);
+        e.key(&k(Key::Backspace), None);
+        assert_eq!(e.text, "first\nlast");
+        e.key(&k(Key::Delete), None);
+        assert_eq!(e.text, "first\nlast");
+        e.set_caret(2);
+        e.paste("\r\nnext");
+        assert_eq!(e.text, "first\nlast\nnext");
+        e.set_selection(1, 3);
+        e.paste("replacement\nlines");
+        assert_eq!(e.text, "replacement\nlines");
+        e.set_revealed(true);
+        e.set_selection(1, 3);
+        e.set_revealed(false);
+        e.set_revealed(true);
+        assert_eq!(e.range(), (1, 3), "toggle without editing preserves revealed selection");
     }
 
     #[test]

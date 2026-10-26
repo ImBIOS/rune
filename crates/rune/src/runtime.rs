@@ -4176,7 +4176,21 @@ impl<S: 'static> Runtime<S> {
         let first = self.commits == 0;
         self.commits += 1;
         self.stats.commits = self.commits;
-        let instant = tx.instant || first;
+        // Concealing is a security boundary: old geometry must not disclose the revealed
+        // line count through a height spring, displaced siblings, or a lingering scroll glide.
+        let revealed: HashSet<_> = self.nodes.iter()
+            .filter(|n| n.input.as_ref().is_some_and(|input| input.edit.is_secure() && input.edit.is_revealed()))
+            .map(|n| n.id).collect();
+        let mut concealed = vec![false; nodes.len()];
+        for (i, n) in nodes.iter().enumerate() {
+            if n.input.as_ref().is_some_and(|input| input.edit.is_hidden_multiline())
+                && revealed.contains(&n.id)
+            {
+                concealed[i] = true;
+            }
+        }
+        mark_ancestors(&nodes, &mut concealed);
+        let instant = tx.instant || first || concealed.iter().any(|&hidden| hidden);
         let now = self.t;
         if self.fit_height && let Some(root) = nodes.first() { self.fit_window(root.local.h, tx, first); }
 
@@ -4599,7 +4613,7 @@ impl<S: 'static> Runtime<S> {
         }
 
         // Scroll viewports: a new sticky viewport opens at the end.
-        for n in &nodes {
+        for (i, n) in nodes.iter().enumerate() {
             if let Some(sp) = n.scroll {
                 let e = self.scrolls.entry(n.id).or_insert(ScrollState {
                     offset: 0.0,
@@ -4615,6 +4629,17 @@ impl<S: 'static> Runtime<S> {
                     slack: Default::default(),
                     x: AxisScroll::default(),
                 });
+                if concealed[i] {
+                    e.offset = 0.0;
+                    e.v = 0.0;
+                    e.max = 0.0;
+                    e.glide = None;
+                    e.glide_to = None;
+                    e.held = false;
+                    e.scrolling = false;
+                    e.slack = scroll_bottom::Slack::landed(self.viewport);
+                    e.x = AxisScroll::default();
+                }
                 if tx.settle && sp.stick_bottom {
                     e.pinned = true;
                     e.v = 0.0;
@@ -4681,6 +4706,7 @@ impl<S: 'static> Runtime<S> {
                     use zeroize::Zeroize;
                     spec.content.zeroize();
                     spec.content = input.edit.display().0;
+                    if input.edit.is_hidden_multiline() { spec.wrap = false; }
                     let scale = self.env.scale;
                     let w = (old.local.w - old.inset[0] - old.inset[2]).max(0.0);
                     let wrap = spec.wrap.then_some(w * scale);
@@ -8902,6 +8928,11 @@ fn flatten(
         inert,
         ..
     } = el;
+    let mut text = text;
+    if input.as_ref().is_some_and(|i| i.edit.is_hidden_multiline()) && let Some(t) = &mut text {
+        // The fixed mask stays one line even in a field narrower than twelve bullets.
+        t.wrap = false;
+    }
     let inert = inert || parent.is_some_and(|p| nodes[p].inert);
     let mut vis = vis;
     if vis.hover_within.is_none() {
@@ -12261,10 +12292,57 @@ mod tests {
     }
 
     #[test]
+    fn secure_multiline_conceal_snaps_geometry_scroll_and_bypasses_caches() {
+        fn view(s: &crate::TextEdit, _: &mut Cx<crate::TextEdit>) -> El {
+            col().cache().w(120.0).child(crate::auto_grow(
+                crate::text_input(s, crate::TextStyle::new(14.0, 400.0))
+                    .w_full().key("secret").on_edit(|s: &mut crate::TextEdit| s), 1, 3))
+        }
+        let mut edit = crate::TextEdit::new("fictional line\n".repeat(60)).secure().revealed(true);
+        edit.focused = true;
+        let mut rt = Runtime::new(edit, view, (180.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert_eq!(rt.text.cached_layout_count(), 0);
+        assert!(rt.node_caches.is_empty());
+        let scroll_id = rt.nodes.iter().find(|n| n.scroll.is_some()).unwrap().id;
+        assert!(rt.scrolls[&scroll_id].max > 100.0);
+        rt.scrolls.get_mut(&scroll_id).unwrap().offset = 300.0;
+        rt.update(|s, _| s.set_revealed(false)); // No tx.instant(): conceal must do this itself.
+        rt.frame(0.0);
+        let st = &rt.scrolls[&scroll_id];
+        assert_eq!((st.offset, st.max), (0.0, 0.0));
+        assert!(st.glide.is_none());
+        let elements = rt.elements();
+        for e in &elements {
+            assert_eq!(e.rect[3], e.target[3], "concealed height must not spring: {}", e.path);
+        }
+        let secret = rt.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+        assert_eq!(secret.text_layout.as_ref().unwrap().len(), 1);
+        assert_eq!(Rc::strong_count(secret.text_layout.as_ref().unwrap()), 1);
+        assert_eq!(rt.text.cached_layout_count(), 0);
+        assert!(rt.ime_area.is_none());
+        let info = elements.iter().find(|e| e.key.as_deref() == Some("secret")).unwrap();
+        assert!(info.text.is_none() && info.selected.is_none());
+
+        // Even a narrow hidden field keeps one mask line, including after wrap_anywhere.
+        fn narrow(s: &crate::TextEdit, _: &mut Cx<crate::TextEdit>) -> El {
+            crate::text_input(s, crate::TextStyle::new(14.0, 400.0)).wrap_anywhere().w(12.0)
+        }
+        let mut narrow = Runtime::new(rt.state.clone(), narrow, (50.0, 100.0), Env::new(true, 1.0));
+        narrow.frame(0.0);
+        assert_eq!(narrow.nodes[0].text_layout.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
     fn wrap_anywhere_wraps_unbroken_tokens_keeps_word_breaks_and_lowers_min_content_width() {
         use crate::{rich, row, text, Span};
         const LONG_BASE64: &str = "AAAAB3NzaC1yc2EAAAADAQABAAABAQDfakebase64publickeymaterialwithoutspaces0123456789ABCDEF==";
         const WORDS: &str = "alpha beta gamma delta epsilon zeta eta theta";
+
+        let mut explicit = text("token");
+        explicit.style.flex_shrink = 0.25;
+        assert_eq!(explicit.wrap_anywhere().style.flex_shrink, 0.25);
+        assert_eq!(text("token").wrap_anywhere().style.flex_shrink, 0.0);
 
         fn view(_: &(), _: &mut Cx<()>) -> El {
             col()
@@ -12273,7 +12351,7 @@ mod tests {
                 .child(col().w(160.0).child(text(LONG_BASE64).wrap().key("default_wrap")))
                 .child(col().w(160.0).child(text(LONG_BASE64).wrap_anywhere().key("anywhere_wrap")))
                 // In a flex row, wrap_anywhere lowers min-content width so the flex parent can shrink it.
-                .child(row().w(160.0).child(text(LONG_BASE64).wrap_anywhere().key("row_anywhere")))
+                .child(row().w(160.0).child(text(LONG_BASE64).wrap_anywhere().shrink().key("row_anywhere")))
                 // Normal words with spaces in the same 160pt width.
                 .child(col().w(160.0).child(text(WORDS).wrap().key("words_default")))
                 .child(col().w(160.0).child(text(WORDS).wrap_anywhere().key("words_anywhere")))

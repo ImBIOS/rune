@@ -9,7 +9,7 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   `text(..)`, `rich(..)`, `text_input(..)` and `TextArea` now offer `.wrap_anywhere()`, which wraps
   at normal word boundaries when words fit and breaks inside an unbroken token (such as a base64
   key or long URL) only when the token alone would overflow the line, while lowering the text's
-  min-content width and enabling flex shrinking so a flex parent can narrow it. Multi-line
+  min-content width without overriding flex shrinking (use `.shrink()` in a flex row). Multi-line
   `.secure()` fields enable `wrap_anywhere` by default.
 - **Multi-line secure fields (`rune_kit::TextArea::secure`, `TextArea::revealed`, and multi-line `text_input(...).secure()`).**
   A multi-line field marked `.secure()` now accepts `Enter` to insert a newline (`⌘Return` /
@@ -19,7 +19,10 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   multi-line secure field renders a fixed single-line bullet mask (`"••••••••••••"`) at a fixed
   height so neither byte length nor line count is leaked; the visual caret pins to the end of the
   mask, pointer hits place the caret at the end of the model, and any active selection highlights
-  the full mask. When revealed (`revealed(true)`), multi-line fields show their real lines, wrap
+  the full mask. Hidden edits append or replace the whole selected value; navigation moves to
+  the end (Shift selects all), and Backspace deletes at the end. Reveal for interior edits.
+  Hiding snaps geometry and resets ancestor scrolling rather than animating old line counts.
+  When revealed (`revealed(true)`), multi-line fields show their real lines, wrap
   long unbroken tokens with `wrap_anywhere`, scroll inside `TextArea::max_height` / `auto_grow`,
   and conceal back to the fixed mask on the first exit frame.
 - **`El::hover_motion_within(enter, exit)`: a subtree default for hover curves.** Every hover track

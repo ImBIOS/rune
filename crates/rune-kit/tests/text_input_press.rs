@@ -628,12 +628,31 @@ fn secure_text_area_masks_multiline_secrets_wraps_long_tokens_when_revealed_and_
     );
 
     // Hiding again restores the fixed 1-line mask height while preserving the multi-line text.
-    rt.update(|s, tx| {
-        s.revealed = false;
-        tx.instant();
-    });
+    rt.update(|s, _| s.revealed = false);
     rt.frame(0.0);
     let inp_rehidden = rt.elements().into_iter().find(|e| e.path.ends_with("area/scroll/input")).unwrap();
     assert_eq!(inp_rehidden.rect[3], inp0.rect[3]);
+    let area_rehidden = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("area")).unwrap();
+    assert_eq!(area_rehidden.rect[3], area_hidden.rect[3]);
     assert_eq!(rt.state.secret.text.lines().count(), 5);
+}
+
+#[test]
+fn secure_text_area_growth_and_small_height_cap_do_not_disclose_hidden_lines() {
+    fn view(s: &TextEdit, _: &mut Cx<TextEdit>) -> El {
+        let k = Kit::neutral(true);
+        col()
+            .child(TextArea::new(s).secure().auto_grow(2, 6).build(&k).key("growing"))
+            .child(TextArea::new(s).secure().rows(8).max_height(40.0).build(&k).key("capped"))
+    }
+    let measure = |secret: &str| {
+        let mut rt = Runtime::new(TextEdit::new(secret), view, (320.0, 300.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.elements().into_iter().map(|e| (e.path, e.rect, e.target, e.caret)).collect::<Vec<_>>()
+    };
+    let short = measure("fictional");
+    let long = measure(&"fictional\n".repeat(100));
+    assert_eq!(short, long);
+    let capped = short.iter().find(|e| e.0.ends_with("capped")).unwrap();
+    assert!(capped.1[3] <= 40.5, "max_height takes precedence over rows: {:?}", capped.1);
 }
