@@ -413,7 +413,7 @@ impl<S: 'static> Runtime<S> {
     /// selects another item (a shortcut, say), focus in that group moves to it.
     pub(super) fn sync_follows(&mut self) {
         let Some(i) = self.focused_index() else { return };
-        if self.nodes[i].focus.selected { return; }
+        if self.nodes[i].input.is_some() || self.nodes[i].focus.selected { return; }
         let Some(g) = self.group(i).filter(|&g| self.nodes[g].focus.follows) else { return };
         let Some(j) = (0..self.nodes.len())
             .find(|&j| self.nodes[j].focus.selected && self.group(j) == Some(g) && self.can_focus(j)) else { return };

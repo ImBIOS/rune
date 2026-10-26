@@ -111,6 +111,7 @@ impl Theme {
     }
 
     /// A colour token. Panics naming the closest tokens when it is missing.
+    #[track_caller]
     pub fn color(&self, name: &str) -> Color {
         self.try_color(name).unwrap_or_else(|| {
             let mut near: Vec<&String> =

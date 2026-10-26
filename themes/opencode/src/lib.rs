@@ -44,13 +44,16 @@ pub fn brand(dark: bool) -> Color {
 
 /// One step of the ember scale for one appearance, the same colour as the token
 /// `ember-dark-<step>` or `ember-light-<step>`. `step` is 1 to 12; anything else panics.
+#[track_caller]
 pub fn ember(dark: bool, step: u8) -> Color {
     scale("ember", dark, step)
 }
 
-/// One step (1 to 12, else panics) of a named colour scale, such as `"ember"`, `"blue"` or
-/// `"smoke"`: the token `<name>-dark-<step>` or `<name>-light-<step>`. Panics if the theme
-/// has no such token.
+/// One step (1 to 12, else panics) of a named colour scale (`"amber"`, `"apple"`, `"blue"`,
+/// `"cobalt"`, `"coral"`, `"ember"`, `"gray"`, `"ink"`, `"lilac"`, `"mint"`, `"smoke"`,
+/// `"solaris"`, `"yuzu"`): the token `<name>-dark-<step>` or `<name>-light-<step>`. Panics if
+/// the theme has no such token.
+#[track_caller]
 pub fn scale(name: &str, dark: bool, step: u8) -> Color {
     assert!((1..=12).contains(&step), "colour scale steps run 1 to 12, got {step}");
     theme(dark).color(&format!("{name}-{}-{step}", if dark { "dark" } else { "light" }))
@@ -262,5 +265,17 @@ mod tests {
     #[should_panic(expected = "1 to 12")]
     fn ember_rejects_step_zero() {
         super::ember(true, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "1 to 12")]
+    fn ember_rejects_step_thirteen() {
+        super::ember(false, 13);
+    }
+
+    #[test]
+    #[should_panic(expected = "has no colour")]
+    fn scale_rejects_unknown_name() {
+        super::scale("unknown", true, 5);
     }
 }

@@ -399,8 +399,10 @@ impl SidebarRow {
     /// A row that shows the selection but never takes focus: for a list driven from outside,
     /// such as one a search field filters and steers with its own keys. The row is out of the
     /// Tab order, Tab and Space don't act on it, and pressing it selects it (`on_select`)
-    /// while a focused field stays focused (`El::preserve_focus_on_press`). The selected row
-    /// is still exposed as selected to assistive tech. Equivalent to
+    /// while a focused field stays focused (`El::preserve_focus_on_press`). Keyboard navigation
+    /// of a select-only list (Up/Down and Return from the field) is the app's job. The selected
+    /// row is still exposed as selected to assistive tech (`ElementInfo::item_selected`), and
+    /// changing the selection never pulls focus to the row. Equivalent to
     /// `.focusable(false).focus_selected(..)` on the built row, plus the focus-preserving press.
     pub fn select_only(mut self) -> Self {
         self.select_only = true;
@@ -526,8 +528,8 @@ impl SidebarRow {
         });
         let sub_font = self.subtitle_style.unwrap_or_else(|| k.ty.caption());
         let name = match &self.subtitle {
-            Some(sub) => format!("{}, {sub}", self.label),
-            None => self.label.clone(),
+            Some(sub) if !sub.is_empty() => format!("{}, {sub}", self.label),
+            _ => self.label.clone(),
         };
         let focusable = !renaming && !self.select_only;
         let mut r = row()

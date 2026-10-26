@@ -162,7 +162,7 @@ impl TextInput {
         self
     }
     /// The box's height in points, in place of 28 (32 with [`Self::large`]) or the fit to
-    /// [`Self::text_style`].
+    /// [`Self::text_style`]. Clamped to at least the text style's line height.
     pub fn height(mut self, points: f32) -> Self {
         self.height = Some(points.max(1.0));
         self
@@ -251,7 +251,7 @@ impl TextInput {
         let hint = if red { c.danger.fg } else { c.text_faint };
         let style = self.style.unwrap_or(k.ty.ui_compact);
         let base: f32 = if self.large { 32.0 } else { 28.0 };
-        let height = self.height.unwrap_or(if self.style.is_some() { base.max(style.line_px() + 12.0) } else { base });
+        let height = self.height.map_or_else(|| base.max(style.line_px() + 12.0), |h| h.max(style.line_px()));
         let field = text_input(&self.edit, style)
             .single_line()
             .key("input")

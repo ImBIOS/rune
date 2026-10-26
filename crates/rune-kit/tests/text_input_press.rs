@@ -198,30 +198,90 @@ fn pressing_any_part_of_a_field_focuses_without_blurring_or_dragging() {
 
 #[test]
 fn a_launcher_size_style_scales_the_box_and_the_caret() {
-    fn view(s: &TextEdit, _: &mut Cx<TextEdit>) -> El {
+    struct Launcher {
+        plain: TextEdit,
+        big: TextEdit,
+        launcher: TextEdit,
+        large_small_style: TextEdit,
+        tight: TextEdit,
+    }
+    fn view(s: &Launcher, _: &mut Cx<Launcher>) -> El {
         let k = Kit::neutral(true);
+        let style_24 = rune::TextStyle::new(17.0, 400.0).lh(24.0);
         col()
-            .child(TextInput::new(s).on_edit(|s: &mut TextEdit| s).build(&k).key("plain"))
+            .child(TextInput::new(&s.plain).on_edit(|s: &mut Launcher| &mut s.plain).build(&k).key("plain"))
             .child(
-                TextInput::new(s).placeholder("Search")
-                    .text_style(rune::TextStyle::new(17.0, 400.0).lh(24.0))
-                    .on_edit(|s: &mut TextEdit| s)
+                TextInput::new(&s.big)
+                    .placeholder("Search")
+                    .text_style(style_24)
+                    .on_edit(|s: &mut Launcher| &mut s.big)
                     .build(&k)
                     .key("big"),
             )
-            .child(TextInput::new(s).height(56.0).build(&k).key("tall"))
+            .child(
+                TextInput::new(&s.launcher)
+                    .placeholder("Type a command")
+                    .leading_icon(k.glyph.search)
+                    .clear_button()
+                    .text_style(style_24)
+                    .height(56.0)
+                    .on_edit(|s: &mut Launcher| &mut s.launcher)
+                    .build(&k)
+                    .key("launcher"),
+            )
+            .child(
+                TextInput::new(&s.large_small_style)
+                    .large()
+                    .text_style(rune::TextStyle::new(13.0, 500.0).lh(16.0))
+                    .build(&k)
+                    .key("large-compact"),
+            )
+            .child(
+                TextInput::new(&s.tight)
+                    .text_style(style_24)
+                    .height(10.0)
+                    .build(&k)
+                    .key("tight"),
+            )
     }
-    let mut rt = Runtime::new(TextEdit::new("hi"), view, (400.0, 300.0), Env::new(true, 1.0));
+    let state = Launcher {
+        plain: TextEdit::new("hi"),
+        big: TextEdit::new("hi"),
+        launcher: TextEdit::new("hi"),
+        large_small_style: TextEdit::new("hi"),
+        tight: TextEdit::new("hi"),
+    };
+    let mut rt = Runtime::new(state, view, (400.0, 300.0), Env::new(true, 1.0));
     rt.frame(0.0);
-    let h = |rt: &Runtime<TextEdit>, key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap().rect[3];
-    assert_eq!((h(&rt, "plain"), h(&rt, "big"), h(&rt, "tall")), (28.0, 36.0, 56.0));
-    let line = |rt: &Runtime<TextEdit>| rt.elements().into_iter().filter(|e| e.key.as_deref() == Some("input")).map(|e| e.rect[3]).collect::<Vec<_>>();
-    assert_eq!(line(&rt), [16.0, 24.0, 16.0], "the editor's line follows the style");
-    let (x, y) = rt.find("big").unwrap();
+    let by_path = |rt: &Runtime<Launcher>, path: &str| rt.elements().into_iter().find(|e| e.path.ends_with(path)).unwrap();
+    let h = |rt: &Runtime<Launcher>, key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap().rect[3];
+    assert_eq!(
+        (h(&rt, "plain"), h(&rt, "big"), h(&rt, "launcher"), h(&rt, "large-compact"), h(&rt, "tight")),
+        (28.0, 36.0, 56.0, 32.0, 24.0),
+        "box grows with style, keeps large's 32 floor, and clamps height to at least line_px"
+    );
+    let line = |rt: &Runtime<Launcher>| rt.elements().into_iter().filter(|e| e.key.as_deref() == Some("input")).map(|e| e.rect[3]).collect::<Vec<_>>();
+    assert_eq!(line(&rt), [16.0, 24.0, 24.0, 16.0, 24.0], "the editor's line follows the style");
+
+    // In the 56 pt launcher box, the 24 pt editor, leading icon, and clear button are all vertically centred.
+    let box_rect = by_path(&rt, "launcher").rect;
+    let input_rect = by_path(&rt, "launcher/value/input").rect;
+    let lead_rect = by_path(&rt, "launcher/value/leading").rect;
+    let action_rect = by_path(&rt, "launcher/action").rect;
+    let box_cy = box_rect[1] + box_rect[3] * 0.5;
+    for (name, r) in [("input", input_rect), ("leading", lead_rect), ("action", action_rect)] {
+        assert!(((r[1] + r[3] * 0.5) - box_cy).abs() < 0.01, "{name} is vertically centred in the 56 pt box: {r:?} vs {box_rect:?}");
+    }
+
+    // Focus the 56 pt launcher field and check that its caret is 24 pt tall and vertically centred.
+    let (x, y) = (box_rect[0] + 40.0, box_cy);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     rt.frame(1.0 / 60.0);
-    assert!(rt.state.focused);
+    assert!(rt.state.launcher.focused);
+    let caret = by_path(&rt, "launcher/value/input").caret.expect("focused launcher caret");
+    assert_eq!(caret[3], 24.0, "caret height matches the 24 pt line height");
+    assert!(((caret[1] + caret[3] * 0.5) - box_cy).abs() < 0.01, "caret is vertically centred in the 56 pt box: {caret:?}");
 }
 
 #[test]

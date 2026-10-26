@@ -15,10 +15,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   `El::preserve_focus_on_press(true)` is documented as working on any element (the press still
   reaches `on_press`; scrolling still cancels it). `TextInput::text_style(TextStyle)` sets the
   field's type (caret, placeholder and selection follow; the box grows to fit) and
-  `TextInput::height(..)` its height, for a launcher-size field. A press anywhere on a container
-  with `role("textbox")` focuses its one reachable editor: a supported pattern, now documented on
-  `El::role`. `rune_theme_opencode::ember(dark, step)` (1 to 12, else panics) and
-  `scale(name, dark, step)` give typed colour-scale steps; `brand(dark)` is `ember(dark, 9)`.
+  `TextInput::height(..)` its height (at least the style's line height), for a launcher-size field.
+  A press anywhere on a container with `role("textbox")` focuses its one reachable editor: a
+  supported pattern, now documented on `El::role`. `rune_theme_opencode::ember(dark, step)` (1 to
+  12, else panics) and `scale(name, dark, step)` give typed colour-scale steps; `brand(dark)` is
+  `ember(dark, 9)`.
 
 - **`Toolbar`'s leading slot gives way.** The leading slot now shrinks (`shrink().min_w(0)`),
   so a long leading title marked `.truncate().shrink().min_w(0.0)` truncates instead of pushing

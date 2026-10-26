@@ -753,6 +753,43 @@ fn a_two_line_row_has_a_stronger_first_line_and_fits_in_40_points() {
 }
 
 #[test]
+fn renaming_a_two_line_row_keeps_the_title_and_subtitle_lines_in_place() {
+    struct Ren {
+        renaming: bool,
+        custom: bool,
+        edit: TextEdit,
+    }
+    fn view(s: &Ren, _: &mut Cx<Ren>) -> El {
+        let mut r = SidebarRow::new("Name").subtitle("Detail");
+        if s.custom {
+            r = r.title_style(TextStyle::new(15.0, 600.0).lh(22.0));
+        }
+        if s.renaming {
+            r = r.renaming(&s.edit, |s: &mut Ren| &mut s.edit, |_, _| {}, |_, _| {});
+        }
+        col().w(240.0).child(r.build(&Kit::neutral(true)).key("r"))
+    }
+    for custom in [false, true] {
+        let mut rt = Runtime::new(Ren { renaming: false, custom, edit: TextEdit::default() }, view, (240.0, 200.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let label_rect = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("label")).unwrap().rect;
+        let sub_rect = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("subtitle")).unwrap().rect;
+        for text in ["Name", ""] {
+            rt.update(|s, _| {
+                s.renaming = true;
+                s.edit = TextEdit::new(text);
+                s.edit.focused = true;
+            });
+            rt.frame(1.0 / 60.0);
+            let rename_rect = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("rename")).unwrap().rect;
+            let sub_now = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("subtitle")).unwrap().rect;
+            assert_eq!((rename_rect[1], rename_rect[3]), (label_rect[1], label_rect[3]), "rename field matches title line y and height");
+            assert_eq!(sub_now, sub_rect, "subtitle does not jump when entering rename");
+        }
+    }
+}
+
+#[test]
 fn a_two_line_row_reads_name_then_subtitle() {
     let rt = lone_row(1);
     assert_eq!(info(&rt, "r").label.as_deref(), Some("Name, Detail"));
@@ -791,8 +828,8 @@ fn select_only_rows_skip_tab_and_keep_an_outside_field_focused() {
 
     rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
     rt.frame(1.0 / 60.0);
-    let focused: Vec<_> = rt.elements().into_iter().filter(|e| e.focused).filter_map(|e| e.key).collect();
-    assert_eq!(focused, ["input"], "Tab lands on the field and no row");
+    let focused = |rt: &Runtime<Pick>| rt.elements().into_iter().filter(|e| e.focused).filter_map(|e| e.key).collect::<Vec<_>>();
+    assert_eq!(focused(&rt), ["input"], "Tab lands on the field and no row");
     rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
     rt.frame(1.0 / 60.0);
     assert!(rt.elements().iter().all(|e| e.key.as_deref().is_none_or(|k| !k.starts_with("row")) || !e.focused));
@@ -803,6 +840,12 @@ fn select_only_rows_skip_tab_and_keep_an_outside_field_focused() {
     rt.pointer_up(x, y);
     rt.frame(1.0 / 60.0);
     assert_eq!((rt.state.picked, rt.state.presses), (2, 1), "the press selects");
-    assert!(rt.state.field.focused || rt.elements().iter().any(|e| e.focused && e.key.as_deref() == Some("input")),
-        "the field keeps focus through the press");
+    assert_eq!(focused(&rt), ["input"], "the field keeps focus through the press");
+    assert!(row(&rt, 2).item_selected && !row(&rt, 1).item_selected);
+
+    // Changing selection from the app (e.g. arrow keys handled by the field) keeps focus on the field.
+    rt.update(|s, _| s.picked = 0);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(focused(&rt), ["input"], "selection change never pulls focus from the field");
+    assert!(row(&rt, 0).item_selected && !row(&rt, 2).item_selected);
 }
