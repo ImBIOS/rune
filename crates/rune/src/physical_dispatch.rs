@@ -422,31 +422,45 @@ mod tests {
     #[test]
     fn key_handlers_see_the_physical_key_whatever_the_layout_types() {
         #[derive(Default)]
-        struct Codes { edit: TextEdit, input: Vec<Option<PhysicalKeyCode>>, app: Vec<(Key, Option<PhysicalKeyCode>)> }
+        struct Codes {
+            edit: TextEdit,
+            input: Vec<Option<PhysicalKeyCode>>,
+            app: Vec<(Key, Option<PhysicalKeyCode>, bool)>,
+            ups: Vec<Option<PhysicalKeyCode>>,
+            change: Vec<Option<PhysicalKeyCode>>,
+        }
         let view = |s: &Codes, _: &mut Cx<Codes>| col().size(300.0, 200.0)
+            .on_key_up(|s: &mut Codes, _, tx| { s.ups.push(tx.physical_key()); true })
             .child(text_input(&s.edit, TextStyle::new(14.0, 400.0)).key("field").size(200.0, 32.0)
                 .on_edit(|s: &mut Codes| &mut s.edit)
+                .on_input_change(|s: &mut Codes, tx| s.change.push(tx.physical_key()))
                 .on_input_key(|s: &mut Codes, _, tx| { s.input.push(tx.physical_key()); false }));
         let mut rt = Runtime::new(Codes::default(), view, (300.0, 200.0), Env::new(true, 1.0));
-        rt.on_key = Some(|s, ev, tx| { s.app.push((ev.key.clone(), tx.physical_key())); true });
+        rt.on_key = Some(|s, ev, tx| { s.app.push((ev.key.clone(), tx.physical_key(), tx.key_repeat())); true });
         rt.frame(0.0);
         click(&mut rt, "field");
         rt.frame(0.0);
-        // ⌘⇧7 on a German layout types '/', on a US one '&'; both are the 7 key.
+        // ⌘⇧7 on a German layout types '/', on a US one '&'; both are the 7 key (press, repeat, key-up).
         let mods = Mods { cmd: true, shift: true, ..Mods::default() };
-        for c in ['/', '&'] {
-            rt.physical_with_fallback(PhysicalInput::Key { key: PhysicalKeyCode::Digit7, mods, pressed: true, repeat: false },
+        for (c, repeat) in [('/', false), ('&', true)] {
+            rt.physical_with_fallback(PhysicalInput::Key { key: PhysicalKeyCode::Digit7, mods, pressed: true, repeat },
                 Some(KeyEvent { key: Key::Command(c), mods }));
-            rt.physical_with_fallback(PhysicalInput::Key { key: PhysicalKeyCode::Digit7, mods, pressed: false, repeat: false }, None);
+            rt.physical_with_fallback(PhysicalInput::Key { key: PhysicalKeyCode::Digit7, mods, pressed: false, repeat: false },
+                Some(KeyEvent { key: Key::Command(c), mods }));
             rt.frame(0.0);
         }
         let seven = Some(PhysicalKeyCode::Digit7);
         assert_eq!(rt.state.input, [seven, seven]);
-        assert_eq!(rt.state.app, [(Key::Command('/'), seven), (Key::Command('&'), seven)]);
-        // A logical key with no physical origin has none.
+        assert_eq!(rt.state.app, [(Key::Command('/'), seven, false), (Key::Command('&'), seven, true)]);
+        assert_eq!(rt.state.ups, [seven, seven]);
+        // A logical key with no physical origin has none, and non-key callbacks (`on_input_change`)
+        // never inherit the key handler's physical key.
         rt.key(KeyEvent { key: Key::Command('&'), mods });
+        rt.physical_with_fallback(PhysicalInput::Key { key: PhysicalKeyCode::KeyA, mods: Mods::default(), pressed: true, repeat: false },
+            Some(KeyEvent { key: Key::Text("a".into()), mods: Mods::default() }));
         rt.frame(0.0);
-        assert_eq!(rt.state.app.last(), Some(&(Key::Command('&'), None)));
+        assert_eq!(rt.state.app.last(), Some(&(Key::Command('&'), None, false)));
+        assert_eq!(rt.state.change, [None]);
     }
 
     #[test]

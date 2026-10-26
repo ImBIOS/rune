@@ -239,6 +239,26 @@ mod tests {
         assert_eq!(rt.state.text, "éx tail");
         assert_eq!(rt.state.focus, 3);
     }
+
+    #[test]
+    fn web_key_forwards_dom_code_for_digits_letters_and_punctuation() {
+        type Seen = Vec<(crate::Key, Option<crate::PhysicalKeyCode>, bool)>;
+        fn view(_: &Seen, _: &mut Cx<Seen>) -> El { crate::el() }
+        let mut rt = Runtime::new(Seen::new(), view, (100.0, 100.0), Env::default());
+        rt.on_key = Some(|s, ev, tx| { s.push((ev.key.clone(), tx.physical_key(), tx.key_repeat())); true });
+        rt.frame(0.0);
+        for (key, code, repeat) in [("/", "Digit7", false), ("/", "Slash", true), (":", "Period", false), ("k", "KeyK", false)] {
+            rt.web_key(&json!({"kind":"key", "key":key, "code":code, "meta":true, "shift":true, "repeat":repeat}));
+            rt.frame(0.0);
+        }
+        use crate::PhysicalKeyCode::*;
+        assert_eq!(rt.state, [
+            (crate::Key::Command('/'), Some(Digit7), false),
+            (crate::Key::Command('/'), Some(Slash), true),
+            (crate::Key::Command(':'), Some(Period), false),
+            (crate::Key::Command('k'), Some(KeyK), false),
+        ]);
+    }
 }
 
 /// A critically damped edge return, integrated exactly for variable frame times.
@@ -361,6 +381,36 @@ impl<S: 'static> Runtime<S> {
             Some(input) => mirror.update(self.focused.as_deref().unwrap_or_default(), Some(&input.edit)),
             None => mirror.update("", None),
         }
+    }
+
+    pub(crate) fn web_key(&mut self, event: &serde_json::Value) -> bool {
+        let flag = |key: &str| event[key].as_bool().unwrap_or(false);
+        let (shift, ctrl, alt, logo) = (flag("shift"), flag("ctrl"), flag("alt"), flag("meta"));
+        let mods = crate::Mods { shift, alt, ctrl, logo, cmd: logo || ctrl };
+        let key = match event["key"].as_str().unwrap_or_default() {
+            "Enter" => crate::Key::Enter, "Tab" => crate::Key::Tab, "Escape" => crate::Key::Escape,
+            "ArrowLeft" => crate::Key::Left, "ArrowRight" => crate::Key::Right,
+            "ArrowUp" => crate::Key::Up, "ArrowDown" => crate::Key::Down,
+            "Home" => crate::Key::Home, "End" => crate::Key::End,
+            "PageUp" => crate::Key::PageUp, "PageDown" => crate::Key::PageDown,
+            "Backspace" => crate::Key::Backspace, "Delete" => crate::Key::Delete,
+            name if name.chars().count() == 1 && mods.cmd => crate::Key::Command(name.chars().next().unwrap().to_ascii_lowercase()),
+            _ => return false,
+        };
+        let event_key = crate::KeyEvent { key, mods };
+        let activate = event_key.key == crate::Key::Tab;
+        let repeat = flag("repeat");
+        let code = event["code"].as_str().filter(|c| !c.is_empty() && !c.contains('+'))
+            .and_then(|c| c.parse::<crate::Shortcut>().ok())
+            .map(|s| s.physical_key());
+        if let Some(key) = code {
+            self.physical_with_fallback(crate::PhysicalInput::Key { key, mods, pressed: true, repeat }, Some(event_key));
+        } else if repeat {
+            self.repeat_key(event_key);
+        } else {
+            self.key(event_key);
+        }
+        activate
     }
 
     pub(crate) fn web_secure(&mut self, key: &str, text: String) {

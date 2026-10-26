@@ -91,27 +91,7 @@ impl<S: 'static> Running<S> {
                     self.rt.web_secure(event["key"].as_str().unwrap_or_default(), text);
                 }
             }
-            Some("key") => {
-                let flag = |key: &str| event[key].as_bool().unwrap_or(false);
-                let mut mods = ModifiersState::empty();
-                mods.set(ModifiersState::SHIFT, flag("shift"));
-                mods.set(ModifiersState::CONTROL, flag("ctrl"));
-                mods.set(ModifiersState::ALT, flag("alt"));
-                mods.set(ModifiersState::SUPER, flag("meta"));
-                let key = match event["key"].as_str().unwrap_or_default() {
-                    "Enter" => crate::Key::Enter, "Tab" => crate::Key::Tab, "Escape" => crate::Key::Escape,
-                    "ArrowLeft" => crate::Key::Left, "ArrowRight" => crate::Key::Right,
-                    "ArrowUp" => crate::Key::Up, "ArrowDown" => crate::Key::Down,
-                    "Home" => crate::Key::Home, "End" => crate::Key::End,
-                    "PageUp" => crate::Key::PageUp, "PageDown" => crate::Key::PageDown,
-                    "Backspace" => crate::Key::Backspace, "Delete" => crate::Key::Delete,
-                    name if name.chars().count() == 1 && (mods.control_key() || mods.super_key()) => crate::Key::Command(name.chars().next().unwrap().to_ascii_lowercase()),
-                    _ => return,
-                };
-                let event_key = crate::KeyEvent { key, mods: modifiers(mods) };
-                activate = event_key.key == crate::Key::Tab;
-                if flag("repeat") { self.rt.repeat_key(event_key); } else { self.rt.key(event_key); }
-            }
+            Some("key") => activate = self.rt.web_key(event),
             _ => {}
         }
         // Commit within the DOM event: clipboard, link and soft-keyboard APIs need activation.

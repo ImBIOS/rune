@@ -63,7 +63,7 @@ export function mount(canvas, callback) {
             anchor: backward ? textarea.selectionEnd : textarea.selectionStart,
             focus: backward ? textarea.selectionStart : textarea.selectionEnd });
     }
-    const key = (name, event = {}) => send({ kind: 'key', key: name, shift: !!event.shiftKey,
+    const key = (name, event = {}) => send({ kind: 'key', key: name, code: event.code ?? '', shift: !!event.shiftKey,
         ctrl: !!event.ctrlKey, alt: !!event.altKey, meta: !!event.metaKey, repeat: !!event.repeat });
     listen(textarea, 'input', event => changed(h.composing || event.isComposing));
     listen(textarea, 'compositionstart', () => { h.composing = true; h.composition = ''; });
@@ -92,11 +92,12 @@ export function mount(canvas, callback) {
         listen(field, 'beforeinput', event => {
             if (event.inputType === 'insertLineBreak' || event.inputType === 'insertParagraph') {
                 event.preventDefault();
-                if (!h.composing && !event.isComposing) key('Enter', { shiftKey: h.shift });
+                if (!h.composing && !event.isComposing) key('Enter', { shiftKey: h.shift, code: 'Enter' });
             } else if (field === password && event.inputType.startsWith('delete')) {
                 event.preventDefault();
-                key(event.inputType.endsWith('Forward') ? 'Delete' : 'Backspace',
-                    { altKey: event.inputType.includes('Word') });
+                const forward = event.inputType.endsWith('Forward');
+                key(forward ? 'Delete' : 'Backspace',
+                    { altKey: event.inputType.includes('Word'), code: forward ? 'Delete' : 'Backspace' });
             }
         });
         listen(field, 'keydown', event => {

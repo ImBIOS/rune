@@ -7,16 +7,18 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 - **Rich fields: soft breaks on rebuilt drafts, leaving code blocks, allow-lists, physical keys.**
   `TextEdit::with_soft_breaks` and `set_soft_breaks` restore the soft breaks `from_parts`
-  can't take. Return on a blank last line of a code block now leaves the block (the blank line
-  becomes a paragraph after it, one undo step) instead of adding another code line, and Down
-  or Right at the very end of a trailing code block or quote adds an empty paragraph after it;
-  both move what a key does in an existing rich field. `TextEdit::allow_marks` and
-  `allow_blocks` limit a field to the formatting its app can store: shortcuts, `toggle_mark`,
-  `set_block` and paste skip the rest, and a disallowed `⌘B`/`⌘I`/`⌘U` reaches the app's key
-  handlers (`allows_mark` and `allows_block` hide toolbar buttons). `Tx::physical_key` gives a
-  key handler the physical key behind a logical one, so a shifted shortcut (`⌘⇧7`) matches on
-  every layout; a script's `{"type": "key"}` takes a `"code"` for it. Fields without an
-  allow-list keep their behaviour otherwise.
+  can't take, and `TextEdit::clear_history` drops the undo and redo stacks while keeping the
+  text, formatting and selection. Return on a blank last line of a code block now leaves the
+  block (the blank line becomes a paragraph after it, one undo step) instead of adding another
+  code line, and Down or Right at the very end of a trailing code block or quote adds an empty
+  paragraph after it; both move what a key does in an existing rich field.
+  `TextEdit::allow_marks` and `allow_blocks` limit a field to the formatting its app can store:
+  shortcuts, `toggle_mark`, `set_block` and paste skip the rest, and a disallowed
+  `⌘B`/`⌘I`/`⌘U` reaches the app's key handlers (`allows_mark` and `allows_block` hide toolbar
+  buttons). `Tx::physical_key` gives a key handler the physical key behind a logical one, so a
+  shifted shortcut (`⌘⇧7`) matches on every layout; a script's `{"type": "key"}` takes a
+  `"code"` for it. Fields without an allow-list keep their behaviour otherwise.
+
 - **Live-only review fixes.** A declined element key handler no longer suppresses an
   ancestor's commit. Moving geometry refreshes hover handlers under a stationary pointer in
   ordinary windows as well as overlays, and schedules their delivery. Debug spot checks
@@ -184,7 +186,6 @@ without a code change (goldens, layout, input), newest first, with the rev that 
   settled instead of trusting a partial model hash. Over-budget fallbacks allocate only the
   visible area when isolation is still needed. Reference replays preserve rounded layer clips,
   reject unsupported layer blur, malformed cache tags and excessive nesting.
-
 - **Grain is symmetric.** `Fx::grain` returned its light half as added light with zero coverage,
   so with `srgb_blend` on each +0.02 of grain became about +40/255 on the framebuffer while the
   dark half only dimmed by 2%: white snow over everything. The light half is now premultiplied

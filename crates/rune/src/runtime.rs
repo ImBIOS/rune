@@ -2644,6 +2644,7 @@ impl<S: 'static> Runtime<S> {
     /// Offer a logical key that already passed `held_gate` to the app, the focused
     /// input's handler, focus traversal and the focused editor, in that order.
     fn route_key(&mut self, ev: &KeyEvent, repeat: bool, one: &mut Tx) -> bool {
+        let physical_key = one.physical_key;
         one.focused = self.focused_key();
         if matches!(ev.key, crate::Key::Modifier { .. }) { return !repeat && self.route_modifier(ev, one); }
         one.key_repeat = repeat;
@@ -2658,13 +2659,16 @@ impl<S: 'static> Runtime<S> {
         // confirm or cancel it, and submit, blur and press nothing.
         if matches!(ev.key, crate::Key::Enter | crate::Key::Escape) && self.composing() { return true; }
         if self.element_key(ev, one) { return true; }
+        one.physical_key = None;
         if self.default_button_key(ev, one) { return true; }
+        one.physical_key = physical_key;
         if app_first && let Some(f) = self.on_key && Tx::took(app_call!(f, &mut self.state, ev, one), one) { return true; }
         if let Some(f) = self.focused_input().and_then(|input| input.key.clone())
             && Tx::took(f(handler_state(&mut self.state), ev, one), one)
         {
             return true;
         }
+        one.physical_key = None;
         // Inside a list item or code block, Tab (and Shift+Tab in lists) edits the document by default.
         if ev.key == crate::edit::Key::Tab
             && !ev.mods.cmd
@@ -2708,10 +2712,12 @@ impl<S: 'static> Runtime<S> {
             }
             if handled { return true; }
         }
+        one.physical_key = physical_key;
         if !app_first && let Some(f) = self.on_key && Tx::took(app_call!(f, &mut self.state, ev, one), one) {
             self.events.push(format!("key {:?}", ev.key));
             return true;
         }
+        one.physical_key = None;
         self.page_scroll(ev)
     }
 

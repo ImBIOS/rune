@@ -37,13 +37,16 @@ impl FromStr for Shortcut {
             } else {
                 if key.is_some() { return Err(invalid()); }
                 let name = match part.as_str() {
-                    "esc" => "escape", "return" => "enter", "spacebar" => "space",
+                    "esc" => "escape", "return" | "numpadenter" => "enter", "spacebar" => "space",
                     "arrowleft" => "left", "arrowright" => "right", "arrowup" => "up", "arrowdown" => "down",
                     "del" => "delete", "ins" => "insert", "pgup" => "pageup", "pgdn" => "pagedown",
                     "-" => "minus", "=" => "equal", "," => "comma", "." => "period", "/" => "slash",
                     ";" => "semicolon", "'" => "quote", "[" => "bracketleft", "]" => "bracketright",
                     "\\" => "backslash", "`" => "backquote",
-                    name => name,
+                    name => name
+                        .strip_prefix("key").filter(|s| s.len() == 1 && s.as_bytes()[0].is_ascii_lowercase())
+                        .or_else(|| name.strip_prefix("digit").filter(|s| s.len() == 1 && s.as_bytes()[0].is_ascii_digit()))
+                        .unwrap_or(name),
                 };
                 key = Some(super::keys::named(name).ok_or_else(invalid)?);
             }
@@ -94,6 +97,7 @@ mod tests {
             ("OPTION+Control+Return", "ctrl+alt+enter"),
             ("super+SHIFT+ctrl+ALT+F24", "ctrl+alt+shift+super+f24"),
             (" ctrl + A ", "ctrl+a"), ("esc", "escape"), ("cmd+/", "super+slash"),
+            ("KeyK", "k"), ("Digit7", "7"), ("BracketLeft", "bracketleft"), ("Semicolon", "semicolon"),
         ] {
             let shortcut: Shortcut = input.parse().unwrap();
             assert_eq!(shortcut.to_string(), expected);

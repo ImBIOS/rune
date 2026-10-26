@@ -933,7 +933,8 @@ newline on `Shift+Return` and pastes plain text. The mark and block methods work
   `on_input_paste` hook takes it. Construct or inspect the model directly with
   `TextEdit::from_parts(text, marks, blocks)`, `edit.marks()`, `edit.blocks()` and
   `edit.paragraphs()`, adding soft breaks with `.with_soft_breaks(edit.soft_breaks().to_vec())`
-  (or `set_soft_breaks`). Accessibility roles (`textbox`) and plain-text values are unchanged.
+  (or `set_soft_breaks`) and dropping undo/redo stacks with `edit.clear_history()`. Accessibility
+  roles (`textbox`) and plain-text values are unchanged.
 - **Allowed formatting**: `.allow_marks([Mark::Bold, Mark::Italic, ..])` and
   `.allow_blocks([Block::Bullet(0), ..])` keep a field to what its app can store (Markdown has no
   underline, say). The field never holds the rest: its shortcut (`⌘U`) goes on to the app's key

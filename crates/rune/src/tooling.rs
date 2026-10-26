@@ -862,12 +862,16 @@ fn parse_script(list: Value) -> Vec<Ev> {
                 };
                 let repeat = e["repeat"].as_bool().unwrap_or(false);
                 // `"code"` names the physical key behind a press (`"7"` for `⌘⇧7`), for handlers
-                // that read `Tx::physical_key`; the key comes back up straight after.
-                if let Some(code) = e["code"].as_str().filter(|_| ty == "key") {
+                // that read `Tx::physical_key`; a press comes back up straight after.
+                if let Some(code) = e["code"].as_str() {
                     let code = code.parse::<crate::Shortcut>().unwrap_or_else(|e| die(&e.to_string())).physical_key();
                     let press = |pressed| crate::PhysicalInput::Key { key: code, mods, pressed, repeat: repeat && pressed };
-                    out.push(Ev { t, kind: Kind::PhysicalKey(press(true), KeyEvent { key, mods }), pos: Pos::Rel(0.0, 0.0) });
-                    out.push(Ev { t, kind: Kind::Physical(press(false)), pos: Pos::Rel(0.0, 0.0) });
+                    if ty == "key-up" {
+                        out.push(Ev { t, kind: Kind::PhysicalKey(press(false), KeyEvent { key, mods }), pos: Pos::Rel(0.0, 0.0) });
+                    } else {
+                        out.push(Ev { t, kind: Kind::PhysicalKey(press(true), KeyEvent { key, mods }), pos: Pos::Rel(0.0, 0.0) });
+                        out.push(Ev { t, kind: Kind::Physical(press(false)), pos: Pos::Rel(0.0, 0.0) });
+                    }
                     continue;
                 }
                 let kind = if ty == "key-up" { Kind::KeyUp(KeyEvent { key, mods }) } else { Kind::Key(KeyEvent { key, mods }, repeat) };

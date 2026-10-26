@@ -558,7 +558,8 @@ impl TextEdit {
     }
 
     /// Whether this field keeps marks of `mark`'s kind (see [`allow_marks`](Self::allow_marks)),
-    /// to hide a formatting bar's button for one it doesn't.
+    /// to hide a formatting bar's button for one it doesn't (`Mark::Link(String::new())` checks
+    /// links).
     pub fn allows_mark(&self, mark: &Mark) -> bool {
         self.allowed_marks.is_none_or(|bits| bits & 1 << mark.kind_order() != 0)
     }
@@ -780,6 +781,12 @@ impl TextEdit {
         self.replace_text("");
     }
 
+    /// Drop the undo and redo stacks, keeping text, marks, blocks, soft breaks and the selection
+    /// (after loading a sent message back into a composer to edit it, say).
+    pub fn clear_history(&mut self) {
+        self.history = Arc::default();
+    }
+
     /// End a typing group on a pointer selection or focus change.
     pub fn break_history_group(&mut self) {
         if self.history.typing { Arc::make_mut(&mut self.history).typing = false; }
@@ -806,6 +813,7 @@ impl TextEdit {
         self.soft_breaks = s.soft_breaks.clone();
         self.pending = None;
         self.clear_preedit();
+        self.sync_invariants();
     }
 
     fn record_change(&mut self, before: Snapshot, typing: bool) {
@@ -951,10 +959,13 @@ impl TextEdit {
         self.soft_breaks.sort_unstable();
         self.soft_breaks.dedup();
         self.soft_breaks.retain(|&idx| idx > 0 && (idx as usize) < line_count);
-        if let Some((armed, _)) = self.pending
-            && armed != (self.anchor, self.focus)
-        {
-            self.pending = None;
+        let anchor_line = self.line_of_byte(self.anchor);
+        if let Some((armed, ref mut marks)) = self.pending {
+            if armed != (self.anchor, self.focus) || self.blocks.get(anchor_line) == Some(&Block::Code) {
+                self.pending = None;
+            } else if let Some(bits) = self.allowed_marks {
+                marks.retain(|m| bits & 1 << m.kind_order() != 0);
+            }
         }
         self.normalize_marks();
     }
@@ -1837,8 +1848,8 @@ impl TextEdit {
                 let i = if m.cmd { self.line_edge(layout, false) } else if word { prev_word(t, self.focus) } else { prev_char(t, self.focus) };
                 self.move_h(i, m.shift);
             }
-            Key::Right if !m.shift && !m.cmd && self.at_end_of_trailing_block() => self.leave_trailing_block(),
-            Key::Down if !m.shift && !m.cmd && self.at_end_of_trailing_block() => self.leave_trailing_block(),
+            Key::Right if !m.shift && !m.cmd && !m.alt && !m.ctrl && self.at_end_of_trailing_block() => self.leave_trailing_block(),
+            Key::Down if !m.shift && !m.cmd && !m.alt && !m.ctrl && self.at_end_of_trailing_block() => self.leave_trailing_block(),
             Key::Right => {
                 let t = &self.text;
                 let i = if m.cmd { self.line_edge(layout, true) } else if word { next_word(t, self.focus) } else { next_char(t, self.focus) };
@@ -3157,13 +3168,34 @@ mod tests {
     #[test]
     fn soft_breaks_can_be_set_on_a_rebuilt_draft() {
         let mut e = TextEdit::from_parts("one\ntwo\nthree", vec![], vec![Block::Bullet(0); 3]).with_soft_breaks(vec![5, 1, 0, 1]);
+        assert!(!e.has_history(), "with_soft_breaks on from_parts adds no undo step");
         assert_eq!(e.soft_breaks(), &[1], "line 0, duplicates and lines past the end are dropped");
         assert_eq!(e.to_html().matches("<li>").count(), 2, "\"two\" continues the first bullet");
         assert_invariants(&e, "with_soft_breaks");
         e.set_soft_breaks(vec![2]);
+        assert!(!e.has_history());
         assert_eq!(e.soft_breaks(), &[2]);
         let round = TextEdit::from_parts(e.text.clone(), e.marks().to_vec(), e.blocks().to_vec()).with_soft_breaks(e.soft_breaks().to_vec());
         assert_eq!(round.to_html(), e.to_html());
+    }
+
+    #[test]
+    fn clear_history_drops_undo_and_redo_while_keeping_formatting_and_selection() {
+        let mut e = TextEdit::from_parts("one\ntwo", vec![MarkRange::new(0..3, Mark::Bold)], vec![Block::Bullet(0); 2])
+            .with_soft_breaks(vec![1]);
+        e.insert("!");
+        e.undo();
+        assert!(e.has_history());
+        e.redo();
+        e.set_selection(1, 4);
+        e.clear_history();
+        assert!(!e.has_history());
+        e.undo();
+        e.redo();
+        assert_eq!((e.text.as_str(), e.anchor, e.focus), ("one\ntwo!", 1, 4));
+        assert_eq!(e.marks(), &[MarkRange::new(0..3, Mark::Bold)]);
+        assert_eq!(e.blocks(), &[Block::Bullet(0); 2]);
+        assert_eq!(e.soft_breaks(), &[1]);
     }
 
     #[test]
@@ -3173,16 +3205,28 @@ mod tests {
         e.key(&k(Key::Text("let x = 1;".into())), None);
         e.key(&k(Key::Enter), None);
         assert_eq!((e.text.as_str(), e.blocks()), ("let x = 1;\n", &[Block::Code; 2][..]));
+        // Composing on a blank code line and pressing Return to commit stays in the block.
+        e.ime(&Ime::Preedit("に".into(), None));
+        assert!(!e.key(&k(Key::Enter), None).submit);
+        e.ime(&Ime::Commit("日".into()));
+        assert_eq!((e.text.as_str(), e.blocks()), ("let x = 1;\n日", &[Block::Code; 2][..]));
+        undo(&mut e, false);
+        assert_eq!((e.text.as_str(), e.blocks()), ("let x = 1;\n", &[Block::Code; 2][..]));
+
         let out = e.key(&k(Key::Enter), None);
         assert!(!out.submit);
         assert_eq!((e.text.as_str(), e.blocks()), ("let x = 1;\n", &[Block::Code, Block::Paragraph][..]), "the blank line left the block");
         assert_eq!((e.anchor, e.focus), (11, 11));
+        undo(&mut e, false);
+        assert_eq!((e.text.as_str(), e.blocks()), ("let x = 1;\n", &[Block::Code; 2][..]), "leaving is one undo step");
+        undo(&mut e, true);
+        assert_eq!((e.text.as_str(), e.blocks()), ("let x = 1;\n", &[Block::Code, Block::Paragraph][..]), "redo leaves the block again");
         e.key(&k(Key::Text("after".into())), None);
         assert_eq!(e.blocks(), &[Block::Code, Block::Paragraph]);
         assert_invariants(&e, "left code");
         undo(&mut e, false);
         undo(&mut e, false);
-        assert_eq!((e.text.as_str(), e.blocks()), ("let x = 1;\n", &[Block::Code; 2][..]), "leaving is one undo step");
+        assert_eq!((e.text.as_str(), e.blocks()), ("let x = 1;\n", &[Block::Code; 2][..]));
 
         // A blank line with more code below it is the code's own.
         let mut e = TextEdit::from_parts("a\n\nb", vec![], vec![Block::Code; 3]);
@@ -3217,11 +3261,30 @@ mod tests {
             assert_eq!(e.text, "x\ny\n", "{ctx}: a paragraph at the end stays put");
             undo(&mut e, false);
             assert_eq!((e.text.as_str(), e.blocks()), ("x\ny", &[block; 2][..]), "{ctx}: one undo step");
+            undo(&mut e, true);
+            assert_eq!((e.text.as_str(), e.blocks()), ("x\ny\n", &[block, block, Block::Paragraph][..]), "{ctx}: redo restores it");
         }
-        // Shift extends the selection instead.
-        let mut e = TextEdit::from_parts("x", vec![], vec![Block::Code]);
-        e.key(&KeyEvent { key: Key::Down, mods: Mods { shift: true, ..Mods::default() } }, None);
-        assert_eq!(e.text, "x");
+        // Does not fire with a selection at the end, during IME, with modifiers, or in a plain field.
+        for key in [Key::Down, Key::Right] {
+            let mut e = TextEdit::from_parts("x", vec![], vec![Block::Code]);
+            e.set_selection(0, 1);
+            e.key(&k(key.clone()), None);
+            assert_eq!((e.text.as_str(), e.blocks()), ("x", &[Block::Code][..]), "selection ending at end");
+
+            let mut e = TextEdit::from_parts("x", vec![], vec![Block::Code]);
+            e.ime(&Ime::Preedit("に".into(), None));
+            e.key(&k(key.clone()), None);
+            assert_eq!((e.text.as_str(), e.blocks()), ("x", &[Block::Code][..]), "during IME preedit");
+
+            let mut e = TextEdit::from_parts("x", vec![], vec![Block::Code]);
+            e.key(&KeyEvent { key: key.clone(), mods: Mods { shift: true, ..Mods::default() } }, None);
+            e.key(&KeyEvent { key: key.clone(), mods: Mods { alt: true, ..Mods::default() } }, None);
+            assert_eq!((e.text.as_str(), e.blocks()), ("x", &[Block::Code][..]), "modified arrow");
+
+            let mut plain = TextEdit::new("x");
+            plain.key(&k(key), None);
+            assert_eq!((plain.text.as_str(), plain.blocks()), ("x", &[Block::Paragraph][..]), "plain field");
+        }
     }
 
     #[test]
@@ -3249,6 +3312,24 @@ mod tests {
         assert_eq!(e.blocks(), &[Block::Bullet(0)]);
         e.set_marks(vec![MarkRange { start: 0, end: 2, mark: Mark::Italic }]);
         assert!(e.marks().is_empty(), "set_marks can't add one either");
+        e.set_blocks(vec![Block::Code]);
+        assert_eq!(e.blocks(), &[Block::Paragraph], "set_blocks can't add one either");
+
+        // Undo/redo of an edit recorded before allow_marks/allow_blocks was set, or a pending
+        // mark armed before allow_marks, cannot smuggle a disallowed mark or block back in.
+        let mut pre = TextEdit::new("ab").rich();
+        pre.set_selection(0, 2);
+        pre.set_mark(Mark::Underline);
+        pre.set_block(Block::Code);
+        pre.set_caret(2);
+        pre.insert("!");
+        pre.toggle_mark(Mark::Italic);
+        let mut pre = pre.allow_marks([Mark::Bold]).allow_blocks([Block::Quote]);
+        assert!(!pre.has_mark(&Mark::Italic), "pending disallowed mark is stripped");
+        undo(&mut pre, false);
+        assert!(pre.marks().is_empty() && pre.blocks() == &[Block::Paragraph], "undo filters snapshot");
+        undo(&mut pre, true);
+        assert!(pre.marks().is_empty() && pre.blocks() == &[Block::Paragraph], "redo filters snapshot");
 
         let mut e = TextEdit::new("").rich().allow_marks([Mark::Bold]).allow_blocks([Block::Quote]);
         e.paste_html("<ul><li><b>b</b> <i>i</i> <u>u</u></li></ul><blockquote>q</blockquote><pre>c</pre>", "");

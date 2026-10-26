@@ -160,8 +160,10 @@ impl<S: 'static> Runtime<S> {
     /// modifier keys it presses and releases. True if a handler took one.
     pub(super) fn modifier_dispatch(&mut self, event: &PhysicalInput, consumed: bool, tx: &mut Tx, live: &mut Option<bool>) -> bool {
         let mut ran = false;
+        let code = match *event { PhysicalInput::Key { key, .. } => Some(key), _ => None };
         for ev in self.modifier_keys.apply(event, consumed, ALTGR_CLEARS_FLAGS) {
             let mut one = self.transaction();
+            one.physical_key = code;
             let took = self.route_modifier(&ev, &mut one);
             fold_live(live, took, &one);
             ran |= took;
