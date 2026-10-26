@@ -5,12 +5,14 @@
 //! `cargo run -p rune-kit --example rich_editor -- --snap demo/kit/rich-editor.png`
 
 use rune::tok::type_;
-use rune::{AppSpec, Block, Cx, El, Icon, Mark, Span, TextEdit, col, el, row, text};
+use rune::{AppSpec, Block, Cx, El, Icon, Mark, PillStyle, Span, TextEdit, col, el, row, text};
 use rune_kit::syntax::{SyntaxTheme, highlight};
 use rune_kit::{Button, ButtonVariant, ControlSize, Divider, Kit, TextArea};
 
 struct State {
     edit: TextEdit,
+    /// Pill ids that name an agent rather than a file.
+    agents: Vec<String>,
 }
 
 impl Default for State {
@@ -37,7 +39,7 @@ impl Default for State {
         edit.focused = true;
         // Place the caret at the end of "attributed" so the Bold button shows active.
         edit.set_caret(19);
-        Self { edit }
+        Self { edit, agents: vec!["agent:review".into()] }
     }
 }
 
@@ -52,16 +54,27 @@ static AGENT: Icon = Icon {
     body: r#"<path d="M8 8C9.38 8 10.5 6.88 10.5 5.5C10.5 4.12 9.38 3 8 3C6.62 3 5.5 4.12 5.5 5.5C5.5 6.88 6.62 8 8 8Z M3 13.5C3 11.29 5.24 9.5 8 9.5C10.76 9.5 13 11.29 13 13.5" stroke="currentColor" stroke-linecap="round"/>"#,
 };
 
-/// A mention pill's icon by its id.
-fn pill_icon(id: &str) -> Option<&'static Icon> {
-    if id.starts_with("file:") { Some(&FILE) } else if id.starts_with("agent:") { Some(&AGENT) } else { None }
+/// A mention pill's look by its id: agents (looked up in app state) get their own colour and icon.
+fn pill_style(k: &Kit, agents: Vec<String>) -> impl Fn(&str) -> PillStyle + 'static {
+    let (agent_bg, agent_fg, file_bg) = (k.c.text_accent.alpha(0.22), k.c.text_accent, k.c.layer_03);
+    move |id| {
+        if agents.iter().any(|a| a == id) {
+            PillStyle::default().bg(agent_bg).fg(agent_fg).icon(&AGENT)
+        } else {
+            PillStyle::default().bg(file_bg).icon(&FILE)
+        }
+    }
 }
 
 /// Turn the `@query` typed before the caret into a file pill, or insert one at the caret.
 fn mention(edit: &mut TextEdit) {
     let (a, b) = edit.range();
     let query = edit.text[..a].rfind('@').filter(|&i| a == b && !edit.text[i..a].contains(char::is_whitespace));
-    edit.replace_with_pill(query.unwrap_or(a)..b, "file:crates/rune/src/text.rs", "text.rs");
+    // The pill and its trailing space are one undo step.
+    edit.undo_group(|e| {
+        e.replace_with_pill(query.unwrap_or(a)..b, "file:crates/rune/src/text.rs", "text.rs");
+        e.insert(" ");
+    });
 }
 
 /// Syntax-highlight every `Block::Code` paragraph run using `rune_kit::syntax::highlight`.
@@ -160,7 +173,7 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
                 .width(None)
                 .rows(11)
                 .decorations(spans)
-                .pill_icon(pill_icon)
+                .pill_style(pill_style(&k, s.agents.clone()))
                 .on_edit(|s: &mut State| &mut s.edit)
                 .build(&k),
         );

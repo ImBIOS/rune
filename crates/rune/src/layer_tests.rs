@@ -1309,3 +1309,48 @@ fn live_scale_zoom_sweep_buckets_during_motion_and_settles_crisp() {
     );
     assert!(!rt.frame(1.0 / 120.0), "nothing keeps animating after live_scale settles");
 }
+
+#[test]
+fn pill_styles_follow_captured_state_through_a_cached_subtree() {
+    use crate::{PillStyle, TextEdit, TextStyle};
+    static A: crate::Icon = crate::Icon { name: "a", view: 8.0, body: "<rect width=\"8\" height=\"8\"/>" };
+    static B: crate::Icon = crate::Icon { name: "b", view: 8.0, body: "<circle cx=\"4\" cy=\"4\" r=\"4\"/>" };
+    type S = (TextEdit, bool);
+    fn view(s: &S, _: &mut Cx<S>) -> El {
+        let swap = s.1;
+        let field = crate::text_input(&s.0, TextStyle::new(14.0, 400.0)).size(200.0, 30.0).pill_style(move |id| {
+            let first = (id == "p:1") != swap;
+            if first { PillStyle::default().bg(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }).icon(&A) } else { PillStyle::default().bg(Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 }).icon(&B) }
+        });
+        el().size(200.0, 40.0).child(el().size(190.0, 30.0).child(field).cache())
+    }
+    let mut edit = TextEdit::new(" ").rich();
+    edit.set_caret(0);
+    edit.insert_pill("p:1", "one");
+    edit.insert("  ");
+    edit.insert_pill("p:2", "two");
+    let mut rt = Runtime::new((edit, false), view, (200.0, 40.0), Env { scale: 1.0, system_dark: true });
+    let gpu = Gpu::headless();
+    let target = Offscreen::new(&gpu.device, 200, 40);
+    let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+    let mut order = |rt: &mut Runtime<S>| {
+        let mut out = Vec::new();
+        for _ in 0..4 {
+            rt.frame(1.0 / 60.0);
+            renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (200, 40));
+            out = pixels(&gpu, &renderer, &target);
+        }
+        let first = |hit: &dyn Fn(&[u8]) -> bool| (0..200).find(|&x| (0..40).any(|y| hit(&out[(y * 200 + x) * 4..][..4])));
+        let (red, blue) = (first(&|p| p[0] > 120 && p[2] < 60), first(&|p| p[2] > 120 && p[0] < 60));
+        (red.expect("red chip"), blue.expect("blue chip"))
+    };
+    let (red, blue) = order(&mut rt);
+    assert!(red < blue, "p:1 draws red then p:2 blue: {red} {blue}");
+    let icons = |rt: &Runtime<S>| rt.nodes.iter().find_map(|n| n.text.as_ref().filter(|t| !t.pills.is_empty())).unwrap().pills.iter().map(|p| p.icon.unwrap().name).collect::<Vec<_>>();
+    assert_eq!(icons(&rt), ["a", "b"]);
+    rt.state.1 = true;
+    rt.invalidate();
+    let (red, blue) = order(&mut rt);
+    assert!(blue < red, "after the captured state flips the cached chips restyle: {red} {blue}");
+    assert_eq!(icons(&rt), ["b", "a"]);
+}

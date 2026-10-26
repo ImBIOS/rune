@@ -230,6 +230,8 @@ pub struct TextEdit {
     /// Pending typing style armed at `(anchor, focus)` when toggling marks on an empty selection.
     pending: Option<((usize, usize), Vec<Mark>)>,
     history: Arc<History>,
+    /// Set inside [`TextEdit::undo_group`]: edits record nothing until the outermost group ends.
+    group: Option<(u32, Snapshot)>,
     secure: bool,
     /// Mirrors the field's `El::single_line()`; the runtime sets it before each edit.
     single_line: bool,
@@ -485,6 +487,7 @@ impl TextEdit {
             soft_breaks: Vec::new(),
             pending: None,
             history: Arc::default(),
+            group: None,
             secure: false,
             single_line: false,
             rich: false,
@@ -816,6 +819,9 @@ impl TextEdit {
     }
 
     fn record_change(&mut self, before: Snapshot, typing: bool) {
+        if self.group.is_some() {
+            return;
+        }
         let after = self.snapshot();
         if before == after {
             return;
@@ -847,9 +853,45 @@ impl TextEdit {
         }
     }
 
+    /// Run `f`, whose edits become one undo step: one undo reverts all of them and one redo
+    /// restores them, with the selection from before the first and after the last. Groups
+    /// nest and flatten into the outermost. A group that changes nothing records no step, and
+    /// `undo` and `redo` do nothing inside one. Typing after the group starts a new step.
+    ///
+    /// Picking a mention is one step, trailing space included:
+    ///
+    /// ```
+    /// # use rune::TextEdit;
+    /// let mut e = TextEdit::default();
+    /// e.insert("hi @ag");
+    /// e.undo_group(|e| {
+    ///     e.replace_with_pill(3..6, "agent:1", "@agent");
+    ///     e.insert(" ");
+    /// });
+    /// assert_eq!(e.text, "hi @agent ");
+    /// e.undo();
+    /// assert_eq!(e.text, "hi @ag");
+    /// ```
+    pub fn undo_group<R>(&mut self, f: impl FnOnce(&mut TextEdit) -> R) -> R {
+        if let Some((depth, _)) = &mut self.group {
+            *depth += 1;
+            let r = f(self);
+            if let Some((depth, _)) = &mut self.group { *depth -= 1; }
+            return r;
+        }
+        self.break_history_group();
+        self.group = Some((0, self.snapshot()));
+        let r = f(self);
+        if let Some((_, before)) = self.group.take() {
+            self.break_history_group();
+            if !self.secure { self.record_change(before, false); }
+        }
+        r
+    }
+
     /// Undo one typing group or discrete edit. Active IME composition is cancelled first.
     pub fn undo(&mut self) {
-        if self.secure { return; }
+        if self.secure || self.group.is_some() { return; }
         self.break_history_group();
         if self.preedit.is_some() { self.clear_preedit(); return; }
         let h = Arc::make_mut(&mut self.history);
@@ -861,7 +903,7 @@ impl TextEdit {
     }
 
     pub fn redo(&mut self) {
-        if self.secure { return; }
+        if self.secure || self.group.is_some() { return; }
         self.break_history_group();
         if self.preedit.is_some() { self.clear_preedit(); return; }
         let h = Arc::make_mut(&mut self.history);
@@ -3895,6 +3937,56 @@ mod tests {
     }
 
     #[test]
+    fn an_undo_group_is_one_step_with_its_selection_and_nests() {
+        let mut e = TextEdit::new("hi @ag").rich();
+        e.set_caret(6);
+        e.undo_group(|e| {
+            e.replace_with_pill(3..6, "agent:1", "@agent");
+            e.undo_group(|e| e.insert(" "));
+        });
+        assert_eq!((e.text.as_str(), e.range(), e.pills().count()), ("hi @agent ", (10, 10), 1));
+        undo(&mut e, false);
+        assert_eq!((e.text.as_str(), e.range(), e.pills().count()), ("hi @ag", (6, 6), 0));
+        undo(&mut e, true);
+        assert_eq!((e.text.as_str(), e.range(), pills_of(&e)), ("hi @agent ", (10, 10), vec![(3..9, "agent:1".to_owned())]));
+        undo(&mut e, false);
+        assert_eq!(e.text, "hi @ag");
+        assert!(e.history.undo.is_empty(), "the group was a single step");
+    }
+
+    #[test]
+    fn undo_groups_keep_typing_coalescing_and_record_nothing_when_empty() {
+        let mut e = TextEdit::default();
+        e.key(&k(Key::Text("a".into())), None);
+        e.key(&k(Key::Text("b".into())), None);
+        e.undo_group(|_| {});
+        e.undo_group(|e| e.set_caret(2));
+        assert_eq!(e.history.undo.len(), 1, "typing coalesces and empty groups add no step");
+        e.key(&k(Key::Text("c".into())), None);
+        e.undo_group(|e| { e.insert("X"); e.insert("Y"); });
+        e.key(&k(Key::Text("d".into())), None);
+        let steps = e.history.undo.len();
+        undo(&mut e, false);
+        undo(&mut e, false);
+        assert_eq!(e.history.undo.len(), steps - 2, "typing after a group is its own step");
+        assert_eq!(e.text, "abc");
+    }
+
+    #[test]
+    fn an_undo_group_leaves_ime_composition_alone() {
+        let mut e = TextEdit::new("x").rich();
+        e.set_caret(1);
+        e.ime(&Ime::Preedit("に".into(), None));
+        e.undo_group(|e| e.ime(&Ime::Commit("日本".into())));
+        assert_eq!((e.text.as_str(), e.preedit.is_none()), ("x日本", true));
+        undo(&mut e, false);
+        assert_eq!(e.text, "x");
+        e.ime(&Ime::Preedit("a".into(), None));
+        e.undo_group(|e| e.undo());
+        assert!(e.preedit.is_some(), "undo inside a group does nothing");
+    }
+
+    #[test]
     fn backspace_and_delete_take_a_pill_whole_and_undo_restores_its_id() {
         let mut e = with_pill();
         e.key(&k(Key::Backspace), None);
@@ -4067,7 +4159,7 @@ mod tests {
         let chips: Vec<crate::text::PillChip> = w
             .display_pills()
             .into_iter()
-            .map(|(start, end, _)| crate::text::PillChip { start, end, icon: None })
+            .map(|(start, end, _)| crate::text::PillChip { start, end, icon: None, bg: None, fg: None })
             .collect();
         let layout = ts.layout_blocks(&w.text, &[], w.blocks(), &chips, style, 2.0, Some(220.0), parley::Alignment::Start);
         assert!(layout.len() >= 3, "wrapped into {} lines", layout.len());
@@ -4090,7 +4182,7 @@ mod tests {
         let p_chips: Vec<crate::text::PillChip> = ime_e
             .display_pills()
             .into_iter()
-            .map(|(start, end, _)| crate::text::PillChip { start, end, icon: None })
+            .map(|(start, end, _)| crate::text::PillChip { start, end, icon: None, bg: None, fg: None })
             .collect();
         let ime_layout = ts.layout_blocks(&disp, &[], &[Block::Paragraph], &p_chips, style, 2.0, None, parley::Alignment::Start);
         let (mut decos, mut icons) = (Vec::new(), Vec::new());
@@ -4101,7 +4193,7 @@ mod tests {
 
         // RTL pill and mixed RTL+LTR pill chips have positive width.
         for (txt, start, end) in [("דוד", 0u32, 6u32), ("שלום@maya", 8, 13), ("@e\u{0301}", 0, 4)] {
-            let pc = [crate::text::PillChip { start, end, icon: None }];
+            let pc = [crate::text::PillChip { start, end, icon: None, bg: None, fg: None }];
             let l = ts.layout_blocks(txt, &[], &[Block::Paragraph], &pc, style, 2.0, None, parley::Alignment::Start);
             let (mut d, mut ic) = (Vec::new(), Vec::new());
             crate::text::pill_chips(&l, &pc, 14.0, 2.0, [0.0, 0.0], Color::BLACK, &mut d, &mut ic);

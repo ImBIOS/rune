@@ -5,6 +5,16 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **One undo step for grouped edits, and per-pill styles.** `TextEdit::undo_group(|e| ..)` makes
+  every edit inside one undo step (picking a mention: `replace_with_pill` then `insert(" ")`);
+  groups nest, an empty one records nothing, and typing coalescing and IME are unchanged outside
+  it. `El::pill_style(|id| PillStyle::default().bg(..).fg(..).icon(..))` styles each pill from a
+  closure that can capture app state (chip colour, label colour, icon; unset parts fall back to
+  `pill_colors` and `pill_icon`). `pill_icon` now takes any `Fn(&str) -> Option<&'static Icon>`
+  closure instead of a plain `fn` (existing `fn` items still compile; a `fn` pointer type
+  annotation on a stored value does not). rune-kit's `TextField`, `TextInput` and `TextArea`
+  forward `pill_style`. `demo/kit/pills-styled.png` shows an agent and a file pill.
+
 - Drag cancellation reaches native Escape and restores pane widths, column widths, sliders
   and gutter selections. Delayed hover ends on window blur; raised content keeps ancestor
   clips outside cached groups. Dropping offset-reordered virtual rows no longer scrolls the

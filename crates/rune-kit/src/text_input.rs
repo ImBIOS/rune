@@ -69,8 +69,11 @@ impl EditActs {
     fn rich_style(&mut self, style: RichStyle) {
         self.visual.push(Box::new(move |e: El| e.rich_style(style)));
     }
-    fn pill_icon(&mut self, icon: fn(&str) -> Option<&'static Icon>) {
+    fn pill_icon(&mut self, icon: impl Fn(&str) -> Option<&'static Icon> + 'static) {
         self.visual.push(Box::new(move |e: El| e.pill_icon(icon)));
+    }
+    fn pill_style(&mut self, style: impl Fn(&str) -> rune::PillStyle + 'static) {
+        self.visual.push(Box::new(move |e: El| e.pill_style(style)));
     }
     fn pill_colors(&mut self, bg: Color, fg: Option<Color>) {
         self.visual.push(Box::new(move |e: El| e.pill_colors(bg, fg)));
@@ -200,8 +203,13 @@ impl TextInput {
         self
     }
     /// See [`El::pill_icon`](rune::El::pill_icon).
-    pub fn pill_icon(mut self, icon: fn(&str) -> Option<&'static Icon>) -> Self {
+    pub fn pill_icon(mut self, icon: impl Fn(&str) -> Option<&'static Icon> + 'static) -> Self {
         self.edits.pill_icon(icon);
+        self
+    }
+    /// See [`El::pill_style`](rune::El::pill_style).
+    pub fn pill_style(mut self, style: impl Fn(&str) -> rune::PillStyle + 'static) -> Self {
+        self.edits.pill_style(style);
         self
     }
     /// See [`El::pill_colors`](rune::El::pill_colors).
@@ -362,8 +370,13 @@ impl TextArea {
         self
     }
     /// See [`El::pill_icon`](rune::El::pill_icon).
-    pub fn pill_icon(mut self, icon: fn(&str) -> Option<&'static Icon>) -> Self {
+    pub fn pill_icon(mut self, icon: impl Fn(&str) -> Option<&'static Icon> + 'static) -> Self {
         self.edits.pill_icon(icon);
+        self
+    }
+    /// See [`El::pill_style`](rune::El::pill_style).
+    pub fn pill_style(mut self, style: impl Fn(&str) -> rune::PillStyle + 'static) -> Self {
+        self.edits.pill_style(style);
         self
     }
     /// See [`El::pill_colors`](rune::El::pill_colors).
@@ -482,8 +495,13 @@ impl TextField {
         self
     }
     /// See [`El::pill_icon`](rune::El::pill_icon).
-    pub fn pill_icon(mut self, icon: fn(&str) -> Option<&'static Icon>) -> Self {
+    pub fn pill_icon(mut self, icon: impl Fn(&str) -> Option<&'static Icon> + 'static) -> Self {
         self.edits.pill_icon(icon);
+        self
+    }
+    /// See [`El::pill_style`](rune::El::pill_style).
+    pub fn pill_style(mut self, style: impl Fn(&str) -> rune::PillStyle + 'static) -> Self {
+        self.edits.pill_style(style);
         self
     }
     /// See [`El::pill_colors`](rune::El::pill_colors).

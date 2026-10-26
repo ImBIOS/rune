@@ -601,6 +601,7 @@ pub struct InputSpec {
     pub(crate) decorations: Vec<Span>,
     pub(crate) rich_style: crate::edit::RichStyle,
     pub(crate) pill_icon: Option<PillIconFn>,
+    pub(crate) pill_style: Option<PillStyleFn>,
     pub(crate) access: Option<EditFn>,
     pub(crate) submit: Option<PressFn>,
     pub(crate) key: Option<InputKeyFn>,
@@ -1005,7 +1006,37 @@ pub(crate) struct PasteFn {
     pub(crate) call: InputPasteFn,
 }
 /// A pill's leading icon by its id; see [`El::pill_icon`].
-pub(crate) type PillIconFn = fn(&str) -> Option<&'static crate::Icon>;
+pub(crate) type PillIconFn = Rc<dyn Fn(&str) -> Option<&'static crate::Icon>>;
+/// A pill's look by its id; see [`El::pill_style`].
+pub(crate) type PillStyleFn = Rc<dyn Fn(&str) -> PillStyle>;
+
+/// How one [`Mark::Pill`](crate::Mark::Pill) chip looks: any part left unset falls back to
+/// [`El::pill_colors`] and [`El::pill_icon`], then the field's defaults. Build one with
+/// `PillStyle::default().bg(..).icon(..)`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PillStyle {
+    bg: Option<Color>,
+    fg: Option<Color>,
+    icon: Option<&'static crate::Icon>,
+}
+
+impl PillStyle {
+    /// The chip's colour.
+    pub fn bg(mut self, bg: Color) -> Self {
+        self.bg = Some(bg);
+        self
+    }
+    /// The label and icon colour.
+    pub fn fg(mut self, fg: Color) -> Self {
+        self.fg = Some(fg);
+        self
+    }
+    /// The leading icon, in the label's colour.
+    pub fn icon(mut self, icon: &'static crate::Icon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+}
 pub(crate) type InputPasteFn = Rc<dyn Fn(&mut dyn Any, &crate::ClipboardContent, &mut Tx) -> bool>;
 pub(crate) type ReadFn = Box<dyn FnOnce(&mut dyn Any, &crate::ClipboardContent, &mut Tx)>;
 
@@ -1316,6 +1347,7 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
         decorations: Vec::new(),
         rich_style: crate::edit::RichStyle::default(),
         pill_icon: None,
+        pill_style: None,
         access: None,
         submit: None,
         key: None,
@@ -2507,12 +2539,6 @@ impl El {
         }
         self
     }
-    /// The leading icon for each [`Mark::Pill`](crate::Mark::Pill) chip in a [`text_input`],
-    /// by the pill's id (`None`: no icon). The icon takes the label's colour.
-    ///
-    /// ```ignore
-    /// text_input(s.draft.clone(), body).pill_icon(|id| id.starts_with("file:").then_some(&FILE))
-    /// ```
     /// The chip colour of each [`Mark::Pill`](crate::Mark::Pill) in a [`text_input`], and its
     /// label and icon colour (`None`: the text's). The chip defaults to the rich style's link
     /// colour at 20% opacity.
@@ -2525,9 +2551,37 @@ impl El {
         }
         self
     }
-    pub fn pill_icon(mut self, icon: fn(&str) -> Option<&'static crate::Icon>) -> Self {
+    /// The leading icon for each [`Mark::Pill`](crate::Mark::Pill) chip in a [`text_input`],
+    /// by the pill's id (`None`: no icon). The icon takes the label's colour.
+    ///
+    /// ```ignore
+    /// text_input(s.draft.clone(), body).pill_icon(|id| id.starts_with("file:").then_some(&FILE))
+    /// ```
+    ///
+    /// The closure may capture state; it runs each time the field is built, so a pill follows
+    /// whatever it captured. For colours too, see [`El::pill_style`].
+    pub fn pill_icon(mut self, icon: impl Fn(&str) -> Option<&'static crate::Icon> + 'static) -> Self {
         if let Some(inp) = &mut self.input {
-            inp.pill_icon = Some(icon);
+            inp.pill_icon = Some(Rc::new(icon));
+            self.sync_input_rich();
+        }
+        self
+    }
+    /// The look of each [`Mark::Pill`](crate::Mark::Pill) chip in a [`text_input`] by the
+    /// pill's id: chip colour, label colour and icon, so a person and an agent can differ.
+    /// What the style leaves unset falls back to [`El::pill_colors`] and [`El::pill_icon`].
+    /// The closure may capture app state; it runs each time the field is built, and what it
+    /// returns is drawn, so a cached subtree restyles when that state changes.
+    ///
+    /// ```ignore
+    /// text_input(s.draft.clone(), body).pill_style({
+    ///     let agents = s.agents.clone();
+    ///     move |id| if agents.contains(id) { PillStyle::default().bg(PURPLE).icon(&BOT) } else { PillStyle::default() }
+    /// })
+    /// ```
+    pub fn pill_style(mut self, style: impl Fn(&str) -> PillStyle + 'static) -> Self {
+        if let Some(inp) = &mut self.input {
+            inp.pill_style = Some(Rc::new(style));
             self.sync_input_rich();
         }
         self
@@ -2548,7 +2602,12 @@ impl El {
             .edit
             .display_pills()
             .into_iter()
-            .map(|(start, end, id)| crate::text::PillChip { start, end, icon: inp.pill_icon.and_then(|f| f(id)) })
+            .map(|(start, end, id)| {
+                let st = inp.pill_style.as_ref().map(|f| f(id)).unwrap_or_default();
+                let icon = st.icon.or_else(|| inp.pill_icon.as_ref().and_then(|f| f(id)));
+                let (bg, fg) = (st.bg, st.fg.or(t.pill_colors.and_then(|(_, fg)| fg)));
+                crate::text::PillChip { start, end, icon, bg, fg }
+            })
             .collect();
         let (mut base_spans, strikes, rich_links, blocks) =
             inp.edit.rich_display_specs(t.style, inp.rich_style);
@@ -2560,9 +2619,7 @@ impl El {
                 base_spans.push(sp);
             }
         }
-        if let Some(fg) = t.pill_colors.and_then(|(_, fg)| fg) {
-            base_spans.extend(t.pills.iter().map(|p| Span { start: p.start, end: p.end, color: Some(fg), ..Span::default() }));
-        }
+        base_spans.extend(t.pills.iter().filter_map(|p| Some(Span { start: p.start, end: p.end, color: Some(p.fg?), ..Span::default() })));
         let mut flat = crate::text::flatten_spans(&base_spans);
         for s in &mut flat {
             if s.underline == Some(Color::TRANSPARENT) {

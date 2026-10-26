@@ -362,6 +362,8 @@ pub(crate) struct PillChip {
     pub start: u32,
     pub end: u32,
     pub icon: Option<&'static Icon>,
+    pub bg: Option<Color>,
+    pub fg: Option<Color>,
 }
 
 /// A pill chip's horizontal geometry in points for text of `size` points: the room before its
@@ -404,7 +406,7 @@ pub(crate) fn pill_chips(
     origin: [f32; 2],
     bg: Color,
     out: &mut Vec<Deco>,
-    icons: &mut Vec<(&'static Icon, u32, [f32; 2])>,
+    icons: &mut Vec<(&'static Icon, u32, [f32; 2], Option<Color>)>,
 ) {
     if pills.is_empty() {
         return;
@@ -466,11 +468,11 @@ pub(crate) fn pill_chips(
             let top = (base - asc - 1.0 * scale).round();
             let bot = (base + desc + 1.0 * scale).round();
             let rect = [(origin[0] + x0).round(), top, (x1 - x0).max(0.0).round(), bot - top];
-            out.push(Deco { rect, color: bg, radius: (5.0 * scale).min(rect[3] * 0.5) });
+            out.push(Deco { rect, color: pill.bg.unwrap_or(bg), radius: (5.0 * scale).min(rect[3] * 0.5) });
             if let Some(icon) = pill.icon {
                 let px = (pm.icon * scale).round().max(1.0);
                 let ix = if rtl_lead { rect[0] + rect[2] - pm.pad * scale - px } else { rect[0] + pm.pad * scale };
-                icons.push((icon, px as u32, [ix, ((top + bot - px) * 0.5).round()]));
+                icons.push((icon, px as u32, [ix, ((top + bot - px) * 0.5).round()], pill.fg));
             }
         }
     }
@@ -3422,7 +3424,7 @@ mod quality_tests {
             .enumerate()
             .map(|(k, label)| {
                 let start = content.find(label).unwrap() as u32;
-                PillChip { start, end: start + label.len() as u32, icon: (k == 1).then_some(&DOT) }
+                PillChip { start, end: start + label.len() as u32, icon: (k == 1).then_some(&DOT), bg: None, fg: None }
             })
             .collect();
         let scale = 2.0;
@@ -3454,7 +3456,7 @@ mod quality_tests {
             pill_chips(&layout, &pills, 14.0, scale, [0.0, 0.0], Color::BLACK, &mut chips, &mut icons);
             assert_eq!(chips.len(), 3, "each pill draws one chip at width {width}");
             assert_eq!(icons.len(), 1);
-            let (_, px, at) = icons[0];
+            let (_, px, at, _) = icons[0];
             let chip = chips[1].rect;
             assert!(at[0] >= chip[0] && at[0] + px as f32 <= chip[0] + chip[2] + 0.5, "icon inside its chip at width {width}");
             let line_of = |byte: usize| layout.lines().position(|l| l.text_range().contains(&byte)).unwrap();

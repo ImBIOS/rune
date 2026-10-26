@@ -6473,7 +6473,8 @@ impl<S: 'static> Runtime<S> {
                         self.instances.push(rect_inst(d.rect, c, d.radius, clip, fade));
                     }
                     let pill_fg = spec.pill_colors.and_then(|(_, fg)| fg).unwrap_or(color);
-                    for (icon, px, at) in pill_icons {
+                    for (icon, px, at, fg) in pill_icons {
+                        let pill_fg = fg.unwrap_or(pill_fg);
                         let at = if tk == 1.0 { at } else { std::array::from_fn(|k| origin[k] + (at[k] - origin[k]) * tk) };
                         if let Some(q) = self.text.icon_quad(icon, px, at) {
                             self.instances.push(glyph(&q, premul(pill_fg, o, srgb), glyph_gamma(pill_fg, s, srgb), clip, fade));
