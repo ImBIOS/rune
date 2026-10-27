@@ -907,25 +907,7 @@ fn parse_script(list: Value) -> Vec<Ev> {
                 out.push(Ev { t, kind: Kind::SmartMagnify, pos });
             }
             "paste" => out.push(Ev { t, kind: Kind::Paste(paste_content(&e)), pos: Pos::Rel(0.0, 0.0) }),
-            "scroll" => {
-                // A trackpad swipe: deltas eased over `dur`, then (with "fling") the release velocity.
-                let dx = e["dx"].as_f64().unwrap_or(0.0) as f32;
-                let dy = e["dy"].as_f64().unwrap_or(0.0) as f32;
-                let dur = e["dur"].as_f64().unwrap_or(0.2).max(0.01);
-                out.push(Ev { t, kind: Kind::Move, pos: pos.clone() });
-                let steps = (dur * 120.0).ceil() as usize;
-                let mut prev = (0.0, 0.0);
-                for s in 1..=steps {
-                    let f = s as f32 / steps as f32;
-                    let f = f * (2.0 - f);
-                    out.push(Ev { t: t + dur * s as f64 / steps as f64, kind: Kind::Wheel(dx * f - prev.0, dy * f - prev.1), pos: pos.clone() });
-                    prev = (dx * f, dy * f);
-                }
-                if e["fling"].as_bool().unwrap_or(false) {
-                    let v = |d: f32| 2.0 * d / dur as f32 * 0.25;
-                    out.push(Ev { t: t + dur + 1e-4, kind: Kind::Fling(v(dx), v(dy)), pos });
-                }
-            }
+            "scroll" => eased_input::swipe(&mut out, &e, t, pos),
             "fling" => {
                 let v = |k: &str| e[k].as_f64().unwrap_or(0.0) as f32;
                 out.push(Ev { t, kind: Kind::Fling(v("vx"), v("v")), pos });
@@ -1381,6 +1363,8 @@ pub(crate) fn straight_alpha(pixels: &mut [u8]) {
     }
 }
 
+#[path = "tooling/eased_input.rs"]
+mod eased_input;
 #[cfg(test)]
 #[path = "tooling/window_tests.rs"]
 mod window_tests;
