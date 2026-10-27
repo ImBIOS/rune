@@ -334,3 +334,67 @@ fn a_view_reading_its_own_size_with_layout_size_settles_on_the_first_frame() {
     frames(&mut rt, 30);
     assert_eq!((rt.state.views.get(), rt.stats.commits), (views, commits), "settled");
 }
+
+#[derive(Default)]
+struct Header {
+    /// What each view run read: whether row 1 has scrolled past the top.
+    seen: std::cell::RefCell<Vec<Option<bool>>>,
+}
+
+/// A header that turns solid once row 1 scrolls past the top of the window.
+fn header_view(s: &Header, cx: &mut Cx<Header>) -> El {
+    let past = cx.layout_with("r1", |r| r[1] < 0.0);
+    s.seen.borrow_mut().push(past);
+    let rows = (0..40).fold(col().w_full(), |c, i| c.child(el().key(format!("r{i}")).w_full().h(30.0)));
+    let header = el().key(if past == Some(true) { "solid" } else { "clear" }).w_full().h(20.0);
+    col().w_full().h_full()
+        .child(col().key("scroll").w_full().h(300.0).scroll(ScrollSpec { stick_bottom: false }).child(rows))
+        .child(header)
+}
+
+#[test]
+fn a_layout_with_read_settles_on_the_first_layout() {
+    let mut rt = Runtime::new(Header::default(), header_view, (300.0, 400.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    assert_eq!(rt.state.seen.borrow().last(), Some(&Some(false)), "{:?}", rt.state.seen.borrow());
+    assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("clear")));
+}
+
+#[test]
+fn a_layout_with_read_re_runs_its_view_only_when_its_value_flips() {
+    let mut rt = Runtime::new(Header::default(), header_view, (300.0, 400.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    for _ in 0..10 { rt.frame(1.0 / 120.0); }
+    rt.state.seen.borrow_mut().clear();
+    let r1 = |rt: &Runtime<Header>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r1")).unwrap().rect[1];
+
+    // Down past the top: one run, on the frame it flips.
+    let commits = rt.stats.commits;
+    let mut flipped_at = None;
+    for frame in 0..20 {
+        rt.wheel(100.0, 100.0, -3.0);
+        rt.frame(1.0 / 120.0);
+        if flipped_at.is_none() && r1(&rt) < 0.0 { flipped_at = Some(frame); }
+        assert_eq!(rt.state.seen.borrow().len(), usize::from(flipped_at.is_some()), "frame {frame}: y {}", r1(&rt));
+    }
+    assert!(r1(&rt) < -20.0, "scrolled past: {}", r1(&rt));
+    assert_eq!(*rt.state.seen.borrow(), [Some(true)]);
+    assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("solid")), "solid in the frame it flipped");
+    assert_eq!(rt.stats.commits - commits, 1, "one commit over 20 scrolled frames");
+
+    // And back: one more.
+    for frame in 0..20 {
+        rt.wheel(100.0, 100.0, 3.0);
+        rt.frame(1.0 / 120.0);
+        let back = r1(&rt) >= 0.0;
+        assert_eq!(rt.state.seen.borrow().len(), 1 + usize::from(back), "frame {frame}: y {}", r1(&rt));
+        if back { break; }
+    }
+    for _ in 0..20 {
+        rt.wheel(100.0, 100.0, 3.0);
+        rt.frame(1.0 / 120.0);
+    }
+    assert_eq!(*rt.state.seen.borrow(), [Some(true), Some(false)]);
+    assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("clear")));
+    assert_eq!(rt.stats.commits - commits, 2);
+}

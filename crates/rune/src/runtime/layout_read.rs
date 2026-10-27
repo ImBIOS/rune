@@ -1,9 +1,11 @@
-//! Reading an element's laid-out rect: `Cx::layout` (or only its size, `Cx::layout_size`) for
-//! views, `El::on_layout` for handlers, and `El::on_screen_layout` for handlers in global screen
-//! points (the rect plus the window origin its host reports through `Runtime::set_window_origin`).
+//! Reading an element's laid-out rect: `Cx::layout` (or only what a view computes from it,
+//! `Cx::layout_with` and `Cx::layout_size`) for views, `El::on_layout` for handlers, and
+//! `El::on_screen_layout` for handlers in global screen points (the rect plus the window origin
+//! its host reports through `Runtime::set_window_origin`).
 //!
-//! Each read records the part of the rect it depends on, so a size read doesn't re-run its
-//! view when only the position moves (scrolling, say).
+//! A `layout_with` read keeps its function, and re-runs its view only when the function gives
+//! the new rect something other than it gave the old one, so a size read doesn't re-run when
+//! the element only moves, and a "scrolled past the top" flag only when it flips.
 //!
 //! All of them see where layout puts an element (window points, after scrolling), never a frame of
 //! its spring, so they don't re-run through animations. A view reading something its own
@@ -15,6 +17,9 @@
 //! - Commits caused only by layout reads or `on_layout`, with no scroll moving, count up; past
 //!   [`ECHOES`] in a row, reads and `on_layout` stop causing commits (values still update
 //!   silently) until anything else commits.
+use std::any::TypeId;
+use std::rc::Rc;
+
 use super::*;
 
 /// Extra measurements one commit may take while a read moves.
@@ -24,55 +29,108 @@ const ECHOES: u32 = 4;
 /// A rect counts as moved when an edge moves more than this (points).
 const MOVED: f32 = 0.5;
 
-/// The part of a laid-out rect a read depends on.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum LayoutPart {
-    /// Width and height (`Cx::layout_size`).
-    Size,
-    /// The whole rect (`Cx::layout`).
-    Rect,
+type SameFn = dyn Fn([f32; 4], [f32; 4]) -> bool;
+
+/// Whether two rects give a `Cx::layout_with` read's function the same value.
+#[derive(Clone)]
+pub(crate) enum Same {
+    /// A function that captures nothing (`layout_size`'s, say): no allocation, and two reads
+    /// with the same function are one dependency.
+    Static(&'static SameFn, TypeId),
+    /// One that captures something.
+    Shared(Rc<SameFn>),
 }
 
-/// The keys a view read, each with the part it depends on.
-pub(crate) type LayoutReads = Vec<(String, LayoutPart)>;
-
-/// Counts a read of `key`'s `part` in `reads`; a whole-rect read covers a size read.
-pub(crate) fn note_read(reads: &mut LayoutReads, key: &str, part: LayoutPart) {
-    match reads.iter_mut().find(|(k, _)| k == key) {
-        Some((_, p)) => if part == LayoutPart::Rect { *p = part },
-        None => reads.push((key.to_owned(), part)),
+impl Same {
+    pub(crate) fn new<T: PartialEq, F: Fn([f32; 4]) -> T + 'static>(f: F) -> Same {
+        let same = move |a: [f32; 4], b: [f32; 4]| f(a) == f(b);
+        if std::mem::size_of_val(&same) == 0 {
+            // Leaking a zero-sized value allocates and leaks nothing.
+            Same::Static(Box::leak(Box::new(same)), TypeId::of::<F>())
+        } else {
+            Same::Shared(Rc::new(same))
+        }
     }
-}
 
-/// What a key a view read resolved to, as last given to the view, and the part it depends on.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Seen {
-    pub(crate) rect: Option<[f32; 4]>,
-    pub(crate) part: LayoutPart,
-}
+    /// Whether `a` and `b` give the function the same value.
+    pub(crate) fn holds(&self, a: [f32; 4], b: [f32; 4]) -> bool {
+        match self {
+            Same::Static(f, _) => f(a, b),
+            Same::Shared(f) => f(a, b),
+        }
+    }
 
-/// What each key a view read resolved to.
-pub(crate) type LayoutSeen = HashMap<String, Seen>;
+    /// Whether `self` and `other` are the same function.
+    pub(crate) fn is(&self, other: &Same) -> bool {
+        match (self, other) {
+            (Same::Static(_, a), Same::Static(_, b)) => a == b,
+            (Same::Shared(a), Same::Shared(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
 
-/// The rect `seen` holds for `key`, when the view read it.
-pub(crate) fn seen_rect(seen: &LayoutSeen, key: &str) -> Option<[f32; 4]> {
-    seen.get(key).and_then(|s| s.rect)
-}
-
-/// `[w, h]` of `rect`.
-pub(crate) fn size_of(rect: Option<[f32; 4]>) -> Option<[f32; 2]> {
-    rect.map(|r| [r[2], r[3]])
-}
-
-/// Whether the `part` of the rect a read depends on moved between `a` and `b`.
-fn part_moved(a: Option<[f32; 4]>, b: Option<[f32; 4]>, part: LayoutPart) -> bool {
-    match part {
-        LayoutPart::Rect => moved(a, b),
-        LayoutPart::Size => match (size_of(a), size_of(b)) {
-            (Some(a), Some(b)) => a.iter().zip(b).any(|(x, y)| (x - y).abs() > MOVED),
+    /// Whether the function's value differs between rects `a` and `b`; an element appearing or
+    /// going counts.
+    pub(crate) fn moved(&self, a: Option<[f32; 4]>, b: Option<[f32; 4]>) -> bool {
+        match (a, b) {
+            (Some(a), Some(b)) => !self.holds(a, b),
             (a, b) => a.is_some() != b.is_some(),
-        },
+        }
     }
+}
+
+/// One layout read a view made: the element's key, and what of its rect the view depends on.
+#[derive(Clone)]
+pub(crate) struct LayoutRead {
+    pub(crate) key: String,
+    /// The `layout_with` function's check, or `None` for the whole rect (`Cx::layout`).
+    pub(crate) same: Option<Same>,
+}
+
+impl LayoutRead {
+    fn moved(&self, a: Option<[f32; 4]>, b: Option<[f32; 4]>) -> bool {
+        match &self.same {
+            None => moved(a, b),
+            Some(same) => same.moved(a, b),
+        }
+    }
+}
+
+/// The layout reads a view made.
+pub(crate) type LayoutReads = Vec<LayoutRead>;
+
+/// Counts a read of `key` in `reads`. A whole-rect read covers every other read of the key,
+/// and a repeated read of the same function counts once.
+pub(crate) fn note_read(reads: &mut LayoutReads, key: &str, same: Option<Same>) {
+    let covered = reads.iter().any(|r| r.key == key && match (&r.same, &same) {
+        (None, _) => true,
+        (Some(a), Some(b)) => a.is(b),
+        (Some(_), None) => false,
+    });
+    if covered { return; }
+    if same.is_none() { reads.retain(|r| r.key != key); }
+    reads.push(LayoutRead { key: key.to_owned(), same });
+}
+
+/// What each key a view read resolved to, as last given to the view.
+pub(crate) type LayoutRects = HashMap<String, Option<[f32; 4]>>;
+
+/// The last view's layout reads, and what each key resolved to.
+#[derive(Default)]
+pub(crate) struct LayoutSeen {
+    pub(crate) rects: LayoutRects,
+    reads: LayoutReads,
+}
+
+impl LayoutSeen {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.reads.is_empty()
+    }
+}
+
+/// The rect `rects` holds for `key`, when the view read it.
+pub(crate) fn seen_rect(rects: &LayoutRects, key: &str) -> Option<[f32; 4]> {
+    rects.get(key).copied().flatten()
 }
 
 impl<S> Cx<S> {
@@ -87,26 +145,45 @@ impl<S> Cx<S> {
     /// and layout reads alone can't keep causing commits. A view whose output never reaches a
     /// fixed point gets a stale value rather than oscillating.
     ///
-    /// A view that only needs the size should call [`Self::layout_size`], which doesn't re-run
-    /// it when the element only moves.
+    /// A view that uses only part of the rect should read that part with [`Self::layout_size`]
+    /// or [`Self::layout_with`], which don't re-run it while the part it uses holds.
     pub fn layout(&self, key: &str) -> Option<[f32; 4]> {
-        note_read(&mut self.layout_reads.borrow_mut(), key, LayoutPart::Rect);
+        note_read(&mut self.layout_reads.borrow_mut(), key, None);
         let rect = seen_rect(&self.layout, key);
         crate::memo::read_layout(key, rect);
         rect
     }
 
-    /// `[w, h]` of the element [`Self::layout`] would return the rect of, in points. Prefer it
-    /// whenever the view uses only the size: the view re-runs when the width or height changes
-    /// past half a point, but not when the element only moves, so an element inside a scrolling
-    /// viewport doesn't re-run the view every frame of the scroll. It settles on the first
-    /// layout like [`Self::layout`], so the first frame already has the right size.
-    pub fn layout_size(&self, key: &str) -> Option<[f32; 2]> {
-        note_read(&mut self.layout_reads.borrow_mut(), key, LayoutPart::Size);
-        let size = size_of(seen_rect(&self.layout, key));
-        crate::memo::read_layout_size(key, size);
-        size
+    /// `f` of the rect [`Self::layout`] returns, re-running the view only when `f` of the new
+    /// rect differs from `f` of the old one (or the element appears or goes). Prefer it to
+    /// `layout` whenever the view needs something that changes less often than the rect:
+    /// `layout_with("feed", |r| r[1] < 0.0)` re-runs a header on the frames the feed scrolls
+    /// past the top, not on every frame of the scroll. It settles on the first layout like
+    /// `layout`, so the first frame already has the right value.
+    ///
+    /// `f` runs again on each later layout until the view re-runs, so keep it cheap and pure.
+    /// A closure that captures nothing costs no more than `layout`; one that captures
+    /// something costs an allocation per read.
+    pub fn layout_with<T: PartialEq + 'static>(&self, key: &str, f: impl Fn([f32; 4]) -> T + 'static) -> Option<T> {
+        let rect = seen_rect(&self.layout, key);
+        let value = rect.map(&f);
+        let same = Same::new(f);
+        crate::memo::read_layout_with(key, &same, rect);
+        note_read(&mut self.layout_reads.borrow_mut(), key, Some(same));
+        value
     }
+
+    /// `[w, h]` of the rect [`Self::layout`] returns: [`Self::layout_with`] the size. Prefer it
+    /// whenever the view uses only the size, so an element inside a scrolling viewport doesn't
+    /// re-run the view every frame of the scroll; it re-runs when the width or height changes.
+    pub fn layout_size(&self, key: &str) -> Option<[f32; 2]> {
+        self.layout_with(key, size)
+    }
+}
+
+/// `[w, h]` of `rect`.
+pub(crate) fn size(rect: [f32; 4]) -> [f32; 2] {
+    [rect[2], rect[3]]
 }
 
 fn moved(a: Option<[f32; 4]>, b: Option<[f32; 4]>) -> bool {
@@ -167,18 +244,24 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// Refreshes what the next view sees for `reads` (the last view's reads when `None`) from
-    /// `nodes` (the current frame's when `None`). Returns whether any of it moved.
-    /// Only the part of each rect a read depends on counts.
-    pub(super) fn layout_moved(&mut self, reads: Option<&[(String, LayoutPart)]>, nodes: Option<&[Node]>) -> bool {
+    /// `nodes` (the current frame's when `None`). Returns whether any of it moved, by what each
+    /// read depends on.
+    pub(super) fn layout_moved(&mut self, reads: Option<LayoutReads>, nodes: Option<&[Node]>) -> bool {
+        let reads = reads.unwrap_or_else(|| std::mem::take(&mut self.layout_seen.reads));
         let nodes = nodes.unwrap_or(&self.nodes);
-        let resolve = |k: &String, part| (k.clone(), Seen { rect: self.layout_of(nodes, k), part });
-        let next: LayoutSeen = match reads {
-            Some(keys) => keys.iter().map(|(k, part)| resolve(k, *part)).collect(),
-            None => self.layout_seen.iter().map(|(k, s)| resolve(k, s.part)).collect(),
-        };
-        let changed = next.len() != self.layout_seen.len()
-            || next.iter().any(|(k, v)| self.layout_seen.get(k).is_none_or(|old| part_moved(old.rect, v.rect, v.part)));
-        self.layout_seen = next;
+        let now: Vec<Option<[f32; 4]>> = reads.iter().map(|r| self.layout_of(nodes, &r.key)).collect();
+        let rects = &mut self.layout_seen.rects;
+        let mut changed = reads.iter().zip(&now).any(|(r, rect)| rects.get(&r.key).is_none_or(|old| r.moved(*old, *rect)));
+        let before = rects.len();
+        rects.retain(|k, _| reads.iter().any(|r| r.key == *k));
+        changed |= rects.len() < before;
+        for (r, rect) in reads.iter().zip(now) {
+            match rects.get_mut(&r.key) {
+                Some(seen) => *seen = rect,
+                None => { rects.insert(r.key.clone(), rect); }
+            }
+        }
+        self.layout_seen.reads = reads;
         changed
     }
 
@@ -186,15 +269,15 @@ impl<S: 'static> Runtime<S> {
     /// the reads matching the final layout so a view that can't settle doesn't loop.
     pub(super) fn settle_layout_reads(&mut self, mut measured: Measured, tx: &Tx) -> Measured {
         if measured.layout_reads.is_empty() {
-            self.layout_seen.clear();
+            self.layout_seen = LayoutSeen::default();
             return measured;
         }
         for _ in 0..PASSES {
-            if !self.layout_moved(Some(&measured.layout_reads), Some(&measured.nodes)) { return measured; }
+            if !self.layout_moved(Some(std::mem::take(&mut measured.layout_reads)), Some(&measured.nodes)) { return measured; }
             self.layout = measured.layout;
             measured = self.measure(tx);
         }
-        self.layout_moved(Some(&measured.layout_reads), Some(&measured.nodes));
+        self.layout_moved(Some(std::mem::take(&mut measured.layout_reads)), Some(&measured.nodes));
         measured
     }
 
@@ -348,6 +431,22 @@ mod tests {
 
     fn frames(rt: &mut Runtime<S>, n: usize) {
         for _ in 0..n { rt.frame(1.0 / 120.0); }
+    }
+
+    #[test]
+    fn reads_of_one_key_count_once_per_function_and_a_whole_rect_read_covers_them() {
+        use super::{LayoutRead, Same, note_read, size};
+        let mut reads: Vec<LayoutRead> = Vec::new();
+        for _ in 0..3 { note_read(&mut reads, "a", Some(Same::new(size))); }
+        assert!(matches!(reads[..], [LayoutRead { same: Some(Same::Static(..)), .. }]), "no allocation, one dependency");
+        let top = 3.0;
+        note_read(&mut reads, "a", Some(Same::new(move |r: [f32; 4]| r[1] < top)));
+        assert!(matches!(reads[1].same, Some(Same::Shared(_))));
+        note_read(&mut reads, "b", Some(Same::new(size)));
+        note_read(&mut reads, "a", None);
+        note_read(&mut reads, "a", Some(Same::new(size)));
+        let kept: Vec<_> = reads.iter().map(|r| (r.key.as_str(), r.same.is_some())).collect();
+        assert_eq!(kept, [("b", true), ("a", false)]);
     }
 
     #[test]

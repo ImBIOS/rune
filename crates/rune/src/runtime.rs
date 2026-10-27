@@ -227,7 +227,7 @@ pub struct Cx<S> {
     time_scale: f32,
     caret: Option<(String, [f32; 4])>,
     caret_read: std::cell::Cell<bool>,
-    layout: layout_read::LayoutSeen,
+    layout: layout_read::LayoutRects,
     layout_reads: std::cell::RefCell<layout_read::LayoutReads>,
     _s: PhantomData<fn(&S)>,
 }
@@ -1546,7 +1546,7 @@ impl<S: 'static> Runtime<S> {
             ime_area: None,
             caret: None,
             caret_watch: false,
-            layout_seen: HashMap::new(),
+            layout_seen: Default::default(),
             layout_fired: HashMap::new(),
             screen_fired: HashMap::new(),
             drawn_fired: HashMap::new(),
@@ -3587,7 +3587,7 @@ struct Measurement<'a, S: 'static> {
     retry: bool,
     caret: Option<(String, [f32; 4])>,
     caret_read: bool,
-    layout_seen: layout_read::LayoutSeen,
+    layout_seen: layout_read::LayoutRects,
     layout_reads: layout_read::LayoutReads,
 }
 
@@ -3831,7 +3831,7 @@ impl<S: 'static> Measurement<'_, S> {
         // Reads made by memos this build reused count as made again.
         self.caret_read = cx.caret_read.get() || replayed.caret;
         self.layout_reads = cx.layout_reads.take();
-        for (key, part) in replayed.layout { layout_read::note_read(&mut self.layout_reads, &key, part); }
+        for read in replayed.layout { layout_read::note_read(&mut self.layout_reads, &read.key, read.same); }
 
         let mut taffy = std::mem::replace(self.layout, TaffyTree::with_capacity(0));
         for entry in self.layout_entries.values_mut() {
@@ -3971,7 +3971,7 @@ impl<S: 'static> Runtime<S> {
             time_scale: self.time_scale,
             caret: self.caret.clone(),
             caret_read: false,
-            layout_seen: self.layout_seen.clone(),
+            layout_seen: self.layout_seen.rects.clone(),
             layout_reads: Vec::new(),
             commits: self.commits,
             nodes: &self.nodes,
