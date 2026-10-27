@@ -71,6 +71,8 @@ struct Win {
     /// reports the new window on screen.
     #[cfg(target_os = "macos")]
     prime: u8,
+    #[cfg(target_os = "macos")]
+    launch_drawables: LaunchDrawables,
 }
 
 impl Win {
@@ -1509,6 +1511,79 @@ pub(crate) fn surface_config(surface: &wgpu::Surface, adapter: &wgpu::Adapter, (
     Some((config, translucent))
 }
 
+/// A new window's surface keeps two drawables until the window first rests on screen, or for
+/// its first second there, then its configured three. CAMetalLayer makes another window-sized
+/// drawable whenever a frame is acquired while the others are still held, and keeps it. Launch
+/// frames overlap that way, presented before the window server shows the window or while their
+/// shaders compile, which left a settled window one drawable (about 12 MB at 980x760) heavier.
+/// Raising the count later makes no drawable until a frame needs it.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaunchDrawables {
+    Capped { steady: u32, since: Option<Instant> },
+    Steady,
+}
+
+#[cfg(target_os = "macos")]
+impl LaunchDrawables {
+    const LAUNCH: Duration = Duration::from_secs(1);
+
+    /// Caps a new surface's `config` at two drawables.
+    fn cap(config: &mut wgpu::SurfaceConfiguration) -> Self {
+        if config.desired_maximum_frame_latency <= 1 { return Self::Steady; }
+        let steady = std::mem::replace(&mut config.desired_maximum_frame_latency, 1);
+        Self::Capped { steady, since: None }
+    }
+
+    /// After a frame on screen: the frame latency to configure, once, when launch ends.
+    fn settle(&mut self, idle: bool, now: Instant) -> Option<u32> {
+        let Self::Capped { steady, since } = self else { return None };
+        let since = *since.get_or_insert(now);
+        if !idle && now.duration_since(since) < Self::LAUNCH { return None; }
+        let steady = *steady;
+        *self = Self::Steady;
+        Some(steady)
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn launch_frames_hold_two_drawables_until_the_window_rests() {
+    let mut config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: wgpu::TextureFormat::Bgra8UnormSrgb,
+        width: 1960,
+        height: 1520,
+        present_mode: wgpu::PresentMode::AutoVsync,
+        desired_maximum_frame_latency: 2,
+        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+        view_formats: vec![],
+        color_space: Default::default(),
+    };
+    let t0 = Instant::now();
+    let mut launch = LaunchDrawables::cap(&mut config);
+    assert_eq!(config.desired_maximum_frame_latency, 1, "Metal makes latency + 1 drawables");
+    assert_eq!(launch.settle(false, t0), None);
+    assert_eq!(launch.settle(false, t0 + Duration::from_millis(500)), None, "frames back to back stay capped");
+    assert_eq!(launch.settle(true, t0 + Duration::from_millis(600)), Some(2), "resting restores the configured latency");
+    assert_eq!(launch.settle(true, t0 + Duration::from_millis(700)), None, "once");
+    assert_eq!(launch.settle(false, t0 + Duration::from_secs(5)), None);
+
+    // A window that never rests gets its third drawable after its first second on screen.
+    config.desired_maximum_frame_latency = 2;
+    let mut launch = LaunchDrawables::cap(&mut config);
+    let shown = t0 + Duration::from_secs(3);
+    assert_eq!(launch.settle(false, shown), None, "the second counts from the first frame on screen");
+    assert_eq!(launch.settle(false, shown + Duration::from_millis(999)), None);
+    assert_eq!(launch.settle(false, shown + LaunchDrawables::LAUNCH), Some(2));
+
+    // Nothing to restore when the configuration already asks for two.
+    config.desired_maximum_frame_latency = 1;
+    let mut launch = LaunchDrawables::cap(&mut config);
+    assert_eq!(config.desired_maximum_frame_latency, 1);
+    assert_eq!(launch.settle(true, t0), None);
+}
+
 /// Follows a blend switch (`Tx::set_srgb_blend`) on a configured surface: reconfigures it for
 /// `rt`'s mode at its size and alpha mode, and rebuilds `renderer` when its target format
 /// changes. Returns the new target format, or `None` when the surface can't be configured.
@@ -2580,6 +2655,8 @@ impl<S: 'static> Host<S> {
         let phys = window.inner_size();
         let (mut config, translucent) = surface_config(&surface, adapter, (phys.width, phys.height), self.rt.srgb_blend())
             .ok_or("the GPU adapter can't present to this window")?;
+        #[cfg(target_os = "macos")]
+        let launch_drawables = LaunchDrawables::cap(&mut config);
         if self.options.transparent {
             config.alpha_mode = translucent.unwrap_or_else(|| {
                 eprintln!("transparency unavailable for {}; using an opaque window", self.native_handle.key());
@@ -2662,6 +2739,8 @@ impl<S: 'static> Host<S> {
             fn_key,
             #[cfg(target_os = "macos")]
             prime,
+            #[cfg(target_os = "macos")]
+            launch_drawables,
         });
         if launcher { self.win.as_mut().unwrap().first_frame.prepare(); }
         self.apply_placement(event_loop);
@@ -3010,6 +3089,11 @@ impl<S: 'static> Host<S> {
         let next_tick: Option<Instant> = None;
         self.idle = !(animating || rt.has_pending_input() || rt.live_pending() || rt.window_frame.is_some() || self.frame_anim.is_some()
             || timer_wants_frame(rt, next_tick));
+        #[cfg(target_os = "macos")]
+        if !hidden && let Some(latency) = l.launch_drawables.settle(self.idle, now) {
+            l.config.desired_maximum_frame_latency = latency;
+            l.surface.configure(&gpu.device, &l.config);
+        }
         if !hidden && (!self.idle || (self.trace.is_some() && self.args.frames.is_some())) {
             // Without a running display link, macOS hands out drawables faster than the
             // display shows them, so a timer paces the next frame instead of the loop.

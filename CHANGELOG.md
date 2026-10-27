@@ -25,6 +25,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 Entries landed since the last fold are in `changelog/unreleased/`.
 
+- **A new window holds two drawables until it rests, on macOS.** A window's Metal surface now
+  starts at frame latency 1 (two drawables) and goes to its configured 2 (three) once the window
+  first goes idle on screen, or after its first second of frames there. A window that drew frames
+  back to back while coming on screen (an app animating at launch, or launch frames waiting on
+  the window server or on shader compiles) made CAMetalLayer allocate a third window-sized
+  drawable and keep it: about 12 MB more settled memory for a 980x760 window. Raising the count
+  allocates nothing until a frame needs it, so a window that animates later still gets its third
+  drawable then.
+
 - **macOS windows take drops of file promises and image data.** winit's window took only
   drags with file paths, so the screenshot thumbnail, Photos, Preview and browsers' images were
   refused. The content view is now the drag destination: a file promise is received into
@@ -99,6 +108,7 @@ Entries landed since the last fold are in `changelog/unreleased/`.
   one critically damped glide instead of a long capped climb. Rows without it are unchanged; a row
   that is also `streaming(true)` keeps the limits.
 
+||||||| parent of 20573c6c (Hold a new window at two drawables until it rests, on macOS)
 - **`Tx::open_url`, `El::mx`/`El::my` and `rune::prefs::Prefs`.** `Tx::open_url(url)` opens
   `http:`, `https:` and `mailto:` links in the system handler on macOS (`NSWorkspace`), Windows
   (`ShellExecuteW`) and Linux (`xdg-open`), as `web::open_url` already did; other schemes
