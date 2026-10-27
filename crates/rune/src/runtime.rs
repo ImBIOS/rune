@@ -6609,6 +6609,26 @@ impl<S: 'static> Runtime<S> {
             // rounded mask first so the text clip cannot move its corner centres.
             isolate |= open_cache || (rounded.is_some() && (n.text.as_ref().is_some_and(|t| t.truncate_fade || t.live.is_some())
                 || n.input.as_ref().is_some_and(|i| i.single_line)));
+            // A soft clip fades each primitive on its own, so where one paints over another (an
+            // image over its placeholder fill, a label over its bubble) the one beneath shows
+            // through the fade, and the stack brightens or darkens towards the edge. A stack that
+            // reaches into a soft edge composites as one layer, which takes the fade once.
+            if !isolate && visible && effective_opacity > 0.001 && fade.iter().any(|&f| f > 0.0)
+                && in_fade([r[0], r[1], r[0] + w, r[1] + h], clip, fade, fade_origin)
+            {
+                let v = &n.vis;
+                let paints = [
+                    v.fill.a > 0.0,
+                    v.border_width > 0.0 && (v.border.a > 0.0 || v.border_bottom.is_some()),
+                    v.gradient.is_some() || v.radial.is_some() || v.surface.is_some(),
+                    v.shape.is_some(),
+                    v.pixels.is_some(),
+                    !v.shadows.is_empty(),
+                    n.text.is_some(),
+                ].into_iter().filter(|&b| b).count();
+                let parent = next.is_some_and(|j| self.nodes[j].parent == Some(i));
+                isolate = paints >= 2 || (paints == 1 && parent);
+            }
             let o = if isolate { 1.0 } else { (own * pinh.paint_opacity).clamp(0.0, 1.0) };
             if !skip_paint && isolate {
                 let start_idx = self.instances.len();
@@ -8600,6 +8620,15 @@ fn inherit_fade(width: &mut [f32; 4], origin: &mut [f32; 4], rect: [f32; 4], own
             origin[edge] = rect[edge];
         }
     }
+}
+
+/// Whether `r` (x0, y0, x1, y1) reaches into a soft edge of `clip`: one fading over `width`
+/// from `origin`, edge by edge (left, top, right, bottom).
+fn in_fade(r: [f32; 4], clip: [f32; 4], width: [f32; 4], origin: [f32; 4]) -> bool {
+    (width[0] > 0.0 && r[0] < origin[0] + width[0] && r[2] > clip[0])
+        || (width[1] > 0.0 && r[1] < origin[1] + width[1] && r[3] > clip[1])
+        || (width[2] > 0.0 && r[2] > origin[2] - width[2] && r[0] < clip[2])
+        || (width[3] > 0.0 && r[3] > origin[3] - width[3] && r[1] < clip[3])
 }
 
 /// `rect` (x, y, w, h) magnified `k` times about `origin`.

@@ -348,6 +348,42 @@ mod tests {
     }
 
     #[test]
+    fn an_image_over_its_fill_fades_into_a_soft_edge_like_a_flat_fill() {
+        use crate::{Cx, El, Env, Runtime, ScrollSpec, col, el, row, image::ImageCache};
+        use crate::color::hex;
+        use crate::render::{Gpu, OFFSCREEN_FORMAT, Offscreen, Renderer};
+        // A dark image on a lighter placeholder with a border, as a chat thumbnail, beside a
+        // flat fill of the image's colour, under a scroll's 16 pt top fade.
+        fn view(s: &Pixels, _: &mut Cx<Pixels>) -> El {
+            let thumb = el().size(40.0, 60.0).radius(8.0).fill(hex("#5a5a5a").unwrap())
+                .border(0.5, hex("#ffffff33").unwrap()).pixels_fit(s, crate::SurfaceFit::Fill);
+            el().size(100.0, 60.0).fill(hex("#141414").unwrap()).child(
+                col().w_full().h_full().scroll(ScrollSpec { stick_bottom: false }).clip_fade(0.0, 16.0, 0.0, 8.0)
+                    .child(row().gap(10.0).child(thumb).child(el().size(40.0, 60.0).fill(hex("#282828").unwrap())))
+                    .child(el().size(4.0, 200.0)))
+        }
+        let cache = ImageCache::new(Arc::new(|| {}));
+        let image = cache.rgba(80, 120, [40u8, 40, 40, 255].repeat(80 * 120));
+        image.wait().unwrap();
+        let gpu = Gpu::headless();
+        let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+        let target = Offscreen::new(&gpu.device, 100, 60);
+        let mut rt = Runtime::new(image.pixels().clone(), view, (100.0, 60.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (100, 60));
+        renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        renderer.draw(&mut enc, &target.view, [0.0, 0.0, 0.0, 1.0]);
+        target.copy(&mut enc);
+        gpu.queue.submit([enc.finish()]);
+        let out = target.read(&gpu.device);
+        let px = |x: usize, y: usize| out[(y * 100 + x) * 4];
+        let (image, flat): (Vec<u8>, Vec<u8>) = (0..24).map(|y| (px(20, y), px(70, y))).unzip();
+        assert!(flat[0] < flat[20], "the band fades: {flat:?}");
+        assert!(image.iter().zip(&flat).all(|(a, b)| a.abs_diff(*b) <= 1), "the image fades like the fill\nimage {image:?}\nflat  {flat:?}");
+    }
+
+    #[test]
     fn gpu_static_mips_alpha_clip_and_page_order_match_pixels() {
         use crate::{Cx, El, Env, Runtime, el, image::ImageCache};
         use crate::render::{Gpu, OFFSCREEN_FORMAT, Offscreen, Renderer};

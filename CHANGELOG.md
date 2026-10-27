@@ -5,7 +5,16 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Stacked paint fades into a soft clip as one.** Under `clip_fade` (or a feathered mask), each
+  primitive faded on its own, so an image over its placeholder fill, or a label over its bubble,
+  let the paint beneath show through the fade: a dark image on a lighter fill brightened towards
+  the edge instead of fading to the background. An element that paints over its own paint (two
+  of fill, border, gradient, shape, pixels, shadows, text; or one of them under children) now
+  composites as one layer while it reaches into a soft edge, and takes the fade once. Elements
+  clear of the fade edges draw as before.
+
 - **`examples/opencode` left the repository** (it moved out). Its golden check is now `crates/rune-kit/tests/markdown_fixture.rs`: eight headless Markdown trees (mermaid, code, tables, task lists, narrow wrapping, streaming) in both OpenCode-theme appearances, compared with `crates/rune-kit/tests/golden/*.json`; accept intended changes with `RUNE_BLESS=1`. `scripts/check-ui.py`, `bench-build.py`, `bench-gpu-springs.py` and `text-bench.py` went with it, and `rune-dev`, `bench-ui.py`, `bench-startup.py`, `snap-ui.py`, `text-goldens.py` and the motion audit no longer list it.
+
 - **`El::arrives_whole()`: a growth-stack row whose content arrives complete glides on the growth
   spring alone.** Such a row (a sent message, a finished reply loaded at once) skips the speed
   limits that pace streaming text, so a large insert, and a pinned viewport following it, moves in
