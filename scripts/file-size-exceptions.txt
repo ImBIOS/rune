@@ -5,10 +5,10 @@ crates/rune-kit/src/markdown.rs 1857
 crates/rune-kit/src/syntax/scan.rs 1694
 crates/rune-light/examples/reel.rs 1899
 crates/rune/src/edit.rs 2780
-crates/rune/src/el.rs 3949
+crates/rune/src/el.rs 3947
 crates/rune/src/overlay.rs 1983
-crates/rune/src/runtime.rs 8396
+crates/rune/src/runtime.rs 8388
 crates/rune/src/text.rs 3151
-crates/rune/src/tooling.rs 1994
-crates/rune/src/window.rs 3561
+crates/rune/src/tooling.rs 1993
+crates/rune/src/window.rs 3533
 examples/kit-gallery/src/stories.rs 1618
