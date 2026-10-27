@@ -49,6 +49,7 @@ pub struct App<S: 'static> {
     pub(crate) on_close: Option<fn(&mut S, &mut Tx)>,
     pub(crate) on_focus: Option<fn(&mut S, bool, &mut Tx)>,
     pub(crate) on_reopen: Option<fn(&mut S, bool, &mut Tx) -> bool>,
+    pub(crate) on_open_url: Option<crate::open_url_in::OnOpenUrl<S>>,
     pub(crate) shared: Arc<Shared<S>>,
     pub(crate) overlays: Vec<Box<dyn crate::overlay::PendingOverlay>>,
     pub(crate) windows: Vec<crate::AnyWindowSpec>,
@@ -82,6 +83,7 @@ impl<S: 'static> App<S> {
             on_close: None,
             on_focus: None,
             on_reopen: None,
+            on_open_url: None,
             shared,
             overlays: Vec::new(),
             windows: Vec::new(),
@@ -279,6 +281,21 @@ impl<S: 'static> App<S> {
         self
     }
 
+    /// macOS: runs on the main thread with each link the system opens with this app
+    /// (`myapp://...`, from `open`, a browser or another app), including the one that launched
+    /// it: links that arrive before the app has started (its first window open, unless it's
+    /// windowless) wait for that, then run in order, each as an `AppHandle::update`. The string is passed through as received; it comes from
+    /// outside the app, so parse and validate it before acting on it. Bringing a window forward
+    /// is up to the app (`AppHandle::open` from a handle the hook's state keeps). The app's bundle must declare the scheme
+    /// (`CFBundleURLTypes`, see the README). One app per process receives links, the first that
+    /// listens; with `run_windows` it listens only once its window starts, which misses the link
+    /// that launched it. Never called on other platforms (Windows and Linux pass links to a new
+    /// process as arguments).
+    pub fn on_open_url(mut self, f: fn(&mut S, &str, &mut Tx)) -> Self {
+        self.on_open_url = Some(f);
+        self
+    }
+
     /// Runs on the UI thread each time the native window is created (again after a Wayland
     /// close or a GPU release): set its icon or native styles through
     /// `WindowHandle::with_raw_handle`.
@@ -360,6 +377,8 @@ impl<S: 'static> App<S> {
             crate::render::discard_prewarm();
             crate::tooling::try_headless(self, args)
         } else {
+            // Before the event loop, so the link that launched the app arrives too.
+            crate::open_url_in::listen(&self);
             crate::window::run(self, args)
         }
     }

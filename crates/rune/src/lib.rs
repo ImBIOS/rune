@@ -124,6 +124,7 @@ mod frame_profile;
 pub use frame_profile::{PHASES, take_frame_phases, thread_cpu_ms};
 pub mod file_dialog;
 mod open_url;
+mod open_url_in;
 pub mod prefs;
 pub use open_url::OpenUrlError;
 pub mod text;

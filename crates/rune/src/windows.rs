@@ -231,6 +231,8 @@ impl<S> WindowSpec<S> {
     pub fn playground(mut self, playground: crate::Playground<S>) -> Self { self.app = self.app.playground(playground); self }
     /// Runs when the app is reopened, like `App::on_reopen`.
     pub fn on_reopen(mut self, f: fn(&mut S, bool, &mut crate::Tx) -> bool) -> Self { self.app = self.app.on_reopen(f); self }
+    /// Receives links opened with the app, like `App::on_open_url`.
+    pub fn on_open_url(mut self, f: fn(&mut S, &str, &mut crate::Tx)) -> Self { self.app = self.app.on_open_url(f); self }
     /// Send `Key::Modifier` presses and releases to this window, like `App::modifier_keys`.
     pub fn modifier_keys(mut self) -> Self { self.app = self.app.modifier_keys(); self }
     /// Tab visits every focusable control in this window, like `App::tab_visits_controls`.
@@ -330,6 +332,7 @@ impl<S: 'static> ErasedWindow for Erased<S> {
             inherited.scene = None;
             inherited.size = None;
         }
+        crate::open_url_in::listen(&self.spec.app);
         crate::window::start(self.spec, self.handle, !self.secondary, inherited, cx)
     }
 }

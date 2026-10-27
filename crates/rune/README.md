@@ -526,6 +526,35 @@ app.run();
   lacks it. An app that installs its own reopen Apple event handler replaces AppKit's, which is
   what asks the delegate, so Rune's reopening never runs; use `on_reopen` instead. Other platforms
   have no reopen, so the hook never runs there. Headless scripts send it with `{"reopen": true}`.
+- Links opened with the app (macOS): `App::on_open_url(|s, url: &str, tx| ..)` runs on the main
+  thread for each `myapp://...` link the system hands the app (`open`, a browser, another app),
+  including the one that launched it. winit 0.30 doesn't forward them, so `App::run` installs a
+  get-URL Apple event handler before the event loop starts, only when the hook is set. Links that
+  arrive before the app has started (its first window open, unless it's windowless) wait for that
+  and then run in order; later ones wake the loop. Each runs as an `AppHandle::update`, so its changes commit and redraw. One app per
+  process receives links, the first that listens; under `run_windows` it listens when its
+  window starts, after launch, so the launching link is missed. The string is passed through
+  untouched: it comes from anyone who can run `open`, so parse and validate it before acting.
+  Rune doesn't bring a window forward; keep an `AppHandle` and call `open()` if the app should.
+  Rune doesn't bundle apps, so the app's `Info.plist` declares the scheme:
+
+  ```xml
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>com.example.myapp</string>
+      <key>CFBundleURLSchemes</key>
+      <array><string>myapp</string></array>
+    </dict>
+  </array>
+  ```
+
+  Launch Services learns the scheme when the bundle is opened or registered (`lsregister -f
+  MyApp.app`); then `open 'myapp://x'` launches or reaches the app. A bare `cargo run` binary has
+  no bundle and gets no links. iOS isn't wired yet (winit owns the scene delegate), and Windows
+  and Linux pass a link to a new process as a launch argument, so the hook never runs there;
+  read it from the arguments, with your own single-instance forwarding if you need one.
 - Edge overlays (HUDs): see `App::overlay` below.
 
 ### Launching fast
