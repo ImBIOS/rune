@@ -290,6 +290,8 @@ pub struct Scene {
     order: Vec<u32>,
     order_dirty: bool,
     out: Vec<Presented>,
+    /// What [`Scene::present`] presented after the motion trace wrote its frame, for the next.
+    late: Vec<Presented>,
     exited: Vec<NodeId>,
     exited_seen: usize,
     to_remove: Vec<u32>,
@@ -316,6 +318,7 @@ impl Scene {
             order: Vec::new(),
             order_dirty: false,
             out: Vec::new(),
+            late: Vec::new(),
             exited: Vec::new(),
             exited_seen: 0,
             to_remove: Vec::new(),
@@ -937,6 +940,43 @@ impl Scene {
             self.rebuild_order();
         }
         self.out.clear();
+        // Written first, so this frame's own values for the same nodes win.
+        self.out.append(&mut self.late);
+        self.present_dirty();
+        for k in 0..self.to_remove.len() {
+            let i = self.to_remove[k] as usize;
+            if self.nodes[i].alive {
+                self.remove_now(i);
+            }
+        }
+        self.exited_seen = self.exited.len();
+        // A node still travelling waits on an active track of its own or an ancestor's, so this
+        // covers it, and a frozen one doesn't keep the frames coming.
+        let animating = self.store.running();
+        if let Some(trace) = self.trace.as_mut() {
+            trace.frame(self.store.now(), &self.out, &self.exited, self.store.events(), &self.intents);
+            self.intents.clear();
+        }
+        FrameOutput { changed: &self.out, exited: &self.exited, events: self.store.events(), animating }
+    }
+
+    /// Presents what was set or animated since [`frame`](Self::frame), without stepping time,
+    /// so a value worked out from something that frame moved afterwards (a scroll offset)
+    /// shows in the same frame. The motion trace, already written for that frame, records them
+    /// with the next.
+    pub fn present(&mut self) {
+        if self.order_dirty {
+            self.rebuild_order();
+        }
+        let from = self.out.len();
+        self.present_dirty();
+        if self.trace.is_some() {
+            self.late.extend_from_slice(&self.out[from..]);
+        }
+    }
+
+    /// Recomputes the presented values of dirty nodes and their subtrees, into `out`.
+    fn present_dirty(&mut self) {
         let scale = self.store.pixel_scale();
         let reduced = self.store.reduced_motion();
         for k in 0..self.order.len() {
@@ -957,21 +997,6 @@ impl Scene {
             let i = self.order[k] as usize;
             self.nodes[i].dirty = false;
         }
-        for k in 0..self.to_remove.len() {
-            let i = self.to_remove[k] as usize;
-            if self.nodes[i].alive {
-                self.remove_now(i);
-            }
-        }
-        self.exited_seen = self.exited.len();
-        // A node still travelling waits on an active track of its own or an ancestor's, so this
-        // covers it, and a frozen one doesn't keep the frames coming.
-        let animating = self.store.running();
-        if let Some(trace) = self.trace.as_mut() {
-            trace.frame(self.store.now(), &self.out, &self.exited, self.store.events(), &self.intents);
-            self.intents.clear();
-        }
-        FrameOutput { changed: &self.out, exited: &self.exited, events: self.store.events(), animating }
     }
 
     /// An ancestor still moving or changing how it draws its subtree: a node ending screen travel

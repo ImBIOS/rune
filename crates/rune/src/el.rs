@@ -1362,6 +1362,7 @@ pub(crate) type AtBottomFn = Rc<dyn Fn(crate::states::States<'_>, bool)>;
 pub(crate) type VisibleRowsFn = Rc<dyn Fn(crate::states::States<'_>, std::ops::Range<usize>) -> bool>;
 pub(crate) type LayoutFn = Rc<dyn Fn(crate::states::States<'_>, [f32; 4])>;
 pub(crate) type DrawnLayoutFn = Rc<dyn Fn(crate::states::States<'_>, [f32; 4], &mut Tx)>;
+pub(crate) type ScrollOffsetFn = Rc<dyn Fn(crate::ScrollPos)>;
 pub(crate) type WindowFocusFn = Rc<dyn Fn(crate::states::States<'_>, bool, &mut Tx)>;
 
 #[derive(Clone)]
@@ -1420,6 +1421,7 @@ pub struct El {
     pub(crate) on_layout: Option<LayoutFn>,
     pub(crate) on_screen_layout: Option<LayoutFn>,
     pub(crate) on_drawn_layout: Option<DrawnLayoutFn>,
+    pub(crate) on_scroll_offset: Option<ScrollOffsetFn>,
     pub(crate) sticky: Option<Box<Sticky>>,
     pub(crate) scroll_edges: ScrollEdges,
     pub(crate) growth: Option<GrowthSpec>,
@@ -1508,6 +1510,7 @@ fn base(dir: FlexDirection) -> El {
         on_layout: None,
         on_screen_layout: None,
         on_drawn_layout: None,
+        on_scroll_offset: None,
         sticky: None,
         scroll_edges: ScrollEdges::default(),
         growth: None,
@@ -3509,56 +3512,6 @@ impl El {
     /// the edge it scrolls to, like CSS `scroll-padding`. The content's own ends still stop flush.
     pub fn scroll_margin(mut self, pts: f32) -> Self {
         self.scroll_edges.margin = pts.max(0.0);
-        self
-    }
-    /// Called with this element's laid-out rect `[x, y, w, h]` in window points, after scrolling
-    /// (as [`Cx::layout`](crate::Cx::layout) reads it): once after its first layout, then when it
-    /// moves or resizes by more than half a point. Never per animation frame: the rect is where
-    /// layout puts the element, not where its spring is on the way there.
-    pub fn on_layout<S: 'static>(mut self, f: impl Fn(&mut S, [f32; 4]) + 'static) -> Self {
-        self.on_layout = Some(Rc::new(move |s, r| f(downcast::<S>(s), r)));
-        self
-    }
-    /// [`El::on_layout`] in global screen points: `[x, y, w, h]` from the top-left of the
-    /// primary display, y down. That's the space of an overlay's
-    /// [`OverlayPlacement::Rect`](crate::OverlayPlacement) on
-    /// [`DisplayTarget::Primary`](crate::DisplayTarget), so an overlay can open over the
-    /// element. It also runs when the window moves without a relayout. On macOS points are one
-    /// space across displays of any scale. Elsewhere the window's desktop pixel position is
-    /// divided by its own scale, so it's exact on the primary display and wherever displays
-    /// share a scale; on Wayland, which hides window positions, the origin reads `(0, 0)`.
-    /// Headless runs place windows on the script's virtual desktop.
-    pub fn on_screen_layout<S: 'static>(mut self, f: impl Fn(&mut S, [f32; 4]) + 'static) -> Self {
-        self.on_screen_layout = Some(Rc::new(move |s, r| f(downcast::<S>(s), r)));
-        self
-    }
-    /// [`El::on_layout`] as drawn: `[x, y, w, h]` in window points where this frame put the
-    /// element, after scrolling and its ancestors' [`El::live_offset`], [`El::live_scale`],
-    /// [`El::live_rect`] and [`El::scale`], so an element on a zoomed canvas reports where it
-    /// shows (the rect hit tests use, and [`ElementInfo::rect`](crate::ElementInfo)). It runs
-    /// once after the element is first drawn, then when that rect moves by more than half a
-    /// point, including on every frame a live value moves it (a camera pan, with no commit). A
-    /// spring moving it, its own or an ancestor's, reports where it comes to rest, as
-    /// `on_layout` does. Its handler runs on the next frame. Keep it to the few elements
-    /// something follows (a selection a toolbar floats over), not every node on a canvas: each
-    /// report is a state change, so the view runs again, unless the handler says
-    /// [`Tx::live_only`] (see [`El::on_drawn_layout_tx`]).
-    pub fn on_drawn_layout<S: 'static>(mut self, f: impl Fn(&mut S, [f32; 4]) + 'static) -> Self {
-        self.on_drawn_layout = Some(Rc::new(move |s, r, _| f(downcast::<S>(s), r)));
-        self
-    }
-    /// [`El::on_drawn_layout`] with a [`Tx`]. A toolbar that floats over a selection by its own
-    /// [`El::live_offset`] follows a camera pan with no view re-run at all: the handler sets
-    /// the toolbar's live offset and says [`Tx::live_only`].
-    ///
-    /// ```ignore
-    /// .on_drawn_layout_tx(|s: &mut Canvas, [x, y, w, _], tx| {
-    ///     s.toolbar_at.set([x + w / 2.0 - TOOLBAR_W / 2.0, y - TOOLBAR_H - 8.0]);
-    ///     tx.live_only();
-    /// })
-    /// ```
-    pub fn on_drawn_layout_tx<S: 'static>(mut self, f: impl Fn(&mut S, [f32; 4], &mut Tx) + 'static) -> Self {
-        self.on_drawn_layout = Some(Rc::new(move |s, r, tx| f(downcast::<S>(s), r, tx)));
         self
     }
     /// Hold this element `inset` points below the top of the nearest vertical scroll viewport

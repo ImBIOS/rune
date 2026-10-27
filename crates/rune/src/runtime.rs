@@ -116,6 +116,8 @@ mod scroll_offset;
 mod sticky;
 #[path = "runtime/live_latch.rs"]
 mod live_latch;
+#[path = "runtime/scroll_watch.rs"]
+mod scroll_watch;
 #[path = "gesture_dispatch.rs"]
 mod gesture_dispatch;
 #[path = "runtime/flights.rs"]
@@ -407,6 +409,7 @@ pub(crate) struct Node {
     on_layout: Option<crate::el::LayoutFn>,
     on_screen_layout: Option<crate::el::LayoutFn>,
     on_drawn_layout: Option<crate::el::DrawnLayoutFn>,
+    on_scroll_offset: Option<crate::el::ScrollOffsetFn>,
     /// `El::sticky_top`, `El::sticky_bottom` and `El::stuck_shadow`.
     sticky: Option<Box<crate::el::Sticky>>,
     scroll_edges: crate::el::ScrollEdges,
@@ -909,6 +912,8 @@ struct ScrollState {
     slack: scroll_bottom::Slack,
     /// The horizontal axis of `El::scroll_x` and `El::scroll_xy`; all zero on a vertical one.
     x: AxisScroll,
+    /// What `El::on_scroll_offset` was last told (`runtime/scroll_watch.rs`).
+    told: Option<crate::ScrollPos>,
 }
 
 /// A scroll viewport's horizontal offset, momentum velocity and limit (points).
@@ -2424,6 +2429,11 @@ impl<S: 'static> Runtime<S> {
         animating |= source(self.step_scroll(step as f32), AnimSource::SCROLL);
         for stack in self.stacks.values_mut() { stack.grown = 0.0; }
         animating |= source(self.reveals_active(), AnimSource::REVEAL);
+        // Values set from `on_scroll_offset` show in the frame that scrolled.
+        if self.tell_scroll_offsets() {
+            animating |= self.latch_live(self.take_live_wake());
+            self.scene.present();
+        }
         animating |= self.build();
         // Compensate drawn motion, leaving unrelated layout and growth springs alone.
         for _ in 0..3 {
@@ -4419,6 +4429,7 @@ impl<S: 'static> Runtime<S> {
                     held: false,
                     slack: Default::default(),
                     x: AxisScroll::default(),
+                    told: None,
                 });
                 if concealed[i] {
                     e.offset = 0.0;
