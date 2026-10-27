@@ -2999,7 +2999,7 @@ impl<S: 'static> Runtime<S> {
         }
         if self.focus_key(ev, shown, one) { return true; }
         let input_handles = match &ev.key {
-            crate::edit::Key::Function(_) | crate::edit::Key::Tab | crate::edit::Key::PageUp | crate::edit::Key::PageDown => false,
+            crate::edit::Key::Function(_) | crate::edit::Key::ContextMenu | crate::edit::Key::Tab | crate::edit::Key::PageUp | crate::edit::Key::PageDown => false,
             crate::edit::Key::Command(c) => {
                 matches!(c, 'a' | 'c' | 'x' | 'z')
                     || (matches!(c, 'b' | 'i' | 'u') && self.focused_input().is_some_and(|i| i.edit.format_chord(ev).is_some()))
@@ -3033,6 +3033,7 @@ impl<S: 'static> Runtime<S> {
         // Selected text takes the Cmd+A and Cmd+C nothing else took, as AppKit's responder chain
         // gives a key equivalent to the menu bar before the text view: an app's shortcut wins.
         if !repeat && self.selection_key(ev, one) { return true; }
+        if !repeat && self.context_menu_key(ev, one) { return true; }
         self.page_scroll(ev) || self.playground_key(ev, one)
     }
 

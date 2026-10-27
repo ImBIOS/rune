@@ -146,6 +146,7 @@ fn key_event(state: &xkbcommon::xkb::State, key: u32) -> Option<crate::KeyEvent>
         0xff50 => crate::Key::Home, 0xff57 => crate::Key::End, 0xff55 => crate::Key::PageUp, 0xff56 => crate::Key::PageDown,
         0xff51 => crate::Key::Left, 0xff52 => crate::Key::Up, 0xff53 => crate::Key::Right, 0xff54 => crate::Key::Down,
         0xffbe..=0xffd5 => crate::Key::Function((symbol - 0xffbe + 1) as u8),
+        0xff67 => crate::Key::ContextMenu,
         _ => {
             let text = state.key_get_utf8(code);
             if mods.cmd { crate::Key::Command(char::from_u32(xkb::keysym_to_utf32(state.key_get_one_sym(code)))?.to_ascii_lowercase()) }

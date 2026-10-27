@@ -1,4 +1,4 @@
-use rune::{Cursor, Cx, El, Env, Runtime, col};
+use rune::{Cursor, Cx, El, Env, Key, KeyEvent, Mods, Runtime, col};
 use rune_kit::{Kit, Markdown};
 
 #[derive(Default)]
@@ -44,4 +44,18 @@ fn a_right_click_on_a_link_opens_its_menu_and_elsewhere_the_rows() {
         assert_eq!(rt.state.row_menus, 1, "plain text goes to the row (selectable {selectable})");
         assert_eq!(rt.state.link_menus.len(), 1);
     }
+}
+
+#[test]
+fn the_menu_key_on_a_focused_link_opens_its_menu_at_its_bottom_left() {
+    let mut rt = Runtime::new(S::default(), view, (480.0, 200.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+    tick(&mut rt);
+    let link = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("https://x.dev/a")).expect("the link");
+    assert!(link.focused);
+    rt.key(KeyEvent { key: Key::ContextMenu, mods: Mods::default() });
+    tick(&mut rt);
+    assert_eq!(rt.state.link_menus, [("https://x.dev/a".to_owned(), link.rect[0], link.rect[1] + link.rect[3])]);
+    assert_eq!(rt.state.row_menus, 0);
 }

@@ -16,6 +16,7 @@ pub(crate) fn key_named(name: &str) -> Option<Key> {
         "PageDown" => Key::PageDown,
         "Escape" => Key::Escape,
         "Tab" => Key::Tab,
+        "ContextMenu" => Key::ContextMenu,
         f if f.len() > 1 && f.starts_with('F') && f[1..].parse::<u8>().is_ok_and(|n| (1..=24).contains(&n)) => {
             Key::Function(f[1..].parse().unwrap())
         }

@@ -2217,7 +2217,7 @@ impl TextEdit {
                 }
                 _ => {}
             },
-            Key::Function(_) | Key::Modifier { .. } => {}
+            Key::Function(_) | Key::ContextMenu | Key::Modifier { .. } => {}
         }
         out
     }

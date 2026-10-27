@@ -144,6 +144,7 @@ fn key_label(ev: &KeyEvent) -> (String, bool) {
         Key::Escape => "⎋".into(),
         Key::Tab => "⇥".into(),
         Key::Function(n) => format!("F{n}"),
+        Key::ContextMenu => "≣".into(),
         // Its own flag is already in `mods`.
         Key::Modifier { modifier: crate::Modifier::Fn, .. } => "fn".into(),
         Key::Modifier { .. } => return (mod_glyphs(m), false),

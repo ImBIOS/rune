@@ -41,6 +41,9 @@ pub enum Key {
     Command(char),
     /// A function key, F1 through F24. Text fields ignore it; apps can bind it.
     Function(u8),
+    /// The Menu (Application) key. Unclaimed, it opens the focused element's context menu, as
+    /// Shift+F10 does: see [`El::on_secondary_press`](crate::El::on_secondary_press).
+    ContextMenu,
     /// A modifier key going down (`pressed`) or up on its own, sent only where the app opts in
     /// with `App::modifier_keys` (or `Runtime::set_modifier_keys`). `mods` holds the modifiers
     /// after the change, as AppKit's flagsChanged does: Shift's press has `shift` set and its

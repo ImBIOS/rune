@@ -1,4 +1,5 @@
-//! The secondary gesture (right-click, macOS control-click): which element's menu it opens.
+//! The secondary gesture (right-click, macOS control-click, the Menu key and Shift+F10):
+//! which element's menu it opens.
 use super::*;
 
 impl<S: 'static> Runtime<S> {
@@ -43,5 +44,36 @@ impl<S: 'static> Runtime<S> {
             }
         }
         self.leave_after_release();
+    }
+
+    /// The Menu key, or Shift+F10, that nothing before it took: the focused element's context
+    /// menu. That is its focused link's `on_link_secondary`, else its own or its nearest
+    /// ancestor's `on_secondary_press`, at the bottom-left of the focused link or element, where
+    /// a menu opens below it as AppKit's and Windows' keyboard menus do.
+    pub(super) fn context_menu_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        let m = ev.mods;
+        let plain = !m.cmd && !m.ctrl && !m.alt && !m.logo;
+        let menu_key = match ev.key {
+            crate::Key::ContextMenu => plain,
+            crate::Key::Function(10) => plain && m.shift,
+            _ => false,
+        };
+        let Some(focused) = self.focused_index().filter(|&i| menu_key && !self.subtree_exiting(i)) else { return false };
+        if self.focused_link_menu(focused, tx) { return true; }
+        let [x, _, _, y] = self.drawn_box(focused);
+        let mut index = focused;
+        loop {
+            let n = &self.nodes[index];
+            if !self.allowed(index) { return false; }
+            if let Some(f) = n.on_secondary_press.clone() {
+                let path = n.path.clone();
+                let point = self.pointer_event(index, x, y);
+                self.events.push(format!("secondary press {path}"));
+                f(states!(self), point, tx);
+                return true;
+            }
+            let Some(p) = n.parent else { return false };
+            index = p;
+        }
     }
 }

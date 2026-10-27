@@ -291,6 +291,17 @@ impl<S: 'static> Runtime<S> {
         self.nodes[i].text.as_ref()?.links.get(k).map(|l| l.id.clone())
     }
 
+    /// The Menu key on focused node `i`'s focused link: its `on_link_secondary`, at the
+    /// bottom-left of its first line box.
+    pub(super) fn focused_link_menu(&mut self, i: usize, tx: &mut Tx) -> bool {
+        let Some(k) = self.links.focus.filter(|&k| k < self.link_count(i)) else { return false };
+        if self.nodes[i].text.as_ref().is_none_or(|t| t.on_link_secondary.is_none()) { return false; }
+        let Some((_, r)) = self.link_boxes(i, self.drawn_box(i)).into_iter().find(|(j, _)| *j == k) else { return false };
+        let path = self.nodes[i].path.clone();
+        let point = self.pointer_event(i, r[0], r[3]);
+        self.secondary_press_link(&path, k, point, tx)
+    }
+
     /// Enter or Space on a focused link presses it.
     pub(super) fn link_key(&mut self, i: usize, tx: &mut Tx) -> bool {
         let Some(k) = self.links.focus.filter(|&k| k < self.link_count(i)) else { return false };

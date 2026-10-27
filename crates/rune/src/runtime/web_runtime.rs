@@ -399,6 +399,7 @@ impl<S: 'static> Runtime<S> {
             "Home" => crate::Key::Home, "End" => crate::Key::End,
             "PageUp" => crate::Key::PageUp, "PageDown" => crate::Key::PageDown,
             "Backspace" => crate::Key::Backspace, "Delete" => crate::Key::Delete,
+            "ContextMenu" => crate::Key::ContextMenu,
             name if name.chars().count() == 1 && mods.cmd => crate::Key::Command(name.chars().next().unwrap().to_ascii_lowercase()),
             _ => return false,
         };
