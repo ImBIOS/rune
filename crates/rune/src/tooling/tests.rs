@@ -335,6 +335,28 @@ fn fit_content_height_follows_the_content() {
 }
 
 #[test]
+fn snapshots_leave_the_playground_out_unless_asked() {
+    let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("rune-playground-snap-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    fn view(n: &u32, _: &mut Cx<u32>) -> crate::El {
+        crate::col().w_full().h_full().padding(8.0).child(crate::text(format!("count {n}")))
+    }
+    let render = |name: &str, playground: bool, open: Option<Option<String>>| {
+        let spec = AppSpec::new("snap", (240.0, 160.0), || 3, view);
+        let mut app = crate::App::new(spec);
+        if playground { app = app.playground(crate::Playground::new().enabled(true).bar(true)); }
+        let snap = dir.join(format!("{name}.png"));
+        headless(app, Args { snap: Some(snap.clone()), scale: Some(2.0), playground: open, ..Default::default() });
+        std::fs::read(&snap).unwrap()
+    };
+    let plain = render("plain", false, None);
+    assert!(plain == render("with", true, None), "a playground with a bar snapshots as the app alone");
+    assert!(plain != render("open", true, Some(None)), "--playground shows it");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn apps_read_the_headless_run_from_init() {
     let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!("rune-run-{}", std::process::id()));

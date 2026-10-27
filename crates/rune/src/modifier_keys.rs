@@ -178,13 +178,13 @@ impl<S: 'static> Runtime<S> {
         if !self.modifier_keys.enabled { return false; }
         one.key_repeat = false;
         let app_first = self.focused.is_none();
-        if app_first && let Some(f) = self.on_key && Tx::took(app_call!(f, &mut self.state, ev, one), one) { return true; }
+        if app_first && let Some(f) = self.on_key && Tx::took(self.app_key(f, ev, one), one) { return true; }
         if let Some(f) = self.focused_input().and_then(|input| input.key.clone())
-            && Tx::took(f(handler_state(&mut self.state), ev, one), one)
+            && Tx::took(f(states!(self), ev, one), one)
         {
             return true;
         }
-        if !app_first && let Some(f) = self.on_key && Tx::took(app_call!(f, &mut self.state, ev, one), one) {
+        if !app_first && let Some(f) = self.on_key && Tx::took(self.app_key(f, ev, one), one) {
             self.events.push(format!("key {:?}", ev.key));
             return true;
         }

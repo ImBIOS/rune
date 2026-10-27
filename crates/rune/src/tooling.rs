@@ -200,6 +200,8 @@ pub struct Args {
     pub(crate) pointer: bool,
     /// `--desktop BACKDROP`: every visible window composited at its frame over this image.
     pub(crate) desktop: Option<PathBuf>,
+    /// `--playground [NAME]`: open the playground at launch, at the story named.
+    pub(crate) playground: Option<Option<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -245,6 +247,11 @@ impl Args {
                 "--hot" | "--snap-on-patch" | "--hot-control" => die("live editing requires the rune/hot feature; use scripts/rune-dev"),
                 "--snap" => a.snap = Some(val(&mut i).into()),
                 "--scene" => a.scene = Some(val(&mut i)),
+                "--playground" => {
+                    let name = argv.get(i + 1).filter(|v| !v.starts_with("--")).cloned();
+                    if name.is_some() { i += 1; }
+                    a.playground = Some(name);
+                }
                 "--at" => {
                     let v = val(&mut i);
                     a.at_mark = mark_time(&v);
@@ -327,6 +334,7 @@ impl Args {
 const HELP: &str = "usage: <app> [window]
   --snap out.png        render offscreen (no window) at --at seconds
   --scene NAME          start from a named scene (--list-scenes)
+  --playground [NAME]   open App::playground at launch, at a story; headless too
   --at SECONDS          virtual time of the snapshot/tree (default: end of frames or script);
                         mark:NAME or mark:NAME+0.5 for a script mark's time (also --start)
   --size WxH            viewport in points      --scale N   device scale (default 2)
@@ -1443,12 +1451,14 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let app_options = app.window_options.clone();
     let modifier_keys = app.modifier_keys;
     let tab_visits_controls = app.tab_visits_controls;
+    let playground = app.playground.take();
     let (spec, state, shared) = app.into_parts(args.scene.as_deref());
     let shortcuts = crate::shortcuts::Guard::attach(&shared, std::sync::Arc::new(|| {}), true, false);
     let mut menus = crate::native_menu::Guard::attach(&shared, true);
     let dark = args.theme.as_deref() != Some("light");
     let state_ms = launched.elapsed().as_secs_f64() * 1000.0;
     let mut rt = runtime_for(&spec, state, size, Env::new(dark, scale), std::sync::Arc::new(|| {}));
+    crate::playground::attach(&mut rt, playground, &spec, args.playground.clone(), false);
     rt.set_titlebar_inset(if app_options.borderless { 0.0 } else { chrome.titlebar_inset() });
     rt.on_focus = on_focus;
     rt.transparent = transparent;

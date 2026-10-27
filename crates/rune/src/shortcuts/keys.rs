@@ -54,6 +54,20 @@ impl Shortcut {
 
     pub(super) fn key_name(&self) -> &'static str { name(self.key).expect("validated physical shortcut key") }
 
+    /// Whether `ev` is this chord, for a window that handles it without a menu: letter and
+    /// digit keys only.
+    pub(crate) fn matches_key(&self, ev: &crate::KeyEvent) -> bool {
+        let (want, m) = (self.modifiers(), ev.mods);
+        let logo = cfg!(target_os = "macos") || want.logo == m.logo;
+        if want.shift != m.shift || want.alt != m.alt || want.cmd != m.cmd || want.ctrl != m.ctrl || !logo { return false; }
+        let name = self.key_name();
+        match &ev.key {
+            crate::Key::Command(c) => name.len() == 1 && name.starts_with(c.to_ascii_lowercase()),
+            crate::Key::Text(t) => name.len() == 1 && name.eq_ignore_ascii_case(t),
+            _ => false,
+        }
+    }
+
     /// Human-facing keycaps, ending in the key: a capital letter or symbol ("K", "/"), or a
     /// name ("Space", "F5"; glyphs such as ↩ ⇥ ⎋ ⌫ on macOS). macOS translates the physical key
     /// using the current keyboard layout on the UI thread, under the chord's ⌘ and ⌃ (some

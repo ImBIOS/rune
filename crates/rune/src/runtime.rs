@@ -34,8 +34,30 @@ use crate::shape::{LineCap, Op, Shape};
 use crate::text::{Deco, PaintedDeco, GlyphQuad, Ink, TextSystem, layout_height};
 use crate::tok::motion;
 
+/// The states a handler call can reach: the app's (`$self.state`), or while the playground is
+/// attached, its stage's beside its own controls.
+macro_rules! states {
+    ($self:ident) => {
+        crate::runtime::handler_states(&mut $self.state, &mut $self.playground)
+    };
+}
+
+pub(crate) fn handler_states<'a, S: 'static>(state: &'a mut S, playground: &'a mut Option<Box<crate::playground::Live<S>>>) -> crate::states::States<'a> {
+    match playground {
+        Some(playground) => playground.states(state),
+        None => crate::states::States::one(handler_state(state)),
+    }
+}
+
+pub(crate) fn handler_states_ref<'a, S: 'static>(state: &'a S, playground: Option<&'a crate::playground::Live<S>>) -> crate::states::StatesRef<'a> {
+    match playground {
+        Some(playground) => playground.states_ref(state),
+        None => crate::states::StatesRef::one(handler_state_ref(state)),
+    }
+}
+
 #[inline(always)]
-fn handler_state<S: 'static>(state: &mut S) -> &mut dyn Any {
+pub(crate) fn handler_state<S: 'static>(state: &mut S) -> &mut dyn Any {
     #[cfg(feature = "hot")]
     if std::any::TypeId::of::<S>() == std::any::TypeId::of::<crate::hot::HostState>() {
         return (state as &mut dyn Any).downcast_mut::<crate::hot::HostState>().unwrap().value.as_mut();
@@ -223,7 +245,6 @@ pub struct Cx<S> {
 }
 
 impl<S> Cx<S> {
-    #[cfg(feature = "hot")]
     pub(crate) fn retype<T>(&self) -> Cx<T> {
         Cx {
             env: self.env, titlebar_inset: self.titlebar_inset, system_accent: self.system_accent,
@@ -231,6 +252,26 @@ impl<S> Cx<S> {
             caret: self.caret.clone(), caret_read: self.caret_read.clone(),
             layout: self.layout.clone(), layout_reads: self.layout_reads.clone(), _s: PhantomData,
         }
+    }
+
+    /// Takes back a [`Self::retype`]d context a nested view ran with: its overrides, and the
+    /// caret and layout reads it added.
+    pub(crate) fn absorb<T>(&mut self, other: Cx<T>) {
+        self.reduced_motion = other.reduced_motion;
+        self.time_scale = other.time_scale;
+        self.caret_read.set(self.caret_read.get() || other.caret_read.get());
+        let mut reads = self.layout_reads.borrow_mut();
+        for key in other.layout_reads.into_inner() {
+            if !reads.contains(&key) { reads.push(key); }
+        }
+    }
+
+    pub(crate) fn set_env(&mut self, env: Env) {
+        self.env = env;
+    }
+
+    pub(crate) fn set_titlebar_inset(&mut self, inset: f32) {
+        self.titlebar_inset = inset;
     }
 
     #[cfg(feature = "hot")]
@@ -952,6 +993,8 @@ pub struct Runtime<S: 'static> {
     pub state: S,
     pub(crate) on_focus: Option<fn(&mut S, bool, &mut Tx)>,
     view: fn(&S, &mut Cx<S>) -> El,
+    /// `App::playground`, when this run shows it.
+    pub(crate) playground: Option<Box<crate::playground::Live<S>>>,
     #[cfg(feature = "hot")]
     pub(crate) hot: Option<crate::hot::Session>,
     pub text: TextSystem,
@@ -1381,6 +1424,7 @@ impl<S: 'static> Runtime<S> {
         Runtime {
             state,
             view,
+            playground: None,
             #[cfg(feature = "hot")]
             hot: None,
             text,
@@ -1964,6 +2008,12 @@ impl<S: 'static> Runtime<S> {
         self.run_pick_reads(tx);
         self.shell_request = self.shell_request.max(tx.shell.take());
         self.minimize_request |= std::mem::take(&mut tx.minimize);
+        let playground = std::mem::take(&mut tx.playground);
+        if !playground.is_empty() {
+            // The playground swaps whole views: no fades between them.
+            tx.instant = true;
+            self.playground_requests(playground);
+        }
         if !tx.open_urls.is_empty() { self.open_urls(std::mem::take(&mut tx.open_urls)); }
         if std::mem::take(&mut tx.clear_secret) {
             if self.copy_request.as_ref().is_some_and(crate::ClipboardWrite::is_secret) { self.copy_request = None; }
@@ -2250,6 +2300,14 @@ impl<S: 'static> Runtime<S> {
             let mut one = self.transaction();
             // Scheduling does not imply a model change.
             if app_call!(poll, &mut self.state, self.clock, &mut one) {
+                ran = true;
+            }
+            merge(&mut tx, one);
+        }
+        if self.playground.as_ref().is_some_and(|p| p.polls()) {
+            let mut one = self.transaction();
+            let clock = self.clock;
+            if self.playground.as_mut().is_some_and(|p| p.poll_stage(clock, &mut one)) {
                 ran = true;
             }
             merge(&mut tx, one);
@@ -2724,7 +2782,7 @@ impl<S: 'static> Runtime<S> {
             Action::WindowFocus(focused) => {
                 if !focused { self.held = None; }
                 let Some(f) = self.nodes.first().and_then(|n| n.on_window_focus.clone()) else { return false };
-                f(handler_state(&mut self.state), focused, &mut one);
+                f(states!(self), focused, &mut one);
                 true
             }
             Action::Physical(event, fallback) => {
@@ -2750,46 +2808,46 @@ impl<S: 'static> Runtime<S> {
             Action::Dismiss(path) => {
                 let Some(f) = self.node(&path).and_then(|n| n.modal.as_ref().map(|m| m.dismiss.clone())) else { return false };
                 self.set_focus(None, self.keyboard_focus);
-                f(handler_state(&mut self.state), &mut one);
+                f(states!(self), &mut one);
                 true
             }
             Action::PointerMove(path, point) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_pointer_move.clone()) else { return false };
-                f(handler_state(&mut self.state), point, &mut one);
+                f(states!(self), point, &mut one);
                 true
             }
             Action::AtBottom(path, at) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_at_bottom.clone()) else { return false };
-                f(handler_state(&mut self.state), at);
+                f(states!(self), at);
                 true
             }
             Action::FarFromBottom(path, far) => {
                 let Some((_, f)) = self.node(&path).and_then(|n| n.on_far_from_bottom.clone()) else { return false };
-                f(handler_state(&mut self.state), far);
+                f(states!(self), far);
                 true
             }
             Action::VisibleRows(path, range) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_visible_rows.clone()) else { return false };
-                f(handler_state(&mut self.state), range)
+                f(states!(self), range)
             }
             Action::Layout(path, rect) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_layout.clone()) else { return false };
-                f(handler_state(&mut self.state), rect);
+                f(states!(self), rect);
                 true
             }
             Action::ScreenLayout(path, rect) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_screen_layout.clone()) else { return false };
-                f(handler_state(&mut self.state), rect);
+                f(states!(self), rect);
                 true
             }
             Action::DrawnLayout(path, rect, _) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_drawn_layout.clone()) else { return false };
-                f(handler_state(&mut self.state), rect, &mut one);
+                f(states!(self), rect, &mut one);
                 true
             }
             Action::Hover(path) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_hover.clone()) else { return false };
-                f(handler_state(&mut self.state), &mut one);
+                f(states!(self), &mut one);
                 true
             }
             Action::HoverChange(path, inside) => {
@@ -2797,12 +2855,12 @@ impl<S: 'static> Runtime<S> {
                 // A leave still reaches an element on its way out.
                 let exiting = || self.nodes.iter().find(|n| !inside && n.path == path).and_then(|n| n.on_hover_change.clone());
                 let Some(f) = self.node(&path).and_then(|n| n.on_hover_change.clone()).or(gone).or_else(exiting) else { return false };
-                f(handler_state(&mut self.state), inside, &mut one);
+                f(states!(self), inside, &mut one);
                 true
             }
             Action::SelectionChange(path, change) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_selection_change.clone()) else { return false };
-                f(handler_state(&mut self.state), &change, &mut one);
+                f(states!(self), &change, &mut one);
                 one.select_from_change = one.select.is_some();
                 true
             }
@@ -2810,13 +2868,13 @@ impl<S: 'static> Runtime<S> {
                 let Some(f) = self.node(&path).and_then(|n| n.on_press.clone()) else { return false };
                 self.events.push(format!("press {path}"));
                 one.button = button;
-                f(handler_state(&mut self.state), &mut one);
+                f(states!(self), &mut one);
                 true
             }
             Action::DoublePress(path) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_double_press.clone()) else { return false };
                 self.events.push(format!("double press {path}"));
-                f(handler_state(&mut self.state), &mut one);
+                f(states!(self), &mut one);
                 true
             }
             Action::Link(path, k) => self.press_link(&path, k, &mut one),
@@ -2824,7 +2882,7 @@ impl<S: 'static> Runtime<S> {
                 let Some(n) = self.node(&path).filter(|n| !self.is_exiting(n.id)) else { return false };
                 let Some(f) = n.on_secondary_press.clone() else { return false };
                 self.events.push(format!("secondary press {path}"));
-                f(handler_state(&mut self.state), point, &mut one);
+                f(states!(self), point, &mut one);
                 true
             }
             Action::Drag(path, mut d, button) => {
@@ -2834,7 +2892,7 @@ impl<S: 'static> Runtime<S> {
                 }
                 one.button = button;
                 d.data = if d.phase == Phase::Down { 0.0 } else { self.drag_data };
-                f(handler_state(&mut self.state), &mut d, &mut one);
+                f(states!(self), &mut d, &mut one);
                 self.drag_data = d.data;
                 if d.phase != Phase::Move {
                     self.events.push(format!("drag {:?} {path}", d.phase));
@@ -2843,13 +2901,13 @@ impl<S: 'static> Runtime<S> {
             }
             Action::DragStart(path) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_drag_start.clone()) else { return false };
-                f(handler_state(&mut self.state), &mut one);
+                f(states!(self), &mut one);
                 true
             }
             Action::DragEnd(path, outcome) => {
                 self.events.push(format!("drag-end {outcome:?} {path}"));
                 let Some(f) = self.node(&path).and_then(|n| n.on_drag_end.clone()) else { return false };
-                f(handler_state(&mut self.state), outcome, &mut one);
+                f(states!(self), outcome, &mut one);
                 true
             }
             Action::Files(event) => self.run_files(event, &mut one),
@@ -2882,8 +2940,8 @@ impl<S: 'static> Runtime<S> {
                             })
                     })
                 };
-                let into_field = |state: &mut dyn Any, access: &crate::el::EditFn, tx: &mut Tx| {
-                    if hook.is_some_and(|hook| hook(state, &content, tx)) { return EditOutcome::default(); }
+                let into_field = |mut state: crate::states::States<'_>, access: &crate::el::EditFn, tx: &mut Tx| {
+                    if hook.is_some_and(|hook| hook(state.reborrow(), &content, tx)) { return EditOutcome::default(); }
                     let edit = access(state);
                     // A rich field keeps the paste's formatting. The HTML was sanitised when it
                     // was read, and `from_html` keeps only its own safe subset anyway.
@@ -2896,7 +2954,7 @@ impl<S: 'static> Runtime<S> {
                 if self.with_focused_state(into_field, &mut one) {
                     self.events.push("paste field".into());
                     true
-                } else if let Some(f) = self.app_paste_handler() && (f.call)(handler_state(&mut self.state), &content, &mut one) {
+                } else if let Some(f) = self.app_paste_handler() && (f.call)(states!(self), &content, &mut one) {
                     self.events.push("paste window".into());
                     true
                 } else { false }
@@ -2904,7 +2962,7 @@ impl<S: 'static> Runtime<S> {
             Action::ClipboardRead(id, content) => {
                 let Some(i) = self.clipboard_reads.iter().position(|(read, _)| *read == id) else { return false };
                 let (_, f) = self.clipboard_reads.remove(i);
-                f(handler_state(&mut self.state), &content, &mut one);
+                f(states!(self), &content, &mut one);
                 true
             }
             Action::FileDialog(id, result) => self.run_file_dialog(id, result, &mut one),
@@ -3030,12 +3088,13 @@ impl<S: 'static> Runtime<S> {
         one.physical_key = None;
         if self.default_button_key(ev, one) { return true; }
         one.physical_key = physical_key;
-        if app_first && let Some(f) = self.on_key && Tx::took(app_call!(f, &mut self.state, ev, one), one) { return true; }
+        if self.playground_nav(ev, one) { return true; }
+        if app_first && let Some(f) = self.on_key && Tx::took(self.app_key(f, ev, one), one) { return true; }
         if self.focused_input().is_some() {
             self.input_click.clear_last();
         }
         if let Some(f) = self.focused_input().and_then(|input| input.key.clone())
-            && Tx::took(f(handler_state(&mut self.state), ev, one), one)
+            && Tx::took(f(states!(self), ev, one), one)
         {
             return true;
         }
@@ -3084,7 +3143,7 @@ impl<S: 'static> Runtime<S> {
             if handled { return true; }
         }
         one.physical_key = physical_key;
-        if !app_first && let Some(f) = self.on_key && Tx::took(app_call!(f, &mut self.state, ev, one), one) {
+        if !app_first && let Some(f) = self.on_key && Tx::took(self.app_key(f, ev, one), one) {
             self.events.push(format!("key {:?}", ev.key));
             return true;
         }
@@ -3092,7 +3151,91 @@ impl<S: 'static> Runtime<S> {
         // Selected text takes the Cmd+A and Cmd+C nothing else took, as AppKit's responder chain
         // gives a key equivalent to the menu bar before the text view: an app's shortcut wins.
         if !repeat && self.selection_key(ev, one) { return true; }
-        self.page_scroll(ev)
+        self.page_scroll(ev) || self.playground_key(ev, one)
+    }
+
+    /// `AppSpec::on_key`, given the stage's state while the playground shows one of the app's.
+    fn app_key(&mut self, f: fn(&mut S, &KeyEvent, &mut Tx) -> bool, ev: &KeyEvent, one: &mut Tx) -> bool {
+        let state = match &mut self.playground {
+            Some(playground) => playground.key_state(&mut self.state),
+            None => Some(&mut self.state),
+        };
+        state.is_some_and(|state| app_call!(f, state, ev, one))
+    }
+
+    /// Keys nothing else took: Escape goes Back from the playground.
+    fn playground_key(&mut self, ev: &KeyEvent, one: &mut Tx) -> bool {
+        let plain = !ev.mods.cmd && !ev.mods.alt && !ev.mods.ctrl && !ev.mods.shift;
+        if ev.key == crate::Key::Escape && plain && self.playground.as_ref().is_some_and(|p| p.is_open()) {
+            one.close_playground();
+            return true;
+        }
+        false
+    }
+
+    /// The playground's own keys, ahead of the stage's `on_key` and focus traversal: its
+    /// shortcut, and while it's open, moving between stories, triggers, and into and around the
+    /// side column. A focused text field keeps its keys.
+    fn playground_nav(&mut self, ev: &KeyEvent, one: &mut Tx) -> bool {
+        let Some(playground) = &self.playground else { return false };
+        if playground.is_shortcut(ev) {
+            if !one.key_repeat { one.toggle_playground(); }
+            return true;
+        }
+        if !playground.is_open() || self.focused_input().is_some() { return false; }
+        let side = self.playground_side();
+        let at = self.focused.as_deref().filter(|_| !self.hover_focus).and_then(|f| side.iter().position(|p| p == f));
+        match playground.nav(ev, at.is_some()) {
+            crate::playground::Nav::Pass => false,
+            crate::playground::Nav::Request(request) => {
+                let trigger = matches!(request, crate::playground::Request::Trigger(_) | crate::playground::Request::Replay);
+                if !(trigger && one.key_repeat) { one.playground.push(request); }
+                true
+            }
+            crate::playground::Nav::IntoSide => {
+                let Some(first) = side.first() else { return false };
+                self.set_focus(Some(first.clone()), true);
+                true
+            }
+            crate::playground::Nav::OutOfSide => {
+                self.set_focus(None, true);
+                true
+            }
+            crate::playground::Nav::SideStep(by) => {
+                let (at, n) = (at.unwrap_or(0) as isize, side.len() as isize);
+                let path = side[(at + by).rem_euclid(n) as usize].clone();
+                self.set_focus(Some(path.clone()), true);
+                one.scroll_to.push((None, path));
+                true
+            }
+        }
+    }
+
+    /// The paths of the focusable controls in the playground's side column, in order.
+    fn playground_side(&self) -> Vec<String> {
+        let inside = |i: usize| std::iter::successors(Some(i), |&j| self.nodes[j].parent).any(|j| self.nodes[j].key.as_deref() == Some("playground-side"));
+        (0..self.nodes.len()).filter(|&i| self.can_focus(i) && inside(i)).map(|i| self.nodes[i].path.clone()).collect()
+    }
+
+    /// Queues playground requests for the next commit, which applies them before its view.
+    fn playground_requests(&mut self, requests: Vec<crate::playground::Request>) {
+        let Some(playground) = &mut self.playground else { return };
+        playground.request(requests);
+        self.dirty = true;
+    }
+
+    /// Applies queued playground requests. Focus leaves the old stage first, while the states
+    /// its fields were built for are still there.
+    fn apply_playground(&mut self) {
+        let Some(playground) = &self.playground else { return };
+        if !playground.has_pending() { return; }
+        if playground.pending_swaps_stage() && self.focused.is_some() { self.set_focus(None, false); }
+        let clock = self.clock;
+        if self.playground.as_mut().is_some_and(|p| p.apply(clock)) {
+            self.memo.clear();
+            // A new stage state gets its first poll on the next frame, as an app's does.
+            if self.playground.as_ref().is_some_and(|p| p.polls()) { self.schedule_wakes([std::time::Duration::ZERO]); }
+        }
     }
 
     /// Page Up and Page Down scroll by most of a viewport, and Home and End to the top and
@@ -3160,7 +3303,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// [`Self::with_focused`] for an edit that needs the app state (an app's paste hook).
-    fn with_focused_state(&mut self, f: impl FnOnce(&mut dyn Any, &crate::el::EditFn, &mut Tx) -> EditOutcome, tx: &mut Tx) -> bool {
+    fn with_focused_state(&mut self, f: impl FnOnce(crate::states::States<'_>, &crate::el::EditFn, &mut Tx) -> EditOutcome, tx: &mut Tx) -> bool {
         let Some(path) = self.focused.clone() else { return false };
         let Some((access, submit, change, animate_layout, single_line, secure, revealed_override)) =
             self.focused_input().map(|i| (i.access.clone(), i.submit.clone(), i.change.clone(), i.animate_layout, i.single_line, i.edit.is_secure(), i.revealed_override))
@@ -3170,23 +3313,23 @@ impl<S: 'static> Runtime<S> {
         let Some(access) = access else { return false };
         self.input_click.clear_last();
         {
-            let edit = access(handler_state(&mut self.state));
+            let edit = access(states!(self));
             edit.set_single_line(single_line);
             if secure && !edit.is_secure() { edit.set_secure(true); }
             if let Some(rev) = revealed_override { edit.set_revealed(rev); }
         }
-        let before = change.as_ref().map(|_| zeroize::Zeroizing::new(access(handler_state(&mut self.state)).text.clone()));
-        let mut out = f(handler_state(&mut self.state), &access, tx);
+        let before = change.as_ref().map(|_| zeroize::Zeroizing::new(access(states!(self)).text.clone()));
+        let mut out = f(states!(self), &access, tx);
         // Submit and Escape's blur act once per press; held keys still type, move and delete.
         if tx.key_repeat { out.submit = false; out.blur = false; }
         // Typing is the user's own hand: no animation.
         tx.instant = !animate_layout;
         self.caret_follow = true;
         if let Some(change) = change
-            && before.as_ref().map(|s| s.as_str()) != Some(access(handler_state(&mut self.state)).text.as_str())
+            && before.as_ref().map(|s| s.as_str()) != Some(access(states!(self)).text.as_str())
         {
-            change(handler_state(&mut self.state), tx);
-            access(handler_state(&mut self.state)).mark_edited();
+            change(states!(self), tx);
+            access(states!(self)).mark_edited();
         }
         if let Some(c) = out.copy {
             tx.copy(c);
@@ -3199,7 +3342,7 @@ impl<S: 'static> Runtime<S> {
         {
             self.events.push(format!("submit {path}"));
             tx.instant = false;
-            sub(handler_state(&mut self.state), tx);
+            sub(states!(self), tx);
         } else if out.submit {
             // A field with nothing to submit passes Return to the default button, as in a sheet.
             self.press_default_button(tx);
@@ -3211,7 +3354,7 @@ impl<S: 'static> Runtime<S> {
     fn composing(&mut self) -> bool {
         let Some(access) = self.focused_input().map(|i| i.access.clone()) else { return false };
         match access {
-            Some(access) => access(handler_state(&mut self.state)).preedit.is_some(),
+            Some(access) => access(states!(self)).preedit.is_some(),
             None => self.focused_input().is_some_and(|i| i.edit.preedit.is_some()),
         }
     }
@@ -3229,7 +3372,7 @@ impl<S: 'static> Runtime<S> {
             .take_while(|&j| self.allowed(j) && !self.subtree_exiting(j))
             .filter_map(|j| self.nodes[j].focus.key.clone())
             .collect();
-        handlers.into_iter().any(|f| Tx::took(f(handler_state(&mut self.state), ev, tx), tx))
+        handlers.into_iter().any(|f| Tx::took(f(states!(self), ev, tx), tx))
     }
 
     fn focused_input(&self) -> Option<&InputSpec> {
@@ -3515,9 +3658,10 @@ impl<S: 'static> Runtime<S> {
 
 /// Measurement capabilities: text/layout caches and virtual geometry only. In particular this
 /// type has no Scene, growth tracks, reveal tracks, draw instances, or mutable app state.
-struct Measurement<'a, S> {
+struct Measurement<'a, S: 'static> {
     state: &'a S,
     view: fn(&S, &mut Cx<S>) -> El,
+    playground: Option<&'a crate::playground::Live<S>>,
     env: Env,
     viewport: (f32, f32),
     fit_height: bool,
@@ -3565,6 +3709,15 @@ struct Measured {
 }
 
 impl<S: 'static> Measurement<'_, S> {
+    /// The app's view, or with the playground attached, the view it composes (the bar, or the
+    /// playground around its stage).
+    fn root_view(&self, cx: &mut Cx<S>) -> El {
+        match self.playground {
+            Some(playground) => playground.view(self.state, self.view, cx, self.viewport),
+            None => (self.view)(self.state, cx),
+        }
+    }
+
     fn finish(mut self, tx: &Tx) -> Measured {
         let mut passes = 0;
         let (layout, nodes) = loop {
@@ -3613,7 +3766,7 @@ impl<S: 'static> Measurement<'_, S> {
             v.pad_bottom = padding(el.style.padding.bottom);
             v.set_gap(crate::virtual_list::gap_y(&el.style));
             let source = el.virtual_rows.take();
-            let state = handler_state_ref(self.state);
+            let state = handler_states_ref(self.state, self.playground);
             if source.is_some() {
                 assert!(el.children.is_empty(), "`.virtual_rows(..)` at {path:?} builds its own rows; it takes no children");
             }
@@ -3751,7 +3904,7 @@ impl<S: 'static> Measurement<'_, S> {
         let memo = crate::memo::enter(std::mem::take(self.memo), self.env, self.system_accent, self.system_reduced_motion, cx.caret.clone(), cx.layout.clone());
         let view_time = crate::frame_profile::Scope::new(crate::frame_profile::Phase::View);
         #[cfg(not(feature = "hot"))]
-        let mut root = { let root = (self.view)(self.state, &mut cx); self.build_tree(root, tx, force_all) };
+        let mut root = { let root = self.root_view(&mut cx); self.build_tree(root, tx, force_all) };
         // Index-built rows run the app's closures in `build_tree`, so a patch's panic there
         // falls back like one in the view.
         #[cfg(feature = "hot")]
@@ -3759,7 +3912,7 @@ impl<S: 'static> Measurement<'_, S> {
             let view = self.view;
             let state = self.state;
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let root = subsecond::HotFn::current(view).call((state, &mut cx));
+                let root = if self.playground.is_some() { self.root_view(&mut cx) } else { subsecond::HotFn::current(view).call((state, &mut cx)) };
                 self.build_tree(root, tx, force_all)
             })) {
                 Ok(root) => (root, memo),
@@ -3882,6 +4035,7 @@ impl<S: 'static> Measurement<'_, S> {
 impl<S: 'static> Runtime<S> {
     fn commit(&mut self, tx: &Tx) {
         let _commit_time = crate::frame_profile::Scope::new(crate::frame_profile::Phase::Commit);
+        self.apply_playground();
         COMMITS.set(COMMITS.get() + 1);
         self.last_commit_clock = self.clock;
         self.memo_since = self.memo.next_pass();
@@ -3916,6 +4070,7 @@ impl<S: 'static> Runtime<S> {
         Measurement {
             state: &self.state,
             view: self.view,
+            playground: self.playground.as_deref(),
             env: self.env,
             viewport: self.viewport,
             fit_height: self.fit_height,
@@ -5006,7 +5161,7 @@ impl<S: 'static> Runtime<S> {
         self.drag_out_armed = false;
         let Some(i) = self.nodes.iter().enumerate().position(|(i, n)| n.path == path && !self.subtree_exiting(i)) else { return false };
         let Some(f) = self.nodes[i].drag_out.clone() else { return false };
-        let Some(item) = f(handler_state_ref(&self.state)).filter(|item| !item.is_empty()) else { return false };
+        let Some(item) = f(handler_states_ref(&self.state, self.playground.as_deref())).filter(|item| !item.is_empty()) else { return false };
         let n = &self.nodes[i];
         let r = self.drawn.get(i).copied().unwrap_or([n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]]);
         let clip = self.screen_clip_of_parent(n.parent).map(|v| v / self.env.scale);
@@ -7670,7 +7825,7 @@ impl<S: 'static> Runtime<S> {
         for read in std::mem::take(&mut tx.pick_reads) {
             let picked = self.element_at_within(read.within.as_deref(), read.x, read.y, read.pick);
             if let Some(f) = read.take() {
-                f(&mut self.state, picked, tx);
+                f(states!(self), picked, tx);
                 self.dirty = true;
             }
         }
@@ -8114,6 +8269,7 @@ fn merge(tx: &mut Tx, one: Tx) {
     if one.copy.is_some() { tx.copy = one.copy; }
     tx.shell = tx.shell.max(one.shell);
     tx.minimize |= one.minimize;
+    tx.playground.extend(one.playground);
     tx.open_urls.extend(one.open_urls);
     tx.srgb_blend = one.srgb_blend.or(tx.srgb_blend);
     tx.blur |= one.blur;

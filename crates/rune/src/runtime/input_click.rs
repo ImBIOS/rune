@@ -215,7 +215,7 @@ impl<S: 'static> Runtime<S> {
         match step {
             Step::Down { clicks, shift } => {
                 self.set_focus(Some(path), false);
-                let e = access(handler_state(&mut self.state));
+                let e = access(states!(self));
                 e.set_single_line(single);
                 e.break_history_group();
                 e.clear_pending();
@@ -251,7 +251,7 @@ impl<S: 'static> Runtime<S> {
                     self.input_click.drop_drag();
                     return false;
                 }
-                let e = access(handler_state(&mut self.state));
+                let e = access(states!(self));
                 e.set_single_line(single);
                 if e.preedit.is_some() {
                     self.input_click.clear();

@@ -2059,6 +2059,50 @@ $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/d
   fields. Without `--trace` nothing changes. Capture on a display, not headless:
   `cargo run --profile perf -p rune --example pacing -- --native --trace pacing.jsonl --frames 240`.
 
+## Playground
+
+`App::playground` is a storybook built into the window. ⌘⇧D (Ctrl+Shift+D off macOS) opens it;
+in debug builds a 26 pt bar along the bottom opens it too. Its stories are the app's scenes plus
+its own pages and `Story`s, grouped by the part before a `/` in their names. One shows at a time on
+a plain stage, live and interactive, with a column beside it for that story's controls and
+triggers.
+
+```rust
+App::new(spec).playground(
+    Playground::new()
+        .page("Lists/Live devices", devices)              // the real state, live
+        .trigger("Lists/Many devices", 'a', "Add device", |s, _| s.devices.push("New"))
+        .side("Lists/Many devices", device_count)         // the app's own controls, beside the stage
+        .story(
+            Story::new("Progress/Upload", upload_init, upload_view)
+                .poll(upload_poll)
+                .trigger('r', "Run, pause, resume", |u, play| {
+                    u.running = true;
+                    play.after(0.6, |u, _| u.running = false);
+                }),
+        )
+        .story(Story::overlay("Toasts/Sync toast", &TOAST, toast_init)),
+)
+```
+
+- **State.** A scene gets a fresh state (`init`, then the scene) each time it's chosen. A story
+  keeps its own state, made by its `init`, until the playground closes. A page draws the real
+  state. Handlers on the stage act on that state; the real state keeps polling throughout and
+  is back, untouched, after Back.
+- **Triggers** are single-letter keys, listed beside the stage. R replays: it makes the state
+  again, then runs the story's `'r'` trigger if it has one. `Play::after(secs, step)` queues
+  follow-up steps on the runtime's logical clock, timed from when the previous step was due, so
+  a replay runs the same every time, headless included. J and K can't be trigger keys.
+- **Keys.** ↑↓ or J K move between stories, ⌘↑ ⌘↓ go to the first and last, → or Tab move into
+  the side column, and Esc (after the stage has had it) or ⌘⇧D leaves.
+  `.shortcut(None)` turns the shortcut off; `tx.open_playground()` opens it from the app.
+- **Overlays.** `Story::overlay` draws an overlay's view in a dashed frame of its size, so it
+  shows in the window and in headless renders.
+- **Off.** It's on in debug builds; `.enabled(bool)` overrides that and `RUNE_PLAYGROUND=0`
+  turns it off. `.bar(false)` drops the bar, so the app lays out as if there were no
+  playground. Snapshots, `--scene` renders and goldens leave it out; `--playground [story]`
+  opens it at launch, headless too. Each `WindowSpec` can have its own.
+
 ## Live Rust editing (desktop development)
 
 ```sh

@@ -199,7 +199,7 @@ impl<S: 'static> Runtime<S> {
             let (path, accepted) = &aim;
             let kind = if *accepted { "drop-hover" } else { "drop-rejected-hover" };
             self.trace_event(format_args!("{kind}:{over}:{path}"));
-            f(handler_state(&mut self.state), over, tx);
+            f(states!(self), over, tx);
             ran = true;
         }
         ran
@@ -221,12 +221,12 @@ impl<S: 'static> Runtime<S> {
                 let path = self.nodes[i].path.clone();
                 if !files.is_empty() && let Some(f) = drop.on_drop {
                     self.trace_event(format_args!("drop-files:{}:{path}", files.len()));
-                    f(handler_state(&mut self.state), &files, tx);
+                    f(states!(self), &files, tx);
                     ran = true;
                 }
                 if !rejected.is_empty() && let Some(f) = drop.on_reject {
                     self.trace_event(format_args!("drop-rejected:{}:{path}", rejected.len()));
-                    f(handler_state(&mut self.state), &rejected, tx);
+                    f(states!(self), &rejected, tx);
                     ran = true;
                 }
                 ran

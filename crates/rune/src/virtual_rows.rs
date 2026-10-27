@@ -3,13 +3,12 @@
 //! the mounted window, so a commit costs a key check per row plus the rows it mounts, however
 //! long the list is.
 
-use std::any::Any;
 use std::borrow::Cow;
 
 use crate::El;
 
-pub(crate) type KeyFn = dyn for<'a> Fn(&'a dyn Any, usize) -> Cow<'a, str>;
-pub(crate) type BuildFn = dyn Fn(&dyn Any, usize) -> El;
+pub(crate) type KeyFn = dyn for<'a> Fn(crate::states::StatesRef<'a>, usize) -> Cow<'a, str>;
+pub(crate) type BuildFn = dyn Fn(crate::states::StatesRef<'_>, usize) -> El;
 
 /// The rows of an index-built list, built at layout time from the window's state.
 pub(crate) struct RowSource {
@@ -18,12 +17,12 @@ pub(crate) struct RowSource {
     pub(crate) build: Box<BuildFn>,
 }
 
-fn key_fn<F: for<'a> Fn(&'a dyn Any, usize) -> Cow<'a, str>>(f: F) -> F {
+fn key_fn<F: for<'a> Fn(crate::states::StatesRef<'a>, usize) -> Cow<'a, str>>(f: F) -> F {
     f
 }
 
-fn state<S: 'static>(s: &dyn Any) -> &S {
-    s.downcast_ref::<S>().expect("virtual rows registered for a different state type than the window's")
+fn state<S: 'static>(s: crate::states::StatesRef<'_>) -> &S {
+    s.cast::<S>().expect("virtual rows registered for a different state type than the window's")
 }
 
 impl RowSource {

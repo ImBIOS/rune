@@ -9,7 +9,6 @@
 //! - Headless runs: the menu stays open in `--tree` (`popupMenu`) until a script's
 //!   `{"type": "menu-pick", "id": "dark"}` or `{"type": "menu-cancel"}` answers it.
 
-use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -180,7 +179,7 @@ impl std::fmt::Display for PopupMenuError {
 }
 impl std::error::Error for PopupMenuError {}
 
-pub(crate) type PickFn = Box<dyn FnOnce(&mut dyn Any, Option<&str>, &mut Tx)>;
+pub(crate) type PickFn = Box<dyn FnOnce(crate::states::States<'_>, Option<&str>, &mut Tx)>;
 
 pub(crate) struct Request {
     pub menu: PopupMenu,
@@ -228,7 +227,8 @@ impl Tx {
         on_pick: impl FnOnce(&mut S, Option<&str>, &mut Tx) + 'static,
     ) {
         let on_pick: PickFn = Box::new(move |s, picked, tx| {
-            on_pick(s.downcast_mut::<S>().expect("pop-up menu registered for a different state type than the app's"), picked, tx);
+            // None once the playground has dropped the stage that asked.
+            if let Some(s) = s.cast::<S>() { on_pick(s, picked, tx); }
         });
         let request = Request { menu, anchor: anchor.into(), on_pick };
         self.popups.push(Call(Rc::new(RefCell::new(Some(request)))));

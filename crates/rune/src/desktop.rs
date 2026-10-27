@@ -128,7 +128,7 @@ impl<S: 'static> Window<S> {
         // --size is the whole output here; each window keeps its own size.
         let mut inherited = args.clone();
         inherited.size = None;
-        if !selected { inherited.scene = None; }
+        if !selected { inherited.scene = None; inherited.playground = None; }
         let own = app.resolve_args(inherited);
         let comp = app.compositor.take();
         let (open, keep_running, on_close, on_focus, on_reopen) = (app.open, app.keep_running, app.on_close, app.on_focus, app.on_reopen);
@@ -137,12 +137,14 @@ impl<S: 'static> Window<S> {
         let tab_visits_controls = app.tab_visits_controls;
         let srgb_blend = app.srgb_blend;
         let titlebar_inset = if options.borderless { 0.0 } else { app.chrome.titlebar_inset() };
+        let playground = app.playground.take();
         let (spec, state, shared) = app.into_parts(own.scene.as_deref());
         let shortcuts = crate::shortcuts::Guard::attach(&shared, Arc::new(|| {}), true, false);
         let menus = crate::native_menu::Guard::attach(&shared, true);
         let size = own.size.unwrap_or(spec.size);
         let dark = own.theme.as_deref() != Some("light");
         let mut rt = crate::tooling::runtime_for(&spec, state, size, Env::new(dark, scale), Arc::new(|| {}));
+        crate::playground::attach(&mut rt, playground, &spec, own.playground.clone(), false);
         rt.on_focus = on_focus;
         rt.set_modifier_keys(modifier_keys);
         rt.set_tab_visits_controls(tab_visits_controls);

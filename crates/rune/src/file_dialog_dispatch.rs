@@ -63,7 +63,7 @@ impl<S: 'static> Runtime<S> {
             "file-dialog:answer:{}",
             if result.as_ref().is_ok_and(Option::is_some) { "path" } else if result.is_ok() { "cancel" } else { "error" }
         ));
-        f(handler_state(&mut self.state), result, one);
+        f(states!(self), result, one);
         true
     }
 

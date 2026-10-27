@@ -6,7 +6,6 @@
 //! dialog once the handler's frame is done, and the answer runs the callback as an action on
 //! a later frame. Headless runs keep the dialog open in `--tree` (`fileDialog`) until a
 //! script's `{"type": "file-dialog", "path": …}` or `{"type": "file-dialog-cancel"}` answers it.
-use std::any::Any;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -134,7 +133,7 @@ async fn native(_: FileDialogKind, _: FileDialogOptions) -> Result<Option<PathBu
 /// when the user cancels, or why no dialog could show.
 pub type FileDialogResult = Result<Option<PathBuf>, FileDialogError>;
 
-pub(crate) type AnswerFn = Box<dyn FnOnce(&mut dyn Any, FileDialogResult, &mut Tx)>;
+pub(crate) type AnswerFn = Box<dyn FnOnce(crate::states::States<'_>, FileDialogResult, &mut Tx)>;
 
 pub(crate) struct Request {
     pub kind: FileDialogKind,
@@ -208,7 +207,8 @@ impl Tx {
 
     fn file_dialog<S: 'static>(&mut self, kind: FileDialogKind, options: FileDialogOptions, on_answer: impl FnOnce(&mut S, FileDialogResult, &mut Tx) + 'static) {
         let on_answer: AnswerFn = Box::new(move |s, result, tx| {
-            on_answer(s.downcast_mut::<S>().expect("file dialog registered for a different state type than the app's"), result, tx);
+            // None once the playground has dropped the stage that asked.
+            if let Some(s) = s.cast::<S>() { on_answer(s, result, tx); }
         });
         self.file_dialogs.push(Call(Rc::new(RefCell::new(Some(Request { kind, options, on_answer })))));
     }

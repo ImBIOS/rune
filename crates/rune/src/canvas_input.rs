@@ -1,7 +1,6 @@
 //! Input a canvas app needs beyond presses and scrolling: wheel deltas an element takes before
 //! any scroll view does, trackpad pinch, rotation and smart magnify, the middle and other mouse
 //! buttons, and key releases. Runtime dispatch is in `gesture_dispatch.rs`.
-use std::any::Any;
 use std::rc::Rc;
 
 use crate::{El, KeyEvent, Mods, Tx};
@@ -115,10 +114,10 @@ impl PointerButton {
     }
 }
 
-pub(crate) type WheelFn = Rc<dyn Fn(&mut dyn Any, WheelEvent, &mut Tx) -> bool>;
-pub(crate) type MagnifyFn = Rc<dyn Fn(&mut dyn Any, MagnifyEvent, &mut Tx) -> bool>;
-pub(crate) type RotateFn = Rc<dyn Fn(&mut dyn Any, RotateEvent, &mut Tx) -> bool>;
-pub(crate) type SmartMagnifyFn = Rc<dyn Fn(&mut dyn Any, f32, f32, &mut Tx) -> bool>;
+pub(crate) type WheelFn = Rc<dyn Fn(crate::states::States<'_>, WheelEvent, &mut Tx) -> bool>;
+pub(crate) type MagnifyFn = Rc<dyn Fn(crate::states::States<'_>, MagnifyEvent, &mut Tx) -> bool>;
+pub(crate) type RotateFn = Rc<dyn Fn(crate::states::States<'_>, RotateEvent, &mut Tx) -> bool>;
+pub(crate) type SmartMagnifyFn = Rc<dyn Fn(crate::states::States<'_>, f32, f32, &mut Tx) -> bool>;
 
 /// An element's canvas handlers, boxed: few elements have any.
 #[derive(Clone, Default)]
@@ -138,8 +137,8 @@ impl CanvasInput {
     }
 }
 
-fn state<S: 'static>(s: &mut dyn Any) -> &mut S {
-    s.downcast_mut::<S>().expect("handler registered for a different state type than the app's")
+fn state<S: 'static>(s: crate::states::States<'_>) -> &mut S {
+    s.cast::<S>().expect("handler registered for a different state type than the app's")
 }
 
 impl El {

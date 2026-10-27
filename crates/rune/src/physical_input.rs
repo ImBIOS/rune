@@ -8,7 +8,7 @@ pub enum PhysicalInput {
     FocusLost,
 }
 
-pub(crate) type Handler = std::rc::Rc<dyn Fn(&mut dyn std::any::Any, &PhysicalInput, &mut crate::Tx) -> bool>;
+pub(crate) type Handler = std::rc::Rc<dyn Fn(crate::states::States<'_>, &PhysicalInput, &mut crate::Tx) -> bool>;
 
 impl crate::El {
     /// Receives physical keys before logical editing, app shortcuts and focus navigation.
@@ -16,7 +16,7 @@ impl crate::El {
     pub fn on_physical_input<S: 'static>(mut self,
         f: impl Fn(&mut S, &PhysicalInput, &mut crate::Tx) -> bool + 'static) -> Self {
         self.focus.physical = Some(std::rc::Rc::new(move |state, event, tx| {
-            state.downcast_mut::<S>().is_some_and(|s| f(s, event, tx))
+            state.cast::<S>().is_some_and(|s| f(s, event, tx))
         }));
         self
     }

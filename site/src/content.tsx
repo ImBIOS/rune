@@ -376,6 +376,19 @@ export const layers: Entry[] = [
       at("crates/rune-motion/src/trace.rs", "motion traces"),
     ],
   },
+  {
+    slug: "playground",
+    title: "Playground",
+    body: (
+      <p>
+        A storybook built into the window, on ⌘⇧D. The app's scenes and its own stories, grouped by type, show one at a
+        time on a plain stage, live and interactive, with their triggers and controls beside them. Each story has its
+        own state, so the real one is never touched. R replays a story from the start, its timed steps running on the
+        logical clock, the same every time.
+      </p>
+    ),
+    code: [at("crates/rune/src/playground.rs", "stories, triggers and replay")],
+  },
 ]
 
 export type Decision = { area: string; chose: string; rejected: string; why: string }

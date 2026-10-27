@@ -62,6 +62,7 @@ pub struct App<S: 'static> {
     pub(crate) tab_visits_controls: bool,
     pub(crate) srgb_blend: bool,
     pub(crate) dev_stats: Option<fn() -> String>,
+    pub(crate) playground: Option<crate::Playground<S>>,
 }
 
 impl<S: 'static> App<S> {
@@ -94,6 +95,7 @@ impl<S: 'static> App<S> {
             tab_visits_controls: false,
             srgb_blend: false,
             dev_stats: None,
+            playground: None,
         }
     }
 
@@ -312,6 +314,22 @@ impl<S: 'static> App<S> {
     /// crate: `.dev_stats(|| procwatch::snapshot().map_or_else(String::new, |s| format!("{} MB, {} fds", s.footprint >> 20, s.fds)))`.
     pub fn dev_stats(mut self, stats: fn() -> String) -> Self {
         self.dev_stats = Some(stats);
+        self
+    }
+
+    /// A storybook in this window for auditing its scenes, stories and overlays: ⌘⇧D, a bar
+    /// along the bottom, or the View menu's Playground item opens it over the app. Shown in debug
+    /// builds unless `RUNE_PLAYGROUND=0`; `--playground [NAME]` opens it at launch, headless
+    /// too, where it otherwise never appears, so snapshots and goldens don't change.
+    pub fn playground(mut self, playground: crate::Playground<S>) -> Self {
+        if playground.is_enabled() && crate::playground::offered_by_env() {
+            let item = crate::MenuItem::new("Playground", |_: &mut S, tx: &mut Tx| tx.toggle_playground())
+                .id("rune.playground")
+                .menu("View");
+            let item = match playground.shortcut_key() { Some(shortcut) => item.key_equivalent(shortcut.clone()), None => item };
+            self = self.menu_item(item);
+        }
+        self.playground = Some(playground);
         self
     }
 

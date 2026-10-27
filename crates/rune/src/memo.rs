@@ -142,7 +142,6 @@ pub(crate) struct MemoCache {
 }
 
 impl MemoCache {
-    #[cfg_attr(not(any(test, feature = "hot")), expect(dead_code))]
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
     }

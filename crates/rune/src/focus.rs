@@ -14,12 +14,12 @@ const CLAMPED_ROLES: [&str; 3] = ["list", "tree", "grid"];
 const TYPE_SELECT_PAUSE: f64 = 1.0;
 
 /// Pushes focus (and a secure flag) into an input's app-owned editor and mirrors it back.
-fn sync_input_focus<S: 'static>(input: &mut crate::el::InputSpec, state: &mut S, focused: bool) -> bool {
+fn sync_input_focus(input: &mut crate::el::InputSpec, states: crate::states::States<'_>, focused: bool) -> bool {
     let Some(access) = &input.access else {
         input.edit.focused = focused;
         return false;
     };
-    let edit = access(handler_state(state));
+    let edit = access(states);
     let mut changed = false;
     edit.set_single_line(input.single_line);
     if input.edit.is_secure() && !edit.is_secure() {
@@ -103,7 +103,7 @@ impl<S: 'static> Runtime<S> {
         if tx.key_repeat { return true; }
         let f = self.nodes[i].on_press.clone().unwrap();
         self.events.push(format!("default {}", self.nodes[i].path));
-        f(handler_state(&mut self.state), tx);
+        f(states!(self), tx);
         true
     }
     fn group(&self, i: usize) -> Option<usize> {
@@ -167,11 +167,11 @@ impl<S: 'static> Runtime<S> {
         let mut changed = self.focused != path && self.physical_focus_lost();
         for n in &mut self.nodes {
             if let Some(input) = &mut n.input {
-                changed |= sync_input_focus(input, &mut self.state, path.as_deref() == Some(n.path.as_str()));
+                changed |= sync_input_focus(input, states!(self), path.as_deref() == Some(n.path.as_str()));
             }
         }
         for (p, input) in &mut self.virtual_inputs {
-            changed |= sync_input_focus(input, &mut self.state, path.as_deref() == Some(p.as_str()));
+            changed |= sync_input_focus(input, states!(self), path.as_deref() == Some(p.as_str()));
         }
         self.focused = path;
         if self.focused.is_some() {
@@ -306,7 +306,7 @@ impl<S: 'static> Runtime<S> {
             if repeat { return true; }
             let f = self.nodes[i].modal.as_ref().unwrap().dismiss.clone();
             self.set_focus(None, true);
-            f(handler_state(&mut self.state), tx);
+            f(states!(self), tx);
             return true;
         }
         if ev.key == Key::Tab {
@@ -343,10 +343,10 @@ impl<S: 'static> Runtime<S> {
                 Key::PageDown => Some(-10), Key::PageUp => Some(10),
                 _ => None,
             };
-            if let Some(delta) = delta { step(handler_state(&mut self.state), delta, tx); return true; }
+            if let Some(delta) = delta { step(states!(self), delta, tx); return true; }
             if matches!(ev.key, Key::Home | Key::End) {
                 let Some(f) = self.nodes[i].focus.step_limit.clone() else { return false };
-                f(handler_state(&mut self.state), ev.key == Key::End, tx);
+                f(states!(self), ev.key == Key::End, tx);
                 return true;
             }
         }
@@ -380,13 +380,13 @@ impl<S: 'static> Runtime<S> {
                 let path = n.path.clone();
                 self.set_focus(Some(path.clone()), true);
                 tx.scroll_to.push((None, path));
-                if let Some(f) = action { f(handler_state(&mut self.state), tx); }
+                if let Some(f) = action { f(states!(self), tx); }
                 return true;
             }
         } else if self.nodes[i].role == "combobox" && self.nodes[i].input.is_none() && matches!(ev.key, Key::Up | Key::Down) {
             // A popup button opens on its arrows as well as Space (NSPopUpButton).
             if repeat { return true; }
-            if let Some(f) = self.nodes[i].on_press.clone() { f(handler_state(&mut self.state), tx); }
+            if let Some(f) = self.nodes[i].on_press.clone() { f(states!(self), tx); }
             return true;
         }
         // Space presses the focused control. Return presses only rows and links; for a button
@@ -397,7 +397,7 @@ impl<S: 'static> Runtime<S> {
             if self.nodes[i].focus.highlight.is_some() && !shown { self.keyboard_focus = false; return true; }
             if repeat { return true; }
             if self.link_key(i, tx) { return true; }
-            if let Some(f) = self.nodes[i].on_press.clone() { f(handler_state(&mut self.state), tx); }
+            if let Some(f) = self.nodes[i].on_press.clone() { f(states!(self), tx); }
             return true;
         }
         false

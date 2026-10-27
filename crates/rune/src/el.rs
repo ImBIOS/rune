@@ -1,6 +1,5 @@
 //! The element tree that view functions return. Plain data plus type-erased handlers.
 
-use std::any::Any;
 use std::rc::Rc;
 
 use rune_motion::{Anim, Spring, Transition};
@@ -72,6 +71,8 @@ pub struct Tx {
     pub(crate) select_from_change: bool,
     /// `Tx::live_only`: this handler changed nothing the view reads.
     pub(crate) live_only: bool,
+    /// `Tx::open_playground` and kin, and the playground's own controls.
+    pub(crate) playground: Vec<crate::playground::Request>,
 }
 
 /// A change to the text selection a handler asked for, carried out after its commit.
@@ -126,7 +127,8 @@ impl Tx {
 
     fn pick_read<S: 'static>(&mut self, within: Option<String>, x: f32, y: f32, pick: crate::Pick, f: impl FnOnce(&mut S, Option<crate::Picked>, &mut Tx) + 'static) {
         let f: PickFn = Box::new(move |s, picked, tx| {
-            f(s.downcast_mut::<S>().expect("element_at registered for a different state type than the app's"), picked, tx);
+            // None once the playground has dropped the stage that asked.
+            if let Some(s) = s.cast::<S>() { f(s, picked, tx); }
         });
         self.pick_reads.push(PickRead { within, x, y, pick, f: Rc::new(std::cell::Cell::new(Some(f))) });
     }
@@ -317,7 +319,8 @@ impl Tx {
     /// ```
     pub fn read_clipboard<S: 'static>(&mut self, f: impl FnOnce(&mut S, &crate::ClipboardContent, &mut Tx) + 'static) {
         let f: ReadFn = Box::new(move |s, content, tx| {
-            f(s.downcast_mut::<S>().expect("read_clipboard registered for a different state type than the app's"), content, tx);
+            // None once the playground has dropped the stage that asked.
+            if let Some(s) = s.cast::<S>() { f(s, content, tx); }
         });
         self.clipboard_reads.push(ClipboardRead(Rc::new(std::cell::Cell::new(Some(f)))));
     }
@@ -330,6 +333,22 @@ impl Tx {
     /// Quit the app after this handler, whether or not it keeps running without a window.
     pub fn quit(&mut self) {
         self.shell = Some(Shell::Quit);
+    }
+
+    /// Show [`App::playground`](crate::App::playground) in this window. Without one, or in a
+    /// run that doesn't show it (a release build, `RUNE_PLAYGROUND=0`, a headless render
+    /// without `--playground`), nothing happens.
+    pub fn open_playground(&mut self) {
+        self.playground.push(crate::playground::Request::Open(None));
+    }
+
+    /// Back to the app from the playground, as its Back button does.
+    pub fn close_playground(&mut self) {
+        self.playground.push(crate::playground::Request::Close);
+    }
+
+    pub fn toggle_playground(&mut self) {
+        self.playground.push(crate::playground::Request::Toggle);
     }
 
     /// Minimize this window after this handler, as its minimize button would (winit's
@@ -561,10 +580,10 @@ impl Drag {
     }
 }
 
-pub(crate) type PressFn = Rc<dyn Fn(&mut dyn Any, &mut Tx)>;
-pub(crate) type InputKeyFn = Rc<dyn Fn(&mut dyn Any, &crate::KeyEvent, &mut Tx) -> bool>;
-pub(crate) type StepFn = Rc<dyn Fn(&mut dyn Any, i32, &mut Tx)>;
-pub(crate) type StepLimitFn = Rc<dyn Fn(&mut dyn Any, bool, &mut Tx)>;
+pub(crate) type PressFn = Rc<dyn Fn(crate::states::States<'_>, &mut Tx)>;
+pub(crate) type InputKeyFn = Rc<dyn Fn(crate::states::States<'_>, &crate::KeyEvent, &mut Tx) -> bool>;
+pub(crate) type StepFn = Rc<dyn Fn(crate::states::States<'_>, i32, &mut Tx)>;
+pub(crate) type StepLimitFn = Rc<dyn Fn(crate::states::States<'_>, bool, &mut Tx)>;
 
 /// A press position in window points, suitable for a context-menu anchor.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -595,11 +614,11 @@ impl PointerEvent {
     }
 }
 
-pub(crate) type PointerFn = Rc<dyn Fn(&mut dyn Any, PointerEvent, &mut Tx)>;
-pub(crate) type DragFn = Rc<dyn Fn(&mut dyn Any, &mut Drag, &mut Tx)>;
-pub(crate) type DragOutFn = Rc<dyn Fn(&dyn Any) -> Option<crate::DragItem>>;
-pub(crate) type DragEndFn = Rc<dyn Fn(&mut dyn Any, crate::DragOutcome, &mut Tx)>;
-pub(crate) type DropFilesFn = Rc<dyn Fn(&mut dyn Any, &[std::path::PathBuf], &mut Tx)>;
+pub(crate) type PointerFn = Rc<dyn Fn(crate::states::States<'_>, PointerEvent, &mut Tx)>;
+pub(crate) type DragFn = Rc<dyn Fn(crate::states::States<'_>, &mut Drag, &mut Tx)>;
+pub(crate) type DragOutFn = Rc<dyn Fn(crate::states::StatesRef<'_>) -> Option<crate::DragItem>>;
+pub(crate) type DragEndFn = Rc<dyn Fn(crate::states::States<'_>, crate::DragOutcome, &mut Tx)>;
+pub(crate) type DropFilesFn = Rc<dyn Fn(crate::states::States<'_>, &[std::path::PathBuf], &mut Tx)>;
 
 /// [`El::on_drop_files`], [`El::accepts_files`], [`El::on_drop_hover`], [`El::on_drop_rejected`]
 /// and [`El::on_drop_rejected_hover`].
@@ -611,7 +630,7 @@ pub(crate) struct DropSpec {
     pub on_reject: Option<DropFilesFn>,
     pub on_reject_hover: Option<DropHoverFn>,
 }
-pub(crate) type DropHoverFn = Rc<dyn Fn(&mut dyn Any, bool, &mut Tx)>;
+pub(crate) type DropHoverFn = Rc<dyn Fn(crate::states::States<'_>, bool, &mut Tx)>;
 
 impl DropSpec {
     /// The files of `paths` this element takes, when it's a drop target, and the rest.
@@ -626,7 +645,7 @@ impl DropSpec {
         if accepted { self.on_hover.clone() } else { self.on_reject_hover.clone() }
     }
 }
-pub(crate) type EditFn = Rc<dyn for<'a> Fn(&'a mut dyn Any) -> &'a mut TextEdit>;
+pub(crate) type EditFn = Rc<dyn for<'a> Fn(crate::states::States<'a>) -> &'a mut TextEdit>;
 
 /// Accessibility state beyond role and label (`El::level`, `El::expanded`, `El::secure`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1111,7 +1130,7 @@ pub(crate) enum Elide {
 /// [`El::on_link`]'s handler.
 #[derive(Clone)]
 pub(crate) struct LinkFn(pub LinkHandler);
-pub(crate) type LinkHandler = Rc<dyn Fn(&mut dyn Any, &str, &mut Tx)>;
+pub(crate) type LinkHandler = Rc<dyn Fn(crate::states::States<'_>, &str, &mut Tx)>;
 
 impl std::fmt::Debug for LinkFn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1298,9 +1317,9 @@ impl PillStyle {
         self
     }
 }
-pub(crate) type InputPasteFn = Rc<dyn Fn(&mut dyn Any, &crate::ClipboardContent, &mut Tx) -> bool>;
-pub(crate) type ReadFn = Box<dyn FnOnce(&mut dyn Any, &crate::ClipboardContent, &mut Tx)>;
-type PickFn = Box<dyn FnOnce(&mut dyn Any, Option<crate::Picked>, &mut Tx)>;
+pub(crate) type InputPasteFn = Rc<dyn Fn(crate::states::States<'_>, &crate::ClipboardContent, &mut Tx) -> bool>;
+pub(crate) type ReadFn = Box<dyn FnOnce(crate::states::States<'_>, &crate::ClipboardContent, &mut Tx)>;
+type PickFn = Box<dyn FnOnce(crate::states::States<'_>, Option<crate::Picked>, &mut Tx)>;
 
 #[derive(Clone)]
 pub(crate) struct PickRead {
@@ -1329,7 +1348,7 @@ impl std::fmt::Debug for ClipboardRead {
 /// What an `El::selection_copy` element copies for a selection inside it.
 pub(crate) type SelectionCopy = Rc<dyn Fn(&crate::TextSelection) -> Option<String>>;
 /// `El::on_selection_change`.
-pub(crate) type SelectionChangeFn = Rc<dyn Fn(&mut dyn Any, &crate::SelectionChange, &mut Tx)>;
+pub(crate) type SelectionChangeFn = Rc<dyn Fn(crate::states::States<'_>, &crate::SelectionChange, &mut Tx)>;
 
 /// A scroll viewport's content-aware edges: `El::scroll_edge_fade` and `El::scroll_margin`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1356,11 +1375,11 @@ impl ScrollAxes {
     pub(crate) fn has(self, horizontal: bool) -> bool { if horizontal { self.x() } else { self.y() } }
 }
 
-pub(crate) type AtBottomFn = Rc<dyn Fn(&mut dyn Any, bool)>;
-pub(crate) type VisibleRowsFn = Rc<dyn Fn(&mut dyn Any, std::ops::Range<usize>) -> bool>;
-pub(crate) type LayoutFn = Rc<dyn Fn(&mut dyn Any, [f32; 4])>;
-pub(crate) type DrawnLayoutFn = Rc<dyn Fn(&mut dyn Any, [f32; 4], &mut Tx)>;
-pub(crate) type WindowFocusFn = Rc<dyn Fn(&mut dyn Any, bool, &mut Tx)>;
+pub(crate) type AtBottomFn = Rc<dyn Fn(crate::states::States<'_>, bool)>;
+pub(crate) type VisibleRowsFn = Rc<dyn Fn(crate::states::States<'_>, std::ops::Range<usize>) -> bool>;
+pub(crate) type LayoutFn = Rc<dyn Fn(crate::states::States<'_>, [f32; 4])>;
+pub(crate) type DrawnLayoutFn = Rc<dyn Fn(crate::states::States<'_>, [f32; 4], &mut Tx)>;
+pub(crate) type WindowFocusFn = Rc<dyn Fn(crate::states::States<'_>, bool, &mut Tx)>;
 
 #[derive(Clone)]
 pub struct El {
@@ -1687,7 +1706,7 @@ impl El {
     /// On the root, receive native window activation/deactivation (not text-field focus).
     /// Also works on interactive overlays. Headless hosts may call Runtime::window_focus.
     pub fn on_window_focus<S: 'static>(mut self, f: impl Fn(&mut S, bool, &mut Tx) + 'static) -> Self {
-        self.on_window_focus = Some(Rc::new(move |s, focused, tx| f(s.downcast_mut::<S>().unwrap(), focused, tx)));
+        self.on_window_focus = Some(Rc::new(move |s, focused, tx| f(s.cast::<S>().unwrap(), focused, tx)));
         self
     }
     /// Paint the latest text in this element's fixed layout box. `text("00:00")` reserves
@@ -1706,7 +1725,7 @@ impl El {
         self.on_paste = Some(PasteFn {
             rich: false,
             call: Rc::new(move |s, content, tx| {
-                content.has_plain() && { f(s.downcast_mut::<S>().unwrap(), content.text(), tx); true }
+                content.has_plain() && { f(s.cast::<S>().unwrap(), content.text(), tx); true }
             }),
         });
         self
@@ -1716,7 +1735,7 @@ impl El {
     pub fn on_paste_content<S: 'static>(mut self, f: impl Fn(&mut S, &crate::ClipboardContent, &mut Tx) + 'static) -> Self {
         self.on_paste = Some(PasteFn {
             rich: true,
-            call: Rc::new(move |s, content, tx| { f(s.downcast_mut::<S>().unwrap(), content, tx); true }),
+            call: Rc::new(move |s, content, tx| { f(s.cast::<S>().unwrap(), content, tx); true }),
         });
         self
     }
@@ -1828,7 +1847,7 @@ impl El {
     /// Called after a focused field's text changes, with the updated model available.
     pub fn on_input_change<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
         if let Some(input) = &mut self.input {
-            input.change = Some(Rc::new(move |s, tx| f(s.downcast_mut::<S>().expect("input change state type"), tx)));
+            input.change = Some(Rc::new(move |s, tx| f(s.cast::<S>().expect("input change state type"), tx)));
         }
         self
     }
@@ -1845,14 +1864,14 @@ impl El {
     /// ```
     pub fn on_input_paste<S: 'static>(mut self, f: impl Fn(&mut S, &crate::ClipboardContent, &mut Tx) -> bool + 'static) -> Self {
         if let Some(input) = &mut self.input {
-            input.paste = Some(Rc::new(move |s, content, tx| f(s.downcast_mut::<S>().expect("input paste state type"), content, tx)));
+            input.paste = Some(Rc::new(move |s, content, tx| f(s.cast::<S>().expect("input paste state type"), content, tx)));
         }
         self
     }
     /// Handle a focused text field's key before the editor. Return true to consume it.
     pub fn on_input_key<S: 'static>(mut self, f: impl Fn(&mut S, &crate::KeyEvent, &mut Tx) -> bool + 'static) -> Self {
         if let Some(input) = &mut self.input {
-            input.key = Some(Rc::new(move |s, key, tx| f(s.downcast_mut::<S>().expect("input key state type"), key, tx)));
+            input.key = Some(Rc::new(move |s, key, tx| f(s.cast::<S>().expect("input key state type"), key, tx)));
         }
         self
     }
@@ -1873,7 +1892,7 @@ impl El {
     /// the element's own points as well.
     pub fn on_secondary_press<S: 'static>(mut self, f: impl Fn(&mut S, PointerPress, &mut Tx) + 'static) -> Self {
         self.on_secondary_press = Some(Rc::new(move |s, p, tx| {
-            f(s.downcast_mut::<S>().expect("secondary press state type"), p.window(), tx);
+            f(s.cast::<S>().expect("secondary press state type"), p.window(), tx);
         }));
         self
     }
@@ -2033,7 +2052,7 @@ impl El {
     /// Trap focus and make the background inert while mounted. Escape requests dismissal.
     pub fn modal<S: 'static>(mut self, click_outside: bool, dismiss: impl Fn(&mut S) + 'static) -> Self {
         self.modal = Some(ModalSpec { outside: click_outside,
-            dismiss: Rc::new(move |s, _| dismiss(s.downcast_mut::<S>().expect("modal state type"))) });
+            dismiss: Rc::new(move |s, _| dismiss(s.cast::<S>().expect("modal state type"))) });
         self
     }
     pub fn modal_click_outside(mut self, enabled: bool) -> Self {
@@ -3399,7 +3418,7 @@ impl El {
     /// a closure in [`edit_access`] so its returned borrow is tied to the state.
     pub fn on_edit<S: 'static>(mut self, f: impl for<'a> Fn(&'a mut S) -> &'a mut TextEdit + 'static) -> Self {
         if let Some(i) = &mut self.input {
-            i.access = Some(Rc::new(move |s: &mut dyn Any| f(downcast::<S>(s))));
+            i.access = Some(Rc::new(edit_fn(move |s| f(downcast::<S>(s)))));
         }
         self
     }
@@ -3825,7 +3844,7 @@ impl El {
     /// <path>` in the trace and `dragOut` in the tree instead. Overlay panels start the same
     /// session; see [`crate::drag_out`] for how far that path is tested.
     pub fn drag_out<S: 'static>(mut self, f: impl Fn(&S) -> Option<crate::DragItem> + 'static) -> Self {
-        self.drag_out = Some(Rc::new(move |s| f(s.downcast_ref::<S>().expect("handler registered for a different state type than the app's"))));
+        self.drag_out = Some(Rc::new(move |s| f(s.cast::<S>().expect("handler registered for a different state type than the app's"))));
         self
     }
     /// How far (points, straight-line) the pointer travels from the press before this
@@ -3944,6 +3963,10 @@ pub fn edit_access<S, F: for<'a> Fn(&'a mut S) -> &'a mut TextEdit>(f: F) -> F {
     f
 }
 
-fn downcast<S: 'static>(s: &mut dyn Any) -> &mut S {
-    s.downcast_mut::<S>().expect("handler registered for a different state type than the app's")
+fn edit_fn<F: for<'a> Fn(crate::states::States<'a>) -> &'a mut TextEdit>(f: F) -> F {
+    f
+}
+
+fn downcast<S: 'static>(s: crate::states::States<'_>) -> &mut S {
+    s.cast::<S>().expect("handler registered for a different state type than the app's")
 }

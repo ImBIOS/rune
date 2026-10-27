@@ -899,11 +899,13 @@ impl<S: 'static> Host<S> {
         let tab_visits_controls = app.tab_visits_controls;
         let fit_height = app.fit_content_height;
         let app_stats = app.dev_stats;
+        let playground = app.playground.take();
         let (mut spec, state, shared) = app.into_parts(args.scene.as_deref());
         let mut size = args.size.unwrap_or(spec.size);
         // The window reports the system appearance and scale when it opens.
         let env = Env::new(args.theme.as_deref() != Some("light"), 1.0);
         let mut rt = runtime_for(&spec, state, size, env, setup_waker(&shared));
+        crate::playground::attach(&mut rt, playground, &spec, args.playground.clone(), true);
         if fit_height {
             spec.min_size = options.fit_min_size(spec.min_size);
             // Opens at the content's height; the first frame corrects any difference its

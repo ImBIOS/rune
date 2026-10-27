@@ -21,7 +21,7 @@ impl<S: 'static> Runtime<S> {
             None => self.trace_event("popup-menu:cancel"),
         }
         let mut one = self.transaction();
-        (request.on_pick)(handler_state(&mut self.state), picked, &mut one);
+        (request.on_pick)(states!(self), picked, &mut one);
         self.latch_requests(&mut one);
         merge(&mut self.pending, one);
         self.dirty = true;

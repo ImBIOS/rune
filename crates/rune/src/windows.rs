@@ -227,6 +227,8 @@ impl<S> WindowSpec<S> {
     /// `Compositor`, `Frame::srgb_blend` says which encoding its passes must match.
     pub fn srgb_blend(mut self, enabled: bool) -> Self { self.app = self.app.srgb_blend(enabled); self }
     pub fn on_focus(mut self, f: fn(&mut S, bool, &mut crate::Tx)) -> Self { self.app = self.app.on_focus(f); self }
+    /// This window's playground, like `App::playground`.
+    pub fn playground(mut self, playground: crate::Playground<S>) -> Self { self.app = self.app.playground(playground); self }
     /// Runs when the app is reopened, like `App::on_reopen`.
     pub fn on_reopen(mut self, f: fn(&mut S, bool, &mut crate::Tx) -> bool) -> Self { self.app = self.app.on_reopen(f); self }
     /// Send `Key::Modifier` presses and releases to this window, like `App::modifier_keys`.
