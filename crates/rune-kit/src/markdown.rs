@@ -43,9 +43,11 @@ use rune::{Align, Color, Cursor, El, Family, Link, LinkPaint, Span, TextHighligh
 
 use crate::Kit;
 
+mod find;
 mod style;
 mod table;
 
+pub use find::{Case, find};
 pub use style::MarkdownStyle;
 #[cfg(feature = "mermaid")] pub(crate) use style::DiagramPaint;
 
@@ -105,7 +107,7 @@ pub struct Table {
 
 /// Maps source UTF-8 byte ranges to rendered text UTF-8 byte ranges.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(super) struct SpanMap(Vec<(Range<usize>, Range<usize>)>);
+pub(super) struct SpanMap(pub(super) Vec<(Range<usize>, Range<usize>)>);
 
 impl SpanMap {
     fn push(&mut self, src: Range<usize>, out: Range<usize>) {
@@ -149,51 +151,6 @@ impl SpanMap {
             src.start += offset;
             src.end += offset;
         }
-    }
-
-    fn map_range(&self, query: Range<usize>, out_text: &str) -> Vec<Range<usize>> {
-        if query.start >= query.end || self.0.is_empty() || out_text.is_empty() {
-            return Vec::new();
-        }
-        let mut mapped: Vec<Range<usize>> = Vec::new();
-        for (src, out) in &self.0 {
-            if query.end <= src.start || src.end <= query.start {
-                continue;
-            }
-            let s0 = query.start.max(src.start);
-            let s1 = query.end.min(src.end);
-            if s0 >= s1 {
-                continue;
-            }
-            let (mut o0, mut o1) = if src.len() == out.len() {
-                (out.start + (s0 - src.start), out.start + (s1 - src.start))
-            } else {
-                let a = if s0 <= src.start {
-                    out.start
-                } else {
-                    out.start + ((s0 - src.start) * out.len()) / src.len()
-                };
-                let b = if s1 >= src.end {
-                    out.end
-                } else {
-                    (out.start + ((s1 - src.start) * out.len()).div_ceil(src.len())).max(a + 1)
-                };
-                (a, b)
-            };
-            o0 = out_text.floor_char_boundary(o0.clamp(out.start, out.end).min(out_text.len()));
-            o1 = out_text.ceil_char_boundary(o1.clamp(out.start, out.end).min(out_text.len()));
-            if o0 >= o1 {
-                continue;
-            }
-            if let Some(prev) = mapped.last_mut()
-                && (prev.end == o0 || out_text.get(prev.end..o0) == Some(PAD))
-            {
-                prev.end = o1;
-            } else {
-                mapped.push(o0..o1);
-            }
-        }
-        mapped
     }
 }
 
@@ -276,7 +233,7 @@ struct Cut {
 /// What colours a [`Block::Code`], one per block in document order (the order the renderer
 /// meets them). Kept beside the blocks so `Block` keeps its shape.
 #[derive(Clone, Debug, PartialEq)]
-struct Source {
+pub(super) struct Source {
     /// The fence's language as written (its info string's first word), if it names one.
     lang: Option<Rc<str>>,
     /// The code's length, to check this belongs to the block it is matched with.
@@ -1038,7 +995,7 @@ pub fn parse_cached(src: &str) -> Rc<Vec<Block>> {
     doc_cached(src).0
 }
 
-fn doc_cached(src: &str) -> Doc {
+pub(super) fn doc_cached(src: &str) -> Doc {
     CACHE.with_borrow_mut(|c| {
         if let Some(hit) = c.docs.get(src) {
             return hit.doc.clone();
@@ -1168,21 +1125,14 @@ impl Highlight {
     }
 }
 
-/// An item accepted by [`Markdown::highlights`]: either `(Range<usize>, Highlight)` by value or
-/// `&(Range<usize>, Highlight)` from a slice.
-pub trait HighlightItem {
+/// An item accepted by [`Markdown::highlights`]: a `Range<usize>`, a match `Vec<Range<usize>>`
+/// from [`find`], or either paired with a [`Highlight`] (by value or reference).
+pub trait HighlightItem: Sized {
     fn into_highlight(self) -> (Range<usize>, Highlight);
-}
-
-impl HighlightItem for (Range<usize>, Highlight) {
-    fn into_highlight(self) -> (Range<usize>, Highlight) {
-        self
-    }
-}
-
-impl HighlightItem for &(Range<usize>, Highlight) {
-    fn into_highlight(self) -> (Range<usize>, Highlight) {
-        self.clone()
+    #[doc(hidden)]
+    fn into_ranges(self) -> (Vec<Range<usize>>, Highlight) {
+        let (r, h) = self.into_highlight();
+        (vec![r], h)
     }
 }
 
@@ -1196,7 +1146,7 @@ pub struct Markdown {
     src: String,
     style: Option<MarkdownStyle>,
     block_keys: Vec<(usize, String)>,
-    highlights: Vec<(Range<usize>, Highlight)>,
+    highlights: Vec<(Vec<Range<usize>>, Highlight)>,
     autolink: bool,
     reveal: f32,
     streaming: bool,
@@ -1216,7 +1166,7 @@ impl Markdown {
         Markdown { src: src.into(), style: None, block_keys: Vec::new(), highlights: Vec::new(), autolink: true, reveal: 0.0, streaming: false, on_link: None, link_look: None, link_ring: None,
             on_task: None, tasks_read_only: false, selectable: false, copy_source: false, scroll_wide: false, highlighter: Highlighter::builtin() }
     }
-    /// Highlight UTF-8 byte ranges of the Markdown source string.
+    /// Highlight UTF-8 byte ranges of the Markdown source string (see [`find`]).
     ///
     /// Ranges refer to the source passed to [`Markdown::new`] (as `pulldown_cmark`'s offset
     /// iterator reports them) and map across inline formatting, code blocks, headings, lists,
@@ -1227,8 +1177,12 @@ impl Markdown {
     /// Backgrounds, rings and foreground colours are paint-only. Matches add no layout nodes;
     /// [`Runtime::elements`](rune::Runtime::elements) reports a `mark` per rendered fragment.
     /// Empty/out-of-source ranges paint nothing; partial UTF-8 characters expand to boundaries.
+    ///
+    /// ```ignore
+    /// let view = Markdown::new(src).highlights(markdown::find(src, query, Case::Insensitive)).build(&kit);
+    /// ```
     pub fn highlights(mut self, highlights: impl IntoIterator<Item = impl HighlightItem>) -> Self {
-        self.highlights = highlights.into_iter().map(HighlightItem::into_highlight).collect();
+        self.highlights = highlights.into_iter().map(HighlightItem::into_ranges).collect();
         self
     }
     /// Default key (`"md-mark-{index}"`) for the `index`-th highlight in [`Self::highlights`]
@@ -1422,7 +1376,7 @@ impl Markdown {
 
 struct Renderer {
     s: MarkdownStyle,
-    highlights: Vec<(Range<usize>, Highlight)>,
+    highlights: Vec<(Vec<Range<usize>>, Highlight)>,
     reveal: f32,
     streaming: bool,
     on_link: Option<LinkWire>,
@@ -1622,8 +1576,8 @@ impl Renderer {
     fn text_highlights_for(&self, text: &str, map: Option<&SpanMap>) -> Vec<TextHighlight> {
         let Some(map) = map.filter(|_| !self.highlights.is_empty()) else { return Vec::new() };
         let mut out = Vec::new();
-        for (idx, (src_range, hl)) in self.highlights.iter().enumerate() {
-            for r in map.map_range(src_range.clone(), text) {
+        for (idx, (src_ranges, hl)) in self.highlights.iter().enumerate() {
+            for r in map.map_ranges(src_ranges, text) {
                 out.push(self.make_text_highlight(idx, r, hl));
             }
         }

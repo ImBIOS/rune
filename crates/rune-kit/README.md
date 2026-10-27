@@ -300,6 +300,10 @@ source each time, and earlier blocks stay mounted.
   blocks, a tab between table cells, no list markers, fences or `**`. Links still open on a
   click, and a selection stays while the source streams on after it. The highlight is
   `k.selection()`; set another with `MarkdownStyle::selection`.
+- **`highlights(..)` and `markdown::find(src, query, case)`** search and highlight the rendered
+  text in source UTF-8 byte ranges across inline markers, tables and code blocks without
+  reshaping text (`Highlight::new()` and `Highlight::current()`, scrolled to with
+  `Tx::scroll_into_view` by `Markdown::highlight_key(index)` or `.key(..)`).
 
 `Tooltip::label(..).render(&TooltipStyle::neutral(dark), &mut layer)` builds a tooltip without
 a kit. `TooltipStyle::max_width(w)` caps its width; `label`, `text` and a `.wrap()` text `child` wrap at it. The
