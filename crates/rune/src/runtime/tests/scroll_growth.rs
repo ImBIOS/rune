@@ -258,3 +258,47 @@ fn rows_all_leaving_a_padded_growth_stack_hold_their_place() {
         assert_eq!(now[..2], [8.0, 28.0], "{left} left: the leaving rows hold on frame 1: {now:?}");
     }
 }
+
+/// Rows removed under a reader who scrolled up end the content above their offset: the
+/// viewport glides to the new end from rest and lands at rest, never past the presented end,
+/// instead of picking up the collapse's speed in a frame.
+#[test]
+fn content_shrinking_under_a_reader_eases_to_its_new_end() {
+    use crate::el::{GrowthSpec, ScrollSpec};
+    fn view(n: &usize, _cx: &mut Cx<usize>) -> El {
+        let mut stack = col().key("stack").w_full().growth(GrowthSpec::default());
+        for i in 0..*n {
+            stack = stack.child(el().key(format!("r{i}")).h(100.0).w_full());
+        }
+        col().key("root").child(col().key("scroll").h(300.0).w_full().scroll(ScrollSpec { stick_bottom: true }).child(stack))
+    }
+    let scroll = |rt: &Runtime<usize>| rt.scrolls.values().next().map(|st| (st.offset, st.max)).unwrap();
+    // (rows left, frame rate, largest first step and frame-to-frame change, as parts of the peak speed)
+    for (left, hz, onset, step) in [(15usize, 120.0, 0.3, 0.4), (5, 120.0, 0.3, 0.4), (15, 60.0, 0.4, 0.55)] {
+        let mut rt = Runtime::new(20usize, view, (200.0, 300.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        rt.frame(1.0 / hz);
+        rt.wheel(100.0, 100.0, 200.0);
+        for _ in 0..30 { rt.frame(1.0 / hz); }
+        let (mut last, _) = scroll(&rt);
+        assert_eq!(last, 1500.0, "reading 200 pt above the end");
+        rt.update(|n, _| *n = left);
+        let mut v = Vec::new();
+        for _ in 0..hz as usize {
+            rt.frame(1.0 / hz);
+            let (offset, max) = scroll(&rt);
+            assert!(offset <= max + 1e-6, "{left} left at {hz} Hz: the end never rises into view");
+            v.push((offset - last) * hz);
+            last = offset;
+        }
+        let end = left as f64 * 100.0 - 300.0;
+        assert!((last - end).abs() < 0.01, "{left} left at {hz} Hz: lands on the new end: {last}");
+        let moving: Vec<f64> = v.iter().copied().skip_while(|s| s.abs() < 1e-9).collect();
+        let peak = moving.iter().fold(0.0f64, |a, s| a.max(s.abs()));
+        let speeds: Vec<i64> = moving.iter().map(|s| s.round() as i64).collect();
+        assert!(moving[0].abs() <= onset * peak, "{left} left at {hz} Hz: starts from rest: {speeds:?}");
+        assert!(moving.windows(2).all(|w| (w[1] - w[0]).abs() <= step * peak), "{left} left at {hz} Hz: no speed jumps: {speeds:?}");
+        let tail = moving.iter().rev().find(|s| s.abs() > 1e-9).unwrap();
+        assert!(tail.abs() <= 0.05 * peak, "{left} left at {hz} Hz: lands at rest: {speeds:?}");
+    }
+}

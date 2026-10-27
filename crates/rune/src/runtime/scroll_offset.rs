@@ -95,6 +95,31 @@ impl<S: 'static> Runtime<S> {
             n.scroll.is_some() && ((x && n.scroll_axes.x()) || (y && n.scroll_axes.y()))
         })
     }
+
+    /// A growth stack shrinking under a reader who scrolled up, until its layout ends above
+    /// their offset: viewport `i` glides to that end from rest, as `Tx::scroll_to` would, rather
+    /// than riding the presented end down at the collapse's own speed and stopping with it.
+    /// `overflow` is this frame's presented overflow. A keep or reveal owns its viewport, and an
+    /// end already above the offset (a settled or instant change) clamps at once.
+    ///
+    /// Returns the layout's end while rows are still moving, which a viewport landed there
+    /// waits for before it sticks to the end, so the presented end's last fraction of a point
+    /// doesn't lift it back up.
+    pub(super) fn ease_to_shrunk_end(&mut self, i: usize, overflow: f64) -> Option<f64> {
+        let c = self.scroll_content(i)?;
+        let stack = self.stacks.get(&self.nodes[c].id)?;
+        let moving = stack.moving || !stack.closing.is_empty();
+        let path = &self.nodes[i].path;
+        let owned = self.keeps.iter().any(|k| k.viewport == *path) || self.scroll_reveals.iter().any(|r| r.viewport == *path);
+        let end = f64::from(self.nodes[c].target[3] - self.nodes[i].target[3]).max(0.0);
+        let still = self.reduced_motion || owned;
+        let st = self.scrolls.get_mut(&self.nodes[i].id)?;
+        if !(still || st.pinned || st.glide.is_some() || st.v.abs() > 1.0 || st.offset > overflow || st.offset - end <= 0.5) {
+            st.glide = Some(0.0);
+            st.glide_to = Some(end);
+        }
+        moving.then_some(end)
+    }
 }
 
 /// Steps a glide on one axis toward `to` on `GLIDE`. Returns whether it is still moving.

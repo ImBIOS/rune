@@ -4825,6 +4825,7 @@ impl<S: 'static> Runtime<S> {
                 (self.keeps.iter().any(|k| k.viewport == *path) || self.scroll_reveals.iter().any(|r| r.viewport == *path))
                     && self.scroll_content(i).and_then(|c| self.stacks.get(&self.nodes[c].id)).is_some_and(|s| s.growing)
             };
+            let laid = if axes.y() { self.ease_to_shrunk_end(i, overflow) } else { None };
             let Some(st) = self.scrolls.get_mut(&id) else { continue };
             st.scrolling = st.direct || st.v.abs() > 1.0 || st.x.v.abs() > 1.0;
             st.direct = false;
@@ -4849,7 +4850,9 @@ impl<S: 'static> Runtime<S> {
                 st.v = 0.0;
             }
             st.offset = st.offset.clamp(0.0, st.max);
-            if sp.stick_bottom && !held && st.offset >= st.max - 0.5 && st.v.abs() <= 1.0 {
+            // Landed on a shrinking stack's new end: stick once its rows get there, not just short.
+            let shrinking = laid.is_some_and(|end| end < st.max - 1e-3 && st.offset < st.max - 1e-3);
+            if sp.stick_bottom && !held && !shrinking && st.offset >= st.max - 0.5 && st.v.abs() <= 1.0 {
                 st.pinned = true;
             }
             if sp.stick_bottom && axes.y() && slack_dt > 0.0 { moving |= self.step_slack(i, slack_dt); }
