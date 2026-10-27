@@ -198,14 +198,23 @@ fn still(polls: &mut u32, _: f64, tx: &mut Tx) -> bool { *polls += 1; tx.wake_af
 fn every_third(polls: &mut u32, _: f64, tx: &mut Tx) -> bool { *polls += 1; tx.wake_after(COMP_PERIOD); *polls % 3 == 0 }
 fn changed(polls: &mut u32, _: f64, tx: &mut Tx) -> bool { *polls += 1; tx.wake_after(COMP_PERIOD); true }
 
+/// A compositor whose `animating` follows a shared flag, as one driven by app state.
+struct FlagComp(std::rc::Rc<std::cell::Cell<bool>>);
+
+impl crate::Compositor<u32> for FlagComp {
+    fn render(&mut self, f: &mut crate::Frame<'_, u32>) { f.draw_ui(); }
+    fn animating(&self) -> bool { self.0.get() }
+}
+
 /// A window as the host runs it, with or without a compositor, counting its frames.
 struct CompHost {
     rt: Runtime<u32>,
     presented: Option<Presented>,
     config: wgpu::SurfaceConfiguration,
     idle: bool,
-    /// A compositor drawing, and whether it animates.
-    comp: Option<bool>,
+    comp: Option<Box<dyn crate::Compositor<u32>>>,
+    /// Whether `comp` animates.
+    comp_animates: std::rc::Rc<std::cell::Cell<bool>>,
     frames: u32,
 }
 
@@ -226,7 +235,9 @@ impl CompHost {
             view_formats: vec![],
             color_space: Default::default(),
         };
-        let mut host = Self { rt, presented: None, config, idle: false, comp, frames: 0 };
+        let comp_animates = std::rc::Rc::new(std::cell::Cell::new(comp == Some(true)));
+        let comp = comp.map(|_| Box::new(FlagComp(comp_animates.clone())) as Box<dyn crate::Compositor<u32>>);
+        let mut host = Self { rt, presented: None, config, idle: false, comp, comp_animates, frames: 0 };
         host.frame(false);
         host.rt.poll = Some(poll);
         host.frame(false);
@@ -240,8 +251,8 @@ impl CompHost {
         if quiet && self.comp.is_none() && self.presented.as_ref().is_some_and(|p| p.unchanged(&self.rt, &self.config, animating, None)) {
             return false;
         }
-        let moving = animating || self.comp == Some(true);
-        self.idle = Presented::settle(&mut self.presented, &self.rt, &self.config, moving, None, false, self.comp.is_some());
+        let moving = animating || composing(self.comp.as_deref());
+        self.idle = Presented::settle(&mut self.presented, &self.rt, &self.config, moving, None, true, self.comp.is_some());
         self.frames += 1;
         true
     }
@@ -252,7 +263,7 @@ impl CompHost {
         let due = self.rt.wake_deadline().expect("a timer is armed");
         let now = self.rt.wall_start.unwrap().elapsed().as_secs_f64();
         self.rt.wall_start = self.rt.wall_start.map(|t| t - Duration::from_secs_f64((due - now).max(0.0) + 1e-4));
-        let rests = self.idle && self.presented.is_some();
+        let rests = self.idle && !composing(self.comp.as_deref()) && self.presented.is_some();
         let frame = match rests.then(|| self.rt.resting_wake()).flatten() {
             Some(stale) => {
                 let frame = stale || self.rt.stale();
@@ -316,4 +327,31 @@ fn a_compositor_s_frame_never_counts_as_unchanged() {
     let frames = host.frames;
     assert!(!host.timer_wake());
     assert_eq!(host.frames, frames);
+}
+
+#[test]
+fn a_compositor_that_starts_animating_while_the_window_rests_draws_its_next_timer() {
+    let mut host = CompHost::new(Some(false), still);
+    assert!(!host.timer_wake());
+    host.comp_animates.set(true);
+    assert!(host.timer_wake(), "a due timer draws once the compositor animates");
+    assert!(!host.idle && host.presented.is_none(), "and the window stops resting");
+    host.comp_animates.set(false);
+    assert!(host.timer_wake());
+    assert!(!host.timer_wake(), "still again, it rests");
+}
+
+#[test]
+fn a_frame_that_leaves_work_for_the_next_does_not_settle() {
+    let mut host = CompHost::new(Some(false), still);
+    assert!(host.idle);
+    // The compositor invalidated the view while drawing, as one ending its own motion may.
+    host.rt.invalidate();
+    let idle = Presented::settle(&mut host.presented, &host.rt, &host.config, false, None, true, true);
+    assert!(!idle && host.presented.is_none(), "a frame with a commit pending isn't idle");
+    host.frame(false);
+    assert!(host.idle && host.presented.is_some(), "the frame that commits it settles");
+    // A frame the window may not rest on (hidden, or a trace counting frames) records nothing.
+    let idle = Presented::settle(&mut host.presented, &host.rt, &host.config, false, None, false, true);
+    assert!(idle && host.presented.is_none());
 }

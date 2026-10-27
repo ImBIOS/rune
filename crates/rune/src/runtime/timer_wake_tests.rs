@@ -195,3 +195,30 @@ fn a_timer_poll_that_hides_the_window_asks_no_frame() {
     rt.frame(crate::frame_clock::RESUME_STEP);
     assert_eq!(rt.state.polls, polls + 2);
 }
+
+/// The frame a resting wake asked for runs covered or misses its drawable (`covered_step`):
+/// the wake's poll stands for it, and its timers count from that poll.
+#[test]
+fn a_timer_frame_that_runs_covered_does_not_poll_again() {
+    let mut rt = runtime(App::default());
+    let polls = rt.state.polls;
+    rt.state.change_at = polls + 1;
+    assert!(host_wake(&mut rt, |_| true));
+    let polled = rt.clock;
+    assert!(rt.hidden_wake(), "the poll's change is still to draw");
+    assert_eq!(rt.state.polls, polls + 1, "one poll for the wake");
+    assert!((rt.wake_deadline().unwrap() - (polled + PERIOD.as_secs_f64())).abs() < 1e-9, "its timer counts from the poll");
+    rt.frame(crate::frame_clock::RESUME_STEP);
+    assert_eq!(rt.state.polls, polls + 2, "the frame that draws next polls");
+
+    // Another timer due by then still polls.
+    let mut rt = runtime(App::default());
+    let polls = rt.state.polls;
+    rt.state.change_at = polls + 1;
+    assert!(host_wake(&mut rt, |_| true));
+    let polled = rt.clock;
+    rt.schedule_wakes_from(polled, [Duration::from_millis(2)]);
+    advance(&mut rt, 0.005);
+    rt.hidden_wake();
+    assert_eq!(rt.state.polls, polls + 2);
+}

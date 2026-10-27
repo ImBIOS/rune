@@ -30,7 +30,15 @@ impl<S: 'static> Runtime<S> {
     /// lays out, animates or draws. Like `update`, its changes wait, dirty, for the next frame.
     /// Returns whether the last frame went out of date: `poll` reported a change or asked for a
     /// scroll or text flight, or a live-edit patch arrived. A `wake_after` alone doesn't count.
+    ///
+    /// A resting wake's poll still stands for a frame it asked for that runs covered or misses
+    /// its drawable: its timers count from it, and nothing polls again unless another came due.
     pub(crate) fn poll_hidden(&mut self) -> bool {
+        let now = self.wall_clock().unwrap_or(self.clock);
+        if self.timer_wake.asked.is_some() && self.wake_deadlines.first().is_none_or(|t| *t > now) {
+            self.cancel_timer_frame();
+            return self.needs_commit();
+        }
         let stale = self.poll_alone();
         let wakes = std::mem::take(&mut self.pending.wakes);
         self.schedule_wakes(wakes);

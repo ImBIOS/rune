@@ -1,4 +1,11 @@
+use crate::compose::Compositor;
 use crate::runtime::Runtime;
+
+/// Whether a compositor draws motion of its own (`Compositor::animating`): its window never
+/// rests, and a due timer draws.
+pub(super) fn composing<S: 'static>(comp: Option<&dyn Compositor<S>>) -> bool {
+    comp.is_some_and(|c| c.animating())
+}
 
 /// What an idle window's last frame drew. A timer that wakes the window builds a frame before
 /// taking a drawable; when it would draw these same pixels, nothing is acquired or presented.
@@ -16,14 +23,16 @@ pub(super) struct Presented {
 }
 
 impl Presented {
-    /// After a shown frame (`hidden` false): whether the window goes idle, and the frame it rests
-    /// on until anything asks for another. `moving`: motion, a compositor or a window frame in
-    /// flight; `next_tick`: the running display link's next tick.
+    /// After a frame: whether the window goes idle, and the frame it rests on until anything
+    /// asks for another. `moving`: motion, a compositor or a window frame in flight; `next_tick`:
+    /// the running display link's next tick; `rests`: the window may rest on this frame (shown,
+    /// and no trace counting frames). A frame that left work for the next one doesn't settle:
+    /// a compositor may update or invalidate the state while it draws.
     pub(super) fn settle<S: 'static>(this: &mut Option<Self>, rt: &Runtime<S>, config: &wgpu::SurfaceConfiguration,
-        moving: bool, next_tick: Option<crate::time::Instant>, hidden: bool, composed: bool) -> bool {
-        let idle = !(moving || rt.has_pending_input() || rt.live_pending() || rt.window_frame.is_some()
+        moving: bool, next_tick: Option<crate::time::Instant>, rests: bool, composed: bool) -> bool {
+        let idle = !(moving || rt.stale() || rt.live_pending() || rt.window_frame.is_some()
             || super::timer_wants_frame(rt, next_tick));
-        if idle && !hidden { Self::record(this, rt, config, composed) } else { *this = None }
+        if idle && rests { Self::record(this, rt, config, composed) } else { *this = None }
         idle
     }
 

@@ -32,7 +32,7 @@ mod launch_drawables;
 #[cfg(target_os = "macos")]
 use launch_drawables::LaunchDrawables;
 mod presented;
-use presented::Presented;
+use presented::{Presented, composing};
 mod platform_sync;
 use platform_sync::sync_platform;
 #[cfg(test)]
@@ -2160,7 +2160,7 @@ impl<S: 'static> Host<S> {
         // Only updates that changed nothing (`AppHandle::update_if`), or an empty startup drain
         // after `try_create` already drew the first frame, ran: no poll, no frame.
         let quiet = (had_updates || (!wake && !stale_before)) && !changed && requests.only_updates()
-            && !self.rt.patch_pending() && (stale_before || !self.rt.needs_commit());
+            && !self.rt.patch_pending() && (stale_before || !self.rt.needs_commit()) && !composing(self.comp.as_deref());
         self.clipboard.flush(&mut self.rt);
         // The next frame polls for the wake.
         if wake && !quiet { self.rt.cancel_timer_frame(); }
@@ -2417,6 +2417,7 @@ impl<S: 'static> Host<S> {
         }
         w.occluded = false;
         self.rt.set_live_visible(true);
+        self.rt.cancel_timer_frame();
         self.native_handle.native.number.store(native_window_number(&w.window).unwrap_or(0), Ordering::Release);
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         if is_wayland(event_loop) {
@@ -2874,7 +2875,7 @@ impl<S: 'static> Host<S> {
             self.clock.hold(frame_time);
             (rt.frame(0.0), 0.0)
         } else {
-            self.clock.advance(rt, frame_time, self.comp.as_ref().is_some_and(|c| c.animating()))
+            self.clock.advance(rt, frame_time, composing(self.comp.as_deref()))
         };
         #[cfg(target_os = "macos")]
         let frame = if l.materials.update(rt.transparent, !rt.materials.is_empty(), &l.window, &l.surface) {
@@ -2981,8 +2982,8 @@ impl<S: 'static> Host<S> {
         // A poll asking for the next frame (`wake_after(Duration::ZERO)`) keeps a running display
         // link going; without one its timer waits a frame in `wake_deadline`.
         let next_tick = l.next_tick(now).filter(|_| !hidden);
-        // A still compositor rests too: its timers poll first, though its frames never count as unchanged.
-        self.idle = Presented::settle(&mut l.presented, rt, &l.config, animating || self.frame_anim.is_some(), next_tick, hidden, self.comp.is_some());
+        let rests = !hidden && !(self.trace.is_some() && self.args.frames.is_some());
+        self.idle = Presented::settle(&mut l.presented, rt, &l.config, animating || self.frame_anim.is_some(), next_tick, rests, self.comp.is_some());
         #[cfg(target_os = "macos")]
         if !hidden && let Some(latency) = l.launch_drawables.settle(self.idle, now) {
             l.config.desired_maximum_frame_latency = latency;
@@ -3115,7 +3116,7 @@ impl<S: 'static> AnyHost for Host<S> {
             } else if self.win.as_ref().is_some_and(|w| (launcher || (w.visible && !w.occluded)) && !w.minimized()
                 && !w.backing_off(Instant::now())) {
                 // A resting window polls first and draws only for what that changed.
-                let rests = self.idle && self.win.as_ref().is_some_and(Win::rests);
+                let rests = self.idle && !composing(self.comp.as_deref()) && self.win.as_ref().is_some_and(Win::rests);
                 let frame = match rests.then(|| self.rt.resting_wake()).flatten() {
                     Some(stale) => {
                         self.clipboard.flush(&mut self.rt);
@@ -3415,6 +3416,8 @@ impl<S: 'static> Host<S> {
                 if size.width == 0 || size.height == 0 {
                     self.secure_input.set(false);
                     l.stop_pacing();
+                    l.presented = None;
+                    rt.cancel_timer_frame();
                     self.idle = true; return;
                 }
                 let origin_moved = screen_origin(&l.window).is_some_and(|o| rt.set_window_origin(o));
@@ -3465,6 +3468,7 @@ impl<S: 'static> Host<S> {
                 if occluded {
                     self.secure_input.set(false);
                     l.stop_pacing();
+                    rt.cancel_timer_frame();
                     self.idle = true; return;
                 }
                 rt.set_titlebar_inset(place_chrome(&l.window, chrome));
