@@ -1,0 +1,14 @@
+[package]
+name = "knobs"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rune = { path = "../../crates/rune" }
+rune-knobs = { path = "../../crates/rune-knobs" }
+
+[features]
+default = ["panel"]
+# A real app turns this on only in its dev builds; shipped builds read each knob's default.
+panel = ["rune-knobs/panel"]

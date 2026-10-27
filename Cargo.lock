@@ -1475,6 +1475,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "knobs"
+version = "0.0.1"
+dependencies = [
+ "rune",
+ "rune-knobs",
+]
+
+[[package]]
 name = "konst"
 version = "0.2.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2916,6 +2924,14 @@ dependencies = [
  "rune-motion",
  "rune-theme-opencode",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "rune-knobs"
+version = "0.0.1"
+dependencies = [
+ "rune",
+ "rune-knobs",
 ]
 
 [[package]]
