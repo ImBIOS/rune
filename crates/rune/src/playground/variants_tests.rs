@@ -13,6 +13,10 @@ fn digits_switch_a_storys_variant_and_r_remakes_the_one_its_on() {
     let mut rt = runtime_with(lab_variants(), Some(Some("Pressed".into())), true);
     assert_eq!(shows(&rt, "lab"), "ticks 0 presses 5", "a story with variants starts on its first");
     assert!(find(&rt, "playground-variant-0").is_some() && find(&rt, "playground-variant-1").is_some(), "the side column lists them");
+    assert_eq!(shows(&rt, "playground-hint"), "↑↓ stories · 1–2 variants · → triggers · Esc back");
+    let all = rt.elements();
+    let caps: Vec<_> = all.iter().filter(|e| e.parent.is_some_and(|p| all[p].key.as_deref() == Some("cap"))).filter_map(|e| e.text.clone()).collect();
+    assert_eq!(caps, ["1", "2", "R", "X"], "each variant's and trigger's key, by its row");
     letter(&mut rt, "2");
     assert_eq!(shows(&rt, "lab"), "ticks 0 presses 50");
     tap(&mut rt, "bump");

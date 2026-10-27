@@ -185,7 +185,12 @@ impl<S: 'static> Live<S> {
                         .on_press_tx(move |_: &mut Controls, tx: &mut Tx| tx.playground.push(request.clone()))
                 }))
         });
-        let hint = if triggers.is_empty() { "↑↓ stories · Esc back" } else { "↑↓ stories · → triggers · Esc back" };
+        let hint = [
+            Some("↑↓ stories".to_owned()),
+            match variants.len().min(9) { 0 => None, 1 => Some("1 variant".into()), n => Some(format!("1–{n} variants")) },
+            (!triggers.is_empty()).then(|| "→ triggers".into()),
+            Some("Esc back".into()),
+        ].into_iter().flatten().collect::<Vec<_>>().join(" · ");
         col().key("playground-side").w(SIDE).h(height).px(12.0).pt(12.0).pb(12.0).gap(12.0)
             .children(title)
             .children(slot)
