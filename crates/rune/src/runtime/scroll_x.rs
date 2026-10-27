@@ -188,6 +188,7 @@ impl<S: 'static> Runtime<S> {
     /// Scrolls the horizontal viewport latched for the gesture (or the innermost one at (x, y))
     /// by `dx` points, 1:1.
     fn wheel_x(&mut self, x: f32, y: f32, dx: f32) {
+        self.release_hover_hold();
         self.dismiss_help();
         let latched = self.wheel_lock.scroller.filter(|id| {
             self.node_index.get(id).is_some_and(|&i| {
@@ -213,6 +214,7 @@ impl<S: 'static> Runtime<S> {
             self.fling(x, y, vy);
             return;
         }
+        self.release_hover_hold();
         self.dismiss_help();
         let Some(id) = self.scroll_at_axis(x, y, true) else { return };
         if let Some(st) = self.scrolls.get_mut(&id) {

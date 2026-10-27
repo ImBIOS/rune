@@ -66,3 +66,107 @@ fn a_wheel_scroll_still_hovers_each_row_it_brings_under_the_pointer() {
     let under = format!("a{}", ((offset + 110.0) / 20.0) as usize);
     assert!(shown(&rt).contains(&under), "{under}: {:?}", shown(&rt));
 }
+
+/// Forty rows, each darkening while pressed and gliding twenty rows on when pressed.
+fn pressing(_: &(), _: &mut Cx<()>) -> El {
+    let rows = col().key("rows").w_full().children((0..40).map(|k| crate::row().key(format!("r{k}")).w_full().h(20.0)
+        .press(Color::WHITE).press_scale(0.9).on_press_tx(|_: &mut (), tx: &mut Tx| tx.scroll_to("scroll", 0.0, 400.0))));
+    col().size(200.0, 200.0).child(col().key("scroll").size(200.0, 200.0).scroll(crate::ScrollSpec { stick_bottom: false }).child(rows))
+}
+
+#[test]
+fn a_press_that_starts_a_glide_still_lets_go() {
+    let mut rt = Runtime::new((), pressing, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.pointer_move(100.0, 110.0);
+    rt.frame(1.0 / 120.0);
+    rt.pointer_down(100.0, 110.0);
+    rt.frame(1.0 / 120.0);
+    let id = rt.nodes.iter().find(|n| n.named("r5")).unwrap().id;
+    assert_eq!(rt.scene.store().target(id, P_PRESS), Some(1.0));
+    assert_eq!(rt.scene.store().target(id, P_PRESS_SCALE), Some(0.9));
+    rt.pointer_up(100.0, 110.0);
+    rt.frame(1.0 / 120.0);
+    rt.frame(1.0 / 120.0);
+    assert!(rt.scroll_holds_hover(), "the press's glide holds hover");
+    assert_eq!(rt.scene.store().target(id, P_PRESS), Some(0.0), "the press lets go mid-glide");
+    assert_eq!(rt.scene.store().target(id, P_PRESS_SCALE), Some(1.0), "the press scale springs back mid-glide");
+}
+
+#[test]
+fn the_hold_ends_with_its_glide() {
+    let mut rt = hovering();
+    rt.update(|_, tx| tx.scroll_to("scroll", 0.0, 400.0));
+    rt.frame(1.0 / 120.0);
+    assert!(rt.scrolls.values().any(|s| s.hover_held));
+    for _ in 0..600 {
+        rt.frame(1.0 / 120.0);
+        if rt.scrolls.values().all(|s| s.glide.is_none()) { break; }
+    }
+    assert!(rt.scrolls.values().all(|s| !s.hover_held), "no stale hold is left for a later glide");
+}
+
+/// Two viewports side by side, and a modal over both while `open`.
+fn pair(open: &bool, _: &mut Cx<bool>) -> El {
+    let side = |key: &str| col().key(key).size(100.0, 200.0).scroll(crate::ScrollSpec { stick_bottom: false })
+        .child(col().w_full().children((0..40).map(|k| crate::row().key(format!("{key}{k}")).w_full().h(20.0).hover_group()
+            .child(el().key(format!("a{key}{k}")).size(10.0, 10.0).fill(Color::WHITE).group_opacity(0.0, 1.0)))));
+    let root = crate::row().size(200.0, 200.0).child(side("l")).child(side("r"));
+    if *open { root.child(col().key("sheet").absolute(150.0, 150.0).size(40.0, 40.0).modal(true, |s: &mut bool| *s = false)) } else { root }
+}
+
+fn gliding_pair() -> Runtime<bool> {
+    let mut rt = Runtime::new(false, pair, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.pointer_move(50.0, 110.0);
+    rt.frame(1.0 / 120.0);
+    rt.update(|_, tx| { tx.scroll_to("l", 0.0, 400.0); tx.scroll_to("r", 0.0, 400.0); });
+    rt.frame(1.0 / 120.0);
+    assert!(rt.scroll_holds_hover());
+    rt
+}
+
+#[test]
+fn a_hand_scroll_anywhere_lets_go_of_the_hold() {
+    let mut rt = gliding_pair();
+    rt.wheel(150.0, 110.0, -10.0);
+    rt.frame(1.0 / 120.0);
+    assert!(rt.scrolls.values().any(|s| s.glide.is_some()), "the viewport under the pointer still glides");
+    assert!(!rt.scroll_holds_hover(), "a wheel over the other viewport lets hover follow the pointer again");
+}
+
+#[test]
+fn a_viewport_under_a_modal_holds_no_hover() {
+    let mut rt = gliding_pair();
+    rt.update(|s, _| *s = true);
+    rt.frame(1.0 / 120.0);
+    assert!(rt.scrolls.values().any(|s| s.glide.is_some() && s.hover_held));
+    assert!(!rt.scroll_holds_hover(), "a modal makes the gliding viewport inert");
+}
+
+/// Two hundred virtual rows, each recording its `on_hover_change`.
+fn hover_rows(_: &Vec<(usize, bool)>, _: &mut Cx<Vec<(usize, bool)>>) -> El {
+    let rows = col().key("rows").w_full().growth(crate::el::GrowthSpec::default()).virtualize(20.0).children((0..200).map(|k| crate::row().key(format!("r{k}")).w_full().h(20.0)
+        .on_hover_change(move |s: &mut Vec<(usize, bool)>, inside, _| s.push((k, inside)))));
+    col().size(200.0, 200.0).child(col().key("scroll").size(200.0, 200.0).scroll(crate::ScrollSpec { stick_bottom: false }).child(rows))
+}
+
+#[test]
+fn a_row_leaving_the_tree_under_a_held_glide_hears_the_pointer_leave() {
+    let mut rt = Runtime::new(Vec::new(), hover_rows, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.pointer_move(100.0, 110.0);
+    rt.frame(1.0 / 120.0);
+    rt.frame(1.0 / 120.0);
+    assert_eq!(rt.state, [(5, true)]);
+    rt.update(|_, tx| tx.scroll_to("scroll", 0.0, 3000.0));
+    rt.frame(1.0 / 120.0);
+    assert!(rt.scroll_holds_hover());
+    assert!(!rt.nodes.iter().any(|n| n.named("r5") && !rt.is_exiting(n.id)), "the glide's cut unmounts the row");
+    for _ in 0..120 {
+        rt.frame(1.0 / 120.0);
+        if rt.state.contains(&(5, false)) { break; }
+    }
+    assert!(rt.state.contains(&(5, false)), "the row heard the leave before it was pruned: {:?}", rt.state);
+    assert!(rt.scroll_holds_hover(), "while the glide still holds hover");
+}

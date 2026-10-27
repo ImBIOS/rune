@@ -877,6 +877,10 @@ struct ScrollState {
     glide: Option<f32>,
     /// The glide started under a still pointer, which hasn't moved since (see `scroll_holds_hover`).
     hover_held: bool,
+    /// The glide is `ease_to_shrunk_end`'s, which retargets or ends it as the rows move.
+    shrink_glide: bool,
+    /// A hand scrolled while the growth stack moved: no shrink glide until it settles.
+    shrink_cut: bool,
     /// Where a glide goes, when not to the bottom.
     glide_to: Option<f64>,
     /// At-bottom state last sent to `El::on_at_bottom`.
@@ -1161,6 +1165,8 @@ pub struct Runtime<S: 'static> {
     hovered: Option<String>,
     /// Elements with `on_hover_change` that the pointer is inside.
     hover_within: Vec<String>,
+    /// `on_hover_change` handlers of elements that left the tree, owed their queued leave.
+    hover_gone: Vec<(String, crate::el::WindowFocusFn)>,
     /// Elements with `hover_delays` whose `on_hover_change` last heard `true`.
     hover_shown: Vec<String>,
     /// Delayed hover changes waiting out their delay: path, inside, due on the clock.
@@ -1520,6 +1526,7 @@ impl<S: 'static> Runtime<S> {
             surface_visible: true,
             hovered: None,
             hover_within: Vec::new(),
+            hover_gone: Vec::new(),
             hover_shown: Vec::new(),
             hover_pending: Vec::new(),
             hover_paused: false,
@@ -2471,7 +2478,7 @@ impl<S: 'static> Runtime<S> {
         self.queue.extend(changes);
         // Hit tests read last frame's drawn rects and clips by index. When a commit moved the
         // indices, the build re-evaluates hover from fresh geometry instead.
-        if (self.built || self.nodes.iter().map(|n| n.id).eq(self.built_ids.iter().copied())) && !self.scroll_holds_hover() {
+        if self.built || self.nodes.iter().map(|n| n.id).eq(self.built_ids.iter().copied()) {
             self.update_interaction();
         }
         #[cfg(test)]
@@ -2605,6 +2612,7 @@ impl<S: 'static> Runtime<S> {
         self.node_index.clear();
         for (old_idx, mut n) in old.into_iter().enumerate() {
             if !self.scene.contains(n.id) {
+                self.hover_pruned(&n);
                 self.reveals.remove(&n.id);
                 self.scrolls.remove(&n.id);
                 self.loops.remove(&n.id);
@@ -2853,7 +2861,8 @@ impl<S: 'static> Runtime<S> {
                 true
             }
             Action::HoverChange(path, inside) => {
-                let Some(f) = self.node(&path).and_then(|n| n.on_hover_change.clone()) else { return false };
+                let gone = self.hover_gone.iter().position(|g| g.0 == path).map(|i| self.hover_gone.remove(i).1);
+                let Some(f) = self.node(&path).and_then(|n| n.on_hover_change.clone()).or(gone) else { return false };
                 f(handler_state(&mut self.state), inside, &mut one);
                 true
             }
@@ -3187,6 +3196,7 @@ impl<S: 'static> Runtime<S> {
     /// height. The hand moved it: any fling or glide stops, and a `stick_bottom` view that
     /// lands on its end follows it again.
     fn page_to(&mut self, i: usize, to: impl FnOnce(f64, f64, f64) -> f64) -> bool {
+        self.release_hover_hold();
         self.keeps.clear();
         self.scroll_reveals.clear();
         let (id, page, stick) = (self.nodes[i].id, f64::from(self.nodes[i].local.h * 0.9), self.nodes[i].scroll.is_some_and(|s| s.stick_bottom));
@@ -4523,6 +4533,8 @@ impl<S: 'static> Runtime<S> {
                     scrolling: false,
                     glide: None,
                     hover_held: false,
+                    shrink_glide: false,
+                    shrink_cut: false,
                     glide_to: None,
                     at_bottom: None,
                     far_from_bottom: None,
@@ -4582,7 +4594,9 @@ impl<S: 'static> Runtime<S> {
                     }
                 }
             }
-            if self.node_index.contains_key(&old.id) || !self.scene.contains(old.id) {
+            if self.node_index.contains_key(&old.id) { continue; }
+            if !self.scene.contains(old.id) {
+                self.hover_pruned(&old);
                 continue;
             }
             let old_parent_id = old.parent.and_then(|p| old_ids.get(p).copied());
@@ -4850,6 +4864,7 @@ impl<S: 'static> Runtime<S> {
                 st.v = 0.0;
             }
             st.offset = st.offset.clamp(0.0, st.max);
+            if st.glide.is_none() && st.x.glide.is_none() { st.hover_held = false; }
             // Landed on a shrinking stack's new end: stick once its rows get there, not just short.
             let shrinking = laid.is_some_and(|end| end < st.max - 1e-3 && st.offset < st.max - 1e-3);
             if sp.stick_bottom && !held && !shrinking && st.offset >= st.max - 0.5 && st.v.abs() <= 1.0 {
@@ -4950,7 +4965,7 @@ impl<S: 'static> Runtime<S> {
     /// point the drag last saw has nothing new to report, and its instant transaction would
     /// cut short whatever the press started (a tapped slider's knob mid-spring).
     fn move_pointer(&mut self, x: f32, y: f32, drag_move: bool) {
-        if self.pointer != Some((x, y)) { self.hover_paused = false; self.scrolls.values_mut().for_each(|s| s.hover_held = false); }
+        if self.pointer != Some((x, y)) { self.hover_paused = false; self.release_hover_hold(); }
         self.pointer = Some((x, y));
         if self.in_viewport(x, y) { self.left_in_capture = false; }
         for &(id, rect) in &self.hits {
@@ -5578,6 +5593,7 @@ impl<S: 'static> Runtime<S> {
     /// Wheel or trackpad delta in points (positive `dy` moves content down, like a browser's
     /// negative deltaY). Applied 1:1: the platform supplies its own momentum phases.
     pub fn wheel(&mut self, x: f32, y: f32, dy: f32) {
+        self.release_hover_hold();
         self.keeps.clear();
         self.scroll_reveals.clear();
         self.dismiss_help();
@@ -5598,6 +5614,7 @@ impl<S: 'static> Runtime<S> {
     /// Releases a scroll with `velocity` (points per second, positive moves content down);
     /// the runtime decays it (for platforms without OS momentum and headless scripts).
     pub fn fling(&mut self, x: f32, y: f32, velocity: f32) {
+        self.release_hover_hold();
         self.keeps.clear();
         self.scroll_reveals.clear();
         self.dismiss_help();
@@ -7281,11 +7298,10 @@ impl<S: 'static> Runtime<S> {
         // A moving chip can enter a stationary pointer. Re-evaluate against this frame's
         // geometry without inventing pointer-move or drag events on animation frames.
         let queued = self.queue.len();
-        let held = self.scroll_holds_hover();
-        if let Some((x, y)) = self.pointer.filter(|_| !held) { self.refresh_hover(x, y); }
+        if let Some((x, y)) = self.pointer { self.refresh_hover(x, y); }
         // A live transform can change hover paint with no handler and no running spring.
         // Retarget from the new geometry and schedule the frame that samples that paint.
-        let interaction = self.pointer.is_some() && !held && self.update_interaction();
+        let interaction = self.pointer.is_some() && self.update_interaction();
         self.queue.len() > queued || interaction
     }
 

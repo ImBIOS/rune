@@ -259,29 +259,37 @@ fn rows_all_leaving_a_padded_growth_stack_hold_their_place() {
     }
 }
 
+/// `n` rows of 100 pt in a growth stack, in a 300 pt `stick_bottom` viewport.
+fn shrinking(n: &usize, _cx: &mut Cx<usize>) -> El {
+    use crate::el::{GrowthSpec, ScrollSpec};
+    let mut stack = col().key("stack").w_full().growth(GrowthSpec::default());
+    for i in 0..*n {
+        stack = stack.child(el().key(format!("r{i}")).h(100.0).w_full());
+    }
+    col().key("root").child(col().key("scroll").h(300.0).w_full().scroll(ScrollSpec { stick_bottom: true }).child(stack))
+}
+
+/// Twenty `shrinking` rows, read 200 pt above their end.
+fn reading(hz: f64) -> Runtime<usize> {
+    let mut rt = Runtime::new(20usize, shrinking, (200.0, 300.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    rt.frame(1.0 / hz);
+    rt.wheel(100.0, 100.0, 200.0);
+    for _ in 0..30 { rt.frame(1.0 / hz); }
+    assert_eq!(rt.scrolls.values().next().unwrap().offset, 1500.0, "reading 200 pt above the end");
+    rt
+}
+
 /// Rows removed under a reader who scrolled up end the content above their offset: the
 /// viewport glides to the new end from rest and lands at rest, never past the presented end,
 /// instead of picking up the collapse's speed in a frame.
 #[test]
 fn content_shrinking_under_a_reader_eases_to_its_new_end() {
-    use crate::el::{GrowthSpec, ScrollSpec};
-    fn view(n: &usize, _cx: &mut Cx<usize>) -> El {
-        let mut stack = col().key("stack").w_full().growth(GrowthSpec::default());
-        for i in 0..*n {
-            stack = stack.child(el().key(format!("r{i}")).h(100.0).w_full());
-        }
-        col().key("root").child(col().key("scroll").h(300.0).w_full().scroll(ScrollSpec { stick_bottom: true }).child(stack))
-    }
     let scroll = |rt: &Runtime<usize>| rt.scrolls.values().next().map(|st| (st.offset, st.max)).unwrap();
     // (rows left, frame rate, largest first step and frame-to-frame change, as parts of the peak speed)
     for (left, hz, onset, step) in [(15usize, 120.0, 0.3, 0.4), (5, 120.0, 0.3, 0.4), (15, 60.0, 0.4, 0.55)] {
-        let mut rt = Runtime::new(20usize, view, (200.0, 300.0), Env::new(true, 2.0));
-        rt.frame(0.0);
-        rt.frame(1.0 / hz);
-        rt.wheel(100.0, 100.0, 200.0);
-        for _ in 0..30 { rt.frame(1.0 / hz); }
+        let mut rt = reading(hz);
         let (mut last, _) = scroll(&rt);
-        assert_eq!(last, 1500.0, "reading 200 pt above the end");
         rt.update(|n, _| *n = left);
         let mut v = Vec::new();
         for _ in 0..hz as usize {
@@ -301,4 +309,79 @@ fn content_shrinking_under_a_reader_eases_to_its_new_end() {
         let tail = moving.iter().rev().find(|s| s.abs() > 1e-9).unwrap();
         assert!(tail.abs() <= 0.05 * peak, "{left} left at {hz} Hz: lands at rest: {speeds:?}");
     }
+}
+
+/// A wheel mid-glide hands the viewport back: no glide starts again until the rows settle.
+#[test]
+fn a_hand_scroll_mid_shrink_keeps_the_viewport() {
+    let mut rt = reading(120.0);
+    rt.update(|n, _| *n = 15);
+    for _ in 0..6 { rt.frame(1.0 / 120.0); }
+    assert!(rt.scrolls.values().next().unwrap().glide.is_some(), "the collapse glides");
+    rt.wheel(100.0, 100.0, 10.0);
+    for f in 0..120 {
+        rt.frame(1.0 / 120.0);
+        assert!(rt.scrolls.values().next().unwrap().glide.is_none(), "frame {f}: no glide takes the viewport back from the hand");
+    }
+}
+
+/// A second removal mid-glide retargets it to the newer end without braking, and rows coming
+/// back past the offset end it where it is.
+#[test]
+fn a_shrink_glide_follows_the_end_as_it_moves() {
+    let mut rt = reading(120.0);
+    rt.update(|n, _| *n = 15);
+    for _ in 0..8 { rt.frame(1.0 / 120.0); }
+    let v = rt.scrolls.values().next().unwrap().glide.unwrap();
+    assert!(v.abs() > 1.0, "gliding at {v}");
+    rt.update(|n, _| *n = 10);
+    rt.frame(1.0 / 120.0);
+    let st = rt.scrolls.values().next().unwrap();
+    assert_eq!(st.glide_to, Some(700.0), "the glide aims at the newer end");
+    assert!(st.glide.unwrap().abs() >= v.abs() * 0.5, "and keeps its speed: {:?} from {v}", st.glide);
+    for _ in 0..120 { rt.frame(1.0 / 120.0); }
+    assert!((rt.scrolls.values().next().unwrap().offset - 700.0).abs() < 0.01, "lands on the newer end");
+
+    let mut rt = reading(120.0);
+    rt.update(|n, _| *n = 15);
+    for _ in 0..8 { rt.frame(1.0 / 120.0); }
+    rt.update(|n, _| *n = 20);
+    rt.frame(1.0 / 120.0);
+    let st = rt.scrolls.values().next().unwrap();
+    assert!(st.glide.is_none(), "rows coming back past the offset end the glide");
+    let at = st.offset;
+    for _ in 0..60 { rt.frame(1.0 / 120.0); }
+    assert_eq!(rt.scrolls.values().next().unwrap().offset, at, "and the viewport stays where it was");
+}
+
+/// A row kept on screen owns its viewport through a collapse: no shrink glide pulls it away.
+#[test]
+fn a_kept_row_holds_its_viewport_through_a_shrink() {
+    let mut rt = reading(120.0);
+    let top = |rt: &Runtime<usize>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r15")).unwrap().rect[1];
+    let was = top(&rt);
+    rt.update(|n, tx| { *n = 17; tx.keep_on_screen("r15"); });
+    for f in 0..20 {
+        rt.frame(1.0 / 120.0);
+        assert!(rt.scrolls.values().next().unwrap().glide.is_none(), "frame {f}: no shrink glide on a kept viewport");
+        assert!((top(&rt) - was).abs() < 0.5, "frame {f}: the kept row holds its place");
+    }
+}
+
+/// Content shrinking past a glide's end lands it there instead of overshooting and springing back.
+#[test]
+fn a_glide_whose_end_shrinks_past_it_lands_there() {
+    let mut rt = reading(120.0);
+    rt.update(|_, tx| tx.scroll_to("scroll", 0.0, 1000.0));
+    for _ in 0..6 { rt.frame(1.0 / 120.0); }
+    assert!(rt.scrolls.values().next().unwrap().glide.is_some_and(|v| v.abs() > 100.0), "gliding up");
+    rt.update(|n, tx| { *n = 12; tx.instant(); });
+    let mut low = f64::MAX;
+    for _ in 0..60 {
+        rt.frame(1.0 / 120.0);
+        low = low.min(rt.scrolls.values().next().unwrap().offset);
+    }
+    let st = rt.scrolls.values().next().unwrap();
+    assert_eq!((st.offset, st.max), (900.0, 900.0));
+    assert!(low >= 900.0 - 1e-6, "never dips below the end: {low}");
 }

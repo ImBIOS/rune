@@ -443,9 +443,12 @@ impl<S: 'static> Runtime<S> {
     /// virtual rows the jump brings into view.
     pub(super) fn apply_keeps(&mut self) {
         if self.keeps.is_empty() { return; }
-        let keeps = std::mem::take(&mut self.keeps);
+        let mut keeps = std::mem::take(&mut self.keeps);
         for pass in 0..4 {
+            // Step with the keeps in place: they own their viewports (`ease_to_shrunk_end`).
+            self.keeps = keeps;
             self.step_scroll(0.0);
+            keeps = std::mem::take(&mut self.keeps);
             let mut moved = false;
             for k in &keeps {
                 let Some(s) = self.nodes.iter().position(|n| n.path == k.viewport && n.scroll.is_some() && n.scroll_axes.y()) else { continue };

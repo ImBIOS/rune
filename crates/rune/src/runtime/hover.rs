@@ -5,6 +5,7 @@ use super::*;
 impl<S: 'static> Runtime<S> {
     pub(super) fn refresh_hover(&mut self, x: f32, y: f32) {
         self.refresh_hover_within();
+        if self.scroll_holds_hover() { return; }
         let hovered = self.primary_target(x, y);
         if hovered.map(|i| self.nodes[i].path.as_str()) == self.hovered.as_deref() { return; }
         self.hovered = hovered.map(|i| self.nodes[i].path.clone());
@@ -27,7 +28,8 @@ impl<S: 'static> Runtime<S> {
             return;
         }
         let mut inside: Vec<String> = Vec::new();
-        if let Some((x, y)) = self.pointer {
+        let held = self.scroll_holds_hover();
+        if let Some((x, y)) = self.pointer.filter(|_| !held) {
             for &(id, r) in &self.hits {
                 if let Some(n) = self.node_index.get(&id).map(|&i| &self.nodes[i])
                     && n.on_hover_change.is_some() && self.hit_contains(id, r, x, y) && !inside.contains(&n.path)
@@ -36,10 +38,11 @@ impl<S: 'static> Runtime<S> {
                 }
             }
         }
-        // A held press stays inside what it started in until it releases.
-        if self.capture.is_some() {
+        // A held press stays inside what it started in until it releases. A held glide keeps
+        // what the pointer was inside until that element exits or leaves the tree.
+        if self.capture.is_some() || held {
             for path in &self.hover_within {
-                if !inside.contains(path) && self.nodes.iter().enumerate().any(|(i, n)| n.path == *path && self.allowed(i)) {
+                if !inside.contains(path) && self.nodes.iter().enumerate().any(|(i, n)| n.path == *path && self.allowed(i) && !(held && self.subtree_exiting(i))) {
                     inside.push(path.clone());
                 }
             }
@@ -53,6 +56,16 @@ impl<S: 'static> Runtime<S> {
         }
         self.hover_within = inside;
         self.settle_hover_delays();
+    }
+
+    /// Node `n` leaves the tree with the pointer inside it: its `on_hover_change` still hears
+    /// the leave, though the handler goes with the node before the action runs.
+    pub(super) fn hover_pruned(&mut self, n: &Node) {
+        let Some(f) = n.on_hover_change.clone().filter(|_| n.hover_delay == [0.0; 2]) else { return };
+        let Some(at) = self.hover_within.iter().position(|p| *p == n.path) else { return };
+        self.hover_within.remove(at);
+        self.hover_gone.push((n.path.clone(), f));
+        self.queue.push(Action::HoverChange(n.path.clone(), false));
     }
 
     /// Starts or drops the waits of `hover_delays` elements whose inside changed.
@@ -113,11 +126,18 @@ impl<S: 'static> Runtime<S> {
     pub(super) fn scroll_holds_hover(&self) -> bool {
         let Some((x, y)) = self.pointer.filter(|_| self.capture.is_none()) else { return false };
         self.scrolls.iter().any(|(id, s)| s.hover_held && (s.glide.is_some() || s.x.glide.is_some())
-            && self.node_index.get(id).is_some_and(|&i| self.node_contains(i, x, y)))
+            && self.node_index.get(id).is_some_and(|&i| !self.subtree_exiting(i) && self.allowed(i) && self.node_contains(i, x, y)))
+    }
+
+    /// The pointer moved or a hand scrolled: hover follows the pointer again.
+    pub(super) fn release_hover_hold(&mut self) {
+        self.scrolls.values_mut().for_each(|s| s.hover_held = false);
     }
 
     pub(super) fn update_interaction(&mut self) -> bool {
         let mut changed = false;
+        // A held glide keeps hover where it was; a press still lets go.
+        let hold = self.scroll_holds_hover();
         let captured = self.capture.as_ref().map(|(p, _)| p.as_str()).or(self.secondary_capture.as_deref());
         for i in 0..self.nodes.len() {
             let n = &self.nodes[i];
@@ -144,9 +164,11 @@ impl<S: 'static> Runtime<S> {
                 None if hovered => Anim::INSTANT,
                 None => rune_motion::Curve::tween(0.1, rune_motion::Easing::EASE_OUT).into(),
             };
-            changed |= self.scene.store().target(id, P_HOVER).unwrap_or(0.0) != hovered as u8 as f32;
+            if !hold {
+                changed |= self.scene.store().target(id, P_HOVER).unwrap_or(0.0) != hovered as u8 as f32;
+                self.scene.animate(id, P_HOVER, hovered as u8 as f32, hover_anim);
+            }
             changed |= self.scene.store().target(id, P_PRESS).unwrap_or(0.0) != pressed as u8 as f32;
-            self.scene.animate(id, P_HOVER, hovered as u8 as f32, hover_anim);
             self.scene.animate(id, P_PRESS, pressed as u8 as f32, if pressed { motion::INSTANT } else { motion::SNAPPY });
             if let Some(k) = press_scale {
                 // Down follows the hand; the release springs back with a little life.

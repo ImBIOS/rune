@@ -53,6 +53,7 @@ impl<S: 'static> Runtime<S> {
                     st.glide_to = Some(to);
                     st.glide = Some(st.glide.unwrap_or(0.0));
                     st.hover_held = true;
+                    st.shrink_glide = false;
                     st.pinned = false;
                 } else {
                     st.glide = None;
@@ -100,7 +101,9 @@ impl<S: 'static> Runtime<S> {
     /// their offset: viewport `i` glides to that end from rest, as `Tx::scroll_to` would, rather
     /// than riding the presented end down at the collapse's own speed and stopping with it.
     /// `overflow` is this frame's presented overflow. A keep or reveal owns its viewport, and an
-    /// end already above the offset (a settled or instant change) clamps at once.
+    /// end already above the offset (a settled or instant change) clamps at once. The glide
+    /// follows the end as it moves again, and stops once the rows regrow past the offset; a
+    /// hand scrolling mid-collapse keeps the viewport until the rows settle.
     ///
     /// Returns the layout's end while rows are still moving, which a viewport landed there
     /// waits for before it sticks to the end, so the presented end's last fraction of a point
@@ -112,11 +115,22 @@ impl<S: 'static> Runtime<S> {
         let path = &self.nodes[i].path;
         let owned = self.keeps.iter().any(|k| k.viewport == *path) || self.scroll_reveals.iter().any(|r| r.viewport == *path);
         let end = f64::from(self.nodes[c].target[3] - self.nodes[i].target[3]).max(0.0);
-        let still = self.reduced_motion || owned;
+        let held = self.reduced_motion || owned;
         let st = self.scrolls.get_mut(&self.nodes[i].id)?;
-        if !(still || st.pinned || st.glide.is_some() || st.v.abs() > 1.0 || st.offset > overflow || st.offset - end <= 0.5) {
+        if st.glide.is_none() { st.shrink_glide = false; }
+        st.shrink_cut = moving && (st.shrink_cut || st.direct || st.v.abs() > 1.0);
+        if st.shrink_glide {
+            if held || st.shrink_cut || end >= st.offset {
+                st.glide = None;
+                st.glide_to = None;
+                st.shrink_glide = false;
+            } else {
+                st.glide_to = Some(end);
+            }
+        } else if moving && !(held || st.shrink_cut || st.pinned || st.glide.is_some() || st.offset > overflow || st.offset - end <= 0.5) {
             st.glide = Some(0.0);
             st.glide_to = Some(end);
+            st.shrink_glide = true;
         }
         moving.then_some(end)
     }

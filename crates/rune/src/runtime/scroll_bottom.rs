@@ -47,6 +47,14 @@ impl Slack {
 /// content reaches it. Returns whether it is still moving.
 pub(super) fn glide(st: &mut ScrollState, dt: f32) -> bool {
     let to = st.glide_to.map_or(st.max, |to| to.min(st.max));
+    // Content shrinking past the glide's end lands it there, rather than its speed carrying
+    // it past and springing back.
+    if st.offset >= st.max && to >= st.max {
+        st.offset = st.max;
+        st.glide = None;
+        st.glide_to = None;
+        return false;
+    }
     let moving = scroll_offset::glide_axis(&mut st.offset, &mut st.glide, to, dt);
     if !moving { st.glide_to = None; }
     moving
@@ -95,6 +103,7 @@ impl<S: 'static> Runtime<S> {
                 st.offset = start.max(st.max - GLIDE_REACH * view_h);
                 st.glide = Some(glide.unwrap_or(0.0));
                 st.hover_held = true;
+                st.shrink_glide = false;
                 st.pinned = false;
             } else {
                 st.offset = st.max;
