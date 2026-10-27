@@ -1,7 +1,7 @@
 import { useEffect, useState, type JSX, type MouseEvent } from "react"
 import { Wordmark } from "./brand/Wordmark"
 import { layers, milestones, principles, risks } from "./content"
-import { ArchitectureView, HomeView, HowItWorksView, NotFoundView, PrinciplesView, RoadmapView, num } from "./pages"
+import { ArchitectureView, HomeView, HowItWorksView, LaunchFastView, NotFoundView, PrinciplesView, RoadmapView, num } from "./pages"
 import { stripBase, withBase } from "./base"
 import { REPO, normalizePath } from "./routes"
 import signature from "./footer-signature.svg"
@@ -45,6 +45,15 @@ function navGroups(pathname: string): NavGroup[] {
           spy("threads", "Threads"),
           spy("testing", "Tests without a window"),
           spy("crates", "Where the code lives"),
+        ]),
+        page("/launch-fast", "Launch fast", [
+          spy("prewarm", "prewarm_gpu"),
+          spy("metallib", "Precompiled shaders"),
+          spy("first-frame", "First frame at creation"),
+          spy("defer", "Defer setup"),
+          spy("reuse", "Reuse a hidden window"),
+          spy("measure", "Measure it"),
+          spy("numbers", "Measured"),
         ]),
         page("/architecture", "Architecture", [
           spy("overview", "Overview"),
@@ -125,6 +134,7 @@ export function App({ pathname: initial }: { pathname?: string }) {
   const views: Record<string, () => JSX.Element> = {
     "/": HomeView,
     "/how-it-works": HowItWorksView,
+    "/launch-fast": LaunchFastView,
     "/principles": PrinciplesView,
     "/architecture": ArchitectureView,
     "/roadmap": RoadmapView,

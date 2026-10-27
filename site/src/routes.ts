@@ -18,6 +18,13 @@ export const routes: Route[] = [
       "How a Rune frame runs, from input and state through Taffy layout and springs to wgpu, with real code, the thread model, headless tests and the crate map.",
   },
   {
+    path: "/launch-fast",
+    label: "Launch fast",
+    title: "Launch fast · Rune",
+    description:
+      "How to get a Rune app's first window on screen in about 300 ms: prewarm_gpu, precompiled Metal shaders, a first frame at creation, deferred setup, a reused hidden window, and how to measure it.",
+  },
+  {
     path: "/principles",
     label: "Principles",
     title: "Principles · Rune",

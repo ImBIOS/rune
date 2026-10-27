@@ -481,7 +481,341 @@ export function HowItWorksView() {
         <Code id="rune-deps" />
       </section>
 
-      <Pager prev={["/", "Overview"]} next={["/architecture", "Architecture"]} />
+      <Pager prev={["/", "Overview"]} next={["/launch-fast", "Launch fast"]} />
+    </>
+  )
+}
+
+function Sample({ lang = "Rust", children }: { lang?: string; children: string }) {
+  return (
+    <figure className="code-block">
+      <figcaption className="code-head">
+        <span>{lang}</span>
+      </figcaption>
+      <pre className="code">
+        <code>{children}</code>
+      </pre>
+    </figure>
+  )
+}
+
+const launchSetup = `let app = App::new(AppSpec::new("Notes", (520.0, 320.0), State::default, view))
+    .accessory()
+    .keep_running();
+let handle = app.handle();
+app.on_ready(move |_window| {
+    handle.update(|state, tx| {
+        // First frame is on screen: now the menu bar item, indexing, network.
+        state.start_background_work(tx);
+    });
+})
+.run();`
+
+const launchHidden = `// Keep the window; hide it instead of closing it.
+let app = App::new(spec).keep_running().windowless();
+let handle = app.handle();
+
+// On the shortcut, the tray click or a Dock reopen:
+handle.show();   // or handle.open() to also activate the app
+// When the user dismisses it:
+handle.hide();`
+
+const launchNumbers: { row: string; before: string; after: string }[] = [
+  { row: "Cold shader cache, content on screen", before: "599", after: "312" },
+  { row: "Cold shader cache, window on screen", before: "422", after: "277" },
+  { row: "Warm shader cache, content on screen", before: "466", after: "299" },
+  { row: "Cold shader cache, Renderer::new alone", before: "232", after: "85" },
+]
+
+export function LaunchFastView() {
+  return (
+    <>
+      <PageHead eyebrow={<span>Launch fast</span>} title="Launch fast">
+        <p>
+          A Rune app can put its first window, with its content drawn, on screen about 300 ms after{" "}
+          <code>open</code> on an Apple silicon Mac, including the first launch after an install or update. Four
+          things get it there: start the GPU on a thread, ship the shader precompiled, keep the main thread free until
+          the first frame, and reuse a window instead of rebuilding it.
+        </p>
+        <p>
+          Two of them need one line or nothing from the app. The rest is about what the app leaves out of its first
+          frame. The numbers are at the end.
+        </p>
+      </PageHead>
+
+      <section className="doc-section">
+        <SectionHead id="prewarm" title="Call prewarm_gpu first in main">
+          <p>
+            A first frame needs a GPU adapter, a device and Rune's render pipeline, and making them is most of a cold
+            launch. <code>rune::prewarm_gpu()</code> starts that work on a thread.
+          </p>
+        </SectionHead>
+        <Sample>{`fn main() {
+    rune::prewarm_gpu();
+    // ... build the App and run it
+}`}</Sample>
+        <div className="prose prose-after">
+          <p>
+            On macOS the thread makes the wgpu instance, adapter and device, then builds the uber pipeline, loading the
+            precompiled shader described below. The first window or overlay opened at launch takes the result, and
+            waits if the thread is still working. Rune's run functions call it too, but only once they start the event
+            loop, so calling it yourself in the first line of <code>main</code> gains the time your own setup takes
+            before that.
+          </p>
+          <ul>
+            <li>Calling it twice does nothing the second time.</li>
+            <li>
+              If the app opens no window at launch, the result is dropped and nothing stays in memory. A{" "}
+              <code>windowless</code> app that opens its window later makes the device then, as it always did.
+            </li>
+            <li>
+              If the first window needs GPU features the prewarmed device lacks, or the adapter can't present to its
+              surface, the window makes a new device on the same instance. The pipeline is built for the usual surface
+              format; a window with another one builds its own.
+            </li>
+            <li>On other platforms it does nothing, because the window's surface chooses the adapter there.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section className="doc-section">
+        <SectionHead id="metallib" title="Precompiled Metal shaders">
+          <p>
+            Without help, a launch translates the uber shader's WGSL to Metal source and has Metal compile it. Rune
+            commits the compiled library instead, as <code>crates/rune/src/uber.metallib</code> (about 33 KB), and on
+            macOS loads it through wgpu's passthrough shader support. This skips WGSL parsing, validation, translation
+            and Metal's compile on every launch. <code>Renderer::new</code> on a cold shader cache goes from 232 ms to
+            85 ms, and from 3.4 ms to 0.6 ms on a warm one.
+          </p>
+        </SectionHead>
+        <div className="prose">
+          <p>
+            Apps need nothing and don't need Xcode: the library is a file in the crate. Rune falls back to the WGSL
+            path, which is slower but identical on screen, when:
+          </p>
+          <ul>
+            <li>the adapter lacks <code>PASSTHROUGH_SHADERS</code>;</li>
+            <li>
+              <code>RUNE_DISABLE_METALLIB=1</code> is set, which is also how to compare the two paths;
+            </li>
+            <li>the committed library's fingerprint doesn't match the shader the build generates;</li>
+            <li>Metal rejects the library or the pipeline made from it.</li>
+          </ul>
+          <h3>Changing the shader</h3>
+          <p>
+            Edit <code>clip.wgsl</code> or <code>shader.wgsl</code>, then run{" "}
+            <code>cargo test -p rune --lib precompiled_uber_metallib_is_fresh</code> on a Mac. The test compares the
+            library and the shader's fingerprints, and its failure message says what to do:
+          </p>
+          <ul>
+            <li>
+              <strong>"MSL is byte-identical; no Xcode or metallib regeneration needed"</strong> means only the
+              fingerprint changed, for example after a comment edit or a descriptor change that generates the same
+              Metal. Paste the three <code>pub(super) const</code> lines it prints into{" "}
+              <code>crates/rune/src/uber_metallib_hash.rs</code>.
+            </li>
+            <li>
+              <strong>"generated MSL or Metal compile flags changed"</strong> or{" "}
+              <strong>"does not match recorded hash"</strong> means the library is stale. Run{" "}
+              <code>scripts/precompile-metal-shaders.sh</code>. It needs Xcode's Metal toolchain (
+              <code>xcrun -sdk macosx metal</code>), dumps the generated MSL, compiles it and rewrites both{" "}
+              <code>uber.metallib</code> and <code>uber_metallib_hash.rs</code>. Commit both files.
+            </li>
+          </ul>
+          <p>
+            On other platforms the same test can only say the fingerprint changed, and tells you to run it on macOS for
+            the exact lines.
+          </p>
+          <h3>What it doesn't cover</h3>
+          <p>
+            Only the uber pipeline is precompiled. The effect, lighting and blur shaders still compile from WGSL the
+            first time they're used, so an app that draws them on its first frame still pays that on a cold cache.
+            iOS isn't covered. Metal binary archives could cover the rest, but they would need support in wgpu, which it doesn't have.
+          </p>
+        </div>
+      </section>
+
+      <section className="doc-section">
+        <SectionHead id="first-frame" title="The first frame is drawn while the window is created">
+          <p>
+            On macOS a visible window draws its first frame during creation, before the window server reports it on
+            screen. Launcher windows and panels, which start hidden, are left out.
+          </p>
+        </SectionHead>
+        <div className="prose">
+          <p>
+            There is nothing to turn on. Before this, a window opened empty and drew on a later display-link tick; now
+            content reaches the screen about 30 ms sooner on an idle Mac, and about 150 ms sooner on a busy one, where
+            the window server is slow to say a new window is visible.
+          </p>
+          <p>
+            It has one consequence for the app. The first view build and layout now run inside window creation, right
+            after the window-created callbacks (<code>App::on_window</code>, <code>WindowSpec::on_created</code>). The
+            window can't appear until they return, so the state's initial value, the first <code>view</code> call and
+            those callbacks should be cheap. Anything slow added there delays the whole window, not just its content.
+          </p>
+        </div>
+      </section>
+
+      <section className="doc-section">
+        <SectionHead id="defer" title="Start everything else after the first frame">
+          <p>
+            The menu bar item, status item, HUDs, secondary windows, network requests and file indexing are all work
+            the user doesn't need to see the first window. Start them from <code>on_ready</code>.
+          </p>
+        </SectionHead>
+        <div className="prose">
+          <p>
+            <code>App::on_ready</code> (and <code>WindowSpec::on_ready</code>) runs on the event thread once per native
+            window creation, after the first frame is ready. For a launcher it runs while the window is still hidden,
+            once its cached frame has finished on the GPU, which is the place to register a global shortcut. It isn't
+            called by headless tooling. The callback gets a <code>WindowHandle</code>, not the state, so capture an{" "}
+            <code>AppHandle</code> and hand the work to <code>update</code>, which runs on the UI thread with{" "}
+            <code>&amp;mut S</code> and a <code>Tx</code>.
+          </p>
+        </div>
+        <Sample>{launchSetup}</Sample>
+        <div className="prose prose-after">
+          <p>
+            Rune has no separate "after first frame" hook for state today; this is how to do it. Updates run inside the
+            event loop even while no window shows, so an update may do main-thread native work such as creating a
+            status item. For work that doesn't need the main thread, spawn a thread from the update and report back
+            with <code>AppHandle::update</code> or <code>AppHandle::wake</code> and <code>AppSpec::poll</code>.
+          </p>
+        </div>
+      </section>
+
+      <section className="doc-section">
+        <SectionHead id="reuse" title="Reuse a hidden window">
+          <p>
+            Showing a window that already exists costs a show. Rebuilding it costs a launch: the native window, the
+            surface, the first view and layout. An app that comes and goes, such as a launcher, a menu bar panel or a
+            settings window, should hide its window and show it again.
+          </p>
+        </SectionHead>
+        <div className="prose">
+          <ul>
+            <li>
+              <code>App::keep_running</code> keeps the app, its state and its event loop alive when the window closes,
+              and <code>windowless</code> starts with no window. On macOS, Windows and X11 closing hides the window and
+              keeps its host; <code>AppHandle::open</code>, <code>show</code> and <code>activate</code> bring it back
+              with the same state, settled on its first frame. Wayland has no hidden toplevel, so it destroys and
+              recreates the window.
+            </li>
+            <li>
+              <code>AppHandle::hide</code> hides it without running the close callback. <code>show</code> shows it
+              without taking focus; <code>open</code> also restores a minimized window and activates the app.{" "}
+              <code>WindowHandle::show</code>, <code>hide</code> and <code>set_visible</code> do the same from window
+              callbacks.
+            </li>
+            <li>
+              <code>WindowOptions::launcher_panel()</code> makes a hidden, retained, nonactivating panel on macOS. It
+              prepares its first frame at alpha zero while hidden, keeps rendering changes into that cached frame, and
+              reveals the cached pixels on show, so a re-summon draws nothing new.
+            </li>
+            <li>
+              A hidden window runs updates, polls and timers as usual but skips view and layout, and the frame that
+              shows it builds once with the latest state.
+            </li>
+            <li>
+              Keep the GPU too. <code>release_gpu_when_closed</code> frees it for an app that idles for hours, but the
+              next open then pays for a device again.
+            </li>
+          </ul>
+        </div>
+        <Sample>{launchHidden}</Sample>
+      </section>
+
+      <section className="doc-section">
+        <SectionHead id="measure" title="Measure it">
+          <p>
+            Launch time moves with the machine's load and Metal's cache, so a single run says little. This is the
+            method behind the numbers below.
+          </p>
+        </SectionHead>
+        <div className="prose">
+          <ul>
+            <li>
+              <strong>Launch like a user does.</strong> Build the app into a bundle with its own bundle ID and start it
+              with <code>open</code>, from a script that takes the timestamp just before. Stop it between runs. Use a
+              Mac with nothing else running, and a release or <code>perf</code> build.
+            </li>
+            <li>
+              <strong>Interleave the builds.</strong> Alternate base and changed builds inside each round, 5 to 10
+              rounds, and compare medians and the 10th to 90th percentile spread. Load drifts over minutes; interleaving
+              puts it on both sides.
+            </li>
+            <li>
+              <strong>Time two moments.</strong> The window is visible when the process's window shows up on screen,
+              which you can poll for in the window list. Content is visible at its first presented frame, which you can
+              timestamp in the app or read from a screen recording of the window's rectangle. They differ by the time the
+              app takes to draw after the window exists, which is what this page reduces.
+            </li>
+            <li>
+              <strong>Run cold and warm.</strong> A cold launch is the first after an install or update, when Metal
+              compiles shaders. To get one, delete the app's Metal shader caches, which sit in the user cache directory
+              (<code>getconf DARWIN_USER_CACHE_DIR</code>) under the bundle ID: <code>com.apple.metal/&lt;bundle
+              id&gt;</code>, and <code>&lt;bundle id&gt;/com.apple.metal</code>,{" "}
+              <code>&lt;bundle id&gt;/com.apple.metalfe</code> and <code>&lt;bundle id&gt;/com.apple.gpuarchiver</code>.
+              A warm launch follows an unmeasured one that fills the cache.
+            </li>
+            <li>
+              <strong>Read settled memory last.</strong> Record the process's physical footprint a few seconds after
+              launch. The <code>procwatch</code> crate reads it and counts allocations. A change that moves work earlier
+              can raise memory at the window and leave it equal once settled.
+            </li>
+          </ul>
+          <p>
+            In the repo, <code>--native --trace run.jsonl</code> writes wall-clock submission timestamps per frame for a
+            real window, <code>surface_stats</code> reports presents and failed drawable acquisitions, and the{" "}
+            <code>frame-profile</code> feature times view, layout, text and paint phases in headless runs. Run the app
+            with <code>RUNE_DISABLE_METALLIB=1</code> to see what the precompiled library saves on your machine.
+          </p>
+        </div>
+      </section>
+
+      <section className="doc-section">
+        <SectionHead id="numbers" title="Measured">
+          <p>
+            Median milliseconds from <code>open</code> for a small app, on an Apple silicon laptop that was under heavy
+            load, 5 interleaved rounds (10 for <code>Renderer::new</code>). The absolute times are high because the machine
+            was busy. The differences are what matter.
+          </p>
+        </SectionHead>
+        <div className="table-wrap">
+          <table className="decisions">
+            <thead>
+              <tr>
+                <th scope="col">Launch</th>
+                <th scope="col">Before</th>
+                <th scope="col">After</th>
+                <th scope="col">Saved</th>
+              </tr>
+            </thead>
+            <tbody>
+              {launchNumbers.map(n => (
+                <tr key={n.row}>
+                  <th scope="row">{n.row}</th>
+                  <td data-label="Before">{n.before} ms</td>
+                  <td data-label="After">{n.after} ms</td>
+                  <td data-label="Saved">{Number(n.before) - Number(n.after)} ms</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="prose prose-after">
+          <p>
+            The first three rows are the first-frame and GPU prewarm changes together, in a hello-world app; a settings
+            window gave 308 ms cold and 291 ms warm. After the change, content lands 30 to 40 ms after the window; before,
+            160 to 190 ms after. The precompiled shader helps most on a cold cache (the last row); a warm cache already
+            holds Metal's result, so warm launches gain little from it. Settled memory was the same, within 1 MB, in
+            every case.
+          </p>
+        </div>
+      </section>
+
+      <Pager prev={["/how-it-works", "How it works"]} next={["/architecture", "Architecture"]} />
     </>
   )
 }
@@ -607,7 +941,7 @@ export function ArchitectureView() {
       </section>
       </div>
 
-      <Pager prev={["/how-it-works", "How it works"]} next={["/principles", "Principles"]} />
+      <Pager prev={["/launch-fast", "Launch fast"]} next={["/principles", "Principles"]} />
     </>
   )
 }

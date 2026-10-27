@@ -526,6 +526,49 @@ app.run();
   have no reopen, so the hook never runs there. Headless scripts send it with `{"reopen": true}`.
 - Edge overlays (HUDs): see `App::overlay` below.
 
+### Launching fast
+
+A small app puts its first window, with content, on screen about 300 ms after `open` on Apple silicon.
+The full page, with the measurement method, is "Launch fast" on the docs site (`site/src/pages.tsx`).
+
+- **`rune::prewarm_gpu()` first in `main`.** On macOS it makes the adapter, device and uber pipeline on a thread
+  while AppKit starts; the first window or overlay opened at launch takes them, waiting if the thread is still
+  working. A second call does nothing. With no window at launch the result is dropped; a window that needs features
+  the prewarmed device lacks gets a new device. Elsewhere it does nothing. The run functions call it too, but only
+  once the event loop starts.
+- **Precompiled Metal uber shader.** `crates/rune/src/uber.metallib` is loaded through wgpu's passthrough shaders,
+  skipping WGSL translation and Metal's compile (`Renderer::new` 232 ms to 85 ms on a cold shader cache). The WGSL
+  path is the fallback when the adapter lacks passthrough support, when `RUNE_DISABLE_METALLIB=1`, when the
+  fingerprint doesn't match or when Metal rejects the library. After editing `clip.wgsl` or `shader.wgsl`, run
+  `cargo test -p rune --lib precompiled_uber_metallib_is_fresh` on a Mac. If it says the MSL is byte-identical, paste
+  the printed lines into `uber_metallib_hash.rs`. If it says the MSL, flags or library hash changed, run
+  `scripts/precompile-metal-shaders.sh` (needs Xcode's Metal toolchain) and commit `uber.metallib` and
+  `uber_metallib_hash.rs`. Effect, lighting and blur shaders and iOS aren't precompiled; binary archives would need
+  wgpu support.
+- **The first frame draws during window creation** on macOS for visible windows (not launcher windows or panels).
+  The first view build and layout run inside creation, right after the window-created callbacks, so keep the initial
+  state, `view` and `on_window` cheap.
+- **Defer the rest to `on_ready`.** It runs once per native creation after the first frame is ready (for a
+  launcher, while hidden). Capture `app.handle()` and call `handle.update(|s, tx| ..)` there to start status
+  items, HUDs, secondary windows, network and indexing; updates run on the UI thread even with no window showing.
+  There is no state-level first-frame hook yet.
+- **Reuse a hidden window.** `keep_running()` / `windowless()` plus `AppHandle::hide()`, `show()` and `open()`
+  (or `WindowOptions::launcher_panel()` for a retained panel that reveals cached pixels) make a re-summon cost a
+  show instead of a launch.
+- **Measuring**: launch with `open` on a quiet Mac, interleave base and changed builds for 5 to 10 rounds, and
+  report medians for window-visible and first-content times, cold and warm. Cold means deleting the app's Metal
+  shader caches under `getconf DARWIN_USER_CACHE_DIR`: `com.apple.metal/<bundle id>` and
+  `<bundle id>/{com.apple.metal,com.apple.metalfe,com.apple.gpuarchiver}`. Read settled memory last.
+
+| Median ms from `open` (loaded laptop, 5 interleaved rounds) | Before | After |
+| --- | --- | --- |
+| Cold shader cache, content on screen | 599 | 312 |
+| Cold shader cache, window on screen | 422 | 277 |
+| Warm shader cache, content on screen | 466 | 299 |
+| Cold shader cache, `Renderer::new` alone (10 rounds) | 232 | 85 |
+
+Absolute times were high because the machine was busy; the differences are what matter.
+
 ### Compact tray-controlled windows
 
 Use `WindowOptions` on a `WindowSpec`. Existing single-window defaults
