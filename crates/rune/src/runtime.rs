@@ -128,6 +128,8 @@ mod hover;
 mod timer_wake;
 #[path = "runtime/props.rs"]
 mod props;
+#[path = "runtime/secondary.rs"]
+mod secondary;
 use props::*;
 pub(crate) use scroll_x::{SHIFT_TURNS_WHEEL, wheel_delta};
 pub(crate) use scroll_offset::ScrollRequest;
@@ -5104,45 +5106,6 @@ impl<S: 'static> Runtime<S> {
         self.capture = Some((path, d));
         self.capture_button = crate::PointerButton::Primary;
         self.capture_inside = true;
-    }
-
-    /// The nearest element with `on_secondary_press` at (x, y), else the selectable text there
-    /// (its Copy menu): an app's context menu on a row wins over its text's.
-    fn secondary_target(&self, x: f32, y: f32) -> Option<&str> {
-        let id = self.hits.iter().rev().find(|&&(id, r)| self.hit_contains(id, r, x, y))?.0;
-        let mut index = *self.node_index.get(&id)?;
-        let mut text = None;
-        loop {
-            let n = &self.nodes[index];
-            if self.subtree_exiting(index) || !self.allowed(index) { break; }
-            if n.on_secondary_press.is_some() { return Some(&n.path); }
-            if text.is_none() && self.is_selectable(index) { text = Some(n.path.as_str()); }
-            let Some(p) = n.parent else { break };
-            index = p;
-        }
-        text
-    }
-
-    /// Capture a secondary gesture without activating primary actions or text selection.
-    pub fn secondary_down(&mut self, x: f32, y: f32) {
-        self.pointer = Some((x, y));
-        self.release_hover_hold();
-        self.keyboard_focus = false;
-        self.dismiss_help();
-        self.secondary_capture = self.secondary_target(x, y).map(str::to_owned);
-    }
-
-    pub fn secondary_up(&mut self, x: f32, y: f32) {
-        self.pointer = Some((x, y));
-        if let Some(path) = self.secondary_capture.take()
-            && self.secondary_target(x, y) == Some(path.as_str())
-            && !self.selection_menu(&path, x, y)
-        {
-            let i = self.nodes.iter().position(|n| n.path == path);
-            let point = i.map_or(PointerEvent { x, y, window_x: x, window_y: y }, |i| self.pointer_event(i, x, y));
-            self.queue.push(Action::SecondaryPress(path, point));
-        }
-        self.leave_after_release();
     }
 
     pub fn pointer_up(&mut self, x: f32, y: f32) {
