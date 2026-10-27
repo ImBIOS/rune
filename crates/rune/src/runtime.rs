@@ -1237,6 +1237,8 @@ pub struct Runtime<S: 'static> {
     pub shell_request: Option<Shell>,
     /// A handler or `update` asked to minimize the window (`Tx::minimize`); the shell takes it.
     pub(crate) minimize_request: bool,
+    /// Links handlers asked to open that this runtime left unopened (`Runtime::take_url_requests`).
+    pub(crate) url_requests: Vec<String>,
     /// Pop-up menus asked for (`Tx::popup_menu`) and not yet answered, oldest first.
     pub(crate) popups: std::collections::VecDeque<crate::popup_menu::Request>,
     /// The first of `popups` is showing.
@@ -1558,6 +1560,7 @@ impl<S: 'static> Runtime<S> {
             clipboard: None,
             shell_request: None,
             minimize_request: false,
+            url_requests: Vec::new(),
             popups: Default::default(),
             file_dialog: None,
             file_dialog_answers: Vec::new(),
@@ -1987,6 +1990,7 @@ impl<S: 'static> Runtime<S> {
         self.run_pick_reads(tx);
         self.shell_request = self.shell_request.max(tx.shell.take());
         self.minimize_request |= std::mem::take(&mut tx.minimize);
+        if !tx.open_urls.is_empty() { self.open_urls(std::mem::take(&mut tx.open_urls)); }
         if std::mem::take(&mut tx.clear_secret) {
             if self.copy_request.as_ref().is_some_and(crate::ClipboardWrite::is_secret) { self.copy_request = None; }
             self.clear_secret_request = true;
@@ -8300,6 +8304,7 @@ fn merge(tx: &mut Tx, one: Tx) {
     if one.copy.is_some() { tx.copy = one.copy; }
     tx.shell = tx.shell.max(one.shell);
     tx.minimize |= one.minimize;
+    tx.open_urls.extend(one.open_urls);
     tx.srgb_blend = one.srgb_blend.or(tx.srgb_blend);
     tx.blur |= one.blur;
     tx.instant |= one.instant;

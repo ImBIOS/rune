@@ -126,6 +126,9 @@ mod frame_profile;
 #[doc(hidden)]
 pub use frame_profile::{PHASES, take_frame_phases, thread_cpu_ms};
 pub mod file_dialog;
+mod open_url;
+pub mod prefs;
+pub use open_url::OpenUrlError;
 pub mod text;
 pub mod theme;
 pub mod tok;

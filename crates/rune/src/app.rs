@@ -354,6 +354,7 @@ impl<S: 'static> App<S> {
             crate::render::discard_prewarm();
             crate::tooling::try_headless(self, args)
         } else {
+            crate::open_url::arm();
             crate::window::run(self, args)
         }
     }

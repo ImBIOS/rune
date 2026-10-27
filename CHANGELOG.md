@@ -5,6 +5,16 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Tx::open_url`, `El::mx`/`El::my` and `rune::prefs::Prefs`.** `Tx::open_url(url)` opens
+  `http:`, `https:` and `mailto:` links in the system handler on macOS (`NSWorkspace`), Windows
+  (`ShellExecuteW`) and Linux (`xdg-open`), as `web::open_url` already did; other schemes
+  (`file:`, an app's own), empty and malformed links return `OpenUrlError` and open nothing.
+  Headless runs open nothing and keep the links for `Runtime::take_url_requests`. `mx` and `my`
+  set both margins of an axis. `Prefs::open(app_id)` is a JSON settings file in the platform
+  config directory with typed `get`/`set`, atomic saves, and a corrupt file moved to
+  `prefs.json.bad`; `Prefs::memory()` and `RUNE_PREFS_DIR` keep tests and headless runs off the
+  real file. `rune` now depends on `serde` on every target (it already did on Linux).
+
 - **A window comes on screen with its first frame on macOS.** A visible window (not a panel or a
   hidden launcher) now draws its first frame while it's being created, before the window server
   reports it on screen, instead of opening empty and drawing on a later display-link tick. The

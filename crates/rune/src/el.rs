@@ -46,6 +46,7 @@ pub struct Tx {
     pub(crate) wakes: Vec<std::time::Duration>,
     pub(crate) shell: Option<Shell>,
     pub(crate) minimize: bool,
+    pub(crate) open_urls: Vec<String>,
     pub(crate) trace: Option<TraceCalls>,
     pub(crate) popups: Vec<crate::popup_menu::Call>,
     pub(crate) file_dialogs: Vec<crate::file_dialog::Call>,
@@ -326,6 +327,15 @@ impl Tx {
     /// A close or quit asked in the same change wins.
     pub fn minimize(&mut self) {
         self.minimize = true;
+    }
+
+    /// Open `url` in the system's default handler once this handler's frame is done: a browser
+    /// for `http:` and `https:`, the mail app for `mailto:`. Other schemes (`file:`, an app's
+    /// own) and malformed links are refused here with the reason and nothing opens. Headless
+    /// runs and tests open nothing; read the requests with `Runtime::take_url_requests`.
+    pub fn open_url(&mut self, url: &str) -> Result<(), crate::open_url::OpenUrlError> {
+        self.open_urls.push(crate::open_url::check(url)?);
+        Ok(())
     }
 
     /// Resize this window's content to `size` points, as an onboarding window changes height
@@ -2269,6 +2279,18 @@ impl El {
     /// ```
     pub fn min_h(mut self, h: f32) -> Self {
         self.style.min_size.height = length(h);
+        self
+    }
+    /// Left and right margin together (CSS `margin-inline`).
+    pub fn mx(mut self, m: f32) -> Self {
+        self.style.margin.left = length(m);
+        self.style.margin.right = length(m);
+        self
+    }
+    /// Top and bottom margin together (CSS `margin-block`).
+    pub fn my(mut self, m: f32) -> Self {
+        self.style.margin.top = length(m);
+        self.style.margin.bottom = length(m);
         self
     }
     pub fn mt(mut self, m: f32) -> Self {
