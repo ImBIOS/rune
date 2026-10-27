@@ -198,11 +198,13 @@ impl<S: 'static> Live<S> {
     /// The app's controls for the open story, from `Playground::side` or `Story::side`, acting
     /// on its stage state.
     fn side_slot(&self, app: &S, cx: &mut Cx<S>) -> Option<El> {
-        let _ = app;
         if let Some(scene) = &self.scene {
             let (_, view) = self.sides.iter().find(|(s, _)| *s == self.selected)?;
             let mut stage = cx.retype::<S>();
-            let root = call(*view, &scene.state, &mut stage);
+            let root = match view {
+                Side::Stage(view) => call(*view, &scene.state, &mut stage),
+                Side::Real(view) => view(&scene.state, app, &mut stage),
+            };
             cx.absorb(stage);
             return Some(root);
         }

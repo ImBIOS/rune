@@ -68,7 +68,7 @@ use story::OwnStory;
 pub struct Playground<S: 'static> {
     pages: Vec<Page<S>>,
     triggers: Vec<(&'static str, Trigger<S>)>,
-    sides: Vec<(&'static str, fn(&S, &mut Cx<S>) -> El)>,
+    sides: Vec<(&'static str, Side<S>)>,
     sizes: Vec<(&'static str, (f32, f32))>,
     shortcut: Option<Shortcut>,
     bar: bool,
@@ -135,7 +135,7 @@ impl<S: 'static> Playground<S> {
     /// top of the side column, drawn from and acting on the scene's stage state: knobs, say.
     /// See [`Story::side`].
     pub fn side(mut self, scene: &'static str, view: fn(&S, &mut Cx<S>) -> El) -> Self {
-        self.sides.push((scene, view));
+        self.sides.push((scene, Side::Stage(view)));
         self
     }
 
@@ -143,6 +143,14 @@ impl<S: 'static> Playground<S> {
     /// state after the scene fn. See [`Story::variant`].
     pub fn variant(mut self, scene: &'static str, name: &'static str, apply: fn(&mut S)) -> Self {
         self.variants.push((scene, name, apply));
+        self
+    }
+
+    /// [`Playground::side`], drawn from the stage and the real state both: to mark the app's
+    /// own choice beside the one the stage previews, say, with a control that calls
+    /// [`Tx::keep_playground`] to write the preview back through [`Playground::keep`].
+    pub fn side_real(mut self, scene: &'static str, view: fn(&S, &S, &mut Cx<S>) -> El) -> Self {
+        self.sides.push((scene, Side::Real(view)));
         self
     }
 
@@ -223,6 +231,12 @@ impl<S: 'static> Playground<S> {
     }
 }
 
+/// A scene's side column view, from [`Playground::side`] or [`Playground::side_real`].
+enum Side<S: 'static> {
+    Stage(fn(&S, &mut Cx<S>) -> El),
+    Real(fn(&S, &S, &mut Cx<S>) -> El),
+}
+
 struct Page<S: 'static> {
     name: &'static str,
     kind: Kind<S>,
@@ -248,6 +262,8 @@ pub(crate) enum Request {
     Select(usize),
     /// R: the stage's state made again, then its `'r'` trigger.
     Replay,
+    /// [`Tx::keep_playground`].
+    Keep,
     /// A digit: the open story's variant, by index, made as R makes it.
     Variant(usize),
     Trigger(char),
@@ -287,7 +303,7 @@ pub(crate) struct Live<S: 'static> {
     pages: Vec<Page<S>>,
     /// By the scene they're for.
     triggers: Vec<(usize, Trigger<S>)>,
-    sides: Vec<(usize, fn(&S, &mut Cx<S>) -> El)>,
+    sides: Vec<(usize, Side<S>)>,
     variants: Vec<(usize, &'static str, fn(&mut S))>,
     /// Each story's variant, by its index into scenes then pages, until the playground closes.
     variant: Vec<usize>,
@@ -535,6 +551,7 @@ impl<S: 'static> Live<S> {
                     self.replay(real);
                 }
                 Request::Variant(_) => {}
+                Request::Keep => self.keep(real),
                 Request::Trigger(key) => self.trigger(key),
                 Request::Dark(dark) => self.dark = Some(dark),
                 Request::Size(i) => self.size = i,
@@ -655,6 +672,12 @@ impl Tx {
     /// Back to the app from the playground, as its Back button does.
     pub fn close_playground(&mut self) {
         self.playground.push(Request::Close);
+    }
+
+    /// Runs [`Playground::keep`] now, with the open scene's stage and the real state, as a
+    /// switch would before the stage goes. The stage stays.
+    pub fn keep_playground(&mut self) {
+        self.playground.push(Request::Keep);
     }
 
     pub fn toggle_playground(&mut self) {

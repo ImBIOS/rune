@@ -105,3 +105,24 @@ fn a_fresh_stage_shares_the_real_waker_and_a_wake_from_another_thread_reaches_it
     assert_eq!(shows(&rt, "count"), "count 41", "and the next frame's poll of the stage took it");
     assert_eq!(rt.state.count, 0, "the real state's inbox is its own");
 }
+
+fn compare(stage: &Real, real: &Real, _: &mut Cx<Real>) -> El {
+    col()
+        .child(text(format!("stage {} real {}", stage.count, real.count)).key("compare"))
+        .child(el().key("keep").size(40.0, 20.0).on_press_tx(|_: &mut Real, tx: &mut Tx| tx.keep_playground()))
+}
+
+#[test]
+fn a_side_view_reads_the_real_state_and_keep_writes_the_preview_back() {
+    let playground = base().fresh(copy).keep(|stage, real| real.count = stage.count).side_real("Still", compare);
+    let mut rt = runtime_with(playground, None, true);
+    rt.state.count = 3;
+    open(&mut rt, "Still");
+    assert_eq!(shows(&rt, "compare"), "stage 3 real 3");
+    tap(&mut rt, "inc");
+    assert_eq!(shows(&rt, "compare"), "stage 4 real 3", "the stage previews; the app's own choice shows beside it");
+    let generation = rt.playground.as_ref().unwrap().generation;
+    tap(&mut rt, "keep");
+    assert_eq!(shows(&rt, "compare"), "stage 4 real 4");
+    assert_eq!((rt.state.count, rt.playground.as_ref().unwrap().generation), (4, generation), "kept, and the stage stays");
+}
