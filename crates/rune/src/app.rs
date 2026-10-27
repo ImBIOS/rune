@@ -648,6 +648,11 @@ mod tests {
         assert!(other.state.is_empty());
         other.window_focus(false);
         assert_eq!(other.state, [false]);
+        other.on_focus = None;
+        other.frame(0.0);
+        assert!(!other.stale());
+        other.window_focus(true);
+        assert!(!other.stale(), "focus on a committed view without on_window_focus asks for no extra frame");
     }
 
     #[test]

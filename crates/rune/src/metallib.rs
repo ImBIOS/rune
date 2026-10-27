@@ -144,7 +144,7 @@ pub(super) fn uber_shader_and_pipeline(
 }
 
 #[cfg(target_os = "macos")]
-fn metallib_enabled() -> bool {
+pub(super) fn metallib_enabled() -> bool {
     if let Some(forced) = FORCE_METALLIB.with(std::cell::Cell::get) {
         return forced;
     }
@@ -152,6 +152,11 @@ fn metallib_enabled() -> bool {
         std::env::var("RUNE_DISABLE_METALLIB").as_deref(),
         Ok("1" | "true" | "TRUE" | "yes")
     )
+}
+
+#[cfg(all(test, target_os = "macos"))]
+pub(super) fn thread_loads() -> usize {
+    METALLIB_LOADS.with(std::cell::Cell::get)
 }
 
 #[cfg(target_os = "macos")]

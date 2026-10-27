@@ -574,13 +574,14 @@ pub fn prewarm_gpu() {
 
 /// Drops what `prewarm_gpu` made if no window took it.
 pub(crate) fn discard_prewarm() {
+    #[cfg(not(test))]
     prewarm::discard();
 }
 
 #[cfg(target_os = "macos")]
 mod prewarm {
     use super::{Gpu, Renderer};
-    use std::sync::{Mutex, atomic::{AtomicBool, Ordering}};
+    use std::sync::Mutex;
     use std::thread::JoinHandle;
 
     /// A Mac window's surface format (`surface_config`) unless the app blends in sRGB space, so
@@ -593,37 +594,70 @@ mod prewarm {
     // has none (asserted where it's made).
     unsafe impl Send for Prewarmed {}
 
-    static STARTED: AtomicBool = AtomicBool::new(false);
-    static THREAD: Mutex<Option<JoinHandle<Option<Prewarmed>>>> = Mutex::new(None);
-
-    pub(super) fn start() {
-        if STARTED.swap(true, Ordering::AcqRel) { return; }
-        let thread = std::thread::Builder::new().name("rune-gpu-prewarm".into()).spawn(|| {
-            objc2::rc::autoreleasepool(|_| {
-                let gpu = Gpu::try_new(Gpu::instance(), None).ok()?;
-                let renderer = Renderer::new(&gpu.device, FORMAT);
-                assert!(renderer.surfaces.is_none(), "a new renderer has no native surface renderer");
-                Some(Prewarmed(gpu, renderer))
-            })
-        });
-        if let Ok(thread) = thread { *THREAD.lock().unwrap_or_else(|e| e.into_inner()) = Some(thread); }
+    #[derive(Default)]
+    enum State {
+        #[default]
+        Idle,
+        Running(JoinHandle<Option<Prewarmed>>),
+        Done,
     }
 
-    pub(super) fn take() -> Option<(Gpu, Renderer)> {
-        let thread = THREAD.lock().unwrap_or_else(|e| e.into_inner()).take()?;
-        thread.join().ok().flatten().map(|Prewarmed(gpu, renderer)| (gpu, renderer))
+    pub(super) struct Slot(Mutex<State>);
+
+    impl Slot {
+        pub(super) const fn new() -> Self {
+            Self(Mutex::new(State::Idle))
+        }
+
+        pub(super) fn start(&self) {
+            let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            if !matches!(*state, State::Idle) { return; }
+            let thread = std::thread::Builder::new().name("rune-gpu-prewarm".into()).spawn(|| {
+                objc2::rc::autoreleasepool(|_| {
+                    let gpu = Gpu::try_new(Gpu::instance(), None).ok()?;
+                    #[cfg(test)]
+                    let loads_before = super::metallib::thread_loads();
+                    let renderer = Renderer::new(&gpu.device, FORMAT);
+                    assert!(renderer.surfaces.is_none(), "a new renderer has no native surface renderer");
+                    #[cfg(test)]
+                    if super::metallib::metallib_enabled() {
+                        assert_eq!(super::metallib::thread_loads(), loads_before + 1, "prewarm_gpu loads the precompiled metallib");
+                    }
+                    Some(Prewarmed(gpu, renderer))
+                })
+            });
+            *state = match thread {
+                Ok(thread) => State::Running(thread),
+                Err(_) => State::Done,
+            };
+        }
+
+        pub(super) fn take(&self) -> Option<(Gpu, Renderer)> {
+            let state = std::mem::replace(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner()), State::Done);
+            let State::Running(thread) = state else { return None };
+            thread.join().ok().flatten().map(|Prewarmed(gpu, renderer)| (gpu, renderer))
+        }
+
+        /// The thread, if still working, drops its result when it finishes.
+        pub(super) fn discard(&self) {
+            let state = std::mem::replace(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner()), State::Done);
+            drop(state);
+        }
     }
 
-    /// The thread, if still working, drops its result when it finishes.
-    pub(super) fn discard() {
-        drop(THREAD.lock().unwrap_or_else(|e| e.into_inner()).take());
-    }
+    static GLOBAL: Slot = Slot::new();
+
+    pub(super) fn start() { GLOBAL.start(); }
+    pub(super) fn take() -> Option<(Gpu, Renderer)> { GLOBAL.take() }
+    #[cfg_attr(test, allow(dead_code))]
+    pub(super) fn discard() { GLOBAL.discard(); }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod prewarm {
     pub(super) fn start() {}
     pub(super) fn take() -> Option<(super::Gpu, super::Renderer)> { None }
+    #[cfg_attr(test, allow(dead_code))]
     pub(super) fn discard() {}
 }
 
@@ -1414,10 +1448,25 @@ mod prewarm_tests {
             Err(error) => return eprintln!("skipped: {error}"),
         };
         let Some(renderer) = renderer else { return eprintln!("skipped: no GPU for the prewarm thread") };
+        assert!(gpu.device.features().contains(wgpu::Features::PASSTHROUGH_SHADERS));
         assert_eq!(renderer.format, wgpu::TextureFormat::Bgra8UnormSrgb);
         drop((renderer, gpu));
         let (_, _surface, again) = Gpu::for_surface(wgpu::Features::empty(), |i| surface(i, &layer)).expect("a second GPU");
         assert!(again.is_none(), "the prewarmed GPU goes to one window");
+
+        // A slot that already took or discarded a GPU ignores a later `start`, so a late
+        // `prewarm_gpu()` call cannot leave an unclaimed GPU in memory.
+        let taken = super::prewarm::Slot::new();
+        assert!(taken.take().is_none());
+        taken.start();
+        assert!(taken.take().is_none());
+
+        let discarded = super::prewarm::Slot::new();
+        discarded.start();
+        discarded.discard();
+        assert!(discarded.take().is_none());
+        discarded.start();
+        assert!(discarded.take().is_none());
     }
 
     /// A prewarmed device without a feature the window wants (and the adapter has) is replaced on

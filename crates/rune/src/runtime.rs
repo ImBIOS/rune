@@ -1847,8 +1847,13 @@ impl<S: 'static> Runtime<S> {
             if let Some(f) = self.on_focus { self.update(|s, tx| f(s, focused, tx)); }
             // Deliver the cancelled Up before FocusLost can commit a view that removes its
             // grip (or the focus callback clears the app's drag state).
-            if !focused { self.cancel_pointer(); }
-            self.queue.push(Action::WindowFocus(focused));
+            if !focused {
+                self.cancel_pointer();
+                self.held = None;
+            }
+            if self.commits == 0 || self.dirty || self.nodes.first().is_some_and(|n| n.on_window_focus.is_some()) {
+                self.queue.push(Action::WindowFocus(focused));
+            }
             if !focused {
                 self.keys_lost();
                 // Losing the window ends hover, rather than waiting out an exit grace.

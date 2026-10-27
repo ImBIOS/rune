@@ -530,6 +530,16 @@ objc2_video::define_class!(
 
         #[unsafe(method(occlusionState))]
         fn occlusion_state(&self) -> usize { OCCLUSION_VISIBLE }
+
+        #[unsafe(method(actionForLayer:forKey:))]
+        fn action_for_layer(
+            &self,
+            _: *const objc2_video::runtime::AnyObject,
+            _: *const objc2_video::runtime::AnyObject,
+        ) -> *const objc2_video::runtime::AnyObject {
+            let Some(null) = objc2_video::runtime::AnyClass::get(c"NSNull") else { return std::ptr::null() };
+            unsafe { objc2_video::msg_send![null, null] }
+        }
     }
 );
 

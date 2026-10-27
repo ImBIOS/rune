@@ -67,10 +67,10 @@ struct Win {
     /// Fn presses, which winit doesn't send, while the app wants modifier keys.
     #[cfg(target_os = "macos")]
     fn_key: Option<crate::fn_key::FnKey>,
-    /// Drawing the first frame during window creation (`Host::try_create`), before AppKit
-    /// reports the window on screen or a display link ticks.
+    /// Initial frames (`Host::try_create` and one follow-up) that may draw before AppKit
+    /// reports the new window on screen.
     #[cfg(target_os = "macos")]
-    prime: bool,
+    prime: u8,
 }
 
 impl Win {
@@ -806,6 +806,7 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) -> Result<(), S
     let _ = accessory;
     #[cfg(target_os = "macos")]
     if !window_server_session() {
+        crate::render::discard_prewarm();
         return Err("event loop: no window server session (no one is logged in to this Mac)".into());
     }
     // While AppKit starts up.
@@ -820,11 +821,12 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) -> Result<(), S
             .with_default_menu(false)
             .with_activate_ignoring_other_apps(false);
     }
-    let event_loop = builder.build().map_err(event_loop_error)?;
+    let event_loop = builder.build().inspect_err(|_| crate::render::discard_prewarm()).map_err(event_loop_error)?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
     let mut windows = Windows { factory: Some(factory), args, proxy, hosts: Vec::new(), gpu: Rc::default() };
     let result = event_loop.run_app(&mut windows);
+    crate::render::discard_prewarm();
     crate::clipboard::shutdown(); // Also cover an event-loop error before `exiting`.
     result.map_err(|error| format!("run: {error}"))
 }
@@ -1265,6 +1267,10 @@ mod occluded_surface {
 
         let shown = crate::macos::PresumeShown::new(&surface).expect("a Metal surface");
         assert!(!crate::macos::surface_occluded(&surface));
+        let stand_in: *const AnyObject = unsafe { msg_send![&*layer, delegate] };
+        let null: *const AnyObject = unsafe { msg_send![AnyClass::get(c"NSNull").expect("Foundation"), null] };
+        let action: *const AnyObject = unsafe { msg_send![stand_in, actionForLayer: &*layer, forKey: std::ptr::null::<AnyObject>()] };
+        assert_eq!(action, null, "PresumeShown suppresses implicit Core Animation actions");
         let frame = acquire(&surface, &gpu.device, &config, 1, &mut meter).expect("the first frame's drawable");
         drop(frame);
         drop(shown);
@@ -2097,13 +2103,17 @@ impl<S: 'static> Host<S> {
     /// elsewhere. A hidden window, a panel or launcher, and a window that can't minimize
     /// ignore it.
     fn minimize(&mut self) {
-        let Some(w) = self.win.as_ref().filter(|w| w.visible) else { return minimize_ignored("a hidden window") };
         #[cfg(target_os = "macos")]
-        if w.panel.is_some() || self.launcher() { return minimize_ignored("a panel"); }
+        let launcher = self.launcher();
+        let Some(w) = self.win.as_mut().filter(|w| w.visible) else { return minimize_ignored("a hidden window") };
+        #[cfg(target_os = "macos")]
+        if w.panel.is_some() || launcher { return minimize_ignored("a panel"); }
         // Off macOS winit reports a minimize button on a borderless window too.
         if self.options.borderless || !w.window.enabled_buttons().contains(winit::window::WindowButtons::MINIMIZE) {
             return minimize_ignored("a window without a minimize button");
         }
+        #[cfg(target_os = "macos")]
+        { w.prime = 0; }
         w.window.set_minimized(true);
     }
 
@@ -2190,9 +2200,10 @@ impl<S: 'static> Host<S> {
             self.menus.drain();
         }
         let changed = clipboard || answered || updated || self.rt.drag_ends_pending();
-        // Only updates that changed nothing (`AppHandle::update_if`) woke it: no poll, no frame.
-        let quiet = had_updates && !changed && requests.only_updates() && !self.rt.patch_pending()
-            && (stale_before || !self.rt.needs_commit());
+        // Only updates that changed nothing (`AppHandle::update_if`), or an empty startup drain
+        // after `try_create` already drew the first frame, ran: no poll, no frame.
+        let quiet = (had_updates || (!wake && !stale_before)) && !changed && requests.only_updates()
+            && !self.rt.patch_pending() && (stale_before || !self.rt.needs_commit());
         self.clipboard.flush(&mut self.rt);
         if requests.quit {
             // A tracking menu holds the event loop until it ends.
@@ -2322,7 +2333,11 @@ impl<S: 'static> Host<S> {
 
     fn close(&mut self, event_loop: &ActiveEventLoop) {
         self.rt.minimize_request = false;
-        if let Some(w) = &mut self.win { w.first_frame.hide(); }
+        if let Some(w) = &mut self.win {
+            w.first_frame.hide();
+            #[cfg(target_os = "macos")]
+            { w.prime = 0; }
+        }
         self.secure_input.set(false);
         if !self.closes() { return; }
         self.close_hook();
@@ -2367,7 +2382,11 @@ impl<S: 'static> Host<S> {
         #[cfg(target_os = "macos")]
         self.fn_key();
         self.rt.keys_lost();
-        if let Some(w) = &mut self.win { w.first_frame.hide(); }
+        if let Some(w) = &mut self.win {
+            w.first_frame.hide();
+            #[cfg(target_os = "macos")]
+            { w.prime = 0; }
+        }
         self.secure_input.set(false);
         self.ime_allowed = false;
         if let Some(w) = &self.win { w.window.set_ime_allowed(false); }
@@ -2537,12 +2556,14 @@ impl<S: 'static> Host<S> {
                 (None, surface.map_err(|e| e.to_string())?)
             }
             None => {
-                let cached = self.gpu_pool.borrow().upgrade();
+                let features = self.comp.as_ref().map_or(wgpu::Features::empty(), |c| c.features());
+                let cached = self.gpu_pool.borrow().upgrade().filter(|gpu| {
+                    gpu.device.features().contains(features & gpu.adapter.features())
+                });
                 let (gpu, surface) = if let Some(gpu) = cached {
                     let surface = gpu.instance.create_surface(window.clone()).map_err(|e| e.to_string())?;
                     (gpu, surface)
                 } else {
-                    let features = self.comp.as_ref().map_or(wgpu::Features::empty(), |c| c.features());
                     let (gpu, surface, renderer) = Gpu::for_surface(features, |instance| instance.create_surface(window.clone()).map_err(|e| e.to_string()))?;
                     prewarmed = renderer;
                     let gpu = Arc::new(gpu);
@@ -2595,7 +2616,6 @@ impl<S: 'static> Host<S> {
         self.shown = true;
         self.idle = true;
         self.rt.set_live_visible(visible);
-        if visible || launcher { window.request_redraw(); }
         *self.native_handle.native.window.lock().unwrap() = Arc::downgrade(&window);
         self.native_handle.native.number.store(native_window_number(&window).unwrap_or(0), Ordering::Release);
         #[cfg(target_os = "macos")]
@@ -2606,6 +2626,8 @@ impl<S: 'static> Host<S> {
         let fn_key = if self.rt.modifier_keys() { crate::fn_key::FnKey::new(&window) } else { None };
         #[cfg(target_os = "macos")]
         let full_screen = mac::FullScreenWatch::new(&window);
+        #[cfg(target_os = "macos")]
+        let prime = if visible && panel.is_none() { 2 } else { 0 };
         self.win = Some(Win {
             first_frame: FirstFrame::default(),
             #[cfg(target_os = "macos")]
@@ -2636,25 +2658,46 @@ impl<S: 'static> Host<S> {
             #[cfg(target_os = "macos")]
             fn_key,
             #[cfg(target_os = "macos")]
-            prime: false,
+            prime,
         });
         if launcher { self.win.as_mut().unwrap().first_frame.prepare(); }
         self.apply_placement(event_loop);
-        self.sync_origin();
         #[cfg(target_os = "macos")]
         if visible && let Some(w) = &self.win && w.panel.is_some() { w.show(focus); }
         if let Some(created) = self.on_created.take() { created(self.native_handle.clone()); }
         if let Some(on_window) = self.on_window.as_mut() { on_window(&self.native_handle); }
+        if let (Some(w), Some((gpu, ..))) = (self.win.as_mut(), self.gpu.as_ref()) {
+            #[cfg(target_os = "macos")]
+            if let Some(pacing) = &mut w.pacing { pacing.update_display(&w.window); }
+            let size = w.window.inner_size();
+            let scale = w.window.scale_factor() as f32;
+            if size.width > 0 && size.height > 0 {
+                w.resize_surface(&gpu.device, size);
+                self.rt.set_viewport((size.width as f32 / scale, size.height as f32 / scale), scale);
+            }
+            self.rt.set_titlebar_inset(place_chrome(&w.window, self.chrome));
+            if let Some(origin) = screen_origin(&w.window) {
+                self.rt.set_window_origin(origin);
+            }
+            if w.window.has_focus() {
+                self.rt.window_focus(true);
+            }
+        }
         // The first frame, now, so the window comes on screen with it instead of empty for a
         // frame or two. AppKit has ordered the window in, but it reaches the screen with this
         // turn's Core Animation commit, so nothing reports it visible yet.
+        let mut drew = false;
         #[cfg(target_os = "macos")]
-        if visible && let Some(w) = self.win.as_mut() && w.panel.is_none()
-            && let Some(shown) = crate::macos::PresumeShown::new(&w.surface) {
-            w.prime = true;
+        if visible && !self.rt.minimize_request && !self.finished && !event_loop.exiting()
+            && self.win.as_ref().is_some_and(|w| w.panel.is_none() && w.window.is_minimized() != Some(true))
+        {
+            let presents = self.meter.totals().presents;
             self.redraw();
-            drop(shown);
-            if let Some(w) = self.win.as_mut() { w.prime = false; }
+            drew = self.meter.totals().presents > presents;
+            self.shell(event_loop);
+        }
+        if !drew && (visible || launcher) && let Some(w) = &self.win {
+            w.window.request_redraw();
         }
         Ok(())
     }
@@ -2737,18 +2780,38 @@ impl<S: 'static> Host<S> {
         // Starting the display link for a window that isn't on screen would wait for a tick that
         // sleeping displays never send, and a running link holds back its timers (`wake_deadline`).
         #[cfg(target_os = "macos")]
-        if !hidden && !l.prime && l.natively_occluded() {
-            self.meter.skipped();
-            self.missed_frame(Missed::Occluded, false);
-            return;
+        if !hidden {
+            if !l.natively_occluded() {
+                l.prime = 0;
+            } else if l.prime == 0 {
+                self.meter.skipped();
+                self.missed_frame(Missed::Occluded, false);
+                return;
+            }
         }
         #[cfg(target_os = "macos")]
         let _prewarm = if hidden { l.panel.as_ref().map(|p| p.prewarm()) } else { None };
         #[cfg(target_os = "macos")]
-        let target = if hidden || resizing || l.prime { None } else if let Some(pacing) = &mut l.pacing {
-            let Some(target) = pacing.next_frame() else { return };
-            Some(target)
+        let target = if hidden || resizing { None } else if let Some(pacing) = &mut l.pacing {
+            if l.prime > 0 && !pacing.running() {
+                None
+            } else {
+                let Some(target) = pacing.next_frame() else { return };
+                Some(target)
+            }
         } else { None };
+        #[cfg(target_os = "macos")]
+        let shown = if !hidden && l.prime > 0 {
+            l.prime -= 1;
+            let Some(shown) = crate::macos::PresumeShown::new(&l.surface) else {
+                self.meter.skipped();
+                self.missed_frame(Missed::Occluded, false);
+                return;
+            };
+            Some(shown)
+        } else {
+            None
+        };
         if self.native_handle.native.number.load(Ordering::Relaxed) == 0 {
             self.native_handle.native.number.store(native_window_number(&l.window).unwrap_or(0), Ordering::Release);
         }
@@ -2849,6 +2912,8 @@ impl<S: 'static> Host<S> {
             { drawable = l.present.as_ref().and(self.present_log.as_ref()).and_then(|log| log.acquired()); }
             frame
         } else { frame };
+        #[cfg(target_os = "macos")]
+        drop(shown);
         l.occluded_wait = OCCLUDED_RETRY;
         l.hidden_wait = TIMEOUT_RETRY;
         if hidden { l.hidden_pace.rendered(now); }
@@ -3377,7 +3442,9 @@ impl<S: 'static> Host<S> {
                 // Alpha-zero launcher panels remain renderable on explicit invalidation.
                 // Their native occlusion transitions must not settle or redraw a reveal.
                 if self.macos_window.launcher && cfg!(target_os = "macos") { return; }
-                l.occluded = occluded;
+                #[cfg(target_os = "macos")]
+                { l.prime = 0; }
+                let was_occluded = std::mem::replace(&mut l.occluded, occluded);
                 l.retry = None;
                 l.occluded_wait = OCCLUDED_RETRY;
                 rt.set_live_visible(l.visible && !occluded && !l.minimized());
@@ -3390,9 +3457,13 @@ impl<S: 'static> Host<S> {
                 // A window opened while the displays slept has no display link yet.
                 #[cfg(target_os = "macos")]
                 if l.pacing.is_none() { l.pacing = crate::display_link::DisplayLink::new(&l.window, self.frame_wake.clone()); }
-                // Coming back paints the settled state in the first frame (guarantee 8).
-                rt.settle_all();
-                l.window.request_redraw();
+                if was_occluded {
+                    // Coming back paints the settled state in the first frame (guarantee 8).
+                    rt.settle_all();
+                    l.window.request_redraw();
+                } else if rt.stale() {
+                    l.window.request_redraw();
+                }
             }
             WindowEvent::ThemeChanged(theme) => {
                 if self.args.theme.is_none() {
@@ -3417,10 +3488,24 @@ impl<S: 'static> Host<S> {
                     self.ime_allowed = false;
                     // A minimized or occluded window skips redraw.
                     l.apply_cursor(rt, false);
-                } else {
+                } else if rt.stale() {
                     rt.ime_reset = true;
+                } else {
+                    let ime_allowed = rt.ime_area.is_some() && !rt.has_secure_focus();
+                    if std::mem::take(&mut rt.ime_reset) || ime_allowed != self.ime_allowed {
+                        l.window.set_ime_allowed(false);
+                        l.window.set_ime_allowed(ime_allowed);
+                        self.ime_allowed = ime_allowed;
+                    }
+                    if let Some(a) = rt.ime_area {
+                        l.window.set_ime_cursor_area(
+                            LogicalPosition::new(a[0] as f64, a[1] as f64),
+                            LogicalSize::new(a[2] as f64, a[3] as f64),
+                        );
+                    }
+                    l.apply_cursor(rt, true);
                 }
-                l.window.request_redraw();
+                if rt.stale() { l.window.request_redraw(); }
             }
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
                 let pressed = event.state == ElementState::Pressed;

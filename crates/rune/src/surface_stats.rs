@@ -156,7 +156,7 @@ impl SurfaceMeter {
     }
 
     pub(crate) fn shared(&self) -> Arc<Mutex<SurfaceStats>> { self.shared.clone() }
-    #[cfg(test)]
+    #[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
     pub(crate) fn totals(&self) -> SurfaceCounts { self.totals }
 
     /// A redraw. `paced` when a display tick or vsync paces it; otherwise it's unpaced unless
