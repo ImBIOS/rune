@@ -189,28 +189,35 @@ pub(super) fn push_selection(out: &mut Vec<Instance>, layout: &Layout<Ink>, a: u
     for (bb, _) in crate::text::range_boxes(layout, a, b, true) {
         let rect = [origin[0] + bb.x0 as f32 * k, origin[1] + bb.y0 as f32 * k, (bb.x1 - bb.x0) as f32 * k, (bb.y1 - bb.y0) as f32 * k];
         let radius = 2.0 * s * k;
-        if !extend_run(out, rect, fill, radius, clip, 40.0 * s * k) {
-            out.push(rect_inst(rect, fill, radius, clip, fade));
-        }
+        extend_run(out, rect, fill, radius, clip, fade, 40.0 * s * k);
     }
 }
 
 /// Words flowed as separate texts each draw their own highlight. One that starts where a recent
-/// one on the same line ended (or after the little gap a chip's icon and padding leave) grows
-/// it instead, so a run reads as one rect with no seams, as tall as the line's tallest text.
-fn extend_run(out: &mut [Instance], rect: [f32; 4], fill: [f32; 4], radius: f32, clip: [f32; 4], reach: f32) -> bool {
+/// one on the same line ended (or after the little gap a chip's icon and padding leave) joins
+/// it, so a run reads as one rect with no seams, as tall as the line's tallest text. When
+/// something filled was drawn in between (a chip's background), a rect of its own is drawn on
+/// top, reaching back to where the last one ended.
+fn extend_run(out: &mut Vec<Instance>, mut rect: [f32; 4], fill: [f32; 4], radius: f32, clip: [f32; 4], fade: [f32; 4], reach: f32) {
     let from = out.len().saturating_sub(256);
-    let Some(prev) = out[from..].iter_mut().rev().find(|i| {
+    let found = out[from..].iter().rposition(|i| {
         let gap = rect[0] - (i.rect[0] + i.rect[2]);
         let overlap = (i.rect[1] + i.rect[3]).min(rect[1] + rect[3]) - i.rect[1].max(rect[1]);
         i.fill == fill && i.clip == clip && i.radii == [radius; 4] && i.params[1] == crate::render::KIND_RECT
             && (-1.0..=reach).contains(&gap) && overlap > 0.6 * i.rect[3].min(rect[3])
-    }) else { return false };
+    }).map(|k| from + k);
+    let Some(at) = found else { return out.push(rect_inst(rect, fill, radius, clip, fade)) };
+    let covered = out[at + 1..].iter().any(|i| i.params[1] == crate::render::KIND_RECT && i.fill != fill && i.fill[3] > 0.0);
+    let prev = &mut out[at];
     let (top, bottom) = (prev.rect[1].min(rect[1]), (prev.rect[1] + prev.rect[3]).max(rect[1] + rect[3]));
+    if covered {
+        let left = (prev.rect[0] + prev.rect[2]).min(rect[0]);
+        rect = [left, top, rect[0] + rect[2] - left, bottom - top];
+        return out.push(rect_inst(rect, fill, radius, clip, fade));
+    }
     prev.rect[2] = prev.rect[0].max(rect[0] + rect[2]) - prev.rect[0];
     prev.rect[1] = top;
     prev.rect[3] = bottom - top;
-    true
 }
 
 /// `now` still reads as `then` did up to byte `upto`: text added after it (streaming in) keeps
