@@ -306,6 +306,7 @@ impl<S: 'static> Runtime<S> {
         let captured = self.capture.as_ref().map(|(p, _)| p.as_str()).or(self.secondary_capture.as_deref());
         for i in 0..self.nodes.len() {
             let n = &self.nodes[i];
+            if n.vis.hover.a <= 0.0 && !n.vis.hover_group && n.vis.press.a <= 0.0 && n.press_scale.is_none() { continue; }
             if self.is_exiting(n.id) { continue; }
             match self.hover_flip(i, captured) {
                 Some(f) if f.changed => flips.push(f),
