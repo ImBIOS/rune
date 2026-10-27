@@ -116,6 +116,9 @@ impl<S: 'static> Runtime<S> {
             if !one.key_repeat { one.toggle_playground(); }
             return true;
         }
+        // Ahead of fields too: route_key doesn't offer it again.
+        if self.playground_typing() && let Some(f) = self.on_key && Tx::took(self.app_key(f, ev, one), one) { return true; }
+        let Some(playground) = &self.playground else { return false };
         if !playground.is_open() || self.focused_input().is_some() || self.focus_on_stage() { return false; }
         let side = self.playground_side();
         let at = self.focused.as_deref().filter(|_| !self.hover_focus).and_then(|f| side.iter().position(|p| p == f));
@@ -143,6 +146,11 @@ impl<S: 'static> Runtime<S> {
                 true
             }
         }
+    }
+
+    /// Whether the stage's `on_key` gets every key first, through `playground_nav`.
+    pub(super) fn playground_typing(&self) -> bool {
+        self.playground.as_ref().is_some_and(|p| p.typing(&self.state))
     }
 
     /// The paths of the focusable controls in the playground's side column, in order.

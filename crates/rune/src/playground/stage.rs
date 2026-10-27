@@ -127,6 +127,16 @@ impl<S: 'static> Live<S> {
         }
     }
 
+    /// Whether [`Playground::typing`] gives the stage's `on_key` every key first.
+    pub(crate) fn typing(&self, app: &S) -> bool {
+        let Some(typing) = self.typing.filter(|_| self.open) else { return false };
+        match (&self.scene, self.page()) {
+            (Some(scene), _) => typing(&scene.state),
+            (None, Some((_, Page { kind: Kind::Own(_), .. }))) => false,
+            (None, _) => typing(app),
+        }
+    }
+
     pub(crate) fn polls(&self) -> bool {
         if !self.open { return false; }
         match (&self.scene, self.own()) {

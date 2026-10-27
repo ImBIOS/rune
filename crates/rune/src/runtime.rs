@@ -2925,7 +2925,7 @@ impl<S: 'static> Runtime<S> {
         if self.default_button_key(ev, one) { return true; }
         one.physical_key = physical_key;
         if self.playground_nav(ev, one) { return true; }
-        if app_first && let Some(f) = self.on_key && Tx::took(self.app_key(f, ev, one), one) { return true; }
+        if app_first && !self.playground_typing() && let Some(f) = self.on_key && Tx::took(self.app_key(f, ev, one), one) { return true; }
         if self.focused_input().is_some() {
             self.input_click.clear_last();
         }
@@ -2979,7 +2979,7 @@ impl<S: 'static> Runtime<S> {
             if handled { return true; }
         }
         one.physical_key = physical_key;
-        if !app_first && let Some(f) = self.on_key && Tx::took(self.app_key(f, ev, one), one) {
+        if !app_first && !self.playground_typing() && let Some(f) = self.on_key && Tx::took(self.app_key(f, ev, one), one) {
             self.events.push(format!("key {:?}", ev.key));
             return true;
         }

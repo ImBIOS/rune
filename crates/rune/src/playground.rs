@@ -77,6 +77,7 @@ pub struct Playground<S: 'static> {
     fresh: Option<fn(&S) -> S>,
     keep: Option<fn(&S, &mut S)>,
     variants: Vec<(&'static str, &'static str, fn(&mut S))>,
+    typing: Option<fn(&S) -> bool>,
 }
 
 impl<S: 'static> Default for Playground<S> {
@@ -101,6 +102,7 @@ impl<S: 'static> Playground<S> {
             fresh: None,
             keep: None,
             variants: Vec::new(),
+            typing: None,
         }
     }
 
@@ -162,6 +164,15 @@ impl<S: 'static> Playground<S> {
     /// starts from it, so tuning in the side column sticks.
     pub fn keep(mut self, keep: fn(&S, &mut S)) -> Self {
         self.keep = Some(keep);
+        self
+    }
+
+    /// While `typing` is true of the stage's state (a scene's, or the real state on a page),
+    /// `AppSpec::on_key` gets every key before the playground and focused fields do, letters
+    /// and arrows included, and what it refuses goes on as usual: for a view that takes text
+    /// itself. A focused Rune field needs none of this; it keeps its keys anyway.
+    pub fn typing(mut self, typing: fn(&S) -> bool) -> Self {
+        self.typing = Some(typing);
         self
     }
 
@@ -278,6 +289,7 @@ pub(crate) struct Live<S: 'static> {
     init: fn() -> S,
     fresh: Option<fn(&S) -> S>,
     keep: Option<fn(&S, &mut S)>,
+    typing: Option<fn(&S) -> bool>,
     scenes: &'static [(&'static str, fn(&mut S))],
     poll: Option<fn(&mut S, f64, &mut Tx) -> bool>,
     /// Stories, as indices into scenes then pages, in the order the list shows them.
@@ -342,7 +354,7 @@ pub(crate) fn offered_by_env() -> bool {
 
 impl<S: 'static> Live<S> {
     fn new(playground: Playground<S>, spec: &crate::AppSpec<S>, menu: bool) -> Self {
-        let Playground { pages, triggers, sides, sizes, shortcut, bar, enabled: _, scenes: show, fresh, keep, variants } = playground;
+        let Playground { pages, triggers, sides, sizes, shortcut, bar, enabled: _, scenes: show, fresh, keep, variants, typing } = playground;
         let mut live = Live {
             owned: pages.iter().map(|_| None).collect(),
             pages,
@@ -357,6 +369,7 @@ impl<S: 'static> Live<S> {
             init: spec.init,
             fresh,
             keep,
+            typing,
             scenes: spec.scenes,
             poll: spec.poll,
             order: Vec::new(),

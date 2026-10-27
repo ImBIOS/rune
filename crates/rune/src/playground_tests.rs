@@ -15,6 +15,8 @@ struct Real {
     focus: Vec<bool>,
     waker: Option<crate::Waker>,
     inbox: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
+    typing: bool,
+    typed: String,
 }
 
 fn view(s: &Real, _: &mut Cx<Real>) -> El {
@@ -95,7 +97,13 @@ fn runtime_with(playground: Playground<Real>, open: Option<Option<String>>, wind
     let mut spec = AppSpec::new("playground", (800.0, 500.0), Real::default, view);
     spec.scenes = SCENES;
     spec.poll = Some(|s, _, _| { s.polls += 1; false });
-    spec.on_key = Some(|s, ev, _| s.holds_escape && ev.key == Key::Escape);
+    spec.on_key = Some(|s, ev, _| match &ev.key {
+        Key::Text(t) if s.typing => {
+            s.typed.push_str(t);
+            true
+        }
+        key => s.holds_escape && *key == Key::Escape,
+    });
     let mut rt = crate::tooling::runtime_for(&spec, (spec.init)(), spec.size, Env::new(false, 1.0), Arc::new(|| {}));
     attach(&mut rt, Some(playground), &spec, open, windowed);
     rt.frame(0.0);
@@ -587,3 +595,6 @@ mod real;
 
 #[path = "playground/variants_tests.rs"]
 mod variants;
+
+#[path = "playground/keys_tests.rs"]
+mod keys;
