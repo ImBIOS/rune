@@ -77,6 +77,9 @@ enum Input {
     Icon(std::path::PathBuf, u32),
     Svg(Arc<[u8]>, u32),
     File(std::path::PathBuf, u32),
+    /// A decoder that panics, standing in for a codec bug.
+    #[cfg(test)]
+    Panic,
 }
 
 impl Input {
@@ -98,7 +101,19 @@ impl Input {
             }
             #[cfg(target_arch = "wasm32")]
             Input::Icon(..) | Input::File(..) => Err(ImageError("filesystem images are unsupported on web".into())),
+            #[cfg(test)]
+            Input::Panic => panic!("decoder bug"),
         }
+    }
+
+    /// `decode`, with a panic in a codec (a malformed file can still trip one) failing this
+    /// image instead of unwinding the worker, which would leave it pending and fail every later one.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn decode_caught(self) -> Result<Decoded, ImageError> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.decode())).unwrap_or_else(|panic| {
+            let why = panic.downcast_ref::<&str>().copied().or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+            Err(ImageError(format!("image decoder panicked: {}", why.unwrap_or("no message"))))
+        })
     }
 }
 struct Job { image: Image, input: Input }
@@ -123,7 +138,7 @@ impl ImageCache {
         let (jobs, receive) = mpsc::channel::<Job>();
         std::thread::Builder::new().name("rune-images".into()).spawn(move || {
             for job in receive {
-                job.image.finish(job.input.decode());
+                job.image.finish(job.input.decode_caught());
                 waker();
             }
         }).expect("image worker");
@@ -502,14 +517,24 @@ fn decode(bytes: &[u8]) -> Result<Decoded, ImageError> {
         return mip_chain(w, h, &rgba);
     }
     let bytes = if bytes.starts_with(b"icns") { icns_png(bytes)? } else { bytes };
+    use image::ImageDecoder;
+    let error = |e: image::ImageError| ImageError(e.to_string());
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format().map_err(|e| ImageError(e.to_string()))?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(8192);
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(256 * 1024 * 1024);
-    reader.limits(limits);
-    let image = reader.decode().map_err(|e| ImageError(e.to_string()))?.into_rgba8();
+    reader.limits(limits.clone());
+    // `ImageReader::decode`, keeping the decoder to read its EXIF orientation (a phone's JPEG
+    // stores its pixels as the sensor saw them and says how to turn them upright).
+    let mut decoder = reader.into_decoder().map_err(error)?;
+    limits.reserve(decoder.total_bytes()).map_err(error)?;
+    decoder.set_limits(limits).map_err(error)?;
+    let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut image = image::DynamicImage::from_decoder(decoder).map_err(error)?;
+    image.apply_orientation(orientation);
+    let image = image.into_rgba8();
     mip_chain(image.width(), image.height(), image.as_raw())
 }
 
@@ -651,6 +676,50 @@ mod tests {
         }
         assert!(mip_chain(0, 1, &[]).is_err());
         assert!(mip_chain(1, 1, &[0]).is_err());
+    }
+
+    #[test]
+    fn a_jpeg_turns_upright_by_its_exif_orientation() {
+        // Red on the left, blue on the right, stored as the camera saw it.
+        let source = image::RgbImage::from_fn(16, 8, |x, _| if x < 8 { image::Rgb([255, 0, 0]) } else { image::Rgb([0, 0, 255]) });
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        source.write_to(&mut encoded, image::ImageFormat::Jpeg).unwrap();
+        let jpeg = encoded.into_inner();
+        // An APP1 Exif segment after SOI: a little-endian TIFF header and one IFD entry,
+        // Orientation (0x0112) = 6, "rotate 90° clockwise to display".
+        let mut tiff = b"II*\0".to_vec();
+        tiff.extend_from_slice(&8u32.to_le_bytes());
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        tiff.extend_from_slice(&[0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0]);
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        let mut app1 = b"Exif\0\0".to_vec();
+        app1.extend_from_slice(&tiff);
+        let mut rotated = jpeg[..2].to_vec();
+        rotated.extend_from_slice(&[0xff, 0xe1]);
+        rotated.extend_from_slice(&(app1.len() as u16 + 2).to_be_bytes());
+        rotated.extend_from_slice(&app1);
+        rotated.extend_from_slice(&jpeg[2..]);
+
+        let plain = decode(&jpeg).unwrap();
+        assert_eq!((plain.mips[0].width, plain.mips[0].height), (16, 8));
+        let upright = decode(&rotated).unwrap();
+        let top = &upright.mips[0];
+        assert_eq!((top.width, top.height), (8, 16), "turned a quarter");
+        let at = |x: u32, y: u32| &top.pixels[((y * top.width + x) * 4) as usize..][..3];
+        assert!(at(4, 2)[0] > 200 && at(4, 2)[2] < 60, "the left (red) half is now on top: {:?}", at(4, 2));
+        assert!(at(4, 13)[2] > 200 && at(4, 13)[0] < 60, "the right (blue) half below: {:?}", at(4, 13));
+    }
+
+    #[test]
+    fn a_decoder_panic_fails_its_image_and_the_worker_goes_on() {
+        let (tx, rx) = mpsc::channel();
+        let cache = ImageCache::new(Arc::new(move || { tx.send(()).unwrap(); }));
+        let broken = cache.request([7; 32], Input::Panic);
+        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(broken.error(), Some(&ImageError("image decoder panicked: decoder bug".into())));
+        let next = cache.rgba(1, 1, vec![20, 40, 60, 255]);
+        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(next.size(), Some([1, 1]), "later images still load");
     }
 
     #[cfg(feature = "svg")]

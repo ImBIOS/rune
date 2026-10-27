@@ -1473,7 +1473,10 @@ straight-alpha sRGB pixels. Static images get area-filtered, linear-premultiplie
 on that worker; rendering chooses a precomputed level from the drawn device-pixel size.
 `Image::{size,is_ready,error}` inspect completion; `Image::wait` is for deterministic headless
 fixtures. Dropping all image and pixel handles releases decoded storage. Legacy ICNS codecs
-are not decoded; provide decoded RGBA for those.
+are not decoded; provide decoded RGBA for those. A JPEG (or any format whose decoder reads
+EXIF) is turned upright by its EXIF orientation, so a phone photo's `size()` is the size it
+shows at. A codec that panics on a malformed file fails that image (`Image::error`) and the
+worker goes on with the next.
 
 SVG and gzipped SVGZ draw on every platform, web included, through resvg (the default-on `svg`
 feature; about 19 small pure-Rust crates and 8 s of parallel release build). Vector images
