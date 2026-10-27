@@ -133,7 +133,7 @@ fn dist_x(r: [f32; 4], x: f32) -> f32 { (r[0] - x).max(x - r[2]).max(0.0) }
 impl<S: 'static> Runtime<S> {
     pub(super) fn is_selectable(&self, i: usize) -> bool {
         let n = &self.nodes[i];
-        n.input.is_none() && n.text.as_ref().is_some_and(|t| t.selectable)
+        n.input.is_none() && n.text.as_ref().is_some_and(|t| t.selectable && !t.redacted)
     }
 
     fn live(&self, path: &str) -> Option<usize> {

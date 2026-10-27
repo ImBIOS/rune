@@ -305,7 +305,7 @@ impl<S: 'static> Runtime<S> {
                 let v = text.visible;
                 let (x0, y0) = (r[0].max(v[0]), r[1].max(v[1]));
                 let (x1, y1) = (r[2].min(v[0] + v[2]), r[3].min(v[1] + v[3]));
-                let words = spec.source_slice(l.start, l.end).map(str::to_owned);
+                let words = (!spec.redacted).then(|| spec.source_slice(l.start, l.end).map(str::to_owned)).flatten();
                 elements.push(ElementInfo {
                     stuck: 0.0,
                     path: format!("{}#link-{k}", n.path),

@@ -561,11 +561,12 @@ impl DropSpec {
 }
 pub(crate) type EditFn = Rc<dyn for<'a> Fn(&'a mut dyn Any) -> &'a mut TextEdit>;
 
-/// Accessibility state beyond role and label (`El::level`, `El::expanded`).
+/// Accessibility state beyond role and label (`El::level`, `El::expanded`, `El::secure`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct A11y {
     pub level: Option<u32>,
     pub expanded: Option<bool>,
+    pub secure: bool,
 }
 
 #[derive(Clone, Default)]
@@ -882,6 +883,8 @@ pub struct TextSpec {
     pub(crate) pill_colors: Option<(Color, Option<Color>)>,
     pub(crate) rich_style: crate::edit::RichStyle,
     pub(crate) redacted: bool,
+    pub(crate) secure_revealed: bool,
+    pub(crate) secure_multiline: bool,
     pub(crate) wrap_anywhere: bool,
 }
 
@@ -909,6 +912,9 @@ impl Drop for TextSpec {
         if self.redacted {
             use zeroize::Zeroize;
             self.content.zeroize();
+            if let Some(src) = &mut self.source {
+                src.text.zeroize();
+            }
         }
     }
 }
@@ -930,6 +936,9 @@ impl TextSpec {
     /// The authored text of `content[start..end]` as copying takes it, without its
     /// [`El::uncopied`] bytes.
     pub(crate) fn copy_slice(&self, start: u32, end: u32) -> Option<String> {
+        if self.redacted {
+            return None;
+        }
         let mut out = String::new();
         let mut at = start;
         for &(a, b) in self.uncopied.iter().filter(|r| r.1 > start && r.0 < end) {
@@ -940,9 +949,49 @@ impl TextSpec {
         Some(out)
     }
 
+    /// Masks `self.content` in place and zeroizes the plain string (for layout of a hidden
+    /// secure label or an exiting revealed one).
+    pub(crate) fn conceal(&mut self) {
+        if !self.redacted {
+            return;
+        }
+        self.secure_revealed = false;
+        let mask = if self.content.is_empty() {
+            String::new()
+        } else if self.secure_multiline {
+            crate::edit::MULTILINE_SECURE_MASK.to_owned()
+        } else {
+            "•".repeat(self.content.chars().count())
+        };
+        use zeroize::Zeroize;
+        self.content.zeroize();
+        self.content = mask;
+        if let Some(mut src) = self.source.take() {
+            src.text.zeroize();
+        }
+        self.case = None;
+        self.spans.clear();
+        self.links.clear();
+        self.rings.clear();
+        self.strikes.clear();
+        self.blocks.clear();
+        self.soft_breaks.clear();
+        self.pills.clear();
+        self.uncopied.clear();
+        if self.secure_multiline {
+            self.wrap = false;
+            self.wrap_anywhere = false;
+            self.max_lines = 0;
+        }
+    }
+
     /// Replaces `content` (the authored string) with its cased form and moves span and link
     /// ranges onto it.
     pub(crate) fn apply_case(&mut self) {
+        if self.redacted {
+            self.case = None;
+            return;
+        }
         // Ring boundaries need distinct brushes even when the surrounding styles match.
         // Do this once before shaping, not once per glyph run at paint time.
         if !self.rings.is_empty() {
@@ -1458,6 +1507,8 @@ pub fn text(content: impl Into<String>) -> El {
         pill_colors: None,
         rich_style: crate::edit::RichStyle::default(),
         redacted: false,
+        secure_revealed: false,
+        secure_multiline: false,
         wrap_anywhere: false,
     });
     e
@@ -1506,6 +1557,7 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
     let (content, _) = edit.display();
     let mut e = text(content).font(style);
     e.role = "textbox";
+    e.a11y.secure = edit.is_secure();
     if let Some(t) = &mut e.text {
         t.wrap = true;
         t.wrap_anywhere = edit.is_secure();
@@ -1585,9 +1637,16 @@ impl El {
         });
         self
     }
-    /// Mask a text input before layout; disable undo, copy, cut and IME composition.
-    /// Prefer `TextEdit::secure()` when the model can be configured at construction.
+    /// Mask a text element or text input before layout; disable undo, copy, cut, selection and
+    /// IME composition, omit accessibility text, redact [`Debug`], bypass layout/raster caches,
+    /// and zeroize owned buffers on conceal and drop.
+    ///
+    /// On read-only [`text`], single-line labels show one `•` per character when hidden, while
+    /// wrapped or multi-line labels (`.wrap()`, `.wrap_anywhere()`, `.max_lines(..)`, [`rich`])
+    /// show the fixed [`MULTILINE_SECURE_MASK`](crate::edit::MULTILINE_SECURE_MASK) on one line.
+    /// Pair with [`revealed`](Self::revealed) to toggle plaintext display.
     pub fn secure(mut self) -> Self {
+        self.a11y.secure = true;
         if let Some(input) = &mut self.input {
             input.edit.set_secure(true);
             let single = input.single_line;
@@ -1602,14 +1661,22 @@ impl El {
             }
             self.sync_input_pills();
             self.sync_input_rich();
+        } else if let Some(text) = &mut self.text {
+            text.redacted = true;
+            if text.selectable {
+                text.selectable = false;
+                if self.cursor == Some(Cursor::Text) {
+                    self.cursor = None;
+                }
+            }
         }
         self
     }
 
-    /// Show the plain characters of a [`secure`](Self::secure) text input while keeping all
-    /// other secure protections (no undo, copy, cut, IME or accessibility text, redacted
-    /// [`Debug`], and zeroized buffers). Prefer [`TextEdit::revealed`] or
-    /// [`TextEdit::set_revealed`] when the model owns the state.
+    /// Show the plain characters of a [`secure`](Self::secure) text element or text input while
+    /// keeping all other secure protections (no undo, copy, cut, selection, IME or accessibility
+    /// text, redacted [`Debug`], uncached shaping/raster, and zeroized buffers). Prefer
+    /// [`TextEdit::revealed`] or [`TextEdit::set_revealed`] when an input model owns the state.
     pub fn revealed(mut self, revealed: bool) -> Self {
         if let Some(input) = &mut self.input {
             input.edit.set_revealed(revealed);
@@ -1621,6 +1688,8 @@ impl El {
             }
             self.sync_input_pills();
             self.sync_input_rich();
+        } else if let Some(text) = &mut self.text {
+            text.secure_revealed = revealed;
         }
         self
     }
@@ -3127,7 +3196,7 @@ impl El {
     /// drags the row, and double- and triple-clicks still select.
     pub fn selectable(mut self, on: bool) -> Self {
         if let Some(t) = &mut self.text {
-            if self.input.is_some() { return self; }
+            if self.input.is_some() || t.redacted { return self; }
             t.selectable = on;
             if on && (self.cursor.is_none() || (!t.links.is_empty() && self.cursor == Some(Cursor::Pointer))) {
                 self.cursor = Some(Cursor::Text);

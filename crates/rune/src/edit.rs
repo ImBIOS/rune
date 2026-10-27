@@ -256,6 +256,8 @@ pub struct TextEdit {
     allowed_marks: Option<u16>,
     /// The block kinds this field keeps ([`Block::kind_bit`]); `None` keeps all.
     allowed_blocks: Option<u8>,
+    /// Hash of `self.text` after the last user edit (`None` when untouched since the app set it).
+    edited_tag: EditedTag,
 }
 
 impl std::fmt::Debug for TextEdit {
@@ -343,6 +345,26 @@ impl PartialEq for ActiveGroup {
     fn eq(&self, _: &Self) -> bool {
         true
     }
+}
+
+/// Tag of `TextEdit::text` recorded after a user edit (`None` when untouched since the app last
+/// set it). Comparing against `text_tag(&self.text)` detects direct `edit.text = ...` assignments
+/// without storing a second copy of the secret.
+#[derive(Clone, Copy, Default)]
+struct EditedTag(Option<u64>);
+
+impl PartialEq for EditedTag {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+fn text_tag(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rune_motion::Fx::default();
+    s.hash(&mut h);
+    s.len().hash(&mut h);
+    h.finish()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -550,6 +572,7 @@ impl TextEdit {
             rich: false,
             allowed_marks: None,
             allowed_blocks: None,
+            edited_tag: EditedTag::default(),
         }
     }
 
@@ -816,10 +839,27 @@ impl TextEdit {
         self.soft_breaks.clear();
         self.pending = None;
         self.clear_preedit();
+        self.edited_tag = EditedTag(None);
         self.history = Arc::default();
         if self.group.0.is_some() {
             self.group.0 = Some((!self.secure).then(|| self.snapshot_now()));
         }
+    }
+
+    /// Whether `self.text` is non-empty and still holds the value the app last set, with no user
+    /// edit since ([`TextEdit::new`], [`Self::replace_text`], or a direct `edit.text = ...`
+    /// update). An empty field is never pristine.
+    ///
+    /// While a hidden multi-line [`secure`](Self::secure) field is pristine, the first insertion
+    /// replaces the entire value with the new text and the first deletion empties it, regardless
+    /// of caret or selection.
+    pub fn is_pristine(&self) -> bool {
+        !self.text.is_empty() && self.edited_tag.0 != Some(text_tag(&self.text))
+    }
+
+    /// Mark the current `self.text` as user-edited (`!self.is_pristine()`).
+    pub fn mark_edited(&mut self) {
+        self.edited_tag.0 = Some(text_tag(&self.text));
     }
 
     #[cfg(test)]
@@ -1985,9 +2025,13 @@ impl TextEdit {
         self.focus = self.anchor;
         self.preedit = None;
         self.sync_invariants();
+        self.mark_edited();
     }
 
-    fn replace(&mut self, (a, b): (usize, usize), s: &str, typing: bool) {
+    fn replace(&mut self, (mut a, mut b): (usize, usize), s: &str, typing: bool) {
+        if self.is_hidden_multiline() && self.is_pristine() {
+            (a, b) = (0, self.text.len());
+        }
         if self.secure {
             let mut next = String::with_capacity(self.text.len() - (b - a) + s.len());
             next.push_str(&self.text[..a]);
@@ -1996,6 +2040,7 @@ impl TextEdit {
             self.replace_text(next);
             self.anchor = a + s.len();
             self.focus = self.anchor;
+            self.mark_edited();
             return;
         }
         self.sync_invariants();
@@ -2009,6 +2054,7 @@ impl TextEdit {
             self.anchor = a + s.len();
             self.focus = self.anchor;
             self.preedit = None;
+            self.mark_edited();
             return;
         }
         let before = self.snapshot();
@@ -2102,6 +2148,10 @@ impl TextEdit {
                 _ => {
                     // Ctrl-K deletes to the end of the line, or the line break at its end.
                     self.break_history_group();
+                    if self.is_hidden_multiline() && self.is_pristine() {
+                        self.insert("");
+                        return out;
+                    }
                     let (a, b) = self.range();
                     let end = if a == b { self.line_edge(layout, true) } else { b };
                     let to = if end > a { end } else if a < self.text.len() { next_char(&self.text, a) } else { a };
@@ -2230,7 +2280,7 @@ impl TextEdit {
             }
             Key::Delete => {
                 let (a, b) = self.range();
-                if a != b {
+                if a != b || (self.is_hidden_multiline() && self.is_pristine()) {
                     self.insert("");
                 } else if a < self.text.len() {
                     let to = if word { self.next_word(a) } else { next_char(&self.text, a) };
@@ -2882,6 +2932,8 @@ mod tests {
             e.key(&KeyEvent { key, mods: Mods { shift: true, ..Mods::default() } }, None);
             assert_eq!(e.range(), (0, e.text.len()));
         }
+        assert!(e.is_pristine(), "navigation keys do not clear pristine");
+        e.mark_edited();
         e.set_caret(2);
         e.key(&k(Key::Text("!".into())), None);
         assert_eq!(e.text, "first\nlast!");
@@ -2901,6 +2953,106 @@ mod tests {
         e.set_revealed(false);
         e.set_revealed(true);
         assert_eq!(e.range(), (1, 3), "toggle without editing preserves revealed selection");
+    }
+
+    #[test]
+    fn hidden_multiline_pristine_replace_and_delete() {
+        // 1. Typing while pristine replaces the whole value, regardless of caret or navigation.
+        let mut e = TextEdit::new("existing-fictional-key\nline-two").secure();
+        e.set_single_line(false);
+        assert!(e.is_pristine());
+        e.set_caret(0);
+        for nav in [Key::Left, Key::Right, Key::Up, Key::Down, Key::Home, Key::End] {
+            e.key(&k(nav), None);
+        }
+        assert!(e.is_pristine());
+        e.key(&k(Key::Text("a".into())), None);
+        assert_eq!(e.text, "a");
+        assert!(!e.is_pristine());
+        // Subsequent edits append and delete normally.
+        e.key(&k(Key::Text("b".into())), None);
+        assert_eq!(e.text, "ab");
+        e.paste("cd");
+        assert_eq!(e.text, "abcd");
+        e.key(&k(Key::Backspace), None);
+        assert_eq!(e.text, "abc");
+
+        // 2. Pasting while pristine replaces the whole value, regardless of selection.
+        let mut e = TextEdit::new("existing-fictional-key\nline-two").secure();
+        e.set_single_line(false);
+        e.set_selection(3, 7);
+        e.paste("new-key\nline-2");
+        assert_eq!(e.text, "new-key\nline-2");
+        assert!(!e.is_pristine());
+        e.paste("\nline-3");
+        assert_eq!(e.text, "new-key\nline-2\nline-3");
+
+        // 3. Deletions while pristine empty the whole value, then subsequent typing starts fresh.
+        for del in [
+            k(Key::Backspace),
+            k(Key::Delete),
+            KeyEvent { key: Key::Backspace, mods: Mods { cmd: true, ..Mods::default() } },
+            KeyEvent { key: Key::Backspace, mods: Mods { alt: true, ..Mods::default() } },
+            KeyEvent { key: Key::Text("k".into()), mods: Mods { ctrl: true, ..Mods::default() } },
+        ] {
+            let mut e = TextEdit::new("existing-fictional-key\nline-two").secure();
+            e.set_single_line(false);
+            e.set_caret(4);
+            e.key(&del, None);
+            assert_eq!(e.text, "", "deletion {del:?} must empty pristine hidden multiline");
+            assert_eq!(e.range(), (0, 0));
+            assert!(!e.is_pristine());
+            e.key(&k(Key::Text("x".into())), None);
+            e.key(&k(Key::Text("y".into())), None);
+            assert_eq!(e.text, "xy");
+        }
+
+        // 4. Toggling revealed (Show -> Hide) without editing keeps pristine; editing while revealed clears it.
+        let mut e = TextEdit::new("existing-fictional-key\nline-two").secure();
+        e.set_single_line(false);
+        e.set_revealed(true);
+        e.set_selection(2, 5);
+        e.set_revealed(false);
+        assert!(e.is_pristine(), "Show then Hide without editing keeps pristine");
+        e.set_caret(e.text.len());
+        e.paste("pasted-after-peek");
+        assert_eq!(e.text, "pasted-after-peek");
+
+        let mut rev = TextEdit::new("existing-fictional-key").secure().revealed(true);
+        rev.set_single_line(false);
+        rev.set_caret(rev.text.len());
+        rev.key(&k(Key::Text("!".into())), None);
+        assert_eq!(rev.text, "existing-fictional-key!", "revealed field edits normally at caret");
+        assert!(!rev.is_pristine());
+        rev.set_revealed(false);
+        rev.key(&k(Key::Text("?".into())), None);
+        assert_eq!(rev.text, "existing-fictional-key!?", "edited while revealed stays non-pristine when hidden");
+
+        // 5. App resetting the value via replace_text or direct edit.text assignment re-arms pristine.
+        rev.replace_text("reloaded-from-vault");
+        assert!(rev.is_pristine());
+        rev.key(&k(Key::Text("z".into())), None);
+        assert_eq!(rev.text, "z");
+        assert!(!rev.is_pristine());
+        rev.text = "assigned-directly-by-app".into();
+        assert!(rev.is_pristine(), "direct edit.text assignment re-arms pristine");
+        rev.paste("fresh");
+        assert_eq!(rev.text, "fresh");
+        assert!(!rev.is_pristine());
+
+        // 6. Empty field is never pristine; single-line secure field never applies pristine replacement.
+        let mut empty = TextEdit::new("").secure();
+        empty.set_single_line(false);
+        assert!(!empty.is_pristine());
+        empty.key(&k(Key::Text("a".into())), None);
+        empty.key(&k(Key::Text("b".into())), None);
+        assert_eq!(empty.text, "ab");
+
+        let mut single = TextEdit::new("hunter2").secure();
+        single.set_single_line(true);
+        single.set_caret(7);
+        single.key(&k(Key::Text("!".into())), None);
+        assert_eq!(single.text, "hunter2!", "single-line secure field edits at caret");
     }
 
     #[test]

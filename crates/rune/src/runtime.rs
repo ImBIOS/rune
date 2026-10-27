@@ -610,6 +610,8 @@ pub struct ElementInfo {
     pub expanded: Option<bool>,
     /// A selected item of a list, tree, table or group ([`El::focus_selected`]).
     pub item_selected: bool,
+    /// Masked secret text or field ([`El::secure`], [`TextEdit::secure`]).
+    pub secure: bool,
     /// How far [`El::sticky_top`], [`El::sticky_bottom`] or [`El::sticky_left`] moved it from
     /// where scrolling put it this frame, in points: down for a stuck header, up for a stuck
     /// footer, right for a stuck left element, 0 when it isn't stuck. `rect` already includes it.
@@ -3211,13 +3213,18 @@ impl<S: 'static> Runtime<S> {
     /// [`Self::with_focused`] for an edit that needs the app state (an app's paste hook).
     fn with_focused_state(&mut self, f: impl FnOnce(&mut dyn Any, &crate::el::EditFn, &mut Tx) -> EditOutcome, tx: &mut Tx) -> bool {
         let Some(path) = self.focused.clone() else { return false };
-        let Some((access, submit, change, animate_layout, single_line)) =
-            self.focused_input().map(|i| (i.access.clone(), i.submit.clone(), i.change.clone(), i.animate_layout, i.single_line))
+        let Some((access, submit, change, animate_layout, single_line, secure, revealed_override)) =
+            self.focused_input().map(|i| (i.access.clone(), i.submit.clone(), i.change.clone(), i.animate_layout, i.single_line, i.edit.is_secure(), i.revealed_override))
         else {
             return false;
         };
         let Some(access) = access else { return false };
-        access(handler_state(&mut self.state)).set_single_line(single_line);
+        {
+            let edit = access(handler_state(&mut self.state));
+            edit.set_single_line(single_line);
+            if secure && !edit.is_secure() { edit.set_secure(true); }
+            if let Some(rev) = revealed_override { edit.set_revealed(rev); }
+        }
         let before = change.as_ref().map(|_| zeroize::Zeroizing::new(access(handler_state(&mut self.state)).text.clone()));
         let mut out = f(handler_state(&mut self.state), &access, tx);
         // Submit and Escape's blur act once per press; held keys still type, move and delete.
@@ -3227,7 +3234,10 @@ impl<S: 'static> Runtime<S> {
         self.caret_follow = true;
         if let Some(change) = change
             && before.as_ref().map(|s| s.as_str()) != Some(access(handler_state(&mut self.state)).text.as_str())
-        { change(handler_state(&mut self.state), tx); }
+        {
+            change(handler_state(&mut self.state), tx);
+            access(handler_state(&mut self.state)).mark_edited();
+        }
         if let Some(c) = out.copy {
             tx.copy(c);
         }
@@ -4195,13 +4205,16 @@ impl<S: 'static> Runtime<S> {
         // Concealing is a security boundary: old geometry must not disclose the revealed
         // line count through a height spring, displaced siblings, or a lingering scroll glide.
         let revealed: HashSet<_> = self.nodes.iter()
-            .filter(|n| n.input.as_ref().is_some_and(|input| input.edit.is_secure() && input.edit.is_revealed()))
+            .filter(|n| {
+                n.input.as_ref().is_some_and(|input| input.edit.is_secure() && input.edit.is_revealed())
+                    || (n.input.is_none() && n.text.as_ref().is_some_and(|t| t.redacted && t.secure_revealed))
+            })
             .map(|n| n.id).collect();
         let mut concealed = vec![false; nodes.len()];
         for (i, n) in nodes.iter().enumerate() {
-            if n.input.as_ref().is_some_and(|input| input.edit.is_hidden_multiline())
-                && revealed.contains(&n.id)
-            {
+            let hidden_now = n.input.as_ref().is_some_and(|input| input.edit.is_hidden_multiline())
+                || (n.input.is_none() && n.text.as_ref().is_some_and(|t| t.redacted && !t.secure_revealed));
+            if hidden_now && revealed.contains(&n.id) {
                 concealed[i] = true;
             }
         }
@@ -4735,6 +4748,22 @@ impl<S: 'static> Runtime<S> {
                     old.text_layout = Some(self.text.layout_for_spec(spec, scale, wrap, line_alignment(spec)));
                     old.elided = None;
                 }
+            } else if let Some(spec) = &mut old.text
+                && spec.redacted
+                && spec.secure_revealed
+            {
+                spec.conceal();
+                let scale = self.env.scale;
+                let w = (old.local.w - old.inset[0] - old.inset[2]).max(0.0);
+                let wrap = spec.wrap.then_some(w * scale);
+                let mut layout = self.text.layout_for_spec(spec, scale, wrap, line_alignment(spec));
+                let mut elided = None;
+                if spec.truncate && layout.full_width() > w * scale + 0.5 {
+                    let (cut, e) = truncated(&mut self.text, spec, scale, w * scale);
+                    (layout, elided) = (cut, Some(e));
+                }
+                old.text_layout = Some(layout);
+                old.elided = elided;
             }
             self.node_index.insert(old.id, nodes.len());
             nodes.push(old);
@@ -5998,6 +6027,7 @@ impl<S: 'static> Runtime<S> {
                     || n.vis.surface.is_some()
                     || (n.material.is_some() && self.native_materials)
                     // Never retain a raster of a secret, even when the field is unfocused.
+                    || n.text.as_ref().is_some_and(|t| t.redacted)
                     || n.input.as_ref().is_some_and(|inp| inp.edit.focused || inp.edit.is_secure())
                     || n.text.as_ref().is_some_and(|t| t.advance_in.is_some());
                 let check = n.text.as_ref().is_some_and(|t| t.live.is_some())
@@ -7766,6 +7796,9 @@ impl<S: 'static> Runtime<S> {
                     in_growing_row |= self.grows.get(&parent.id).is_some_and(|g| g.moving());
                     a = step_up(pi);
                 }
+                let secure = n.a11y.secure
+                    || n.text.as_ref().is_some_and(|t| t.redacted)
+                    || n.input.as_ref().is_some_and(|i| i.edit.is_secure());
                 Some(ElementInfo {
                     trace_name: n.trace_name,
                     trace_namespace: n.trace_namespace,
@@ -7783,9 +7816,9 @@ impl<S: 'static> Runtime<S> {
                     role: n.role,
                     label: n.label.clone(),
                     text: match &n.text {
-                        Some(t) => (!n.input.as_ref().is_some_and(|i| i.edit.is_secure())).then(|| t.source_text().to_owned()),
+                        Some(t) => (!secure).then(|| t.source_text().to_owned()),
                         // A text built from several (a rolling label's glyphs) reads as its label.
-                        None => n.label.clone().filter(|_| n.role == "text"),
+                        None => (!secure).then(|| n.label.clone()).flatten().filter(|_| n.role == "text"),
                     },
                     rect,
                     target: [n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]],
@@ -7808,13 +7841,14 @@ impl<S: 'static> Runtime<S> {
                     caret: self.caret_rect(&self.nodes, i),
                     drag_out: n.drag_out.is_some(),
                     help: n.help.as_ref().filter(|_| !n.help_cut || n.elided.is_some()).cloned(),
-                    selected: n.text.as_ref().filter(|t| t.selectable).and_then(|t| {
+                    selected: n.text.as_ref().filter(|t| t.selectable && !secure).and_then(|t| {
                         let (a, b) = selectable::range_in(&sel_ranges, i)?;
                         t.copy_slice(a as u32, b as u32)
                     }),
                     level: n.a11y.level,
                     expanded: n.a11y.expanded,
                     item_selected: n.focus.selected,
+                    secure,
                     stuck: self.stuck.get(i).copied().unwrap_or(0.0),
                     virtual_extent: self.virtuals.contains_key(&n.path) && n.vis.fill.a == 0.0
                         && n.vis.border_width == 0.0 && n.vis.shadows.is_empty() && n.text.is_none() && n.vis.icon.is_none(),
@@ -7838,7 +7872,7 @@ impl<S: 'static> Runtime<S> {
                 visible: [r.x.max(c[0]), r.y.max(c[1]), (r.edges()[2].min(c[2]) - r.x.max(c[0])).max(0.0),
                     (r.edges()[3].min(c[3]) - r.y.max(c[1])).max(0.0)],
                 revealing: true, in_growing_row: false, scrolling: false, virtual_extent: false, live_intent: 0, caret: None, drag_out: false,
-                help: None, selected: None, level: None, expanded: None, item_selected: false, stuck: 0.0,
+                help: None, selected: None, level: None, expanded: None, item_selected: false, secure: false, stuck: 0.0,
             });
         }
         self.link_elements(&mut elements);
@@ -8507,8 +8541,8 @@ fn truncated(text: &mut TextSystem, spec: &TextSpec, scale: f32, max_w: f32) -> 
         Elision { head: bounds[head], tail: bounds[tail] }
     };
     let make = |text: &mut TextSystem, e: Elision| {
-        let s = [&content[..e.head], Elision::ELLIPSIS, &content[e.tail..]].concat();
-        text.layout_rich(&s, &e.spans(&spec.spans), spec.style, scale, None)
+        let s = zeroize::Zeroizing::new([&content[..e.head], Elision::ELLIPSIS, &content[e.tail..]].concat());
+        text.layout_blocks_inner(&s, &e.spans(&spec.spans), &spec.blocks, &[], spec.style, scale, None, parley::Alignment::Start, spec.wrap_anywhere, !spec.redacted)
     };
     let (mut lo, mut hi) = (0usize, n);
     while lo < hi {
@@ -8597,7 +8631,7 @@ fn clamped(text: &mut TextSystem, spec: &TextSpec, scale: f32, max_w: f32, full:
         Elision { head, tail: content.len() }
     };
     let make = |text: &mut TextSystem, e: Elision| {
-        let s = [&content[..e.head], Elision::ELLIPSIS].concat();
+        let s = zeroize::Zeroizing::new([&content[..e.head], Elision::ELLIPSIS].concat());
         text.layout_blocks_inner(&s, &e.spans(&spec.spans), &spec.blocks, &[], spec.style, scale, Some(max_w), line_alignment(spec), spec.wrap_anywhere, !spec.redacted)
     };
     let fits = |l: &Layout<Ink>| l.len() <= lines && last_line_width(l, lines) <= max_w + 0.5;
@@ -8985,6 +9019,15 @@ fn flatten(
     if input.as_ref().is_some_and(|i| i.edit.is_hidden_multiline()) && let Some(t) = &mut text {
         // The fixed mask stays one line even in a field narrower than twelve bullets.
         t.wrap = false;
+    } else if input.is_none()
+        && let Some(t) = &mut text
+        && t.redacted
+    {
+        t.secure_multiline = t.wrap || t.wrap_anywhere || t.max_lines > 0;
+        t.case = None;
+        if !t.secure_revealed {
+            t.conceal();
+        }
     }
     let inert = inert || parent.is_some_and(|p| nodes[p].inert);
     let mut vis = vis;
@@ -8998,7 +9041,7 @@ fn flatten(
         vis.hover_motion = vis.hover_within;
     }
     if let Some(t) = &text && t.live.is_some() {
-        assert!(input.is_none() && !t.wrap && t.spans.is_empty() && t.reveal < 0.0 && !t.truncate,
+        assert!(input.is_none() && !t.redacted && !t.wrap && t.spans.is_empty() && t.reveal < 0.0 && !t.truncate,
             "live_text requires plain single-line text; use truncate_fade for overflow");
     }
     let mut style = style;
@@ -9017,7 +9060,7 @@ fn flatten(
     let measured = text.is_some();
     let measure = text.as_ref().map(|t| crate::text::text_hash(&t.content, &t.spans, t.style, scale, None) ^ u64::from(t.wrap) ^ (u64::from(t.truncate || t.truncate_fade) << 1)
         ^ ((t.max_lines as u64) << 2)
-        ^ (u64::from(input.as_ref().is_some_and(|i| i.edit.is_revealed())) << 3)
+        ^ (u64::from(input.as_ref().is_some_and(|i| i.edit.is_revealed()) || t.secure_revealed) << 3)
         ^ (u64::from(t.wrap_anywhere) << 4)
         ^ t.advance_in.as_ref().map_or(0, |(run, at)| run.hash.rotate_left(3) ^ (*at as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)));
     nodes.push(Node {
@@ -12456,5 +12499,347 @@ mod tests {
         // Rich text also supports wrap_anywhere.
         let rich_layout = node("rich_anywhere").text_layout.as_ref().unwrap();
         assert!(rich_layout.len() >= 4 && rich_layout.full_width() <= 160.5);
+    }
+
+    #[test]
+    fn secure_label_masks_reveals_conceals_and_never_leaks_plaintext() {
+        use crate::{text, Transition};
+        const SINGLE_SECRET: &str = "sk-fictional-token-987654";
+        const MULTI_SECRET: &str = "-----BEGIN FAKE KEY-----\nAAAAB3NzaC1yc2EAAAADAQABAAABAQDfakebase64payload0123456789ABCDEFGH==\n-----END FAKE KEY-----";
+
+        #[derive(Clone)]
+        struct State {
+            revealed: bool,
+            open: bool,
+        }
+        fn view(s: &State, _: &mut Cx<State>) -> El {
+            let mut root = col().cache().size(240.0, 240.0);
+            if s.open {
+                root = root
+                    .child(
+                        text(SINGLE_SECRET)
+                            .secure()
+                            .revealed(s.revealed)
+                            .selectable(true)
+                            .text_case(crate::TextCase::Uppercase)
+                            .transition(Transition::blur_replace())
+                            .key("single"),
+                    )
+                    .child(
+                        text(SINGLE_SECRET)
+                            .selectable(true)
+                            .secure()
+                            .revealed(s.revealed)
+                            .truncate()
+                            .w(60.0)
+                            .key("trunc"),
+                    )
+                    .child(
+                        col()
+                            .w(140.0)
+                            .max_h(44.0)
+                            .scroll(ScrollSpec { stick_bottom: false })
+                            .key("scroll")
+                            .child(
+                                text(MULTI_SECRET)
+                                    .wrap_anywhere()
+                                    .secure()
+                                    .revealed(s.revealed)
+                                    .transition(Transition::blur_replace())
+                                    .key("multi"),
+                            ),
+                    )
+                    .child(
+                        col().w(140.0).child(
+                            text(MULTI_SECRET)
+                                .secure()
+                                .max_lines(2)
+                                .revealed(s.revealed)
+                                .key("clamped"),
+                        ),
+                    );
+            }
+            root
+        }
+
+        let mut rt = Runtime::new(State { revealed: false, open: true }, view, (240.0, 240.0), Env::new(true, 1.0));
+        let cached0 = rt.text.cached_layout_count();
+        rt.frame(0.0);
+
+        // 1. Hidden state: single-line shows 1 bullet per char, multi-line shows fixed 12-bullet mask on 1 line.
+        let check_no_leak = |rt: &mut Runtime<State>| {
+            let tree = crate::tooling::tree_json(rt, 0.0).to_string();
+            let specs: Vec<_> = rt.nodes.iter().map(|n| (&n.text, &n.input)).collect();
+            let dbg = format!("{:?} {:?}", rt.elements(), specs);
+            for needle in ["sk-fictional", "987654", "BEGIN FAKE KEY", "AAAAB3Nza"] {
+                assert!(!tree.contains(needle), "--tree leaked {needle}: {tree}");
+                assert!(!dbg.contains(needle), "Debug/elements leaked {needle}");
+            }
+            assert_eq!(rt.text.cached_layout_count(), cached0, "secure labels must bypass TextSystem layout/shape caches");
+            assert!(rt.node_caches.is_empty(), "secure labels must disable ancestor El::cache raster");
+            assert!(rt.text.atlas.resident_caches.is_empty());
+            for key in ["single", "trunc", "multi", "clamped"] {
+                let i = rt.nodes.iter().position(|n| n.key.as_deref() == Some(key)).unwrap();
+                let path = rt.nodes[i].path.clone();
+                assert_eq!(Rc::strong_count(rt.nodes[i].text_layout.as_ref().unwrap()), 1, "{key} layout owned only by node");
+                assert!(!rt.is_selectable(i), "{key} must not be selectable");
+                assert!(!rt.selection_menu(&path, 5.0, 5.0), "{key} must not offer Copy menu");
+                let info = rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap();
+                assert_eq!(info.role, "text");
+                assert!(info.secure, "{key} must report ElementInfo::secure");
+                assert!(info.text.is_none(), "{key} must omit ElementInfo::text");
+                assert!(info.selected.is_none(), "{key} must omit ElementInfo::selected");
+            }
+            assert!(tree.contains("\"secure\":true"), "--tree must include secure flag: {tree}");
+        };
+        check_no_leak(&mut rt);
+
+        let n_single = rt.nodes.iter().find(|n| n.key.as_deref() == Some("single")).unwrap();
+        assert_eq!(n_single.text.as_ref().unwrap().content, "•".repeat(SINGLE_SECRET.chars().count()));
+        let n_multi = rt.nodes.iter().find(|n| n.key.as_deref() == Some("multi")).unwrap();
+        assert_eq!(n_multi.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
+        assert_eq!(n_multi.text_layout.as_ref().unwrap().len(), 1);
+        let n_clamped = rt.nodes.iter().find(|n| n.key.as_deref() == Some("clamped")).unwrap();
+        assert_eq!(n_clamped.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
+        assert_eq!(n_clamped.text_layout.as_ref().unwrap().len(), 1);
+
+        // Try selecting and copying via pointer + Cmd+C while hidden.
+        let single_rect = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("single")).unwrap().rect;
+        rt.pointer_down(single_rect[0] + 2.0, single_rect[1] + 4.0);
+        rt.pointer_move(single_rect[0] + 60.0, single_rect[1] + 4.0);
+        rt.pointer_up(single_rect[0] + 60.0, single_rect[1] + 4.0);
+        rt.key(KeyEvent { key: crate::Key::Command('c'), mods: crate::Mods { cmd: true, ..Default::default() } });
+        assert!(rt.selected_text().is_none() && rt.copy_request.is_none());
+
+        // 2. Revealed state: lays out plaintext (with wrap_anywhere, max_lines, truncate) without leaking to caches/tree/Debug.
+        rt.update(|s, _| s.revealed = true);
+        rt.frame(0.0);
+        check_no_leak(&mut rt);
+
+        let n_single = rt.nodes.iter().find(|n| n.key.as_deref() == Some("single")).unwrap();
+        assert_eq!(n_single.text.as_ref().unwrap().content, SINGLE_SECRET);
+        let n_trunc = rt.nodes.iter().find(|n| n.key.as_deref() == Some("trunc")).unwrap();
+        assert!(n_trunc.elided.is_some(), "truncate elides overflowing revealed label");
+        let n_multi = rt.nodes.iter().find(|n| n.key.as_deref() == Some("multi")).unwrap();
+        assert!(n_multi.text_layout.as_ref().unwrap().len() >= 4, "wrap_anywhere wraps revealed multi-line label");
+        let n_clamped = rt.nodes.iter().find(|n| n.key.as_deref() == Some("clamped")).unwrap();
+        assert_eq!(n_clamped.text_layout.as_ref().unwrap().len(), 2, "max_lines(2) clamps revealed multi-line label");
+        assert!(n_clamped.elided.is_some());
+
+        // Try selecting and copying while revealed: still blocked.
+        rt.pointer_down(single_rect[0] + 2.0, single_rect[1] + 4.0);
+        rt.pointer_move(single_rect[0] + 60.0, single_rect[1] + 4.0);
+        rt.pointer_up(single_rect[0] + 60.0, single_rect[1] + 4.0);
+        rt.key(KeyEvent { key: crate::Key::Command('c'), mods: crate::Mods { cmd: true, ..Default::default() } });
+        assert!(rt.selected_text().is_none() && rt.copy_request.is_none());
+
+        // 3. Concealing (revealed(true) -> revealed(false)) wipes plaintext and snaps geometry and scroll without animating.
+        let scroll_id = rt.nodes.iter().find(|n| n.key.as_deref() == Some("scroll")).unwrap().id;
+        assert!(rt.scrolls[&scroll_id].max > 10.0);
+        rt.scrolls.get_mut(&scroll_id).unwrap().offset = 24.0;
+        rt.update(|s, _| s.revealed = false); // No tx.instant(): conceal must snap itself.
+        rt.frame(0.0);
+        check_no_leak(&mut rt);
+        let st = &rt.scrolls[&scroll_id];
+        assert_eq!((st.offset, st.max), (0.0, 0.0), "concealing resets ancestor scroll immediately");
+        for e in rt.elements() {
+            assert_eq!(e.rect[3], e.target[3], "concealed height must not spring: {}", e.path);
+        }
+        let n_multi = rt.nodes.iter().find(|n| n.key.as_deref() == Some("multi")).unwrap();
+        assert_eq!(n_multi.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
+
+        // 4. Exiting while revealed conceals to the mask on the first exit frame.
+        rt.update(|s, tx| {
+            s.revealed = true;
+            tx.instant();
+        });
+        rt.frame(0.0);
+        rt.update(|s, _| s.open = false);
+        assert!(rt.frame(1.0 / 60.0));
+        let ex_single = rt.nodes.iter().find(|n| n.key.as_deref() == Some("single")).expect("exiting single label");
+        assert!(rt.is_exiting(ex_single.id));
+        assert_eq!(ex_single.text.as_ref().unwrap().content, "•".repeat(SINGLE_SECRET.chars().count()));
+        assert!(!format!("{:?}", ex_single.text).contains("sk-fictional"));
+
+        if let Some(dir) = std::env::var_os("RUNE_SECURE_LABEL_STILLS") {
+            use crate::render::{Gpu, OFFSCREEN_FORMAT, Offscreen, Renderer, write_png};
+            use crate::{oklch, row, TextStyle};
+            let dir = std::path::PathBuf::from(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            fn card_view(revealed: &bool, _: &mut Cx<bool>) -> El {
+                let bg = oklch(0.18, 0.01, 260.0);
+                let surface = oklch(0.23, 0.012, 260.0);
+                let border = oklch(0.34, 0.015, 260.0);
+                let muted = oklch(0.68, 0.015, 260.0);
+                let fg = oklch(0.95, 0.008, 260.0);
+                let badge = if *revealed { "REVEALED" } else { "HIDDEN" };
+                col()
+                    .size(420.0, 230.0)
+                    .padding(20.0)
+                    .gap(14.0)
+                    .fill(bg)
+                    .child(
+                        row()
+                            .w_full()
+                            .justify_between()
+                            .items_center()
+                            .child(text("Fictional Credential Detail").font(TextStyle::new(14.0, 600.0)).color(fg))
+                            .child(text(badge).font(TextStyle::new(11.0, 600.0).mono()).color(muted)),
+                    )
+                    .child(
+                        col()
+                            .w_full()
+                            .padding(12.0)
+                            .gap(6.0)
+                            .fill(surface)
+                            .radius(8.0)
+                            .border(1.0, border)
+                            .child(text("API token (single-line secure label)").font(TextStyle::new(11.0, 500.0)).color(muted))
+                            .child(
+                                text(SINGLE_SECRET)
+                                    .font(TextStyle::new(13.0, 400.0).mono())
+                                    .color(fg)
+                                    .secure()
+                                    .revealed(*revealed),
+                            ),
+                    )
+                    .child(
+                        col()
+                            .w_full()
+                            .padding(12.0)
+                            .gap(6.0)
+                            .fill(surface)
+                            .radius(8.0)
+                            .border(1.0, border)
+                            .child(text("SSH key (multi-line secure label, wrap_anywhere)").font(TextStyle::new(11.0, 500.0)).color(muted))
+                            .child(
+                                text(MULTI_SECRET)
+                                    .font(TextStyle::new(12.0, 400.0).mono())
+                                    .color(fg)
+                                    .wrap_anywhere()
+                                    .secure()
+                                    .revealed(*revealed),
+                            ),
+                    )
+            }
+            let gpu = Gpu::headless();
+            let (w, h) = (840, 460);
+            for (name, rev) in [("secure-label-hidden.png", false), ("secure-label-revealed.png", true)] {
+                let mut rt = Runtime::new(rev, card_view, (420.0, 230.0), Env::new(true, 2.0));
+                rt.frame(0.0);
+                let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+                renderer.prepare(&gpu.device, &gpu.queue, &mut rt.text.atlas, &rt.instances, (w, h));
+                renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
+                let target = Offscreen::new(&gpu.device, w, h);
+                let mut enc = gpu.device.create_command_encoder(&Default::default());
+                renderer.draw(&mut enc, &target.view, [0.07, 0.08, 0.09, 1.0]);
+                target.copy(&mut enc);
+                gpu.queue.submit([enc.finish()]);
+                let out = target.read(&gpu.device);
+                write_png(&dir.join(name), w, h, &out).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn hidden_multiline_pristine_composes_with_runtime_and_app_on_change() {
+        use crate::{text_input, Key, KeyEvent, Mods, TextEdit, TextStyle};
+
+        struct App {
+            secret: TextEdit,
+            saved: String,
+            app_pristine: bool,
+            revealed: bool,
+        }
+        impl App {
+            fn new(saved: &str) -> Self {
+                Self {
+                    secret: TextEdit::new(saved),
+                    saved: saved.to_owned(),
+                    app_pristine: !saved.is_empty(),
+                    revealed: false,
+                }
+            }
+            /// Simulates an app that also implements the pristine-replace rule in `on_input_change`:
+            /// if `TextEdit` had appended to `saved` while pristine, strip `saved`; if `TextEdit`
+            /// had deleted a suffix of `saved`, clear it; otherwise keep `secret.text`.
+            fn on_secret_change(&mut self) {
+                if self.app_pristine && !self.revealed && !self.saved.is_empty() {
+                    self.app_pristine = false;
+                    if self.secret.text.len() > self.saved.len()
+                        && let Some(inserted) = self.secret.text.strip_prefix(&self.saved)
+                    {
+                        let inserted = inserted.to_owned();
+                        self.secret.replace_text(inserted);
+                    } else if !self.secret.text.is_empty()
+                        && self.secret.text.len() == self.saved.len() - 1
+                        && self.saved.starts_with(&self.secret.text)
+                    {
+                        self.secret.clear();
+                    }
+                }
+            }
+        }
+
+        fn view(s: &App, _: &mut Cx<App>) -> El {
+            col().size(240.0, 120.0).child(
+                text_input(&s.secret, TextStyle::new(14.0, 400.0))
+                    .secure()
+                    .revealed(s.revealed)
+                    .key("secret")
+                    .w(200.0)
+                    .on_edit(|s: &mut App| &mut s.secret)
+                    .on_input_change(|s: &mut App, _| s.on_secret_change()),
+            )
+        }
+
+        let focus_by_click = |rt: &mut Runtime<App>| {
+            let r = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("secret")).unwrap().rect;
+            rt.pointer_down(r[0] + 6.0, r[1] + 6.0);
+            rt.pointer_up(r[0] + 6.0, r[1] + 6.0);
+            rt.frame(0.0);
+        };
+
+        // Case 1: Typing after clicking and pressing arrows replaces the whole value, then appends.
+        let mut rt = Runtime::new(App::new("old-fictional-private-key\nsecond-line"), view, (240.0, 120.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        focus_by_click(&mut rt);
+        rt.key(KeyEvent { key: Key::Left, mods: Mods::default() });
+        rt.key(KeyEvent { key: Key::Home, mods: Mods::default() });
+        rt.key(KeyEvent { key: Key::Text("x".into()), mods: Mods::default() });
+        rt.frame(0.0);
+        assert_eq!(rt.state.secret.text, "x");
+        assert!(!rt.state.secret.is_pristine());
+        rt.key(KeyEvent { key: Key::Text("y".into()), mods: Mods::default() });
+        rt.frame(0.0);
+        assert_eq!(rt.state.secret.text, "xy");
+
+        // Case 2: Pasting after Show -> Hide (without editing) replaces the whole value, then appends.
+        let mut rt = Runtime::new(App::new("old-fictional-private-key\nsecond-line"), view, (240.0, 120.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        focus_by_click(&mut rt);
+        rt.update(|s, _| s.revealed = true);
+        rt.frame(0.0);
+        rt.update(|s, _| s.revealed = false);
+        rt.frame(0.0);
+        assert!(rt.state.secret.is_pristine());
+        rt.paste("pasted-key\nline-2");
+        rt.frame(0.0);
+        assert_eq!(rt.state.secret.text, "pasted-key\nline-2");
+        rt.paste("\nline-3");
+        rt.frame(0.0);
+        assert_eq!(rt.state.secret.text, "pasted-key\nline-2\nline-3");
+
+        // Case 3: Backspace while pristine empties the field; subsequent typing starts from "".
+        let mut rt = Runtime::new(App::new("old-fictional-private-key\nsecond-line"), view, (240.0, 120.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        focus_by_click(&mut rt);
+        rt.key(KeyEvent { key: Key::Backspace, mods: Mods::default() });
+        rt.frame(0.0);
+        assert_eq!(rt.state.secret.text, "");
+        assert!(!rt.state.secret.is_pristine());
+        rt.key(KeyEvent { key: Key::Text("n".into()), mods: Mods::default() });
+        rt.frame(0.0);
+        assert_eq!(rt.state.secret.text, "n");
     }
 }

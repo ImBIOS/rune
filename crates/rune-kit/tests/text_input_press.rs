@@ -656,3 +656,42 @@ fn secure_text_area_growth_and_small_height_cap_do_not_disclose_hidden_lines() {
     let capped = short.iter().find(|e| e.0.ends_with("capped")).unwrap();
     assert!(capped.1[3] <= 40.5, "max_height takes precedence over rows: {:?}", capped.1);
 }
+
+#[test]
+fn secure_text_area_replaces_pristine_secret_on_first_edit() {
+    use rune::{Key, KeyEvent, Mods};
+    fn view(s: &TextEdit, _: &mut Cx<TextEdit>) -> El {
+        let k = Kit::neutral(true);
+        col().padding(12.0).child(
+            TextArea::new(s)
+                .secure()
+                .on_edit(|s: &mut TextEdit| s)
+                .build(&k)
+                .key("area"),
+        )
+    }
+
+    let mut rt = Runtime::new(
+        TextEdit::new("-----BEGIN FAKE KEY-----\ninitial-line"),
+        view,
+        (320.0, 200.0),
+        Env::new(true, 1.0),
+    );
+    rt.frame(0.0);
+
+    let area = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("area")).unwrap();
+    rt.pointer_down(area.rect[0] + 16.0, area.rect[1] + 16.0);
+    rt.pointer_up(area.rect[0] + 16.0, area.rect[1] + 16.0);
+    rt.frame(0.0);
+    assert!(rt.state.is_pristine());
+
+    rt.paste("replacement-line-1\nreplacement-line-2");
+    rt.frame(0.0);
+    assert_eq!(rt.state.text, "replacement-line-1\nreplacement-line-2");
+    assert!(!rt.state.is_pristine());
+
+    rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    rt.key(KeyEvent { key: Key::Text("replacement-line-3".into()), mods: Mods::default() });
+    rt.frame(0.0);
+    assert_eq!(rt.state.text, "replacement-line-1\nreplacement-line-2\nreplacement-line-3");
+}

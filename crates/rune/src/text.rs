@@ -1799,13 +1799,7 @@ impl TextSystem {
         max_width: Option<f32>,
         align: Alignment,
     ) -> Rc<Layout<Ink>> {
-        if !spec.redacted {
-            return self.layout_blocks_inner(&spec.content, &spec.spans, &spec.blocks, &spec.pills, spec.style, scale, max_width, align, spec.wrap_anywhere, true);
-        }
-        let shared = std::mem::replace(&mut self.layout_cx, LayoutContext::new());
-        let layout = self.layout_blocks_inner(&spec.content, &spec.spans, &spec.blocks, &spec.pills, spec.style, scale, max_width, align, spec.wrap_anywhere, false);
-        self.layout_cx = shared;
-        layout
+        self.layout_blocks_inner(&spec.content, &spec.spans, &spec.blocks, &spec.pills, spec.style, scale, max_width, align, spec.wrap_anywhere, !spec.redacted)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1822,6 +1816,7 @@ impl TextSystem {
         wrap_anywhere: bool,
         cache: bool,
     ) -> Rc<Layout<Ink>> {
+        let shared = (!cache).then(|| std::mem::replace(&mut self.layout_cx, LayoutContext::new()));
         let has_indented_blocks = blocks.iter().any(|&b| b != crate::edit::Block::Paragraph);
         // Each pill's label range, and the room before and after it in device px; boxes keep
         // the pill's index in their id, so ranges that fail the checks keep no chip.
@@ -2118,6 +2113,9 @@ impl TextSystem {
         if cache {
             self.layouts.insert(key, (l.clone(), g, text.len() as u32));
             self.shapes.insert(shape_key, key);
+        }
+        if let Some(shared) = shared {
+            self.layout_cx = shared;
         }
         l
     }
