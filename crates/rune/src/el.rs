@@ -884,7 +884,6 @@ pub struct TextSpec {
     pub(crate) rich_style: crate::edit::RichStyle,
     pub(crate) redacted: bool,
     pub(crate) secure_revealed: bool,
-    pub(crate) secure_multiline: bool,
     pub(crate) wrap_anywhere: bool,
 }
 
@@ -958,10 +957,8 @@ impl TextSpec {
         self.secure_revealed = false;
         let mask = if self.content.is_empty() {
             String::new()
-        } else if self.secure_multiline {
-            crate::edit::MULTILINE_SECURE_MASK.to_owned()
         } else {
-            "•".repeat(self.content.chars().count())
+            crate::edit::MULTILINE_SECURE_MASK.to_owned()
         };
         use zeroize::Zeroize;
         self.content.zeroize();
@@ -978,11 +975,9 @@ impl TextSpec {
         self.soft_breaks.clear();
         self.pills.clear();
         self.uncopied.clear();
-        if self.secure_multiline {
-            self.wrap = false;
-            self.wrap_anywhere = false;
-            self.max_lines = 0;
-        }
+        self.wrap = false;
+        self.wrap_anywhere = false;
+        self.max_lines = 0;
     }
 
     /// Replaces `content` (the authored string) with its cased form and moves span and link
@@ -1508,7 +1503,6 @@ pub fn text(content: impl Into<String>) -> El {
         rich_style: crate::edit::RichStyle::default(),
         redacted: false,
         secure_revealed: false,
-        secure_multiline: false,
         wrap_anywhere: false,
     });
     e
@@ -1641,9 +1635,9 @@ impl El {
     /// IME composition, omit accessibility text, redact [`Debug`], bypass layout/raster caches,
     /// and zeroize owned buffers on conceal and drop.
     ///
-    /// On read-only [`text`], single-line labels show one `•` per character when hidden, while
-    /// wrapped or multi-line labels (`.wrap()`, `.wrap_anywhere()`, `.max_lines(..)`, [`rich`])
-    /// show the fixed [`MULTILINE_SECURE_MASK`](crate::edit::MULTILINE_SECURE_MASK) on one line.
+    /// Non-empty read-only [`text`] and [`rich`] labels show a fixed twelve-bullet mask on
+    /// one line, hiding their length as well as their content. Explicit labels and help must
+    /// describe the field, not contain its secret value. Links and rolling text are disabled.
     /// Pair with [`revealed`](Self::revealed) to toggle plaintext display.
     pub fn secure(mut self) -> Self {
         self.a11y.secure = true;

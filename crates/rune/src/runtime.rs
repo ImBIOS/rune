@@ -610,8 +610,6 @@ pub struct ElementInfo {
     pub expanded: Option<bool>,
     /// A selected item of a list, tree, table or group ([`El::focus_selected`]).
     pub item_selected: bool,
-    /// Masked secret text or field ([`El::secure`], [`TextEdit::secure`]).
-    pub secure: bool,
     /// How far [`El::sticky_top`], [`El::sticky_bottom`] or [`El::sticky_left`] moved it from
     /// where scrolling put it this frame, in points: down for a stuck header, up for a stuck
     /// footer, right for a stuck left element, 0 when it isn't stuck. `rect` already includes it.
@@ -2687,7 +2685,7 @@ impl<S: 'static> Runtime<S> {
     fn capture_text_flight(&mut self, source: String, target: String) {
         let Some((i, n)) = self.nodes.iter().enumerate().find(|(_, n)| crate::flight::selects(&source, &n.path, n.key.as_deref())) else { return };
         let (Some(spec), Some(layout), Some(r)) = (&n.text, &n.text_layout, self.drawn.get(i)) else { return };
-        if spec.content.is_empty() { return; }
+        if spec.redacted || spec.content.is_empty() { return; }
         let scale = self.env.scale;
         let (rect, origin) = text_extent(n, spec, layout, *r, scale);
         let clip = self.screen_clip_of_parent(n.parent).map(|v| v / scale);
@@ -7723,6 +7721,16 @@ impl<S: 'static> Runtime<S> {
             .collect()
     }
 
+    /// Whether an element path contains secure text, hidden or revealed. Accessibility
+    /// adapters should use this alongside [`Self::elements`] to report protected content.
+    /// Unknown paths (including synthetic flight/link paths) return false.
+    pub fn element_is_secure(&self, path: &str) -> bool {
+        self.nodes.iter().find(|n| n.path == path).is_some_and(|n| {
+            n.a11y.secure || n.text.as_ref().is_some_and(|t| t.redacted)
+                || n.input.as_ref().is_some_and(|i| i.edit.is_secure())
+        })
+    }
+
     pub fn elements(&self) -> Vec<ElementInfo> {
         fn intent(n: &Node) -> u32 {
             n.live.iter().filter(|b| b.spring.is_none()).fold(0, |bits, b| bits | match b.property {
@@ -7848,7 +7856,6 @@ impl<S: 'static> Runtime<S> {
                     level: n.a11y.level,
                     expanded: n.a11y.expanded,
                     item_selected: n.focus.selected,
-                    secure,
                     stuck: self.stuck.get(i).copied().unwrap_or(0.0),
                     virtual_extent: self.virtuals.contains_key(&n.path) && n.vis.fill.a == 0.0
                         && n.vis.border_width == 0.0 && n.vis.shadows.is_empty() && n.text.is_none() && n.vis.icon.is_none(),
@@ -7872,7 +7879,7 @@ impl<S: 'static> Runtime<S> {
                 visible: [r.x.max(c[0]), r.y.max(c[1]), (r.edges()[2].min(c[2]) - r.x.max(c[0])).max(0.0),
                     (r.edges()[3].min(c[3]) - r.y.max(c[1])).max(0.0)],
                 revealing: true, in_growing_row: false, scrolling: false, virtual_extent: false, live_intent: 0, caret: None, drag_out: false,
-                help: None, selected: None, level: None, expanded: None, item_selected: false, secure: false, stuck: 0.0,
+                help: None, selected: None, level: None, expanded: None, item_selected: false, stuck: 0.0,
             });
         }
         self.link_elements(&mut elements);
@@ -9016,6 +9023,19 @@ fn flatten(
         ..
     } = el;
     let mut text = text;
+    if let Some(t) = &mut text && t.redacted {
+        // Rich links carry URLs and can expose them through hover, copy and tree children.
+        use zeroize::Zeroize;
+        for link in &mut t.links {
+            link.id.zeroize();
+            if let Some(label) = &mut link.label { label.zeroize(); }
+        }
+        t.links.clear();
+        t.rings.clear();
+        t.selectable = false;
+        t.advance_in = None;
+        t.live = None;
+    }
     if input.as_ref().is_some_and(|i| i.edit.is_hidden_multiline()) && let Some(t) = &mut text {
         // The fixed mask stays one line even in a field narrower than twelve bullets.
         t.wrap = false;
@@ -9023,7 +9043,6 @@ fn flatten(
         && let Some(t) = &mut text
         && t.redacted
     {
-        t.secure_multiline = t.wrap || t.wrap_anywhere || t.max_lines > 0;
         t.case = None;
         if !t.secure_revealed {
             t.conceal();
@@ -9063,6 +9082,9 @@ fn flatten(
         ^ (u64::from(input.as_ref().is_some_and(|i| i.edit.is_revealed()) || t.secure_revealed) << 3)
         ^ (u64::from(t.wrap_anywhere) << 4)
         ^ t.advance_in.as_ref().map_or(0, |(run, at)| run.hash.rotate_left(3) ^ (*at as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)));
+    // Secure leaves remeasure without retaining a content-derived dictionary oracle.
+    let secure_measure = text.as_ref().is_some_and(|t| t.redacted);
+    let measure = if secure_measure { Some(0) } else { measure };
     nodes.push(Node {
         on_paste,
         on_window_focus,
@@ -9171,7 +9193,7 @@ fn flatten(
         } else if measured {
             *taffy.get_node_context_mut(id).unwrap() = me;
         }
-        if entry.measure != measure {
+        if secure_measure || entry.measure != measure {
             taffy.mark_dirty(id).unwrap();
         }
         entry.measure = measure;
@@ -12566,7 +12588,7 @@ mod tests {
         let cached0 = rt.text.cached_layout_count();
         rt.frame(0.0);
 
-        // 1. Hidden state: single-line shows 1 bullet per char, multi-line shows fixed 12-bullet mask on 1 line.
+        // 1. All hidden labels show the same fixed mask, hiding length and line count.
         let check_no_leak = |rt: &mut Runtime<State>| {
             let tree = crate::tooling::tree_json(rt, 0.0).to_string();
             let specs: Vec<_> = rt.nodes.iter().map(|n| (&n.text, &n.input)).collect();
@@ -12586,7 +12608,7 @@ mod tests {
                 assert!(!rt.selection_menu(&path, 5.0, 5.0), "{key} must not offer Copy menu");
                 let info = rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap();
                 assert_eq!(info.role, "text");
-                assert!(info.secure, "{key} must report ElementInfo::secure");
+                assert!(rt.element_is_secure(&info.path), "{key} must report secure state");
                 assert!(info.text.is_none(), "{key} must omit ElementInfo::text");
                 assert!(info.selected.is_none(), "{key} must omit ElementInfo::selected");
             }
@@ -12595,7 +12617,7 @@ mod tests {
         check_no_leak(&mut rt);
 
         let n_single = rt.nodes.iter().find(|n| n.key.as_deref() == Some("single")).unwrap();
-        assert_eq!(n_single.text.as_ref().unwrap().content, "•".repeat(SINGLE_SECRET.chars().count()));
+        assert_eq!(n_single.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
         let n_multi = rt.nodes.iter().find(|n| n.key.as_deref() == Some("multi")).unwrap();
         assert_eq!(n_multi.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
         assert_eq!(n_multi.text_layout.as_ref().unwrap().len(), 1);
@@ -12658,7 +12680,7 @@ mod tests {
         assert!(rt.frame(1.0 / 60.0));
         let ex_single = rt.nodes.iter().find(|n| n.key.as_deref() == Some("single")).expect("exiting single label");
         assert!(rt.is_exiting(ex_single.id));
-        assert_eq!(ex_single.text.as_ref().unwrap().content, "•".repeat(SINGLE_SECRET.chars().count()));
+        assert_eq!(ex_single.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
         assert!(!format!("{:?}", ex_single.text).contains("sk-fictional"));
 
         if let Some(dir) = std::env::var_os("RUNE_SECURE_LABEL_STILLS") {
@@ -12742,6 +12764,30 @@ mod tests {
     }
 
     #[test]
+    fn secure_rich_labels_have_no_links_flights_or_retained_measure_hashes() {
+        fn view(revealed: &bool, _: &mut Cx<bool>) -> El {
+            col().child(crate::rich("fictional-secret", vec![])
+                .link(crate::Link::new(0..9, "fictional-url-secret").label("fictional-link-secret"))
+                .secure().revealed(*revealed).key("secret"))
+                .child(crate::text("destination").key("target"))
+        }
+        let mut rt = Runtime::new(true, view, (300.0, 100.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+        assert!(n.text.as_ref().unwrap().links.is_empty());
+        assert_eq!(rt.layout_entries[&n.path].measure, Some(0));
+        assert!(rt.element_is_secure(&n.path));
+        assert!(!rt.element_is_secure("missing"));
+        assert!(!crate::tooling::tree_json(&rt, 0.0).to_string().contains("fictional-"));
+        rt.capture_text_flight("secret".into(), "target".into());
+        assert!(rt.flights.is_empty(), "a revealed secret must not survive as flying glyphs");
+        rt.update(|s, _| *s = false);
+        rt.frame(0.0);
+        let n = rt.nodes.iter().find(|n| n.key.as_deref() == Some("secret")).unwrap();
+        assert_eq!(n.text.as_ref().unwrap().content, crate::edit::MULTILINE_SECURE_MASK);
+    }
+
+    #[test]
     fn hidden_multiline_pristine_composes_with_runtime_and_app_on_change() {
         use crate::{text_input, Key, KeyEvent, Mods, TextEdit, TextStyle};
 
@@ -12813,6 +12859,17 @@ mod tests {
         rt.key(KeyEvent { key: Key::Text("y".into()), mods: Mods::default() });
         rt.frame(0.0);
         assert_eq!(rt.state.secret.text, "xy");
+
+        // Keyboard focus does not consume pristine state either.
+        let mut tabbed = Runtime::new(App::new("fictional-key"), view, (240.0, 120.0), Env::new(true, 1.0));
+        tabbed.frame(0.0);
+        tabbed.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+        tabbed.frame(0.0);
+        assert!(tabbed.elements().iter().any(|e| e.key.as_deref() == Some("secret") && e.focused));
+        assert!(tabbed.state.secret.is_pristine());
+        tabbed.key(KeyEvent { key: Key::Text("t".into()), mods: Mods::default() });
+        tabbed.frame(0.0);
+        assert_eq!(tabbed.state.secret.text, "t");
 
         // Case 2: Pasting after Show -> Hide (without editing) replaces the whole value, then appends.
         let mut rt = Runtime::new(App::new("old-fictional-private-key\nsecond-line"), view, (240.0, 120.0), Env::new(true, 1.0));
