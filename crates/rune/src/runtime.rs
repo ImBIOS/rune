@@ -131,6 +131,10 @@ mod on_key_tests;
 #[cfg(test)]
 #[path = "live_only_tests.rs"]
 mod live_only_tests;
+#[path = "runtime/select_all.rs"] mod select_all;
+#[cfg(test)]
+#[path = "runtime/select_all_tests.rs"]
+mod select_all_tests;
 #[cfg(test)]
 #[path = "runtime/selection_api_tests.rs"]
 mod selection_api_tests;

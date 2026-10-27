@@ -132,6 +132,7 @@ pub(super) struct Held {
     last: Option<(String, f64, f32, f32, u8)>,
     /// Shift is held (from the host's modifier events), so a press extends the selection.
     pub(super) shift: bool,
+    pub(super) pick: super::select_all::Pick, // where Select All goes with no selection
 }
 
 /// The char boundary at or before byte `i` of `text`.
@@ -236,7 +237,7 @@ impl<S: 'static> Runtime<S> {
         n.input.is_none() && n.text.as_ref().is_some_and(|t| t.selectable && !t.redacted)
     }
 
-    fn live(&self, path: &str) -> Option<usize> {
+    pub(super) fn live(&self, path: &str) -> Option<usize> {
         (0..self.nodes.len()).find(|&i| self.nodes[i].path == path && !self.subtree_exiting(i) && self.allowed(i))
     }
 
@@ -255,7 +256,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// The selection group node `i` is in: its nearest `El::selection_group` ancestor.
-    fn group_of(&self, i: usize) -> Option<usize> {
+    pub(super) fn group_of(&self, i: usize) -> Option<usize> {
         std::iter::successors(self.nodes[i].parent, |&p| self.nodes[p].parent).find(|&p| self.nodes[p].selection_group)
     }
 
@@ -264,12 +265,12 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// Node `j` is a selectable text of group `g` (not of a group inside it).
-    fn member(&self, j: usize, g: usize) -> bool {
+    pub(super) fn member(&self, j: usize, g: usize) -> bool {
         self.is_selectable(j) && self.group_of(j) == Some(g) && !self.subtree_exiting(j) && self.allowed(j)
     }
 
     /// Group `g`'s selectable texts, in tree order.
-    fn group_texts(&self, g: usize) -> Vec<usize> {
+    pub(super) fn group_texts(&self, g: usize) -> Vec<usize> {
         // Nodes are in tree order, so a subtree is the run after its root.
         let inside = |j: usize| std::iter::successors(self.nodes[j].parent, |&p| self.nodes[p].parent).any(|p| p == g);
         (g + 1..self.nodes.len()).take_while(|&j| inside(j)).filter(|&j| self.member(j, g)).collect()
@@ -300,6 +301,7 @@ impl<S: 'static> Runtime<S> {
     fn seal(&mut self) {
         let ends = self.selection_holder().and_then(|h| Some((h, self.focus_holder(h)?)));
         self.text_sel.between = ends.map_or(0, |(h, f)| self.between_hash(h, f));
+        self.remember_pick();
     }
 
     /// The node holding the anchor, while it's still there, still selectable and still reads as
@@ -553,7 +555,7 @@ impl<S: 'static> Runtime<S> {
 
     /// Selects from the start of text `first` to the end of text `last`, a later text of its
     /// selection group or `first` itself.
-    fn select_span(&mut self, first: usize, last: usize) {
+    pub(super) fn select_span(&mut self, first: usize, last: usize) {
         let (head, content) = (self.nodes[first].path.clone(), self.content_of(first).to_owned());
         let far = (first != last).then(|| (self.nodes[last].path.clone(), self.content_of(last).to_owned()));
         let end = far.as_ref().map_or(content.len(), |f| f.1.len());
@@ -755,19 +757,15 @@ impl<S: 'static> Runtime<S> {
         let crate::Key::Command(c @ ('c' | 'a')) = ev.key else { return false };
         let m = ev.mods;
         let plain = m.cmd && !m.shift && !m.alt && if cfg!(target_os = "macos") { !m.ctrl } else { !m.logo };
-        if !plain || self.text_sel.path.is_none() || self.focused_input().is_some() { return false; }
-        let Some(i) = self.selection_holder() else { self.clear_text_selection(); return false };
+        if !plain || self.focused_input().is_some() || (c == 'c' && self.text_sel.path.is_none()) { return false; }
+        let holder = self.selection_holder();
+        if holder.is_none() { self.clear_text_selection(); }
+        if c == 'a' { return self.select_all_key(); }
+        let Some(i) = holder else { return false };
         let path = self.nodes[i].path.clone();
-        if c == 'a' {
-            let texts = self.group_of(i).map(|g| self.group_texts(g)).unwrap_or_default();
-            let (first, last) = (texts.first().copied().unwrap_or(i), texts.last().copied().unwrap_or(i));
-            self.select_span(first, last);
-            self.events.push(format!("select all {path}"));
-        } else {
-            let Some(text) = self.copy_text() else { return false };
-            self.events.push(format!("copy {path}"));
-            tx.copy(text);
-        }
+        let Some(text) = self.copy_text() else { return false };
+        self.events.push(format!("copy {path}"));
+        tx.copy(text);
         true
     }
 
@@ -783,7 +781,8 @@ impl<S: 'static> Runtime<S> {
             let content = self.content_of(i).to_owned();
             let (a, b) = self.unit_in(i, at, Unit::Word);
             self.text_sel = Held { path: Some(path.to_owned()), content, anchor: a, focus: b, far: None, between: 0,
-                unit: Unit::Word, origin: (a, b), dragging: false, last: None, shift: self.text_sel.shift };
+                unit: Unit::Word, origin: (a, b), dragging: false, last: None, shift: self.text_sel.shift,
+                pick: std::mem::take(&mut self.text_sel.pick) };
         }
         let text = self.copy_text();
         let mut copy = crate::PopupItem::new("copy", "Copy").enabled(text.is_some());
