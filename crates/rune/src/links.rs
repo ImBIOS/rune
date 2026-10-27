@@ -332,4 +332,118 @@ impl<S: 'static> Runtime<S> {
             }
         }
     }
+
+    /// Node `i`'s highlight line boxes in window points (x0, y0, x1, y1) for border box `rect`.
+    pub(super) fn highlight_boxes(&self, i: usize, rect: [f32; 4]) -> Vec<(usize, [f32; 4])> {
+        self.highlight_boxes_in(&self.nodes, i, rect, self.drawn_scale.get(i).copied().unwrap_or(1.0))
+    }
+
+    pub(super) fn highlight_boxes_in(&self, nodes: &[Node], i: usize, rect: [f32; 4], z: f32) -> Vec<(usize, [f32; 4])> {
+        let n = &nodes[i];
+        let (Some(spec), Some(layout)) = (&n.text, &n.text_layout) else { return Vec::new() };
+        if spec.highlights.is_empty() { return Vec::new(); }
+        let s = self.env.scale;
+        let [ox, oy] = origin(n, spec, layout, rect, s, z);
+        let px = s / z.max(1e-4);
+        let len = layout_len(n, spec);
+        let mut out = Vec::new();
+        for (k, h) in spec.highlights.iter().enumerate() {
+            let (a, b) = drawn(n, h.start, h.end);
+            for (bb, _) in boxes(layout, len, a, b) {
+                out.push((k, [ox + bb.x0 as f32 / px, oy + bb.y0 as f32 / px, ox + bb.x1 as f32 / px, oy + bb.y1 as f32 / px]));
+            }
+        }
+        out
+    }
+
+    /// Unscrolled target rect `[x0, y0, x1, y1]` (in window points) and first node index for
+    /// the highlight keyed `key` (or scoped `path/key`).
+    pub(super) fn highlight_target_in(&self, nodes: &[Node], scope: Option<&str>, key: &str) -> Option<(usize, [f32; 4])> {
+        let mut first_node = None;
+        let mut union: Option<[f32; 4]> = None;
+        for (i, n) in nodes.iter().enumerate() {
+            if !n.parent.is_none_or(|p| super::in_scope(&nodes[p].path, scope)) {
+                continue;
+            }
+            let Some(spec) = n.text.as_ref().filter(|t| !t.highlights.is_empty()) else { continue };
+            let mut matched_any = false;
+            for (k, h) in spec.highlights.iter().enumerate() {
+                let Some(hkey) = h.key.as_deref() else { continue };
+                let path = format!("{}/{hkey}", n.path);
+                if crate::flight::selects(key, &path, Some(hkey)) {
+                    if !matched_any {
+                        matched_any = true;
+                        first_node.get_or_insert(i);
+                    }
+                    for (j, r) in self.highlight_boxes_in(nodes, i, n.target, 1.0) {
+                        if j == k {
+                            union = Some(union.map_or(r, |u| [u[0].min(r[0]), u[1].min(r[1]), u[2].max(r[2]), u[3].max(r[3])]));
+                        }
+                    }
+                }
+            }
+        }
+        Some((first_node?, union?))
+    }
+
+    /// Centre of the first drawn line box of the highlight keyed `key`, in points.
+    pub(super) fn find_highlight(&self, key: &str) -> Option<(f32, f32)> {
+        (0..self.nodes.len()).filter(|&i| !self.subtree_exiting(i)).find_map(|i| {
+            let n = &self.nodes[i];
+            let k = n.text.as_ref()?.highlights.iter().position(|h| {
+                h.key.as_deref().is_some_and(|hk| crate::flight::selects(key, &format!("{}/{hk}", n.path), Some(hk)))
+            })?;
+            let (_, r) = self.highlight_boxes(i, self.drawn_box(i)).into_iter().find(|(j, _)| *j == k)?;
+            Some(((r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5))
+        })
+    }
+
+    /// Reports each text highlight as its own `"mark"` element after its text.
+    pub(super) fn highlight_elements(&self, elements: &mut Vec<ElementInfo>) {
+        for i in 0..self.nodes.len() {
+            let n = &self.nodes[i];
+            let Some(spec) = n.text.as_ref().filter(|t| !t.highlights.is_empty()) else { continue };
+            let Some(at) = elements.iter().position(|e| e.path == n.path) else { continue };
+            let text = elements[at].clone();
+            let boxes = self.highlight_boxes(i, self.drawn_box(i));
+            let targets = self.highlight_boxes(i, n.target);
+            let union = |k: usize, bs: &[(usize, [f32; 4])]| bs.iter().filter(|(j, _)| *j == k).fold(None, |u: Option<[f32; 4]>, (_, r)| {
+                Some(u.map_or(*r, |u| [u[0].min(r[0]), u[1].min(r[1]), u[2].max(r[2]), u[3].max(r[3])]))
+            });
+            for (k, h) in spec.highlights.iter().enumerate() {
+                let Some(r) = union(k, &boxes) else { continue };
+                let t = union(k, &targets).unwrap_or(r);
+                let v = text.visible;
+                let (x0, y0) = (r[0].max(v[0]), r[1].max(v[1]));
+                let (x1, y1) = (r[2].min(v[0] + v[2]), r[3].min(v[1] + v[3]));
+                let words = spec.source_slice(h.start, h.end).map(str::to_owned);
+                elements.push(ElementInfo {
+                    stuck: 0.0,
+                    path: format!("{}#mark-{k}", n.path),
+                    key: h.key.clone(),
+                    role: "mark",
+                    label: words.clone(),
+                    text: words,
+                    rect: [r[0], r[1], r[2] - r[0], r[3] - r[1]],
+                    target: [t[0], t[1], t[2] - t[0], t[3] - t[1]],
+                    visible: [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)],
+                    fill: h.bg,
+                    text_color: h.fg.or(text.text_color),
+                    radius: 4.0,
+                    focusable: false,
+                    focused: false,
+                    focus_visible: false,
+                    hover: 0.0,
+                    press: 0.0,
+                    parent: Some(i),
+                    caret: None,
+                    selected: None,
+                    level: None,
+                    expanded: None,
+                    item_selected: false,
+                    ..text.clone()
+                });
+            }
+        }
+    }
 }

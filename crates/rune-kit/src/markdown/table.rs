@@ -58,7 +58,7 @@ impl Renderer {
         if self.s.table_tabular { TextStyle { features: with_tnum(f.features), ..f } } else { f }
     }
 
-    pub(super) fn table(&self, t: &Table) -> El {
+    pub(super) fn table(&self, t: &Table, head_maps: &[SpanMap], row_maps: &[Vec<SpanMap>]) -> El {
         let s = &self.s;
         let n = t.align.len().max(t.head.len()).max(1);
         let cols = self.columns(t, n);
@@ -72,10 +72,11 @@ impl Renderer {
             Some(outline) => frame.radius(6.0).border(0.5, outline).clip_rounded(6.0),
             None => frame.clip_soft(0.0),
         };
-        frame = frame.child(self.table_row(&t.head, t, &cols, self.head_font(), s.table_head_text).key("th").fill(s.table_head_fill));
+        frame = frame.child(self.table_row(&t.head, head_maps, t, &cols, self.head_font(), s.table_head_text).key("th").fill(s.table_head_fill));
         let rule = |key: String| el().key(key).w_full().h(0.5).fill(s.table_rule);
         for (i, cells) in t.rows.iter().enumerate() {
-            frame = frame.child(rule(format!("s{i}"))).child(self.table_row(cells, t, &cols, self.body_font(), s.text).key(format!("r{i}")));
+            let rmap = row_maps.get(i).map_or(&[][..], Vec::as_slice);
+            frame = frame.child(rule(format!("s{i}"))).child(self.table_row(cells, rmap, t, &cols, self.body_font(), s.text).key(format!("r{i}")));
         }
         if s.table_outline.is_none() {
             frame = frame.child(rule("s-end".into()));
@@ -87,7 +88,7 @@ impl Renderer {
         frame
     }
 
-    fn table_row(&self, cells: &[Inline], t: &Table, cols: &Columns, font: TextStyle, color: Color) -> El {
+    fn table_row(&self, cells: &[Inline], maps: &[SpanMap], t: &Table, cols: &Columns, font: TextStyle, color: Color) -> El {
         let empty = Inline::default();
         let [pad_x, pad_y] = self.s.table_pad;
         let mut r = row().w_full();
@@ -103,7 +104,7 @@ impl Renderer {
             r = r.child(
                 // Clipped: a word wider than a shrunk column (or a row still streaming in) must
                 // not run into the next column.
-                col().key(format!("c{j}")).w(*natural).shrink().min_w(*min).pl(self.pad_left(j)).pr(pad_x).py(pad_y).clip_soft(0.0).child(self.select_inline(content, inl)),
+                col().key(format!("c{j}")).w(*natural).shrink().min_w(*min).pl(self.pad_left(j)).pr(pad_x).py(pad_y).clip_soft(0.0).child(self.select_inline(content, inl, maps.get(j))),
             );
         }
         r

@@ -72,8 +72,13 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn layout_of(&self, nodes: &[Node], key: &str) -> Option<[f32; 4]> {
-        let i = nodes.iter().position(|n| crate::flight::selects(key, &n.path, n.key.as_deref()))?;
-        Some(self.laid_out(nodes, i))
+        if let Some(i) = nodes.iter().position(|n| crate::flight::selects(key, &n.path, n.key.as_deref())) {
+            return Some(self.laid_out(nodes, i));
+        }
+        let (i, [x0, y0, x1, y1]) = self.highlight_target_in(nodes, None, key)?;
+        let node_rect = self.laid_out(nodes, i);
+        let t = nodes[i].target;
+        Some([node_rect[0] + (x0 - t[0]), node_rect[1] + (y0 - t[1]), x1 - x0, y1 - y0])
     }
 
     /// Refreshes what the next view sees for `reads` (the last view's reads when `None`) from

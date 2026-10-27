@@ -5,6 +5,18 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Markdown source-byte highlights (`Markdown::highlights`, `Highlight`), strikethrough (`~~struck~~`), and bare-URL autolinking (`Markdown::autolink`).**
+  `Markdown::highlights` accepts `(Range<usize>, Highlight)` pairs in source UTF-8 bytes and maps
+  them to rendered text across inline formatting, headings, paragraphs, lists, task items, quotes,
+  tables, diffs and code blocks without reshaping text or shifting line breaks (`El::text_highlight`
+  / `TextHighlight`). Standard matches (`Highlight::new()`) and active matches
+  (`Highlight::current()`) draw rounded background fills and optional inset border rings from
+  `MarkdownStyle` (`highlight_bg`, `highlight_current_bg`, `highlight_current_ring`, or per-match
+  `.bg(..)` / `.fg(..)` / `.ring(..)`), and each highlight can be scrolled into view with
+  `Tx::scroll_into_view` by its `.key(..)` or `Markdown::highlight_key(index)`. GFM `~~strikethrough~~`
+  spans now paint strike lines through `El::strike`, and bare `https://…`, `http://…` and `www.…`
+  URLs in plain text autolink by default (with GFM trailing punctuation and balanced-parenthesis
+  trimming, `http://` destination prefix for `www.`, and `.autolink(false)` to opt out).
 - **`El::on_far_from_bottom(min, f)`: when a chat shows its jump-to-latest button.** On a
   scroll viewport, reports whether it stands more than its own height, and at least `min`
   points, above its bottom: once after its first layout, then only on change, like

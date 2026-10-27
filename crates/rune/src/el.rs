@@ -888,6 +888,8 @@ pub struct TextSpec {
     pub(crate) rings: Vec<(u32, u32, Color, f32)>,
     /// Strikethrough byte ranges `(start, end, color)` of `content`.
     pub(crate) strikes: Vec<(u32, u32, Option<Color>)>,
+    /// Paint-only highlight byte ranges of `content`.
+    pub(crate) highlights: Vec<crate::text::TextHighlight>,
     /// Per-paragraph [`Block`](crate::Block) attributes for `content`.
     pub(crate) blocks: Vec<crate::edit::Block>,
     /// Line indices (`> 0`) created by `Shift+Return` (`<br>`).
@@ -1031,6 +1033,12 @@ impl TextSpec {
         }
         for r in &mut self.rings {
             (r.0, r.1) = (source.shown(r.0, false), source.shown(r.1, true));
+        }
+        for r in &mut self.strikes {
+            (r.0, r.1) = (source.shown(r.0, false), source.shown(r.1, true));
+        }
+        for h in &mut self.highlights {
+            (h.start, h.end) = (source.shown(h.start, false), source.shown(h.end, true));
         }
         self.content = shown;
         self.source = Some(Box::new(source));
@@ -1514,6 +1522,7 @@ pub fn text(content: impl Into<String>) -> El {
         uncopied: Vec::new(),
         rings: Vec::new(),
         strikes: Vec::new(),
+        highlights: Vec::new(),
         blocks: Vec::new(),
         soft_breaks: Vec::new(),
         pills: Vec::new(),
@@ -2928,6 +2937,38 @@ impl El {
     pub fn span_rings(mut self, rings: impl IntoIterator<Item = (usize, usize, Color, f32)>) -> Self {
         for (start, end, color, width) in rings {
             self = self.span_ring(start, end, color, width);
+        }
+        self
+    }
+    /// A strikethrough line across bytes `start..end` in `color` (`None`: the span's or text's
+    /// colour). Wrapped lines each get their own segment.
+    pub fn strike(mut self, start: usize, end: usize, color: Option<Color>) -> Self {
+        if let Some(t) = &mut self.text && start < end {
+            t.strikes.push((start as u32, end as u32, color));
+        }
+        self
+    }
+    /// Strikethrough lines `(start, end, color)` for multiple byte ranges (see [`El::strike`]).
+    pub fn strikes(mut self, strikes: impl IntoIterator<Item = (usize, usize, Option<Color>)>) -> Self {
+        for (start, end, color) in strikes {
+            self = self.strike(start, end, color);
+        }
+        self
+    }
+    /// A paint-only [`TextHighlight`](crate::TextHighlight) over bytes of the text.
+    ///
+    /// Drawn from the shaped layout's glyph boxes without splitting runs, so adding, moving or
+    /// clearing highlights never reshapes text or shifts line breaks.
+    pub fn text_highlight(mut self, highlight: crate::text::TextHighlight) -> Self {
+        if let Some(t) = &mut self.text && highlight.start < highlight.end {
+            t.highlights.push(highlight);
+        }
+        self
+    }
+    /// Paint-only [`TextHighlight`](crate::TextHighlight)s over bytes of the text (see [`El::text_highlight`]).
+    pub fn text_highlights(mut self, highlights: impl IntoIterator<Item = crate::text::TextHighlight>) -> Self {
+        for h in highlights {
+            self = self.text_highlight(h);
         }
         self
     }

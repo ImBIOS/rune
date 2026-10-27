@@ -39,7 +39,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use rune::{Align, Color, Cursor, El, Family, Icon, Link, LinkPaint, Span, Spring, TextStyle, Tx, col, el, icon, rich, row, text};
+use rune::{Align, Color, Cursor, El, Family, Icon, Link, LinkPaint, Span, Spring, TextHighlight, TextStyle, Tx, col, el, icon, rich, row, text};
 
 use crate::{Kit, PaletteSeed};
 
@@ -57,6 +57,7 @@ pub enum Style {
     CodePad,
     Strong,
     Em,
+    Strike,
     Link,
 }
 
@@ -98,11 +99,153 @@ pub struct Table {
     pub open: bool,
 }
 
+/// Maps source UTF-8 byte ranges to rendered text UTF-8 byte ranges.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct SpanMap(Vec<(Range<usize>, Range<usize>)>);
+
+impl SpanMap {
+    fn push(&mut self, src: Range<usize>, out: Range<usize>) {
+        if src.start >= src.end || out.start >= out.end {
+            return;
+        }
+        if let Some((last_src, last_out)) = self.0.last_mut()
+            && last_src.end == src.start
+            && last_out.end == out.start
+            && last_src.len() == last_out.len()
+            && src.len() == out.len()
+        {
+            last_src.end = src.end;
+            last_out.end = out.end;
+            return;
+        }
+        self.0.push((src, out));
+    }
+
+    fn truncate_out(&mut self, len: usize) {
+        self.0.retain_mut(|(src, out)| {
+            if out.start >= len {
+                return false;
+            }
+            if out.end > len {
+                let cut = out.end - len;
+                if src.len() == out.len() {
+                    src.end = src.end.saturating_sub(cut);
+                }
+                out.end = len;
+            }
+            src.start < src.end && out.start < out.end
+        });
+    }
+
+    fn shift_src(&mut self, offset: usize) {
+        if offset == 0 {
+            return;
+        }
+        for (src, _) in &mut self.0 {
+            src.start += offset;
+            src.end += offset;
+        }
+    }
+
+    fn map_range(&self, query: Range<usize>, out_text: &str) -> Vec<Range<usize>> {
+        if query.start >= query.end || self.0.is_empty() || out_text.is_empty() {
+            return Vec::new();
+        }
+        let mut mapped: Vec<Range<usize>> = Vec::new();
+        for (src, out) in &self.0 {
+            if query.end <= src.start || src.end <= query.start {
+                continue;
+            }
+            let s0 = query.start.max(src.start);
+            let s1 = query.end.min(src.end);
+            if s0 >= s1 {
+                continue;
+            }
+            let (mut o0, mut o1) = if src.len() == out.len() {
+                (out.start + (s0 - src.start), out.start + (s1 - src.start))
+            } else {
+                let a = if s0 <= src.start {
+                    out.start
+                } else {
+                    out.start + ((s0 - src.start) * out.len()) / src.len()
+                };
+                let b = if s1 >= src.end {
+                    out.end
+                } else {
+                    (out.start + ((s1 - src.start) * out.len()).div_ceil(src.len())).max(a + 1)
+                };
+                (a, b)
+            };
+            o0 = out_text.floor_char_boundary(o0.clamp(out.start, out.end).min(out_text.len()));
+            o1 = out_text.ceil_char_boundary(o1.clamp(out.start, out.end).min(out_text.len()));
+            if o0 >= o1 {
+                continue;
+            }
+            if let Some(prev) = mapped.last_mut()
+                && (prev.end == o0 || out_text.get(prev.end..o0) == Some(PAD))
+            {
+                prev.end = o1;
+            } else {
+                mapped.push(o0..o1);
+            }
+        }
+        mapped
+    }
+}
+
+/// Source-to-rendered byte mappings parallel to [`Block`], kept beside `Block` so `Block` keeps
+/// its shape.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) enum BlockMap {
+    Inline(SpanMap),
+    Code(SpanMap),
+    List(Vec<Vec<BlockMap>>),
+    Quote(Vec<BlockMap>),
+    Table { head: Vec<SpanMap>, rows: Vec<Vec<SpanMap>> },
+    #[default]
+    None,
+}
+
+impl BlockMap {
+    fn shift_src(mut self, offset: usize) -> Self {
+        if offset == 0 {
+            return self;
+        }
+        match &mut self {
+            BlockMap::Inline(m) | BlockMap::Code(m) => m.shift_src(offset),
+            BlockMap::List(items) => {
+                for item in items {
+                    for b in item {
+                        *b = std::mem::take(b).shift_src(offset);
+                    }
+                }
+            }
+            BlockMap::Quote(inner) => {
+                for b in inner {
+                    *b = std::mem::take(b).shift_src(offset);
+                }
+            }
+            BlockMap::Table { head, rows } => {
+                for m in head {
+                    m.shift_src(offset);
+                }
+                for row in rows {
+                    for m in row {
+                        m.shift_src(offset);
+                    }
+                }
+            }
+            BlockMap::None => {}
+        }
+        self
+    }
+}
+
 struct Builder {
-    /// Open containers: (kind, blocks so far).
-    stack: Vec<(Container, Vec<Block>)>,
-    inline: Option<(InlineKind, Inline, Vec<Open>)>,
-    code: Option<(String, Fence)>,
+    /// Open containers: (kind, blocks so far, maps so far).
+    stack: Vec<(Container, Vec<Block>, Vec<BlockMap>)>,
+    inline: Option<(InlineKind, Inline, Vec<Open>, SpanMap)>,
+    code: Option<(String, Fence, SpanMap)>,
     /// The source range of the last paragraph started at the root.
     last_root_para: Option<Range<usize>>,
     sources: Vec<Source>,
@@ -111,6 +254,7 @@ struct Builder {
     block_starts: Vec<usize>,
     root_start: usize,
     cuts: Vec<Cut>,
+    autolink: bool,
 }
 
 /// Where a top-level block starts: the start of its first line, and how many top-level blocks,
@@ -146,7 +290,7 @@ enum Fence {
     Mermaid(bool),
 }
 
-/// An emphasis, strong or link run that has started and not yet ended.
+/// An emphasis, strong, strike or link run that has started and not yet ended.
 struct Open {
     start: usize,
     style: Style,
@@ -156,9 +300,9 @@ struct Open {
 enum Container {
     Root,
     Quote,
-    List(Option<u64>, Vec<Vec<Block>>),
+    List(Option<u64>, Vec<Vec<Block>>, Vec<Vec<BlockMap>>),
     Item(usize),
-    Table(Table, Vec<Inline>),
+    Table(Table, Vec<Inline>, Vec<SpanMap>, Vec<Vec<SpanMap>>, Vec<SpanMap>),
 }
 
 #[derive(Clone, Copy)]
@@ -169,22 +313,25 @@ enum InlineKind {
 }
 
 impl Builder {
-    fn push(&mut self, b: Block) {
+    fn push(&mut self, b: Block, map: BlockMap) {
         if self.stack.len() == 1 {
             self.block_starts.push(self.root_start);
         }
-        self.stack.last_mut().unwrap().1.push(b);
+        let top = self.stack.last_mut().unwrap();
+        top.1.push(b);
+        top.2.push(map);
     }
 
     /// Pushes a code block's text: without its final newline, or at the end of input without
     /// any trailing newlines.
-    fn push_code(&mut self, mut text: String, fence: Fence, eof: bool) {
+    fn push_code(&mut self, mut text: String, fence: Fence, mut map: SpanMap, eof: bool) {
         let line_ended = text.ends_with('\n');
         if eof {
             text.truncate(text.trim_end_matches('\n').len());
         } else if line_ended {
             text.pop();
         }
+        map.truncate_out(text.len());
         let block = code_block(text, &fence);
         if let Block::Code(code) = &block {
             let (lang, closed) = match fence {
@@ -195,21 +342,22 @@ impl Builder {
             let coloured = if closed || line_ended { code.len() } else { code.rfind('\n').unwrap_or(0) };
             self.sources.push(Source { lang, len: code.len(), coloured });
         }
-        self.push(block);
+        self.push(block, BlockMap::Code(map));
     }
 
-    fn inline(&mut self) -> &mut (InlineKind, Inline, Vec<Open>) {
+    fn inline(&mut self) -> &mut (InlineKind, Inline, Vec<Open>, SpanMap) {
         // Tight list items have text without a paragraph.
-        self.inline.get_or_insert_with(|| (InlineKind::Para, Inline::default(), Vec::new()))
+        self.inline.get_or_insert_with(|| (InlineKind::Para, Inline::default(), Vec::new(), SpanMap::default()))
     }
 
     fn flush_inline(&mut self) {
-        if let Some((kind, mut inl, open)) = self.inline.take() {
+        if let Some((kind, mut inl, open, mut map)) = self.inline.take() {
             for o in open {
                 end_run(&mut inl, o);
             }
             let trimmed = inl.text.trim_end().len();
             inl.text.truncate(trimmed);
+            map.truncate_out(trimmed);
             inl.spans.retain_mut(|s| {
                 s.1 = s.1.min(trimmed);
                 s.0 < s.1
@@ -218,48 +366,57 @@ impl Builder {
                 s.1 = s.1.min(trimmed);
                 s.0 < s.1
             });
+            if self.autolink {
+                autolink_inline(&mut inl);
+            }
             if let InlineKind::Cell = kind {
                 // Empty cells still hold their column.
-                if let Some((Container::Table(_, cells), _)) = self.stack.last_mut() {
+                if let Some((Container::Table(_, cells, _, _, cell_maps), _, _)) = self.stack.last_mut() {
                     cells.push(inl);
+                    cell_maps.push(map);
                 }
                 return;
             }
             if inl.text.is_empty() {
                 return;
             }
-            self.push(match kind {
-                InlineKind::Para | InlineKind::Cell => Block::Para(inl),
-                InlineKind::Heading(l) => Block::Heading(l, inl),
-            });
+            self.push(
+                match kind {
+                    InlineKind::Para | InlineKind::Cell => Block::Para(inl),
+                    InlineKind::Heading(l) => Block::Heading(l, inl),
+                },
+                BlockMap::Inline(map),
+            );
         }
     }
 
     /// Closes the innermost container into its parent.
     fn pop_container(&mut self) {
         self.flush_inline();
-        let Some((c, blocks)) = self.stack.pop() else { return };
+        let Some((c, blocks, maps)) = self.stack.pop() else { return };
         match c {
             Container::Item(_) => {
-                if let Some((Container::List(_, items), _)) = self.stack.last_mut() {
+                if let Some((Container::List(_, items, item_maps), _, _)) = self.stack.last_mut() {
                     items.push(blocks);
+                    item_maps.push(maps);
                 }
             }
-            Container::List(start, items) => self.push(Block::List { start, items }),
-            Container::Quote => self.push(Block::Quote(blocks)),
-            Container::Table(mut t, cells) => {
+            Container::List(start, items, item_maps) => self.push(Block::List { start, items }, BlockMap::List(item_maps)),
+            Container::Quote => self.push(Block::Quote(blocks), BlockMap::Quote(maps)),
+            Container::Table(mut t, cells, head, mut rows, cell_maps) => {
                 if !cells.is_empty() {
                     t.rows.push(cells);
+                    rows.push(cell_maps);
                 }
-                self.push(Block::Table(t));
+                self.push(Block::Table(t), BlockMap::Table { head, rows });
             }
             Container::Root => {}
         }
     }
 
-    fn table(&mut self) -> Option<(&mut Table, &mut Vec<Inline>)> {
+    fn table(&mut self) -> Option<(&mut Table, &mut Vec<Inline>, &mut Vec<SpanMap>, &mut Vec<Vec<SpanMap>>, &mut Vec<SpanMap>)> {
         match self.stack.last_mut() {
-            Some((Container::Table(t, cells), _)) => Some((t, cells)),
+            Some((Container::Table(t, cells, head, rows, cell_maps), _, _)) => Some((t, cells, head, rows, cell_maps)),
             _ => None,
         }
     }
@@ -267,14 +424,197 @@ impl Builder {
 
 const PAD: &str = "\u{202f}";
 
-/// Parses `src` into blocks. Unclosed constructs are closed at the end of input.
-pub fn parse(src: &str) -> Vec<Block> {
-    parse_doc(src).0
+/// Source byte range of the inner code text inside a backtick code span `src[range]`.
+fn code_span_content_range(src: &str, range: Range<usize>, rendered: &str) -> Range<usize> {
+    let Some(raw) = src.get(range.clone()) else { return range };
+    let open = raw.bytes().take_while(|&b| b == b'`').count();
+    let close = raw[open..].bytes().rev().take_while(|&b| b == b'`').count();
+    let mut start = range.start + open;
+    let mut end = range.end.saturating_sub(close);
+    if end.saturating_sub(start) == rendered.len() + 2
+        && src.as_bytes().get(start).is_some_and(|b| *b == b' ' || *b == b'\n')
+        && src.as_bytes().get(end.saturating_sub(1)).is_some_and(|b| *b == b' ' || *b == b'\n')
+    {
+        start += 1;
+        end -= 1;
+    }
+    if start < end { start..end } else { range }
 }
 
-fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>, Vec<Option<(bool, usize)>>, Vec<Cut>, Vec<usize>) {
+/// Scans `inl.text` outside inline code and existing links for bare GFM autolinks (`https://…`,
+/// `http://…`, `www.…`) and wires them into `inl.links` and `inl.spans`.
+fn autolink_inline(inl: &mut Inline) {
+    if !inl.text.contains("https://") && !inl.text.contains("http://") && !inl.text.contains("www.") {
+        return;
+    }
+    let mut excluded: Vec<(usize, usize)> = inl
+        .spans
+        .iter()
+        .filter(|(_, _, st)| matches!(st, Style::Code | Style::CodePad | Style::Link))
+        .map(|&(a, b, _)| (a, b))
+        .collect();
+    excluded.sort_unstable_by_key(|&(a, _)| a);
+
+    let mut found: Vec<(usize, usize, String)> = Vec::new();
+    let mut cursor = 0;
+    for (ex_a, ex_b) in excluded {
+        if cursor < ex_a {
+            scan_bare_urls(&inl.text, cursor, ex_a, &mut found);
+        }
+        cursor = cursor.max(ex_b);
+    }
+    if cursor < inl.text.len() {
+        scan_bare_urls(&inl.text, cursor, inl.text.len(), &mut found);
+    }
+    if found.is_empty() {
+        return;
+    }
+    let had_links = !inl.links.is_empty();
+    for (start, end, dest) in found {
+        inl.links.push((start, end, dest));
+        inl.spans.push((start, end, Style::Link));
+    }
+    if had_links {
+        inl.links.sort_by_key(|l| l.0);
+        // Keep `Style::Link` spans in `inl.spans` ordered by start byte to match `inl.links`.
+        let mut link_ranges: Vec<(usize, usize)> = inl.links.iter().map(|&(a, b, _)| (a, b)).collect();
+        let mut k = 0;
+        for sp in &mut inl.spans {
+            if matches!(sp.2, Style::Link) {
+                (sp.0, sp.1) = link_ranges[k];
+                k += 1;
+            }
+        }
+        let _ = &mut link_ranges;
+    }
+}
+
+fn scan_bare_urls(text: &str, seg_start: usize, seg_end: usize, out: &mut Vec<(usize, usize, String)>) {
+    let bytes = text.as_bytes();
+    let mut i = seg_start;
+    while i < seg_end {
+        let rest = &text[i..seg_end];
+        let (prefix_len, is_www) = if rest.starts_with("https://") {
+            (8, false)
+        } else if rest.starts_with("http://") {
+            (7, false)
+        } else if rest.starts_with("www.") {
+            (4, true)
+        } else {
+            i += rest.chars().next().map_or(1, char::len_utf8);
+            continue;
+        };
+        let valid_prev = i == 0
+            || matches!(bytes[i - 1], b' ' | b'\t' | b'\n' | b'*' | b'_' | b'~' | b'[')
+            || (bytes[i - 1] == b'(' && (i < 2 || bytes[i - 2] != b']'));
+        if !valid_prev {
+            i += prefix_len;
+            continue;
+        }
+        let raw_len = rest
+            .find(|c: char| c.is_whitespace() || c.is_control() || matches!(c, '<' | '>'))
+            .unwrap_or(rest.len());
+        let mut end = i + raw_len;
+        trim_gfm_autolink(text, i, prefix_len, &mut end);
+        let matched = &text[i..end];
+        if valid_autolink_domain(&matched[prefix_len..], is_www) {
+            let dest = if is_www { format!("http://{matched}") } else { matched.to_owned() };
+            out.push((i, end, dest));
+            i = end;
+        } else {
+            i += prefix_len;
+        }
+    }
+}
+
+/// GFM 6.9 extended autolink path trailing-punctuation trimming.
+fn trim_gfm_autolink(text: &str, start: usize, prefix_len: usize, end: &mut usize) {
+    loop {
+        let slice = &text[start..*end];
+        if slice.len() <= prefix_len {
+            break;
+        }
+        let Some(last) = slice.chars().next_back() else { break };
+        if matches!(last, '?' | '!' | '.' | ',' | ':' | '*' | '_' | '~' | '\'' | '"') {
+            *end -= last.len_utf8();
+            continue;
+        }
+        if last == ')' {
+            let body = &slice[prefix_len..];
+            let opens = body.bytes().filter(|&b| b == b'(').count();
+            let closes = body.bytes().filter(|&b| b == b')').count();
+            if closes > opens {
+                *end -= 1;
+                continue;
+            }
+            break;
+        }
+        if last == ']' {
+            let body = &slice[prefix_len..];
+            let opens = body.bytes().filter(|&b| b == b'[').count();
+            let closes = body.bytes().filter(|&b| b == b']').count();
+            if closes > opens {
+                *end -= 1;
+                continue;
+            }
+            break;
+        }
+        if last == ';' {
+            let before_semi = &slice[..slice.len() - 1];
+            if let Some(amp) = before_semi.rfind('&') {
+                let entity = &before_semi[amp + 1..];
+                if !entity.is_empty() && entity.bytes().all(|b| b.is_ascii_alphanumeric()) && amp >= prefix_len {
+                    *end = start + amp;
+                    continue;
+                }
+            }
+            *end -= 1;
+            continue;
+        }
+        break;
+    }
+}
+
+/// Validates the authority/domain portion of a bare URL after `https://`, `http://`, or `www.`.
+fn valid_autolink_domain(after_prefix: &str, is_www: bool) -> bool {
+    let host_end = after_prefix.find(['/', '?', '#']).unwrap_or(after_prefix.len());
+    let mut host = &after_prefix[..host_end];
+    if let Some((h, port)) = host.rsplit_once(':')
+        && !port.is_empty()
+        && port.bytes().all(|b| b.is_ascii_digit())
+    {
+        host = h;
+    }
+    if host.is_empty()
+        || !host.as_bytes()[0].is_ascii_alphanumeric()
+        || host.ends_with('.')
+        || host.ends_with('-')
+        || !host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+    {
+        return false;
+    }
+    if is_www && !host.contains('.') {
+        return false;
+    }
+    let segments: Vec<&str> = host.split('.').collect();
+    if segments.iter().any(|s| s.is_empty()) {
+        return false;
+    }
+    // GFM 6.9: the last two domain segments must not contain underscores.
+    if segments.len() >= 2 && segments[segments.len() - 2..].iter().any(|s| s.contains('_')) {
+        return false;
+    }
+    true
+}
+
+/// Parses `src` into blocks. Unclosed constructs are closed at the end of input.
+pub fn parse(src: &str) -> Vec<Block> {
+    parse_doc(src, true).0
+}
+
+fn parse_doc(src: &str, autolink: bool) -> (Vec<Block>, Vec<Source>, Vec<Option<(bool, usize)>>, Vec<Cut>, Vec<usize>, Vec<BlockMap>) {
     let mut b = Builder {
-        stack: vec![(Container::Root, Vec::new())],
+        stack: vec![(Container::Root, Vec::new(), Vec::new())],
         inline: None,
         code: None,
         last_root_para: None,
@@ -283,6 +623,7 @@ fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>, Vec<Option<(bool, usize)>>,
         block_starts: Vec::new(),
         root_start: 0,
         cuts: Vec::new(),
+        autolink,
     };
     let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
     for (ev, range) in Parser::new_ext(src, opts).into_offset_iter() {
@@ -305,7 +646,7 @@ fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>, Vec<Option<(bool, usize)>>,
                     if b.stack.len() == 1 {
                         b.last_root_para = Some(range);
                     }
-                    b.inline = Some((InlineKind::Para, Inline::default(), Vec::new()));
+                    b.inline = Some((InlineKind::Para, Inline::default(), Vec::new(), SpanMap::default()));
                 }
                 Tag::Heading { level, .. } => {
                     b.flush_inline();
@@ -315,7 +656,7 @@ fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>, Vec<Option<(bool, usize)>>,
                         HeadingLevel::H3 => 3,
                         _ => 4,
                     };
-                    b.inline = Some((InlineKind::Heading(l), Inline::default(), Vec::new()));
+                    b.inline = Some((InlineKind::Heading(l), Inline::default(), Vec::new(), SpanMap::default()));
                 }
                 Tag::CodeBlock(kind) => {
                     b.flush_inline();
@@ -331,21 +672,21 @@ fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>, Vec<Option<(bool, usize)>>,
                         }
                         CodeBlockKind::Indented => Fence::Plain(None, true),
                     };
-                    b.code = Some((String::new(), fence));
+                    b.code = Some((String::new(), fence, SpanMap::default()));
                 }
                 Tag::BlockQuote(_) => {
                     b.flush_inline();
-                    b.stack.push((Container::Quote, Vec::new()));
+                    b.stack.push((Container::Quote, Vec::new(), Vec::new()));
                 }
                 Tag::List(start) => {
                     b.flush_inline();
-                    b.stack.push((Container::List(start, Vec::new()), Vec::new()));
+                    b.stack.push((Container::List(start, Vec::new(), Vec::new()), Vec::new(), Vec::new()));
                 }
                 Tag::Item => {
                     b.flush_inline();
                     let idx = b.tasks.len();
                     b.tasks.push(None);
-                    b.stack.push((Container::Item(idx), Vec::new()));
+                    b.stack.push((Container::Item(idx), Vec::new(), Vec::new()));
                 }
                 Tag::Table(aligns) => {
                     b.flush_inline();
@@ -357,70 +698,94 @@ fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>, Vec<Option<(bool, usize)>>,
                             Alignment::None | Alignment::Left => Align::Start,
                         })
                         .collect();
-                    b.stack.push((Container::Table(Table { align, ..Table::default() }, Vec::new()), Vec::new()));
+                    b.stack.push((
+                        Container::Table(Table { align, ..Table::default() }, Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+                        Vec::new(),
+                        Vec::new(),
+                    ));
                 }
                 Tag::TableHead | Tag::TableRow => {
                     // A row is still arriving while its line has no newline yet.
                     let open = !src[range.start..].contains('\n');
-                    if let Some((t, _)) = b.table() {
+                    if let Some((t, _, _, _, _)) = b.table() {
                         t.open = open;
                     }
                 }
                 Tag::TableCell => {
                     b.flush_inline();
-                    b.inline = Some((InlineKind::Cell, Inline::default(), Vec::new()));
+                    b.inline = Some((InlineKind::Cell, Inline::default(), Vec::new(), SpanMap::default()));
                 }
                 Tag::Strong => open(&mut b, Style::Strong, None),
                 Tag::Emphasis => open(&mut b, Style::Em, None),
+                Tag::Strikethrough => open(&mut b, Style::Strike, None),
                 Tag::Link { dest_url, .. } => open(&mut b, Style::Link, Some(dest_url.into_string())),
                 _ => {}
             },
             Event::End(tag) => match tag {
                 TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::TableCell => b.flush_inline(),
                 TagEnd::CodeBlock => {
-                    if let Some((text, fence)) = b.code.take() {
-                        b.push_code(text, fence, false);
+                    if let Some((text, fence, map)) = b.code.take() {
+                        b.push_code(text, fence, map, false);
                     }
                 }
                 TagEnd::TableHead => {
                     b.flush_inline();
-                    if let Some((t, cells)) = b.table() {
+                    if let Some((t, cells, head, _, cell_maps)) = b.table() {
                         t.head = std::mem::take(cells);
+                        *head = std::mem::take(cell_maps);
                     }
                 }
                 TagEnd::TableRow => {
                     b.flush_inline();
-                    if let Some((t, cells)) = b.table() {
+                    if let Some((t, cells, _, rows, cell_maps)) = b.table() {
                         t.rows.push(std::mem::take(cells));
+                        rows.push(std::mem::take(cell_maps));
                     }
                 }
                 TagEnd::BlockQuote(_) | TagEnd::Item | TagEnd::List(_) | TagEnd::Table => b.pop_container(),
-                TagEnd::Strong | TagEnd::Emphasis | TagEnd::Link => close(&mut b),
+                TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough | TagEnd::Link => close(&mut b),
                 _ => {}
             },
             Event::Text(t) => {
-                if let Some((code, _)) = &mut b.code {
+                if let Some((code, _, map)) = &mut b.code {
+                    let start = code.len();
                     code.push_str(&t);
+                    map.push(range, start..code.len());
                 } else {
-                    b.inline().1.text.push_str(&t);
+                    let inl = b.inline();
+                    let start = inl.1.text.len();
+                    inl.1.text.push_str(&t);
+                    inl.3.push(range, start..inl.1.text.len());
                 }
             }
             Event::Code(t) => {
-                let inl = &mut b.inline().1;
-                let a = inl.text.len();
-                inl.text.push_str(PAD);
-                let start = inl.text.len();
-                inl.text.push_str(&t);
-                let end = inl.text.len();
-                inl.text.push_str(PAD);
-                inl.spans.push((a, start, Style::CodePad));
-                inl.spans.push((start, end, Style::Code));
-                inl.spans.push((end, inl.text.len(), Style::CodePad));
+                let code_src = code_span_content_range(src, range, &t);
+                let inl = b.inline();
+                let a = inl.1.text.len();
+                inl.1.text.push_str(PAD);
+                let start = inl.1.text.len();
+                inl.1.text.push_str(&t);
+                let end = inl.1.text.len();
+                inl.1.text.push_str(PAD);
+                inl.1.spans.push((a, start, Style::CodePad));
+                inl.1.spans.push((start, end, Style::Code));
+                inl.1.spans.push((end, inl.1.text.len(), Style::CodePad));
+                inl.3.push(code_src, start..end);
             }
-            Event::SoftBreak => b.inline().1.text.push(' '),
-            Event::HardBreak => b.inline().1.text.push('\n'),
+            Event::SoftBreak => {
+                let inl = b.inline();
+                let start = inl.1.text.len();
+                inl.1.text.push(' ');
+                inl.3.push(range, start..inl.1.text.len());
+            }
+            Event::HardBreak => {
+                let inl = b.inline();
+                let start = inl.1.text.len();
+                inl.1.text.push('\n');
+                inl.3.push(range, start..inl.1.text.len());
+            }
             Event::TaskListMarker(checked) => {
-                if let Some(idx) = b.stack.iter().rev().find_map(|(c, _)| match c {
+                if let Some(idx) = b.stack.iter().rev().find_map(|(c, _, _)| match c {
                     Container::Item(idx) => Some(*idx),
                     _ => None,
                 }) {
@@ -429,27 +794,28 @@ fn parse_doc(src: &str) -> (Vec<Block>, Vec<Source>, Vec<Option<(bool, usize)>>,
             }
             Event::Rule => {
                 b.flush_inline();
-                b.push(Block::Rule);
+                b.push(Block::Rule, BlockMap::None);
             }
             _ => {}
         }
     }
     b.flush_inline();
-    if let Some((text, fence)) = b.code.take() {
-        b.push_code(text, fence, true);
+    if let Some((text, fence, map)) = b.code.take() {
+        b.push_code(text, fence, map, true);
     }
     // Unwind containers left open by a partial stream.
     while b.stack.len() > 1 {
         b.pop_container();
     }
     let last_para = b.last_root_para.take();
-    let mut blocks = b.stack.pop().unwrap().1;
+    let (_, mut blocks, mut maps) = b.stack.pop().unwrap();
     if let (Some(Block::Para(_)), Some(range)) = (blocks.last(), last_para)
-        && let Some(t) = pending_table(&src[range.start..])
+        && let Some((t, map)) = pending_table(&src[range.start..], range.start, autolink)
     {
         *blocks.last_mut().unwrap() = Block::Table(t);
+        *maps.last_mut().unwrap() = map;
     }
-    (blocks, b.sources, b.tasks, b.cuts, b.block_starts)
+    (blocks, b.sources, b.tasks, b.cuts, b.block_starts, maps)
 }
 
 fn code_block(text: String, fence: &Fence) -> Block {
@@ -474,20 +840,22 @@ fn fence_closed(block: &str) -> bool {
 
 /// The header (and partial delimiter row) of a table still streaming in, from the source of the
 /// document's last paragraph: `| a | b |` alone, or followed by a delimiter row in progress.
-fn pending_table(src: &str) -> Option<Table> {
+fn pending_table(src: &str, base_offset: usize, autolink: bool) -> Option<(Table, BlockMap)> {
     let mut lines = src.trim_end().lines();
-    let head = lines.next()?.trim();
+    let raw_head = lines.next()?;
+    let lead_ws = raw_head.len() - raw_head.trim_start().len();
+    let head = raw_head.trim();
     let delim = lines.next().map(str::trim);
     if lines.next().is_some() || !head.starts_with('|') {
         return None;
     }
-    let cells = split_row(head);
+    let cells = split_row(head, base_offset + lead_ws);
     if cells.len() < 2 || delim.is_some_and(|d| !d.starts_with('|') || !d.chars().all(|c| "|:- ".contains(c))) {
         return None;
     }
     let mut align = vec![Align::Start; cells.len()];
     if let Some(d) = delim {
-        for (a, spec) in align.iter_mut().zip(split_row(d)) {
+        for (a, (_, spec)) in align.iter_mut().zip(split_row(d, 0)) {
             *a = match (spec.starts_with(':'), spec.len() > 1 && spec.ends_with(':')) {
                 (true, true) => Align::Center,
                 (false, true) => Align::End,
@@ -495,33 +863,59 @@ fn pending_table(src: &str) -> Option<Table> {
             };
         }
     }
-    let head = cells.iter().map(|c| inline_of(c)).collect();
-    Some(Table { align, head, rows: Vec::new(), open: true })
+    let mut head_inlines = Vec::with_capacity(cells.len());
+    let mut head_maps = Vec::with_capacity(cells.len());
+    for (cell_off, c) in &cells {
+        let (inl, map) = inline_of(c, *cell_off, autolink);
+        head_inlines.push(inl);
+        head_maps.push(map);
+    }
+    Some((
+        Table { align, head: head_inlines, rows: Vec::new(), open: true },
+        BlockMap::Table { head: head_maps, rows: Vec::new() },
+    ))
 }
 
 /// The cells of a `| a | b |` line (a trailing pipe is optional; `\|` doesn't split, and stays
-/// escaped for [`inline_of`] to unescape).
-fn split_row(line: &str) -> Vec<String> {
-    let inner = line.strip_prefix('|').unwrap_or(line);
-    let mut cells = vec![String::new()];
-    let mut chars = inner.chars().peekable();
-    while let Some(c) = chars.next() {
+/// escaped for [`inline_of`] to unescape), with each trimmed cell's starting byte offset.
+fn split_row(line: &str, base_offset: usize) -> Vec<(usize, String)> {
+    let pipe_off = usize::from(line.starts_with('|'));
+    let inner = &line[pipe_off..];
+    let mut cells: Vec<(usize, String)> = vec![(base_offset + pipe_off, String::new())];
+    let mut chars = inner.char_indices().peekable();
+    while let Some((idx, c)) = chars.next() {
         match c {
-            '\\' if chars.peek() == Some(&'|') => cells.last_mut().unwrap().extend(['\\', chars.next().unwrap()]),
-            '|' => cells.push(String::new()),
-            c => cells.last_mut().unwrap().push(c),
+            '\\' if chars.peek().is_some_and(|&(_, next)| next == '|') => {
+                cells.last_mut().unwrap().1.extend(['\\', chars.next().unwrap().1]);
+            }
+            '|' => cells.push((base_offset + pipe_off + idx + 1, String::new())),
+            c => cells.last_mut().unwrap().1.push(c),
         }
     }
-    if cells.last().is_some_and(|c| c.trim().is_empty()) && inner.trim_end().ends_with('|') {
+    if cells.last().is_some_and(|(_, c)| c.trim().is_empty()) && inner.trim_end().ends_with('|') {
         cells.pop();
     }
-    cells.into_iter().map(|c| c.trim().to_owned()).collect()
+    cells
+        .into_iter()
+        .map(|(off, c)| {
+            let lead = c.len() - c.trim_start().len();
+            (off + lead, c.trim().to_owned())
+        })
+        .collect()
 }
 
-fn inline_of(src: &str) -> Inline {
-    match parse(src).into_iter().next() {
-        Some(Block::Para(i)) => i,
-        _ => Inline { text: src.to_owned(), ..Inline::default() },
+fn inline_of(src: &str, offset: usize, autolink: bool) -> (Inline, SpanMap) {
+    let (blocks, _, _, _, _, maps) = parse_doc(src, autolink);
+    match (blocks.into_iter().next(), maps.into_iter().next()) {
+        (Some(Block::Para(i)), Some(BlockMap::Inline(mut m))) => {
+            m.shift_src(offset);
+            (i, m)
+        }
+        _ => {
+            let mut m = SpanMap::default();
+            m.push(offset..offset + src.len(), 0..src.len());
+            (Inline { text: src.to_owned(), ..Inline::default() }, m)
+        }
     }
 }
 
@@ -532,7 +926,7 @@ fn open(b: &mut Builder, style: Style, url: Option<String>) {
 }
 
 fn close(b: &mut Builder) {
-    let (_, inl, open) = b.inline();
+    let (_, inl, open, _) = b.inline();
     if let Some(o) = open.pop() {
         end_run(inl, o);
     }
@@ -549,7 +943,7 @@ fn end_run(inl: &mut Inline, o: Open) {
 /// Estimated bytes of parsed documents kept beyond those on screen (see [`budget`]).
 const CACHE_BYTES: usize = 16 << 20;
 
-type Doc = (Rc<Vec<Block>>, Rc<[Source]>, Rc<[Option<(bool, usize)>]>, Rc<[usize]>);
+type Doc = (Rc<Vec<Block>>, Rc<[Source]>, Rc<[Option<(bool, usize)>]>, Rc<[usize]>, Rc<[BlockMap]>);
 
 #[derive(Clone)]
 struct Parsed {
@@ -588,8 +982,8 @@ fn doc_cached(src: &str) -> Doc {
         let parsed = grown.as_ref().and_then(|last| extend(c.docs.peek(&**last)?, last.len(), src)).unwrap_or_else(|| {
             #[cfg(test)]
             PARSES.with(|p| p.set((p.get().0 + 1, p.get().1)));
-            let (blocks, sources, tasks, cuts, starts) = parse_doc(src);
-            Parsed { doc: (Rc::new(blocks), sources.into(), tasks.into(), starts.into()), cuts: cuts.into() }
+            let (blocks, sources, tasks, cuts, starts, maps) = parse_doc(src, true);
+            Parsed { doc: (Rc::new(blocks), sources.into(), tasks.into(), starts.into(), maps.into()), cuts: cuts.into() }
         });
         // A stream's earlier string is dead once it grows, unless something drew it this
         // commit; left in, a long stream would fill the budget with its prefixes.
@@ -621,13 +1015,15 @@ fn extend(base: &Parsed, base_len: usize, src: &str) -> Option<Parsed> {
     }
     #[cfg(test)]
     PARSES.with(|p| p.set((p.get().0, p.get().1 + 1)));
-    let (tail, sources, tasks, cuts, starts) = parse_doc(&src[cut.at..]);
+    let (tail, sources, tasks, cuts, starts, maps) = parse_doc(&src[cut.at..], true);
     let mut blocks = base.doc.0[..cut.blocks].to_vec();
     blocks.extend(tail);
     let sources: Rc<[Source]> = base.doc.1[..cut.sources].iter().cloned().chain(sources).collect();
     let tasks = base.doc.2[..cut.tasks].iter().copied()
         .chain(tasks.into_iter().map(|t| t.map(|(checked, at)| (checked, at + cut.at)))).collect();
     let starts = base.doc.3[..cut.blocks].iter().copied().chain(starts.into_iter().map(|at| at + cut.at)).collect();
+    let maps = base.doc.4[..cut.blocks].iter().cloned()
+        .chain(maps.into_iter().map(|m| m.shift_src(cut.at))).collect();
     let cuts = base.cuts[..i]
         .iter()
         .copied()
@@ -638,7 +1034,7 @@ fn extend(base: &Parsed, base_len: usize, src: &str) -> Option<Parsed> {
             tasks: c.tasks + cut.tasks,
         }))
         .collect();
-    Some(Parsed { doc: (Rc::new(blocks), sources, tasks, starts), cuts })
+    Some(Parsed { doc: (Rc::new(blocks), sources, tasks, starts, maps), cuts })
 }
 
 /// How markdown looks. [`MarkdownStyle::from_kit`] takes every colour and font from the kit's
@@ -681,6 +1077,12 @@ pub struct MarkdownStyle {
     syntax: SyntaxTheme,
     highlight: bool,
     selection: Color,
+    highlight_bg: Color,
+    highlight_fg: Option<Color>,
+    highlight_ring: Option<(Color, f32)>,
+    highlight_current_bg: Color,
+    highlight_current_fg: Option<Color>,
+    highlight_current_ring: Option<(Color, f32)>,
     task: TaskPaint,
     pub(crate) diagram: DiagramPaint,
 }
@@ -762,6 +1164,12 @@ impl MarkdownStyle {
             syntax: SyntaxTheme::from_kit(k),
             highlight: true,
             selection: k.selection(),
+            highlight_bg: if k.dark { k.alpha(c.warning.icon, 0.24) } else { rune::oklcha(0.86, 0.15, 85.0, 0.42) },
+            highlight_fg: None,
+            highlight_ring: None,
+            highlight_current_bg: if k.dark { k.alpha(c.warning.icon, 0.40) } else { rune::oklcha(0.82, 0.17, 75.0, 0.58) },
+            highlight_current_fg: None,
+            highlight_current_ring: Some((if k.dark { c.warning.icon } else { rune::oklch(0.66, 0.16, 70.0) }, 1.0)),
             task: TaskPaint {
                 fill_on: c.surface_weak,
                 border_on: c.std_border,
@@ -1006,6 +1414,120 @@ impl MarkdownStyle {
         self.diagram.max_width = points.max(120.0);
         self
     }
+    /// Background fill of standard [`Markdown::highlights`] matches.
+    pub fn highlight_bg(mut self, c: Color) -> Self {
+        self.highlight_bg = c;
+        self
+    }
+    /// Optional glyph foreground colour of standard [`Markdown::highlights`] matches.
+    pub fn highlight_fg(mut self, c: Option<Color>) -> Self {
+        self.highlight_fg = c;
+        self
+    }
+    /// Optional inset border ring `(color, width_pt)` of standard [`Markdown::highlights`] matches.
+    pub fn highlight_ring(mut self, ring: Option<(Color, f32)>) -> Self {
+        self.highlight_ring = ring;
+        self
+    }
+    /// Background fill of [`Highlight::current`] matches.
+    pub fn highlight_current_bg(mut self, c: Color) -> Self {
+        self.highlight_current_bg = c;
+        self
+    }
+    /// Optional glyph foreground colour of [`Highlight::current`] matches.
+    pub fn highlight_current_fg(mut self, c: Option<Color>) -> Self {
+        self.highlight_current_fg = c;
+        self
+    }
+    /// Optional inset border ring `(color, width_pt)` of [`Highlight::current`] matches.
+    pub fn highlight_current_ring(mut self, ring: Option<(Color, f32)>) -> Self {
+        self.highlight_current_ring = ring;
+        self
+    }
+}
+
+/// How a source byte range in [`Markdown::highlights`] is painted.
+///
+/// [`Highlight::default()`] (or [`Highlight::new()`]) draws a standard match background from
+/// [`MarkdownStyle`]; [`Highlight::current()`] draws the active match with a stronger background
+/// and an inset border ring. Either may be customized with [`Highlight::bg`], [`Highlight::fg`],
+/// [`Highlight::ring`] and [`Highlight::key`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Highlight {
+    pub(crate) current: bool,
+    pub(crate) bg: Option<Color>,
+    pub(crate) fg: Option<Color>,
+    pub(crate) ring: Option<(Color, f32)>,
+    pub(crate) key: Option<String>,
+}
+
+impl Highlight {
+    /// A standard match highlight using the theme's [`MarkdownStyle::highlight_bg`].
+    pub fn new() -> Highlight {
+        Highlight::default()
+    }
+    /// An active/current match highlight using the theme's [`MarkdownStyle::highlight_current_bg`]
+    /// and [`MarkdownStyle::highlight_current_ring`].
+    pub fn current() -> Highlight {
+        Highlight { current: true, ..Highlight::default() }
+    }
+    /// Alias for [`Highlight::current`].
+    pub fn active() -> Highlight {
+        Highlight::current()
+    }
+    /// Sets whether this highlight uses the active/current match style.
+    pub fn current_match(mut self, current: bool) -> Self {
+        self.current = current;
+        self
+    }
+    /// Whether this highlight uses the active/current match style.
+    pub fn is_current(&self) -> bool {
+        self.current
+    }
+    /// Overrides the rounded background colour behind the highlighted glyphs.
+    pub fn bg(mut self, c: Color) -> Self {
+        self.bg = Some(c);
+        self
+    }
+    /// Overrides the glyph foreground colour over the highlighted range.
+    pub fn fg(mut self, c: Color) -> Self {
+        self.fg = Some(c);
+        self
+    }
+    /// Alias for [`Highlight::fg`].
+    pub fn color(self, c: Color) -> Self {
+        self.fg(c)
+    }
+    /// Overrides the inset border ring `(color, width_pt)` inside the rounded background.
+    pub fn ring(mut self, color: Color, width: f32) -> Self {
+        self.ring = (width > 0.0 && width.is_finite()).then_some((color, width));
+        self
+    }
+    /// Sets a key for [`Tx::scroll_into_view`](rune::Tx::scroll_into_view),
+    /// [`Cx::layout`](rune::Cx::layout) and [`Runtime::find`](rune::Runtime::find). When unset,
+    /// the highlight is reachable under [`Markdown::highlight_key`]`(index)`.
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+}
+
+/// An item accepted by [`Markdown::highlights`]: either `(Range<usize>, Highlight)` by value or
+/// `&(Range<usize>, Highlight)` from a slice.
+pub trait HighlightItem {
+    fn into_highlight(self) -> (Range<usize>, Highlight);
+}
+
+impl HighlightItem for (Range<usize>, Highlight) {
+    fn into_highlight(self) -> (Range<usize>, Highlight) {
+        self
+    }
+}
+
+impl HighlightItem for &(Range<usize>, Highlight) {
+    fn into_highlight(self) -> (Range<usize>, Highlight) {
+        self.clone()
+    }
 }
 
 type LinkWire = Rc<dyn Fn(El) -> El>;
@@ -1018,6 +1540,8 @@ pub struct Markdown {
     src: String,
     style: Option<MarkdownStyle>,
     block_keys: Vec<(usize, String)>,
+    highlights: Vec<(Range<usize>, Highlight)>,
+    autolink: bool,
     reveal: f32,
     streaming: bool,
     on_link: Option<LinkWire>,
@@ -1032,8 +1556,31 @@ pub struct Markdown {
 
 impl Markdown {
     pub fn new(src: impl Into<String>) -> Markdown {
-        Markdown { src: src.into(), style: None, block_keys: Vec::new(), reveal: 0.0, streaming: false, on_link: None, link_look: None, link_ring: None,
+        Markdown { src: src.into(), style: None, block_keys: Vec::new(), highlights: Vec::new(), autolink: true, reveal: 0.0, streaming: false, on_link: None, link_look: None, link_ring: None,
             on_task: None, tasks_read_only: false, selectable: false, scroll_wide: false, highlighter: Highlighter::builtin() }
+    }
+    /// Highlight UTF-8 byte ranges of the Markdown source string.
+    ///
+    /// Ranges refer to the source passed to [`Markdown::new`] (as `pulldown_cmark`'s offset
+    /// iterator reports them) and map across inline formatting, code blocks, headings, lists,
+    /// blockquotes and tables without reshaping text or shifting layout. Each highlight is
+    /// reachable by [`Tx::scroll_into_view`](rune::Tx::scroll_into_view) and
+    /// [`Cx::layout`](rune::Cx::layout) under its [`Highlight::key`], or under
+    /// [`Markdown::highlight_key`]`(i)` when no key was set on it.
+    pub fn highlights(mut self, highlights: impl IntoIterator<Item = impl HighlightItem>) -> Self {
+        self.highlights = highlights.into_iter().map(HighlightItem::into_highlight).collect();
+        self
+    }
+    /// Default key (`"md-mark-{index}"`) for the `index`-th highlight in [`Self::highlights`]
+    /// when [`Highlight::key`] was not set on it.
+    pub fn highlight_key(index: usize) -> String {
+        format!("md-mark-{index}")
+    }
+    /// Whether bare `https://…`, `http://…` and `www.…` URLs in plain text are autolinked
+    /// (`true` by default).
+    pub fn autolink(mut self, on: bool) -> Self {
+        self.autolink = on;
+        self
     }
     /// Stable keys as `(source_byte_offset, key)` pairs. The offset is the start of the first
     /// source line of a rendered top-level block (including any indentation), not its ordinal.
@@ -1178,21 +1725,27 @@ impl Markdown {
     /// Builds with `style`, for apps without a [`Kit`] (see [`MarkdownStyle::neutral`] and
     /// [`MarkdownStyle::from_seed`]).
     pub fn render(self, style: &MarkdownStyle) -> El {
-        let (blocks, sources, tasks, starts) = doc_cached(&self.src);
+        let (blocks, sources, tasks, starts, maps) = if self.autolink {
+            doc_cached(&self.src)
+        } else {
+            let (b, s, t, _, st, m) = parse_doc(&self.src, false);
+            (Rc::new(b), s.into(), t.into(), st.into(), m.into())
+        };
         let keys = if self.block_keys.is_empty() { Vec::new() } else {
             starts.iter().map(|at| self.block_keys.iter().find(|(offset, _)| offset == at)
                 .map_or_else(String::new, |(_, key)| key.clone())).collect::<Vec<_>>()
         };
-        let r = Renderer { s: style.clone(), reveal: self.reveal, streaming: self.streaming, on_link: self.on_link, link_look: self.link_look, link_ring: self.link_ring,
+        let r = Renderer { s: style.clone(), highlights: self.highlights, reveal: self.reveal, streaming: self.streaming, on_link: self.on_link, link_look: self.link_look, link_ring: self.link_ring,
             on_task: self.on_task, tasks_read_only: self.tasks_read_only, selectable: self.selectable, scroll_wide: self.scroll_wide,
             highlighter: self.highlighter, sources, next_source: Cell::new(0), tasks, next_task: Cell::new(0),
             current_block_key: RefCell::new("b0".into()) };
-        r.blocks(&blocks, &keys, true).selection_group(self.selectable)
+        r.blocks(&blocks, &maps, &keys, true).selection_group(self.selectable)
     }
 }
 
 struct Renderer {
     s: MarkdownStyle,
+    highlights: Vec<(Range<usize>, Highlight)>,
     reveal: f32,
     streaming: bool,
     on_link: Option<LinkWire>,
@@ -1246,13 +1799,13 @@ fn margins(b: &Block) -> (f32, f32) {
     }
 }
 
-/// Code as rich text with `spans` (byte ranges of `code`). Text layout widens tabs in a
-/// monospace `style` to four-column stops itself; in any other family it draws a tab as one
-/// space, so each tab is padded with uncopied spaces to the next stop: lines line up and a copy
-/// still gets the tab.
-fn tabbed(code: &str, mut spans: Vec<Span>, style: TextStyle) -> El {
+/// Code as rich text with `spans` and `highlights` (byte ranges of `code`). Text layout widens
+/// tabs in a monospace `style` to four-column stops itself; in any other family it draws a tab
+/// as one space, so each tab is padded with uncopied spaces to the next stop: lines line up and a
+/// copy still gets the tab.
+fn tabbed(code: &str, mut spans: Vec<Span>, mut highlights: Vec<TextHighlight>, style: TextStyle) -> El {
     if !code.contains('\t') || matches!(style.family, Family::Mono | Family::SystemMono) {
-        return rich(code.to_owned(), spans);
+        return rich(code.to_owned(), spans).text_highlights(highlights);
     }
     let mut shown = String::with_capacity(code.len() + code.len() / 8);
     // (source byte, shown byte, pad, padding so far including this tab's)
@@ -1278,7 +1831,11 @@ fn tabbed(code: &str, mut spans: Vec<Span>, style: TextStyle) -> El {
     for sp in &mut spans {
         (sp.start, sp.end) = (shift(sp.start), shift(sp.end));
     }
-    tabs.iter().fold(rich(shown, spans), |el, t| el.uncopied(t.1 + 1..t.1 + 1 + t.2))
+    for hl in &mut highlights {
+        let r = hl.range();
+        *hl = hl.clone().with_range(shift(r.start as u32) as usize..shift(r.end as u32) as usize);
+    }
+    tabs.iter().fold(rich(shown, spans).text_highlights(highlights), |el, t| el.uncopied(t.1 + 1..t.1 + 1 + t.2))
 }
 
 impl Renderer {
@@ -1309,6 +1866,9 @@ impl Renderer {
                 out.insert(at, sp);
                 continue;
             }
+            if matches!(st, Style::Strike) {
+                continue;
+            }
             let in_link = links.iter().find(|l| l.start <= a as u32 && b as u32 <= l.end);
             let mut sp = Span::new(a, b);
             match st {
@@ -1328,9 +1888,37 @@ impl Renderer {
                 }
                 Style::Strong => sp.weight = Some(s.strong_weight),
                 Style::Em => sp.italic = true,
-                Style::Link => unreachable!(),
+                Style::Strike | Style::Link => unreachable!(),
             }
             out.push(sp);
+        }
+        out
+    }
+
+    /// Resolves `hl` against [`MarkdownStyle`] into a [`TextHighlight`] for `range`.
+    fn make_text_highlight(&self, idx: usize, range: Range<usize>, hl: &Highlight) -> TextHighlight {
+        let s = &self.s;
+        let bg = hl.bg.unwrap_or(if hl.current { s.highlight_current_bg } else { s.highlight_bg });
+        let fg = hl.fg.or(if hl.current { s.highlight_current_fg } else { s.highlight_fg });
+        let ring = hl.ring.or(if hl.current { s.highlight_current_ring } else { s.highlight_ring });
+        let key = hl.key.clone().unwrap_or_else(|| Markdown::highlight_key(idx));
+        let mut th = TextHighlight::new(range, bg).key(key);
+        if let Some(c) = fg {
+            th = th.color(c);
+        }
+        if let Some((rc, rw)) = ring {
+            th = th.ring(rc, rw);
+        }
+        th
+    }
+
+    fn text_highlights_for(&self, text: &str, map: Option<&SpanMap>) -> Vec<TextHighlight> {
+        let Some(map) = map.filter(|_| !self.highlights.is_empty()) else { return Vec::new() };
+        let mut out = Vec::new();
+        for (idx, (src_range, hl)) in self.highlights.iter().enumerate() {
+            for r in map.map_range(src_range.clone(), text) {
+                out.push(self.make_text_highlight(idx, r, hl));
+            }
         }
         out
     }
@@ -1357,22 +1945,30 @@ impl Renderer {
         if self.selectable { e.selectable(true).selection_color(self.s.selection) } else { e }
     }
 
-    /// `e`, the text of `inl`, with its links and selectable, copying without inline code's padding.
-    fn select_inline(&self, e: El, inl: &Inline) -> El {
+    /// `e`, the text of `inl`, with its strikethroughs, highlights, links and selectable, copying
+    /// without inline code's padding.
+    pub(super) fn select_inline(&self, mut e: El, inl: &Inline, map: Option<&SpanMap>) -> El {
+        for &(a, b, st) in &inl.spans {
+            if matches!(st, Style::Strike) {
+                e = e.strike(a, b, None);
+            }
+        }
+        e = e.text_highlights(self.text_highlights_for(&inl.text, map));
         let e = self.select(self.wire_link(e, inl));
         if !self.selectable { return e; }
         inl.spans.iter().filter(|s| matches!(s.2, Style::CodePad)).fold(e, |e, s| e.uncopied(s.0..s.1))
     }
 
-    fn para(&self, inl: &Inline, style: TextStyle, color: Color) -> El {
+    fn para(&self, inl: &Inline, map: Option<&SpanMap>, style: TextStyle, color: Color) -> El {
         let e = rich(inl.text.clone(), self.spans(inl, style.size)).font(style).color(color).reveal(self.reveal).w_full();
-        self.select_inline(e, inl)
+        self.select_inline(e, inl, map)
     }
 
-    fn blocks(&self, blocks: &[Block], keys: &[String], top_level: bool) -> El {
+    fn blocks(&self, blocks: &[Block], maps: &[BlockMap], keys: &[String], top_level: bool) -> El {
         let mut c = col().w_full();
         let mut prev_mb = 0.0f32;
         let mut used: Vec<String> = Vec::new();
+        let empty = BlockMap::None;
         for (i, b) in blocks.iter().enumerate() {
             let (mt, mb) = margins(b);
             let top = if i == 0 { 0.0 } else { mt.max(prev_mb) };
@@ -1380,15 +1976,16 @@ impl Renderer {
             if top_level {
                 self.current_block_key.replace(key.clone().into());
             }
-            c = c.child(self.block(b).key(key).mt(top));
+            c = c.child(self.block(b, maps.get(i).unwrap_or(&empty)).key(key).mt(top));
             prev_mb = mb;
         }
         c
     }
 
-    fn code(&self, code: &str, source: Option<&Source>) -> El {
+    fn code(&self, code: &str, source: Option<&Source>, map: Option<&SpanMap>) -> El {
         let s = &self.s;
-        let body = tabbed(code, self.syntax_spans(code, source), s.code_block).font(s.code_block).color(s.text).reveal(self.reveal);
+        let highlights = self.text_highlights_for(code, map);
+        let body = tabbed(code, self.syntax_spans(code, source), highlights, s.code_block).font(s.code_block).color(s.text).reveal(self.reveal);
         let frame = col().w_full().radius(6.0).fill(s.code_block_fill).border(0.5, s.code_block_border);
         if self.scroll_wide {
             // The text sizes to its longest line inside the viewport, which scrolls under the
@@ -1413,10 +2010,23 @@ impl Renderer {
     }
 
     /// One row per line, so added and removed lines are tinted edge to edge.
-    fn diff(&self, src: &str) -> El {
+    fn diff(&self, src: &str, map: Option<&SpanMap>) -> El {
         let s = &self.s;
+        let all_hl = self.text_highlights_for(src, map);
         let mut c = col().w_full().py(12.0).radius(6.0).fill(s.code_block_fill).border(0.5, s.code_block_border);
+        let mut line_start = 0usize;
         for (n, line) in src.split('\n').enumerate() {
+            let line_end = line_start + line.len();
+            let line_hl: Vec<TextHighlight> = all_hl
+                .iter()
+                .filter_map(|h| {
+                    let r = h.range();
+                    let a = r.start.max(line_start);
+                    let b = r.end.min(line_end);
+                    (a < b).then(|| h.clone().with_range((a - line_start)..(b - line_start)))
+                })
+                .collect();
+            line_start = line_end + 1;
             let header = ["@@", "diff ", "index ", "--- ", "+++ "].iter().any(|p| line.starts_with(p));
             let (tint, color) = match line.as_bytes().first() {
                 _ if header => (None, s.diff_hunk),
@@ -1429,7 +2039,7 @@ impl Renderer {
                 .key(format!("l{n}"))
                 .w_full()
                 .px(12.0)
-                .child(self.select(tabbed(shown, Vec::new(), s.code_block).font(s.code_block).color(color).wrap().reveal(self.reveal).w_full()));
+                .child(self.select(tabbed(shown, Vec::new(), line_hl, s.code_block).font(s.code_block).color(color).wrap().reveal(self.reveal).w_full()));
             if let Some(t) = tint {
                 r = r.fill(t);
             }
@@ -1439,7 +2049,7 @@ impl Renderer {
     }
 
     #[cfg_attr(not(feature = "mermaid"), allow(clippy::unused_self))]
-    fn mermaid(&self, src: &str) -> El {
+    fn mermaid(&self, src: &str, map: Option<&SpanMap>) -> El {
         #[cfg(feature = "mermaid")]
         {
             match crate::mermaid::diagram(src, &self.s.diagram) {
@@ -1447,15 +2057,15 @@ impl Renderer {
                 None => col()
                     .w_full()
                     .gap(6.0)
-                    .child(self.code(src, None).key("source"))
+                    .child(self.code(src, None, map).key("source"))
                     .child(text("Diagram not supported").font(TextStyle { size: 12.0, line_height: 16.0, ..self.s.body }).color(self.s.muted).key("hint")),
             }
         }
         #[cfg(not(feature = "mermaid"))]
-        self.code(src, None)
+        self.code(src, None, map)
     }
 
-    fn task_item(&self, k: usize, item: &[Block], item_idx: usize, checked: bool) -> El {
+    fn task_item(&self, k: usize, item: &[Block], item_maps: &[BlockMap], item_idx: usize, checked: bool) -> El {
         let t = &self.s.task;
         let interactive = self.on_task.is_some() && !self.tasks_read_only;
         let (fill, border) = if checked {
@@ -1487,7 +2097,7 @@ impl Renderer {
             .focusable(interactive)
             .w_full()
             .child(control)
-            .child(self.blocks(item, &[], false).grow(1.0).shrink());
+            .child(self.blocks(item, item_maps, &[], false).grow(1.0).shrink());
         if let Some(on_task) = self.on_task.as_ref().filter(|_| !self.tasks_read_only) {
             let block_key = self.current_block_key.borrow().clone();
             r = on_task(r.cursor(Cursor::Pointer), block_key, item_idx, !checked);
@@ -1495,28 +2105,47 @@ impl Renderer {
         r
     }
 
-    fn block(&self, b: &Block) -> El {
+    fn block(&self, b: &Block, map: &BlockMap) -> El {
         let s = &self.s;
+        let inl_map = match map {
+            BlockMap::Inline(m) => Some(m),
+            _ => None,
+        };
+        let code_map = match map {
+            BlockMap::Code(m) => Some(m),
+            _ => None,
+        };
         match b {
-            Block::Para(inl) => self.para(inl, s.body, s.text),
+            Block::Para(inl) => self.para(inl, inl_map, s.body, s.text),
             Block::Heading(l, inl) => {
-                self.para(inl, s.headings[(*l as usize - 1).min(2)], if *l >= 4 { s.muted } else { s.text })
+                self.para(inl, inl_map, s.headings[(*l as usize - 1).min(2)], if *l >= 4 { s.muted } else { s.text })
             }
             Block::Code(code) => {
                 let n = self.next_source.get();
                 self.next_source.set(n + 1);
-                self.code(code, self.sources.get(n).filter(|src| src.len == code.len()))
+                self.code(code, self.sources.get(n).filter(|src| src.len == code.len()), code_map)
             }
-            Block::Diff(src) => self.diff(src),
-            Block::Mermaid(src) => self.mermaid(src),
-            Block::Table(t) => self.table(t),
+            Block::Diff(src) => self.diff(src, code_map),
+            Block::Mermaid(src) => self.mermaid(src, code_map),
+            Block::Table(t) => {
+                let (head_maps, row_maps) = match map {
+                    BlockMap::Table { head, rows } => (head.as_slice(), rows.as_slice()),
+                    _ => (&[][..], &[][..]),
+                };
+                self.table(t, head_maps, row_maps)
+            }
             Block::List { start, items } => {
+                let item_maps = match map {
+                    BlockMap::List(m) => m.as_slice(),
+                    _ => &[][..],
+                };
                 let mut c = col().w_full().gap(4.0);
                 for (k, item) in items.iter().enumerate() {
+                    let imap = item_maps.get(k).map_or(&[][..], Vec::as_slice);
                     let task_idx = self.next_task.get();
                     self.next_task.set(task_idx + 1);
                     if let Some((checked, marker_offset)) = self.tasks.get(task_idx).copied().flatten() {
-                        c = c.child(self.task_item(k, item, marker_offset, checked));
+                        c = c.child(self.task_item(k, item, imap, marker_offset, checked));
                         continue;
                     }
                     let marker = match start {
@@ -1530,15 +2159,21 @@ impl Renderer {
                             .child(
                                 text(marker).font(s.body).color(s.muted).w(32.0).align(Align::Center).reveal(self.reveal),
                             )
-                            .child(self.blocks(item, &[], false).grow(1.0).shrink()),
+                            .child(self.blocks(item, imap, &[], false).grow(1.0).shrink()),
                     );
                 }
                 c
             }
-            Block::Quote(inner) => row()
-                .w_full()
-                .child(el().w(2.0).h_full().radius(1.0).fill(s.quote_rule))
-                .child(self.blocks(inner, &[], false).grow(1.0).shrink().pl(12.0)),
+            Block::Quote(inner) => {
+                let inner_maps = match map {
+                    BlockMap::Quote(m) => m.as_slice(),
+                    _ => &[][..],
+                };
+                row()
+                    .w_full()
+                    .child(el().w(2.0).h_full().radius(1.0).fill(s.quote_rule))
+                    .child(self.blocks(inner, inner_maps, &[], false).grow(1.0).shrink().pl(12.0))
+            }
             Block::Rule => el().w_full().h(0.5).fill(s.rule),
         }
     }
@@ -1590,8 +2225,8 @@ mod tests {
                 }
             }
         }
-        let (blocks, sources, tasks, _) = doc_cached(src);
-        let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, link_look: None, link_ring: None, on_task: None,
+        let (blocks, sources, tasks, _, _) = doc_cached(src);
+        let r = Renderer { s: style.clone(), highlights: Vec::new(), reveal: 0.0, streaming: false, on_link: None, link_look: None, link_ring: None, on_task: None,
             tasks_read_only: false, selectable: false, scroll_wide: false, highlighter, sources: sources.clone(),
             next_source: Cell::new(0), tasks, next_task: Cell::new(0), current_block_key: RefCell::new("b0".into()) };
         let mut found = Vec::new();
@@ -1777,12 +2412,13 @@ mod tests {
             let before = parses();
             for end in (1..=doc.len()).filter(|&i| doc.is_char_boundary(i)) {
                 let src = &doc[..end];
-                let (blocks, sources, tasks, starts) = doc_cached(src);
-                let (want, want_sources, want_tasks, want_cuts, want_starts) = parse_doc(src);
+                let (blocks, sources, tasks, starts, maps) = doc_cached(src);
+                let (want, want_sources, want_tasks, want_cuts, want_starts, want_maps) = parse_doc(src, true);
                 assert_eq!(*blocks, want, "blocks of {src:?}");
                 assert_eq!(&*sources, &want_sources[..], "sources of {src:?}");
                 assert_eq!(&*tasks, &want_tasks[..], "tasks of {src:?}");
                 assert_eq!(&*starts, &want_starts[..], "block starts of {src:?}");
+                assert_eq!(&*maps, &want_maps[..], "maps of {src:?}");
                 let cuts = CACHE.with_borrow(|c| c.docs.peek(src).unwrap().cuts.clone());
                 assert_eq!(&*cuts, &want_cuts[..], "cuts of {src:?}");
             }
@@ -1840,9 +2476,9 @@ mod tests {
         let look: LinkLook = Rc::new(move |url| {
             url.starts_with("session:").then(|| (Span::new(0, 0).color(Color::WHITE).weight(500.0).bg(bg, 3.0), LinkPaint::new()))
         });
-        let (blocks, sources, tasks, _) = doc_cached("[**bold** *em* `code` plain](session:1)");
+        let (blocks, sources, tasks, _, _) = doc_cached("[**bold** *em* `code` plain](session:1)");
         let Block::Para(inl) = &blocks[0] else { panic!() };
-        let r = Renderer { s: style.clone(), reveal: 0.0, streaming: false, on_link: None, link_look: Some(look), link_ring: None, on_task: None,
+        let r = Renderer { s: style.clone(), highlights: Vec::new(), reveal: 0.0, streaming: false, on_link: None, link_look: Some(look), link_ring: None, on_task: None,
             tasks_read_only: false, selectable: false, scroll_wide: false, highlighter: Highlighter::builtin(), sources,
             next_source: Cell::new(0), tasks, next_task: Cell::new(0), current_block_key: RefCell::new("b0".into()) };
         let spans = r.spans(inl, style.body.size);

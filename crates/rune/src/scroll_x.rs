@@ -258,13 +258,17 @@ impl<S: 'static> Runtime<S> {
     /// `Tx::scroll_into_view` on x: scrolls the nearest horizontal viewport around row `key`
     /// just far enough to show it, leaving its `El::scroll_margin`.
     pub(super) fn reveal_row_x(&mut self, scope: Option<&str>, key: &str) {
-        let Some(i) = self.nodes.iter().position(|n| {
+        let target = self.nodes.iter().position(|n| {
             n.named(key) && n.parent.is_none_or(|p| super::in_scope(&self.nodes[p].path, scope))
-        }) else { return };
+        }).map(|i| (i, self.nodes[i].target[0], self.nodes[i].local.w)).or_else(|| {
+            let (i, [x0, _, x1, _]) = self.highlight_target_in(&self.nodes, scope, key)?;
+            Some((i, x0, (x1 - x0).max(0.0)))
+        });
+        let Some((i, target_x, target_w)) = target else { return };
         let Some(v) = std::iter::successors(self.nodes[i].parent, |&p| self.nodes[p].parent)
             .find(|&p| self.nodes[p].scroll.is_some() && self.nodes[p].scroll_axes.x()) else { return };
-        let (row, view) = (&self.nodes[i], &self.nodes[v]);
-        let (left, width, viewport) = (f64::from(row.target[0] - view.target[0]), f64::from(row.local.w), f64::from(view.local.w));
+        let view = &self.nodes[v];
+        let (left, width, viewport) = (f64::from(target_x - view.target[0]), f64::from(target_w), f64::from(view.local.w));
         let (margin, id) = (f64::from(view.scroll_edges.margin), view.id);
         // A vertical reveal may have just mounted rows (virtual ones) that widened the content.
         let max = self.scroll_overflow_x(v).max(0.0);

@@ -3053,6 +3053,15 @@ impl<S: 'static> Runtime<S> {
                     (a, b).hash(&mut h);
                     floats(&mut h, &[c.r, c.g, c.b, c.a, w]);
                 }
+                for &(a, b, c) in &t.strikes {
+                    (a, b, c).hash(&mut h);
+                }
+                for hl in &t.highlights {
+                    (hl.start, hl.end, hl.bg, hl.fg, hl.pad.to_bits(), &hl.key).hash(&mut h);
+                    if let Some((rc, rw)) = hl.ring {
+                        (rc, rw.to_bits()).hash(&mut h);
+                    }
+                }
             }
         }
         h.finish()
@@ -5671,13 +5680,19 @@ impl<S: 'static> Runtime<S> {
     /// One placement of [`Self::reveal_row`]: whether it committed. After the first, it moves
     /// only when the row would land somewhere else.
     fn reveal_row_once(&mut self, scope: Option<&str>, key: &str, first: bool) -> bool {
-        let geometry = self.nodes.iter().enumerate().find_map(|(i, row)| {
+        let target_node = self.nodes.iter().enumerate().find_map(|(i, row)| {
             if !row.named(key) || self.subtree_exiting(i) || !row.parent.is_none_or(|p| in_scope(&self.nodes[p].path, scope)) {
                 return None;
             }
+            Some((i, row.target[1], row.local.h, true))
+        }).or_else(|| {
+            let (i, [_, y0, _, y1]) = self.highlight_target_in(&self.nodes, scope, key)?;
+            (!self.subtree_exiting(i)).then_some((i, y0, (y1 - y0).max(0.0), false))
+        });
+        let geometry = target_node.and_then(|(i, target_top, target_h, is_whole_node)| {
             let s = self.viewport_of(i)?;
             let parent = &self.nodes[s];
-            let (laid_top, laid_h) = (row.target[1] - parent.target[1], row.local.h);
+            let (laid_top, laid_h) = (target_top - parent.target[1], target_h);
             let (top, height) = std::iter::successors(Some(i), |&p| self.nodes[p].parent)
                 .take_while(|&p| p != s)
                 .find_map(|r| {
@@ -5693,11 +5708,11 @@ impl<S: 'static> Runtime<S> {
                         .sum::<f32>() + stack.gap * count as f32;
                     let r_top = (self.nodes[c].target[1] - parent.target[1]) + stack.pad_top + before_r;
                     let r_h = self.grows.get(&rid).map_or(self.nodes[r].local.h, |g| g.h);
-                    if i == r {
+                    if i == r && is_whole_node {
                         Some((r_top, r_h))
                     } else {
-                        let in_row = row.target[1] - self.nodes[r].target[1];
-                        Some((r_top + in_row, row.local.h))
+                        let in_row = target_top - self.nodes[r].target[1];
+                        Some((r_top + in_row, target_h))
                     }
                 })
                 .unwrap_or((laid_top, laid_h));
@@ -7255,12 +7270,21 @@ impl<S: 'static> Runtime<S> {
                         Some(e) => self.text.decorations_with_rings(layout, &e.spans(&spec.spans), &e.rings(&spec.rings), s, origin, &mut self.deco_scratch),
                         None => self.text.decorations_with_rings(layout, &spec.spans, &spec.rings, s, origin, &mut self.deco_scratch),
                     }
-                    if !spec.strikes.is_empty() {
-                        self.text.strike_decorations(layout, &spec.spans, &spec.strikes, color, s, origin, &mut self.deco_scratch);
-                    }
                     let drawn_len = n.elided.map_or(spec.content.len(), |e| e.drawn_len(spec.content.len()));
+                    if !spec.highlights.is_empty() {
+                        match n.elided {
+                            Some(e) => self.text.highlight_decorations(layout, &e.highlights(&spec.highlights), drawn_len, s, origin, &mut self.deco_scratch),
+                            None => self.text.highlight_decorations(layout, &spec.highlights, drawn_len, s, origin, &mut self.deco_scratch),
+                        }
+                    }
+                    if !spec.strikes.is_empty() {
+                        match n.elided {
+                            Some(e) => self.text.strike_decorations(layout, &e.spans(&spec.spans), &e.strikes(&spec.strikes), color, s, origin, &mut self.deco_scratch),
+                            None => self.text.strike_decorations(layout, &spec.spans, &spec.strikes, color, s, origin, &mut self.deco_scratch),
+                        }
+                    }
                     link_fx.decos(layout, drawn_len, s, origin, &mut self.deco_scratch);
-                    if !spec.rings.is_empty() {
+                    if !spec.rings.is_empty() || spec.highlights.iter().any(|h| h.ring.is_some()) {
                         // Adjacent backgrounds overlap by bg_pad. Paint ringed chips after
                         // plain fills so a neighboring fill cannot erase an inset edge;
                         // keep underlines above both. No sorting on the ringless path.
@@ -7301,6 +7325,7 @@ impl<S: 'static> Runtime<S> {
                     }
                     self.glyph_scratch.clear();
                     let r_origin = if scale_motion == ScaleMotion::Still { origin } else { [0.0, 0.0] };
+                    let has_hl_fg = spec.highlights.iter().any(|h| h.fg.is_some());
                     // A cell of a longer run draws its slice of the run's glyphs, shaped in context.
                     let zoom = if let (Some(r), Some((_, at))) = (&n.run_layout, &spec.advance_in)
                         && let Some(x) = r.x(*at)
@@ -7317,7 +7342,7 @@ impl<S: 'static> Runtime<S> {
                         } else {
                             f32::NEG_INFINITY..f32::INFINITY
                         };
-                        self.text.glyphs_in_band(layout, s, r_origin, raster, reveal.is_some() || !link_fx.is_empty(), band, &mut self.glyph_scratch);
+                        self.text.glyphs_in_band(layout, s, r_origin, raster, reveal.is_some() || !link_fx.is_empty() || has_hl_fg, band, &mut self.glyph_scratch);
                         tk / raster
                     };
                     let gamma = glyph_gamma(color, s, srgb);
@@ -7336,6 +7361,15 @@ impl<S: 'static> Runtime<S> {
                         let (mut f, mut gm) = (base, gamma);
                         if q.ink > 0
                             && let Some(c) = spec.spans.get(q.ink as usize - 1).and_then(|sp| sp.color)
+                        {
+                            f = premul(c, o, srgb);
+                            gm = glyph_gamma(c, s, srgb);
+                        }
+                        if has_hl_fg
+                            && let Some(c) = spec.highlights.iter().rev().find_map(|h| {
+                                let (a, b) = n.elided.map_or((h.start as usize, h.end as usize), |e| e.mark(h.start as usize, h.end as usize, false));
+                                ((q.byte as usize) >= a && (q.byte as usize) < b).then_some(h.fg).flatten()
+                            })
                         {
                             f = premul(c, o, srgb);
                             gm = glyph_gamma(c, s, srgb);
@@ -7895,18 +7929,19 @@ impl<S: 'static> Runtime<S> {
             });
         }
         self.link_elements(&mut elements);
+        self.highlight_elements(&mut elements);
         elements
     }
 
     /// Centre of the first element whose key is `key`, or whose path ends with `key` when it
     /// contains a `/` (e.g. `slider/knob`), in points. Failing that, the first line box of the
-    /// link (`El::link`) whose id is `key`. Exiting elements and their children are gone here;
-    /// [`Runtime::presented`] still reads them.
+    /// link (`El::link`) or highlight (`El::text_highlight`) keyed `key`. Exiting elements and
+    /// their children are gone here; [`Runtime::presented`] still reads them.
     pub fn find(&self, key: &str) -> Option<(f32, f32)> {
         let suffix = format!("/{key}");
         let matches = |n: &Node| if key.contains('/') { n.path == key || n.path.ends_with(&suffix) } else { n.key.as_deref() == Some(key) };
         let i = (0..self.nodes.len()).find(|&i| matches(&self.nodes[i]) && !self.subtree_exiting(i));
-        let Some(i) = i else { return self.find_link(key) };
+        let Some(i) = i else { return self.find_link(key).or_else(|| self.find_highlight(key)) };
         let r = self.drawn.get(i).copied()?;
         Some((r[0] + r[2] * 0.5, r[1] + r[3] * 0.5))
     }
@@ -8538,6 +8573,22 @@ impl Elision {
         rings.iter().filter_map(|&(a, b, c, w)| {
             let (start, end) = self.mark(a as usize, b as usize, false);
             (start < end).then_some((start as u32, end as u32, c, w))
+        }).collect()
+    }
+
+    /// `strikes` moved onto the drawn string.
+    fn strikes(self, strikes: &[(u32, u32, Option<Color>)]) -> Vec<(u32, u32, Option<Color>)> {
+        strikes.iter().filter_map(|&(a, b, c)| {
+            let (start, end) = self.mark(a as usize, b as usize, false);
+            (start < end).then_some((start as u32, end as u32, c))
+        }).collect()
+    }
+
+    /// `highlights` moved onto the drawn string.
+    fn highlights(self, highlights: &[crate::text::TextHighlight]) -> Vec<crate::text::TextHighlight> {
+        highlights.iter().filter_map(|h| {
+            let (start, end) = self.mark(h.start as usize, h.end as usize, false);
+            (start < end).then(|| crate::text::TextHighlight { start: start as u32, end: end as u32, ..h.clone() })
         }).collect()
     }
 }

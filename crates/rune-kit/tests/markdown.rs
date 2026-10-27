@@ -1,7 +1,7 @@
 #![cfg(feature = "markdown")]
 
-use rune::{Color, Cx, El, Env, LinkPaint, Runtime, col};
-use rune_kit::markdown::{Block, Style, parse, parse_cached};
+use rune::{Color, Cx, El, Env, LinkPaint, Runtime, ScrollSpec, col};
+use rune_kit::markdown::{Block, Highlight, Style, parse, parse_cached};
 use rune_kit::{Kit, Markdown, MarkdownStyle};
 use std::rc::Rc;
 
@@ -1174,3 +1174,288 @@ fn link_ring_frames_chosen_links_merges_inner_runs_and_stays_on_hover() {
     assert_eq!(hovered.len(), 1);
     assert_eq!((hovered[0].rect, hovered[0].params[0], hovered[0].border), (ringed[0].rect, 1.0, want_ring));
 }
+
+#[test]
+fn strikethrough_parses_and_paints_in_light_and_dark_themes() {
+    let src = "Keep ~~struck~~ and ~~**bold** `code`~~ in\n\n- ~~item~~\n\n| Col |\n|---|\n| ~~cell~~ |\n";
+    let b = parse(src);
+    let Block::Para(p) = &b[0] else { panic!("{b:?}") };
+    assert_eq!(p.text, "Keep struck and bold \u{202f}code\u{202f} in");
+    let struck: Vec<&str> = p
+        .spans
+        .iter()
+        .filter(|s| matches!(s.2, Style::Strike))
+        .map(|&(a, z, _)| &p.text[a..z])
+        .collect();
+    assert_eq!(struck, ["struck", "bold \u{202f}code\u{202f}"]);
+
+    fn view(&(dark, strike): &(bool, bool), _: &mut Cx<(bool, bool)>) -> El {
+        let k = Kit::neutral(dark);
+        let doc = if strike {
+            "Keep ~~struck~~ and ~~**bold** `code`~~\n\n- ~~item~~\n\n| Col |\n|---|\n| ~~cell~~ |\n"
+        } else {
+            "Keep struck and **bold** `code`\n\n- item\n\n| Col |\n|---|\n| cell |\n"
+        };
+        col().w(360.0).child(Markdown::new(doc).build(&k))
+    }
+
+    for dark in [false, true] {
+        let mut plain = Runtime::new((dark, false), view, (360.0, 300.0), Env::new(dark, 1.0));
+        plain.frame(0.0);
+        let mut struck_rt = Runtime::new((dark, true), view, (360.0, 300.0), Env::new(dark, 1.0));
+        struck_rt.frame(0.0);
+
+        let thin_rects = |rt: &Runtime<(bool, bool)>| -> Vec<[f32; 4]> {
+            rt.instances
+                .iter()
+                .filter(|i| i.params[1] == rune::render::KIND_RECT && i.rect[3] >= 0.9 && i.rect[3] <= 2.5 && i.rect[2] > 12.0)
+                .map(|i| i.rect)
+                .collect()
+        };
+        let extra = thin_rects(&struck_rt).len().saturating_sub(thin_rects(&plain).len());
+        assert!(extra >= 4, "dark={dark}: strike lines drawn for paragraph, list item and table cell ({extra} new lines)");
+    }
+}
+
+#[test]
+fn bare_urls_autolink_with_gfm_punctuation_rules_and_respect_opt_out() {
+    let src = concat!(
+        "Visit https://example.org/docs?x=1#top, http://example.org:8080/a; ",
+        "and www.example.org/path/to_file! ",
+        "Also (see https://en.wikipedia.org/wiki/Rust_(programming_language)) ",
+        "and https://example.org/entity&nbsp; ",
+        "but not `https://in.code` or [explicit](https://explicit.example/x).\n\n",
+        "```\nhttps://in.fence.example\n```\n",
+    );
+    let b = parse(src);
+    let Block::Para(p) = &b[0] else { panic!("{b:?}") };
+    let links: Vec<(&str, &str)> = p.links.iter().map(|(a, z, u)| (&p.text[*a..*z], u.as_str())).collect();
+    assert_eq!(
+        links,
+        [
+            ("https://example.org/docs?x=1#top", "https://example.org/docs?x=1#top"),
+            ("http://example.org:8080/a", "http://example.org:8080/a"),
+            ("www.example.org/path/to_file", "http://www.example.org/path/to_file"),
+            (
+                "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+                "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+            ),
+            ("https://example.org/entity", "https://example.org/entity"),
+            ("explicit", "https://explicit.example/x"),
+        ]
+    );
+
+    // Pressing a bare `www.` link sends its `http://` destination through `on_link`, and `.autolink(false)` leaves bare URLs plain.
+    struct AutoState {
+        autolink: bool,
+        opened: Vec<String>,
+    }
+    fn auto_view(s: &AutoState, _: &mut Cx<AutoState>) -> El {
+        col().w(480.0).child(
+            Markdown::new("Try www.example.org/hello, or [named](https://named.example).")
+                .autolink(s.autolink)
+                .on_link(|s: &mut AutoState, url| s.opened.push(url.to_owned()))
+                .build(&Kit::neutral(true)),
+        )
+    }
+    let mut rt = Runtime::new(AutoState { autolink: true, opened: Vec::new() }, auto_view, (480.0, 120.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let (x, y) = rt.find("http://www.example.org/hello").expect("bare www link is findable by normalized URL");
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.opened, ["http://www.example.org/hello"]);
+
+    rt.state.autolink = false;
+    rt.invalidate();
+    rt.frame(1.0 / 60.0);
+    assert!(rt.find("http://www.example.org/hello").is_none(), "autolink(false) disables bare URL links");
+    assert!(rt.find("https://named.example").is_some(), "explicit links remain active");
+}
+
+#[test]
+fn highlights_map_source_bytes_across_formatting_blocks_and_syntax_without_reshaping() {
+    let src = concat!(
+        "# Heading Alpha\n\n",
+        "Plain **bold token** and `inline_code` plus ~~struck_word~~ and [linked text](https://example.org/hidden).\n\n",
+        "Second paragraph continues here.\n\n",
+        "- list item one\n",
+        "- [x] task needle done\n\n",
+        "> quoted thoughts\n\n",
+        "| Col A | Col B |\n",
+        "|---|---|\n",
+        "| cell_alpha | cell_beta |\n\n",
+        "```rust\nfn compute(value: i32) -> i32 {\n    value + 1\n}\n```\n",
+    );
+
+    let range_of = |needle: &str| -> std::ops::Range<usize> {
+        let start = src.find(needle).unwrap_or_else(|| panic!("no {needle:?}"));
+        start..start + needle.len()
+    };
+
+    // Include:
+    // 0: heading substring
+    // 1: span across plain -> **bold token** -> plain ("Plain **bold")
+    // 2: inside inline code ("inline_code")
+    // 3: inside strikethrough ("struck")
+    // 4: spanning across first and second paragraphs ("hidden).\n\nSecond")
+    // 5: inside list item ("item one")
+    // 6: inside task item ("needle")
+    // 7: inside quote ("thoughts")
+    // 8: inside table cell ("cell_beta")
+    // 9: inside code block ("compute(value") - marked as current!
+    // 10: syntax-only range ("**") - must produce no visible highlight
+    // 11: link destination syntax ("(https://example.org/hidden)") - must produce no visible highlight
+    let bold_stars = src.find("**bold").unwrap();
+    let link_dest = src.find("(https://example.org/hidden)").unwrap();
+    let highlights = vec![
+        (range_of("Alpha"), Highlight::new()),
+        (range_of("Plain **bold"), Highlight::new()),
+        (range_of("inline_code"), Highlight::new()),
+        (range_of("struck"), Highlight::new()),
+        (range_of("linked text](https://example.org/hidden).\n\nSecond"), Highlight::new()),
+        (range_of("item one"), Highlight::new()),
+        (range_of("needle"), Highlight::new()),
+        (range_of("thoughts"), Highlight::new()),
+        (range_of("cell_beta"), Highlight::new()),
+        (range_of("compute(value"), Highlight::current().key("active-match")),
+        (bold_stars..bold_stars + 2, Highlight::new().key("syntax-only-stars")),
+        (link_dest..link_dest + "(https://example.org/hidden)".len(), Highlight::new().key("syntax-only-url")),
+    ];
+
+    type HlState = (String, Vec<(std::ops::Range<usize>, Highlight)>);
+    fn hl_view((src, hls): &HlState, _: &mut Cx<HlState>) -> El {
+        let k = Kit::neutral(true);
+        let style = MarkdownStyle::from_kit(&k)
+            .highlight_bg(rune::color::hex("#eab30838").unwrap())
+            .highlight_current_bg(rune::color::hex("#f59e0b66").unwrap())
+            .highlight_current_ring(Some((rune::color::hex("#f59e0b").unwrap(), 1.5)));
+        col().w(520.0).child(Markdown::new(src.clone()).style(style).highlights(hls).build(&k))
+    }
+    fn render_with(src: &str, hls: &[(std::ops::Range<usize>, Highlight)]) -> Runtime<HlState> {
+        let mut rt = Runtime::new((src.to_owned(), hls.to_vec()), hl_view, (520.0, 900.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt
+    }
+
+    let plain_rt = render_with(src, &[]);
+    let hl_rt = render_with(src, &highlights);
+
+    // 1. Every glyph quad in `hl_rt` is in the exact same position and UV as in `plain_rt` (no text reshaping!).
+    let glyphs = |rt: &Runtime<HlState>| -> Vec<([u32; 4], [u32; 4])> {
+        rt.instances
+            .iter()
+            .filter(|i| i.params[1] == rune::render::KIND_GLYPH)
+            .map(|i| (i.rect.map(f32::to_bits), i.uv.map(f32::to_bits)))
+            .collect()
+    };
+    assert_eq!(glyphs(&plain_rt), glyphs(&hl_rt), "highlights must never reshape text or move glyphs");
+
+    // 2. Check exposed mark elements and labels.
+    let marks: Vec<_> = hl_rt
+        .elements()
+        .into_iter()
+        .filter(|e| e.role == "mark")
+        .map(|e| (e.key.unwrap_or_default(), e.label.unwrap_or_default()))
+        .collect();
+    assert!(marks.contains(&("md-mark-0".into(), "Alpha".into())), "{marks:?}");
+    assert!(marks.contains(&("md-mark-1".into(), "Plain bold".into())), "{marks:?}");
+    assert!(marks.contains(&("md-mark-2".into(), "inline_code".into())), "{marks:?}");
+    assert!(marks.contains(&("md-mark-3".into(), "struck".into())), "{marks:?}");
+    // Cross-block highlight (#4) produces two mark elements: "linked text." in para 1 and "Second" in para 2.
+    let cross: Vec<&str> = marks.iter().filter(|(k, _)| k == "md-mark-4").map(|(_, l)| l.as_str()).collect();
+    assert_eq!(cross, ["linked text.", "Second"]);
+    assert!(marks.contains(&("md-mark-5".into(), "item one".into())), "{marks:?}");
+    assert!(marks.contains(&("md-mark-6".into(), "needle".into())), "{marks:?}");
+    assert!(marks.contains(&("md-mark-7".into(), "thoughts".into())), "{marks:?}");
+    assert!(marks.contains(&("md-mark-8".into(), "cell_beta".into())), "{marks:?}");
+    assert!(marks.contains(&("active-match".into(), "compute(value".into())), "{marks:?}");
+
+    // Syntax-only ranges produce no mark elements at all.
+    assert!(!marks.iter().any(|(k, _)| k.starts_with("syntax-only")), "syntax-only ranges must not highlight: {marks:?}");
+
+    // 3. Current match draws its inset ring, while standard matches draw rounded bg rects without a ring.
+    let want_ring = rune::color::hex("#f59e0b").unwrap().premul(1.0);
+    let ringed: Vec<_> = hl_rt
+        .instances
+        .iter()
+        .filter(|i| i.params[1] == rune::render::KIND_RECT && (i.params[0] - 1.5).abs() < 1e-3 && i.border == want_ring)
+        .collect();
+    assert_eq!(ringed.len(), 1, "current match gets its 1.5pt ring: {ringed:?}");
+}
+
+#[test]
+fn scroll_into_view_scrolls_to_highlighted_match_in_tall_document_and_code_block() {
+    let mut doc = String::from("# Searchable Document\n\n");
+    for i in 0..25 {
+        doc.push_str(&format!("Paragraph {i} with filler words to push later content below the fold.\n\n"));
+    }
+    doc.push_str("Paragraph with the first_target_match in body text.\n\n");
+    doc.push_str("```rust\n");
+    for i in 0..30 {
+        doc.push_str(&format!("let line_{i} = {i};\n"));
+    }
+    doc.push_str("let deep_code_target = 42;\n```\n");
+
+    let first_range = {
+        let s = doc.find("first_target_match").unwrap();
+        s..s + "first_target_match".len()
+    };
+    let code_range = {
+        let s = doc.find("deep_code_target").unwrap();
+        s..s + "deep_code_target".len()
+    };
+
+    struct SearchApp {
+        doc: String,
+        r1: std::ops::Range<usize>,
+        r2: std::ops::Range<usize>,
+    }
+
+    fn search_view(s: &SearchApp, _: &mut Cx<SearchApp>) -> El {
+        let hls = [
+            (s.r1.clone(), Highlight::new()),
+            (s.r2.clone(), Highlight::current().key("code-hit")),
+        ];
+        col()
+            .key("doc-scroll")
+            .w_full()
+            .h(200.0)
+            .scroll(ScrollSpec { stick_bottom: false })
+            .child(Markdown::new(s.doc.clone()).highlights(&hls).build(&Kit::neutral(true)))
+    }
+
+    let mut rt = Runtime::new(
+        SearchApp { doc, r1: first_range, r2: code_range },
+        search_view,
+        (480.0, 200.0),
+        Env::new(true, 1.0),
+    );
+    rt.frame(0.0);
+
+    // Initially both targets are well below the 200pt viewport.
+    let mark_y = |rt: &Runtime<SearchApp>, key: &str| -> f32 {
+        by_key(rt, key).rect[1]
+    };
+    let y1_initial = mark_y(&rt, &Markdown::highlight_key(0));
+    let y2_initial = mark_y(&rt, "code-hit");
+    assert!(y1_initial > 400.0 && y2_initial > y1_initial + 300.0, "initially below fold: {y1_initial}, {y2_initial}");
+
+    // Scroll to the first highlight using its default key `Markdown::highlight_key(0)`.
+    rt.update(|_, tx| tx.scroll_into_view(Markdown::highlight_key(0)));
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+    }
+    let m1 = by_key(&rt, &Markdown::highlight_key(0)).rect;
+    assert!(m1[1] >= 0.0 && m1[1] + m1[3] <= 200.5, "first highlight scrolled into viewport: {m1:?}");
+
+    // Scroll to the deep code-block highlight using its custom key `"code-hit"`.
+    rt.update(|_, tx| tx.scroll_into_view("code-hit"));
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+    }
+    let m2 = by_key(&rt, "code-hit").rect;
+    assert!(m2[1] >= 0.0 && m2[1] + m2[3] <= 200.5, "deep code-block highlight scrolled into viewport: {m2:?}");
+}
+

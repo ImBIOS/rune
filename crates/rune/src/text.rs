@@ -658,6 +658,67 @@ impl LinkPaint {
     }
 }
 
+/// A paint-only highlight over `start..end` UTF-8 bytes of a [`text`](crate::text) element.
+///
+/// Drawn from the shaped layout's glyph boxes without splitting runs, so adding, moving or
+/// clearing highlights never reshapes text or shifts line breaks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextHighlight {
+    pub(crate) start: u32,
+    pub(crate) end: u32,
+    pub(crate) bg: Color,
+    pub(crate) fg: Option<Color>,
+    pub(crate) ring: Option<(Color, f32)>,
+    pub(crate) pad: f32,
+    pub(crate) key: Option<String>,
+}
+
+impl TextHighlight {
+    /// Bytes `range` of the text, painted with a rounded `bg` fill behind each line's glyphs.
+    pub fn new(range: std::ops::Range<usize>, bg: Color) -> TextHighlight {
+        TextHighlight {
+            start: range.start as u32,
+            end: range.end as u32,
+            bg,
+            fg: None,
+            ring: None,
+            pad: 1.5,
+            key: None,
+        }
+    }
+    /// Glyph colour over the highlighted range.
+    pub fn color(mut self, c: Color) -> Self {
+        self.fg = Some(c);
+        self
+    }
+    /// Inset `c` border ring `width` points wide inside the rounded background on each line.
+    pub fn ring(mut self, c: Color, width: f32) -> Self {
+        self.ring = (width > 0.0 && width.is_finite()).then_some((c, width));
+        self
+    }
+    /// Horizontal padding around each line's background, in points (`1.5` by default).
+    pub fn pad(mut self, pad: f32) -> Self {
+        self.pad = pad;
+        self
+    }
+    /// Optional key for [`Tx::scroll_into_view`](crate::Tx::scroll_into_view),
+    /// [`Cx::layout`](crate::Cx::layout) and [`Runtime::find`](crate::Runtime::find).
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+    /// The UTF-8 byte range of this highlight.
+    pub fn range(&self) -> std::ops::Range<usize> {
+        self.start as usize..self.end as usize
+    }
+    /// Returns this highlight with its UTF-8 byte range replaced by `range`.
+    pub fn with_range(mut self, range: std::ops::Range<usize>) -> Self {
+        self.start = range.start as u32;
+        self.end = range.end as u32;
+        self
+    }
+}
+
 /// Looked up for every glyph of every frame, so hashed with Fx rather than SipHash.
 type GlyphMap<V> = HashMap<GlyphKey, V, std::hash::BuildHasherDefault<rune_motion::Fx>>;
 
@@ -2520,6 +2581,69 @@ impl TextSystem {
                 let x0 = origin[0] + bb.x0 as f32;
                 let y = (origin[1] + m.baseline - strike_off).round();
                 out.push(PaintedDeco::new(Deco { rect: [x0, y, w, h], color, radius: 0.0 }, None, 0));
+            }
+        }
+    }
+
+    /// Rounded background fills and rings for `highlights` in device px.
+    pub(crate) fn highlight_decorations(
+        &self,
+        layout: &Layout<Ink>,
+        highlights: &[TextHighlight],
+        len: usize,
+        scale: f32,
+        origin: [f32; 2],
+        out: &mut Vec<PaintedDeco>,
+    ) {
+        if highlights.is_empty() {
+            return;
+        }
+        let radius = 4.0 * scale;
+        for h in highlights {
+            let (a, b) = ((h.start as usize).min(len), (h.end as usize).min(len));
+            if a >= b || (h.bg.a <= 0.0 && h.ring.is_none()) {
+                continue;
+            }
+            let pad = h.pad * scale;
+            let ring = h.ring.map(|(c, rw)| (c, rw * scale));
+            let mut last: Option<(usize, usize)> = None;
+            for (bb, line_idx) in range_boxes(layout, a, b, false) {
+                let w = (bb.x1 - bb.x0) as f32;
+                if w <= 0.0 {
+                    continue;
+                }
+                let x0 = origin[0] + bb.x0 as f32;
+                let (mut top, mut bot) = ((origin[1] + bb.y0 as f32).round(), (origin[1] + bb.y1 as f32).round());
+                if let Some(l) = layout.get(line_idx) {
+                    let base = origin[1] + l.metrics().baseline;
+                    let (mut asc, mut desc) = (0.0f32, 0.0f32);
+                    for run in l.runs() {
+                        let r = run.text_range();
+                        if r.start < b && a < r.end {
+                            let fm = run.font_metrics();
+                            (asc, desc) = (asc.max(fm.ascent), desc.max(fm.descent.abs()));
+                        }
+                    }
+                    if asc > 0.0 || desc > 0.0 {
+                        top = (base - asc - 1.0 * scale).round();
+                        bot = (base + desc + 1.0 * scale).round();
+                    }
+                }
+                let rect = [x0 - pad, top, w + 2.0 * pad, (bot - top).max(0.0)];
+                let merge = last.filter(|&(li, _)| li == line_idx).is_some_and(|(_, k)| {
+                    let (d, _) = out[k].paint();
+                    (d.rect[0] + d.rect[2] - rect[0] - 2.0 * pad).abs() < 1.0
+                });
+                if merge {
+                    let (d, _) = out[last.unwrap().1].paint();
+                    if rect[3] > d.rect[3] {
+                        (d.rect[1], d.rect[3]) = (rect[1], rect[3]);
+                    }
+                    d.rect[2] = rect[0] + rect[2] - d.rect[0];
+                } else {
+                    last = Some((line_idx, out.len()));
+                    out.push(PaintedDeco::new(Deco { rect, color: h.bg, radius }, ring, (b as u32).saturating_sub(1)));
+                }
             }
         }
     }
