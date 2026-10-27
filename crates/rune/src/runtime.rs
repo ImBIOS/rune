@@ -249,8 +249,8 @@ impl<S> Cx<S> {
         self.time_scale = other.time_scale;
         self.caret_read.set(self.caret_read.get() || other.caret_read.get());
         let mut reads = self.layout_reads.borrow_mut();
-        for key in other.layout_reads.into_inner() {
-            if !reads.contains(&key) { reads.push(key); }
+        for read in other.layout_reads.into_inner() {
+            layout_read::note_read(&mut reads, &read.key, read.same);
         }
     }
 
@@ -2368,7 +2368,7 @@ impl<S: 'static> Runtime<S> {
             self.capture_launch(source, target);
         }
         if self.caret_watch && self.caret_moved(None) { self.dirty = true; }
-        let read_moved = !self.layout_seen.is_empty() && self.layout_feedback_open() && self.layout_moved(None, None);
+        let read_moved = self.layout_reads_moved();
         if self.has_pixel_aspect && self.pixel_aspect_changed() { self.relayout = true; }
         let besides = self.dirty || self.relayout || self.settle || self.virtual_window_changed();
         let other = ran || besides;
@@ -3936,6 +3936,7 @@ impl<S: 'static> Runtime<S> {
                 scroll.pinned = true;
             }
         }
+        self.refresh_layout_seen();
         let mut measured = self.measure(tx);
         self.focus_before_commit = self.focused.clone();
         // Settle layout reads first so a field that mounts once a rect is known is in `nodes`.

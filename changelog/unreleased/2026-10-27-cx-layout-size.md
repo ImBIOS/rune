@@ -7,4 +7,8 @@
   re-commits on every scroll frame. Both settle on the first layout as `Cx::layout` does, so
   the first frame has the right value. `memo::layout_with` and `memo::layout_size` do the same
   for components without a `Cx`, and memos that read them are reused while the value holds.
-  `Cx::layout` is unchanged.
+  `Cx::layout` keeps its half-point threshold, but movement below it now adds up until it
+  counts instead of being lost frame by frame, and a memo holding a `Cx::layout` read is
+  reused through moves below it. Layout reads and `on_layout` report an element's width and
+  height as layout sized it, so moving an element no longer changes its size by a rounding
+  error.

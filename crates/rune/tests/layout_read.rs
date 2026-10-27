@@ -398,3 +398,120 @@ fn a_layout_with_read_re_runs_its_view_only_when_its_value_flips() {
     assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("clear")));
     assert_eq!(rt.stats.commits - commits, 2);
 }
+
+#[derive(Default)]
+struct Bar {
+    width: f32,
+    top: f32,
+    views: Cell<u32>,
+}
+
+/// Reads one bar's whole rect and its size: the size check must not be lost under the rect read.
+fn both_view(s: &Bar, cx: &mut Cx<Bar>) -> El {
+    s.views.set(s.views.get() + 1);
+    let _ = cx.layout("bar");
+    let w = cx.layout_size("bar").map_or(0.0, |[w, _]| w);
+    col().w_full().items_start().child(el().key("bar").w(s.width).h(10.0)).child(el().key("echo").w(w).h(10.0))
+}
+
+#[test]
+fn a_whole_rect_read_keeps_a_size_read_of_the_same_key_exact() {
+    let mut rt = Runtime::new(Bar { width: 100.0, ..Bar::default() }, both_view, (300.0, 200.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    rt.update(|s, _| s.width = 100.4);
+    rt.frame(1.0 / 120.0);
+    let echo = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("echo")).unwrap().target[2];
+    assert!((echo - 100.4).abs() < 1e-3, "a 0.4 pt resize reaches the size read: {echo}");
+}
+
+#[test]
+fn drift_below_the_threshold_adds_up_until_a_whole_rect_read_re_runs() {
+    let mut rt = Runtime::new(S::default(), scroll_view, (300.0, 400.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    for _ in 0..100 {
+        rt.wheel(100.0, 100.0, -0.4);
+        rt.frame(1.0 / 120.0);
+    }
+    let (row, marker) = (find(&rt, "r10").rect[1], find(&rt, "marker").target[1]);
+    assert!(row < 270.0, "scrolled 40 pt: {row}");
+    assert!((marker - row).abs() <= 0.5, "the marker follows within half a point: marker {marker}, row {row}");
+}
+
+#[derive(Default)]
+struct Gate {
+    width: f32,
+    views: Cell<u32>,
+}
+
+/// Reads `b` only once `a`'s rect matches the state, so `b` goes unread on a commit's first pass.
+fn gate_view(s: &Gate, cx: &mut Cx<Gate>) -> El {
+    s.views.set(s.views.get() + 1);
+    let ready = cx.layout("a").is_some_and(|r| (r[2] - s.width).abs() < 0.01);
+    let b = if ready { cx.layout("b") } else { None };
+    col().w_full().items_start()
+        .child(el().key("a").w(s.width).h(10.0))
+        .child(el().key("b").w(50.0).h(10.0))
+        .child(el().key("echo").w(b.map_or(0.0, |r| r[2])).h(5.0))
+}
+
+#[test]
+fn a_key_unread_on_one_settling_pass_keeps_its_rect_for_the_next() {
+    let mut rt = Runtime::new(Gate { width: 100.0, ..Gate::default() }, gate_view, (300.0, 200.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    for _ in 0..10 { rt.frame(1.0 / 120.0); }
+    let views = rt.state.views.get();
+    rt.update(|s, _| s.width = 200.0);
+    rt.frame(1.0 / 120.0);
+    let echo = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("echo")).unwrap().target[2];
+    assert_eq!(echo, 50.0);
+    assert_eq!(rt.state.views.get() - views, 2, "one pass with a stale, one to settle");
+}
+
+/// Echoes the size of an element a third of 100 tall, below a gap the state sets.
+fn third_view(s: &Bar, cx: &mut Cx<Bar>) -> El {
+    s.views.set(s.views.get() + 1);
+    let h = cx.layout_size("third").map_or(0.0, |[_, h]| h);
+    col().w_full().items_start()
+        .child(el().key("gap").w(10.0).h(s.top))
+        .child(el().key("third").w(10.0).h(100.0 / 3.0))
+        .child(el().key("echo").w(10.0).h(h))
+}
+
+#[test]
+fn moving_an_element_does_not_change_the_size_a_read_sees() {
+    let mut rt = Runtime::new(Bar::default(), third_view, (300.0, 400.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    for top in [33.4, 50.0, 31.0, 64.1] {
+        let views = rt.state.views.get();
+        rt.update(|s, _| s.top = top);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(rt.state.views.get() - views, 1, "a move to {top} re-ran the size read");
+    }
+}
+
+/// A marker follows row 10 through a scroll, beside a bar whose `on_layout` grows it forever.
+fn capped_view(s: &S, cx: &mut Cx<S>) -> El {
+    s.views.set(s.views.get() + 1);
+    let rows = (0..40).fold(col().w_full(), |c, i| c.child(el().key(format!("r{i}")).w_full().h(30.0)));
+    let grow_by = s.grow_by;
+    let mut root = col().w_full().h_full().items_start()
+        .child(col().key("scroll").w_full().h(300.0).scroll(ScrollSpec { stick_bottom: false }).child(rows))
+        .child(el().key("bar").w(s.width.max(10.0)).h(10.0).on_layout(move |s: &mut S, r| s.width = r[2] + grow_by));
+    if let Some([_, y, _, _]) = cx.layout("r10") {
+        root = root.child(el().key("marker").absolute(0.0, y).size(10.0, 10.0));
+    }
+    root
+}
+
+#[test]
+fn the_first_scroll_frame_after_feedback_stops_still_moves_a_read() {
+    let mut rt = Runtime::new(S { grow_by: 10.0, width: 50.0, ..S::default() }, capped_view, (600.0, 400.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    frames(&mut rt, 60);
+    let commits = rt.stats.commits;
+    frames(&mut rt, 10);
+    assert_eq!(rt.stats.commits, commits, "feedback stopped");
+    rt.wheel(100.0, 100.0, -30.0);
+    rt.frame(1.0 / 120.0);
+    assert_eq!(find(&rt, "marker").target[1], find(&rt, "r10").rect[1], "followed on the first scroll frame");
+}

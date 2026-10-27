@@ -50,7 +50,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
 use crate::El;
-use crate::runtime::layout_read::{LayoutRects, Same, note_read, seen_rect, size};
+use crate::runtime::layout_read::{LayoutRects, Same, moved, note_read, seen_rect, size};
 
 /// The children a memo's placeholders share.
 #[derive(Clone)]
@@ -123,7 +123,7 @@ impl Seen {
     fn holds(&self, read: &Read) -> bool {
         match read {
             Read::Caret(key, rect) => crate::runtime::caret_of(&self.caret, key) == *rect,
-            Read::Layout(key, rect) => seen_rect(&self.layout, key) == *rect,
+            Read::Layout(key, rect) => !moved(*rect, seen_rect(&self.layout, key)),
             Read::LayoutWith(key, same, rect) => !same.moved(*rect, seen_rect(&self.layout, key)),
         }
     }
@@ -728,6 +728,33 @@ mod tests {
         assert_eq!(BUILDS.get(), builds + 4, "a resize rebuilds all three");
         assert_eq!(shown(&rt, "cx").as_deref(), Some("Some([150.0, 10.0])"));
         assert_eq!(shown(&rt, "free"), shown(&rt, "cx"));
+    }
+
+    fn scrolled(s: &Probe, cx: &mut Cx<Probe>) -> El {
+        let rows = (0..20).fold(col().w_full(), |c, i| c.child(el().key(format!("r{i}")).w_full().h(30.0)));
+        col().size(300.0, 300.0).children([
+            col().key("scroll").w_full().h(200.0).scroll(ScrollSpec { stick_bottom: false }).child(rows),
+            memo("label", 0, || counted(text(format!("{:?}", cx.layout("r3"))).key("label"))),
+            text(format!("tick {}", s.ticks)).key("tick"),
+        ])
+    }
+
+    #[test]
+    fn a_whole_rect_read_inside_a_memo_holds_through_a_move_below_the_threshold() {
+        BUILDS.set(0);
+        let mut rt = Runtime::new(Probe { width: 0.0, ticks: 0 }, scrolled, (300.0, 300.0), Env::default());
+        rt.frame(0.0);
+        let builds = BUILDS.get();
+        rt.wheel(100.0, 100.0, -0.3);
+        rt.frame(1.0 / 60.0);
+        rt.state.ticks += 1;
+        commit(&mut rt);
+        assert_eq!(BUILDS.get(), builds, "0.3 pt is within the half point a whole-rect read ignores");
+        rt.wheel(100.0, 100.0, -0.3);
+        rt.frame(1.0 / 60.0);
+        rt.state.ticks += 1;
+        commit(&mut rt);
+        assert_eq!(BUILDS.get(), builds + 1, "0.6 pt from what it read builds");
     }
 
     #[test]

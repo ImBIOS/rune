@@ -15,8 +15,12 @@
 //!   The values it is given next are then the final layout's, so nothing re-runs by itself.
 //! - Between commits, only scrolling moves a laid-out rect, which re-runs readers next frame.
 //! - Commits caused only by layout reads or `on_layout`, with no scroll moving, count up; past
-//!   [`ECHOES`] in a row, reads and `on_layout` stop causing commits (values still update
-//!   silently) until anything else commits.
+//!   [`ECHOES`] in a row, reads and `on_layout` stop causing commits until anything else
+//!   commits or a scroll moves. Reads get the current rects at the next commit.
+//!
+//! What a view is given for each key stays what its reads last saw until a read of the key
+//! moves or a commit runs the view again, so movement below a read's threshold adds up until
+//! it counts.
 use std::any::TypeId;
 use std::rc::Rc;
 
@@ -99,17 +103,16 @@ impl LayoutRead {
 /// The layout reads a view made.
 pub(crate) type LayoutReads = Vec<LayoutRead>;
 
-/// Counts a read of `key` in `reads`. A whole-rect read covers every other read of the key,
-/// and a repeated read of the same function counts once.
+/// Counts a read of `key` in `reads`, once per kind: a whole-rect read once, and each
+/// `layout_with` function once. A whole-rect read doesn't cover a function's read, since it
+/// ignores changes a function may see (a 0.4 pt resize, say).
 pub(crate) fn note_read(reads: &mut LayoutReads, key: &str, same: Option<Same>) {
-    let covered = reads.iter().any(|r| r.key == key && match (&r.same, &same) {
-        (None, _) => true,
+    let counted = reads.iter().any(|r| r.key == key && match (&r.same, &same) {
+        (None, None) => true,
         (Some(a), Some(b)) => a.is(b),
-        (Some(_), None) => false,
+        _ => false,
     });
-    if covered { return; }
-    if same.is_none() { reads.retain(|r| r.key != key); }
-    reads.push(LayoutRead { key: key.to_owned(), same });
+    if !counted { reads.push(LayoutRead { key: key.to_owned(), same }); }
 }
 
 /// What each key a view read resolved to, as last given to the view.
@@ -162,8 +165,10 @@ impl<S> Cx<S> {
     /// `layout`, so the first frame already has the right value.
     ///
     /// `f` runs again on each later layout until the view re-runs, so keep it cheap and pure.
-    /// A closure that captures nothing costs no more than `layout`; one that captures
-    /// something costs an allocation per read.
+    /// A function item or a closure that captures nothing costs no more than `layout`, and
+    /// reading it again in the same view counts once. A closure that captures something, or a
+    /// `fn` pointer, isn't zero-sized: it costs an allocation per read, and each read counts
+    /// (and is checked) separately, so keep those out of loops.
     pub fn layout_with<T: PartialEq + 'static>(&self, key: &str, f: impl Fn([f32; 4]) -> T + 'static) -> Option<T> {
         let rect = seen_rect(&self.layout, key);
         let value = rect.map(&f);
@@ -186,7 +191,9 @@ pub(crate) fn size(rect: [f32; 4]) -> [f32; 2] {
     [rect[2], rect[3]]
 }
 
-fn moved(a: Option<[f32; 4]>, b: Option<[f32; 4]>) -> bool {
+/// Whether a whole-rect read counts `a` to `b` as a move: an edge moved past [`MOVED`], or
+/// the element appeared or went.
+pub(crate) fn moved(a: Option<[f32; 4]>, b: Option<[f32; 4]>) -> bool {
     match (a, b) {
         (Some(a), Some(b)) => a.iter().zip(b).any(|(x, y)| (x - y).abs() > MOVED),
         (None, None) => false,
@@ -218,7 +225,8 @@ impl<S: 'static> Runtime<S> {
             dx -= ax - nodes[anc].target[0];
             dy -= ay - nodes[anc].target[1];
         }
-        [t[0] - dx, t[1] - dy, t[2] - t[0], t[3] - t[1]]
+        // Layout's own size, not the edges' difference, which rounds differently where it sits.
+        [t[0] - dx, t[1] - dy, nodes[i].local.w, nodes[i].local.h]
     }
 
     /// Node `i`'s unscrolled layout rect, under its own and its ancestors' static `El::scale`,
@@ -243,41 +251,65 @@ impl<S: 'static> Runtime<S> {
         Some([node_rect[0] + (x0 - t[0]), node_rect[1] + (y0 - t[1]), x1 - x0, y1 - y0])
     }
 
-    /// Refreshes what the next view sees for `reads` (the last view's reads when `None`) from
-    /// `nodes` (the current frame's when `None`). Returns whether any of it moved, by what each
-    /// read depends on.
-    pub(super) fn layout_moved(&mut self, reads: Option<LayoutReads>, nodes: Option<&[Node]>) -> bool {
+    /// Checks `reads` (the last view's when `None`) against `nodes` (the current frame's when
+    /// `None`), by what each read depends on. When one moved, or when `force`, the next view
+    /// gets the current rects; otherwise it keeps what the reads last saw, so drift below a
+    /// read's threshold adds up. Returns whether one moved.
+    pub(super) fn layout_moved(&mut self, reads: Option<LayoutReads>, nodes: Option<&[Node]>, force: bool) -> bool {
         let reads = reads.unwrap_or_else(|| std::mem::take(&mut self.layout_seen.reads));
         let nodes = nodes.unwrap_or(&self.nodes);
         let now: Vec<Option<[f32; 4]>> = reads.iter().map(|r| self.layout_of(nodes, &r.key)).collect();
         let rects = &mut self.layout_seen.rects;
-        let mut changed = reads.iter().zip(&now).any(|(r, rect)| rects.get(&r.key).is_none_or(|old| r.moved(*old, *rect)));
-        let before = rects.len();
-        rects.retain(|k, _| reads.iter().any(|r| r.key == *k));
-        changed |= rects.len() < before;
-        for (r, rect) in reads.iter().zip(now) {
-            match rects.get_mut(&r.key) {
-                Some(seen) => *seen = rect,
-                None => { rects.insert(r.key.clone(), rect); }
+        let changed = reads.iter().zip(&now).any(|(r, rect)| rects.get(&r.key).is_none_or(|old| r.moved(*old, *rect)));
+        if changed || force {
+            for (r, rect) in reads.iter().zip(now) {
+                match rects.get_mut(&r.key) {
+                    Some(seen) => *seen = rect,
+                    None => { rects.insert(r.key.clone(), rect); }
+                }
             }
         }
         self.layout_seen.reads = reads;
         changed
     }
 
+    /// Before a commit runs the view: what it is given for each key it read becomes the
+    /// current rect, since it re-runs anyway.
+    pub(super) fn refresh_layout_seen(&mut self) {
+        if self.layout_seen.rects.is_empty() { return; }
+        let now: Vec<_> = self.layout_seen.rects.keys().map(|k| self.layout_of(&self.nodes, k)).collect();
+        for (seen, rect) in self.layout_seen.rects.values_mut().zip(now) { *seen = rect; }
+    }
+
+    /// Once a frame: whether a layout read moved, so the view re-runs. Scrolling reopens
+    /// feedback first, so the first scroll frame after feedback stopped still checks.
+    pub(super) fn layout_reads_moved(&mut self) -> bool {
+        if self.layout_seen.is_empty() { return false; }
+        if self.scrolling() { self.layout_echoes = 0; }
+        self.layout_feedback_open() && self.layout_moved(None, None, false)
+    }
+
     /// Re-measures `measured` while a layout read moved, at most [`PASSES`] times, then leaves
-    /// the reads matching the final layout so a view that can't settle doesn't loop.
+    /// the reads matching the final layout so a view that can't settle doesn't loop. Keys no
+    /// pass read any more go only at the end, so one read behind a gate the next pass opens
+    /// keeps its rect.
     pub(super) fn settle_layout_reads(&mut self, mut measured: Measured, tx: &Tx) -> Measured {
         if measured.layout_reads.is_empty() {
             self.layout_seen = LayoutSeen::default();
             return measured;
         }
+        let mut settled = false;
         for _ in 0..PASSES {
-            if !self.layout_moved(Some(std::mem::take(&mut measured.layout_reads)), Some(&measured.nodes)) { return measured; }
+            if !self.layout_moved(Some(std::mem::take(&mut measured.layout_reads)), Some(&measured.nodes), false) {
+                settled = true;
+                break;
+            }
             self.layout = measured.layout;
             measured = self.measure(tx);
         }
-        self.layout_moved(Some(std::mem::take(&mut measured.layout_reads)), Some(&measured.nodes));
+        if !settled { self.layout_moved(Some(std::mem::take(&mut measured.layout_reads)), Some(&measured.nodes), true); }
+        let LayoutSeen { rects, reads } = &mut self.layout_seen;
+        rects.retain(|k, _| reads.iter().any(|r| r.key == *k));
         measured
     }
 
@@ -289,12 +321,15 @@ impl<S: 'static> Runtime<S> {
     /// Counts a frame's commit toward [`ECHOES`]: `feedback` when layout reads or `on_layout`
     /// caused it, `other` when anything else did.
     pub(super) fn count_layout_echo(&mut self, feedback: bool, other: bool) {
-        let scrolling = self.scrolls.values().any(|st| st.scrolling || st.direct || st.glide.is_some() || st.x.glide.is_some());
-        if other || scrolling {
+        if other || self.scrolling() {
             self.layout_echoes = 0;
         } else if feedback {
             self.layout_echoes += 1;
         }
+    }
+
+    fn scrolling(&self) -> bool {
+        self.scrolls.values().any(|st| st.scrolling || st.direct || st.glide.is_some() || st.x.glide.is_some())
     }
 
     /// Queues `on_layout` and `on_screen_layout` for elements whose laid-out rect changed (or
@@ -434,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_of_one_key_count_once_per_function_and_a_whole_rect_read_covers_them() {
+    fn reads_of_one_key_count_once_per_function_and_once_for_the_whole_rect() {
         use super::{LayoutRead, Same, note_read, size};
         let mut reads: Vec<LayoutRead> = Vec::new();
         for _ in 0..3 { note_read(&mut reads, "a", Some(Same::new(size))); }
@@ -446,7 +481,7 @@ mod tests {
         note_read(&mut reads, "a", None);
         note_read(&mut reads, "a", Some(Same::new(size)));
         let kept: Vec<_> = reads.iter().map(|r| (r.key.as_str(), r.same.is_some())).collect();
-        assert_eq!(kept, [("b", true), ("a", false)]);
+        assert_eq!(kept, [("a", true), ("a", true), ("b", true), ("a", false)], "a whole-rect read keeps the value reads");
     }
 
     #[test]
