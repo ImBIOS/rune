@@ -1,5 +1,6 @@
 //! `Tx::scroll_to`, `Tx::scroll_to_instant` and `Tx::scroll_to_y`: moving a viewport to an
-//! offset the app picked, gliding or at once, clamped, on virtual rows too.
+//! offset the app picked, gliding or at once, clamped, on virtual rows too; and
+//! `Tx::scroll_key_to`, landing a row at a height in its viewport.
 use rune::{Cx, El, Env, GrowthSpec, Runtime, ScrollSpec, col, el, row};
 
 #[derive(Default)]
@@ -101,4 +102,24 @@ fn scroll_to_lands_on_virtual_rows_it_mounts() {
     rt.update(|_, tx| tx.scroll_to("list", 0.0, 99_999.0));
     settle(&mut rt);
     assert_eq!(at(&rt, "r99").1, 160.0, "clamped to the end the rows measure");
+}
+
+#[test]
+fn scroll_key_to_lands_a_row_where_asked_in_the_frame_that_builds_it() {
+    let mut rt = app(S { list: true, rows: 20, ..S::default() });
+    rt.update(|s, tx| {
+        s.rows = 30;
+        tx.scroll_key_to("row12", 30.0);
+    });
+    rt.frame(1.0 / 60.0);
+    assert_eq!(at(&rt, "row12").1, 30.0, "placed from the new rows, on the first frame");
+    rt.frame(1.0 / 60.0);
+    assert_eq!(at(&rt, "row12").1, 30.0, "and it stays");
+
+    rt.update(|_, tx| tx.scroll_key_to("row29", 0.0));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(at(&rt, "row29").1, 160.0, "clamped to the end");
+    rt.update(|_, tx| tx.scroll_key_to("row0", 50.0));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(at(&rt, "row0").1, 0.0, "and to the top");
 }

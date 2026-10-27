@@ -46,13 +46,13 @@ impl Tx {
     /// shows its content from `x` points in, clamped to its ends: 0 is the start, as a carousel's
     /// "back to the first" does. Instant; any momentum stops. See [`El::scroll_x`].
     pub fn scroll_to_x(&mut self, key: impl Into<String>, x: f32) {
-        self.scroll_offsets.push(crate::runtime::ScrollRequest { key: key.into(), x: Some(x), y: None, animated: false });
+        self.scroll_offsets.push(crate::runtime::ScrollRequest { key: key.into(), x: Some(x), y: None, animated: false, anchor: false });
     }
     /// Move the vertical scroll viewport keyed `key` (or the nearest one containing it) so it
     /// shows its content from `y` points down, clamped to its ends. Instant; any momentum or
     /// glide stops, and a `stick_bottom` viewport that lands on its end follows it again.
     pub fn scroll_to_y(&mut self, key: impl Into<String>, y: f32) {
-        self.scroll_offsets.push(crate::runtime::ScrollRequest { key: key.into(), x: None, y: Some(y), animated: false });
+        self.scroll_offsets.push(crate::runtime::ScrollRequest { key: key.into(), x: None, y: Some(y), animated: false, anchor: false });
     }
     /// Glide the scroll viewport keyed `key` (or the nearest one containing it) to show its
     /// content from (`x`, `y`) points in, on the spring [`Tx::scroll_to_bottom`] uses, as a
@@ -61,11 +61,21 @@ impl Tx {
     /// doesn't scroll are ignored, so a vertical list takes `y` alone. The wheel, a fling or
     /// another request takes over mid-glide. Reduced motion, and a settled frame, jump.
     pub fn scroll_to(&mut self, key: impl Into<String>, x: f32, y: f32) {
-        self.scroll_offsets.push(crate::runtime::ScrollRequest { key: key.into(), x: Some(x), y: Some(y), animated: true });
+        self.scroll_offsets.push(crate::runtime::ScrollRequest { key: key.into(), x: Some(x), y: Some(y), animated: true, anchor: false });
     }
     /// [`Tx::scroll_to`] without the glide.
     pub fn scroll_to_instant(&mut self, key: impl Into<String>, x: f32, y: f32) {
-        self.scroll_offsets.push(crate::runtime::ScrollRequest { key: key.into(), x: Some(x), y: Some(y), animated: false });
+        self.scroll_offsets.push(crate::runtime::ScrollRequest { key: key.into(), x: Some(x), y: Some(y), animated: false, anchor: false });
+    }
+    /// Move the vertical scroll viewport around the element keyed `key` so the element's top sits
+    /// `at` points below the viewport's top, clamped to the content's ends: a page that opens on
+    /// a heading lands it just under its bar. It's placed from the layout of the commit this
+    /// handler causes, so the frame that first draws a new page draws it there, and unlike
+    /// [`Tx::scroll_into_view`] where it lands doesn't depend on where the view was or what was
+    /// stuck over it. Instant; any momentum or glide stops. The element must be laid out: reveal
+    /// a virtual row that isn't mounted with [`Tx::scroll_into_view`].
+    pub fn scroll_key_to(&mut self, key: impl Into<String>, at: f32) {
+        self.scroll_offsets.push(crate::runtime::ScrollRequest { key: key.into(), x: None, y: Some(at), animated: false, anchor: true });
     }
     /// Keep the element keyed `key` (or at that path) where it shows on screen across the
     /// commit this handler causes, by moving the nearest vertical scroll viewport around it. A

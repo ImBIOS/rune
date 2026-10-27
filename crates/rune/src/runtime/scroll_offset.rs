@@ -1,5 +1,6 @@
 //! `Tx::scroll_to`, `Tx::scroll_to_instant`, `Tx::scroll_to_x` and `Tx::scroll_to_y`: moving a
-//! viewport to an offset its app picked, gliding there or at once.
+//! viewport to an offset its app picked, gliding there or at once; and `Tx::scroll_key_to`,
+//! landing an element at a height in its viewport.
 use super::*;
 
 /// A request to move a viewport to an offset on one axis or both.
@@ -9,6 +10,9 @@ pub(crate) struct ScrollRequest {
     pub x: Option<f32>,
     pub y: Option<f32>,
     pub animated: bool,
+    /// `key` names an element, and `y` is how far below the viewport's top its top lands
+    /// (`Tx::scroll_key_to`).
+    pub anchor: bool,
 }
 
 impl<S: 'static> Runtime<S> {
@@ -21,7 +25,20 @@ impl<S: 'static> Runtime<S> {
         let animate = !self.reduced_motion && !self.settled;
         // Jumps: (viewport, horizontal, offset), reapplied once virtual rows land.
         let mut jumps = Vec::new();
+        // Anchored jumps, placed again from the new layout once virtual rows land.
+        let mut anchors = Vec::new();
         for r in requests {
+            if r.anchor {
+                let Some((i, to)) = self.anchor_offset(&r.key, r.y.unwrap_or(0.0)) else { continue };
+                jumps.push((self.nodes[i].id, false, to));
+                anchors.push((jumps.len() - 1, r.key, r.y.unwrap_or(0.0)));
+                if let Some(st) = self.scrolls.get_mut(&self.nodes[i].id) {
+                    st.v = 0.0;
+                    st.glide = None;
+                    st.glide_to = None;
+                }
+                continue;
+            }
             let Some(i) = self.scroll_viewport_on(&r.key, r.x.is_some(), r.y.is_some()) else { continue };
             let (id, axes) = (self.nodes[i].id, self.nodes[i].scroll_axes);
             let (view_w, view_h) = (f64::from(self.nodes[i].local.w), f64::from(self.nodes[i].local.h));
@@ -66,6 +83,9 @@ impl<S: 'static> Runtime<S> {
             if !self.virtual_window_changed() { break; }
             self.commit(&Tx::default());
             self.step_scroll(0.0);
+            for (j, key, at) in &anchors {
+                if let Some((_, to)) = self.anchor_offset(key, *at) { jumps[*j].2 = to; }
+            }
             self.apply_jumps(&jumps);
         }
     }
@@ -82,6 +102,14 @@ impl<S: 'static> Runtime<S> {
                 st.pinned = stick && st.offset >= st.max - 0.5;
             }
         }
+    }
+
+    /// The vertical viewport around the element `key` and the offset that puts the element's
+    /// top `at` points below its top, before clamping.
+    fn anchor_offset(&self, key: &str, at: f32) -> Option<(usize, f64)> {
+        let e = self.nodes.iter().enumerate().position(|(i, n)| n.named(key) && !self.subtree_exiting(i))?;
+        let v = self.scroll_viewport_on(key, false, true)?;
+        Some((v, f64::from(self.nodes[e].target[1] - self.nodes[v].target[1] - at).max(0.0)))
     }
 
     /// The viewport keyed (or pathed) `key`, or the nearest one around it, that scrolls

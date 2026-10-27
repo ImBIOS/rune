@@ -322,7 +322,7 @@ pub(super) fn anchored_target(nodes: &[Node], scrolls: &HashMap<NodeId, ScrollSt
 fn target_shift(nodes: &[Node], scrolls: &HashMap<NodeId, ScrollState>, j: usize) -> [f32; 2] {
     let mut total = [0.0; 2];
     for a in std::iter::successors(Some(j), |&p| nodes[p].parent.filter(|_| nodes[p].above.is_none())) {
-        let Some((edge, inset)) = nodes[a].sticky.as_ref().and_then(|s| Some((s.edge?, s.inset))) else { continue };
+        let Some((edge, inset, tail)) = nodes[a].sticky.as_ref().and_then(|s| Some((s.edge?, s.inset, s.tail))) else { continue };
         let Some(p) = nodes[a].parent else { continue };
         if edge == StickyEdge::Left {
             let Some(s) = std::iter::successors(Some(p), |&u| nodes[u].parent)
@@ -361,7 +361,7 @@ fn target_shift(nodes: &[Node], scrolls: &HashMap<NodeId, ScrollState>, j: usize
             let top = nodes[a].target[1] - st_y - oy;
             let bottom = nodes[a].target[3] - st_y - oy;
             let frame = [0.0, band_h, box_top, box_bottom, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY];
-            total[1] += shift(edge, inset, [top, bottom, 0.0, 0.0], frame);
+            total[1] += shift(edge, if tail { inset - (bottom - top) } else { inset }, [top, bottom, 0.0, 0.0], frame);
         }
     }
     total

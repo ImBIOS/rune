@@ -89,6 +89,7 @@ pub mod color;
 pub mod compose;
 pub mod edit;
 pub mod el;
+mod el_sticky;
 mod key_diagnostics;
 pub mod growth;
 pub mod live;

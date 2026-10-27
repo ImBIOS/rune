@@ -5783,7 +5783,7 @@ impl<S: 'static> Runtime<S> {
                 pinh.anchor = [0.0; 2];
                 pinh.anchor_to = [0.0; 2];
             }
-            if self.has_sticky && let Some((edge, inset)) = n.sticky.as_ref().and_then(|s| Some((s.edge?, s.inset))) {
+            if self.has_sticky && let Some((edge, inset, tail)) = n.sticky.as_ref().and_then(|s| Some((s.edge?, s.inset, s.tail))) {
                 // Worked out from this frame's offsets, which the viewport above already applied.
                 // Exclude this node's own `prop::OFFSET` (`live_offset`) so it translates from the
                 // stuck place rather than being clamped away by the sticky edge.
@@ -5809,7 +5809,7 @@ impl<S: 'static> Runtime<S> {
                 let own_off = self.scene.get(n.id, prop::OFFSET).unwrap_or(rune_motion::Vec2::ZERO);
                 let (top, left) = (p.rect.y - own_off.y + pinh.dy, p.rect.x - own_off.x + pinh.dx);
                 let h = if self.row_h[i] >= 0.0 { self.row_h[i] } else { p.rect.h };
-                let shift = sticky::shift(edge, inset, [top, top + h, left, left + p.rect.w], frame);
+                let shift = sticky::shift(edge, if tail { inset - h } else { inset }, [top, top + h, left, left + p.rect.w], frame);
                 self.stuck[i] = shift;
                 if edge == crate::el::StickyEdge::Left { pinh.dx += shift } else { pinh.dy += shift }
                 // A sticky element stays crisp against the viewport edge it sticks to while rows
