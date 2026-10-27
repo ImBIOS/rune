@@ -58,7 +58,8 @@ impl<S: 'static> Live<S> {
         let band = if inset > 0.0 { BAND } else { 0.0 };
         let header = row().w(SIDEBAR).h(HEADER).pl(8.0).center_y().child(back);
         let drag = (band > 0.0).then(|| el().w(SIDEBAR).h(band).window_drag());
-        let mut list = col().key("playground-list").w(SIDEBAR).h(height - 2.0 * HEADER - band).px(8.0).pb(8.0).scroll(ScrollSpec { stick_bottom: false });
+        // A scroll measures its first child, so the rows go in one content column.
+        let mut list = col().key("playground-rows").w_full();
         let mut group = None;
         for (n, &i) in self.order.iter().enumerate() {
             if group != Some(self.group(i)) {
@@ -80,6 +81,8 @@ impl<S: 'static> Live<S> {
         if self.order.is_empty() {
             list = list.child(text("No stories").font(type_::BODY).color(t.text_secondary).px(8.0).pt(4.0));
         }
+        let list = col().key("playground-list").w(SIDEBAR).h(height - 2.0 * HEADER - band).px(8.0).pb(8.0)
+            .scroll(ScrollSpec { stick_bottom: false }).child(list);
         col().w(SIDEBAR).h(height)
             .children(drag)
             .child(header)

@@ -538,3 +538,27 @@ fn scene_triggers_and_sides_take_names_as_find_does() {
     rt.frame(DT);
     assert_eq!(shows(&rt, "still-side"), "side 4");
 }
+
+#[test]
+fn a_long_story_list_scrolls_and_reaches_what_was_off_screen() {
+    let mut p = base();
+    for n in 0..30 {
+        let name: &'static str = Box::leak(format!("Many/Story {n}").into_boxed_str());
+        p = p.story(Story::new(name, Lab::default, lab));
+    }
+    let mut rt = runtime_with(p, Some(None), true);
+    rt.frame(DT);
+    let last = rt.playground.as_ref().unwrap().order.last().copied().unwrap();
+    let item = format!("playground-item-{last}");
+    let (_, y) = center(&rt, &item);
+    assert!(y > 500.0, "the last story starts below the window");
+    let list = find(&rt, "playground-list").expect("list").rect;
+
+    rt.wheel(list[0] + 20.0, list[1] + 100.0, -4000.0);
+    rt.frame(DT);
+    rt.frame(DT);
+    let (x2, y2) = center(&rt, &item);
+    assert!(y2 < y && y2 < 500.0, "the wheel scrolled the list up to the last story");
+    let hit = rt.element_at(x2, y2).and_then(|p| p.key().map(str::to_owned));
+    assert!(hit.is_some_and(|k| k == item || find(&rt, &k).is_some_and(|e| e.rect[1] >= y2 - 28.0)), "the last story is hittable");
+}
