@@ -238,3 +238,99 @@ fn a_focused_field_remounting_after_a_layout_read_does_not_steal_newer_focus() {
     assert_eq!(focused, ["second"], "remounted field must not steal focus from the newer field");
     assert!(rt.state.second.focused && !rt.state.first.focused);
 }
+
+#[derive(Default)]
+struct SizeRead {
+    size_only: bool,
+    tall: bool,
+    views: Cell<u32>,
+}
+
+/// Rows in a scroll; a bar below it echoes row 10's size, read with `layout_size` or `layout`.
+fn sized_view(s: &SizeRead, cx: &mut Cx<SizeRead>) -> El {
+    s.views.set(s.views.get() + 1);
+    let rows = (0..40).fold(col().w_full(), |c, i| {
+        c.child(el().key(format!("r{i}")).w_full().h(if i == 10 && s.tall { 50.0 } else { 30.0 }))
+    });
+    let size = if s.size_only { cx.layout_size("r10") } else { cx.layout("r10").map(|r| [r[2], r[3]]) };
+    let mut root = col().w_full().h_full()
+        .child(col().key("scroll").w_full().h(300.0).scroll(ScrollSpec { stick_bottom: false }).child(rows));
+    if let Some([w, h]) = size {
+        root = root.child(el().key("echo").w(w).h(h));
+    }
+    root
+}
+
+fn echo(rt: &Runtime<SizeRead>) -> [f32; 4] {
+    rt.elements().into_iter().find(|e| e.key.as_deref() == Some("echo")).expect("echo").target
+}
+
+/// View runs and commits over 60 frames of a trackpad-like scroll, a wheel event a frame.
+fn scroll_runs(size_only: bool) -> (u32, u64) {
+    let mut rt = Runtime::new(SizeRead { size_only, ..SizeRead::default() }, sized_view, (300.0, 400.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    for _ in 0..10 { rt.frame(1.0 / 120.0); }
+    let (views, commits) = (rt.state.views.get(), rt.stats.commits);
+    let before = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r10")).unwrap().rect[1];
+    for _ in 0..60 {
+        rt.wheel(100.0, 100.0, -3.0);
+        rt.frame(1.0 / 120.0);
+    }
+    let after = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r10")).unwrap().rect[1];
+    assert!(after < before - 50.0, "scrolled: {before} -> {after}");
+    (rt.state.views.get() - views, rt.stats.commits - commits)
+}
+
+#[test]
+fn a_size_read_does_not_re_run_its_view_while_the_element_scrolls() {
+    let (size_views, size_commits) = scroll_runs(true);
+    let (rect_views, rect_commits) = scroll_runs(false);
+    eprintln!("60 scroll frames: layout_size {size_views} views, {size_commits} commits; layout {rect_views} views, {rect_commits} commits");
+    assert_eq!((size_views, size_commits), (0, 0), "position moves alone don't re-run a size read");
+    assert!(rect_views >= 50 && rect_commits >= 50, "a whole-rect read still follows the position ({rect_views} views)");
+}
+
+#[test]
+fn a_size_read_re_runs_its_view_when_the_element_resizes() {
+    let mut rt = Runtime::new(SizeRead { size_only: true, ..SizeRead::default() }, sized_view, (300.0, 400.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    assert_eq!(echo(&rt)[2..], [300.0, 30.0], "settled on the first frame");
+
+    // Its own height, in the commit that changed it.
+    rt.update(|s, _| s.tall = true);
+    rt.frame(1.0 / 120.0);
+    assert_eq!(echo(&rt)[2..], [300.0, 50.0]);
+
+    // Its width, from a parent resize.
+    rt.set_viewport((420.0, 400.0), 2.0);
+    rt.frame(1.0 / 120.0);
+    assert_eq!(echo(&rt)[2..], [420.0, 50.0]);
+
+    let views = rt.state.views.get();
+    for _ in 0..30 { rt.frame(1.0 / 120.0); }
+    assert_eq!(rt.state.views.get(), views, "settled");
+}
+
+/// A card reads its own width with `layout_size` to pick two columns or one.
+fn responsive_size(s: &S, cx: &mut Cx<S>) -> El {
+    s.views.set(s.views.get() + 1);
+    let wide = cx.layout_size("card").is_some_and(|[w, _]| w >= 400.0);
+    let body = if wide { row().key("body").gap(10.0) } else { col().key("body").gap(10.0) };
+    col().w_full().padding(10.0).child(
+        col().key("card").w_full().child(body.child(el().key("a").w(150.0).h(40.0)).child(el().key("b").w(150.0).h(40.0))),
+    )
+}
+
+#[test]
+fn a_view_reading_its_own_size_with_layout_size_settles_on_the_first_frame() {
+    let mut rt = Runtime::new(S::default(), responsive_size, (600.0, 400.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    assert_eq!(find(&rt, "b").target[1], find(&rt, "a").target[1], "wide: side by side on the first frame");
+    rt.set_viewport((300.0, 400.0), 2.0);
+    rt.frame(1.0 / 120.0);
+    assert!(find(&rt, "b").target[1] > find(&rt, "a").target[1], "narrow in the commit that resized it");
+    frames(&mut rt, 60);
+    let (views, commits) = (rt.state.views.get(), rt.stats.commits);
+    frames(&mut rt, 30);
+    assert_eq!((rt.state.views.get(), rt.stats.commits), (views, commits), "settled");
+}

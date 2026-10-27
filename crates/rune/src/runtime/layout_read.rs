@@ -1,8 +1,11 @@
-//! Reading an element's laid-out rect: `Cx::layout` for views, `El::on_layout` for handlers,
-//! and `El::on_screen_layout` for handlers in global screen points (the rect plus the window
-//! origin its host reports through `Runtime::set_window_origin`).
+//! Reading an element's laid-out rect: `Cx::layout` (or only its size, `Cx::layout_size`) for
+//! views, `El::on_layout` for handlers, and `El::on_screen_layout` for handlers in global screen
+//! points (the rect plus the window origin its host reports through `Runtime::set_window_origin`).
 //!
-//! Both see where layout puts an element (window points, after scrolling), never a frame of
+//! Each read records the part of the rect it depends on, so a size read doesn't re-run its
+//! view when only the position moves (scrolling, say).
+//!
+//! All of them see where layout puts an element (window points, after scrolling), never a frame of
 //! its spring, so they don't re-run through animations. A view reading something its own
 //! output resizes (its own size, say) can feed back into itself; that settles instead of
 //! looping:
@@ -21,8 +24,90 @@ const ECHOES: u32 = 4;
 /// A rect counts as moved when an edge moves more than this (points).
 const MOVED: f32 = 0.5;
 
-/// What each key a view read resolved to, as last given to the view.
-pub(super) type LayoutSeen = HashMap<String, Option<[f32; 4]>>;
+/// The part of a laid-out rect a read depends on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum LayoutPart {
+    /// Width and height (`Cx::layout_size`).
+    Size,
+    /// The whole rect (`Cx::layout`).
+    Rect,
+}
+
+/// The keys a view read, each with the part it depends on.
+pub(crate) type LayoutReads = Vec<(String, LayoutPart)>;
+
+/// Counts a read of `key`'s `part` in `reads`; a whole-rect read covers a size read.
+pub(crate) fn note_read(reads: &mut LayoutReads, key: &str, part: LayoutPart) {
+    match reads.iter_mut().find(|(k, _)| k == key) {
+        Some((_, p)) => if part == LayoutPart::Rect { *p = part },
+        None => reads.push((key.to_owned(), part)),
+    }
+}
+
+/// What a key a view read resolved to, as last given to the view, and the part it depends on.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Seen {
+    pub(crate) rect: Option<[f32; 4]>,
+    pub(crate) part: LayoutPart,
+}
+
+/// What each key a view read resolved to.
+pub(crate) type LayoutSeen = HashMap<String, Seen>;
+
+/// The rect `seen` holds for `key`, when the view read it.
+pub(crate) fn seen_rect(seen: &LayoutSeen, key: &str) -> Option<[f32; 4]> {
+    seen.get(key).and_then(|s| s.rect)
+}
+
+/// `[w, h]` of `rect`.
+pub(crate) fn size_of(rect: Option<[f32; 4]>) -> Option<[f32; 2]> {
+    rect.map(|r| [r[2], r[3]])
+}
+
+/// Whether the `part` of the rect a read depends on moved between `a` and `b`.
+fn part_moved(a: Option<[f32; 4]>, b: Option<[f32; 4]>, part: LayoutPart) -> bool {
+    match part {
+        LayoutPart::Rect => moved(a, b),
+        LayoutPart::Size => match (size_of(a), size_of(b)) {
+            (Some(a), Some(b)) => a.iter().zip(b).any(|(x, y)| (x - y).abs() > MOVED),
+            (a, b) => a.is_some() != b.is_some(),
+        },
+    }
+}
+
+impl<S> Cx<S> {
+    /// The laid-out rect `[x, y, w, h]` in window points, after scrolling, of the element keyed
+    /// `key` (or named by a key path such as `"msg-42/body"`, as `Tx::fly_text` takes), or
+    /// `None` when there is none. It is where layout puts the element, not a frame of its spring.
+    ///
+    /// A view that reads it re-runs when that rect moves or resizes past half a point: in the
+    /// same commit when the change comes from layout, the next frame when scrolling moved it.
+    /// Reading an element the view itself resizes (its own size, say) settles: the commit
+    /// re-runs the view at most twice more while the value moves, then keeps the last layout,
+    /// and layout reads alone can't keep causing commits. A view whose output never reaches a
+    /// fixed point gets a stale value rather than oscillating.
+    ///
+    /// A view that only needs the size should call [`Self::layout_size`], which doesn't re-run
+    /// it when the element only moves.
+    pub fn layout(&self, key: &str) -> Option<[f32; 4]> {
+        note_read(&mut self.layout_reads.borrow_mut(), key, LayoutPart::Rect);
+        let rect = seen_rect(&self.layout, key);
+        crate::memo::read_layout(key, rect);
+        rect
+    }
+
+    /// `[w, h]` of the element [`Self::layout`] would return the rect of, in points. Prefer it
+    /// whenever the view uses only the size: the view re-runs when the width or height changes
+    /// past half a point, but not when the element only moves, so an element inside a scrolling
+    /// viewport doesn't re-run the view every frame of the scroll. It settles on the first
+    /// layout like [`Self::layout`], so the first frame already has the right size.
+    pub fn layout_size(&self, key: &str) -> Option<[f32; 2]> {
+        note_read(&mut self.layout_reads.borrow_mut(), key, LayoutPart::Size);
+        let size = size_of(seen_rect(&self.layout, key));
+        crate::memo::read_layout_size(key, size);
+        size
+    }
+}
 
 fn moved(a: Option<[f32; 4]>, b: Option<[f32; 4]>) -> bool {
     match (a, b) {
@@ -83,14 +168,16 @@ impl<S: 'static> Runtime<S> {
 
     /// Refreshes what the next view sees for `reads` (the last view's reads when `None`) from
     /// `nodes` (the current frame's when `None`). Returns whether any of it moved.
-    pub(super) fn layout_moved(&mut self, reads: Option<&[String]>, nodes: Option<&[Node]>) -> bool {
+    /// Only the part of each rect a read depends on counts.
+    pub(super) fn layout_moved(&mut self, reads: Option<&[(String, LayoutPart)]>, nodes: Option<&[Node]>) -> bool {
         let nodes = nodes.unwrap_or(&self.nodes);
+        let resolve = |k: &String, part| (k.clone(), Seen { rect: self.layout_of(nodes, k), part });
         let next: LayoutSeen = match reads {
-            Some(keys) => keys.iter().map(|k| (k.clone(), self.layout_of(nodes, k))).collect(),
-            None => self.layout_seen.keys().map(|k| (k.clone(), self.layout_of(nodes, k))).collect(),
+            Some(keys) => keys.iter().map(|(k, part)| resolve(k, *part)).collect(),
+            None => self.layout_seen.iter().map(|(k, s)| resolve(k, s.part)).collect(),
         };
         let changed = next.len() != self.layout_seen.len()
-            || next.iter().any(|(k, v)| self.layout_seen.get(k).is_none_or(|old| moved(*old, *v)));
+            || next.iter().any(|(k, v)| self.layout_seen.get(k).is_none_or(|old| part_moved(old.rect, v.rect, v.part)));
         self.layout_seen = next;
         changed
     }

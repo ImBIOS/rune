@@ -24,8 +24,8 @@
 //!   again. App state the closure reads (a theme, a locale, a selection) must be part of
 //!   `version`. For a text field that's the
 //!   `TextEdit` itself, which hashes its text, selection, composition and focus.
-//! - **`Cx` reads.** `Cx::layout` and `Cx::caret` called inside the closure are recorded with
-//!   what they returned. A reuse counts them as read again, so the view still re-runs when they
+//! - **`Cx` reads.** `Cx::layout`, `Cx::layout_size` and `Cx::caret` called inside the closure
+//!   are recorded with what they returned. A reuse counts them as read again, so the view still re-runs when they
 //!   move, and builds again when one returns something else. They needn't be in `version`.
 //! - **Hot reload** (`rune/hot`) drops every cached subtree, so new code always builds.
 //! - **Virtual rows** that scroll out keep their cached subtree as long as the view still
@@ -49,6 +49,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
 use crate::El;
+use crate::runtime::layout_read::{LayoutPart, LayoutSeen, note_read, seen_rect, size_of};
 
 /// The children a memo's placeholders share.
 #[derive(Clone)]
@@ -97,19 +98,21 @@ impl Built {
 enum Read {
     Caret(String, Option<[f32; 4]>),
     Layout(String, Option<[f32; 4]>),
+    LayoutSize(String, Option<[f32; 2]>),
 }
 
 /// What the `Cx` of the view being built would return now.
 struct Seen {
     caret: Option<(String, [f32; 4])>,
-    layout: HashMap<String, Option<[f32; 4]>>,
+    layout: LayoutSeen,
 }
 
 impl Seen {
     fn holds(&self, read: &Read) -> bool {
         match read {
             Read::Caret(key, rect) => crate::runtime::caret_of(&self.caret, key) == *rect,
-            Read::Layout(key, rect) => self.layout.get(key).copied().flatten() == *rect,
+            Read::Layout(key, rect) => seen_rect(&self.layout, key) == *rect,
+            Read::LayoutSize(key, size) => size_of(seen_rect(&self.layout, key)) == *size,
         }
     }
 }
@@ -118,7 +121,7 @@ impl Seen {
 #[derive(Default)]
 pub(crate) struct Replayed {
     pub(crate) caret: bool,
-    pub(crate) layout: Vec<String>,
+    pub(crate) layout: crate::runtime::layout_read::LayoutReads,
 }
 
 struct Entry {
@@ -201,7 +204,7 @@ pub(crate) fn enter(
     accent: crate::SystemAccent,
     reduced_motion: bool,
     caret: Option<(String, [f32; 4])>,
-    layout: HashMap<String, Option<[f32; 4]>>,
+    layout: LayoutSeen,
 ) -> Guard {
     cache.pass += 1;
     let accent = [accent.accent(env.system_dark), accent.focus(env.system_dark)].map(|c| [c.r, c.g, c.b, c.a].map(f32::to_bits));
@@ -229,19 +232,38 @@ pub(crate) fn read_layout(key: &str, rect: Option<[f32; 4]>) {
     record(|| Read::Layout(key.to_owned(), rect));
 }
 
+/// Records a `Cx::layout_size` read for the memo building, if any.
+pub(crate) fn read_layout_size(key: &str, size: Option<[f32; 2]>) {
+    record(|| Read::LayoutSize(key.to_owned(), size));
+}
+
 /// [`Cx::layout`](crate::Cx::layout) for a component that builds inside a view without taking
 /// [`Cx`](crate::Cx); `None` outside a view build.
 pub fn layout(key: &str) -> Option<[f32; 4]> {
+    read_outside_cx(key, LayoutPart::Rect, |rect| (rect, Read::Layout(key.to_owned(), rect)))
+}
+
+/// [`Cx::layout_size`](crate::Cx::layout_size) for a component that builds inside a view
+/// without taking [`Cx`](crate::Cx); `None` outside a view build. Prefer it to [`layout`] when
+/// only the size matters, so the view doesn't re-run when the element only moves.
+pub fn layout_size(key: &str) -> Option<[f32; 2]> {
+    read_outside_cx(key, LayoutPart::Size, |rect| {
+        let size = size_of(rect);
+        (size, Read::LayoutSize(key.to_owned(), size))
+    })
+}
+
+/// A layout read of `key`'s `part` made without a `Cx`: counted toward the view and the memo
+/// building, if any. `read` turns the rect the view sees into the value and its record.
+fn read_outside_cx<T>(key: &str, part: LayoutPart, read: impl FnOnce(Option<[f32; 4]>) -> (Option<T>, Read)) -> Option<T> {
     SCOPES.with_borrow_mut(|scopes| {
         let s = scopes.last_mut()?;
-        let rect = s.seen.layout.get(key).copied().flatten();
-        if !s.replayed.layout.iter().any(|k| k == key) {
-            s.replayed.layout.push(key.to_owned());
-        }
+        let (value, made) = read(seen_rect(&s.seen.layout, key));
+        note_read(&mut s.replayed.layout, key, part);
         if !s.reads.is_empty() {
-            s.note(&[Read::Layout(key.to_owned(), rect)]);
+            s.note(&[made]);
         }
-        rect
+        value
     })
 }
 
@@ -293,8 +315,8 @@ pub(crate) fn hash_of(v: &impl Hash) -> u64 {
 /// }))
 /// ```
 ///
-/// Anything the closure reads that can change belongs in `version`, apart from `Cx::layout`
-/// and `Cx::caret`, which are tracked; see the [module docs](crate::memo) for handlers, live
+/// Anything the closure reads that can change belongs in `version`, apart from `Cx::layout`,
+/// `Cx::layout_size` and `Cx::caret`, which are tracked; see the [module docs](crate::memo) for handlers, live
 /// values and what else invalidates. Outside a view (a test calling a view function directly)
 /// it just builds.
 #[cfg_attr(debug_assertions, track_caller)]
@@ -329,11 +351,8 @@ pub fn memo(id: impl Into<String>, version: impl Hash, build: impl FnOnce() -> E
             for read in reads {
                 match read {
                     Read::Caret(..) => s.replayed.caret = true,
-                    Read::Layout(key, _) => {
-                        if !s.replayed.layout.contains(&key) {
-                            s.replayed.layout.push(key);
-                        }
-                    }
+                    Read::Layout(key, _) => note_read(&mut s.replayed.layout, &key, LayoutPart::Rect),
+                    Read::LayoutSize(key, _) => note_read(&mut s.replayed.layout, &key, LayoutPart::Size),
                 }
             }
             if let Some(parent) = s.nested.last_mut() {
@@ -648,6 +667,44 @@ mod tests {
         rt.state.width = 150.0;
         commit(&mut rt);
         assert_eq!(label(&rt).as_deref(), Some("width 150"), "a moved read builds, though the version didn't change");
+    }
+
+    struct Moving {
+        top: f32,
+        width: f32,
+        ticks: u32,
+    }
+
+    fn moving(s: &Moving, cx: &mut Cx<Moving>) -> El {
+        let shown = |key: &str, v: Option<[f32; 2]>| counted(text(format!("{v:?}")).key(key));
+        col().size(300.0, 300.0).children([
+            el().key("gap").w(10.0).h(s.top),
+            el().key("probe").w(s.width).h(10.0),
+            memo("cx", 0, || shown("cx", cx.layout_size("probe"))),
+            memo("free", 0, || shown("free", layout_size("probe"))),
+            memo("rect", 0, || shown("rect", cx.layout("probe").map(|r| [r[2], r[3]]))),
+            text(format!("tick {}", s.ticks)).key("tick"),
+        ])
+    }
+
+    #[test]
+    fn a_size_read_inside_a_memo_rebuilds_it_only_when_the_size_changes() {
+        BUILDS.set(0);
+        let mut rt = Runtime::new(Moving { top: 0.0, width: 100.0, ticks: 0 }, moving, (300.0, 300.0), Env::default());
+        rt.frame(0.0);
+        let shown = |rt: &Runtime<Moving>, key| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).and_then(|e| e.text);
+        assert_eq!(shown(&rt, "cx").as_deref(), Some("Some([100.0, 10.0])"), "settled on the first commit");
+        assert_eq!(shown(&rt, "free"), shown(&rt, "cx"));
+        let builds = BUILDS.get();
+        rt.state.top = 40.0;
+        rt.state.ticks += 1;
+        commit(&mut rt);
+        assert_eq!(BUILDS.get(), builds + 1, "a move rebuilds only the whole-rect read");
+        rt.state.width = 150.0;
+        commit(&mut rt);
+        assert_eq!(BUILDS.get(), builds + 4, "a resize rebuilds all three");
+        assert_eq!(shown(&rt, "cx").as_deref(), Some("Some([150.0, 10.0])"));
+        assert_eq!(shown(&rt, "free"), shown(&rt, "cx"));
     }
 
     #[test]

@@ -98,7 +98,7 @@ mod scroll_bottom;
 #[path = "runtime/caret.rs"]
 mod caret;
 #[path = "runtime/layout_read.rs"]
-mod layout_read;
+pub(crate) mod layout_read;
 #[path = "links.rs"]
 mod links;
 #[path = "selectable.rs"]
@@ -228,7 +228,7 @@ pub struct Cx<S> {
     caret: Option<(String, [f32; 4])>,
     caret_read: std::cell::Cell<bool>,
     layout: layout_read::LayoutSeen,
-    layout_reads: std::cell::RefCell<Vec<String>>,
+    layout_reads: std::cell::RefCell<layout_read::LayoutReads>,
     _s: PhantomData<fn(&S)>,
 }
 
@@ -332,23 +332,6 @@ impl<S> Cx<S> {
         self.caret_read.set(true);
         let rect = caret_of(&self.caret, key);
         crate::memo::read_caret(key, rect);
-        rect
-    }
-    /// The laid-out rect `[x, y, w, h]` in window points, after scrolling, of the element keyed
-    /// `key` (or named by a key path such as `"msg-42/body"`, as `Tx::fly_text` takes), or
-    /// `None` when there is none. It is where layout puts the element, not a frame of its spring.
-    ///
-    /// A view that reads it re-runs when that rect moves or resizes past half a point: in the
-    /// same commit when the change comes from layout, the next frame when scrolling moved it.
-    /// Reading an element the view itself resizes (its own size, say) settles: the commit
-    /// re-runs the view at most twice more while the value moves, then keeps the last layout,
-    /// and layout reads alone can't keep causing commits. A view whose output never reaches a
-    /// fixed point gets a stale value rather than oscillating.
-    pub fn layout(&self, key: &str) -> Option<[f32; 4]> {
-        let mut reads = self.layout_reads.borrow_mut();
-        if !reads.iter().any(|k| k == key) { reads.push(key.to_owned()); }
-        let rect = self.layout.get(key).copied().flatten();
-        crate::memo::read_layout(key, rect);
         rect
     }
 }
@@ -1211,7 +1194,7 @@ pub struct Runtime<S: 'static> {
     caret: Option<(String, [f32; 4])>,
     /// The last view read the caret, so it re-runs when the caret moves.
     caret_watch: bool,
-    /// Keys the last view read with `Cx::layout`, and what each resolved to.
+    /// Keys the last view read with `Cx::layout` or `Cx::layout_size`, and what each resolved to.
     layout_seen: layout_read::LayoutSeen,
     /// Rect last sent to each element's `El::on_layout`.
     layout_fired: HashMap<NodeId, [f32; 4]>,
@@ -3605,7 +3588,7 @@ struct Measurement<'a, S: 'static> {
     caret: Option<(String, [f32; 4])>,
     caret_read: bool,
     layout_seen: layout_read::LayoutSeen,
-    layout_reads: Vec<String>,
+    layout_reads: layout_read::LayoutReads,
 }
 
 /// Owned result of completed measurement. Scene mutation consumes this once; retries never
@@ -3616,7 +3599,7 @@ struct Measured {
     reduced_motion: bool,
     time_scale: f32,
     caret_read: bool,
-    layout_reads: Vec<String>,
+    layout_reads: layout_read::LayoutReads,
 }
 
 impl<S: 'static> Measurement<'_, S> {
@@ -3848,9 +3831,7 @@ impl<S: 'static> Measurement<'_, S> {
         // Reads made by memos this build reused count as made again.
         self.caret_read = cx.caret_read.get() || replayed.caret;
         self.layout_reads = cx.layout_reads.take();
-        for key in replayed.layout {
-            if !self.layout_reads.contains(&key) { self.layout_reads.push(key); }
-        }
+        for (key, part) in replayed.layout { layout_read::note_read(&mut self.layout_reads, &key, part); }
 
         let mut taffy = std::mem::replace(self.layout, TaffyTree::with_capacity(0));
         for entry in self.layout_entries.values_mut() {
