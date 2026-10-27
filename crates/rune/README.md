@@ -1940,6 +1940,10 @@ $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/d
   "rotate", "degrees": 15}` and `{"type": "smart-magnify"}` are trackpad gestures. Each lands at
   `x,y` or `key`, else where the pointer is. `"button": "middle"` (or `back`, `forward`,
   `secondary`) on `down`, `up`, `tap` and `drag` presses with that button.
+- **Window resize in scripts**: `{"type": "resize", "dw": -300, "dh": 0, "dur": 0.5}` is a
+  person dragging the window's corner, one viewport step a frame with an eased hand, as a live
+  resize delivers it (content at rest follows; unlike `Tx::resize_window`). The canvas keeps its
+  size, so grow only after shrinking to see the whole window.
 - **Chords**: `{"type": "shortcut", "chord": "cmd+space"}` is the user pressing a chord
   system-wide. Register it with `App::global_shortcut` or `register_shortcut`. Only its
   shortcut handler runs, exactly as when the OS delivers it: it never reaches `on_key`,

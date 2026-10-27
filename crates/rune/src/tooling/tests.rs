@@ -287,6 +287,29 @@ fn window_resizes_move_the_headless_viewport_on_the_virtual_clock() {
 }
 
 #[test]
+fn a_scripted_resize_steps_the_viewport_with_the_hand() {
+    let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("rune-script-resize-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("script.json");
+    std::fs::write(&script, r#"[{"t": 0.1, "type": "resize", "dw": -100, "dh": -40, "dur": 0.5}]"#).unwrap();
+    let viewport = |at: &str| {
+        let spec = AppSpec::new("resize", (300.0, 400.0), || (), |_, _| crate::el().key("root").w_full().h_full());
+        let tree = dir.join(format!("{at}.json"));
+        let args = ["--script", script.to_str().unwrap(), "--scale", "1", "--fps", "60", "--at", at, "--tree", tree.to_str().unwrap()];
+        headless(crate::App::new(spec), Args::parse_from(args.map(String::from).into()));
+        let tree: Value = serde_json::from_str(&std::fs::read_to_string(tree).unwrap()).unwrap();
+        let size = tree["viewport"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect::<Vec<_>>();
+        (size[0], size[1])
+    };
+    assert_eq!(viewport("0.05"), (300.0, 400.0));
+    let (w, h) = viewport("0.35");
+    assert!(w < 300.0 && w > 200.0 && h < 400.0 && h > 360.0, "mid-resize: {w}x{h}");
+    assert_eq!(viewport("1"), (200.0, 360.0));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn fit_content_height_follows_the_content() {
     let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!("rune-fit-content-{}", std::process::id()));

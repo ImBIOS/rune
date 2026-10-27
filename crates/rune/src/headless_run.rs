@@ -124,6 +124,9 @@ pub enum ScriptEvent {
     Focus(bool),
     /// `{"reopen": true}`: the app reopened, as a click on its macOS Dock icon does.
     Reopen,
+    /// `{"type": "resize", "dw": …, "dh": …, "dur": …}`: a person resizing the window, one step
+    /// a frame, (dw, dh) points from its size when the resize began.
+    Resize { dw: f32, dh: f32 },
     /// A native menu item fired by name.
     Menu(String),
     /// A pop-up menu's picked item id, or None when the script dismisses it.

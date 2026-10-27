@@ -202,3 +202,37 @@ fn a_long_scrolled_text_paints_only_its_visible_lines() {
     assert_eq!(rt.stats.glyphs, 5, "4 visible 'a' lines plus the overhanging 'T' glyph");
     assert_eq!(rt.text.atlas.glyph_entries(), 2, "'a' and overhanging 'T' both rasterized");
 }
+
+#[test]
+fn a_window_resize_lands_rewrapped_rows_under_a_pinned_tail() {
+    use crate::el::text;
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        col().key("viewport").w_full().h_full().scroll(ScrollSpec { stick_bottom: true })
+            .child(col().key("stack").w_full().growth(GrowthSpec::default())
+                .child(col().key("first").w_full().child(text("Wrap again as the window narrows. ".repeat(40)).wrap().w_full()))
+                .child(col().key("last").w_full().child(text("The tail stays pinned. ".repeat(20)).wrap().w_full())))
+    }
+    let mut rt = Runtime::new((), view, (600.0, 300.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    let gap = |rt: &Runtime<()>| {
+        let el = rt.elements();
+        let end = |k: &str| el.iter().find(|e| e.key.as_deref() == Some(k)).map(|e| e.rect[1] + e.rect[3]).unwrap();
+        end("viewport") - end("last")
+    };
+    let rest = gap(&rt);
+    let first = rt.nodes.iter().find(|n| n.key.as_deref() == Some("first")).unwrap().id;
+    let before = rt.grows[&first].h;
+    // One step a frame, as a person drags the corner.
+    for w in (420..600).rev().step_by(6) {
+        rt.set_viewport((w as f32, 300.0), 2.0);
+        rt.frame(1.0 / 120.0);
+        assert!((gap(&rt) - rest).abs() < 0.5, "at width {w} the tail moved off the bottom: {} vs {rest}", gap(&rt));
+        let el = rt.elements();
+        let rect = |k: &str| el.iter().find(|e| e.key.as_deref() == Some(k)).unwrap().rect;
+        let (a, b) = (rect("first"), rect("last"));
+        assert!(a[1] + a[3] <= b[1] + 0.5, "at width {w} the first row runs into the last: {a:?} {b:?}");
+    }
+    assert!(rt.grows[&first].h > before + 1.0, "the first row rewrapped taller");
+    let measured = rt.nodes.iter().find(|n| n.id == first).unwrap().local.h;
+    assert_eq!(rt.grows[&first].h, measured, "and its slot landed with it");
+}

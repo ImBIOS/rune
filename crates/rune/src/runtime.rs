@@ -983,6 +983,8 @@ struct Stack {
     width_hold_until: f64,
     width_shrink_until: f64,
     pending_heights: HashMap<NodeId, f32>,
+    /// The window size at the last commit.
+    window: (f32, f32),
     /// How far its rows grew (positive steps only) this frame.
     grown: f32,
     /// Whether any row in the stack still has height left to grow.
@@ -1095,6 +1097,8 @@ pub struct Runtime<S: 'static> {
     launches: flights::Launches,
     /// `inh_scratch` and `row_dy` index `nodes`: no commit since the last build.
     built: bool,
+    /// The node ids the last build indexed its scratch by.
+    built_ids: Vec<NodeId>,
     #[cfg(debug_assertions)]
     matched_warned: HashSet<Rc<str>>,
     layer_scratch: Vec<(usize, usize, usize)>,
@@ -1493,6 +1497,7 @@ impl<S: 'static> Runtime<S> {
             matched: Vec::new(),
             flying: Vec::new(),
             built: false,
+            built_ids: Vec::new(),
             #[cfg(debug_assertions)]
             matched_warned: HashSet::new(),
             layer_scratch: Vec::new(),
@@ -2541,7 +2546,11 @@ impl<S: 'static> Runtime<S> {
         // What the commit or a `Tx::select_text` changed is heard next frame.
         let changes = self.selection_changes();
         self.queue.extend(changes);
-        self.update_interaction();
+        // Hit tests read last frame's drawn rects and clips by index. When a commit moved the
+        // indices, the build re-evaluates hover from fresh geometry instead.
+        if self.built || self.nodes.iter().map(|n| n.id).eq(self.built_ids.iter().copied()) {
+            self.update_interaction();
+        }
         #[cfg(test)]
         if let Some(publish) = tests::MID_FRAME.with(|hook| hook.borrow_mut().take()) { publish(); }
         let live_animating = self.latch_live(live_woke);
@@ -2592,6 +2601,16 @@ impl<S: 'static> Runtime<S> {
                 let offset = rune_motion::Vec2::new(x * n.local.w, y * n.local.h);
                 if self.scene.get(*id, prop::OFFSET) != Some(offset) {
                     self.scene.set(*id, prop::OFFSET, offset);
+                }
+            }
+        }
+        // An exit that drew nothing last frame (under a parent that hid at once, say) is over.
+        if self.built {
+            for (i, n) in self.nodes.iter().enumerate() {
+                if self.inh_scratch.get(i).is_some_and(|h| h.opacity < 1.0 / 512.0) && self.is_exiting(n.id)
+                    && !self.flying.iter().any(|f| f.0 == n.id)
+                {
+                    self.scene.unmount(n.id);
                 }
             }
         }
@@ -3349,7 +3368,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn node(&self, path: &str) -> Option<&Node> {
-        self.nodes.iter().enumerate().find(|(i, n)| n.path == path && !self.subtree_exiting(*i)).map(|(_, n)| n)
+        self.nodes.iter().enumerate().find(|(i, n)| n.path == path && !self.subtree_exiting(*i) && !self.subtree_unmounted(*i)).map(|(_, n)| n)
     }
 
     /// `El::on_key` handlers on the focused element and its ancestors, innermost first. A
@@ -3494,6 +3513,15 @@ impl<S: 'static> Runtime<S> {
     fn subtree_exiting(&self, mut i: usize) -> bool {
         loop {
             if self.is_exiting(self.nodes[i].id) { return true; }
+            let Some(parent) = self.nodes[i].parent else { return false };
+            i = parent;
+        }
+    }
+
+    /// Unmounted in this commit (an instant removal), though still listed until the next.
+    fn subtree_unmounted(&self, mut i: usize) -> bool {
+        loop {
+            if !self.scene.contains(self.nodes[i].id) { return true; }
             let Some(parent) = self.nodes[i].parent else { return false };
             i = parent;
         }
@@ -4205,6 +4233,11 @@ impl<S: 'static> Runtime<S> {
                 let id = nodes[j].id;
                 self.grows.get(&id).is_some_and(|g| g.moving()) || stack.pending_heights.contains_key(&id)
             });
+            // A person resizing the window holds the content: rewrapped rows land in the frame,
+            // so a pinned tail stays where it is instead of sliding back after the drag. A
+            // streaming row still waits for the width to settle, then eases.
+            let resized = existed && stack.window != self.viewport;
+            stack.window = self.viewport;
             if first || !existed || tx.settle || self.reduced_motion || (reading && !revealing_moving) {
                 stack.width_hold_until = 0.0;
                 stack.width_shrink_until = 0.0;
@@ -4246,7 +4279,7 @@ impl<S: 'static> Runtime<S> {
                 });
                 g.streaming = streaming;
                 g.whole = whole;
-                let snap_change = instant && !streaming && (h - g.target).abs() > 1e-4;
+                let snap_change = (instant || resized) && !streaming && (h - g.target).abs() > 1e-4;
                 if tx.settle || !existed || first || self.reduced_motion || snap_change || row_reading {
                     *g = GrowTrack { streaming, whole, ..GrowTrack::settled(h) };
                     stack.pending_heights.remove(&id);
@@ -4600,8 +4633,9 @@ impl<S: 'static> Runtime<S> {
                     e.pinned = true;
                     e.v = 0.0;
                 }
-                // A window resize or a settle lands the slack: the rows go straight to the bottom.
-                if tx.settle || e.slack.window != self.viewport { e.slack = scroll_bottom::Slack::landed(self.viewport); }
+                // A window resize, a settle or an instant change lands the slack: the rows go
+                // straight to the bottom, not on a glide a moment later.
+                if tx.settle || tx.instant || e.slack.window != self.viewport { e.slack = scroll_bottom::Slack::landed(self.viewport); }
                 if tx.follow_edge && sp.stick_bottom && !tx.instant { e.slack.follow = true; }
             }
         }
@@ -4610,7 +4644,12 @@ impl<S: 'static> Runtime<S> {
         let present_len = nodes.len();
         let old_nodes = std::mem::take(&mut self.nodes);
         let old_ids: Vec<NodeId> = old_nodes.iter().map(|n| n.id).collect();
-        for mut old in old_nodes {
+        // What drew nothing last frame (faded out already, or under a hidden parent) has no exit
+        // to show.
+        let unseen: Vec<bool> = if self.built {
+            (0..old_nodes.len()).map(|i| self.inh_scratch.get(i).is_some_and(|h| h.opacity < 1.0 / 512.0)).collect()
+        } else { Vec::new() };
+        for (oi, mut old) in old_nodes.into_iter().enumerate() {
             if let Some(&i) = self.node_index.get(&old.id) {
                 let mut fill = None;
                 for bound in &mut nodes[i].live {
@@ -4638,7 +4677,7 @@ impl<S: 'static> Runtime<S> {
             let parent_remained_present =
                 old_parent_id.is_none_or(|pid| self.node_index.get(&pid).is_some_and(|&i| i < present_len));
             if parent_remained_present {
-                if tx.settle || (instant && !self.is_exiting(old.id)) {
+                if tx.settle || (instant && !self.is_exiting(old.id)) || unseen.get(oi).copied().unwrap_or(false) {
                     self.scene.unmount(old.id);
                 } else {
                     self.scene.remove(old.id);
@@ -7304,6 +7343,8 @@ impl<S: 'static> Runtime<S> {
         self.update_help();
         self.layer_scratch = layers;
         self.built = true;
+        self.built_ids.clear();
+        self.built_ids.extend(self.nodes.iter().map(|n| n.id));
         if video_signature != self.video_signature {
             // A video loaded, ended or failed: views reading its state re-run next frame.
             self.video_signature = video_signature;

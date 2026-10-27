@@ -48,7 +48,7 @@ impl<S: 'static> Runtime<S> {
     }
     pub(super) fn refresh_modal_index(&mut self) {
         self.modal_index = self.nodes.iter().enumerate().rev()
-            .find(|(i, n)| n.modal.is_some() && !self.subtree_exiting(*i)).map(|(i, _)| i);
+            .find(|(i, n)| n.modal.is_some() && !self.subtree_exiting(*i) && !self.subtree_unmounted(*i)).map(|(i, _)| i);
         self.modal_members = (0..self.nodes.len()).map(|i| self.modal_index.is_none_or(|m| i >= m)).collect();
         // Portals are root siblings. Follow their anchor ownership, including chained
         // popovers, rather than requiring their layout parent to be the modal.
@@ -685,6 +685,15 @@ mod tests {
         rt.update(|s, _| { s.open = false; s.field.focused = false; s.search.focused = true; });
         rt.frame(0.0);
         assert_eq!(focused(&rt), "search", "the handler's focus request outside the modal wins over the opener");
+        assert!(rt.state.search.focused);
+        // The same when the sheet goes in the frame, with no exit.
+        rt.update(|s, _| { s.search.focused = false; s.open = true; s.field.focused = true; });
+        rt.frame(0.0);
+        let now = |rt: &Runtime<Form>| rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key);
+        assert_eq!(now(&rt).as_deref(), Some("field"));
+        rt.update(|s, tx| { tx.instant(); s.open = false; s.field.focused = false; s.search.focused = true; });
+        rt.frame(0.0);
+        assert_eq!(now(&rt).as_deref(), Some("search"), "an instant close keeps the request too");
         assert!(rt.state.search.focused);
     }
 

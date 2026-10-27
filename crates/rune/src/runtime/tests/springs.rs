@@ -405,3 +405,38 @@ fn an_exiting_element_drops_its_own_time_scale() {
     for _ in 0..120 { rt.frame(LAB_DT); }
     assert!(rt.elements().iter().all(|e| e.key.as_deref() != Some("card")), "and it leaves");
 }
+
+#[test]
+fn removing_what_draws_nothing_skips_its_exit() {
+    // (shown, glow opacity, parent hidden)
+    fn view(s: &(bool, f32, bool), _: &mut Cx<(bool, f32, bool)>) -> El {
+        col().key("root").size(200.0, 200.0)
+            .child(col().key("group").size(100.0, 100.0).opacity(if s.2 { 0.0 } else { 1.0 }).opacity_motion(rune_motion::Anim::INSTANT)
+                .children(s.0.then(|| el().key("dot").size(10.0, 10.0).fill(Color::WHITE).transition(Transition::opacity()))))
+            .children(s.0.then(|| el().key("glow").size(50.0, 50.0).fill(Color::WHITE).opacity(s.1).transition(Transition::opacity())))
+    }
+    let exiting = |rt: &Runtime<(bool, f32, bool)>, k: &str| rt.elements().into_iter().any(|e| e.key.as_deref() == Some(k));
+    let mut rt = Runtime::new((true, 1.0, false), view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    for _ in 0..60 { rt.frame(1.0 / 60.0); }
+    // Visible: both fade out.
+    rt.update(|s, _| s.0 = false);
+    rt.frame(1.0 / 60.0);
+    assert!(exiting(&rt, "dot") && exiting(&rt, "glow"), "a visible element fades out");
+    for _ in 0..60 { rt.frame(1.0 / 60.0); }
+    // Faded out already, or under a hidden parent: gone in the frame.
+    rt.update(|s, _| *s = (true, 0.0, true));
+    for _ in 0..60 { rt.frame(1.0 / 60.0); }
+    rt.update(|s, _| s.0 = false);
+    rt.frame(1.0 / 60.0);
+    assert!(!exiting(&rt, "glow"), "the glow at opacity 0 has no exit");
+    assert!(!exiting(&rt, "dot"), "nor the dot under a hidden parent");
+    assert!(!rt.animating);
+    // The parent hides at once in the same commit: the dot's exit stops when it draws nothing.
+    rt.update(|s, _| *s = (true, 1.0, false));
+    for _ in 0..60 { rt.frame(1.0 / 60.0); }
+    rt.update(|s, _| *s = (false, 1.0, true));
+    rt.frame(1.0 / 60.0);
+    rt.frame(1.0 / 60.0);
+    assert!(!exiting(&rt, "dot"), "the dot under a parent that hid at once is gone");
+}

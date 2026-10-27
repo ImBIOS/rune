@@ -23,10 +23,10 @@ crates/rune/src/macos.rs 987
 crates/rune/src/overlay.rs 1983
 crates/rune/src/recorder/mod.rs 812
 crates/rune/src/render.rs 1485
-crates/rune/src/runtime.rs 8547
+crates/rune/src/runtime.rs 8446
 crates/rune/src/selectable.rs 802
 crates/rune/src/text.rs 3151
-crates/rune/src/tooling.rs 2004
+crates/rune/src/tooling.rs 1994
 crates/rune/src/video/macos.rs 914
 crates/rune/src/window.rs 3561
 examples/cursed-settings/src/gags.rs 850

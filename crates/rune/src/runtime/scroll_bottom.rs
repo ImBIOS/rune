@@ -814,6 +814,20 @@ mod tests {
         }
     }
 
+    /// An instant change (a zoom, say) lands the slack with it, not on a glide a moment later.
+    #[test]
+    fn an_instant_change_lands_the_slack_at_once() {
+        let mut rt = sending(7);
+        let y = rects(&rt)["r35"][1];
+        rt.update(|s, tx| { tx.instant(); s.composer.as_mut().unwrap().clear() });
+        rt.frame(1.0 / 120.0);
+        let landed = rects(&rt)["r35"][1];
+        assert!(landed - y > 80.0, "the rows came down with the change: {y} -> {landed}");
+        assert!(slack_gap(&rt).abs() < 0.05, "{}", slack_gap(&rt));
+        for _ in 0..60 { rt.frame(1.0 / 120.0); }
+        assert_eq!(rects(&rt)["r35"][1], landed, "and stayed there");
+    }
+
     /// A composer shrinking with nothing growing in lets the rows down after it, once.
     #[test]
     fn a_composer_shrinking_alone_lets_the_rows_down_once() {

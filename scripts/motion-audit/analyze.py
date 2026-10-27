@@ -10,18 +10,29 @@ looks wrong:
   idle-frames      frames that asked for another frame but changed nothing traced
   never-settles    still animating at the end of the run, long after the last input
   pop-in/pop-out   mounted or unmounted at full opacity with no transition
+  cut-exit         unmounted partway through its fade (nothing leaves above opacity 0)
   jump             a rect edge moves far in one frame between still frames (no interpolation)
   step             one frame of a smooth motion moves much more than its neighbours
   sibling-jump     a jump in a sibling of something that just mounted or unmounted
   overshoot        an edge passes its rest value and comes back
   jiggle           an edge reverses direction twice or more within one motion
+  reversal         one motion heads the wrong way first, or goes out and comes back
+  dog-leg          a move's route is much longer than the straight line between its ends
   latency          input whose first visible response comes frames later
   hitch            frame CPU over budget during motion
 
-Usage: scripts/motion-audit/analyze.py TRACE.jsonl... [--json out.json] [--quiet]
-Exit code is 0; this is a report, not a gate.
+With `--script S.json` before a trace, the script's events can say what they expect
+(`"expect": "instant" | "follow" | "smooth" | "leaves"`, see `expectations`), which adds
+not-instant, lags-hand, snap and wrong-exit findings and makes cuts inside an instant
+window intended.
+
+Usage: scripts/motion-audit/analyze.py [--script S.json] TRACE.jsonl... [--json out.json]
+       [--allow allow.json] [--fail] [--quiet]
+`--allow` takes rules `{"trace", "kind" (or a list), "element" (a substring), "reason"}`;
+every rule needs a reason. Exit code is 0 unless `--fail` and a finding isn't allowed.
 """
 
+import bisect
 import json
 import math
 import statistics
@@ -101,7 +112,30 @@ def fmt_runs(rs, limit=4):
     return s + (f" (+{len(rs) - limit} more)" if len(rs) > limit else "")
 
 
-def analyze(path):
+def loop_ids(els, moved):
+    """A loop (a spinner, a sheen, a busy ring's dots) keeps changing on most frames it's alive,
+    as one element or as a group of siblings taking turns. Its wraps and turns are its design."""
+    busy = defaultdict(set)
+    group_busy = defaultdict(set)
+    for j, moves in enumerate(moved):
+        for id in moves:
+            busy[id].add(j)
+            if id in els:
+                group_busy[els[id].parent].add(j)
+    life = {e.id: len(e.hist) for e in els.values()}
+    out = {id for id in busy if life.get(id, 0) >= 60 and len(busy[id]) >= 0.5 * life[id]}
+    groups = {p for p, ks in group_busy.items() if p in life and life[p] >= 60 and len(ks) >= 0.5 * life[p]}
+    out |= {e.id for e in els.values() if e.parent in groups}
+    # What a loop carries moves with it.
+    grew = True
+    while grew:
+        more = {e.id for e in els.values() if e.parent in out and e.id not in out}
+        grew = bool(more)
+        out |= more
+    return out
+
+
+def analyze(path, script=None):
     header, frames = load(path)
     W, H, hz = header["width"], header["height"], header["hz"]
     dt_ms = 1000.0 / hz
@@ -118,8 +152,14 @@ def analyze(path):
     deaths = defaultdict(list)  # frame -> (id, last state)
     cpu = []
     changed_by_frame = []
+    t_ms = []
+    changes = []  # frame -> {id: props whose value changed or whose track ran}
+    prev = {}  # id -> (x, y, w, h, opacity)
 
     for k, fr in enumerate(frames):
+        t_ms.append(fr.get("t", k * dt_ms))
+        moves = defaultdict(set)
+        changes.append(moves)
         for m in fr.get("m", []):
             e = els.get(m["id"])
             if e is None:
@@ -135,6 +175,15 @@ def analyze(path):
             e.flags = row[7]
             e.vis = row[8:12] if len(row) >= 12 else None
             e.ever_drawn |= area(e.rect) >= MIN_AREA and not e.flags & BLANK
+            old = prev.get(id)
+            if old is not None and id in alive:
+                if abs(row[1] - old[0]) > 0.01 or abs(row[2] - old[1]) > 0.01:
+                    moves[id].add("position")
+                if abs(row[3] - old[2]) > 0.01 or abs(row[4] - old[3]) > 0.01:
+                    moves[id].add("size")
+                if abs(row[5] - old[4]) > 0.001:
+                    moves[id].add("opacity")
+            prev[id] = tuple(row[1:6])
             if id not in alive:
                 alive.add(id)
                 e.born = k
@@ -169,9 +218,12 @@ def analyze(path):
             if not active:
                 continue  # set without animating: no motion this frame
             if isinstance(who, str):
-                touched_untraced[(short(who), prop)] += 1
+                # An untraced container (a layout-only stack) is seen if what it holds is.
+                if not any(els[i].name.startswith(who + "/") and seen(els[i], W, H) for i in alive):
+                    touched_untraced[(short(who), prop)] += 1
                 continue
             sampled[(who, prop)].add(k)
+            moves[who].add(prop)
             e = els.get(who)
             if e is None or who not in alive:
                 touched_untraced[(f"#{who}", prop)] += 1
@@ -180,6 +232,18 @@ def analyze(path):
                 touched_invisible[(e.name, prop, who)].append(k)
 
     n = len(frames)
+    acts = script_inputs(script) if script else []
+    loops = loop_ids(els, changes)
+
+    def frame_of(t):
+        return min(bisect.bisect_left(t_ms, t * 1000.0 - 0.01), n - 1)
+
+    input_frames = sorted({frame_of(t) for a in acts for t in a["times"]} | {k for k, _ in inputs})
+
+    def interrupted(k0, k1):
+        """An input landed mid-motion (a retarget may turn it around)."""
+        i = bisect.bisect_right(input_frames, k0)
+        return i < len(input_frames) and input_frames[i] <= k1
 
     # invisible work: report the outermost element of a subtree that went unseen together
     def covered(id, prop, ks):
@@ -243,7 +307,7 @@ def analyze(path):
     # A loop (a spinner) runs for as long as it's shown: only other motion fails to settle.
     quiet = int(500 / dt_ms)
     only_loops = frames[-1].get("quality", {}).get("why", []) == ["loop"] and not any(
-        a for fr in frames[-quiet:] for _, _, a in fr.get("tk", []))
+        a and who not in loops for fr in frames[-quiet:] for who, _, a in fr.get("tk", []))
     if animating and animating[-1] and (n - 1 - last_input) * dt_ms > 1000 and not only_loops:
         q = frames[-1].get("quality", {})
         start = n - 1
@@ -259,13 +323,20 @@ def analyze(path):
                                     + ("busiest tracks: " + "; ".join(f"{short(nm)} {p} ×{c}" for (nm, p), c in top) if top else "no store tracks")))
 
     # pops
-    def top_level(ids, k, table):
+    def top_level(ids, k=None, table=None):
+        # By path too: a layout-only parent (an untraced stack) breaks the id chain.
         s = set(ids)
-        return [i for i in ids if els[i].parent not in s]
+        names = {els[i].name for i in ids}
+        def under(i):
+            nm = els[i].name
+            return any(nm[:j] in names for j in range(len(nm)) if nm[j] == "/")
+        return [i for i in ids if els[i].parent not in s and not under(i)]
 
     for k, ids in births.items():
         for id in top_level(ids, k, births):
             e = els[id]
+            if id in loops:
+                continue
             h = [x for x in e.hist if x[0] >= k][:3]
             if not h:
                 continue
@@ -281,13 +352,14 @@ def analyze(path):
                                  detail=f"mounted at opacity {op} size {w:.0f}×{hh:.0f} at ({x:.0f},{y:.0f})"
                                         + (f", then jumped to ({h[1][1]:.0f},{h[1][2]:.0f})" if moved else " with no transition")))
     for k, items in deaths.items():
-        ids = [i for i, *_ in items]
-        s = set(ids)
+        tops = set(top_level([i for i, *_ in items]))
         for id, rect, op, was_seen in items:
-            if els[id].parent in s or not was_seen or op < POP_OPACITY:
+            if id not in tops or not was_seen:
                 continue
-            findings.append(dict(kind="pop-out", element=els[id].name, frames=1, longest=1, at=str(k),
-                                 detail=f"unmounted at opacity {op} size {rect[2]:.0f}×{rect[3]:.0f} at ({rect[0]:.0f},{rect[1]:.0f})"))
+            # Nothing unmounts above opacity 0: a fade cut short is a smaller pop.
+            findings.append(dict(kind="pop-out" if op >= POP_OPACITY else "cut-exit", element=els[id].name, frames=1, longest=1, at=str(k),
+                                 detail=f"unmounted at opacity {op} size {rect[2]:.0f}×{rect[3]:.0f} at ({rect[0]:.0f},{rect[1]:.0f})"
+                                        + ("" if op >= POP_OPACITY else ", before its fade reached 0")))
 
     # geometry: jumps, steps, overshoot, jiggle
     changed_parents = defaultdict(set)  # frame -> parents with births/deaths
@@ -300,7 +372,7 @@ def analyze(path):
     pressing = [bool(fr.get("k")) for fr in frames]
     for e in els.values():
         h = e.hist
-        if len(h) < 3:
+        if len(h) < 3 or e.id in loops:
             continue
         # Only report the outermost element of a group moving together.
         for edge, label in ((1, "x"), (2, "y"), (3, "w"), (4, "h")):
@@ -364,8 +436,40 @@ def analyze(path):
                         if amp > 0.5:
                             findings.append(dict(kind="jiggle", element=e.name, frames=k1 - k0 + 1, longest=k1 - k0 + 1, at=f"{k0}–{k1}",
                                                  detail=f"{label} reverses {reversals}× over {amp:.1f}pt ({start:.1f} → {rest:.1f})"))
+                    elif reversals == 1 and not interrupted(k0, k1):
+                        # One monotonic path: no wind-up the wrong way, no out-and-back.
+                        if abs(travel) > 0.5:
+                            back = max((start - v) * math.copysign(1, travel) for v in vals)
+                            what = f"{label} {start:.1f} → {rest:.1f} heads {back:.1f}pt the wrong way first"
+                        else:
+                            back = max(abs(v - start) for v in vals)
+                            what = f"{label} goes {back:.1f}pt out from {start:.1f} and back"
+                        if back > 1.0:
+                            findings.append(dict(kind="reversal", element=e.name, frames=k1 - k0 + 1, longest=k1 - k0 + 1, at=f"{k0}–{k1}",
+                                                 detail=what))
                 if not moving:
                     seg = []
+        # One straight path: the top-left corner's route against its chord, per continuous move.
+        seg = []
+        ph = {x[0]: x for x in parent.hist} if (parent := els.get(e.parent)) else {}
+        for i in range(1, len(h) + 1):
+            if i < len(h) and h[i][0] == h[i - 1][0] + 1 and (abs(h[i][1] - h[i - 1][1]) > 0.01 or abs(h[i][2] - h[i - 1][2]) > 0.01):
+                seg.append(i)
+                continue
+            if len(seg) >= 4:
+                pts = [h[seg[0] - 1]] + [h[j] for j in seg]
+                k0, k1 = pts[1][0], pts[-1][0]
+                hidden = all(p[5] <= 0.05 or not p[8] for p in pts)
+                held = any(pressing[p[0]] or p[6] & (4 | BLANK) for p in pts)
+                rides = all(p[0] in ph and p[0] - 1 in ph and abs((ph[p[0]][1] - ph[p[0] - 1][1]) - (p[1] - q[1])) < 0.05
+                            and abs((ph[p[0]][2] - ph[p[0] - 1][2]) - (p[2] - q[2])) < 0.05 for q, p in zip(pts, pts[1:]))
+                if not (hidden or held or rides or interrupted(k0, k1)):
+                    route = sum(math.hypot(p[1] - q[1], p[2] - q[2]) for q, p in zip(pts, pts[1:]))
+                    chord = math.hypot(pts[-1][1] - pts[0][1], pts[-1][2] - pts[0][2])
+                    if chord > JUMP_PT and route > 1.2 * chord:
+                        findings.append(dict(kind="dog-leg", element=e.name, frames=k1 - k0 + 1, longest=k1 - k0 + 1, at=f"{k0}–{k1}",
+                                             detail=f"({pts[0][1]:.0f},{pts[0][2]:.0f}) → ({pts[-1][1]:.0f},{pts[-1][2]:.0f}) travels {route:.0f}pt for a {chord:.0f}pt move"))
+            seg = []
 
     # latency: input to first visible change
     for k, ev in inputs:
@@ -390,30 +494,316 @@ def analyze(path):
             findings.append(dict(kind="hitch", element="(frame)", frames=len(bad), longest=len(bad), at=fmt_runs(runs(bad)),
                                  detail=f"{len(bad)} animating frames over {budget:.1f} ms CPU (median {med:.2f}, worst {cpu[worst]:.1f} at frame {worst})"))
 
+    if acts:
+        findings = expectations(acts, findings, els, changes, loops, deaths, n, hz, frame_of)
+
     return dict(trace=path, frames=n, hz=hz, inputs=[(k, ev) for k, ev in inputs], findings=findings,
                 animating_frames=sum(animating), idle_frames=len(idle))
 
 
+def script_inputs(script):
+    """The script's events with the times their inputs land (a typed string is one per key,
+    a tap a press and a release, a drag its press and its release)."""
+    events = script.get("events", []) if isinstance(script, dict) else script
+    out = []
+    for i, e in enumerate(events):
+        t = float(e.get("t", 0.0))
+        ty = e.get("type", "tap")
+        end = t
+        if ty == "type" and "paste" not in e:
+            every = e.get("every", 0.035)
+            times = [t + every * j for j in range(max(len(e.get("text", "")), 1))]
+        elif ty in ("tap", "click", "secondary-click"):
+            times = [t, t + e.get("hold", 0.08)]
+        elif ty in ("double-click", "double-tap", "triple-click"):
+            gap = max(e.get("gap", 0.15), e.get("hold", 0.06) + 0.01)
+            times = [t + gap * j for j in range(3 if ty == "triple-click" else 2)]
+        elif ty == "drag":
+            end = t + max(e.get("dur", 0.3), 0.01) + 0.02
+            times = [t, end]
+        elif ty == "scroll":
+            end = t + max(e.get("dur", 0.2), 0.01)
+            times = [t, end]
+        else:
+            times = [t]
+        expect = e.get("expect", [])
+        out.append(dict(index=i, event=e, type=ty, times=times, end=max(times[-1], end),
+                        expect=[expect] if isinstance(expect, str) else list(expect)))
+    return out
+
+
+def describe(e):
+    ty = e.get("type", "tap")
+    mods = "".join(s for m, s in (("ctrl", "⌃"), ("alt", "⌥"), ("shift", "⇧"), ("cmd", "⌘")) if e.get(m))
+    if ty in ("key", "key-up"):
+        return f"key {mods}{e.get('name', '')}"
+    if ty == "type":
+        return f"type {e.get('text', '')!r}"
+    where = e.get("key") or (f"({e['x']:.0f},{e['y']:.0f})" if "x" in e else "")
+    return f"{ty} {where}".strip()
+
+
+def named(name, key):
+    return name == key or name.endswith("/" + key)
+
+
+def expectations(acts, findings, els, moved, background, deaths, n, hz, frame_of):
+    """Checks the script's `expect`ations and drops generic findings they make intended.
+
+      instant  everything the input changes lands in the frame (a cut): nothing in `scope`
+               (an element name part, default all) still changes two frames after it
+      follow   a drag's `element` moves with the pointer, 1:1, on the drag's axes (or `prop`)
+      smooth   after the input (a drag's release), `element` travels over several frames;
+               no single frame covers most of the move, and it doesn't land at once
+      leaves   `element` is the one that leaves; no sibling leaves in its place
+    """
+    times = sorted({t for a in acts for t in a["times"]})
+    out = []
+    instant_windows = []  # (k0, k1, scope)
+    dying = defaultdict(list)
+    for k, items in deaths.items():
+        for id, rect, op, was_seen in items:
+            dying[id].append((k, op))
+
+    def next_time(t):
+        i = bisect.bisect_right(times, t + 1e-6)
+        return times[i] if i < len(times) else None
+
+    def window(t, cap):
+        k0 = frame_of(t)
+        nt = next_time(t)
+        k1 = min(frame_of(nt) if nt is not None else n, k0 + int(cap * hz), n)
+        return k0, max(k1, k0 + 1)
+
+    def find(key, k0, k1):
+        cands = [e for e in els.values() if named(e.name, key) and any(k0 - 1 <= st[0] < k1 for st in e.hist)]
+        return min(cands, key=lambda e: (e.flags & BLANK != 0, len(e.name))) if cands else None
+
+    def ancestors(id):
+        seen_ = set()
+        p = els[id].parent if id in els else None
+        while p is not None and p not in seen_:
+            seen_.add(p)
+            yield p
+            p = els[p].parent if p in els else None
+
+    def missing(a, key):
+        out.append(dict(kind="expect-missing", element=key, frames=0, longest=0, at=str(frame_of(a["times"][0])),
+                        detail=f"{describe(a['event'])}: no element {key!r} to check '{'/'.join(a['expect'])}' on"))
+
+    for a in acts:
+        e, label = a["event"], describe(a["event"])
+        if "instant" in a["expect"]:
+            scope = e.get("scope", "")
+            bad = {}  # id -> (frames, props)
+            for t in a["times"]:
+                k0, k1 = window(t, 0.6)
+                instant_windows.append((k0, k1, scope))
+                runs_ = defaultdict(list)
+                # A motion already running when the input lands (an entrance settling) isn't its answer.
+                already = defaultdict(set)
+                for j in range(max(k0 - 2, 0), k0):
+                    for id, props in moved[j].items():
+                        already[id] |= props
+                for j in range(k0, k1):
+                    for id, props in moved[j].items():
+                        el = els.get(id)
+                        # A pressed control's feedback answers the finger, not the input's effect.
+                        props = props - {"press"} - already[id]
+                        if el is None or not props or id in background or el.flags & BLANK or scope not in el.name:
+                            continue
+                        runs_[id].append((j, props))
+                for id, hits in runs_.items():
+                    ks = [j for j, _ in hits]
+                    # Two changes in a row, the later two frames or more after the input: motion.
+                    late = [j for j in ks if j - 1 in ks and j >= k0 + 2]
+                    if late:
+                        frames_, props = bad.get(id, ([], set()))
+                        props = props | {p for j, ps in hits if j in late or j + 1 in late for p in ps}
+                        bad[id] = (frames_ + [j for j in ks if j >= k0 + 1], props)
+            tops = [id for id in bad if not any(p in bad for p in ancestors(id))]
+            for id in sorted(tops, key=lambda i: -len(bad[i][0]))[:4]:
+                ks, props = bad[id]
+                rs = runs(ks)
+                out.append(dict(kind="not-instant", element=els[id].name, frames=len(ks), longest=max(b - a_ + 1 for a_, b in rs), at=fmt_runs(rs, 2),
+                                detail=f"{label}: {', '.join(sorted(props))} still changing {max(b - a_ + 1 for a_, b in rs)} frames in a row (expected a cut)"))
+            if len(tops) > 4:
+                out.append(dict(kind="not-instant", element=f"(+{len(tops) - 4} more)", frames=0, longest=0, at="", detail=f"{label}: more elements animate"))
+        if "follow" in a["expect"]:
+            key = e.get("element") or e.get("key", "")
+            t0, dur = float(e.get("t", 0.0)), max(e.get("dur", 0.3), 0.01)
+            k0, k1 = frame_of(t0), frame_of(t0 + dur + 0.02)
+            el = find(key, k0, k1)
+            if el is None:
+                missing(a, key)
+            else:
+                steps = math.ceil(dur * 120)
+
+                def hand(t):
+                    s = max(0, min(steps, math.floor((t - t0) / dur * steps + 1e-6)))
+                    f = s / steps
+                    f = f * f * (3 - 2 * f)
+                    return e.get("dx", 0.0) * f, e.get("dy", 0.0) * f
+                axes = [e["prop"]] if "prop" in e else [c for c, d in (("x", "dx"), ("y", "dy")) if e.get(d)]
+                idx = {"x": 1, "y": 2, "w": 3, "h": 4}
+                pos = {st[0]: st for st in el.hist}
+                off, started = [], False
+                drift = defaultdict(float)
+                for j in range(k0 + 1, k1):
+                    if j not in pos or j - 1 not in pos:
+                        continue
+                    tj, tp = j / hz, (j - 1) / hz
+                    for c in axes:
+                        de = pos[j][idx[c]] - pos[j - 1][idx[c]]
+                        dh = hand(tj)[0 if c in "xw" else 1] - hand(tp)[0 if c in "xw" else 1]
+                        # The first move picks up what the hand moved inside the drag's slop.
+                        pickup = not started and abs(de) > 0.05
+                        started |= pickup
+                        # Held at a limit (the list's end, a minimum width), it may stop; while
+                        # it moves, it moves with the hand, so a spring trailing it drifts off.
+                        if started and not pickup and abs(de) > 0.05:
+                            drift[c] += de - dh
+                            if abs(drift[c]) > 2.0 or abs(de - dh) > 1.0:
+                                off.append((j, drift[c] if abs(drift[c]) > 2.0 else de - dh))
+                if not started and any(abs(v) > 1.0 for v in hand(t0 + dur)):
+                    out.append(dict(kind="lags-hand", element=el.name, frames=0, longest=0, at=str(k0),
+                                    detail=f"{label}: doesn't move while the pointer drags it"))
+                elif len(off) >= 2:
+                    worst = max(off, key=lambda o: abs(o[1]))
+                    out.append(dict(kind="lags-hand", element=el.name, frames=len(off), longest=len(off), at=fmt_runs(runs([j for j, _ in off]), 2),
+                                    detail=f"{label}: moves off the pointer on {len(off)} frames (worst {worst[1]:+.1f}pt at frame {worst[0]}); a drag follows the hand 1:1"))
+        if "smooth" in a["expect"]:
+            key = e.get("element") or e.get("key", "")
+            k0, k1 = window(a["end"], 1.2)
+            el = find(key, k0, k1)
+            if el is None:
+                missing(a, key)
+            else:
+                h = [st for st in el.hist if k0 - 1 <= st[0] < k1]
+                born = el.born is not None and k0 - 1 <= el.born < k1
+                worst = None
+                travel = 0.0
+                for c, label_c in ((1, "x"), (2, "y"), (3, "w"), (4, "h")):
+                    vals = [st[c] for st in h]
+                    total = vals[-1] - vals[0] if vals else 0.0
+                    travel = max(travel, abs(total))
+                    steps_ = [b - a_ for a_, b in zip(vals, vals[1:])]
+                    if abs(total) > JUMP_PT and steps_:
+                        big = max(steps_, key=abs)
+                        moving = sum(1 for s in steps_ if abs(s) > 0.05)
+                        if abs(big) > 0.5 * abs(total) or moving < 3:
+                            if worst is None or abs(big) > abs(worst[1]):
+                                worst = (label_c, big, total, moving)
+                if worst:
+                    c, big, total, moving = worst
+                    out.append(dict(kind="snap", element=el.name, frames=moving, longest=moving, at=str(k0),
+                                    detail=f"{label}: {c} covers {big:+.1f}pt of its {total:+.1f}pt move in one frame ({moving} moving frames)"))
+                elif born and travel < 4 and h and h[0][5] >= POP_OPACITY:
+                    out.append(dict(kind="snap", element=el.name, frames=1, longest=1, at=str(el.born),
+                                    detail=f"{label}: appears at its place with no travel ({h[0][3]:.0f}×{h[0][4]:.0f} at {h[0][1]:.0f},{h[0][2]:.0f})"))
+        if "leaves" in a["expect"]:
+            key = e.get("element") or e.get("key", "")
+            k0, k1 = window(a["end"], 1.2)
+            el = find(key, k0, k1)
+            if el is None:
+                missing(a, key)
+            else:
+                def leaves(x):
+                    if any(k0 <= k < k1 for k, _ in dying[x.id]):
+                        return True
+                    ops = [st[5] for st in x.hist if k0 - 1 <= st[0] < k1]
+                    return bool(ops) and ops[0] > POP_OPACITY and ops[-1] <= VISIBLE_OPACITY
+                gone = [x for x in els.values() if x.parent == el.parent and x.id != el.id and not x.flags & BLANK and leaves(x)]
+                if not leaves(el) or gone:
+                    who = ", ".join(short(x.name, 1) for x in gone[:3]) or "nothing"
+                    out.append(dict(kind="wrong-exit", element=el.name, frames=1, longest=1, at=str(k0),
+                                    detail=f"{label}: expected {short(el.name, 1)} to leave; {'it stays and ' if not leaves(el) else ''}{who} leave{'s' if len(gone) == 1 else ''}"
+                                           + " (index keys?)"))
+
+    # What an instant input changes is meant to cut: pops and jumps inside its window aren't findings.
+    cuts = {"pop-in", "pop-out", "appear-then-jump", "jump", "step", "sibling-jump", "cut-exit"}
+
+    def intended(f):
+        if f["kind"] not in cuts:
+            return False
+        k = int(f["at"].split("–")[0]) if f["at"][:1].isdigit() else -1
+        return any(k0 <= k < k1 + 1 and scope in f["element"] for k0, k1, scope in instant_windows)
+    return [f for f in findings if not intended(f)] + out
+
+
+def trace_name(path):
+    name = path.rsplit("/", 1)[-1]
+    return name[:-6] if name.endswith(".jsonl") else name
+
+
+def allowed(rules, trace, f):
+    """The allowlist rule that covers finding `f` in `trace`, if any."""
+    for r in rules:
+        kind = r.get("kind", f["kind"])
+        if r.get("trace", trace) == trace and f["kind"] in ([kind] if isinstance(kind, str) else kind) \
+                and r.get("element", "") in f["element"]:
+            return r
+    return None
+
+
 def main():
     args = sys.argv[1:]
-    out = None
+    out = allow_path = None
     quiet = "--quiet" in args
-    args = [a for a in args if a != "--quiet"]
-    if "--json" in args:
-        i = args.index("--json")
-        out = args[i + 1]
-        del args[i:i + 2]
-    reports = [analyze(p) for p in args]
+    fail = "--fail" in args
+    args = [a for a in args if a not in ("--quiet", "--fail")]
+    for flag in ("--json", "--allow"):
+        if flag in args:
+            i = args.index(flag)
+            if flag == "--json":
+                out = args[i + 1]
+            else:
+                allow_path = args[i + 1]
+            del args[i:i + 2]
+    jobs, script = [], None
+    i = 0
+    while i < len(args):
+        if args[i] == "--script":
+            with open(args[i + 1]) as f:
+                script = json.load(f)
+            i += 2
+            continue
+        jobs.append((args[i], script))
+        script = None
+        i += 1
+    rules = []
+    if allow_path:
+        with open(allow_path) as f:
+            rules = json.load(f)
+        for r in rules:
+            if not r.get("reason"):
+                sys.exit(f"{allow_path}: every rule needs a reason: {r}")
+    reports = [analyze(p, s) for p, s in jobs]
+    used, open_ = set(), 0
     for r in reports:
-        name = r["trace"].rsplit("/", 1)[-1]
-        print(f"== {name}: {r['frames']} frames, {r['animating_frames']} animating, {r['idle_frames']} idle, {len(r['findings'])} findings")
+        name = trace_name(r["trace"])
+        for f in r["findings"]:
+            rule = allowed(rules, name, f)
+            f["allowed"] = rule["reason"] if rule else None
+            if rule:
+                used.add(id(rule))
+        live = [f for f in r["findings"] if not f["allowed"]]
+        open_ += len(live)
+        print(f"== {name}: {r['frames']} frames, {r['animating_frames']} animating, {r['idle_frames']} idle, {len(live)} findings"
+              + (f" (+{len(r['findings']) - len(live)} allowed)" if len(live) < len(r["findings"]) else ""))
         if quiet:
             continue
-        for f in sorted(r["findings"], key=lambda f: (f["kind"], -f["frames"])):
+        for f in sorted(live, key=lambda f: (f["kind"], -f["frames"])):
             print(f"  {f['kind']:<16} {short(f['element']):<60} @{f['at']:<14} {f['detail']}")
+    for r in rules:
+        if id(r) not in used:
+            print(f"   unused allow rule: {json.dumps(r, ensure_ascii=False)}")
     if out:
         with open(out, "w") as f:
             json.dump(reports, f, indent=1)
+    if fail:
+        print(f"{open_} finding{'' if open_ == 1 else 's'} not in the allowlist" if open_ else "no findings outside the allowlist")
+        sys.exit(1 if open_ else 0)
 
 
 if __name__ == "__main__":

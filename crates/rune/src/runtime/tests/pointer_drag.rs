@@ -405,3 +405,29 @@ fn hover_lands_at_once_and_fades_out() {
     rt.frame(0.5);
     assert_eq!(hover(&rt), 0.0);
 }
+
+#[test]
+fn rows_mounting_above_keep_a_still_pointers_hover() {
+    // Nodes mounting earlier in the tree shift every later index; last frame's geometry
+    // mustn't be read under the new indices (the hover would drop for a frame).
+    fn view(n: &usize, _: &mut Cx<usize>) -> El {
+        col().size(200.0, 80.0)
+            .child(col().size(200.0, 40.0).clip_rounded(0.0).children((0..*n).map(|k| el().key(format!("r{k}")).size(200.0, 10.0))))
+            .child(crate::row().key("row").size(200.0, 40.0).hover_group()
+                .child(el().key("reveal").size(10.0, 10.0).fill(Color::WHITE).group_opacity(0.0, 1.0)))
+    }
+    let mut rt = Runtime::new(1usize, view, (200.0, 80.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.pointer_move(150.0, 60.0);
+    rt.frame(1.0 / 120.0);
+    let group = |rt: &Runtime<usize>| {
+        let i = rt.nodes.iter().position(|n| n.key.as_deref() == Some("reveal")).unwrap();
+        rt.inh_scratch[i].group
+    };
+    assert_eq!(group(&rt), 1.0);
+    for _ in 0..3 {
+        rt.update(|n: &mut usize, _| *n += 1);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(group(&rt), 1.0, "the reveal stays shown while rows mount above");
+    }
+}

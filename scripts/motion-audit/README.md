@@ -27,6 +27,25 @@ tracks it sampled (`tk`: `[element id or path, property, active]`; inactive mean
 | `jump`, `step`, `sibling-jump` | a one-frame change in position or size, on its own or next to something animating, seen on both frames (a loop wrapping while transparent or clipped is not one) |
 | `overshoot`, `jiggle` | passes its target, or reverses direction more than once |
 | `latency`, `hitch` | input with no motion for several frames; a frame over budget |
+| `cut-exit` | unmounts partway through its fade: nothing leaves above opacity 0 |
+| `reversal`, `dog-leg` | one motion heads the wrong way first or goes out and back; a route much longer than its chord |
+
+An app's scenario can say what each input should do with `"expect"` on its script event:
+
+| Expect | Checks | Finding |
+| --- | --- | --- |
+| `instant` | everything in `scope` (an element name part) lands within a frame or two of the input; pops and jumps there are intended | `not-instant` |
+| `follow` | a drag's `element` moves 1:1 with the pointer while it moves (it may stop at a limit) | `lags-hand` |
+| `smooth` | after the input, `element` travels over several frames, not in one | `snap` |
+| `leaves` | `element` is what leaves, not a sibling (index keys remove the last row) | `wrong-exit` |
+
+```sh
+python3 scripts/motion-audit/analyze.py --script s.json trace.jsonl --allow allow.json --fail
+```
+
+`--allow` takes a JSON list of `{"trace", "kind" (or a list), "element" (a substring),
+"reason"}` rules for intended behaviour; every rule needs a reason, and unused rules are
+listed. `--fail` exits non-zero when a finding isn't allowed.
 
 A motion that hides what it moves (a fade to 0, a collapse, a slide out) runs on for a few
 frames below what anyone can see, down to its settle threshold. Up to 250 ms of that tail,

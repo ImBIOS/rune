@@ -550,6 +550,8 @@ pub(crate) enum Kind {
     ButtonDown(crate::PointerButton),
     ButtonUp(crate::PointerButton),
     KeyUp(KeyEvent),
+    /// A person dragging the window's corner, (dw, dh) from the size where (0, 0) started.
+    Resize(f32, f32),
 }
 
 impl Kind {
@@ -685,6 +687,7 @@ impl Ev {
             Kind::ButtonDown(b) => pointer(PointerAction::ButtonDown(*b)),
             Kind::ButtonUp(b) => pointer(PointerAction::ButtonUp(*b)),
             Kind::KeyUp(key) => ScriptEvent::KeyUp(key.clone()),
+            Kind::Resize(dw, dh) => ScriptEvent::Resize { dw: *dw, dh: *dh },
         };
         TimedEvent { t: self.t, event }
     }
@@ -908,6 +911,7 @@ fn parse_script(list: Value) -> Vec<Ev> {
             }
             "paste" => out.push(Ev { t, kind: Kind::Paste(paste_content(&e)), pos: Pos::Rel(0.0, 0.0) }),
             "scroll" => eased_input::swipe(&mut out, &e, t, pos),
+            "resize" => eased_input::resize(&mut out, &e, t),
             "fling" => {
                 let v = |k: &str| e[k].as_f64().unwrap_or(0.0) as f32;
                 out.push(Ev { t, kind: Kind::Fling(v("vx"), v("v")), pos });
@@ -1550,6 +1554,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let mut early_place = None;
     // `Tx::resize_window` moves the viewport on the virtual clock; the canvas keeps its size.
     let mut frame_anim = None;
+    let mut resize_from = rt.viewport;
     // As on macOS, a frame change asked for while nothing moves waits a frame to start.
     let mut idle = true;
     if script.iter().find(|e| !matches!(e.kind, Kind::Mark(_))).is_some_and(|e| e.t <= 1e-9) {
@@ -1601,6 +1606,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
                 Kind::Wheel(dx, dy) => wheel(&mut rt, (x, y), *dx, *dy),
                 Kind::Fling(vx, vy) => fling(&mut rt, (x, y), *vx, *vy),
                 Kind::Files(step) => file_input(&mut rt, step, (x, y)),
+                &Kind::Resize(dw, dh) => eased_input::step_resize(&mut rt, &mut resize_from, (dw, dh), scale),
                 kind => {
                     if kind.is_down() { last_down = (x, y); }
                     canvas_input(&mut rt, kind, (x, y));
