@@ -674,6 +674,21 @@ The `rune-mac` crate holds the app's side (all no-ops off macOS):
   under `~/Library/Caches/mac-app/busy/`, so a crash can't hold the swap.
 - `rune_mac::toggle_full_screen()` and `is_full_screen()` drive the key window's full screen.
 
+### Logging frame and input timing
+
+For an app's own perf log, with nothing changed about how its windows draw:
+
+- **`App::on_frame_encoded(|f: &FrameEncoded| ..)`** (or `WindowSpec::on_frame_encoded`) runs on the UI thread
+  after each frame of a desktop window. `f.outcome()` is `Drawn` (encoded, submitted and presented; the first frame
+  and a hidden launcher's count), `Unchanged` (a timer's frame that drew what was on screen, so no drawable was
+  taken) or `Skipped` (covered, minimised, occluded or no drawable). `f.at()` is when encoding finished,
+  `f.seq()` numbers the window's reports and `f.presents_at()` is the display link's target refresh when it paced
+  the frame (macOS). Headless runs, overlays and the web don't call it.
+- **`Tx::input_time()`** in an input handler is when that event arrived: the `NSEvent` timestamp on macOS, the
+  moment the window took it from winit elsewhere. Events that pile up between frames keep their own times. It is
+  `None` in timers, polls, updates and layout callbacks. The gap from it to the next `Drawn` frame's `at()` is the
+  app's input-to-encode latency.
+
 ### Compact tray-controlled windows
 
 Use `WindowOptions` on a `WindowSpec`. Existing single-window defaults

@@ -737,6 +737,7 @@ struct Host<S: 'static> {
     on_created: Option<Box<dyn FnOnce(WindowHandle)>>,
     on_window: Option<crate::app::OnWindow>,
     on_ready: Option<crate::app::OnWindow>,
+    frame_reports: crate::frame_encoded::FrameReports,
     finished: bool,
     /// False for windows `App::window` added: they live as long as the loop, never keep it.
     keeps_loop: bool,
@@ -802,6 +803,7 @@ impl<S: 'static> Host<S> {
         let mut args = app.resolve_args(args);
         let on_window = app.on_window.take();
         let on_ready = app.on_ready.take();
+        let frame_reports = crate::frame_encoded::FrameReports::new(app.on_frame_encoded.take(), Some(native_handle.key()));
         let macos_window = std::mem::take(&mut app.macos_window);
         // Before the menu guard, so custom items in Edit or Window join these menus.
         #[cfg(target_os = "macos")]
@@ -880,6 +882,7 @@ impl<S: 'static> Host<S> {
             on_created,
             on_window,
             on_ready,
+            frame_reports,
             finished: false,
             keeps_loop: true,
             spec,

@@ -56,6 +56,7 @@ pub struct App<S: 'static> {
     pub(crate) windows: Vec<crate::AnyWindowSpec>,
     pub(crate) on_window: Option<OnWindow>,
     pub(crate) on_ready: Option<OnWindow>,
+    pub(crate) on_frame_encoded: Option<crate::frame_encoded::OnFrameEncoded>,
     pub(crate) macos_window: crate::MacWindowOptions,
     pub(crate) compositor: Option<Box<dyn crate::compose::Compositor<S>>>,
     pub(crate) window_options: crate::WindowOptions,
@@ -91,6 +92,7 @@ impl<S: 'static> App<S> {
             windows: Vec::new(),
             on_window: None,
             on_ready: None,
+            on_frame_encoded: None,
             macos_window: crate::MacWindowOptions::default(),
             compositor: None,
             window_options: crate::WindowOptions::default(),
@@ -327,6 +329,20 @@ impl<S: 'static> App<S> {
     /// Not called by headless tooling. May queue a show through the supplied handle.
     pub fn on_ready(mut self, f: impl FnMut(&crate::WindowHandle) + 'static) -> Self {
         self.on_ready = Some(Box::new(f));
+        self
+    }
+
+    /// Runs on the UI thread after each frame of the app's window, saying what it came to
+    /// ([`FrameOutcome`](crate::FrameOutcome)): `Drawn` once it was encoded, submitted and
+    /// presented, the first frame during creation and a hidden launcher's frames included;
+    /// `Unchanged` for a frame only a timer asked for that drew what was on screen; `Skipped`
+    /// for one a covered, minimised or occluded window, or a drawable that never came, kept
+    /// from drawing. For logging frame timing: pair [`FrameEncoded::at`](crate::FrameEncoded::at)
+    /// with `Tx::input_time` for input latency. It changes nothing about when or what the window
+    /// draws; without it, each frame checks an `Option`. Desktop windows only: headless runs,
+    /// overlays and the web never call it.
+    pub fn on_frame_encoded(mut self, f: impl FnMut(&crate::FrameEncoded) + 'static) -> Self {
+        self.on_frame_encoded = Some(Box::new(f));
         self
     }
 

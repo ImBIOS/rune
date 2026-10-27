@@ -243,6 +243,12 @@ impl<S> WindowSpec<S> {
     pub fn on_ready(mut self, f: impl FnMut(&crate::WindowHandle) + 'static) -> Self {
         self.app = self.app.on_ready(f); self
     }
+    /// Reports each of this window's frames, like `App::on_frame_encoded`. A spec made with
+    /// `WindowSpec::from_app` keeps its app's hook unless this replaces it; windows `App::window`
+    /// adds have their own.
+    pub fn on_frame_encoded(mut self, f: impl FnMut(&crate::FrameEncoded) + 'static) -> Self {
+        self.app = self.app.on_frame_encoded(f); self
+    }
     pub fn options(mut self, options: WindowOptions) -> Self {
         self.options = options;
         self.app.macos_window = MacWindowOptions::default();

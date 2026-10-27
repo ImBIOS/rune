@@ -34,6 +34,7 @@ impl<S: 'static> Host<S> {
         // come at the retry's pace, not the display's.
         if !stepped { covered_step(&mut self.rt); }
         self.clipboard.flush(&mut self.rt);
+        self.frame_reports.skipped();
     }
 
     /// A frame for a window that's hidden, covered, asleep or minimised: while shown, what it
@@ -49,6 +50,7 @@ impl<S: 'static> Host<S> {
             self.rt.set_live_visible(false);
             covered_step(&mut self.rt);
             self.clipboard.flush(&mut self.rt);
+            self.frame_reports.skipped();
         }
     }
 
@@ -145,6 +147,7 @@ impl<S: 'static> Host<S> {
                 sync_platform(l, rt, &mut self.secure_input, &mut self.ime_allowed, &self.clipboard);
                 l.stop_pacing();
                 self.meter.set_pacing(l.pacing_state(false));
+                self.frame_reports.unchanged(target);
                 return;
             }
             Some((animating, dt, now))
@@ -153,7 +156,7 @@ impl<S: 'static> Host<S> {
         };
         let frame = match acquire(&l.surface, &gpu.device, &l.config, 1, &mut self.meter) {
             Ok(frame) => frame,
-            Err(_) if hidden => { l.retry = l.first_frame.missed(Instant::now(), &mut l.hidden_wait); return; }
+            Err(_) if hidden => { l.retry = l.first_frame.missed(Instant::now(), &mut l.hidden_wait); self.frame_reports.skipped(); return; }
             Err(missed) => return self.missed_frame(missed, built.is_some()),
         };
         if !hidden && !self.rt.live_visible() && { let size = l.window.inner_size(); size.width > 0 && size.height > 0 } {
@@ -182,6 +185,7 @@ impl<S: 'static> Host<S> {
             self.rt.scene.store_mut().audit_retargets(true);
         }
         let frame_time = target.unwrap_or(now);
+        let presents_at = target;
         self.rt.window_resting = self.frame_anim.is_none() && self.rt.window_frame.is_none();
         let target_ms = target.zip(self.trace_start).map(|(target, start)| crate::present_time::ms_since(start, target));
         let rt = &mut self.rt;
@@ -203,7 +207,7 @@ impl<S: 'static> Host<S> {
             let frame = match acquire(&l.surface, &gpu.device, &l.config, 1, &mut self.meter) {
                 Ok(frame) => frame,
                 // Retrying at once is what spins while occluded; wait like any missed frame.
-                Err(_) if hidden => { l.retry = l.first_frame.missed(Instant::now(), &mut l.hidden_wait); return; }
+                Err(_) if hidden => { l.retry = l.first_frame.missed(Instant::now(), &mut l.hidden_wait); self.frame_reports.skipped(); return; }
                 Err(missed) => return self.missed_frame(missed, true),
             };
             drawable = l.present.as_ref().and(self.present_log.as_ref()).and_then(|log| log.acquired());
@@ -219,7 +223,7 @@ impl<S: 'static> Host<S> {
             }
             let frame = match acquire(&l.surface, &gpu.device, &l.config, 1, &mut self.meter) {
                 Ok(frame) => frame,
-                Err(_) if hidden => { l.retry = l.first_frame.missed(Instant::now(), &mut l.hidden_wait); return; }
+                Err(_) if hidden => { l.retry = l.first_frame.missed(Instant::now(), &mut l.hidden_wait); self.frame_reports.skipped(); return; }
                 Err(missed) => return self.missed_frame(missed, true),
             };
             #[cfg(target_os = "macos")]
@@ -263,6 +267,7 @@ impl<S: 'static> Host<S> {
         }
         if let Some(alpha) = &l.alpha { alpha.draw(&mut enc, &view); }
         renderer.submit(&gpu.queue, enc);
+        let encoded = self.frame_reports.stamp();
         l.window.pre_present_notify();
         #[cfg(target_os = "macos")]
         l.materials.present(&rt.materials, rt.env.scale, || gpu.queue.present(frame));
@@ -282,6 +287,7 @@ impl<S: 'static> Host<S> {
         // A display link that couldn't be made while the displays slept: they're back.
         #[cfg(target_os = "macos")]
         if !hidden && l.pacing.is_none() { l.pacing = crate::display_link::DisplayLink::retry(&l.window, self.frame_wake.clone()); }
+        self.frame_reports.drawn(encoded, presents_at);
         if let Some(trace) = self.trace.as_mut() {
             // A frame count keeps the trace redrawing while idle, as below.
             let continuous = !self.idle || self.args.frames.is_some();

@@ -216,6 +216,8 @@ struct CompHost {
     /// Whether `comp` animates.
     comp_animates: std::rc::Rc<std::cell::Cell<bool>>,
     frames: u32,
+    /// Called where `draw` calls it.
+    reports: crate::frame_encoded::FrameReports,
 }
 
 impl CompHost {
@@ -237,7 +239,7 @@ impl CompHost {
         };
         let comp_animates = std::rc::Rc::new(std::cell::Cell::new(comp == Some(true)));
         let comp = comp.map(|_| Box::new(FlagComp(comp_animates.clone())) as Box<dyn crate::Compositor<u32>>);
-        let mut host = Self { rt, presented: None, config, idle: false, comp, comp_animates, frames: 0 };
+        let mut host = Self { rt, presented: None, config, idle: false, comp, comp_animates, frames: 0, reports: Default::default() };
         host.frame(false);
         host.rt.poll = Some(poll);
         host.frame(false);
@@ -249,11 +251,14 @@ impl CompHost {
     fn frame(&mut self, quiet: bool) -> bool {
         let animating = self.rt.frame(crate::frame_clock::RESUME_STEP);
         if quiet && self.comp.is_none() && self.presented.as_ref().is_some_and(|p| p.unchanged(&self.rt, &self.config, animating, None)) {
+            self.reports.unchanged(None);
             return false;
         }
         let moving = animating || composing(self.comp.as_deref());
+        let encoded = self.reports.stamp();
         self.idle = Presented::settle(&mut self.presented, &self.rt, &self.config, moving, None, true, self.comp.is_some());
         self.frames += 1;
+        self.reports.drawn(encoded, None);
         true
     }
 
@@ -354,4 +359,32 @@ fn a_frame_that_leaves_work_for_the_next_does_not_settle() {
     // A frame the window may not rest on (hidden, or a trace counting frames) records nothing.
     let idle = Presented::settle(&mut host.presented, &host.rt, &host.config, false, None, false, true);
     assert!(idle && host.presented.is_none());
+}
+
+/// The same frames, timers and settling with `App::on_frame_encoded` as without: a window
+/// reports what it decided and nothing it decides reads the reports.
+#[test]
+fn reporting_frames_changes_no_frame_skip_or_redraw() {
+    fn run(hook: bool) -> (Vec<(bool, bool, bool, bool, u32)>, u64, u32, Vec<crate::FrameOutcome>) {
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = log.clone();
+        let mut host = CompHost::new(None, every_third);
+        let hook = hook.then(|| Box::new(move |f: &crate::FrameEncoded| sink.borrow_mut().push(f.outcome())) as crate::frame_encoded::OnFrameEncoded);
+        host.reports = crate::frame_encoded::FrameReports::new(hook, Some("main"));
+        let mut steps = Vec::new();
+        for i in 0..12 {
+            let presented = if i % 5 == 0 { host.frame(false) } else { host.timer_wake() };
+            steps.push((presented, host.idle, host.rt.stale(), host.rt.wake_deadline().is_some(), host.frames));
+        }
+        let outcomes = log.borrow().clone();
+        (steps, host.rt.stats.commits, host.rt.state, outcomes)
+    }
+    let (plain, plain_commits, plain_polls, none) = run(false);
+    let (hooked, hooked_commits, hooked_polls, outcomes) = run(true);
+    assert_eq!(plain, hooked);
+    assert_eq!((plain_commits, plain_polls), (hooked_commits, hooked_polls));
+    assert!(none.is_empty());
+    assert!(outcomes.contains(&crate::FrameOutcome::Drawn) && outcomes.contains(&crate::FrameOutcome::Unchanged), "{outcomes:?}");
+    let drawn = outcomes.iter().filter(|o| **o == crate::FrameOutcome::Drawn).count() as u32;
+    assert_eq!(drawn, hooked.last().unwrap().4 - 2, "one Drawn per presented frame after the two `new` drew");
 }
