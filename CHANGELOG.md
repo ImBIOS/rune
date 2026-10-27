@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **macOS windows take drops of file promises and image data.** winit's window took only
+  drags with file paths, so the screenshot thumbnail, Photos, Preview and browsers' images were
+  refused. The content view is now the drag destination: a file promise is received into
+  `$TMPDIR/rune-drops/…`, image data (PNG, JPEG, GIF, WebP, HEIC; TIFF as PNG) is written there,
+  and the drop reaches `El::on_drop_files` as paths. While hovering, a promise or image shows as
+  a stand-in path (`File.png`, `Image.png`) so `accepts_files` filters work. AppKit reports the
+  drag's position at every step, so macOS no longer samples the pointer for it.
+
 - **`Tx::follow_edge()`: pinned rows ride a moving bottom edge.** Rows stuck to a
   stick-to-bottom viewport's end used to hold the room a shrinking sibling freed as slack, then
   close it late on the growth spring, which suits a send (a new row grows into it) but leaves a

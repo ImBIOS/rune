@@ -2527,6 +2527,8 @@ impl<S: 'static> Host<S> {
         } else { None };
         #[cfg(target_os = "macos")]
         crate::macos::configure_window(&window, &self.macos_window);
+        #[cfg(target_os = "macos")]
+        crate::macos_drop::install(&window);
         if self.options.click_through && let Err(error) = window.set_cursor_hittest(false) {
             eprintln!("click-through unavailable for {}: {error}", self.native_handle.key());
         }
@@ -3244,12 +3246,25 @@ impl<S: 'static> Host<S> {
     /// sample; and, while the drag is over the window, a new sample, which redraws only when it
     /// changes the drop target. Runs even while the window is covered, as queued input does.
     fn flush_files(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        let appkit = self.win.as_ref().map(|l| crate::macos_drop::take(&l.window)).unwrap_or_default();
         let Some(l) = self.win.as_ref().filter(|w| w.visible) else {
             self.files = FileDrop::default();
             return;
         };
         let f = &mut self.files;
         let mut queued = false;
+        // AppKit's drags say where they are at every step (`macos_drop`), so nothing samples.
+        #[cfg(target_os = "macos")]
+        for step in appkit {
+            use crate::macos_drop::Step;
+            queued |= match step {
+                Step::Enter(paths, at) => { self.rt.drag_files(paths, Some(at)); true }
+                Step::Move(at) => self.rt.drag_files_to(Some(at)),
+                Step::Drop(paths, at) => { self.rt.drop_files(paths, Some(at)); true }
+                Step::Leave => { self.rt.drag_files_leave(); true }
+            };
+        }
         for step in std::mem::take(&mut f.steps) {
             queued = true;
             match step {

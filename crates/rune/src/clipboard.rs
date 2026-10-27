@@ -19,6 +19,8 @@ use crate::{Runtime, Waker};
 mod html;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::tiff_to_png;
 pub use html::sanitize_html;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> { m.lock().unwrap_or_else(|e| e.into_inner()) }

@@ -72,7 +72,7 @@ fn read_image(pb: &NSPasteboard) -> Option<ClipboardImage> {
 }
 
 /// PNG for TIFF bytes (the first image of a multi-page TIFF), through `NSBitmapImageRep`.
-pub(super) fn tiff_to_png(tiff: &[u8]) -> Option<ClipboardImage> {
+pub(crate) fn tiff_to_png(tiff: &[u8]) -> Option<ClipboardImage> {
     if tiff.is_empty() || tiff.len() > MAX_TIFF_BYTES || !tiff_dimensions_ok(tiff) {
         return None;
     }
