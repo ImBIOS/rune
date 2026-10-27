@@ -41,6 +41,10 @@ pub(crate) struct VirtualList {
     pub shown: HashSet<String>,
     /// The row holding the focused element, kept while that row is scrolled out.
     pub focused_row: Option<String>,
+    /// The rows holding the text selection's anchor and focus, kept built while scrolled out.
+    pub pinned_rows: Vec<String>,
+    /// Offscreen row state for text selection.
+    pub selection: crate::runtime::selectable::virtual_selection::PinnedSelection,
     /// The selected row on the last commit of an `El::reveal_selected(true)` stack.
     pub selected_row: Option<String>,
     pub reveal_selected: Option<String>,

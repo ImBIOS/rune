@@ -449,16 +449,16 @@ fn a_selection_in_a_virtual_row_scrolled_out_drops_without_panicking() {
     rt.pointer_up(200.0, 300.0);
     tick(&mut rt);
     assert!(!rt.elements().iter().any(|e| e.path == "#0/scroll/rows/r0/a"), "row 0 scrolled out");
-    assert_eq!(rt.selected_text(), None);
+    assert_eq!(rt.selected_text().as_deref(), Some("row 0 title\nrow 0 body"));
     command(&mut rt, 'c');
     command(&mut rt, 'a');
-    // Back up: it comes back unselected.
+    // Back up: the pinned row's selection is preserved when it mounts again.
     for _ in 0..40 {
         rt.wheel(200.0, 200.0, 400.0);
         tick(&mut rt);
     }
     wait(&mut rt);
     assert!(rt.elements().iter().any(|e| e.path == "#0/scroll/rows/r0/a"));
-    assert_eq!(rt.selected_text(), None);
+    assert_eq!(rt.selected_text().as_deref(), Some("row 0 title\nrow 0 body"));
 }
 

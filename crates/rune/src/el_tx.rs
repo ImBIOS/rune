@@ -249,10 +249,10 @@ impl Tx {
 
     /// Select bytes `range` of the [`El::selectable`] text named `key` (a key, path or key
     /// path, as [`Cx::layout`](crate::Cx::layout) takes), as if dragged across, after this
-    /// handler's commit: an element the same change builds can be selected. The range is
-    /// clamped to the text and its character boundaries. Cmd+C then copies it and Cmd+A
-    /// selects all of its text or group. Nothing happens when `key` (the element's final key; a [`memo`](crate::memo)'s id
-    /// replaces one set inside) names no selectable text. It lives on across rebuilds that keep the text's path and the selected part.
+    /// handler's commit: an element the same change builds can be selected, and an unbuilt
+    /// [`El::virtual_rows`] or [`El::virtualize`] row is built and pinned without scrolling.
+    /// The range is clamped to the text and its character boundaries; Cmd+C then copies it and Cmd+A selects all of its text or group.
+    /// Nothing happens when `key` (the element's final key; a [`memo`](crate::memo)'s id replaces one set inside) names no selectable text.
     pub fn select_text(&mut self, key: impl Into<String>, range: std::ops::Range<usize>) {
         self.select = Some(SelectRequest::Range(key.into(), range));
         self.select_from_change = false;
@@ -260,8 +260,8 @@ impl Tx {
 
     /// Select all of the [`El::selectable`] text named `key`, or, for any other element, every
     /// selectable text inside it that shares the first one's [`El::selection_group`], as Cmd+A
-    /// does: `select_all_text("note")` on a selectable `Markdown` keyed `note` selects the
-    /// whole document. After this handler's commit, as [`Tx::select_text`], with its `key` rules.
+    /// does (including from the first to the last row of a virtual list): `select_all_text("note")`
+    /// on a selectable `Markdown` keyed `note` selects the whole document. After this handler's commit, as [`Tx::select_text`], with its `key` rules.
     pub fn select_all_text(&mut self, key: impl Into<String>) {
         self.select = Some(SelectRequest::All(key.into()));
         self.select_from_change = false;

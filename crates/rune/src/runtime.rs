@@ -203,7 +203,6 @@ mod flatten;
 use flatten::*;
 #[path = "runtime/measure.rs"]
 mod measure;
-use measure::*;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Env {
@@ -3497,7 +3496,7 @@ impl<S: 'static> Measurement<'_, S> {
     /// `bound` is the most `el` can be tall (see [`crate::virtual_list::height_bound`]); `scroll`
     /// is the scroll viewport `el` is the content of, whether it sticks to the bottom, and its bound.
     #[allow(clippy::too_many_arguments)]
-    fn window_tree(&mut self, el: &mut El, parent: &str, index: usize, scroll: Option<(&str, bool, f32)>, settle: bool, force_all: bool, bound: f32, inert: bool) {
+    fn window_tree(&mut self, el: &mut El, parent: &str, index: usize, scroll: Option<(&str, bool, f32)>, settle: bool, force_all: bool, bound: f32, inert: bool, group: Option<&str>) {
         el.expand_memo();
         let inert = inert || el.inert;
         let bound = crate::virtual_list::height_bound(&el.style, bound);
@@ -3590,55 +3589,14 @@ impl<S: 'static> Measurement<'_, S> {
             v.shown = shown;
             el.style.padding.top = length(v.pad_top + v.before);
             el.style.padding.bottom = length(v.pad_bottom + v.after);
-            if let Some(rows) = source {
-                let key_warnings = &mut *self.key_warnings;
-                let mut build = |i: usize| {
-                    let key = &v.keys[i];
-                    let mut row = (rows.build)(state, i).key(key.clone());
-                    // The view's key repair ran before these rows existed.
-                    if crate::key_diagnostics::clean(&row) { return row; }
-                    let duplicates = crate::key_diagnostics::repair_at(&mut row, &format!("{path}/{key}"));
-                    match key_warnings.as_mut() {
-                        Some(out) => out.extend(duplicates.into_iter().map(|d| d.message)),
-                        None => crate::key_diagnostics::warn_once(&duplicates),
-                    }
-                    row
-                };
-                // A focused field's row is built, unmounted, so its typing still lands.
-                let under = |f: &str| f.strip_prefix(path.as_str()).is_some_and(|rest| rest.starts_with('/'));
-                let focused = v.focused_row.as_deref().filter(|_| self.focused.is_some_and(under))
-                    .and_then(|key| v.index_of(key)).filter(|i| !v.range.contains(i));
-                if let Some(i) = focused {
-                    collect_virtual_inputs(&build(i), &path, i, inert, self.virtual_inputs);
-                }
-                el.children = v.range.clone().map(|i| {
-                    let mut row = build(i);
-                    row.virtual_mount = v.born(i) < self.commits;
-                    row
-                }).collect();
-            } else {
-                if !self.retry && el.focus.reveal_selected {
-                    let selected = el.children.iter().find(|c| c.focus.selected).and_then(|c| c.key.clone());
-                    if selected != v.selected_row {
-                        v.reveal_selected = selected.clone();
-                        v.selected_row = selected;
-                    }
-                }
-                el.children = std::mem::take(&mut el.children).into_iter().enumerate().filter_map(|(i, mut child)| {
-                    if !v.range.contains(&i) {
-                        collect_virtual_inputs(&child, &path, i, inert, self.virtual_inputs);
-                        return None;
-                    }
-                    child.virtual_mount = v.born(i) < self.commits;
-                    Some(child)
-                }).collect();
-            }
+            self.populate_virtual_children(el, &path, source, inert, group);
         }
         let bounds = crate::virtual_list::child_bounds(&el.style, el.scroll.is_some(), bound, &el.children);
         let scroll = el.scroll.map(|s| (path.as_str(), s.stick_bottom, bound));
+        let child_group = if el.selection_group { Some(path.as_str()) } else { group };
         for (i, child) in el.children.iter_mut().enumerate() {
             let bound = bounds.of(child);
-            self.window_tree(child, &path, i, scroll, settle, force_all, bound, inert);
+            self.window_tree(child, &path, i, scroll, settle, force_all, bound, inert, child_group);
         }
     }
 
@@ -4810,6 +4768,7 @@ impl<S: 'static> Runtime<S> {
         if self.drag_out_armed && crate::drag_out::past_threshold(self.press_at, (x, y), self.drag_out_threshold) && self.start_drag_out(path.clone()) {
             return;
         }
+        self.press_moved |= (x - self.press_at.0).abs() > CLICK_SLOP || (y - self.press_at.1).abs() > CLICK_SLOP;
         self.selection_drag(x, y);
         if self.input_click.captured {
             self.input_drag(x, y, drag_move);
@@ -4817,7 +4776,6 @@ impl<S: 'static> Runtime<S> {
         }
         let Some(i) = self.nodes.iter().enumerate().position(|(i, n)| n.path == path && !self.subtree_exiting(i)) else { return };
         let (id, r, has_drag) = (self.nodes[i].id, self.nodes[i].target, self.nodes[i].on_drag.is_some() && !self.drags_out(&self.nodes[i]));
-        self.press_moved |= (x - self.press_at.0).abs() > CLICK_SLOP || (y - self.press_at.1).abs() > CLICK_SLOP;
         // A hit rect is where the element was drawn (after scrolling); `target` is its
         // unscrolled layout rect, kept only for elements that were never drawn.
         let mut hits = self.hits.iter().filter(|(hit, _)| *hit == id).peekable();

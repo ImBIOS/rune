@@ -80,8 +80,102 @@ impl<S: 'static> Measurement<'_, S> {
         // Index-built rows build here, so memos inside them share the view's cache. A window that
         // fits its content lays its root out at its natural height, which nothing bounds.
         let bound = if self.fit_height { f32::INFINITY } else { self.viewport.1 };
-        self.window_tree(&mut root, "", 0, None, tx.settle, force_all, bound, false);
+        self.window_tree(&mut root, "", 0, None, tx.settle, force_all, bound, false, None);
         root
+    }
+
+    pub(super) fn populate_virtual_children(
+        &mut self,
+        el: &mut El,
+        path: &str,
+        source: Option<Rc<crate::virtual_rows::RowSource>>,
+        inert: bool,
+        group: Option<&str>,
+    ) {
+        let state = playground_host::handler_states_ref(self.state, self.playground);
+        let v = self.virtuals.get_mut(path).unwrap();
+        let list_group = if el.selection_group { Some(path.to_owned()) } else { group.map(str::to_owned) };
+        v.selection.group_path = list_group.clone();
+        v.selection.inert = inert;
+        v.selection.texts.clear();
+        v.selection.copy_providers.clear();
+        v.selection.unmounted.clear();
+        if let Some(rows) = source {
+            let key_warnings = &mut *self.key_warnings;
+            let keys = &v.keys;
+            let mut build = |i: usize| {
+                let key = &keys[i];
+                let mut row = (rows.build)(state, i).key(key.clone());
+                // The view's key repair ran before these rows existed.
+                if crate::key_diagnostics::clean(&row) { return row; }
+                let duplicates = crate::key_diagnostics::repair_at(&mut row, &format!("{path}/{key}"));
+                match key_warnings.as_mut() {
+                    Some(out) => out.extend(duplicates.into_iter().map(|d| d.message)),
+                    None => crate::key_diagnostics::warn_once(&duplicates),
+                }
+                row
+            };
+            // A focused field's row and a selection's pinned end rows are built unmounted.
+            let under = |f: &str| f.strip_prefix(path).is_some_and(|rest| rest.starts_with('/'));
+            let focused = v.focused_row.as_deref().filter(|_| self.focused.is_some_and(under))
+                .and_then(|key| v.index_of(key)).filter(|i| !v.range.contains(i));
+            let pinned: Vec<usize> = v.pinned_rows.iter()
+                .filter_map(|key| v.index_of(key))
+                .filter(|i| !v.range.contains(i))
+                .collect();
+            if let Some(i) = focused {
+                let row = build(i);
+                collect_virtual_inputs(&row, path, i, inert, self.virtual_inputs);
+                if pinned.contains(&i) {
+                    selectable::virtual_selection::collect_virtual_row_selection(
+                        &row, path, &v.keys[i], i, list_group.as_deref(), inert,
+                        &mut v.selection.texts, &mut v.selection.copy_providers,
+                    );
+                }
+            }
+            for i in pinned {
+                if Some(i) == focused { continue; }
+                let row = build(i);
+                selectable::virtual_selection::collect_virtual_row_selection(
+                    &row, path, &v.keys[i], i, list_group.as_deref(), inert,
+                    &mut v.selection.texts, &mut v.selection.copy_providers,
+                );
+            }
+            el.children = v.range.clone().map(|i| {
+                let mut row = build(i);
+                row.virtual_mount = v.born(i) < self.commits;
+                row
+            }).collect();
+            v.selection.source = Some(rows);
+        } else {
+            v.selection.source = None;
+            if !self.retry && el.focus.reveal_selected {
+                let selected = el.children.iter().find(|c| c.focus.selected).and_then(|c| c.key.clone());
+                if selected != v.selected_row {
+                    v.reveal_selected = selected.clone();
+                    v.selected_row = selected;
+                }
+            }
+            let pinned: Vec<usize> = v.pinned_rows.iter()
+                .filter_map(|key| v.index_of(key))
+                .filter(|i| !v.range.contains(i))
+                .collect();
+            el.children = std::mem::take(&mut el.children).into_iter().enumerate().filter_map(|(i, mut child)| {
+                if !v.range.contains(&i) {
+                    collect_virtual_inputs(&child, path, i, inert, self.virtual_inputs);
+                    if pinned.contains(&i) {
+                        selectable::virtual_selection::collect_virtual_row_selection(
+                            &child, path, &v.keys[i], i, list_group.as_deref(), inert,
+                            &mut v.selection.texts, &mut v.selection.copy_providers,
+                        );
+                    }
+                    v.selection.unmounted.insert(i, child);
+                    return None;
+                }
+                child.virtual_mount = v.born(i) < self.commits;
+                Some(child)
+            }).collect();
+        }
     }
 }
 

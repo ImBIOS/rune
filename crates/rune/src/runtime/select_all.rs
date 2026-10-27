@@ -15,7 +15,9 @@ impl<S: 'static> Runtime<S> {
 
     /// Remembers the unit of the text holding the selection.
     pub(super) fn remember_pick(&mut self) {
-        let unit = self.selection_holder().map(|h| self.nodes[self.select_unit(h)].path.clone());
+        let unit = self.selection_holder_end().map(|h| {
+            self.end_group_path(h).unwrap_or_else(|| self.end_path(h)).to_owned()
+        });
         if unit.is_some() {
             self.text_sel.pick.0 = unit;
         }
@@ -24,8 +26,13 @@ impl<S: 'static> Runtime<S> {
     /// Where Cmd+A goes: the selection's group, else the last picked while it's mounted, else
     /// the only one in the window.
     fn select_all_target(&self) -> Option<usize> {
-        if let Some(h) = self.selection_holder() {
-            return Some(self.select_unit(h));
+        if let Some(h) = self.selection_holder_end() {
+            return match h {
+                selectable::virtual_selection::EndRef::Mounted(i) => Some(self.select_unit(i)),
+                selectable::virtual_selection::EndRef::Offscreen(..) => {
+                    self.end_group_path(h).and_then(|gp| self.live(gp))
+                }
+            };
         }
         let live = |i: usize| self.is_selectable(i) && !self.subtree_exiting(i) && self.allowed(i);
         let picked = self.text_sel.pick.0.as_deref().and_then(|p| self.live(p)).filter(|&u| {
@@ -41,7 +48,37 @@ impl<S: 'static> Runtime<S> {
 
     /// Cmd+A when nothing else took it: selects all of `select_all_target`.
     pub(super) fn select_all_key(&mut self) -> bool {
+        if let Some(h @ selectable::virtual_selection::EndRef::Offscreen(vi, _)) = self.selection_holder_end() {
+            match self.end_group_path(h).map(str::to_owned) {
+                None => {
+                    let path = self.end_path(h).to_owned();
+                    self.select_span_ends(h, h);
+                    self.events.push(format!("select all {path}"));
+                    return true;
+                }
+                Some(gp) if self.live(&gp).is_none() => {
+                    let texts = &self.virtuals.iter().nth(vi).unwrap().1.selection.texts;
+                    let mut members = texts.iter().enumerate()
+                        .filter(|(_, t)| t.group_path.as_deref() == Some(gp.as_str()))
+                        .map(|(ti, _)| selectable::virtual_selection::EndRef::Offscreen(vi, ti));
+                    let Some(first) = members.next() else { return false };
+                    let last = members.last().unwrap_or(first);
+                    self.select_span_ends(first, last);
+                    self.events.push(format!("select all {gp}"));
+                    return true;
+                }
+                Some(_) => {}
+            }
+        }
         let Some(u) = self.select_all_target() else { return false };
+        if self.nodes[u].selection_group
+            && let Some((first, last)) = self.virtual_span_under(u)
+        {
+            let path = self.nodes[u].path.clone();
+            self.select_span_ends(first, last);
+            self.events.push(format!("select all {path}"));
+            return true;
+        }
         let (first, last) = if self.nodes[u].selection_group {
             let texts = self.group_texts(u);
             let (Some(&first), Some(&last)) = (texts.first(), texts.last()) else { return false };
