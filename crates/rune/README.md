@@ -1370,7 +1370,7 @@ For static assets, construct an `ImageCache` once with the app's setup waker:
 
 ```rust,ignore
 let cache = rune::ImageCache::new(waker);
-let icon = cache.load(png_bytes); // PNG, JPEG, or PNG-backed ICNS
+let icon = cache.load(png_bytes); // PNG, JPEG, PNG-backed ICNS, or SVG
 // Keep `icon` in app state; pending images paint nothing, completion wakes the app.
 el().size(32.0, 32.0).pixels(icon.pixels())
 ```
@@ -1380,7 +1380,24 @@ straight-alpha sRGB pixels. Static images get area-filtered, linear-premultiplie
 on that worker; rendering chooses a precomputed level from the drawn device-pixel size.
 `Image::{size,is_ready,error}` inspect completion; `Image::wait` is for deterministic headless
 fixtures. Dropping all image and pixel handles releases decoded storage. Legacy ICNS codecs
-and SVG are not decoded; provide decoded RGBA for those formats.
+are not decoded; provide decoded RGBA for those.
+
+SVG and gzipped SVGZ draw on every platform, web included, through resvg (the default-on `svg`
+feature; about 19 small pure-Rust crates and 8 s of parallel release build). Vector images
+have no pixel size, so rasterize them at the size they draw at and let the mips cover smaller
+draws:
+
+```rust,ignore
+let scale = env.scale; // the window's device pixels per point
+let mark = cache.svg(svg_bytes, 16.0, scale);               // fits 16 pt square, crisp at 2×
+let any = cache.load_mime(bytes, "image/svg+xml", 16.0, scale); // from a data URL's MIME type
+let file = cache.file("assets/logo.svg", 48.0, scale);      // read on the worker; not on web
+```
+
+`cache.file` treats `.svg` and `.svgz` paths (or SVG content) as vectors and decodes other
+files like `load`. `cache.load` recognises SVG by its content and rasterizes it at twice its
+own size. SVG text needs fonts resvg isn't given, so convert text to paths. With the feature
+off, SVG images resolve to `Image::error`.
 
 `El::pixels_fit(&pixels, SurfaceFit::Fit)` keeps the image's aspect ratio, letterboxed and
 centred on whole device pixels (the corner radius rounds the image itself); `SurfaceFit::Fill`

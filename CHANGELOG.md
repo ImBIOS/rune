@@ -5,11 +5,20 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **SVG images on every platform.** `ImageCache::svg(bytes, size_pt, scale)` rasterizes SVG or
+  SVGZ to fit `size_pt` at the window's scale, so a 16 pt mark is crisp at 2×. `load_mime`
+  takes a MIME type (a data URL's `image/svg+xml`), `file(path, size_pt, scale)` reads a file
+  on the worker and treats `.svg`/`.svgz` as vectors, and `load` now recognises SVG bytes and
+  rasterizes them at twice their own size. Before, only Linux app icons drew SVG. resvg moves
+  behind a default-on `svg` feature; apps that set `default-features = false` on `rune` add
+  `svg` to keep it.
+
 - **Secure label review fixes.** Hidden read-only labels use twelve bullets regardless of length. Secure text cannot fly, retain content hashes for layout invalidation, or expose rich links. `Runtime::element_is_secure(path)` reports protected content without changing `ElementInfo` literals. Pristine tracking stores only an edited flag; use `TextEdit::replace_text` for app replacements (including identical values). Backspace at byte zero also clears pristine hidden multi-line fields.
 - **Read-only secure text labels (`text(..).secure().revealed(bool)`) and pristine replacement on hidden multi-line secure fields (`TextEdit::is_pristine`, `TextEdit::mark_edited`).**
   - Read-only `text(..)` and `rich(..)` elements now support `.secure()` and `.revealed(bool)`, sharing the same protections as secure `text_input`: plaintext never enters `TextSystem::layouts`, `TextSystem::shapes`, ancestor `El::cache` rasters (`node_caches` / `resident_caches`), `ElementInfo::text`, `ElementInfo::selected`, `Debug` (`[redacted]`), or `--tree` JSON; selection and copy are disabled (even if `.selectable(true)` is called before or after `.secure()`); and owned `TextSpec` source buffers are zeroized on conceal and `Drop`. Hidden labels show a fixed twelve-bullet mask (`""` when empty), independent of length and line count. When revealed (`revealed(true)`), labels lay out and elide/clamp/wrap normally (including `.wrap_anywhere()`, `.max_lines(..)`, `.truncate()`), snap geometry and ancestor scroll immediately without height animation when concealed back to `revealed(false)`, and conceal to the mask on their first exit frame.
   - `Runtime::element_is_secure(path)` (and `--tree`'s `"secure": true`) identifies both secure labels (`role: "text"`) and secure inputs (`role: "textbox"`).
   - Hidden multi-line `.secure()` fields whose value has not been edited by the user since the app last set it (`TextEdit::new` or `replace_text`) are now pristine (`TextEdit::is_pristine()`, cleared by user edits or `TextEdit::mark_edited()`). While pristine and hidden, any insertion (typing or paste) replaces the entire value with the inserted text and any deletion (`Backspace`, `Delete`, `⌘⌫`, `⌥⌫`, `⌃K`) empties the field, independent of caret or selection; the first edit clears pristine so subsequent edits append or delete at the end as usual. Toggling `revealed` does not reset pristine, an empty field is never pristine, and revealed fields edit normally at the caret or selection.
+
 - **Stacked paint fades into a soft clip as one.** Under `clip_fade` (or a feathered mask), each
   primitive faded on its own, so an image over its placeholder fill, or a label over its bubble,
   let the paint beneath show through the fade: a dark image on a lighter fill brightened towards

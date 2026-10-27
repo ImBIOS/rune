@@ -71,7 +71,36 @@ impl Image {
     }
 }
 
-enum Input { Encoded(Arc<[u8]>), Rgba(u32, u32, Arc<[u8]>), Icon(std::path::PathBuf, u32) }
+enum Input {
+    Encoded(Arc<[u8]>),
+    Rgba(u32, u32, Arc<[u8]>),
+    Icon(std::path::PathBuf, u32),
+    Svg(Arc<[u8]>, u32),
+    File(std::path::PathBuf, u32),
+}
+
+impl Input {
+    fn decode(self) -> Result<Decoded, ImageError> {
+        match self {
+            Input::Encoded(bytes) => decode(&bytes),
+            Input::Rgba(w, h, bytes) => mip_chain(w, h, &bytes),
+            Input::Svg(bytes, px) => svg_rgba(&bytes, px).and_then(|(w, h, bytes)| mip_chain(w, h, &bytes)),
+            #[cfg(not(target_arch = "wasm32"))]
+            Input::Icon(path, px) => app_icon_rgba(&path, px).and_then(|(w, h, bytes)| mip_chain(w, h, &bytes)),
+            #[cfg(not(target_arch = "wasm32"))]
+            Input::File(path, px) => {
+                let bytes = std::fs::read(&path).map_err(|e| ImageError(format!("{}: {e}", path.display())))?;
+                if has_svg_extension(&path) || is_svg(&bytes) {
+                    svg_rgba(&bytes, px).and_then(|(w, h, bytes)| mip_chain(w, h, &bytes))
+                } else {
+                    decode(&bytes)
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            Input::Icon(..) | Input::File(..) => Err(ImageError("filesystem images are unsupported on web".into())),
+        }
+    }
+}
 struct Job { image: Image, input: Input }
 
 /// Construct once during app setup. The cache deduplicates by content, not a path or pointer;
@@ -94,20 +123,17 @@ impl ImageCache {
         let (jobs, receive) = mpsc::channel::<Job>();
         std::thread::Builder::new().name("rune-images".into()).spawn(move || {
             for job in receive {
-                let decoded = match job.input {
-                    Input::Encoded(bytes) => decode(&bytes),
-                    Input::Rgba(w, h, bytes) => mip_chain(w, h, &bytes),
-                    Input::Icon(path, px) => app_icon_rgba(&path, px).and_then(|(w, h, bytes)| mip_chain(w, h, &bytes)),
-                };
-                job.image.finish(decoded);
+                job.image.finish(job.input.decode());
                 waker();
             }
         }).expect("image worker");
         Self { entries: Mutex::new(HashMap::new()), jobs }
     }
 
-    /// PNG, JPEG, or modern ICNS containing a PNG representation. Legacy ICNS codecs
-    /// return an explicit error; callers can provide platform-decoded RGBA instead.
+    /// PNG, JPEG, modern ICNS containing a PNG representation, or SVG (plain or gzipped SVGZ,
+    /// recognised by its content). An SVG rasterizes at twice its own size; use
+    /// [`ImageCache::svg`] to rasterize it at the size it draws at. Legacy ICNS codecs return an
+    /// explicit error; callers can provide platform-decoded RGBA instead.
     pub fn load(&self, bytes: impl Into<Arc<[u8]>>) -> Image {
         let bytes = bytes.into();
         let mut hash = blake3::Hasher::new();
@@ -115,6 +141,42 @@ impl ImageCache {
         hash.update(&bytes);
         let id = *hash.finalize().as_bytes();
         self.request(id, Input::Encoded(bytes))
+    }
+
+    /// SVG or SVGZ bytes rasterized to fit `size_pt` points square at `scale` device pixels per
+    /// point (pass the window's [`Env::scale`](crate::Env)), keeping the drawing's aspect ratio.
+    /// Rasterize at the largest size the image draws at: smaller draws use its mips, so 16 pt at
+    /// 2× stays crisp. Handles are shared by content, size and scale.
+    pub fn svg(&self, bytes: impl Into<Arc<[u8]>>, size_pt: f32, scale: f32) -> Image {
+        let bytes = bytes.into();
+        let px = icon_pixels(size_pt, scale);
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"rune-svg\0");
+        hash.update(&px.to_le_bytes());
+        hash.update(&bytes);
+        self.request(*hash.finalize().as_bytes(), Input::Svg(bytes, px))
+    }
+
+    /// Bytes with a MIME type, as from a data URL or a `Content-Type` header: `image/svg+xml`
+    /// rasterizes like [`ImageCache::svg`], anything else decodes like [`ImageCache::load`].
+    pub fn load_mime(&self, bytes: impl Into<Arc<[u8]>>, mime: &str, size_pt: f32, scale: f32) -> Image {
+        let essence = mime.split(';').next().unwrap_or("").trim();
+        if essence.eq_ignore_ascii_case("image/svg+xml") { self.svg(bytes, size_pt, scale) } else { self.load(bytes) }
+    }
+
+    /// An image file, read and decoded on the worker. `.svg` and `.svgz` files (or SVG content)
+    /// rasterize like [`ImageCache::svg`]; other formats decode like [`ImageCache::load`], ignoring
+    /// the size. Handles are shared by path, size and scale, so an edited file needs a new handle
+    /// once the old ones drop. Unsupported on web, where the image resolves to an error.
+    pub fn file(&self, path: impl AsRef<std::path::Path>, size_pt: f32, scale: f32) -> Image {
+        let path = path.as_ref().to_path_buf();
+        let px = icon_pixels(size_pt, scale);
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"rune-file\0");
+        hash.update(path.as_os_str().as_encoded_bytes());
+        hash.update(&[0]);
+        hash.update(&px.to_le_bytes());
+        self.request(*hash.finalize().as_bytes(), Input::File(path, px))
     }
 
     /// Straight-alpha sRGB RGBA8. Validation, premultiplication and mips happen off-thread.
@@ -169,12 +231,7 @@ impl ImageCache {
             let image = image.clone();
             let wake = self.wake.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let decoded = match input {
-                    Input::Encoded(bytes) => decode(&bytes),
-                    Input::Rgba(w, h, bytes) => mip_chain(w, h, &bytes),
-                    Input::Icon(..) => Err(ImageError("filesystem icons are unsupported on web".into())),
-                };
-                image.finish(decoded);
+                image.finish(input.decode());
                 wake();
             });
         }
@@ -185,6 +242,18 @@ impl ImageCache {
 fn icon_pixels(size_pt: f32, scale: f32) -> u32 {
     let px = (size_pt * scale).ceil();
     if px.is_finite() { px.clamp(1.0, 1024.0) as u32 } else { 1 }
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn has_svg_extension(path: &std::path::Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("svg") || e.eq_ignore_ascii_case("svgz"))
+}
+
+/// Gzip (SVGZ), or markup after an optional BOM and whitespace. No raster format starts with `<`.
+fn is_svg(bytes: &[u8]) -> bool {
+    if bytes.starts_with(&[0x1f, 0x8b]) { return true; }
+    let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
+    bytes.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'<')
 }
 
 /// Rasterize the platform icon for an app bundle or file at about `px`×`px`, as straight-alpha
@@ -280,18 +349,21 @@ fn linux_icon(path: &std::path::Path, px: u32) -> Result<(u32, u32, Vec<u8>), Im
     } else { path.to_path_buf() };
     let bytes = std::fs::read(&file).map_err(|e| ImageError(format!("{}: {e}", file.display())))?;
     if bytes.len() > 16 << 20 { return Err(ImageError(format!("{} is too large for an icon", file.display()))); }
-    if file.extension().is_some_and(|e| e == "svg" || e == "svgz") { return svg_rgba(&bytes, px); }
+    if has_svg_extension(&file) { return svg_rgba(&bytes, px); }
     let image = image::load_from_memory(&bytes).map_err(|e| ImageError(format!("{}: {e}", file.display())))?.into_rgba8();
     if image.width() > 1024 || image.height() > 1024 { return Err(ImageError(format!("{} is too large for an icon", file.display()))); }
     Ok((image.width(), image.height(), image.into_raw()))
 }
 
-/// An SVG scaled to fit `px` square, keeping its aspect ratio.
-#[cfg(target_os = "linux")]
+/// An SVG scaled to fit `px` square, keeping its aspect ratio, as straight-alpha sRGB RGBA8.
+/// `px == 0` rasterizes at twice the drawing's own size, at most 4096 pixels per side.
+#[cfg(feature = "svg")]
 fn svg_rgba(bytes: &[u8], px: u32) -> Result<(u32, u32, Vec<u8>), ImageError> {
     use resvg::{tiny_skia, usvg};
-    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).map_err(|e| ImageError(e.to_string()))?;
+    if bytes.len() > 32 << 20 { return Err(ImageError("SVG is too large".into())); }
+    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).map_err(|e| ImageError(format!("SVG: {e}")))?;
     let size = tree.size();
+    let px = if px == 0 { (size.width().max(size.height()) * 2.0).ceil().clamp(1.0, 4096.0) as u32 } else { px };
     let k = px as f32 / size.width().max(size.height());
     let (w, h) = (((size.width() * k).round() as u32).clamp(1, px), ((size.height() * k).round() as u32).clamp(1, px));
     let mut pixmap = tiny_skia::Pixmap::new(w, h).ok_or_else(|| ImageError("empty SVG".into()))?;
@@ -300,6 +372,11 @@ fn svg_rgba(bytes: &[u8], px: u32) -> Result<(u32, u32, Vec<u8>), ImageError> {
         let c = p.demultiply();
         [c.red(), c.green(), c.blue(), c.alpha()]
     }).collect()))
+}
+
+#[cfg(not(feature = "svg"))]
+fn svg_rgba(_: &[u8], _: u32) -> Result<(u32, u32, Vec<u8>), ImageError> {
+    Err(ImageError("SVG images need rune's `svg` feature".into()))
 }
 
 /// Freedesktop icon lookup: a `.desktop` entry's `Icon=` as an absolute path, or by name in the
@@ -420,6 +497,10 @@ fn macos_icon(path: &std::path::Path, px: u32) -> Result<(u32, u32, Vec<u8>), Im
 }
 
 fn decode(bytes: &[u8]) -> Result<Decoded, ImageError> {
+    if is_svg(bytes) {
+        let (w, h, rgba) = svg_rgba(bytes, 0)?;
+        return mip_chain(w, h, &rgba);
+    }
     let bytes = if bytes.starts_with(b"icns") { icns_png(bytes)? } else { bytes };
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format().map_err(|e| ImageError(e.to_string()))?;
@@ -570,6 +651,44 @@ mod tests {
         }
         assert!(mip_chain(0, 1, &[]).is_err());
         assert!(mip_chain(1, 1, &[0]).is_err());
+    }
+
+    #[cfg(feature = "svg")]
+    #[test]
+    fn svg_rasterizes_at_the_requested_device_size_from_bytes_mime_files_and_svgz() {
+        const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="8" viewBox="0 0 16 8"><rect width="8" height="8" fill="#ff0000"/></svg>"##;
+        let crc = |data: &[u8]| !data.iter().fold(!0u32, |c, &b| (0..8).fold(c ^ b as u32, |c, _| (c >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(c & 1))));
+        // Gzip with one stored deflate block.
+        let mut svgz = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff, 1];
+        svgz.extend_from_slice(&(SVG.len() as u16).to_le_bytes());
+        svgz.extend_from_slice(&(!(SVG.len() as u16)).to_le_bytes());
+        svgz.extend_from_slice(SVG);
+        svgz.extend_from_slice(&crc(SVG).to_le_bytes());
+        svgz.extend_from_slice(&(SVG.len() as u32).to_le_bytes());
+        let dir = std::env::temp_dir().join(format!("rune-svg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mark.svg"), SVG).unwrap();
+        std::fs::write(dir.join("mark.svgz"), &svgz).unwrap();
+        let cache = ImageCache::new(Arc::new(|| {}));
+        let cases = [
+            ("load: twice its own size", cache.load(SVG), [32, 16]),
+            ("load: sniffed svgz", cache.load(svgz.clone()), [32, 16]),
+            ("svg: 24 pt at 2x", cache.svg(SVG, 24.0, 2.0), [48, 24]),
+            ("svg: 16 pt at 3x", cache.svg(svgz.clone(), 16.0, 3.0), [48, 24]),
+            ("mime", cache.load_mime(SVG, "image/svg+xml; charset=utf-8", 8.0, 2.0), [16, 8]),
+            ("file .svg", cache.file(dir.join("mark.svg"), 32.0, 2.0), [64, 32]),
+            ("file .svgz", cache.file(dir.join("mark.svgz"), 32.0, 1.0), [32, 16]),
+        ];
+        for (what, image, size) in cases {
+            assert_eq!(image.wait(), Ok(size), "{what}");
+            let mip = &image.decoded().unwrap().unwrap().mips[0];
+            let at = |x: u32, y: u32| &mip.pixels[((y * mip.width + x) * 4) as usize..][..4];
+            assert_eq!(at(1, size[1] / 2), [255, 0, 0, 255], "{what}: the left half is red");
+            assert_eq!(at(size[0] - 2, size[1] / 2), [0, 0, 0, 0], "{what}: the right half is clear");
+        }
+        assert!(cache.load_mime(b"<svg".to_vec(), "image/svg+xml", 16.0, 2.0).wait().is_err(), "malformed SVG fails");
+        assert!(cache.file(dir.join("missing.svg"), 16.0, 2.0).wait().is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
