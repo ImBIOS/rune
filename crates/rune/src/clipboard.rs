@@ -18,6 +18,7 @@ use crate::{Runtime, Waker};
 
 mod content;
 mod html;
+pub(crate) mod tx;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
