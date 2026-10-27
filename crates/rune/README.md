@@ -569,6 +569,8 @@ app.run();
   no bundle and gets no links. iOS isn't wired yet (winit owns the scene delegate), and Windows
   and Linux pass a link to a new process as a launch argument, so the hook never runs there;
   read it from the arguments, with your own single-instance forwarding if you need one.
+  `scripts/mac-app --scheme myapp` writes that entry and registers the bundle for you (see
+  "Relaunching a Mac app" below).
 - Edge overlays (HUDs): see `App::overlay` below.
 
 ### Launching fast
@@ -606,6 +608,9 @@ The full page, with the measurement method, is "Launch fast" on the docs site (`
   true, so return false when nothing changed. A custom compositor returns `animating() == true` only while it moves
   (the default is false); a still one lets its window rest too. One settings window went from 77 presents per 20 s
   idle to none, 2.45% CPU to 0.85%, and 77 MB to 70 MB.
+- **Relaunch in place while developing.** `scripts/mac-app` swaps a rebuilt bundle in and starts it before the
+  old process quits, so with `rune_mac::remember_frame` the new window lands over the old one (see "Relaunching a
+  Mac app" below).
 - **Reuse a hidden window.** `keep_running()` / `windowless()` plus `AppHandle::hide()`, `show()` and `open()`
   (or `WindowOptions::launcher_panel()` for a retained panel that reveals cached pixels) make a re-summon cost a
   show instead of a launch.
@@ -624,6 +629,44 @@ The full page, with the measurement method, is "Launch fast" on the docs site (`
 | Cold shader cache, `Renderer::new` alone (10 rounds) | 232 | 85 |
 
 Absolute times were high because the machine was busy; the differences are what matter.
+
+### Relaunching a Mac app (`scripts/mac-app`, `rune-mac`)
+
+`cargo run` starts a bare binary: no bundle, so no icon, no links, no microphone prompt, and a
+window that opens at its default place every run. `scripts/mac-app` installs a built binary as
+`~/Applications/NAME.app` and relaunches it without the window blinking: the new bundle is built
+beside the running one, swapped in and started, and the old process quits once the new one is up.
+
+```sh
+cargo build --release -p example
+scripts/mac-app --name Example --id com.example.app --exe example --bin target/release/example \
+  --icon assets/icon.icns --scheme example --mic "To take dictation" -- --some-app-flag
+```
+
+- `--name`, `--id`, `--exe` and `--bin` are required: the bundle's name, its bundle id, the
+  executable's name inside it, and the binary to copy in. `--icon` is an `.icns`. Arguments
+  after `--` go to the app.
+- `--scheme NAME` declares `NAME://` links in the bundle and registers it with Launch Services,
+  so `App::on_open_url` receives them at once.
+- `--mic "WHY"` adds the microphone usage string macOS shows in its first-run prompt.
+- `--wait-idle SECS`, for unattended rebuilds (a file watcher, an agent), holds the swap while
+  the app is in front and the keyboard or mouse was used in the last SECS seconds. When the app
+  isn't in front, it relaunches behind the app that is, without taking focus.
+- `MAC_APP_SIGN="Developer ID Application: …"` signs with that identity, so macOS remembers
+  permission answers across rebuilds. Without it the bundle is signed ad hoc, which macOS treats
+  as a new app each build.
+
+The `rune-mac` crate holds the app's side (all no-ops off macOS):
+
+- `rune_mac::launch()`, first thing in `main`, keeps a relaunch behind the app in front from
+  activating. winit activates every app it starts, `open -g` or not.
+- `rune_mac::remember_frame(name)`, called from `poll` until it returns true, has AppKit save the
+  window frame and restore it next launch; `rune_mac::saved_size(name)` gives that size for
+  `AppSpec::size`, so the layout doesn't animate to it at launch.
+- `rune_mac::busy(true)` holds the script's swap, for up to 15 minutes, while the app is doing
+  something a relaunch would lose; `busy(false)` lets it go. The marker is the process's pid
+  under `~/Library/Caches/mac-app/busy/`, so a crash can't hold the swap.
+- `rune_mac::toggle_full_screen()` and `is_full_screen()` drive the key window's full screen.
 
 ### Compact tray-controlled windows
 
