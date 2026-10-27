@@ -385,3 +385,49 @@ fn a_glide_whose_end_shrinks_past_it_lands_there() {
     assert_eq!((st.offset, st.max), (900.0, 900.0));
     assert!(low >= 900.0 - 1e-6, "never dips below the end: {low}");
 }
+
+/// The collapse's spring tail can run on for a while under a fraction of a point. A reader
+/// the glide landed on the new end sticks to it once the rows are within half a point of it,
+/// so rows arriving in that tail grow in under a pinned end rather than below the viewport.
+#[test]
+fn a_reader_landed_on_a_shrunk_end_follows_rows_arriving_in_its_tail() {
+    let mut rt = reading(120.0);
+    rt.update(|n, _| *n = 15);
+    for f in 0.. {
+        rt.frame(1.0 / 120.0);
+        let st = rt.scrolls.values().next().unwrap();
+        if st.glide.is_none() && st.max - 1200.0 < 0.5 { break; }
+        assert!(f < 240, "the glide lands and the rows near the end");
+    }
+    assert!(rt.stacks.values().next().unwrap().moving, "the rows are still settling");
+    assert!(rt.scrolls.values().next().unwrap().pinned, "the reader sticks to the end");
+    rt.update(|n, _| *n = 20);
+    for _ in 0..120 { rt.frame(1.0 / 120.0); }
+    let st = rt.scrolls.values().next().unwrap();
+    assert_eq!((st.offset, st.max), (1700.0, 1700.0), "and follows the rows that come back");
+}
+
+/// While a collapse glides a reader to the new end, `on_far_from_bottom` measures from the end
+/// they're headed to: the presented end, still collapsing, doesn't report them far for a moment.
+#[test]
+fn a_shrink_glide_never_reports_far_from_the_end_it_heads_for() {
+    use crate::el::{GrowthSpec, ScrollSpec};
+    fn view(s: &(usize, Vec<bool>), _: &mut Cx<(usize, Vec<bool>)>) -> El {
+        let mut stack = col().key("stack").w_full().growth(GrowthSpec::default());
+        for i in 0..s.0 {
+            stack = stack.child(el().key(format!("r{i}")).h(100.0).w_full());
+        }
+        let scroll = col().key("scroll").h(300.0).w_full().scroll(ScrollSpec { stick_bottom: true })
+            .on_far_from_bottom(300.0, |s: &mut (usize, Vec<bool>), far| s.1.push(far));
+        col().key("root").child(scroll.child(stack))
+    }
+    let mut rt = Runtime::new((20usize, Vec::new()), view, (200.0, 300.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    rt.frame(1.0 / 120.0);
+    rt.wheel(100.0, 100.0, 200.0);
+    for _ in 0..30 { rt.frame(1.0 / 120.0); }
+    assert_eq!(rt.state.1, [false], "200 above the end is near");
+    rt.update(|s, _| s.0 = 15);
+    for _ in 0..120 { rt.frame(1.0 / 120.0); }
+    assert_eq!(rt.state.1, [false], "gliding to the new end stays near");
+}

@@ -255,7 +255,9 @@ impl<S: 'static> Runtime<S> {
                 }
             }
             if let Some((min, _)) = &n.on_far_from_bottom {
-                let far = st.max - st.offset > f64::from(min.max(n.local.h));
+                // A shrink glide heads for the new end; the presented one is still collapsing.
+                let end = if st.shrink_glide { st.glide_to.map_or(st.max, |to| to.min(st.max)) } else { st.max };
+                let far = end - st.offset > f64::from(min.max(n.local.h));
                 if st.far_from_bottom != Some(far) {
                     st.far_from_bottom = Some(far);
                     self.queue.push(Action::FarFromBottom(n.path.clone(), far));

@@ -4381,7 +4381,8 @@ impl<S: 'static> Runtime<S> {
                 }
             }
             let rest_quiet = instant || !was_present || was_exiting || self.reduced_motion;
-            self.set_group_rest(id, nodes[i].vis.group_opacity.map(|g| g[0]), nodes[i].opacity_motion, spring_l, rest_quiet);
+            let motion = nodes[i].opacity_motion;
+            self.set_group_rest(id, &mut nodes[i].vis.group_opacity, motion, spring_l, rest_quiet);
             let k = nodes[i].static_scale;
             nodes[i].scale_track = k != 1.0 || self.scene.store().has(id, P_SCALE);
             if nodes[i].scale_track {
@@ -4865,8 +4866,9 @@ impl<S: 'static> Runtime<S> {
             }
             st.offset = st.offset.clamp(0.0, st.max);
             if st.glide.is_none() && st.x.glide.is_none() { st.hover_held = false; }
-            // Landed on a shrinking stack's new end: stick once its rows get there, not just short.
-            let shrinking = laid.is_some_and(|end| end < st.max - 1e-3 && st.offset < st.max - 1e-3);
+            // Landed on a shrinking stack's new end: stick once its rows are within half a point
+            // of it, not while they're still short of it.
+            let shrinking = laid.is_some_and(|end| end < st.max - 0.5 && st.offset < st.max - 1e-3);
             if sp.stick_bottom && !held && !shrinking && st.offset >= st.max - 0.5 && st.v.abs() <= 1.0 {
                 st.pinned = true;
             }

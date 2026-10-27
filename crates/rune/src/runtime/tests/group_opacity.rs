@@ -86,3 +86,30 @@ fn a_new_mount_draws_at_its_rest_on_its_first_frame() {
         assert!((0.0..1.0 / 512.0).contains(&a), "frame {f}: a new child resting at 0 draws {a}");
     }
 }
+
+/// A row that drops `group_opacity` (its actions shown at rest) fades them to full on its
+/// motion, and fades them back out when it takes the rest level again, rather than cutting.
+#[test]
+fn adding_or_dropping_group_opacity_fades() {
+    fn view(on: &bool, _: &mut Cx<bool>) -> El {
+        let act = el().key("act").size(10.0, 10.0).fill(Color::WHITE);
+        let act = if *on { act.group_opacity(0.0, 1.0) } else { act };
+        col().size(200.0, 100.0).child(crate::row().key("row").size(200.0, 40.0).hover_group().child(act))
+    }
+    let alpha = |rt: &Runtime<bool>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("act")).unwrap().opacity;
+    let mut rt = Runtime::new(true, view, (200.0, 100.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    assert_eq!(alpha(&rt), 0.0);
+    for (on, from, to) in [(false, 0.0, 1.0), (true, 1.0, 0.0)] {
+        rt.update(|s, _| *s = on);
+        let mut seen = Vec::new();
+        for _ in 0..120 {
+            rt.frame(1.0 / 120.0);
+            seen.push(alpha(&rt));
+        }
+        assert!((seen[0] - from).abs() < 0.5, "the first frame doesn't cut to {to}: {seen:?}");
+        assert!(seen.windows(2).all(|w| (w[1] - w[0]).abs() < 0.2), "it fades: {seen:?}");
+        assert!((seen[119] - to).abs() < 1e-3, "and lands on {to}: {seen:?}");
+    }
+    assert!(!rt.animating);
+}

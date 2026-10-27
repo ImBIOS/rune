@@ -78,17 +78,29 @@ pub(super) fn paint_pose_springing(store: &rune_motion::AnimationStore, id: Node
 pub(super) const STATIC_SCALE_SETTLE: f64 = 0.1;
 
 impl<S: 'static> Runtime<S> {
-    /// Moves node `id`'s group-opacity rest to `rest` on its opacity motion (the transaction's
-    /// spring without one), or lands it when `quiet`: an instant change, a mount, reduced motion.
-    pub(super) fn set_group_rest(&mut self, id: NodeId, rest: Option<f32>, motion: Option<Anim>, spring: Spring, quiet: bool) {
+    /// Moves node `id`'s group-opacity rest to its `group` rest on its opacity motion (the
+    /// transaction's spring without one), or lands it when `quiet`: an instant change, a mount,
+    /// reduced motion. No group opacity draws at full, so an element that takes one on or drops
+    /// it fades from or to 1; one still fading to full keeps `group` at `[1, 1]` until it lands.
+    pub(super) fn set_group_rest(&mut self, id: NodeId, group: &mut Option<[f32; 2]>, motion: Option<Anim>, spring: Spring, quiet: bool) {
         let store = self.scene.store();
-        match rest {
-            None if store.has(id, P_GROUP_REST) => self.scene.store_mut().remove(id, P_GROUP_REST),
-            None => {}
-            Some(r) if quiet || !store.has(id, P_GROUP_REST) => self.scene.set(id, P_GROUP_REST, r),
-            Some(r) if store.target(id, P_GROUP_REST) != Some(r) => self.scene.animate(id, P_GROUP_REST, r, motion.unwrap_or(spring.into())),
-            Some(_) => {}
+        let had = store.has(id, P_GROUP_REST);
+        let settled = !store.is_animating(id, P_GROUP_REST) && store.get(id, P_GROUP_REST) == Some(1.0);
+        let to = group.map_or(1.0, |g| g[0]);
+        let motion = motion.unwrap_or(spring.into());
+        if group.is_none() && (!had || quiet || settled) {
+            if had { self.scene.store_mut().remove(id, P_GROUP_REST); }
+            return;
         }
+        if quiet {
+            self.scene.set(id, P_GROUP_REST, to);
+        } else if !had {
+            self.scene.set(id, P_GROUP_REST, 1.0);
+            self.scene.animate(id, P_GROUP_REST, to, motion);
+        } else if store.target(id, P_GROUP_REST) != Some(to) {
+            self.scene.animate(id, P_GROUP_REST, to, motion);
+        }
+        group.get_or_insert([1.0, 1.0]);
     }
 
     /// The opacity factor `El::group_opacity` gives node `n` under a hover group at `group`.
