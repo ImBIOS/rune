@@ -1,4 +1,5 @@
-//! `--playground NAME` with `--variant` and `--crop KEY`, headless and the same every run.
+//! `--playground NAME` with `--snap`, `--out`, `--video`, `--script`, `--variant` and
+//! `--crop KEY`, headless and the same every run.
 
 use super::*;
 
@@ -48,6 +49,33 @@ fn png_size(path: &std::path::Path) -> (u32, u32) {
     let b = std::fs::read(path).unwrap();
     let be = |i: usize| u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
     (be(16), be(20))
+}
+
+#[test]
+fn a_playground_scene_renders_its_script_the_same_every_run() {
+    let _turn = HEADLESS.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("rune-playground-cli-{}", std::process::id()));
+    let script = dir.join("script.json");
+    std::fs::create_dir_all(&dir).unwrap();
+    // G's trigger runs at 0.5 s on the logical clock, after the slide 'r' started on choosing.
+    std::fs::write(&script, r#"[{"t": 0.5, "type": "type", "text": "g"}, {"t": 1.2, "type": "mark", "name": "end"}]"#).unwrap();
+    let video = std::process::Command::new("ffprobe").arg("-version").output().is_ok();
+    let mut args = vec!["--script", script.to_str().unwrap(), "--at", "1.0", "--out", "{out}/frames", "--every", "6"];
+    if video { args.extend(["--video", "{out}/clip.mp4"]); }
+    let first = bytes(&run(&dir, "first", &args));
+    let second = bytes(&run(&dir, "second", &args));
+    assert!(first.iter().any(|(n, _)| n == "snap.png") && first.iter().any(|(n, _)| n.starts_with("frame_")));
+    assert_eq!(first.iter().any(|(n, _)| n == "clip.mp4"), video);
+    for ((name, a), (_, b)) in first.iter().zip(&second) {
+        assert!(a == b, "{name} differs between runs");
+    }
+    assert_eq!(first.len(), second.len());
+    let still = bytes(&run(&dir, "still", &["--at", "1.0"]));
+    let start = bytes(&run(&dir, "start", &["--at", "0"]));
+    let snap = |files: &[(String, Vec<u8>)]| files.iter().find(|(n, _)| n == "snap.png").unwrap().1.clone();
+    assert!(snap(&first) != snap(&still), "the script's trigger key changed the scene");
+    assert!(snap(&still) != snap(&start), "choosing the scene played its 'r' motion");
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
