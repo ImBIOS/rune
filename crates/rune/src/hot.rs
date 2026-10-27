@@ -42,6 +42,11 @@ pub(crate) fn original_only<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+/// Whether views run as built at startup, inside [`original_only`].
+pub(crate) fn originals_only() -> bool {
+    ORIGINAL_ONLY.get()
+}
+
 fn view_adapter<S: 'static>(host: &HostState, cx: &mut Cx<HostState>) -> El {
     let spec = host.spec.downcast_ref::<AppSpec<S>>().unwrap();
     let state = host.value.downcast_ref::<S>().unwrap();

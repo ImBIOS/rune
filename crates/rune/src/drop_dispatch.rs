@@ -100,6 +100,13 @@ impl<S: 'static> Runtime<S> {
     /// ([`El::on_drop_rejected_hover`]), for tests and tools.
     pub fn drop_rejected_hovered(&self) -> Option<String> { self.hover_key(false) }
 
+    /// Drops the drag's target and the hover callback it would hear `false` on, unheard: their
+    /// elements went with the state they were built for.
+    pub(super) fn forget_drop_targets(&mut self) {
+        self.file_drag.aimed = None;
+        self.file_drag.hovered = None;
+    }
+
     fn hover_key(&self, accepted: bool) -> Option<String> {
         let ((path, _), _) = self.file_drag.hovered.as_ref().filter(|((_, a), _)| *a == accepted)?;
         Some(self.node(path).and_then(|n| n.key.clone()).unwrap_or_else(|| path.clone()))
@@ -163,7 +170,7 @@ impl<S: 'static> Runtime<S> {
                 top
             }
         };
-        let root = self.active_modal().unwrap_or(0);
+        let root = self.active_modal().unwrap_or_else(|| self.app_root());
         std::iter::successors(start, |&i| self.nodes[i].parent)
             .chain(std::iter::once(root).filter(|&r| r < self.nodes.len()))
             .filter(|&i| self.allowed(i) && !self.subtree_exiting(i))

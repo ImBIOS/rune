@@ -38,22 +38,8 @@ use crate::tok::motion;
 /// attached, its stage's beside its own controls.
 macro_rules! states {
     ($self:ident) => {
-        crate::runtime::handler_states(&mut $self.state, &mut $self.playground)
+        crate::runtime::playground_host::handler_states(&mut $self.state, &mut $self.playground)
     };
-}
-
-pub(crate) fn handler_states<'a, S: 'static>(state: &'a mut S, playground: &'a mut Option<Box<crate::playground::Live<S>>>) -> crate::states::States<'a> {
-    match playground {
-        Some(playground) => playground.states(state),
-        None => crate::states::States::one(handler_state(state)),
-    }
-}
-
-pub(crate) fn handler_states_ref<'a, S: 'static>(state: &'a S, playground: Option<&'a crate::playground::Live<S>>) -> crate::states::StatesRef<'a> {
-    match playground {
-        Some(playground) => playground.states_ref(state),
-        None => crate::states::StatesRef::one(handler_state_ref(state)),
-    }
 }
 
 #[inline(always)]
@@ -105,6 +91,8 @@ mod popup_dispatch;
 mod file_dialog_dispatch;
 #[path = "drop_dispatch.rs"]
 mod drop_dispatch;
+#[path = "runtime/playground.rs"]
+mod playground_host;
 #[path = "runtime/scroll_bottom.rs"]
 mod scroll_bottom;
 #[path = "runtime/caret.rs"]
@@ -1896,7 +1884,7 @@ impl<S: 'static> Runtime<S> {
                 self.cancel_pointer();
                 self.held = None;
             }
-            if self.commits == 0 || self.dirty || self.nodes.first().is_some_and(|n| n.on_window_focus.is_some()) {
+            if self.commits == 0 || self.dirty || self.nodes.get(self.app_root()).is_some_and(|n| n.on_window_focus.is_some()) {
                 self.queue.push(Action::WindowFocus(focused));
             }
             if !focused {
@@ -2008,12 +1996,7 @@ impl<S: 'static> Runtime<S> {
         self.run_pick_reads(tx);
         self.shell_request = self.shell_request.max(tx.shell.take());
         self.minimize_request |= std::mem::take(&mut tx.minimize);
-        let playground = std::mem::take(&mut tx.playground);
-        if !playground.is_empty() {
-            // The playground swaps whole views: no fades between them.
-            tx.instant = true;
-            self.playground_requests(playground);
-        }
+        self.latch_playground(tx);
         if !tx.open_urls.is_empty() { self.open_urls(std::mem::take(&mut tx.open_urls)); }
         if std::mem::take(&mut tx.clear_secret) {
             if self.copy_request.as_ref().is_some_and(crate::ClipboardWrite::is_secret) { self.copy_request = None; }
@@ -2334,7 +2317,10 @@ impl<S: 'static> Runtime<S> {
             // the previous field. The same boundary covers an earlier handler, and lets a
             // file drag find only what is mounted and reachable now (a covered window builds
             // nothing until this).
-            if (ran || self.dirty || !tx.scroll_to.is_empty()) && matches!(&action, Action::Key { .. } | Action::KeyUp(_) | Action::Physical(..) | Action::Ime(_) | Action::Paste(..) | Action::Files(_)) {
+            let routed = matches!(&action, Action::Key { .. } | Action::KeyUp(_) | Action::Physical(..) | Action::Ime(_) | Action::Paste(..) | Action::Files(_));
+            // So is a playground an earlier handler opened or moved.
+            if routed { self.latch_playground(&mut tx); }
+            if (ran || self.dirty || !tx.scroll_to.is_empty()) && routed {
                 if ran || self.dirty {
                     for (source, target) in std::mem::take(&mut tx.text_flights) {
                         self.capture_text_flight(source, target);
@@ -2781,7 +2767,7 @@ impl<S: 'static> Runtime<S> {
         let ran = match action {
             Action::WindowFocus(focused) => {
                 if !focused { self.held = None; }
-                let Some(f) = self.nodes.first().and_then(|n| n.on_window_focus.clone()) else { return false };
+                let Some(f) = self.nodes.get(self.app_root()).and_then(|n| n.on_window_focus.clone()) else { return false };
                 f(states!(self), focused, &mut one);
                 true
             }
@@ -3161,81 +3147,6 @@ impl<S: 'static> Runtime<S> {
             None => Some(&mut self.state),
         };
         state.is_some_and(|state| app_call!(f, state, ev, one))
-    }
-
-    /// Keys nothing else took: Escape goes Back from the playground.
-    fn playground_key(&mut self, ev: &KeyEvent, one: &mut Tx) -> bool {
-        let plain = !ev.mods.cmd && !ev.mods.alt && !ev.mods.ctrl && !ev.mods.shift;
-        if ev.key == crate::Key::Escape && plain && self.playground.as_ref().is_some_and(|p| p.is_open()) {
-            one.close_playground();
-            return true;
-        }
-        false
-    }
-
-    /// The playground's own keys, ahead of the stage's `on_key` and focus traversal: its
-    /// shortcut, and while it's open, moving between stories, triggers, and into and around the
-    /// side column. A focused text field keeps its keys.
-    fn playground_nav(&mut self, ev: &KeyEvent, one: &mut Tx) -> bool {
-        let Some(playground) = &self.playground else { return false };
-        if playground.is_shortcut(ev) {
-            if !one.key_repeat { one.toggle_playground(); }
-            return true;
-        }
-        if !playground.is_open() || self.focused_input().is_some() { return false; }
-        let side = self.playground_side();
-        let at = self.focused.as_deref().filter(|_| !self.hover_focus).and_then(|f| side.iter().position(|p| p == f));
-        match playground.nav(ev, at.is_some()) {
-            crate::playground::Nav::Pass => false,
-            crate::playground::Nav::Request(request) => {
-                let trigger = matches!(request, crate::playground::Request::Trigger(_) | crate::playground::Request::Replay);
-                if !(trigger && one.key_repeat) { one.playground.push(request); }
-                true
-            }
-            crate::playground::Nav::IntoSide => {
-                let Some(first) = side.first() else { return false };
-                self.set_focus(Some(first.clone()), true);
-                true
-            }
-            crate::playground::Nav::OutOfSide => {
-                self.set_focus(None, true);
-                true
-            }
-            crate::playground::Nav::SideStep(by) => {
-                let (at, n) = (at.unwrap_or(0) as isize, side.len() as isize);
-                let path = side[(at + by).rem_euclid(n) as usize].clone();
-                self.set_focus(Some(path.clone()), true);
-                one.scroll_to.push((None, path));
-                true
-            }
-        }
-    }
-
-    /// The paths of the focusable controls in the playground's side column, in order.
-    fn playground_side(&self) -> Vec<String> {
-        let inside = |i: usize| std::iter::successors(Some(i), |&j| self.nodes[j].parent).any(|j| self.nodes[j].key.as_deref() == Some("playground-side"));
-        (0..self.nodes.len()).filter(|&i| self.can_focus(i) && inside(i)).map(|i| self.nodes[i].path.clone()).collect()
-    }
-
-    /// Queues playground requests for the next commit, which applies them before its view.
-    fn playground_requests(&mut self, requests: Vec<crate::playground::Request>) {
-        let Some(playground) = &mut self.playground else { return };
-        playground.request(requests);
-        self.dirty = true;
-    }
-
-    /// Applies queued playground requests. Focus leaves the old stage first, while the states
-    /// its fields were built for are still there.
-    fn apply_playground(&mut self) {
-        let Some(playground) = &self.playground else { return };
-        if !playground.has_pending() { return; }
-        if playground.pending_swaps_stage() && self.focused.is_some() { self.set_focus(None, false); }
-        let clock = self.clock;
-        if self.playground.as_mut().is_some_and(|p| p.apply(clock)) {
-            self.memo.clear();
-            // A new stage state gets its first poll on the next frame, as an app's does.
-            if self.playground.as_ref().is_some_and(|p| p.polls()) { self.schedule_wakes([std::time::Duration::ZERO]); }
-        }
     }
 
     /// Page Up and Page Down scroll by most of a viewport, and Home and End to the top and
@@ -3714,7 +3625,7 @@ impl<S: 'static> Measurement<'_, S> {
     fn root_view(&self, cx: &mut Cx<S>) -> El {
         match self.playground {
             Some(playground) => playground.view(self.state, self.view, cx, self.viewport),
-            None => (self.view)(self.state, cx),
+            None => crate::playground::call(self.view, self.state, cx),
         }
     }
 
@@ -3766,7 +3677,7 @@ impl<S: 'static> Measurement<'_, S> {
             v.pad_bottom = padding(el.style.padding.bottom);
             v.set_gap(crate::virtual_list::gap_y(&el.style));
             let source = el.virtual_rows.take();
-            let state = handler_states_ref(self.state, self.playground);
+            let state = playground_host::handler_states_ref(self.state, self.playground);
             if source.is_some() {
                 assert!(el.children.is_empty(), "`.virtual_rows(..)` at {path:?} builds its own rows; it takes no children");
             }
@@ -3909,10 +3820,8 @@ impl<S: 'static> Measurement<'_, S> {
         // falls back like one in the view.
         #[cfg(feature = "hot")]
         let (mut root, memo) = {
-            let view = self.view;
-            let state = self.state;
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let root = if self.playground.is_some() { self.root_view(&mut cx) } else { subsecond::HotFn::current(view).call((state, &mut cx)) };
+                let root = self.root_view(&mut cx);
                 self.build_tree(root, tx, force_all)
             })) {
                 Ok(root) => (root, memo),
@@ -3925,7 +3834,7 @@ impl<S: 'static> Measurement<'_, S> {
                     self.virtual_inputs.clear();
                     cx = fresh_cx(self);
                     let memo = crate::memo::enter(emptied, self.env, self.system_accent, self.system_reduced_motion, cx.caret.clone(), cx.layout.clone());
-                    let root = crate::hot::original_only(|| view(state, &mut cx));
+                    let root = crate::hot::original_only(|| self.root_view(&mut cx));
                     (crate::hot::original_only(|| self.build_tree(root, tx, force_all)), memo)
                 }
             }
@@ -4752,6 +4661,7 @@ impl<S: 'static> Runtime<S> {
             self.time_scaled = time_scales.iter().any(|&k| k != 1.0);
         }
         self.nodes = nodes;
+        self.find_app_root();
         self.commit_gen = self.commit_gen.wrapping_add(1);
         self.has_dissolve = self.nodes.iter().any(|n| n.vis.blend == crate::render::Blend::PlusLighter);
         self.has_cache = self.nodes.iter().any(|n| n.vis.cache);
@@ -5161,7 +5071,7 @@ impl<S: 'static> Runtime<S> {
         self.drag_out_armed = false;
         let Some(i) = self.nodes.iter().enumerate().position(|(i, n)| n.path == path && !self.subtree_exiting(i)) else { return false };
         let Some(f) = self.nodes[i].drag_out.clone() else { return false };
-        let Some(item) = f(handler_states_ref(&self.state, self.playground.as_deref())).filter(|item| !item.is_empty()) else { return false };
+        let Some(item) = f(playground_host::handler_states_ref(&self.state, self.playground.as_deref())).filter(|item| !item.is_empty()) else { return false };
         let n = &self.nodes[i];
         let r = self.drawn.get(i).copied().unwrap_or([n.target[0], n.target[1], n.target[2] - n.target[0], n.target[3] - n.target[1]]);
         let clip = self.screen_clip_of_parent(n.parent).map(|v| v / self.env.scale);
@@ -5501,7 +5411,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn app_paste_handler(&self) -> Option<crate::el::PasteFn> {
-        self.nodes.get(self.active_modal().unwrap_or(0))?.on_paste.clone()
+        self.nodes.get(self.active_modal().unwrap_or_else(|| self.app_root()))?.on_paste.clone()
     }
     pub(crate) fn accepts_paste(&self) -> bool {
         self.paste_target().is_some() || self.app_paste_handler().is_some()
@@ -7919,7 +7829,7 @@ impl<S: 'static> Runtime<S> {
     /// follow it, so they flip when the app changes theme itself).
     pub(crate) fn backdrop_dark(&self) -> Option<bool> {
         if self.transparent { return None; }
-        let n = self.nodes.first()?;
+        let n = self.nodes.get(self.app_root())?;
         let c = self.color(n.id, P_FILL, n.vis.fill);
         (c.a > 0.5).then(|| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b < 0.25)
     }
@@ -7943,7 +7853,7 @@ impl<S: 'static> Runtime<S> {
 
     pub fn clear_color(&self) -> [f32; 4] {
         if self.transparent { return [0.0; 4]; }
-        self.nodes.first().map_or([0.0, 0.0, 0.0, 1.0], |n| {
+        self.nodes.get(self.app_root()).map_or([0.0, 0.0, 0.0, 1.0], |n| {
             let c = self.color(n.id, P_FILL, n.vis.fill);
             if self.srgb_blend {
                 [srgb_encode(c.r), srgb_encode(c.g), srgb_encode(c.b), 1.0]

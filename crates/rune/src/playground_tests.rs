@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::*;
-use crate::{AppSpec, Env, Key, KeyEvent, Mods, Runtime, TextEdit, TextStyle, text_input};
+use crate::{AppSpec, Env, Key, KeyEvent, Mods, Runtime, TextEdit, TextStyle, Transition, text_input};
 
 #[derive(Default)]
 struct Real {
@@ -10,10 +10,16 @@ struct Real {
     polls: u32,
     holds_escape: bool,
     field: TextEdit,
+    pastes: Vec<String>,
+    drops: usize,
+    focus: Vec<bool>,
 }
 
 fn view(s: &Real, _: &mut Cx<Real>) -> El {
     col().w_full().h_full()
+        .on_paste(|s: &mut Real, text: &str, _| s.pastes.push(text.into()))
+        .on_drop_files(|s: &mut Real, files: &[std::path::PathBuf], _| s.drops += files.len())
+        .on_window_focus(|s: &mut Real, focused, _| s.focus.push(focused))
         .child(text(format!("count {}", s.count)).key("count"))
         .child(el().key("inc").size(40.0, 20.0).on_press(|s: &mut Real| s.count += 1))
         .child(text_input(&s.field, TextStyle::new(14.0, 400.0)).key("field").size(200.0, 24.0).on_edit(|s: &mut Real| &mut s.field))
@@ -70,17 +76,24 @@ fn fade_story() -> Story<Fade> {
         .trigger('f', "Finish", |p, _| p.log.push(("finish", 0.0)))
 }
 
-fn runtime_in(open: Option<Option<String>>, windowed: bool) -> Runtime<Real> {
-    let mut spec = AppSpec::new("playground", (800.0, 500.0), Real::default, view);
-    spec.scenes = SCENES;
-    spec.poll = Some(|s, _, _| { s.polls += 1; false });
-    spec.on_key = Some(|s, ev, _| s.holds_escape && ev.key == Key::Escape);
-    let playground = Playground::new()
+fn base() -> Playground<Real> {
+    Playground::new()
         .enabled(true)
         .page("Live/Activity", activity)
         .story(Story::new("Lab", Lab::default, lab).poll(lab_poll))
         .story(fade_story())
-        .trigger("big", 'd', "Double", |s, _| s.count *= 2);
+        .trigger("big", 'd', "Double", |s, _| s.count *= 2)
+}
+
+fn runtime_in(open: Option<Option<String>>, windowed: bool) -> Runtime<Real> {
+    runtime_with(base(), open, windowed)
+}
+
+fn runtime_with(playground: Playground<Real>, open: Option<Option<String>>, windowed: bool) -> Runtime<Real> {
+    let mut spec = AppSpec::new("playground", (800.0, 500.0), Real::default, view);
+    spec.scenes = SCENES;
+    spec.poll = Some(|s, _, _| { s.polls += 1; false });
+    spec.on_key = Some(|s, ev, _| s.holds_escape && ev.key == Key::Escape);
     let mut rt = crate::tooling::runtime_for(&spec, (spec.init)(), spec.size, Env::new(false, 1.0), Arc::new(|| {}));
     attach(&mut rt, Some(playground), &spec, open, windowed);
     rt.frame(0.0);
@@ -329,4 +342,199 @@ fn leaving_a_story_part_way_drops_its_queued_steps() {
     press(&mut rt, Key::Up);
     for _ in 0..60 { rt.frame(1.0 / 60.0); }
     assert_eq!(shows(&rt, "fade"), "[\"start\"]", "no burst of overdue steps on return");
+}
+
+const DT: f64 = 1.0 / 60.0;
+
+fn center(rt: &Runtime<Real>, key: &str) -> (f32, f32) {
+    let r = find(rt, key).unwrap_or_else(|| panic!("no {key}")).rect;
+    (r[0] + r[2] * 0.5, r[1] + r[3] * 0.5)
+}
+
+fn own_state<P: 'static>(rt: &Runtime<Real>) -> &P {
+    let (own, stage) = rt.playground.as_ref().and_then(|p| p.own()).expect("a story with its own state");
+    own.state_ref(stage).downcast_ref().unwrap()
+}
+
+fn scene_state(rt: &Runtime<Real>) -> &Real {
+    &rt.playground.as_ref().and_then(|p| p.scene.as_ref()).expect("a scene").state
+}
+
+#[cfg(feature = "hot")]
+#[test]
+fn a_view_that_panics_falls_back_to_the_open_story() {
+    thread_local! { static PANICS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
+    fn flaky(_: &Lab, _: &mut Cx<Lab>) -> El {
+        if PANICS.replace(PANICS.get().saturating_sub(1)) > 0 { panic!("a patched view panicked"); }
+        text("steady").key("flaky")
+    }
+    let mut rt = runtime_with(base().story(Story::new("Fixes/Flaky", Lab::default, flaky)), Some(Some("Flaky".into())), true);
+    assert_eq!(shows(&rt, "flaky"), "steady");
+    PANICS.set(1);
+    rt.update(|s, _| s.count += 1);
+    rt.frame(DT);
+    assert_eq!(shows(&rt, "flaky"), "steady", "the fallback builds the story, not the app");
+    assert!(find(&rt, "count").is_none());
+}
+
+#[derive(Default)]
+struct Tip {
+    hidden: bool,
+}
+
+fn tip(p: &Tip, _: &mut Cx<Tip>) -> El {
+    let tip = (!p.hidden).then(|| el().key("tip").size(120.0, 120.0).transition(Transition::opacity()).on_hover_change(|_: &mut Tip, _, _| {}));
+    col().w_full().h_full().children(tip)
+}
+
+#[test]
+fn a_new_stage_ends_the_old_ones_exits() {
+    let story = Story::new("Fixes/Tip", Tip::default, tip).trigger('h', "Hide", |p, _| p.hidden = true);
+    let mut rt = runtime_with(base().story(story), Some(Some("Tip".into())), true);
+    let (x, y) = center(&rt, "tip");
+    rt.pointer_move(x, y);
+    rt.frame(DT);
+    letter(&mut rt, "h");
+    rt.frame(DT);
+    let exiting = |rt: &Runtime<Real>| rt.elements().into_iter().any(|e| e.key.as_deref() == Some("tip") && e.exiting);
+    assert!(exiting(&rt), "the tip fades out");
+    press(&mut rt, Key::Down);
+    assert!(!exiting(&rt), "gone with the state its handlers were built for");
+    rt.pointer_move(x + 300.0, y);
+    rt.frame(DT);
+    rt.pointer_move(x, y);
+    rt.frame(DT);
+}
+
+#[test]
+fn root_handlers_reach_the_app_above_the_bar_and_the_stage() {
+    let mut rt = runtime(None);
+    rt.paste("hi");
+    rt.frame(DT);
+    rt.drop_files(vec!["a.txt".into()], None);
+    rt.frame(DT);
+    rt.window_focus(false);
+    rt.frame(DT);
+    assert_eq!((rt.state.pastes.as_slice(), rt.state.drops, rt.state.focus.last()), (&["hi".to_owned()][..], 1, Some(&false)));
+    rt.update(|_, tx| tx.open_playground());
+    rt.frame(DT);
+    rt.paste("staged");
+    rt.frame(DT);
+    rt.drop_files(vec!["b.txt".into(), "c.txt".into()], None);
+    rt.frame(DT);
+    rt.window_focus(true);
+    rt.frame(DT);
+    let scene = scene_state(&rt);
+    assert_eq!((scene.pastes.as_slice(), scene.drops, scene.focus.as_slice()), (&["staged".to_owned()][..], 2, &[true][..]));
+    assert_eq!((rt.state.pastes.len(), rt.state.drops), (1, 1), "the real state is untouched");
+}
+
+#[test]
+fn a_key_after_a_press_that_opens_the_playground_reaches_it() {
+    let mut rt = runtime(None);
+    let (x, y) = center(&rt, "playground-open");
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.key(KeyEvent { key: Key::Down, mods: Mods::default() });
+    rt.frame(DT);
+    assert!(is_open(&rt));
+    assert_eq!(selected(&rt), 1, "the open landed before the key");
+}
+
+#[derive(Default)]
+struct Tray {
+    hovering: bool,
+}
+
+fn tray(_: &Tray, _: &mut Cx<Tray>) -> El {
+    el().key("tray").w_full().h_full().on_drop_files(|_: &mut Tray, _, _| {}).on_drop_hover(|p: &mut Tray, on, _| p.hovering = on)
+}
+
+#[test]
+fn a_new_stage_forgets_what_the_pointer_held_in_the_old_one() {
+    let mut rt = runtime_with(base().story(Story::new("Fixes/Tray", Tray::default, tray)), Some(Some("Tray".into())), true);
+    let at = center(&rt, "tray");
+    rt.drag_files(vec!["a.txt".into()], Some(at));
+    rt.frame(DT);
+    assert!(own_state::<Tray>(&rt).hovering);
+    rt.pointer_down(at.0, at.1);
+    press(&mut rt, Key::Down);
+    assert_eq!(selected(&rt), 0);
+    rt.drag_files_leave();
+    rt.frame(DT);
+    rt.pointer_move(at.0 + 10.0, at.1);
+    rt.pointer_up(at.0 + 10.0, at.1);
+    rt.frame(DT);
+    assert_eq!(rt.drop_hovered(), None);
+}
+
+fn slow(_: &Lab, cx: &mut Cx<Lab>) -> El {
+    cx.time_scale(0.25);
+    text("slow").key("slow")
+}
+
+#[test]
+fn a_storys_time_scale_stays_with_it() {
+    let mut rt = runtime_with(base().story(Story::new("Fixes/Slow", Lab::default, slow)), Some(Some("Slow".into())), true);
+    assert_eq!(rt.time_scale, 0.25);
+    press(&mut rt, Key::Down);
+    assert_eq!(rt.time_scale, 1.0, "the next story starts at the app's");
+    press(&mut rt, Key::Up);
+    assert_eq!(rt.time_scale, 0.25);
+    escape(&mut rt);
+    assert!(!is_open(&rt));
+    assert_eq!(rt.time_scale, 1.0, "Back restores the app's");
+}
+
+#[derive(Default)]
+struct Knob {
+    value: i32,
+}
+
+fn knob(k: &Knob, _: &mut Cx<Knob>) -> El {
+    col().w_full().h_full()
+        .child(text(format!("value {}", k.value)).key("value"))
+        .child(el().key("knob").size(60.0, 20.0).on_step(|k: &mut Knob, by, _| k.value += by))
+}
+
+#[test]
+fn an_element_focused_in_the_stage_keeps_its_keys_until_escape() {
+    let mut rt = runtime_with(base().story(Story::new("Fixes/Knob", Knob::default, knob)), Some(Some("Knob".into())), true);
+    let at = selected(&rt);
+    tap(&mut rt, "knob");
+    assert_eq!(focused(&rt).as_deref(), Some("knob"));
+    press(&mut rt, Key::Down);
+    press(&mut rt, Key::Up);
+    press(&mut rt, Key::Up);
+    assert_eq!((shows(&rt, "value"), selected(&rt)), ("value 1".to_owned(), at));
+    escape(&mut rt);
+    assert!(is_open(&rt) && focused(&rt).is_none(), "Escape leaves the knob");
+    press(&mut rt, Key::Down);
+    assert_ne!(selected(&rt), at);
+}
+
+#[test]
+fn a_replay_from_the_side_column_keeps_the_keyboard_there() {
+    let mut rt = runtime(Some(Some("Fade".into())));
+    press(&mut rt, Key::Right);
+    press(&mut rt, Key::Down);
+    assert_eq!(focused(&rt).as_deref(), Some("playground-trigger-f"));
+    letter(&mut rt, "r");
+    rt.frame(DT);
+    assert_eq!(shows(&rt, "fade"), "[\"start\"]");
+    assert_eq!(focused(&rt).as_deref(), Some("playground-trigger-f"));
+    press(&mut rt, Key::Up);
+    assert_eq!(focused(&rt).as_deref(), Some("playground-trigger-r"));
+}
+
+#[test]
+fn scene_triggers_and_sides_take_names_as_find_does() {
+    let playground = base()
+        .trigger("still", 'q', "Add four", |s, _| s.count += 4)
+        .side("STILL", |s, _| text(format!("side {}", s.count)).key("still-side"));
+    let mut rt = runtime_with(playground, Some(Some("Motion/Still".into())), true);
+    assert_eq!(shows(&rt, "still-side"), "side 0");
+    letter(&mut rt, "q");
+    rt.frame(DT);
+    assert_eq!(shows(&rt, "still-side"), "side 4");
 }

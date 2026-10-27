@@ -19,6 +19,7 @@ impl<'a> States<'a> {
         States { app, extra: Some(extra) }
     }
 
+    /// None when neither is an `S`: a deferred callback whose stage the playground has dropped.
     pub(crate) fn cast<S: 'static>(self) -> Option<&'a mut S> {
         if self.app.is::<S>() {
             return self.app.downcast_mut();
@@ -50,4 +51,13 @@ impl<'a> StatesRef<'a> {
     pub(crate) fn cast<S: 'static>(self) -> Option<&'a S> {
         self.app.downcast_ref().or_else(|| self.extra?.downcast_ref())
     }
+}
+
+pub(crate) fn downcast<S: 'static>(s: States<'_>) -> &mut S {
+    s.cast::<S>().expect("handler registered for a different state type than the app's")
+}
+
+/// Pins an edit-access closure's signature, so Rust ties the returned borrow to the states.
+pub(crate) fn edit_fn<F: for<'a> Fn(States<'a>) -> &'a mut crate::edit::TextEdit>(f: F) -> F {
+    f
 }

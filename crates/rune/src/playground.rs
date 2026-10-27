@@ -24,6 +24,11 @@ const BAND: f32 = 28.0;
 const ROW: f32 = 28.0;
 const CONTROL: f32 = 24.0;
 
+mod story;
+mod view;
+
+use story::OwnStory;
+
 /// A step a trigger runs, now or later on the logical clock: see [`Play::after`].
 pub type Step<X> = fn(&mut X, &mut Play<'_, X>);
 
@@ -67,6 +72,14 @@ struct Trigger<X> {
     key: char,
     label: &'static str,
     run: Step<X>,
+}
+
+/// Runs `view`, through the hot-patch table in a hot build, unless the frame is rebuilding from
+/// the startup code after a patched view panicked.
+pub(crate) fn call<X: 'static>(view: fn(&X, &mut Cx<X>) -> El, state: &X, cx: &mut Cx<X>) -> El {
+    #[cfg(feature = "hot")]
+    if !crate::hot::originals_only() { return subsecond::HotFn::current(view).call((state, cx)); }
+    view(state, cx)
 }
 
 fn trigger<X>(key: char, label: &'static str, run: Step<X>) -> Trigger<X> {
@@ -130,7 +143,7 @@ impl<X> Stage<X> {
 /// replays the story from the start, a trigger's letter runs it, → or Tab move into the side
 /// column (↑↓ inside it, Tab or Esc back out), and Esc or ⌘⇧D go back to the app. They come
 /// before the stage's `AppSpec::on_key`, except Esc, which the stage gets first. A focused
-/// text field keeps all its keys.
+/// text field keeps all its keys, and so does an element focused in the stage, until Esc.
 pub struct Playground<S: 'static> {
     pages: Vec<Page<S>>,
     triggers: Vec<(&'static str, Trigger<S>)>,
@@ -175,7 +188,7 @@ impl<S: 'static> Playground<S> {
         self
     }
 
-    /// A trigger for the scene named `scene`: `key` runs `run` on the scene's stage state, as
+    /// A trigger for the scene named `scene` (its path, or just its name): `key` runs `run` on the scene's stage state, as
     /// its button in the side column does. An `'r'` trigger runs after each replay. See
     /// [`Story::trigger`].
     pub fn trigger(mut self, scene: &'static str, key: char, label: &'static str, run: Step<S>) -> Self {
@@ -183,8 +196,9 @@ impl<S: 'static> Playground<S> {
         self
     }
 
-    /// The app's own controls for the scene named `scene`, at the top of the side column, drawn
-    /// from and acting on the scene's stage state: knobs, say. See [`Story::side`].
+    /// The app's own controls for the scene named `scene` (its path, or just its name), at the
+    /// top of the side column, drawn from and acting on the scene's stage state: knobs, say.
+    /// See [`Story::side`].
     pub fn side(mut self, scene: &'static str, view: fn(&S, &mut Cx<S>) -> El) -> Self {
         self.sides.push((scene, view));
         self
@@ -302,70 +316,6 @@ enum Kind<S: 'static> {
     Own(Box<dyn OwnStory>),
 }
 
-/// A [`Story`] with its state type erased. Its stage is a `Stage<P>`.
-trait OwnStory {
-    fn init(&self) -> Box<dyn Any>;
-    fn state<'a>(&self, stage: &'a mut dyn Any) -> &'a mut dyn Any;
-    fn state_ref<'a>(&self, stage: &'a dyn Any) -> &'a dyn Any;
-    fn view(&self, stage: &dyn Any, cx: &mut Cx<()>) -> El;
-    fn side(&self, stage: &dyn Any, cx: &mut Cx<()>) -> Option<El>;
-    fn poll(&self, stage: &mut dyn Any, t: f64, tx: &mut Tx) -> bool;
-    fn polls(&self, stage: &dyn Any) -> bool;
-    /// Queues the trigger on `key` at `now`; false when there's none.
-    fn trigger(&self, stage: &mut dyn Any, key: char, now: f64) -> bool;
-    /// Drops the steps still queued, so a story left part way doesn't burst on return.
-    fn stop(&self, stage: &mut dyn Any);
-    fn triggers(&self) -> Vec<(char, &'static str)>;
-    fn frame(&self) -> Option<(f32, f32)>;
-}
-
-impl<P: 'static> OwnStory for Story<P> {
-    fn init(&self) -> Box<dyn Any> {
-        Box::new(Stage::new((self.init)()))
-    }
-    fn state<'a>(&self, stage: &'a mut dyn Any) -> &'a mut dyn Any {
-        &mut Self::stage_mut(stage).state
-    }
-    fn state_ref<'a>(&self, stage: &'a dyn Any) -> &'a dyn Any {
-        &Self::stage(stage).state
-    }
-    fn view(&self, stage: &dyn Any, cx: &mut Cx<()>) -> El {
-        let mut own = cx.retype::<P>();
-        let root = (self.view)(&Self::stage(stage).state, &mut own);
-        cx.absorb(own);
-        root
-    }
-    fn side(&self, stage: &dyn Any, cx: &mut Cx<()>) -> Option<El> {
-        let side = self.side?;
-        let mut own = cx.retype::<P>();
-        let root = side(&Self::stage(stage).state, &mut own);
-        cx.absorb(own);
-        Some(root)
-    }
-    fn poll(&self, stage: &mut dyn Any, t: f64, tx: &mut Tx) -> bool {
-        let stage = Self::stage_mut(stage);
-        let ran = stage.run(t, tx);
-        self.poll.is_some_and(|poll| poll(&mut stage.state, t, tx)) || ran
-    }
-    fn polls(&self, stage: &dyn Any) -> bool {
-        self.poll.is_some() || !Self::stage(stage).script.is_empty()
-    }
-    fn trigger(&self, stage: &mut dyn Any, key: char, now: f64) -> bool {
-        let Some(t) = self.triggers.iter().find(|t| t.key == key) else { return false };
-        Self::stage_mut(stage).script.push((now, t.run));
-        true
-    }
-    fn stop(&self, stage: &mut dyn Any) {
-        Self::stage_mut(stage).script.clear();
-    }
-    fn triggers(&self) -> Vec<(char, &'static str)> {
-        self.triggers.iter().map(|t| (t.key, t.label)).collect()
-    }
-    fn frame(&self) -> Option<(f32, f32)> {
-        self.frame
-    }
-}
-
 /// A story's group and name, from its `"Group/Name"` path.
 fn split(path: &'static str, default: &'static str) -> (&'static str, &'static str) {
     path.split_once('/').unwrap_or((default, path))
@@ -412,8 +362,9 @@ pub(crate) struct Controls;
 /// A window's playground while it runs.
 pub(crate) struct Live<S: 'static> {
     pages: Vec<Page<S>>,
-    triggers: Vec<(&'static str, Trigger<S>)>,
-    sides: Vec<(&'static str, fn(&S, &mut Cx<S>) -> El)>,
+    /// By the scene they're for.
+    triggers: Vec<(usize, Trigger<S>)>,
+    sides: Vec<(usize, fn(&S, &mut Cx<S>) -> El)>,
     sizes: Vec<(&'static str, (f32, f32))>,
     shortcut: Option<Shortcut>,
     /// The View menu's item takes the shortcut, so keys here leave it alone.
@@ -439,6 +390,11 @@ pub(crate) struct Live<S: 'static> {
     /// Bumped by every select and replay, so the new stage's elements start fresh: scroll
     /// offsets, focus and animations don't carry over from the last one.
     generation: u32,
+    /// The node the app's view returned, which holds the window's root handlers.
+    pub(crate) root: usize,
+    /// The time scale the app had when the playground opened, which every new stage starts
+    /// from and Back restores.
+    pub(crate) app_time_scale: f32,
 }
 
 /// Shows `playground` in `rt`'s window when this run offers it: an enabled playground, in a
@@ -458,6 +414,13 @@ pub(crate) fn attach<S: 'static>(rt: &mut crate::Runtime<S>, playground: Option<
     rt.playground = Some(Box::new(live));
 }
 
+/// `--playground [NAME]`'s optional story name, taking it when the next argument isn't a flag.
+pub(crate) fn arg(argv: &[String], i: &mut usize) -> Option<String> {
+    let name = argv.get(*i + 1).filter(|v| !v.starts_with("--")).cloned();
+    if name.is_some() { *i += 1; }
+    name
+}
+
 fn hidden_by_env() -> bool {
     std::env::var("RUNE_PLAYGROUND").is_ok_and(|v| v == "0")
 }
@@ -469,16 +432,11 @@ pub(crate) fn offered_by_env() -> bool {
 impl<S: 'static> Live<S> {
     fn new(playground: Playground<S>, spec: &crate::AppSpec<S>, menu: bool) -> Self {
         let Playground { pages, triggers, sides, sizes, shortcut, bar, enabled: _ } = playground;
-        for name in triggers.iter().map(|(n, _)| n).chain(sides.iter().map(|(n, _)| n)) {
-            if !spec.scenes.iter().any(|(s, _)| s == name) {
-                eprintln!("rune: the playground has a trigger or side column for {name:?}, which isn't one of AppSpec::scenes");
-            }
-        }
         let mut live = Live {
             owned: pages.iter().map(|_| None).collect(),
             pages,
-            triggers,
-            sides,
+            triggers: Vec::new(),
+            sides: Vec::new(),
             sizes,
             shortcut,
             menu,
@@ -497,7 +455,17 @@ impl<S: 'static> Live<S> {
             pending: Vec::new(),
             now: 0.0,
             generation: 0,
+            root: 0,
+            app_time_scale: 1.0,
         };
+        // Scene names as `find` takes them: a path or a name, matching case if it can.
+        let scene = |live: &Self, name: &str| {
+            let at = live.find_among(name, live.scenes.len());
+            if at.is_none() { eprintln!("rune: the playground has a trigger or side column for {name:?}, which isn't one of AppSpec::scenes"); }
+            at
+        };
+        live.triggers = triggers.into_iter().filter_map(|(name, t)| Some((scene(&live, name)?, t))).collect();
+        live.sides = sides.into_iter().filter_map(|(name, view)| Some((scene(&live, name)?, view))).collect();
         let mut groups: Vec<&str> = Vec::new();
         for i in 0..live.count() {
             let group = live.group(i);
@@ -533,9 +501,14 @@ impl<S: 'static> Live<S> {
 
     /// The story called `name`: its path, or just its name, matching case only if need be.
     fn find(&self, name: &str) -> Option<usize> {
+        self.find_among(name, self.count())
+    }
+
+    /// [`Live::find`] among the first `n` stories.
+    fn find_among(&self, name: &str, n: usize) -> Option<usize> {
         let exact = |i: &usize| self.path(*i) == name || self.name(*i) == name;
         let loose = |i: &usize| self.path(*i).eq_ignore_ascii_case(name) || self.name(*i).eq_ignore_ascii_case(name);
-        (0..self.count()).find(exact).or_else(|| (0..self.count()).find(loose))
+        (0..n).find(exact).or_else(|| (0..n).find(loose))
     }
 
     fn page(&self) -> Option<(usize, &Page<S>)> {
@@ -557,7 +530,7 @@ impl<S: 'static> Live<S> {
     fn triggers(&self) -> Vec<(char, &'static str)> {
         if self.is_live_page() { return Vec::new(); }
         let mut keys = match (self.scenes.get(self.selected), self.own()) {
-            (Some((name, _)), _) => self.triggers.iter().filter(|(s, _)| s == name).map(|(_, t)| (t.key, t.label)).collect(),
+            (Some(_), _) => self.triggers.iter().filter(|(s, _)| *s == self.selected).map(|(_, t)| (t.key, t.label)).collect(),
             (None, Some((own, _))) => own.triggers(),
             (None, None) => Vec::new(),
         };
@@ -576,6 +549,11 @@ impl<S: 'static> Live<S> {
 
     pub(crate) fn pending_swaps_stage(&self) -> bool {
         self.pending.iter().any(Request::swaps_stage)
+    }
+
+    /// Whether the only requests that swap the stage are replays, which keep its story.
+    pub(crate) fn pending_replays_only(&self) -> bool {
+        self.pending.iter().filter(|r| r.swaps_stage()).all(|r| *r == Request::Replay)
     }
 
     /// Applies the requests handlers made since the last commit; true when anything changed.
@@ -648,8 +626,7 @@ impl<S: 'static> Live<S> {
         if !self.open { return; }
         let now = self.now;
         if let Some(scene) = &mut self.scene {
-            let name = self.scenes[self.selected].0;
-            if let Some((_, t)) = self.triggers.iter().find(|(s, t)| *s == name && t.key == key) {
+            if let Some((_, t)) = self.triggers.iter().find(|(s, t)| *s == self.selected && t.key == key) {
                 scene.script.push((now, t.run));
             }
             return;
@@ -735,17 +712,19 @@ impl<S: 'static> Live<S> {
             Key::Text(t) if !m.cmd => t.chars().next().filter(|_| t.chars().count() == 1).map(|c| c.to_ascii_lowercase()),
             _ => None,
         };
-        if let Some(c) = letter && self.triggers().iter().any(|(k, _)| *k == c) {
+        if in_side {
+            match ev.key {
+                Key::Tab | Key::Escape => return Nav::OutOfSide,
+                Key::Up if !m.cmd => return Nav::SideStep(-1),
+                Key::Down if !m.cmd => return Nav::SideStep(1),
+                _ => {}
+            }
+        }
+        // In the side column, Space presses the focused control.
+        if let Some(c) = letter && !(in_side && c == ' ') && self.triggers().iter().any(|(k, _)| *k == c) {
             return Nav::Request(if c == 'r' { Request::Replay } else { Request::Trigger(c) });
         }
-        if in_side {
-            return match ev.key {
-                Key::Tab | Key::Escape => Nav::OutOfSide,
-                Key::Up if !m.cmd => Nav::SideStep(-1),
-                Key::Down if !m.cmd => Nav::SideStep(1),
-                _ => Nav::Pass,
-            };
-        }
+        if in_side { return Nav::Pass; }
         let at = self.order.iter().position(|&i| i == self.selected).unwrap_or(0);
         let n = self.order.len();
         if n == 0 { return Nav::Pass; }
@@ -760,293 +739,30 @@ impl<S: 'static> Live<S> {
         };
         Nav::Request(Request::Select(self.order[to]))
     }
+}
 
-    /// The window's root: the app's view above the bar, or the playground around its stage.
-    pub(crate) fn view(&self, app: &S, view: fn(&S, &mut Cx<S>) -> El, cx: &mut Cx<S>, viewport: (f32, f32)) -> El {
-        let t = tok::theme(cx.system_dark());
-        if !self.open {
-            if !self.bar { return view(app, cx); }
-            let mut root = view(app, cx);
-            let focus = root.on_window_focus.take();
-            // Laid out as the root of a window BAR shorter, as the runtime sizes a root.
-            let mut out = col().key("playground-closed").w(viewport.0).h(viewport.1)
-                .child(root.w(viewport.0).h((viewport.1 - BAR).max(0.0)))
-                .child(self.bar_view(t));
-            out.on_window_focus = focus;
-            return out;
-        }
-        let dark = cx.system_dark();
-        let stage_w = (viewport.0 - SIDEBAR - SIDE - 2.0).max(0.0);
-        let stage = self.stage(app, view, cx, (stage_w, viewport.1), t);
-        let side = self.side(app, cx, t, dark, viewport.1);
-        row().key("playground").w(viewport.0).h(viewport.1).fill(t.bg)
-            .child(self.sidebar(t, dark, cx.titlebar_inset(), viewport.1))
-            .child(el().w(1.0).h(viewport.1).fill(t.separator))
-            .child(stage)
-            .child(el().w(1.0).h(viewport.1).fill(t.separator))
-            .child(side)
+impl Tx {
+    /// Show [`App::playground`](crate::App::playground) in this window. Without one, or in a
+    /// run that doesn't show it (a release build, `RUNE_PLAYGROUND=0`, a headless render
+    /// without `--playground`), nothing happens.
+    pub fn open_playground(&mut self) {
+        self.playground.push(Request::Open(None));
     }
 
-    fn bar_view(&self, t: Theme) -> El {
-        let stories = match self.count() { 0 => String::new(), 1 => "1 story".into(), n => format!("{n} stories") };
-        let hint = self.shortcut.as_ref().map(keycaps);
-        let summary = [Some(stories).filter(|s| !s.is_empty()), hint].into_iter().flatten().collect::<Vec<_>>().join(" · ");
-        let open = row().key("playground-open").h(20.0).ml(4.0).px(6.0).gap(6.0).center_y().radius(radius::SM - 1.0)
-            .hover(t.hover).press(t.press)
-            .child(icon(&GRID, 12.0).color(t.text_secondary))
-            .child(text("Playground").font(type_::LABEL).color(t.text_secondary))
-            .role("button").label("Open the playground")
-            .on_press_tx(|_: &mut Controls, tx: &mut Tx| tx.open_playground());
-        col().w_full().h(BAR).fill(t.bg)
-            .child(el().w_full().h(1.0).fill(t.separator))
-            .child(
-                row().w_full().h(BAR - 1.0).center_y().justify_between()
-                    .child(open)
-                    .child(text(summary).font(type_::LABEL).color(t.text_secondary).pr(10.0)),
-            )
+    /// Back to the app from the playground, as its Back button does.
+    pub fn close_playground(&mut self) {
+        self.playground.push(Request::Close);
     }
 
-    fn sidebar(&self, t: Theme, dark: bool, inset: f32, height: f32) -> El {
-        let back = row().key("playground-back").h(CONTROL).pl(4.0).pr(8.0).gap(2.0).center_y().radius(radius::SM)
-            .hover(t.hover).press(t.press)
-            .child(icon(&CHEVRON_LEFT, 16.0).color(t.text_secondary))
-            .child(text("Back").font(type_::LABEL).color(t.text))
-            .role("button").label("Back to the app")
-            .on_press_tx(|_: &mut Controls, tx: &mut Tx| tx.close_playground());
-        // Back sits at the list's text inset; where the window's own controls take the corner,
-        // it goes in the row under them.
-        let band = if inset > 0.0 { BAND } else { 0.0 };
-        let header = row().w(SIDEBAR).h(HEADER).pl(8.0).center_y().child(back);
-        let drag = (band > 0.0).then(|| el().w(SIDEBAR).h(band).window_drag());
-        let mut list = col().key("playground-list").w(SIDEBAR).h(height - 2.0 * HEADER - band).px(8.0).pb(8.0).scroll(ScrollSpec { stick_bottom: false });
-        let mut group = None;
-        for (n, &i) in self.order.iter().enumerate() {
-            if group != Some(self.group(i)) {
-                group = Some(self.group(i));
-                list = list.child(text(self.group(i)).key(format!("playground-group-{i}")).font(type_::SECTION).color(t.text_secondary)
-                    .px(8.0).pt(if n == 0 { 4.0 } else { 16.0 }).pb(4.0));
-            }
-            let on = i == self.selected;
-            let name = self.name(i);
-            list = list.child(
-                row().key(format!("playground-item-{i}")).w_full().h(ROW).px(8.0).center_y().radius(radius::MD)
-                    .fill(if on { selected(t, dark) } else { Color::TRANSPARENT })
-                    .hover(if on { selected(t, dark) } else { t.hover })
-                    .child(text(name).font(type_::BODY).color(if on { t.text } else { t.text_secondary }).truncate())
-                    .role("button").label(name)
-                    .on_press_tx(move |_: &mut Controls, tx: &mut Tx| tx.playground.push(Request::Select(i))),
-            );
-        }
-        if self.order.is_empty() {
-            list = list.child(text("No stories").font(type_::BODY).color(t.text_secondary).px(8.0).pt(4.0));
-        }
-        col().w(SIDEBAR).h(height)
-            .children(drag)
-            .child(header)
-            .child(list)
-            .child(self.stage_controls(t, dark))
-    }
-
-    /// Along the sidebar's foot: the stage's size, motion and appearance.
-    fn stage_controls(&self, t: Theme, window_dark: bool) -> El {
-        let dark = self.dark.unwrap_or(window_dark);
-        let (glyph, appearance) = if dark { (&MOON, "Dark appearance") } else { (&SUN, "Light appearance") };
-        let theme = icon_button(t, "playground-theme", glyph, appearance, false, window_dark, Request::Dark(!dark));
-        let reduce = icon_button(t, "playground-reduce-motion", &MOTION, "Reduce Motion", self.reduce_motion, window_dark, Request::ReduceMotion(!self.reduce_motion));
-        let sizes = (!self.sizes.is_empty()).then(|| self.size_menu(t));
-        row().key("playground-stage-controls").w(SIDEBAR).h(HEADER).px(8.0).gap(2.0).center_y()
-            .children(sizes)
-            .child(spacer())
-            .child(reduce)
-            .child(theme)
-    }
-
-    /// The stage's size: the window's room or a preset, from a pop-up menu (a press steps
-    /// through them where there's no native one).
-    fn size_menu(&self, t: Theme) -> El {
-        let current = self.size.checked_sub(1).and_then(|i| self.sizes.get(i)).map_or("Window", |(n, _)| *n);
-        let options: Vec<(String, String)> = std::iter::once(("0".to_owned(), "Window".to_owned()))
-            .chain(self.sizes.iter().enumerate().map(|(i, (n, (w, h)))| ((i + 1).to_string(), format!("{n}  {w}×{h}"))))
-            .collect();
-        let (size, count) = (self.size, self.sizes.len() + 1);
-        row().key("playground-size").h(CONTROL).pl(8.0).pr(4.0).gap(2.0).center_y().radius(radius::SM)
-            .hover(t.hover).press(t.press)
-            .child(text(current).font(type_::LABEL).color(t.text))
-            .child(icon(&CHEVRON_DOWN, 16.0).color(t.text_secondary))
-            .role("button").label("Stage size")
-            .on_press_tx(move |_: &mut Controls, tx: &mut Tx| {
-                if !crate::popup_menu_supported() {
-                    tx.playground.push(Request::Size((size + 1) % count));
-                    return;
-                }
-                let menu = crate::PopupMenu::picker(options.clone(), &size.to_string());
-                tx.popup_menu(menu, "playground-size", |_: &mut Controls, picked, tx| {
-                    if let Some(i) = picked.and_then(|id| id.parse().ok()) { tx.playground.push(Request::Size(i)); }
-                });
-            })
-    }
-
-    /// The column right of the stage: the story's group and name, the app's controls for it,
-    /// its triggers, and a key hint.
-    fn side(&self, app: &S, cx: &mut Cx<S>, t: Theme, dark: bool, height: f32) -> El {
-        let i = self.selected;
-        let title = (i < self.count()).then(|| {
-            col().key("playground-title").px(4.0).gap(2.0)
-                .child(text(self.group(i)).font(type_::SECTION).color(t.text_secondary))
-                .child(text(self.name(i)).font(type_::TITLE).color(t.text).truncate())
-        });
-        let slot = self.side_slot(app, cx).map(|slot| el().key(format!("playground-slot-{}", self.generation)).w_full().child(slot));
-        let triggers = self.triggers();
-        let card = (!triggers.is_empty()).then(|| {
-            col().key("playground-triggers").w_full().padding(4.0).gap(2.0).radius(radius::LG).fill(t.card).outline(1.0, 0.0, t.card_border)
-                .children(triggers.iter().map(|&(key, label)| {
-                    let request = if key == 'r' { Request::Replay } else { Request::Trigger(key) };
-                    row().key(format!("playground-trigger-{key}")).w_full().h(ROW).px(4.0).gap(8.0).center_y().radius(radius::MD)
-                        .focusable(true).focus_highlight(selected(t, dark)).press(t.press)
-                        .child(row().key("cap").h(20.0).min_w(22.0).px(6.0).center().radius(radius::SM - 2.0).fill(t.control_track)
-                            .child(text(cap(key)).font(type_::LABEL).color(t.text)))
-                        .child(text(label).font(type_::BODY).color(t.text).truncate())
-                        .role("button").label(label)
-                        .on_press_tx(move |_: &mut Controls, tx: &mut Tx| tx.playground.push(request.clone()))
-                }))
-        });
-        let hint = if triggers.is_empty() { "↑↓ stories · Esc back" } else { "↑↓ stories · → triggers · Esc back" };
-        col().key("playground-side").w(SIDE).h(height).px(12.0).pt(12.0).pb(12.0).gap(12.0)
-            .children(title)
-            .children(slot)
-            .children(card)
-            .child(spacer())
-            .child(text(hint).key("playground-hint").font(type_::SECTION).color(t.text_secondary).px(4.0))
-    }
-
-    /// The app's controls for the open story, from `Playground::side` or `Story::side`, acting
-    /// on its stage state.
-    fn side_slot(&self, app: &S, cx: &mut Cx<S>) -> Option<El> {
-        let _ = app;
-        if let Some(scene) = &self.scene {
-            let name = self.scenes[self.selected].0;
-            let (_, view) = self.sides.iter().find(|(s, _)| *s == name)?;
-            let mut stage = cx.retype::<S>();
-            let root = view(&scene.state, &mut stage);
-            cx.absorb(stage);
-            return Some(root);
-        }
-        let (own, stage) = self.own()?;
-        let mut unit = cx.retype::<()>();
-        let root = own.side(stage, &mut unit);
-        cx.absorb(unit);
-        root
-    }
-
-    fn stage(&self, app: &S, view: fn(&S, &mut Cx<S>) -> El, cx: &mut Cx<S>, area: (f32, f32), t: Theme) -> El {
-        let mut env = cx.env();
-        if let Some(dark) = self.dark { env.system_dark = dark; }
-        let page = self.page();
-        let frame = self.own().and_then(|(own, _)| own.frame());
-        let preset = self.size.checked_sub(1).and_then(|i| self.sizes.get(i)).map(|(_, size)| *size);
-        let (w, h) = frame.or(preset).unwrap_or(area);
-        let content = match (&self.scene, page) {
-            (Some(scene), _) => Some(self.nested(cx, env, |c| view(&scene.state, c))),
-            (None, Some((_, Page { kind: Kind::Live(page), .. }))) => Some(self.nested(cx, env, |c| page(app, c))),
-            (None, Some(_)) => self.own().map(|(own, stage)| {
-                let mut unit = cx.retype::<()>();
-                unit.set_env(env);
-                unit.set_titlebar_inset(0.0);
-                if self.reduce_motion { unit.reduced_motion(true); }
-                let root = own.view(stage, &mut unit);
-                cx.absorb(unit);
-                root
-            }),
-            (None, None) => None,
-        };
-        let inner = tok::theme(env.system_dark);
-        let content = content.unwrap_or_else(|| {
-            col().center().child(text("Add scenes to AppSpec::scenes, or stories to the playground").font(type_::BODY).color(inner.text_secondary))
-        });
-        // Sized as a window sizes its root.
-        let stage = el().key(format!("playground-stage-{}", self.generation)).w(w).h(h).child(content.w(w).h(h));
-        let stage = match (frame, preset) {
-            // An overlay's clear parts stay clear.
-            (Some(_), _) => stage.border(1.0, t.text_secondary.alpha(0.35)).border_dash(4.0, 3.0),
-            (None, Some(_)) => stage.outline(1.0, 0.0, inner.separator),
-            (None, None) => stage,
-        };
-        col().w(area.0).h(area.1).center().fill(inner.bg).clip_rounded(0.0).child(stage)
-    }
-
-    /// Runs a stage view of the app's own type with the stage's appearance and motion.
-    fn nested(&self, cx: &mut Cx<S>, env: crate::Env, f: impl FnOnce(&mut Cx<S>) -> El) -> El {
-        let mut stage = cx.retype::<S>();
-        stage.set_env(env);
-        stage.set_titlebar_inset(0.0);
-        if self.reduce_motion { stage.reduced_motion(true); }
-        let root = f(&mut stage);
-        cx.absorb(stage);
-        root
+    pub fn toggle_playground(&mut self) {
+        self.playground.push(Request::Toggle);
     }
 }
 
-/// A selected row's fill, a step stronger in dark mode where the track is faint.
-fn selected(t: Theme, dark: bool) -> Color {
-    if dark { t.control_off } else { t.control_track }
+/// Whether `key` is the stage's, around the story's root.
+pub(crate) fn is_stage(key: &str) -> bool {
+    key.strip_prefix("playground-stage-").is_some_and(|g| g.parse::<u32>().is_ok())
 }
-
-/// A trigger's key as its cap shows it.
-fn cap(key: char) -> String {
-    if key == ' ' { "Space".into() } else { key.to_ascii_uppercase().to_string() }
-}
-
-/// A shortcut as the bar shows it: "⇧⌘D", or "Ctrl+Shift+D" off macOS.
-fn keycaps(shortcut: &Shortcut) -> String {
-    shortcut.keycaps().join(if cfg!(target_os = "macos") { "" } else { "+" })
-}
-
-/// A quiet square button showing `glyph`, named by `label` in its tooltip; `on` fills it as the
-/// list's selection is filled.
-fn icon_button(t: Theme, key: &str, glyph: &'static Icon, label: &str, on: bool, dark: bool, request: Request) -> El {
-    row().key(key.to_owned()).size(CONTROL, CONTROL).center().radius(radius::SM)
-        .fill(if on { selected(t, dark) } else { Color::TRANSPARENT })
-        .hover(if on { selected(t, dark) } else { t.hover }).press(t.press)
-        .child(icon(glyph, 16.0).color(if on { t.text } else { t.text_secondary }))
-        .role("button").label(label.to_owned()).help(label.to_owned())
-        .on_press_tx(move |_: &mut Controls, tx: &mut Tx| tx.playground.push(request.clone()))
-}
-
-static CHEVRON_LEFT: Icon = Icon {
-    name: "playground-chevron-left",
-    view: 16.0,
-    body: r#"<path d="M9.5 4L5.5 8L9.5 12" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>"#,
-};
-
-static GRID: Icon = Icon {
-    name: "playground-grid",
-    view: 12.0,
-    body: r#"<rect x="1" y="1" width="4" height="4" rx="1" fill="currentColor"/><rect x="7" y="1" width="4" height="4" rx="1" fill="currentColor"/><rect x="1" y="7" width="4" height="4" rx="1" fill="currentColor"/><rect x="7" y="7" width="4" height="4" rx="1" fill="currentColor"/>"#,
-};
-
-static CHEVRON_DOWN: Icon = Icon {
-    name: "playground-chevron-down",
-    view: 16.0,
-    body: r#"<path d="M5 6.75L8 9.75L11 6.75" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>"#,
-};
-
-static SUN: Icon = Icon {
-    name: "playground-sun",
-    view: 16.0,
-    body: r#"<circle cx="8" cy="8" r="2.75" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M8 1.75V3M8 13V14.25M1.75 8H3M13 8H14.25M3.6 3.6L4.45 4.45M11.55 11.55L12.4 12.4M3.6 12.4L4.45 11.55M11.55 4.45L12.4 3.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#,
-};
-
-static MOON: Icon = Icon {
-    name: "playground-moon",
-    view: 16.0,
-    body: r#"<path d="M13.25 9.5A5.5 5.5 0 0 1 6.5 2.75A5.5 5.5 0 1 0 13.25 9.5Z" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linejoin="round"/>"#,
-};
-
-static MOTION: Icon = Icon {
-    name: "playground-motion",
-    view: 16.0,
-    body: r#"<circle cx="10" cy="8" r="3.25" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M1.75 5.5H4.5M1.25 8H4M1.75 10.5H4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#,
-};
 
 #[cfg(test)]
 #[path = "playground_tests.rs"]

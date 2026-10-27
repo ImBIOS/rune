@@ -9,6 +9,7 @@ use crate::color::Color;
 use crate::edit::TextEdit;
 use crate::growth::{GROWTH, StreamEdge, edge};
 use crate::shape::Shape;
+use crate::states::{downcast, edit_fn};
 use crate::text::{Icon, Link, Span};
 use crate::tok::TextStyle;
 
@@ -127,7 +128,6 @@ impl Tx {
 
     fn pick_read<S: 'static>(&mut self, within: Option<String>, x: f32, y: f32, pick: crate::Pick, f: impl FnOnce(&mut S, Option<crate::Picked>, &mut Tx) + 'static) {
         let f: PickFn = Box::new(move |s, picked, tx| {
-            // None once the playground has dropped the stage that asked.
             if let Some(s) = s.cast::<S>() { f(s, picked, tx); }
         });
         self.pick_reads.push(PickRead { within, x, y, pick, f: Rc::new(std::cell::Cell::new(Some(f))) });
@@ -319,7 +319,6 @@ impl Tx {
     /// ```
     pub fn read_clipboard<S: 'static>(&mut self, f: impl FnOnce(&mut S, &crate::ClipboardContent, &mut Tx) + 'static) {
         let f: ReadFn = Box::new(move |s, content, tx| {
-            // None once the playground has dropped the stage that asked.
             if let Some(s) = s.cast::<S>() { f(s, content, tx); }
         });
         self.clipboard_reads.push(ClipboardRead(Rc::new(std::cell::Cell::new(Some(f)))));
@@ -333,22 +332,6 @@ impl Tx {
     /// Quit the app after this handler, whether or not it keeps running without a window.
     pub fn quit(&mut self) {
         self.shell = Some(Shell::Quit);
-    }
-
-    /// Show [`App::playground`](crate::App::playground) in this window. Without one, or in a
-    /// run that doesn't show it (a release build, `RUNE_PLAYGROUND=0`, a headless render
-    /// without `--playground`), nothing happens.
-    pub fn open_playground(&mut self) {
-        self.playground.push(crate::playground::Request::Open(None));
-    }
-
-    /// Back to the app from the playground, as its Back button does.
-    pub fn close_playground(&mut self) {
-        self.playground.push(crate::playground::Request::Close);
-    }
-
-    pub fn toggle_playground(&mut self) {
-        self.playground.push(crate::playground::Request::Toggle);
     }
 
     /// Minimize this window after this handler, as its minimize button would (winit's
@@ -3961,12 +3944,4 @@ impl El {
 /// the state: `.on_edit(edit_access(move |s: &mut App| &mut s.rows[i].name))`.
 pub fn edit_access<S, F: for<'a> Fn(&'a mut S) -> &'a mut TextEdit>(f: F) -> F {
     f
-}
-
-fn edit_fn<F: for<'a> Fn(crate::states::States<'a>) -> &'a mut TextEdit>(f: F) -> F {
-    f
-}
-
-fn downcast<S: 'static>(s: crate::states::States<'_>) -> &mut S {
-    s.cast::<S>().expect("handler registered for a different state type than the app's")
 }

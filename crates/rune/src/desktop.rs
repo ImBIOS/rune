@@ -133,9 +133,7 @@ impl<S: 'static> Window<S> {
         let comp = app.compositor.take();
         let (open, keep_running, on_close, on_focus, on_reopen) = (app.open, app.keep_running, app.on_close, app.on_focus, app.on_reopen);
         let native = std::mem::take(&mut app.macos_window);
-        let modifier_keys = app.modifier_keys;
-        let tab_visits_controls = app.tab_visits_controls;
-        let srgb_blend = app.srgb_blend;
+        let (modifier_keys, tab_visits_controls, srgb_blend) = (app.modifier_keys, app.tab_visits_controls, app.srgb_blend);
         let titlebar_inset = if options.borderless { 0.0 } else { app.chrome.titlebar_inset() };
         let playground = app.playground.take();
         let (spec, state, shared) = app.into_parts(own.scene.as_deref());

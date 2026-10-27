@@ -247,11 +247,7 @@ impl Args {
                 "--hot" | "--snap-on-patch" | "--hot-control" => die("live editing requires the rune/hot feature; use scripts/rune-dev"),
                 "--snap" => a.snap = Some(val(&mut i).into()),
                 "--scene" => a.scene = Some(val(&mut i)),
-                "--playground" => {
-                    let name = argv.get(i + 1).filter(|v| !v.starts_with("--")).cloned();
-                    if name.is_some() { i += 1; }
-                    a.playground = Some(name);
-                }
+                "--playground" => a.playground = Some(crate::playground::arg(&argv, &mut i)),
                 "--at" => {
                     let v = val(&mut i);
                     a.at_mark = mark_time(&v);
@@ -1449,9 +1445,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     });
     let fit_height = app.fit_content_height;
     let app_options = app.window_options.clone();
-    let modifier_keys = app.modifier_keys;
-    let tab_visits_controls = app.tab_visits_controls;
-    let playground = app.playground.take();
+    let (modifier_keys, tab_visits_controls, playground) = (app.modifier_keys, app.tab_visits_controls, app.playground.take());
     let (spec, state, shared) = app.into_parts(args.scene.as_deref());
     let shortcuts = crate::shortcuts::Guard::attach(&shared, std::sync::Arc::new(|| {}), true, false);
     let mut menus = crate::native_menu::Guard::attach(&shared, true);
