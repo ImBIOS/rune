@@ -111,7 +111,8 @@ impl RollingText {
         let edge = (font.line_px() * 0.12).max(1.0);
         // The fades sit in padding that negative margins take back out of layout, so the resting
         // glyphs (descenders included) are never faded but rolling glyphs and a growing or
-        // shrinking edge stay soft.
+        // shrinking edge stay soft. Glyphs slide on the row's own width-leading X spring, so in a
+        // label whose trailing edge holds still (right-aligned) the glyphs that stay hold still.
         let side = (font.size * 0.3).max(2.0);
         let mut e = row()
             .key(self.key.clone())
@@ -151,6 +152,7 @@ impl RollingText {
                     .advance_in(&run, at)
                     .color(color)
                     .motion(spring)
+                    .width_leads()
                     .transition(tr),
             );
         }
