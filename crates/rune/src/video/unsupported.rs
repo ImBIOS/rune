@@ -30,6 +30,8 @@ pub(super) fn apply(_: &Arc<Shared>) {}
 
 pub(super) fn drive(_: &Arc<Shared>) {}
 
+pub(super) fn preload(_: &Arc<Shared>) {}
+
 pub(super) fn live_time(_: &Shared) -> Option<f64> {
     None
 }

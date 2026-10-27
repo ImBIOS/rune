@@ -437,6 +437,28 @@ pub(crate) fn test_frames(source: &MediaSource, at: f64) -> Result<(ByteFrame, B
     Ok((image(&generator(&asset, None), at)?, image(&raw, at)?, orient(&asset)))
 }
 
+/// Whether a poster decode has landed, and with a picture.
+#[cfg(test)]
+pub(crate) fn test_poster(shared: &Shared) -> Option<bool> {
+    let native = shared.native.lock().unwrap();
+    let posters = native.posters.lock().unwrap();
+    posters.done.as_ref().map(|d| matches!(d, Ok((Some(_), _))))
+}
+
+/// An app warming the page it shows next: decode the clip's first frame now, so the first frame
+/// that draws it already has it. Nothing once a poster or player has started, or for audio.
+pub(super) fn preload(shared: &Arc<Shared>) {
+    let mut native = shared.native.lock().unwrap();
+    let c = shared.ctl.lock().unwrap();
+    if shared.kind == Kind::Audio || native.player.is_some() || native.poster_started || c.failed.is_some() {
+        return;
+    }
+    let at = c.time;
+    drop(c);
+    native.poster_due = true;
+    request_poster(shared, &mut native, at);
+}
+
 /// One worker per clip opens it and decodes the newest requested poster (none for audio),
 /// then wakes its windows, or for audio drives it on the main queue.
 fn request_poster(shared: &Arc<Shared>, native: &mut Native, at: f64) {

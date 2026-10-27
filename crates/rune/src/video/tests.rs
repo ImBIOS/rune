@@ -567,3 +567,21 @@ fn a_new_runtime_starts_the_headless_clock_again() {
     rt.frame(0.1);
     assert!((a.time() - 0.1).abs() < 1e-6, "{}", a.time());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn preload_decodes_the_first_frame_before_anything_draws_it() {
+    let v = Video::file(fixture());
+    assert_eq!(macos::test_poster(&v.shared), None);
+    // Preload is a no-op headless (frames decode as they draw), so call the backend directly.
+    macos::preload(&v.shared);
+    let start = std::time::Instant::now();
+    while macos::test_poster(&v.shared).is_none() && start.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(macos::test_poster(&v.shared), Some(true), "the first frame decoded off the main thread");
+    v.preload();
+    let audio = Player::audio(sound("silence.wav"));
+    macos::preload(&audio.shared);
+    assert_eq!(macos::test_poster(&audio.shared), None, "audio has no poster to warm");
+}

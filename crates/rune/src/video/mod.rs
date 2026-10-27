@@ -274,6 +274,15 @@ impl Player {
         self.shared.kind == Kind::Audio
     }
 
+    /// Decode the first frame now, off the main thread, so the first frame that draws this clip
+    /// shows it rather than an empty box: for the page an app expects to show next. Headless
+    /// runs decode frames as they draw, so there it does nothing.
+    pub fn preload(&self) {
+        if playback_enabled() {
+            backend::preload(&self.shared);
+        }
+    }
+
     /// Start or resume playback. After [`PlayerState::Ended`] it starts from the beginning.
     pub fn play(&self) {
         self.edit(|c| {
