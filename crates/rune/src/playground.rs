@@ -196,7 +196,8 @@ impl<S: 'static> Playground<S> {
     }
 
     /// A trigger for the scene named `scene` (its path, or just its name): `key` runs `run` on the scene's stage state, as
-    /// its button in the side column does. An `'r'` trigger runs after each replay. See
+    /// its button in the side column does. An `'r'` trigger runs when the scene is chosen and on
+    /// each replay, so its motion plays at once. See
     /// [`Story::trigger`].
     pub fn trigger(mut self, scene: &'static str, key: char, label: &'static str, run: Step<S>) -> Self {
         self.triggers.push((scene, trigger(key, label, run)));
@@ -547,7 +548,6 @@ impl<S: 'static> Live<S> {
                 Request::Replay => {
                     if let Some((i, _)) = self.page() { self.owned[i] = None; }
                     self.select(self.selected);
-                    self.trigger('r');
                 }
                 Request::Trigger(key) => self.trigger(key),
                 Request::Dark(dark) => self.dark = Some(dark),
@@ -590,6 +590,7 @@ impl<S: 'static> Live<S> {
         self.owned.iter_mut().for_each(|o| *o = None);
     }
 
+    /// Shows story `i`. A stage made new, as a scene's always is, runs its `'r'` trigger.
     fn select(&mut self, i: usize) {
         if let Some(left) = self.selected.checked_sub(self.scenes.len())
             && let (Some(Page { kind: Kind::Own(own), .. }), Some(Some(stage))) = (self.pages.get(left), self.owned.get_mut(left))
@@ -610,7 +611,10 @@ impl<S: 'static> Live<S> {
         } else if let Some((i, page)) = self.page() && let Kind::Own(own) = &page.kind && self.owned[i].is_none() {
             let stage = crate::with_scene_clock(scene_clock, || own.init());
             self.owned[i] = Some(stage);
+        } else {
+            return;
         }
+        self.trigger('r');
     }
 
     /// Queues the open story's trigger on `key`, to run at the next poll from now.

@@ -45,8 +45,8 @@ impl<P: 'static> Story<P> {
 
     /// A trigger: `key` (a letter, or `' '` for Space) runs `run` on the story's state, as its
     /// button in the side column does. [`Play::after`] queues the steps that follow, on the
-    /// logical clock. R always replays: the state is made again, then an `'r'` trigger, if
-    /// there is one, runs. J and K are taken.
+    /// logical clock. An `'r'` trigger runs whenever the state is made: when the story first
+    /// shows, and on R, which always replays. J and K are taken.
     pub fn trigger(mut self, key: char, label: &'static str, run: Step<P>) -> Self {
         self.triggers.push(trigger(key, label, run));
         self
