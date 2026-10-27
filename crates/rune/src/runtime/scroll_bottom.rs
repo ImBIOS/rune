@@ -177,9 +177,18 @@ impl<S: 'static> Runtime<S> {
             .filter(move |&j| self.nodes[j].parent == Some(i) && !self.is_exiting(self.nodes[j].id) && self.scene.contains(self.nodes[j].id))
     }
 
-    /// Scroll viewport `i`'s first present child.
+    /// Scroll viewport `i`'s growth-stack child, or the child that supplies its content end.
     pub(super) fn scroll_content(&self, i: usize) -> Option<usize> {
-        self.scroll_children(i).next()
+        let view = self.nodes[i].target;
+        self.scroll_stack(i).or_else(|| {
+            self.scroll_children(i).max_by(|&a, &b| {
+                let end = |c: usize| {
+                    let n = &self.nodes[c];
+                    f64::from(n.target[1] - view[1]) + self.stack_extent(c).unwrap_or(f64::from(n.target[3] - n.target[1]))
+                };
+                end(a).total_cmp(&end(b))
+            })
+        })
     }
 
     /// Scroll viewport `i`'s growth-stack child, if any.
@@ -201,7 +210,7 @@ impl<S: 'static> Runtime<S> {
             if let Some(st) = self.scrolls.get_mut(&id) { st.slack.edges = None; }
             return false;
         }
-        let Some(c) = self.scroll_stack(i).or_else(|| self.scroll_content(i)) else { return false };
+        let Some(c) = self.scroll_content(i) else { return false };
         let stack = self.nodes[c].growth.and_then(|spec| Some((spec, self.stacks.get_mut(&self.nodes[c].id)?)));
         let view = self.scene.presented(id).map(|p| p.rect.edges());
         let (Some((spec, stack)), Some(view), false) = (stack, view, self.reduced_motion) else {

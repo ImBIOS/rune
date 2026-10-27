@@ -311,21 +311,20 @@ pub(super) fn flatten(
         if let [content] = children.as_mut_slice() {
             style.flex_direction = FlexDirection::Row;
             unwrapped_width(&mut content.style, scroll_axes.y());
-        } else if !scroll_axes.y() {
-            style.flex_direction = FlexDirection::Row;
-            for child in &mut children {
-                if child.style.size.width.is_auto() {
-                    child.style.size.width = Dimension::max_content();
-                }
-                child.style.flex_shrink = 0.0;
-            }
         } else {
+            if !scroll_axes.y() {
+                style.flex_direction = FlexDirection::Row;
+            }
             for child in &mut children {
-                if child.style.size.width.is_auto() || child.style.size.width == Dimension::percent(1.0) {
+                let w_full = child.style.size.width == Dimension::percent(1.0);
+                if child.style.size.width.is_auto() || w_full {
                     child.style.size.width = Dimension::max_content();
+                    if w_full && child.style.min_size.width.is_auto() {
+                        child.style.min_size.width = percent(1.0);
+                    }
                 }
                 child.style.flex_shrink = 0.0;
-                if child.style.align_self.is_none() {
+                if scroll_axes.y() && child.style.align_self.is_none() {
                     child.style.align_self = Some(AlignSelf::FLEX_START);
                 }
             }

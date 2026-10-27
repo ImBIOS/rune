@@ -44,6 +44,7 @@ impl<S: 'static> Measurement<'_, S> {
             }
             let Some(scroll) = nodes.iter().find(|n| n.path == v.scroll_path) else { continue };
             v.viewport = scroll.local.h;
+            v.top = (nodes[ci].target[1] - scroll.target[1]).max(0.0);
             let st = self.scrolls.get_mut(&scroll.id);
             let sticky = scroll.scroll.unwrap().stick_bottom;
             let pinned = (settle && sticky) || st.as_ref().map_or(sticky, |s| s.pinned);
@@ -53,7 +54,7 @@ impl<S: 'static> Measurement<'_, S> {
             } else { 0.0 };
             // Rows that shrank or went leave the offset past the end until scrolling clamps it;
             // what shows then is the end.
-            let offset = offset.min(v.max_offset());
+            let offset = (offset - v.top).clamp(0.0, v.max_offset());
             let end = v.row_end(v.range.end);
             let mounted_height = (end - v.before).max(0.0);
             // Never present a blank caused by an estimate. Expand and measure again first.

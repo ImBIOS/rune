@@ -46,6 +46,7 @@ pub(crate) struct VirtualList {
     pub reveal_selected: Option<String>,
     pub scroll_path: String,
     pub viewport: f32,
+    pub top: f32,
     pub pad_top: f32,
     pub pad_bottom: f32,
     gap: f32,

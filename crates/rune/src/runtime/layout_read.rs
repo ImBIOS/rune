@@ -209,9 +209,11 @@ impl<S: 'static> Runtime<S> {
         let mut up = nodes[i].parent.filter(|_| nodes[i].above.is_none());
         while let Some(p) = up {
             if let Some(st) = self.scrolls.get(&nodes[p].id) {
-                let origin = self.virtuals.values().find(|v| v.scroll_path == nodes[p].path).map_or(0.0, |v| v.before);
-                dy += st.offset as f32 - origin;
+                dy += st.offset as f32;
                 dx += st.x.offset as f32;
+            }
+            if let Some(v) = self.virtuals.get(&nodes[p].path) {
+                dy -= v.before;
             }
             up = nodes[p].parent.filter(|_| nodes[p].above.is_none());
         }

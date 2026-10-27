@@ -465,7 +465,7 @@ impl<S: 'static> Runtime<S> {
                     && let Some(v) = self.virtuals.get(v_path)
                     && let Some(idx) = v.index_of(row_key)
                 {
-                    f64::from(v.pad_top + v.prefix(idx) + *in_row)
+                    f64::from(v.top + v.pad_top + v.prefix(idx) + *in_row)
                 } else {
                     continue;
                 };

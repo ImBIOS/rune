@@ -3424,7 +3424,7 @@ impl<S: 'static> Runtime<S> {
             let Some(v) = self.virtuals.get_mut(path) else { continue };
             let (offset, pinned) = self.path_ids.get(&v.scroll_path)
                 .and_then(|id| self.scrolls.get(id))
-                .map_or((0.0, false), |s| (s.offset as f32, s.pinned));
+                .map_or((0.0, false), |s| ((s.offset as f32 - v.top).max(0.0), s.pinned));
             let range = v.visible_range(offset, pinned);
             if v.reported_visible.as_ref() != Some(&range) {
                 v.reported_visible = Some(range.clone());
@@ -3441,7 +3441,7 @@ impl<S: 'static> Runtime<S> {
         let Some(&i) = self.path_ids.get(path).and_then(|id| self.node_index.get(id)) else { return false };
         if self.subtree_exiting(i) { return false; }
         self.path_ids.get(&v.scroll_path).and_then(|id| self.scrolls.get(id))
-            .is_some_and(|s| v.needs_window(s.offset as f32, s.pinned))
+            .is_some_and(|s| v.needs_window((s.offset as f32 - v.top).max(0.0), s.pinned))
     }
 
     /// Whether an index-built list still mounts its overscan a little per frame, so the host
@@ -3559,6 +3559,7 @@ impl<S: 'static> Measurement<'_, S> {
             v.scroll_path = scroll_path.to_owned();
             // A retry keeps the viewport the last pass measured; `self.nodes` is the last commit's.
             if !self.retry { v.viewport = height; }
+            offset = (offset - v.top).max(0.0);
             v.pad_top = padding(el.style.padding.top);
             v.pad_bottom = padding(el.style.padding.bottom);
             v.set_gap(crate::virtual_list::gap_y(&el.style));
@@ -5344,9 +5345,9 @@ impl<S: 'static> Runtime<S> {
                     })
                 })?;
                 let row_key = &v.keys[index];
-                let top = f64::from(v.pad_top + v.prefix(index));
+                let top = f64::from(v.top + v.pad_top + v.prefix(index));
                 let height = f64::from(v.height(row_key));
-                let end = f64::from(v.pad_top + v.prefix(v.keys.len()) + v.pad_bottom);
+                let end = f64::from(v.top + v.pad_top + v.prefix(v.keys.len()) + v.pad_bottom);
                 Some((v.scroll_path.clone(), top, height, f64::from(v.viewport), top, height, end))
             }).next()
         });
@@ -5667,6 +5668,7 @@ impl<S: 'static> Runtime<S> {
             let Some(&ci) = self.node_index.get(cid) else { continue };
             let Some(spec) = self.nodes[ci].growth else { continue };
             let origin = self.virtuals.get(&self.nodes[ci].path).map_or(0.0, |v| v.before);
+            self.row_dy[ci] = grid(origin, s);
             let mut y = stack.pad_top - origin;
             let mut first_row = true;
             for id in &stack.order {
@@ -7031,10 +7033,9 @@ impl<S: 'static> Runtime<S> {
             if n.scroll.is_some()
                 && let Some(st) = self.scrolls.get(&n.id)
             {
-                let origin = self.virtuals.values().find(|v| v.scroll_path == n.path).map_or(0.0, |v| f64::from(v.before));
                 let offset = self.stuck_offset(i, p.rect.edges()[3]).unwrap_or(st.offset);
                 let held = self.bottom_offset(i, p.rect.edges()[3]).is_some_and(|b| (offset - b).abs() < 0.5);
-                dy -= grid((offset - origin) as f32 + st.slack.height(), s);
+                dy -= grid(offset as f32 + st.slack.height(), s);
                 if let Some(st) = self.scrolls.get_mut(&self.nodes[i].id) { st.held = held; }
             }
             let (mut scale, mut anchor, mut anchor_to, mut dx) = (sc, anchor, anchor_to, pinh.dx);

@@ -149,3 +149,90 @@ fn scroll_xy_with_direct_children_scrolls_both_axes_and_warns_on_trailing_growth
     assert!(layout_diagnostics::warned_at("growth-sibling:"));
 }
 
+#[test]
+fn animated_header_above_pinned_growth_stack_keeps_last_row_on_bottom_every_frame() {
+    fn view(tall: &bool, _: &mut Cx<bool>) -> El {
+        let stack = col()
+            .key("stack")
+            .w_full()
+            .growth(GrowthSpec::default())
+            .children((0..6).map(|i| row().key(format!("r{i}")).w_full().h(40.0)));
+        col()
+            .key("scroll")
+            .size(200.0, 200.0)
+            .scroll(ScrollSpec { stick_bottom: true })
+            .child(el().key("header").w_full().h(if *tall { 120.0 } else { 40.0 }))
+            .child(stack)
+    }
+    let mut rt = Runtime::new(false, view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|tall, _| *tall = true);
+    for frame in 0..90 {
+        rt.frame(1.0 / 120.0);
+        let r5 = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r5")).unwrap();
+        assert!(
+            (r5.rect[1] + r5.rect[3] - 200.0).abs() < 0.05,
+            "frame {frame}: last row bottom {} left viewport bottom 200.0",
+            r5.rect[1] + r5.rect[3]
+        );
+    }
+}
+
+#[test]
+fn header_before_virtual_stack_reveals_unmounted_row_and_keeps_header_at_origin() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        let stack = col()
+            .key("rows")
+            .w_full()
+            .growth(GrowthSpec::default())
+            .virtualize(20.0)
+            .children((0..100).map(|i| row().key(format!("r{i}")).w_full().h(20.0)));
+        col()
+            .key("scroll")
+            .size(200.0, 200.0)
+            .scroll(ScrollSpec { stick_bottom: false })
+            .child(el().key("header").w_full().h(500.0))
+            .child(stack)
+    }
+    let mut rt = Runtime::new((), view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    assert!(rt.elements().iter().all(|e| e.key.as_deref() != Some("r35")), "r35 starts unmounted");
+
+    // Scrolling near the bottom of the 500pt header must keep r0 mounted and visible.
+    rt.wheel(100.0, 100.0, -450.0);
+    rt.frame(1.0 / 60.0);
+    let r0 = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r0")).expect("r0 stays mounted below header");
+    assert!((r0.rect[1] - 50.0).abs() < 0.05, "r0 at y={} instead of 50.0", r0.rect[1]);
+
+    // Revealing an initially unmounted row accounts for the header height and does not shift the header by `before`.
+    rt.update(|_, tx| tx.scroll_into_view("r35"));
+    rt.frame(1.0 / 60.0);
+    assert!(rt.virtuals["scroll/rows"].before > 0.0, "earlier virtual rows were culled");
+    let r35 = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r35")).expect("r35 mounted and revealed");
+    assert!((r35.rect[1] + r35.rect[3] - 200.0).abs() < 0.05, "r35 bottom {} != 200.0", r35.rect[1] + r35.rect[3]);
+    let header = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("header")).unwrap();
+    assert!((header.rect[1] - (-1020.0)).abs() < 0.05, "header top {} moved with virtual culling", header.rect[1]);
+}
+
+#[test]
+fn scroll_x_with_multiple_children_unwraps_w_full_text_column() {
+    fn view(_: &(), _: &mut Cx<()>) -> El {
+        row()
+            .key("strip")
+            .size(200.0, 80.0)
+            .scroll_x()
+            .child(el().key("badge").w(40.0).h(20.0))
+            .child(col().key("wide").w_full().child(crate::el::text("unwrapped horizontal text ".repeat(12)).wrap()))
+            .child(col().key("short").w_full().child(crate::el::text("ok")))
+    }
+    let mut rt = Runtime::new((), view, (200.0, 80.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let badge = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("badge")).unwrap();
+    let wide = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("wide")).unwrap();
+    let short = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("short")).unwrap();
+    assert_eq!(badge.rect[2], 40.0);
+    assert!(wide.rect[2] > 400.0, "w_full column in multi-child scroll_x unwraps past viewport width, got {}", wide.rect[2]);
+    assert_eq!(short.rect[2], 200.0, "w_full child keeps min-width 100% of viewport when narrower");
+}
+
+
