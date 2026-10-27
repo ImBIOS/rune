@@ -2909,6 +2909,7 @@ dependencies = [
 name = "rune-kit"
 version = "0.0.1"
 dependencies = [
+ "procwatch",
  "pulldown-cmark",
  "resvg",
  "rune",

@@ -27,7 +27,12 @@ required-features = ["markdown"]
 name = "markdown_resize"
 required-features = ["markdown", "frame-profile"]
 
+[[example]]
+name = "scroll_bench"
+required-features = ["markdown", "frame-profile"]
+
 [dev-dependencies]
+procwatch = { path = "../procwatch" }
 # Reference rasteriser for the built-in glyphs (tests/glyphs.rs).
 resvg = { version = "0.45", default-features = false }
 # The fixture goldens render with the OpenCode theme's tokens and fonts (tests/markdown_fixture.rs).

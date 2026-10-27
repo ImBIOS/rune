@@ -4,6 +4,12 @@
 Frame-CPU mode:
   cargo build --profile perf -p settings --bins --features frame-profile
   python3 scripts/bench-ui.py --frame-cpu --out target/frame-cpu --runs 9
+
+Scroll frame-CPU mode (windowless; input through draw lists, no GPU submission):
+  cargo build --profile perf -p rune-kit --example scroll_bench --features markdown,frame-profile
+  python3 scripts/bench-ui.py --frame-cpu --scroll --out target/scroll --runs 9
+Save scroll_bench under saved/target/perf/examples/ to compare scroll workloads.
+
 Save the baseline binaries in saved/target/perf,
 then build the candidate and add --compare saved/target/perf. Use separate Cargo
 target directories for separate source roots. Comparison verifies binary hashes
@@ -34,6 +40,7 @@ p.add_argument('--out', required=True, type=pathlib.Path)
 p.add_argument('--runs', type=int, default=7)
 p.add_argument('--only', default='')
 p.add_argument('--frame-cpu', action='store_true', help='include dense fixtures and phase/allocation metrics (build --features frame-profile)')
+p.add_argument('--scroll', action='store_true', help='windowless scroll workloads; build rune-kit example scroll_bench with markdown,frame-profile')
 p.add_argument('--compare', type=pathlib.Path, help='alternate with saved baseline binaries in a target/perf directory')
 a = p.parse_args()
 if a.runs < 1:
@@ -44,6 +51,9 @@ workloads = {
 }
 if a.frame_cpu:
     workloads['startup'] = ('settings', ['--first-pixels', '--frames', '1'])
+if a.scroll:
+    workloads = {f'scroll-{name}': ('examples/scroll_bench', ['--workload', name, '--frames', '480'])
+                 for name in ('list', 'markdown', 'sticky', 'growth')}
 rx = re.compile(r'gpu init ([\d.]+) ms, first frame ([\d.]+) ms, frame cpu mean ([\d.]+) ms p50 ([\d.]+) p95 ([\d.]+) max ([\d.]+), (\d+) instances')
 names = ['gpu_ms', 'first_ms', 'mean_ms', 'p50_ms', 'p95_ms', 'max_ms', 'instances']
 result = {}
@@ -93,7 +103,14 @@ for name, (binary, args) in workloads.items():
                                 proc.wait()
             else:
                 r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=True, timeout=180)
-                log_path.write_text(r.stderr)
+                log_path.write_text(r.stdout + r.stderr)
+            if a.scroll:
+                profile = re.search(r'rune-scroll-profile (.+)', r.stdout)
+                if not profile:
+                    raise RuntimeError(r.stdout + r.stderr)
+                if i:
+                    samples[stage].append(json.loads(profile[1]))
+                continue
             m = rx.search(r.stderr)
             if not m:
                 raise RuntimeError(r.stderr)
@@ -120,7 +137,7 @@ for name, (binary, args) in workloads.items():
             print(f'METRIC {label}.{key}={value:.6f}', flush=True)
             print(f'METRIC {label}.{key}.mad={mad[key]:.6f}', flush=True)
     if a.compare:
-        metric = 'thread_cpu_ms' if 'thread_cpu_ms' in samples['current'][0] and 'thread_cpu_ms' in samples['before'][0] else 'mean_ms'
+        metric = 'cpu_ms_p50' if a.scroll else ('thread_cpu_ms' if 'thread_cpu_ms' in samples['current'][0] and 'thread_cpu_ms' in samples['before'][0] else 'mean_ms')
         ratios = [cur[metric] / old[metric] for cur, old in zip(samples['current'], samples['before'])]
         ratio = statistics.median(ratios)
         spread = statistics.median(abs(r - ratio) for r in ratios)
