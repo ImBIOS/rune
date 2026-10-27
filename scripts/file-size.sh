@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Checks Rust file sizes. Counts non-test lines per tracked .rs file under crates/ and examples/
 # (inline #[cfg(test)] items are excluded; test-only files are measured separately).
-#   warn  > 500 non-test lines       error > 800 non-test lines unless listed in
+#   warn  > 800 non-test lines       error > 1500 non-test lines unless listed in
 #   warn  > 1000 lines in a test file or inline test module   scripts/file-size-exceptions.txt ("<path> <ceiling>")
 # Usage: scripts/file-size.sh [--warn-only] [--update-exceptions [--allow-raise]]
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-SOFT=500 HARD=800 TESTCAP=1000
+SOFT=800 HARD=1500 TESTCAP=1000
 EXC=scripts/file-size-exceptions.txt
 warn_only=0 update=0 raise=0
 for a in "$@"; do
@@ -60,7 +60,7 @@ measure() {
 rows=$(measure)
 ceil_of() { [ -f "$EXC" ] && awk -v p="$1" '$1 == p { print $2; exit }' "$EXC" || true; }
 
-errors=0 warns=0 over500=0 over800=0
+errors=0 warns=0 oversoft=0 overhard=0
 out=$(mktemp); trap 'rm -f "$out"' EXIT
 ann() { [ "${GITHUB_ACTIONS:-}" = true ] && echo "::$1 file=$2::$3" || true; }
 
@@ -78,9 +78,9 @@ while read -r p prod test maxtest; do
     ann warning "$p" "inline test module has $maxtest lines (limit $TESTCAP)"
   fi
   [ "$prod" -gt "$SOFT" ] || continue
-  over500=$((over500 + 1))
+  oversoft=$((oversoft + 1))
   if [ "$prod" -gt "$HARD" ]; then
-    over800=$((over800 + 1))
+    overhard=$((overhard + 1))
     limit=$(ceil_of "$p"); limit=${limit:-$HARD}
     if [ "$prod" -gt "$limit" ]; then
       errors=$((errors + 1))
@@ -99,7 +99,7 @@ while read -r p prod test maxtest; do
 done <<< "$rows"
 
 sort -rn "$out"
-echo "over $SOFT: $over500, over $HARD: $over800, errors: $errors, warnings: $warns"
+echo "over $SOFT: $oversoft, over $HARD: $overhard, errors: $errors, warnings: $warns"
 
 if [ "$update" -eq 1 ]; then
   tmp=$(mktemp)

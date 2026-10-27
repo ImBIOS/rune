@@ -19,9 +19,9 @@ A Rust GPU UI framework (wgpu, winit) for apps that feel like SwiftUI on iOS at 
 - Work on `dev`. `production` deploys the site.
 - `dev` is fast-forward-only: never force-push or rewrite it. Apps pin its revs, so a rewrite breaks every app's build on a clean fetch.
 - For any change that can move an app's output or break its build, add `changelog/unreleased/<YYYY-MM-DD>-<slug>.md` with one top-level bullet, in the style of the `CHANGELOG.md` entries. `scripts/changelog-fold` folds them into `## dev`.
-- Keep Rust files under 500 non-test lines (`#[cfg(test)]` code excluded); 800 is a hard cap. Older oversized files are listed in `scripts/file-size-exceptions.txt` with ceilings that only go down. Run `scripts/file-size.sh` to check.
+- Keep Rust files under 800 non-test lines (`#[cfg(test)]` code excluded); 1,500 is a hard cap. The point is to stop god files and edit collisions, not to chop a file that reads fine as one piece. Older files over the cap are listed in `scripts/file-size-exceptions.txt` with ceilings that only go down. Run `scripts/file-size.sh` to check.
 - Put tests in a sibling `tests.rs` or `*_tests.rs`, and keep any test file or module under 1,000 lines.
-- Before adding to an oversized file, move the area you touch into its own module, in its own PR.
+- Before adding to a file over the cap, move the area you touch into its own module, in its own PR.
 - A feature owns its state, keys and registrations so it plugs in with one line. New runtime state goes in the owning subsystem's struct, not a flat `Runtime` field.
 - In `lib.rs`, keep `mod` and `pub use` lists one item per line, sorted.
 - Apps build these types as literals, so adding a pub field breaks them: `AppSpec`, `Env`, `Elevation`, `PaletteSeed`, `OverlaySpec`, `TextStyle`, `RunOptions`, `ScrollSpec`, `Span`, `ByteFrame`, `SurfaceDraw`, `LayerSpec`. Add a builder method instead.

@@ -1,34 +1,14 @@
-# <path> <ceiling>: non-test line ceilings for files above 800. Ceilings only go down.
+# <path> <ceiling>: non-test line ceilings for files above 1500. Ceilings only go down.
 # Refresh with scripts/file-size.sh --update-exceptions.
-crates/rune-fx/examples/gallery/main.rs 1082
-crates/rune-fx/src/fill.rs 940
 crates/rune-fx/src/lib.rs 1509
-crates/rune-fx/src/renderer.rs 851
-crates/rune-kit/src/diff/state.rs 886
-crates/rune-kit/src/diff/view.rs 865
-crates/rune-kit/src/markdown.rs 1903
+crates/rune-kit/src/markdown.rs 1857
 crates/rune-kit/src/syntax/scan.rs 1694
-crates/rune-kit/src/tree.rs 1217
-crates/rune-light/examples/light.rs 1236
 crates/rune-light/examples/reel.rs 1899
-crates/rune-light/src/lib.rs 1210
-crates/rune-motion/src/scene.rs 1172
-crates/rune-motion/src/store.rs 1366
-crates/rune/src/clipboard.rs 872
-crates/rune/src/desktop.rs 1238
 crates/rune/src/edit.rs 2780
-crates/rune/src/edit/html.rs 992
 crates/rune/src/el.rs 3949
-crates/rune/src/macos.rs 987
 crates/rune/src/overlay.rs 1983
-crates/rune/src/recorder/mod.rs 812
-crates/rune/src/render.rs 1485
-crates/rune/src/runtime.rs 8446
-crates/rune/src/selectable.rs 802
+crates/rune/src/runtime.rs 8396
 crates/rune/src/text.rs 3151
 crates/rune/src/tooling.rs 1994
-crates/rune/src/video/macos.rs 914
 crates/rune/src/window.rs 3561
-examples/cursed-settings/src/gags.rs 850
 examples/kit-gallery/src/stories.rs 1618
-examples/lab/src/gfx.rs 1376
