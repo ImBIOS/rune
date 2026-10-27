@@ -2,6 +2,7 @@
 //! flex growth so every row's cells line up without a grid.
 
 use super::*;
+use super::style::{TableBody, TableFrame};
 
 /// Estimated bytes of column widths kept beyond the tables on screen.
 const WIDTHS_BYTES: usize = 1 << 20;
@@ -49,7 +50,7 @@ impl MarkdownStyle {
         self
     }
     /// The rounded outline around a table, or `None` for none; a rule then runs under the
-    /// last row too, as on a web page.
+    /// last row too, as on a web page. A [`Self::table_frame`] draws in its place.
     pub fn table_outline(mut self, outline: Option<Color>) -> Self {
         self.table_outline = outline;
         self
@@ -124,6 +125,58 @@ impl MarkdownStyle {
         self.table_outline = self.table_outline.map(|_| t.rule);
         self
     }
+    /// A rounded frame around the table in place of the outline: filled `fill`, with a
+    /// half-point `ring` drawn inside its edge and `pad` points between the edge and the rows.
+    pub fn table_frame(mut self, fill: Color, ring: Color, pad: f32) -> Self {
+        self.table_frame = Some(TableFrame { fill, ring, pad: pad.max(0.0) });
+        self
+    }
+    /// The body rows on a card of their own inside the frame: filled `fill`, rounded `radius`,
+    /// with `shadows` under it (an elevation, e.g. the kit's `elevation.raised`). The header
+    /// then sits on the frame with no fill and no rule under it, and rules run between body
+    /// rows only.
+    pub fn table_body(mut self, fill: Color, radius: f32, shadows: &[rune::Shadow]) -> Self {
+        self.table_body = Some(TableBody { fill, radius: radius.max(0.0), shadows: shadows.to_vec() });
+        self
+    }
+    /// The header cells' padding, `x` on the left and right and `y` above and below (the body
+    /// cells' [`Self::table_cell_padding`] by default).
+    pub fn table_header_pad(mut self, x: f32, y: f32) -> Self {
+        self.table_head_pad = Some([x.max(0.0), y.max(0.0)]);
+        self
+    }
+    /// Whether a table fills the text's width (a web table's `width: 100%`), the extra space
+    /// shared out to columns in proportion to their content. Off by default: a narrow table is
+    /// as wide as its content. A table wider than the text shrinks or scrolls either way.
+    pub fn table_full_width(mut self, on: bool) -> Self {
+        self.table_full_width = on;
+        self
+    }
+    /// The space above and below a table (12 and 16 points by default). Like the other blocks'
+    /// margins, it collapses with the space a neighbour wants, taking the larger.
+    pub fn table_margin(mut self, top: f32, bottom: f32) -> Self {
+        self.table_margin = [top.max(0.0), bottom.max(0.0)];
+        self
+    }
+    /// A data table on a card, from the kit's tokens: the body rows on a raised `bg_base` card
+    /// inset 2 points in a `layer_01` frame that also holds the faint, medium-weight header;
+    /// 13-point cells at weight 440 with tabular figures, padded 12 by 10 (the header 12 by 8),
+    /// filling the text's width, 16 points above and below.
+    pub fn table_card(self, k: &Kit) -> Self {
+        let c = &k.c;
+        let raised: Vec<rune::Shadow> = k.shadow_layers(&k.elevation.raised).collect();
+        self.table_frame(c.layer_01, c.border_muted, 2.0)
+            .table_body(c.bg_base, 4.0, &raised)
+            .table_rules(c.border_muted)
+            .table_header_text(c.text_faint)
+            .table_header_weight(500.0)
+            .table_header_pad(12.0, 8.0)
+            .table_cell_padding(12.0, 10.0)
+            .table_font(TextStyle { weight: 440.0, tracking: -0.04, ..k.ty.ui_compact })
+            .table_tabular_figures(true)
+            .table_full_width(true)
+            .table_margin(16.0, 16.0)
+    }
 }
 
 impl Renderer {
@@ -135,9 +188,13 @@ impl Renderer {
         self.cell_font(self.s.table_font.unwrap_or(self.s.body))
     }
 
-    /// Column `j`'s left padding.
-    fn pad_left(&self, j: usize) -> f32 {
-        if j == 0 && self.s.table_flush_left { 0.0 } else { self.s.table_pad[0] }
+    /// Column `j`'s left padding in a row padded `x` on either side.
+    fn pad_left(&self, j: usize, x: f32) -> f32 {
+        if j == 0 && self.s.table_flush_left { 0.0 } else { x }
+    }
+
+    fn head_pad(&self) -> [f32; 2] {
+        self.s.table_head_pad.unwrap_or(self.s.table_pad)
     }
 
     fn cell_font(&self, f: TextStyle) -> TextStyle {
@@ -152,34 +209,71 @@ impl Renderer {
         // Without an outline the corners stay square, so the rules run the full width, and no
         // border inset moves the cells off the text around the table. Either way columns too
         // wide to fit stop at the frame.
-        let border = if s.table_outline.is_some() { 0.5 } else { 0.0 };
-        let mut frame = col().w_full().max_w(total + 2.0 * border).padding(border);
-        frame = match s.table_outline {
-            Some(outline) => frame.radius(6.0).border(0.5, outline).clip_rounded(6.0),
-            None => frame.clip_soft(0.0),
+        let (ring, fill, inset) = match (s.table_frame, s.table_outline) {
+            (Some(f), _) => (Some(f.ring), Some(f.fill), f.pad.max(0.5)),
+            (None, Some(outline)) => (Some(outline), None, 0.5),
+            (None, None) => (None, None, 0.0),
         };
-        frame = frame.child(self.table_row(&t.head, head_maps, t, &cols, self.head_font(), s.table_head_text).key("th").fill(s.table_head_fill));
-        let rule = |key: String| el().key(key).w_full().h(0.5).fill(s.table_rule);
-        for (i, cells) in t.rows.iter().enumerate() {
-            let rmap = row_maps.get(i).map_or(&[][..], Vec::as_slice);
-            let sep = rule(format!("s{i}"));
-            let sep = match s.table_head_rule { Some(c) if i == 0 => sep.fill(c), _ => sep };
-            frame = frame.child(sep).child(self.table_row(cells, rmap, t, &cols, self.body_font(), s.text).key(format!("r{i}")));
+        let mut frame = col().w_full().padding(inset);
+        if !s.table_full_width {
+            frame = frame.max_w(total + 2.0 * inset);
         }
-        if s.table_outline.is_none() {
-            let end = rule("s-end".into());
-            frame = frame.child(match s.table_head_rule { Some(c) if t.rows.is_empty() => end.fill(c), _ => end });
+        if let Some(fill) = fill {
+            frame = frame.radius(6.0).fill(fill);
+        }
+        let head = self.table_row(&t.head, head_maps, t, &cols, self.head_font(), s.table_head_text, self.head_pad()).key("th");
+        let rule = |key: String| el().key(key).w_full().h(0.5).fill(s.table_rule);
+        let row_at = |i: usize, cells: &[Inline]| {
+            let rmap = row_maps.get(i).map_or(&[][..], Vec::as_slice);
+            self.table_row(cells, rmap, t, &cols, self.body_font(), s.text, s.table_pad).key(format!("r{i}"))
+        };
+        if let Some(body) = &s.table_body {
+            // The frame doesn't clip, so the card's shadow shows past it; the header row and
+            // the card clip their own overflow instead.
+            if let Some(ring) = ring {
+                frame = frame.radius(6.0).border(0.5, ring);
+            }
+            frame = frame.child(head.clip_soft(0.0));
+            if !t.rows.is_empty() {
+                let mut rows = col().key("tbc").w_full().clip_rounded(body.radius);
+                for (i, cells) in t.rows.iter().enumerate() {
+                    if i > 0 {
+                        rows = rows.child(rule(format!("s{i}")));
+                    }
+                    rows = rows.child(row_at(i, cells));
+                }
+                let card = col().key("tb").w_full().radius(body.radius).fill(body.fill);
+                frame = frame.child(body.shadows.iter().fold(card, |c, sh| c.box_shadow(*sh)).child(rows));
+            }
+        } else {
+            frame = match ring {
+                Some(ring) => frame.radius(6.0).border(0.5, ring).clip_rounded(6.0),
+                None => frame.clip_soft(0.0),
+            };
+            frame = frame.child(head.fill(s.table_head_fill));
+            for (i, cells) in t.rows.iter().enumerate() {
+                let sep = rule(format!("s{i}"));
+                let sep = match s.table_head_rule { Some(c) if i == 0 => sep.fill(c), _ => sep };
+                frame = frame.child(sep).child(row_at(i, cells));
+            }
+            if ring.is_none() {
+                let end = rule("s-end".into());
+                frame = frame.child(match s.table_head_rule { Some(c) if t.rows.is_empty() => end.fill(c), _ => end });
+            }
         }
         if self.scroll_wide {
             // Every column at its natural width, scrolling when the table is wider than the text.
-            return col().key("scroll").w_full().scroll_x().child(frame.w(total + 2.0 * border));
+            // Full width: the viewport makes `w_full` content its natural width, or its own if wider.
+            let frame = if s.table_full_width { frame } else { frame.w(total + 2.0 * inset) };
+            return col().key("scroll").w_full().scroll_x().child(frame);
         }
         frame
     }
 
-    fn table_row(&self, cells: &[Inline], maps: &[SpanMap], t: &Table, cols: &Columns, font: TextStyle, color: Color) -> El {
+    #[allow(clippy::too_many_arguments)]
+    fn table_row(&self, cells: &[Inline], maps: &[SpanMap], t: &Table, cols: &Columns, font: TextStyle, color: Color, [pad_x, pad_y]: [f32; 2]) -> El {
         let empty = Inline::default();
-        let [pad_x, pad_y] = self.s.table_pad;
+        let total: f32 = cols.natural.iter().sum();
         let mut r = row().w_full();
         for (j, (natural, min)) in cols.natural.iter().zip(&cols.min).enumerate() {
             let inl = cells.get(j).unwrap_or(&empty);
@@ -190,10 +284,19 @@ impl Renderer {
                 .align(align)
                 .reveal(self.reveal)
                 .w_full();
+            // Full width: each column's share of the row is its share of the natural width, so
+            // a wider row widens columns in proportion and a narrower one shrinks them as
+            // without it. A table that scrolls never shrinks a column below its content.
+            let cell = col().key(format!("c{j}"));
+            let cell = match (self.s.table_full_width && total > 0.0, self.scroll_wide) {
+                (false, _) => cell.w(*natural).shrink().min_w(*min),
+                (true, false) => cell.w_frac(natural / total).shrink().min_w(*min),
+                (true, true) => cell.w_frac(natural / total).shrink().min_w(*natural),
+            };
             r = r.child(
                 // Clipped: a word wider than a shrunk column (or a row still streaming in) must
                 // not run into the next column.
-                col().key(format!("c{j}")).w(*natural).shrink().min_w(*min).pl(self.pad_left(j)).pr(pad_x).py(pad_y).clip_soft(0.0).child(self.select_inline(content, inl, maps.get(j))),
+                cell.pl(self.pad_left(j, pad_x)).pr(pad_x).py(pad_y).clip_soft(0.0).child(self.select_inline(content, inl, maps.get(j))),
             );
         }
         r
@@ -227,30 +330,36 @@ impl Renderer {
             self.s.inline_code_scale.to_bits(),
             self.s.inline_code_weight.to_bits(),
             self.s.table_pad.map(f32::to_bits),
+            self.head_pad().map(f32::to_bits),
             self.s.table_flush_left,
             link_styles,
         ));
         if let Some(hit) = WIDTHS.with_borrow_mut(|c| c.get(&key).cloned()) {
             return hit;
         }
-        let mut natural = vec![0.0f32; n];
-        let mut min = vec![0.0f32; n];
-        let lines = std::iter::once((&t.head, head)).chain(rows.iter().map(|r| (r, body)));
-        for (cells, font) in lines {
-            for (j, inl) in cells.iter().take(n).enumerate() {
-                if inl.text.is_empty() {
-                    continue;
+        // Each line's widest cell per column, the header's apart from the body's: their
+        // padding can differ.
+        let widths = |lines: &mut dyn Iterator<Item = &Vec<Inline>>, font: TextStyle| {
+            let (mut natural, mut min) = (vec![0.0f32; n], vec![0.0f32; n]);
+            for cells in lines {
+                for (j, inl) in cells.iter().take(n).enumerate() {
+                    if inl.text.is_empty() {
+                        continue;
+                    }
+                    let spans = self.spans(inl, font.size);
+                    natural[j] = natural[j].max(rune::text::measure(&inl.text, &spans, font, None).0);
+                    min[j] = min[j].max(rune::text::measure(&inl.text, &spans, font, Some(0.0)).0.min(cap));
                 }
-                let spans = self.spans(inl, font.size);
-                natural[j] = natural[j].max(rune::text::measure(&inl.text, &spans, font, None).0);
-                min[j] = min[j].max(rune::text::measure(&inl.text, &spans, font, Some(0.0)).0.min(cap));
             }
-        }
-        let pad = |(j, w): (usize, f32)| w + self.pad_left(j) + self.s.table_pad[0];
-        let cols = Rc::new(Columns {
-            natural: natural.into_iter().enumerate().map(pad).collect(),
-            min: min.into_iter().enumerate().map(pad).collect(),
-        });
+            (natural, min)
+        };
+        let (head_natural, head_min) = widths(&mut std::iter::once(&t.head), head);
+        let (body_natural, body_min) = widths(&mut rows.iter(), body);
+        let [head_x, body_x] = [self.head_pad()[0], self.s.table_pad[0]];
+        let padded = |h: &[f32], b: &[f32]| -> Vec<f32> {
+            (0..n).map(|j| (h[j] + self.pad_left(j, head_x) + head_x).max(b[j] + self.pad_left(j, body_x) + body_x)).collect()
+        };
+        let cols = Rc::new(Columns { natural: padded(&head_natural, &body_natural), min: padded(&head_min, &body_min) });
         WIDTHS.with_borrow_mut(|c| c.insert(key, cols.clone(), 8 * n + 64));
         cols
     }

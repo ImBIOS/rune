@@ -1492,7 +1492,7 @@ fn block_key(i: usize, keys: &[String], used: &mut Vec<String>) -> String {
 }
 
 /// (margin-top, margin-bottom) per block, collapsed like CSS margins.
-fn margins(b: &Block) -> (f32, f32) {
+fn margins(b: &Block, s: &MarkdownStyle) -> (f32, f32) {
     match b {
         Block::Para(_) => (0.0, 12.0),
         Block::Heading(1, _) => (28.0, 12.0),
@@ -1502,7 +1502,7 @@ fn margins(b: &Block) -> (f32, f32) {
         Block::List { .. } => (8.0, 12.0),
         Block::Quote(_) => (16.0, 16.0),
         Block::Rule => (32.0, 32.0),
-        Block::Table(_) => (12.0, 16.0),
+        Block::Table(_) => (s.table_margin[0], s.table_margin[1]),
     }
 }
 
@@ -1677,7 +1677,7 @@ impl Renderer {
         let names = rendered_keys(blocks.len(), keys);
         let empty = BlockMap::None;
         for ((i, b), key) in blocks.iter().enumerate().zip(names) {
-            let (mt, mb) = margins(b);
+            let (mt, mb) = margins(b, &self.s);
             let top = if i == 0 { 0.0 } else { mt.max(prev_mb) };
             if top_level {
                 self.current_block_key.replace(key.clone().into());

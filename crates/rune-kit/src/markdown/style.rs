@@ -38,6 +38,13 @@ pub struct MarkdownStyle {
     /// Cell padding (x, y), and whether the first column has none on its left.
     pub(super) table_pad: [f32; 2],
     pub(super) table_flush_left: bool,
+    pub(super) table_frame: Option<TableFrame>,
+    pub(super) table_body: Option<TableBody>,
+    /// Header cell padding (x, y) when it differs from the body's.
+    pub(super) table_head_pad: Option<[f32; 2]>,
+    pub(super) table_full_width: bool,
+    /// Space above and below a table (collapsed with its neighbours' like CSS margins).
+    pub(super) table_margin: [f32; 2],
     pub(super) diff_add: Color,
     pub(super) diff_remove: Color,
     pub(super) diff_add_text: Color,
@@ -69,6 +76,22 @@ pub(super) struct TaskPaint {
     pub(super) check: &'static Icon,
     pub(super) radius: f32,
     pub(super) motion: Spring,
+}
+
+/// A table's rounded frame (see [`MarkdownStyle::table_frame`]).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TableFrame {
+    pub(super) fill: Color,
+    pub(super) ring: Color,
+    pub(super) pad: f32,
+}
+
+/// The card a table's body rows sit on (see [`MarkdownStyle::table_body`]).
+#[derive(Clone, Debug)]
+pub(super) struct TableBody {
+    pub(super) fill: Color,
+    pub(super) radius: f32,
+    pub(super) shadows: Vec<rune::Shadow>,
 }
 
 /// Colours and sizes diagrams draw with (see [`MarkdownStyle::diagram`]).
@@ -127,6 +150,11 @@ impl MarkdownStyle {
             table_font: None,
             table_pad: [10.0, 6.0],
             table_flush_left: false,
+            table_frame: None,
+            table_body: None,
+            table_head_pad: None,
+            table_full_width: false,
+            table_margin: [12.0, 16.0],
             diff_add: tint(c.layer_01, c.success.icon, if k.dark { 0.11 } else { 0.14 }),
             diff_remove: tint(c.layer_01, c.danger.icon, if k.dark { 0.11 } else { 0.14 }),
             diff_add_text: c.text_base,
