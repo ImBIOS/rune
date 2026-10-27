@@ -49,6 +49,7 @@ mod canvas_input;
 pub use canvas_input::{GesturePhase, MagnifyEvent, PointerButton, RotateEvent, WheelEvent};
 mod layout_watch;
 pub use layout_watch::ScrollPos;
+mod tx_keys;
 mod tx_scroll;
 mod native_menu;
 pub use native_menu::{MenuError, MenuItem};

@@ -135,37 +135,6 @@ impl Tx {
         self.pick_reads.push(PickRead { within, x, y, pick, f: Rc::new(std::cell::Cell::new(Some(f))) });
     }
 
-    /// Whether the key a key handler is seeing is the OS auto-repeat of a held key: true for
-    /// each repeat, false for the first press and outside key handlers. One-shot actions
-    /// (start recording on Enter, say) can return early on a repeat; arrows and Tab usually
-    /// want every repeat.
-    pub fn key_repeat(&self) -> bool { self.key_repeat }
-
-    /// In a key handler, the physical key behind the logical key it's seeing: where the key
-    /// sits, whatever the keyboard layout and Shift make it type. `KeyEvent` carries the
-    /// character, which moves between layouts once Shift is held (`⌘⇧7` arrives as
-    /// `Key::Command('&')` on a US layout and `Key::Command('/')` on a German one), so a shifted
-    /// shortcut matches this instead: `tx.physical_key() == Some(PhysicalKeyCode::Digit7)`.
-    /// `None` for a key with no physical origin (`Runtime::key`, a script's `"key"` without a
-    /// `"code"`) and outside key handlers.
-    pub fn physical_key(&self) -> Option<crate::PhysicalKeyCode> { self.physical_key }
-
-    /// The modifier keys held as this handler runs, so a click can tell Shift-click (extend a
-    /// list's selection) and Cmd-click (toggle a row) from a plain one. A key handler reads
-    /// the key's own [`KeyEvent::mods`](crate::KeyEvent) instead.
-    pub fn mods(&self) -> crate::Mods { self.mods }
-
-    /// In a key handler, the key of the element that had focus when the key arrived, `None`
-    /// when nothing had (and in every other handler). An unkeyed element reads as `#n`, its
-    /// index among its siblings, and a focused [`Link`](crate::Link) as its id. A window's `on_key` hears
-    /// a key either before anything else (nothing focused) or after the focused control passed
-    /// it on, so `tx.focused().is_none()` picks out the first case: plain arrows can drive the
-    /// window (a settings pane) only while no control has focus, as in System Settings. The
-    /// whole order is under "Key routing" in the rune README.
-    pub fn focused(&self) -> Option<&str> {
-        self.focused.as_deref()
-    }
-
     /// Whether this runtime has an attached motion or tooling trace.
     pub fn tracing(&self) -> bool { self.trace.is_some() }
 
