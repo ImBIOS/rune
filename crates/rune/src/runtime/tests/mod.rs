@@ -2,6 +2,7 @@ use super::*;
 use crate::PointerPress;
 use crate::el::{col, el};
 
+mod group_opacity;
 mod input_clipboard;
 mod layout_rows;
 mod loop_sleep;

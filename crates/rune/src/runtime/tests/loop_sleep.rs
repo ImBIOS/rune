@@ -56,9 +56,10 @@ fn cycles_share_deadlines_and_sleep_when_hidden_by_hover_groups() {
     rt.frame(0.5);
     assert_eq!(rt.stats.commits, commits);
     assert!((rt.ambient.unwrap() - 1.0 / 30.0).abs() < 1e-7);
-    rt.state = true; rt.invalidate(); rt.frame(0.0);
+    // A new rest fades on the element's motion; an instant one lands in the frame.
+    rt.update(|s, tx| { tx.instant(); *s = true }); rt.frame(0.0);
     assert_eq!(rt.wake_deadline(), None, "group-opacity zero must not wake");
-    rt.state = false; rt.invalidate(); rt.frame(0.0);
+    rt.update(|s, tx| { tx.instant(); *s = false }); rt.frame(0.0);
     assert!(rt.wake_deadline().is_some());
     rt.set_live_visible(false); rt.frame(0.0);
     assert_eq!(rt.wake_deadline(), None);

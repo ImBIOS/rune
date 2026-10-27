@@ -4366,6 +4366,8 @@ impl<S: 'static> Runtime<S> {
                     }
                 }
             }
+            let rest_quiet = instant || !was_present || was_exiting || self.reduced_motion;
+            self.set_group_rest(id, nodes[i].vis.group_opacity.map(|g| g[0]), nodes[i].opacity_motion, spring_l, rest_quiet);
             let k = nodes[i].static_scale;
             nodes[i].scale_track = k != 1.0 || self.scene.store().has(id, P_SCALE);
             if nodes[i].scale_track {
@@ -5695,7 +5697,7 @@ impl<S: 'static> Runtime<S> {
             let Some(parent) = n.parent.filter(|&p| self.nodes[p].vis.blend == crate::render::Blend::PlusLighter) else { continue };
             let Some(p) = self.scene.presented(n.id) else { continue };
             let mut opacity = p.opacity;
-            if let Some([rest, hov]) = n.vis.group_opacity { opacity *= rest + (hov - rest) * inherited_group; }
+            opacity *= self.group_factor(n, inherited_group);
             if fades(n.looping) && let Some(track) = self.loops.get(&n.id) {
                 opacity *= track.sample_at(self.scene.store().node_time(n.id), self.clock, self.reduced_motion);
             }
@@ -6007,9 +6009,7 @@ impl<S: 'static> Runtime<S> {
             }
             let mark = if n.vis.mark != 0 { n.vis.mark } else { pinh.mark };
             let mut own = p.opacity;
-            if let Some([rest, hov]) = n.vis.group_opacity {
-                own *= rest + (hov - rest) * pinh.group;
-            }
+            own *= self.group_factor(n, pinh.group);
             let base_opacity = (own * pinh.opacity).clamp(0.0, 1.0);
             let group = if n.vis.hover.a > 0.0 || n.vis.hover_group {
                 self.scene.get(n.id, P_HOVER).unwrap_or(0.0).clamp(0.0, 1.0)

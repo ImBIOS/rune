@@ -50,6 +50,7 @@ pub(super) fn prop_name(id: u16) -> &'static str {
         88 => "icon-turn",
         89 => "scale",
         90..=93 => "shadow",
+        94 => "group-rest",
         _ => "custom",
     }
 }
@@ -58,6 +59,8 @@ pub(super) fn prop_name(id: u16) -> &'static str {
 pub(super) const P_ICON_TURN: Prop<f32> = Prop::custom(88, PropClass::Rotation);
 /// `El::scale`'s presented factor. `prop::SCALE` belongs to `live_scale`; they multiply.
 pub(super) const P_SCALE: Prop<f32> = Prop::custom(89, PropClass::Scale);
+/// `El::group_opacity`'s presented rest level, so a new rest fades in rather than cutting.
+pub(super) const P_GROUP_REST: Prop<f32> = Prop::custom(94, PropClass::Opacity);
 /// The first four shadows' geometry: x, y, blur and spread in a rect's lanes.
 pub(super) const P_SHADOW_GEO: [Prop<rune_motion::Rect>; 4] = [
     Prop::custom(90, PropClass::Shape),
@@ -73,3 +76,25 @@ pub(super) fn paint_pose_springing(store: &rune_motion::AnimationStore, id: Node
 }
 /// Seconds a changed `El::scale` holds still before its text rasterizes at that size.
 pub(super) const STATIC_SCALE_SETTLE: f64 = 0.1;
+
+impl<S: 'static> Runtime<S> {
+    /// Moves node `id`'s group-opacity rest to `rest` on its opacity motion (the transaction's
+    /// spring without one), or lands it when `quiet`: an instant change, a mount, reduced motion.
+    pub(super) fn set_group_rest(&mut self, id: NodeId, rest: Option<f32>, motion: Option<Anim>, spring: Spring, quiet: bool) {
+        let store = self.scene.store();
+        match rest {
+            None if store.has(id, P_GROUP_REST) => self.scene.store_mut().remove(id, P_GROUP_REST),
+            None => {}
+            Some(r) if quiet || !store.has(id, P_GROUP_REST) => self.scene.set(id, P_GROUP_REST, r),
+            Some(r) if store.target(id, P_GROUP_REST) != Some(r) => self.scene.animate(id, P_GROUP_REST, r, motion.unwrap_or(spring.into())),
+            Some(_) => {}
+        }
+    }
+
+    /// The opacity factor `El::group_opacity` gives node `n` under a hover group at `group`.
+    pub(super) fn group_factor(&self, n: &Node, group: f32) -> f32 {
+        let Some([rest, hovered]) = n.vis.group_opacity else { return 1.0 };
+        let rest = self.scene.get(n.id, P_GROUP_REST).unwrap_or(rest);
+        rest + (hovered - rest) * group
+    }
+}
