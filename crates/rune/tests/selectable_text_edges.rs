@@ -237,11 +237,11 @@ fn only_the_plain_chords_belong_to_the_selection() {
     assert_eq!(rt.selected_text().as_deref(), Some(ROW));
     assert_eq!(rt.state.keys.len(), app + 2, "the app saw both first");
 
-    // A click on nothing clears it.
+    // A click on nothing clears it; Cmd+A then goes back to the text last clicked.
     click(&mut rt, (480.0, 390.0));
     assert_eq!(rt.text_selection(), None);
     chord(&mut rt, 'a', Mods::default());
-    assert_eq!(rt.text_selection(), None);
+    assert_eq!(rt.selected_text().as_deref(), Some(ROW));
 }
 
 #[test]
