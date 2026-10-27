@@ -27,6 +27,7 @@ const CONTROL: f32 = 24.0;
 mod nav;
 mod stage;
 mod story;
+mod variants;
 mod view;
 
 use nav::Row;
@@ -60,7 +61,7 @@ use story::OwnStory;
 /// Keys, while it's open: ↑↓ move along the list, group headers included, and J K between
 /// stories (⌘↑ ⌘↓ to the first and last). On a header, ← folds its group, → unfolds it and ↵
 /// toggles it, as a click on it does; groups stay folded until the playground closes. R
-/// replays the story from the start, a trigger's letter runs it, → or Tab move into the side
+/// replays the story from the start, 1 to 9 pick its variant, a trigger's letter runs it, → or Tab move into the side
 /// column (↑↓ inside it, ←, Tab or Esc back out), and Esc or ⌘⇧D go back to the app. They come
 /// before the stage's `AppSpec::on_key`, except Esc, which the stage gets first. A focused
 /// text field keeps all its keys, and so does an element focused in the stage, until Esc.
@@ -75,6 +76,7 @@ pub struct Playground<S: 'static> {
     scenes: Option<fn(&str) -> bool>,
     fresh: Option<fn(&S) -> S>,
     keep: Option<fn(&S, &mut S)>,
+    variants: Vec<(&'static str, &'static str, fn(&mut S))>,
 }
 
 impl<S: 'static> Default for Playground<S> {
@@ -98,6 +100,7 @@ impl<S: 'static> Playground<S> {
             scenes: None,
             fresh: None,
             keep: None,
+            variants: Vec::new(),
         }
     }
 
@@ -129,6 +132,13 @@ impl<S: 'static> Playground<S> {
     /// See [`Story::side`].
     pub fn side(mut self, scene: &'static str, view: fn(&S, &mut Cx<S>) -> El) -> Self {
         self.sides.push((scene, view));
+        self
+    }
+
+    /// A variant of the scene named `scene` (its path, or just its name): `apply` runs on its
+    /// state after the scene fn. See [`Story::variant`].
+    pub fn variant(mut self, scene: &'static str, name: &'static str, apply: fn(&mut S)) -> Self {
+        self.variants.push((scene, name, apply));
         self
     }
 
@@ -217,6 +227,8 @@ pub(crate) enum Request {
     Select(usize),
     /// R: the stage's state made again, then its `'r'` trigger.
     Replay,
+    /// A digit: the open story's variant, by index, made as R makes it.
+    Variant(usize),
     Trigger(char),
     Dark(bool),
     Size(usize),
@@ -230,7 +242,7 @@ pub(crate) enum Request {
 impl Request {
     /// Whether this one changes the stage's state, so handlers built for the old one must go.
     fn swaps_stage(&self) -> bool {
-        matches!(self, Request::Open(_) | Request::Close | Request::Toggle | Request::Select(_) | Request::Replay)
+        matches!(self, Request::Open(_) | Request::Close | Request::Toggle | Request::Select(_) | Request::Replay | Request::Variant(_))
     }
 }
 
@@ -255,6 +267,9 @@ pub(crate) struct Live<S: 'static> {
     /// By the scene they're for.
     triggers: Vec<(usize, Trigger<S>)>,
     sides: Vec<(usize, fn(&S, &mut Cx<S>) -> El)>,
+    variants: Vec<(usize, &'static str, fn(&mut S))>,
+    /// Each story's variant, by its index into scenes then pages, until the playground closes.
+    variant: Vec<usize>,
     sizes: Vec<(&'static str, (f32, f32))>,
     shortcut: Option<Shortcut>,
     /// The View menu's item takes the shortcut, so keys here leave it alone.
@@ -327,12 +342,14 @@ pub(crate) fn offered_by_env() -> bool {
 
 impl<S: 'static> Live<S> {
     fn new(playground: Playground<S>, spec: &crate::AppSpec<S>, menu: bool) -> Self {
-        let Playground { pages, triggers, sides, sizes, shortcut, bar, enabled: _, scenes: show, fresh, keep } = playground;
+        let Playground { pages, triggers, sides, sizes, shortcut, bar, enabled: _, scenes: show, fresh, keep, variants } = playground;
         let mut live = Live {
             owned: pages.iter().map(|_| None).collect(),
             pages,
             triggers: Vec::new(),
             sides: Vec::new(),
+            variants: Vec::new(),
+            variant: Vec::new(),
             sizes,
             shortcut,
             menu,
@@ -366,6 +383,8 @@ impl<S: 'static> Live<S> {
         };
         live.triggers = triggers.into_iter().filter_map(|(name, t)| Some((scene(&live, name)?, t))).collect();
         live.sides = sides.into_iter().filter_map(|(name, view)| Some((scene(&live, name)?, view))).collect();
+        live.variants = variants.into_iter().filter_map(|(name, variant, apply)| Some((scene(&live, name)?, variant, apply))).collect();
+        live.variant = vec![0; live.count()];
         let listed: Vec<usize> = (0..live.count()).filter(|&i| live.scenes.get(i).is_none_or(|(name, _)| show.is_none_or(|show| show(name)))).collect();
         let mut groups: Vec<&str> = Vec::new();
         for &i in &listed {
@@ -456,7 +475,7 @@ impl<S: 'static> Live<S> {
 
     /// Whether the only requests that swap the stage are replays, which keep its story.
     pub(crate) fn pending_replays_only(&self) -> bool {
-        self.pending.iter().filter(|r| r.swaps_stage()).all(|r| *r == Request::Replay)
+        self.pending.iter().filter(|r| r.swaps_stage()).all(|r| matches!(r, Request::Replay | Request::Variant(_)))
     }
 
     /// Applies the requests handlers made since the last commit; true when anything changed.
@@ -484,11 +503,12 @@ impl<S: 'static> Live<S> {
                     self.reveal(i);
                     self.select(i, real);
                 }
-                Request::Replay if self.is_live_page() => {}
-                Request::Replay => {
-                    if let Some((i, _)) = self.page() { self.owned[i] = None; }
-                    self.select(self.selected, real);
+                Request::Replay => self.replay(real),
+                Request::Variant(n) if n < self.variants().len() => {
+                    self.variant[self.selected] = n;
+                    self.replay(real);
                 }
+                Request::Variant(_) => {}
                 Request::Trigger(key) => self.trigger(key),
                 Request::Dark(dark) => self.dark = Some(dark),
                 Request::Size(i) => self.size = i,
@@ -522,6 +542,13 @@ impl<S: 'static> Live<S> {
         }
     }
 
+    /// The open story's stage made again, then its `'r'` trigger.
+    fn replay(&mut self, real: &mut S) {
+        if self.is_live_page() { return; }
+        if let Some((i, _)) = self.page() { self.owned[i] = None; }
+        self.select(self.selected, real);
+    }
+
     /// [`Playground::keep`], from the scene's stage as it goes.
     fn keep(&mut self, real: &mut S) {
         if let (Some(keep), Some(scene)) = (self.keep, &self.scene) { keep(&scene.state, real); }
@@ -532,6 +559,7 @@ impl<S: 'static> Live<S> {
         self.open = false;
         self.header = None;
         self.folded.clear();
+        self.variant.iter_mut().for_each(|v| *v = 0);
         self.scene = None;
         self.owned.iter_mut().for_each(|o| *o = None);
     }
@@ -549,14 +577,16 @@ impl<S: 'static> Live<S> {
         self.generation += 1;
         let scene_clock = crate::SceneClock { now: self.now, dt: 1.0 / 60.0 };
         if let Some((_, f)) = self.scenes.get(self.selected) {
-            let (init, fresh) = (self.init, self.fresh);
+            let (init, fresh, variant) = (self.init, self.fresh, self.scene_variant());
             self.scene = Some(Box::new(Stage::new(crate::with_scene_clock(scene_clock, || {
                 let mut s = fresh.map_or_else(init, |fresh| fresh(real));
                 f(&mut s);
+                if let Some(variant) = variant { variant(&mut s); }
                 s
             }))));
         } else if let Some((i, page)) = self.page() && let Kind::Own(own) = &page.kind && self.owned[i].is_none() {
-            let stage = crate::with_scene_clock(scene_clock, || own.init(&*real));
+            let variant = self.variant[self.selected];
+            let stage = crate::with_scene_clock(scene_clock, || own.init(&*real, variant));
             self.owned[i] = Some(stage);
         } else {
             return;

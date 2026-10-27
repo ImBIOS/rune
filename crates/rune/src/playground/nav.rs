@@ -21,6 +21,7 @@ impl<S: 'static> Live<S> {
                 _ => {}
             }
         }
+        if let Some(request) = letter.and_then(|c| self.variant_key(c)) { return Nav::Request(request); }
         // In the side column, Space presses the focused control.
         if let Some(c) = letter && !(in_side && c == ' ') && self.triggers().iter().any(|(k, _)| *k == c) {
             return Nav::Request(if c == 'r' { Request::Replay } else { Request::Trigger(c) });

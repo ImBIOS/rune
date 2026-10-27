@@ -157,6 +157,21 @@ impl<S: 'static> Live<S> {
         });
         // Keyed by story, not generation, so a replay keeps the keyboard on the control it's on.
         let slot = self.side_slot(app, cx).map(|slot| el().key(format!("playground-slot-{i}")).w_full().child(slot));
+        let variants = self.variants();
+        let at = self.variant_at();
+        let picker = (!variants.is_empty()).then(|| {
+            col().key("playground-variants").w_full().padding(4.0).gap(2.0).radius(radius::LG).fill(t.card).outline(1.0, 0.0, t.card_border)
+                .children(variants.iter().enumerate().take(9).map(|(n, &name)| {
+                    let on = n == at;
+                    row().key(format!("playground-variant-{n}")).w_full().h(ROW).px(4.0).gap(8.0).center_y().radius(radius::MD)
+                        .fill(if on { selected(t, dark) } else { Color::TRANSPARENT })
+                        .focusable(true).focus_highlight(selected(t, dark)).press(t.press)
+                        .child(keycap(t, &(n + 1).to_string()))
+                        .child(text(name).font(type_::BODY).color(if on { t.text } else { t.text_secondary }).truncate())
+                        .role("button").label(name)
+                        .on_press_tx(move |_: &mut Controls, tx: &mut Tx| tx.playground.push(Request::Variant(n)))
+                }))
+        });
         let triggers = self.triggers();
         let card = (!triggers.is_empty()).then(|| {
             col().key("playground-triggers").w_full().padding(4.0).gap(2.0).radius(radius::LG).fill(t.card).outline(1.0, 0.0, t.card_border)
@@ -164,8 +179,7 @@ impl<S: 'static> Live<S> {
                     let request = if key == 'r' { Request::Replay } else { Request::Trigger(key) };
                     row().key(format!("playground-trigger-{key}")).w_full().h(ROW).px(4.0).gap(8.0).center_y().radius(radius::MD)
                         .focusable(true).focus_highlight(selected(t, dark)).press(t.press)
-                        .child(row().key("cap").h(20.0).min_w(22.0).px(6.0).center().radius(radius::SM - 2.0).fill(t.control_track)
-                            .child(text(cap(key)).font(type_::LABEL).color(t.text)))
+                        .child(keycap(t, &cap(key)))
                         .child(text(label).font(type_::BODY).color(t.text).truncate())
                         .role("button").label(label)
                         .on_press_tx(move |_: &mut Controls, tx: &mut Tx| tx.playground.push(request.clone()))
@@ -175,6 +189,7 @@ impl<S: 'static> Live<S> {
         col().key("playground-side").w(SIDE).h(height).px(12.0).pt(12.0).pb(12.0).gap(12.0)
             .children(title)
             .children(slot)
+            .children(picker)
             .children(card)
             .child(spacer())
             .child(text(hint).key("playground-hint").font(type_::SECTION).color(t.text_secondary).px(4.0))
@@ -249,6 +264,12 @@ impl<S: 'static> Live<S> {
 /// A selected row's fill, a step stronger in dark mode where the track is faint.
 fn selected(t: Theme, dark: bool) -> Color {
     if dark { t.control_off } else { t.control_track }
+}
+
+/// A key's cap beside its control in the side column.
+fn keycap(t: Theme, key: &str) -> El {
+    row().key("cap").h(20.0).min_w(22.0).px(6.0).center().radius(radius::SM - 2.0).fill(t.control_track)
+        .child(text(key.to_owned()).font(type_::LABEL).color(t.text))
 }
 
 /// A trigger's key as its cap shows it.

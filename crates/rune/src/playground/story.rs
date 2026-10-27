@@ -22,12 +22,13 @@ pub struct Story<P: 'static> {
     frame: Option<(f32, f32)>,
     triggers: Vec<Trigger<P>>,
     side: Option<fn(&P, &mut Cx<P>) -> El>,
+    variants: Vec<(&'static str, fn(&mut P))>,
 }
 
 impl<P: 'static> Story<P> {
     /// `name` may be a `"Group/Name"` path.
     pub fn new(name: &'static str, init: fn() -> P, view: fn(&P, &mut Cx<P>) -> El) -> Self {
-        Story { name, init: Init::New(init), view, poll: None, frame: None, triggers: Vec::new(), side: None }
+        Story { name, init: Init::New(init), view, poll: None, frame: None, triggers: Vec::new(), side: None, variants: Vec::new() }
     }
 
     /// A story whose state `derive` makes from the app's real state, each time it's made: when
@@ -74,6 +75,14 @@ impl<P: 'static> Story<P> {
         }
     }
 
+    /// A variant: `apply` runs on the state after `init`. Keys 1 to 9, or its row in the side
+    /// column, switch between them, making the state again as R does. A story with variants
+    /// starts on its first.
+    pub fn variant(mut self, name: &'static str, apply: fn(&mut P)) -> Self {
+        self.variants.push((name, apply));
+        self
+    }
+
     fn stage(stage: &dyn Any) -> &Stage<P> {
         stage.downcast_ref().expect("a story's stage is its own")
     }
@@ -92,7 +101,7 @@ enum Init<P> {
 /// A [`Story`] with its state type erased. Its stage is a `Stage<P>`.
 pub(super) trait OwnStory {
     /// A new stage, from the app's real state if the story derives from it.
-    fn init(&self, real: &dyn Any) -> Box<dyn Any>;
+    fn init(&self, real: &dyn Any, variant: usize) -> Box<dyn Any>;
     fn state<'a>(&self, stage: &'a mut dyn Any) -> &'a mut dyn Any;
     fn state_ref<'a>(&self, stage: &'a dyn Any) -> &'a dyn Any;
     fn view(&self, stage: &dyn Any, cx: &mut Cx<()>) -> El;
@@ -104,15 +113,17 @@ pub(super) trait OwnStory {
     /// Drops the steps still queued, so a story left part way doesn't burst on return.
     fn stop(&self, stage: &mut dyn Any);
     fn triggers(&self) -> Vec<(char, &'static str)>;
+    fn variants(&self) -> Vec<&'static str>;
     fn frame(&self) -> Option<(f32, f32)>;
 }
 
 impl<P: 'static> OwnStory for Story<P> {
-    fn init(&self, real: &dyn Any) -> Box<dyn Any> {
-        let state = match &self.init {
+    fn init(&self, real: &dyn Any, variant: usize) -> Box<dyn Any> {
+        let mut state = match &self.init {
             Init::New(init) => init(),
             Init::Real(_, derive) => derive(real),
         };
+        if let Some((_, apply)) = self.variants.get(variant) { apply(&mut state); }
         Box::new(Stage::new(state))
     }
     fn state<'a>(&self, stage: &'a mut dyn Any) -> &'a mut dyn Any {
@@ -152,6 +163,9 @@ impl<P: 'static> OwnStory for Story<P> {
     }
     fn triggers(&self) -> Vec<(char, &'static str)> {
         self.triggers.iter().map(|t| (t.key, t.label)).collect()
+    }
+    fn variants(&self) -> Vec<&'static str> {
+        self.variants.iter().map(|(name, _)| *name).collect()
     }
     fn frame(&self) -> Option<(f32, f32)> {
         self.frame

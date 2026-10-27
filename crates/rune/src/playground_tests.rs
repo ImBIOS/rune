@@ -584,3 +584,6 @@ mod scenes;
 
 #[path = "playground/real_tests.rs"]
 mod real;
+
+#[path = "playground/variants_tests.rs"]
+mod variants;
