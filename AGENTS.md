@@ -19,6 +19,11 @@ A Rust GPU UI framework (wgpu, winit) for apps that feel like SwiftUI on iOS at 
 - Work on `dev`. `production` deploys the site.
 - `dev` is fast-forward-only: never force-push or rewrite it. Apps pin its revs, so a rewrite breaks every app's build on a clean fetch.
 - Add a `CHANGELOG.md` `## dev` entry, newest first, for any change that can move an app's output or break its build.
+- Keep Rust files under 500 non-test lines (`#[cfg(test)]` code excluded); 800 is a hard cap. Older oversized files are listed in `scripts/file-size-exceptions.txt` with ceilings that only go down. Run `scripts/file-size.sh` to check.
+- Put tests in a sibling `tests.rs` or `*_tests.rs`, and keep any test file or module under 1,000 lines.
+- Before adding to an oversized file, move the area you touch into its own module, in its own PR.
+- A feature owns its state, keys and registrations so it plugs in with one line. New runtime state goes in the owning subsystem's struct, not a flat `Runtime` field.
+- In `lib.rs`, keep `mod` and `pub use` lists one item per line, sorted.
 - Apps build these types as literals, so adding a pub field breaks them: `AppSpec`, `Env`, `Elevation`, `PaletteSeed`, `OverlaySpec`, `TextStyle`, `RunOptions`, `ScrollSpec`, `Span`, `ByteFrame`, `SurfaceDraw`, `LayerSpec`. Add a builder method instead.
 
 ## This repo is public
