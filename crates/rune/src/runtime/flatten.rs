@@ -307,9 +307,29 @@ pub(super) fn flatten(
         r => r,
     };
     let mut children = children;
-    if scroll.is_some() && scroll_axes.x() && let Some(content) = children.first_mut() {
-        style.flex_direction = FlexDirection::Row;
-        unwrapped_width(&mut content.style, scroll_axes.y());
+    if scroll.is_some() && scroll_axes.x() {
+        if let [content] = children.as_mut_slice() {
+            style.flex_direction = FlexDirection::Row;
+            unwrapped_width(&mut content.style, scroll_axes.y());
+        } else if !scroll_axes.y() {
+            style.flex_direction = FlexDirection::Row;
+            for child in &mut children {
+                if child.style.size.width.is_auto() {
+                    child.style.size.width = Dimension::max_content();
+                }
+                child.style.flex_shrink = 0.0;
+            }
+        } else {
+            for child in &mut children {
+                if child.style.size.width.is_auto() || child.style.size.width == Dimension::percent(1.0) {
+                    child.style.size.width = Dimension::max_content();
+                }
+                child.style.flex_shrink = 0.0;
+                if child.style.align_self.is_none() {
+                    child.style.align_self = Some(AlignSelf::FLEX_START);
+                }
+            }
+        }
     }
     let row = matches!(style.flex_direction, FlexDirection::Row | FlexDirection::RowReverse);
     let kids: Vec<taffy::NodeId> = children

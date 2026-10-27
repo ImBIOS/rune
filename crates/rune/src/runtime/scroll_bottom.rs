@@ -146,8 +146,13 @@ impl<S: 'static> Runtime<S> {
         let lag = self.stuck_lag(i, c, bottom)?;
         // How far the rows end above the bottom in the layout (negative past it), beside the
         // stack's own bottom padding and border.
-        let pad = self.stacks.get(&self.nodes[c].id).map_or(0.0, |s| (s.pad_bottom - self.nodes[c].inset[3]).max(0.0));
-        let short = f64::from(n.target[3] - (self.nodes[c].target[3] - pad));
+        let content_bottom = self.scroll_children(i)
+            .map(|k| {
+                let pad = self.stacks.get(&self.nodes[k].id).map_or(0.0, |s| (s.pad_bottom - self.nodes[k].inset[3]).max(0.0));
+                self.nodes[k].target[3] - pad
+            })
+            .reduce(f32::max)?;
+        let short = f64::from(n.target[3] - content_bottom);
         // Stuck on a shrinking stack's end: the rows' last fraction collapses under it (see `step_scroll`).
         let end = st.laid.filter(|&end| st.offset <= end + 1e-6).unwrap_or(f64::INFINITY);
         if st.held && (short <= 0.5 || lag - short >= -0.5) {
@@ -165,9 +170,21 @@ impl<S: 'static> Runtime<S> {
         Some(self.scroll_overflow(i) + self.stuck_lag(i, c, bottom)?)
     }
 
-    /// Scroll viewport `i`'s content: its first child.
+    /// Scroll viewport `i`'s present direct children.
+    pub(super) fn scroll_children(&self, i: usize) -> impl Iterator<Item = usize> + '_ {
+        (i + 1..self.nodes.len())
+            .take_while(move |&j| self.nodes[j].parent >= Some(i))
+            .filter(move |&j| self.nodes[j].parent == Some(i) && !self.is_exiting(self.nodes[j].id) && self.scene.contains(self.nodes[j].id))
+    }
+
+    /// Scroll viewport `i`'s first present child.
     pub(super) fn scroll_content(&self, i: usize) -> Option<usize> {
-        (i + 1..self.nodes.len()).find(|&j| self.nodes[j].parent == Some(i))
+        self.scroll_children(i).next()
+    }
+
+    /// Scroll viewport `i`'s growth-stack child, if any.
+    pub(super) fn scroll_stack(&self, i: usize) -> Option<usize> {
+        self.scroll_children(i).find(|&c| self.nodes[c].growth.is_some())
     }
 
     /// How much further content `c` of viewport `i` has to travel to its layout than the
@@ -184,7 +201,7 @@ impl<S: 'static> Runtime<S> {
             if let Some(st) = self.scrolls.get_mut(&id) { st.slack.edges = None; }
             return false;
         }
-        let Some(c) = self.scroll_content(i) else { return false };
+        let Some(c) = self.scroll_stack(i).or_else(|| self.scroll_content(i)) else { return false };
         let stack = self.nodes[c].growth.and_then(|spec| Some((spec, self.stacks.get_mut(&self.nodes[c].id)?)));
         let view = self.scene.presented(id).map(|p| p.rect.edges());
         let (Some((spec, stack)), Some(view), false) = (stack, view, self.reduced_motion) else {

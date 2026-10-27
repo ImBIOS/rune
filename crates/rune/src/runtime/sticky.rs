@@ -454,7 +454,7 @@ impl<S: 'static> Runtime<S> {
                 let Some(s) = self.nodes.iter().position(|n| n.path == k.viewport && n.scroll.is_some() && n.scroll_axes.y()) else { continue };
                 let laid = if let Some(i) = self.nodes.iter().position(|n| n.path == k.path) {
                     if self.viewport_of(i) != Some(s) { continue; }
-                    if self.scroll_content(s).and_then(|c| self.stacks.get(&self.nodes[c].id)).is_some_and(|st| st.growing)
+                    if self.scroll_stack(s).and_then(|c| self.stacks.get(&self.nodes[c].id)).is_some_and(|st| st.growing)
                         && let Some(st) = self.scrolls.get_mut(&self.nodes[s].id)
                     {
                         st.pinned = false;
@@ -527,7 +527,7 @@ impl<S: 'static> Runtime<S> {
             let viewport = f64::from(self.drawn[s][3] / scale);
             let margin = f64::from(self.nodes[s].scroll_edges.margin);
             let stick = self.nodes[s].scroll.is_some_and(|s| s.stick_bottom);
-            let growing = self.scroll_content(s).and_then(|c| self.stacks.get(&self.nodes[c].id)).is_some_and(|st| st.growing);
+            let growing = self.scroll_stack(s).and_then(|c| self.stacks.get(&self.nodes[c].id)).is_some_and(|st| st.growing);
             let Some(st) = self.scrolls.get_mut(&self.nodes[s].id) else { continue };
             let top = st.offset + rel_top;
             let to = scroll_edge::reveal(st.offset, top, height, viewport, margin).clamp(0.0, st.max);

@@ -229,7 +229,7 @@ impl<S: 'static> Runtime<S> {
     /// fits.
     fn scroll_overflow_x(&self, i: usize) -> f64 {
         let view = self.nodes[i].target;
-        let content_w = self.scroll_content(i).map_or(0.0, |c| f64::from(self.nodes[c].target[2] - view[0]));
+        let content_w = self.scroll_children(i).map(|c| f64::from(self.nodes[c].target[2] - view[0])).reduce(f64::max).unwrap_or(0.0);
         content_w - f64::from(view[2] - view[0])
     }
 

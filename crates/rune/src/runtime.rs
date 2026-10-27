@@ -3373,13 +3373,9 @@ impl<S: 'static> Runtime<S> {
             } else { clip };
             let (shift_min, shift_max) = match (self.scrolls.get(&n.id), n.scroll) {
                 (Some(st), Some(sp)) => {
-                    let content = (i + 1..nodes.len()).find(|&j| nodes[j].parent == Some(i));
-                    let max_x = if n.scroll_axes.x() {
-                        content.map_or(0.0, |c| (nodes[c].target[2] - n.target[2]).max(0.0))
-                    } else { 0.0 };
-                    let max_y = if n.scroll_axes.y() {
-                        content.map_or(0.0, |c| (nodes[c].target[3] - n.target[3]).max(0.0))
-                    } else { 0.0 };
+                    let children = || (i + 1..nodes.len()).take_while(|&j| nodes[j].parent >= Some(i)).filter(|&j| nodes[j].parent == Some(i));
+                    let max_x = if n.scroll_axes.x() { children().fold(0.0_f32, |m, c| m.max(nodes[c].target[2] - n.target[2])) } else { 0.0 };
+                    let max_y = if n.scroll_axes.y() { children().fold(0.0_f32, |m, c| m.max(nodes[c].target[3] - n.target[3])) } else { 0.0 };
                     let ox0 = st.x.offset as f32;
                     let ox1 = ox0.clamp(0.0, max_x);
                     let oy0 = st.offset as f32 + st.slack.height();
@@ -4679,11 +4675,10 @@ impl<S: 'static> Runtime<S> {
     /// How far scroll viewport `i`'s content reaches past its bottom, negative while it fits.
     fn scroll_overflow(&self, i: usize) -> f64 {
         let view = self.nodes[i].target;
-        let content_h = self.scroll_content(i).map_or(0.0, |c| {
+        let content_h = self.scroll_children(i).map(|c| {
             let n = &self.nodes[c];
-            let top = n.target[1] - view[1];
-            f64::from(top) + self.stack_extent(c).unwrap_or(f64::from(n.target[3] - n.target[1]))
-        });
+            f64::from(n.target[1] - view[1]) + self.stack_extent(c).unwrap_or(f64::from(n.target[3] - n.target[1]))
+        }).reduce(f64::max).unwrap_or(0.0);
         content_h - f64::from(view[3] - view[1])
     }
 
@@ -4706,7 +4701,7 @@ impl<S: 'static> Runtime<S> {
             let held = (!self.keeps.is_empty() || !self.scroll_reveals.is_empty()) && {
                 let path = &self.nodes[i].path;
                 (self.keeps.iter().any(|k| k.viewport == *path) || self.scroll_reveals.iter().any(|r| r.viewport == *path))
-                    && self.scroll_content(i).and_then(|c| self.stacks.get(&self.nodes[c].id)).is_some_and(|s| s.growing)
+                    && self.scroll_stack(i).and_then(|c| self.stacks.get(&self.nodes[c].id)).is_some_and(|s| s.growing)
             };
             let laid = if axes.y() { self.ease_to_shrunk_end(i, overflow) } else { None };
             let Some(st) = self.scrolls.get_mut(&id) else { continue };
@@ -5336,7 +5331,7 @@ impl<S: 'static> Runtime<S> {
                     }
                 })
                 .unwrap_or((laid_top, laid_h));
-            let laid_end = self.scroll_content(s).map_or(0.0, |c| self.nodes[c].target[3] - parent.target[1]);
+            let laid_end = self.scroll_children(s).map(|c| self.nodes[c].target[3] - parent.target[1]).reduce(f32::max).unwrap_or(0.0);
             Some((parent.path.clone(), f64::from(top), f64::from(height), f64::from(parent.local.h), f64::from(laid_top), f64::from(laid_h), f64::from(laid_end)))
         }).or_else(|| {
             self.nodes.iter().filter(|n| in_scope(&n.path, scope)).filter_map(|n| {

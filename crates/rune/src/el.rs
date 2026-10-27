@@ -510,7 +510,7 @@ pub(crate) struct ModalSpec {
     pub outside: bool,
 }
 
-/// A vertical scroll viewport. Its first child is the content.
+/// A vertical scroll viewport.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScrollSpec {
     /// Follow the end: while scrolled to the bottom, growth keeps the bottom in view, and a new
@@ -3243,7 +3243,7 @@ impl El {
         if let Some(i) = &mut self.input { i.animate_layout = true; }
         self
     }
-    /// A vertical scroll viewport over its first child.
+    /// A vertical scroll viewport over its children.
     ///
     /// The viewport needs a bounded height to scroll: a fixed `.h(..)`, or a `.grow(1.0)` share
     /// of a parent whose height is itself bounded. Every flex column between that bounded
@@ -3259,7 +3259,7 @@ impl El {
         self.style.overflow = taffy::Point { x: taffy::Overflow::Hidden, y: taffy::Overflow::Scroll };
         self
     }
-    /// A horizontal scroll viewport over its first child: a filmstrip, a wide code block or
+    /// A horizontal scroll viewport over its children: a filmstrip, a wide code block or
     /// table, a tab strip that overflows.
     ///
     /// The content is laid out at its natural width, unwrapped as SwiftUI's
@@ -3285,7 +3285,7 @@ impl El {
         self.style.overflow = taffy::Point { x: taffy::Overflow::Scroll, y: taffy::Overflow::Hidden };
         self
     }
-    /// A viewport that scrolls both ways over its first child (a wide timeline, a large
+    /// A viewport that scrolls both ways over its children (a wide timeline, a large
     /// table): [`El::scroll`] and [`El::scroll_x`] together. A trackpad gesture moves it along
     /// the axis it starts on, as AppKit's predominant-axis scrolling does. It keeps the
     /// `stick_bottom` of an earlier [`El::scroll`] call. Needs a bounded height like

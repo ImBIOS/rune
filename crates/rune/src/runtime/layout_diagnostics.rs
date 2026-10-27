@@ -13,10 +13,38 @@ static WARNED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 pub(super) fn collapsed_scrolls(taffy: &TaffyTree<usize>, nodes: &[Node]) {
     let height = |i: usize| taffy.layout(nodes[i].taffy).map_or(0.0, |l| l.size.height);
+    let bottom = |i: usize| taffy.layout(nodes[i].taffy).map_or(0.0, |l| l.location.y + l.size.height);
     let grown = |i: usize| taffy.style(nodes[i].taffy).is_ok_and(|s| s.flex_grow > 0.0 && s.flex_basis == length(0.0));
     for (i, n) in nodes.iter().enumerate() {
-        if n.scroll.is_none() || !n.scroll_axes.y() || height(i) >= 0.5 { continue; }
-        let content = nodes.get(i + 1).filter(|c| c.parent == Some(i)).map_or(0.0, |_| height(i + 1));
+        if n.scroll.is_none() { continue; }
+        let direct = || (i + 1..nodes.len()).take_while(|&j| nodes[j].parent >= Some(i)).filter(|&j| nodes[j].parent == Some(i));
+        if n.growth.is_some() {
+            let site = n.scroll_source.map_or_else(|| n.path.clone(), |s| s.to_string());
+            if WARNED.lock().unwrap().insert(format!("growth:{site}")) {
+                eprintln!(
+                    "rune: scroll viewport {:?} (.scroll at {site}) also sets .growth(..); \
+                     put .growth(..) on a child column inside .scroll(..) so the viewport box \
+                     does not take the stack's presented height. (debug builds only)",
+                    n.path,
+                );
+            }
+        }
+        let mut kids = direct();
+        if let Some(g) = kids.find(|&j| nodes[j].growth.is_some())
+            && kids.next().is_some()
+        {
+            let site = n.scroll_source.map_or_else(|| n.path.clone(), |s| s.to_string());
+            if WARNED.lock().unwrap().insert(format!("growth-sibling:{site}")) {
+                eprintln!(
+                    "rune: growth stack {:?} inside scroll viewport {:?} (.scroll at {site}) \
+                     has sibling elements after it; a growth stack must be the last (or only) \
+                     child of its scroll viewport so nothing below it overlaps its growing rows. (debug builds only)",
+                    nodes[g].path, n.path,
+                );
+            }
+        }
+        if !n.scroll_axes.y() || height(i) >= 0.5 { continue; }
+        let content = direct().map(bottom).fold(0.0_f32, f32::max);
         if content < 0.5 { continue; }
         let mut up = Some(i);
         let mut collapsed = false;
@@ -35,6 +63,11 @@ pub(super) fn collapsed_scrolls(taffy: &TaffyTree<usize>, nodes: &[Node]) {
             n.path,
         );
     }
+}
+
+#[cfg(test)]
+pub(super) fn warned_at(needle: &str) -> bool {
+    WARNED.lock().unwrap().iter().any(|site| site.contains(needle))
 }
 
 #[cfg(test)]
