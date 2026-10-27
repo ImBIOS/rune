@@ -162,7 +162,7 @@ export const principles: Entry[] = [
     body: (
       <>
         <p>
-          Tokens, knobs and literal edits apply live with no rebuild. Structural Rust edits hot-patch on the Mac in
+          Tokens and literal edits apply live with no rebuild. Structural Rust edits hot-patch on the Mac in
           about a second today, keeping app state, and the goal is 300&nbsp;ms.
         </p>
         <p>

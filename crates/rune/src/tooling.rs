@@ -1415,9 +1415,6 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     }
     let mut comp = app.compositor.take();
     let srgb_blend = app.srgb_blend;
-    // Snapshots and scripts run in parallel; they open the panel only when asked to.
-    #[cfg(all(feature = "dev", debug_assertions))]
-    let dev = app.dev.take().filter(|_| std::env::var_os("RUNE_DEV_PANEL").is_some());
     let on_focus = app.on_focus;
     let on_reopen = app.on_reopen;
     let source = read_script(&args);
@@ -1452,8 +1449,6 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let dark = args.theme.as_deref() != Some("light");
     let state_ms = launched.elapsed().as_secs_f64() * 1000.0;
     let mut rt = runtime_for(&spec, state, size, Env::new(dark, scale), std::sync::Arc::new(|| {}));
-    #[cfg(all(feature = "dev", debug_assertions))]
-    if let Some(dev) = dev { crate::dev::launch(&mut rt, &spec, dev, std::sync::Arc::new(|| {})); }
     rt.set_titlebar_inset(if app_options.borderless { 0.0 } else { chrome.titlebar_inset() });
     rt.on_focus = on_focus;
     rt.transparent = transparent;

@@ -981,10 +981,6 @@ pub struct Runtime<S: 'static> {
     pub poll: Option<fn(&mut S, f64, &mut Tx) -> bool>,
     /// Seconds since the first frame, unscaled (virtual when headless).
     pub clock: f64,
-    #[cfg(all(feature = "dev", debug_assertions))]
-    pub(crate) dev_clock: Option<crate::dev_clock::DevClock>,
-    #[cfg(all(feature = "dev", debug_assertions))]
-    pub(crate) dev: Option<crate::dev::Session<S>>,
     wake_deadlines: Vec<f64>,
     timer_wake: timer_wake::TimerWake,
     /// Windowed runs read the clock from the wall instead of summing frame steps.
@@ -1405,10 +1401,6 @@ impl<S: 'static> Runtime<S> {
             time_scale: 1.0,
             poll: None,
             clock: 0.0,
-            #[cfg(all(feature = "dev", debug_assertions))]
-            dev_clock: None,
-            #[cfg(all(feature = "dev", debug_assertions))]
-            dev: None,
             wake_deadlines: Vec::new(),
             timer_wake: Default::default(),
             wall_start: None,
@@ -1914,30 +1906,6 @@ impl<S: 'static> Runtime<S> {
         self.dirty = true;
     }
 
-    /// Whether a compositor should apply its optional rune-fx motion blur.
-    /// Always true when no dev panel is attached.
-    pub fn motion_blur_enabled(&self) -> bool {
-        #[cfg(all(feature = "dev", debug_assertions))]
-        if let Some(dev) = &self.dev { return dev.blur; }
-        true
-    }
-
-    #[cfg(all(feature = "dev", debug_assertions))]
-    pub(crate) fn dev_velocity_overlay(&mut self) {
-        for (i, node) in self.nodes.iter().enumerate() {
-            let Some(v) = self.scene.store().velocity(node.id, prop::FRAME) else { continue };
-            let (vx, vy) = (v.x + v.w * 0.5, v.y + v.h * 0.5);
-            if vx.hypot(vy) < 1.0 { continue; }
-            let [x, y, w, h] = self.drawn[i];
-            let start = [x + w * 0.5, y + h * 0.5];
-            let end = [start[0] + vx * 0.05, start[1] + vy * 0.05];
-            let shape = Shape::new().line(start, end, 2.0, LineCap::Round, Color::WHITE);
-            let scale = self.env.scale;
-            push_shape(&mut self.instances, &shape, [0.0; 2], [scale; 2], scale, 0.8, self.srgb_blend, NO_CLIP, [0.0; 4]);
-        }
-        if self.track_marks { self.marks.resize(self.instances.len(), 0); }
-    }
-
     /// Changes the state from outside any handler, for data another thread delivered
     /// (`AppHandle::update`). Runs now, so it works while no window shows; the next frame commits
     /// it with the motion `f` asked for.
@@ -2068,12 +2036,9 @@ impl<S: 'static> Runtime<S> {
         height.ceil_to(self.env.scale).max(1.0)
     }
 
-    /// Host time on the logical clock, unless a dev clock owns it.
+    /// Host time on the logical clock.
     fn wall_clock(&self) -> Option<f64> {
-        let wall_start = self.wall_start;
-        #[cfg(all(feature = "dev", debug_assertions))]
-        let wall_start = wall_start.filter(|_| self.dev_clock.is_none());
-        wall_start.map(|t0| t0.elapsed().as_secs_f64())
+        self.wall_start.map(|t0| t0.elapsed().as_secs_f64())
     }
 
     /// Schedules the `wake_after`s that updates left for a frame, counting from now, when no
@@ -2119,10 +2084,7 @@ impl<S: 'static> Runtime<S> {
 
     /// Next requested wake on the unscaled app clock. None lets the shell sleep indefinitely.
     pub fn wake_deadline(&self) -> Option<f64> {
-        let deadline = self.logical_wake_deadline()?;
-        #[cfg(all(feature = "dev", debug_assertions))]
-        if let Some(clock) = &self.dev_clock { return clock.deadline(deadline); }
-        Some(deadline)
+        self.logical_wake_deadline()
     }
 
     /// The native window or overlay's frame counts; `None` headless.
@@ -2132,8 +2094,6 @@ impl<S: 'static> Runtime<S> {
 
     /// When `poll` last ran, on `wake_deadline`'s clock.
     pub(crate) fn polled_at(&self) -> f64 {
-        #[cfg(all(feature = "dev", debug_assertions))]
-        if let Some(clock) = &self.dev_clock { return clock.deadline(self.clock).unwrap_or(self.clock); }
         self.timer_wake.polled_at().unwrap_or(self.clock)
     }
 
@@ -2169,11 +2129,8 @@ impl<S: 'static> Runtime<S> {
         self.frame_split(0.0, dt)
     }
 
-    /// A hidden or windowless host's due timer. Under the dev panel, motion the timer starts
-    /// keeps real time on hidden ticks, as it would on a shown window's redraws.
+    /// A hidden or windowless host's due timer.
     pub(crate) fn hidden_timer_frame(&mut self) {
-        #[cfg(all(feature = "dev", debug_assertions))]
-        if self.dev.is_some() { return self.dev_hidden_frame(); }
         self.frame(0.0);
     }
 
@@ -2200,8 +2157,6 @@ impl<S: 'static> Runtime<S> {
             if self.files_held() { self.hidden_timer_frame(); }
             return self.stats.commits != commits;
         }
-        #[cfg(all(feature = "dev", debug_assertions))]
-        if self.dev.is_some() { self.dev_hidden_frame(); return true; }
         self.poll_hidden()
     }
 
@@ -2211,40 +2166,13 @@ impl<S: 'static> Runtime<S> {
     /// frame or a sleeping host's gap belongs to old tracks, never to targets first observed
     /// on this frame.
     pub(crate) fn frame_split(&mut self, catch_up: f64, dt: f64) -> bool {
-        #[cfg(all(feature = "dev", debug_assertions))]
-        if let Some(mut dev) = self.dev.take() {
-            let scope = dev.scope();
-            let moving = crate::dev::scope(scope, || {
-                // Bring existing tracks/timers to the command's timestamp first. Idle wall
-                // time must never be charged to a transition or spring created by that command.
-                let commands = dev.prepare();
-                if commands { self.frame_clock(catch_up + dt, 0.0); }
-                dev.before(self);
-                if commands { self.frame_clock(0.0, 0.0) } else { self.frame_clock(catch_up, dt) };
-                dev.after(self)
-            });
-            self.dev = Some(dev);
-            return moving;
-        }
         self.frame_clock(catch_up, dt)
     }
 
     fn frame_clock(&mut self, catch_up: f64, dt: f64) -> bool {
         // Like a native shell: the logical clock follows host time (timers, poll), while
         // animations step by the frame's own dt, so idle time never lands on a fresh commit.
-        #[cfg(not(all(feature = "dev", debug_assertions)))]
         let elapsed = catch_up + dt;
-        #[cfg(all(feature = "dev", debug_assertions))]
-        let (elapsed, catch_up, dt) = match &mut self.dev_clock {
-            Some(clock) => {
-                let total = catch_up + dt;
-                let (elapsed, animation) = clock.advance(self.wall_start.map(|t| t.elapsed().as_secs_f64()), total);
-                // Scale and pause both parts alike; manual steps go to `dt`.
-                let catch_up = if total > 0.0 { catch_up * (animation / total).min(1.0) } else { 0.0 };
-                (elapsed, catch_up, animation - catch_up)
-            }
-            None => (catch_up + dt, catch_up, dt),
-        };
         // A coarse headless step still polls at its timer deadlines, independent of FPS, as an
         // idle window wakes for them. Like a window's timer floor (`window::timer_deadline`),
         // a poll comes at most once a frame interval and takes every deadline due by then, so
@@ -2502,8 +2430,6 @@ impl<S: 'static> Runtime<S> {
         if self.time_scale <= 0.0 { self.anim_sources = 0; }
         if filling { self.anim_sources |= AnimSource::VIRTUAL_FILL; }
         self.animating = (animating && self.time_scale > 0.0) || filling;
-        #[cfg(all(feature = "dev", debug_assertions))]
-        if self.dev_clock.as_ref().is_some_and(|clock| clock.paused) { self.animating = false; }
         if !open_urls.is_empty() { self.open_urls(open_urls); }
         self.animating
     }

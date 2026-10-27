@@ -3,8 +3,8 @@
 //! input, scroll viewports, growth stacks, streaming reveals, themes as data, and headless agent
 //! tooling.
 
-#[cfg(all(target_arch = "wasm32", any(feature = "hot", feature = "dev", feature = "native-file-dialog")))]
-compile_error!("web does not support Rune's hot, dev, or native-file-dialog features; disable them for wasm32");
+#[cfg(all(target_arch = "wasm32", any(feature = "hot", feature = "native-file-dialog")))]
+compile_error!("web does not support Rune's hot or native-file-dialog features; disable them for wasm32");
 
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
 mod activation;
@@ -12,29 +12,8 @@ mod app;
 pub mod time;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
-#[cfg(all(feature = "dev", debug_assertions))]
-mod dev_clock;
-#[cfg(all(feature = "dev", debug_assertions))]
-pub mod dev;
-
-/// Live dev value with a default at the call site. Release builds expand to the default alone.
-#[cfg(all(feature = "dev", debug_assertions))]
-#[macro_export]
-macro_rules! tune {
-    ($key:expr, $default:expr) => { $crate::dev::tune($key, $default, None) };
-    ($key:expr, $default:expr, $min:expr, $max:expr, $step:expr) => {
-        $crate::dev::tune($key, $default, Some([$min, $max, $step]))
-    };
-}
-#[cfg(not(all(feature = "dev", debug_assertions)))]
-#[macro_export]
-macro_rules! tune {
-    ($key:expr, $default:expr $(, $min:expr, $max:expr, $step:expr)?) => { $default };
-}
-
 /// The logical clock a scene fn (`AppSpec::scenes`) builds its state against. `--scene` starts
-/// at time zero; the dev panel's state picker passes the running clock (`poll`'s `now`) and the
-/// last frame's animation dt, scaled by the panel's speed.
+/// at time zero.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct SceneClock {
@@ -42,13 +21,15 @@ pub struct SceneClock {
     pub dt: f64,
 }
 
+thread_local! {
+    static SCENE_CLOCK: std::cell::Cell<SceneClock> = const { std::cell::Cell::new(SceneClock { now: 0.0, dt: 0.0 }) };
+}
+
 /// Readable from scene fns, `AppSpec::init` and `AppSpec::setup`; zero anywhere else.
 pub fn scene_clock() -> SceneClock {
-    #[cfg(all(feature = "dev", debug_assertions))]
-    return dev::scene_clock();
-    #[cfg(not(all(feature = "dev", debug_assertions)))]
-    SceneClock::default()
+    SCENE_CLOCK.get()
 }
+
 
 mod shortcuts;
 pub use shortcuts::{PhysicalKeyCode, Shortcut, ShortcutError, ShortcutId, modifier_keycaps};

@@ -187,7 +187,5 @@ fn main() {
             ..AppSpec::new("Rune Lab", (1320.0, 800.0), Lab::new, ui::view)
         },
     ).compositor(gfx::LabGfx::default()).modifier_keys();
-    #[cfg(all(feature = "dev", debug_assertions))]
-    let app = app.dev_panel(rune::dev::Config { motion_blur: true, ..Default::default() });
     app.run();
 }

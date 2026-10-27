@@ -102,8 +102,6 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn rests(&self) -> bool {
-        #[cfg(all(feature = "dev", debug_assertions))]
-        if self.dev.is_some() || self.dev_clock.is_some() { return false; }
         #[cfg(feature = "hot")]
         if self.hot.is_some() { return false; }
         !self.animating && !self.stale() && !self.settle && self.loop_wake.is_none() && self.window_frame.is_none()

@@ -27,8 +27,7 @@
 //! - **`Cx` reads.** `Cx::layout` and `Cx::caret` called inside the closure are recorded with
 //!   what they returned. A reuse counts them as read again, so the view still re-runs when they
 //!   move, and builds again when one returns something else. They needn't be in `version`.
-//! - **Hot reload** (`rune/hot`) and dev-panel tunables drop every cached subtree, so new code
-//!   or a new value always builds.
+//! - **Hot reload** (`rune/hot`) drops every cached subtree, so new code always builds.
 //! - **Virtual rows** that scroll out keep their cached subtree as long as the view still
 //!   creates them (virtualized rows always are); scrolling back in mounts it again without a
 //!   build. A memo the view stops creating is dropped once the commit that stopped creating it
@@ -143,7 +142,7 @@ pub(crate) struct MemoCache {
 }
 
 impl MemoCache {
-    #[cfg_attr(not(any(test, feature = "hot", all(feature = "dev", debug_assertions))), expect(dead_code))]
+    #[cfg_attr(not(any(test, feature = "hot")), expect(dead_code))]
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
     }

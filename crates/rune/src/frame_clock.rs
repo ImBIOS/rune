@@ -48,9 +48,9 @@ pub(crate) fn split(gap: f64, running: bool) -> Step {
 }
 
 /// Steps `rt` by a frame `gap` seconds after the last, for hosts without presentation times
-/// (the hot loop, hidden dev frames). Without a wall clock, timers and poll still see the
+/// (the hot loop). Without a wall clock, timers and poll still see the
 /// whole gap.
-#[cfg(any(test, feature = "hot", all(feature = "dev", debug_assertions)))]
+#[cfg(any(test, feature = "hot"))]
 pub(crate) fn advance_by<S: 'static>(rt: &mut Runtime<S>, gap: f64) -> bool {
     let step = split(gap, rt.animating);
     rt.clock += (gap - step.total()).max(0.0);

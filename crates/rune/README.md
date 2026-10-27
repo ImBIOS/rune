@@ -477,8 +477,7 @@ app.run();
   Space; macOS and X11 report covering, Wayland neither covering nor minimizing) runs updates, `poll`, `wake_after` timers, `on_close` and queued
   input as usual, but not its view or layout, and draws nothing. The frame that shows it again
   builds once with the latest state, with motion already landed where it would have ended. A
-  window any part of which shows draws as usual. The dev panel's tree and headless runs always
-  see a current tree.
+  window any part of which shows draws as usual. Headless runs always see a current tree.
 - Handlers ask the shell with `Tx::close_window()`, `Tx::minimize()` and `Tx::quit()` (quit wins,
   and either wins over minimize). Minimize does nothing for a hidden window, a panel, a launcher,
   an overlay, a borderless window or a window that can't minimize (debug builds say so).

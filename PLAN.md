@@ -30,7 +30,7 @@ Slint.
 | Animation | Render thread owns the presented tree; every property is an analytic spring track (duration + bounce, SwiftUI's formula) that retargets with velocity | Animating through view re-renders on the main thread |
 | Accessibility | AccessKit, and the same tree is the agent inspector's tree | Own a11y bridges |
 | Shells | winit to start (the prototype runs on it); own thin shells per platform (borrowing from Zed's Apache-2.0 `gpui_macos`/`gpui_windows`/`gpui_linux`/`gpui_ios`/`gpui_web`) as soon as text input lands, because winit's IME is incomplete | winit forever, SDL3 |
-| Hot reload | Tokens, knobs and live literals with no rebuild (≤ 100 ms), subsecond hot-patching for structural Rust edits on Mac (~1 s measured, goal 300 ms), **split-process dev mode** for the iPhone (renderer on the phone, app code on the Mac) | A view DSL interpreter, code loading on the device |
+| Hot reload | Tokens and live literals with no rebuild (≤ 100 ms), subsecond hot-patching for structural Rust edits on Mac (~1 s measured, goal 300 ms), **split-process dev mode** for the iPhone (renderer on the phone, app code on the Mac) | A view DSL interpreter, code loading on the device |
 | Platform order | macOS + Windows + Linux together (one wgpu backend) → web (docs site, demos) → iOS → Android | |
 
 **Top three risks:** text input and text quality (IME on three desktops, then iOS `UITextInput`), matching
@@ -94,7 +94,7 @@ Kit's fork) under its Apache-2.0 licence.
    - **Comments state invariants and intent for the next agent,** not prose for a human reader.
    - **Perf is measured by counts** (instructions, instances, glyphs, layout nodes, allocations) so gates are exact
      and bisectable; wall-clock numbers come from reserved hardware.
-   - **Prototypes are cheap and throwaway:** live literals, knobs, scenes and hot reload make trying ten variants
+   - **Prototypes are cheap and throwaway:** live literals, scenes, the playground and hot reload make trying ten variants
      faster than debating one.
 
 ## 3. Architecture
@@ -279,7 +279,7 @@ fine for tools, wrong for feel).
 ## 5. Hot reload
 
 Goal: edit to pixels in under 300 ms with state kept, on the Mac and on a connected iPhone. Today that's reachable
-for tokens, knobs, literals and shaders; structural Rust edits measure about a second.
+for tokens, literals and shaders; structural Rust edits measure about a second.
 
 Code loading on a physical iPhone is a dead end for now. Subsecond explicitly excludes physical iOS devices; JIT and
 loading code signed after install aren't available without a debugger; InjectionNext's device support has an
@@ -290,7 +290,7 @@ Views stay plain Rust; there is no separate view language.
 
 | Layer | What changes | How | Target (edit → presented frame) |
 |---|---|---|---|
-| 0. Tokens and knobs | colours, spacing, type, springs, any `Tunable` | token file watched + knobs remote protocol over WebSocket; render thread re-resolves live, in-flight springs retarget | ≤ 50 ms Mac, ≤ 100 ms iPhone |
+| 0. Tokens and knobs | colours, spacing, type, springs, any `Tunable` | token file watched; render thread re-resolves live, in-flight springs retarget | ≤ 50 ms Mac, ≤ 100 ms iPhone |
 | 1. Live literals | any edit that only changes literals in view code (a number, colour, string, spring, enum variant) | Xcode-Previews-style: in dev builds a macro gives each literal in a view function a `file:line:col` id; the watcher re-parses the saved file and, if only literals changed, pushes the new values down the token channel. No compile. | ≤ 100 ms Mac and iPhone |
 | 2. Shaders | Metal/WGSL | rebuild the one pipeline at runtime in dev | ≤ 150 ms |
 | 3. Rust on the Mac | structural edits: view functions, handlers, layout, logic | subsecond hot-patching through `dx` (the same path upstream GPUI now uses); models live outside patched code, so state stays | **measured ~1 s** (989 ms median, S1); goal ≤ 300 ms |
@@ -345,8 +345,8 @@ Agents need to build UI, look at it, and prove it works without a person. Built 
   "wait until idle".
 - **Traces:** motion-trace JSONL from the render thread (no recorder needed), the internal layout linter's rules ported to the layout
   tree, Perfetto/Tracy spans per phase, presented-frame ids.
-- **Tuning:** every `Tunable` publishes knobs `ControlDescriptor`s; the knobs panel drives Mac or iPhone; "copy as
-  code" emits Rust constants.
+- **Auditing:** `App::playground` lists every scene and page inside the running app, live, with light/dark,
+  sizes and reduced motion; tunables are plain constants edited under hot reload.
 - **APIs agents can't misuse:** no notify to forget, no borrows across `await`, explicit keys, errors with fixes
   ("`Text` has no key inside a dynamic list; add `.key(id)`"), `llms.txt`, and examples that are also tests.
 
@@ -357,7 +357,7 @@ mk run [--device iphone] [--split]      # app with hot reload; --split = split-p
 mk scenes / mk snap <scene> [--at 0.25s] # list scenes; render one to PNG + tree JSON, deterministic
 mk inspect <query>                       # e.g. mk inspect 'role=button text~"Stop"' → rects, source, springs
 mk trace <scene> --script tap.json       # motion-trace JSONL + frame timings; mk lint runs motion/layout rules
-mk tune                                  # open the knobs panel for the running app
+mk run --playground [scene]              # open the app in its playground
 mk bench <workload>                      # the perf workloads in §8, with machine manifest
 ```
 
@@ -561,7 +561,7 @@ by Kit on a real window.
 
 **M1 — Theming, gallery, docs site (now).** Rune's token
 schema and theme system, with the OpenCode theme generated from `@opencode/ui` as its first consumer; core tree, Taffy, springs and presence, wgpu renderer (`UberQuad` + atlas text with
-dilation), winit window, scenes, `--snap` headless goldens, inspector, motion traces, knobs. A gallery of the
+dilation), winit window, scenes, `--snap` headless goldens, inspector, motion traces, playground. A gallery of the
 first components with the same names as the web kit, each diffed against its web story. A docs/marketing site that
 explains Rune with headless-rendered stills first and live WebGPU demos once the web build works. The settings demo
 being built now is the seed.

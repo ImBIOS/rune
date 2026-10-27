@@ -22,7 +22,6 @@ members = [
     "examples/lab",
     "examples/video-player",
     "examples/video-tiles",
-    "examples/dev-panel",
     "examples/cursed-settings",
     "examples/drag-out",
     "examples/drop-files",

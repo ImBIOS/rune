@@ -895,8 +895,6 @@ impl<S: 'static> Host<S> {
         let on_focus = app.on_focus;
         let chrome = app.chrome;
         let srgb_blend = app.srgb_blend;
-        #[cfg(all(feature = "dev", debug_assertions))]
-        let dev = app.dev.take();
         let modifier_keys = app.modifier_keys;
         let tab_visits_controls = app.tab_visits_controls;
         let fit_height = app.fit_content_height;
@@ -936,8 +934,6 @@ impl<S: 'static> Host<S> {
         let meter = SurfaceMeter::new(native_handle.key(), native_handle.native.stats.clone());
         rt.surface_stats = Some(meter.shared());
         rt.app_stats = app_stats;
-        #[cfg(all(feature = "dev", debug_assertions))]
-        if let Some(dev) = dev { crate::dev::launch(&mut rt, &spec, dev, waker.clone()); }
         let mut clipboard = crate::clipboard::Client::default();
         clipboard.connect(waker.clone());
         shared.connect(waker.clone());
@@ -2188,15 +2184,6 @@ impl<S: 'static> Host<S> {
         let answered = quiet && ((!stale_before && self.rt.needs_commit()) || self.rt.has_pending_input());
         if quiet { self.clipboard.flush(&mut self.rt); }
         let (changed, quiet) = (changed || answered, quiet && !answered);
-        #[cfg(all(feature = "dev", debug_assertions))]
-        if self.rt.dev.is_some() && self.win.as_ref().is_none_or(|w| !w.visible || w.occluded || w.minimized()) {
-            // A hidden/windowless app still services its dev channel without a GPU or redraw.
-            if self.launcher() && let Some(w) = &self.win { w.window.request_redraw(); }
-            else { self.rt.dev_hidden_frame(); self.shell(event_loop); }
-        }
-        // A dev command may change a shown launcher, which otherwise redraws only for updates.
-        #[cfg(all(feature = "dev", debug_assertions))]
-        let (changed, quiet) = (changed || self.rt.dev.is_some(), quiet && self.rt.dev.is_none());
         // A launcher's cached reveal draws nothing; a hidden one renders its changes hidden,
         // paced (`refresh_hidden`). A covered or minimised one runs them without asking for a
         // frame it wouldn't draw.
@@ -2221,9 +2208,6 @@ impl<S: 'static> Host<S> {
     /// fresh. A minimize waits for a show in the same turn (`shows`). Returns whether it polled.
     fn poll_hidden(&mut self, event_loop: &ActiveEventLoop, shows: bool) -> bool {
         if event_loop.exiting() || self.win.as_ref().is_some_and(|w| w.visible) { return false; }
-        // Its hidden frames already poll.
-        #[cfg(all(feature = "dev", debug_assertions))]
-        if self.rt.dev.is_some() { return false; }
         let changed = self.rt.poll_hidden();
         self.clipboard.flush(&mut self.rt);
         let minimize = shows && std::mem::take(&mut self.rt.minimize_request);
@@ -2246,11 +2230,9 @@ impl<S: 'static> Host<S> {
         render
     }
 
-    /// What a hidden launcher's frame must render as it commits: queued input, drag ends and
-    /// dev commands. Committed without a render, they'd leave a cached frame that looks fresh.
+    /// What a hidden launcher's frame must render as it commits: queued input and drag ends.
+    /// Committed without a render, they'd leave a cached frame that looks fresh.
     fn hidden_launcher_renders(&self) -> bool {
-        #[cfg(all(feature = "dev", debug_assertions))]
-        if self.rt.dev.is_some() { return true; }
         self.rt.has_pending_input() || self.rt.drag_ends_pending()
     }
 
@@ -3138,16 +3120,6 @@ impl<S: 'static> AnyHost for Host<S> {
                 self.shell(event_loop);
             }
         }
-        #[cfg(all(feature = "dev", debug_assertions))]
-        if self.rt.dev_hidden_deadline().is_some_and(|deadline| deadline <= Instant::now()) {
-            if let Some(w) = self.win.as_ref().filter(|w| (self.launcher() || (w.visible && !w.occluded)) && !w.minimized()) {
-                w.window.request_redraw();
-                self.rt.dev_hidden_stop();
-            } else {
-                self.rt.dev_hidden_frame();
-                self.shell(event_loop);
-            }
-        }
     }
 
     fn wake_deadline(&self) -> Option<Instant> {
@@ -3155,8 +3127,6 @@ impl<S: 'static> AnyHost for Host<S> {
         // armed while its redraw waits for that tick would spin the event loop. Without a
         // running link, a timer due sooner than a frame waits a frame (`timer_deadline`).
         let runtime = timer_deadline(&self.rt).filter(|_| !self.win.as_ref().is_some_and(Win::paced));
-        #[cfg(all(feature = "dev", debug_assertions))]
-        let runtime = runtime.into_iter().chain(self.rt.dev_hidden_deadline()).min();
         let win = self.win.as_ref();
         runtime.into_iter()
             .chain(win.and_then(|w| w.first_frame.deadline.map(|(retry, _)| retry)))

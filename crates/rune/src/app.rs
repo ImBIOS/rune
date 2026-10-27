@@ -62,8 +62,6 @@ pub struct App<S: 'static> {
     pub(crate) tab_visits_controls: bool,
     pub(crate) srgb_blend: bool,
     pub(crate) dev_stats: Option<fn() -> String>,
-    #[cfg(all(feature = "dev", debug_assertions))]
-    pub(crate) dev: Option<crate::dev::Config<S>>,
 }
 
 impl<S: 'static> App<S> {
@@ -71,8 +69,6 @@ impl<S: 'static> App<S> {
         let shared: Arc<Shared<S>> = Arc::default();
         shared.shortcuts.named(spec.title);
         App {
-            #[cfg(all(feature = "dev", debug_assertions))]
-            dev: None,
             spec,
             chrome: crate::Chrome::DEFAULT,
             init: None,
@@ -311,16 +307,8 @@ impl<S: 'static> App<S> {
         }
     }
 
-    /// Opt into the knobs remote panel for this debug runtime.
-    #[cfg(all(feature = "dev", debug_assertions))]
-    pub fn dev_panel(mut self, config: crate::dev::Config<S>) -> Self {
-        self.dev = Some(config);
-        self
-    }
-
     /// The app's own counters (memory, caches, queues), shown beside the window's frame stats
-    /// in the dev panel (`App::dev_panel`) and in a native trace's summary. Called at most
-    /// once a frame with the panel open, so keep it cheap. For example, with the `procwatch`
+    /// in a native trace's summary. Keep it cheap. For example, with the `procwatch`
     /// crate: `.dev_stats(|| procwatch::snapshot().map_or_else(String::new, |s| format!("{} MB, {} fds", s.footprint >> 20, s.fds)))`.
     pub fn dev_stats(mut self, stats: fn() -> String) -> Self {
         self.dev_stats = Some(stats);
