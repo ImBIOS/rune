@@ -10,6 +10,7 @@ mod picture_scale;
 mod pointer_drag;
 mod pointer_hit;
 mod scroll_growth;
+mod scroll_hover;
 mod secure_text;
 mod springs;
 mod window_wake;

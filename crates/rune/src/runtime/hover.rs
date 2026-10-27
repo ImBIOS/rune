@@ -106,6 +106,16 @@ impl<S: 'static> Runtime<S> {
         for (path, inside, _) in due { self.report_hover(path, inside); }
     }
 
+    /// A glide the app asked for (`Tx::scroll_to_bottom`, `Tx::scroll_to`) is carrying rows
+    /// under a pointer that hasn't moved since it started. As on macOS, hover waits for the
+    /// pointer to move or the scroll to stop, so the rows passing under it don't flash their
+    /// hover-revealed controls. A hand's wheel or trackpad scroll still re-hovers each frame.
+    pub(super) fn scroll_holds_hover(&self) -> bool {
+        let Some((x, y)) = self.pointer.filter(|_| self.capture.is_none()) else { return false };
+        self.scrolls.iter().any(|(id, s)| s.hover_held && (s.glide.is_some() || s.x.glide.is_some())
+            && self.node_index.get(id).is_some_and(|&i| self.node_contains(i, x, y)))
+    }
+
     pub(super) fn update_interaction(&mut self) -> bool {
         let mut changed = false;
         let captured = self.capture.as_ref().map(|(p, _)| p.as_str()).or(self.secondary_capture.as_deref());

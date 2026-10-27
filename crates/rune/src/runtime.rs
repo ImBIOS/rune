@@ -875,6 +875,8 @@ struct ScrollState {
     /// Velocity of a glide to the bottom (`Tx::scroll_to_bottom`) or to `glide_to`
     /// (`Tx::scroll_to`) while one runs.
     glide: Option<f32>,
+    /// The glide started under a still pointer, which hasn't moved since (see `scroll_holds_hover`).
+    hover_held: bool,
     /// Where a glide goes, when not to the bottom.
     glide_to: Option<f64>,
     /// At-bottom state last sent to `El::on_at_bottom`.
@@ -2469,7 +2471,7 @@ impl<S: 'static> Runtime<S> {
         self.queue.extend(changes);
         // Hit tests read last frame's drawn rects and clips by index. When a commit moved the
         // indices, the build re-evaluates hover from fresh geometry instead.
-        if self.built || self.nodes.iter().map(|n| n.id).eq(self.built_ids.iter().copied()) {
+        if (self.built || self.nodes.iter().map(|n| n.id).eq(self.built_ids.iter().copied())) && !self.scroll_holds_hover() {
             self.update_interaction();
         }
         #[cfg(test)]
@@ -4518,6 +4520,7 @@ impl<S: 'static> Runtime<S> {
                     direct: false,
                     scrolling: false,
                     glide: None,
+                    hover_held: false,
                     glide_to: None,
                     at_bottom: None,
                     far_from_bottom: None,
@@ -4942,7 +4945,7 @@ impl<S: 'static> Runtime<S> {
     /// point the drag last saw has nothing new to report, and its instant transaction would
     /// cut short whatever the press started (a tapped slider's knob mid-spring).
     fn move_pointer(&mut self, x: f32, y: f32, drag_move: bool) {
-        if self.pointer != Some((x, y)) { self.hover_paused = false; }
+        if self.pointer != Some((x, y)) { self.hover_paused = false; self.scrolls.values_mut().for_each(|s| s.hover_held = false); }
         self.pointer = Some((x, y));
         if self.in_viewport(x, y) { self.left_in_capture = false; }
         for &(id, rect) in &self.hits {
@@ -7273,10 +7276,11 @@ impl<S: 'static> Runtime<S> {
         // A moving chip can enter a stationary pointer. Re-evaluate against this frame's
         // geometry without inventing pointer-move or drag events on animation frames.
         let queued = self.queue.len();
-        if let Some((x, y)) = self.pointer { self.refresh_hover(x, y); }
+        let held = self.scroll_holds_hover();
+        if let Some((x, y)) = self.pointer.filter(|_| !held) { self.refresh_hover(x, y); }
         // A live transform can change hover paint with no handler and no running spring.
         // Retarget from the new geometry and schedule the frame that samples that paint.
-        let interaction = self.pointer.is_some() && self.update_interaction();
+        let interaction = self.pointer.is_some() && !held && self.update_interaction();
         self.queue.len() > queued || interaction
     }
 
