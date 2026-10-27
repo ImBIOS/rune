@@ -64,3 +64,19 @@ pub(crate) fn map_key(key: &WKey, m: ModifiersState) -> Option<KeyEvent> {
     };
     Some(KeyEvent { key, mods })
 }
+
+/// The character `event`'s key types under the current layout with no modifiers, for
+/// `Tx::key_base`.
+pub(crate) fn key_base(event: &winit::event::KeyEvent) -> Option<char> {
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    {
+        use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+        match event.key_without_modifiers() {
+            WKey::Character(s) => { let mut c = s.chars(); c.next().filter(|_| c.next().is_none()) }
+            WKey::Named(NamedKey::Space) => Some(' '),
+            _ => None,
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    { let _ = event; None }
+}

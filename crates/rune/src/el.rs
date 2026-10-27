@@ -21,6 +21,7 @@ pub struct Tx {
     pub(crate) shortcut_activation_token: Option<String>,
     pub(crate) key_repeat: bool,
     pub(crate) physical_key: Option<crate::PhysicalKeyCode>,
+    pub(crate) key_base: Option<char>,
     pub(crate) focused: Option<String>,
     pub(crate) instant: bool,
     pub(crate) motion: Option<Spring>,

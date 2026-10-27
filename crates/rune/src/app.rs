@@ -876,7 +876,7 @@ mod tests {
         let cmd = Mods { cmd: true, ..Mods::default() };
         let press = |rt: &mut Runtime<u32>, code, c, then| {
             rt.physical_then(PhysicalInput::Key { key: code, mods: cmd, pressed: true, repeat: false },
-                Some(KeyEvent { key: Key::Command(c), mods: cmd }), Some(then));
+                Some(KeyEvent { key: Key::Command(c), mods: cmd }), None, Some(then));
             rt.frame(0.0);
         };
         let mut rt = Runtime::new(0u32, |_: &u32, _: &mut Cx<u32>| el(), (100.0, 100.0), Env::default());

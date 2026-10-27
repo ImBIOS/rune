@@ -102,6 +102,37 @@ fn a_script_key_with_a_code_reaches_handlers_with_its_physical_key() {
 }
 
 #[test]
+fn a_script_key_with_a_code_reaches_handlers_with_its_unmodified_character() {
+    let script = parse_script(json!([
+        {"type": "key", "name": "å", "alt": true, "code": "a", "base": "a"},
+        {"t": 0.1, "type": "key", "name": "k", "cmd": true, "code": "k"},
+        {"t": 0.2, "type": "key", "name": "&", "cmd": true, "shift": true, "code": "7"},
+        {"t": 0.3, "type": "key", "name": "k", "cmd": true},
+        {"t": 0.4, "type": "key-up", "name": "q", "code": "a"},
+    ]));
+    type Seen = Vec<(Key, Option<char>)>;
+    let view = |_: &Seen, _: &mut crate::Cx<Seen>| crate::el()
+        .on_key_up(|s: &mut Seen, ev, tx| { s.push((ev.key.clone(), tx.key_base())); true });
+    let mut rt = Runtime::new(Seen::new(), view, (100.0, 100.0), Env::default());
+    rt.on_key = Some(|s, ev, tx| { s.push((ev.key.clone(), tx.key_base())); true });
+    for event in script {
+        match event.kind {
+            Kind::Key(k, _) => rt.key(k),
+            Kind::Physical(input) => rt.physical_input(input),
+            kind => assert!(canvas_input(&mut rt, &kind, (0.0, 0.0)), "unexpected {kind:?}"),
+        }
+        rt.frame(0.0);
+    }
+    assert_eq!(rt.state, [
+        (Key::Text("å".into()), Some('a')),
+        (Key::Command('k'), Some('k')),
+        (Key::Command('&'), None),
+        (Key::Command('k'), None),
+        (Key::Text("q".into()), Some('q')),
+    ]);
+}
+
+#[test]
 fn a_script_key_can_be_a_held_keys_repeat() {
     let script = parse_script(json!([
         {"type": "key", "name": "Enter"},

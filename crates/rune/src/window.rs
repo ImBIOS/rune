@@ -34,7 +34,7 @@ use presented::{Presented, composing};
 mod platform_sync;
 use platform_sync::sync_platform;
 mod keys;
-pub(crate) use keys::{map_key, map_mods};
+pub(crate) use keys::{key_base, map_key, map_mods};
 mod event_loop;
 #[cfg(not(target_arch = "wasm32"))]
 pub use event_loop::run;
@@ -3385,7 +3385,7 @@ impl<S: 'static> Host<S> {
                 if let winit::keyboard::PhysicalKey::Code(key) = event.physical_key {
                     redraw = rt.physical_then(crate::PhysicalInput::Key {
                         key, mods: map_mods(self.mods), pressed, repeat: event.repeat,
-                    }, logical, unhandled);
+                    }, logical, key_base(&event), unhandled);
                 } else if let Some(ev) = logical {
                     if !pressed { redraw = rt.key_up(ev); }
                     else if ev.key == Key::Command('v') && rt.accepts_paste() { self.clipboard.read(rt); }

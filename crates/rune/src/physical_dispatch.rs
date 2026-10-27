@@ -1,7 +1,7 @@
 use super::*;
 use crate::{PhysicalInput, PhysicalKeyCode};
 
-pub(super) struct Fallback { key: KeyEvent, unhandled: Option<Unhandled> }
+pub(super) struct Fallback { key: KeyEvent, base: Option<char>, unhandled: Option<Unhandled> }
 
 /// What a window does with a logical key no handler took: close or minimize as its title-bar
 /// button would. A standard ⌘W or ⌘M menu item asks for it, so an app's own binding wins.
@@ -37,23 +37,24 @@ impl<S: 'static> Runtime<S> {
         }
     }
     /// Queue a key press with its physical code and logical key, as a native host sends them
-    /// (a script's `{"type": "key", "code": …}`).
-    pub(crate) fn physical_key_input(&mut self, event: PhysicalInput, key: KeyEvent) {
+    /// (a script's `{"type": "key", "code": …}`), and its `Tx::key_base`.
+    pub(crate) fn physical_key_input(&mut self, event: PhysicalInput, key: KeyEvent, base: Option<char>) {
         self.observe_mods(&event);
-        self.physical_with_fallback(event, Some(key));
+        self.physical_then(event, Some(key), base, None);
     }
     /// Return whether the native host needs to request a frame for this event.
     pub(crate) fn physical_with_fallback(&mut self, event: PhysicalInput, key: Option<KeyEvent>) -> bool {
-        self.physical_then(event, key, None)
+        self.physical_then(event, key, None, None)
     }
-    /// `physical_with_fallback`, and `unhandled` happens when no handler takes the logical key.
-    pub(crate) fn physical_then(&mut self, event: PhysicalInput, key: Option<KeyEvent>, unhandled: Option<Unhandled>) -> bool {
+    /// `physical_with_fallback`, with the key's unmodified character (`Tx::key_base`), and
+    /// `unhandled` happens when no handler takes the logical key.
+    pub(crate) fn physical_then(&mut self, event: PhysicalInput, key: Option<KeyEvent>, base: Option<char>, unhandled: Option<Unhandled>) -> bool {
         if self.cancel_drag_key(&event) { return true; }
         if key.is_none() && matches!(event, PhysicalInput::Modifiers(_) | PhysicalInput::Key { pressed: false, .. }) {
             return self.physical_observation(event);
         }
         if !matches!(event, PhysicalInput::Key { pressed: false, .. }) { self.dismiss_help(); }
-        self.queue.push(Action::Physical(event, key.map(|key| Fallback { key, unhandled })));
+        self.queue.push(Action::Physical(event, key.map(|key| Fallback { key, base, unhandled })));
         true
     }
     /// Modifier/release events have no logical action. When input is already queued,
@@ -133,23 +134,21 @@ impl<S: 'static> Runtime<S> {
         let modifier = self.modifier_dispatch(&event, consumed, tx, &mut live);
         let ran = consumed || modifier | match fallback {
             // A release's logical key, for `on_key_up`.
-            Some(Fallback { key, .. }) if matches!(event, PhysicalInput::Key { pressed: false, .. }) => {
-                let mut one = self.transaction();
-                one.physical_key = code;
+            Some(Fallback { key, base, .. }) if matches!(event, PhysicalInput::Key { pressed: false, .. }) => {
+                let mut one = Tx { physical_key: code, key_base: base, ..self.transaction() };
                 let ran = self.route_key_up(&key, &mut one);
                 fold_live(&mut live, ran, &one);
                 merge(tx, one);
                 ran
             }
-            Some(Fallback { key, unhandled }) => {
+            Some(Fallback { key, base, unhandled }) => {
                 if key.key == crate::Key::Command('v') && self.accepts_paste() {
                     // Capture the target in event order, before another queued click can
                     // change focus. An empty/image clipboard still consumes the command.
                     self.paste_request = Some(self.paste_target());
                     false
                 } else {
-                    let mut one = self.transaction();
-                    one.physical_key = code;
+                    let mut one = Tx { physical_key: code, key_base: base, ..self.transaction() };
                     let ran = self.route_key(&key, repeat, &mut one);
                     let unhandled = unhandled.filter(|_| !ran && !repeat);
                     match unhandled {

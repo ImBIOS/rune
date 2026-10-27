@@ -537,7 +537,7 @@ pub(crate) enum Kind {
     /// The key and whether it is an auto-repeat.
     Key(KeyEvent, bool),
     /// A key press with its physical code (`{"type": "key", "code": …}`), as a native host sends it.
-    PhysicalKey(crate::PhysicalInput, KeyEvent),
+    PhysicalKey(crate::PhysicalInput, KeyEvent, Option<char>),
     Paste(crate::ClipboardContent),
     /// A wheel delta (dx, dy) in points.
     Wheel(f32, f32),
@@ -579,7 +579,7 @@ pub(crate) fn canvas_input<S: 'static>(rt: &mut Runtime<S>, kind: &Kind, (x, y):
         Kind::ButtonDown(b) => rt.button_down(x, y, *b),
         Kind::ButtonUp(b) => rt.button_up(x, y, *b),
         Kind::KeyUp(k) => { rt.key_up(k.clone()); }
-        Kind::PhysicalKey(event, k) => rt.physical_key_input(*event, k.clone()),
+        Kind::PhysicalKey(event, k, base) => rt.physical_key_input(*event, k.clone(), *base),
         _ => return false,
     }
     true
@@ -649,7 +649,7 @@ impl Ev {
             Kind::SecondaryDown => pointer(PointerAction::SecondaryDown),
             Kind::SecondaryUp => pointer(PointerAction::SecondaryUp),
             Kind::Key(key, repeat) => ScriptEvent::Key { key: key.clone(), repeat: *repeat },
-            Kind::PhysicalKey(event, key) => ScriptEvent::Key {
+            Kind::PhysicalKey(event, key, _) => ScriptEvent::Key {
                 key: key.clone(), repeat: matches!(event, crate::PhysicalInput::Key { repeat: true, .. }),
             },
             Kind::Paste(content) if content.is_rich() => ScriptEvent::PasteContent(content.clone()),
@@ -852,15 +852,15 @@ fn parse_script(list: Value) -> Vec<Ev> {
                     key_named(name).unwrap_or_else(|| die(&format!("unknown key {name}")))
                 };
                 let repeat = e["repeat"].as_bool().unwrap_or(false);
-                // `"code"` names the physical key behind a press (`"7"` for `⌘⇧7`), for handlers
-                // that read `Tx::physical_key`; a press comes back up straight after.
+                // `"code"` names a press's physical key (`"7"` for `⌘⇧7`), with a `Tx::key_base`; it comes back up straight after.
                 if let Some(code) = e["code"].as_str() {
                     let code = code.parse::<crate::Shortcut>().unwrap_or_else(|e| die(&e.to_string())).physical_key();
+                    let base = script_key_base(&e, name, mods);
                     let press = |pressed| crate::PhysicalInput::Key { key: code, mods, pressed, repeat: repeat && pressed };
                     if ty == "key-up" {
-                        out.push(Ev { t, kind: Kind::PhysicalKey(press(false), KeyEvent { key, mods }), pos: Pos::Rel(0.0, 0.0) });
+                        out.push(Ev { t, kind: Kind::PhysicalKey(press(false), KeyEvent { key, mods }, base), pos: Pos::Rel(0.0, 0.0) });
                     } else {
-                        out.push(Ev { t, kind: Kind::PhysicalKey(press(true), KeyEvent { key, mods }), pos: Pos::Rel(0.0, 0.0) });
+                        out.push(Ev { t, kind: Kind::PhysicalKey(press(true), KeyEvent { key, mods }, base), pos: Pos::Rel(0.0, 0.0) });
                         out.push(Ev { t, kind: Kind::Physical(press(false)), pos: Pos::Rel(0.0, 0.0) });
                     }
                     continue;
@@ -1352,7 +1352,7 @@ pub(crate) fn straight_alpha(pixels: &mut [u8]) {
 mod eased_input;
 #[path = "tooling/key_names.rs"]
 mod key_names;
-pub(crate) use key_names::key_named;
+pub(crate) use key_names::{key_named, script_key_base};
 #[cfg(test)]
 #[path = "tooling/window_tests.rs"]
 mod window_tests;
@@ -1593,7 +1593,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             }
             if let Some((ov, _)) = overlay.as_mut() {
                 match &e.kind {
-                    Kind::Key(key, _) | Kind::PhysicalKey(_, key) => ov.key(e.t, key),
+                    Kind::Key(key, _) | Kind::PhysicalKey(_, key, _) => ov.key(e.t, key),
                     Kind::Shortcut(chord) => ov.chord(e.t, chord),
                     &Kind::Physical(crate::PhysicalInput::Key { key, mods, pressed: true, .. }) => {
                         if let Ok(chord) = crate::Shortcut::from_physical_key(key, mods) { ov.chord(e.t, &chord) }

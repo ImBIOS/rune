@@ -217,6 +217,10 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   `Key::Command('/')` on a German one. `tx.physical_key()` names the key itself
   (`Some(PhysicalKeyCode::Digit7)` on both), so match shifted shortcuts on it. It is `None` for a
   key with no physical origin: `Runtime::key`, or a script `"key"` without a `"code"`.
+  `tx.key_base()` is the character the key types under the current layout with no modifiers
+  (`Some('a')` for ⌥A, which types `å`), for bindings by letter that follow the layout, as
+  macOS's key bindings do; `None` where winit can't say (the web, iOS) and with no physical
+  origin.
 - **Periodic motion**: `.looping(rune_motion::LoopSpec::opacity(..))` or `LoopSpec::rotation(period)`
   (icon quads). Tracks use animation time, preserve phase when retimed and only request frames
   while visible through ancestor clips. Removal uses the existing spring presence fade. Reduced
@@ -1972,7 +1976,8 @@ $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/d
   `KeyEvent::is_command(' ')` matches both.
   `"code": "7"` (any key name `{"physical": …}` takes) adds the physical key behind a press,
   as a window sends it, for handlers that read `tx.physical_key()`; the key is released right
-  after. `{"physical": "cmd+k"}` reaches only `on_physical_input` handlers. `{"type": "key-up",
+  after. With a `"code"`, `"base": "a"` sets `tx.key_base()`; without it a one-character name
+  pressed without `shift` or `alt` is its own base, lowercased. `{"physical": "cmd+k"}` reaches only `on_physical_input` handlers. `{"type": "key-up",
   "name": " "}` releases a key for `on_key_up`.
 - **Canvas input in scripts**: `{"type": "wheel", "dx": 0, "dy": -40}` is one wheel delta (with
   `cmd` and the other modifiers, `"phase": "began" | "moved" | "ended"` and `"precise"`, true

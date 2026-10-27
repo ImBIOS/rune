@@ -1,5 +1,5 @@
-//! `Tx`'s reads about the key a key handler is seeing: repeat, physical key, modifiers
-//! and the focused element.
+//! `Tx`'s reads about the key a key handler is seeing: repeat, physical key, unmodified
+//! character, modifiers and the focused element.
 
 use crate::Tx;
 
@@ -18,6 +18,16 @@ impl Tx {
     /// `None` for a key with no physical origin (`Runtime::key`, a script's `"key"` without a
     /// `"code"`) and outside key handlers.
     pub fn physical_key(&self) -> Option<crate::PhysicalKeyCode> { self.physical_key }
+
+    /// In a key handler, the character the key types under the current keyboard layout with
+    /// no modifiers held: `'a'` for ⌥A (which arrives as `Key::Text("å")` on a US Mac layout)
+    /// and ⇧A, and `'a'` for AZERTY's A key, which sits where QWERTY's Q does. A binding by
+    /// letter, as macOS's `DefaultKeyBinding.dict` binds ⌥-letters, matches this rather than
+    /// [`Tx::physical_key`], which names where the key sits (`KeyQ` there). `None` off
+    /// macOS, Windows and Linux, for a key that types no single character (arrows, Return),
+    /// for a key with no physical origin (`Runtime::key`, a script's `"key"` without a
+    /// `"code"`) and outside key handlers.
+    pub fn key_base(&self) -> Option<char> { self.key_base }
 
     /// The modifier keys held as this handler runs, so a click can tell Shift-click (extend a
     /// list's selection) and Cmd-click (toggle a row) from a plain one. A key handler reads

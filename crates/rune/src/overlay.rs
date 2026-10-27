@@ -1763,9 +1763,9 @@ impl<T: 'static> AnyHost for Overlay<T> {
                 let pressed = event.state.is_pressed();
                 let fallback = (pressed || self.rt.wants_key_up()).then(|| crate::window::map_key(&event.logical_key, self.mods)).flatten();
                 if let winit::keyboard::PhysicalKey::Code(key) = event.physical_key {
-                    self.dirty |= self.rt.physical_with_fallback(crate::PhysicalInput::Key {
+                    self.dirty |= self.rt.physical_then(crate::PhysicalInput::Key {
                         key, mods: crate::window::map_mods(self.mods), pressed, repeat: event.repeat,
-                    }, fallback);
+                    }, fallback, crate::window::key_base(&event), None);
                 } else if let Some(key) = fallback {
                     if !pressed { self.dirty |= self.rt.key_up(key); }
                     else if event.repeat { self.rt.repeat_key(key); } else { self.rt.key(key); }
