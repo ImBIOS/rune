@@ -97,7 +97,7 @@ fn a_frame_that_draws_the_same_pixels_is_the_same() {
         color_space: Default::default(),
     };
     let mut presented = None;
-    Presented::record(&mut presented, &rt, &config);
+    Presented::record(&mut presented, &rt, &config, false);
     let p = presented.as_ref().unwrap();
 
     // A poll that says it changed state, but the view draws the same.
@@ -141,7 +141,7 @@ fn a_timer_frame_that_draws_the_same_still_draws_while_a_poll_steps() {
         color_space: Default::default(),
     };
     let mut presented = None;
-    Presented::record(&mut presented, &rt, &config);
+    Presented::record(&mut presented, &rt, &config, false);
     let p = presented.as_ref().unwrap();
     let next_tick = Some(Instant::now() + Duration::from_millis(8));
     assert!(p.unchanged(&rt, &config, false, next_tick), "a slow timer leaves the drawable");
@@ -188,4 +188,132 @@ fn launch_frames_hold_two_drawables_until_the_window_rests() {
     let mut launch = LaunchDrawables::cap(&mut config);
     assert_eq!(config.desired_maximum_frame_latency, 1);
     assert_eq!(launch.settle(true, t0), None);
+}
+
+/// The poll's timer: long enough that a stalled test machine never finds a timer due that the
+/// test didn't move the clock to.
+const COMP_PERIOD: Duration = Duration::from_secs(5);
+
+fn still(polls: &mut u32, _: f64, tx: &mut Tx) -> bool { *polls += 1; tx.wake_after(COMP_PERIOD); false }
+fn every_third(polls: &mut u32, _: f64, tx: &mut Tx) -> bool { *polls += 1; tx.wake_after(COMP_PERIOD); *polls % 3 == 0 }
+fn changed(polls: &mut u32, _: f64, tx: &mut Tx) -> bool { *polls += 1; tx.wake_after(COMP_PERIOD); true }
+
+/// A window as the host runs it, with or without a compositor, counting its frames.
+struct CompHost {
+    rt: Runtime<u32>,
+    presented: Option<Presented>,
+    config: wgpu::SurfaceConfiguration,
+    idle: bool,
+    /// A compositor drawing, and whether it animates.
+    comp: Option<bool>,
+    frames: u32,
+}
+
+impl CompHost {
+    /// The first frame draws before `poll` is set, so one timer is armed at a time.
+    fn new(comp: Option<bool>, poll: fn(&mut u32, f64, &mut Tx) -> bool) -> Self {
+        fn view(_: &u32, _: &mut crate::Cx<u32>) -> crate::El { crate::el().key("box").size(20.0, 20.0).fill(crate::Color::WHITE) }
+        let mut rt = Runtime::new(0u32, view, (20.0, 20.0), crate::Env::default());
+        rt.wall_start = Some(Instant::now());
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            width: 20,
+            height: 20,
+            present_mode: wgpu::PresentMode::AutoVsync,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+            color_space: Default::default(),
+        };
+        let mut host = Self { rt, presented: None, config, idle: false, comp, frames: 0 };
+        host.frame(false);
+        host.rt.poll = Some(poll);
+        host.frame(false);
+        host
+    }
+
+    /// As `draw`: a quiet frame (only a timer asked for it) that draws what's on screen presents
+    /// nothing, unless a compositor draws it. Returns whether it presented.
+    fn frame(&mut self, quiet: bool) -> bool {
+        let animating = self.rt.frame(crate::frame_clock::RESUME_STEP);
+        if quiet && self.comp.is_none() && self.presented.as_ref().is_some_and(|p| p.unchanged(&self.rt, &self.config, animating, None)) {
+            return false;
+        }
+        let moving = animating || self.comp == Some(true);
+        self.idle = Presented::settle(&mut self.presented, &self.rt, &self.config, moving, None, false, self.comp.is_some());
+        self.frames += 1;
+        true
+    }
+
+    /// As `new_events` at a due timer: a resting window polls first and asks for a frame only
+    /// when that poll changed something. Returns whether it presented.
+    fn timer_wake(&mut self) -> bool {
+        let due = self.rt.wake_deadline().expect("a timer is armed");
+        let now = self.rt.wall_start.unwrap().elapsed().as_secs_f64();
+        self.rt.wall_start = self.rt.wall_start.map(|t| t - Duration::from_secs_f64((due - now).max(0.0) + 1e-4));
+        let rests = self.idle && self.presented.is_some();
+        let frame = match rests.then(|| self.rt.resting_wake()).flatten() {
+            Some(stale) => {
+                let frame = stale || self.rt.stale();
+                self.rt.resting_wake_frame(frame);
+                frame
+            }
+            None => true,
+        };
+        frame && self.frame(true)
+    }
+}
+
+#[test]
+fn a_still_compositor_s_window_rests_and_polls_its_timers_first() {
+    let mut host = CompHost::new(Some(false), still);
+    assert!(host.idle && host.presented.is_some(), "a still compositor lets the window rest");
+    let (frames, commits, polls) = (host.frames, host.rt.stats.commits, host.rt.state);
+    for _ in 0..8 { assert!(!host.timer_wake(), "a poll that returns false builds and presents nothing"); }
+    assert_eq!(host.frames, frames);
+    assert_eq!(host.rt.stats.commits, commits, "and runs no view");
+    assert_eq!(host.rt.state, polls + 8, "each timer still polls");
+}
+
+#[test]
+fn a_still_compositor_s_poll_that_changes_something_gets_one_frame() {
+    let mut host = CompHost::new(Some(false), every_third);
+    let (frames, polls) = (host.frames, host.rt.state);
+    let drew = (0..6).filter(|_| host.timer_wake()).count();
+    let changes = (polls + 1..=polls + 6).filter(|p| p % 3 == 0).count();
+    assert_eq!(drew, changes, "one frame for each poll that returns true");
+    assert_eq!(host.frames - frames, changes as u32);
+    assert_eq!(host.rt.state, polls + 6, "one poll a wake: the frame doesn't poll again");
+}
+
+#[test]
+fn an_animating_compositor_draws_every_frame() {
+    let mut host = CompHost::new(Some(true), still);
+    assert!(!host.idle && host.presented.is_none(), "an animating compositor never rests");
+    let (frames, polls) = (host.frames, host.rt.state);
+    for _ in 0..5 { assert!(host.timer_wake()); }
+    assert_eq!(host.frames - frames, 5);
+    assert_eq!(host.rt.state, polls + 5, "the frames poll");
+}
+
+#[test]
+fn a_compositor_s_frame_never_counts_as_unchanged() {
+    let mut host = CompHost::new(Some(false), still);
+    host.rt.update(|_, _| {});
+    host.rt.frame(crate::frame_clock::RESUME_STEP);
+    let p = host.presented.as_ref().unwrap();
+    assert!(!p.same(&host.rt, &host.config), "the same instances may composite differently");
+    assert!(!p.unchanged(&host.rt, &host.config, false, None));
+    // A changed poll's quiet frame presents.
+    let mut host = CompHost::new(Some(false), changed);
+    assert!(host.idle && host.presented.is_some());
+    assert!(host.timer_wake(), "a poll that changed nothing on screen still presents a compositor's frame");
+
+    // Without a compositor, the same frame presents nothing.
+    let mut host = CompHost::new(None, still);
+    host.rt.poll = Some(changed);
+    let frames = host.frames;
+    assert!(!host.timer_wake());
+    assert_eq!(host.frames, frames);
 }

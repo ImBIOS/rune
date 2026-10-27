@@ -17,7 +17,8 @@ pub trait Compositor<S: 'static>: 'static {
     fn render(&mut self, f: &mut Frame<'_, S>);
 
     /// True while something the compositor draws moves on its own: the window keeps its display
-    /// link running. False lets it go idle (no frames at rest).
+    /// link running. False lets it go idle (no frames at rest) and rest: a due `wake_after`
+    /// runs `poll` alone and draws only when that poll changed something.
     fn animating(&self) -> bool {
         false
     }

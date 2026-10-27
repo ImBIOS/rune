@@ -2981,9 +2981,8 @@ impl<S: 'static> Host<S> {
         // A poll asking for the next frame (`wake_after(Duration::ZERO)`) keeps a running display
         // link going; without one its timer waits a frame in `wake_deadline`.
         let next_tick = l.next_tick(now).filter(|_| !hidden);
-        self.idle = !(animating || rt.has_pending_input() || rt.live_pending() || rt.window_frame.is_some() || self.frame_anim.is_some()
-            || timer_wants_frame(rt, next_tick));
-        if self.idle && !hidden && self.comp.is_none() { Presented::record(&mut l.presented, rt, &l.config) } else { l.presented = None }
+        // A still compositor rests too: its timers poll first, though its frames never count as unchanged.
+        self.idle = Presented::settle(&mut l.presented, rt, &l.config, animating || self.frame_anim.is_some(), next_tick, hidden, self.comp.is_some());
         #[cfg(target_os = "macos")]
         if !hidden && let Some(latency) = l.launch_drawables.settle(self.idle, now) {
             l.config.desired_maximum_frame_latency = latency;

@@ -2,6 +2,8 @@ use crate::runtime::Runtime;
 
 /// What an idle window's last frame drew. A timer that wakes the window builds a frame before
 /// taking a drawable; when it would draw these same pixels, nothing is acquired or presented.
+/// A compositor's frame lets the window rest but never counts as the same: it may draw
+/// differently from the same instances.
 pub(super) struct Presented {
     instances: Vec<crate::render::Instance>,
     clear: [f32; 4],
@@ -10,18 +12,28 @@ pub(super) struct Presented {
     srgb: bool,
     scale: f32,
     transparent: bool,
+    composed: bool,
 }
 
 impl Presented {
-    pub(super) fn record<S: 'static>(this: &mut Option<Self>, rt: &Runtime<S>, config: &wgpu::SurfaceConfiguration) {
+    /// After a shown frame (`hidden` false): whether the window goes idle, and the frame it rests
+    /// on until anything asks for another. `moving`: motion, a compositor or a window frame in
+    /// flight; `next_tick`: the running display link's next tick.
+    pub(super) fn settle<S: 'static>(this: &mut Option<Self>, rt: &Runtime<S>, config: &wgpu::SurfaceConfiguration,
+        moving: bool, next_tick: Option<crate::time::Instant>, hidden: bool, composed: bool) -> bool {
+        let idle = !(moving || rt.has_pending_input() || rt.live_pending() || rt.window_frame.is_some()
+            || super::timer_wants_frame(rt, next_tick));
+        if idle && !hidden { Self::record(this, rt, config, composed) } else { *this = None }
+        idle
+    }
+
+    pub(super) fn record<S: 'static>(this: &mut Option<Self>, rt: &Runtime<S>, config: &wgpu::SurfaceConfiguration, composed: bool) {
         let (clear, size, srgb, scale, transparent) = (rt.clear_color(), (config.width, config.height), rt.srgb_blend(), rt.env.scale, rt.transparent);
-        match this {
-            Some(p) => {
-                p.instances.clone_from(&rt.instances);
-                (p.clear, p.size, p.format, p.srgb, p.scale, p.transparent) = (clear, size, config.format, srgb, scale, transparent);
-            }
-            None => *this = Some(Self { instances: rt.instances.clone(), clear, size, format: config.format, srgb, scale, transparent }),
-        }
+        let p = this.get_or_insert_with(|| Self {
+            instances: Vec::new(), clear, size, format: config.format, srgb, scale, transparent, composed,
+        });
+        if composed { p.instances.clear() } else { p.instances.clone_from(&rt.instances) }
+        (p.clear, p.size, p.format, p.srgb, p.scale, p.transparent, p.composed) = (clear, size, config.format, srgb, scale, transparent, composed);
     }
 
     /// Whether a timer frame `rt` built before taking a drawable can go without one: nothing
@@ -35,10 +47,10 @@ impl Presented {
 
     /// Whether `rt`'s built frame draws what this one did: the same instances into the same
     /// surface, with no glyph or image upload waiting, and nothing drawn outside the instances
-    /// (`SurfaceDraw` content, native materials).
+    /// (a compositor, `SurfaceDraw` content, native materials).
     pub(super) fn same<S: 'static>(&self, rt: &Runtime<S>, config: &wgpu::SurfaceConfiguration) -> bool {
         let atlas = &rt.text.atlas;
-        self.size == (config.width, config.height) && self.format == config.format && self.srgb == rt.srgb_blend()
+        !self.composed && self.size == (config.width, config.height) && self.format == config.format && self.srgb == rt.srgb_blend()
             && self.scale == rt.env.scale && self.clear == rt.clear_color() && self.transparent == rt.transparent
             && rt.surfaces.is_empty() && rt.materials.is_empty()
             && atlas.dirty.is_none() && atlas.pages.iter().all(|p| p.dirty.is_none())
