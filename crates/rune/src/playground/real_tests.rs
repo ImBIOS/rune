@@ -68,3 +68,40 @@ fn keep_copies_the_stage_back_before_a_replay_a_switch_and_back() {
     assert_eq!(rt.state.count, 8, "and on Back");
     assert_eq!(shows(&rt, "count"), "count 8");
 }
+
+#[test]
+fn a_fresh_stage_shares_the_real_waker_and_a_wake_from_another_thread_reaches_its_poll() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut spec = AppSpec::new("playground", (800.0, 500.0), Real::default, view);
+    spec.scenes = SCENES;
+    spec.setup = Some(|s, waker| {
+        s.waker = Some(waker);
+        s.inbox = Some(Arc::default());
+    });
+    spec.poll = Some(|s, _, _| {
+        let got: Vec<u32> = s.inbox.as_ref().map(|i| i.lock().unwrap().drain(..).collect()).unwrap_or_default();
+        s.count += got.iter().sum::<u32>();
+        !got.is_empty()
+    });
+    // The stage keeps the real waker and makes its own inbox, as a worker it starts would.
+    let fresh = base().fresh(|real| Real { waker: real.waker.clone(), inbox: Some(Arc::default()), ..Real::default() });
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let counted = wakes.clone();
+    let mut rt = crate::tooling::runtime_for(&spec, (spec.init)(), spec.size, Env::new(false, 1.0), Arc::new(move || { counted.fetch_add(1, Ordering::SeqCst); }));
+    attach(&mut rt, Some(fresh), &spec, Some(Some("Still".into())), false);
+    rt.frame(0.0);
+    rt.frame(DT);
+    let stage = &rt.playground.as_ref().unwrap().scene.as_ref().expect("a scene's stage").state;
+    let (waker, inbox) = (stage.waker.clone().expect("the real waker"), stage.inbox.clone().unwrap());
+    let before = wakes.load(Ordering::SeqCst);
+    std::thread::spawn(move || {
+        inbox.lock().unwrap().push(41);
+        waker();
+    })
+    .join()
+    .unwrap();
+    assert_eq!(wakes.load(Ordering::SeqCst), before + 1, "the wake reached the window's waker");
+    rt.frame(DT);
+    assert_eq!(shows(&rt, "count"), "count 41", "and the next frame's poll of the stage took it");
+    assert_eq!(rt.state.count, 0, "the real state's inbox is its own");
+}

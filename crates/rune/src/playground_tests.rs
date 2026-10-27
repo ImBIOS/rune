@@ -13,6 +13,8 @@ struct Real {
     pastes: Vec<String>,
     drops: usize,
     focus: Vec<bool>,
+    waker: Option<crate::Waker>,
+    inbox: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
 }
 
 fn view(s: &Real, _: &mut Cx<Real>) -> El {

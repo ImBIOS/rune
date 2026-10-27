@@ -140,7 +140,8 @@ impl<S: 'static> Playground<S> {
     }
 
     /// Scenes start from `fresh(&real)` rather than `AppSpec::init`, then their scene fn applies:
-    /// `|real| real.clone()` previews them on a copy of the app as it is, its handles included.
+    /// `|real| real.clone()` previews them on a copy of the app as it is, its waker and handles
+    /// included: a wake from another thread polls the stage.
     pub fn fresh(mut self, fresh: fn(&S) -> S) -> Self {
         self.fresh = Some(fresh);
         self
