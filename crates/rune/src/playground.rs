@@ -28,6 +28,7 @@ mod nav;
 mod story;
 mod view;
 
+use nav::Row;
 pub use story::Story;
 use story::OwnStory;
 
@@ -141,7 +142,9 @@ impl<X> Stage<X> {
 /// isn't used), polled by `AppSpec::poll` but never given `AppSpec::setup`, so it gets no
 /// waker and starts nothing. Back drops every stage state and returns to the real one.
 ///
-/// Keys, while it's open: ↑↓ or J K move between stories (⌘↑ ⌘↓ to the first and last), R
+/// Keys, while it's open: ↑↓ move along the list, group headers included, and J K between
+/// stories (⌘↑ ⌘↓ to the first and last). On a header, ← folds its group, → unfolds it and ↵
+/// toggles it, as a click on it does; groups stay folded until the playground closes. R
 /// replays the story from the start, a trigger's letter runs it, → or Tab move into the side
 /// column (↑↓ inside it, Tab or Esc back out), and Esc or ⌘⇧D go back to the app. They come
 /// before the stage's `AppSpec::on_key`, except Esc, which the stage gets first. A focused
@@ -272,6 +275,10 @@ pub(crate) enum Request {
     Dark(bool),
     Size(usize),
     ReduceMotion(bool),
+    /// A group's header becomes the list's selection; the stage keeps its story.
+    Header(&'static str),
+    /// Folds a group (`Some(true)`), unfolds it, or toggles it (`None`).
+    Fold(&'static str, Option<bool>),
 }
 
 impl Request {
@@ -315,6 +322,10 @@ pub(crate) struct Live<S: 'static> {
     open: bool,
     /// Into scenes then pages.
     selected: usize,
+    /// A group header is the list's selection rather than `selected`'s row.
+    header: Option<&'static str>,
+    /// Groups whose stories the list hides, until the playground closes.
+    folded: Vec<&'static str>,
     scene: Option<Box<Stage<S>>>,
     owned: Vec<Option<Box<dyn Any>>>,
     controls: Controls,
@@ -384,6 +395,8 @@ impl<S: 'static> Live<S> {
             order: Vec::new(),
             open: false,
             selected: 0,
+            header: None,
+            folded: Vec::new(),
             scene: None,
             controls: Controls,
             dark: None,
@@ -504,6 +517,7 @@ impl<S: 'static> Live<S> {
                     let at = name.as_deref().and_then(|n| self.find(n));
                     if !self.open || at.is_some() {
                         self.open = true;
+                        if let Some(i) = at { self.reveal(i); }
                         self.select(at.unwrap_or(self.selected));
                     }
                 }
@@ -513,7 +527,10 @@ impl<S: 'static> Live<S> {
                     self.open = true;
                     self.select(self.selected);
                 }
-                Request::Select(i) => self.select(i),
+                Request::Select(i) => {
+                    self.reveal(i);
+                    self.select(i);
+                }
                 Request::Replay if self.is_live_page() => {}
                 Request::Replay => {
                     if let Some((i, _)) = self.page() { self.owned[i] = None; }
@@ -524,13 +541,39 @@ impl<S: 'static> Live<S> {
                 Request::Dark(dark) => self.dark = Some(dark),
                 Request::Size(i) => self.size = i,
                 Request::ReduceMotion(on) => self.reduce_motion = on,
+                Request::Header(group) => self.header = Some(group),
+                Request::Fold(group, fold) => self.fold(group, fold),
             }
         }
         changed
     }
 
+    fn fold(&mut self, group: &'static str, fold: Option<bool>) {
+        let folded = self.folded.contains(&group);
+        match fold.unwrap_or(!folded) {
+            true if !folded => {
+                self.folded.push(group);
+                // The selected story's row goes, so its header takes the selection.
+                if self.header.is_none() && self.selected < self.count() && self.group(self.selected) == group { self.header = Some(group); }
+            }
+            false => self.folded.retain(|g| *g != group),
+            true => {}
+        }
+    }
+
+    /// Story `i`'s row becomes the list's selection, its group unfolded.
+    fn reveal(&mut self, i: usize) {
+        self.header = None;
+        if i < self.count() {
+            let group = self.group(i);
+            self.folded.retain(|g| *g != group);
+        }
+    }
+
     fn close(&mut self) {
         self.open = false;
+        self.header = None;
+        self.folded.clear();
         self.scene = None;
         self.owned.iter_mut().for_each(|o| *o = None);
     }

@@ -60,22 +60,21 @@ impl<S: 'static> Live<S> {
         let drag = (band > 0.0).then(|| el().w(SIDEBAR).h(band).window_drag());
         // A scroll measures its first child, so the rows go in one content column.
         let mut list = col().key("playground-rows").w_full();
-        let mut group = None;
-        for (n, &i) in self.order.iter().enumerate() {
-            if group != Some(self.group(i)) {
-                group = Some(self.group(i));
-                list = list.child(text(self.group(i)).key(format!("playground-group-{i}")).font(type_::SECTION).color(t.text_secondary)
-                    .px(8.0).pt(if n == 0 { 4.0 } else { 16.0 }).pb(4.0));
-            }
-            let on = i == self.selected;
-            let name = self.name(i);
+        for (n, entry) in self.rows().into_iter().enumerate() {
+            let (on, name, item) = match entry {
+                Row::Header(group, i) => {
+                    list = list.child(self.header_row(t, dark, group, i, n == 0));
+                    continue;
+                }
+                Row::Story(i) => (i == self.selected && self.header.is_none(), self.name(i), i),
+            };
             list = list.child(
-                row().key(format!("playground-item-{i}")).w_full().h(ROW).px(8.0).center_y().radius(radius::MD)
+                row().key(format!("playground-item-{item}")).w_full().h(ROW).px(8.0).center_y().radius(radius::MD)
                     .fill(if on { selected(t, dark) } else { Color::TRANSPARENT })
                     .hover(if on { selected(t, dark) } else { t.hover })
-                    .child(text(name).font(type_::BODY).color(if on { t.text } else { t.text_secondary }).truncate())
+                    .child(text(name).font(type_::BODY).color(if on || item == self.selected { t.text } else { t.text_secondary }).truncate())
                     .role("button").label(name)
-                    .on_press_tx(move |_: &mut Controls, tx: &mut Tx| tx.playground.push(Request::Select(i))),
+                    .on_press_tx(move |_: &mut Controls, tx: &mut Tx| tx.playground.push(Request::Select(item))),
             );
         }
         if self.order.is_empty() {
@@ -88,6 +87,24 @@ impl<S: 'static> Live<S> {
             .child(header)
             .child(list)
             .child(self.stage_controls(t, dark))
+    }
+
+    /// A group's header, keyed by its first story: a press selects it and folds or unfolds it.
+    fn header_row(&self, t: Theme, dark: bool, group: &'static str, first: usize, top: bool) -> El {
+        let on = self.header == Some(group);
+        let folded = self.folded.contains(&group);
+        let row = row().key(format!("playground-group-{first}")).w_full().h(24.0).px(8.0).gap(4.0).center_y().radius(radius::MD)
+            .fill(if on { selected(t, dark) } else { Color::TRANSPARENT })
+            .hover(if on { selected(t, dark) } else { t.hover })
+            .child(text(group).font(type_::SECTION).color(if on { t.text } else { t.text_secondary }).truncate())
+            .child(spacer())
+            .child(icon(if folded { &CHEVRON_RIGHT } else { &CHEVRON_DOWN }, 14.0).color(t.text_secondary))
+            .role("button").label(if folded { format!("Show {group}") } else { format!("Hide {group}") })
+            .on_press_tx(move |_: &mut Controls, tx: &mut Tx| {
+                tx.playground.push(Request::Header(group));
+                tx.playground.push(Request::Fold(group, None));
+            });
+        col().w_full().pt(if top { 2.0 } else { 10.0 }).pb(2.0).child(row)
     }
 
     /// Along the sidebar's foot: the stage's size, motion and appearance.
@@ -265,6 +282,12 @@ static GRID: Icon = Icon {
     name: "playground-grid",
     view: 12.0,
     body: r#"<rect x="1" y="1" width="4" height="4" rx="1" fill="currentColor"/><rect x="7" y="1" width="4" height="4" rx="1" fill="currentColor"/><rect x="1" y="7" width="4" height="4" rx="1" fill="currentColor"/><rect x="7" y="7" width="4" height="4" rx="1" fill="currentColor"/>"#,
+};
+
+static CHEVRON_RIGHT: Icon = Icon {
+    name: "playground-chevron-right",
+    view: 16.0,
+    body: r#"<path d="M6.75 5L9.75 8L6.75 11" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>"#,
 };
 
 static CHEVRON_DOWN: Icon = Icon {

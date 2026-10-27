@@ -26,18 +26,57 @@ impl<S: 'static> Live<S> {
             return Nav::Request(if c == 'r' { Request::Replay } else { Request::Trigger(c) });
         }
         if in_side { return Nav::Pass; }
-        let at = self.order.iter().position(|&i| i == self.selected).unwrap_or(0);
-        let n = self.order.len();
-        if n == 0 { return Nav::Pass; }
-        let to = match (&ev.key, letter) {
-            (Key::Up, _) if m.cmd => 0,
-            (Key::Down, _) if m.cmd => n - 1,
-            (_, _) if m.cmd => return Nav::Pass,
-            (Key::Up, _) | (_, Some('k')) => (at + n - 1) % n,
-            (Key::Down, _) | (_, Some('j')) => (at + 1) % n,
-            (Key::Right, _) | (Key::Tab, _) if !m.shift => return Nav::IntoSide,
+        let rows = self.rows();
+        let Some(&last) = rows.iter().rev().find(|r| matches!(r, Row::Story(_))) else { return Nav::Pass };
+        let at = rows.iter().position(|r| match (*r, self.header) {
+            (Row::Header(g, _), Some(h)) => g == h,
+            (Row::Story(i), None) => i == self.selected,
+            _ => false,
+        });
+        let n = rows.len();
+        let to = match (&ev.key, letter, self.header) {
+            (Key::Up, _, _) if m.cmd => rows.iter().copied().find(|r| matches!(r, Row::Story(_))).unwrap_or(last),
+            (Key::Down, _, _) if m.cmd => last,
+            (_, _, _) if m.cmd => return Nav::Pass,
+            (Key::Up, _, _) => rows[at.map_or(0, |a| (a + n - 1) % n)],
+            (Key::Down, _, _) => rows[at.map_or(0, |a| (a + 1) % n)],
+            // J and K skip the headers.
+            (_, Some(c @ ('j' | 'k')), _) => {
+                let step = if c == 'j' { 1 } else { n - 1 };
+                let from = at.unwrap_or(0);
+                (1..=n).map(|k| rows[(from + k * step) % n]).find(|r| matches!(r, Row::Story(_))).unwrap_or(last)
+            }
+            (Key::Left, _, Some(g)) => return Nav::Request(Request::Fold(g, Some(true))),
+            (Key::Right, _, Some(g)) if !m.shift => return Nav::Request(Request::Fold(g, Some(false))),
+            (Key::Enter, _, Some(g)) => return Nav::Request(Request::Fold(g, None)),
+            (Key::Right, _, None) | (Key::Tab, _, _) if !m.shift => return Nav::IntoSide,
             _ => return Nav::Pass,
         };
-        Nav::Request(Request::Select(self.order[to]))
+        Nav::Request(match to {
+            Row::Header(g, _) => Request::Header(g),
+            Row::Story(i) => Request::Select(i),
+        })
     }
+
+    /// The list's rows: each group's header, then its stories unless it's folded.
+    pub(super) fn rows(&self) -> Vec<Row> {
+        let mut rows = Vec::new();
+        let mut current = None;
+        for &i in &self.order {
+            let group = self.group(i);
+            if current != Some(group) {
+                current = Some(group);
+                rows.push(Row::Header(group, i));
+            }
+            if !self.folded.contains(&group) { rows.push(Row::Story(i)); }
+        }
+        rows
+    }
+}
+
+/// A row of the story list. A header carries its first story, which keys it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Row {
+    Header(&'static str, usize),
+    Story(usize),
 }

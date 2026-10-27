@@ -121,6 +121,10 @@ fn selected(rt: &Runtime<Real>) -> usize {
     rt.playground.as_ref().map_or(usize::MAX, |p| p.selected)
 }
 
+fn header(rt: &Runtime<Real>) -> Option<&'static str> {
+    rt.playground.as_ref().and_then(|p| p.header)
+}
+
 fn focused(rt: &Runtime<Real>) -> Option<String> {
     rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key)
 }
@@ -257,20 +261,23 @@ fn keys_walk_the_stories_in_their_groups_order() {
     for (i, group) in [(0, true), (1, false), (2, true), (5, false), (3, true), (4, true)] {
         assert_eq!(find(&rt, &format!("playground-group-{i}")).is_some(), group, "story {i}");
     }
-    let walk = [(Key::Down, 1), (Key::Down, 2), (Key::Down, 5), (Key::Down, 3), (Key::Up, 5)];
-    for (key, at) in walk {
+    // Headers are rows too; on one, the stage keeps its story.
+    let walk = [(Key::Down, 1, None), (Key::Down, 1, Some("Motion")), (Key::Down, 2, None), (Key::Down, 5, None), (Key::Down, 5, Some("Live")), (Key::Down, 3, None), (Key::Up, 3, Some("Live")), (Key::Up, 5, None)];
+    for (key, at, on) in walk {
         press(&mut rt, key);
-        assert_eq!(selected(&rt), at);
+        assert_eq!((selected(&rt), header(&rt)), (at, on));
     }
     letter(&mut rt, "j");
-    assert_eq!(selected(&rt), 3);
+    assert_eq!((selected(&rt), header(&rt)), (3, None), "J skips headers");
     letter(&mut rt, "k");
-    assert_eq!(selected(&rt), 5);
+    assert_eq!((selected(&rt), header(&rt)), (5, None));
     let cmd = Mods { cmd: true, ..Mods::default() };
     press_with(&mut rt, Key::Down, cmd);
-    assert_eq!(selected(&rt), 4, "⌘↓ goes to the last");
+    assert_eq!(selected(&rt), 4, "⌘↓ goes to the last story");
     press_with(&mut rt, Key::Up, cmd);
     assert_eq!(selected(&rt), 0, "⌘↑ to the first");
+    press(&mut rt, Key::Up);
+    assert_eq!(header(&rt), Some("Scenes"));
     press(&mut rt, Key::Up);
     assert_eq!(selected(&rt), 4, "and ↑ wraps");
 }
@@ -313,6 +320,7 @@ fn right_goes_into_the_side_column_and_tab_comes_back() {
     press(&mut rt, Key::Tab);
     assert_eq!(focused(&rt), None);
     press(&mut rt, Key::Down);
+    press(&mut rt, Key::Down);
     assert_eq!(selected(&rt), 3);
     press(&mut rt, Key::Right);
     assert_eq!(focused(&rt), None, "a live page has no triggers to go into");
@@ -337,9 +345,9 @@ fn the_shortcut_opens_and_closes_it_without_a_menu() {
 fn leaving_a_story_part_way_drops_its_queued_steps() {
     let mut rt = runtime(Some(Some("Fade".into())));
     letter(&mut rt, "r");
-    press(&mut rt, Key::Down);
+    letter(&mut rt, "j");
     for _ in 0..60 { rt.frame(1.0 / 60.0); }
-    press(&mut rt, Key::Up);
+    letter(&mut rt, "k");
     for _ in 0..60 { rt.frame(1.0 / 60.0); }
     assert_eq!(shows(&rt, "fade"), "[\"start\"]", "no burst of overdue steps on return");
 }
@@ -398,7 +406,7 @@ fn a_new_stage_ends_the_old_ones_exits() {
     rt.frame(DT);
     let exiting = |rt: &Runtime<Real>| rt.elements().into_iter().any(|e| e.key.as_deref() == Some("tip") && e.exiting);
     assert!(exiting(&rt), "the tip fades out");
-    press(&mut rt, Key::Down);
+    letter(&mut rt, "j");
     assert!(!exiting(&rt), "gone with the state its handlers were built for");
     rt.pointer_move(x + 300.0, y);
     rt.frame(DT);
@@ -458,7 +466,7 @@ fn a_new_stage_forgets_what_the_pointer_held_in_the_old_one() {
     rt.frame(DT);
     assert!(own_state::<Tray>(&rt).hovering);
     rt.pointer_down(at.0, at.1);
-    press(&mut rt, Key::Down);
+    letter(&mut rt, "j");
     assert_eq!(selected(&rt), 0);
     rt.drag_files_leave();
     rt.frame(DT);
@@ -477,9 +485,9 @@ fn slow(_: &Lab, cx: &mut Cx<Lab>) -> El {
 fn a_storys_time_scale_stays_with_it() {
     let mut rt = runtime_with(base().story(Story::new("Fixes/Slow", Lab::default, slow)), Some(Some("Slow".into())), true);
     assert_eq!(rt.time_scale, 0.25);
-    press(&mut rt, Key::Down);
+    letter(&mut rt, "j");
     assert_eq!(rt.time_scale, 1.0, "the next story starts at the app's");
-    press(&mut rt, Key::Up);
+    letter(&mut rt, "k");
     assert_eq!(rt.time_scale, 0.25);
     escape(&mut rt);
     assert!(!is_open(&rt));
@@ -509,7 +517,7 @@ fn an_element_focused_in_the_stage_keeps_its_keys_until_escape() {
     assert_eq!((shows(&rt, "value"), selected(&rt)), ("value 1".to_owned(), at));
     escape(&mut rt);
     assert!(is_open(&rt) && focused(&rt).is_none(), "Escape leaves the knob");
-    press(&mut rt, Key::Down);
+    letter(&mut rt, "j");
     assert_ne!(selected(&rt), at);
 }
 
@@ -562,3 +570,6 @@ fn a_long_story_list_scrolls_and_reaches_what_was_off_screen() {
     let hit = rt.element_at(x2, y2).and_then(|p| p.key().map(str::to_owned));
     assert!(hit.is_some_and(|k| k == item || find(&rt, &k).is_some_and(|e| e.rect[1] >= y2 - 28.0)), "the last story is hittable");
 }
+
+#[path = "playground/groups_tests.rs"]
+mod groups;
