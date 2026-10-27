@@ -22,6 +22,8 @@ pub struct Tx {
     pub(crate) focused: Option<String>,
     pub(crate) instant: bool,
     pub(crate) motion: Option<Spring>,
+    /// The layout curve from [`Tx::motion_curve`]; `motion` holds its spring stand-in.
+    pub(crate) motion_curve: Option<Anim>,
     pub(crate) color_motion: Option<Spring>,
     pub(crate) settle: bool,
     pub(crate) relayout: bool,
@@ -446,6 +448,20 @@ impl Tx {
     /// Animate this change's layout with `spring` instead of each element's own.
     pub fn motion(&mut self, spring: Spring) {
         self.motion = Some(spring);
+        self.motion_curve = None;
+    }
+    /// Animate this change's layout on `anim` instead of each element's own spring: a spring,
+    /// or a fixed-duration eased tween to compare against one
+    /// (`tx.motion_curve(Curve::tween(0.35, Easing::cubic(0.16, 1.0, 0.3, 1.0)))`). What
+    /// moves with the layout but only takes a spring (scroll requests, matched flights) uses a
+    /// zero-bounce spring of the curve's duration. The last `motion` or `motion_curve` wins.
+    pub fn motion_curve(&mut self, anim: impl Into<Anim>) {
+        let anim = anim.into();
+        self.motion = Some(match anim.curve {
+            rune_motion::Curve::Spring(s) => s,
+            c => Spring::new(c.logical_duration().max(0.01), 0.0),
+        });
+        self.motion_curve = Some(anim);
     }
     /// Apply this change with no animation and land every running track: growth, reveals and
     /// follow-the-end (opening or returning to a session, guarantee 8).

@@ -2986,6 +2986,7 @@ impl<S: 'static> Runtime<S> {
             one.instant = false;
             one.settle = false;
             one.motion = None;
+            one.motion_curve = None;
             one.color_motion = None;
         }
         merge(tx, one);
@@ -4377,6 +4378,7 @@ impl<S: 'static> Runtime<S> {
             let id = nodes[i].id;
             let parent_id = nodes[i].parent.map(|p| nodes[p].id);
             let spring_l = tx.motion.unwrap_or(nodes[i].motion);
+            let anim_l: Anim = tx.motion_curve.unwrap_or_else(|| spring_l.into());
             let spring_c = tx.color_motion.unwrap_or(nodes[i].motion);
             // Text leads its background so theme crossfades never dip through zero contrast.
             let spring_tc = Spring::new((spring_c.duration * 0.5).max(0.1), spring_c.bounce);
@@ -4444,7 +4446,7 @@ impl<S: 'static> Runtime<S> {
                     // still springs, or a re-centred column jumps against its moving parent. So
                     // do `animate_layout` contents inside the row.
                     if let Some(drawn) = self.scene.get(id, prop::FRAME) { row_jump = drawn.y - scene_rect.y; }
-                    let mut la = LayoutAnim::axes(spring_l, Anim::INSTANT);
+                    let mut la = LayoutAnim::axes(anim_l, Anim::INSTANT);
                     if tx.motion.is_none() && nodes[i].width_leads {
                         la = la.width_leads();
                     }
@@ -4452,7 +4454,7 @@ impl<S: 'static> Runtime<S> {
                 } else if layout_instant || follows_window {
                     LayoutAnim::INSTANT
                 } else {
-                    let mut la = LayoutAnim::new(spring_l);
+                    let mut la = LayoutAnim::new(anim_l);
                     if tx.motion.is_none() {
                         if let Some((lead, trail)) = nodes[i].lead {
                             la = la.lead(lead, trail);
@@ -8379,7 +8381,10 @@ fn merge(tx: &mut Tx, one: Tx) {
     tx.blur |= one.blur;
     tx.instant |= one.instant;
     tx.settle |= one.settle;
-    tx.motion = one.motion.or(tx.motion);
+    if one.motion.is_some() {
+        tx.motion = one.motion;
+        tx.motion_curve = one.motion_curve;
+    }
     tx.color_motion = one.color_motion.or(tx.color_motion);
 }
 
@@ -9398,6 +9403,32 @@ mod tests {
         assert_eq!(pose(&reduced).opacity, 1.0);
         assert_eq!(pose(&reduced).loop_phase, Some(1.0));
         assert_eq!(reduced.wake_deadline(), None);
+    }
+
+    #[test]
+    fn motion_curve_moves_layout_on_a_tween() {
+        fn view(h: &f32, _: &mut Cx<f32>) -> El {
+            col().size(200.0, 300.0).child(el().key("card").w(100.0).h(*h))
+        }
+        let h = |rt: &Runtime<f32>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("card")).unwrap().rect[3];
+        let run = |set: fn(&mut Tx)| {
+            let mut rt = Runtime::new(100.0_f32, view, (200.0, 300.0), Env { scale: 1.0, system_dark: true });
+            rt.frame(0.0);
+            rt.update(|x, tx| { *x = 200.0; set(tx); });
+            rt.frame(0.0);
+            let mut hs = vec![];
+            for _ in 0..60 { rt.frame(1.0 / 120.0); hs.push(h(&rt)); }
+            hs
+        };
+        let linear = run(|tx| tx.motion_curve(rune_motion::Curve::linear(0.4)));
+        // Halfway through a 0.4 s linear tween is halfway there, and it lands on time.
+        assert!((linear[23] - 150.0).abs() < 3.0, "{}", linear[23]);
+        assert!((linear[47] - 200.0).abs() < 0.01, "{}", linear[47]);
+        let spring = run(|tx| tx.motion(Spring::new(0.4, 0.0)));
+        assert!((spring[23] - linear[23]).abs() > 3.0, "a spring is not the tween");
+        // A spring passed as a curve is that spring; a later `motion` replaces the curve.
+        assert_eq!(run(|tx| tx.motion_curve(Spring::new(0.4, 0.0))), spring);
+        assert_eq!(run(|tx| { tx.motion_curve(rune_motion::Curve::linear(0.4)); tx.motion(Spring::new(0.4, 0.0)) }), spring);
     }
 
     #[test]

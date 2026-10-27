@@ -5,6 +5,13 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`Tx::motion_curve(anim)`: a commit's layout on any curve.** `tx.motion` takes only a
+  spring; `motion_curve` takes an `Anim` (a spring, or a `Curve::tween` with an `Easing`), so an
+  app can compare eased tweens against its spring for the same layout change. Scroll requests
+  and matched flights in that commit, which take only a spring, use a zero-bounce spring of the
+  curve's duration. The last `motion` or `motion_curve` in a handler wins. Nothing changes for
+  apps that don't call it.
+
 - **SVG images on every platform.** `ImageCache::svg(bytes, size_pt, scale)` rasterizes SVG or
   SVGZ to fit `size_pt` at the window's scale, so a 16 pt mark is crisp at 2×. `load_mime`
   takes a MIME type (a data URL's `image/svg+xml`), `file(path, size_pt, scale)` reads a file
