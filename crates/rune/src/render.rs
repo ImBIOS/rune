@@ -495,8 +495,10 @@ impl Gpu {
             apply_limit_buckets: false,
         }))
         .map_err(|error| format!("no GPU adapter: {error}"))?;
-        let required_features = adapter.features()
-            & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::PASSTHROUGH_SHADERS | wanted);
+        let optional_features = wgpu::Features::TIMESTAMP_QUERY | wanted;
+        #[cfg(target_os = "macos")]
+        let optional_features = optional_features | wgpu::Features::PASSTHROUGH_SHADERS;
+        let required_features = adapter.features() & optional_features;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("rune"),
             required_features,
@@ -582,14 +584,14 @@ impl Renderer {
     }
 
     fn create(device: &wgpu::Device, format: wgpu::TextureFormat, properties: Option<(&[crate::gpu_springs::Node], &[u32])>) -> Renderer {
-        let shader = if properties.is_some() {
+        let spring_shader = if properties.is_some() {
             let source = format!("{CLIP_WGSL}\n{}\n{}", include_str!("shader.wgsl"), crate::gpu_springs::SHADER);
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            Some(device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("uber"),
                 source: wgpu::ShaderSource::Wgsl(source.into()),
-            })
+            }))
         } else {
-            metallib::uber_shader(device)
+            None
         };
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
@@ -650,7 +652,11 @@ impl Renderer {
             immediate_size: 0,
         });
         let vertex_entry = if properties.is_some() { "vs_springs" } else { "vs" };
-        let pipeline = Self::pipeline(device, &layout, &shader, format, vertex_entry, Blend::SourceOver);
+        let make_pipeline = |shader: &wgpu::ShaderModule| Self::pipeline(device, &layout, shader, format, vertex_entry, Blend::SourceOver);
+        let (shader, pipeline) = match spring_shader {
+            Some(shader) => { let pipeline = make_pipeline(&shader); (shader, pipeline) }
+            None => metallib::uber_shader_and_pipeline(device, make_pipeline),
+        };
         let capacity = 256;
         let instances = Self::instance_buffer(device, capacity);
         let spring_instances = properties.map_or(0, |(_, ids)| ids.len());

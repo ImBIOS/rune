@@ -2961,6 +2961,8 @@ dependencies = [
  "web-sys",
  "web-time",
  "wgpu",
+ "wgpu-core",
+ "wgpu-hal",
  "windows-sys 0.59.0",
  "winit",
  "x11rb",

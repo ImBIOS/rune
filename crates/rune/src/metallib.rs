@@ -49,6 +49,31 @@ pub(super) fn uber_wgsl_hash(wgsl: &str) -> blake3::Hash {
     blake3::hash(wgsl.as_bytes())
 }
 
+// Hash the actual renderer/layout and generator, not a second handwritten description of them.
+// This deliberately invalidates on unrelated renderer edits too: a safe false positive is better
+// than silently passing incompatible bindings to an unchecked shader. Const evaluation keeps the
+// source files out of the executable. The manifest also covers the exact backend version pins.
+#[cfg(any(test, target_os = "macos"))]
+const fn uber_abi_hash() -> u64 {
+    let inputs: [&[u8]; 3] = [
+        include_bytes!("render.rs"),
+        include_bytes!("metallib.rs"),
+        include_bytes!("../Cargo.toml"),
+    ];
+    let mut h = 0xcbf29ce484222325u64;
+    let mut i = 0;
+    while i < inputs.len() {
+        let mut j = 0;
+        while j < inputs[i].len() {
+            h = (h ^ inputs[i][j] as u64).wrapping_mul(0x100000001b3);
+            j += 1;
+        }
+        h = (h ^ 0xff).wrapping_mul(0x100000001b3);
+        i += 1;
+    }
+    h
+}
+
 fn wgsl_shader(device: &wgpu::Device, wgsl: &str) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("uber"),
@@ -56,16 +81,21 @@ fn wgsl_shader(device: &wgpu::Device, wgsl: &str) -> wgpu::ShaderModule {
     })
 }
 
-pub(super) fn uber_shader(device: &wgpu::Device) -> wgpu::ShaderModule {
+pub(super) fn uber_shader_and_pipeline(
+    device: &wgpu::Device,
+    mut make_pipeline: impl FnMut(&wgpu::ShaderModule) -> wgpu::RenderPipeline,
+) -> (wgpu::ShaderModule, wgpu::RenderPipeline) {
     let wgsl = uber_wgsl();
     #[cfg(target_os = "macos")]
     if metallib_enabled()
-        && let Some(shader) = try_uber_metallib(device, &wgsl, UBER_METALLIB, UBER_WGSL_BLAKE3)
+        && let Some(result) = try_uber_metallib(device, &wgsl, UBER_METALLIB, UBER_WGSL_BLAKE3, &mut make_pipeline)
     {
         METALLIB_LOADS.with(|n| n.set(n.get() + 1));
-        return shader;
+        return result;
     }
-    wgsl_shader(device, &wgsl)
+    let shader = wgsl_shader(device, &wgsl);
+    let pipeline = make_pipeline(&shader);
+    (shader, pipeline)
 }
 
 #[cfg(target_os = "macos")]
@@ -80,16 +110,17 @@ fn metallib_enabled() -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn try_uber_metallib(
+fn try_uber_metallib<T>(
     device: &wgpu::Device,
     wgsl: &str,
     metallib: &[u8],
     expected_wgsl_hash: &str,
-) -> Option<wgpu::ShaderModule> {
+    make_pipeline: impl FnOnce(&wgpu::ShaderModule) -> T,
+) -> Option<(wgpu::ShaderModule, T)> {
     if !device.features().contains(wgpu::Features::PASSTHROUGH_SHADERS) {
         return None;
     }
-    if !metallib.starts_with(b"MTLB") {
+    if metallib != UBER_METALLIB || const { uber_abi_hash() } != UBER_ABI_FNV64 {
         return None;
     }
     if uber_wgsl_hash(wgsl).to_hex().as_str() != expected_wgsl_hash {
@@ -97,8 +128,13 @@ fn try_uber_metallib(
     }
     let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let internal_scope = device.push_error_scope(wgpu::ErrorFilter::Internal);
-    // SAFETY: `metallib` is compiled from the Naga MSL for `uber_wgsl()` with matching entry
-    // points (`vs`, `fs`), resource bindings, and vertex-pulling layout (`UBER_VERTEX_ATTRS`).
+    // SAFETY: only our embedded macOS library is accepted, never caller-provided shader code.
+    // Its validated Naga MSL retains bounds checks and loop bounding; the ABI fingerprint above
+    // covers the renderer's bindings, immediates, instance layout, generator and exact backend
+    // pins. Vertex pulling uses buffer(30), and Metal supplies its sizes even for passthrough.
+    // No storage/workgroup arrays or specialization constants are used (HAL cannot reflect those
+    // from passthrough). Unsupported OS/GPU libraries and pipeline linkage failures are caught
+    // before any draw. Pixel equivalence and regeneration tests check the committed artifact.
     let shader = unsafe {
         device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
             label: Some("uber"),
@@ -116,12 +152,15 @@ fn try_uber_metallib(
             ..Default::default()
         })
     };
+    // Metal may load the library but reject an entry point or its AIR at pipeline creation.
+    // Keep both scopes active through that operation, before retaining the shader for later use.
+    let pipeline = make_pipeline(&shader);
     let internal_err = pollster::block_on(internal_scope.pop());
     let validation_err = pollster::block_on(validation_scope.pop());
     if internal_err.is_some() || validation_err.is_some() {
         return None;
     }
-    Some(shader)
+    Some((shader, pipeline))
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -295,12 +334,15 @@ mod tests {
         println!("---BEGIN_WGSL_BLAKE3---\n{}\n---END_WGSL_BLAKE3---", wgsl_hash.to_hex());
         println!("---BEGIN_MSL_BLAKE3---\n{}\n---END_MSL_BLAKE3---", msl_hash.to_hex());
         println!("---BEGIN_METAL_FLAGS---\n{METAL_COMPILE_FLAGS}\n---END_METAL_FLAGS---");
+        println!("---BEGIN_ABI_FNV64---\n{:016x}\n---END_ABI_FNV64---", uber_abi_hash());
         println!("---BEGIN_VS_MSL---\n{vs_msl}---END_VS_MSL---");
         println!("---BEGIN_FS_MSL---\n{fs_msl}---END_FS_MSL---");
     }
 
     #[test]
     fn precompiled_uber_metallib_is_fresh() {
+        assert_eq!(uber_abi_hash(), UBER_ABI_FNV64,
+            "renderer layout, generator or backend pins changed; run scripts/precompile-metal-shaders.sh");
         let wgsl = uber_wgsl();
         assert_eq!(
             uber_wgsl_hash(&wgsl).to_hex().as_str(),
@@ -362,16 +404,16 @@ mod tests {
 
         let wgsl = uber_wgsl();
         assert!(
-            try_uber_metallib(&gpu.device, &wgsl, UBER_METALLIB, "stale-hash").is_none(),
+            try_uber_metallib(&gpu.device, &wgsl, UBER_METALLIB, "stale-hash", |_| ()).is_none(),
             "hash mismatch must fall back"
         );
         assert!(
-            try_uber_metallib(&gpu.device, &wgsl, b"not-mtlb", UBER_WGSL_BLAKE3).is_none(),
+            try_uber_metallib(&gpu.device, &wgsl, b"not-mtlb", UBER_WGSL_BLAKE3, |_| ()).is_none(),
             "missing MTLB magic must fall back"
         );
         assert!(
-            try_uber_metallib(&gpu.device, &wgsl, b"MTLBcorrupt-payload", UBER_WGSL_BLAKE3).is_none(),
-            "corrupt metallib payload must be caught by validation scope and fall back"
+            try_uber_metallib(&gpu.device, &wgsl, b"MTLBcorrupt-payload", UBER_WGSL_BLAKE3, |_| ()).is_none(),
+            "foreign or corrupt metallib must be rejected before passing bytes to the driver"
         );
 
         // Device created without PASSTHROUGH_SHADERS must fall back cleanly to WGSL.
@@ -387,10 +429,35 @@ mod tests {
         ))
         .expect("device without passthrough");
         assert!(
-            try_uber_metallib(&no_pt_device, &wgsl, UBER_METALLIB, UBER_WGSL_BLAKE3).is_none(),
+            try_uber_metallib(&no_pt_device, &wgsl, UBER_METALLIB, UBER_WGSL_BLAKE3, |_| ()).is_none(),
             "device without PASSTHROUGH_SHADERS must fall back"
         );
         let _r_fallback = Renderer::new(&no_pt_device, OFFSCREEN_FORMAT);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pipeline_linkage_failure_retries_wgsl_without_uncaptured_error() {
+        use super::super::{Blend, Gpu, OFFSCREEN_FORMAT, Renderer};
+
+        let gpu = Gpu::headless();
+        let renderer = with_metallib_enabled(false, || Renderer::new(&gpu.device, OFFSCREEN_FORMAT));
+        let before = METALLIB_LOADS.with(std::cell::Cell::get);
+        let mut attempts = 0;
+        let (_shader, _pipeline) = with_metallib_enabled(true, || {
+            uber_shader_and_pipeline(&gpu.device, |shader| {
+                attempts += 1;
+                // Loading the library succeeds; resolving this function fails in HAL's
+                // load_shader at pipeline creation. The default uncaptured handler panics
+                // if the pipeline is outside the fallback's error scopes.
+                let entry = if attempts == 1 { "missing_vertex_entry" } else { "vs" };
+                Renderer::pipeline(&gpu.device, &renderer.layout, shader, OFFSCREEN_FORMAT,
+                    entry, Blend::SourceOver)
+            })
+        });
+        assert_eq!(attempts, 2, "a loaded library can still fail at pipeline creation");
+        assert_eq!(METALLIB_LOADS.with(std::cell::Cell::get), before,
+            "a failed pipeline must not retain the passthrough shader");
     }
 
     #[cfg(target_os = "macos")]
