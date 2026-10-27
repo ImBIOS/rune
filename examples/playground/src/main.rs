@@ -1,8 +1,10 @@
 //! A small preferences window with a playground (⌘⇧D): its scenes, a live page, a story with its
-//! own state and timer, and an overlay, grouped by type, with triggers and a side-column control.
+//! own state and timer, and an overlay, grouped by type, with triggers, variants (1–9) and a
+//! side-column control. A click on a group's header folds it.
 //!
 //! `cargo run -p playground` shows the bar along the bottom; `-- --playground "Upload"` opens
-//! the playground at that story, and `-- --snap out.png --playground` renders it headless.
+//! the playground at that story, and `-- --snap out.png --playground` renders it headless;
+//! `--variant "Long names"` beside `--playground "Many devices"` picks a variant.
 
 use std::time::Duration;
 
@@ -204,20 +206,29 @@ fn main() {
     let spec = AppSpec { scenes: SCENES, ..AppSpec::new("Preferences", (640.0, 420.0), init, view) };
     App::new(spec)
         .playground(
-            Playground::new()
+            Playground::<Prefs>::new()
                 .page("Lists/Live devices", devices_page)
                 .trigger("Lists/Many devices", 'a', "Add device", |s, _| s.devices.push("New device"))
                 .trigger("Lists/Many devices", 'x', "Remove the last", |s, _| { s.devices.pop(); })
                 .side("Lists/Many devices", device_count)
+                .variant("Lists/Many devices", "Six", |_| {})
+                .variant("Lists/Many devices", "Just this one", |s| s.devices.truncate(1))
+                .variant("Lists/Many devices", "Long names", |s| {
+                    s.devices = vec!["Studio desk in the back office", "Travel laptop (borrowed for the conference)", "Kitchen tablet"];
+                })
                 .story(
                     Story::new("Progress/Upload", upload_init, upload_view)
                         .poll(upload_poll)
                         .trigger('r', "Run, pause, resume", upload_replay)
-                        .trigger('f', "Finish", |u, _| { u.progress = 100; u.running = false; }),
+                        .trigger('f', "Finish", |u, _| { u.progress = 100; u.running = false; })
+                        .variant("From the start", |_| {})
+                        .variant("Half done", |u| u.progress = 48),
                 )
                 .story(
                     Story::overlay("Toasts/Sync toast", &TOAST, || Toast { message: "Synced 3 devices", failed: false })
-                        .trigger('e', "Fail", |s, _| { s.message = "Sync failed, retrying"; s.failed = true; }),
+                        .trigger('e', "Fail", |s, _| { s.message = "Sync failed, retrying"; s.failed = true; })
+                        .variant("Synced", |_| {})
+                        .variant("Failed", |s| { s.message = "Sync failed, retrying"; s.failed = true; }),
                 )
                 .sizes(&[("Compact", (420.0, 300.0)), ("Wide", (900.0, 560.0))]),
         )
