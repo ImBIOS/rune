@@ -17,6 +17,8 @@ use crate::color::{oklch, oklcha, Color};
 use crate::text::{Ink, Link, Span};
 
 mod html;
+mod ime;
+pub use ime::Ime;
 mod keys;
 pub use keys::{Key, KeyEvent, KeySide, Modifier, Mods};
 
@@ -382,18 +384,6 @@ pub(crate) struct History {
     redo: Vec<Change>,
     bytes: usize,
     typing: bool,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum Ime {
-    Preedit(String, Option<(usize, usize)>),
-    Commit(String),
-}
-
-impl Drop for Ime {
-    fn drop(&mut self) {
-        match self { Self::Preedit(text, _) | Self::Commit(text) => text.zeroize() }
-    }
 }
 
 /// What an edit asks of the host.
