@@ -24,6 +24,15 @@ impl Presented {
         }
     }
 
+    /// Whether a timer frame `rt` built before taking a drawable can go without one: nothing
+    /// moves or waits, no timer wants the display link's next tick (`next_tick`), and it draws
+    /// what this frame did.
+    pub(super) fn unchanged<S: 'static>(&self, rt: &Runtime<S>, config: &wgpu::SurfaceConfiguration, animating: bool,
+        next_tick: Option<crate::time::Instant>) -> bool {
+        !animating && !rt.has_pending_input() && !rt.live_pending() && rt.window_frame.is_none()
+            && !super::timer_wants_frame(rt, next_tick) && self.same(rt, config)
+    }
+
     /// Whether `rt`'s built frame draws what this one did: the same instances into the same
     /// surface, with no glyph or image upload waiting, and nothing drawn outside the instances
     /// (`SurfaceDraw` content, native materials).

@@ -263,6 +263,14 @@ impl Win {
         self.presented.is_some()
     }
 
+    /// The display link's next tick after `now`, while it runs.
+    fn next_tick(&self, now: Instant) -> Option<Instant> {
+        #[cfg(target_os = "macos")]
+        return self.pacing.as_ref().filter(|p| p.running()).map(|p| now + Duration::from_secs_f64(1.0 / p.refresh_hz()));
+        #[cfg(not(target_os = "macos"))]
+        { let _ = now; None }
+    }
+
     /// Whether the display link drives redraws. Other platforms redraw on request.
     fn paced(&self) -> bool {
         #[cfg(target_os = "macos")]
@@ -2095,6 +2103,7 @@ impl<S: 'static> Host<S> {
         w.visible = true;
         w.occluded = false;
         self.rt.set_live_visible(!w.minimized());
+        self.rt.cancel_timer_frame();
         self.idle = true;
         self.native_handle.native.number.store(native_window_number(&w.window).unwrap_or(0), Ordering::Release);
         if !built { self.rt.settle_all(); }
@@ -2153,6 +2162,8 @@ impl<S: 'static> Host<S> {
         let quiet = (had_updates || (!wake && !stale_before)) && !changed && requests.only_updates()
             && !self.rt.patch_pending() && (stale_before || !self.rt.needs_commit());
         self.clipboard.flush(&mut self.rt);
+        // The next frame polls for the wake.
+        if wake && !quiet { self.rt.cancel_timer_frame(); }
         if requests.quit {
             // A tracking menu holds the event loop until it ends.
             self.popup.cancel(&mut self.rt);
@@ -2339,6 +2350,7 @@ impl<S: 'static> Host<S> {
         self.ime_allowed = false;
         if let Some(w) = &self.win { w.window.set_ime_allowed(false); }
         self.rt.set_live_visible(false);
+        self.rt.cancel_timer_frame();
         self.popup.cancel(&mut self.rt);
         self.file_dialog.cancel(&mut self.rt);
         self.rt.cancel_pointer();
@@ -2796,6 +2808,8 @@ impl<S: 'static> Host<S> {
                 l.alpha = Some(crate::surface_alpha::AlphaSurface::new(&gpu.device, target, (l.config.width, l.config.height)));
             }
         }
+        #[cfg(target_os = "macos")]
+        { self.rt.native_materials = l.materials.native(); }
         // Only a timer woke the resting window: build the frame first, and take no drawable
         // when it draws what's on screen.
         let quiet = std::mem::take(&mut l.quiet) && !hidden && !live_resize && l.presented.is_some() && self.comp.is_none()
@@ -2808,8 +2822,8 @@ impl<S: 'static> Host<S> {
             self.rt.window_resting = true;
             let (animating, dt) = self.clock.advance(&mut self.rt, target.unwrap_or(now), false);
             let rt = &mut self.rt;
-            if !animating && !rt.has_pending_input() && !rt.live_pending() && rt.window_frame.is_none()
-                && renderer.srgb_blend() == rt.srgb_blend() && l.presented.as_ref().is_some_and(|p| p.same(rt, &l.config)) {
+            if renderer.srgb_blend() == rt.srgb_blend()
+                && l.presented.as_ref().is_some_and(|p| p.unchanged(rt, &l.config, animating, l.next_tick(now))) {
                 sync_platform(l, rt, &mut self.secure_input, &mut self.ime_allowed, &self.clipboard);
                 l.stop_pacing();
                 self.meter.set_pacing(l.pacing_state(false));
@@ -2853,8 +2867,6 @@ impl<S: 'static> Host<S> {
         self.rt.window_resting = self.frame_anim.is_none() && self.rt.window_frame.is_none();
         let target_ms = target.zip(self.trace_start).map(|(target, start)| crate::present_time::ms_since(start, target));
         let rt = &mut self.rt;
-        #[cfg(target_os = "macos")]
-        { rt.native_materials = l.materials.native(); }
         if hidden && l.first_frame.settles() { rt.settle_all(); }
         let (mut animating, dt) = if let Some((animating, dt, _)) = built {
             (animating, dt)
@@ -2968,10 +2980,7 @@ impl<S: 'static> Host<S> {
         }
         // A poll asking for the next frame (`wake_after(Duration::ZERO)`) keeps a running display
         // link going; without one its timer waits a frame in `wake_deadline`.
-        #[cfg(target_os = "macos")]
-        let next_tick = l.pacing.as_ref().filter(|p| !hidden && p.running()).map(|p| now + Duration::from_secs_f64(1.0 / p.refresh_hz()));
-        #[cfg(not(target_os = "macos"))]
-        let next_tick: Option<Instant> = None;
+        let next_tick = l.next_tick(now).filter(|_| !hidden);
         self.idle = !(animating || rt.has_pending_input() || rt.live_pending() || rt.window_frame.is_some() || self.frame_anim.is_some()
             || timer_wants_frame(rt, next_tick));
         if self.idle && !hidden && self.comp.is_none() { Presented::record(&mut l.presented, rt, &l.config) } else { l.presented = None }
@@ -3112,7 +3121,10 @@ impl<S: 'static> AnyHost for Host<S> {
                     Some(stale) => {
                         self.clipboard.flush(&mut self.rt);
                         self.shell(event_loop);
-                        stale || self.rt.stale()
+                        // A close the poll asked for may have hidden the window.
+                        let frame = (stale || self.rt.stale()) && self.win.as_ref().is_some_and(|w| w.visible);
+                        self.rt.resting_wake_frame(frame);
+                        frame
                     }
                     None => true,
                 };

@@ -117,6 +117,41 @@ fn a_frame_that_draws_the_same_pixels_is_the_same() {
     assert!(!p.same(&rt, &config), "a change on screen draws again");
 }
 
+/// A timer frame that draws the same pixels still takes its drawable while a poll steps on the
+/// display link (`wake_after(ZERO)`): skipping it would stop the link and the steps with it.
+#[test]
+fn a_timer_frame_that_draws_the_same_still_draws_while_a_poll_steps() {
+    fn poll(step: &mut bool, _: f64, tx: &mut Tx) -> bool {
+        tx.wake_after(if *step { Duration::ZERO } else { Duration::from_millis(250) });
+        false
+    }
+    let mut rt = Runtime::new(false, |_, _| crate::el().size(20.0, 20.0), (20.0, 20.0), crate::Env::default());
+    rt.poll = Some(poll);
+    rt.wall_start = Some(Instant::now());
+    rt.frame(0.0);
+    let config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: wgpu::TextureFormat::Bgra8UnormSrgb,
+        width: 20,
+        height: 20,
+        present_mode: wgpu::PresentMode::AutoVsync,
+        desired_maximum_frame_latency: 2,
+        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+        view_formats: vec![],
+        color_space: Default::default(),
+    };
+    let mut presented = None;
+    Presented::record(&mut presented, &rt, &config);
+    let p = presented.as_ref().unwrap();
+    let next_tick = Some(Instant::now() + Duration::from_millis(8));
+    assert!(p.unchanged(&rt, &config, false, next_tick), "a quarter-second timer leaves the drawable");
+    rt.state = true;
+    rt.frame(0.0);
+    assert!(p.same(&rt, &config));
+    assert!(!p.unchanged(&rt, &config, false, next_tick), "a step due by the next tick draws");
+    assert!(p.unchanged(&rt, &config, false, None), "without a running link the timer paces it");
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn launch_frames_hold_two_drawables_until_the_window_rests() {

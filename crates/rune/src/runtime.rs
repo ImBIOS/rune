@@ -2189,7 +2189,7 @@ impl<S: 'static> Runtime<S> {
     pub(crate) fn polled_at(&self) -> f64 {
         #[cfg(all(feature = "dev", debug_assertions))]
         if let Some(clock) = &self.dev_clock { return clock.deadline(self.clock).unwrap_or(self.clock); }
-        self.clock
+        self.timer_wake.polled_at().unwrap_or(self.clock)
     }
 
     fn logical_wake_deadline(&self) -> Option<f64> {
@@ -2369,13 +2369,9 @@ impl<S: 'static> Runtime<S> {
         // retargets them. Presenting waits for `step_motion`, so the frame is sampled and
         // built once.
         if catch_up > 0.0 { self.catch_up_motion(catch_up); }
-        // After a resting window's timer polled for this frame, what that poll left due (a
-        // `wake_after(ZERO)`) waits for the next frame's poll.
-        let polled = self.timer_wake.take_polled();
-        if !polled {
-            let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
-            self.wake_deadlines.drain(..due);
-        }
+        let polled = self.timer_wake.frame_polled(self.wake_deadlines.first().is_some_and(|t| *t <= self.clock));
+        let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
+        self.wake_deadlines.drain(..due);
         self.fire_hover_delays();
         if let Some(poll) = self.poll.filter(|_| !polled) {
             let mut one = self.transaction();
