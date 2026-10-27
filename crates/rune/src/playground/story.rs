@@ -16,7 +16,7 @@ use super::*;
 /// ```
 pub struct Story<P: 'static> {
     pub(super) name: &'static str,
-    init: fn() -> P,
+    init: Init<P>,
     view: fn(&P, &mut Cx<P>) -> El,
     poll: Option<fn(&mut P, f64, &mut Tx) -> bool>,
     frame: Option<(f32, f32)>,
@@ -27,7 +27,14 @@ pub struct Story<P: 'static> {
 impl<P: 'static> Story<P> {
     /// `name` may be a `"Group/Name"` path.
     pub fn new(name: &'static str, init: fn() -> P, view: fn(&P, &mut Cx<P>) -> El) -> Self {
-        Story { name, init, view, poll: None, frame: None, triggers: Vec::new(), side: None }
+        Story { name, init: Init::New(init), view, poll: None, frame: None, triggers: Vec::new(), side: None }
+    }
+
+    /// A story whose state `derive` makes from the app's real state, each time it's made: when
+    /// it first shows, and on R. `S` is the playground's app state.
+    pub fn from_real<S: 'static>(name: &'static str, derive: fn(&S) -> P, view: fn(&P, &mut Cx<P>) -> El) -> Self {
+        let init = Init::Real(std::any::TypeId::of::<S>(), Box::new(move |real: &dyn Any| derive(real.downcast_ref().expect("checked by Playground::story"))));
+        Story { init, ..Story::new(name, || unreachable!(), view) }
     }
 
     /// An overlay's view at its size, in a dashed frame over the stage (the overlay's clear
@@ -59,6 +66,14 @@ impl<P: 'static> Story<P> {
         self
     }
 
+    /// The app state `init` derives from, for [`Story::from_real`].
+    pub(super) fn real(&self) -> Option<std::any::TypeId> {
+        match &self.init {
+            Init::New(_) => None,
+            Init::Real(t, _) => Some(*t),
+        }
+    }
+
     fn stage(stage: &dyn Any) -> &Stage<P> {
         stage.downcast_ref().expect("a story's stage is its own")
     }
@@ -68,9 +83,16 @@ impl<P: 'static> Story<P> {
     }
 }
 
+/// How a story makes its state: from nothing, or from the real state, of the type named.
+enum Init<P> {
+    New(fn() -> P),
+    Real(std::any::TypeId, Box<dyn Fn(&dyn Any) -> P>),
+}
+
 /// A [`Story`] with its state type erased. Its stage is a `Stage<P>`.
 pub(super) trait OwnStory {
-    fn init(&self) -> Box<dyn Any>;
+    /// A new stage, from the app's real state if the story derives from it.
+    fn init(&self, real: &dyn Any) -> Box<dyn Any>;
     fn state<'a>(&self, stage: &'a mut dyn Any) -> &'a mut dyn Any;
     fn state_ref<'a>(&self, stage: &'a dyn Any) -> &'a dyn Any;
     fn view(&self, stage: &dyn Any, cx: &mut Cx<()>) -> El;
@@ -86,8 +108,12 @@ pub(super) trait OwnStory {
 }
 
 impl<P: 'static> OwnStory for Story<P> {
-    fn init(&self) -> Box<dyn Any> {
-        Box::new(Stage::new((self.init)()))
+    fn init(&self, real: &dyn Any) -> Box<dyn Any> {
+        let state = match &self.init {
+            Init::New(init) => init(),
+            Init::Real(_, derive) => derive(real),
+        };
+        Box::new(Stage::new(state))
     }
     fn state<'a>(&self, stage: &'a mut dyn Any) -> &'a mut dyn Any {
         &mut Self::stage_mut(stage).state

@@ -54,7 +54,7 @@ impl<S: 'static> Runtime<S> {
         let was_open = playground.is_open();
         if swaps && !keep && self.focused.is_some() { self.set_focus(None, false); }
         let clock = self.clock;
-        if !self.playground.as_mut().is_some_and(|p| p.apply(clock)) { return; }
+        if !self.playground.as_mut().is_some_and(|p| p.apply(clock, &mut self.state)) { return; }
         self.memo.clear();
         if swaps { self.leave_stage(was_open); }
         // A new stage state gets its first poll on the next frame, as an app's does.

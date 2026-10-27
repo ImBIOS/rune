@@ -579,3 +579,6 @@ mod groups;
 
 #[path = "playground/scenes_tests.rs"]
 mod scenes;
+
+#[path = "playground/real_tests.rs"]
+mod real;

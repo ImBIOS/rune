@@ -55,7 +55,7 @@ use story::OwnStory;
 ///
 /// A scene opens as a fresh `AppSpec::init` with the scene fn applied (`App::init`'s closure
 /// isn't used), polled by `AppSpec::poll` but never given `AppSpec::setup`, so it gets no
-/// waker and starts nothing. Back drops every stage state and returns to the real one.
+/// waker and starts nothing; with [`Playground::fresh`] it starts from the real state instead. Back drops every stage state and returns to the real one.
 ///
 /// Keys, while it's open: ↑↓ move along the list, group headers included, and J K between
 /// stories (⌘↑ ⌘↓ to the first and last). On a header, ← folds its group, → unfolds it and ↵
@@ -73,6 +73,7 @@ pub struct Playground<S: 'static> {
     bar: bool,
     enabled: bool,
     scenes: Option<fn(&str) -> bool>,
+    fresh: Option<fn(&S) -> S>,
 }
 
 impl<S: 'static> Default for Playground<S> {
@@ -94,6 +95,7 @@ impl<S: 'static> Playground<S> {
             bar: true,
             enabled: cfg!(debug_assertions),
             scenes: None,
+            fresh: None,
         }
     }
 
@@ -106,6 +108,7 @@ impl<S: 'static> Playground<S> {
 
     /// A story with its own state: see [`Story`].
     pub fn story<P: 'static>(mut self, story: Story<P>) -> Self {
+        assert!(story.real().is_none_or(|t| t == std::any::TypeId::of::<S>()), "Story::from_real({:?}) derives from another app state than this playground's", story.name);
         self.pages.push(Page { name: story.name, kind: Kind::Own(Box::new(story)) });
         self
     }
@@ -131,6 +134,13 @@ impl<S: 'static> Playground<S> {
     /// ungrouped scenes to `--scene`. By default, all of them.
     pub fn scenes(mut self, show: fn(&str) -> bool) -> Self {
         self.scenes = Some(show);
+        self
+    }
+
+    /// Scenes start from `fresh(&real)` rather than `AppSpec::init`, then their scene fn applies:
+    /// `|real| real.clone()` previews them on a copy of the app as it is, its handles included.
+    pub fn fresh(mut self, fresh: fn(&S) -> S) -> Self {
+        self.fresh = Some(fresh);
         self
     }
 
@@ -240,6 +250,7 @@ pub(crate) struct Live<S: 'static> {
     menu: bool,
     bar: bool,
     init: fn() -> S,
+    fresh: Option<fn(&S) -> S>,
     scenes: &'static [(&'static str, fn(&mut S))],
     poll: Option<fn(&mut S, f64, &mut Tx) -> bool>,
     /// Stories, as indices into scenes then pages, in the order the list shows them.
@@ -304,7 +315,7 @@ pub(crate) fn offered_by_env() -> bool {
 
 impl<S: 'static> Live<S> {
     fn new(playground: Playground<S>, spec: &crate::AppSpec<S>, menu: bool) -> Self {
-        let Playground { pages, triggers, sides, sizes, shortcut, bar, enabled: _, scenes: show } = playground;
+        let Playground { pages, triggers, sides, sizes, shortcut, bar, enabled: _, scenes: show, fresh } = playground;
         let mut live = Live {
             owned: pages.iter().map(|_| None).collect(),
             pages,
@@ -315,6 +326,7 @@ impl<S: 'static> Live<S> {
             menu,
             bar,
             init: spec.init,
+            fresh,
             scenes: spec.scenes,
             poll: spec.poll,
             order: Vec::new(),
@@ -435,7 +447,7 @@ impl<S: 'static> Live<S> {
     }
 
     /// Applies the requests handlers made since the last commit; true when anything changed.
-    pub(crate) fn apply(&mut self, clock: f64) -> bool {
+    pub(crate) fn apply(&mut self, clock: f64, real: &mut S) -> bool {
         self.now = clock;
         let mut changed = false;
         for request in std::mem::take(&mut self.pending) {
@@ -446,23 +458,23 @@ impl<S: 'static> Live<S> {
                     if !self.open || at.is_some() {
                         self.open = true;
                         if let Some(i) = at { self.reveal(i); }
-                        self.select(at.unwrap_or(self.selected));
+                        self.select(at.unwrap_or(self.selected), real);
                     }
                 }
                 Request::Close => self.close(),
                 Request::Toggle if self.open => self.close(),
                 Request::Toggle => {
                     self.open = true;
-                    self.select(self.selected);
+                    self.select(self.selected, real);
                 }
                 Request::Select(i) => {
                     self.reveal(i);
-                    self.select(i);
+                    self.select(i, real);
                 }
                 Request::Replay if self.is_live_page() => {}
                 Request::Replay => {
                     if let Some((i, _)) = self.page() { self.owned[i] = None; }
-                    self.select(self.selected);
+                    self.select(self.selected, real);
                 }
                 Request::Trigger(key) => self.trigger(key),
                 Request::Dark(dark) => self.dark = Some(dark),
@@ -506,7 +518,7 @@ impl<S: 'static> Live<S> {
     }
 
     /// Shows story `i`. A stage made new, as a scene's always is, runs its `'r'` trigger.
-    fn select(&mut self, i: usize) {
+    fn select(&mut self, i: usize, real: &S) {
         if let Some(left) = self.selected.checked_sub(self.scenes.len())
             && let (Some(Page { kind: Kind::Own(own), .. }), Some(Some(stage))) = (self.pages.get(left), self.owned.get_mut(left))
         {
@@ -517,14 +529,14 @@ impl<S: 'static> Live<S> {
         self.generation += 1;
         let scene_clock = crate::SceneClock { now: self.now, dt: 1.0 / 60.0 };
         if let Some((_, f)) = self.scenes.get(self.selected) {
-            let init = self.init;
+            let (init, fresh) = (self.init, self.fresh);
             self.scene = Some(Box::new(Stage::new(crate::with_scene_clock(scene_clock, || {
-                let mut s = init();
+                let mut s = fresh.map_or_else(init, |fresh| fresh(real));
                 f(&mut s);
                 s
             }))));
         } else if let Some((i, page)) = self.page() && let Kind::Own(own) = &page.kind && self.owned[i].is_none() {
-            let stage = crate::with_scene_clock(scene_clock, || own.init());
+            let stage = crate::with_scene_clock(scene_clock, || own.init(real));
             self.owned[i] = Some(stage);
         } else {
             return;
