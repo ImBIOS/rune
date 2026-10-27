@@ -267,7 +267,17 @@ impl Renderer {
                 Some(ring) => frame.radius(6.0).border(0.5, ring).clip_rounded(6.0),
                 None => frame.clip_soft(0.0),
             };
-            frame = frame.child(head.fill(s.table_head_fill));
+            // The header's square fill would paint over the outline where it curves in at the
+            // frame's corners, so it rounds by the radius left inside the inset.
+            let head = head.fill(s.table_head_fill);
+            let head = if ring.is_some() {
+                let r = (6.0 - inset).max(0.0);
+                let b = if t.rows.is_empty() { r } else { 0.0 };
+                head.clip_corners([r, r, b, b])
+            } else {
+                head
+            };
+            frame = frame.child(head);
             for (i, cells) in t.rows.iter().enumerate() {
                 let sep = rule(format!("s{i}"));
                 let sep = match s.table_head_rule { Some(c) if i == 0 => sep.fill(c), _ => sep };

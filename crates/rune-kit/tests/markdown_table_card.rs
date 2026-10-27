@@ -328,3 +328,17 @@ fn a_header_alone_is_sized_by_its_own_padding() {
     let width = |style| cell(&run(src, style, 600.0), "th", 0).rect[2];
     assert_eq!(width(wide), width(same));
 }
+
+#[test]
+fn an_outlined_table_header_rounds_inside_the_outline() {
+    const HEAD: rune::Color = rune::Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+    fn styled(src: &String, _: &mut Cx<String>) -> El {
+        col().w_full().child(Markdown::new(src.clone()).render(&MarkdownStyle::neutral(true).table_header_fill(HEAD)))
+    }
+    for (src, bottom) in [("| A | B |\n|---|---|\n| a | b |\n", 0.0), ("| A | B |\n|---|---|\n", 5.5)] {
+        let mut rt = Runtime::new(src.to_owned(), styled, (480.0, 400.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let fill = rt.instances.iter().find(|i| i.fill == [HEAD.r, HEAD.g, HEAD.b, HEAD.a]).expect("the header's fill");
+        assert_eq!(rune::render::unpack_clip_radii(fill.fade[3]), [5.5, 5.5, bottom, bottom], "{src:?}");
+    }
+}
