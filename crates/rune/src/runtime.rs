@@ -2484,7 +2484,7 @@ impl<S: 'static> Runtime<S> {
         // Hit tests read last frame's drawn rects and clips by index. When a commit moved the
         // indices, the build re-evaluates hover from fresh geometry instead.
         if self.built || self.nodes.iter().map(|n| n.id).eq(self.built_ids.iter().copied()) {
-            self.update_interaction();
+            self.update_interaction(None);
         }
         #[cfg(test)]
         if let Some(publish) = tests::MID_FRAME.with(|hook| hook.borrow_mut().take()) { publish(); }
@@ -5123,6 +5123,8 @@ impl<S: 'static> Runtime<S> {
         }
         self.drop_drag_out_request();
         self.pointer = Some((x, y));
+        // A press is the hand's: hover follows the pointer through moving layout.
+        self.release_hover_hold();
         self.keyboard_focus = false;
         self.dismiss_help();
         // A press cancels the waits to report an enter; the next move after it starts them again.
@@ -5242,6 +5244,7 @@ impl<S: 'static> Runtime<S> {
     /// Capture a secondary gesture without activating primary actions or text selection.
     pub fn secondary_down(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
+        self.release_hover_hold();
         self.keyboard_focus = false;
         self.dismiss_help();
         self.secondary_capture = self.secondary_target(x, y).map(str::to_owned);
@@ -5354,8 +5357,8 @@ impl<S: 'static> Runtime<S> {
     pub fn hit_regions(&self) -> &[[f32; 4]] { &self.overlay_hits }
 
     /// The pointer shape the shell should show: the pressed element's while a gesture holds
-    /// the pointer, else the one under it in the current frame, from the nearest ancestor that
-    /// sets one. The arrow while the pointer is outside the window.
+    /// the pointer, else the one under it in the current frame (the held hover while moving
+    /// layout holds it), from the nearest ancestor that sets one. The arrow while the pointer is outside the window.
     pub fn cursor(&self) -> crate::el::Cursor {
         let Some((x, y)) = self.pointer.filter(|&(x, y)| self.in_viewport(x, y)) else { return crate::el::Cursor::Default };
         // An element on its way out has no cursor: `Cursor::Hidden` ends when it's removed.
@@ -5363,7 +5366,8 @@ impl<S: 'static> Runtime<S> {
         let target = match &self.capture {
             Some(_) if self.text_sel.dragging => self.selection_holder(),
             Some((p, _)) => (0..self.nodes.len()).find(|&i| self.nodes[i].path == *p && !self.subtree_exiting(i) && self.allowed(i)),
-            None => self.selectable_at(x, y).or_else(|| self.primary_target(x, y)),
+            // Moving layout holds hover: the cursor stays with what the pointer was over.
+            None => self.held_hover().flatten().or_else(|| self.selectable_at(x, y).or_else(|| self.primary_target(x, y))),
         };
         let Some(mut i) = target else {
             return crate::el::Cursor::Default;
@@ -7291,6 +7295,11 @@ impl<S: 'static> Runtime<S> {
                 crate::render::end_layer(&mut self.instances, &mut self.surfaces, &mut self.marks, start, surface_start);
             }
         }
+        // A moving chip can enter a stationary pointer. Re-evaluate against this frame's
+        // geometry without inventing pointer-move or drag events on animation frames. Tooltips
+        // follow the hold this decides.
+        let queued = self.queue.len();
+        let held = self.pointer.map(|(x, y)| self.refresh_hover(x, y));
         self.update_help();
         self.layer_scratch = layers;
         self.built = true;
@@ -7305,13 +7314,9 @@ impl<S: 'static> Runtime<S> {
         if self.track_marks { self.marks.resize(self.instances.len(), 0); }
         self.stats.glyphs = glyph_count;
         self.ambient = ambient;
-        // A moving chip can enter a stationary pointer. Re-evaluate against this frame's
-        // geometry without inventing pointer-move or drag events on animation frames.
-        let queued = self.queue.len();
-        if let Some((x, y)) = self.pointer { self.refresh_hover(x, y); }
         // A live transform can change hover paint with no handler and no running spring.
         // Retarget from the new geometry and schedule the frame that samples that paint.
-        let interaction = self.pointer.is_some() && self.update_interaction();
+        let interaction = self.pointer.is_some() && self.update_interaction(held);
         self.queue.len() > queued || interaction
     }
 

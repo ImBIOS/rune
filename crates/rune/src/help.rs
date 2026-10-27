@@ -136,7 +136,12 @@ impl<S: 'static> Runtime<S> {
             return;
         }
         let pointer = self.pointer.filter(|&(x, y)| self.in_viewport(x, y) && self.capture.is_none() && self.secondary_capture.is_none());
-        let under = pointer.and_then(|(x, y)| self.help_at(x, y));
+        // While moving layout holds hover, the tooltip keeps its element, and nothing sliding
+        // under the pointer starts a wait.
+        let under = match self.held_hover() {
+            Some(_) => self.help.target.as_ref().and_then(|(p, _)| self.hover_live(p)).filter(|_| pointer.is_some()),
+            None => pointer.and_then(|(x, y)| self.help_at(x, y)),
+        };
         let path = under.map(|i| self.nodes[i].path.clone());
         if path.as_deref() != self.help.target.as_ref().map(|(p, _)| p.as_str()) {
             self.help.target = path.map(|p| (p, self.clock));

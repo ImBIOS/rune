@@ -18,6 +18,8 @@ use crate::props::{NodeId, Prop, PropClass, PropId};
 use crate::spring::Spring;
 use crate::value::{Animatable, MAX_LANES, lanes};
 
+mod tracks;
+
 const NONE: u32 = u32::MAX;
 /// Most additive layers a lane keeps before it collapses them into one merged segment.
 const MAX_ADDITIVE: usize = 8;
@@ -781,22 +783,6 @@ impl AnimationStore {
     /// Events since the previous tick (settles, completions).
     pub fn events(&self) -> &[MotionEvent] {
         &self.events
-    }
-
-    /// Tracks sampled (or `set`) in the last tick: what changed on screen.
-    pub fn touched(&self) -> impl Iterator<Item = (NodeId, PropId)> + '_ {
-        self.touched.iter().map(|&t| {
-            let m = &self.t_meta[t as usize];
-            (m.node, m.prop)
-        })
-    }
-
-    /// Like [`touched`](Self::touched), with track ids.
-    pub fn touched_tracks(&self) -> impl Iterator<Item = (TrackId, NodeId, PropId)> + '_ {
-        self.touched.iter().map(|&t| {
-            let m = &self.t_meta[t as usize];
-            (TrackId { index: t, generation: m.generation }, m.node, m.prop)
-        })
     }
 
     /// The values presented at the last tick for a track, as raw lanes.

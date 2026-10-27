@@ -106,3 +106,36 @@ fn leaving_the_window_cancels_a_pending_enter() {
     rt.frame(0.2);
     assert!(rt.state.is_empty());
 }
+
+/// `gone`: `None` keeps the zone; `Some(instant)` removes it, at once when `instant`, else
+/// through its exit.
+struct Leaving { gone: Option<bool>, heard: Vec<bool> }
+
+fn leaving_view(s: &Leaving, _: &mut Cx<Leaving>) -> El {
+    let zone = el().key("zone").w(16.0).h(100.0)
+        .on_hover_change(|s: &mut Leaving, inside, _| s.heard.push(inside))
+        .hover_delays(Duration::from_millis(40), Duration::from_millis(100));
+    col().w_full().h_full().children(s.gone.is_none().then_some(zone))
+}
+
+fn leaving(rest: f64, instant: bool) -> Vec<bool> {
+    let mut rt = Runtime::new(Leaving { gone: None, heard: Vec::new() }, leaving_view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.pointer_move(8.0, 50.0);
+    rt.frame(rest);
+    rt.update(move |s, tx| { s.gone = Some(instant); if instant { tx.instant(); } });
+    for _ in 0..60 { rt.frame(1.0 / 60.0); }
+    rt.state.heard
+}
+
+#[test]
+fn a_zone_leaving_before_its_enter_reports_nothing() {
+    assert_eq!(leaving(0.02, false), Vec::<bool>::new(), "through its exit");
+    assert_eq!(leaving(0.02, true), Vec::<bool>::new(), "at once");
+}
+
+#[test]
+fn a_shown_zone_leaving_hears_its_leave() {
+    assert_eq!(leaving(0.05, false), [true, false], "through its exit");
+    assert_eq!(leaving(0.05, true), [true, false], "at once");
+}

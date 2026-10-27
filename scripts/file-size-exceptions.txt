@@ -13,7 +13,7 @@ crates/rune-light/examples/light.rs 1236
 crates/rune-light/examples/reel.rs 1899
 crates/rune-light/src/lib.rs 1210
 crates/rune-motion/src/scene.rs 1172
-crates/rune-motion/src/store.rs 1380
+crates/rune-motion/src/store.rs 1366
 crates/rune/src/clipboard.rs 872
 crates/rune/src/desktop.rs 1238
 crates/rune/src/edit.rs 2780
