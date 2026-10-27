@@ -130,6 +130,8 @@ mod timer_wake;
 mod props;
 #[path = "runtime/secondary.rs"]
 mod secondary;
+#[path = "runtime/press_clicks.rs"]
+mod press_clicks;
 #[path = "runtime/window_requests.rs"]
 mod window_requests;
 use props::*;
@@ -1338,6 +1340,8 @@ pub struct Runtime<S: 'static> {
     last_press: Option<(String, f64, f32, f32)>,
     /// The press now held is the second of a double press.
     double_armed: bool,
+    /// The presses counted into `Drag::clicks`.
+    press_clicks: press_clicks::PressClicks,
     press_down_t: f64,
     /// The held press has travelled past the click slop: it isn't a click of a double press.
     press_moved: bool,
@@ -1634,6 +1638,7 @@ impl<S: 'static> Runtime<S> {
             last_drag_press: None,
             last_press: None,
             double_armed: false,
+            press_clicks: Default::default(),
             press_down_t: 0.0,
             press_moved: false,
             press_cancelled: false,
@@ -5039,6 +5044,7 @@ impl<S: 'static> Runtime<S> {
             return;
         }
         self.press_at = (x, y);
+        let clicks = self.press_clicks.press(&n.path, now, (x, y), self.double_click_interval);
         self.double_armed = n.on_double_press.is_some() && pending.is_some_and(|(p, t, px, py)| {
             p == n.path && now - t <= self.double_click_interval && (x - px).abs() <= CLICK_SLOP && (y - py).abs() <= CLICK_SLOP
         });
@@ -5080,6 +5086,7 @@ impl<S: 'static> Runtime<S> {
             dx: 0.0,
             dy: 0.0,
             data: 0.0,
+            clicks,
             cancelled: false,
         };
         let path = n.path.clone();
@@ -5122,6 +5129,7 @@ impl<S: 'static> Runtime<S> {
         let button = std::mem::take(&mut self.capture_button);
         self.refresh_hover_within();
         let double = std::mem::take(&mut self.double_armed);
+        if self.press_moved { self.press_clicks.clear(); }
         if input_capture {
             self.capture_inside = false;
             return;

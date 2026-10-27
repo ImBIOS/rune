@@ -410,6 +410,11 @@ pub struct Drag {
     pub dy: f32,
     /// Scratch kept across one gesture's phases (e.g. a grab offset).
     pub data: f32,
+    /// Which click of a run the press is, the same on every phase: 1, then 2 and 3 (and on, as
+    /// AppKit's `clickCount`) for presses on this element each within the double-click
+    /// interval and 4 pt of the one before. A press that drags past 4 pt ends the run. A text
+    /// view selects by words on 2 and lines on 3, and extends by them as the drag moves.
+    pub clicks: u32,
     pub(crate) cancelled: bool,
 }
 

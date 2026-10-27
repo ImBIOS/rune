@@ -169,6 +169,7 @@ impl<S: 'static> Runtime<S> {
             dx: 0.0,
             dy: 0.0,
             data: 0.0,
+            clicks: u32::from(clicks),
             cancelled: false,
         };
         self.capture = Some((path, d));

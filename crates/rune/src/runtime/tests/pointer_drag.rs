@@ -431,3 +431,48 @@ fn rows_mounting_above_keep_a_still_pointers_hover() {
         assert_eq!(group(&rt), 1.0, "the reveal stays shown while rows mount above");
     }
 }
+
+#[test]
+fn a_drag_counts_its_run_of_clicks() {
+    type State = Vec<(Phase, u32)>;
+    fn view(_: &State, _: &mut Cx<State>) -> El {
+        col().children([
+            el().key("text").size(100.0, 40.0).on_drag(|s: &mut State, d, _| s.push((d.phase, d.clicks)))
+                .on_double_press(|s: &mut State| s.push((Phase::Up, 0))),
+            el().key("other").size(100.0, 40.0).on_drag(|s: &mut State, d, _| s.push((d.phase, d.clicks))),
+        ])
+    }
+    let mut rt = Runtime::new(Vec::new(), view, (200.0, 200.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let click = |rt: &mut Runtime<State>, x: f32, y: f32| {
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.1);
+        let downs: Vec<u32> = rt.state.iter().filter(|e| e.0 == Phase::Down).map(|e| e.1).collect();
+        rt.state.clear();
+        downs[0]
+    };
+    let presses: Vec<u32> = (0..4).map(|i| click(&mut rt, 10.0 + i as f32, 10.0)).collect();
+    assert_eq!(presses, [1, 2, 3, 4], "each press within the interval and 4 pt of the last counts on");
+    rt.frame(1.0);
+    assert_eq!(click(&mut rt, 10.0, 10.0), 1, "a press after the interval starts again");
+    assert_eq!(click(&mut rt, 10.0, 50.0), 1, "another element starts again");
+    assert_eq!(click(&mut rt, 20.0, 10.0), 1, "farther than 4 pt starts again");
+
+    rt.pointer_down(20.0, 10.0);
+    rt.pointer_move(40.0, 10.0);
+    rt.pointer_up(40.0, 10.0);
+    rt.frame(0.1);
+    assert!(rt.state.iter().all(|e| e.1 == 2), "every phase of a double-click drag says 2: {:?}", rt.state);
+    rt.state.clear();
+    assert_eq!(click(&mut rt, 20.0, 10.0), 1, "a press that dragged ends the run");
+
+    rt.frame(1.0);
+    rt.pointer_down(10.0, 10.0);
+    rt.pointer_up(10.0, 10.0);
+    rt.frame(0.1);
+    rt.pointer_down(10.0, 10.0);
+    rt.pointer_up(10.0, 10.0);
+    rt.frame(0.1);
+    assert!(rt.state.contains(&(Phase::Up, 0)), "on_double_press still runs: {:?}", rt.state);
+}

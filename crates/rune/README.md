@@ -120,6 +120,12 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   neither half of one. The interval is the system setting on macOS and Windows and 0.5 s
   elsewhere. Headless runs use the virtual clock, so a script's `double-click` (or two `click`s inside 0.5 s) is
   deterministic. Pointer only: the keyboard runs `on_press` (Space, and Return on a row).
+- **Click count in a drag**: `Drag::clicks` says which click of a run an `on_drag` press is, on
+  every phase: 1, then 2, 3 and on for presses on the element each within the double-click
+  interval and 4 pt of the one before, as AppKit's `clickCount`. A press that drags past 4 pt
+  ends the run. An app-drawn text view selects by words on 2 and lines on 3 and extends by them
+  as the drag moves; `on_double_press` keeps pairing as before. A script's `double-click`,
+  `triple-click` and `down`/`move`/`up` drive it on the virtual clock.
 - **Press scale**: `.press_scale(0.97)` shrinks an element (and its children) about its centre
   while a press on it is held, following the pointer in and out like an iOS tile, and springs back
   with a slight bounce on release. Interrupting a spring retargets it without a jump. Layout and

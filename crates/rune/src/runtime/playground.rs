@@ -84,6 +84,7 @@ impl<S: 'static> Runtime<S> {
         self.last_press = None;
         self.last_drag_press = None;
         self.double_armed = false;
+        self.press_clicks.clear();
         let Some(playground) = &mut self.playground else { return };
         if was_open { self.time_scale = playground.app_time_scale; } else { playground.app_time_scale = self.time_scale; }
     }

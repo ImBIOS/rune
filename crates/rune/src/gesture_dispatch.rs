@@ -189,12 +189,13 @@ impl<S: 'static> Runtime<S> {
         let n = &self.nodes[i];
         let r = n.target;
         let [lx, ly] = self.to_local(i, x, y);
-        let d = Drag { phase: Phase::Down, x: lx, y: ly, w: r[2] - r[0], h: r[3] - r[1], start_x: lx, start_y: ly, dx: 0.0, dy: 0.0, data: 0.0, cancelled: false };
+        let d = Drag { phase: Phase::Down, x: lx, y: ly, w: r[2] - r[0], h: r[3] - r[1], start_x: lx, start_y: ly, dx: 0.0, dy: 0.0, data: 0.0, clicks: 1, cancelled: false };
         let path = n.path.clone();
         if n.on_drag.is_some() { self.queue.push(Action::Drag(path.clone(), d, button)); }
         self.drag_out_armed = false;
         self.double_armed = false;
         self.last_press = None;
+        self.press_clicks.clear();
         self.press_at = (x, y);
         self.press_down_t = self.now_clock();
         self.press_moved = false;
