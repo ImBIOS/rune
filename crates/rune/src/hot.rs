@@ -638,8 +638,8 @@ mod tests {
         rt.frame(0.0); // Deliver the first layout report.
         rt.window_focus(true);
         rt.paste("window paste");
-        // Opening the modal focuses its first control.
-        rt.key(KeyEvent { key: Key::Enter, mods: Default::default() });
+        // The modal focuses its first control; Space presses it (Return would go to the default button).
+        rt.key(KeyEvent { key: Key::Text(" ".into()), mods: Default::default() });
         rt.physical_input(crate::PhysicalInput::Modifiers(Default::default()));
         rt.frame(0.0);
         let (x, y) = rt.find("button").unwrap();
