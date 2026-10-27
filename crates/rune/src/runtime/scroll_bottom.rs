@@ -102,7 +102,6 @@ impl<S: 'static> Runtime<S> {
             if animated && !self.reduced_motion && !self.settled && st.max - start > 0.5 {
                 st.offset = start.max(st.max - GLIDE_REACH * view_h);
                 st.glide = Some(glide.unwrap_or(0.0));
-                st.hover_held = true;
                 st.shrink_glide = false;
                 st.pinned = false;
             } else {

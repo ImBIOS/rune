@@ -37,7 +37,6 @@ impl<S: 'static> Runtime<S> {
                     st.x.offset = st.x.offset.clamp(end - reach, end + reach);
                     st.x.aim = to;
                     st.x.glide = Some(st.x.glide.unwrap_or(0.0));
-                    st.hover_held = true;
                 } else {
                     st.x.glide = None;
                     jumps.push((id, true, to));
@@ -52,7 +51,6 @@ impl<S: 'static> Runtime<S> {
                     st.offset = st.offset.clamp(end - reach, end + reach);
                     st.glide_to = Some(to);
                     st.glide = Some(st.glide.unwrap_or(0.0));
-                    st.hover_held = true;
                     st.shrink_glide = false;
                     st.pinned = false;
                 } else {

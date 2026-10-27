@@ -877,8 +877,6 @@ struct ScrollState {
     /// Velocity of a glide to the bottom (`Tx::scroll_to_bottom`) or to `glide_to`
     /// (`Tx::scroll_to`) while one runs.
     glide: Option<f32>,
-    /// The glide started under a still pointer, which hasn't moved since (see `scroll_holds_hover`).
-    hover_held: bool,
     /// The glide is `ease_to_shrunk_end`'s, which retargets or ends it as the rows move.
     shrink_glide: bool,
     /// A hand scrolled while the growth stack moved: no shrink glide until it settles.
@@ -1177,6 +1175,8 @@ pub struct Runtime<S: 'static> {
     hover_pending: Vec<(String, bool, f64)>,
     /// A press stopped the waits to report an enter; the pointer's next move restarts them.
     hover_paused: bool,
+    /// Hover waiting out layout motion under a still pointer.
+    hover_hold: hover::HoverHold,
     /// Files dragged over the window from another app (`drop_dispatch`).
     file_drag: drop_dispatch::FileDrag,
     pub ime_area: Option<[f32; 4]>,
@@ -1534,6 +1534,7 @@ impl<S: 'static> Runtime<S> {
             hover_shown: Vec::new(),
             hover_pending: Vec::new(),
             hover_paused: false,
+            hover_hold: Default::default(),
             file_drag: Default::default(),
             ime_area: None,
             caret: None,
@@ -2867,7 +2868,9 @@ impl<S: 'static> Runtime<S> {
             }
             Action::HoverChange(path, inside) => {
                 let gone = self.hover_gone.iter().position(|g| g.0 == path).map(|i| self.hover_gone.remove(i).1);
-                let Some(f) = self.node(&path).and_then(|n| n.on_hover_change.clone()).or(gone) else { return false };
+                // A leave still reaches an element on its way out.
+                let exiting = || self.nodes.iter().find(|n| !inside && n.path == path).and_then(|n| n.on_hover_change.clone());
+                let Some(f) = self.node(&path).and_then(|n| n.on_hover_change.clone()).or(gone).or_else(exiting) else { return false };
                 f(handler_state(&mut self.state), inside, &mut one);
                 true
             }
@@ -4537,7 +4540,6 @@ impl<S: 'static> Runtime<S> {
                     direct: false,
                     scrolling: false,
                     glide: None,
-                    hover_held: false,
                     shrink_glide: false,
                     shrink_cut: false,
                     glide_to: None,
@@ -4871,7 +4873,6 @@ impl<S: 'static> Runtime<S> {
                 st.v = 0.0;
             }
             st.offset = st.offset.clamp(0.0, st.max);
-            if st.glide.is_none() && st.x.glide.is_none() { st.hover_held = false; }
             // Landed on a shrinking stack's new end: stick once its rows are within half a point
             // of it, not while they're still short of it.
             let shrinking = laid.is_some_and(|end| end < st.max - 0.5 && st.offset < st.max - 1e-3);

@@ -88,7 +88,7 @@ fn a_press_that_starts_a_glide_still_lets_go() {
     rt.pointer_up(100.0, 110.0);
     rt.frame(1.0 / 120.0);
     rt.frame(1.0 / 120.0);
-    assert!(rt.scroll_holds_hover(), "the press's glide holds hover");
+    assert!(rt.hover_hold.held, "the press's glide holds hover");
     assert_eq!(rt.scene.store().target(id, P_PRESS), Some(0.0), "the press lets go mid-glide");
     assert_eq!(rt.scene.store().target(id, P_PRESS_SCALE), Some(1.0), "the press scale springs back mid-glide");
 }
@@ -97,13 +97,14 @@ fn a_press_that_starts_a_glide_still_lets_go() {
 fn the_hold_ends_with_its_glide() {
     let mut rt = hovering();
     rt.update(|_, tx| tx.scroll_to("scroll", 0.0, 400.0));
-    rt.frame(1.0 / 120.0);
-    assert!(rt.scrolls.values().any(|s| s.hover_held));
+    let mut held = false;
     for _ in 0..600 {
         rt.frame(1.0 / 120.0);
+        held |= rt.hover_hold.held;
         if rt.scrolls.values().all(|s| s.glide.is_none()) { break; }
     }
-    assert!(rt.scrolls.values().all(|s| !s.hover_held), "no stale hold is left for a later glide");
+    assert!(held, "the glide held hover");
+    assert!(!rt.hover_hold.held && !rt.hover_hold.released, "no stale hold is left for a later glide");
 }
 
 /// Two viewports side by side, and a modal over both while `open`.
@@ -121,9 +122,12 @@ fn gliding_pair() -> Runtime<bool> {
     rt.pointer_move(50.0, 110.0);
     rt.frame(1.0 / 120.0);
     rt.update(|_, tx| { tx.scroll_to("l", 0.0, 400.0); tx.scroll_to("r", 0.0, 400.0); });
-    rt.frame(1.0 / 120.0);
-    assert!(rt.scroll_holds_hover());
-    rt
+    // Until a row other than the hovered one glides under the pointer.
+    for _ in 0..30 {
+        rt.frame(1.0 / 120.0);
+        if rt.hover_hold.held { return rt; }
+    }
+    panic!("the glides held hover");
 }
 
 #[test]
@@ -132,7 +136,7 @@ fn a_hand_scroll_anywhere_lets_go_of_the_hold() {
     rt.wheel(150.0, 110.0, -10.0);
     rt.frame(1.0 / 120.0);
     assert!(rt.scrolls.values().any(|s| s.glide.is_some()), "the viewport under the pointer still glides");
-    assert!(!rt.scroll_holds_hover(), "a wheel over the other viewport lets hover follow the pointer again");
+    assert!(rt.hover_hold.released && !rt.hover_hold.held, "a wheel over the other viewport lets hover follow the pointer again");
 }
 
 #[test]
@@ -140,8 +144,8 @@ fn a_viewport_under_a_modal_holds_no_hover() {
     let mut rt = gliding_pair();
     rt.update(|s, _| *s = true);
     rt.frame(1.0 / 120.0);
-    assert!(rt.scrolls.values().any(|s| s.glide.is_some() && s.hover_held));
-    assert!(!rt.scroll_holds_hover(), "a modal makes the gliding viewport inert");
+    assert!(rt.scrolls.values().any(|s| s.glide.is_some()));
+    assert!(!rt.hover_hold.held, "a modal makes the gliding viewport inert");
 }
 
 /// Two hundred virtual rows, each recording its `on_hover_change`.
@@ -161,12 +165,12 @@ fn a_row_leaving_the_tree_under_a_held_glide_hears_the_pointer_leave() {
     assert_eq!(rt.state, [(5, true)]);
     rt.update(|_, tx| tx.scroll_to("scroll", 0.0, 3000.0));
     rt.frame(1.0 / 120.0);
-    assert!(rt.scroll_holds_hover());
+    assert!(rt.hover_hold.held);
     assert!(!rt.nodes.iter().any(|n| n.named("r5") && !rt.is_exiting(n.id)), "the glide's cut unmounts the row");
     for _ in 0..120 {
         rt.frame(1.0 / 120.0);
         if rt.state.contains(&(5, false)) { break; }
     }
     assert!(rt.state.contains(&(5, false)), "the row heard the leave before it was pruned: {:?}", rt.state);
-    assert!(rt.scroll_holds_hover(), "while the glide still holds hover");
+    assert!(rt.hover_hold.held, "while the glide still holds hover");
 }

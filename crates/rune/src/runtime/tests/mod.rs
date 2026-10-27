@@ -4,6 +4,7 @@ use crate::el::{col, el};
 
 mod group_opacity;
 mod input_clipboard;
+mod layout_hover;
 mod layout_rows;
 mod loop_sleep;
 mod picture_scale;
