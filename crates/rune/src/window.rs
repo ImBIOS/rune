@@ -665,6 +665,7 @@ impl ApplicationHandler<WakeEvent> for Windows {
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if let Some(host) = self.hosts.iter_mut().flatten().find(|h| h.owns(id)) {
+            let _input = crate::input_time::arrived(&event);
             host.window_event(event_loop, id, event);
         }
         self.cleanup(event_loop);

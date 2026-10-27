@@ -99,6 +99,7 @@ mod el_drop;
 mod el_pills;
 mod el_sticky;
 mod el_tx;
+mod input_time;
 mod key_diagnostics;
 pub mod growth;
 pub mod live;

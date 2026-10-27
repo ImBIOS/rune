@@ -34,6 +34,14 @@ impl Tx {
     /// the key's own [`KeyEvent::mods`](crate::KeyEvent) instead.
     pub fn mods(&self) -> crate::Mods { self.mods }
 
+    /// When the input this handler runs for arrived, to measure input-to-photon latency
+    /// against [`FrameEncoded`](crate::FrameEncoded): on macOS the timestamp of the `NSEvent`
+    /// AppKit dispatched it in, elsewhere when the window took it from winit. Input that piles
+    /// up between frames keeps each event's own time. `None` in handlers no input caused
+    /// (timers, polls, updates, layout callbacks) and for input fed to a `Runtime` directly
+    /// (`Runtime::key` and kin, headless scripts).
+    pub fn input_time(&self) -> Option<crate::time::Instant> { self.input_time }
+
     /// In a key handler, the key of the element that had focus when the key arrived, `None`
     /// when nothing had (and in every other handler). An unkeyed element reads as `#n`, its
     /// index among its siblings, and a focused [`Link`](crate::Link) as its id. A window's `on_key` hears

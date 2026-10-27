@@ -153,7 +153,7 @@ fn secondary_only_children_preserve_primary_click_hover_and_background_blur() {
     rt.pointer_move(10.0, 10.0);
     rt.pointer_down(10.0, 10.0);
     assert!(rt.hovered.is_none());
-    assert!(matches!(rt.queue.last(), Some(Action::Blur)));
+    assert!(matches!(rt.queue.iter().last(), Some(Action::Blur)));
     assert!(rt.secondary_target(10.0, 10.0).is_some());
 }
 

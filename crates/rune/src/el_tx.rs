@@ -11,6 +11,8 @@ use crate::el::*;
 pub struct Tx {
     pub(crate) shortcut_activation_token: Option<String>,
     pub(crate) key_repeat: bool,
+    /// `Tx::input_time`.
+    pub(crate) input_time: Option<crate::time::Instant>,
     pub(crate) physical_key: Option<crate::PhysicalKeyCode>,
     pub(crate) key_base: Option<char>,
     pub(crate) focused: Option<String>,

@@ -998,7 +998,7 @@ pub struct Runtime<S: 'static> {
     /// animation (`step_viewport`), not the user or the system.
     viewport_stepped: bool,
     settle: bool,
-    queue: Vec<Action>,
+    queue: ActionQueue,
     pointer: Option<(f32, f32)>,
     capture: Option<(String, Drag)>,
     /// The button holding `capture` (`El::pointer_buttons`).
@@ -1423,7 +1423,7 @@ impl<S: 'static> Runtime<S> {
             relayout: false,
             viewport_stepped: false,
             settle: false,
-            queue: Vec::new(),
+            queue: ActionQueue::default(),
             pointer: None,
             capture: None,
             capture_button: crate::PointerButton::Primary,
@@ -1944,7 +1944,8 @@ impl<S: 'static> Runtime<S> {
     pub fn tracing(&self) -> bool { self.trace_channels.is_some() || self.scene.tracing() }
 
     fn transaction(&self) -> Tx {
-        Tx { trace: self.tracing().then(crate::el::TraceCalls::default), mods: self.held_mods, selection: self.selection_snapshot(), ..Tx::default() }
+        Tx { trace: self.tracing().then(crate::el::TraceCalls::default), mods: self.held_mods, selection: self.selection_snapshot(),
+            input_time: crate::input_time::current(), ..Tx::default() }
     }
 
     /// A scalar from the actual draw path (e.g. `shell.width`). Values hold until resampled.
@@ -2087,6 +2088,8 @@ impl<S: 'static> Runtime<S> {
     /// `elapsed` advances the logical clock when no wall clock drives it; `catch_up` steps
     /// running motion before the commit and `dt` steps all motion after it.
     fn frame_step(&mut self, elapsed: f64, catch_up: f64, dt: f64) -> bool {
+        // Each queued action runs with its own input's arrival time; nothing else has one.
+        let _input = crate::input_time::scope(None);
         let mut live_woke = self.take_live_wake();
         #[cfg(feature = "hot")]
         if self.hot.as_mut().is_some_and(crate::hot::Session::changed) {
@@ -2155,7 +2158,8 @@ impl<S: 'static> Runtime<S> {
         #[cfg(debug_assertions)]
         let mut ran_other = ran;
         let mut pointer_hover = false;
-        for action in queue {
+        for Queued { action, at } in queue {
+            let _input = crate::input_time::scope(at);
             pointer_hover |= matches!(action, Action::Hover(_));
             // State may have requested focus on a newly mounted field. Resolve the
             // new tree before routing this frame's text, not after it has gone to
@@ -2215,8 +2219,8 @@ impl<S: 'static> Runtime<S> {
         self.latch_requests(&mut tx);
         // A handler asked for a menu: the hover it takes ends in this commit, not a frame later.
         if self.release_pointer_for_popup() {
-            for action in std::mem::take(&mut self.queue) {
-                if matches!(action, Action::HoverChange(..)) { ran |= self.run_action(action, &mut tx); } else { self.queue.push(action); }
+            for queued in std::mem::take(&mut self.queue) {
+                if matches!(queued.action, Action::HoverChange(..)) { ran |= self.run_action(queued.action, &mut tx); } else { self.queue.push_queued(queued); }
             }
             open_urls.extend(std::mem::take(&mut tx.open_urls));
             self.latch_requests(&mut tx);

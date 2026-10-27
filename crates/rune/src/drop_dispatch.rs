@@ -37,7 +37,7 @@ pub(crate) struct FileDrag {
     hits: Vec<(NodeId, [f32; 4], usize)>,
     /// File steps waiting for this frame's build (`hold_files`), and whether those leading the
     /// queue already waited one.
-    held: Vec<Action>,
+    held: Vec<Queued>,
     waited: bool,
 }
 
@@ -137,20 +137,20 @@ impl<S: 'static> Runtime<S> {
     /// (`stale`: state changed this frame, or while the window was covered and built nothing)
     /// waits for this frame's build, once, so it lands on what is mounted and laid out now. The
     /// file steps after it wait too, to keep their order.
-    pub(super) fn hold_files(&mut self, queue: Vec<Action>, stale: bool) -> Vec<Action> {
+    pub(super) fn hold_files(&mut self, queue: ActionQueue, stale: bool) -> ActionQueue {
         let waited = std::mem::take(&mut self.file_drag.waited);
         let aims = |a: &Action| matches!(a, Action::Files(FileEvent::Hover(..) | FileEvent::Move | FileEvent::Drop(..)));
         if waited || !stale || !queue.iter().any(aims) { return queue; }
-        let (files, rest) = queue.into_iter().partition(|a| matches!(a, Action::Files(_)));
+        let (files, rest): (_, Vec<_>) = queue.into_iter().partition(|q| matches!(q.action, Action::Files(_)));
         self.file_drag.held = files;
-        rest
+        rest.into_iter().collect()
     }
 
     /// The held file steps go first next frame.
     pub(super) fn release_files(&mut self) {
         if self.file_drag.held.is_empty() { return; }
         self.file_drag.waited = true;
-        self.queue.splice(0..0, std::mem::take(&mut self.file_drag.held));
+        self.queue.prepend(std::mem::take(&mut self.file_drag.held));
     }
 
     /// File steps wait for the next frame (`hold_files`).

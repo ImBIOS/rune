@@ -1,6 +1,7 @@
 //! The actions input and layout queue for the next frame's handlers, and how a frame runs them.
 
 use super::*;
+use crate::time::Instant;
 
 pub(super) enum Action {
     WindowFocus(bool),
@@ -46,6 +47,52 @@ pub(super) enum Action {
     FileDialog(u64, crate::file_dialog::FileDialogResult),
     Focus(String, f32, f32),
     Blur,
+}
+
+/// A queued action and when the input that queued it arrived (`Tx::input_time`): the arrival
+/// time its host dispatched the input under (`input_time::scope`), none for what layout,
+/// timers, updates and polls queue.
+pub(super) struct Queued {
+    pub(super) action: Action,
+    pub(super) at: Option<Instant>,
+}
+
+/// The actions waiting for the next frame, in order, each with its input's arrival time.
+#[derive(Default)]
+pub(super) struct ActionQueue(Vec<Queued>);
+
+impl ActionQueue {
+    /// Queues `action` stamped with the input being dispatched now, if any.
+    pub(super) fn push(&mut self, action: Action) { self.0.push(Queued { action, at: crate::input_time::current() }); }
+    /// Queues an action again with its own stamp.
+    pub(super) fn push_queued(&mut self, queued: Queued) { self.0.push(queued); }
+    /// Puts `queued` ahead of everything queued.
+    pub(super) fn prepend(&mut self, queued: Vec<Queued>) { self.0.splice(0..0, queued); }
+    pub(super) fn iter(&self) -> impl Iterator<Item = &Action> { self.0.iter().map(|q| &q.action) }
+    pub(super) fn len(&self) -> usize { self.0.len() }
+    pub(super) fn is_empty(&self) -> bool { self.0.is_empty() }
+    pub(super) fn retain(&mut self, mut keep: impl FnMut(&Action) -> bool) { self.0.retain(|q| keep(&q.action)); }
+    pub(super) fn remove(&mut self, index: usize) -> Action { self.0.remove(index).action }
+}
+
+impl Extend<Action> for ActionQueue {
+    fn extend<I: IntoIterator<Item = Action>>(&mut self, actions: I) {
+        for action in actions { self.push(action); }
+    }
+}
+
+impl Extend<Queued> for ActionQueue {
+    fn extend<I: IntoIterator<Item = Queued>>(&mut self, queued: I) { self.0.extend(queued); }
+}
+
+impl FromIterator<Queued> for ActionQueue {
+    fn from_iter<I: IntoIterator<Item = Queued>>(queued: I) -> Self { Self(queued.into_iter().collect()) }
+}
+
+impl IntoIterator for ActionQueue {
+    type Item = Queued;
+    type IntoIter = std::vec::IntoIter<Queued>;
+    fn into_iter(self) -> Self::IntoIter { self.0.into_iter() }
 }
 
 /// The handler an event goes to, when its `Tx::live_only` can keep the event from committing.
@@ -134,11 +181,11 @@ pub(super) fn merge(tx: &mut Tx, one: Tx) {
 /// Slots the ends hosts reported since the last frame into this frame's actions. One OS drag
 /// runs at a time and hosts report ends in order, so each belongs to the oldest open drag: it
 /// runs before any later drag's start, and after its own start when both are queued.
-pub(super) fn order_drag_ends(queue: Vec<Action>, ended: Vec<(String, crate::DragOutcome)>, open: &mut usize) -> Vec<Action> {
-    let mut ended = ended.into_iter().map(|(path, outcome)| Action::DragEnd(path, outcome));
+pub(super) fn order_drag_ends(queue: ActionQueue, ended: Vec<(String, crate::DragOutcome)>, open: &mut usize) -> ActionQueue {
+    let mut ended = ended.into_iter().map(|(path, outcome)| Queued { action: Action::DragEnd(path, outcome), at: None });
     let mut out = Vec::with_capacity(queue.len() + ended.len());
-    for action in queue {
-        match &action {
+    for queued in queue {
+        match &queued.action {
             Action::DragStart(_) => {
                 while *open > 0 && let Some(end) = ended.next() {
                     out.push(end);
@@ -149,11 +196,11 @@ pub(super) fn order_drag_ends(queue: Vec<Action>, ended: Vec<(String, crate::Dra
             Action::DragEnd(..) => *open = open.saturating_sub(1),
             _ => {}
         }
-        out.push(action);
+        out.push(queued);
     }
     for end in ended {
         *open = open.saturating_sub(1);
         out.push(end);
     }
-    out
+    ActionQueue(out)
 }
