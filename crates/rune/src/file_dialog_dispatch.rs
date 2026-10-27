@@ -2,7 +2,8 @@ use super::*;
 use crate::file_dialog::{FileDialogError, FileDialogKind, FileDialogOptions, FileDialogResult, Pending, Request};
 
 impl<S: 'static> Runtime<S> {
-    /// The file dialog showing, or about to show, from [`Tx::open_file`] or [`Tx::save_file`].
+    /// The file dialog showing, or about to show, from [`Tx::open_file`], [`Tx::save_file`] or
+    /// [`Tx::open_folder`].
     pub fn file_dialog(&self) -> Option<(FileDialogKind, &FileDialogOptions)> {
         self.file_dialog.as_ref().map(|d| (d.kind, &d.options))
     }

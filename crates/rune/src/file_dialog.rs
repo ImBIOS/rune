@@ -2,7 +2,7 @@
 //! Native futures use rfd on macOS and Windows, and the XDG desktop portal's FileChooser
 //! over zbus on Linux.
 //!
-//! A handler can also ask with [`Tx::open_file`] or [`Tx::save_file`]: the window shows the
+//! A handler can also ask with [`Tx::open_file`], [`Tx::save_file`] or [`Tx::open_folder`]: the window shows the
 //! dialog once the handler's frame is done, and the answer runs the callback as an action on
 //! a later frame. Headless runs keep the dialog open in `--tree` (`fileDialog`) until a
 //! script's `{"type": "file-dialog", "path": …}` or `{"type": "file-dialog-cancel"}` answers it.
@@ -40,11 +40,13 @@ impl FileDialogOptions {
     }
 }
 
+/// Which dialog: Open picks an existing file, Save names a file to write, Folder picks an
+/// existing folder (its options' filters and file name don't apply).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FileDialogKind { Open, Save }
+pub enum FileDialogKind { Open, Save, Folder }
 
 impl FileDialogKind {
-    fn name(self) -> &'static str { match self { Self::Open => "open", Self::Save => "save" } }
+    fn name(self) -> &'static str { match self { Self::Open => "open", Self::Save => "save", Self::Folder => "folder" } }
 }
 
 /// Expected request and its response. `None` is cancellation, not a missing fixture.
@@ -86,6 +88,9 @@ impl FileDialogs {
     pub async fn save(&self, options: FileDialogOptions) -> Result<Option<PathBuf>, FileDialogError> {
         self.show(FileDialogKind::Save, options).await
     }
+    pub async fn open_folder(&self, options: FileDialogOptions) -> Result<Option<PathBuf>, FileDialogError> {
+        self.show(FileDialogKind::Folder, options).await
+    }
     async fn show(&self, kind: FileDialogKind, options: FileDialogOptions) -> Result<Option<PathBuf>, FileDialogError> {
         match &self.0 {
             Backend::Scripted(responses) => {
@@ -121,6 +126,7 @@ fn rfd_show(dialog: rfd::AsyncFileDialog, kind: FileDialogKind) -> impl Future<O
     let file: Pin<Box<dyn Future<Output = Option<rfd::FileHandle>> + Send>> = match kind {
         FileDialogKind::Open => Box::pin(dialog.pick_file()),
         FileDialogKind::Save => Box::pin(dialog.save_file()),
+        FileDialogKind::Folder => Box::pin(dialog.pick_folder()),
     };
     async move { Ok(file.await.map(|file| file.path().to_path_buf())) }
 }
@@ -129,7 +135,7 @@ async fn native(_: FileDialogKind, _: FileDialogOptions) -> Result<Option<PathBu
     Err(FileDialogError("native file dialogs aren't supported on this platform".into()))
 }
 
-/// What a [`Tx::open_file`] or [`Tx::save_file`] callback gets: the chosen path, `Ok(None)`
+/// What a [`Tx::open_file`], [`Tx::save_file`] or [`Tx::open_folder`] callback gets: the chosen path, `Ok(None)`
 /// when the user cancels, or why no dialog could show.
 pub type FileDialogResult = Result<Option<PathBuf>, FileDialogError>;
 
@@ -203,6 +209,13 @@ impl Tx {
     /// [`Tx::open_file`] for a Save dialog: the path to write, which may not exist yet.
     pub fn save_file<S: 'static>(&mut self, options: FileDialogOptions, on_answer: impl FnOnce(&mut S, FileDialogResult, &mut Tx) + 'static) {
         self.file_dialog(FileDialogKind::Save, options, on_answer);
+    }
+
+    /// [`Tx::open_file`] for a folder: an Open dialog that picks an existing folder, as an app
+    /// opening a project or choosing where exports go. `options`' title and directory apply;
+    /// its filters and file name don't. A script answers it as it does a file dialog.
+    pub fn open_folder<S: 'static>(&mut self, options: FileDialogOptions, on_answer: impl FnOnce(&mut S, FileDialogResult, &mut Tx) + 'static) {
+        self.file_dialog(FileDialogKind::Folder, options, on_answer);
     }
 
     fn file_dialog<S: 'static>(&mut self, kind: FileDialogKind, options: FileDialogOptions, on_answer: impl FnOnce(&mut S, FileDialogResult, &mut Tx) + 'static) {
@@ -317,11 +330,14 @@ mod tests {
         let dialogs = FileDialogs::scripted([
             ScriptedFileDialog { kind: FileDialogKind::Open, path: Some(path.clone()) },
             ScriptedFileDialog { kind: FileDialogKind::Save, path: None },
+            ScriptedFileDialog { kind: FileDialogKind::Folder, path: Some("/fixture/Projects".into()) },
         ]);
         let options = FileDialogOptions::default().filter("Audio", &["wav", "flac"]);
         assert!(pollster::block_on(dialogs.save(options.clone())).is_err());
         assert_eq!(pollster::block_on(dialogs.open(options.clone())).unwrap(), Some(path));
         assert_eq!(pollster::block_on(dialogs.clone().save(options.clone())).unwrap(), None);
+        assert!(pollster::block_on(dialogs.open(options.clone())).is_err(), "a folder fixture doesn't answer an Open");
+        assert_eq!(pollster::block_on(dialogs.open_folder(options.clone())).unwrap(), Some("/fixture/Projects".into()));
         assert!(pollster::block_on(dialogs.open(options)).is_err());
     }
 
@@ -365,6 +381,24 @@ mod tests {
         rt.frame(5.0 / 60.0);
         assert_eq!(rt.state.answers[1], Ok(None), "cancelling answers None");
         assert!(rt.resolve_file_dialog(None).is_err(), "nothing is open");
+    }
+
+    #[test]
+    fn a_folder_dialog_waits_open_as_a_folder_and_answers_with_the_folder() {
+        fn view(_: &Import, _: &mut Cx<Import>) -> El {
+            el().key("open").size(80.0, 20.0).on_press_tx(|_: &mut Import, tx: &mut Tx| {
+                let options = FileDialogOptions { title: "Open Project".into(), directory: Some("/work".into()), ..Default::default() };
+                tx.open_folder(options, |s: &mut Import, result, _| s.answers.push(result.map_err(|e| e.0)));
+            })
+        }
+        let mut rt = Runtime::new(Import::default(), view, (200.0, 100.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        press(&mut rt);
+        assert_eq!(rt.file_dialog().map(|(kind, o)| (kind, o.title.clone())), Some((FileDialogKind::Folder, "Open Project".into())));
+        assert_eq!(rt.file_dialog_json().unwrap(), serde_json::json!({ "kind": "folder", "title": "Open Project", "filters": [], "directory": "/work" }));
+        rt.resolve_file_dialog(Some("/work/notes".into())).unwrap();
+        rt.frame(2.0 / 60.0);
+        assert_eq!(rt.state.answers, [Ok(Some("/work/notes".into()))]);
     }
 
     #[test]

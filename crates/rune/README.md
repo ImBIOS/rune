@@ -1225,8 +1225,8 @@ draw it, so `--snap` shows it and `--tree` has a top-level `tooltip` object.
 ### File dialogs
 
 Enable Rune's `native-file-dialog` feature and inject `FileDialogs::native()` in the shell.
-`dialogs.open(options).await` and `dialogs.save(options).await` return an optional path
-(None means cancelled). `FileDialogOptions` carries title, directory, suggested filename and
+`dialogs.open(options).await`, `dialogs.save(options).await` and
+`dialogs.open_folder(options).await` return an optional path (None means cancelled). `FileDialogOptions` carries title, directory, suggested filename and
 `.filter("Audio", &["wav", "flac"])`. rfd handles macOS and Windows; on Linux Rune calls the
 XDG desktop portal's FileChooser itself over zbus, parented to the focused X11 window, and
 returns an error when the desktop has no portal. Poll these futures on the app's async executor
@@ -1254,7 +1254,9 @@ Or ask from a handler, with no executor or waker to wire up:
 - The window shows the dialog once the handler's frame is done (a sheet on macOS, owned by
   the window on Windows, the portal's chooser on Linux) and keeps drawing while it's up. The
   answer runs the callback on a later frame, as `tx.read_clipboard` does. `tx.save_file` is
-  the same for a Save dialog.
+  the same for a Save dialog, and `tx.open_folder` for an Open dialog that picks a folder
+  (`FileDialogKind::Folder`, `"kind": "folder"` in `--tree`; filters and file name don't apply;
+  the portal's `directory` chooser on Linux).
 - One dialog at a time: asked for while one is open, the callback gets an error at once and
   the open dialog stays. Asked for in the same turn that shows a hidden window, it shows with
   the window; asked for on a window that stays hidden, or on an overlay, the callback gets an

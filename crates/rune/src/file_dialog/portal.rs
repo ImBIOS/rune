@@ -47,10 +47,11 @@ fn dbus_error(e: zbus::Error) -> FileDialogError {
 fn request_options<'a>(kind: FileDialogKind, options: &'a FileDialogOptions, token: &'a str) -> HashMap<&'static str, Variant<'a>> {
     let mut map = HashMap::from([("handle_token", Variant::from(token)), ("modal", Variant::from(true))]);
     let filters = filters(options);
-    if !filters.is_empty() { map.insert("filters", Variant::from(filters)); }
+    if !filters.is_empty() && kind != FileDialogKind::Folder { map.insert("filters", Variant::from(filters)); }
     if let Some(bytes) = options.directory.as_deref().and_then(path_bytes) {
         map.insert("current_folder", Variant::from(bytes));
     }
+    if kind == FileDialogKind::Folder { map.insert("directory", Variant::from(true)); }
     if kind == FileDialogKind::Save && let Some(name) = options.file_name.as_deref().filter(|s| !s.is_empty()) {
         map.insert("current_name", Variant::from(name));
     }
@@ -91,7 +92,8 @@ async fn run(kind: FileDialogKind, options: FileDialogOptions, parent: String, m
             res = request.receive_signal("Response") => res.map_err(dbus_error)?,
             _ = reply.closed() => { let _ = conn.close().await; return Ok(None); }
         };
-        let method = match kind { FileDialogKind::Open => "OpenFile", FileDialogKind::Save => "SaveFile" };
+        // A folder is OpenFile's `directory` choice (portal version 3).
+        let method = match kind { FileDialogKind::Open | FileDialogKind::Folder => "OpenFile", FileDialogKind::Save => "SaveFile" };
         let body = (parent.as_str(), options.title.as_str(), request_options(kind, &options, &token));
         let handle: OwnedObjectPath = portal.call(method, &body).await.map_err(dbus_error)?;
         if handle.as_str() != path {
@@ -145,6 +147,11 @@ mod tests {
         assert_eq!(open.get("filters"), Some(&Variant::from(vec![("Exports".to_string(), vec![(0u32, "*.csv".to_string())])])));
         assert_eq!(open.get("current_folder"), Some(&Variant::from(b"/home/a/Downloads\0".to_vec())));
         assert!(!open.contains_key("current_name"));
+        assert!(!open.contains_key("directory"));
+        let folder = request_options(FileDialogKind::Folder, &options, "t4");
+        assert_eq!(folder.get("directory"), Some(&Variant::from(true)));
+        assert!(!folder.contains_key("filters"));
+        assert_eq!(folder.get("current_folder"), Some(&Variant::from(b"/home/a/Downloads\0".to_vec())));
         let save = request_options(FileDialogKind::Save, &options, "t2");
         assert_eq!(save.get("current_name"), Some(&Variant::from("export.csv")));
         let empty = FileDialogOptions { directory: Some(PathBuf::new()), file_name: Some(String::new()), ..Default::default() }
