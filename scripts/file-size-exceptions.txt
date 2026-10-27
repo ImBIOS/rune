@@ -6,7 +6,7 @@ crates/rune-fx/src/lib.rs 1509
 crates/rune-fx/src/renderer.rs 851
 crates/rune-kit/src/diff/state.rs 886
 crates/rune-kit/src/diff/view.rs 865
-crates/rune-kit/src/markdown.rs 2258
+crates/rune-kit/src/markdown.rs 2330
 crates/rune-kit/src/syntax/scan.rs 1694
 crates/rune-kit/src/tree.rs 1217
 crates/rune-light/examples/light.rs 1236
@@ -18,14 +18,15 @@ crates/rune/src/clipboard.rs 872
 crates/rune/src/desktop.rs 1238
 crates/rune/src/edit.rs 2780
 crates/rune/src/edit/html.rs 992
-crates/rune/src/el.rs 3849
+crates/rune/src/el.rs 3949
 crates/rune/src/macos.rs 987
 crates/rune/src/overlay.rs 1983
 crates/rune/src/recorder/mod.rs 812
 crates/rune/src/render.rs 1485
-crates/rune/src/runtime.rs 9237
+crates/rune/src/runtime.rs 8653
+crates/rune/src/selectable.rs 802
 crates/rune/src/text.rs 3151
-crates/rune/src/tooling.rs 2303
+crates/rune/src/tooling.rs 2004
 crates/rune/src/video/macos.rs 914
 crates/rune/src/window.rs 3561
 examples/cursed-settings/src/gags.rs 850
