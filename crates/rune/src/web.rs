@@ -14,7 +14,8 @@ pub(crate) fn safe_area() -> [f32; 4] { INSETS.get() }
 /// Open an HTTP(S) or mail link in a new browser tab. Call from a user input handler;
 /// browser popup policy applies. The new page receives no opener or referrer.
 pub fn open_url(url: &str) -> Result<(), String> {
-    platform::open_link(url).map_err(|e| format!("{e:?}"))
+    let url = crate::open_url::check(url).map_err(|e| e.to_string())?;
+    platform::open_link(&url).map_err(|e| format!("{e:?}"))
 }
 
 #[derive(Clone, Copy)]
@@ -140,6 +141,7 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
             rt.set_os_drag(false);
             let now = Instant::now();
             rt.wall_start = Some(now);
+            rt.open_urls_natively = true;
             shared.connect(wake.clone());
             let menus = crate::native_menu::Guard::attach(&shared, false);
             let shortcuts = crate::shortcuts::Guard::attach(&shared, wake.clone(), false, false);

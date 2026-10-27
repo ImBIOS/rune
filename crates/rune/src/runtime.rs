@@ -1239,6 +1239,8 @@ pub struct Runtime<S: 'static> {
     pub(crate) minimize_request: bool,
     /// Links handlers asked to open that this runtime left unopened (`Runtime::take_url_requests`).
     pub(crate) url_requests: Vec<String>,
+    /// True when attached to a live window, overlay or web canvas, not a headless or scripted run.
+    pub(crate) open_urls_natively: bool,
     /// Pop-up menus asked for (`Tx::popup_menu`) and not yet answered, oldest first.
     pub(crate) popups: std::collections::VecDeque<crate::popup_menu::Request>,
     /// The first of `popups` is showing.
@@ -1561,6 +1563,7 @@ impl<S: 'static> Runtime<S> {
             shell_request: None,
             minimize_request: false,
             url_requests: Vec::new(),
+            open_urls_natively: false,
             popups: Default::default(),
             file_dialog: None,
             file_dialog_answers: Vec::new(),
@@ -2403,12 +2406,14 @@ impl<S: 'static> Runtime<S> {
             }
             self.run_pick_reads(&mut tx);
         }
+        let mut open_urls = std::mem::take(&mut tx.open_urls);
         self.latch_requests(&mut tx);
         // A handler asked for a menu: the hover it takes ends in this commit, not a frame later.
         if self.release_pointer_for_popup() {
             for action in std::mem::take(&mut self.queue) {
                 if matches!(action, Action::HoverChange(..)) { ran |= self.run_action(action, &mut tx); } else { self.queue.push(action); }
             }
+            open_urls.extend(std::mem::take(&mut tx.open_urls));
             self.latch_requests(&mut tx);
         }
         self.release_files();
@@ -2497,6 +2502,7 @@ impl<S: 'static> Runtime<S> {
         self.animating = (animating && self.time_scale > 0.0) || filling;
         #[cfg(all(feature = "dev", debug_assertions))]
         if self.dev_clock.as_ref().is_some_and(|clock| clock.paused) { self.animating = false; }
+        if !open_urls.is_empty() { self.open_urls(open_urls); }
         self.animating
     }
 

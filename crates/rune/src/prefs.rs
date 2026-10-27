@@ -17,12 +17,18 @@
 //! nothing watches the file: a second process's changes show up at the next `open`. A file that
 //! doesn't parse is moved to `prefs.json.bad` and the store starts empty. On the web, and where
 //! no config directory can be found, the store is in memory and `is_persistent` says so.
-use std::{collections::BTreeMap, fmt, io, path::{Path, PathBuf}};
+use std::{
+    collections::BTreeMap,
+    fmt, io,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 const FILE: &str = "prefs.json";
+static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
 
 /// Why a change couldn't be saved. The value is still set in memory.
 #[derive(Debug)]
@@ -119,14 +125,18 @@ fn load(path: &Path) -> BTreeMap<String, Value> {
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use io::Write;
-    if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    let seq = NEXT_TMP.fetch_add(1, Ordering::Relaxed);
+    tmp.push(format!(".{}.{seq}.tmp", std::process::id()));
     let tmp = PathBuf::from(tmp);
     let result = (|| {
         let mut file = std::fs::File::create(&tmp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        drop(file);
         std::fs::rename(&tmp, path)
     })();
     if result.is_err() { let _ = std::fs::remove_file(&tmp); }
@@ -137,7 +147,8 @@ fn sanitize(app_id: &str) -> String {
     let id: String = app_id.trim().chars()
         .map(|c| if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
         .collect();
-    match id.as_str() { "" | "." | ".." => "app".into(), _ => id }
+    let trimmed = id.trim_end_matches(|c: char| c.is_whitespace() || c == '.');
+    if trimmed.is_empty() { "app".into() } else { trimmed.to_owned() }
 }
 
 /// The directory app folders live in, from an environment lookup.
@@ -218,7 +229,29 @@ mod tests {
         assert_eq!(sanitize("com.example.notes"), "com.example.notes");
         assert_eq!(sanitize("../evil/id"), ".._evil_id");
         assert_eq!(sanitize(".."), "app");
+        assert_eq!(sanitize("..."), "app");
+        assert_eq!(sanitize("com.example."), "com.example");
         assert_eq!(sanitize(""), "app");
+    }
+
+    #[test]
+    fn concurrent_writers_do_not_clobber_temp_files() {
+        let dir = Dir::new("concurrent");
+        let path = dir.0.join(FILE);
+        std::thread::scope(|s| {
+            for t in 0..4u32 {
+                let path = &path;
+                s.spawn(move || {
+                    let mut prefs = Prefs::at(path);
+                    for i in 0..20u32 {
+                        prefs.set(&format!("k_{t}"), &(t * 100 + i)).unwrap();
+                    }
+                });
+            }
+        });
+        let final_prefs = Prefs::at(&path);
+        assert!(final_prefs.is_persistent());
+        assert!(!dir.0.join("prefs.json.bad").exists());
     }
 
     #[test]

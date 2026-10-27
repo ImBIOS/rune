@@ -72,6 +72,7 @@ impl<S: 'static> Runtime<S> {
         let mut tx = Tx::default();
         let consumed = self.dispatch_physical(event, None, &mut tx);
         let live_only = std::mem::take(&mut tx.live_only);
+        self.latch_requests(&mut tx);
         merge(&mut self.pending, tx);
         if consumed && live_only {
             self.live_only_skips += 1;
@@ -181,6 +182,7 @@ impl<S: 'static> Runtime<S> {
     pub(super) fn physical_focus_lost(&mut self) -> bool {
         let mut tx = Tx::default();
         let changed = self.offer_physical(&PhysicalInput::FocusLost, &mut tx, &mut None);
+        self.latch_requests(&mut tx);
         merge(&mut self.pending, tx);
         changed
     }

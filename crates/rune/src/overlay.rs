@@ -1869,6 +1869,7 @@ impl<T: 'static> PendingOverlay for Overlay<T> {
         // All live sources (including Pixels) must share this registration: a second
         // set_live_waker call replaces the wake lane and resets its subscriptions.
         self.rt.set_live_waker(wake.clone());
+        self.rt.open_urls_natively = true;
         self.clipboard.connect(wake.clone());
         self.popup.connect(wake.clone());
         self.gpu_pool = gpu;

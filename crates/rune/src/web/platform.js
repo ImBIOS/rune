@@ -36,7 +36,7 @@ export async function pngBytes(blob, max) {
 }
 
 export function openLink(url) {
-    const parsed = new URL(url, location.href);
+    const parsed = new URL(url);
     if (!['https:', 'http:', 'mailto:'].includes(parsed.protocol)) throw new Error('Unsupported link scheme.');
     window.open(parsed.href, '_blank', 'noopener,noreferrer');
 }
