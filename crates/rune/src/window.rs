@@ -256,6 +256,13 @@ impl Win {
         self.window.set_visible(false);
     }
 
+    /// Its last frame is on screen and nothing has asked for another since.
+    fn rests(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        if self.prime > 0 { return false; }
+        self.presented.is_some()
+    }
+
     /// Whether the display link drives redraws. Other platforms redraw on request.
     fn paced(&self) -> bool {
         #[cfg(target_os = "macos")]
@@ -3097,10 +3104,22 @@ impl<S: 'static> AnyHost for Host<S> {
                 self.shell(event_loop);
                 if changed && launcher { self.refresh_hidden(); }
             // A redraw while the window backs off would draw nothing and leave the timer due.
-            } else if let Some(w) = self.win.as_mut().filter(|w| (launcher || (w.visible && !w.occluded)) && !w.minimized()
+            } else if self.win.as_ref().is_some_and(|w| (launcher || (w.visible && !w.occluded)) && !w.minimized()
                 && !w.backing_off(Instant::now())) {
-                w.quiet = true;
-                w.window.request_redraw();
+                // A resting window polls first and draws only for what that changed.
+                let rests = self.idle && self.win.as_ref().is_some_and(Win::rests);
+                let frame = match rests.then(|| self.rt.resting_wake()).flatten() {
+                    Some(stale) => {
+                        self.clipboard.flush(&mut self.rt);
+                        self.shell(event_loop);
+                        stale || self.rt.stale()
+                    }
+                    None => true,
+                };
+                if frame && let Some(w) = &mut self.win {
+                    w.quiet = true;
+                    w.window.request_redraw();
+                }
             } else {
                 covered_step(&mut self.rt);
                 self.clipboard.flush(&mut self.rt);

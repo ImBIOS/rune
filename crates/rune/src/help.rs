@@ -57,6 +57,11 @@ impl<S: 'static> Runtime<S> {
         self.help.tip.as_ref().map(|(t, r)| (t.as_str(), *r))
     }
 
+    /// A tooltip waits for a frame at or after its delay to draw.
+    pub(super) fn tooltip_waiting(&self) -> bool {
+        self.help.scheduled.is_some_and(|due| self.clock + 1e-6 < due)
+    }
+
     /// During `build`: node `i` has help and draws visible over `rect` (points, x0 y0 x1 y1),
     /// after the first `seq` hits.
     pub(super) fn push_help_hit(&mut self, i: usize, rect: [f32; 4], seq: usize) {

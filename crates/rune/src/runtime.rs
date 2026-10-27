@@ -110,9 +110,14 @@ mod gesture_dispatch;
 mod flights;
 #[path = "runtime/hover.rs"]
 mod hover;
+#[path = "runtime/timer_wake.rs"]
+mod timer_wake;
 pub(crate) use scroll_x::{SHIFT_TURNS_WHEEL, wheel_delta};
 pub(crate) use scroll_offset::ScrollRequest;
 pub use selectable::{SelectedText, SelectionChange, TextSelection};
+#[cfg(test)]
+#[path = "runtime/timer_wake_tests.rs"]
+mod timer_wake_tests;
 #[cfg(test)]
 #[path = "runtime/truncate_tests.rs"]
 mod truncate_tests;
@@ -1042,6 +1047,7 @@ pub struct Runtime<S: 'static> {
     #[cfg(all(feature = "dev", debug_assertions))]
     pub(crate) dev: Option<crate::dev::Session<S>>,
     wake_deadlines: Vec<f64>,
+    timer_wake: timer_wake::TimerWake,
     /// Windowed runs read the clock from the wall instead of summing frame steps.
     pub wall_start: Option<crate::time::Instant>,
     /// Called for keys unhandled by the focused control; return true to consume it.
@@ -1461,6 +1467,7 @@ impl<S: 'static> Runtime<S> {
             #[cfg(all(feature = "dev", debug_assertions))]
             dev: None,
             wake_deadlines: Vec::new(),
+            timer_wake: Default::default(),
             wall_start: None,
             on_key: None,
             nodes: Vec::new(),
@@ -2116,32 +2123,6 @@ impl<S: 'static> Runtime<S> {
         height.ceil_to(self.env.scale).max(1.0)
     }
 
-    /// `poll` alone, for a hidden window's wake: its timers and inbox advance while nothing
-    /// lays out, animates or draws. Like `update`, its changes wait, dirty, for the next frame.
-    /// Returns whether the last frame went out of date: `poll` reported a change or asked for a
-    /// scroll or text flight, or a live-edit patch arrived. A `wake_after` alone doesn't count.
-    pub(crate) fn poll_hidden(&mut self) -> bool {
-        if let Some(clock) = self.wall_clock() { self.clock = clock; }
-        // An `update`'s `wake_after` counts from now; no frame may come to schedule it.
-        let wakes = std::mem::take(&mut self.pending.wakes);
-        self.schedule_wakes(wakes);
-        // Due timers are spent with or without a poll, as a frame spends them; one left due
-        // would wake the host again every frame interval.
-        let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
-        self.wake_deadlines.drain(..due);
-        let patched = self.patch_pending();
-        let Some(poll) = self.poll else { return patched };
-        let mut one = self.transaction();
-        let changed = app_call!(poll, &mut self.state, self.clock, &mut one);
-        self.dirty |= changed;
-        self.schedule_wakes(one.wakes.drain(..));
-        let asks_frame = one.srgb_blend.is_some_and(|b| b != self.srgb_blend) || (one.blur && self.focused.is_some());
-        self.latch_requests(&mut one);
-        let stale = changed || one.frame_work() || patched || asks_frame;
-        merge(&mut self.pending, one);
-        stale
-    }
-
     /// Host time on the logical clock, unless a dev clock owns it.
     fn wall_clock(&self) -> Option<f64> {
         let wall_start = self.wall_start;
@@ -2388,10 +2369,15 @@ impl<S: 'static> Runtime<S> {
         // retargets them. Presenting waits for `step_motion`, so the frame is sampled and
         // built once.
         if catch_up > 0.0 { self.catch_up_motion(catch_up); }
-        let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
-        self.wake_deadlines.drain(..due);
+        // After a resting window's timer polled for this frame, what that poll left due (a
+        // `wake_after(ZERO)`) waits for the next frame's poll.
+        let polled = self.timer_wake.take_polled();
+        if !polled {
+            let due = self.wake_deadlines.partition_point(|t| *t <= self.clock);
+            self.wake_deadlines.drain(..due);
+        }
         self.fire_hover_delays();
-        if let Some(poll) = self.poll {
+        if let Some(poll) = self.poll.filter(|_| !polled) {
             let mut one = self.transaction();
             // Scheduling does not imply a model change.
             if app_call!(poll, &mut self.state, self.clock, &mut one) {
