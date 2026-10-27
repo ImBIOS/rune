@@ -1,5 +1,7 @@
-//! AppKit cursors set directly, for overlays that are rarely the key window.
+//! AppKit cursors set directly: for overlays, which are rarely the key window, and for image
+//! cursors, which winit would size in pixels (twice too big on Retina).
 
+use std::cell::RefCell;
 #[cfg(feature = "macos-background-cursor")]
 use std::cell::Cell;
 
@@ -7,9 +9,105 @@ use objc2::rc::Retained;
 use objc2::{msg_send, msg_send_id};
 use objc2_foundation::{NSObject, NSPoint, NSSize};
 
+use crate::cursor::CursorImage;
+use crate::cursor_image::{Decoded, ImageCursors, SOURCE_SCALE};
+use crate::el::Cursor;
+
+thread_local! {
+    static IMAGES: RefCell<ImageCursors<Retained<NSObject>>> = const { RefCell::new(ImageCursors::new()) };
+}
+
+/// The NSCursor for `image`, made once. `None` if it didn't decode.
+fn native(image: CursorImage) -> Option<Retained<NSObject>> {
+    IMAGES.with(|c| c.borrow_mut().get(image, SOURCE_SCALE, ns_cursor))
+}
+
+/// Sets an image cursor on `window` itself, with the window's cursor rects (winit's cursor)
+/// off so AppKit doesn't put winit's back on entering, focus or a rect rebuild. Gives
+/// winit's cursor back, turning the rects on, for any other cursor. `None` when the image is
+/// set; otherwise the cursor for winit, the arrow for an image that didn't decode.
+pub(crate) fn window_cursor(window: &winit::window::Window, next: Cursor) -> Option<Cursor> {
+    let Some(ns_window) = crate::macos::ns_window(window) else { return Some(next) };
+    if let Cursor::Image(image) = next && let Some(cursor) = native(image) {
+        // SAFETY: NSWindow and NSCursor on the main thread, where winit applies cursors.
+        unsafe {
+            let _: () = msg_send![&*ns_window, disableCursorRects];
+            let _: () = msg_send![&*cursor, set];
+        }
+        return None;
+    }
+    let next = if matches!(next, Cursor::Image(_)) { Cursor::Default } else { next };
+    // SAFETY: as above.
+    unsafe {
+        let enabled: bool = msg_send![&*ns_window, areCursorRectsEnabled];
+        if !enabled {
+            let _: () = msg_send![&*ns_window, enableCursorRects];
+            if let Some(view) = crate::macos::content_view(window) { let _: () = msg_send![&*ns_window, invalidateCursorRectsForView: &*view]; }
+            // The rects come back on AppKit's next pass, and not at all once the pointer has
+            // left: the image mustn't stay until then.
+            set_ns_cursor(next);
+        }
+    }
+    Some(next)
+}
+
+/// Sets an image cursor again while it holds the pointer: the system may have shown another
+/// on the way (a window edge's resize arrows), and the window's rects are off.
+pub(crate) fn reassert(image: CursorImage) {
+    let Some(Some(cursor)) = IMAGES.with(|c| c.borrow_mut().cached(image, SOURCE_SCALE)) else { return };
+    // SAFETY: NSCursor on the main thread.
+    unsafe { let _: () = msg_send![&*cursor, set]; }
+}
+
+/// An NSCursor whose image is sized in points with `d`'s pixels as its bitmap, so a 2x PNG is
+/// sharp on Retina and its size in points everywhere. winit sizes the image in pixels.
+pub(crate) fn ns_cursor(d: &Decoded) -> Result<Retained<NSObject>, String> {
+    use objc2::rc::Allocated;
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    use objc2_foundation::NSString;
+    let class = |name: &str| AnyClass::get(name).ok_or_else(|| format!("{name} is unavailable"));
+    let (bitmap, image, cursor, color_space) = (class("NSBitmapImageRep")?, class("NSImage")?, class("NSCursor")?, class("NSColorSpace")?);
+    let (w, h) = (d.width as isize, d.height as isize);
+    // SAFETY: AppKit image and cursor construction; every object is retained, the bitmap
+    // written only within its rows.
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let rep: Allocated<AnyObject> = msg_send_id![bitmap, alloc];
+        let null: *mut *mut u8 = std::ptr::null_mut();
+        // Default bitmapFormat: premultiplied alpha-last RGBA.
+        let rep: Option<Retained<AnyObject>> = msg_send_id![rep,
+            initWithBitmapDataPlanes: null pixelsWide: w pixelsHigh: h bitsPerSample: 8isize
+            samplesPerPixel: 4isize hasAlpha: Bool::YES isPlanar: Bool::NO
+            colorSpaceName: &*NSString::from_str("NSDeviceRGBColorSpace") bitmapFormat: 0usize
+            bytesPerRow: w * 4 bitsPerPixel: 32isize];
+        let rep = rep.ok_or("could not allocate a cursor bitmap")?;
+        let data: *mut u8 = msg_send![&*rep, bitmapData];
+        let stride: isize = msg_send![&*rep, bytesPerRow];
+        if data.is_null() || stride < w * 4 { return Err("the cursor bitmap has no pixels".into()); }
+        for (y, row) in d.rgba.chunks_exact(w as usize * 4).enumerate() {
+            let out = std::slice::from_raw_parts_mut(data.offset(y as isize * stride), w as usize * 4);
+            for (o, p) in out.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
+                for i in 0..3 { o[i] = ((p[i] as u32 * p[3] as u32 + 127) / 255) as u8; }
+                o[3] = p[3];
+            }
+        }
+        let srgb: *mut AnyObject = msg_send![color_space, sRGBColorSpace];
+        let tagged: Option<Retained<AnyObject>> = msg_send_id![&*rep, bitmapImageRepByRetaggingWithColorSpace: srgb];
+        let rep = tagged.unwrap_or(rep);
+        let size = NSSize::new(d.width as f64 / d.scale as f64, d.height as f64 / d.scale as f64);
+        let ns_image: Allocated<NSObject> = msg_send_id![image, alloc];
+        let ns_image: Option<Retained<NSObject>> = msg_send_id![ns_image, initWithSize: size];
+        let ns_image = ns_image.ok_or("NSImage refused the size")?;
+        let _: () = msg_send![&*ns_image, addRepresentation: &*rep];
+        let [x, y] = d.hot.map(|h| h as f64 / d.scale as f64);
+        let ns_cursor: Allocated<NSObject> = msg_send_id![cursor, alloc];
+        let ns_cursor: Option<Retained<NSObject>> = msg_send_id![ns_cursor, initWithImage: &*ns_image, hotSpot: NSPoint::new(x, y)];
+        ns_cursor.ok_or_else(|| "NSCursor refused the image".into())
+    })
+}
+
 /// `[NSCursor set]` with winit's shape for each cursor. Main thread.
-pub(crate) fn set_ns_cursor(cursor: crate::el::Cursor) {
-    use crate::el::Cursor as C;
+pub(crate) fn set_ns_cursor(cursor: Cursor) {
+    use Cursor as C;
     thread_local! {
         static TRANSPARENT: Option<Retained<NSObject>> = image_cursor(None);
         static MOVE: Option<Retained<NSObject>> = image_cursor(Some("move"));
@@ -22,6 +120,7 @@ pub(crate) fn set_ns_cursor(cursor: crate::el::Cursor) {
         let image = match cursor {
             C::Hidden => TRANSPARENT.with(Clone::clone),
             C::Move => MOVE.with(Clone::clone),
+            C::Image(image) => native(image),
             _ => None,
         };
         let ns: Option<Retained<NSObject>> = match (image, cursor) {

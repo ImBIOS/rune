@@ -5,6 +5,13 @@
 //! a focused window, and its `ShowCursor` count is process-wide. A cursor image is per-window
 //! like any other shape, so the OS drops it when the pointer leaves the window or the window
 //! goes away.
+//!
+//! `Cursor::Image` goes through winit's custom cursors, made at the window's scale so the
+//! image keeps its size in points. winit makes those only with the event loop at hand, so a
+//! window's first use of an image waits for [`make_pending`] before the loop sleeps. On macOS
+//! winit would size the image in pixels, twice too big on Retina, so `macos_cursor` sets it.
+
+use std::sync::Arc;
 
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{CursorIcon, CustomCursor, Window};
@@ -13,24 +20,98 @@ use crate::el::Cursor;
 
 pub(crate) struct OsCursor {
     applied: (bool, Cursor),
+    /// The scale an image cursor was last made at: a window moving to a display with another
+    /// scale makes it again.
+    scale: f32,
     transparent: CustomCursor,
 }
 
 impl OsCursor {
     pub(crate) fn new(event_loop: &ActiveEventLoop) -> Self {
         let source = CustomCursor::from_rgba(vec![0u8; 4], 1, 1, 0, 0).expect("a 1x1 cursor image is valid");
-        OsCursor { applied: (false, Cursor::Default), transparent: event_loop.create_custom_cursor(source) }
+        OsCursor { applied: (false, Cursor::Default), scale: 0.0, transparent: event_loop.create_custom_cursor(source) }
     }
 
     /// Applies `want` while the host is `active` (the pointer is over its window or its hit
     /// area), and the arrow once when it stops being active. winit sets some cursors at once
     /// (Win32 `SetCursor`), so an inactive host must leave the cursor to whichever window has
     /// the pointer.
-    pub(crate) fn apply(&mut self, window: &Window, want: Cursor, active: bool) {
-        let Some(next) = next(&mut self.applied, want, active) else { return };
+    pub(crate) fn apply(&mut self, window: &Arc<Window>, want: Cursor, active: bool) {
+        let scale = image_scale(window);
+        let rescaled = active && matches!(want, Cursor::Image(_)) && std::mem::replace(&mut self.scale, scale) != scale;
+        let Some(next) = next(&mut self.applied, want, active).or(rescaled.then_some(want)) else {
+            #[cfg(target_os = "macos")]
+            if let (true, Cursor::Image(image)) = self.applied { crate::macos_cursor::reassert(image); }
+            return;
+        };
+        #[cfg(target_os = "macos")]
+        let Some(next) = crate::macos_cursor::window_cursor(window, next) else { return };
+        #[cfg(not(target_os = "macos"))]
+        images::forget(window);
         match next {
             Cursor::Hidden => window.set_cursor(self.transparent.clone()),
+            #[cfg(not(target_os = "macos"))]
+            Cursor::Image(image) => images::set(window, image, scale),
             other => window.set_cursor(icon(other)),
+        }
+    }
+}
+
+/// Pixels per point in the OS cursors made for `window`.
+fn image_scale(window: &Window) -> f32 {
+    if cfg!(target_os = "macos") { crate::cursor_image::SOURCE_SCALE } else { window.scale_factor() as f32 }
+}
+
+/// Makes the image cursors windows asked for since the loop last slept, and sets them.
+pub(crate) fn make_pending(event_loop: &ActiveEventLoop) {
+    #[cfg(not(target_os = "macos"))]
+    images::make_pending(event_loop);
+    #[cfg(target_os = "macos")]
+    let _ = event_loop;
+}
+
+#[cfg(not(target_os = "macos"))]
+mod images {
+    use std::cell::RefCell;
+    use std::sync::{Arc, Weak};
+
+    use winit::event_loop::ActiveEventLoop;
+    use winit::window::{CursorIcon, CustomCursor, Window};
+
+    use crate::cursor::CursorImage;
+    use crate::cursor_image::ImageCursors;
+
+    thread_local! {
+        static CURSORS: RefCell<ImageCursors<CustomCursor>> = const { RefCell::new(ImageCursors::new()) };
+        static PENDING: RefCell<Vec<(Weak<Window>, CursorImage, f32)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn set(window: &Arc<Window>, image: CursorImage, scale: f32) {
+        match CURSORS.with(|c| c.borrow_mut().cached(image, scale)) {
+            Some(Some(cursor)) => window.set_cursor(cursor),
+            Some(None) => window.set_cursor(CursorIcon::Default),
+            None => PENDING.with(|p| p.borrow_mut().push((Arc::downgrade(window), image, scale))),
+        }
+    }
+
+    /// Drops a cursor `window` asked for and no longer wants.
+    pub(super) fn forget(window: &Arc<Window>) {
+        PENDING.with(|p| p.borrow_mut().retain(|(w, ..)| !std::ptr::eq(w.as_ptr(), Arc::as_ptr(window))));
+    }
+
+    pub(super) fn make_pending(event_loop: &ActiveEventLoop) {
+        for (window, image, scale) in PENDING.with(|p| std::mem::take(&mut *p.borrow_mut())) {
+            let Some(window) = window.upgrade() else { continue };
+            let cursor = CURSORS.with(|c| c.borrow_mut().get(image, scale, |d| {
+                let side = |n: u32| u16::try_from(n).map_err(|_| format!("{n} px is too big"));
+                let source = CustomCursor::from_rgba(d.rgba.clone(), side(d.width)?, side(d.height)?, d.hot[0] as u16, d.hot[1] as u16)
+                    .map_err(|e| e.to_string())?;
+                Ok(event_loop.create_custom_cursor(source))
+            }));
+            match cursor {
+                Some(cursor) => window.set_cursor(cursor),
+                None => window.set_cursor(CursorIcon::Default),
+            }
         }
     }
 }
@@ -43,9 +124,10 @@ fn next(applied: &mut (bool, Cursor), want: Cursor, active: bool) -> Option<Curs
     (was != (active, want) && (active || was.0)).then_some(want)
 }
 
+/// winit's shape for `c`. An image that never became an OS cursor is the arrow.
 fn icon(c: Cursor) -> CursorIcon {
     match c {
-        Cursor::Default | Cursor::Hidden => CursorIcon::Default,
+        Cursor::Default | Cursor::Hidden | Cursor::Image(_) => CursorIcon::Default,
         Cursor::Pointer => CursorIcon::Pointer,
         Cursor::Text => CursorIcon::Text,
         Cursor::Grab => CursorIcon::Grab,

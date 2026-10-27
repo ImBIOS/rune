@@ -7,7 +7,7 @@ use taffy::prelude::*;
 
 use crate::color::Color;
 pub(crate) use crate::el_drop::{DropHoverFn, DropSpec};
-pub use crate::cursor::Cursor;
+pub use crate::cursor::{Cursor, CursorImage};
 pub(crate) use crate::el_sticky::{Sticky, StickyEdge};
 use crate::edit::TextEdit;
 use crate::growth::{GROWTH, StreamEdge, edge};

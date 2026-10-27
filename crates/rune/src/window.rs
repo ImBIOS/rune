@@ -669,6 +669,7 @@ impl ApplicationHandler<WakeEvent> for Windows {
         self.cleanup(event_loop);
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        crate::os_cursor::make_pending(event_loop);
         let mut animating = false;
         for host in self.hosts.iter_mut().flatten() {
             animating |= host.about_to_wait(event_loop);

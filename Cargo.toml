@@ -28,6 +28,7 @@ members = [
     "examples/video-tiles",
     "examples/cursed-settings",
     "examples/drag-out",
+    "examples/sketch",
     "examples/drop-files",
     "examples/rich-clipboard",
     "examples/matched",
