@@ -26,6 +26,10 @@ use std::rc::Rc;
 
 use super::*;
 
+#[path = "selection_rects.rs"]
+mod selection_rects;
+pub(crate) use selection_rects::{SELECTION, boxes_moved};
+
 /// Extra measurements one commit may take while a read moves.
 const PASSES: usize = 2;
 /// Commits in a row that layout feedback alone may cause.
@@ -115,8 +119,22 @@ pub(crate) fn note_read(reads: &mut LayoutReads, key: &str, same: Option<Same>) 
     if !counted { reads.push(LayoutRead { key: key.to_owned(), same }); }
 }
 
-/// What each key a view read resolved to, as last given to the view.
-pub(crate) type LayoutRects = HashMap<String, Option<[f32; 4]>>;
+/// What each key a view read resolved to, as last given to the view, and the selection's line
+/// boxes when it read them ([`SELECTION`]).
+#[derive(Clone, Default)]
+pub(crate) struct LayoutRects {
+    rects: HashMap<String, Option<[f32; 4]>>,
+    pub(crate) selection: Rc<[[f32; 4]]>,
+}
+
+impl std::ops::Deref for LayoutRects {
+    type Target = HashMap<String, Option<[f32; 4]>>;
+    fn deref(&self) -> &Self::Target { &self.rects }
+}
+
+impl std::ops::DerefMut for LayoutRects {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.rects }
+}
 
 /// The last view's layout reads, and what each key resolved to.
 #[derive(Default)]
@@ -244,6 +262,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     fn layout_of(&self, nodes: &[Node], key: &str) -> Option<[f32; 4]> {
+        if key == SELECTION { return None; }
         if let Some(i) = nodes.iter().position(|n| crate::flight::selects(key, &n.path, n.key.as_deref())) {
             return Some(self.laid_out(nodes, i));
         }
@@ -261,9 +280,12 @@ impl<S: 'static> Runtime<S> {
         let reads = reads.unwrap_or_else(|| std::mem::take(&mut self.layout_seen.reads));
         let nodes = nodes.unwrap_or(&self.nodes);
         let now: Vec<Option<[f32; 4]>> = reads.iter().map(|r| self.layout_of(nodes, &r.key)).collect();
+        let boxes = reads.iter().any(|r| r.key == SELECTION).then(|| self.selection_boxes(nodes));
         let rects = &mut self.layout_seen.rects;
-        let changed = reads.iter().zip(&now).any(|(r, rect)| rects.get(&r.key).is_none_or(|old| r.moved(*old, *rect)));
+        let changed = reads.iter().zip(&now).any(|(r, rect)| rects.get(&r.key).is_none_or(|old| r.moved(*old, *rect)))
+            || boxes.as_ref().is_some_and(|b| boxes_moved(&rects.selection, b));
         if changed || force {
+            if let Some(b) = boxes { rects.selection = b.into(); }
             for (r, rect) in reads.iter().zip(now) {
                 match rects.get_mut(&r.key) {
                     Some(seen) => *seen = rect,
@@ -281,6 +303,7 @@ impl<S: 'static> Runtime<S> {
         if self.layout_seen.rects.is_empty() { return; }
         let now: Vec<_> = self.layout_seen.rects.keys().map(|k| self.layout_of(&self.nodes, k)).collect();
         for (seen, rect) in self.layout_seen.rects.values_mut().zip(now) { *seen = rect; }
+        if self.layout_seen.rects.contains_key(SELECTION) { self.layout_seen.rects.selection = self.selection_boxes(&self.nodes).into(); }
     }
 
     /// Once a frame: whether a layout read moved, so the view re-runs. Scrolling reopens
@@ -288,6 +311,7 @@ impl<S: 'static> Runtime<S> {
     pub(super) fn layout_reads_moved(&mut self) -> bool {
         if self.layout_seen.is_empty() { return false; }
         if self.scrolling() { self.layout_echoes = 0; }
+        if self.selection_read_moved() { self.dirty = true; }
         self.layout_feedback_open() && self.layout_moved(None, None, false)
     }
 
@@ -312,6 +336,7 @@ impl<S: 'static> Runtime<S> {
         if !settled { self.layout_moved(Some(std::mem::take(&mut measured.layout_reads)), Some(&measured.nodes), true); }
         let LayoutSeen { rects, reads } = &mut self.layout_seen;
         rects.retain(|k, _| reads.iter().any(|r| r.key == *k));
+        if !rects.contains_key(SELECTION) { rects.selection = Rc::default(); }
         measured
     }
 

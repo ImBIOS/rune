@@ -4923,7 +4923,7 @@ impl<S: 'static> Runtime<S> {
             }
             return;
         }
-        self.selection_down(self.selectable_at(x, y), x, y);
+        self.press_selection(target, x, y);
         // Inside a draggable row, dragging drags the row; clicks still select words and lines.
         if target.is_some_and(|t| self.nodes[t].on_drag.is_some() || self.nodes[t].drag_out.is_some()) {
             self.text_sel.dragging = false;
@@ -4970,12 +4970,10 @@ impl<S: 'static> Runtime<S> {
             .take_while(|&p| self.allowed(p))
             .find(|&p| self.nodes[p].focus.key.is_some() && self.can_focus(p))).flatten();
         let in_textbox = std::iter::successors(n.parent, |&p| self.nodes[p].parent).any(|p| self.textbox_input(p).is_some());
-        let preserve_focus = std::iter::successors(Some(ti), |&p| self.nodes[p].parent)
-            .take_while(|&p| self.allowed(p))
-            .any(|p| self.nodes[p].focus.preserve_on_press);
-        if !on_link && n.focus.enabled && !self.is_selectable(ti) {
+        let (preserve_focus, keeps) = (self.press_keeps_focus(ti), self.press_keeps_selection(ti));
+        if !on_link && !keeps && n.focus.enabled && !self.is_selectable(ti) {
             self.queue.push(Action::FocusControl(n.path.clone()));
-        } else if !on_link && let Some(p) = keyed {
+        } else if !on_link && !keeps && let Some(p) = keyed {
             self.queue.push(Action::FocusControl(self.nodes[p].path.clone()));
         } else if !on_link && !in_textbox && !preserve_focus && self.focused.is_some() {
             self.queue.push(Action::Blur);

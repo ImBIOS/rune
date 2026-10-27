@@ -50,7 +50,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
 use crate::El;
-use crate::runtime::layout_read::{LayoutRects, Same, moved, note_read, seen_rect, size};
+use crate::runtime::layout_read::{LayoutRects, SELECTION, Same, boxes_moved, moved, note_read, seen_rect, size};
 
 /// The children a memo's placeholders share.
 #[derive(Clone)]
@@ -101,6 +101,8 @@ enum Read {
     Layout(String, Option<[f32; 4]>),
     /// A `Cx::layout_with` read: its function's check, and the rect it was given.
     LayoutWith(String, Same, Option<[f32; 4]>),
+    /// A `Cx::selection_rects` read, and the boxes it returned.
+    Selection(Rc<[[f32; 4]]>),
 }
 
 impl PartialEq for Read {
@@ -108,6 +110,7 @@ impl PartialEq for Read {
         match (self, other) {
             (Read::Caret(a, x), Read::Caret(b, y)) | (Read::Layout(a, x), Read::Layout(b, y)) => a == b && x == y,
             (Read::LayoutWith(a, f, x), Read::LayoutWith(b, g, y)) => a == b && f.is(g) && x == y,
+            (Read::Selection(a), Read::Selection(b)) => a == b,
             _ => false,
         }
     }
@@ -125,6 +128,7 @@ impl Seen {
             Read::Caret(key, rect) => crate::runtime::caret_of(&self.caret, key) == *rect,
             Read::Layout(key, rect) => !moved(*rect, seen_rect(&self.layout, key)),
             Read::LayoutWith(key, same, rect) => !same.moved(*rect, seen_rect(&self.layout, key)),
+            Read::Selection(boxes) => !boxes_moved(boxes, &self.layout.selection),
         }
     }
 }
@@ -242,6 +246,11 @@ pub(crate) fn read_caret(key: &str, rect: Option<[f32; 4]>) {
 /// Records a `Cx::layout` read for the memo building, if any.
 pub(crate) fn read_layout(key: &str, rect: Option<[f32; 4]>) {
     record(|| Read::Layout(key.to_owned(), rect));
+}
+
+/// Records a `Cx::selection_rects` read for the memo building, if any.
+pub(crate) fn read_selection(boxes: &Rc<[[f32; 4]]>) {
+    record(|| Read::Selection(boxes.clone()));
 }
 
 /// Records a `Cx::layout_with` read for the memo building, if any.
@@ -376,6 +385,7 @@ pub fn memo(id: impl Into<String>, version: impl Hash, build: impl FnOnce() -> E
                     Read::Caret(..) => s.replayed.caret = true,
                     Read::Layout(key, _) => note_read(&mut s.replayed.layout, &key, None),
                     Read::LayoutWith(key, same, _) => note_read(&mut s.replayed.layout, &key, Some(same)),
+                    Read::Selection(_) => note_read(&mut s.replayed.layout, SELECTION, None),
                 }
             }
             if let Some(parent) = s.nested.last_mut() {
@@ -505,7 +515,7 @@ mod tests {
     #[test]
     fn a_view_panicking_inside_a_memo_leaves_no_scope_for_the_next_build() {
         let panicked = std::panic::catch_unwind(|| {
-            let _scope = enter(MemoCache::default(), Env::new(true, 1.0), crate::SystemAccent::DEFAULT, false, None, HashMap::new());
+            let _scope = enter(MemoCache::default(), Env::new(true, 1.0), crate::SystemAccent::DEFAULT, false, None, LayoutRects::default());
             memo("outer", 0, || memo("inner", 0, || panic!("view panicked")))
         });
         assert!(panicked.is_err());

@@ -17,72 +17,16 @@
 use super::*;
 use std::ops::Range;
 
-/// A selection of [`El::selectable`] text, as [`Tx::text_selection`] reads it and an
-/// [`El::selection_copy`] element sees it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct TextSelection {
-    texts: Vec<SelectedText>,
-    text: String,
-}
+#[path = "selection_toolbar.rs"]
+mod selection_toolbar;
+#[path = "text_selection.rs"]
+mod text_selection;
+pub(crate) use selection_toolbar::OnPress;
+pub use text_selection::{SelectedText, SelectionChange, TextSelection};
 
-impl TextSelection {
-    /// The selected texts in tree order (for [`El::selection_copy`], every text it could reach).
-    pub fn texts(&self) -> &[SelectedText] { &self.texts }
-    /// The selected text as copying takes it without [`El::selection_copy`]: as authored
-    /// (before [`El::text_case`]), without [`El::uncopied`] bytes, with a newline between
-    /// texts and a tab between texts side by side (table cells).
-    pub fn text(&self) -> &str { &self.text }
-}
-
-/// One [`El::selectable`] text of a [`TextSelection`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SelectedText {
-    path: String,
-    key: Option<String>,
-    range: Range<usize>,
-    len: usize,
-    whole: bool,
-    text: String,
-}
-
-impl SelectedText {
-    /// The text element's path ([`ElementInfo::path`]); for [`El::selection_copy`], relative to
-    /// the element that asks, empty for that element itself.
-    pub fn path(&self) -> &str { &self.path }
-    /// The text element's own key, if it has one.
-    pub fn key(&self) -> Option<&str> { self.key.as_deref() }
-    /// The selected bytes of the text's content, empty when none are.
-    pub fn range(&self) -> Range<usize> { self.range.clone() }
-    /// The length in bytes of the text's content.
-    pub fn len(&self) -> usize { self.len }
-    /// The text has no content.
-    pub fn is_empty(&self) -> bool { self.len == 0 }
-    /// Some of the text is selected.
-    pub fn is_selected(&self) -> bool { !self.range.is_empty() }
-    /// All of the text is selected.
-    pub fn is_whole(&self) -> bool { self.whole }
-    /// The selected part as copying takes it.
-    pub fn text(&self) -> &str { &self.text }
-}
-
-/// What an [`El::on_selection_change`] element hears.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SelectionChange {
-    selection: Option<Rc<TextSelection>>,
-    was: bool,
-}
-
-impl SelectionChange {
-    /// The whole selection while any of it is inside the element, `None` otherwise.
-    pub fn selection(&self) -> Option<&TextSelection> { self.selection.as_deref() }
-    /// A selection appeared inside the element, where there was none.
-    pub fn started(&self) -> bool { !self.was && self.selection.is_some() }
-    /// The selection cleared or left the element.
-    pub fn cleared(&self) -> bool { self.was && self.selection.is_none() }
-}
-
-/// The commit and the selection's ends: what a selection read from them depends on.
-type Basis = (u64, Option<String>, usize, usize, Option<String>);
+/// The commit, the selection's ends and whether a press is making it: what a selection read
+/// from them depends on.
+type Basis = (u64, Option<String>, usize, usize, Option<String>, bool);
 
 /// `Tx::text_selection`'s snapshot and what it was taken from.
 pub(super) struct Snapshot {
@@ -413,7 +357,7 @@ impl<S: 'static> Runtime<S> {
         let ranges = self.selection_ranges();
         if ranges.is_empty() { return None; }
         let texts = ranges.iter().map(|&(i, a, b)| self.selected_piece(i, a..b, None)).collect();
-        Some(TextSelection { texts, text: self.joined(&ranges) })
+        Some(TextSelection { texts, text: self.joined(&ranges), backward: self.selection_backward() })
     }
 
     /// [`Runtime::selection`] for a handler's `Tx`, kept until a commit or the selection changes.
@@ -436,17 +380,20 @@ impl<S: 'static> Runtime<S> {
             && from.2 == sel.anchor
             && from.3 == sel.focus
             && from.4.as_deref() == sel.far.as_ref().map(|f| f.0.as_str())
+            && from.5 == sel.dragging
     }
 
     fn selection_from(&self) -> Basis {
         let sel = &self.text_sel;
-        (self.commits, sel.path.clone(), sel.anchor, sel.focus, sel.far.as_ref().map(|f| f.0.clone()))
+        (self.commits, sel.path.clone(), sel.anchor, sel.focus, sel.far.as_ref().map(|f| f.0.clone()), sel.dragging)
     }
 
     /// The `El::on_selection_change` calls owed since the last check: each element whose part
     /// of the selection changed, started or cleared.
     pub(super) fn selection_changes(&mut self) -> Vec<Action> {
         if self.sel_heard.from.as_ref().is_some_and(|f| self.same_from(f)) { return Vec::new(); }
+        // A release is heard by whoever holds the selection, though it didn't change.
+        let released = self.sel_heard.from.as_ref().is_some_and(|f| f.5 && !self.text_sel.dragging);
         self.sel_heard.from = Some(self.selection_from());
         if self.sel_heard.by_path.is_empty() && !self.nodes.iter().any(|n| n.on_selection_change.is_some()) {
             return Vec::new();
@@ -485,6 +432,7 @@ impl<S: 'static> Runtime<S> {
                 (Some(a), Some(b)) => {
                     Rc::ptr_eq(a, b)
                         || (a.text == b.text
+                            && a.backward == b.backward
                             && a.texts.len() == b.texts.len()
                             && a.texts.iter().zip(&b.texts).all(|(x, y)| {
                                 x.key == y.key
@@ -497,8 +445,9 @@ impl<S: 'static> Runtime<S> {
                 }
                 (a, b) => a.is_none() && b.is_none(),
             };
-            if !same {
-                out.push(Action::SelectionChange(path.clone(), SelectionChange { selection: now.clone(), was: before.is_some() }));
+            if !same || (released && now.is_some()) {
+                let change = SelectionChange { selection: now.clone(), was: before.is_some(), dragging: self.text_sel.dragging };
+                out.push(Action::SelectionChange(path.clone(), change));
             }
             if let Some(now) = now { heard.insert(path, now); }
         }
@@ -542,7 +491,7 @@ impl<S: 'static> Runtime<S> {
                 .filter(|&j| match g { Some(g) => self.group_of(j) == Some(g), None => j == first })
                 .map(|j| self.selected_piece(j, range_in(&ranges, j).map_or(0..0, |(a, b)| a..b), Some(p)))
                 .collect();
-            if let Some(text) = f(&TextSelection { texts, text: drawn.clone() }) { return Some(text); }
+            if let Some(text) = f(&TextSelection { texts, text: drawn.clone(), backward: self.selection_backward() }) { return Some(text); }
         }
         (!drawn.is_empty()).then_some(drawn)
     }

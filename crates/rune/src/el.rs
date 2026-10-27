@@ -116,7 +116,7 @@ pub(crate) struct FocusSpec {
     pub group: bool,
     pub selected: bool,
     pub reveal_selected: bool,
-    pub preserve_on_press: bool,
+    pub preserve_on_press: crate::runtime::selectable::OnPress,
     pub ring: Option<Outline>,
     /// `no_focus_ring`: no default ring on this control, and none from this element.
     pub ring_off: bool,
@@ -1369,7 +1369,7 @@ impl El {
     /// button, a toolbar. The press still reaches `on_press` and the other handlers, and a
     /// scroll still cancels it as usual. Focusable descendants still take focus normally.
     pub fn preserve_focus_on_press(mut self, enabled: bool) -> Self {
-        self.focus.preserve_on_press = enabled;
+        self.focus.preserve_on_press.focus = enabled;
         self
     }
     /// On a focus group: arrow keys and type-select also press the item they focus, so
@@ -2747,9 +2747,9 @@ impl El {
     /// the whole selection while any of it is inside this element, `None` otherwise, and says
     /// whether it [`started`](crate::SelectionChange::started) or
     /// [`cleared`](crate::SelectionChange::cleared) here. It runs at most once a frame, however
-    /// many times a drag moved the selection, before that frame's commit. A press that leaves
-    /// only a caret selects nothing, so it isn't heard. Call [`Tx::live_only`] when nothing the
-    /// view reads changed, so a drag doesn't rebuild the view each frame.
+    /// many times a drag moved the selection, before that frame's commit, and once more when the
+    /// press making it releases ([`dragging`](crate::SelectionChange::dragging)). A press leaving
+    /// only a caret isn't heard. Call [`Tx::live_only`] when the view reads nothing that changed.
     ///
     /// ```ignore
     /// col().selection_group(true).on_selection_change(|s: &mut Notes, change, _| {

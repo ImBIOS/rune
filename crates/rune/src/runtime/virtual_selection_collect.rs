@@ -102,14 +102,14 @@ impl<S: 'static> Runtime<S> {
                     if a >= b || b > self.content_of(i).len() { return None; }
                     let piece = self.selected_piece(i, a..b, base);
                     let text = piece.text().to_owned();
-                    Some(TextSelection { texts: vec![piece], text })
+                    Some(TextSelection { texts: vec![piece], text, backward: self.selection_backward() })
                 }
                 EndRef::Offscreen(vi, ti) => {
                     let t = self.offscreen_text(vi, ti);
                     if a >= b || b > t.spec.content.len() { return None; }
                     let piece = offscreen_piece(t, a..b, base_path);
                     let text = piece.text().to_owned();
-                    Some(TextSelection { texts: vec![piece], text })
+                    Some(TextSelection { texts: vec![piece], text, backward: self.selection_backward() })
                 }
             };
         }
@@ -154,7 +154,7 @@ impl<S: 'static> Runtime<S> {
                     first_in_row = false;
                     if hit_cap { break; }
                 }
-                return (!out.is_empty()).then_some(TextSelection { texts, text: out });
+                return (!out.is_empty()).then_some(TextSelection { texts, text: out, backward: self.selection_backward() });
             }
         }
 
@@ -301,7 +301,7 @@ impl<S: 'static> Runtime<S> {
             }
         }
 
-        (!out.is_empty()).then_some(TextSelection { texts, text: out })
+        (!out.is_empty()).then_some(TextSelection { texts, text: out, backward: self.selection_backward() })
     }
 
     /// Finds the first and last selectable texts inside mounted node `root` (including unbuilt rows

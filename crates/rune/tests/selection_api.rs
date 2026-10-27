@@ -237,9 +237,10 @@ fn on_selection_change_hears_a_drag_start_change_and_clear_once_a_frame() {
     assert_eq!(calls.len(), frames, "{calls:?}");
     assert!(calls[0].0 && !calls[0].1, "the first is the start: {calls:?}");
     assert!(calls[1..].iter().all(|c| !c.0 && !c.1 && c.2.as_ref().is_some_and(|t| "first paragraph".starts_with(t.as_str()))), "{calls:?}");
+    let last = calls.last().and_then(|c| c.2.clone());
     rt.pointer_up(x0 + 54.0, y);
     tick(&mut rt);
-    assert_eq!(heard(&mut rt), [], "releasing changes nothing");
+    assert_eq!(heard(&mut rt), [Heard(false, false, last)], "the release is heard once, with the same selection");
 
     // Cmd+A widens it; a click outside the group clears it.
     command(&mut rt, 'a');
