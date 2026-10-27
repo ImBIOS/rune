@@ -67,6 +67,9 @@ pub struct Tx {
     pub(crate) selection: Option<Rc<crate::TextSelection>>,
     /// `Tx::select_text`, `Tx::select_all_text` and `Tx::clear_text_selection`; the last wins.
     pub(crate) select: Option<SelectRequest>,
+    /// `select` came from an `El::on_selection_change` handler, so applying it must not queue
+    /// another `on_selection_change` round for that change.
+    pub(crate) select_from_change: bool,
     /// `Tx::live_only`: this handler changed nothing the view reads.
     pub(crate) live_only: bool,
 }
@@ -397,6 +400,7 @@ impl Tx {
     /// The selection lives on across rebuilds that keep the text's path and the selected part.
     pub fn select_text(&mut self, key: impl Into<String>, range: std::ops::Range<usize>) {
         self.select = Some(SelectRequest::Range(key.into(), range));
+        self.select_from_change = false;
     }
 
     /// Select all of the [`El::selectable`] text named `key`, or, for any other element, every
@@ -405,11 +409,13 @@ impl Tx {
     /// whole document. After this handler's commit, as [`Tx::select_text`].
     pub fn select_all_text(&mut self, key: impl Into<String>) {
         self.select = Some(SelectRequest::All(key.into()));
+        self.select_from_change = false;
     }
 
     /// Clear the [`El::selectable`] text selection, as a click elsewhere does.
     pub fn clear_text_selection(&mut self) {
         self.select = Some(SelectRequest::Clear);
+        self.select_from_change = false;
     }
 
     /// Switch this window between linear and sRGB (gamma-space) blending from the next frame,

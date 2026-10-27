@@ -2424,7 +2424,10 @@ impl<S: 'static> Runtime<S> {
                 }
             }
             // A selection an earlier handler asked for is what this key copies.
-            if matches!(action, Action::Key { .. } | Action::Physical(..)) && let Some(request) = tx.select.take() { self.select_request(request); }
+            if matches!(action, Action::Key { .. } | Action::Physical(..)) && let Some(request) = tx.select.take() {
+                let from_change = std::mem::take(&mut tx.select_from_change);
+                self.apply_select_request(request, from_change);
+            }
             if matches!(action, Action::Layout(..) | Action::ScreenLayout(..) | Action::DrawnLayout(_, _, false) | Action::VisibleRows(..)) {
                 ran_layout |= self.run_action(action, &mut tx);
             } else {
@@ -2481,10 +2484,6 @@ impl<S: 'static> Runtime<S> {
             self.compare_live_check(check);
             self.apply_keeps();
         }
-        if let Some(request) = tx.select.take() { self.select_request(request); }
-        // What the commit or a `Tx::select_text` changed is heard next frame.
-        let changes = self.selection_changes();
-        self.queue.extend(changes);
         #[cfg(debug_assertions)]
         { self.live_check = None; }
         tx.keep_on_screen.clear();
@@ -2523,6 +2522,13 @@ impl<S: 'static> Runtime<S> {
         if destination { self.scroll_reveals.clear(); }
         // Those scrolls moved the caret after the commit a view placed from it saw.
         if self.caret_watch && self.caret_moved(None) { self.commit(&Tx { instant: true, ..Tx::default() }); }
+        if let Some(request) = tx.select.take() {
+            let from_change = std::mem::take(&mut tx.select_from_change);
+            self.apply_select_request(request, from_change);
+        }
+        // What the commit or a `Tx::select_text` changed is heard next frame.
+        let changes = self.selection_changes();
+        self.queue.extend(changes);
         self.update_interaction();
         #[cfg(test)]
         if let Some(publish) = tests::MID_FRAME.with(|hook| hook.borrow_mut().take()) { publish(); }
@@ -2901,6 +2907,7 @@ impl<S: 'static> Runtime<S> {
             Action::SelectionChange(path, change) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_selection_change.clone()) else { return false };
                 f(handler_state(&mut self.state), &change, &mut one);
+                one.select_from_change = one.select.is_some();
                 true
             }
             Action::Press(path, button) => {
@@ -8428,7 +8435,10 @@ fn merge(tx: &mut Tx, one: Tx) {
     tx.open_urls.extend(one.open_urls);
     tx.srgb_blend = one.srgb_blend.or(tx.srgb_blend);
     tx.blur |= one.blur;
-    if one.select.is_some() { tx.select = one.select; }
+    if one.select.is_some() {
+        tx.select = one.select;
+        tx.select_from_change = one.select_from_change;
+    }
     tx.instant |= one.instant;
     tx.settle |= one.settle;
     tx.follow_edge |= one.follow_edge;

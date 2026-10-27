@@ -171,7 +171,7 @@ impl<S: 'static> Runtime<S> {
     fn offer_physical(&mut self, event: &PhysicalInput, tx: &mut Tx, live: &mut Option<bool>) -> bool {
         let Some(handler) = self.focused.as_deref().and_then(|p| self.node(p))
             .and_then(|n| n.focus.physical.clone()) else { return false };
-        let mut one = Tx { key_repeat: matches!(event, PhysicalInput::Key { repeat: true, .. }), ..Tx::default() };
+        let mut one = Tx { key_repeat: matches!(event, PhysicalInput::Key { repeat: true, .. }), ..self.transaction() };
         let consumed = Tx::took(handler(handler_state(&mut self.state), event, &mut one), &mut one);
         fold_live(live, consumed, &one);
         merge(tx, one);

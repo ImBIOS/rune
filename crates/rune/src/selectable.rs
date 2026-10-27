@@ -42,6 +42,7 @@ pub struct SelectedText {
     key: Option<String>,
     range: Range<usize>,
     len: usize,
+    whole: bool,
     text: String,
 }
 
@@ -60,7 +61,7 @@ impl SelectedText {
     /// Some of the text is selected.
     pub fn is_selected(&self) -> bool { !self.range.is_empty() }
     /// All of the text is selected.
-    pub fn is_whole(&self) -> bool { self.range == (0..self.len) && self.len > 0 }
+    pub fn is_whole(&self) -> bool { self.whole }
     /// The selected part as copying takes it.
     pub fn text(&self) -> &str { &self.text }
 }
@@ -216,6 +217,19 @@ pub(super) fn range_in(ranges: &[(usize, usize, usize)], i: usize) -> Option<(us
 /// How far `x` is outside box `r` (x0, y0, x1, y1) horizontally.
 fn dist_x(r: [f32; 4], x: f32) -> f32 { (r[0] - x).max(x - r[2]).max(0.0) }
 
+/// Whether `a` and `b` have the same keyed segments and the same unkeyed tail after their last
+/// key, so a keyed text keeps its selection when a sibling shifts an unkeyed ancestor's index.
+fn same_keyed_path(a: &str, b: &str) -> bool {
+    fn split(p: &str) -> Option<(&str, &str)> {
+        let last_key = p.rmatch_indices('/').find(|&(i, _)| !p[i + 1..].starts_with('#'))
+            .map_or_else(|| (!p.starts_with('#')).then_some(0), |(i, _)| Some(i + 1))?;
+        let end = last_key + p[last_key..].find('/').unwrap_or(p.len() - last_key);
+        Some((&p[..end], &p[end..]))
+    }
+    let (Some((ka, ta)), Some((kb, tb))) = (split(a), split(b)) else { return false };
+    ta == tb && ka.split('/').filter(|s| !s.starts_with('#')).eq(kb.split('/').filter(|s| !s.starts_with('#')))
+}
+
 impl<S: 'static> Runtime<S> {
     pub(super) fn is_selectable(&self, i: usize) -> bool {
         let n = &self.nodes[i];
@@ -224,6 +238,16 @@ impl<S: 'static> Runtime<S> {
 
     fn live(&self, path: &str) -> Option<usize> {
         (0..self.nodes.len()).find(|&i| self.nodes[i].path == path && !self.subtree_exiting(i) && self.allowed(i))
+    }
+
+    /// A unique live selectable node at `path`'s keyed identity when an unkeyed ancestor moved.
+    fn rebound(&self, path: &str, content: &str, upto: usize) -> Option<usize> {
+        let mut hits = (0..self.nodes.len()).filter(|&i| {
+            self.is_selectable(i) && !self.subtree_exiting(i) && self.allowed(i)
+                && same_keyed_path(path, &self.nodes[i].path) && kept(content, self.content_of(i), upto)
+        });
+        let first = hits.next()?;
+        hits.next().is_none().then_some(first)
     }
 
     fn content_of(&self, i: usize) -> &str {
@@ -325,6 +349,34 @@ impl<S: 'static> Runtime<S> {
     /// the texts between are checked.
     pub(super) fn prune_text_selection(&mut self) {
         if self.text_sel.path.is_none() { return; }
+        let mut rebind = false;
+        if self.selection_holder().is_none()
+            && let Some(old_path) = self.text_sel.path.clone()
+        {
+            let upto = self.text_sel.anchor.max(self.text_sel.focus).max(self.text_sel.origin.1);
+            if let Some(i) = self.rebound(&old_path, &self.text_sel.content, upto) {
+                let old_ancs: Vec<&str> = std::iter::successors(Some(old_path.as_str()), |p| p.rsplit_once('/').map(|(a, _)| a)).collect();
+                let new_ancs: Vec<usize> = std::iter::successors(Some(i), |&p| self.nodes[p].parent).collect();
+                for (&old_anc, &new_anc) in old_ancs.iter().zip(&new_ancs) {
+                    if let Some(v) = self.sel_heard.by_path.remove(old_anc) {
+                        self.sel_heard.by_path.insert(self.nodes[new_anc].path.clone(), v);
+                    }
+                }
+                self.text_sel.path = Some(self.nodes[i].path.clone());
+                rebind = true;
+            }
+        }
+        if let Some(h) = self.selection_holder()
+            && self.focus_holder(h).is_none()
+            && let Some((far, content)) = &self.text_sel.far
+            && let Some(j) = self.rebound(far, content, self.text_sel.focus)
+        {
+            self.text_sel.far = Some((self.nodes[j].path.clone(), content.clone()));
+            rebind = true;
+        }
+        if rebind && let Some((h, f)) = self.selection_holder().and_then(|h| Some((h, self.focus_holder(h)?))) {
+            self.text_sel.between = self.between_hash(h, f);
+        }
         let Some((h, f)) = self.selection_holder().and_then(|h| Some((h, self.focus_holder(h)?)))
             .filter(|&(h, f)| self.text_sel.far.is_none() || self.between_hash(h, f) == self.text_sel.between)
         else {
@@ -369,12 +421,23 @@ impl<S: 'static> Runtime<S> {
     /// [`Runtime::selection`] for a handler's `Tx`, kept until a commit or the selection changes.
     pub(super) fn selection_snapshot(&self) -> Option<Rc<TextSelection>> {
         self.text_sel.path.as_ref()?;
+        {
+            let cache = self.sel_snapshot.borrow();
+            if let Some(s) = cache.as_ref().filter(|s| self.same_from(&s.from)) { return s.selection.clone(); }
+        }
         let from = self.selection_from();
-        let mut cache = self.sel_snapshot.borrow_mut();
-        if let Some(s) = cache.as_ref().filter(|s| s.from == from) { return s.selection.clone(); }
         let selection = self.selection().map(Rc::new);
-        *cache = Some(Snapshot { from, selection: selection.clone() });
+        *self.sel_snapshot.borrow_mut() = Some(Snapshot { from, selection: selection.clone() });
         selection
+    }
+
+    fn same_from(&self, from: &Basis) -> bool {
+        let sel = &self.text_sel;
+        from.0 == self.commits
+            && from.1.as_deref() == sel.path.as_deref()
+            && from.2 == sel.anchor
+            && from.3 == sel.focus
+            && from.4.as_deref() == sel.far.as_ref().map(|f| f.0.as_str())
     }
 
     fn selection_from(&self) -> Basis {
@@ -385,24 +448,43 @@ impl<S: 'static> Runtime<S> {
     /// The `El::on_selection_change` calls owed since the last check: each element whose part
     /// of the selection changed, started or cleared.
     pub(super) fn selection_changes(&mut self) -> Vec<Action> {
-        let from = self.selection_from();
-        if self.sel_heard.from.as_ref() == Some(&from) { return Vec::new(); }
-        self.sel_heard.from = Some(from);
-        let watchers: Vec<usize> = (0..self.nodes.len()).filter(|&i| self.nodes[i].on_selection_change.is_some()).collect();
+        if self.sel_heard.from.as_ref().is_some_and(|f| self.same_from(f)) { return Vec::new(); }
+        self.sel_heard.from = Some(self.selection_from());
+        if self.sel_heard.by_path.is_empty() && !self.nodes.iter().any(|n| n.on_selection_change.is_some()) {
+            return Vec::new();
+        }
+        let watchers: Vec<usize> = (0..self.nodes.len())
+            .filter(|&i| self.nodes[i].on_selection_change.is_some() && !self.subtree_exiting(i) && self.allowed(i))
+            .collect();
         if watchers.is_empty() && self.sel_heard.by_path.is_empty() { return Vec::new(); }
-        let sel = self.selection_snapshot();
-        let selected: Vec<usize> = match sel {
-            Some(_) => self.selection_ranges().into_iter().filter(|r| r.1 < r.2).map(|r| r.0).collect(),
-            None => Vec::new(),
-        };
+        let selected: Vec<usize> = self.selection_ranges().into_iter().filter(|r| r.1 < r.2).map(|r| r.0).collect();
         let inside = |w: usize, j: usize| std::iter::successors(Some(j), |&p| self.nodes[p].parent).any(|p| p == w);
+        if self.sel_heard.by_path.is_empty() && !watchers.iter().any(|&w| selected.iter().any(|&j| inside(w, j))) {
+            return Vec::new();
+        }
+        let sel = (!selected.is_empty()).then(|| self.selection_snapshot()).flatten();
         let (mut out, mut heard) = (Vec::new(), HashMap::new());
         for w in watchers {
             let path = self.nodes[w].path.clone();
             let now = sel.clone().filter(|_| selected.iter().any(|&j| inside(w, j)));
-            let before = self.sel_heard.by_path.remove(&path);
+            let before = self.sel_heard.by_path.remove(&path).or_else(|| {
+                let k = self.sel_heard.by_path.keys().find(|k| same_keyed_path(k, &path))?.clone();
+                self.sel_heard.by_path.remove(&k)
+            });
             let same = match (&before, &now) {
-                (Some(a), Some(b)) => Rc::ptr_eq(a, b) || a == b,
+                (Some(a), Some(b)) => {
+                    Rc::ptr_eq(a, b)
+                        || (a.text == b.text
+                            && a.texts.len() == b.texts.len()
+                            && a.texts.iter().zip(&b.texts).all(|(x, y)| {
+                                x.key == y.key
+                                    && x.range == y.range
+                                    && x.len == y.len
+                                    && x.whole == y.whole
+                                    && x.text == y.text
+                                    && (x.path == y.path || same_keyed_path(&x.path, &y.path))
+                            }))
+                }
                 (a, b) => a.is_none() && b.is_none(),
             };
             if !same {
@@ -422,8 +504,12 @@ impl<S: 'static> Runtime<S> {
             Some(b) => n.path.strip_prefix(&self.nodes[b].path).and_then(|p| p.strip_prefix('/')).unwrap_or(&n.path).to_owned(),
             None => n.path.clone(),
         };
+        let len = self.content_of(i).len();
+        let (full_a, full_b) = n.text.as_ref().filter(|t| !t.uncopied.is_empty())
+            .map_or((0, len), |t| trim_uncopied(&t.uncopied, (0, len)));
+        let whole = !range.is_empty() && len > 0 && range.start <= full_a && range.end >= full_b;
         let text = n.text.as_ref().and_then(|t| t.copy_slice(range.start as u32, range.end as u32)).unwrap_or_default();
-        SelectedText { path, key: n.key.clone(), range, len: self.content_of(i).len(), text }
+        SelectedText { path, key: n.key.clone(), range, len, whole, text }
     }
 
     /// What copying the selection puts on the clipboard: the nearest [`El::selection_copy`]
@@ -495,6 +581,13 @@ impl<S: 'static> Runtime<S> {
             }
             SelectRequest::All(key) => {
                 let Some(i) = named(&key) else { return };
+                if self.nodes[i].selection_group {
+                    let members = self.group_texts(i);
+                    if let (Some(&first), Some(&last)) = (members.first(), members.last()) {
+                        self.select_span(first, last);
+                        return;
+                    }
+                }
                 let inside = |j: usize| j == i || std::iter::successors(self.nodes[j].parent, |&p| self.nodes[p].parent).any(|p| p == i);
                 let texts = || (i..self.nodes.len()).take_while(|&j| inside(j))
                     .filter(|&j| self.is_selectable(j) && !self.subtree_exiting(j) && self.allowed(j));
@@ -505,6 +598,15 @@ impl<S: 'static> Runtime<S> {
                 };
                 self.select_span(first, last);
             }
+        }
+    }
+
+    /// `select_request`, recording what an `El::on_selection_change` callback changed as already
+    /// heard so it doesn't fire again on its own request.
+    pub(super) fn apply_select_request(&mut self, request: SelectRequest, from_change: bool) {
+        self.select_request(request);
+        if from_change {
+            let _ = self.selection_changes();
         }
     }
 
@@ -618,17 +720,31 @@ impl<S: 'static> Runtime<S> {
             None => self.text_index_at(h, x, y).map(|at| (h, at)),
         }) else { return };
         let at = self.unit_in(j, at, self.text_sel.unit);
-        if j == h {
-            let sel = &mut self.text_sel;
-            (sel.anchor, sel.focus) = extend(sel.origin, at);
-            sel.far = None;
+        let (anchor, focus) = if j == h {
+            extend(self.text_sel.origin, at)
+        } else if j > h {
+            (self.text_sel.origin.0, at.1)
         } else {
-            let far = (self.nodes[j].path.clone(), self.content_of(j).to_owned());
-            let sel = &mut self.text_sel;
-            (sel.anchor, sel.focus) = if j > h { (sel.origin.0, at.1) } else { (sel.origin.1, at.0) };
-            sel.far = Some(far);
+            (self.text_sel.origin.1, at.0)
+        };
+        let same_far = if j == h {
+            self.text_sel.far.is_none()
+        } else {
+            self.text_sel.far.as_ref().is_some_and(|(p, _)| *p == self.nodes[j].path)
+        };
+        if (self.text_sel.anchor, self.text_sel.focus) == (anchor, focus) && same_far {
+            return;
         }
-        self.seal();
+        self.text_sel.anchor = anchor;
+        self.text_sel.focus = focus;
+        if j == h {
+            self.text_sel.far = None;
+        } else if !same_far {
+            self.text_sel.far = Some((self.nodes[j].path.clone(), self.content_of(j).to_owned()));
+        }
+        if !same_far {
+            self.seal();
+        }
     }
 
     /// Cmd+C (Ctrl+C elsewhere) copies a non-empty selection and Cmd+A selects all of the text

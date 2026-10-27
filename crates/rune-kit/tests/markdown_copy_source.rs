@@ -24,9 +24,9 @@ fn runtime(source: bool) -> (Runtime<S>, rune::clipboard::MemoryClipboard) {
     (rt, clipboard)
 }
 
-fn tick(rt: &mut Runtime<S>) { rt.frame(1.0 / 60.0); }
+fn tick<T: 'static>(rt: &mut Runtime<T>) { rt.frame(1.0 / 60.0); }
 
-fn copy(rt: &mut Runtime<S>, clipboard: &rune::clipboard::MemoryClipboard, f: impl FnOnce(&mut rune::Tx)) -> String {
+fn copy<T: 'static>(rt: &mut Runtime<T>, clipboard: &rune::clipboard::MemoryClipboard, f: impl FnOnce(&mut rune::Tx)) -> String {
     rt.update(|_, tx| f(tx));
     tick(rt);
     rt.key(KeyEvent { key: Key::Command('c'), mods: Mods { cmd: true, ..Mods::default() } });
@@ -103,4 +103,46 @@ fn an_apps_on_key_sees_cmd_a_before_a_clicked_note() {
         let want = if takes { None } else { Some("a\nb") };
         assert_eq!(rt.selected_text().as_deref(), want, "takes={takes}: passed on, the note selects all");
     }
+}
+
+#[test]
+fn inline_code_rule_and_crlf_blocks_copy_cleanly() {
+    #[derive(Default)]
+    struct Doc { src: &'static str }
+    fn doc_view(s: &Doc, _: &mut Cx<Doc>) -> El {
+        col().w_full().padding(10.0).child(Markdown::new(s.src).selectable(true).copy_source(true).build(&Kit::neutral(true)).key("note"))
+    }
+    let run = |src: &'static str| {
+        let mut rt = Runtime::new(Doc { src }, doc_view, (480.0, 800.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        let clipboard = rune::clipboard::memory();
+        rt.use_clipboard(&clipboard);
+        (rt, clipboard)
+    };
+
+    // Document starting and ending with `---` rules returns the full source verbatim on Select All.
+    let ruled = "---\n\nHello **world**\n\n---\n";
+    let (mut rt, clipboard) = run(ruled);
+    assert_eq!(copy(&mut rt, &clipboard, |tx| tx.select_all_text("note")), ruled);
+
+    // Double-clicking a single inline-code word selects the whole block despite uncopied padding.
+    let inline = "`code`\n";
+    let (mut rt, clipboard) = run(inline);
+    let b0 = rt.elements().into_iter().find(|e| e.path.ends_with("note/b0")).expect("b0");
+    let (x, y) = (b0.rect[0] + 12.0, b0.rect[1] + b0.rect[3] / 2.0);
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    tick(&mut rt);
+    rt.key(KeyEvent { key: Key::Command('c'), mods: Mods { cmd: true, ..Mods::default() } });
+    tick(&mut rt);
+    assert_eq!(clipboard.text().as_deref().map(String::as_str), Some(inline));
+
+    // CRLF code and diff blocks strip `\r` from drawn text while preserving source copy.
+    let crlf = "```rust\r\nfn main() {}\r\n```\r\n\r\n```diff\r\n@@ -1 +1 @@\r\n-old\r\n+new\r\n```\r\n";
+    let (mut rt, clipboard) = run(crlf);
+    assert_eq!(copy(&mut rt, &clipboard, |tx| tx.select_all_text("note")), crlf);
+    assert_eq!(rt.selected_text().as_deref(), Some("fn main() {}\n@@ -1 +1 @@\n-old\n+new"));
 }

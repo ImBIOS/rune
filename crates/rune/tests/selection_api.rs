@@ -278,3 +278,134 @@ fn on_selection_change_hears_code_and_selections_elsewhere_dont_reach_it() {
     tick(&mut rt);
     assert_eq!(heard(&mut rt), [Heard(true, false, Some("first paragraph".into())), Heard(false, true, None)]);
 }
+
+#[test]
+fn a_focused_field_keeps_a_static_selection_across_commits() {
+    let mut rt = runtime();
+    rt.state.field = TextEdit::new("field words");
+    rt.state.field.focused = true;
+    rt.invalidate();
+    tick(&mut rt);
+    act(&mut rt, |tx| tx.select_text("lone", 0..4));
+    assert_eq!(rt.selected_text().as_deref(), Some("lone"));
+    for _ in 0..3 {
+        rt.invalidate();
+        tick(&mut rt);
+    }
+    assert_eq!(rt.selected_text().as_deref(), Some("lone"), "staying focused on the field keeps the static selection");
+}
+
+#[test]
+fn scroll_into_view_and_select_text_in_one_handler_selects_a_culled_row() {
+    #[derive(Default)]
+    struct V;
+    fn vview(_: &V, _: &mut Cx<V>) -> El {
+        let style = TextStyle::new(14.0, 400.0).lh(20.0);
+        col().w(300.0).h(80.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(
+            col()
+                .key("list")
+                .w_full()
+                .growth(rune::GrowthSpec::default())
+                .virtual_rows(
+                    100,
+                    24.0,
+                    |_: &V, i| format!("r{i}").into(),
+                    move |_: &V, i| {
+                        row().key(format!("r{i}")).w_full().h(24.0).child(
+                            text(format!("row {i} content"))
+                                .key(format!("t{i}"))
+                                .font(style)
+                                .w_full()
+                                .selectable(true),
+                        )
+                    },
+                ),
+        )
+    }
+    let mut rt = Runtime::new(V, vview, (320.0, 100.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    assert!(rt.elements().iter().all(|e| e.key.as_deref() != Some("t80")), "row 80 starts culled");
+    rt.update(|_, tx| {
+        tx.scroll_into_view("r80");
+        tx.select_text("t80", 0..6);
+    });
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.selected_text().as_deref(), Some("row 80"));
+}
+
+#[test]
+fn on_selection_change_calling_select_does_not_loop() {
+    #[derive(Default)]
+    struct LoopState { calls: Vec<Option<String>> }
+    fn lview(_: &LoopState, _: &mut Cx<LoopState>) -> El {
+        let style = TextStyle::new(14.0, 400.0).lh(20.0);
+        col().key("doc").w(300.0).selection_group(true)
+            .on_selection_change(|s: &mut LoopState, c, tx| {
+                s.calls.push(c.selection().map(|sel| sel.text().to_owned()));
+                if c.selection().is_some_and(|sel| sel.text() == "hello") {
+                    tx.select_all_text("doc");
+                }
+            })
+            .child(text("hello world").key("a").font(style).w_full().selectable(true))
+    }
+    let mut rt = Runtime::new(LoopState::default(), lview, (320.0, 100.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    rt.update(|_, tx| tx.select_text("a", 0..5));
+    for _ in 0..5 {
+        rt.frame(1.0 / 60.0);
+    }
+    assert_eq!(rt.state.calls, [Some("hello".to_owned())], "widening inside on_selection_change does not re-trigger it");
+    assert_eq!(rt.selected_text().as_deref(), Some("hello world"));
+}
+
+#[test]
+fn keyed_selection_survives_when_an_unkeyed_ancestor_shifts_index() {
+    #[derive(Default)]
+    struct Shift { banner: bool, heard: Vec<Heard> }
+    fn sview(s: &Shift, _: &mut Cx<Shift>) -> El {
+        let style = TextStyle::new(14.0, 400.0).lh(20.0);
+        col().w(300.0).gap(8.0)
+            .children(s.banner.then(|| row().w_full().child(text("banner").font(style))))
+            .child(
+                col().w_full().selection_group(true)
+                    .on_selection_change(|s: &mut Shift, c, _| {
+                        s.heard.push(Heard(c.started(), c.cleared(), c.selection().map(|t| t.text().to_owned())));
+                    })
+                    .child(text("alpha beta").key("msg").font(style).w_full().selectable(true)),
+            )
+    }
+    let mut rt = Runtime::new(Shift::default(), sview, (320.0, 120.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    rt.update(|_, tx| tx.select_text("msg", 0..5));
+    rt.frame(1.0 / 60.0);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.selected_text().as_deref(), Some("alpha"));
+    assert_eq!(std::mem::take(&mut rt.state.heard), [Heard(true, false, Some("alpha".into()))]);
+
+    // Inserting an unkeyed sibling before the unkeyed wrapper shifts `#0/msg` to `#1/msg`.
+    rt.update(|s, _| s.banner = true);
+    rt.frame(1.0 / 60.0);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.selected_text().as_deref(), Some("alpha"), "keyed text keeps its selection across unkeyed wrapper shift");
+    assert_eq!(rt.state.heard, [], "no bogus clear/start when the selection did not change");
+}
+
+#[test]
+fn secure_text_is_never_selectable_or_copied() {
+    #[derive(Default)]
+    struct Sec;
+    fn sec_view(_: &Sec, _: &mut Cx<Sec>) -> El {
+        let style = TextStyle::new(14.0, 400.0).lh(20.0);
+        col().key("doc").w(300.0).selection_group(true)
+            .child(text("public").key("pub").font(style).w_full().selectable(true))
+            .child(text("top-secret").key("sec").font(style).w_full().selectable(true).secure())
+    }
+    let mut rt = Runtime::new(Sec, sec_view, (320.0, 120.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    rt.update(|_, tx| tx.select_all_text("sec"));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.selected_text(), None);
+    rt.update(|_, tx| tx.select_all_text("doc"));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.selected_text().as_deref(), Some("public"));
+}

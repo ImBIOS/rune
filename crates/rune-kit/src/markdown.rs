@@ -329,9 +329,12 @@ impl Builder {
     fn push_code(&mut self, mut text: String, fence: Fence, mut map: SpanMap, eof: bool) {
         let line_ended = text.ends_with('\n');
         if eof {
-            text.truncate(text.trim_end_matches('\n').len());
+            text.truncate(text.trim_end_matches(['\n', '\r']).len());
         } else if line_ended {
             text.pop();
+            if text.ends_with('\r') {
+                text.pop();
+            }
         }
         map.truncate_out(text.len());
         let block = code_block(text, &fence);
@@ -1889,7 +1892,9 @@ fn source_copy(src: &str, starts: &[usize], names: &[String], sel: &rune::TextSe
     if first == last && !sel.texts().iter().filter(|t| block_of(t.path()) == Some(first)).all(|t| t.is_whole() || t.is_empty()) {
         return None;
     }
-    if first == 0 && last + 1 >= starts.len() { return Some(src.to_owned()); }
+    if (first == 0 && last + 1 >= starts.len()) || sel.texts().iter().all(|t| t.is_whole() || t.is_empty()) {
+        return Some(src.to_owned());
+    }
     let start = *starts.get(first)?;
     let end = starts.get(last + 1).copied().unwrap_or(src.len());
     Some(src.get(start..end)?.trim_end().to_owned())
@@ -2155,6 +2160,7 @@ impl Renderer {
                 })
                 .collect();
             line_start = line_end + 1;
+            let line = line.strip_suffix('\r').unwrap_or(line);
             let header = ["@@", "diff ", "index ", "--- ", "+++ "].iter().any(|p| line.starts_with(p));
             let (tint, color) = match line.as_bytes().first() {
                 _ if header => (None, s.diff_hunk),
