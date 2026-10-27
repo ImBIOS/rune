@@ -6,7 +6,7 @@ crates/rune-fx/src/lib.rs 1509
 crates/rune-fx/src/renderer.rs 851
 crates/rune-kit/src/diff/state.rs 886
 crates/rune-kit/src/diff/view.rs 865
-crates/rune-kit/src/markdown.rs 2330
+crates/rune-kit/src/markdown.rs 1903
 crates/rune-kit/src/syntax/scan.rs 1694
 crates/rune-kit/src/tree.rs 1217
 crates/rune-light/examples/light.rs 1236

@@ -40,6 +40,92 @@ fn with_tnum(features: &'static str) -> &'static str {
     out
 }
 
+impl MarkdownStyle {
+    /// A table's outline and row rules, and its header row's fill.
+    pub fn table(mut self, border: Color, header_fill: Color) -> Self {
+        self.table_outline = Some(border);
+        self.table_rule = border;
+        self.table_head_fill = header_fill;
+        self
+    }
+    /// The rounded outline around a table, or `None` for none; a rule then runs under the
+    /// last row too, as on a web page.
+    pub fn table_outline(mut self, outline: Option<Color>) -> Self {
+        self.table_outline = outline;
+        self
+    }
+    /// The hairline under the header and between rows.
+    pub fn table_rules(mut self, c: Color) -> Self {
+        self.table_rule = c;
+        self
+    }
+    /// The header row's text colour (the body text colour by default).
+    pub fn table_header_text(mut self, c: Color) -> Self {
+        self.table_head_text = c;
+        self
+    }
+    /// The header row's fill alone (`table` sets it with the border).
+    pub fn table_header_fill(mut self, c: Color) -> Self {
+        self.table_head_fill = c;
+        self
+    }
+    /// The hairline under the header row, when it should stand out from the row rules, as a
+    /// web `th { border-bottom }` in a stronger colour than the `td`s'. The row rule colour
+    /// by default.
+    pub fn table_header_rule(mut self, c: Color) -> Self {
+        self.table_head_rule = Some(c);
+        self
+    }
+    /// The header row's weight (the strong weight by default), for a medium-weight `th` beside
+    /// bold `strong` text.
+    pub fn table_header_weight(mut self, w: f32) -> Self {
+        self.table_head_weight = Some(w);
+        self
+    }
+    /// Whether cells set figures at one width (OpenType `tnum`) so numbers line up down a
+    /// column. On by default; only digits change.
+    pub fn table_tabular_figures(mut self, on: bool) -> Self {
+        self.table_tabular = on;
+        self
+    }
+    /// The narrowest a column shrinks to when its longest word is wider (120 points by default).
+    pub fn table_min_column(mut self, points: f32) -> Self {
+        self.table_min_column = points.max(0.0);
+        self
+    }
+    /// The cells' font (the body font by default). The header takes it at the strong weight,
+    /// and inline code scales from its size. A web table at `font-size: 0.93em` is the body
+    /// style at 0.93 of its size.
+    pub fn table_font(mut self, f: TextStyle) -> Self {
+        self.table_font = Some(f);
+        self
+    }
+    /// Each cell's padding: `x` on the left and right, `y` above and below (10 and 6 points by
+    /// default).
+    pub fn table_cell_padding(mut self, x: f32, y: f32) -> Self {
+        self.table_pad = [x.max(0.0), y.max(0.0)];
+        self
+    }
+    /// Whether the first column starts at the table's left edge, with no left padding, so its
+    /// text lines up with the paragraphs around it, as a web table whose first cells have
+    /// `padding-left: 0`. Off by default.
+    pub fn table_flush_left(mut self, on: bool) -> Self {
+        self.table_flush_left = on;
+        self
+    }
+    /// Tables that read like a data [`Table`](crate::Table) beside them: its cell font, cell
+    /// padding (sized so a one-line row is the data table's row height), rules and muted header
+    /// text. The outline, when there is one, takes the rule colour.
+    pub fn table_like(mut self, t: &crate::TableStyle) -> Self {
+        self.table_font = Some(t.font);
+        self.table_pad = [t.cell_pad, ((t.row_height - t.font.line_height) / 2.0).max(0.0)];
+        self.table_rule = t.rule;
+        self.table_head_text = t.header_text;
+        self.table_outline = self.table_outline.map(|_| t.rule);
+        self
+    }
+}
+
 impl Renderer {
     fn head_font(&self) -> TextStyle {
         self.cell_font(TextStyle { weight: self.s.table_head_weight.unwrap_or(self.s.strong_weight), ..self.s.table_font.unwrap_or(self.s.body) })
