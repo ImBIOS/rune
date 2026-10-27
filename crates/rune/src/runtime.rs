@@ -1916,7 +1916,7 @@ impl<S: 'static> Runtime<S> {
                 }
             }
         }
-        if !focused { self.wheel_lost(); }
+        if !focused { self.input_click.clear(); self.wheel_lost(); }
     }
 
     /// The window gets no more keys: it lost focus or hid, which may never report a blur. The
@@ -3170,6 +3170,9 @@ impl<S: 'static> Runtime<S> {
         if self.default_button_key(ev, one) { return true; }
         one.physical_key = physical_key;
         if app_first && let Some(f) = self.on_key && Tx::took(app_call!(f, &mut self.state, ev, one), one) { return true; }
+        if self.focused_input().is_some() {
+            self.input_click.clear_last();
+        }
         if let Some(f) = self.focused_input().and_then(|input| input.key.clone())
             && Tx::took(f(handler_state(&mut self.state), ev, one), one)
         {
@@ -5037,7 +5040,10 @@ impl<S: 'static> Runtime<S> {
             return;
         }
         self.selection_drag(x, y);
-        self.input_drag(x, y, drag_move);
+        if self.input_click.captured {
+            self.input_drag(x, y, drag_move);
+            return;
+        }
         let Some(i) = self.nodes.iter().enumerate().position(|(i, n)| n.path == path && !self.subtree_exiting(i)) else { return };
         let (id, r, has_drag) = (self.nodes[i].id, self.nodes[i].target, self.nodes[i].on_drag.is_some() && !self.drags_out(&self.nodes[i]));
         self.press_moved |= (x - self.press_at.0).abs() > CLICK_SLOP || (y - self.press_at.1).abs() > CLICK_SLOP;
@@ -5085,7 +5091,7 @@ impl<S: 'static> Runtime<S> {
         self.drop_drag_out_request();
         self.drag_out_armed = false;
         self.text_sel.dragging = false;
-        self.input_click.stop_drag();
+        self.input_click.clear();
         self.capture = None;
         self.secondary_capture = None;
         self.capture_inside = false;
@@ -5096,6 +5102,7 @@ impl<S: 'static> Runtime<S> {
     /// End a held drag without a drop: its handler hears `Phase::Up` with [`Drag::cancelled`]
     /// and the release that follows does nothing. False when no drag is held.
     fn cancel_drag(&mut self) -> bool {
+        if self.input_click.captured { return false; }
         let Some((path, d)) = &self.capture else { return false };
         let Some(i) = self.nodes.iter().enumerate().position(|(i, n)| &n.path == path && !self.subtree_exiting(i)) else { return false };
         if self.nodes[i].on_drag.is_none() || self.drags_out(&self.nodes[i]) { return false; }
@@ -5324,11 +5331,15 @@ impl<S: 'static> Runtime<S> {
         // A drag that selected text is a selection, not a press.
         let selected = self.selected_by_drag();
         self.text_sel.dragging = false;
-        self.input_click.stop_drag();
+        let input_capture = self.input_click.end_press();
         let Some((path, d)) = self.capture.take() else { return };
         let button = std::mem::take(&mut self.capture_button);
         self.refresh_hover_within();
         let double = std::mem::take(&mut self.double_armed);
+        if input_capture {
+            self.capture_inside = false;
+            return;
+        }
         let Some(i) = self.nodes.iter().enumerate().position(|(i, n)| n.path == path && !self.subtree_exiting(i)) else { return };
         let n = &self.nodes[i];
         let (has_drag, has_press, has_double) = (n.on_drag.is_some() && !self.drags_out(n), n.on_press.is_some(), n.on_double_press.is_some());

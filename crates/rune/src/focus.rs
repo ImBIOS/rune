@@ -154,9 +154,7 @@ impl<S: 'static> Runtime<S> {
         crate::el::Outline { width: 3.0, offset: 0.0, color: self.system_accent.focus(self.env.system_dark) }
     }
     pub(super) fn set_focus(&mut self, path: Option<String>, keyboard: bool) -> bool {
-        if self.input_click.last_path().is_some_and(|p| path.as_deref() != Some(p)) {
-            self.input_click.clear();
-        }
+        self.input_click.on_focus_change(path.as_deref());
         if self.focused != path { self.ime_area = None; self.ime_reset = true; self.blur_links(); self.hover_focus = false; }
         // Tabbing away or into a field takes the selection's keyboard; a hovered row doesn't.
         if self.focused != path
@@ -256,6 +254,9 @@ impl<S: 'static> Runtime<S> {
         std::mem::swap(&mut self.nodes, nodes);
         let changed = self.set_focus(next, self.keyboard_focus);
         std::mem::swap(&mut self.nodes, nodes);
+        if self.input_click.dragging_path().is_some_and(|p| !nodes.iter().any(|n| n.path == p && !n.inert && n.input.is_some())) {
+            self.input_click.drop_drag();
+        }
         if self.capture.is_none() {
             self.last_focused = self.focused.clone();
         }
