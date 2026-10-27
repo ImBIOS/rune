@@ -4,7 +4,7 @@
 use rune::{El, Icon, TextStyle, Tx, col, el, icon, row, text};
 
 use crate::menu::{Modal, dismissal};
-use crate::overlay::{Placement, menu_anchor};
+use crate::overlay::{Placement, fit_scroll, menu_anchor};
 use crate::{Kit, State, over, press_over, shadows};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -149,7 +149,7 @@ impl Select {
             modal
         });
         // 12rem tall at most; consecutive options sit 2 points apart, headers flush.
-        let mut list = col().key("listbox").role("listbox").focus_group().padding(4.0).max_h(192.0).clip_soft(0.0).items_stretch();
+        let mut list = col().key("rows").padding(4.0).items_stretch();
         let mut group: Option<&str> = None;
         let mut after_item = false;
         for (i, (g, o)) in self.options.iter().enumerate() {
@@ -206,7 +206,7 @@ impl Select {
                 .max_w(368.0)
                 .radius(6.0)
                 .fill(c.layer_01)
-                .child(list),
+                .child(col().key("listbox").role("listbox").focus_group().max_h(192.0).min_h(0.0).shrink().child(fit_scroll(list))),
             &k.elevation.floating,
         );
         if let Some(modal) = modal {

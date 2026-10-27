@@ -13,6 +13,15 @@ const CLAMPED_ROLES: [&str; 3] = ["list", "tree", "grid"];
 /// AppKit's type-select resets after this long without a key.
 const TYPE_SELECT_PAUSE: f64 = 1.0;
 
+/// Whether `ev` navigates (Tab, an arrow, Home, End, Page Up or Page Down, unmodified but for
+/// Shift), which shows focus from then on, as CSS `:focus-visible` after keyboard navigation.
+/// Other keys keep whatever showed: Space on a clicked button, Escape, or typing shows no ring.
+/// Type-select shows it when it moves focus.
+pub(super) fn navigates(ev: &KeyEvent) -> bool {
+    !(ev.mods.cmd || ev.mods.ctrl || ev.mods.alt || ev.mods.logo)
+        && matches!(ev.key, Key::Tab | Key::Up | Key::Down | Key::Left | Key::Right | Key::Home | Key::End | Key::PageUp | Key::PageDown)
+}
+
 /// Pushes focus (and a secure flag) into an input's app-owned editor and mirrors it back.
 fn sync_input_focus(input: &mut crate::el::InputSpec, states: crate::states::States<'_>, focused: bool) -> bool {
     let Some(access) = &input.access else {
@@ -298,14 +307,13 @@ impl<S: 'static> Runtime<S> {
     /// `shown`: the focus highlight was visible before this key arrived.
     pub(super) fn focus_key(&mut self, ev: &KeyEvent, shown: bool, tx: &mut Tx) -> bool {
         if ev.mods.cmd || ev.mods.ctrl || ev.mods.alt || ev.mods.logo { return false; }
-        self.keyboard_focus = true;
         // Activations (dismiss, press, open) fire once per press. Their repeats are consumed so
         // they reach nothing else; navigation below keeps repeating.
         let repeat = tx.key_repeat;
         if ev.key == Key::Escape && let Some(i) = self.active_modal() {
             if repeat { return true; }
             let f = self.nodes[i].modal.as_ref().unwrap().dismiss.clone();
-            self.set_focus(None, true);
+            self.set_focus(None, self.keyboard_focus);
             f(states!(self), tx);
             return true;
         }
@@ -613,6 +621,19 @@ mod tests {
         rt.pointer_down(x, y); rt.pointer_up(x, y); rt.frame(0.0);
         assert_eq!(focused(&rt), "early");
         assert!(!rt.elements().iter().any(|e| e.focus_visible));
+    }
+    #[test]
+    fn only_navigation_keys_show_focus_after_a_click() {
+        let mut rt = runtime();
+        let (x, y) = rt.find("radio0").unwrap();
+        rt.pointer_down(x, y); rt.pointer_up(x, y); rt.frame(0.0);
+        assert_eq!(focused(&rt), "radio0");
+        for k in [Key::Text(" ".into()), Key::Escape, Key::Text("x".into())] {
+            key(&mut rt, k.clone(), false);
+            assert!(!rt.elements().iter().any(|e| e.focus_visible), "{k:?} after a click shows no ring");
+        }
+        key(&mut rt, Key::Right, false);
+        assert!(rt.elements().iter().any(|e| e.focused && e.focus_visible), "an arrow shows it");
     }
     #[test]
     fn modal_traps_restores_nested_and_blocks_background() {

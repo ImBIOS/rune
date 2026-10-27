@@ -114,6 +114,9 @@ mod scroll_x;
 mod scroll_offset;
 #[path = "runtime/sticky.rs"]
 mod sticky;
+#[path = "runtime/anchor.rs"]
+mod anchor;
+use anchor::anchor_position;
 #[path = "runtime/live_latch.rs"]
 mod live_latch;
 #[path = "runtime/scroll_watch.rs"]
@@ -150,6 +153,9 @@ mod line_clamp_tests;
 #[cfg(test)]
 #[path = "runtime/aspect_fit_tests.rs"]
 mod aspect_fit_tests;
+#[cfg(test)]
+#[path = "runtime/anchor_fit_tests.rs"]
+mod anchor_fit_tests;
 #[cfg(test)]
 #[path = "drop_tests.rs"]
 mod drop_tests;
@@ -2945,7 +2951,7 @@ impl<S: 'static> Runtime<S> {
         if matches!(ev.key, crate::Key::Modifier { .. }) { return !repeat && self.route_modifier(ev, one); }
         one.key_repeat = repeat;
         let shown = self.keyboard_focus || self.hover_focus;
-        self.keyboard_focus = true;
+        self.keyboard_focus |= focus::navigates(ev);
         // With no focused element, app-owned navigation (e.g. a toolbar)
         // gets first refusal before Rune starts a new Tab traversal.
         let app_first = self.focused.is_none();
@@ -3746,12 +3752,12 @@ impl<S: 'static> Measurement<'_, S> {
             if !entry.used { taffy.remove(entry.id).unwrap(); }
             entry.used
         });
+        let room = Size {
+            width: AvailableSpace::Definite(self.viewport.0),
+            height: if self.fit_height { AvailableSpace::MaxContent } else { AvailableSpace::Definite(self.viewport.1) },
+        };
         {
             let _layout_time = crate::frame_profile::Scope::new(crate::frame_profile::Phase::Layout);
-            let room = Size {
-                width: AvailableSpace::Definite(self.viewport.0),
-                height: if self.fit_height { AvailableSpace::MaxContent } else { AvailableSpace::Definite(self.viewport.1) },
-            };
             compute_layout(&mut taffy, root_id, room, &nodes, &mut self.text, scale);
             // `aspect_fit` elements laid out filling their room; fix each at the largest box
             // at its ratio inside it and lay out again, so siblings and alignment follow.
@@ -3769,40 +3775,20 @@ impl<S: 'static> Measurement<'_, S> {
         #[cfg(debug_assertions)]
         layout_diagnostics::collapsed_scrolls(&taffy, &nodes);
 
-        self.node_index.clear();
-        self.node_index.reserve(nodes.len());
-        for i in 0..nodes.len() {
-            let id = self.node_id(&nodes[i].path);
-            nodes[i].id = id;
-            self.node_index.insert(id, i);
-            let l = taffy.layout(nodes[i].taffy).unwrap();
-            nodes[i].local = MRect::new(l.location.x, l.location.y, l.size.width, l.size.height);
-            let (px, py) = nodes[i].parent.map_or((0.0, 0.0), |p| (nodes[p].target[0], nodes[p].target[1]));
-            let mut x = px + l.location.x;
-            let mut y = py + l.location.y;
-            if let Some(a) = &nodes[i].above
-                && let Some(j) = nodes[..i].iter().position(|n| n.key.as_ref() == Some(&a.key))
-            {
-                // Anchors inside scroll viewports sit where they are scrolled (and stuck) to.
-                let target = sticky::anchored_target(&nodes, self.scrolls, j, self.viewport);
-                (x, y) = anchor_position(a, target, (l.size.width, l.size.height), self.viewport);
-                nodes[i].local.x = x - px;
-                nodes[i].local.y = y - py;
-            }
-            nodes[i].target = [x, y, x + l.size.width, y + l.size.height];
-            let ins = [
-                l.padding.left + l.border.left,
-                l.padding.top + l.border.top,
-                l.padding.right + l.border.right,
-                l.padding.bottom + l.border.bottom,
-            ];
-            nodes[i].inset = ins;
+        self.place(&taffy, &mut nodes);
+        if self.fit_anchored(&mut taffy, &nodes) {
+            compute_layout(&mut taffy, root_id, room, &nodes, &mut self.text, scale);
+            self.place(&taffy, &mut nodes);
+        }
+        for n in &mut nodes {
+            let l = taffy.layout(n.taffy).unwrap();
+            let ins = n.inset;
             // A cell of a run draws from the run's layout (and keeps it cached) instead of its own.
-            let run = nodes[i].text.as_ref().and_then(|t| t.advance_in.as_ref().map(|(run, at)| (self.text.run_layout(run, t.style, scale), *at)));
+            let run = n.text.as_ref().and_then(|t| t.advance_in.as_ref().map(|(run, at)| (self.text.run_layout(run, t.style, scale), *at)));
             if let Some((r, _)) = run.filter(|(r, at)| r.x(*at).is_some()) {
-                nodes[i].text_layout = Some(r.layout.clone());
-                nodes[i].run_layout = Some(r);
-            } else if let Some(spec) = &nodes[i].text {
+                n.text_layout = Some(r.layout.clone());
+                n.run_layout = Some(r);
+            } else if let Some(spec) = &n.text {
                 let w = (l.size.width - ins[0] - ins[2]).max(0.0);
                 let wrap = spec.wrap.then_some(w * scale);
                 let mut layout = self.text.layout_for_spec(spec, scale, wrap, line_alignment(spec));
@@ -3813,8 +3799,8 @@ impl<S: 'static> Measurement<'_, S> {
                 } else if let Some((cut, e)) = clamped(&mut self.text, spec, scale, w * scale, &layout) {
                     (layout, elided) = (cut, Some(e));
                 }
-                nodes[i].text_layout = Some(layout);
-                nodes[i].elided = elided;
+                n.text_layout = Some(layout);
+                n.elided = elided;
             }
         }
 
@@ -8122,45 +8108,6 @@ fn glyph_or_image(q: &GlyphQuad, text: &TextSystem, images: &mut crate::pixels::
         clip,
         fade: crate::render::pack_fade(fade, clip, clip),
     })
-}
-
-/// Where an anchored overlay of `size` goes next to `t` (x0, y0, x1, y1), flipped to the
-/// opposite side when it doesn't fit, then kept 8 points inside the viewport.
-fn anchor_position(a: &crate::el::Anchor, t: [f32; 4], size: (f32, f32), vp: (f32, f32)) -> (f32, f32) {
-    use crate::el::Side;
-    let (w, h) = size;
-    let margin = 8.0;
-    let along = |lo: f32, hi: f32, len: f32| match a.align {
-        Align::Start => lo,
-        Align::Center => (lo + hi - len) * 0.5,
-        Align::End => hi - len,
-    };
-    let (mut x, mut y) = match a.side {
-        Side::Top => (along(t[0], t[2], w), t[1] - h - a.gap),
-        Side::Bottom => (along(t[0], t[2], w), t[3] + a.gap),
-        Side::Left => (t[0] - w - a.gap, along(t[1], t[3], h)),
-        Side::Right => (t[2] + a.gap, along(t[1], t[3], h)),
-    };
-    // Flip the side when the other one fits (Floating UI's `flip`).
-    match a.side {
-        Side::Bottom if y + h > vp.1 - margin && t[1] - h - a.gap >= margin => y = t[1] - h - a.gap,
-        Side::Top if y < margin && t[3] + a.gap + h <= vp.1 - margin => y = t[3] + a.gap,
-        Side::Right if x + w > vp.0 - margin && t[0] - w - a.gap >= margin => x = t[0] - w - a.gap,
-        Side::Left if x < margin && t[2] + a.gap + w <= vp.0 - margin => x = t[2] + a.gap,
-        _ => {}
-    }
-    // Flip the alignment when it overflows and the other end fits, then shift along the side.
-    let vertical = matches!(a.side, Side::Top | Side::Bottom);
-    let (pos, lo, hi, len, room) = if vertical { (&mut x, t[0], t[2], w, vp.0) } else { (&mut y, t[1], t[3], h, vp.1) };
-    match a.align {
-        Align::End if *pos < margin && lo + len <= room - margin => *pos = lo,
-        Align::Start if *pos + len > room - margin && hi - len >= margin => *pos = hi - len,
-        _ => {}
-    }
-    *pos = pos.clamp(margin, (room - len - margin).max(margin));
-    // Along the main axis only keep the start edge inside; a long list may run off the far end.
-    if vertical { y = y.max(margin) } else { x = x.max(margin) }
-    (x, y)
 }
 
 /// Instances for a vector shape whose origin sits at `origin` (device px), with `k` device px per

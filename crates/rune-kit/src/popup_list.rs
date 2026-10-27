@@ -279,6 +279,8 @@ impl<S: 'static> PopupList<S> {
             .role("listbox")
             .w_full()
             .h((self.items.len() as f32 * 28.0).min(self.max_height))
+            .shrink()
+            .min_h(0.0)
             .scroll(ScrollSpec { stick_bottom: false })
             .clip_soft(0.0)
             .child(rows);
@@ -289,6 +291,8 @@ impl<S: 'static> PopupList<S> {
             .key("list")
             .preserve_focus_on_press(true)
             .w_full()
+            .shrink()
+            .min_h(0.0)
             .child(viewport)
             .child(
                 el().key("empty")

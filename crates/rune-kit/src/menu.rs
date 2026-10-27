@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use rune::{El, Icon, PointerPress, TextStyle, Tx, col, el, icon, row, text};
 
-use crate::overlay::{Placement, menu_anchor, scrim};
+use crate::overlay::{Placement, fit_scroll, menu_anchor, scrim};
 use crate::{Acts, Kit, State, shadows};
 
 /// A menu at a secondary-press position. Store the point from `El::on_secondary_press`
@@ -275,16 +275,13 @@ impl Menu {
     fn surface(self, k: &Kit, layer: &mut Vec<El>) -> El {
         let c = &k.c;
         let standard = self.standard;
-        let mut list = col().key(format!("{}-menu", self.key)).role("menu").focus_group().min_w(self.min_width).items_stretch();
-        list = if standard {
-            shadows(
-                k,
-                list.padding(4.0).radius(k.radius.md).fill(c.surface_raised).border(1.0, k.alpha(c.std_border, 0.5)),
-                &k.elevation.md,
-            )
+        let frame = col().key(format!("{}-menu", self.key)).role("menu").focus_group().min_w(self.min_width).items_stretch();
+        let frame = if standard {
+            shadows(k, frame.radius(k.radius.md).fill(c.surface_raised).border(1.0, k.alpha(c.std_border, 0.5)), &k.elevation.md)
         } else {
-            shadows(k, list.padding(2.0).radius(6.0).fill(c.layer_01), &k.elevation.floating)
+            shadows(k, frame.radius(6.0).fill(c.layer_01), &k.elevation.floating)
         };
+        let mut list = col().key("rows").items_stretch().padding(if standard { 4.0 } else { 2.0 });
         for (i, entry) in self.entries.into_iter().enumerate() {
             list = list.child(match entry {
                 MenuEntry::Item(item) => item.build(k, standard, format!("{}-item{i}", self.key), layer),
@@ -302,7 +299,7 @@ impl Menu {
                 }
             });
         }
-        list
+        frame.child(fit_scroll(list))
     }
 
     pub fn build(mut self, k: &Kit, layer: &mut Vec<El>) -> El {

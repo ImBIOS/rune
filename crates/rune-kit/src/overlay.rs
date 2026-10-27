@@ -6,7 +6,7 @@
 //! [`crate::root`]. Content is `El::anchored` to the trigger, so it follows layout, flips when
 //! it doesn't fit, and paints above everything mounted before it.
 
-use rune::{Align, Color, El, Shadow, Side, TextStyle, Transition, col, el, row, text};
+use rune::{Align, Color, El, ScrollSpec, Shadow, Side, TextStyle, Transition, col, el, row, text};
 use rune_motion::{Effect, Spring, SpringPair, Vec2, tokens};
 
 use crate::{Acts, ControlSize, IconButton, IconButtonVariant, Kit, shadows};
@@ -68,8 +68,7 @@ pub(crate) fn anchor(k: &Kit, content: El, anchor: &str, placement: Placement, g
 }
 
 pub(crate) fn anchor_at(k: &Kit, content: El, anchor: &str, side: Side, align: Align, gap: f32) -> El {
-    content
-        .anchored(anchor, side, align, gap)
+    fit(content, anchor, side, align, gap)
         .transition(Transition::scale_anchor(0.96, anchor_origin(side, align)))
         .motion(k.motion.overlay)
 }
@@ -80,6 +79,23 @@ fn anchor_with(motion: Spring, content: El, anchor: &str, placement: Placement, 
         .anchored(anchor, side, align, gap)
         .transition(Transition::scale_anchor(0.96, placement.origin()))
         .motion(motion)
+}
+
+/// A dropdown surface above or below its anchor is at most as tall as the window leaves it
+/// (`El::anchored_fit`); one beside it (a submenu) only flips.
+fn fit(content: El, anchor: &str, side: Side, align: Align, gap: f32) -> El {
+    if matches!(side, Side::Top | Side::Bottom) {
+        content.anchored_fit(anchor, side, align, gap)
+    } else {
+        content.anchored(anchor, side, align, gap)
+    }
+}
+
+/// A dropdown's rows in a scroll viewport that shrinks with its fitted surface, so a list
+/// longer than the window has room for scrolls, its edges fading while rows pass under them.
+/// Put it in a column with `.min_h(0.0)` up to the surface.
+pub(crate) fn fit_scroll(rows: El) -> El {
+    col().key("scroll").w_full().shrink().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).scroll_edge_fade(8.0).child(rows)
 }
 
 /// Positions a menu surface next to `anchor` with no entrance: it is there on the next frame,
@@ -93,7 +109,7 @@ pub(crate) fn menu_anchor(k: &Kit, content: El, anchor: &str, placement: Placeme
         springs: SpringPair::new(tokens::INSTANT, Spring::new(0.25, 0.0)),
         ..Transition::identity()
     };
-    content.anchored(anchor, side, align, gap).transition(fade).motion(k.motion.overlay)
+    fit(content, anchor, side, align, gap).transition(fade).motion(k.motion.overlay)
 }
 
 /// A transparent full-window press target under an open overlay: pressing outside closes it.
@@ -107,6 +123,9 @@ pub(crate) fn raised(k: &Kit, e: El, radius: f32) -> El {
 }
 
 /// `Popover::new("share").trigger(button).title("Share").open(s.open).build(&kit, &mut layer)`.
+///
+/// Above or below its trigger it is at most as tall as the window leaves it, and its body
+/// shrinks: give a long body a scroll viewport (`.shrink().min_h(0.0)`) to scroll in.
 pub struct Popover {
     key: String,
     trigger: Option<El>,
@@ -202,11 +221,15 @@ impl Popover {
                 row().key("description").px(12.0).child(text(d.clone()).font(k.ty.text_small).color(c.std_text)),
             );
         }
-        content = content.child(col().key("body").padding(12.0).children(self.body));
+        content = content.child(col().key("body").padding(12.0).shrink().min_h(0.0).children(self.body));
         if let Some(s) = self.dismiss {
             layer.push(s);
         }
-        layer.push(anchor(k, raised(k, content, k.radius.md), &anchor_key, self.placement, self.gutter));
+        let (side, align) = self.placement.split();
+        let content = fit(raised(k, content, k.radius.md), &anchor_key, side, align, self.gutter)
+            .transition(Transition::scale_anchor(0.96, self.placement.origin()))
+            .motion(k.motion.overlay);
+        layer.push(content);
         trigger
     }
 }
