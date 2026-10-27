@@ -1,0 +1,1 @@
+- Selectable texts flowed side by side (words around a chip) draw one continuous highlight rect per line instead of one per word, so no seams show between them.
