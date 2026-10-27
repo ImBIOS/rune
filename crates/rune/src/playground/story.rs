@@ -1,6 +1,72 @@
-//! A [`Story`] behind [`OwnStory`], so the playground holds stories of any state type.
+//! [`Story`], and [`OwnStory`], which erases its state type so the playground holds stories
+//! of any.
 
 use super::*;
+
+/// A story with its own state, made by `init` when it first shows and kept, timers and
+/// animations included, until the playground closes. R makes it again. Handlers built for `P`
+/// change it.
+///
+/// ```ignore
+/// Story::new("Progress/Upload", Upload::new, upload_view)
+///     .poll(Upload::tick)
+///     .trigger('r', "Run", |u, play| play.after(0.5, |u, _| u.done = true))
+///     .trigger('f', "Finish", |u, _| u.done = true)
+///     .side(upload_knobs)
+/// ```
+pub struct Story<P: 'static> {
+    pub(super) name: &'static str,
+    init: fn() -> P,
+    view: fn(&P, &mut Cx<P>) -> El,
+    poll: Option<fn(&mut P, f64, &mut Tx) -> bool>,
+    frame: Option<(f32, f32)>,
+    triggers: Vec<Trigger<P>>,
+    side: Option<fn(&P, &mut Cx<P>) -> El>,
+}
+
+impl<P: 'static> Story<P> {
+    /// `name` may be a `"Group/Name"` path.
+    pub fn new(name: &'static str, init: fn() -> P, view: fn(&P, &mut Cx<P>) -> El) -> Self {
+        Story { name, init, view, poll: None, frame: None, triggers: Vec::new(), side: None }
+    }
+
+    /// An overlay's view at its size, in a dashed frame over the stage (the overlay's clear
+    /// parts stay clear), with a state made by `init`.
+    pub fn overlay(name: &'static str, spec: &OverlaySpec<P>, init: fn() -> P) -> Self {
+        Story { frame: Some(spec.size), ..Story::new(name, init, spec.view) }
+    }
+
+    /// Called every frame while the story shows, as `AppSpec::poll` is, after its due steps:
+    /// true when it changed the state.
+    pub fn poll(mut self, poll: fn(&mut P, f64, &mut Tx) -> bool) -> Self {
+        self.poll = Some(poll);
+        self
+    }
+
+    /// A trigger: `key` (a letter, or `' '` for Space) runs `run` on the story's state, as its
+    /// button in the side column does. [`Play::after`] queues the steps that follow, on the
+    /// logical clock. R always replays: the state is made again, then an `'r'` trigger, if
+    /// there is one, runs. J and K are taken.
+    pub fn trigger(mut self, key: char, label: &'static str, run: Step<P>) -> Self {
+        self.triggers.push(trigger(key, label, run));
+        self
+    }
+
+    /// The app's own controls for this story, at the top of the side column, drawn from and
+    /// acting on its state: knobs, say.
+    pub fn side(mut self, view: fn(&P, &mut Cx<P>) -> El) -> Self {
+        self.side = Some(view);
+        self
+    }
+
+    fn stage(stage: &dyn Any) -> &Stage<P> {
+        stage.downcast_ref().expect("a story's stage is its own")
+    }
+
+    fn stage_mut(stage: &mut dyn Any) -> &mut Stage<P> {
+        stage.downcast_mut().expect("a story's stage is its own")
+    }
+}
 
 /// A [`Story`] with its state type erased. Its stage is a `Stage<P>`.
 pub(super) trait OwnStory {

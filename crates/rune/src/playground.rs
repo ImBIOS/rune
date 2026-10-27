@@ -24,9 +24,11 @@ const BAND: f32 = 28.0;
 const ROW: f32 = 28.0;
 const CONTROL: f32 = 24.0;
 
+mod nav;
 mod story;
 mod view;
 
+pub use story::Story;
 use story::OwnStory;
 
 /// A step a trigger runs, now or later on the logical clock: see [`Play::after`].
@@ -238,71 +240,6 @@ impl<S: 'static> Playground<S> {
 
     pub(crate) fn shortcut_key(&self) -> Option<&Shortcut> {
         self.shortcut.as_ref()
-    }
-}
-
-/// A story with its own state, made by `init` when it first shows and kept, timers and
-/// animations included, until the playground closes. R makes it again. Handlers built for `P`
-/// change it.
-///
-/// ```ignore
-/// Story::new("Progress/Upload", Upload::new, upload_view)
-///     .poll(Upload::tick)
-///     .trigger('r', "Run", |u, play| play.after(0.5, |u, _| u.done = true))
-///     .trigger('f', "Finish", |u, _| u.done = true)
-///     .side(upload_knobs)
-/// ```
-pub struct Story<P: 'static> {
-    name: &'static str,
-    init: fn() -> P,
-    view: fn(&P, &mut Cx<P>) -> El,
-    poll: Option<fn(&mut P, f64, &mut Tx) -> bool>,
-    frame: Option<(f32, f32)>,
-    triggers: Vec<Trigger<P>>,
-    side: Option<fn(&P, &mut Cx<P>) -> El>,
-}
-
-impl<P: 'static> Story<P> {
-    /// `name` may be a `"Group/Name"` path.
-    pub fn new(name: &'static str, init: fn() -> P, view: fn(&P, &mut Cx<P>) -> El) -> Self {
-        Story { name, init, view, poll: None, frame: None, triggers: Vec::new(), side: None }
-    }
-
-    /// An overlay's view at its size, in a dashed frame over the stage (the overlay's clear
-    /// parts stay clear), with a state made by `init`.
-    pub fn overlay(name: &'static str, spec: &OverlaySpec<P>, init: fn() -> P) -> Self {
-        Story { frame: Some(spec.size), ..Story::new(name, init, spec.view) }
-    }
-
-    /// Called every frame while the story shows, as `AppSpec::poll` is, after its due steps:
-    /// true when it changed the state.
-    pub fn poll(mut self, poll: fn(&mut P, f64, &mut Tx) -> bool) -> Self {
-        self.poll = Some(poll);
-        self
-    }
-
-    /// A trigger: `key` (a letter, or `' '` for Space) runs `run` on the story's state, as its
-    /// button in the side column does. [`Play::after`] queues the steps that follow, on the
-    /// logical clock. R always replays: the state is made again, then an `'r'` trigger, if
-    /// there is one, runs. J and K are taken.
-    pub fn trigger(mut self, key: char, label: &'static str, run: Step<P>) -> Self {
-        self.triggers.push(trigger(key, label, run));
-        self
-    }
-
-    /// The app's own controls for this story, at the top of the side column, drawn from and
-    /// acting on its state: knobs, say.
-    pub fn side(mut self, view: fn(&P, &mut Cx<P>) -> El) -> Self {
-        self.side = Some(view);
-        self
-    }
-
-    fn stage(stage: &dyn Any) -> &Stage<P> {
-        stage.downcast_ref().expect("a story's stage is its own")
-    }
-
-    fn stage_mut(stage: &mut dyn Any) -> &mut Stage<P> {
-        stage.downcast_mut().expect("a story's stage is its own")
     }
 }
 
@@ -702,43 +639,6 @@ impl<S: 'static> Live<S> {
         !self.menu && self.shortcut.as_ref().is_some_and(|s| s.matches_key(ev))
     }
 
-    /// What `ev` does in the open playground. `in_side`: the keyboard is in the side column.
-    pub(crate) fn nav(&self, ev: &KeyEvent, in_side: bool) -> Nav {
-        let m = ev.mods;
-        // Control on macOS, the Windows key elsewhere: never the playground's.
-        let other = m.alt || (cfg!(target_os = "macos") && m.ctrl) || (cfg!(not(target_os = "macos")) && m.logo);
-        if !self.open || other { return Nav::Pass; }
-        let letter = match &ev.key {
-            Key::Text(t) if !m.cmd => t.chars().next().filter(|_| t.chars().count() == 1).map(|c| c.to_ascii_lowercase()),
-            _ => None,
-        };
-        if in_side {
-            match ev.key {
-                Key::Tab | Key::Escape => return Nav::OutOfSide,
-                Key::Up if !m.cmd => return Nav::SideStep(-1),
-                Key::Down if !m.cmd => return Nav::SideStep(1),
-                _ => {}
-            }
-        }
-        // In the side column, Space presses the focused control.
-        if let Some(c) = letter && !(in_side && c == ' ') && self.triggers().iter().any(|(k, _)| *k == c) {
-            return Nav::Request(if c == 'r' { Request::Replay } else { Request::Trigger(c) });
-        }
-        if in_side { return Nav::Pass; }
-        let at = self.order.iter().position(|&i| i == self.selected).unwrap_or(0);
-        let n = self.order.len();
-        if n == 0 { return Nav::Pass; }
-        let to = match (&ev.key, letter) {
-            (Key::Up, _) if m.cmd => 0,
-            (Key::Down, _) if m.cmd => n - 1,
-            (_, _) if m.cmd => return Nav::Pass,
-            (Key::Up, _) | (_, Some('k')) => (at + n - 1) % n,
-            (Key::Down, _) | (_, Some('j')) => (at + 1) % n,
-            (Key::Right, _) | (Key::Tab, _) if !m.shift => return Nav::IntoSide,
-            _ => return Nav::Pass,
-        };
-        Nav::Request(Request::Select(self.order[to]))
-    }
 }
 
 impl Tx {
