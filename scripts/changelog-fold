@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Fold changelog/unreleased/*.md into CHANGELOG.md under `## dev`, newest first, then delete them.
+
+Usage: scripts/changelog-fold [--check]
+Order is each fragment's first-commit time (git log --diff-filter=A), else the date in its filename.
+"""
+import calendar, glob, os, re, subprocess, sys, time
+
+root = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
+os.chdir(root)
+check = "--check" in sys.argv[1:]
+
+
+def stamp(path):
+    out = subprocess.run(
+        ["git", "log", "--diff-filter=A", "--format=%ct", "-1", "--", path],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    if out:
+        return int(out)
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", os.path.basename(path))
+    return calendar.timegm((int(m[1]), int(m[2]), int(m[3]), 0, 0, 0)) if m else int(time.time())
+
+
+frags = [f for f in glob.glob("changelog/unreleased/*.md") if os.path.basename(f) != "README.md"]
+if not frags:
+    print("no fragments")
+    sys.exit(0)
+frags.sort(key=lambda f: (-stamp(f), os.path.basename(f)))
+entries = [open(f).read().strip("\n") for f in frags]
+
+text = open("CHANGELOG.md").read()
+lines = text.split("\n")
+i = lines.index("## dev")
+j = i + 1
+while j < len(lines) and lines[j].strip() == "":
+    j += 1
+# keep the note line (and any other leading prose) above the entries
+while j < len(lines) and lines[j] and not lines[j].startswith(("- ", "## ")):
+    j += 1
+while j < len(lines) and lines[j].strip() == "":
+    j += 1
+block = "\n\n".join(entries).split("\n") + [""]
+new = lines[:j] + block + lines[j:]
+if check:
+    for f in frags:
+        print("would fold", f)
+    sys.exit(0)
+open("CHANGELOG.md", "w").write("\n".join(new))
+for f in frags:
+    os.remove(f)
+    print("folded", f)

@@ -5,6 +5,8 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+Entries landed since the last fold are in `changelog/unreleased/`.
+
 - **macOS windows take drops of file promises and image data.** winit's window took only
   drags with file paths, so the screenshot thumbnail, Photos, Preview and browsers' images were
   refused. The content view is now the drag destination: a file promise is received into
