@@ -73,6 +73,10 @@ struct Win {
     prime: u8,
     #[cfg(target_os = "macos")]
     launch_drawables: LaunchDrawables,
+    /// Only a due timer asked for the next frame, which may then draw nothing new.
+    quiet: bool,
+    /// The last frame presented, while the window rests.
+    presented: Option<Presented>,
 }
 
 impl Win {
@@ -1300,6 +1304,30 @@ fn setup_waker<S: 'static>(shared: &Arc<crate::app::Shared<S>>) -> Waker {
 /// ended, as Core Animation's time-based motion has by the time a covered window shows again.
 pub(crate) fn covered_step<S: 'static>(rt: &mut Runtime<S>) { rt.hidden_wake(); }
 
+/// What a built frame hands the window besides its pixels: secure input, the IME, the cursor,
+/// help tags and the clipboard.
+fn sync_platform<S: 'static>(l: &mut Win, rt: &mut Runtime<S>, secure_input: &mut crate::secure_input::SecureInput,
+    ime: &mut bool, clipboard: &crate::clipboard::Client) {
+    let focused = l.window.has_focus();
+    secure_input.set(rt.has_secure_focus() && focused);
+    let ime_allowed = rt.ime_area.is_some() && !rt.has_secure_focus() && focused;
+    if std::mem::take(&mut rt.ime_reset) || ime_allowed != *ime {
+        l.window.set_ime_allowed(false);
+        l.window.set_ime_allowed(ime_allowed);
+        *ime = ime_allowed;
+    }
+    l.apply_cursor(rt, focused);
+    #[cfg(target_os = "macos")]
+    l.help.sync(&l.window, rt.help_regions());
+    clipboard.flush(rt);
+    if let Some(a) = rt.ime_area {
+        l.window.set_ime_cursor_area(
+            LogicalPosition::new(a[0] as f64, a[1] as f64),
+            LogicalSize::new(a[2] as f64, a[3] as f64),
+        );
+    }
+}
+
 #[cfg(test)]
 mod covered {
     use super::*;
@@ -1544,6 +1572,84 @@ impl LaunchDrawables {
         *self = Self::Steady;
         Some(steady)
     }
+}
+
+/// What an idle window's last frame drew. A timer that wakes the window builds a frame before
+/// taking a drawable; when it would draw these same pixels, nothing is acquired or presented.
+struct Presented {
+    instances: Vec<crate::render::Instance>,
+    clear: [f32; 4],
+    size: (u32, u32),
+    format: wgpu::TextureFormat,
+    srgb: bool,
+    scale: f32,
+    transparent: bool,
+}
+
+impl Presented {
+    fn record<S: 'static>(this: &mut Option<Self>, rt: &Runtime<S>, config: &wgpu::SurfaceConfiguration) {
+        let (clear, size, srgb, scale, transparent) = (rt.clear_color(), (config.width, config.height), rt.srgb_blend(), rt.env.scale, rt.transparent);
+        match this {
+            Some(p) => {
+                p.instances.clone_from(&rt.instances);
+                (p.clear, p.size, p.format, p.srgb, p.scale, p.transparent) = (clear, size, config.format, srgb, scale, transparent);
+            }
+            None => *this = Some(Self { instances: rt.instances.clone(), clear, size, format: config.format, srgb, scale, transparent }),
+        }
+    }
+
+    /// Whether `rt`'s built frame draws what this one did: the same instances into the same
+    /// surface, with no glyph or image upload waiting, and nothing drawn outside the instances
+    /// (`SurfaceDraw` content, native materials).
+    fn same<S: 'static>(&self, rt: &Runtime<S>, config: &wgpu::SurfaceConfiguration) -> bool {
+        let atlas = &rt.text.atlas;
+        self.size == (config.width, config.height) && self.format == config.format && self.srgb == rt.srgb_blend()
+            && self.scale == rt.env.scale && self.clear == rt.clear_color() && self.transparent == rt.transparent
+            && rt.surfaces.is_empty() && rt.materials.is_empty()
+            && atlas.dirty.is_none() && atlas.pages.iter().all(|p| p.dirty.is_none())
+            && rt.images.pages.iter().all(|p| p.dirty.is_none())
+            && bytemuck::cast_slice::<_, u8>(&self.instances) == bytemuck::cast_slice::<_, u8>(&rt.instances)
+    }
+}
+
+#[test]
+fn a_frame_that_draws_the_same_pixels_is_the_same() {
+    use crate::{Color, el};
+    fn view(n: &u32, _: &mut crate::Cx<u32>) -> crate::El {
+        el().key("root").size(200.0, 100.0).child(el().key("box").size(40.0 + *n as f32, 40.0).fill(Color { r: 0.3, g: 0.5, b: 0.9, a: 1.0 }))
+    }
+    let mut rt = Runtime::new(0u32, view, (200.0, 100.0), crate::Env::new(false, 2.0));
+    rt.frame(0.0);
+    let config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: wgpu::TextureFormat::Bgra8UnormSrgb,
+        width: 400,
+        height: 200,
+        present_mode: wgpu::PresentMode::AutoVsync,
+        desired_maximum_frame_latency: 2,
+        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+        view_formats: vec![],
+        color_space: Default::default(),
+    };
+    let mut presented = None;
+    Presented::record(&mut presented, &rt, &config);
+    let p = presented.as_ref().unwrap();
+
+    // A poll that says it changed state, but the view draws the same.
+    rt.update(|_, _| {});
+    rt.frame(0.0);
+    assert!(p.same(&rt, &config), "a rebuild that draws the same pixels presents nothing");
+
+    let resized = wgpu::SurfaceConfiguration { width: 402, ..config.clone() };
+    assert!(!p.same(&rt, &resized), "a resized surface draws again");
+    rt.text.atlas.dirty = Some((0, 1));
+    assert!(!p.same(&rt, &config), "a glyph upload draws again");
+    rt.text.atlas.dirty = None;
+
+    rt.update(|n, _| *n = 8);
+    rt.settle_all();
+    rt.frame(0.0);
+    assert!(!p.same(&rt, &config), "a change on screen draws again");
 }
 
 #[cfg(target_os = "macos")]
@@ -2491,6 +2597,7 @@ impl<S: 'static> Host<S> {
             w.stop_pacing();
             w.visible = false;
             w.retry = None;
+            w.presented = None;
             // Its hidden frame delivers the focus loss.
             if launcher { w.window.request_redraw(); }
         }
@@ -2741,6 +2848,8 @@ impl<S: 'static> Host<S> {
             prime,
             #[cfg(target_os = "macos")]
             launch_drawables,
+            quiet: false,
+            presented: None,
         });
         if launcher { self.win.as_mut().unwrap().first_frame.prepare(); }
         self.apply_placement(event_loop);
@@ -2805,6 +2914,7 @@ impl<S: 'static> Host<S> {
     /// ran the runtime.
     fn missed_frame(&mut self, missed: Missed, stepped: bool) {
         let Some(l) = self.win.as_mut() else { return };
+        l.presented = None;
         let now = Instant::now();
         let wait = l.occluded_wait;
         if missed == Missed::Occluded {
@@ -2835,6 +2945,7 @@ impl<S: 'static> Host<S> {
     /// reports with no event lands here first, and the frame that next draws settles.
     fn covered_frame(&mut self) {
         let Some(l) = self.win.as_mut() else { return };
+        l.presented = None;
         l.stop_pacing();
         let shown = l.visible;
         self.land_frame();
@@ -2919,10 +3030,33 @@ impl<S: 'static> Host<S> {
                 l.alpha = Some(crate::surface_alpha::AlphaSurface::new(&gpu.device, target, (l.config.width, l.config.height)));
             }
         }
+        // Only a timer woke the resting window: build the frame first, and take no drawable
+        // when it draws what's on screen.
+        let quiet = std::mem::take(&mut l.quiet) && !hidden && !live_resize && l.presented.is_some() && self.comp.is_none()
+            && self.trace.is_none() && self.args.trace.is_none() && self.rt.live_visible()
+            && self.rt.window_frame.is_none() && self.frame_anim.is_none();
+        #[cfg(target_os = "macos")]
+        let quiet = quiet && shown.is_none() && !l.materials.native();
+        let built = if quiet {
+            let now = Instant::now();
+            self.rt.window_resting = true;
+            let (animating, dt) = self.clock.advance(&mut self.rt, target.unwrap_or(now), false);
+            let rt = &mut self.rt;
+            if !animating && !rt.has_pending_input() && !rt.live_pending() && rt.window_frame.is_none()
+                && renderer.srgb_blend() == rt.srgb_blend() && l.presented.as_ref().is_some_and(|p| p.same(rt, &l.config)) {
+                sync_platform(l, rt, &mut self.secure_input, &mut self.ime_allowed, &self.clipboard);
+                l.stop_pacing();
+                self.meter.set_pacing(l.pacing_state(false));
+                return;
+            }
+            Some((animating, dt, now))
+        } else {
+            None
+        };
         let frame = match acquire(&l.surface, &gpu.device, &l.config, 1, &mut self.meter) {
             Ok(frame) => frame,
             Err(_) if hidden => { l.retry = l.first_frame.missed(Instant::now(), &mut l.hidden_wait); return; }
-            Err(missed) => return self.missed_frame(missed, false),
+            Err(missed) => return self.missed_frame(missed, built.is_some()),
         };
         if !hidden && !self.rt.live_visible() && { let size = l.window.inner_size(); size.width > 0 && size.height > 0 } {
             // Uncovered after a missed frame said it was occluded.
@@ -2935,7 +3069,7 @@ impl<S: 'static> Host<S> {
         let mut drawable = l.present.as_ref().and(self.present_log.as_ref()).and_then(|log| log.acquired());
         #[cfg(not(target_os = "macos"))]
         let drawable = None;
-        let now = Instant::now();
+        let now = built.map_or_else(Instant::now, |(_, _, now)| now);
         if self.trace.is_none() && let Some(path) = &self.args.trace {
             let hz = l.window.current_monitor().and_then(|m| m.refresh_rate_millihertz()).map_or(60.0, |hz| hz as f64 / 1000.0);
             #[cfg(target_os = "macos")]
@@ -2956,7 +3090,9 @@ impl<S: 'static> Host<S> {
         #[cfg(target_os = "macos")]
         { rt.native_materials = l.materials.native(); }
         if hidden && l.first_frame.settles() { rt.settle_all(); }
-        let (mut animating, dt) = if hidden {
+        let (mut animating, dt) = if let Some((animating, dt, _)) = built {
+            (animating, dt)
+        } else if hidden {
             self.clock.hold(frame_time);
             (rt.frame(0.0), 0.0)
         } else {
@@ -2999,25 +3135,8 @@ impl<S: 'static> Host<S> {
         l.occluded_wait = OCCLUDED_RETRY;
         l.hidden_wait = TIMEOUT_RETRY;
         if hidden { l.hidden_pace.rendered(now); }
-        self.secure_input.set(rt.has_secure_focus() && l.window.has_focus());
         let update_ms = now.elapsed().as_secs_f64() * 1000.0;
-        let ime_allowed = rt.ime_area.is_some() && !rt.has_secure_focus() && l.window.has_focus();
-        if std::mem::take(&mut rt.ime_reset) || ime_allowed != self.ime_allowed {
-            l.window.set_ime_allowed(false);
-            l.window.set_ime_allowed(ime_allowed);
-            self.ime_allowed = ime_allowed;
-        }
-        let focused = l.window.has_focus();
-        l.apply_cursor(rt, focused);
-        #[cfg(target_os = "macos")]
-        l.help.sync(&l.window, rt.help_regions());
-        self.clipboard.flush(rt);
-        if let Some(a) = rt.ime_area {
-            l.window.set_ime_cursor_area(
-                LogicalPosition::new(a[0] as f64, a[1] as f64),
-                LogicalSize::new(a[2] as f64, a[3] as f64),
-            );
-        }
+        sync_platform(l, rt, &mut self.secure_input, &mut self.ime_allowed, &self.clipboard);
         let target_format = if rt.srgb_blend() { l.config.format.remove_srgb_suffix() } else { l.config.format };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
             format: (target_format != l.config.format).then_some(target_format),
@@ -3089,6 +3208,7 @@ impl<S: 'static> Host<S> {
         let next_tick: Option<Instant> = None;
         self.idle = !(animating || rt.has_pending_input() || rt.live_pending() || rt.window_frame.is_some() || self.frame_anim.is_some()
             || timer_wants_frame(rt, next_tick));
+        if self.idle && !hidden && self.comp.is_none() { Presented::record(&mut l.presented, rt, &l.config) } else { l.presented = None }
         #[cfg(target_os = "macos")]
         if !hidden && let Some(latency) = l.launch_drawables.settle(self.idle, now) {
             l.config.desired_maximum_frame_latency = latency;
@@ -3218,8 +3338,9 @@ impl<S: 'static> AnyHost for Host<S> {
                 self.shell(event_loop);
                 if changed && launcher { self.refresh_hidden(); }
             // A redraw while the window backs off would draw nothing and leave the timer due.
-            } else if let Some(w) = self.win.as_ref().filter(|w| (self.launcher() || (w.visible && !w.occluded)) && !w.minimized()
+            } else if let Some(w) = self.win.as_mut().filter(|w| (launcher || (w.visible && !w.occluded)) && !w.minimized()
                 && !w.backing_off(Instant::now())) {
+                w.quiet = true;
                 w.window.request_redraw();
             } else {
                 covered_step(&mut self.rt);
@@ -3385,6 +3506,8 @@ impl<S: 'static> Host<S> {
 
     fn handle_user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
         if !self.started { return; }
+        // The display tick a timer's frame waits for draws that frame.
+        if !matches!(event, WakeEvent::DisplayTick(_)) && let Some(w) = &mut self.win { w.quiet = false; }
         match event {
             WakeEvent::App(_) => {
                 self.drain(event_loop, true);
@@ -3422,6 +3545,7 @@ impl<S: 'static> Host<S> {
         if self.win.as_ref().is_none_or(|w| w.window.id() != id) {
             return;
         }
+        if !matches!(event, WindowEvent::RedrawRequested) && let Some(w) = &mut self.win { w.quiet = false; }
         #[cfg(target_os = "macos")]
         if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Occluded(_))
             && let Some(w) = &mut self.win && let Some(pacing) = &mut w.pacing {
@@ -3546,6 +3670,7 @@ impl<S: 'static> Host<S> {
                 { l.prime = 0; }
                 let was_occluded = std::mem::replace(&mut l.occluded, occluded);
                 l.retry = None;
+                l.presented = None;
                 l.occluded_wait = OCCLUDED_RETRY;
                 rt.set_live_visible(l.visible && !occluded && !l.minimized());
                 if occluded {
