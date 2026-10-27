@@ -10,7 +10,67 @@
 //! element. The selection is byte offsets into the texts' content; a view that changes the
 //! selected part of a text drops it, while text appended after it (a message streaming in)
 //! keeps it.
+//!
+//! Code reads the selection with `Tx::text_selection` and sets it with `Tx::select_text`,
+//! `Tx::select_all_text` and `Tx::clear_text_selection`; an `El::selection_copy` element
+//! decides what copying a selection inside it takes.
 use super::*;
+use crate::el::SelectRequest;
+use std::ops::Range;
+
+/// A selection of [`El::selectable`] text, as [`Tx::text_selection`] reads it and an
+/// [`El::selection_copy`] element sees it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TextSelection {
+    texts: Vec<SelectedText>,
+    text: String,
+}
+
+impl TextSelection {
+    /// The selected texts in tree order (for [`El::selection_copy`], every text it could reach).
+    pub fn texts(&self) -> &[SelectedText] { &self.texts }
+    /// The selected text as copying takes it without [`El::selection_copy`]: as authored
+    /// (before [`El::text_case`]), without [`El::uncopied`] bytes, with a newline between
+    /// texts and a tab between texts side by side (table cells).
+    pub fn text(&self) -> &str { &self.text }
+}
+
+/// One [`El::selectable`] text of a [`TextSelection`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectedText {
+    path: String,
+    key: Option<String>,
+    range: Range<usize>,
+    len: usize,
+    text: String,
+}
+
+impl SelectedText {
+    /// The text element's path ([`ElementInfo::path`]); for [`El::selection_copy`], relative to
+    /// the element that asks, empty for that element itself.
+    pub fn path(&self) -> &str { &self.path }
+    /// The text element's own key, if it has one.
+    pub fn key(&self) -> Option<&str> { self.key.as_deref() }
+    /// The selected bytes of the text's content, empty when none are.
+    pub fn range(&self) -> Range<usize> { self.range.clone() }
+    /// The length in bytes of the text's content.
+    pub fn len(&self) -> usize { self.len }
+    /// The text has no content.
+    pub fn is_empty(&self) -> bool { self.len == 0 }
+    /// Some of the text is selected.
+    pub fn is_selected(&self) -> bool { !self.range.is_empty() }
+    /// All of the text is selected.
+    pub fn is_whole(&self) -> bool { self.range == (0..self.len) && self.len > 0 }
+    /// The selected part as copying takes it.
+    pub fn text(&self) -> &str { &self.text }
+}
+
+/// `Tx::text_selection`'s snapshot and what it was taken from: the commit and the selection's
+/// ends.
+pub(super) struct Snapshot {
+    from: (u64, Option<String>, usize, usize, Option<String>),
+    selection: Option<Rc<TextSelection>>,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Unit {
@@ -21,7 +81,7 @@ enum Unit {
 }
 
 #[derive(Default)]
-pub(super) struct TextSelection {
+pub(super) struct Held {
     /// The text holding the anchor, and its content when last seen.
     path: Option<String>,
     content: String,
@@ -264,13 +324,73 @@ impl<S: 'static> Runtime<S> {
         Some((sel.path.as_deref()?, range))
     }
 
-    /// The selected text, as copying would put it on the clipboard (as authored, before
-    /// `El::text_case`). Across a selection group's texts: a newline between texts, a tab
-    /// between texts side by side (table cells).
+    /// The selected text as drawn, as copying puts it on the clipboard without an
+    /// [`El::selection_copy`] (as authored, before `El::text_case`). Across a selection group's
+    /// texts: a newline between texts, a tab between texts side by side (table cells).
     pub fn selected_text(&self) -> Option<String> {
+        let out = self.joined(&self.selection_ranges());
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// The selection as [`Tx::text_selection`] reads it, `None` with nothing selected.
+    pub fn selection(&self) -> Option<TextSelection> {
+        let ranges = self.selection_ranges();
+        if ranges.is_empty() { return None; }
+        let texts = ranges.iter().map(|&(i, a, b)| self.selected_piece(i, a..b, None)).collect();
+        Some(TextSelection { texts, text: self.joined(&ranges) })
+    }
+
+    /// [`Runtime::selection`] for a handler's `Tx`, kept until a commit or the selection changes.
+    pub(super) fn selection_snapshot(&self) -> Option<Rc<TextSelection>> {
+        let sel = &self.text_sel;
+        sel.path.as_ref()?;
+        let from = (self.commits, sel.path.clone(), sel.anchor, sel.focus, sel.far.as_ref().map(|f| f.0.clone()));
+        let mut cache = self.sel_snapshot.borrow_mut();
+        if let Some(s) = cache.as_ref().filter(|s| s.from == from) { return s.selection.clone(); }
+        let selection = self.selection().map(Rc::new);
+        *cache = Some(Snapshot { from, selection: selection.clone() });
+        selection
+    }
+
+    /// Node `i` as a [`SelectedText`] with `range` selected, its path relative to `base`'s.
+    fn selected_piece(&self, i: usize, range: Range<usize>, base: Option<usize>) -> SelectedText {
+        let n = &self.nodes[i];
+        let path = match base {
+            Some(b) if b == i => String::new(),
+            Some(b) => n.path.strip_prefix(&self.nodes[b].path).and_then(|p| p.strip_prefix('/')).unwrap_or(&n.path).to_owned(),
+            None => n.path.clone(),
+        };
+        let text = n.text.as_ref().and_then(|t| t.copy_slice(range.start as u32, range.end as u32)).unwrap_or_default();
+        SelectedText { path, key: n.key.clone(), range, len: self.content_of(i).len(), text }
+    }
+
+    /// What copying the selection puts on the clipboard: the nearest [`El::selection_copy`]
+    /// around it says, else the text as drawn.
+    fn copy_text(&self) -> Option<String> {
+        let ranges = self.selection_ranges();
+        let (&(first, ..), &(last, ..)) = (ranges.first()?, ranges.last()?);
+        let drawn = self.joined(&ranges);
+        let around = |a: usize, j: usize| std::iter::successors(Some(j), |&p| self.nodes[p].parent).any(|p| p == a);
+        let provider = std::iter::successors(Some(first), |&p| self.nodes[p].parent)
+            .find(|&p| self.nodes[p].selection_copy.is_some() && around(p, last));
+        if let Some(p) = provider && let Some(f) = self.nodes[p].selection_copy.clone() {
+            let g = self.group_of(first);
+            let texts = (p..self.nodes.len())
+                .take_while(|&j| around(p, j))
+                .filter(|&j| self.is_selectable(j) && !self.subtree_exiting(j) && self.allowed(j))
+                .filter(|&j| match g { Some(g) => self.group_of(j) == Some(g), None => j == first })
+                .map(|j| self.selected_piece(j, range_in(&ranges, j).map_or(0..0, |(a, b)| a..b), Some(p)))
+                .collect();
+            if let Some(text) = f(&TextSelection { texts, text: drawn.clone() }) { return Some(text); }
+        }
+        (!drawn.is_empty()).then_some(drawn)
+    }
+
+    /// The texts of `ranges` joined as copying joins them.
+    fn joined(&self, ranges: &[(usize, usize, usize)]) -> String {
         let mut out = String::new();
         let mut prev: Option<usize> = None;
-        for (i, a, b) in self.selection_ranges() {
+        for &(i, a, b) in ranges {
             let Some(piece) = self.nodes[i].text.as_ref().and_then(|t| t.copy_slice(a as u32, b as u32)) else { continue };
             if let Some(p) = prev {
                 let (pb, nb) = (self.drawn_box(p), self.drawn_box(i));
@@ -280,7 +400,50 @@ impl<S: 'static> Runtime<S> {
             out.push_str(&piece);
             prev = Some(i);
         }
-        (!out.is_empty()).then_some(out)
+        out
+    }
+
+    /// Selects from the start of text `first` to the end of text `last`, a later text of its
+    /// selection group or `first` itself.
+    fn select_span(&mut self, first: usize, last: usize) {
+        let (head, content) = (self.nodes[first].path.clone(), self.content_of(first).to_owned());
+        let far = (first != last).then(|| (self.nodes[last].path.clone(), self.content_of(last).to_owned()));
+        let end = far.as_ref().map_or(content.len(), |f| f.1.len());
+        let origin = if far.is_some() { (0, 0) } else { (0, end) };
+        let sel = &mut self.text_sel;
+        (sel.path, sel.content, sel.anchor, sel.focus, sel.origin, sel.unit, sel.far) = (Some(head), content, 0, end, origin, Unit::Char, far);
+        sel.dragging = false;
+        self.seal();
+    }
+
+    /// Carries out a `Tx::select_text`, `select_all_text` or `clear_text_selection`.
+    pub(super) fn select_request(&mut self, request: SelectRequest) {
+        let named = |key: &str| (0..self.nodes.len()).find(|&i| self.nodes[i].named(key) && !self.subtree_exiting(i) && self.allowed(i));
+        match request {
+            SelectRequest::Clear => self.clear_text_selection(),
+            SelectRequest::Range(key, range) => {
+                let Some(i) = named(&key).filter(|&i| self.is_selectable(i)) else { return };
+                let content = self.content_of(i).to_owned();
+                let (a, b) = (floor_boundary(&content, range.start), floor_boundary(&content, range.end.max(range.start)));
+                let path = self.nodes[i].path.clone();
+                let sel = &mut self.text_sel;
+                (sel.path, sel.content, sel.anchor, sel.focus, sel.origin, sel.unit, sel.far) = (Some(path), content, a, b, (a, b), Unit::Char, None);
+                sel.dragging = false;
+                self.seal();
+            }
+            SelectRequest::All(key) => {
+                let Some(i) = named(&key) else { return };
+                let inside = |j: usize| j == i || std::iter::successors(self.nodes[j].parent, |&p| self.nodes[p].parent).any(|p| p == i);
+                let texts = || (i..self.nodes.len()).take_while(|&j| inside(j))
+                    .filter(|&j| self.is_selectable(j) && !self.subtree_exiting(j) && self.allowed(j));
+                let Some(first) = texts().next() else { return };
+                let last = match self.group_of(first) {
+                    Some(g) => texts().filter(|&j| self.group_of(j) == Some(g)).last().unwrap_or(first),
+                    None => first,
+                };
+                self.select_span(first, last);
+            }
+        }
     }
 
     /// The held press is selecting text by dragging, and has selected some.
@@ -419,21 +582,11 @@ impl<S: 'static> Runtime<S> {
         let path = self.nodes[i].path.clone();
         if c == 'a' {
             let texts = self.group_of(i).map(|g| self.group_texts(g)).unwrap_or_default();
-            if let (Some(&first), Some(&last)) = (texts.first(), texts.last()) && first != last {
-                let (head, content) = (self.nodes[first].path.clone(), self.content_of(first).to_owned());
-                let far = (self.nodes[last].path.clone(), self.content_of(last).to_owned());
-                let sel = &mut self.text_sel;
-                (sel.path, sel.content, sel.anchor, sel.focus, sel.origin, sel.unit) = (Some(head), content, 0, far.1.len(), (0, 0), Unit::Char);
-                sel.far = Some(far);
-            } else {
-                let len = self.text_sel.content.len();
-                let sel = &mut self.text_sel;
-                (sel.anchor, sel.focus, sel.origin, sel.unit, sel.far) = (0, len, (0, len), Unit::Char, None);
-            }
-            self.seal();
+            let (first, last) = (texts.first().copied().unwrap_or(i), texts.last().copied().unwrap_or(i));
+            self.select_span(first, last);
             self.events.push(format!("select all {path}"));
         } else {
-            let Some(text) = self.selected_text() else { return false };
+            let Some(text) = self.copy_text() else { return false };
             self.events.push(format!("copy {path}"));
             tx.copy(text);
         }
@@ -451,10 +604,10 @@ impl<S: 'static> Runtime<S> {
         {
             let content = self.content_of(i).to_owned();
             let (a, b) = self.unit_in(i, at, Unit::Word);
-            self.text_sel = TextSelection { path: Some(path.to_owned()), content, anchor: a, focus: b, far: None, between: 0,
+            self.text_sel = Held { path: Some(path.to_owned()), content, anchor: a, focus: b, far: None, between: 0,
                 unit: Unit::Word, origin: (a, b), dragging: false, last: None, shift: self.text_sel.shift };
         }
-        let text = self.selected_text();
+        let text = self.copy_text();
         let mut copy = crate::PopupItem::new("copy", "Copy").enabled(text.is_some());
         if let Ok(shortcut) = "cmd+c".parse::<crate::Shortcut>() { copy = copy.key_equivalent(shortcut); }
         self.events.push(format!("selection menu {path}"));

@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **The app takes Cmd+A and Cmd+C before selected text, and code can set and read the
+  selection.** Key routing offers plain Cmd+A and Cmd+C to selectable text last, after both
+  `on_key` calls and element key handlers, so an `on_key` that returns true for them now wins
+  where the selection used to take them first. A focused text field keeps its own. New:
+  `Tx::text_selection()` (a `TextSelection` of `SelectedText`s), `Tx::select_text(key, range)`,
+  `Tx::select_all_text(key)`, `Tx::clear_text_selection()` (applied after the handler's
+  commit), `El::selection_copy(|sel| ..)` to choose what Cmd+C and the Copy menu copy, and kit's
+  `Markdown::copy_source(true)`, which copies the Markdown source of whole top-level blocks.
 Entries landed since the last fold are in `changelog/unreleased/`.
 
 - **macOS windows take drops of file promises and image data.** winit's window took only

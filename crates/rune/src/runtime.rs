@@ -109,6 +109,7 @@ mod gesture_dispatch;
 mod flights;
 pub(crate) use scroll_x::{SHIFT_TURNS_WHEEL, wheel_delta};
 pub(crate) use scroll_offset::ScrollRequest;
+pub use selectable::{SelectedText, TextSelection};
 #[cfg(test)]
 #[path = "truncate_tests.rs"]
 mod truncate_tests;
@@ -127,6 +128,9 @@ mod on_key_tests;
 #[cfg(test)]
 #[path = "live_only_tests.rs"]
 mod live_only_tests;
+#[cfg(test)]
+#[path = "selection_api_tests.rs"]
+mod selection_api_tests;
 #[cfg(test)]
 #[path = "anchored_grow_tests.rs"]
 mod anchored_grow_tests;
@@ -447,6 +451,8 @@ pub(crate) struct Node {
     window_drag: bool,
     /// `El::selection_group`.
     selection_group: bool,
+    /// `El::selection_copy`.
+    selection_copy: Option<crate::el::SelectionCopy>,
     a11y: crate::el::A11y,
     /// Inside an `El::inert` subtree (this element or an ancestor).
     pub(crate) inert: bool,
@@ -1220,7 +1226,9 @@ pub struct Runtime<S: 'static> {
     caret_follow: bool,
     links: links::LinkState,
     /// The selection in `El::selectable` text.
-    text_sel: selectable::TextSelection,
+    text_sel: selectable::Held,
+    /// `Tx::text_selection`'s snapshot, kept while neither a commit nor the selection changed.
+    sel_snapshot: std::cell::RefCell<Option<selectable::Snapshot>>,
     /// Modifier keys held now, as the window last reported them (`Tx::mods`).
     held_mods: crate::Mods,
     /// `El::help` tooltips.
@@ -1558,6 +1566,7 @@ impl<S: 'static> Runtime<S> {
             caret_follow: false,
             links: Default::default(),
             text_sel: Default::default(),
+            sel_snapshot: Default::default(),
             held_mods: Default::default(),
             help: Default::default(),
             help_delay: 0.5,
@@ -2134,7 +2143,7 @@ impl<S: 'static> Runtime<S> {
     pub fn tracing(&self) -> bool { self.trace_channels.is_some() || self.scene.tracing() }
 
     fn transaction(&self) -> Tx {
-        Tx { trace: self.tracing().then(crate::el::TraceCalls::default), mods: self.held_mods, ..Tx::default() }
+        Tx { trace: self.tracing().then(crate::el::TraceCalls::default), mods: self.held_mods, selection: self.selection_snapshot(), ..Tx::default() }
     }
 
     /// A scalar from the actual draw path (e.g. `shell.width`). Values hold until resampled.
@@ -2407,6 +2416,8 @@ impl<S: 'static> Runtime<S> {
                     }
                 }
             }
+            // A selection an earlier handler asked for is what this key copies.
+            if matches!(action, Action::Key { .. } | Action::Physical(..)) && let Some(request) = tx.select.take() { self.select_request(request); }
             if matches!(action, Action::Layout(..) | Action::ScreenLayout(..) | Action::DrawnLayout(_, _, false) | Action::VisibleRows(..)) {
                 ran_layout |= self.run_action(action, &mut tx);
             } else {
@@ -2461,6 +2472,7 @@ impl<S: 'static> Runtime<S> {
             self.compare_live_check(check);
             self.apply_keeps();
         }
+        if let Some(request) = tx.select.take() { self.select_request(request); }
         #[cfg(debug_assertions)]
         { self.live_check = None; }
         tx.keep_on_screen.clear();
@@ -3112,8 +3124,6 @@ impl<S: 'static> Runtime<S> {
         // With no focused element, app-owned navigation (e.g. a toolbar)
         // gets first refusal before Rune starts a new Tab traversal.
         let app_first = self.focused.is_none();
-        // Selected text has the keyboard for copying, as AppKit's first responder does.
-        if !repeat && self.selection_key(ev, one) { return true; }
         // Return and Escape that reach a field mid-composition belong to the input method: they
         // confirm or cancel it, and submit, blur and press nothing.
         if matches!(ev.key, crate::Key::Enter | crate::Key::Escape) && self.composing() { return true; }
@@ -3177,6 +3187,9 @@ impl<S: 'static> Runtime<S> {
             return true;
         }
         one.physical_key = None;
+        // Selected text takes the Cmd+A and Cmd+C nothing else took, as AppKit's responder chain
+        // gives a key equivalent to the menu bar before the text view: an app's shortcut wins.
+        if !repeat && self.selection_key(ev, one) { return true; }
         self.page_scroll(ev)
     }
 
@@ -8397,6 +8410,7 @@ fn merge(tx: &mut Tx, one: Tx) {
     tx.open_urls.extend(one.open_urls);
     tx.srgb_blend = one.srgb_blend.or(tx.srgb_blend);
     tx.blur |= one.blur;
+    if one.select.is_some() { tx.select = one.select; }
     tx.instant |= one.instant;
     tx.settle |= one.settle;
     tx.follow_edge |= one.follow_edge;
@@ -9059,6 +9073,7 @@ fn flatten(
         material,
         aspect_fit,
         selection_group,
+        selection_copy,
         a11y,
         inert,
         ..
@@ -9184,6 +9199,7 @@ fn flatten(
         cursor,
         window_drag,
         selection_group,
+        selection_copy,
         a11y,
         inert,
         press_scale,

@@ -1630,6 +1630,7 @@ pub struct Markdown {
     tasks_read_only: bool,
     link_ring: Option<LinkRing>,
     selectable: bool,
+    copy_source: bool,
     scroll_wide: bool,
     highlighter: Highlighter,
 }
@@ -1637,7 +1638,7 @@ pub struct Markdown {
 impl Markdown {
     pub fn new(src: impl Into<String>) -> Markdown {
         Markdown { src: src.into(), style: None, block_keys: Vec::new(), highlights: Vec::new(), autolink: true, reveal: 0.0, streaming: false, on_link: None, link_look: None, link_ring: None,
-            on_task: None, tasks_read_only: false, selectable: false, scroll_wide: false, highlighter: Highlighter::builtin() }
+            on_task: None, tasks_read_only: false, selectable: false, copy_source: false, scroll_wide: false, highlighter: Highlighter::builtin() }
     }
     /// Highlight UTF-8 byte ranges of the Markdown source string.
     ///
@@ -1765,9 +1766,21 @@ impl Markdown {
     /// paragraphs, headings, list items, quotes, code blocks and table cells
     /// ([`El::selection_group`]): Cmd+A selects the whole block, and Cmd+C copies the text as
     /// drawn, a newline between blocks and a tab between table cells, without list markers or
-    /// code fences. Links still open on a click. The highlight is [`MarkdownStyle::selection`].
+    /// code fences (or the source, with [`Self::copy_source`]). Links still open on a click.
+    /// The highlight is [`MarkdownStyle::selection`].
     pub fn selectable(mut self, on: bool) -> Self {
         self.selectable = on;
+        self
+    }
+
+    /// With [`Self::selectable`], copying a selection copies the Markdown source instead of the
+    /// text as drawn ([`El::selection_copy`]), by whole top-level blocks: each block the
+    /// selection touches, from its first line to the next block, without trailing blank
+    /// lines, and the whole source verbatim when it touches every block (Cmd+A, Cmd+C). A
+    /// selection inside one block that leaves part of it out (a word, a line, one list item)
+    /// still copies the text as drawn.
+    pub fn copy_source(mut self, on: bool) -> Self {
+        self.copy_source = on;
         self
     }
 
@@ -1823,7 +1836,11 @@ impl Markdown {
             on_task: self.on_task, tasks_read_only: self.tasks_read_only, selectable: self.selectable, scroll_wide: self.scroll_wide,
             highlighter: self.highlighter, sources, next_source: Cell::new(0), tasks, next_task: Cell::new(0),
             current_block_key: RefCell::new("b0".into()) };
-        r.blocks(&blocks, &maps, &keys, true).selection_group(self.selectable)
+        let root = r.blocks(&blocks, &maps, &keys, true).selection_group(self.selectable);
+        if !(self.selectable && self.copy_source) { return root; }
+        let names: Rc<[String]> = rendered_keys(blocks.len(), &keys).into();
+        let src: Rc<str> = self.src.into();
+        root.selection_copy(move |sel| source_copy(&src, &starts, &names, sel))
     }
 }
 
@@ -1848,6 +1865,34 @@ struct Renderer {
     /// The next of `tasks`, advanced at each list item in document order.
     next_task: Cell<usize>,
     current_block_key: RefCell<Rc<str>>,
+}
+
+/// The keys [`Renderer::blocks`] gives `n` blocks.
+fn rendered_keys(n: usize, keys: &[String]) -> Vec<String> {
+    let mut used = Vec::new();
+    (0..n).map(|i| if keys.is_empty() { format!("b{i}") } else { block_key(i, keys, &mut used) }).collect()
+}
+
+/// [`Markdown::copy_source`]: the source of the top-level blocks (keyed `names`, starting at
+/// `starts`) that `sel` touches, `None` for part of one block.
+fn source_copy(src: &str, starts: &[usize], names: &[String], sel: &rune::TextSelection) -> Option<String> {
+    // The longest key that is the path or its first segments: an app's key may hold a `/`.
+    let block_of = |path: &str| names.iter().enumerate()
+        .filter(|(_, k)| path == k.as_str() || path.strip_prefix(k.as_str()).is_some_and(|rest| rest.starts_with('/')))
+        .max_by_key(|(_, k)| k.len()).map(|(b, _)| b);
+    let mut touched: Option<(usize, usize)> = None;
+    for t in sel.texts().iter().filter(|t| t.is_selected()) {
+        let Some(b) = block_of(t.path()) else { continue };
+        touched = Some(touched.map_or((b, b), |(first, _)| (first, b)));
+    }
+    let (first, last) = touched?;
+    if first == last && !sel.texts().iter().filter(|t| block_of(t.path()) == Some(first)).all(|t| t.is_whole() || t.is_empty()) {
+        return None;
+    }
+    if first == 0 && last + 1 >= starts.len() { return Some(src.to_owned()); }
+    let start = *starts.get(first)?;
+    let end = starts.get(last + 1).copied().unwrap_or(src.len());
+    Some(src.get(start..end)?.trim_end().to_owned())
 }
 
 fn block_key(i: usize, keys: &[String], used: &mut Vec<String>) -> String {
@@ -2051,12 +2096,11 @@ impl Renderer {
     fn blocks(&self, blocks: &[Block], maps: &[BlockMap], keys: &[String], top_level: bool) -> El {
         let mut c = col().w_full();
         let mut prev_mb = 0.0f32;
-        let mut used: Vec<String> = Vec::new();
+        let names = rendered_keys(blocks.len(), keys);
         let empty = BlockMap::None;
-        for (i, b) in blocks.iter().enumerate() {
+        for ((i, b), key) in blocks.iter().enumerate().zip(names) {
             let (mt, mb) = margins(b);
             let top = if i == 0 { 0.0 } else { mt.max(prev_mb) };
-            let key = if keys.is_empty() { format!("b{i}") } else { block_key(i, keys, &mut used) };
             if top_level {
                 self.current_block_key.replace(key.clone().into());
             }

@@ -59,9 +59,12 @@ fn view(s: &S, _: &mut Cx<S>) -> El {
 fn runtime() -> Runtime<S> {
     let s = S { field: TextEdit::new("field text"), stale: "— a".into(), stale_selectable: true, stale_shown: true, ..S::default() };
     let mut rt = Runtime::new(s, view, (500.0, 400.0), Env::new(true, 2.0));
+    // The app sees every key first and takes all but plain Cmd+A and Cmd+C, which it leaves to
+    // the selection.
     rt.on_key = Some(|s, ev, _| {
         s.keys.push(format!("{:?} shift={} alt={}", ev.key, ev.mods.shift, ev.mods.alt));
-        true
+        let m = ev.mods;
+        !(matches!(ev.key, Key::Command('a' | 'c')) && !m.shift && !m.alt && !m.ctrl)
     });
     rt.frame(0.0);
     rt
@@ -225,20 +228,20 @@ fn only_the_plain_chords_belong_to_the_selection() {
     let app = rt.state.keys.len();
     wait(&mut rt);
 
-    // A single click makes the text the holder: Cmd+C has nothing to copy and reaches the app;
-    // Cmd+A selects all of it.
+    // A single click makes the text the holder: Cmd+C has nothing to copy; Cmd+A, which the
+    // app passed on, selects all of it.
     click(&mut rt, g[5]);
     chord(&mut rt, 'c', Mods::default());
-    assert_eq!(rt.state.keys.len(), app + 1, "an empty selection doesn't take Cmd+C");
+    assert!(clipboard.text().is_none(), "an empty selection copies nothing");
     chord(&mut rt, 'a', Mods::default());
     assert_eq!(rt.selected_text().as_deref(), Some(ROW));
-    assert_eq!(rt.state.keys.len(), app + 1);
+    assert_eq!(rt.state.keys.len(), app + 2, "the app saw both first");
 
-    // A click on nothing clears it, and Cmd+A is the app's again.
+    // A click on nothing clears it.
     click(&mut rt, (480.0, 390.0));
     assert_eq!(rt.text_selection(), None);
     chord(&mut rt, 'a', Mods::default());
-    assert_eq!(rt.state.keys.len(), app + 2);
+    assert_eq!(rt.text_selection(), None);
 }
 
 #[test]
@@ -295,9 +298,8 @@ fn a_selection_drops_when_its_text_changes_or_goes() {
     rt.invalidate();
     tick(&mut rt);
     assert_eq!(rt.text_selection(), None);
-    let keys = rt.state.keys.len();
     chord(&mut rt, 'a', Mods::default());
-    assert_eq!(rt.state.keys.len(), keys + 1);
+    assert_eq!(rt.text_selection(), None);
     wait(&mut rt);
 
     // Selected, then removed.

@@ -63,8 +63,20 @@ pub struct Tx {
     pub(crate) mods: crate::Mods,
     pub(crate) srgb_blend: Option<bool>,
     pub(crate) blur: bool,
+    /// The text selection as the event arrived (`Tx::text_selection`).
+    pub(crate) selection: Option<Rc<crate::TextSelection>>,
+    /// `Tx::select_text`, `Tx::select_all_text` and `Tx::clear_text_selection`; the last wins.
+    pub(crate) select: Option<SelectRequest>,
     /// `Tx::live_only`: this handler changed nothing the view reads.
     pub(crate) live_only: bool,
+}
+
+/// A change to the text selection a handler asked for, carried out after its commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SelectRequest {
+    Range(String, std::ops::Range<usize>),
+    All(String),
+    Clear,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -154,7 +166,7 @@ impl Tx {
     /// or a text flight. A `wake_after` only schedules.
     pub(crate) fn frame_work(&self) -> bool {
         !self.pick_reads.is_empty() || !self.scroll_to.is_empty() || !self.scroll_bottom.is_empty() || !self.scroll_pages.is_empty() || !self.scroll_offsets.is_empty()
-            || !self.keep_on_screen.is_empty() || !self.text_flights.is_empty() || !self.launches.is_empty()
+            || !self.keep_on_screen.is_empty() || !self.text_flights.is_empty() || !self.launches.is_empty() || self.select.is_some()
     }
 
     /// An app marker on the next frame, e.g. `tx.trace_event(format_args!("lab:{step:?}"))`.
@@ -367,6 +379,37 @@ impl Tx {
     /// model clears it too. Does nothing when nothing has focus.
     pub fn blur(&mut self) {
         self.blur = true;
+    }
+
+    /// The [`El::selectable`] text selection as this event arrived: the texts it covers with
+    /// their selected ranges, and the text as copying takes it. `None` when nothing is
+    /// selected (a single click leaves only a caret-sized selection, which reads as `None`).
+    /// What this handler asks with [`Tx::select_text`] and kin shows from the next event on.
+    pub fn text_selection(&self) -> Option<&crate::TextSelection> {
+        self.selection.as_deref()
+    }
+
+    /// Select bytes `range` of the [`El::selectable`] text named `key` (a key, path or key
+    /// path, as [`Cx::layout`](crate::Cx::layout) takes), as if dragged across, after this
+    /// handler's commit: an element the same change builds can be selected. The range is
+    /// clamped to the text and its character boundaries. Cmd+C then copies it and Cmd+A
+    /// selects all of its text or group. Nothing happens when `key` names no selectable text.
+    /// The selection lives on across rebuilds that keep the text's path and the selected part.
+    pub fn select_text(&mut self, key: impl Into<String>, range: std::ops::Range<usize>) {
+        self.select = Some(SelectRequest::Range(key.into(), range));
+    }
+
+    /// Select all of the [`El::selectable`] text named `key`, or, for any other element, every
+    /// selectable text inside it that shares the first one's [`El::selection_group`], as Cmd+A
+    /// does: `select_all_text("note")` on a selectable `Markdown` keyed `note` selects the
+    /// whole document. After this handler's commit, as [`Tx::select_text`].
+    pub fn select_all_text(&mut self, key: impl Into<String>) {
+        self.select = Some(SelectRequest::All(key.into()));
+    }
+
+    /// Clear the [`El::selectable`] text selection, as a click elsewhere does.
+    pub fn clear_text_selection(&mut self) {
+        self.select = Some(SelectRequest::Clear);
     }
 
     /// Switch this window between linear and sRGB (gamma-space) blending from the next frame,
@@ -1277,6 +1320,9 @@ impl ClipboardRead {
 impl std::fmt::Debug for ClipboardRead {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("ClipboardRead") }
 }
+/// What an `El::selection_copy` element copies for a selection inside it.
+pub(crate) type SelectionCopy = Rc<dyn Fn(&crate::TextSelection) -> Option<String>>;
+
 /// A scroll viewport's content-aware edges: `El::scroll_edge_fade` and `El::scroll_margin`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct ScrollEdges {
@@ -1388,6 +1434,8 @@ pub struct El {
     /// `El::aspect_fit`'s width over height; 0 when unset.
     pub(crate) aspect_fit: f32,
     pub(crate) selection_group: bool,
+    /// `El::selection_copy`.
+    pub(crate) selection_copy: Option<SelectionCopy>,
     /// `El::level` and `El::expanded`.
     pub(crate) a11y: A11y,
     pub(crate) inert: bool,
@@ -1468,6 +1516,7 @@ fn base(dir: FlexDirection) -> El {
         material: None,
         aspect_fit: 0.0,
         selection_group: false,
+        selection_copy: None,
         a11y: A11y::default(),
         inert: false,
     }
@@ -3267,6 +3316,25 @@ impl El {
     /// isn't selectable (a list marker) is skipped. Outside a group each text is its own.
     pub fn selection_group(mut self, on: bool) -> Self {
         self.selection_group = on;
+        self
+    }
+    /// What copying a text selection inside this element puts on the clipboard (Cmd+C and the
+    /// Copy menu) instead of the selected text as drawn, so a document drawn from source can
+    /// copy the source. `f` sees every [`El::selectable`] text inside this element that the
+    /// selection could reach (those of its selection group), in tree order, each with its
+    /// selected range (empty when it isn't selected) and its path relative to this element.
+    /// Return `None` to copy the drawn text after all ([`TextSelection::text`]). The nearest
+    /// such element around both ends of the selection answers. Kit's `Markdown::copy_source`
+    /// is one.
+    ///
+    /// ```ignore
+    /// col().selection_group(true)
+    ///     .selection_copy(move |sel| sel.texts().iter().all(|t| t.is_whole()).then(|| note.clone()))
+    /// ```
+    ///
+    /// [`TextSelection::text`]: crate::TextSelection::text
+    pub fn selection_copy(mut self, f: impl Fn(&crate::TextSelection) -> Option<String> + 'static) -> Self {
+        self.selection_copy = Some(Rc::new(f));
         self
     }
     /// Draws and lays out, but the pointer and keyboard pass through this element and

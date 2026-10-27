@@ -174,8 +174,8 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   flags (`focusable`, `focused`, `focusVisible`, `inert`) are the future platform AX hook.
 - **Key routing**: a key the OS delivers to the window goes to the first of these that takes it.
   Global shortcuts and native menu key equivalents are handled before the window sees the key.
-  1. Selected text, for its copy keys. Return and Escape while a field composes (IME preedit)
-     go to the composition and no further.
+  1. Return and Escape while a field composes (IME preedit) go to the composition and no
+     further.
   2. Return, with no modifiers, presses the window's (or open modal's) `default_button()`
      unless the focused element takes Return (see the table below).
   3. Nothing focused: the window's `on_key`, with `tx.focused()` `None`.
@@ -189,7 +189,10 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
   6. The focused text field's editor.
   7. The window's `on_key` again, now with `tx.focused()` naming the focused element (or link), for keys
      the focused control passed on.
-  8. Page Up, Page Down, Home and End scroll the nearest scroll view around the focused
+  8. Selected text, for its copy keys (plain Cmd+A and Cmd+C): an app's `on_key` that takes
+     them wins, as a menu key equivalent wins over an AppKit text view. A focused text field
+     keeps its own at step 6.
+  9. Page Up, Page Down, Home and End scroll the nearest scroll view around the focused
      element, else around the pointer, else the first in the tree, skipping any whose content
      fits: a chat's short composer passes them to the message list beside it. A view that
      overflows keeps them, even at the edge a key moves toward (where it does nothing), as an
@@ -1114,6 +1117,29 @@ node `selected` with the selected string, and scripts gain a `triple-click` even
 
 ```rust
 text(&command).font(k.ty.mono).selectable(true).selection_color(k.selection())
+```
+
+A handler reads the selection with `tx.text_selection()`, a `TextSelection` of the selected
+texts (path, key, byte range, whether all of it is selected) and the text copying takes. It sets
+the selection by key with `tx.select_text(key, range)` (a byte range of one text, clamped to its
+characters), `tx.select_all_text(key)` (a text, or every text of the selection group inside an
+element) and `tx.clear_text_selection()`. These apply after the handler's change is built, so a
+text the same change adds can be selected, and before a key later in the same frame, so a
+handler can select and the next Cmd+C copies it. The last call wins.
+
+`El::selection_copy(|sel| ..)` on an element decides what copying a selection inside it takes,
+for Cmd+C and the Copy menu: it sees every selectable text it could reach (paths relative to it,
+unselected texts with an empty range), and returning `None` copies the text as drawn. The nearest
+one around both ends of the selection answers. An app that wants Cmd+C or Cmd+A for something
+else takes it in `on_key`, which sees it before the selection does.
+
+```rust
+col().key("note").selection_group(true).children(paragraphs)
+    .selection_copy(move |sel| sel.texts().iter().all(|t| t.is_whole()).then(|| source.clone()))
+
+// Select a note's text from code, then read it back in a later handler.
+tx.select_all_text("note");
+let picked = tx.text_selection().map(|s| s.text().to_owned());
 ```
 
 ### Help tooltips
