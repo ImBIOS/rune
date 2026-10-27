@@ -5,6 +5,15 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Rows inserted in the same commit as a `scroll_into_view` land at full height again.** In a
+  reader's virtual growth stack (unpinned, or `stick_bottom: false`), a commit that inserts
+  rows and calls `tx.scroll_into_view` grew the new rows from zero since growth started springing
+  under reveals. A search list that put a new first result above its first row and revealed it
+  showed only that row's header for several frames, and a row with no header showed a sliver.
+  New rows now land at full height under a reveal in their own commit, as they do under one left
+  from an earlier commit, so the reveal shows them whole on the first frame. Rows already in the
+  stack whose height changes keep springing, and pinned `stick_bottom` timelines are unchanged.
+  **Output change** for an app that inserts and reveals rows in one commit.
 - **Metal shader fallback also covers pipeline creation.** If Metal accepts the precompiled
   library but rejects its pipeline, `Renderer::new` retries with WGSL without an uncaptured GPU
   error. Shared layout descriptors and the actual Naga options have semantic fingerprints;

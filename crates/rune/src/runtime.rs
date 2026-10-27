@@ -4203,23 +4203,26 @@ impl<S: 'static> Runtime<S> {
             // is driving this viewport across the commit. A reveal left from an earlier commit
             // keeps only rows already growing on their spring: new rows land, or under a parent
             // whose size springs too, the two springs carry them past their slots.
+            // So does a reveal in this commit for rows new to the stack: rows inserted above an
+            // anchored first row and revealed at once land whole instead of growing from zero.
             let revealing = self.virtuals.get(&nodes[c].path)
                 .is_some_and(|v| self.scroll_reveals.iter().any(|r| r.viewport == v.scroll_path));
-            let reading = self.virtuals.get(&nodes[c].path)
-                .filter(|v| {
-                    !self.keeps.iter().any(|k| k.viewport == v.scroll_path)
-                        && !tx.scroll_to.iter().any(|(scope, key)| {
-                            nodes.iter().enumerate().find(|(_, n)| n.named(key)
-                                && n.parent.is_none_or(|p| in_scope(&nodes[p].path, scope.as_deref())))
-                                .is_some_and(|(i, _)| {
-                                    std::iter::successors(nodes[i].parent, |&p| nodes[p].parent)
-                                        .find(|&p| nodes[p].scroll.is_some() && nodes[p].scroll_axes.y())
-                                        .is_some_and(|p| nodes[p].path == v.scroll_path)
-                                })
+            let revealed_now = self.virtuals.get(&nodes[c].path).is_some_and(|v| {
+                tx.scroll_to.iter().any(|(scope, key)| {
+                    nodes.iter().enumerate().find(|(_, n)| n.named(key)
+                        && n.parent.is_none_or(|p| in_scope(&nodes[p].path, scope.as_deref())))
+                        .is_some_and(|(i, _)| {
+                            std::iter::successors(nodes[i].parent, |&p| nodes[p].parent)
+                                .find(|&p| nodes[p].scroll.is_some() && nodes[p].scroll_axes.y())
+                                .is_some_and(|p| nodes[p].path == v.scroll_path)
                         })
                 })
+            });
+            let reader = self.virtuals.get(&nodes[c].path)
+                .filter(|v| !self.keeps.iter().any(|k| k.viewport == v.scroll_path))
                 .and_then(|v| self.path_ids.get(&v.scroll_path))
                 .and_then(|id| self.scrolls.get(id)).is_some_and(|s| !s.pinned);
+            let reading = reader && !revealed_now;
             let rows: Vec<usize> = (c + 1..nodes.len()).filter(|&j| nodes[j].parent == Some(c)).collect();
             let existed = self.stacks.contains_key(&cid) && !tx.settle;
             let mut stack = self.stacks.remove(&cid).unwrap_or_default();
@@ -4279,7 +4282,8 @@ impl<S: 'static> Runtime<S> {
                 stack.tops.insert(id, nodes[j].target[1] - ctop);
                 let streaming = nodes[j].streaming;
                 let g_moving = self.grows.get(&id).is_some_and(|g| g.moving()) || stack.pending_heights.contains_key(&id);
-                let row_reading = reading && !(revealing && g_moving);
+                let entering = revealed_now && reader && !self.grows.contains_key(&id);
+                let row_reading = (reading && !(revealing && g_moving)) || entering;
                 if streaming && existed && !tx.settle && !first && !self.reduced_motion && !row_reading {
                     // Measure the final wrapped text before mutating the growth track. Targets
                     // retain full layout height; only the presented stack extent lags the fill.
