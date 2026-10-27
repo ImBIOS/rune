@@ -26,6 +26,18 @@ A Rust GPU UI framework (wgpu, winit) for apps that feel like SwiftUI on iOS at 
 - In `lib.rs`, keep `mod` and `pub use` lists one item per line, sorted.
 - Apps build these types as literals, so adding a pub field breaks them: `AppSpec`, `Env`, `Elevation`, `PaletteSeed`, `OverlaySpec`, `TextStyle`, `RunOptions`, `ScrollSpec`, `Span`, `ByteFrame`, `SurfaceDraw`, `LayerSpec`. Add a builder method instead.
 
+## Performance
+
+App-side rules live in "Launching fast" in `crates/rune/README.md` and the "Launch fast" docs page. In examples and in Rune itself:
+
+- Start slow work (network, indexing, status items) from `on_ready`, after the first frame. Land state that arrives just after launch with `tx.instant()`, so the first second stays still.
+- `poll` returns true only when visible state changed, and a loop stops asking for frames when its work ends. An idle window draws nothing.
+- Read sizes with `Cx::layout_size` or `Cx::layout_with`, not whole rects, so a scroll doesn't rebuild the view every frame. A handler that only moves a live value (scroll, zoom, a transform) calls `Tx::live_only()`.
+- Build only mounted rows: `virtual_rows`, with row content built inside its closure; `memo` for rows that rarely change.
+- Bound every cache in entries and in bytes, counting decoded pixels, not encoded size.
+- Take numbers from `--profile perf`. Compare paired, alternating runs by median, keep outliers, and say what a headless number leaves out (GPU upload, presentation).
+- A motion change passes `scripts/motion-audit` with its scenario added. Fix a finding in Rune rather than allowing it.
+
 ## This repo is public
 
 Everything pushed stays public in history. Before committing, run `git diff --cached | rg -n '/Users/|/private/var/|\.ts\.net|ses_[A-Za-z0-9]{20}'` and keep these out:
