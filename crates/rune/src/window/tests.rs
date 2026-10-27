@@ -122,7 +122,7 @@ fn a_frame_that_draws_the_same_pixels_is_the_same() {
 #[test]
 fn a_timer_frame_that_draws_the_same_still_draws_while_a_poll_steps() {
     fn poll(step: &mut bool, _: f64, tx: &mut Tx) -> bool {
-        tx.wake_after(if *step { Duration::ZERO } else { Duration::from_millis(250) });
+        tx.wake_after(if *step { Duration::ZERO } else { Duration::from_secs(5) });
         false
     }
     let mut rt = Runtime::new(false, |_, _| crate::el().size(20.0, 20.0), (20.0, 20.0), crate::Env::default());
@@ -144,7 +144,7 @@ fn a_timer_frame_that_draws_the_same_still_draws_while_a_poll_steps() {
     Presented::record(&mut presented, &rt, &config);
     let p = presented.as_ref().unwrap();
     let next_tick = Some(Instant::now() + Duration::from_millis(8));
-    assert!(p.unchanged(&rt, &config, false, next_tick), "a quarter-second timer leaves the drawable");
+    assert!(p.unchanged(&rt, &config, false, next_tick), "a slow timer leaves the drawable");
     rt.state = true;
     rt.frame(0.0);
     assert!(p.same(&rt, &config));

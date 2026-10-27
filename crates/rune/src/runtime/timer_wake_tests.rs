@@ -4,6 +4,10 @@ use super::*;
 use crate::{Cx, El, Env};
 use std::time::Duration;
 
+/// The poll's timer. The runtime follows the real clock, so it is long enough that a stalled
+/// test machine never finds a timer due that the test didn't move the clock to.
+const PERIOD: Duration = Duration::from_secs(5);
+
 #[derive(Default)]
 struct App {
     polls: u32,
@@ -20,7 +24,7 @@ fn view(s: &App, _: &mut Cx<App>) -> El {
 
 fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     s.polls += 1;
-    tx.wake_after(if s.step { Duration::ZERO } else { Duration::from_millis(250) });
+    tx.wake_after(if s.step { Duration::ZERO } else { PERIOD });
     s.step || s.polls == s.change_at
 }
 
@@ -39,9 +43,10 @@ fn advance(rt: &mut Runtime<App>, secs: f64) {
     rt.wall_start = rt.wall_start.map(|t| t - Duration::from_secs_f64(secs));
 }
 
-/// Moves the wall clock to just past the next timer.
+/// Moves the wall clock to just past every armed timer: the setup frames each armed one a
+/// moment apart in real time, and the later ones would otherwise outlast the poll.
 fn reach_timer(rt: &mut Runtime<App>) {
-    let due = rt.wake_deadline().expect("a timer is armed");
+    let due = rt.wake_deadlines.last().copied().expect("a timer is armed");
     let now = rt.wall_start.unwrap().elapsed().as_secs_f64();
     advance(rt, (due - now).max(0.0) + 1e-4);
 }
@@ -155,7 +160,7 @@ fn the_timer_s_frame_keeps_the_poll_s_time() {
     assert!(rt.clock > polled);
     assert_eq!(rt.polled_at(), polled, "timers pace from the poll, not the frame");
     let next = rt.wake_deadline().unwrap();
-    assert!((next - (rt.clock + 0.25)).abs() < 1e-9, "the poll's timer counts from the frame that took it");
+    assert!((next - (rt.clock + PERIOD.as_secs_f64())).abs() < 1e-9, "the poll's timer counts from the frame that took it");
 }
 
 #[test]
@@ -175,7 +180,7 @@ fn a_timer_poll_that_hides_the_window_asks_no_frame() {
     rt.state.change_at = polls + 1;
     assert!(!host_wake(&mut rt, |_| false), "a keep-running window the poll closed");
     let polled = rt.clock;
-    assert!((rt.wake_deadline().unwrap() - (polled + 0.25)).abs() < 1e-9, "its timer still runs, hidden");
+    assert!((rt.wake_deadline().unwrap() - (polled + PERIOD.as_secs_f64())).abs() < 1e-9, "its timer still runs, hidden");
     rt.frame(crate::frame_clock::RESUME_STEP);
     assert_eq!(rt.state.polls, polls + 2, "the frame that shows it polls");
 
@@ -186,7 +191,7 @@ fn a_timer_poll_that_hides_the_window_asks_no_frame() {
     assert!(host_wake(&mut rt, |_| true));
     let polled = rt.clock;
     rt.cancel_timer_frame();
-    assert!((rt.wake_deadline().unwrap() - (polled + 0.25)).abs() < 1e-9);
+    assert!((rt.wake_deadline().unwrap() - (polled + PERIOD.as_secs_f64())).abs() < 1e-9);
     rt.frame(crate::frame_clock::RESUME_STEP);
     assert_eq!(rt.state.polls, polls + 2);
 }
