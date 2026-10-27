@@ -682,6 +682,56 @@ export function LaunchFastView() {
       </section>
 
       <section className="doc-section">
+        <SectionHead id="still" title="Keep the first second still">
+          <p>
+            Rune animates nothing in the first second after content shows, so every frame drawn then is the app's.
+            The usual cause is state that arrives a few milliseconds after launch, such as a system setting or a
+            first network answer, and animates in.
+          </p>
+        </SectionHead>
+        <div className="prose">
+          <p>
+            Land that first answer with <code>tx.instant()</code>, or don't animate it. A settings row whose switch
+            faded in over a placeholder, and reflowed the row, kept its window drawing at 120 Hz for 0.7 s: about 85
+            frames in the first second instead of 4 to 8.
+          </p>
+          <p>
+            It costs memory too. A window that draws back to back while it comes on screen makes macOS allocate an
+            extra window-sized drawable and keep it; that row cost 14 MB of settled footprint (91 MB instead of 77).
+            Rune now holds a new window to two drawables until it first rests, or for its first second, so launch
+            frames that wait on the window server or a shader compile no longer cause it.
+          </p>
+        </div>
+      </section>
+
+      <section className="doc-section">
+        <SectionHead id="idle" title="Draw nothing when idle">
+          <p>
+            A window at rest should present no frames. Rune stops its display link when nothing moves, so what keeps
+            an idle window drawing is almost always the app's own timers, polls or compositor.
+          </p>
+        </SectionHead>
+        <div className="prose">
+          <ul>
+            <li>
+              <strong>Return false from <code>poll</code> when nothing changed.</strong> A due{" "}
+              <code>wake_after</code> on a resting window runs <code>poll</code> first and builds, lays out and
+              draws only if it returns true. A poll that always returns true draws a frame on every tick.
+            </li>
+            <li>
+              <strong>A compositor reports <code>animating()</code> only while it moves.</strong> It defaults to false.
+              A window with a still compositor rests and gates its timers on <code>poll</code> like any other; one
+              that always reports true draws every display-link tick.
+            </li>
+          </ul>
+          <p>
+            A settings window that checked a system setting four times a second went from 77 presents per 20 s idle to
+            none, its CPU from 2.45% to 0.85%, and its footprint from 77 MB to 70 MB.
+          </p>
+        </div>
+      </section>
+
+      <section className="doc-section">
         <SectionHead id="reuse" title="Reuse a hidden window">
           <p>
             Showing a window that already exists costs a show. Rebuilding it costs a launch: the native window, the
@@ -759,6 +809,15 @@ export function LaunchFastView() {
               <strong>Read settled memory last.</strong> Record the process's physical footprint a few seconds after
               launch. The <code>procwatch</code> crate reads it and counts allocations. A change that moves work earlier
               can raise memory at the window and leave it equal once settled.
+            </li>
+            <li>
+              <strong>Count frames in the first second.</strong> After content shows, a still app draws a handful. Many
+              more means something animates at launch.
+            </li>
+            <li>
+              <strong>Measure idle too.</strong> Leave the window shown and untouched for 20 s, and count redraws and
+              presents, CPU, and settled RSS and footprint. Count <code>poll</code> calls and the ones that return true
+              separately from frames, so you can tell whether the app or the toolkit asked for each frame.
             </li>
           </ul>
           <p>

@@ -555,13 +555,24 @@ The full page, with the measurement method, is "Launch fast" on the docs site (`
   launcher, while hidden). Capture `app.handle()` and call `handle.update(|s, tx| ..)` there to start status
   items, HUDs, secondary windows, network and indexing; updates run on the UI thread even with no window showing.
   There is no state-level first-frame hook yet.
+- **Keep the first second still.** Rune animates nothing then, so every frame is the app's. Land state that
+  arrives right after launch (a system setting, a first network answer) with `tx.instant()`, or don't animate it.
+  One settings window's launch fade drew about 85 frames in its first second instead of 4 to 8, and drawing back to
+  back while the window came on screen made macOS keep an extra window-sized drawable: 14 MB more settled
+  footprint. Rune now holds a new window to two drawables until it rests, or for its first second.
+- **Draw nothing when idle.** A due `wake_after` on a resting window runs `poll` first and draws only if it returns
+  true, so return false when nothing changed. A custom compositor returns `animating() == true` only while it moves
+  (the default is false); a still one lets its window rest too. One settings window went from 77 presents per 20 s
+  idle to none, 2.45% CPU to 0.85%, and 77 MB to 70 MB.
 - **Reuse a hidden window.** `keep_running()` / `windowless()` plus `AppHandle::hide()`, `show()` and `open()`
   (or `WindowOptions::launcher_panel()` for a retained panel that reveals cached pixels) make a re-summon cost a
   show instead of a launch.
 - **Measuring**: launch with `open` on a quiet Mac, interleave base and changed builds for 5 to 10 rounds, and
   report medians for window-visible and first-content times, cold and warm. Cold means deleting the app's Metal
   shader caches under `getconf DARWIN_USER_CACHE_DIR`: `com.apple.metal/<bundle id>` and
-  `<bundle id>/{com.apple.metal,com.apple.metalfe,com.apple.gpuarchiver}`. Read settled memory last.
+  `<bundle id>/{com.apple.metal,com.apple.metalfe,com.apple.gpuarchiver}`. Read settled memory last. Count frames
+  in the first second after content. Measure idle too: redraws, presents and CPU over 20 s with the window shown
+  and untouched, plus settled RSS and footprint, and count `poll` returns separately from frames.
 
 | Median ms from `open` (loaded laptop, 5 interleaved rounds) | Before | After |
 | --- | --- | --- |

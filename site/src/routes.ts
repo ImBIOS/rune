@@ -22,7 +22,7 @@ export const routes: Route[] = [
     label: "Launch fast",
     title: "Launch fast · Rune",
     description:
-      "How to get a Rune app's first window on screen in about 300 ms: prewarm_gpu, precompiled Metal shaders, a first frame at creation, deferred setup, a reused hidden window, and how to measure it.",
+      "How to get a Rune app's first window on screen in about 300 ms: prewarm_gpu, precompiled Metal shaders, a first frame at creation, deferred setup, a still first second, an idle window that draws nothing, a reused hidden window, and how to measure it.",
   },
   {
     path: "/principles",

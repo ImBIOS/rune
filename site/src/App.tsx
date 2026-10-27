@@ -51,6 +51,8 @@ function navGroups(pathname: string): NavGroup[] {
           spy("metallib", "Precompiled shaders"),
           spy("first-frame", "First frame at creation"),
           spy("defer", "Defer setup"),
+          spy("still", "Keep the first second still"),
+          spy("idle", "Draw nothing when idle"),
           spy("reuse", "Reuse a hidden window"),
           spy("measure", "Measure it"),
           spy("numbers", "Measured"),
