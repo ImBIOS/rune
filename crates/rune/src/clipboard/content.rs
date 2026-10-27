@@ -69,7 +69,14 @@ impl ClipboardContent {
     }
     pub(crate) fn has_own_pills(&self) -> bool { self.own_pills }
     /// Text, HTML and RTF only, for a rich text target: no image or files to decode or list.
-    pub(super) fn text_forms(mut self) -> Self { self.image = None; self.files.clear(); self }
+    /// None when the image or files were all it had, so a paste of them alone changes nothing;
+    /// genuinely empty text stays.
+    pub(super) fn text_forms(mut self) -> Option<Self> {
+        let had = !self.is_empty();
+        self.image = None;
+        self.files.clear();
+        (!had || !self.is_empty()).then_some(self)
+    }
     /// Plain consumers (a field without an `on_input_paste`, a text `on_paste`) take it: it
     /// has text, or nothing else. Rich-only content (an HTML clipboard with no plain text)
     /// reaches only rich hooks, as before it reached no one.

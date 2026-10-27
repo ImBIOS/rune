@@ -324,6 +324,31 @@ fn copied_images_and_files_round_trip_and_reach_only_hooks() {
 }
 
 #[test]
+fn a_paste_of_files_alone_keeps_the_selection_of_a_field_without_a_hook() {
+    use crate::ClipboardContent;
+    struct State { field: crate::TextEdit }
+    fn view(s: &State, _: &mut Cx<State>) -> El {
+        col().size(200.0, 100.0).child(crate::text_input(&s.field, crate::TextStyle::new(16.0, 400.0)).key("field").size(200.0, 40.0)
+            .on_edit(|s: &mut State| &mut s.field))
+    }
+    for rich in [false, true] {
+        let mut field = crate::TextEdit::new("keep me");
+        if rich { field = field.rich(); }
+        field.focused = true;
+        field.set_selection(0, 7);
+        let m = crate::clipboard::memory();
+        let mut rt = Runtime::new(State { field }, view, (200.0, 100.0), Env::new(true, 1.0));
+        rt.use_clipboard(&m);
+        rt.frame(0.0);
+        rt.update(|_, tx| tx.copy_rich(ClipboardContent::default().with_files([std::path::PathBuf::from("/fixtures/a.txt")])));
+        rt.update(|_, tx| tx.request_paste());
+        rt.frame(0.0);
+        rt.frame(0.0);
+        assert_eq!((rt.state.field.text.as_str(), rt.state.field.selected()), ("keep me", "keep me"), "rich {rich}");
+    }
+}
+
+#[test]
 fn read_clipboard_answers_once_even_when_empty_and_pastes_nowhere() {
     use crate::ClipboardContent;
     #[derive(Default)]

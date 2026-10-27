@@ -6,7 +6,7 @@ struct S { selectable: bool, link_menus: Vec<(String, f32, f32)>, row_menus: usi
 
 fn view(s: &S, _: &mut Cx<S>) -> El {
     let k = Kit::neutral(true);
-    let text = Markdown::new("Hello there and [link](https://x.dev/a) after.")
+    let text = Markdown::new("Hello there and [link](https://x.dev/a) and [other](https://x.dev/b).")
         .selectable(s.selectable)
         .on_link(|s: &mut S, url| s.opened.push(url.to_owned()))
         .on_link_secondary(|s: &mut S, url, p, _| s.link_menus.push((url.to_owned(), p.x, p.y)))
@@ -58,4 +58,24 @@ fn the_menu_key_on_a_focused_link_opens_its_menu_at_its_bottom_left() {
     tick(&mut rt);
     assert_eq!(rt.state.link_menus, [("https://x.dev/a".to_owned(), link.rect[0], link.rect[1] + link.rect[3])]);
     assert_eq!(rt.state.row_menus, 0);
+}
+
+fn link_center(rt: &Runtime<S>, url: &str) -> (f32, f32) {
+    let link = rt.elements().into_iter().find(|e| e.key.as_deref() == Some(url)).expect("the link");
+    (link.rect[0] + link.rect[2] / 2.0, link.rect[1] + link.rect[3] / 2.0)
+}
+
+#[test]
+fn a_right_click_that_moves_to_another_link_opens_no_menu() {
+    let mut rt = Runtime::new(S::default(), view, (480.0, 200.0), Env::new(true, 2.0));
+    rt.frame(0.0);
+    let (a, b) = (link_center(&rt, "https://x.dev/a"), link_center(&rt, "https://x.dev/b"));
+    rt.secondary_down(a.0, a.1);
+    rt.pointer_move(b.0, b.1);
+    rt.secondary_up(b.0, b.1);
+    tick(&mut rt);
+    assert!(rt.state.link_menus.is_empty(), "{:?}", rt.state.link_menus);
+    assert_eq!(rt.state.row_menus, 0);
+    right_click(&mut rt, b.0, b.1);
+    assert_eq!(rt.state.link_menus, [("https://x.dev/b".to_owned(), b.0, b.1)]);
 }

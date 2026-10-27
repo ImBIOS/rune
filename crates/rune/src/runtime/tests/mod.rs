@@ -2,6 +2,7 @@ use super::*;
 use crate::PointerPress;
 use crate::el::{col, el};
 
+mod context_menu_key;
 mod group_opacity;
 mod input_clipboard;
 mod layout_hover;

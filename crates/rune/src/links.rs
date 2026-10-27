@@ -10,6 +10,8 @@ pub(super) struct LinkState {
     press: Option<(String, usize)>,
     /// The focused text element's focused link.
     focus: Option<usize>,
+    /// The link a secondary press began on, in the captured text.
+    secondary: Option<usize>,
 }
 
 /// Where node `n`'s text starts inside its border box `rect` (points, x0 y0 x1 y1), its text
@@ -234,6 +236,13 @@ impl<S: 'static> Runtime<S> {
         self.nodes[i].text.as_ref()?.on_link_secondary.as_ref()?;
         self.link_at(i, x, y)
     }
+
+    /// Secondary down on captured node `i`: remember the link it began on.
+    pub(super) fn secondary_link_down(&mut self, i: Option<usize>, x: f32, y: f32) {
+        self.links.secondary = i.and_then(|i| self.secondary_link_at(i, x, y));
+    }
+
+    pub(super) fn take_secondary_link(&mut self) -> Option<usize> { self.links.secondary.take() }
 
     /// Runs the `on_link_secondary` handler of node `path` for link `k`.
     pub(super) fn secondary_press_link(&mut self, path: &str, k: usize, point: PointerEvent, tx: &mut Tx) -> bool {

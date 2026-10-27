@@ -28,19 +28,25 @@ impl<S: 'static> Runtime<S> {
         self.keyboard_focus = false;
         self.dismiss_help();
         self.secondary_capture = self.secondary_target(x, y).map(str::to_owned);
+        let i = self.secondary_capture.as_ref().and_then(|p| self.nodes.iter().position(|n| &n.path == p));
+        self.secondary_link_down(i, x, y);
     }
 
     pub fn secondary_up(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
+        let down_link = self.take_secondary_link();
         if let Some(path) = self.secondary_capture.take()
             && self.secondary_target(x, y) == Some(path.as_str())
         {
             let i = self.nodes.iter().position(|n| n.path == path);
             let point = i.map_or(PointerEvent { x, y, window_x: x, window_y: y }, |i| self.pointer_event(i, x, y));
-            if let Some(k) = i.and_then(|i| self.secondary_link_at(i, x, y)) {
-                self.queue.push(Action::LinkSecondary(path, k, point));
-            } else if !self.selection_menu(&path, x, y) {
-                self.queue.push(Action::SecondaryPress(path, point));
+            let link = i.and_then(|i| self.secondary_link_at(i, x, y));
+            // Like a primary link press, it must end on the link it began on; one that moved
+            // onto, off or between links opens nothing.
+            match (link, down_link) {
+                (Some(k), Some(d)) if k == d => self.queue.push(Action::LinkSecondary(path, k, point)),
+                (None, None) if !self.selection_menu(&path, x, y) => self.queue.push(Action::SecondaryPress(path, point)),
+                _ => {}
             }
         }
         self.leave_after_release();
@@ -58,7 +64,7 @@ impl<S: 'static> Runtime<S> {
             crate::Key::Function(10) => plain && m.shift,
             _ => false,
         };
-        let Some(focused) = self.focused_index().filter(|&i| menu_key && !self.subtree_exiting(i)) else { return false };
+        let Some(focused) = self.focused_index().filter(|&i| menu_key && self.can_focus(i)) else { return false };
         if self.focused_link_menu(focused, tx) { return true; }
         let [x, _, _, y] = self.drawn_box(focused);
         let mut index = focused;

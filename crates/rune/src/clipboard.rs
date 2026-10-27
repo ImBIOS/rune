@@ -411,7 +411,7 @@ impl Backend for Board {
         self.content.as_ref().filter(|c| c.has_plain()).map(|c| c.text.clone())
     }
     fn content(&mut self, all: bool) -> Option<ClipboardContent> {
-        self.content.clone().map(|c| if all { c } else { c.text_forms() })
+        self.content.clone().and_then(|c| if all { Some(c) } else { c.text_forms() })
     }
     fn revision(&self) -> Option<u64> { Some(self.revision) }
     fn clear(&mut self) { self.content = None; self.revision += 1; }
