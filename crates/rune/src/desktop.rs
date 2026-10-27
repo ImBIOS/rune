@@ -128,7 +128,7 @@ impl<S: 'static> Window<S> {
         // --size is the whole output here; each window keeps its own size.
         let mut inherited = args.clone();
         inherited.size = None;
-        if !selected { inherited.scene = None; inherited.playground = None; }
+        if !selected { inherited.scene = None; inherited.playground = None; inherited.variant = None; }
         let own = app.resolve_args(inherited);
         let comp = app.compositor.take();
         let (open, keep_running, on_close, on_focus, on_reopen) = (app.open, app.keep_running, app.on_close, app.on_focus, app.on_reopen);
@@ -143,7 +143,7 @@ impl<S: 'static> Window<S> {
         let size = own.size.unwrap_or(spec.size);
         let dark = own.theme.as_deref() != Some("light");
         let mut rt = crate::tooling::runtime_for(&spec, state, size, Env::new(dark, scale), Arc::new(|| {}));
-        crate::playground::attach(&mut rt, playground, &spec, own.playground.clone(), false);
+        crate::playground::attach(&mut rt, playground, &spec, own.playground.clone(), own.variant.clone(), false);
         rt.on_focus = on_focus;
         rt.app_ime.hook = on_ime;
         rt.set_modifier_keys(modifier_keys);

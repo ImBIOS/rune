@@ -5,12 +5,30 @@ use super::*;
 impl<S: 'static> Live<S> {
     /// The open story's variants' names, in key order.
     pub(super) fn variants(&self) -> Vec<&'static str> {
-        if self.scenes.get(self.selected).is_some() {
-            return self.variants.iter().filter(|(s, _, _)| *s == self.selected).map(|(_, name, _)| *name).collect();
+        self.variants_of(self.selected)
+    }
+
+    fn variants_of(&self, i: usize) -> Vec<&'static str> {
+        if i < self.scenes.len() {
+            return self.variants.iter().filter(|(s, _, _)| *s == i).map(|(_, name, _)| *name).collect();
         }
-        match self.page() {
-            Some((_, Page { kind: Kind::Own(own), .. })) => own.variants(),
+        match self.pages.get(i - self.scenes.len()) {
+            Some(Page { kind: Kind::Own(own), .. }) => own.variants(),
             _ => Vec::new(),
+        }
+    }
+
+    /// `--variant`: story `name` (else the first) opens on the variant `variant` names, by
+    /// number from 1 or by name.
+    pub(super) fn pick(&mut self, name: Option<&str>, variant: &str) {
+        let i = name.and_then(|n| self.find(n)).unwrap_or(self.selected);
+        let names = self.variants_of(i);
+        let by_number = variant.parse::<usize>().ok().filter(|n| (1..=names.len()).contains(n)).map(|n| n - 1);
+        let by_name = || names.iter().position(|n| *n == variant).or_else(|| names.iter().position(|n| n.eq_ignore_ascii_case(variant)));
+        match by_number.or_else(by_name) {
+            Some(n) => self.variant[i] = n,
+            None if names.is_empty() => crate::tooling::die(&format!("{:?} has no variants", self.path(i))),
+            None => crate::tooling::die(&format!("no variant {variant:?} of {:?}; it has: {}", self.path(i), names.join(", "))),
         }
     }
 

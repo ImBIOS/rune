@@ -834,7 +834,7 @@ impl<S: 'static> Host<S> {
         // The window reports the system appearance and scale when it opens.
         let env = Env::new(args.theme.as_deref() != Some("light"), 1.0);
         let mut rt = runtime_for(&spec, state, size, env, setup_waker(&shared));
-        crate::playground::attach(&mut rt, playground, &spec, args.playground.clone(), true);
+        crate::playground::attach(&mut rt, playground, &spec, args.playground.clone(), args.variant.clone(), true);
         if fit_height {
             spec.min_size = options.fit_min_size(spec.min_size);
             // Opens at the content's height; the first frame corrects any difference its

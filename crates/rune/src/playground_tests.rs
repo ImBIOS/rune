@@ -105,7 +105,7 @@ fn runtime_with(playground: Playground<Real>, open: Option<Option<String>>, wind
         key => s.holds_escape && *key == Key::Escape,
     });
     let mut rt = crate::tooling::runtime_for(&spec, (spec.init)(), spec.size, Env::new(false, 1.0), Arc::new(|| {}));
-    attach(&mut rt, Some(playground), &spec, open, windowed);
+    attach(&mut rt, Some(playground), &spec, open, None, windowed);
     rt.frame(0.0);
     rt
 }
@@ -258,7 +258,7 @@ fn without_the_bar_the_app_lays_out_untouched() {
     rt.frame(0.0);
     let plain: Vec<_> = rt.elements().into_iter().map(|e| (e.path, e.rect)).collect();
     let mut rt = crate::tooling::runtime_for(&spec, (spec.init)(), spec.size, Env::new(false, 1.0), Arc::new(|| {}));
-    attach(&mut rt, Some(Playground::new().enabled(true).bar(false)), &spec, None, true);
+    attach(&mut rt, Some(Playground::new().enabled(true).bar(false)), &spec, None, None, true);
     rt.frame(0.0);
     let barless: Vec<_> = rt.elements().into_iter().map(|e| (e.path, e.rect)).collect();
     assert_eq!(plain, barless);

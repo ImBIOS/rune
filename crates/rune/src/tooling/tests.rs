@@ -918,3 +918,6 @@ fn the_window_title_starts_from_the_spec_and_follows_set_title() {
     assert!(!rt.update_if(|_, tx| { tx.set_title("Draft"); false }), "the shell shows a title without a frame");
     assert_eq!(rt.window_title.take_change(), Some("Draft"));
 }
+
+#[path = "playground_cli_tests.rs"]
+mod playground_cli;

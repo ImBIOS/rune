@@ -2235,7 +2235,9 @@ App::new(spec).playground(
 - **Off.** It's on in debug builds; `.enabled(bool)` overrides that and `RUNE_PLAYGROUND=0`
   turns it off. `.bar(false)` drops the bar, so the app lays out as if there were no
   playground. Snapshots, `--scene` renders and goldens leave it out; `--playground [story]`
-  opens it at launch, headless too. Each `WindowSpec` can have its own.
+  opens it at launch, headless too, and `--variant N|name` opens that story on a variant.
+  `--crop KEY` crops a `--snap` to an element's laid-out rect, by key or path, the stage's
+  first. Each `WindowSpec` can have its own.
 
 ### Moving a story table onto it
 

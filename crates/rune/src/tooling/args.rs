@@ -53,6 +53,10 @@ pub struct Args {
     pub(crate) desktop: Option<PathBuf>,
     /// `--playground [NAME]`: open the playground at launch, at the story named.
     pub(crate) playground: Option<Option<String>>,
+    /// `--variant N|NAME`: the variant `--playground` opens its story on.
+    pub(crate) variant: Option<String>,
+    /// `--crop KEY`: crop `--snap` to the element with this key or path, in the stage first.
+    pub(crate) crop_key: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -99,6 +103,7 @@ impl Args {
                 "--snap" => a.snap = Some(val(&mut i).into()),
                 "--scene" => a.scene = Some(val(&mut i)),
                 "--playground" => a.playground = Some(crate::playground::arg(&argv, &mut i)),
+                "--variant" => a.variant = Some(val(&mut i)),
                 "--at" => {
                     let v = val(&mut i);
                     a.at_mark = mark_time(&v);
@@ -138,11 +143,12 @@ impl Args {
                 "--trace-all" => a.trace_all = true,
                 "--strip" => a.strip = Some(val(&mut i).into()),
                 "--crop" => {
-                    let v: Vec<f32> = val(&mut i).split(',').map(|s| num(s) as f32).collect();
-                    if v.len() != 4 {
-                        die("--crop is x,y,w,h in points");
+                    let v = val(&mut i);
+                    match v.split(',').map(|s| s.trim().parse::<f32>()).collect::<Result<Vec<_>, _>>() {
+                        Ok(r) if r.len() == 4 => a.crops.push([r[0], r[1], r[2], r[3]]),
+                        _ if v.contains(',') => die("--crop is x,y,w,h in points, or an element's key or path"),
+                        _ => a.crop_key = Some(v),
                     }
-                    a.crops.push([v[0], v[1], v[2], v[3]]);
                 }
                 "--cols" => a.cols = (num(&val(&mut i)) as usize).max(1),
                 "--every" => a.every = (num(&val(&mut i)) as usize).max(1),
@@ -160,6 +166,8 @@ impl Args {
             i += 1;
         }
         let _ = EXTRA.set(extra);
+        if a.variant.is_some() && a.playground.is_none() { die("--variant needs --playground"); }
+        if a.crop_key.is_some() && a.snap.is_none() { die("--crop KEY needs --snap"); }
         a
     }
 
@@ -182,6 +190,8 @@ pub(crate) const HELP: &str = "usage: <app> [window]
   --snap out.png        render offscreen (no window) at --at seconds
   --scene NAME          start from a named scene (--list-scenes)
   --playground [NAME]   open App::playground at launch, at a story; headless too
+  --variant N|NAME      open --playground's story on a variant (1 is the first)
+  --crop KEY            crop --snap to the element with that key or path, the stage's first
   --at SECONDS          virtual time of the snapshot/tree (default: end of frames or script);
                         mark:NAME or mark:NAME+0.5 for a script mark's time (also --start)
   --size WxH            viewport in points      --scale N   device scale (default 2)

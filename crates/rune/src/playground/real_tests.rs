@@ -88,7 +88,7 @@ fn a_fresh_stage_shares_the_real_waker_and_a_wake_from_another_thread_reaches_it
     let wakes = Arc::new(AtomicUsize::new(0));
     let counted = wakes.clone();
     let mut rt = crate::tooling::runtime_for(&spec, (spec.init)(), spec.size, Env::new(false, 1.0), Arc::new(move || { counted.fetch_add(1, Ordering::SeqCst); }));
-    attach(&mut rt, Some(fresh), &spec, Some(Some("Still".into())), false);
+    attach(&mut rt, Some(fresh), &spec, Some(Some("Still".into())), None, false);
     rt.frame(0.0);
     rt.frame(DT);
     let stage = &rt.playground.as_ref().unwrap().scene.as_ref().expect("a scene's stage").state;

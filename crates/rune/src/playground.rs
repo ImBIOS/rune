@@ -353,8 +353,8 @@ pub(crate) struct Live<S: 'static> {
 
 /// Shows `playground` in `rt`'s window when this run offers it: an enabled playground, in a
 /// window unless `RUNE_PLAYGROUND=0`, or wherever `--playground` asks for it, headless included,
-/// opened at the story it names.
-pub(crate) fn attach<S: 'static>(rt: &mut crate::Runtime<S>, playground: Option<Playground<S>>, spec: &crate::AppSpec<S>, open: Option<Option<String>>, windowed: bool) {
+/// opened at the story it names, on the variant `--variant` names.
+pub(crate) fn attach<S: 'static>(rt: &mut crate::Runtime<S>, playground: Option<Playground<S>>, spec: &crate::AppSpec<S>, open: Option<Option<String>>, variant: Option<String>, windowed: bool) {
     let Some(playground) = playground.filter(Playground::is_enabled) else { return };
     if open.is_none() && (!windowed || hidden_by_env()) { return; }
     let mut live = Live::new(playground, spec, windowed && cfg!(target_os = "macos"));
@@ -363,6 +363,7 @@ pub(crate) fn attach<S: 'static>(rt: &mut crate::Runtime<S>, playground: Option<
             let names: Vec<_> = live.order.iter().map(|&i| live.path(i)).collect();
             crate::tooling::die(&format!("no story {name:?} in the playground; it has: {}", names.join(", ")));
         }
+        if let Some(variant) = variant { live.pick(name.as_deref(), &variant); }
         live.pending.push(Request::Open(name));
     }
     rt.playground = Some(Box::new(live));

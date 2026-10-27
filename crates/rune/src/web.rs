@@ -136,7 +136,7 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
             let proxy = self.proxy.clone();
             let wake: crate::Waker = Arc::new(move || { let _ = proxy.send_event(Wake::App); });
             let mut rt = crate::tooling::runtime_for(&spec, state, (size.width as f32 / scale, size.height as f32 / scale), Env::new(dark, scale), wake.clone());
-            crate::playground::attach(&mut rt, playground, &spec, None, true);
+            crate::playground::attach(&mut rt, playground, &spec, None, None, true);
             rt.on_focus = on_focus;
             rt.set_modifier_keys(modifier_keys);
             rt.set_srgb_blend(srgb_blend);

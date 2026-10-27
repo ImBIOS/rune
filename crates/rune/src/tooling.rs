@@ -154,6 +154,8 @@ pub(crate) fn runtime_for<S: 'static>(spec: &AppSpec<S>, state: S, size: (f32, f
 
 #[path = "tooling/args.rs"]
 mod args;
+#[path = "tooling/crop.rs"]
+mod crop;
 pub use args::Args;
 pub(crate) use args::*;
 
@@ -950,7 +952,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     let dark = args.theme.as_deref() != Some("light");
     let state_ms = launched.elapsed().as_secs_f64() * 1000.0;
     let mut rt = runtime_for(&spec, state, size, Env::new(dark, scale), std::sync::Arc::new(|| {}));
-    crate::playground::attach(&mut rt, playground, &spec, args.playground.clone(), false);
+    crate::playground::attach(&mut rt, playground, &spec, args.playground.clone(), args.variant.clone(), false);
     rt.set_titlebar_inset(if app_options.borderless { 0.0 } else { chrome.titlebar_inset() });
     rt.on_focus = on_focus;
     rt.app_ime.hook = on_ime;
@@ -1026,6 +1028,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
     };
     let mut frames_written = 0usize;
     let has_video = writer.has_video();
+    let snap_crop = std::cell::Cell::new(None::<[u32; 4]>);
     // Finished readbacks, in frame order.
     let mut deliver = |shot: Shot, mut px: Vec<u8>| {
         if args.chrome_overlay
@@ -1041,7 +1044,9 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
                 writer.png(dir.join(format!("frame_{:04}.png", shot.k - start_frame)), px.clone()).unwrap_or_else(|e| die(&e));
             }
         }
-        if shot.snap {
+        if shot.snap && let (Some(path), Some(r)) = (&args.snap, snap_crop.get()) {
+            write_png(path, r[2], r[3], &crop::crop(&px, wp, r)).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
+        } else if shot.snap {
             writer.png(args.snap.clone().unwrap(), px.clone()).unwrap_or_else(|e| die(&e));
         }
         if shot.video {
@@ -1194,6 +1199,7 @@ pub(crate) fn headless_configured<S: 'static>(mut app: crate::app::App<S>, args:
             video: in_range && has_video,
             snap: k == snap_frame && args.snap.is_some(),
         };
+        if shot.snap && let Some(key) = &args.crop_key { snap_crop.set(Some(crop::element_rect(&rt, key, scale, (wp, hp)))); }
         let first_pixels = args.first_pixels && k == 0;
         let want_pixels = shot.dump || shot.video || shot.snap || first_pixels;
         if want_pixels {
