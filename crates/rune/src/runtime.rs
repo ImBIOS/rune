@@ -429,6 +429,7 @@ pub(crate) struct Node {
     scroll: Option<ScrollSpec>,
     scroll_axes: crate::el::ScrollAxes,
     on_at_bottom: Option<crate::el::AtBottomFn>,
+    on_far_from_bottom: Option<(f32, crate::el::AtBottomFn)>,
     on_visible_rows: Option<crate::el::VisibleRowsFn>,
     on_layout: Option<crate::el::LayoutFn>,
     on_screen_layout: Option<crate::el::LayoutFn>,
@@ -497,6 +498,7 @@ enum Action {
     Hover(String),
     HoverChange(String, bool),
     AtBottom(String, bool),
+    FarFromBottom(String, bool),
     VisibleRows(String, std::ops::Range<usize>),
     Layout(String, [f32; 4]),
     ScreenLayout(String, [f32; 4]),
@@ -912,6 +914,8 @@ struct ScrollState {
     glide_to: Option<f64>,
     /// At-bottom state last sent to `El::on_at_bottom`.
     at_bottom: Option<bool>,
+    /// State last sent to `El::on_far_from_bottom`.
+    far_from_bottom: Option<bool>,
     /// Whether the last frame drew the content's bottom on the viewport's (see `stuck_offset`).
     held: bool,
     /// Room freed under a pinned growth stack, held under its last row (see `step_slack`).
@@ -2821,6 +2825,11 @@ impl<S: 'static> Runtime<S> {
                 f(handler_state(&mut self.state), at);
                 true
             }
+            Action::FarFromBottom(path, far) => {
+                let Some((_, f)) = self.node(&path).and_then(|n| n.on_far_from_bottom.clone()) else { return false };
+                f(handler_state(&mut self.state), far);
+                true
+            }
             Action::VisibleRows(path, range) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_visible_rows.clone()) else { return false };
                 f(handler_state(&mut self.state), range)
@@ -4660,6 +4669,7 @@ impl<S: 'static> Runtime<S> {
                     glide: None,
                     glide_to: None,
                     at_bottom: None,
+                    far_from_bottom: None,
                     held: false,
                     slack: Default::default(),
                     x: AxisScroll::default(),
@@ -9003,6 +9013,7 @@ fn flatten(
         scroll,
         scroll_axes,
         on_at_bottom,
+        on_far_from_bottom,
         on_visible_rows,
         on_layout,
         on_screen_layout,
@@ -9134,6 +9145,7 @@ fn flatten(
         scroll,
         scroll_axes,
         on_at_bottom,
+        on_far_from_bottom,
         on_visible_rows,
         on_layout,
         on_screen_layout,

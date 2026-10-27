@@ -225,16 +225,26 @@ impl<S: 'static> Runtime<S> {
         s.moving()
     }
 
-    /// Queues `on_at_bottom` for viewports whose at-bottom state changed this frame.
+    /// Queues `on_at_bottom` and `on_far_from_bottom` for viewports whose state changed this
+    /// frame.
     pub(super) fn report_at_bottom(&mut self) {
         for i in 0..self.nodes.len() {
-            if self.nodes[i].on_at_bottom.is_none() || self.subtree_exiting(i) { continue; }
             let n = &self.nodes[i];
+            if (n.on_at_bottom.is_none() && n.on_far_from_bottom.is_none()) || self.subtree_exiting(i) { continue; }
             let Some(st) = self.scrolls.get_mut(&n.id) else { continue };
-            let at = st.offset >= st.max - AT_BOTTOM;
-            if st.at_bottom != Some(at) {
-                st.at_bottom = Some(at);
-                self.queue.push(Action::AtBottom(n.path.clone(), at));
+            if n.on_at_bottom.is_some() {
+                let at = st.offset >= st.max - AT_BOTTOM;
+                if st.at_bottom != Some(at) {
+                    st.at_bottom = Some(at);
+                    self.queue.push(Action::AtBottom(n.path.clone(), at));
+                }
+            }
+            if let Some((min, _)) = &n.on_far_from_bottom {
+                let far = st.max - st.offset > f64::from(min.max(n.local.h));
+                if st.far_from_bottom != Some(far) {
+                    st.far_from_bottom = Some(far);
+                    self.queue.push(Action::FarFromBottom(n.path.clone(), far));
+                }
             }
         }
     }
@@ -254,7 +264,7 @@ mod tests {
 
     // One state type for every test here: each type monomorphises a whole `Runtime<S>`.
     #[derive(Default)]
-    struct Chat { rows: usize, reports: Vec<bool>, instant: bool, reduced: bool, virtualized: bool, loose: bool, tall_tail: bool, composer: Option<crate::TextEdit>, sends: bool, track_drawn: bool, drawn: Vec<f32> }
+    struct Chat { rows: usize, reports: Vec<bool>, instant: bool, reduced: bool, virtualized: bool, loose: bool, tall_tail: bool, composer: Option<crate::TextEdit>, sends: bool, track_drawn: bool, drawn: Vec<f32>, far: Vec<bool> }
 
     fn view(s: &Chat, cx: &mut Cx<Chat>) -> El {
         cx.reduced_motion(s.reduced);
@@ -271,6 +281,7 @@ mod tests {
         let root = col().w_full().h_full()
             .child(col().key("scroll").w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: !s.loose })
                 .on_at_bottom(|s: &mut Chat, at| s.reports.push(at))
+                .on_far_from_bottom(400.0, |s: &mut Chat, far| s.far.push(far))
                 .child(stack))
             .child(el().key("jump").w_full().h(40.0).on_press_tx(|s: &mut Chat, tx| {
                 if s.instant { tx.scroll_to_bottom_instant("stack") } else { tx.scroll_to_bottom("scroll") }
@@ -347,6 +358,34 @@ mod tests {
         assert!(bottom_gap(&rt).abs() < 0.05, "a sticky viewport follows the end again after landing");
         assert_eq!(rt.state.reports, [true, false, true]);
         assert!(!rt.animating);
+    }
+
+    /// Far from the bottom means more than the viewport's height (300 here) and at least
+    /// `min` (400) above it; a glide back reports near before it lands.
+    #[test]
+    fn far_from_bottom_reports_past_its_threshold_only() {
+        let mut rt = chat(Chat { rows: 40, ..Default::default() });
+        assert_eq!(rt.state.far, [false], "the first layout reports its state");
+        rt.update(|_, tx| tx.scroll_to_y("scroll", 1e6));
+        let max = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("stack")).unwrap().rect[3] - 300.0;
+        rt.update(|_, tx| tx.scroll_to_y("scroll", max - 350.0));
+        for _ in 0..3 { rt.frame(1.0 / 120.0); }
+        assert_eq!(rt.state.far, [false], "350 above the bottom is within 400");
+        rt.update(|_, tx| tx.scroll_to_y("scroll", max - 450.0));
+        for _ in 0..3 { rt.frame(1.0 / 120.0); }
+        assert_eq!(rt.state.far, [false, true]);
+        let commits = rt.stats.commits;
+        for _ in 0..30 { rt.frame(1.0 / 120.0); }
+        assert_eq!(rt.stats.commits, commits, "no per-frame callbacks at rest");
+        press(&mut rt, "jump");
+        let mut near_at = None;
+        for f in 0..240 {
+            rt.frame(1.0 / 120.0);
+            if near_at.is_none() && rt.state.far.len() == 3 { near_at = Some((f, bottom_gap(&rt))); }
+        }
+        let (_, gap) = near_at.expect("the glide reports near");
+        assert!((-400.0..0.0).contains(&gap), "near once within 400 of the end, before landing: {gap}");
+        assert_eq!(rt.state.far, [false, true, false]);
     }
 
     /// A scroll to the bottom asked for while the window is covered (or hidden) waits for the

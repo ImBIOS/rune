@@ -1349,6 +1349,7 @@ pub struct El {
     pub(crate) scroll: Option<ScrollSpec>,
     pub(crate) scroll_axes: ScrollAxes,
     pub(crate) on_at_bottom: Option<AtBottomFn>,
+    pub(crate) on_far_from_bottom: Option<(f32, AtBottomFn)>,
     pub(crate) on_visible_rows: Option<VisibleRowsFn>,
     pub(crate) on_layout: Option<LayoutFn>,
     pub(crate) on_screen_layout: Option<LayoutFn>,
@@ -1432,6 +1433,7 @@ fn base(dir: FlexDirection) -> El {
         scroll: None,
         scroll_axes: ScrollAxes::Y,
         on_at_bottom: None,
+        on_far_from_bottom: None,
         on_visible_rows: None,
         on_layout: None,
         on_screen_layout: None,
@@ -3335,6 +3337,13 @@ impl El {
     /// [`Tx::scroll_to_bottom`] for a "jump to latest" button.
     pub fn on_at_bottom<S: 'static>(mut self, f: impl Fn(&mut S, bool) + 'static) -> Self {
         self.on_at_bottom = Some(Rc::new(move |s, at| f(downcast::<S>(s), at)));
+        self
+    }
+    /// On a scroll viewport, called with whether it stands more than its own height, and at
+    /// least `min` points, above its bottom: where a chat shows its "jump to latest" button and
+    /// hides it again near the end. Once after its first layout, then only when that changes.
+    pub fn on_far_from_bottom<S: 'static>(mut self, min: f32, f: impl Fn(&mut S, bool) + 'static) -> Self {
+        self.on_far_from_bottom = Some((min, Rc::new(move |s, far| f(downcast::<S>(s), far))));
         self
     }
     /// On a scroll viewport, fade its top and bottom edges over `width` points (16–32 reads well),

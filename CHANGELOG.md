@@ -5,6 +5,11 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **`El::on_far_from_bottom(min, f)`: when a chat shows its jump-to-latest button.** On a
+  scroll viewport, reports whether it stands more than its own height, and at least `min`
+  points, above its bottom: once after its first layout, then only on change, like
+  `on_at_bottom`. A glide back from `Tx::scroll_to_bottom` reports near before it lands. Nothing
+  changes for apps that don't use it.
 - **`Tx::motion_curve(anim)`: a commit's layout on any curve.** `tx.motion` takes only a
   spring; `motion_curve` takes an `Anim` (a spring, or a `Curve::tween` with an `Easing`), so an
   app can compare eased tweens against its spring for the same layout change. Scroll requests
