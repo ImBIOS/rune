@@ -1,4 +1,5 @@
-//! Backdrops: system materials behind the window (`El::system_material`).
+//! Backdrops: system materials behind the window (`El::system_material`) and blur of the
+//! window's own content (`El::backdrop_blur`).
 use crate::El;
 
 impl El {
@@ -13,6 +14,25 @@ impl El {
     pub fn system_material(mut self, material: crate::SystemMaterial) -> Self {
         if material == crate::SystemMaterial::Glass { self.vis.continuous_corners = true; }
         self.material = Some(material);
+        self
+    }
+
+    /// Blurs what is already drawn behind this element in the same window, inside its rounded
+    /// (or continuous) corners and clip, then draws the element's fill over the blur as a tint,
+    /// with its border and children on top: `el().backdrop_blur(20.0).fill(tint)` is a frosted
+    /// bar. `sigma` is the Gaussian standard deviation in points, as in CSS
+    /// `backdrop-filter: blur()`; 0 turns it off. Blurs past about 78 points at 2x stop growing.
+    ///
+    /// Unlike `El::system_material`, which shows what is behind the window, this blurs Rune's
+    /// own content and looks the same on every platform. The element's opacity fades the blur
+    /// with it, and its outer shadows leave the blurred interior clear. The first
+    /// `MAX_BACKDROP_BLURS` blurred elements in a frame blur; any past that, and any drawn into a
+    /// target that can't be copied (no `COPY_SRC`, or a caller's own `wgpu::RenderPass` via
+    /// `Renderer::draw_range`), draw only their fill. Inside an ancestor drawn as one layer
+    /// (`El::group_opacity`, `El::blur`, `El::cache`) the backdrop is what that layer has drawn
+    /// so far, as in CSS.
+    pub fn backdrop_blur(mut self, sigma: f32) -> Self {
+        self.vis.backdrop_blur = if sigma.is_finite() { sigma.max(0.0) } else { 0.0 };
         self
     }
 }

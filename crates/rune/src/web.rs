@@ -154,6 +154,8 @@ impl<S: 'static> ApplicationHandler<Wake> for Browser<S> {
                 error("WebGPU canvas has no supported configuration"); event_loop.exit(); return;
             };
             config.present_mode = wgpu::PresentMode::Fifo;
+            // Backdrop blurs and effect backdrops copy the canvas mid-frame; without it they fall back.
+            config.usage |= surface.get_capabilities(&gpu.adapter).usages & wgpu::TextureUsages::COPY_SRC;
             let format = if srgb_blend { config.format.remove_srgb_suffix() } else { config.format.add_srgb_suffix() };
             if format != config.format { config.view_formats.push(format); }
             surface.configure(&gpu.device, &config);

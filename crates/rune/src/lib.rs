@@ -114,6 +114,7 @@ pub mod image;
 pub mod hot;
 pub mod render;
 mod translucency;
+pub use render::MAX_BACKDROP_BLURS;
 pub use render::prewarm_gpu;
 mod record;
 mod headless_run;

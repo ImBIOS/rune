@@ -1993,15 +1993,44 @@ Which blur a frosted panel needs depends on what sits behind it:
 
 - **The desktop or other windows:** `El::system_material` above, in a transparent window. Only
   the platform can see behind the window.
-- **The app's own content:** no `El` builder blurs what the window drew under an element.
-  `El::blur(σ)` blurs the element's own subtree, not its backdrop. `rune-fx` has the effect:
-  `Fx::lens(LensParams { frost: 1.0, .. })` is Liquid Glass "regular" (a pyramid blur up to
-  σ 18 pt, a saturation lift and grain). Put `.effect_backdrop(true)` on its effect slot and draw
-  through `Renderer::draw_with_backdrop`, calling `FxRenderer::blur_backdrop` on
-  `EffectPhase::Backdrop(encoder)` with `site.backdrop`; `examples/lab/src/gfx.rs` and the rune-fx
-  README cover the calls.
+- **The app's own content:** `El::backdrop_blur` below. (`El::blur(σ)` blurs the element's own
+  subtree, not its backdrop.) For refraction, a saturation lift and grain on top of the blur,
+  `rune-fx`'s `Fx::lens(LensParams { frost: 1.0, .. })` is Liquid Glass "regular": put
+  `.effect_backdrop(true)` on its effect slot and draw through `Renderer::draw_with_backdrop`,
+  calling `FxRenderer::blur_backdrop` on `EffectPhase::Backdrop(encoder)` with `site.backdrop`;
+  `examples/lab/src/gfx.rs` and the rune-fx README cover the calls.
 - **No blur:** a translucent `fill` over the content is the cheap stand-in, and what
   `system_material` draws in opaque windows and headless renders.
+
+### Backdrop blur (`El::backdrop_blur`)
+
+```rust,ignore
+col().pin(Some(0.0), None, Some(0.0), Some(0.0)).h(60.0)
+    .backdrop_blur(20.0)
+    .fill(Color::WHITE.alpha(0.6))
+    .child(tabs)
+```
+
+The element blurs what the window has already drawn behind it, inside its rounded or continuous
+corners and its clip, then draws its fill over the blur as a tint, and its border and children
+on top. Sigma is in points, as in CSS `backdrop-filter: blur()`. It works through plain
+`rune::run` and in headless renders, which are deterministic.
+
+At the element the renderer ends the pass, copies the target, blurs the copy with a dual-filter
+pyramid at half resolution (13 taps down, 9 up, `Rgba16Float`), and reopens the pass to draw the
+blur through the element's corner mask. Every pyramid level is cut to the element's rect plus
+three sigma, and each tap is clamped to that region, so nothing outside it leaks in and the
+window's edges don't darken. Scrolling, springs and opacity behave as for any paint: the blur
+follows the element's presented rect, its opacity fades the blur, and its outer shadows leave the
+blurred interior clear. A still frame doesn't redraw.
+
+A frame blurs at most `MAX_BACKDROP_BLURS` (4) elements; later ones draw only their fill. So do
+blurs drawn into a target without `COPY_SRC`, or into a caller's own `wgpu::RenderPass` through
+`Renderer::draw_range`. The web backend asks the canvas for `COPY_SRC`. Inside an ancestor
+drawn as one layer (`El::group_opacity`, `El::blur`, `El::cache`, a rotation) the backdrop is
+what that layer has drawn so far, as in CSS. A frame without a blurred element runs the same
+passes as before and draws the same pixels. `examples/frosted-bar` scrolls a list under a
+frosted bottom bar.
 
 ## Run
 

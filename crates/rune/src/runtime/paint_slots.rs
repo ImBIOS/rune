@@ -1,6 +1,6 @@
 //! Paint records that keep a place in the painter stream for pixels Rune doesn't paint itself:
-//! effect slots a compositor fills (`El::effect`).
-use crate::render::{Instance, KIND_EFFECT, LayerSpec, NO_CLIP};
+//! effect slots a compositor fills (`El::effect`) and backdrop blurs (`El::backdrop_blur`).
+use crate::render::{Instance, KIND_BACKDROP_BLUR, KIND_EFFECT, LayerSpec, NO_CLIP};
 
 /// Pushes the effect slot `(bleed_pt, backdrop)` over `rect` with corner `radii`, clipped by
 /// `clip` and the packed `fade`, at `k_px` device pixels per point and paint opacity `o`.
@@ -28,4 +28,33 @@ pub(super) fn push_effect(instances: &mut Vec<Instance>, (bleed, backdrop): (f32
     instances.push(Instance { clip: NO_CLIP, ..slot });
     instances.push(Instance::end_layer());
     Some(instances.len() - 2)
+}
+
+/// Pushes a backdrop blur record (`El::backdrop_blur`) of `sigma` points over `rect` with corner
+/// `radii` (continuous when `continuous`), cut by `clip`, the soft edges `fade` from
+/// `fade_origin` and an ancestor's rounded clip `rounded`, at `k_px` device pixels per point and
+/// opacity `o`. Returns the signed corner radius an outer shadow leaves clear over the blur.
+pub(super) fn push_backdrop_blur(instances: &mut Vec<Instance>, sigma: f32, (rect, radii, continuous): ([f32; 4], [f32; 4], bool),
+    (clip, fade, fade_origin): ([f32; 4], [f32; 4], [f32; 4]), rounded: Option<([f32; 4], [f32; 4])>, k_px: f32, o: f32) -> f32 {
+    let intersect = |a: [f32; 4], b: [f32; 4]| [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
+    // One clip rectangle fits the packed ABI: a rounded clip cut by `clip` keeps only the cut.
+    let (clip, round) = match rounded {
+        Some((mask, radii)) if intersect(clip, mask) == mask => (mask, Some(radii)),
+        Some((mask, _)) => (intersect(clip, mask), None),
+        None => (clip, None),
+    };
+    let mut record = Instance {
+        rect,
+        radii: if continuous { radii.map(|v| -v) } else { radii },
+        fill: [0.0, 0.0, 0.0, o],
+        border: [0.0; 4],
+        params: [sigma * k_px, KIND_BACKDROP_BLUR, 0.0, k_px],
+        uv: [0.0; 4],
+        clip,
+        fade: crate::render::pack_fade(fade, fade_origin, clip),
+    };
+    if let Some(radii) = round { record.round_clip_corners(radii); }
+    instances.push(record);
+    let radius = crate::system_material::clamp_radius(radii, rect[2], rect[3]);
+    if continuous { -radius } else { radius }
 }

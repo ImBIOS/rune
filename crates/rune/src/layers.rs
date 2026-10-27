@@ -618,9 +618,10 @@ impl Renderer {
                     let (x0, y0) = (edge(l.clip[0].floor(), origin[0], size[0]), edge(l.clip[1].floor(), origin[1], size[1]));
                     let (x1, y1) = (edge(l.clip[2].ceil(), origin[0], size[0]), edge(l.clip[3].ceil(), origin[1], size[1]));
                     if x1 > x0 && y1 > y0 {
-                        pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                        let outer = pass.scissor();
+                        pass.set_scissor(Some([x0, y0, x1 - x0, y1 - y0]), size);
                         self.draw_layer_range(pass, format, l.begin + 1..l.end, target, hook);
-                        pass.set_scissor_rect(0, 0, size[0], size[1]);
+                        pass.set_scissor(outer, size);
                     }
                 } else {
                     self.draw_layer_range(pass, format, l.begin + 1..l.end, target, hook);

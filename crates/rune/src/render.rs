@@ -13,7 +13,10 @@ pub(crate) mod layer_blur;
 mod metallib;
 #[path = "render_pass.rs"]
 mod pass;
-use pass::{ActivePass, Backdrop, PassInner};
+use pass::{ActivePass, Backdrop};
+#[path = "backdrop_blur.rs"]
+mod backdrop_blur;
+pub use backdrop_blur::MAX_BACKDROP_BLURS;
 pub use layers::LayerStats;
 
 pub const KIND_RECT: f32 = 0.0;
@@ -54,6 +57,12 @@ pub const KIND_RADIAL: f32 = 11.0;
 /// drawn in an isolated layer that applies its opacity. `Runtime::marks` carries its `El::effect`
 /// tag.
 pub const KIND_EFFECT: f32 = 12.0;
+/// A backdrop blur (`El::backdrop_blur`). Like an effect slot it rasterizes nothing itself in
+/// the uber shader; the renderer stops there, copies and blurs what is below, and draws the blur
+/// inside `rect` with signed corner `radii`, cut by `clip`/`fade`, at opacity `fill[3]`.
+/// `params.x` is the blur's standard deviation in device pixels and `params.w` the scale in
+/// device pixels per point.
+pub const KIND_BACKDROP_BLUR: f32 = 13.0;
 
 /// How a scope combines its contents. The completed scope still uses source-over on its parent
 /// unless that parent also requests additive composition.
@@ -582,8 +591,11 @@ pub struct Renderer {
     srgb_blend: bool,
     /// Effect slots of the uploaded instances, by index.
     effects: Vec<(u32, Instance)>,
-    /// Pooled viewport-sized backdrop copies, allocated only when a slot sets `effect_backdrop`.
+    /// Pooled viewport-sized backdrop copies, allocated only when a slot sets `effect_backdrop`
+    /// or an element sets `backdrop_blur`.
     backdrops: Vec<Backdrop>,
+    /// Pipelines and pyramid for backdrop blur records, built on the first one.
+    backdrop_blur: Option<backdrop_blur::BackdropBlur>,
 }
 
 impl Renderer {
@@ -666,6 +678,7 @@ impl Renderer {
             srgb_blend: false,
             effects: Vec::new(),
             backdrops: Vec::new(),
+            backdrop_blur: None,
         }
     }
 
@@ -849,7 +862,7 @@ impl Renderer {
     pub fn draw_range(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat, range: std::ops::Range<u32>) {
         if range.is_empty() && range.end != self.count { return; }
         self.validate_layer_range(&range);
-        let mut active = ActivePass { inner: Some(PassInner::Borrowed(pass)), encoder: None };
+        let mut active = ActivePass::borrowed(pass);
         self.draw_layer_range(&mut active, format, range, None, &mut |_, _| {});
     }
 
@@ -861,7 +874,7 @@ impl Renderer {
     pub fn draw_range_with(&self, pass: &mut wgpu::RenderPass<'_>, format: wgpu::TextureFormat, range: std::ops::Range<u32>, hook: &mut EffectHook<'_>) {
         if range.is_empty() && range.end != self.count { return; }
         self.validate_layer_range(&range);
-        let mut active = ActivePass { inner: Some(PassInner::Borrowed(pass)), encoder: None };
+        let mut active = ActivePass::borrowed(pass);
         self.draw_layer_range(&mut active, format, range, None, &mut |phase, site| {
             if let EffectPhase::Draw(pass) = phase { hook(pass, site); }
         });
@@ -937,6 +950,10 @@ impl Renderer {
         for (at, instance) in self.effects[first..].iter().take_while(|(at, _)| *at < range.end) {
             self.draw_instances(pass, format, cursor..*at + 1, target);
             cursor = *at + 1;
+            if instance.params[1] == KIND_BACKDROP_BLUR {
+                self.draw_backdrop_blur(pass, format, *at, instance, target);
+                continue;
+            }
             let (origin, size) = self.target_frame(target);
             // Scissor to the slot's clip rectangle, so a compositor that ignores `clip` still
             // stays inside its scroll view or clipped ancestor.
@@ -953,7 +970,7 @@ impl Renderer {
             pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
             hook(EffectPhase::Draw(pass), &EffectSite { index: *at, instance, scale: instance.params[3], format, origin, size, in_layer: target.is_some(), srgb_blend: self.srgb_blend, backdrop });
             pass.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
-            pass.set_scissor_rect(0, 0, size[0], size[1]);
+            pass.set_scissor(pass.scissor(), size);
         }
         self.draw_instances(pass, format, cursor..range.end, target);
     }
@@ -1046,7 +1063,7 @@ impl Renderer {
         self.effects.clear();
         for (i, instance) in instances.iter().enumerate() {
             has_layers |= instance.params[1] == KIND_LAYER;
-            if instance.params[1] == KIND_EFFECT { self.effects.push((i as u32, *instance)); }
+            if instance.params[1] == KIND_EFFECT || instance.params[1] == KIND_BACKDROP_BLUR { self.effects.push((i as u32, *instance)); }
             let next_bind = if instance.params[1] == KIND_IMAGE {
                 Some(BatchBind::Image(instance.params[0] as usize))
             } else if instance.params[1] == KIND_GLYPH {
@@ -1071,7 +1088,7 @@ impl Renderer {
         if start < self.count { self.image_batches.push((start..self.count, bind)); }
         self.prepare_layers(device, queue, if has_layers { instances } else { &[] }, viewport);
         self.sync_resident_caches(&mut atlas.resident_caches);
-        if self.effects.iter().any(|(_, i)| i.params[0] != 0.0) {
+        if self.effects.iter().any(|(_, i)| i.params[0] != 0.0 || i.params[1] == KIND_BACKDROP_BLUR) {
             self.ensure_backdrop(device, self.format, viewport);
             for index in 0..self.extra.len() {
                 self.ensure_backdrop(device, self.extra[index].0, viewport);
@@ -1080,6 +1097,7 @@ impl Renderer {
                 self.ensure_backdrop(device, layers::FORMAT, viewport);
             }
         }
+        self.prepare_backdrop_blur(device, queue, viewport);
     }
 
     pub fn prepare_surfaces(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, draws: &[crate::native_surface::SurfaceDraw], viewport: (u32,u32)) {
@@ -1151,6 +1169,7 @@ impl Renderer {
             if self.layer_stats().extra_passes > 0 { t.beginning_of_pass_write_index = None; }
             t
         });
+        let blurs = self.has_backdrop_blur();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("frame"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1160,11 +1179,18 @@ impl Renderer {
                 ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: timestamps,
+            timestamp_writes: timestamps.clone(),
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        self.draw_range(&mut pass, self.format, 0..self.count);
+        if !blurs {
+            self.draw_range(&mut pass, self.format, 0..self.count);
+            return;
+        }
+        // Backdrop blurs split the frame pass, which needs it owned along with the encoder.
+        let pass = pass.forget_lifetime();
+        let mut active = ActivePass::owned(pass, encoder, view).with_timestamps(timestamps);
+        self.draw_layer_range(&mut active, self.format, 0..self.count, None, &mut |_, _| {});
     }
 }
 

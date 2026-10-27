@@ -595,6 +595,8 @@ pub struct Visual {
     pub mark: u32,
     /// An effect slot (`El::effect`): `(bleed_pt, needs_backdrop)`.
     pub(crate) effect: Option<(f32, bool)>,
+    /// Backdrop blur standard deviation in points (`El::backdrop_blur`); 0 is off.
+    pub(crate) backdrop_blur: f32,
     /// Tracks hover for its descendants' `group_*` styles even without a hover colour. Any
     /// element with a hover colour is a group too.
     pub hover_group: bool,
@@ -660,6 +662,7 @@ impl Default for Visual {
             pixels_fit: None,
             mark: 0,
             effect: None,
+            backdrop_blur: 0.0,
             hover_group: false,
             hover_motion: None,
             hover_within: None,
